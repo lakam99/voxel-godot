@@ -31,6 +31,8 @@ func run() -> void:
     test_sky_light_consistency()
     test_spawn_clearance()
     await test_player_movement()
+    await test_uphill_smoothing()
+    await test_steep_uphill_blocking()
     await test_jump()
     await wait_until_grounded(120)
     await test_block_destroy_ray()
@@ -135,6 +137,81 @@ func test_player_movement() -> void:
     )
     add_result("terrain_descent_smoothing", max_downward_correction <= 0.22, "max downward correction %.3f" % max_downward_correction)
 
+func test_uphill_smoothing() -> void:
+    if not player or not main:
+        add_result("terrain_ascent_smoothing", false, "player or main missing")
+        return
+
+    var start_cell := Vector2i(roundi(player.global_position.x / CELL), roundi(player.global_position.z / CELL))
+    var base_height: float = main.call("terrain_height_cell", start_cell.x, start_cell.y)
+    var edits := get_height_edits()
+
+    for dz in range(-1, 2):
+        edits[Vector2i(start_cell.x, start_cell.y + dz)] = base_height
+        edits[Vector2i(start_cell.x + 1, start_cell.y + dz)] = base_height + CELL
+        edits[Vector2i(start_cell.x + 2, start_cell.y + dz)] = base_height + CELL
+
+    main.call("rebuild_chunks_around_cell", start_cell)
+    main.call("rebuild_chunks_around_cell", Vector2i(start_cell.x + 2, start_cell.y))
+    player.global_position = Vector3((start_cell.x - 0.35) * CELL, base_height, start_cell.y * CELL)
+    player.velocity = Vector3.ZERO
+    player.set("terrain_grounded", true)
+    player.set("max_upward_terrain_correction", 0.0)
+    await wait_physics_frames(8)
+
+    player.set("automated_move", Vector3.RIGHT)
+    var peak_y: float = player.global_position.y
+    for i in range(32):
+        await get_tree().physics_frame
+        peak_y = max(peak_y, player.global_position.y)
+    player.set("automated_move", Vector3.ZERO)
+    await wait_physics_frames(8)
+
+    var max_upward_correction: float = player.get("max_upward_terrain_correction")
+    var climbed: float = peak_y - base_height
+    add_result(
+        "terrain_ascent_smoothing",
+        max_upward_correction <= 0.18 and climbed > 0.55,
+        "max upward correction %.3f, climbed %.2f" % [max_upward_correction, climbed]
+    )
+
+func test_steep_uphill_blocking() -> void:
+    if not player or not main:
+        add_result("terrain_steep_ascent_blocking", false, "player or main missing")
+        return
+
+    var start_cell := Vector2i(roundi(player.global_position.x / CELL) + 6, roundi(player.global_position.z / CELL))
+    var base_height: float = main.call("terrain_height_cell", start_cell.x, start_cell.y)
+    var edits := get_height_edits()
+
+    for dz in range(-1, 2):
+        edits[Vector2i(start_cell.x, start_cell.y + dz)] = base_height
+        edits[Vector2i(start_cell.x + 1, start_cell.y + dz)] = base_height + CELL * 3.0
+        edits[Vector2i(start_cell.x + 2, start_cell.y + dz)] = base_height + CELL * 3.0
+
+    main.call("rebuild_chunks_around_cell", start_cell)
+    main.call("rebuild_chunks_around_cell", Vector2i(start_cell.x + 2, start_cell.y))
+    player.global_position = Vector3((start_cell.x - 0.35) * CELL, base_height, start_cell.y * CELL)
+    player.velocity = Vector3.ZERO
+    player.set("terrain_grounded", true)
+    player.set("max_upward_terrain_correction", 0.0)
+    await wait_physics_frames(8)
+
+    var start_x: float = player.global_position.x
+    player.set("automated_move", Vector3.RIGHT)
+    await wait_physics_frames(32)
+    player.set("automated_move", Vector3.ZERO)
+    await wait_physics_frames(8)
+
+    var climbed: float = player.global_position.y - base_height
+    var advanced: float = player.global_position.x - start_x
+    var max_upward_correction: float = player.get("max_upward_terrain_correction")
+    add_result(
+        "terrain_steep_ascent_blocking",
+        climbed < 0.45 and advanced < CELL * 0.95 and max_upward_correction <= 0.18,
+        "climbed %.2f, advanced %.2f, max upward correction %.3f" % [climbed, advanced, max_upward_correction]
+    )
+
 func test_jump() -> void:
     if not player:
         add_result("jump", false, "player missing")
@@ -168,6 +245,12 @@ func test_block_destroy_ray() -> void:
     if not player or not camera:
         add_result("block_destroy_ray", false, "player or camera missing")
         return
+    reset_player_on_flat_patch(Vector2i(roundi(player.global_position.x / CELL) + 8, roundi(player.global_position.z / CELL)))
+    player.rotation.y = 0.0
+    player.set("pitch", 0.0)
+    camera.rotation.x = 0.0
+    await wait_physics_frames(8)
+
     var forward: Vector3 = -camera.global_transform.basis.z
     forward = forward.normalized()
     var target_pos: Vector3 = camera.global_position + forward * 4.0
@@ -232,6 +315,14 @@ func get_blocks() -> Dictionary:
         return value
     return {}
 
+func get_height_edits() -> Dictionary:
+    if not main:
+        return {}
+    var value: Variant = main.get("height_edits")
+    if value is Dictionary:
+        return value
+    return {}
+
 func is_player_grounded() -> bool:
     if not player:
         return false
@@ -255,3 +346,16 @@ func aim_player_at(world_point: Vector3) -> void:
     var pitch_value: float = clamp(atan2(local_direction.y, -local_direction.z), deg_to_rad(-82.0), deg_to_rad(82.0))
     player.set("pitch", pitch_value)
     camera.rotation.x = pitch_value
+
+func reset_player_on_flat_patch(center_cell: Vector2i) -> void:
+    if not main or not player:
+        return
+    var base_height: float = main.call("terrain_height_cell", center_cell.x, center_cell.y)
+    var edits := get_height_edits()
+    for dz in range(-5, 6):
+        for dx in range(-5, 6):
+            edits[Vector2i(center_cell.x + dx, center_cell.y + dz)] = base_height
+    main.call("rebuild_chunks_around_cell", center_cell)
+    player.global_position = Vector3(center_cell.x * CELL, base_height, center_cell.y * CELL)
+    player.velocity = Vector3.ZERO
+    player.set("terrain_grounded", true)
