@@ -33,6 +33,7 @@ func run() -> void:
     await test_player_movement()
     await test_uphill_smoothing()
     await test_steep_uphill_blocking()
+    await test_airborne_obstacle_blocking()
     await test_jump()
     await wait_until_grounded(120)
     await test_block_destroy_ray()
@@ -212,10 +213,54 @@ func test_steep_uphill_blocking() -> void:
         "climbed %.2f, advanced %.2f, max upward correction %.3f" % [climbed, advanced, max_upward_correction]
     )
 
+func test_airborne_obstacle_blocking() -> void:
+    if not player or not main:
+        add_result("airborne_obstacle_blocking", false, "player or main missing")
+        return
+
+    var start_cell := Vector2i(roundi(player.global_position.x / CELL) + 9, roundi(player.global_position.z / CELL))
+    var base_height: float = main.call("terrain_height_cell", start_cell.x, start_cell.y)
+    var obstacle_height: float = base_height + CELL * 4.0
+    var edits := get_height_edits()
+
+    for dz in range(-2, 3):
+        for dx in range(-2, 4):
+            edits[Vector2i(start_cell.x + dx, start_cell.y + dz)] = base_height
+        edits[Vector2i(start_cell.x + 1, start_cell.y + dz)] = obstacle_height
+        edits[Vector2i(start_cell.x + 2, start_cell.y + dz)] = obstacle_height
+
+    main.call("rebuild_chunks_around_cell", start_cell)
+    main.call("rebuild_chunks_around_cell", Vector2i(start_cell.x + 2, start_cell.y))
+    player.global_position = Vector3((start_cell.x - 0.35) * CELL, base_height, start_cell.y * CELL)
+    player.velocity = Vector3.ZERO
+    player.set("terrain_grounded", true)
+    player.set("airborne_obstacle_blocks", 0)
+    await wait_physics_frames(8)
+
+    var start_x: float = player.global_position.x
+    player.set("automated_jump", true)
+    player.set("automated_move", Vector3.RIGHT)
+    var peak_y: float = player.global_position.y
+    for i in range(45):
+        await get_tree().physics_frame
+        peak_y = max(peak_y, player.global_position.y)
+    player.set("automated_move", Vector3.ZERO)
+    await wait_physics_frames(8)
+
+    var advanced: float = player.global_position.x - start_x
+    var block_count := int(player.get("airborne_obstacle_blocks"))
+    add_result(
+        "airborne_obstacle_blocking",
+        block_count > 0 and peak_y < obstacle_height - 0.55 and advanced < CELL * 1.15,
+        "blocks %d, peak y %.2f, obstacle y %.2f, advanced %.2f" % [block_count, peak_y, obstacle_height, advanced]
+    )
+
 func test_jump() -> void:
     if not player:
         add_result("jump", false, "player missing")
         return
+    reset_player_on_flat_patch(Vector2i(roundi(player.global_position.x / CELL) + 8, roundi(player.global_position.z / CELL)))
+    await wait_physics_frames(8)
     for i in range(90):
         if is_player_grounded():
             break

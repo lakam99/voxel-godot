@@ -24,6 +24,7 @@ var physics_ticks := 0
 var terrain_grounded := false
 var max_upward_terrain_correction := 0.0
 var max_downward_terrain_correction := 0.0
+var airborne_obstacle_blocks := 0
 
 func _ready() -> void:
     set_physics_process(true)
@@ -110,6 +111,9 @@ func apply_terrain_grounding(delta: float, was_grounded: bool, jumped: bool, pre
 
     if distance_above_ground < 0.0:
         var rise_needed: float = -distance_above_ground
+        var previous_ground_y: float = main.call("height_at_world", previous_position.x, previous_position.z)
+        var horizontal_move: float = Vector2(global_position.x - previous_position.x, global_position.z - previous_position.z).length()
+        var obstacle_rise: float = ground_y - previous_ground_y
         if was_grounded and not jumped and rise_needed <= TERRAIN_WALKABLE_RISE:
             var old_y: float = global_position.y
             var max_rise: float = TERRAIN_ASCEND_SPEED * delta
@@ -121,8 +125,20 @@ func apply_terrain_grounding(delta: float, was_grounded: bool, jumped: bool, pre
             terrain_grounded = true
             return
 
+        if (not was_grounded or jumped) and horizontal_move > 0.001 and obstacle_rise > TERRAIN_WALKABLE_RISE:
+            global_position.x = previous_position.x
+            global_position.z = previous_position.z
+            velocity.x = 0.0
+            velocity.z = 0.0
+            terrain_grounded = false
+            airborne_obstacle_blocks += 1
+            if velocity.y <= 0.0 and global_position.y <= previous_ground_y + TERRAIN_LANDING_DISTANCE:
+                global_position.y = previous_ground_y
+                velocity.y = 0.0
+                terrain_grounded = true
+            return
+
         if was_grounded and not jumped:
-            var previous_ground_y: float = main.call("height_at_world", previous_position.x, previous_position.z)
             global_position = Vector3(previous_position.x, max(previous_position.y, previous_ground_y), previous_position.z)
             velocity.x = 0.0
             velocity.y = 0.0
