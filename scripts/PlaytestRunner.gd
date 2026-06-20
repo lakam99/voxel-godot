@@ -28,6 +28,7 @@ func run() -> void:
     await wait_physics_frames(80)
     test_scene_bootstrap()
     test_terrain_collision_shapes()
+    test_sky_light_consistency()
     test_spawn_clearance()
     await test_player_movement()
     await test_jump()
@@ -85,6 +86,28 @@ func test_terrain_collision_shapes() -> void:
         if shape_node and shape_node.shape:
             with_shape += 1
     add_result("terrain_collision_shapes", checked > 0 and checked == with_shape, "%d/%d chunks with shapes" % [with_shape, checked])
+
+func test_sky_light_consistency() -> void:
+    if not main or not player:
+        add_result("sky_light_consistency", false, "main or player missing")
+        return
+    var sun_light := main.get("sun") as DirectionalLight3D
+    var sun_disc := main.get("sun_visual") as MeshInstance3D
+    if not sun_light or not sun_disc:
+        add_result("sky_light_consistency", false, "sun light or disc missing")
+        return
+    var casts_day_shadows := sun_light.shadow_enabled and sun_light.light_energy > 0.1
+    var sun_above_player := sun_disc.visible and sun_disc.global_position.y > player.global_position.y + 40.0
+    add_result(
+        "sky_light_consistency",
+        not casts_day_shadows or sun_above_player,
+        "sun shadows %s, disc visible %s, disc y %.2f, player y %.2f" % [
+            str(casts_day_shadows),
+            str(sun_disc.visible),
+            sun_disc.global_position.y,
+            player.global_position.y
+        ]
+    )
 
 func test_player_movement() -> void:
     if not player:

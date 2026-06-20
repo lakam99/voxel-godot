@@ -10,6 +10,7 @@ const MAX_HEIGHT := 120.0
 const WATER_LEVEL := 11.1
 const DAY_LENGTH := 260.0
 const INTERACT_RANGE := 10.5
+const SKY_RADIUS := 640.0
 
 const BIOME_COLORS := {
     "ocean": Color(0.24, 0.58, 0.68),
@@ -48,7 +49,10 @@ var prop_root: Node3D
 var water: MeshInstance3D
 var sun: DirectionalLight3D
 var moon: DirectionalLight3D
+var sun_visual: MeshInstance3D
+var moon_visual: MeshInstance3D
 var player: CharacterBody3D
+var world_environment: WorldEnvironment
 
 var terrain_material: StandardMaterial3D
 var materials := {}
@@ -115,6 +119,7 @@ func setup_materials() -> void:
     terrain_material = StandardMaterial3D.new()
     terrain_material.vertex_color_use_as_albedo = true
     terrain_material.roughness = 0.86
+    terrain_material.cull_mode = BaseMaterial3D.CULL_DISABLED
 
     materials["woodBlock"] = make_material(Color(0.60, 0.36, 0.17), 0.82)
     materials["stoneBlock"] = make_material(Color(0.52, 0.57, 0.54), 0.90)
@@ -125,6 +130,8 @@ func setup_materials() -> void:
     materials["leaf"] = make_material(Color(0.17, 0.45, 0.19), 0.78)
     materials["rock"] = make_material(Color(0.40, 0.45, 0.43), 0.92)
     materials["water"] = make_material(Color(0.30, 0.70, 0.78, 0.46), 0.20, true)
+    materials["sunDisc"] = make_unshaded_material(Color(1.0, 0.82, 0.38))
+    materials["moonDisc"] = make_unshaded_material(Color(0.72, 0.78, 0.94))
 
 func make_material(color: Color, roughness: float = 0.82, transparent: bool = false) -> StandardMaterial3D:
     var material := StandardMaterial3D.new()
@@ -134,16 +141,23 @@ func make_material(color: Color, roughness: float = 0.82, transparent: bool = fa
         material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
     return material
 
+func make_unshaded_material(color: Color) -> StandardMaterial3D:
+    var material := StandardMaterial3D.new()
+    material.albedo_color = color
+    material.roughness = 1.0
+    material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+    return material
+
 func setup_environment() -> void:
-    var world_env := WorldEnvironment.new()
+    world_environment = WorldEnvironment.new()
     var env := Environment.new()
     env.background_mode = Environment.BG_COLOR
     env.background_color = Color(0.66, 0.84, 0.87)
     env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
     env.ambient_light_color = Color(0.78, 0.82, 0.76)
     env.ambient_light_energy = 0.52
-    world_env.environment = env
-    add_child(world_env)
+    world_environment.environment = env
+    add_child(world_environment)
 
     sun = DirectionalLight3D.new()
     sun.name = "Sun"
@@ -159,6 +173,11 @@ func setup_environment() -> void:
     moon.shadow_enabled = false
     add_child(moon)
 
+    sun_visual = make_sky_body("SunDisc", materials["sunDisc"], 20.0)
+    moon_visual = make_sky_body("MoonDisc", materials["moonDisc"], 15.0)
+    add_child(sun_visual)
+    add_child(moon_visual)
+
     var plane := PlaneMesh.new()
     plane.size = Vector2(3000.0, 3000.0)
     water = MeshInstance3D.new()
@@ -168,6 +187,19 @@ func setup_environment() -> void:
     water.position.y = WATER_LEVEL
     add_child(water)
     update_sky(0.0)
+
+func make_sky_body(node_name: String, material: Material, radius: float) -> MeshInstance3D:
+    var mesh := SphereMesh.new()
+    mesh.radius = radius
+    mesh.height = radius * 2.0
+    mesh.radial_segments = 32
+    mesh.rings = 16
+    var body := MeshInstance3D.new()
+    body.name = node_name
+    body.mesh = mesh
+    body.material_override = material
+    body.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+    return body
 
 func setup_player() -> void:
     player = CharacterBody3D.new()
@@ -263,11 +295,37 @@ func _process(delta: float) -> void:
 func update_sky(delta: float) -> void:
     time_of_day = fposmod(time_of_day + delta / DAY_LENGTH, 1.0)
     var angle := time_of_day * TAU
-    sun.rotation = Vector3(-sin(angle) * 1.1 - 0.45, angle, 0.0)
-    moon.rotation = Vector3(sin(angle) * 1.1 + 0.45, angle + PI, 0.0)
-    var day: float = clamp(sin(angle) * 0.5 + 0.5, 0.0, 1.0)
+    var sun_dir := Vector3(cos(angle), sin(angle), -0.34).normalized()
+    var moon_dir := -sun_dir
+    orient_directional_light(sun, sun_dir)
+    orient_directional_light(moon, moon_dir)
+
+    var observer := Vector3.ZERO
+    if player:
+        observer = player.global_position
+    sun_visual.global_position = observer + sun_dir * SKY_RADIUS
+    moon_visual.global_position = observer + moon_dir * SKY_RADIUS
+    sun_visual.visible = sun_dir.y > -0.04
+    moon_visual.visible = moon_dir.y > -0.04
+
+    var day: float = clamp((sun_dir.y + 0.08) / 0.82, 0.0, 1.0)
+    var night: float = clamp((moon_dir.y + 0.05) / 0.70, 0.0, 1.0)
     sun.light_energy = lerp(0.08, 2.35, day)
+    sun.shadow_enabled = day > 0.08
     moon.light_energy = lerp(0.34, 0.04, day)
+    moon.shadow_enabled = night > 0.35
+
+    if world_environment and world_environment.environment:
+        var env := world_environment.environment
+        env.background_color = Color(0.18, 0.23, 0.36).lerp(Color(0.66, 0.84, 0.87), day)
+        env.ambient_light_color = Color(0.28, 0.31, 0.44).lerp(Color(0.78, 0.82, 0.76), day)
+        env.ambient_light_energy = lerp(0.22, 0.58, day)
+
+func orient_directional_light(light: DirectionalLight3D, sky_direction: Vector3) -> void:
+    var up := Vector3.UP
+    if abs(sky_direction.dot(up)) > 0.94:
+        up = Vector3.FORWARD
+    light.look_at(light.global_position - sky_direction, up)
 
 func _unhandled_input(event: InputEvent) -> void:
     if event is InputEventMouseMotion and Input.get_mouse_mode() == Input.MOUSE_MODE_CAPTURED:
@@ -374,22 +432,24 @@ func build_chunk_mesh(cx: int, cz: int) -> Mesh:
     var st := SurfaceTool.new()
     st.begin(Mesh.PRIMITIVE_TRIANGLES)
     st.set_material(terrain_material)
-    var start_x := cx * CHUNK_SIZE
-    var start_z := cz * CHUNK_SIZE
+    var start_x: int = cx * CHUNK_SIZE
+    var start_z: int = cz * CHUNK_SIZE
+    var skirt_bottom: float = min(MIN_HEIGHT - CELL * 2.0, WATER_LEVEL - CELL * 7.0)
     for z in range(CHUNK_SIZE):
         for x in range(CHUNK_SIZE):
-            var gx := start_x + x
-            var gz := start_z + z
-            var p00 := terrain_vertex_local(gx, gz, start_x, start_z)
-            var p10 := terrain_vertex_local(gx + 1, gz, start_x, start_z)
-            var p01 := terrain_vertex_local(gx, gz + 1, start_x, start_z)
-            var p11 := terrain_vertex_local(gx + 1, gz + 1, start_x, start_z)
+            var gx: int = start_x + x
+            var gz: int = start_z + z
+            var p00: Vector3 = terrain_vertex_local(gx, gz, start_x, start_z)
+            var p10: Vector3 = terrain_vertex_local(gx + 1, gz, start_x, start_z)
+            var p01: Vector3 = terrain_vertex_local(gx, gz + 1, start_x, start_z)
+            var p11: Vector3 = terrain_vertex_local(gx + 1, gz + 1, start_x, start_z)
             add_vertex(st, p00, gx, gz)
             add_vertex(st, p01, gx, gz + 1)
             add_vertex(st, p10, gx + 1, gz)
             add_vertex(st, p10, gx + 1, gz)
             add_vertex(st, p01, gx, gz + 1)
             add_vertex(st, p11, gx + 1, gz + 1)
+    add_chunk_skirts(st, start_x, start_z, skirt_bottom)
     st.generate_normals()
     return st.commit()
 
@@ -401,6 +461,37 @@ func add_vertex(st: SurfaceTool, point: Vector3, cell_x: int, cell_z: int) -> vo
 
 func terrain_vertex_local(cell_x: int, cell_z: int, origin_cell_x: int, origin_cell_z: int) -> Vector3:
     return Vector3((cell_x - origin_cell_x) * CELL, terrain_height_cell(cell_x, cell_z), (cell_z - origin_cell_z) * CELL)
+
+func add_chunk_skirts(st: SurfaceTool, start_x: int, start_z: int, bottom_y: float) -> void:
+    var end_x := start_x + CHUNK_SIZE
+    var end_z := start_z + CHUNK_SIZE
+    for x in range(start_x, end_x):
+        add_skirt_quad(st, x, start_z, x + 1, start_z, start_x, start_z, bottom_y)
+        add_skirt_quad(st, x + 1, end_z, x, end_z, start_x, start_z, bottom_y)
+    for z in range(start_z, end_z):
+        add_skirt_quad(st, start_x, z + 1, start_x, z, start_x, start_z, bottom_y)
+        add_skirt_quad(st, end_x, z, end_x, z + 1, start_x, start_z, bottom_y)
+
+func add_skirt_quad(
+    st: SurfaceTool,
+    ax: int,
+    az: int,
+    bx: int,
+    bz: int,
+    origin_x: int,
+    origin_z: int,
+    bottom_y: float
+) -> void:
+    var top_a := terrain_vertex_local(ax, az, origin_x, origin_z)
+    var top_b := terrain_vertex_local(bx, bz, origin_x, origin_z)
+    var bottom_a := Vector3((ax - origin_x) * CELL, bottom_y, (az - origin_z) * CELL)
+    var bottom_b := Vector3((bx - origin_x) * CELL, bottom_y, (bz - origin_z) * CELL)
+    add_vertex(st, top_a, ax, az)
+    add_vertex(st, bottom_a, ax, az)
+    add_vertex(st, top_b, bx, bz)
+    add_vertex(st, top_b, bx, bz)
+    add_vertex(st, bottom_a, ax, az)
+    add_vertex(st, bottom_b, bx, bz)
 
 func spawn_chunk_props(chunk: Node3D, cx: int, cz: int) -> void:
     var rng := RandomNumberGenerator.new()
