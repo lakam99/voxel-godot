@@ -7,12 +7,21 @@ const AIR_CONTROL := 0.42
 const JUMP_SPEED := 8.9
 const GRAVITY := 26.0
 const MOUSE_SENSITIVITY := 0.0024
+const TERRAIN_SNAP_DISTANCE := 1.25
 
 var camera: Camera3D
 var pitch := 0.0
 var main: Node = null
+var automated_input := false
+var automated_move := Vector3.ZERO
+var automated_sprint := false
+var automated_jump := false
+var physics_ticks := 0
+var terrain_grounded := false
 
 func _ready() -> void:
+    set_physics_process(true)
+
     camera = Camera3D.new()
     camera.name = "Camera3D"
     camera.current = true
@@ -39,6 +48,7 @@ func handle_mouse_motion(relative: Vector2) -> void:
     camera.rotation.x = pitch
 
 func _physics_process(delta: float) -> void:
+    physics_ticks += 1
     var forward := -global_transform.basis.z
     forward.y = 0.0
     forward = forward.normalized()
@@ -47,29 +57,51 @@ func _physics_process(delta: float) -> void:
     right = right.normalized()
 
     var wish := Vector3.ZERO
-    if Input.is_key_pressed(KEY_W):
-        wish += forward
-    if Input.is_key_pressed(KEY_S):
-        wish -= forward
-    if Input.is_key_pressed(KEY_D):
-        wish += right
-    if Input.is_key_pressed(KEY_A):
-        wish -= right
+    if automated_input:
+        wish = automated_move
+    else:
+        if Input.is_key_pressed(KEY_W):
+            wish += forward
+        if Input.is_key_pressed(KEY_S):
+            wish -= forward
+        if Input.is_key_pressed(KEY_D):
+            wish += right
+        if Input.is_key_pressed(KEY_A):
+            wish -= right
     if wish.length_squared() > 0.001:
         wish = wish.normalized()
 
-    var speed := SPRINT_SPEED if Input.is_key_pressed(KEY_SHIFT) else WALK_SPEED
+    var sprinting := automated_sprint if automated_input else Input.is_key_pressed(KEY_SHIFT)
+    var speed := SPRINT_SPEED if sprinting else WALK_SPEED
     var control := 1.0 if is_on_floor() else AIR_CONTROL
     velocity.x = lerp(velocity.x, wish.x * speed, min(1.0, ACCELERATION * control * delta))
     velocity.z = lerp(velocity.z, wish.z * speed, min(1.0, ACCELERATION * control * delta))
 
-    if is_on_floor():
-        if Input.is_key_pressed(KEY_SPACE):
+    var grounded := is_on_floor() or terrain_grounded
+    if grounded:
+        var jumping := automated_jump if automated_input else Input.is_key_pressed(KEY_SPACE)
+        if jumping:
             velocity.y = JUMP_SPEED
+            automated_jump = false
+            terrain_grounded = false
     else:
         velocity.y -= GRAVITY * delta
 
     move_and_slide()
+    apply_terrain_grounding()
+
+func apply_terrain_grounding() -> void:
+    if not main or not main.has_method("height_at_world"):
+        terrain_grounded = is_on_floor()
+        return
+
+    var ground_y: float = main.call("height_at_world", global_position.x, global_position.z)
+    if velocity.y <= 0.0 and global_position.y <= ground_y + TERRAIN_SNAP_DISTANCE:
+        global_position.y = ground_y
+        velocity.y = 0.0
+        terrain_grounded = true
+    else:
+        terrain_grounded = false
 
 func view_ray(max_distance: float) -> Dictionary:
     var origin := camera.global_position

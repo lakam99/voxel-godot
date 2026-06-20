@@ -174,8 +174,54 @@ func setup_player() -> void:
     player.name = "Player"
     player.set_script(PlayerController)
     player.main = self
-    player.position = Vector3(0.0, height_at_world(0.0, 28.0) + 4.0, 28.0)
+    player.position = find_spawn_position()
     add_child(player)
+
+func find_spawn_position() -> Vector3:
+    var best_cell := find_spawn_cell(CELL * 0.35)
+    if best_cell == Vector2i(999999, 999999):
+        best_cell = find_spawn_cell(CELL * 0.9)
+    if best_cell == Vector2i(999999, 999999):
+        best_cell = find_spawn_cell(CELL * 1.6)
+    if best_cell == Vector2i(999999, 999999):
+        best_cell = Vector2i(0, 28)
+    var spawn_height: float = terrain_height_cell(best_cell.x, best_cell.y)
+    return Vector3(best_cell.x * CELL, spawn_height + 5.0, best_cell.y * CELL)
+
+func find_spawn_cell(max_variation: float) -> Vector2i:
+    var best_cell := Vector2i(999999, 999999)
+    var best_score: float = -999999.0
+    for z in range(-72, 73):
+        for x in range(-72, 73):
+            var h: float = terrain_height_cell(x, z)
+            if h <= WATER_LEVEL + 2.4:
+                continue
+            var variation: float = height_variation_cell(x, z, 2)
+            if variation > max_variation:
+                continue
+            var biome: String = biome_at_cell(x, z)
+            var biome_score: float = 0.0
+            if biome == "plains" or biome == "forest" or biome == "savanna":
+                biome_score = 18.0
+            elif biome == "beach":
+                biome_score = 6.0
+            elif biome == "alpine" or biome == "snow":
+                biome_score = -20.0
+            var distance_penalty: float = Vector2(float(x), float(z)).length() * 0.18
+            var score: float = biome_score - variation * 8.0 - distance_penalty
+            if score > best_score:
+                best_score = score
+                best_cell = Vector2i(x, z)
+    return best_cell
+
+func height_variation_cell(x: int, z: int, radius: int) -> float:
+    var center_height: float = terrain_height_cell(x, z)
+    var max_delta := 0.0
+    for dz in range(-radius, radius + 1):
+        for dx in range(-radius, radius + 1):
+            var sample_height: float = terrain_height_cell(x + dx, z + dz)
+            max_delta = max(max_delta, abs(sample_height - center_height))
+    return max_delta
 
 func setup_hud() -> void:
     var layer := CanvasLayer.new()
@@ -285,6 +331,7 @@ func update_chunks(force: bool = false) -> void:
 func create_chunk(cx: int, cz: int) -> void:
     var chunk := Node3D.new()
     chunk.name = "Chunk_%d_%d" % [cx, cz]
+    chunk.position = Vector3(cx * CHUNK_SIZE * CELL, 0.0, cz * CHUNK_SIZE * CELL)
     chunk_root.add_child(chunk)
 
     var mesh := build_chunk_mesh(cx, cz)
@@ -295,9 +342,12 @@ func create_chunk(cx: int, cz: int) -> void:
 
     var body := StaticBody3D.new()
     body.name = "TerrainBody"
+    body.collision_layer = 2
+    body.collision_mask = 0
     body.set_meta("kind", "terrain")
     body.set_meta("chunk", Vector2i(cx, cz))
     var collision := CollisionShape3D.new()
+    collision.name = "TerrainCollision"
     collision.shape = mesh.create_trimesh_shape()
     body.add_child(collision)
     chunk.add_child(body)
@@ -330,28 +380,27 @@ func build_chunk_mesh(cx: int, cz: int) -> Mesh:
         for x in range(CHUNK_SIZE):
             var gx := start_x + x
             var gz := start_z + z
-            var p00 := terrain_vertex(gx, gz)
-            var p10 := terrain_vertex(gx + 1, gz)
-            var p01 := terrain_vertex(gx, gz + 1)
-            var p11 := terrain_vertex(gx + 1, gz + 1)
-            add_vertex(st, p00)
-            add_vertex(st, p01)
-            add_vertex(st, p10)
-            add_vertex(st, p10)
-            add_vertex(st, p01)
-            add_vertex(st, p11)
+            var p00 := terrain_vertex_local(gx, gz, start_x, start_z)
+            var p10 := terrain_vertex_local(gx + 1, gz, start_x, start_z)
+            var p01 := terrain_vertex_local(gx, gz + 1, start_x, start_z)
+            var p11 := terrain_vertex_local(gx + 1, gz + 1, start_x, start_z)
+            add_vertex(st, p00, gx, gz)
+            add_vertex(st, p01, gx, gz + 1)
+            add_vertex(st, p10, gx + 1, gz)
+            add_vertex(st, p10, gx + 1, gz)
+            add_vertex(st, p01, gx, gz + 1)
+            add_vertex(st, p11, gx + 1, gz + 1)
     st.generate_normals()
     return st.commit()
 
-func add_vertex(st: SurfaceTool, point: Vector3) -> void:
-    var cell := Vector2i(world_to_cell(point.x), world_to_cell(point.z))
-    var color: Color = BIOME_COLORS.get(biome_at_cell(cell.x, cell.y), BIOME_COLORS["plains"])
-    var shade := 0.88 + noise01(ridge_noise, cell.x + 400, cell.y - 200) * 0.18
+func add_vertex(st: SurfaceTool, point: Vector3, cell_x: int, cell_z: int) -> void:
+    var color: Color = BIOME_COLORS.get(biome_at_cell(cell_x, cell_z), BIOME_COLORS["plains"])
+    var shade := 0.88 + noise01(ridge_noise, cell_x + 400, cell_z - 200) * 0.18
     st.set_color(color * shade)
     st.add_vertex(point)
 
-func terrain_vertex(cell_x: int, cell_z: int) -> Vector3:
-    return Vector3(cell_x * CELL, terrain_height_cell(cell_x, cell_z), cell_z * CELL)
+func terrain_vertex_local(cell_x: int, cell_z: int, origin_cell_x: int, origin_cell_z: int) -> Vector3:
+    return Vector3((cell_x - origin_cell_x) * CELL, terrain_height_cell(cell_x, cell_z), (cell_z - origin_cell_z) * CELL)
 
 func spawn_chunk_props(chunk: Node3D, cx: int, cz: int) -> void:
     var rng := RandomNumberGenerator.new()
@@ -369,9 +418,9 @@ func spawn_chunk_props(chunk: Node3D, cx: int, cz: int) -> void:
             continue
         var biome := biome_at_cell(x, z)
         if rng.randf() < rock_chance(biome, h):
-            make_rock(chunk, prop_id, Vector3(x * CELL, h, z * CELL), rng)
+            make_rock(chunk, prop_id, Vector3((x - start_x) * CELL, h, (z - start_z) * CELL), rng)
         elif rng.randf() < tree_chance(biome):
-            make_tree(chunk, prop_id, Vector3(x * CELL, h, z * CELL), biome, rng)
+            make_tree(chunk, prop_id, Vector3((x - start_x) * CELL, h, (z - start_z) * CELL), biome, rng)
 
 func make_tree(parent: Node, prop_id: String, position: Vector3, biome: String, rng: RandomNumberGenerator) -> void:
     var body := StaticBody3D.new()
