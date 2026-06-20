@@ -121,6 +121,7 @@ func test_player_movement() -> void:
     var travel: float = Vector2(player.global_position.x - start.x, player.global_position.z - start.z).length()
     var velocity: Vector3 = player.velocity
     var move_value: Vector3 = player.get("automated_move")
+    var max_downward_correction: float = player.get("max_downward_terrain_correction")
     add_result(
         "player_movement",
         travel > 4.0,
@@ -132,6 +133,7 @@ func test_player_movement() -> void:
             str(move_value)
         ]
     )
+    add_result("terrain_descent_smoothing", max_downward_correction <= 0.22, "max downward correction %.3f" % max_downward_correction)
 
 func test_jump() -> void:
     if not player:
@@ -144,10 +146,23 @@ func test_jump() -> void:
     var start_y: float = player.global_position.y
     player.set("automated_jump", true)
     var peak_y: float = start_y
-    for i in range(28):
+    var landing_frame := -1
+    var became_airborne := false
+    for i in range(90):
         await get_tree().physics_frame
         peak_y = max(peak_y, player.global_position.y)
-    add_result("jump", peak_y > start_y + 0.55, "rise %.2f, floor %s" % [peak_y - start_y, str(is_player_grounded())])
+        if not is_player_grounded():
+            became_airborne = true
+        elif became_airborne:
+            landing_frame = i + 1
+            break
+    var rise: float = peak_y - start_y
+    var natural_air_time := landing_frame >= 36 or landing_frame == -1
+    add_result(
+        "jump",
+        rise > 0.55 and natural_air_time,
+        "rise %.2f, landing frame %d, floor %s" % [rise, landing_frame, str(is_player_grounded())]
+    )
 
 func test_block_destroy_ray() -> void:
     if not player or not camera:

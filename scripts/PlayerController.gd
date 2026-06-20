@@ -7,7 +7,9 @@ const AIR_CONTROL := 0.42
 const JUMP_SPEED := 8.9
 const GRAVITY := 26.0
 const MOUSE_SENSITIVITY := 0.0024
-const TERRAIN_SNAP_DISTANCE := 1.25
+const TERRAIN_LANDING_DISTANCE := 0.18
+const TERRAIN_WALKABLE_DROP := 1.55
+const TERRAIN_DESCEND_SPEED := 7.25
 
 var camera: Camera3D
 var pitch := 0.0
@@ -18,6 +20,7 @@ var automated_sprint := false
 var automated_jump := false
 var physics_ticks := 0
 var terrain_grounded := false
+var max_downward_terrain_correction := 0.0
 
 func _ready() -> void:
     set_physics_process(true)
@@ -73,30 +76,60 @@ func _physics_process(delta: float) -> void:
 
     var sprinting := automated_sprint if automated_input else Input.is_key_pressed(KEY_SHIFT)
     var speed := SPRINT_SPEED if sprinting else WALK_SPEED
-    var control := 1.0 if is_on_floor() else AIR_CONTROL
+    var control := 1.0 if is_on_floor() or terrain_grounded else AIR_CONTROL
     velocity.x = lerp(velocity.x, wish.x * speed, min(1.0, ACCELERATION * control * delta))
     velocity.z = lerp(velocity.z, wish.z * speed, min(1.0, ACCELERATION * control * delta))
 
-    var grounded := is_on_floor() or terrain_grounded
+    var was_grounded := is_on_floor() or terrain_grounded
+    var jumped := false
+    var grounded := was_grounded
     if grounded:
         var jumping := automated_jump if automated_input else Input.is_key_pressed(KEY_SPACE)
         if jumping:
             velocity.y = JUMP_SPEED
             automated_jump = false
             terrain_grounded = false
+            jumped = true
     else:
         velocity.y -= GRAVITY * delta
 
     move_and_slide()
-    apply_terrain_grounding()
+    apply_terrain_grounding(delta, was_grounded, jumped)
 
-func apply_terrain_grounding() -> void:
+func apply_terrain_grounding(delta: float, was_grounded: bool, jumped: bool) -> void:
     if not main or not main.has_method("height_at_world"):
         terrain_grounded = is_on_floor()
         return
 
     var ground_y: float = main.call("height_at_world", global_position.x, global_position.z)
-    if velocity.y <= 0.0 and global_position.y <= ground_y + TERRAIN_SNAP_DISTANCE:
+    var distance_above_ground: float = global_position.y - ground_y
+
+    if distance_above_ground <= 0.0:
+        global_position.y = ground_y
+        velocity.y = max(velocity.y, 0.0)
+        terrain_grounded = not jumped
+        return
+
+    if jumped:
+        terrain_grounded = false
+        return
+
+    if was_grounded and velocity.y <= 0.0 and distance_above_ground <= TERRAIN_WALKABLE_DROP:
+        var old_y: float = global_position.y
+        var max_drop: float = TERRAIN_DESCEND_SPEED * delta
+        global_position.y = move_toward(global_position.y, ground_y, max_drop)
+        var correction: float = max(0.0, old_y - global_position.y)
+        if correction > max_downward_terrain_correction:
+            max_downward_terrain_correction = correction
+        if global_position.y <= ground_y + 0.03:
+            global_position.y = ground_y
+            velocity.y = 0.0
+            terrain_grounded = true
+        else:
+            terrain_grounded = true
+        return
+
+    if velocity.y <= 0.0 and distance_above_ground <= TERRAIN_LANDING_DISTANCE:
         global_position.y = ground_y
         velocity.y = 0.0
         terrain_grounded = true
