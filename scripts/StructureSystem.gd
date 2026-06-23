@@ -243,10 +243,10 @@ func build_building(base_x: int, base_z: int, level: float, width: int, depth: i
                 var window_axis_match := z % 3 == 1 if (x == 0 or x == width - 1) else x % 3 == 1
                 if window_line and window_axis_match:
                     block_type = "glass"
-                place_structure_block(base_x + x, base_z + z, level, dy, block_type)
+                place_structure_block(base_x + x, base_z + z, level, dy, block_type, wall_visual_options(x, z, width, depth, dy, block_type, wall_type))
     for x in range(-1, width + 1):
         for z in range(-1, depth + 1):
-            place_structure_block(base_x + x, base_z + z, level, wall_height, roof_type)
+            place_structure_block(base_x + x, base_z + z, level, wall_height, roof_type, roof_visual_options(x, z, width, depth, roof_type))
     place_porch(base_x, base_z, level, width, depth, door_side)
     if town_building and rng.randf() > 0.35:
         place_loot_chest(base_x, base_z, level, width, depth, door_side, rng, "town")
@@ -254,6 +254,72 @@ func build_building(base_x: int, base_z: int, level: float, width: int, depth: i
         place_loot_chest(base_x, base_z, level, width, depth, door_side, rng, "cabin")
     if town_building and rng.randf() > 0.55:
         place_utility(base_x + 1, base_z + depth - 2, level, "bed")
+
+func wall_visual_options(x: int, z: int, width: int, depth: int, dy: int, block_type: String, wall_type: String) -> Dictionary:
+    var trim_key := "trimStone" if wall_type == "stoneBlock" else "trimWood"
+    if block_type == "glass":
+        var axis := "x" if (x == 0 or x == width - 1) else "z"
+        var side := -1 if (x == 0 or z == 0) else 1
+        if axis == "z":
+            side = -1 if z == 0 else 1
+        return {
+            "accentRole": "windowFrame",
+            "windowAxis": axis,
+            "windowSide": side,
+            "windowTrimMaterial": trim_key
+        }
+    var corner := (x == 0 or x == width - 1) and (z == 0 or z == depth - 1)
+    if corner and dy <= 2:
+        return {
+            "accentRole": "cornerTimber",
+            "cornerX": -1 if x == 0 else 1,
+            "cornerZ": -1 if z == 0 else 1,
+            "cornerTrimMaterial": trim_key
+        }
+    return {}
+
+func roof_visual_options(x: int, z: int, width: int, depth: int, roof_type: String) -> Dictionary:
+    var axis := "x" if width >= depth else "z"
+    var cross_value := z if axis == "x" else x
+    var cross_min := -1
+    var cross_max := depth if axis == "x" else width
+    var center := float(cross_min + cross_max) * 0.5
+    var distance_to_center := absf(float(cross_value) - center)
+    var role := "ridge" if distance_to_center <= 0.52 else "slope"
+    var side := -1 if float(cross_value) < center else 1
+    var edge_x := 0
+    var edge_z := 0
+    if x == -1:
+        edge_x = -1
+    elif x == width:
+        edge_x = 1
+    if z == -1:
+        edge_z = -1
+    elif z == depth:
+        edge_z = 1
+    if edge_x != 0 or edge_z != 0:
+        role = "eave" if role != "ridge" else role
+    var options := {
+        "roofRole": role,
+        "roofAxis": axis,
+        "roofSide": side,
+        "roofMaterial": "roofStone" if roof_type == "stoneBlock" else "roofWood",
+        "roofTrimMaterial": "trimStone" if roof_type == "stoneBlock" else "trimWood",
+        "roofEdgeX": edge_x,
+        "roofEdgeZ": edge_z
+    }
+    var chimney_x: int = clampi(width - 2, 1, width - 2)
+    var chimney_z: int = clampi(2, 1, depth - 2)
+    if x == chimney_x and z == chimney_z:
+        options["roofAccent"] = "chimney"
+    return options
+
+func camp_fence_options(base_options: Dictionary, axis: String) -> Dictionary:
+    var options := base_options.duplicate()
+    options["accentRole"] = "fencePost"
+    options["fenceAxis"] = axis
+    options["fenceTrimMaterial"] = "trimWood"
+    return options
 
 func build_ruin(base_x: int, base_z: int, level: float, width: int, depth: int, rng: RandomNumberGenerator) -> void:
     generated_ruin_count += 1
@@ -307,12 +373,12 @@ func build_camp(base_x: int, base_z: int, level: float, width: int, depth: int, 
         place_utility(base_x + cell.x, base_z + cell.y, level, "torch", tier_options)
     for x in range(1, width - 1):
         if x % 3 == 0:
-            place_structure_block(base_x + x, base_z, level, 0, "woodBlock", tier_options)
-            place_structure_block(base_x + x, base_z + depth - 1, level, 0, "woodBlock", tier_options)
+            place_structure_block(base_x + x, base_z, level, 0, "woodBlock", camp_fence_options(tier_options, "x"))
+            place_structure_block(base_x + x, base_z + depth - 1, level, 0, "woodBlock", camp_fence_options(tier_options, "x"))
     for z in range(1, depth - 1):
         if z % 3 == 1:
-            place_structure_block(base_x, base_z + z, level, 0, "woodBlock", tier_options)
-            place_structure_block(base_x + width - 1, base_z + z, level, 0, "woodBlock", tier_options)
+            place_structure_block(base_x, base_z + z, level, 0, "woodBlock", camp_fence_options(tier_options, "z"))
+            place_structure_block(base_x + width - 1, base_z + z, level, 0, "woodBlock", camp_fence_options(tier_options, "z"))
     var trap_cells := [
         Vector2i(center_x - 1, -2),
         Vector2i(center_x + 1, -2),
@@ -490,7 +556,9 @@ func place_door(cell_x: int, cell_z: int, level: float, side: int, secondary: bo
         "world_y": world_y,
         "facing": facing,
         "secondary": secondary,
-        "door": true
+        "door": true,
+        "accentRole": "doorFrame",
+        "doorTrimMaterial": "trimWood"
     })
     if block:
         generated_door_count += 1

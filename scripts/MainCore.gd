@@ -142,6 +142,7 @@ var hud_message_refresh_count := 0
 var hud_skipped_refresh_count := 0
 var last_hud_refresh_message := ""
 var detail_meshes := {}
+var block_meshes := {}
 
 func _ready() -> void:
     playtest_progress("main_ready_start")

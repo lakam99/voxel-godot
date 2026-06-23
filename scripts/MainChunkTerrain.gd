@@ -1,15 +1,198 @@
 extends "res://scripts/MainInteractionFlow.gd"
 
 func add_block_mesh(parent: Node3D, size: Vector3, offset: Vector3, material_key: String, rotation := Vector3.ZERO) -> MeshInstance3D:
-    var mesh := BoxMesh.new()
-    mesh.size = size
     var mesh_instance := MeshInstance3D.new()
-    mesh_instance.mesh = mesh
-    mesh_instance.material_override = materials.get(material_key, materials["stoneBlock"])
+    mesh_instance.name = "BlockVisual_%s" % material_key
+    mesh_instance.mesh = block_visual_mesh(material_key)
+    mesh_instance.material_override = block_visual_material(material_key)
     mesh_instance.position = offset
     mesh_instance.rotation = rotation
+    mesh_instance.scale = size
+    mesh_instance.set_meta("visual_role", "block")
+    mesh_instance.set_meta("material_key", material_key)
     parent.add_child(mesh_instance)
     return mesh_instance
+
+func block_visual_material(material_key: String) -> Material:
+    return materials.get(material_key, materials["stoneBlock"])
+
+func block_visual_mesh(material_key: String) -> Mesh:
+    var mesh_key := "plain" if material_key in ["glass", "flame", "furnaceGlow", "copperOreGlow", "ironOreGlow"] else "chamfered"
+    if block_meshes.has(mesh_key):
+        return block_meshes[mesh_key]
+    var mesh: Mesh
+    if mesh_key == "plain":
+        var plain := BoxMesh.new()
+        plain.size = Vector3.ONE
+        mesh = plain
+    else:
+        mesh = make_chamfered_unit_block_mesh()
+    block_meshes[mesh_key] = mesh
+    return mesh
+
+func make_chamfered_unit_block_mesh() -> ArrayMesh:
+    var st := begin_block_surface()
+    var o := 0.5
+    var i := 0.42
+    add_block_quad(st, Vector3(-i, -i, o), Vector3(i, -i, o), Vector3(i, i, o), Vector3(-i, i, o))
+    add_block_quad(st, Vector3(i, -i, -o), Vector3(-i, -i, -o), Vector3(-i, i, -o), Vector3(i, i, -o))
+    add_block_quad(st, Vector3(o, -i, i), Vector3(o, -i, -i), Vector3(o, i, -i), Vector3(o, i, i))
+    add_block_quad(st, Vector3(-o, -i, -i), Vector3(-o, -i, i), Vector3(-o, i, i), Vector3(-o, i, -i))
+    add_block_quad(st, Vector3(-i, o, i), Vector3(i, o, i), Vector3(i, o, -i), Vector3(-i, o, -i))
+    add_block_quad(st, Vector3(-i, -o, -i), Vector3(i, -o, -i), Vector3(i, -o, i), Vector3(-i, -o, i))
+
+    add_block_quad(st, Vector3(-i, i, o), Vector3(i, i, o), Vector3(i, o, i), Vector3(-i, o, i))
+    add_block_quad(st, Vector3(i, -i, o), Vector3(-i, -i, o), Vector3(-i, -o, i), Vector3(i, -o, i))
+    add_block_quad(st, Vector3(i, -i, o), Vector3(i, i, o), Vector3(o, i, i), Vector3(o, -i, i))
+    add_block_quad(st, Vector3(-i, i, o), Vector3(-i, -i, o), Vector3(-o, -i, i), Vector3(-o, i, i))
+
+    add_block_quad(st, Vector3(i, i, -o), Vector3(-i, i, -o), Vector3(-i, o, -i), Vector3(i, o, -i))
+    add_block_quad(st, Vector3(-i, -i, -o), Vector3(i, -i, -o), Vector3(i, -o, -i), Vector3(-i, -o, -i))
+    add_block_quad(st, Vector3(o, -i, -i), Vector3(o, i, -i), Vector3(i, i, -o), Vector3(i, -i, -o))
+    add_block_quad(st, Vector3(-o, i, -i), Vector3(-o, -i, -i), Vector3(-i, -i, -o), Vector3(-i, i, -o))
+
+    add_block_quad(st, Vector3(o, i, i), Vector3(o, i, -i), Vector3(i, o, -i), Vector3(i, o, i))
+    add_block_quad(st, Vector3(-o, i, -i), Vector3(-o, i, i), Vector3(-i, o, i), Vector3(-i, o, -i))
+    add_block_quad(st, Vector3(o, -i, -i), Vector3(o, -i, i), Vector3(i, -o, i), Vector3(i, -o, -i))
+    add_block_quad(st, Vector3(-o, -i, i), Vector3(-o, -i, -i), Vector3(-i, -o, -i), Vector3(-i, -o, i))
+
+    for sx in [-1.0, 1.0]:
+        for sy in [-1.0, 1.0]:
+            for sz in [-1.0, 1.0]:
+                add_block_triangle(
+                    st,
+                    Vector3(sx * o, sy * i, sz * i),
+                    Vector3(sx * i, sy * o, sz * i),
+                    Vector3(sx * i, sy * i, sz * o)
+                )
+    st.generate_normals()
+    return st.commit()
+
+func begin_block_surface(material: Material = null) -> SurfaceTool:
+    var st := SurfaceTool.new()
+    st.begin(Mesh.PRIMITIVE_TRIANGLES)
+    if material != null:
+        st.set_material(material)
+    return st
+
+func add_block_triangle(st: SurfaceTool, a: Vector3, b: Vector3, c: Vector3) -> void:
+    st.add_vertex(a)
+    st.add_vertex(b)
+    st.add_vertex(c)
+
+func add_block_quad(st: SurfaceTool, a: Vector3, b: Vector3, c: Vector3, d: Vector3) -> void:
+    add_block_triangle(st, a, b, c)
+    add_block_triangle(st, a, c, d)
+
+func tag_visual(node: MeshInstance3D, role: String, visual_name: String = "") -> MeshInstance3D:
+    if node == null:
+        return node
+    if visual_name != "":
+        node.name = visual_name
+    node.set_meta("visual_role", role)
+    return node
+
+func add_cached_mesh_visual(parent: Node3D, mesh_key: String, material_key: String, size: Vector3, offset: Vector3, rotation := Vector3.ZERO, role := "block", visual_name := "") -> MeshInstance3D:
+    var mesh_instance := MeshInstance3D.new()
+    mesh_instance.name = visual_name if visual_name != "" else "Visual_%s" % mesh_key
+    mesh_instance.mesh = cached_visual_mesh(mesh_key)
+    mesh_instance.material_override = block_visual_material(material_key)
+    mesh_instance.position = offset
+    mesh_instance.rotation = rotation
+    mesh_instance.scale = size
+    mesh_instance.set_meta("visual_role", role)
+    mesh_instance.set_meta("material_key", material_key)
+    parent.add_child(mesh_instance)
+    return mesh_instance
+
+func cached_visual_mesh(mesh_key: String) -> Mesh:
+    var key := "visual_%s" % mesh_key
+    if block_meshes.has(key):
+        return block_meshes[key]
+    var plain := BoxMesh.new()
+    plain.size = Vector3.ONE
+    var mesh: Mesh = plain
+    block_meshes[key] = mesh
+    return mesh
+
+func add_roof_block_visual(parent: Node3D, block_type: String, options: Dictionary) -> void:
+    var role := String(options.get("roofRole", "slope"))
+    var axis := String(options.get("roofAxis", "x"))
+    var material_key := String(options.get("roofMaterial", "roofStone" if block_type == "stoneBlock" else "roofWood"))
+    var trim_key := String(options.get("roofTrimMaterial", "trimStone" if block_type == "stoneBlock" else "trimWood"))
+    var rotation := Vector3.ZERO
+    tag_visual(add_block_mesh(parent, Vector3(CELL * 1.02, CELL * 0.22, CELL * 1.02), Vector3(0.0, -CELL * 0.30, 0.0), material_key), "roof", "RoofVisual_%s" % role)
+    if role == "ridge":
+        var ridge_size := Vector3(CELL * 1.16, CELL * 0.18, CELL * 0.30) if axis == "x" else Vector3(CELL * 0.30, CELL * 0.18, CELL * 1.16)
+        add_cached_mesh_visual(parent, "roof_ridge_bar", material_key, ridge_size, Vector3(0.0, -CELL * 0.10, 0.0), rotation, "roof", "RoofRidgeCapVisual")
+    add_roof_edge_trim(parent, options, trim_key)
+    if String(options.get("roofAccent", "")) == "chimney":
+        add_chimney_visual(parent, trim_key)
+
+func add_roof_edge_trim(parent: Node3D, options: Dictionary, trim_key: String) -> void:
+    var edge_x := int(options.get("roofEdgeX", 0))
+    var edge_z := int(options.get("roofEdgeZ", 0))
+    if edge_x != 0:
+        tag_visual(add_block_mesh(parent, Vector3(CELL * 0.08, CELL * 0.18, CELL * 1.18), Vector3(float(edge_x) * CELL * 0.57, -CELL * 0.22, 0.0), trim_key), "roofTrim", "RoofEaveTrimX")
+    if edge_z != 0:
+        tag_visual(add_block_mesh(parent, Vector3(CELL * 1.18, CELL * 0.18, CELL * 0.08), Vector3(0.0, -CELL * 0.22, float(edge_z) * CELL * 0.57), trim_key), "roofTrim", "RoofEaveTrimZ")
+
+func add_chimney_visual(parent: Node3D, material_key: String) -> void:
+    tag_visual(add_block_mesh(parent, Vector3(CELL * 0.34, CELL * 0.90, CELL * 0.34), Vector3(CELL * 0.18, CELL * 0.45, CELL * 0.12), material_key), "chimney", "ChimneyVisual")
+    tag_visual(add_block_mesh(parent, Vector3(CELL * 0.46, CELL * 0.14, CELL * 0.46), Vector3(CELL * 0.18, CELL * 0.96, CELL * 0.12), material_key), "chimney", "ChimneyCapVisual")
+
+func add_window_frame_visual(parent: Node3D, options: Dictionary) -> void:
+    var axis := String(options.get("windowAxis", "z"))
+    var side := float(int(options.get("windowSide", 1)))
+    var trim_key := String(options.get("windowTrimMaterial", "trimWood"))
+    var face_offset := CELL * 0.515 * side
+    if axis == "x":
+        for z_offset in [-0.36, 0.36]:
+            tag_visual(add_block_mesh(parent, Vector3(CELL * 0.055, CELL * 0.88, CELL * 0.065), Vector3(face_offset, 0.0, float(z_offset) * CELL), trim_key), "windowFrame", "WindowFramePost")
+        for y_offset in [-0.42, 0.42]:
+            tag_visual(add_block_mesh(parent, Vector3(CELL * 0.06, CELL * 0.06, CELL * 0.86), Vector3(face_offset, float(y_offset) * CELL, 0.0), trim_key), "windowFrame", "WindowFrameRail")
+    else:
+        for x_offset in [-0.36, 0.36]:
+            tag_visual(add_block_mesh(parent, Vector3(CELL * 0.065, CELL * 0.88, CELL * 0.055), Vector3(float(x_offset) * CELL, 0.0, face_offset), trim_key), "windowFrame", "WindowFramePost")
+        for y_offset in [-0.42, 0.42]:
+            tag_visual(add_block_mesh(parent, Vector3(CELL * 0.86, CELL * 0.06, CELL * 0.06), Vector3(0.0, float(y_offset) * CELL, face_offset), trim_key), "windowFrame", "WindowFrameRail")
+
+func add_corner_timber_visual(parent: Node3D, options: Dictionary) -> void:
+    var sx := float(int(options.get("cornerX", 1)))
+    var sz := float(int(options.get("cornerZ", 1)))
+    var trim_key := String(options.get("cornerTrimMaterial", "trimWood"))
+    tag_visual(add_block_mesh(parent, Vector3(CELL * 0.10, CELL * 1.04, CELL * 0.16), Vector3(sx * CELL * 0.50, 0.0, sz * CELL * 0.43), trim_key), "cornerTimber", "CornerTimberX")
+    tag_visual(add_block_mesh(parent, Vector3(CELL * 0.16, CELL * 1.04, CELL * 0.10), Vector3(sx * CELL * 0.43, 0.0, sz * CELL * 0.50), trim_key), "cornerTimber", "CornerTimberZ")
+
+func add_door_frame_visual(parent: Node3D, options: Dictionary) -> void:
+    var trim_key := String(options.get("doorTrimMaterial", "trimWood"))
+    tag_visual(add_block_mesh(parent, Vector3(CELL * 0.10, CELL * 1.86, CELL * 0.18), Vector3(-CELL * 0.55, CELL * 0.42, 0.0), trim_key), "doorFrame", "DoorFrameLeft")
+    tag_visual(add_block_mesh(parent, Vector3(CELL * 0.10, CELL * 1.86, CELL * 0.18), Vector3(CELL * 0.55, CELL * 0.42, 0.0), trim_key), "doorFrame", "DoorFrameRight")
+    tag_visual(add_block_mesh(parent, Vector3(CELL * 1.20, CELL * 0.12, CELL * 0.20), Vector3(0.0, CELL * 1.34, 0.0), trim_key), "doorFrame", "DoorFrameLintel")
+    if not bool(options.get("secondary", false)):
+        tag_visual(add_block_mesh(parent, Vector3(CELL * 0.54, CELL * 0.22, CELL * 0.06), Vector3(0.0, CELL * 1.56, -CELL * 0.13), trim_key), "sign", "DoorSignVisual")
+
+func add_fence_accent_visual(parent: Node3D, options: Dictionary) -> void:
+    var axis := String(options.get("fenceAxis", "x"))
+    var trim_key := String(options.get("fenceTrimMaterial", "trimWood"))
+    tag_visual(add_block_mesh(parent, Vector3(CELL * 0.18, CELL * 1.08, CELL * 0.18), Vector3.ZERO, trim_key), "fencePost", "FencePostVisual")
+    if axis == "z":
+        for y_offset in [0.18, -0.18]:
+            tag_visual(add_block_mesh(parent, Vector3(CELL * 0.14, CELL * 0.12, CELL * 1.04), Vector3(0.0, float(y_offset) * CELL, 0.0), trim_key), "fenceRail", "FenceRailVisual")
+    else:
+        for y_offset in [0.18, -0.18]:
+            tag_visual(add_block_mesh(parent, Vector3(CELL * 1.04, CELL * 0.12, CELL * 0.14), Vector3(0.0, float(y_offset) * CELL, 0.0), trim_key), "fenceRail", "FenceRailVisual")
+
+func add_block_accent_visuals(parent: Node3D, block_type: String, options: Dictionary) -> void:
+    var accent := String(options.get("accentRole", ""))
+    if accent == "windowFrame" and block_type == "glass":
+        add_window_frame_visual(parent, options)
+    elif accent == "cornerTimber":
+        add_corner_timber_visual(parent, options)
+    elif accent == "doorFrame" and block_type == "door":
+        add_door_frame_visual(parent, options)
+    elif accent == "fencePost":
+        add_fence_accent_visual(parent, options)
 
 func add_workbench_visual(parent: Node3D) -> void:
     add_block_mesh(parent, Vector3(CELL * 1.18, CELL * 0.16, CELL * 0.92), Vector3(0.0, CELL * 0.29, 0.0), "workbench")
@@ -163,6 +346,8 @@ func add_trader_stall_visual(parent: Node3D) -> void:
     for i in range(-2, 3):
         var material_key := "traderClothLight" if i % 2 == 0 else "traderCloth"
         add_block_mesh(parent, Vector3(CELL * 0.18, CELL * 0.16, CELL * 0.05), Vector3(float(i) * CELL * 0.20, CELL * 0.50, CELL * 0.45), material_key)
+    tag_visual(add_block_mesh(parent, Vector3(CELL * 0.34, CELL * 0.26, CELL * 0.34), Vector3(-CELL * 0.42, -CELL * 0.02, -CELL * 0.50), "woodBlock"), "crate", "TraderCrateVisual")
+    tag_visual(add_block_mesh(parent, Vector3(CELL * 0.26, CELL * 0.42, CELL * 0.26), Vector3(CELL * 0.44, -CELL * 0.03, -CELL * 0.48), "door"), "barrel", "TraderBarrelVisual")
 
 func create_block(cell: Vector3i, block_type: String, options: Dictionary = {}) -> StaticBody3D:
     if blocks.has(cell):
@@ -183,6 +368,24 @@ func create_block(cell: Vector3i, block_type: String, options: Dictionary = {}) 
         body.set_meta("cacheKey", String(options.get("cacheKey", "")))
     if options.has("storageSlots"):
         body.set_meta("storage_slots", options.get("storageSlots", []))
+    for visual_key in [
+        "roofRole",
+        "roofAxis",
+        "roofSide",
+        "roofMaterial",
+        "roofTrimMaterial",
+        "roofEdgeX",
+        "roofEdgeZ",
+        "roofAccent",
+        "accentRole",
+        "windowAxis",
+        "windowSide",
+        "cornerX",
+        "cornerZ",
+        "fenceAxis"
+    ]:
+        if options.has(visual_key):
+            body.set_meta(visual_key, options.get(visual_key))
 
     var profile := block_collision_profile(block_type)
     var mesh_size: Vector3 = profile.get("size", Vector3.ONE * CELL * 0.96)
@@ -216,7 +419,9 @@ func create_block(cell: Vector3i, block_type: String, options: Dictionary = {}) 
     collider_size = mesh_size
     collider_offset = mesh_offset
 
-    if block_type == "workbench":
+    if options.has("roofRole") and (block_type == "woodBlock" or block_type == "stoneBlock"):
+        add_roof_block_visual(body, block_type, options)
+    elif block_type == "workbench":
         add_workbench_visual(body)
     elif block_type == "chest":
         add_chest_visual(body)
@@ -242,6 +447,7 @@ func create_block(cell: Vector3i, block_type: String, options: Dictionary = {}) 
         add_ore_block_visual(body, block_type, mesh_size, mesh_offset)
     else:
         add_block_mesh(body, mesh_size, mesh_offset, block_type)
+    add_block_accent_visuals(body, block_type, options)
 
     var shape := BoxShape3D.new()
     shape.size = collider_size

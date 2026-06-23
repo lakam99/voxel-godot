@@ -3543,6 +3543,9 @@ func test_structure_and_town_generation() -> void:
         String(main.call("biome_at_cell", center_x, center_z)) == "town" and main.call("height_variation_cell", center_x, center_z, 5) <= 0.05,
         "biome %s, variation %.2f" % [String(main.call("biome_at_cell", center_x, center_z)), float(main.call("height_variation_cell", center_x, center_z, 5))]
     )
+    var camp_rng := RandomNumberGenerator.new()
+    camp_rng.seed = 90177
+    structure_system.call("build_camp", center_x + 52, center_z + 52, level, 12, 11, camp_rng)
 
     var blocks := get_blocks()
     var generated_type_counts := {}
@@ -3551,10 +3554,17 @@ func test_structure_and_town_generation() -> void:
     var generated_glass_ground := 0
     var grounded_base_found := false
     var grounded_base_ok := false
+    var visual_role_counts := {}
+    var block_visual_mesh_ids := {}
+    var roof_meta_count := 0
     for block in blocks.values():
         var body := block as StaticBody3D
         if body == null or not bool(body.get_meta("generated", false)):
             continue
+        collect_visual_role_counts(body, visual_role_counts)
+        collect_block_visual_mesh_ids(body, block_visual_mesh_ids)
+        if body.has_meta("roofRole"):
+            roof_meta_count += 1
         var block_type := String(body.get_meta("block_type"))
         generated_type_counts[block_type] = int(generated_type_counts.get(block_type, 0)) + 1
         if block_type == "door":
@@ -3575,6 +3585,30 @@ func test_structure_and_town_generation() -> void:
 
     add_result("structure_base_grounded", grounded_base_found and grounded_base_ok, "found %s, ok %s" % [str(grounded_base_found), str(grounded_base_ok)])
     add_result("no_ground_level_glass", generated_glass_ground == 0, "%d ground-level generated glass blocks" % generated_glass_ground)
+    var block_mesh_cache: Dictionary = main.get("block_meshes")
+    var block_mesh_cache_ok := block_mesh_cache.has("plain") and block_mesh_cache.has("chamfered") and block_visual_mesh_ids.size() <= 2
+    add_result(
+        "building_visual_mesh_cache",
+        block_mesh_cache_ok,
+        "cache keys %s, block visual mesh ids %d" % [str(block_mesh_cache.keys()), block_visual_mesh_ids.size()]
+    )
+    var roof_visuals_ok := roof_meta_count > 20 and int(visual_role_counts.get("roof", 0)) >= roof_meta_count and int(visual_role_counts.get("roofTrim", 0)) > 0 and int(visual_role_counts.get("chimney", 0)) >= 1
+    add_result(
+        "building_roof_visuals",
+        roof_visuals_ok,
+        "roof meta %d, roles %s" % [roof_meta_count, str(visual_role_counts)]
+    )
+    var accent_visuals_ok := (
+        int(visual_role_counts.get("windowFrame", 0)) > 0
+        and int(visual_role_counts.get("doorFrame", 0)) > 0
+        and int(visual_role_counts.get("cornerTimber", 0)) > 0
+        and int(visual_role_counts.get("sign", 0)) > 0
+        and int(visual_role_counts.get("fencePost", 0)) > 0
+        and int(visual_role_counts.get("fenceRail", 0)) > 0
+        and int(visual_role_counts.get("crate", 0)) > 0
+        and int(visual_role_counts.get("barrel", 0)) > 0
+    )
+    add_result("building_accent_visuals", accent_visuals_ok, str(visual_role_counts))
 
     var paired_door := false
     for i in range(doors.size()):
@@ -3782,7 +3816,7 @@ func test_npc_equipment_and_pathing() -> void:
 
     var detours_before := int(npc_system.stats().get("pathDetours", 0))
     var max_lateral := 0.0
-    for i in range(130):
+    for i in range(160):
         npc_system.move_npc(entry, target_position, CELL * 0.24, false, false)
         max_lateral = maxf(max_lateral, absf(body.global_position.z - start_position.z))
         await wait_physics_frames(1)
@@ -5778,6 +5812,25 @@ func count_mesh_descendants(node: Node) -> int:
     for child in node.get_children():
         count += count_mesh_descendants(child)
     return count
+
+func collect_visual_role_counts(node: Node, counts: Dictionary) -> void:
+    if node == null:
+        return
+    if node.has_meta("visual_role"):
+        var role := String(node.get_meta("visual_role", ""))
+        counts[role] = int(counts.get(role, 0)) + 1
+    for child in node.get_children():
+        collect_visual_role_counts(child, counts)
+
+func collect_block_visual_mesh_ids(node: Node, ids: Dictionary) -> void:
+    if node == null:
+        return
+    if node is MeshInstance3D and String(node.get_meta("visual_role", "")) == "block":
+        var mesh_instance := node as MeshInstance3D
+        if mesh_instance.mesh != null:
+            ids[str(mesh_instance.mesh.get_instance_id())] = true
+    for child in node.get_children():
+        collect_block_visual_mesh_ids(child, ids)
 
 func count_named_descendants(node: Node, node_name: String) -> int:
     if node == null:
