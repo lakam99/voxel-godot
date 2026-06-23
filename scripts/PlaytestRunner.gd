@@ -119,6 +119,8 @@ func run() -> void:
     test_generated_environment_prop_visuals()
     mark_progress("character_visuals")
     test_modular_character_visuals()
+    mark_progress("visual_render_policy")
+    test_generated_visual_render_policy()
     mark_progress("held_item")
     await test_held_item_system()
     mark_progress("terrain_collision")
@@ -4414,6 +4416,43 @@ func test_generated_environment_prop_visuals() -> void:
     if rock:
         rock.queue_free()
 
+func test_generated_visual_render_policy() -> void:
+    if main == null:
+        add_result("generated_visual_render_policy", false, "main missing")
+        return
+    var registry = main.get("visual_asset_registry")
+    var npc_system = main.get("npc_system")
+    var npc_factory = npc_system.get("visual_factory") if npc_system else null
+    var npc_registry = npc_factory.get("character_assets") if npc_factory else null
+    var environment_ready: bool = registry != null and registry.is_ready()
+    var character_ready: bool = npc_registry != null and npc_registry.is_ready()
+    if not environment_ready or not character_ready:
+        add_result("generated_visual_render_policy", false, "registries ready %s/%s" % [str(environment_ready), str(character_ready)])
+        return
+
+    var tree_visual: Node3D = registry.instantiate_asset(registry.select_tree_asset_id("forest", "policy:tree"))
+    var rock_visual: Node3D = registry.instantiate_asset(registry.select_rock_asset_id("mountain", "policy:rock"))
+    var bush_visual: Node3D = registry.instantiate_family("bush", "policy:bush") if registry.has_method("instantiate_family") else null
+    var npc_part: Node3D = npc_registry.instantiate_family("npc_torso", "policy:npc")
+    var stats := {
+        "tree": render_policy_stats(tree_visual),
+        "rock": render_policy_stats(rock_visual),
+        "bush": render_policy_stats(bush_visual),
+        "npc": render_policy_stats(npc_part)
+    }
+    var tree_ok: bool = render_policy_has_shadow(stats["tree"]) and render_policy_has_visibility(stats["tree"])
+    var rock_ok: bool = render_policy_has_shadow(stats["rock"]) and render_policy_has_visibility(stats["rock"])
+    var bush_ok: bool = render_policy_no_shadow(stats["bush"]) and render_policy_has_visibility(stats["bush"])
+    var npc_ok: bool = render_policy_has_shadow(stats["npc"]) and render_policy_has_visibility(stats["npc"])
+    for node in [tree_visual, rock_visual, bush_visual, npc_part]:
+        if node != null:
+            node.queue_free()
+    add_result(
+        "generated_visual_render_policy",
+        tree_ok and rock_ok and bush_ok and npc_ok,
+        "tree %s rock %s bush %s npc %s" % [str(stats["tree"]), str(stats["rock"]), str(stats["bush"]), str(stats["npc"])]
+    )
+
 func test_modular_character_visuals() -> void:
     if main == null or player == null:
         add_result("character_asset_pack_ready", false, "main/player missing")
@@ -5956,6 +5995,43 @@ func count_mesh_descendants(node: Node) -> int:
     for child in node.get_children():
         count += count_mesh_descendants(child)
     return count
+
+func render_policy_stats(node: Node) -> Dictionary:
+    var stats := {
+        "meshes": 0,
+        "shadowOn": 0,
+        "shadowOff": 0,
+        "visibility": 0
+    }
+    collect_render_policy_stats(node, stats)
+    return stats
+
+func collect_render_policy_stats(node: Node, stats: Dictionary) -> void:
+    if node == null:
+        return
+    if node is MeshInstance3D:
+        var mesh_instance := node as MeshInstance3D
+        stats["meshes"] = int(stats["meshes"]) + 1
+        if mesh_instance.cast_shadow == GeometryInstance3D.SHADOW_CASTING_SETTING_OFF:
+            stats["shadowOff"] = int(stats["shadowOff"]) + 1
+        else:
+            stats["shadowOn"] = int(stats["shadowOn"]) + 1
+        if mesh_instance.visibility_range_end > 0.0:
+            stats["visibility"] = int(stats["visibility"]) + 1
+    for child in node.get_children():
+        collect_render_policy_stats(child, stats)
+
+func render_policy_has_shadow(stats: Dictionary) -> bool:
+    var meshes := int(stats.get("meshes", 0))
+    return meshes > 0 and int(stats.get("shadowOn", 0)) == meshes and int(stats.get("visibility", 0)) == meshes
+
+func render_policy_no_shadow(stats: Dictionary) -> bool:
+    var meshes := int(stats.get("meshes", 0))
+    return meshes > 0 and int(stats.get("shadowOff", 0)) == meshes and int(stats.get("visibility", 0)) == meshes
+
+func render_policy_has_visibility(stats: Dictionary) -> bool:
+    var meshes := int(stats.get("meshes", 0))
+    return meshes > 0 and int(stats.get("visibility", 0)) == meshes
 
 func collect_visual_role_counts(node: Node, counts: Dictionary) -> void:
     if node == null:

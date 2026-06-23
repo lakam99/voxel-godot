@@ -174,6 +174,9 @@ func instantiate_tree_visual(biome: String, prop_id: String) -> Node3D:
 func instantiate_rock_visual(biome: String, prop_id: String) -> Node3D:
     return instantiate_asset(select_rock_asset_id(biome, prop_id))
 
+func instantiate_family(family: String, stable_key: String) -> Node3D:
+    return instantiate_asset(select_asset_id(PackedStringArray([family]), "", stable_key, family))
+
 func instantiate_asset(asset_id: String) -> Node3D:
     if asset_id == "" or disabled_asset_ids.has(asset_id):
         return null
@@ -188,7 +191,44 @@ func instantiate_asset(asset_id: String) -> Node3D:
         return null
     node.set_meta("visual_source", "generated_asset")
     node.set_meta("visual_asset_id", asset_id)
+    apply_render_policy(node, asset_id)
     return node
+
+func apply_render_policy(node: Node3D, asset_id: String) -> void:
+    var asset: Dictionary = assets_by_id.get(asset_id, {})
+    var family := String(asset.get("family", ""))
+    var shadow_policy := shadow_policy_for_family(family)
+    var visibility_end := visibility_range_for_family(family)
+    apply_render_policy_recursive(node, shadow_policy, visibility_end)
+    node.set_meta("shadow_policy", shadow_policy)
+    node.set_meta("visibility_range_end", visibility_end)
+
+func shadow_policy_for_family(family: String) -> int:
+    if family == "bush":
+        return GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+    return GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+
+func visibility_range_for_family(family: String) -> float:
+    match family:
+        "broadleaf_tree", "conifer_tree", "savanna_tree":
+            return 260.0
+        "rock":
+            return 220.0
+        "stump_log":
+            return 160.0
+        "bush":
+            return 120.0
+    return 180.0
+
+func apply_render_policy_recursive(node: Node, shadow_policy: int, visibility_end: float) -> void:
+    if node is MeshInstance3D:
+        var mesh_instance := node as MeshInstance3D
+        mesh_instance.cast_shadow = shadow_policy
+        mesh_instance.visibility_range_end = visibility_end
+        mesh_instance.visibility_range_end_margin = minf(24.0, visibility_end * 0.12)
+        mesh_instance.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
+    for child in node.get_children():
+        apply_render_policy_recursive(child, shadow_policy, visibility_end)
 
 func asset_size(asset_id: String) -> Vector3:
     var asset: Dictionary = assets_by_id.get(asset_id, {})

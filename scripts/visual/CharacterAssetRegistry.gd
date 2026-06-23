@@ -134,7 +134,23 @@ func instantiate_asset(asset_id: String) -> Node3D:
         return null
     node.set_meta("visual_source", "character_asset")
     node.set_meta("visual_asset_id", asset_id)
+    apply_render_policy(node)
     return node
+
+func apply_render_policy(node: Node3D) -> void:
+    apply_render_policy_recursive(node)
+    node.set_meta("shadow_policy", GeometryInstance3D.SHADOW_CASTING_SETTING_ON)
+    node.set_meta("visibility_range_end", 140.0)
+
+func apply_render_policy_recursive(node: Node) -> void:
+    if node is MeshInstance3D:
+        var mesh_instance := node as MeshInstance3D
+        mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+        mesh_instance.visibility_range_end = 140.0
+        mesh_instance.visibility_range_end_margin = 18.0
+        mesh_instance.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
+    for child in node.get_children():
+        apply_render_policy_recursive(child)
 
 func instantiate_family(family: String, stable_key: String) -> Node3D:
     return instantiate_asset(select_family_asset(family, stable_key))
