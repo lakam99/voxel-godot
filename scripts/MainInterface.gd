@@ -25,6 +25,10 @@ const PlayerProjectileSystemScript := preload("res://scripts/PlayerProjectileSys
 const WeatherSystemScript := preload("res://scripts/WeatherSystem.gd")
 const TutorialSystemScript := preload("res://scripts/TutorialSystem.gd")
 const NpcSystemScript := preload("res://scripts/NpcSystem.gd")
+const StoryEventBusScript := preload("res://scripts/story/StoryEventBus.gd")
+const StoryDirectorScript := preload("res://scripts/story/StoryDirector.gd")
+const StoryQuestSystemScript := preload("res://scripts/story/StoryQuestSystem.gd")
+const RegionStoryGeneratorScript := preload("res://scripts/story/RegionStoryGenerator.gd")
 
 const CELL := 1.35
 const CHUNK_SIZE := 28
@@ -103,6 +107,12 @@ func setup_save_system() -> void: pass
 func apply_world_seed(new_seed: String, remember := false) -> void: pass
 func random_world_seed(exclude_seed := "") -> String: return ""
 func setup_game_systems() -> void: pass
+func setup_story_systems() -> void: pass
+func story_region_id_for_cell(cell: Vector2i) -> String: return ""
+func story_region_id_for_world_position(position: Vector3) -> String: return ""
+func emit_story_event(event_type: String, subject_id := "", region_id := "", dedupe_key := "", position := Vector3.INF, payload := {}) -> bool: return false
+func update_story_region_entry(cell: Vector2i, position: Vector3, biome: String) -> void: pass
+func debug_story_dump() -> Dictionary: return {}
 func setup_visual_asset_registry() -> void: pass
 func setup_static_item_asset_registry() -> void: pass
 func setup_animated_asset_registry() -> void: pass

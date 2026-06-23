@@ -90,6 +90,11 @@ func _unhandled_input(event: InputEvent) -> void:
         if event.keycode == KEY_F5:
             save_world(true)
             return
+        if event.keycode == KEY_F6:
+            var story_dump := debug_story_dump()
+            print("STORY_DEBUG_DUMP %s" % JSON.stringify(story_dump, "  "))
+            update_hud("Story debug dumped to console")
+            return
         if event.keycode == KEY_F9:
             try_load_world(true)
             return
@@ -206,14 +211,26 @@ func hud_refresh_stats() -> Dictionary:
     }
 
 func update_exploration_state(cell: Vector2i, biome: String) -> void:
+    var observer_position := player.global_position if player else Vector3(float(cell.x) * CELL, 0.0, float(cell.y) * CELL)
+    update_story_region_entry(cell, observer_position, biome)
     if biome != "" and not discovered_biomes.has(biome):
         discovered_biomes[biome] = true
+        emit_story_event("biome_discovered", "biome:%s" % biome, story_region_id_for_cell(cell), "discover:biome:%s" % biome, observer_position, {
+            "biome": biome,
+            "cell": [cell.x, cell.y]
+        })
         award_discovery_xp({ "type": "biome", "message": "Biome discovered: %s" % biome.capitalize() })
     var town := town_region_at_cell(cell.x, cell.y)
     if not town.is_empty():
         var key := "%d,%d" % [int(town.get("centerX", 0)), int(town.get("centerZ", 0))]
         if not discovered_town_keys.has(key):
             discovered_town_keys[key] = true
+            var town_cell := Vector2i(int(town.get("centerX", cell.x)), int(town.get("centerZ", cell.y)))
+            var town_position := player.global_position if player else Vector3(float(town_cell.x) * CELL, float(town.get("level", 0.0)), float(town_cell.y) * CELL)
+            emit_story_event("town_discovered", "town:%s" % key, story_region_id_for_cell(town_cell), "discover:town:%s" % key, town_position, {
+                "townKey": key,
+                "centerCell": [town_cell.x, town_cell.y]
+            })
             award_discovery_xp({ "type": "town", "message": "Town discovered" })
     if player:
         discover_landmarks_near(player.global_position)
@@ -267,6 +284,12 @@ func discover_landmark(tier: String, key: String, position: Vector3) -> bool:
         discovered_camp_keys[key] = true
     else:
         return false
+    var cell := Vector2i(world_to_cell(position.x), world_to_cell(position.z))
+    emit_story_event("%s_discovered" % tier, "%s:%s" % [tier, key], story_region_id_for_cell(cell), "discover:%s:%s" % [tier, key], position, {
+        "landmarkType": tier,
+        "key": key,
+        "cell": [cell.x, cell.y]
+    })
     var label := landmark_label_for_tier(tier)
     award_discovery_xp({
         "type": tier,
@@ -293,6 +316,13 @@ func discover_shrine_cache(block: Node) -> bool:
     if key == "" or discovered_shrine_keys.has(key):
         return false
     discovered_shrine_keys[key] = true
+    var shrine_position := (block as Node3D).global_position if block is Node3D else Vector3.INF
+    var shrine_cell := Vector2i(world_to_cell(shrine_position.x), world_to_cell(shrine_position.z)) if is_finite(shrine_position.x) and is_finite(shrine_position.z) else Vector2i.ZERO
+    emit_story_event("shrine_discovered", "shrine:%s" % key, story_region_id_for_cell(shrine_cell), "discover:shrine:%s" % key, shrine_position, {
+        "landmarkType": "shrine",
+        "key": key,
+        "cell": [shrine_cell.x, shrine_cell.y]
+    })
     award_discovery_xp({ "type": "shrine", "message": "Rift shrine discovered" })
     var spawned := 0
     if hostile_system and block is Node3D and not sanctuary_established:

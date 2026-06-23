@@ -19,12 +19,15 @@ func reset_runtime_world_state() -> void:
     clear_all_blocks()
     if structure_system and structure_system.has_method("reset"):
         structure_system.reset()
+    if story_director and story_director.has_method("reset"):
+        story_director.reset()
     discovered_biomes.clear()
     discovered_town_keys.clear()
     discovered_shrine_keys.clear()
     discovered_mine_keys.clear()
     discovered_ruin_keys.clear()
     discovered_camp_keys.clear()
+    last_story_region_id = ""
     death_count = 0
     respawn_point = null
     beacon_charge = 0.0
@@ -88,6 +91,7 @@ func create_save_snapshot() -> Dictionary:
         "equipment": equipment_system.snapshot() if equipment_system else {},
         "objectives": objective_system.snapshot() if objective_system else {},
         "contracts": contract_system.snapshot() if contract_system else {},
+        "story": story_director.snapshot() if story_director else {},
         "exploration": snapshot_exploration(),
         "deathCount": death_count,
         "respawnPoint": vector3_to_array(respawn_point) if respawn_point is Vector3 else [],
@@ -111,6 +115,8 @@ func apply_save_snapshot(snapshot: Dictionary) -> bool:
         objective_system.restore(snapshot["objectives"])
     if contract_system and snapshot.has("contracts"):
         contract_system.restore(snapshot["contracts"])
+    if story_director:
+        story_director.restore(snapshot.get("story", {}))
     restore_exploration(snapshot.get("exploration", {}))
     if survival_system and snapshot.has("survival"):
         survival_system.restore(snapshot["survival"])

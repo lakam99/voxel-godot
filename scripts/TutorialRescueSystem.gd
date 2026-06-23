@@ -60,6 +60,14 @@ func complete_final_night() -> bool:
                 main.npc_system.clear_scripted_target(guard)
         if main.hostile_system:
             main.hostile_system.clear()
+        if main.has_method("emit_story_event"):
+            var event_position: Vector3 = main.player.global_position if main.player else rescue_return_position()
+            var cell := Vector2i(main.world_to_cell(event_position.x), main.world_to_cell(event_position.z))
+            main.emit_story_event("tutorial_final_rescue_complete", "tutorial:final_rescue", main.story_region_id_for_cell(cell), "tutorial:final_rescue_complete", event_position, {
+                "rescuedNpcId": RESCUE_FORAGER_ID,
+                "guardNpcId": RESCUE_GUARD_ID,
+                "tutorialStep": "finalNightComplete"
+            })
     clear_rescue_torch()
     return true
 

@@ -26,6 +26,7 @@ func interact_with(node: Node) -> bool:
     var npc_name := String(node.get_meta("npc_name", "Villager"))
     var npc_role := String(node.get_meta("npc_role", ""))
     system.last_dialogue_node = node
+    emit_npc_spoken_event(node, npc_id, npc_name, npc_role)
     if not system.intro_bed_used and npc_id != "mira":
         var locked_line := "Help Mira finish the fence and lamps first. We can talk properly after dawn."
         system.last_message = "%s: %s" % [npc_name, locked_line]
@@ -78,6 +79,18 @@ func handle_npc_quest(npc_id: String) -> String:
         "sera":
             return handle_sera_quest()
     return ""
+
+func emit_npc_spoken_event(node: Node, npc_id: String, npc_name: String, npc_role: String) -> void:
+    if main == null or npc_id == "" or not main.has_method("emit_story_event"):
+        return
+    var position := (node as Node3D).global_position if node is Node3D else Vector3.INF
+    var region_id: String = main.story_region_id_for_world_position(position) if main.has_method("story_region_id_for_world_position") else ""
+    main.emit_story_event("npc_spoken_to", "npc:%s" % npc_id, region_id, "npc_spoken:%s:%s" % [npc_id, current_tutorial_stage()], position, {
+        "npcId": npc_id,
+        "name": npc_name,
+        "role": npc_role,
+        "tutorial": true
+    })
 
 func handle_mira_quest() -> String:
     if not system.intro_door_opened:

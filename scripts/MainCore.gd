@@ -55,6 +55,10 @@ var player_projectiles
 var weather_system
 var tutorial_system
 var npc_system
+var story_event_bus
+var story_director
+var story_quest_system
+var region_story_generator
 var item_visual_factory
 var visual_asset_registry
 var static_item_asset_registry
@@ -79,6 +83,7 @@ var discovered_shrine_keys := {}
 var discovered_mine_keys := {}
 var discovered_ruin_keys := {}
 var discovered_camp_keys := {}
+var last_story_region_id := ""
 var last_survival_health := 100.0
 var shelter_sample_elapsed := 0.0
 var cached_shelter_comfort := 0.0
@@ -222,6 +227,11 @@ func apply_world_seed(new_seed: String, remember := false) -> void:
     setup_noise()
     if weather_system and weather_system.has_method("reset_for_seed"):
         weather_system.reset_for_seed(seed_hash)
+    if region_story_generator and region_story_generator.has_method("setup"):
+        region_story_generator.setup(seed_text, seed_hash, TOWN_REGION_CELLS)
+    if story_director and story_director.has_method("reset"):
+        story_director.reset()
+    last_story_region_id = ""
     if save_system and remember and save_system.has_method("set_active_seed"):
         save_system.set_active_seed(seed_text)
 
@@ -267,6 +277,7 @@ func setup_game_systems() -> void:
     progression_system = ProgressionSystemScript.new()
     if save_system == null:
         setup_save_system()
+    setup_story_systems()
     inventory_system.changed.connect(_sync_inventory_totals)
     crafting_system.crafted.connect(_on_recipe_crafted)
     objective_system.completed.connect(_on_objective_completed)
@@ -282,6 +293,70 @@ func setup_game_systems() -> void:
     last_survival_health = survival_system.health
     grant_starter_inventory()
     _sync_inventory_totals()
+
+func setup_story_systems() -> void:
+    if region_story_generator == null:
+        region_story_generator = RegionStoryGeneratorScript.new()
+        region_story_generator.name = "RegionStoryGenerator"
+        add_child(region_story_generator)
+    region_story_generator.setup(seed_text, seed_hash, TOWN_REGION_CELLS)
+    if story_event_bus == null:
+        story_event_bus = StoryEventBusScript.new()
+        story_event_bus.name = "StoryEventBus"
+        add_child(story_event_bus)
+    story_event_bus.setup(self)
+    if story_quest_system == null:
+        story_quest_system = StoryQuestSystemScript.new()
+        story_quest_system.name = "StoryQuestSystem"
+        add_child(story_quest_system)
+    story_quest_system.setup(self)
+    if story_director == null:
+        story_director = StoryDirectorScript.new()
+        story_director.name = "StoryDirector"
+        add_child(story_director)
+    story_director.setup(self, story_event_bus, region_story_generator, story_quest_system)
+
+func story_region_id_for_cell(cell: Vector2i) -> String:
+    if story_director != null and story_director.has_method("region_id_for_cell"):
+        return String(story_director.region_id_for_cell(cell))
+    var region_x := floori(float(cell.x) / float(TOWN_REGION_CELLS))
+    var region_z := floori(float(cell.y) / float(TOWN_REGION_CELLS))
+    return "r:%d,%d" % [region_x, region_z]
+
+func story_region_id_for_world_position(position: Vector3) -> String:
+    if not is_finite(position.x) or not is_finite(position.z):
+        return ""
+    return story_region_id_for_cell(Vector2i(world_to_cell(position.x), world_to_cell(position.z)))
+
+func emit_story_event(event_type: String, subject_id := "", region_id := "", dedupe_key := "", position := Vector3.INF, payload := {}) -> bool:
+    if story_event_bus == null:
+        return false
+    var final_region_id := region_id
+    if final_region_id == "":
+        final_region_id = story_region_id_for_world_position(position)
+    var event: Dictionary = story_event_bus.emit_event(event_type, subject_id, final_region_id, dedupe_key, position, payload)
+    return not event.is_empty()
+
+func update_story_region_entry(cell: Vector2i, position: Vector3, biome: String) -> void:
+    if story_event_bus == null:
+        return
+    var region_id := story_region_id_for_cell(cell)
+    if region_id == "" or region_id == last_story_region_id:
+        return
+    last_story_region_id = region_id
+    emit_story_event("story_region_entered", "region:%s" % region_id, region_id, "", position, {
+        "cell": [cell.x, cell.y],
+        "biome": biome
+    })
+
+func debug_story_dump() -> Dictionary:
+    if story_director != null and story_director.has_method("debug_story_dump"):
+        return story_director.debug_story_dump()
+    return {
+        "currentStoryRegionId": "",
+        "quest": {},
+        "recentEvents": []
+    }
 
 func setup_visual_asset_registry() -> void:
     visual_asset_registry = VisualAssetRegistryScript.new()
