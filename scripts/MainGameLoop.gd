@@ -11,6 +11,9 @@ func update_sky(delta: float) -> void:
     var night := clock_night_factor()
     var sun_progress := daylight_progress(phase)
     var moon_progress := wrapped_clock_progress(MOONRISE_CLOCK, MOONSET_CLOCK, phase)
+    if visual_style == null:
+        setup_visual_style()
+    var warmth: float = float(visual_style.sunset_amount(sun_progress, day))
     var sun_dir := Vector3(lerpf(-0.82, 0.82, sun_progress), maxf(0.025, sin(sun_progress * PI)), -0.34).normalized()
     var moon_dir := Vector3(lerpf(0.78, -0.78, moon_progress), maxf(0.035, sin(moon_progress * PI)), 0.28).normalized()
     orient_directional_light(sun, sun_dir)
@@ -24,16 +27,14 @@ func update_sky(delta: float) -> void:
     sun_visual.visible = day > 0.025
     moon_visual.visible = clock_in_wrapped_range(phase, MOONRISE_CLOCK, MOONSET_CLOCK) and night > 0.025
 
-    sun.light_energy = lerp(0.02, 2.35, day)
+    sun.light_color = visual_style.sun_light_color(warmth)
+    sun.light_energy = lerpf(visual_style.sun_min_energy, visual_style.sun_max_energy, day) * (1.0 + warmth * visual_style.sunset_sun_boost)
     sun.shadow_enabled = shadows_enabled and day > 0.18 and sun_visual.visible
-    moon.light_energy = lerp(0.13, 0.025, day)
+    moon.light_color = visual_style.moon_color
+    moon.light_energy = lerpf(visual_style.moon_max_energy, visual_style.moon_min_energy, day)
     moon.shadow_enabled = shadows_enabled and night > 0.45 and moon_visual.visible
 
-    if world_environment and world_environment.environment:
-        var env := world_environment.environment
-        env.background_color = Color(0.012, 0.018, 0.052).lerp(Color(0.66, 0.84, 0.87), day)
-        env.ambient_light_color = Color(0.09, 0.105, 0.16).lerp(Color(0.78, 0.82, 0.76), day)
-        env.ambient_light_energy = lerp(0.065, 0.58, day)
+    apply_environment_style(day, warmth, 0.0)
     if weather_system:
         var cell := Vector2i(world_to_cell(observer.x), world_to_cell(observer.z))
         var biome := biome_at_cell(cell.x, cell.y)
@@ -49,6 +50,29 @@ func update_sky(delta: float) -> void:
     elif audio_effects and audio_effects.has_method("update_weather_ambience"):
         audio_effects.update_weather_ambience({ "kind": "clear", "intensity": 0.0 })
     update_music_state(observer, day)
+
+func apply_environment_style(day: float, warmth: float, weather_tint: float) -> void:
+    if visual_style == null:
+        setup_visual_style()
+    var tint := clampf(weather_tint, 0.0, visual_style.max_weather_tint)
+    if sky_material:
+        sky_material.set("sky_top_color", visual_style.sky_top_color(day, warmth, tint))
+        sky_material.set("sky_horizon_color", visual_style.sky_horizon_color(day, warmth, tint))
+        sky_material.set("ground_horizon_color", visual_style.ground_horizon_color(day, tint))
+        sky_material.set("ground_bottom_color", visual_style.ground_bottom)
+        sky_material.set("sky_energy_multiplier", visual_style.sky_energy_multiplier)
+        sky_material.set("ground_energy_multiplier", visual_style.ground_energy_multiplier)
+        sky_material.set("sun_angle_max", visual_style.procedural_sun_angle)
+    if world_environment and world_environment.environment:
+        var env := world_environment.environment
+        env.background_color = visual_style.sky_horizon_color(day, warmth, tint)
+        env.ambient_light_color = visual_style.ambient_color(day, tint)
+        env.ambient_light_energy = lerpf(visual_style.ambient_min_energy, visual_style.ambient_max_energy, day)
+        env.fog_light_color = visual_style.fog_color(day, warmth, tint)
+        env.fog_light_energy = visual_style.fog_light_energy
+        env.fog_density = lerpf(visual_style.fog_density_night, visual_style.fog_density_day, day)
+        env.fog_sky_affect = visual_style.fog_sky_affect
+        env.fog_sun_scatter = visual_style.fog_sun_scatter
 
 func update_music_state(observer: Vector3, day: float) -> void:
     if audio_effects == null:
@@ -79,20 +103,29 @@ func update_music_state(observer: Vector3, day: float) -> void:
         })
 
 func apply_weather_lighting(weather: Dictionary, day: float) -> void:
+    if visual_style == null:
+        setup_visual_style()
     var cloud_cover := float(weather.get("cloudCover", 0.0))
     var weather_intensity := float(weather.get("intensity", 0.0))
-    var shade := clampf(1.0 - cloud_cover * 0.32 - weather_intensity * 0.28, 0.36, 1.0)
+    var phase := clock_phase()
+    var sun_progress := daylight_progress(phase)
+    var warmth: float = float(visual_style.sunset_amount(sun_progress, day))
+    var tint_strength: float = float(visual_style.weather_tint_amount(cloud_cover, weather_intensity))
+    apply_environment_style(day, warmth, tint_strength)
+    var shade := clampf(1.0 - cloud_cover * visual_style.cloud_sun_shade - weather_intensity * visual_style.rain_sun_shade, 0.48, 1.0)
     sun.light_energy *= shade
-    moon.light_energy *= clampf(1.0 - cloud_cover * 0.38 - weather_intensity * 0.24, 0.28, 1.0)
+    moon.light_energy *= clampf(1.0 - cloud_cover * visual_style.cloud_moon_shade - weather_intensity * visual_style.rain_moon_shade, 0.50, 1.0)
     if world_environment and world_environment.environment:
         var env := world_environment.environment
-        var storm_tint := Color(0.48, 0.55, 0.58)
-        var night_tint := Color(0.028, 0.036, 0.072)
-        var storm_ambient := Color(0.18, 0.21, 0.24).lerp(Color(0.50, 0.55, 0.58), day)
-        var tint_strength := clampf(cloud_cover * 0.22 + weather_intensity * 0.28, 0.0, 0.46)
-        env.background_color = env.background_color.lerp(storm_tint.lerp(night_tint, 1.0 - day), tint_strength)
-        env.ambient_light_color = env.ambient_light_color.lerp(storm_ambient, tint_strength * 0.55)
-        env.ambient_light_energy *= clampf(1.0 - weather_intensity * 0.22 - cloud_cover * (1.0 - day) * 0.22, 0.52, 1.0)
+        env.ambient_light_energy = maxf(
+            visual_style.ambient_min_energy,
+            env.ambient_light_energy * clampf(
+                1.0 - weather_intensity * 0.16 - cloud_cover * (1.0 - day) * 0.12,
+                visual_style.weather_ambient_floor,
+                1.0
+            )
+        )
+        env.fog_density = lerpf(env.fog_density, visual_style.fog_density_weather, tint_strength)
     var water_material := materials.get("water") as StandardMaterial3D
     if water_material:
         water_material.albedo_color = Color(0.30, 0.70, 0.78, 0.46).lerp(Color(0.46, 0.58, 0.56, 0.54), cloud_cover * 0.42 + weather_intensity * 0.22)

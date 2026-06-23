@@ -1,0 +1,67 @@
+[gd_resource type="Resource" script_class="VisualStyle" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://scripts/visual/VisualStyle.gd" id="1_style"]
+
+[resource]
+script = ExtResource("1_style")
+day_sky_top = Color(0.42, 0.66, 0.82, 1)
+day_sky_horizon = Color(0.76, 0.88, 0.86, 1)
+night_sky_top = Color(0.018, 0.022, 0.055, 1)
+night_sky_horizon = Color(0.075, 0.095, 0.145, 1)
+sunset_sky_top = Color(0.72, 0.42, 0.28, 1)
+sunset_sky_horizon = Color(0.98, 0.64, 0.34, 1)
+day_ground_horizon = Color(0.54, 0.64, 0.58, 1)
+night_ground_horizon = Color(0.045, 0.055, 0.08, 1)
+ground_bottom = Color(0.025, 0.03, 0.04, 1)
+sunset_width = 0.2
+sky_energy_multiplier = 1.05
+ground_energy_multiplier = 0.58
+procedural_sun_angle = 4.5
+sun_disc_radius = 22.0
+moon_disc_radius = 15.5
+sun_color_day = Color(1, 0.86, 0.58, 1)
+sun_color_warm = Color(1, 0.64, 0.34, 1)
+moon_color = Color(0.55, 0.64, 0.92, 1)
+ambient_day = Color(0.67, 0.73, 0.68, 1)
+ambient_night = Color(0.2, 0.23, 0.32, 1)
+ambient_weather = Color(0.42, 0.48, 0.52, 1)
+sun_min_energy = 0.035
+sun_max_energy = 1.48
+moon_min_energy = 0.045
+moon_max_energy = 0.24
+ambient_min_energy = 0.18
+ambient_max_energy = 0.52
+ambient_sky_contribution = 0.78
+sunset_sun_boost = 0.08
+weather_sky_top = Color(0.35, 0.43, 0.48, 1)
+weather_sky_horizon = Color(0.52, 0.6, 0.6, 1)
+weather_night_sky = Color(0.03, 0.04, 0.075, 1)
+weather_fog_day = Color(0.55, 0.62, 0.62, 1)
+weather_fog_night = Color(0.06, 0.072, 0.1, 1)
+cloud_sun_shade = 0.24
+rain_sun_shade = 0.24
+cloud_moon_shade = 0.2
+rain_moon_shade = 0.18
+max_weather_tint = 0.46
+weather_ambient_tint = 0.42
+weather_ambient_floor = 0.74
+fog_day = Color(0.64, 0.76, 0.76, 1)
+fog_night = Color(0.075, 0.092, 0.13, 1)
+fog_sunset = Color(0.94, 0.58, 0.34, 1)
+fog_density_day = 0.0065
+fog_density_night = 0.0105
+fog_density_weather = 0.014
+fog_sky_affect = 0.42
+fog_light_energy = 0.6
+fog_sun_scatter = 0.24
+tonemap_exposure = 0.88
+tonemap_white = 1.95
+ssao_enabled = true
+ssao_radius = 2.1
+ssao_intensity = 1.0
+ssao_power = 1.22
+shadow_max_distance = 180.0
+shadow_fade_start = 0.72
+shadow_blur = 1.15
+sun_angular_distance = 1.1
+moon_angular_distance = 0.55

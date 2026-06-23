@@ -86,33 +86,58 @@ func make_unshaded_material(color: Color) -> StandardMaterial3D:
     material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
     return material
 
+func setup_visual_style() -> void:
+    if visual_style == null:
+        visual_style = DEFAULT_VISUAL_STYLE.duplicate(true)
+
 func setup_environment() -> void:
+    setup_visual_style()
     world_environment = WorldEnvironment.new()
     var env := Environment.new()
-    env.background_mode = Environment.BG_COLOR
-    env.background_color = Color(0.66, 0.84, 0.87)
-    env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
-    env.ambient_light_color = Color(0.78, 0.82, 0.76)
-    env.ambient_light_energy = 0.52
+    sky_material = ProceduralSkyMaterial.new()
+    sky_resource = Sky.new()
+    sky_resource.sky_material = sky_material
+    env.background_mode = Environment.BG_SKY
+    env.sky = sky_resource
+    env.background_color = visual_style.day_sky_horizon
+    env.ambient_light_source = Environment.AMBIENT_SOURCE_SKY
+    env.ambient_light_color = visual_style.ambient_day
+    env.ambient_light_energy = visual_style.ambient_max_energy
+    env.ambient_light_sky_contribution = visual_style.ambient_sky_contribution
+    env.tonemap_mode = Environment.TONE_MAPPER_FILMIC
+    env.tonemap_exposure = visual_style.tonemap_exposure
+    env.tonemap_white = visual_style.tonemap_white
+    env.fog_enabled = true
+    env.fog_light_color = visual_style.fog_day
+    env.fog_light_energy = visual_style.fog_light_energy
+    env.fog_density = visual_style.fog_density_day
+    env.fog_sky_affect = visual_style.fog_sky_affect
+    env.fog_sun_scatter = visual_style.fog_sun_scatter
+    env.set("ssao_enabled", visual_style.ssao_enabled)
+    env.set("ssao_radius", visual_style.ssao_radius)
+    env.set("ssao_intensity", visual_style.ssao_intensity)
+    env.set("ssao_power", visual_style.ssao_power)
     world_environment.environment = env
     add_child(world_environment)
 
     sun = DirectionalLight3D.new()
     sun.name = "Sun"
-    sun.light_color = Color(1.0, 0.88, 0.62)
-    sun.light_energy = 2.25
+    sun.light_color = visual_style.sun_color_day
+    sun.light_energy = visual_style.sun_max_energy
     sun.shadow_enabled = true
+    configure_directional_shadow_style(sun, visual_style.sun_angular_distance)
     add_child(sun)
 
     moon = DirectionalLight3D.new()
     moon.name = "Moon"
-    moon.light_color = Color(0.58, 0.68, 1.0)
-    moon.light_energy = 0.10
+    moon.light_color = visual_style.moon_color
+    moon.light_energy = visual_style.moon_max_energy
     moon.shadow_enabled = false
+    configure_directional_shadow_style(moon, visual_style.moon_angular_distance)
     add_child(moon)
 
-    sun_visual = make_sky_body("SunDisc", materials["sunDisc"], 20.0)
-    moon_visual = make_sky_body("MoonDisc", materials["moonDisc"], 15.0)
+    sun_visual = make_sky_body("SunDisc", materials["sunDisc"], visual_style.sun_disc_radius)
+    moon_visual = make_sky_body("MoonDisc", materials["moonDisc"], visual_style.moon_disc_radius)
     add_child(sun_visual)
     add_child(moon_visual)
 
@@ -130,6 +155,12 @@ func setup_environment() -> void:
     weather_system.setup(self, seed_hash)
     add_child(weather_system)
     update_sky(0.0)
+
+func configure_directional_shadow_style(light: DirectionalLight3D, angular_distance: float) -> void:
+    light.set("directional_shadow_max_distance", visual_style.shadow_max_distance)
+    light.set("directional_shadow_fade_start", visual_style.shadow_fade_start)
+    light.set("shadow_blur", visual_style.shadow_blur)
+    light.set("light_angular_distance", angular_distance)
 
 func setup_break_overlay() -> void:
     break_material = StandardMaterial3D.new()

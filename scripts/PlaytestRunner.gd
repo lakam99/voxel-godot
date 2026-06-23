@@ -126,6 +126,8 @@ func run() -> void:
     test_chunk_detail_batches()
     mark_progress("sky_light")
     test_sky_light_consistency()
+    mark_progress("environment_visual_style")
+    test_environment_visual_style()
     mark_progress("weather_visual")
     test_weather_visual_system()
     mark_progress("spawn_clearance")
@@ -4443,6 +4445,73 @@ func test_sky_light_consistency() -> void:
             str(sun_disc.visible),
             sun_disc.global_position.y,
             player.global_position.y
+        ]
+    )
+
+func test_environment_visual_style() -> void:
+    if not main:
+        add_result("environment_visual_style", false, "main missing")
+        return
+    var world_env := main.get("world_environment") as WorldEnvironment
+    var sun_light := main.get("sun") as DirectionalLight3D
+    var moon_light := main.get("moon") as DirectionalLight3D
+    if world_env == null or world_env.environment == null or sun_light == null or moon_light == null:
+        add_result("environment_visual_style", false, "environment or lights missing")
+        return
+    var env := world_env.environment
+    var sky_mat := main.get("sky_material") as ProceduralSkyMaterial
+    var style := main.get("visual_style") as Resource
+    var structure_ok := env.background_mode == Environment.BG_SKY \
+        and env.sky != null \
+        and sky_mat != null \
+        and env.ambient_light_source == Environment.AMBIENT_SOURCE_SKY \
+        and env.tonemap_mode == Environment.TONE_MAPPER_FILMIC \
+        and env.fog_enabled \
+        and bool(env.get("ssao_enabled")) \
+        and style != null
+    var original_time := float(main.get("time_of_day"))
+    main.set("time_of_day", 0.25)
+    main.call("update_sky", 0.0)
+    var noon_sun := sun_light.light_energy
+    var noon_ambient := env.ambient_light_energy
+    var noon_fog := env.fog_density
+    main.set("time_of_day", 0.75)
+    main.call("update_sky", 0.0)
+    var night_sun := sun_light.light_energy
+    var night_moon := moon_light.light_energy
+    var night_ambient := env.ambient_light_energy
+    var night_fog := env.fog_density
+    main.set("time_of_day", original_time)
+    main.call("update_sky", 0.0)
+    var range_ok := noon_sun >= 0.55 \
+        and noon_sun <= 1.70 \
+        and noon_ambient >= 0.34 \
+        and noon_ambient <= 0.62 \
+        and noon_fog >= 0.002 \
+        and noon_fog <= 0.020 \
+        and night_sun <= 0.12 \
+        and night_moon >= 0.09 \
+        and night_moon <= 0.30 \
+        and night_ambient >= 0.13 \
+        and night_ambient <= 0.34 \
+        and night_fog >= 0.004 \
+        and night_fog <= 0.030
+    add_result(
+        "environment_visual_style",
+        structure_ok and range_ok,
+        "sky %s, filmic %s, sky ambient %s, fog %s, ssao %s, noon sun %.2f amb %.2f fog %.4f, night sun %.2f moon %.2f amb %.2f fog %.4f" % [
+            str(env.background_mode == Environment.BG_SKY and env.sky != null and sky_mat != null),
+            str(env.tonemap_mode == Environment.TONE_MAPPER_FILMIC),
+            str(env.ambient_light_source == Environment.AMBIENT_SOURCE_SKY),
+            str(env.fog_enabled),
+            str(bool(env.get("ssao_enabled"))),
+            noon_sun,
+            noon_ambient,
+            noon_fog,
+            night_sun,
+            night_moon,
+            night_ambient,
+            night_fog
         ]
     )
 

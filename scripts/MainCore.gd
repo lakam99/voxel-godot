@@ -1,5 +1,7 @@
 extends "res://scripts/MainInterface.gd"
 
+const DEFAULT_VISUAL_STYLE := preload("res://resources/visual/gamecube_style.tres")
+
 var seed_text := "atlas-1492"
 var seed_hash := 1
 var height_noise: FastNoiseLite
@@ -18,6 +20,11 @@ var sun_visual: MeshInstance3D
 var moon_visual: MeshInstance3D
 var player: CharacterBody3D
 var world_environment: WorldEnvironment
+var visual_style: Resource
+var sky_resource: Sky
+var sky_material: ProceduralSkyMaterial
+var visual_capture_active := false
+var visual_debug_enabled := false
 
 var terrain_material: StandardMaterial3D
 var materials := {}
