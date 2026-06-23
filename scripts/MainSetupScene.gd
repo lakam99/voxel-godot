@@ -54,13 +54,13 @@ func setup_materials() -> void:
     materials["mushroomCluster"] = make_material(Color(0.73, 0.68, 0.54), 0.86)
     materials["mushroomCap"] = make_material(Color(0.64, 0.28, 0.42), 0.78)
     materials["frostHerbPatch"] = make_material(Color(0.70, 0.90, 0.92), 0.58)
-    materials["detailGrass"] = make_material(Color(0.34, 0.68, 0.27), 0.86)
-    materials["detailFlower"] = make_material(Color(0.95, 0.64, 0.32), 0.72)
-    materials["detailReed"] = make_material(Color(0.42, 0.55, 0.24), 0.86)
-    materials["detailPebble"] = make_material(Color(0.48, 0.51, 0.48), 0.92)
-    materials["detailSnow"] = make_material(Color(0.88, 0.93, 0.91), 0.78)
-    materials["detailScrub"] = make_material(Color(0.50, 0.56, 0.26), 0.88)
-    materials["detailLeaf"] = make_material(Color(0.48, 0.38, 0.18), 0.88)
+    materials["detailGrass"] = make_detail_material(Color(0.34, 0.68, 0.27), 0.86, 0.018)
+    materials["detailFlower"] = make_detail_material(Color(0.95, 0.64, 0.32), 0.72, 0.010)
+    materials["detailReed"] = make_detail_material(Color(0.42, 0.55, 0.24), 0.86, 0.026)
+    materials["detailPebble"] = make_detail_material(Color(0.48, 0.51, 0.48), 0.92, 0.0)
+    materials["detailSnow"] = make_detail_material(Color(0.88, 0.93, 0.91), 0.78, 0.0)
+    materials["detailScrub"] = make_detail_material(Color(0.50, 0.56, 0.26), 0.88, 0.014)
+    materials["detailLeaf"] = make_detail_material(Color(0.48, 0.38, 0.18), 0.88, 0.004)
     materials["rawFish"] = make_material(Color(0.42, 0.72, 0.78), 0.52)
     materials["cookedFish"] = make_material(Color(0.78, 0.42, 0.24), 0.74)
     var water_material := load("res://resources/visual/water_material.tres") as Material
@@ -76,6 +76,14 @@ func make_material(color: Color, roughness: float = 0.82, transparent: bool = fa
     material.roughness = roughness
     if transparent:
         material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+    return material
+
+func make_detail_material(color: Color, roughness: float, wind_strength: float) -> ShaderMaterial:
+    var material := ShaderMaterial.new()
+    material.shader = load("res://resources/visual/detail_material.gdshader") as Shader
+    material.set_shader_parameter("base_color", color)
+    material.set_shader_parameter("roughness", roughness)
+    material.set_shader_parameter("wind_strength", wind_strength)
     return material
 
 func make_emissive_material(color: Color, energy: float) -> StandardMaterial3D:

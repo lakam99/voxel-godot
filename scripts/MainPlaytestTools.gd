@@ -256,8 +256,9 @@ func add_detail_for_biome(batches: Dictionary, local_position: Vector3, biome: S
 func append_flower_detail(batches: Dictionary, local_position: Vector3, rng: RandomNumberGenerator) -> void:
     var yaw := rng.randf() * TAU
     var scale := rng.randf_range(0.82, 1.18)
-    append_detail_transform(batches, "flowerStem", local_position + Vector3(0.0, 0.14, 0.0), yaw, Vector3.ONE * scale)
-    append_detail_transform(batches, "flowerBloom", local_position + Vector3(0.0, 0.32, 0.0), yaw, Vector3.ONE * scale)
+    var offset := Vector3(cos(yaw + PI * 0.5), 0.0, sin(yaw + PI * 0.5)) * 0.08
+    append_detail_transform(batches, "flowerStem", local_position + Vector3(0.0, 0.15, 0.0) - offset, yaw, Vector3.ONE * scale)
+    append_detail_transform(batches, "flowerBloom", local_position + Vector3(0.0, 0.15, 0.0) + offset, yaw + PI * 0.62, Vector3.ONE * scale)
 
 func append_detail_transform(batches: Dictionary, detail_type: String, origin: Vector3, yaw: float, scale: Vector3) -> void:
     if not batches.has(detail_type):
@@ -268,25 +269,36 @@ func append_detail_transform(batches: Dictionary, detail_type: String, origin: V
 func spawn_detail_batch(parent: Node3D, detail_type: String, transforms: Array) -> void:
     var multimesh := MultiMesh.new()
     multimesh.transform_format = MultiMesh.TRANSFORM_3D
+    multimesh.use_colors = true
+    multimesh.use_custom_data = true
     multimesh.mesh = detail_mesh(detail_type)
     multimesh.instance_count = transforms.size()
     for i in range(transforms.size()):
-        multimesh.set_instance_transform(i, transforms[i])
+        var transform: Transform3D = transforms[i]
+        multimesh.set_instance_transform(i, transform)
+        multimesh.set_instance_color(i, detail_instance_color(detail_type, transform, i))
+        multimesh.set_instance_custom_data(i, Color(detail_instance_phase(detail_type, transform, i), 0.0, 0.0, 1.0))
     var instance := MultiMeshInstance3D.new()
     instance.name = "Detail_%s_%d" % [detail_type, transforms.size()]
     instance.multimesh = multimesh
-    instance.material_override = detail_material(detail_type)
+    var override_material := detail_material(detail_type)
+    if override_material != null:
+        instance.material_override = override_material
     instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+    instance.visibility_range_end = detail_visibility_range(detail_type)
+    instance.visibility_range_end_margin = 12.0
+    instance.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
     instance.set_meta("kind", "decor")
     instance.set_meta("detail_type", detail_type)
+    instance.set_meta("detail_visibility_end", instance.visibility_range_end)
     parent.add_child(instance)
 
 func detail_material(detail_type: String) -> Material:
     match detail_type:
-        "flowerStem", "grass":
+        "flowerStem", "flowerBloom":
+            return null
+        "grass":
             return materials["detailGrass"]
-        "flowerBloom":
-            return materials["detailFlower"]
         "reed":
             return materials["detailReed"]
         "pebble":
@@ -305,58 +317,198 @@ func detail_mesh(detail_type: String) -> Mesh:
     var mesh: Mesh
     match detail_type:
         "grass":
-            var grass := BoxMesh.new()
-            grass.size = Vector3(0.055, 0.38, 0.055)
-            mesh = grass
+            mesh = make_grass_cluster_mesh()
         "flowerStem":
-            var stem := CylinderMesh.new()
-            stem.top_radius = 0.014
-            stem.bottom_radius = 0.018
-            stem.height = 0.28
-            stem.radial_segments = 5
-            mesh = stem
+            mesh = make_flower_cluster_mesh(0)
         "flowerBloom":
-            var bloom := SphereMesh.new()
-            bloom.radius = 0.055
-            bloom.height = 0.055
-            bloom.radial_segments = 6
-            bloom.rings = 3
-            mesh = bloom
+            mesh = make_flower_cluster_mesh(1)
         "reed":
-            var reed := CylinderMesh.new()
-            reed.top_radius = 0.018
-            reed.bottom_radius = 0.030
-            reed.height = 0.72
-            reed.radial_segments = 5
-            mesh = reed
+            mesh = make_reed_cluster_mesh()
         "pebble":
-            var pebble := SphereMesh.new()
-            pebble.radius = 0.11
-            pebble.height = 0.085
-            pebble.radial_segments = 7
-            pebble.rings = 4
-            mesh = pebble
+            mesh = make_pebble_cluster_mesh()
         "snowClump":
-            var snow := SphereMesh.new()
-            snow.radius = 0.18
-            snow.height = 0.10
-            snow.radial_segments = 8
-            snow.rings = 4
-            mesh = snow
+            mesh = make_snow_clump_mesh()
         "scrub":
-            var scrub := BoxMesh.new()
-            scrub.size = Vector3(0.12, 0.34, 0.05)
-            mesh = scrub
+            mesh = make_scrub_cluster_mesh()
         "leafLitter":
-            var leaf := BoxMesh.new()
-            leaf.size = Vector3(0.18, 0.018, 0.12)
-            mesh = leaf
+            mesh = make_leaf_litter_mesh()
         _:
-            var fallback := BoxMesh.new()
-            fallback.size = Vector3(0.08, 0.20, 0.08)
-            mesh = fallback
+            mesh = make_grass_cluster_mesh()
     detail_meshes[detail_type] = mesh
     return mesh
+
+func detail_visibility_range(detail_type: String) -> float:
+    match detail_type:
+        "reed", "scrub":
+            return 82.0
+        "grass", "flowerStem", "flowerBloom":
+            return 64.0
+        "pebble", "snowClump", "leafLitter":
+            return 58.0
+    return 64.0
+
+func detail_instance_phase(detail_type: String, transform: Transform3D, index: int) -> float:
+    return detail_hash_unit(detail_type, transform.origin, index, 19.71)
+
+func detail_instance_color(detail_type: String, transform: Transform3D, index: int) -> Color:
+    var warm := detail_hash_unit(detail_type, transform.origin, index, 3.17)
+    var cool := detail_hash_unit(detail_type, transform.origin, index, 9.91)
+    var light := detail_hash_unit(detail_type, transform.origin, index, 14.43)
+    match detail_type:
+        "pebble":
+            return Color(0.88 + warm * 0.20, 0.90 + cool * 0.16, 0.86 + light * 0.18, 1.0)
+        "snowClump":
+            return Color(0.95 + warm * 0.10, 0.98 + cool * 0.08, 1.0 + light * 0.06, 1.0)
+        "leafLitter":
+            return Color(0.92 + warm * 0.18, 0.82 + cool * 0.14, 0.70 + light * 0.12, 1.0)
+        "flowerBloom":
+            return Color(1.02 + warm * 0.16, 0.92 + cool * 0.12, 0.86 + light * 0.16, 1.0)
+        "reed", "scrub":
+            return Color(0.86 + warm * 0.18, 0.94 + cool * 0.16, 0.78 + light * 0.16, 1.0)
+    return Color(0.86 + warm * 0.18, 0.96 + cool * 0.18, 0.82 + light * 0.14, 1.0)
+
+func detail_hash_unit(detail_type: String, origin: Vector3, index: int, salt: float) -> float:
+    var type_seed := float(abs(hash_string(detail_type)) % 997)
+    var value := sin(origin.x * 12.9898 + origin.z * 78.233 + origin.y * 5.913 + float(index) * 37.719 + type_seed + salt) * 43758.5453
+    return fposmod(value, 1.0)
+
+func make_grass_cluster_mesh() -> ArrayMesh:
+    var st := begin_detail_surface(materials["detailGrass"])
+    var blade_data := [
+        [Vector3(-0.09, -0.19, -0.05), 0.38, 0.055, 0.10, 0.0],
+        [Vector3(0.06, -0.19, 0.02), 0.46, 0.048, -0.08, 1.18],
+        [Vector3(0.0, -0.19, -0.10), 0.34, 0.045, 0.06, 2.35],
+        [Vector3(0.12, -0.19, -0.04), 0.31, 0.038, -0.04, 3.30],
+        [Vector3(-0.02, -0.19, 0.10), 0.42, 0.050, 0.11, 4.28],
+        [Vector3(-0.13, -0.19, 0.05), 0.30, 0.040, -0.05, 5.36],
+    ]
+    for row in blade_data:
+        add_detail_blade(st, row[0], float(row[1]), float(row[2]), float(row[4]), float(row[3]))
+    return commit_detail_surface(st)
+
+func make_reed_cluster_mesh() -> ArrayMesh:
+    var st := begin_detail_surface(materials["detailReed"])
+    var reeds := [
+        [Vector3(-0.06, -0.36, -0.03), 0.86, 0.032, 0.08, 0.15],
+        [Vector3(0.04, -0.36, 0.02), 0.78, 0.026, -0.05, 1.50],
+        [Vector3(0.10, -0.36, -0.04), 0.66, 0.024, 0.04, 2.60],
+        [Vector3(-0.12, -0.36, 0.05), 0.72, 0.024, -0.08, 3.85],
+    ]
+    for row in reeds:
+        add_detail_stem(st, row[0], float(row[1]), float(row[2]), float(row[4]), float(row[3]))
+    add_detail_blade(st, Vector3(0.0, -0.36, 0.08), 0.58, 0.035, 4.8, 0.13)
+    return commit_detail_surface(st)
+
+func make_scrub_cluster_mesh() -> ArrayMesh:
+    var st := begin_detail_surface(materials["detailScrub"])
+    add_detail_blade(st, Vector3(-0.11, -0.17, -0.03), 0.36, 0.055, 0.2, 0.13)
+    add_detail_blade(st, Vector3(0.08, -0.17, 0.01), 0.32, 0.048, 1.2, -0.10)
+    add_detail_blade(st, Vector3(0.00, -0.17, 0.09), 0.30, 0.046, 2.5, 0.08)
+    add_detail_blade(st, Vector3(0.13, -0.17, -0.08), 0.24, 0.040, 3.7, -0.05)
+    add_detail_blade(st, Vector3(-0.06, -0.17, 0.04), 0.28, 0.044, 4.7, 0.12)
+    return commit_detail_surface(st)
+
+func make_flower_cluster_mesh(variant: int) -> ArrayMesh:
+    var mesh := ArrayMesh.new()
+    var stem_st := begin_detail_surface(materials["detailGrass"])
+    add_detail_stem(stem_st, Vector3(0.0, -0.15, 0.0), 0.31 + float(variant) * 0.03, 0.018, 0.0, 0.018)
+    add_detail_blade(stem_st, Vector3(-0.015, -0.08, 0.0), 0.13, 0.032, 2.0 + float(variant) * 0.4, 0.04)
+    add_detail_blade(stem_st, Vector3(0.012, -0.07, 0.0), 0.12, 0.030, 4.6 + float(variant) * 0.3, -0.04)
+    commit_detail_surface(stem_st, mesh)
+
+    var bloom_st := begin_detail_surface(materials["detailFlower"])
+    var center := Vector3(0.0, 0.17 + float(variant) * 0.03, 0.0)
+    var petals := 5 + variant
+    for i in range(petals):
+        var angle := float(i) / float(petals) * TAU
+        var petal_center := center + Vector3(cos(angle), 0.0, sin(angle)) * 0.025
+        add_vertical_diamond(bloom_st, petal_center, 0.075, 0.042, angle)
+    return commit_detail_surface(bloom_st, mesh)
+
+func make_pebble_cluster_mesh() -> ArrayMesh:
+    var st := begin_detail_surface(materials["detailPebble"])
+    add_detail_octahedron(st, Vector3(-0.08, 0.0, -0.03), Vector3(0.11, 0.06, 0.08))
+    add_detail_octahedron(st, Vector3(0.06, -0.005, 0.04), Vector3(0.085, 0.045, 0.065))
+    add_detail_octahedron(st, Vector3(0.15, -0.01, -0.03), Vector3(0.055, 0.035, 0.045))
+    return commit_detail_surface(st)
+
+func make_snow_clump_mesh() -> ArrayMesh:
+    var st := begin_detail_surface(materials["detailSnow"])
+    add_detail_octahedron(st, Vector3(-0.07, 0.0, -0.03), Vector3(0.16, 0.055, 0.11))
+    add_detail_octahedron(st, Vector3(0.08, -0.005, 0.02), Vector3(0.13, 0.045, 0.10))
+    add_detail_octahedron(st, Vector3(0.0, 0.01, 0.10), Vector3(0.09, 0.04, 0.07))
+    return commit_detail_surface(st)
+
+func make_leaf_litter_mesh() -> ArrayMesh:
+    var st := begin_detail_surface(materials["detailLeaf"])
+    add_horizontal_diamond(st, Vector3(-0.08, -0.008, -0.04), 0.22, 0.075, 0.3)
+    add_horizontal_diamond(st, Vector3(0.08, -0.006, 0.03), 0.18, 0.065, 1.6)
+    add_horizontal_diamond(st, Vector3(0.00, -0.004, 0.10), 0.16, 0.055, 2.7)
+    add_horizontal_diamond(st, Vector3(0.13, -0.007, -0.09), 0.14, 0.050, 4.1)
+    return commit_detail_surface(st)
+
+func begin_detail_surface(material: Material) -> SurfaceTool:
+    var st := SurfaceTool.new()
+    st.begin(Mesh.PRIMITIVE_TRIANGLES)
+    st.set_material(material)
+    return st
+
+func commit_detail_surface(st: SurfaceTool, mesh: ArrayMesh = null) -> ArrayMesh:
+    st.generate_normals()
+    return st.commit(mesh)
+
+func add_detail_triangle(st: SurfaceTool, a: Vector3, b: Vector3, c: Vector3, wind_a: float, wind_b: float, wind_c: float) -> void:
+    st.set_uv2(Vector2(wind_a, 0.0))
+    st.add_vertex(a)
+    st.set_uv2(Vector2(wind_b, 0.0))
+    st.add_vertex(b)
+    st.set_uv2(Vector2(wind_c, 0.0))
+    st.add_vertex(c)
+
+func add_detail_quad(st: SurfaceTool, a: Vector3, b: Vector3, c: Vector3, d: Vector3, wind_bottom: float, wind_top: float) -> void:
+    add_detail_triangle(st, a, b, c, wind_bottom, wind_top, wind_bottom)
+    add_detail_triangle(st, c, b, d, wind_bottom, wind_top, wind_top)
+
+func add_detail_blade(st: SurfaceTool, base: Vector3, height: float, width: float, yaw: float, lean: float) -> void:
+    var right := Vector3(cos(yaw), 0.0, sin(yaw)) * width
+    var forward := Vector3(-sin(yaw), 0.0, cos(yaw))
+    var tip := base + Vector3(0.0, height, 0.0) + forward * lean
+    add_detail_triangle(st, base - right, tip, base + right, 0.0, 1.0, 0.0)
+
+func add_detail_stem(st: SurfaceTool, base: Vector3, height: float, width: float, yaw: float, lean: float) -> void:
+    var right := Vector3(cos(yaw), 0.0, sin(yaw)) * width
+    var forward := Vector3(-sin(yaw), 0.0, cos(yaw))
+    var top := base + Vector3(0.0, height, 0.0) + forward * lean
+    add_detail_quad(st, base - right, top - right * 0.45, base + right, top + right * 0.45, 0.0, 1.0)
+
+func add_horizontal_diamond(st: SurfaceTool, center: Vector3, length: float, width: float, yaw: float) -> void:
+    var forward := Vector3(cos(yaw), 0.0, sin(yaw)) * length * 0.5
+    var right := Vector3(-sin(yaw), 0.0, cos(yaw)) * width * 0.5
+    add_detail_triangle(st, center - forward, center + right, center + forward, 0.0, 0.0, 0.0)
+    add_detail_triangle(st, center - forward, center + forward, center - right, 0.0, 0.0, 0.0)
+
+func add_vertical_diamond(st: SurfaceTool, center: Vector3, height: float, width: float, yaw: float) -> void:
+    var right := Vector3(cos(yaw), 0.0, sin(yaw)) * width * 0.5
+    var top := center + Vector3(0.0, height * 0.5, 0.0)
+    var bottom := center - Vector3(0.0, height * 0.5, 0.0)
+    add_detail_triangle(st, bottom, center + right, top, 0.35, 0.65, 1.0)
+    add_detail_triangle(st, bottom, top, center - right, 0.35, 1.0, 0.65)
+
+func add_detail_octahedron(st: SurfaceTool, center: Vector3, radius: Vector3) -> void:
+    var top := center + Vector3(0.0, radius.y, 0.0)
+    var bottom := center - Vector3(0.0, radius.y, 0.0)
+    var east := center + Vector3(radius.x, 0.0, 0.0)
+    var west := center - Vector3(radius.x, 0.0, 0.0)
+    var north := center - Vector3(0.0, 0.0, radius.z)
+    var south := center + Vector3(0.0, 0.0, radius.z)
+    add_detail_triangle(st, top, north, east, 0.0, 0.0, 0.0)
+    add_detail_triangle(st, top, east, south, 0.0, 0.0, 0.0)
+    add_detail_triangle(st, top, south, west, 0.0, 0.0, 0.0)
+    add_detail_triangle(st, top, west, north, 0.0, 0.0, 0.0)
+    add_detail_triangle(st, bottom, east, north, 0.0, 0.0, 0.0)
+    add_detail_triangle(st, bottom, south, east, 0.0, 0.0, 0.0)
+    add_detail_triangle(st, bottom, west, south, 0.0, 0.0, 0.0)
+    add_detail_triangle(st, bottom, north, west, 0.0, 0.0, 0.0)
 
 func tree_visual_spec(biome: String, rng: RandomNumberGenerator) -> Dictionary:
     var spec := {

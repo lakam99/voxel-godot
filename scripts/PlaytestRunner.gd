@@ -4627,6 +4627,10 @@ func test_chunk_detail_batches() -> void:
     var collider_count := 0
     var chunk_count_with_decor := 0
     var detail_types := {}
+    var upgraded_meshes := 0
+    var color_batches := 0
+    var custom_batches := 0
+    var faded_batches := 0
     for chunk_node_variant in chunks.values():
         var chunk_node := chunk_node_variant as Node
         if chunk_node == null:
@@ -4643,16 +4647,34 @@ func test_chunk_detail_batches() -> void:
             batch_nodes += 1
             detail_instances += batch.multimesh.instance_count
             detail_types[String(batch.get_meta("detail_type", "unknown"))] = true
+            if batch.multimesh.mesh is ArrayMesh:
+                upgraded_meshes += 1
+            if batch.multimesh.use_colors:
+                color_batches += 1
+            if batch.multimesh.use_custom_data:
+                custom_batches += 1
+            if batch.visibility_range_end > 0.0:
+                faded_batches += 1
     var batched: bool = batch_nodes > 0 and detail_instances > batch_nodes * 3
     add_result(
         "chunk_detail_batches",
-        batched and collider_count == 0 and detail_types.size() >= 3,
-        "chunks %d/%d, batches %d, instances %d, colliders %d, types %s" % [
+        batched
+            and collider_count == 0
+            and detail_types.size() >= 3
+            and upgraded_meshes == batch_nodes
+            and color_batches == batch_nodes
+            and custom_batches == batch_nodes
+            and faded_batches == batch_nodes,
+        "chunks %d/%d, batches %d, instances %d, colliders %d, upgraded %d, colors %d, custom %d, faded %d, types %s" % [
             chunk_count_with_decor,
             chunks.size(),
             batch_nodes,
             detail_instances,
             collider_count,
+            upgraded_meshes,
+            color_batches,
+            custom_batches,
+            faded_batches,
             str(detail_types.keys())
         ]
     )
