@@ -1,0 +1,654 @@
+{
+  "assets": [
+    {
+      "bounds": {
+        "position": {
+          "x": -1.236,
+          "y": 0.0,
+          "z": -1.226
+        },
+        "size": {
+          "x": 2.581,
+          "y": 4.867,
+          "z": 2.381
+        }
+      },
+      "family": "broadleaf_tree",
+      "grounded": true,
+      "id": "broadleaf_01",
+      "materials": [
+        "trunk",
+        "bark_dark",
+        "leaf_primary",
+        "leaf_secondary"
+      ],
+      "meshInstances": 1,
+      "path": "res://assets/visual/generated/environment/broadleaf_01.glb",
+      "triangleCount": 224
+    },
+    {
+      "bounds": {
+        "position": {
+          "x": -1.04,
+          "y": 0.0,
+          "z": -0.949
+        },
+        "size": {
+          "x": 2.175,
+          "y": 5.337,
+          "z": 2.182
+        }
+      },
+      "family": "broadleaf_tree",
+      "grounded": true,
+      "id": "broadleaf_02",
+      "materials": [
+        "trunk",
+        "bark_dark",
+        "leaf_primary",
+        "leaf_secondary"
+      ],
+      "meshInstances": 1,
+      "path": "res://assets/visual/generated/environment/broadleaf_02.glb",
+      "triangleCount": 268
+    },
+    {
+      "bounds": {
+        "position": {
+          "x": -1.39,
+          "y": 0.0,
+          "z": -0.766
+        },
+        "size": {
+          "x": 2.846,
+          "y": 5.193,
+          "z": 2.119
+        }
+      },
+      "family": "broadleaf_tree",
+      "grounded": true,
+      "id": "broadleaf_03",
+      "materials": [
+        "trunk",
+        "bark_dark",
+        "leaf_primary",
+        "leaf_secondary"
+      ],
+      "meshInstances": 1,
+      "path": "res://assets/visual/generated/environment/broadleaf_03.glb",
+      "triangleCount": 180
+    },
+    {
+      "bounds": {
+        "position": {
+          "x": -1.242,
+          "y": 0.0,
+          "z": -1.238
+        },
+        "size": {
+          "x": 2.41,
+          "y": 5.513,
+          "z": 2.127
+        }
+      },
+      "family": "broadleaf_tree",
+      "grounded": true,
+      "id": "broadleaf_04",
+      "materials": [
+        "trunk",
+        "bark_dark",
+        "leaf_primary",
+        "leaf_secondary"
+      ],
+      "meshInstances": 1,
+      "path": "res://assets/visual/generated/environment/broadleaf_04.glb",
+      "triangleCount": 224
+    },
+    {
+      "bounds": {
+        "position": {
+          "x": -1.392,
+          "y": 0.0,
+          "z": -0.979
+        },
+        "size": {
+          "x": 2.535,
+          "y": 5.767,
+          "z": 2.139
+        }
+      },
+      "family": "broadleaf_tree",
+      "grounded": true,
+      "id": "broadleaf_05",
+      "materials": [
+        "trunk",
+        "bark_dark",
+        "leaf_primary",
+        "leaf_secondary"
+      ],
+      "meshInstances": 1,
+      "path": "res://assets/visual/generated/environment/broadleaf_05.glb",
+      "triangleCount": 268
+    },
+    {
+      "bounds": {
+        "position": {
+          "x": -1.271,
+          "y": 0.0,
+          "z": -1.191
+        },
+        "size": {
+          "x": 2.222,
+          "y": 5.673,
+          "z": 2.428
+        }
+      },
+      "family": "broadleaf_tree",
+      "grounded": true,
+      "id": "broadleaf_06",
+      "materials": [
+        "trunk",
+        "bark_dark",
+        "leaf_primary",
+        "leaf_secondary"
+      ],
+      "meshInstances": 1,
+      "path": "res://assets/visual/generated/environment/broadleaf_06.glb",
+      "triangleCount": 180
+    },
+    {
+      "bounds": {
+        "position": {
+          "x": -1.049,
+          "y": 0.0,
+          "z": -1.049
+        },
+        "size": {
+          "x": 2.099,
+          "y": 5.068,
+          "z": 2.099
+        }
+      },
+      "family": "conifer_tree",
+      "grounded": true,
+      "id": "conifer_01",
+      "materials": [
+        "trunk",
+        "needle_primary",
+        "needle_secondary"
+      ],
+      "meshInstances": 1,
+      "path": "res://assets/visual/generated/environment/conifer_01.glb",
+      "triangleCount": 172
+    },
+    {
+      "bounds": {
+        "position": {
+          "x": -1.066,
+          "y": 0.0,
+          "z": -1.066
+        },
+        "size": {
+          "x": 2.131,
+          "y": 5.356,
+          "z": 2.131
+        }
+      },
+      "family": "conifer_tree",
+      "grounded": true,
+      "id": "conifer_02",
+      "materials": [
+        "trunk",
+        "needle_primary",
+        "needle_secondary"
+      ],
+      "meshInstances": 1,
+      "path": "res://assets/visual/generated/environment/conifer_02.glb",
+      "triangleCount": 140
+    },
+    {
+      "bounds": {
+        "position": {
+          "x": -1.021,
+          "y": 0.0,
+          "z": -1.021
+        },
+        "size": {
+          "x": 2.042,
+          "y": 5.713,
+          "z": 2.042
+        }
+      },
+      "family": "conifer_tree",
+      "grounded": true,
+      "id": "conifer_03",
+      "materials": [
+        "trunk",
+        "needle_primary",
+        "needle_secondary"
+      ],
+      "meshInstances": 1,
+      "path": "res://assets/visual/generated/environment/conifer_03.glb",
+      "triangleCount": 172
+    },
+    {
+      "bounds": {
+        "position": {
+          "x": -1.024,
+          "y": 0.0,
+          "z": -1.024
+        },
+        "size": {
+          "x": 2.047,
+          "y": 6.036,
+          "z": 2.047
+        }
+      },
+      "family": "conifer_tree",
+      "grounded": true,
+      "id": "conifer_04",
+      "materials": [
+        "trunk",
+        "needle_primary",
+        "needle_secondary"
+      ],
+      "meshInstances": 1,
+      "path": "res://assets/visual/generated/environment/conifer_04.glb",
+      "triangleCount": 140
+    },
+    {
+      "bounds": {
+        "position": {
+          "x": -1.55,
+          "y": -0.01,
+          "z": -0.979
+        },
+        "size": {
+          "x": 2.722,
+          "y": 3.857,
+          "z": 1.699
+        }
+      },
+      "family": "savanna_tree",
+      "grounded": true,
+      "id": "savanna_01",
+      "materials": [
+        "trunk",
+        "bark_dark",
+        "savanna_leaf"
+      ],
+      "meshInstances": 1,
+      "path": "res://assets/visual/generated/environment/savanna_01.glb",
+      "triangleCount": 204
+    },
+    {
+      "bounds": {
+        "position": {
+          "x": -1.368,
+          "y": -0.008,
+          "z": -1.023
+        },
+        "size": {
+          "x": 2.832,
+          "y": 4.11,
+          "z": 1.672
+        }
+      },
+      "family": "savanna_tree",
+      "grounded": true,
+      "id": "savanna_02",
+      "materials": [
+        "trunk",
+        "bark_dark",
+        "savanna_leaf"
+      ],
+      "meshInstances": 1,
+      "path": "res://assets/visual/generated/environment/savanna_02.glb",
+      "triangleCount": 248
+    },
+    {
+      "bounds": {
+        "position": {
+          "x": -1.758,
+          "y": -0.014,
+          "z": -0.872
+        },
+        "size": {
+          "x": 2.928,
+          "y": 4.291,
+          "z": 1.556
+        }
+      },
+      "family": "savanna_tree",
+      "grounded": true,
+      "id": "savanna_03",
+      "materials": [
+        "trunk",
+        "bark_dark",
+        "savanna_leaf"
+      ],
+      "meshInstances": 1,
+      "path": "res://assets/visual/generated/environment/savanna_03.glb",
+      "triangleCount": 292
+    },
+    {
+      "bounds": {
+        "position": {
+          "x": -0.679,
+          "y": 0.0,
+          "z": -0.476
+        },
+        "size": {
+          "x": 1.459,
+          "y": 0.564,
+          "z": 0.925
+        }
+      },
+      "family": "rock",
+      "grounded": true,
+      "id": "rock_01",
+      "materials": [
+        "rock_primary",
+        "rock_accent"
+      ],
+      "meshInstances": 1,
+      "path": "res://assets/visual/generated/environment/rock_01.glb",
+      "triangleCount": 20
+    },
+    {
+      "bounds": {
+        "position": {
+          "x": -0.626,
+          "y": 0.0,
+          "z": -0.512
+        },
+        "size": {
+          "x": 1.261,
+          "y": 1.02,
+          "z": 0.93
+        }
+      },
+      "family": "rock",
+      "grounded": true,
+      "id": "rock_02",
+      "materials": [
+        "rock_primary",
+        "rock_accent"
+      ],
+      "meshInstances": 1,
+      "path": "res://assets/visual/generated/environment/rock_02.glb",
+      "triangleCount": 20
+    },
+    {
+      "bounds": {
+        "position": {
+          "x": -0.75,
+          "y": 0.0,
+          "z": -0.617
+        },
+        "size": {
+          "x": 1.629,
+          "y": 0.83,
+          "z": 1.252
+        }
+      },
+      "family": "rock",
+      "grounded": true,
+      "id": "rock_03",
+      "materials": [
+        "rock_primary",
+        "rock_accent"
+      ],
+      "meshInstances": 1,
+      "path": "res://assets/visual/generated/environment/rock_03.glb",
+      "triangleCount": 80
+    },
+    {
+      "bounds": {
+        "position": {
+          "x": -0.673,
+          "y": 0.0,
+          "z": -0.709
+        },
+        "size": {
+          "x": 1.348,
+          "y": 1.282,
+          "z": 1.416
+        }
+      },
+      "family": "rock",
+      "grounded": true,
+      "id": "rock_04",
+      "materials": [
+        "rock_primary",
+        "rock_accent"
+      ],
+      "meshInstances": 1,
+      "path": "res://assets/visual/generated/environment/rock_04.glb",
+      "triangleCount": 20
+    },
+    {
+      "bounds": {
+        "position": {
+          "x": -1.071,
+          "y": 0.0,
+          "z": -0.867
+        },
+        "size": {
+          "x": 2.057,
+          "y": 1.282,
+          "z": 1.818
+        }
+      },
+      "family": "rock",
+      "grounded": true,
+      "id": "rock_05",
+      "materials": [
+        "rock_primary",
+        "rock_accent"
+      ],
+      "meshInstances": 1,
+      "path": "res://assets/visual/generated/environment/rock_05.glb",
+      "triangleCount": 20
+    },
+    {
+      "bounds": {
+        "position": {
+          "x": -1.38,
+          "y": 0.0,
+          "z": -0.801
+        },
+        "size": {
+          "x": 2.847,
+          "y": 1.079,
+          "z": 1.502
+        }
+      },
+      "family": "rock",
+      "grounded": true,
+      "id": "rock_06",
+      "materials": [
+        "rock_primary",
+        "rock_accent"
+      ],
+      "meshInstances": 1,
+      "path": "res://assets/visual/generated/environment/rock_06.glb",
+      "triangleCount": 80
+    },
+    {
+      "bounds": {
+        "position": {
+          "x": -0.526,
+          "y": 0.013,
+          "z": -0.51
+        },
+        "size": {
+          "x": 1.251,
+          "y": 0.948,
+          "z": 0.917
+        }
+      },
+      "family": "bush",
+      "grounded": true,
+      "id": "bush_01",
+      "materials": [
+        "leaf_primary",
+        "leaf_secondary"
+      ],
+      "meshInstances": 1,
+      "path": "res://assets/visual/generated/environment/bush_01.glb",
+      "triangleCount": 80
+    },
+    {
+      "bounds": {
+        "position": {
+          "x": -0.542,
+          "y": 0.0,
+          "z": -0.527
+        },
+        "size": {
+          "x": 1.237,
+          "y": 0.931,
+          "z": 1.048
+        }
+      },
+      "family": "bush",
+      "grounded": true,
+      "id": "bush_02",
+      "materials": [
+        "leaf_primary",
+        "leaf_secondary",
+        "trunk"
+      ],
+      "meshInstances": 1,
+      "path": "res://assets/visual/generated/environment/bush_02.glb",
+      "triangleCount": 124
+    },
+    {
+      "bounds": {
+        "position": {
+          "x": -0.832,
+          "y": -0.034,
+          "z": -0.583
+        },
+        "size": {
+          "x": 1.494,
+          "y": 0.869,
+          "z": 1.138
+        }
+      },
+      "family": "bush",
+      "grounded": true,
+      "id": "bush_03",
+      "materials": [
+        "leaf_primary",
+        "leaf_secondary"
+      ],
+      "meshInstances": 1,
+      "path": "res://assets/visual/generated/environment/bush_03.glb",
+      "triangleCount": 120
+    },
+    {
+      "bounds": {
+        "position": {
+          "x": -0.68,
+          "y": -0.028,
+          "z": -0.726
+        },
+        "size": {
+          "x": 1.409,
+          "y": 0.965,
+          "z": 1.273
+        }
+      },
+      "family": "bush",
+      "grounded": true,
+      "id": "bush_04",
+      "materials": [
+        "leaf_primary",
+        "leaf_secondary",
+        "trunk"
+      ],
+      "meshInstances": 1,
+      "path": "res://assets/visual/generated/environment/bush_04.glb",
+      "triangleCount": 164
+    },
+    {
+      "bounds": {
+        "position": {
+          "x": -0.247,
+          "y": 0.0,
+          "z": -0.26
+        },
+        "size": {
+          "x": 0.495,
+          "y": 0.855,
+          "z": 0.52
+        }
+      },
+      "family": "stump_log",
+      "grounded": true,
+      "id": "stump_log_01",
+      "materials": [
+        "trunk",
+        "cut_wood"
+      ],
+      "meshInstances": 1,
+      "path": "res://assets/visual/generated/environment/stump_log_01.glb",
+      "triangleCount": 88
+    },
+    {
+      "bounds": {
+        "position": {
+          "x": -0.901,
+          "y": 0.013,
+          "z": -0.291
+        },
+        "size": {
+          "x": 1.803,
+          "y": 0.495,
+          "z": 0.583
+        }
+      },
+      "family": "stump_log",
+      "grounded": true,
+      "id": "stump_log_02",
+      "materials": [
+        "trunk",
+        "cut_wood",
+        "bark_dark"
+      ],
+      "meshInstances": 1,
+      "path": "res://assets/visual/generated/environment/stump_log_02.glb",
+      "triangleCount": 160
+    },
+    {
+      "bounds": {
+        "position": {
+          "x": -1.032,
+          "y": 0.014,
+          "z": -0.335
+        },
+        "size": {
+          "x": 2.064,
+          "y": 0.533,
+          "z": 0.67
+        }
+      },
+      "family": "stump_log",
+      "grounded": true,
+      "id": "stump_log_03",
+      "materials": [
+        "trunk",
+        "cut_wood",
+        "bark_dark"
+      ],
+      "meshInstances": 1,
+      "path": "res://assets/visual/generated/environment/stump_log_03.glb",
+      "triangleCount": 160
+    }
+  ],
+  "checked": 26,
+  "errors": [],
+  "passed": true
+}
