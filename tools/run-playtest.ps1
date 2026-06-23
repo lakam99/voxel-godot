@@ -13,6 +13,8 @@ if ($ReportPath -eq "") {
 }
 
 $env:VOXEL_PLAYTEST_REPORT = $ReportPath
+$env:VOXEL_PLAYTEST_PROGRESS = Join-Path $projectPath "playtest-progress.txt"
+$env:VOXEL_PLAYTEST = "1"
 if ($ScreenshotPath -ne "") {
     $env:VOXEL_PLAYTEST_SCREENSHOT = $ScreenshotPath
 } else {

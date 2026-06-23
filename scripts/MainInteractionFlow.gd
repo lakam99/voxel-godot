@@ -1,0 +1,438 @@
+extends "res://scripts/MainPlaytestTools.gd"
+
+func make_ore(parent: Node, prop_id: String, position: Vector3, ore_type: String, rng: RandomNumberGenerator):
+    if ore_type == "":
+        ore_type = "copperOre"
+    var body := StaticBody3D.new()
+    body.name = "Ore_%s" % ore_type
+    body.position = position
+    body.rotation.y = rng.randf() * TAU
+    body.set_meta("kind", "prop")
+    body.set_meta("prop_id", prop_id)
+    body.set_meta("drop", ore_type)
+    body.set_meta("material", ore_type)
+    body.set_meta("ore_type", ore_type)
+    body.set_meta("required_tool", ItemCatalogScript.material_required_tool(ore_type))
+    body.set_meta("required_tier", ItemCatalogScript.material_required_tier(ore_type))
+    body.set_meta("drop_count", rng.randi_range(1, 2 if ore_type == "ironOre" else 3))
+
+    var radius := 0.58 + rng.randf() * 0.82
+    var ore_mesh := SphereMesh.new()
+    ore_mesh.radius = radius
+    ore_mesh.height = radius * (0.70 + rng.randf() * 0.56)
+    ore_mesh.radial_segments = 9
+    ore_mesh.rings = 5
+    var ore := MeshInstance3D.new()
+    ore.name = "OreStone"
+    ore.mesh = ore_mesh
+    ore.material_override = materials.get("oreBase", materials["rock"])
+    ore.position.y = radius * 0.40
+    ore.scale = Vector3(1.15 + rng.randf() * 0.5, 0.62 + rng.randf() * 0.45, 1.0 + rng.randf() * 0.42)
+    body.add_child(ore)
+
+    var vein_mesh := BoxMesh.new()
+    vein_mesh.size = Vector3(radius * 0.78, radius * 0.12, radius * 0.18)
+    for i in range(5):
+        var vein := MeshInstance3D.new()
+        vein.name = "OreSeam"
+        vein.mesh = vein_mesh
+        vein.material_override = materials.get(ore_type, materials["rock"])
+        vein.position = Vector3((rng.randf() - 0.5) * radius * 0.95, radius * (0.38 + rng.randf() * 0.48), -radius * (0.44 + rng.randf() * 0.18))
+        vein.rotation = Vector3(rng.randf() * 0.7, rng.randf() * TAU, rng.randf() * 0.7)
+        body.add_child(vein)
+
+    var glow_key := "ironOreGlow" if ore_type == "ironOre" else "copperOreGlow"
+    var glint_mesh := SphereMesh.new()
+    glint_mesh.radius = radius * 0.13
+    glint_mesh.height = radius * 0.18
+    glint_mesh.radial_segments = 6
+    glint_mesh.rings = 3
+    for i in range(3):
+        var glint := MeshInstance3D.new()
+        glint.name = "OreGlint"
+        glint.mesh = glint_mesh
+        glint.material_override = materials.get(glow_key, materials.get(ore_type, materials["rock"]))
+        glint.position = Vector3((rng.randf() - 0.5) * radius * 0.72, radius * (0.58 + rng.randf() * 0.28), -radius * 0.58)
+        glint.scale = Vector3(1.0, 0.72 + rng.randf() * 0.38, 1.0)
+        body.add_child(glint)
+
+    var shape := SphereShape3D.new()
+    shape.radius = radius * 1.05
+    var collider := CollisionShape3D.new()
+    collider.shape = shape
+    collider.position.y = radius * 0.42
+    body.add_child(collider)
+    parent.add_child(body)
+    return body
+
+func make_forage(parent: Node, prop_id: String, position: Vector3, biome: String, rng: RandomNumberGenerator):
+    var spec := forage_for_biome(biome)
+    if spec.is_empty():
+        return null
+    var material_id := String(spec.get("material", "berryBush"))
+    var body := StaticBody3D.new()
+    body.name = "Forage_%s" % material_id
+    body.position = position
+    body.rotation.y = rng.randf() * TAU
+    body.set_meta("kind", "prop")
+    body.set_meta("prop_id", prop_id)
+    body.set_meta("drop", String(spec.get("drop", "berries")))
+    body.set_meta("material", material_id)
+    body.set_meta("drop_count", rng.randi_range(int(spec.get("drop_min", 1)), int(spec.get("drop_max", 1))))
+
+    match material_id:
+        "aloePatch":
+            for i in range(6):
+                var leaf_mesh := CylinderMesh.new()
+                leaf_mesh.bottom_radius = 0.12 + rng.randf() * 0.04
+                leaf_mesh.top_radius = 0.0
+                leaf_mesh.height = 0.55 + rng.randf() * 0.28
+                leaf_mesh.radial_segments = 5
+                var leaf := MeshInstance3D.new()
+                leaf.mesh = leaf_mesh
+                leaf.material_override = materials["aloePatch"]
+                leaf.position = Vector3((rng.randf() - 0.5) * 0.38, 0.24, (rng.randf() - 0.5) * 0.38)
+                leaf.rotation = Vector3(0.35 + rng.randf() * 0.35, rng.randf() * TAU, 0.0)
+                body.add_child(leaf)
+        "mushroomCluster":
+            for i in range(4):
+                var stem_mesh := CylinderMesh.new()
+                stem_mesh.top_radius = 0.04
+                stem_mesh.bottom_radius = 0.055
+                stem_mesh.height = 0.26 + rng.randf() * 0.20
+                stem_mesh.radial_segments = 5
+                var stem := MeshInstance3D.new()
+                stem.mesh = stem_mesh
+                stem.material_override = materials["mushroomCluster"]
+                stem.position = Vector3((rng.randf() - 0.5) * 0.52, stem_mesh.height * 0.5, (rng.randf() - 0.5) * 0.52)
+                body.add_child(stem)
+                var cap_mesh := SphereMesh.new()
+                cap_mesh.radius = 0.13 + rng.randf() * 0.05
+                cap_mesh.height = cap_mesh.radius * 0.8
+                var cap := MeshInstance3D.new()
+                cap.mesh = cap_mesh
+                cap.material_override = materials["mushroomCap"]
+                cap.position = stem.position + Vector3(0.0, stem_mesh.height * 0.58, 0.0)
+                cap.scale = Vector3(1.15, 0.52, 1.15)
+                body.add_child(cap)
+        "frostHerbPatch":
+            for i in range(5):
+                var blade_mesh := CylinderMesh.new()
+                blade_mesh.bottom_radius = 0.055
+                blade_mesh.top_radius = 0.0
+                blade_mesh.height = 0.42 + rng.randf() * 0.22
+                blade_mesh.radial_segments = 4
+                var blade := MeshInstance3D.new()
+                blade.mesh = blade_mesh
+                blade.material_override = materials["frostHerbPatch"]
+                blade.position = Vector3((rng.randf() - 0.5) * 0.44, 0.22, (rng.randf() - 0.5) * 0.44)
+                blade.rotation = Vector3(0.18 + rng.randf() * 0.28, rng.randf() * TAU, 0.0)
+                body.add_child(blade)
+        _:
+            var bush_mesh := SphereMesh.new()
+            bush_mesh.radius = 0.42 + rng.randf() * 0.10
+            bush_mesh.height = bush_mesh.radius * 1.05
+            var bush := MeshInstance3D.new()
+            bush.mesh = bush_mesh
+            bush.material_override = materials["berryBush"]
+            bush.position.y = 0.38
+            bush.scale = Vector3(1.18, 0.72, 1.05)
+            body.add_child(bush)
+            var berry_mesh := SphereMesh.new()
+            berry_mesh.radius = 0.055
+            berry_mesh.height = 0.11
+            for i in range(7):
+                var berry := MeshInstance3D.new()
+                berry.mesh = berry_mesh
+                berry.material_override = materials["berryFruit"]
+                var angle := rng.randf() * TAU
+                var spread := 0.20 + rng.randf() * 0.22
+                berry.position = Vector3(cos(angle) * spread, 0.40 + rng.randf() * 0.20, sin(angle) * spread)
+                body.add_child(berry)
+
+    var shape := SphereShape3D.new()
+    shape.radius = float(spec.get("radius", 0.50))
+    var collider := CollisionShape3D.new()
+    collider.shape = shape
+    collider.position.y = shape.radius * 0.45
+    body.add_child(collider)
+    parent.add_child(body)
+    return body
+
+func make_wildlife(parent: Node, prop_id: String, position: Vector3, biome: String, rng: RandomNumberGenerator):
+    var cold := biome == "snow" or biome == "tundra" or biome == "alpine"
+    var body := StaticBody3D.new()
+    body.name = "Wildlife"
+    body.position = position
+    body.rotation.y = rng.randf() * TAU
+    body.set_meta("kind", "prop")
+    body.set_meta("prop_id", prop_id)
+    body.set_meta("drop", "rawMeat")
+    body.set_meta("material", "wildlife")
+    body.set_meta("drop_count", rng.randi_range(1, 2 if cold else 3))
+    body.set_meta("extra_drop", "hide")
+    body.set_meta("extra_drop_count", rng.randi_range(1, 2))
+
+    var body_mesh := SphereMesh.new()
+    body_mesh.radius = 0.42 + rng.randf() * 0.08
+    body_mesh.height = 0.72 + rng.randf() * 0.10
+    var torso := MeshInstance3D.new()
+    torso.mesh = body_mesh
+    torso.material_override = materials["wildlife"]
+    torso.position = Vector3(0.0, 0.56, 0.0)
+    torso.scale = Vector3(1.38, 0.80, 0.82)
+    body.add_child(torso)
+
+    var head_mesh := SphereMesh.new()
+    head_mesh.radius = 0.20
+    head_mesh.height = 0.30
+    var head := MeshInstance3D.new()
+    head.mesh = head_mesh
+    head.material_override = materials["wildlife"]
+    head.position = Vector3(0.48, 0.74, 0.0)
+    head.scale = Vector3(1.0, 0.86, 0.86)
+    body.add_child(head)
+
+    var leg_mesh := CylinderMesh.new()
+    leg_mesh.top_radius = 0.045
+    leg_mesh.bottom_radius = 0.055
+    leg_mesh.height = 0.52
+    leg_mesh.radial_segments = 5
+    for x_offset in [-0.28, 0.28]:
+        for z_offset in [-0.18, 0.18]:
+            var leg := MeshInstance3D.new()
+            leg.mesh = leg_mesh
+            leg.material_override = materials["wildlifeDark"]
+            leg.position = Vector3(x_offset, 0.24, z_offset)
+            body.add_child(leg)
+
+    var ear_mesh := CylinderMesh.new()
+    ear_mesh.bottom_radius = 0.06
+    ear_mesh.top_radius = 0.0
+    ear_mesh.height = 0.20
+    ear_mesh.radial_segments = 4
+    for z_offset in [-0.09, 0.09]:
+        var ear := MeshInstance3D.new()
+        ear.mesh = ear_mesh
+        ear.material_override = materials["wildlifeDark"]
+        ear.position = Vector3(0.53, 0.94, z_offset)
+        ear.rotation.z = -0.45
+        body.add_child(ear)
+
+    var shape := BoxShape3D.new()
+    shape.size = Vector3(1.18, 1.05, 0.78)
+    var collider := CollisionShape3D.new()
+    collider.shape = shape
+    collider.position.y = 0.52
+    body.add_child(collider)
+    parent.add_child(body)
+    register_wildlife(body, rng, cold)
+    return body
+
+func place_selected_block() -> void:
+    var hit: Dictionary = player.view_ray(PLACEMENT_RANGE)
+    if hit.is_empty():
+        hit = fallback_ground_placement_hit(PLACEMENT_RANGE)
+        if hit.is_empty():
+            update_hud("No placement target")
+            return
+    var active: Dictionary = inventory_system.active_stack()
+    var block_type := String(active.get("item", ""))
+    if block_type == "":
+        update_hud("Active slot is empty")
+        return
+    if not ItemCatalogScript.is_placeable(block_type):
+        update_hud("%s is not placeable" % ItemCatalogScript.label(block_type))
+        return
+    var placement := placement_from_hit(hit, block_type)
+    if placement.is_empty():
+        update_hud("No placement target")
+        return
+    if not placement_within_action_reach(placement):
+        update_hud("Too far away")
+        return
+    var cell: Vector3i = placement["cell"]
+    if blocks.has(cell):
+        update_hud("Blocked")
+        return
+    var block_options := {
+        "player_placed": true,
+        "world_y": float(placement["world_y"])
+    }
+    if should_face_player(block_type):
+        block_options["facing"] = snapped_player_yaw()
+    var block := create_block(cell, block_type, block_options)
+    if block == null or not is_instance_valid(block) or not blocks.has(cell):
+        update_hud("Blocked")
+        return
+    inventory_system.consume_active(1)
+    if held_item:
+        held_item.play_use("place")
+    play_feedback("place", block.global_position, feedback_color_for_material(block_type), 5)
+    if block_type == "workbench":
+        objective_system.complete("place_workbench")
+    award_place_xp(block_type)
+    if tutorial_system and tutorial_system.has_method("on_block_placed") and bool(tutorial_system.on_block_placed(block)):
+        update_hud(tutorial_system.last_message)
+    else:
+        update_hud("Placed %s" % ItemCatalogScript.label(block_type))
+
+func should_face_player(block_type: String) -> bool:
+    return block_type in ["door", "bed", "chest", "furnace", "anvil", "workbench", "traderStall"]
+
+func snapped_player_yaw() -> float:
+    if player == null:
+        return 0.0
+    return roundf(player.rotation.y / (PI * 0.5)) * PI * 0.5
+
+func fallback_ground_placement_hit(max_distance: float) -> Dictionary:
+    if player == null or player.camera == null:
+        return {}
+    var origin: Vector3 = player.camera.global_position
+    var forward: Vector3 = -player.camera.global_transform.basis.z.normalized()
+    if forward.y > -0.04:
+        return {}
+    var previous_delta: float = origin.y - height_at_world(origin.x, origin.z)
+    var steps := 18
+    for i in range(1, steps + 1):
+        var distance := max_distance * float(i) / float(steps)
+        var sample: Vector3 = origin + forward * distance
+        var ground_y := height_at_world(sample.x, sample.z)
+        var delta := sample.y - ground_y
+        if previous_delta >= 0.0 and delta <= 0.08:
+            return {
+                "position": Vector3(sample.x, ground_y, sample.z),
+                "normal": Vector3.UP,
+                "collider": null
+            }
+        previous_delta = delta
+    return {}
+
+func placement_from_hit(hit: Dictionary, block_type: String) -> Dictionary:
+    var hit_position: Vector3 = hit.get("position", Vector3.ZERO)
+    var normal: Vector3 = hit.get("normal", Vector3.UP)
+    if normal.length_squared() < 0.001:
+        normal = Vector3.UP
+    normal = normal.normalized()
+    var profile := block_collision_profile(block_type)
+    var collider_size: Vector3 = profile.get("size", Vector3.ONE * CELL * 0.96)
+    var collider_offset: Vector3 = profile.get("offset", Vector3.ZERO)
+    var hit_collider := hit.get("collider") as Node
+
+    if hit_collider and hit_collider.has_meta("kind") and String(hit_collider.get_meta("kind")) == "block" and hit_collider.has_meta("cell"):
+        var target_cell: Vector3i = hit_collider.get_meta("cell")
+        var offset_cell := dominant_cell_offset(normal)
+        var cell := target_cell + offset_cell
+        var world_y := float(cell.y) * CELL
+        if offset_cell.y > 0:
+            world_y = hit_position.y - collider_offset.y + collider_size.y * 0.5
+        elif offset_cell.y < 0:
+            world_y = hit_position.y - collider_offset.y - collider_size.y * 0.5
+        elif hit_collider is Node3D:
+            world_y = (hit_collider as Node3D).global_position.y
+        return {
+            "cell": cell,
+            "world_y": world_y
+        }
+
+    var planar_normal := Vector3(normal.x, 0.0, normal.z)
+    var xz_position := hit_position
+    if planar_normal.length_squared() > 0.001:
+        xz_position += planar_normal.normalized() * CELL * 0.18
+    var ground_y := placement_surface_height(xz_position.x, xz_position.z, block_type)
+    var world_y := ground_y - collider_offset.y + collider_size.y * 0.5
+    return {
+        "cell": Vector3i(world_to_cell(xz_position.x), floori(world_y / CELL) + 1, world_to_cell(xz_position.z)),
+        "world_y": world_y
+    }
+
+func placement_within_action_reach(placement: Dictionary) -> bool:
+    if player == null or not placement.has("cell"):
+        return false
+    var cell: Vector3i = placement["cell"]
+    var target_flat := Vector2(float(cell.x) * CELL, float(cell.z) * CELL)
+    var player_flat := Vector2(player.global_position.x, player.global_position.z)
+    return player_flat.distance_to(target_flat) <= ACTION_REACH
+
+func hit_within_action_reach(hit: Dictionary) -> bool:
+    if player == null or not hit.has("position"):
+        return false
+    var hit_position: Vector3 = hit.get("position", Vector3.ZERO)
+    var target_flat := Vector2(hit_position.x, hit_position.z)
+    var player_flat := Vector2(player.global_position.x, player.global_position.z)
+    return player_flat.distance_to(target_flat) <= ACTION_REACH
+
+func placement_surface_height(x: float, z: float, block_type: String) -> float:
+    var profile := block_collision_profile(block_type)
+    var size: Vector3 = profile.get("size", Vector3.ONE * CELL * 0.96)
+    var radius_x: float = clampf(size.x * 0.42, CELL * 0.22, CELL * 0.54)
+    var radius_z: float = clampf(size.z * 0.42, CELL * 0.22, CELL * 0.54)
+    var samples := [
+        Vector2.ZERO,
+        Vector2(radius_x, 0.0),
+        Vector2(-radius_x, 0.0),
+        Vector2(0.0, radius_z),
+        Vector2(0.0, -radius_z),
+        Vector2(radius_x, radius_z),
+        Vector2(-radius_x, radius_z),
+        Vector2(radius_x, -radius_z),
+        Vector2(-radius_x, -radius_z)
+    ]
+    var center_height := height_at_world(x, z)
+    var min_height := center_height
+    var max_height := center_height
+    for sample in samples:
+        var h := height_at_world(x + sample.x, z + sample.y)
+        min_height = minf(min_height, h)
+        max_height = maxf(max_height, h)
+    var variation := max_height - min_height
+    var support_tolerance := CELL * (0.92 if block_type in ["workbench", "anvil", "chest", "furnace"] else 0.72)
+    return max_height if variation <= support_tolerance else center_height
+
+func dominant_cell_offset(normal: Vector3) -> Vector3i:
+    var abs_normal := Vector3(absf(normal.x), absf(normal.y), absf(normal.z))
+    if abs_normal.y >= abs_normal.x and abs_normal.y >= abs_normal.z:
+        return Vector3i(0, 1 if normal.y >= 0.0 else -1, 0)
+    if abs_normal.x >= abs_normal.z:
+        return Vector3i(1 if normal.x >= 0.0 else -1, 0, 0)
+    return Vector3i(0, 0, 1 if normal.z >= 0.0 else -1)
+
+func block_collision_profile(block_type: String) -> Dictionary:
+    var size := Vector3.ONE * CELL * 0.96
+    var offset := Vector3.ZERO
+    if block_type == "workbench":
+        size = Vector3(CELL * 1.12, CELL * 0.72, CELL * 0.88)
+        offset.y = CELL * 0.02
+    elif block_type == "chest":
+        size = Vector3(CELL * 1.02, CELL * 0.68, CELL * 0.78)
+        offset.y = -CELL * 0.06
+    elif block_type == "bed":
+        size = Vector3(CELL * 1.20, CELL * 0.44, CELL * 0.82)
+        offset.y = -CELL * 0.25
+    elif block_type == "anvil":
+        size = Vector3(CELL * 1.00, CELL * 0.74, CELL * 0.58)
+        offset.y = -CELL * 0.10
+    elif block_type == "furnace":
+        size = Vector3(CELL * 0.98, CELL * 0.94, CELL * 0.84)
+        offset.y = -CELL * 0.02
+    elif block_type == "cobblestonePath":
+        size = Vector3(CELL * 0.96, CELL * 0.045, CELL * 0.96)
+    elif block_type == "door":
+        size = Vector3(CELL * 0.92, CELL * 1.72, CELL * 0.16)
+        offset.y = CELL * 0.38
+    elif block_type == "torch":
+        size = Vector3(CELL * 0.18, CELL * 0.82, CELL * 0.18)
+        offset.y = CELL * 0.10
+    elif block_type == "spikeTrap":
+        size = Vector3(CELL * 0.82, CELL * 0.30, CELL * 0.82)
+        offset.y = -CELL * 0.28
+    elif block_type == "campfire":
+        size = Vector3(CELL * 0.70, CELL * 0.32, CELL * 0.70)
+        offset.y = -CELL * 0.28
+    elif block_type == "traderStall":
+        size = Vector3(CELL * 1.12, CELL * 0.74, CELL * 0.82)
+        offset.y = -CELL * 0.14
+    return {
+        "size": size,
+        "offset": offset
+    }

@@ -3,3 +3,5 @@ export.cfg
 export_presets.cfg
 *.tmp
 *.translation
+playtest-report.json
+playtest-progress.txt

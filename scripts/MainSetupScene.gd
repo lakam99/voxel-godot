@@ -1,0 +1,436 @@
+extends "res://scripts/MainSaveState.gd"
+
+func setup_materials() -> void:
+    terrain_material = StandardMaterial3D.new()
+    terrain_material.vertex_color_use_as_albedo = true
+    terrain_material.roughness = 0.86
+    terrain_material.cull_mode = BaseMaterial3D.CULL_DISABLED
+
+    materials["woodBlock"] = make_material(Color(0.60, 0.36, 0.17), 0.82)
+    materials["stoneBlock"] = make_material(Color(0.52, 0.57, 0.54), 0.90)
+    materials["dirtBlock"] = make_material(Color(0.39, 0.27, 0.16), 0.92)
+    materials["glass"] = make_material(Color(0.55, 0.82, 0.92, 0.42), 0.12, true)
+    materials["cobblestonePath"] = make_material(Color(0.42, 0.46, 0.42), 0.88)
+    materials["workbench"] = make_material(Color(0.57, 0.34, 0.16), 0.80)
+    materials["anvil"] = make_material(Color(0.24, 0.26, 0.26), 0.74)
+    materials["door"] = make_material(Color(0.31, 0.16, 0.07), 0.76)
+    materials["bed"] = make_material(Color(0.60, 0.24, 0.24), 0.82)
+    materials["chest"] = make_material(Color(0.50, 0.29, 0.12), 0.78)
+    materials["chestBand"] = make_material(Color(0.19, 0.16, 0.12), 0.64)
+    materials["bedPillow"] = make_material(Color(0.86, 0.82, 0.72), 0.76)
+    materials["bedBlanket"] = make_material(Color(0.66, 0.21, 0.19), 0.80)
+    materials["hingeMetal"] = make_material(Color(0.78, 0.64, 0.32), 0.46)
+    materials["furnaceMouth"] = make_material(Color(0.08, 0.07, 0.06), 0.92)
+    materials["furnaceGlow"] = make_emissive_material(Color(1.0, 0.38, 0.12), 0.62)
+    materials["flame"] = make_emissive_material(Color(1.0, 0.48, 0.12), 0.92)
+    materials["traderStall"] = make_material(Color(0.62, 0.38, 0.18), 0.78)
+    materials["traderCloth"] = make_material(Color(0.79, 0.29, 0.25), 0.74)
+    materials["traderClothLight"] = make_material(Color(0.86, 0.77, 0.55), 0.76)
+    materials["furnace"] = make_material(Color(0.34, 0.36, 0.34), 0.90)
+    materials["campfire"] = make_material(Color(0.64, 0.34, 0.12), 0.78)
+    materials["torch"] = make_material(Color(0.80, 0.52, 0.22), 0.72)
+    materials["spikeTrap"] = make_material(Color(0.38, 0.31, 0.25), 0.86)
+    materials["wardLantern"] = make_material(Color(0.72, 0.58, 0.28), 0.42)
+    materials["sanctuaryBeacon"] = make_material(Color(0.54, 0.74, 0.92), 0.34)
+    materials["riftAnchor"] = make_material(Color(0.42, 0.30, 0.62), 0.52)
+    materials["trunk"] = make_material(Color(0.33, 0.18, 0.10), 0.86)
+    materials["leaf"] = make_material(Color(0.17, 0.45, 0.19), 0.78)
+    materials["rock"] = make_material(Color(0.40, 0.45, 0.43), 0.92)
+    materials["oreBase"] = make_material(Color(0.30, 0.34, 0.33), 0.94)
+    materials["copperOre"] = make_material(Color(0.84, 0.43, 0.20), 0.58)
+    materials["ironOre"] = make_material(Color(0.76, 0.79, 0.74), 0.62)
+    materials["copperVein"] = make_material(Color(0.78, 0.36, 0.17), 0.60)
+    materials["ironVein"] = make_material(Color(0.72, 0.75, 0.70), 0.64)
+    materials["copperOreGlow"] = make_emissive_material(Color(1.0, 0.54, 0.24), 0.26)
+    materials["ironOreGlow"] = make_emissive_material(Color(0.88, 0.93, 0.86), 0.20)
+    materials["wildlife"] = make_material(Color(0.58, 0.43, 0.30), 0.84)
+    materials["wildlifeDark"] = make_material(Color(0.29, 0.22, 0.16), 0.86)
+    materials["berryBush"] = make_material(Color(0.20, 0.48, 0.20), 0.82)
+    materials["berryFruit"] = make_material(Color(0.82, 0.14, 0.20), 0.62)
+    materials["aloePatch"] = make_material(Color(0.34, 0.66, 0.38), 0.80)
+    materials["mushroomCluster"] = make_material(Color(0.73, 0.68, 0.54), 0.86)
+    materials["mushroomCap"] = make_material(Color(0.64, 0.28, 0.42), 0.78)
+    materials["frostHerbPatch"] = make_material(Color(0.70, 0.90, 0.92), 0.58)
+    materials["detailGrass"] = make_material(Color(0.34, 0.68, 0.27), 0.86)
+    materials["detailFlower"] = make_material(Color(0.95, 0.64, 0.32), 0.72)
+    materials["detailReed"] = make_material(Color(0.42, 0.55, 0.24), 0.86)
+    materials["detailPebble"] = make_material(Color(0.48, 0.51, 0.48), 0.92)
+    materials["detailSnow"] = make_material(Color(0.88, 0.93, 0.91), 0.78)
+    materials["detailScrub"] = make_material(Color(0.50, 0.56, 0.26), 0.88)
+    materials["detailLeaf"] = make_material(Color(0.48, 0.38, 0.18), 0.88)
+    materials["rawFish"] = make_material(Color(0.42, 0.72, 0.78), 0.52)
+    materials["cookedFish"] = make_material(Color(0.78, 0.42, 0.24), 0.74)
+    materials["water"] = make_material(Color(0.30, 0.70, 0.78, 0.46), 0.20, true)
+    materials["sunDisc"] = make_unshaded_material(Color(1.0, 0.82, 0.38))
+    materials["moonDisc"] = make_unshaded_material(Color(0.72, 0.78, 0.94))
+
+func make_material(color: Color, roughness: float = 0.82, transparent: bool = false) -> StandardMaterial3D:
+    var material := StandardMaterial3D.new()
+    material.albedo_color = color
+    material.roughness = roughness
+    if transparent:
+        material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+    return material
+
+func make_emissive_material(color: Color, energy: float) -> StandardMaterial3D:
+    var material := make_material(color, 0.48)
+    material.emission_enabled = true
+    material.emission = color
+    material.emission_energy_multiplier = energy
+    return material
+
+func make_unshaded_material(color: Color) -> StandardMaterial3D:
+    var material := StandardMaterial3D.new()
+    material.albedo_color = color
+    material.roughness = 1.0
+    material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+    return material
+
+func setup_environment() -> void:
+    world_environment = WorldEnvironment.new()
+    var env := Environment.new()
+    env.background_mode = Environment.BG_COLOR
+    env.background_color = Color(0.66, 0.84, 0.87)
+    env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
+    env.ambient_light_color = Color(0.78, 0.82, 0.76)
+    env.ambient_light_energy = 0.52
+    world_environment.environment = env
+    add_child(world_environment)
+
+    sun = DirectionalLight3D.new()
+    sun.name = "Sun"
+    sun.light_color = Color(1.0, 0.88, 0.62)
+    sun.light_energy = 2.25
+    sun.shadow_enabled = true
+    add_child(sun)
+
+    moon = DirectionalLight3D.new()
+    moon.name = "Moon"
+    moon.light_color = Color(0.58, 0.68, 1.0)
+    moon.light_energy = 0.10
+    moon.shadow_enabled = false
+    add_child(moon)
+
+    sun_visual = make_sky_body("SunDisc", materials["sunDisc"], 20.0)
+    moon_visual = make_sky_body("MoonDisc", materials["moonDisc"], 15.0)
+    add_child(sun_visual)
+    add_child(moon_visual)
+
+    var plane := PlaneMesh.new()
+    plane.size = Vector2(3000.0, 3000.0)
+    water = MeshInstance3D.new()
+    water.name = "Water"
+    water.mesh = plane
+    water.material_override = materials["water"]
+    water.position.y = WATER_LEVEL
+    add_child(water)
+
+    weather_system = WeatherSystemScript.new()
+    weather_system.name = "Weather"
+    weather_system.setup(self, seed_hash)
+    add_child(weather_system)
+    update_sky(0.0)
+
+func setup_break_overlay() -> void:
+    break_material = StandardMaterial3D.new()
+    break_material.albedo_color = Color(0.05, 0.045, 0.035, 0.95)
+    break_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+    break_material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+    break_overlay = MeshInstance3D.new()
+    break_overlay.name = "BreakageOverlay"
+    break_overlay.visible = false
+    break_overlay.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+    add_child(break_overlay)
+
+func make_sky_body(node_name: String, material: Material, radius: float) -> MeshInstance3D:
+    var mesh := SphereMesh.new()
+    mesh.radius = radius
+    mesh.height = radius * 2.0
+    mesh.radial_segments = 32
+    mesh.rings = 16
+    var body := MeshInstance3D.new()
+    body.name = node_name
+    body.mesh = mesh
+    body.material_override = material
+    body.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+    return body
+
+func setup_player() -> void:
+    player = CharacterBody3D.new()
+    player.name = "Player"
+    player.set_script(PlayerController)
+    player.main = self
+    player.survival = survival_system
+    player.position = find_spawn_position()
+    add_child(player)
+
+func setup_hostiles() -> void:
+    hostile_system = HostileSystemScript.new()
+    hostile_system.name = "Hostiles"
+    hostile_system.setup(self, player, survival_system, inventory_system)
+    add_child(hostile_system)
+
+func setup_npc_system() -> void:
+    npc_system = NpcSystemScript.new()
+    npc_system.name = "NPCs"
+    add_child(npc_system)
+    npc_system.setup(self, hostile_system)
+
+func setup_player_projectiles() -> void:
+    player_projectiles = PlayerProjectileSystemScript.new()
+    player_projectiles.name = "PlayerProjectiles"
+    player_projectiles.setup(player, inventory_system, hostile_system, ItemCatalogScript.ITEMS, blocks)
+    player_projectiles.hostile_hit.connect(_on_player_projectile_hostile_hit)
+    add_child(player_projectiles)
+
+func setup_held_item() -> void:
+    if not player or not player.camera:
+        return
+    held_item = HeldItemSystemScript.new()
+    held_item.name = "HeldItem"
+    player.camera.add_child(held_item)
+    held_item.setup(inventory_system)
+
+func find_spawn_position() -> Vector3:
+    var best_cell := find_spawn_cell(CELL * 0.35)
+    if best_cell == Vector2i(999999, 999999):
+        best_cell = find_spawn_cell(CELL * 0.9)
+    if best_cell == Vector2i(999999, 999999):
+        best_cell = find_spawn_cell(CELL * 1.6)
+    if best_cell == Vector2i(999999, 999999):
+        best_cell = Vector2i(0, 28)
+    var spawn_height: float = terrain_height_cell(best_cell.x, best_cell.y)
+    return Vector3(best_cell.x * CELL, spawn_height + 5.0, best_cell.y * CELL)
+
+func find_spawn_cell(max_variation: float) -> Vector2i:
+    var best_cell := Vector2i(999999, 999999)
+    var best_score: float = -999999.0
+    for z in range(-72, 73):
+        for x in range(-72, 73):
+            var h: float = terrain_height_cell(x, z)
+            if h <= WATER_LEVEL + 2.4:
+                continue
+            var variation: float = height_variation_cell(x, z, 2)
+            if variation > max_variation:
+                continue
+            var biome: String = biome_at_cell(x, z)
+            var biome_score: float = 0.0
+            if biome == "plains" or biome == "forest" or biome == "savanna":
+                biome_score = 18.0
+            elif biome == "beach":
+                biome_score = 6.0
+            elif biome == "alpine" or biome == "snow":
+                biome_score = -20.0
+            var distance_penalty: float = Vector2(float(x), float(z)).length() * 0.18
+            var score: float = biome_score - variation * 8.0 - distance_penalty
+            if score > best_score:
+                best_score = score
+                best_cell = Vector2i(x, z)
+    return best_cell
+
+func height_variation_cell(x: int, z: int, radius: int) -> float:
+    var center_height: float = terrain_height_cell(x, z)
+    var max_delta := 0.0
+    for dz in range(-radius, radius + 1):
+        for dx in range(-radius, radius + 1):
+            var sample_height: float = terrain_height_cell(x + dx, z + dz)
+            max_delta = max(max_delta, abs(sample_height - center_height))
+    return max_delta
+
+func setup_hud() -> void:
+    hud = GameHudScript.new()
+    hud.name = "HUD"
+    add_child(hud)
+    hud.setup(inventory_system, crafting_system, objective_system, equipment_system, contract_system)
+    hud.slot_clicked.connect(_on_ui_slot_clicked)
+    hud.slot_moved.connect(_on_ui_slot_moved)
+    hud.craft_requested.connect(_on_craft_requested)
+    hud.utility_action_requested.connect(_on_utility_action_requested)
+    hud.teleport_requested.connect(_on_teleport_requested)
+    hud.equipment_slot_clicked.connect(_on_equipment_slot_clicked)
+    hud.setting_changed.connect(_on_setting_changed)
+    hud.playtest_requested.connect(_on_playtest_requested)
+    hud.playtest_cleanup_requested.connect(_on_playtest_cleanup_requested)
+    hud.resume_requested.connect(_on_resume_requested)
+    hud.new_game_requested.connect(_on_new_game_requested)
+    hud.dialogue_closed.connect(_on_dialogue_closed)
+    hud.set_settings_state(runtime_settings)
+    hud.set_playtest_cases(playtest_case_specs())
+    apply_runtime_settings()
+
+func setup_tutorial_system() -> void:
+    tutorial_system = TutorialSystemScript.new()
+    tutorial_system.name = "TutorialSystem"
+    add_child(tutorial_system)
+    tutorial_system.setup(self)
+
+func setup_audio_effects() -> void:
+    audio_effects = AudioEffectsSystemScript.new()
+    audio_effects.name = "AudioEffects"
+    add_child(audio_effects)
+
+func play_feedback(effect_name: String, position := Vector3.INF, color := Color.WHITE, count := 0) -> void:
+    if audio_effects == null:
+        return
+    audio_effects.play(effect_name)
+    if count <= 0:
+        return
+    var effect_position: Vector3 = position
+    if effect_position == Vector3.INF:
+        effect_position = player.global_position + Vector3(0.0, 1.25, 0.0) if player else Vector3.ZERO
+    audio_effects.burst(effect_position, color, count)
+
+func refresh_intro_knock_audio() -> void:
+    if audio_effects == null:
+        return
+    var should_knock: bool = tutorial_system != null and tutorial_system.has_method("should_loop_intro_knock") and bool(tutorial_system.should_loop_intro_knock())
+    if should_knock and audio_effects.has_method("start_knock_loop"):
+        audio_effects.start_knock_loop()
+    elif audio_effects.has_method("stop_knock_loop"):
+        audio_effects.stop_knock_loop()
+
+func show_tutorial_dialogue(fallback_message: String) -> void:
+    if tutorial_system == null or hud == null or not tutorial_system.has_method("dialogue_payload"):
+        update_hud(fallback_message)
+        return
+    var dialogue: Dictionary = tutorial_system.dialogue_payload()
+    if dialogue.is_empty():
+        update_hud(fallback_message)
+        return
+    if tutorial_system.has_method("focus_dialogue_npc"):
+        tutorial_system.focus_dialogue_npc()
+    hud.show_dialogue(
+        String(dialogue.get("speaker", "Villager")),
+        String(dialogue.get("role", "")),
+        String(dialogue.get("text", fallback_message)),
+        dialogue
+    )
+    Input.set_mouse_mode(Input.MOUSE_MODE_VISIBLE)
+    update_hud("", true)
+
+func capture_mouse_if_no_modal() -> void:
+    if hud == null:
+        Input.set_mouse_mode(Input.MOUSE_MODE_CAPTURED)
+        return
+    if not (
+        hud.is_inventory_open()
+        or hud.is_utility_open()
+        or hud.is_teleport_open()
+        or hud.is_contracts_open()
+        or hud.is_settings_open()
+        or hud.is_playtest_open()
+        or hud.is_game_menu_open()
+        or hud.is_dialogue_open()
+    ):
+        Input.set_mouse_mode(Input.MOUSE_MODE_CAPTURED)
+
+func disable_collision_shapes_recursive(node: Node) -> void:
+    for child in node.get_children():
+        var collider := child as CollisionShape3D
+        if collider:
+            collider.disabled = true
+        disable_collision_shapes_recursive(child)
+
+func spawn_falling_tree_visual(tree: Node3D) -> void:
+    if tree == null or tree.get_parent() == null:
+        return
+    var visual := tree.duplicate() as Node3D
+    if visual == null:
+        return
+    visual.name = "FallingTree"
+    tree.get_parent().add_child(visual)
+    visual.global_transform = tree.global_transform
+    visual.set_meta("kind", "falling")
+    disable_collision_shapes_recursive(visual)
+
+    var target_rotation := visual.rotation
+    var fall_axis_z := true
+    var direction := 1.0
+    if player:
+        var offset := player.global_position - tree.global_position
+        fall_axis_z = abs(offset.x) > abs(offset.z)
+        direction = sign(offset.x) if fall_axis_z else -sign(offset.z)
+        if is_zero_approx(direction):
+            direction = 1.0
+    if fall_axis_z:
+        target_rotation.z += direction * (PI / 2.15)
+    else:
+        target_rotation.x += direction * (PI / 2.15)
+
+    var tween := create_tween()
+    tween.set_trans(Tween.TRANS_SINE)
+    tween.set_ease(Tween.EASE_IN_OUT)
+    tween.tween_property(visual, "rotation", target_rotation, 1.15)
+    tween.tween_interval(0.25)
+    tween.tween_callback(Callable(visual, "queue_free"))
+
+func feedback_color_for_material(material_id: String) -> Color:
+    var key := material_id
+    if key == "tree":
+        key = "trunk"
+    elif key == "grass":
+        return BIOME_COLORS["plains"].lightened(0.12)
+    elif key == "dirt" or key == "mud":
+        return Color(0.39, 0.27, 0.16)
+    elif key == "sand":
+        return Color(0.82, 0.72, 0.46)
+    elif key == "snow":
+        return Color(0.86, 0.91, 0.90)
+    elif key == "stone":
+        key = "stoneBlock"
+    if materials.has(key):
+        var material := materials[key] as StandardMaterial3D
+        if material:
+            return material.albedo_color
+    return Color(0.72, 0.68, 0.58)
+
+func _process(delta: float) -> void:
+    var frame_start := Time.get_ticks_usec()
+    world_elapsed += delta
+    if player:
+        var chunk_start := Time.get_ticks_usec()
+        update_chunks(false)
+        perf_chunk_ms = profiled_ms(chunk_start)
+        water.position.x = player.position.x
+        water.position.z = player.position.z
+    var sky_start := Time.get_ticks_usec()
+    update_sky(delta)
+    perf_sky_ms = profiled_ms(sky_start)
+    update_sleep_transition(delta)
+    var utility_start := Time.get_ticks_usec()
+    if utility_system:
+        utility_system.update(delta)
+    perf_utility_ms = profiled_ms(utility_start)
+    var pickups_start := Time.get_ticks_usec()
+    update_dropped_pickups(delta)
+    perf_pickups_ms = profiled_ms(pickups_start)
+    update_wildlife(delta)
+    var survival_start := Time.get_ticks_usec()
+    update_survival(delta)
+    perf_survival_ms = profiled_ms(survival_start)
+    var hostiles_start := Time.get_ticks_usec()
+    update_hostiles(delta)
+    perf_hostiles_ms = profiled_ms(hostiles_start)
+    update_npcs(delta)
+    handle_collapse_if_needed()
+    var beacon_start := Time.get_ticks_usec()
+    update_beacon_charge(delta)
+    perf_beacon_ms = profiled_ms(beacon_start)
+    var autosave_start := Time.get_ticks_usec()
+    if autosave_enabled:
+        autosave_elapsed += delta
+        if autosave_elapsed >= 5.0:
+            autosave_elapsed = 0.0
+            save_world(false)
+    perf_autosave_ms = profiled_ms(autosave_start)
+    var break_start := Time.get_ticks_usec()
+    update_break_reset(delta)
+    perf_break_ms = profiled_ms(break_start)
+    var hud_start := Time.get_ticks_usec()
+    update_hud_frame(delta)
+    perf_hud_ms = profiled_ms(hud_start)
+    update_performance_overlay(delta)
+    perf_frame_ms = profiled_ms(frame_start)
+
+func profiled_ms(start_usec: int) -> float:
+    return float(Time.get_ticks_usec() - start_usec) / 1000.0
