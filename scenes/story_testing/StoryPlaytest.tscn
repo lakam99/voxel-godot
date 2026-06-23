@@ -1,0 +1,6 @@
+[gd_scene load_steps=2 format=3 uid="uid://storyplaytestrunner"]
+
+[ext_resource type="Script" path="res://scripts/story/testing/StoryPlaytestRunner.gd" id="1_story_test"]
+
+[node name="StoryPlaytestRunner" type="Node"]
+script = ExtResource("1_story_test")
