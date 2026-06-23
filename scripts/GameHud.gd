@@ -9,7 +9,7 @@ const GameHudLayoutBuilderScript := preload("res://scripts/GameHudLayoutBuilder.
 const GameHudRendererScript := preload("res://scripts/GameHudRenderer.gd")
 const GameHudOverlayControllerScript := preload("res://scripts/GameHudOverlayController.gd")
 const HudStyleFactoryScript := preload("res://scripts/visual/HudStyleFactory.gd")
-const GAME_BUILD_LABEL := "build 2026.06.22.8"
+const GAME_BUILD_LABEL := "build 2026.06.23.1"
 
 signal slot_clicked(index)
 signal slot_moved(from_index, to_index)

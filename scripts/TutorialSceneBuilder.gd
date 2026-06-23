@@ -2,6 +2,7 @@ extends RefCounted
 class_name TutorialSceneBuilder
 
 const NpcVisualFactoryScript := preload("res://scripts/NpcVisualFactory.gd")
+const FireLight3DScript := preload("res://scripts/FireLight3D.gd")
 const CELL := 1.35
 const SAFE_RADIUS_CELLS := 24
 const FENCE_RADIUS_CELLS := 25
@@ -313,13 +314,13 @@ func add_mesh(parent: Node3D, mesh: Mesh, material: Material, position: Vector3,
 func add_warm_light(position: Vector3, radius: float, energy: float) -> void:
     if system.light_root == null:
         return
-    var light := OmniLight3D.new()
+    var light := FireLight3DScript.new()
     light.name = "TutorialLanternLight"
     light.position = position
-    light.light_color = Color(1.0, 0.72, 0.38)
-    light.light_energy = energy
-    light.omni_range = radius
-    light.shadow_enabled = false
+    var cast_shadows := main != null and bool(main.get("shadows_enabled"))
+    light.configure(Color(1.0, 0.90, 0.74), energy, radius, cast_shadows)
+    if light.has_method("set_day_suppressed"):
+        light.set_day_suppressed(true)
     system.light_root.add_child(light)
 
 func make_material(color: Color, roughness: float) -> StandardMaterial3D:

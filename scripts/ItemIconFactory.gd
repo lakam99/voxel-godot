@@ -37,7 +37,7 @@ func setup_palette() -> void:
     palette["cooked"] = Color(0.72, 0.34, 0.18, 1.0)
     palette["herb"] = Color(0.48, 0.78, 0.44, 1.0)
     palette["frost"] = Color(0.72, 0.92, 0.96, 1.0)
-    palette["flame"] = Color(1.0, 0.55, 0.16, 1.0)
+    palette["flame"] = Color(1.0, 0.72, 0.38, 1.0)
     palette["string"] = Color(0.92, 0.82, 0.62, 1.0)
 
 func icon_for(item_id: String) -> Texture2D:

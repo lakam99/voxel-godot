@@ -15,12 +15,15 @@ var materials := {}
 var visual_factory
 var sway_enabled := true
 var sway_time := 0.0
+var local_light_shadows_enabled := true
 
-func setup(inventory_system) -> void:
+func setup(inventory_system, static_asset_registry = null) -> void:
     inventory = inventory_system
     position = base_position
     rotation = base_rotation
     visual_factory = ItemVisualFactoryScript.new()
+    if visual_factory and visual_factory.has_method("set_static_asset_registry"):
+        visual_factory.set_static_asset_registry(static_asset_registry)
     setup_materials()
     item_root = Node3D.new()
     item_root.name = "HeldItemRoot"
@@ -65,6 +68,7 @@ func refresh_active() -> void:
     var visual: Node3D = visual_factory.make_held_item(current_item) if visual_factory else null
     if visual:
         item_root.add_child(visual)
+        apply_local_light_shadows(item_root)
     else:
         visible = false
 
@@ -77,6 +81,18 @@ func _process(delta: float) -> void:
 func set_sway_enabled(enabled: bool) -> void:
     sway_enabled = enabled
     apply_pose()
+
+func set_local_light_shadows_enabled(enabled: bool) -> void:
+    local_light_shadows_enabled = enabled
+    apply_local_light_shadows(item_root)
+
+func apply_local_light_shadows(node: Node) -> void:
+    if node == null:
+        return
+    if node is Light3D and bool(node.get_meta("casts_shadow_when_enabled", false)):
+        (node as Light3D).shadow_enabled = local_light_shadows_enabled
+    for child in node.get_children():
+        apply_local_light_shadows(child)
 
 func play_use(action: String) -> void:
     use_action = action

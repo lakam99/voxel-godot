@@ -1,0 +1,6 @@
+[gd_scene load_steps=2 format=3 uid="uid://animatedassetpreview"]
+
+[ext_resource type="Script" path="res://scripts/visual/AnimatedAssetPreview.gd" id="1_preview"]
+
+[node name="AnimatedAssetPreview" type="Node3D"]
+script = ExtResource("1_preview")

@@ -6,6 +6,7 @@ const CASES := [
     { "name": "town_noon", "playtest": "town", "clock": 12.0, "weather": "clear", "intensity": 0.0, "clouds": 0.22, "hud": false, "offset": Vector3(8.5, 0.0, 8.5), "pitch": -10.0 },
     { "name": "town_sunset", "playtest": "town", "clock": 18.7, "weather": "clear", "intensity": 0.0, "clouds": 0.26, "hud": false, "offset": Vector3(-9.0, 0.0, 7.5), "pitch": -8.0 },
     { "name": "forest_midnight", "playtest": "forest", "clock": 0.0, "weather": "clear", "intensity": 0.0, "clouds": 0.18, "hud": false, "offset": Vector3(7.0, 0.0, 9.0), "pitch": -6.0 },
+    { "name": "forest_midnight_lights", "playtest": "forest", "clock": 23.8, "weather": "clear", "intensity": 0.0, "clouds": 0.18, "hud": false, "offset": Vector3(7.0, 0.0, 9.0), "pitch": -8.0, "heldItem": "torch", "placedLights": true },
     { "name": "forest_rain", "playtest": "forest", "clock": 16.5, "weather": "rain", "intensity": 0.68, "clouds": 0.88, "hud": false, "offset": Vector3(8.0, 0.0, 7.0), "pitch": -9.0 },
     { "name": "mountain_day", "playtest": "mountain", "clock": 9.0, "weather": "clear", "intensity": 0.0, "clouds": 0.30, "hud": false, "offset": Vector3(24.0, 0.0, 18.0), "pitch": -16.0, "eyeHeight": 7.0 },
     { "name": "water_clear", "playtest": "water", "clock": 12.0, "weather": "clear", "intensity": 0.0, "clouds": 0.18, "hud": false, "offset": Vector3(7.0, 0.0, 7.0), "pitch": -18.0, "lookAtWater": true },
@@ -33,10 +34,49 @@ func run() -> void:
     add_child(main)
     await wait_frames(90)
     configure_static_scene()
-    for case_spec in CASES:
+    var capture_cases := CASES.duplicate()
+    if OS.get_environment("VOXEL_VISUAL_CAPTURE_TOOLS") == "1":
+        capture_cases.append_array(tool_capture_cases())
+    for case_spec in capture_cases:
         await capture_case(case_spec)
     write_metadata()
     get_tree().quit(1 if failed else 0)
+
+func tool_capture_cases() -> Array[Dictionary]:
+    var ids := [
+        "woodenAxe",
+        "stoneAxe",
+        "ironAxe",
+        "woodenPickaxe",
+        "stonePickaxe",
+        "copperPickaxe",
+        "ironPickaxe",
+        "woodenShovel",
+        "copperShovel",
+        "ironShovel",
+        "woodenSword",
+        "stoneSword",
+        "ironSword",
+        "nightBlade",
+        "hunterBow",
+        "ironCrossbow",
+        "fishingRod"
+    ]
+    var cases: Array[Dictionary] = []
+    for item_id in ids:
+        cases.append({
+            "name": "held_%s" % item_id,
+            "playtest": "forest",
+            "clock": 13.0,
+            "weather": "clear",
+            "intensity": 0.0,
+            "clouds": 0.18,
+            "hud": false,
+            "offset": Vector3(7.0, 0.0, 9.0),
+            "pitch": -8.0,
+            "heldItem": item_id
+        })
+    return cases
 
 func configure_static_scene() -> void:
     disable_tutorial_capture_overrides()
@@ -79,6 +119,7 @@ func capture_case(capture_case: Dictionary) -> void:
     configure_static_scene()
     position_camera(capture_case)
     apply_capture_time_and_weather(capture_case)
+    configure_capture_lights(capture_case)
     set_hud_visible(bool(capture_case.get("hud", false)))
     await wait_frames(3)
     var case_name := String(capture_case["name"])
@@ -189,6 +230,55 @@ func set_hud_visible(visible: bool) -> void:
         (hud as CanvasLayer).visible = visible
         if visible:
             main.update_hud("Visual capture baseline")
+
+func configure_capture_lights(capture_case: Dictionary) -> void:
+    var held_item_id := String(capture_case.get("heldItem", ""))
+    if held_item_id != "":
+        var inventory = main.get("inventory_system")
+        if inventory != null and inventory.has_method("clear") and inventory.has_method("add_item"):
+            inventory.clear()
+            inventory.add_item(held_item_id, 1)
+            if inventory.has_method("select"):
+                inventory.select(0)
+        var held_item = main.get("held_item")
+        if held_item != null and held_item.has_method("refresh_active"):
+            held_item.refresh_active()
+    if bool(capture_case.get("placedLights", false)):
+        place_capture_light_fixture()
+
+func place_capture_light_fixture() -> void:
+    if player == null or camera == null:
+        return
+    var forward := -camera.global_transform.basis.z.normalized()
+    forward.y = 0.0
+    if forward.length() < 0.01:
+        forward = -player.global_transform.basis.z
+    forward = forward.normalized()
+    var right := camera.global_transform.basis.x.normalized()
+    right.y = 0.0
+    if right.length() < 0.01:
+        right = player.global_transform.basis.x
+    right = right.normalized()
+    var anchor := camera.global_position + forward * 4.4
+    var center_cell := Vector2i(roundi(anchor.x / main.CELL), roundi(anchor.z / main.CELL))
+    for y in range(0, 3):
+        for x in range(-2, 3):
+            var wall_cell := center_cell + Vector2i(x, 0)
+            create_capture_block(wall_cell, y, "stoneBlock")
+    create_capture_block(center_cell + Vector2i(0, -2), 0, "wardLantern")
+    create_capture_block(center_cell + Vector2i(-2, -2), 0, "torch")
+
+func create_capture_block(cell: Vector2i, y_offset: int, block_type: String) -> void:
+    var ground := float(main.terrain_height_cell(cell.x, cell.y))
+    var y_cell := floori((ground + main.CELL * 0.5) / main.CELL) + y_offset
+    var block_cell := Vector3i(cell.x, y_cell, cell.y)
+    var blocks: Dictionary = main.get("blocks")
+    if blocks.has(block_cell):
+        var existing := blocks[block_cell] as Node
+        if existing != null:
+            existing.queue_free()
+        blocks.erase(block_cell)
+    main.create_block(block_cell, block_type)
 
 func make_case_metadata(capture_case: Dictionary, png_path: String) -> Dictionary:
     var weather = main.get("weather_system")

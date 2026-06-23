@@ -29,6 +29,9 @@ func apply_runtime_setting(setting: String, value, sync_hud: bool = true) -> voi
             update_chunks(true)
     elif setting == "shadows":
         shadows_enabled = bool(value)
+        apply_local_light_shadows()
+        if held_item and held_item.has_method("set_local_light_shadows_enabled"):
+            held_item.set_local_light_shadows_enabled(shadows_enabled)
         if sun and moon:
             update_sky(0.0)
     elif setting == "weatherParticles":

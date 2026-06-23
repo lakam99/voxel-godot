@@ -9,14 +9,14 @@ func setup_materials() -> void:
         fallback_terrain.cull_mode = BaseMaterial3D.CULL_DISABLED
         terrain_material = fallback_terrain
 
-    materials["woodBlock"] = make_building_material(Color(0.60, 0.36, 0.17), Color(0.35, 0.19, 0.08), 0.82, 0.22, 0.10)
+    materials["woodBlock"] = make_building_material(Color(0.58, 0.34, 0.16), Color(0.35, 0.18, 0.07), 0.88, 0.18, 0.10, 0.30, 14.5, Color(0.19, 0.09, 0.035))
     materials["stoneBlock"] = make_building_material(Color(0.52, 0.57, 0.54), Color(0.33, 0.37, 0.35), 0.90, 0.18, 0.14)
     materials["dirtBlock"] = make_building_material(Color(0.43, 0.31, 0.20), Color(0.28, 0.19, 0.12), 0.92, 0.16, 0.07)
     materials["glass"] = make_material(Color(0.55, 0.82, 0.92, 0.42), 0.12, true)
     materials["cobblestonePath"] = make_building_material(Color(0.42, 0.46, 0.42), Color(0.26, 0.30, 0.28), 0.88, 0.16, 0.22)
-    materials["workbench"] = make_building_material(Color(0.57, 0.34, 0.16), Color(0.34, 0.17, 0.07), 0.80, 0.20, 0.08)
+    materials["workbench"] = make_building_material(Color(0.56, 0.32, 0.14), Color(0.32, 0.15, 0.06), 0.86, 0.16, 0.08, 0.34, 15.0, Color(0.18, 0.08, 0.03))
     materials["anvil"] = make_building_material(Color(0.24, 0.26, 0.26), Color(0.42, 0.44, 0.42), 0.74, 0.10, 0.06)
-    materials["door"] = make_building_material(Color(0.31, 0.16, 0.07), Color(0.52, 0.29, 0.12), 0.76, 0.18, 0.05)
+    materials["door"] = make_building_material(Color(0.34, 0.17, 0.07), Color(0.55, 0.30, 0.12), 0.86, 0.15, 0.05, 0.38, 16.0, Color(0.15, 0.065, 0.026))
     materials["bed"] = make_material(Color(0.60, 0.24, 0.24), 0.82)
     materials["chest"] = make_material(Color(0.50, 0.29, 0.12), 0.78)
     materials["chestBand"] = make_material(Color(0.19, 0.16, 0.12), 0.64)
@@ -24,8 +24,8 @@ func setup_materials() -> void:
     materials["bedBlanket"] = make_material(Color(0.66, 0.21, 0.19), 0.80)
     materials["hingeMetal"] = make_material(Color(0.78, 0.64, 0.32), 0.46)
     materials["furnaceMouth"] = make_material(Color(0.08, 0.07, 0.06), 0.92)
-    materials["furnaceGlow"] = make_emissive_material(Color(1.0, 0.38, 0.12), 0.62)
-    materials["flame"] = make_emissive_material(Color(1.0, 0.48, 0.12), 0.92)
+    materials["furnaceGlow"] = make_emissive_material(Color(1.0, 0.66, 0.36), 0.50)
+    materials["flame"] = make_emissive_material(Color(1.0, 0.73, 0.42), 0.72)
     materials["traderStall"] = make_material(Color(0.62, 0.38, 0.18), 0.78)
     materials["traderCloth"] = make_material(Color(0.79, 0.29, 0.25), 0.74)
     materials["traderClothLight"] = make_material(Color(0.86, 0.77, 0.55), 0.76)
@@ -61,9 +61,9 @@ func setup_materials() -> void:
     materials["detailSnow"] = make_detail_material(Color(0.88, 0.93, 0.91), 0.78, 0.0)
     materials["detailScrub"] = make_detail_material(Color(0.50, 0.56, 0.26), 0.88, 0.014)
     materials["detailLeaf"] = make_detail_material(Color(0.48, 0.38, 0.18), 0.88, 0.004)
-    materials["roofWood"] = make_building_material(Color(0.50, 0.25, 0.11), Color(0.30, 0.13, 0.06), 0.84, 0.20, 0.06)
+    materials["roofWood"] = make_building_material(Color(0.48, 0.23, 0.10), Color(0.28, 0.12, 0.05), 0.88, 0.16, 0.06, 0.28, 13.0, Color(0.15, 0.06, 0.025))
     materials["roofStone"] = make_building_material(Color(0.40, 0.46, 0.45), Color(0.25, 0.29, 0.28), 0.90, 0.17, 0.16)
-    materials["trimWood"] = make_building_material(Color(0.28, 0.14, 0.06), Color(0.48, 0.25, 0.10), 0.82, 0.14, 0.04)
+    materials["trimWood"] = make_building_material(Color(0.30, 0.15, 0.06), Color(0.48, 0.24, 0.09), 0.88, 0.12, 0.04, 0.32, 15.0, Color(0.13, 0.05, 0.02))
     materials["trimStone"] = make_building_material(Color(0.36, 0.39, 0.37), Color(0.56, 0.58, 0.54), 0.88, 0.12, 0.10)
     materials["rawFish"] = make_material(Color(0.42, 0.72, 0.78), 0.52)
     materials["cookedFish"] = make_material(Color(0.78, 0.42, 0.24), 0.74)
@@ -90,7 +90,16 @@ func make_detail_material(color: Color, roughness: float, wind_strength: float) 
     material.set_shader_parameter("wind_strength", wind_strength)
     return material
 
-func make_building_material(color: Color, accent: Color, roughness: float, breakup_strength: float, grid_strength: float) -> ShaderMaterial:
+func make_building_material(
+    color: Color,
+    accent: Color,
+    roughness: float,
+    breakup_strength: float,
+    grid_strength: float,
+    grain_strength: float = 0.0,
+    grain_scale: float = 13.0,
+    grain_color: Color = Color(0.20, 0.10, 0.04)
+) -> ShaderMaterial:
     var material := ShaderMaterial.new()
     material.shader = load("res://resources/visual/building_material.gdshader") as Shader
     material.set_shader_parameter("base_color", color)
@@ -98,6 +107,9 @@ func make_building_material(color: Color, accent: Color, roughness: float, break
     material.set_shader_parameter("roughness", roughness)
     material.set_shader_parameter("breakup_strength", breakup_strength)
     material.set_shader_parameter("grid_strength", grid_strength)
+    material.set_shader_parameter("grain_strength", grain_strength)
+    material.set_shader_parameter("grain_scale", grain_scale)
+    material.set_shader_parameter("grain_color", grain_color)
     return material
 
 func make_emissive_material(color: Color, energy: float) -> StandardMaterial3D:
@@ -250,7 +262,7 @@ func setup_held_item() -> void:
     held_item = HeldItemSystemScript.new()
     held_item.name = "HeldItem"
     player.camera.add_child(held_item)
-    held_item.setup(inventory_system)
+    held_item.setup(inventory_system, static_item_asset_registry)
 
 func find_spawn_position() -> Vector3:
     var best_cell := find_spawn_cell(CELL * 0.35)

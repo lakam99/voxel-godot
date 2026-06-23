@@ -1,0 +1,40 @@
+{
+  "generator": "animated-poc-v1",
+  "assets": [
+    {
+      "id": "door_open_close",
+      "path": "assets/generated/animated/door_open_close.glb",
+      "expectedAnimations": [
+        "door_open_close"
+      ]
+    },
+    {
+      "id": "chest_open_close",
+      "path": "assets/generated/animated/chest_open_close.glb",
+      "expectedAnimations": [
+        "chest_open_close"
+      ]
+    },
+    {
+      "id": "boar_idle_walk",
+      "path": "assets/generated/animated/boar_idle_walk.glb",
+      "expectedAnimations": [
+        "boar_idle_walk"
+      ]
+    },
+    {
+      "id": "deer_idle_walk",
+      "path": "assets/generated/animated/deer_idle_walk.glb",
+      "expectedAnimations": [
+        "deer_idle_walk"
+      ]
+    },
+    {
+      "id": "hare_idle_walk",
+      "path": "assets/generated/animated/hare_idle_walk.glb",
+      "expectedAnimations": [
+        "hare_idle_walk"
+      ]
+    }
+  ]
+}

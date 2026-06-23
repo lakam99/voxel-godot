@@ -51,7 +51,7 @@ func register_wildlife(body: StaticBody3D, rng: RandomNumberGenerator, cold := f
     body.set_meta("wildlife_home", body.global_position)
     body.set_meta("wildlife_direction", random_horizontal_direction(rng))
     body.set_meta("wildlife_timer", rng.randf_range(0.8, 2.6))
-    body.set_meta("wildlife_speed", rng.randf_range(0.42, 0.74) * (0.86 if cold else 1.0))
+    body.set_meta("wildlife_speed", rng.randf_range(0.42, 0.74) * (0.86 if cold else 1.0) * float(body.get_meta("wildlife_speed_multiplier", 1.0)))
     body.set_meta("wildlife_last_move", 0.0)
     if not wildlife_nodes.has(body):
         wildlife_nodes.append(body)
@@ -114,12 +114,27 @@ func update_single_wildlife(body: StaticBody3D, delta: float) -> void:
                 break
         timer = randf_range(0.55, 1.45)
     if moved > 0.001:
-        body.rotation.y = atan2(direction.x, direction.z)
+        body.rotation.y = atan2(-direction.x, -direction.z)
+    update_wildlife_animation(body, moved, speed)
     var ground_y := height_at_world(body.global_position.x, body.global_position.z)
     body.global_position.y = ground_y
     body.set_meta("wildlife_direction", direction)
     body.set_meta("wildlife_timer", timer)
     body.set_meta("wildlife_last_move", moved)
+
+func update_wildlife_animation(body: StaticBody3D, moved: float, speed: float) -> void:
+    if not bool(body.get_meta("wildlife_animated", false)):
+        return
+    var path := String(body.get_meta("wildlife_animation_player_path", ""))
+    if path == "":
+        return
+    var anim_player := body.get_node_or_null(NodePath(path)) as AnimationPlayer
+    if anim_player == null:
+        return
+    var animation_name := String(body.get_meta("wildlife_animation_name", ""))
+    if animation_name != "" and not anim_player.is_playing():
+        anim_player.play(animation_name)
+    anim_player.speed_scale = 0.35 if moved <= 0.001 else clampf(speed * 1.25, 0.75, 1.85)
 
 func move_wildlife(body: StaticBody3D, displacement: Vector3) -> float:
     displacement.y = 0.0

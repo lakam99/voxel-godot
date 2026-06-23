@@ -47,4 +47,7 @@ func _can_drop_data(_at_position: Vector2, data: Variant) -> bool:
 func _drop_data(_at_position: Vector2, data: Variant) -> void:
     if not _can_drop_data(_at_position, data):
         return
-    slot_dropped.emit(int(data.get("from", -1)), slot_index)
+    call_deferred("_emit_slot_dropped", int(data.get("from", -1)), slot_index)
+
+func _emit_slot_dropped(from_index: int, to_index: int) -> void:
+    slot_dropped.emit(from_index, to_index)

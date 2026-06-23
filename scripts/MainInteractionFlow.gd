@@ -160,19 +160,120 @@ func make_forage(parent: Node, prop_id: String, position: Vector3, biome: String
     return body
 
 func make_wildlife(parent: Node, prop_id: String, position: Vector3, biome: String, rng: RandomNumberGenerator):
-    var cold := biome == "snow" or biome == "tundra" or biome == "alpine"
+    var profile := wildlife_profile(biome, rng)
+    var cold := bool(profile.get("cold", false))
     var body := StaticBody3D.new()
-    body.name = "Wildlife"
+    body.name = "Wildlife_%s" % String(profile.get("variant", "boar"))
     body.position = position
     body.rotation.y = rng.randf() * TAU
     body.set_meta("kind", "prop")
     body.set_meta("prop_id", prop_id)
     body.set_meta("drop", "rawMeat")
     body.set_meta("material", "wildlife")
-    body.set_meta("drop_count", rng.randi_range(1, 2 if cold else 3))
+    body.set_meta("wildlife_variant", String(profile.get("variant", "boar")))
+    body.set_meta("wildlife_speed_multiplier", float(profile.get("speed_multiplier", 1.0)))
+    body.set_meta("drop_count", rng.randi_range(1, int(profile.get("drop_max", 2 if cold else 3))))
     body.set_meta("extra_drop", "hide")
-    body.set_meta("extra_drop_count", rng.randi_range(1, 2))
+    body.set_meta("extra_drop_count", rng.randi_range(1, int(profile.get("extra_drop_max", 2))))
 
+    if add_animated_wildlife_visual(body, profile, rng) == null:
+        add_procedural_wildlife_visual(body, profile, rng)
+
+    var shape := BoxShape3D.new()
+    shape.size = profile.get("collider_size", Vector3(1.18, 1.05, 0.78))
+    var collider := CollisionShape3D.new()
+    collider.shape = shape
+    collider.position.y = float(profile.get("collider_y", 0.52))
+    body.add_child(collider)
+    parent.add_child(body)
+    register_wildlife(body, rng, cold)
+    return body
+
+func wildlife_profile(biome: String, rng: RandomNumberGenerator) -> Dictionary:
+    var cold := biome == "snow" or biome == "tundra" or biome == "alpine" or biome == "taiga"
+    var roll := rng.randf()
+    var variant := "boar"
+    if cold:
+        variant = "hare" if roll < 0.62 else "deer"
+    elif biome == "forest" or biome == "plains":
+        variant = "deer" if roll < 0.42 else ("hare" if roll < 0.68 else "boar")
+    elif biome == "savanna" or biome == "desert" or biome == "beach":
+        variant = "hare" if roll < 0.70 else "boar"
+    elif biome == "swamp":
+        variant = "boar" if roll < 0.70 else "hare"
+    var profiles := {
+        "boar": {
+            "variant": "boar",
+            "asset": "boar_idle_walk",
+            "animation": "boar_idle_walk",
+            "scale": 0.72,
+            "speed_multiplier": 0.92,
+            "drop_max": 3,
+            "extra_drop_max": 2,
+            "collider_size": Vector3(1.18, 1.05, 0.78),
+            "collider_y": 0.52,
+            "cold": cold
+        },
+        "deer": {
+            "variant": "deer",
+            "asset": "deer_idle_walk",
+            "animation": "deer_idle_walk",
+            "scale": 0.66,
+            "speed_multiplier": 1.10,
+            "drop_max": 3,
+            "extra_drop_max": 2,
+            "collider_size": Vector3(0.94, 1.52, 0.72),
+            "collider_y": 0.76,
+            "cold": cold
+        },
+        "hare": {
+            "variant": "hare",
+            "asset": "hare_idle_walk",
+            "animation": "hare_idle_walk",
+            "scale": 0.92,
+            "speed_multiplier": 1.34,
+            "drop_max": 1,
+            "extra_drop_max": 1,
+            "collider_size": Vector3(0.62, 0.74, 0.52),
+            "collider_y": 0.34,
+            "cold": cold
+        }
+    }
+    return profiles.get(variant, profiles["boar"]).duplicate(true)
+
+func add_animated_wildlife_visual(body: Node3D, profile: Dictionary, rng: RandomNumberGenerator) -> Node3D:
+    if animated_asset_registry == null:
+        return null
+    var asset_id := String(profile.get("asset", ""))
+    if asset_id == "" or not animated_asset_registry.has_method("instantiate_asset"):
+        return null
+    var visual: Node3D = animated_asset_registry.instantiate_asset(asset_id)
+    if visual == null:
+        return null
+    visual.name = "AnimatedWildlife_%s" % String(profile.get("variant", "animal"))
+    visual.scale = Vector3.ONE * float(profile.get("scale", 1.0)) * rng.randf_range(0.92, 1.08)
+    visual.rotation.y = PI
+    visual.set_meta("visual_role", "wildlife")
+    body.add_child(visual)
+
+    var anim_player: AnimationPlayer = animated_asset_registry.find_animation_player(visual)
+    var animation_name := String(profile.get("animation", ""))
+    if anim_player != null and animation_name != "":
+        var animation := anim_player.get_animation(animation_name)
+        if animation != null:
+            animation.loop_mode = Animation.LOOP_LINEAR
+        anim_player.play(animation_name)
+        anim_player.speed_scale = rng.randf_range(0.75, 1.10)
+        body.set_meta("wildlife_animation_player_path", String(body.get_path_to(anim_player)))
+        body.set_meta("wildlife_animation_name", animation_name)
+        body.set_meta("wildlife_animated", true)
+    return visual
+
+func add_procedural_wildlife_visual(body: Node3D, profile: Dictionary, rng: RandomNumberGenerator) -> void:
+    var root := Node3D.new()
+    root.name = "ProceduralWildlifeVisual"
+    root.scale = Vector3.ONE * float(profile.get("scale", 1.0))
+    body.add_child(root)
     var body_mesh := SphereMesh.new()
     body_mesh.radius = 0.42 + rng.randf() * 0.08
     body_mesh.height = 0.72 + rng.randf() * 0.10
@@ -181,7 +282,7 @@ func make_wildlife(parent: Node, prop_id: String, position: Vector3, biome: Stri
     torso.material_override = materials["wildlife"]
     torso.position = Vector3(0.0, 0.56, 0.0)
     torso.scale = Vector3(1.38, 0.80, 0.82)
-    body.add_child(torso)
+    root.add_child(torso)
 
     var head_mesh := SphereMesh.new()
     head_mesh.radius = 0.20
@@ -191,7 +292,7 @@ func make_wildlife(parent: Node, prop_id: String, position: Vector3, biome: Stri
     head.material_override = materials["wildlife"]
     head.position = Vector3(0.48, 0.74, 0.0)
     head.scale = Vector3(1.0, 0.86, 0.86)
-    body.add_child(head)
+    root.add_child(head)
 
     var leg_mesh := CylinderMesh.new()
     leg_mesh.top_radius = 0.045
@@ -204,7 +305,7 @@ func make_wildlife(parent: Node, prop_id: String, position: Vector3, biome: Stri
             leg.mesh = leg_mesh
             leg.material_override = materials["wildlifeDark"]
             leg.position = Vector3(x_offset, 0.24, z_offset)
-            body.add_child(leg)
+            root.add_child(leg)
 
     var ear_mesh := CylinderMesh.new()
     ear_mesh.bottom_radius = 0.06
@@ -217,17 +318,7 @@ func make_wildlife(parent: Node, prop_id: String, position: Vector3, biome: Stri
         ear.material_override = materials["wildlifeDark"]
         ear.position = Vector3(0.53, 0.94, z_offset)
         ear.rotation.z = -0.45
-        body.add_child(ear)
-
-    var shape := BoxShape3D.new()
-    shape.size = Vector3(1.18, 1.05, 0.78)
-    var collider := CollisionShape3D.new()
-    collider.shape = shape
-    collider.position.y = 0.52
-    body.add_child(collider)
-    parent.add_child(body)
-    register_wildlife(body, rng, cold)
-    return body
+        root.add_child(ear)
 
 func place_selected_block() -> void:
     var hit: Dictionary = player.view_ray(PLACEMENT_RANGE)

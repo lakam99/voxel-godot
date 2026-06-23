@@ -34,6 +34,7 @@ $expectedCases = @(
     "town_noon",
     "town_sunset",
     "forest_midnight",
+    "forest_midnight_lights",
     "forest_rain",
     "mountain_day",
     "water_overcast",

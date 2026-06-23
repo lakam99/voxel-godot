@@ -422,4 +422,4 @@ static func clear_container(container: Node) -> void:
         return
     for child in container.get_children():
         container.remove_child(child)
-        child.free()
+        child.queue_free()

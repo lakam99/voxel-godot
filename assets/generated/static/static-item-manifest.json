@@ -1,0 +1,275 @@
+{
+  "generator": "static-items-v2",
+  "assets": [
+    {
+      "id": "woodenAxe",
+      "family": "tool",
+      "path": "assets/generated/static/woodenAxe.glb",
+      "minMeshes": 4
+    },
+    {
+      "id": "woodenPickaxe",
+      "family": "tool",
+      "path": "assets/generated/static/woodenPickaxe.glb",
+      "minMeshes": 4
+    },
+    {
+      "id": "woodenShovel",
+      "family": "tool",
+      "path": "assets/generated/static/woodenShovel.glb",
+      "minMeshes": 4
+    },
+    {
+      "id": "woodenSword",
+      "family": "tool",
+      "path": "assets/generated/static/woodenSword.glb",
+      "minMeshes": 4
+    },
+    {
+      "id": "stoneAxe",
+      "family": "tool",
+      "path": "assets/generated/static/stoneAxe.glb",
+      "minMeshes": 4
+    },
+    {
+      "id": "stonePickaxe",
+      "family": "tool",
+      "path": "assets/generated/static/stonePickaxe.glb",
+      "minMeshes": 4
+    },
+    {
+      "id": "stoneShovel",
+      "family": "tool",
+      "path": "assets/generated/static/stoneShovel.glb",
+      "minMeshes": 4
+    },
+    {
+      "id": "stoneSword",
+      "family": "tool",
+      "path": "assets/generated/static/stoneSword.glb",
+      "minMeshes": 4
+    },
+    {
+      "id": "copperAxe",
+      "family": "tool",
+      "path": "assets/generated/static/copperAxe.glb",
+      "minMeshes": 4
+    },
+    {
+      "id": "copperPickaxe",
+      "family": "tool",
+      "path": "assets/generated/static/copperPickaxe.glb",
+      "minMeshes": 4
+    },
+    {
+      "id": "copperShovel",
+      "family": "tool",
+      "path": "assets/generated/static/copperShovel.glb",
+      "minMeshes": 4
+    },
+    {
+      "id": "copperSword",
+      "family": "tool",
+      "path": "assets/generated/static/copperSword.glb",
+      "minMeshes": 4
+    },
+    {
+      "id": "ironAxe",
+      "family": "tool",
+      "path": "assets/generated/static/ironAxe.glb",
+      "minMeshes": 4
+    },
+    {
+      "id": "ironPickaxe",
+      "family": "tool",
+      "path": "assets/generated/static/ironPickaxe.glb",
+      "minMeshes": 4
+    },
+    {
+      "id": "ironShovel",
+      "family": "tool",
+      "path": "assets/generated/static/ironShovel.glb",
+      "minMeshes": 4
+    },
+    {
+      "id": "ironSword",
+      "family": "tool",
+      "path": "assets/generated/static/ironSword.glb",
+      "minMeshes": 4
+    },
+    {
+      "id": "nightBlade",
+      "family": "tool",
+      "path": "assets/generated/static/nightBlade.glb",
+      "minMeshes": 4
+    },
+    {
+      "id": "hunterBow",
+      "family": "tool",
+      "path": "assets/generated/static/hunterBow.glb",
+      "minMeshes": 4
+    },
+    {
+      "id": "ironCrossbow",
+      "family": "tool",
+      "path": "assets/generated/static/ironCrossbow.glb",
+      "minMeshes": 4
+    },
+    {
+      "id": "fishingRod",
+      "family": "tool",
+      "path": "assets/generated/static/fishingRod.glb",
+      "minMeshes": 3
+    },
+    {
+      "id": "arrows",
+      "family": "tool",
+      "path": "assets/generated/static/arrows.glb",
+      "minMeshes": 4
+    },
+    {
+      "id": "workbench",
+      "family": "utility",
+      "path": "assets/generated/static/workbench.glb",
+      "minMeshes": 4
+    },
+    {
+      "id": "anvil",
+      "family": "utility",
+      "path": "assets/generated/static/anvil.glb",
+      "minMeshes": 4
+    },
+    {
+      "id": "door",
+      "family": "utility",
+      "path": "assets/generated/static/door.glb",
+      "minMeshes": 4
+    },
+    {
+      "id": "bed",
+      "family": "utility",
+      "path": "assets/generated/static/bed.glb",
+      "minMeshes": 4
+    },
+    {
+      "id": "chest",
+      "family": "utility",
+      "path": "assets/generated/static/chest.glb",
+      "minMeshes": 4
+    },
+    {
+      "id": "furnace",
+      "family": "utility",
+      "path": "assets/generated/static/furnace.glb",
+      "minMeshes": 4
+    },
+    {
+      "id": "campfire",
+      "family": "utility",
+      "path": "assets/generated/static/campfire.glb",
+      "minMeshes": 4
+    },
+    {
+      "id": "torch",
+      "family": "utility",
+      "path": "assets/generated/static/torch.glb",
+      "minMeshes": 3
+    },
+    {
+      "id": "spikeTrap",
+      "family": "utility",
+      "path": "assets/generated/static/spikeTrap.glb",
+      "minMeshes": 4
+    },
+    {
+      "id": "wardLantern",
+      "family": "utility",
+      "path": "assets/generated/static/wardLantern.glb",
+      "minMeshes": 4
+    },
+    {
+      "id": "sanctuaryBeacon",
+      "family": "utility",
+      "path": "assets/generated/static/sanctuaryBeacon.glb",
+      "minMeshes": 4
+    },
+    {
+      "id": "riftAnchor",
+      "family": "utility",
+      "path": "assets/generated/static/riftAnchor.glb",
+      "minMeshes": 4
+    },
+    {
+      "id": "traderStall",
+      "family": "utility",
+      "path": "assets/generated/static/traderStall.glb",
+      "minMeshes": 4
+    },
+    {
+      "id": "hideVest",
+      "family": "equipment",
+      "path": "assets/generated/static/hideVest.glb",
+      "minMeshes": 4
+    },
+    {
+      "id": "stoneArmor",
+      "family": "equipment",
+      "path": "assets/generated/static/stoneArmor.glb",
+      "minMeshes": 4
+    },
+    {
+      "id": "copperArmor",
+      "family": "equipment",
+      "path": "assets/generated/static/copperArmor.glb",
+      "minMeshes": 4
+    },
+    {
+      "id": "ironArmor",
+      "family": "equipment",
+      "path": "assets/generated/static/ironArmor.glb",
+      "minMeshes": 4
+    },
+    {
+      "id": "wardArmor",
+      "family": "equipment",
+      "path": "assets/generated/static/wardArmor.glb",
+      "minMeshes": 4
+    },
+    {
+      "id": "trailPack",
+      "family": "equipment",
+      "path": "assets/generated/static/trailPack.glb",
+      "minMeshes": 4
+    },
+    {
+      "id": "expeditionPack",
+      "family": "equipment",
+      "path": "assets/generated/static/expeditionPack.glb",
+      "minMeshes": 4
+    },
+    {
+      "id": "trailCharm",
+      "family": "equipment",
+      "path": "assets/generated/static/trailCharm.glb",
+      "minMeshes": 3
+    },
+    {
+      "id": "wardAmulet",
+      "family": "equipment",
+      "path": "assets/generated/static/wardAmulet.glb",
+      "minMeshes": 3
+    },
+    {
+      "id": "compass",
+      "family": "equipment",
+      "path": "assets/generated/static/compass.glb",
+      "minMeshes": 3
+    },
+    {
+      "id": "surveyLens",
+      "family": "equipment",
+      "path": "assets/generated/static/surveyLens.glb",
+      "minMeshes": 3
+    }
+  ]
+}

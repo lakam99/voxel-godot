@@ -16,6 +16,7 @@ func move_npc(entry: Dictionary, target: Vector3, max_distance: float, moving_ho
     if body == null or max_distance <= 0.0:
         return 0.0
     var previous := body.global_position
+    refresh_route_if_needed(entry, previous, target, moving_home, allow_outside)
     var path_waypoints: Array = entry.get("pathWaypoints", [])
     if not path_waypoints.is_empty():
         var waypoint: Vector3 = path_waypoints[0]
@@ -29,6 +30,7 @@ func move_npc(entry: Dictionary, target: Vector3, max_distance: float, moving_ho
             if bool(path_step.get("ok", false)):
                 return commit_npc_step(body, previous, path_step)
             entry["pathWaypoints"] = []
+            entry["pathRefreshTimer"] = 0.0
 
     var detour: Vector3 = entry.get("detourTarget", NO_DETOUR)
     if has_detour(detour) and float(entry.get("detourTimer", 0.0)) > 0.0:
@@ -42,7 +44,7 @@ func move_npc(entry: Dictionary, target: Vector3, max_distance: float, moving_ho
             entry["detourTarget"] = NO_DETOUR
             entry["detourTimer"] = 0.0
 
-    if not npc_straight_route_crosses_blocked(previous, target):
+    if not npc_straight_route_crosses_blocked(entry, previous, target):
         var direct_step := npc_attempt_step(entry, previous, target, max_distance, moving_home, allow_outside)
         if bool(direct_step.get("ok", false)):
             entry["blockedMoveTime"] = 0.0
@@ -61,6 +63,7 @@ func move_npc(entry: Dictionary, target: Vector3, max_distance: float, moving_ho
             var first_path_step := npc_attempt_step(entry, previous, path_target, max_distance, moving_home, allow_outside)
             if bool(first_path_step.get("ok", false)):
                 return commit_npc_step(body, previous, first_path_step)
+            entry["pathRefreshTimer"] = 0.0
 
     var new_detour := choose_detour_target(entry, target, moving_home, allow_outside)
     if has_detour(new_detour):
@@ -71,6 +74,30 @@ func move_npc(entry: Dictionary, target: Vector3, max_distance: float, moving_ho
         if bool(sidestep.get("ok", false)):
             return commit_npc_step(body, previous, sidestep)
     return 0.0
+
+func refresh_route_if_needed(entry: Dictionary, previous: Vector3, target: Vector3, moving_home: bool, allow_outside: bool) -> void:
+    var target_cell := world_cell(target)
+    var current_goal: Vector2i = entry.get("routeGoalCell", Vector2i(999999, 999999))
+    var route_allow := bool(entry.get("routeAllowOutside", false))
+    var route_home := bool(entry.get("routeMovingHome", false))
+    var distance := Vector2(target.x - previous.x, target.z - previous.z).length()
+    if target_cell == current_goal and route_allow == allow_outside and route_home == moving_home and not entry.get("pathWaypoints", []).is_empty():
+        return
+    if distance < CELL * 2.0:
+        entry["routeGoalCell"] = target_cell
+        entry["routeAllowOutside"] = allow_outside
+        entry["routeMovingHome"] = moving_home
+        entry["pathWaypoints"] = []
+        return
+    var path := compute_npc_path(entry, target, moving_home, allow_outside)
+    entry["routeGoalCell"] = target_cell
+    entry["routeAllowOutside"] = allow_outside
+    entry["routeMovingHome"] = moving_home
+    if not path.is_empty():
+        entry["pathWaypoints"] = path
+        system.npc_path_detours += 1
+    else:
+        entry["pathWaypoints"] = []
 
 func has_detour(detour: Vector3) -> bool:
     return absf(detour.x) < 1000000.0 and absf(detour.y) < 1000000.0 and absf(detour.z) < 1000000.0
@@ -102,8 +129,14 @@ func validate_npc_candidate(entry: Dictionary, body: StaticBody3D, previous: Vec
     var next_ground: float = main.height_at_world(candidate.x, candidate.z)
     if next_ground < main.WATER_LEVEL + 0.45:
         return { "ok": false, "reason": "water" }
-    if absf(next_ground - previous_ground) > CELL * 0.82 and not moving_home:
+    var height_delta := next_ground - previous_ground
+    if absf(height_delta) > CELL * 0.82 and not moving_home:
         return { "ok": false, "reason": "slope" }
+    if height_delta > CELL * 0.34:
+        entry["jumpIntentTime"] = 0.35
+        var entry_body := entry.get("body") as Node
+        if entry_body:
+            entry_body.set_meta("npc_jump_intent", true)
     candidate.y = next_ground + 0.04
     if npc_obstacle_between(body, previous, candidate, moving_home):
         return { "ok": false, "reason": "obstacle" }
@@ -125,7 +158,7 @@ func compute_npc_path(entry: Dictionary, target: Vector3, moving_home: bool, all
     var goal_cell := world_cell(target)
     if start_cell == goal_cell:
         return []
-    var blocked_cells := npc_blocked_cells()
+    var blocked_cells := npc_blocked_cells(entry)
     var open: Array[Vector2i] = [start_cell]
     var came_from := {}
     var cost_so_far := { start_cell: 0.0 }
@@ -206,13 +239,13 @@ func path_cell_position(cell: Vector2i) -> Vector3:
 func cell_distance(a: Vector2i, b: Vector2i) -> float:
     return Vector2(float(a.x - b.x), float(a.y - b.y)).length()
 
-func npc_straight_route_crosses_blocked(previous: Vector3, target: Vector3) -> bool:
+func npc_straight_route_crosses_blocked(entry: Dictionary, previous: Vector3, target: Vector3) -> bool:
     var delta := target - previous
     delta.y = 0.0
     var distance := delta.length()
     if distance <= CELL * 2.25:
         return false
-    var blocked_cells := npc_blocked_cells()
+    var blocked_cells := npc_blocked_cells(entry)
     if blocked_cells.is_empty():
         return false
     var start_cell := world_cell(previous)
@@ -241,7 +274,7 @@ func npc_path_position_allowed(entry: Dictionary, from_cell: Vector2i, to_cell: 
         return false
     return true
 
-func npc_blocked_cells() -> Dictionary:
+func npc_blocked_cells(entry: Dictionary = {}) -> Dictionary:
     var blocked := {}
     if main == null:
         return blocked
@@ -255,7 +288,28 @@ func npc_blocked_cells() -> Dictionary:
             continue
         var cell: Vector3i = body.get_meta("cell", Vector3i.ZERO)
         blocked[Vector2i(cell.x, cell.z)] = true
+    add_prop_obstacle_cells(blocked, entry)
     return blocked
+
+func add_prop_obstacle_cells(blocked: Dictionary, entry: Dictionary) -> void:
+    var roots := [main.get("chunk_root"), main.get("prop_root")]
+    for root_value in roots:
+        var root := root_value as Node
+        if root == null:
+            continue
+        var stack: Array[Node] = [root]
+        while not stack.is_empty():
+            var node := stack.pop_back() as Node
+            if node == null:
+                continue
+            if node is Node3D and String(node.get_meta("kind", "")) == "prop":
+                var material := String(node.get_meta("material", ""))
+                var drop := String(node.get_meta("drop", ""))
+                var is_target: bool = entry.get("jobTargetNode") == node
+                if not is_target and (material in ["tree", "rock", "copperOre", "ironOre", "wildlife"] or drop in ["logs", "stones"]):
+                    blocked[world_cell((node as Node3D).global_position)] = true
+            for child in node.get_children():
+                stack.append(child)
 
 func choose_detour_target(entry: Dictionary, target: Vector3, moving_home: bool, allow_outside: bool) -> Vector3:
     var body := entry.get("body") as StaticBody3D
@@ -319,7 +373,7 @@ func npc_ray_obstacle(body: Node3D, start: Vector3, end: Vector3, moving_home :=
         if block_type in ["cobblestonePath", "torch"]:
             return false
         if block_type == "door":
-            system.open_door_for_npc(collider)
+            system.open_door_for_npc(collider, body)
             return false
         return true
     return kind in ["prop", "npc", "tutorial_npc", "hostile"]

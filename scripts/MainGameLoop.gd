@@ -9,6 +9,7 @@ func update_sky(delta: float) -> void:
     var phase := clock_phase()
     var day := clock_day_factor()
     var night := clock_night_factor()
+    update_fire_light_day_factor(day)
     var sun_progress := daylight_progress(phase)
     var moon_progress := wrapped_clock_progress(MOONRISE_CLOCK, MOONSET_CLOCK, phase)
     if visual_style == null:
@@ -51,6 +52,11 @@ func update_sky(delta: float) -> void:
         audio_effects.update_weather_ambience({ "kind": "clear", "intensity": 0.0 })
     update_music_state(observer, day)
 
+func update_fire_light_day_factor(day: float) -> void:
+    for light in get_tree().get_nodes_in_group("fire_lights"):
+        if light != null and light.has_method("set_day_factor"):
+            light.set_day_factor(day)
+
 func apply_environment_style(day: float, warmth: float, weather_tint: float) -> void:
     if visual_style == null:
         setup_visual_style()
@@ -69,7 +75,7 @@ func apply_environment_style(day: float, warmth: float, weather_tint: float) -> 
         env.ambient_light_color = visual_style.ambient_color(day, tint)
         env.ambient_light_energy = lerpf(visual_style.ambient_min_energy, visual_style.ambient_max_energy, day)
         env.fog_light_color = visual_style.fog_color(day, warmth, tint)
-        env.fog_light_energy = visual_style.fog_light_energy
+        env.fog_light_energy = lerpf(visual_style.fog_light_energy_night, visual_style.fog_light_energy, day)
         env.fog_density = lerpf(visual_style.fog_density_night, visual_style.fog_density_day, day)
         env.fog_sky_affect = visual_style.fog_sky_affect
         env.fog_sun_scatter = visual_style.fog_sun_scatter

@@ -9,6 +9,8 @@ static func build(system) -> Dictionary:
     var visible_weapons := 0
     var job_workers := 0
     var outside_workers := 0
+    var hungry := 0
+    var foragers_with_food := 0
     for entry in system.npcs:
         var body := entry.get("body") as Node
         if body == null or not is_instance_valid(body):
@@ -27,6 +29,11 @@ static func build(system) -> Dictionary:
             job_workers += 1
             if body is Node3D and not system.point_inside_town(entry, (body as Node3D).global_position):
                 outside_workers += 1
+        if float(entry.get("hunger", 100.0)) < 60.0:
+            hungry += 1
+        var personal_inventory: Dictionary = entry.get("personalInventory", {})
+        if String(entry.get("job", "")) == "forage" and int(personal_inventory.get("berries", 0)) > 0:
+            foragers_with_food += 1
     return {
         "npcs": system.npcs.size(),
         "homed": homed,
@@ -37,7 +44,12 @@ static func build(system) -> Dictionary:
         "jobWorkers": job_workers,
         "outsideWorkers": outside_workers,
         "jobRuns": system.job_runs_completed,
+        "forageRuns": system.npc_forage_runs,
+        "foragersWithFood": foragers_with_food,
+        "hungry": hungry,
+        "foodEaten": system.npc_food_eaten,
         "doorOpens": system.door_opens,
+        "doorCloses": system.door_closes,
         "towns": system.spawned_town_keys.size(),
         "guardShots": system.guard_shots,
         "guardMeleeStrikes": system.guard_melee_strikes,

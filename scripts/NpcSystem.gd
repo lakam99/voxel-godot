@@ -19,15 +19,21 @@ var spawned_town_keys := {}
 var guard_shots := 0
 var guard_melee_strikes := 0
 var door_opens := 0
+var door_closes := 0
 var job_runs_completed := 0
 var last_message := ""
 var focused_dialogue_body: Node = null
 var npc_use_animations := 0
 var npc_path_detours := 0
 var npc_blocked_moves := 0
+var npc_forage_runs := 0
+var npc_food_eaten := 0
+var pending_door_closes: Array = []
 var visual_factory
 var pathing
 var combat
+var components_initialized := false
+var component_init_attempted := false
 
 func setup(main_node, hostile_system_node) -> void:
     main = main_node
@@ -35,12 +41,22 @@ func setup(main_node, hostile_system_node) -> void:
     npc_root = Node3D.new()
     npc_root.name = "TownNPCs"
     add_child(npc_root)
-    visual_factory = NpcVisualFactoryScript.new()
-    visual_factory.setup(main)
-    pathing = NpcPathingScript.new()
-    pathing.setup(self, main)
-    combat = NpcCombatScript.new()
-    combat.setup(self, hostile_system, visual_factory.arrow_material)
+    ensure_components()
+
+func ensure_components() -> void:
+    if components_initialized or component_init_attempted:
+        return
+    component_init_attempted = true
+    if visual_factory == null:
+        visual_factory = NpcVisualFactoryScript.new()
+        visual_factory.setup(main)
+    if pathing == null:
+        pathing = NpcPathingScript.new()
+        pathing.setup(self, main)
+    if combat == null:
+        combat = NpcCombatScript.new()
+        combat.setup(self, hostile_system, visual_factory.arrow_material)
+    components_initialized = visual_factory != null and pathing != null and combat != null
 
 func clear() -> void:
     for entry in npcs:
@@ -51,6 +67,7 @@ func clear() -> void:
     npc_by_id.clear()
     spawned_town_keys.clear()
     focused_dialogue_body = null
+    pending_door_closes.clear()
     if combat:
         combat.clear()
 
@@ -94,6 +111,7 @@ func clear_scripted_target(body: Node) -> void:
 func register_npc(body: StaticBody3D, profile: Dictionary) -> Dictionary:
     if body == null:
         return {}
+    ensure_components()
     unregister_npc(body)
     var home_cell: Vector2i = profile.get("homeCell", profile.get("cell", Vector2i.ZERO))
     var porch_cell: Vector2i = profile.get("porchCell", home_cell)
@@ -134,6 +152,11 @@ func register_npc(body: StaticBody3D, profile: Dictionary) -> Dictionary:
         "jobPhase": "idle",
         "jobTimer": randf_range(2.0, 6.0),
         "jobTarget": body.global_position,
+        "jobTargetNode": null,
+        "goal": "idle",
+        "personalInventory": {},
+        "hunger": randf_range(72.0, 96.0),
+        "maxHunger": 100.0,
         "jobRuns": 0,
         "holdIntroDoor": bool(profile.get("holdIntroDoor", false)),
         "tutorial": bool(profile.get("tutorial", false)),
@@ -147,7 +170,11 @@ func register_npc(body: StaticBody3D, profile: Dictionary) -> Dictionary:
         "detourTimer": 0.0,
         "blockedMoveTime": 0.0,
         "pathWaypoints": [],
-        "pathRefreshTimer": 0.0
+        "pathRefreshTimer": 0.0,
+        "routeGoalCell": Vector2i(999999, 999999),
+        "routeAllowOutside": false,
+        "routeMovingHome": false,
+        "jumpIntentTime": 0.0
     }
     apply_npc_metadata(body, entry, home_cell, porch_cell, guard_cell, job)
     ensure_npc_held_item(entry)
@@ -163,6 +190,9 @@ func apply_npc_metadata(body: Node, entry: Dictionary, home_cell: Vector2i, porc
     body.set_meta("npc_can_fight", bool(entry["canFight"]))
     body.set_meta("npc_job", job)
     body.set_meta("npc_job_phase", "idle")
+    body.set_meta("npc_goal", String(entry.get("goal", "idle")))
+    body.set_meta("npc_hunger", float(entry.get("hunger", 100.0)))
+    body.set_meta("npc_inventory", entry.get("personalInventory", {}))
     body.set_meta("npc_job_runs", 0)
     body.set_meta("npc_has_home", true)
     body.set_meta("npc_inside_home", false)
@@ -210,7 +240,8 @@ func tutorial_town_key() -> String:
     return String(main.tutorial_system.tutorial_town_key())
 
 func spawn_town_npc(record: Dictionary, index: int) -> StaticBody3D:
-    var can_fight: bool = index == 0 or index % 3 == 2
+    ensure_components()
+    var can_fight: bool = index == 0 or index % 4 == 3
     var roles := ["Farmer", "Carpenter", "Forager", "Mason", "Trader"]
     var names := ["Iven", "Mara", "Pell", "Ona", "Brin", "Tess", "Cal"]
     var role: String = "Guard" if can_fight else String(roles[index % roles.size()])
@@ -248,8 +279,11 @@ func spawn_town_npc(record: Dictionary, index: int) -> StaticBody3D:
 func update_npcs(delta: float, day_factor: float) -> void:
     if main == null:
         return
+    ensure_components()
     spawn_generic_town_npcs()
-    combat.update_tracers(delta)
+    if combat != null:
+        combat.update_tracers(delta)
+    update_pending_door_closes(delta)
     var night_factor := clampf((1.0 - day_factor - 0.30) / 0.55, 0.0, 1.0)
     for entry in npcs.duplicate():
         var body := entry.get("body") as StaticBody3D
@@ -261,6 +295,7 @@ func update_npcs(delta: float, day_factor: float) -> void:
 
 func update_npc(entry: Dictionary, delta: float, night_factor: float) -> void:
     var body := entry.get("body") as StaticBody3D
+    update_npc_needs(entry, delta, night_factor)
     if npc_is_held_by_intro_or_dialogue(entry, body):
         return
     if body.has_meta("npc_scripted_target"):
@@ -300,7 +335,7 @@ func update_npc(entry: Dictionary, delta: float, night_factor: float) -> void:
     entry["lastMoveDistance"] = moved
     if moved <= 0.001 and not moving_home:
         entry["wanderTimer"] = 0.0
-        if moving_job:
+        if moving_job and String(entry.get("job", "")) != "forage":
             entry["jobTarget"] = choose_job_target(entry)
     if moving_home:
         settle_home_if_reached(entry)
@@ -375,8 +410,31 @@ func update_npc_visual_state(entry: Dictionary, delta: float) -> void:
     if float(entry.get("detourTimer", 0.0)) <= 0.0:
         entry["detourTarget"] = NO_DETOUR
     entry["pathRefreshTimer"] = maxf(0.0, float(entry.get("pathRefreshTimer", 0.0)) - delta)
+    entry["jumpIntentTime"] = maxf(0.0, float(entry.get("jumpIntentTime", 0.0)) - delta)
+    var body := entry.get("body") as Node
+    if body and float(entry.get("jumpIntentTime", 0.0)) <= 0.0:
+        body.set_meta("npc_jump_intent", false)
     update_name_label_visibility(entry)
     visual_factory.update_held_animation(entry, delta)
+
+func update_npc_needs(entry: Dictionary, delta: float, night_factor: float) -> void:
+    var max_hunger := float(entry.get("maxHunger", 100.0))
+    var drain := 0.020 if night_factor <= 0.45 else 0.010
+    if String(entry.get("job", "")) == "forage":
+        drain *= 1.35
+    var hunger := clampf(float(entry.get("hunger", max_hunger)) - delta * drain, 0.0, max_hunger)
+    entry["hunger"] = hunger
+    var body := entry.get("body") as Node
+    if body:
+        body.set_meta("npc_hunger", hunger)
+    if hunger < max_hunger * 0.55 and npc_inventory_count(entry, "berries") > 0:
+        npc_inventory_add(entry, "berries", -1)
+        hunger = minf(max_hunger, hunger + 24.0)
+        entry["hunger"] = hunger
+        npc_food_eaten += 1
+        if body:
+            body.set_meta("npc_hunger", hunger)
+        last_message = "%s ate berries" % String(entry.get("name", "NPC"))
 
 func update_name_label_visibility(entry: Dictionary) -> void:
     var body := entry.get("body") as Node3D
@@ -429,6 +487,8 @@ func update_day_job(entry: Dictionary, delta: float) -> bool:
     var job := String(entry.get("job", ""))
     if not (job in ["forage", "wood", "stone"]):
         return false
+    if job == "forage":
+        return update_forager_goal(entry, body, delta)
     var phase := String(entry.get("jobPhase", "idle"))
     var timer := float(entry.get("jobTimer", 0.0)) - delta
     if phase == "idle":
@@ -438,6 +498,7 @@ func update_day_job(entry: Dictionary, delta: float) -> bool:
             return false
         entry["jobPhase"] = "outbound"
         entry["jobTarget"] = choose_job_target(entry)
+        set_npc_goal(entry, "gather %s" % String(entry.get("jobResource", "resource")))
         entry["jobTimer"] = randf_range(6.0, 12.0)
         body.set_meta("npc_job_phase", "outbound")
         return true
@@ -476,6 +537,7 @@ func update_gathering_job(entry: Dictionary, body: StaticBody3D, timer: float) -
     job_runs_completed += 1
     entry["jobPhase"] = "returning"
     entry["jobTarget"] = entry.get("porchPosition", body.global_position)
+    set_npc_goal(entry, "return home")
     entry["jobTimer"] = randf_range(8.0, 14.0)
     body.set_meta("npc_job_phase", "returning")
     body.set_meta("npc_job_runs", runs)
@@ -486,6 +548,7 @@ func update_returning_job(entry: Dictionary, body: StaticBody3D, timer: float) -
     var porch: Vector3 = entry.get("porchPosition", body.global_position)
     if body.global_position.distance_to(porch) <= CELL * 1.0 or timer <= 0.0:
         entry["jobPhase"] = "idle"
+        set_npc_goal(entry, "idle")
         entry["jobTimer"] = randf_range(8.0, 18.0)
         body.set_meta("npc_job_phase", "idle")
         body.set_meta("npc_carried_resource", "")
@@ -494,6 +557,178 @@ func update_returning_job(entry: Dictionary, body: StaticBody3D, timer: float) -
     entry["jobTimer"] = timer
     body.set_meta("npc_job_phase", "returning")
     return true
+
+func update_forager_goal(entry: Dictionary, body: StaticBody3D, delta: float) -> bool:
+    var phase := String(entry.get("jobPhase", "idle"))
+    var timer := float(entry.get("jobTimer", 0.0)) - delta
+    if phase == "idle":
+        var hungry := float(entry.get("hunger", 100.0)) < 82.0
+        if timer > 0.0 and not hungry:
+            entry["jobTimer"] = timer
+            set_npc_goal(entry, "rest")
+            body.set_meta("npc_job_phase", "idle")
+            return false
+        var forage := find_forage_target(entry)
+        if forage == null:
+            entry["jobPhase"] = "searching"
+            entry["jobTimer"] = randf_range(3.0, 7.0)
+            entry["jobTarget"] = choose_job_target(entry)
+            set_npc_goal(entry, "search for berries")
+            body.set_meta("npc_job_phase", "searching")
+            return true
+        entry["jobTargetNode"] = forage
+        entry["jobTarget"] = forage.global_position
+        entry["jobPhase"] = "outbound"
+        entry["jobTimer"] = randf_range(12.0, 22.0)
+        set_npc_goal(entry, "forage berries")
+        body.set_meta("npc_job_phase", "outbound")
+        return true
+    if phase == "outbound" or phase == "searching":
+        var target_value = entry.get("jobTargetNode")
+        var target_node: Node3D = target_value if target_value is Node3D and is_instance_valid(target_value) else null
+        if target_node != null:
+            entry["jobTarget"] = target_node.global_position
+        elif phase == "outbound":
+            entry["jobTargetNode"] = null
+            entry["jobPhase"] = "idle"
+            entry["jobTimer"] = 0.0
+            return true
+        var target: Vector3 = entry.get("jobTarget", body.global_position)
+        var outside_town := not point_inside_town(entry, body.global_position)
+        var reached_target := body.global_position.distance_to(target) <= CELL * 1.15
+        var timed_out_at_real_target := timer <= 0.0 and phase == "outbound" and target_node != null
+        if reached_target or (phase == "searching" and outside_town) or timed_out_at_real_target:
+            entry["jobPhase"] = "gathering"
+            entry["jobTimer"] = randf_range(1.0, 1.8)
+            set_npc_goal(entry, "pick berries")
+            play_npc_use(entry, "gather")
+            body.set_meta("npc_job_phase", "gathering")
+        else:
+            if timer <= 0.0:
+                entry["jobTarget"] = choose_job_target(entry)
+                timer = randf_range(3.0, 7.0)
+            entry["jobTimer"] = timer
+        return true
+    if phase == "gathering":
+        if timer > 0.0:
+            entry["jobTimer"] = timer
+            set_npc_goal(entry, "pick berries")
+            body.set_meta("npc_job_phase", "gathering")
+            return true
+        harvest_forager_target(entry)
+        var runs := int(entry.get("jobRuns", 0)) + 1
+        entry["jobRuns"] = runs
+        job_runs_completed += 1
+        npc_forage_runs += 1
+        entry["jobPhase"] = "returning"
+        entry["jobTarget"] = entry.get("porchPosition", body.global_position)
+        entry["jobTimer"] = randf_range(10.0, 18.0)
+        set_npc_goal(entry, "bring berries home")
+        body.set_meta("npc_job_phase", "returning")
+        body.set_meta("npc_job_runs", runs)
+        body.set_meta("npc_carried_resource", "berries")
+        return true
+    if phase == "returning":
+        var porch: Vector3 = entry.get("porchPosition", body.global_position)
+        if body.global_position.distance_to(porch) <= CELL * 1.0 or timer <= 0.0:
+            entry["jobPhase"] = "idle"
+            entry["jobTimer"] = randf_range(5.0, 12.0)
+            set_npc_goal(entry, "rest")
+            body.set_meta("npc_job_phase", "idle")
+            body.set_meta("npc_carried_resource", "")
+            return false
+        entry["jobTarget"] = porch
+        entry["jobTimer"] = timer
+        set_npc_goal(entry, "bring berries home")
+        body.set_meta("npc_job_phase", "returning")
+        return true
+    entry["jobPhase"] = "idle"
+    entry["jobTimer"] = randf_range(3.0, 7.0)
+    return false
+
+func set_npc_goal(entry: Dictionary, goal: String) -> void:
+    entry["goal"] = goal
+    var body := entry.get("body") as Node
+    if body:
+        body.set_meta("npc_goal", goal)
+
+func npc_inventory_count(entry: Dictionary, item_id: String) -> int:
+    var personal_inventory: Dictionary = entry.get("personalInventory", {})
+    return int(personal_inventory.get(item_id, 0))
+
+func npc_inventory_add(entry: Dictionary, item_id: String, amount: int) -> void:
+    if item_id == "" or amount == 0:
+        return
+    var personal_inventory: Dictionary = entry.get("personalInventory", {})
+    var new_count := maxi(0, int(personal_inventory.get(item_id, 0)) + amount)
+    if new_count <= 0:
+        personal_inventory.erase(item_id)
+    else:
+        personal_inventory[item_id] = new_count
+    entry["personalInventory"] = personal_inventory
+    var body := entry.get("body") as Node
+    if body:
+        body.set_meta("npc_inventory", personal_inventory.duplicate())
+
+func find_forage_target(entry: Dictionary) -> Node3D:
+    var body := entry.get("body") as Node3D
+    if body == null:
+        return null
+    var best: Node3D = null
+    var best_distance := INF
+    for root in [main.get("chunk_root"), main.get("prop_root")]:
+        var found := find_forage_target_in_tree(root as Node, entry, body.global_position, best_distance)
+        if found.get("node") is Node3D:
+            best = found["node"]
+            best_distance = float(found["distance"])
+    return best
+
+func find_forage_target_in_tree(root: Node, entry: Dictionary, origin: Vector3, best_distance: float) -> Dictionary:
+    var best: Node3D = null
+    var best_dist := best_distance
+    if root == null:
+        return { "node": best, "distance": best_dist }
+    var stack: Array[Node] = [root]
+    while not stack.is_empty():
+        var node := stack.pop_back() as Node
+        if node == null:
+            continue
+        if node is Node3D and is_valid_forage_node(node as Node3D, entry):
+            var distance := (node as Node3D).global_position.distance_to(origin)
+            if distance < best_dist:
+                best = node as Node3D
+                best_dist = distance
+        for child in node.get_children():
+            stack.append(child)
+    return { "node": best, "distance": best_dist }
+
+func is_valid_forage_node(node: Node3D, entry: Dictionary) -> bool:
+    if not is_instance_valid(node) or bool(node.get_meta("npc_harvested", false)):
+        return false
+    if String(node.get_meta("kind", "")) != "prop":
+        return false
+    if String(node.get_meta("drop", "")) != "berries" and String(node.get_meta("material", "")) != "berryBush":
+        return false
+    if not point_inside_work_area(entry, node.global_position):
+        return false
+    var h: float = main.height_at_world(node.global_position.x, node.global_position.z)
+    return h >= main.WATER_LEVEL + 0.45
+
+func harvest_forager_target(entry: Dictionary) -> void:
+    var target_value = entry.get("jobTargetNode")
+    var target_node: Node3D = target_value if target_value is Node3D and is_instance_valid(target_value) else null
+    var amount := 1
+    if target_node != null:
+        amount = max(1, int(target_node.get_meta("drop_count", 1)))
+        target_node.set_meta("npc_harvested", true)
+        var prop_id := String(target_node.get_meta("prop_id", ""))
+        if prop_id != "" and main != null:
+            var removed_props: Dictionary = main.get("removed_props")
+            removed_props[prop_id] = true
+        target_node.queue_free()
+    npc_inventory_add(entry, "berries", amount)
+    entry["jobTargetNode"] = null
+    last_message = "%s gathered berries" % String(entry.get("name", "Forager"))
 
 func home_route_target(entry: Dictionary) -> Vector3:
     var body := entry.get("body") as StaticBody3D
@@ -527,34 +762,194 @@ func settle_home_if_reached(entry: Dictionary) -> void:
         entry["homeRouteIndex"] = int((entry.get("homeRoutePositions", []) as Array).size())
         body.set_meta("npc_inside_home", true)
 
-func open_door_for_npc(collider: Node) -> void:
+func open_door_for_npc(collider: Node, npc_body: Node3D = null) -> void:
     if collider == null or main == null or not main.has_method("toggle_door"):
         return
+    collider = main.interaction_block_from_collider(collider) if main.has_method("interaction_block_from_collider") else collider
     if bool(collider.get_meta("open", false)):
+        schedule_door_close(collider, npc_body)
         return
     if bool(main.toggle_door(collider)):
         door_opens += 1
+        schedule_door_close(collider, npc_body)
         last_message = "NPC opened a door"
 
+func schedule_door_close(door: Node, npc_body: Node3D) -> void:
+    if door == null or not is_instance_valid(door):
+        return
+    for pending in pending_door_closes:
+        if pending.get("door") == door:
+            pending["timer"] = 0.0
+            pending["npc"] = npc_body
+            return
+    pending_door_closes.append({ "door": door, "npc": npc_body, "timer": 0.0 })
+
+func update_pending_door_closes(delta: float) -> void:
+    for pending in pending_door_closes.duplicate():
+        var door := pending.get("door") as Node3D
+        if door == null or not is_instance_valid(door):
+            pending_door_closes.erase(pending)
+            continue
+        pending["timer"] = float(pending.get("timer", 0.0)) + delta
+        var npc := pending.get("npc") as Node3D
+        var npc_clear: bool = npc == null or not is_instance_valid(npc) or npc.global_position.distance_to(door.global_position) > CELL * 1.45
+        var player_clear: bool = true
+        if main != null and main.player != null:
+            player_clear = main.player.global_position.distance_to(door.global_position) > CELL * 1.35
+        var timed_out := float(pending.get("timer", 0.0)) > 4.5
+        if bool(door.get_meta("open", false)) and npc_clear and (player_clear or timed_out):
+            if bool(main.toggle_door(door)):
+                door_closes += 1
+                last_message = "NPC closed a door"
+            pending_door_closes.erase(pending)
+        elif not bool(door.get_meta("open", false)):
+            pending_door_closes.erase(pending)
+
 func move_npc(entry: Dictionary, target: Vector3, max_distance: float, moving_home := false, allow_outside := false) -> float:
-    return pathing.move_npc(entry, target, max_distance, moving_home, allow_outside)
+    var moved := 0.0
+    if pathing == null:
+        return fallback_move_npc(entry, target, max_distance, moving_home, allow_outside)
+    moved = pathing.move_npc(entry, target, max_distance, moving_home, allow_outside)
+    if moved <= 0.001 and max_distance > 0.0:
+        moved = fallback_move_npc(entry, target, max_distance, moving_home, allow_outside)
+    return moved
+
+func fallback_move_npc(entry: Dictionary, target: Vector3, max_distance: float, moving_home := false, allow_outside := false) -> float:
+    var body := entry.get("body") as StaticBody3D
+    if body == null or main == null or max_distance <= 0.0:
+        return 0.0
+    var previous := body.global_position
+    var active_target := target
+    var detour: Vector3 = entry.get("fallbackDetour", NO_DETOUR)
+    if absf(detour.x) < 1000000.0:
+        if previous.distance_to(detour) > CELL * 0.65:
+            active_target = detour
+        else:
+            entry["fallbackDetour"] = NO_DETOUR
+    elif fallback_route_blocked(previous, target):
+        var chosen := choose_fallback_detour(entry, previous, target, moving_home, allow_outside)
+        if absf(chosen.x) < 1000000.0:
+            entry["fallbackDetour"] = chosen
+            active_target = chosen
+            npc_path_detours += 1
+    var delta := active_target - previous
+    delta.y = 0.0
+    if delta.length_squared() < 0.001:
+        return 0.0
+    var step := delta.normalized() * minf(max_distance, delta.length())
+    var candidate := previous + step
+    if not fallback_candidate_allowed(entry, previous, candidate, moving_home, allow_outside):
+        npc_blocked_moves += 1
+        return 0.0
+    var ground_y: float = main.height_at_world(candidate.x, candidate.z)
+    candidate.y = ground_y + 0.04
+    body.global_position = candidate
+    body.rotation.y = atan2(step.x, step.z)
+    return Vector2(candidate.x - previous.x, candidate.z - previous.z).length()
+
+func fallback_route_blocked(previous: Vector3, target: Vector3) -> bool:
+    var delta := target - previous
+    delta.y = 0.0
+    var distance := delta.length()
+    if distance <= CELL * 1.5 or main == null:
+        return false
+    var samples := clampi(ceili(distance / (CELL * 0.5)), 2, 80)
+    for i in range(1, samples):
+        var probe := previous.lerp(target, float(i) / float(samples))
+        if fallback_cell_blocked(Vector2i(roundi(probe.x / CELL), roundi(probe.z / CELL))):
+            return true
+    return false
+
+func choose_fallback_detour(entry: Dictionary, previous: Vector3, target: Vector3, moving_home: bool, allow_outside: bool) -> Vector3:
+    var forward := target - previous
+    forward.y = 0.0
+    if forward.length_squared() < 0.001:
+        return NO_DETOUR
+    forward = forward.normalized()
+    var side := Vector3(-forward.z, 0.0, forward.x)
+    for distance_value in [CELL * 2.4, CELL * 4.0, CELL * 5.6]:
+        var distance: float = float(distance_value)
+        for direction_value in [1.0, -1.0]:
+            var direction: float = float(direction_value)
+            var detour: Vector3 = previous + side * direction * distance + forward * CELL * 3.2
+            if fallback_candidate_allowed(entry, previous, detour, moving_home, allow_outside):
+                detour.y = main.height_at_world(detour.x, detour.z) + 0.04
+                return detour
+    return NO_DETOUR
+
+func fallback_candidate_allowed(entry: Dictionary, previous: Vector3, candidate: Vector3, moving_home: bool, allow_outside: bool) -> bool:
+    if allow_outside:
+        if not point_inside_work_area(entry, candidate):
+            return false
+    elif not point_inside_town(entry, candidate):
+        return false
+    var ground_y: float = main.height_at_world(candidate.x, candidate.z)
+    if ground_y < main.WATER_LEVEL + 0.45:
+        return false
+    var previous_y: float = main.height_at_world(previous.x, previous.z)
+    if absf(ground_y - previous_y) > CELL * 0.9 and not moving_home:
+        return false
+    var cell: Vector2i = Vector2i(roundi(candidate.x / CELL), roundi(candidate.z / CELL))
+    return not fallback_cell_blocked(cell)
+
+func fallback_cell_blocked(cell: Vector2i) -> bool:
+    if main == null:
+        return false
+    var blocks: Dictionary = main.get("blocks")
+    for block in blocks.values():
+        var body := block as Node
+        if body == null or not is_instance_valid(body):
+            continue
+        var block_type := String(body.get_meta("block_type", ""))
+        if block_type in ["cobblestonePath", "torch"]:
+            continue
+        var block_cell: Vector3i = body.get_meta("cell", Vector3i.ZERO)
+        if block_cell.x == cell.x and block_cell.z == cell.y:
+            if block_type == "door":
+                open_door_for_npc(body, null)
+                return false
+            return true
+    return false
 
 func choose_day_target(entry: Dictionary) -> Vector3:
+    if pathing == null:
+        return entry.get("porchPosition", Vector3.ZERO)
     return pathing.choose_day_target(entry)
 
 func choose_job_target(entry: Dictionary) -> Vector3:
+    if pathing == null:
+        return entry.get("porchPosition", Vector3.ZERO)
     return pathing.choose_job_target(entry)
 
 func point_inside_town(entry: Dictionary, position: Vector3) -> bool:
+    if pathing == null:
+        var center: Vector2i = entry.get("townCenter", Vector2i.ZERO)
+        var radius := float(entry.get("townRadius", 18)) * CELL
+        var flat := Vector2(position.x - float(center.x) * CELL, position.z - float(center.y) * CELL)
+        return flat.length() <= radius
     return pathing.point_inside_town(entry, position)
 
+func point_inside_work_area(entry: Dictionary, position: Vector3) -> bool:
+    if pathing == null:
+        var center: Vector2i = entry.get("townCenter", Vector2i.ZERO)
+        var radius := (float(entry.get("townRadius", 18)) + 24.0) * CELL
+        var flat := Vector2(position.x - float(center.x) * CELL, position.z - float(center.y) * CELL)
+        return flat.length() <= radius
+    return pathing.point_inside_work_area(entry, position)
+
 func nearest_hostile(origin: Vector3, radius: float) -> Node3D:
+    if combat == null:
+        return null
     return combat.nearest_hostile(origin, radius)
 
 func fire_at_hostile(entry: Dictionary, target: Node3D) -> void:
+    if combat == null:
+        return
     combat.fire_at_hostile(entry, target)
 
 func strike_hostile(entry: Dictionary, target: Node3D) -> void:
+    if combat == null:
+        return
     combat.strike_hostile(entry, target)
 
 func npc_weapon_is_ranged(weapon_id: String) -> bool:

@@ -2,6 +2,7 @@ extends RefCounted
 class_name TutorialRescueSystem
 
 const CELL := 1.35
+const FireLight3DScript := preload("res://scripts/FireLight3D.gd")
 const FENCE_RADIUS_CELLS := 25
 const RESCUE_MONSTER_COUNT := 6
 const RESCUE_GUARD_ID := "sera"
@@ -128,14 +129,15 @@ func spawn_rescue_torch(position: Vector3) -> void:
     flame_mesh.rings = 4
     var flame := MeshInstance3D.new()
     flame.mesh = flame_mesh
-    flame.material_override = system.make_emissive_material(Color(1.0, 0.58, 0.16), 1.8)
+    flame.material_override = system.make_emissive_material(Color(1.0, 0.73, 0.42), 1.35)
     flame.position.y = 1.02
     root.add_child(flame)
-    var light := OmniLight3D.new()
+    var light := FireLight3DScript.new()
     light.name = "RescueTorchLight"
-    light.light_color = Color(1.0, 0.66, 0.34)
-    light.light_energy = 1.85
-    light.omni_range = CELL * 9.0
+    var cast_shadows := main != null and bool(main.get("shadows_enabled"))
+    light.configure(Color(1.0, 0.89, 0.72), 1.85, CELL * 9.0, cast_shadows)
+    if light.has_method("set_day_suppressed"):
+        light.set_day_suppressed(true)
     root.add_child(light)
     system.light_root.add_child(root)
     system.rescue_torch = root

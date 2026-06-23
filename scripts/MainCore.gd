@@ -57,6 +57,8 @@ var tutorial_system
 var npc_system
 var item_visual_factory
 var visual_asset_registry
+var static_item_asset_registry
+var animated_asset_registry
 var hud
 var held_item
 var break_overlay: MeshInstance3D
@@ -236,7 +238,10 @@ func random_world_seed(exclude_seed := "") -> String:
 
 func setup_game_systems() -> void:
     setup_visual_asset_registry()
+    setup_static_item_asset_registry()
+    setup_animated_asset_registry()
     item_visual_factory = ItemVisualFactoryScript.new()
+    item_visual_factory.set_static_asset_registry(static_item_asset_registry)
     inventory_system = InventorySystemScript.new(
         ItemCatalogScript.ITEMS,
         ItemCatalogScript.INVENTORY_SIZE,
@@ -282,6 +287,16 @@ func setup_visual_asset_registry() -> void:
     visual_asset_registry = VisualAssetRegistryScript.new()
     if not visual_asset_registry.setup():
         push_warning("Generated visual asset registry loaded with fallbacks: %s" % str(visual_asset_registry.last_errors))
+
+func setup_static_item_asset_registry() -> void:
+    static_item_asset_registry = StaticItemAssetRegistryScript.new()
+    if not static_item_asset_registry.setup():
+        push_warning("Generated static item asset registry loaded with fallbacks: %s" % str(static_item_asset_registry.last_errors))
+
+func setup_animated_asset_registry() -> void:
+    animated_asset_registry = AnimatedAssetRegistryScript.new()
+    if not animated_asset_registry.setup():
+        push_warning("Generated animated asset registry loaded with fallbacks: %s" % str(animated_asset_registry.last_errors))
 
 func grant_starter_inventory() -> void:
     inventory_system.add_item("woodBlock", 32)

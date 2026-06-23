@@ -9,6 +9,8 @@ const GameHudScript := preload("res://scripts/GameHud.gd")
 const HeldItemSystemScript := preload("res://scripts/HeldItemSystem.gd")
 const ItemVisualFactoryScript := preload("res://scripts/ItemVisualFactory.gd")
 const VisualAssetRegistryScript := preload("res://scripts/visual/VisualAssetRegistry.gd")
+const StaticItemAssetRegistryScript := preload("res://scripts/visual/StaticItemAssetRegistry.gd")
+const AnimatedAssetRegistryScript := preload("res://scripts/visual/AnimatedAssetRegistry.gd")
 const ObjectiveSystemScript := preload("res://scripts/ObjectiveSystem.gd")
 const StructureSystemScript := preload("res://scripts/StructureSystem.gd")
 const UtilityBlockSystemScript := preload("res://scripts/UtilityBlockSystem.gd")
@@ -88,7 +90,7 @@ const BIOME_COLORS := {
     "swamp": Color(0.34, 0.43, 0.25),
     "desert": Color(0.82, 0.66, 0.36),
     "savanna": Color(0.66, 0.67, 0.34),
-    "town": Color(0.52, 0.55, 0.49),
+    "town": Color(0.43, 0.67, 0.38),
     "alpine": Color(0.50, 0.55, 0.53),
     "tundra": Color(0.58, 0.66, 0.58),
     "snow": Color(0.86, 0.91, 0.90)
@@ -101,6 +103,9 @@ func setup_save_system() -> void: pass
 func apply_world_seed(new_seed: String, remember := false) -> void: pass
 func random_world_seed(exclude_seed := "") -> String: return ""
 func setup_game_systems() -> void: pass
+func setup_visual_asset_registry() -> void: pass
+func setup_static_item_asset_registry() -> void: pass
+func setup_animated_asset_registry() -> void: pass
 func grant_starter_inventory() -> void: pass
 func _sync_inventory_totals() -> void: pass
 func save_world(show_message := true) -> bool: return false
@@ -267,6 +272,7 @@ func _on_playtest_requested(case_id: String) -> void: pass
 func _on_playtest_cleanup_requested() -> void: pass
 func apply_runtime_settings() -> void: pass
 func apply_runtime_setting(setting: String, value, sync_hud: bool = true) -> void: pass
+func apply_local_light_shadows(root: Node = null) -> void: pass
 func update_performance_overlay(delta: float) -> void: pass
 func debug_performance_state() -> Dictionary: return {}
 func count_nodes_with_meta(node: Node, key: String, expected: String = "") -> int: return 0

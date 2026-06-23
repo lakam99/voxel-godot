@@ -2,11 +2,18 @@ extends RefCounted
 class_name ItemVisualFactory
 
 const ItemCatalogScript := preload("res://scripts/ItemCatalog.gd")
+const FireLight3DScript := preload("res://scripts/FireLight3D.gd")
+const FIRE_LIGHT_COLOR := Color(1.0, 0.89, 0.72)
+const LANTERN_LIGHT_COLOR := Color(1.0, 0.92, 0.78)
 
 var materials := {}
+var static_item_asset_registry = null
 
 func _init() -> void:
     setup_materials()
+
+func set_static_asset_registry(registry) -> void:
+    static_item_asset_registry = registry
 
 func setup_materials() -> void:
     materials["wood"] = make_material(Color(0.66, 0.40, 0.20), 0.78)
@@ -32,7 +39,7 @@ func setup_materials() -> void:
     materials["cooked"] = make_material(Color(0.72, 0.34, 0.18), 0.76)
     materials["herb"] = make_material(Color(0.48, 0.78, 0.44), 0.72)
     materials["frost"] = make_material(Color(0.72, 0.92, 0.96), 0.46, false, Color(0.28, 0.66, 0.78), 0.22)
-    materials["flame"] = make_material(Color(1.0, 0.55, 0.16, 0.92), 0.30, true, Color(1.0, 0.36, 0.06), 1.40)
+    materials["flame"] = make_material(Color(1.0, 0.73, 0.42, 0.92), 0.30, true, Color(1.0, 0.68, 0.38), 1.10)
     materials["string"] = make_material(Color(0.92, 0.82, 0.62), 0.58)
 
 func make_material(color: Color, roughness := 0.82, transparent := false, emission := Color.BLACK, emission_energy := 0.0, metalness := 0.0) -> StandardMaterial3D:
@@ -60,12 +67,16 @@ func make_held_item(item_id: String) -> Node3D:
     var root := Node3D.new()
     root.name = "ItemHeldVisual_%s" % item_id
     build_item(root, item_id, true)
+    apply_held_item_render_policy(root)
     root.rotation = held_rotation(item_id)
-    root.scale = Vector3.ONE * held_scale(item_id)
+    var scale_value := held_scale(item_id)
+    root.scale = Vector3(-scale_value, scale_value, scale_value) if should_mirror_right_hand_item(item_id) else Vector3.ONE * scale_value
     return root
 
 func build_item(root: Node3D, item_id: String, held: bool) -> void:
     if item_id == "":
+        return
+    if try_build_static_item(root, item_id, held):
         return
     if item_id == "torch":
         build_torch(root, held)
@@ -112,6 +123,61 @@ func build_item(root: Node3D, item_id: String, held: bool) -> void:
     else:
         build_generic(root, item_id, held)
 
+func try_build_static_item(root: Node3D, item_id: String, held: bool) -> bool:
+    if static_item_asset_registry == null:
+        return false
+    if not static_item_asset_registry.has_method("has_asset") or not static_item_asset_registry.has_asset(item_id):
+        return false
+    var visual: Node3D = static_item_asset_registry.instantiate_item(item_id)
+    if visual == null:
+        return false
+    visual.name = "GeneratedStaticItem_%s" % item_id
+    var scale_value := generated_item_scale(item_id, held)
+    visual.scale = Vector3.ONE * scale_value
+    root.add_child(visual)
+    add_generated_item_extras(root, item_id, held, scale_value)
+    return true
+
+func apply_held_item_render_policy(node: Node) -> void:
+    if node == null:
+        return
+    if node is MeshInstance3D:
+        (node as MeshInstance3D).cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+    for child in node.get_children():
+        apply_held_item_render_policy(child)
+
+func generated_item_scale(item_id: String, held: bool) -> float:
+    if item_id in ["workbench", "anvil", "chest", "furnace", "bed", "campfire", "spikeTrap", "wardLantern", "sanctuaryBeacon", "riftAnchor", "traderStall"]:
+        return 0.48 if held else 0.62
+    if item_id == "torch":
+        return 0.62 if held else 0.72
+    if item_id in ["door", "hideVest", "stoneArmor", "copperArmor", "ironArmor", "wardArmor", "trailPack", "expeditionPack"]:
+        return 0.54 if held else 0.66
+    if item_id in ["trailCharm", "wardAmulet", "compass", "surveyLens"]:
+        return 0.68 if held else 0.78
+    if item_id == "arrows":
+        return 0.76 if held else 0.86
+    if item_id in ["hunterBow", "ironCrossbow", "fishingRod"] or is_tool(item_id):
+        return 0.72 if held else 0.82
+    return 0.78 if held else 0.88
+
+func add_generated_item_extras(root: Node3D, item_id: String, held: bool, scale_value: float) -> void:
+    if item_id == "campfire":
+        add_light_emitter(root, "CampfireItemLight", Vector3(0.0, 0.22 * scale_value, 0.0), FIRE_LIGHT_COLOR, 3.25 if held else 2.00, 12.0 if held else 6.0, true, 0.88, 0.28, -1.0, 1.38, true)
+        add_ground_fill_light(root, "CampfireGroundLight", held, FIRE_LIGHT_COLOR, 1.15 if held else 0.55, 9.6 if held else 4.6, true)
+    elif item_id == "torch":
+        add_light_emitter(root, "TorchItemLight", Vector3(0.0, 0.62 * scale_value, -0.18 * scale_value), FIRE_LIGHT_COLOR, 3.05 if held else 1.90, 11.4 if held else 6.0, true, 0.88, 0.28, -1.0, 1.38, true)
+        add_ground_fill_light(root, "TorchGroundLight", held, FIRE_LIGHT_COLOR, 1.05 if held else 0.50, 9.2 if held else 4.4, true)
+    elif item_id == "riftAnchor":
+        add_light_emitter(root, "RiftAnchorItemLight", Vector3(0.0, 0.50 * scale_value, -0.12 * scale_value), Color(0.78, 0.44, 1.0), 3.95 if held else 2.20, 13.2 if held else 6.8)
+        add_ground_fill_light(root, "RiftAnchorGroundLight", held, Color(0.78, 0.44, 1.0), 1.30 if held else 0.58, 10.0 if held else 4.8)
+    elif item_id == "sanctuaryBeacon":
+        add_light_emitter(root, "SanctuaryBeaconItemLight", Vector3(0.0, 0.52 * scale_value, -0.12 * scale_value), Color(0.58, 0.86, 1.0), 4.25 if held else 2.35, 13.8 if held else 7.0)
+        add_ground_fill_light(root, "SanctuaryBeaconGroundLight", held, Color(0.58, 0.86, 1.0), 1.36 if held else 0.62, 10.4 if held else 5.0)
+    elif item_id == "wardLantern":
+        add_light_emitter(root, "WardLanternItemLight", Vector3(0.0, 0.52 * scale_value, -0.12 * scale_value), LANTERN_LIGHT_COLOR, 1.92 if held else 1.17, 11.8 if held else 6.4, true, 0.88, 0.28, -1.0, 1.38, true)
+        add_ground_fill_light(root, "WardLanternGroundLight", held, LANTERN_LIGHT_COLOR, 0.63 if held else 0.31, 9.4 if held else 4.6, true)
+
 func add_box(parent: Node3D, size: Vector3, material: Material, position := Vector3.ZERO, rotation := Vector3.ZERO) -> MeshInstance3D:
     var mesh := BoxMesh.new()
     mesh.size = size
@@ -141,9 +207,36 @@ func add_mesh(parent: Node3D, mesh: Mesh, material: Material, position := Vector
     instance.material_override = material
     instance.position = position
     instance.rotation = rotation
-    instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+    instance.cast_shadow = shadow_policy_for_material(material)
     parent.add_child(instance)
     return instance
+
+func shadow_policy_for_material(material: Material) -> int:
+    var base := material as BaseMaterial3D
+    if base != null:
+        if base.transparency != BaseMaterial3D.TRANSPARENCY_DISABLED:
+            return GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+        if base.emission_enabled:
+            return GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+    return GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+
+func add_light_emitter(parent: Node3D, light_name: String, position: Vector3, color: Color, energy: float, range: float, shadows := true, flicker := 0.88, range_flicker := 0.28, min_scale := -1.0, max_scale := 1.38, day_suppressed := false) -> OmniLight3D:
+    var light := FireLight3DScript.new()
+    light.name = light_name
+    light.position = position
+    light.configure(color, energy, range, shadows, flicker, range_flicker, 2.10, min_scale, max_scale)
+    if day_suppressed and light.has_method("set_day_suppressed"):
+        light.set_day_suppressed(true)
+    parent.add_child(light)
+    return light
+
+func add_ground_fill_light(parent: Node3D, light_name: String, held: bool, color: Color, energy: float, range: float, day_suppressed := false) -> OmniLight3D:
+    var offset := Vector3(-0.34, -0.28, -0.48) if held else Vector3(0.0, -0.18, 0.0)
+    var light := add_light_emitter(parent, light_name, offset, color, energy, range, false, 0.22, 0.08, 0.72, 1.08, day_suppressed)
+    light.set_meta("casts_shadow_when_enabled", false)
+    light.set_meta("ground_fill_light", true)
+    light.shadow_enabled = false
+    return light
 
 func build_block(root: Node3D, item_id: String, held: bool) -> void:
     var size := Vector3.ONE * (0.36 if held else 0.42)
@@ -205,12 +298,16 @@ func build_campfire(root: Node3D, held: bool) -> void:
     for angle in [deg_to_rad(42.0), deg_to_rad(-42.0)]:
         add_cylinder(root, 0.035 * scale, 0.52 * scale, materials["wood"], Vector3(0.0, -0.06 * scale, 0.0), Vector3(0.0, 0.0, angle), 7)
     add_cylinder(root, 0.05 * scale, 0.30 * scale, materials["flame"], Vector3(0.0, 0.12 * scale, 0.0), Vector3.ZERO, 6, 0.0)
+    add_light_emitter(root, "CampfireItemLight", Vector3(0.0, 0.22 * scale, 0.0), FIRE_LIGHT_COLOR, 3.25 if held else 2.00, 12.0 if held else 6.0, true, 0.88, 0.28, -1.0, 1.38, true)
+    add_ground_fill_light(root, "CampfireGroundLight", held, FIRE_LIGHT_COLOR, 1.15 if held else 0.55, 9.6 if held else 4.6, true)
 
 func build_torch(root: Node3D, held: bool) -> void:
     var scale := 0.92 if held else 1.0
     add_cylinder(root, 0.026 * scale, 0.72 * scale, materials["wood"], Vector3(0.0, -0.05 * scale, 0.0), Vector3(0.0, 0.0, deg_to_rad(12.0)), 7)
     add_box(root, Vector3(0.12, 0.12, 0.12) * scale, materials["wood_dark"], Vector3(0.0, 0.28 * scale, 0.0), Vector3(0.0, 0.0, deg_to_rad(12.0)))
     add_sphere(root, 0.09 * scale, materials["flame"], Vector3(0.0, 0.40 * scale, 0.0), Vector3(0.82, 1.25, 0.82))
+    add_light_emitter(root, "TorchItemLight", Vector3(0.0, 0.62 * scale, -0.18 * scale), FIRE_LIGHT_COLOR, 3.05 if held else 1.90, 11.4 if held else 6.0, true, 0.88, 0.28, -1.0, 1.38, true)
+    add_ground_fill_light(root, "TorchGroundLight", held, FIRE_LIGHT_COLOR, 1.05 if held else 0.50, 9.2 if held else 4.4, true)
 
 func build_spike_trap(root: Node3D, held: bool) -> void:
     var scale := 0.86 if held else 1.0
@@ -225,6 +322,15 @@ func build_ward_object(root: Node3D, item_id: String, held: bool) -> void:
     add_box(root, Vector3(0.08, 0.42, 0.08) * scale, materials["gold"], Vector3(0.0, 0.0, 0.0), Vector3(deg_to_rad(35.0), 0.0, deg_to_rad(45.0)))
     if item_id == "sanctuaryBeacon" or item_id == "riftAnchor":
         add_box(root, Vector3(0.42, 0.06, 0.42) * scale, materials["stone_dark"], Vector3(0.0, -0.24 * scale, 0.0))
+    if item_id == "riftAnchor":
+        add_light_emitter(root, "RiftAnchorItemLight", Vector3(0.0, 0.36 * scale, -0.12 * scale), Color(0.78, 0.44, 1.0), 3.95 if held else 2.20, 13.2 if held else 6.8)
+        add_ground_fill_light(root, "RiftAnchorGroundLight", held, Color(0.78, 0.44, 1.0), 1.30 if held else 0.58, 10.0 if held else 4.8)
+    elif item_id == "sanctuaryBeacon":
+        add_light_emitter(root, "SanctuaryBeaconItemLight", Vector3(0.0, 0.38 * scale, -0.12 * scale), Color(0.58, 0.86, 1.0), 4.25 if held else 2.35, 13.8 if held else 7.0)
+        add_ground_fill_light(root, "SanctuaryBeaconGroundLight", held, Color(0.58, 0.86, 1.0), 1.36 if held else 0.62, 10.4 if held else 5.0)
+    else:
+        add_light_emitter(root, "WardLanternItemLight", Vector3(0.0, 0.38 * scale, -0.12 * scale), LANTERN_LIGHT_COLOR, 1.92 if held else 1.17, 11.8 if held else 6.4, true, 0.88, 0.28, -1.0, 1.38, true)
+        add_ground_fill_light(root, "WardLanternGroundLight", held, LANTERN_LIGHT_COLOR, 0.63 if held else 0.31, 9.4 if held else 4.6, true)
 
 func build_tool(root: Node3D, item_id: String, held: bool) -> void:
     var scale := 0.92 if held else 1.0
@@ -411,7 +517,7 @@ func held_rotation(item_id: String) -> Vector3:
     if item_id == "fishingRod":
         return Vector3(deg_to_rad(4.0), deg_to_rad(6.0), deg_to_rad(-24.0))
     if is_tool(item_id):
-        return Vector3(deg_to_rad(12.0), deg_to_rad(6.0), deg_to_rad(-22.0))
+        return Vector3(deg_to_rad(10.0), deg_to_rad(-92.0), deg_to_rad(-20.0))
     return Vector3(deg_to_rad(14.0), deg_to_rad(-20.0), deg_to_rad(8.0))
 
 func pickup_rotation(item_id: String) -> Vector3:
@@ -427,3 +533,6 @@ func held_scale(item_id: String) -> float:
     if is_tool(item_id) or item_id in ["hunterBow", "ironCrossbow", "fishingRod"]:
         return 1.02
     return 0.98
+
+func should_mirror_right_hand_item(item_id: String) -> bool:
+    return is_tool(item_id)

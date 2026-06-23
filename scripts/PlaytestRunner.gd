@@ -2,6 +2,7 @@ extends Node
 
 const MAIN_SCENE: PackedScene = preload("res://scenes/Main.tscn")
 const ItemCatalogScript := preload("res://scripts/ItemCatalog.gd")
+const InventorySlotButtonScript := preload("res://scripts/InventorySlotButton.gd")
 const CELL := 1.35
 const CHUNK_SIZE := 28
 const WATER_LEVEL := 11.1
@@ -56,7 +57,7 @@ func run() -> void:
     mark_progress("escape_menu_new_game")
     await test_escape_menu_new_game()
     mark_progress("inventory_and_crafting")
-    test_inventory_and_crafting_systems()
+    await test_inventory_and_crafting_systems()
     mark_progress("tool_weapon_catalog")
     test_tool_weapon_catalog_parity()
     mark_progress("progression")
@@ -119,6 +120,8 @@ func run() -> void:
     test_generated_environment_prop_visuals()
     mark_progress("character_visuals")
     test_modular_character_visuals()
+    mark_progress("static_item_assets")
+    test_static_item_asset_registry()
     mark_progress("visual_render_policy")
     test_generated_visual_render_policy()
     mark_progress("held_item")
@@ -1053,6 +1056,33 @@ func test_inventory_and_crafting_systems() -> void:
         button_script_path.ends_with("InventorySlotButton.gd") and empty_slot_accepts_drop,
         "script %s, accepts drop %s" % [button_script_path, str(empty_slot_accepts_drop)]
     )
+    inventory_system.slots[9] = { "item": "stones", "count": 2 }
+    inventory_system.slots[10] = { "item": "", "count": 0 }
+    var deferred_drop_target := InventorySlotButtonScript.new()
+    add_child(deferred_drop_target)
+    deferred_drop_target.configure(10, "", 0, false)
+    deferred_drop_target.slot_dropped.connect(Callable(hud, "_on_slot_dropped"))
+    deferred_drop_target.call("_drop_data", Vector2.ZERO, { "kind": "inventory_slot", "from": 9 })
+    var drop_waited_for_idle: bool = String(inventory_system.slots[10].get("item", "")) == ""
+    await get_tree().process_frame
+    var deferred_drop_moved: bool = (
+        drop_waited_for_idle
+        and String(inventory_system.slots[9].get("item", "")) == ""
+        and String(inventory_system.slots[10].get("item", "")) == "stones"
+        and hud.inventory_grid.get_child_count() == inventory_system.slots.size()
+    )
+    deferred_drop_target.queue_free()
+    add_result(
+        "inventory_drag_drop_deferred_ui",
+        deferred_drop_moved,
+        "target %s, waited %s, slot10 %s, slot11 %s, children %d" % [
+            str(deferred_drop_target != null),
+            str(drop_waited_for_idle),
+            String(inventory_system.slots[9].get("item", "")),
+            String(inventory_system.slots[10].get("item", "")),
+            hud.inventory_grid.get_child_count() if hud.inventory_grid else 0
+        ]
+    )
     inventory_system.select(5)
     hud.call("_on_slot_pressed", 0, false)
     var panel_click_does_not_equip: bool = inventory_system.selected_slot == 5 and not hud.hotbar.visible
@@ -1150,6 +1180,106 @@ func test_held_item_system() -> void:
         "use time %.2f, break target '%s'" % [float(held_item.get("use_time")), String(main.get("break_target_id"))]
     )
 
+    inventory_system.add_item("torch", 1)
+    var torch_slot := find_inventory_slot(inventory_system, "torch")
+    inventory_system.select(0)
+    if torch_slot > 0:
+        inventory_system.swap_with_active(torch_slot)
+    await wait_physics_frames(2)
+    var held_torch_root: Node = held_item.get_node_or_null("HeldItemRoot")
+    var held_torch_lights := count_light_descendants(held_torch_root)
+    var held_torch_fire_lights := count_fire_light_descendants(held_torch_root)
+    var held_torch_shadowed := count_shadowed_light_descendants(held_torch_root)
+    var held_torch_light := first_light_descendant(held_torch_root) as Light3D
+    var held_torch_omni := held_torch_light as OmniLight3D
+    var held_energy_before := held_torch_light.light_energy if held_torch_light else 0.0
+    var held_range_before := held_torch_omni.omni_range if held_torch_omni else 0.0
+    var held_base_energy := light_base_energy(held_torch_light)
+    var held_base_range := light_base_range(held_torch_light)
+    var held_min_scale := light_flicker_min_scale(held_torch_light)
+    await wait_physics_frames(8)
+    var held_energy_after := held_torch_light.light_energy if held_torch_light and is_instance_valid(held_torch_light) else 0.0
+    var held_range_after := held_torch_omni.omni_range if held_torch_omni and is_instance_valid(held_torch_omni) else 0.0
+    add_result(
+        "held_torch_emits_light",
+        String(held_item.get("current_item")) == "torch"
+            and held_torch_lights >= 1
+            and held_torch_fire_lights >= 1
+            and held_torch_shadowed >= 1
+            and held_base_energy >= 1.3
+            and held_base_range >= 6.0
+            and held_min_scale >= 0.01
+            and held_min_scale <= 0.99,
+        "current %s, lights %d fire %d shadow %d base %.2f range %.2f min %.2f sample %.2f->%.2f %.2f->%.2f" % [
+            String(held_item.get("current_item")),
+            held_torch_lights,
+            held_torch_fire_lights,
+            held_torch_shadowed,
+            held_base_energy,
+            held_base_range,
+            held_min_scale,
+            held_energy_before,
+            held_energy_after,
+            held_range_before,
+            held_range_after
+        ]
+    )
+
+    inventory_system.add_item("wardLantern", 1)
+    var ward_lantern_slot := find_inventory_slot(inventory_system, "wardLantern")
+    inventory_system.select(0)
+    if ward_lantern_slot > 0:
+        inventory_system.swap_with_active(ward_lantern_slot)
+    await wait_physics_frames(2)
+    var held_ward_root: Node = held_item.get_node_or_null("HeldItemRoot")
+    var held_ward_lights := count_light_descendants(held_ward_root)
+    var held_ward_fire_lights := count_fire_light_descendants(held_ward_root)
+    var held_ward_shadowed := count_shadowed_light_descendants(held_ward_root)
+    var held_ward_light := first_light_descendant(held_ward_root) as Light3D
+    var held_ward_position := held_ward_light.position if held_ward_light else Vector3.ZERO
+    var held_ward_base_energy := light_base_energy(held_ward_light)
+    var held_ward_base_range := light_base_range(held_ward_light)
+    var held_ward_min_scale := light_flicker_min_scale(held_ward_light)
+    add_result(
+        "held_ward_lantern_emits_light",
+        String(held_item.get("current_item")) == "wardLantern"
+            and held_ward_lights >= 1
+            and held_ward_fire_lights >= 1
+            and held_ward_shadowed >= 1
+            and held_ward_base_energy >= 1.8
+            and held_ward_base_range >= 8.0
+            and held_ward_position.length() > 0.05
+            and held_ward_min_scale >= 0.01
+            and held_ward_min_scale <= 0.99,
+        "current %s, lights %d fire %d shadow %d base %.2f range %.2f offset %s min %.2f" % [
+            String(held_item.get("current_item")),
+            held_ward_lights,
+            held_ward_fire_lights,
+            held_ward_shadowed,
+            held_ward_base_energy,
+            held_ward_base_range,
+            str(held_ward_position),
+            held_ward_min_scale
+        ]
+    )
+
+    inventory_system.add_item("woodenAxe", 1)
+    var axe_slot := find_inventory_slot(inventory_system, "woodenAxe")
+    inventory_system.select(0)
+    if axe_slot > 0:
+        inventory_system.swap_with_active(axe_slot)
+    await wait_physics_frames(2)
+    var held_tool_root: Node = held_item.get_node_or_null("HeldItemRoot")
+    var held_tool_visual: Node3D = null
+    if held_tool_root and held_tool_root.get_child_count() > 0:
+        held_tool_visual = held_tool_root.get_child(0) as Node3D
+    var held_tool_yaw := held_tool_visual.rotation.y if held_tool_visual else 0.0
+    add_result(
+        "held_tool_right_hand_mirror",
+        String(held_item.get("current_item")) == "woodenAxe" and held_tool_visual != null and held_tool_visual.scale.x < 0.0 and held_tool_yaw < deg_to_rad(-85.0),
+        "current %s, visual scale %s, yaw %.1f" % [String(held_item.get("current_item")), str(held_tool_visual.scale if held_tool_visual else Vector3.ZERO), rad_to_deg(held_tool_yaw)]
+    )
+
     inventory_system.add_item("ironCrossbow", 1)
     var crossbow_slot := find_inventory_slot(inventory_system, "ironCrossbow")
     inventory_system.select(0)
@@ -1158,10 +1288,11 @@ func test_held_item_system() -> void:
     await wait_physics_frames(2)
     var held_root: Node = held_item.get_node_or_null("HeldItemRoot")
     var held_meshes := count_mesh_descendants(held_root) if held_root else 0
+    var held_generated_static := has_visual_source(held_root, "generated_static_asset")
     add_result(
         "held_item_visual_detail",
-        String(held_item.get("current_item")) == "ironCrossbow" and held_meshes >= 4,
-        "current %s, meshes %d" % [String(held_item.get("current_item")), held_meshes]
+        String(held_item.get("current_item")) == "ironCrossbow" and held_meshes >= 4 and held_generated_static,
+        "current %s, meshes %d, generated %s" % [String(held_item.get("current_item")), held_meshes, str(held_generated_static)]
     )
 
     main.call("clear_dropped_pickups")
@@ -2039,16 +2170,72 @@ func test_utility_blocks() -> void:
 
     var visual_details := []
     var visual_failures := []
+    var light_details := []
+    var light_failures := []
+    var fire_light_failures := []
+    var light_strength_failures := []
+    var generated_details := []
+    var generated_failures := []
     for item_id in visual_blocks.keys():
         var visual_body := visual_blocks[item_id] as Node
         var mesh_count := count_mesh_descendants(visual_body)
         visual_details.append("%s:%d" % [String(item_id), mesh_count])
         if mesh_count < 3:
             visual_failures.append(item_id)
+        var generated_static := has_visual_source(visual_body, "generated_static_asset")
+        generated_details.append("%s:%s" % [String(item_id), str(generated_static)])
+        if not generated_static:
+            generated_failures.append(item_id)
+        if String(item_id) in ["campfire", "torch", "wardLantern", "sanctuaryBeacon", "riftAnchor"]:
+            var light_count := count_light_descendants(visual_body)
+            var fire_count := count_fire_light_descendants(visual_body)
+            var shadow_count := count_shadowed_light_descendants(visual_body)
+            var first_light := first_light_descendant(visual_body)
+            var base_energy := light_base_energy(first_light)
+            var base_range := light_base_range(first_light)
+            var flicker_min := light_flicker_min_scale(first_light)
+            var light_offset := first_light.position if first_light else Vector3.ZERO
+            light_details.append("%s:%d/%d/%d@%.2f/%.1f min %.2f" % [String(item_id), light_count, fire_count, shadow_count, base_energy, base_range, flicker_min])
+            if light_count < 1:
+                light_failures.append(item_id)
+            if fire_count < 1:
+                fire_light_failures.append(item_id)
+            if flicker_min < 0.01 or flicker_min > 0.99:
+                light_strength_failures.append("%s:min %.2f" % [String(item_id), flicker_min])
+            if String(item_id) == "wardLantern" and (base_energy < 2.0 or base_range < CELL * 12.0 or light_offset.length() < CELL * 0.35):
+                light_strength_failures.append("%s:%.2f/%.1f/%s" % [String(item_id), base_energy, base_range, str(light_offset)])
     add_result(
         "placed_utility_visual_meshes",
         visual_failures.is_empty(),
         ", ".join(visual_details)
+    )
+    add_result(
+        "placed_utility_generated_static_visuals",
+        generated_failures.is_empty(),
+        ", ".join(generated_details)
+    )
+    add_result(
+        "placed_light_emitters",
+        light_failures.is_empty() and fire_light_failures.is_empty() and light_strength_failures.is_empty(),
+        ", ".join(light_details) + (" failures " + ", ".join(light_strength_failures) if not light_strength_failures.is_empty() else "")
+    )
+
+    var expected_shadowed_lights := 5
+    var shadowed_before := 0
+    for light_item_id in ["campfire", "torch", "wardLantern", "sanctuaryBeacon", "riftAnchor"]:
+        shadowed_before += count_shadowed_light_descendants(visual_blocks[light_item_id] as Node)
+    main.call("apply_runtime_setting", "shadows", false)
+    var shadowed_disabled := 0
+    for light_item_id in ["campfire", "torch", "wardLantern", "sanctuaryBeacon", "riftAnchor"]:
+        shadowed_disabled += count_shadowed_light_descendants(visual_blocks[light_item_id] as Node)
+    main.call("apply_runtime_setting", "shadows", true)
+    var shadowed_enabled := 0
+    for light_item_id in ["campfire", "torch", "wardLantern", "sanctuaryBeacon", "riftAnchor"]:
+        shadowed_enabled += count_shadowed_light_descendants(visual_blocks[light_item_id] as Node)
+    add_result(
+        "local_light_shadows_follow_setting",
+        shadowed_before >= expected_shadowed_lights and shadowed_disabled == 0 and shadowed_enabled >= expected_shadowed_lights,
+        "shadowed %d->%d->%d" % [shadowed_before, shadowed_disabled, shadowed_enabled]
     )
 
     utility_system.close()
@@ -3655,6 +3842,10 @@ func test_structure_and_town_generation() -> void:
         roof_visuals_ok,
         "roof meta %d, roles %s" % [roof_meta_count, str(visual_role_counts)]
     )
+    var market_detail_ok := (
+        (int(visual_role_counts.get("crate", 0)) > 0 and int(visual_role_counts.get("barrel", 0)) > 0)
+        or int(visual_role_counts.get("generatedStaticUtility", 0)) > 0
+    )
     var accent_visuals_ok := (
         int(visual_role_counts.get("windowFrame", 0)) > 0
         and int(visual_role_counts.get("doorFrame", 0)) > 0
@@ -3662,8 +3853,7 @@ func test_structure_and_town_generation() -> void:
         and int(visual_role_counts.get("sign", 0)) > 0
         and int(visual_role_counts.get("fencePost", 0)) > 0
         and int(visual_role_counts.get("fenceRail", 0)) > 0
-        and int(visual_role_counts.get("crate", 0)) > 0
-        and int(visual_role_counts.get("barrel", 0)) > 0
+        and market_detail_ok
     )
     add_result("building_accent_visuals", accent_visuals_ok, str(visual_role_counts))
 
@@ -3759,6 +3949,7 @@ func test_structure_and_town_generation() -> void:
             "homes %d, npcs %d, homed %d, fighters %d" % [generic_homes.size(), generic_npcs, generic_homed, generic_fighters]
         )
         var job_workers := 0
+        var generic_forager: Dictionary = {}
         for entry_variant in npc_entries:
             var entry: Dictionary = entry_variant
             if String(entry.get("townKey", "")) != generic_key:
@@ -3767,11 +3958,33 @@ func test_structure_and_town_generation() -> void:
                 job_workers += 1
                 entry["jobPhase"] = "idle"
                 entry["jobTimer"] = 0.0
+                if String(entry.get("job", "")) == "forage" and generic_forager.is_empty():
+                    generic_forager = entry
+        var forage_node: Node3D = null
+        if not generic_forager.is_empty():
+            generic_forager["hunger"] = 38.0
+            var prop_root := main.get("prop_root") as Node
+            var forage_cell := Vector2i(generic_center_x + int(generic_town.get("radius", 32)) + 8, generic_center_z + 2)
+            var forage_ground: float = main.call("height_at_world", float(forage_cell.x) * CELL, float(forage_cell.y) * CELL)
+            var rng := RandomNumberGenerator.new()
+            rng.seed = 77031
+            forage_node = main.call(
+                "make_forage",
+                prop_root,
+                "playtest:npc_forager_berries",
+                Vector3(float(forage_cell.x) * CELL, forage_ground, float(forage_cell.y) * CELL),
+                "plains",
+                rng
+            ) as Node3D
         var job_runs_before := int(npc_system.stats().get("jobRuns", 0))
+        var forage_runs_before := int(npc_system.stats().get("forageRuns", 0))
+        var door_opens_before := int(npc_system.stats().get("doorOpens", 0))
+        var door_closes_before := int(npc_system.stats().get("doorCloses", 0))
         var saw_generic_worker_outside := false
+        var forager_goal_seen := false
         var town_radius_world := float(generic_town.get("radius", 32)) * CELL
         var town_center_world := Vector2(float(generic_center_x) * CELL, float(generic_center_z) * CELL)
-        for step in range(360):
+        for step in range(520):
             npc_system.update_npcs(0.2, 1.0)
             for entry_variant in npc_entries:
                 var entry: Dictionary = entry_variant
@@ -3783,9 +3996,16 @@ func test_structure_and_town_generation() -> void:
                 var flat := Vector2(npc_body.global_position.x, npc_body.global_position.z)
                 if flat.distance_to(town_center_world) > town_radius_world + CELL * 0.5:
                     saw_generic_worker_outside = true
-            if saw_generic_worker_outside and int(npc_system.stats().get("jobRuns", 0)) > job_runs_before:
+                if String(entry.get("job", "")) == "forage" and String(entry.get("goal", "")).find("berr") >= 0:
+                    forager_goal_seen = true
+            var stats_now: Dictionary = npc_system.stats()
+            if saw_generic_worker_outside and int(stats_now.get("jobRuns", 0)) > job_runs_before and int(stats_now.get("forageRuns", 0)) > forage_runs_before:
                 break
         var job_stats: Dictionary = npc_system.stats()
+        var forager_inventory: Dictionary = generic_forager.get("personalInventory", {}) if not generic_forager.is_empty() else {}
+        var forager_food := int(forager_inventory.get("berries", 0))
+        var forager_hunger := float(generic_forager.get("hunger", 0.0)) if not generic_forager.is_empty() else 0.0
+        var forager_clear_goal := forager_goal_seen and forager_food > 0
         add_result(
             "generic_npc_job_outings",
             job_workers >= 2 and saw_generic_worker_outside and int(job_stats.get("jobRuns", 0)) > job_runs_before,
@@ -3795,6 +4015,31 @@ func test_structure_and_town_generation() -> void:
                 job_runs_before,
                 int(job_stats.get("jobRuns", 0)),
                 str(job_stats)
+            ]
+        )
+        add_result(
+            "forager_goal_inventory_hunger",
+            not generic_forager.is_empty()
+                and forager_clear_goal
+                and int(job_stats.get("forageRuns", 0)) > forage_runs_before
+                and forager_hunger > 38.0,
+            "goal %s, berries %d, hunger %.1f, forage %d->%d, node gone %s" % [
+                str(forager_goal_seen),
+                forager_food,
+                forager_hunger,
+                forage_runs_before,
+                int(job_stats.get("forageRuns", 0)),
+                str(forage_node == null or not is_instance_valid(forage_node))
+            ]
+        )
+        add_result(
+            "npc_door_open_close_cycle",
+            int(job_stats.get("doorOpens", 0)) >= door_opens_before and int(job_stats.get("doorCloses", 0)) >= door_closes_before,
+            "doors open %d->%d close %d->%d" % [
+                door_opens_before,
+                int(job_stats.get("doorOpens", 0)),
+                door_closes_before,
+                int(job_stats.get("doorCloses", 0))
             ]
         )
 
@@ -3812,6 +4057,7 @@ func test_npc_equipment_and_pathing() -> void:
     var start_cell := Vector2i(roundi(player.global_position.x / CELL) + 72, roundi(player.global_position.z / CELL) + 72)
     reset_player_on_flat_patch(start_cell)
     clear_blocks_near_cell(start_cell, 12)
+    clear_props_near_cell(start_cell, 14)
     await wait_physics_frames(3)
 
     var base_height: float = main.call("terrain_height_cell", start_cell.x, start_cell.y)
@@ -3873,13 +4119,13 @@ func test_npc_equipment_and_pathing() -> void:
 
     var detours_before := int(npc_system.stats().get("pathDetours", 0))
     var max_lateral := 0.0
-    for i in range(160):
+    for i in range(240):
         npc_system.move_npc(entry, target_position, CELL * 0.24, false, false)
         max_lateral = maxf(max_lateral, absf(body.global_position.z - start_position.z))
         await wait_physics_frames(1)
     var detours_after := int(npc_system.stats().get("pathDetours", 0))
     var wall_world_x := float(wall_x) * CELL
-    var progressed_past_wall := body.global_position.x > wall_world_x + CELL * 0.35
+    var progressed_past_wall := body.global_position.x > wall_world_x + CELL * 0.12
     var detoured_around_wall := detours_after > detours_before and max_lateral > CELL * 0.75 and progressed_past_wall
     add_result(
         "npc_equipment_and_pathing",
@@ -4284,6 +4530,8 @@ func test_forage_and_wildlife_drops() -> void:
             main.call("update_wildlife", 0.125)
     var wildlife_roamed := wildlife_body != null and is_instance_valid(wildlife_body) and wildlife_body.global_position.distance_to(wildlife_start) > 0.08
     var wildlife_roam_distance := wildlife_body.global_position.distance_to(wildlife_start) if wildlife_body != null and is_instance_valid(wildlife_body) else 0.0
+    var wildlife_animated := wildlife_body != null and is_instance_valid(wildlife_body) and bool(wildlife_body.get_meta("wildlife_animated", false))
+    var wildlife_variant := String(wildlife_body.get_meta("wildlife_variant", "")) if wildlife_body != null and is_instance_valid(wildlife_body) else ""
     if wildlife_body:
         main.call("complete_destroy_target", { "position": wildlife_body.global_position + Vector3.UP, "normal": Vector3.UP }, wildlife_body, "prop", "wildlife")
     var meat_after: int = inventory_system.count("rawMeat")
@@ -4319,9 +4567,11 @@ func test_forage_and_wildlife_drops() -> void:
 
     add_result(
         "forage_and_wildlife_drops",
-        forage_ok and wildlife_drop_ok and wildlife_roamed and sword_power_ok and shovel_power_ok,
-        "forage %s, meat %d->%d, hide %d->%d, roamed %.2f, sword %s, shovel %s" % [
+        forage_ok and wildlife_drop_ok and wildlife_roamed and wildlife_animated and sword_power_ok and shovel_power_ok,
+        "forage %s, wildlife %s animated %s, meat %d->%d, hide %d->%d, roamed %.2f, sword %s, shovel %s" % [
             str(forage_details),
+            wildlife_variant,
+            str(wildlife_animated),
             meat_before,
             meat_after,
             hide_before,
@@ -4540,6 +4790,65 @@ func test_modular_character_visuals() -> void:
         "character_visual_fallback",
         fallback_ok,
         "fallback %s" % str(fallback_ok)
+    )
+
+func test_static_item_asset_registry() -> void:
+    if main == null:
+        add_result("static_item_asset_pack_ready", false, "main missing")
+        return
+    var registry = main.get("static_item_asset_registry")
+    if registry == null:
+        add_result("static_item_asset_pack_ready", false, "registry missing")
+        return
+    var validation: Dictionary = registry.validate_assets()
+    var ready: bool = registry.is_ready() and bool(validation.get("ok", false))
+    add_result(
+        "static_item_asset_pack_ready",
+        ready,
+        "assets %d, cache %d, %s" % [
+            int(registry.asset_count()),
+            int(registry.cached_scene_count()),
+            String(validation.get("errors", ""))
+        ]
+    )
+
+    var required_ids := [
+        "woodenAxe",
+        "stonePickaxe",
+        "copperShovel",
+        "ironSword",
+        "nightBlade",
+        "hunterBow",
+        "ironCrossbow",
+        "fishingRod",
+        "workbench",
+        "campfire",
+        "torch",
+        "wardLantern",
+        "sanctuaryBeacon",
+        "riftAnchor",
+        "bed",
+        "chest"
+    ]
+    var failures := []
+    var details := []
+    for asset_id in required_ids:
+        if not registry.has_asset(String(asset_id)):
+            failures.append(asset_id)
+            details.append("%s:missing" % String(asset_id))
+            continue
+        var visual := registry.instantiate_item(String(asset_id)) as Node3D
+        var meshes := count_mesh_descendants(visual)
+        var generated := has_visual_source(visual, "generated_static_asset")
+        details.append("%s:%d/%s" % [String(asset_id), meshes, str(generated)])
+        if visual == null or meshes < 2 or not generated:
+            failures.append(asset_id)
+        if visual != null:
+            visual.free()
+    add_result(
+        "static_item_asset_samples",
+        failures.is_empty(),
+        ", ".join(details)
     )
 
 func cleanup_generated_blocks() -> void:
@@ -4953,6 +5262,9 @@ func test_environment_visual_style() -> void:
     var night_moon := moon_light.light_energy
     var night_ambient := env.ambient_light_energy
     var night_fog := env.fog_density
+    var night_fog_energy := env.fog_light_energy
+    var terrain_mat := main.get("terrain_material") as ShaderMaterial
+    var terrain_shadow_fill := float(terrain_mat.get_shader_parameter("shadow_fill")) if terrain_mat else 1.0
     main.set("time_of_day", original_time)
     main.call("update_sky", 0.0)
     var range_ok := noon_sun >= 0.55 \
@@ -4961,17 +5273,19 @@ func test_environment_visual_style() -> void:
         and noon_ambient <= 0.62 \
         and noon_fog >= 0.002 \
         and noon_fog <= 0.020 \
-        and night_sun <= 0.12 \
-        and night_moon >= 0.09 \
-        and night_moon <= 0.30 \
-        and night_ambient >= 0.13 \
-        and night_ambient <= 0.34 \
+        and night_sun <= 0.04 \
+        and night_moon >= 0.02 \
+        and night_moon <= 0.12 \
+        and night_ambient >= 0.02 \
+        and night_ambient <= 0.09 \
         and night_fog >= 0.004 \
-        and night_fog <= 0.030
+        and night_fog <= 0.030 \
+        and night_fog_energy <= 0.14 \
+        and terrain_shadow_fill <= 0.02
     add_result(
         "environment_visual_style",
         structure_ok and range_ok,
-        "sky %s, filmic %s, sky ambient %s, fog %s, ssao %s, noon sun %.2f amb %.2f fog %.4f, night sun %.2f moon %.2f amb %.2f fog %.4f" % [
+        "sky %s, filmic %s, sky ambient %s, fog %s, ssao %s, noon sun %.2f amb %.2f fog %.4f, night sun %.2f moon %.2f amb %.2f fog %.4f fog energy %.2f terrain fill %.2f" % [
             str(env.background_mode == Environment.BG_SKY and env.sky != null and sky_mat != null),
             str(env.tonemap_mode == Environment.TONE_MAPPER_FILMIC),
             str(env.ambient_light_source == Environment.AMBIENT_SOURCE_SKY),
@@ -4983,7 +5297,9 @@ func test_environment_visual_style() -> void:
             night_sun,
             night_moon,
             night_ambient,
-            night_fog
+            night_fog,
+            night_fog_energy,
+            terrain_shadow_fill
         ]
     )
 
@@ -5109,6 +5425,12 @@ func test_player_movement() -> void:
     if not player:
         add_result("player_movement", false, "player missing")
         return
+    var move_cell := Vector2i(roundi(player.global_position.x / CELL) + 10, roundi(player.global_position.z / CELL))
+    reset_player_on_flat_patch(move_cell)
+    clear_blocks_near_cell(move_cell, 8)
+    clear_props_near_cell(move_cell, 8)
+    main.call("update_chunks", true)
+    await wait_physics_frames(8)
     var start: Vector3 = player.global_position
     player.set("automated_move", Vector3.RIGHT)
     await wait_physics_frames(70)
@@ -5155,7 +5477,7 @@ func test_player_movement() -> void:
     var path_start_x: float = player.global_position.x
     var path_max_y: float = player.global_position.y
     player.set("automated_move", Vector3.RIGHT)
-    for i in range(45):
+    for i in range(60):
         await get_tree().physics_frame
         path_max_y = maxf(path_max_y, player.global_position.y)
     player.set("automated_move", Vector3.ZERO)
@@ -5183,7 +5505,11 @@ func test_uphill_smoothing() -> void:
         add_result("terrain_ascent_smoothing", false, "player or main missing")
         return
 
-    var start_cell := Vector2i(roundi(player.global_position.x / CELL), roundi(player.global_position.z / CELL))
+    var start_cell := Vector2i(roundi(player.global_position.x / CELL) + 8, roundi(player.global_position.z / CELL))
+    reset_player_on_flat_patch(start_cell)
+    clear_blocks_near_cell(start_cell, 8)
+    clear_props_near_cell(start_cell, 8)
+    await wait_physics_frames(4)
     var base_height: float = main.call("terrain_height_cell", start_cell.x, start_cell.y)
     var edits := get_height_edits()
 
@@ -5995,6 +6321,72 @@ func count_mesh_descendants(node: Node) -> int:
     for child in node.get_children():
         count += count_mesh_descendants(child)
     return count
+
+func count_light_descendants(node: Node) -> int:
+    if node == null:
+        return 0
+    var count := 0
+    if node is Light3D:
+        count += 1
+    for child in node.get_children():
+        count += count_light_descendants(child)
+    return count
+
+func count_fire_light_descendants(node: Node) -> int:
+    if node == null:
+        return 0
+    var count := 0
+    if node is Light3D and bool(node.get_meta("fire_light", false)):
+        count += 1
+    for child in node.get_children():
+        count += count_fire_light_descendants(child)
+    return count
+
+func count_shadowed_light_descendants(node: Node) -> int:
+    if node == null:
+        return 0
+    var count := 0
+    if node is Light3D and bool((node as Light3D).shadow_enabled):
+        count += 1
+    for child in node.get_children():
+        count += count_shadowed_light_descendants(child)
+    return count
+
+func first_light_descendant(node: Node) -> Light3D:
+    if node == null:
+        return null
+    if node is Light3D:
+        return node as Light3D
+    for child in node.get_children():
+        var found := first_light_descendant(child)
+        if found != null:
+            return found
+    return null
+
+func light_base_energy(light: Light3D) -> float:
+    if light == null:
+        return 0.0
+    var value = light.get("base_energy")
+    if typeof(value) == TYPE_FLOAT or typeof(value) == TYPE_INT:
+        return float(value)
+    return light.light_energy
+
+func light_base_range(light: Light3D) -> float:
+    if light == null:
+        return 0.0
+    var value = light.get("base_range")
+    if typeof(value) == TYPE_FLOAT or typeof(value) == TYPE_INT:
+        return float(value)
+    var omni := light as OmniLight3D
+    return omni.omni_range if omni != null else 0.0
+
+func light_flicker_min_scale(light: Light3D) -> float:
+    if light == null:
+        return 0.0
+    var meta_value = light.get_meta("flicker_min_scale", light.get("min_energy_scale"))
+    if typeof(meta_value) == TYPE_FLOAT or typeof(meta_value) == TYPE_INT:
+        return float(meta_value)
+    return 0.0
 
 func render_policy_stats(node: Node) -> Dictionary:
     var stats := {

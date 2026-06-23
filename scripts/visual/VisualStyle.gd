@@ -9,7 +9,7 @@ class_name VisualStyle
 @export var sunset_sky_top := Color(0.72, 0.42, 0.28)
 @export var sunset_sky_horizon := Color(0.98, 0.64, 0.34)
 @export var day_ground_horizon := Color(0.54, 0.64, 0.58)
-@export var night_ground_horizon := Color(0.045, 0.055, 0.080)
+@export var night_ground_horizon := Color(0.012, 0.016, 0.030)
 @export var ground_bottom := Color(0.025, 0.030, 0.040)
 @export_range(0.0, 1.0, 0.01) var sunset_width := 0.20
 @export_range(0.0, 4.0, 0.01) var sky_energy_multiplier := 1.05
@@ -23,40 +23,41 @@ class_name VisualStyle
 @export var sun_color_warm := Color(1.0, 0.64, 0.34)
 @export var moon_color := Color(0.55, 0.64, 0.92)
 @export var ambient_day := Color(0.67, 0.73, 0.68)
-@export var ambient_night := Color(0.20, 0.23, 0.32)
-@export var ambient_weather := Color(0.42, 0.48, 0.52)
-@export_range(0.0, 3.0, 0.01) var sun_min_energy := 0.035
+@export var ambient_night := Color(0.035, 0.045, 0.075)
+@export var ambient_weather := Color(0.22, 0.27, 0.31)
+@export_range(0.0, 3.0, 0.01) var sun_min_energy := 0.0
 @export_range(0.0, 3.0, 0.01) var sun_max_energy := 1.48
-@export_range(0.0, 3.0, 0.01) var moon_min_energy := 0.045
-@export_range(0.0, 3.0, 0.01) var moon_max_energy := 0.24
-@export_range(0.0, 2.0, 0.01) var ambient_min_energy := 0.18
+@export_range(0.0, 3.0, 0.01) var moon_min_energy := 0.012
+@export_range(0.0, 3.0, 0.01) var moon_max_energy := 0.08
+@export_range(0.0, 2.0, 0.01) var ambient_min_energy := 0.035
 @export_range(0.0, 2.0, 0.01) var ambient_max_energy := 0.52
-@export_range(0.0, 1.0, 0.01) var ambient_sky_contribution := 0.78
+@export_range(0.0, 1.0, 0.01) var ambient_sky_contribution := 0.34
 @export_range(0.0, 2.0, 0.01) var sunset_sun_boost := 0.08
 
 @export_group("Weather")
 @export var weather_sky_top := Color(0.35, 0.43, 0.48)
 @export var weather_sky_horizon := Color(0.52, 0.60, 0.60)
-@export var weather_night_sky := Color(0.030, 0.040, 0.075)
+@export var weather_night_sky := Color(0.012, 0.016, 0.035)
 @export var weather_fog_day := Color(0.55, 0.62, 0.62)
-@export var weather_fog_night := Color(0.060, 0.072, 0.100)
+@export var weather_fog_night := Color(0.018, 0.024, 0.040)
 @export_range(0.0, 1.0, 0.01) var cloud_sun_shade := 0.24
 @export_range(0.0, 1.0, 0.01) var rain_sun_shade := 0.24
-@export_range(0.0, 1.0, 0.01) var cloud_moon_shade := 0.20
-@export_range(0.0, 1.0, 0.01) var rain_moon_shade := 0.18
+@export_range(0.0, 1.0, 0.01) var cloud_moon_shade := 0.42
+@export_range(0.0, 1.0, 0.01) var rain_moon_shade := 0.34
 @export_range(0.0, 1.0, 0.01) var max_weather_tint := 0.46
-@export_range(0.0, 1.0, 0.01) var weather_ambient_tint := 0.42
-@export_range(0.0, 1.0, 0.01) var weather_ambient_floor := 0.74
+@export_range(0.0, 1.0, 0.01) var weather_ambient_tint := 0.16
+@export_range(0.0, 1.0, 0.01) var weather_ambient_floor := 0.38
 
 @export_group("Fog")
 @export var fog_day := Color(0.64, 0.76, 0.76)
-@export var fog_night := Color(0.075, 0.092, 0.130)
+@export var fog_night := Color(0.018, 0.024, 0.040)
 @export var fog_sunset := Color(0.94, 0.58, 0.34)
 @export_range(0.0, 0.1, 0.0005) var fog_density_day := 0.0065
 @export_range(0.0, 0.1, 0.0005) var fog_density_night := 0.0105
 @export_range(0.0, 0.1, 0.0005) var fog_density_weather := 0.0140
 @export_range(0.0, 1.0, 0.01) var fog_sky_affect := 0.42
 @export_range(0.0, 2.0, 0.01) var fog_light_energy := 0.60
+@export_range(0.0, 2.0, 0.01) var fog_light_energy_night := 0.08
 @export_range(0.0, 1.0, 0.01) var fog_sun_scatter := 0.24
 
 @export_group("Tonemap and Occlusion")
