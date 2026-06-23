@@ -11,6 +11,7 @@ static func build_ui(hud) -> void:
     root.set_anchors_preset(Control.PRESET_FULL_RECT)
     root.mouse_filter = Control.MOUSE_FILTER_IGNORE
     hud.add_child(root)
+    hud.hud_root = root
 
     hud.status_label = Label.new()
     hud.status_label.position = Vector2(18, 18)
@@ -19,6 +20,7 @@ static func build_ui(hud) -> void:
 
     hud.version_label = Label.new()
     hud.version_label.text = GAME_BUILD_LABEL
+    hud.version_label.visible = false
     hud.version_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
     hud.version_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
     hud.version_label.anchor_left = 1.0

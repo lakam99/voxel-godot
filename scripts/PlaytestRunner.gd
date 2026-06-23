@@ -205,11 +205,40 @@ func test_scene_bootstrap() -> void:
     if player:
         add_result("controller_ticks", int(player.get("physics_ticks")) > 0, "%d ticks" % int(player.get("physics_ticks")))
     var hud = main.get("hud") if main else null
+    var status_label: Label = hud.get("status_label") if hud else null
     var version_label: Label = hud.get("version_label") if hud else null
+    var hud_root: Control = hud.get("hud_root") if hud else null
+    var ui_theme: Theme = hud.get("ui_theme") if hud else null
+    var normal_status := status_label.text if status_label else ""
+    var normal_debug_hidden := (
+        version_label != null
+        and not version_label.visible
+        and not normal_status.contains("seed ")
+        and not normal_status.contains("chunks")
+    )
+    if hud:
+        hud.call("set_performance_open", true)
+        hud.call("set_status", "atlas-1492", "town", 49, Vector2(1.0, 2.0), "12:00")
+    var debug_status := status_label.text if status_label else ""
+    var debug_readouts_visible := (
+        version_label != null
+        and version_label.visible
+        and version_label.text.begins_with("build ")
+        and debug_status.contains("seed atlas-1492")
+        and debug_status.contains("49 chunks")
+        and debug_status.contains("1, 2")
+    )
+    if hud:
+        hud.call("set_performance_open", false)
     add_result(
-        "version_label_visible",
-        version_label != null and version_label.visible and version_label.text.begins_with("build "),
-        "label '%s'" % (version_label.text if version_label else "")
+        "debug_readouts_gated",
+        normal_debug_hidden and debug_readouts_visible,
+        "normal '%s', debug '%s', build visible %s" % [normal_status, debug_status, str(version_label.visible if version_label else false)]
+    )
+    add_result(
+        "hud_theme_applied",
+        hud_root != null and ui_theme != null and hud_root.theme == ui_theme,
+        "theme %s" % str(ui_theme != null)
     )
 
 func test_tutorial_start_system() -> void:
@@ -909,6 +938,30 @@ func test_inventory_and_crafting_systems() -> void:
         wheel_previous == 4 and wheel_next == 5 and String(inventory_system.active_stack().get("item", "")) == "logs",
         "wheel slots %d->%d active %s" % [wheel_previous, wheel_next, String(inventory_system.active_stack().get("item", ""))]
     )
+    hud.set_inventory_open(false)
+    hud.render_hotbar()
+    var hotbar_child_count: int = hud.hotbar.get_child_count() if hud.hotbar else 0
+    var first_hotbar_button := hud.hotbar.get_child(0) as Button if hotbar_child_count > 0 else null
+    inventory_system.select(6)
+    hud.render_hotbar()
+    var selected_hotbar_button := hud.hotbar.get_child(6) as Button if hud.hotbar.get_child_count() > 6 else null
+    var hotbar_reuses_slots: bool = (
+        hotbar_child_count == inventory_system.hotbar_size
+        and first_hotbar_button != null
+        and hud.hotbar.get_child(0) == first_hotbar_button
+        and selected_hotbar_button != null
+        and String(selected_hotbar_button.theme_type_variation) == "HotbarSlotSelected"
+    )
+    add_result(
+        "hotbar_reuses_slots",
+        hotbar_reuses_slots,
+        "children %d, first reused %s, selected variation %s" % [
+            hud.hotbar.get_child_count() if hud.hotbar else 0,
+            str(first_hotbar_button != null and hud.hotbar.get_child(0) == first_hotbar_button),
+            String(selected_hotbar_button.theme_type_variation) if selected_hotbar_button else ""
+        ]
+    )
+    inventory_system.select(5)
 
     main.call("_on_ui_slot_clicked", 12)
     var empty_click_inert: bool = (

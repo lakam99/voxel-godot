@@ -8,6 +8,7 @@ const InventorySlotButtonScript := preload("res://scripts/InventorySlotButton.gd
 const GameHudLayoutBuilderScript := preload("res://scripts/GameHudLayoutBuilder.gd")
 const GameHudRendererScript := preload("res://scripts/GameHudRenderer.gd")
 const GameHudOverlayControllerScript := preload("res://scripts/GameHudOverlayController.gd")
+const HudStyleFactoryScript := preload("res://scripts/visual/HudStyleFactory.gd")
 const GAME_BUILD_LABEL := "build 2026.06.22.8"
 
 signal slot_clicked(index)
@@ -29,6 +30,10 @@ var objectives
 var equipment
 var contracts
 
+var hud_root: Control
+var ui_theme: Theme
+var debug_readout_visible := false
+var last_status_state := {}
 var status_label: Label
 var version_label: Label
 var target_label: Label
@@ -91,6 +96,7 @@ var sleep_fade_overlay: ColorRect
 var sleep_fade_tween: Tween
 var icon_cache := {}
 var icon_factory
+var hotbar_slot_buttons: Array[Button] = []
 var setting_controls := {}
 var settings_state := {}
 var playtest_cases := []
@@ -118,6 +124,7 @@ func setup(inventory_system, crafting_system, objective_system = null, equipment
 
 func build_ui() -> void:
     GameHudLayoutBuilderScript.build_ui(self)
+    HudStyleFactoryScript.apply(self)
 
 func play_sleep_fade(fade_out := 0.55, hold := 0.45, fade_in := 0.70) -> void:
     GameHudOverlayControllerScript.play_sleep_fade(self, fade_out, hold, fade_in)
@@ -132,8 +139,12 @@ func set_performance(state: Dictionary) -> void:
     GameHudRendererScript.set_performance(self, state)
 
 func set_performance_open(open: bool) -> void:
+    debug_readout_visible = open
     if performance_label:
         performance_label.visible = open
+    if version_label:
+        version_label.visible = open
+    GameHudRendererScript.refresh_status_label(self)
 
 func toggle_performance() -> bool:
     set_performance_open(not performance_label.visible)

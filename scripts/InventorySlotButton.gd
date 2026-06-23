@@ -21,6 +21,8 @@ func _get_drag_data(_at_position: Vector2) -> Variant:
     var preview := Button.new()
     preview.disabled = true
     preview.custom_minimum_size = custom_minimum_size
+    preview.theme = theme
+    preview.theme_type_variation = theme_type_variation
     preview.icon = icon
     preview.text = text
     preview.clip_text = true

@@ -5,7 +5,32 @@ const InventorySlotButtonScript := preload("res://scripts/InventorySlotButton.gd
 const ItemCatalogScript := preload("res://scripts/ItemCatalog.gd")
 
 static func set_status(hud, seed_text: String, biome: String, chunk_count: int, coords: Vector2, time_text: String) -> void:
-    hud.status_label.text = "Voxel Biome World Godot\nseed %s | %s | %d chunks\n%s | %.0f, %.0f" % [seed_text, biome.capitalize(), chunk_count, time_text, coords.x, coords.y]
+    hud.last_status_state = {
+        "seed": seed_text,
+        "biome": biome,
+        "chunkCount": chunk_count,
+        "coords": coords,
+        "time": time_text
+    }
+    refresh_status_label(hud)
+
+static func refresh_status_label(hud) -> void:
+    if hud.status_label == null or not (hud.last_status_state is Dictionary) or hud.last_status_state.is_empty():
+        return
+    var biome := String(hud.last_status_state.get("biome", "")).capitalize()
+    var time_text := String(hud.last_status_state.get("time", ""))
+    if bool(hud.debug_readout_visible):
+        var coords := hud.last_status_state.get("coords", Vector2.ZERO) as Vector2
+        hud.status_label.text = "Voxel Biome World Godot\nseed %s | %s | %d chunks\n%s | %.0f, %.0f" % [
+            String(hud.last_status_state.get("seed", "")),
+            biome,
+            int(hud.last_status_state.get("chunkCount", 0)),
+            time_text,
+            coords.x,
+            coords.y
+        ]
+        return
+    hud.status_label.text = "Voxel Biome World\n%s | %s" % [biome, time_text]
 
 static func set_performance(hud, state: Dictionary) -> void:
     if hud.performance_label == null or not hud.performance_label.visible:
@@ -207,10 +232,24 @@ static func render_active(hud) -> void:
     hud.active_label.text = "Active: empty" if item_id == "" else "Active: %s x%d" % [ItemCatalogScript.label(item_id), int(stack.get("count", 0))]
 
 static func render_hotbar(hud) -> void:
-    clear_container(hud.hotbar)
+    ensure_hotbar_slots(hud)
     for i in range(hud.inventory.hotbar_size):
         var slot: Dictionary = hud.inventory.slots[i] if i < hud.inventory.slots.size() else { "item": "", "count": 0 }
-        hud.hotbar.add_child(make_slot_button(hud, slot, i, true))
+        update_slot_button(hud, hud.hotbar_slot_buttons[i], slot, i, true)
+
+static func ensure_hotbar_slots(hud) -> void:
+    if hud.hotbar == null or hud.inventory == null:
+        return
+    while hud.hotbar_slot_buttons.size() < hud.inventory.hotbar_size:
+        var index: int = int(hud.hotbar_slot_buttons.size())
+        var button := make_slot_button(hud, { "item": "", "count": 0 }, index, true)
+        hud.hotbar_slot_buttons.append(button)
+        hud.hotbar.add_child(button)
+    while hud.hotbar_slot_buttons.size() > hud.inventory.hotbar_size:
+        var button := hud.hotbar_slot_buttons.pop_back() as Button
+        if button:
+            hud.hotbar.remove_child(button)
+            button.queue_free()
 
 static func render_inventory_grid(hud) -> void:
     clear_container(hud.inventory_grid)
@@ -248,25 +287,33 @@ static func render_equipment(hud) -> void:
     hud.equipment_readout.text = "Equipment: %s | Armor %d | +STA %d +HUN %d" % [", ".join(labels) if labels.size() > 0 else "none", int(state.get("armor", 0)), roundi(float(bonus.get("stamina", 0.0))), roundi(float(bonus.get("hunger", 0.0)))]
 
 static func make_slot_button(hud, slot: Dictionary, index: int, compact: bool) -> Button:
+    var button := InventorySlotButtonScript.new()
+    button.toggle_mode = false
+    button.disabled = false
+    button.pressed.connect(Callable(hud, "_on_slot_pressed").bind(index, compact))
+    button.slot_dropped.connect(Callable(hud, "_on_slot_dropped"))
+    update_slot_button(hud, button, slot, index, compact)
+    return button
+
+static func update_slot_button(hud, button: Button, slot: Dictionary, index: int, compact: bool) -> void:
     var item_id := String(slot.get("item", ""))
     var count := int(slot.get("count", 0))
-    var button := InventorySlotButtonScript.new()
     button.custom_minimum_size = Vector2(82, 58) if compact else Vector2(116, 72)
     button.clip_text = true
     style_item_button_icon(button)
-    button.toggle_mode = false
-    button.disabled = false
     button.configure(index, item_id, count, compact)
+    button.icon = null
+    button.remove_theme_color_override("font_color")
+    var selected: bool = index == int(hud.inventory.selected_slot)
+    if compact:
+        button.theme_type_variation = &"HotbarSlotSelected" if selected else &"HotbarSlot"
+    else:
+        button.theme_type_variation = &"InventorySlotSelected" if selected else &"InventorySlot"
     if item_id == "":
         button.text = "%d\nEmpty" % (index + 1) if compact else "Empty"
     else:
         button.icon = icon_for(hud, item_id)
         button.text = "%d\nx%d" % [index + 1, count] if compact else "%s\nx%d" % [ItemCatalogScript.label(item_id), count]
-    if index == hud.inventory.selected_slot:
-        button.add_theme_color_override("font_color", Color(1.0, 0.93, 0.62))
-    button.pressed.connect(Callable(hud, "_on_slot_pressed").bind(index, compact))
-    button.slot_dropped.connect(Callable(hud, "_on_slot_dropped"))
-    return button
 
 static func make_equipment_button(hud, slot: String, label: String, key: String) -> Button:
     var button := Button.new()
