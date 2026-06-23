@@ -1,0 +1,1168 @@
+{
+  "schemaVersion": 1,
+  "generator": "phase10-characters-v1",
+  "seed": 1492,
+  "coordinateSystem": "Blender Z-up source; GLB import verified in Godot",
+  "triangleLimit": 900,
+  "characterDirectory": "assets/visual/generated/characters",
+  "contactSheet": "assets/visual/generated/characters/contact-sheet.png",
+  "families": {
+    "npc_torso": 3,
+    "npc_head": 3,
+    "npc_headwear": 4,
+    "npc_arm": 2,
+    "hostile_torso": 5,
+    "hostile_head": 5,
+    "hostile_eye": 3,
+    "hostile_core": 2,
+    "hostile_shard": 3
+  },
+  "materialVocabulary": [
+    "accent",
+    "cloth",
+    "frost",
+    "hair",
+    "hostile",
+    "hostile_accent",
+    "hostile_eye",
+    "rift_core",
+    "skin"
+  ],
+  "assets": [
+    {
+      "id": "npc_torso_01",
+      "path": "assets/visual/generated/characters/npc_torso_01.glb",
+      "family": "npc_torso",
+      "variant": 1,
+      "triangleCount": 128,
+      "boundingBox": {
+        "min": [
+          -0.376,
+          -0.2933,
+          0.0
+        ],
+        "max": [
+          0.376,
+          0.2933,
+          0.895
+        ],
+        "size": [
+          0.7521,
+          0.5866,
+          0.895
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "grounded": true,
+        "minZ": 0.0,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "cloth",
+        "accent"
+      ]
+    },
+    {
+      "id": "npc_torso_02",
+      "path": "assets/visual/generated/characters/npc_torso_02.glb",
+      "family": "npc_torso",
+      "variant": 2,
+      "triangleCount": 128,
+      "boundingBox": {
+        "min": [
+          -0.3763,
+          -0.2935,
+          0.0
+        ],
+        "max": [
+          0.3763,
+          0.2935,
+          0.93
+        ],
+        "size": [
+          0.7527,
+          0.5871,
+          0.93
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "grounded": true,
+        "minZ": 0.0,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "cloth",
+        "accent"
+      ]
+    },
+    {
+      "id": "npc_torso_03",
+      "path": "assets/visual/generated/characters/npc_torso_03.glb",
+      "family": "npc_torso",
+      "variant": 3,
+      "triangleCount": 140,
+      "boundingBox": {
+        "min": [
+          -0.3733,
+          -0.2912,
+          0.0
+        ],
+        "max": [
+          0.3733,
+          0.35,
+          0.965
+        ],
+        "size": [
+          0.7466,
+          0.6412,
+          0.965
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "grounded": true,
+        "minZ": 0.0,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "cloth",
+        "accent"
+      ]
+    },
+    {
+      "id": "npc_head_01",
+      "path": "assets/visual/generated/characters/npc_head_01.glb",
+      "family": "npc_head",
+      "variant": 1,
+      "triangleCount": 140,
+      "boundingBox": {
+        "min": [
+          -0.2253,
+          -0.26,
+          0.0
+        ],
+        "max": [
+          0.2253,
+          0.1934,
+          0.5059
+        ],
+        "size": [
+          0.4505,
+          0.4534,
+          0.5059
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "grounded": true,
+        "minZ": 0.0,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "skin"
+      ]
+    },
+    {
+      "id": "npc_head_02",
+      "path": "assets/visual/generated/characters/npc_head_02.glb",
+      "family": "npc_head",
+      "variant": 2,
+      "triangleCount": 140,
+      "boundingBox": {
+        "min": [
+          -0.2253,
+          -0.2622,
+          0.0
+        ],
+        "max": [
+          0.2253,
+          0.1996,
+          0.5222
+        ],
+        "size": [
+          0.4505,
+          0.4619,
+          0.5222
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "grounded": true,
+        "minZ": 0.0,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "skin"
+      ]
+    },
+    {
+      "id": "npc_head_03",
+      "path": "assets/visual/generated/characters/npc_head_03.glb",
+      "family": "npc_head",
+      "variant": 3,
+      "triangleCount": 140,
+      "boundingBox": {
+        "min": [
+          -0.2253,
+          -0.2641,
+          0.0
+        ],
+        "max": [
+          0.2253,
+          0.2059,
+          0.5386
+        ],
+        "size": [
+          0.4505,
+          0.47,
+          0.5386
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "grounded": true,
+        "minZ": 0.0,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "skin"
+      ]
+    },
+    {
+      "id": "npc_headwear_01",
+      "path": "assets/visual/generated/characters/npc_headwear_01.glb",
+      "family": "npc_headwear",
+      "variant": 1,
+      "triangleCount": 66,
+      "boundingBox": {
+        "min": [
+          -0.2702,
+          -0.2038,
+          0.0
+        ],
+        "max": [
+          0.2702,
+          0.25,
+          0.3696
+        ],
+        "size": [
+          0.5405,
+          0.4538,
+          0.3696
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "grounded": true,
+        "minZ": 0.0,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "accent"
+      ]
+    },
+    {
+      "id": "npc_headwear_02",
+      "path": "assets/visual/generated/characters/npc_headwear_02.glb",
+      "family": "npc_headwear",
+      "variant": 2,
+      "triangleCount": 168,
+      "boundingBox": {
+        "min": [
+          -0.2229,
+          -0.1972,
+          0.0
+        ],
+        "max": [
+          0.2665,
+          0.1572,
+          0.1562
+        ],
+        "size": [
+          0.4894,
+          0.3544,
+          0.1562
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "grounded": true,
+        "minZ": 0.0,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "hair"
+      ]
+    },
+    {
+      "id": "npc_headwear_03",
+      "path": "assets/visual/generated/characters/npc_headwear_03.glb",
+      "family": "npc_headwear",
+      "variant": 3,
+      "triangleCount": 88,
+      "boundingBox": {
+        "min": [
+          -0.3315,
+          -0.2584,
+          0.0
+        ],
+        "max": [
+          0.3315,
+          0.2584,
+          0.2525
+        ],
+        "size": [
+          0.663,
+          0.5168,
+          0.2525
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "grounded": true,
+        "minZ": 0.0,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "accent"
+      ]
+    },
+    {
+      "id": "npc_headwear_04",
+      "path": "assets/visual/generated/characters/npc_headwear_04.glb",
+      "family": "npc_headwear",
+      "variant": 4,
+      "triangleCount": 66,
+      "boundingBox": {
+        "min": [
+          -0.256,
+          -0.31,
+          0.0
+        ],
+        "max": [
+          0.256,
+          0.205,
+          0.21
+        ],
+        "size": [
+          0.5121,
+          0.515,
+          0.21
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "grounded": true,
+        "minZ": 0.0,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "accent"
+      ]
+    },
+    {
+      "id": "npc_arm_01",
+      "path": "assets/visual/generated/characters/npc_arm_01.glb",
+      "family": "npc_arm",
+      "variant": 1,
+      "triangleCount": 72,
+      "boundingBox": {
+        "min": [
+          -0.0568,
+          -0.0656,
+          0.0
+        ],
+        "max": [
+          0.0568,
+          0.0656,
+          0.4746
+        ],
+        "size": [
+          0.1136,
+          0.1312,
+          0.4746
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "grounded": true,
+        "minZ": 0.0,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "cloth",
+        "skin",
+        "accent"
+      ]
+    },
+    {
+      "id": "npc_arm_02",
+      "path": "assets/visual/generated/characters/npc_arm_02.glb",
+      "family": "npc_arm",
+      "variant": 2,
+      "triangleCount": 72,
+      "boundingBox": {
+        "min": [
+          -0.0568,
+          -0.0656,
+          0.0
+        ],
+        "max": [
+          0.0568,
+          0.0656,
+          0.5018
+        ],
+        "size": [
+          0.1136,
+          0.1312,
+          0.5018
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "grounded": true,
+        "minZ": 0.0,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "cloth",
+        "skin",
+        "accent"
+      ]
+    },
+    {
+      "id": "hostile_torso_shadow",
+      "path": "assets/visual/generated/characters/hostile_torso_shadow.glb",
+      "family": "hostile_torso",
+      "variant": "shadow",
+      "triangleCount": 84,
+      "boundingBox": {
+        "min": [
+          -0.3864,
+          -0.34,
+          0.0
+        ],
+        "max": [
+          0.3864,
+          0.3192,
+          1.0551
+        ],
+        "size": [
+          0.7728,
+          0.6592,
+          1.0551
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "grounded": true,
+        "minZ": 0.0,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "hostile",
+        "hostile_accent"
+      ]
+    },
+    {
+      "id": "hostile_torso_frost",
+      "path": "assets/visual/generated/characters/hostile_torso_frost.glb",
+      "family": "hostile_torso",
+      "variant": "frost",
+      "triangleCount": 84,
+      "boundingBox": {
+        "min": [
+          -0.3864,
+          -0.34,
+          0.0
+        ],
+        "max": [
+          0.3864,
+          0.3192,
+          1.0551
+        ],
+        "size": [
+          0.7728,
+          0.6592,
+          1.0551
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "grounded": true,
+        "minZ": 0.0,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "frost",
+        "hostile_accent"
+      ]
+    },
+    {
+      "id": "hostile_torso_seer",
+      "path": "assets/visual/generated/characters/hostile_torso_seer.glb",
+      "family": "hostile_torso",
+      "variant": "seer",
+      "triangleCount": 84,
+      "boundingBox": {
+        "min": [
+          -0.3864,
+          -0.34,
+          0.0
+        ],
+        "max": [
+          0.3864,
+          0.3192,
+          1.0551
+        ],
+        "size": [
+          0.7728,
+          0.6592,
+          1.0551
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "grounded": true,
+        "minZ": 0.0,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "hostile",
+        "hostile_accent"
+      ]
+    },
+    {
+      "id": "hostile_torso_rift",
+      "path": "assets/visual/generated/characters/hostile_torso_rift.glb",
+      "family": "hostile_torso",
+      "variant": "rift",
+      "triangleCount": 84,
+      "boundingBox": {
+        "min": [
+          -0.4869,
+          -0.4284,
+          0.0
+        ],
+        "max": [
+          0.4869,
+          0.4022,
+          1.3294
+        ],
+        "size": [
+          0.9737,
+          0.8306,
+          1.3294
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "grounded": true,
+        "minZ": 0.0,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "hostile",
+        "hostile_accent"
+      ]
+    },
+    {
+      "id": "hostile_torso_skitter",
+      "path": "assets/visual/generated/characters/hostile_torso_skitter.glb",
+      "family": "hostile_torso",
+      "variant": "skitter",
+      "triangleCount": 104,
+      "boundingBox": {
+        "min": [
+          -0.2782,
+          -0.2448,
+          0.0
+        ],
+        "max": [
+          0.2782,
+          0.2298,
+          0.7597
+        ],
+        "size": [
+          0.5564,
+          0.4746,
+          0.7597
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "grounded": true,
+        "minZ": 0.0,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "hostile",
+        "hostile_accent"
+      ]
+    },
+    {
+      "id": "hostile_head_shadow",
+      "path": "assets/visual/generated/characters/hostile_head_shadow.glb",
+      "family": "hostile_head",
+      "variant": "shadow",
+      "triangleCount": 60,
+      "boundingBox": {
+        "min": [
+          -0.276,
+          -0.28,
+          0.0
+        ],
+        "max": [
+          0.276,
+          0.246,
+          0.492
+        ],
+        "size": [
+          0.552,
+          0.526,
+          0.492
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "grounded": true,
+        "minZ": 0.0,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "hostile",
+        "hostile_accent"
+      ]
+    },
+    {
+      "id": "hostile_head_frost",
+      "path": "assets/visual/generated/characters/hostile_head_frost.glb",
+      "family": "hostile_head",
+      "variant": "frost",
+      "triangleCount": 60,
+      "boundingBox": {
+        "min": [
+          -0.276,
+          -0.28,
+          0.0
+        ],
+        "max": [
+          0.276,
+          0.246,
+          0.492
+        ],
+        "size": [
+          0.552,
+          0.526,
+          0.492
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "grounded": true,
+        "minZ": 0.0,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "frost",
+        "hostile_accent"
+      ]
+    },
+    {
+      "id": "hostile_head_seer",
+      "path": "assets/visual/generated/characters/hostile_head_seer.glb",
+      "family": "hostile_head",
+      "variant": "seer",
+      "triangleCount": 80,
+      "boundingBox": {
+        "min": [
+          -0.276,
+          -0.28,
+          0.0
+        ],
+        "max": [
+          0.276,
+          0.246,
+          0.6326
+        ],
+        "size": [
+          0.552,
+          0.526,
+          0.6326
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "grounded": true,
+        "minZ": 0.0,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "hostile",
+        "hostile_accent"
+      ]
+    },
+    {
+      "id": "hostile_head_rift",
+      "path": "assets/visual/generated/characters/hostile_head_rift.glb",
+      "family": "hostile_head",
+      "variant": "rift",
+      "triangleCount": 80,
+      "boundingBox": {
+        "min": [
+          -0.3257,
+          -0.3304,
+          0.0
+        ],
+        "max": [
+          0.3257,
+          0.2903,
+          0.7465
+        ],
+        "size": [
+          0.6514,
+          0.6207,
+          0.7465
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "grounded": true,
+        "minZ": 0.0,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "hostile",
+        "hostile_accent"
+      ]
+    },
+    {
+      "id": "hostile_head_skitter",
+      "path": "assets/visual/generated/characters/hostile_head_skitter.glb",
+      "family": "hostile_head",
+      "variant": "skitter",
+      "triangleCount": 60,
+      "boundingBox": {
+        "min": [
+          -0.2042,
+          -0.2072,
+          0.0
+        ],
+        "max": [
+          0.2042,
+          0.182,
+          0.3641
+        ],
+        "size": [
+          0.4085,
+          0.3892,
+          0.3641
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "grounded": true,
+        "minZ": 0.0,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "hostile",
+        "hostile_accent"
+      ]
+    },
+    {
+      "id": "hostile_eye_01",
+      "path": "assets/visual/generated/characters/hostile_eye_01.glb",
+      "family": "hostile_eye",
+      "variant": 1,
+      "triangleCount": 60,
+      "boundingBox": {
+        "min": [
+          -0.181,
+          -0.0467,
+          0.0
+        ],
+        "max": [
+          0.181,
+          0.0375,
+          0.0998
+        ],
+        "size": [
+          0.3619,
+          0.0842,
+          0.0998
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "grounded": true,
+        "minZ": 0.0,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "hostile_eye",
+        "hostile_accent"
+      ]
+    },
+    {
+      "id": "hostile_eye_02",
+      "path": "assets/visual/generated/characters/hostile_eye_02.glb",
+      "family": "hostile_eye",
+      "variant": 2,
+      "triangleCount": 60,
+      "boundingBox": {
+        "min": [
+          -0.181,
+          -0.0505,
+          0.0
+        ],
+        "max": [
+          0.181,
+          0.0499,
+          0.1116
+        ],
+        "size": [
+          0.3621,
+          0.1003,
+          0.1116
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "grounded": true,
+        "minZ": 0.0,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "hostile_eye",
+        "hostile_accent"
+      ]
+    },
+    {
+      "id": "hostile_eye_03",
+      "path": "assets/visual/generated/characters/hostile_eye_03.glb",
+      "family": "hostile_eye",
+      "variant": 3,
+      "triangleCount": 60,
+      "boundingBox": {
+        "min": [
+          -0.184,
+          -0.0543,
+          0.0
+        ],
+        "max": [
+          0.184,
+          0.062,
+          0.1233
+        ],
+        "size": [
+          0.368,
+          0.1163,
+          0.1233
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "grounded": true,
+        "minZ": 0.0,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "hostile_eye",
+        "hostile_accent"
+      ]
+    },
+    {
+      "id": "hostile_core_01",
+      "path": "assets/visual/generated/characters/hostile_core_01.glb",
+      "family": "hostile_core",
+      "variant": 1,
+      "triangleCount": 84,
+      "boundingBox": {
+        "min": [
+          -0.2462,
+          -0.1692,
+          0.0
+        ],
+        "max": [
+          0.2462,
+          0.1692,
+          0.47
+        ],
+        "size": [
+          0.4924,
+          0.3384,
+          0.47
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "grounded": true,
+        "minZ": 0.0,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "rift_core",
+        "hostile_accent"
+      ]
+    },
+    {
+      "id": "hostile_core_02",
+      "path": "assets/visual/generated/characters/hostile_core_02.glb",
+      "family": "hostile_core",
+      "variant": 2,
+      "triangleCount": 84,
+      "boundingBox": {
+        "min": [
+          -0.2659,
+          -0.1944,
+          0.0
+        ],
+        "max": [
+          0.2659,
+          0.1944,
+          0.54
+        ],
+        "size": [
+          0.5318,
+          0.3888,
+          0.54
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "grounded": true,
+        "minZ": 0.0,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "rift_core",
+        "hostile_accent"
+      ]
+    },
+    {
+      "id": "hostile_shard_01",
+      "path": "assets/visual/generated/characters/hostile_shard_01.glb",
+      "family": "hostile_shard",
+      "variant": 1,
+      "triangleCount": 30,
+      "boundingBox": {
+        "min": [
+          -0.0606,
+          -0.0688,
+          0.0
+        ],
+        "max": [
+          0.0606,
+          0.085,
+          0.4825
+        ],
+        "size": [
+          0.1213,
+          0.1538,
+          0.4825
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "grounded": true,
+        "minZ": 0.0,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "rift_core",
+        "hostile_accent"
+      ]
+    },
+    {
+      "id": "hostile_shard_02",
+      "path": "assets/visual/generated/characters/hostile_shard_02.glb",
+      "family": "hostile_shard",
+      "variant": 2,
+      "triangleCount": 30,
+      "boundingBox": {
+        "min": [
+          -0.0678,
+          -0.0769,
+          0.0
+        ],
+        "max": [
+          0.0678,
+          0.095,
+          0.5425
+        ],
+        "size": [
+          0.1355,
+          0.1719,
+          0.5425
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "grounded": true,
+        "minZ": 0.0,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "rift_core",
+        "hostile_accent"
+      ]
+    },
+    {
+      "id": "hostile_shard_03",
+      "path": "assets/visual/generated/characters/hostile_shard_03.glb",
+      "family": "hostile_shard",
+      "variant": 3,
+      "triangleCount": 30,
+      "boundingBox": {
+        "min": [
+          -0.0749,
+          -0.0849,
+          0.0
+        ],
+        "max": [
+          0.0749,
+          0.105,
+          0.6025
+        ],
+        "size": [
+          0.1498,
+          0.1899,
+          0.6025
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "grounded": true,
+        "minZ": 0.0,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "rift_core",
+        "hostile_accent"
+      ]
+    }
+  ]
+}

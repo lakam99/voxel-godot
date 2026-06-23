@@ -375,7 +375,38 @@ func update_npc_visual_state(entry: Dictionary, delta: float) -> void:
     if float(entry.get("detourTimer", 0.0)) <= 0.0:
         entry["detourTarget"] = NO_DETOUR
     entry["pathRefreshTimer"] = maxf(0.0, float(entry.get("pathRefreshTimer", 0.0)) - delta)
+    update_name_label_visibility(entry)
     visual_factory.update_held_animation(entry, delta)
+
+func update_name_label_visibility(entry: Dictionary) -> void:
+    var body := entry.get("body") as Node3D
+    if body == null or not is_instance_valid(body):
+        return
+    var label := body.get_node_or_null("NpcNameLabel") as Label3D
+    if label == null:
+        return
+    var show := bool(body.get_meta("npc_dialogue_focused", false))
+    var player_body := main.get("player") as Node3D if main != null else null
+    if player_body != null:
+        var distance := body.global_position.distance_to(player_body.global_position)
+        if distance <= CELL * 5.25:
+            show = true
+        elif npc_is_targeted_by_camera(body, player_body, distance):
+            show = true
+    label.visible = show
+    label.no_depth_test = false
+
+func npc_is_targeted_by_camera(body: Node3D, player_body: Node, distance: float) -> bool:
+    if distance > CELL * 10.0 or player_body == null:
+        return false
+    var camera := player_body.get("camera") as Camera3D
+    if camera == null:
+        return false
+    var to_label := (body.global_position + Vector3(0.0, 1.20, 0.0)) - camera.global_position
+    if to_label.length_squared() <= 0.001:
+        return true
+    var forward := -camera.global_transform.basis.z.normalized()
+    return forward.dot(to_label.normalized()) > 0.982
 
 func play_npc_use(entry: Dictionary, action: String) -> void:
     entry["useAction"] = action

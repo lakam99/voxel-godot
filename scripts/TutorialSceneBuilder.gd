@@ -1,16 +1,20 @@
 extends RefCounted
 class_name TutorialSceneBuilder
 
+const NpcVisualFactoryScript := preload("res://scripts/NpcVisualFactory.gd")
 const CELL := 1.35
 const SAFE_RADIUS_CELLS := 24
 const FENCE_RADIUS_CELLS := 25
 
 var system
 var main
+var npc_visual_factory
 
 func setup(tutorial_system) -> void:
     system = tutorial_system
     main = system.main
+    npc_visual_factory = NpcVisualFactoryScript.new()
+    npc_visual_factory.setup(main)
     system.npc_root = Node3D.new()
     system.npc_root.name = "TutorialNPCs"
     system.add_child(system.npc_root)
@@ -253,6 +257,9 @@ func add_npc_collider(body: StaticBody3D) -> void:
 func add_npc_visual(parent: Node3D, color: Color, accent: Color, npc_name: String, role: String) -> void:
     var body_material := make_material(color, 0.82)
     var accent_material := make_material(accent, 0.74)
+    if npc_visual_factory != null:
+        npc_visual_factory.add_visual(parent, body_material, accent_material, npc_name, role)
+        return
     var skin_material := make_material(Color(0.76, 0.55, 0.39), 0.70)
     var torso_mesh := CylinderMesh.new()
     torso_mesh.top_radius = 0.26

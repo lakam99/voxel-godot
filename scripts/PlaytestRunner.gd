@@ -117,6 +117,8 @@ func run() -> void:
     test_forage_and_wildlife_drops()
     mark_progress("generated_prop_visuals")
     test_generated_environment_prop_visuals()
+    mark_progress("character_visuals")
+    test_modular_character_visuals()
     mark_progress("held_item")
     await test_held_item_system()
     mark_progress("terrain_collision")
@@ -4411,6 +4413,95 @@ func test_generated_environment_prop_visuals() -> void:
         tree.queue_free()
     if rock:
         rock.queue_free()
+
+func test_modular_character_visuals() -> void:
+    if main == null or player == null:
+        add_result("character_asset_pack_ready", false, "main/player missing")
+        add_result("modular_npc_visuals", false, "main/player missing")
+        add_result("modular_hostile_visuals", false, "main/player missing")
+        add_result("character_visual_fallback", false, "main/player missing")
+        return
+    var npc_system = main.get("npc_system")
+    var hostile_system = main.get("hostile_system")
+    var npc_factory = npc_system.get("visual_factory") if npc_system else null
+    var hostile_factory = hostile_system.get("visual_factory") if hostile_system else null
+    var npc_registry = npc_factory.get("character_assets") if npc_factory else null
+    var hostile_registry = hostile_factory.get("character_assets") if hostile_factory else null
+    var npc_ready: bool = npc_registry != null and npc_registry.is_ready()
+    var hostile_ready: bool = hostile_registry != null and hostile_registry.is_ready()
+    var asset_count: int = npc_registry.asset_count() if npc_ready else 0
+    var family_count: int = npc_registry.family_count() if npc_ready else 0
+    add_result(
+        "character_asset_pack_ready",
+        npc_ready and hostile_ready and asset_count == 30 and family_count >= 8,
+        "npc ready %s, hostile ready %s, assets %d, families %d" % [str(npc_ready), str(hostile_ready), asset_count, family_count]
+    )
+
+    var npc_entries: Array = npc_system.get("npcs") if npc_system else []
+    var npc_entry: Dictionary = npc_entries[0] if npc_entries.size() > 0 and npc_entries[0] is Dictionary else {}
+    var npc_body := npc_entry.get("body") as Node3D
+    var npc_label := npc_body.get_node_or_null("NpcNameLabel") as Label3D if npc_body else null
+    var original_player_position: Vector3 = player.global_position
+    var far_hidden := false
+    var near_visible := false
+    if npc_body != null and npc_label != null:
+        player.global_position = npc_body.global_position + Vector3(CELL * 12.0, 0.0, CELL * 12.0)
+        npc_system.call("update_npc_visual_state", npc_entry, 0.016)
+        far_hidden = not npc_label.visible
+        player.global_position = npc_body.global_position + Vector3(CELL * 2.0, 0.0, 0.0)
+        npc_system.call("update_npc_visual_state", npc_entry, 0.016)
+        near_visible = npc_label.visible and not npc_label.no_depth_test
+        player.global_position = original_player_position
+        npc_system.call("update_npc_visual_state", npc_entry, 0.016)
+    var npc_generated := npc_body != null and String(npc_body.get_meta("visual_source", "")) == "character_asset" and has_visual_source(npc_body, "character_asset")
+    var npc_parts: Array = npc_body.get_meta("character_asset_parts", []) if npc_body else []
+    add_result(
+        "modular_npc_visuals",
+        npc_generated and npc_parts.size() >= 5 and count_mesh_descendants(npc_body) >= 5 and far_hidden and near_visible,
+        "generated %s, parts %d, meshes %d, label far/near %s/%s" % [
+            str(npc_generated),
+            npc_parts.size(),
+            count_mesh_descendants(npc_body),
+            str(far_hidden),
+            str(near_visible)
+        ]
+    )
+
+    var enemy_body: Node3D = null
+    var enemy_generated := false
+    var enemy_parts: Array = []
+    var enemy_collision := false
+    var enemy_collision_count := 0
+    if hostile_system != null:
+        enemy_body = hostile_system.spawn_enemy(player.global_position + Vector3(18.0, 0.0, 18.0), "rift")
+        enemy_generated = enemy_body != null and String(enemy_body.get_meta("visual_source", "")) == "character_asset" and has_visual_source(enemy_body, "character_asset")
+        enemy_parts = enemy_body.get_meta("character_asset_parts", []) if enemy_body else []
+        enemy_collision_count = count_collision_descendants(enemy_body)
+        enemy_collision = enemy_collision_count >= 1
+        var enemy_state: Dictionary = hostile_system.enemy_for_body(enemy_body) if enemy_body else {}
+        if not enemy_state.is_empty():
+            hostile_system.get("enemies").erase(enemy_state)
+        if enemy_body:
+            enemy_body.queue_free()
+    add_result(
+        "modular_hostile_visuals",
+        enemy_generated and enemy_parts.size() >= 4 and enemy_collision,
+        "generated %s, parts %d, collisions %d" % [str(enemy_generated), enemy_parts.size(), enemy_collision_count]
+    )
+
+    var fallback_ok := false
+    if npc_ready and npc_factory != null:
+        npc_registry.disable_all_for_test()
+        var fallback_body := Node3D.new()
+        npc_factory.add_visual(fallback_body, npc_factory.body_material(0), npc_factory.accent_material(0), "Fallback", "Tester")
+        fallback_ok = String(fallback_body.get_meta("visual_source", "")) == "primitive_fallback" and has_visual_source(fallback_body, "primitive_fallback")
+        fallback_body.queue_free()
+        npc_registry.clear_test_disabled_assets()
+    add_result(
+        "character_visual_fallback",
+        fallback_ok,
+        "fallback %s" % str(fallback_ok)
+    )
 
 func cleanup_generated_blocks() -> void:
     var blocks := get_blocks()

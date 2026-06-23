@@ -1,7 +1,10 @@
 extends RefCounted
 class_name NpcVisualFactory
 
+const CharacterAssetRegistryScript := preload("res://scripts/visual/CharacterAssetRegistry.gd")
+
 var main
+var character_assets
 var cloth_materials: Array[StandardMaterial3D] = []
 var accent_materials: Array[StandardMaterial3D] = []
 var skin_material: StandardMaterial3D
@@ -28,6 +31,9 @@ func setup(main_node) -> void:
     arrow_material.emission = Color(0.62, 0.38, 0.10)
     arrow_material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
     arrow_material.roughness = 0.68
+    character_assets = CharacterAssetRegistryScript.new()
+    if not character_assets.setup():
+        push_warning("Character visual registry loaded with NPC fallbacks: %s" % str(character_assets.last_errors))
 
 func body_material(index: int) -> StandardMaterial3D:
     return cloth_materials[posmod(index, cloth_materials.size())]
@@ -134,6 +140,58 @@ func add_collider(parent: StaticBody3D) -> void:
     parent.add_child(collider)
 
 func add_visual(parent: Node3D, body_material: StandardMaterial3D, accent: StandardMaterial3D, npc_name: String, role: String) -> void:
+    if add_generated_visual(parent, body_material, accent, npc_name, role):
+        return
+    add_primitive_visual(parent, body_material, accent, npc_name, role)
+
+func add_generated_visual(parent: Node3D, body_material: StandardMaterial3D, accent: StandardMaterial3D, npc_name: String, role: String) -> bool:
+    if character_assets == null or not character_assets.is_ready():
+        return false
+    var key := "%s:%s" % [npc_name, role]
+    var material_map := {
+        "cloth": body_material,
+        "accent": accent,
+        "skin": skin_material,
+        "hair": accent
+    }
+    var torso: Node3D = character_assets.instantiate_family("npc_torso", key)
+    var head: Node3D = character_assets.instantiate_family("npc_head", key)
+    var headwear: Node3D = character_assets.instantiate_family("npc_headwear", "%s:headwear" % key)
+    var arm_left: Node3D = character_assets.instantiate_family("npc_arm", "%s:left" % key)
+    var arm_right: Node3D = character_assets.instantiate_family("npc_arm", "%s:right" % key)
+    var parts: Array = [torso, head, headwear, arm_left, arm_right]
+    for part in parts:
+        if part == null:
+            for cleanup in parts:
+                if cleanup != null:
+                    cleanup.queue_free()
+            return false
+
+    add_character_part(parent, torso, "NpcTorso", Vector3(0.0, 0.25, 0.0), Vector3.ZERO, Vector3.ONE, material_map)
+    add_character_part(parent, head, "NpcHead", Vector3(0.0, 1.16, -0.01), Vector3.ZERO, Vector3.ONE, material_map)
+    add_character_part(parent, headwear, "NpcHeadwear", Vector3(0.0, 1.34, -0.02), Vector3.ZERO, Vector3.ONE, material_map)
+    add_character_part(parent, arm_left, "NpcArmLeft", Vector3(-0.31, 0.48, 0.0), Vector3(0.0, 0.0, -0.30), Vector3.ONE, material_map)
+    add_character_part(parent, arm_right, "NpcArmRight", Vector3(0.31, 0.48, 0.0), Vector3(0.0, 0.0, 0.30), Vector3.ONE, material_map)
+    add_name_label(parent, npc_name, role)
+    parent.set_meta("visual_source", "character_asset")
+    parent.set_meta("character_asset_parts", [
+        String(torso.get_meta("visual_asset_id", "")),
+        String(head.get_meta("visual_asset_id", "")),
+        String(headwear.get_meta("visual_asset_id", "")),
+        String(arm_left.get_meta("visual_asset_id", "")),
+        String(arm_right.get_meta("visual_asset_id", ""))
+    ])
+    return true
+
+func add_character_part(parent: Node3D, part: Node3D, part_name: String, position: Vector3, rotation: Vector3, scale: Vector3, material_map: Dictionary) -> void:
+    part.name = part_name
+    part.position = position
+    part.rotation = rotation
+    part.scale = scale
+    character_assets.apply_material_map(part, material_map)
+    parent.add_child(part)
+
+func add_primitive_visual(parent: Node3D, body_material: StandardMaterial3D, accent: StandardMaterial3D, npc_name: String, role: String) -> void:
     var torso_mesh := CylinderMesh.new()
     torso_mesh.top_radius = 0.26
     torso_mesh.bottom_radius = 0.34
@@ -151,6 +209,7 @@ func add_visual(parent: Node3D, body_material: StandardMaterial3D, accent: Stand
     head_mesh.radial_segments = 10
     head_mesh.rings = 6
     var head := MeshInstance3D.new()
+    head.name = "PrimitiveNpcHead"
     head.mesh = head_mesh
     head.material_override = skin_material
     head.position.y = 1.34
@@ -180,13 +239,19 @@ func add_visual(parent: Node3D, body_material: StandardMaterial3D, accent: Stand
         arm.position = Vector3(side * 0.34, 0.78, 0.0)
         arm.rotation.z = side * 0.22
         parent.add_child(arm)
+    add_name_label(parent, npc_name, role)
+    parent.set_meta("visual_source", "primitive_fallback")
+    parent.set_meta("character_asset_parts", [])
 
+func add_name_label(parent: Node3D, npc_name: String, role: String) -> void:
     var label := Label3D.new()
+    label.name = "NpcNameLabel"
     label.text = "%s\n%s" % [npc_name, role]
     label.font_size = 26
     label.position.y = 1.88
     label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
-    label.no_depth_test = true
+    label.no_depth_test = false
+    label.visible = false
     parent.add_child(label)
 
 func make_material(color: Color, roughness: float) -> StandardMaterial3D:

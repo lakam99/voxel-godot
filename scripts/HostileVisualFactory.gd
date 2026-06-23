@@ -1,6 +1,9 @@
 extends RefCounted
 class_name HostileVisualFactory
 
+const CharacterAssetRegistryScript := preload("res://scripts/visual/CharacterAssetRegistry.gd")
+
+var character_assets
 var enemy_material: StandardMaterial3D
 var eye_material: StandardMaterial3D
 var frost_material: StandardMaterial3D
@@ -10,6 +13,9 @@ var rift_eye_material: StandardMaterial3D
 
 func _init() -> void:
     setup_materials()
+    character_assets = CharacterAssetRegistryScript.new()
+    if not character_assets.setup():
+        push_warning("Character visual registry loaded with hostile fallbacks: %s" % str(character_assets.last_errors))
 
 func setup_materials() -> void:
     enemy_material = make_material(Color(0.13, 0.14, 0.25), Color(0.05, 0.08, 0.22), 0.72)
@@ -63,6 +69,86 @@ func build_visual(body: Node3D, variant: String) -> Dictionary:
     var visual_material: StandardMaterial3D = spec.get("material", enemy_material)
     var visual_eye_material: StandardMaterial3D = spec.get("eyeMaterial", eye_material)
 
+    if not add_generated_visual(body, variant, scale, visual_material, visual_eye_material):
+        add_primitive_visual(body, variant, scale, visual_material, visual_eye_material)
+
+    var shape := CapsuleShape3D.new()
+    shape.radius = 0.42 * scale
+    shape.height = 1.65 * scale
+    var collider := CollisionShape3D.new()
+    collider.shape = shape
+    collider.position.y = 0.82 * scale
+    body.add_child(collider)
+    return spec
+
+func add_generated_visual(body: Node3D, variant: String, scale: float, visual_material: StandardMaterial3D, visual_eye_material: StandardMaterial3D) -> bool:
+    if character_assets == null or not character_assets.is_ready():
+        return false
+    var visual_variant := variant if variant in ["shadow", "frost", "seer", "rift", "skitter"] else "shadow"
+    var material_map := {
+        "hostile": visual_material,
+        "frost": visual_material,
+        "hostile_accent": visual_eye_material,
+        "hostile_eye": visual_eye_material,
+        "rift_core": visual_eye_material
+    }
+    var torso: Node3D = character_assets.instantiate_exact_or_family("hostile_torso_%s" % visual_variant, "hostile_torso", "%s:torso" % visual_variant)
+    var head: Node3D = character_assets.instantiate_exact_or_family("hostile_head_%s" % visual_variant, "hostile_head", "%s:head" % visual_variant)
+    var eyes: Node3D = character_assets.instantiate_family("hostile_eye", "%s:eyes" % visual_variant)
+    var parts: Array = [torso, head, eyes]
+    var core: Node3D = null
+    var shards: Array = []
+    if variant == "rift":
+        core = character_assets.instantiate_family("hostile_core", "rift:core")
+        parts.append(core)
+        for i in range(5):
+            var shard: Node3D = character_assets.instantiate_family("hostile_shard", "rift:shard:%d" % i)
+            shards.append(shard)
+            parts.append(shard)
+    for part in parts:
+        if part == null:
+            for cleanup in parts:
+                if cleanup != null:
+                    cleanup.queue_free()
+            return false
+
+    add_character_part(body, torso, "HostileTorso", Vector3(0.0, 0.02 * scale, 0.0), Vector3.ZERO, Vector3.ONE * scale, material_map)
+    add_character_part(body, head, "HostileHead", Vector3(0.0, 1.22 * scale, -0.01 * scale), Vector3.ZERO, Vector3.ONE * scale, material_map)
+    add_character_part(body, eyes, "HostileEyes", Vector3(0.0, 1.48 * scale, -0.24 * scale), Vector3.ZERO, Vector3.ONE * scale, material_map)
+    if core != null:
+        add_character_part(body, core, "HostileRiftCore", Vector3(0.0, 0.92 * scale, -0.30 * scale), Vector3.ZERO, Vector3.ONE * scale, material_map)
+        for i in range(shards.size()):
+            var shard_node := shards[i] as Node3D
+            var shard_angle: float = (float(i) / float(maxi(1, shards.size()))) * TAU
+            add_character_part(
+                body,
+                shard_node,
+                "HostileRiftShard_%d" % i,
+                Vector3(cos(shard_angle) * 0.54 * scale, 1.78 * scale, sin(shard_angle) * 0.54 * scale),
+                Vector3(0.0, -shard_angle, PI * 0.16),
+                Vector3.ONE * scale,
+                material_map
+            )
+    body.set_meta("visual_source", "character_asset")
+    body.set_meta("character_asset_parts", character_asset_ids(parts))
+    return true
+
+func add_character_part(body: Node3D, part: Node3D, part_name: String, position: Vector3, rotation: Vector3, scale: Vector3, material_map: Dictionary) -> void:
+    part.name = part_name
+    part.position = position
+    part.rotation = rotation
+    part.scale = scale
+    character_assets.apply_material_map(part, material_map)
+    body.add_child(part)
+
+func character_asset_ids(parts: Array) -> Array[String]:
+    var result: Array[String] = []
+    for part in parts:
+        if part != null:
+            result.append(String(part.get_meta("visual_asset_id", "")))
+    return result
+
+func add_primitive_visual(body: Node3D, variant: String, scale: float, visual_material: StandardMaterial3D, visual_eye_material: StandardMaterial3D) -> void:
     var body_mesh := CylinderMesh.new()
     body_mesh.top_radius = 0.34 * scale
     body_mesh.bottom_radius = 0.46 * scale
@@ -99,15 +185,8 @@ func build_visual(body: Node3D, variant: String) -> Dictionary:
         add_seer_halo(body, scale, visual_eye_material)
     elif variant == "rift":
         add_rift_core(body, scale, visual_eye_material)
-
-    var shape := CapsuleShape3D.new()
-    shape.radius = 0.42 * scale
-    shape.height = 1.65 * scale
-    var collider := CollisionShape3D.new()
-    collider.shape = shape
-    collider.position.y = 0.82 * scale
-    body.add_child(collider)
-    return spec
+    body.set_meta("visual_source", "primitive_fallback")
+    body.set_meta("character_asset_parts", [])
 
 func add_seer_halo(body: Node3D, scale: float, material: Material) -> void:
     var halo_mesh := TorusMesh.new()
