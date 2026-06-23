@@ -56,6 +56,7 @@ var weather_system
 var tutorial_system
 var npc_system
 var item_visual_factory
+var visual_asset_registry
 var hud
 var held_item
 var break_overlay: MeshInstance3D
@@ -233,6 +234,7 @@ func random_world_seed(exclude_seed := "") -> String:
     return "atlas-%08d" % ((stamp % 90000000) + 10000000)
 
 func setup_game_systems() -> void:
+    setup_visual_asset_registry()
     item_visual_factory = ItemVisualFactoryScript.new()
     inventory_system = InventorySystemScript.new(
         ItemCatalogScript.ITEMS,
@@ -274,6 +276,11 @@ func setup_game_systems() -> void:
     last_survival_health = survival_system.health
     grant_starter_inventory()
     _sync_inventory_totals()
+
+func setup_visual_asset_registry() -> void:
+    visual_asset_registry = VisualAssetRegistryScript.new()
+    if not visual_asset_registry.setup():
+        push_warning("Generated visual asset registry loaded with fallbacks: %s" % str(visual_asset_registry.last_errors))
 
 func grant_starter_inventory() -> void:
     inventory_system.add_item("woodBlock", 32)

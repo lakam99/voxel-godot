@@ -115,6 +115,8 @@ func run() -> void:
     test_ore_generation_and_drops()
     mark_progress("forage_wildlife")
     test_forage_and_wildlife_drops()
+    mark_progress("generated_prop_visuals")
+    test_generated_environment_prop_visuals()
     mark_progress("held_item")
     await test_held_item_system()
     mark_progress("terrain_collision")
@@ -4240,6 +4242,89 @@ func test_forage_and_wildlife_drops() -> void:
     )
     inventory_system.restore(original_inventory)
 
+func test_generated_environment_prop_visuals() -> void:
+    var props := main.get("prop_root") as Node3D if main else null
+    if main == null or props == null or player == null:
+        add_result("generated_environment_prop_visuals", false, "main/prop_root/player missing")
+        add_result("generated_environment_prop_fallback", false, "main/prop_root/player missing")
+        return
+    var registry = main.get("visual_asset_registry")
+    var registry_ready: bool = registry != null and registry.is_ready()
+    var cached_before: int = registry.cached_scene_count() if registry_ready else 0
+    var asset_count: int = registry.asset_count() if registry_ready else 0
+    var profile_count: int = registry.profile_count() if registry_ready else 0
+
+    var rng := RandomNumberGenerator.new()
+    rng.seed = 903771
+    var tree := main.call("make_tree", props, "playtest:generated:tree", player.global_position + Vector3(7.0, 0.0, 7.0), "forest", rng) as StaticBody3D
+    var rock := main.call("make_rock", props, "playtest:generated:rock", player.global_position + Vector3(8.7, 0.0, 7.0), rng) as StaticBody3D
+    var cached_after_spawn: int = registry.cached_scene_count() if registry_ready else 0
+    var tree_asset := String(tree.get_meta("visual_asset_id", "")) if tree else ""
+    var rock_asset := String(rock.get_meta("visual_asset_id", "")) if rock else ""
+    var tree_generated := tree != null and String(tree.get_meta("visual_source", "")) == "generated_asset" and has_visual_source(tree, "generated_asset")
+    var rock_generated := rock != null and String(rock.get_meta("visual_source", "")) == "generated_asset" and has_visual_source(rock, "generated_asset")
+    var tree_collision := count_collision_descendants(tree) >= 2
+    var rock_collision := count_collision_descendants(rock) >= 2
+    var cache_stable: bool = cached_before == cached_after_spawn
+    add_result(
+        "generated_environment_prop_visuals",
+        registry_ready and asset_count == 26 and profile_count >= 8 and tree_generated and rock_generated and tree_collision and rock_collision and cache_stable,
+        "ready %s, assets %d, profiles %d, tree %s meshes %d collisions %d, rock %s meshes %d collisions %d, cache %d->%d" % [
+            str(registry_ready),
+            asset_count,
+            profile_count,
+            tree_asset,
+            count_mesh_descendants(tree),
+            count_collision_descendants(tree),
+            rock_asset,
+            count_mesh_descendants(rock),
+            count_collision_descendants(rock),
+            cached_before,
+            cached_after_spawn
+        ]
+    )
+
+    var fallback_tree_ok := false
+    var fallback_rock_ok := false
+    var disabled_tree := ""
+    var disabled_rock := ""
+    if registry_ready:
+        disabled_tree = registry.select_tree_asset_id("forest", "playtest:fallback:tree")
+        var fallback_position := player.global_position + Vector3(10.5, 0.0, 7.0)
+        var fallback_rock_position := fallback_position + Vector3(1.7, 0.0, 0.0)
+        var fallback_rock_biome: String = main.call("biome_at_cell", roundi(fallback_rock_position.x / CELL), roundi(fallback_rock_position.z / CELL))
+        disabled_rock = registry.select_rock_asset_id(fallback_rock_biome, "playtest:fallback:rock")
+        registry.disable_asset_for_test(disabled_tree)
+        registry.disable_asset_for_test(disabled_rock)
+        var fallback_rng := RandomNumberGenerator.new()
+        fallback_rng.seed = 903772
+        var fallback_tree := main.call("make_tree", props, "playtest:fallback:tree", fallback_position, "forest", fallback_rng) as StaticBody3D
+        var fallback_rock := main.call("make_rock", props, "playtest:fallback:rock", fallback_rock_position, fallback_rng) as StaticBody3D
+        fallback_tree_ok = fallback_tree != null and String(fallback_tree.get_meta("visual_source", "")) == "primitive_fallback" and has_visual_source(fallback_tree, "primitive_fallback") and count_collision_descendants(fallback_tree) >= 2
+        fallback_rock_ok = fallback_rock != null and String(fallback_rock.get_meta("visual_source", "")) == "primitive_fallback" and has_visual_source(fallback_rock, "primitive_fallback") and count_collision_descendants(fallback_rock) >= 2
+        if fallback_tree:
+            fallback_tree.queue_free()
+        if fallback_rock:
+            fallback_rock.queue_free()
+        registry.clear_test_disabled_assets()
+
+    add_result(
+        "generated_environment_prop_fallback",
+        registry_ready and fallback_tree_ok and fallback_rock_ok and cached_before == (registry.cached_scene_count() if registry_ready else -1),
+        "disabled tree %s rock %s, tree fallback %s, rock fallback %s, cache %d" % [
+            disabled_tree,
+            disabled_rock,
+            str(fallback_tree_ok),
+            str(fallback_rock_ok),
+            registry.cached_scene_count() if registry_ready else 0
+        ]
+    )
+
+    if tree:
+        tree.queue_free()
+    if rock:
+        rock.queue_free()
+
 func cleanup_generated_blocks() -> void:
     var blocks := get_blocks()
     for key in blocks.keys():
@@ -5691,6 +5776,16 @@ func count_collision_descendants(node: Node) -> int:
     for child in node.get_children():
         count += count_collision_descendants(child)
     return count
+
+func has_visual_source(node: Node, source: String) -> bool:
+    if node == null:
+        return false
+    if String(node.get_meta("visual_source", "")) == source:
+        return true
+    for child in node.get_children():
+        if has_visual_source(child, source):
+            return true
+    return false
 
 func icon_distinct_colors(texture: Texture2D) -> int:
     if texture == null:

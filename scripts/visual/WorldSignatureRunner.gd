@@ -90,7 +90,6 @@ func collect_prop_records(root: Node, records: Array) -> void:
             records.append({
                 "id": String(node.get_meta("prop_id", node.name)),
                 "kind": String(node.get_meta("kind", "")),
-                "name": node.name,
                 "material": material_id,
                 "drop": String(node.get_meta("drop", "")),
                 "position": vec3(stable_position)

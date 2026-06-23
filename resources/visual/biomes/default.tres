@@ -1,0 +1,12 @@
+[gd_resource type="Resource" script_class="BiomeVisualProfile" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://scripts/visual/BiomeVisualProfile.gd" id="1_profile"]
+
+[resource]
+script = ExtResource("1_profile")
+biome_id = "default"
+tree_families = PackedStringArray("broadleaf_tree")
+rock_families = PackedStringArray("rock")
+tree_scale = 1.0
+rock_scale = 1.0
+

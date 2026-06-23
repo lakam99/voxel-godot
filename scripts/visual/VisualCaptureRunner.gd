@@ -7,7 +7,7 @@ const CASES := [
     { "name": "town_sunset", "playtest": "town", "clock": 18.7, "weather": "clear", "intensity": 0.0, "clouds": 0.26, "hud": false, "offset": Vector3(-9.0, 0.0, 7.5), "pitch": -8.0 },
     { "name": "forest_midnight", "playtest": "forest", "clock": 0.0, "weather": "clear", "intensity": 0.0, "clouds": 0.18, "hud": false, "offset": Vector3(7.0, 0.0, 9.0), "pitch": -6.0 },
     { "name": "forest_rain", "playtest": "forest", "clock": 16.5, "weather": "rain", "intensity": 0.68, "clouds": 0.88, "hud": false, "offset": Vector3(8.0, 0.0, 7.0), "pitch": -9.0 },
-    { "name": "mountain_day", "playtest": "mountain", "clock": 9.0, "weather": "clear", "intensity": 0.0, "clouds": 0.30, "hud": false, "offset": Vector3(10.0, 0.0, 8.0), "pitch": -11.0 },
+    { "name": "mountain_day", "playtest": "mountain", "clock": 9.0, "weather": "clear", "intensity": 0.0, "clouds": 0.30, "hud": false, "offset": Vector3(24.0, 0.0, 18.0), "pitch": -16.0, "eyeHeight": 7.0 },
     { "name": "water_clear", "playtest": "water", "clock": 12.0, "weather": "clear", "intensity": 0.0, "clouds": 0.18, "hud": false, "offset": Vector3(7.0, 0.0, 7.0), "pitch": -18.0, "lookAtWater": true },
     { "name": "water_sunset", "playtest": "water", "clock": 18.7, "weather": "clear", "intensity": 0.0, "clouds": 0.26, "hud": false, "offset": Vector3(-8.0, 0.0, 6.0), "pitch": -16.0, "lookAtWater": true },
     { "name": "water_overcast", "playtest": "water", "clock": 14.5, "weather": "rain", "intensity": 0.18, "clouds": 0.72, "hud": false, "offset": Vector3(8.0, 0.0, 8.0), "pitch": -16.0, "lookAtWater": true },
@@ -108,7 +108,7 @@ func position_camera(capture_case: Dictionary) -> void:
     target.y = main.height_at_world(target.x, target.z)
     var offset: Vector3 = capture_case.get("offset", Vector3(8.0, 0.0, 8.0))
     var position := target + offset
-    position.y = main.height_at_world(position.x, position.z) + 0.08
+    position.y = main.height_at_world(position.x, position.z) + float(capture_case.get("eyeHeight", 0.08))
     player.global_position = position
     player.velocity = Vector3.ZERO
     player.look_at(Vector3(target.x, position.y, target.z), Vector3.UP)

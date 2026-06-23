@@ -358,31 +358,105 @@ func detail_mesh(detail_type: String) -> Mesh:
     detail_meshes[detail_type] = mesh
     return mesh
 
-func make_tree(parent: Node, prop_id: String, position: Vector3, biome: String, rng: RandomNumberGenerator):
-    var body := StaticBody3D.new()
-    body.name = "Tree"
-    body.position = position
-    body.rotation.y = rng.randf() * TAU
-    body.set_meta("kind", "prop")
-    body.set_meta("prop_id", prop_id)
-    body.set_meta("drop", "logs")
-    body.set_meta("material", "tree")
-    body.set_meta("drop_count", 3)
-
-    var height := 3.0 + rng.randf() * 2.2
+func tree_visual_spec(biome: String, rng: RandomNumberGenerator) -> Dictionary:
+    var spec := {
+        "rotation": rng.randf() * TAU,
+        "height": 3.0 + rng.randf() * 2.2,
+        "clumps": []
+    }
     if biome == "taiga" or biome == "snow" or biome == "tundra":
-        height += 1.6
+        spec["height"] = float(spec["height"]) + 1.6
+    var height := float(spec["height"])
+    var clumps := 3 if biome == "taiga" or biome == "snow" or biome == "tundra" else 5
+    for c in range(clumps):
+        var radius := 0.82 + rng.randf() * 0.35
+        var angle := rng.randf() * TAU
+        var spread := 0.0 if c == 0 else 0.42 + rng.randf() * 0.55
+        var y := height + 0.3 + rng.randf() * 0.65
+        var scale := Vector3(
+            1.2 + rng.randf() * 0.4,
+            0.68 + rng.randf() * 0.22,
+            1.2 + rng.randf() * 0.4
+        )
+        spec["clumps"].append({
+            "radius": radius,
+            "position": Vector3(cos(angle) * spread, y, sin(angle) * spread),
+            "scale": scale
+        })
+    return spec
 
+func add_tree_visual(body: StaticBody3D, prop_id: String, biome: String, spec: Dictionary) -> void:
+    if add_generated_tree_visual(body, prop_id, biome, spec):
+        return
+    add_fallback_tree_visual(body, spec)
+
+func add_generated_tree_visual(body: StaticBody3D, prop_id: String, biome: String, spec: Dictionary) -> bool:
+    if visual_asset_registry == null or not visual_asset_registry.is_ready():
+        return false
+    var asset_id: String = visual_asset_registry.select_tree_asset_id(biome, prop_id)
+    var visual: Node3D = visual_asset_registry.instantiate_asset(asset_id)
+    if visual == null:
+        return false
+    var asset_size: Vector3 = visual_asset_registry.asset_size(asset_id)
+    var source_height := maxf(0.1, asset_size.z)
+    var target_height := maxf(0.1, float(spec.get("height", source_height)))
+    var scale := clampf((target_height / source_height) * visual_asset_registry.tree_scale_for_biome(biome), 0.55, 1.55)
+    visual.name = "GeneratedTreeVisual"
+    visual.position = Vector3.ZERO
+    visual.rotation = Vector3.ZERO
+    visual.scale = Vector3.ONE * scale
+    visual.set_meta("visual_source", "generated_asset")
+    visual.set_meta("visual_asset_id", asset_id)
+    body.add_child(visual)
+    body.set_meta("visual_source", "generated_asset")
+    body.set_meta("visual_asset_id", asset_id)
+    return true
+
+func add_fallback_tree_visual(body: StaticBody3D, spec: Dictionary) -> void:
+    var height := float(spec.get("height", 4.0))
     var trunk_mesh := CylinderMesh.new()
     trunk_mesh.top_radius = 0.16
     trunk_mesh.bottom_radius = 0.28
     trunk_mesh.height = height
     trunk_mesh.radial_segments = 7
     var trunk := MeshInstance3D.new()
+    trunk.name = "PrimitiveTreeTrunk"
     trunk.mesh = trunk_mesh
     trunk.material_override = materials["trunk"]
     trunk.position.y = height * 0.5
+    trunk.set_meta("visual_source", "primitive_fallback")
     body.add_child(trunk)
+
+    for leaf_spec in spec.get("clumps", []):
+        var leaf_mesh := SphereMesh.new()
+        leaf_mesh.radius = float(leaf_spec.get("radius", 0.95))
+        leaf_mesh.height = leaf_mesh.radius * 1.25
+        var leaf := MeshInstance3D.new()
+        leaf.name = "PrimitiveTreeLeaf"
+        leaf.mesh = leaf_mesh
+        leaf.material_override = materials["leaf"]
+        leaf.position = leaf_spec.get("position", Vector3(0.0, height + 0.5, 0.0))
+        leaf.scale = leaf_spec.get("scale", Vector3.ONE)
+        leaf.set_meta("visual_source", "primitive_fallback")
+        body.add_child(leaf)
+    body.set_meta("visual_source", "primitive_fallback")
+    body.set_meta("visual_asset_id", "")
+
+func make_tree(parent: Node, prop_id: String, position: Vector3, biome: String, rng: RandomNumberGenerator):
+    var spec := tree_visual_spec(biome, rng)
+    var body := StaticBody3D.new()
+    body.name = "Tree"
+    body.position = position
+    body.rotation.y = float(spec.get("rotation", 0.0))
+    body.set_meta("kind", "prop")
+    body.set_meta("prop_id", prop_id)
+    body.set_meta("drop", "logs")
+    body.set_meta("material", "tree")
+    body.set_meta("drop_count", 3)
+    body.set_meta("visual_biome", biome)
+
+    var height := float(spec.get("height", 4.0))
+    add_tree_visual(body, prop_id, biome, spec)
 
     var trunk_shape := CylinderShape3D.new()
     trunk_shape.radius = 0.36
@@ -392,44 +466,95 @@ func make_tree(parent: Node, prop_id: String, position: Vector3, biome: String, 
     collider.position.y = height * 0.5
     body.add_child(collider)
 
-    var clumps := 3 if biome == "taiga" or biome == "snow" or biome == "tundra" else 5
-    for c in range(clumps):
-        var leaf_mesh := SphereMesh.new()
-        leaf_mesh.radius = 0.82 + rng.randf() * 0.35
-        leaf_mesh.height = leaf_mesh.radius * 1.25
-        var leaf := MeshInstance3D.new()
-        leaf.mesh = leaf_mesh
-        leaf.material_override = materials["leaf"]
-        var angle := rng.randf() * TAU
-        var spread := 0.0 if c == 0 else 0.42 + rng.randf() * 0.55
-        leaf.position = Vector3(cos(angle) * spread, height + 0.3 + rng.randf() * 0.65, sin(angle) * spread)
-        leaf.scale = Vector3(1.2 + rng.randf() * 0.4, 0.68 + rng.randf() * 0.22, 1.2 + rng.randf() * 0.4)
-        body.add_child(leaf)
-
     parent.add_child(body)
     return body
 
+func rock_visual_spec(rng: RandomNumberGenerator) -> Dictionary:
+    var rotation := rng.randf() * TAU
+    var radius := 0.55 + rng.randf() * 0.7
+    var height_factor := 0.75 + rng.randf() * 0.8
+    var scale := Vector3(
+        1.15 + rng.randf() * 0.6,
+        0.58 + rng.randf() * 0.72,
+        1.0 + rng.randf() * 0.5
+    )
+    return {
+        "rotation": rotation,
+        "radius": radius,
+        "height_factor": height_factor,
+        "scale": scale
+    }
+
+func add_rock_visual(body: StaticBody3D, prop_id: String, biome: String, spec: Dictionary) -> void:
+    if add_generated_rock_visual(body, prop_id, biome, spec):
+        return
+    add_fallback_rock_visual(body, spec)
+
+func add_generated_rock_visual(body: StaticBody3D, prop_id: String, biome: String, spec: Dictionary) -> bool:
+    if visual_asset_registry == null or not visual_asset_registry.is_ready():
+        return false
+    var asset_id: String = visual_asset_registry.select_rock_asset_id(biome, prop_id)
+    var visual: Node3D = visual_asset_registry.instantiate_asset(asset_id)
+    if visual == null:
+        return false
+    var radius := float(spec.get("radius", 0.8))
+    var height_factor := float(spec.get("height_factor", 1.0))
+    var old_scale: Vector3 = spec.get("scale", Vector3.ONE)
+    var asset_size: Vector3 = visual_asset_registry.asset_size(asset_id)
+    var sx := (radius * 2.0 * old_scale.x) / maxf(0.1, asset_size.x)
+    var sy := (radius * height_factor * old_scale.y) / maxf(0.1, asset_size.z)
+    var sz := (radius * 2.0 * old_scale.z) / maxf(0.1, asset_size.y)
+    var profile_scale: float = visual_asset_registry.rock_scale_for_biome(biome)
+    visual.name = "GeneratedRockVisual"
+    visual.position = Vector3.ZERO
+    visual.rotation = Vector3.ZERO
+    visual.scale = Vector3(sx, sy, sz) * profile_scale
+    visual.set_meta("visual_source", "generated_asset")
+    visual.set_meta("visual_asset_id", asset_id)
+    body.add_child(visual)
+    body.set_meta("visual_source", "generated_asset")
+    body.set_meta("visual_asset_id", asset_id)
+    return true
+
+func add_fallback_rock_visual(body: StaticBody3D, spec: Dictionary) -> void:
+    var radius := float(spec.get("radius", 0.8))
+    var rock_mesh := SphereMesh.new()
+    rock_mesh.radius = radius
+    rock_mesh.height = radius * float(spec.get("height_factor", 1.0))
+    var rock := MeshInstance3D.new()
+    rock.name = "PrimitiveRockVisual"
+    rock.mesh = rock_mesh
+    rock.material_override = materials["rock"]
+    rock.position.y = radius * 0.42
+    rock.scale = spec.get("scale", Vector3.ONE)
+    rock.set_meta("visual_source", "primitive_fallback")
+    body.add_child(rock)
+    body.set_meta("visual_source", "primitive_fallback")
+    body.set_meta("visual_asset_id", "")
+
+func prop_biome_for_position(parent: Node, position: Vector3) -> String:
+    var world_position := position
+    var parent_node := parent as Node3D
+    if parent_node:
+        world_position = parent_node.global_transform * position
+    return biome_at_cell(world_to_cell(world_position.x), world_to_cell(world_position.z))
+
 func make_rock(parent: Node, prop_id: String, position: Vector3, rng: RandomNumberGenerator):
+    var spec := rock_visual_spec(rng)
+    var biome := prop_biome_for_position(parent, position)
     var body := StaticBody3D.new()
     body.name = "Rock"
     body.position = position
-    body.rotation.y = rng.randf() * TAU
+    body.rotation.y = float(spec.get("rotation", 0.0))
     body.set_meta("kind", "prop")
     body.set_meta("prop_id", prop_id)
     body.set_meta("drop", "stones")
     body.set_meta("material", "rock")
     body.set_meta("drop_count", 4)
+    body.set_meta("visual_biome", biome)
 
-    var radius := 0.55 + rng.randf() * 0.7
-    var rock_mesh := SphereMesh.new()
-    rock_mesh.radius = radius
-    rock_mesh.height = radius * (0.75 + rng.randf() * 0.8)
-    var rock := MeshInstance3D.new()
-    rock.mesh = rock_mesh
-    rock.material_override = materials["rock"]
-    rock.position.y = radius * 0.42
-    rock.scale = Vector3(1.15 + rng.randf() * 0.6, 0.58 + rng.randf() * 0.72, 1.0 + rng.randf() * 0.5)
-    body.add_child(rock)
+    var radius := float(spec.get("radius", 0.8))
+    add_rock_visual(body, prop_id, biome, spec)
 
     var shape := SphereShape3D.new()
     shape.radius = radius * 1.05
