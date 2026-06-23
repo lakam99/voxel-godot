@@ -1,0 +1,23 @@
+[gd_resource type="ShaderMaterial" load_steps=2 format=3]
+
+[ext_resource type="Shader" path="res://shaders/stylized_water.gdshader" id="1_water"]
+
+[resource]
+shader = ExtResource("1_water")
+shader_parameter/shallow_color = Vector3(0.22, 0.68, 0.72)
+shader_parameter/deep_color = Vector3(0.06, 0.34, 0.54)
+shader_parameter/foam_color = Vector3(0.72, 0.9, 0.86)
+shader_parameter/overcast_tint = Vector3(0.34, 0.62, 0.64)
+shader_parameter/sunset_tint = Vector3(0.96, 0.58, 0.36)
+shader_parameter/cloud_cover = 0.22
+shader_parameter/weather_intensity = 0.0
+shader_parameter/day_factor = 1.0
+shader_parameter/sunset_warmth = 0.0
+shader_parameter/wave_time = 0.0
+shader_parameter/wave_scale_a = 0.06
+shader_parameter/wave_scale_b = 0.135
+shader_parameter/wave_height = 0.045
+shader_parameter/alpha_base = 0.9
+shader_parameter/fresnel_strength = 0.08
+shader_parameter/roughness_value = 0.82
+shader_parameter/specular_value = 0.14

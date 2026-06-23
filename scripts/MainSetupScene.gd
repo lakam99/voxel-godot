@@ -63,7 +63,10 @@ func setup_materials() -> void:
     materials["detailLeaf"] = make_material(Color(0.48, 0.38, 0.18), 0.88)
     materials["rawFish"] = make_material(Color(0.42, 0.72, 0.78), 0.52)
     materials["cookedFish"] = make_material(Color(0.78, 0.42, 0.24), 0.74)
-    materials["water"] = make_material(Color(0.30, 0.70, 0.78, 0.46), 0.20, true)
+    var water_material := load("res://resources/visual/water_material.tres") as Material
+    if water_material == null:
+        water_material = make_material(Color(0.30, 0.70, 0.78, 0.46), 0.20, true)
+    materials["water"] = water_material
     materials["sunDisc"] = make_unshaded_material(Color(1.0, 0.82, 0.38))
     materials["moonDisc"] = make_unshaded_material(Color(0.72, 0.78, 0.94))
 
@@ -146,6 +149,8 @@ func setup_environment() -> void:
 
     var plane := PlaneMesh.new()
     plane.size = Vector2(3000.0, 3000.0)
+    plane.subdivide_width = 96
+    plane.subdivide_depth = 96
     water = MeshInstance3D.new()
     water.name = "Water"
     water.mesh = plane

@@ -1,0 +1,8 @@
+[gd_resource type="ShaderMaterial" load_steps=2 format=3]
+
+[ext_resource type="Shader" path="res://shaders/stylized_clouds.gdshader" id="1_clouds"]
+
+[resource]
+shader = ExtResource("1_clouds")
+shader_parameter/cloud_tint = Vector3(1.0, 0.94, 0.80)
+shader_parameter/alpha = 0.36

@@ -8,7 +8,9 @@ const CASES := [
     { "name": "forest_midnight", "playtest": "forest", "clock": 0.0, "weather": "clear", "intensity": 0.0, "clouds": 0.18, "hud": false, "offset": Vector3(7.0, 0.0, 9.0), "pitch": -6.0 },
     { "name": "forest_rain", "playtest": "forest", "clock": 16.5, "weather": "rain", "intensity": 0.68, "clouds": 0.88, "hud": false, "offset": Vector3(8.0, 0.0, 7.0), "pitch": -9.0 },
     { "name": "mountain_day", "playtest": "mountain", "clock": 9.0, "weather": "clear", "intensity": 0.0, "clouds": 0.30, "hud": false, "offset": Vector3(10.0, 0.0, 8.0), "pitch": -11.0 },
-    { "name": "water_overcast", "playtest": "water", "clock": 14.5, "weather": "rain", "intensity": 0.18, "clouds": 0.72, "hud": false, "offset": Vector3(8.0, 0.0, 8.0), "pitch": -7.0 },
+    { "name": "water_clear", "playtest": "water", "clock": 12.0, "weather": "clear", "intensity": 0.0, "clouds": 0.18, "hud": false, "offset": Vector3(7.0, 0.0, 7.0), "pitch": -18.0, "lookAtWater": true },
+    { "name": "water_sunset", "playtest": "water", "clock": 18.7, "weather": "clear", "intensity": 0.0, "clouds": 0.26, "hud": false, "offset": Vector3(-8.0, 0.0, 6.0), "pitch": -16.0, "lookAtWater": true },
+    { "name": "water_overcast", "playtest": "water", "clock": 14.5, "weather": "rain", "intensity": 0.18, "clouds": 0.72, "hud": false, "offset": Vector3(8.0, 0.0, 8.0), "pitch": -16.0, "lookAtWater": true },
     { "name": "hud_gameplay", "playtest": "town", "clock": 12.0, "weather": "clear", "intensity": 0.0, "clouds": 0.22, "hud": true, "offset": Vector3(8.5, 0.0, 8.5), "pitch": -10.0 }
 ]
 
@@ -99,6 +101,9 @@ func position_camera(capture_case: Dictionary) -> void:
     if player == null or camera == null:
         return
     var target_cell := current_playtest_cell(String(capture_case["playtest"]))
+    if bool(capture_case.get("lookAtWater", false)):
+        position_water_camera(capture_case, target_cell)
+        return
     var target := Vector3(float(target_cell.x) * main.CELL, 0.0, float(target_cell.y) * main.CELL)
     target.y = main.height_at_world(target.x, target.z)
     var offset: Vector3 = capture_case.get("offset", Vector3(8.0, 0.0, 8.0))
@@ -110,6 +115,55 @@ func position_camera(capture_case: Dictionary) -> void:
     var base_camera_position: Vector3 = player.get("base_camera_position")
     camera.position = base_camera_position
     camera.rotation.x = deg_to_rad(float(capture_case.get("pitch", -8.0)))
+
+func position_water_camera(capture_case: Dictionary, target_cell: Vector2i) -> void:
+    var water_cell := target_cell + Vector2i(-8, -3)
+    prepare_capture_water_patch(water_cell)
+    var view_cell := find_capture_water_vantage_cell(water_cell)
+    var water_target := Vector3(float(water_cell.x) * main.CELL, main.WATER_LEVEL, float(water_cell.y) * main.CELL)
+    var position := Vector3(float(view_cell.x) * main.CELL, 0.0, float(view_cell.y) * main.CELL)
+    position.y = maxf(main.height_at_world(position.x, position.z), main.WATER_LEVEL) + 0.08
+    player.global_position = position
+    player.velocity = Vector3.ZERO
+    player.look_at(Vector3(water_target.x, position.y, water_target.z), Vector3.UP)
+    var base_camera_position: Vector3 = player.get("base_camera_position")
+    camera.position = base_camera_position
+    camera.rotation.x = deg_to_rad(float(capture_case.get("pitch", -16.0)))
+
+func prepare_capture_water_patch(center: Vector2i) -> void:
+    var edits_value: Variant = main.get("height_edits")
+    if not (edits_value is Dictionary):
+        return
+    var edits: Dictionary = edits_value
+    for dz in range(-5, 6):
+        for dx in range(-7, 8):
+            var distance := Vector2(float(dx), float(dz)).length()
+            if distance > 7.1:
+                continue
+            edits[center + Vector2i(dx, dz)] = main.WATER_LEVEL - 0.42
+    main.rebuild_chunks_around_cell(center)
+
+func find_capture_water_vantage_cell(water_cell: Vector2i) -> Vector2i:
+    var directions: Array[Vector2i] = [
+        Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1),
+        Vector2i(1, 1), Vector2i(-1, 1), Vector2i(1, -1), Vector2i(-1, -1)
+    ]
+    var best_cell := water_cell + Vector2i(9, 9)
+    var best_score := INF
+    for radius in range(8, 28, 2):
+        for direction in directions:
+            var cell: Vector2i = water_cell + direction * radius
+            var height := float(main.terrain_height_cell(cell.x, cell.y))
+            if height < main.WATER_LEVEL + 0.75:
+                continue
+            var variation := float(main.height_variation_cell(cell.x, cell.y, 1))
+            if variation > main.CELL * 2.0:
+                continue
+            var score := absf(height - (main.WATER_LEVEL + 2.0)) + variation * 1.5 + float(radius) * 0.05
+            if score < best_score:
+                best_score = score
+                best_cell = cell
+    return best_cell
 
 func current_playtest_cell(case_id: String) -> Vector2i:
     var target: Dictionary = main.playtest_case_target(case_id)

@@ -1,0 +1,51 @@
+{
+  "camera": {
+    "position": {
+      "x": 8.0,
+      "y": 24.68,
+      "z": 7.0
+    },
+    "rotationDegrees": {
+      "x": -9.0,
+      "y": 48.814,
+      "z": 0.0
+    }
+  },
+  "case": "forest_rain",
+  "clockHour": 16.5,
+  "clockText": "16:30",
+  "hudVisible": false,
+  "performance": {
+    "blocks": 1216,
+    "chunks": 49,
+    "drawEstimate": 6538,
+    "hostiles": 0,
+    "physicsBodies": 2242,
+    "props": 954
+  },
+  "playtestDestination": "forest",
+  "png": "forest_rain.png",
+  "renderer": "Forward Plus",
+  "resolution": {
+    "height": 720,
+    "width": 1280
+  },
+  "seed": "atlas-1492",
+  "timeOfDay": 0.438,
+  "weather": {
+    "batchedStars": true,
+    "cloudCards": true,
+    "cloudCover": 0.88,
+    "cloudNodes": 18,
+    "clouds": 18,
+    "intensity": 0.68,
+    "kind": "rain",
+    "particleQuality": 1.0,
+    "rainVisible": true,
+    "snowVisible": false,
+    "starNodes": 0,
+    "stars": 160,
+    "starsVisible": false,
+    "waterInfluence": 0.0
+  }
+}

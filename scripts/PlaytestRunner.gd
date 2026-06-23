@@ -137,6 +137,10 @@ func run() -> void:
     test_environment_visual_style()
     mark_progress("weather_visual")
     test_weather_visual_system()
+    mark_progress("water_visual")
+    test_water_visual_material()
+    mark_progress("weather_presentation")
+    test_weather_presentation_batching()
     mark_progress("spawn_clearance")
     test_spawn_clearance()
     mark_progress("player_movement")
@@ -4687,6 +4691,93 @@ func test_weather_visual_system() -> void:
             str(star_state.get("starsVisible", false)),
             int(star_state.get("clouds", 0)),
             int(star_state.get("stars", 0))
+        ]
+    )
+
+func test_water_visual_material() -> void:
+    if not main:
+        add_result("water_visual_material", false, "main missing")
+        return
+    var water := main.get("water") as MeshInstance3D
+    var materials: Dictionary = main.get("materials")
+    var material := materials.get("water") as ShaderMaterial
+    var shader_path := ""
+    if material and material.shader:
+        shader_path = material.shader.resource_path
+    if main.has_method("apply_weather_lighting"):
+        main.call("apply_weather_lighting", { "cloudCover": 0.82, "intensity": 0.46 }, 0.58)
+    var cloud_param := -1.0
+    var weather_param := -1.0
+    if material:
+        cloud_param = float(material.get_shader_parameter("cloud_cover"))
+        weather_param = float(material.get_shader_parameter("weather_intensity"))
+    var plane := water.mesh as PlaneMesh if water else null
+    var water_level_ok := water != null and absf(water.position.y - WATER_LEVEL) <= 0.001
+    var plane_ok := plane != null and plane.size.x >= 2999.0 and plane.size.y >= 2999.0
+    var param_ok := absf(cloud_param - 0.82) <= 0.002 and absf(weather_param - 0.46) <= 0.002
+    add_result(
+        "water_visual_material",
+        material != null
+            and shader_path.ends_with("stylized_water.gdshader")
+            and water != null
+            and water.material_override == material
+            and water_level_ok
+            and plane_ok
+            and param_ok,
+        "shader %s, water y %.2f, plane %s, params %.2f/%.2f" % [
+            shader_path,
+            water.position.y if water else -999.0,
+            str(plane.size if plane else Vector2.ZERO),
+            cloud_param,
+            weather_param
+        ]
+    )
+
+func test_weather_presentation_batching() -> void:
+    if not main or not player:
+        add_result("weather_presentation_batching", false, "main or player missing")
+        return
+    var weather_system = main.get("weather_system")
+    if weather_system == null:
+        add_result("weather_presentation_batching", false, "weather system missing")
+        return
+    weather_system.force_weather("clear", 0.0, 0.10, player.global_position)
+    var state: Dictionary = weather_system.snapshot()
+    var star_root := weather_system.get("star_root") as MultiMeshInstance3D
+    var cloud_root := weather_system.get("cloud_root") as Node3D
+    var rain := weather_system.get("rain") as MultiMeshInstance3D
+    var snow := weather_system.get("snow") as MultiMeshInstance3D
+    var clouds_checked := 0
+    var cloud_cards := 0
+    if cloud_root:
+        for child in cloud_root.get_children():
+            var cloud := child as MeshInstance3D
+            if cloud == null:
+                continue
+            clouds_checked += 1
+            if bool(cloud.get_meta("cloud_card", false)) and cloud.mesh is ArrayMesh:
+                cloud_cards += 1
+    var stars_batched := star_root != null \
+        and star_root.multimesh != null \
+        and star_root.multimesh.instance_count == int(state.get("stars", 0)) \
+        and star_root.get_child_count() == 0
+    var clouds_ok := clouds_checked == int(state.get("clouds", 0)) and cloud_cards == clouds_checked and clouds_checked >= 12
+    var precip_ok := rain != null and snow != null and rain.multimesh != null and snow.multimesh != null
+    add_result(
+        "weather_presentation_batching",
+        stars_batched
+            and clouds_ok
+            and precip_ok
+            and bool(state.get("batchedStars", false))
+            and bool(state.get("cloudCards", false)),
+        "stars batched %s nodes %d/%d, clouds cards %d/%d, precip %s/%s" % [
+            str(stars_batched),
+            star_root.get_child_count() if star_root else -1,
+            int(state.get("stars", 0)),
+            cloud_cards,
+            clouds_checked,
+            str(rain != null and rain.multimesh != null),
+            str(snow != null and snow.multimesh != null)
         ]
     )
 

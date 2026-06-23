@@ -16,12 +16,17 @@ var target_cloud_cover := 0.28
 var target_intensity := 0.0
 var water_influence := 0.0
 var cloud_root: Node3D
-var star_root: Node3D
+var star_root: MultiMeshInstance3D
 var rain: MultiMeshInstance3D
 var snow: MultiMeshInstance3D
 var rain_positions: Array[Vector3] = []
 var snow_positions: Array[Vector3] = []
-var cloud_material: StandardMaterial3D
+var star_positions: Array[Vector3] = []
+var star_bases: Array[float] = []
+var star_phases: Array[float] = []
+var star_speeds: Array[float] = []
+var cloud_mesh_library: Array[ArrayMesh] = []
+var cloud_material: Material
 var star_material: StandardMaterial3D
 var rain_material: StandardMaterial3D
 var snow_material: StandardMaterial3D
@@ -60,9 +65,16 @@ func clear_generated_nodes() -> void:
     snow = null
     rain_positions.clear()
     snow_positions.clear()
+    star_positions.clear()
+    star_bases.clear()
+    star_phases.clear()
+    star_speeds.clear()
+    cloud_mesh_library.clear()
 
 func setup_materials() -> void:
-    cloud_material = make_unshaded(Color(1.0, 0.94, 0.82, 0.34))
+    cloud_material = load("res://resources/visual/cloud_material.tres") as Material
+    if cloud_material == null:
+        cloud_material = make_unshaded(Color(1.0, 0.94, 0.82, 0.34))
     star_material = make_unshaded(Color(0.92, 0.95, 1.0, 0.92))
     rain_material = make_unshaded(Color(0.54, 0.72, 0.84, 0.45))
     snow_material = make_unshaded(Color(0.94, 0.98, 1.0, 0.78))
@@ -79,26 +91,25 @@ func setup_clouds() -> void:
     cloud_root = Node3D.new()
     cloud_root.name = "CloudLayer"
     add_child(cloud_root)
+    for variant in range(4):
+        cloud_mesh_library.append(create_cloud_mesh(variant))
     for i in range(CLOUD_COUNT):
-        var mesh := SphereMesh.new()
-        mesh.radius = 5.5 + hash01("cloud-radius:%d" % i) * 7.0
-        mesh.height = mesh.radius * 0.38
-        mesh.radial_segments = 12
-        mesh.rings = 6
         var cloud := MeshInstance3D.new()
         cloud.name = "Cloud_%02d" % i
-        cloud.mesh = mesh
+        cloud.mesh = cloud_mesh_library[i % cloud_mesh_library.size()]
         cloud.material_override = cloud_material
         cloud.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
         var angle := hash01("cloud-angle:%d" % i) * TAU
         var distance := 70.0 + hash01("cloud-distance:%d" % i) * 190.0
         cloud.position = Vector3(cos(angle) * distance, 74.0 + hash01("cloud-height:%d" % i) * 34.0, sin(angle) * distance)
-        cloud.scale = Vector3(1.8 + hash01("cloud-x:%d" % i) * 1.6, 0.28, 0.8 + hash01("cloud-z:%d" % i) * 1.3)
+        cloud.rotation.y = hash01("cloud-rot:%d" % i) * TAU
+        cloud.scale = Vector3(3.8 + hash01("cloud-x:%d" % i) * 2.8, 1.0, 2.4 + hash01("cloud-z:%d" % i) * 2.0)
+        cloud.set_meta("cloud_card", true)
         cloud.set_meta("drift", Vector3(-0.7 + hash01("cloud-dx:%d" % i) * 1.4, 0.0, -0.45 + hash01("cloud-dz:%d" % i) * 0.9))
         cloud_root.add_child(cloud)
 
 func setup_stars() -> void:
-    star_root = Node3D.new()
+    star_root = MultiMeshInstance3D.new()
     star_root.name = "StarField"
     add_child(star_root)
     var mesh := SphereMesh.new()
@@ -106,21 +117,52 @@ func setup_stars() -> void:
     mesh.height = 0.34
     mesh.radial_segments = 5
     mesh.rings = 3
+    star_root.multimesh = MultiMesh.new()
+    star_root.multimesh.transform_format = MultiMesh.TRANSFORM_3D
+    star_root.multimesh.mesh = mesh
+    star_root.multimesh.instance_count = STAR_COUNT
+    star_root.material_override = star_material
+    star_root.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
     for i in range(STAR_COUNT):
-        var star := MeshInstance3D.new()
-        star.name = "Star_%03d" % i
-        star.mesh = mesh
-        star.material_override = star_material
-        star.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
         var angle := hash01("star-angle:%d" % i) * TAU
         var elevation := 0.22 + hash01("star-elevation:%d" % i) * 0.66
         var radius := 260.0 + hash01("star-radius:%d" % i) * 230.0
-        star.position = Vector3(cos(angle) * radius, elevation * 260.0, sin(angle) * radius)
-        star.set_meta("base", 0.45 + hash01("star-base:%d" % i) * 0.85)
-        star.set_meta("phase", hash01("star-phase:%d" % i) * TAU)
-        star.set_meta("speed", 1.2 + hash01("star-speed:%d" % i) * 2.5)
-        star_root.add_child(star)
+        var position := Vector3(cos(angle) * radius, elevation * 260.0, sin(angle) * radius)
+        var base := 0.45 + hash01("star-base:%d" % i) * 0.85
+        star_positions.append(position)
+        star_bases.append(base)
+        star_phases.append(hash01("star-phase:%d" % i) * TAU)
+        star_speeds.append(1.2 + hash01("star-speed:%d" % i) * 2.5)
+        star_root.multimesh.set_instance_transform(i, Transform3D(Basis().scaled(Vector3.ONE * base), position))
     star_root.visible = false
+
+func create_cloud_mesh(variant: int) -> ArrayMesh:
+    var st := SurfaceTool.new()
+    st.begin(Mesh.PRIMITIVE_TRIANGLES)
+    var blob_count := 4 + variant
+    for i in range(blob_count):
+        var offset := Vector3(
+            (hash01("cloud-blob-x:%d:%d" % [variant, i]) - 0.5) * 6.0,
+            (hash01("cloud-blob-y:%d:%d" % [variant, i]) - 0.5) * 0.26,
+            (hash01("cloud-blob-z:%d:%d" % [variant, i]) - 0.5) * 2.7
+        )
+        var radius_x := 1.35 + hash01("cloud-blob-rx:%d:%d" % [variant, i]) * 1.8
+        var radius_z := 0.55 + hash01("cloud-blob-rz:%d:%d" % [variant, i]) * 0.95
+        add_cloud_blob(st, offset, radius_x, radius_z, 8)
+    return st.commit()
+
+func add_cloud_blob(st: SurfaceTool, center: Vector3, radius_x: float, radius_z: float, segments: int) -> void:
+    for i in range(segments):
+        var a0 := float(i) / float(segments) * TAU
+        var a1 := float(i + 1) / float(segments) * TAU
+        add_cloud_vertex(st, center, 1.0)
+        add_cloud_vertex(st, center + Vector3(cos(a0) * radius_x, 0.0, sin(a0) * radius_z), 0.10)
+        add_cloud_vertex(st, center + Vector3(cos(a1) * radius_x, 0.0, sin(a1) * radius_z), 0.10)
+
+func add_cloud_vertex(st: SurfaceTool, position: Vector3, alpha: float) -> void:
+    st.set_normal(Vector3.DOWN)
+    st.set_color(Color(1.0, 1.0, 1.0, alpha))
+    st.add_vertex(position)
 
 func setup_precipitation() -> void:
     rain = MultiMeshInstance3D.new()
@@ -180,9 +222,19 @@ func update_weather(delta: float, observer: Vector3, biome: String, day_factor: 
     return snapshot()
 
 func update_clouds(delta: float, observer: Vector3, day_factor: float) -> void:
+    if cloud_root == null:
+        return
     cloud_root.global_position = Vector3(observer.x, observer.y * 0.08, observer.z)
     var alpha := lerpf(0.16, 0.54, cloud_cover) * lerpf(0.34, 1.0, day_factor)
-    cloud_material.albedo_color = Color(1.0, 0.94, 0.80, alpha).lerp(Color(0.58, 0.62, 0.62, alpha + intensity * 0.16), cloud_cover * 0.65 + intensity * 0.25)
+    var cloud_color := Color(1.0, 0.94, 0.80, alpha).lerp(Color(0.58, 0.62, 0.62, alpha + intensity * 0.16), cloud_cover * 0.65 + intensity * 0.25)
+    var shader_cloud := cloud_material as ShaderMaterial
+    if shader_cloud:
+        shader_cloud.set_shader_parameter("cloud_tint", Vector3(cloud_color.r, cloud_color.g, cloud_color.b))
+        shader_cloud.set_shader_parameter("alpha", clampf(cloud_color.a, 0.0, 0.86))
+    else:
+        var fallback_cloud := cloud_material as StandardMaterial3D
+        if fallback_cloud:
+            fallback_cloud.albedo_color = cloud_color
     for child in cloud_root.get_children():
         var cloud := child as MeshInstance3D
         if cloud == null:
@@ -200,6 +252,8 @@ func update_clouds(delta: float, observer: Vector3, day_factor: float) -> void:
             cloud.position.z = limit
 
 func update_stars(observer: Vector3, day_factor: float) -> void:
+    if star_root == null or star_root.multimesh == null:
+        return
     var night_factor := 1.0 - day_factor
     var visibility := smoothstep(0.16, 0.74, night_factor) * clampf(1.0 - cloud_cover * 0.86 - intensity * 0.44, 0.0, 1.0)
     star_root.visible = visibility > 0.03
@@ -207,15 +261,12 @@ func update_stars(observer: Vector3, day_factor: float) -> void:
     if not star_root.visible:
         return
     star_material.albedo_color.a = visibility
-    for child in star_root.get_children():
-        var star := child as MeshInstance3D
-        if star == null:
-            continue
-        var base := float(star.get_meta("base", 1.0))
-        var phase := float(star.get_meta("phase", 0.0))
-        var speed := float(star.get_meta("speed", 1.0))
+    for i in range(star_positions.size()):
+        var base := star_bases[i]
+        var phase := star_phases[i]
+        var speed := star_speeds[i]
         var twinkle := clampf(base * (0.72 + sin(elapsed * speed + phase) * 0.28), 0.22, 1.35)
-        star.scale = Vector3.ONE * twinkle
+        star_root.multimesh.set_instance_transform(i, Transform3D(Basis().scaled(Vector3.ONE * twinkle), star_positions[i]))
 
 func update_precipitation(delta: float, observer: Vector3) -> void:
     var rain_amount := intensity if kind == "rain" else 0.0
@@ -345,6 +396,10 @@ func snapshot() -> Dictionary:
         "starsVisible": star_root.visible if star_root else false,
         "clouds": CLOUD_COUNT,
         "stars": STAR_COUNT,
+        "cloudNodes": cloud_root.get_child_count() if cloud_root else 0,
+        "starNodes": star_root.get_child_count() if star_root else 0,
+        "batchedStars": star_root is MultiMeshInstance3D and star_root.multimesh != null,
+        "cloudCards": cloud_root != null and cloud_root.get_child_count() == CLOUD_COUNT,
         "particleQuality": particle_quality
     }
 

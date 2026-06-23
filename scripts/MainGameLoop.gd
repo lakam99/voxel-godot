@@ -126,9 +126,17 @@ func apply_weather_lighting(weather: Dictionary, day: float) -> void:
             )
         )
         env.fog_density = lerpf(env.fog_density, visual_style.fog_density_weather, tint_strength)
-    var water_material := materials.get("water") as StandardMaterial3D
+    var water_material := materials.get("water") as ShaderMaterial
     if water_material:
-        water_material.albedo_color = Color(0.30, 0.70, 0.78, 0.46).lerp(Color(0.46, 0.58, 0.56, 0.54), cloud_cover * 0.42 + weather_intensity * 0.22)
+        water_material.set_shader_parameter("cloud_cover", cloud_cover)
+        water_material.set_shader_parameter("weather_intensity", weather_intensity)
+        water_material.set_shader_parameter("day_factor", day)
+        water_material.set_shader_parameter("sunset_warmth", warmth)
+        water_material.set_shader_parameter("wave_time", world_elapsed)
+    else:
+        var fallback_water := materials.get("water") as StandardMaterial3D
+        if fallback_water:
+            fallback_water.albedo_color = Color(0.30, 0.70, 0.78, 0.46).lerp(Color(0.46, 0.58, 0.56, 0.54), cloud_cover * 0.42 + weather_intensity * 0.22)
 
 func update_survival(delta: float) -> void:
     if survival_system == null or player == null:

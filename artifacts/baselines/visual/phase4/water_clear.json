@@ -1,0 +1,51 @@
+{
+  "camera": {
+    "position": {
+      "x": -2.7,
+      "y": 15.041,
+      "z": -109.35
+    },
+    "rotationDegrees": {
+      "x": -18.0,
+      "y": -135.0,
+      "z": 0.0
+    }
+  },
+  "case": "water_clear",
+  "clockHour": 12.0,
+  "clockText": "12:00",
+  "hudVisible": false,
+  "performance": {
+    "blocks": 1222,
+    "chunks": 49,
+    "drawEstimate": 6653,
+    "hostiles": 0,
+    "physicsBodies": 2235,
+    "props": 941
+  },
+  "playtestDestination": "water",
+  "png": "water_clear.png",
+  "renderer": "Forward Plus",
+  "resolution": {
+    "height": 720,
+    "width": 1280
+  },
+  "seed": "atlas-1492",
+  "timeOfDay": 0.25,
+  "weather": {
+    "batchedStars": true,
+    "cloudCards": true,
+    "cloudCover": 0.18,
+    "cloudNodes": 18,
+    "clouds": 18,
+    "intensity": 0.0,
+    "kind": "clear",
+    "particleQuality": 1.0,
+    "rainVisible": false,
+    "snowVisible": false,
+    "starNodes": 0,
+    "stars": 160,
+    "starsVisible": false,
+    "waterInfluence": 0.0769230769230769
+  }
+}
