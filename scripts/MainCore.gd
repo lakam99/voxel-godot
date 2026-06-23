@@ -26,7 +26,7 @@ var sky_material: ProceduralSkyMaterial
 var visual_capture_active := false
 var visual_debug_enabled := false
 
-var terrain_material: StandardMaterial3D
+var terrain_material: Material
 var materials := {}
 var chunks := {}
 var chunk_asset_cache := {}

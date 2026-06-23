@@ -3,6 +3,7 @@ extends Node
 const MAIN_SCENE: PackedScene = preload("res://scenes/Main.tscn")
 const ItemCatalogScript := preload("res://scripts/ItemCatalog.gd")
 const CELL := 1.35
+const CHUNK_SIZE := 28
 const WATER_LEVEL := 11.1
 const INTERACT_RANGE := 10.5
 const ACTION_REACH := CELL * 1.85
@@ -118,6 +119,12 @@ func run() -> void:
     await test_held_item_system()
     mark_progress("terrain_collision")
     test_terrain_collision_shapes()
+    mark_progress("terrain_topology")
+    test_terrain_mesh_topology_signature()
+    mark_progress("terrain_material")
+    test_terrain_shader_material()
+    mark_progress("terrain_normals")
+    test_terrain_chunk_edge_normals()
     mark_progress("terrain_generation_profile")
     test_terrain_generation_profile()
     mark_progress("world_streaming")
@@ -4269,6 +4276,143 @@ func test_terrain_collision_shapes() -> void:
         if shape_node and shape_node.shape:
             with_shape += 1
     add_result("terrain_collision_shapes", checked > 0 and checked == with_shape, "%d/%d chunks with shapes" % [with_shape, checked])
+
+func test_terrain_mesh_topology_signature() -> void:
+    var chunks := get_chunks()
+    var expected_vertices := CHUNK_SIZE * CHUNK_SIZE * 6 + CHUNK_SIZE * 4 * 6
+    var checked := 0
+    var matching := 0
+    var with_normals := 0
+    for chunk_node in chunks.values():
+        var chunk := chunk_node as Node
+        var mesh := terrain_mesh_for_chunk(chunk)
+        if mesh == null or mesh.get_surface_count() == 0:
+            continue
+        checked += 1
+        var arrays := mesh.surface_get_arrays(0)
+        var vertices: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
+        var normals: PackedVector3Array = arrays[Mesh.ARRAY_NORMAL]
+        if vertices.size() == expected_vertices:
+            matching += 1
+        if normals.size() == vertices.size() and normals.size() > 0:
+            with_normals += 1
+    add_result(
+        "terrain_mesh_topology_signature",
+        checked > 0 and checked == matching and checked == with_normals,
+        "%d/%d chunks match %d vertices, normals %d/%d" % [matching, checked, expected_vertices, with_normals, checked]
+    )
+
+func test_terrain_shader_material() -> void:
+    var material := main.get("terrain_material") as ShaderMaterial if main else null
+    var shader_path := ""
+    if material and material.shader:
+        shader_path = material.shader.resource_path
+    var chunks := get_chunks()
+    var checked := 0
+    var assigned := 0
+    for chunk_node in chunks.values():
+        var chunk := chunk_node as Node
+        var mesh := terrain_mesh_for_chunk(chunk)
+        if mesh == null or mesh.get_surface_count() == 0:
+            continue
+        checked += 1
+        if mesh.surface_get_material(0) is ShaderMaterial:
+            assigned += 1
+    add_result(
+        "terrain_shader_material",
+        material != null and shader_path.ends_with("stylized_terrain.gdshader") and checked > 0 and checked == assigned,
+        "material %s, shader %s, assigned %d/%d" % [str(material != null), shader_path, assigned, checked]
+    )
+
+func test_terrain_chunk_edge_normals() -> void:
+    if not main:
+        add_result("terrain_chunk_edge_normals", false, "main missing")
+        return
+    var chunks := get_chunks()
+    var comparisons := 0
+    var pairs := 0
+    var max_degrees := 0.0
+    for key_variant in chunks.keys():
+        if pairs >= 16:
+            break
+        var key := key_variant as Vector2i
+        var east_key := key + Vector2i(1, 0)
+        if chunks.has(east_key) and pairs < 16:
+            var east_mesh := main.call("build_chunk_mesh", key.x, key.y) as Mesh
+            var west_mesh := main.call("build_chunk_mesh", east_key.x, east_key.y) as Mesh
+            var east_samples := terrain_edge_normal_samples(east_mesh, "east")
+            var west_samples := terrain_edge_normal_samples(west_mesh, "west")
+            for sample_key in east_samples.keys():
+                if not west_samples.has(sample_key):
+                    continue
+                var a: Vector3 = east_samples[sample_key]
+                var b: Vector3 = west_samples[sample_key]
+                max_degrees = maxf(max_degrees, rad_to_deg(a.angle_to(b)))
+                comparisons += 1
+            pairs += 1
+        var south_key := key + Vector2i(0, 1)
+        if chunks.has(south_key) and pairs < 16:
+            var south_mesh := main.call("build_chunk_mesh", key.x, key.y) as Mesh
+            var north_mesh := main.call("build_chunk_mesh", south_key.x, south_key.y) as Mesh
+            var south_samples := terrain_edge_normal_samples(south_mesh, "south")
+            var north_samples := terrain_edge_normal_samples(north_mesh, "north")
+            for sample_key in south_samples.keys():
+                if not north_samples.has(sample_key):
+                    continue
+                var c: Vector3 = south_samples[sample_key]
+                var d: Vector3 = north_samples[sample_key]
+                max_degrees = maxf(max_degrees, rad_to_deg(c.angle_to(d)))
+                comparisons += 1
+            pairs += 1
+    add_result(
+        "terrain_chunk_edge_normals",
+        pairs >= 8 and comparisons >= 200 and max_degrees <= 0.75,
+        "pairs %d, comparisons %d, max edge normal delta %.4f degrees" % [pairs, comparisons, max_degrees]
+    )
+
+func terrain_mesh_for_chunk(chunk: Node) -> Mesh:
+    if chunk == null:
+        return null
+    var mesh_instance := chunk.get_node_or_null("TerrainMesh") as MeshInstance3D
+    return mesh_instance.mesh if mesh_instance else null
+
+func terrain_edge_normal_samples(mesh: Mesh, side: String) -> Dictionary:
+    if mesh == null or mesh.get_surface_count() == 0:
+        return {}
+    var arrays := mesh.surface_get_arrays(0)
+    var vertices: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
+    var normals: PackedVector3Array = arrays[Mesh.ARRAY_NORMAL]
+    if vertices.is_empty() or normals.size() != vertices.size():
+        return {}
+    var target := CHUNK_SIZE * CELL
+    var totals := {}
+    var counts := {}
+    for i in range(vertices.size()):
+        var vertex := vertices[i]
+        var normal := normals[i]
+        if normal.y <= 0.25:
+            continue
+        var on_edge := false
+        match side:
+            "west":
+                on_edge = absf(vertex.x) <= 0.001
+            "east":
+                on_edge = absf(vertex.x - target) <= 0.001
+            "north":
+                on_edge = absf(vertex.z) <= 0.001
+            "south":
+                on_edge = absf(vertex.z - target) <= 0.001
+        if on_edge:
+            var sample_index := roundi(vertex.z / CELL) if side == "west" or side == "east" else roundi(vertex.x / CELL)
+            totals[sample_index] = totals.get(sample_index, Vector3.ZERO) + normal.normalized()
+            counts[sample_index] = int(counts.get(sample_index, 0)) + 1
+    var result := {}
+    for sample_key in totals.keys():
+        var total: Vector3 = totals[sample_key]
+        if int(counts.get(sample_key, 0)) <= 0 or total.length_squared() <= 0.0:
+            continue
+        result[sample_key] = total.normalized()
+    return result
 
 func test_terrain_generation_profile() -> void:
     if not main:

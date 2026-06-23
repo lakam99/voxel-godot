@@ -1,10 +1,13 @@
 extends "res://scripts/MainSaveState.gd"
 
 func setup_materials() -> void:
-    terrain_material = StandardMaterial3D.new()
-    terrain_material.vertex_color_use_as_albedo = true
-    terrain_material.roughness = 0.86
-    terrain_material.cull_mode = BaseMaterial3D.CULL_DISABLED
+    terrain_material = load("res://resources/visual/terrain_material.tres") as Material
+    if terrain_material == null:
+        var fallback_terrain := StandardMaterial3D.new()
+        fallback_terrain.vertex_color_use_as_albedo = true
+        fallback_terrain.roughness = 0.86
+        fallback_terrain.cull_mode = BaseMaterial3D.CULL_DISABLED
+        terrain_material = fallback_terrain
 
     materials["woodBlock"] = make_material(Color(0.60, 0.36, 0.17), 0.82)
     materials["stoneBlock"] = make_material(Color(0.52, 0.57, 0.54), 0.90)

@@ -1,0 +1,19 @@
+[gd_resource type="ShaderMaterial" load_steps=2 format=3]
+
+[ext_resource type="Shader" path="res://shaders/stylized_terrain.gdshader" id="1_shader"]
+
+[resource]
+shader = ExtResource("1_shader")
+shader_parameter/macro_scale = 0.03
+shader_parameter/macro_strength = 0.075
+shader_parameter/slope_rock_strength = 0.3
+shader_parameter/side_value_strength = 0.1
+shader_parameter/snow_start = 58.0
+shader_parameter/snow_end = 86.0
+shader_parameter/snow_strength = 0.32
+shader_parameter/albedo_boost = 1.24
+shader_parameter/shadow_fill = 0.16
+shader_parameter/rock_tint = Vector3(0.44, 0.47, 0.43)
+shader_parameter/snow_tint = Vector3(0.86, 0.9, 0.86)
+shader_parameter/roughness_value = 0.9
+shader_parameter/specular_value = 0.14

@@ -323,11 +323,16 @@ func rebuild_chunk(cx: int, cz: int) -> void: pass
 func rebuild_chunks_around_cell(cell: Vector2i) -> void: pass
 func build_chunk_mesh(cx: int, cz: int) -> Mesh: return null
 func terrain_vertex_local_cached(height_cache: Dictionary, cell_x: int, cell_z: int, origin_cell_x: int, origin_cell_z: int) -> Vector3: return Vector3.ZERO
-func add_cached_vertex(st: SurfaceTool, point: Vector3, color_cache: Dictionary, cell_x: int, cell_z: int) -> void: pass
+func add_cached_vertex(st: SurfaceTool, point: Vector3, color_cache: Dictionary, normal_cache: Dictionary, cell_x: int, cell_z: int) -> void: pass
 func add_vertex(st: SurfaceTool, point: Vector3, cell_x: int, cell_z: int) -> void: pass
+func terrain_normal_for_cell_cached(height_cache: Dictionary, cell_x: int, cell_z: int) -> Vector3: return Vector3.UP
+func terrain_normal_for_cell(cell_x: int, cell_z: int) -> Vector3: return Vector3.UP
+func terrain_height_from_cache(height_cache: Dictionary, cell_x: int, cell_z: int) -> float: return 0.0
 func terrain_vertex_local(cell_x: int, cell_z: int, origin_cell_x: int, origin_cell_z: int) -> Vector3: return Vector3.ZERO
 func add_chunk_skirts(st: SurfaceTool, start_x: int, start_z: int, bottom_y: float) -> void: pass
 func add_skirt_quad( st: SurfaceTool, ax: int, az: int, bx: int, bz: int, origin_x: int, origin_z: int, bottom_y: float ) -> void: pass
+func add_skirt_vertex(st: SurfaceTool, point: Vector3, cell_x: int, cell_z: int, normal: Vector3) -> void: pass
+func skirt_outward_normal(ax: int, az: int, bx: int, bz: int, origin_x: int, origin_z: int) -> Vector3: return Vector3.UP
 func spawn_chunk_props(chunk: Node3D, cx: int, cz: int) -> void: pass
 func spawn_chunk_detail_batches(chunk: Node3D, cx: int, cz: int) -> void: pass
 func add_detail_for_biome(batches: Dictionary, local_position: Vector3, biome: String, height: float, rng: RandomNumberGenerator) -> void: pass

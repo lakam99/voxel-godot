@@ -9,15 +9,23 @@ func build_chunk_mesh(cx: int, cz: int) -> Mesh:
     var skirt_bottom: float = min(MIN_HEIGHT - CELL * 2.0, WATER_LEVEL - CELL * 7.0)
     var height_cache := {}
     var color_cache := {}
-    for vz in range(CHUNK_SIZE + 1):
-        for vx in range(CHUNK_SIZE + 1):
+    var normal_cache := {}
+    for vz in range(-1, CHUNK_SIZE + 2):
+        for vx in range(-1, CHUNK_SIZE + 2):
             var cell_x: int = start_x + vx
             var cell_z: int = start_z + vz
             var key := Vector2i(cell_x, cell_z)
             height_cache[key] = terrain_height_cell(cell_x, cell_z)
+            if vx < 0 or vx > CHUNK_SIZE or vz < 0 or vz > CHUNK_SIZE:
+                continue
             var color: Color = BIOME_COLORS.get(biome_at_cell(cell_x, cell_z), BIOME_COLORS["plains"])
             var shade := 0.88 + noise01(ridge_noise, cell_x + 400, cell_z - 200) * 0.18
             color_cache[key] = color * shade
+    for vz in range(CHUNK_SIZE + 1):
+        for vx in range(CHUNK_SIZE + 1):
+            var cell_x: int = start_x + vx
+            var cell_z: int = start_z + vz
+            normal_cache[Vector2i(cell_x, cell_z)] = terrain_normal_for_cell_cached(height_cache, cell_x, cell_z)
     for z in range(CHUNK_SIZE):
         for x in range(CHUNK_SIZE):
             var gx: int = start_x + x
@@ -26,14 +34,13 @@ func build_chunk_mesh(cx: int, cz: int) -> Mesh:
             var p10: Vector3 = terrain_vertex_local_cached(height_cache, gx + 1, gz, start_x, start_z)
             var p01: Vector3 = terrain_vertex_local_cached(height_cache, gx, gz + 1, start_x, start_z)
             var p11: Vector3 = terrain_vertex_local_cached(height_cache, gx + 1, gz + 1, start_x, start_z)
-            add_cached_vertex(st, p00, color_cache, gx, gz)
-            add_cached_vertex(st, p01, color_cache, gx, gz + 1)
-            add_cached_vertex(st, p10, color_cache, gx + 1, gz)
-            add_cached_vertex(st, p10, color_cache, gx + 1, gz)
-            add_cached_vertex(st, p01, color_cache, gx, gz + 1)
-            add_cached_vertex(st, p11, color_cache, gx + 1, gz + 1)
+            add_cached_vertex(st, p00, color_cache, normal_cache, gx, gz)
+            add_cached_vertex(st, p01, color_cache, normal_cache, gx, gz + 1)
+            add_cached_vertex(st, p10, color_cache, normal_cache, gx + 1, gz)
+            add_cached_vertex(st, p10, color_cache, normal_cache, gx + 1, gz)
+            add_cached_vertex(st, p01, color_cache, normal_cache, gx, gz + 1)
+            add_cached_vertex(st, p11, color_cache, normal_cache, gx + 1, gz + 1)
     add_chunk_skirts(st, start_x, start_z, skirt_bottom)
-    st.generate_normals()
     return st.commit()
 
 func terrain_vertex_local_cached(height_cache: Dictionary, cell_x: int, cell_z: int, origin_cell_x: int, origin_cell_z: int) -> Vector3:
@@ -41,16 +48,36 @@ func terrain_vertex_local_cached(height_cache: Dictionary, cell_x: int, cell_z: 
     var y: float = float(height_cache[key]) if height_cache.has(key) else terrain_height_cell(cell_x, cell_z)
     return Vector3((cell_x - origin_cell_x) * CELL, y, (cell_z - origin_cell_z) * CELL)
 
-func add_cached_vertex(st: SurfaceTool, point: Vector3, color_cache: Dictionary, cell_x: int, cell_z: int) -> void:
+func add_cached_vertex(st: SurfaceTool, point: Vector3, color_cache: Dictionary, normal_cache: Dictionary, cell_x: int, cell_z: int) -> void:
     var key := Vector2i(cell_x, cell_z)
+    st.set_normal(normal_cache.get(key, Vector3.UP))
     st.set_color(color_cache.get(key, BIOME_COLORS["plains"]))
     st.add_vertex(point)
 
 func add_vertex(st: SurfaceTool, point: Vector3, cell_x: int, cell_z: int) -> void:
     var color: Color = BIOME_COLORS.get(biome_at_cell(cell_x, cell_z), BIOME_COLORS["plains"])
     var shade := 0.88 + noise01(ridge_noise, cell_x + 400, cell_z - 200) * 0.18
+    st.set_normal(terrain_normal_for_cell(cell_x, cell_z))
     st.set_color(color * shade)
     st.add_vertex(point)
+
+func terrain_normal_for_cell_cached(height_cache: Dictionary, cell_x: int, cell_z: int) -> Vector3:
+    var left := terrain_height_from_cache(height_cache, cell_x - 1, cell_z)
+    var right := terrain_height_from_cache(height_cache, cell_x + 1, cell_z)
+    var back := terrain_height_from_cache(height_cache, cell_x, cell_z - 1)
+    var forward := terrain_height_from_cache(height_cache, cell_x, cell_z + 1)
+    return Vector3(left - right, CELL * 2.0, back - forward).normalized()
+
+func terrain_normal_for_cell(cell_x: int, cell_z: int) -> Vector3:
+    var left := terrain_height_cell(cell_x - 1, cell_z)
+    var right := terrain_height_cell(cell_x + 1, cell_z)
+    var back := terrain_height_cell(cell_x, cell_z - 1)
+    var forward := terrain_height_cell(cell_x, cell_z + 1)
+    return Vector3(left - right, CELL * 2.0, back - forward).normalized()
+
+func terrain_height_from_cache(height_cache: Dictionary, cell_x: int, cell_z: int) -> float:
+    var key := Vector2i(cell_x, cell_z)
+    return float(height_cache[key]) if height_cache.has(key) else terrain_height_cell(cell_x, cell_z)
 
 func terrain_vertex_local(cell_x: int, cell_z: int, origin_cell_x: int, origin_cell_z: int) -> Vector3:
     return Vector3((cell_x - origin_cell_x) * CELL, terrain_height_cell(cell_x, cell_z), (cell_z - origin_cell_z) * CELL)
@@ -79,12 +106,33 @@ func add_skirt_quad(
     var top_b := terrain_vertex_local(bx, bz, origin_x, origin_z)
     var bottom_a := Vector3((ax - origin_x) * CELL, bottom_y, (az - origin_z) * CELL)
     var bottom_b := Vector3((bx - origin_x) * CELL, bottom_y, (bz - origin_z) * CELL)
-    add_vertex(st, top_a, ax, az)
-    add_vertex(st, bottom_a, ax, az)
-    add_vertex(st, top_b, bx, bz)
-    add_vertex(st, top_b, bx, bz)
-    add_vertex(st, bottom_a, ax, az)
-    add_vertex(st, bottom_b, bx, bz)
+    var normal := skirt_outward_normal(ax, az, bx, bz, origin_x, origin_z)
+    add_skirt_vertex(st, top_a, ax, az, normal)
+    add_skirt_vertex(st, bottom_a, ax, az, normal)
+    add_skirt_vertex(st, top_b, bx, bz, normal)
+    add_skirt_vertex(st, top_b, bx, bz, normal)
+    add_skirt_vertex(st, bottom_a, ax, az, normal)
+    add_skirt_vertex(st, bottom_b, bx, bz, normal)
+
+func add_skirt_vertex(st: SurfaceTool, point: Vector3, cell_x: int, cell_z: int, normal: Vector3) -> void:
+    var color: Color = BIOME_COLORS.get(biome_at_cell(cell_x, cell_z), BIOME_COLORS["plains"])
+    var shade := 0.88 + noise01(ridge_noise, cell_x + 400, cell_z - 200) * 0.18
+    st.set_normal(normal)
+    st.set_color(color * shade)
+    st.add_vertex(point)
+
+func skirt_outward_normal(ax: int, az: int, bx: int, bz: int, origin_x: int, origin_z: int) -> Vector3:
+    var end_x := origin_x + CHUNK_SIZE
+    var end_z := origin_z + CHUNK_SIZE
+    if ax == origin_x and bx == origin_x:
+        return Vector3.LEFT
+    if ax == end_x and bx == end_x:
+        return Vector3.RIGHT
+    if az == origin_z and bz == origin_z:
+        return Vector3.BACK
+    if az == end_z and bz == end_z:
+        return Vector3.FORWARD
+    return Vector3.UP
 
 func spawn_chunk_props(chunk: Node3D, cx: int, cz: int) -> void:
     var rng := RandomNumberGenerator.new()
