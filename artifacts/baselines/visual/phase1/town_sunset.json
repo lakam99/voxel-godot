@@ -1,0 +1,47 @@
+{
+  "camera": {
+    "position": {
+      "x": 369.0,
+      "y": 21.98,
+      "z": 14.25
+    },
+    "rotationDegrees": {
+      "x": -8.0,
+      "y": -50.194,
+      "z": 0.0
+    }
+  },
+  "case": "town_sunset",
+  "clockHour": 18.7,
+  "clockText": "18:42",
+  "hudVisible": false,
+  "performance": {
+    "blocks": 1219,
+    "chunks": 49,
+    "drawEstimate": 6504,
+    "hostiles": 0,
+    "physicsBodies": 2188,
+    "props": 897
+  },
+  "playtestDestination": "town",
+  "png": "town_sunset.png",
+  "renderer": "Forward Plus",
+  "resolution": {
+    "height": 720,
+    "width": 1280
+  },
+  "seed": "atlas-1492",
+  "timeOfDay": 0.529,
+  "weather": {
+    "cloudCover": 0.26,
+    "clouds": 18,
+    "intensity": 0.0,
+    "kind": "clear",
+    "particleQuality": 1.0,
+    "rainVisible": false,
+    "snowVisible": false,
+    "stars": 160,
+    "starsVisible": false,
+    "waterInfluence": 0.0
+  }
+}

@@ -5,3 +5,5 @@ export_presets.cfg
 *.translation
 playtest-report.json
 playtest-progress.txt
+artifacts/visual/
+artifacts/world-signature/

@@ -1,0 +1,47 @@
+{
+  "camera": {
+    "position": {
+      "x": 189.55,
+      "y": 52.963,
+      "z": 102.5
+    },
+    "rotationDegrees": {
+      "x": -11.0,
+      "y": 51.34,
+      "z": 0.0
+    }
+  },
+  "case": "mountain_day",
+  "clockHour": 9.0,
+  "clockText": "09:00",
+  "hudVisible": false,
+  "performance": {
+    "blocks": 1216,
+    "chunks": 49,
+    "drawEstimate": 7276,
+    "hostiles": 0,
+    "physicsBodies": 2294,
+    "props": 1006
+  },
+  "playtestDestination": "mountain",
+  "png": "mountain_day.png",
+  "renderer": "Forward Plus",
+  "resolution": {
+    "height": 720,
+    "width": 1280
+  },
+  "seed": "atlas-1492",
+  "timeOfDay": 0.125,
+  "weather": {
+    "cloudCover": 0.3,
+    "clouds": 18,
+    "intensity": 0.0,
+    "kind": "clear",
+    "particleQuality": 1.0,
+    "rainVisible": false,
+    "snowVisible": false,
+    "stars": 160,
+    "starsVisible": false,
+    "waterInfluence": 0.0
+  }
+}

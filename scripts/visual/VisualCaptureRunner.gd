@@ -1,0 +1,205 @@
+extends Node
+
+const MAIN_SCENE: PackedScene = preload("res://scenes/Main.tscn")
+const SEED := "atlas-1492"
+const CASES := [
+    { "name": "town_noon", "playtest": "town", "clock": 12.0, "weather": "clear", "intensity": 0.0, "clouds": 0.22, "hud": false, "offset": Vector3(8.5, 0.0, 8.5), "pitch": -10.0 },
+    { "name": "town_sunset", "playtest": "town", "clock": 18.7, "weather": "clear", "intensity": 0.0, "clouds": 0.26, "hud": false, "offset": Vector3(-9.0, 0.0, 7.5), "pitch": -8.0 },
+    { "name": "forest_midnight", "playtest": "forest", "clock": 0.0, "weather": "clear", "intensity": 0.0, "clouds": 0.18, "hud": false, "offset": Vector3(7.0, 0.0, 9.0), "pitch": -6.0 },
+    { "name": "forest_rain", "playtest": "forest", "clock": 16.5, "weather": "rain", "intensity": 0.68, "clouds": 0.88, "hud": false, "offset": Vector3(8.0, 0.0, 7.0), "pitch": -9.0 },
+    { "name": "mountain_day", "playtest": "mountain", "clock": 9.0, "weather": "clear", "intensity": 0.0, "clouds": 0.30, "hud": false, "offset": Vector3(10.0, 0.0, 8.0), "pitch": -11.0 },
+    { "name": "water_overcast", "playtest": "water", "clock": 14.5, "weather": "rain", "intensity": 0.18, "clouds": 0.72, "hud": false, "offset": Vector3(8.0, 0.0, 8.0), "pitch": -7.0 },
+    { "name": "hud_gameplay", "playtest": "town", "clock": 12.0, "weather": "clear", "intensity": 0.0, "clouds": 0.22, "hud": true, "offset": Vector3(8.5, 0.0, 8.5), "pitch": -10.0 }
+]
+
+var main
+var player: CharacterBody3D
+var camera: Camera3D
+var output_dir := ""
+var metadata: Array[Dictionary] = []
+var failed := false
+
+func _ready() -> void:
+    call_deferred("run")
+
+func run() -> void:
+    output_dir = OS.get_environment("VOXEL_VISUAL_CAPTURE_DIR")
+    if output_dir == "":
+        output_dir = ProjectSettings.globalize_path("res://artifacts/visual/latest")
+    ensure_dir(output_dir)
+    main = MAIN_SCENE.instantiate()
+    add_child(main)
+    await wait_frames(90)
+    configure_static_scene()
+    for case_spec in CASES:
+        await capture_case(case_spec)
+    write_metadata()
+    get_tree().quit(1 if failed else 0)
+
+func configure_static_scene() -> void:
+    disable_tutorial_capture_overrides()
+    player = main.get("player") as CharacterBody3D
+    if player:
+        player.set("automated_input", true)
+        player.set("automated_move", Vector3.ZERO)
+        player.set("automated_sprint", false)
+        player.set("automated_jump", false)
+        player.set_physics_process(false)
+        camera = player.get("camera") as Camera3D
+    if main.has_method("apply_runtime_setting"):
+        main.apply_runtime_setting("headBob", false, false)
+        main.apply_runtime_setting("handSway", false, false)
+    var held_item = main.get("held_item")
+    if held_item and held_item is Node:
+        (held_item as Node).set_process(false)
+        if held_item.has_method("set_sway_enabled"):
+            held_item.set_sway_enabled(false)
+    main.set_process(false)
+
+func disable_tutorial_capture_overrides() -> void:
+    var tutorial = main.get("tutorial_system")
+    if tutorial == null:
+        return
+    tutorial.set("intro_bed_used", true)
+    tutorial.set("intro_repair_active", false)
+    tutorial.set("intro_repair_complete", true)
+    tutorial.set("final_night_active", false)
+    tutorial.set("final_night_complete", false)
+
+func capture_case(capture_case: Dictionary) -> void:
+    main.set_process(true)
+    var ok := bool(main.run_playtest_case(String(capture_case["playtest"])))
+    await wait_frames(8)
+    main.set_process(false)
+    if not ok:
+        push_error("Could not load visual capture case: %s" % capture_case["name"])
+        return
+    configure_static_scene()
+    position_camera(capture_case)
+    apply_capture_time_and_weather(capture_case)
+    set_hud_visible(bool(capture_case.get("hud", false)))
+    await wait_frames(3)
+    var case_name := String(capture_case["name"])
+    var png_path := path_join(output_dir, "%s.png" % case_name)
+    var image: Image = get_viewport().get_texture().get_image()
+    if image == null:
+        failed = true
+        push_error("Could not read viewport image for visual capture %s" % case_name)
+        return
+    var err := image.save_png(png_path)
+    if err != OK:
+        failed = true
+        push_error("Could not save visual capture %s: %s" % [case_name, str(err)])
+        return
+    var case_metadata := make_case_metadata(capture_case, "%s.png" % case_name)
+    metadata.append(case_metadata)
+    write_json(path_join(output_dir, "%s.json" % case_name), case_metadata)
+
+func position_camera(capture_case: Dictionary) -> void:
+    if player == null or camera == null:
+        return
+    var target_cell := current_playtest_cell(String(capture_case["playtest"]))
+    var target := Vector3(float(target_cell.x) * main.CELL, 0.0, float(target_cell.y) * main.CELL)
+    target.y = main.height_at_world(target.x, target.z)
+    var offset: Vector3 = capture_case.get("offset", Vector3(8.0, 0.0, 8.0))
+    var position := target + offset
+    position.y = main.height_at_world(position.x, position.z) + 0.08
+    player.global_position = position
+    player.velocity = Vector3.ZERO
+    player.look_at(Vector3(target.x, position.y, target.z), Vector3.UP)
+    var base_camera_position: Vector3 = player.get("base_camera_position")
+    camera.position = base_camera_position
+    camera.rotation.x = deg_to_rad(float(capture_case.get("pitch", -8.0)))
+
+func current_playtest_cell(case_id: String) -> Vector2i:
+    var target: Dictionary = main.playtest_case_target(case_id)
+    return target.get("cell", Vector2i.ZERO)
+
+func apply_capture_time_and_weather(capture_case: Dictionary) -> void:
+    var clock_hour := float(capture_case["clock"])
+    main.time_of_day = fposmod(clock_hour / 24.0 - main.CLOCK_DISPLAY_OFFSET, 1.0)
+    var observer := player.global_position if player else Vector3.ZERO
+    var weather = main.get("weather_system")
+    if weather and weather.has_method("force_weather"):
+        weather.force_weather(
+            String(capture_case["weather"]),
+            float(capture_case["intensity"]),
+            float(capture_case["clouds"]),
+            observer
+        )
+    main.update_sky(0.0)
+
+func set_hud_visible(visible: bool) -> void:
+    var hud = main.get("hud")
+    if hud and hud is CanvasLayer:
+        (hud as CanvasLayer).visible = visible
+        if visible:
+            main.update_hud("Visual capture baseline")
+
+func make_case_metadata(capture_case: Dictionary, png_path: String) -> Dictionary:
+    var weather = main.get("weather_system")
+    var viewport_size := get_viewport().get_visible_rect().size
+    return {
+        "seed": SEED,
+        "case": String(capture_case["name"]),
+        "playtestDestination": String(capture_case["playtest"]),
+        "clockHour": float(capture_case["clock"]),
+        "clockText": main.clock_time_text(),
+        "timeOfDay": snapped_float(main.time_of_day),
+        "weather": weather.snapshot() if weather and weather.has_method("snapshot") else {},
+        "hudVisible": bool(capture_case.get("hud", false)),
+        "png": png_path,
+        "resolution": { "width": int(viewport_size.x), "height": int(viewport_size.y) },
+        "renderer": "Forward Plus",
+        "camera": {
+            "position": vec3(camera.global_position if camera else Vector3.ZERO),
+            "rotationDegrees": vec3_degrees(camera.global_rotation if camera else Vector3.ZERO)
+        },
+        "performance": stable_performance_values()
+    }
+
+func stable_performance_values() -> Dictionary:
+    var perf: Dictionary = main.debug_performance_state() if main and main.has_method("debug_performance_state") else {}
+    return {
+        "chunks": int(perf.get("chunks", 0)),
+        "props": int(perf.get("props", 0)),
+        "blocks": int(perf.get("blocks", 0)),
+        "hostiles": int(perf.get("hostiles", 0)),
+        "physicsBodies": int(perf.get("physicsBodies", 0)),
+        "drawEstimate": int(perf.get("drawEstimate", 0))
+    }
+
+func write_metadata() -> void:
+    write_json(path_join(output_dir, "visual-captures.json"), {
+        "seed": SEED,
+        "cases": metadata
+    })
+
+func wait_frames(count: int) -> void:
+    for i in range(count):
+        await get_tree().process_frame
+
+func ensure_dir(path: String) -> void:
+    var err := DirAccess.make_dir_recursive_absolute(path)
+    if err != OK and err != ERR_ALREADY_EXISTS:
+        push_error("Could not create directory %s: %s" % [path, str(err)])
+
+func write_json(path: String, value) -> void:
+    var file := FileAccess.open(path, FileAccess.WRITE)
+    if file == null:
+        push_error("Could not write JSON: %s" % path)
+        return
+    file.store_string(JSON.stringify(value, "  "))
+    file.close()
+
+func path_join(base: String, file_name: String) -> String:
+    return base.path_join(file_name)
+
+func vec3(value: Vector3) -> Dictionary:
+    return { "x": snapped_float(value.x), "y": snapped_float(value.y), "z": snapped_float(value.z) }
+
+func vec3_degrees(value: Vector3) -> Dictionary:
+    return { "x": snapped_float(rad_to_deg(value.x)), "y": snapped_float(rad_to_deg(value.y)), "z": snapped_float(rad_to_deg(value.z)) }
+
+func snapped_float(value: float) -> float:
+    return snappedf(value, 0.001)

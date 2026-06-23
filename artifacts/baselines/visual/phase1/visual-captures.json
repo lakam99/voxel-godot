@@ -1,0 +1,334 @@
+{
+  "cases": [
+    {
+      "camera": {
+        "position": {
+          "x": 386.5,
+          "y": 21.98,
+          "z": 15.25
+        },
+        "rotationDegrees": {
+          "x": -10.0,
+          "y": 45.0,
+          "z": 0.0
+        }
+      },
+      "case": "town_noon",
+      "clockHour": 12.0,
+      "clockText": "12:00",
+      "hudVisible": false,
+      "performance": {
+        "blocks": 1219,
+        "chunks": 49,
+        "drawEstimate": 6504,
+        "hostiles": 0,
+        "physicsBodies": 2188,
+        "props": 897
+      },
+      "playtestDestination": "town",
+      "png": "town_noon.png",
+      "renderer": "Forward Plus",
+      "resolution": {
+        "height": 720,
+        "width": 1280
+      },
+      "seed": "atlas-1492",
+      "timeOfDay": 0.25,
+      "weather": {
+        "cloudCover": 0.22,
+        "clouds": 18,
+        "intensity": 0.0,
+        "kind": "clear",
+        "particleQuality": 1.0,
+        "rainVisible": false,
+        "snowVisible": false,
+        "stars": 160,
+        "starsVisible": false,
+        "waterInfluence": 0.0
+      }
+    },
+    {
+      "camera": {
+        "position": {
+          "x": 369.0,
+          "y": 21.98,
+          "z": 14.25
+        },
+        "rotationDegrees": {
+          "x": -8.0,
+          "y": -50.194,
+          "z": 0.0
+        }
+      },
+      "case": "town_sunset",
+      "clockHour": 18.7,
+      "clockText": "18:42",
+      "hudVisible": false,
+      "performance": {
+        "blocks": 1219,
+        "chunks": 49,
+        "drawEstimate": 6504,
+        "hostiles": 0,
+        "physicsBodies": 2188,
+        "props": 897
+      },
+      "playtestDestination": "town",
+      "png": "town_sunset.png",
+      "renderer": "Forward Plus",
+      "resolution": {
+        "height": 720,
+        "width": 1280
+      },
+      "seed": "atlas-1492",
+      "timeOfDay": 0.529,
+      "weather": {
+        "cloudCover": 0.26,
+        "clouds": 18,
+        "intensity": 0.0,
+        "kind": "clear",
+        "particleQuality": 1.0,
+        "rainVisible": false,
+        "snowVisible": false,
+        "stars": 160,
+        "starsVisible": false,
+        "waterInfluence": 0.0
+      }
+    },
+    {
+      "camera": {
+        "position": {
+          "x": 7.0,
+          "y": 24.68,
+          "z": 9.0
+        },
+        "rotationDegrees": {
+          "x": -6.0,
+          "y": 37.875,
+          "z": 0.0
+        }
+      },
+      "case": "forest_midnight",
+      "clockHour": 0.0,
+      "clockText": "00:00",
+      "hudVisible": false,
+      "performance": {
+        "blocks": 1216,
+        "chunks": 49,
+        "drawEstimate": 6697,
+        "hostiles": 0,
+        "physicsBodies": 2242,
+        "props": 954
+      },
+      "playtestDestination": "forest",
+      "png": "forest_midnight.png",
+      "renderer": "Forward Plus",
+      "resolution": {
+        "height": 720,
+        "width": 1280
+      },
+      "seed": "atlas-1492",
+      "timeOfDay": 0.75,
+      "weather": {
+        "cloudCover": 0.18,
+        "clouds": 18,
+        "intensity": 0.0,
+        "kind": "clear",
+        "particleQuality": 1.0,
+        "rainVisible": false,
+        "snowVisible": false,
+        "stars": 160,
+        "starsVisible": true,
+        "waterInfluence": 0.0
+      }
+    },
+    {
+      "camera": {
+        "position": {
+          "x": 8.0,
+          "y": 24.68,
+          "z": 7.0
+        },
+        "rotationDegrees": {
+          "x": -9.0,
+          "y": 48.814,
+          "z": 0.0
+        }
+      },
+      "case": "forest_rain",
+      "clockHour": 16.5,
+      "clockText": "16:30",
+      "hudVisible": false,
+      "performance": {
+        "blocks": 1216,
+        "chunks": 49,
+        "drawEstimate": 6538,
+        "hostiles": 0,
+        "physicsBodies": 2242,
+        "props": 954
+      },
+      "playtestDestination": "forest",
+      "png": "forest_rain.png",
+      "renderer": "Forward Plus",
+      "resolution": {
+        "height": 720,
+        "width": 1280
+      },
+      "seed": "atlas-1492",
+      "timeOfDay": 0.438,
+      "weather": {
+        "cloudCover": 0.88,
+        "clouds": 18,
+        "intensity": 0.68,
+        "kind": "rain",
+        "particleQuality": 1.0,
+        "rainVisible": true,
+        "snowVisible": false,
+        "stars": 160,
+        "starsVisible": false,
+        "waterInfluence": 0.0
+      }
+    },
+    {
+      "camera": {
+        "position": {
+          "x": 189.55,
+          "y": 52.963,
+          "z": 102.5
+        },
+        "rotationDegrees": {
+          "x": -11.0,
+          "y": 51.34,
+          "z": 0.0
+        }
+      },
+      "case": "mountain_day",
+      "clockHour": 9.0,
+      "clockText": "09:00",
+      "hudVisible": false,
+      "performance": {
+        "blocks": 1216,
+        "chunks": 49,
+        "drawEstimate": 7276,
+        "hostiles": 0,
+        "physicsBodies": 2294,
+        "props": 1006
+      },
+      "playtestDestination": "mountain",
+      "png": "mountain_day.png",
+      "renderer": "Forward Plus",
+      "resolution": {
+        "height": 720,
+        "width": 1280
+      },
+      "seed": "atlas-1492",
+      "timeOfDay": 0.125,
+      "weather": {
+        "cloudCover": 0.3,
+        "clouds": 18,
+        "intensity": 0.0,
+        "kind": "clear",
+        "particleQuality": 1.0,
+        "rainVisible": false,
+        "snowVisible": false,
+        "stars": 160,
+        "starsVisible": false,
+        "waterInfluence": 0.0
+      }
+    },
+    {
+      "camera": {
+        "position": {
+          "x": 26.9,
+          "y": 15.041,
+          "z": -86.5
+        },
+        "rotationDegrees": {
+          "x": -7.0,
+          "y": 45.0,
+          "z": 0.0
+        }
+      },
+      "case": "water_overcast",
+      "clockHour": 14.5,
+      "clockText": "14:30",
+      "hudVisible": false,
+      "performance": {
+        "blocks": 1222,
+        "chunks": 49,
+        "drawEstimate": 6738,
+        "hostiles": 0,
+        "physicsBodies": 2250,
+        "props": 956
+      },
+      "playtestDestination": "water",
+      "png": "water_overcast.png",
+      "renderer": "Forward Plus",
+      "resolution": {
+        "height": 720,
+        "width": 1280
+      },
+      "seed": "atlas-1492",
+      "timeOfDay": 0.354,
+      "weather": {
+        "cloudCover": 0.72,
+        "clouds": 18,
+        "intensity": 0.18,
+        "kind": "rain",
+        "particleQuality": 1.0,
+        "rainVisible": true,
+        "snowVisible": false,
+        "stars": 160,
+        "starsVisible": false,
+        "waterInfluence": 0.0
+      }
+    },
+    {
+      "camera": {
+        "position": {
+          "x": 386.5,
+          "y": 21.98,
+          "z": 15.25
+        },
+        "rotationDegrees": {
+          "x": -10.0,
+          "y": 45.0,
+          "z": 0.0
+        }
+      },
+      "case": "hud_gameplay",
+      "clockHour": 12.0,
+      "clockText": "12:00",
+      "hudVisible": true,
+      "performance": {
+        "blocks": 1219,
+        "chunks": 49,
+        "drawEstimate": 6504,
+        "hostiles": 0,
+        "physicsBodies": 2188,
+        "props": 897
+      },
+      "playtestDestination": "town",
+      "png": "hud_gameplay.png",
+      "renderer": "Forward Plus",
+      "resolution": {
+        "height": 720,
+        "width": 1280
+      },
+      "seed": "atlas-1492",
+      "timeOfDay": 0.25,
+      "weather": {
+        "cloudCover": 0.22,
+        "clouds": 18,
+        "intensity": 0.0,
+        "kind": "clear",
+        "particleQuality": 1.0,
+        "rainVisible": false,
+        "snowVisible": false,
+        "stars": 160,
+        "starsVisible": false,
+        "waterInfluence": 0.0
+      }
+    }
+  ],
+  "seed": "atlas-1492"
+}

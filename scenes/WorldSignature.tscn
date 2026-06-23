@@ -1,0 +1,6 @@
+[gd_scene load_steps=2 format=3 uid="uid://worldsignature"]
+
+[ext_resource type="Script" path="res://scripts/visual/WorldSignatureRunner.gd" id="1_signature"]
+
+[node name="WorldSignatureRunner" type="Node"]
+script = ExtResource("1_signature")
