@@ -2,6 +2,7 @@ extends Node
 class_name StoryDirector
 
 const WorldmarkDefinitionScript := preload("res://scripts/story/data/WorldmarkDefinition.gd")
+const FrontierCampaignSpineScript := preload("res://scripts/story/campaign/FrontierCampaignSpine.gd")
 
 const MAX_DEDUPE_KEYS := 512
 const MAX_DEBUG_EVENTS := 24
@@ -11,6 +12,7 @@ var main
 var event_bus
 var region_generator
 var quest_system
+var campaign_spine
 var campaign := {}
 var region_records := {}
 var settlements := {}
@@ -26,6 +28,11 @@ func setup(main_node, bus_node, generator_node, quest_node) -> void:
     event_bus = bus_node
     region_generator = generator_node
     quest_system = quest_node
+    if campaign_spine == null:
+        campaign_spine = FrontierCampaignSpineScript.new()
+        campaign_spine.name = "FrontierCampaignSpine"
+        add_child(campaign_spine)
+    campaign_spine.setup(main, self, region_generator)
     if quest_system != null and quest_system.has_method("set_story_director"):
         quest_system.set_story_director(self)
     if event_bus != null:
@@ -45,6 +52,8 @@ func reset() -> void:
     current_story_region_id = ""
     if quest_system != null and quest_system.has_method("reset"):
         quest_system.reset()
+    if campaign_spine != null and campaign_spine.has_method("reset"):
+        campaign_spine.reset()
 
 func region_id_for_cell(cell: Vector2i) -> String:
     if region_generator == null:
@@ -122,12 +131,15 @@ func ingest_event(event_value) -> bool:
     remember_debug_event(event)
     if quest_system != null and quest_system.has_method("handle_event"):
         quest_system.handle_event(event)
+    if campaign_spine != null and campaign_spine.has_method("handle_event"):
+        campaign_spine.handle_event(event)
     return true
 
 func snapshot() -> Dictionary:
     return {
         "schemaVersion": 1,
         "campaign": campaign.duplicate(true),
+        "campaignSpine": campaign_spine.snapshot() if campaign_spine != null and campaign_spine.has_method("snapshot") else {},
         "regionRecords": region_records.duplicate(true),
         "quests": quest_system.snapshot() if quest_system != null and quest_system.has_method("snapshot") else {},
         "settlements": settlements.duplicate(true),
@@ -150,6 +162,7 @@ func debug_story_dump() -> Dictionary:
             "questSystem": quest_system != null
         },
         "campaign": campaign.duplicate(true),
+        "campaignSpine": campaign_spine.debug_state() if campaign_spine != null and campaign_spine.has_method("debug_state") else {},
         "quest": quest_debug,
         "recentEvents": debug_recent_events.duplicate(true)
     }
@@ -160,6 +173,8 @@ func restore(snapshot_value) -> void:
         return
     var state: Dictionary = snapshot_value
     campaign = dictionary_value(state.get("campaign", {}))
+    if campaign_spine != null and campaign_spine.has_method("restore"):
+        campaign_spine.restore(state.get("campaignSpine", {}))
     region_records = dictionary_value(state.get("regionRecords", {}))
     settlements = dictionary_value(state.get("settlements", {}))
     generated_text = dictionary_value(state.get("generatedText", {}))

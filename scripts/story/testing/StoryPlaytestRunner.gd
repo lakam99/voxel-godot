@@ -5,6 +5,7 @@ const RegionStoryGeneratorScript := preload("res://scripts/story/RegionStoryGene
 const StoryEventBusScript := preload("res://scripts/story/StoryEventBus.gd")
 const StoryDirectorScript := preload("res://scripts/story/StoryDirector.gd")
 const StoryQuestSystemScript := preload("res://scripts/story/StoryQuestSystem.gd")
+const FrontierCampaignSpineScript := preload("res://scripts/story/campaign/FrontierCampaignSpine.gd")
 const GloamHartArcScript := preload("res://scripts/story/arcs/GloamHartArc.gd")
 const StorySitePlacementScript := preload("res://scripts/story/data/StorySitePlacement.gd")
 const RegionStoryRecordScript := preload("res://scripts/story/data/RegionStoryRecord.gd")
@@ -45,6 +46,7 @@ const SCRIPT_PATHS := [
     "res://scripts/story/StoryEventBus.gd",
     "res://scripts/story/StoryDirector.gd",
     "res://scripts/story/StoryQuestSystem.gd",
+    "res://scripts/story/campaign/FrontierCampaignSpine.gd",
     "res://scripts/story/arcs/GloamHartArc.gd",
     "res://scripts/story/RegionStoryGenerator.gd",
     "res://scripts/story/data/StorySitePlacement.gd",
@@ -105,6 +107,7 @@ func run() -> void:
     test_gloam_hart_definition_preserves_first_arc_contract()
     test_duplicate_events_do_not_duplicate_story_effects()
     await test_main_scene_instantiates()
+    test_phase12_campaign_spine_progression_and_endless_play()
     test_phase4_source_events_and_quest_state_round_trip()
     test_first_arc_waits_for_tutorial_completion()
     test_tutorial_completion_starts_first_quest_once()
@@ -429,6 +432,118 @@ func test_main_scene_instantiates() -> void:
         "main_scene_story_test_mode_instantiates",
         story_test_mode and main != null and player != null and missing.is_empty(),
         "story mode %s, player %s, missing %s" % [str(story_test_mode), str(player != null), str(missing)]
+    )
+
+func test_phase12_campaign_spine_progression_and_endless_play() -> void:
+    if main == null or main.get("story_director") == null:
+        add_result("phase12_campaign_spine_progression_and_endless_play", false, "main story_director missing")
+        return
+    var baseline_snapshot: Dictionary = main.create_save_snapshot()
+    var director = main.get("story_director")
+    reset_story_runtime(director)
+    var quest := start_first_arc_for_test(director)
+    var spine = director.get("campaign_spine")
+    var initial_state: Dictionary = spine.snapshot() if spine != null else {}
+    var anchors: Dictionary = initial_state.get("anchors", {})
+    var anchors_json := stable_json(anchors)
+    reset_story_runtime(director)
+    start_first_arc_for_test(director)
+    var repeat_anchors_json := stable_json(spine.snapshot().get("anchors", {}))
+    reset_story_runtime(director)
+    quest = start_first_arc_for_test(director)
+    var affected := String(quest.get("affectedRegionId", ""))
+    director.ingest_event(story_event("story_worldmark_resolved", "worldmark:gloam_hart", affected, "phase12:first-worldmark", {
+        "resolution": "release",
+        "definitionId": "gloam_hart",
+        "rewardsGranted": true
+    }))
+    var act_two_state: Dictionary = spine.snapshot()
+    director.ingest_event(story_event("recurring_character_met", "character:mara_trader", starter_region_id(), "phase12:mara-met", {
+        "characterId": "mara_trader",
+        "relationshipDelta": 3,
+        "memoryFlag": "met_on_far_road"
+    }))
+    director.ingest_event(story_event("recurring_character_memory", "character:mara_trader", starter_region_id(), "phase12:mara-route", {
+        "characterId": "mara_trader",
+        "relationshipDelta": 3,
+        "memoryFlag": "shared_route_news"
+    }))
+    var anchor_ids := [
+        "far_roads_network_junction",
+        "far_roads_living_boundary",
+        "old_compact_archive",
+        "compact_failure_site"
+    ]
+    for anchor_id in anchor_ids:
+        var anchor: Dictionary = spine.snapshot().get("anchors", {}).get(anchor_id, {})
+        var region_id := String(anchor.get("regionId", starter_region_id()))
+        director.ingest_event(story_event("campaign_anchor_reached", "campaign_anchor:%s" % anchor_id, region_id, "phase12:anchor:%s" % anchor_id, {
+            "anchorId": anchor_id
+        }))
+    var before_principles_state: Dictionary = spine.snapshot()
+    director.ingest_event(story_event("campaign_principles_chosen", "campaign:frontier_principles", starter_region_id(), "phase12:principles", {
+        "principles": ["repair before expansion", "restraint around Worldmarks", "settlements answer to their regions", "chosen by prophecy"]
+    }))
+    var complete_state: Dictionary = spine.snapshot()
+    var characters: Dictionary = complete_state.get("recurringCharacters", {})
+    var mara: Dictionary = characters.get("mara_trader", {})
+    var mara_flags: Dictionary = mara.get("memoryFlags", {})
+    var save_snapshot: Dictionary = main.create_save_snapshot()
+    var before_spine_json := stable_json(save_snapshot.get("story", {}).get("campaignSpine", {}))
+    var loaded := bool(main.apply_save_snapshot(save_snapshot))
+    director = main.get("story_director")
+    spine = director.get("campaign_spine")
+    var after_spine_json := stable_json(spine.snapshot() if spine != null else {})
+    var post_campaign_record: Dictionary = director.ensure_region_record_for_id("r:44,-44", "forest")
+    var post_campaign_event_before := int(director.snapshot().get("eventCounts", {}).get("story_region_entered", 0))
+    director.ingest_event(story_event("story_region_entered", "region:r:44,-44", "r:44,-44", "phase12:post-region", {
+        "biome": "forest"
+    }))
+    var post_campaign_event_after := int(director.snapshot().get("eventCounts", {}).get("story_region_entered", 0))
+    var final_text := stable_json(spine.snapshot()).to_lower()
+    var anchor_regions := {}
+    for anchor_key in anchors.keys():
+        var anchor_record: Dictionary = anchors[anchor_key]
+        anchor_regions[String(anchor_record.get("regionId", ""))] = true
+    var baseline_loaded := bool(main.apply_save_snapshot(baseline_snapshot))
+    director = main.get("story_director")
+    reset_story_runtime(director)
+    add_result(
+        "phase12_campaign_spine_progression_and_endless_play",
+        spine != null
+            and not anchors.is_empty()
+            and anchor_regions.size() == anchors.size()
+            and anchors_json == repeat_anchors_json
+            and String(initial_state.get("act", "")) == FrontierCampaignSpineScript.ACT_I
+            and String(act_two_state.get("act", "")) == FrontierCampaignSpineScript.ACT_II
+            and String(before_principles_state.get("act", "")) == FrontierCampaignSpineScript.ACT_III
+            and bool(complete_state.get("completed", false))
+            and String(complete_state.get("act", "")) == FrontierCampaignSpineScript.POST_CAMPAIGN
+            and bool(complete_state.get("endlessWorldContinues", false))
+            and bool(complete_state.get("regionalStoriesEnabled", false))
+            and bool(mara_flags.get("met_on_far_road", false))
+            and bool(mara_flags.get("shared_route_news", false))
+            and String(mara.get("relationship", "")) == "trusted"
+            and loaded
+            and before_spine_json == after_spine_json
+            and not post_campaign_record.is_empty()
+            and post_campaign_event_after == post_campaign_event_before + 1
+            and final_text.find("prophecy") < 0
+            and final_text.find("bloodline") < 0
+            and baseline_loaded,
+        "anchors %d stable %s, acts %s/%s/%s/%s, complete %s, mara %s, save %s, postEvent %d->%d" % [
+            anchors.size(),
+            str(anchors_json == repeat_anchors_json),
+            initial_state.get("act", ""),
+            act_two_state.get("act", ""),
+            before_principles_state.get("act", ""),
+            complete_state.get("act", ""),
+            str(complete_state.get("completed", false)),
+            str(mara),
+            str(before_spine_json == after_spine_json),
+            post_campaign_event_before,
+            post_campaign_event_after
+        ]
     )
 
 func test_story_snapshot_save_load_preserves_records_exactly() -> void:
