@@ -6,6 +6,8 @@ const StoryEventBusScript := preload("res://scripts/story/StoryEventBus.gd")
 const StoryDirectorScript := preload("res://scripts/story/StoryDirector.gd")
 const StoryQuestSystemScript := preload("res://scripts/story/StoryQuestSystem.gd")
 const StorySitePlacementScript := preload("res://scripts/story/data/StorySitePlacement.gd")
+const RegionStoryRecordScript := preload("res://scripts/story/data/RegionStoryRecord.gd")
+const WorldmarkStateScript := preload("res://scripts/story/data/WorldmarkState.gd")
 const WorldmarkDefinitionScript := preload("res://scripts/story/data/WorldmarkDefinition.gd")
 const WorldmarkTraitCatalogScript := preload("res://scripts/story/data/WorldmarkTraitCatalog.gd")
 const WorldmarkGeneratorScript := preload("res://scripts/story/WorldmarkGenerator.gd")
@@ -43,6 +45,8 @@ const SCRIPT_PATHS := [
     "res://scripts/story/StoryQuestSystem.gd",
     "res://scripts/story/RegionStoryGenerator.gd",
     "res://scripts/story/data/StorySitePlacement.gd",
+    "res://scripts/story/data/RegionStoryRecord.gd",
+    "res://scripts/story/data/WorldmarkState.gd",
     "res://scripts/story/data/WorldmarkDefinition.gd",
     "res://scripts/story/data/WorldmarkTraitCatalog.gd",
     "res://scripts/story/WorldmarkGenerator.gd",
@@ -91,6 +95,7 @@ func run() -> void:
     test_project_scripts_load()
     test_region_id_floor_division()
     test_region_records_deterministic()
+    test_phase3_region_record_validation_and_reset_restore_suppression()
     test_worldmark_trait_catalog_and_compatibility()
     test_concept_first_worldmark_generation_prototypes()
     test_gloam_hart_definition_preserves_first_arc_contract()
@@ -186,6 +191,60 @@ func test_region_records_deterministic() -> void:
         "%s vs %s" % [same_a.get("seed", ""), different_seed.get("seed", "")]
     )
     generator.queue_free()
+
+func test_phase3_region_record_validation_and_reset_restore_suppression() -> void:
+    var bus := StoryEventBusScript.new()
+    var generator := RegionStoryGeneratorScript.new()
+    var quests := StoryQuestSystemScript.new()
+    var director := StoryDirectorScript.new()
+    add_child(bus)
+    add_child(generator)
+    add_child(quests)
+    add_child(director)
+    generator.setup("atlas-story-test", 101, 280)
+    bus.setup(null)
+    quests.setup(null)
+    director.setup(null, bus, generator, quests)
+    var record: Dictionary = generator.generate_region_record("atlas-story-test", 101, "r:3,-2", "taiga")
+    var record_validation: Dictionary = RegionStoryRecordScript.validate(record)
+    var worldmark_validation: Dictionary = WorldmarkStateScript.validate("r:3,-2", record.get("worldmark", {}))
+    director.ensure_region_record_for_id("r:3,-2", "taiga")
+    director.ingest_event(story_event("landmark_discovered", "mine:phase3", "r:3,-2", "discover:mine:phase3", {
+        "landmarkType": "mine"
+    }))
+    var before_snapshot: Dictionary = director.snapshot()
+    var before_json := stable_json(before_snapshot)
+    director.restore(before_snapshot)
+    var after_snapshot: Dictionary = director.snapshot()
+    var after_json := stable_json(after_snapshot)
+    var event_counts: Dictionary = after_snapshot.get("eventCounts", {})
+    var dedupe_keys: Array = after_snapshot.get("processedDedupeKeys", [])
+    director.reset()
+    var reset_snapshot: Dictionary = director.snapshot()
+    var reset_records: Dictionary = reset_snapshot.get("regionRecords", {})
+    var reset_events: Dictionary = reset_snapshot.get("eventCounts", {})
+    add_result(
+        "phase3_region_record_validation_and_reset_restore_suppression",
+        bool(record_validation.get("ok", false))
+            and bool(worldmark_validation.get("ok", false))
+            and before_json == after_json
+            and int(event_counts.get("landmark_discovered", 0)) == 1
+            and dedupe_keys.size() == 1
+            and reset_records.is_empty()
+            and reset_events.is_empty(),
+        "record %s worldmark %s restoreSame %s events %s dedupe %d resetRecords %d" % [
+            str(record_validation),
+            str(worldmark_validation),
+            str(before_json == after_json),
+            str(event_counts),
+            dedupe_keys.size(),
+            reset_records.size()
+        ]
+    )
+    director.queue_free()
+    quests.queue_free()
+    generator.queue_free()
+    bus.queue_free()
 
 func test_worldmark_trait_catalog_and_compatibility() -> void:
     var movement_ids := WorldmarkTraitCatalogScript.ids("movement")

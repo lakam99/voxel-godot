@@ -2,6 +2,7 @@ extends Node
 class_name RegionStoryGenerator
 
 const WorldmarkGeneratorScript := preload("res://scripts/story/WorldmarkGenerator.gd")
+const RegionStoryRecordScript := preload("res://scripts/story/data/RegionStoryRecord.gd")
 
 const GENERATION_VERSION := 1
 
@@ -51,7 +52,7 @@ func generate_region_record(seed_text: String, seed_hash: int, region_id: String
     var worldmark := {}
     if worldmark_generator != null and worldmark_generator.has_method("generate_worldmark_record"):
         worldmark = worldmark_generator.generate_worldmark_record(seed_text, seed_hash, region_id, biome)
-    return {
+    var record := {
         "schemaVersion": 1,
         "generationVersion": GENERATION_VERSION,
         "id": region_id,
@@ -67,6 +68,7 @@ func generate_region_record(seed_text: String, seed_hash: int, region_id: String
         },
         "generatedText": {}
     }
+    return RegionStoryRecordScript.normalize(record)
 
 func record_for_region_id(region_id: String, dominant_biome := "") -> Dictionary:
     return generate_region_record(world_seed_text, world_seed_hash, region_id, dominant_biome)
