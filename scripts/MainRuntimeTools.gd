@@ -163,7 +163,7 @@ func use_or_place() -> void:
                         refresh_intro_knock_audio()
                         show_tutorial_dialogue(tutorial_system.last_message)
                     else:
-                        update_hud("Door opened" if door_open else "Door closed")
+                        update_hud("Opened door" if door_open else "Closed door")
                     return
             if block_type == "bed":
                 if sleep_at_bed(block):

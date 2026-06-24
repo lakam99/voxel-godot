@@ -13,10 +13,19 @@ static func build_ui(hud) -> void:
     hud.add_child(root)
     hud.hud_root = root
 
+    hud.location_panel = PanelContainer.new()
+    hud.location_panel.position = Vector2(16, 14)
+    hud.location_panel.custom_minimum_size = Vector2(236, 62)
+    root.add_child(hud.location_panel)
+    var location_margin := MarginContainer.new()
+    location_margin.add_theme_constant_override("margin_left", 10)
+    location_margin.add_theme_constant_override("margin_right", 10)
+    location_margin.add_theme_constant_override("margin_top", 7)
+    location_margin.add_theme_constant_override("margin_bottom", 7)
+    hud.location_panel.add_child(location_margin)
     hud.status_label = Label.new()
-    hud.status_label.position = Vector2(18, 18)
-    hud.status_label.add_theme_font_size_override("font_size", 15)
-    root.add_child(hud.status_label)
+    hud.status_label.add_theme_font_size_override("font_size", 16)
+    location_margin.add_child(hud.status_label)
 
     hud.version_label = Label.new()
     hud.version_label.text = GAME_BUILD_LABEL
@@ -40,16 +49,8 @@ static func build_ui(hud) -> void:
     hud.performance_label.modulate = Color(0.84, 0.96, 0.86, 0.88)
     root.add_child(hud.performance_label)
 
-    var vitals := VBoxContainer.new()
-    vitals.position = Vector2(18, 218)
-    root.add_child(vitals)
-    hud.health_label = hud.make_vital_label("HP 100")
-    hud.stamina_label = hud.make_vital_label("STA 100")
-    hud.hunger_label = hud.make_vital_label("HUN 100")
-    hud.armor_label = hud.make_vital_label("ARM 0")
-    hud.danger_label = hud.make_vital_label("Safe")
-    for label in [hud.health_label, hud.stamina_label, hud.hunger_label, hud.armor_label, hud.danger_label]:
-        vitals.add_child(label)
+    build_vitals_panel(hud, root)
+    build_reticle(hud, root)
 
     hud.compass_label = Label.new()
     hud.compass_label.text = "N"
@@ -216,8 +217,99 @@ static func build_victory_panel(hud, root: Control) -> void:
     hud.victory_stats_list.add_theme_constant_override("v_separation", 5)
     victory_box.add_child(hud.victory_stats_list)
 
+static func build_vitals_panel(hud, root: Control) -> void:
+    hud.vitals_panel = PanelContainer.new()
+    hud.vitals_panel.position = Vector2(16, 92)
+    hud.vitals_panel.custom_minimum_size = Vector2(226, 142)
+    root.add_child(hud.vitals_panel)
+    var margin := MarginContainer.new()
+    margin.add_theme_constant_override("margin_left", 10)
+    margin.add_theme_constant_override("margin_right", 10)
+    margin.add_theme_constant_override("margin_top", 8)
+    margin.add_theme_constant_override("margin_bottom", 8)
+    hud.vitals_panel.add_child(margin)
+    var vitals := VBoxContainer.new()
+    vitals.add_theme_constant_override("separation", 6)
+    margin.add_child(vitals)
+
+    var health := add_vital_row(hud, vitals, "HP", Color(0.82, 0.24, 0.22), "HealthBar")
+    hud.health_label = health["label"]
+    hud.health_bar = health["bar"]
+    var stamina := add_vital_row(hud, vitals, "ST", Color(0.96, 0.76, 0.30), "StaminaBar")
+    hud.stamina_label = stamina["label"]
+    hud.stamina_bar = stamina["bar"]
+    var hunger := add_vital_row(hud, vitals, "HN", Color(0.38, 0.72, 0.44), "HungerBar")
+    hud.hunger_label = hunger["label"]
+    hud.hunger_bar = hunger["bar"]
+
+    var status_row := HBoxContainer.new()
+    status_row.add_theme_constant_override("separation", 7)
+    vitals.add_child(status_row)
+    var shield := Label.new()
+    shield.text = "SHD"
+    shield.custom_minimum_size = Vector2(34, 20)
+    shield.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+    shield.add_theme_font_size_override("font_size", 14)
+    status_row.add_child(shield)
+    hud.armor_label = hud.make_vital_label("0")
+    hud.armor_label.custom_minimum_size = Vector2(46, 20)
+    status_row.add_child(hud.armor_label)
+    hud.danger_label = hud.make_vital_label("SAFE")
+    hud.danger_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+    hud.danger_label.custom_minimum_size = Vector2(78, 22)
+    status_row.add_child(hud.danger_label)
+
+static func add_vital_row(hud, parent: VBoxContainer, icon_text: String, color: Color, bar_variation: String) -> Dictionary:
+    var row := HBoxContainer.new()
+    row.add_theme_constant_override("separation", 7)
+    parent.add_child(row)
+    var icon := Label.new()
+    icon.text = icon_text
+    icon.custom_minimum_size = Vector2(34, 22)
+    icon.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+    icon.add_theme_font_size_override("font_size", 14)
+    icon.modulate = color.lightened(0.12)
+    row.add_child(icon)
+    var bar := ProgressBar.new()
+    bar.min_value = 0.0
+    bar.max_value = 100.0
+    bar.value = 100.0
+    bar.show_percentage = false
+    bar.custom_minimum_size = Vector2(104, 12)
+    bar.theme_type_variation = StringName(bar_variation)
+    row.add_child(bar)
+    var label: Label = hud.make_vital_label("100")
+    label.custom_minimum_size = Vector2(42, 22)
+    label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+    row.add_child(label)
+    return { "label": label, "bar": bar }
+
+static func build_reticle(hud, root: Control) -> void:
+    hud.reticle_root = Control.new()
+    hud.reticle_root.mouse_filter = Control.MOUSE_FILTER_IGNORE
+    hud.reticle_root.anchor_left = 0.5
+    hud.reticle_root.anchor_right = 0.5
+    hud.reticle_root.anchor_top = 0.5
+    hud.reticle_root.anchor_bottom = 0.5
+    hud.reticle_root.offset_left = -12
+    hud.reticle_root.offset_right = 12
+    hud.reticle_root.offset_top = -12
+    hud.reticle_root.offset_bottom = 12
+    root.add_child(hud.reticle_root)
+    var horizontal := ColorRect.new()
+    horizontal.color = Color(0.96, 0.92, 0.74, 0.42)
+    horizontal.position = Vector2(5, 11)
+    horizontal.size = Vector2(14, 2)
+    hud.reticle_root.add_child(horizontal)
+    var vertical := ColorRect.new()
+    vertical.color = Color(0.96, 0.92, 0.74, 0.42)
+    vertical.position = Vector2(11, 5)
+    vertical.size = Vector2(2, 14)
+    hud.reticle_root.add_child(vertical)
+
 static func build_dialogue_panel(hud, root: Control) -> void:
     hud.target_label = Label.new()
+    hud.target_label.visible = false
     hud.target_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
     hud.target_label.anchor_left = 0.5
     hud.target_label.anchor_right = 0.5
@@ -227,7 +319,7 @@ static func build_dialogue_panel(hud, root: Control) -> void:
     hud.target_label.offset_right = 260
     hud.target_label.offset_top = 72
     hud.target_label.offset_bottom = 104
-    hud.target_label.add_theme_font_size_override("font_size", 16)
+    hud.target_label.add_theme_font_size_override("font_size", 18)
     root.add_child(hud.target_label)
 
     hud.objective_toast = Label.new()
@@ -244,6 +336,21 @@ static func build_dialogue_panel(hud, root: Control) -> void:
     hud.objective_toast.offset_bottom = 28
     hud.objective_toast.add_theme_font_size_override("font_size", 24)
     root.add_child(hud.objective_toast)
+
+    hud.notification_label = Label.new()
+    hud.notification_label.visible = false
+    hud.notification_label.modulate.a = 0.0
+    hud.notification_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+    hud.notification_label.anchor_left = 0.5
+    hud.notification_label.anchor_right = 0.5
+    hud.notification_label.anchor_top = 1.0
+    hud.notification_label.anchor_bottom = 1.0
+    hud.notification_label.offset_left = -300
+    hud.notification_label.offset_right = 300
+    hud.notification_label.offset_top = -164
+    hud.notification_label.offset_bottom = -136
+    hud.notification_label.add_theme_font_size_override("font_size", 18)
+    root.add_child(hud.notification_label)
 
     hud.dialogue_panel = PanelContainer.new()
     hud.dialogue_panel.visible = false
@@ -304,15 +411,16 @@ static func build_dialogue_panel(hud, root: Control) -> void:
 static func build_progress_and_inventory(hud, root: Control) -> void:
     hud.level_label = Label.new()
     hud.level_label.text = "Lvl 1 | XP 0/80"
-    hud.level_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-    hud.level_label.anchor_left = 0.5
-    hud.level_label.anchor_right = 0.5
+    hud.level_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+    hud.level_label.anchor_left = 0.0
+    hud.level_label.anchor_right = 0.0
     hud.level_label.anchor_top = 1.0
     hud.level_label.anchor_bottom = 1.0
-    hud.level_label.offset_left = -180
-    hud.level_label.offset_right = 180
-    hud.level_label.offset_top = -150
-    hud.level_label.offset_bottom = -128
+    hud.level_label.offset_left = 18
+    hud.level_label.offset_right = 210
+    hud.level_label.offset_top = -98
+    hud.level_label.offset_bottom = -76
+    hud.level_label.add_theme_font_size_override("font_size", 15)
     root.add_child(hud.level_label)
 
     hud.xp_bar = ProgressBar.new()
@@ -320,18 +428,19 @@ static func build_progress_and_inventory(hud, root: Control) -> void:
     hud.xp_bar.max_value = 80.0
     hud.xp_bar.value = 0.0
     hud.xp_bar.show_percentage = false
-    hud.xp_bar.anchor_left = 0.5
-    hud.xp_bar.anchor_right = 0.5
+    hud.xp_bar.anchor_left = 0.0
+    hud.xp_bar.anchor_right = 0.0
     hud.xp_bar.anchor_top = 1.0
     hud.xp_bar.anchor_bottom = 1.0
-    hud.xp_bar.offset_left = -170
-    hud.xp_bar.offset_right = 170
-    hud.xp_bar.offset_top = -128
-    hud.xp_bar.offset_bottom = -116
+    hud.xp_bar.offset_left = 18
+    hud.xp_bar.offset_right = 210
+    hud.xp_bar.offset_top = -74
+    hud.xp_bar.offset_bottom = -62
     root.add_child(hud.xp_bar)
 
     hud.xp_recent_label = Label.new()
     hud.xp_recent_label.text = "No XP earned yet"
+    hud.xp_recent_label.visible = false
     hud.xp_recent_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
     hud.xp_recent_label.anchor_left = 0.5
     hud.xp_recent_label.anchor_right = 0.5
@@ -344,16 +453,23 @@ static func build_progress_and_inventory(hud, root: Control) -> void:
     root.add_child(hud.xp_recent_label)
 
     hud.active_label = Label.new()
-    hud.active_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-    hud.active_label.anchor_left = 0.5
-    hud.active_label.anchor_right = 0.5
-    hud.active_label.anchor_top = 1.0
-    hud.active_label.anchor_bottom = 1.0
-    hud.active_label.offset_left = -260
-    hud.active_label.offset_right = 260
-    hud.active_label.offset_top = -96
-    hud.active_label.offset_bottom = -76
+    hud.active_label.visible = false
     root.add_child(hud.active_label)
+
+    hud.selected_item_label = Label.new()
+    hud.selected_item_label.visible = false
+    hud.selected_item_label.modulate.a = 0.0
+    hud.selected_item_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+    hud.selected_item_label.anchor_left = 0.5
+    hud.selected_item_label.anchor_right = 0.5
+    hud.selected_item_label.anchor_top = 1.0
+    hud.selected_item_label.anchor_bottom = 1.0
+    hud.selected_item_label.offset_left = -240
+    hud.selected_item_label.offset_right = 240
+    hud.selected_item_label.offset_top = -112
+    hud.selected_item_label.offset_bottom = -88
+    hud.selected_item_label.add_theme_font_size_override("font_size", 17)
+    root.add_child(hud.selected_item_label)
 
     hud.hotbar = HBoxContainer.new()
     hud.hotbar.anchor_left = 0.5

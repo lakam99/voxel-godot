@@ -79,6 +79,7 @@ static func build_settings_panel(hud, root: Control) -> void:
     add_settings_slider(hud, "fov", "FOV", 58.0, 104.0, 1.0, 72.0)
     add_settings_slider(hud, "renderDistance", "Render", 2.0, 4.0, 1.0, 3.0)
     add_settings_slider(hud, "weatherParticles", "Weather", 0.0, 1.0, 0.05, 1.0)
+    add_settings_slider(hud, "hudScale", "HUD Scale", 0.8, 1.4, 0.2, 1.0)
     add_settings_slider(hud, "lookSmoothing", "Look Smoothing", 0.0, 0.82, 0.02, 0.0)
     add_settings_checkbox(hud, "invertY", "Invert Y", false)
     add_settings_checkbox(hud, "shadows", "Shadows", true)

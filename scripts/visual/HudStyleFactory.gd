@@ -74,14 +74,26 @@ static func configure_theme(theme: Theme) -> void:
     add_button_variation(theme, "InventorySlotSelected", slot_box(true, false), slot_box(true, false), slot_box(true, true), GOLD)
     add_panel_variation(theme, "DialoguePanel", panel_box(Color(0.09, 0.11, 0.10, 0.94), GOLD, 2, 4, Vector4(14, 14, 10, 10)))
     add_panel_variation(theme, "UtilityPanel", panel_box(Color(0.10, 0.13, 0.12, 0.90), BORDER, 1, 4, Vector4(12, 12, 10, 10)))
+    add_panel_variation(theme, "HudLocationPanel", panel_box(Color(0.08, 0.105, 0.095, 0.80), Color(0.42, 0.48, 0.42, 0.74), 1, 4, Vector4(0, 0, 0, 0)))
+    add_panel_variation(theme, "HudVitalsPanel", panel_box(Color(0.08, 0.10, 0.09, 0.78), Color(0.36, 0.42, 0.37, 0.74), 1, 4, Vector4(0, 0, 0, 0)))
     add_label_variation(theme, "ToastLabel", 24, Color(1.0, 0.94, 0.70))
-    add_label_variation(theme, "VitalLabel", 14, INK)
+    add_label_variation(theme, "VitalLabel", 15, INK)
     add_label_variation(theme, "MutedLabel", 13, MUTED)
     add_label_variation(theme, "DebugLabel", 12, Color(0.77, 0.92, 0.77, 0.88))
+    add_label_variation(theme, "InteractionPromptLabel", 18, Color(1.0, 0.94, 0.70))
+    add_label_variation(theme, "NotificationLabel", 18, Color(0.94, 0.91, 0.78))
+    add_label_variation(theme, "SafetyBadge", 14, Color(0.82, 0.96, 0.76))
+    add_progress_variation(theme, "HealthBar", Color(0.64, 0.20, 0.18, 0.96), Color(0.95, 0.36, 0.28, 0.95))
+    add_progress_variation(theme, "StaminaBar", Color(0.63, 0.50, 0.18, 0.96), Color(1.0, 0.77, 0.25, 0.95))
+    add_progress_variation(theme, "HungerBar", Color(0.25, 0.48, 0.28, 0.96), Color(0.48, 0.82, 0.46, 0.95))
 
 static func apply_type_variations(hud) -> void:
     if hud.status_label:
         hud.status_label.theme_type_variation = &"MutedLabel"
+    if hud.location_panel:
+        hud.location_panel.theme_type_variation = &"HudLocationPanel"
+    if hud.vitals_panel:
+        hud.vitals_panel.theme_type_variation = &"HudVitalsPanel"
     if hud.version_label:
         hud.version_label.theme_type_variation = &"DebugLabel"
     if hud.performance_label:
@@ -89,6 +101,14 @@ static func apply_type_variations(hud) -> void:
     for label in [hud.health_label, hud.stamina_label, hud.hunger_label, hud.armor_label, hud.danger_label]:
         if label:
             label.theme_type_variation = &"VitalLabel"
+    if hud.danger_label:
+        hud.danger_label.theme_type_variation = &"SafetyBadge"
+    if hud.target_label:
+        hud.target_label.theme_type_variation = &"InteractionPromptLabel"
+    if hud.notification_label:
+        hud.notification_label.theme_type_variation = &"NotificationLabel"
+    if hud.selected_item_label:
+        hud.selected_item_label.theme_type_variation = &"NotificationLabel"
     if hud.objective_toast:
         hud.objective_toast.theme_type_variation = &"ToastLabel"
     if hud.dialogue_panel:
@@ -128,6 +148,11 @@ static func add_label_variation(theme: Theme, variation: String, size: int, colo
     theme.set_color("font_shadow_color", variation, Color(0.0, 0.0, 0.0, 0.74))
     theme.set_constant("shadow_offset_x", variation, 1)
     theme.set_constant("shadow_offset_y", variation, 1)
+
+static func add_progress_variation(theme: Theme, variation: String, bg: Color, fill: Color) -> void:
+    theme.set_type_variation(variation, "ProgressBar")
+    theme.set_stylebox("background", variation, panel_box(Color(0.055, 0.065, 0.06, 0.86), Color(0.24, 0.28, 0.25, 0.82), 1, 3, Vector4(0, 0, 0, 0)))
+    theme.set_stylebox("fill", variation, panel_box(fill, bg.lightened(0.18), 0, 3, Vector4(0, 0, 0, 0)))
 
 static func panel_box(bg: Color, border: Color, border_width: int, radius: int, margins: Vector4) -> StyleBoxFlat:
     var box := StyleBoxFlat.new()

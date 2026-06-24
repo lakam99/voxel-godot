@@ -55,9 +55,6 @@ func _unhandled_input(event: InputEvent) -> void:
             return
         if event.keycode >= KEY_1 and event.keycode <= KEY_8:
             inventory_system.select(int(event.keycode - KEY_1))
-            var active: Dictionary = inventory_system.active_stack()
-            var item_id := String(active.get("item", ""))
-            update_hud("Selected %s" % (ItemCatalogScript.label(item_id) if item_id != "" else "empty"))
             return
         if event.keycode == KEY_O:
             var objectives_open: bool = hud.toggle_objectives()
@@ -147,9 +144,6 @@ func select_hotbar_delta(delta: int) -> int:
         return -1
     var next_slot := posmod(inventory_system.selected_slot + delta, inventory_system.hotbar_size)
     inventory_system.select(next_slot)
-    var active: Dictionary = inventory_system.active_stack()
-    var item_id := String(active.get("item", ""))
-    update_hud("Selected %s" % (ItemCatalogScript.label(item_id) if item_id != "" else "empty"))
     return next_slot
 
 func update_hud_frame(delta: float) -> void:
@@ -179,13 +173,15 @@ func update_hud(message: String = "", throttled: bool = false) -> void:
     var biome := biome_at_cell(cell.x, cell.y)
     update_exploration_state(cell, biome)
     update_objectives_and_contracts()
-    var time_text := clock_time_text()
+    var time_text := "Day %d %s" % [max(1, int(floor(world_elapsed / DAY_LENGTH)) + 1), clock_time_text()]
+    var weather_state: Dictionary = weather_system.snapshot() if weather_system else { "kind": "clear", "intensity": 0.0 }
     hud.set_status(
         seed_text,
         biome.capitalize(),
         chunks.size(),
         Vector2(player.position.x, player.position.z),
-        time_text
+        time_text,
+        weather_state
     )
     if survival_system:
         hud.set_survival(survival_system.snapshot())
@@ -203,10 +199,10 @@ func update_hud(message: String = "", throttled: bool = false) -> void:
         navigation_heading_text(),
         navigation_map_state()
     )
+    if hud.has_method("set_interaction_prompt"):
+        hud.set_interaction_prompt(focused_interaction_prompt())
     if message != "":
-        hud.set_target_message(message)
-    elif beacon_status_message != "":
-        hud.set_target_message(beacon_status_message)
+        hud.show_notification(message) if hud.has_method("show_notification") else hud.set_target_message(message)
 
 func hud_refresh_stats() -> Dictionary:
     return {
@@ -219,6 +215,56 @@ func hud_refresh_stats() -> Dictionary:
         "elapsed": hud_refresh_elapsed,
         "lastMessage": last_hud_refresh_message
     }
+
+func focused_interaction_prompt() -> String:
+    if player == null:
+        return ""
+    var hit: Dictionary = player.view_ray(INTERACT_RANGE, true)
+    if hit.is_empty() or not hit_within_action_reach(hit):
+        return ""
+    var collider := hit.get("collider") as Node
+    if collider == null:
+        return ""
+    var story_prompt := focused_story_prompt(collider)
+    if story_prompt != "":
+        return story_prompt
+    if collider.has_meta("kind"):
+        var kind := String(collider.get_meta("kind"))
+        if kind == "tutorial_npc" or kind == "npc":
+            return "[RMB] Talk to %s" % String(collider.get_meta("npc_name", "Resident"))
+    var block := interaction_block_from_collider(collider)
+    if block == null or not block.has_meta("kind") or String(block.get_meta("kind")) != "block":
+        return ""
+    var block_type := String(block.get_meta("block_type", ""))
+    return focused_block_prompt(block, block_type)
+
+func focused_story_prompt(collider: Node) -> String:
+    var current := collider
+    while current != null:
+        if current.has_meta("kind") and String(current.get_meta("kind")) == "story_interactable":
+            var prompt := String(current.get_meta("storyPrompt", "Inspect"))
+            return "[RMB] %s" % prompt
+        current = current.get_parent()
+    return ""
+
+func focused_block_prompt(block: Node, block_type: String) -> String:
+    if block_type == "door":
+        return "[RMB] Close door" if bool(block.get_meta("open", false)) else "[RMB] Open door"
+    if block_type == "bed":
+        return "[RMB] Sleep"
+    if block_type == "chest":
+        return "[RMB] Open Chest"
+    if block_type == "furnace":
+        return "[RMB] Use Furnace"
+    if block_type == "campfire":
+        return "[RMB] Use Campfire"
+    if block_type == "workbench":
+        return "[RMB] Craft at Workbench"
+    if block_type == "anvil":
+        return "[RMB] Use Anvil"
+    if block_type == "traderStall":
+        return "[RMB] Trade"
+    return ""
 
 func update_exploration_state(cell: Vector2i, biome: String) -> void:
     var observer_position := player.global_position if player else Vector3(float(cell.x) * CELL, 0.0, float(cell.y) * CELL)

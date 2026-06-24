@@ -4,13 +4,14 @@ class_name GameHudRenderer
 const InventorySlotButtonScript := preload("res://scripts/InventorySlotButton.gd")
 const ItemCatalogScript := preload("res://scripts/ItemCatalog.gd")
 
-static func set_status(hud, seed_text: String, biome: String, chunk_count: int, coords: Vector2, time_text: String) -> void:
+static func set_status(hud, seed_text: String, biome: String, chunk_count: int, coords: Vector2, time_text: String, weather_state := {}) -> void:
     hud.last_status_state = {
         "seed": seed_text,
         "biome": biome,
         "chunkCount": chunk_count,
         "coords": coords,
-        "time": time_text
+        "time": time_text,
+        "weather": weather_state.duplicate(true) if weather_state is Dictionary else {}
     }
     refresh_status_label(hud)
 
@@ -30,7 +31,18 @@ static func refresh_status_label(hud) -> void:
             coords.y
         ]
         return
-    hud.status_label.text = "Voxel Biome World\n%s | %s" % [biome, time_text]
+    var weather: Dictionary = hud.last_status_state.get("weather", {}) if hud.last_status_state.get("weather", {}) is Dictionary else {}
+    var weather_text := weather_label(weather)
+    hud.status_label.text = "%s\n%s | %s" % [biome, time_text, weather_text]
+
+static func weather_label(weather: Dictionary) -> String:
+    var kind := String(weather.get("kind", "clear")).capitalize()
+    var intensity := float(weather.get("intensity", 0.0))
+    if intensity > 0.12 and (kind == "Rain" or kind == "Snow"):
+        return "%s %.0f%%" % [kind, clampf(intensity, 0.0, 1.0) * 100.0]
+    if kind == "":
+        return "Clear"
+    return kind
 
 static func set_performance(hud, state: Dictionary) -> void:
     if hud.performance_label == null or not hud.performance_label.visible:
@@ -84,11 +96,36 @@ static func apply_story_accessibility(hud) -> void:
 static func set_survival(hud, state: Dictionary) -> void:
     if hud.health_label == null:
         return
-    hud.health_label.text = "HP %d/%d" % [roundi(float(state.get("health", 100.0))), roundi(float(state.get("maxHealth", 100.0)))]
-    hud.stamina_label.text = "STA %d/%d" % [roundi(float(state.get("stamina", 100.0))), roundi(float(state.get("maxStamina", 100.0)))]
-    hud.hunger_label.text = "HUN %d/%d" % [roundi(float(state.get("hunger", 100.0))), roundi(float(state.get("maxHunger", 100.0)))]
-    hud.armor_label.text = "ARM %d" % roundi(float(state.get("armor", 0.0)))
-    hud.danger_label.text = String(state.get("danger", "Safe"))
+    var health: int = roundi(float(state.get("health", 100.0)))
+    var max_health: int = max(1, roundi(float(state.get("maxHealth", 100.0))))
+    var stamina: int = roundi(float(state.get("stamina", 100.0)))
+    var max_stamina: int = max(1, roundi(float(state.get("maxStamina", 100.0))))
+    var hunger: int = roundi(float(state.get("hunger", 100.0)))
+    var max_hunger: int = max(1, roundi(float(state.get("maxHunger", 100.0))))
+    hud.health_label.text = "%d" % health
+    hud.stamina_label.text = "%d" % stamina
+    hud.hunger_label.text = "%d" % hunger
+    if hud.health_bar:
+        hud.health_bar.max_value = max_health
+        hud.health_bar.value = clampf(float(health), 0.0, float(max_health))
+    if hud.stamina_bar:
+        hud.stamina_bar.max_value = max_stamina
+        hud.stamina_bar.value = clampf(float(stamina), 0.0, float(max_stamina))
+    if hud.hunger_bar:
+        hud.hunger_bar.max_value = max_hunger
+        hud.hunger_bar.value = clampf(float(hunger), 0.0, float(max_hunger))
+    hud.armor_label.text = "%d" % roundi(float(state.get("armor", 0.0)))
+    var danger := String(state.get("danger", "Safe"))
+    hud.danger_label.text = safety_badge_text(danger)
+
+static func safety_badge_text(danger: String) -> String:
+    if danger == "" or danger == "Safe":
+        return "SAFE"
+    if danger == "Light safe":
+        return "LIGHT"
+    if danger == "Sheltered":
+        return "SHELTER"
+    return danger.to_upper()
 
 static func set_progression(hud, state: Dictionary) -> void:
     if hud.level_label == null:
@@ -101,7 +138,11 @@ static func set_progression(hud, state: Dictionary) -> void:
         hud.xp_bar.max_value = maxf(1.0, float(needed))
         hud.xp_bar.value = clampf(float(current_xp), 0.0, float(needed))
     if hud.xp_recent_label:
-        hud.xp_recent_label.text = String(state.get("recent", "No XP earned yet"))
+        var recent := String(state.get("recent", "No XP earned yet"))
+        hud.xp_recent_label.text = recent
+        if recent != "" and recent != "No XP earned yet" and recent != hud.last_progression_recent and hud.has_method("show_notification"):
+            hud.show_notification(recent)
+        hud.last_progression_recent = recent
 
 static func set_navigation(hud, compass_visible: bool, map_visible: bool, heading_text: String, map_state: Dictionary) -> void:
     hud.map_enabled = map_visible
@@ -306,9 +347,20 @@ static func story_accessibility_prefix(row: Dictionary) -> String:
     return ""
 
 static func render_active(hud) -> void:
+    if hud.inventory_panel != null and hud.inventory_panel.visible:
+        if hud.selected_item_label:
+            hud.selected_item_label.visible = false
+        return
     var stack: Dictionary = hud.inventory.active_stack()
     var item_id := String(stack.get("item", ""))
-    hud.active_label.text = "Active: empty" if item_id == "" else "Active: %s x%d" % [ItemCatalogScript.label(item_id), int(stack.get("count", 0))]
+    if hud.active_label:
+        hud.active_label.text = ""
+        hud.active_label.visible = false
+    var selected_slot := int(hud.inventory.selected_slot)
+    if selected_slot != hud.last_selected_slot_seen:
+        hud.last_selected_slot_seen = selected_slot
+        if hud.has_method("show_selected_item"):
+            hud.show_selected_item(item_id, int(stack.get("count", 0)))
 
 static func render_hotbar(hud) -> void:
     ensure_hotbar_slots(hud)
@@ -389,10 +441,24 @@ static func update_slot_button(hud, button: Button, slot: Dictionary, index: int
     else:
         button.theme_type_variation = &"InventorySlotSelected" if selected else &"InventorySlot"
     if item_id == "":
-        button.text = "%d\nEmpty" % (index + 1) if compact else "Empty"
+        if compact and button.has_method("set_compact_presentation"):
+            button.set_compact_presentation(index + 1, null, 0, -1.0)
+        else:
+            button.text = "Empty"
     else:
-        button.icon = icon_for(hud, item_id)
-        button.text = "%d\nx%d" % [index + 1, count] if compact else "%s\nx%d" % [ItemCatalogScript.label(item_id), count]
+        var item_icon := icon_for(hud, item_id)
+        if compact and button.has_method("set_compact_presentation"):
+            button.set_compact_presentation(index + 1, item_icon, count, slot_durability(slot))
+        else:
+            button.icon = item_icon
+            button.text = "%s\nx%d" % [ItemCatalogScript.label(item_id), count]
+
+static func slot_durability(slot: Dictionary) -> float:
+    if slot.has("durability"):
+        return clampf(float(slot.get("durability", 1.0)), 0.0, 1.0)
+    if slot.has("condition"):
+        return clampf(float(slot.get("condition", 1.0)), 0.0, 1.0)
+    return -1.0
 
 static func make_equipment_button(hud, slot: String, label: String, key: String) -> Button:
     var button := Button.new()
@@ -474,7 +540,7 @@ static func update_slider_label(hud, setting: String, value: float) -> void:
     var label_text := String(entry.get("labelText", setting))
     if setting == "renderDistance" or setting == "fov":
         label.text = "%s %d" % [label_text, roundi(value)]
-    elif setting == "weatherParticles" or setting == "lookSmoothing" or setting == "storyJournalFontScale":
+    elif setting == "weatherParticles" or setting == "lookSmoothing" or setting == "storyJournalFontScale" or setting == "hudScale":
         label.text = "%s %d%%" % [label_text, roundi(value * 100.0)]
     elif setting == "storyTextSpeed":
         label.text = "%s %d%%" % [label_text, roundi((value / 2.0) * 100.0)]
@@ -497,6 +563,34 @@ static func icon_color(item_id: String) -> Color:
     if item_id.find("copper") >= 0:
         return Color(0.76, 0.44, 0.25)
     return Color(0.46, 0.50, 0.58)
+
+static func apply_hud_scale(hud) -> void:
+    var scale := float(hud.hud_scale)
+    var label_sizes := {
+        hud.status_label: 16,
+        hud.target_label: 18,
+        hud.notification_label: 18,
+        hud.selected_item_label: 17,
+        hud.level_label: 15,
+        hud.health_label: 15,
+        hud.stamina_label: 15,
+        hud.hunger_label: 15,
+        hud.armor_label: 15,
+        hud.danger_label: 14,
+        hud.compass_label: 18,
+        hud.compass_waypoint_label: 12
+    }
+    for label_variant in label_sizes.keys():
+        var label := label_variant as Label
+        if label == null:
+            continue
+        label.add_theme_font_size_override("font_size", maxi(10, roundi(float(label_sizes[label_variant]) * scale)))
+    if hud.health_bar:
+        hud.health_bar.custom_minimum_size.y = 12.0 * scale
+    if hud.stamina_bar:
+        hud.stamina_bar.custom_minimum_size.y = 12.0 * scale
+    if hud.hunger_bar:
+        hud.hunger_bar.custom_minimum_size.y = 12.0 * scale
 
 static func clear_container(container: Node) -> void:
     if container == null:

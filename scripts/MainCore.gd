@@ -130,6 +130,7 @@ var runtime_settings := {
     "renderDistance": 3,
     "shadows": true,
     "weatherParticles": 1.0,
+    "hudScale": 1.0,
     "fullscreen": false,
     "lookSmoothing": 0.0,
     "headBob": true,

@@ -189,9 +189,6 @@ func map_color_for_sample(biome: String, height: float) -> Color:
 func _on_ui_slot_clicked(index: int) -> void:
     if index < inventory_system.hotbar_size:
         inventory_system.select(index)
-        var active: Dictionary = inventory_system.active_stack()
-        var item_id := String(active.get("item", ""))
-        update_hud("Selected %s" % (ItemCatalogScript.label(item_id) if item_id != "" else "empty"))
         return
     if index >= 0 and index < inventory_system.slots.size():
         var slot: Dictionary = inventory_system.slots[index]

@@ -36,9 +36,12 @@ var ui_theme: Theme
 var debug_readout_visible := false
 var last_status_state := {}
 var status_label: Label
+var location_panel: PanelContainer
 var version_label: Label
 var target_label: Label
 var active_label: Label
+var selected_item_label: Label
+var notification_label: Label
 var level_label: Label
 var xp_bar: ProgressBar
 var xp_recent_label: Label
@@ -47,6 +50,11 @@ var stamina_label: Label
 var hunger_label: Label
 var armor_label: Label
 var danger_label: Label
+var health_bar: ProgressBar
+var stamina_bar: ProgressBar
+var hunger_bar: ProgressBar
+var vitals_panel: PanelContainer
+var reticle_root: Control
 var hotbar: HBoxContainer
 var inventory_panel: PanelContainer
 var inventory_grid: GridContainer
@@ -96,6 +104,10 @@ var dialogue_body_label: Label
 var dialogue_reply_label: Label
 var dialogue_context := {}
 var objective_toast_time := 0.0
+var selected_item_time := 0.0
+var notification_time := 0.0
+var last_selected_slot_seen := -999
+var last_progression_recent := ""
 var sleep_fade_overlay: ColorRect
 var sleep_fade_tween: Tween
 var icon_cache := {}
@@ -111,6 +123,7 @@ var current_map_state := {}
 var story_state := {}
 var dialogue_reveal_elapsed := 0.0
 var dialogue_reveal_cps := -1.0
+var hud_scale := 1.0
 
 func setup(inventory_system, crafting_system, objective_system = null, equipment_system = null, contract_system = null, story_journal_model = null) -> void:
     inventory = inventory_system
@@ -141,8 +154,8 @@ func play_sleep_fade(fade_out := 0.55, hold := 0.45, fade_in := 0.70) -> void:
 func is_sleep_fading() -> bool:
     return sleep_fade_overlay != null and sleep_fade_overlay.visible
 
-func set_status(seed_text: String, biome: String, chunk_count: int, coords: Vector2, time_text: String) -> void:
-    GameHudRendererScript.set_status(self, seed_text, biome, chunk_count, coords, time_text)
+func set_status(seed_text: String, biome: String, chunk_count: int, coords: Vector2, time_text: String, weather_state := {}) -> void:
+    GameHudRendererScript.set_status(self, seed_text, biome, chunk_count, coords, time_text, weather_state)
 
 func set_performance(state: Dictionary) -> void:
     GameHudRendererScript.set_performance(self, state)
@@ -314,7 +327,38 @@ func set_playtest_status(message: String) -> void:
         playtest_status.text = message
 
 func set_target_message(message: String) -> void:
+    show_notification(message)
+
+func set_interaction_prompt(message: String) -> void:
+    if target_label == null:
+        return
     target_label.text = message
+    target_label.visible = message != ""
+
+func show_selected_item(item_id: String, count: int) -> void:
+    if selected_item_label == null:
+        return
+    if item_id == "":
+        selected_item_label.text = ""
+        selected_item_label.visible = false
+        selected_item_time = 0.0
+        return
+    selected_item_label.text = "%s x%d" % [ItemCatalogScript.label(item_id), count] if count > 1 else ItemCatalogScript.label(item_id)
+    selected_item_label.visible = true
+    selected_item_label.modulate.a = 1.0
+    selected_item_time = 2.1
+
+func show_notification(message: String, duration := 3.0) -> void:
+    if notification_label == null or message.strip_edges() == "":
+        return
+    notification_label.text = message
+    notification_label.visible = true
+    notification_label.modulate.a = 1.0
+    notification_time = maxf(0.2, duration)
+
+func set_hud_scale(value: float) -> void:
+    hud_scale = clampf(value, 0.8, 1.4)
+    GameHudRendererScript.apply_hud_scale(self)
 
 func set_survival(state: Dictionary) -> void:
     GameHudRendererScript.set_survival(self, state)
@@ -350,7 +394,9 @@ func set_inventory_open(open: bool) -> void:
     if hotbar:
         hotbar.visible = not open
     if active_label:
-        active_label.visible = not open
+        active_label.visible = false
+    if selected_item_label:
+        selected_item_label.visible = (not open) and selected_item_time > 0.0
     if open:
         hide_dialogue()
     if open and game_menu_panel:

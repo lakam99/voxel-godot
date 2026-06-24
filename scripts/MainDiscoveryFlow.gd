@@ -9,6 +9,8 @@ func apply_runtime_setting(setting: String, value, sync_hud: bool = true) -> voi
         value = clampi(roundi(float(value)), 2, 4)
     elif setting == "weatherParticles":
         value = clampf(float(value), 0.0, 1.0)
+    elif setting == "hudScale":
+        value = snappedf(clampf(float(value), 0.8, 1.4), 0.2)
     elif setting == "lookSmoothing":
         value = clampf(float(value), 0.0, 0.82)
     elif setting == "storyTextSpeed":
@@ -43,6 +45,9 @@ func apply_runtime_setting(setting: String, value, sync_hud: bool = true) -> voi
     elif setting == "weatherParticles":
         if weather_system and weather_system.has_method("set_particle_quality"):
             weather_system.set_particle_quality(float(value))
+    elif setting == "hudScale":
+        if hud and hud.has_method("set_hud_scale"):
+            hud.set_hud_scale(float(value))
     elif setting == "handSway":
         if held_item and held_item.has_method("set_sway_enabled"):
             held_item.set_sway_enabled(bool(value))

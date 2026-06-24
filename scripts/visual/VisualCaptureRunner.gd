@@ -34,7 +34,7 @@ func run() -> void:
     add_child(main)
     await wait_frames(90)
     configure_static_scene()
-    var capture_cases := CASES.duplicate()
+    var capture_cases := hud_refinement_capture_cases() if OS.get_environment("VOXEL_HUD_REFINEMENT_CAPTURE") == "1" else CASES.duplicate()
     if OS.get_environment("VOXEL_VISUAL_CAPTURE_TOOLS") == "1":
         capture_cases.append_array(tool_capture_cases())
     for case_spec in capture_cases:
@@ -77,6 +77,16 @@ func tool_capture_cases() -> Array[Dictionary]:
             "heldItem": item_id
         })
     return cases
+
+func hud_refinement_capture_cases() -> Array[Dictionary]:
+    return [
+        { "name": "hud_daylight", "playtest": "town", "clock": 12.0, "weather": "clear", "intensity": 0.0, "clouds": 0.22, "hud": true, "offset": Vector3(8.5, 0.0, 8.5), "pitch": -10.0 },
+        { "name": "hud_night", "playtest": "forest", "clock": 0.0, "weather": "clear", "intensity": 0.0, "clouds": 0.18, "hud": true, "offset": Vector3(7.0, 0.0, 9.0), "pitch": -6.0, "heldItem": "torch" },
+        { "name": "hud_combat", "playtest": "combat", "clock": 21.5, "weather": "clear", "intensity": 0.0, "clouds": 0.28, "hud": true, "offset": Vector3(8.0, 0.0, 8.0), "pitch": -8.0, "combatHud": true },
+        { "name": "hud_interaction", "playtest": "town", "clock": 12.0, "weather": "clear", "intensity": 0.0, "clouds": 0.22, "hud": true, "lookAtBlockOffset": Vector2i(3, 2), "offset": Vector3(-4.6, 0.0, -3.6), "pitch": -4.0 },
+        { "name": "hud_inventory_use", "playtest": "town", "clock": 12.0, "weather": "clear", "intensity": 0.0, "clouds": 0.22, "hud": true, "offset": Vector3(8.5, 0.0, 8.5), "pitch": -10.0, "openInventory": true },
+        { "name": "hud_empty_hotbar", "playtest": "town", "clock": 12.0, "weather": "clear", "intensity": 0.0, "clouds": 0.22, "hud": true, "offset": Vector3(8.5, 0.0, 8.5), "pitch": -10.0, "emptyHotbar": true }
+    ]
 
 func configure_static_scene() -> void:
     disable_tutorial_capture_overrides()
@@ -121,6 +131,7 @@ func capture_case(capture_case: Dictionary) -> void:
     apply_capture_time_and_weather(capture_case)
     configure_capture_lights(capture_case)
     set_hud_visible(bool(capture_case.get("hud", false)))
+    prepare_hud_capture_state(capture_case)
     await wait_frames(3)
     var case_name := String(capture_case["name"])
     var png_path := path_join(output_dir, "%s.png" % case_name)
@@ -142,6 +153,9 @@ func position_camera(capture_case: Dictionary) -> void:
     if player == null or camera == null:
         return
     var target_cell := current_playtest_cell(String(capture_case["playtest"]))
+    if capture_case.has("lookAtBlockOffset"):
+        position_block_focus_camera(capture_case, target_cell)
+        return
     if bool(capture_case.get("lookAtWater", false)):
         position_water_camera(capture_case, target_cell)
         return
@@ -156,6 +170,21 @@ func position_camera(capture_case: Dictionary) -> void:
     var base_camera_position: Vector3 = player.get("base_camera_position")
     camera.position = base_camera_position
     camera.rotation.x = deg_to_rad(float(capture_case.get("pitch", -8.0)))
+
+func position_block_focus_camera(capture_case: Dictionary, target_cell: Vector2i) -> void:
+    var block_offset: Vector2i = capture_case.get("lookAtBlockOffset", Vector2i.ZERO)
+    var block_cell := target_cell + block_offset
+    var target := Vector3(float(block_cell.x) * main.CELL, 0.0, float(block_cell.y) * main.CELL)
+    target.y = main.height_at_world(target.x, target.z) + main.CELL * 0.75
+    var offset: Vector3 = capture_case.get("offset", Vector3(-4.0, 0.0, -4.0))
+    var position := target + offset
+    position.y = main.height_at_world(position.x, position.z) + 0.18
+    player.global_position = position
+    player.velocity = Vector3.ZERO
+    player.look_at(target, Vector3.UP)
+    var base_camera_position: Vector3 = player.get("base_camera_position")
+    camera.position = base_camera_position
+    camera.rotation.x = deg_to_rad(float(capture_case.get("pitch", -4.0)))
 
 func position_water_camera(capture_case: Dictionary, target_cell: Vector2i) -> void:
     var water_cell := target_cell + Vector2i(-8, -3)
@@ -229,7 +258,34 @@ func set_hud_visible(visible: bool) -> void:
     if hud and hud is CanvasLayer:
         (hud as CanvasLayer).visible = visible
         if visible:
-            main.update_hud("Visual capture baseline")
+            main.update_hud("")
+
+func prepare_hud_capture_state(capture_case: Dictionary) -> void:
+    if not bool(capture_case.get("hud", false)):
+        return
+    var hud = main.get("hud")
+    var inventory = main.get("inventory_system")
+    var survival = main.get("survival_system")
+    if bool(capture_case.get("emptyHotbar", false)) and inventory != null:
+        inventory.clear()
+        inventory.select(0)
+        if hud:
+            hud.render()
+            hud.set_interaction_prompt("")
+    if bool(capture_case.get("combatHud", false)) and survival != null and hud != null:
+        survival.health = 64.0
+        survival.stamina = 42.0
+        survival.hunger = 36.0
+        survival.last_danger = "Hostiles"
+        hud.set_survival(survival.snapshot())
+        hud.show_notification("Hostile hit: 12")
+    if bool(capture_case.get("openInventory", false)) and hud != null and inventory != null:
+        inventory.add_item("berries", 3)
+        inventory.add_item("stonePickaxe", 1)
+        hud.set_inventory_open(true)
+        hud.show_notification("Used: Berries")
+    if capture_case.has("lookAtBlockOffset") and hud != null:
+        main.update_hud("")
 
 func configure_capture_lights(capture_case: Dictionary) -> void:
     var held_item_id := String(capture_case.get("heldItem", ""))

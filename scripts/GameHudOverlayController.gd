@@ -52,7 +52,10 @@ static func show_dialogue(hud, speaker: String, role: String, body: String, cont
     hud.dialogue_body_label.visible_characters = 0 if hud.dialogue_reveal_cps > 0.0 else -1
     hud.dialogue_reply_label.visible = true
     hud.dialogue_panel.visible = true
-    hud.target_label.text = ""
+    if hud.has_method("set_interaction_prompt"):
+        hud.set_interaction_prompt("")
+    elif hud.target_label:
+        hud.target_label.text = ""
     if hud.inventory_panel:
         hud.inventory_panel.visible = false
     if hud.utility_panel:
@@ -104,3 +107,13 @@ static func process(hud, delta: float) -> void:
         hud.objective_toast.modulate.a = clamp(hud.objective_toast_time / 0.8, 0.0, 1.0) if hud.objective_toast_time < 0.8 else 1.0
         if hud.objective_toast_time <= 0.0:
             hud.objective_toast.visible = false
+    if hud.selected_item_time > 0.0 and hud.selected_item_label != null:
+        hud.selected_item_time = max(0.0, hud.selected_item_time - delta)
+        hud.selected_item_label.modulate.a = clamp(hud.selected_item_time / 0.55, 0.0, 1.0) if hud.selected_item_time < 0.55 else 1.0
+        if hud.selected_item_time <= 0.0:
+            hud.selected_item_label.visible = false
+    if hud.notification_time > 0.0 and hud.notification_label != null:
+        hud.notification_time = max(0.0, hud.notification_time - delta)
+        hud.notification_label.modulate.a = clamp(hud.notification_time / 0.65, 0.0, 1.0) if hud.notification_time < 0.65 else 1.0
+        if hud.notification_time <= 0.0:
+            hud.notification_label.visible = false

@@ -220,6 +220,7 @@ func test_scene_bootstrap() -> void:
     var normal_debug_hidden := (
         version_label != null
         and not version_label.visible
+        and not normal_status.contains("Voxel Biome World")
         and not normal_status.contains("seed ")
         and not normal_status.contains("chunks")
     )
@@ -246,6 +247,20 @@ func test_scene_bootstrap() -> void:
         "hud_theme_applied",
         hud_root != null and ui_theme != null and hud_root.theme == ui_theme,
         "theme %s" % str(ui_theme != null)
+    )
+    var hud_refined := (
+        hud != null
+        and hud.get("location_panel") != null
+        and hud.get("vitals_panel") != null
+        and hud.get("reticle_root") != null
+        and hud.get("notification_label") != null
+        and hud.get("selected_item_label") != null
+        and not String(status_label.text if status_label else "").contains("Voxel Biome World")
+    )
+    add_result(
+        "hud_refinement_composition",
+        hud_refined,
+        "location/vitals/reticle/notifications present %s" % str(hud_refined)
     )
 
 func test_tutorial_start_system() -> void:
@@ -952,12 +967,25 @@ func test_inventory_and_crafting_systems() -> void:
     inventory_system.select(6)
     hud.render_hotbar()
     var selected_hotbar_button := hud.hotbar.get_child(6) as Button if hud.hotbar.get_child_count() > 6 else null
+    var populated_hotbar_button := hud.hotbar.get_child(5) as Button if hud.hotbar.get_child_count() > 5 else null
+    var selected_shortcut_label := selected_hotbar_button.get("shortcut_label") as Label if selected_hotbar_button != null else null
+    var populated_shortcut_label := populated_hotbar_button.get("shortcut_label") as Label if populated_hotbar_button != null else null
+    var populated_icon_rect := populated_hotbar_button.get("icon_rect") as TextureRect if populated_hotbar_button != null else null
+    var populated_count_label := populated_hotbar_button.get("count_label") as Label if populated_hotbar_button != null else null
     var hotbar_reuses_slots: bool = (
         hotbar_child_count == inventory_system.hotbar_size
         and first_hotbar_button != null
         and hud.hotbar.get_child(0) == first_hotbar_button
         and selected_hotbar_button != null
         and String(selected_hotbar_button.theme_type_variation) == "HotbarSlotSelected"
+        and selected_shortcut_label != null
+        and selected_shortcut_label.text == "7"
+        and populated_shortcut_label != null
+        and populated_shortcut_label.text == "6"
+        and populated_icon_rect != null
+        and populated_icon_rect.texture != null
+        and populated_count_label != null
+        and populated_count_label.text == "12"
     )
     add_result(
         "hotbar_reuses_slots",
@@ -1904,6 +1932,7 @@ func test_settings_playtest_debug() -> void:
     main.call("apply_runtime_setting", "headBob", false)
     main.call("apply_runtime_setting", "handSway", false)
     main.call("apply_runtime_setting", "weatherParticles", 0.25)
+    main.call("apply_runtime_setting", "hudScale", 1.4)
     main.call("apply_runtime_setting", "shadows", false)
     main.call("apply_runtime_setting", "renderDistance", 2)
     await wait_physics_frames(2)
@@ -1917,6 +1946,7 @@ func test_settings_playtest_debug() -> void:
         and not bool(player.get("head_bob_enabled"))
         and (held_item == null or not bool(held_item.get("sway_enabled")))
         and abs(float(weather_system.snapshot().get("particleQuality", 1.0)) - 0.25) < 0.01
+        and abs(float(hud.get("hud_scale")) - 1.4) < 0.01
         and not bool(main.get("shadows_enabled"))
         and int(main.get("render_distance")) == 2
         and chunks.size() == 25
@@ -1955,10 +1985,11 @@ func test_settings_playtest_debug() -> void:
     add_result(
         "settings_runtime_controls",
         settings_applied,
-        "fov %.1f, sens %.4f, particles %.2f, render %d, chunks %d" % [
+        "fov %.1f, sens %.4f, particles %.2f, hud %.1f, render %d, chunks %d" % [
             camera.fov,
             float(player.get("mouse_sensitivity")),
             float(weather_system.snapshot().get("particleQuality", 1.0)),
+            float(hud.get("hud_scale")),
             int(main.get("render_distance")),
             chunks.size()
         ]
@@ -1990,6 +2021,7 @@ func test_settings_playtest_debug() -> void:
     main.call("apply_runtime_setting", "headBob", true)
     main.call("apply_runtime_setting", "handSway", true)
     main.call("apply_runtime_setting", "weatherParticles", 1.0)
+    main.call("apply_runtime_setting", "hudScale", 1.0)
     main.call("apply_runtime_setting", "shadows", true)
     main.call("apply_runtime_setting", "renderDistance", original_render_distance)
     player.global_position = original_position
@@ -2021,7 +2053,7 @@ func test_hud_refresh_throttling() -> void:
     main.call("update_hud", "Immediate HUD Test")
     var after_message: Dictionary = main.call("hud_refresh_stats")
     var message_delta: int = int(after_message.get("messages", 0)) - int(after_wait.get("messages", 0))
-    var message_visible: bool = hud.target_label.text.find("Immediate HUD Test") >= 0
+    var message_visible: bool = hud.notification_label != null and hud.notification_label.text.find("Immediate HUD Test") >= 0 and hud.notification_label.visible
 
     main.set("hud_refresh_interval", 0.0)
     main.call("update_hud_frame", 0.016)
@@ -2961,7 +2993,7 @@ func test_survival_system() -> void:
     var used_food: bool = main.call("try_use_active_consumable")
     var food_helped: bool = used_food and inventory_system.count("berries") == berries_before - 1 and float(survival_system.hunger) > 40.0 and float(survival_system.health) > 80.0
     hud.set_survival(survival_system.snapshot())
-    var hud_updated: bool = hud.health_label.text.begins_with("HP") and hud.hunger_label.text.begins_with("HUN")
+    var hud_updated: bool = hud.health_bar != null and hud.hunger_bar != null and float(hud.health_bar.value) > 80.0 and float(hud.hunger_bar.value) > 40.0
     add_result(
         "survival_food_and_hud",
         food_helped and hud_updated,
@@ -5818,7 +5850,8 @@ func test_mining_tool_requirements() -> void:
     await wait_physics_frames(2)
     main.call("destroy_target")
     await wait_physics_frames(2)
-    var copper_wrong_blocked: bool = blocks.has(copper_cell) and float(main.get("break_progress")) == 0.0 and hud.target_label.text.find("Stone Pickaxe") >= 0
+    var copper_tool_message: String = hud.notification_label.text if hud.notification_label != null else ""
+    var copper_wrong_blocked: bool = blocks.has(copper_cell) and float(main.get("break_progress")) == 0.0 and copper_tool_message.find("Stone Pickaxe") >= 0
 
     set_active_inventory_item(inventory_system, "stonePickaxe")
     var copper_before: int = inventory_system.count("copperOre")
@@ -5840,7 +5873,8 @@ func test_mining_tool_requirements() -> void:
     await wait_physics_frames(2)
     main.call("destroy_target")
     await wait_physics_frames(2)
-    var iron_wrong_blocked: bool = blocks.has(iron_cell) and float(main.get("break_progress")) == 0.0 and hud.target_label.text.find("Copper Pickaxe") >= 0
+    var iron_tool_message: String = hud.notification_label.text if hud.notification_label != null else ""
+    var iron_wrong_blocked: bool = blocks.has(iron_cell) and float(main.get("break_progress")) == 0.0 and iron_tool_message.find("Copper Pickaxe") >= 0
 
     set_active_inventory_item(inventory_system, "copperPickaxe")
     var iron_before: int = inventory_system.count("ironOre")
@@ -5866,7 +5900,7 @@ func test_mining_tool_requirements() -> void:
             str(copper_mined),
             str(iron_wrong_blocked),
             str(iron_mined),
-            hud.target_label.text
+            iron_tool_message
         ]
     )
 
