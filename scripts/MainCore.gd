@@ -65,6 +65,8 @@ var worldmark_influence_system
 var story_journal_model
 var story_dialogue_router
 var worldmark_encounter_controller
+var settlement_state_system
+var region_aftermath_system
 var item_visual_factory
 var visual_asset_registry
 var static_item_asset_registry
@@ -243,6 +245,10 @@ func apply_world_seed(new_seed: String, remember := false) -> void:
         worldmark_influence_system.reset()
     if worldmark_encounter_controller and worldmark_encounter_controller.has_method("reset"):
         worldmark_encounter_controller.reset()
+    if settlement_state_system and settlement_state_system.has_method("reset"):
+        settlement_state_system.reset()
+    if region_aftermath_system and region_aftermath_system.has_method("reset"):
+        region_aftermath_system.reset()
     last_story_region_id = ""
     if save_system and remember and save_system.has_method("set_active_seed"):
         save_system.set_active_seed(seed_text)
@@ -337,6 +343,16 @@ func setup_story_systems() -> void:
         worldmark_encounter_controller.name = "WorldmarkEncounterController"
         add_child(worldmark_encounter_controller)
     worldmark_encounter_controller.setup(self, story_director)
+    if settlement_state_system == null:
+        settlement_state_system = SettlementStateSystemScript.new()
+        settlement_state_system.name = "SettlementStateSystem"
+        add_child(settlement_state_system)
+    settlement_state_system.setup(self, story_director)
+    if region_aftermath_system == null:
+        region_aftermath_system = RegionAftermathSystemScript.new()
+        region_aftermath_system.name = "RegionAftermathSystem"
+        add_child(region_aftermath_system)
+    region_aftermath_system.setup(self, story_director, settlement_state_system)
     if story_world_overlay_system == null:
         story_world_overlay_system = StoryWorldOverlaySystemScript.new()
         story_world_overlay_system.name = "StoryWorldOverlaySystem"
@@ -476,6 +492,8 @@ func debug_story_dump() -> Dictionary:
     dump["influence"] = worldmark_influence_system.debug_state() if worldmark_influence_system != null and worldmark_influence_system.has_method("debug_state") else {}
     dump["journal"] = story_journal_model.state() if story_journal_model != null and story_journal_model.has_method("state") else {}
     dump["encounter"] = worldmark_encounter_controller.debug_state() if worldmark_encounter_controller != null and worldmark_encounter_controller.has_method("debug_state") else {}
+    dump["settlement"] = settlement_state_system.debug_state() if settlement_state_system != null and settlement_state_system.has_method("debug_state") else {}
+    dump["aftermath"] = region_aftermath_system.debug_state() if region_aftermath_system != null and region_aftermath_system.has_method("debug_state") else {}
     return dump
 
 func setup_visual_asset_registry() -> void:

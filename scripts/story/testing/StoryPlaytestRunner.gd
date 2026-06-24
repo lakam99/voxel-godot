@@ -13,6 +13,8 @@ const StoryDialogueRouterScript := preload("res://scripts/story/StoryDialogueRou
 const NpcKnowledgeScopeScript := preload("res://scripts/story/data/NpcKnowledgeScope.gd")
 const WorldmarkEncounterControllerScript := preload("res://scripts/story/encounters/WorldmarkEncounterController.gd")
 const GloamHartEncounterScript := preload("res://scripts/story/encounters/GloamHartEncounter.gd")
+const SettlementStateSystemScript := preload("res://scripts/story/SettlementStateSystem.gd")
+const RegionAftermathSystemScript := preload("res://scripts/story/RegionAftermathSystem.gd")
 
 const FIRST_QUEST_ID := "story.gloam_hart.storm"
 
@@ -43,6 +45,8 @@ const SCRIPT_PATHS := [
     "res://scripts/story/StoryJournalModel.gd",
     "res://scripts/story/StoryDialogueRouter.gd",
     "res://scripts/story/data/NpcKnowledgeScope.gd",
+    "res://scripts/story/SettlementStateSystem.gd",
+    "res://scripts/story/RegionAftermathSystem.gd",
     "res://scripts/story/encounters/WorldmarkEncounterController.gd",
     "res://scripts/story/encounters/GloamHartEncounter.gd",
     "res://scripts/visual/VisualAssetRegistry.gd",
@@ -96,6 +100,8 @@ func run() -> void:
     test_gloam_hart_slay_resolution_idempotent_rewards_and_cleanup()
     test_gloam_hart_release_gating_and_resolution()
     test_gloam_hart_save_load_recovery_policy()
+    test_worldmark_aftermath_slay_delayed_settlement_and_dialogue()
+    test_worldmark_aftermath_release_wildlife_trade_and_save_load()
     test_ordinary_clues_count_idempotently()
     test_story_interactable_clues_dedupe_and_progress()
     test_historical_clue_unlock_persists_and_quest_round_trips()
@@ -231,6 +237,8 @@ func test_main_scene_instantiates() -> void:
         "story_journal_model",
         "story_dialogue_router",
         "worldmark_encounter_controller",
+        "settlement_state_system",
+        "region_aftermath_system",
         "hud",
         "visual_asset_registry",
         "static_item_asset_registry",
@@ -921,6 +929,121 @@ func test_gloam_hart_save_load_recovery_policy() -> void:
         ]
     )
 
+func test_worldmark_aftermath_slay_delayed_settlement_and_dialogue() -> void:
+    var director = main.get("story_director")
+    var isolated_state := begin_isolated_countermeasure_test_state()
+    var setup := finish_gloam_hart_resolution(director, "slay")
+    var aftermath = main.get("region_aftermath_system")
+    var settlement = main.get("settlement_state_system")
+    var started: bool = bool(aftermath.sync_from_resolution()) if aftermath != null else false
+    var initial: Dictionary = aftermath.debug_state() if aftermath != null else {}
+    var initial_settlement: Dictionary = settlement.debug_state() if settlement != null else {}
+    var advanced: Dictionary = aftermath.advance_days_for_test(1.0) if aftermath != null else {}
+    var advanced_settlement: Dictionary = settlement.debug_state() if settlement != null else {}
+    var router = main.get("story_dialogue_router")
+    var dialogue: Dictionary = router.response_for_npc("sera", "Sera", "Guard", "") if router != null else {}
+    var dialogue_text := String(dialogue.get("text", "")).to_lower()
+    var npc_activity_count := story_aftermath_npc_activity_count("repair_public_space")
+    var ok: bool = (
+        bool(setup.get("resolved", false))
+        and started
+        and String(initial.get("resolution", "")) == "slay"
+        and not bool(initial.get("settlementTierUnlocked", false))
+        and int(initial_settlement.get("tier", -1)) == 0
+        and bool(advanced.get("settlementTierUnlocked", false))
+        and bool(advanced.get("tradeLinkUnlocked", false))
+        and bool(advanced.get("serviceUnlocked", false))
+        and bool(advanced.get("cozySceneUnlocked", false))
+        and bool(advanced.get("slayCombatRecipe", false))
+        and String(advanced.get("wildlifeRecovery", "")) == "slow"
+        and String(advanced.get("guardMood", "")) == "confident"
+        and int(advanced_settlement.get("tier", 0)) == 1
+        and String(advanced_settlement.get("status", "")) == "secure"
+        and npc_activity_count >= 1
+        and bool(dialogue.get("handled", false))
+        and dialogue_text.find("guards") >= 0
+    )
+    restore_isolated_countermeasure_test_state(isolated_state)
+    add_result(
+        "worldmark_aftermath_slay_delayed_settlement_and_dialogue",
+        ok,
+        "resolved %s started %s initial tier %s advanced %s settlement %s npcActivity %d dialogue '%s'" % [
+            str(setup.get("resolved", false)),
+            str(started),
+            str(initial_settlement.get("tier", "")),
+            str(advanced),
+            str(advanced_settlement),
+            npc_activity_count,
+            dialogue.get("text", "")
+        ]
+    )
+
+func test_worldmark_aftermath_release_wildlife_trade_and_save_load() -> void:
+    var director = main.get("story_director")
+    var isolated_state := begin_isolated_countermeasure_test_state()
+    var setup := finish_gloam_hart_resolution(director, "release")
+    var aftermath = main.get("region_aftermath_system")
+    var settlement = main.get("settlement_state_system")
+    if aftermath != null:
+        aftermath.sync_from_resolution()
+        aftermath.advance_days_for_test(2.0)
+    var before: Dictionary = aftermath.debug_state() if aftermath != null else {}
+    var before_settlement: Dictionary = settlement.debug_state() if settlement != null else {}
+    var npc_activity_before := story_aftermath_npc_activity_count("reopen_forage_paths")
+    var save_snapshot: Dictionary = main.create_save_snapshot()
+    var loaded := bool(main.apply_save_snapshot(save_snapshot))
+    director = main.get("story_director")
+    aftermath = main.get("region_aftermath_system")
+    settlement = main.get("settlement_state_system")
+    var after: Dictionary = aftermath.debug_state() if aftermath != null else {}
+    var after_settlement: Dictionary = settlement.debug_state() if settlement != null else {}
+    var router = main.get("story_dialogue_router")
+    var dialogue: Dictionary = router.response_for_npc("niko", "Niko", "Forager", "") if router != null else {}
+    var dialogue_text := String(dialogue.get("text", "")).to_lower()
+    var npc_activity_count := story_aftermath_npc_activity_count("reopen_forage_paths")
+    var activity_reconstructed: bool = npc_activity_count >= 1 or String(after_settlement.get("residentActivity", "")) == "reopen_forage_paths"
+    var story_snapshot: Dictionary = director.snapshot() if director != null else {}
+    var beacon_preserved: bool = main.get("sanctuary_established") == false and float(main.get("beacon_charge")) >= 0.0
+    var settlements_saved: bool = story_snapshot.get("settlements", {}) is Dictionary
+    var ok: bool = (
+        bool(setup.get("resolved", false))
+        and loaded
+        and String(before.get("resolution", "")) == "release"
+        and bool(before.get("complete", false))
+        and bool(before.get("releaseNatureRoute", false))
+        and bool(before.get("distantHartMayAppear", false))
+        and String(before.get("wildlifeRecovery", "")) == "quick"
+        and bool(before.get("tradeLinkUnlocked", false))
+        and bool(before.get("serviceUnlocked", false))
+        and bool(before_settlement.get("tradeLinkUnlocked", false))
+        and String(after.get("resolution", "")) == "release"
+        and bool(after.get("complete", false))
+        and String(after_settlement.get("status", "")) == "secure"
+        and npc_activity_before >= 1
+        and activity_reconstructed
+        and bool(dialogue.get("handled", false))
+        and dialogue_text.find("forage") >= 0
+        and settlements_saved
+        and beacon_preserved
+    )
+    restore_isolated_countermeasure_test_state(isolated_state)
+    add_result(
+        "worldmark_aftermath_release_wildlife_trade_and_save_load",
+        ok,
+        "resolved %s loaded %s before %s settlement %s after %s afterSettlement %s npcActivity %d/%d dialogue '%s' beacon %s" % [
+            str(setup.get("resolved", false)),
+            str(loaded),
+            str(before),
+            str(before_settlement),
+            str(after),
+            str(after_settlement),
+            npc_activity_before,
+            npc_activity_count,
+            dialogue.get("text", ""),
+            str(beacon_preserved)
+        ]
+    )
+
 func test_ordinary_clues_count_idempotently() -> void:
     var director = main.get("story_director")
     director.reset()
@@ -1254,6 +1377,12 @@ func reset_story_runtime(director) -> void:
         var encounter_controller = main.get("worldmark_encounter_controller")
         if encounter_controller != null and encounter_controller.has_method("reset"):
             encounter_controller.reset()
+        var settlement = main.get("settlement_state_system")
+        if settlement != null and settlement.has_method("reset"):
+            settlement.reset()
+        var aftermath = main.get("region_aftermath_system")
+        if aftermath != null and aftermath.has_method("reset"):
+            aftermath.reset()
         var overlay = main.get("story_world_overlay_system")
         if overlay != null and overlay.has_method("reset"):
             overlay.reset()
@@ -1288,6 +1417,20 @@ func prepare_gloam_hart_encounter(director, include_history: bool) -> Dictionary
         "history": include_history
     }
 
+func finish_gloam_hart_resolution(director, resolution: String) -> Dictionary:
+    var setup := prepare_gloam_hart_encounter(director, resolution == "release")
+    var controller = main.get("worldmark_encounter_controller")
+    var encounter = controller.get("active_encounter") if controller != null else null
+    var resolved := false
+    if encounter != null:
+        if resolution == "release":
+            encounter.apply_player_damage(140.0, "test")
+            resolved = bool(main.try_release_story_worldmark())
+        else:
+            resolved = bool(controller.damage_active_encounter(999.0, "test"))
+    setup["resolved"] = resolved
+    return setup
+
 func story_minion_count() -> int:
     var hostile_system = main.get("hostile_system") if main != null else null
     if hostile_system == null:
@@ -1302,6 +1445,23 @@ func story_minion_count() -> int:
         var enemy: Dictionary = enemy_value
         var body := enemy.get("body") as Node
         if body != null and is_instance_valid(body) and String(body.get_meta("story_minion", "")) == "gloam_hart":
+            count += 1
+    return count
+
+func story_aftermath_npc_activity_count(activity: String) -> int:
+    var npc_system = main.get("npc_system") if main != null else null
+    if npc_system == null:
+        return 0
+    var npcs_value = npc_system.get("npcs")
+    if not (npcs_value is Array):
+        return 0
+    var count := 0
+    for entry_value in npcs_value:
+        if not (entry_value is Dictionary):
+            continue
+        var entry: Dictionary = entry_value
+        var body := entry.get("body") as Node
+        if body != null and is_instance_valid(body) and String(body.get_meta("story_aftermath_activity", "")) == activity:
             count += 1
     return count
 

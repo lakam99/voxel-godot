@@ -35,7 +35,8 @@ func state() -> Dictionary:
         "foundClues": found_clue_rows(facts),
         "knownPreparation": known_preparation(facts, quest),
         "affectedSettlement": affected_settlement_status(region_record),
-        "resolutionHistory": resolution_rows(region_record)
+        "resolutionHistory": resolution_rows(region_record),
+        "aftermath": aftermath_rows(region_record)
     }
 
 func first_quest() -> Dictionary:
@@ -145,3 +146,15 @@ func resolution_rows(region_record: Dictionary) -> Array:
     if resolution == "":
         return [{ "label": "Resolution", "value": "???" }]
     return [{ "label": "Resolution", "value": "Released" if resolution == "release" else "Slain" }]
+
+func aftermath_rows(region_record: Dictionary) -> Array:
+    var worldmark: Dictionary = region_record.get("worldmark", {})
+    var aftermath: Dictionary = worldmark.get("aftermathState", {})
+    if aftermath.is_empty():
+        return [{ "label": "Aftermath", "value": "Not begun" }]
+    return [
+        { "label": "Storm", "value": "Cleared" if bool(aftermath.get("stormCleared", false)) else "Clearing" },
+        { "label": "Town", "value": "Secure" if bool(aftermath.get("settlementTierUnlocked", false)) else "Recovering" },
+        { "label": "Activity", "value": String(aftermath.get("residentActivity", "")) },
+        { "label": "Wildlife", "value": String(aftermath.get("wildlifeRecovery", "")) }
+    ]

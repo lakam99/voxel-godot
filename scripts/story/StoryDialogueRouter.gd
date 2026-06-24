@@ -51,6 +51,8 @@ func first_quest() -> Dictionary:
 func line_for(npc_id: String, role: String, stage: String, facts: Dictionary, scopes: Array, fallback_line: String) -> String:
     var ordinary_count := int(facts.get("ordinaryCluesFound", 0))
     var history_known := bool(facts.get("historyClueFound", false))
+    if scopes.has(NpcKnowledgeScopeScript.POST_RESOLUTION_MEMORY):
+        return post_resolution_line(npc_id, role, String(facts.get("resolution", "")), fallback_line)
     match npc_id:
         "mira":
             if stage == "speak_with_sera":
@@ -85,6 +87,29 @@ func line_for(npc_id: String, role: String, stage: String, facts: Dictionary, sc
     if fallback_line != "":
         return fallback_line
     return "People call it the Gloam Hart, but public rumor is not the same as truth."
+
+func post_resolution_line(npc_id: String, role: String, resolution: String, fallback_line: String) -> String:
+    match npc_id:
+        "mira":
+            return "The fixed storm is breaking apart. We will record that you chose %s." % ("release" if resolution == "release" else "to stand and slay it")
+        "sera":
+            if resolution == "release":
+                return "The guards are not all certain, but the lantern line feels less like a cage now."
+            return "The guards walk taller, though I will not pretend every shadow left with the Hart."
+        "rowan":
+            return "The public square can be repaired now. Give people a day and they will start building around hope again."
+        "niko":
+            if resolution == "release":
+                return "Forage trails are opening quickly. I saw deer tracks near the old stones again."
+            return "The woods are quieter. They will recover, but not as quickly as people will."
+    var lower_role := String(role).to_lower()
+    if lower_role == "guard":
+        return "Patrols remember the Gloam Hart resolution. Confidence and caution both have uses."
+    if lower_role == "forager":
+        return "The gathering paths are changing now that the storm is no longer fixed."
+    if lower_role == "trader":
+        return "A route is opening again. Not a grand market yet, but enough to move useful goods."
+    return fallback_line if fallback_line != "" else "The town remembers what happened at the storm hollow."
 
 func npc_id_for_node(node: Node, npc_name: String) -> String:
     if node.has_meta("npc_id"):

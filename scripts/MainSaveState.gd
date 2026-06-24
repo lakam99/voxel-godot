@@ -27,6 +27,10 @@ func reset_runtime_world_state() -> void:
         worldmark_influence_system.reset()
     if worldmark_encounter_controller and worldmark_encounter_controller.has_method("reset"):
         worldmark_encounter_controller.reset()
+    if settlement_state_system and settlement_state_system.has_method("reset"):
+        settlement_state_system.reset()
+    if region_aftermath_system and region_aftermath_system.has_method("reset"):
+        region_aftermath_system.reset()
     discovered_biomes.clear()
     discovered_town_keys.clear()
     discovered_shrine_keys.clear()
@@ -131,6 +135,8 @@ func apply_save_snapshot(snapshot: Dictionary) -> bool:
     restore_player_state(snapshot.get("player", {}))
     if worldmark_encounter_controller and worldmark_encounter_controller.has_method("recover_after_load"):
         worldmark_encounter_controller.recover_after_load()
+    if region_aftermath_system and region_aftermath_system.has_method("reconstruct_after_load"):
+        region_aftermath_system.reconstruct_after_load()
     restore_player_blocks(snapshot.get("blocks", []))
     if tutorial_system:
         tutorial_system.restore(snapshot.get("tutorial", {}))

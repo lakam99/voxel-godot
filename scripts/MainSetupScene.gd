@@ -486,6 +486,8 @@ func _process(delta: float) -> void:
     update_hostiles(delta)
     perf_hostiles_ms = profiled_ms(hostiles_start)
     update_npcs(delta)
+    if region_aftermath_system:
+        region_aftermath_system.update(delta)
     handle_collapse_if_needed()
     var beacon_start := Time.get_ticks_usec()
     update_beacon_charge(delta)

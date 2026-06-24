@@ -35,6 +35,8 @@ const WorldmarkInfluenceSystemScript := preload("res://scripts/story/WorldmarkIn
 const StoryJournalModelScript := preload("res://scripts/story/StoryJournalModel.gd")
 const StoryDialogueRouterScript := preload("res://scripts/story/StoryDialogueRouter.gd")
 const WorldmarkEncounterControllerScript := preload("res://scripts/story/encounters/WorldmarkEncounterController.gd")
+const SettlementStateSystemScript := preload("res://scripts/story/SettlementStateSystem.gd")
+const RegionAftermathSystemScript := preload("res://scripts/story/RegionAftermathSystem.gd")
 
 const CELL := 1.35
 const CHUNK_SIZE := 28
