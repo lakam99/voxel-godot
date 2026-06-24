@@ -3,6 +3,7 @@ class_name StoryDirector
 
 const WorldmarkDefinitionScript := preload("res://scripts/story/data/WorldmarkDefinition.gd")
 const FrontierCampaignSpineScript := preload("res://scripts/story/campaign/FrontierCampaignSpine.gd")
+const LocalLlmNarrativeTextProviderScript := preload("res://scripts/story/text/LocalLlmNarrativeTextProvider.gd")
 
 const MAX_DEDUPE_KEYS := 512
 const MAX_DEBUG_EVENTS := 24
@@ -13,6 +14,7 @@ var event_bus
 var region_generator
 var quest_system
 var campaign_spine
+var narrative_text_provider
 var campaign := {}
 var region_records := {}
 var settlements := {}
@@ -33,6 +35,8 @@ func setup(main_node, bus_node, generator_node, quest_node) -> void:
         campaign_spine.name = "FrontierCampaignSpine"
         add_child(campaign_spine)
     campaign_spine.setup(main, self, region_generator)
+    if narrative_text_provider == null:
+        narrative_text_provider = LocalLlmNarrativeTextProviderScript.new()
     if quest_system != null and quest_system.has_method("set_story_director"):
         quest_system.set_story_director(self)
     if event_bus != null:
@@ -149,6 +153,17 @@ func snapshot() -> Dictionary:
         "eventCounts": event_counts.duplicate(true),
         "currentStoryRegionId": current_story_region_id
     }
+
+func set_narrative_text_provider(provider) -> void:
+    narrative_text_provider = provider
+
+func narrative_text(request: Dictionary) -> Dictionary:
+    if narrative_text_provider == null:
+        narrative_text_provider = LocalLlmNarrativeTextProviderScript.new()
+    var text_cache: Dictionary = dictionary_value(generated_text.get("narrativeText", {}))
+    var result: Dictionary = narrative_text_provider.generate(request, text_cache)
+    generated_text["narrativeText"] = text_cache
+    return result
 
 func debug_story_dump() -> Dictionary:
     var quest_debug := {}

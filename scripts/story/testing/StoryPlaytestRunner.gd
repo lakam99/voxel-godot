@@ -6,6 +6,9 @@ const StoryEventBusScript := preload("res://scripts/story/StoryEventBus.gd")
 const StoryDirectorScript := preload("res://scripts/story/StoryDirector.gd")
 const StoryQuestSystemScript := preload("res://scripts/story/StoryQuestSystem.gd")
 const FrontierCampaignSpineScript := preload("res://scripts/story/campaign/FrontierCampaignSpine.gd")
+const TemplateNarrativeTextProviderScript := preload("res://scripts/story/text/TemplateNarrativeTextProvider.gd")
+const LocalLlmNarrativeTextProviderScript := preload("res://scripts/story/text/LocalLlmNarrativeTextProvider.gd")
+const Phase13NarrativeTextProviderTestsScript := preload("res://scripts/story/testing/Phase13NarrativeTextProviderTests.gd")
 const GloamHartArcScript := preload("res://scripts/story/arcs/GloamHartArc.gd")
 const StorySitePlacementScript := preload("res://scripts/story/data/StorySitePlacement.gd")
 const RegionStoryRecordScript := preload("res://scripts/story/data/RegionStoryRecord.gd")
@@ -47,6 +50,10 @@ const SCRIPT_PATHS := [
     "res://scripts/story/StoryDirector.gd",
     "res://scripts/story/StoryQuestSystem.gd",
     "res://scripts/story/campaign/FrontierCampaignSpine.gd",
+    "res://scripts/story/text/NarrativeTextProvider.gd",
+    "res://scripts/story/text/TemplateNarrativeTextProvider.gd",
+    "res://scripts/story/text/LocalLlmNarrativeTextProvider.gd",
+    "res://scripts/story/testing/Phase13NarrativeTextProviderTests.gd",
     "res://scripts/story/arcs/GloamHartArc.gd",
     "res://scripts/story/RegionStoryGenerator.gd",
     "res://scripts/story/data/StorySitePlacement.gd",
@@ -108,6 +115,7 @@ func run() -> void:
     test_duplicate_events_do_not_duplicate_story_effects()
     await test_main_scene_instantiates()
     test_phase12_campaign_spine_progression_and_endless_play()
+    test_phase13_narrative_text_provider_contracts()
     test_phase4_source_events_and_quest_state_round_trip()
     test_first_arc_waits_for_tutorial_completion()
     test_tutorial_completion_starts_first_quest_once()
@@ -544,6 +552,15 @@ func test_phase12_campaign_spine_progression_and_endless_play() -> void:
             post_campaign_event_before,
             post_campaign_event_after
         ]
+    )
+
+func test_phase13_narrative_text_provider_contracts() -> void:
+    var tester := Phase13NarrativeTextProviderTestsScript.new()
+    var result: Dictionary = tester.run(main, main.get("story_director") if main != null else null)
+    add_result(
+        "phase13_narrative_text_provider_contracts",
+        bool(result.get("ok", false)),
+        String(result.get("details", ""))
     )
 
 func test_story_snapshot_save_load_preserves_records_exactly() -> void:
