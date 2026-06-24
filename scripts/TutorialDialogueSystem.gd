@@ -59,6 +59,9 @@ func interact_with(node: Node) -> bool:
     var quest_line := handle_npc_quest(npc_id)
     if quest_line != "":
         line = quest_line
+    var story_reaction := story_reaction_line(node, npc_id, npc_name, npc_role, line)
+    if story_reaction != "":
+        line = story_reaction
     system.last_message = "%s: %s" % [npc_name, line]
     system.last_dialogue = make_dialogue_payload(npc_name, npc_role, line, npc_id, npc_id == "mira" and system.is_intro_elder_waiting_for_ack())
     if main and main.has_method("update_objectives_and_contracts"):
@@ -67,6 +70,18 @@ func interact_with(node: Node) -> bool:
         node.set_meta("xp_awarded", true)
         main.award_progression("Met %s" % npc_name, 4)
     return true
+
+func story_reaction_line(node: Node, npc_id: String, npc_name: String, npc_role: String, fallback_line: String) -> String:
+    if main == null or main.get("story_dialogue_router") == null:
+        return ""
+    var router = main.get("story_dialogue_router")
+    if not router.has_method("response_for_npc"):
+        return ""
+    var response: Dictionary = router.response_for_npc(npc_id, npc_name, npc_role, fallback_line)
+    if not bool(response.get("handled", false)):
+        return ""
+    router.last_response = response.duplicate(true)
+    return String(response.get("text", ""))
 
 func handle_npc_quest(npc_id: String) -> String:
     match npc_id:

@@ -147,6 +147,33 @@ static func build_ui(hud) -> void:
     hud.contract_recent.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
     contract_box.add_child(hud.contract_recent)
 
+    hud.story_panel = PanelContainer.new()
+    hud.story_panel.visible = false
+    hud.story_panel.anchor_left = 1.0
+    hud.story_panel.anchor_right = 1.0
+    hud.story_panel.offset_left = -430
+    hud.story_panel.offset_right = -22
+    hud.story_panel.offset_top = 188
+    hud.story_panel.offset_bottom = 560
+    root.add_child(hud.story_panel)
+    var story_box := VBoxContainer.new()
+    story_box.add_theme_constant_override("separation", 6)
+    hud.story_panel.add_child(story_box)
+    var story_title := Label.new()
+    story_title.text = "Story"
+    story_title.add_theme_font_size_override("font_size", 20)
+    story_box.add_child(story_title)
+    hud.story_status_label = Label.new()
+    hud.story_status_label.text = "No active investigation"
+    hud.story_status_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+    story_box.add_child(hud.story_status_label)
+    var story_scroll := ScrollContainer.new()
+    story_scroll.custom_minimum_size = Vector2(380, 288)
+    story_box.add_child(story_scroll)
+    hud.story_list = VBoxContainer.new()
+    hud.story_list.add_theme_constant_override("separation", 5)
+    story_scroll.add_child(hud.story_list)
+
     build_victory_panel(hud, root)
     build_dialogue_panel(hud, root)
     build_progress_and_inventory(hud, root)

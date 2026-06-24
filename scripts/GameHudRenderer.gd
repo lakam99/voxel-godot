@@ -226,6 +226,45 @@ static func render_contracts(hud) -> void:
         label.modulate = Color(0.74, 0.92, 0.78) if done else (Color(1.0, 0.92, 0.62) if active else Color(0.88, 0.90, 0.86))
         hud.contract_list.add_child(label)
 
+static func render_story_journal(hud) -> void:
+    if hud.story_panel == null or hud.story_list == null or hud.story_status_label == null:
+        return
+    clear_container(hud.story_list)
+    var state: Dictionary = hud.story_state
+    if state.is_empty() or not bool(state.get("active", false)):
+        hud.story_status_label.text = "No active investigation"
+        add_story_label(hud, "No active story quest", Color(0.82, 0.84, 0.80))
+        return
+    hud.story_status_label.text = "%s\n%s" % [String(state.get("title", "Story")), String(state.get("status", ""))]
+    add_story_section(hud, "Dossier", state.get("dossier", []))
+    add_story_section(hud, "Found Clues", state.get("foundClues", []))
+    add_story_section(hud, "Optional", state.get("optionalObjectives", []))
+    add_story_label(hud, "Preparation: %s" % String(state.get("knownPreparation", "???")), Color(0.88, 0.90, 0.86))
+    add_story_label(hud, "Region: %s" % String(state.get("affectedRegionId", "???")), Color(0.78, 0.86, 0.92))
+    add_story_label(hud, "Settlement: %s" % String(state.get("affectedSettlement", "???")), Color(0.78, 0.86, 0.92))
+
+static func add_story_section(hud, title: String, rows_value) -> void:
+    add_story_label(hud, title, Color(1.0, 0.92, 0.62))
+    var rows: Array = rows_value if rows_value is Array else []
+    if rows.is_empty():
+        add_story_label(hud, "???", Color(0.70, 0.72, 0.70))
+        return
+    for row_value in rows:
+        if not (row_value is Dictionary):
+            continue
+        var row: Dictionary = row_value
+        var label := String(row.get("label", ""))
+        var value := String(row.get("value", ""))
+        var text := label if value == "" else "%s: %s" % [label, value]
+        add_story_label(hud, text, Color(0.74, 0.92, 0.78) if bool(row.get("complete", false)) else Color(0.88, 0.90, 0.86))
+
+static func add_story_label(hud, text: String, color: Color) -> void:
+    var label := Label.new()
+    label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+    label.text = text
+    label.modulate = color
+    hud.story_list.add_child(label)
+
 static func render_active(hud) -> void:
     var stack: Dictionary = hud.inventory.active_stack()
     var item_id := String(stack.get("item", ""))

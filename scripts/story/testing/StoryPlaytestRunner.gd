@@ -8,6 +8,9 @@ const StoryQuestSystemScript := preload("res://scripts/story/StoryQuestSystem.gd
 const StorySitePlacementScript := preload("res://scripts/story/data/StorySitePlacement.gd")
 const StoryWorldOverlaySystemScript := preload("res://scripts/story/StoryWorldOverlaySystem.gd")
 const WorldmarkInfluenceSystemScript := preload("res://scripts/story/WorldmarkInfluenceSystem.gd")
+const StoryJournalModelScript := preload("res://scripts/story/StoryJournalModel.gd")
+const StoryDialogueRouterScript := preload("res://scripts/story/StoryDialogueRouter.gd")
+const NpcKnowledgeScopeScript := preload("res://scripts/story/data/NpcKnowledgeScope.gd")
 
 const FIRST_QUEST_ID := "story.gloam_hart.storm"
 
@@ -35,6 +38,9 @@ const SCRIPT_PATHS := [
     "res://scripts/story/StoryInteractable.gd",
     "res://scripts/story/StoryWorldOverlaySystem.gd",
     "res://scripts/story/WorldmarkInfluenceSystem.gd",
+    "res://scripts/story/StoryJournalModel.gd",
+    "res://scripts/story/StoryDialogueRouter.gd",
+    "res://scripts/story/data/NpcKnowledgeScope.gd",
     "res://scripts/visual/VisualAssetRegistry.gd",
     "res://scripts/visual/CharacterAssetRegistry.gd",
     "res://scripts/visual/StaticItemAssetRegistry.gd",
@@ -82,6 +88,11 @@ func run() -> void:
     test_story_interactable_clues_dedupe_and_progress()
     test_historical_clue_unlock_persists_and_quest_round_trips()
     test_optional_history_interactable_state_persists_and_sites_round_trips()
+    test_story_journal_hides_hidden_truth_until_history()
+    test_story_dialogue_router_filters_npc_knowledge()
+    test_story_dialogue_router_generic_fallback()
+    test_story_journal_save_load_round_trips()
+    await test_story_journal_ui_viewports()
     test_story_snapshot_save_load_preserves_records_exactly()
     test_old_save_without_story_field_loads()
     test_story_artifacts_directory_writable()
@@ -205,6 +216,8 @@ func test_main_scene_instantiates() -> void:
         "story_site_placement",
         "story_world_overlay_system",
         "worldmark_influence_system",
+        "story_journal_model",
+        "story_dialogue_router",
         "hud",
         "visual_asset_registry",
         "static_item_asset_registry",
@@ -611,6 +624,141 @@ func test_optional_history_interactable_state_persists_and_sites_round_trips() -
         ]
     )
 
+func test_story_journal_hides_hidden_truth_until_history() -> void:
+    var director = main.get("story_director")
+    reset_story_runtime(director)
+    var quest := advance_to_clue_stage(director)
+    var affected := String(quest.get("affectedRegionId", ""))
+    var journal = main.get("story_journal_model")
+    var before: Dictionary = journal.state()
+    var before_hidden := dossier_value(before, "Hidden truth")
+    director.ingest_event(story_event("story_clue_found", "clue:old_compact_record", affected, "", {
+        "clueKind": "historical",
+        "clueId": "historical:old_compact_record"
+    }))
+    var after: Dictionary = journal.state()
+    var after_hidden := dossier_value(after, "Hidden truth")
+    add_result(
+        "story_journal_hides_hidden_truth_until_history",
+        bool(before.get("active", false))
+            and before_hidden == "???"
+            and after_hidden.find("compact") >= 0
+            and after_hidden.find("spare") >= 0,
+        "before '%s', after '%s', affected %s" % [before_hidden, after_hidden, affected]
+    )
+
+func test_story_dialogue_router_filters_npc_knowledge() -> void:
+    var director = main.get("story_director")
+    reset_story_runtime(director)
+    var quest := advance_to_clue_stage(director)
+    var affected := String(quest.get("affectedRegionId", ""))
+    var router = main.get("story_dialogue_router")
+    var before: Dictionary = router.response_for_npc("niko", "Niko", "Forager", "")
+    var before_text := String(before.get("text", "")).to_lower()
+    director.ingest_event(story_event("story_clue_found", "clue:old_compact_record", affected, "", {
+        "clueKind": "historical",
+        "clueId": "historical:old_compact_record"
+    }))
+    var after: Dictionary = router.response_for_npc("niko", "Niko", "Forager", "")
+    var after_text := String(after.get("text", "")).to_lower()
+    var scopes: Array = before.get("knowledgeScopes", [])
+    add_result(
+        "story_dialogue_router_filters_npc_knowledge",
+        bool(before.get("handled", false))
+            and scopes.has("public_town_rumor")
+            and scopes.has("role_specific_knowledge")
+            and not bool(before.get("hiddenTruthKnown", false))
+            and before_text.find("compact") < 0
+            and bool(after.get("hiddenTruthKnown", false))
+            and after_text.find("compact") >= 0,
+        "before scopes %s hidden %s text '%s', after hidden %s text '%s'" % [
+            str(scopes),
+            str(before.get("hiddenTruthKnown", false)),
+            before.get("text", ""),
+            str(after.get("hiddenTruthKnown", false)),
+            after.get("text", "")
+        ]
+    )
+
+func test_story_dialogue_router_generic_fallback() -> void:
+    var director = main.get("story_director")
+    reset_story_runtime(director)
+    advance_to_clue_stage(director)
+    var router = main.get("story_dialogue_router")
+    var body := StaticBody3D.new()
+    body.name = "GeneratedStoryResident"
+    body.set_meta("kind", "npc")
+    body.set_meta("npc_name", "Iven")
+    body.set_meta("npc_role", "Guard")
+    add_child(body)
+    var response: Dictionary = router.interact_with_node(body)
+    var snapshot: Dictionary = director.snapshot()
+    var event_counts: Dictionary = snapshot.get("eventCounts", {})
+    var scopes_value = response.get("knowledgeScopes", [])
+    var scopes: Array = scopes_value if scopes_value is Array else []
+    body.queue_free()
+    add_result(
+        "story_dialogue_router_generic_fallback",
+        bool(response.get("handled", false))
+            and String(response.get("text", "")).to_lower().find("compact") < 0
+            and String(response.get("text", "")).to_lower().find("spare") < 0
+            and String(response.get("text", "")).to_lower().find("cage") < 0
+            and scopes.has("role_specific_knowledge")
+            and int(event_counts.get("npc_spoken_to", 0)) >= 1,
+        "handled %s scopes %s events %d text '%s'" % [
+            str(response.get("handled", false)),
+            str(response.get("knowledgeScopes", [])),
+            int(event_counts.get("npc_spoken_to", 0)),
+            response.get("text", "")
+        ]
+    )
+
+func test_story_journal_save_load_round_trips() -> void:
+    var director = main.get("story_director")
+    reset_story_runtime(director)
+    var quest := advance_to_clue_stage(director)
+    var affected := String(quest.get("affectedRegionId", ""))
+    director.ingest_event(story_event("story_clue_found", "clue:scarred_tree", affected, "", {
+        "clueKind": "ordinary",
+        "clueId": "ordinary:scarred_tree"
+    }))
+    var journal = main.get("story_journal_model")
+    var before_json := stable_json(journal.state())
+    var save_snapshot: Dictionary = main.create_save_snapshot()
+    var loaded := bool(main.apply_save_snapshot(save_snapshot))
+    journal = main.get("story_journal_model")
+    var after_json := stable_json(journal.state())
+    add_result(
+        "story_journal_save_load_round_trips",
+        loaded and before_json == after_json,
+        "loaded %s, before %d chars, after %d chars" % [str(loaded), before_json.length(), after_json.length()]
+    )
+
+func test_story_journal_ui_viewports() -> void:
+    var director = main.get("story_director")
+    reset_story_runtime(director)
+    advance_to_clue_stage(director)
+    var hud_node = main.get("hud")
+    var old_size := get_window().size
+    var ok := true
+    var details: Array[String] = []
+    for size in [Vector2i(1280, 720), Vector2i(1920, 1080)]:
+        get_window().size = size
+        await get_tree().process_frame
+        hud_node.set_story_journal_open(true)
+        await get_tree().process_frame
+        var rect: Rect2 = hud_node.story_panel.get_global_rect()
+        var fits := rect.position.x >= 0.0 and rect.position.y >= 0.0 and rect.end.x <= float(size.x) and rect.end.y <= float(size.y)
+        ok = ok and hud_node.story_panel.visible and fits and rect.size.x >= 360.0 and rect.size.y >= 300.0
+        details.append("%s rect %s fits %s" % [str(size), str(rect), str(fits)])
+        hud_node.set_story_journal_open(false)
+    get_window().size = old_size
+    add_result(
+        "story_journal_ui_viewports",
+        ok,
+        "; ".join(details)
+    )
+
 func test_old_save_without_story_field_loads() -> void:
     if main == null:
         add_result("old_save_without_story_field_loads", false, "main missing")
@@ -772,6 +920,16 @@ func story_site_node(definition_id: String) -> Node:
         if String(site.get("definitionId", "")) == definition_id:
             return story_node
     return null
+
+func dossier_value(journal_state: Dictionary, label: String) -> String:
+    var rows: Array = journal_state.get("dossier", [])
+    for row_value in rows:
+        if not (row_value is Dictionary):
+            continue
+        var row: Dictionary = row_value
+        if String(row.get("label", "")) == label:
+            return String(row.get("value", ""))
+    return ""
 
 func wait_physics_frames(count: int) -> void:
     for i in range(count):

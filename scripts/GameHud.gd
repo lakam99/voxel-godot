@@ -29,6 +29,7 @@ var crafting
 var objectives
 var equipment
 var contracts
+var story_journal
 
 var hud_root: Control
 var ui_theme: Theme
@@ -83,6 +84,9 @@ var contract_panel: PanelContainer
 var contract_status: Label
 var contract_list: VBoxContainer
 var contract_recent: Label
+var story_panel: PanelContainer
+var story_status_label: Label
+var story_list: VBoxContainer
 var victory_panel: PanelContainer
 var victory_stats_list: GridContainer
 var dialogue_panel: PanelContainer
@@ -103,13 +107,15 @@ var playtest_cases := []
 var map_enabled := false
 var map_collapsed := false
 var current_map_state := {}
+var story_state := {}
 
-func setup(inventory_system, crafting_system, objective_system = null, equipment_system = null, contract_system = null) -> void:
+func setup(inventory_system, crafting_system, objective_system = null, equipment_system = null, contract_system = null, story_journal_model = null) -> void:
     inventory = inventory_system
     crafting = crafting_system
     objectives = objective_system
     equipment = equipment_system
     contracts = contract_system
+    story_journal = story_journal_model
     icon_factory = ItemIconFactoryScript.new()
     build_ui()
     inventory.changed.connect(render)
@@ -182,6 +188,8 @@ func set_settings_open(open: bool) -> void:
             contract_panel.visible = false
             if contracts:
                 contracts.toggle_menu(false)
+        if story_panel:
+            story_panel.visible = false
 
 func toggle_settings() -> bool:
     set_settings_open(not settings_panel.visible)
@@ -207,6 +215,8 @@ func set_game_menu_open(open: bool) -> void:
             contract_panel.visible = false
             if contracts:
                 contracts.toggle_menu(false)
+        if story_panel:
+            story_panel.visible = false
 
 func toggle_game_menu() -> bool:
     set_game_menu_open(not game_menu_panel.visible)
@@ -231,6 +241,8 @@ func set_playtest_open(open: bool) -> void:
             contract_panel.visible = false
             if contracts:
                 contracts.toggle_menu(false)
+        if story_panel:
+            story_panel.visible = false
 
 func toggle_playtest() -> bool:
     set_playtest_open(not playtest_panel.visible)
@@ -328,6 +340,8 @@ func set_inventory_open(open: bool) -> void:
         contract_panel.visible = false
         if contracts:
             contracts.toggle_menu(false)
+    if open and story_panel:
+        story_panel.visible = false
     if open and teleport_panel:
         teleport_panel.visible = false
     if open and settings_panel:
@@ -362,6 +376,8 @@ func set_teleport_open(open: bool) -> void:
             contract_panel.visible = false
             if contracts:
                 contracts.toggle_menu(false)
+        if story_panel:
+            story_panel.visible = false
         if settings_panel:
             settings_panel.visible = false
         if playtest_panel:
@@ -389,6 +405,8 @@ func toggle_objectives() -> bool:
         hide_dialogue()
     if contract_panel:
         contract_panel.visible = false
+    if story_panel:
+        story_panel.visible = false
     objective_panel.visible = not objective_panel.visible
     render_objectives()
     return objective_panel.visible
@@ -408,12 +426,50 @@ func toggle_contracts() -> bool:
         return false
     if objective_panel:
         objective_panel.visible = false
+    if story_panel:
+        story_panel.visible = false
     var open: bool = contracts.toggle_menu()
     render_contracts()
     return open
 
 func is_contracts_open() -> bool:
     return contract_panel != null and contract_panel.visible
+
+func set_story_journal_state(state: Dictionary) -> void:
+    story_state = state.duplicate(true)
+    if story_panel != null and story_panel.visible:
+        render_story_journal()
+
+func set_story_journal_open(open: bool) -> void:
+    if story_panel == null:
+        return
+    story_panel.visible = open
+    if open:
+        hide_dialogue()
+        set_inventory_open(false)
+        set_teleport_open(false)
+        set_settings_open(false)
+        set_playtest_open(false)
+        hide_utility_panel()
+        if game_menu_panel:
+            game_menu_panel.visible = false
+        if objective_panel:
+            objective_panel.visible = false
+        if contract_panel:
+            contract_panel.visible = false
+            if contracts:
+                contracts.toggle_menu(false)
+        if story_journal != null and story_journal.has_method("state"):
+            set_story_journal_state(story_journal.state())
+        else:
+            render_story_journal()
+
+func toggle_story_journal() -> bool:
+    set_story_journal_open(not story_panel.visible)
+    return story_panel.visible
+
+func is_story_journal_open() -> bool:
+    return story_panel != null and story_panel.visible
 
 func show_victory(stats: Array) -> void:
     GameHudOverlayControllerScript.show_victory(self, stats)
@@ -457,6 +513,9 @@ func render_objectives() -> void:
 
 func render_contracts() -> void:
     GameHudRendererScript.render_contracts(self)
+
+func render_story_journal() -> void:
+    GameHudRendererScript.render_story_journal(self)
 
 func render_active() -> void:
     GameHudRendererScript.render_active(self)

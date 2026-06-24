@@ -314,7 +314,7 @@ func setup_hud() -> void:
     hud = GameHudScript.new()
     hud.name = "HUD"
     add_child(hud)
-    hud.setup(inventory_system, crafting_system, objective_system, equipment_system, contract_system)
+    hud.setup(inventory_system, crafting_system, objective_system, equipment_system, contract_system, story_journal_model)
     hud.slot_clicked.connect(_on_ui_slot_clicked)
     hud.slot_moved.connect(_on_ui_slot_moved)
     hud.craft_requested.connect(_on_craft_requested)

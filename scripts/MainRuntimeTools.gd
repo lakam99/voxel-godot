@@ -144,6 +144,10 @@ func use_or_place() -> void:
                     held_item.play_use("interact")
                 show_tutorial_dialogue(tutorial_system.last_message)
                 return
+        if collider and interact_story_dialogue_node(collider):
+            if held_item:
+                held_item.play_use("interact")
+            return
         if collider and interact_story_node(collider):
             if held_item:
                 held_item.play_use("interact")

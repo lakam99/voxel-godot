@@ -62,6 +62,8 @@ var region_story_generator
 var story_site_placement
 var story_world_overlay_system
 var worldmark_influence_system
+var story_journal_model
+var story_dialogue_router
 var item_visual_factory
 var visual_asset_registry
 var static_item_asset_registry
@@ -337,6 +339,16 @@ func setup_story_systems() -> void:
         worldmark_influence_system.name = "WorldmarkInfluenceSystem"
         add_child(worldmark_influence_system)
     worldmark_influence_system.setup(self, story_director)
+    if story_journal_model == null:
+        story_journal_model = StoryJournalModelScript.new()
+        story_journal_model.name = "StoryJournalModel"
+        add_child(story_journal_model)
+    story_journal_model.setup(self, story_director)
+    if story_dialogue_router == null:
+        story_dialogue_router = StoryDialogueRouterScript.new()
+        story_dialogue_router.name = "StoryDialogueRouter"
+        add_child(story_dialogue_router)
+    story_dialogue_router.setup(self, story_director)
 
 func story_region_id_for_cell(cell: Vector2i) -> String:
     if story_director != null and story_director.has_method("region_id_for_cell"):
@@ -380,6 +392,23 @@ func interact_story_node(node: Node) -> bool:
         return false
     return bool(story_world_overlay_system.interact_with_node(node))
 
+func interact_story_dialogue_node(node: Node) -> bool:
+    if story_dialogue_router == null or not story_dialogue_router.has_method("interact_with_node"):
+        return false
+    var response: Dictionary = story_dialogue_router.interact_with_node(node)
+    if response.is_empty() or not bool(response.get("handled", false)):
+        return false
+    if hud and hud.has_method("show_dialogue"):
+        hud.show_dialogue(
+            String(response.get("speaker", "Resident")),
+            String(response.get("role", "")),
+            String(response.get("text", "")),
+            response
+        )
+    if npc_system and node is Node3D and player:
+        npc_system.focus_dialogue_npc(node, player.global_position)
+    return true
+
 func debug_story_dump() -> Dictionary:
     var dump: Dictionary = story_director.debug_story_dump() if story_director != null and story_director.has_method("debug_story_dump") else {
         "currentStoryRegionId": "",
@@ -388,6 +417,7 @@ func debug_story_dump() -> Dictionary:
     }
     dump["overlay"] = story_world_overlay_system.debug_state() if story_world_overlay_system != null and story_world_overlay_system.has_method("debug_state") else {}
     dump["influence"] = worldmark_influence_system.debug_state() if worldmark_influence_system != null and worldmark_influence_system.has_method("debug_state") else {}
+    dump["journal"] = story_journal_model.state() if story_journal_model != null and story_journal_model.has_method("state") else {}
     return dump
 
 func setup_visual_asset_registry() -> void:

@@ -37,6 +37,9 @@ func _unhandled_input(event: InputEvent) -> void:
             elif hud and hud.is_contracts_open() and contract_system:
                 contract_system.toggle_menu(false)
                 update_hud("Contracts closed")
+            elif hud and hud.is_story_journal_open():
+                hud.set_story_journal_open(false)
+                update_hud("Story closed")
             elif utility_system and utility_system.is_open():
                 utility_system.close()
                 Input.set_mouse_mode(Input.MOUSE_MODE_CAPTURED)
@@ -63,6 +66,10 @@ func _unhandled_input(event: InputEvent) -> void:
         if event.keycode == KEY_J:
             var contracts_open: bool = hud.toggle_contracts()
             update_hud("Contracts opened" if contracts_open else "Contracts closed")
+            return
+        if event.keycode == KEY_L:
+            var story_open: bool = hud.toggle_story_journal()
+            update_hud("Story opened" if story_open else "Story closed")
             return
         if event.keycode == KEY_M:
             if has_map():
@@ -113,6 +120,7 @@ func _unhandled_input(event: InputEvent) -> void:
         or hud.is_utility_open()
         or hud.is_teleport_open()
         or hud.is_contracts_open()
+        or hud.is_story_journal_open()
         or hud.is_settings_open()
         or hud.is_playtest_open()
         or hud.is_game_menu_open()
@@ -187,6 +195,8 @@ func update_hud(message: String = "", throttled: bool = false) -> void:
         hud.set_equipment(equipment_system.state())
     if contract_system:
         hud.set_contracts(contract_system.state())
+    if story_journal_model and hud.has_method("set_story_journal_state"):
+        hud.set_story_journal_state(story_journal_model.state())
     hud.set_navigation(
         has_compass(),
         has_map(),
