@@ -67,6 +67,8 @@ var story_dialogue_router
 var worldmark_encounter_controller
 var settlement_state_system
 var region_aftermath_system
+var story_accessibility_settings
+var story_debug_tools
 var item_visual_factory
 var visual_asset_registry
 var static_item_asset_registry
@@ -131,7 +133,13 @@ var runtime_settings := {
     "fullscreen": false,
     "lookSmoothing": 0.0,
     "headBob": true,
-    "handSway": true
+    "handSway": true,
+    "storyTextSpeed": 2.0,
+    "storySubtitles": true,
+    "storyJournalFontScale": 1.0,
+    "storyColorIndependentClues": true,
+    "storyReplayDiscoveredText": true,
+    "storyControllerNavigation": true
 }
 var render_distance := RENDER_DISTANCE
 var shadows_enabled := true
@@ -373,6 +381,17 @@ func setup_story_systems() -> void:
         story_dialogue_router.name = "StoryDialogueRouter"
         add_child(story_dialogue_router)
     story_dialogue_router.setup(self, story_director)
+    if story_accessibility_settings == null:
+        story_accessibility_settings = StoryAccessibilitySettingsScript.new()
+        story_accessibility_settings.name = "StoryAccessibilitySettings"
+        add_child(story_accessibility_settings)
+    story_accessibility_settings.setup(self)
+    story_accessibility_settings.apply_runtime_settings(runtime_settings)
+    if story_debug_tools == null:
+        story_debug_tools = StoryDebugToolsScript.new()
+        story_debug_tools.name = "StoryDebugTools"
+        add_child(story_debug_tools)
+    story_debug_tools.setup(self, story_director)
 
 func story_region_id_for_cell(cell: Vector2i) -> String:
     if story_director != null and story_director.has_method("region_id_for_cell"):
@@ -465,6 +484,11 @@ func try_release_story_worldmark() -> bool:
         return false
     return bool(worldmark_encounter_controller.try_release_active_encounter())
 
+func run_story_debug_command(command: String, args := {}) -> Dictionary:
+    if story_debug_tools == null or not story_debug_tools.has_method("run_command"):
+        return { "ok": false, "command": command, "message": "Story debug tools unavailable" }
+    return story_debug_tools.run_command(command, args)
+
 func interact_story_dialogue_node(node: Node) -> bool:
     if story_dialogue_router == null or not story_dialogue_router.has_method("interact_with_node"):
         return false
@@ -494,6 +518,8 @@ func debug_story_dump() -> Dictionary:
     dump["encounter"] = worldmark_encounter_controller.debug_state() if worldmark_encounter_controller != null and worldmark_encounter_controller.has_method("debug_state") else {}
     dump["settlement"] = settlement_state_system.debug_state() if settlement_state_system != null and settlement_state_system.has_method("debug_state") else {}
     dump["aftermath"] = region_aftermath_system.debug_state() if region_aftermath_system != null and region_aftermath_system.has_method("debug_state") else {}
+    dump["accessibility"] = story_accessibility_settings.state() if story_accessibility_settings != null and story_accessibility_settings.has_method("state") else {}
+    dump["debugTools"] = story_debug_tools.debug_state() if story_debug_tools != null and story_debug_tools.has_method("debug_state") else {}
     return dump
 
 func setup_visual_asset_registry() -> void:

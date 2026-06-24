@@ -11,7 +11,13 @@ func apply_runtime_setting(setting: String, value, sync_hud: bool = true) -> voi
         value = clampf(float(value), 0.0, 1.0)
     elif setting == "lookSmoothing":
         value = clampf(float(value), 0.0, 0.82)
+    elif setting == "storyTextSpeed":
+        value = clampf(float(value), 0.5, 2.0)
+    elif setting == "storyJournalFontScale":
+        value = clampf(float(value), 0.85, 1.35)
     elif setting in ["invertY", "shadows", "fullscreen", "headBob", "handSway"]:
+        value = bool(value)
+    elif setting in ["storySubtitles", "storyColorIndependentClues", "storyReplayDiscoveredText", "storyControllerNavigation"]:
         value = bool(value)
     else:
         return
@@ -43,6 +49,11 @@ func apply_runtime_setting(setting: String, value, sync_hud: bool = true) -> voi
     elif setting == "fullscreen" and OS.get_environment("VOXEL_PLAYTEST") == "":
         var mode := DisplayServer.WINDOW_MODE_FULLSCREEN if bool(value) else DisplayServer.WINDOW_MODE_WINDOWED
         DisplayServer.window_set_mode(mode)
+    elif setting.begins_with("story"):
+        if story_accessibility_settings and story_accessibility_settings.has_method("apply_runtime_settings"):
+            story_accessibility_settings.apply_runtime_settings(runtime_settings)
+        if hud and hud.has_method("set_story_accessibility_state") and story_accessibility_settings:
+            hud.set_story_accessibility_state(story_accessibility_settings.state())
 
     if sync_hud and hud:
         hud.set_settings_state(runtime_settings)
@@ -62,6 +73,10 @@ func debug_performance_state() -> Dictionary:
     var visual_count := count_visual_nodes(chunk_root) + count_visual_nodes(prop_root) + count_visual_nodes(block_root)
     if weather_system:
         visual_count += count_visual_nodes(weather_system)
+    var story_perf := {
+        "overlay": story_world_overlay_system.performance_state() if story_world_overlay_system != null and story_world_overlay_system.has_method("performance_state") else {},
+        "encounter": worldmark_encounter_controller.performance_state() if worldmark_encounter_controller != null and worldmark_encounter_controller.has_method("performance_state") else {}
+    }
     return {
         "fps": Engine.get_frames_per_second(),
         "chunks": chunks.size(),
@@ -83,7 +98,8 @@ func debug_performance_state() -> Dictionary:
         "breakMs": perf_break_ms,
         "hudMs": perf_hud_ms,
         "hudRefresh": hud_refresh_stats(),
-        "chunkCache": chunk_asset_cache_stats()
+        "chunkCache": chunk_asset_cache_stats(),
+        "story": story_perf
     }
 
 func count_nodes_with_meta(node: Node, key: String, expected: String = "") -> int:

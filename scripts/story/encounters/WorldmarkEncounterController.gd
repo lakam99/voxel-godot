@@ -3,6 +3,8 @@ class_name WorldmarkEncounterController
 
 const GloamHartEncounterScene := preload("res://scenes/story/GloamHartEncounter.tscn")
 const FIRST_QUEST_ID := "story.gloam_hart.storm"
+const ENCOUNTER_NODE_BUDGET := 80
+const ENCOUNTER_MINION_BUDGET := 6
 const REWARD_TABLE := {
     "slay": { "nightShard": 6, "riftCore": 1, "relicFragment": 2 },
     "release": { "wardTonic": 2, "relicFragment": 3 }
@@ -312,5 +314,38 @@ func debug_state() -> Dictionary:
         "activeRegionId": active_region_id,
         "recoveredFromSave": recovered_from_save,
         "lastMessage": last_message,
-        "encounter": active_encounter.debug_state() if active_encounter != null and is_instance_valid(active_encounter) and active_encounter.has_method("debug_state") else {}
+        "encounter": active_encounter.debug_state() if active_encounter != null and is_instance_valid(active_encounter) and active_encounter.has_method("debug_state") else {},
+        "performance": performance_state()
     }
+
+func performance_state() -> Dictionary:
+    var node_count := count_nodes_recursive(active_encounter)
+    var visual_count := count_visual_nodes(active_encounter)
+    var minion_count := 0
+    if active_encounter != null and is_instance_valid(active_encounter) and active_encounter.has_method("debug_state"):
+        minion_count = int(active_encounter.debug_state().get("minions", 0))
+    return {
+        "active": active_encounter != null and is_instance_valid(active_encounter),
+        "nodeCount": node_count,
+        "nodeBudget": ENCOUNTER_NODE_BUDGET,
+        "visualNodeCount": visual_count,
+        "minionCount": minion_count,
+        "minionBudget": ENCOUNTER_MINION_BUDGET,
+        "budgetOk": node_count <= ENCOUNTER_NODE_BUDGET and minion_count <= ENCOUNTER_MINION_BUDGET
+    }
+
+func count_nodes_recursive(node: Node) -> int:
+    if node == null or not is_instance_valid(node):
+        return 0
+    var count := 1
+    for child in node.get_children():
+        count += count_nodes_recursive(child)
+    return count
+
+func count_visual_nodes(node: Node) -> int:
+    if node == null or not is_instance_valid(node):
+        return 0
+    var count := 1 if node is MeshInstance3D or node is MultiMeshInstance3D else 0
+    for child in node.get_children():
+        count += count_visual_nodes(child)
+    return count

@@ -149,6 +149,7 @@ static func build_ui(hud) -> void:
 
     hud.story_panel = PanelContainer.new()
     hud.story_panel.visible = false
+    hud.story_panel.focus_mode = Control.FOCUS_ALL
     hud.story_panel.anchor_left = 1.0
     hud.story_panel.anchor_right = 1.0
     hud.story_panel.offset_left = -430
@@ -246,6 +247,7 @@ static func build_dialogue_panel(hud, root: Control) -> void:
 
     hud.dialogue_panel = PanelContainer.new()
     hud.dialogue_panel.visible = false
+    hud.dialogue_panel.focus_mode = Control.FOCUS_ALL
     hud.dialogue_panel.anchor_left = 0.5
     hud.dialogue_panel.anchor_right = 0.5
     hud.dialogue_panel.anchor_top = 1.0

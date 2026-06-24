@@ -37,7 +37,10 @@ static func set_performance(hud, state: Dictionary) -> void:
         return
     var hud_refresh: Dictionary = state.get("hudRefresh", {})
     var chunk_cache: Dictionary = state.get("chunkCache", {})
-    hud.performance_label.text = "FPS %d | frame %.2fms | chunks %d | props %d | blocks %d\nhostiles %d | pickups %d | bodies %d | draw est %d\nchunk %.2f | sky %.2f | hostile %.2f | survival %.2f | hud %.2f\nutility %.2f | pickups %.2f | beacon %.2f | break %.2f | save %.2f\nHUD refresh %d/%d skip %d | chunk cache h/m/i %d/%d/%d" % [
+    var story: Dictionary = state.get("story", {})
+    var story_overlay: Dictionary = story.get("overlay", {}) if story is Dictionary else {}
+    var story_encounter: Dictionary = story.get("encounter", {}) if story is Dictionary else {}
+    hud.performance_label.text = "FPS %d | frame %.2fms | chunks %d | props %d | blocks %d\nhostiles %d | pickups %d | bodies %d | draw est %d\nchunk %.2f | sky %.2f | hostile %.2f | survival %.2f | hud %.2f\nutility %.2f | pickups %.2f | beacon %.2f | break %.2f | save %.2f\nHUD refresh %d/%d skip %d | chunk cache h/m/i %d/%d/%d\nstory overlay %d/%d | encounter %d/%d" % [
         roundi(float(state.get("fps", 0.0))),
         float(state.get("frameMs", 0.0)),
         int(state.get("chunks", 0)),
@@ -62,8 +65,21 @@ static func set_performance(hud, state: Dictionary) -> void:
         int(hud_refresh.get("skipped", 0)),
         int(chunk_cache.get("hits", 0)),
         int(chunk_cache.get("misses", 0)),
-        int(chunk_cache.get("invalidations", 0))
+        int(chunk_cache.get("invalidations", 0)),
+        int(story_overlay.get("nodeCount", 0)),
+        int(story_overlay.get("nodeBudget", 0)),
+        int(story_encounter.get("nodeCount", 0)),
+        int(story_encounter.get("nodeBudget", 0))
     ]
+
+static func apply_story_accessibility(hud) -> void:
+    if hud.dialogue_body_label:
+        hud.dialogue_body_label.visible = hud.story_accessibility_bool("storySubtitles", true)
+        hud.dialogue_body_label.add_theme_font_size_override("font_size", hud.story_font_size(17))
+    if hud.dialogue_speaker_label:
+        hud.dialogue_speaker_label.add_theme_font_size_override("font_size", hud.story_font_size(20))
+    if hud.story_status_label:
+        hud.story_status_label.add_theme_font_size_override("font_size", hud.story_font_size(15))
 
 static func set_survival(hud, state: Dictionary) -> void:
     if hud.health_label == null:
@@ -239,6 +255,10 @@ static func render_story_journal(hud) -> void:
     add_story_section(hud, "Dossier", state.get("dossier", []))
     add_story_section(hud, "Found Clues", state.get("foundClues", []))
     add_story_section(hud, "Optional", state.get("optionalObjectives", []))
+    add_story_section(hud, "Resolution", state.get("resolutionHistory", []))
+    add_story_section(hud, "Aftermath", state.get("aftermath", []))
+    if hud.story_accessibility_bool("storyReplayDiscoveredText", true):
+        add_story_section(hud, "Replay", state.get("replayEntries", []))
     add_story_label(hud, "Preparation: %s" % String(state.get("knownPreparation", "???")), Color(0.88, 0.90, 0.86))
     add_story_label(hud, "Region: %s" % String(state.get("affectedRegionId", "???")), Color(0.78, 0.86, 0.92))
     add_story_label(hud, "Settlement: %s" % String(state.get("affectedSettlement", "???")), Color(0.78, 0.86, 0.92))
@@ -256,6 +276,8 @@ static func add_story_section(hud, title: String, rows_value) -> void:
         var label := String(row.get("label", ""))
         var value := String(row.get("value", ""))
         var text := label if value == "" else "%s: %s" % [label, value]
+        if hud.story_accessibility_bool("storyColorIndependentClues", true):
+            text = story_accessibility_prefix(row) + text
         add_story_label(hud, text, Color(0.74, 0.92, 0.78) if bool(row.get("complete", false)) else Color(0.88, 0.90, 0.86))
 
 static func add_story_label(hud, text: String, color: Color) -> void:
@@ -263,7 +285,25 @@ static func add_story_label(hud, text: String, color: Color) -> void:
     label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
     label.text = text
     label.modulate = color
+    label.add_theme_font_size_override("font_size", hud.story_font_size(14) if hud.has_method("story_font_size") else 14)
     hud.story_list.add_child(label)
+
+static func story_accessibility_prefix(row: Dictionary) -> String:
+    var kind := String(row.get("kind", row.get("category", "")))
+    match kind:
+        "ordinary":
+            return "[CLUE] "
+        "historical":
+            return "[HISTORY] "
+        "letter":
+            return "[LETTER] "
+        "journal":
+            return "[JOURNAL] "
+        "resolution":
+            return "[CHOICE] "
+    if row.has("complete"):
+        return "[DONE] " if bool(row.get("complete", false)) else "[OPEN] "
+    return ""
 
 static func render_active(hud) -> void:
     var stack: Dictionary = hud.inventory.active_stack()
@@ -434,8 +474,10 @@ static func update_slider_label(hud, setting: String, value: float) -> void:
     var label_text := String(entry.get("labelText", setting))
     if setting == "renderDistance" or setting == "fov":
         label.text = "%s %d" % [label_text, roundi(value)]
-    elif setting == "weatherParticles" or setting == "lookSmoothing":
+    elif setting == "weatherParticles" or setting == "lookSmoothing" or setting == "storyJournalFontScale":
         label.text = "%s %d%%" % [label_text, roundi(value * 100.0)]
+    elif setting == "storyTextSpeed":
+        label.text = "%s %d%%" % [label_text, roundi((value / 2.0) * 100.0)]
     else:
         label.text = "%s %.2f" % [label_text, value]
 

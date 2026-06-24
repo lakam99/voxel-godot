@@ -53,8 +53,8 @@ static func build_settings_panel(hud, root: Control) -> void:
     hud.settings_panel.anchor_bottom = 0.5
     hud.settings_panel.offset_left = -285
     hud.settings_panel.offset_right = 285
-    hud.settings_panel.offset_top = -272
-    hud.settings_panel.offset_bottom = 272
+    hud.settings_panel.offset_top = -318
+    hud.settings_panel.offset_bottom = 318
     root.add_child(hud.settings_panel)
 
     var box := VBoxContainer.new()
@@ -65,11 +65,15 @@ static func build_settings_panel(hud, root: Control) -> void:
     title.add_theme_font_size_override("font_size", 22)
     box.add_child(title)
 
+    var settings_scroll := ScrollContainer.new()
+    settings_scroll.custom_minimum_size = Vector2(542, 498)
+    box.add_child(settings_scroll)
+
     hud.settings_grid = GridContainer.new()
     hud.settings_grid.columns = 2
     hud.settings_grid.add_theme_constant_override("h_separation", 12)
     hud.settings_grid.add_theme_constant_override("v_separation", 8)
-    box.add_child(hud.settings_grid)
+    settings_scroll.add_child(hud.settings_grid)
 
     add_settings_slider(hud, "mouseSensitivity", "Mouse", 0.25, 2.50, 0.05, 1.00)
     add_settings_slider(hud, "fov", "FOV", 58.0, 104.0, 1.0, 72.0)
@@ -81,6 +85,12 @@ static func build_settings_panel(hud, root: Control) -> void:
     add_settings_checkbox(hud, "headBob", "Head Bob", true)
     add_settings_checkbox(hud, "handSway", "Hand Sway", true)
     add_settings_checkbox(hud, "fullscreen", "Fullscreen", false)
+    add_settings_slider(hud, "storyTextSpeed", "Story Text", 0.5, 2.0, 0.05, 2.0)
+    add_settings_slider(hud, "storyJournalFontScale", "Journal Font", 0.85, 1.35, 0.05, 1.0)
+    add_settings_checkbox(hud, "storySubtitles", "Story Subtitles", true)
+    add_settings_checkbox(hud, "storyColorIndependentClues", "Clue Labels", true)
+    add_settings_checkbox(hud, "storyReplayDiscoveredText", "Replay Text", true)
+    add_settings_checkbox(hud, "storyControllerNavigation", "Controller Nav", true)
 
     var close := Button.new()
     close.text = "Close"

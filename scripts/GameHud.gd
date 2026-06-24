@@ -103,11 +103,14 @@ var icon_factory
 var hotbar_slot_buttons: Array[Button] = []
 var setting_controls := {}
 var settings_state := {}
+var story_accessibility_state := {}
 var playtest_cases := []
 var map_enabled := false
 var map_collapsed := false
 var current_map_state := {}
 var story_state := {}
+var dialogue_reveal_elapsed := 0.0
+var dialogue_reveal_cps := -1.0
 
 func setup(inventory_system, crafting_system, objective_system = null, equipment_system = null, contract_system = null, story_journal_model = null) -> void:
     inventory = inventory_system
@@ -171,6 +174,24 @@ func set_settings_state(state: Dictionary) -> void:
             update_slider_label(setting, float(settings_state.get(setting)))
         elif control is CheckBox:
             control.set_pressed_no_signal(bool(settings_state.get(setting)))
+
+func set_story_accessibility_state(state: Dictionary) -> void:
+    story_accessibility_state = state.duplicate(true)
+    GameHudRendererScript.apply_story_accessibility(self)
+    if story_panel != null and story_panel.visible:
+        render_story_journal()
+
+func story_accessibility_bool(setting: String, fallback := true) -> bool:
+    return bool(story_accessibility_state.get(setting, fallback))
+
+func story_font_size(base_size: int) -> int:
+    return maxi(10, roundi(float(base_size) * float(story_accessibility_state.get("storyJournalFontScale", 1.0))))
+
+func story_dialogue_cps() -> float:
+    var speed := float(story_accessibility_state.get("storyTextSpeed", 2.0))
+    if speed >= 1.95:
+        return -1.0
+    return lerpf(24.0, 90.0, inverse_lerp(0.5, 1.95, speed))
 
 func set_settings_open(open: bool) -> void:
     if settings_panel == null:
@@ -463,6 +484,8 @@ func set_story_journal_open(open: bool) -> void:
             set_story_journal_state(story_journal.state())
         else:
             render_story_journal()
+        if story_accessibility_bool("storyControllerNavigation", true):
+            story_panel.grab_focus()
 
 func toggle_story_journal() -> bool:
     set_story_journal_open(not story_panel.visible)

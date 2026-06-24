@@ -37,6 +37,8 @@ const StoryDialogueRouterScript := preload("res://scripts/story/StoryDialogueRou
 const WorldmarkEncounterControllerScript := preload("res://scripts/story/encounters/WorldmarkEncounterController.gd")
 const SettlementStateSystemScript := preload("res://scripts/story/SettlementStateSystem.gd")
 const RegionAftermathSystemScript := preload("res://scripts/story/RegionAftermathSystem.gd")
+const StoryAccessibilitySettingsScript := preload("res://scripts/story/StoryAccessibilitySettings.gd")
+const StoryDebugToolsScript := preload("res://scripts/story/tools/StoryDebugTools.gd")
 
 const CELL := 1.35
 const CHUNK_SIZE := 28
@@ -125,6 +127,7 @@ func interact_story_node(node: Node) -> bool: return false
 func start_story_encounter_from_site(site: Dictionary, position: Vector3) -> bool: return false
 func damage_story_worldmark(amount: float, source := "player") -> bool: return false
 func try_release_story_worldmark() -> bool: return false
+func run_story_debug_command(command: String, args := {}) -> Dictionary: return {}
 func debug_story_dump() -> Dictionary: return {}
 func setup_visual_asset_registry() -> void: pass
 func setup_static_item_asset_registry() -> void: pass

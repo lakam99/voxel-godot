@@ -445,3 +445,5 @@ func apply_runtime_settings() -> void:
         apply_runtime_setting(String(setting_variant), runtime_settings[setting_variant], false)
     if hud:
         hud.set_settings_state(runtime_settings)
+        if story_accessibility_settings and hud.has_method("set_story_accessibility_state"):
+            hud.set_story_accessibility_state(story_accessibility_settings.state())

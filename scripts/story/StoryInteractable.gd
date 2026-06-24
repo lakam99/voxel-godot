@@ -14,6 +14,7 @@ func configure(site_data: Dictionary) -> void:
     set_meta("storySite", site.duplicate(true))
     set_meta("storyRegionId", String(site.get("regionId", "")))
     set_meta("storyPrompt", String(site.get("prompt", "Inspect")))
+    set_meta("storyAccessibilityCue", accessibility_cue(String(site.get("kind", "")), String(site.get("clueKind", ""))))
     var cell := site_cell(site)
     global_position = Vector3(float(cell.x) * CELL, float(site.get("worldY", 0.0)) + 0.12, float(cell.y) * CELL)
     build_fallback_visual(String(site.get("kind", "")), String(site.get("clueKind", "")))
@@ -27,6 +28,7 @@ func build_fallback_visual(kind: String, clue_kind: String) -> void:
     mesh_instance.material_override = visual_material(kind, clue_kind)
     mesh_instance.position.y = 0.32
     add_child(mesh_instance)
+    add_accessibility_marker(kind, clue_kind)
     var shape := CollisionShape3D.new()
     shape.name = "StoryCollision"
     var sphere := SphereShape3D.new()
@@ -66,6 +68,28 @@ func visual_material(kind: String, clue_kind: String) -> StandardMaterial3D:
     else:
         material.albedo_color = Color(0.62, 0.66, 0.58)
     return material
+
+func add_accessibility_marker(kind: String, clue_kind: String) -> void:
+    var label := Label3D.new()
+    label.name = "StoryCueLabel"
+    label.text = accessibility_cue(kind, clue_kind)
+    label.position = Vector3(0.0, 1.24, 0.0)
+    label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+    label.font_size = 28
+    label.outline_size = 8
+    label.modulate = Color(0.96, 0.94, 0.82)
+    add_child(label)
+
+func accessibility_cue(kind: String, clue_kind: String) -> String:
+    if clue_kind == "historical":
+        return "HISTORY"
+    if kind == "clue":
+        return "CLUE"
+    if kind == "boundary_stone":
+        return "STONE"
+    if kind == "encounter_marker":
+        return "HOLLOW"
+    return "STORY"
 
 func site_cell(site_data: Dictionary) -> Vector2i:
     var cell_value = site_data.get("cell", [])

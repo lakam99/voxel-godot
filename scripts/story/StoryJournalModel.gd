@@ -33,11 +33,20 @@ func state() -> Dictionary:
         "optionalObjectives": optional_objectives(quest),
         "dossier": dossier_rows(facts, region_record),
         "foundClues": found_clue_rows(facts),
+        "replayEntries": replay_entries_for_state(facts, region_record),
         "knownPreparation": known_preparation(facts, quest),
         "affectedSettlement": affected_settlement_status(region_record),
         "resolutionHistory": resolution_rows(region_record),
         "aftermath": aftermath_rows(region_record)
     }
+
+func replay_entries() -> Array:
+    var quest := first_quest()
+    if quest.is_empty():
+        return []
+    var facts: Dictionary = quest.get("facts", {})
+    var region_record := affected_region(String(quest.get("affectedRegionId", "")))
+    return replay_entries_for_state(facts, region_record)
 
 func first_quest() -> Dictionary:
     if story_director == null or story_director.quest_system == null:
@@ -109,6 +118,40 @@ func found_clue_rows(facts: Dictionary) -> Array:
         rows.append({ "label": "???", "kind": "unknown" })
     return rows
 
+func replay_entries_for_state(facts: Dictionary, region_record: Dictionary) -> Array:
+    var entries := []
+    var ordinary_ids: Array = facts.get("ordinaryClueIds", [])
+    for clue_id_value in ordinary_ids:
+        var clue_id := String(clue_id_value)
+        entries.append({
+            "id": clue_id,
+            "label": clue_label(clue_id),
+            "value": replay_text_for_clue(clue_id),
+            "kind": "journal",
+            "replayable": true
+        })
+    if bool(facts.get("historyClueFound", false)):
+        entries.append({
+            "id": "historical_old_compact",
+            "label": "Old compact record",
+            "value": "Lantern light was meant to spare the Hart, not bind it.",
+            "kind": "letter",
+            "replayable": true
+        })
+    var worldmark: Dictionary = region_record.get("worldmark", {})
+    var resolution := String(worldmark.get("resolution", ""))
+    if resolution != "":
+        entries.append({
+            "id": "gloam_hart_resolution",
+            "label": "Resolution",
+            "value": "The Gloam Hart was %s." % ("released" if resolution == "release" else "slain"),
+            "kind": "resolution",
+            "replayable": true
+        })
+    if entries.is_empty():
+        entries.append({ "label": "No discovered text yet", "value": "", "kind": "unknown" })
+    return entries
+
 func clue_label(clue_id: String) -> String:
     if clue_id.find("antler") >= 0 or clue_id.find("scarred_tree") >= 0:
         return "Pale antler scars"
@@ -117,6 +160,15 @@ func clue_label(clue_id: String) -> String:
     if clue_id.find("broken_lantern") >= 0:
         return "Broken lantern frame"
     return "Regional clue"
+
+func replay_text_for_clue(clue_id: String) -> String:
+    if clue_id.find("antler") >= 0 or clue_id.find("scarred_tree") >= 0:
+        return "Pale antler scars face away from the old lantern line."
+    if clue_id.find("ringing_stone") >= 0:
+        return "The boundary stone rings under rain, like metal under strain."
+    if clue_id.find("broken_lantern") >= 0:
+        return "The broken lantern frame was pushed away from the trees."
+    return "A regional clue was recorded for later review."
 
 func known_preparation(facts: Dictionary, quest: Dictionary) -> String:
     if bool(facts.get("worldmarkResolved", false)):

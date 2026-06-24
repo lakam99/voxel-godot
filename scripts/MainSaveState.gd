@@ -33,6 +33,8 @@ func reset_runtime_world_state() -> void:
         settlement_state_system.reset()
     if region_aftermath_system and region_aftermath_system.has_method("reset"):
         region_aftermath_system.reset()
+    if story_debug_tools and story_debug_tools.has_method("setup"):
+        story_debug_tools.setup(self, story_director)
     discovered_biomes.clear()
     discovered_town_keys.clear()
     discovered_shrine_keys.clear()

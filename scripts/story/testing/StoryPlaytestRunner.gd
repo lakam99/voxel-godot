@@ -9,6 +9,7 @@ const FrontierCampaignSpineScript := preload("res://scripts/story/campaign/Front
 const TemplateNarrativeTextProviderScript := preload("res://scripts/story/text/TemplateNarrativeTextProvider.gd")
 const LocalLlmNarrativeTextProviderScript := preload("res://scripts/story/text/LocalLlmNarrativeTextProvider.gd")
 const Phase13NarrativeTextProviderTestsScript := preload("res://scripts/story/testing/Phase13NarrativeTextProviderTests.gd")
+const Phase14StoryPolishTestsScript := preload("res://scripts/story/testing/Phase14StoryPolishTests.gd")
 const GloamHartArcScript := preload("res://scripts/story/arcs/GloamHartArc.gd")
 const StorySitePlacementScript := preload("res://scripts/story/data/StorySitePlacement.gd")
 const RegionStoryRecordScript := preload("res://scripts/story/data/RegionStoryRecord.gd")
@@ -27,6 +28,9 @@ const WorldmarkEncounterControllerScript := preload("res://scripts/story/encount
 const GloamHartEncounterScript := preload("res://scripts/story/encounters/GloamHartEncounter.gd")
 const SettlementStateSystemScript := preload("res://scripts/story/SettlementStateSystem.gd")
 const RegionAftermathSystemScript := preload("res://scripts/story/RegionAftermathSystem.gd")
+const StoryAccessibilitySettingsScript := preload("res://scripts/story/StoryAccessibilitySettings.gd")
+const StoryDebugToolsScript := preload("res://scripts/story/tools/StoryDebugTools.gd")
+const StoryAuthoringValidatorScript := preload("res://scripts/story/tools/StoryAuthoringValidator.gd")
 
 const FIRST_QUEST_ID := "story.gloam_hart.storm"
 
@@ -54,6 +58,7 @@ const SCRIPT_PATHS := [
     "res://scripts/story/text/TemplateNarrativeTextProvider.gd",
     "res://scripts/story/text/LocalLlmNarrativeTextProvider.gd",
     "res://scripts/story/testing/Phase13NarrativeTextProviderTests.gd",
+    "res://scripts/story/testing/Phase14StoryPolishTests.gd",
     "res://scripts/story/arcs/GloamHartArc.gd",
     "res://scripts/story/RegionStoryGenerator.gd",
     "res://scripts/story/data/StorySitePlacement.gd",
@@ -69,11 +74,14 @@ const SCRIPT_PATHS := [
     "res://scripts/story/WorldmarkInfluenceSystem.gd",
     "res://scripts/story/StoryJournalModel.gd",
     "res://scripts/story/StoryDialogueRouter.gd",
+    "res://scripts/story/StoryAccessibilitySettings.gd",
     "res://scripts/story/data/NpcKnowledgeScope.gd",
     "res://scripts/story/SettlementStateSystem.gd",
     "res://scripts/story/RegionAftermathSystem.gd",
     "res://scripts/story/encounters/WorldmarkEncounterController.gd",
     "res://scripts/story/encounters/GloamHartEncounter.gd",
+    "res://scripts/story/tools/StoryDebugTools.gd",
+    "res://scripts/story/tools/StoryAuthoringValidator.gd",
     "res://scripts/visual/VisualAssetRegistry.gd",
     "res://scripts/visual/CharacterAssetRegistry.gd",
     "res://scripts/visual/StaticItemAssetRegistry.gd",
@@ -116,6 +124,7 @@ func run() -> void:
     await test_main_scene_instantiates()
     test_phase12_campaign_spine_progression_and_endless_play()
     test_phase13_narrative_text_provider_contracts()
+    test_phase14_story_polish_accessibility_debug_authoring()
     test_phase4_source_events_and_quest_state_round_trip()
     test_first_arc_waits_for_tutorial_completion()
     test_tutorial_completion_starts_first_quest_once()
@@ -420,11 +429,13 @@ func test_main_scene_instantiates() -> void:
         "story_quest_system",
         "region_story_generator",
         "story_site_placement",
-        "story_world_overlay_system",
-        "worldmark_influence_system",
-        "story_journal_model",
-        "story_dialogue_router",
-        "worldmark_encounter_controller",
+            "story_world_overlay_system",
+            "worldmark_influence_system",
+            "story_journal_model",
+            "story_dialogue_router",
+            "story_accessibility_settings",
+            "story_debug_tools",
+            "worldmark_encounter_controller",
         "settlement_state_system",
         "region_aftermath_system",
         "hud",
@@ -440,6 +451,15 @@ func test_main_scene_instantiates() -> void:
         "main_scene_story_test_mode_instantiates",
         story_test_mode and main != null and player != null and missing.is_empty(),
         "story mode %s, player %s, missing %s" % [str(story_test_mode), str(player != null), str(missing)]
+    )
+
+func test_phase14_story_polish_accessibility_debug_authoring() -> void:
+    var test := Phase14StoryPolishTestsScript.new()
+    var outcome: Dictionary = test.run(main)
+    add_result(
+        "phase14_story_polish_accessibility_debug_authoring",
+        bool(outcome.get("ok", false)),
+        String(outcome.get("details", ""))
     )
 
 func test_phase12_campaign_spine_progression_and_endless_play() -> void:

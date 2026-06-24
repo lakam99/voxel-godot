@@ -46,6 +46,10 @@ static func show_dialogue(hud, speaker: String, role: String, body: String, cont
     hud.dialogue_role_label.text = role
     hud.dialogue_role_label.visible = role != ""
     hud.dialogue_body_label.text = body
+    hud.dialogue_body_label.visible = hud.story_accessibility_bool("storySubtitles", true) if hud.has_method("story_accessibility_bool") else true
+    hud.dialogue_reveal_elapsed = 0.0
+    hud.dialogue_reveal_cps = hud.story_dialogue_cps() if hud.has_method("story_dialogue_cps") else -1.0
+    hud.dialogue_body_label.visible_characters = 0 if hud.dialogue_reveal_cps > 0.0 else -1
     hud.dialogue_reply_label.visible = true
     hud.dialogue_panel.visible = true
     hud.target_label.text = ""
@@ -67,6 +71,11 @@ static func show_dialogue(hud, speaker: String, role: String, body: String, cont
         hud.playtest_panel.visible = false
     if hud.game_menu_panel:
         hud.game_menu_panel.visible = false
+    var controller_navigation := true
+    if hud.has_method("story_accessibility_bool"):
+        controller_navigation = hud.story_accessibility_bool("storyControllerNavigation", true)
+    if controller_navigation:
+        hud.dialogue_panel.grab_focus()
 
 static func hide_dialogue(hud, emit_signal := true) -> void:
     if hud.dialogue_panel == null or not hud.dialogue_panel.visible:
@@ -76,6 +85,8 @@ static func hide_dialogue(hud, emit_signal := true) -> void:
     hud.dialogue_context.clear()
     if emit_signal:
         hud.dialogue_closed.emit(context)
+    if hud.dialogue_body_label:
+        hud.dialogue_body_label.visible_characters = -1
 
 static func show_objective_complete(hud, label: String) -> void:
     hud.objective_toast.text = "Objective Complete: %s" % label
@@ -84,9 +95,12 @@ static func show_objective_complete(hud, label: String) -> void:
     hud.objective_toast.modulate.a = 1.0
 
 static func process(hud, delta: float) -> void:
-    if hud.objective_toast_time <= 0.0:
-        return
-    hud.objective_toast_time = max(0.0, hud.objective_toast_time - delta)
-    hud.objective_toast.modulate.a = clamp(hud.objective_toast_time / 0.8, 0.0, 1.0) if hud.objective_toast_time < 0.8 else 1.0
-    if hud.objective_toast_time <= 0.0:
-        hud.objective_toast.visible = false
+    if hud.dialogue_panel != null and hud.dialogue_panel.visible and hud.dialogue_body_label != null and hud.dialogue_reveal_cps > 0.0:
+        hud.dialogue_reveal_elapsed += delta
+        var visible_count := roundi(hud.dialogue_reveal_elapsed * hud.dialogue_reveal_cps)
+        hud.dialogue_body_label.visible_characters = mini(hud.dialogue_body_label.text.length(), visible_count)
+    if hud.objective_toast_time > 0.0:
+        hud.objective_toast_time = max(0.0, hud.objective_toast_time - delta)
+        hud.objective_toast.modulate.a = clamp(hud.objective_toast_time / 0.8, 0.0, 1.0) if hud.objective_toast_time < 0.8 else 1.0
+        if hud.objective_toast_time <= 0.0:
+            hud.objective_toast.visible = false

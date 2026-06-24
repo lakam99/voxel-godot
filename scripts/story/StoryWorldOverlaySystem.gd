@@ -7,6 +7,8 @@ const STAGE_RETUNE_BOUNDARY_STONES := "retune_boundary_stones_placeholder"
 const STAGE_ENCOUNTER_LOCKED := "encounter_locked_placeholder"
 const REQUIRED_TOOL_ITEMS := ["surveyLens", "wardLantern"]
 const RETUNE_COSTS := { "nightShard": 1 }
+const OVERLAY_NODE_BUDGET := 96
+const OVERLAY_INTERACTABLE_BUDGET := 12
 
 var main
 var story_director
@@ -344,5 +346,44 @@ func debug_state() -> Dictionary:
         "activeRegionId": active_region_id,
         "spawnedSites": spawned_sites.keys(),
         "spawnedCount": spawned_sites.size(),
-        "lastMessage": last_message
+        "lastMessage": last_message,
+        "performance": performance_state()
     }
+
+func performance_state() -> Dictionary:
+    var node_count := count_nodes_recursive(overlay_root)
+    var visual_count := count_visual_nodes(overlay_root)
+    var collision_count := count_collision_nodes(overlay_root)
+    return {
+        "nodeCount": node_count,
+        "nodeBudget": OVERLAY_NODE_BUDGET,
+        "interactableCount": spawned_sites.size(),
+        "interactableBudget": OVERLAY_INTERACTABLE_BUDGET,
+        "visualNodeCount": visual_count,
+        "collisionNodeCount": collision_count,
+        "budgetOk": node_count <= OVERLAY_NODE_BUDGET and spawned_sites.size() <= OVERLAY_INTERACTABLE_BUDGET
+    }
+
+func count_nodes_recursive(node: Node) -> int:
+    if node == null:
+        return 0
+    var count := 1
+    for child in node.get_children():
+        count += count_nodes_recursive(child)
+    return count
+
+func count_visual_nodes(node: Node) -> int:
+    if node == null:
+        return 0
+    var count := 1 if node is MeshInstance3D or node is Label3D or node is MultiMeshInstance3D else 0
+    for child in node.get_children():
+        count += count_visual_nodes(child)
+    return count
+
+func count_collision_nodes(node: Node) -> int:
+    if node == null:
+        return 0
+    var count := 1 if node is CollisionShape3D or node is CollisionObject3D else 0
+    for child in node.get_children():
+        count += count_collision_nodes(child)
+    return count
