@@ -141,6 +141,7 @@ func run() -> void:
     test_gloam_hart_encounter_phase_progression_countermeasure_and_animation_fallback()
     test_gloam_hart_slay_resolution_idempotent_rewards_and_cleanup()
     test_gloam_hart_release_gating_and_resolution()
+    test_gloam_hart_release_normal_input_affordance()
     test_gloam_hart_save_load_recovery_policy()
     test_worldmark_aftermath_slay_delayed_settlement_and_dialogue()
     test_worldmark_aftermath_release_wildlife_trade_and_save_load()
@@ -149,6 +150,7 @@ func run() -> void:
     test_historical_clue_unlock_persists_and_quest_round_trips()
     test_optional_history_interactable_state_persists_and_sites_round_trips()
     test_story_journal_hides_hidden_truth_until_history()
+    test_phase_b_navigation_and_journal_clarity()
     test_story_dialogue_router_filters_npc_knowledge()
     test_story_dialogue_router_generic_fallback()
     test_story_journal_save_load_round_trips()
@@ -1379,6 +1381,148 @@ func test_gloam_hart_release_gating_and_resolution() -> void:
         ]
     )
 
+func test_gloam_hart_release_normal_input_affordance() -> void:
+    var director = main.get("story_director")
+    var isolated_state := begin_isolated_countermeasure_test_state()
+
+    var early_setup := prepare_gloam_hart_encounter(director, true)
+    var early_affected := String(early_setup.get("affected", ""))
+    var early_controller = main.get("worldmark_encounter_controller")
+    var early_inventory = main.get("inventory_system")
+    var early_tonic_before: int = early_inventory.count("wardTonic") if early_inventory != null else -1
+    var early_relic_before: int = early_inventory.count("relicFragment") if early_inventory != null else -1
+    var prompt_hidden_before_phase := String(main.story_release_input_prompt()) == ""
+    press_story_release_input()
+    var early_tonic_after: int = early_inventory.count("wardTonic") if early_inventory != null else -1
+    var early_relic_after: int = early_inventory.count("relicFragment") if early_inventory != null else -1
+    var early_resolution := ""
+    if early_controller != null and early_controller.has_method("worldmark_resolution"):
+        early_resolution = String(early_controller.worldmark_resolution(early_affected))
+    var early_message := String(main.get("last_hud_refresh_message"))
+    var blocked_before_phase := early_resolution == "" and early_tonic_after == early_tonic_before and early_relic_after == early_relic_before
+
+    reset_story_runtime(director)
+    clear_story_countermeasure_test_inventory()
+    var no_history_setup := prepare_gloam_hart_encounter(director, false)
+    var no_history_affected := String(no_history_setup.get("affected", ""))
+    var no_history_controller = main.get("worldmark_encounter_controller")
+    var no_history_encounter = no_history_controller.get("active_encounter") if no_history_controller != null else null
+    if no_history_encounter != null:
+        no_history_encounter.apply_player_damage(140.0, "test")
+    var prompt_hidden_without_history := String(main.story_release_input_prompt()) == ""
+    press_story_release_input()
+    var no_history_resolution := ""
+    if no_history_controller != null and no_history_controller.has_method("worldmark_resolution"):
+        no_history_resolution = String(no_history_controller.worldmark_resolution(no_history_affected))
+    var no_history_message := String(main.get("last_hud_refresh_message"))
+    var unavailable_without_history := no_history_resolution == "" and no_history_message == "You do not know the old rite."
+
+    reset_story_runtime(director)
+    clear_story_countermeasure_test_inventory()
+    var release_setup := prepare_gloam_hart_encounter(director, true)
+    var release_affected := String(release_setup.get("affected", ""))
+    var release_controller = main.get("worldmark_encounter_controller")
+    var release_encounter = release_controller.get("active_encounter") if release_controller != null else null
+    var inventory = main.get("inventory_system")
+    if release_encounter != null:
+        release_encounter.apply_player_damage(140.0, "test")
+    var prompt_ready := String(main.story_release_input_prompt()) == "[R] Release rite ready"
+    var tonic_before: int = inventory.count("wardTonic") if inventory != null else -1
+    var relic_before: int = inventory.count("relicFragment") if inventory != null else -1
+    press_story_release_input()
+    var tonic_after: int = inventory.count("wardTonic") if inventory != null else -1
+    var relic_after: int = inventory.count("relicFragment") if inventory != null else -1
+    var release_resolution := ""
+    if release_controller != null and release_controller.has_method("worldmark_resolution"):
+        release_resolution = String(release_controller.worldmark_resolution(release_affected))
+    var release_event_counts: Dictionary = director.snapshot().get("eventCounts", {}).duplicate(true)
+    var save_snapshot: Dictionary = main.create_save_snapshot()
+    press_story_release_input()
+    var tonic_duplicate: int = inventory.count("wardTonic") if inventory != null else -1
+    var relic_duplicate: int = inventory.count("relicFragment") if inventory != null else -1
+    var duplicate_event_counts: Dictionary = director.snapshot().get("eventCounts", {}).duplicate(true)
+    var loaded := bool(main.apply_save_snapshot(save_snapshot))
+    director = main.get("story_director")
+    inventory = main.get("inventory_system")
+    var loaded_record: Dictionary = director.snapshot().get("regionRecords", {}).get(release_affected, {})
+    var loaded_worldmark: Dictionary = loaded_record.get("worldmark", {})
+    var loaded_state: Dictionary = loaded_worldmark.get("encounterState", {})
+    var release_save_load_stable: bool = (
+        loaded
+        and String(loaded_worldmark.get("resolution", "")) == "release"
+        and bool(loaded_state.get("rewardsGranted", false))
+        and inventory != null
+        and inventory.count("wardTonic") == tonic_after
+        and inventory.count("relicFragment") == relic_after
+    )
+
+    reset_story_runtime(director)
+    clear_story_countermeasure_test_inventory()
+    var slay_setup := prepare_gloam_hart_encounter(director, true)
+    var slay_affected := String(slay_setup.get("affected", ""))
+    var slay_controller = main.get("worldmark_encounter_controller")
+    var slay_ok := false
+    if slay_controller != null:
+        slay_ok = bool(slay_controller.damage_active_encounter(999.0, "test"))
+    var slay_resolution := ""
+    if slay_controller != null and slay_controller.has_method("worldmark_resolution"):
+        slay_resolution = String(slay_controller.worldmark_resolution(slay_affected))
+
+    var release_via_input := (
+        release_resolution == "release"
+        and tonic_after == tonic_before + 2
+        and relic_after == relic_before + 3
+    )
+    var duplicate_input_idempotent := (
+        tonic_duplicate == tonic_after
+        and relic_duplicate == relic_after
+        and int(duplicate_event_counts.get("story_worldmark_resolved", 0)) == int(release_event_counts.get("story_worldmark_resolved", 0))
+    )
+    var slay_still_works := slay_ok and slay_resolution == "slay"
+    var ok: bool = (
+        bool(early_setup.get("startOk", false))
+        and prompt_hidden_before_phase
+        and blocked_before_phase
+        and bool(no_history_setup.get("startOk", false))
+        and prompt_hidden_without_history
+        and unavailable_without_history
+        and bool(release_setup.get("startOk", false))
+        and prompt_ready
+        and release_via_input
+        and duplicate_input_idempotent
+        and release_save_load_stable
+        and bool(slay_setup.get("startOk", false))
+        and slay_still_works
+    )
+    restore_isolated_countermeasure_test_state(isolated_state)
+    add_result(
+        "gloam_hart_release_normal_input_affordance",
+        ok,
+        "early start %s promptHidden %s blocked %s msg '%s', noHistory start %s promptHidden %s unavailable %s msg '%s', release start %s promptReady %s input %s rewards tonic %d/%d/%d relic %d/%d/%d duplicate %s saveLoad %s, slay start %s slay %s" % [
+            str(early_setup.get("startOk", false)),
+            str(prompt_hidden_before_phase),
+            str(blocked_before_phase),
+            early_message,
+            str(no_history_setup.get("startOk", false)),
+            str(prompt_hidden_without_history),
+            str(unavailable_without_history),
+            no_history_message,
+            str(release_setup.get("startOk", false)),
+            str(prompt_ready),
+            str(release_via_input),
+            tonic_before,
+            tonic_after,
+            tonic_duplicate,
+            relic_before,
+            relic_after,
+            relic_duplicate,
+            str(duplicate_input_idempotent),
+            str(release_save_load_stable),
+            str(slay_setup.get("startOk", false)),
+            str(slay_still_works)
+        ]
+    )
+
 func test_gloam_hart_save_load_recovery_policy() -> void:
     var director = main.get("story_director")
     var isolated_state := begin_isolated_countermeasure_test_state()
@@ -1717,6 +1861,121 @@ func test_story_journal_hides_hidden_truth_until_history() -> void:
             and after_hidden.find("compact") >= 0
             and after_hidden.find("spare") >= 0,
         "before '%s', after '%s', affected %s" % [before_hidden, after_hidden, affected]
+    )
+
+func test_phase_b_navigation_and_journal_clarity() -> void:
+    var director = main.get("story_director")
+    reset_story_runtime(director)
+    var journal = main.get("story_journal_model")
+    var problems: Array[String] = []
+
+    var quest_start := start_first_arc_for_test(director)
+    var start_state: Dictionary = journal.state()
+    var start_optional := journal_row_value(start_state, "optionalObjectives", "Old compact record")
+    if String(start_state.get("status", "")) != "Speak with Mira":
+        problems.append("quest start status")
+    if start_optional.find("may reveal another way to resolve the Hart") < 0:
+        problems.append("quest start optional history line")
+    if dossier_value(start_state, "Hidden truth") != "???":
+        problems.append("quest start hidden truth")
+
+    director.ingest_event(story_event("npc_spoken_to", "npc:mira", starter_region_id(), "", {
+        "npcId": "mira"
+    }))
+    var mira_state: Dictionary = journal.state()
+    if String(mira_state.get("status", "")) != "Speak with Sera":
+        problems.append("Mira handoff status")
+
+    director.ingest_event(story_event("npc_spoken_to", "npc:sera", starter_region_id(), "", {
+        "npcId": "sera"
+    }))
+    var travel_quest := first_quest_state(director)
+    var affected := String(travel_quest.get("affectedRegionId", quest_start.get("affectedRegionId", "")))
+    var travel_state: Dictionary = journal.state()
+    var waypoint := journal_row_value(travel_state, "navigation", "Storm waypoint")
+    var travel_navigation_text := stable_json(travel_state.get("navigation", []))
+    var direction_ok := waypoint.find("north") >= 0 or waypoint.find("south") >= 0 or waypoint.find("east") >= 0 or waypoint.find("west") >= 0
+    if String(travel_state.get("status", "")) != "Travel to the storm waypoint":
+        problems.append("Sera handoff travel status")
+    if waypoint == "" or not direction_ok or travel_navigation_text.find("r:") >= 0:
+        problems.append("affected region waypoint")
+
+    var prep_names_ok := (
+        journal_row_value(travel_state, "preparationRequirements", "Survey Lens") != ""
+        and journal_row_value(travel_state, "preparationRequirements", "Ward Lantern") != ""
+        and journal_row_value(travel_state, "preparationRequirements", "Night Shard charge") != ""
+    )
+    if not prep_names_ok:
+        problems.append("countermeasure requirement rows")
+
+    director.ingest_event(story_event("story_region_entered", "region:%s" % affected, affected, "", {
+        "biome": travel_quest.get("affectedRegionBiome", "")
+    }))
+    var entered_state: Dictionary = journal.state()
+    if journal_row_value(entered_state, "progress", "Ordinary clues").find("0 found, 2 remaining") < 0:
+        problems.append("entered ordinary count")
+
+    director.ingest_event(story_event("story_clue_found", "clue:scarred_tree", affected, "", {
+        "clueKind": "ordinary",
+        "clueId": "ordinary:scarred_tree"
+    }))
+    var one_clue_state: Dictionary = journal.state()
+    if journal_row_value(one_clue_state, "progress", "Ordinary clues").find("1 found, 1 remaining") < 0:
+        problems.append("one ordinary clue count")
+
+    director.ingest_event(story_event("story_clue_found", "clue:ringing_stone", affected, "", {
+        "clueKind": "ordinary",
+        "clueId": "ordinary:ringing_stone"
+    }))
+    var two_clue_state: Dictionary = journal.state()
+    if journal_row_value(two_clue_state, "progress", "Ordinary clues").find("2 found, 0 remaining") < 0:
+        problems.append("two ordinary clue count")
+    if dossier_value(two_clue_state, "Hidden truth") != "???":
+        problems.append("historical clue not found hidden truth")
+    if journal_row_value(two_clue_state, "optionalObjectives", "Old compact record").find("may reveal another way") < 0:
+        problems.append("historical clue not found optional line")
+
+    director.ingest_event(story_event("story_clue_found", "clue:old_compact_record", affected, "", {
+        "clueKind": "historical",
+        "clueId": "historical:old_compact_record"
+    }))
+    var history_state: Dictionary = journal.state()
+    if dossier_value(history_state, "Hidden truth").find("spare the Hart") < 0:
+        problems.append("historical clue found hidden truth")
+    if journal_row_value(history_state, "optionalObjectives", "Old compact record").find("release rite understood") < 0:
+        problems.append("historical clue found optional line")
+
+    director.ingest_event(story_event("story_countermeasure_prepared", "countermeasure:gloam_hart", affected, "", {
+        "source": "test",
+        "items": ["surveyLens", "wardLantern"]
+    }))
+    director.ingest_event(story_event("story_boundary_stone_retuned", "boundary_stone_north", affected, "", {
+        "stoneId": "boundary_stone_north"
+    }))
+    var one_stone_state: Dictionary = journal.state()
+    if journal_row_value(one_stone_state, "progress", "Boundary stones").find("1 retuned, 1 remaining") < 0:
+        problems.append("one boundary stone count")
+
+    director.ingest_event(story_event("story_boundary_stone_retuned", "boundary_stone_south", affected, "", {
+        "stoneId": "boundary_stone_south"
+    }))
+    var two_stone_state: Dictionary = journal.state()
+    if journal_row_value(two_stone_state, "progress", "Boundary stones").find("2 retuned, 0 remaining") < 0:
+        problems.append("two boundary stone count")
+
+    add_result(
+        "phase_b_navigation_and_journal_clarity",
+        problems.is_empty(),
+        "problems %s; waypoint '%s'; ordinary '%s'/'%s'; boundary '%s'/'%s'; hidden before '%s' after '%s'" % [
+            str(problems),
+            waypoint,
+            journal_row_value(one_clue_state, "progress", "Ordinary clues"),
+            journal_row_value(two_clue_state, "progress", "Ordinary clues"),
+            journal_row_value(one_stone_state, "progress", "Boundary stones"),
+            journal_row_value(two_stone_state, "progress", "Boundary stones"),
+            dossier_value(two_clue_state, "Hidden truth"),
+            dossier_value(history_state, "Hidden truth")
+        ]
     )
 
 func test_story_dialogue_router_filters_npc_knowledge() -> void:
@@ -2129,6 +2388,15 @@ func story_site_node(definition_id: String) -> Node:
             return story_node
     return null
 
+func press_story_release_input() -> void:
+    if main == null:
+        return
+    var event := InputEventKey.new()
+    event.keycode = KEY_R
+    event.pressed = true
+    event.echo = false
+    main.call("_unhandled_input", event)
+
 func dossier_value(journal_state: Dictionary, label: String) -> String:
     var rows: Array = journal_state.get("dossier", [])
     for row_value in rows:
@@ -2137,6 +2405,15 @@ func dossier_value(journal_state: Dictionary, label: String) -> String:
         var row: Dictionary = row_value
         if String(row.get("label", "")) == label:
             return String(row.get("value", ""))
+    return ""
+
+func journal_row_value(journal_state: Dictionary, section: String, label: String) -> String:
+    var rows: Array = journal_state.get(section, [])
+    for row_value in rows:
+        if row_value is Dictionary:
+            var row: Dictionary = row_value
+            if String(row.get("label", "")) == label:
+                return String(row.get("value", ""))
     return ""
 
 func wait_physics_frames(count: int) -> void:

@@ -1,8 +1,6 @@
 extends "res://scripts/MainInteractionFlow.gd"
 
-const FireLight3DScript := preload("res://scripts/FireLight3D.gd")
-const FIRE_LIGHT_COLOR := Color(1.0, 0.89, 0.72)
-const LANTERN_LIGHT_COLOR := Color(1.0, 0.92, 0.78)
+const LocalLightRigScript := preload("res://scripts/LocalLightRig.gd")
 
 func add_block_mesh(parent: Node3D, size: Vector3, offset: Vector3, material_key: String, rotation := Vector3.ZERO) -> MeshInstance3D:
     var mesh_instance := MeshInstance3D.new()
@@ -102,28 +100,16 @@ func tag_visual(node: MeshInstance3D, role: String, visual_name: String = "") ->
     node.set_meta("visual_role", role)
     return node
 
-func add_light_emitter(parent: Node3D, light_name: String, offset: Vector3, color: Color, energy: float, range: float, day_suppressed := false) -> OmniLight3D:
-    var light := FireLight3DScript.new()
-    light.name = light_name
-    light.position = offset
-    light.configure(color, energy, range, shadows_enabled)
-    if day_suppressed and light.has_method("set_day_suppressed"):
-        light.set_day_suppressed(true)
-    parent.add_child(light)
-    return light
+func ground_light_offset() -> Vector3:
+    return Vector3(0.0, CELL * 0.36, 0.0)
 
-func add_ground_fill_light(parent: Node3D, light_name: String, offset: Vector3, color: Color, energy: float, range: float, day_suppressed := false) -> OmniLight3D:
-    var light := FireLight3DScript.new()
-    light.name = light_name
-    light.position = offset
-    light.configure(color, energy, range, false, 0.22, 0.08, 1.65, 0.72, 1.08)
-    if day_suppressed and light.has_method("set_day_suppressed"):
-        light.set_day_suppressed(true)
-    light.set_meta("ground_fill_light", true)
-    light.set_meta("casts_shadow_when_enabled", false)
-    light.shadow_enabled = false
-    parent.add_child(light)
-    return light
+func add_world_light_rig(parent: Node3D, profile_id: String) -> Dictionary:
+    return LocalLightRigScript.add_rig(parent, profile_id, {
+        "context": "placed",
+        "scale": CELL,
+        "terrain_position": ground_light_offset(),
+        "shadows": shadows_enabled
+    })
 
 func apply_local_light_shadows(root: Node = null) -> void:
     if root != null:
@@ -315,8 +301,7 @@ func add_furnace_visual(parent: Node3D) -> void:
 
 func add_campfire_visual(parent: Node3D) -> void:
     if add_generated_static_utility_visual(parent, "campfire") != null:
-        add_light_emitter(parent, "CampfireLight", Vector3(0.0, CELL * 0.32, 0.0), FIRE_LIGHT_COLOR, 3.10, CELL * 12.0, true)
-        add_ground_fill_light(parent, "CampfireGroundLight", Vector3(0.0, -CELL * 0.28, 0.0), FIRE_LIGHT_COLOR, 1.15, CELL * 8.8, true)
+        add_world_light_rig(parent, "campfire")
         return
     add_block_mesh(parent, Vector3(CELL * 0.82, CELL * 0.08, CELL * 0.22), Vector3(0.0, -CELL * 0.38, 0.0), "trunk", Vector3(0.0, 0.72, 0.0))
     add_block_mesh(parent, Vector3(CELL * 0.82, CELL * 0.08, CELL * 0.22), Vector3(0.0, -CELL * 0.34, 0.0), "trunk", Vector3(0.0, -0.72, 0.0))
@@ -325,19 +310,16 @@ func add_campfire_visual(parent: Node3D) -> void:
         add_block_mesh(parent, Vector3(CELL * 0.18, CELL * 0.14, CELL * 0.18), Vector3(float(x_offset) * CELL, -CELL * 0.40, -CELL * 0.30), "stoneBlock")
     add_block_mesh(parent, Vector3(CELL * 0.20, CELL * 0.50, CELL * 0.20), Vector3(0.0, -CELL * 0.08, 0.0), "flame", Vector3(0.0, 0.78, 0.0))
     add_block_mesh(parent, Vector3(CELL * 0.15, CELL * 0.38, CELL * 0.15), Vector3(0.0, -CELL * 0.03, 0.0), "furnaceGlow", Vector3(0.0, -0.78, 0.0))
-    add_light_emitter(parent, "CampfireLight", Vector3(0.0, CELL * 0.32, 0.0), FIRE_LIGHT_COLOR, 3.10, CELL * 12.0, true)
-    add_ground_fill_light(parent, "CampfireGroundLight", Vector3(0.0, -CELL * 0.28, 0.0), FIRE_LIGHT_COLOR, 1.15, CELL * 8.8, true)
+    add_world_light_rig(parent, "campfire")
 
 func add_torch_visual(parent: Node3D) -> void:
     if add_generated_static_utility_visual(parent, "torch") != null:
-        add_light_emitter(parent, "TorchLight", Vector3(0.0, CELL * 0.84, 0.0), FIRE_LIGHT_COLOR, 3.35, CELL * 11.2, true)
-        add_ground_fill_light(parent, "TorchGroundLight", Vector3(0.0, -CELL * 0.28, 0.0), FIRE_LIGHT_COLOR, 1.05, CELL * 8.0, true)
+        add_world_light_rig(parent, "torch")
         return
     add_block_mesh(parent, Vector3(CELL * 0.10, CELL * 0.78, CELL * 0.10), Vector3(0.0, -CELL * 0.04, 0.0), "trunk")
     add_block_mesh(parent, Vector3(CELL * 0.22, CELL * 0.12, CELL * 0.22), Vector3(0.0, CELL * 0.38, 0.0), "torch")
     add_block_mesh(parent, Vector3(CELL * 0.18, CELL * 0.24, CELL * 0.18), Vector3(0.0, CELL * 0.56, 0.0), "flame")
-    add_light_emitter(parent, "TorchLight", Vector3(0.0, CELL * 0.84, 0.0), FIRE_LIGHT_COLOR, 3.35, CELL * 11.2, true)
-    add_ground_fill_light(parent, "TorchGroundLight", Vector3(0.0, -CELL * 0.28, 0.0), FIRE_LIGHT_COLOR, 1.05, CELL * 8.0, true)
+    add_world_light_rig(parent, "torch")
 
 func add_spike_trap_visual(parent: Node3D) -> void:
     if add_generated_static_utility_visual(parent, "spikeTrap") != null:
@@ -349,15 +331,7 @@ func add_spike_trap_visual(parent: Node3D) -> void:
 
 func add_ward_object_visual(parent: Node3D, block_type: String) -> void:
     if add_generated_static_utility_visual(parent, block_type) != null:
-        if block_type == "riftAnchor":
-            add_light_emitter(parent, "RiftAnchorLight", Vector3(0.0, CELL * 0.76, 0.0), Color(0.78, 0.44, 1.0), 4.95, CELL * 16.0)
-            add_ground_fill_light(parent, "RiftAnchorGroundLight", Vector3(0.0, -CELL * 0.28, 0.0), Color(0.78, 0.44, 1.0), 1.35, CELL * 10.5)
-        elif block_type == "sanctuaryBeacon":
-            add_light_emitter(parent, "SanctuaryBeaconLight", Vector3(0.0, CELL * 0.78, 0.0), Color(0.58, 0.86, 1.0), 5.40, CELL * 17.0)
-            add_ground_fill_light(parent, "SanctuaryBeaconGroundLight", Vector3(0.0, -CELL * 0.28, 0.0), Color(0.58, 0.86, 1.0), 1.45, CELL * 11.0)
-        else:
-            add_light_emitter(parent, "WardLanternLight", Vector3(0.0, CELL * 0.74, 0.0), LANTERN_LIGHT_COLOR, 2.31, CELL * 13.0, true)
-            add_ground_fill_light(parent, "WardLanternGroundLight", Vector3(0.0, -CELL * 0.28, 0.0), LANTERN_LIGHT_COLOR, 0.71, CELL * 9.5, true)
+        add_world_light_rig(parent, block_type)
         return
     var glow_key := "sanctuaryBeacon" if block_type == "sanctuaryBeacon" else ("riftAnchor" if block_type == "riftAnchor" else "wardLantern")
     add_block_mesh(parent, Vector3(CELL * 0.44, CELL * 0.16, CELL * 0.44), Vector3(0.0, -CELL * 0.43, 0.0), "stoneBlock")
@@ -365,14 +339,11 @@ func add_ward_object_visual(parent: Node3D, block_type: String) -> void:
     add_block_mesh(parent, Vector3(CELL * 0.34, CELL * 0.34, CELL * 0.34), Vector3(0.0, CELL * 0.34, 0.0), glow_key, Vector3(0.0, 0.78, 0.0))
     add_block_mesh(parent, Vector3(CELL * 0.50, CELL * 0.045, CELL * 0.50), Vector3(0.0, CELL * 0.56, 0.0), "hingeMetal")
     if block_type == "riftAnchor":
-        add_light_emitter(parent, "RiftAnchorLight", Vector3(0.0, CELL * 0.76, 0.0), Color(0.78, 0.44, 1.0), 4.95, CELL * 16.0)
-        add_ground_fill_light(parent, "RiftAnchorGroundLight", Vector3(0.0, -CELL * 0.28, 0.0), Color(0.78, 0.44, 1.0), 1.35, CELL * 10.5)
+        add_world_light_rig(parent, "riftAnchor")
     elif block_type == "sanctuaryBeacon":
-        add_light_emitter(parent, "SanctuaryBeaconLight", Vector3(0.0, CELL * 0.78, 0.0), Color(0.58, 0.86, 1.0), 5.40, CELL * 17.0)
-        add_ground_fill_light(parent, "SanctuaryBeaconGroundLight", Vector3(0.0, -CELL * 0.28, 0.0), Color(0.58, 0.86, 1.0), 1.45, CELL * 11.0)
+        add_world_light_rig(parent, "sanctuaryBeacon")
     else:
-        add_light_emitter(parent, "WardLanternLight", Vector3(0.0, CELL * 0.74, 0.0), LANTERN_LIGHT_COLOR, 2.31, CELL * 13.0, true)
-        add_ground_fill_light(parent, "WardLanternGroundLight", Vector3(0.0, -CELL * 0.28, 0.0), LANTERN_LIGHT_COLOR, 0.71, CELL * 9.5, true)
+        add_world_light_rig(parent, "wardLantern")
 
 func add_door_visual(parent: Node3D, secondary: bool) -> void:
     var width := CELL * 0.90

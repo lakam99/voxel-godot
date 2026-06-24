@@ -57,6 +57,87 @@ func update_fire_light_day_factor(day: float) -> void:
         if light != null and light.has_method("set_day_factor"):
             light.set_day_factor(day)
 
+func update_local_light_rig_lod(delta: float) -> void:
+    local_light_lod_elapsed += delta
+    if local_light_lod_elapsed < 0.25:
+        update_terrain_local_light_uniforms()
+        return
+    local_light_lod_elapsed = 0.0
+    if player == null or get_tree() == null:
+        update_terrain_local_light_uniforms()
+        return
+    var observer := player.global_position
+    var candidates := []
+    for light_value in get_tree().get_nodes_in_group("local_light_rig_fill"):
+        if not is_instance_valid(light_value):
+            continue
+        var light := light_value as Light3D
+        if light == null:
+            continue
+        if bool(light.get_meta("held_world_ground_fill", false)):
+            if light.has_method("set_lod_visible"):
+                light.set_lod_visible(true)
+            continue
+        var distance := observer.distance_to(light.global_position)
+        var max_distance := float(light.get_meta("rig_lod_distance", 56.0))
+        if distance <= max_distance:
+            candidates.append({ "light": light, "distance": distance })
+        elif light.has_method("set_lod_visible"):
+            light.set_lod_visible(false)
+    candidates.sort_custom(func(a, b): return float(a["distance"]) < float(b["distance"]))
+    var max_active := 48
+    for index in range(candidates.size()):
+        var light := candidates[index]["light"] as Light3D
+        if light != null and light.has_method("set_lod_visible"):
+            light.set_lod_visible(index < max_active)
+    update_terrain_local_light_uniforms()
+
+func update_terrain_local_light_uniforms() -> void:
+    var shader_material := terrain_material as ShaderMaterial
+    if shader_material == null or get_tree() == null:
+        return
+    var observer := player.global_position if player != null else Vector3.ZERO
+    var candidates := []
+    for light_value in get_tree().get_nodes_in_group("local_light_rig_fill"):
+        if not is_instance_valid(light_value):
+            continue
+        var light := light_value as Light3D
+        if light == null or not light.visible:
+            continue
+        var role := String(light.get_meta("light_role", ""))
+        if role != "terrain_wash" and role != "bounce_fill":
+            continue
+        var omni := light as OmniLight3D
+        var base_range := float(light.get("base_range"))
+        var range := maxf(omni.omni_range if omni != null else base_range, 0.0)
+        if range <= 0.01:
+            continue
+        var cull_range := maxf(base_range, range)
+        var distance := observer.distance_to(light.global_position)
+        if distance > cull_range + 18.0:
+            continue
+        candidates.append({ "light": light, "distance": distance, "range": range })
+    candidates.sort_custom(func(a, b): return float(a["distance"]) < float(b["distance"]))
+    var positions := PackedVector4Array()
+    var colors := PackedVector4Array()
+    var max_count := mini(12, candidates.size())
+    for index in range(max_count):
+        var light := candidates[index]["light"] as Light3D
+        if light == null:
+            continue
+        var position := light.global_position
+        var range := float(candidates[index]["range"])
+        var role := String(light.get_meta("light_role", ""))
+        var role_scale := 1.0 if role == "terrain_wash" else 0.72
+        positions.append(Vector4(position.x, position.y, position.z, range))
+        colors.append(Vector4(light.light_color.r, light.light_color.g, light.light_color.b, maxf(light.light_energy, 0.0) * role_scale))
+    while positions.size() < 12:
+        positions.append(Vector4.ZERO)
+        colors.append(Vector4.ZERO)
+    shader_material.set_shader_parameter("terrain_local_light_count", max_count)
+    shader_material.set_shader_parameter("terrain_local_light_positions", positions)
+    shader_material.set_shader_parameter("terrain_local_light_colors", colors)
+
 func apply_environment_style(day: float, warmth: float, weather_tint: float) -> void:
     if visual_style == null:
         setup_visual_style()

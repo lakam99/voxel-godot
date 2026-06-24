@@ -170,6 +170,8 @@ func run() -> void:
     await test_mining_upgrade_progression()
     mark_progress("material_hardness")
     await test_material_hardness_and_reset()
+    mark_progress("right_mouse_interaction")
+    await test_right_mouse_interaction_input()
     mark_progress("block_destroy_ray")
     await test_block_destroy_ray()
     mark_progress("saving_report")
@@ -192,6 +194,22 @@ func mark_progress(label: String) -> void:
 func wait_physics_frames(count: int) -> void:
     for i in range(count):
         await get_tree().physics_frame
+
+func dispatch_mouse_button(button_index: int, pressed := true, position := Vector2(-1.0, -1.0)) -> void:
+    var event := InputEventMouseButton.new()
+    event.button_index = button_index
+    event.pressed = pressed
+    var event_position := position
+    if event_position.x < 0.0 or event_position.y < 0.0:
+        event_position = get_viewport().get_visible_rect().size * 0.5
+    event.position = event_position
+    event.global_position = event_position
+    get_viewport().push_input(event)
+
+func control_center(control: Control) -> Vector2:
+    if control == null:
+        return get_viewport().get_visible_rect().size * 0.5
+    return control.get_global_rect().get_center()
 
 func add_result(name: String, passed: bool, details: String = "") -> void:
     results.append({
@@ -1208,6 +1226,10 @@ func test_held_item_system() -> void:
         "use time %.2f, break target '%s'" % [float(held_item.get("use_time")), String(main.get("break_target_id"))]
     )
 
+    var held_light_original_time := float(main.get("time_of_day"))
+    main.set("time_of_day", 0.75)
+    main.call("update_sky", 0.0)
+
     inventory_system.add_item("torch", 1)
     var torch_slot := find_inventory_slot(inventory_system, "torch")
     inventory_system.select(0)
@@ -1218,39 +1240,132 @@ func test_held_item_system() -> void:
     var held_torch_lights := count_light_descendants(held_torch_root)
     var held_torch_fire_lights := count_fire_light_descendants(held_torch_root)
     var held_torch_shadowed := count_shadowed_light_descendants(held_torch_root)
-    var held_torch_light := first_light_descendant(held_torch_root) as Light3D
+    var held_torch_overlay_meshes := ground_overlay_mesh_descendants(held_torch_root)
+    var held_torch_ground_fills := ground_fill_light_descendants(held_torch_root)
+    var held_torch_sources := light_role_descendants(held_torch_root, "source")
+    var held_torch_terrain_washes := light_role_descendants(held_torch_root, "terrain_wash")
+    var held_torch_bounce_fills := light_role_descendants(held_torch_root, "bounce_fill")
+    var held_torch_ground_fill: Light3D = null
+    if not held_torch_terrain_washes.is_empty():
+        held_torch_ground_fill = held_torch_terrain_washes[0] as Light3D
+    var held_torch_light := first_light_role_descendant(held_torch_root, "source")
     var held_torch_omni := held_torch_light as OmniLight3D
     var held_energy_before := held_torch_light.light_energy if held_torch_light else 0.0
     var held_range_before := held_torch_omni.omni_range if held_torch_omni else 0.0
     var held_base_energy := light_base_energy(held_torch_light)
     var held_base_range := light_base_range(held_torch_light)
     var held_min_scale := light_flicker_min_scale(held_torch_light)
-    await wait_physics_frames(8)
+    var torch_original_pitch := camera.rotation.x
+    camera.rotation.x = 0.0
+    await wait_physics_frames(2)
+    var torch_fill_level_pos := held_torch_ground_fill.global_position if held_torch_ground_fill else Vector3.ZERO
+    var torch_fill_level_ground := float(main.call("height_at_world", torch_fill_level_pos.x, torch_fill_level_pos.z)) if held_torch_ground_fill else 0.0
+    camera.rotation.x = deg_to_rad(62.0)
+    await wait_physics_frames(2)
+    var torch_fill_up_pos := held_torch_ground_fill.global_position if held_torch_ground_fill and is_instance_valid(held_torch_ground_fill) else Vector3.ZERO
+    var torch_fill_up_ground := float(main.call("height_at_world", torch_fill_up_pos.x, torch_fill_up_pos.z)) if held_torch_ground_fill and is_instance_valid(held_torch_ground_fill) else 0.0
+    camera.rotation.x = deg_to_rad(-62.0)
+    await wait_physics_frames(2)
+    var torch_fill_down_pos := held_torch_ground_fill.global_position if held_torch_ground_fill and is_instance_valid(held_torch_ground_fill) else Vector3.ZERO
+    var torch_fill_down_ground := float(main.call("height_at_world", torch_fill_down_pos.x, torch_fill_down_pos.z)) if held_torch_ground_fill and is_instance_valid(held_torch_ground_fill) else 0.0
+    camera.rotation.x = torch_original_pitch
+    var torch_fill_level_height := torch_fill_level_pos.y - torch_fill_level_ground
+    var torch_fill_up_height := torch_fill_up_pos.y - torch_fill_up_ground
+    var torch_fill_down_height := torch_fill_down_pos.y - torch_fill_down_ground
+    var torch_fill_up_drift := torch_fill_level_pos.distance_to(torch_fill_up_pos)
+    var torch_fill_down_drift := torch_fill_level_pos.distance_to(torch_fill_down_pos)
+    var torch_fill_pitch_independent := (
+        held_torch_ground_fill != null
+        and torch_fill_level_height >= 0.75
+        and torch_fill_level_height <= 2.60
+        and torch_fill_up_height >= 0.75
+        and torch_fill_up_height <= 2.60
+        and torch_fill_down_height >= 0.75
+        and torch_fill_down_height <= 2.60
+        and torch_fill_up_drift <= 0.25
+        and torch_fill_down_drift <= 0.25
+    )
+    var held_torch_energy_min := held_energy_before
+    var held_torch_energy_max := held_energy_before
+    var held_torch_range_min := held_range_before
+    var held_torch_range_max := held_range_before
+    for i in range(12):
+        await wait_physics_frames(1)
+        if held_torch_light != null and is_instance_valid(held_torch_light):
+            held_torch_energy_min = minf(held_torch_energy_min, held_torch_light.light_energy)
+            held_torch_energy_max = maxf(held_torch_energy_max, held_torch_light.light_energy)
+        if held_torch_omni != null and is_instance_valid(held_torch_omni):
+            held_torch_range_min = minf(held_torch_range_min, held_torch_omni.omni_range)
+            held_torch_range_max = maxf(held_torch_range_max, held_torch_omni.omni_range)
     var held_energy_after := held_torch_light.light_energy if held_torch_light and is_instance_valid(held_torch_light) else 0.0
     var held_range_after := held_torch_omni.omni_range if held_torch_omni and is_instance_valid(held_torch_omni) else 0.0
+    var held_torch_flickers := held_torch_energy_max - held_torch_energy_min > 0.08 and held_torch_range_max - held_torch_range_min > 0.08
     add_result(
         "held_torch_emits_light",
         String(held_item.get("current_item")) == "torch"
-            and held_torch_lights >= 1
+            and held_torch_lights >= 3
             and held_torch_fire_lights >= 1
             and held_torch_shadowed >= 1
+            and held_torch_ground_fills.size() >= 2
+            and held_torch_sources.size() >= 1
+            and held_torch_terrain_washes.size() >= 1
+            and held_torch_bounce_fills.size() >= 1
             and held_base_energy >= 1.3
             and held_base_range >= 6.0
+            and held_base_range <= 6.4
             and held_min_scale >= 0.01
-            and held_min_scale <= 0.99,
-        "current %s, lights %d fire %d shadow %d base %.2f range %.2f min %.2f sample %.2f->%.2f %.2f->%.2f" % [
+            and held_min_scale <= 0.99
+            and held_torch_flickers
+            and held_torch_overlay_meshes.is_empty(),
+        "current %s, lights %d fire %d shadow %d roles %d/%d/%d fill %d base %.2f range %.2f min %.2f overlays %d sample %.2f->%.2f %.2f->%.2f flicker %.2f/%.2f" % [
             String(held_item.get("current_item")),
             held_torch_lights,
             held_torch_fire_lights,
             held_torch_shadowed,
+            held_torch_sources.size(),
+            held_torch_terrain_washes.size(),
+            held_torch_bounce_fills.size(),
+            held_torch_ground_fills.size(),
             held_base_energy,
             held_base_range,
             held_min_scale,
+            held_torch_overlay_meshes.size(),
             held_energy_before,
             held_energy_after,
             held_range_before,
-            held_range_after
+            held_range_after,
+            held_torch_energy_max - held_torch_energy_min,
+            held_torch_range_max - held_torch_range_min
         ]
+    )
+    add_result(
+        "held_torch_ground_fill_pitch_independent",
+        torch_fill_pitch_independent,
+        "level %s h %.2f, up %s h %.2f drift %.2f, down %s h %.2f drift %.2f" % [
+            str(torch_fill_level_pos),
+            torch_fill_level_height,
+            str(torch_fill_up_pos),
+            torch_fill_up_height,
+            torch_fill_up_drift,
+            str(torch_fill_down_pos),
+            torch_fill_down_height,
+            torch_fill_down_drift
+        ]
+    )
+    if main.has_method("update_terrain_local_light_uniforms"):
+        main.call("update_terrain_local_light_uniforms")
+    var torch_terrain_material := main.get("terrain_material") as ShaderMaterial
+    var torch_uniform_range_before := terrain_light_uniform_first_range(torch_terrain_material)
+    var torch_uniform_energy_before := terrain_light_uniform_max_energy(torch_terrain_material)
+    await wait_physics_frames(8)
+    if main.has_method("update_terrain_local_light_uniforms"):
+        main.call("update_terrain_local_light_uniforms")
+    var torch_uniform_range_after := terrain_light_uniform_first_range(torch_terrain_material)
+    var torch_uniform_energy_after := terrain_light_uniform_max_energy(torch_terrain_material)
+    add_result(
+        "held_torch_terrain_material_flickers",
+        absf(torch_uniform_range_after - torch_uniform_range_before) > 0.02 or absf(torch_uniform_energy_after - torch_uniform_energy_before) > 0.02,
+        "range %.2f->%.2f energy %.2f->%.2f" % [torch_uniform_range_before, torch_uniform_range_after, torch_uniform_energy_before, torch_uniform_energy_after]
     )
 
     inventory_system.add_item("wardLantern", 1)
@@ -1263,33 +1378,127 @@ func test_held_item_system() -> void:
     var held_ward_lights := count_light_descendants(held_ward_root)
     var held_ward_fire_lights := count_fire_light_descendants(held_ward_root)
     var held_ward_shadowed := count_shadowed_light_descendants(held_ward_root)
-    var held_ward_light := first_light_descendant(held_ward_root) as Light3D
+    var held_ward_overlay_meshes := ground_overlay_mesh_descendants(held_ward_root)
+    var held_ward_ground_fills := ground_fill_light_descendants(held_ward_root)
+    var held_ward_sources := light_role_descendants(held_ward_root, "source")
+    var held_ward_terrain_washes := light_role_descendants(held_ward_root, "terrain_wash")
+    var held_ward_bounce_fills := light_role_descendants(held_ward_root, "bounce_fill")
+    var held_ward_ground_fill: Light3D = null
+    if not held_ward_terrain_washes.is_empty():
+        held_ward_ground_fill = held_ward_terrain_washes[0] as Light3D
+    var held_ward_light := first_light_role_descendant(held_ward_root, "source")
     var held_ward_position := held_ward_light.position if held_ward_light else Vector3.ZERO
     var held_ward_base_energy := light_base_energy(held_ward_light)
     var held_ward_base_range := light_base_range(held_ward_light)
     var held_ward_min_scale := light_flicker_min_scale(held_ward_light)
+    var ward_original_pitch := camera.rotation.x
+    camera.rotation.x = 0.0
+    await wait_physics_frames(2)
+    var ward_fill_level_pos := held_ward_ground_fill.global_position if held_ward_ground_fill else Vector3.ZERO
+    var ward_fill_level_ground := float(main.call("height_at_world", ward_fill_level_pos.x, ward_fill_level_pos.z)) if held_ward_ground_fill else 0.0
+    camera.rotation.x = deg_to_rad(62.0)
+    await wait_physics_frames(2)
+    var ward_fill_up_pos := held_ward_ground_fill.global_position if held_ward_ground_fill and is_instance_valid(held_ward_ground_fill) else Vector3.ZERO
+    var ward_fill_up_ground := float(main.call("height_at_world", ward_fill_up_pos.x, ward_fill_up_pos.z)) if held_ward_ground_fill and is_instance_valid(held_ward_ground_fill) else 0.0
+    camera.rotation.x = deg_to_rad(-62.0)
+    await wait_physics_frames(2)
+    var ward_fill_down_pos := held_ward_ground_fill.global_position if held_ward_ground_fill and is_instance_valid(held_ward_ground_fill) else Vector3.ZERO
+    var ward_fill_down_ground := float(main.call("height_at_world", ward_fill_down_pos.x, ward_fill_down_pos.z)) if held_ward_ground_fill and is_instance_valid(held_ward_ground_fill) else 0.0
+    camera.rotation.x = ward_original_pitch
+    var ward_fill_level_height := ward_fill_level_pos.y - ward_fill_level_ground
+    var ward_fill_up_height := ward_fill_up_pos.y - ward_fill_up_ground
+    var ward_fill_down_height := ward_fill_down_pos.y - ward_fill_down_ground
+    var ward_fill_up_drift := ward_fill_level_pos.distance_to(ward_fill_up_pos)
+    var ward_fill_down_drift := ward_fill_level_pos.distance_to(ward_fill_down_pos)
+    var ward_fill_pitch_independent := (
+        held_ward_ground_fill != null
+        and ward_fill_level_height >= 0.75
+        and ward_fill_level_height <= 2.60
+        and ward_fill_up_height >= 0.75
+        and ward_fill_up_height <= 2.60
+        and ward_fill_down_height >= 0.75
+        and ward_fill_down_height <= 2.60
+        and ward_fill_up_drift <= 0.25
+        and ward_fill_down_drift <= 0.25
+    )
     add_result(
         "held_ward_lantern_emits_light",
         String(held_item.get("current_item")) == "wardLantern"
-            and held_ward_lights >= 1
+            and held_ward_lights >= 3
             and held_ward_fire_lights >= 1
             and held_ward_shadowed >= 1
+            and held_ward_ground_fills.size() >= 2
+            and held_ward_sources.size() >= 1
+            and held_ward_terrain_washes.size() >= 1
+            and held_ward_bounce_fills.size() >= 1
             and held_ward_base_energy >= 1.8
             and held_ward_base_range >= 8.0
             and held_ward_position.length() > 0.05
             and held_ward_min_scale >= 0.01
-            and held_ward_min_scale <= 0.99,
-        "current %s, lights %d fire %d shadow %d base %.2f range %.2f offset %s min %.2f" % [
+            and held_ward_min_scale <= 0.99
+            and held_ward_overlay_meshes.is_empty(),
+        "current %s, lights %d fire %d shadow %d roles %d/%d/%d fill %d base %.2f range %.2f offset %s min %.2f overlays %d" % [
             String(held_item.get("current_item")),
             held_ward_lights,
             held_ward_fire_lights,
             held_ward_shadowed,
+            held_ward_sources.size(),
+            held_ward_terrain_washes.size(),
+            held_ward_bounce_fills.size(),
+            held_ward_ground_fills.size(),
             held_ward_base_energy,
             held_ward_base_range,
             str(held_ward_position),
-            held_ward_min_scale
+            held_ward_min_scale,
+            held_ward_overlay_meshes.size()
         ]
     )
+    add_result(
+        "held_ward_lantern_ground_fill_pitch_independent",
+        ward_fill_pitch_independent,
+        "level %s h %.2f, up %s h %.2f drift %.2f, down %s h %.2f drift %.2f" % [
+            str(ward_fill_level_pos),
+            ward_fill_level_height,
+            str(ward_fill_up_pos),
+            ward_fill_up_height,
+            ward_fill_up_drift,
+            str(ward_fill_down_pos),
+            ward_fill_down_height,
+            ward_fill_down_drift
+        ]
+    )
+    if main.has_method("update_terrain_local_light_uniforms"):
+        main.call("update_terrain_local_light_uniforms")
+    var terrain_light_material := main.get("terrain_material") as ShaderMaterial
+    var terrain_light_count := int(terrain_light_material.get_shader_parameter("terrain_local_light_count")) if terrain_light_material else 0
+    var terrain_light_positions_value = terrain_light_material.get_shader_parameter("terrain_local_light_positions") if terrain_light_material else null
+    var terrain_light_colors_value = terrain_light_material.get_shader_parameter("terrain_local_light_colors") if terrain_light_material else null
+    var first_terrain_light_range := 0.0
+    var strongest_terrain_light_energy := 0.0
+    if typeof(terrain_light_positions_value) == TYPE_PACKED_VECTOR4_ARRAY:
+        var terrain_position_vectors: PackedVector4Array = terrain_light_positions_value
+        if terrain_position_vectors.size() > 0:
+            first_terrain_light_range = terrain_position_vectors[0].w
+    elif typeof(terrain_light_positions_value) == TYPE_ARRAY:
+        var terrain_position_array: Array = terrain_light_positions_value
+        if terrain_position_array.size() > 0 and terrain_position_array[0] is Vector4:
+            first_terrain_light_range = (terrain_position_array[0] as Vector4).w
+    if typeof(terrain_light_colors_value) == TYPE_PACKED_VECTOR4_ARRAY:
+        var terrain_color_vectors: PackedVector4Array = terrain_light_colors_value
+        for value in terrain_color_vectors:
+            strongest_terrain_light_energy = maxf(strongest_terrain_light_energy, value.w)
+    elif typeof(terrain_light_colors_value) == TYPE_ARRAY:
+        var terrain_color_array: Array = terrain_light_colors_value
+        for value in terrain_color_array:
+            if value is Vector4:
+                strongest_terrain_light_energy = maxf(strongest_terrain_light_energy, (value as Vector4).w)
+    add_result(
+        "held_light_updates_terrain_material_lighting",
+        terrain_light_count >= 1 and first_terrain_light_range >= 8.0 and strongest_terrain_light_energy >= 1.0,
+        "count %d, first range %.2f, max energy %.2f" % [terrain_light_count, first_terrain_light_range, strongest_terrain_light_energy]
+    )
+    main.set("time_of_day", held_light_original_time)
+    main.call("update_sky", 0.0)
 
     inventory_system.add_item("woodenAxe", 1)
     var axe_slot := find_inventory_slot(inventory_system, "woodenAxe")
@@ -1483,6 +1692,53 @@ func test_objective_system() -> void:
         "objective_list_opens",
         opened and hud.objective_panel.visible and hud.objective_list.get_child_count() == objective_system.all_objectives().size(),
         "opened %s, rows %d" % [str(opened), hud.objective_list.get_child_count()]
+    )
+    var objective_scroll := hud.get("objective_scroll") as ScrollContainer
+    var objective_scroll_layout: bool = (
+        objective_scroll != null
+        and hud.objective_list.get_parent() == objective_scroll
+        and objective_scroll.clip_contents
+        and objective_scroll.custom_minimum_size.y <= 190.0
+        and hud.objective_list.custom_minimum_size.x >= 280.0
+        and hud.objective_panel.offset_bottom <= get_viewport().get_visible_rect().size.y
+    )
+    add_result(
+        "objective_list_bounded_scroll",
+        objective_scroll_layout,
+        "scroll %s, clip %s, list width %.1f, panel bottom %.1f" % [
+            str(objective_scroll != null),
+            str(objective_scroll.clip_contents if objective_scroll else false),
+            hud.objective_list.custom_minimum_size.x,
+            hud.objective_panel.offset_bottom
+        ]
+    )
+    hud.objective_panel.visible = false
+    main.set_game_mouse_mode(Input.MOUSE_MODE_CAPTURED)
+    var objective_key := InputEventKey.new()
+    objective_key.keycode = KEY_O
+    objective_key.pressed = true
+    main.call("_unhandled_input", objective_key)
+    var objective_requested_open_mode: int = int(main.get("last_requested_mouse_mode"))
+    var objective_actual_open_mode: int = int(Input.get_mouse_mode())
+    var objective_mouse_open: bool = hud.is_objectives_open() and objective_requested_open_mode == int(Input.MOUSE_MODE_VISIBLE)
+    var objective_escape := InputEventKey.new()
+    objective_escape.keycode = KEY_ESCAPE
+    objective_escape.pressed = true
+    main.call("_unhandled_input", objective_escape)
+    var objective_requested_close_mode: int = int(main.get("last_requested_mouse_mode"))
+    var objective_actual_close_mode: int = int(Input.get_mouse_mode())
+    var objective_mouse_closed: bool = not hud.is_objectives_open() and objective_requested_close_mode == int(Input.MOUSE_MODE_CAPTURED)
+    add_result(
+        "objective_panel_frees_mouse",
+        objective_mouse_open and objective_mouse_closed,
+        "open %s requested/actual %d/%d, closed %s requested/actual %d/%d" % [
+            str(objective_mouse_open),
+            objective_requested_open_mode,
+            objective_actual_open_mode,
+            str(objective_mouse_closed),
+            objective_requested_close_mode,
+            objective_actual_close_mode
+        ]
     )
 
     hud.set_inventory_open(true)
@@ -1758,6 +2014,58 @@ func test_contract_system() -> void:
             int(progression_system.total_xp),
             stone_blocks_before,
             inventory_system.count("stoneBlock")
+        ]
+    )
+    var contract_scroll := hud.get("contract_scroll") as ScrollContainer
+    var first_contract_label := hud.contract_list.get_child(0) as Label if hud.contract_list.get_child_count() > 0 else null
+    var contract_layout_ok: bool = (
+        contract_scroll != null
+        and hud.contract_list.get_parent() == contract_scroll
+        and contract_scroll.clip_contents
+        and hud.contract_list.custom_minimum_size.x >= 300.0
+        and first_contract_label != null
+        and first_contract_label.custom_minimum_size.x >= 300.0
+        and hud.contract_panel.offset_bottom <= get_viewport().get_visible_rect().size.y
+    )
+    add_result(
+        "contract_list_bounded_width",
+        contract_layout_ok,
+        "scroll %s, clip %s, list width %.1f, row width %.1f, panel bottom %.1f, rows %d" % [
+            str(contract_scroll != null),
+            str(contract_scroll.clip_contents if contract_scroll else false),
+            hud.contract_list.custom_minimum_size.x,
+            first_contract_label.custom_minimum_size.x if first_contract_label else 0.0,
+            hud.contract_panel.offset_bottom,
+            hud.contract_list.get_child_count()
+        ]
+    )
+    contract_system.toggle_menu(false)
+    hud.render_contracts()
+    main.set_game_mouse_mode(Input.MOUSE_MODE_CAPTURED)
+    var contract_key := InputEventKey.new()
+    contract_key.keycode = KEY_J
+    contract_key.pressed = true
+    main.call("_unhandled_input", contract_key)
+    var contract_requested_open_mode: int = int(main.get("last_requested_mouse_mode"))
+    var contract_actual_open_mode: int = int(Input.get_mouse_mode())
+    var contract_mouse_open: bool = hud.is_contracts_open() and contract_requested_open_mode == int(Input.MOUSE_MODE_VISIBLE)
+    var contract_escape := InputEventKey.new()
+    contract_escape.keycode = KEY_ESCAPE
+    contract_escape.pressed = true
+    main.call("_unhandled_input", contract_escape)
+    var contract_requested_close_mode: int = int(main.get("last_requested_mouse_mode"))
+    var contract_actual_close_mode: int = int(Input.get_mouse_mode())
+    var contract_mouse_closed: bool = not hud.is_contracts_open() and contract_requested_close_mode == int(Input.MOUSE_MODE_CAPTURED)
+    add_result(
+        "contract_panel_frees_mouse",
+        contract_mouse_open and contract_mouse_closed,
+        "open %s requested/actual %d/%d, closed %s requested/actual %d/%d" % [
+            str(contract_mouse_open),
+            contract_requested_open_mode,
+            contract_actual_open_mode,
+            str(contract_mouse_closed),
+            contract_requested_close_mode,
+            contract_actual_close_mode
         ]
     )
     var base_contract_state := {
@@ -2206,6 +2514,10 @@ func test_utility_blocks() -> void:
     var light_failures := []
     var fire_light_failures := []
     var light_strength_failures := []
+    var ground_fill_details := []
+    var ground_fill_failures := []
+    var ground_overlay_details := []
+    var ground_overlay_failures := []
     var generated_details := []
     var generated_failures := []
     for item_id in visual_blocks.keys():
@@ -2222,18 +2534,61 @@ func test_utility_blocks() -> void:
             var light_count := count_light_descendants(visual_body)
             var fire_count := count_fire_light_descendants(visual_body)
             var shadow_count := count_shadowed_light_descendants(visual_body)
-            var first_light := first_light_descendant(visual_body)
+            var first_light := first_light_role_descendant(visual_body, "source")
             var base_energy := light_base_energy(first_light)
             var base_range := light_base_range(first_light)
             var flicker_min := light_flicker_min_scale(first_light)
             var light_offset := first_light.position if first_light else Vector3.ZERO
-            light_details.append("%s:%d/%d/%d@%.2f/%.1f min %.2f" % [String(item_id), light_count, fire_count, shadow_count, base_energy, base_range, flicker_min])
-            if light_count < 1:
+            var ground_fill_lights := ground_fill_light_descendants(visual_body)
+            var source_lights := light_role_descendants(visual_body, "source")
+            var terrain_wash_lights := light_role_descendants(visual_body, "terrain_wash")
+            var bounce_fill_lights := light_role_descendants(visual_body, "bounce_fill")
+            var local_rig_lights := local_light_rig_descendants(visual_body)
+            var ground_overlay_meshes := ground_overlay_mesh_descendants(visual_body)
+            var min_ground_fill_height := INF
+            var min_ground_fill_range := INF
+            var shadowed_ground_fill := 0
+            for fill_light_value in ground_fill_lights:
+                var fill_light := fill_light_value as Light3D
+                if fill_light == null:
+                    continue
+                min_ground_fill_height = minf(min_ground_fill_height, fill_light.position.y)
+                min_ground_fill_range = minf(min_ground_fill_range, light_base_range(fill_light))
+                if fill_light.shadow_enabled:
+                    shadowed_ground_fill += 1
+            if ground_fill_lights.is_empty():
+                min_ground_fill_height = 0.0
+                min_ground_fill_range = 0.0
+            var expected_ground_fill_range := CELL * 6.0
+            if String(item_id) == "torch":
+                expected_ground_fill_range = CELL * 5.0
+            light_details.append("%s:%d/%d/%d roles %d/%d/%d rig %d @%.2f/%.1f min %.2f" % [
+                String(item_id),
+                light_count,
+                fire_count,
+                shadow_count,
+                source_lights.size(),
+                terrain_wash_lights.size(),
+                bounce_fill_lights.size(),
+                local_rig_lights.size(),
+                base_energy,
+                base_range,
+                flicker_min
+            ])
+            ground_fill_details.append("%s:%d@%.2f/%.1f shadow %d" % [String(item_id), ground_fill_lights.size(), min_ground_fill_height, min_ground_fill_range, shadowed_ground_fill])
+            ground_overlay_details.append("%s:%d" % [String(item_id), ground_overlay_meshes.size()])
+            if light_count < 3 or source_lights.is_empty() or terrain_wash_lights.is_empty() or bounce_fill_lights.is_empty() or local_rig_lights.size() < 3:
                 light_failures.append(item_id)
-            if fire_count < 1:
+            if fire_count < 3:
                 fire_light_failures.append(item_id)
+            if ground_fill_lights.size() < 2 or min_ground_fill_height < CELL * 0.30 or min_ground_fill_range < expected_ground_fill_range or shadowed_ground_fill > 0:
+                ground_fill_failures.append(item_id)
+            if not ground_overlay_meshes.is_empty():
+                ground_overlay_failures.append(item_id)
             if flicker_min < 0.01 or flicker_min > 0.99:
                 light_strength_failures.append("%s:min %.2f" % [String(item_id), flicker_min])
+            if String(item_id) == "torch" and (base_range < CELL * 6.0 or base_range > CELL * 6.4):
+                light_strength_failures.append("%s:range %.2f" % [String(item_id), base_range])
             if String(item_id) == "wardLantern" and (base_energy < 2.0 or base_range < CELL * 12.0 or light_offset.length() < CELL * 0.35):
                 light_strength_failures.append("%s:%.2f/%.1f/%s" % [String(item_id), base_energy, base_range, str(light_offset)])
     add_result(
@@ -2250,6 +2605,16 @@ func test_utility_blocks() -> void:
         "placed_light_emitters",
         light_failures.is_empty() and fire_light_failures.is_empty() and light_strength_failures.is_empty(),
         ", ".join(light_details) + (" failures " + ", ".join(light_strength_failures) if not light_strength_failures.is_empty() else "")
+    )
+    add_result(
+        "placed_light_ground_fill",
+        ground_fill_failures.is_empty(),
+        ", ".join(ground_fill_details) + (" failures " + ", ".join(ground_fill_failures) if not ground_fill_failures.is_empty() else "")
+    )
+    add_result(
+        "placed_light_uses_real_ground_lighting",
+        ground_overlay_failures.is_empty(),
+        ", ".join(ground_overlay_details) + (" failures " + ", ".join(ground_overlay_failures) if not ground_overlay_failures.is_empty() else "")
     )
 
     var expected_shadowed_lights := 5
@@ -5805,6 +6170,105 @@ func test_block_destroy_ray() -> void:
         ]
     )
 
+func test_right_mouse_interaction_input() -> void:
+    if not main or not player or not camera:
+        add_result("right_mouse_interaction_input", false, "main/player/camera missing")
+        add_result("left_mouse_held_item_strike_input", false, "main/player/camera missing")
+        return
+    var inventory_system = main.get("inventory_system")
+    var held_item = main.get("held_item")
+    var hud = main.get("hud")
+    if inventory_system == null or held_item == null or hud == null:
+        add_result("right_mouse_interaction_input", false, "inventory, held item, or hud missing")
+        add_result("left_mouse_held_item_strike_input", false, "inventory, held item, or hud missing")
+        return
+    var base_cell := Vector2i(roundi(player.global_position.x / CELL) + 8, roundi(player.global_position.z / CELL))
+    reset_player_on_flat_patch(base_cell)
+    clear_blocks_near_cell(base_cell, 8)
+    clear_props_near_cell(base_cell, 8)
+    await wait_physics_frames(8)
+
+    var ground_y: float = main.call("terrain_height_cell", base_cell.x, base_cell.y - 2)
+    var door_cell := Vector3i(base_cell.x, floori(ground_y / CELL) + 1, base_cell.y - 2)
+    var door := main.call("create_block", door_cell, "door") as StaticBody3D
+    await wait_physics_frames(6)
+    if door == null:
+        add_result("right_mouse_interaction_input", false, "door creation failed")
+        return
+
+    var aim_point := door.global_position + Vector3(0.0, CELL * 0.45, 0.0)
+    aim_player_at(aim_point)
+    await wait_physics_frames(3)
+    var hit: Dictionary = player.call("view_ray", INTERACT_RANGE, true)
+    var hit_block: Node = main.call("interaction_block_from_collider", hit.get("collider")) if not hit.is_empty() else null
+    var hit_door: bool = hit_block == door
+    var prompt := String(main.call("focused_interaction_prompt"))
+    var prompt_reach := 999.0
+    if hit.has("position"):
+        var hit_position: Vector3 = hit.get("position", Vector3.ZERO)
+        prompt_reach = Vector2(hit_position.x - player.global_position.x, hit_position.z - player.global_position.z).length()
+    var right_click_position := control_center(hud.location_panel)
+    Input.set_mouse_mode(Input.MOUSE_MODE_VISIBLE)
+    dispatch_mouse_button(MOUSE_BUTTON_RIGHT, true, right_click_position)
+    await wait_physics_frames(3)
+    dispatch_mouse_button(MOUSE_BUTTON_RIGHT, false, right_click_position)
+    var opened_first_click: bool = bool(door.get_meta("open", false))
+    var pivot := door.get_node_or_null("DoorPivot") as Node3D
+    add_result(
+        "right_mouse_interaction_input",
+        hit_door and prompt.find("Open door") >= 0 and opened_first_click and pivot != null and abs(pivot.rotation.y) > 0.5,
+        "hitDoor %s prompt '%s' reach %.2f/%.2f opened %s pivot %s click %s mouseActual %d" % [
+            str(hit_door),
+            prompt,
+            prompt_reach,
+            ACTION_REACH,
+            str(opened_first_click),
+            str(pivot != null),
+            str(right_click_position),
+            int(Input.get_mouse_mode())
+        ]
+    )
+
+    clear_blocks_near_cell(base_cell, 8)
+    clear_props_near_cell(base_cell, 8)
+    inventory_system.set_size(ItemCatalogScript.MAX_INVENTORY_SIZE)
+    inventory_system.clear()
+    inventory_system.add_item("woodenAxe", 1)
+    set_active_inventory_item(inventory_system, "woodenAxe")
+    if held_item.has_method("refresh_active"):
+        held_item.refresh_active()
+    held_item.set("use_action", "")
+    held_item.set("use_time", 0.0)
+    if held_item.has_method("apply_pose"):
+        held_item.apply_pose()
+    reset_player_on_flat_patch(Vector2i(base_cell.x + 6, base_cell.y))
+    player.rotation.y = 0.0
+    player.set("pitch", deg_to_rad(-18.0))
+    camera.rotation.x = deg_to_rad(-18.0)
+    await wait_physics_frames(4)
+    var before_action := String(held_item.get("use_action"))
+    var before_time := float(held_item.get("use_time"))
+    var left_click_position := control_center(hud.hotbar)
+    Input.set_mouse_mode(Input.MOUSE_MODE_VISIBLE)
+    dispatch_mouse_button(MOUSE_BUTTON_LEFT, true, left_click_position)
+    await wait_physics_frames(2)
+    dispatch_mouse_button(MOUSE_BUTTON_LEFT, false, left_click_position)
+    var after_action := String(held_item.get("use_action"))
+    var after_time := float(held_item.get("use_time"))
+    add_result(
+        "left_mouse_held_item_strike_input",
+        String(held_item.get("current_item")) == "woodenAxe" and after_action == "strike" and after_time > before_time,
+        "item %s action %s->%s time %.2f->%.2f click %s mouseActual %d" % [
+            String(held_item.get("current_item")),
+            before_action,
+            after_action,
+            before_time,
+            after_time,
+            str(left_click_position),
+            int(Input.get_mouse_mode())
+        ]
+    )
+
 func test_mining_tool_requirements() -> void:
     if not main or not player or not camera:
         add_result("mining_tool_requirements", false, "main/player/camera missing")
@@ -6092,8 +6556,6 @@ func test_material_hardness_and_reset() -> void:
     }
     inventory_system.set_size(ItemCatalogScript.MAX_INVENTORY_SIZE)
     inventory_system.clear()
-    inventory_system.add_item("woodenPickaxe", 1)
-    set_active_inventory_item(inventory_system, "woodenPickaxe")
 
     var hardness_cell := Vector2i(roundi(player.global_position.x / CELL) + 8, roundi(player.global_position.z / CELL))
     reset_player_on_flat_patch(hardness_cell)
@@ -6111,6 +6573,7 @@ func test_material_hardness_and_reset() -> void:
     var test_cell := Vector3i(roundi(target_pos.x / CELL), roundi(target_pos.y / CELL), roundi(target_pos.z / CELL))
     main.call("create_block", test_cell, "stoneBlock")
     await wait_physics_frames(4)
+    var blocks := get_blocks()
     var block_center := Vector3(test_cell.x * CELL, test_cell.y * CELL, test_cell.z * CELL)
     aim_player_at(block_center)
     await wait_physics_frames(2)
@@ -6128,13 +6591,21 @@ func test_material_hardness_and_reset() -> void:
                 pre_hit_cell = pre_collider.get_meta("cell")
     main.call("destroy_target")
     await wait_physics_frames(4)
-    var blocks := get_blocks()
+    var bare_hand_blocked: bool = blocks.has(test_cell) and float(main.get("break_progress")) == 0.0 and String(main.get("last_hud_refresh_message")).find("Wooden Pickaxe") >= 0
+
+    inventory_system.add_item("woodenPickaxe", 1)
+    set_active_inventory_item(inventory_system, "woodenPickaxe")
+    main.call("reset_break_progress")
+    main.call("destroy_target")
+    await wait_physics_frames(4)
+    blocks = get_blocks()
     var overlay := main.get("break_overlay") as MeshInstance3D
-    var cracked_not_destroyed := blocks.has(test_cell) and float(main.get("break_progress")) > 0.0 and overlay != null and overlay.visible
+    var cracked_not_destroyed: bool = blocks.has(test_cell) and float(main.get("break_progress")) > 0.0 and overlay != null and overlay.visible
     add_result(
         "material_hardness_first_strike",
-        cracked_not_destroyed,
-        "progress %.2f, overlay %s, prehit %s/%s cell %s target %s active %s dist %.2f" % [
+        bare_hand_blocked and cracked_not_destroyed,
+        "bareBlocked %s progress %.2f, overlay %s, prehit %s/%s cell %s target %s active %s dist %.2f" % [
+            str(bare_hand_blocked),
             float(main.get("break_progress")),
             str(overlay != null and overlay.visible),
             pre_hit_kind,
@@ -6155,6 +6626,30 @@ func test_material_hardness_and_reset() -> void:
         await wait_physics_frames(2)
     blocks = get_blocks()
     add_result("material_hardness_destroyed", not blocks.has(test_cell), "stone block removed after repeated strikes")
+    inventory_system.clear()
+    var tree_gate := String(main.call("unmet_tool_requirement_message", "tree")).find("Wooden Axe") >= 0
+    var rock_gate := String(main.call("unmet_tool_requirement_message", "rock")).find("Wooden Pickaxe") >= 0
+    var wildlife_gate := String(main.call("unmet_tool_requirement_message", "wildlife")).find("Wooden Sword") >= 0
+    var bare_hostile_damage_low := float(main.call("melee_damage_for_active_item")) <= 1.1
+    var bare_damage := float(main.call("melee_damage_for_active_item"))
+    inventory_system.add_item("woodenSword", 1)
+    set_active_inventory_item(inventory_system, "woodenSword")
+    var wooden_sword_damage := float(main.call("melee_damage_for_active_item"))
+    inventory_system.add_item("nightBlade", 1)
+    set_active_inventory_item(inventory_system, "nightBlade")
+    var night_blade_damage := float(main.call("melee_damage_for_active_item"))
+    add_result(
+        "tool_weapon_gating_and_scaling",
+        tree_gate and rock_gate and wildlife_gate and bare_hostile_damage_low and wooden_sword_damage > 15.0 and night_blade_damage > wooden_sword_damage,
+        "tree %s rock %s wildlife %s bare %.1f woodenSword %.1f nightBlade %.1f" % [
+            str(tree_gate),
+            str(rock_gate),
+            str(wildlife_gate),
+            bare_damage,
+            wooden_sword_damage,
+            night_blade_damage
+        ]
+    )
     restore_collision_shapes(disabled_prop_shapes)
     inventory_system.restore(original_inventory)
 
@@ -6376,6 +6871,60 @@ func count_fire_light_descendants(node: Node) -> int:
         count += count_fire_light_descendants(child)
     return count
 
+func ground_fill_light_descendants(node: Node) -> Array:
+    var lights := []
+    if node == null:
+        return lights
+    if node is Light3D and bool(node.get_meta("ground_fill_light", false)):
+        lights.append(node)
+    for child in node.get_children():
+        lights.append_array(ground_fill_light_descendants(child))
+    return lights
+
+func light_role_descendants(node: Node, role: String) -> Array:
+    var lights := []
+    if node == null:
+        return lights
+    if node is Light3D and String(node.get_meta("light_role", "")) == role:
+        lights.append(node)
+    for child in node.get_children():
+        lights.append_array(light_role_descendants(child, role))
+    return lights
+
+func first_light_role_descendant(node: Node, role: String) -> Light3D:
+    if node == null:
+        return null
+    if node is Light3D and String(node.get_meta("light_role", "")) == role:
+        return node as Light3D
+    for child in node.get_children():
+        var found := first_light_role_descendant(child, role)
+        if found != null:
+            return found
+    return null
+
+func local_light_rig_descendants(node: Node) -> Array:
+    var lights := []
+    if node == null:
+        return lights
+    if node is Light3D and bool(node.get_meta("local_light_rig", false)):
+        lights.append(node)
+    for child in node.get_children():
+        lights.append_array(local_light_rig_descendants(child))
+    return lights
+
+func ground_overlay_mesh_descendants(node: Node) -> Array:
+    var overlays := []
+    if node == null:
+        return overlays
+    if node is MeshInstance3D:
+        var node_name := String(node.name).to_lower()
+        var visual_role := String(node.get_meta("visual_role", "")).to_lower()
+        if node_name.find("groundpool") >= 0 or visual_role == "groundlightpool":
+            overlays.append(node)
+    for child in node.get_children():
+        overlays.append_array(ground_overlay_mesh_descendants(child))
+    return overlays
+
 func count_shadowed_light_descendants(node: Node) -> int:
     if node == null:
         return 0
@@ -6421,6 +6970,36 @@ func light_flicker_min_scale(light: Light3D) -> float:
     if typeof(meta_value) == TYPE_FLOAT or typeof(meta_value) == TYPE_INT:
         return float(meta_value)
     return 0.0
+
+func terrain_light_uniform_first_range(shader_material: ShaderMaterial) -> float:
+    if shader_material == null:
+        return 0.0
+    var positions_value = shader_material.get_shader_parameter("terrain_local_light_positions")
+    if typeof(positions_value) == TYPE_PACKED_VECTOR4_ARRAY:
+        var position_vectors: PackedVector4Array = positions_value
+        if position_vectors.size() > 0:
+            return position_vectors[0].w
+    elif typeof(positions_value) == TYPE_ARRAY:
+        var position_array: Array = positions_value
+        if position_array.size() > 0 and position_array[0] is Vector4:
+            return (position_array[0] as Vector4).w
+    return 0.0
+
+func terrain_light_uniform_max_energy(shader_material: ShaderMaterial) -> float:
+    if shader_material == null:
+        return 0.0
+    var colors_value = shader_material.get_shader_parameter("terrain_local_light_colors")
+    var strongest := 0.0
+    if typeof(colors_value) == TYPE_PACKED_VECTOR4_ARRAY:
+        var color_vectors: PackedVector4Array = colors_value
+        for value in color_vectors:
+            strongest = maxf(strongest, value.w)
+    elif typeof(colors_value) == TYPE_ARRAY:
+        var color_array: Array = colors_value
+        for value in color_array:
+            if value is Vector4:
+                strongest = maxf(strongest, (value as Vector4).w)
+    return strongest
 
 func render_policy_stats(node: Node) -> Dictionary:
     var stats := {

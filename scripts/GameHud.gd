@@ -87,9 +87,11 @@ var mini_map
 var map_info_label: Label
 var objective_toast: Label
 var objective_panel: PanelContainer
+var objective_scroll: ScrollContainer
 var objective_list: VBoxContainer
 var contract_panel: PanelContainer
 var contract_status: Label
+var contract_scroll: ScrollContainer
 var contract_list: VBoxContainer
 var contract_recent: Label
 var story_panel: PanelContainer
@@ -464,7 +466,15 @@ func set_teleport_status(message: String) -> void:
     if teleport_status:
         teleport_status.text = message
 
-func toggle_objectives() -> bool:
+func is_objectives_open() -> bool:
+    return objective_panel != null and objective_panel.visible
+
+func set_objectives_open(open: bool) -> bool:
+    if objective_panel == null:
+        return false
+    if not open:
+        objective_panel.visible = false
+        return false
     if inventory_panel.visible or settings_panel.visible or playtest_panel.visible or is_game_menu_open():
         objective_panel.visible = false
         return false
@@ -472,17 +482,27 @@ func toggle_objectives() -> bool:
         hide_dialogue()
     if contract_panel:
         contract_panel.visible = false
+        if contracts:
+            contracts.toggle_menu(false)
     if story_panel:
         story_panel.visible = false
-    objective_panel.visible = not objective_panel.visible
+    objective_panel.visible = true
     render_objectives()
     return objective_panel.visible
 
-func toggle_contracts() -> bool:
+func toggle_objectives() -> bool:
+    return set_objectives_open(not is_objectives_open())
+
+func set_contracts_open(open: bool) -> bool:
     if contracts == null or contract_panel == null:
+        return false
+    if not open:
+        contracts.toggle_menu(false)
+        render_contracts()
         return false
     if inventory_panel.visible or teleport_panel.visible or settings_panel.visible or playtest_panel.visible or is_game_menu_open():
         contract_panel.visible = false
+        contracts.toggle_menu(false)
         return false
     if is_dialogue_open():
         hide_dialogue()
@@ -495,9 +515,12 @@ func toggle_contracts() -> bool:
         objective_panel.visible = false
     if story_panel:
         story_panel.visible = false
-    var open: bool = contracts.toggle_menu()
+    var opened: bool = contracts.toggle_menu(true)
     render_contracts()
-    return open
+    return opened and contract_panel.visible
+
+func toggle_contracts() -> bool:
+    return set_contracts_open(not is_contracts_open())
 
 func is_contracts_open() -> bool:
     return contract_panel != null and contract_panel.visible

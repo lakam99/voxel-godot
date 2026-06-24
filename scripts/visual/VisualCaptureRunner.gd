@@ -6,6 +6,7 @@ const CASES := [
     { "name": "town_noon", "playtest": "town", "clock": 12.0, "weather": "clear", "intensity": 0.0, "clouds": 0.22, "hud": false, "offset": Vector3(8.5, 0.0, 8.5), "pitch": -10.0 },
     { "name": "town_sunset", "playtest": "town", "clock": 18.7, "weather": "clear", "intensity": 0.0, "clouds": 0.26, "hud": false, "offset": Vector3(-9.0, 0.0, 7.5), "pitch": -8.0 },
     { "name": "forest_midnight", "playtest": "forest", "clock": 0.0, "weather": "clear", "intensity": 0.0, "clouds": 0.18, "hud": false, "offset": Vector3(7.0, 0.0, 9.0), "pitch": -6.0 },
+    { "name": "forest_midnight_held_light_forward", "playtest": "forest", "clock": 23.8, "weather": "clear", "intensity": 0.0, "clouds": 0.18, "hud": false, "offset": Vector3(7.0, 0.0, 9.0), "pitch": 0.0, "heldItem": "torch" },
     { "name": "forest_midnight_lights", "playtest": "forest", "clock": 23.8, "weather": "clear", "intensity": 0.0, "clouds": 0.18, "hud": false, "offset": Vector3(7.0, 0.0, 9.0), "pitch": -8.0, "heldItem": "torch", "placedLights": true },
     { "name": "forest_rain", "playtest": "forest", "clock": 16.5, "weather": "rain", "intensity": 0.68, "clouds": 0.88, "hud": false, "offset": Vector3(8.0, 0.0, 7.0), "pitch": -9.0 },
     { "name": "mountain_day", "playtest": "mountain", "clock": 9.0, "weather": "clear", "intensity": 0.0, "clouds": 0.30, "hud": false, "offset": Vector3(24.0, 0.0, 18.0), "pitch": -16.0, "eyeHeight": 7.0 },
@@ -35,7 +36,11 @@ func run() -> void:
     add_child(main)
     await wait_frames(90)
     configure_static_scene()
-    var capture_cases := hud_refinement_capture_cases() if OS.get_environment("VOXEL_HUD_REFINEMENT_CAPTURE") == "1" else CASES.duplicate()
+    var capture_cases := CASES.duplicate()
+    if OS.get_environment("VOXEL_UI_LAYOUT_CAPTURE") == "1":
+        capture_cases = ui_layout_capture_cases()
+    elif OS.get_environment("VOXEL_HUD_REFINEMENT_CAPTURE") == "1":
+        capture_cases = hud_refinement_capture_cases()
     if OS.get_environment("VOXEL_VISUAL_CAPTURE_TOOLS") == "1":
         capture_cases.append_array(tool_capture_cases())
     for case_spec in capture_cases:
@@ -106,6 +111,12 @@ func hud_refinement_capture_cases() -> Array[Dictionary]:
         { "name": "hud_interaction", "playtest": "town", "clock": 12.0, "weather": "clear", "intensity": 0.0, "clouds": 0.22, "hud": true, "lookAtBlockOffset": Vector2i(1, -2), "focusBlock": "door", "offset": Vector3(-1.8, 0.0, -1.4), "pitch": -4.0 }
     ]
 
+func ui_layout_capture_cases() -> Array[Dictionary]:
+    return [
+        { "name": "ui_objectives", "playtest": "town", "clock": 12.0, "weather": "clear", "intensity": 0.0, "clouds": 0.22, "hud": true, "offset": Vector3(8.5, 0.0, 8.5), "pitch": -10.0, "openObjectives": true },
+        { "name": "ui_contracts", "playtest": "town", "clock": 12.0, "weather": "clear", "intensity": 0.0, "clouds": 0.22, "hud": true, "offset": Vector3(8.5, 0.0, 8.5), "pitch": -10.0, "openContracts": true }
+    ]
+
 func configure_static_scene() -> void:
     disable_tutorial_capture_overrides()
     player = main.get("player") as CharacterBody3D
@@ -148,6 +159,8 @@ func capture_case(capture_case: Dictionary) -> void:
     position_camera(capture_case)
     apply_capture_time_and_weather(capture_case)
     configure_capture_lights(capture_case)
+    if main.has_method("update_terrain_local_light_uniforms"):
+        main.update_terrain_local_light_uniforms()
     set_hud_visible(bool(capture_case.get("hud", false)))
     prepare_hud_capture_state(capture_case)
     await wait_frames(3)
@@ -292,6 +305,11 @@ func prepare_hud_capture_state(capture_case: Dictionary) -> void:
     var survival = main.get("survival_system")
     if hud != null and not bool(capture_case.get("openInventory", false)):
         hud.set_inventory_open(false)
+    if hud != null and hud.objective_panel != null:
+        hud.objective_panel.visible = false
+    if hud != null and hud.contract_panel != null and hud.contracts != null:
+        hud.contracts.toggle_menu(false)
+        hud.render_contracts()
     if bool(capture_case.get("emptyHotbar", false)) and inventory != null:
         inventory.clear()
         inventory.select(0)
@@ -310,6 +328,13 @@ func prepare_hud_capture_state(capture_case: Dictionary) -> void:
         inventory.add_item("stonePickaxe", 1)
         hud.set_inventory_open(true)
         hud.show_notification("Used: Berries")
+    if bool(capture_case.get("openObjectives", false)) and hud != null:
+        if hud.objective_panel != null:
+            hud.objective_panel.visible = false
+        hud.toggle_objectives()
+    if bool(capture_case.get("openContracts", false)) and hud != null and hud.contracts != null:
+        hud.contracts.restore({ "completed": [], "townUnlocked": true, "menuOpen": false })
+        hud.toggle_contracts()
     if capture_case.has("lookAtBlockOffset") and hud != null:
         main.update_hud("")
 
@@ -370,6 +395,7 @@ func make_case_metadata(capture_case: Dictionary, png_path: String) -> Dictionar
     var prompt_text := target_label.text if target_label != null else ""
     var prompt_visible := target_label.visible if target_label != null else false
     var ray_state := focused_ray_state()
+    var overlay_state := hud_overlay_state(hud)
     return {
         "seed": SEED,
         "case": String(capture_case["name"]),
@@ -385,11 +411,42 @@ func make_case_metadata(capture_case: Dictionary, png_path: String) -> Dictionar
         "interactionPrompt": prompt_text,
         "interactionPromptVisible": prompt_visible,
         "focusedRay": ray_state,
+        "uiOverlay": overlay_state,
         "camera": {
             "position": vec3(camera.global_position if camera else Vector3.ZERO),
             "rotationDegrees": vec3_degrees(camera.global_rotation if camera else Vector3.ZERO)
         },
         "performance": stable_performance_values()
+    }
+
+func hud_overlay_state(hud) -> Dictionary:
+    if hud == null:
+        return {}
+    var objective_scroll = hud.get("objective_scroll") as ScrollContainer
+    var contract_scroll = hud.get("contract_scroll") as ScrollContainer
+    return {
+        "objectivePanelVisible": bool(hud.objective_panel.visible) if hud.objective_panel else false,
+        "objectiveRows": hud.objective_list.get_child_count() if hud.objective_list else 0,
+        "objectiveScroll": control_state(objective_scroll),
+        "objectiveList": control_state(hud.objective_list),
+        "contractPanelVisible": bool(hud.contract_panel.visible) if hud.contract_panel else false,
+        "contractRows": hud.contract_list.get_child_count() if hud.contract_list else 0,
+        "contractScroll": control_state(contract_scroll),
+        "contractList": control_state(hud.contract_list)
+    }
+
+func control_state(control: Control) -> Dictionary:
+    if control == null:
+        return {}
+    var rect := control.get_global_rect()
+    return {
+        "x": snapped_float(rect.position.x),
+        "y": snapped_float(rect.position.y),
+        "width": snapped_float(rect.size.x),
+        "height": snapped_float(rect.size.y),
+        "minWidth": snapped_float(control.custom_minimum_size.x),
+        "minHeight": snapped_float(control.custom_minimum_size.y),
+        "clip": bool(control.clip_contents)
     }
 
 func focused_ray_state() -> Dictionary:

@@ -90,8 +90,11 @@ func apply_player_damage(amount: float, source := "player") -> bool:
 func try_release() -> bool:
     if status != "active":
         return false
-    if phase < 3 or not release_available:
+    if phase < 3:
         last_message = "The release rite is not ready"
+        return false
+    if not release_available:
+        last_message = "You do not know the old rite."
         return false
     play_animation_state("release_calm")
     resolve("release")

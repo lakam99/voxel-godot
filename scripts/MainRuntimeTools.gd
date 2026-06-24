@@ -135,7 +135,7 @@ func create_playtest_collapse_case(base_cell: Vector2i) -> void:
         create_playtest_structure_block(base_cell.x + x, base_cell.y - 2, level, 4, "woodBlock")
 
 func use_or_place() -> void:
-    var hit: Dictionary = player.view_ray(INTERACT_RANGE, true)
+    var hit: Dictionary = focused_interaction_hit()
     if not hit.is_empty():
         var collider: Node = hit.get("collider")
         if collider and tutorial_system and tutorial_system.is_tutorial_npc(collider):

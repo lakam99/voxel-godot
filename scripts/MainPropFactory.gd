@@ -23,7 +23,7 @@ func destroy_target() -> void:
         reset_break_progress()
         if held_item:
             held_item.play_use("strike")
-        var resolved_worldmark := damage_story_worldmark(8.0 * tool_power_for_material("hostile"), "melee")
+        var resolved_worldmark := damage_story_worldmark(melee_damage_for_active_item(), "melee")
         var hit_position: Vector3 = collider.global_position + Vector3(0.0, 1.0, 0.0) if collider is Node3D else Vector3.INF
         play_feedback("defeat" if resolved_worldmark else "enemyHit", hit_position, Color(0.48, 0.68, 0.92), 16 if resolved_worldmark else 8)
         var message := "Worldmark hit"
@@ -37,7 +37,7 @@ func destroy_target() -> void:
             held_item.play_use("strike")
         if hostile_system:
             var variant := String(collider.get_meta("variant", "shadow"))
-            var defeated_hostile: bool = hostile_system.damage_hostile(collider, 8.0 * tool_power_for_material("hostile"))
+            var defeated_hostile: bool = hostile_system.damage_hostile(collider, melee_damage_for_active_item())
             if defeated_hostile:
                 award_hostile_xp(variant)
                 play_feedback("defeat", collider.global_position + Vector3(0.0, 1.0, 0.0) if collider is Node3D else Vector3.INF, Color(0.62, 0.24, 0.82), 16)
@@ -217,6 +217,8 @@ func unmet_tool_requirement_message(material_id: String) -> String:
     var active_tool := active_tool_info()
     if String(active_tool.get("tool", "")) == required_tool and int(active_tool.get("tier", 0)) >= required_tier:
         return ""
+    if material_id == "wildlife":
+        return "Needs %s or ranged weapon for %s" % [required_tool_label(required_tool, required_tier), ItemCatalogScript.material_label(material_id)]
     return "Needs %s for %s" % [required_tool_label(required_tool, required_tier), ItemCatalogScript.material_label(material_id)]
 
 func active_tool_info() -> Dictionary:
@@ -271,11 +273,11 @@ func required_tool_label(tool_class: String, tier: int) -> String:
 
 func tool_power_for_material(material_id: String) -> float:
     if not inventory_system:
-        return 1.0
+        return bare_hand_power_for_material(material_id)
     var active: Dictionary = inventory_system.active_stack()
     var item_id := String(active.get("item", ""))
     if item_id == "":
-        return 1.0
+        return bare_hand_power_for_material(material_id)
     var tier := 1.0
     if item_id.begins_with("wooden"):
         tier = 2.0
@@ -292,8 +294,12 @@ func tool_power_for_material(material_id: String) -> float:
     var soil := ["grass", "dirt", "sand", "mud", "snow", "dirtBlock"]
     var stone := ["stone", "rock", "stoneBlock", "cobblestonePath", "glass", "anvil", "furnace", "wardLantern", "sanctuaryBeacon", "riftAnchor"]
     var wood := ["tree", "woodBlock", "workbench", "door", "bed", "chest", "traderStall", "campfire", "torch", "spikeTrap"]
-    if material_id == "hostile" and (item_id.ends_with("Sword") or item_id.ends_with("Axe") or item_id.ends_with("Pickaxe") or item_id.ends_with("Shovel") or item_id == "nightBlade"):
-        return tier
+    if material_id == "hostile":
+        if item_id.ends_with("Sword") or item_id == "nightBlade":
+            return tier
+        if item_id.ends_with("Axe") or item_id.ends_with("Pickaxe") or item_id.ends_with("Shovel"):
+            return 0.35 + tier * 0.15
+        return bare_hand_power_for_material(material_id)
     if material_id == "wildlife" and (item_id.ends_with("Sword") or item_id.ends_with("Axe") or item_id == "nightBlade"):
         return tier + (1.0 if item_id.ends_with("Sword") else 0.0)
     if item_id.ends_with("Pickaxe") and material_id in ["copperOre", "copperVein"]:
@@ -306,6 +312,33 @@ func tool_power_for_material(material_id: String) -> float:
         return tier
     if item_id.ends_with("Axe") and (material_id in wood or material_id in forage):
         return tier
+    return bare_hand_power_for_material(material_id)
+
+func bare_hand_power_for_material(material_id: String) -> float:
+    if material_id == "hostile" or material_id == "wildlife":
+        return 0.12
+    if material_id in ["berryBush", "aloePatch", "mushroomCluster", "frostHerbPatch"]:
+        return 0.40
+    if material_id in ["grass", "dirt", "sand", "mud", "snow", "dirtBlock"]:
+        return 0.25
+    if material_id in ["torch", "glass"]:
+        return 0.35
+    return 0.05
+
+func melee_damage_for_active_item() -> float:
+    if inventory_system == null:
+        return 1.0
+    var active: Dictionary = inventory_system.active_stack()
+    var item_id := String(active.get("item", ""))
+    if item_id == "":
+        return 1.0
+    var tier := float(tool_tier_for_item(item_id))
+    if item_id == "nightBlade":
+        return 42.0
+    if item_id.ends_with("Sword"):
+        return 8.0 + tier * 5.0
+    if item_id.ends_with("Axe") or item_id.ends_with("Pickaxe") or item_id.ends_with("Shovel"):
+        return 2.0 + tier * 1.25
     return 1.0
 
 func try_fire_ranged() -> bool:

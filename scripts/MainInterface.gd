@@ -191,6 +191,8 @@ func feedback_color_for_material(material_id: String) -> Color: return Color.WHI
 func _process(delta: float) -> void: pass
 func profiled_ms(start_usec: int) -> float: return 0.0
 func update_sky(delta: float) -> void: pass
+func update_local_light_rig_lod(delta: float) -> void: pass
+func update_terrain_local_light_uniforms() -> void: pass
 func update_music_state(observer: Vector3, day: float) -> void: pass
 func apply_weather_lighting(weather: Dictionary, day: float) -> void: pass
 func update_survival(delta: float) -> void: pass
@@ -338,6 +340,7 @@ func find_standalone_structure_target(kind: String) -> Dictionary: return {}
 func create_playtest_ground_block(base_cell: Vector2i, offset: Vector2i, block_type: String, case_id: String, dy: int = 0) -> Node: return null
 func create_playtest_structure_block(cell_x: int, cell_z: int, level: float, dy: int, block_type: String, case_id: String = "collapse") -> Node: return null
 func create_playtest_collapse_case(base_cell: Vector2i) -> void: pass
+func focused_interaction_hit() -> Dictionary: return {}
 func use_or_place() -> void: pass
 func try_use_active_consumable() -> bool: return false
 func fish_with_rod() -> bool: return false

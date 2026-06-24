@@ -2,7 +2,7 @@ extends RefCounted
 class_name TutorialRescueSystem
 
 const CELL := 1.35
-const FireLight3DScript := preload("res://scripts/FireLight3D.gd")
+const LocalLightRigScript := preload("res://scripts/LocalLightRig.gd")
 const FENCE_RADIUS_CELLS := 25
 const RESCUE_MONSTER_COUNT := 6
 const RESCUE_GUARD_ID := "sera"
@@ -140,13 +140,22 @@ func spawn_rescue_torch(position: Vector3) -> void:
     flame.material_override = system.make_emissive_material(Color(1.0, 0.73, 0.42), 1.35)
     flame.position.y = 1.02
     root.add_child(flame)
-    var light := FireLight3DScript.new()
-    light.name = "RescueTorchLight"
     var cast_shadows := main != null and bool(main.get("shadows_enabled"))
-    light.configure(Color(1.0, 0.89, 0.72), 1.85, CELL * 9.0, cast_shadows)
-    if light.has_method("set_day_suppressed"):
-        light.set_day_suppressed(true)
-    root.add_child(light)
+    LocalLightRigScript.add_rig(root, "rescue_torch", {
+        "context": "placed",
+        "scale": CELL,
+        "source_position": Vector3(0.0, 1.02, 0.0),
+        "terrain_position": Vector3(0.0, CELL * 0.36, 0.0),
+        "bounce_position": Vector3(0.0, CELL * 0.96, 0.0),
+        "source_energy": 1.85,
+        "source_range": CELL * 9.0,
+        "terrain_energy": 1.35,
+        "terrain_range": CELL * 8.6,
+        "bounce_energy": 0.65,
+        "bounce_range": CELL * 10.0,
+        "shadows": cast_shadows,
+        "day_suppressed": true
+    })
     system.light_root.add_child(root)
     system.rescue_torch = root
 

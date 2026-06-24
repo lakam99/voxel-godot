@@ -157,6 +157,7 @@ var perf_beacon_ms := 0.0
 var perf_autosave_ms := 0.0
 var perf_break_ms := 0.0
 var perf_hud_ms := 0.0
+var local_light_lod_elapsed := 0.0
 var hud_refresh_interval := 0.16
 var hud_refresh_elapsed := 0.16
 var hud_refresh_count := 0
@@ -484,6 +485,74 @@ func try_release_story_worldmark() -> bool:
     if worldmark_encounter_controller == null or not worldmark_encounter_controller.has_method("try_release_active_encounter"):
         return false
     return bool(worldmark_encounter_controller.try_release_active_encounter())
+
+func story_release_input_state() -> Dictionary:
+    if story_director == null or worldmark_encounter_controller == null:
+        return { "active": false, "ready": false }
+    var active_encounter = worldmark_encounter_controller.get("active_encounter")
+    if active_encounter == null or not is_instance_valid(active_encounter):
+        return { "active": false, "ready": false }
+    var status := String(active_encounter.get("status"))
+    var phase := int(active_encounter.get("phase"))
+    var region_id := String(worldmark_encounter_controller.get("active_region_id"))
+    var quest: Dictionary = {}
+    if story_director.get("quest_system") != null and story_director.get("quest_system").has_method("first_quest"):
+        quest = story_director.get("quest_system").first_quest()
+    var facts_value = quest.get("facts", {})
+    var facts: Dictionary = facts_value if facts_value is Dictionary else {}
+    var boundary_complete := int(facts.get("boundaryStonesRetuned", 0)) >= 2
+    var countermeasure_complete := bool(facts.get("countermeasurePrepared", false))
+    var history_found := bool(facts.get("historyClueFound", false))
+    var release_route_available := bool(facts.get("releaseRouteAvailable", false))
+    var unresolved := true
+    if region_id != "" and worldmark_encounter_controller.has_method("worldmark_resolution"):
+        unresolved = String(worldmark_encounter_controller.worldmark_resolution(region_id)) == ""
+    var valid_release_phase := phase >= 3
+    return {
+        "active": status == "active",
+        "phase": phase,
+        "validReleasePhase": valid_release_phase,
+        "historyClueFound": history_found,
+        "boundaryComplete": boundary_complete,
+        "countermeasurePrepared": countermeasure_complete,
+        "releaseRouteAvailable": release_route_available,
+        "unresolved": unresolved,
+        "ready": status == "active"
+            and valid_release_phase
+            and history_found
+            and boundary_complete
+            and countermeasure_complete
+            and release_route_available
+            and unresolved
+    }
+
+func story_release_input_prompt() -> String:
+    var state := story_release_input_state()
+    if bool(state.get("ready", false)):
+        return "[R] Release rite ready"
+    return ""
+
+func try_story_release_input() -> bool:
+    var state := story_release_input_state()
+    if not bool(state.get("active", false)):
+        return false
+    if not bool(state.get("validReleasePhase", false)):
+        update_hud("The release rite is not ready")
+        return true
+    if not bool(state.get("historyClueFound", false)):
+        update_hud("You do not know the old rite.")
+        return true
+    if not bool(state.get("ready", false)):
+        update_hud("The release rite is not ready")
+        return true
+    var released := try_release_story_worldmark()
+    var message := "Gloam Hart released" if released else "The release rite is not ready"
+    if worldmark_encounter_controller != null:
+        var controller_message := String(worldmark_encounter_controller.get("last_message"))
+        if controller_message != "":
+            message = controller_message
+    update_hud(message)
+    return true
 
 func run_story_debug_command(command: String, args := {}) -> Dictionary:
     if story_debug_tools == null or not story_debug_tools.has_method("run_command"):

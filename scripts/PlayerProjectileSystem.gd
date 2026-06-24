@@ -92,6 +92,15 @@ func fire_active() -> bool:
             last_message = String(controller.get("last_message"))
             return true
 
+    if collider and collider.has_meta("kind") and String(collider.get_meta("kind")) == "prop" and String(collider.get_meta("material", "")) == "wildlife":
+        var parent := get_parent()
+        if parent != null and parent.has_method("complete_destroy_target"):
+            if not hit.has("normal"):
+                hit["normal"] = Vector3.UP
+            parent.complete_destroy_target(hit, collider, "prop", "wildlife")
+            last_message = "Wildlife dropped"
+            return true
+
     last_message = "%s blocked" % label(item_id)
     return true
 

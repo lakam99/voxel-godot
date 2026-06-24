@@ -16,6 +16,7 @@ var max_range_scale := 1.28
 var phase := 0.0
 var day_factor := 0.0
 var day_suppressed := false
+var lod_visible := true
 
 const RANDOM_MIN_ENERGY_LOW := 0.01
 const RANDOM_MIN_ENERGY_HIGH := 0.99
@@ -38,7 +39,10 @@ func configure(
     range_flicker := 0.28,
     speed := 2.10,
     min_scale := -1.0,
-    max_scale := 1.38
+    max_scale := 1.38,
+    attenuation := 0.62,
+    light_role := "source",
+    local_rig := false
 ) -> void:
     base_light_color = color
     dim_light_color = color.lerp(Color(0.98, 0.66, 0.42), 0.28)
@@ -57,14 +61,18 @@ func configure(
     phase = randf() * TAU
     light_energy = energy
     omni_range = light_range
-    omni_attenuation = 0.62
+    omni_attenuation = attenuation
     shadow_enabled = shadows
     shadow_blur = 1.25
     shadow_bias = 0.030
     set_meta("visual_role", "light")
     set_meta("fire_light", true)
+    set_meta("flicker_amount", flicker_amount)
+    set_meta("range_flicker", range_amount)
     set_meta("flicker_min_scale", min_energy_scale)
-    set_meta("casts_shadow_when_enabled", true)
+    set_meta("casts_shadow_when_enabled", shadows)
+    set_meta("light_role", light_role)
+    set_meta("local_light_rig", local_rig)
     add_to_group("fire_lights")
     set_process(true)
 
@@ -74,6 +82,9 @@ func set_day_suppressed(enabled: bool) -> void:
 
 func set_day_factor(value: float) -> void:
     day_factor = clampf(value, 0.0, 1.0)
+
+func set_lod_visible(enabled: bool) -> void:
+    lod_visible = enabled
 
 func daylight_visibility() -> float:
     if not day_suppressed:
@@ -89,7 +100,7 @@ func _process(delta: float) -> void:
     ) / 1.5
     var pulse := clampf(1.0 + wave * flicker_amount, min_energy_scale, max_energy_scale)
     var visibility := daylight_visibility()
-    visible = visibility > 0.02
+    visible = visibility > 0.02 and lod_visible
     light_energy = base_energy * pulse * visibility
     omni_range = base_range * clampf(1.0 + wave * range_amount, min_range_scale, max_range_scale) * visibility
     var color_t := clampf((pulse - min_energy_scale) / maxf(0.001, max_energy_scale - min_energy_scale), 0.0, 1.0)

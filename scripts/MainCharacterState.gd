@@ -333,6 +333,7 @@ func should_accept_mouse_look() -> bool:
             hud.is_inventory_open()
             or hud.is_utility_open()
             or hud.is_teleport_open()
+            or hud.is_objectives_open()
             or hud.is_contracts_open()
             or hud.is_settings_open()
             or hud.is_playtest_open()

@@ -453,6 +453,14 @@ func hit_within_action_reach(hit: Dictionary) -> bool:
     var player_flat := Vector2(player.global_position.x, player.global_position.z)
     return player_flat.distance_to(target_flat) <= ACTION_REACH
 
+func focused_interaction_hit() -> Dictionary:
+    if player == null:
+        return {}
+    var hit: Dictionary = player.view_ray(INTERACT_RANGE, true)
+    if hit.is_empty() or not hit_within_action_reach(hit):
+        return {}
+    return hit
+
 func placement_surface_height(x: float, z: float, block_type: String) -> float:
     var profile := block_collision_profile(block_type)
     var size: Vector3 = profile.get("size", Vector3.ONE * CELL * 0.96)

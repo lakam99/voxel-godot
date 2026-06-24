@@ -257,6 +257,9 @@ static func render_objectives(hud) -> void:
         var done := bool(objective.get("completed", false))
         var available := bool(objective.get("available", true))
         label.text = "%s %s" % ["DONE" if done else ("TODO" if available else "LOCKED"), String(objective.get("label", ""))]
+        label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+        label.custom_minimum_size = Vector2(282, 0)
+        label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
         label.modulate = Color(0.74, 0.92, 0.78) if done else (Color(0.92, 0.92, 0.88) if available else Color(0.68, 0.72, 0.70, 0.74))
         hud.objective_list.add_child(label)
 
@@ -279,6 +282,8 @@ static func render_contracts(hud) -> void:
         var active := bool(row.get("active", false))
         var label := Label.new()
         label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+        label.custom_minimum_size = Vector2(320, 0)
+        label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
         label.text = "%s %s\n%s\n%s" % ["DONE" if done else (">" if active else "TODO"), String(row.get("label", "")), String(row.get("detail", "")), String(row.get("reward", ""))]
         label.modulate = Color(0.74, 0.92, 0.78) if done else (Color(1.0, 0.92, 0.62) if active else Color(0.88, 0.90, 0.86))
         hud.contract_list.add_child(label)
@@ -293,15 +298,17 @@ static func render_story_journal(hud) -> void:
         add_story_label(hud, "No active story quest", Color(0.82, 0.84, 0.80))
         return
     hud.story_status_label.text = "%s\n%s" % [String(state.get("title", "Story")), String(state.get("status", ""))]
+    add_story_section(hud, "Waypoint", state.get("navigation", []))
     add_story_section(hud, "Dossier", state.get("dossier", []))
+    add_story_section(hud, "Progress", state.get("progress", []))
     add_story_section(hud, "Found Clues", state.get("foundClues", []))
+    add_story_section(hud, "Countermeasure", state.get("preparationRequirements", []))
     add_story_section(hud, "Optional", state.get("optionalObjectives", []))
     add_story_section(hud, "Resolution", state.get("resolutionHistory", []))
     add_story_section(hud, "Aftermath", state.get("aftermath", []))
     if hud.story_accessibility_bool("storyReplayDiscoveredText", true):
         add_story_section(hud, "Replay", state.get("replayEntries", []))
     add_story_label(hud, "Preparation: %s" % String(state.get("knownPreparation", "???")), Color(0.88, 0.90, 0.86))
-    add_story_label(hud, "Region: %s" % String(state.get("affectedRegionId", "???")), Color(0.78, 0.86, 0.92))
     add_story_label(hud, "Settlement: %s" % String(state.get("affectedSettlement", "???")), Color(0.78, 0.86, 0.92))
 
 static func add_story_section(hud, title: String, rows_value) -> void:
@@ -342,6 +349,12 @@ static func story_accessibility_prefix(row: Dictionary) -> String:
             return "[JOURNAL] "
         "resolution":
             return "[CHOICE] "
+        "navigation":
+            return "[WAYPOINT] "
+        "boundary":
+            return "[STONE] "
+        "preparation":
+            return "[DONE] " if bool(row.get("complete", false)) else "[NEEDED] "
     if row.has("complete"):
         return "[DONE] " if bool(row.get("complete", false)) else "[OPEN] "
     return ""
@@ -421,6 +434,8 @@ static func make_slot_button(hud, slot: Dictionary, index: int, compact: bool) -
     var button := InventorySlotButtonScript.new()
     button.toggle_mode = false
     button.disabled = false
+    if compact:
+        button.mouse_filter = Control.MOUSE_FILTER_IGNORE
     button.pressed.connect(Callable(hud, "_on_slot_pressed").bind(index, compact))
     button.slot_dropped.connect(Callable(hud, "_on_slot_dropped"))
     update_slot_button(hud, button, slot, index, compact)

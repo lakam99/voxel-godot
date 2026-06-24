@@ -10,7 +10,7 @@ func _unhandled_input(event: InputEvent) -> void:
             if hud and hud.is_contracts_open() and contract_system:
                 contract_system.toggle_menu(false)
             var open: bool = hud.toggle_inventory()
-            Input.set_mouse_mode(Input.MOUSE_MODE_VISIBLE if open else Input.MOUSE_MODE_CAPTURED)
+            set_game_mouse_mode(Input.MOUSE_MODE_VISIBLE if open else Input.MOUSE_MODE_CAPTURED)
             update_hud("Inventory opened" if open else "Inventory closed")
             return
         if event.keycode == KEY_ESCAPE:
@@ -20,48 +20,58 @@ func _unhandled_input(event: InputEvent) -> void:
                 update_hud("")
             elif hud and hud.is_game_menu_open():
                 hud.set_game_menu_open(false)
-                Input.set_mouse_mode(Input.MOUSE_MODE_CAPTURED)
+                set_game_mouse_mode(Input.MOUSE_MODE_CAPTURED)
                 update_hud("Game menu closed")
             elif hud and hud.is_teleport_open():
                 hud.set_teleport_open(false)
-                Input.set_mouse_mode(Input.MOUSE_MODE_CAPTURED)
+                set_game_mouse_mode(Input.MOUSE_MODE_CAPTURED)
                 update_hud("Teleport closed")
             elif hud and hud.is_settings_open():
                 hud.set_settings_open(false)
-                Input.set_mouse_mode(Input.MOUSE_MODE_CAPTURED)
+                set_game_mouse_mode(Input.MOUSE_MODE_CAPTURED)
                 update_hud("Settings closed")
             elif hud and hud.is_playtest_open():
                 hud.set_playtest_open(false)
-                Input.set_mouse_mode(Input.MOUSE_MODE_CAPTURED)
+                set_game_mouse_mode(Input.MOUSE_MODE_CAPTURED)
                 update_hud("Playtest closed")
+            elif hud and hud.is_objectives_open():
+                hud.set_objectives_open(false)
+                set_game_mouse_mode(Input.MOUSE_MODE_CAPTURED)
+                update_hud("Objectives closed")
             elif hud and hud.is_contracts_open() and contract_system:
-                contract_system.toggle_menu(false)
+                hud.set_contracts_open(false)
+                set_game_mouse_mode(Input.MOUSE_MODE_CAPTURED)
                 update_hud("Contracts closed")
             elif hud and hud.is_story_journal_open():
                 hud.set_story_journal_open(false)
                 update_hud("Story closed")
             elif utility_system and utility_system.is_open():
                 utility_system.close()
-                Input.set_mouse_mode(Input.MOUSE_MODE_CAPTURED)
+                set_game_mouse_mode(Input.MOUSE_MODE_CAPTURED)
                 update_hud("Utility closed")
             elif hud and hud.is_inventory_open():
                 hud.set_inventory_open(false)
-                Input.set_mouse_mode(Input.MOUSE_MODE_CAPTURED)
+                set_game_mouse_mode(Input.MOUSE_MODE_CAPTURED)
                 update_hud("Inventory closed")
             else:
                 var menu_open: bool = hud.toggle_game_menu() if hud else false
-                Input.set_mouse_mode(Input.MOUSE_MODE_VISIBLE if menu_open else Input.MOUSE_MODE_CAPTURED)
+                set_game_mouse_mode(Input.MOUSE_MODE_VISIBLE if menu_open else Input.MOUSE_MODE_CAPTURED)
                 update_hud("Game menu opened" if menu_open else "Game menu closed")
             return
         if event.keycode >= KEY_1 and event.keycode <= KEY_8:
             inventory_system.select(int(event.keycode - KEY_1))
             return
+        if event.keycode == KEY_R:
+            if try_story_release_input():
+                return
         if event.keycode == KEY_O:
             var objectives_open: bool = hud.toggle_objectives()
+            set_game_mouse_mode(Input.MOUSE_MODE_VISIBLE if objectives_open else Input.MOUSE_MODE_CAPTURED)
             update_hud("Objectives opened" if objectives_open else "Objectives closed")
             return
         if event.keycode == KEY_J:
             var contracts_open: bool = hud.toggle_contracts()
+            set_game_mouse_mode(Input.MOUSE_MODE_VISIBLE if contracts_open else Input.MOUSE_MODE_CAPTURED)
             update_hud("Contracts opened" if contracts_open else "Contracts closed")
             return
         if event.keycode == KEY_L:
@@ -77,7 +87,7 @@ func _unhandled_input(event: InputEvent) -> void:
             return
         if event.keycode == KEY_F2:
             var settings_open: bool = hud.toggle_settings() if hud else false
-            Input.set_mouse_mode(Input.MOUSE_MODE_VISIBLE if settings_open else Input.MOUSE_MODE_CAPTURED)
+            set_game_mouse_mode(Input.MOUSE_MODE_VISIBLE if settings_open else Input.MOUSE_MODE_CAPTURED)
             update_hud("Settings opened" if settings_open else "Settings closed")
             return
         if event.keycode == KEY_F3:
@@ -88,7 +98,7 @@ func _unhandled_input(event: InputEvent) -> void:
             return
         if event.keycode == KEY_F4:
             var playtest_open: bool = hud.toggle_playtest() if hud else false
-            Input.set_mouse_mode(Input.MOUSE_MODE_VISIBLE if playtest_open else Input.MOUSE_MODE_CAPTURED)
+            set_game_mouse_mode(Input.MOUSE_MODE_VISIBLE if playtest_open else Input.MOUSE_MODE_CAPTURED)
             update_hud("Playtest cases opened" if playtest_open else "Playtest cases closed")
             return
         if event.keycode == KEY_F5:
@@ -108,7 +118,7 @@ func _unhandled_input(event: InputEvent) -> void:
             if hud and hud.is_inventory_open():
                 hud.set_inventory_open(false)
             var open_teleport: bool = hud.toggle_teleport()
-            Input.set_mouse_mode(Input.MOUSE_MODE_VISIBLE if open_teleport else Input.MOUSE_MODE_CAPTURED)
+            set_game_mouse_mode(Input.MOUSE_MODE_VISIBLE if open_teleport else Input.MOUSE_MODE_CAPTURED)
             update_hud("Teleport opened" if open_teleport else "Teleport closed")
             return
 
@@ -116,6 +126,7 @@ func _unhandled_input(event: InputEvent) -> void:
         hud.is_inventory_open()
         or hud.is_utility_open()
         or hud.is_teleport_open()
+        or hud.is_objectives_open()
         or hud.is_contracts_open()
         or hud.is_story_journal_open()
         or hud.is_settings_open()
@@ -132,8 +143,9 @@ func _unhandled_input(event: InputEvent) -> void:
             select_hotbar_delta(1)
             return
         if Input.get_mouse_mode() != Input.MOUSE_MODE_CAPTURED:
-            Input.set_mouse_mode(Input.MOUSE_MODE_CAPTURED)
-            return
+            set_game_mouse_mode(Input.MOUSE_MODE_CAPTURED)
+            if not (event.button_index == MOUSE_BUTTON_LEFT or event.button_index == MOUSE_BUTTON_RIGHT):
+                return
         if event.button_index == MOUSE_BUTTON_LEFT:
             destroy_target()
         elif event.button_index == MOUSE_BUTTON_RIGHT:
@@ -219,8 +231,11 @@ func hud_refresh_stats() -> Dictionary:
 func focused_interaction_prompt() -> String:
     if player == null:
         return ""
-    var hit: Dictionary = player.view_ray(INTERACT_RANGE, true)
-    if hit.is_empty() or not hit_within_action_reach(hit):
+    var release_prompt := story_release_input_prompt()
+    if release_prompt != "":
+        return release_prompt
+    var hit: Dictionary = focused_interaction_hit()
+    if hit.is_empty():
         return ""
     var collider := hit.get("collider") as Node
     if collider == null:

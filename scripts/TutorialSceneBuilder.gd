@@ -2,7 +2,7 @@ extends RefCounted
 class_name TutorialSceneBuilder
 
 const NpcVisualFactoryScript := preload("res://scripts/NpcVisualFactory.gd")
-const FireLight3DScript := preload("res://scripts/FireLight3D.gd")
+const LocalLightRigScript := preload("res://scripts/LocalLightRig.gd")
 const CELL := 1.35
 const SAFE_RADIUS_CELLS := 24
 const FENCE_RADIUS_CELLS := 25
@@ -314,14 +314,27 @@ func add_mesh(parent: Node3D, mesh: Mesh, material: Material, position: Vector3,
 func add_warm_light(position: Vector3, radius: float, energy: float) -> void:
     if system.light_root == null:
         return
-    var light := FireLight3DScript.new()
-    light.name = "TutorialLanternLight"
-    light.position = position
     var cast_shadows := main != null and bool(main.get("shadows_enabled"))
-    light.configure(Color(1.0, 0.90, 0.74), energy, radius, cast_shadows)
-    if light.has_method("set_day_suppressed"):
-        light.set_day_suppressed(true)
-    system.light_root.add_child(light)
+    var fill_position := position
+    if main != null and main.has_method("height_at_world"):
+        fill_position.y = main.height_at_world(position.x, position.z) + CELL * 0.36
+    else:
+        fill_position.y = position.y - CELL * 0.85
+    LocalLightRigScript.add_rig(system.light_root, "tutorial_lantern", {
+        "context": "placed",
+        "scale": CELL,
+        "source_position": position,
+        "terrain_position": fill_position,
+        "bounce_position": fill_position + Vector3(0.0, CELL * 0.72, 0.0),
+        "source_energy": energy,
+        "source_range": radius,
+        "terrain_energy": energy * 0.70,
+        "terrain_range": radius * 0.85,
+        "bounce_energy": energy * 0.38,
+        "bounce_range": radius * 1.05,
+        "shadows": cast_shadows,
+        "day_suppressed": true
+    })
 
 func make_material(color: Color, roughness: float) -> StandardMaterial3D:
     var material := StandardMaterial3D.new()

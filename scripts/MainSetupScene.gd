@@ -1,5 +1,11 @@
 extends "res://scripts/MainSaveState.gd"
 
+var last_requested_mouse_mode: int = Input.MOUSE_MODE_VISIBLE
+
+func set_game_mouse_mode(mode: int) -> void:
+    last_requested_mouse_mode = mode
+    Input.set_mouse_mode(mode)
+
 func setup_materials() -> void:
     terrain_material = load("res://resources/visual/terrain_material.tres") as Material
     if terrain_material == null:
@@ -379,24 +385,25 @@ func show_tutorial_dialogue(fallback_message: String) -> void:
         String(dialogue.get("text", fallback_message)),
         dialogue
     )
-    Input.set_mouse_mode(Input.MOUSE_MODE_VISIBLE)
+    set_game_mouse_mode(Input.MOUSE_MODE_VISIBLE)
     update_hud("", true)
 
 func capture_mouse_if_no_modal() -> void:
     if hud == null:
-        Input.set_mouse_mode(Input.MOUSE_MODE_CAPTURED)
+        set_game_mouse_mode(Input.MOUSE_MODE_CAPTURED)
         return
     if not (
         hud.is_inventory_open()
         or hud.is_utility_open()
         or hud.is_teleport_open()
+        or hud.is_objectives_open()
         or hud.is_contracts_open()
         or hud.is_settings_open()
         or hud.is_playtest_open()
         or hud.is_game_menu_open()
         or hud.is_dialogue_open()
     ):
-        Input.set_mouse_mode(Input.MOUSE_MODE_CAPTURED)
+        set_game_mouse_mode(Input.MOUSE_MODE_CAPTURED)
 
 func disable_collision_shapes_recursive(node: Node) -> void:
     for child in node.get_children():
@@ -469,6 +476,7 @@ func _process(delta: float) -> void:
         water.position.z = player.position.z
     var sky_start := Time.get_ticks_usec()
     update_sky(delta)
+    update_local_light_rig_lod(delta)
     perf_sky_ms = profiled_ms(sky_start)
     update_sleep_transition(delta)
     var utility_start := Time.get_ticks_usec()

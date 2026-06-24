@@ -5,6 +5,36 @@ const GameHudPanelBuilderScript := preload("res://scripts/GameHudPanelBuilder.gd
 const MiniMapDisplayScript := preload("res://scripts/MiniMapDisplay.gd")
 const GAME_BUILD_LABEL := "build 2026.06.22.8"
 
+static func set_mouse_filter_recursive(node: Node, filter: int) -> void:
+    if node == null:
+        return
+    if node is Control:
+        (node as Control).mouse_filter = filter
+    for child in node.get_children():
+        set_mouse_filter_recursive(child, filter)
+
+static func set_passive_hud_mouse_filters(hud) -> void:
+    for control in [
+        hud.location_panel,
+        hud.version_label,
+        hud.performance_label,
+        hud.compass_label,
+        hud.compass_waypoint_label,
+        hud.map_panel,
+        hud.vitals_panel,
+        hud.reticle_root,
+        hud.target_label,
+        hud.objective_toast,
+        hud.notification_label,
+        hud.level_label,
+        hud.xp_bar,
+        hud.xp_recent_label,
+        hud.active_label,
+        hud.selected_item_label,
+        hud.hotbar
+    ]:
+        set_mouse_filter_recursive(control, Control.MOUSE_FILTER_IGNORE)
+
 static func build_ui(hud) -> void:
     var root := Control.new()
     root.name = "HudRoot"
@@ -106,13 +136,22 @@ static func build_ui(hud) -> void:
     hud.objective_panel.offset_bottom = 430
     root.add_child(hud.objective_panel)
     var objective_box := VBoxContainer.new()
+    objective_box.add_theme_constant_override("separation", 8)
     hud.objective_panel.add_child(objective_box)
     var objective_title := Label.new()
     objective_title.text = "Objectives"
     objective_title.add_theme_font_size_override("font_size", 20)
     objective_box.add_child(objective_title)
+    hud.objective_scroll = ScrollContainer.new()
+    hud.objective_scroll.clip_contents = true
+    hud.objective_scroll.custom_minimum_size = Vector2(296, 182)
+    hud.objective_scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+    objective_box.add_child(hud.objective_scroll)
     hud.objective_list = VBoxContainer.new()
-    objective_box.add_child(hud.objective_list)
+    hud.objective_list.custom_minimum_size = Vector2(282, 0)
+    hud.objective_list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+    hud.objective_list.add_theme_constant_override("separation", 5)
+    hud.objective_scroll.add_child(hud.objective_list)
 
     hud.contract_panel = PanelContainer.new()
     hud.contract_panel.visible = false
@@ -137,15 +176,21 @@ static func build_ui(hud) -> void:
     hud.contract_status.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
     hud.contract_status.size_flags_horizontal = Control.SIZE_EXPAND_FILL
     contract_header.add_child(hud.contract_status)
-    var contract_scroll := ScrollContainer.new()
-    contract_scroll.custom_minimum_size = Vector2(340, 282)
-    contract_box.add_child(contract_scroll)
+    hud.contract_scroll = ScrollContainer.new()
+    hud.contract_scroll.clip_contents = true
+    hud.contract_scroll.custom_minimum_size = Vector2(340, 282)
+    hud.contract_scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+    contract_box.add_child(hud.contract_scroll)
     hud.contract_list = VBoxContainer.new()
+    hud.contract_list.custom_minimum_size = Vector2(320, 0)
+    hud.contract_list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
     hud.contract_list.add_theme_constant_override("separation", 5)
-    contract_scroll.add_child(hud.contract_list)
+    hud.contract_scroll.add_child(hud.contract_list)
     hud.contract_recent = Label.new()
     hud.contract_recent.text = "Find a town to unlock contracts"
     hud.contract_recent.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+    hud.contract_recent.custom_minimum_size = Vector2(340, 36)
+    hud.contract_recent.size_flags_horizontal = Control.SIZE_EXPAND_FILL
     contract_box.add_child(hud.contract_recent)
 
     hud.story_panel = PanelContainer.new()
@@ -185,6 +230,7 @@ static func build_ui(hud) -> void:
     GameHudPanelBuilderScript.build_settings_panel(hud, root)
     GameHudPanelBuilderScript.build_playtest_panel(hud, root)
     GameHudPanelBuilderScript.build_sleep_fade_overlay(hud, root)
+    set_passive_hud_mouse_filters(hud)
 
 static func build_victory_panel(hud, root: Control) -> void:
     hud.victory_panel = PanelContainer.new()
