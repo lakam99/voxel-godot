@@ -1,0 +1,6 @@
+[gd_scene load_steps=2 format=3 uid="uid://gloamhartencounter"]
+
+[ext_resource type="Script" path="res://scripts/story/encounters/GloamHartEncounter.gd" id="1_gloam_hart_encounter"]
+
+[node name="GloamHartEncounter" type="StaticBody3D"]
+script = ExtResource("1_gloam_hart_encounter")

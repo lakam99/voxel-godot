@@ -66,6 +66,8 @@ func stage_label(stage: String) -> String:
             return "Retune the boundary stones"
         "encounter_locked_placeholder":
             return "Find the storm hollow"
+        "worldmark_resolved":
+            return "Worldmark resolved"
     return "Investigation pending"
 
 func optional_objectives(quest: Dictionary) -> Array:
@@ -116,6 +118,8 @@ func clue_label(clue_id: String) -> String:
     return "Regional clue"
 
 func known_preparation(facts: Dictionary, quest: Dictionary) -> String:
+    if bool(facts.get("worldmarkResolved", false)):
+        return "Worldmark resolved"
     if bool(facts.get("stormWeakened", false)):
         return "Boundary stones retuned"
     var stone_count := int(facts.get("boundaryStonesRetuned", 0))
@@ -140,4 +144,4 @@ func resolution_rows(region_record: Dictionary) -> Array:
     var resolution := String(worldmark.get("resolution", ""))
     if resolution == "":
         return [{ "label": "Resolution", "value": "???" }]
-    return [{ "label": "Resolution", "value": resolution }]
+    return [{ "label": "Resolution", "value": "Released" if resolution == "release" else "Slain" }]

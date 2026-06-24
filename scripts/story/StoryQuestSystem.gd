@@ -12,6 +12,7 @@ const STAGE_OPTIONAL_FIND_HISTORICAL_CLUE := "optional_find_historical_clue"
 const STAGE_PREPARE_COUNTERMEASURE_PLACEHOLDER := "prepare_countermeasure_placeholder"
 const STAGE_RETUNE_BOUNDARY_STONES_PLACEHOLDER := "retune_boundary_stones_placeholder"
 const STAGE_ENCOUNTER_LOCKED_PLACEHOLDER := "encounter_locked_placeholder"
+const STAGE_WORLDMARK_RESOLVED := "worldmark_resolved"
 const STAGE_ORDER := [
     STAGE_SPEAK_WITH_MIRA,
     STAGE_SPEAK_WITH_SERA,
@@ -20,7 +21,8 @@ const STAGE_ORDER := [
     STAGE_OPTIONAL_FIND_HISTORICAL_CLUE,
     STAGE_PREPARE_COUNTERMEASURE_PLACEHOLDER,
     STAGE_RETUNE_BOUNDARY_STONES_PLACEHOLDER,
-    STAGE_ENCOUNTER_LOCKED_PLACEHOLDER
+    STAGE_ENCOUNTER_LOCKED_PLACEHOLDER,
+    STAGE_WORLDMARK_RESOLVED
 ]
 
 var main
@@ -55,6 +57,8 @@ func handle_event(event: Dictionary) -> bool:
             return handle_countermeasure_prepared(event)
         "story_boundary_stone_retuned":
             return handle_boundary_stone_retuned(event)
+        "story_worldmark_resolved":
+            return handle_worldmark_resolved(event)
     return false
 
 func snapshot() -> Dictionary:
@@ -99,7 +103,8 @@ func start_first_arc(event: Dictionary) -> bool:
             STAGE_OPTIONAL_FIND_HISTORICAL_CLUE: "story.gloam_hart.stage.optional_find_historical_clue",
             STAGE_PREPARE_COUNTERMEASURE_PLACEHOLDER: "story.gloam_hart.stage.prepare_countermeasure_placeholder",
             STAGE_RETUNE_BOUNDARY_STONES_PLACEHOLDER: "story.gloam_hart.stage.retune_boundary_stones_placeholder",
-            STAGE_ENCOUNTER_LOCKED_PLACEHOLDER: "story.gloam_hart.stage.encounter_locked_placeholder"
+            STAGE_ENCOUNTER_LOCKED_PLACEHOLDER: "story.gloam_hart.stage.encounter_locked_placeholder",
+            STAGE_WORLDMARK_RESOLVED: "story.gloam_hart.stage.worldmark_resolved"
         },
         "facts": {
             "miraSpoken": false,
@@ -120,7 +125,10 @@ func start_first_arc(event: Dictionary) -> bool:
             "encounterUnlocked": false,
             "combatRouteUnlocked": false,
             "releaseRouteAvailable": false,
-            "encounterLocked": true
+            "encounterLocked": true,
+            "worldmarkResolved": false,
+            "resolution": "",
+            "rewardsGranted": false
         },
         "optionalObjectives": {
             "learn_old_compact": false
@@ -258,6 +266,30 @@ func handle_boundary_stone_retuned(event: Dictionary) -> bool:
         facts["encounterLocked"] = false
         quest["facts"] = facts
         set_stage(quest, STAGE_ENCOUNTER_LOCKED_PLACEHOLDER)
+    quests[FIRST_QUEST_ID] = quest
+    return true
+
+func handle_worldmark_resolved(event: Dictionary) -> bool:
+    var quest := first_quest()
+    if quest.is_empty():
+        return false
+    if String(event.get("regionId", "")) != String(quest.get("affectedRegionId", "")):
+        return false
+    var facts := facts_for_quest(quest)
+    if bool(facts.get("worldmarkResolved", false)):
+        return false
+    var payload := payload_from_event(event)
+    var resolution := String(payload.get("resolution", ""))
+    if not (resolution in ["slay", "release"]):
+        return false
+    facts["worldmarkResolved"] = true
+    facts["resolution"] = resolution
+    facts["rewardsGranted"] = bool(payload.get("rewardsGranted", false))
+    facts["encounterLocked"] = false
+    quest["facts"] = facts
+    quest["status"] = "completed"
+    quest["resolution"] = resolution
+    set_stage(quest, STAGE_WORLDMARK_RESOLVED)
     quests[FIRST_QUEST_ID] = quest
     return true
 
@@ -432,5 +464,8 @@ func debug_state() -> Dictionary:
         "encounterUnlocked": bool(facts.get("encounterUnlocked", false)),
         "combatRouteUnlocked": bool(facts.get("combatRouteUnlocked", false)),
         "releaseRouteAvailable": bool(facts.get("releaseRouteAvailable", false)),
-        "encounterLocked": bool(facts.get("encounterLocked", true))
+        "encounterLocked": bool(facts.get("encounterLocked", true)),
+        "worldmarkResolved": bool(facts.get("worldmarkResolved", false)),
+        "resolution": String(facts.get("resolution", "")),
+        "rewardsGranted": bool(facts.get("rewardsGranted", false))
     }

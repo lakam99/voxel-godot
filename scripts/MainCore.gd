@@ -64,6 +64,7 @@ var story_world_overlay_system
 var worldmark_influence_system
 var story_journal_model
 var story_dialogue_router
+var worldmark_encounter_controller
 var item_visual_factory
 var visual_asset_registry
 var static_item_asset_registry
@@ -240,6 +241,8 @@ func apply_world_seed(new_seed: String, remember := false) -> void:
         story_world_overlay_system.reset()
     if worldmark_influence_system and worldmark_influence_system.has_method("reset"):
         worldmark_influence_system.reset()
+    if worldmark_encounter_controller and worldmark_encounter_controller.has_method("reset"):
+        worldmark_encounter_controller.reset()
     last_story_region_id = ""
     if save_system and remember and save_system.has_method("set_active_seed"):
         save_system.set_active_seed(seed_text)
@@ -329,6 +332,11 @@ func setup_story_systems() -> void:
         story_director.name = "StoryDirector"
         add_child(story_director)
     story_director.setup(self, story_event_bus, region_story_generator, story_quest_system)
+    if worldmark_encounter_controller == null:
+        worldmark_encounter_controller = WorldmarkEncounterControllerScript.new()
+        worldmark_encounter_controller.name = "WorldmarkEncounterController"
+        add_child(worldmark_encounter_controller)
+    worldmark_encounter_controller.setup(self, story_director)
     if story_world_overlay_system == null:
         story_world_overlay_system = StoryWorldOverlaySystemScript.new()
         story_world_overlay_system.name = "StoryWorldOverlaySystem"
@@ -426,6 +434,21 @@ func interact_story_node(node: Node) -> bool:
         return false
     return bool(story_world_overlay_system.interact_with_node(node))
 
+func start_story_encounter_from_site(site: Dictionary, position: Vector3) -> bool:
+    if worldmark_encounter_controller == null or not worldmark_encounter_controller.has_method("start_encounter_from_site"):
+        return false
+    return bool(worldmark_encounter_controller.start_encounter_from_site(site, position))
+
+func damage_story_worldmark(amount: float, source := "player") -> bool:
+    if worldmark_encounter_controller == null or not worldmark_encounter_controller.has_method("damage_active_encounter"):
+        return false
+    return bool(worldmark_encounter_controller.damage_active_encounter(amount, source))
+
+func try_release_story_worldmark() -> bool:
+    if worldmark_encounter_controller == null or not worldmark_encounter_controller.has_method("try_release_active_encounter"):
+        return false
+    return bool(worldmark_encounter_controller.try_release_active_encounter())
+
 func interact_story_dialogue_node(node: Node) -> bool:
     if story_dialogue_router == null or not story_dialogue_router.has_method("interact_with_node"):
         return false
@@ -452,6 +475,7 @@ func debug_story_dump() -> Dictionary:
     dump["overlay"] = story_world_overlay_system.debug_state() if story_world_overlay_system != null and story_world_overlay_system.has_method("debug_state") else {}
     dump["influence"] = worldmark_influence_system.debug_state() if worldmark_influence_system != null and worldmark_influence_system.has_method("debug_state") else {}
     dump["journal"] = story_journal_model.state() if story_journal_model != null and story_journal_model.has_method("state") else {}
+    dump["encounter"] = worldmark_encounter_controller.debug_state() if worldmark_encounter_controller != null and worldmark_encounter_controller.has_method("debug_state") else {}
     return dump
 
 func setup_visual_asset_registry() -> void:

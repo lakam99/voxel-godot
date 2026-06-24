@@ -25,6 +25,8 @@ func reset_runtime_world_state() -> void:
         story_world_overlay_system.reset()
     if worldmark_influence_system and worldmark_influence_system.has_method("reset"):
         worldmark_influence_system.reset()
+    if worldmark_encounter_controller and worldmark_encounter_controller.has_method("reset"):
+        worldmark_encounter_controller.reset()
     discovered_biomes.clear()
     discovered_town_keys.clear()
     discovered_shrine_keys.clear()
@@ -127,6 +129,8 @@ func apply_save_snapshot(snapshot: Dictionary) -> bool:
     restore_height_edits(snapshot.get("terrain", []))
     restore_removed_props(snapshot.get("removedProps", []))
     restore_player_state(snapshot.get("player", {}))
+    if worldmark_encounter_controller and worldmark_encounter_controller.has_method("recover_after_load"):
+        worldmark_encounter_controller.recover_after_load()
     restore_player_blocks(snapshot.get("blocks", []))
     if tutorial_system:
         tutorial_system.restore(snapshot.get("tutorial", {}))

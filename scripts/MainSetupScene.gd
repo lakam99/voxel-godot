@@ -254,6 +254,7 @@ func setup_player_projectiles() -> void:
     player_projectiles.name = "PlayerProjectiles"
     player_projectiles.setup(player, inventory_system, hostile_system, ItemCatalogScript.ITEMS, blocks)
     player_projectiles.hostile_hit.connect(_on_player_projectile_hostile_hit)
+    player_projectiles.story_worldmark_hit.connect(_on_player_projectile_story_worldmark_hit)
     add_child(player_projectiles)
 
 func setup_held_item() -> void:

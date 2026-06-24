@@ -2,6 +2,7 @@ extends Node3D
 class_name PlayerProjectileSystem
 
 signal hostile_hit(variant, defeated, position)
+signal story_worldmark_hit(resolved, position)
 
 var player: CharacterBody3D
 var inventory
@@ -82,6 +83,14 @@ func fire_active() -> bool:
         hostile_hit.emit(variant, defeated, target)
         last_message = hostile_system.last_message
         return true
+
+    if collider and collider.has_meta("kind") and String(collider.get_meta("kind")) == "story_worldmark":
+        var controller = story_worldmark_controller()
+        if controller != null and controller.has_method("damage_active_encounter"):
+            var resolved: bool = bool(controller.damage_active_encounter(maxf(1.0, float(spec.get("damage", 1.0))), "ranged"))
+            story_worldmark_hit.emit(resolved, target)
+            last_message = String(controller.get("last_message"))
+            return true
 
     last_message = "%s blocked" % label(item_id)
     return true
@@ -178,6 +187,12 @@ func current_block_registry() -> Dictionary:
         if parent_blocks is Dictionary:
             return parent_blocks
     return block_registry
+
+func story_worldmark_controller():
+    var parent := get_parent()
+    if parent == null:
+        return null
+    return parent.get("worldmark_encounter_controller")
 
 func ray_aabb_intersection(origin: Vector3, direction: Vector3, box_min: Vector3, box_max: Vector3, max_distance: float) -> float:
     var t_min := 0.0

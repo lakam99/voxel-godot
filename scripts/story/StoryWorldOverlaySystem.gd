@@ -85,6 +85,8 @@ func interact_with_node(node: Node) -> bool:
     var position := site_world_position(site)
     if target is Node3D and target.is_inside_tree():
         position = (target as Node3D).global_position
+    if String(site.get("kind", "")) == "encounter_marker" and should_handle_encounter_marker(site):
+        return interact_encounter_marker(site, position)
     if String(site.get("kind", "")) == "boundary_stone" and should_handle_boundary_retune(site):
         return interact_boundary_stone(site, position)
     var event_type := event_type_for_site(site)
@@ -113,6 +115,33 @@ func should_handle_boundary_retune(site: Dictionary) -> bool:
         STAGE_RETUNE_BOUNDARY_STONES,
         STAGE_ENCOUNTER_LOCKED
     ]
+
+func should_handle_encounter_marker(site: Dictionary) -> bool:
+    var quest := current_quest()
+    if quest.is_empty():
+        return false
+    if String(site.get("regionId", "")) != String(quest.get("affectedRegionId", "")):
+        return false
+    var facts := facts_for_quest(quest)
+    if bool(facts.get("worldmarkResolved", false)):
+        return true
+    return String(quest.get("stage", "")) == STAGE_ENCOUNTER_LOCKED and bool(facts.get("encounterUnlocked", false))
+
+func interact_encounter_marker(site: Dictionary, position: Vector3) -> bool:
+    var quest := current_quest()
+    var facts := facts_for_quest(quest)
+    if bool(facts.get("worldmarkResolved", false)) or worldmark_resolution(String(site.get("regionId", ""))) != "":
+        set_story_message("The storm hollow is quiet now.")
+        return true
+    if not bool(facts.get("encounterUnlocked", false)):
+        set_story_message(authored_text_for_site(site))
+        return true
+    if main != null and main.has_method("start_story_encounter_from_site"):
+        var started := bool(main.start_story_encounter_from_site(site, position))
+        last_message = "The Gloam Hart steps from the storm hollow." if started else "The storm hollow remains quiet."
+        return true
+    set_story_message("The storm hollow remains quiet.")
+    return true
 
 func interact_boundary_stone(site: Dictionary, position: Vector3) -> bool:
     var quest := current_quest()
@@ -302,6 +331,13 @@ func affected_region_id() -> String:
         return ""
     var quest: Dictionary = story_director.quest_system.first_quest() if story_director.quest_system.has_method("first_quest") else {}
     return String(quest.get("affectedRegionId", ""))
+
+func worldmark_resolution(region_id: String) -> String:
+    if story_director == null or region_id == "":
+        return ""
+    var record: Dictionary = story_director.region_records.get(region_id, {})
+    var worldmark: Dictionary = record.get("worldmark", {})
+    return String(worldmark.get("resolution", ""))
 
 func debug_state() -> Dictionary:
     return {

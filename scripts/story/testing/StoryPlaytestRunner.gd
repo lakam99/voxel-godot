@@ -11,6 +11,8 @@ const WorldmarkInfluenceSystemScript := preload("res://scripts/story/WorldmarkIn
 const StoryJournalModelScript := preload("res://scripts/story/StoryJournalModel.gd")
 const StoryDialogueRouterScript := preload("res://scripts/story/StoryDialogueRouter.gd")
 const NpcKnowledgeScopeScript := preload("res://scripts/story/data/NpcKnowledgeScope.gd")
+const WorldmarkEncounterControllerScript := preload("res://scripts/story/encounters/WorldmarkEncounterController.gd")
+const GloamHartEncounterScript := preload("res://scripts/story/encounters/GloamHartEncounter.gd")
 
 const FIRST_QUEST_ID := "story.gloam_hart.storm"
 
@@ -41,6 +43,8 @@ const SCRIPT_PATHS := [
     "res://scripts/story/StoryJournalModel.gd",
     "res://scripts/story/StoryDialogueRouter.gd",
     "res://scripts/story/data/NpcKnowledgeScope.gd",
+    "res://scripts/story/encounters/WorldmarkEncounterController.gd",
+    "res://scripts/story/encounters/GloamHartEncounter.gd",
     "res://scripts/visual/VisualAssetRegistry.gd",
     "res://scripts/visual/CharacterAssetRegistry.gd",
     "res://scripts/visual/StaticItemAssetRegistry.gd",
@@ -48,7 +52,8 @@ const SCRIPT_PATHS := [
 ]
 
 const SCENE_PATHS := [
-    "res://scenes/story/StoryInteractable.tscn"
+    "res://scenes/story/StoryInteractable.tscn",
+    "res://scenes/story/GloamHartEncounter.tscn"
 ]
 
 var main: Node3D
@@ -87,6 +92,10 @@ func run() -> void:
     test_boundary_retune_costs_and_failed_attempts()
     test_boundary_retune_duplicate_persistence_and_storm_weakening()
     test_history_clue_gates_release_route_after_boundary_retune()
+    test_gloam_hart_encounter_phase_progression_countermeasure_and_animation_fallback()
+    test_gloam_hart_slay_resolution_idempotent_rewards_and_cleanup()
+    test_gloam_hart_release_gating_and_resolution()
+    test_gloam_hart_save_load_recovery_policy()
     test_ordinary_clues_count_idempotently()
     test_story_interactable_clues_dedupe_and_progress()
     test_historical_clue_unlock_persists_and_quest_round_trips()
@@ -221,6 +230,7 @@ func test_main_scene_instantiates() -> void:
         "worldmark_influence_system",
         "story_journal_model",
         "story_dialogue_router",
+        "worldmark_encounter_controller",
         "hud",
         "visual_asset_registry",
         "static_item_asset_registry",
@@ -665,6 +675,252 @@ func test_history_clue_gates_release_route_after_boundary_retune() -> void:
         ]
     )
 
+func test_gloam_hart_encounter_phase_progression_countermeasure_and_animation_fallback() -> void:
+    var director = main.get("story_director")
+    var isolated_state := begin_isolated_countermeasure_test_state()
+    var setup := prepare_gloam_hart_encounter(director, false)
+    var controller = main.get("worldmark_encounter_controller")
+    var encounter = controller.get("active_encounter") if controller != null else null
+    var start_ok := bool(setup.get("startOk", false))
+    var fallback_ok := false
+    var phase_two_ok := false
+    var phase_three_ok := false
+    var pulse_damage := -1.0
+    var states: Array = []
+    if encounter != null:
+        encounter.force_animation_state("missing_state_for_test")
+        fallback_ok = bool(encounter.get("animation_fallback_used"))
+        pulse_damage = float(encounter.storm_pulse_damage())
+        encounter.apply_player_damage(70.0, "test")
+        phase_two_ok = int(encounter.get("phase")) == 2
+        encounter.apply_player_damage(70.0, "test")
+        phase_three_ok = int(encounter.get("phase")) == 3
+        states = encounter.debug_state().get("animationStatesUsed", [])
+    var debug: Dictionary = main.debug_story_dump()
+    var encounter_dump: Dictionary = debug.get("encounter", {})
+    var ok: bool = (
+        start_ok
+        and bool(encounter_dump.get("active", false))
+        and fallback_ok
+        and phase_two_ok
+        and phase_three_ok
+        and is_equal_approx(pulse_damage, 5.0)
+        and states.has("idle_breathe")
+        and states.has("storm_pulse")
+        and states.has("stagger_vulnerable")
+    )
+    if controller != null and controller.has_method("reset"):
+        controller.reset()
+    restore_isolated_countermeasure_test_state(isolated_state)
+    add_result(
+        "gloam_hart_encounter_phase_progression_countermeasure_and_animation_fallback",
+        ok,
+        "start %s active %s fallback %s phases %s/%s pulse %.1f states %s" % [
+            str(start_ok),
+            str(encounter_dump.get("active", false)),
+            str(fallback_ok),
+            str(phase_two_ok),
+            str(phase_three_ok),
+            pulse_damage,
+            str(states)
+        ]
+    )
+
+func test_gloam_hart_slay_resolution_idempotent_rewards_and_cleanup() -> void:
+    var director = main.get("story_director")
+    var isolated_state := begin_isolated_countermeasure_test_state()
+    var setup := prepare_gloam_hart_encounter(director, false)
+    var affected := String(setup.get("affected", ""))
+    var controller = main.get("worldmark_encounter_controller")
+    var encounter = controller.get("active_encounter") if controller != null else null
+    var inventory = main.get("inventory_system")
+    var night_before: int = inventory.count("nightShard") if inventory != null else -1
+    var core_before: int = inventory.count("riftCore") if inventory != null else -1
+    var relic_before: int = inventory.count("relicFragment") if inventory != null else -1
+    var minions_before := 0
+    var slay_ok := false
+    if encounter != null:
+        encounter.apply_player_damage(70.0, "test")
+        minions_before = story_minion_count()
+        slay_ok = bool(controller.damage_active_encounter(999.0, "test"))
+    var night_after: int = inventory.count("nightShard") if inventory != null else -1
+    var core_after: int = inventory.count("riftCore") if inventory != null else -1
+    var relic_after: int = inventory.count("relicFragment") if inventory != null else -1
+    var duplicate_result := false
+    if controller != null and controller.has_method("resolve_region"):
+        duplicate_result = bool(controller.resolve_region(affected, "slay"))
+    var night_final: int = inventory.count("nightShard") if inventory != null else -1
+    var core_final: int = inventory.count("riftCore") if inventory != null else -1
+    var relic_final: int = inventory.count("relicFragment") if inventory != null else -1
+    var quest := first_quest_state(director)
+    var facts: Dictionary = quest.get("facts", {})
+    var record: Dictionary = director.snapshot().get("regionRecords", {}).get(affected, {})
+    var worldmark: Dictionary = record.get("worldmark", {})
+    var state: Dictionary = worldmark.get("encounterState", {})
+    var ok: bool = (
+        bool(setup.get("startOk", false))
+        and slay_ok
+        and minions_before >= 2
+        and story_minion_count() == 0
+        and night_after == night_before + 6
+        and core_after == core_before + 1
+        and relic_after == relic_before + 2
+        and not duplicate_result
+        and night_final == night_after
+        and core_final == core_after
+        and relic_final == relic_after
+        and String(worldmark.get("resolution", "")) == "slay"
+        and String(quest.get("status", "")) == "completed"
+        and bool(facts.get("worldmarkResolved", false))
+        and String(facts.get("resolution", "")) == "slay"
+        and bool(state.get("rewardsGranted", false))
+    )
+    restore_isolated_countermeasure_test_state(isolated_state)
+    add_result(
+        "gloam_hart_slay_resolution_idempotent_rewards_and_cleanup",
+        ok,
+        "start %s slay %s minions %d->%d rewards night %d/%d/%d core %d/%d/%d relic %d/%d/%d duplicate %s resolution %s quest %s" % [
+            str(setup.get("startOk", false)),
+            str(slay_ok),
+            minions_before,
+            story_minion_count(),
+            night_before,
+            night_after,
+            night_final,
+            core_before,
+            core_after,
+            core_final,
+            relic_before,
+            relic_after,
+            relic_final,
+            str(duplicate_result),
+            worldmark.get("resolution", ""),
+            quest.get("status", "")
+        ]
+    )
+
+func test_gloam_hart_release_gating_and_resolution() -> void:
+    var director = main.get("story_director")
+    var isolated_state := begin_isolated_countermeasure_test_state()
+    var combat_setup := prepare_gloam_hart_encounter(director, false)
+    var combat_controller = main.get("worldmark_encounter_controller")
+    var combat_encounter = combat_controller.get("active_encounter") if combat_controller != null else null
+    var unavailable_release := false
+    if combat_encounter != null:
+        combat_encounter.apply_player_damage(140.0, "test")
+        unavailable_release = not bool(main.try_release_story_worldmark())
+    reset_story_runtime(director)
+    clear_story_countermeasure_test_inventory()
+    var release_setup := prepare_gloam_hart_encounter(director, true)
+    var affected := String(release_setup.get("affected", ""))
+    var release_controller = main.get("worldmark_encounter_controller")
+    var release_encounter = release_controller.get("active_encounter") if release_controller != null else null
+    var inventory = main.get("inventory_system")
+    var tonic_before: int = inventory.count("wardTonic") if inventory != null else -1
+    var relic_before: int = inventory.count("relicFragment") if inventory != null else -1
+    var release_ok := false
+    if release_encounter != null:
+        release_encounter.apply_player_damage(140.0, "test")
+        release_ok = bool(main.try_release_story_worldmark())
+    var tonic_after: int = inventory.count("wardTonic") if inventory != null else -1
+    var relic_after: int = inventory.count("relicFragment") if inventory != null else -1
+    var duplicate_result := false
+    if release_controller != null and release_controller.has_method("resolve_region"):
+        duplicate_result = bool(release_controller.resolve_region(affected, "release"))
+    var tonic_final: int = inventory.count("wardTonic") if inventory != null else -1
+    var relic_final: int = inventory.count("relicFragment") if inventory != null else -1
+    var quest := first_quest_state(director)
+    var facts: Dictionary = quest.get("facts", {})
+    var record: Dictionary = director.snapshot().get("regionRecords", {}).get(affected, {})
+    var worldmark: Dictionary = record.get("worldmark", {})
+    var ok: bool = (
+        bool(combat_setup.get("startOk", false))
+        and unavailable_release
+        and bool(release_setup.get("startOk", false))
+        and release_ok
+        and tonic_after == tonic_before + 2
+        and relic_after == relic_before + 3
+        and tonic_final == tonic_after
+        and relic_final == relic_after
+        and not duplicate_result
+        and String(worldmark.get("resolution", "")) == "release"
+        and bool(facts.get("worldmarkResolved", false))
+        and String(facts.get("resolution", "")) == "release"
+    )
+    restore_isolated_countermeasure_test_state(isolated_state)
+    add_result(
+        "gloam_hart_release_gating_and_resolution",
+        ok,
+        "combat start %s unavailable %s release start %s release %s tonic %d/%d/%d relic %d/%d/%d duplicate %s resolution %s" % [
+            str(combat_setup.get("startOk", false)),
+            str(unavailable_release),
+            str(release_setup.get("startOk", false)),
+            str(release_ok),
+            tonic_before,
+            tonic_after,
+            tonic_final,
+            relic_before,
+            relic_after,
+            relic_final,
+            str(duplicate_result),
+            worldmark.get("resolution", "")
+        ]
+    )
+
+func test_gloam_hart_save_load_recovery_policy() -> void:
+    var director = main.get("story_director")
+    var isolated_state := begin_isolated_countermeasure_test_state()
+    var setup := prepare_gloam_hart_encounter(director, false)
+    var controller = main.get("worldmark_encounter_controller")
+    var encounter = controller.get("active_encounter") if controller != null else null
+    if encounter != null:
+        encounter.apply_player_damage(70.0, "test")
+        encounter.force_animation_state("storm_pulse")
+    var snapshot: Dictionary = main.create_save_snapshot()
+    var story_json := stable_json(snapshot.get("story", {}))
+    var loaded := bool(main.apply_save_snapshot(snapshot))
+    director = main.get("story_director")
+    controller = main.get("worldmark_encounter_controller")
+    var recovered_dump: Dictionary = controller.debug_state() if controller != null and controller.has_method("debug_state") else {}
+    var recovered_encounter: Dictionary = recovered_dump.get("encounter", {})
+    var active := bool(recovered_dump.get("active", false))
+    var recovered := bool(recovered_dump.get("recoveredFromSave", false))
+    var phase := int(recovered_encounter.get("phase", 0))
+    var health := float(recovered_encounter.get("health", 0.0))
+    var record: Dictionary = director.snapshot().get("regionRecords", {}).get(String(setup.get("affected", "")), {})
+    var worldmark: Dictionary = record.get("worldmark", {})
+    var state: Dictionary = worldmark.get("encounterState", {})
+    var transient_absent := story_json.find("stateElapsed") < 0 and story_json.find("animationState") < 0 and story_json.find("projectile") < 0
+    var ok: bool = (
+        bool(setup.get("startOk", false))
+        and loaded
+        and active
+        and recovered
+        and phase == 2
+        and is_equal_approx(health, 120.0)
+        and String(state.get("status", "")) == "active"
+        and int(state.get("phase", 0)) == 2
+        and String(worldmark.get("resolution", "")) == ""
+        and transient_absent
+    )
+    if controller != null and controller.has_method("reset"):
+        controller.reset()
+    restore_isolated_countermeasure_test_state(isolated_state)
+    add_result(
+        "gloam_hart_save_load_recovery_policy",
+        ok,
+        "start %s loaded %s active %s recovered %s phase %d health %.1f state %s transientAbsent %s" % [
+            str(setup.get("startOk", false)),
+            str(loaded),
+            str(active),
+            str(recovered),
+            phase,
+            health,
+            str(state),
+            str(transient_absent)
+        ]
+    )
+
 func test_ordinary_clues_count_idempotently() -> void:
     var director = main.get("story_director")
     director.reset()
@@ -995,12 +1251,59 @@ func reset_story_runtime(director) -> void:
         director.reset()
     if main != null:
         main.set("last_story_region_id", "")
+        var encounter_controller = main.get("worldmark_encounter_controller")
+        if encounter_controller != null and encounter_controller.has_method("reset"):
+            encounter_controller.reset()
         var overlay = main.get("story_world_overlay_system")
         if overlay != null and overlay.has_method("reset"):
             overlay.reset()
         var influence = main.get("worldmark_influence_system")
         if influence != null and influence.has_method("reset"):
             influence.reset()
+
+func prepare_gloam_hart_encounter(director, include_history: bool) -> Dictionary:
+    reset_story_runtime(director)
+    var quest := advance_to_optional_history_stage(director)
+    var affected := String(quest.get("affectedRegionId", ""))
+    var biome := String(quest.get("affectedRegionBiome", ""))
+    if include_history:
+        director.ingest_event(story_event("story_clue_found", "clue:old_compact_record", affected, "", {
+            "clueKind": "historical",
+            "clueId": "historical:old_compact_record"
+        }))
+    enter_story_region(affected, biome)
+    grant_story_countermeasure_items(2)
+    var north_node := story_site_node("boundary_stone_north")
+    var south_node := story_site_node("boundary_stone_south")
+    var marker_node := story_site_node("encounter_marker")
+    var north_ok: bool = bool(main.interact_story_node(north_node))
+    var south_ok: bool = bool(main.interact_story_node(south_node))
+    var start_ok: bool = bool(main.interact_story_node(marker_node))
+    return {
+        "affected": affected,
+        "biome": biome,
+        "northOk": north_ok,
+        "southOk": south_ok,
+        "startOk": start_ok,
+        "history": include_history
+    }
+
+func story_minion_count() -> int:
+    var hostile_system = main.get("hostile_system") if main != null else null
+    if hostile_system == null:
+        return 0
+    var enemies_value = hostile_system.get("enemies")
+    if not (enemies_value is Array):
+        return 0
+    var count := 0
+    for enemy_value in enemies_value:
+        if not (enemy_value is Dictionary):
+            continue
+        var enemy: Dictionary = enemy_value
+        var body := enemy.get("body") as Node
+        if body != null and is_instance_valid(body) and String(body.get_meta("story_minion", "")) == "gloam_hart":
+            count += 1
+    return count
 
 func ensure_story_sites_for_region(region_id: String) -> Array:
     if main == null or region_id == "":

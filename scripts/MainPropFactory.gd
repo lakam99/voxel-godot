@@ -19,6 +19,18 @@ func destroy_target() -> void:
         play_melee_miss()
         return
     var kind := String(collider.get_meta("kind"))
+    if kind == "story_worldmark":
+        reset_break_progress()
+        if held_item:
+            held_item.play_use("strike")
+        var resolved_worldmark := damage_story_worldmark(8.0 * tool_power_for_material("hostile"), "melee")
+        var hit_position: Vector3 = collider.global_position + Vector3(0.0, 1.0, 0.0) if collider is Node3D else Vector3.INF
+        play_feedback("defeat" if resolved_worldmark else "enemyHit", hit_position, Color(0.48, 0.68, 0.92), 16 if resolved_worldmark else 8)
+        var message := "Worldmark hit"
+        if worldmark_encounter_controller != null:
+            message = String(worldmark_encounter_controller.get("last_message"))
+        update_hud(message)
+        return
     if kind == "hostile":
         reset_break_progress()
         if held_item:
@@ -323,6 +335,11 @@ func _on_player_projectile_hostile_hit(variant: String, defeated: bool, position
         play_feedback("enemyHit", position, Color(0.82, 0.22, 0.20), 8)
     if hostile_system:
         update_hud(hostile_system.last_message)
+
+func _on_player_projectile_story_worldmark_hit(resolved: bool, position: Vector3) -> void:
+    play_feedback("defeat" if resolved else "enemyHit", position, Color(0.48, 0.68, 0.92), 16 if resolved else 8)
+    if worldmark_encounter_controller != null:
+        update_hud(String(worldmark_encounter_controller.get("last_message")))
 
 func show_break_overlay(hit_position: Vector3, normal: Vector3, ratio: float) -> void:
     if not break_overlay:

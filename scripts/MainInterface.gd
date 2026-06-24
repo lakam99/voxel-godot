@@ -34,6 +34,7 @@ const StoryWorldOverlaySystemScript := preload("res://scripts/story/StoryWorldOv
 const WorldmarkInfluenceSystemScript := preload("res://scripts/story/WorldmarkInfluenceSystem.gd")
 const StoryJournalModelScript := preload("res://scripts/story/StoryJournalModel.gd")
 const StoryDialogueRouterScript := preload("res://scripts/story/StoryDialogueRouter.gd")
+const WorldmarkEncounterControllerScript := preload("res://scripts/story/encounters/WorldmarkEncounterController.gd")
 
 const CELL := 1.35
 const CHUNK_SIZE := 28
@@ -119,6 +120,9 @@ func emit_story_event(event_type: String, subject_id := "", region_id := "", ded
 func update_story_region_entry(cell: Vector2i, position: Vector3, biome: String) -> void: pass
 func interact_story_dialogue_node(node: Node) -> bool: return false
 func interact_story_node(node: Node) -> bool: return false
+func start_story_encounter_from_site(site: Dictionary, position: Vector3) -> bool: return false
+func damage_story_worldmark(amount: float, source := "player") -> bool: return false
+func try_release_story_worldmark() -> bool: return false
 func debug_story_dump() -> Dictionary: return {}
 func setup_visual_asset_registry() -> void: pass
 func setup_static_item_asset_registry() -> void: pass
@@ -424,6 +428,7 @@ func required_tool_label(tool_class: String, tier: int) -> String: return ""
 func tool_power_for_material(material_id: String) -> float: return 0.0
 func try_fire_ranged() -> bool: return false
 func _on_player_projectile_hostile_hit(variant: String, defeated: bool, position: Vector3) -> void: pass
+func _on_player_projectile_story_worldmark_hit(resolved: bool, position: Vector3) -> void: pass
 func show_break_overlay(hit_position: Vector3, normal: Vector3, ratio: float) -> void: pass
 func add_crack_line(mesh: ImmediateMesh, a: Vector3, b: Vector3) -> void: pass
 func height_at_world(x: float, z: float) -> float: return 0.0
