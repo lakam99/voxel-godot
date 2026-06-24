@@ -5,6 +5,7 @@ const RegionStoryGeneratorScript := preload("res://scripts/story/RegionStoryGene
 const StoryEventBusScript := preload("res://scripts/story/StoryEventBus.gd")
 const StoryDirectorScript := preload("res://scripts/story/StoryDirector.gd")
 const StoryQuestSystemScript := preload("res://scripts/story/StoryQuestSystem.gd")
+const GloamHartArcScript := preload("res://scripts/story/arcs/GloamHartArc.gd")
 const StorySitePlacementScript := preload("res://scripts/story/data/StorySitePlacement.gd")
 const RegionStoryRecordScript := preload("res://scripts/story/data/RegionStoryRecord.gd")
 const WorldmarkStateScript := preload("res://scripts/story/data/WorldmarkState.gd")
@@ -44,6 +45,7 @@ const SCRIPT_PATHS := [
     "res://scripts/story/StoryEventBus.gd",
     "res://scripts/story/StoryDirector.gd",
     "res://scripts/story/StoryQuestSystem.gd",
+    "res://scripts/story/arcs/GloamHartArc.gd",
     "res://scripts/story/RegionStoryGenerator.gd",
     "res://scripts/story/data/StorySitePlacement.gd",
     "res://scripts/story/data/RegionStoryRecord.gd",
@@ -106,6 +108,7 @@ func run() -> void:
     test_phase4_source_events_and_quest_state_round_trip()
     test_first_arc_waits_for_tutorial_completion()
     test_tutorial_completion_starts_first_quest_once()
+    test_phase5_gloam_hart_handoff_opening_contract()
     test_mira_event_advances_only_mira_stage()
     test_sera_event_requires_mira_stage()
     test_affected_region_entry_advances_travel_stage()
@@ -599,6 +602,96 @@ func test_tutorial_completion_starts_first_quest_once() -> void:
             repeat_affected,
             coords_distance,
             worldmark.get("definitionId", "")
+        ]
+    )
+
+func test_phase5_gloam_hart_handoff_opening_contract() -> void:
+    if main == null or main.get("story_director") == null:
+        add_result("phase5_gloam_hart_handoff_opening_contract", false, "main story_director missing")
+        return
+    var baseline_snapshot: Dictionary = main.create_save_snapshot()
+    var director = main.get("story_director")
+    reset_story_runtime(director)
+    var quest := start_first_arc_for_test(director)
+    var validation: Dictionary = GloamHartArcScript.validate_opening_quest(quest)
+    var affected := String(quest.get("affectedRegionId", ""))
+    var starter := String(quest.get("starterRegionId", ""))
+    var biome := String(quest.get("affectedRegionBiome", ""))
+    var campaign: Dictionary = director.snapshot().get("campaign", {})
+    var start_load_ok := save_load_preserves_story_stage("speak_with_mira")
+    director = main.get("story_director")
+    director.ingest_event(story_event("npc_spoken_to", "npc:mira", starter_region_id(), "", {
+        "npcId": "mira"
+    }))
+    var after_mira := first_quest_state(director)
+    var mira_load_ok := save_load_preserves_story_stage("speak_with_sera")
+    director = main.get("story_director")
+    director.ingest_event(story_event("npc_spoken_to", "npc:sera", starter_region_id(), "", {
+        "npcId": "sera"
+    }))
+    var after_sera := first_quest_state(director)
+    var sera_load_ok := save_load_preserves_story_stage("travel_to_affected_region")
+    director = main.get("story_director")
+    director.ingest_event(story_event("story_region_entered", "region:r:99,99", "r:99,99", "", {
+        "biome": "forest"
+    }))
+    var after_wrong_region := first_quest_state(director)
+    var wrong_region_ok := String(after_wrong_region.get("stage", "")) == "travel_to_affected_region"
+    var travel_load_ok := save_load_preserves_story_stage("travel_to_affected_region")
+    director = main.get("story_director")
+    director.ingest_event(story_event("story_region_entered", "region:%s" % affected, affected, "", {
+        "biome": biome
+    }))
+    var after_enter := first_quest_state(director)
+    var enter_facts: Dictionary = after_enter.get("facts", {})
+    var enter_load_ok := save_load_preserves_story_stage(String(after_enter.get("stage", "")))
+    director = main.get("story_director")
+    reset_story_runtime(director)
+    var repeat_quest := start_first_arc_for_test(director)
+    var repeat_affected := String(repeat_quest.get("affectedRegionId", ""))
+    var old_save_handoff: Dictionary = phase5_old_completed_tutorial_save_handoff_once()
+    var baseline_loaded := bool(main.apply_save_snapshot(baseline_snapshot))
+    director = main.get("story_director")
+    reset_story_runtime(director)
+    var opening_stages: Array = GloamHartArcScript.opening_stage_order()
+    var ok := (
+        bool(validation.get("ok", false))
+        and opening_stages == ["speak_with_mira", "speak_with_sera", "travel_to_affected_region"]
+        and String(campaign.get("firstAffectedRegionId", "")) == affected
+        and affected != ""
+        and affected != starter
+        and affected_region_distance(starter, affected) > 0
+        and affected_region_distance(starter, affected) <= 8
+        and biome in ["forest", "taiga"]
+        and start_load_ok
+        and String(after_mira.get("stage", "")) == "speak_with_sera"
+        and mira_load_ok
+        and String(after_sera.get("stage", "")) == "travel_to_affected_region"
+        and sera_load_ok
+        and wrong_region_ok
+        and travel_load_ok
+        and String(after_enter.get("stage", "")) != "travel_to_affected_region"
+        and bool(enter_facts.get("enteredAffectedRegion", false))
+        and enter_load_ok
+        and repeat_affected == affected
+        and bool(old_save_handoff.get("ok", false))
+        and baseline_loaded
+    )
+    add_result(
+        "phase5_gloam_hart_handoff_opening_contract",
+        ok,
+        "validation %s, starter %s, affected %s, biome %s, stages %s/%s/%s, wrongOk %s, enter %s, repeat %s, oldSave %s" % [
+            str(validation),
+            starter,
+            affected,
+            biome,
+            quest.get("stage", ""),
+            after_mira.get("stage", ""),
+            after_sera.get("stage", ""),
+            str(wrong_region_ok),
+            after_enter.get("stage", ""),
+            repeat_affected,
+            str(old_save_handoff)
         ]
     )
 
@@ -2022,6 +2115,66 @@ func advance_to_optional_history_stage(director) -> Dictionary:
         "clueId": "ordinary:ringing_stone"
     }))
     return first_quest_state(director)
+
+func save_load_preserves_story_stage(expected_stage: String) -> bool:
+    if main == null or main.get("story_director") == null:
+        return false
+    var snapshot: Dictionary = main.create_save_snapshot()
+    var before_story_json := stable_json(snapshot.get("story", {}))
+    var loaded := bool(main.apply_save_snapshot(snapshot))
+    var director = main.get("story_director")
+    if director == null:
+        return false
+    var quest := first_quest_state(director)
+    return loaded and String(quest.get("stage", "")) == expected_stage and stable_json(director.snapshot()) == before_story_json
+
+func phase5_old_completed_tutorial_save_handoff_once() -> Dictionary:
+    if main == null:
+        return { "ok": false, "reason": "main missing" }
+    var old_save: Dictionary = main.create_save_snapshot()
+    old_save.erase("story")
+    var tutorial: Dictionary = old_save.get("tutorial", {}) if old_save.get("tutorial", {}) is Dictionary else {}
+    tutorial["started"] = true
+    var completed_steps: Array = tutorial.get("completedSteps", []) if tutorial.get("completedSteps", []) is Array else []
+    for step_id in ["finalNightStarted", "finalNightComplete", "miraBlessing"]:
+        if not completed_steps.has(step_id):
+            completed_steps.append(step_id)
+    tutorial["completedSteps"] = completed_steps
+    var intro: Dictionary = tutorial.get("introRepair", {}) if tutorial.get("introRepair", {}) is Dictionary else {}
+    intro["finalNightActive"] = false
+    intro["finalNightComplete"] = true
+    intro["finalNightDefeatsStart"] = 0
+    tutorial["introRepair"] = intro
+    old_save["tutorial"] = tutorial
+    var loaded_old := bool(main.apply_save_snapshot(old_save))
+    var director = main.get("story_director")
+    var first := first_quest_state(director)
+    var first_count := quest_count(director)
+    var migrated_save: Dictionary = main.create_save_snapshot()
+    var loaded_migrated := bool(main.apply_save_snapshot(migrated_save))
+    director = main.get("story_director")
+    var second := first_quest_state(director)
+    var second_count := quest_count(director)
+    var event_counts: Dictionary = director.snapshot().get("eventCounts", {}) if director != null else {}
+    var ok := (
+        loaded_old
+        and loaded_migrated
+        and first_count == 1
+        and second_count == 1
+        and String(first.get("id", "")) == FIRST_QUEST_ID
+        and String(second.get("id", "")) == FIRST_QUEST_ID
+        and String(first.get("affectedRegionId", "")) == String(second.get("affectedRegionId", ""))
+        and int(event_counts.get("tutorial_final_rescue_complete", 0)) == 1
+    )
+    return {
+        "ok": ok,
+        "loadedOld": loaded_old,
+        "loadedMigrated": loaded_migrated,
+        "firstCount": first_count,
+        "secondCount": second_count,
+        "affected": String(first.get("affectedRegionId", "")),
+        "events": event_counts
+    }
 
 func first_quest_state(director) -> Dictionary:
     var snapshot: Dictionary = director.snapshot()

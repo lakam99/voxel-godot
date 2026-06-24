@@ -1,6 +1,8 @@
 extends Node
 class_name StoryQuestSystem
 
+const GloamHartArcScript := preload("res://scripts/story/arcs/GloamHartArc.gd")
+
 const FIRST_QUEST_ID := "story.gloam_hart.storm"
 const ARC_ID := "storm_that_stays"
 const ORDINARY_CLUES_REQUIRED := 2
@@ -75,6 +77,7 @@ func start_first_arc(event: Dictionary) -> bool:
     var starter_region_id := starter_region_id_from_event(event)
     var affected_region_id := select_first_affected_region(starter_region_id)
     var affected_biome := dominant_biome_for_region(affected_region_id)
+    var opening_definition: Dictionary = GloamHartArcScript.opening_definition()
     if story_director != null and story_director.has_method("mark_gloam_hart_region"):
         story_director.mark_gloam_hart_region(affected_region_id, affected_biome)
     if main != null and main.get("story_world_overlay_system") != null:
@@ -89,8 +92,9 @@ func start_first_arc(event: Dictionary) -> bool:
         "stageIndex": stage_index(STAGE_SPEAK_WITH_MIRA),
         "tracked": true,
         "titleId": "story.gloam_hart.storm.title",
-        "label": "The Storm That Stays",
-        "worldmarkDefinitionId": "gloam_hart",
+        "label": String(opening_definition.get("label", "The Storm That Stays")),
+        "worldmarkDefinitionId": String(opening_definition.get("worldmarkDefinitionId", "gloam_hart")),
+        "openingHandoff": opening_definition.get("handoff", {}),
         "starterRegionId": starter_region_id,
         "affectedRegionId": affected_region_id,
         "affectedRegionBiome": affected_biome,

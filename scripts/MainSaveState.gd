@@ -1,5 +1,7 @@
 extends "res://scripts/MainCore.gd"
 
+const FIRST_STORY_QUEST_ID := "story.gloam_hart.storm"
+
 func reset_runtime_world_state() -> void:
     world_elapsed = 0.0
     autosave_elapsed = 0.0
@@ -140,6 +142,7 @@ func apply_save_snapshot(snapshot: Dictionary) -> bool:
     restore_player_blocks(snapshot.get("blocks", []))
     if tutorial_system:
         tutorial_system.restore(snapshot.get("tutorial", {}))
+    ensure_story_handoff_for_completed_tutorial_save()
     death_count = max(0, int(snapshot.get("deathCount", snapshot.get("runStats", {}).get("deathCount", 0))))
     respawn_point = optional_vector3(snapshot.get("respawnPoint", []))
     clear_dropped_pickups()
@@ -161,6 +164,39 @@ func apply_save_snapshot(snapshot: Dictionary) -> bool:
     reload_chunks()
     refresh_intro_knock_audio()
     return true
+
+func ensure_story_handoff_for_completed_tutorial_save() -> void:
+    if story_director == null or tutorial_system == null:
+        return
+    if not completed_tutorial_needs_story_handoff():
+        return
+    var snapshot: Dictionary = story_director.snapshot()
+    var quests: Dictionary = snapshot.get("quests", {})
+    if quests.has(FIRST_STORY_QUEST_ID):
+        return
+    var cell := Vector2i(280, 0)
+    var town_value = tutorial_system.get("town")
+    if town_value is Dictionary and not town_value.is_empty():
+        cell = Vector2i(int(town_value.get("centerX", cell.x)), int(town_value.get("centerZ", cell.y)))
+    var event_position := Vector3(float(cell.x) * CELL, 0.0, float(cell.y) * CELL)
+    if player:
+        event_position = player.global_position
+    emit_story_event("tutorial_final_rescue_complete", "tutorial:final_rescue", story_region_id_for_cell(cell), "tutorial:final_rescue_complete", event_position, {
+        "rescuedNpcId": "niko",
+        "guardNpcId": "sera",
+        "tutorialStep": "finalNightComplete",
+        "source": "completed_tutorial_save_load"
+    })
+
+func completed_tutorial_needs_story_handoff() -> bool:
+    if tutorial_system == null:
+        return false
+    if bool(tutorial_system.get("final_night_complete")):
+        return true
+    var completed_steps_value = tutorial_system.get("completed_steps")
+    if completed_steps_value is Dictionary:
+        return bool(completed_steps_value.get("finalNightComplete", false))
+    return false
 
 func snapshot_exploration() -> Dictionary:
     return {
