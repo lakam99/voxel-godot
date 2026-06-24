@@ -5,6 +5,9 @@ export_presets.cfg
 *.translation
 playtest-report.json
 playtest-progress.txt
+artifacts/*.json
+artifacts/*.txt
+artifacts/ui-layout-fix/
 artifacts/visual/
 artifacts/world-signature/
 artifacts/story/
