@@ -8,6 +8,7 @@ const StoryQuestSystemScript := preload("res://scripts/story/StoryQuestSystem.gd
 const StorySitePlacementScript := preload("res://scripts/story/data/StorySitePlacement.gd")
 const RegionStoryRecordScript := preload("res://scripts/story/data/RegionStoryRecord.gd")
 const WorldmarkStateScript := preload("res://scripts/story/data/WorldmarkState.gd")
+const StoryQuestStateScript := preload("res://scripts/story/data/StoryQuestState.gd")
 const WorldmarkDefinitionScript := preload("res://scripts/story/data/WorldmarkDefinition.gd")
 const WorldmarkTraitCatalogScript := preload("res://scripts/story/data/WorldmarkTraitCatalog.gd")
 const WorldmarkGeneratorScript := preload("res://scripts/story/WorldmarkGenerator.gd")
@@ -47,6 +48,7 @@ const SCRIPT_PATHS := [
     "res://scripts/story/data/StorySitePlacement.gd",
     "res://scripts/story/data/RegionStoryRecord.gd",
     "res://scripts/story/data/WorldmarkState.gd",
+    "res://scripts/story/data/StoryQuestState.gd",
     "res://scripts/story/data/WorldmarkDefinition.gd",
     "res://scripts/story/data/WorldmarkTraitCatalog.gd",
     "res://scripts/story/WorldmarkGenerator.gd",
@@ -101,6 +103,7 @@ func run() -> void:
     test_gloam_hart_definition_preserves_first_arc_contract()
     test_duplicate_events_do_not_duplicate_story_effects()
     await test_main_scene_instantiates()
+    test_phase4_source_events_and_quest_state_round_trip()
     test_first_arc_waits_for_tutorial_completion()
     test_tutorial_completion_starts_first_quest_once()
     test_mira_event_advances_only_mira_stage()
@@ -454,6 +457,91 @@ func test_story_snapshot_save_load_preserves_records_exactly() -> void:
         "story_snapshot_save_load_preserves_records_exactly",
         before_json == after_json,
         "before %d chars, after %d chars" % [before_json.length(), after_json.length()]
+    )
+
+func test_phase4_source_events_and_quest_state_round_trip() -> void:
+    if main == null or main.get("story_director") == null:
+        add_result("phase4_source_events_and_quest_state_round_trip", false, "main story_director missing")
+        return
+    var director = main.get("story_director")
+    reset_story_runtime(director)
+    var saved_exploration := {
+        "biomes": main.get("discovered_biomes").duplicate(true),
+        "towns": main.get("discovered_town_keys").duplicate(true),
+        "mines": main.get("discovered_mine_keys").duplicate(true),
+        "ruins": main.get("discovered_ruin_keys").duplicate(true),
+        "camps": main.get("discovered_camp_keys").duplicate(true),
+        "shrines": main.get("discovered_shrine_keys").duplicate(true)
+    }
+    main.get("discovered_biomes").erase("taiga")
+    var tutorial = main.get("tutorial_system")
+    var town: Dictionary = tutorial.get("town") if tutorial != null and tutorial.get("town") is Dictionary else {}
+    var town_cell := Vector2i(int(town.get("centerX", 280)), int(town.get("centerZ", 0)))
+    var town_key := "%d,%d" % [town_cell.x, town_cell.y]
+    main.get("discovered_town_keys").erase(town_key)
+    main.update_exploration_state(town_cell, "taiga")
+    main.discover_landmark("mine", "phase4-mine", Vector3(float(town_cell.x + 400) * main.CELL, 20.0, float(town_cell.y) * main.CELL))
+    main.discover_landmark("ruin", "phase4-ruin", Vector3(float(town_cell.x + 430) * main.CELL, 20.0, float(town_cell.y) * main.CELL))
+    main.discover_landmark("camp", "phase4-camp", Vector3(float(town_cell.x + 460) * main.CELL, 20.0, float(town_cell.y) * main.CELL))
+    var shrine := StaticBody3D.new()
+    shrine.name = "Phase4Shrine"
+    shrine.set_meta("generatedTier", "shrine")
+    shrine.set_meta("cacheKey", "phase4-shrine")
+    shrine.position = Vector3(float(town_cell.x + 490) * main.CELL, 20.0, float(town_cell.y) * main.CELL)
+    add_child(shrine)
+    var old_sanctuary := bool(main.get("sanctuary_established"))
+    main.set("sanctuary_established", true)
+    var shrine_ok: bool = bool(main.discover_shrine_cache(shrine))
+    main.set("sanctuary_established", old_sanctuary)
+    shrine.queue_free()
+    director.ingest_event(story_event("tutorial_final_rescue_complete", "tutorial:final_rescue", starter_region_id(), "phase4:tutorial", {
+        "rescuedNpcId": "niko"
+    }))
+    director.ingest_event(story_event("npc_spoken_to", "npc:mira", starter_region_id(), "phase4:npc:mira", {
+        "npcId": "mira"
+    }))
+    var quest := first_quest_state(director)
+    var quest_validation: Dictionary = StoryQuestStateScript.validate(quest)
+    var quest_json := stable_json(quest)
+    var quest_system = director.get("quest_system")
+    if quest_system != null and quest_system.has_method("restore"):
+        var quest_snapshot := {}
+        quest_snapshot[FIRST_QUEST_ID] = quest
+        quest_system.restore(quest_snapshot)
+    var restored_quest := first_quest_state(director)
+    var counts_before_hud_refresh: Dictionary = director.snapshot().get("eventCounts", {})
+    main.update_hud("phase4 hud refresh should not emit story")
+    var counts: Dictionary = director.snapshot().get("eventCounts", {})
+    main.set("discovered_biomes", saved_exploration["biomes"])
+    main.set("discovered_town_keys", saved_exploration["towns"])
+    main.set("discovered_mine_keys", saved_exploration["mines"])
+    main.set("discovered_ruin_keys", saved_exploration["ruins"])
+    main.set("discovered_camp_keys", saved_exploration["camps"])
+    main.set("discovered_shrine_keys", saved_exploration["shrines"])
+    var hostile_system = main.get("hostile_system")
+    if hostile_system != null and hostile_system.has_method("clear"):
+        hostile_system.clear()
+    add_result(
+        "phase4_source_events_and_quest_state_round_trip",
+        stable_json(counts_before_hud_refresh) == stable_json(counts)
+            and int(counts.get("biome_discovered", 0)) == 1
+            and int(counts.get("town_discovered", 0)) == 1
+            and int(counts.get("mine_discovered", 0)) == 1
+            and int(counts.get("ruin_discovered", 0)) == 1
+            and int(counts.get("camp_discovered", 0)) == 1
+            and int(counts.get("shrine_discovered", 0)) == 1
+            and int(counts.get("tutorial_final_rescue_complete", 0)) == 1
+            and int(counts.get("npc_spoken_to", 0)) == 1
+            and shrine_ok
+            and bool(quest_validation.get("ok", false))
+            and quest_json == stable_json(restored_quest),
+        "beforeHud %s afterHud %s, shrine %s, quest %s, restoreSame %s" % [
+            str(counts_before_hud_refresh),
+            str(counts),
+            str(shrine_ok),
+            str(quest_validation),
+            str(quest_json == stable_json(restored_quest))
+        ]
     )
 
 func test_first_arc_waits_for_tutorial_completion() -> void:
