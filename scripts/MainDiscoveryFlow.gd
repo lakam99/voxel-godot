@@ -149,6 +149,7 @@ func _on_contract_rewarded(contract: Dictionary) -> void:
     for item_id_variant in items.keys():
         var item_id := String(item_id_variant)
         granted += inventory_system.add_item(item_id, int(items[item_id_variant])) if inventory_system else 0
+        maybe_emit_story_countermeasure_prepared(item_id, "contract_reward")
     _sync_inventory_totals()
     play_feedback("pickup", Vector3.INF, Color(0.86, 0.75, 0.42), 14)
     update_hud("Contract complete: %s" % String(contract.get("label", "Contract")))

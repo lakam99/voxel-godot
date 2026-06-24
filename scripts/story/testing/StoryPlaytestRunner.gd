@@ -84,6 +84,9 @@ func run() -> void:
     test_story_sites_are_valid_deterministic_and_saved()
     test_story_region_overlay_and_influence_clear_on_exit()
     test_story_interactable_boundary_and_encounter_events()
+    test_boundary_retune_costs_and_failed_attempts()
+    test_boundary_retune_duplicate_persistence_and_storm_weakening()
+    test_history_clue_gates_release_route_after_boundary_retune()
     test_ordinary_clues_count_idempotently()
     test_story_interactable_clues_dedupe_and_progress()
     test_historical_clue_unlock_persists_and_quest_round_trips()
@@ -476,6 +479,192 @@ func test_story_interactable_boundary_and_encounter_events() -> void:
         ]
     )
 
+func test_boundary_retune_costs_and_failed_attempts() -> void:
+    var director = main.get("story_director")
+    reset_story_runtime(director)
+    var isolated_state := begin_isolated_countermeasure_test_state()
+    var quest := advance_to_optional_history_stage(director)
+    var affected := String(quest.get("affectedRegionId", ""))
+    enter_story_region(affected, String(quest.get("affectedRegionBiome", "")))
+    var north_node := story_site_node("boundary_stone_north")
+    var no_item_ok: bool = bool(main.interact_story_node(north_node))
+    var after_no_items := first_quest_state(director)
+    var after_no_items_facts: Dictionary = after_no_items.get("facts", {})
+    grant_story_countermeasure_items(0)
+    var no_shard_ok: bool = bool(main.interact_story_node(north_node))
+    var after_no_shard := first_quest_state(director)
+    var after_no_shard_facts: Dictionary = after_no_shard.get("facts", {})
+    var inventory = main.get("inventory_system")
+    inventory.add_item("nightShard", 1)
+    var retune_ok: bool = bool(main.interact_story_node(north_node))
+    var after_retune := first_quest_state(director)
+    var retune_facts: Dictionary = after_retune.get("facts", {})
+    var event_counts: Dictionary = director.snapshot().get("eventCounts", {})
+    var shards_after_retune: int = inventory.count("nightShard")
+    var retune_source := String(retune_facts.get("countermeasureSource", ""))
+    var ok: bool = (
+        no_item_ok
+        and no_shard_ok
+        and retune_ok
+        and not bool(after_no_items_facts.get("countermeasurePrepared", false))
+        and int(after_no_items_facts.get("boundaryStonesRetuned", 0)) == 0
+        and not bool(after_no_shard_facts.get("countermeasurePrepared", false))
+        and int(after_no_shard_facts.get("boundaryStonesRetuned", 0)) == 0
+        and bool(retune_facts.get("countermeasurePrepared", false))
+        and retune_source == "boundary_stone"
+        and int(retune_facts.get("boundaryStonesRetuned", 0)) == 1
+        and shards_after_retune == 0
+        and int(event_counts.get("story_boundary_stone_retuned", 0)) == 1
+    )
+    restore_isolated_countermeasure_test_state(isolated_state)
+    add_result(
+        "boundary_retune_costs_and_failed_attempts",
+        ok,
+        "noItem %s noShard %s retune %s prepared %s/%s/%s count %d shards %d events %d source %s" % [
+            str(no_item_ok),
+            str(no_shard_ok),
+            str(retune_ok),
+            str(after_no_items_facts.get("countermeasurePrepared", false)),
+            str(after_no_shard_facts.get("countermeasurePrepared", false)),
+            str(retune_facts.get("countermeasurePrepared", false)),
+            int(retune_facts.get("boundaryStonesRetuned", 0)),
+            shards_after_retune,
+            int(event_counts.get("story_boundary_stone_retuned", 0)),
+            retune_source
+        ]
+    )
+
+func test_boundary_retune_duplicate_persistence_and_storm_weakening() -> void:
+    var director = main.get("story_director")
+    reset_story_runtime(director)
+    var isolated_state := begin_isolated_countermeasure_test_state()
+    var quest := advance_to_optional_history_stage(director)
+    var affected := String(quest.get("affectedRegionId", ""))
+    var biome := String(quest.get("affectedRegionBiome", ""))
+    enter_story_region(affected, biome)
+    grant_story_countermeasure_items(3)
+    var north_node := story_site_node("boundary_stone_north")
+    var south_node := story_site_node("boundary_stone_south")
+    var north_first_ok: bool = bool(main.interact_story_node(north_node))
+    var north_duplicate_ok: bool = bool(main.interact_story_node(north_node))
+    var south_ok: bool = bool(main.interact_story_node(south_node))
+    var inventory = main.get("inventory_system")
+    var after_retune := first_quest_state(director)
+    var retune_facts: Dictionary = after_retune.get("facts", {})
+    var event_counts: Dictionary = director.snapshot().get("eventCounts", {})
+    var save_snapshot: Dictionary = main.create_save_snapshot()
+    var loaded := bool(main.apply_save_snapshot(save_snapshot))
+    director = main.get("story_director")
+    enter_story_region(affected, biome)
+    var restored := first_quest_state(director)
+    var restored_facts: Dictionary = restored.get("facts", {})
+    var influence: Dictionary = main.debug_story_dump().get("influence", {})
+    var weather: Dictionary = influence.get("weatherBias", {})
+    var inventory_after_load = main.get("inventory_system")
+    var ids: Array = restored_facts.get("boundaryStoneIds", [])
+    var ok: bool = (
+        north_first_ok
+        and north_duplicate_ok
+        and south_ok
+        and loaded
+        and int(retune_facts.get("boundaryStonesRetuned", 0)) == 2
+        and int(restored_facts.get("boundaryStonesRetuned", 0)) == 2
+        and ids.has("boundary_stone_north")
+        and ids.has("boundary_stone_south")
+        and String(restored.get("stage", "")) == "encounter_locked_placeholder"
+        and bool(restored_facts.get("stormWeakened", false))
+        and bool(restored_facts.get("encounterUnlocked", false))
+        and bool(restored_facts.get("combatRouteUnlocked", false))
+        and not bool(restored_facts.get("encounterLocked", true))
+        and inventory_after_load.count("nightShard") == 1
+        and int(event_counts.get("story_boundary_stone_retuned", 0)) == 2
+        and bool(weather.get("stormWeakened", false))
+        and float(weather.get("intensity", 1.0)) < 0.22
+    )
+    restore_isolated_countermeasure_test_state(isolated_state)
+    add_result(
+        "boundary_retune_duplicate_persistence_and_storm_weakening",
+        ok,
+        "interacts %s/%s/%s loaded %s stage %s stones %d ids %s shards %d events %d weather %s" % [
+            str(north_first_ok),
+            str(north_duplicate_ok),
+            str(south_ok),
+            str(loaded),
+            restored.get("stage", ""),
+            int(restored_facts.get("boundaryStonesRetuned", 0)),
+            str(ids),
+            inventory_after_load.count("nightShard"),
+            int(event_counts.get("story_boundary_stone_retuned", 0)),
+            str(weather)
+        ]
+    )
+
+func test_history_clue_gates_release_route_after_boundary_retune() -> void:
+    var director = main.get("story_director")
+    reset_story_runtime(director)
+    var isolated_state := begin_isolated_countermeasure_test_state()
+    var combat_quest := advance_to_optional_history_stage(director)
+    var combat_affected := String(combat_quest.get("affectedRegionId", ""))
+    enter_story_region(combat_affected, String(combat_quest.get("affectedRegionBiome", "")))
+    grant_story_countermeasure_items(2)
+    var combat_north_node := story_site_node("boundary_stone_north")
+    var combat_south_node := story_site_node("boundary_stone_south")
+    var combat_north_ok: bool = bool(main.interact_story_node(combat_north_node))
+    var combat_south_ok: bool = bool(main.interact_story_node(combat_south_node))
+    var combat_after := first_quest_state(director)
+    var combat_facts: Dictionary = combat_after.get("facts", {})
+    reset_story_runtime(director)
+    clear_story_countermeasure_test_inventory()
+    var release_quest := advance_to_optional_history_stage(director)
+    var release_affected := String(release_quest.get("affectedRegionId", ""))
+    director.ingest_event(story_event("story_clue_found", "clue:old_compact_record", release_affected, "", {
+        "clueKind": "historical",
+        "clueId": "historical:old_compact_record"
+    }))
+    enter_story_region(release_affected, String(release_quest.get("affectedRegionBiome", "")))
+    grant_story_countermeasure_items(2)
+    var release_north_node := story_site_node("boundary_stone_north")
+    var release_south_node := story_site_node("boundary_stone_south")
+    var release_north_ok: bool = bool(main.interact_story_node(release_north_node))
+    var release_south_ok: bool = bool(main.interact_story_node(release_south_node))
+    var release_after := first_quest_state(director)
+    var release_facts: Dictionary = release_after.get("facts", {})
+    var ok: bool = (
+        combat_north_ok
+        and combat_south_ok
+        and release_north_ok
+        and release_south_ok
+        and bool(combat_facts.get("combatRouteUnlocked", false))
+        and not bool(combat_facts.get("historyClueFound", false))
+        and not bool(combat_facts.get("releaseRouteUnlocked", false))
+        and not bool(combat_facts.get("releaseRouteAvailable", false))
+        and bool(release_facts.get("combatRouteUnlocked", false))
+        and bool(release_facts.get("historyClueFound", false))
+        and bool(release_facts.get("releaseRouteUnlocked", false))
+        and bool(release_facts.get("releaseRouteAvailable", false))
+    )
+    restore_isolated_countermeasure_test_state(isolated_state)
+    add_result(
+        "history_clue_gates_release_route_after_boundary_retune",
+        ok,
+        "combat ok %s/%s count %d hist/release %s/%s available %s combatRoute %s, release ok %s/%s count %d hist/release %s/%s available %s combatRoute %s" % [
+            str(combat_north_ok),
+            str(combat_south_ok),
+            int(combat_facts.get("boundaryStonesRetuned", 0)),
+            str(combat_facts.get("historyClueFound", false)),
+            str(combat_facts.get("releaseRouteUnlocked", false)),
+            str(combat_facts.get("releaseRouteAvailable", false)),
+            str(combat_facts.get("combatRouteUnlocked", false)),
+            str(release_north_ok),
+            str(release_south_ok),
+            int(release_facts.get("boundaryStonesRetuned", 0)),
+            str(release_facts.get("historyClueFound", false)),
+            str(release_facts.get("releaseRouteUnlocked", false)),
+            str(release_facts.get("releaseRouteAvailable", false)),
+            str(release_facts.get("combatRouteUnlocked", false))
+        ]
+    )
+
 func test_ordinary_clues_count_idempotently() -> void:
     var director = main.get("story_director")
     director.reset()
@@ -820,6 +1009,58 @@ func ensure_story_sites_for_region(region_id: String) -> Array:
     if overlay != null and overlay.has_method("ensure_sites_for_region"):
         return overlay.ensure_sites_for_region(region_id)
     return []
+
+func begin_isolated_countermeasure_test_state() -> Dictionary:
+    var state := {}
+    var inventory = main.get("inventory_system") if main != null else null
+    if inventory != null:
+        state["inventory"] = {
+            "slots": inventory.snapshot(),
+            "size": inventory.size,
+            "selectedSlot": inventory.selected_slot
+        }
+        inventory.restore({
+            "slots": [],
+            "size": inventory.size,
+            "selectedSlot": 0
+        })
+    var contracts = main.get("contract_system") if main != null else null
+    if contracts != null:
+        var contract_list = contracts.get("contracts")
+        state["contractsSnapshot"] = contracts.snapshot()
+        state["contractsList"] = contract_list.duplicate(true) if contract_list is Array else []
+        contracts.set("contracts", [])
+    return state
+
+func restore_isolated_countermeasure_test_state(state: Dictionary) -> void:
+    var contracts = main.get("contract_system") if main != null else null
+    if contracts != null:
+        contracts.set("contracts", state.get("contractsList", []))
+        contracts.restore(state.get("contractsSnapshot", {}))
+    var inventory = main.get("inventory_system") if main != null else null
+    if inventory != null and state.has("inventory"):
+        inventory.restore(state["inventory"])
+
+func clear_story_countermeasure_test_inventory() -> void:
+    var inventory = main.get("inventory_system") if main != null else null
+    if inventory == null:
+        return
+    inventory.restore({
+        "slots": [],
+        "size": inventory.size,
+        "selectedSlot": 0
+    })
+
+func grant_story_countermeasure_items(night_shards: int) -> void:
+    if main == null:
+        return
+    var inventory = main.get("inventory_system")
+    if inventory == null:
+        return
+    inventory.add_item("surveyLens", 1)
+    inventory.add_item("wardLantern", 1)
+    if night_shards > 0:
+        inventory.add_item("nightShard", night_shards)
 
 func story_site_validation(sites: Array) -> Dictionary:
     var seen_ids := {}

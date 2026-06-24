@@ -371,6 +371,40 @@ func emit_story_event(event_type: String, subject_id := "", region_id := "", ded
     var event: Dictionary = story_event_bus.emit_event(event_type, subject_id, final_region_id, dedupe_key, position, payload)
     return not event.is_empty()
 
+func maybe_emit_story_countermeasure_prepared(item_id: String, source := "item_acquired") -> bool:
+    if not (item_id in ["surveyLens", "wardLantern"]):
+        return false
+    if story_director == null or inventory_system == null or story_director.quest_system == null:
+        return false
+    if not story_director.quest_system.has_method("first_quest"):
+        return false
+    var quest: Dictionary = story_director.quest_system.first_quest()
+    if quest.is_empty():
+        return false
+    var stage := String(quest.get("stage", ""))
+    if not (stage in ["optional_find_historical_clue", "prepare_countermeasure_placeholder"]):
+        return false
+    var facts: Dictionary = quest.get("facts", {}) if quest.get("facts", {}) is Dictionary else {}
+    if bool(facts.get("countermeasurePrepared", false)):
+        return false
+    if inventory_system.count("surveyLens") <= 0 or inventory_system.count("wardLantern") <= 0:
+        return false
+    var region_id := String(quest.get("affectedRegionId", ""))
+    if region_id == "":
+        return false
+    return emit_story_event(
+        "story_countermeasure_prepared",
+        "countermeasure:gloam_hart",
+        region_id,
+        "story_countermeasure_prepared:%s" % region_id,
+        Vector3.INF,
+        {
+            "source": source,
+            "triggerItem": item_id,
+            "items": ["surveyLens", "wardLantern"]
+        }
+    )
+
 func update_story_region_entry(cell: Vector2i, position: Vector3, biome: String) -> void:
     if story_event_bus == null:
         return

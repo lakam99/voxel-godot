@@ -26,16 +26,19 @@ func sync_for_region(region_id: String) -> void:
 func apply_influence(region_id: String) -> void:
     active = true
     active_region_id = region_id
+    var weakened := storm_weakened()
     weather_bias = {
         "kind": "rain",
-        "intensity": 0.22,
-        "cloudCover": 0.35,
+        "intensity": 0.08 if weakened else 0.22,
+        "cloudCover": 0.18 if weakened else 0.35,
+        "stormWeakened": weakened,
         "removable": true
     }
     ambience_tag = "gloam_hart_ringing_storm"
     hostile_modifier = {
         "tag": "gloam_hart_pressure",
-        "shadowBias": 0.12,
+        "shadowBias": 0.04 if weakened else 0.12,
+        "stormWeakened": weakened,
         "removable": true
     }
 
@@ -61,6 +64,15 @@ func first_worldmark_resolved() -> bool:
     var record: Dictionary = story_director.region_records.get(region_id, {})
     var worldmark: Dictionary = record.get("worldmark", {})
     return String(worldmark.get("resolution", "")) != ""
+
+func storm_weakened() -> bool:
+    if story_director == null or story_director.quest_system == null:
+        return false
+    var quest: Dictionary = story_director.quest_system.first_quest() if story_director.quest_system.has_method("first_quest") else {}
+    var facts_value = quest.get("facts", {})
+    if facts_value is Dictionary:
+        return bool(facts_value.get("stormWeakened", false))
+    return false
 
 func debug_state() -> Dictionary:
     return {

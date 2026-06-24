@@ -111,8 +111,15 @@ func start_first_arc(event: Dictionary) -> bool:
             "historicalClueId": "",
             "releaseRouteUnlocked": false,
             "countermeasurePrepared": false,
+            "countermeasureItems": [],
+            "countermeasureSource": "",
             "boundaryStonesRetuned": 0,
             "boundaryStoneIds": [],
+            "lastBoundaryStoneRetuned": "",
+            "stormWeakened": false,
+            "encounterUnlocked": false,
+            "combatRouteUnlocked": false,
+            "releaseRouteAvailable": false,
             "encounterLocked": true
         },
         "optionalObjectives": {
@@ -199,6 +206,8 @@ func handle_historical_clue(quest: Dictionary, clue_id: String) -> bool:
     facts["historyClueFound"] = true
     facts["historicalClueId"] = clue_id
     facts["releaseRouteUnlocked"] = true
+    if bool(facts.get("stormWeakened", false)):
+        facts["releaseRouteAvailable"] = true
     quest["facts"] = facts
     var optional_objectives: Dictionary = quest.get("optionalObjectives", {})
     optional_objectives["learn_old_compact"] = true
@@ -208,7 +217,7 @@ func handle_historical_clue(quest: Dictionary, clue_id: String) -> bool:
     quests[FIRST_QUEST_ID] = quest
     return true
 
-func handle_countermeasure_prepared(_event: Dictionary) -> bool:
+func handle_countermeasure_prepared(event: Dictionary) -> bool:
     var quest := first_quest()
     var stage := String(quest.get("stage", ""))
     if not (stage in [STAGE_OPTIONAL_FIND_HISTORICAL_CLUE, STAGE_PREPARE_COUNTERMEASURE_PLACEHOLDER]):
@@ -216,7 +225,10 @@ func handle_countermeasure_prepared(_event: Dictionary) -> bool:
     var facts := facts_for_quest(quest)
     if bool(facts.get("countermeasurePrepared", false)):
         return false
+    var payload := payload_from_event(event)
     facts["countermeasurePrepared"] = true
+    facts["countermeasureItems"] = payload.get("items", ["surveyLens", "wardLantern"])
+    facts["countermeasureSource"] = String(payload.get("source", ""))
     quest["facts"] = facts
     set_stage(quest, STAGE_RETUNE_BOUNDARY_STONES_PLACEHOLDER)
     quests[FIRST_QUEST_ID] = quest
@@ -236,8 +248,15 @@ func handle_boundary_stone_retuned(event: Dictionary) -> bool:
     stone_ids.append(stone_id)
     facts["boundaryStoneIds"] = stone_ids
     facts["boundaryStonesRetuned"] = stone_ids.size()
+    facts["lastBoundaryStoneRetuned"] = stone_id
     quest["facts"] = facts
     if stone_ids.size() >= 2:
+        facts["stormWeakened"] = true
+        facts["encounterUnlocked"] = true
+        facts["combatRouteUnlocked"] = true
+        facts["releaseRouteAvailable"] = bool(facts.get("historyClueFound", false))
+        facts["encounterLocked"] = false
+        quest["facts"] = facts
         set_stage(quest, STAGE_ENCOUNTER_LOCKED_PLACEHOLDER)
     quests[FIRST_QUEST_ID] = quest
     return true
@@ -405,6 +424,13 @@ func debug_state() -> Dictionary:
         "historicalClueId": String(facts.get("historicalClueId", "")),
         "releaseRouteUnlocked": bool(facts.get("releaseRouteUnlocked", false)),
         "countermeasurePrepared": bool(facts.get("countermeasurePrepared", false)),
+        "countermeasureItems": facts.get("countermeasureItems", []),
+        "countermeasureSource": String(facts.get("countermeasureSource", "")),
         "boundaryStonesRetuned": int(facts.get("boundaryStonesRetuned", 0)),
+        "boundaryStoneIds": facts.get("boundaryStoneIds", []),
+        "stormWeakened": bool(facts.get("stormWeakened", false)),
+        "encounterUnlocked": bool(facts.get("encounterUnlocked", false)),
+        "combatRouteUnlocked": bool(facts.get("combatRouteUnlocked", false)),
+        "releaseRouteAvailable": bool(facts.get("releaseRouteAvailable", false)),
         "encounterLocked": bool(facts.get("encounterLocked", true))
     }

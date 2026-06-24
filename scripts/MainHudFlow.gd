@@ -263,6 +263,7 @@ func _on_recipe_crafted(recipe_id: String, output: String, amount: int) -> void:
         objective_system.complete("copperGear")
     if output.begins_with("iron") and output != "ironIngot":
         objective_system.complete("iron")
+    maybe_emit_story_countermeasure_prepared(output, "crafting")
     update_objectives_and_contracts()
 
 func _on_objective_completed(objective: Dictionary) -> void:
@@ -289,6 +290,7 @@ func _on_utility_processed(block_type: String, output_item: String) -> void:
         objective_system.complete("smeltIron")
         objective_system.complete("iron")
     play_feedback("craft", Vector3.INF, feedback_color_for_material(output_item), 6)
+    maybe_emit_story_countermeasure_prepared(output_item, "utility_processed:%s" % block_type)
     update_objectives_and_contracts()
 
 func _on_utility_traded(trade: Dictionary) -> void:
@@ -296,6 +298,7 @@ func _on_utility_traded(trade: Dictionary) -> void:
     award_progression("trade: %s" % String(trade.get("label", "barter")), int(trade.get("xp", 6)))
     update_objectives_and_contracts()
     play_feedback("pickup", Vector3.INF, feedback_color_for_material(output_item), 8)
+    maybe_emit_story_countermeasure_prepared(output_item, "utility_trade")
 
 func _on_survival_changed() -> void:
     if survival_system and survival_system.health < last_survival_health - 0.05:

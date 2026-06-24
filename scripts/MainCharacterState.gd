@@ -33,6 +33,7 @@ func update_dropped_pickups(delta: float) -> void:
             continue
         count -= collected
         play_feedback("pickup", node.global_position, feedback_color_for_material(item_id), min(10, max(2, collected)))
+        maybe_emit_story_countermeasure_prepared(item_id, "pickup")
         if count <= 0:
             dropped_pickups.erase(pickup)
             recycle_pickup(pickup)

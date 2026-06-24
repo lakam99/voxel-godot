@@ -116,6 +116,11 @@ func clue_label(clue_id: String) -> String:
     return "Regional clue"
 
 func known_preparation(facts: Dictionary, quest: Dictionary) -> String:
+    if bool(facts.get("stormWeakened", false)):
+        return "Boundary stones retuned"
+    var stone_count := int(facts.get("boundaryStonesRetuned", 0))
+    if stone_count > 0:
+        return "Boundary stones retuned: %d/2" % stone_count
     if bool(facts.get("countermeasurePrepared", false)):
         return "Countermeasure prepared"
     if int(facts.get("ordinaryCluesFound", 0)) >= 2:
