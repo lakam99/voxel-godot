@@ -29,6 +29,9 @@ const StoryEventBusScript := preload("res://scripts/story/StoryEventBus.gd")
 const StoryDirectorScript := preload("res://scripts/story/StoryDirector.gd")
 const StoryQuestSystemScript := preload("res://scripts/story/StoryQuestSystem.gd")
 const RegionStoryGeneratorScript := preload("res://scripts/story/RegionStoryGenerator.gd")
+const StorySitePlacementScript := preload("res://scripts/story/data/StorySitePlacement.gd")
+const StoryWorldOverlaySystemScript := preload("res://scripts/story/StoryWorldOverlaySystem.gd")
+const WorldmarkInfluenceSystemScript := preload("res://scripts/story/WorldmarkInfluenceSystem.gd")
 
 const CELL := 1.35
 const CHUNK_SIZE := 28
@@ -112,6 +115,7 @@ func story_region_id_for_cell(cell: Vector2i) -> String: return ""
 func story_region_id_for_world_position(position: Vector3) -> String: return ""
 func emit_story_event(event_type: String, subject_id := "", region_id := "", dedupe_key := "", position := Vector3.INF, payload := {}) -> bool: return false
 func update_story_region_entry(cell: Vector2i, position: Vector3, biome: String) -> void: pass
+func interact_story_node(node: Node) -> bool: return false
 func debug_story_dump() -> Dictionary: return {}
 func setup_visual_asset_registry() -> void: pass
 func setup_static_item_asset_registry() -> void: pass

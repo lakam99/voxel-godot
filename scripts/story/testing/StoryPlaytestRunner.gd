@@ -5,6 +5,9 @@ const RegionStoryGeneratorScript := preload("res://scripts/story/RegionStoryGene
 const StoryEventBusScript := preload("res://scripts/story/StoryEventBus.gd")
 const StoryDirectorScript := preload("res://scripts/story/StoryDirector.gd")
 const StoryQuestSystemScript := preload("res://scripts/story/StoryQuestSystem.gd")
+const StorySitePlacementScript := preload("res://scripts/story/data/StorySitePlacement.gd")
+const StoryWorldOverlaySystemScript := preload("res://scripts/story/StoryWorldOverlaySystem.gd")
+const WorldmarkInfluenceSystemScript := preload("res://scripts/story/WorldmarkInfluenceSystem.gd")
 
 const FIRST_QUEST_ID := "story.gloam_hart.storm"
 
@@ -28,10 +31,18 @@ const SCRIPT_PATHS := [
     "res://scripts/story/StoryDirector.gd",
     "res://scripts/story/StoryQuestSystem.gd",
     "res://scripts/story/RegionStoryGenerator.gd",
+    "res://scripts/story/data/StorySitePlacement.gd",
+    "res://scripts/story/StoryInteractable.gd",
+    "res://scripts/story/StoryWorldOverlaySystem.gd",
+    "res://scripts/story/WorldmarkInfluenceSystem.gd",
     "res://scripts/visual/VisualAssetRegistry.gd",
     "res://scripts/visual/CharacterAssetRegistry.gd",
     "res://scripts/visual/StaticItemAssetRegistry.gd",
     "res://scripts/visual/AnimatedAssetRegistry.gd"
+]
+
+const SCENE_PATHS := [
+    "res://scenes/story/StoryInteractable.tscn"
 ]
 
 var main: Node3D
@@ -64,8 +75,13 @@ func run() -> void:
     test_mira_event_advances_only_mira_stage()
     test_sera_event_requires_mira_stage()
     test_affected_region_entry_advances_travel_stage()
+    test_story_sites_are_valid_deterministic_and_saved()
+    test_story_region_overlay_and_influence_clear_on_exit()
+    test_story_interactable_boundary_and_encounter_events()
     test_ordinary_clues_count_idempotently()
+    test_story_interactable_clues_dedupe_and_progress()
     test_historical_clue_unlock_persists_and_quest_round_trips()
+    test_optional_history_interactable_state_persists_and_sites_round_trips()
     test_story_snapshot_save_load_preserves_records_exactly()
     test_old_save_without_story_field_loads()
     test_story_artifacts_directory_writable()
@@ -78,13 +94,20 @@ func test_project_scripts_load() -> void:
         if not ResourceLoader.exists(path):
             failures.append("%s missing" % path)
             continue
-        var resource := load(path)
-        if resource == null:
+        var script_resource := load(path)
+        if script_resource == null:
+            failures.append("%s failed to load" % path)
+    for path in SCENE_PATHS:
+        if not ResourceLoader.exists(path):
+            failures.append("%s missing" % path)
+            continue
+        var scene_resource := load(path)
+        if scene_resource == null:
             failures.append("%s failed to load" % path)
     add_result(
         "project_scripts_load",
         failures.is_empty(),
-        "%d scripts checked%s" % [SCRIPT_PATHS.size(), "" if failures.is_empty() else ": " + "; ".join(failures)]
+        "%d scripts and %d scenes checked%s" % [SCRIPT_PATHS.size(), SCENE_PATHS.size(), "" if failures.is_empty() else ": " + "; ".join(failures)]
     )
 
 func test_region_id_floor_division() -> void:
@@ -179,6 +202,9 @@ func test_main_scene_instantiates() -> void:
         "story_director",
         "story_quest_system",
         "region_story_generator",
+        "story_site_placement",
+        "story_world_overlay_system",
+        "worldmark_influence_system",
         "hud",
         "visual_asset_registry",
         "static_item_asset_registry",
@@ -345,6 +371,98 @@ func test_affected_region_entry_advances_travel_stage() -> void:
         "wrong %s, entered %s, affected %s" % [wrong_region.get("stage", ""), entered.get("stage", ""), affected]
     )
 
+func test_story_sites_are_valid_deterministic_and_saved() -> void:
+    var director = main.get("story_director")
+    reset_story_runtime(director)
+    var quest := start_first_arc_for_test(director)
+    var affected := String(quest.get("affectedRegionId", ""))
+    var sites := ensure_story_sites_for_region(affected)
+    var first_sites_json := stable_json(sites)
+    var first_snapshot: Dictionary = director.snapshot()
+    var first_records: Dictionary = first_snapshot.get("regionRecords", {})
+    var first_record: Dictionary = first_records.get(affected, {})
+    var saved_sites: Array = first_record.get("storySites", [])
+    var validation := story_site_validation(sites)
+    reset_story_runtime(director)
+    var repeat_quest := start_first_arc_for_test(director)
+    var repeat_affected := String(repeat_quest.get("affectedRegionId", ""))
+    var repeat_sites := ensure_story_sites_for_region(repeat_affected)
+    add_result(
+        "story_sites_are_valid_deterministic_and_saved",
+        affected != ""
+            and affected == repeat_affected
+            and first_sites_json == stable_json(repeat_sites)
+            and first_sites_json == stable_json(saved_sites)
+            and bool(validation.get("ok", false)),
+        "affected %s, repeat %s, sites %d, saved %d, %s" % [
+            affected,
+            repeat_affected,
+            sites.size(),
+            saved_sites.size(),
+            String(validation.get("details", ""))
+        ]
+    )
+
+func test_story_region_overlay_and_influence_clear_on_exit() -> void:
+    var director = main.get("story_director")
+    reset_story_runtime(director)
+    var quest := advance_to_clue_stage(director)
+    var affected := String(quest.get("affectedRegionId", ""))
+    enter_story_region(affected, String(quest.get("affectedRegionBiome", "")))
+    var active_dump: Dictionary = main.debug_story_dump()
+    var active_overlay: Dictionary = active_dump.get("overlay", {})
+    var active_influence: Dictionary = active_dump.get("influence", {})
+    enter_story_region(starter_region_id(), "forest")
+    var exit_dump: Dictionary = main.debug_story_dump()
+    var exit_overlay: Dictionary = exit_dump.get("overlay", {})
+    var exit_influence: Dictionary = exit_dump.get("influence", {})
+    add_result(
+        "story_region_overlay_and_influence_clear_on_exit",
+        int(active_overlay.get("spawnedCount", 0)) == 7
+            and bool(active_influence.get("active", false))
+            and int(exit_overlay.get("spawnedCount", 0)) == 0
+            and not bool(exit_influence.get("active", false)),
+        "active overlay %d influence %s, exit overlay %d influence %s" % [
+            int(active_overlay.get("spawnedCount", 0)),
+            str(active_influence.get("active", false)),
+            int(exit_overlay.get("spawnedCount", 0)),
+            str(exit_influence.get("active", false))
+        ]
+    )
+
+func test_story_interactable_boundary_and_encounter_events() -> void:
+    var director = main.get("story_director")
+    reset_story_runtime(director)
+    var quest := advance_to_clue_stage(director)
+    var affected := String(quest.get("affectedRegionId", ""))
+    enter_story_region(affected, String(quest.get("affectedRegionBiome", "")))
+    var north_node := story_site_node("boundary_stone_north")
+    var south_node := story_site_node("boundary_stone_south")
+    var marker_node := story_site_node("encounter_marker")
+    var north_ok: bool = bool(main.interact_story_node(north_node))
+    var south_ok: bool = bool(main.interact_story_node(south_node))
+    var marker_ok: bool = bool(main.interact_story_node(marker_node))
+    var snapshot: Dictionary = director.snapshot()
+    var event_counts: Dictionary = snapshot.get("eventCounts", {})
+    var after_quest := first_quest_state(director)
+    add_result(
+        "story_interactable_boundary_and_encounter_events",
+        north_ok
+            and south_ok
+            and marker_ok
+            and int(event_counts.get("story_boundary_stone_discovered", 0)) == 2
+            and int(event_counts.get("story_encounter_marker_found", 0)) == 1
+            and String(after_quest.get("stage", "")) == "find_ordinary_clues",
+        "boundary %s/%s=%d encounter %s=%d stage %s" % [
+            str(north_ok),
+            str(south_ok),
+            int(event_counts.get("story_boundary_stone_discovered", 0)),
+            str(marker_ok),
+            int(event_counts.get("story_encounter_marker_found", 0)),
+            after_quest.get("stage", "")
+        ]
+    )
+
 func test_ordinary_clues_count_idempotently() -> void:
     var director = main.get("story_director")
     director.reset()
@@ -367,8 +485,41 @@ func test_ordinary_clues_count_idempotently() -> void:
     add_result(
         "ordinary_clues_count_idempotently",
         int(facts.get("ordinaryCluesFound", 0)) == 2
-            and String(after_clues.get("stage", "")) == "optional_find_historical_clue",
+            and String(after_clues.get("stage", "")) == "prepare_countermeasure_placeholder",
         "count %d, ids %s, stage %s" % [int(facts.get("ordinaryCluesFound", 0)), str(facts.get("ordinaryClueIds", [])), after_clues.get("stage", "")]
+    )
+
+func test_story_interactable_clues_dedupe_and_progress() -> void:
+    var director = main.get("story_director")
+    reset_story_runtime(director)
+    var quest := advance_to_clue_stage(director)
+    var affected := String(quest.get("affectedRegionId", ""))
+    enter_story_region(affected, String(quest.get("affectedRegionBiome", "")))
+    var antler_node := story_site_node("ordinary_antler_scars")
+    var stone_node := story_site_node("ordinary_ringing_stone")
+    var first_ok: bool = bool(main.interact_story_node(antler_node))
+    var duplicate_ok: bool = bool(main.interact_story_node(antler_node))
+    var after_first := first_quest_state(director)
+    var first_facts: Dictionary = after_first.get("facts", {})
+    var second_ok: bool = bool(main.interact_story_node(stone_node))
+    var after_second := first_quest_state(director)
+    var second_facts: Dictionary = after_second.get("facts", {})
+    add_result(
+        "story_interactable_clues_dedupe_and_progress",
+        first_ok
+            and duplicate_ok
+            and second_ok
+            and int(first_facts.get("ordinaryCluesFound", 0)) == 1
+            and int(second_facts.get("ordinaryCluesFound", 0)) == 2
+            and String(after_second.get("stage", "")) == "prepare_countermeasure_placeholder",
+        "first %s duplicate %s second %s, counts %d/%d, stage %s" % [
+            str(first_ok),
+            str(duplicate_ok),
+            str(second_ok),
+            int(first_facts.get("ordinaryCluesFound", 0)),
+            int(second_facts.get("ordinaryCluesFound", 0)),
+            after_second.get("stage", "")
+        ]
     )
 
 func test_historical_clue_unlock_persists_and_quest_round_trips() -> void:
@@ -413,6 +564,53 @@ func test_historical_clue_unlock_persists_and_quest_round_trips() -> void:
         ]
     )
 
+func test_optional_history_interactable_state_persists_and_sites_round_trips() -> void:
+    var director = main.get("story_director")
+    reset_story_runtime(director)
+    var quest := advance_to_clue_stage(director)
+    var affected := String(quest.get("affectedRegionId", ""))
+    enter_story_region(affected, String(quest.get("affectedRegionBiome", "")))
+    var antler_node := story_site_node("ordinary_antler_scars")
+    var stone_node := story_site_node("ordinary_ringing_stone")
+    var history_node := story_site_node("historical_old_compact")
+    var first_ok: bool = bool(main.interact_story_node(antler_node))
+    var second_ok: bool = bool(main.interact_story_node(stone_node))
+    var history_ok: bool = bool(main.interact_story_node(history_node))
+    var save_snapshot: Dictionary = main.create_save_snapshot()
+    var story_before: Dictionary = save_snapshot.get("story", {})
+    var before_records: Dictionary = story_before.get("regionRecords", {})
+    var before_record: Dictionary = before_records.get(affected, {})
+    var before_sites_json := stable_json(before_record.get("storySites", []))
+    var loaded := bool(main.apply_save_snapshot(save_snapshot))
+    director = main.get("story_director")
+    var restored := first_quest_state(director)
+    var facts: Dictionary = restored.get("facts", {})
+    var after_snapshot: Dictionary = director.snapshot()
+    var after_records: Dictionary = after_snapshot.get("regionRecords", {})
+    var after_record: Dictionary = after_records.get(affected, {})
+    var after_sites: Array = after_record.get("storySites", [])
+    add_result(
+        "optional_history_interactable_state_persists_and_sites_round_trips",
+        first_ok
+            and second_ok
+            and history_ok
+            and loaded
+            and bool(facts.get("historyClueFound", false))
+            and bool(facts.get("releaseRouteUnlocked", false))
+            and String(restored.get("stage", "")) == "prepare_countermeasure_placeholder"
+            and before_sites_json == stable_json(after_record.get("storySites", [])),
+        "interacts %s/%s/%s, loaded %s, stage %s, history %s, release %s, sites %d" % [
+            str(first_ok),
+            str(second_ok),
+            str(history_ok),
+            str(loaded),
+            restored.get("stage", ""),
+            str(facts.get("historyClueFound", false)),
+            str(facts.get("releaseRouteUnlocked", false)),
+            after_sites.size()
+        ]
+    )
+
 func test_old_save_without_story_field_loads() -> void:
     if main == null:
         add_result("old_save_without_story_field_loads", false, "main missing")
@@ -454,6 +652,126 @@ func test_story_artifacts_directory_writable() -> void:
         write_ok and read_back.find("StoryPlaytestRunner") >= 0,
         artifact_path
     )
+
+func reset_story_runtime(director) -> void:
+    if director != null:
+        director.reset()
+    if main != null:
+        main.set("last_story_region_id", "")
+        var overlay = main.get("story_world_overlay_system")
+        if overlay != null and overlay.has_method("reset"):
+            overlay.reset()
+        var influence = main.get("worldmark_influence_system")
+        if influence != null and influence.has_method("reset"):
+            influence.reset()
+
+func ensure_story_sites_for_region(region_id: String) -> Array:
+    if main == null or region_id == "":
+        return []
+    var overlay = main.get("story_world_overlay_system")
+    if overlay != null and overlay.has_method("ensure_sites_for_region"):
+        return overlay.ensure_sites_for_region(region_id)
+    return []
+
+func story_site_validation(sites: Array) -> Dictionary:
+    var seen_ids := {}
+    var cells: Array[Vector2i] = []
+    var ordinary_count := 0
+    var historical_count := 0
+    var boundary_count := 0
+    var encounter_count := 0
+    var problems: Array[String] = []
+    for site_value in sites:
+        if not (site_value is Dictionary):
+            problems.append("non-dictionary site")
+            continue
+        var site: Dictionary = site_value
+        var site_id := String(site.get("id", ""))
+        var kind := String(site.get("kind", ""))
+        var clue_kind := String(site.get("clueKind", ""))
+        var cell := story_site_cell(site)
+        if site_id == "" or seen_ids.has(site_id):
+            problems.append("duplicate id %s" % site_id)
+        seen_ids[site_id] = true
+        if not story_site_cell_valid(cell):
+            problems.append("%s invalid cell %s" % [site_id, str(cell)])
+        for existing_cell in cells:
+            var distance := Vector2(float(existing_cell.x), float(existing_cell.y)).distance_to(Vector2(float(cell.x), float(cell.y)))
+            if distance < 8.0:
+                problems.append("%s too close to %s" % [site_id, str(existing_cell)])
+        cells.append(cell)
+        if kind == "clue" and clue_kind == "ordinary":
+            ordinary_count += 1
+        elif kind == "clue" and clue_kind == "historical":
+            historical_count += 1
+        elif kind == "boundary_stone":
+            boundary_count += 1
+        elif kind == "encounter_marker":
+            encounter_count += 1
+    var ok := sites.size() == 7 and ordinary_count == 3 and historical_count == 1 and boundary_count == 2 and encounter_count == 1 and problems.is_empty()
+    return {
+        "ok": ok,
+        "details": "counts ordinary=%d historical=%d boundary=%d encounter=%d problems=%s" % [
+            ordinary_count,
+            historical_count,
+            boundary_count,
+            encounter_count,
+            str(problems)
+        ]
+    }
+
+func story_site_cell_valid(cell: Vector2i) -> bool:
+    if main == null:
+        return false
+    if main.terrain_height_cell(cell.x, cell.y) <= main.WATER_LEVEL + 1.2:
+        return false
+    if String(main.biome_at_cell(cell.x, cell.y)) in ["ocean", "beach", "town"]:
+        return false
+    var town: Dictionary = main.town_region_at_cell(cell.x, cell.y)
+    if not town.is_empty():
+        return false
+    if main.height_variation_cell(cell.x, cell.y, 2) > 2.4:
+        return false
+    return true
+
+func story_site_cell(site: Dictionary) -> Vector2i:
+    var cell_value = site.get("cell", [])
+    if cell_value is Array and cell_value.size() >= 2:
+        return Vector2i(int(cell_value[0]), int(cell_value[1]))
+    return Vector2i.ZERO
+
+func enter_story_region(region_id: String, biome: String) -> void:
+    if main == null or region_id == "":
+        return
+    var generator = main.get("region_story_generator")
+    if generator == null:
+        return
+    var center: Vector2i = generator.region_center_cell(region_id)
+    var resolved_biome := biome
+    if resolved_biome == "":
+        resolved_biome = String(main.biome_at_cell(center.x, center.y))
+    main.set("last_story_region_id", "")
+    main.update_story_region_entry(center, Vector3(float(center.x) * main.CELL, main.terrain_height_cell(center.x, center.y), float(center.y) * main.CELL), resolved_biome)
+
+func story_site_node(definition_id: String) -> Node:
+    if main == null:
+        return null
+    var overlay = main.get("story_world_overlay_system")
+    if overlay == null:
+        return null
+    var spawned_value = overlay.get("spawned_sites")
+    if not (spawned_value is Dictionary):
+        return null
+    var spawned: Dictionary = spawned_value
+    for site_id in spawned.keys():
+        var node = spawned[site_id]
+        if node == null or not (node is Node):
+            continue
+        var story_node := node as Node
+        var site: Dictionary = story_node.get_meta("storySite", {})
+        if String(site.get("definitionId", "")) == definition_id:
+            return story_node
+    return null
 
 func wait_physics_frames(count: int) -> void:
     for i in range(count):

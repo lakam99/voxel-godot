@@ -21,6 +21,10 @@ func reset_runtime_world_state() -> void:
         structure_system.reset()
     if story_director and story_director.has_method("reset"):
         story_director.reset()
+    if story_world_overlay_system and story_world_overlay_system.has_method("reset"):
+        story_world_overlay_system.reset()
+    if worldmark_influence_system and worldmark_influence_system.has_method("reset"):
+        worldmark_influence_system.reset()
     discovered_biomes.clear()
     discovered_town_keys.clear()
     discovered_shrine_keys.clear()

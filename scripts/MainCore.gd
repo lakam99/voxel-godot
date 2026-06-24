@@ -59,6 +59,9 @@ var story_event_bus
 var story_director
 var story_quest_system
 var region_story_generator
+var story_site_placement
+var story_world_overlay_system
+var worldmark_influence_system
 var item_visual_factory
 var visual_asset_registry
 var static_item_asset_registry
@@ -231,6 +234,10 @@ func apply_world_seed(new_seed: String, remember := false) -> void:
         region_story_generator.setup(seed_text, seed_hash, TOWN_REGION_CELLS)
     if story_director and story_director.has_method("reset"):
         story_director.reset()
+    if story_world_overlay_system and story_world_overlay_system.has_method("reset"):
+        story_world_overlay_system.reset()
+    if worldmark_influence_system and worldmark_influence_system.has_method("reset"):
+        worldmark_influence_system.reset()
     last_story_region_id = ""
     if save_system and remember and save_system.has_method("set_active_seed"):
         save_system.set_active_seed(seed_text)
@@ -310,11 +317,26 @@ func setup_story_systems() -> void:
         story_quest_system.name = "StoryQuestSystem"
         add_child(story_quest_system)
     story_quest_system.setup(self)
+    if story_site_placement == null:
+        story_site_placement = StorySitePlacementScript.new()
+        story_site_placement.name = "StorySitePlacement"
+        add_child(story_site_placement)
+    story_site_placement.setup(self, region_story_generator)
     if story_director == null:
         story_director = StoryDirectorScript.new()
         story_director.name = "StoryDirector"
         add_child(story_director)
     story_director.setup(self, story_event_bus, region_story_generator, story_quest_system)
+    if story_world_overlay_system == null:
+        story_world_overlay_system = StoryWorldOverlaySystemScript.new()
+        story_world_overlay_system.name = "StoryWorldOverlaySystem"
+        add_child(story_world_overlay_system)
+    story_world_overlay_system.setup(self, story_director, story_site_placement)
+    if worldmark_influence_system == null:
+        worldmark_influence_system = WorldmarkInfluenceSystemScript.new()
+        worldmark_influence_system.name = "WorldmarkInfluenceSystem"
+        add_child(worldmark_influence_system)
+    worldmark_influence_system.setup(self, story_director)
 
 func story_region_id_for_cell(cell: Vector2i) -> String:
     if story_director != null and story_director.has_method("region_id_for_cell"):
@@ -348,15 +370,25 @@ func update_story_region_entry(cell: Vector2i, position: Vector3, biome: String)
         "cell": [cell.x, cell.y],
         "biome": biome
     })
+    if story_world_overlay_system and story_world_overlay_system.has_method("sync_for_region"):
+        story_world_overlay_system.sync_for_region(region_id)
+    if worldmark_influence_system and worldmark_influence_system.has_method("sync_for_region"):
+        worldmark_influence_system.sync_for_region(region_id)
+
+func interact_story_node(node: Node) -> bool:
+    if story_world_overlay_system == null or not story_world_overlay_system.has_method("interact_with_node"):
+        return false
+    return bool(story_world_overlay_system.interact_with_node(node))
 
 func debug_story_dump() -> Dictionary:
-    if story_director != null and story_director.has_method("debug_story_dump"):
-        return story_director.debug_story_dump()
-    return {
+    var dump: Dictionary = story_director.debug_story_dump() if story_director != null and story_director.has_method("debug_story_dump") else {
         "currentStoryRegionId": "",
         "quest": {},
         "recentEvents": []
     }
+    dump["overlay"] = story_world_overlay_system.debug_state() if story_world_overlay_system != null and story_world_overlay_system.has_method("debug_state") else {}
+    dump["influence"] = worldmark_influence_system.debug_state() if worldmark_influence_system != null and worldmark_influence_system.has_method("debug_state") else {}
+    return dump
 
 func setup_visual_asset_registry() -> void:
     visual_asset_registry = VisualAssetRegistryScript.new()

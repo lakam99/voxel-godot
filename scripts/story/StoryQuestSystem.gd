@@ -73,6 +73,10 @@ func start_first_arc(event: Dictionary) -> bool:
     var affected_biome := dominant_biome_for_region(affected_region_id)
     if story_director != null and story_director.has_method("mark_gloam_hart_region"):
         story_director.mark_gloam_hart_region(affected_region_id, affected_biome)
+    if main != null and main.get("story_world_overlay_system") != null:
+        var overlay = main.get("story_world_overlay_system")
+        if overlay.has_method("ensure_sites_for_region"):
+            overlay.ensure_sites_for_region(affected_region_id)
     quests[FIRST_QUEST_ID] = {
         "id": FIRST_QUEST_ID,
         "arcId": ARC_ID,
@@ -181,7 +185,7 @@ func handle_ordinary_clue(quest: Dictionary, clue_id: String) -> bool:
     facts["ordinaryCluesFound"] = clue_ids.size()
     quest["facts"] = facts
     if clue_ids.size() >= ORDINARY_CLUES_REQUIRED and stage == STAGE_FIND_ORDINARY_CLUES:
-        set_stage(quest, STAGE_OPTIONAL_FIND_HISTORICAL_CLUE)
+        set_stage(quest, STAGE_PREPARE_COUNTERMEASURE_PLACEHOLDER)
     quests[FIRST_QUEST_ID] = quest
     return true
 
