@@ -1,6 +1,8 @@
 extends Node
 class_name StoryDirector
 
+const WorldmarkDefinitionScript := preload("res://scripts/story/data/WorldmarkDefinition.gd")
+
 const MAX_DEDUPE_KEYS := 512
 const MAX_DEBUG_EVENTS := 24
 const FIRST_QUEST_ID := "story.gloam_hart.storm"
@@ -75,17 +77,9 @@ func mark_gloam_hart_region(region_id: String, dominant_biome := "") -> Dictiona
     record["state"] = "affected_rumored"
     record["arcId"] = "storm_that_stays"
     record["questId"] = FIRST_QUEST_ID
-    var worldmark: Dictionary = record.get("worldmark", {})
-    worldmark["id"] = "worldmark:%s" % region_id
-    worldmark["definitionId"] = "gloam_hart"
-    worldmark["arcId"] = "storm_that_stays"
-    worldmark["titleId"] = "story.gloam_hart.title"
-    worldmark["displayNameId"] = "story.gloam_hart.name"
-    worldmark["domain"] = "storm_and_light"
-    worldmark["condition"] = "bound"
-    worldmark["desire"] = "silence_the_old_lanterns"
-    worldmark["publicBeliefId"] = "gloam_hart_public"
-    worldmark["hiddenTruthId"] = "gloam_hart_truth"
+    var existing_worldmark: Dictionary = record.get("worldmark", {})
+    var definition := gloam_hart_definition()
+    var worldmark: Dictionary = WorldmarkDefinitionScript.apply_to_existing(region_id, definition, existing_worldmark)
     if not worldmark.has("foundClueIds") or not (worldmark["foundClueIds"] is Array):
         worldmark["foundClueIds"] = []
     if not worldmark.has("preparationFlags") or not (worldmark["preparationFlags"] is Dictionary):
@@ -100,6 +94,13 @@ func mark_gloam_hart_region(region_id: String, dominant_biome := "") -> Dictiona
     campaign["firstAffectedRegionId"] = region_id
     campaign["firstWorldmarkDefinitionId"] = "gloam_hart"
     return record
+
+func gloam_hart_definition() -> Dictionary:
+    if region_generator != null and region_generator.has_method("worldmark_definition"):
+        var generated_definition: Dictionary = region_generator.worldmark_definition("gloam_hart")
+        if not generated_definition.is_empty():
+            return generated_definition
+    return WorldmarkDefinitionScript.definition_for_id("gloam_hart")
 
 func ingest_event(event_value) -> bool:
     if not (event_value is Dictionary):

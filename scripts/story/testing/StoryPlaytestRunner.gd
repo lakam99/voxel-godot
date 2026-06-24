@@ -6,6 +6,10 @@ const StoryEventBusScript := preload("res://scripts/story/StoryEventBus.gd")
 const StoryDirectorScript := preload("res://scripts/story/StoryDirector.gd")
 const StoryQuestSystemScript := preload("res://scripts/story/StoryQuestSystem.gd")
 const StorySitePlacementScript := preload("res://scripts/story/data/StorySitePlacement.gd")
+const WorldmarkDefinitionScript := preload("res://scripts/story/data/WorldmarkDefinition.gd")
+const WorldmarkTraitCatalogScript := preload("res://scripts/story/data/WorldmarkTraitCatalog.gd")
+const WorldmarkGeneratorScript := preload("res://scripts/story/WorldmarkGenerator.gd")
+const WorldmarkCompatibilityRulesScript := preload("res://scripts/story/WorldmarkCompatibilityRules.gd")
 const StoryWorldOverlaySystemScript := preload("res://scripts/story/StoryWorldOverlaySystem.gd")
 const WorldmarkInfluenceSystemScript := preload("res://scripts/story/WorldmarkInfluenceSystem.gd")
 const StoryJournalModelScript := preload("res://scripts/story/StoryJournalModel.gd")
@@ -39,6 +43,10 @@ const SCRIPT_PATHS := [
     "res://scripts/story/StoryQuestSystem.gd",
     "res://scripts/story/RegionStoryGenerator.gd",
     "res://scripts/story/data/StorySitePlacement.gd",
+    "res://scripts/story/data/WorldmarkDefinition.gd",
+    "res://scripts/story/data/WorldmarkTraitCatalog.gd",
+    "res://scripts/story/WorldmarkGenerator.gd",
+    "res://scripts/story/WorldmarkCompatibilityRules.gd",
     "res://scripts/story/StoryInteractable.gd",
     "res://scripts/story/StoryWorldOverlaySystem.gd",
     "res://scripts/story/WorldmarkInfluenceSystem.gd",
@@ -83,6 +91,9 @@ func run() -> void:
     test_project_scripts_load()
     test_region_id_floor_division()
     test_region_records_deterministic()
+    test_worldmark_trait_catalog_and_compatibility()
+    test_concept_first_worldmark_generation_prototypes()
+    test_gloam_hart_definition_preserves_first_arc_contract()
     test_duplicate_events_do_not_duplicate_story_effects()
     await test_main_scene_instantiates()
     test_first_arc_waits_for_tutorial_completion()
@@ -174,6 +185,107 @@ func test_region_records_deterministic() -> void:
         same_json != stable_json(different_seed),
         "%s vs %s" % [same_a.get("seed", ""), different_seed.get("seed", "")]
     )
+    generator.queue_free()
+
+func test_worldmark_trait_catalog_and_compatibility() -> void:
+    var movement_ids := WorldmarkTraitCatalogScript.ids("movement")
+    var attack_ids := WorldmarkTraitCatalogScript.ids("attack")
+    var defense_ids := WorldmarkTraitCatalogScript.ids("defense")
+    var resolution_ids := WorldmarkTraitCatalogScript.ids("resolution")
+    var generator := WorldmarkGeneratorScript.new()
+    generator.setup("atlas-story-test", 101)
+    var validation: Dictionary = generator.validate_all_definitions()
+    var definitions: Dictionary = WorldmarkDefinitionScript.definitions()
+    var hart: Dictionary = definitions.get("gloam_hart", {})
+    var fungal: Dictionary = definitions.get("mire_bloom_colossus", {})
+    var ember: Dictionary = definitions.get("cinderwing_ember", {})
+    add_result(
+        "worldmark_trait_catalog_and_compatibility",
+        movement_ids == ["burrow", "charge", "flight", "hover", "stalk"]
+            and attack_ids == ["projectile", "pulse", "summon", "sweep", "terrain_burst"]
+            and defense_ids == ["armor", "burrow_escape", "mist", "regeneration", "shield"]
+            and resolution_ids == ["bargain", "bind", "heal", "release", "relocate", "slay"]
+            and bool(validation.get("ok", false))
+            and not hart.is_empty()
+            and not fungal.is_empty()
+            and not ember.is_empty(),
+        "defs %s, validation %s" % [str(definitions.keys()), str(validation)]
+    )
+
+func test_concept_first_worldmark_generation_prototypes() -> void:
+    var generator := RegionStoryGeneratorScript.new()
+    generator.setup("atlas-story-test", 101, 280)
+    var swamp_a: Dictionary = generator.generate_region_record("atlas-story-test", 101, "r:7,0", "swamp")
+    var swamp_b: Dictionary = generator.generate_region_record("atlas-story-test", 101, "r:7,0", "swamp")
+    var ember_record: Dictionary = generator.generate_region_record("atlas-story-test", 101, "r:8,0", "savanna")
+    var swamp_worldmark: Dictionary = swamp_a.get("worldmark", {})
+    var ember_worldmark: Dictionary = ember_record.get("worldmark", {})
+    var swamp_resolutions: Array = swamp_worldmark.get("resolutionFamilies", [])
+    var ember_resolutions: Array = ember_worldmark.get("resolutionFamilies", [])
+    var swamp_movement: Array = swamp_worldmark.get("movementTraits", [])
+    var ember_movement: Array = ember_worldmark.get("movementTraits", [])
+    add_result(
+        "concept_first_worldmark_generation_prototypes",
+        stable_json(swamp_a) == stable_json(swamp_b)
+            and String(swamp_worldmark.get("definitionId", "")) == "mire_bloom_colossus"
+            and String(swamp_worldmark.get("domain", "")) == "spores_and_stillwater"
+            and String(swamp_worldmark.get("condition", "")) == "starving"
+            and swamp_movement.has("burrow")
+            and not swamp_movement.has("flight")
+            and swamp_resolutions.has("heal")
+            and String(ember_worldmark.get("definitionId", "")) == "cinderwing_ember"
+            and String(ember_worldmark.get("domain", "")) == "ember_and_high_wind"
+            and String(ember_worldmark.get("condition", "")) == "enraged"
+            and ember_movement.has("flight")
+            and ember_movement.has("hover")
+            and ember_resolutions.has("bargain")
+            and stable_json(swamp_resolutions) != stable_json(ember_resolutions),
+        "swamp %s/%s, ember %s/%s" % [
+            swamp_worldmark.get("definitionId", ""),
+            str(swamp_resolutions),
+            ember_worldmark.get("definitionId", ""),
+            str(ember_resolutions)
+        ]
+    )
+    generator.queue_free()
+
+func test_gloam_hart_definition_preserves_first_arc_contract() -> void:
+    var generator := RegionStoryGeneratorScript.new()
+    var quests := StoryQuestSystemScript.new()
+    var director := StoryDirectorScript.new()
+    add_child(generator)
+    add_child(quests)
+    add_child(director)
+    generator.setup("atlas-story-test", 101, 280)
+    quests.setup(null)
+    director.setup(null, null, generator, quests)
+    var record: Dictionary = director.mark_gloam_hart_region("r:2,0", "forest")
+    var worldmark: Dictionary = record.get("worldmark", {})
+    var validation: Dictionary = WorldmarkCompatibilityRulesScript.validate_definition(WorldmarkDefinitionScript.definition_for_id("gloam_hart"))
+    var movement: Array = worldmark.get("movementTraits", [])
+    var attacks: Array = worldmark.get("attackTraits", [])
+    var resolutions: Array = worldmark.get("resolutionFamilies", [])
+    add_result(
+        "gloam_hart_definition_preserves_first_arc_contract",
+        String(worldmark.get("definitionId", "")) == "gloam_hart"
+            and String(worldmark.get("arcId", "")) == "storm_that_stays"
+            and String(worldmark.get("titleId", "")) == "story.gloam_hart.title"
+            and String(worldmark.get("displayNameId", "")) == "story.gloam_hart.name"
+            and String(worldmark.get("domain", "")) == "storm_and_light"
+            and String(worldmark.get("condition", "")) == "bound"
+            and String(worldmark.get("desire", "")) == "silence_the_old_lanterns"
+            and String(worldmark.get("publicBeliefId", "")) == "gloam_hart_public"
+            and String(worldmark.get("hiddenTruthId", "")) == "gloam_hart_truth"
+            and movement.has("charge")
+            and attacks.has("sweep")
+            and attacks.has("pulse")
+            and attacks.has("summon")
+            and resolutions == ["slay", "release"]
+            and bool(validation.get("ok", false)),
+        "worldmark %s, validation %s" % [str(worldmark), str(validation)]
+    )
+    director.queue_free()
+    quests.queue_free()
     generator.queue_free()
 
 func test_duplicate_events_do_not_duplicate_story_effects() -> void:
@@ -885,7 +997,6 @@ func test_gloam_hart_save_load_recovery_policy() -> void:
         encounter.apply_player_damage(70.0, "test")
         encounter.force_animation_state("storm_pulse")
     var snapshot: Dictionary = main.create_save_snapshot()
-    var story_json := stable_json(snapshot.get("story", {}))
     var loaded := bool(main.apply_save_snapshot(snapshot))
     director = main.get("story_director")
     controller = main.get("worldmark_encounter_controller")
@@ -898,7 +1009,8 @@ func test_gloam_hart_save_load_recovery_policy() -> void:
     var record: Dictionary = director.snapshot().get("regionRecords", {}).get(String(setup.get("affected", "")), {})
     var worldmark: Dictionary = record.get("worldmark", {})
     var state: Dictionary = worldmark.get("encounterState", {})
-    var transient_absent := story_json.find("stateElapsed") < 0 and story_json.find("animationState") < 0 and story_json.find("projectile") < 0
+    var state_json := stable_json(state)
+    var transient_absent := state_json.find("stateElapsed") < 0 and state_json.find("animationState") < 0 and state_json.find("projectile") < 0
     var ok: bool = (
         bool(setup.get("startOk", false))
         and loaded

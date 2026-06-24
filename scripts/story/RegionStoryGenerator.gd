@@ -1,16 +1,22 @@
 extends Node
 class_name RegionStoryGenerator
 
+const WorldmarkGeneratorScript := preload("res://scripts/story/WorldmarkGenerator.gd")
+
 const GENERATION_VERSION := 1
 
 var world_seed_text := ""
 var world_seed_hash := 0
 var region_cell_size := 1
+var worldmark_generator
 
 func setup(seed_text: String, seed_hash: int, town_region_cells: int) -> void:
     world_seed_text = seed_text
     world_seed_hash = seed_hash
     region_cell_size = maxi(1, town_region_cells)
+    if worldmark_generator == null:
+        worldmark_generator = WorldmarkGeneratorScript.new()
+    worldmark_generator.setup(seed_text, seed_hash)
 
 func region_id_for_cell(cell: Vector2i) -> String:
     var region_x := floori(float(cell.x) / float(region_cell_size))
@@ -42,6 +48,9 @@ func generate_region_record(seed_text: String, seed_hash: int, region_id: String
     var biome := dominant_biome
     if biome == "":
         biome = stable_pick(["forest", "taiga", "plains", "swamp", "savanna", "alpine"], stable_seed, "biome")
+    var worldmark := {}
+    if worldmark_generator != null and worldmark_generator.has_method("generate_worldmark_record"):
+        worldmark = worldmark_generator.generate_worldmark_record(seed_text, seed_hash, region_id, biome)
     return {
         "schemaVersion": 1,
         "generationVersion": GENERATION_VERSION,
@@ -51,19 +60,7 @@ func generate_region_record(seed_text: String, seed_hash: int, region_id: String
         "seed": stable_seed,
         "dominantBiome": biome,
         "state": "rumored",
-        "worldmark": {
-            "id": "worldmark:%s" % region_id,
-            "definitionId": "pending_worldmark",
-            "domain": stable_pick(["storm_and_light", "roots_and_memory", "stone_and_echo", "mist_and_paths"], stable_seed, "domain"),
-            "condition": stable_pick(["bound", "wounded", "lost", "guarding"], stable_seed, "condition"),
-            "desire": stable_pick(["quiet", "repair", "return", "safe_boundary"], stable_seed, "desire"),
-            "publicBeliefId": "pending_public:%s" % region_id,
-            "hiddenTruthId": "pending_truth:%s" % region_id,
-            "foundClueIds": [],
-            "preparationFlags": {},
-            "encounterState": {},
-            "resolution": ""
-        },
+        "worldmark": worldmark,
         "settlement": {
             "tier": 0,
             "flags": {}
@@ -73,6 +70,22 @@ func generate_region_record(seed_text: String, seed_hash: int, region_id: String
 
 func record_for_region_id(region_id: String, dominant_biome := "") -> Dictionary:
     return generate_region_record(world_seed_text, world_seed_hash, region_id, dominant_biome)
+
+func worldmark_definition(definition_id: String) -> Dictionary:
+    if worldmark_generator == null:
+        worldmark_generator = WorldmarkGeneratorScript.new()
+        worldmark_generator.setup(world_seed_text, world_seed_hash)
+    if worldmark_generator.has_method("definition_for_id"):
+        return worldmark_generator.definition_for_id(definition_id)
+    return {}
+
+func worldmark_definition_ids() -> Array[String]:
+    if worldmark_generator == null:
+        worldmark_generator = WorldmarkGeneratorScript.new()
+        worldmark_generator.setup(world_seed_text, world_seed_hash)
+    if worldmark_generator.has_method("definition_ids"):
+        return worldmark_generator.definition_ids()
+    return []
 
 func stable_pick(options: Array, seed_value: int, salt: String) -> String:
     if options.is_empty():
