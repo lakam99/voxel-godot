@@ -30,6 +30,7 @@ func run() -> void:
     if output_dir == "":
         output_dir = ProjectSettings.globalize_path("res://artifacts/visual/latest")
     ensure_dir(output_dir)
+    apply_capture_resolution_override()
     main = MAIN_SCENE.instantiate()
     add_child(main)
     await wait_frames(90)
@@ -41,6 +42,23 @@ func run() -> void:
         await capture_case(case_spec)
     write_metadata()
     get_tree().quit(1 if failed else 0)
+
+func apply_capture_resolution_override() -> void:
+    var resolution_text := OS.get_environment("VOXEL_VISUAL_CAPTURE_RESOLUTION").strip_edges().to_lower()
+    if resolution_text == "":
+        return
+    var parts := resolution_text.split("x", false)
+    if parts.size() != 2:
+        push_error("Invalid VOXEL_VISUAL_CAPTURE_RESOLUTION: %s" % resolution_text)
+        return
+    var desired_size := Vector2i(int(parts[0]), int(parts[1]))
+    if desired_size.x < 320 or desired_size.y < 240:
+        push_error("Ignoring too-small visual capture resolution: %s" % resolution_text)
+        return
+    DisplayServer.window_set_size(desired_size)
+    var root_window := get_tree().root
+    root_window.set("size", desired_size)
+    root_window.set("content_scale_size", desired_size)
 
 func tool_capture_cases() -> Array[Dictionary]:
     var ids := [
@@ -83,9 +101,9 @@ func hud_refinement_capture_cases() -> Array[Dictionary]:
         { "name": "hud_daylight", "playtest": "town", "clock": 12.0, "weather": "clear", "intensity": 0.0, "clouds": 0.22, "hud": true, "offset": Vector3(8.5, 0.0, 8.5), "pitch": -10.0 },
         { "name": "hud_night", "playtest": "forest", "clock": 0.0, "weather": "clear", "intensity": 0.0, "clouds": 0.18, "hud": true, "offset": Vector3(7.0, 0.0, 9.0), "pitch": -6.0, "heldItem": "torch" },
         { "name": "hud_combat", "playtest": "combat", "clock": 21.5, "weather": "clear", "intensity": 0.0, "clouds": 0.28, "hud": true, "offset": Vector3(8.0, 0.0, 8.0), "pitch": -8.0, "combatHud": true },
-        { "name": "hud_interaction", "playtest": "town", "clock": 12.0, "weather": "clear", "intensity": 0.0, "clouds": 0.22, "hud": true, "lookAtBlockOffset": Vector2i(3, 2), "offset": Vector3(-4.6, 0.0, -3.6), "pitch": -4.0 },
         { "name": "hud_inventory_use", "playtest": "town", "clock": 12.0, "weather": "clear", "intensity": 0.0, "clouds": 0.22, "hud": true, "offset": Vector3(8.5, 0.0, 8.5), "pitch": -10.0, "openInventory": true },
-        { "name": "hud_empty_hotbar", "playtest": "town", "clock": 12.0, "weather": "clear", "intensity": 0.0, "clouds": 0.22, "hud": true, "offset": Vector3(8.5, 0.0, 8.5), "pitch": -10.0, "emptyHotbar": true }
+        { "name": "hud_empty_hotbar", "playtest": "town", "clock": 12.0, "weather": "clear", "intensity": 0.0, "clouds": 0.22, "hud": true, "offset": Vector3(8.5, 0.0, 8.5), "pitch": -10.0, "emptyHotbar": true },
+        { "name": "hud_interaction", "playtest": "town", "clock": 12.0, "weather": "clear", "intensity": 0.0, "clouds": 0.22, "hud": true, "lookAtBlockOffset": Vector2i(1, -2), "focusBlock": "door", "offset": Vector3(-1.8, 0.0, -1.4), "pitch": -4.0 }
     ]
 
 func configure_static_scene() -> void:
@@ -133,6 +151,9 @@ func capture_case(capture_case: Dictionary) -> void:
     set_hud_visible(bool(capture_case.get("hud", false)))
     prepare_hud_capture_state(capture_case)
     await wait_frames(3)
+    if bool(capture_case.get("hud", false)) and capture_case.has("lookAtBlockOffset"):
+        main.update_hud("")
+        await wait_frames(1)
     var case_name := String(capture_case["name"])
     var png_path := path_join(output_dir, "%s.png" % case_name)
     var image: Image = get_viewport().get_texture().get_image()
@@ -174,6 +195,9 @@ func position_camera(capture_case: Dictionary) -> void:
 func position_block_focus_camera(capture_case: Dictionary, target_cell: Vector2i) -> void:
     var block_offset: Vector2i = capture_case.get("lookAtBlockOffset", Vector2i.ZERO)
     var block_cell := target_cell + block_offset
+    var focus_block_type := String(capture_case.get("focusBlock", ""))
+    if focus_block_type != "":
+        create_capture_block(block_cell, 0, focus_block_type)
     var target := Vector3(float(block_cell.x) * main.CELL, 0.0, float(block_cell.y) * main.CELL)
     target.y = main.height_at_world(target.x, target.z) + main.CELL * 0.75
     var offset: Vector3 = capture_case.get("offset", Vector3(-4.0, 0.0, -4.0))
@@ -184,7 +208,7 @@ func position_block_focus_camera(capture_case: Dictionary, target_cell: Vector2i
     player.look_at(target, Vector3.UP)
     var base_camera_position: Vector3 = player.get("base_camera_position")
     camera.position = base_camera_position
-    camera.rotation.x = deg_to_rad(float(capture_case.get("pitch", -4.0)))
+    camera.look_at(target, Vector3.UP)
 
 func position_water_camera(capture_case: Dictionary, target_cell: Vector2i) -> void:
     var water_cell := target_cell + Vector2i(-8, -3)
@@ -266,6 +290,8 @@ func prepare_hud_capture_state(capture_case: Dictionary) -> void:
     var hud = main.get("hud")
     var inventory = main.get("inventory_system")
     var survival = main.get("survival_system")
+    if hud != null and not bool(capture_case.get("openInventory", false)):
+        hud.set_inventory_open(false)
     if bool(capture_case.get("emptyHotbar", false)) and inventory != null:
         inventory.clear()
         inventory.select(0)
@@ -339,6 +365,11 @@ func create_capture_block(cell: Vector2i, y_offset: int, block_type: String) -> 
 func make_case_metadata(capture_case: Dictionary, png_path: String) -> Dictionary:
     var weather = main.get("weather_system")
     var viewport_size := get_viewport().get_visible_rect().size
+    var hud = main.get("hud")
+    var target_label := hud.get("target_label") as Label if hud != null else null
+    var prompt_text := target_label.text if target_label != null else ""
+    var prompt_visible := target_label.visible if target_label != null else false
+    var ray_state := focused_ray_state()
     return {
         "seed": SEED,
         "case": String(capture_case["name"]),
@@ -351,11 +382,34 @@ func make_case_metadata(capture_case: Dictionary, png_path: String) -> Dictionar
         "png": png_path,
         "resolution": { "width": int(viewport_size.x), "height": int(viewport_size.y) },
         "renderer": "Forward Plus",
+        "interactionPrompt": prompt_text,
+        "interactionPromptVisible": prompt_visible,
+        "focusedRay": ray_state,
         "camera": {
             "position": vec3(camera.global_position if camera else Vector3.ZERO),
             "rotationDegrees": vec3_degrees(camera.global_rotation if camera else Vector3.ZERO)
         },
         "performance": stable_performance_values()
+    }
+
+func focused_ray_state() -> Dictionary:
+    if player == null or not player.has_method("view_ray"):
+        return {}
+    var hit: Dictionary = player.view_ray(10.5, true)
+    if hit.is_empty():
+        return { "hit": false }
+    var collider := hit.get("collider") as Node
+    var block = main.interaction_block_from_collider(collider) if main and main.has_method("interaction_block_from_collider") else collider
+    var hit_position: Vector3 = hit.get("position", Vector3.ZERO)
+    return {
+        "hit": true,
+        "collider": collider.name if collider != null else "",
+        "colliderKind": String(collider.get_meta("kind", "")) if collider != null and collider.has_meta("kind") else "",
+        "block": block.name if block != null else "",
+        "blockType": String(block.get_meta("block_type", "")) if block != null and block.has_meta("block_type") else "",
+        "withinReach": bool(main.hit_within_action_reach(hit)) if main and main.has_method("hit_within_action_reach") else false,
+        "distance": snapped_float(player.global_position.distance_to(hit_position)),
+        "position": vec3(hit_position)
     }
 
 func stable_performance_values() -> Dictionary:

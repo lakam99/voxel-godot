@@ -1,0 +1,67 @@
+{
+  "camera": {
+    "position": {
+      "x": 377.103,
+      "y": 21.98,
+      "z": 2.303
+    },
+    "rotationDegrees": {
+      "x": -14.148,
+      "y": -127.875,
+      "z": 0.0
+    }
+  },
+  "case": "hud_interaction",
+  "clockHour": 12.0,
+  "clockText": "12:00",
+  "focusedRay": {
+    "block": "Block_door_281_15_3",
+    "blockType": "door",
+    "collider": "DoorInteraction",
+    "colliderKind": "block",
+    "distance": 1.984,
+    "hit": true,
+    "position": {
+      "x": 378.916,
+      "y": 21.401,
+      "z": 3.713
+    },
+    "withinReach": true
+  },
+  "hudVisible": true,
+  "interactionPrompt": "[RMB] Open door",
+  "interactionPromptVisible": true,
+  "performance": {
+    "blocks": 1220,
+    "chunks": 49,
+    "drawEstimate": 6012,
+    "hostiles": 0,
+    "physicsBodies": 2179,
+    "props": 886
+  },
+  "playtestDestination": "town",
+  "png": "hud_interaction.png",
+  "renderer": "Forward Plus",
+  "resolution": {
+    "height": 720,
+    "width": 1280
+  },
+  "seed": "atlas-1492",
+  "timeOfDay": 0.25,
+  "weather": {
+    "batchedStars": true,
+    "cloudCards": true,
+    "cloudCover": 0.22,
+    "cloudNodes": 18,
+    "clouds": 18,
+    "intensity": 0.0,
+    "kind": "clear",
+    "particleQuality": 1.0,
+    "rainVisible": false,
+    "snowVisible": false,
+    "starNodes": 0,
+    "stars": 160,
+    "starsVisible": false,
+    "waterInfluence": 0.0
+  }
+}

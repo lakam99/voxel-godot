@@ -1,0 +1,67 @@
+{
+  "camera": {
+    "position": {
+      "x": 386.5,
+      "y": 21.98,
+      "z": 15.25
+    },
+    "rotationDegrees": {
+      "x": -10.0,
+      "y": 45.0,
+      "z": 0.0
+    }
+  },
+  "case": "hud_empty_hotbar",
+  "clockHour": 12.0,
+  "clockText": "12:00",
+  "focusedRay": {
+    "block": "@StaticBody3D@14469",
+    "blockType": "workbench",
+    "collider": "@StaticBody3D@14469",
+    "colliderKind": "block",
+    "distance": 7.371,
+    "hit": true,
+    "position": {
+      "x": 381.294,
+      "y": 20.682,
+      "z": 10.044
+    },
+    "withinReach": false
+  },
+  "hudVisible": true,
+  "interactionPrompt": "",
+  "interactionPromptVisible": false,
+  "performance": {
+    "blocks": 1219,
+    "chunks": 49,
+    "drawEstimate": 6007,
+    "hostiles": 0,
+    "physicsBodies": 2177,
+    "props": 886
+  },
+  "playtestDestination": "town",
+  "png": "hud_empty_hotbar.png",
+  "renderer": "Forward Plus",
+  "resolution": {
+    "height": 720,
+    "width": 1280
+  },
+  "seed": "atlas-1492",
+  "timeOfDay": 0.25,
+  "weather": {
+    "batchedStars": true,
+    "cloudCards": true,
+    "cloudCover": 0.22,
+    "cloudNodes": 18,
+    "clouds": 18,
+    "intensity": 0.0,
+    "kind": "clear",
+    "particleQuality": 1.0,
+    "rainVisible": false,
+    "snowVisible": false,
+    "starNodes": 0,
+    "stars": 160,
+    "starsVisible": false,
+    "waterInfluence": 0.0
+  }
+}

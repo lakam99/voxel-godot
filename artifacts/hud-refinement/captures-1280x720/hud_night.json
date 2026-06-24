@@ -1,0 +1,56 @@
+{
+  "camera": {
+    "position": {
+      "x": 7.0,
+      "y": 24.68,
+      "z": 9.0
+    },
+    "rotationDegrees": {
+      "x": -6.0,
+      "y": 37.875,
+      "z": 0.0
+    }
+  },
+  "case": "hud_night",
+  "clockHour": 0.0,
+  "clockText": "00:00",
+  "focusedRay": {
+    "hit": false
+  },
+  "hudVisible": true,
+  "interactionPrompt": "",
+  "interactionPromptVisible": false,
+  "performance": {
+    "blocks": 1216,
+    "chunks": 49,
+    "drawEstimate": 5846,
+    "hostiles": 0,
+    "physicsBodies": 2267,
+    "props": 979
+  },
+  "playtestDestination": "forest",
+  "png": "hud_night.png",
+  "renderer": "Forward Plus",
+  "resolution": {
+    "height": 720,
+    "width": 1280
+  },
+  "seed": "atlas-1492",
+  "timeOfDay": 0.75,
+  "weather": {
+    "batchedStars": true,
+    "cloudCards": true,
+    "cloudCover": 0.18,
+    "cloudNodes": 18,
+    "clouds": 18,
+    "intensity": 0.0,
+    "kind": "clear",
+    "particleQuality": 1.0,
+    "rainVisible": false,
+    "snowVisible": false,
+    "starNodes": 0,
+    "stars": 160,
+    "starsVisible": true,
+    "waterInfluence": 0.0
+  }
+}

@@ -1,0 +1,67 @@
+{
+  "camera": {
+    "position": {
+      "x": 8.0,
+      "y": 24.68,
+      "z": 8.0
+    },
+    "rotationDegrees": {
+      "x": -8.0,
+      "y": 45.0,
+      "z": 0.0
+    }
+  },
+  "case": "hud_combat",
+  "clockHour": 21.5,
+  "clockText": "21:30",
+  "focusedRay": {
+    "block": "Block_stoneBlock_2_18_2",
+    "blockType": "stoneBlock",
+    "collider": "Block_stoneBlock_2_18_2",
+    "colliderKind": "block",
+    "distance": 6.619,
+    "hit": true,
+    "position": {
+      "x": 3.348,
+      "y": 23.755,
+      "z": 3.348
+    },
+    "withinReach": false
+  },
+  "hudVisible": true,
+  "interactionPrompt": "",
+  "interactionPromptVisible": false,
+  "performance": {
+    "blocks": 1221,
+    "chunks": 49,
+    "drawEstimate": 5809,
+    "hostiles": 4,
+    "physicsBodies": 2264,
+    "props": 967
+  },
+  "playtestDestination": "combat",
+  "png": "hud_combat.png",
+  "renderer": "Forward Plus",
+  "resolution": {
+    "height": 720,
+    "width": 1280
+  },
+  "seed": "atlas-1492",
+  "timeOfDay": 0.646,
+  "weather": {
+    "batchedStars": true,
+    "cloudCards": true,
+    "cloudCover": 0.28,
+    "cloudNodes": 18,
+    "clouds": 18,
+    "intensity": 0.0,
+    "kind": "clear",
+    "particleQuality": 1.0,
+    "rainVisible": false,
+    "snowVisible": false,
+    "starNodes": 0,
+    "stars": 160,
+    "starsVisible": true,
+    "waterInfluence": 0.0
+  }
+}
