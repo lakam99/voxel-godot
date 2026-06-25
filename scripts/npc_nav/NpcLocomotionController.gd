@@ -158,6 +158,7 @@ func move(entry: Dictionary, intent: Dictionary, max_distance: float, planner, w
         entry["routeWaitTicks"] = 0
         entry["routeYieldTicks"] = 0
         set_route_status(entry, "moving", "")
+    trim_reached_route_cells(entry, world)
     increment_validated_move(entry)
     return { "moved": moved, "status": String(entry.get("routeStatus", "moving")), "reason": "" }
 
@@ -285,6 +286,9 @@ func validate_candidate(entry: Dictionary, previous: Vector3, candidate: Vector3
         return terrain
     candidate.y = float(terrain.get("height", main.height_at_world(candidate.x, candidate.z))) + 0.04
     var snapshot: Dictionary = world.build_snapshot(entry, allow_outside, moving_home)
+    var center_sweep: Dictionary = center_sweep_blocker(snapshot, previous, candidate, world, previous_cell)
+    if not bool(center_sweep.get("ok", false)):
+        return center_sweep
     var previous_footprint: Array[Vector2i] = capsule_footprint_cells(previous, world)
     for footprint_cell in capsule_footprint_cells(candidate, world):
         var blocker = world.static_blocker(snapshot, footprint_cell)
@@ -306,6 +310,25 @@ func validate_candidate(entry: Dictionary, previous: Vector3, candidate: Vector3
     if body != null and capsule_hits_obstacle(entry, body, previous, candidate):
         return { "ok": false, "reason": "blocked_capsule" }
     return { "ok": true, "candidate": candidate }
+
+func center_sweep_blocker(snapshot: Dictionary, previous: Vector3, candidate: Vector3, world, previous_cell: Vector2i) -> Dictionary:
+    var flat_delta := Vector2(candidate.x - previous.x, candidate.z - previous.z)
+    var samples := clampi(ceili(flat_delta.length() / maxf(0.01, CELL * 0.20)), 1, 8)
+    var checked := {}
+    for i in range(1, samples + 1):
+        var t := float(i) / float(samples)
+        var sample := previous.lerp(candidate, t)
+        var sample_cell: Vector2i = world.world_cell(sample)
+        if sample_cell == previous_cell or checked.has(sample_cell):
+            continue
+        checked[sample_cell] = true
+        var blocker = world.static_blocker(snapshot, sample_cell)
+        if blocker == null:
+            continue
+        var door := blocker as Node
+        if door == null or String(door.get_meta("block_type", "")) != "door":
+            return { "ok": false, "reason": "blocked_static" }
+    return { "ok": true }
 
 func capsule_footprint_cells(position: Vector3, world) -> Array[Vector2i]:
     var cells: Array[Vector2i] = []

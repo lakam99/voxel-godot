@@ -47,6 +47,7 @@ var elapsed := 0.0
 var finished := false
 var failed := false
 var results: Array[Dictionary] = []
+var route_case_provider = null
 var metrics := {
 	"assertions": 0,
 	"selectedCases": 0,
@@ -273,6 +274,8 @@ func contract_cases() -> Array[Dictionary]:
 	]
 	cases.append_array(motor_cases())
 	cases.append_array(nav_world_cases())
+	if suite_filter == "route" or suite_filter == "all" or suite_filter == "":
+		cases.append_array(route_cases())
 	return cases
 
 func motor_cases() -> Array[Dictionary]:
@@ -337,6 +340,13 @@ func nav_world_cases() -> Array[Dictionary]:
 			"callable": Callable(self, String(spec[1]))
 		})
 	return cases
+
+func route_cases() -> Array[Dictionary]:
+	if route_case_provider == null:
+		var provider_script = load("res://scripts/testing/npc/NpcRouteTestCases.gd")
+		route_case_provider = provider_script.new()
+		route_case_provider.call("setup", self)
+	return route_case_provider.call("cases")
 
 func suite_matches(case_suite: String) -> bool:
 	return suite_filter == "" or suite_filter == "all" or suite_filter == case_suite

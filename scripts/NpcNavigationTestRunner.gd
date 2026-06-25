@@ -5,6 +5,14 @@ func run() -> void:
     main = MAIN_SCENE.instantiate()
     add_child(main)
     mark_progress("npc_nav_main_instantiated")
+    if main != null:
+        if main.get("tutorial_system") != null:
+            var tutorial = main.get("tutorial_system")
+            tutorial.set("intro_repair_active", false)
+            tutorial.set("intro_bed_used", true)
+            tutorial.set("final_night_active", false)
+            tutorial.set("final_night_complete", true)
+        main.set("time_of_day", 0.25)
     await wait_physics_frames(20)
 
     player = main.get("player") as CharacterBody3D

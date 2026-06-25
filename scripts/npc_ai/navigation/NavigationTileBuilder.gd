@@ -25,7 +25,8 @@ func build_tile(snapshot: Dictionary, topology_revision: int, profile = null, so
 	for surface in snapshot.get("surfaces", []):
 		if not (surface is Dictionary):
 			continue
-		var span = NavSpanDataScript.from_surface(tile.tile_key, surface, index)
+		var span_index: int = int(surface.get("spanIndex", index))
+		var span = NavSpanDataScript.from_surface(tile.tile_key, surface, span_index)
 		span.walkable = span.walkable and span.supports_profile(traversal_profile)
 		tile.add_span(span)
 		index += 1

@@ -18,6 +18,12 @@
       "description": "Phase 03 multi-surface navigation world and authoritative invalidation tests",
       "command": ".\\tools\\npc\\run-npc-nav-world-tests.ps1",
       "defaultArgs": ["-TimeMode", "Both"]
+    },
+    {
+      "id": "route",
+      "description": "Phase 04 hierarchical route planner, semantic costs, and corridor tests",
+      "command": ".\\tools\\npc\\run-npc-route-tests.ps1",
+      "defaultArgs": ["-TimeMode", "Both"]
     }
   ]
 }

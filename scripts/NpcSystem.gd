@@ -696,6 +696,8 @@ func update_day_job(entry: Dictionary, delta: float) -> bool:
     if job == "forage":
         return update_forager_goal(entry, body, delta)
     var phase := String(entry.get("jobPhase", "idle"))
+    if phase in ["outbound", "gathering", "returning"]:
+        clear_home_route_terminal(entry)
     var timer := float(entry.get("jobTimer", 0.0)) - delta
     if phase == "idle":
         if timer > 0.0:
@@ -704,6 +706,7 @@ func update_day_job(entry: Dictionary, delta: float) -> bool:
             return false
         entry["jobPhase"] = "outbound"
         entry["jobTarget"] = choose_job_target(entry)
+        clear_home_route_terminal(entry)
         set_npc_goal(entry, "gather %s" % String(entry.get("jobResource", "resource")))
         entry["jobTimer"] = randf_range(6.0, 12.0)
         body.set_meta("npc_job_phase", "outbound")
@@ -773,6 +776,8 @@ func update_returning_job(entry: Dictionary, body: Node3D, timer: float) -> bool
 
 func update_forager_goal(entry: Dictionary, body: Node3D, delta: float) -> bool:
     var phase := String(entry.get("jobPhase", "idle"))
+    if phase in ["outbound", "searching", "gathering", "returning"]:
+        clear_home_route_terminal(entry)
     var timer := float(entry.get("jobTimer", 0.0)) - delta
     if phase == "idle":
         var hungry := float(entry.get("hunger", 100.0)) < 82.0
@@ -793,6 +798,7 @@ func update_forager_goal(entry: Dictionary, body: Node3D, delta: float) -> bool:
         entry["jobTarget"] = pathing.forage_target_position(entry, forage) if pathing != null and pathing.has_method("forage_target_position") else forage.global_position
         entry["jobPhase"] = "outbound"
         entry["jobTimer"] = randf_range(12.0, 22.0)
+        clear_home_route_terminal(entry)
         set_npc_goal(entry, "forage berries")
         body.set_meta("npc_job_phase", "outbound")
         return true
@@ -822,6 +828,7 @@ func update_forager_goal(entry: Dictionary, body: Node3D, delta: float) -> bool:
                     entry["jobTarget"] = pathing.forage_target_position(entry, target_node) if pathing != null and pathing.has_method("forage_target_position") else target_node.global_position
                 else:
                     entry["jobTarget"] = choose_job_target(entry)
+                clear_home_route_terminal(entry)
                 entry["routeForceReplan"] = true
                 timer = randf_range(3.0, 7.0)
             entry["jobTimer"] = timer
@@ -868,6 +875,18 @@ func set_npc_goal(entry: Dictionary, goal: String) -> void:
     var body := entry.get("body") as Node
     if body:
         body.set_meta("npc_goal", goal)
+
+func clear_home_route_terminal(entry: Dictionary) -> void:
+    if String(entry.get("routeReason", "")) != "home_porch_fallback":
+        return
+    entry["routeStatus"] = "idle"
+    entry["routeReason"] = ""
+    entry["routeFallbackCell"] = Vector2i(999999, 999999)
+    entry["routeForceReplan"] = true
+    var body := entry.get("body") as Node
+    if body:
+        body.set_meta("npc_route_status", "idle")
+        body.set_meta("npc_route_reason", "")
 
 func npc_inventory_count(entry: Dictionary, item_id: String) -> int:
     var personal_inventory: Dictionary = entry.get("personalInventory", {})
@@ -998,6 +1017,7 @@ func settle_home_if_reached(entry: Dictionary) -> void:
     var level := float(entry.get("level", body.global_position.y - 0.04))
     var fallback_position := cell_to_position(fallback_cell, level)
     var target_is_home := active_target_cell == home_cell
+    var target_is_home_edge := target_is_home or active_target_cell == porch_cell
     var route_arrived_at_porch_fallback := route_arrived and target_is_home and fallback_cell == porch_cell and current_cell == porch_cell
     if near_home or (route_arrived and not route_arrived_at_porch_fallback and body.global_position.distance_to(home) <= CELL * 1.45):
         mark_npc_inside_home(entry)
@@ -1010,7 +1030,7 @@ func settle_home_if_reached(entry: Dictionary) -> void:
     var current_is_safe_home_edge := current_cell == porch_cell or current_cell == home_cell or body.global_position.distance_to(porch) <= CELL * 1.75
     var at_safe_porch := body.global_position.distance_to(porch) <= CELL * 1.75
     var fallback_supports_safe_edge := (fallback_is_safe_home_edge and at_fallback) or fallback_missing or current_is_safe_home_edge
-    if target_is_home and route_terminal and fallback_supports_safe_edge and at_safe_porch:
+    if target_is_home_edge and route_terminal and fallback_supports_safe_edge and at_safe_porch:
         mark_npc_inside_home(entry, "home_porch_fallback")
 
 func mark_npc_inside_home(entry: Dictionary, fallback_reason := "") -> void:
@@ -1089,6 +1109,8 @@ func update_pending_door_closes(delta: float) -> void:
 func move_npc(entry: Dictionary, target: Vector3, max_distance: float, moving_home := false, allow_outside := false, physics_delta := 0.0166667) -> float:
     if pathing == null:
         return 0.0
+    if not moving_home:
+        clear_home_route_terminal(entry)
     return pathing.move_npc(entry, target, max_distance, moving_home, allow_outside, physics_delta)
 
 func apply_npc_route_motion(entry: Dictionary, previous: Vector3, candidate: Vector3, physics_delta: float) -> Dictionary:
