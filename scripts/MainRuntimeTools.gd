@@ -300,6 +300,8 @@ func toggle_door(door: Node) -> bool:
     for child in door.get_children():
         if child is CollisionShape3D:
             child.disabled = open
+    if npc_system and npc_system.has_method("notify_navigation_door_state_changed"):
+        npc_system.notify_navigation_door_state_changed(door, open)
     return true
 
 func update_chunks(force: bool = false) -> void:
@@ -318,6 +320,8 @@ func update_chunks(force: bool = false) -> void:
 
     for key in chunks.keys():
         if not needed.has(key):
+            if npc_system and npc_system.has_method("notify_navigation_chunk_unloaded"):
+                npc_system.notify_navigation_chunk_unloaded(key)
             chunks[key].queue_free()
             chunks.erase(key)
     if structure_system:
@@ -350,7 +354,10 @@ func create_chunk(cx: int, cz: int) -> void:
     chunk.add_child(body)
 
     spawn_chunk_props(chunk, cx, cz)
-    chunks[Vector2i(cx, cz)] = chunk
+    var chunk_key := Vector2i(cx, cz)
+    chunks[chunk_key] = chunk
+    if npc_system and npc_system.has_method("notify_navigation_chunk_loaded"):
+        npc_system.notify_navigation_chunk_loaded(chunk_key)
 
 func chunk_assets(cx: int, cz: int) -> Dictionary:
     var key := Vector2i(cx, cz)
@@ -406,6 +413,8 @@ func rebuild_chunk(cx: int, cz: int) -> void:
     var key := Vector2i(cx, cz)
     invalidate_chunk_asset_cache(key)
     if chunks.has(key):
+        if npc_system and npc_system.has_method("notify_navigation_chunk_unloaded"):
+            npc_system.notify_navigation_chunk_unloaded(key)
         chunks[key].queue_free()
         chunks.erase(key)
     create_chunk(cx, cz)
