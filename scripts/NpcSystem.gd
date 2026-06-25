@@ -55,6 +55,7 @@ var components_initialized := false
 var component_init_attempted := false
 var last_spawn_scan_frame := -1
 var npc_update_cursor := 0
+var published_navigation_semantics := {}
 
 func setup(main_node, hostile_system_node) -> void:
     main = main_node
@@ -102,6 +103,7 @@ func clear() -> void:
     npcs.clear()
     npc_by_id.clear()
     spawned_town_keys.clear()
+    published_navigation_semantics.clear()
     focused_dialogue_body = null
     pending_door_closes.clear()
     if autonomy_system:
@@ -243,6 +245,7 @@ func register_npc(body: Node3D, profile: Dictionary) -> Dictionary:
         entry["motorProfile"] = CharacterMotorProfileScript.from_traversal_profile(context.get("traversal_profile"))
     if body.get_script() == NpcAgentScript and body.has_method("configure_agent"):
         body.call("configure_agent", entry.get("motorProfile"))
+    publish_navigation_profile_semantics(entry)
     ensure_npc_held_item(entry)
     npcs.append(entry)
     npc_by_id[body.get_instance_id()] = entry
@@ -265,6 +268,98 @@ func apply_npc_metadata(body: Node, entry: Dictionary, home_cell: Vector2i, porc
     body.set_meta("npc_weapon", String(entry["weaponId"]))
     body.set_meta("npc_route_status", String(entry.get("routeStatus", "idle")))
     body.set_meta("npc_route_reason", String(entry.get("routeReason", "")))
+
+func publish_navigation_profile_semantics(entry: Dictionary) -> void:
+    if autonomy_system == null or not autonomy_system.has_method("register_semantic_region"):
+        return
+    var stable_id := String(entry.get("id", "npc"))
+    var town_key := String(entry.get("townKey", ""))
+    var semantic_scope := town_key if town_key != "" else stable_id
+    var level := float(entry.get("level", 0.0))
+    var home_cell: Vector2i = entry.get("homeCell", Vector2i.ZERO)
+    var porch_cell: Vector2i = entry.get("porchCell", home_cell)
+    var guard_cell: Vector2i = entry.get("guardCell", porch_cell)
+    var town_center: Vector2i = entry.get("townCenter", home_cell)
+    var town_radius := int(entry.get("townRadius", 0))
+    var home_id := "home:%s:%s" % [semantic_scope, stable_id]
+    register_navigation_semantic_once(&"home_interior", home_id, navigation_cell_bounds(home_cell, level, 1, CELL * 2.4), {
+        "npcId": stable_id,
+        "buildingId": home_id,
+        "inside": true,
+        "anchors": {
+            "home": cell_key(home_cell),
+            "bed": cell_key(home_cell)
+        },
+        "entrance": {
+            "porchCell": cell_key(porch_cell),
+            "portalHint": "door:%s" % cell_key(porch_cell)
+        }
+    })
+    register_navigation_semantic_once(&"guard_post", "guard:%s:%s" % [semantic_scope, cell_key(guard_cell)], navigation_cell_bounds(guard_cell, level, 1, CELL * 2.2), {
+        "npcId": stable_id,
+        "homeId": home_id,
+        "anchor": cell_key(guard_cell)
+    })
+    register_navigation_semantic_once(&"staging_area", "staging:%s:%s" % [semantic_scope, cell_key(porch_cell)], navigation_cell_bounds(porch_cell, level, 1, CELL * 2.0), {
+        "homeId": home_id,
+        "anchor": cell_key(porch_cell),
+        "purpose": "door_approach"
+    })
+    if town_key == "":
+        return
+    var settlement_id := "settlement:%s" % town_key
+    register_navigation_semantic_once(&"settlement_bounds", settlement_id, navigation_town_bounds(town_center, town_radius, level), {
+        "townKey": town_key,
+        "center": cell_key(town_center),
+        "radius": town_radius
+    })
+    var path_span: int = maxi(10, int(float(town_radius) * 0.52))
+    register_navigation_semantic_once(&"road", "road:%s:x" % town_key, navigation_road_bounds(town_center, level, path_span, true), {
+        "townKey": town_key,
+        "axis": "x",
+        "surface": "cobblestonePath"
+    })
+    register_navigation_semantic_once(&"road", "road:%s:z" % town_key, navigation_road_bounds(town_center, level, path_span, false), {
+        "townKey": town_key,
+        "axis": "z",
+        "surface": "cobblestonePath"
+    })
+    var central_work := Vector2i(town_center.x, town_center.y - 3)
+    register_navigation_semantic_once(&"work_anchor", "work:%s:central" % town_key, navigation_cell_bounds(central_work, level, 2, CELL * 2.4), {
+        "townKey": town_key,
+        "anchor": cell_key(central_work),
+        "jobs": ["crafting", "storage", "forage_staging"]
+    })
+
+func register_navigation_semantic_once(kind: StringName, region_id: String, bounds: AABB, metadata := {}) -> void:
+    if region_id == "" or published_navigation_semantics.has(region_id):
+        return
+    published_navigation_semantics[region_id] = true
+    autonomy_system.register_semantic_region(kind, region_id, bounds, metadata)
+
+func navigation_cell_bounds(cell: Vector2i, level: float, radius_cells := 1, height := CELL * 2.0) -> AABB:
+    var footprint_cells: int = radius_cells * 2 + 1
+    var origin := Vector3(float(cell.x - radius_cells) * CELL - CELL * 0.5, level - CELL * 0.1, float(cell.y - radius_cells) * CELL - CELL * 0.5)
+    return AABB(origin, Vector3(float(footprint_cells) * CELL, height, float(footprint_cells) * CELL))
+
+func navigation_town_bounds(center: Vector2i, radius_cells: int, level: float) -> AABB:
+    var radius: int = maxi(1, radius_cells)
+    var size_cells: int = radius * 2 + 1
+    var origin := Vector3(float(center.x - radius) * CELL - CELL * 0.5, level - CELL, float(center.y - radius) * CELL - CELL * 0.5)
+    return AABB(origin, Vector3(float(size_cells) * CELL, CELL * 8.0, float(size_cells) * CELL))
+
+func navigation_road_bounds(center: Vector2i, level: float, span_cells: int, horizontal: bool) -> AABB:
+    var span: int = maxi(1, span_cells)
+    if horizontal:
+        var x_origin := float(center.x - span) * CELL - CELL * 0.5
+        var z_origin := float(center.y) * CELL - CELL * 1.5
+        return AABB(Vector3(x_origin, level - CELL * 0.1, z_origin), Vector3(float(span * 2 + 1) * CELL, CELL * 1.2, CELL * 3.0))
+    var origin_x := float(center.x) * CELL - CELL * 1.5
+    var origin_z := float(center.y - span) * CELL - CELL * 0.5
+    return AABB(Vector3(origin_x, level - CELL * 0.1, origin_z), Vector3(CELL * 3.0, CELL * 1.2, float(span * 2 + 1) * CELL))
+
+func cell_key(cell: Vector2i) -> String:
+    return "%d,%d" % [cell.x, cell.y]
 
 func route_positions_from_profile(route_cells_value, level: float) -> Array[Vector3]:
     var result: Array[Vector3] = []
@@ -847,6 +942,8 @@ func harvest_forager_target(entry: Dictionary) -> void:
         if prop_id != "" and main != null:
             var removed_props: Dictionary = main.get("removed_props")
             removed_props[prop_id] = true
+            if autonomy_system:
+                autonomy_system.notify_prop_removed(prop_id, target_node)
         target_node.queue_free()
     npc_inventory_add(entry, "berries", amount)
     entry["jobTargetNode"] = null
@@ -1068,6 +1165,18 @@ func notify_navigation_block_removed(cell: Vector3i, block_type: String, block: 
     if autonomy_system:
         autonomy_system.notify_block_removed(cell, block_type, block)
 
+func notify_navigation_terrain_edited(cell: Vector2i, old_height: float, new_height: float) -> void:
+    if autonomy_system:
+        autonomy_system.notify_terrain_edited(cell, old_height, new_height)
+
+func notify_navigation_prop_created(prop_id: String, prop: Node = null) -> void:
+    if autonomy_system:
+        autonomy_system.notify_prop_created(prop_id, prop)
+
+func notify_navigation_prop_removed(prop_id: String, prop: Node = null) -> void:
+    if autonomy_system:
+        autonomy_system.notify_prop_removed(prop_id, prop)
+
 func notify_navigation_chunk_loaded(chunk_key: Vector2i) -> void:
     if autonomy_system:
         autonomy_system.notify_chunk_loaded(chunk_key)
@@ -1079,6 +1188,18 @@ func notify_navigation_chunk_unloaded(chunk_key: Vector2i) -> void:
 func notify_navigation_door_state_changed(door: Node, open: bool) -> void:
     if autonomy_system:
         autonomy_system.notify_door_state_changed(door, open)
+
+func notify_navigation_door_registered(door: Node) -> void:
+    if autonomy_system:
+        autonomy_system.notify_door_registered(door)
+
+func notify_navigation_structure_metadata_changed(structure_id: String, bounds: AABB, metadata := {}) -> void:
+    if autonomy_system:
+        autonomy_system.notify_structure_metadata_changed(structure_id, bounds, metadata)
+
+func notify_navigation_semantic_changed(semantic_id: String, bounds: AABB, metadata := {}) -> void:
+    if autonomy_system:
+        autonomy_system.notify_semantic_changed(semantic_id, bounds, metadata)
 
 func cell_to_position(cell: Vector2i, level: float) -> Vector3:
     return Vector3(float(cell.x) * CELL, level + 0.04, float(cell.y) * CELL)

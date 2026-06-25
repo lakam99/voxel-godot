@@ -18,6 +18,8 @@ const NpcActionInstanceScript := preload("res://scripts/npc_ai/contracts/NpcActi
 const InteractionResultScript := preload("res://scripts/npc_ai/contracts/InteractionResult.gd")
 const NpcTelemetryServiceScript := preload("res://scripts/npc_ai/debug/NpcTelemetryService.gd")
 const NavigationChangeBusScript := preload("res://scripts/npc_ai/navigation/NavigationChangeBus.gd")
+const NavigationWorldServiceScript := preload("res://scripts/npc_ai/navigation/NavigationWorldService.gd")
+const NavigationSemanticServiceScript := preload("res://scripts/npc_ai/navigation/NavigationSemanticService.gd")
 const CharacterMotor3DScript := preload("res://scripts/npc_ai/motor/CharacterMotor3D.gd")
 const CharacterMotorCommandScript := preload("res://scripts/npc_ai/contracts/CharacterMotorCommand.gd")
 const CharacterMotorProfileScript := preload("res://scripts/npc_ai/contracts/CharacterMotorProfile.gd")
@@ -270,6 +272,7 @@ func contract_cases() -> Array[Dictionary]:
 		}
 	]
 	cases.append_array(motor_cases())
+	cases.append_array(nav_world_cases())
 	return cases
 
 func motor_cases() -> Array[Dictionary]:
@@ -298,6 +301,38 @@ func motor_cases() -> Array[Dictionary]:
 		cases.append({
 			"id": String(spec[0]),
 			"suite": "motor",
+			"timeModes": ["day", "night"],
+			"callable": Callable(self, String(spec[1]))
+		})
+	return cases
+
+func nav_world_cases() -> Array[Dictionary]:
+	var ids := [
+		["npc_navworld_event_block_add_dirty_exact_tiles", "test_navworld_event_block_add_dirty_exact_tiles"],
+		["npc_navworld_event_block_remove_dirty_exact_tiles", "test_navworld_event_block_remove_dirty_exact_tiles"],
+		["npc_navworld_event_prop_remove_dirty_exact_tiles", "test_navworld_event_prop_remove_dirty_exact_tiles"],
+		["npc_navworld_event_terrain_edit_dirty_exact_tiles", "test_navworld_event_terrain_edit_dirty_exact_tiles"],
+		["npc_navworld_event_chunk_load_unload", "test_navworld_event_chunk_load_unload"],
+		["npc_navworld_no_scene_scan_revision", "test_navworld_no_scene_scan_revision"],
+		["npc_navworld_multisurface_bridge", "test_navworld_multisurface_bridge"],
+		["npc_navworld_tunnel_headroom", "test_navworld_tunnel_headroom"],
+		["npc_navworld_stacked_surfaces_disconnected", "test_navworld_stacked_surfaces_disconnected"],
+		["npc_navworld_profile_clearance_small_large", "test_navworld_profile_clearance_small_large"],
+		["npc_navworld_slope_step_drop_edges", "test_navworld_slope_step_drop_edges"],
+		["npc_navworld_corner_cut_rejected", "test_navworld_corner_cut_rejected"],
+		["npc_navworld_door_portal_edge_registered", "test_navworld_door_portal_edge_registered"],
+		["npc_navworld_semantic_home_interior", "test_navworld_semantic_home_interior"],
+		["npc_navworld_semantic_guard_post", "test_navworld_semantic_guard_post"],
+		["npc_navworld_semantic_road_and_work_anchor", "test_navworld_semantic_road_and_work_anchor"],
+		["npc_navworld_unloaded_tile_not_traversable", "test_navworld_unloaded_tile_not_traversable"],
+		["npc_navworld_build_budget_yields_and_resumes", "test_navworld_build_budget_yields_and_resumes"],
+		["npc_navworld_deterministic_tile_output", "test_navworld_deterministic_tile_output"]
+	]
+	var cases: Array[Dictionary] = []
+	for spec in ids:
+		cases.append({
+			"id": String(spec[0]),
+			"suite": "nav_world",
 			"timeModes": ["day", "night"],
 			"callable": Callable(self, String(spec[1]))
 		})
@@ -753,6 +788,7 @@ func test_change_bus_coalesces_tiles(_mode: String) -> Dictionary:
 		and (event.get("objectIds", []) as Array).has("block:3,1,3:woodBlock")
 		and int(change_bus.call("pending_count")) == 0
 	)
+	autonomy.free()
 	return outcome(
 		passed,
 		"events=%s stats=%s" % [JSON.stringify(events), JSON.stringify(change_bus.call("stats"))],
@@ -1108,6 +1144,265 @@ func test_motor_every_active_actor_physics_tick(_mode: String) -> Dictionary:
 	agent.queue_free()
 	var passed := ticks == 5 and meta_ticks == 5
 	return outcome(passed, "ticks=%d meta=%d" % [ticks, meta_ticks], ["agent_physics_process_ticks", "agent_tick_meta"], { "ticks": ticks, "metaTicks": meta_ticks })
+
+func test_navworld_event_block_add_dirty_exact_tiles(_mode: String) -> Dictionary:
+	var setup := nav_event_setup()
+	var bus = setup.bus
+	var service = setup.service
+	var cell := Vector3i(17, 1, 2)
+	var tile_key := NavigationChangeBusScript.tile_key_for_cell(cell)
+	bus.emit_change(NpcEnumsScript.CHANGE_KIND_BLOCK_CREATED, "block:add", AABB(Vector3(17.0, 1.0, 2.0) * NpcConstantsScript.CELL_SIZE, Vector3.ONE), [tile_key])
+	var events: Array = service.process_change_bus()
+	var dirty: Dictionary = service.get("dirty_tiles")
+	var passed := events.size() == 1 and dirty.keys() == [tile_key] and int(service.stats().get("topologyRevision", 0)) == 1
+	return outcome(passed, "tile=%s events=%s stats=%s" % [tile_key, JSON.stringify(events), JSON.stringify(service.stats())], ["block_add_exact_tile_dirty", "topology_revision_from_event"], { "events": events, "dirty": dirty.keys(), "stats": service.stats() })
+
+func test_navworld_event_block_remove_dirty_exact_tiles(_mode: String) -> Dictionary:
+	var setup := nav_event_setup()
+	var bus = setup.bus
+	var service = setup.service
+	var cell := Vector3i(-1, 1, 33)
+	var tile_key := NavigationChangeBusScript.tile_key_for_cell(cell)
+	bus.emit_change(NpcEnumsScript.CHANGE_KIND_BLOCK_REMOVED, "block:remove", AABB(Vector3(float(cell.x), 0.0, float(cell.z)) * NpcConstantsScript.CELL_SIZE, Vector3.ONE), [tile_key])
+	var events: Array = service.process_change_bus()
+	var dirty: Dictionary = service.get("dirty_tiles")
+	var passed := events.size() == 1 and dirty.keys() == [tile_key] and int(service.stats().get("topologyRevision", 0)) == 1
+	return outcome(passed, "tile=%s dirty=%s" % [tile_key, JSON.stringify(dirty.keys())], ["block_remove_exact_tile_dirty"], { "events": events, "dirty": dirty.keys() })
+
+func test_navworld_event_prop_remove_dirty_exact_tiles(_mode: String) -> Dictionary:
+	var autonomy := NpcAutonomySystemScript.new()
+	autonomy.setup(null, null)
+	var prop := Node3D.new()
+	prop.name = "BerryProp"
+	add_child(prop)
+	prop.global_position = Vector3(2.0 * NpcConstantsScript.CELL_SIZE, 0.0, 1.0 * NpcConstantsScript.CELL_SIZE)
+	autonomy.notify_prop_removed("berry-1", prop)
+	var events: Array = autonomy.process_navigation_changes()
+	prop.queue_free()
+	autonomy.free()
+	var event: Dictionary = events[0] if events.size() > 0 else {}
+	var passed := events.size() == 1 and String(event.get("tileKey", "")) == "0,0" and (event.get("changeKinds", []) as Array).has(String(NpcEnumsScript.CHANGE_KIND_PROP_REMOVED))
+	return outcome(passed, "events=%s" % JSON.stringify(events), ["prop_remove_exact_tile_dirty", "prop_remove_change_kind"], { "events": events })
+
+func test_navworld_event_terrain_edit_dirty_exact_tiles(_mode: String) -> Dictionary:
+	var autonomy := NpcAutonomySystemScript.new()
+	autonomy.setup(null, null)
+	autonomy.notify_terrain_edited(Vector2i(17, 17), 4.0, 2.65)
+	var events: Array = autonomy.process_navigation_changes()
+	autonomy.free()
+	var event: Dictionary = events[0] if events.size() > 0 else {}
+	var passed := events.size() == 1 and String(event.get("tileKey", "")) == "1,1" and (event.get("changeKinds", []) as Array).has(String(NpcEnumsScript.CHANGE_KIND_TERRAIN_EDIT))
+	return outcome(passed, "events=%s" % JSON.stringify(events), ["terrain_edit_exact_tile_dirty", "terrain_edit_change_kind"], { "events": events })
+
+func test_navworld_event_chunk_load_unload(_mode: String) -> Dictionary:
+	var setup := nav_event_setup()
+	var bus = setup.bus
+	var service = setup.service
+	var key := Vector2i(2, -1)
+	var tile_key := NavigationChangeBusScript.tile_key_for_chunk(key)
+	bus.emit_change(NpcEnumsScript.CHANGE_KIND_CHUNK_LOADED, "chunk:load", AABB(Vector3.ZERO, Vector3.ONE), [tile_key])
+	service.process_change_bus()
+	var after_load: Dictionary = service.stats()
+	bus.emit_change(NpcEnumsScript.CHANGE_KIND_CHUNK_UNLOADED, "chunk:unload", AABB(Vector3.ZERO, Vector3.ONE), [tile_key])
+	service.process_change_bus()
+	var states: Dictionary = service.get("tile_states")
+	var passed: bool = int(after_load.get("dirtyTileCount", 0)) == 1 and String(states.get(tile_key, "")) == "unloaded" and not service.is_tile_traversable(tile_key)
+	return outcome(passed, "load=%s states=%s" % [JSON.stringify(after_load), JSON.stringify(states)], ["chunk_load_dirty", "chunk_unload_explicit_state", "unloaded_not_traversable"], { "afterLoad": after_load, "tileStates": states })
+
+func test_navworld_no_scene_scan_revision(_mode: String) -> Dictionary:
+	var service_text := read_text("res://scripts/npc_ai/navigation/NavigationWorldService.gd")
+	var builder_text := read_text("res://scripts/npc_ai/navigation/NavigationTileBuilder.gd")
+	var autonomy_text := read_text("res://scripts/npc_ai/NpcAutonomySystem.gd")
+	var passed := (
+		service_text.find("get_tree(") < 0
+		and service_text.find("find_children") < 0
+		and service_text.find("hash(") < 0
+		and builder_text.find("get_tree(") < 0
+		and autonomy_text.find("process_navigation_changes") >= 0
+		and autonomy_text.find("NavigationChangeBus") >= 0
+	)
+	return outcome(passed, "serviceScan=%d find=%d hash=%d" % [service_text.find("get_tree("), service_text.find("find_children"), service_text.find("hash(")], ["new_stack_no_scene_scan_revision", "change_bus_drives_nav_world"], {})
+
+func test_navworld_multisurface_bridge(_mode: String) -> Dictionary:
+	var service := NavigationWorldServiceScript.new()
+	var tile = service.build_tile_now(nav_snapshot("0,0", [
+		nav_surface(Vector3i(0, 0, 0), { "worldPosition": Vector3(0.0, 0.0, 0.0), "semanticRegionIds": ["terrain"] }),
+		nav_surface(Vector3i(0, 2, 0), { "worldPosition": Vector3(0.0, 2.7, 0.0), "semanticRegionIds": ["bridge"] })
+	]))
+	var spans: Array = tile.spans_for_column(Vector3i(0, 0, 0))
+	var passed: bool = spans.size() == 2 and int(tile.to_summary().get("spanCount", 0)) == 2
+	return outcome(passed, "summary=%s spans=%d" % [JSON.stringify(tile.to_summary()), spans.size()], ["multiple_vertical_spans_same_xz"], { "tile": tile.to_summary(), "spans": spans.size() })
+
+func test_navworld_tunnel_headroom(_mode: String) -> Dictionary:
+	var service := NavigationWorldServiceScript.new()
+	var tile = service.build_tile_now(nav_snapshot("0,0", [
+		nav_surface(Vector3i(0, 0, 0), { "headroom": 1.2 }),
+		nav_surface(Vector3i(1, 0, 0), { "headroom": 2.2 })
+	]))
+	var low_span = tile.spans_for_column(Vector3i(0, 0, 0))[0]
+	var clear_span = tile.spans_for_column(Vector3i(1, 0, 0))[0]
+	var passed := not bool(low_span.get("walkable")) and bool(clear_span.get("walkable"))
+	return outcome(passed, "low=%s clear=%s" % [JSON.stringify(low_span.to_summary()), JSON.stringify(clear_span.to_summary())], ["headroom_rejects_low_tunnel", "headroom_accepts_clear_tunnel"], { "low": low_span.to_summary(), "clear": clear_span.to_summary() })
+
+func test_navworld_stacked_surfaces_disconnected(_mode: String) -> Dictionary:
+	var service := NavigationWorldServiceScript.new()
+	var tile = service.build_tile_now(nav_snapshot("0,0", [
+		nav_surface(Vector3i(0, 0, 0), { "worldPosition": Vector3(0, 0, 0) }),
+		nav_surface(Vector3i(0, 3, 0), { "worldPosition": Vector3(0, 4.0, 0) })
+	]))
+	var spans: Array = tile.spans_for_column(Vector3i(0, 0, 0))
+	var edge = tile.edge_between(spans[0].key_string(), spans[1].key_string()) if spans.size() == 2 else null
+	var passed: bool = spans.size() == 2 and edge == null
+	return outcome(passed, "spans=%d edge=%s" % [spans.size(), str(edge != null)], ["stacked_surfaces_no_magic_vertical_edge"], { "tile": tile.to_summary() })
+
+func test_navworld_profile_clearance_small_large(_mode: String) -> Dictionary:
+	var small = TraversalProfileScript.default_adult_npc()
+	small.body_radius = 0.22
+	small.personal_space_margin = 0.04
+	var large = TraversalProfileScript.default_adult_npc()
+	large.body_radius = 0.55
+	large.personal_space_margin = 0.10
+	var snapshot := nav_snapshot("0,0", [
+		nav_surface(Vector3i(0, 0, 0), { "lateralClearance": 0.40 })
+	])
+	var small_tile = NavigationWorldServiceScript.new().build_tile_now(snapshot, small)
+	var large_tile = NavigationWorldServiceScript.new().build_tile_now(snapshot, large)
+	var small_span = small_tile.spans_for_column(Vector3i(0, 0, 0))[0]
+	var large_span = large_tile.spans_for_column(Vector3i(0, 0, 0))[0]
+	var passed: bool = bool(small_span.get("walkable")) and not bool(large_span.get("walkable"))
+	return outcome(passed, "small=%s large=%s" % [JSON.stringify(small_span.to_summary()), JSON.stringify(large_span.to_summary())], ["profile_clearance_small_passes", "profile_clearance_large_rejected"], { "small": small_span.to_summary(), "large": large_span.to_summary() })
+
+func test_navworld_slope_step_drop_edges(_mode: String) -> Dictionary:
+	var service := NavigationWorldServiceScript.new()
+	var tile = service.build_tile_now(nav_snapshot("0,0", [
+		nav_surface(Vector3i(0, 0, 0), { "worldPosition": Vector3(0.0, 0.0, 0.0) }),
+		nav_surface(Vector3i(1, 0, 0), { "worldPosition": Vector3(NpcConstantsScript.CELL_SIZE, 0.75, 0.0) }),
+		nav_surface(Vector3i(-1, 0, 0), { "worldPosition": Vector3(-NpcConstantsScript.CELL_SIZE, -0.75, 0.0) })
+	]))
+	var base = tile.spans_for_column(Vector3i(0, 0, 0))[0]
+	var up = tile.spans_for_column(Vector3i(1, 0, 0))[0]
+	var down = tile.spans_for_column(Vector3i(-1, 0, 0))[0]
+	var up_edge = tile.edge_between(base.key_string(), up.key_string())
+	var down_edge = tile.edge_between(base.key_string(), down.key_string())
+	var passed: bool = up_edge != null and up_edge.get("traversal_kind") == NpcEnumsScript.TRAVERSAL_KIND_STEP and down_edge != null and down_edge.get("traversal_kind") == NpcEnumsScript.TRAVERSAL_KIND_DROP
+	return outcome(passed, "up=%s down=%s" % [JSON.stringify(up_edge.to_summary() if up_edge else {}), JSON.stringify(down_edge.to_summary() if down_edge else {})], ["step_edge_built", "drop_edge_built"], { "up": up_edge.to_summary() if up_edge else {}, "down": down_edge.to_summary() if down_edge else {} })
+
+func test_navworld_corner_cut_rejected(_mode: String) -> Dictionary:
+	var service := NavigationWorldServiceScript.new()
+	var tile = service.build_tile_now(nav_snapshot("0,0", [
+		nav_surface(Vector3i(0, 0, 0)),
+		nav_surface(Vector3i(1, 0, 1)),
+		nav_surface(Vector3i(1, 0, 0), { "blocked": true, "blockerKind": "wall" }),
+		nav_surface(Vector3i(0, 0, 1), { "blocked": true, "blockerKind": "wall" })
+	]))
+	var base = tile.spans_for_column(Vector3i(0, 0, 0))[0]
+	var diagonal = tile.spans_for_column(Vector3i(1, 0, 1))[0]
+	var edge = tile.edge_between(base.key_string(), diagonal.key_string())
+	var passed := edge == null
+	return outcome(passed, "edge=%s summary=%s" % [str(edge != null), JSON.stringify(tile.to_summary())], ["diagonal_corner_cut_rejected"], { "tile": tile.to_summary() })
+
+func test_navworld_door_portal_edge_registered(_mode: String) -> Dictionary:
+	var from_key := "0,0:0,0,0:0"
+	var to_key := "0,0:1,0,0:1"
+	var service := NavigationWorldServiceScript.new()
+	var tile = service.build_tile_now(nav_snapshot("0,0", [
+		nav_surface(Vector3i(0, 0, 0)),
+		nav_surface(Vector3i(1, 0, 0))
+	], {
+		"doorPortals": [{ "id": "door:home-a", "kind": "single", "width": 1.0 }],
+		"doorLinks": [{ "from": from_key, "to": to_key, "portalId": "door:home-a", "cost": 2.0 }]
+	}))
+	var edge = tile.edge_between(from_key, to_key)
+	var passed: bool = edge != null and edge.get("traversal_kind") == NpcEnumsScript.TRAVERSAL_KIND_DOOR and tile.door_portals.has("door:home-a")
+	return outcome(passed, "edge=%s portals=%s" % [JSON.stringify(edge.to_summary() if edge else {}), JSON.stringify(tile.door_portals.keys())], ["door_portal_registered", "door_edge_explicit"], { "edge": edge.to_summary() if edge else {}, "portals": tile.door_portals.keys() })
+
+func test_navworld_semantic_home_interior(_mode: String) -> Dictionary:
+	var service := NavigationWorldServiceScript.new()
+	var semantic = service.get("semantic_service")
+	semantic.register_home("home-a", AABB(Vector3.ZERO, Vector3(4, 3, 4)), { "bed": Vector3(1, 0, 1) }, { "portalId": "door:home-a" })
+	var homes: Array = semantic.regions_for_kind(&"home_interior")
+	var at_point: Array = semantic.regions_at_position(Vector3(1, 1, 1), &"home_interior")
+	var passed := homes.size() == 1 and at_point.size() == 1 and bool(homes[0].get("metadata", {}).get("inside", false))
+	return outcome(passed, "homes=%s" % JSON.stringify(homes), ["home_interior_semantic_region", "home_inside_metadata", "home_entrance_metadata"], { "homes": homes, "atPoint": at_point })
+
+func test_navworld_semantic_guard_post(_mode: String) -> Dictionary:
+	var service := NavigationWorldServiceScript.new()
+	var semantic = service.get("semantic_service")
+	semantic.register_guard_post("north", AABB(Vector3(8, 0, 0), Vector3(2, 3, 2)), { "patrol": "north-road" })
+	var guards: Array = semantic.regions_for_kind(&"guard_post")
+	var passed := guards.size() == 1 and String(guards[0].get("id", "")) == "guard:north"
+	return outcome(passed, "guards=%s" % JSON.stringify(guards), ["guard_post_semantic_region"], { "guards": guards })
+
+func test_navworld_semantic_road_and_work_anchor(_mode: String) -> Dictionary:
+	var service := NavigationWorldServiceScript.new()
+	var semantic = service.get("semantic_service")
+	semantic.register_road("main", AABB(Vector3.ZERO, Vector3(10, 1, 2)), { "surface": "cobblestonePath" })
+	semantic.register_work_anchor("woodpile", AABB(Vector3(4, 0, 4), Vector3(2, 2, 2)), { "job": "wood" })
+	var roads: Array = semantic.regions_for_kind(&"road")
+	var work: Array = semantic.regions_for_kind(&"work_anchor")
+	var passed := roads.size() == 1 and work.size() == 1 and int(semantic.stats().get("regionCount", 0)) == 2
+	return outcome(passed, "semantic=%s" % JSON.stringify(semantic.stats()), ["road_semantic_region", "work_anchor_semantic_region"], { "roads": roads, "work": work, "stats": semantic.stats() })
+
+func test_navworld_unloaded_tile_not_traversable(_mode: String) -> Dictionary:
+	var service := NavigationWorldServiceScript.new()
+	var tile = service.build_tile_now({ "tileKey": "3,3", "unloaded": true, "surfaces": [] })
+	var passed := bool(tile.get("unloaded")) and not service.is_tile_traversable("3,3")
+	return outcome(passed, "tile=%s traversable=%s" % [JSON.stringify(tile.to_summary()), str(service.is_tile_traversable("3,3"))], ["unloaded_tile_explicit", "unloaded_tile_not_traversable"], { "tile": tile.to_summary() })
+
+func test_navworld_build_budget_yields_and_resumes(_mode: String) -> Dictionary:
+	var service := NavigationWorldServiceScript.new()
+	for i in range(3):
+		service.request_tile(nav_snapshot("%d,0" % i, [nav_surface(Vector3i(i * 16, 0, 0))]), 1)
+	var first: Array = service.build_next_tiles(1, 4000)
+	var after_first := service.stats()
+	var second: Array = service.build_next_tiles(1, 4000)
+	var third: Array = service.build_next_tiles(1, 4000)
+	var after_all := service.stats()
+	var passed: bool = first.size() == 1 and second.size() == 1 and third.size() == 1 and int(after_first.get("buildQueue", {}).get("pending", 0)) == 2 and int(after_all.get("buildQueue", {}).get("pending", 0)) == 0 and int(after_all.get("buildQueue", {}).get("yieldedJobs", 0)) >= 1
+	return outcome(passed, "first=%s afterAll=%s" % [JSON.stringify(after_first), JSON.stringify(after_all)], ["build_budget_yields", "build_budget_resumes", "build_queue_drains"], { "afterFirst": after_first, "afterAll": after_all })
+
+func test_navworld_deterministic_tile_output(_mode: String) -> Dictionary:
+	var snapshot := nav_snapshot("0,0", [
+		nav_surface(Vector3i(0, 0, 0), { "semanticRegionIds": ["road"] }),
+		nav_surface(Vector3i(1, 0, 0), { "semanticRegionIds": ["road"] }),
+		nav_surface(Vector3i(1, 1, 1), { "worldPosition": Vector3(NpcConstantsScript.CELL_SIZE, 0.75, NpcConstantsScript.CELL_SIZE), "semanticRegionIds": ["bridge"] })
+	], {
+		"semanticRegions": [{ "id": "road:main", "kind": "road" }]
+	})
+	var first = NavigationWorldServiceScript.new().build_tile_now(snapshot)
+	var second = NavigationWorldServiceScript.new().build_tile_now(snapshot)
+	var passed: bool = first.stable_signature() == second.stable_signature()
+	return outcome(passed, "first=%s second=%s" % [first.stable_signature(), second.stable_signature()], ["deterministic_tile_signature"], { "first": first.stable_signature(), "second": second.stable_signature() })
+
+func nav_event_setup() -> Dictionary:
+	var bus := NavigationChangeBusScript.new()
+	var service := NavigationWorldServiceScript.new()
+	service.setup(null, bus)
+	return { "bus": bus, "service": service }
+
+func nav_snapshot(tile_key: String, surfaces: Array, extra := {}) -> Dictionary:
+	var snapshot := {
+		"tileKey": tile_key,
+		"surfaces": surfaces
+	}
+	for key in extra.keys():
+		snapshot[key] = extra[key]
+	return snapshot
+
+func nav_surface(cell: Vector3i, extra := {}) -> Dictionary:
+	var surface := {
+		"cell": cell,
+		"worldPosition": Vector3(float(cell.x) * NpcConstantsScript.CELL_SIZE, float(cell.y) * NpcConstantsScript.CELL_SIZE, float(cell.z) * NpcConstantsScript.CELL_SIZE),
+		"floorNormal": Vector3.UP,
+		"headroom": 2.4,
+		"lateralClearance": 1.0,
+		"blocked": false,
+		"semanticRegionIds": [],
+		"traversalTags": ["terrain"]
+	}
+	for key in extra.keys():
+		surface[key] = extra[key]
+	return surface
 
 func motor_body(node_name: String) -> CharacterBody3D:
 	var body := CharacterBody3D.new()

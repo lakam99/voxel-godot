@@ -544,6 +544,8 @@ func create_block(cell: Vector3i, block_type: String, options: Dictionary = {}) 
     blocks[cell] = body
     if npc_system and npc_system.has_method("notify_navigation_block_created"):
         npc_system.notify_navigation_block_created(cell, block_type, body)
+    if block_type == "door" and npc_system and npc_system.has_method("notify_navigation_door_registered"):
+        npc_system.notify_navigation_door_registered(body)
     return body
 
 func is_structural_block_type(block_type: String) -> bool:

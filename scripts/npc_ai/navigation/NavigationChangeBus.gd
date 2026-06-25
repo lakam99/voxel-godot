@@ -26,9 +26,27 @@ static func tile_key_for_world_position(position: Vector3) -> String:
 	var cell := Vector2i(roundi(position.x / NpcConstantsScript.CELL_SIZE), roundi(position.z / NpcConstantsScript.CELL_SIZE))
 	return tile_key_for_cell(cell)
 
+static func tile_keys_for_bounds(bounds: AABB) -> Array[String]:
+	var result: Array[String] = []
+	if bounds.size == Vector3.ZERO:
+		return result
+	var min_cell_x := floori(bounds.position.x / NpcConstantsScript.CELL_SIZE)
+	var min_cell_z := floori(bounds.position.z / NpcConstantsScript.CELL_SIZE)
+	var max_cell_x := floori((bounds.position.x + bounds.size.x - 0.001) / NpcConstantsScript.CELL_SIZE)
+	var max_cell_z := floori((bounds.position.z + bounds.size.z - 0.001) / NpcConstantsScript.CELL_SIZE)
+	for z in range(min_cell_z, max_cell_z + 1):
+		for x in range(min_cell_x, max_cell_x + 1):
+			var tile_key := tile_key_for_cell(Vector2i(x, z))
+			if not result.has(tile_key):
+				result.append(tile_key)
+	result.sort()
+	return result
+
 func emit_change(kind: StringName, object_id: String, bounds: AABB, tile_keys: Array, source_revision := 0) -> int:
 	monotonic_revision += 1
 	var normalized_tiles := _normalized_tile_keys(tile_keys)
+	if normalized_tiles.is_empty():
+		normalized_tiles = tile_keys_for_bounds(bounds)
 	if normalized_tiles.is_empty():
 		normalized_tiles.append("0,0")
 	for tile_key in normalized_tiles:
