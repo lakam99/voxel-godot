@@ -1,0 +1,6 @@
+[gd_scene load_steps=2 format=3 uid="uid://npcautonomytest"]
+
+[ext_resource type="Script" path="res://scripts/testing/npc/NpcAutonomyTestRunner.gd" id="1_npc_autonomy_test"]
+
+[node name="NpcAutonomyTestRunner" type="Node"]
+script = ExtResource("1_npc_autonomy_test")

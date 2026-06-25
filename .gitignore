@@ -9,6 +9,8 @@ npc-navigation-report.json
 npc-navigation-progress.txt
 artifacts/*.json
 artifacts/*.txt
+artifacts/npc/
+artifacts/test-runners/
 artifacts/ui-layout-fix/
 artifacts/visual/
 artifacts/world-signature/

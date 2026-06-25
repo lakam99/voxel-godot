@@ -50,6 +50,7 @@ Prefer composed systems under `scripts/` or `scripts/story/` over expanding that
 
 ## Important Plans And Docs
 
+- `CODEX_NPC_PATHFINDING_FINAL_IMPLEMENTATION_PLAN.md`: controlling mandatory specification for the NPC autonomy/pathfinding replacement. When executing this work, reread the current phase, global invariants, test protocol, and prohibited-shortcuts section before editing. Follow one phase branch/report/merge cycle at a time.
 - `CODEX_VISUAL_UPGRADE_PLAN.md`: visual polish roadmap.
 - `CODEX_STORY_IMPLEMENTATION_PLAN.md`: story/worldmark roadmap. Follow one phase at a time.
 - `docs/ANIMATED_ASSET_PIPELINE.md`: generated animated asset workflow.
@@ -66,6 +67,14 @@ Functional playtest:
 
 ```powershell
 .\tools\run-playtest.ps1
+```
+
+NPC pathfinding replacement harness:
+
+```powershell
+.\tools\npc\run-npc-contract-tests.ps1 -TimeMode Both
+.\tools\npc\run-all-npc-tests.ps1 -TimeMode Both
+.\tools\run-all-test-runners.ps1
 ```
 
 Visual captures:
@@ -127,6 +136,8 @@ Avoid:
 - decorative objects with gameplay collision unless explicitly needed.
 
 ## NPC And AI Expectations
+
+For the full NPC autonomy/pathfinding replacement, `CODEX_NPC_PATHFINDING_FINAL_IMPLEMENTATION_PLAN.md` supersedes older NPC pathing plans. Implement only the active phase on its required branch, write the phase report under `docs/npc_pathfinding/`, keep the branch and merged `master` green, and do not skip ahead to later-phase runtime behavior.
 
 NPCs should move with purpose:
 

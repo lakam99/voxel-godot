@@ -1,0 +1,59 @@
+{
+  "schemaVersion": 1,
+  "runners": [
+    {
+      "id": "npc_focused",
+      "description": "All focused NPC suites implemented up to the active phase",
+      "command": ".\\tools\\npc\\run-all-npc-tests.ps1",
+      "args": ["-TimeMode", "Both"],
+      "required": true
+    },
+    {
+      "id": "npc_navigation_legacy",
+      "description": "Existing dedicated NPC navigation regression runner",
+      "command": ".\\tools\\run-npc-navigation-tests.ps1",
+      "args": ["-ReportPath", "artifacts\\test-runners\\npc-navigation-report.json"],
+      "reportPath": "artifacts\\test-runners\\npc-navigation-report.json",
+      "required": true
+    },
+    {
+      "id": "playtest",
+      "description": "Broad gameplay continuity playtest",
+      "command": ".\\tools\\run-playtest.ps1",
+      "args": ["-ReportPath", "artifacts\\test-runners\\playtest-report.json"],
+      "reportPath": "artifacts\\test-runners\\playtest-report.json",
+      "required": true
+    },
+    {
+      "id": "story_playtest",
+      "description": "Story continuity playtest",
+      "command": ".\\tools\\story\\run-story-playtest.ps1",
+      "args": ["-ReportPath", "artifacts\\test-runners\\story-playtest-report.json"],
+      "reportPath": "artifacts\\test-runners\\story-playtest-report.json",
+      "required": true
+    },
+    {
+      "id": "world_signature",
+      "description": "Deterministic world signature comparison",
+      "command": ".\\tools\\run-world-signature.ps1",
+      "args": ["-OutputPath", "artifacts\\test-runners\\world-signature-atlas-1492.json"],
+      "reportPath": "artifacts\\test-runners\\world-signature-atlas-1492.json",
+      "required": true
+    },
+    {
+      "id": "visual_captures",
+      "description": "Visual capture generation and metadata validation",
+      "command": ".\\tools\\run-visual-captures.ps1",
+      "args": ["-OutputDir", "artifacts\\test-runners\\visual"],
+      "reportPath": "artifacts\\test-runners\\visual\\visual-captures.json",
+      "required": true
+    },
+    {
+      "id": "visual_manifest",
+      "description": "Generated visual manifest validation",
+      "command": "node",
+      "args": [".\\tools\\art\\validate-visual-manifest.mjs"],
+      "required": true
+    }
+  ]
+}

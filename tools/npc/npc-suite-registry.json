@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "suites": [
+    {
+      "id": "contract",
+      "description": "Phase 00 focused contract and baseline characterization tests",
+      "command": ".\\tools\\npc\\run-npc-contract-tests.ps1",
+      "defaultArgs": ["-TimeMode", "Both"]
+    }
+  ]
+}
