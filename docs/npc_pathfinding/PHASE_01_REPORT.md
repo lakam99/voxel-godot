@@ -7,7 +7,9 @@
 - Base branch: `master`
 - Base commit: `ac5f12fc20b50740abc79bf9492220ed7c07e648`
 - Branch implementation commit: `1006d4826bd456784a2a50a9395c0737e4956634`
-- Merge commit: pending no-fast-forward merge to `master`
+- Merge commit: `ab7a5b7f9102355a11de246f4350d7e0cad113ba`
+- Repair branch: `npc-pathfinding/phase-01-master-repair`
+- Repair commit: `95ae58612f41948e4f06a7b27ff8155629829b57`
 - Dates: 2026-06-25
 - Controlling specification: `CODEX_NPC_PATHFINDING_FINAL_IMPLEMENTATION_PLAN.md`
 
@@ -312,15 +314,104 @@ Intermediate failures encountered and fixed:
 
 ## 13. Full All-Runner Evidence On Merged `master`
 
-Pending required steps:
+Merge command:
 
 ```powershell
 git switch master
 git merge --no-ff npc-pathfinding/phase-01-contracts-observability -m "Merge Phase 01: NPC contract observability"
+```
+
+Initial merged `master` gate command:
+
+```powershell
 .\tools\run-all-test-runners.ps1 -ReportPath artifacts\test-runners\all-test-runners-master-phase01.json
 ```
 
-This section will be populated after the no-fast-forward merge and merged `master` all-runner gate.
+Initial merged `master` report:
+
+- Merge commit: `ab7a5b7f9102355a11de246f4350d7e0cad113ba`
+- Path: `artifacts/test-runners/all-test-runners-master-phase01.json`
+- SHA-256: `5CB114AE0B95065D94A3BD768038BF85E4BDCC1FBD0E21FDC13269D0D58809E8`
+- Started: `2026-06-25T15:49:05.7911995Z`
+- Finished: `2026-06-25T15:55:30.0064436Z`
+- Duration: 384.216 seconds
+- Result count: 7
+- Failure count: 1
+
+Initial merged `master` runner results:
+
+| Runner | Exit | Passed | Duration seconds |
+| --- | ---: | --- | ---: |
+| `npc_focused` | 0 | true | 1.671 |
+| `npc_navigation_legacy` | 0 | true | 48.953 |
+| `playtest` | 1 | false | 202.937 |
+| `story_playtest` | 0 | true | 64.022 |
+| `world_signature` | 0 | true | 14.552 |
+| `visual_captures` | 0 | true | 51.980 |
+| `visual_manifest` | 0 | true | 0.048 |
+
+The failing row was `held_torch_emits_light` in the broad playtest:
+
+```text
+current torch, lights 3 fire 3 shadow 1 roles 1/1/1 fill 2 base 3.05 range 6.27 min 0.08 overlays 0 sample 4.20->4.21 6.99->7.24 flicker 0.01/0.25
+```
+
+Root cause: the held torch source light could sit on the hard maximum-energy clamp for the whole short playtest sample window. Range still animated, but energy changed too little for the assertion and for visible held-light liveliness.
+
+Repair branch:
+
+```powershell
+git switch -c npc-pathfinding/phase-01-master-repair
+```
+
+Repair commit:
+
+- `95ae58612f41948e4f06a7b27ff8155629829b57` - `Stabilize held torch light flicker`
+
+Repair behavior:
+
+- `scripts/LocalLightRig.gd` now supports per-role `*_flicker_speed` and `*_max_scale` profile overrides.
+- Held torch source lights use `source_max_scale = 1.52`, matching the measured waveform bound closely enough to avoid the maximum clamp plateau.
+- Held torch source lights use `source_flicker_speed = 3.0`, which keeps the 12-frame sample above the required visible energy delta even near waveform extrema.
+- Placed lights and non-source fill roles keep their existing defaults.
+
+Standalone repair playtest:
+
+- Command: `.\tools\run-playtest.ps1 -ReportPath artifacts\test-runners\playtest-repair-phase01.json`
+- Report path: `artifacts/test-runners/playtest-repair-phase01.json`
+- SHA-256: `67135630A32EB19D04EEA620E3CC006B6DAA911622FB1C3BF7D2A333A769F0E7`
+- Result: pass
+- Held torch evidence: `current torch, lights 3 fire 3 shadow 1 roles 1/1/1 fill 2 base 3.05 range 6.27 min 0.08 overlays 0 sample 0.95->1.28 4.95->5.16 flicker 0.52/0.33`
+
+Repair branch all-runner:
+
+```powershell
+.\tools\run-all-test-runners.ps1 -ReportPath artifacts\test-runners\all-test-runners-repair-phase01.json
+```
+
+Repair branch report:
+
+- Path: `artifacts/test-runners/all-test-runners-repair-phase01.json`
+- SHA-256: `9F15EA79E446072C60F3540A33CE85940A4C41259AF4F1BECA00C2802259CA09`
+- Started: `2026-06-25T16:02:24.8822839Z`
+- Finished: `2026-06-25T16:08:28.1165780Z`
+- Duration: 363.235 seconds
+- Result count: 7
+- Failure count: 0
+
+Repair branch runner results:
+
+| Runner | Exit | Passed | Duration seconds |
+| --- | ---: | --- | ---: |
+| `npc_focused` | 0 | true | 1.663 |
+| `npc_navigation_legacy` | 0 | true | 44.140 |
+| `playtest` | 0 | true | 191.835 |
+| `story_playtest` | 0 | true | 61.477 |
+| `world_signature` | 0 | true | 13.964 |
+| `visual_captures` | 0 | true | 50.058 |
+| `visual_manifest` | 0 | true | 0.044 |
+
+Repaired `master` gate: pending no-fast-forward repair merge and rerun.
 
 ## 14. Phase Gate Self-Audit
 
@@ -334,7 +425,7 @@ This section will be populated after the no-fast-forward merge and merged `maste
 | Save snapshots compatible and no transient new state | PASS on branch | Runtime state is excluded from persistence; existing save defaults baseline still passes day/night |
 | Focused contract suite passes day and night | PASS on branch | `contract-both.json`: 40 results, 0 failures |
 | Every existing runner passes on phase branch | PASS on branch | `all-test-runners-branch-phase01-green.json`: 7 results, 0 failures |
-| Every existing runner passes on merged `master` | PENDING | Requires the Section 13 merge and master all-runner |
+| Every existing runner passes on merged `master` | PENDING repair merge | Initial merged `master` reached all 7 runners but failed broad playtest; repair branch all-runner is green in Section 13 |
 | Report includes ownership diagram, event flow, queue bounds, and migration switch state | PASS on branch | Sections 5, 6, and 9 |
 
 ## 15. Review Questions
@@ -362,7 +453,7 @@ Yes on the phase branch. All repository runners pass after the held-light repair
 ## 16. Deviations And Repairs
 
 - No deviation from Phase 01 NPC scope was taken.
-- A broad playtest visual assertion exposed a held torch light source clamp issue while running the branch all-runner. `scripts/LocalLightRig.gd` now allows role-specific source minimum scale and sets held torch minimum scale to `0.08`, which restores sampled energy/range flicker without changing NPC behavior.
+- A broad playtest visual assertion exposed a held torch light source clamp issue while running the branch and merged `master` all-runners. `scripts/LocalLightRig.gd` now allows role-specific source minimum scale, maximum scale, and flicker speed. Held torch source lights use a stable range that restores sampled energy/range flicker without changing NPC behavior.
 - The focused contract report records the pre-implementation commit SHA because it was generated before the implementation commit. The branch all-runner report was generated from the committed code state and is the branch gate evidence.
 
 ## 17. Known Issues And Next Phase Risks
@@ -375,4 +466,4 @@ Yes on the phase branch. All repository runners pass after the held-light repair
 
 ## 18. Branch Verdict
 
-Phase 01 passes its focused contract, aggregate NPC, parser, and phase-branch all-runner gates. The required no-fast-forward merge and merged `master` all-runner evidence are still pending and must be recorded before Phase 02 begins.
+Phase 01 passes its focused contract, aggregate NPC, parser, phase-branch all-runner, and repair-branch all-runner gates. The repaired `master` merge and all-runner evidence are still pending and must be recorded before Phase 02 begins.
