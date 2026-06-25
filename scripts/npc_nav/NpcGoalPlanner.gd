@@ -46,6 +46,7 @@ func make_intent(entry: Dictionary, target: Vector3, max_distance: float, moving
         "priority": 100 if moving_home else 50,
         "action": "",
         "interruptible": not moving_home,
+        "allowPartial": moving_home,
         "strictArrival": kind == "scripted",
         "fallbackCells": fallback_cells
     }
