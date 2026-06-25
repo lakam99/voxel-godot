@@ -1,11 +1,13 @@
 extends RefCounted
 class_name NpcConstants
 
-const ARCHITECTURE_VERSION := "phase02_physics_motor"
+const ARCHITECTURE_VERSION := "phase03_navigation_world"
 const LEGACY_LOCOMOTION_MODE := "legacy_route_intent_motor_adapter"
 
 const CELL_SIZE := 1.35
 const NAV_TILE_CELL_SIZE := 16
+const NAV_BUILD_MAX_JOBS_PER_TICK := 1
+const NAV_BUILD_HARD_SLICE_USEC := 4000
 
 const TELEMETRY_RING_CAPACITY := 256
 const TELEMETRY_GLOBAL_COUNTER_LIMIT := 128

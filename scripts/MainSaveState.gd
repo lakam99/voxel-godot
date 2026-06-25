@@ -264,14 +264,21 @@ func restore_height_edits(entries) -> void:
         if not (entry is Dictionary):
             continue
         var key := Vector2i(int(entry.get("x", 0)), int(entry.get("z", 0)))
-        height_edits[key] = float(entry.get("height", MIN_HEIGHT))
+        var old_height := terrain_height_cell(key.x, key.y)
+        var new_height := float(entry.get("height", MIN_HEIGHT))
+        height_edits[key] = new_height
+        if npc_system and npc_system.has_method("notify_navigation_terrain_edited"):
+            npc_system.notify_navigation_terrain_edited(key, old_height, new_height)
 
 func restore_removed_props(entries) -> void:
     removed_props.clear()
     if not (entries is Array):
         return
     for prop_id in entries:
-        removed_props[String(prop_id)] = true
+        var prop_key := String(prop_id)
+        removed_props[prop_key] = true
+        if npc_system and npc_system.has_method("notify_navigation_prop_removed"):
+            npc_system.notify_navigation_prop_removed(prop_key, null)
 
 func restore_player_state(state) -> void:
     if player == null or not (state is Dictionary):
@@ -339,6 +346,8 @@ func clear_player_blocks() -> void:
     for key in blocks.keys():
         var body := blocks[key] as Node
         if body != null and bool(body.get_meta("player_placed", false)):
+            if npc_system and npc_system.has_method("notify_navigation_block_removed") and body.has_meta("cell"):
+                npc_system.notify_navigation_block_removed(body.get_meta("cell"), String(body.get_meta("block_type", "")), body)
             body.queue_free()
             blocks.erase(key)
 
@@ -346,6 +355,8 @@ func clear_all_blocks() -> void:
     for key in blocks.keys():
         var body := blocks[key] as Node
         if body != null:
+            if npc_system and npc_system.has_method("notify_navigation_block_removed") and body.has_meta("cell"):
+                npc_system.notify_navigation_block_removed(body.get_meta("cell"), String(body.get_meta("block_type", "")), body)
             body.queue_free()
         blocks.erase(key)
 

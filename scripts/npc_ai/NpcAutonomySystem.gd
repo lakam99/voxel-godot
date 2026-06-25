@@ -7,6 +7,7 @@ const NpcBrainSchedulerScript := preload("res://scripts/npc_ai/NpcBrainScheduler
 const NpcConstantsScript := preload("res://scripts/npc_ai/NpcConstants.gd")
 const NpcEnumsScript := preload("res://scripts/npc_ai/NpcEnums.gd")
 const NavigationChangeBusScript := preload("res://scripts/npc_ai/navigation/NavigationChangeBus.gd")
+const NavigationWorldServiceScript := preload("res://scripts/npc_ai/navigation/NavigationWorldService.gd")
 const NpcTelemetryServiceScript := preload("res://scripts/npc_ai/debug/NpcTelemetryService.gd")
 
 var npc_system: Node
@@ -19,19 +20,27 @@ var blackboards_by_stable_id := {}
 var scheduler
 var telemetry
 var change_bus
+var navigation_world
 
 func _init() -> void:
 	scheduler = NpcBrainSchedulerScript.new()
 	telemetry = NpcTelemetryServiceScript.new()
 	change_bus = NavigationChangeBusScript.new()
+	navigation_world = NavigationWorldServiceScript.new()
+	navigation_world.setup(null, change_bus)
 
 func setup(system_node: Node, main_node: Node) -> void:
 	npc_system = system_node
 	main = main_node
+	navigation_world.setup(main, change_bus)
 	telemetry.record_event("_system", &"architecture", "setup", &"none", {
 		"architectureVersion": architecture_version,
 		"locomotionMode": locomotion_mode
 	})
+
+func _physics_process(_delta: float) -> void:
+	process_navigation_changes()
+	navigation_world.build_next_tiles(NpcConstantsScript.NAV_BUILD_MAX_JOBS_PER_TICK, NpcConstantsScript.NAV_BUILD_HARD_SLICE_USEC)
 
 func clear() -> void:
 	contexts_by_instance_id.clear()
@@ -40,6 +49,8 @@ func clear() -> void:
 	scheduler = NpcBrainSchedulerScript.new()
 	telemetry = NpcTelemetryServiceScript.new()
 	change_bus = NavigationChangeBusScript.new()
+	navigation_world = NavigationWorldServiceScript.new()
+	navigation_world.setup(main, change_bus)
 
 func register_legacy_npc(body: Node, profile: Dictionary, legacy_entry: Dictionary):
 	if body == null:
@@ -113,6 +124,21 @@ func notify_block_removed(cell: Vector3i, block_type: String, block: Node = null
 	change_bus.emit_change(NpcEnumsScript.CHANGE_KIND_BLOCK_REMOVED, object_id, bounds, [NavigationChangeBusScript.tile_key_for_cell(cell)])
 	telemetry.increment(&"change_block_removed")
 
+func notify_terrain_edited(cell: Vector2i, old_height: float, new_height: float) -> void:
+	var min_y := minf(old_height, new_height) - NpcConstantsScript.CELL_SIZE
+	var max_y := maxf(old_height, new_height) + NpcConstantsScript.CELL_SIZE
+	var origin := Vector3(float(cell.x) * NpcConstantsScript.CELL_SIZE - NpcConstantsScript.CELL_SIZE * 0.5, min_y, float(cell.y) * NpcConstantsScript.CELL_SIZE - NpcConstantsScript.CELL_SIZE * 0.5)
+	var bounds := AABB(origin, Vector3(NpcConstantsScript.CELL_SIZE, max_y - min_y, NpcConstantsScript.CELL_SIZE))
+	var object_id := "terrain:%d,%d" % [cell.x, cell.y]
+	change_bus.emit_change(NpcEnumsScript.CHANGE_KIND_TERRAIN_EDIT, object_id, bounds, NavigationChangeBusScript.tile_keys_for_bounds(bounds))
+	telemetry.increment(&"change_terrain_edit")
+
+func notify_prop_created(prop_id: String, prop: Node = null) -> void:
+	_emit_prop_change(NpcEnumsScript.CHANGE_KIND_PROP_CREATED, prop_id, prop)
+
+func notify_prop_removed(prop_id: String, prop: Node = null) -> void:
+	_emit_prop_change(NpcEnumsScript.CHANGE_KIND_PROP_REMOVED, prop_id, prop)
+
 func notify_chunk_loaded(chunk_key: Vector2i) -> void:
 	var object_id := "chunk:%d,%d" % [chunk_key.x, chunk_key.y]
 	change_bus.emit_change(NpcEnumsScript.CHANGE_KIND_CHUNK_LOADED, object_id, _bounds_for_chunk(chunk_key), [NavigationChangeBusScript.tile_key_for_chunk(chunk_key)])
@@ -139,6 +165,51 @@ func notify_door_state_changed(door: Node, open: bool) -> void:
 	change_bus.emit_change(NpcEnumsScript.CHANGE_KIND_DOOR_STATE, object_id, bounds, [tile_key])
 	telemetry.record_event("_system", &"door", "state_changed", NpcEnumsScript.DOOR_STATE_OPEN if open else NpcEnumsScript.DOOR_STATE_CLOSED, { "open": open })
 
+func notify_door_registered(door: Node) -> void:
+	var tile_key := "0,0"
+	var object_id := "door"
+	var bounds := AABB()
+	if door != null:
+		object_id = "door:%s" % String(door.name)
+		if door.has_meta("cell"):
+			var cell: Vector3i = door.get_meta("cell")
+			tile_key = NavigationChangeBusScript.tile_key_for_cell(cell)
+			bounds = _bounds_for_cell(cell)
+		elif door is Node3D:
+			var position := (door as Node3D).global_position
+			tile_key = NavigationChangeBusScript.tile_key_for_world_position(position)
+			bounds = AABB(position - Vector3.ONE * 0.5, Vector3.ONE)
+	change_bus.emit_change(NpcEnumsScript.CHANGE_KIND_DOOR_REGISTERED, object_id, bounds, [tile_key])
+	telemetry.increment(&"change_door_registered")
+
+func notify_structure_metadata_changed(structure_id: String, bounds: AABB, metadata := {}) -> void:
+	change_bus.emit_change(NpcEnumsScript.CHANGE_KIND_STRUCTURE_METADATA, "structure:%s" % structure_id, bounds, NavigationChangeBusScript.tile_keys_for_bounds(bounds))
+	telemetry.record_event("_system", &"semantic", "structure_metadata", &"none", metadata)
+
+func notify_semantic_changed(semantic_id: String, bounds: AABB, metadata := {}) -> void:
+	change_bus.emit_change(NpcEnumsScript.CHANGE_KIND_SEMANTIC_CHANGED, "semantic:%s" % semantic_id, bounds, NavigationChangeBusScript.tile_keys_for_bounds(bounds))
+	telemetry.record_event("_system", &"semantic", "changed", &"none", metadata)
+
+func register_semantic_region(kind: StringName, region_id: String, bounds: AABB, metadata := {}) -> int:
+	if navigation_world == null or region_id == "":
+		return 0
+	var revision: int = navigation_world.register_semantic_region(kind, region_id, bounds, metadata)
+	change_bus.emit_change(NpcEnumsScript.CHANGE_KIND_SEMANTIC_CHANGED, "semantic:%s" % region_id, bounds, NavigationChangeBusScript.tile_keys_for_bounds(bounds), revision)
+	telemetry.record_event("_system", &"semantic", "registered", kind, {
+		"regionId": region_id,
+		"revision": revision
+	})
+	return revision
+
+func process_navigation_changes() -> Array:
+	return navigation_world.process_change_bus() if navigation_world != null else []
+
+func request_navigation_tile(snapshot: Dictionary, priority := 0, profile = null) -> Dictionary:
+	return navigation_world.request_tile(snapshot, priority, profile) if navigation_world != null else {}
+
+func build_navigation_tiles(max_jobs := 1) -> Array:
+	return navigation_world.build_next_tiles(max_jobs, NpcConstantsScript.NAV_BUILD_HARD_SLICE_USEC) if navigation_world != null else []
+
 func stats() -> Dictionary:
 	return {
 		"architectureVersion": architecture_version,
@@ -146,7 +217,8 @@ func stats() -> Dictionary:
 		"contexts": contexts_by_stable_id.size(),
 		"scheduler": scheduler.stats(),
 		"telemetry": telemetry.stats(),
-		"changeBus": change_bus.stats()
+		"changeBus": change_bus.stats(),
+		"navigationWorld": navigation_world.stats()
 	}
 
 func _bounds_for_cell(cell: Vector3i) -> AABB:
@@ -158,3 +230,13 @@ func _bounds_for_chunk(chunk_key: Vector2i) -> AABB:
 	var span := float(NpcConstantsScript.NAV_TILE_CELL_SIZE) * NpcConstantsScript.CELL_SIZE
 	var origin := Vector3(float(chunk_key.x) * span, -128.0, float(chunk_key.y) * span)
 	return AABB(origin, Vector3(span, 256.0, span))
+
+func _emit_prop_change(kind: StringName, prop_id: String, prop: Node = null) -> void:
+	var object_id := "prop:%s" % prop_id
+	var bounds := AABB()
+	if prop is Node3D:
+		var position := (prop as Node3D).global_position
+		bounds = AABB(position - Vector3.ONE * NpcConstantsScript.CELL_SIZE * 0.5, Vector3.ONE * NpcConstantsScript.CELL_SIZE)
+	var tile_keys := NavigationChangeBusScript.tile_keys_for_bounds(bounds)
+	change_bus.emit_change(kind, object_id, bounds, tile_keys)
+	telemetry.increment(&"change_prop_removed" if kind == NpcEnumsScript.CHANGE_KIND_PROP_REMOVED else &"change_prop_created")

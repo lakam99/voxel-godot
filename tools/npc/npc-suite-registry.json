@@ -12,6 +12,12 @@
       "description": "Phase 02 shared character motor and CharacterBody3D NPC migration tests",
       "command": ".\\tools\\npc\\run-npc-motor-tests.ps1",
       "defaultArgs": ["-TimeMode", "Both"]
+    },
+    {
+      "id": "nav_world",
+      "description": "Phase 03 multi-surface navigation world and authoritative invalidation tests",
+      "command": ".\\tools\\npc\\run-npc-nav-world-tests.ps1",
+      "defaultArgs": ["-TimeMode", "Both"]
     }
   ]
 }
