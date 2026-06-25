@@ -1,5 +1,7 @@
 # NPC Pathfinding Completion Plan
 
+> Superseded notice (2026-06-25): this document is retained for historical context only. The controlling NPC implementation specification is `CODEX_NPC_PATHFINDING_FINAL_IMPLEMENTATION_PLAN.md`; use that file for new NPC autonomy, traversal, pathfinding, door, schedule, traffic, save, and verification work.
+
 This plan continues the first-pass NPC navigation redesign without repeating the verification and debugging traps found during implementation.
 
 ## Current Evidence
