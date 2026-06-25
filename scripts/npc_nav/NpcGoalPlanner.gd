@@ -3,6 +3,8 @@ class_name NpcGoalPlanner
 
 const CELL := 1.35
 const MAX_ROUTE_SCORED_CANDIDATES := 16
+const RESOURCE_SCAN_NODE_LIMIT := 1200
+const RESOURCE_SCAN_CANDIDATE_LIMIT := 48
 
 var system
 var main
@@ -273,8 +275,11 @@ func add_resource_prop_candidates(candidates: Array[Vector3], entry: Dictionary,
     var body := entry.get("body") as Node3D
     var origin: Vector3 = body.global_position if body != null else entry.get("porchPosition", Vector3.ZERO)
     var props: Array[Node3D] = []
-    for root_value in [main.get("chunk_root"), main.get("prop_root")]:
-        collect_job_props(root_value as Node, entry, job, props)
+    var remaining_scan_nodes := RESOURCE_SCAN_NODE_LIMIT
+    for root_value in [main.get("prop_root"), main.get("chunk_root")]:
+        remaining_scan_nodes = collect_job_props(root_value as Node, entry, job, props, remaining_scan_nodes, RESOURCE_SCAN_CANDIDATE_LIMIT)
+        if remaining_scan_nodes <= 0 or props.size() >= RESOURCE_SCAN_CANDIDATE_LIMIT:
+            break
     props.sort_custom(func(a: Node3D, b: Node3D) -> bool:
         return a.global_position.distance_squared_to(origin) < b.global_position.distance_squared_to(origin)
     )
@@ -294,18 +299,21 @@ func add_resource_prop_candidates(candidates: Array[Vector3], entry: Dictionary,
         if not added_for_prop:
             continue
 
-func collect_job_props(root: Node, entry: Dictionary, job: String, props: Array[Node3D]) -> void:
-    if root == null:
-        return
+func collect_job_props(root: Node, entry: Dictionary, job: String, props: Array[Node3D], max_nodes: int, max_props: int) -> int:
+    if root == null or max_nodes <= 0 or props.size() >= max_props:
+        return max_nodes
     var stack: Array[Node] = [root]
-    while not stack.is_empty():
+    var scanned := 0
+    while not stack.is_empty() and scanned < max_nodes and props.size() < max_props:
         var node := stack.pop_back() as Node
+        scanned += 1
         if node == null:
             continue
         if node is Node3D and prop_matches_job(node as Node3D, entry, job):
             props.append(node as Node3D)
         for child in node.get_children():
             stack.append(child)
+    return max_nodes - scanned
 
 func prop_matches_job(prop: Node3D, entry: Dictionary, job: String) -> bool:
     if not is_instance_valid(prop) or bool(prop.get_meta("npc_harvested", false)):

@@ -154,6 +154,8 @@ func test_generic_town_npc_navigation() -> void:
     var town_radius_world := float(generic_town.get("radius", 32)) * CELL
     var town_center_world := Vector2(float(generic_center_x) * CELL, float(generic_center_z) * CELL)
     for step in range(520):
+        if step % 80 == 0:
+            mark_progress("npc_nav_generic_town_jobs_%d" % step)
         npc_system.update_npcs(0.2, 1.0)
         for entry_variant in npc_entries:
             var entry: Dictionary = entry_variant
@@ -175,6 +177,8 @@ func test_generic_town_npc_navigation() -> void:
             targeted_forage_done = int(inventory_now.get("berries", 0)) > 0 and hunger_now > 38.0
         if saw_generic_worker_outside and int(stats_now.get("jobRuns", 0)) > job_runs_before and targeted_forage_done:
             break
+        if step % 20 == 19:
+            await wait_physics_frames(1)
 
     var job_stats: Dictionary = npc_system.stats()
     var forager_inventory: Dictionary = generic_forager.get("personalInventory", {}) if not generic_forager.is_empty() else {}
@@ -274,18 +278,14 @@ func test_npc_capsule_collision_gate() -> void:
     ) as Node3D
     await wait_physics_frames(3)
 
-    var body := StaticBody3D.new()
-    body.name = "NpcNavCapsuleGateNPC"
-    body.collision_layer = 4
-    body.collision_mask = 0
-    body.position = start_position
-    body.set_meta("kind", "npc")
+    var body := npc_system.create_npc_body("NpcNavCapsuleGateNPC", "npc") as CharacterBody3D
     npc_system.call("add_npc_collider", body)
     var npc_root := npc_system.get("npc_root") as Node3D
     if npc_root:
         npc_root.add_child(body)
     else:
         npc_system.add_child(body)
+    npc_system.safe_place_npc(body, start_position, null, "test_spawn")
     var entry: Dictionary = npc_system.register_npc(body, {
         "id": "npc-nav-capsule-gate",
         "name": "Capsule Gate",
@@ -383,19 +383,9 @@ func test_two_npcs_cross_narrow_door() -> void:
 
     var left_start := Vector3(float(start_cell.x + 1) * CELL, base_height + 0.04, float(start_cell.y) * CELL)
     var right_start := Vector3(float(start_cell.x + 7) * CELL, base_height + 0.04, float(start_cell.y) * CELL)
-    var left_npc := StaticBody3D.new()
-    left_npc.name = "NpcNavDoorLeft"
-    left_npc.collision_layer = 4
-    left_npc.collision_mask = 0
-    left_npc.position = left_start
-    left_npc.set_meta("kind", "npc")
+    var left_npc := npc_system.create_npc_body("NpcNavDoorLeft", "npc") as CharacterBody3D
     npc_system.call("add_npc_collider", left_npc)
-    var right_npc := StaticBody3D.new()
-    right_npc.name = "NpcNavDoorRight"
-    right_npc.collision_layer = 4
-    right_npc.collision_mask = 0
-    right_npc.position = right_start
-    right_npc.set_meta("kind", "npc")
+    var right_npc := npc_system.create_npc_body("NpcNavDoorRight", "npc") as CharacterBody3D
     npc_system.call("add_npc_collider", right_npc)
     var npc_root := npc_system.get("npc_root") as Node3D
     if npc_root:
@@ -404,6 +394,8 @@ func test_two_npcs_cross_narrow_door() -> void:
     else:
         npc_system.add_child(left_npc)
         npc_system.add_child(right_npc)
+    npc_system.safe_place_npc(left_npc, left_start, null, "test_spawn")
+    npc_system.safe_place_npc(right_npc, right_start, null, "test_spawn")
 
     var town_center := Vector2i(start_cell.x + 4, start_cell.y)
     var left_entry: Dictionary = npc_system.register_npc(left_npc, {
@@ -543,18 +535,14 @@ func test_home_return_fallback_semantics() -> void:
     await wait_physics_frames(2)
 
     var level: float = main.call("terrain_height_cell", home_cell.x, home_cell.y)
-    var body := StaticBody3D.new()
-    body.name = "NpcNavHomeFallback"
-    body.collision_layer = 4
-    body.collision_mask = 0
-    body.position = Vector3(float(start_cell.x) * CELL, level + 0.04, float(start_cell.y) * CELL)
-    body.set_meta("kind", "npc")
+    var body := npc_system.create_npc_body("NpcNavHomeFallback", "npc") as CharacterBody3D
     npc_system.call("add_npc_collider", body)
     var npc_root := npc_system.get("npc_root") as Node3D
     if npc_root:
         npc_root.add_child(body)
     else:
         npc_system.add_child(body)
+    npc_system.safe_place_npc(body, Vector3(float(start_cell.x) * CELL, level + 0.04, float(start_cell.y) * CELL), null, "test_spawn")
     var entry: Dictionary = npc_system.register_npc(body, {
         "id": "npc-nav-home-fallback",
         "name": "Home Fallback Tester",
@@ -590,7 +578,7 @@ func test_home_return_fallback_semantics() -> void:
     var next_home_target: Vector3 = npc_system.home_route_target(entry)
     var advanced_route_waypoint := int(entry.get("homeRouteIndex", 0)) == 1 and world_to_flat_cell(next_home_target) == second_route_cell
 
-    body.global_position = Vector3(float(porch_cell.x + 1) * CELL, level + 0.04, float(porch_cell.y + 1) * CELL)
+    npc_system.safe_place_npc(body, Vector3(float(porch_cell.x + 1) * CELL, level + 0.04, float(porch_cell.y + 1) * CELL), null, "test_home_setup")
     entry["homeRoutePositions"] = []
     entry["homeRouteIndex"] = 0
     entry["routeStatus"] = "arrived"
@@ -599,7 +587,7 @@ func test_home_return_fallback_semantics() -> void:
     var advanced_from_porch := world_to_flat_cell(final_home_target) == home_cell
 
     var porch_position: Vector3 = entry.get("porchPosition", body.global_position)
-    body.global_position = porch_position
+    npc_system.safe_place_npc(body, porch_position, null, "test_home_setup")
     entry["insideHome"] = false
     body.set_meta("npc_inside_home", false)
     entry["homeRoutePositions"] = []
@@ -670,14 +658,14 @@ func test_reachability_aware_goal_selection() -> void:
     await wait_physics_frames(3)
 
     var entries: Array[Dictionary] = []
-    var bodies: Array[StaticBody3D] = []
+    var bodies: Array[Node3D] = []
     var wood_entry := make_nav_test_npc(npc_system, "npc-nav-wood-worker", "Wood Worker", "wood", start_cell, town_radius, base_height, Vector2i(start_cell.x - 1, start_cell.y))
     var stone_entry := make_nav_test_npc(npc_system, "npc-nav-stone-worker", "Stone Worker", "stone", start_cell, town_radius, base_height, Vector2i(start_cell.x + 1, start_cell.y))
     var guard_entry := make_nav_test_npc(npc_system, "npc-nav-guard-worker", "Guard", "", start_cell, town_radius, base_height, Vector2i(start_cell.x, start_cell.y + 2), true)
     for entry in [wood_entry, stone_entry, guard_entry]:
         if not entry.is_empty():
             entries.append(entry)
-            var body := entry.get("body") as StaticBody3D
+            var body := entry.get("body") as Node3D
             if body != null:
                 bodies.append(body)
 
@@ -752,7 +740,7 @@ func test_reachability_aware_goal_selection() -> void:
     )
 
     for entry in entries:
-        var body := entry.get("body") as StaticBody3D
+        var body := entry.get("body") as Node3D
         if body != null:
             npc_system.unregister_npc(body)
     for body in bodies:
@@ -766,18 +754,14 @@ func test_reachability_aware_goal_selection() -> void:
         hostile.queue_free()
 
 func make_nav_test_npc(npc_system, npc_id: String, npc_name: String, job: String, town_center: Vector2i, town_radius: int, level: float, cell: Vector2i, can_fight := false) -> Dictionary:
-    var body := StaticBody3D.new()
-    body.name = npc_name
-    body.collision_layer = 4
-    body.collision_mask = 0
-    body.position = Vector3(float(cell.x) * CELL, level + 0.04, float(cell.y) * CELL)
-    body.set_meta("kind", "npc")
+    var body := npc_system.create_npc_body(npc_name, "npc") as CharacterBody3D
     npc_system.call("add_npc_collider", body)
     var npc_root := npc_system.get("npc_root") as Node3D
     if npc_root:
         npc_root.add_child(body)
     else:
         npc_system.add_child(body)
+    npc_system.safe_place_npc(body, Vector3(float(cell.x) * CELL, level + 0.04, float(cell.y) * CELL), null, "test_spawn")
     return npc_system.register_npc(body, {
         "id": npc_id,
         "name": npc_name,

@@ -201,14 +201,13 @@ func npc_spec(id: String, npc_name: String, role: String, cell: Vector2i, home: 
     }, true)
     return result
 
-func spawn_npc(spec: Dictionary, level: float, look_target: Vector3) -> StaticBody3D:
-    var body := StaticBody3D.new()
-    body.name = "TutorialNPC_%s" % String(spec.get("id", "villager"))
+func spawn_npc(spec: Dictionary, level: float, look_target: Vector3) -> CharacterBody3D:
+    if main == null or main.npc_system == null or not main.npc_system.has_method("create_npc_body"):
+        return null
+    var body := main.npc_system.create_npc_body("TutorialNPC_%s" % String(spec.get("id", "villager")), "tutorial_npc") as CharacterBody3D
+    if body == null:
+        return null
     var cell: Vector2i = spec.get("cell", Vector2i.ZERO)
-    body.position = Vector3(float(cell.x) * CELL, level + 0.02, float(cell.y) * CELL)
-    body.collision_layer = 4
-    body.collision_mask = 0
-    body.set_meta("kind", "tutorial_npc")
     body.set_meta("npc_id", String(spec.get("id", "")))
     body.set_meta("npc_name", String(spec.get("name", "Villager")))
     body.set_meta("npc_role", String(spec.get("role", "")))
@@ -217,12 +216,13 @@ func spawn_npc(spec: Dictionary, level: float, look_target: Vector3) -> StaticBo
     add_npc_visual(body, spec.get("color", Color(0.55, 0.42, 0.31)), spec.get("accent", Color(0.80, 0.66, 0.42)), String(spec.get("name", "Villager")), String(spec.get("role", "")))
     add_npc_collider(body)
     system.npc_root.add_child(body)
+    main.npc_system.safe_place_npc(body, Vector3(float(cell.x) * CELL, level + 0.02, float(cell.y) * CELL), null, "tutorial_spawn")
     register_with_npc_system(body, spec, level, cell)
     if body.global_position.distance_to(look_target) > 0.2:
         body.look_at(look_target, Vector3.UP)
     return body
 
-func register_with_npc_system(body: StaticBody3D, spec: Dictionary, level: float, cell: Vector2i) -> void:
+func register_with_npc_system(body: Node3D, spec: Dictionary, level: float, cell: Vector2i) -> void:
     if main == null or main.npc_system == null or not main.npc_system.has_method("register_npc"):
         return
     main.npc_system.register_npc(body, {
@@ -246,14 +246,9 @@ func register_with_npc_system(body: StaticBody3D, spec: Dictionary, level: float
         "tutorial": true
     })
 
-func add_npc_collider(body: StaticBody3D) -> void:
-    var capsule := CapsuleShape3D.new()
-    capsule.radius = 0.34
-    capsule.height = 1.62
-    var collider := CollisionShape3D.new()
-    collider.shape = capsule
-    collider.position.y = 0.84
-    body.add_child(collider)
+func add_npc_collider(body: Node3D) -> void:
+    if npc_visual_factory != null:
+        npc_visual_factory.add_collider(body)
 
 func add_npc_visual(parent: Node3D, color: Color, accent: Color, npc_name: String, role: String) -> void:
     var body_material := make_material(color, 0.82)

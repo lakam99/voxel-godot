@@ -38,7 +38,7 @@ func nearest_hostile(origin: Vector3, radius: float) -> Node3D:
 func fire_at_hostile(entry: Dictionary, target: Node3D) -> void:
     if target == null or hostile_system == null or float(entry.get("cooldown", 0.0)) > 0.0:
         return
-    var body := entry.get("body") as StaticBody3D
+    var body := entry.get("body") as Node3D
     if body == null:
         return
     var start := body.global_position + Vector3(0.0, 1.58, 0.0)
@@ -57,7 +57,7 @@ func fire_at_hostile(entry: Dictionary, target: Node3D) -> void:
 func strike_hostile(entry: Dictionary, target: Node3D) -> void:
     if target == null or hostile_system == null or float(entry.get("cooldown", 0.0)) > 0.0:
         return
-    var body := entry.get("body") as StaticBody3D
+    var body := entry.get("body") as Node3D
     if body == null:
         return
     var flat_distance := Vector2(

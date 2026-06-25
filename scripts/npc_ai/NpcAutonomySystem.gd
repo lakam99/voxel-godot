@@ -73,6 +73,28 @@ func unregister_legacy_npc(body: Node) -> void:
 	scheduler.unregister_agent(context.stable_id)
 	telemetry.record_event(context.stable_id, &"registration", "legacy_unregistered")
 
+func record_motion(entry: Dictionary, motor_state) -> void:
+	if motor_state == null:
+		return
+	var body := entry.get("body") as Node
+	var context = context_for_body(body)
+	var stable_id := String(entry.get("id", "npc"))
+	if context != null:
+		stable_id = String(context.get("stable_id"))
+	var displacement: Vector3 = motor_state.get("displacement")
+	var requested: Vector3 = motor_state.get("requested_velocity")
+	var applied: Vector3 = motor_state.get("applied_velocity")
+	telemetry.increment(&"motor_frames")
+	if bool(motor_state.get("blocked")):
+		telemetry.increment(&"motor_blocked_contacts")
+	telemetry.record_event(stable_id, &"motor", "motion", &"none", {
+		"requestedVelocity": [requested.x, requested.y, requested.z],
+		"appliedVelocity": [applied.x, applied.y, applied.z],
+		"displacement": [displacement.x, displacement.y, displacement.z],
+		"blocked": bool(motor_state.get("blocked")),
+		"blockedContact": String(motor_state.get("blocked_contact_category"))
+	})
+
 func context_for_body(body: Node):
 	return contexts_by_instance_id.get(body.get_instance_id()) if body != null else null
 

@@ -130,11 +130,16 @@ func update_held_animation(entry: Dictionary, delta: float) -> void:
     else:
         anchor.position += Vector3(0.0, 0.02 * pulse, -0.04 * pulse)
 
-func add_collider(parent: StaticBody3D) -> void:
+func add_collider(parent: Node3D) -> void:
+    if parent == null:
+        return
+    if parent.get_node_or_null("NpcCollider") != null:
+        return
     var capsule := CapsuleShape3D.new()
     capsule.radius = 0.34
     capsule.height = 1.62
     var collider := CollisionShape3D.new()
+    collider.name = "NpcCollider"
     collider.shape = capsule
     collider.position.y = 0.84
     parent.add_child(collider)

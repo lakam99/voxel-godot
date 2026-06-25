@@ -43,12 +43,13 @@ func invalidate() -> void:
     if navigation_world != null:
         navigation_world.invalidate()
 
-func move_npc(entry: Dictionary, target: Vector3, max_distance: float, moving_home := false, allow_outside := false) -> float:
+func move_npc(entry: Dictionary, target: Vector3, max_distance: float, moving_home := false, allow_outside := false, physics_delta := 0.0166667) -> float:
     ensure_ready()
-    var body := entry.get("body") as StaticBody3D
+    var body := entry.get("body") as CharacterBody3D
     if body == null or max_distance <= 0.0 or goal_planner == null or locomotion == null:
         return 0.0
     var intent: Dictionary = goal_planner.make_intent(entry, target, max_distance, moving_home, allow_outside)
+    intent["physicsDelta"] = physics_delta
     var result: Dictionary = locomotion.move(entry, intent, max_distance, route_planner, navigation_world)
     return float(result.get("moved", 0.0))
 

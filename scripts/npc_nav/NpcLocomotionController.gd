@@ -2,6 +2,7 @@ extends RefCounted
 class_name NpcLocomotionController
 
 const CELL := 1.35
+const NpcConstantsScript := preload("res://scripts/npc_ai/NpcConstants.gd")
 const CAPSULE_RADIUS := 0.34
 const CAPSULE_HEIGHT := 1.64
 const CELL_RESERVATION_TTL := 5
@@ -27,7 +28,7 @@ func begin_frame() -> void:
     expire_reservations(door_reservations)
 
 func move(entry: Dictionary, intent: Dictionary, max_distance: float, planner, world) -> Dictionary:
-    var body := entry.get("body") as StaticBody3D
+    var body := entry.get("body") as CharacterBody3D
     if body == null or main == null or planner == null or world == null or max_distance <= 0.0:
         return { "moved": 0.0, "status": "blocked", "reason": "missing_context" }
     var previous: Vector3 = body.global_position
@@ -131,11 +132,25 @@ func move(entry: Dictionary, intent: Dictionary, max_distance: float, planner, w
         return { "moved": 0.0, "status": "waiting", "reason": final_reason }
     claim_reservation(reservations, reservation_key, entry, priority, CELL_RESERVATION_TTL)
 
-    body.global_position = move_candidate
-    var facing_step := move_candidate - previous
-    facing_step.y = 0.0
-    if facing_step.length_squared() > 0.001:
-        body.rotation.y = atan2(facing_step.x, facing_step.z)
+    var physics_delta := maxf(0.0001, float(intent.get("physicsDelta", 0.0166667)))
+    var motor_result: Dictionary = {}
+    if system != null and system.has_method("apply_npc_route_motion"):
+        motor_result = system.apply_npc_route_motion(entry, previous, move_candidate, physics_delta)
+    else:
+        return { "moved": 0.0, "status": "blocked", "reason": "missing_motion_adapter" }
+    var actual_position: Vector3 = motor_result.get("position", body.global_position)
+    var moved := float(motor_result.get("moved", flat_distance(previous, actual_position)))
+    if bool(motor_result.get("blocked", false)) and moved <= 0.001:
+        entry["blockedMoveTime"] = float(entry.get("blockedMoveTime", 0.0)) + max_distance
+        if system != null:
+            system.npc_blocked_moves += 1
+        if float(entry.get("blockedMoveTime", 0.0)) > CELL * 0.90:
+            entry["routeForceReplan"] = true
+            entry["blockedMoveTime"] = 0.0
+            increment_stuck_recovery(entry)
+        var motor_reason := String(motor_result.get("reason", "motor_blocked"))
+        set_route_status(entry, "waiting", motor_reason)
+        return { "moved": moved, "status": "waiting", "reason": motor_reason }
     entry["blockedMoveTime"] = 0.0
     if yielded_step:
         set_route_status(entry, "yielding", "")
@@ -144,7 +159,7 @@ func move(entry: Dictionary, intent: Dictionary, max_distance: float, planner, w
         entry["routeYieldTicks"] = 0
         set_route_status(entry, "moving", "")
     increment_validated_move(entry)
-    return { "moved": flat_distance(previous, move_candidate), "status": String(entry.get("routeStatus", "moving")), "reason": "" }
+    return { "moved": moved, "status": String(entry.get("routeStatus", "moving")), "reason": "" }
 
 func ensure_route(entry: Dictionary, intent: Dictionary, planner, world) -> Dictionary:
     var target_cell: Vector2i = intent.get("targetCell", world.world_cell(intent.get("target", Vector3.ZERO)))
@@ -287,7 +302,7 @@ func validate_candidate(entry: Dictionary, previous: Vector3, candidate: Vector3
         var reservation_key: String = world.cell_key(footprint_cell)
         if footprint_cell != previous_cell and reservation_blocks_entry(reservations, reservation_key, entry, priority):
             return { "ok": false, "reason": reservation_conflict_reason(reservations, reservation_key, entry, priority) }
-    var body := entry.get("body") as StaticBody3D
+    var body := entry.get("body") as CharacterBody3D
     if body != null and capsule_hits_obstacle(entry, body, previous, candidate):
         return { "ok": false, "reason": "blocked_capsule" }
     return { "ok": true, "candidate": candidate }
@@ -426,7 +441,7 @@ func entry_loses_to_dynamic(entry: Dictionary, blocker, priority := 0) -> bool:
         return priority < blocker_priority
     return npc_id > blocker_id
 
-func capsule_hits_obstacle(entry: Dictionary, body: StaticBody3D, previous: Vector3, candidate: Vector3) -> bool:
+func capsule_hits_obstacle(entry: Dictionary, body: CharacterBody3D, previous: Vector3, candidate: Vector3) -> bool:
     if system == null or body == null or capsule_shape == null:
         return false
     var delta: Vector3 = candidate - previous
@@ -438,7 +453,7 @@ func capsule_hits_obstacle(entry: Dictionary, body: StaticBody3D, previous: Vect
         var query := PhysicsShapeQueryParameters3D.new()
         query.shape = capsule_shape
         query.transform = Transform3D(Basis(), sample + Vector3(0.0, CAPSULE_HEIGHT * 0.5, 0.0))
-        query.collision_mask = 1
+        query.collision_mask = NpcConstantsScript.COLLISION_NPC_STATIC_QUERY_MASK
         query.collide_with_bodies = true
         query.collide_with_areas = false
         query.exclude = [body.get_rid()]
@@ -452,7 +467,7 @@ func capsule_hits_obstacle(entry: Dictionary, body: StaticBody3D, previous: Vect
                 return true
     return false
 
-func collider_blocks_capsule(entry: Dictionary, collider: Node, body: StaticBody3D) -> bool:
+func collider_blocks_capsule(entry: Dictionary, collider: Node, body: CharacterBody3D) -> bool:
     var kind := String(collider.get_meta("kind", ""))
     if kind == "block":
         var block_type := String(collider.get_meta("block_type", ""))
