@@ -162,6 +162,8 @@ static func apply_held_profile(profile: Dictionary, id: String) -> void:
         profile["source_energy"] = 3.05
         profile["source_range"] = 11.4
         profile["source_min_scale"] = 0.08
+        profile["source_max_scale"] = 1.52
+        profile["source_flicker_speed"] = 3.0
         profile["terrain_energy"] = 3.35
         profile["terrain_range"] = 13.6
         profile["bounce_energy"] = 2.35
@@ -263,10 +265,12 @@ static func create_light(parent: Node3D, prefix: String, profile_id: String, con
     var casts_shadows := bool(profile.get("shadows", true)) and role == ROLE_SOURCE
     var flicker := 0.88 if role == ROLE_SOURCE else 0.18 if role == ROLE_TERRAIN_WASH else 0.12
     var range_flicker := 0.28 if role == ROLE_SOURCE else 0.06 if role == ROLE_TERRAIN_WASH else 0.04
-    var speed := 2.10 if role == ROLE_SOURCE else 1.55 if role == ROLE_TERRAIN_WASH else 1.25
+    var default_speed := 2.10 if role == ROLE_SOURCE else 1.55 if role == ROLE_TERRAIN_WASH else 1.25
+    var speed := float(profile.get("%s_flicker_speed" % key_prefix, default_speed))
     var default_min_scale := -1.0 if role == ROLE_SOURCE else 0.74 if role == ROLE_TERRAIN_WASH else 0.82
     var min_scale := float(profile.get("%s_min_scale" % key_prefix, default_min_scale))
-    var max_scale := 1.38 if role == ROLE_SOURCE else 1.08 if role == ROLE_TERRAIN_WASH else 1.05
+    var default_max_scale := 1.38 if role == ROLE_SOURCE else 1.08 if role == ROLE_TERRAIN_WASH else 1.05
+    var max_scale := float(profile.get("%s_max_scale" % key_prefix, default_max_scale))
     light.configure(
         profile.get("color", FIRE_COLOR),
         float(profile.get("%s_energy" % key_prefix, 1.0)),
