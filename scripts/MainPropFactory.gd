@@ -133,6 +133,8 @@ func complete_destroy_target(hit: Dictionary, collider: Node, kind: String, mate
     elif kind == "block":
         var block_cell: Vector3i = collider.get_meta("cell")
         var block_type: String = collider.get_meta("block_type")
+        if npc_system and npc_system.has_method("notify_navigation_block_removed"):
+            npc_system.notify_navigation_block_removed(block_cell, block_type, collider)
         blocks.erase(block_cell)
         collider.queue_free()
         inventory_system.add_item(ItemCatalogScript.material_drop(material_id), 1)

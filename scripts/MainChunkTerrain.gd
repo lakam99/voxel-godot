@@ -541,6 +541,8 @@ func create_block(cell: Vector3i, block_type: String, options: Dictionary = {}) 
 
     block_root.add_child(body)
     blocks[cell] = body
+    if npc_system and npc_system.has_method("notify_navigation_block_created"):
+        npc_system.notify_navigation_block_created(cell, block_type, body)
     return body
 
 func is_structural_block_type(block_type: String) -> bool:
@@ -655,7 +657,10 @@ func collapse_structure_component(component: Array) -> int:
         spawn_pickup_stack(ItemCatalogScript.material_drop(block_type), 1, block.global_position)
         if utility_system and utility_system.active_block == block:
             utility_system.close()
-        blocks.erase(block.get_meta("cell"))
+        var block_cell: Vector3i = block.get_meta("cell")
+        if npc_system and npc_system.has_method("notify_navigation_block_removed"):
+            npc_system.notify_navigation_block_removed(block_cell, block_type, block)
+        blocks.erase(block_cell)
         block.queue_free()
         collapsed += 1
     if collapsed > 0:

@@ -1,0 +1,35 @@
+extends RefCounted
+class_name NpcConstants
+
+const ARCHITECTURE_VERSION := "phase01_contracts_observability"
+const LEGACY_LOCOMOTION_MODE := "legacy_static_body_adapter"
+
+const CELL_SIZE := 1.35
+const NAV_TILE_CELL_SIZE := 16
+
+const TELEMETRY_RING_CAPACITY := 256
+const TELEMETRY_GLOBAL_COUNTER_LIMIT := 128
+const BRAIN_UPDATES_PER_TICK := 8
+const BRAIN_REGISTERED_AGENT_LIMIT := 256
+const CHANGE_BUS_MAX_PENDING_TILES := 512
+
+# Existing layer values observed before Phase 01. These are documentation constants,
+# not a renumbering of physics layers.
+const COLLISION_WORLD_QUERY := 1
+const COLLISION_TERRAIN_BODY := 2
+const COLLISION_NPC_BODY := 4
+const COLLISION_NONBLOCKING_PATH := 8
+const COLLISION_HOSTILE_LOS_MASK := 1 | 4
+const COLLISION_NPC_STATIC_QUERY_MASK := 1
+
+const DEFAULT_NPC_RADIUS := 0.42
+const DEFAULT_NPC_STANDING_HEIGHT := 1.72
+const DEFAULT_NPC_STEP_UP := 1.24
+const DEFAULT_NPC_SAFE_DROP := 1.55
+const DEFAULT_NPC_MAX_FLOOR_ANGLE_DEGREES := 46.0
+const DEFAULT_NPC_WALK_SPEED := 2.45
+const DEFAULT_NPC_ACCELERATION := 14.0
+const DEFAULT_DOOR_MINIMUM_WIDTH := 0.78
+const DEFAULT_HEADROOM_MARGIN := 0.08
+const DEFAULT_PERSONAL_SPACE_MARGIN := 0.10
+

@@ -6,6 +6,7 @@ const NpcPathingScript := preload("res://scripts/NpcPathing.gd")
 const NpcCombatScript := preload("res://scripts/NpcCombat.gd")
 const NpcProfileRulesScript := preload("res://scripts/NpcProfileRules.gd")
 const NpcStatsScript := preload("res://scripts/NpcStats.gd")
+const NpcAutonomySystemScript := preload("res://scripts/npc_ai/NpcAutonomySystem.gd")
 
 const CELL := 1.35
 const NO_DETOUR := Vector3(9999999.0, 9999999.0, 9999999.0)
@@ -37,6 +38,7 @@ var pending_door_closes: Array = []
 var visual_factory
 var pathing
 var combat
+var autonomy_system
 var components_initialized := false
 var component_init_attempted := false
 var last_spawn_scan_frame := -1
@@ -48,7 +50,16 @@ func setup(main_node, hostile_system_node) -> void:
     npc_root = Node3D.new()
     npc_root.name = "TownNPCs"
     add_child(npc_root)
+    ensure_autonomy_system()
     ensure_components()
+
+func ensure_autonomy_system() -> void:
+    if autonomy_system != null and is_instance_valid(autonomy_system):
+        return
+    autonomy_system = NpcAutonomySystemScript.new()
+    autonomy_system.name = "NpcAutonomySystem"
+    add_child(autonomy_system)
+    autonomy_system.setup(self, main)
 
 func ensure_components() -> void:
     if components_initialized or component_init_attempted:
@@ -75,12 +86,16 @@ func clear() -> void:
     spawned_town_keys.clear()
     focused_dialogue_body = null
     pending_door_closes.clear()
+    if autonomy_system:
+        autonomy_system.clear()
     if combat:
         combat.clear()
 
 func unregister_npc(body: Node) -> void:
     if body == null:
         return
+    if autonomy_system:
+        autonomy_system.unregister_legacy_npc(body)
     npc_by_id.erase(body.get_instance_id())
     if focused_dialogue_body == body:
         focused_dialogue_body = null
@@ -198,6 +213,8 @@ func register_npc(body: StaticBody3D, profile: Dictionary) -> Dictionary:
         "jumpIntentTime": 0.0
     }
     apply_npc_metadata(body, entry, home_cell, porch_cell, guard_cell, job)
+    ensure_autonomy_system()
+    autonomy_system.register_legacy_npc(body, profile, entry)
     ensure_npc_held_item(entry)
     npcs.append(entry)
     npc_by_id[body.get_instance_id()] = entry
@@ -980,6 +997,26 @@ func add_npc_collider(parent: StaticBody3D) -> void:
 
 func add_npc_visual(parent: Node3D, body_material: StandardMaterial3D, accent_material: StandardMaterial3D, npc_name: String, role: String, can_fight := false) -> void:
     visual_factory.add_visual(parent, body_material, accent_material, npc_name, role)
+
+func notify_navigation_block_created(cell: Vector3i, block_type: String, block: Node = null) -> void:
+    if autonomy_system:
+        autonomy_system.notify_block_created(cell, block_type, block)
+
+func notify_navigation_block_removed(cell: Vector3i, block_type: String, block: Node = null) -> void:
+    if autonomy_system:
+        autonomy_system.notify_block_removed(cell, block_type, block)
+
+func notify_navigation_chunk_loaded(chunk_key: Vector2i) -> void:
+    if autonomy_system:
+        autonomy_system.notify_chunk_loaded(chunk_key)
+
+func notify_navigation_chunk_unloaded(chunk_key: Vector2i) -> void:
+    if autonomy_system:
+        autonomy_system.notify_chunk_unloaded(chunk_key)
+
+func notify_navigation_door_state_changed(door: Node, open: bool) -> void:
+    if autonomy_system:
+        autonomy_system.notify_door_state_changed(door, open)
 
 func cell_to_position(cell: Vector2i, level: float) -> Vector3:
     return Vector3(float(cell.x) * CELL, level + 0.04, float(cell.y) * CELL)
