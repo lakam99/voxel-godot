@@ -6,6 +6,12 @@
       "description": "Phase 00 focused contract and baseline characterization tests",
       "command": ".\\tools\\npc\\run-npc-contract-tests.ps1",
       "defaultArgs": ["-TimeMode", "Both"]
+    },
+    {
+      "id": "motor",
+      "description": "Phase 02 shared character motor and CharacterBody3D NPC migration tests",
+      "command": ".\\tools\\npc\\run-npc-motor-tests.ps1",
+      "defaultArgs": ["-TimeMode", "Both"]
     }
   ]
 }

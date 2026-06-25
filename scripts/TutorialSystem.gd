@@ -387,6 +387,7 @@ func focus_dialogue_npc() -> void:
         main.npc_system.focus_dialogue_npc(last_dialogue_node, main.player.global_position)
 
 func clear_dialogue_focus() -> void:
+    last_dialogue_node = null
     if main and main.npc_system and main.npc_system.has_method("clear_dialogue_focus"):
         main.npc_system.clear_dialogue_focus()
 
@@ -502,7 +503,7 @@ func rescue_party_home() -> bool:
 func settle_rescue_party_home() -> void:
     rescue_system.settle_rescue_party_home()
 
-func find_tutorial_npc(npc_id: String) -> StaticBody3D:
+func find_tutorial_npc(npc_id: String) -> Node3D:
     return rescue_system.find_tutorial_npc(npc_id)
 
 func show_speech_bubble(npc_id: String, text: String, duration := 2.6) -> void:
@@ -574,7 +575,7 @@ func force_stormy_night() -> void:
 func spawn_tutorial_npcs() -> void:
     scene_builder.spawn_tutorial_npcs()
 
-func spawn_npc(spec: Dictionary, level: float, look_target: Vector3) -> StaticBody3D:
+func spawn_npc(spec: Dictionary, level: float, look_target: Vector3) -> Node3D:
     return scene_builder.spawn_npc(spec, level, look_target)
 
 func add_npc_visual(parent: Node3D, color: Color, accent: Color, npc_name: String, role: String) -> void:

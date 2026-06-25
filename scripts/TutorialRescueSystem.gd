@@ -91,7 +91,7 @@ func setup_rescue_scene() -> void:
     spawn_rescue_torch(system.rescue_site)
     var forager := find_tutorial_npc(RESCUE_FORAGER_ID)
     if forager:
-        forager.global_position = system.rescue_site
+        safe_place_tutorial_npc(forager, system.rescue_site, "rescue_encounter_spawn")
         forager.set_meta("npc_force_hold", true)
         forager.set_meta("npc_rescue_stranded", true)
         show_speech_bubble(RESCUE_FORAGER_ID, "Help!", 3.8)
@@ -193,6 +193,9 @@ func start_rescue_escort() -> void:
     system.rescue_escort_started = true
     var guard := find_tutorial_npc(RESCUE_GUARD_ID)
     if guard and main and main.npc_system:
+        system.clear_dialogue_focus()
+        guard.set_meta("npc_dialogue_focused", false)
+        guard.set_meta("npc_force_hold", false)
         var guard_target: Vector3 = system.rescue_site + Vector3(-CELL * 1.45, 0.0, -CELL * 1.0)
         guard_target.y = main.height_at_world(guard_target.x, guard_target.z) + 0.04
         main.npc_system.set_scripted_target(guard, guard_target, true, true)
@@ -264,15 +267,20 @@ func settle_rescue_party_home() -> void:
     var forager := find_tutorial_npc(RESCUE_FORAGER_ID)
     var guard := find_tutorial_npc(RESCUE_GUARD_ID)
     if forager:
-        forager.global_position = home
+        safe_place_tutorial_npc(forager, home, "rescue_return_home")
     if guard:
-        guard.global_position = home + Vector3(CELL * 0.75, 0.0, CELL * 0.75)
+        safe_place_tutorial_npc(guard, home + Vector3(CELL * 0.75, 0.0, CELL * 0.75), "rescue_return_home")
 
-func find_tutorial_npc(npc_id: String) -> StaticBody3D:
+func safe_place_tutorial_npc(body: Node3D, position: Vector3, reason: String) -> void:
+    if body == null or main == null or main.npc_system == null or not main.npc_system.has_method("safe_place_npc"):
+        return
+    main.npc_system.safe_place_npc(body, position, null, reason)
+
+func find_tutorial_npc(npc_id: String) -> Node3D:
     if system.npc_root == null:
         return null
     for child in system.npc_root.get_children():
-        var body := child as StaticBody3D
+        var body := child as Node3D
         if body != null and String(body.get_meta("npc_id", "")) == npc_id:
             return body
     return null

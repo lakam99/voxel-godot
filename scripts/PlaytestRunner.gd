@@ -678,11 +678,37 @@ func test_tutorial_start_system() -> void:
     var rescue_bubble_present: bool = niko_body != null and niko_body.get_node_or_null("SpeechBubble") != null
     var guard_before: Vector3 = (sera as Node3D).global_position if sera is Node3D else Vector3.ZERO
     var guard_briefed: bool = sera != null and bool(tutorial_system.interact_with(sera))
+    if sera is Node3D:
+        var player_clear_position := guard_before + Vector3(-CELL * 2.25, 0.0, CELL * 2.25)
+        player_clear_position.y = main.call("height_at_world", player_clear_position.x, player_clear_position.z)
+        player.global_position = player_clear_position
+        player.velocity = Vector3.ZERO
     for i in range(36):
         npc_system.update_npcs(0.12, 0.0)
     var escort_state: Dictionary = tutorial_system.state()
     var escort_started: bool = bool(escort_state.get("rescueEscortStarted", false))
-    var guard_moved: bool = sera is Node3D and (sera as Node3D).global_position.distance_to(guard_before) > 0.2
+    var guard_after: Vector3 = (sera as Node3D).global_position if sera is Node3D else Vector3.ZERO
+    var guard_distance := guard_after.distance_to(guard_before)
+    var guard_moved: bool = sera is Node3D and guard_distance > 0.2
+    var guard_route_status := String((sera as Node).get_meta("npc_route_status", "")) if sera is Node else ""
+    var guard_route_reason := String((sera as Node).get_meta("npc_route_reason", "")) if sera is Node else ""
+    var guard_scripted := sera is Node and (sera as Node).has_meta("npc_scripted_target")
+    var guard_focused := sera is Node and bool((sera as Node).get_meta("npc_dialogue_focused", false))
+    var guard_held := sera is Node and bool((sera as Node).get_meta("npc_force_hold", false))
+    var guard_target: Vector3 = (sera as Node).get_meta("npc_scripted_target", Vector3.ZERO) if guard_scripted else Vector3.ZERO
+    var guard_requested: Vector3 = (sera as Node).get_meta("npc_requested_velocity", Vector3.ZERO) if sera is Node else Vector3.ZERO
+    var guard_applied: Vector3 = (sera as Node).get_meta("npc_applied_velocity", Vector3.ZERO) if sera is Node else Vector3.ZERO
+    var guard_displacement: Vector3 = (sera as Node).get_meta("npc_last_displacement", Vector3.ZERO) if sera is Node else Vector3.ZERO
+    var guard_blocked_contact := String((sera as Node).get_meta("npc_blocked_contact", "")) if sera is Node else ""
+    var guard_motion_summary := "pos %s target %s req %s applied %s disp %s block %s near %s" % [
+        compact_vec3(guard_after),
+        compact_vec3(guard_target),
+        compact_vec3(guard_requested),
+        compact_vec3(guard_applied),
+        compact_vec3(guard_displacement),
+        guard_blocked_contact,
+        nearest_actor_summary(sera as Node3D)
+    ]
     var rescue_hostile_count := 0
     for enemy_state_variant in hostile_system.enemies.duplicate():
         var enemy_state: Dictionary = enemy_state_variant
@@ -724,13 +750,20 @@ func test_tutorial_start_system() -> void:
             and not bool(tutorial_system.is_bed_locked())
             and final_objective_complete
             and ready_objective,
-        "started %s, active %s, bed locked %s, guard %s/%s/%s, niko held %s, torch %s, bubble %s, rescue %d/%d, returning %s, complete %s, objective %s, ready %s, steps %s" % [
+        "started %s, active %s, bed locked %s, guard %s/%s/%s dist %.2f route %s/%s scripted %s focused %s held %s, motion [%s], niko held %s, torch %s, bubble %s, rescue %d/%d, returning %s, complete %s, objective %s, ready %s, steps %s" % [
             str(final_started),
             str(final_active),
             str(final_bed_locked),
             str(guard_briefed),
             str(escort_started),
             str(guard_moved),
+            guard_distance,
+            guard_route_status,
+            guard_route_reason,
+            str(guard_scripted),
+            str(guard_focused),
+            str(guard_held),
+            guard_motion_summary,
             str(niko_held),
             str(rescue_torch_present),
             str(rescue_bubble_present),
@@ -4549,6 +4582,8 @@ func test_npc_equipment_and_pathing() -> void:
     var base_height: float = main.call("terrain_height_cell", start_cell.x, start_cell.y)
     var start_position := Vector3(float(start_cell.x) * CELL, base_height + 0.04, float(start_cell.y) * CELL)
     var target_position := Vector3(float(start_cell.x + 8) * CELL, base_height + 0.04, float(start_cell.y) * CELL)
+    player.global_position = Vector3(float(start_cell.x - 4) * CELL, base_height, float(start_cell.y - 4) * CELL)
+    player.velocity = Vector3.ZERO
     var wall_x := start_cell.x + 3
     var wall_z := start_cell.y
     var wall_y := base_height + CELL * 0.48
@@ -4566,18 +4601,14 @@ func test_npc_equipment_and_pathing() -> void:
         main.call("create_block", wall_cell, "stoneBlock", { "world_y": wall_y })
     await wait_physics_frames(3)
 
-    var body := StaticBody3D.new()
-    body.name = "PlaytestPathingNPC"
-    body.collision_layer = 4
-    body.collision_mask = 0
-    body.position = start_position
-    body.set_meta("kind", "npc")
+    var body := npc_system.create_npc_body("PlaytestPathingNPC", "npc") as CharacterBody3D
     npc_system.call("add_npc_collider", body)
     var npc_root := npc_system.get("npc_root") as Node3D
     if npc_root:
         npc_root.add_child(body)
     else:
         npc_system.add_child(body)
+    npc_system.safe_place_npc(body, start_position, null, "playtest_spawn")
     var entry: Dictionary = npc_system.register_npc(body, {
         "id": "playtest-pathing-npc",
         "name": "Path Tester",
@@ -4638,7 +4669,7 @@ func test_npc_equipment_and_pathing() -> void:
         ]
     )
 
-    body.global_position = start_position
+    npc_system.safe_place_npc(body, start_position, null, "playtest_reset")
     entry["pathWaypoints"] = []
     entry["routeCells"] = []
     entry["routeForceReplan"] = true
@@ -4682,7 +4713,7 @@ func test_npc_equipment_and_pathing() -> void:
         ]
     )
 
-    body.global_position = start_position
+    npc_system.safe_place_npc(body, start_position, null, "playtest_reset")
     entry["pathWaypoints"] = []
     entry["routeCells"] = []
     entry["routeForceReplan"] = true
@@ -7322,6 +7353,116 @@ func npc_shelter_debug(npc_system) -> String:
         if details.size() >= 8:
             break
     return "; ".join(details)
+
+func compact_vec3(value: Vector3) -> String:
+    return "(%.2f,%.2f,%.2f)" % [value.x, value.y, value.z]
+
+func nearest_actor_summary(origin: Node3D) -> String:
+    if origin == null or main == null:
+        return "missing"
+    var best_name := "none"
+    var best_distance := INF
+    if player != null and player != origin:
+        best_name = "player"
+        best_distance = origin.global_position.distance_to(player.global_position)
+    var npc_system = main.get("npc_system")
+    if npc_system != null:
+        var entries: Array = npc_system.get("npcs")
+        for entry_variant in entries:
+            var entry: Dictionary = entry_variant
+            var body := entry.get("body") as Node3D
+            if body == null or not is_instance_valid(body) or body == origin:
+                continue
+            var distance := origin.global_position.distance_to(body.global_position)
+            if distance < best_distance:
+                best_distance = distance
+                best_name = "npc:%s" % String(entry.get("id", body.name))
+    var hostile_system = main.get("hostile_system")
+    if hostile_system != null:
+        for enemy_variant in hostile_system.get("enemies"):
+            var enemy: Dictionary = enemy_variant
+            var body := enemy.get("body") as Node3D
+            if body == null or not is_instance_valid(body) or body == origin:
+                continue
+            var distance := origin.global_position.distance_to(body.global_position)
+            if distance < best_distance:
+                best_distance = distance
+                best_name = "hostile:%s" % body.name
+    return "%s %.2f overlap %s static %s" % [
+        best_name,
+        best_distance,
+        overlap_summary(origin),
+        nearest_static_summary(origin)
+    ]
+
+func overlap_summary(origin: Node3D) -> String:
+    if origin == null or origin.get_world_3d() == null:
+        return "missing"
+    var shape := CapsuleShape3D.new()
+    shape.radius = 0.38
+    shape.height = 1.62
+    var query := PhysicsShapeQueryParameters3D.new()
+    query.shape = shape
+    query.transform = Transform3D(Basis(), origin.global_position + Vector3(0.0, 0.81, 0.0))
+    query.collision_mask = 0x7fffffff
+    query.collide_with_bodies = true
+    query.collide_with_areas = false
+    var collision_object := origin as CollisionObject3D
+    if collision_object != null:
+        query.exclude = [collision_object.get_rid()]
+    var hits: Array = origin.get_world_3d().direct_space_state.intersect_shape(query, 8)
+    var names: Array[String] = []
+    for hit_variant in hits:
+        var hit: Dictionary = hit_variant
+        var collider := hit.get("collider") as Node
+        if collider == null or collider == origin:
+            continue
+        names.append("%s:%s" % [collider.name, String(collider.get_meta("kind", ""))])
+    if names.is_empty():
+        return "none"
+    return ",".join(names)
+
+func nearest_static_summary(origin: Node3D) -> String:
+    if origin == null or main == null:
+        return "missing"
+    var best := {
+        "distance": INF,
+        "label": "none"
+    }
+    var roots := [
+        main.get("prop_root") as Node,
+        main.get("chunk_root") as Node
+    ]
+    var remaining := 1800
+    for root in roots:
+        if root == null:
+            continue
+        remaining = nearest_static_in_tree(root, origin, best, remaining)
+        if remaining <= 0:
+            break
+    return "%s %.2f" % [String(best.get("label", "none")), float(best.get("distance", INF))]
+
+func nearest_static_in_tree(node: Node, origin: Node3D, best: Dictionary, remaining: int) -> int:
+    if node == null or remaining <= 0:
+        return remaining
+    remaining -= 1
+    var node_3d := node as Node3D
+    if node_3d != null and node_3d != origin and node is PhysicsBody3D:
+        var kind := String(node.get_meta("kind", ""))
+        if kind in ["block", "prop", "hostile", "npc", "tutorial_npc"]:
+            var distance := origin.global_position.distance_to(node_3d.global_position)
+            if distance < float(best.get("distance", INF)):
+                best["distance"] = distance
+                best["label"] = "%s:%s:%s" % [
+                    node.name,
+                    kind,
+                    String(node.get_meta("block_type", node.get_meta("prop_type", "")))
+                ]
+    for child in node.get_children():
+        remaining = nearest_static_in_tree(child, origin, best, remaining)
+        if remaining <= 0:
+            break
+    return remaining
 
 func icon_distinct_colors(texture: Texture2D) -> int:
     if texture == null:

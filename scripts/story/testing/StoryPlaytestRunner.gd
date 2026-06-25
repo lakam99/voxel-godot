@@ -2016,7 +2016,7 @@ func test_story_dialogue_router_generic_fallback() -> void:
     reset_story_runtime(director)
     advance_to_clue_stage(director)
     var router = main.get("story_dialogue_router")
-    var body := StaticBody3D.new()
+    var body := CharacterBody3D.new()
     body.name = "GeneratedStoryResident"
     body.set_meta("kind", "npc")
     body.set_meta("npc_name", "Iven")

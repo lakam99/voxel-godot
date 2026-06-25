@@ -1,8 +1,8 @@
 extends RefCounted
 class_name NpcConstants
 
-const ARCHITECTURE_VERSION := "phase01_contracts_observability"
-const LEGACY_LOCOMOTION_MODE := "legacy_static_body_adapter"
+const ARCHITECTURE_VERSION := "phase02_physics_motor"
+const LEGACY_LOCOMOTION_MODE := "legacy_route_intent_motor_adapter"
 
 const CELL_SIZE := 1.35
 const NAV_TILE_CELL_SIZE := 16
@@ -21,6 +21,9 @@ const COLLISION_NPC_BODY := 4
 const COLLISION_NONBLOCKING_PATH := 8
 const COLLISION_HOSTILE_LOS_MASK := 1 | 4
 const COLLISION_NPC_STATIC_QUERY_MASK := 1
+const COLLISION_PLAYER_BODY := 1
+const COLLISION_NPC_BODY_MASK := 1 | 2 | 4
+const COLLISION_NPC_SAFE_PLACEMENT_MASK := 1 | 2 | 4
 
 const DEFAULT_NPC_RADIUS := 0.42
 const DEFAULT_NPC_STANDING_HEIGHT := 1.72

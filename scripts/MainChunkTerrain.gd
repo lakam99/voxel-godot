@@ -1,6 +1,7 @@
 extends "res://scripts/MainInteractionFlow.gd"
 
 const LocalLightRigScript := preload("res://scripts/LocalLightRig.gd")
+const NpcConstantsScript := preload("res://scripts/npc_ai/NpcConstants.gd")
 
 func add_block_mesh(parent: Node3D, size: Vector3, offset: Vector3, material_key: String, rotation := Vector3.ZERO) -> MeshInstance3D:
     var mesh_instance := MeshInstance3D.new()
@@ -536,8 +537,8 @@ func create_block(cell: Vector3i, block_type: String, options: Dictionary = {}) 
     body.add_child(collider)
     if block_type == "door":
         add_door_interaction_proxy(body, collider_size, collider_offset)
-    elif block_type == "cobblestonePath":
-        body.collision_layer = 8
+    elif block_type == "cobblestonePath" or block_type == "torch":
+        body.collision_layer = NpcConstantsScript.COLLISION_NONBLOCKING_PATH
 
     block_root.add_child(body)
     blocks[cell] = body

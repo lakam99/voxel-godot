@@ -18,6 +18,13 @@ const NpcActionInstanceScript := preload("res://scripts/npc_ai/contracts/NpcActi
 const InteractionResultScript := preload("res://scripts/npc_ai/contracts/InteractionResult.gd")
 const NpcTelemetryServiceScript := preload("res://scripts/npc_ai/debug/NpcTelemetryService.gd")
 const NavigationChangeBusScript := preload("res://scripts/npc_ai/navigation/NavigationChangeBus.gd")
+const CharacterMotor3DScript := preload("res://scripts/npc_ai/motor/CharacterMotor3D.gd")
+const CharacterMotorCommandScript := preload("res://scripts/npc_ai/contracts/CharacterMotorCommand.gd")
+const CharacterMotorProfileScript := preload("res://scripts/npc_ai/contracts/CharacterMotorProfile.gd")
+const NpcMotionControllerScript := preload("res://scripts/npc_ai/NpcMotionController.gd")
+const NpcSafePlacementServiceScript := preload("res://scripts/npc_ai/NpcSafePlacementService.gd")
+const NpcLocomotionControllerScript := preload("res://scripts/npc_nav/NpcLocomotionController.gd")
+const NpcAgentScript := preload("res://scripts/npc_ai/NpcAgent.gd")
 
 var suite_filter := "contract"
 var case_filter := ""
@@ -134,7 +141,7 @@ func run() -> void:
 	finish()
 
 func contract_cases() -> Array[Dictionary]:
-	return [
+	var cases: Array[Dictionary] = [
 		{
 			"id": "npc_contract_clock_day_snapshot",
 			"suite": "contract",
@@ -262,6 +269,39 @@ func contract_cases() -> Array[Dictionary]:
 			"callable": Callable(self, "test_all_runner_registry_baseline")
 		}
 	]
+	cases.append_array(motor_cases())
+	return cases
+
+func motor_cases() -> Array[Dictionary]:
+	var ids := [
+		["npc_motor_player_characterization_flat", "test_motor_player_characterization_flat"],
+		["npc_motor_player_characterization_slope", "test_motor_player_characterization_slope"],
+		["npc_motor_player_characterization_jump", "test_motor_player_characterization_jump"],
+		["npc_motor_npc_flat_acceleration", "test_motor_npc_flat_acceleration"],
+		["npc_motor_npc_slope_limit", "test_motor_npc_slope_limit"],
+		["npc_motor_npc_step_up_limit", "test_motor_npc_step_up_limit"],
+		["npc_motor_npc_safe_drop", "test_motor_npc_safe_drop"],
+		["npc_motor_wall_slide_no_penetration", "test_motor_wall_slide_no_penetration"],
+		["npc_motor_fence_window_corner_no_penetration", "test_motor_fence_window_corner_no_penetration"],
+		["npc_motor_closed_door_blocks", "test_motor_closed_door_blocks"],
+		["npc_motor_open_door_clears", "test_motor_open_door_clears"],
+		["npc_motor_player_npc_solid_separation", "test_motor_player_npc_solid_separation"],
+		["npc_motor_decorative_path_torch_nonblocking_mask", "test_motor_decorative_path_torch_nonblocking_mask"],
+		["npc_motor_no_route_transform_write", "test_motor_no_route_transform_write"],
+		["npc_motor_no_unstick_teleport", "test_motor_no_unstick_teleport"],
+		["npc_motor_spawn_safe_placement", "test_motor_spawn_safe_placement"],
+		["npc_motor_spawn_rejects_occupied_capsule", "test_motor_spawn_rejects_occupied_capsule"],
+		["npc_motor_every_active_actor_physics_tick", "test_motor_every_active_actor_physics_tick"]
+	]
+	var cases: Array[Dictionary] = []
+	for spec in ids:
+		cases.append({
+			"id": String(spec[0]),
+			"suite": "motor",
+			"timeModes": ["day", "night"],
+			"callable": Callable(self, String(spec[1]))
+		})
+	return cases
 
 func suite_matches(case_suite: String) -> bool:
 	return suite_filter == "" or suite_filter == "all" or suite_filter == case_suite
@@ -533,9 +573,9 @@ func test_partial_never_arrival(_mode: String) -> Dictionary:
 	)
 
 func test_stable_tie_break(_mode: String) -> Dictionary:
-	var body_10 := StaticBody3D.new()
+	var body_10 := CharacterBody3D.new()
 	body_10.name = "fallback-10"
-	var body_02 := StaticBody3D.new()
+	var body_02 := CharacterBody3D.new()
 	body_02.name = "fallback-02"
 	var context_10 = NpcAgentContextScript.from_legacy_profile(body_10, { "id": "npc-10", "name": "Ten" })
 	var context_02 = NpcAgentContextScript.from_legacy_profile(body_02, { "id": "npc-02", "name": "Two" })
@@ -576,9 +616,9 @@ func test_profile_capability_filter(_mode: String) -> Dictionary:
 	)
 
 func test_rng_stream_isolation(mode: String) -> Dictionary:
-	var body_a := StaticBody3D.new()
+	var body_a := CharacterBody3D.new()
 	body_a.name = "NpcA"
-	var body_b := StaticBody3D.new()
+	var body_b := CharacterBody3D.new()
 	body_b.name = "NpcB"
 	var context_a = NpcAgentContextScript.from_legacy_profile(body_a, { "id": "npc-a" })
 	var context_b = NpcAgentContextScript.from_legacy_profile(body_b, { "id": "npc-b" })
@@ -745,9 +785,9 @@ func test_change_bus_monotonic_revision(_mode: String) -> Dictionary:
 	)
 
 func test_guard_duty_not_can_fight(_mode: String) -> Dictionary:
-	var fighter_body := StaticBody3D.new()
+	var fighter_body := CharacterBody3D.new()
 	fighter_body.name = "Fighter"
-	var night_body := StaticBody3D.new()
+	var night_body := CharacterBody3D.new()
 	night_body.name = "NightWatcher"
 	var fighter = NpcAgentContextScript.from_legacy_profile(fighter_body, { "id": "fighter", "canFight": true, "nightGuard": false })
 	var watcher = NpcAgentContextScript.from_legacy_profile(night_body, { "id": "watcher", "canFight": false, "nightGuard": true })
@@ -764,8 +804,9 @@ func test_guard_duty_not_can_fight(_mode: String) -> Dictionary:
 func test_autonomy_composition_no_main_layer(_mode: String) -> Dictionary:
 	var system := NpcSystemScript.new()
 	system.setup(null, null)
-	var body := StaticBody3D.new()
+	var body := CharacterBody3D.new()
 	body.name = "ContractNPC"
+	system.add_child(body)
 	var entry: Dictionary = system.register_npc(body, {
 		"id": "contract-npc",
 		"name": "Contract NPC",
@@ -826,6 +867,286 @@ func test_autonomy_composition_no_main_layer(_mode: String) -> Dictionary:
 		["autonomy_system_child", "typed_context_association", "no_new_main_layer", "legacy_entry_preserved"],
 		{ "stats": stats, "mainScripts": main_scripts, "unexpectedMainScripts": unexpected_main_scripts, "entryId": entry.get("id", "") }
 	)
+
+func test_motor_player_characterization_flat(_mode: String) -> Dictionary:
+	var profile = CharacterMotorProfileScript.player_default()
+	var result := run_motor_once(profile, CharacterMotorCommandScript.from_direction(Vector3.RIGHT, float(profile.get("walk_speed"))), true)
+	var state = result.get("state")
+	var applied: Vector3 = state.get("applied_velocity") if state != null else Vector3.ZERO
+	var passed := (
+		NpcTestAssertionsScript.approx_equal(float(profile.get("walk_speed")), 9.5)
+		and NpcTestAssertionsScript.approx_equal(float(profile.get("sprint_speed")), 15.5)
+		and NpcTestAssertionsScript.approx_equal(float(profile.get("acceleration")), 14.0)
+		and applied.x > 0.1
+	)
+	return outcome(
+		passed,
+		"profile=%s applied=%s" % [JSON.stringify(profile.to_summary()), str(applied)],
+		["player_walk_speed", "player_sprint_speed", "player_acceleration", "motor_applies_flat_velocity"],
+		{ "profile": profile.to_summary(), "appliedVelocity": [applied.x, applied.y, applied.z] }
+	)
+
+func test_motor_player_characterization_slope(_mode: String) -> Dictionary:
+	var profile = CharacterMotorProfileScript.player_default()
+	var passed := (
+		NpcTestAssertionsScript.approx_equal(float(profile.get("floor_max_angle_degrees")), 46.0)
+		and NpcTestAssertionsScript.approx_equal(float(profile.get("floor_snap_length")), 0.32)
+		and NpcTestAssertionsScript.approx_equal(float(profile.get("terrain_walkable_rise")), 1.55)
+		and NpcTestAssertionsScript.approx_equal(float(profile.get("terrain_walkable_drop")), 1.55)
+	)
+	return outcome(
+		passed,
+		"profile=%s" % JSON.stringify(profile.to_summary()),
+		["player_floor_angle", "player_floor_snap", "player_walkable_rise", "player_walkable_drop"],
+		{ "profile": profile.to_summary() }
+	)
+
+func test_motor_player_characterization_jump(_mode: String) -> Dictionary:
+	var profile = CharacterMotorProfileScript.player_default()
+	var command = CharacterMotorCommandScript.from_direction(Vector3.ZERO, 0.0, true, false)
+	var result := run_motor_once(profile, command, true)
+	var state = result.get("state")
+	var velocity: Vector3 = state.get("velocity") if state != null else Vector3.ZERO
+	var passed := (
+		state != null
+		and bool(state.get("jumped"))
+		and velocity.y >= float(profile.get("jump_speed")) - 0.01
+		and NpcTestAssertionsScript.approx_equal(float(profile.get("jump_speed")), 8.9)
+		and NpcTestAssertionsScript.approx_equal(float(profile.get("gravity")), 26.0)
+	)
+	return outcome(
+		passed,
+		"jumped=%s velocity=%s profile=%s" % [str(state != null and bool(state.get("jumped"))), str(velocity), JSON.stringify(profile.to_summary())],
+		["player_jump_speed", "player_gravity", "motor_jump_state"],
+		{ "velocity": [velocity.x, velocity.y, velocity.z], "profile": profile.to_summary() }
+	)
+
+func test_motor_npc_flat_acceleration(_mode: String) -> Dictionary:
+	var profile = CharacterMotorProfileScript.npc_default()
+	var command = CharacterMotorCommandScript.from_velocity(Vector3(float(profile.get("walk_speed")), 0.0, 0.0))
+	var result := run_motor_once(profile, command, true)
+	var state = result.get("state")
+	var requested: Vector3 = state.get("requested_velocity") if state != null else Vector3.ZERO
+	var velocity: Vector3 = state.get("velocity") if state != null else Vector3.ZERO
+	var passed := (
+		state != null
+		and bool(profile.get("instant_horizontal_velocity"))
+		and NpcTestAssertionsScript.approx_equal(float(profile.get("walk_speed")), 2.6)
+		and absf(velocity.x - requested.x) <= 0.05
+	)
+	return outcome(
+		passed,
+		"requested=%s velocity=%s profile=%s" % [str(requested), str(velocity), JSON.stringify(profile.to_summary())],
+		["npc_profile_instant_velocity", "npc_walk_speed", "npc_motor_velocity_matches_request"],
+		{ "requestedVelocity": [requested.x, requested.y, requested.z], "velocity": [velocity.x, velocity.y, velocity.z], "profile": profile.to_summary() }
+	)
+
+func test_motor_npc_slope_limit(_mode: String) -> Dictionary:
+	var profile = CharacterMotorProfileScript.npc_default()
+	var passed := NpcTestAssertionsScript.approx_equal(float(profile.get("floor_max_angle_degrees")), 46.0)
+	return outcome(passed, "floorMax=%.2f" % float(profile.get("floor_max_angle_degrees")), ["npc_floor_angle_shared"], profile.to_summary())
+
+func test_motor_npc_step_up_limit(_mode: String) -> Dictionary:
+	var profile = CharacterMotorProfileScript.npc_default()
+	var passed := float(profile.get("terrain_walkable_rise")) <= 1.20 and float(profile.get("terrain_walkable_rise")) > 0.4
+	return outcome(passed, "stepUp=%.2f" % float(profile.get("terrain_walkable_rise")), ["npc_step_up_limit"], profile.to_summary())
+
+func test_motor_npc_safe_drop(_mode: String) -> Dictionary:
+	var profile = CharacterMotorProfileScript.npc_default()
+	var passed := float(profile.get("terrain_walkable_drop")) <= 1.35 and float(profile.get("terrain_landing_distance")) <= 0.20
+	return outcome(passed, "drop=%.2f landing=%.2f" % [float(profile.get("terrain_walkable_drop")), float(profile.get("terrain_landing_distance"))], ["npc_safe_drop_limit", "npc_landing_snap_limit"], profile.to_summary())
+
+func test_motor_wall_slide_no_penetration(_mode: String) -> Dictionary:
+	var locomotion_text := read_text("res://scripts/npc_nav/NpcLocomotionController.gd")
+	var motor_text := read_text("res://scripts/npc_ai/motor/CharacterMotor3D.gd")
+	var passed := locomotion_text.find("global_position =") < 0 and motor_text.find("global_position.x =") < 0 and motor_text.find("global_position.z =") < 0 and motor_text.find("move_and_slide()") >= 0
+	return outcome(
+		passed,
+		"locomotionGlobalWrite=%d motorHorizontalWriteX=%d motorHorizontalWriteZ=%d" % [locomotion_text.find("global_position ="), motor_text.find("global_position.x ="), motor_text.find("global_position.z =")],
+		["route_motion_no_transform_write", "motor_uses_move_and_slide", "motor_no_horizontal_teleport"],
+		{ "locomotionGlobalWrite": locomotion_text.find("global_position ="), "motorMoveAndSlide": motor_text.find("move_and_slide()") }
+	)
+
+func test_motor_fence_window_corner_no_penetration(_mode: String) -> Dictionary:
+	var locomotion_text := read_text("res://scripts/npc_nav/NpcLocomotionController.gd")
+	var passed := (
+		locomotion_text.find("capsule_hits_obstacle") >= 0
+		and locomotion_text.find("collider_blocks_capsule") >= 0
+		and locomotion_text.find("\"prop\", \"npc\", \"tutorial_npc\", \"hostile\"") >= 0
+		and locomotion_text.find("intersect_shape") >= 0
+	)
+	return outcome(
+		passed,
+		"capsule=%d blockers=%d intersect=%d" % [locomotion_text.find("capsule_hits_obstacle"), locomotion_text.find("collider_blocks_capsule"), locomotion_text.find("intersect_shape")],
+		["capsule_probe", "dynamic_blockers_include_npcs", "shape_query_collision_probe"],
+		{}
+	)
+
+func test_motor_closed_door_blocks(_mode: String) -> Dictionary:
+	var controller = NpcLocomotionControllerScript.new()
+	var door := Node3D.new()
+	var body := CharacterBody3D.new()
+	door.set_meta("kind", "block")
+	door.set_meta("block_type", "door")
+	door.set_meta("open", false)
+	var blocks := bool(controller.collider_blocks_capsule({}, door, body))
+	door.free()
+	body.free()
+	return outcome(blocks, "closedDoorBlocks=%s" % str(blocks), ["closed_door_blocks_capsule"], { "closedDoorBlocks": blocks })
+
+func test_motor_open_door_clears(_mode: String) -> Dictionary:
+	var controller = NpcLocomotionControllerScript.new()
+	var door := Node3D.new()
+	var body := CharacterBody3D.new()
+	door.set_meta("kind", "block")
+	door.set_meta("block_type", "door")
+	door.set_meta("open", true)
+	var clears := not bool(controller.collider_blocks_capsule({}, door, body))
+	door.free()
+	body.free()
+	return outcome(clears, "openDoorClears=%s" % str(clears), ["open_door_clears_capsule"], { "openDoorClears": clears })
+
+func test_motor_player_npc_solid_separation(_mode: String) -> Dictionary:
+	var npc_mask: int = NpcConstantsScript.COLLISION_NPC_BODY_MASK
+	var passed := (
+		(npc_mask & NpcConstantsScript.COLLISION_PLAYER_BODY) != 0
+		and (npc_mask & NpcConstantsScript.COLLISION_NPC_BODY) != 0
+		and (npc_mask & NpcConstantsScript.COLLISION_WORLD_QUERY) != 0
+	)
+	return outcome(
+		passed,
+		"npcMask=%d playerLayer=%d npcLayer=%d worldLayer=%d" % [npc_mask, NpcConstantsScript.COLLISION_PLAYER_BODY, NpcConstantsScript.COLLISION_NPC_BODY, NpcConstantsScript.COLLISION_WORLD_QUERY],
+		["npc_collides_with_player_layer", "npc_collides_with_npc_layer", "npc_collides_with_world_layer"],
+		{ "npcMask": npc_mask, "playerLayer": NpcConstantsScript.COLLISION_PLAYER_BODY, "npcLayer": NpcConstantsScript.COLLISION_NPC_BODY }
+	)
+
+func test_motor_decorative_path_torch_nonblocking_mask(_mode: String) -> Dictionary:
+	var npc_mask: int = NpcConstantsScript.COLLISION_NPC_BODY_MASK
+	var safe_mask: int = NpcConstantsScript.COLLISION_NPC_SAFE_PLACEMENT_MASK
+	var static_query_mask: int = NpcConstantsScript.COLLISION_NPC_STATIC_QUERY_MASK
+	var decorative_layer: int = NpcConstantsScript.COLLISION_NONBLOCKING_PATH
+	var chunk_text := read_text("res://scripts/MainChunkTerrain.gd")
+	var creation_assigns_nonblocking := (
+		chunk_text.find("block_type == \"cobblestonePath\" or block_type == \"torch\"") >= 0
+		and chunk_text.find("COLLISION_NONBLOCKING_PATH") >= 0
+	)
+	var masks_exclude_decorative := (
+		(npc_mask & decorative_layer) == 0
+		and (safe_mask & decorative_layer) == 0
+		and (static_query_mask & decorative_layer) == 0
+	)
+	var passed := creation_assigns_nonblocking and masks_exclude_decorative
+	return outcome(
+		passed,
+		"npcMask=%d safeMask=%d staticMask=%d decorative=%d creation=%s" % [npc_mask, safe_mask, static_query_mask, decorative_layer, str(creation_assigns_nonblocking)],
+		["decorative_layer_excluded_from_npc_masks", "path_torch_assigned_nonblocking_layer"],
+		{ "npcMask": npc_mask, "safeMask": safe_mask, "staticQueryMask": static_query_mask, "decorativeLayer": decorative_layer, "creationAssignsNonblocking": creation_assigns_nonblocking }
+	)
+
+func test_motor_no_route_transform_write(_mode: String) -> Dictionary:
+	var files := {
+		"NpcSystem": read_text("res://scripts/NpcSystem.gd"),
+		"NpcPathing": read_text("res://scripts/NpcPathing.gd"),
+		"NpcLocomotionController": read_text("res://scripts/npc_nav/NpcLocomotionController.gd"),
+		"NpcMotionController": read_text("res://scripts/npc_ai/NpcMotionController.gd")
+	}
+	var offenders: Array[String] = []
+	for key in files.keys():
+		var text: String = files[key]
+		if text.find("global_position =") >= 0 or text.find(".position =") >= 0:
+			offenders.append(String(key))
+	var passed := offenders.is_empty()
+	return outcome(passed, "offenders=%s" % JSON.stringify(offenders), ["no_route_global_position_assignment", "no_route_position_assignment"], { "offenders": offenders })
+
+func test_motor_no_unstick_teleport(_mode: String) -> Dictionary:
+	var locomotion_text := read_text("res://scripts/npc_nav/NpcLocomotionController.gd")
+	var passed := (
+		locomotion_text.find("increment_stuck_recovery") >= 0
+		and locomotion_text.find("safe_place_npc") < 0
+		and locomotion_text.find("teleport") < 0
+		and locomotion_text.find("global_position =") < 0
+	)
+	return outcome(
+		passed,
+		"stuck=%d safePlace=%d teleport=%d globalWrite=%d" % [locomotion_text.find("increment_stuck_recovery"), locomotion_text.find("safe_place_npc"), locomotion_text.find("teleport"), locomotion_text.find("global_position =")],
+		["stuck_recovery_replans_only", "no_locomotion_safe_placement", "no_teleport_keyword"],
+		{}
+	)
+
+func test_motor_spawn_safe_placement(_mode: String) -> Dictionary:
+	var service = NpcSafePlacementServiceScript.new()
+	service.setup(null, null)
+	var body := motor_body("SafePlacementNPC")
+	var result: Dictionary = service.place_spawn(body, Vector3(2.0, 1.0, 3.0), CharacterMotorProfileScript.npc_default(), "test_spawn")
+	var passed := bool(result.get("ok", false)) and bool(body.get_meta("npc_safe_placement_validated", false)) and body.global_position.distance_to(Vector3(2.0, 1.0, 3.0)) <= 0.001
+	body.queue_free()
+	return outcome(
+		passed,
+		"result=%s position=%s" % [JSON.stringify(result), str(result.get("position", Vector3.ZERO))],
+		["safe_placement_ok", "safe_placement_sets_meta", "safe_placement_applies_position"],
+		{ "result": result }
+	)
+
+func test_motor_spawn_rejects_occupied_capsule(_mode: String) -> Dictionary:
+	var text := read_text("res://scripts/npc_ai/NpcSafePlacementService.gd")
+	var passed := text.find("intersect_shape") >= 0 and text.find("\"occupied_capsule\"") >= 0 and text.find("COLLISION_NPC_SAFE_PLACEMENT_MASK") >= 0
+	return outcome(
+		passed,
+		"intersect=%d occupied=%d mask=%d" % [text.find("intersect_shape"), text.find("\"occupied_capsule\""), text.find("COLLISION_NPC_SAFE_PLACEMENT_MASK")],
+		["safe_placement_uses_shape_query", "safe_placement_rejects_occupied_capsule", "safe_placement_uses_central_mask"],
+		{}
+	)
+
+func test_motor_every_active_actor_physics_tick(_mode: String) -> Dictionary:
+	var agent := NpcAgentScript.new() as CharacterBody3D
+	agent.name = "PhysicsTickNPC"
+	add_child(agent)
+	for i in range(5):
+		agent.call("_physics_process", 1.0 / 60.0)
+	var ticks := int(agent.get("physics_tick_count"))
+	var meta_ticks := int(agent.get_meta("npc_physics_ticks", 0))
+	agent.queue_free()
+	var passed := ticks == 5 and meta_ticks == 5
+	return outcome(passed, "ticks=%d meta=%d" % [ticks, meta_ticks], ["agent_physics_process_ticks", "agent_tick_meta"], { "ticks": ticks, "metaTicks": meta_ticks })
+
+func motor_body(node_name: String) -> CharacterBody3D:
+	var body := CharacterBody3D.new()
+	body.name = node_name
+	body.collision_layer = NpcConstantsScript.COLLISION_NPC_BODY
+	body.collision_mask = NpcConstantsScript.COLLISION_NPC_BODY_MASK
+	var shape := CapsuleShape3D.new()
+	shape.radius = 0.34
+	shape.height = 1.62
+	var collider := CollisionShape3D.new()
+	collider.name = "MotorTestCollider"
+	collider.shape = shape
+	collider.position.y = 0.84
+	body.add_child(collider)
+	add_child(body)
+	return body
+
+func run_motor_once(profile, command, grounded := true) -> Dictionary:
+	var body := motor_body("MotorTestBody")
+	var motor = CharacterMotor3DScript.new()
+	command.terrain_grounded = grounded
+	command.grounded_hint = grounded
+	command.jump_snap_time = 0.0
+	var state = motor.call("apply", body, command, profile, 1.0 / 60.0, null)
+	var result := {
+		"state": state,
+		"position": body.global_position,
+		"velocity": body.velocity
+	}
+	body.queue_free()
+	return result
+
+func read_text(path: String) -> String:
+	var file := FileAccess.open(path, FileAccess.READ)
+	if file == null:
+		return ""
+	var text := file.get_as_text()
+	file.close()
+	return text
 
 func outcome(passed: bool, details: String, assertions: Array, key_state: Dictionary) -> Dictionary:
 	return {

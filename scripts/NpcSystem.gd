@@ -7,8 +7,18 @@ const NpcCombatScript := preload("res://scripts/NpcCombat.gd")
 const NpcProfileRulesScript := preload("res://scripts/NpcProfileRules.gd")
 const NpcStatsScript := preload("res://scripts/NpcStats.gd")
 const NpcAutonomySystemScript := preload("res://scripts/npc_ai/NpcAutonomySystem.gd")
+const NpcAgentScene := preload("res://scenes/npc/NpcAgent.tscn")
+const NpcAgentScript := preload("res://scripts/npc_ai/NpcAgent.gd")
+const NpcConstantsScript := preload("res://scripts/npc_ai/NpcConstants.gd")
+const NpcMotionControllerScript := preload("res://scripts/npc_ai/NpcMotionController.gd")
+const NpcSafePlacementServiceScript := preload("res://scripts/npc_ai/NpcSafePlacementService.gd")
+const CharacterMotorProfileScript := preload("res://scripts/npc_ai/contracts/CharacterMotorProfile.gd")
 
 const CELL := 1.35
+const DOOR_CLOSE_CLEAR_RADIUS := CELL * 0.9
+const DOOR_CLOSE_TIMEOUT_SECONDS := 4.5
+const FORAGE_SCAN_NODE_LIMIT := 1200
+const FORAGE_SCAN_CANDIDATE_LIMIT := 36
 const NO_DETOUR := Vector3(9999999.0, 9999999.0, 9999999.0)
 
 var main
@@ -39,6 +49,8 @@ var visual_factory
 var pathing
 var combat
 var autonomy_system
+var motion_controller
+var safe_placement_service
 var components_initialized := false
 var component_init_attempted := false
 var last_spawn_scan_frame := -1
@@ -74,7 +86,13 @@ func ensure_components() -> void:
     if combat == null:
         combat = NpcCombatScript.new()
         combat.setup(self, hostile_system, visual_factory.arrow_material)
-    components_initialized = visual_factory != null and pathing != null and combat != null
+    if motion_controller == null:
+        motion_controller = NpcMotionControllerScript.new()
+        motion_controller.setup(self, main)
+    if safe_placement_service == null:
+        safe_placement_service = NpcSafePlacementServiceScript.new()
+        safe_placement_service.setup(self, main)
+    components_initialized = visual_factory != null and pathing != null and combat != null and motion_controller != null and safe_placement_service != null
 
 func clear() -> void:
     for entry in npcs:
@@ -130,15 +148,20 @@ func clear_scripted_target(body: Node) -> void:
     body.remove_meta("npc_scripted_target")
     body.set_meta("npc_scripted_arrived", false)
 
-func register_npc(body: StaticBody3D, profile: Dictionary) -> Dictionary:
+func register_npc(body: Node3D, profile: Dictionary) -> Dictionary:
     if body == null:
         return {}
     ensure_components()
     unregister_npc(body)
+    var character_body := body as CharacterBody3D
+    if character_body != null:
+        character_body.collision_layer = NpcConstantsScript.COLLISION_NPC_BODY
+        character_body.collision_mask = NpcConstantsScript.COLLISION_NPC_BODY_MASK
+    var body_position: Vector3 = body.global_position if body.is_inside_tree() else body.position
     var home_cell: Vector2i = profile.get("homeCell", profile.get("cell", Vector2i.ZERO))
     var porch_cell: Vector2i = profile.get("porchCell", home_cell)
     var guard_cell: Vector2i = profile.get("guardCell", porch_cell)
-    var level := float(profile.get("level", body.global_position.y))
+    var level := float(profile.get("level", body_position.y))
     var role := String(profile.get("role", "Villager"))
     var can_fight := bool(profile.get("canFight", false))
     var job := String(profile.get("job", ""))
@@ -150,7 +173,7 @@ func register_npc(body: StaticBody3D, profile: Dictionary) -> Dictionary:
         "name": String(profile.get("name", body.name)),
         "role": role,
         "townKey": String(profile.get("townKey", "")),
-        "townCenter": profile.get("townCenter", Vector2i(roundi(body.global_position.x / CELL), roundi(body.global_position.z / CELL))),
+        "townCenter": profile.get("townCenter", Vector2i(roundi(body_position.x / CELL), roundi(body_position.z / CELL))),
         "townRadius": int(profile.get("townRadius", 18)),
         "level": level,
         "homeCell": home_cell,
@@ -173,7 +196,7 @@ func register_npc(body: StaticBody3D, profile: Dictionary) -> Dictionary:
         "jobResource": resource_for_job(job),
         "jobPhase": "idle",
         "jobTimer": randf_range(2.0, 6.0),
-        "jobTarget": body.global_position,
+        "jobTarget": body_position,
         "jobTargetNode": null,
         "goal": "idle",
         "personalInventory": {},
@@ -185,7 +208,7 @@ func register_npc(body: StaticBody3D, profile: Dictionary) -> Dictionary:
         "cooldown": randf_range(0.2, 1.2),
         "wanderTimer": randf_range(0.4, 1.6),
         "homeReturnTime": 0.0,
-        "dayTarget": body.global_position,
+        "dayTarget": body_position,
         "insideHome": false,
         "lastMoveDistance": 0.0,
         "detourTarget": NO_DETOUR,
@@ -210,11 +233,16 @@ func register_npc(body: StaticBody3D, profile: Dictionary) -> Dictionary:
         "routeWaitTicks": 0,
         "routeYieldTicks": 0,
         "routePriority": 0,
-        "jumpIntentTime": 0.0
+        "jumpIntentTime": 0.0,
+        "motorProfile": CharacterMotorProfileScript.npc_default()
     }
     apply_npc_metadata(body, entry, home_cell, porch_cell, guard_cell, job)
     ensure_autonomy_system()
-    autonomy_system.register_legacy_npc(body, profile, entry)
+    var context = autonomy_system.register_legacy_npc(body, profile, entry)
+    if context != null:
+        entry["motorProfile"] = CharacterMotorProfileScript.from_traversal_profile(context.get("traversal_profile"))
+    if body.get_script() == NpcAgentScript and body.has_method("configure_agent"):
+        body.call("configure_agent", entry.get("motorProfile"))
     ensure_npc_held_item(entry)
     npcs.append(entry)
     npc_by_id[body.get_instance_id()] = entry
@@ -246,6 +274,35 @@ func route_positions_from_profile(route_cells_value, level: float) -> Array[Vect
             result.append(cell_to_position(cell_value, level))
         elif cell_value is Vector3:
             result.append(cell_value)
+    return result
+
+func create_npc_body(npc_name: String, kind := "npc") -> CharacterBody3D:
+    ensure_components()
+    var body := NpcAgentScene.instantiate() as CharacterBody3D
+    if body == null:
+        body = NpcAgentScript.new() as CharacterBody3D
+    body.name = npc_name
+    body.collision_layer = NpcConstantsScript.COLLISION_NPC_BODY
+    body.collision_mask = NpcConstantsScript.COLLISION_NPC_BODY_MASK
+    body.set_meta("kind", kind)
+    body.set_meta("npc_owned_by_system", true)
+    body.set_meta("npc_agent_body", true)
+    return body
+
+func safe_place_npc(body: Node3D, position: Vector3, profile = null, reason := "spawn") -> Dictionary:
+    ensure_components()
+    var character_body := body as CharacterBody3D
+    if character_body == null or safe_placement_service == null:
+        return { "ok": false, "position": position, "reason": "missing_character_body" }
+    var result: Dictionary = safe_placement_service.place_spawn(character_body, position, profile, reason)
+    if autonomy_system != null:
+        var telemetry = autonomy_system.get("telemetry")
+        if telemetry != null:
+            telemetry.increment(&"safe_placement_attempts")
+            if bool(result.get("ok", false)):
+                telemetry.increment(&"safe_placement_success")
+            else:
+                telemetry.increment(&"safe_placement_rejected")
     return result
 
 func weapon_for_profile(profile: Dictionary, role: String, can_fight: bool) -> String:
@@ -283,27 +340,22 @@ func tutorial_town_key() -> String:
         return ""
     return String(main.tutorial_system.tutorial_town_key())
 
-func spawn_town_npc(record: Dictionary, index: int) -> StaticBody3D:
+func spawn_town_npc(record: Dictionary, index: int) -> CharacterBody3D:
     ensure_components()
     var can_fight: bool = index == 0 or index % 4 == 3
     var roles := ["Farmer", "Carpenter", "Forager", "Mason", "Trader"]
     var names := ["Iven", "Mara", "Pell", "Ona", "Brin", "Tess", "Cal"]
     var role: String = "Guard" if can_fight else String(roles[index % roles.size()])
     var name: String = String(names[index % names.size()])
-    var body := StaticBody3D.new()
-    body.name = "TownNPC_%s_%d" % [String(record.get("townKey", "town")).replace(",", "_"), index]
-    body.collision_layer = 4
-    body.collision_mask = 0
-    body.set_meta("kind", "npc")
-    body.set_meta("npc_owned_by_system", true)
+    var body := create_npc_body("TownNPC_%s_%d" % [String(record.get("townKey", "town")).replace(",", "_"), index], "npc")
     body.set_meta("npc_name", name)
     body.set_meta("npc_role", role)
     var level := float(record.get("level", 16.0))
     var porch_cell: Vector2i = record.get("porchCell", record.get("homeCell", Vector2i.ZERO))
-    body.position = cell_to_position(porch_cell, level)
     add_npc_visual(body, visual_factory.body_material(index), visual_factory.accent_material(index), name, role, can_fight)
     add_npc_collider(body)
     npc_root.add_child(body)
+    safe_place_npc(body, cell_to_position(porch_cell, level), CharacterMotorProfileScript.npc_default(), "spawn")
     register_npc(body, {
         "id": String(record.get("id", body.name)),
         "name": name,
@@ -339,7 +391,7 @@ func update_npcs(delta: float, day_factor: float) -> void:
     npc_update_cursor = npc_update_cursor % update_count
     for offset in range(budget):
         var entry: Dictionary = update_entries[(npc_update_cursor + offset) % update_count]
-        var body := entry.get("body") as StaticBody3D
+        var body := entry.get("body") as Node3D
         if body == null or not is_instance_valid(body):
             npcs.erase(entry)
             continue
@@ -348,7 +400,7 @@ func update_npcs(delta: float, day_factor: float) -> void:
     npc_update_cursor = (npc_update_cursor + budget) % max(1, npcs.size())
 
 func update_npc(entry: Dictionary, delta: float, night_factor: float) -> void:
-    var body := entry.get("body") as StaticBody3D
+    var body := entry.get("body") as Node3D
     update_npc_needs(entry, delta, night_factor)
     if npc_is_held_by_intro_or_dialogue(entry, body):
         return
@@ -389,7 +441,7 @@ func update_npc(entry: Dictionary, delta: float, night_factor: float) -> void:
         speed = 14.0
     if moving_home:
         entry["homeActiveTargetCell"] = flat_cell_for_position(target)
-    var moved := move_npc(entry, target, speed * delta, moving_home, moving_job or moving_guard)
+    var moved := move_npc(entry, target, speed * delta, moving_home, moving_job or moving_guard, delta)
     if moved <= 0.001 and moving_job:
         entry["routeForceReplan"] = true
     entry["lastMoveDistance"] = moved
@@ -401,7 +453,7 @@ func update_npc(entry: Dictionary, delta: float, night_factor: float) -> void:
         settle_home_if_reached(entry)
     face_hostile_if_needed(body, target_hostile)
 
-func npc_is_held_by_intro_or_dialogue(entry: Dictionary, body: StaticBody3D) -> bool:
+func npc_is_held_by_intro_or_dialogue(entry: Dictionary, body: Node3D) -> bool:
     if bool(entry.get("holdIntroDoor", false)) and main and main.tutorial_system:
         var waiting_for_door := not bool(main.tutorial_system.get("intro_door_opened"))
         var waiting_for_ack: bool = main.tutorial_system.has_method("is_intro_elder_waiting_for_ack") and bool(main.tutorial_system.is_intro_elder_waiting_for_ack())
@@ -422,16 +474,16 @@ func npc_is_held_by_intro_or_dialogue(entry: Dictionary, body: StaticBody3D) -> 
         return true
     return false
 
-func update_scripted_npc(entry: Dictionary, body: StaticBody3D, delta: float) -> void:
+func update_scripted_npc(entry: Dictionary, body: Node3D, delta: float) -> void:
     var scripted_target: Vector3 = body.get_meta("npc_scripted_target", body.global_position)
     var allow_outside := bool(body.get_meta("npc_scripted_allow_outside", true))
-    entry["lastMoveDistance"] = move_npc(entry, scripted_target, 3.05 * delta, false, allow_outside)
+    entry["lastMoveDistance"] = move_npc(entry, scripted_target, 3.05 * delta, false, allow_outside, delta)
     if body.global_position.distance_to(scripted_target) <= CELL * 0.95:
         body.set_meta("npc_scripted_arrived", true)
         if not bool(body.get_meta("npc_scripted_hold_on_arrival", true)):
             clear_scripted_target(body)
 
-func update_fighter_target(entry: Dictionary, body: StaticBody3D, target_hostile: Node3D, weapon_id: String) -> Vector3:
+func update_fighter_target(entry: Dictionary, body: Node3D, target_hostile: Node3D, weapon_id: String) -> Vector3:
     entry["insideHome"] = false
     body.set_meta("npc_inside_home", false)
     var melee := npc_weapon_is_melee(weapon_id)
@@ -446,7 +498,7 @@ func update_fighter_target(entry: Dictionary, body: StaticBody3D, target_hostile
         fire_at_hostile(entry, target_hostile)
     return target
 
-func update_wander_target(entry: Dictionary, body: StaticBody3D, delta: float) -> Vector3:
+func update_wander_target(entry: Dictionary, body: Node3D, delta: float) -> Vector3:
     var wander_timer := float(entry.get("wanderTimer", 0.0)) - delta
     var day_target: Vector3 = entry.get("dayTarget", body.global_position)
     if wander_timer <= 0.0 or body.global_position.distance_to(day_target) < CELL * 0.65 or not point_inside_town(entry, day_target):
@@ -456,7 +508,7 @@ func update_wander_target(entry: Dictionary, body: StaticBody3D, delta: float) -
     entry["dayTarget"] = day_target
     return day_target
 
-func face_hostile_if_needed(body: StaticBody3D, target_hostile: Node3D) -> void:
+func face_hostile_if_needed(body: Node3D, target_hostile: Node3D) -> void:
     if target_hostile == null or body.global_position.distance_to(target_hostile.global_position) <= 0.1:
         return
     var to_target := target_hostile.global_position - body.global_position
@@ -540,7 +592,7 @@ func face_position(body: Node3D, target: Vector3) -> void:
         body.rotation.y = atan2(to_target.x, to_target.z)
 
 func update_day_job(entry: Dictionary, delta: float) -> bool:
-    var body := entry.get("body") as StaticBody3D
+    var body := entry.get("body") as Node3D
     if body == null:
         return false
     var job := String(entry.get("job", ""))
@@ -572,7 +624,7 @@ func update_day_job(entry: Dictionary, delta: float) -> bool:
     body.set_meta("npc_job_phase", "idle")
     return false
 
-func update_outbound_job(entry: Dictionary, body: StaticBody3D, timer: float) -> bool:
+func update_outbound_job(entry: Dictionary, body: Node3D, timer: float) -> bool:
     var target: Vector3 = entry.get("jobTarget", body.global_position)
     var outside_town := not point_inside_town(entry, body.global_position)
     var target_outside := not point_inside_town(entry, target)
@@ -587,7 +639,7 @@ func update_outbound_job(entry: Dictionary, body: StaticBody3D, timer: float) ->
         entry["jobTimer"] = timer
     return true
 
-func update_gathering_job(entry: Dictionary, body: StaticBody3D, timer: float) -> bool:
+func update_gathering_job(entry: Dictionary, body: Node3D, timer: float) -> bool:
     if timer > 0.0:
         entry["jobTimer"] = timer
         body.set_meta("npc_job_phase", "gathering")
@@ -610,7 +662,7 @@ func update_gathering_job(entry: Dictionary, body: StaticBody3D, timer: float) -
     body.set_meta("npc_carried_resource", String(entry.get("jobResource", "")))
     return true
 
-func update_returning_job(entry: Dictionary, body: StaticBody3D, timer: float) -> bool:
+func update_returning_job(entry: Dictionary, body: Node3D, timer: float) -> bool:
     var porch: Vector3 = entry.get("porchPosition", body.global_position)
     if body.global_position.distance_to(porch) <= CELL * 1.0 or timer <= 0.0:
         entry["jobPhase"] = "idle"
@@ -624,7 +676,7 @@ func update_returning_job(entry: Dictionary, body: StaticBody3D, timer: float) -
     body.set_meta("npc_job_phase", "returning")
     return true
 
-func update_forager_goal(entry: Dictionary, body: StaticBody3D, delta: float) -> bool:
+func update_forager_goal(entry: Dictionary, body: Node3D, delta: float) -> bool:
     var phase := String(entry.get("jobPhase", "idle"))
     var timer := float(entry.get("jobTimer", 0.0)) - delta
     if phase == "idle":
@@ -745,24 +797,30 @@ func find_forage_target(entry: Dictionary) -> Node3D:
     if body == null:
         return null
     var candidates: Array[Node3D] = []
-    for root in [main.get("chunk_root"), main.get("prop_root")]:
-        collect_forage_targets_in_tree(root as Node, entry, body.global_position, candidates)
+    var remaining_scan_nodes := FORAGE_SCAN_NODE_LIMIT
+    for root in [main.get("prop_root"), main.get("chunk_root")]:
+        remaining_scan_nodes = collect_forage_targets_in_tree(root as Node, entry, body.global_position, candidates, remaining_scan_nodes, FORAGE_SCAN_CANDIDATE_LIMIT)
+        if remaining_scan_nodes <= 0 or candidates.size() >= FORAGE_SCAN_CANDIDATE_LIMIT:
+            break
     if pathing != null and pathing.has_method("choose_forage_target"):
         return pathing.choose_forage_target(entry, candidates)
     return candidates[0] if not candidates.is_empty() else null
 
-func collect_forage_targets_in_tree(root: Node, entry: Dictionary, origin: Vector3, candidates: Array[Node3D]) -> void:
-    if root == null:
-        return
+func collect_forage_targets_in_tree(root: Node, entry: Dictionary, origin: Vector3, candidates: Array[Node3D], max_nodes: int, max_candidates: int) -> int:
+    if root == null or max_nodes <= 0 or candidates.size() >= max_candidates:
+        return max_nodes
     var stack: Array[Node] = [root]
-    while not stack.is_empty():
+    var scanned := 0
+    while not stack.is_empty() and scanned < max_nodes and candidates.size() < max_candidates:
         var node := stack.pop_back() as Node
+        scanned += 1
         if node == null:
             continue
         if node is Node3D and is_valid_forage_node(node as Node3D, entry):
             candidates.append(node as Node3D)
         for child in node.get_children():
             stack.append(child)
+    return max_nodes - scanned
 
 func is_valid_forage_node(node: Node3D, entry: Dictionary) -> bool:
     if not is_instance_valid(node) or bool(node.get_meta("npc_harvested", false)):
@@ -795,7 +853,7 @@ func harvest_forager_target(entry: Dictionary) -> void:
     last_message = "%s gathered berries" % String(entry.get("name", "Forager"))
 
 func home_route_target(entry: Dictionary) -> Vector3:
-    var body := entry.get("body") as StaticBody3D
+    var body := entry.get("body") as Node3D
     var porch: Vector3 = entry.get("porchPosition", body.global_position)
     var home: Vector3 = entry.get("homePosition", body.global_position)
     if bool(entry.get("insideHome", false)):
@@ -812,7 +870,7 @@ func home_route_target(entry: Dictionary) -> Vector3:
     return porch if not home_route_step_reached(entry, porch) else home
 
 func home_route_step_reached(entry: Dictionary, route_target: Vector3) -> bool:
-    var body := entry.get("body") as StaticBody3D
+    var body := entry.get("body") as Node3D
     if body == null:
         return true
     if body.global_position.distance_to(route_target) <= CELL * 0.82:
@@ -827,7 +885,7 @@ func home_route_step_reached(entry: Dictionary, route_target: Vector3) -> bool:
     return abs(current_cell.x - target_cell.x) <= 1 and abs(current_cell.y - target_cell.y) <= 1
 
 func settle_home_if_reached(entry: Dictionary) -> void:
-    var body := entry.get("body") as StaticBody3D
+    var body := entry.get("body") as Node3D
     if body == null:
         return
     var home_cell: Vector2i = entry.get("homeCell", Vector2i.ZERO)
@@ -859,7 +917,7 @@ func settle_home_if_reached(entry: Dictionary) -> void:
         mark_npc_inside_home(entry, "home_porch_fallback")
 
 func mark_npc_inside_home(entry: Dictionary, fallback_reason := "") -> void:
-    var body := entry.get("body") as StaticBody3D
+    var body := entry.get("body") as Node3D
     if body == null:
         return
     entry["insideHome"] = true
@@ -898,7 +956,6 @@ func schedule_door_close(door: Node, npc_body: Node3D) -> void:
         return
     for pending in pending_door_closes:
         if pending.get("door") == door:
-            pending["timer"] = 0.0
             pending["npc"] = npc_body
             return
     pending_door_closes.append({ "door": door, "npc": npc_body, "timer": 0.0 })
@@ -913,17 +970,17 @@ func update_pending_door_closes(delta: float) -> void:
         pending["timer"] = float(pending.get("timer", 0.0)) + delta
         var npc_value = pending.get("npc")
         var npc: Node3D = npc_value if npc_value != null and is_instance_valid(npc_value) and npc_value is Node3D else null
-        var npc_clear: bool = npc == null or not is_instance_valid(npc) or npc.global_position.distance_to(door.global_position) > CELL * 1.45
+        var npc_clear: bool = npc == null or not is_instance_valid(npc) or npc.global_position.distance_to(door.global_position) > DOOR_CLOSE_CLEAR_RADIUS
         var player_clear: bool = true
         if main != null and main.player != null:
-            player_clear = main.player.global_position.distance_to(door.global_position) > CELL * 1.35
+            player_clear = main.player.global_position.distance_to(door.global_position) > DOOR_CLOSE_CLEAR_RADIUS
         var npcs_clear := true
         for entry in npcs:
             var body := entry.get("body") as Node3D
-            if body != null and is_instance_valid(body) and body.global_position.distance_to(door.global_position) <= CELL * 1.45:
+            if body != null and is_instance_valid(body) and body.global_position.distance_to(door.global_position) <= DOOR_CLOSE_CLEAR_RADIUS:
                 npcs_clear = false
                 break
-        var timed_out := float(pending.get("timer", 0.0)) > 4.5
+        var timed_out := float(pending.get("timer", 0.0)) > DOOR_CLOSE_TIMEOUT_SECONDS
         if bool(door.get_meta("open", false)) and npc_clear and npcs_clear and (player_clear or timed_out):
             if bool(main.toggle_door(door)):
                 door_closes += 1
@@ -932,10 +989,15 @@ func update_pending_door_closes(delta: float) -> void:
         elif not bool(door.get_meta("open", false)):
             pending_door_closes.erase(pending)
 
-func move_npc(entry: Dictionary, target: Vector3, max_distance: float, moving_home := false, allow_outside := false) -> float:
+func move_npc(entry: Dictionary, target: Vector3, max_distance: float, moving_home := false, allow_outside := false, physics_delta := 0.0166667) -> float:
     if pathing == null:
         return 0.0
-    return pathing.move_npc(entry, target, max_distance, moving_home, allow_outside)
+    return pathing.move_npc(entry, target, max_distance, moving_home, allow_outside, physics_delta)
+
+func apply_npc_route_motion(entry: Dictionary, previous: Vector3, candidate: Vector3, physics_delta: float) -> Dictionary:
+    if motion_controller == null:
+        return { "moved": 0.0, "blocked": true, "reason": "missing_motion_controller", "position": previous }
+    return motion_controller.apply_route_motion(entry, previous, candidate, physics_delta)
 
 func choose_day_target(entry: Dictionary) -> Vector3:
     if pathing == null:
@@ -992,7 +1054,7 @@ func npc_weapon_is_melee(weapon_id: String) -> bool:
 func ensure_npc_held_item(entry: Dictionary) -> void:
     visual_factory.ensure_held_item(entry)
 
-func add_npc_collider(parent: StaticBody3D) -> void:
+func add_npc_collider(parent: Node3D) -> void:
     visual_factory.add_collider(parent)
 
 func add_npc_visual(parent: Node3D, body_material: StandardMaterial3D, accent_material: StandardMaterial3D, npc_name: String, role: String, can_fight := false) -> void:
