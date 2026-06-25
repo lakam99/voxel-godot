@@ -6,8 +6,8 @@
 - Branch: `npc-pathfinding/phase-00-baseline-harness`
 - Base branch: `master`
 - Base commit: `329416babe993377e6442cc77f9b3b2617302675`
-- Branch implementation commit: pending branch commit
-- Merge commit: pending post-merge update
+- Branch implementation commit: `5e1a08aef2f2dc2f59b36b7e11b62ecb319d8fe2`
+- Merge commit: `8ba638e4b6e4b1c445cef14973afe1f4640ff1a8`
 - Dates: 2026-06-25
 - Controlling specification: `CODEX_NPC_PATHFINDING_FINAL_IMPLEMENTATION_PLAN.md`
 
@@ -203,7 +203,51 @@ Intermediate failure encountered and not hidden:
 
 ## 11. Full All-Runner Evidence On Merged `master`
 
-Pending post-merge update. The specification requires this section to be recorded after the phase branch is committed, merged with `--no-ff`, and `.\tools\run-all-test-runners.ps1` is rerun on `master`.
+Merge command:
+
+```powershell
+git switch master
+git merge --no-ff npc-pathfinding/phase-00-baseline-harness -m "Merge Phase 00: baseline NPC contract harness"
+```
+
+Master gate command:
+
+```powershell
+.\tools\run-all-test-runners.ps1
+```
+
+Merged `master` report:
+
+- Merge commit: `8ba638e4b6e4b1c445cef14973afe1f4640ff1a8`
+- Path: `artifacts/test-runners/all-test-runners-report.json`
+- SHA-256: `CDC39E8DB6794F6501C5B6A6D62B65FA351F2DBC693C6F00909186BB39BBC6CA`
+- Started: `2026-06-25T14:38:53.1523407Z`
+- Finished: `2026-06-25T14:45:06.1771369Z`
+- Duration: 373.026 seconds
+- Result count: 7
+- Failure count: 0
+
+Registered runner results on merged `master`:
+
+| Runner | Exit | Passed | Duration seconds | Report |
+| --- | ---: | --- | ---: | --- |
+| `npc_focused` | 0 | true | 1.275 | `artifacts/npc/reports/all-npc-both.json` |
+| `npc_navigation_legacy` | 0 | true | 46.795 | `artifacts/test-runners/npc-navigation-report.json` |
+| `playtest` | 0 | true | 195.781 | `artifacts/test-runners/playtest-report.json` |
+| `story_playtest` | 0 | true | 63.028 | `artifacts/test-runners/story-playtest-report.json` |
+| `world_signature` | 0 | true | 13.892 | `artifacts/test-runners/world-signature-atlas-1492.json` |
+| `visual_captures` | 0 | true | 52.159 | `artifacts/test-runners/visual/visual-captures.json` |
+| `visual_manifest` | 0 | true | 0.048 | no JSON report |
+
+Merged `master` artifact details:
+
+- Focused contract: 18 results, 0 failures, SHA-256 `F23D3A608DC1FAAD1082582FBFC59ABFB32A070D3A4F939B591EE1F77C8E07D8`.
+- Legacy NPC navigation: 11 results, 0 failures, SHA-256 `937FCB88743ED7CD0B0665E96A15A1B4E6D5D3434467D51B502FE7923CC620A1`.
+- Broad playtest: 181 results, 0 failures, SHA-256 `9479C8413DAE15C13AC952EA0CD06D8EA2061E7866D27D84E6226FB5980F940E`.
+- Story playtest: 49 results, 0 failures, SHA-256 `6FC8C09595D4F3A17912E920928EB11CF815AB37B3B4F590903AF10CFBCDA7A5`.
+- World signature: matched baseline, SHA-256 `05290360F4ACA4965AC3EB6EA6B4D5E886A01F52CE02E073D1B845DCA87A63D5`.
+- Visual captures: 11 cases, SHA-256 `C38D2B6DB9092F3EFCA54C4EA2367E91330B55B5BC6C7B6D1AA7FAA4D1C083C1`.
+- Broad held-torch assertion on merged `master`: passed with `range 6.85..6.95 delta 0.10 energy 2.67..2.74 delta 0.07`.
 
 ## 12. Performance And Boundedness Metrics
 
@@ -254,12 +298,12 @@ Broad runner snapshots:
 - Existing focused NPC navigation tests pass unchanged: 11 results, 0 failures, SHA-256 `2846C917E53A8CAE7AEAA43BECC953A42376719DB8FE11436E3E91B0B600B7CE`.
 - Broad playtest, story playtest, world signature, visual captures, and visual-manifest validation pass on the phase branch: evidenced in Section 10.
 - No gameplay behavior changed: only test harness, docs, wrapper, registry, and ignore-list files were edited.
-- Phase report contains baseline and phase-branch evidence: yes; merged `master` evidence pending Section 11 update after merge.
+- Phase report contains baseline, phase-branch, and merged `master` evidence: yes.
 
 ## 15. Deviation Register
 
 - None for implementation scope.
-- Process note: post-merge `master` evidence cannot exist before the branch commit and merge. Section 11 is intentionally left pending for the required post-merge update.
+- Process note: Section 11 was populated after the branch commit, no-fast-forward merge, and required `master` all-runner gate because the merge hash and master evidence did not exist before those steps.
 
 ## 16. Known Issues/Debt
 
@@ -283,7 +327,7 @@ These are baseline findings for later phases, not Phase 00 implementation change
 
 ## 18. Risk Assessment For Next Phase
 
-Phase 01 can start only after this branch is merged into `master`, the repository all-runner passes on `master`, and this report is updated with merge hash and master evidence.
+Phase 01 can start from merged `master` after this report update is committed.
 
 Main risks for Phase 01:
 
@@ -292,6 +336,6 @@ Main risks for Phase 01:
 - The broad playtest has one observed transient visual assertion; failures must still be inspected instead of bypassed.
 - Later phases must keep NPC randomness isolated from terrain/town RNG.
 
-## 19. Verdict
+## 19. Final Verdict
 
-Phase-branch gates pass and merge is allowed once intentional files are staged and committed. Phase 00 is not closed until merged `master` evidence is recorded in Section 11.
+Phase 00 passes its branch and merged `master` gates. Phase 01 may begin from the updated green `master` after this report update is committed.
