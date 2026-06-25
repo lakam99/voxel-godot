@@ -417,9 +417,20 @@ func terrain_height_cell(x: int, z: int) -> float:
     return base_height_cell(x, z)
 
 func base_height_cell(x: int, z: int) -> float:
-    var town: Dictionary = town_region_at_cell(x, z)
+    var town: Dictionary = town_region_for_height_cell(x, z)
     if not town.is_empty():
-        return float(town["level"])
+        var center_x := int(town["centerX"])
+        var center_z := int(town["centerZ"])
+        var radius := float(town["radius"])
+        var distance := Vector2(float(x - center_x), float(z - center_z)).length()
+        var level := float(town["level"])
+        if distance <= radius:
+            return level
+        var apron := float(town_slope_apron_cells(town))
+        var natural := natural_base_height_cell(x, z)
+        var blend := clampf((distance - radius) / maxf(1.0, apron), 0.0, 1.0)
+        var eased := blend * blend * (3.0 - 2.0 * blend)
+        return lerp(level, natural, eased)
     return natural_base_height_cell(x, z)
 
 func natural_base_height_cell(x: int, z: int) -> float:
@@ -479,3 +490,55 @@ func town_region_at_cell(x: int, z: int) -> Dictionary:
             if distance <= float(town["radius"]):
                 return town
     return {}
+
+func town_region_for_height_cell(x: int, z: int) -> Dictionary:
+    var region_x := floori(float(x) / float(TOWN_REGION_CELLS))
+    var region_z := floori(float(z) / float(TOWN_REGION_CELLS))
+    var best_town := {}
+    var best_distance := INF
+    for rz in range(region_z - 1, region_z + 2):
+        for rx in range(region_x - 1, region_x + 2):
+            var town: Dictionary = town_region(rx, rz)
+            if town.is_empty():
+                continue
+            var distance := Vector2(float(x - int(town["centerX"])), float(z - int(town["centerZ"]))).length()
+            var max_distance := float(town["radius"]) + float(town_slope_apron_cells(town))
+            if distance <= max_distance and distance < best_distance:
+                best_town = town
+                best_distance = distance
+    return best_town
+
+func town_slope_apron_cells(town: Dictionary) -> int:
+    var key: Vector2i = Vector2i(int(town.get("regionX", 0)), int(town.get("regionZ", 0)))
+    if town_slope_apron_cache.has(key):
+        return int(town_slope_apron_cache[key])
+    var radius: int = int(town.get("radius", TOWN_RADIUS_CELLS))
+    var center_x: int = int(town.get("centerX", 0))
+    var center_z: int = int(town.get("centerZ", 0))
+    var level: float = float(town.get("level", WATER_LEVEL + 3.0))
+    var apron: int = maxi(18, ceili(float(radius) * 0.55))
+    var max_apron: int = maxi(apron, int(float(TOWN_REGION_CELLS) * 0.5) - radius - 6)
+    var sample_dirs: Array[Vector2] = [
+        Vector2(1.0, 0.0),
+        Vector2(-1.0, 0.0),
+        Vector2(0.0, 1.0),
+        Vector2(0.0, -1.0),
+        Vector2(1.0, 1.0).normalized(),
+        Vector2(-1.0, 1.0).normalized(),
+        Vector2(1.0, -1.0).normalized(),
+        Vector2(-1.0, -1.0).normalized()
+    ]
+    for _pass in range(3):
+        var max_diff: float = 0.0
+        var sample_distance: float = float(radius + apron)
+        for direction in sample_dirs:
+            var sample_x: int = center_x + roundi(direction.x * sample_distance)
+            var sample_z: int = center_z + roundi(direction.y * sample_distance)
+            max_diff = maxf(max_diff, absf(natural_base_height_cell(sample_x, sample_z) - level))
+        var needed: int = ceili(max_diff / maxf(0.01, CELL * 0.72)) + 4
+        var next_apron: int = mini(max_apron, maxi(apron, needed))
+        if next_apron == apron:
+            break
+        apron = next_apron
+    town_slope_apron_cache[key] = apron
+    return apron

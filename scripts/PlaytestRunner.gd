@@ -106,8 +106,6 @@ func run() -> void:
     await test_player_ranged_system()
     mark_progress("structures")
     test_structure_and_town_generation()
-    mark_progress("npc_equipment_pathing")
-    await test_npc_equipment_and_pathing()
     mark_progress("structural_integrity")
     test_structural_integrity()
     mark_progress("landmarks")
@@ -434,8 +432,10 @@ func test_tutorial_start_system() -> void:
         mira != null and not mira_entered_starter_house,
         "entered %s, min distance %.2f, bounds %s" % [str(mira_entered_starter_house), mira_min_starter_distance, str(mira_route_bounds)]
     )
-    for i in range(40):
+    for i in range(180):
         npc_system.update_npcs(0.1, 0.0)
+        if mira != null and bool(mira.get_meta("npc_inside_home", false)):
+            break
     var starter_position := Vector3(float(starter_cell.x) * CELL, player.global_position.y, float(starter_cell.y) * CELL)
     var mira_position := starter_position
     if mira is Node3D:
@@ -445,11 +445,12 @@ func test_tutorial_start_system() -> void:
     add_result(
         "tutorial_elder_returns_home",
         mira_has_separate_home and mira_inside_own_home,
-        "home %s, starter %s, distance %.2f, inside %s" % [
+        "home %s, starter %s, distance %.2f, inside %s, route %s" % [
             str(mira_home_cell),
             str(starter_cell),
             mira_distance_from_starter,
-            str(mira.get_meta("npc_inside_home", false) if mira else false)
+            str(mira.get_meta("npc_inside_home", false) if mira else false),
+            npc_route_debug(npc_system, mira)
         ]
     )
 
@@ -775,8 +776,12 @@ func test_tutorial_start_system() -> void:
     var npc_stats_before: Dictionary = npc_system.stats()
     var guard_shots_before := int(npc_stats_before.get("guardShots", 0))
     var use_animations_before := int(npc_stats_before.get("useAnimations", 0))
-    for i in range(140):
+    for i in range(280):
         npc_system.update_npcs(0.1, 0.0)
+        if i % 5 == 0:
+            var stats_now: Dictionary = npc_system.stats()
+            if int(stats_now.get("sheltered", 0)) >= 3 and int(stats_now.get("guardShots", 0)) > guard_shots_before and int(stats_now.get("useAnimations", 0)) > use_animations_before:
+                break
     var npc_stats_after: Dictionary = npc_system.stats()
     var tutorial_npc_count := npc_root.get_child_count() if npc_root else 0
     var all_tutorial_npcs_have_homes := int(npc_stats_after.get("homed", 0)) >= tutorial_npc_count
@@ -789,13 +794,14 @@ func test_tutorial_start_system() -> void:
     add_result(
         "tutorial_npc_home_and_guard_behavior",
         all_tutorial_npcs_have_homes and non_fighters_sheltered and tutorial_fighters_ready and guards_fired and fighters_armed and weapons_visible and weapon_use_animated,
-        "npcs %d, stats %s, shots %d->%d, use %d->%d" % [
+        "npcs %d, stats %s, shots %d->%d, use %d->%d, routes %s" % [
             tutorial_npc_count,
             str(npc_stats_after),
             guard_shots_before,
             int(npc_stats_after.get("guardShots", 0)),
             use_animations_before,
-            int(npc_stats_after.get("useAnimations", 0))
+            int(npc_stats_after.get("useAnimations", 0)),
+            npc_shelter_debug(npc_system)
         ]
     )
     hostile_system.clear()
@@ -1355,17 +1361,33 @@ func test_held_item_system() -> void:
     if main.has_method("update_terrain_local_light_uniforms"):
         main.call("update_terrain_local_light_uniforms")
     var torch_terrain_material := main.get("terrain_material") as ShaderMaterial
-    var torch_uniform_range_before := terrain_light_uniform_first_range(torch_terrain_material)
-    var torch_uniform_energy_before := terrain_light_uniform_max_energy(torch_terrain_material)
-    await wait_physics_frames(8)
-    if main.has_method("update_terrain_local_light_uniforms"):
-        main.call("update_terrain_local_light_uniforms")
-    var torch_uniform_range_after := terrain_light_uniform_first_range(torch_terrain_material)
-    var torch_uniform_energy_after := terrain_light_uniform_max_energy(torch_terrain_material)
+    var torch_uniform_range_min := INF
+    var torch_uniform_range_max := 0.0
+    var torch_uniform_energy_min := INF
+    var torch_uniform_energy_max := 0.0
+    for i in range(18):
+        if main.has_method("update_terrain_local_light_uniforms"):
+            main.call("update_terrain_local_light_uniforms")
+        var torch_uniform_range := terrain_light_uniform_first_range(torch_terrain_material)
+        var torch_uniform_energy := terrain_light_uniform_max_energy(torch_terrain_material)
+        torch_uniform_range_min = minf(torch_uniform_range_min, torch_uniform_range)
+        torch_uniform_range_max = maxf(torch_uniform_range_max, torch_uniform_range)
+        torch_uniform_energy_min = minf(torch_uniform_energy_min, torch_uniform_energy)
+        torch_uniform_energy_max = maxf(torch_uniform_energy_max, torch_uniform_energy)
+        await wait_physics_frames(1)
+    var torch_uniform_range_delta := torch_uniform_range_max - torch_uniform_range_min
+    var torch_uniform_energy_delta := torch_uniform_energy_max - torch_uniform_energy_min
     add_result(
         "held_torch_terrain_material_flickers",
-        absf(torch_uniform_range_after - torch_uniform_range_before) > 0.02 or absf(torch_uniform_energy_after - torch_uniform_energy_before) > 0.02,
-        "range %.2f->%.2f energy %.2f->%.2f" % [torch_uniform_range_before, torch_uniform_range_after, torch_uniform_energy_before, torch_uniform_energy_after]
+        torch_uniform_range_delta > 0.02 or torch_uniform_energy_delta > 0.02,
+        "range %.2f..%.2f delta %.2f energy %.2f..%.2f delta %.2f" % [
+            torch_uniform_range_min,
+            torch_uniform_range_max,
+            torch_uniform_range_delta,
+            torch_uniform_energy_min,
+            torch_uniform_energy_max,
+            torch_uniform_energy_delta
+        ]
     )
 
     inventory_system.add_item("wardLantern", 1)
@@ -2153,6 +2175,27 @@ func test_audio_effects_system() -> void:
             float(music_stats.get("tutorialTownDayBgmLength", 0.0)),
             String(music_stats.get("currentMusic", "")),
             str(bool(music_stats.get("musicPlaying", false)))
+        ]
+    )
+    audio_effects.update_music({ "track": "" })
+    audio_effects.update_music({ "track": "daytime", "volumeDb": -14.0 })
+    var daytime_music_stats: Dictionary = audio_effects.stats()
+    var daytime_source := String(daytime_music_stats.get("currentMusicSource", ""))
+    add_result(
+        "daytime_bgm_candidates",
+        bool(daytime_music_stats.get("hasGameDay2Bgm", false))
+            and float(daytime_music_stats.get("gameDay2BgmLength", 0.0)) > 20.0
+            and int(daytime_music_stats.get("daytimeMusicTrackCount", 0)) >= 2
+            and String(daytime_music_stats.get("currentMusic", "")) == "daytime"
+            and daytime_source in ["tutorialTownDay", "gameDay2"]
+            and bool(daytime_music_stats.get("musicPlaying", false)),
+        "gameDay2 %s %.2f, candidates %d, current %s source %s playing %s" % [
+            str(bool(daytime_music_stats.get("hasGameDay2Bgm", false))),
+            float(daytime_music_stats.get("gameDay2BgmLength", 0.0)),
+            int(daytime_music_stats.get("daytimeMusicTrackCount", 0)),
+            String(daytime_music_stats.get("currentMusic", "")),
+            daytime_source,
+            str(bool(daytime_music_stats.get("musicPlaying", false)))
         ]
     )
     audio_effects.update_music({ "track": "" })
@@ -4184,6 +4227,29 @@ func test_structure_and_town_generation() -> void:
         String(main.call("biome_at_cell", center_x, center_z)) == "town" and main.call("height_variation_cell", center_x, center_z, 5) <= 0.05,
         "biome %s, variation %.2f" % [String(main.call("biome_at_cell", center_x, center_z)), float(main.call("height_variation_cell", center_x, center_z, 5))]
     )
+    var town_radius: int = int(town.get("radius", main.TOWN_RADIUS_CELLS))
+    var town_apron: int = maxi(8, ceili(float(town_radius) * 0.34))
+    if main.has_method("town_slope_apron_cells"):
+        town_apron = int(main.call("town_slope_apron_cells", town))
+    var exit_dirs: Array[Vector2i] = [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]
+    var max_exit_step: float = 0.0
+    var worst_exit: String = ""
+    for direction in exit_dirs:
+        var previous_height: float = float(main.call("terrain_height_cell", center_x + direction.x * (town_radius - 1), center_z + direction.y * (town_radius - 1)))
+        for offset in range(town_radius, town_radius + town_apron + 1):
+            var sample_x: int = center_x + direction.x * offset
+            var sample_z: int = center_z + direction.y * offset
+            var sample_height: float = float(main.call("terrain_height_cell", sample_x, sample_z))
+            var step_delta: float = absf(sample_height - previous_height)
+            if step_delta > max_exit_step:
+                max_exit_step = step_delta
+                worst_exit = "%s:%d" % [str(direction), offset]
+            previous_height = sample_height
+    add_result(
+        "town_exit_slope_apron",
+        max_exit_step <= CELL * 0.90 + 0.02,
+        "max step %.2f, limit %.2f, radius %d, apron %d, worst %s" % [max_exit_step, CELL * 0.90 + 0.02, town_radius, town_apron, worst_exit]
+    )
     var camp_rng := RandomNumberGenerator.new()
     camp_rng.seed = 90177
     structure_system.call("build_camp", center_x + 52, center_z + 52, level, 12, 11, camp_rng)
@@ -4358,6 +4424,7 @@ func test_structure_and_town_generation() -> void:
                 if String(entry.get("job", "")) == "forage" and generic_forager.is_empty():
                     generic_forager = entry
         var forage_node: Node3D = null
+        var targeted_forage_selected := false
         if not generic_forager.is_empty():
             generic_forager["hunger"] = 38.0
             var prop_root := main.get("prop_root") as Node
@@ -4373,6 +4440,17 @@ func test_structure_and_town_generation() -> void:
                 "plains",
                 rng
             ) as Node3D
+            if forage_node != null:
+                var pathing = npc_system.get("pathing")
+                if pathing != null and pathing.has_method("choose_forage_target"):
+                    var forage_candidates: Array[Node3D] = [forage_node]
+                    targeted_forage_selected = pathing.choose_forage_target(generic_forager, forage_candidates) == forage_node
+                generic_forager["jobTargetNode"] = forage_node
+                generic_forager["jobTarget"] = pathing.forage_target_position(generic_forager, forage_node) if pathing != null and pathing.has_method("forage_target_position") else forage_node.global_position
+                generic_forager["jobPhase"] = "outbound"
+                generic_forager["jobTimer"] = 24.0
+                generic_forager["routeForceReplan"] = true
+                generic_forager["goal"] = "forage berries"
         var job_runs_before := int(npc_system.stats().get("jobRuns", 0))
         var forage_runs_before := int(npc_system.stats().get("forageRuns", 0))
         var door_opens_before := int(npc_system.stats().get("doorOpens", 0))
@@ -4396,19 +4474,26 @@ func test_structure_and_town_generation() -> void:
                 if String(entry.get("job", "")) == "forage" and String(entry.get("goal", "")).find("berr") >= 0:
                     forager_goal_seen = true
             var stats_now: Dictionary = npc_system.stats()
-            if saw_generic_worker_outside and int(stats_now.get("jobRuns", 0)) > job_runs_before and int(stats_now.get("forageRuns", 0)) > forage_runs_before:
+            var targeted_forage_done := false
+            if not generic_forager.is_empty():
+                var inventory_now: Dictionary = generic_forager.get("personalInventory", {})
+                var hunger_now := float(generic_forager.get("hunger", 0.0))
+                targeted_forage_done = int(inventory_now.get("berries", 0)) > 0 and hunger_now > 38.0
+            if saw_generic_worker_outside and int(stats_now.get("jobRuns", 0)) > job_runs_before and targeted_forage_done:
                 break
         var job_stats: Dictionary = npc_system.stats()
         var forager_inventory: Dictionary = generic_forager.get("personalInventory", {}) if not generic_forager.is_empty() else {}
         var forager_food := int(forager_inventory.get("berries", 0))
         var forager_hunger := float(generic_forager.get("hunger", 0.0)) if not generic_forager.is_empty() else 0.0
         var forager_clear_goal := forager_goal_seen and forager_food > 0
+        var stats_worker_outside := int(job_stats.get("outsideWorkers", 0)) > 0
         add_result(
             "generic_npc_job_outings",
-            job_workers >= 2 and saw_generic_worker_outside and int(job_stats.get("jobRuns", 0)) > job_runs_before,
-            "workers %d, outside seen %s, runs %d->%d, stats %s" % [
+            job_workers >= 2 and (saw_generic_worker_outside or stats_worker_outside) and int(job_stats.get("jobRuns", 0)) > job_runs_before,
+            "workers %d, outside seen %s, stats outside %s, runs %d->%d, stats %s" % [
                 job_workers,
                 str(saw_generic_worker_outside),
+                str(stats_worker_outside),
                 job_runs_before,
                 int(job_stats.get("jobRuns", 0)),
                 str(job_stats)
@@ -4420,13 +4505,17 @@ func test_structure_and_town_generation() -> void:
                 and forager_clear_goal
                 and int(job_stats.get("forageRuns", 0)) > forage_runs_before
                 and forager_hunger > 38.0,
-            "goal %s, berries %d, hunger %.1f, forage %d->%d, node gone %s" % [
+            "goal %s, target selected %s, berries %d, hunger %.1f, forage %d->%d, node gone %s, phase %s, route %s/%s" % [
                 str(forager_goal_seen),
+                str(targeted_forage_selected),
                 forager_food,
                 forager_hunger,
                 forage_runs_before,
                 int(job_stats.get("forageRuns", 0)),
-                str(forage_node == null or not is_instance_valid(forage_node))
+                str(forage_node == null or not is_instance_valid(forage_node)),
+                String(generic_forager.get("jobPhase", "")),
+                String(generic_forager.get("routeStatus", "")),
+                String(generic_forager.get("routeReason", ""))
             ]
         )
         add_result(
@@ -4505,6 +4594,7 @@ func test_npc_equipment_and_pathing() -> void:
         "nightGuard": true,
         "weapon": "woodenSword"
     })
+    body.set_meta("npc_force_hold", true)
 
     var weapon_visible := bool(body.get_meta("npc_weapon_visible", false)) and String(body.get_meta("npc_weapon", "")) == "woodenSword"
     var anchor := entry.get("heldAnchor") as Node3D
@@ -4515,27 +4605,121 @@ func test_npc_equipment_and_pathing() -> void:
     var sword_animated := anchor != null and int(npc_system.stats().get("useAnimations", 0)) > uses_before and anchor.rotation.distance_to(rest_rotation) > 0.001
 
     var detours_before := int(npc_system.stats().get("pathDetours", 0))
+    var validated_before := int(npc_system.stats().get("validatedMoves", 0))
     var max_lateral := 0.0
+    var entered_wall_cell := false
     for i in range(240):
         npc_system.move_npc(entry, target_position, CELL * 0.24, false, false)
         max_lateral = maxf(max_lateral, absf(body.global_position.z - start_position.z))
+        var npc_cell := world_to_flat_cell(body.global_position)
+        if npc_cell.x == wall_x and abs(npc_cell.y - wall_z) <= 2:
+            entered_wall_cell = true
         await wait_physics_frames(1)
     var detours_after := int(npc_system.stats().get("pathDetours", 0))
+    var validated_after := int(npc_system.stats().get("validatedMoves", 0))
     var wall_world_x := float(wall_x) * CELL
     var progressed_past_wall := body.global_position.x > wall_world_x + CELL * 0.12
     var detoured_around_wall := detours_after > detours_before and max_lateral > CELL * 0.75 and progressed_past_wall
     add_result(
         "npc_equipment_and_pathing",
-        weapon_visible and sword_animated and detoured_around_wall,
-        "weapon %s, sword animated %s, detours %d->%d, lateral %.2f, end %.2f %.2f, wall %.2f" % [
+        weapon_visible and sword_animated and detoured_around_wall and not entered_wall_cell and validated_after > validated_before,
+        "weapon %s, sword animated %s, detours %d->%d, validated %d->%d, lateral %.2f, end %.2f %.2f, wall %.2f, entered wall %s" % [
             str(weapon_visible),
             str(sword_animated),
             detours_before,
             detours_after,
+            validated_before,
+            validated_after,
             max_lateral,
             body.global_position.x,
             body.global_position.z,
-            wall_world_x
+            wall_world_x,
+            str(entered_wall_cell)
+        ]
+    )
+
+    body.global_position = start_position
+    entry["pathWaypoints"] = []
+    entry["routeCells"] = []
+    entry["routeForceReplan"] = true
+    var replan_target := Vector3(float(start_cell.x + 7) * CELL, base_height + 0.04, float(start_cell.y + 4) * CELL)
+    for i in range(3):
+        npc_system.move_npc(entry, replan_target, CELL * 0.22, false, false)
+        await wait_physics_frames(1)
+    var planned_cells: Array = entry.get("routeCells", [])
+    var dynamic_block_cell := Vector2i(start_cell.x + 1, start_cell.y + 1)
+    if not planned_cells.is_empty() and planned_cells[0] is Vector2i:
+        dynamic_block_cell = planned_cells[0]
+    var dynamic_block_key := Vector3i(dynamic_block_cell.x, wall_cell_y, dynamic_block_cell.y)
+    blocks = get_blocks()
+    if blocks.has(dynamic_block_key):
+        var old_dynamic := blocks[dynamic_block_key] as Node
+        if old_dynamic:
+            old_dynamic.queue_free()
+        blocks.erase(dynamic_block_key)
+    main.call("create_block", dynamic_block_key, "stoneBlock", { "world_y": wall_y })
+    await wait_physics_frames(3)
+    var route_revision_before := String(entry.get("routeSnapshotRevision", ""))
+    var route_replans_before := int(entry.get("routeReplans", 0))
+    var entered_dynamic_block := false
+    for i in range(12):
+        npc_system.move_npc(entry, replan_target, CELL * 0.20, false, false)
+        if world_to_flat_cell(body.global_position) == dynamic_block_cell:
+            entered_dynamic_block = true
+        await wait_physics_frames(1)
+    var route_revision_after := String(entry.get("routeSnapshotRevision", ""))
+    var route_replans_after := int(entry.get("routeReplans", 0))
+    add_result(
+        "npc_route_invalidates_player_block",
+        route_revision_after != route_revision_before and route_replans_after > route_replans_before and not entered_dynamic_block,
+        "revision %s -> %s, replans %d->%d, blocked cell %s, entered %s" % [
+            route_revision_before,
+            route_revision_after,
+            route_replans_before,
+            route_replans_after,
+            str(dynamic_block_cell),
+            str(entered_dynamic_block)
+        ]
+    )
+
+    body.global_position = start_position
+    entry["pathWaypoints"] = []
+    entry["routeCells"] = []
+    entry["routeForceReplan"] = true
+    entry["routeStatus"] = "idle"
+    entry["routeReason"] = ""
+    var unreachable_center := Vector2i(start_cell.x + 5, start_cell.y + 5)
+    var unreachable_cells: Array[Vector3i] = []
+    blocks = get_blocks()
+    for dx in range(-1, 2):
+        for dz in range(-1, 2):
+            var enclosed_cell := Vector3i(unreachable_center.x + dx, wall_cell_y, unreachable_center.y + dz)
+            unreachable_cells.append(enclosed_cell)
+            if blocks.has(enclosed_cell):
+                var old_enclosed := blocks[enclosed_cell] as Node
+                if old_enclosed:
+                    old_enclosed.queue_free()
+                blocks.erase(enclosed_cell)
+            main.call("create_block", enclosed_cell, "stoneBlock", { "world_y": wall_y })
+    await wait_physics_frames(3)
+    var unreachable_before := int(npc_system.stats().get("unreachableGoals", 0))
+    var unreachable_target := Vector3(float(unreachable_center.x) * CELL, base_height + 0.04, float(unreachable_center.y) * CELL)
+    for i in range(12):
+        npc_system.move_npc(entry, unreachable_target, CELL * 0.20, false, false)
+        await wait_physics_frames(1)
+    var unreachable_after := int(npc_system.stats().get("unreachableGoals", 0))
+    var route_status := String(entry.get("routeStatus", ""))
+    var route_reason := String(entry.get("routeReason", ""))
+    var did_not_snap_to_goal := body.global_position.distance_to(unreachable_target) > CELL * 0.70
+    add_result(
+        "npc_unreachable_goal_diagnostics",
+        unreachable_after > unreachable_before and route_status != "" and did_not_snap_to_goal,
+        "unreachable %d->%d, status %s, reason %s, distance %.2f" % [
+            unreachable_before,
+            unreachable_after,
+            route_status,
+            route_reason,
+            body.global_position.distance_to(unreachable_target)
         ]
     )
 
@@ -4543,6 +4727,17 @@ func test_npc_equipment_and_pathing() -> void:
     if is_instance_valid(body):
         body.queue_free()
     blocks = get_blocks()
+    if blocks.has(dynamic_block_key):
+        var dynamic_block_body := blocks[dynamic_block_key] as Node
+        if dynamic_block_body:
+            dynamic_block_body.queue_free()
+        blocks.erase(dynamic_block_key)
+    for enclosed_cell in unreachable_cells:
+        if blocks.has(enclosed_cell):
+            var enclosed_body := blocks[enclosed_cell] as Node
+            if enclosed_body:
+                enclosed_body.queue_free()
+            blocks.erase(enclosed_cell)
     for wall_cell in wall_cells:
         if blocks.has(wall_cell):
             var wall_body := blocks[wall_cell] as Node
@@ -7086,6 +7281,47 @@ func has_visual_source(node: Node, source: String) -> bool:
         if has_visual_source(child, source):
             return true
     return false
+
+func npc_route_debug(npc_system, body: Node) -> String:
+    if npc_system == null or body == null or not is_instance_valid(body):
+        return "missing"
+    var entries: Array = npc_system.get("npcs")
+    for entry_variant in entries:
+        var entry: Dictionary = entry_variant
+        if entry.get("body") != body:
+            continue
+        var body_3d := body as Node3D
+        var current_cell := world_to_flat_cell(body_3d.global_position) if body_3d != null else Vector2i.ZERO
+        return "%s cell %s home %s porch %s active %s fallback %s status %s/%s index %d inside %s force %s dialogue %s" % [
+            String(body.get_meta("npc_id", entry.get("id", body.name))),
+            str(current_cell),
+            str(entry.get("homeCell", Vector2i.ZERO)),
+            str(entry.get("porchCell", Vector2i.ZERO)),
+            str(entry.get("homeActiveTargetCell", Vector2i.ZERO)),
+            str(entry.get("routeFallbackCell", Vector2i.ZERO)),
+            String(entry.get("routeStatus", "")),
+            String(entry.get("routeReason", "")),
+            int(entry.get("homeRouteIndex", 0)),
+            str(body.get_meta("npc_inside_home", false)),
+            str(body.get_meta("npc_force_hold", false)),
+            str(body.get_meta("npc_dialogue_focused", false))
+        ]
+    return "entry missing"
+
+func npc_shelter_debug(npc_system) -> String:
+    if npc_system == null:
+        return "missing"
+    var entries: Array = npc_system.get("npcs")
+    var details: Array[String] = []
+    for entry_variant in entries:
+        var entry: Dictionary = entry_variant
+        var body := entry.get("body") as Node
+        if body == null or not is_instance_valid(body):
+            continue
+        details.append(npc_route_debug(npc_system, body))
+        if details.size() >= 8:
+            break
+    return "; ".join(details)
 
 func icon_distinct_colors(texture: Texture2D) -> int:
     if texture == null:

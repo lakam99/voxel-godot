@@ -11,8 +11,10 @@ const WAV_PATHS := {
     "doorOpen": "res://assets/audio/sfx/door_open.wav",
     "doorClose": "res://assets/audio/sfx/door_close.wav",
     "chestOpen": "res://assets/audio/sfx/chest_open.wav",
-    "tutorialTownDay": "res://assets/audio/bgm/tutorial_town_day.wav"
+    "tutorialTownDay": "res://assets/audio/bgm/tutorial_town_day.wav",
+    "gameDay2": "res://assets/audio/bgm/game_day_2.wav"
 }
+const DAYTIME_MUSIC_TRACKS := ["tutorialTownDay", "gameDay2"]
 const STREAM_PATHS := {
     "natureDay": "res://assets/audio/sfx/nature_day.mp3",
     "nightWind": "res://assets/audio/sfx/night_wind.mp3"
@@ -41,7 +43,9 @@ var ambient_night_amount := 0.0
 var knock_looping := false
 var knock_repeat_timer := 0.0
 var current_music := ""
+var current_music_source := ""
 var streams := {}
+var daytime_music_tracks := []
 var last_played := ""
 var play_count := 0
 var visual_effects: Array = []
@@ -96,7 +100,14 @@ func build_streams() -> void:
     streams["chestOpen"] = load_wav_or_fallback("chestOpen", make_tone_stream([380.0, 205.0], 0.12, "triangle"))
     streams["rainLoop"] = load_wav_or_fallback("rainLoop", make_noise_stream(1.2), true)
     streams["tutorialTownDay"] = load_wav_or_fallback("tutorialTownDay", make_tone_stream([220.0], 0.02, "sine"), true)
-    streams["daytime"] = streams["tutorialTownDay"]
+    var tutorial_day_stream := streams["tutorialTownDay"] as AudioStreamWAV
+    streams["gameDay2"] = load_wav_or_fallback("gameDay2", tutorial_day_stream, true)
+    daytime_music_tracks.clear()
+    for track in DAYTIME_MUSIC_TRACKS:
+        if streams.has(track):
+            daytime_music_tracks.append(track)
+    if not daytime_music_tracks.is_empty():
+        streams["daytime"] = streams[daytime_music_tracks[0]]
     var nature_stream := load_imported_stream("natureDay")
     if nature_stream != null:
         streams["natureDay"] = nature_stream
@@ -199,8 +210,9 @@ func update_music(state: Dictionary) -> void:
         requested = ""
     if requested != current_music:
         current_music = requested
+        current_music_source = ""
         if current_music != "":
-            music_player.stream = streams[current_music]
+            music_player.stream = stream_for_music(current_music)
             music_volume_db = -60.0
             music_player.volume_db = music_volume_db
             music_player.play()
@@ -341,10 +353,14 @@ func stats() -> Dictionary:
         "nightVolumeDb": night_volume_db,
         "nightPlaying": night_player.playing if night_player else false,
         "currentMusic": current_music,
+        "currentMusicSource": current_music_source,
         "musicPlaying": music_player.playing if music_player else false,
         "musicVolumeDb": music_volume_db,
         "hasTutorialTownDayBgm": streams.has("tutorialTownDay"),
         "tutorialTownDayBgmLength": streams["tutorialTownDay"].get_length() if streams.has("tutorialTownDay") else 0.0,
+        "hasGameDay2Bgm": streams.has("gameDay2"),
+        "gameDay2BgmLength": streams["gameDay2"].get_length() if streams.has("gameDay2") else 0.0,
+        "daytimeMusicTrackCount": daytime_music_tracks.size(),
         "knockLooping": knock_looping,
         "visualEffects": visual_effects.size(),
         "effectPool": visual_effect_pool.size(),
@@ -370,6 +386,13 @@ func load_wav_or_fallback(name: String, fallback: AudioStreamWAV, loop := false)
     if loaded != null:
         return loaded
     return fallback
+
+func stream_for_music(track: String) -> AudioStream:
+    if track == "daytime" and not daytime_music_tracks.is_empty():
+        current_music_source = String(daytime_music_tracks.pick_random())
+        return streams[current_music_source] as AudioStream
+    current_music_source = track
+    return streams[track] as AudioStream
 
 func load_imported_stream(name: String) -> AudioStream:
     var path := String(STREAM_PATHS.get(name, ""))

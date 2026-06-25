@@ -36,6 +36,7 @@ var chunk_asset_cache_misses := 0
 var chunk_asset_cache_invalidations := 0
 var height_edits := {}
 var town_region_cache := {}
+var town_slope_apron_cache := {}
 var blocks := {}
 var removed_props := {}
 var inventory := {}
@@ -241,6 +242,7 @@ func apply_world_seed(new_seed: String, remember := false) -> void:
         seed_text = random_world_seed()
     seed_hash = hash_string(seed_text)
     town_region_cache.clear()
+    town_slope_apron_cache.clear()
     fishing_rng.seed = hash_string("%s:fishing" % seed_text)
     setup_noise()
     if weather_system and weather_system.has_method("reset_for_seed"):

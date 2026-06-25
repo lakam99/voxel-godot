@@ -19,6 +19,7 @@ func run() -> void:
     if output_path == "":
         output_path = ProjectSettings.globalize_path("res://artifacts/world-signature/latest/atlas-1492.json")
     ensure_dir(output_path.get_base_dir())
+    OS.set_environment("VOXEL_PLAYTEST", "1")
     main = MAIN_SCENE.instantiate()
     add_child(main)
     await wait_frames(90)

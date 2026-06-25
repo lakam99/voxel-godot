@@ -28,12 +28,19 @@ var npc_path_detours := 0
 var npc_blocked_moves := 0
 var npc_forage_runs := 0
 var npc_food_eaten := 0
+var npc_route_replans := 0
+var npc_stuck_recoveries := 0
+var npc_reservation_waits := 0
+var npc_unreachable_goals := 0
+var npc_validated_moves := 0
 var pending_door_closes: Array = []
 var visual_factory
 var pathing
 var combat
 var components_initialized := false
 var component_init_attempted := false
+var last_spawn_scan_frame := -1
+var npc_update_cursor := 0
 
 func setup(main_node, hostile_system_node) -> void:
     main = main_node
@@ -174,6 +181,20 @@ func register_npc(body: StaticBody3D, profile: Dictionary) -> Dictionary:
         "routeGoalCell": Vector2i(999999, 999999),
         "routeAllowOutside": false,
         "routeMovingHome": false,
+        "routeStatus": "idle",
+        "routeReason": "",
+        "routeReplans": 0,
+        "stuckRecoveries": 0,
+        "reservationWaits": 0,
+        "unreachableGoals": 0,
+        "validatedMoves": 0,
+        "routeCells": [],
+        "routeActions": {},
+        "routeSnapshotRevision": "",
+        "routeForceReplan": false,
+        "routeWaitTicks": 0,
+        "routeYieldTicks": 0,
+        "routePriority": 0,
         "jumpIntentTime": 0.0
     }
     apply_npc_metadata(body, entry, home_cell, porch_cell, guard_cell, job)
@@ -197,6 +218,8 @@ func apply_npc_metadata(body: Node, entry: Dictionary, home_cell: Vector2i, porc
     body.set_meta("npc_has_home", true)
     body.set_meta("npc_inside_home", false)
     body.set_meta("npc_weapon", String(entry["weaponId"]))
+    body.set_meta("npc_route_status", String(entry.get("routeStatus", "idle")))
+    body.set_meta("npc_route_reason", String(entry.get("routeReason", "")))
 
 func route_positions_from_profile(route_cells_value, level: float) -> Array[Vector3]:
     var result: Array[Vector3] = []
@@ -220,6 +243,10 @@ func resource_for_job(job: String) -> String:
 func spawn_generic_town_npcs() -> void:
     if main == null or main.structure_system == null or not main.structure_system.has_method("town_home_records_snapshot"):
         return
+    var current_frame := Engine.get_process_frames()
+    if last_spawn_scan_frame == current_frame:
+        return
+    last_spawn_scan_frame = current_frame
     var records_by_town: Dictionary = main.structure_system.town_home_records_snapshot()
     var tutorial_key := tutorial_town_key()
     for town_key_variant in records_by_town.keys():
@@ -284,14 +311,24 @@ func update_npcs(delta: float, day_factor: float) -> void:
     if combat != null:
         combat.update_tracers(delta)
     update_pending_door_closes(delta)
+    if pathing != null and pathing.has_method("begin_frame"):
+        pathing.begin_frame()
     var night_factor := clampf((1.0 - day_factor - 0.30) / 0.55, 0.0, 1.0)
-    for entry in npcs.duplicate():
+    var update_entries := npcs.duplicate()
+    var update_count := update_entries.size()
+    var budget := update_count if update_count <= 16 else mini(update_count, 8)
+    if update_count <= 0:
+        return
+    npc_update_cursor = npc_update_cursor % update_count
+    for offset in range(budget):
+        var entry: Dictionary = update_entries[(npc_update_cursor + offset) % update_count]
         var body := entry.get("body") as StaticBody3D
         if body == null or not is_instance_valid(body):
             npcs.erase(entry)
             continue
         update_npc_visual_state(entry, delta)
         update_npc(entry, delta, night_factor)
+    npc_update_cursor = (npc_update_cursor + budget) % max(1, npcs.size())
 
 func update_npc(entry: Dictionary, delta: float, night_factor: float) -> void:
     var body := entry.get("body") as StaticBody3D
@@ -310,9 +347,11 @@ func update_npc(entry: Dictionary, delta: float, night_factor: float) -> void:
     var target: Vector3
     var moving_home := false
     var moving_job := false
+    var moving_guard := false
     if night_factor > 0.45:
         if can_fight and (target_hostile != null or night_guard):
             target = update_fighter_target(entry, body, target_hostile, weapon_id)
+            moving_guard = target_hostile != null
         else:
             moving_home = true
             entry["homeReturnTime"] = float(entry.get("homeReturnTime", 0.0)) + delta
@@ -330,8 +369,12 @@ func update_npc(entry: Dictionary, delta: float, night_factor: float) -> void:
 
     var speed := 2.3 if night_factor <= 0.45 else (6.4 if moving_home else 2.45)
     if moving_home and bool(entry.get("holdIntroDoor", false)):
-        speed = 10.0
-    var moved := move_npc(entry, target, speed * delta, moving_home, moving_job)
+        speed = 14.0
+    if moving_home:
+        entry["homeActiveTargetCell"] = flat_cell_for_position(target)
+    var moved := move_npc(entry, target, speed * delta, moving_home, moving_job or moving_guard)
+    if moved <= 0.001 and moving_job:
+        entry["routeForceReplan"] = true
     entry["lastMoveDistance"] = moved
     if moved <= 0.001 and not moving_home:
         entry["wanderTimer"] = 0.0
@@ -374,15 +417,14 @@ func update_scripted_npc(entry: Dictionary, body: StaticBody3D, delta: float) ->
 func update_fighter_target(entry: Dictionary, body: StaticBody3D, target_hostile: Node3D, weapon_id: String) -> Vector3:
     entry["insideHome"] = false
     body.set_meta("npc_inside_home", false)
-    var target: Vector3 = entry.get("guardPosition", body.global_position)
+    var melee := npc_weapon_is_melee(weapon_id)
+    var target: Vector3 = choose_guard_target(entry, target_hostile, melee)
     if target_hostile == null:
         return target
-    if npc_weapon_is_melee(weapon_id):
+    if melee:
         var flat_distance := Vector2(target_hostile.global_position.x - body.global_position.x, target_hostile.global_position.z - body.global_position.z).length()
         if flat_distance <= CELL * 1.72:
             strike_hostile(entry, target_hostile)
-        else:
-            target = target_hostile.global_position
     else:
         fire_at_hostile(entry, target_hostile)
     return target
@@ -516,7 +558,8 @@ func update_day_job(entry: Dictionary, delta: float) -> bool:
 func update_outbound_job(entry: Dictionary, body: StaticBody3D, timer: float) -> bool:
     var target: Vector3 = entry.get("jobTarget", body.global_position)
     var outside_town := not point_inside_town(entry, body.global_position)
-    if body.global_position.distance_to(target) <= CELL * 1.1 or (timer <= 0.0 and outside_town):
+    var target_outside := not point_inside_town(entry, target)
+    if target_outside and (body.global_position.distance_to(target) <= CELL * 1.1 or (timer <= 0.0 and outside_town)):
         entry["jobPhase"] = "gathering"
         entry["jobTimer"] = randf_range(1.8, 3.5)
         body.set_meta("npc_job_phase", "gathering")
@@ -531,6 +574,12 @@ func update_gathering_job(entry: Dictionary, body: StaticBody3D, timer: float) -
     if timer > 0.0:
         entry["jobTimer"] = timer
         body.set_meta("npc_job_phase", "gathering")
+        return true
+    if point_inside_town(entry, body.global_position):
+        entry["jobPhase"] = "outbound"
+        entry["jobTarget"] = choose_job_target(entry)
+        entry["jobTimer"] = randf_range(4.0, 8.0)
+        body.set_meta("npc_job_phase", "outbound")
         return true
     var runs := int(entry.get("jobRuns", 0)) + 1
     entry["jobRuns"] = runs
@@ -577,7 +626,7 @@ func update_forager_goal(entry: Dictionary, body: StaticBody3D, delta: float) ->
             body.set_meta("npc_job_phase", "searching")
             return true
         entry["jobTargetNode"] = forage
-        entry["jobTarget"] = forage.global_position
+        entry["jobTarget"] = pathing.forage_target_position(entry, forage) if pathing != null and pathing.has_method("forage_target_position") else forage.global_position
         entry["jobPhase"] = "outbound"
         entry["jobTimer"] = randf_range(12.0, 22.0)
         set_npc_goal(entry, "forage berries")
@@ -585,10 +634,10 @@ func update_forager_goal(entry: Dictionary, body: StaticBody3D, delta: float) ->
         return true
     if phase == "outbound" or phase == "searching":
         var target_value = entry.get("jobTargetNode")
-        var target_node: Node3D = target_value if target_value is Node3D and is_instance_valid(target_value) else null
-        if target_node != null:
-            entry["jobTarget"] = target_node.global_position
-        elif phase == "outbound":
+        var target_node: Node3D = null
+        if target_value != null and is_instance_valid(target_value) and target_value is Node3D:
+            target_node = target_value
+        if target_node == null and phase == "outbound":
             entry["jobTargetNode"] = null
             entry["jobPhase"] = "idle"
             entry["jobTimer"] = 0.0
@@ -596,8 +645,8 @@ func update_forager_goal(entry: Dictionary, body: StaticBody3D, delta: float) ->
         var target: Vector3 = entry.get("jobTarget", body.global_position)
         var outside_town := not point_inside_town(entry, body.global_position)
         var reached_target := body.global_position.distance_to(target) <= CELL * 1.15
-        var timed_out_at_real_target := timer <= 0.0 and phase == "outbound" and target_node != null
-        if reached_target or (phase == "searching" and outside_town) or timed_out_at_real_target:
+        var reached_forage_node := target_node != null and body.global_position.distance_to(target_node.global_position) <= CELL * 1.75
+        if reached_target or reached_forage_node or (phase == "searching" and outside_town):
             entry["jobPhase"] = "gathering"
             entry["jobTimer"] = randf_range(1.0, 1.8)
             set_npc_goal(entry, "pick berries")
@@ -605,7 +654,11 @@ func update_forager_goal(entry: Dictionary, body: StaticBody3D, delta: float) ->
             body.set_meta("npc_job_phase", "gathering")
         else:
             if timer <= 0.0:
-                entry["jobTarget"] = choose_job_target(entry)
+                if target_node != null:
+                    entry["jobTarget"] = pathing.forage_target_position(entry, target_node) if pathing != null and pathing.has_method("forage_target_position") else target_node.global_position
+                else:
+                    entry["jobTarget"] = choose_job_target(entry)
+                entry["routeForceReplan"] = true
                 timer = randf_range(3.0, 7.0)
             entry["jobTimer"] = timer
         return true
@@ -674,33 +727,25 @@ func find_forage_target(entry: Dictionary) -> Node3D:
     var body := entry.get("body") as Node3D
     if body == null:
         return null
-    var best: Node3D = null
-    var best_distance := INF
+    var candidates: Array[Node3D] = []
     for root in [main.get("chunk_root"), main.get("prop_root")]:
-        var found := find_forage_target_in_tree(root as Node, entry, body.global_position, best_distance)
-        if found.get("node") is Node3D:
-            best = found["node"]
-            best_distance = float(found["distance"])
-    return best
+        collect_forage_targets_in_tree(root as Node, entry, body.global_position, candidates)
+    if pathing != null and pathing.has_method("choose_forage_target"):
+        return pathing.choose_forage_target(entry, candidates)
+    return candidates[0] if not candidates.is_empty() else null
 
-func find_forage_target_in_tree(root: Node, entry: Dictionary, origin: Vector3, best_distance: float) -> Dictionary:
-    var best: Node3D = null
-    var best_dist := best_distance
+func collect_forage_targets_in_tree(root: Node, entry: Dictionary, origin: Vector3, candidates: Array[Node3D]) -> void:
     if root == null:
-        return { "node": best, "distance": best_dist }
+        return
     var stack: Array[Node] = [root]
     while not stack.is_empty():
         var node := stack.pop_back() as Node
         if node == null:
             continue
         if node is Node3D and is_valid_forage_node(node as Node3D, entry):
-            var distance := (node as Node3D).global_position.distance_to(origin)
-            if distance < best_dist:
-                best = node as Node3D
-                best_dist = distance
+            candidates.append(node as Node3D)
         for child in node.get_children():
             stack.append(child)
-    return { "node": best, "distance": best_dist }
 
 func is_valid_forage_node(node: Node3D, entry: Dictionary) -> bool:
     if not is_instance_valid(node) or bool(node.get_meta("npc_harvested", false)):
@@ -710,6 +755,8 @@ func is_valid_forage_node(node: Node3D, entry: Dictionary) -> bool:
     if String(node.get_meta("drop", "")) != "berries" and String(node.get_meta("material", "")) != "berryBush":
         return false
     if not point_inside_work_area(entry, node.global_position):
+        return false
+    if point_inside_town(entry, node.global_position):
         return false
     var h: float = main.height_at_world(node.global_position.x, node.global_position.z)
     return h >= main.WATER_LEVEL + 0.45
@@ -740,27 +787,82 @@ func home_route_target(entry: Dictionary) -> Vector3:
     var route_index := int(entry.get("homeRouteIndex", 0))
     while route_index < route_positions.size():
         var route_target: Vector3 = route_positions[route_index]
-        if body.global_position.distance_to(route_target) > CELL * 0.82:
+        if not home_route_step_reached(entry, route_target):
             entry["homeRouteIndex"] = route_index
             return route_target
         route_index += 1
     entry["homeRouteIndex"] = route_index
-    return porch if body.global_position.distance_to(porch) > CELL * 0.82 else home
+    return porch if not home_route_step_reached(entry, porch) else home
+
+func home_route_step_reached(entry: Dictionary, route_target: Vector3) -> bool:
+    var body := entry.get("body") as StaticBody3D
+    if body == null:
+        return true
+    if body.global_position.distance_to(route_target) <= CELL * 0.82:
+        return true
+    if String(entry.get("routeStatus", "")) != "arrived" or not entry.has("homeActiveTargetCell"):
+        return false
+    var target_cell := flat_cell_for_position(route_target)
+    var active_cell: Vector2i = entry.get("homeActiveTargetCell", target_cell)
+    if active_cell != target_cell:
+        return false
+    var current_cell := flat_cell_for_position(body.global_position)
+    return abs(current_cell.x - target_cell.x) <= 1 and abs(current_cell.y - target_cell.y) <= 1
 
 func settle_home_if_reached(entry: Dictionary) -> void:
     var body := entry.get("body") as StaticBody3D
     if body == null:
         return
+    var home_cell: Vector2i = entry.get("homeCell", Vector2i.ZERO)
+    var porch_cell: Vector2i = entry.get("porchCell", home_cell)
     var porch: Vector3 = entry.get("porchPosition", body.global_position)
     var home: Vector3 = entry.get("homePosition", body.global_position)
-    var near_home := body.global_position.distance_to(home) <= CELL * 4.8
-    var timed_near := float(entry.get("homeReturnTime", 0.0)) > 5.6 and body.global_position.distance_to(home) <= CELL * 14.0
-    var near_porch := body.global_position.distance_to(porch) <= CELL * 1.65 and body.global_position.distance_to(home) <= CELL * 5.2
-    if near_home or timed_near or near_porch:
-        body.global_position = home
-        entry["insideHome"] = true
-        entry["homeRouteIndex"] = int((entry.get("homeRoutePositions", []) as Array).size())
-        body.set_meta("npc_inside_home", true)
+    var near_home := body.global_position.distance_to(home) <= CELL * 0.92
+    var route_status := String(entry.get("routeStatus", ""))
+    var route_arrived := route_status == "arrived"
+    var current_cell := flat_cell_for_position(body.global_position)
+    var active_target_cell: Vector2i = entry.get("homeActiveTargetCell", home_cell)
+    var fallback_cell: Vector2i = entry.get("routeFallbackCell", flat_cell_for_position(body.global_position))
+    var level := float(entry.get("level", body.global_position.y - 0.04))
+    var fallback_position := cell_to_position(fallback_cell, level)
+    var target_is_home := active_target_cell == home_cell
+    var route_arrived_at_porch_fallback := route_arrived and target_is_home and fallback_cell == porch_cell and current_cell == porch_cell
+    if near_home or (route_arrived and not route_arrived_at_porch_fallback and body.global_position.distance_to(home) <= CELL * 1.45):
+        mark_npc_inside_home(entry)
+        return
+
+    var route_terminal := route_status in ["arrived", "partial", "blocked"]
+    var fallback_is_safe_home_edge := fallback_cell == porch_cell or fallback_cell == home_cell
+    var at_fallback := current_cell == fallback_cell or body.global_position.distance_to(fallback_position) <= CELL * 0.95
+    var fallback_missing := fallback_cell == Vector2i(999999, 999999)
+    var current_is_safe_home_edge := current_cell == porch_cell or current_cell == home_cell or body.global_position.distance_to(porch) <= CELL * 1.75
+    var at_safe_porch := body.global_position.distance_to(porch) <= CELL * 1.75
+    var fallback_supports_safe_edge := (fallback_is_safe_home_edge and at_fallback) or fallback_missing or current_is_safe_home_edge
+    if target_is_home and route_terminal and fallback_supports_safe_edge and at_safe_porch:
+        mark_npc_inside_home(entry, "home_porch_fallback")
+
+func mark_npc_inside_home(entry: Dictionary, fallback_reason := "") -> void:
+    var body := entry.get("body") as StaticBody3D
+    if body == null:
+        return
+    entry["insideHome"] = true
+    entry["homeRouteIndex"] = int((entry.get("homeRoutePositions", []) as Array).size())
+    body.set_meta("npc_inside_home", true)
+    if fallback_reason != "":
+        record_home_fallback(entry, fallback_reason)
+        entry["routeStatus"] = "partial"
+        entry["routeReason"] = fallback_reason
+        body.set_meta("npc_route_status", "partial")
+        body.set_meta("npc_route_reason", fallback_reason)
+
+func record_home_fallback(entry: Dictionary, reason: String) -> void:
+    var home_cell: Vector2i = entry.get("homeCell", Vector2i.ZERO)
+    var signature := "home:%d,%d:%s" % [home_cell.x, home_cell.y, reason]
+    if String(entry.get("lastUnreachableSignature", "")) == signature:
+        return
+    entry["lastUnreachableSignature"] = signature
+    entry["unreachableGoals"] = int(entry.get("unreachableGoals", 0)) + 1
+    npc_unreachable_goals += 1
 
 func open_door_for_npc(collider: Node, npc_body: Node3D = null) -> void:
     if collider == null or main == null or not main.has_method("toggle_door"):
@@ -786,18 +888,26 @@ func schedule_door_close(door: Node, npc_body: Node3D) -> void:
 
 func update_pending_door_closes(delta: float) -> void:
     for pending in pending_door_closes.duplicate():
-        var door := pending.get("door") as Node3D
-        if door == null or not is_instance_valid(door):
+        var door_value = pending.get("door")
+        if door_value == null or not is_instance_valid(door_value) or not (door_value is Node3D):
             pending_door_closes.erase(pending)
             continue
+        var door: Node3D = door_value
         pending["timer"] = float(pending.get("timer", 0.0)) + delta
-        var npc := pending.get("npc") as Node3D
+        var npc_value = pending.get("npc")
+        var npc: Node3D = npc_value if npc_value != null and is_instance_valid(npc_value) and npc_value is Node3D else null
         var npc_clear: bool = npc == null or not is_instance_valid(npc) or npc.global_position.distance_to(door.global_position) > CELL * 1.45
         var player_clear: bool = true
         if main != null and main.player != null:
             player_clear = main.player.global_position.distance_to(door.global_position) > CELL * 1.35
+        var npcs_clear := true
+        for entry in npcs:
+            var body := entry.get("body") as Node3D
+            if body != null and is_instance_valid(body) and body.global_position.distance_to(door.global_position) <= CELL * 1.45:
+                npcs_clear = false
+                break
         var timed_out := float(pending.get("timer", 0.0)) > 4.5
-        if bool(door.get_meta("open", false)) and npc_clear and (player_clear or timed_out):
+        if bool(door.get_meta("open", false)) and npc_clear and npcs_clear and (player_clear or timed_out):
             if bool(main.toggle_door(door)):
                 door_closes += 1
                 last_message = "NPC closed a door"
@@ -806,110 +916,9 @@ func update_pending_door_closes(delta: float) -> void:
             pending_door_closes.erase(pending)
 
 func move_npc(entry: Dictionary, target: Vector3, max_distance: float, moving_home := false, allow_outside := false) -> float:
-    var moved := 0.0
     if pathing == null:
-        return fallback_move_npc(entry, target, max_distance, moving_home, allow_outside)
-    moved = pathing.move_npc(entry, target, max_distance, moving_home, allow_outside)
-    if moved <= 0.001 and max_distance > 0.0:
-        moved = fallback_move_npc(entry, target, max_distance, moving_home, allow_outside)
-    return moved
-
-func fallback_move_npc(entry: Dictionary, target: Vector3, max_distance: float, moving_home := false, allow_outside := false) -> float:
-    var body := entry.get("body") as StaticBody3D
-    if body == null or main == null or max_distance <= 0.0:
         return 0.0
-    var previous := body.global_position
-    var active_target := target
-    var detour: Vector3 = entry.get("fallbackDetour", NO_DETOUR)
-    if absf(detour.x) < 1000000.0:
-        if previous.distance_to(detour) > CELL * 0.65:
-            active_target = detour
-        else:
-            entry["fallbackDetour"] = NO_DETOUR
-    elif fallback_route_blocked(previous, target):
-        var chosen := choose_fallback_detour(entry, previous, target, moving_home, allow_outside)
-        if absf(chosen.x) < 1000000.0:
-            entry["fallbackDetour"] = chosen
-            active_target = chosen
-            npc_path_detours += 1
-    var delta := active_target - previous
-    delta.y = 0.0
-    if delta.length_squared() < 0.001:
-        return 0.0
-    var step := delta.normalized() * minf(max_distance, delta.length())
-    var candidate := previous + step
-    if not fallback_candidate_allowed(entry, previous, candidate, moving_home, allow_outside):
-        npc_blocked_moves += 1
-        return 0.0
-    var ground_y: float = main.height_at_world(candidate.x, candidate.z)
-    candidate.y = ground_y + 0.04
-    body.global_position = candidate
-    body.rotation.y = atan2(step.x, step.z)
-    return Vector2(candidate.x - previous.x, candidate.z - previous.z).length()
-
-func fallback_route_blocked(previous: Vector3, target: Vector3) -> bool:
-    var delta := target - previous
-    delta.y = 0.0
-    var distance := delta.length()
-    if distance <= CELL * 1.5 or main == null:
-        return false
-    var samples := clampi(ceili(distance / (CELL * 0.5)), 2, 80)
-    for i in range(1, samples):
-        var probe := previous.lerp(target, float(i) / float(samples))
-        if fallback_cell_blocked(Vector2i(roundi(probe.x / CELL), roundi(probe.z / CELL))):
-            return true
-    return false
-
-func choose_fallback_detour(entry: Dictionary, previous: Vector3, target: Vector3, moving_home: bool, allow_outside: bool) -> Vector3:
-    var forward := target - previous
-    forward.y = 0.0
-    if forward.length_squared() < 0.001:
-        return NO_DETOUR
-    forward = forward.normalized()
-    var side := Vector3(-forward.z, 0.0, forward.x)
-    for distance_value in [CELL * 2.4, CELL * 4.0, CELL * 5.6]:
-        var distance: float = float(distance_value)
-        for direction_value in [1.0, -1.0]:
-            var direction: float = float(direction_value)
-            var detour: Vector3 = previous + side * direction * distance + forward * CELL * 3.2
-            if fallback_candidate_allowed(entry, previous, detour, moving_home, allow_outside):
-                detour.y = main.height_at_world(detour.x, detour.z) + 0.04
-                return detour
-    return NO_DETOUR
-
-func fallback_candidate_allowed(entry: Dictionary, previous: Vector3, candidate: Vector3, moving_home: bool, allow_outside: bool) -> bool:
-    if allow_outside:
-        if not point_inside_work_area(entry, candidate):
-            return false
-    elif not point_inside_town(entry, candidate):
-        return false
-    var ground_y: float = main.height_at_world(candidate.x, candidate.z)
-    if ground_y < main.WATER_LEVEL + 0.45:
-        return false
-    var previous_y: float = main.height_at_world(previous.x, previous.z)
-    if absf(ground_y - previous_y) > CELL * 0.9 and not moving_home:
-        return false
-    var cell: Vector2i = Vector2i(roundi(candidate.x / CELL), roundi(candidate.z / CELL))
-    return not fallback_cell_blocked(cell)
-
-func fallback_cell_blocked(cell: Vector2i) -> bool:
-    if main == null:
-        return false
-    var blocks: Dictionary = main.get("blocks")
-    for block in blocks.values():
-        var body := block as Node
-        if body == null or not is_instance_valid(body):
-            continue
-        var block_type := String(body.get_meta("block_type", ""))
-        if block_type in ["cobblestonePath", "torch"]:
-            continue
-        var block_cell: Vector3i = body.get_meta("cell", Vector3i.ZERO)
-        if block_cell.x == cell.x and block_cell.z == cell.y:
-            if block_type == "door":
-                open_door_for_npc(body, null)
-                return false
-            return true
-    return false
+    return pathing.move_npc(entry, target, max_distance, moving_home, allow_outside)
 
 func choose_day_target(entry: Dictionary) -> Vector3:
     if pathing == null:
@@ -920,6 +929,11 @@ func choose_job_target(entry: Dictionary) -> Vector3:
     if pathing == null:
         return entry.get("porchPosition", Vector3.ZERO)
     return pathing.choose_job_target(entry)
+
+func choose_guard_target(entry: Dictionary, target_hostile: Node3D = null, melee := false) -> Vector3:
+    if pathing == null:
+        return entry.get("guardPosition", entry.get("porchPosition", Vector3.ZERO))
+    return pathing.choose_guard_target(entry, target_hostile, melee)
 
 func point_inside_town(entry: Dictionary, position: Vector3) -> bool:
     if pathing == null:
@@ -969,6 +983,9 @@ func add_npc_visual(parent: Node3D, body_material: StandardMaterial3D, accent_ma
 
 func cell_to_position(cell: Vector2i, level: float) -> Vector3:
     return Vector3(float(cell.x) * CELL, level + 0.04, float(cell.y) * CELL)
+
+func flat_cell_for_position(position: Vector3) -> Vector2i:
+    return Vector2i(roundi(position.x / CELL), roundi(position.z / CELL))
 
 func stats() -> Dictionary:
     return NpcStatsScript.build(self)

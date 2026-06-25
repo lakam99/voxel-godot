@@ -1,0 +1,293 @@
+extends RefCounted
+class_name NpcNavigationWorld
+
+const CELL := 1.35
+const INVALID_CELL := Vector2i(999999, 999999)
+
+var system
+var main
+var cached_revision := ""
+var cached_blocked := {}
+var cached_doors := {}
+var cached_paths := {}
+var cached_props := {}
+var height_cache := {}
+var revision_frame_key := ""
+var cached_revision_value := ""
+
+func setup(system_node, main_node) -> void:
+    system = system_node
+    main = main_node
+
+func invalidate() -> void:
+    cached_revision = ""
+    cached_revision_value = ""
+    revision_frame_key = ""
+    height_cache = {}
+
+func build_snapshot(entry: Dictionary, allow_outside := false, moving_home := false) -> Dictionary:
+    var revision_id := revision()
+    if revision_id != cached_revision:
+        rebuild_static_cells()
+        cached_revision = revision_id
+    return {
+        "revision": revision_id,
+        "blocked": cached_blocked,
+        "doors": cached_doors,
+        "paths": cached_paths,
+        "props": cached_props,
+        "dynamic": live_occupant_cells(entry),
+        "allowOutside": allow_outside,
+        "movingHome": moving_home
+    }
+
+func revision() -> String:
+    if main == null:
+        return "empty"
+    var current_frame_key := "%d:%d" % [Engine.get_process_frames(), Engine.get_physics_frames()]
+    if revision_frame_key == current_frame_key and cached_revision_value != "":
+        return cached_revision_value
+    var blocks: Dictionary = main.get("blocks")
+    var block_count := blocks.size()
+    var block_hash := 0
+    for key in blocks.keys():
+        block_hash = int(hash("%d:%s" % [block_hash, str(key)]))
+    var root_count := 0
+    var height_edit_count := 0
+    var height_edits_value = main.get("height_edits")
+    if height_edits_value is Dictionary:
+        height_edit_count = (height_edits_value as Dictionary).size()
+    for root_value in [main.get("chunk_root"), main.get("prop_root")]:
+        var root := root_value as Node
+        if root:
+            root_count += root.get_child_count()
+    var npc_count := 0
+    if system != null:
+        npc_count = system.npcs.size()
+    cached_revision_value = "%d:%d:%d:%d:%d" % [block_count, block_hash, root_count, height_edit_count, npc_count]
+    revision_frame_key = current_frame_key
+    return cached_revision_value
+
+func rebuild_static_cells() -> void:
+    cached_blocked = {}
+    cached_doors = {}
+    cached_paths = {}
+    cached_props = {}
+    height_cache = {}
+    if main == null:
+        return
+    var blocks: Dictionary = main.get("blocks")
+    for block in blocks.values():
+        var body := block as Node
+        if body == null or not is_instance_valid(body):
+            continue
+        var block_type := String(body.get_meta("block_type", ""))
+        var block_cell := block_world_cell(body)
+        if block_cell == INVALID_CELL:
+            continue
+        if block_type == "door":
+            cached_doors[block_cell] = body
+            continue
+        if block_type == "cobblestonePath":
+            cached_paths[block_cell] = true
+            continue
+        if block_type == "torch":
+            continue
+        cached_blocked[block_cell] = body
+    add_prop_obstacle_cells()
+
+func block_world_cell(body: Node) -> Vector2i:
+    if body.has_meta("cell"):
+        var cell_value = body.get_meta("cell")
+        if cell_value is Vector3i:
+            return Vector2i(cell_value.x, cell_value.z)
+        if cell_value is Vector2i:
+            return cell_value
+    if body is Node3D:
+        return world_cell((body as Node3D).global_position)
+    return INVALID_CELL
+
+func add_prop_obstacle_cells() -> void:
+    for root_value in [main.get("chunk_root"), main.get("prop_root")]:
+        var root := root_value as Node
+        if root == null:
+            continue
+        var stack: Array[Node] = [root]
+        while not stack.is_empty():
+            var node := stack.pop_back() as Node
+            if node == null:
+                continue
+            if node is Node3D and String(node.get_meta("kind", "")) == "prop":
+                var prop := node as Node3D
+                if prop_blocks_npc(prop):
+                    var cell := world_cell(prop.global_position)
+                    cached_blocked[cell] = prop
+                    cached_props[cell] = prop
+            for child in node.get_children():
+                stack.append(child)
+
+func prop_blocks_npc(prop: Node3D) -> bool:
+    var material := String(prop.get_meta("material", ""))
+    var drop := String(prop.get_meta("drop", ""))
+    if material in ["tree", "rock", "copperOre", "ironOre", "wildlife", "berryBush"]:
+        return true
+    return drop in ["logs", "stones", "berries"]
+
+func live_occupant_cells(entry: Dictionary) -> Dictionary:
+    var dynamic := {}
+    var self_body := entry.get("body") as Node3D
+    if system != null:
+        for other_entry in system.npcs:
+            var other_body := other_entry.get("body") as Node3D
+            if other_body == null or not is_instance_valid(other_body) or other_body == self_body:
+                continue
+            dynamic[world_cell(other_body.global_position)] = other_body
+    if system != null and system.get("hostile_system") != null:
+        var hostile_system = system.get("hostile_system")
+        var enemies_value = hostile_system.get("enemies") if hostile_system != null else null
+        if enemies_value is Array:
+            for enemy in enemies_value:
+                var enemy_body: Node3D = null
+                if enemy is Node3D:
+                    enemy_body = enemy
+                elif enemy is Dictionary:
+                    enemy_body = (enemy as Dictionary).get("body") as Node3D
+                if enemy_body == null or not is_instance_valid(enemy_body):
+                    continue
+                dynamic[world_cell(enemy_body.global_position)] = enemy_body
+    if main != null and main.get("player") is Node3D:
+        var player := main.get("player") as Node3D
+        dynamic[world_cell(player.global_position)] = player
+    return dynamic
+
+func world_cell(position: Vector3) -> Vector2i:
+    return Vector2i(roundi(position.x / CELL), roundi(position.z / CELL))
+
+func cell_position(cell: Vector2i) -> Vector3:
+    if main == null:
+        return Vector3(float(cell.x) * CELL, 0.0, float(cell.y) * CELL)
+    var y: float = height_for_cell(cell)
+    return Vector3(float(cell.x) * CELL, y + 0.04, float(cell.y) * CELL)
+
+func height_for_cell(cell: Vector2i) -> float:
+    if main == null:
+        return 0.0
+    if height_cache.has(cell):
+        return float(height_cache[cell])
+    var y: float = main.height_at_world(float(cell.x) * CELL, float(cell.y) * CELL)
+    height_cache[cell] = y
+    return y
+
+func cell_distance(a: Vector2i, b: Vector2i) -> float:
+    return Vector2(float(a.x - b.x), float(a.y - b.y)).length()
+
+func cell_key(cell: Vector2i) -> String:
+    return "%d,%d" % [cell.x, cell.y]
+
+func point_inside_town(entry: Dictionary, position: Vector3) -> bool:
+    var center: Vector2i = entry.get("townCenter", Vector2i.ZERO)
+    var radius := float(entry.get("townRadius", 18)) * CELL
+    var flat := Vector2(position.x - float(center.x) * CELL, position.z - float(center.y) * CELL)
+    return flat.length() <= radius
+
+func point_inside_work_area(entry: Dictionary, position: Vector3) -> bool:
+    var center: Vector2i = entry.get("townCenter", Vector2i.ZERO)
+    var radius := (float(entry.get("townRadius", 18)) + 24.0) * CELL
+    var flat := Vector2(position.x - float(center.x) * CELL, position.z - float(center.y) * CELL)
+    return flat.length() <= radius
+
+func point_allowed(entry: Dictionary, position: Vector3, allow_outside := false, moving_home := false) -> bool:
+    if allow_outside or moving_home:
+        return point_inside_work_area(entry, position)
+    return point_inside_town(entry, position)
+
+func cell_allowed_area(entry: Dictionary, cell: Vector2i, allow_outside := false, moving_home := false) -> bool:
+    return point_allowed(entry, cell_position(cell), allow_outside, moving_home)
+
+func terrain_allows_step(from_cell: Vector2i, to_cell: Vector2i, moving_home := false) -> Dictionary:
+    if main == null:
+        return { "ok": false, "reason": "no_world" }
+    var from_height: float = height_for_cell(from_cell)
+    var to_height: float = height_for_cell(to_cell)
+    if to_height < main.WATER_LEVEL + 0.45:
+        return { "ok": false, "reason": "water" }
+    if absf(to_height - from_height) > CELL * 0.90 and not moving_home:
+        return { "ok": false, "reason": "slope" }
+    return { "ok": true, "height": to_height }
+
+func static_blocker(snapshot: Dictionary, cell: Vector2i):
+    var blocked: Dictionary = snapshot.get("blocked", {})
+    var blocker = blocked.get(cell, null)
+    if blocker != null and blocker is Object and not is_instance_valid(blocker):
+        blocked.erase(cell)
+        return null
+    return blocker
+
+func door_at(snapshot: Dictionary, cell: Vector2i) -> Node:
+    var doors: Dictionary = snapshot.get("doors", {})
+    var door_value = doors.get(cell, null)
+    if door_value == null:
+        return null
+    if not is_instance_valid(door_value):
+        doors.erase(cell)
+        return null
+    if door_value is Node:
+        return door_value
+    return null
+
+func dynamic_blocker(snapshot: Dictionary, cell: Vector2i):
+    var dynamic: Dictionary = snapshot.get("dynamic", {})
+    var blocker = dynamic.get(cell, null)
+    if blocker != null and blocker is Object and not is_instance_valid(blocker):
+        dynamic.erase(cell)
+        return null
+    return blocker
+
+func is_path_cell(snapshot: Dictionary, cell: Vector2i) -> bool:
+    var paths: Dictionary = snapshot.get("paths", {})
+    return paths.has(cell)
+
+func cell_pathable(entry: Dictionary, snapshot: Dictionary, from_cell: Vector2i, to_cell: Vector2i, target_cells: Dictionary, ignore_dynamic := false) -> Dictionary:
+    var allow_outside := bool(snapshot.get("allowOutside", false))
+    var moving_home := bool(snapshot.get("movingHome", false))
+    if not cell_allowed_area(entry, to_cell, allow_outside, moving_home):
+        return { "ok": false, "reason": "outside_area" }
+    var terrain := terrain_allows_step(from_cell, to_cell, moving_home)
+    if not bool(terrain.get("ok", false)):
+        return terrain
+    if static_blocker(snapshot, to_cell) != null and not target_cells.has(to_cell):
+        return { "ok": false, "reason": "blocked_static" }
+    if not ignore_dynamic and dynamic_blocker(snapshot, to_cell) != null and not target_cells.has(to_cell):
+        return { "ok": false, "reason": "blocked_dynamic" }
+    return { "ok": true, "reason": "" }
+
+func candidate_cells_near(entry: Dictionary, target_cell: Vector2i, allow_outside := false, moving_home := false, radius := 2) -> Array[Vector2i]:
+    var result: Array[Vector2i] = []
+    for r in range(0, radius + 1):
+        for dx in range(-r, r + 1):
+            for dz in range(-r, r + 1):
+                if max(abs(dx), abs(dz)) != r:
+                    continue
+                var cell := target_cell + Vector2i(dx, dz)
+                if cell_allowed_area(entry, cell, allow_outside, moving_home):
+                    result.append(cell)
+    result.sort_custom(func(a: Vector2i, b: Vector2i) -> bool:
+        return cell_distance(a, target_cell) < cell_distance(b, target_cell)
+    )
+    return result
+
+func approach_cells_for_target(entry: Dictionary, target_position: Vector3, allow_outside := true) -> Array[Vector2i]:
+    var target_cell := world_cell(target_position)
+    var result: Array[Vector2i] = []
+    for radius in range(1, 4):
+        for dx in range(-radius, radius + 1):
+            for dz in range(-radius, radius + 1):
+                if max(abs(dx), abs(dz)) != radius:
+                    continue
+                var cell := target_cell + Vector2i(dx, dz)
+                if cell_allowed_area(entry, cell, allow_outside, false):
+                    result.append(cell)
+    result.sort_custom(func(a: Vector2i, b: Vector2i) -> bool:
+        return cell_distance(a, target_cell) < cell_distance(b, target_cell)
+    )
+    return result
