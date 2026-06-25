@@ -10,6 +10,7 @@
 - Merge commit: `ab7a5b7f9102355a11de246f4350d7e0cad113ba`
 - Repair branch: `npc-pathfinding/phase-01-master-repair`
 - Repair commit: `95ae58612f41948e4f06a7b27ff8155629829b57`
+- Repair merge commit: `3a470f78113f7946731e73d30bffe07256778d40`
 - Dates: 2026-06-25
 - Controlling specification: `CODEX_NPC_PATHFINDING_FINAL_IMPLEMENTATION_PLAN.md`
 
@@ -411,7 +412,47 @@ Repair branch runner results:
 | `visual_captures` | 0 | true | 50.058 |
 | `visual_manifest` | 0 | true | 0.044 |
 
-Repaired `master` gate: pending no-fast-forward repair merge and rerun.
+Repair merge command:
+
+```powershell
+git switch master
+git merge --no-ff npc-pathfinding/phase-01-master-repair -m "Merge Phase 01 repair: held torch flicker stability"
+```
+
+Repaired `master` gate command:
+
+```powershell
+.\tools\run-all-test-runners.ps1 -ReportPath artifacts\test-runners\all-test-runners-master-phase01-repaired.json
+```
+
+Repaired `master` report:
+
+- Repair merge commit: `3a470f78113f7946731e73d30bffe07256778d40`
+- Path: `artifacts/test-runners/all-test-runners-master-phase01-repaired.json`
+- SHA-256: `287BF41D6ABA2BD56E354E809A23BB12B61F7FF5294306171E840B3288641391`
+- Started: `2026-06-25T16:10:39.4538897Z`
+- Finished: `2026-06-25T16:16:28.5811445Z`
+- Duration: 349.128 seconds
+- Result count: 7
+- Failure count: 0
+
+Repaired `master` runner results:
+
+| Runner | Exit | Passed | Duration seconds | Report SHA-256 |
+| --- | ---: | --- | ---: | --- |
+| `npc_focused` | 0 | true | 1.700 | `38D2C0CE0FDB65FD165D0CBEAA37F6135601D7FC9BCDD4743DDCC58227B3690C` |
+| `npc_navigation_legacy` | 0 | true | 41.439 | `42283C088FAABD5062855C24AC21AC7BBB6790AC99902D17A2F16644D51F21E1` |
+| `playtest` | 0 | true | 182.586 | `15CFAF3414CBCD288AF4FC688092D7671D5C86709EF48B008C9998CB8C2E5900` |
+| `story_playtest` | 0 | true | 59.473 | `6FC8C09595D4F3A17912E920928EB11CF815AB37B3B4F590903AF10CFBCDA7A5` |
+| `world_signature` | 0 | true | 13.893 | `05290360F4ACA4965AC3EB6EA6B4D5E886A01F52CE02E073D1B845DCA87A63D5` |
+| `visual_captures` | 0 | true | 49.942 | `C38D2B6DB9092F3EFCA54C4EA2367E91330B55B5BC6C7B6D1AA7FAA4D1C083C1` |
+| `visual_manifest` | 0 | true | 0.043 | no JSON report |
+
+Repaired held torch evidence:
+
+```text
+current torch, lights 3 fire 3 shadow 1 roles 1/1/1 fill 2 base 3.05 range 6.27 min 0.08 overlays 0 sample 0.91->3.43 4.93->6.51 flicker 2.52/1.58
+```
 
 ## 14. Phase Gate Self-Audit
 
@@ -425,7 +466,7 @@ Repaired `master` gate: pending no-fast-forward repair merge and rerun.
 | Save snapshots compatible and no transient new state | PASS on branch | Runtime state is excluded from persistence; existing save defaults baseline still passes day/night |
 | Focused contract suite passes day and night | PASS on branch | `contract-both.json`: 40 results, 0 failures |
 | Every existing runner passes on phase branch | PASS on branch | `all-test-runners-branch-phase01-green.json`: 7 results, 0 failures |
-| Every existing runner passes on merged `master` | PENDING repair merge | Initial merged `master` reached all 7 runners but failed broad playtest; repair branch all-runner is green in Section 13 |
+| Every existing runner passes on merged `master` | PASS | Initial merged `master` reached all 7 runners but failed broad playtest; repair branch and repaired `master` all-runner are green in Section 13 |
 | Report includes ownership diagram, event flow, queue bounds, and migration switch state | PASS on branch | Sections 5, 6, and 9 |
 
 ## 15. Review Questions
@@ -466,4 +507,4 @@ Yes on the phase branch. All repository runners pass after the held-light repair
 
 ## 18. Branch Verdict
 
-Phase 01 passes its focused contract, aggregate NPC, parser, phase-branch all-runner, and repair-branch all-runner gates. The repaired `master` merge and all-runner evidence are still pending and must be recorded before Phase 02 begins.
+Phase 01 passes its focused contract, aggregate NPC, parser, phase-branch all-runner, repair-branch all-runner, and repaired merged `master` all-runner gates. Phase 02 may begin from `master` commit `3a470f78113f7946731e73d30bffe07256778d40`.
