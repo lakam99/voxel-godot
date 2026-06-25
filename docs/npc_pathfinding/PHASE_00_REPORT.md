@@ -6,7 +6,7 @@
 - Branch: `npc-pathfinding/phase-00-baseline-harness`
 - Base branch: `master`
 - Base commit: `329416babe993377e6442cc77f9b3b2617302675`
-- Branch implementation commit: `5e1a08aef2f2dc2f59b36b7e11b62ecb319d8fe2`
+- Branch implementation commit: `5e1a08aaea48a9740782fb192a6623db784ec983`
 - Merge commit: `8ba638e4b6e4b1c445cef14973afe1f4640ff1a8`
 - Dates: 2026-06-25
 - Controlling specification: `CODEX_NPC_PATHFINDING_FINAL_IMPLEMENTATION_PLAN.md`
