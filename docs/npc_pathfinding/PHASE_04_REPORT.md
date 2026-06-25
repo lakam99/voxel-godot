@@ -5,11 +5,11 @@
 - Phase: 04 - Hierarchical Route Planner, Semantic Costs, and Corridor Generation
 - Branch: `npc-pathfinding/phase-04-hierarchical-routing`
 - Base commit before Phase 04 branch changes: `0e4ea8ebef14e9395b3ee61956835b6caecbcf95`
-- Branch implementation commit: pending branch commit
-- Merge commit: pending non-fast-forward merge
+- Branch implementation commit: `142c6c797c3364adc0b162a4f4ae53c7572aa501`
+- Merge commit: `2dd99e1383402cdce80f337860e28ea5ac8a64c0`
 - Date: 2026-06-25
 - Controlling specification: `CODEX_NPC_PATHFINDING_FINAL_IMPLEMENTATION_PLAN.md`
-- Scope status: branch implementation gates passed; merged `master` gate is pending by protocol.
+- Scope status: branch implementation gates passed; merged `master` gate passed after the non-fast-forward merge.
 
 ## 2. Objective
 
@@ -221,7 +221,27 @@ Runner registry used: `tools\test-runner-registry.json`.
 
 ## 11. Full All-Runner Evidence On Merged Master
 
-Pending non-fast-forward merge and required `master` rerun.
+Merge commit: `2dd99e1383402cdce80f337860e28ea5ac8a64c0`
+
+Command:
+
+```powershell
+.\tools\run-all-test-runners.ps1
+```
+
+Report: `artifacts\test-runners\all-test-runners-report.json`
+
+Result: pass, 7 runners, 0 failures, 1087.229s, finished `2026-06-25T22:49:16.6092219Z`.
+
+| Runner | Exit | Result | Duration | Fresh report |
+| --- | ---: | --- | ---: | --- |
+| `npc_focused` | 0 | Pass | 6.458s | yes |
+| `npc_navigation_legacy` | 0 | Pass | 106.353s | yes |
+| `playtest` | 0 | Pass | 791.699s | yes |
+| `story_playtest` | 0 | Pass | 92.596s | yes |
+| `world_signature` | 0 | Pass | 20.056s | yes |
+| `visual_captures` | 0 | Pass | 69.912s | yes |
+| `visual_manifest` | 0 | Pass | 0.101s | yes |
 
 ## 12. Performance And Boundedness Metrics
 
@@ -258,13 +278,11 @@ Named route bounds:
 | Semantic cost choices are deterministic and explainable | Pass | `RouteCostModel` cost breakdowns plus road/hazard/guard tests passed day/night |
 | Route statuses and terminal reasons satisfy the contract | Pass | `npc_contract_route_status_terminal`, `npc_route_pending_budget_resumes`, `npc_route_partial_explicit_only`, and `npc_route_unreachable_terminal_reason` passed |
 | Existing focused NPC scenarios and broad playtest remain green | Pass | `run-all-npc-tests`, `run-npc-navigation-tests`, and all-runner `playtest` passed |
-| Full all-runner gate passes on branch and `master` | Branch pass, master pending | Branch all-runner passed 7/7; `master` rerun pending until merge |
+| Full all-runner gate passes on branch and `master` | Pass | Branch all-runner passed 7/7; merged `master` all-runner passed 7/7 at merge commit `2dd99e1383402cdce80f337860e28ea5ac8a64c0` |
 
 ## 15. Deviation Register
 
-No unapproved Phase 04 implementation deviation is recorded on the phase branch.
-
-The merged-`master` evidence section is pending because the required non-fast-forward merge has not happened yet.
+No unapproved Phase 04 implementation deviation is recorded.
 
 ## 16. Known Issues And Debt
 
@@ -313,4 +331,4 @@ Phase 05 incremental route repair should build on the route dependency data alre
 
 ## 19. Verdict
 
-Branch implementation gates passed and the branch is ready for the required non-fast-forward merge step. Merged-`master` evidence is pending and must be recorded before Phase 05 work starts.
+Branch and merged-`master` gates passed. Phase 05 may start only from the updated green `master`.
