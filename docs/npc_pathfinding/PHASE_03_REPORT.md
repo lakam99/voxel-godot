@@ -5,11 +5,11 @@
 - Phase: 03 - Multi-Surface Navigation World and Authoritative Invalidation
 - Branch: `npc-pathfinding/phase-03-navigation-world`
 - Base commit before Phase 03 branch changes: `c5143af91695b02323ccaf4af2f2a2171d8a6a14`
-- Branch implementation commit: pending at report creation
-- Merge commit: pending at report creation
+- Branch implementation commit: `e18eb8ceaa2b56688d540051ac44bcfc71eb886d`
+- Merge commit: `1607ff9d90a7a07387ea83dad50e7e83103e52e1`
 - Date: 2026-06-25
 - Controlling specification: `CODEX_NPC_PATHFINDING_FINAL_IMPLEMENTATION_PLAN.md`
-- Scope status at report creation: branch implementation gates passed; post-merge `master` gate pending until after the branch commit and non-fast-forward merge.
+- Scope status: branch implementation gates passed; merged `master` gate passed after the non-fast-forward merge.
 
 ## 2. Objective
 
@@ -211,7 +211,29 @@ Broad report counts:
 
 ## 11. Full All-Runner Evidence On Merged Master
 
-Pending at report creation. Per the controlling specification, the branch must be committed, merged into `master` with a non-fast-forward merge, and `.\tools\run-all-test-runners.ps1` must pass on `master` before Phase 04 can begin.
+Merge commit: `1607ff9d90a7a07387ea83dad50e7e83103e52e1`
+
+Command:
+
+```powershell
+.\tools\run-all-test-runners.ps1
+```
+
+Report: `artifacts\test-runners\all-test-runners-report.json`
+
+Result: pass, 7 runners, 0 failures, 473.669s, finished `2026-06-25T19:36:48.6734641Z`.
+
+| Runner | Exit | Result | Duration | Fresh report |
+| --- | ---: | --- | ---: | --- |
+| `npc_focused` | 0 | Pass | 3.412s | yes |
+| `npc_navigation_legacy` | 0 | Pass | 103.821s | yes |
+| `playtest` | 0 | Pass | 235.830s | yes |
+| `story_playtest` | 0 | Pass | 63.239s | yes |
+| `world_signature` | 0 | Pass | 14.737s | yes |
+| `visual_captures` | 0 | Pass | 52.482s | yes |
+| `visual_manifest` | 0 | Pass | 0.097s | yes |
+
+The merged-master `nav_world-both.json` report was produced on branch `master` at commit `1607ff9d90a7a07387ea83dad50e7e83103e52e1`; it had 38 results, 0 failures, 70 assertions, and 0.041s duration.
 
 ## 12. Performance And Boundedness Metrics
 
@@ -259,13 +281,11 @@ Evidence:
 | Existing behavior continues through compatibility layer | Pass | contract, motor, legacy NPC navigation, playtest, and story reports green |
 | World signature remains unchanged | Pass | `world_signature` runner matched baseline |
 | Full all-runner gate passes on branch | Pass | `all-test-runners-report.json`; 7 runners, 0 failures |
-| Full all-runner gate passes on merged `master` | Pending | Must run after branch commit and non-fast-forward merge |
+| Full all-runner gate passes on merged `master` | Pass | `all-test-runners-report.json`; 7 runners, 0 failures at merge commit `1607ff9d90a7a07387ea83dad50e7e83103e52e1` |
 
 ## 15. Deviation Register
 
-None for the branch implementation scope.
-
-The post-merge `master` gate is a lifecycle step pending at report creation, not an approved deviation.
+None.
 
 ## 16. Known Issues And Debt
 
@@ -379,6 +399,6 @@ The Phase 03 service exposes query, debug export, revisions, dirty/stale/unloade
 
 ## 19. Verdict
 
-Phase 03 branch implementation is ready for commit and non-fast-forward merge into `master`.
+Phase 03 passed on its branch and on merged `master`.
 
-The phase shall not be treated as accepted for the repository until the merged `master` all-runner gate passes and this report is updated with the merge evidence.
+Phase 04 may begin only from this updated, green `master`.
