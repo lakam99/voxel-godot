@@ -24,6 +24,12 @@
       "description": "Phase 04 hierarchical route planner, semantic costs, and corridor tests",
       "command": ".\\tools\\npc\\run-npc-route-tests.ps1",
       "defaultArgs": ["-TimeMode", "Both"]
+    },
+    {
+      "id": "repair",
+      "description": "Phase 05 incremental route repair and dynamic world response tests",
+      "command": ".\\tools\\npc\\run-npc-repair-tests.ps1",
+      "defaultArgs": ["-TimeMode", "Both"]
     }
   ]
 }

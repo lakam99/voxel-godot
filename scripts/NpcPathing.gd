@@ -13,6 +13,7 @@ var navigation_world
 var route_planner
 var locomotion
 var goal_planner
+var route_repair
 
 func setup(system_node, main_node) -> void:
     system = system_node
@@ -30,6 +31,7 @@ func ensure_ready() -> void:
     route_planner = coordinator.get("route_planner")
     locomotion = coordinator.get("locomotion")
     goal_planner = coordinator.get("goal_planner")
+    route_repair = coordinator.get("route_repair")
 
 func begin_frame() -> void:
     ensure_ready()
@@ -40,6 +42,12 @@ func invalidate() -> void:
     ensure_ready()
     if coordinator != null:
         coordinator.invalidate()
+
+func process_navigation_events(events: Array, max_expansions := 128) -> Array[Dictionary]:
+    ensure_ready()
+    if coordinator == null:
+        return []
+    return coordinator.process_navigation_events(events, max_expansions)
 
 func move_npc(entry: Dictionary, target: Vector3, max_distance: float, moving_home := false, allow_outside := false, physics_delta := 0.0166667) -> float:
     ensure_ready()

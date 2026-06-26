@@ -202,7 +202,10 @@ func register_semantic_region(kind: StringName, region_id: String, bounds: AABB,
 	return revision
 
 func process_navigation_changes() -> Array:
-	return navigation_world.process_change_bus() if navigation_world != null else []
+	var events: Array = navigation_world.process_change_bus() if navigation_world != null else []
+	if npc_system != null and npc_system.has_method("process_navigation_route_changes") and not events.is_empty():
+		npc_system.call("process_navigation_route_changes", events)
+	return events
 
 func request_navigation_tile(snapshot: Dictionary, priority := 0, profile = null) -> Dictionary:
 	return navigation_world.request_tile(snapshot, priority, profile) if navigation_world != null else {}

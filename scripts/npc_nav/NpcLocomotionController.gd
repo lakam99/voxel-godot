@@ -173,32 +173,22 @@ func ensure_route(entry: Dictionary, intent: Dictionary, planner, world) -> Dict
         String(intent.get("action", ""))
     ]
     var snapshot_revision: String = world.revision()
+    var route_known := String(entry.get("routeKey", "")) != ""
+    var current_waypoints: Array = entry.get("pathWaypoints", [])
+    var cached_status := String(entry.get("routeStatus", "idle"))
+    var empty_route_waiting_for_reason := current_waypoints.is_empty() and cached_status in ["blocked", "waiting"]
     var needs_route: bool = bool(entry.get("routeForceReplan", false))
     needs_route = needs_route or String(entry.get("routeKey", "")) != route_key
     needs_route = needs_route or String(entry.get("routeSnapshotRevision", "")) != snapshot_revision
-    needs_route = needs_route or (entry.get("pathWaypoints", []) as Array).is_empty()
+    needs_route = needs_route or (current_waypoints.is_empty() and (not route_known or not empty_route_waiting_for_reason))
     if not needs_route:
+        var has_cached_route := not current_waypoints.is_empty()
         return {
-            "ok": true,
-            "status": String(entry.get("routeStatus", "moving")),
+            "ok": has_cached_route,
+            "status": "routed" if has_cached_route and cached_status in ["blocked", "waiting"] else cached_status,
             "reason": String(entry.get("routeReason", "")),
             "cells": entry.get("routeCells", []),
-            "waypoints": entry.get("pathWaypoints", []),
-            "actions": entry.get("routeActions", {}),
-            "targetCell": target_cell,
-            "fallbackCell": entry.get("routeFallbackCell", target_cell),
-            "snapshotRevision": snapshot_revision
-        }
-    var same_route_retry := String(entry.get("routeKey", "")) == route_key and String(entry.get("routeSnapshotRevision", "")) == snapshot_revision
-    var retry_ticks := int(entry.get("routeRetryTicks", 0))
-    if same_route_retry and retry_ticks > 0 and (entry.get("pathWaypoints", []) as Array).is_empty():
-        entry["routeRetryTicks"] = retry_ticks - 1
-        return {
-            "ok": false,
-            "status": String(entry.get("routeStatus", "blocked")),
-            "reason": String(entry.get("routeReason", "retry_wait")),
-            "cells": [],
-            "waypoints": [],
+            "waypoints": current_waypoints,
             "actions": entry.get("routeActions", {}),
             "targetCell": target_cell,
             "fallbackCell": entry.get("routeFallbackCell", target_cell),
@@ -219,7 +209,7 @@ func ensure_route(entry: Dictionary, intent: Dictionary, planner, world) -> Dict
     if bool(route.get("ok", false)) and not (route.get("waypoints", []) as Array).is_empty():
         entry["routeRetryTicks"] = 0
     elif String(route.get("status", "")) != "arrived":
-        entry["routeRetryTicks"] = 80
+        entry["routeRetryTicks"] = 0
     if bool(route.get("ok", false)) and not (route.get("waypoints", []) as Array).is_empty():
         increment_route_replan(entry)
     set_route_status(entry, String(route.get("status", "blocked")), String(route.get("reason", "")))
@@ -499,23 +489,36 @@ func collider_blocks_capsule(entry: Dictionary, collider: Node, body: CharacterB
         if block_type == "door":
             if bool(collider.get_meta("open", false)):
                 return false
-            if route_has_door_action(entry, collider):
+            var door := interaction_door_for_collider(collider)
+            if route_has_door_action(entry, door):
                 if system != null:
-                    system.open_door_for_npc(collider, body)
+                    system.open_door_for_npc(door, body)
                 return true
             return true
         return true
     return kind in ["prop", "npc", "tutorial_npc", "hostile"]
 
 func route_has_door_action(entry: Dictionary, door: Node) -> bool:
+    door = interaction_door_for_collider(door)
     var actions: Dictionary = entry.get("routeActions", {})
     for action_value in actions.values():
         if not (action_value is Dictionary):
             continue
         var action: Dictionary = action_value
-        if action.get("door") == door:
+        if interaction_door_for_collider(action.get("door") as Node) == door:
             return true
     return false
+
+func interaction_door_for_collider(collider: Node) -> Node:
+    if collider == null:
+        return null
+    if system != null:
+        var main_node = system.get("main")
+        if main_node != null and main_node.has_method("interaction_block_from_collider"):
+            var interaction_block = main_node.interaction_block_from_collider(collider)
+            if interaction_block != null and interaction_block is Node:
+                return interaction_block
+    return collider
 
 func set_route_status(entry: Dictionary, status: String, reason: String) -> void:
     entry["routeStatus"] = status

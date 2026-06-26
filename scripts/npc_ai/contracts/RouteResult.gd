@@ -14,6 +14,10 @@ var topology_revision := 0
 var dynamic_revision := 0
 var corridor = null
 var arrival_contract := ""
+var repair_graph := {}
+var repair_start_key := ""
+var repair_goal_keys: Array = []
+var repair_request = null
 
 static func make(status_value: StringName, reason_value: StringName = NpcEnumsScript.ROUTE_REASON_NONE, generation_value := 0):
 	var result = load("res://scripts/npc_ai/contracts/RouteResult.gd").new()

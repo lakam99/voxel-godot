@@ -14,6 +14,7 @@ var navigation_world
 var route_planner
 var locomotion
 var goal_planner
+var route_repair
 
 func setup(system_node, main_node) -> void:
     system = system_node
@@ -22,6 +23,7 @@ func setup(system_node, main_node) -> void:
     navigation_world.setup(system, main)
     route_planner = NpcRoutePlannerScript.new()
     route_planner.setup(system, main, navigation_world)
+    route_repair = route_planner.get("repair_service")
     locomotion = NpcLocomotionControllerScript.new()
     locomotion.setup(system, main)
     goal_planner = NpcGoalPlannerScript.new()
@@ -34,6 +36,19 @@ func begin_frame() -> void:
 func invalidate() -> void:
     if navigation_world != null:
         navigation_world.invalidate()
+
+func process_navigation_events(events: Array, max_expansions := 128) -> Array[Dictionary]:
+    if route_planner == null or not route_planner.has_method("process_navigation_events"):
+        return []
+    return route_planner.process_navigation_events(events, max_expansions)
+
+func classify_navigation_event(event: Dictionary) -> Dictionary:
+    var result := {}
+    if route_repair == null:
+        return result
+    for route_id in route_repair.routes_for_event(event):
+        result[String(route_id)] = route_repair.classify_event(String(route_id), event)
+    return result
 
 func move_npc(entry: Dictionary, target: Vector3, max_distance: float, moving_home := false, allow_outside := false, physics_delta := 0.0166667) -> float:
     var body := entry.get("body") as CharacterBody3D
