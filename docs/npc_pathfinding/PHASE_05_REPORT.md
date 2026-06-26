@@ -5,11 +5,11 @@
 - Phase: 05 - Incremental Route Repair and Dynamic World Response
 - Branch: `npc-pathfinding/phase-05-incremental-repair`
 - Base commit before Phase 05 branch changes: `10b23f903df06ab0e90dbe1bd95bde1ac52474b2`
-- Branch implementation commit: pending at initial report creation
-- Merge commit: pending at initial report creation
+- Branch implementation commit: `bdaa9f80c4db005e9884e1fb874f85076a7eea5e`
+- Merge commit: `5ebd7ef6b320afaaef26d1724be51a9d8334a147`
 - Date: 2026-06-26
 - Controlling specification: `CODEX_NPC_PATHFINDING_FINAL_IMPLEMENTATION_PLAN.md`
-- Scope status: branch implementation gates passed; merged `master` gate pending until the required non-fast-forward merge.
+- Scope status: branch implementation gates passed; merged `master` gate passed after the required non-fast-forward merge.
 
 ## 2. Objective
 
@@ -221,12 +221,25 @@ Runner registry used: `tools\test-runner-registry.json`.
 
 ## 11. Merged Master Evidence
 
-Pending at initial report creation. The required next steps are:
+Command:
 
-1. Commit Phase 05 implementation and this report on `npc-pathfinding/phase-05-incremental-repair`.
-2. Merge the phase branch into `master` with a non-fast-forward merge.
-3. Rerun `.\tools\run-all-test-runners.ps1` on `master`.
-4. Update this section with the merged `master` gate evidence.
+```powershell
+.\tools\run-all-test-runners.ps1
+```
+
+Report: `artifacts\test-runners\all-test-runners-report.json`
+
+Result: pass, 7 runners, 0 failures, 1514.475s, finished `2026-06-26T02:52:43.3766311Z` on merged `master` commit `5ebd7ef6b320afaaef26d1724be51a9d8334a147`.
+
+| Runner | Exit | Result | Duration | Fresh report |
+| --- | ---: | --- | ---: | --- |
+| `npc_focused` | 0 | Pass | 7.662s | yes |
+| `npc_navigation_legacy` | 0 | Pass | 263.706s | yes |
+| `playtest` | 0 | Pass | 1091.130s | yes |
+| `story_playtest` | 0 | Pass | 69.616s | yes |
+| `world_signature` | 0 | Pass | 15.518s | yes |
+| `visual_captures` | 0 | Pass | 66.702s | yes |
+| `visual_manifest` | 0 | Pass | 0.092s | yes |
 
 ## 12. Static And Prohibited-Shortcut Audit
 
@@ -258,7 +271,7 @@ Results:
 | Day/night dynamic cases pass | Pass | `npc_repair_day_worker_dynamic_block`, `npc_repair_night_guard_dynamic_block`, `npc_repair_night_civilian_home_dynamic_block` in both time modes |
 | All prior focused suites pass on branch | Pass | `.\tools\npc\run-all-npc-tests.ps1 -TimeMode Both`; 5 suites, 0 failures |
 | Every repository runner passes on branch | Pass | `.\tools\run-all-test-runners.ps1`; 7 runners, 0 failures |
-| Every repository runner passes on merged `master` | Pending | Must be run after the required non-fast-forward merge |
+| Every repository runner passes on merged `master` | Pass | `.\tools\run-all-test-runners.ps1`; 7 runners, 0 failures, 1514.475s |
 
 ## 14. Review Questions
 
