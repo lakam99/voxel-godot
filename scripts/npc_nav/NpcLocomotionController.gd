@@ -3,6 +3,8 @@ class_name NpcLocomotionController
 
 const CELL := 1.35
 const NpcConstantsScript := preload("res://scripts/npc_ai/NpcConstants.gd")
+const NpcCorridorFollowerScript := preload("res://scripts/npc_ai/movement/NpcCorridorFollower.gd")
+const ReciprocalAvoidanceAdapterScript := preload("res://scripts/npc_ai/movement/ReciprocalAvoidanceAdapter.gd")
 const CAPSULE_RADIUS := 0.34
 const CAPSULE_HEIGHT := 1.64
 const CELL_RESERVATION_TTL := 5
@@ -12,6 +14,8 @@ var main
 var reservations := {}
 var capsule_shape: CapsuleShape3D
 var reservation_frame := 0
+var corridor_follower
+var avoidance_adapter
 
 func setup(system_node, main_node) -> void:
     system = system_node
@@ -19,10 +23,15 @@ func setup(system_node, main_node) -> void:
     capsule_shape = CapsuleShape3D.new()
     capsule_shape.radius = CAPSULE_RADIUS
     capsule_shape.height = CAPSULE_HEIGHT
+    corridor_follower = NpcCorridorFollowerScript.new()
+    avoidance_adapter = ReciprocalAvoidanceAdapterScript.new()
+    avoidance_adapter.setup(system, main)
 
 func begin_frame() -> void:
     reservation_frame += 1
     expire_reservations(reservations)
+    if avoidance_adapter != null:
+        avoidance_adapter.begin_frame()
 
 func move(entry: Dictionary, intent: Dictionary, max_distance: float, planner, world) -> Dictionary:
     var body := entry.get("body") as CharacterBody3D
@@ -91,38 +100,34 @@ func move(entry: Dictionary, intent: Dictionary, max_distance: float, planner, w
         increment_reservation_wait(entry)
         return { "moved": 0.0, "status": "waiting", "reason": door_wait }
 
-    var waypoint: Vector3 = path_waypoints[0]
-    var delta: Vector3 = waypoint - previous
-    delta.y = 0.0
-    if delta.length_squared() < 0.001:
-        path_waypoints.remove_at(0)
-        entry["pathWaypoints"] = path_waypoints
-        return { "moved": 0.0, "status": "waiting", "reason": "waypoint_close" }
     var moving_home := bool(intent.get("movingHome", false))
     var allow_outside := bool(intent.get("allowOutside", false))
-    var yielded_step := false
-    var validation: Dictionary = {}
-    var yield_ticks := int(entry.get("routeYieldTicks", 0))
-    if yield_ticks > 0:
-        validation = try_yield_backoff(entry, previous, waypoint, max_distance, moving_home, allow_outside, world, priority)
-        if bool(validation.get("ok", false)):
-            yielded_step = true
-            entry["routeYieldTicks"] = max(0, yield_ticks - 1)
-        else:
-            entry["routeYieldTicks"] = 0
-    if not bool(validation.get("ok", false)):
-        var step: Vector3 = delta.normalized() * minf(max_distance, delta.length())
-        var candidate: Vector3 = previous + step
-        validation = validate_candidate(entry, previous, candidate, moving_home, allow_outside, world, priority)
-        var direct_reason := String(validation.get("reason", ""))
-        if direct_reason == "yielding":
-            increment_reservation_wait(entry)
-            entry["routeYieldTicks"] = maxi(int(entry.get("routeYieldTicks", 0)), 12)
-            validation = try_yield_backoff(entry, previous, waypoint, max_distance, moving_home, allow_outside, world, priority)
-            yielded_step = bool(validation.get("ok", false))
-        if not bool(validation.get("ok", false)):
-            validation = try_local_avoidance(entry, previous, waypoint, max_distance, moving_home, allow_outside, world, priority)
-    if not bool(validation.get("ok", false)):
+    var actors := []
+    if system != null and system.has_method("current_door_actors"):
+        actors = system.call("current_door_actors")
+    var follow: Dictionary = corridor_follower.compute_step(
+        entry,
+        body,
+        previous,
+        target,
+        path_waypoints,
+        intent,
+        max_distance,
+        world,
+        self,
+        avoidance_adapter,
+        actors
+    )
+    entry["corridorFollow"] = compact_follow_result(follow)
+    record_follow_metrics(follow)
+    if bool(follow.get("arrived", false)):
+        clear_route(entry)
+        set_route_status(entry, "arrived", "")
+        return { "moved": 0.0, "status": "arrived", "reason": "" }
+    if not bool(follow.get("ok", false)):
+        var retreat_result := try_dynamic_yield_retreat(entry, previous, follow, intent, max_distance, world, actors, priority)
+        if not retreat_result.is_empty():
+            return retreat_result
         entry["blockedMoveTime"] = float(entry.get("blockedMoveTime", 0.0)) + max_distance
         if system != null:
             system.npc_blocked_moves += 1
@@ -130,10 +135,14 @@ func move(entry: Dictionary, intent: Dictionary, max_distance: float, planner, w
             entry["routeForceReplan"] = true
             entry["blockedMoveTime"] = 0.0
             increment_stuck_recovery(entry)
-        set_route_status(entry, "waiting", String(validation.get("reason", "blocked")))
-        return { "moved": 0.0, "status": "waiting", "reason": String(validation.get("reason", "blocked")) }
+        var follow_reason := String(follow.get("reason", "blocked"))
+        var classification := String(follow.get("classification", "blocked"))
+        if classification == "traffic_reservation":
+            increment_reservation_wait(entry)
+        set_route_status(entry, "waiting", follow_reason)
+        return { "moved": 0.0, "status": "waiting", "reason": follow_reason, "classification": classification }
 
-    var move_candidate: Vector3 = validation.get("candidate", previous)
+    var move_candidate: Vector3 = follow.get("candidate", previous)
     var candidate_cell: Vector2i = world.world_cell(move_candidate)
     var reservation_key: String = world.cell_key(candidate_cell)
     if reservation_blocks_entry(reservations, reservation_key, entry, priority):
@@ -153,7 +162,19 @@ func move(entry: Dictionary, intent: Dictionary, max_distance: float, planner, w
         return { "moved": 0.0, "status": "blocked", "reason": "missing_motion_adapter" }
     var actual_position: Vector3 = motor_result.get("position", body.global_position)
     var moved := float(motor_result.get("moved", flat_distance(previous, actual_position)))
+    var motor_reason := String(motor_result.get("reason", "motor_blocked"))
+    var progress_result: Dictionary = corridor_follower.record_motion(entry, previous, actual_position, entry.get("pathWaypoints", []), motor_reason)
+    entry["corridorProgress"] = progress_result
     if bool(motor_result.get("blocked", false)) and moved <= 0.001:
+        var portal_recenter_result := try_portal_clearance_recenter(entry, previous, follow, intent, max_distance, world, priority, motor_reason)
+        if not portal_recenter_result.is_empty():
+            return portal_recenter_result
+        if motor_reason == "static_or_dynamic_collision":
+            var motor_retreat_follow := follow.duplicate(true)
+            motor_retreat_follow["reason"] = "yielding"
+            var motor_retreat_result := try_dynamic_yield_retreat(entry, previous, motor_retreat_follow, intent, max_distance, world, actors, priority)
+            if not motor_retreat_result.is_empty():
+                return motor_retreat_result
         entry["blockedMoveTime"] = float(entry.get("blockedMoveTime", 0.0)) + max_distance
         if system != null:
             system.npc_blocked_moves += 1
@@ -161,19 +182,191 @@ func move(entry: Dictionary, intent: Dictionary, max_distance: float, planner, w
             entry["routeForceReplan"] = true
             entry["blockedMoveTime"] = 0.0
             increment_stuck_recovery(entry)
-        var motor_reason := String(motor_result.get("reason", "motor_blocked"))
         set_route_status(entry, "waiting", motor_reason)
         return { "moved": moved, "status": "waiting", "reason": motor_reason }
     entry["blockedMoveTime"] = 0.0
-    if yielded_step:
-        set_route_status(entry, "yielding", "")
-    else:
-        entry["routeWaitTicks"] = 0
-        entry["routeYieldTicks"] = 0
-        set_route_status(entry, "moving", "")
+    entry["routeWaitTicks"] = 0
+    entry["routeYieldTicks"] = 0
+    set_route_status(entry, "moving", "")
     trim_reached_route_cells(entry, world)
     increment_validated_move(entry)
     return { "moved": moved, "status": String(entry.get("routeStatus", "moving")), "reason": "" }
+
+func try_dynamic_yield_retreat(entry: Dictionary, previous: Vector3, follow: Dictionary, intent: Dictionary, max_distance: float, world, actors: Array, priority: int) -> Dictionary:
+    var reason := String(follow.get("reason", ""))
+    if not (reason in ["yielding", "cell_reserved", "yield_blocked"]):
+        return {}
+    var blocker := follow.get("blocker") as Node3D
+    if blocker == null or not is_instance_valid(blocker):
+        blocker = nearest_dynamic_blocker(previous, entry, actors)
+    if blocker == null or not is_instance_valid(blocker):
+        return {}
+    var blocker_offset := previous - blocker.global_position
+    blocker_offset.y = 0.0
+    var blocker_distance := blocker_offset.length()
+    if blocker_distance >= NpcConstantsScript.TRAFFIC_RETREAT_CLEARANCE:
+        return {}
+    var attempted: Vector3 = follow.get("candidate", previous)
+    var retreat_direction := previous - attempted
+    retreat_direction.y = 0.0
+    if retreat_direction.length_squared() <= 0.0001:
+        retreat_direction = blocker_offset
+    if retreat_direction.length_squared() <= 0.0001:
+        return {}
+    retreat_direction = retreat_direction.normalized()
+    var retreat_distance := minf(
+        max_distance * NpcConstantsScript.TRAFFIC_RETREAT_DISTANCE_SCALE,
+        maxf(0.0, NpcConstantsScript.TRAFFIC_RETREAT_CLEARANCE - blocker_distance + 0.04)
+    )
+    if retreat_distance <= 0.001:
+        return {}
+    var candidate := previous + retreat_direction * retreat_distance
+    candidate.y = previous.y
+    if candidate.distance_to(blocker.global_position) <= previous.distance_to(blocker.global_position):
+        candidate = previous + blocker_offset.normalized() * retreat_distance
+        candidate.y = previous.y
+    var moving_home := bool(intent.get("movingHome", false))
+    var allow_outside := bool(intent.get("allowOutside", false))
+    var validation: Dictionary = validate_candidate(entry, previous, candidate, moving_home, allow_outside, world, priority)
+    var validation_reason := String(validation.get("reason", ""))
+    if not bool(validation.get("ok", false)) and not (validation_reason in ["yielding", "blocked_dynamic", "cell_reserved", "yield_blocked"]):
+        return {}
+    var physics_delta := maxf(0.0001, float(intent.get("physicsDelta", 0.0166667)))
+    var motor_result: Dictionary = {}
+    if system != null and system.has_method("apply_npc_route_motion"):
+        motor_result = system.apply_npc_route_motion(entry, previous, candidate, physics_delta)
+    else:
+        return {}
+    var actual_position: Vector3 = motor_result.get("position", previous)
+    var moved := float(motor_result.get("moved", flat_distance(previous, actual_position)))
+    if moved <= 0.001:
+        return {}
+    if corridor_follower != null and corridor_follower.has_method("record_motion"):
+        entry["corridorProgress"] = corridor_follower.record_motion(entry, previous, actual_position, entry.get("pathWaypoints", []), "yielding_retreat")
+    increment_reservation_wait(entry)
+    set_route_status(entry, "waiting", "yielding_retreat")
+    return { "moved": moved, "status": "waiting", "reason": "yielding_retreat", "classification": "traffic_reservation" }
+
+func try_portal_clearance_recenter(entry: Dictionary, previous: Vector3, follow: Dictionary, intent: Dictionary, max_distance: float, world, priority: int, motor_reason: String) -> Dictionary:
+    if not bool(follow.get("portalMode", false)) or motor_reason != "static_or_dynamic_collision":
+        return {}
+    var direction := String(entry.get("activeDoorDirection", ""))
+    var axis := axis_for_door_direction(direction)
+    if axis.length_squared() <= 0.0001:
+        return {}
+    var lateral := portal_centerline_lateral(entry, previous, direction)
+    if lateral.length_squared() <= 0.0001:
+        var velocity: Vector3 = follow.get("safeVelocity", Vector3.ZERO)
+        if velocity.length_squared() <= 0.0001:
+            velocity = follow.get("desiredVelocity", Vector3.ZERO)
+        velocity.y = 0.0
+        lateral = velocity - axis * velocity.dot(axis)
+    if lateral.length_squared() <= 0.0001:
+        var target: Vector3 = intent.get("target", previous)
+        var target_delta := target - previous
+        target_delta.y = 0.0
+        lateral = target_delta - axis * target_delta.dot(axis)
+    if lateral.length_squared() <= 0.0001:
+        return {}
+    var recenter_distance := minf(max_distance * NpcConstantsScript.PORTAL_RECENTER_DISTANCE_SCALE, NpcConstantsScript.CELL_SIZE * 0.12)
+    if recenter_distance <= 0.001:
+        return try_portal_axis_retreat(entry, previous, intent, max_distance, world, priority, axis)
+    var candidate := previous + lateral.normalized() * recenter_distance
+    candidate.y = previous.y
+    var moving_home := bool(intent.get("movingHome", false))
+    var allow_outside := bool(intent.get("allowOutside", false))
+    var validation: Dictionary = validate_candidate(entry, previous, candidate, moving_home, allow_outside, world, priority)
+    if not bool(validation.get("ok", false)):
+        return try_portal_axis_retreat(entry, previous, intent, max_distance, world, priority, axis)
+    var physics_delta := maxf(0.0001, float(intent.get("physicsDelta", 0.0166667)))
+    var motor_result: Dictionary = {}
+    if system != null and system.has_method("apply_npc_route_motion"):
+        motor_result = system.apply_npc_route_motion(entry, previous, validation.get("candidate", candidate), physics_delta)
+    else:
+        return try_portal_axis_retreat(entry, previous, intent, max_distance, world, priority, axis)
+    var actual_position: Vector3 = motor_result.get("position", previous)
+    var moved := float(motor_result.get("moved", flat_distance(previous, actual_position)))
+    if moved <= 0.001:
+        return try_portal_axis_retreat(entry, previous, intent, max_distance, world, priority, axis)
+    if corridor_follower != null and corridor_follower.has_method("record_motion"):
+        entry["corridorProgress"] = corridor_follower.record_motion(entry, previous, actual_position, entry.get("pathWaypoints", []), "portal_recentering")
+    increment_validated_move(entry)
+    set_route_status(entry, "waiting", "portal_recentering")
+    return { "moved": moved, "status": "waiting", "reason": "portal_recentering", "classification": "door_state" }
+
+func try_portal_axis_retreat(entry: Dictionary, previous: Vector3, intent: Dictionary, max_distance: float, world, priority: int, axis: Vector3) -> Dictionary:
+    if axis.length_squared() <= 0.0001:
+        return {}
+    var retreat_distance := minf(max_distance * NpcConstantsScript.PORTAL_RETREAT_DISTANCE_SCALE, NpcConstantsScript.CELL_SIZE * 0.18)
+    if retreat_distance <= 0.001:
+        return {}
+    var candidate := previous - axis.normalized() * retreat_distance
+    candidate.y = previous.y
+    var moving_home := bool(intent.get("movingHome", false))
+    var allow_outside := bool(intent.get("allowOutside", false))
+    var validation: Dictionary = validate_candidate(entry, previous, candidate, moving_home, allow_outside, world, priority)
+    if not bool(validation.get("ok", false)):
+        return {}
+    var physics_delta := maxf(0.0001, float(intent.get("physicsDelta", 0.0166667)))
+    var motor_result: Dictionary = {}
+    if system != null and system.has_method("apply_npc_route_motion"):
+        motor_result = system.apply_npc_route_motion(entry, previous, validation.get("candidate", candidate), physics_delta)
+    else:
+        return {}
+    var actual_position: Vector3 = motor_result.get("position", previous)
+    var moved := float(motor_result.get("moved", flat_distance(previous, actual_position)))
+    if moved <= 0.001:
+        return {}
+    if corridor_follower != null and corridor_follower.has_method("record_motion"):
+        entry["corridorProgress"] = corridor_follower.record_motion(entry, previous, actual_position, entry.get("pathWaypoints", []), "portal_retreat")
+    increment_reservation_wait(entry)
+    set_route_status(entry, "waiting", "portal_retreat")
+    return { "moved": moved, "status": "waiting", "reason": "portal_retreat", "classification": "door_state" }
+
+func portal_centerline_lateral(entry: Dictionary, previous: Vector3, direction: String) -> Vector3:
+    if system == null or system.get("autonomy_system") == null:
+        return Vector3.ZERO
+    var autonomy = system.get("autonomy_system")
+    if autonomy == null or autonomy.get("door_portals") == null:
+        return Vector3.ZERO
+    var portal_id := String(entry.get("activeDoorPortalId", ""))
+    if portal_id == "":
+        return Vector3.ZERO
+    var portals: Dictionary = autonomy.get("door_portals").get("portals")
+    var portal = portals.get(portal_id)
+    if portal == null:
+        return Vector3.ZERO
+    var center: Vector3 = portal.threshold_bounds.position + portal.threshold_bounds.size * 0.5
+    if direction in ["x+", "x-"]:
+        return Vector3(0.0, 0.0, center.z - previous.z)
+    if direction in ["z+", "z-"]:
+        return Vector3(center.x - previous.x, 0.0, 0.0)
+    return Vector3.ZERO
+
+func axis_for_door_direction(direction: String) -> Vector3:
+    if direction == "x+":
+        return Vector3.RIGHT
+    if direction == "x-":
+        return Vector3.LEFT
+    if direction == "z+":
+        return Vector3.BACK
+    if direction == "z-":
+        return Vector3.FORWARD
+    return Vector3.ZERO
+
+func nearest_dynamic_blocker(position: Vector3, entry: Dictionary, actors: Array) -> Node3D:
+    var body := entry.get("body") as Node3D
+    var best: Node3D = null
+    var best_distance := INF
+    for actor in actors:
+        var other := actor as Node3D
+        if other == null or other == body or not is_instance_valid(other):
+            continue
+        var distance := Vector2(position.x - other.global_position.x, position.z - other.global_position.z).length()
+        if distance < best_distance:
+            best_distance = distance
+            best = other
+    return best
 
 func ensure_route(entry: Dictionary, intent: Dictionary, planner, world) -> Dictionary:
     var target_cell: Vector2i = intent.get("targetCell", world.world_cell(intent.get("target", Vector3.ZERO)))
@@ -393,6 +586,41 @@ func clear_door_stage(entry: Dictionary) -> void:
     entry.erase("doorStagePortalId")
     entry.erase("doorStagePosition")
 
+func compact_follow_result(follow: Dictionary) -> Dictionary:
+    var avoidance: Dictionary = follow.get("avoidance", {}) if follow.has("avoidance") else {}
+    return {
+        "ok": bool(follow.get("ok", false)),
+        "arrived": bool(follow.get("arrived", false)),
+        "reason": String(follow.get("reason", "")),
+        "classification": String(follow.get("classification", "")),
+        "portalMode": bool(follow.get("portalMode", false)),
+        "avoidanceActive": bool(avoidance.get("active", false)),
+        "avoidanceReason": String(avoidance.get("reason", "")),
+        "callbackFresh": bool(avoidance.get("callbackFresh", false)),
+        "fallbackUsed": bool(avoidance.get("fallbackUsed", false)),
+        "activeAvoidanceCount": int(avoidance.get("activeRegistrationCount", 0)),
+        "remainingDistance": float(follow.get("remainingDistance", 0.0))
+    }
+
+func record_follow_metrics(follow: Dictionary) -> void:
+    if system == null:
+        return
+    var avoidance: Dictionary = follow.get("avoidance", {}) if follow.has("avoidance") else {}
+    if bool(avoidance.get("active", false)):
+        system.set("npc_avoidance_active_frames", int(system.get("npc_avoidance_active_frames")) + 1)
+    if bool(avoidance.get("callbackFresh", false)):
+        system.set("npc_avoidance_callback_frames", int(system.get("npc_avoidance_callback_frames")) + 1)
+    if bool(avoidance.get("fallbackUsed", false)):
+        system.set("npc_avoidance_fallback_frames", int(system.get("npc_avoidance_fallback_frames")) + 1)
+    if int(avoidance.get("activeRegistrationCount", 0)) > 0:
+        system.set("npc_avoidance_active_registrations", max(int(system.get("npc_avoidance_active_registrations")), int(avoidance.get("activeRegistrationCount", 0))))
+
+func corridor_stats() -> Dictionary:
+    return corridor_follower.stats() if corridor_follower != null and corridor_follower.has_method("stats") else {}
+
+func avoidance_stats() -> Dictionary:
+    return avoidance_adapter.stats() if avoidance_adapter != null and avoidance_adapter.has_method("stats") else {}
+
 func validate_candidate(entry: Dictionary, previous: Vector3, candidate: Vector3, moving_home := false, allow_outside := false, world = null, priority := 0) -> Dictionary:
     if world == null or main == null:
         return { "ok": false, "reason": "missing_world" }
@@ -462,44 +690,6 @@ func capsule_footprint_cells(position: Vector3, world) -> Array[Vector2i]:
         if not cells.has(cell):
             cells.append(cell)
     return cells
-
-func try_local_avoidance(entry: Dictionary, previous: Vector3, waypoint: Vector3, max_distance: float, moving_home := false, allow_outside := false, world = null, priority := 0) -> Dictionary:
-    var forward: Vector3 = waypoint - previous
-    forward.y = 0.0
-    if forward.length_squared() < 0.001:
-        return { "ok": false, "reason": "no_forward" }
-    forward = forward.normalized()
-    var side: Vector3 = Vector3(-forward.z, 0.0, forward.x)
-    for option in [Vector2(0.80, 0.44), Vector2(0.80, -0.44), Vector2(0.45, 0.72), Vector2(0.45, -0.72), Vector2(1.0, 0.0), Vector2(-0.55, 0.0), Vector2(-0.45, 0.45), Vector2(-0.45, -0.45)]:
-        var direction: Vector3 = (forward * option.x + side * option.y).normalized()
-        var candidate: Vector3 = previous + direction * minf(max_distance, CELL * 0.42)
-        var validation: Dictionary = validate_candidate(entry, previous, candidate, moving_home, allow_outside, world, priority)
-        if bool(validation.get("ok", false)):
-            return validation
-    return { "ok": false, "reason": "local_blocked" }
-
-func try_yield_backoff(entry: Dictionary, previous: Vector3, waypoint: Vector3, max_distance: float, moving_home := false, allow_outside := false, world = null, priority := 0) -> Dictionary:
-    var forward: Vector3 = waypoint - previous
-    forward.y = 0.0
-    if forward.length_squared() < 0.001:
-        return { "ok": false, "reason": "yield_no_forward" }
-    forward = forward.normalized()
-    var side: Vector3 = Vector3(-forward.z, 0.0, forward.x)
-    var side_sign := 1.0 if (hash(String(entry.get("id", "npc"))) & 1) == 0 else -1.0
-    var options := [
-        Vector2(-1.0, 0.0),
-        Vector2(-0.92, side_sign * 0.42),
-        Vector2(-0.92, -side_sign * 0.42),
-        Vector2(-0.58, side_sign * 0.82),
-        Vector2(-0.58, -side_sign * 0.82)
-    ]
-    for option in options:
-        var direction: Vector3 = (forward * option.x + side * option.y).normalized()
-        var candidate: Vector3 = previous + direction * minf(max_distance, CELL * 0.48)
-        var validation: Dictionary = validate_candidate(entry, previous, candidate, moving_home, allow_outside, world, priority)
-        if bool(validation.get("ok", false)):
-            return validation
-    return { "ok": false, "reason": "yield_blocked" }
 
 func expire_reservations(claims: Dictionary) -> void:
     for key in claims.keys():

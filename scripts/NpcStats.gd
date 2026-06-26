@@ -80,6 +80,14 @@ static func build(system) -> Dictionary:
         "reservationWaits": system.npc_reservation_waits,
         "unreachableGoals": system.npc_unreachable_goals,
         "validatedMoves": system.npc_validated_moves,
+        "avoidance": {
+            "activeFrames": system.npc_avoidance_active_frames,
+            "callbackFrames": system.npc_avoidance_callback_frames,
+            "fallbackFrames": system.npc_avoidance_fallback_frames,
+            "peakActiveRegistrations": system.npc_avoidance_active_registrations,
+            "adapter": system.pathing.coordinator.locomotion.avoidance_stats() if system.pathing and system.pathing.coordinator and system.pathing.coordinator.locomotion else {},
+            "corridor": system.pathing.coordinator.locomotion.corridor_stats() if system.pathing and system.pathing.coordinator and system.pathing.coordinator.locomotion else {}
+        },
         "tracers": system.combat.tracers.size() if system.combat else 0,
         "lastMessage": system.last_message
     }

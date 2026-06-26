@@ -50,6 +50,7 @@ var results: Array[Dictionary] = []
 var route_case_provider = null
 var repair_case_provider = null
 var door_case_provider = null
+var avoidance_case_provider = null
 var metrics := {
 	"assertions": 0,
 	"selectedCases": 0,
@@ -282,6 +283,8 @@ func contract_cases() -> Array[Dictionary]:
 		cases.append_array(repair_cases())
 	if suite_filter == "door" or suite_filter == "all" or suite_filter == "":
 		cases.append_array(door_cases())
+	if suite_filter == "avoidance" or suite_filter == "all" or suite_filter == "":
+		cases.append_array(avoidance_cases())
 	return cases
 
 func motor_cases() -> Array[Dictionary]:
@@ -367,6 +370,13 @@ func door_cases() -> Array[Dictionary]:
 		door_case_provider = provider_script.new()
 		door_case_provider.call("setup", self)
 	return door_case_provider.call("cases")
+
+func avoidance_cases() -> Array[Dictionary]:
+	if avoidance_case_provider == null:
+		var provider_script = load("res://scripts/testing/npc/NpcAvoidanceTestCases.gd")
+		avoidance_case_provider = provider_script.new()
+		avoidance_case_provider.call("setup", self)
+	return avoidance_case_provider.call("cases")
 
 func suite_matches(case_suite: String) -> bool:
 	return suite_filter == "" or suite_filter == "all" or suite_filter == case_suite
