@@ -15,7 +15,7 @@ const NpcSafePlacementServiceScript := preload("res://scripts/npc_ai/NpcSafePlac
 const CharacterMotorProfileScript := preload("res://scripts/npc_ai/contracts/CharacterMotorProfile.gd")
 
 const CELL := 1.35
-const DOOR_TRAFFIC_RELEASE_RADIUS := CELL * 0.55
+const DOOR_TRAFFIC_RELEASE_RADIUS := CELL * 1.65
 const FORAGE_SCAN_NODE_LIMIT := 1200
 const FORAGE_SCAN_CANDIDATE_LIMIT := 36
 const NO_DETOUR := Vector3(9999999.0, 9999999.0, 9999999.0)
@@ -43,6 +43,10 @@ var npc_stuck_recoveries := 0
 var npc_reservation_waits := 0
 var npc_unreachable_goals := 0
 var npc_validated_moves := 0
+var npc_avoidance_active_frames := 0
+var npc_avoidance_callback_frames := 0
+var npc_avoidance_fallback_frames := 0
+var npc_avoidance_active_registrations := 0
 var visual_factory
 var pathing
 var combat

@@ -36,6 +36,12 @@
       "description": "Phase 06 smart door portal, controller, shared authority, and safety tests",
       "command": ".\\tools\\npc\\run-npc-door-tests.ps1",
       "defaultArgs": ["-TimeMode", "Both"]
+    },
+    {
+      "id": "avoidance",
+      "description": "Phase 07 predictive local avoidance and stable corridor follower tests",
+      "command": ".\\tools\\npc\\run-npc-avoidance-tests.ps1",
+      "defaultArgs": ["-TimeMode", "Both"]
     }
   ]
 }

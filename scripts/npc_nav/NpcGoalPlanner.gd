@@ -35,7 +35,7 @@ func make_intent(entry: Dictionary, target: Vector3, max_distance: float, moving
     if moving_home:
         arrival_radius = CELL * 0.82
     elif kind == "scripted":
-        arrival_radius = CELL * 0.35
+        arrival_radius = CELL * 0.45
     return {
         "kind": kind,
         "target": target,
