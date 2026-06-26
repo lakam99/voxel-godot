@@ -5,11 +5,11 @@
 - Phase: 06 - Authoritative Smart Doors and Shared Player/NPC Interaction
 - Branch: `npc-pathfinding/phase-06-smart-doors`
 - Base commit before Phase 06 branch changes: `17a7eafc4a1a5b952ccf27d75e6c91c15b56a864`
-- Branch code commit: pending at branch-report authoring time
-- Merge commit: pending at branch-report authoring time
+- Branch code commit: `7863c9622354b0eb3d9a780147cace82375a5bea`
+- Merge commit: `6f988f6cad8bfdbf05901bf019dcc7f11c7ee2ca`
 - Date: 2026-06-26
 - Controlling specification: `CODEX_NPC_PATHFINDING_FINAL_IMPLEMENTATION_PLAN.md`
-- Scope status: branch gates passed; merged `master` gate pending until the required non-fast-forward merge and rerun.
+- Scope status: branch gates passed; merged `master` gate passed after the required non-fast-forward merge and rerun.
 
 ## 2. Objective
 
@@ -187,7 +187,25 @@ Runner registry used: `tools\test-runner-registry.json`.
 
 ## 11. Merged Master Evidence
 
-Pending until the required non-fast-forward merge and `.\tools\run-all-test-runners.ps1` rerun on `master`.
+Command:
+
+```powershell
+.\tools\run-all-test-runners.ps1
+```
+
+Report: `artifacts\test-runners\all-test-runners-report.json`
+
+Result: pass, 7 runners, 0 failures, 1699.422s, finished `2026-06-26T08:47:25.2073494Z` on merged `master` commit `6f988f6cad8bfdbf05901bf019dcc7f11c7ee2ca`.
+
+| Runner | Exit | Result | Duration | Fresh report |
+| --- | ---: | --- | ---: | --- |
+| `npc_focused` | 0 | Pass | 8.873s | yes |
+| `npc_navigation_legacy` | 0 | Pass | 458.978s | yes |
+| `playtest` | 0 | Pass | 1081.528s | yes |
+| `story_playtest` | 0 | Pass | 68.414s | yes |
+| `world_signature` | 0 | Pass | 15.485s | yes |
+| `visual_captures` | 0 | Pass | 66.004s | yes |
+| `visual_manifest` | 0 | Pass | 0.091s | yes |
 
 ## 12. Static And Prohibited-Shortcut Audit
 
@@ -230,7 +248,7 @@ After the fix, the door focused suite, legacy door path, and full all-runner gat
 | Legacy door smoke tests remain green through the new controller | Pass | `npc_nav_door_open_close_cycle`, `door_toggle_collision` |
 | All focused suites pass on branch | Pass | contract, motor, nav-world, route, repair, and door suites all green |
 | Full repository gate passes on branch | Pass | `.\tools\run-all-test-runners.ps1`; 7 runners, 0 failures |
-| Full repository gate passes on merged `master` | Pending | Merge and master rerun not yet executed at branch-report authoring time |
+| Full repository gate passes on merged `master` | Pass | `.\tools\run-all-test-runners.ps1`; 7 runners, 0 failures, 1699.422s |
 
 ## 15. Review Questions
 
