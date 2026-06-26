@@ -15,8 +15,7 @@ const NpcSafePlacementServiceScript := preload("res://scripts/npc_ai/NpcSafePlac
 const CharacterMotorProfileScript := preload("res://scripts/npc_ai/contracts/CharacterMotorProfile.gd")
 
 const CELL := 1.35
-const DOOR_CLOSE_CLEAR_RADIUS := CELL * 1.05
-const DOOR_CLOSE_TIMEOUT_SECONDS := 4.5
+const DOOR_TRAFFIC_RELEASE_RADIUS := CELL * 0.55
 const FORAGE_SCAN_NODE_LIMIT := 1200
 const FORAGE_SCAN_CANDIDATE_LIMIT := 36
 const NO_DETOUR := Vector3(9999999.0, 9999999.0, 9999999.0)
@@ -44,7 +43,6 @@ var npc_stuck_recoveries := 0
 var npc_reservation_waits := 0
 var npc_unreachable_goals := 0
 var npc_validated_moves := 0
-var pending_door_closes: Array = []
 var visual_factory
 var pathing
 var combat
@@ -105,7 +103,6 @@ func clear() -> void:
     spawned_town_keys.clear()
     published_navigation_semantics.clear()
     focused_dialogue_body = null
-    pending_door_closes.clear()
     if autonomy_system:
         autonomy_system.clear()
     if combat:
@@ -474,7 +471,7 @@ func update_npcs(delta: float, day_factor: float) -> void:
     spawn_generic_town_npcs()
     if combat != null:
         combat.update_tracers(delta)
-    update_pending_door_closes(delta)
+    update_door_policies(delta)
     if pathing != null and pathing.has_method("begin_frame"):
         pathing.begin_frame()
     var night_factor := clampf((1.0 - day_factor - 0.30) / 0.55, 0.0, 1.0)
@@ -1090,56 +1087,208 @@ func record_home_fallback(entry: Dictionary, reason: String) -> void:
     entry["unreachableGoals"] = int(entry.get("unreachableGoals", 0)) + 1
     npc_unreachable_goals += 1
 
-func open_door_for_npc(collider: Node, npc_body: Node3D = null) -> void:
-    if collider == null or main == null or not main.has_method("toggle_door"):
-        return
-    collider = main.interaction_block_from_collider(collider) if main.has_method("interaction_block_from_collider") else collider
-    if bool(collider.get_meta("open", false)):
-        schedule_door_close(collider, npc_body)
-        return
-    if bool(main.toggle_door(collider)):
-        door_opens += 1
-        schedule_door_close(collider, npc_body)
-        last_message = "NPC opened a door"
-
-func schedule_door_close(door: Node, npc_body: Node3D) -> void:
+func request_npc_door_traversal(collider: Node, npc_body: Node3D = null, entry: Dictionary = {}, action: Dictionary = {}) -> Dictionary:
+    ensure_autonomy_system()
+    var door := interaction_door_for_npc(collider)
     if door == null or not is_instance_valid(door):
-        return
-    for pending in pending_door_closes:
-        if pending.get("door") == door:
-            pending["npc"] = npc_body
-            return
-    pending_door_closes.append({ "door": door, "npc": npc_body, "timer": 0.0 })
+        return { "ok": false, "status": "failed", "reason": "missing_door" }
+    var was_open := bool(door.get_meta("open", false))
+    var result: Dictionary = autonomy_system.request_npc_door_traversal(door, npc_body, entry, action) if autonomy_system else { "ok": false, "status": "failed", "reason": "missing_autonomy" }
+    if bool(result.get("ok", false)) and not was_open and bool(door.get_meta("open", false)):
+        door_opens += 1
+        last_message = "NPC opened a door"
+    return result
 
-func update_pending_door_closes(delta: float) -> void:
-    for pending in pending_door_closes.duplicate():
-        var door_value = pending.get("door")
-        if door_value == null or not is_instance_valid(door_value) or not (door_value is Node3D):
-            pending_door_closes.erase(pending)
-            continue
-        var door: Node3D = door_value
-        pending["timer"] = float(pending.get("timer", 0.0)) + delta
-        var npc_value = pending.get("npc")
-        var npc: Node3D = npc_value if npc_value != null and is_instance_valid(npc_value) and npc_value is Node3D else null
-        var npc_clear: bool = npc == null or not is_instance_valid(npc) or npc.global_position.distance_to(door.global_position) > DOOR_CLOSE_CLEAR_RADIUS
-        var player_clear: bool = true
-        if main != null and main.player != null:
-            player_clear = main.player.global_position.distance_to(door.global_position) > DOOR_CLOSE_CLEAR_RADIUS
-        var npcs_clear := true
-        for entry in npcs:
-            var body := entry.get("body") as Node3D
-            if body != null and is_instance_valid(body) and body.global_position.distance_to(door.global_position) <= DOOR_CLOSE_CLEAR_RADIUS:
-                npcs_clear = false
-                break
-        var active_route_hold := npc_route_holds_door_open(door)
-        var timed_out := float(pending.get("timer", 0.0)) > DOOR_CLOSE_TIMEOUT_SECONDS
-        if bool(door.get_meta("open", false)) and not active_route_hold and npc_clear and npcs_clear and (player_clear or timed_out):
-            if bool(main.toggle_door(door)):
+func request_door_state(collider: Node, desired_open: bool, actor: Node = null, actor_kind := "system", metadata := {}):
+    ensure_autonomy_system()
+    var door := interaction_door_for_npc(collider)
+    if door == null or not is_instance_valid(door):
+        return null
+    var was_open := bool(door.get_meta("open", false))
+    var result = autonomy_system.request_door_state(door, desired_open, actor, actor_kind, metadata) if autonomy_system else null
+    if result != null and String(result.get("status")) == "succeeded":
+        var is_open := bool(door.get_meta("open", false))
+        if is_open != was_open:
+            if is_open:
+                door_opens += 1
+            else:
                 door_closes += 1
-                last_message = "NPC closed a door"
-            pending_door_closes.erase(pending)
-        elif not bool(door.get_meta("open", false)):
-            pending_door_closes.erase(pending)
+    return result
+
+func request_door_toggle(collider: Node, actor: Node = null, actor_kind := "player", metadata := {}):
+    ensure_autonomy_system()
+    var door := interaction_door_for_npc(collider)
+    if door == null or not is_instance_valid(door):
+        return null
+    var logical_open := bool(door.get_meta("open", false))
+    if autonomy_system != null and autonomy_system.door_portals != null:
+        var portal_id: String = autonomy_system.register_door(door, metadata)
+        var portal = autonomy_system.door_portals.portals.get(portal_id)
+        if portal != null:
+            logical_open = String(portal.state) == "open"
+    return request_door_state(door, not logical_open, actor, actor_kind, metadata)
+
+func update_door_policies(delta: float) -> void:
+    release_completed_door_holds()
+    if autonomy_system == null:
+        return
+    var actors := current_door_actors()
+    var result: Dictionary = autonomy_system.process_door_policies(delta, actors)
+    var closed := int(result.get("closed", 0))
+    if closed > 0:
+        door_closes += closed
+        last_message = "NPC closed a door"
+
+func current_door_actors() -> Array:
+    var actors: Array = []
+    if main != null and main.player != null and is_instance_valid(main.player):
+        actors.append(main.player)
+    for entry in npcs:
+        var body := entry.get("body") as Node3D
+        if body != null and is_instance_valid(body) and not actors.has(body):
+            actors.append(body)
+    return actors
+
+func release_completed_door_holds() -> void:
+    if autonomy_system == null:
+        return
+    for entry in npcs:
+        var portal_id := String(entry.get("activeDoorPortalId", ""))
+        if portal_id == "":
+            continue
+        if route_still_needs_active_door(entry, portal_id):
+            continue
+        var actor_id := String(entry.get("activeDoorActorId", entry.get("id", "")))
+        autonomy_system.release_npc_door_hold(actor_id, true)
+        clear_completed_door_action(entry, portal_id)
+        entry.erase("activeDoorPortalId")
+        entry.erase("activeDoorActorId")
+        entry.erase("activeDoorDirection")
+
+func route_still_needs_active_door(entry: Dictionary, portal_id: String) -> bool:
+    if portal_id == "":
+        return false
+    if String(entry.get("routeStatus", "")) in ["arrived", "partial"] and (entry.get("pathWaypoints", []) as Array).is_empty():
+        return false
+    if active_door_crossing_still_needs_hold(entry, portal_id):
+        return true
+    if active_door_crossing_has_cleared(entry, portal_id):
+        return false
+    var actions: Dictionary = entry.get("routeActions", {})
+    for action_value in actions.values():
+        if not (action_value is Dictionary):
+            continue
+        var action: Dictionary = action_value
+        var action_door := interaction_door_for_npc(action.get("door") as Node)
+        if action_door == null:
+            continue
+        var action_portal_id := ""
+        if autonomy_system != null and autonomy_system.door_portals != null:
+            action_portal_id = autonomy_system.door_portals.resolve_portal_id(action_door, "")
+        if action_portal_id == portal_id and route_still_needs_door(entry, action):
+            return true
+    return false
+
+func active_door_crossing_still_needs_hold(entry: Dictionary, portal_id: String) -> bool:
+    if autonomy_system == null or autonomy_system.door_portals == null:
+        return false
+    var portal = autonomy_system.door_portals.portals.get(portal_id)
+    if portal == null:
+        return false
+    var body := entry.get("body") as Node3D
+    if body == null or not is_instance_valid(body):
+        return false
+    if not portal.occupied_actors([body], "threshold").is_empty() or not portal.occupied_actors([body], "sweep").is_empty():
+        return true
+    var direction := String(entry.get("activeDoorDirection", ""))
+    if direction == "":
+        return false
+    var center: Vector3 = portal.threshold_bounds.position + portal.threshold_bounds.size * 0.5
+    if direction == "x+":
+        return body.global_position.x <= center.x + DOOR_TRAFFIC_RELEASE_RADIUS
+    if direction == "x-":
+        return body.global_position.x >= center.x - DOOR_TRAFFIC_RELEASE_RADIUS
+    if direction == "z+":
+        return body.global_position.z <= center.z + DOOR_TRAFFIC_RELEASE_RADIUS
+    if direction == "z-":
+        return body.global_position.z >= center.z - DOOR_TRAFFIC_RELEASE_RADIUS
+    return false
+
+func active_door_crossing_has_cleared(entry: Dictionary, portal_id: String) -> bool:
+    if autonomy_system == null or autonomy_system.door_portals == null:
+        return false
+    var portal = autonomy_system.door_portals.portals.get(portal_id)
+    if portal == null:
+        return false
+    var body := entry.get("body") as Node3D
+    if body == null or not is_instance_valid(body):
+        return false
+    var direction := String(entry.get("activeDoorDirection", ""))
+    if direction == "":
+        return false
+    var center: Vector3 = portal.threshold_bounds.position + portal.threshold_bounds.size * 0.5
+    if direction == "x+":
+        return body.global_position.x > center.x + DOOR_TRAFFIC_RELEASE_RADIUS
+    if direction == "x-":
+        return body.global_position.x < center.x - DOOR_TRAFFIC_RELEASE_RADIUS
+    if direction == "z+":
+        return body.global_position.z > center.z + DOOR_TRAFFIC_RELEASE_RADIUS
+    if direction == "z-":
+        return body.global_position.z < center.z - DOOR_TRAFFIC_RELEASE_RADIUS
+    return false
+
+func clear_completed_door_action(entry: Dictionary, portal_id: String) -> void:
+    if portal_id == "":
+        return
+    var actions: Dictionary = entry.get("routeActions", {})
+    if actions.is_empty():
+        return
+    for key in actions.keys().duplicate():
+        var action_value = actions.get(key)
+        if not (action_value is Dictionary):
+            continue
+        var action: Dictionary = action_value
+        var action_door := interaction_door_for_npc(action.get("door") as Node)
+        if action_door == null:
+            continue
+        var action_portal_id := ""
+        if autonomy_system != null and autonomy_system.door_portals != null:
+            action_portal_id = autonomy_system.door_portals.resolve_portal_id(action_door, "")
+        if action_portal_id == portal_id:
+            actions.erase(key)
+    entry["routeActions"] = actions
+    prune_completed_door_route_prefix(entry)
+
+func prune_completed_door_route_prefix(entry: Dictionary) -> void:
+    var direction := String(entry.get("activeDoorDirection", ""))
+    if direction == "":
+        return
+    var body := entry.get("body") as Node3D
+    if body == null or not is_instance_valid(body):
+        return
+    var current_cell := flat_cell_for_position(body.global_position)
+    var cells: Array = entry.get("routeCells", [])
+    var waypoints: Array = entry.get("pathWaypoints", [])
+    var removed := 0
+    while not cells.is_empty() and cells[0] is Vector2i and route_cell_is_behind_active_door_clearance(cells[0], current_cell, direction):
+        cells.remove_at(0)
+        removed += 1
+    while removed > 0 and not waypoints.is_empty():
+        waypoints.remove_at(0)
+        removed -= 1
+    entry["routeCells"] = cells
+    entry["pathWaypoints"] = waypoints
+
+func route_cell_is_behind_active_door_clearance(cell: Vector2i, current_cell: Vector2i, direction: String) -> bool:
+    if direction == "x+":
+        return cell.x <= current_cell.x
+    if direction == "x-":
+        return cell.x >= current_cell.x
+    if direction == "z+":
+        return cell.y <= current_cell.y
+    if direction == "z-":
+        return cell.y >= current_cell.y
+    return false
 
 func npc_route_holds_door_open(door: Node) -> bool:
     if door == null or not is_instance_valid(door):
@@ -1170,7 +1319,7 @@ func route_still_needs_door(entry: Dictionary, action: Dictionary) -> bool:
     if not (cell_value is Vector2i):
         if action_door == null or not is_instance_valid(action_door):
             return false
-        return body.global_position.distance_to(action_door.global_position) <= DOOR_CLOSE_CLEAR_RADIUS
+        return body.global_position.distance_to(action_door.global_position) <= DOOR_TRAFFIC_RELEASE_RADIUS
     var door_cell: Vector2i = cell_value
     var goal_cell: Vector2i = entry.get("routeGoalCell", door_cell)
     var goal_delta := goal_cell - door_cell
@@ -1179,13 +1328,13 @@ func route_still_needs_door(entry: Dictionary, action: Dictionary) -> bool:
         door_position = action_door.global_position
     if abs(goal_delta.x) >= abs(goal_delta.y) and goal_delta.x != 0:
         if goal_delta.x > 0:
-            return body.global_position.x <= door_position.x + DOOR_CLOSE_CLEAR_RADIUS
-        return body.global_position.x >= door_position.x - DOOR_CLOSE_CLEAR_RADIUS
+            return body.global_position.x <= door_position.x + DOOR_TRAFFIC_RELEASE_RADIUS
+        return body.global_position.x >= door_position.x - DOOR_TRAFFIC_RELEASE_RADIUS
     if goal_delta.y != 0:
         if goal_delta.y > 0:
-            return body.global_position.z <= door_position.z + DOOR_CLOSE_CLEAR_RADIUS
-        return body.global_position.z >= door_position.z - DOOR_CLOSE_CLEAR_RADIUS
-    return body.global_position.distance_to(door_position) <= DOOR_CLOSE_CLEAR_RADIUS
+            return body.global_position.z <= door_position.z + DOOR_TRAFFIC_RELEASE_RADIUS
+        return body.global_position.z >= door_position.z - DOOR_TRAFFIC_RELEASE_RADIUS
+    return body.global_position.distance_to(door_position) <= DOOR_TRAFFIC_RELEASE_RADIUS
 
 func interaction_door_for_npc(collider: Node) -> Node:
     if collider == null:

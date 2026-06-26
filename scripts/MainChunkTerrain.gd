@@ -429,6 +429,58 @@ func add_trader_stall_visual(parent: Node3D) -> void:
     tag_visual(add_block_mesh(parent, Vector3(CELL * 0.34, CELL * 0.26, CELL * 0.34), Vector3(-CELL * 0.42, -CELL * 0.02, -CELL * 0.50), "woodBlock"), "crate", "TraderCrateVisual")
     tag_visual(add_block_mesh(parent, Vector3(CELL * 0.26, CELL * 0.42, CELL * 0.26), Vector3(CELL * 0.44, -CELL * 0.03, -CELL * 0.48), "door"), "barrel", "TraderBarrelVisual")
 
+func door_side_from_facing(facing: float) -> int:
+    if absf(sin(facing)) > absf(cos(facing)):
+        return 1 if sin(facing) > 0.0 else 3
+    return 0 if cos(facing) >= 0.0 else 2
+
+func door_facing_from_side(side: int) -> float:
+    if side == 1:
+        return PI * 0.5
+    if side == 3:
+        return -PI * 0.5
+    if side == 2:
+        return PI
+    return 0.0
+
+func infer_door_side_from_neighbors(cell: Vector3i, fallback_side: int) -> int:
+    var x_axis_neighbors := 0
+    var z_axis_neighbors := 0
+    for offset in [Vector3i(1, 0, 0), Vector3i(-1, 0, 0)]:
+        if is_door_wall_neighbor(cell + offset):
+            x_axis_neighbors += 1
+    for offset in [Vector3i(0, 0, 1), Vector3i(0, 0, -1)]:
+        if is_door_wall_neighbor(cell + offset):
+            z_axis_neighbors += 1
+    if z_axis_neighbors > x_axis_neighbors:
+        return 1
+    if x_axis_neighbors > z_axis_neighbors:
+        return 0
+    return fallback_side
+
+func is_door_wall_neighbor(cell: Vector3i) -> bool:
+    var neighbor = blocks.get(cell)
+    if not (neighbor is Node):
+        return false
+    var neighbor_type := String((neighbor as Node).get_meta("block_type", ""))
+    return neighbor_type in ["woodBlock", "stoneBlock", "glass", "door"]
+
+func door_primary_cell(cell: Vector3i, side: int, secondary: bool) -> Vector3i:
+    if not secondary:
+        return cell
+    if side == 0 or side == 2:
+        return Vector3i(cell.x - 1, cell.y, cell.z)
+    if side == 1 or side == 3:
+        return Vector3i(cell.x, cell.y, cell.z - 1)
+    return cell
+
+func door_group_id_for_cell(cell: Vector3i, side: int, secondary: bool) -> String:
+    var primary := door_primary_cell(cell, side, secondary)
+    return "door-group:%d,%d,%d:%d" % [primary.x, primary.y, primary.z, side]
+
+func door_portal_id_for_cell(cell: Vector3i, side: int, secondary: bool) -> String:
+    return "door:%s" % door_group_id_for_cell(cell, side, secondary)
+
 func create_block(cell: Vector3i, block_type: String, options: Dictionary = {}) -> StaticBody3D:
     if blocks.has(cell):
         return blocks[cell]
@@ -478,10 +530,31 @@ func create_block(cell: Vector3i, block_type: String, options: Dictionary = {}) 
     elif block_type == "door":
         mesh_size = Vector3(CELL * 0.92, CELL * 1.72, CELL * 0.16)
         mesh_offset.y = CELL * 0.38
-        body.set_meta("open", false)
+        var secondary := bool(options.get("secondary", false))
+        var side := int(options.get("doorSide", infer_door_side_from_neighbors(cell, door_side_from_facing(body.rotation.y))))
+        if not options.has("facing"):
+            body.rotation.y = door_facing_from_side(side)
+        var group_id := String(options.get("doorGroupId", ""))
+        if group_id == "":
+            group_id = door_group_id_for_cell(cell, side, secondary)
+        var portal_id := String(options.get("doorPortalId", ""))
+        if portal_id == "":
+            portal_id = "door:%s" % group_id
+        body.set_meta("open", bool(options.get("open", false)))
         body.set_meta("closed_rotation", body.rotation.y)
-        body.set_meta("secondary", bool(options.get("secondary", false)))
-        var swing := 1.0 if bool(options.get("secondary", false)) else -1.0
+        body.set_meta("secondary", secondary)
+        body.set_meta("door_leaf_index", int(options.get("doorLeafIndex", 1 if secondary else 0)))
+        body.set_meta("door_side", side)
+        body.set_meta("door_group_id", group_id)
+        body.set_meta("door_portal_id", portal_id)
+        body.set_meta("door_building_id", String(options.get("doorBuildingId", "")))
+        body.set_meta("door_public_access", bool(options.get("doorPublicAccess", true)))
+        body.set_meta("door_policy", String(options.get("doorPolicy", "private_home")))
+        body.set_meta("locked", bool(options.get("locked", false)))
+        body.set_meta("jammed", bool(options.get("jammed", false)))
+        body.set_meta("destroyed", bool(options.get("destroyed", false)))
+        body.set_meta("unloaded", bool(options.get("unloaded", false)))
+        var swing := 1.0 if secondary else -1.0
         body.set_meta("open_swing", swing * PI * 0.5)
         body.set_meta("open_rotation", body.rotation.y)
     elif block_type == "torch":

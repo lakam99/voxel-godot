@@ -21,20 +21,27 @@ func run() -> void:
         camera = player.get("camera") as Camera3D
     Input.set_mouse_mode(Input.MOUSE_MODE_VISIBLE)
 
+    var case_filter := OS.get_environment("VOXEL_NPC_NAV_CASE")
     mark_progress("npc_nav_warmup")
     await wait_physics_frames(80)
-    mark_progress("npc_nav_capsule_gate")
-    await test_npc_capsule_collision_gate()
-    mark_progress("npc_nav_two_npc_door")
-    await test_two_npcs_cross_narrow_door()
-    mark_progress("npc_nav_home_fallback")
-    await test_home_return_fallback_semantics()
-    mark_progress("npc_nav_reachable_goals")
-    await test_reachability_aware_goal_selection()
-    mark_progress("npc_nav_generic_town")
-    await test_generic_town_npc_navigation()
-    mark_progress("npc_nav_route_core")
-    await test_npc_equipment_and_pathing()
+    if case_filter == "" or case_filter == "capsule" or case_filter == "door":
+        mark_progress("npc_nav_capsule_gate")
+        await test_npc_capsule_collision_gate()
+    if case_filter == "" or case_filter == "door":
+        mark_progress("npc_nav_two_npc_door")
+        await test_two_npcs_cross_narrow_door()
+    if case_filter == "" or case_filter == "home":
+        mark_progress("npc_nav_home_fallback")
+        await test_home_return_fallback_semantics()
+    if case_filter == "" or case_filter == "goals":
+        mark_progress("npc_nav_reachable_goals")
+        await test_reachability_aware_goal_selection()
+    if case_filter == "" or case_filter == "generic":
+        mark_progress("npc_nav_generic_town")
+        await test_generic_town_npc_navigation()
+    if case_filter == "" or case_filter == "route":
+        mark_progress("npc_nav_route_core")
+        await test_npc_equipment_and_pathing()
 
     save_optional_screenshot()
     save_report()
@@ -443,12 +450,14 @@ func test_two_npcs_cross_narrow_door() -> void:
     var both_crossed := false
     var min_separation := INF
     var door_world_x := float(door_cell.x) * CELL
-    for step in range(260):
+    for step in range(520):
+        if step % 80 == 0:
+            mark_progress("npc_nav_two_npc_door_%d" % step)
         if pathing != null and pathing.has_method("begin_frame"):
             pathing.begin_frame()
         npc_system.move_npc(left_entry, right_start, CELL * 0.22, false, false)
         npc_system.move_npc(right_entry, left_start, CELL * 0.22, false, false)
-        npc_system.update_pending_door_closes(0.18)
+        npc_system.update_door_policies(0.18)
         var left_cell := world_to_flat_cell(left_npc.global_position)
         var right_cell := world_to_flat_cell(right_npc.global_position)
         if left_cell == right_cell:
@@ -458,8 +467,12 @@ func test_two_npcs_cross_narrow_door() -> void:
             both_crossed = true
             break
         await wait_physics_frames(1)
-    for i in range(24):
-        npc_system.update_pending_door_closes(0.18)
+    for i in range(160):
+        if pathing != null and pathing.has_method("begin_frame"):
+            pathing.begin_frame()
+        npc_system.move_npc(left_entry, right_start, CELL * 0.22, false, false)
+        npc_system.move_npc(right_entry, left_start, CELL * 0.22, false, false)
+        npc_system.update_door_policies(0.18)
         await wait_physics_frames(1)
     var stats_after: Dictionary = npc_system.stats()
     var door := blocks.get(door_cell) as Node
@@ -524,7 +537,7 @@ func test_two_npcs_cross_narrow_door() -> void:
             var block_body := blocks[cell] as Node
             if block_body:
                 block_body.queue_free()
-            blocks.erase(cell)
+        blocks.erase(cell)
 
 func test_home_return_fallback_semantics() -> void:
     if not main or not player:

@@ -551,11 +551,25 @@ func place_door(cell_x: int, cell_z: int, level: float, side: int, secondary: bo
     var world_y: float = level + main.CELL * 0.48
     var cell_y: int = floori(world_y / main.CELL) + 1
     var facing: float = StructureDoorRulesScript.door_facing(side)
+    var group_x := cell_x
+    var group_z := cell_z
+    if secondary:
+        if side == 0 or side == 2:
+            group_x -= 1
+        elif side == 1 or side == 3:
+            group_z -= 1
+    var group_id := "door-group:%d,%d,%d:%d" % [group_x, cell_y, group_z, side]
     var block = main.create_block(Vector3i(cell_x, cell_y, cell_z), "door", {
         "generated": true,
         "world_y": world_y,
         "facing": facing,
         "secondary": secondary,
+        "doorSide": side,
+        "doorLeafIndex": 1 if secondary else 0,
+        "doorGroupId": group_id,
+        "doorPortalId": "door:%s" % group_id,
+        "doorPublicAccess": true,
+        "doorPolicy": "private_home",
         "door": true,
         "accentRole": "doorFrame",
         "doorTrimMaterial": "trimWood"
