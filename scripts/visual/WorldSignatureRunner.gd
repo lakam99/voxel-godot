@@ -1,7 +1,7 @@
 extends Node
 
 const MAIN_SCENE: PackedScene = preload("res://scenes/Main.tscn")
-const SEED := "atlas-1492"
+const DEFAULT_SEED := "atlas-1492"
 const SAMPLE_CELLS := [
     Vector2i(-84, -84), Vector2i(-56, 0), Vector2i(-28, 42), Vector2i(0, 0),
     Vector2i(28, 28), Vector2i(56, -28), Vector2i(84, 56), Vector2i(112, -56),
@@ -10,6 +10,7 @@ const SAMPLE_CELLS := [
 
 var main
 var output_path := ""
+var seed := DEFAULT_SEED
 
 func _ready() -> void:
     call_deferred("run")
@@ -19,6 +20,10 @@ func run() -> void:
     if output_path == "":
         output_path = ProjectSettings.globalize_path("res://artifacts/world-signature/latest/atlas-1492.json")
     ensure_dir(output_path.get_base_dir())
+    seed = OS.get_environment("VOXEL_TEST_SEED").strip_edges()
+    if seed == "":
+        seed = DEFAULT_SEED
+    OS.set_environment("VOXEL_TEST_SEED", seed)
     OS.set_environment("VOXEL_PLAYTEST", "1")
     main = MAIN_SCENE.instantiate()
     add_child(main)
@@ -40,7 +45,7 @@ func prepare_world() -> void:
 
 func build_signature() -> Dictionary:
     return {
-        "seed": SEED,
+        "seed": seed,
         "terrainSamples": terrain_samples(),
         "loadedChunkKeys": loaded_chunk_keys(),
         "props": prop_records(),

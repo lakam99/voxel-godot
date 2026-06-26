@@ -1,6 +1,7 @@
 param(
     [string]$GodotExe = "C:\Users\arkam\Downloads\Godot_v4.6.1-stable_win64.exe\Godot_v4.6.1-stable_win64_console.exe",
     [string]$OutputDir = "",
+    [string]$Seed = "atlas-1492",
     [switch]$UpdateBaseline,
     [switch]$Headless
 )
@@ -16,6 +17,7 @@ $baselineDir = [System.IO.Path]::GetFullPath((Join-Path $projectPath "artifacts\
 
 $env:VOXEL_PLAYTEST = "1"
 $env:VOXEL_VISUAL_CAPTURE_DIR = $OutputDir
+$env:VOXEL_TEST_SEED = $Seed
 
 New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
 

@@ -20,6 +20,7 @@ func run() -> void:
         player.set("automated_input", true)
         camera = player.get("camera") as Camera3D
     Input.set_mouse_mode(Input.MOUSE_MODE_VISIBLE)
+    hold_existing_ambient_npcs()
 
     var case_filter := OS.get_environment("VOXEL_NPC_NAV_CASE")
     mark_progress("npc_nav_warmup")
@@ -44,9 +45,25 @@ func run() -> void:
         await test_npc_equipment_and_pathing()
 
     save_optional_screenshot()
-    save_report()
     finished = true
+    save_report()
+    mark_progress("finished")
     get_tree().quit(1 if failed else 0)
+
+func hold_existing_ambient_npcs() -> void:
+    if main == null:
+        return
+    var npc_system = main.get("npc_system")
+    if npc_system == null:
+        return
+    if npc_system.has_method("spawn_generic_town_npcs"):
+        npc_system.spawn_generic_town_npcs()
+    var entries: Array = npc_system.get("npcs")
+    for entry_value in entries:
+        var entry: Dictionary = entry_value
+        var body := entry.get("body") as Node
+        if body != null and is_instance_valid(body):
+            body.set_meta("npc_force_hold", true)
 
 func test_generic_town_npc_navigation() -> void:
     if not main:

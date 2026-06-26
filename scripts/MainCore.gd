@@ -86,6 +86,7 @@ var world_elapsed := 0.0
 var time_of_day := 0.32
 var next_fishing_ready_at := 0.0
 var fishing_rng := RandomNumberGenerator.new()
+var test_seed_sequence := 0
 var autosave_elapsed := 0.0
 var autosave_enabled := true
 var discovered_biomes := {}
@@ -176,7 +177,10 @@ func _ready() -> void:
     var active_seed := ""
     if autosave_enabled and save_system and save_system.has_method("active_seed"):
         active_seed = save_system.active_seed("")
-    if active_seed != "":
+    var forced_test_seed := test_seed_text()
+    if forced_test_seed != "":
+        seed_text = forced_test_seed
+    elif active_seed != "":
         seed_text = active_seed
     apply_world_seed(seed_text, false)
     playtest_progress("main_noise_done")
@@ -241,6 +245,8 @@ func apply_world_seed(new_seed: String, remember := false) -> void:
     if seed_text == "":
         seed_text = random_world_seed()
     seed_hash = hash_string(seed_text)
+    if test_seed_text() != "":
+        seed(seed_hash)
     town_region_cache.clear()
     town_slope_apron_cache.clear()
     fishing_rng.seed = hash_string("%s:fishing" % seed_text)
@@ -266,6 +272,15 @@ func apply_world_seed(new_seed: String, remember := false) -> void:
         save_system.set_active_seed(seed_text)
 
 func random_world_seed(exclude_seed := "") -> String:
+    var forced_test_seed := test_seed_text()
+    if forced_test_seed != "" and OS.get_environment("VOXEL_PLAYTEST") != "":
+        for attempt in range(8):
+            var candidate_index: int = test_seed_sequence + attempt
+            var stable_value: int = absi(hash_string("%s:test-world:%d" % [forced_test_seed, candidate_index]))
+            var generated_test: String = "atlas-%08d" % ((stable_value % 90000000) + 10000000)
+            if generated_test != exclude_seed:
+                test_seed_sequence = candidate_index + 1
+                return generated_test
     var rng := RandomNumberGenerator.new()
     rng.randomize()
     var generated := ""
@@ -275,6 +290,9 @@ func random_world_seed(exclude_seed := "") -> String:
             return generated
     var stamp := int(Time.get_unix_time_from_system())
     return "atlas-%08d" % ((stamp % 90000000) + 10000000)
+
+func test_seed_text() -> String:
+    return OS.get_environment("VOXEL_TEST_SEED").strip_edges()
 
 func setup_game_systems() -> void:
     setup_visual_asset_registry()

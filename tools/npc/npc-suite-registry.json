@@ -42,6 +42,12 @@
       "description": "Phase 07 predictive local avoidance and stable corridor follower tests",
       "command": ".\\tools\\npc\\run-npc-avoidance-tests.ps1",
       "defaultArgs": ["-TimeMode", "Both"]
+    },
+    {
+      "id": "traffic",
+      "description": "Phase 08 space-time traffic, door queue fairness, and deadlock recovery tests",
+      "command": ".\\tools\\npc\\run-npc-traffic-tests.ps1",
+      "defaultArgs": ["-TimeMode", "Both"]
     }
   ]
 }

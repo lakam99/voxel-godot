@@ -1,6 +1,9 @@
 param(
     [string]$RegistryPath = "",
-    [string]$ReportPath = ""
+    [string]$ReportPath = "",
+    [string]$Seed = "atlas-1492",
+    [switch]$StopOnFailure,
+    [switch]$ContinueOnFailure
 )
 
 $ErrorActionPreference = "Continue"
@@ -19,7 +22,9 @@ New-Item -ItemType Directory -Force -Path ([System.IO.Path]::GetDirectoryName($R
 $registry = Get-Content -LiteralPath $RegistryPath -Raw | ConvertFrom-Json
 $results = @()
 $failureCount = 0
+$stoppedEarly = $false
 $started = Get-Date
+$env:VOXEL_TEST_SEED = $Seed
 
 Push-Location $projectPath
 try {
@@ -31,6 +36,14 @@ try {
         if ($null -ne $runner.args) {
             foreach ($arg in $runner.args) {
                 $runnerArgs += [string]$arg
+            }
+        }
+        $seedArgIndex = [array]::IndexOf($runnerArgs, "-Seed")
+        if ($seedArgIndex -ge 0) {
+            if ($seedArgIndex + 1 -lt $runnerArgs.Count) {
+                $runnerArgs[$seedArgIndex + 1] = $Seed
+            } else {
+                $runnerArgs += $Seed
             }
         }
         $runnerReport = if ($null -ne $runner.reportPath) { Join-Path $projectPath ([string]$runner.reportPath) } else { "" }
@@ -73,6 +86,11 @@ try {
             reportPath = $runnerReport
             reportFresh = $reportFresh
         }
+        if (-not $passed -and $StopOnFailure) {
+            Write-Error "Stopping after failed runner: $id"
+            $stoppedEarly = $true
+            break
+        }
     }
 }
 finally {
@@ -82,11 +100,15 @@ finally {
 $report = [pscustomobject]@{
     schemaVersion = 1
     registryPath = $RegistryPath
+    seed = $Seed
     startedUtc = $started.ToUniversalTime().ToString("o")
     finishedUtc = (Get-Date).ToUniversalTime().ToString("o")
     durationSeconds = [math]::Round(((Get-Date) - $started).TotalSeconds, 3)
     resultCount = $results.Count
     failureCount = $failureCount
+    stoppedEarly = $stoppedEarly
+    stopOnFailure = [bool]$StopOnFailure
+    continueOnFailure = [bool]$ContinueOnFailure
     results = $results
 }
 $report | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $ReportPath
