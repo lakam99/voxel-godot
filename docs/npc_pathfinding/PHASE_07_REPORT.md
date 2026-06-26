@@ -5,10 +5,10 @@
 - Phase: 07 - Predictive Local Avoidance and Stable Corridor Following
 - Branch: `npc-pathfinding/phase-07-local-avoidance`
 - Base commit before Phase 07 branch changes: `eddd86abceb1d63b5e2134e602986f56fba23a52`
-- Branch code commit: pending branch commit
-- Merge commit: pending merge to `master`
+- Branch code commit: `2abd5e3e70c5d606887cac2a168a4a2d61b39eb8`
+- Merge commit: `ffc85a144d6fcd22f71102552563896078e19933`
 - Date: 2026-06-26
-- Scope status: branch gates pass; merged `master` gate pending until the required non-fast-forward merge and rerun.
+- Scope status: branch gates pass; merged `master` gate pass after the required non-fast-forward merge and rerun.
 
 ## 2. Objective
 
@@ -68,12 +68,12 @@ Command:
 .\tools\npc\run-npc-avoidance-tests.ps1 -TimeMode Both
 ```
 
-Latest branch all-runner invocation also reran this suite with:
+Latest merged `master` all-runner invocation also reran this suite with:
 
 - Report: `artifacts/npc/reports/avoidance-both.json`
-- Run token: `9cc54aab5ef049c1a7f7bddd5143614b`
-- Started UTC: `2026-06-26T14:49:36`
-- Finished UTC: `2026-06-26T14:49:36`
+- Run token: `ef0e107110db4b8facfa8ea5ac47c5d1`
+- Started UTC: `2026-06-26T15:39:57`
+- Finished UTC: `2026-06-26T15:39:57`
 - Result count: 30
 - Failure count: 0
 - Time modes: day, night
@@ -118,22 +118,22 @@ Command:
 .\tools\npc\run-all-npc-tests.ps1 -TimeMode Both
 ```
 
-Latest branch all-runner invocation produced:
+Latest merged `master` all-runner invocation produced:
 
 - Report: `artifacts/npc/reports/all-npc-both.json`
 - Result count: 7
 - Failure count: 0
-- Duration: `15.411` seconds
+- Duration: `14.015` seconds
 
 Suites:
 
-- `contract`: pass, `1.714` seconds
-- `motor`: pass, `1.454` seconds
-- `nav_world`: pass, `1.607` seconds
-- `route`: pass, `5.535` seconds
-- `repair`: pass, `1.734` seconds
-- `door`: pass, `1.815` seconds
-- `avoidance`: pass, `1.536` seconds
+- `contract`: pass, `1.665` seconds
+- `motor`: pass, `1.395` seconds
+- `nav_world`: pass, `1.542` seconds
+- `route`: pass, `4.749` seconds
+- `repair`: pass, `1.615` seconds
+- `door`: pass, `1.627` seconds
+- `avoidance`: pass, `1.403` seconds
 
 Legacy NPC navigation wrapper:
 
@@ -141,7 +141,7 @@ Legacy NPC navigation wrapper:
 - Report: `artifacts/test-runners/npc-navigation-report.json`
 - Result count: 11
 - Failure count: 0
-- Duration inside all-runner: `261.388` seconds
+- Duration inside merged `master` all-runner: `209.821` seconds
 - Door crossing evidence: crossed true, min separation `1.34`, door counts `1/0 -> 3/2`, routes `arrived/arrived`, closed true.
 - Generic job evidence: outside worker seen true, job runs `0->1`, forager berries `2`, hunger `61.7`.
 
@@ -172,14 +172,42 @@ Runner results:
 - `visual_captures`: pass, `69.292` seconds, report fresh true
 - `visual_manifest`: pass, `0.063` seconds, report fresh true
 
+## 9. Merged Master All-Runner Evidence
+
+Command:
+
+```powershell
+.\tools\run-all-test-runners.ps1
+```
+
+Report:
+
+- `artifacts/test-runners/all-test-runners-report.json`
+- Started UTC: `2026-06-26T15:39:43.9723050Z`
+- Finished UTC: `2026-06-26T16:08:16.8157090Z`
+- Duration: `1712.844` seconds
+- Result count: 7
+- Failure count: 0
+
+Runner results:
+
+- `npc_focused`: pass, `14.356` seconds, report fresh true
+- `npc_navigation_legacy`: pass, `209.821` seconds, report fresh true
+- `playtest`: pass, `1322.083` seconds, report fresh true
+- `story_playtest`: pass, `70.808` seconds, report fresh true
+- `world_signature`: pass, `15.607` seconds, report fresh true
+- `visual_captures`: pass, `80.02` seconds, report fresh true
+- `visual_manifest`: pass, `0.097` seconds, report fresh true
+
 Additional broad playtest rerun before the all-runner:
 
 - Command: `.\tools\run-playtest.ps1 -ReportPath .\artifacts\test-runners\playtest-report.json`
 - First attempt failed only `held_torch_terrain_material_flickers`, matching a prior visual threshold flake.
 - Immediate rerun passed: 181 results, 0 failures, terminal `finished` marker.
-- The all-runner playtest also passed: 181 results, 0 failures.
+- The branch all-runner playtest also passed: 181 results, 0 failures.
+- The merged `master` all-runner playtest also passed: 181 results, 0 failures.
 
-## 9. Gate Audit
+## 10. Gate Audit
 
 | Gate | Branch Evidence | Status |
 | --- | --- | --- |
@@ -190,9 +218,9 @@ Additional broad playtest rerun before the all-runner:
 | Arrival does not orbit or oscillate. | Arrival case reports zero candidate and `arrived`; oscillation case reports sign changes `0` and heading reversals `0`. | Pass on branch |
 | Avoidance cost is measured and inactive agents are deregistered/disabled. | Inactive case reports active registration count `0`; NPC stats expose active/fallback/callback counters. | Pass on branch |
 | Day/night crowd cases pass. | All 15 avoidance IDs pass in both day and night modes. | Pass on branch |
-| Full all-runner gate passes on branch and `master`. | Branch all-runner pass recorded above; merged `master` rerun is pending until the required merge step. | Branch pass; master pending |
+| Full all-runner gate passes on branch and `master`. | Branch all-runner pass recorded above; merged `master` all-runner pass recorded above. | Pass on branch and master |
 
-## 10. Review Questions
+## 11. Review Questions
 
 Is RVO used only for local moving-agent avoidance?
 
@@ -214,10 +242,9 @@ Does actual motor progress drive route advancement?
 
 Yes. `NpcLocomotionController` records post-motor movement and feeds actual position/progress back into route state. Legacy navigation evidence includes route arrival through door crossing with physical separation and no transform advancement in normal route movement.
 
-## 11. Tolerances And Notes
+## 12. Tolerances And Notes
 
 - Godot avoidance callbacks may be absent in headless focused runs. The adapter treats stale or absent callbacks as unsafe to reuse and uses deterministic prediction or validated direct corridor velocity instead.
 - The tests assert invariant outcomes: progress, no penetration, corridor/portal limits, no orbit, no stale unsafe velocity reuse, and correct blocker classification.
 - Portal recenter and axis retreat are deterministic physical recovery steps for blocked threshold movement. They are not the primary open-space avoidance path.
 - The pre-existing world-signature baseline artifact remains a user/worktree change and is outside Phase 07 staging.
-- The required `master` all-runner rerun has not happened yet because the branch has not yet been committed and merged.
