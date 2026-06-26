@@ -109,6 +109,10 @@ func plan_route(request, max_expansions := 4096):
 	result.cost = float(search.get("cost", corridor.total_cost))
 	result.corridor = corridor
 	result.arrival_contract = corridor.arrival_contract
+	result.repair_graph = graph
+	result.repair_start_key = start_key
+	result.repair_goal_keys = goal_keys.duplicate()
+	result.repair_request = request
 	return result
 
 func plan_legacy_route(entry: Dictionary, intent: Dictionary, legacy_world, max_expansions := 200000) -> Dictionary:

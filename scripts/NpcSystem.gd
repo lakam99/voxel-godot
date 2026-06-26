@@ -15,7 +15,7 @@ const NpcSafePlacementServiceScript := preload("res://scripts/npc_ai/NpcSafePlac
 const CharacterMotorProfileScript := preload("res://scripts/npc_ai/contracts/CharacterMotorProfile.gd")
 
 const CELL := 1.35
-const DOOR_CLOSE_CLEAR_RADIUS := CELL * 0.9
+const DOOR_CLOSE_CLEAR_RADIUS := CELL * 1.05
 const DOOR_CLOSE_TIMEOUT_SECONDS := 4.5
 const FORAGE_SCAN_NODE_LIMIT := 1200
 const FORAGE_SCAN_CANDIDATE_LIMIT := 36
@@ -812,6 +812,24 @@ func update_forager_goal(entry: Dictionary, body: Node3D, delta: float) -> bool:
             entry["jobPhase"] = "idle"
             entry["jobTimer"] = 0.0
             return true
+        if target_node != null and current_route_failure_blocks_forager(entry):
+            mark_forager_target_unreachable(entry, target_node)
+            var failures := int(entry.get("forageRouteFailures", 0)) + 1
+            entry["forageRouteFailures"] = failures
+            entry["jobTargetNode"] = null
+            entry["routeForceReplan"] = true
+            if failures >= NpcConstantsScript.ROUTE_REPAIR_FAILURE_LIMIT:
+                entry["jobPhase"] = "searching"
+                entry["jobTarget"] = choose_job_target(entry)
+                entry["jobTimer"] = randf_range(3.0, 7.0)
+                set_npc_goal(entry, "search for berries")
+                body.set_meta("npc_job_phase", "searching")
+                return true
+            entry["jobPhase"] = "idle"
+            entry["jobTimer"] = 0.0
+            set_npc_goal(entry, "forage berries")
+            body.set_meta("npc_job_phase", "idle")
+            return true
         var target: Vector3 = entry.get("jobTarget", body.global_position)
         var outside_town := not point_inside_town(entry, body.global_position)
         var reached_target := body.global_position.distance_to(target) <= CELL * 1.15
@@ -840,6 +858,7 @@ func update_forager_goal(entry: Dictionary, body: Node3D, delta: float) -> bool:
             body.set_meta("npc_job_phase", "gathering")
             return true
         harvest_forager_target(entry)
+        entry["forageRouteFailures"] = 0
         var runs := int(entry.get("jobRuns", 0)) + 1
         entry["jobRuns"] = runs
         job_runs_completed += 1
@@ -939,6 +958,8 @@ func collect_forage_targets_in_tree(root: Node, entry: Dictionary, origin: Vecto
 func is_valid_forage_node(node: Node3D, entry: Dictionary) -> bool:
     if not is_instance_valid(node) or bool(node.get_meta("npc_harvested", false)):
         return false
+    if bool(node.get_meta(forager_unreachable_meta_key(entry), false)):
+        return false
     if String(node.get_meta("kind", "")) != "prop":
         return false
     if String(node.get_meta("drop", "")) != "berries" and String(node.get_meta("material", "")) != "berryBush":
@@ -949,6 +970,19 @@ func is_valid_forage_node(node: Node3D, entry: Dictionary) -> bool:
         return false
     var h: float = main.height_at_world(node.global_position.x, node.global_position.z)
     return h >= main.WATER_LEVEL + 0.45
+
+func current_route_failure_blocks_forager(entry: Dictionary) -> bool:
+    if String(entry.get("routeStatus", "")) != "blocked":
+        return false
+    return String(entry.get("routeReason", "")) in ["no_route", "no_goal_span", "empty_route"]
+
+func mark_forager_target_unreachable(entry: Dictionary, node: Node3D) -> void:
+    if node == null or not is_instance_valid(node):
+        return
+    node.set_meta(forager_unreachable_meta_key(entry), true)
+
+func forager_unreachable_meta_key(entry: Dictionary) -> String:
+    return "npc_unreachable_forager_%s" % String(entry.get("id", "npc"))
 
 func harvest_forager_target(entry: Dictionary) -> void:
     var target_value = entry.get("jobTargetNode")
@@ -1097,14 +1131,70 @@ func update_pending_door_closes(delta: float) -> void:
             if body != null and is_instance_valid(body) and body.global_position.distance_to(door.global_position) <= DOOR_CLOSE_CLEAR_RADIUS:
                 npcs_clear = false
                 break
+        var active_route_hold := npc_route_holds_door_open(door)
         var timed_out := float(pending.get("timer", 0.0)) > DOOR_CLOSE_TIMEOUT_SECONDS
-        if bool(door.get_meta("open", false)) and npc_clear and npcs_clear and (player_clear or timed_out):
+        if bool(door.get_meta("open", false)) and not active_route_hold and npc_clear and npcs_clear and (player_clear or timed_out):
             if bool(main.toggle_door(door)):
                 door_closes += 1
                 last_message = "NPC closed a door"
             pending_door_closes.erase(pending)
         elif not bool(door.get_meta("open", false)):
             pending_door_closes.erase(pending)
+
+func npc_route_holds_door_open(door: Node) -> bool:
+    if door == null or not is_instance_valid(door):
+        return false
+    var normalized_door := interaction_door_for_npc(door)
+    for entry in npcs:
+        var body := entry.get("body") as Node3D
+        if body == null or not is_instance_valid(body):
+            continue
+        if String(entry.get("routeStatus", "")) in ["arrived", "partial"] and (entry.get("pathWaypoints", []) as Array).is_empty():
+            continue
+        var actions: Dictionary = entry.get("routeActions", {})
+        for action_value in actions.values():
+            if not (action_value is Dictionary):
+                continue
+            var action: Dictionary = action_value
+            var action_door := interaction_door_for_npc(action.get("door") as Node)
+            if action_door == normalized_door and route_still_needs_door(entry, action):
+                return true
+    return false
+
+func route_still_needs_door(entry: Dictionary, action: Dictionary) -> bool:
+    var body := entry.get("body") as Node3D
+    if body == null or not is_instance_valid(body):
+        return false
+    var action_door := action.get("door") as Node3D
+    var cell_value = action.get("cell")
+    if not (cell_value is Vector2i):
+        if action_door == null or not is_instance_valid(action_door):
+            return false
+        return body.global_position.distance_to(action_door.global_position) <= DOOR_CLOSE_CLEAR_RADIUS
+    var door_cell: Vector2i = cell_value
+    var goal_cell: Vector2i = entry.get("routeGoalCell", door_cell)
+    var goal_delta := goal_cell - door_cell
+    var door_position := Vector3(float(door_cell.x) * CELL, body.global_position.y, float(door_cell.y) * CELL)
+    if action_door != null and is_instance_valid(action_door):
+        door_position = action_door.global_position
+    if abs(goal_delta.x) >= abs(goal_delta.y) and goal_delta.x != 0:
+        if goal_delta.x > 0:
+            return body.global_position.x <= door_position.x + DOOR_CLOSE_CLEAR_RADIUS
+        return body.global_position.x >= door_position.x - DOOR_CLOSE_CLEAR_RADIUS
+    if goal_delta.y != 0:
+        if goal_delta.y > 0:
+            return body.global_position.z <= door_position.z + DOOR_CLOSE_CLEAR_RADIUS
+        return body.global_position.z >= door_position.z - DOOR_CLOSE_CLEAR_RADIUS
+    return body.global_position.distance_to(door_position) <= DOOR_CLOSE_CLEAR_RADIUS
+
+func interaction_door_for_npc(collider: Node) -> Node:
+    if collider == null:
+        return null
+    if main != null and main.has_method("interaction_block_from_collider"):
+        var interaction_block = main.interaction_block_from_collider(collider)
+        if interaction_block != null and interaction_block is Node:
+            return interaction_block
+    return collider
 
 func move_npc(entry: Dictionary, target: Vector3, max_distance: float, moving_home := false, allow_outside := false, physics_delta := 0.0166667) -> float:
     if pathing == null:
@@ -1210,6 +1300,11 @@ func notify_navigation_chunk_unloaded(chunk_key: Vector2i) -> void:
 func notify_navigation_door_state_changed(door: Node, open: bool) -> void:
     if autonomy_system:
         autonomy_system.notify_door_state_changed(door, open)
+
+func process_navigation_route_changes(events: Array) -> Array[Dictionary]:
+    if pathing == null:
+        return []
+    return pathing.process_navigation_events(events)
 
 func notify_navigation_door_registered(door: Node) -> void:
     if autonomy_system:
