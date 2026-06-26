@@ -377,7 +377,6 @@ func legacy_request(entry: Dictionary, intent: Dictionary, legacy_world):
 		"kind": "point_region",
 		"center": target,
 		"radius": request.maximum_acceptable_goal_distance,
-		"verticalTolerance": NpcConstantsScript.DEFAULT_NPC_STEP_UP,
 		"_graph": _build_legacy_graph(entry, intent, legacy_world, request.start_position)
 	}
 	var blackboard = entry.get("blackboard")

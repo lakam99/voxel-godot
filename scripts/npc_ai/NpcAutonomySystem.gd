@@ -9,6 +9,9 @@ const NpcEnumsScript := preload("res://scripts/npc_ai/NpcEnums.gd")
 const NavigationChangeBusScript := preload("res://scripts/npc_ai/navigation/NavigationChangeBus.gd")
 const NavigationWorldServiceScript := preload("res://scripts/npc_ai/navigation/NavigationWorldService.gd")
 const NpcTelemetryServiceScript := preload("res://scripts/npc_ai/debug/NpcTelemetryService.gd")
+const DoorPortalServiceScript := preload("res://scripts/npc_ai/interactions/DoorPortalService.gd")
+const SmartObjectServiceScript := preload("res://scripts/npc_ai/interactions/SmartObjectService.gd")
+const DoorTraversalExecutorScript := preload("res://scripts/npc_ai/interactions/DoorTraversalExecutor.gd")
 
 var npc_system: Node
 var main: Node
@@ -21,6 +24,9 @@ var scheduler
 var telemetry
 var change_bus
 var navigation_world
+var door_portals
+var smart_objects
+var door_traversal
 
 func _init() -> void:
 	scheduler = NpcBrainSchedulerScript.new()
@@ -28,11 +34,17 @@ func _init() -> void:
 	change_bus = NavigationChangeBusScript.new()
 	navigation_world = NavigationWorldServiceScript.new()
 	navigation_world.setup(null, change_bus)
+	door_portals = DoorPortalServiceScript.new()
+	smart_objects = SmartObjectServiceScript.new()
+	door_traversal = DoorTraversalExecutorScript.new()
 
 func setup(system_node: Node, main_node: Node) -> void:
 	npc_system = system_node
 	main = main_node
 	navigation_world.setup(main, change_bus)
+	door_portals.setup(main, self)
+	smart_objects.setup(self, door_portals)
+	door_traversal.setup(door_portals)
 	telemetry.record_event("_system", &"architecture", "setup", &"none", {
 		"architectureVersion": architecture_version,
 		"locomotionMode": locomotion_mode
@@ -51,6 +63,12 @@ func clear() -> void:
 	change_bus = NavigationChangeBusScript.new()
 	navigation_world = NavigationWorldServiceScript.new()
 	navigation_world.setup(main, change_bus)
+	door_portals = DoorPortalServiceScript.new()
+	door_portals.setup(main, self)
+	smart_objects = SmartObjectServiceScript.new()
+	smart_objects.setup(self, door_portals)
+	door_traversal = DoorTraversalExecutorScript.new()
+	door_traversal.setup(door_portals)
 
 func register_legacy_npc(body: Node, profile: Dictionary, legacy_entry: Dictionary):
 	if body == null:
@@ -166,6 +184,7 @@ func notify_door_state_changed(door: Node, open: bool) -> void:
 	telemetry.record_event("_system", &"door", "state_changed", NpcEnumsScript.DOOR_STATE_OPEN if open else NpcEnumsScript.DOOR_STATE_CLOSED, { "open": open })
 
 func notify_door_registered(door: Node) -> void:
+	register_door(door)
 	var tile_key := "0,0"
 	var object_id := "door"
 	var bounds := AABB()
@@ -181,6 +200,69 @@ func notify_door_registered(door: Node) -> void:
 			bounds = AABB(position - Vector3.ONE * 0.5, Vector3.ONE)
 	change_bus.emit_change(NpcEnumsScript.CHANGE_KIND_DOOR_REGISTERED, object_id, bounds, [tile_key])
 	telemetry.increment(&"change_door_registered")
+
+func register_door(door: Node, metadata := {}) -> String:
+	if smart_objects == null:
+		return ""
+	var portal_id: String = smart_objects.register_door(door, metadata)
+	if portal_id != "":
+		telemetry.record_event("_system", &"door", "registered", &"none", {
+			"portalId": portal_id
+		})
+	return portal_id
+
+func request_door_state(door: Node, desired_open: bool, actor: Node = null, actor_kind := "system", metadata := {}):
+	if smart_objects == null:
+		return null
+	var result = smart_objects.request_door_state(door, desired_open, actor, actor_kind, metadata)
+	if result != null:
+		telemetry.record_event("_system", &"door", "state_request", StringName(String(result.reason)), {
+			"desiredOpen": desired_open,
+			"actorKind": actor_kind,
+			"status": String(result.status),
+			"metrics": result.metrics.duplicate(true) if result.metrics is Dictionary else {}
+		})
+	return result
+
+func request_door_toggle(door: Node, actor: Node = null, actor_kind := "player", metadata := {}):
+	if smart_objects == null:
+		return null
+	var result = smart_objects.request_door_toggle(door, actor, actor_kind, metadata)
+	if result != null:
+		telemetry.record_event("_system", &"door", "toggle_request", StringName(String(result.reason)), {
+			"actorKind": actor_kind,
+			"status": String(result.status),
+			"metrics": result.metrics.duplicate(true) if result.metrics is Dictionary else {}
+		})
+	return result
+
+func request_npc_door_traversal(door: Node, actor: Node, entry: Dictionary = {}, action: Dictionary = {}) -> Dictionary:
+	if door_traversal == null:
+		return { "ok": false, "status": "failed", "reason": "missing_door_traversal" }
+	var result: Dictionary = door_traversal.request_crossing(door, actor, entry, action)
+	if bool(result.get("ok", false)):
+		telemetry.increment(&"door_traversal_granted")
+	else:
+		telemetry.increment(&"door_traversal_waiting")
+	return result
+
+func release_npc_door_hold(actor_or_id, schedule_close := true) -> void:
+	if door_traversal != null:
+		door_traversal.release_actor(actor_or_id, schedule_close)
+
+func process_door_policies(delta: float, actors: Array = []) -> Dictionary:
+	if door_portals == null:
+		return { "closed": 0, "blocked": 0, "scheduled": 0 }
+	return door_portals.process(delta, actors)
+
+func emit_door_state_revision(door: Node, open: bool, reason: String, revision: int) -> void:
+	if door != null and is_instance_valid(door):
+		door.set_meta("door_state_revision", revision)
+	notify_door_state_changed(door, open)
+	telemetry.record_event("_system", &"door", "revision", NpcEnumsScript.DOOR_STATE_OPEN if open else NpcEnumsScript.DOOR_STATE_CLOSED, {
+		"reason": reason,
+		"revision": revision
+	})
 
 func notify_structure_metadata_changed(structure_id: String, bounds: AABB, metadata := {}) -> void:
 	change_bus.emit_change(NpcEnumsScript.CHANGE_KIND_STRUCTURE_METADATA, "structure:%s" % structure_id, bounds, NavigationChangeBusScript.tile_keys_for_bounds(bounds))
@@ -221,7 +303,10 @@ func stats() -> Dictionary:
 		"scheduler": scheduler.stats(),
 		"telemetry": telemetry.stats(),
 		"changeBus": change_bus.stats(),
-		"navigationWorld": navigation_world.stats()
+		"navigationWorld": navigation_world.stats(),
+		"smartObjects": smart_objects.stats() if smart_objects != null else {},
+		"doorPortals": door_portals.stats() if door_portals != null else {},
+		"doorTraversal": door_traversal.stats() if door_traversal != null else {}
 	}
 
 func _bounds_for_cell(cell: Vector3i) -> AABB:

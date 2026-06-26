@@ -6,12 +6,10 @@ const NpcConstantsScript := preload("res://scripts/npc_ai/NpcConstants.gd")
 const CAPSULE_RADIUS := 0.34
 const CAPSULE_HEIGHT := 1.64
 const CELL_RESERVATION_TTL := 5
-const DOOR_RESERVATION_TTL := 18
 
 var system
 var main
 var reservations := {}
-var door_reservations := {}
 var capsule_shape: CapsuleShape3D
 var reservation_frame := 0
 
@@ -25,7 +23,6 @@ func setup(system_node, main_node) -> void:
 func begin_frame() -> void:
     reservation_frame += 1
     expire_reservations(reservations)
-    expire_reservations(door_reservations)
 
 func move(entry: Dictionary, intent: Dictionary, max_distance: float, planner, world) -> Dictionary:
     var body := entry.get("body") as CharacterBody3D
@@ -46,10 +43,23 @@ func move(entry: Dictionary, intent: Dictionary, max_distance: float, planner, w
         count_unreachable_once(entry, intent, String(route.get("reason", "blocked")))
         return { "moved": 0.0, "status": String(route.get("status", "blocked")), "reason": String(route.get("reason", "blocked")) }
     if String(route.get("status", "")) == "arrived":
-        clear_route(entry)
-        set_route_status(entry, "arrived", "")
-        return { "moved": 0.0, "status": "arrived", "reason": "" }
+        if strict_arrival and flat_distance(previous, target) > arrival_radius:
+            seed_strict_final_waypoint(entry, target, world)
+        else:
+            clear_route(entry)
+            set_route_status(entry, "arrived", "")
+            return { "moved": 0.0, "status": "arrived", "reason": "" }
 
+    if should_restore_from_door_stage(entry, previous):
+        clear_door_stage(entry)
+        entry["routeForceReplan"] = true
+        route = ensure_route(entry, intent, planner, world)
+        if not bool(route.get("ok", false)):
+            set_route_status(entry, String(route.get("status", "blocked")), String(route.get("reason", "blocked")))
+            count_unreachable_once(entry, intent, String(route.get("reason", "blocked")))
+            return { "moved": 0.0, "status": String(route.get("status", "blocked")), "reason": String(route.get("reason", "blocked")) }
+
+    trim_active_door_approach_cells(entry)
     trim_reached_route_cells(entry, world)
     var path_waypoints: Array = entry.get("pathWaypoints", [])
     while not path_waypoints.is_empty() and flat_distance(previous, path_waypoints[0]) <= CELL * 0.36:
@@ -73,6 +83,9 @@ func move(entry: Dictionary, intent: Dictionary, max_distance: float, planner, w
     entry["routePriority"] = priority
     var next_cell: Vector2i = next_route_cell(entry, world)
     var door_wait: String = handle_door_action(entry, next_cell, world, priority)
+    if door_wait == "":
+        door_wait = handle_upcoming_door_action(entry, next_cell, world, priority)
+    path_waypoints = entry.get("pathWaypoints", [])
     if door_wait != "":
         set_route_status(entry, "waiting", door_wait)
         increment_reservation_wait(entry)
@@ -180,7 +193,9 @@ func ensure_route(entry: Dictionary, intent: Dictionary, planner, world) -> Dict
     var needs_route: bool = bool(entry.get("routeForceReplan", false))
     needs_route = needs_route or String(entry.get("routeKey", "")) != route_key
     needs_route = needs_route or String(entry.get("routeSnapshotRevision", "")) != snapshot_revision
-    needs_route = needs_route or (current_waypoints.is_empty() and (not route_known or not empty_route_waiting_for_reason))
+    var cached_reason := String(entry.get("routeReason", ""))
+    var transient_empty_route := cached_reason in ["empty_route", "static_or_dynamic_collision", "blocked_dynamic", "yielding", "local_blocked"]
+    needs_route = needs_route or (current_waypoints.is_empty() and (not route_known or not empty_route_waiting_for_reason or transient_empty_route))
     if not needs_route:
         var has_cached_route := not current_waypoints.is_empty()
         return {
@@ -223,6 +238,47 @@ func clear_route(entry: Dictionary) -> void:
     entry["routeActions"] = {}
     entry["routeForceReplan"] = false
 
+func seed_strict_final_waypoint(entry: Dictionary, target: Vector3, world) -> void:
+    var target_cell: Vector2i = world.world_cell(target)
+    var target_position: Vector3 = world.cell_position(target_cell)
+    entry["routeCells"] = [target_cell]
+    entry["pathWaypoints"] = [target_position]
+    entry["routeActions"] = {}
+    entry["routeFallbackCell"] = target_cell
+    set_route_status(entry, "moving", "")
+
+func trim_active_door_approach_cells(entry: Dictionary) -> void:
+    var active_portal_id := String(entry.get("activeDoorPortalId", ""))
+    if active_portal_id == "":
+        return
+    var cells: Array = entry.get("routeCells", [])
+    var waypoints: Array = entry.get("pathWaypoints", [])
+    if cells.size() <= 2 or waypoints.is_empty():
+        return
+    var actions: Dictionary = entry.get("routeActions", {})
+    var action_cell := Vector2i(999999, 999999)
+    for action_value in actions.values():
+        if not (action_value is Dictionary):
+            continue
+        var action: Dictionary = action_value
+        if String(action.get("kind", "")) != "door":
+            continue
+        if String(action.get("portalId", "")) != active_portal_id:
+            continue
+        var cell_value = action.get("cell")
+        if cell_value is Vector2i:
+            action_cell = cell_value
+            break
+    if action_cell == Vector2i(999999, 999999):
+        return
+    var action_index: int = cells.find(action_cell)
+    while action_index > 1 and not cells.is_empty() and not waypoints.is_empty():
+        cells.remove_at(0)
+        waypoints.remove_at(0)
+        action_index -= 1
+    entry["routeCells"] = cells
+    entry["pathWaypoints"] = waypoints
+
 func trim_reached_route_cells(entry: Dictionary, world) -> void:
     var body := entry.get("body") as Node3D
     if body == null:
@@ -254,15 +310,88 @@ func handle_door_action(entry: Dictionary, next_cell: Vector2i, world, priority 
     if door_value == null or not is_instance_valid(door_value) or not (door_value is Node):
         return ""
     var door: Node = door_value
-    var door_key: String = str(door.get_instance_id())
-    if reservation_blocks_entry(door_reservations, door_key, entry, priority):
-        return reservation_conflict_reason(door_reservations, door_key, entry, priority, "door_reserved")
-    claim_reservation(door_reservations, door_key, entry, priority, DOOR_RESERVATION_TTL, true)
     if system != null:
-        system.open_door_for_npc(door, body)
+        var traversal: Dictionary = system.request_npc_door_traversal(door, body, entry, action) if system.has_method("request_npc_door_traversal") else {}
+        if not bool(traversal.get("ok", false)):
+            if traversal.has("stagePosition") and body != null:
+                var stage_position: Vector3 = traversal.get("stagePosition", body.global_position)
+                if apply_door_stage(entry, body, stage_position, world, String(traversal.get("portalId", ""))):
+                    return ""
+            return String(traversal.get("reason", "door_waiting"))
+        clear_door_stage(entry)
     if not bool(door.get_meta("open", false)):
         return "door_opening"
     return ""
+
+func handle_upcoming_door_action(entry: Dictionary, next_cell: Vector2i, world, priority := 0) -> String:
+    if String(entry.get("activeDoorPortalId", "")) != "":
+        return ""
+    var actions: Dictionary = entry.get("routeActions", {})
+    if actions.is_empty():
+        return ""
+    var route_cells: Array = entry.get("routeCells", [])
+    var body := entry.get("body") as Node3D
+    if body == null:
+        return ""
+    var sorted_keys := actions.keys()
+    sorted_keys.sort()
+    for action_key in sorted_keys:
+        var action_value = actions[action_key]
+        if not (action_value is Dictionary):
+            continue
+        var action: Dictionary = action_value
+        if String(action.get("kind", "")) != "door":
+            continue
+        var cell_value = action.get("cell")
+        if not (cell_value is Vector2i):
+            continue
+        var action_cell: Vector2i = cell_value
+        if action_cell == next_cell:
+            continue
+        var action_index: int = route_cells.find(action_cell)
+        if action_index < 0 or action_index > 2:
+            continue
+        var door_value = action.get("door")
+        if door_value == null or not is_instance_valid(door_value) or not (door_value is Node):
+            continue
+        if system == null or not system.has_method("request_npc_door_traversal"):
+            continue
+        var door: Node = door_value as Node
+        var traversal: Dictionary = system.request_npc_door_traversal(door, body, entry, action)
+        if bool(traversal.get("ok", false)):
+            clear_door_stage(entry)
+            return ""
+        if traversal.has("stagePosition"):
+            var stage_position: Vector3 = traversal.get("stagePosition", body.global_position)
+            if apply_door_stage(entry, body, stage_position, world, String(traversal.get("portalId", ""))):
+                return ""
+        return String(traversal.get("reason", "door_waiting"))
+    return ""
+
+func apply_door_stage(entry: Dictionary, body: Node3D, stage_position: Vector3, world, portal_id: String) -> bool:
+    if body == null or world == null:
+        return false
+    if flat_distance(body.global_position, stage_position) <= CELL * 0.24:
+        return false
+    entry["doorStageActive"] = true
+    entry["doorStagePortalId"] = portal_id
+    entry["doorStagePosition"] = stage_position
+    entry["pathWaypoints"] = [stage_position]
+    entry["routeCells"] = [world.world_cell(stage_position)]
+    return true
+
+func should_restore_from_door_stage(entry: Dictionary, position: Vector3) -> bool:
+    if not bool(entry.get("doorStageActive", false)):
+        return false
+    if String(entry.get("activeDoorPortalId", "")) != "":
+        return true
+    var stage_position: Vector3 = entry.get("doorStagePosition", position)
+    return flat_distance(position, stage_position) <= CELL * 0.42
+
+func clear_door_stage(entry: Dictionary) -> void:
+    entry.erase("doorStageActive")
+    entry.erase("doorStagePortalId")
+    entry.erase("doorStagePosition")
 
 func validate_candidate(entry: Dictionary, previous: Vector3, candidate: Vector3, moving_home := false, allow_outside := false, world = null, priority := 0) -> Dictionary:
     if world == null or main == null:
@@ -490,15 +619,19 @@ func collider_blocks_capsule(entry: Dictionary, collider: Node, body: CharacterB
             if bool(collider.get_meta("open", false)):
                 return false
             var door := interaction_door_for_collider(collider)
-            if route_has_door_action(entry, door):
-                if system != null:
-                    system.open_door_for_npc(door, body)
+            var action := route_door_action(entry, door)
+            if not action.is_empty():
+                if system != null and system.has_method("request_npc_door_traversal"):
+                    system.request_npc_door_traversal(door, body, entry, action)
                 return true
             return true
         return true
     return kind in ["prop", "npc", "tutorial_npc", "hostile"]
 
 func route_has_door_action(entry: Dictionary, door: Node) -> bool:
+    return not route_door_action(entry, door).is_empty()
+
+func route_door_action(entry: Dictionary, door: Node) -> Dictionary:
     door = interaction_door_for_collider(door)
     var actions: Dictionary = entry.get("routeActions", {})
     for action_value in actions.values():
@@ -506,8 +639,8 @@ func route_has_door_action(entry: Dictionary, door: Node) -> bool:
             continue
         var action: Dictionary = action_value
         if interaction_door_for_collider(action.get("door") as Node) == door:
-            return true
-    return false
+            return action
+    return {}
 
 func interaction_door_for_collider(collider: Node) -> Node:
     if collider == null:

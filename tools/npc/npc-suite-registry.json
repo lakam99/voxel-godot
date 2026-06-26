@@ -30,6 +30,12 @@
       "description": "Phase 05 incremental route repair and dynamic world response tests",
       "command": ".\\tools\\npc\\run-npc-repair-tests.ps1",
       "defaultArgs": ["-TimeMode", "Both"]
+    },
+    {
+      "id": "door",
+      "description": "Phase 06 smart door portal, controller, shared authority, and safety tests",
+      "command": ".\\tools\\npc\\run-npc-door-tests.ps1",
+      "defaultArgs": ["-TimeMode", "Both"]
     }
   ]
 }

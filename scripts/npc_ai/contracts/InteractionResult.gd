@@ -26,5 +26,6 @@ func to_summary() -> Dictionary:
 		"ownerNpcId": owner_npc_id,
 		"status": String(status),
 		"reason": String(reason),
-		"generation": generation
+		"generation": generation,
+		"metrics": metrics.duplicate(true)
 	}

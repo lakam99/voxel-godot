@@ -304,7 +304,12 @@ func snapshot_player_blocks() -> Array:
             "cell": [cell.x, cell.y, cell.z],
             "worldY": body.position.y,
             "facing": body.rotation.y,
-            "open": bool(body.get_meta("open", false))
+            "open": bool(body.get_meta("open", false)),
+            "locked": bool(body.get_meta("locked", false)),
+            "jammed": bool(body.get_meta("jammed", false)),
+            "destroyed": bool(body.get_meta("destroyed", false)),
+            "doorPortalId": String(body.get_meta("door_portal_id", "")),
+            "doorGroupId": String(body.get_meta("door_group_id", ""))
         }
         if body.has_meta("storage_slots"):
             entry["storageSlots"] = serialize_slots(body.get_meta("storage_slots"))
@@ -329,7 +334,12 @@ func restore_player_blocks(entries) -> void:
         var block := create_block(cell, block_type, {
             "player_placed": true,
             "world_y": float(entry.get("worldY", cell.y * CELL)),
-            "facing": float(entry.get("facing", 0.0))
+            "facing": float(entry.get("facing", 0.0)),
+            "locked": bool(entry.get("locked", false)),
+            "jammed": bool(entry.get("jammed", false)),
+            "destroyed": bool(entry.get("destroyed", false)),
+            "doorPortalId": String(entry.get("doorPortalId", "")),
+            "doorGroupId": String(entry.get("doorGroupId", ""))
         })
         if block == null:
             continue
@@ -340,7 +350,7 @@ func restore_player_blocks(entries) -> void:
             if utility_system:
                 utility_system.ensure_furnace(block)
         if block_type == "door" and bool(entry.get("open", false)):
-            toggle_door(block)
+            request_door_state(block, true, null, "save", { "authorized": true })
 
 func clear_player_blocks() -> void:
     for key in blocks.keys():

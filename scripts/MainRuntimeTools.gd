@@ -288,21 +288,24 @@ func is_utility_block(block_type: String) -> bool:
     return block_type in ["workbench", "anvil", "chest", "furnace", "campfire", "bed", "traderStall"]
 
 func toggle_door(door: Node) -> bool:
+    var result = request_door_toggle(door, player, "player")
+    return result != null and String(result.get("status")) == "succeeded"
+
+func request_door_toggle(door: Node, actor: Node = null, actor_kind := "player", metadata := {}):
     door = interaction_block_from_collider(door)
     if not door or not door.has_meta("block_type") or String(door.get_meta("block_type")) != "door":
-        return false
-    var open := not bool(door.get_meta("open"))
-    door.set_meta("open", open)
-    door.rotation.y = float(door.get_meta("closed_rotation", door.rotation.y))
-    var pivot := door.get_node_or_null("DoorPivot") as Node3D
-    if pivot:
-        pivot.rotation.y = float(door.get_meta("open_swing", PI * 0.5)) if open else 0.0
-    for child in door.get_children():
-        if child is CollisionShape3D:
-            child.disabled = open
-    if npc_system and npc_system.has_method("notify_navigation_door_state_changed"):
-        npc_system.notify_navigation_door_state_changed(door, open)
-    return true
+        return null
+    if npc_system and npc_system.has_method("request_door_toggle"):
+        return npc_system.request_door_toggle(door, actor, actor_kind, metadata)
+    return null
+
+func request_door_state(door: Node, desired_open: bool, actor: Node = null, actor_kind := "system", metadata := {}):
+    door = interaction_block_from_collider(door)
+    if not door or not door.has_meta("block_type") or String(door.get_meta("block_type")) != "door":
+        return null
+    if npc_system and npc_system.has_method("request_door_state"):
+        return npc_system.request_door_state(door, desired_open, actor, actor_kind, metadata)
+    return null
 
 func update_chunks(force: bool = false) -> void:
     var center := world_to_chunk(player.position.x, player.position.z)
