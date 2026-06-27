@@ -178,7 +178,6 @@ func town_anchor_candidates(entry: Dictionary) -> Array[Vector3]:
             candidates.append(pos)
     add_path_candidates(candidates, entry, false)
     add_utility_anchor_candidates(candidates, entry)
-    add_deterministic_ring_candidates(candidates, entry, false)
     return candidates
 
 func job_anchor_candidates(entry: Dictionary) -> Array[Vector3]:

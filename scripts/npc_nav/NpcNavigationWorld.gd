@@ -1,6 +1,8 @@
 extends RefCounted
 class_name NpcNavigationWorld
 
+const NpcConstantsScript := preload("res://scripts/npc_ai/NpcConstants.gd")
+
 const CELL := 1.35
 const INVALID_CELL := Vector2i(999999, 999999)
 
@@ -93,6 +95,8 @@ func rebuild_static_cells() -> void:
             continue
         if block_type == "torch":
             continue
+        if not block_xz_blocks_npc(block_cell, body):
+            continue
         cached_blocked[block_cell] = body
     add_prop_obstacle_cells()
 
@@ -132,6 +136,14 @@ func prop_blocks_npc(prop: Node3D) -> bool:
     if material in ["tree", "rock", "copperOre", "ironOre", "wildlife", "berryBush"]:
         return true
     return drop in ["logs", "stones", "berries"]
+
+func block_xz_blocks_npc(cell: Vector2i, body: Node) -> bool:
+    if main == null or not (body is Node3D):
+        return true
+    var block_center_y := (body as Node3D).global_position.y
+    var floor_y := height_for_cell(cell)
+    var clearance_center_y := floor_y + NpcConstantsScript.DEFAULT_NPC_STANDING_HEIGHT + NpcConstantsScript.DEFAULT_HEADROOM_MARGIN + CELL * 0.45
+    return block_center_y <= clearance_center_y
 
 func live_occupant_cells(entry: Dictionary) -> Dictionary:
     var dynamic := {}
@@ -216,6 +228,8 @@ func terrain_allows_step(from_cell: Vector2i, to_cell: Vector2i, moving_home := 
     return { "ok": true, "height": to_height }
 
 func static_blocker(snapshot: Dictionary, cell: Vector2i):
+    if door_at(snapshot, cell) != null:
+        return null
     var blocked: Dictionary = snapshot.get("blocked", {})
     var blocker = blocked.get(cell, null)
     if blocker != null and blocker is Object and not is_instance_valid(blocker):

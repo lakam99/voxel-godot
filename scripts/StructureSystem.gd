@@ -216,6 +216,8 @@ func record_town_home(town_key: String, town: Dictionary, base_x: int, base_z: i
         "homeCell": home_cell,
         "porchCell": porch_cell,
         "guardCell": guard_cell,
+        "interiorMinCell": Vector2i(base_x, base_z),
+        "interiorMaxCell": Vector2i(base_x + width - 1, base_z + depth - 1),
         "buildingIndex": index
     }
     town_home_records[town_key].append(record)

@@ -92,9 +92,11 @@ func request_crossing(door: Node, actor: Node, entry: Dictionary = {}, action: D
 func release_actor(actor_or_id, schedule_close := true) -> void:
 	if door_portals == null:
 		return
-	var actor_id := String(actor_or_id)
+	var actor_id := ""
 	if actor_or_id is Node:
 		actor_id = _actor_id(actor_or_id, {})
+	else:
+		actor_id = String(actor_or_id)
 	for portal_id in active_crossings.keys().duplicate():
 		var active: Dictionary = active_crossings[portal_id]
 		if String(active.get("actorId", "")) == actor_id:
@@ -105,9 +107,11 @@ func release_actor(actor_or_id, schedule_close := true) -> void:
 			metrics["released"] = int(metrics.get("released", 0)) + 1
 
 func cancel_actor(actor_or_id) -> void:
-	var actor_id := String(actor_or_id)
+	var actor_id := ""
 	if actor_or_id is Node:
 		actor_id = _actor_id(actor_or_id, {})
+	else:
+		actor_id = String(actor_or_id)
 	if traffic_reservations != null:
 		traffic_reservations.cancel_owner(actor_id)
 	release_actor(actor_or_id, true)

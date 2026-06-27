@@ -62,7 +62,8 @@ func plan_route(request, max_expansions := 4096):
 	if allowed_tiles.is_empty() and (not goal_tiles.is_empty() and not goal_tiles.has(start_tile)):
 		return _base_result(request, NpcEnumsScript.ROUTE_STATUS_UNREACHABLE, NpcEnumsScript.ROUTE_REASON_NO_ROUTE, {
 			"hierarchy": hierarchy,
-			"abstractReason": "no_tile_path"
+			"abstractReason": "no_tile_path",
+			"graph": _route_graph_metrics(graph, start_key, goal_keys, allowed_tiles)
 		})
 	var request_id := String(request.get("request_id"))
 	if request_id == "":
@@ -82,7 +83,10 @@ func plan_route(request, max_expansions := 4096):
 	var status: StringName = search.get("status")
 	if status == NpcEnumsScript.ROUTE_STATUS_PENDING:
 		_touch_active_job(job_key)
-		var pending = _base_result(request, NpcEnumsScript.ROUTE_STATUS_PENDING, &"pending_budget", { "hierarchy": hierarchy })
+		var pending = _base_result(request, NpcEnumsScript.ROUTE_STATUS_PENDING, &"pending_budget", {
+			"hierarchy": hierarchy,
+			"graph": _route_graph_metrics(graph, start_key, goal_keys, allowed_tiles)
+		})
 		return pending
 	active_jobs.erase(job_key)
 	active_job_order.erase(job_key)
@@ -95,10 +99,17 @@ func plan_route(request, max_expansions := 4096):
 			search = fallback_search
 			status = search.get("status")
 	if status == NpcEnumsScript.ROUTE_STATUS_PENDING:
-		var fallback_pending = _base_result(request, NpcEnumsScript.ROUTE_STATUS_PENDING, &"pending_budget", { "hierarchy": hierarchy, "fallback": "unrestricted_local" })
+		var fallback_pending = _base_result(request, NpcEnumsScript.ROUTE_STATUS_PENDING, &"pending_budget", {
+			"hierarchy": hierarchy,
+			"fallback": "unrestricted_local",
+			"graph": _route_graph_metrics(graph, start_key, goal_keys, [])
+		})
 		return fallback_pending
 	if status == NpcEnumsScript.ROUTE_STATUS_UNREACHABLE:
-		return _base_result(request, NpcEnumsScript.ROUTE_STATUS_UNREACHABLE, search.get("reason", NpcEnumsScript.ROUTE_REASON_NO_ROUTE), { "hierarchy": hierarchy })
+		return _base_result(request, NpcEnumsScript.ROUTE_STATUS_UNREACHABLE, search.get("reason", NpcEnumsScript.ROUTE_REASON_NO_ROUTE), {
+			"hierarchy": hierarchy,
+			"graph": _route_graph_metrics(graph, start_key, goal_keys, allowed_tiles)
+		})
 	var corridor = corridor_builder.build(graph, search.get("path", []), search.get("edges", []), search.get("breakdowns", []), request, true)
 	var result = _base_result(request, status, search.get("reason", NpcEnumsScript.ROUTE_REASON_NONE), {
 		"hierarchy": hierarchy,
@@ -114,6 +125,20 @@ func plan_route(request, max_expansions := 4096):
 	result.repair_goal_keys = goal_keys.duplicate()
 	result.repair_request = request
 	return result
+
+func _route_graph_metrics(graph: Dictionary, start_key: String, goal_keys: Array, allowed_tiles: Array) -> Dictionary:
+	var edges: Dictionary = graph.get("edges", {})
+	var edge_count := 0
+	for edge_list in edges.values():
+		edge_count += (edge_list as Array).size()
+	return {
+		"nodeCount": (graph.get("nodes", {}) as Dictionary).size(),
+		"edgeCount": edge_count,
+		"startKey": start_key,
+		"startEdgeCount": (edges.get(start_key, []) as Array).size(),
+		"goalKeys": goal_keys.duplicate(),
+		"allowedTileCount": allowed_tiles.size()
+	}
 
 func plan_legacy_route(entry: Dictionary, intent: Dictionary, legacy_world, max_expansions := 200000) -> Dictionary:
 	var request = legacy_request(entry, intent, legacy_world)

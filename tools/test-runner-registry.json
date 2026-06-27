@@ -9,6 +9,22 @@
       "required": true
     },
     {
+      "id": "npc_observation_dusk",
+      "description": "Phase 09 dusk return-home observation evidence",
+      "command": ".\\tools\\npc\\run-npc-observation-tests.ps1",
+      "args": ["-Scenario", "DuskReturnHome", "-TimeMode", "Transition", "-Seed", "atlas-1492", "-ReportPath", "artifacts\\test-runners\\npc-observation-dusk.json"],
+      "reportPath": "artifacts\\test-runners\\npc-observation-dusk.json",
+      "required": true
+    },
+    {
+      "id": "npc_observation_midnight",
+      "description": "Phase 09 midnight guard/interior observation evidence",
+      "command": ".\\tools\\npc\\run-npc-observation-tests.ps1",
+      "args": ["-Scenario", "MidnightTown", "-TimeMode", "Night", "-Seed", "atlas-1492", "-ReportPath", "artifacts\\test-runners\\npc-observation-midnight.json"],
+      "reportPath": "artifacts\\test-runners\\npc-observation-midnight.json",
+      "required": true
+    },
+    {
       "id": "world_signature",
       "description": "Deterministic world signature comparison",
       "command": ".\\tools\\run-world-signature.ps1",

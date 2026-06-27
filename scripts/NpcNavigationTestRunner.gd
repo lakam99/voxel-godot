@@ -632,30 +632,32 @@ func test_home_return_fallback_semantics() -> void:
     entry["homeRouteIndex"] = 0
     entry["routeStatus"] = "blocked"
     entry["routeReason"] = "no_candidate_goal"
-    entry["routeFallbackCell"] = Vector2i(999999, 999999)
+    entry["routeFallbackCell"] = porch_cell
     entry["homeActiveTargetCell"] = home_cell
-    var unreachable_before := int(npc_system.stats().get("unreachableGoals", 0))
+    entry.erase("homeSettleDebug")
+    var unreachable_before := int(entry.get("unreachableGoals", 0))
     npc_system.settle_home_if_reached(entry)
-    var unreachable_after := int(npc_system.stats().get("unreachableGoals", 0))
-    var fallback_marked := bool(entry.get("insideHome", false)) \
-        and bool(body.get_meta("npc_inside_home", false)) \
-        and String(entry.get("routeStatus", "")) == "partial" \
-        and String(entry.get("routeReason", "")) == "home_porch_fallback" \
+    var unreachable_after := int(entry.get("unreachableGoals", 0))
+    var fallback_blocked := not bool(entry.get("insideHome", false)) \
+        and not bool(body.get_meta("npc_inside_home", false)) \
+        and String(entry.get("routeStatus", "")) == "blocked" \
+        and String(entry.get("routeReason", "")) == "home_porch_fallback_not_inside" \
         and unreachable_after > unreachable_before \
         and body.global_position.distance_to(porch_position) <= 0.001
 
     add_result(
         "npc_nav_home_return_fallback_semantics",
-        timer_did_not_mark and advanced_route_waypoint and advanced_from_porch and fallback_marked,
-        "timer safe %s, route advance %s, porch advance %s, fallback %s, route %s/%s, unreachable %d->%d" % [
+        timer_did_not_mark and advanced_route_waypoint and advanced_from_porch and fallback_blocked,
+        "timer safe %s, route advance %s, porch advance %s, fallback %s, route %s/%s, unreachable %d->%d, debug %s" % [
             str(timer_did_not_mark),
             str(advanced_route_waypoint),
             str(advanced_from_porch),
-            str(fallback_marked),
+            str(fallback_blocked),
             String(entry.get("routeStatus", "")),
             String(entry.get("routeReason", "")),
             unreachable_before,
-            unreachable_after
+            unreachable_after,
+            JSON.stringify(entry.get("homeSettleDebug", {}))
         ]
     )
 

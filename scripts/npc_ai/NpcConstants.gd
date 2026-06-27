@@ -1,7 +1,7 @@
 extends RefCounted
 class_name NpcConstants
 
-const ARCHITECTURE_VERSION := "phase08_traffic_deadlock"
+const ARCHITECTURE_VERSION := "phase09_purpose_schedules"
 const LEGACY_LOCOMOTION_MODE := "legacy_route_intent_motor_adapter"
 
 const CELL_SIZE := 1.35

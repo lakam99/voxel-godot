@@ -34,6 +34,7 @@ func _process(delta: float) -> void:
         get_tree().quit(1)
 
 func run() -> void:
+    var only_section := OS.get_environment("VOXEL_PLAYTEST_ONLY").strip_edges()
     mark_progress("start")
     main = MAIN_SCENE.instantiate()
     add_child(main)
@@ -50,8 +51,16 @@ func run() -> void:
     await wait_physics_frames(80)
     mark_progress("scene_bootstrap")
     test_scene_bootstrap()
+    if finish_if_only_section("scene_bootstrap", only_section):
+        return
+    if only_section != "" and only_section != "tutorial_start":
+        add_result("playtest_section_filter", false, "unsupported VOXEL_PLAYTEST_ONLY '%s'" % only_section)
+        finish_playtest()
+        return
     mark_progress("tutorial_start")
     await test_tutorial_start_system()
+    if finish_if_only_section("tutorial_start", only_section):
+        return
     mark_progress("mouse_look")
     test_mouse_look_input()
     mark_progress("escape_menu_new_game")
@@ -172,12 +181,21 @@ func run() -> void:
     await test_right_mouse_interaction_input()
     mark_progress("block_destroy_ray")
     await test_block_destroy_ray()
+    finish_playtest()
+
+func finish_playtest() -> void:
     mark_progress("saving_report")
     save_optional_screenshot()
     finished = true
     save_report()
     mark_progress("finished")
     get_tree().quit(1 if failed else 0)
+
+func finish_if_only_section(section_id: String, only_section: String) -> bool:
+    if only_section == "" or only_section != section_id:
+        return false
+    finish_playtest()
+    return true
 
 func mark_progress(label: String) -> void:
     var path: String = OS.get_environment("VOXEL_PLAYTEST_PROGRESS")
@@ -436,6 +454,9 @@ func test_tutorial_start_system() -> void:
         npc_system.update_npcs(0.1, 0.0)
         if mira != null and bool(mira.get_meta("npc_inside_home", false)):
             break
+        if i % 15 == 0:
+            mark_progress("tutorial_elder_return_%03d" % i)
+            await get_tree().process_frame
     var starter_position := Vector3(float(starter_cell.x) * CELL, player.global_position.y, float(starter_cell.y) * CELL)
     var mira_position := starter_position
     if mira is Node3D:
@@ -453,6 +474,7 @@ func test_tutorial_start_system() -> void:
             npc_route_debug(npc_system, mira)
         ]
     )
+    mark_progress("tutorial_elder_return_checked")
 
     var rowan_locked_interaction := rowan != null and bool(tutorial_system.interact_with(rowan))
     var locked_state: Dictionary = tutorial_system.state()
@@ -663,6 +685,7 @@ func test_tutorial_start_system() -> void:
             str(ready_before_final)
         ]
     )
+    mark_progress("tutorial_weapon_preps_checked")
 
     hostile_system.clear()
     var final_started: bool = mira != null and bool(tutorial_system.interact_with(mira))
@@ -685,6 +708,9 @@ func test_tutorial_start_system() -> void:
         player.velocity = Vector3.ZERO
     for i in range(36):
         npc_system.update_npcs(0.12, 0.0)
+        if i % 12 == 0:
+            mark_progress("tutorial_guard_escort_%03d" % i)
+            await get_tree().process_frame
     var escort_state: Dictionary = tutorial_system.state()
     var escort_started: bool = bool(escort_state.get("rescueEscortStarted", false))
     var guard_after: Vector3 = (sera as Node3D).global_position if sera is Node3D else Vector3.ZERO
@@ -725,6 +751,9 @@ func test_tutorial_start_system() -> void:
         main.call("update_objectives_and_contracts")
         if bool(tutorial_system.state().get("finalNightComplete", false)):
             break
+        if i % 15 == 0:
+            mark_progress("tutorial_rescue_return_%03d" % i)
+            await get_tree().process_frame
     main.call("update_objectives_and_contracts")
     var final_done_state: Dictionary = tutorial_system.state()
     var final_done_steps: Dictionary = final_done_state.get("completedSteps", {})
@@ -776,6 +805,7 @@ func test_tutorial_start_system() -> void:
             str(final_done_steps)
         ]
     )
+    mark_progress("tutorial_final_rescue_checked")
 
     hostile_system.clear()
     player.global_position = tutorial_original_position
@@ -783,6 +813,9 @@ func test_tutorial_start_system() -> void:
     for i in range(6):
         hostile_system.spawn_cooldown = 0.0
         hostile_system.update_hostiles(0.25, 0.0, "town", false)
+        if i % 3 == 0:
+            mark_progress("tutorial_perimeter_spawn_%03d" % i)
+            await get_tree().process_frame
     var perimeter_spawned: bool = hostile_system.enemies.size() >= 3
     var nearest: float = INF
     var unsafe_spawn: bool = true
@@ -815,6 +848,9 @@ func test_tutorial_start_system() -> void:
             var stats_now: Dictionary = npc_system.stats()
             if int(stats_now.get("sheltered", 0)) >= 3 and int(stats_now.get("guardShots", 0)) > guard_shots_before and int(stats_now.get("useAnimations", 0)) > use_animations_before:
                 break
+        if i % 20 == 0:
+            mark_progress("tutorial_guard_behavior_%03d" % i)
+            await get_tree().process_frame
     var npc_stats_after: Dictionary = npc_system.stats()
     var tutorial_npc_count := npc_root.get_child_count() if npc_root else 0
     var all_tutorial_npcs_have_homes := int(npc_stats_after.get("homed", 0)) >= tutorial_npc_count
@@ -7398,17 +7434,49 @@ func npc_route_debug(npc_system, body: Node) -> String:
             continue
         var body_3d := body as Node3D
         var current_cell := world_to_flat_cell(body_3d.global_position) if body_3d != null else Vector2i.ZERO
-        return "%s cell %s home %s porch %s active %s fallback %s status %s/%s index %d inside %s force %s dialogue %s" % [
+        var settle_debug: Dictionary = entry.get("homeSettleDebug", {})
+        var action_keys: Array = (entry.get("routeActions", {}) as Dictionary).keys()
+        action_keys.sort()
+        var typed_summary := "none"
+        var typed_result = entry.get("typedRouteResult")
+        if typed_result != null:
+            var metrics_value = typed_result.get("metrics")
+            var metrics_summary := ""
+            if metrics_value is Dictionary:
+                var hierarchy: Dictionary = (metrics_value as Dictionary).get("hierarchy", {})
+                var graph: Dictionary = (metrics_value as Dictionary).get("graph", {})
+                metrics_summary = " tiles=%d entrances=%d nodes=%d edges=%d startEdges=%d goals=%s allowedTiles=%d fallback=%s" % [
+                    int(hierarchy.get("tileCount", 0)),
+                    int(hierarchy.get("entranceCount", 0)),
+                    int(graph.get("nodeCount", 0)),
+                    int(graph.get("edgeCount", 0)),
+                    int(graph.get("startEdgeCount", 0)),
+                    str(graph.get("goalKeys", [])),
+                    int(graph.get("allowedTileCount", 0)),
+                    str((metrics_value as Dictionary).get("fallback", ""))
+                ]
+            typed_summary = "%s/%s %s" % [
+                str(typed_result.get("status")),
+                str(typed_result.get("reason")),
+                metrics_summary
+            ]
+        return "%s cell %s home %s porch %s interior %s..%s active %s fallback %s status %s/%s index %d inside %s blocked %s actions %s typed %s settle %s force %s dialogue %s" % [
             String(body.get_meta("npc_id", entry.get("id", body.name))),
             str(current_cell),
             str(entry.get("homeCell", Vector2i.ZERO)),
             str(entry.get("porchCell", Vector2i.ZERO)),
+            str(entry.get("interiorMinCell", Vector2i.ZERO)),
+            str(entry.get("interiorMaxCell", Vector2i.ZERO)),
             str(entry.get("homeActiveTargetCell", Vector2i.ZERO)),
             str(entry.get("routeFallbackCell", Vector2i.ZERO)),
             String(entry.get("routeStatus", "")),
             String(entry.get("routeReason", "")),
             int(entry.get("homeRouteIndex", 0)),
             str(body.get_meta("npc_inside_home", false)),
+            str(body.get_meta("npc_home_blocked", false)),
+            str(action_keys),
+            typed_summary,
+            JSON.stringify(settle_debug),
             str(body.get_meta("npc_force_hold", false)),
             str(body.get_meta("npc_dialogue_focused", false))
         ]

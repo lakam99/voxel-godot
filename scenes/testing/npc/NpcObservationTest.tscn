@@ -1,0 +1,6 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://scripts/testing/npc/NpcObservationRunner.gd" id="1_npc_observation"]
+
+[node name="NpcObservationRunner" type="Node"]
+script = ExtResource("1_npc_observation")

@@ -13,7 +13,7 @@ static func weapon_for_profile(profile: Dictionary, role: String, can_fight: boo
     return "woodenSword" if abs(hash(key)) % 3 == 0 else "hunterBow"
 
 static func job_for_role(role: String, can_fight: bool) -> String:
-    if can_fight or role.to_lower().find("guard") >= 0 or role.to_lower().find("watch") >= 0:
+    if role.to_lower().find("guard") >= 0 or role.to_lower().find("watch") >= 0:
         return "guard"
     match role.to_lower():
         "forager", "farmer":

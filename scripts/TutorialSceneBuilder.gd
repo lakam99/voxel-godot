@@ -195,6 +195,8 @@ func npc_spec(id: String, npc_name: String, role: String, cell: Vector2i, home: 
         "cell": cell,
         "homeCell": home.get("homeCell", cell),
         "porchCell": home.get("porchCell", cell),
+        "interiorMinCell": home.get("interiorMinCell", home.get("homeCell", cell)),
+        "interiorMaxCell": home.get("interiorMaxCell", home.get("homeCell", cell)),
         "color": color,
         "accent": accent,
         "dialogue": dialogue
@@ -236,6 +238,8 @@ func register_with_npc_system(body: Node3D, spec: Dictionary, level: float, cell
         "cell": cell,
         "homeCell": spec.get("homeCell", cell),
         "porchCell": spec.get("porchCell", cell),
+        "interiorMinCell": spec.get("interiorMinCell", spec.get("homeCell", cell)),
+        "interiorMaxCell": spec.get("interiorMaxCell", spec.get("homeCell", cell)),
         "guardCell": spec.get("guardCell", spec.get("porchCell", cell)),
         "canFight": bool(spec.get("canFight", false)),
         "nightGuard": bool(spec.get("nightGuard", false)),
