@@ -22,6 +22,8 @@ static func job_for_role(role: String, can_fight: bool) -> String:
             return "wood"
         "mason":
             return "stone"
+        "trader":
+            return "trade"
     return ""
 
 static func resource_for_job(job: String) -> String:
@@ -32,4 +34,6 @@ static func resource_for_job(job: String) -> String:
             return "logs"
         "stone":
             return "stones"
+        "trade":
+            return "stall"
     return ""

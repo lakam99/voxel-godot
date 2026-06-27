@@ -181,6 +181,8 @@ func _release_action_owned_state(entry: Dictionary, reason: String) -> void:
 			autonomy_system.call("release_npc_traffic_reservations", entry, reason)
 		if autonomy_system.has_method("release_npc_door_hold"):
 			autonomy_system.call("release_npc_door_hold", body if body != null else String(entry.get("id", "")), true)
+	if npc_system != null and npc_system.has_method("release_job_reservation"):
+		npc_system.call("release_job_reservation", entry, reason)
 	entry["activeDoorTrafficGroupId"] = ""
 	entry["activeTrafficStepGroup"] = ""
 	var blackboard = entry.get("blackboard")

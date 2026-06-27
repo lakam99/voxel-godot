@@ -152,6 +152,18 @@ func complete_destroy_target(hit: Dictionary, collider: Node, kind: String, mate
         var prop_id: String = collider.get_meta("prop_id")
         var drop: String = collider.get_meta("drop")
         var drop_count := int(collider.get_meta("drop_count", 1))
+        if npc_system and npc_system.has_method("request_shared_prop_harvest"):
+            var action_position: Vector3 = (collider as Node3D).global_position if collider is Node3D else hit.get("position", player.global_position if player != null else Vector3.ZERO)
+            var harvest: Dictionary = npc_system.request_shared_prop_harvest(collider, player, "player", {
+                "actorPosition": action_position,
+                "request_id": "player:%s:%d" % [prop_id, Engine.get_process_frames()]
+            })
+            if not bool(harvest.get("ok", false)):
+                update_hud("Unavailable: %s" % String(harvest.get("reason", "busy")))
+                return
+            var metrics: Dictionary = harvest.get("metrics", {})
+            drop = String(metrics.get("drop", drop))
+            drop_count = int(metrics.get("amount", drop_count))
         removed_props[prop_id] = true
         if npc_system and npc_system.has_method("notify_navigation_prop_removed"):
             npc_system.notify_navigation_prop_removed(prop_id, collider)

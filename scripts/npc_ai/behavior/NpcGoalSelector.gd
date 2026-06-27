@@ -33,7 +33,7 @@ func select_goal(context, blackboard, entry: Dictionary, perception: Dictionary,
 		if job == "forage":
 			scores[String(NpcEnumsScript.GOAL_KIND_FORAGE)] = 1.05
 			reasons[String(NpcEnumsScript.GOAL_KIND_FORAGE)] = "role_forager_food_loop"
-		elif job in ["wood", "stone"]:
+		elif job in ["wood", "stone", "trade"]:
 			scores[String(NpcEnumsScript.GOAL_KIND_WORK)] = 1.00
 			reasons[String(NpcEnumsScript.GOAL_KIND_WORK)] = "role_worker_job"
 		elif job == "guard":

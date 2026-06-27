@@ -3,11 +3,26 @@ class_name SmartObjectService
 
 const NpcEnumsScript := preload("res://scripts/npc_ai/NpcEnums.gd")
 const InteractionRequestScript := preload("res://scripts/npc_ai/contracts/InteractionRequest.gd")
+const InteractionResultScript := preload("res://scripts/npc_ai/contracts/InteractionResult.gd")
 const SmartObjectRegistrationScript := preload("res://scripts/npc_ai/interactions/SmartObjectRegistration.gd")
+
+const CELL := 1.35
+const COMMAND_RESERVE := &"reserve"
+const COMMAND_RELEASE := &"release"
+const COMMAND_CANCEL := &"cancel"
+const COMMAND_COMPLETE := &"complete"
+const COMMAND_HARVEST := &"harvest"
+const COMMAND_DEPOSIT := &"deposit"
+const COMMAND_USE := &"use"
+const COMMAND_REST := &"rest"
+const COMMAND_GUARD := &"guard"
 
 var owner: Node = null
 var door_portals = null
 var registrations := {}
+var completed_effects := {}
+var counters := {}
+var revision_counter := 0
 
 func setup(owner_node: Node, door_portal_service) -> void:
 	owner = owner_node
@@ -15,6 +30,9 @@ func setup(owner_node: Node, door_portal_service) -> void:
 
 func clear() -> void:
 	registrations.clear()
+	completed_effects.clear()
+	counters.clear()
+	revision_counter = 0
 	if door_portals != null:
 		door_portals.clear()
 
@@ -26,10 +44,93 @@ func register_door(door: Node, metadata := {}) -> String:
 		registrations[portal_id] = SmartObjectRegistrationScript.make(portal_id, "door", door, metadata)
 	return portal_id
 
+func register_object(object_id: String, kind: String, node: Node = null, metadata := {}) -> String:
+	if object_id == "":
+		object_id = object_id_for_node(node)
+	if object_id == "":
+		return ""
+	var merged := metadata.duplicate(true) if metadata is Dictionary else {}
+	merged["kind"] = kind
+	merged["objectId"] = object_id
+	if not merged.has("slots"):
+		merged["slots"] = make_default_slots(node, kind, merged)
+	if not merged.has("capacity"):
+		merged["capacity"] = 1
+	var existing = registrations.get(object_id)
+	if existing != null:
+		existing.kind = kind
+		existing.node = node
+		existing.metadata = merged
+		existing.slots = merged.get("slots", {}).duplicate(true) if merged.get("slots", {}) is Dictionary else {}
+		existing.depleted = bool(merged.get("depleted", existing.depleted))
+		existing.revision += 1
+	else:
+		registrations[object_id] = SmartObjectRegistrationScript.make(object_id, kind, node, merged)
+	var registration = registrations[object_id]
+	registration.revision = _next_revision()
+	_record("registered", object_id, kind, { "slots": registration.slots.size() })
+	return object_id
+
+func register_resource(prop: Node, metadata := {}) -> String:
+	if prop == null or not is_instance_valid(prop):
+		return ""
+	var material := String(prop.get_meta("material", ""))
+	var drop := String(prop.get_meta("drop", ""))
+	var kind := "forage_source"
+	if drop == "logs" or material == "tree":
+		kind = "tree_source"
+	elif drop in ["stones", "copperOre", "ironOre"] or material in ["rock", "copperOre", "ironOre"]:
+		kind = "stone_source"
+	var object_id := object_id_for_node(prop)
+	var merged := metadata.duplicate(true) if metadata is Dictionary else {}
+	merged["drop"] = drop
+	merged["material"] = material
+	merged["dropCount"] = max(1, int(prop.get_meta("drop_count", 1)))
+	merged["action"] = "harvest_resource"
+	merged["singleUse"] = true
+	merged["requiresApproach"] = true
+	merged["actionReach"] = float(merged.get("actionReach", CELL * 1.65))
+	merged["verticalTolerance"] = float(merged.get("verticalTolerance", CELL * 0.72))
+	return register_object(object_id, kind, prop, merged)
+
+func register_workstation(block: Node, metadata := {}) -> String:
+	var object_id := object_id_for_node(block)
+	var block_type := String(block.get_meta("block_type", "")) if block != null and block.has_meta("block_type") else String(metadata.get("blockType", "workstation"))
+	var kind := "workstation"
+	if block_type == "chest":
+		kind = "storage"
+	elif block_type == "traderStall":
+		kind = "trader_stall"
+	elif block_type == "bed":
+		kind = "bed"
+	var merged := metadata.duplicate(true) if metadata is Dictionary else {}
+	merged["blockType"] = block_type
+	merged["requiresApproach"] = true
+	merged["actionReach"] = float(merged.get("actionReach", CELL * 1.55))
+	merged["verticalTolerance"] = float(merged.get("verticalTolerance", CELL * 0.72))
+	return register_object(object_id, kind, block, merged)
+
+func register_anchor(object_id: String, kind: String, position: Vector3, metadata := {}) -> String:
+	var merged := metadata.duplicate(true) if metadata is Dictionary else {}
+	merged["position"] = position
+	merged["slots"] = {
+		"slot:0": {
+			"slotId": "slot:0",
+			"position": position,
+			"facing": Vector3.FORWARD,
+			"capacity": int(merged.get("capacity", 1)),
+			"occupants": []
+		}
+	}
+	merged["requiresApproach"] = bool(merged.get("requiresApproach", true))
+	merged["actionReach"] = float(merged.get("actionReach", CELL * 1.30))
+	merged["verticalTolerance"] = float(merged.get("verticalTolerance", CELL * 0.72))
+	return register_object(object_id, kind, null, merged)
+
 func request_interaction(request, actors: Array = []):
 	if request == null:
-		return load("res://scripts/npc_ai/contracts/InteractionResult.gd").make(NpcEnumsScript.INTERACTION_STATUS_FAILED, &"missing_request")
-	var command: StringName = request.get("command")
+		return InteractionResultScript.make(NpcEnumsScript.INTERACTION_STATUS_FAILED, &"missing_request")
+	var command: StringName = request_value(request, "command", &"none")
 	if command in [
 		NpcEnumsScript.DOOR_COMMAND_OPEN,
 		NpcEnumsScript.DOOR_COMMAND_CLOSE,
@@ -43,20 +144,561 @@ func request_interaction(request, actors: Array = []):
 		NpcEnumsScript.DOOR_COMMAND_REPAIR
 	] and door_portals != null:
 		return door_portals.request_interaction(request, actors)
-	return load("res://scripts/npc_ai/contracts/InteractionResult.gd").make(NpcEnumsScript.INTERACTION_STATUS_FAILED, &"unsupported")
+	match command:
+		COMMAND_RESERVE:
+			return reserve_interaction(request)
+		COMMAND_RELEASE, COMMAND_CANCEL:
+			return release_interaction(request)
+		COMMAND_COMPLETE:
+			return complete_interaction(request)
+		COMMAND_HARVEST:
+			return immediate_harvest(request)
+		COMMAND_DEPOSIT, COMMAND_USE, COMMAND_REST, COMMAND_GUARD:
+			return complete_interaction(request)
+	return InteractionResultScript.make(NpcEnumsScript.INTERACTION_STATUS_FAILED, &"unsupported")
 
 func request_door_state(door: Node, desired_open: bool, actor: Node = null, actor_kind := "system", metadata := {}):
 	if door_portals == null:
-		return load("res://scripts/npc_ai/contracts/InteractionResult.gd").make(NpcEnumsScript.INTERACTION_STATUS_FAILED, &"missing_door_service")
+		return InteractionResultScript.make(NpcEnumsScript.INTERACTION_STATUS_FAILED, &"missing_door_service")
 	return door_portals.request_door_state(door, desired_open, actor, actor_kind, metadata)
 
 func request_door_toggle(door: Node, actor: Node = null, actor_kind := "player", metadata := {}):
 	if door_portals == null:
-		return load("res://scripts/npc_ai/contracts/InteractionResult.gd").make(NpcEnumsScript.INTERACTION_STATUS_FAILED, &"missing_door_service")
+		return InteractionResultScript.make(NpcEnumsScript.INTERACTION_STATUS_FAILED, &"missing_door_service")
 	return door_portals.request_door_toggle(door, actor, actor_kind, metadata)
+
+func reserve_interaction(request):
+	var registration = registration_for_request(request)
+	if registration == null:
+		return _result(NpcEnumsScript.INTERACTION_STATUS_FAILED, &"target_gone", { "objectId": String(request_value(request, "object_id", "")) })
+	if registration.depleted:
+		return _result(NpcEnumsScript.INTERACTION_STATUS_FAILED, &"resource_depleted", { "objectId": registration.object_id })
+	var access := validate_access_policy(registration, request)
+	if not bool(access.get("ok", false)):
+		return _result(NpcEnumsScript.INTERACTION_STATUS_FAILED, StringName(String(access.get("reason", "access_denied"))), access)
+	var owner_id := _actor_id(request)
+	var existing := reservation_for_owner(registration, owner_id)
+	if not existing.is_empty():
+		return _result(NpcEnumsScript.INTERACTION_STATUS_SUCCEEDED, &"already_reserved", reservation_metrics(registration, existing, false))
+	var metadata := request_metadata(request)
+	var action_kind := String(metadata.get("action", registration.metadata.get("action", String(request_value(request, "command", "")))))
+	var slot := first_available_slot(registration, owner_id, action_kind)
+	if slot.is_empty():
+		return _result(NpcEnumsScript.INTERACTION_STATUS_FAILED, &"capacity_busy", {
+			"objectId": registration.object_id,
+			"kind": registration.kind,
+			"capacity": int(registration.metadata.get("capacity", 1)),
+			"owners": reservation_owners(registration)
+		})
+	var slot_id := String(slot.get("slotId", "slot:0"))
+	var reservation_id := "%s:%s:%s:%d" % [registration.object_id, slot_id, owner_id, registration.revision]
+	var reservation := {
+		"reservationId": reservation_id,
+		"slotId": slot_id,
+		"ownerId": owner_id,
+		"actorKind": String(request_value(request, "actor_kind", metadata.get("actorKind", ""))),
+		"action": action_kind,
+		"requestId": String(request_value(request, "request_id", "")),
+		"generation": int(request_value(request, "generation", 0)),
+		"state": "reserved"
+	}
+	registration.reservations[reservation_id] = reservation
+	var updated_slot: Dictionary = registration.slots.get(slot_id, {}).duplicate(true)
+	var occupants: Array = updated_slot.get("occupants", [])
+	if not occupants.has(owner_id):
+		occupants.append(owner_id)
+	updated_slot["occupants"] = occupants
+	registration.slots[slot_id] = updated_slot
+	_count("reservations_granted")
+	_record("reserved", registration.object_id, registration.kind, reservation_metrics(registration, reservation, false))
+	return _result(NpcEnumsScript.INTERACTION_STATUS_SUCCEEDED, &"reserved", reservation_metrics(registration, reservation, false))
+
+func release_interaction(request):
+	var registration = registration_for_request(request)
+	if registration == null:
+		return _result(NpcEnumsScript.INTERACTION_STATUS_SUCCEEDED, &"release_target_gone")
+	var reservation_id := String(request_metadata(request).get("reservationId", ""))
+	var owner_id := _actor_id(request)
+	var released := release_reservation(registration, reservation_id, owner_id, String(request_value(request, "command", "")))
+	return _result(NpcEnumsScript.INTERACTION_STATUS_SUCCEEDED, &"released" if released > 0 else &"nothing_to_release", {
+		"objectId": registration.object_id,
+		"released": released
+	})
+
+func complete_interaction(request):
+	var registration = registration_for_request(request)
+	var request_id := stable_request_id(request)
+	if completed_effects.has(request_id):
+		var replay: Dictionary = completed_effects[request_id].duplicate(true)
+		replay["effectApplied"] = false
+		return _result(NpcEnumsScript.INTERACTION_STATUS_SUCCEEDED, &"idempotent_replay", replay)
+	if registration == null:
+		return _result(NpcEnumsScript.INTERACTION_STATUS_FAILED, &"target_gone", { "requestId": request_id })
+	if registration.depleted and _is_single_use(registration):
+		return _result(NpcEnumsScript.INTERACTION_STATUS_FAILED, &"resource_depleted", { "objectId": registration.object_id })
+	var access := validate_access_policy(registration, request)
+	if not bool(access.get("ok", false)):
+		return _result(NpcEnumsScript.INTERACTION_STATUS_FAILED, StringName(String(access.get("reason", "access_denied"))), access)
+	var owner_id := _actor_id(request)
+	var reservation := reservation_for_request(registration, request)
+	var metadata := request_metadata(request)
+	var action_kind := String(metadata.get("action", registration.metadata.get("action", String(request_value(request, "command", "")))))
+	var require_reservation := bool(metadata.get("requireReservation", owner_id != "" and String(request_value(request, "actor_kind", "")) != "player"))
+	if require_reservation and reservation.is_empty():
+		return _result(NpcEnumsScript.INTERACTION_STATUS_FAILED, &"missing_reservation", { "objectId": registration.object_id, "ownerId": owner_id })
+	var approach := validate_approach(registration, request, reservation)
+	if not bool(approach.get("ok", false)):
+		return _result(NpcEnumsScript.INTERACTION_STATUS_FAILED, StringName(String(approach.get("reason", "invalid_approach"))), approach)
+	var metrics := effect_metrics(registration, request, reservation, action_kind)
+	metrics["effectApplied"] = true
+	metrics["requestId"] = request_id
+	if _is_single_use(registration) or action_kind == "harvest_resource" or String(request_value(request, "command", "")) == String(COMMAND_HARVEST):
+		registration.depleted = true
+		registration.metadata["depleted"] = true
+		if registration.node != null and is_instance_valid(registration.node):
+			registration.node.set_meta("npc_harvested", true)
+			registration.node.set_meta("smart_object_depleted", true)
+		release_object_reservations(registration, "completed")
+	elif not bool(metadata.get("holdReservation", false)):
+		release_reservation(registration, String(reservation.get("reservationId", "")), owner_id, "completed")
+	completed_effects[request_id] = metrics.duplicate(true)
+	_count("effects_completed")
+	_record("completed", registration.object_id, registration.kind, metrics)
+	return _result(NpcEnumsScript.INTERACTION_STATUS_SUCCEEDED, &"effect_applied", metrics)
+
+func immediate_harvest(request):
+	var registration = registration_for_request(request)
+	if registration == null:
+		return _result(NpcEnumsScript.INTERACTION_STATUS_FAILED, &"target_gone")
+	var owner_id := _actor_id(request)
+	if reservation_for_owner(registration, owner_id).is_empty():
+		var reserve_request = InteractionRequestScript.make(COMMAND_RESERVE, registration.object_id, owner_id, {
+			"action": "harvest_resource",
+			"actorKind": String(request_value(request, "actor_kind", "player"))
+		})
+		reserve_request.object_node = registration.node
+		reserve_request.actor_node = request_value(request, "actor_node", null)
+		reserve_request.actor_kind = request_value(request, "actor_kind", "")
+		var reserve_result = reserve_interaction(reserve_request)
+		if String(reserve_result.status) != String(NpcEnumsScript.INTERACTION_STATUS_SUCCEEDED):
+			return reserve_result
+	var complete_request = InteractionRequestScript.make(COMMAND_COMPLETE, registration.object_id, owner_id, request_metadata(request))
+	complete_request.object_node = registration.node
+	complete_request.actor_node = request_value(request, "actor_node", null)
+	complete_request.actor_kind = request_value(request, "actor_kind", "")
+	complete_request.request_id = stable_request_id(request)
+	return complete_interaction(complete_request)
+
+func notify_object_removed(object_id: String, node: Node = null) -> void:
+	if object_id == "" and node != null:
+		object_id = object_id_for_node(node)
+	if object_id == "":
+		return
+	var registration = registrations.get(object_id)
+	if registration == null:
+		return
+	registration.depleted = true
+	registration.metadata["depleted"] = true
+	release_object_reservations(registration, "target_gone")
+	_record("removed", registration.object_id, registration.kind, { "reason": "target_gone" })
+
+func object_available(object_id: String, actor_id := "") -> Dictionary:
+	var registration = registrations.get(object_id)
+	if registration == null:
+		return { "ok": false, "reason": "target_gone" }
+	if registration.depleted:
+		return { "ok": false, "reason": "resource_depleted" }
+	if not first_available_slot(registration, actor_id, "").is_empty():
+		return { "ok": true, "reason": "available" }
+	return { "ok": false, "reason": "capacity_busy", "owners": reservation_owners(registration) }
+
+func score_candidates(entry: Dictionary, action_kind: String, candidates: Array) -> Array[Dictionary]:
+	var scored: Array[Dictionary] = []
+	var body := entry.get("body") as Node3D
+	var origin: Vector3 = body.global_position if body != null else entry.get("porchPosition", Vector3.ZERO)
+	var role := String(entry.get("job", entry.get("role", ""))).to_lower()
+	for candidate in candidates:
+		var object_id := ""
+		var position := origin
+		var metadata := {}
+		if candidate is Node3D:
+			var node := candidate as Node3D
+			object_id = object_id_for_node(node)
+			position = node.global_position
+			metadata = { "material": String(node.get_meta("material", "")), "drop": String(node.get_meta("drop", "")) }
+		elif candidate is Dictionary:
+			object_id = String(candidate.get("objectId", ""))
+			position = candidate.get("position", origin)
+			metadata = candidate.get("metadata", {})
+		var distance := Vector2(position.x - origin.x, position.z - origin.z).length()
+		var congestion := 0
+		if registrations.has(object_id):
+			var registered_object = registrations[object_id]
+			congestion = registered_object.reservations.size()
+		var role_bonus := 0.0
+		var drop := String(metadata.get("drop", ""))
+		var material := String(metadata.get("material", ""))
+		if role == "forage" and (drop == "berries" or material == "berryBush"):
+			role_bonus = 18.0
+		elif role == "wood" and (drop == "logs" or material == "tree"):
+			role_bonus = 18.0
+		elif role == "stone" and (drop in ["stones", "copperOre", "ironOre"] or material in ["rock", "copperOre", "ironOre"]):
+			role_bonus = 18.0
+		var danger := float(metadata.get("danger", 0.0))
+		var score := distance + float(congestion) * CELL * 8.0 + danger * CELL * 10.0 - role_bonus
+		scored.append({
+			"objectId": object_id,
+			"position": position,
+			"score": score,
+			"distance": distance,
+			"congestion": congestion,
+			"danger": danger,
+			"roleBonus": role_bonus,
+			"action": action_kind
+		})
+	scored.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+		if is_equal_approx(float(a.get("score", 0.0)), float(b.get("score", 0.0))):
+			return String(a.get("objectId", "")) < String(b.get("objectId", ""))
+		return float(a.get("score", 0.0)) < float(b.get("score", 0.0))
+	)
+	return scored
+
+func registration_for_request(request):
+	var object_id := String(request_value(request, "object_id", ""))
+	if object_id == "" and request_value(request, "object_node", null) != null:
+		object_id = object_id_for_node(request_value(request, "object_node", null))
+	if object_id != "" and registrations.has(object_id):
+		return registrations[object_id]
+	var node := request_value(request, "object_node", null) as Node
+	if node != null and is_instance_valid(node):
+		if String(node.get_meta("kind", "")) == "prop":
+			object_id = register_resource(node, request_metadata(request))
+		elif node.has_meta("block_type"):
+			object_id = register_workstation(node, request_metadata(request))
+		if object_id != "" and registrations.has(object_id):
+			return registrations[object_id]
+	return null
+
+func first_available_slot(registration, owner_id: String, _action_kind: String) -> Dictionary:
+	var slots: Dictionary = registration.slots
+	var keys: Array = slots.keys()
+	keys.sort()
+	for key in keys:
+		var slot: Dictionary = slots[key]
+		var occupants: Array = slot.get("occupants", [])
+		if occupants.has(owner_id):
+			return slot
+	var object_capacity := int(registration.metadata.get("capacity", 1))
+	if registration.reservations.size() >= object_capacity:
+		return {}
+	for key in keys:
+		var slot: Dictionary = slots[key]
+		var capacity := int(slot.get("capacity", registration.metadata.get("capacity", 1)))
+		var occupants: Array = slot.get("occupants", [])
+		if occupants.size() < capacity:
+			return slot
+	return {}
+
+func reservation_for_owner(registration, owner_id: String) -> Dictionary:
+	if owner_id == "":
+		return {}
+	for reservation_value in registration.reservations.values():
+		var reservation: Dictionary = reservation_value
+		if String(reservation.get("ownerId", "")) == owner_id:
+			return reservation
+	return {}
+
+func reservation_for_request(registration, request) -> Dictionary:
+	var reservation_id := String(request_metadata(request).get("reservationId", ""))
+	if reservation_id != "" and registration.reservations.has(reservation_id):
+		return registration.reservations[reservation_id]
+	return reservation_for_owner(registration, _actor_id(request))
+
+func release_reservation(registration, reservation_id: String, owner_id: String, reason: String) -> int:
+	var released := 0
+	var keys: Array = registration.reservations.keys().duplicate()
+	for key in keys:
+		var reservation: Dictionary = registration.reservations[key]
+		if reservation_id != "" and String(key) != reservation_id:
+			continue
+		if reservation_id == "" and owner_id != "" and String(reservation.get("ownerId", "")) != owner_id:
+			continue
+		var slot_id := String(reservation.get("slotId", ""))
+		registration.reservations.erase(key)
+		var slot: Dictionary = registration.slots.get(slot_id, {}).duplicate(true)
+		var occupants: Array = slot.get("occupants", [])
+		occupants.erase(String(reservation.get("ownerId", "")))
+		slot["occupants"] = occupants
+		registration.slots[slot_id] = slot
+		released += 1
+		_record("released", registration.object_id, registration.kind, { "reservationId": String(key), "reason": reason })
+	return released
+
+func release_object_reservations(registration, reason: String) -> int:
+	var released := 0
+	for key in registration.reservations.keys().duplicate():
+		var reservation: Dictionary = registration.reservations[key]
+		released += release_reservation(registration, String(key), String(reservation.get("ownerId", "")), reason)
+	return released
+
+func validate_approach(registration, request, reservation: Dictionary) -> Dictionary:
+	var metadata := request_metadata(request)
+	if not bool(metadata.get("requiresApproach", registration.metadata.get("requiresApproach", true))):
+		return { "ok": true, "reason": "approach_not_required" }
+	var actor_position := actor_position_for_request(request)
+	if actor_position == Vector3.INF:
+		return { "ok": false, "reason": "missing_actor_position", "objectId": registration.object_id }
+	var slot := slot_for_reservation(registration, reservation)
+	if slot.is_empty():
+		return { "ok": false, "reason": "missing_approach_slot", "objectId": registration.object_id }
+	var slot_position: Vector3 = slot.get("position", object_position(registration))
+	var reach := float(metadata.get("actionReach", registration.metadata.get("actionReach", CELL * 1.55)))
+	var vertical_tolerance := float(metadata.get("verticalTolerance", registration.metadata.get("verticalTolerance", CELL * 0.72)))
+	var flat_distance := Vector2(actor_position.x - slot_position.x, actor_position.z - slot_position.z).length()
+	var vertical_delta := absf(actor_position.y - slot_position.y)
+	if vertical_delta > vertical_tolerance:
+		return { "ok": false, "reason": "wrong_vertical_layer", "verticalDelta": vertical_delta, "tolerance": vertical_tolerance, "slot": _vector_summary(slot_position), "actor": _vector_summary(actor_position) }
+	if flat_distance > reach:
+		return { "ok": false, "reason": "outside_action_reach", "distance": flat_distance, "reach": reach, "slot": _vector_summary(slot_position), "actor": _vector_summary(actor_position) }
+	var line_reason := line_of_sight_block_reason(actor_position, object_position(registration), registration)
+	if line_reason != "":
+		return { "ok": false, "reason": line_reason, "slot": _vector_summary(slot_position), "actor": _vector_summary(actor_position) }
+	return { "ok": true, "reason": "valid_approach", "distance": flat_distance, "slotId": String(slot.get("slotId", "")), "slot": _vector_summary(slot_position) }
+
+func validate_access_policy(registration, request) -> Dictionary:
+	var metadata := request_metadata(request)
+	var actor_kind := String(request_value(request, "actor_kind", metadata.get("actorKind", "")))
+	var allowed_actor_kinds: Array = registration.metadata.get("allowedActorKinds", [])
+	if not allowed_actor_kinds.is_empty() and not allowed_actor_kinds.has(actor_kind):
+		return {
+			"ok": false,
+			"reason": "access_denied",
+			"actorKind": actor_kind,
+			"allowedActorKinds": allowed_actor_kinds.duplicate()
+		}
+	var schedule_state := String(metadata.get("scheduleState", ""))
+	var allowed_schedule: Array = registration.metadata.get("allowedScheduleStates", [])
+	if schedule_state != "" and not allowed_schedule.is_empty() and not allowed_schedule.has(schedule_state):
+		return {
+			"ok": false,
+			"reason": "schedule_policy_closed",
+			"scheduleState": schedule_state,
+			"allowedScheduleStates": allowed_schedule.duplicate()
+		}
+	return { "ok": true, "reason": "access_granted" }
+
+func slot_for_reservation(registration, reservation: Dictionary) -> Dictionary:
+	if not reservation.is_empty():
+		var slot_id := String(reservation.get("slotId", ""))
+		if slot_id != "" and registration.slots.has(slot_id):
+			return registration.slots[slot_id]
+	var slots: Dictionary = registration.slots
+	var keys: Array = slots.keys()
+	keys.sort()
+	if keys.is_empty():
+		return {}
+	return slots[keys[0]]
+
+func effect_metrics(registration, request, reservation: Dictionary, action_kind: String) -> Dictionary:
+	var drop := String(registration.metadata.get("drop", ""))
+	var amount: int = max(1, int(registration.metadata.get("dropCount", registration.metadata.get("amount", 1))))
+	if registration.node != null and is_instance_valid(registration.node):
+		drop = String(registration.node.get_meta("drop", drop))
+		amount = max(1, int(registration.node.get_meta("drop_count", amount)))
+	var metrics := reservation_metrics(registration, reservation, true)
+	metrics["action"] = action_kind
+	metrics["drop"] = drop
+	metrics["amount"] = amount
+	metrics["material"] = String(registration.metadata.get("material", ""))
+	metrics["propId"] = String(registration.metadata.get("propId", ""))
+	if registration.node != null and is_instance_valid(registration.node):
+		metrics["propId"] = String(registration.node.get_meta("prop_id", metrics["propId"]))
+		if registration.node.has_meta("extra_drop"):
+			metrics["extraDrop"] = String(registration.node.get_meta("extra_drop", ""))
+			metrics["extraAmount"] = int(registration.node.get_meta("extra_drop_count", 0))
+	metrics["command"] = String(request_value(request, "command", ""))
+	return metrics
+
+func reservation_metrics(registration, reservation: Dictionary, effect_applied: bool) -> Dictionary:
+	var slot := slot_for_reservation(registration, reservation)
+	var position: Vector3 = slot.get("position", object_position(registration)) if not slot.is_empty() else object_position(registration)
+	return {
+		"objectId": registration.object_id,
+		"kind": registration.kind,
+		"reservationId": String(reservation.get("reservationId", "")),
+		"slotId": String(slot.get("slotId", reservation.get("slotId", ""))),
+		"ownerId": String(reservation.get("ownerId", "")),
+		"approachPosition": _vector_summary(position),
+		"effectApplied": effect_applied,
+		"depleted": registration.depleted
+	}
+
+func make_default_slots(node: Node, kind: String, metadata: Dictionary) -> Dictionary:
+	var base := object_position_from_node_or_metadata(node, metadata)
+	var reach := float(metadata.get("slotOffset", CELL * 1.05))
+	var positions := [
+		base + Vector3(reach, 0.0, 0.0),
+		base + Vector3(-reach, 0.0, 0.0),
+		base + Vector3(0.0, 0.0, reach),
+		base + Vector3(0.0, 0.0, -reach)
+	]
+	if kind in ["bed", "storage", "trader_stall", "workstation"]:
+		positions = [base + Vector3(0.0, 0.0, reach)]
+	var slots := {}
+	for i in range(positions.size()):
+		var slot_id := "slot:%d" % i
+		slots[slot_id] = {
+			"slotId": slot_id,
+			"position": positions[i],
+			"facing": base - positions[i],
+			"capacity": int(metadata.get("capacity", 1)),
+			"occupants": []
+		}
+	return slots
+
+func object_id_for_node(node: Node) -> String:
+	if node == null:
+		return ""
+	if node.has_meta("prop_id"):
+		return "prop:%s" % String(node.get_meta("prop_id"))
+	if node.has_meta("cell"):
+		var cell = node.get_meta("cell")
+		var kind := String(node.get_meta("block_type", node.name))
+		if cell is Vector3i:
+			return "block:%d,%d,%d:%s" % [cell.x, cell.y, cell.z, kind]
+	if node.has_meta("smart_object_id"):
+		return String(node.get_meta("smart_object_id"))
+	return "node:%s:%d" % [String(node.name), node.get_instance_id()]
+
+func object_position(registration) -> Vector3:
+	return object_position_from_node_or_metadata(registration.node, registration.metadata)
+
+func object_position_from_node_or_metadata(node: Node, metadata: Dictionary) -> Vector3:
+	if metadata.has("position") and metadata["position"] is Vector3:
+		return metadata["position"]
+	if node is Node3D and is_instance_valid(node):
+		var node_3d := node as Node3D
+		return node_3d.global_position if node_3d.is_inside_tree() else node_3d.position
+	return Vector3.ZERO
+
+func actor_position_for_request(request) -> Vector3:
+	var metadata := request_metadata(request)
+	if metadata.has("actorPosition") and metadata["actorPosition"] is Vector3:
+		return metadata["actorPosition"]
+	var actor := request_value(request, "actor_node", null) as Node3D
+	if actor != null and is_instance_valid(actor):
+		return actor.global_position if actor.is_inside_tree() else actor.position
+	return Vector3.INF
+
+func line_of_sight_block_reason(from_position: Vector3, to_position: Vector3, registration) -> String:
+	var blockers: Array = registration.metadata.get("blockers", [])
+	for blocker in blockers:
+		if blocker is AABB and segment_samples_enter_aabb(from_position, to_position, blocker):
+			return "line_of_sight_blocked"
+	var main_node = owner.get("main") if owner != null else null
+	if main_node == null:
+		return ""
+	var blocks: Dictionary = main_node.get("blocks")
+	if blocks.is_empty():
+		return ""
+	var flat_distance := Vector2(to_position.x - from_position.x, to_position.z - from_position.z).length()
+	var steps: int = maxi(2, ceili(flat_distance / (CELL * 0.45)))
+	for i in range(1, steps):
+		var t := float(i) / float(steps)
+		var sample := from_position.lerp(to_position, t)
+		var sample_cell := Vector3i(roundi(sample.x / CELL), roundi(sample.y / CELL), roundi(sample.z / CELL))
+		for dy in range(-1, 2):
+			var key := Vector3i(sample_cell.x, sample_cell.y + dy, sample_cell.z)
+			if not blocks.has(key):
+				continue
+			var block := blocks[key] as Node
+			if block == null or not is_instance_valid(block):
+				continue
+			var block_type := String(block.get_meta("block_type", ""))
+			if block_type in ["cobblestonePath", "torch"]:
+				continue
+			if block_type == "door" and bool(block.get_meta("open", false)):
+				continue
+			return "line_of_sight_blocked"
+	return ""
+
+func segment_samples_enter_aabb(from_position: Vector3, to_position: Vector3, bounds: AABB) -> bool:
+	for i in range(1, 16):
+		var t := float(i) / 16.0
+		if bounds.has_point(from_position.lerp(to_position, t)):
+			return true
+	return false
+
+func reservation_owners(registration) -> Array:
+	var owners := []
+	for reservation in registration.reservations.values():
+		owners.append(String((reservation as Dictionary).get("ownerId", "")))
+	return owners
+
+func stable_request_id(request) -> String:
+	var request_id := String(request_value(request, "request_id", ""))
+	if request_id != "":
+		return request_id
+	return "%s:%s:%s:%d" % [String(request_value(request, "command", "")), String(request_value(request, "object_id", "")), _actor_id(request), int(request_value(request, "generation", 0))]
+
+func _actor_id(request) -> String:
+	var actor_id := String(request_value(request, "actor_id", ""))
+	if actor_id != "":
+		return actor_id
+	var actor := request_value(request, "actor_node", null) as Node
+	if actor != null:
+		if actor.has_meta("npc_stable_id"):
+			return String(actor.get_meta("npc_stable_id"))
+		if actor.name != "":
+			return String(actor.name)
+	return String(request_metadata(request).get("actorId", ""))
+
+func _is_single_use(registration) -> bool:
+	return bool(registration.metadata.get("singleUse", registration.kind in ["forage_source", "tree_source", "stone_source"]))
+
+func request_value(request, key: String, default_value = null):
+	if request == null:
+		return default_value
+	if request is Dictionary:
+		return request.get(key, default_value)
+	var value = request.get(key)
+	return default_value if value == null else value
+
+func request_metadata(request) -> Dictionary:
+	var metadata = request_value(request, "metadata", {})
+	return metadata if metadata is Dictionary else {}
+
+func _result(status: StringName, reason: StringName, metrics := {}):
+	var result = InteractionResultScript.make(status, reason)
+	result.metrics = metrics.duplicate(true) if metrics is Dictionary else {}
+	result.interaction_id = String(result.metrics.get("reservationId", result.metrics.get("requestId", "")))
+	result.owner_npc_id = String(result.metrics.get("ownerId", ""))
+	return result
+
+func _vector_summary(value: Vector3) -> Array:
+	return [snappedf(value.x, 0.001), snappedf(value.y, 0.001), snappedf(value.z, 0.001)]
+
+func _next_revision() -> int:
+	revision_counter += 1
+	return revision_counter
+
+func _count(key: String) -> void:
+	counters[key] = int(counters.get(key, 0)) + 1
+
+func _record(action: String, object_id: String, kind: String, metadata := {}) -> void:
+	_count(action)
+	if owner != null and owner.get("telemetry") != null:
+		var telemetry = owner.get("telemetry")
+		if telemetry != null and telemetry.has_method("record_event"):
+			telemetry.record_event("_system", &"smart_object", action, StringName(kind), {
+				"objectId": object_id,
+				"metadata": metadata.duplicate(true) if metadata is Dictionary else {}
+			})
 
 func stats() -> Dictionary:
 	return {
 		"registrations": registrations.size(),
-		"doorPortals": door_portals.stats() if door_portals != null else {}
+		"doorPortals": door_portals.stats() if door_portals != null else {},
+		"completedEffects": completed_effects.size(),
+		"counters": counters.duplicate(true)
 	}
