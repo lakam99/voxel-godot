@@ -6,7 +6,7 @@ Branch: `npc-pathfinding/phase-13-finalize`
 
 Base commit: `56119cef054cd444f6e9b87886b66054936785d0`
 
-Status: focused NPC suites, broad playtest, static audit, and world signature pass on the phase branch. Branch all-runner, merge commit, merged `master` all-runner, and final report hash rows are pending until those commands are run.
+Status: focused NPC suites, broad playtest, static audit, world signature, and branch all-runner pass on the phase branch. Merge commit, merged `master` all-runner, and final report hash rows are pending until those commands are run.
 
 ## Evidence Index
 
@@ -36,11 +36,17 @@ Static audit and world signature:
 - `.\tools\run-world-signature.ps1` reports the generated latest signature matches `artifacts/baselines/world-signature/atlas-1492.json`.
 - Baseline and latest hash: `05290360F4ACA4965AC3EB6EA6B4D5E886A01F52CE02E073D1B845DCA87A63D5`.
 
-Pending evidence:
+Branch all-runner evidence:
 
 - Branch all-runner report: `artifacts/test-runners/phase13-branch-all-test-runners-report.json`
+- Branch HEAD during run: `4e1d893ec9fd2de7e6dd90461250c2fdd4ce9521`
+- Aggregate: 10 runner entries, 0 failures, 861.809 seconds.
+- Runner rows: `npc_focused`, `npc_observation_dusk`, `npc_observation_midnight`, `npc_observation_phase12`, `world_signature`, `visual_manifest`, `npc_navigation_integration`, `story_playtest`, `visual_captures`, and `playtest` all passed with exit code 0.
+
+Pending evidence:
+
 - Merged `master` all-runner report: `artifacts/test-runners/phase13-master-all-test-runners-report.json`
-- Branch implementation/report commit: pending
+- Branch implementation/report commit: `4e1d893ec9fd2de7e6dd90461250c2fdd4ce9521`
 - Merge commit: pending
 
 ## 23.1 Architecture and ownership
@@ -162,9 +168,9 @@ Pending evidence:
 - [x] All queues/caches/traces are bounded. Evidence: contract, traffic, streaming/save, and soak reports.
 - [x] Existing dedicated NPC navigation runner passes. Evidence: `phase13-npc-navigation-post-event.json`, 11 results, 0 failures.
 - [x] Broad playtest passes. Evidence: `phase13-playtest-after-event-flush.json`, 181 results, 0 failures.
-- [ ] Story playtest passes. Evidence pending branch all-runner report.
+- [x] Story playtest passes. Evidence: branch all-runner `story_playtest`, exit 0, 77.031s, report `artifacts/test-runners/story-playtest-report.json`.
 - [x] World signature passes with understood baseline. Evidence: `.\tools\run-world-signature.ps1`, matching baseline/latest hash `05290360F4ACA4965AC3EB6EA6B4D5E886A01F52CE02E073D1B845DCA87A63D5`.
-- [ ] Visual captures and manifest validation pass. Evidence pending branch all-runner report.
+- [x] Visual captures and manifest validation pass. Evidence: branch all-runner `visual_manifest` exit 0, 0.090s; `visual_captures` exit 0, 71.934s, report `artifacts/test-runners/visual/visual-captures.json`.
 - [ ] Phase branch and merged `master` both pass the all-runner gate. Evidence pending branch and master all-runner reports.
 - [x] Final observation artifacts were inspected and documented. Evidence: `phase13-observation-both-post-event.json` and Phase 13 report Section 9.
 
