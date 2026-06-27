@@ -202,12 +202,16 @@ func tutorial_home_record(index: int, fallback_home: Vector2i, fallback_porch: V
             return {
                 "homeCell": record.get("homeCell", fallback_home),
                 "porchCell": record.get("porchCell", fallback_porch),
-                "guardCell": record.get("guardCell", fallback_guard)
+                "guardCell": record.get("guardCell", fallback_guard),
+                "interiorMinCell": record.get("interiorMinCell", fallback_home),
+                "interiorMaxCell": record.get("interiorMaxCell", fallback_home)
             }
     return {
         "homeCell": fallback_home,
         "porchCell": fallback_porch,
-        "guardCell": fallback_guard
+        "guardCell": fallback_guard,
+        "interiorMinCell": fallback_home,
+        "interiorMaxCell": fallback_home
     }
 
 func configure_starting_inventory() -> void:

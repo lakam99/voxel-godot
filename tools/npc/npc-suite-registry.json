@@ -48,6 +48,12 @@
       "description": "Phase 08 space-time traffic, door queue fairness, and deadlock recovery tests",
       "command": ".\\tools\\npc\\run-npc-traffic-tests.ps1",
       "defaultArgs": ["-TimeMode", "Both"]
+    },
+    {
+      "id": "behavior",
+      "description": "Phase 09 utility goals, symbolic task planning, and day/night schedule tests",
+      "command": ".\\tools\\npc\\run-npc-behavior-tests.ps1",
+      "defaultArgs": ["-TimeMode", "Both"]
     }
   ]
 }

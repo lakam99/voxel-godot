@@ -190,6 +190,8 @@ func register_npc(body: Node3D, profile: Dictionary) -> Dictionary:
         "guardCell": guard_cell,
         "homePosition": cell_to_position(home_cell, level),
         "porchPosition": cell_to_position(porch_cell, level),
+        "interiorMinCell": profile.get("interiorMinCell", home_cell),
+        "interiorMaxCell": profile.get("interiorMaxCell", home_cell),
         "guardPosition": cell_to_position(guard_cell, level),
         "homeRoutePositions": route_positions_from_profile(profile.get("homeRouteCells", []), level),
         "homeRouteIndex": 0,
@@ -289,7 +291,9 @@ func publish_navigation_profile_semantics(entry: Dictionary) -> void:
     var town_center: Vector2i = entry.get("townCenter", home_cell)
     var town_radius := int(entry.get("townRadius", 0))
     var home_id := "home:%s:%s" % [semantic_scope, stable_id]
-    register_navigation_semantic_once(&"home_interior", home_id, navigation_cell_bounds(home_cell, level, 1, CELL * 2.4), {
+    var interior_min: Vector2i = entry.get("interiorMinCell", home_cell)
+    var interior_max: Vector2i = entry.get("interiorMaxCell", home_cell)
+    register_navigation_semantic_once(&"home_interior", home_id, navigation_rect_bounds(interior_min, interior_max, level, CELL * 2.4), {
         "npcId": stable_id,
         "buildingId": home_id,
         "inside": true,
@@ -348,6 +352,14 @@ func navigation_cell_bounds(cell: Vector2i, level: float, radius_cells := 1, hei
     var footprint_cells: int = radius_cells * 2 + 1
     var origin := Vector3(float(cell.x - radius_cells) * CELL - CELL * 0.5, level - CELL * 0.1, float(cell.y - radius_cells) * CELL - CELL * 0.5)
     return AABB(origin, Vector3(float(footprint_cells) * CELL, height, float(footprint_cells) * CELL))
+
+func navigation_rect_bounds(min_cell: Vector2i, max_cell: Vector2i, level: float, height := CELL * 2.0) -> AABB:
+    var min_x := mini(min_cell.x, max_cell.x)
+    var max_x := maxi(min_cell.x, max_cell.x)
+    var min_z := mini(min_cell.y, max_cell.y)
+    var max_z := maxi(min_cell.y, max_cell.y)
+    var origin := Vector3(float(min_x) * CELL - CELL * 0.5, level - CELL * 0.1, float(min_z) * CELL - CELL * 0.5)
+    return AABB(origin, Vector3(float(max_x - min_x + 1) * CELL, height, float(max_z - min_z + 1) * CELL))
 
 func navigation_town_bounds(center: Vector2i, radius_cells: int, level: float) -> AABB:
     var radius: int = maxi(1, radius_cells)
@@ -468,9 +480,11 @@ func spawn_town_npc(record: Dictionary, index: int) -> CharacterBody3D:
         "level": level,
         "homeCell": record.get("homeCell", Vector2i.ZERO),
         "porchCell": porch_cell,
+        "interiorMinCell": record.get("interiorMinCell", record.get("homeCell", Vector2i.ZERO)),
+        "interiorMaxCell": record.get("interiorMaxCell", record.get("homeCell", Vector2i.ZERO)),
         "guardCell": record.get("guardCell", porch_cell),
         "canFight": can_fight,
-        "nightGuard": can_fight
+        "nightGuard": role.to_lower().find("guard") >= 0
     })
     return body
 
@@ -504,6 +518,12 @@ func update_npcs(delta: float, day_factor: float) -> void:
     npc_update_cursor = (npc_update_cursor + budget) % max(1, npcs.size())
 
 func update_npc(entry: Dictionary, delta: float, night_factor: float) -> void:
+    if autonomy_system != null and autonomy_system.has_method("update_legacy_npc"):
+        autonomy_system.update_legacy_npc(entry, delta, night_factor)
+        return
+    update_npc_legacy_fallback(entry, delta, night_factor)
+
+func update_npc_legacy_fallback(entry: Dictionary, delta: float, night_factor: float) -> void:
     var body := entry.get("body") as Node3D
     update_npc_needs(entry, delta, night_factor)
     if npc_is_held_by_intro_or_dialogue(entry, body):
@@ -607,7 +627,7 @@ func update_wander_target(entry: Dictionary, body: Node3D, delta: float) -> Vect
     var day_target: Vector3 = entry.get("dayTarget", body.global_position)
     if wander_timer <= 0.0 or body.global_position.distance_to(day_target) < CELL * 0.65 or not point_inside_town(entry, day_target):
         day_target = choose_day_target(entry)
-        wander_timer = randf_range(3.0, 7.0)
+        wander_timer = 4.0 + float(abs(hash(String(entry.get("id", "npc")))) % 180) / 60.0
     entry["wanderTimer"] = wander_timer
     entry["dayTarget"] = day_target
     return day_target
@@ -905,16 +925,18 @@ func set_npc_goal(entry: Dictionary, goal: String) -> void:
         body.set_meta("npc_goal", goal)
 
 func clear_home_route_terminal(entry: Dictionary) -> void:
-    if String(entry.get("routeReason", "")) != "home_porch_fallback":
+    if not (String(entry.get("routeReason", "")) in ["home_porch_fallback", "home_porch_fallback_not_inside", "porch_not_inside", "threshold_not_inside"]):
         return
     entry["routeStatus"] = "idle"
     entry["routeReason"] = ""
+    entry["homeBlocked"] = false
     entry["routeFallbackCell"] = Vector2i(999999, 999999)
     entry["routeForceReplan"] = true
     var body := entry.get("body") as Node
     if body:
         body.set_meta("npc_route_status", "idle")
         body.set_meta("npc_route_reason", "")
+        body.set_meta("npc_home_blocked", false)
 
 func npc_inventory_count(entry: Dictionary, item_id: String) -> int:
     var personal_inventory: Dictionary = entry.get("personalInventory", {})
@@ -1026,7 +1048,11 @@ func home_route_target(entry: Dictionary) -> Vector3:
             return route_target
         route_index += 1
     entry["homeRouteIndex"] = route_index
-    return porch if not home_route_step_reached(entry, porch) else home
+    var current_cell := flat_cell_for_position(body.global_position)
+    var porch_cell: Vector2i = entry.get("porchCell", entry.get("homeCell", Vector2i.ZERO))
+    if abs(current_cell.x - porch_cell.x) <= 1 and abs(current_cell.y - porch_cell.y) <= 1:
+        return home
+    return home
 
 func home_route_step_reached(entry: Dictionary, route_target: Vector3) -> bool:
     var body := entry.get("body") as Node3D
@@ -1034,18 +1060,28 @@ func home_route_step_reached(entry: Dictionary, route_target: Vector3) -> bool:
         return true
     if body.global_position.distance_to(route_target) <= CELL * 0.82:
         return true
-    if String(entry.get("routeStatus", "")) != "arrived" or not entry.has("homeActiveTargetCell"):
-        return false
     var target_cell := flat_cell_for_position(route_target)
+    var current_cell := flat_cell_for_position(body.global_position)
+    var porch_cell: Vector2i = entry.get("porchCell", target_cell)
+    var route_status := String(entry.get("routeStatus", ""))
+    if target_cell == porch_cell and abs(current_cell.x - target_cell.x) <= 1 and abs(current_cell.y - target_cell.y) <= 1:
+        return true
+    if route_status != "arrived" or not entry.has("homeActiveTargetCell"):
+        return false
     var active_cell: Vector2i = entry.get("homeActiveTargetCell", target_cell)
     if active_cell != target_cell:
         return false
-    var current_cell := flat_cell_for_position(body.global_position)
     return abs(current_cell.x - target_cell.x) <= 1 and abs(current_cell.y - target_cell.y) <= 1
 
 func settle_home_if_reached(entry: Dictionary) -> void:
     var body := entry.get("body") as Node3D
     if body == null:
+        return
+    var inside_semantic := false
+    if autonomy_system != null and autonomy_system.has_method("is_inside_home_interior"):
+        inside_semantic = bool(autonomy_system.is_inside_home_interior(entry, body.global_position))
+    if inside_semantic:
+        mark_npc_inside_home(entry)
         return
     var home_cell: Vector2i = entry.get("homeCell", Vector2i.ZERO)
     var porch_cell: Vector2i = entry.get("porchCell", home_cell)
@@ -1062,7 +1098,7 @@ func settle_home_if_reached(entry: Dictionary) -> void:
     var target_is_home := active_target_cell == home_cell
     var target_is_home_edge := target_is_home or active_target_cell == porch_cell
     var route_arrived_at_porch_fallback := route_arrived and target_is_home and fallback_cell == porch_cell and current_cell == porch_cell
-    if near_home or (route_arrived and not route_arrived_at_porch_fallback and body.global_position.distance_to(home) <= CELL * 1.45):
+    if autonomy_system == null and (near_home or (route_arrived and not route_arrived_at_porch_fallback and body.global_position.distance_to(home) <= CELL * 1.45)):
         mark_npc_inside_home(entry)
         return
 
@@ -1073,8 +1109,36 @@ func settle_home_if_reached(entry: Dictionary) -> void:
     var current_is_safe_home_edge := current_cell == porch_cell or current_cell == home_cell or body.global_position.distance_to(porch) <= CELL * 1.75
     var at_safe_porch := body.global_position.distance_to(porch) <= CELL * 1.75
     var fallback_supports_safe_edge := (fallback_is_safe_home_edge and at_fallback) or fallback_missing or current_is_safe_home_edge
-    if target_is_home_edge and route_terminal and fallback_supports_safe_edge and at_safe_porch:
-        mark_npc_inside_home(entry, "home_porch_fallback")
+    entry["homeSettleDebug"] = {
+        "insideSemantic": inside_semantic,
+        "routeStatus": route_status,
+        "currentCell": current_cell,
+        "homeCell": home_cell,
+        "porchCell": porch_cell,
+        "activeTargetCell": active_target_cell,
+        "fallbackCell": fallback_cell,
+        "targetIsHomeEdge": target_is_home_edge,
+        "routeTerminal": route_terminal,
+        "fallbackSupportsSafeEdge": fallback_supports_safe_edge,
+        "atSafePorch": at_safe_porch,
+        "distanceToPorch": body.global_position.distance_to(porch)
+    }
+    if target_is_home and route_terminal and fallback_supports_safe_edge and at_safe_porch:
+        mark_npc_home_blocked(entry, "home_porch_fallback_not_inside")
+
+func mark_npc_home_blocked(entry: Dictionary, reason := "home_blocked") -> void:
+    var body := entry.get("body") as Node3D
+    if body == null:
+        return
+    entry["insideHome"] = false
+    entry["homeBlocked"] = true
+    entry["routeStatus"] = "blocked"
+    entry["routeReason"] = reason
+    entry["unreachableGoals"] = int(entry.get("unreachableGoals", 0)) + 1
+    body.set_meta("npc_inside_home", false)
+    body.set_meta("npc_home_blocked", true)
+    body.set_meta("npc_route_status", "blocked")
+    body.set_meta("npc_route_reason", reason)
 
 func mark_npc_inside_home(entry: Dictionary, fallback_reason := "") -> void:
     var body := entry.get("body") as Node3D

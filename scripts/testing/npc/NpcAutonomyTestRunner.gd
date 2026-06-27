@@ -52,6 +52,7 @@ var repair_case_provider = null
 var door_case_provider = null
 var avoidance_case_provider = null
 var traffic_case_provider = null
+var behavior_case_provider = null
 var metrics := {
 	"assertions": 0,
 	"selectedCases": 0,
@@ -288,6 +289,8 @@ func contract_cases() -> Array[Dictionary]:
 		cases.append_array(avoidance_cases())
 	if suite_filter == "traffic" or suite_filter == "all" or suite_filter == "":
 		cases.append_array(traffic_cases())
+	if suite_filter == "behavior" or suite_filter == "all" or suite_filter == "":
+		cases.append_array(behavior_cases())
 	return cases
 
 func motor_cases() -> Array[Dictionary]:
@@ -387,6 +390,13 @@ func traffic_cases() -> Array[Dictionary]:
 		traffic_case_provider = provider_script.new()
 		traffic_case_provider.call("setup", self)
 	return traffic_case_provider.call("cases")
+
+func behavior_cases() -> Array[Dictionary]:
+	if behavior_case_provider == null:
+		var provider_script = load("res://scripts/testing/npc/NpcBehaviorTestCases.gd")
+		behavior_case_provider = provider_script.new()
+		behavior_case_provider.call("setup", self)
+	return behavior_case_provider.call("cases")
 
 func suite_matches(case_suite: String) -> bool:
 	return suite_filter == "" or suite_filter == "all" or suite_filter == case_suite

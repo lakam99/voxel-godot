@@ -1,0 +1,14 @@
+[gd_resource type="Resource" script_class="NpcRoleScheduleResource" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://scripts/npc_ai/behavior/NpcRoleScheduleResource.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+role_id = "tutorial"
+canonical_job = ""
+day_goal_kind = &"idle"
+dusk_goal_kind = &"home"
+night_goal_kind = &"home"
+can_take_night_guard = false
+requires_interior_home = true
+semantic_anchor_kinds = Array[String](["home_interior", "road"])

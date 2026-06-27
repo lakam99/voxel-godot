@@ -17,6 +17,14 @@ const SafeIntervalPlannerScript := preload("res://scripts/npc_ai/traffic/SafeInt
 const WaitForGraphScript := preload("res://scripts/npc_ai/traffic/WaitForGraph.gd")
 const TrafficPriorityPolicyScript := preload("res://scripts/npc_ai/traffic/TrafficPriorityPolicy.gd")
 const TrafficReservationServiceScript := preload("res://scripts/npc_ai/traffic/TrafficReservationService.gd")
+const GuardRosterServiceScript := preload("res://scripts/npc_ai/behavior/GuardRosterService.gd")
+const NpcScheduleServiceScript := preload("res://scripts/npc_ai/behavior/NpcScheduleService.gd")
+const NpcPerceptionServiceScript := preload("res://scripts/npc_ai/behavior/NpcPerceptionService.gd")
+const NpcGoalSelectorScript := preload("res://scripts/npc_ai/behavior/NpcGoalSelector.gd")
+const NpcActionLibraryScript := preload("res://scripts/npc_ai/behavior/NpcActionLibrary.gd")
+const NpcTaskPlannerScript := preload("res://scripts/npc_ai/behavior/NpcTaskPlanner.gd")
+const NpcRecoveryPolicyScript := preload("res://scripts/npc_ai/behavior/NpcRecoveryPolicy.gd")
+const NpcPlanExecutorScript := preload("res://scripts/npc_ai/behavior/NpcPlanExecutor.gd")
 
 var npc_system: Node
 var main: Node
@@ -37,6 +45,14 @@ var safe_interval_planner
 var wait_for_graph
 var traffic_priority_policy
 var traffic_reservations
+var guard_roster
+var schedule_service
+var perception_service
+var goal_selector
+var action_library
+var task_planner
+var recovery_policy
+var plan_executor
 
 func _init() -> void:
 	scheduler = NpcBrainSchedulerScript.new()
@@ -53,6 +69,7 @@ func _init() -> void:
 	traffic_priority_policy = TrafficPriorityPolicyScript.new()
 	traffic_reservations = TrafficReservationServiceScript.new()
 	traffic_reservations.setup(bottleneck_classifier, safe_interval_planner, wait_for_graph, traffic_priority_policy)
+	setup_behavior_services()
 
 func setup(system_node: Node, main_node: Node) -> void:
 	npc_system = system_node
@@ -67,6 +84,7 @@ func setup(system_node: Node, main_node: Node) -> void:
 	traffic_reservations = TrafficReservationServiceScript.new()
 	traffic_reservations.setup(bottleneck_classifier, safe_interval_planner, wait_for_graph, traffic_priority_policy)
 	door_traversal.setup(door_portals, traffic_reservations, bottleneck_classifier, traffic_priority_policy, wait_for_graph)
+	setup_behavior_services()
 	telemetry.record_event("_system", &"architecture", "setup", &"none", {
 		"architectureVersion": architecture_version,
 		"locomotionMode": locomotion_mode
@@ -97,6 +115,28 @@ func clear() -> void:
 	traffic_reservations = TrafficReservationServiceScript.new()
 	traffic_reservations.setup(bottleneck_classifier, safe_interval_planner, wait_for_graph, traffic_priority_policy)
 	door_traversal.setup(door_portals, traffic_reservations, bottleneck_classifier, traffic_priority_policy, wait_for_graph)
+	setup_behavior_services()
+
+func setup_behavior_services() -> void:
+	guard_roster = GuardRosterServiceScript.new()
+	schedule_service = NpcScheduleServiceScript.new()
+	schedule_service.setup(guard_roster)
+	perception_service = NpcPerceptionServiceScript.new()
+	perception_service.setup(self, npc_system)
+	goal_selector = NpcGoalSelectorScript.new()
+	action_library = NpcActionLibraryScript.new()
+	task_planner = NpcTaskPlannerScript.new()
+	task_planner.setup(action_library)
+	recovery_policy = NpcRecoveryPolicyScript.new()
+	plan_executor = NpcPlanExecutorScript.new()
+	plan_executor.setup(self, npc_system, main, {
+		"schedule": schedule_service,
+		"guardRoster": guard_roster,
+		"perception": perception_service,
+		"goalSelector": goal_selector,
+		"taskPlanner": task_planner,
+		"recovery": recovery_policy
+	})
 
 func register_legacy_npc(body: Node, profile: Dictionary, legacy_entry: Dictionary):
 	if body == null:
@@ -109,6 +149,8 @@ func register_legacy_npc(body: Node, profile: Dictionary, legacy_entry: Dictiona
 	scheduler.register_agent(context.stable_id)
 	legacy_entry["agentContext"] = context
 	legacy_entry["blackboard"] = blackboard
+	if guard_roster != null:
+		guard_roster.migrate_legacy_duty(context, legacy_entry)
 	body.set_meta("npc_stable_id", context.stable_id)
 	body.set_meta("npc_guard_duty", String(context.guard_duty_kind))
 	telemetry.record_event(context.stable_id, &"registration", "legacy_registered", &"none", {
@@ -116,6 +158,29 @@ func register_legacy_npc(body: Node, profile: Dictionary, legacy_entry: Dictiona
 		"guardDuty": String(context.guard_duty_kind)
 	})
 	return context
+
+func update_legacy_npc(entry: Dictionary, delta: float, night_factor: float) -> void:
+	if plan_executor == null:
+		return
+	plan_executor.update_legacy_npc(entry, delta, night_factor)
+
+func inject_schedule_snapshot(snapshot: Dictionary) -> void:
+	if schedule_service != null:
+		schedule_service.inject_snapshot(snapshot)
+
+func clear_injected_schedule_snapshot() -> void:
+	if schedule_service != null:
+		schedule_service.clear_injected_snapshot()
+
+func is_inside_home_interior(entry: Dictionary, position: Vector3) -> bool:
+	if perception_service == null:
+		return false
+	return perception_service.is_inside_home_interior(entry, position)
+
+func release_action_owned_state(entry: Dictionary, reason := "released") -> void:
+	release_npc_traffic_reservations(entry, reason)
+	var body := entry.get("body") as Node
+	release_npc_door_hold(body if body != null else String(entry.get("id", "")), true)
 
 func unregister_legacy_npc(body: Node) -> void:
 	if body == null:
@@ -392,7 +457,9 @@ func stats() -> Dictionary:
 		"smartObjects": smart_objects.stats() if smart_objects != null else {},
 		"doorPortals": door_portals.stats() if door_portals != null else {},
 		"doorTraversal": door_traversal.stats() if door_traversal != null else {},
-		"traffic": traffic_reservations.stats() if traffic_reservations != null else {}
+		"traffic": traffic_reservations.stats() if traffic_reservations != null else {},
+		"guardRoster": guard_roster.summary() if guard_roster != null else {},
+		"behavior": plan_executor.stats() if plan_executor != null else {}
 	}
 
 func _bounds_for_cell(cell: Vector3i) -> AABB:
