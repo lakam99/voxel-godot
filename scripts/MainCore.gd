@@ -87,8 +87,18 @@ var time_of_day := 0.32
 var next_fishing_ready_at := 0.0
 var fishing_rng := RandomNumberGenerator.new()
 var test_seed_sequence := 0
+var runtime_perf_monitor = RuntimePerformanceMonitorScript.new()
 var autosave_elapsed := 0.0
+var autosave_interval_seconds := 60.0
 var autosave_enabled := true
+var autosave_dirty := false
+var autosave_dirty_reasons := {}
+var autosave_jobs_started := 0
+var autosave_jobs_completed := 0
+var autosave_jobs_failed := 0
+var autosave_last_player_position := Vector3.INF
+var autosave_last_player_rotation_y := INF
+var autosave_last_time_bucket := -1
 var discovered_biomes := {}
 var discovered_town_keys := {}
 var discovered_shrine_keys := {}
@@ -119,6 +129,10 @@ var pickup_nodes_discarded := 0
 var wildlife_nodes: Array = []
 var map_sample_cache_key := ""
 var map_sample_cache: Array = []
+var navigation_map_state_cache_key := ""
+var navigation_map_state_cache := {}
+var navigation_map_state_cache_elapsed := 999.0
+var navigation_map_state_cache_interval := 0.75
 var visual_quality := {
     "decorativeDensity": 0.74,
     "decorativeDetailCap": 72,
@@ -157,6 +171,10 @@ var perf_survival_ms := 0.0
 var perf_hostiles_ms := 0.0
 var perf_beacon_ms := 0.0
 var perf_autosave_ms := 0.0
+var perf_npc_ms := 0.0
+var perf_route_plan_ms := 0.0
+var perf_nav_snapshot_ms := 0.0
+var perf_job_scan_ms := 0.0
 var perf_break_ms := 0.0
 var perf_hud_ms := 0.0
 var local_light_lod_elapsed := 0.0
@@ -224,6 +242,7 @@ func _ready() -> void:
     if not loaded and tutorial_system and tutorial_system.last_message != "":
         ready_message = tutorial_system.last_message
     update_hud(ready_message)
+    reset_autosave_dirty_tracking(not loaded, "new_world")
 
 func playtest_progress(label: String) -> void:
     var path: String = OS.get_environment("VOXEL_PLAYTEST_PROGRESS")
@@ -239,6 +258,85 @@ func setup_save_system() -> void:
     autosave_enabled = OS.get_environment("VOXEL_PLAYTEST") == ""
     var save_path := "user://voxel_biome_world_saves.json" if autosave_enabled else "user://voxel_biome_world_playtest_saves.json"
     save_system = SaveSystemScript.new(save_path)
+    autosave_interval_seconds = 60.0
+
+func mark_world_dirty(reason := "world") -> void:
+    autosave_dirty = true
+    autosave_dirty_reasons[String(reason)] = true
+
+func reset_autosave_dirty_tracking(mark_dirty := false, reason := "reset") -> void:
+    autosave_dirty = mark_dirty
+    autosave_dirty_reasons.clear()
+    if mark_dirty:
+        autosave_dirty_reasons[String(reason)] = true
+    if player:
+        autosave_last_player_position = player.global_position
+        autosave_last_player_rotation_y = player.rotation.y
+    else:
+        autosave_last_player_position = Vector3.INF
+        autosave_last_player_rotation_y = INF
+    autosave_last_time_bucket = floori(time_of_day * 48.0)
+
+func update_autosave_dirty_state() -> void:
+    if player:
+        if not is_finite(autosave_last_player_position.x):
+            autosave_last_player_position = player.global_position
+            autosave_last_player_rotation_y = player.rotation.y
+        elif autosave_last_player_position.distance_squared_to(player.global_position) >= 0.20 * 0.20:
+            autosave_last_player_position = player.global_position
+            mark_world_dirty("player_position")
+        if not is_finite(autosave_last_player_rotation_y) or absf(wrapf(player.rotation.y - autosave_last_player_rotation_y, -PI, PI)) >= 0.04:
+            autosave_last_player_rotation_y = player.rotation.y
+            mark_world_dirty("player_rotation")
+    var time_bucket := floori(time_of_day * 48.0)
+    if autosave_last_time_bucket != time_bucket:
+        autosave_last_time_bucket = time_bucket
+        mark_world_dirty("world_time")
+
+func process_autosave(delta: float) -> void:
+    var section_start: int = runtime_perf_monitor.begin_section("autosave") if runtime_perf_monitor != null else Time.get_ticks_usec()
+    if save_system != null and save_system.has_method("poll_async_save"):
+        var async_result: Dictionary = save_system.poll_async_save()
+        if not async_result.is_empty():
+            autosave_jobs_completed += 1
+            if not bool(async_result.get("ok", false)):
+                autosave_jobs_failed += 1
+                mark_world_dirty("autosave_retry")
+            if runtime_perf_monitor != null:
+                runtime_perf_monitor.observe_external_duration("autosave_json_stringify_write", float(async_result.get("stringifyWriteMs", 0.0)))
+    if not autosave_enabled or save_system == null:
+        perf_autosave_ms = runtime_perf_monitor.end_section("autosave", section_start) if runtime_perf_monitor != null else float(Time.get_ticks_usec() - section_start) / 1000.0
+        return
+    update_autosave_dirty_state()
+    autosave_elapsed += delta
+    if autosave_elapsed >= autosave_interval_seconds:
+        autosave_elapsed = 0.0
+        if autosave_dirty:
+            var pending := bool(save_system.call("has_async_save_pending")) if save_system.has_method("has_async_save_pending") else false
+            if pending:
+                mark_world_dirty("autosave_pending")
+                if runtime_perf_monitor != null:
+                    runtime_perf_monitor.increment_counter("autosave_pending")
+            else:
+                var snapshot_start: int = runtime_perf_monitor.begin_section("autosave_snapshot") if runtime_perf_monitor != null else Time.get_ticks_usec()
+                var snapshot: Dictionary = create_save_snapshot()
+                if runtime_perf_monitor != null:
+                    runtime_perf_monitor.end_section("autosave_snapshot", snapshot_start)
+                var started := false
+                if save_system.has_method("save_async"):
+                    started = bool(save_system.save_async(seed_text, snapshot))
+                else:
+                    started = bool(save_system.save(seed_text, snapshot))
+                if started:
+                    autosave_jobs_started += 1
+                    reset_autosave_dirty_tracking(false)
+                    if runtime_perf_monitor != null:
+                        runtime_perf_monitor.increment_counter("autosave_jobs_started")
+                else:
+                    mark_world_dirty("autosave_start_failed")
+                    if runtime_perf_monitor != null:
+                        runtime_perf_monitor.increment_counter("autosave_start_failed")
+    perf_autosave_ms = runtime_perf_monitor.end_section("autosave", section_start) if runtime_perf_monitor != null else float(Time.get_ticks_usec() - section_start) / 1000.0
 
 func apply_world_seed(new_seed: String, remember := false) -> void:
     seed_text = new_seed.strip_edges()
@@ -641,12 +739,20 @@ func grant_starter_inventory() -> void:
 func _sync_inventory_totals() -> void:
     if inventory_system:
         inventory = inventory_system.totals()
+        mark_world_dirty("inventory")
 
 func save_world(show_message := true) -> bool:
     if save_system == null:
         return false
+    if save_system.has_method("poll_async_save"):
+        save_system.poll_async_save(true)
+    var snapshot_start: int = runtime_perf_monitor.begin_section("autosave_snapshot") if runtime_perf_monitor != null else Time.get_ticks_usec()
     var snapshot: Dictionary = create_save_snapshot()
+    if runtime_perf_monitor != null:
+        runtime_perf_monitor.end_section("autosave_snapshot", snapshot_start)
     var ok: bool = save_system.save(seed_text, snapshot)
+    if ok:
+        reset_autosave_dirty_tracking(false)
     if show_message:
         update_hud("World saved" if ok else "Save failed")
     return ok
@@ -662,6 +768,8 @@ func try_load_world(show_message := false) -> bool:
             update_hud("No save for %s" % seed_text)
         return false
     var loaded := apply_save_snapshot(snapshot)
+    if loaded:
+        reset_autosave_dirty_tracking(false)
     if show_message:
         update_hud("Loaded saved world" if loaded else "Load failed")
     return loaded
@@ -691,4 +799,5 @@ func start_new_game(show_message := true) -> bool:
     Input.set_mouse_mode(Input.MOUSE_MODE_CAPTURED)
     if show_message:
         update_hud("New game started" if started else "New game reset")
+    reset_autosave_dirty_tracking(true, "new_game")
     return started

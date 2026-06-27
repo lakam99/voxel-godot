@@ -22,6 +22,15 @@ func navigation_map_state() -> Dictionary:
     if player == null:
         return { "radius": radius, "heading": 0.0, "points": points, "pointCount": 0, "terrainSamples": [], "sampleCount": 0, "waypointsText": "No tracked structures nearby", "markerSummary": "No mapped markers nearby" }
     var player_cell := Vector2i(world_to_cell(player.global_position.x), world_to_cell(player.global_position.z))
+    var map_visible := has_map()
+    var heading := deg_to_rad(heading_degrees())
+    var cache_cell := Vector2i(int(floor(float(player_cell.x) / 2.0)) * 2, int(floor(float(player_cell.y) / 2.0)) * 2)
+    var hostile_count: int = hostile_system.enemies.size() if hostile_system else 0
+    var cache_key := "%d,%d:%d:%s:%d:%d" % [cache_cell.x, cache_cell.y, roundi(radius), str(map_visible), blocks.size(), hostile_count]
+    if cache_key == navigation_map_state_cache_key and navigation_map_state_cache_elapsed < navigation_map_state_cache_interval and not navigation_map_state_cache.is_empty():
+        var cached_state: Dictionary = navigation_map_state_cache.duplicate(true)
+        cached_state["heading"] = heading
+        return cached_state
     var town := town_region_at_cell(player_cell.x, player_cell.y)
     if not town.is_empty():
         add_map_point(points, "town", "Town", Vector2(float(town.get("centerX", 0)) * CELL - player.global_position.x, float(town.get("centerZ", 0)) * CELL - player.global_position.z), 4.8, radius)
@@ -47,16 +56,20 @@ func navigation_map_state() -> Dictionary:
             var body := enemy.get("body") as Node3D
             if body and is_instance_valid(body):
                 add_map_point(points, "hostile", "Hostile", Vector2(body.global_position.x - player.global_position.x, body.global_position.z - player.global_position.z), 3.8, radius)
-    return {
+    var state := {
         "radius": radius,
-        "heading": deg_to_rad(heading_degrees()),
+        "heading": heading,
         "points": points,
         "pointCount": points.size(),
-        "terrainSamples": map_terrain_samples(player_cell, radius) if has_map() else [],
-        "sampleCount": MAP_SAMPLE_GRID if has_map() else 0,
+        "terrainSamples": map_terrain_samples(player_cell, radius) if map_visible else [],
+        "sampleCount": MAP_SAMPLE_GRID if map_visible else 0,
         "waypointsText": navigation_waypoints_text(points),
         "markerSummary": map_marker_summary(points)
     }
+    navigation_map_state_cache_key = cache_key
+    navigation_map_state_cache_elapsed = 0.0
+    navigation_map_state_cache = state.duplicate(true)
+    return state
 
 func add_map_point(points: Array, kind: String, label: String, offset: Vector2, size: float, radius: float) -> void:
     if offset.length() > radius:
@@ -202,6 +215,7 @@ func _on_ui_slot_moved(from_index: int, to_index: int) -> void:
     var source: Dictionary = inventory_system.slots[from_index] if from_index >= 0 and from_index < inventory_system.slots.size() else {}
     var item_id := String(source.get("item", ""))
     if inventory_system.move_slot(from_index, to_index):
+        mark_world_dirty("inventory_moved")
         update_hud("Moved %s" % (ItemCatalogScript.label(item_id) if item_id != "" else "item"))
 
 func _on_craft_requested(recipe_id: String) -> void:
@@ -237,6 +251,7 @@ func _on_new_game_requested() -> void:
         held_item.refresh_active()
 
 func _on_recipe_crafted(recipe_id: String, output: String, amount: int) -> void:
+    mark_world_dirty("recipe_crafted")
     award_craft_xp(recipe_id)
     play_feedback("craft", Vector3.INF, feedback_color_for_material(output), 8)
     match output:
@@ -264,10 +279,12 @@ func _on_recipe_crafted(recipe_id: String, output: String, amount: int) -> void:
     update_objectives_and_contracts()
 
 func _on_objective_completed(objective: Dictionary) -> void:
+    mark_world_dirty("objective_completed")
     if hud:
         hud.show_objective_complete(String(objective.get("label", "")))
 
 func _on_utility_changed() -> void:
+    mark_world_dirty("utility_changed")
     if hud == null or utility_system == null:
         return
     hud.render_utility(utility_system.active_state())
@@ -275,6 +292,7 @@ func _on_utility_changed() -> void:
         update_hud(utility_system.last_message)
 
 func _on_utility_processed(block_type: String, output_item: String) -> void:
+    mark_world_dirty("utility_processed")
     var amount := 4
     if output_item in ["copperIngot", "ironIngot"]:
         amount = 10
@@ -291,6 +309,7 @@ func _on_utility_processed(block_type: String, output_item: String) -> void:
     update_objectives_and_contracts()
 
 func _on_utility_traded(trade: Dictionary) -> void:
+    mark_world_dirty("utility_traded")
     var output_item := String(trade.get("output", ""))
     award_progression("trade: %s" % String(trade.get("label", "barter")), int(trade.get("xp", 6)))
     update_objectives_and_contracts()
@@ -298,6 +317,7 @@ func _on_utility_traded(trade: Dictionary) -> void:
     maybe_emit_story_countermeasure_prepared(output_item, "utility_trade")
 
 func _on_survival_changed() -> void:
+    mark_world_dirty("survival_changed")
     if survival_system and survival_system.health < last_survival_health - 0.05:
         play_feedback("damage", Vector3.INF, Color(0.95, 0.22, 0.16), 7)
     if survival_system:
@@ -306,6 +326,7 @@ func _on_survival_changed() -> void:
         hud.set_survival(survival_system.snapshot())
 
 func _on_progression_changed(state: Dictionary, leveled: bool) -> void:
+    mark_world_dirty("progression_changed")
     apply_progression_bonuses(state)
     if hud:
         hud.set_progression(state)

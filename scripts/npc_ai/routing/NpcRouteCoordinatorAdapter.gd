@@ -7,6 +7,11 @@ const HierarchicalRoutePlannerScript := preload("res://scripts/npc_ai/routing/Hi
 const IncrementalRouteRepairScript := preload("res://scripts/npc_ai/routing/IncrementalRouteRepair.gd")
 
 const CELL := NpcConstantsScript.CELL_SIZE
+const LIVE_ROUTE_JOBS_PER_FRAME := 2
+const LIVE_ROUTE_EXPANSIONS_PER_FRAME := 8
+const EXTERNAL_DIRECT_ROUTE_EXPANSIONS := 64
+const ROUTE_CACHE_LIMIT := 128
+const FULL_REPAIR_REGISTRATION_NODE_LIMIT := 128
 
 var system
 var main
@@ -14,6 +19,15 @@ var world
 var coordinator
 var repair_service
 var active_route_entries := {}
+var route_budget_frame := -1
+var route_budget_tick := 0
+var route_budget_engine_frame := -1
+var route_budget_seen_tick := -1
+var route_budget_serial := 0
+var route_jobs_this_frame := 0
+var route_last_granted_actor_id := ""
+var route_cache := {}
+var route_cache_order: Array[String] = []
 
 func setup(system_node, main_node, navigation_world) -> void:
 	system = system_node
@@ -24,6 +38,21 @@ func setup(system_node, main_node, navigation_world) -> void:
 	repair_service = IncrementalRouteRepairScript.new()
 	repair_service.setup(coordinator)
 
+func performance_monitor():
+	return main.get("runtime_perf_monitor") if main != null else null
+
+func begin_frame() -> void:
+	route_budget_tick += 1
+
+func invalidate() -> void:
+	route_cache.clear()
+	route_cache_order.clear()
+	active_route_entries.clear()
+	if coordinator != null and coordinator.has_method("clear"):
+		coordinator.clear()
+	if repair_service != null and repair_service.has_method("clear"):
+		repair_service.clear()
+
 func plan_route(entry: Dictionary, intent: Dictionary) -> Dictionary:
 	if coordinator == null:
 		coordinator = HierarchicalRoutePlannerScript.new()
@@ -32,7 +61,31 @@ func plan_route(entry: Dictionary, intent: Dictionary) -> Dictionary:
 		repair_service.setup(coordinator)
 	if world == null:
 		return route_failure("blocked", "missing_world", intent.get("targetCell", Vector2i(999999, 999999)))
-	var result: Dictionary = coordinator.plan_runtime_route(entry, intent, world)
+	var monitor = performance_monitor()
+	var cache_key := _route_cache_key(entry, intent)
+	if route_cache.has(cache_key):
+		if monitor != null:
+			monitor.increment_counter("route_cache_hits")
+		return _copy_cached_route(route_cache[cache_key])
+	if monitor != null:
+		monitor.increment_counter("route_cache_misses")
+	if not _claim_route_budget(entry):
+		if monitor != null:
+			monitor.increment_counter("route_jobs_pending")
+		return route_failure("pending", "route_budget", intent.get("targetCell", Vector2i(999999, 999999)))
+	var external_direct_route := entry.has("_externalDirectMoveFrame")
+	var route_section := "route_planning_external_direct" if external_direct_route else "route_planning"
+	var route_start: int = monitor.begin_section(route_section) if monitor != null else Time.get_ticks_usec()
+	var expansion_budget := _expansion_budget_for(entry, intent)
+	var result: Dictionary = coordinator.plan_runtime_route(entry, intent, world, expansion_budget)
+	if monitor != null:
+		monitor.end_section(route_section, route_start)
+		if String(result.get("status", "")) == "pending":
+			monitor.increment_counter("route_jobs_pending")
+		else:
+			monitor.increment_counter("route_jobs_completed")
+	if String(result.get("status", "")) != "pending":
+		_store_route_cache(cache_key, result)
 	_register_repair_route(entry, result)
 	return result
 
@@ -87,7 +140,16 @@ func _register_repair_route(entry: Dictionary, route: Dictionary) -> void:
 		repair_service.index_result(_route_id_for_entry(entry), typed_result)
 		return
 	var route_id: String = _route_id_for_entry(entry)
-	repair_service.register_route(route_id, graph, start_key, goal_keys, typed_result.get("repair_request"), typed_result.get("corridor"))
+	var monitor = performance_monitor()
+	var node_count := (graph.get("nodes", {}) as Dictionary).size()
+	if node_count <= FULL_REPAIR_REGISTRATION_NODE_LIMIT:
+		repair_service.register_route(route_id, graph, start_key, goal_keys, typed_result.get("repair_request"), typed_result.get("corridor"))
+		if monitor != null:
+			monitor.increment_counter("repair_route_full_registrations")
+	else:
+		repair_service.index_result(route_id, typed_result)
+		if monitor != null:
+			monitor.increment_counter("repair_route_indexed_registrations")
 	active_route_entries[route_id] = entry
 
 func _apply_repair_response(route_id: String, response: Dictionary) -> void:
@@ -97,6 +159,11 @@ func _apply_repair_response(route_id: String, response: Dictionary) -> void:
 	var status: StringName = response.get("status")
 	var reason: StringName = response.get("reason")
 	if status == NpcEnumsScript.REPAIR_STATUS_UNCHANGED:
+		return
+	if String(reason) == "indexed_only":
+		entry["routeForceReplan"] = true
+		entry["routeStatus"] = "waiting"
+		entry["routeReason"] = "indexed_replan"
 		return
 	if status == NpcEnumsScript.REPAIR_STATUS_REPAIRED and response.get("routeResult") != null:
 		var route_result = response.get("routeResult")
@@ -117,3 +184,103 @@ func _apply_repair_response(route_id: String, response: Dictionary) -> void:
 
 func _route_id_for_entry(entry: Dictionary) -> String:
 	return "runtime:%s" % String(entry.get("id", "npc"))
+
+func _begin_route_budget_frame() -> void:
+	var engine_frame := Engine.get_process_frames()
+	if engine_frame == route_budget_engine_frame and route_budget_tick == route_budget_seen_tick:
+		return
+	route_budget_engine_frame = engine_frame
+	route_budget_seen_tick = route_budget_tick
+	route_budget_serial += 1
+	route_budget_frame = route_budget_serial
+	route_jobs_this_frame = 0
+
+func _claim_route_budget(entry: Dictionary) -> bool:
+	_begin_route_budget_frame()
+	if route_jobs_this_frame >= LIVE_ROUTE_JOBS_PER_FRAME:
+		return false
+	var actor_id := String(entry.get("id", ""))
+	if actor_id == "":
+		route_jobs_this_frame += 1
+		return true
+	var route_actions: Dictionary = entry.get("routeActions", {})
+	var external_direct_move := entry.has("_externalDirectMoveFrame") and String(entry.get("activeDoorPortalId", "")) == "" and route_actions.is_empty()
+	if not external_direct_move and actor_id == route_last_granted_actor_id and int(entry.get("routeBudgetYieldedFrame", -999999)) != route_budget_frame - 1:
+		entry["routeBudgetYieldedFrame"] = route_budget_frame
+		var monitor = performance_monitor()
+		if monitor != null:
+			monitor.increment_counter("route_budget_yields")
+		return false
+	route_jobs_this_frame += 1
+	route_last_granted_actor_id = actor_id
+	entry["routeBudgetGrantedFrame"] = route_budget_frame
+	return true
+
+func _expansion_budget_for(entry: Dictionary, intent: Dictionary) -> int:
+	if entry.has("_externalDirectMoveFrame"):
+		return EXTERNAL_DIRECT_ROUTE_EXPANSIONS
+	if bool(intent.get("movingHome", false)) or String(intent.get("kind", "")) in ["home", "scripted"]:
+		return EXTERNAL_DIRECT_ROUTE_EXPANSIONS
+	if bool(entry.get("tutorial", false)) or int(entry.get("routePriority", 0)) >= 140:
+		return EXTERNAL_DIRECT_ROUTE_EXPANSIONS
+	return LIVE_ROUTE_EXPANSIONS_PER_FRAME
+
+func _route_cache_key(entry: Dictionary, intent: Dictionary) -> String:
+	var body := entry.get("body") as Node3D
+	var start_cell: Vector2i = world.world_cell(body.global_position) if body != null and world != null else Vector2i.ZERO
+	var target_cell: Vector2i = intent.get("targetCell", world.world_cell(intent.get("target", Vector3.ZERO)) if world != null else Vector2i.ZERO)
+	var static_revision := 0
+	if world != null:
+		static_revision = int(world.get("static_snapshot_revision"))
+	var profile_id := "adult_npc"
+	var context = entry.get("agentContext")
+	if context != null:
+		profile_id = String(context.get("traversal_profile_id")) if context.get("traversal_profile_id") != null else profile_id
+	return "%s|%d|%d,%d|%d,%d|%s|%s|%s|%s" % [
+		profile_id,
+		static_revision,
+		start_cell.x,
+		start_cell.y,
+		target_cell.x,
+		target_cell.y,
+		String(intent.get("kind", "move")),
+		str(bool(intent.get("allowOutside", false))),
+		str(bool(intent.get("movingHome", false))),
+		String(intent.get("action", ""))
+	]
+
+func _store_route_cache(cache_key: String, route: Dictionary) -> void:
+	if cache_key == "" or route.is_empty() or not bool(route.get("ok", false)):
+		return
+	route_cache[cache_key] = _compact_route_for_cache(route)
+	route_cache_order.erase(cache_key)
+	route_cache_order.append(cache_key)
+	while route_cache_order.size() > ROUTE_CACHE_LIMIT:
+		var evicted: String = route_cache_order.pop_front()
+		route_cache.erase(evicted)
+
+func _compact_route_for_cache(route: Dictionary) -> Dictionary:
+	return {
+		"ok": bool(route.get("ok", false)),
+		"status": String(route.get("status", "")),
+		"reason": String(route.get("reason", "")),
+		"cells": (route.get("cells", []) as Array).duplicate(),
+		"waypoints": (route.get("waypoints", []) as Array).duplicate(),
+		"actions": (route.get("actions", {}) as Dictionary).duplicate(true),
+		"targetCell": route.get("targetCell", Vector2i(999999, 999999)),
+		"fallbackCell": route.get("fallbackCell", Vector2i(999999, 999999)),
+		"snapshotRevision": String(route.get("snapshotRevision", ""))
+	}
+
+func _copy_cached_route(route: Dictionary) -> Dictionary:
+	return {
+		"ok": bool(route.get("ok", false)),
+		"status": String(route.get("status", "")),
+		"reason": String(route.get("reason", "")),
+		"cells": (route.get("cells", []) as Array).duplicate(),
+		"waypoints": (route.get("waypoints", []) as Array).duplicate(),
+		"actions": (route.get("actions", {}) as Dictionary).duplicate(true),
+		"targetCell": route.get("targetCell", Vector2i(999999, 999999)),
+		"fallbackCell": route.get("fallbackCell", Vector2i(999999, 999999)),
+		"snapshotRevision": String(route.get("snapshotRevision", ""))
+	}

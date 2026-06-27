@@ -17,7 +17,7 @@ const CharacterMotorProfileScript := preload("res://scripts/npc_ai/contracts/Cha
 const CELL := 1.35
 const DOOR_TRAFFIC_RELEASE_RADIUS := CELL * 1.65
 const FORAGE_SCAN_NODE_LIMIT := 1200
-const FORAGE_SCAN_CANDIDATE_LIMIT := 36
+const FORAGE_SCAN_CANDIDATE_LIMIT := 16
 const NO_DETOUR := Vector3(9999999.0, 9999999.0, 9999999.0)
 
 var main
@@ -58,7 +58,12 @@ var components_initialized := false
 var component_init_attempted := false
 var last_spawn_scan_frame := -1
 var npc_update_cursor := 0
+var npc_update_active := false
+var external_move_budget_physics_frame := -1
 var published_navigation_semantics := {}
+
+func performance_monitor():
+    return main.get("runtime_perf_monitor") if main != null else null
 
 func setup(main_node, hostile_system_node) -> void:
     main = main_node
@@ -580,21 +585,40 @@ func update_npcs(delta: float, day_factor: float) -> void:
     spawn_generic_town_npcs()
     if combat != null:
         combat.update_tracers(delta)
+    var monitor = performance_monitor()
+    var door_start: int = monitor.begin_section("door_policy_update") if monitor != null else Time.get_ticks_usec()
     update_door_policies(delta)
+    if monitor != null:
+        monitor.end_section("door_policy_update", door_start)
     if pathing != null and pathing.has_method("begin_frame"):
         pathing.begin_frame()
+    if autonomy_system != null and autonomy_system.has_method("begin_update_frame"):
+        autonomy_system.begin_update_frame()
     var night_factor := clampf((1.0 - day_factor - 0.30) / 0.55, 0.0, 1.0)
     var update_entries := npcs.duplicate()
     var update_count := update_entries.size()
-    var budget := update_count if update_count <= 16 else mini(update_count, 8)
+    var budget := update_count
+    if update_count > 24:
+        budget = 4
+    elif update_count > 16:
+        budget = 6
     if update_count <= 0:
         return
     npc_update_cursor = npc_update_cursor % update_count
-    for offset in range(budget):
-        var entry: Dictionary = update_entries[(npc_update_cursor + offset) % update_count]
+    npc_update_active = true
+    var scanned := 0
+    var processed := 0
+    while scanned < update_count and processed < budget:
+        var entry: Dictionary = update_entries[(npc_update_cursor + scanned) % update_count]
+        scanned += 1
         var body := entry.get("body") as Node3D
         if body == null or not is_instance_valid(body):
             npcs.erase(entry)
+            continue
+        if bool(body.get_meta("npc_force_hold", false)) and not body.has_meta("npc_scripted_target"):
+            if main.player:
+                face_position(body, main.player.global_position)
+            entry["lastMoveDistance"] = 0.0
             continue
         if autonomy_system != null and autonomy_system.has_method("update_simulation_lod"):
             var observer_position := Vector3.INF
@@ -609,13 +633,21 @@ func update_npcs(delta: float, day_factor: float) -> void:
         entry["_lodGateApplied"] = true
         update_npc(entry, delta, night_factor)
         entry.erase("_lodGateApplied")
-    npc_update_cursor = (npc_update_cursor + budget) % max(1, npcs.size())
+        processed += 1
+    npc_update_active = false
+    npc_update_cursor = (npc_update_cursor + max(1, scanned)) % max(1, npcs.size())
 
 func update_npc(entry: Dictionary, delta: float, night_factor: float) -> void:
+    if not npc_update_active and autonomy_system != null and autonomy_system.has_method("begin_update_frame"):
+        autonomy_system.begin_update_frame()
     if not bool(entry.get("_lodGateApplied", false)):
         entry["npc_lod_brain_due"] = true
     if autonomy_system != null:
+        var monitor = performance_monitor()
+        var autonomy_start: int = monitor.begin_section("NpcAutonomySystem") if monitor != null else Time.get_ticks_usec()
         autonomy_system.update_npc(entry, delta, night_factor)
+        if monitor != null:
+            monitor.end_section("NpcAutonomySystem", autonomy_start)
 
 func npc_is_held_by_intro_or_dialogue(entry: Dictionary, body: Node3D) -> bool:
     if bool(entry.get("holdIntroDoor", false)) and main and main.tutorial_system:
@@ -787,12 +819,26 @@ func find_forage_target(entry: Dictionary) -> Node3D:
     var body := entry.get("body") as Node3D
     if body == null:
         return null
-    var candidates: Array[Node3D] = []
-    var remaining_scan_nodes := FORAGE_SCAN_NODE_LIMIT
-    for root in [main.get("prop_root"), main.get("chunk_root")]:
-        remaining_scan_nodes = collect_forage_targets_in_tree(root as Node, entry, body.global_position, candidates, remaining_scan_nodes, FORAGE_SCAN_CANDIDATE_LIMIT)
-        if remaining_scan_nodes <= 0 or candidates.size() >= FORAGE_SCAN_CANDIDATE_LIMIT:
-            break
+    var monitor = performance_monitor()
+    var scan_start: int = monitor.begin_section("job_forage_scan") if monitor != null else Time.get_ticks_usec()
+    var candidates: Array[Node3D] = indexed_resource_candidates(entry, ["forage_source"], {
+        "limit": FORAGE_SCAN_CANDIDATE_LIMIT,
+        "unreachableMetaKey": forager_unreachable_meta_key(entry),
+        "drops": ["berries"],
+        "outsideTown": true,
+        "workAreaOnly": true
+    })
+    var scanned_nodes := 0
+    if candidates.is_empty() and allow_resource_scan_fallback():
+        var remaining_scan_nodes := FORAGE_SCAN_NODE_LIMIT
+        for root in [main.get("prop_root"), main.get("chunk_root")]:
+            remaining_scan_nodes = collect_forage_targets_in_tree(root as Node, entry, body.global_position, candidates, remaining_scan_nodes, FORAGE_SCAN_CANDIDATE_LIMIT)
+            if remaining_scan_nodes <= 0 or candidates.size() >= FORAGE_SCAN_CANDIDATE_LIMIT:
+                break
+        scanned_nodes = FORAGE_SCAN_NODE_LIMIT - remaining_scan_nodes
+    if monitor != null:
+        monitor.increment_counter("forage_scan_nodes", scanned_nodes)
+        monitor.end_section("job_forage_scan", scan_start)
     if pathing != null and pathing.has_method("choose_forage_target"):
         return pathing.choose_forage_target(entry, candidates)
     return candidates[0] if not candidates.is_empty() else null
@@ -851,12 +897,27 @@ func find_job_resource_target(entry: Dictionary, job: String) -> Node3D:
     var body := entry.get("body") as Node3D
     if body == null:
         return null
-    var candidates: Array[Node3D] = []
-    var remaining_scan_nodes := FORAGE_SCAN_NODE_LIMIT
-    for root in [main.get("prop_root"), main.get("chunk_root")]:
-        remaining_scan_nodes = collect_job_resource_targets_in_tree(root as Node, entry, job, body.global_position, candidates, remaining_scan_nodes, FORAGE_SCAN_CANDIDATE_LIMIT)
-        if remaining_scan_nodes <= 0 or candidates.size() >= FORAGE_SCAN_CANDIDATE_LIMIT:
-            break
+    var monitor = performance_monitor()
+    var scan_start: int = monitor.begin_section("job_forage_scan") if monitor != null else Time.get_ticks_usec()
+    var query_options := {
+        "limit": FORAGE_SCAN_CANDIDATE_LIMIT,
+        "outsideTown": true,
+        "workAreaOnly": true
+    }
+    if job == "forage":
+        query_options["drops"] = ["berries"]
+    var candidates: Array[Node3D] = indexed_resource_candidates(entry, resource_kinds_for_job(job), query_options)
+    var scanned_nodes := 0
+    if candidates.is_empty() and allow_resource_scan_fallback():
+        var remaining_scan_nodes := FORAGE_SCAN_NODE_LIMIT
+        for root in [main.get("prop_root"), main.get("chunk_root")]:
+            remaining_scan_nodes = collect_job_resource_targets_in_tree(root as Node, entry, job, body.global_position, candidates, remaining_scan_nodes, FORAGE_SCAN_CANDIDATE_LIMIT)
+            if remaining_scan_nodes <= 0 or candidates.size() >= FORAGE_SCAN_CANDIDATE_LIMIT:
+                break
+        scanned_nodes = FORAGE_SCAN_NODE_LIMIT - remaining_scan_nodes
+    if monitor != null:
+        monitor.increment_counter("job_scan_nodes", scanned_nodes)
+        monitor.end_section("job_forage_scan", scan_start)
     if candidates.is_empty():
         return null
     if autonomy_system != null and autonomy_system.get("smart_objects") != null:
@@ -874,6 +935,29 @@ func find_job_resource_target(entry: Dictionary, job: String) -> Node3D:
         if smart_object_available(object_id, String(entry.get("id", ""))):
             return candidate
     return null
+
+func indexed_resource_candidates(entry: Dictionary, kinds: Array, options: Dictionary) -> Array[Node3D]:
+    var service = smart_object_service()
+    if service == null or not service.has_method("query_resource_nodes") or kinds.is_empty():
+        return []
+    return service.query_resource_nodes(entry, kinds, options)
+
+func smart_object_service():
+    if autonomy_system == null:
+        return null
+    return autonomy_system.get("smart_objects")
+
+func resource_kinds_for_job(job: String) -> Array:
+    if job == "wood":
+        return ["tree_source"]
+    if job == "stone":
+        return ["stone_source"]
+    if job == "forage":
+        return ["forage_source"]
+    return []
+
+func allow_resource_scan_fallback() -> bool:
+    return OS.get_environment("VOXEL_NPC_ALLOW_RESOURCE_SCAN") == "1"
 
 func collect_job_resource_targets_in_tree(root: Node, entry: Dictionary, job: String, _origin: Vector3, candidates: Array[Node3D], max_nodes: int, max_candidates: int) -> int:
     if root == null or max_nodes <= 0 or candidates.size() >= max_candidates:
@@ -1005,13 +1089,25 @@ func complete_station_use(entry: Dictionary, action: String) -> bool:
 func find_trader_stall(entry: Dictionary) -> Node3D:
     if main == null:
         return null
-    var blocks: Dictionary = main.get("blocks")
     var body := entry.get("body") as Node3D
     var origin: Vector3 = body.global_position if body != null else entry.get("porchPosition", Vector3.ZERO)
     var best: Node3D = null
     var best_score := INF
-    for value in blocks.values():
-        var block := value as Node3D
+    var stalls: Array[Node3D] = indexed_resource_candidates(entry, ["trader_stall"], {
+        "limit": 16,
+        "outsideTown": false,
+        "workAreaOnly": true
+    })
+    if stalls.is_empty() and allow_resource_scan_fallback():
+        var blocks: Dictionary = main.get("blocks")
+        for value in blocks.values():
+            var block := value as Node3D
+            if block == null or not is_instance_valid(block):
+                continue
+            if String(block.get_meta("block_type", "")) != "traderStall":
+                continue
+            stalls.append(block)
+    for block in stalls:
         if block == null or not is_instance_valid(block):
             continue
         if String(block.get_meta("block_type", "")) != "traderStall":
@@ -1287,6 +1383,8 @@ func request_shared_prop_harvest(prop: Node, actor: Node = null, actor_kind := "
     if autonomy_system == null:
         return { "ok": true, "status": "succeeded", "reason": "missing_autonomy_optional", "metrics": {} }
     var object_id: String = autonomy_system.register_smart_resource(prop, metadata)
+    if object_id == "":
+        return { "ok": true, "status": "succeeded", "reason": "not_shared_resource", "metrics": {} }
     var request_metadata := metadata.duplicate(true) if metadata is Dictionary else {}
     request_metadata["actorKind"] = actor_kind
     request_metadata["command"] = &"harvest"
@@ -1323,6 +1421,11 @@ func release_npc_traffic_reservations(entry_or_id, reason := "released") -> int:
     if autonomy_system == null:
         return 0
     return autonomy_system.release_npc_traffic_reservations(entry_or_id, reason)
+
+func release_npc_door_hold(actor_or_id, schedule_close := true) -> void:
+    ensure_autonomy_system()
+    if autonomy_system != null and autonomy_system.has_method("release_npc_door_hold"):
+        autonomy_system.release_npc_door_hold(actor_or_id, schedule_close)
 
 func release_npc_traffic_generation(entry: Dictionary, reason := "generation_replaced") -> int:
     ensure_autonomy_system()
@@ -1404,12 +1507,16 @@ func request_player_door_use(collider: Node, actor: Node = null, actor_kind := "
     return result
 
 func update_door_policies(delta: float) -> void:
+    var monitor = performance_monitor()
     if autonomy_system != null and autonomy_system.has_method("advance_traffic"):
         var traffic_already_advanced: bool = false
         if autonomy_system.has_method("consume_external_traffic_advance"):
             traffic_already_advanced = bool(autonomy_system.consume_external_traffic_advance())
         if not traffic_already_advanced:
+            var traffic_start: int = monitor.begin_section("traffic_update") if monitor != null else Time.get_ticks_usec()
             autonomy_system.advance_traffic(delta, false)
+            if monitor != null:
+                monitor.end_section("traffic_update", traffic_start)
     if autonomy_system != null and autonomy_system.has_method("process_navigation_changes"):
         autonomy_system.process_navigation_changes()
     release_completed_door_holds()
@@ -1633,7 +1740,18 @@ func move_npc(entry: Dictionary, target: Vector3, max_distance: float, moving_ho
         return 0.0
     if not moving_home:
         clear_home_route_terminal(entry)
-    return pathing.move_npc(entry, target, max_distance, moving_home, allow_outside, physics_delta)
+    var external_direct_move := false
+    if not npc_update_active and pathing.has_method("begin_frame"):
+        var physics_frame := Engine.get_physics_frames()
+        if external_move_budget_physics_frame != physics_frame:
+            pathing.begin_frame()
+            external_move_budget_physics_frame = physics_frame
+        entry["_externalDirectMoveFrame"] = physics_frame
+        external_direct_move = true
+    var moved: float = float(pathing.move_npc(entry, target, max_distance, moving_home, allow_outside, physics_delta))
+    if external_direct_move:
+        entry.erase("_externalDirectMoveFrame")
+    return moved
 
 func apply_npc_route_motion(entry: Dictionary, previous: Vector3, candidate: Vector3, physics_delta: float) -> Dictionary:
     if motion_controller == null:
@@ -1704,34 +1822,42 @@ func add_npc_visual(parent: Node3D, body_material: StandardMaterial3D, accent_ma
 func notify_navigation_block_created(cell: Vector3i, block_type: String, block: Node = null) -> void:
     if autonomy_system:
         autonomy_system.notify_block_created(cell, block_type, block)
+        flush_navigation_change_bus()
 
 func notify_navigation_block_removed(cell: Vector3i, block_type: String, block: Node = null) -> void:
     if autonomy_system:
         autonomy_system.notify_block_removed(cell, block_type, block)
+        flush_navigation_change_bus()
 
 func notify_navigation_terrain_edited(cell: Vector2i, old_height: float, new_height: float) -> void:
     if autonomy_system:
         autonomy_system.notify_terrain_edited(cell, old_height, new_height)
+        flush_navigation_change_bus()
 
 func notify_navigation_prop_created(prop_id: String, prop: Node = null) -> void:
     if autonomy_system:
         autonomy_system.notify_prop_created(prop_id, prop)
+        flush_navigation_change_bus()
 
 func notify_navigation_prop_removed(prop_id: String, prop: Node = null) -> void:
     if autonomy_system:
         autonomy_system.notify_prop_removed(prop_id, prop)
+        flush_navigation_change_bus()
 
 func notify_navigation_chunk_loaded(chunk_key: Vector2i) -> void:
     if autonomy_system:
         autonomy_system.notify_chunk_loaded(chunk_key)
+        flush_navigation_change_bus()
 
 func notify_navigation_chunk_unloaded(chunk_key: Vector2i) -> void:
     if autonomy_system:
         autonomy_system.notify_chunk_unloaded(chunk_key)
+        flush_navigation_change_bus()
 
 func notify_navigation_door_state_changed(door: Node, open: bool) -> void:
     if autonomy_system:
         autonomy_system.notify_door_state_changed(door, open)
+        flush_navigation_change_bus()
 
 func process_navigation_route_changes(events: Array) -> Array[Dictionary]:
     if pathing == null:
@@ -1741,14 +1867,21 @@ func process_navigation_route_changes(events: Array) -> Array[Dictionary]:
 func notify_navigation_door_registered(door: Node) -> void:
     if autonomy_system:
         autonomy_system.notify_door_registered(door)
+        flush_navigation_change_bus()
 
 func notify_navigation_structure_metadata_changed(structure_id: String, bounds: AABB, metadata := {}) -> void:
     if autonomy_system:
         autonomy_system.notify_structure_metadata_changed(structure_id, bounds, metadata)
+        flush_navigation_change_bus()
 
 func notify_navigation_semantic_changed(semantic_id: String, bounds: AABB, metadata := {}) -> void:
     if autonomy_system:
         autonomy_system.notify_semantic_changed(semantic_id, bounds, metadata)
+        flush_navigation_change_bus()
+
+func flush_navigation_change_bus() -> void:
+    if autonomy_system != null and autonomy_system.has_method("process_navigation_changes"):
+        autonomy_system.process_navigation_changes()
 
 func cell_to_position(cell: Vector2i, level: float) -> Vector3:
     return Vector3(float(cell.x) * CELL, level + 0.04, float(cell.y) * CELL)

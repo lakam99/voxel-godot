@@ -162,6 +162,7 @@ func update_hud_frame(delta: float) -> void:
     if not player or not hud:
         return
     hud_refresh_elapsed += delta
+    navigation_map_state_cache_elapsed += delta
     if hud_refresh_interval > 0.0 and hud_refresh_elapsed < hud_refresh_interval:
         hud_skipped_refresh_count += 1
         return
@@ -205,12 +206,19 @@ func update_hud(message: String = "", throttled: bool = false) -> void:
         hud.set_contracts(contract_system.state())
     if story_journal_model and hud.has_method("set_story_journal_state"):
         hud.set_story_journal_state(story_journal_model.state())
+    var nav_state_start := Time.get_ticks_usec()
+    var map_state := navigation_map_state()
+    if runtime_perf_monitor != null:
+        runtime_perf_monitor.observe_duration("hud_navigation_state", profiled_ms(nav_state_start))
+    var nav_apply_start := Time.get_ticks_usec()
     hud.set_navigation(
         has_compass(),
         has_map(),
         navigation_heading_text(),
-        navigation_map_state()
+        map_state
     )
+    if runtime_perf_monitor != null:
+        runtime_perf_monitor.observe_duration("hud_navigation_apply", profiled_ms(nav_apply_start))
     if hud.has_method("set_interaction_prompt"):
         hud.set_interaction_prompt(focused_interaction_prompt())
     if message != "":

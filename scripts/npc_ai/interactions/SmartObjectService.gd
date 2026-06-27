@@ -5,8 +5,11 @@ const NpcEnumsScript := preload("res://scripts/npc_ai/NpcEnums.gd")
 const InteractionRequestScript := preload("res://scripts/npc_ai/contracts/InteractionRequest.gd")
 const InteractionResultScript := preload("res://scripts/npc_ai/contracts/InteractionResult.gd")
 const SmartObjectRegistrationScript := preload("res://scripts/npc_ai/interactions/SmartObjectRegistration.gd")
+const NpcConstantsScript := preload("res://scripts/npc_ai/NpcConstants.gd")
 
 const CELL := 1.35
+const WORLD_CHUNK_CELL_SIZE := 28
+const RESOURCE_QUERY_DEFAULT_CHUNK_RADIUS := 3
 const COMMAND_RESERVE := &"reserve"
 const COMMAND_RELEASE := &"release"
 const COMMAND_CANCEL := &"cancel"
@@ -23,6 +26,15 @@ var registrations := {}
 var completed_effects := {}
 var counters := {}
 var revision_counter := 0
+var index_by_kind := {}
+var available_index_by_kind := {}
+var depleted_index_by_kind := {}
+var index_by_tile := {}
+var index_by_chunk := {}
+var index_by_region := {}
+var index_by_town := {}
+var index_by_layer := {}
+var query_cache := {}
 
 func setup(owner_node: Node, door_portal_service) -> void:
 	owner = owner_node
@@ -32,6 +44,15 @@ func clear() -> void:
 	registrations.clear()
 	completed_effects.clear()
 	counters.clear()
+	index_by_kind.clear()
+	available_index_by_kind.clear()
+	depleted_index_by_kind.clear()
+	index_by_tile.clear()
+	index_by_chunk.clear()
+	index_by_region.clear()
+	index_by_town.clear()
+	index_by_layer.clear()
+	query_cache.clear()
 	revision_counter = 0
 	if door_portals != null:
 		door_portals.clear()
@@ -58,6 +79,7 @@ func register_object(object_id: String, kind: String, node: Node = null, metadat
 		merged["capacity"] = 1
 	var existing = registrations.get(object_id)
 	if existing != null:
+		_unindex_registration(existing)
 		existing.kind = kind
 		existing.node = node
 		existing.metadata = merged
@@ -68,6 +90,7 @@ func register_object(object_id: String, kind: String, node: Node = null, metadat
 		registrations[object_id] = SmartObjectRegistrationScript.make(object_id, kind, node, merged)
 	var registration = registrations[object_id]
 	registration.revision = _next_revision()
+	_index_registration(registration)
 	_record("registered", object_id, kind, { "slots": registration.slots.size() })
 	return object_id
 
@@ -76,11 +99,15 @@ func register_resource(prop: Node, metadata := {}) -> String:
 		return ""
 	var material := String(prop.get_meta("material", ""))
 	var drop := String(prop.get_meta("drop", ""))
-	var kind := "forage_source"
+	var kind := ""
 	if drop == "logs" or material == "tree":
 		kind = "tree_source"
 	elif drop in ["stones", "copperOre", "ironOre"] or material in ["rock", "copperOre", "ironOre"]:
 		kind = "stone_source"
+	elif drop in ["berries", "aloe", "mirecap", "frostHerb"] or material in ["berryBush", "aloePatch", "mushroomCluster", "frostHerbPatch"]:
+		kind = "forage_source"
+	else:
+		return ""
 	var object_id := object_id_for_node(prop)
 	var merged := metadata.duplicate(true) if metadata is Dictionary else {}
 	merged["drop"] = drop
@@ -259,6 +286,7 @@ func complete_interaction(request):
 			registration.node.set_meta("npc_harvested", true)
 			registration.node.set_meta("smart_object_depleted", true)
 		release_object_reservations(registration, "completed")
+		_index_registration(registration)
 	elif not bool(metadata.get("holdReservation", false)):
 		release_reservation(registration, String(reservation.get("reservationId", "")), owner_id, "completed")
 	completed_effects[request_id] = metrics.duplicate(true)
@@ -300,6 +328,7 @@ func notify_object_removed(object_id: String, node: Node = null) -> void:
 	registration.depleted = true
 	registration.metadata["depleted"] = true
 	release_object_reservations(registration, "target_gone")
+	_index_registration(registration)
 	_record("removed", registration.object_id, registration.kind, { "reason": "target_gone" })
 
 func object_available(object_id: String, actor_id := "") -> Dictionary:
@@ -311,6 +340,197 @@ func object_available(object_id: String, actor_id := "") -> Dictionary:
 	if not first_available_slot(registration, actor_id, "").is_empty():
 		return { "ok": true, "reason": "available" }
 	return { "ok": false, "reason": "capacity_busy", "owners": reservation_owners(registration) }
+
+func query_resource_nodes(entry: Dictionary, kinds: Array, options := {}) -> Array[Node3D]:
+	var option_map: Dictionary = options if options is Dictionary else {}
+	var cache_key: String = query_cache_key(entry, kinds, option_map)
+	var cached: Dictionary = query_cache.get(cache_key, {})
+	if not cached.is_empty() and int(cached.get("revision", -1)) == revision_counter and int(cached.get("frame", -1000)) + int(option_map.get("cacheFrames", 8)) >= Engine.get_process_frames():
+		var cached_nodes: Array[Node3D] = []
+		for object_id_value in cached.get("objectIds", []):
+			var registration = registrations.get(String(object_id_value))
+			if registration != null and registration_matches_query(registration, entry, option_map):
+				var node := live_registration_node_3d(registration)
+				if node != null:
+					cached_nodes.append(node)
+		if not cached_nodes.is_empty():
+			_count("indexed_query_cache_hits")
+			return cached_nodes
+	var body := entry.get("body") as Node3D
+	var origin: Vector3 = body.global_position if body != null else entry.get("porchPosition", Vector3.ZERO)
+	var object_ids := candidate_object_ids_for_query(entry, kinds, option_map, origin)
+	var scored: Array[Dictionary] = []
+	for object_id in object_ids.keys():
+		var registration = registrations.get(String(object_id))
+		if registration == null or not registration_matches_query(registration, entry, option_map):
+			continue
+		var position: Vector3 = object_position(registration)
+		scored.append({
+			"objectId": String(object_id),
+			"position": position,
+			"distance": Vector2(position.x - origin.x, position.z - origin.z).length()
+		})
+	scored.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+		if is_equal_approx(float(a.get("distance", 0.0)), float(b.get("distance", 0.0))):
+			return String(a.get("objectId", "")) < String(b.get("objectId", ""))
+		return float(a.get("distance", 0.0)) < float(b.get("distance", 0.0))
+	)
+	var limit: int = maxi(1, int(option_map.get("limit", 48)))
+	var result: Array[Node3D] = []
+	var result_ids: Array[String] = []
+	for score in scored:
+		if result.size() >= limit:
+			break
+		var object_id := String(score.get("objectId", ""))
+		var registration = registrations.get(object_id)
+		if registration == null:
+			continue
+		var node := live_registration_node_3d(registration)
+		if node == null:
+			continue
+		result.append(node)
+		result_ids.append(object_id)
+	query_cache[cache_key] = {
+		"revision": revision_counter,
+		"frame": Engine.get_process_frames(),
+		"objectIds": result_ids
+	}
+	_count("indexed_resource_queries")
+	return result
+
+func candidate_object_ids_for_query(entry: Dictionary, kinds: Array, options: Dictionary, origin: Vector3) -> Dictionary:
+	var kind_lookup := {}
+	for kind_value in kinds:
+		var kind := String(kind_value)
+		if kind != "":
+			kind_lookup[kind] = true
+	if kind_lookup.is_empty():
+		return {}
+	var result := {}
+	var origin_cell := Vector2i(roundi(origin.x / CELL), roundi(origin.z / CELL))
+	var chunk_size: int = maxi(1, WORLD_CHUNK_CELL_SIZE)
+	var search_radius: int = resource_query_chunk_radius(entry, options)
+	var collection_limit := resource_query_collection_limit(options)
+	var found_enough := false
+	for radius in range(search_radius + 1):
+		for dx in range(-radius, radius + 1):
+			for dz in range(-radius, radius + 1):
+				if maxi(absi(dx), absi(dz)) != radius:
+					continue
+				var chunk_cell := origin_cell + Vector2i(dx * chunk_size, dz * chunk_size)
+				var bucket: Dictionary = index_by_chunk.get(chunk_key_for_cell(chunk_cell), {})
+				collect_candidate_object_ids(result, bucket, kind_lookup, entry, options, collection_limit)
+				if result.size() >= collection_limit:
+					found_enough = true
+					break
+			if found_enough:
+				break
+		if found_enough:
+			break
+	if result.is_empty() and not bool(options.get("workAreaOnly", true)):
+		_count("indexed_resource_global_fallbacks")
+		for kind in kind_lookup.keys():
+			var bucket: Dictionary = available_index_by_kind.get(String(kind), {})
+			collect_candidate_object_ids(result, bucket, kind_lookup, entry, options, collection_limit)
+			if result.size() >= collection_limit:
+				break
+	elif result.is_empty():
+		_count("indexed_resource_empty_spatial_queries")
+	else:
+		_count("indexed_resource_spatial_queries")
+	return result
+
+func resource_query_chunk_radius(entry: Dictionary, options: Dictionary) -> int:
+	if bool(options.get("workAreaOnly", true)):
+		var town_radius := float(entry.get("townRadius", 18))
+		var farthest_work_cell_radius := town_radius + town_radius + 24.0
+		return maxi(1, ceili(farthest_work_cell_radius / float(maxi(1, WORLD_CHUNK_CELL_SIZE))))
+	return maxi(1, int(options.get("chunkRadius", RESOURCE_QUERY_DEFAULT_CHUNK_RADIUS)))
+
+func resource_query_collection_limit(options: Dictionary) -> int:
+	var limit := maxi(1, int(options.get("limit", 48)))
+	return maxi(12, limit)
+
+func collect_candidate_object_ids(result: Dictionary, bucket: Dictionary, kind_lookup: Dictionary, entry: Dictionary, options: Dictionary, collection_limit := 0) -> void:
+	for object_id_value in bucket.keys():
+		if collection_limit > 0 and result.size() >= collection_limit:
+			return
+		var object_id := String(object_id_value)
+		if result.has(object_id):
+			continue
+		var registration = registrations.get(object_id)
+		if registration == null or not registration_matches_candidate_filters(registration, entry, options, kind_lookup):
+			continue
+		result[object_id] = true
+
+func registration_matches_candidate_filters(registration, entry: Dictionary, options: Dictionary, kind_lookup: Dictionary) -> bool:
+	if registration == null or registration.depleted:
+		return false
+	if registration_node_is_stale(registration):
+		mark_registration_stale(registration)
+		return false
+	if not kind_lookup.has(String(registration.kind)):
+		return false
+	var allowed_drops: Array = options.get("drops", [])
+	if not allowed_drops.is_empty() and not allowed_drops.has(registration_drop_value(registration)):
+		return false
+	var allowed_materials: Array = options.get("materials", [])
+	if not allowed_materials.is_empty() and not allowed_materials.has(registration_material_value(registration)):
+		return false
+	var position: Vector3 = object_position(registration)
+	if bool(options.get("workAreaOnly", true)) and not indexed_point_inside_work_area(entry, position):
+		return false
+	if bool(options.get("outsideTown", true)) and indexed_point_inside_town(entry, position):
+		return false
+	var required_layer := int(options.get("verticalLayer", -999999))
+	if required_layer != -999999 and vertical_layer_for_position(position) != required_layer:
+		return false
+	return true
+
+func registration_drop_value(registration) -> String:
+	if registration == null:
+		return ""
+	var node := live_registration_node_3d(registration)
+	if node != null:
+		return String(node.get_meta("drop", registration.metadata.get("drop", "")))
+	return String(registration.metadata.get("drop", ""))
+
+func registration_material_value(registration) -> String:
+	if registration == null:
+		return ""
+	var node := live_registration_node_3d(registration)
+	if node != null:
+		return String(node.get_meta("material", registration.metadata.get("material", "")))
+	return String(registration.metadata.get("material", ""))
+
+func registration_matches_query(registration, entry: Dictionary, options: Dictionary) -> bool:
+	if registration == null or registration.depleted:
+		return false
+	var node := live_registration_node_3d(registration)
+	if node == null:
+		return false
+	if bool(node.get_meta("npc_harvested", false)) or bool(node.get_meta("smart_object_depleted", false)):
+		return false
+	var allowed_drops: Array = options.get("drops", [])
+	if not allowed_drops.is_empty() and not allowed_drops.has(String(node.get_meta("drop", ""))):
+		return false
+	var allowed_materials: Array = options.get("materials", [])
+	if not allowed_materials.is_empty() and not allowed_materials.has(String(node.get_meta("material", ""))):
+		return false
+	var unreachable_key := String(options.get("unreachableMetaKey", ""))
+	if unreachable_key != "" and bool(node.get_meta(unreachable_key, false)):
+		return false
+	var position: Vector3 = object_position(registration)
+	if bool(options.get("workAreaOnly", true)) and not indexed_point_inside_work_area(entry, position):
+		return false
+	if bool(options.get("outsideTown", true)) and indexed_point_inside_town(entry, position):
+		return false
+	var required_layer := int(options.get("verticalLayer", -999999))
+	if required_layer != -999999 and vertical_layer_for_position(position) != required_layer:
+		return false
+	var actor_id := String(entry.get("id", ""))
+	var availability: Dictionary = object_available(registration.object_id, actor_id)
+	return bool(availability.get("ok", false))
 
 func score_candidates(entry: Dictionary, action_kind: String, candidates: Array) -> Array[Dictionary]:
 	var scored: Array[Dictionary] = []
@@ -590,15 +810,52 @@ func object_id_for_node(node: Node) -> String:
 	return "node:%s:%d" % [String(node.name), node.get_instance_id()]
 
 func object_position(registration) -> Vector3:
+	if registration == null:
+		return Vector3.ZERO
 	return object_position_from_node_or_metadata(registration.node, registration.metadata)
 
-func object_position_from_node_or_metadata(node: Node, metadata: Dictionary) -> Vector3:
+func object_position_from_node_or_metadata(node, metadata: Dictionary) -> Vector3:
 	if metadata.has("position") and metadata["position"] is Vector3:
 		return metadata["position"]
-	if node is Node3D and is_instance_valid(node):
+	if node != null and is_instance_valid(node) and node is Node3D:
 		var node_3d := node as Node3D
 		return node_3d.global_position if node_3d.is_inside_tree() else node_3d.position
 	return Vector3.ZERO
+
+func live_registration_node_3d(registration) -> Node3D:
+	if registration == null:
+		return null
+	if registration_node_is_stale(registration):
+		mark_registration_stale(registration)
+		return null
+	var node = registration.node
+	if node is Node3D:
+		return node as Node3D
+	return null
+
+func registration_node_is_stale(registration) -> bool:
+	if registration == null or registration.node == null:
+		return false
+	return not is_instance_valid(registration.node)
+
+func mark_registration_stale(registration, reason := "stale_node") -> void:
+	if registration == null:
+		return
+	var object_id := String(registration.object_id)
+	if object_id == "":
+		return
+	if not registration.depleted:
+		release_object_reservations(registration, reason)
+	registration.depleted = true
+	registration.node = null
+	registration.metadata["depleted"] = true
+	registration.metadata["available"] = false
+	_unindex_registration(registration)
+	_index_add(index_by_kind, registration.kind, object_id)
+	_index_add(depleted_index_by_kind, registration.kind, object_id)
+	registration.revision = _next_revision()
+	query_cache.clear()
+	_record("removed", object_id, registration.kind, { "reason": reason })
 
 func actor_position_for_request(request) -> Vector3:
 	var metadata := request_metadata(request)
@@ -647,6 +904,119 @@ func segment_samples_enter_aabb(from_position: Vector3, to_position: Vector3, bo
 		if bounds.has_point(from_position.lerp(to_position, t)):
 			return true
 	return false
+
+func _index_registration(registration) -> void:
+	if registration == null:
+		return
+	_unindex_registration(registration)
+	var object_id: String = registration.object_id
+	if object_id == "":
+		return
+	var position: Vector3 = object_position(registration)
+	var cell := Vector2i(roundi(position.x / CELL), roundi(position.z / CELL))
+	var tile_key: String = tile_key_for_cell(cell)
+	var chunk_key: String = chunk_key_for_cell(cell)
+	var region_key: String = region_key_for_cell(cell)
+	var layer_key: String = str(vertical_layer_for_position(position))
+	var town_key: String = String(registration.metadata.get("townKey", ""))
+	_index_add(index_by_kind, registration.kind, object_id)
+	if registration.depleted:
+		_index_add(depleted_index_by_kind, registration.kind, object_id)
+	else:
+		_index_add(available_index_by_kind, registration.kind, object_id)
+	_index_add(index_by_tile, tile_key, object_id)
+	_index_add(index_by_chunk, chunk_key, object_id)
+	_index_add(index_by_region, region_key, object_id)
+	_index_add(index_by_layer, layer_key, object_id)
+	if town_key != "":
+		_index_add(index_by_town, town_key, object_id)
+	registration.metadata["tileKey"] = tile_key
+	registration.metadata["chunkKey"] = chunk_key
+	registration.metadata["regionKey"] = region_key
+	registration.metadata["verticalLayer"] = int(layer_key)
+	registration.metadata["available"] = not registration.depleted
+	query_cache.clear()
+
+func _unindex_registration(registration) -> void:
+	if registration == null:
+		return
+	var object_id: String = registration.object_id
+	if object_id == "":
+		return
+	for index in [
+		index_by_kind,
+		available_index_by_kind,
+		depleted_index_by_kind,
+		index_by_tile,
+		index_by_chunk,
+		index_by_region,
+		index_by_town,
+		index_by_layer
+	]:
+		_index_remove(index, object_id)
+
+func _index_add(index: Dictionary, key: String, object_id: String) -> void:
+	if key == "" or object_id == "":
+		return
+	var bucket: Dictionary = index.get(key, {})
+	bucket[object_id] = true
+	index[key] = bucket
+
+func _index_remove(index: Dictionary, object_id: String) -> void:
+	for key_value in index.keys().duplicate():
+		var key := String(key_value)
+		var bucket: Dictionary = index.get(key, {})
+		if not bucket.has(object_id):
+			continue
+		bucket.erase(object_id)
+		if bucket.is_empty():
+			index.erase(key)
+		else:
+			index[key] = bucket
+
+func tile_key_for_cell(cell: Vector2i) -> String:
+	var tile_size: int = maxi(1, NpcConstantsScript.NAV_TILE_CELL_SIZE)
+	return "%d,%d" % [floori(float(cell.x) / float(tile_size)), floori(float(cell.y) / float(tile_size))]
+
+func chunk_key_for_cell(cell: Vector2i) -> String:
+	var chunk_size: int = maxi(1, WORLD_CHUNK_CELL_SIZE)
+	return "%d,%d" % [floori(float(cell.x) / float(chunk_size)), floori(float(cell.y) / float(chunk_size))]
+
+func region_key_for_cell(cell: Vector2i) -> String:
+	var region_size := 64
+	return "%d,%d" % [floori(float(cell.x) / float(region_size)), floori(float(cell.y) / float(region_size))]
+
+func vertical_layer_for_position(position: Vector3) -> int:
+	return floori(position.y / CELL)
+
+func indexed_point_inside_town(entry: Dictionary, position: Vector3) -> bool:
+	var center: Vector2i = entry.get("townCenter", Vector2i.ZERO)
+	var radius := float(entry.get("townRadius", 18)) * CELL
+	var flat := Vector2(position.x - float(center.x) * CELL, position.z - float(center.y) * CELL)
+	return flat.length() <= radius
+
+func indexed_point_inside_work_area(entry: Dictionary, position: Vector3) -> bool:
+	var center: Vector2i = entry.get("townCenter", Vector2i.ZERO)
+	var radius := (float(entry.get("townRadius", 18)) + 24.0) * CELL
+	var flat := Vector2(position.x - float(center.x) * CELL, position.z - float(center.y) * CELL)
+	return flat.length() <= radius
+
+func query_cache_key(entry: Dictionary, kinds: Array, options: Dictionary) -> String:
+	var kind_values: Array[String] = []
+	for kind_value in kinds:
+		kind_values.append(String(kind_value))
+	kind_values.sort()
+	var center: Vector2i = entry.get("townCenter", Vector2i.ZERO)
+	return "%s|%d,%d|%d|%s|%s|%s|%s" % [
+		",".join(kind_values),
+		center.x,
+		center.y,
+		int(entry.get("townRadius", 18)),
+		str(bool(options.get("workAreaOnly", true))),
+		str(bool(options.get("outsideTown", true))),
+		String(options.get("unreachableMetaKey", "")),
+		String(options.get("verticalLayer", "")) + "|" + JSON.stringify(options.get("drops", [])) + "|" + JSON.stringify(options.get("materials", []))
+	]
 
 func reservation_owners(registration) -> Array:
 	var owners := []

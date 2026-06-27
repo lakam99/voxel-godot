@@ -82,6 +82,8 @@ func debug_performance_state() -> Dictionary:
         "overlay": story_world_overlay_system.performance_state() if story_world_overlay_system != null and story_world_overlay_system.has_method("performance_state") else {},
         "encounter": worldmark_encounter_controller.performance_state() if worldmark_encounter_controller != null and worldmark_encounter_controller.has_method("performance_state") else {}
     }
+    var perf_summary: Dictionary = runtime_perf_monitor.summary() if runtime_perf_monitor != null else {}
+    var save_stats: Dictionary = save_system.stats() if save_system != null and save_system.has_method("stats") else {}
     return {
         "fps": Engine.get_frames_per_second(),
         "chunks": chunks.size(),
@@ -100,6 +102,27 @@ func debug_performance_state() -> Dictionary:
         "hostilesMs": perf_hostiles_ms,
         "beaconMs": perf_beacon_ms,
         "autosaveMs": perf_autosave_ms,
+        "npcMs": perf_npc_ms,
+        "routePlanMs": perf_route_plan_ms,
+        "navSnapshotMs": perf_nav_snapshot_ms,
+        "jobScanMs": perf_job_scan_ms,
+        "frameP50Ms": float(perf_summary.get("frameP50Ms", 0.0)),
+        "frameP95Ms": float(perf_summary.get("frameP95Ms", 0.0)),
+        "frameP99Ms": float(perf_summary.get("frameP99Ms", 0.0)),
+        "frameMaxMs": float(perf_summary.get("frameMaxMs", 0.0)),
+        "lastSpikeReason": String(perf_summary.get("lastSpikeReason", "")),
+        "lastSpikeFrameMs": float(perf_summary.get("lastSpikeFrameMs", 0.0)),
+        "lastSpikeTopSections": perf_summary.get("lastSpikeTopSections", []),
+        "perfSections": perf_summary.get("sections", {}),
+        "perfSectionMaxMs": perf_summary.get("sectionMaxMs", {}),
+        "perfCounters": perf_summary.get("counters", {}),
+        "autosaveDirty": autosave_dirty,
+        "autosaveDirtyReasons": autosave_dirty_reasons.keys(),
+        "autosaveInterval": autosave_interval_seconds,
+        "autosaveJobsStarted": autosave_jobs_started,
+        "autosaveJobsCompleted": autosave_jobs_completed,
+        "autosaveJobsFailed": autosave_jobs_failed,
+        "autosaveStats": save_stats,
         "breakMs": perf_break_ms,
         "hudMs": perf_hud_ms,
         "hudRefresh": hud_refresh_stats(),
@@ -140,6 +163,7 @@ func count_physics_bodies(node: Node) -> int:
     return count
 
 func _on_equipment_changed() -> void:
+    mark_world_dirty("equipment_changed")
     if progression_system:
         apply_progression_bonuses(progression_system.state())
     if hud and equipment_system:
@@ -157,10 +181,12 @@ func _on_equipment_slot_clicked(slot: String) -> void:
     update_hud(equipment_system.last_message)
 
 func _on_contracts_changed() -> void:
+    mark_world_dirty("contracts_changed")
     if hud and contract_system:
         hud.set_contracts(contract_system.state())
 
 func _on_contract_rewarded(contract: Dictionary) -> void:
+    mark_world_dirty("contract_rewarded")
     var reward: Dictionary = contract.get("reward", {})
     var xp := int(reward.get("xp", 0))
     if xp > 0:

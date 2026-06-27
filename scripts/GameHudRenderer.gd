@@ -52,7 +52,14 @@ static func set_performance(hud, state: Dictionary) -> void:
     var story: Dictionary = state.get("story", {})
     var story_overlay: Dictionary = story.get("overlay", {}) if story is Dictionary else {}
     var story_encounter: Dictionary = story.get("encounter", {}) if story is Dictionary else {}
-    hud.performance_label.text = "FPS %d | frame %.2fms | chunks %d | props %d | blocks %d\nhostiles %d | pickups %d | bodies %d | draw est %d\nchunk %.2f | sky %.2f | hostile %.2f | survival %.2f | hud %.2f\nutility %.2f | pickups %.2f | beacon %.2f | break %.2f | save %.2f\nHUD refresh %d/%d skip %d | chunk cache h/m/i %d/%d/%d\nstory overlay %d/%d | encounter %d/%d" % [
+    var spike_sections := []
+    for row in state.get("lastSpikeTopSections", []):
+        if row is Dictionary:
+            spike_sections.append("%s %.1f" % [String(row.get("name", "")), float(row.get("ms", 0.0))])
+    var spike_text := ", ".join(spike_sections)
+    if spike_text == "":
+        spike_text = "none"
+    hud.performance_label.text = "FPS %d | frame %.2fms | chunks %d | props %d | blocks %d\nhostiles %d | pickups %d | bodies %d | draw est %d\nchunk %.2f | sky %.2f | hostile %.2f | survival %.2f | hud %.2f\nnpc %.2f | route %.2f | nav %.2f | job %.2f | save %.2f\nutility %.2f | pickups %.2f | beacon %.2f | break %.2f\nframe p50 %.2f | p95 %.2f | p99 %.2f | max %.2f\nspike %.2f %s | top %s\nsave jobs %d/%d fail %d | dirty %s | interval %.0fs\nHUD refresh %d/%d skip %d | chunk cache h/m/i %d/%d/%d\nstory overlay %d/%d | encounter %d/%d" % [
         roundi(float(state.get("fps", 0.0))),
         float(state.get("frameMs", 0.0)),
         int(state.get("chunks", 0)),
@@ -67,11 +74,27 @@ static func set_performance(hud, state: Dictionary) -> void:
         float(state.get("hostilesMs", 0.0)),
         float(state.get("survivalMs", 0.0)),
         float(state.get("hudMs", 0.0)),
+        float(state.get("npcMs", 0.0)),
+        float(state.get("routePlanMs", 0.0)),
+        float(state.get("navSnapshotMs", 0.0)),
+        float(state.get("jobScanMs", 0.0)),
+        float(state.get("autosaveMs", 0.0)),
         float(state.get("utilityMs", 0.0)),
         float(state.get("pickupsMs", 0.0)),
         float(state.get("beaconMs", 0.0)),
         float(state.get("breakMs", 0.0)),
-        float(state.get("autosaveMs", 0.0)),
+        float(state.get("frameP50Ms", 0.0)),
+        float(state.get("frameP95Ms", 0.0)),
+        float(state.get("frameP99Ms", 0.0)),
+        float(state.get("frameMaxMs", 0.0)),
+        float(state.get("lastSpikeFrameMs", 0.0)),
+        String(state.get("lastSpikeReason", "")),
+        spike_text,
+        int(state.get("autosaveJobsCompleted", 0)),
+        int(state.get("autosaveJobsStarted", 0)),
+        int(state.get("autosaveJobsFailed", 0)),
+        str(bool(state.get("autosaveDirty", false))),
+        float(state.get("autosaveInterval", 0.0)),
         int(hud_refresh.get("throttled", 0)),
         int(hud_refresh.get("manual", 0)),
         int(hud_refresh.get("skipped", 0)),
@@ -179,8 +202,10 @@ static func render(hud) -> void:
         render_hotbar(hud)
     render_active(hud)
     render_equipment(hud)
-    render_objectives(hud)
-    render_contracts(hud)
+    if hud.objective_panel != null and hud.objective_panel.visible:
+        render_objectives(hud)
+    if hud.contract_panel != null and hud.contract_panel.visible:
+        render_contracts(hud)
     if hud.inventory_panel and hud.inventory_panel.visible:
         render_inventory_grid(hud)
         render_crafting_list(hud)
@@ -251,6 +276,8 @@ static func hide_utility_panel(hud) -> void:
 static func render_objectives(hud) -> void:
     if hud.objectives == null or hud.objective_list == null:
         return
+    if hud.objective_panel != null and not hud.objective_panel.visible:
+        return
     clear_container(hud.objective_list)
     for objective in hud.objectives.all_objectives():
         var label := Label.new()
@@ -266,14 +293,14 @@ static func render_objectives(hud) -> void:
 static func render_contracts(hud) -> void:
     if hud.contracts == null or hud.contract_panel == null or hud.contract_list == null:
         return
-    clear_container(hud.contract_list)
     var state: Dictionary = hud.contracts.state()
     var unlocked := bool(state.get("townUnlocked", false))
     hud.contract_panel.visible = unlocked and bool(state.get("menuOpen", false)) and not hud.inventory_panel.visible and not hud.teleport_panel.visible
     hud.contract_status.text = "%d/%d" % [int(state.get("completed", 0)), int(state.get("total", 0))] if unlocked else "Locked"
     hud.contract_recent.text = String(state.get("recent", "Find a town to unlock contracts"))
-    if not unlocked:
+    if not hud.contract_panel.visible:
         return
+    clear_container(hud.contract_list)
     for row_value in state.get("contracts", []):
         if not (row_value is Dictionary):
             continue

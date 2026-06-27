@@ -23,7 +23,37 @@ var active_jobs := {}
 var active_job_order: Array[String] = []
 var local_cost_cache := {}
 var local_cost_cache_order: Array[String] = []
+var runtime_graph_cache := {}
+var runtime_graph_cache_order: Array[String] = []
+var runtime_graph_build_jobs := {}
 var last_stats := {}
+
+const RUNTIME_GRAPH_CACHE_LIMIT := 48
+const RUNTIME_GRAPH_SYNC_CELL_LIMIT := 16
+const RUNTIME_GRAPH_BUILD_CELLS_INITIAL_CALL := 4
+const RUNTIME_GRAPH_BUILD_CELLS_RESUME_CALL := 16
+const RUNTIME_GRAPH_STEP_USEC_BUDGET := 1600
+const RUNTIME_SEARCH_STEP_USEC_BUDGET := 1400
+const EXTERNAL_DIRECT_GRAPH_STEP_USEC_BUDGET := 10000
+const EXTERNAL_DIRECT_GRAPH_BUILD_CELLS_INITIAL_CALL := 16
+const EXTERNAL_DIRECT_GRAPH_BUILD_CELLS_RESUME_CALL := 768
+const FOREGROUND_RUNTIME_GRAPH_BUILD_UNITS := 8192
+const RUNTIME_CARDINAL_EDGE_OFFSETS := [
+	Vector2i(1, 0),
+	Vector2i(-1, 0),
+	Vector2i(0, 1),
+	Vector2i(0, -1)
+]
+const RUNTIME_EDGE_OFFSETS := [
+	Vector2i(1, 0),
+	Vector2i(-1, 0),
+	Vector2i(0, 1),
+	Vector2i(0, -1),
+	Vector2i(1, 1),
+	Vector2i(1, -1),
+	Vector2i(-1, 1),
+	Vector2i(-1, -1)
+]
 
 func setup(nav_world = null) -> void:
 	navigation_world = nav_world
@@ -33,6 +63,9 @@ func clear() -> void:
 	active_job_order.clear()
 	local_cost_cache.clear()
 	local_cost_cache_order.clear()
+	runtime_graph_cache.clear()
+	runtime_graph_cache_order.clear()
+	runtime_graph_build_jobs.clear()
 	last_stats.clear()
 
 func plan_route(request, max_expansions := 4096):
@@ -41,7 +74,38 @@ func plan_route(request, max_expansions := 4096):
 	if int(request.get("cancelled_generation")) == int(request.get("cancellation_generation")):
 		return _base_result(request, NpcEnumsScript.ROUTE_STATUS_CANCELLED, NpcEnumsScript.ROUTE_REASON_CANCELLED)
 	var profile = _profile_for_request(request)
+	var request_id := String(request.get("request_id"))
+	if request_id == "":
+		request_id = "route:%s:%s" % [String(request.get("owner_npc_id")), str(Time.get_ticks_usec())]
+		request.set("request_id", request_id)
+	var job_key := "%s:%d" % [request_id, int(request.get("cancellation_generation"))]
+	if active_jobs.has(job_key):
+		var active_job: Dictionary = active_jobs[job_key]
+		var active_goal_lookup: Dictionary = active_job.get("goals", {})
+		var active_goal_keys := []
+		for goal_key_value in active_goal_lookup.keys():
+			active_goal_keys.append(String(goal_key_value))
+		return _step_route_job(
+			request,
+			job_key,
+			active_job.get("graph", {}),
+			String(active_job.get("start", "")),
+			active_goal_keys,
+			active_job.get("allowedTiles", []),
+			{},
+			profile,
+			max_expansions
+		)
 	var graph: Dictionary = request.get("goal_spec").get("_graph", {}) if request.get("goal_spec") is Dictionary else {}
+	if bool(graph.get("_pending", false)):
+		return _base_result(request, NpcEnumsScript.ROUTE_STATUS_PENDING, &"pending_graph_build", {
+			"graph": _route_pending_graph_metrics(graph, "", [], [])
+		})
+	if bool(graph.get("_yieldAfterBuild", false)):
+		graph.erase("_yieldAfterBuild")
+		return _base_result(request, NpcEnumsScript.ROUTE_STATUS_PENDING, &"pending_graph_build", {
+			"graph": _route_pending_graph_metrics(graph, "", [], [])
+		})
 	if graph.is_empty():
 		graph = build_graph(profile)
 	var start_key := resolve_start_key(graph, request, profile)
@@ -50,7 +114,14 @@ func plan_route(request, max_expansions := 4096):
 	var goal_keys := resolve_goal_keys(graph, request, profile)
 	if goal_keys.is_empty():
 		return _base_result(request, NpcEnumsScript.ROUTE_STATUS_UNREACHABLE, &"no_goal_span")
-	var hierarchy := build_hierarchy(graph, profile)
+	var runtime_graph_request := _goal_spec(request).has("_graph")
+	var hierarchy := {
+		"tileCount": (graph.get("tiles", []) as Array).size(),
+		"entranceCount": 0,
+		"entrances": [],
+		"tileEdges": {},
+		"runtimeLocal": true
+	} if runtime_graph_request else build_hierarchy(graph, profile)
 	var start_tile := String((graph.get("spanTiles", {}) as Dictionary).get(start_key, ""))
 	var goal_tiles: Array = []
 	for goal_key in goal_keys:
@@ -58,22 +129,21 @@ func plan_route(request, max_expansions := 4096):
 		if goal_tile != "" and not goal_tiles.has(goal_tile):
 			goal_tiles.append(goal_tile)
 	goal_tiles.sort()
-	var allowed_tiles := abstract_tile_path(hierarchy, start_tile, goal_tiles)
-	if allowed_tiles.is_empty() and (not goal_tiles.is_empty() and not goal_tiles.has(start_tile)):
+	var allowed_tiles := [] if runtime_graph_request else abstract_tile_path(hierarchy, start_tile, goal_tiles)
+	if not runtime_graph_request and allowed_tiles.is_empty() and (not goal_tiles.is_empty() and not goal_tiles.has(start_tile)):
 		return _base_result(request, NpcEnumsScript.ROUTE_STATUS_UNREACHABLE, NpcEnumsScript.ROUTE_REASON_NO_ROUTE, {
 			"hierarchy": hierarchy,
 			"abstractReason": "no_tile_path",
 			"graph": _route_graph_metrics(graph, start_key, goal_keys, allowed_tiles)
 		})
-	var request_id := String(request.get("request_id"))
-	if request_id == "":
-		request_id = "route:%s:%s" % [String(request.get("owner_npc_id")), str(Time.get_ticks_usec())]
-		request.set("request_id", request_id)
-	var job_key := "%s:%d" % [request_id, int(request.get("cancellation_generation"))]
 	if not active_jobs.has(job_key):
 		active_jobs[job_key] = local_planner.start_job(graph, start_key, goal_keys, cost_model, request, profile, allowed_tiles)
 		_touch_active_job(job_key)
-	var search: Dictionary = local_planner.step(active_jobs[job_key], max_expansions)
+	return _step_route_job(request, job_key, graph, start_key, goal_keys, allowed_tiles, hierarchy, profile, max_expansions)
+
+func _step_route_job(request, job_key: String, graph: Dictionary, start_key: String, goal_keys: Array, allowed_tiles: Array, hierarchy: Dictionary, profile, max_expansions: int):
+	var search_budget_usec := _local_search_usec_budget(request)
+	var search: Dictionary = local_planner.step(active_jobs[job_key], max_expansions, search_budget_usec)
 	last_stats = {
 		"lastExpansions": int(search.get("expansions", local_planner.stats().get("lastExpansions", 0))),
 		"activeJobs": active_jobs.size(),
@@ -85,14 +155,14 @@ func plan_route(request, max_expansions := 4096):
 		_touch_active_job(job_key)
 		var pending = _base_result(request, NpcEnumsScript.ROUTE_STATUS_PENDING, &"pending_budget", {
 			"hierarchy": hierarchy,
-			"graph": _route_graph_metrics(graph, start_key, goal_keys, allowed_tiles)
+			"graph": _route_pending_graph_metrics(graph, start_key, goal_keys, allowed_tiles)
 		})
 		return pending
 	active_jobs.erase(job_key)
 	active_job_order.erase(job_key)
 	if status == NpcEnumsScript.ROUTE_STATUS_UNREACHABLE and not allowed_tiles.is_empty() and _goal_spec(request).has("_graph"):
 		var fallback_job := local_planner.start_job(graph, start_key, goal_keys, cost_model, request, profile, [])
-		var fallback_search: Dictionary = local_planner.step(fallback_job, max_expansions)
+		var fallback_search: Dictionary = local_planner.step(fallback_job, max_expansions, search_budget_usec)
 		last_stats["abstractFallback"] = "unrestricted_local"
 		last_stats["lastFallbackExpansions"] = int(fallback_search.get("expansions", local_planner.stats().get("lastExpansions", 0)))
 		if fallback_search.get("status") != NpcEnumsScript.ROUTE_STATUS_UNREACHABLE:
@@ -102,13 +172,19 @@ func plan_route(request, max_expansions := 4096):
 		var fallback_pending = _base_result(request, NpcEnumsScript.ROUTE_STATUS_PENDING, &"pending_budget", {
 			"hierarchy": hierarchy,
 			"fallback": "unrestricted_local",
-			"graph": _route_graph_metrics(graph, start_key, goal_keys, [])
+			"graph": _route_pending_graph_metrics(graph, start_key, goal_keys, [])
 		})
 		return fallback_pending
 	if status == NpcEnumsScript.ROUTE_STATUS_UNREACHABLE:
 		return _base_result(request, NpcEnumsScript.ROUTE_STATUS_UNREACHABLE, search.get("reason", NpcEnumsScript.ROUTE_REASON_NO_ROUTE), {
 			"hierarchy": hierarchy,
-			"graph": _route_graph_metrics(graph, start_key, goal_keys, allowed_tiles)
+			"graph": _route_graph_metrics(graph, start_key, goal_keys, allowed_tiles),
+			"search": {
+				"expansions": int(search.get("expansions", 0)),
+				"closedCount": int(search.get("closedCount", 0)),
+				"bestKey": String(search.get("bestKey", "")),
+				"bestGoalDistance": float(search.get("bestGoalDistance", INF))
+			}
 		})
 	var corridor = corridor_builder.build(graph, search.get("path", []), search.get("edges", []), search.get("breakdowns", []), request, true)
 	var result = _base_result(request, status, search.get("reason", NpcEnumsScript.ROUTE_REASON_NONE), {
@@ -128,23 +204,43 @@ func plan_route(request, max_expansions := 4096):
 
 func _route_graph_metrics(graph: Dictionary, start_key: String, goal_keys: Array, allowed_tiles: Array) -> Dictionary:
 	var edges: Dictionary = graph.get("edges", {})
-	var edge_count := 0
-	for edge_list in edges.values():
-		edge_count += (edge_list as Array).size()
 	return {
 		"nodeCount": (graph.get("nodes", {}) as Dictionary).size(),
-		"edgeCount": edge_count,
+		"edgeCount": int(graph.get("edgeCount", -1)),
 		"startKey": start_key,
 		"startEdgeCount": (edges.get(start_key, []) as Array).size(),
 		"goalKeys": goal_keys.duplicate(),
 		"allowedTileCount": allowed_tiles.size()
 	}
 
+func _route_pending_graph_metrics(graph: Dictionary, start_key: String, goal_keys: Array, allowed_tiles: Array) -> Dictionary:
+	return {
+		"nodeCount": (graph.get("nodes", {}) as Dictionary).size(),
+		"edgeCount": -1,
+		"startKey": start_key,
+		"goalKeys": goal_keys.duplicate(),
+		"allowedTileCount": allowed_tiles.size()
+	}
+
 func plan_runtime_route(entry: Dictionary, intent: Dictionary, world_adapter, max_expansions := 200000) -> Dictionary:
+	var monitor = world_adapter.performance_monitor() if world_adapter != null and world_adapter.has_method("performance_monitor") else null
+	var request_start: int = monitor.begin_section("route_runtime_request") if monitor != null else Time.get_ticks_usec()
 	var request = runtime_request(entry, intent, world_adapter)
+	if monitor != null:
+		monitor.end_section("route_runtime_request", request_start)
+	var plan_start: int = monitor.begin_section("route_search_step") if monitor != null else Time.get_ticks_usec()
 	var result = plan_route(request, max_expansions)
+	if monitor != null:
+		monitor.end_section("route_search_step", plan_start)
+	var record_start: int = monitor.begin_section("route_record_result") if monitor != null else Time.get_ticks_usec()
 	_record_route_result(entry, result)
-	return route_dictionary_from_result(result, intent, world_adapter)
+	if monitor != null:
+		monitor.end_section("route_record_result", record_start)
+	var convert_start: int = monitor.begin_section("route_result_convert") if monitor != null else Time.get_ticks_usec()
+	var route: Dictionary = route_dictionary_from_result(result, intent, world_adapter)
+	if monitor != null:
+		monitor.end_section("route_result_convert", convert_start)
+	return route
 
 func route_cost_for_runtime(entry: Dictionary, target: Vector3, allow_outside := false, moving_home := false, arrival_radius := NpcConstantsScript.CELL_SIZE * 0.85, approach_cells: Array = [], world_adapter = null) -> float:
 	if world_adapter == null:
@@ -388,7 +484,20 @@ func resolve_goal_keys(graph: Dictionary, request, profile = null) -> Array:
 
 func runtime_request(entry: Dictionary, intent: Dictionary, world_adapter):
 	var request = RouteRequestScript.new()
-	request.request_id = "runtime:%s:%s:%s" % [String(entry.get("id", "npc")), String(intent.get("kind", "move")), str(intent.get("targetCell", Vector2i.ZERO))]
+	var target_cell_value: Vector2i = intent.get("targetCell", Vector2i.ZERO)
+	var revision_key := "0"
+	if world_adapter != null:
+		revision_key = str(int(world_adapter.get("static_snapshot_revision")))
+	request.request_id = "runtime:%s:%s:%d,%d:%s:%s:%s:%s" % [
+		String(entry.get("id", "npc")),
+		String(intent.get("kind", "move")),
+		target_cell_value.x,
+		target_cell_value.y,
+		str(bool(intent.get("allowOutside", false))),
+		str(bool(intent.get("movingHome", false))),
+		String(intent.get("action", "")),
+		revision_key
+	]
 	request.owner_npc_id = String(entry.get("id", "npc"))
 	var body := entry.get("body") as Node3D
 	request.start_position = body.global_position if body != null else entry.get("porchPosition", Vector3.ZERO)
@@ -398,76 +507,126 @@ func runtime_request(entry: Dictionary, intent: Dictionary, world_adapter):
 	request.allow_partial = bool(intent.get("allowPartial", false))
 	request.maximum_acceptable_goal_distance = float(intent.get("arrivalRadius", NpcConstantsScript.CELL_SIZE * 0.75))
 	var target: Vector3 = intent.get("target", request.start_position)
-	request.goal_spec = {
+	if String(entry.get("activeRuntimeRouteRequestId", "")) != request.request_id:
+		entry["activeRuntimeRouteRequestId"] = request.request_id
+		entry["activeRuntimeRouteGeneration"] = int(entry.get("activeRuntimeRouteGeneration", 0)) + 1
+	request.cancellation_generation = int(entry.get("activeRuntimeRouteGeneration", 1))
+	var active_job_key := "%s:%d" % [request.request_id, request.cancellation_generation]
+	var graph := {}
+	if not active_jobs.has(active_job_key):
+		graph = _build_runtime_graph(entry, intent, world_adapter, request.start_position)
+	var target_center: Vector3 = world_adapter.cell_position(target_cell_value) if world_adapter != null else target
+	var target_span_keys: Array = []
+	if graph.has("_targetSpanKeys"):
+		target_span_keys = (graph.get("_targetSpanKeys", []) as Array).duplicate()
+	var goal_spec := {
 		"kind": "point_region",
-		"center": target,
+		"center": target_center,
 		"radius": request.maximum_acceptable_goal_distance,
-		"_graph": _build_runtime_graph(entry, intent, world_adapter, request.start_position)
+		"_graph": graph
 	}
-	var blackboard = entry.get("blackboard")
-	if blackboard != null and blackboard.has_method("next_route_generation"):
-		request.cancellation_generation = blackboard.next_route_generation()
-	else:
-		request.next_generation()
+	if not target_span_keys.is_empty():
+		goal_spec["kind"] = "smart_object_slot_set"
+		goal_spec["spanKeys"] = target_span_keys
+	request.goal_spec = goal_spec
+	var preferences := {}
+	if entry.has("_externalDirectMoveFrame"):
+		preferences["externalDirectRoute"] = true
+	if _runtime_graph_foreground_route(entry, intent):
+		preferences["foregroundRoute"] = true
+	if not preferences.is_empty():
+		request.semantic_preferences = preferences
 	return request
+
+func _local_search_usec_budget(request) -> int:
+	if request == null or not _goal_spec(request).has("_graph"):
+		return 0
+	var preferences: Dictionary = request.get("semantic_preferences") if request.get("semantic_preferences") is Dictionary else {}
+	if bool(preferences.get("externalDirectRoute", false)):
+		return 0
+	if bool(preferences.get("foregroundRoute", false)):
+		return 0
+	return RUNTIME_SEARCH_STEP_USEC_BUDGET
 
 func _build_runtime_graph(entry: Dictionary, intent: Dictionary, world_adapter, start_position: Vector3) -> Dictionary:
 	var graph := _empty_graph()
 	if world_adapter == null:
 		return graph
+	var monitor = world_adapter.performance_monitor() if world_adapter.has_method("performance_monitor") else null
+	var graph_start: int = monitor.begin_section("runtime_graph_build") if monitor != null else Time.get_ticks_usec()
 	var allow_outside := bool(intent.get("allowOutside", false))
 	var moving_home := bool(intent.get("movingHome", false))
+	var snapshot_start: int = monitor.begin_section("runtime_graph_snapshot") if monitor != null else Time.get_ticks_usec()
 	var snapshot: Dictionary = world_adapter.build_snapshot(entry, allow_outside, moving_home)
+	if monitor != null:
+		monitor.end_section("runtime_graph_snapshot", snapshot_start)
 	var start_cell: Vector2i = world_adapter.world_cell(start_position)
 	var target_cell: Vector2i = intent.get("targetCell", world_adapter.world_cell(intent.get("target", start_position)))
+	var margin := _runtime_margin_for_intent(intent, entry)
+	var cache_key := _runtime_graph_cache_key(entry, intent, world_adapter, start_cell, target_cell, margin)
+	var foreground_route := _runtime_graph_foreground_route(entry, intent)
+	if runtime_graph_build_jobs.has(cache_key):
+		var continue_existing_start: int = monitor.begin_section("runtime_graph_continue") if monitor != null else Time.get_ticks_usec()
+		var existing_pending_graph: Dictionary = _continue_runtime_graph_build_job(cache_key, entry, intent, world_adapter, snapshot, start_cell, {}, [], {}, _runtime_graph_resume_units(entry, intent), foreground_route)
+		if monitor != null:
+			monitor.end_section("runtime_graph_continue", continue_existing_start)
+			monitor.end_section("runtime_graph_build", graph_start)
+		return existing_pending_graph
+	var target_start: int = monitor.begin_section("runtime_graph_targets") if monitor != null else Time.get_ticks_usec()
 	var target_cells: Dictionary = _runtime_target_cells(entry, intent, world_adapter, snapshot, target_cell, start_cell)
+	if monitor != null:
+		monitor.end_section("runtime_graph_targets", target_start)
 	if target_cells.is_empty():
 		target_cells[target_cell] = true
-	var margin := _runtime_margin_for_intent(intent)
+	if runtime_graph_cache.has(cache_key):
+		var cached_graph: Dictionary = runtime_graph_cache[cache_key]
+		if _runtime_graph_covers(cached_graph, start_cell, target_cells):
+			runtime_graph_cache_order.erase(cache_key)
+			runtime_graph_cache_order.append(cache_key)
+			if monitor != null:
+				monitor.increment_counter("runtime_graph_cache_hits")
+				monitor.end_section("runtime_graph_build", graph_start)
+			return cached_graph
+	if monitor != null:
+		monitor.increment_counter("runtime_graph_cache_misses")
+	var candidates_start: int = monitor.begin_section("runtime_graph_candidates") if monitor != null else Time.get_ticks_usec()
 	var candidate_cells: Dictionary = _runtime_graph_cells(start_cell, target_cell, target_cells, margin)
 	var cells := candidate_cells.keys()
 	cells.sort_custom(func(a: Vector2i, b: Vector2i) -> bool:
 		return a.x < b.x or (a.x == b.x and a.y < b.y)
 	)
+	var target_lookup := {}
+	for cell in target_cells.keys():
+		target_lookup[cell] = true
+	if monitor != null:
+		monitor.end_section("runtime_graph_candidates", candidates_start)
+	if cells.size() > RUNTIME_GRAPH_SYNC_CELL_LIMIT:
+		var continue_start: int = monitor.begin_section("runtime_graph_continue") if monitor != null else Time.get_ticks_usec()
+		var pending_graph: Dictionary = _continue_runtime_graph_build_job(cache_key, entry, intent, world_adapter, snapshot, start_cell, target_cells, cells, target_lookup, _runtime_graph_initial_units(entry, intent), foreground_route)
+		if monitor != null:
+			monitor.end_section("runtime_graph_continue", continue_start)
+		if monitor != null:
+			monitor.end_section("runtime_graph_build", graph_start)
+		return pending_graph
+	var sync_start: int = monitor.begin_section("runtime_graph_sync_nodes") if monitor != null else Time.get_ticks_usec()
 	for cell: Vector2i in cells:
 		if not _runtime_cell_can_be_node(entry, world_adapter, snapshot, cell, start_cell, target_cells):
 			continue
 		var span = _runtime_span_for_cell(world_adapter, snapshot, cell)
 		_add_node(graph, span, NavigationChangeBusScript.tile_key_for_cell(cell))
+	if monitor != null:
+		monitor.end_section("runtime_graph_sync_nodes", sync_start)
 	var node_keys := (graph.get("nodes", {}) as Dictionary).keys()
 	node_keys.sort()
-	var target_lookup := {}
-	for cell in target_cells.keys():
-		target_lookup[cell] = true
+	var edge_start: int = monitor.begin_section("runtime_graph_sync_edges") if monitor != null else Time.get_ticks_usec()
 	for from_key in node_keys:
-		var from_span = (graph.get("nodes", {}) as Dictionary)[from_key]
-		var from_cell3: Vector3i = from_span.get("cell")
-		var from_cell: Vector2i = Vector2i(from_cell3.x, from_cell3.z)
-		for offset in [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1), Vector2i(1, 1), Vector2i(1, -1), Vector2i(-1, 1), Vector2i(-1, -1)]:
-			var to_cell: Vector2i = from_cell + offset
-			var to_key := _runtime_span_key(to_cell)
-			if not (graph.get("nodes", {}) as Dictionary).has(to_key):
-				continue
-			if offset.x != 0 and offset.y != 0 and (_runtime_step_blocked(entry, world_adapter, snapshot, from_cell, Vector2i(offset.x, 0), target_lookup) or _runtime_step_blocked(entry, world_adapter, snapshot, from_cell, Vector2i(0, offset.y), target_lookup)):
-				continue
-			if _runtime_step_blocked(entry, world_adapter, snapshot, from_cell, offset, target_lookup):
-				continue
-			var to_span = (graph.get("nodes", {}) as Dictionary)[to_key]
-			var kind := NpcEnumsScript.TRAVERSAL_KIND_WALK
-			var cost := 1.414 if offset.x != 0 and offset.y != 0 else 1.0
-			var door: Node = world_adapter.door_at(snapshot, to_cell)
-			if door != null:
-				kind = NpcEnumsScript.TRAVERSAL_KIND_DOOR
-				cost += 1.0
-			elif world_adapter.is_path_cell(snapshot, to_cell):
-				cost *= 0.78
-			var edge = NavEdgeDataScript.make(from_key, to_key, kind, cost)
-			if door != null:
-				edge.portal_id = "door:%s" % String(door.name)
-				edge.action_id = "open"
-				edge.required_capabilities.append(&"open_doors")
-				edge.metadata = { "door": door }
-			_add_edge_record(graph, from_key, to_key, edge, NavigationChangeBusScript.tile_key_for_cell(from_cell), NavigationChangeBusScript.tile_key_for_cell(to_cell))
+		_add_runtime_edges_for_key(graph, String(from_key), entry, intent, world_adapter, snapshot, target_lookup)
+	if monitor != null:
+		monitor.end_section("runtime_graph_sync_edges", edge_start)
+	if monitor != null:
+		monitor.end_section("runtime_graph_build", graph_start)
+	graph["_targetSpanKeys"] = _runtime_target_span_keys(target_cells)
+	_store_runtime_graph_cache(cache_key, graph)
 	return graph
 
 func _empty_graph() -> Dictionary:
@@ -475,7 +634,8 @@ func _empty_graph() -> Dictionary:
 		"nodes": {},
 		"edges": {},
 		"spanTiles": {},
-		"tiles": []
+		"tiles": [],
+		"edgeCount": 0
 	}
 
 func _runtime_graph_cells(start_cell: Vector2i, target_cell: Vector2i, target_cells: Dictionary, margin: int) -> Dictionary:
@@ -485,9 +645,231 @@ func _runtime_graph_cells(start_cell: Vector2i, target_cell: Vector2i, target_ce
 	_runtime_add_line_corridor(cells, start_cell, target_cell, margin)
 	for target in target_cells.keys():
 		if target is Vector2i:
+			if maxi(absi(target.x - target_cell.x), absi(target.y - target_cell.y)) <= margin:
+				cells[target] = true
+				continue
 			_runtime_add_cell_radius(cells, target, margin)
 			_runtime_add_line_corridor(cells, start_cell, target, margin)
 	return cells
+
+func _runtime_graph_cache_key(entry: Dictionary, intent: Dictionary, world_adapter, start_cell: Vector2i, target_cell: Vector2i, margin: int) -> String:
+	var static_revision := 0
+	if world_adapter != null:
+		static_revision = int(world_adapter.get("static_snapshot_revision"))
+	var profile_id := "adult_npc"
+	var context = entry.get("agentContext")
+	if context != null and context.get("traversal_profile_id") != null:
+		profile_id = String(context.get("traversal_profile_id"))
+	var start_tile := NavigationChangeBusScript.tile_key_for_cell(start_cell)
+	var target_tile := NavigationChangeBusScript.tile_key_for_cell(target_cell)
+	return "%s|%d|%s|%s|%s|%d|%s|%s" % [
+		profile_id,
+		static_revision,
+		start_tile,
+		target_tile,
+		String(intent.get("kind", "move")),
+		margin,
+		str(bool(intent.get("allowOutside", false))),
+		str(bool(intent.get("movingHome", false)))
+	]
+
+func _runtime_graph_covers(graph: Dictionary, start_cell: Vector2i, target_cells: Dictionary) -> bool:
+	var nodes: Dictionary = graph.get("nodes", {})
+	if not nodes.has(_runtime_span_key(start_cell)):
+		return false
+	for cell_value in target_cells.keys():
+		if cell_value is Vector2i and nodes.has(_runtime_span_key(cell_value)):
+			return true
+	return false
+
+func _store_runtime_graph_cache(cache_key: String, graph: Dictionary) -> void:
+	if cache_key == "" or graph.is_empty():
+		return
+	var cached_graph := graph.duplicate(false)
+	cached_graph.erase("_pending")
+	cached_graph.erase("_yieldAfterBuild")
+	runtime_graph_cache[cache_key] = cached_graph
+	runtime_graph_cache_order.erase(cache_key)
+	runtime_graph_cache_order.append(cache_key)
+	while runtime_graph_cache_order.size() > RUNTIME_GRAPH_CACHE_LIMIT:
+		var evicted := String(runtime_graph_cache_order.pop_front())
+		runtime_graph_cache.erase(evicted)
+
+func _continue_runtime_graph_build_job(cache_key: String, entry: Dictionary, intent: Dictionary, world_adapter, snapshot: Dictionary, start_cell: Vector2i, target_cells: Dictionary, cells: Array, target_lookup: Dictionary, max_units := RUNTIME_GRAPH_BUILD_CELLS_RESUME_CALL, ignore_time_budget := false) -> Dictionary:
+	var step_start_usec := Time.get_ticks_usec()
+	var job: Dictionary = runtime_graph_build_jobs.get(cache_key, {})
+	if job.is_empty():
+		job = {
+			"graph": _empty_graph(),
+			"cells": cells.duplicate(),
+			"targetCells": target_cells.duplicate(),
+			"targetLookup": target_lookup.duplicate(),
+			"targetSpanKeys": _runtime_target_span_keys(target_cells),
+			"cellIndex": 0,
+			"edgeKeys": [],
+			"edgeIndex": 0,
+			"edgeOffsets": _runtime_edge_offsets_for_entry(entry, intent),
+			"phase": "nodes"
+		}
+	runtime_graph_build_jobs[cache_key] = job
+	var graph: Dictionary = job.get("graph", _empty_graph())
+	var job_cells: Array = job.get("cells", cells)
+	var job_target_cells: Dictionary = job.get("targetCells", target_cells)
+	var job_target_lookup: Dictionary = job.get("targetLookup", target_lookup)
+	graph.erase("_pending")
+	var processed := 0
+	var unit_budget := maxi(1, max_units)
+	var phase := String(job.get("phase", "nodes"))
+	if phase == "nodes":
+		var cell_index := int(job.get("cellIndex", 0))
+		while cell_index < job_cells.size() and processed < unit_budget:
+			var cell: Vector2i = job_cells[cell_index]
+			if _runtime_cell_can_be_node(entry, world_adapter, snapshot, cell, start_cell, job_target_cells):
+				var span = _runtime_span_for_cell(world_adapter, snapshot, cell)
+				_add_node(graph, span, NavigationChangeBusScript.tile_key_for_cell(cell))
+			cell_index += 1
+			processed += 1
+			if _runtime_graph_step_time_exhausted(entry, step_start_usec, processed, ignore_time_budget):
+				break
+		job["cellIndex"] = cell_index
+		if cell_index >= job_cells.size():
+			var edge_keys := (graph.get("nodes", {}) as Dictionary).keys()
+			edge_keys.sort()
+			job["edgeKeys"] = edge_keys
+			job["edgeIndex"] = 0
+			job["edgeOffsetIndex"] = 0
+			phase = "edges"
+			job["phase"] = phase
+	if phase == "edges" and processed < unit_budget and not _runtime_graph_step_time_exhausted(entry, step_start_usec, processed, ignore_time_budget):
+		var edge_keys: Array = job.get("edgeKeys", [])
+		var edge_offsets: Array = job.get("edgeOffsets", _runtime_edge_offsets_for_entry(entry, intent))
+		if edge_offsets.is_empty():
+			edge_offsets = RUNTIME_CARDINAL_EDGE_OFFSETS
+		var edge_index := int(job.get("edgeIndex", 0))
+		var edge_offset_index := int(job.get("edgeOffsetIndex", 0))
+		while edge_index < edge_keys.size() and processed < unit_budget:
+			_add_runtime_edge_offset_for_key(graph, String(edge_keys[edge_index]), edge_offsets[edge_offset_index], entry, world_adapter, snapshot, job_target_lookup)
+			edge_offset_index += 1
+			if edge_offset_index >= edge_offsets.size():
+				edge_offset_index = 0
+				edge_index += 1
+			processed += 1
+			if _runtime_graph_step_time_exhausted(entry, step_start_usec, processed, ignore_time_budget):
+				break
+		job["edgeIndex"] = edge_index
+		job["edgeOffsetIndex"] = edge_offset_index
+		if edge_index >= edge_keys.size():
+			runtime_graph_build_jobs.erase(cache_key)
+			graph.erase("_pending")
+			graph["_targetSpanKeys"] = job.get("targetSpanKeys", [])
+			_store_runtime_graph_cache(cache_key, graph)
+			if not entry.has("_externalDirectMoveFrame"):
+				graph["_yieldAfterBuild"] = true
+			return graph
+	job["graph"] = graph
+	runtime_graph_build_jobs[cache_key] = job
+	graph["_pending"] = true
+	graph["_targetSpanKeys"] = job.get("targetSpanKeys", [])
+	return graph
+
+func _runtime_graph_step_time_exhausted(entry: Dictionary, step_start_usec: int, processed: int, ignore_time_budget := false) -> bool:
+	if ignore_time_budget:
+		return false
+	var budget := EXTERNAL_DIRECT_GRAPH_STEP_USEC_BUDGET if entry.has("_externalDirectMoveFrame") else RUNTIME_GRAPH_STEP_USEC_BUDGET
+	return processed > 0 and Time.get_ticks_usec() - step_start_usec >= budget
+
+func _runtime_target_span_keys(target_cells: Dictionary) -> Array[String]:
+	var result: Array[String] = []
+	for cell_value in target_cells.keys():
+		if cell_value is Vector2i:
+			result.append(_runtime_span_key(cell_value))
+	result.sort()
+	return result
+
+func _runtime_graph_initial_units(entry: Dictionary, intent: Dictionary = {}) -> int:
+	if _runtime_graph_foreground_route(entry, intent):
+		return FOREGROUND_RUNTIME_GRAPH_BUILD_UNITS
+	return EXTERNAL_DIRECT_GRAPH_BUILD_CELLS_INITIAL_CALL if entry.has("_externalDirectMoveFrame") else RUNTIME_GRAPH_BUILD_CELLS_INITIAL_CALL
+
+func _runtime_graph_resume_units(entry: Dictionary, intent: Dictionary = {}) -> int:
+	if _runtime_graph_foreground_route(entry, intent):
+		return FOREGROUND_RUNTIME_GRAPH_BUILD_UNITS
+	if entry.has("_externalDirectMoveFrame"):
+		return EXTERNAL_DIRECT_GRAPH_BUILD_CELLS_RESUME_CALL
+	if String(intent.get("kind", "")) == "scripted":
+		return 1
+	var job := String(entry.get("job", ""))
+	if job in ["forage", "wood", "stone"]:
+		return RUNTIME_GRAPH_BUILD_CELLS_RESUME_CALL
+	return 1
+
+func _runtime_graph_foreground_route(entry: Dictionary, intent: Dictionary = {}) -> bool:
+	if bool(entry.get("tutorial", false)):
+		return true
+	if bool(intent.get("movingHome", false)):
+		return true
+	var kind := String(intent.get("kind", ""))
+	if kind in ["scripted", "home"]:
+		return true
+	return int(entry.get("routePriority", 0)) >= 140
+
+func _runtime_edge_offsets_for_entry(entry: Dictionary, intent: Dictionary = {}) -> Array:
+	if entry.has("_externalDirectMoveFrame"):
+		return RUNTIME_EDGE_OFFSETS
+	if String(intent.get("kind", "")) == "scripted":
+		return RUNTIME_CARDINAL_EDGE_OFFSETS
+	var job := String(entry.get("job", ""))
+	if job in ["forage", "wood", "stone"]:
+		return RUNTIME_EDGE_OFFSETS
+	return RUNTIME_CARDINAL_EDGE_OFFSETS
+
+func _add_runtime_edges_for_key(graph: Dictionary, from_key: String, entry: Dictionary, intent: Dictionary, world_adapter, snapshot: Dictionary, target_lookup: Dictionary) -> void:
+	for offset in _runtime_edge_offsets_for_entry(entry, intent):
+		_add_runtime_edge_offset_for_key(graph, from_key, offset, entry, world_adapter, snapshot, target_lookup)
+
+func _add_runtime_edge_offset_for_key(graph: Dictionary, from_key: String, offset: Vector2i, entry: Dictionary, world_adapter, snapshot: Dictionary, target_lookup: Dictionary) -> void:
+	var nodes: Dictionary = graph.get("nodes", {})
+	if not nodes.has(from_key):
+		return
+	var from_span = nodes[from_key]
+	var from_cell3: Vector3i = from_span.get("cell")
+	var from_cell: Vector2i = Vector2i(from_cell3.x, from_cell3.z)
+	var to_cell: Vector2i = from_cell + offset
+	var to_key := _runtime_span_key(to_cell)
+	if not nodes.has(to_key):
+		return
+	var blocked := false
+	if offset.x != 0 and offset.y != 0:
+		blocked = _runtime_step_blocked(entry, world_adapter, snapshot, from_cell, Vector2i(offset.x, 0), target_lookup) or _runtime_step_blocked(entry, world_adapter, snapshot, from_cell, Vector2i(0, offset.y), target_lookup)
+	if not blocked:
+		blocked = _runtime_step_blocked(entry, world_adapter, snapshot, from_cell, offset, target_lookup)
+	if blocked:
+		return
+	var kind := NpcEnumsScript.TRAVERSAL_KIND_WALK
+	var cost := 1.414 if offset.x != 0 and offset.y != 0 else 1.0
+	var door: Node = world_adapter.door_at(snapshot, to_cell)
+	if door != null:
+		kind = NpcEnumsScript.TRAVERSAL_KIND_DOOR
+		cost += 1.0
+	elif world_adapter.is_path_cell(snapshot, to_cell):
+		cost *= 0.78
+	var edge := {
+		"from_key": from_key,
+		"to_key": to_key,
+		"traversal_kind": kind,
+		"cost": cost,
+		"bidirectional": true,
+		"portal_id": "",
+		"action_id": "",
+		"required_capabilities": [],
+		"metadata": {}
+	}
+	if door != null:
+		edge["portal_id"] = "door:%s" % String(door.name)
+		edge["action_id"] = "open"
+		edge["required_capabilities"] = [&"open_doors"]
+		edge["metadata"] = { "door": door }
+	_add_edge_record(graph, from_key, to_key, edge, NavigationChangeBusScript.tile_key_for_cell(from_cell), NavigationChangeBusScript.tile_key_for_cell(to_cell))
 
 func _runtime_add_cell_radius(cells: Dictionary, center: Vector2i, radius: int) -> void:
 	for z in range(center.y - radius, center.y + radius + 1):
@@ -520,7 +902,6 @@ func _add_node(graph: Dictionary, span, tile_key: String) -> void:
 	(graph["spanTiles"] as Dictionary)[key] = tile_key
 	if not (graph["tiles"] as Array).has(tile_key):
 		(graph["tiles"] as Array).append(tile_key)
-		(graph["tiles"] as Array).sort()
 
 func _add_edge_record(graph: Dictionary, from_key: String, to_key: String, edge, from_tile: String, to_tile: String) -> void:
 	if from_key == "" or to_key == "" or not (graph["nodes"] as Dictionary).has(from_key) or not (graph["nodes"] as Dictionary).has(to_key):
@@ -542,6 +923,7 @@ func _add_edge_record(graph: Dictionary, from_key: String, to_key: String, edge,
 		"metadata": edge.get("metadata").duplicate(true)
 	}
 	((graph["edges"] as Dictionary)[from_key] as Array).append(record)
+	graph["edgeCount"] = int(graph.get("edgeCount", 0)) + 1
 
 func _add_cross_tile_edges(graph: Dictionary, profile = null) -> void:
 	var keys := (graph.get("nodes", {}) as Dictionary).keys()
@@ -638,15 +1020,16 @@ func _runtime_target_cells(entry: Dictionary, intent: Dictionary, world_adapter,
 			target_cells[cell_value] = true
 	return target_cells
 
-func _runtime_margin_for_intent(intent: Dictionary) -> int:
+func _runtime_margin_for_intent(intent: Dictionary, entry: Dictionary = {}) -> int:
 	var kind := String(intent.get("kind", "move"))
+	var external_direct := entry.has("_externalDirectMoveFrame")
 	if bool(intent.get("movingHome", false)):
-		return 26
+		return 8 if external_direct else 4
 	if kind == "scripted":
-		return 16
+		return 4 if external_direct else 1
 	if bool(intent.get("allowOutside", false)):
-		return 12
-	return 8
+		return 3 if external_direct else 2
+	return 3 if external_direct else 2
 
 func _runtime_cell_can_be_goal(entry: Dictionary, world_adapter, snapshot: Dictionary, cell: Vector2i, start_cell: Vector2i) -> bool:
 	if cell == start_cell:

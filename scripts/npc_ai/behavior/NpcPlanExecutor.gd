@@ -14,6 +14,14 @@ var goal_selector = null
 var task_planner = null
 var recovery_policy = null
 var compliance_counters := {}
+var job_selection_frame := -1
+var job_selections_this_frame := 0
+var guard_target_frame := -1
+var guard_target_refreshes_this_frame := 0
+var update_frame_serial := 0
+
+const JOB_SELECTIONS_PER_FRAME := 1
+const GUARD_TARGET_REFRESHES_PER_FRAME := 1
 
 func setup(autonomy, system_node, main_node, services: Dictionary) -> void:
 	autonomy_system = autonomy
@@ -26,54 +34,104 @@ func setup(autonomy, system_node, main_node, services: Dictionary) -> void:
 	task_planner = services.get("taskPlanner")
 	recovery_policy = services.get("recovery")
 
+func performance_monitor():
+	return main.get("runtime_perf_monitor") if main != null else null
+
+func begin_update_frame() -> void:
+	update_frame_serial += 1
+
 func update_npc(entry: Dictionary, delta: float, night_factor: float) -> void:
 	if npc_system == null:
 		return
 	var body := entry.get("body") as Node3D
 	if body == null or not is_instance_valid(body):
 		return
+	var monitor = performance_monitor()
 	if npc_system.has_method("update_npc_needs"):
+		var needs_start: int = monitor.begin_section("npc_needs") if monitor != null else Time.get_ticks_usec()
 		npc_system.call("update_npc_needs", entry, delta, night_factor)
+		if monitor != null:
+			monitor.end_section("npc_needs", needs_start)
 	entry["cooldown"] = maxf(0.0, float(entry.get("cooldown", 0.0)) - delta)
 	var context = entry.get("agentContext")
 	var blackboard = entry.get("blackboard")
+	var schedule_start: int = monitor.begin_section("npc_schedule") if monitor != null else Time.get_ticks_usec()
 	var schedule: Dictionary = schedule_service.snapshot_for(context, entry, main, night_factor)
+	if monitor != null:
+		monitor.end_section("npc_schedule", schedule_start)
+	var perception_start: int = monitor.begin_section("npc_perception") if monitor != null else Time.get_ticks_usec()
 	var perception: Dictionary = perception_service.snapshot(entry, schedule)
+	if monitor != null:
+		monitor.end_section("npc_perception", perception_start)
 	if npc_system.has_method("npc_is_held_by_intro_or_dialogue") and bool(npc_system.call("npc_is_held_by_intro_or_dialogue", entry, body)):
 		_release_action_owned_state(entry, "script_hold")
 		_publish_debug(entry, blackboard, { "goalKind": NpcEnumsScript.GOAL_KIND_IDLE, "reason": "held_by_script" }, {}, schedule, perception)
 		return
+	var goal_start: int = monitor.begin_section("npc_goal_select") if monitor != null else Time.get_ticks_usec()
 	var goal: Dictionary = goal_selector.select_goal(context, blackboard, entry, perception, schedule)
+	if monitor != null:
+		monitor.end_section("npc_goal_select", goal_start)
 	var previous_goal := String(entry.get("activeGoalKind", ""))
 	var goal_kind := String(goal.get("goalKind", NpcEnumsScript.GOAL_KIND_IDLE))
 	if previous_goal != "" and previous_goal != goal_kind:
 		_release_action_owned_state(entry, "goal_changed_%s_to_%s" % [previous_goal, goal_kind])
 	entry["activeGoalKind"] = goal_kind
+	var plan_start: int = monitor.begin_section("npc_task_plan") if monitor != null else Time.get_ticks_usec()
 	var plan: Dictionary = task_planner.plan(goal, context, entry, perception, schedule)
+	if monitor != null:
+		monitor.end_section("npc_task_plan", plan_start)
 	if blackboard != null:
 		blackboard.current_plan = plan
 		blackboard.perception_snapshot = perception
 		blackboard.schedule_state = schedule.get("scheduleState", NpcEnumsScript.SCHEDULE_STATE_DAY)
+	var debug_start: int = monitor.begin_section("npc_debug_publish") if monitor != null else Time.get_ticks_usec()
 	_publish_debug(entry, blackboard, goal, plan, schedule, perception)
+	if monitor != null:
+		monitor.end_section("npc_debug_publish", debug_start)
+	var execute_start: int = monitor.begin_section("npc_execute_plan") if monitor != null else Time.get_ticks_usec()
 	_execute_plan(entry, body, goal, plan, perception, schedule, delta)
+	if monitor != null:
+		monitor.end_section("npc_execute_plan", execute_start)
 	if npc_system.has_method("face_hostile_if_needed"):
+		var face_start: int = monitor.begin_section("npc_face_hostile") if monitor != null else Time.get_ticks_usec()
 		npc_system.call("face_hostile_if_needed", body, perception.get("threat"))
+		if monitor != null:
+			monitor.end_section("npc_face_hostile", face_start)
 
 func _execute_plan(entry: Dictionary, body: Node3D, goal: Dictionary, plan: Dictionary, perception: Dictionary, schedule: Dictionary, delta: float) -> void:
 	var goal_kind: StringName = goal.get("goalKind", NpcEnumsScript.GOAL_KIND_IDLE)
+	var monitor = performance_monitor()
 	match goal_kind:
 		NpcEnumsScript.GOAL_KIND_SCRIPTED:
+			var scripted_start: int = monitor.begin_section("npc_execute_scripted") if monitor != null else Time.get_ticks_usec()
 			_execute_scripted(entry, body, delta)
+			if monitor != null:
+				monitor.end_section("npc_execute_scripted", scripted_start)
 		NpcEnumsScript.GOAL_KIND_HOME:
+			var home_start: int = monitor.begin_section("npc_execute_home") if monitor != null else Time.get_ticks_usec()
 			_execute_home(entry, body, perception, delta)
+			if monitor != null:
+				monitor.end_section("npc_execute_home", home_start)
 		NpcEnumsScript.GOAL_KIND_GUARD:
+			var guard_start: int = monitor.begin_section("npc_execute_guard") if monitor != null else Time.get_ticks_usec()
 			_execute_guard(entry, body, perception, schedule, delta)
+			if monitor != null:
+				monitor.end_section("npc_execute_guard", guard_start)
 		NpcEnumsScript.GOAL_KIND_WORK:
+			var work_start: int = monitor.begin_section("npc_execute_work") if monitor != null else Time.get_ticks_usec()
 			_execute_job(entry, body, delta)
+			if monitor != null:
+				monitor.end_section("npc_execute_work", work_start)
 		NpcEnumsScript.GOAL_KIND_FORAGE:
+			var forage_start: int = monitor.begin_section("npc_execute_forage") if monitor != null else Time.get_ticks_usec()
 			_execute_job(entry, body, delta)
+			if monitor != null:
+				monitor.end_section("npc_execute_forage", forage_start)
 		_:
+			var idle_start: int = monitor.begin_section("npc_execute_idle") if monitor != null else Time.get_ticks_usec()
 			_execute_idle(entry, body, delta)
+			if monitor != null:
+				monitor.end_section("npc_execute_idle", idle_start)
 
 func _execute_scripted(entry: Dictionary, body: Node3D, delta: float) -> void:
 	entry["routePriority"] = 180
@@ -89,7 +147,7 @@ func _execute_home(entry: Dictionary, body: Node3D, perception: Dictionary, delt
 	entry["homeActiveTargetCell"] = _flat_cell_for_position(target)
 	var speed := 6.4
 	if bool(entry.get("holdIntroDoor", false)):
-		speed = 14.0
+		speed = 20.0
 	var moved := float(npc_system.call("move_npc", entry, target, speed * delta, true, false, delta)) if npc_system.has_method("move_npc") else 0.0
 	entry["lastMoveDistance"] = moved
 	if npc_system.has_method("settle_home_if_reached"):
@@ -108,8 +166,28 @@ func _execute_guard(entry: Dictionary, body: Node3D, perception: Dictionary, sch
 	entry["routePriority"] = 130 if bool(schedule.get("activeGuardDuty", false)) else 170
 	var weapon_id := String(entry.get("weaponId", ""))
 	var target_hostile = perception.get("threat") if bool(perception.get("activeThreat", false)) else null
-	var target: Vector3 = npc_system.call("update_fighter_target", entry, body, target_hostile, weapon_id) if npc_system.has_method("update_fighter_target") else entry.get("guardPosition", body.global_position)
+	var monitor = performance_monitor()
+	var target_start: int = monitor.begin_section("npc_guard_target") if monitor != null else Time.get_ticks_usec()
+	var target: Vector3 = entry.get("guardTargetCache", entry.get("guardPosition", body.global_position))
+	var refresh_timer := float(entry.get("guardTargetRefreshTimer", 0.0)) - delta
+	var hostile_key := ""
+	if target_hostile != null and is_instance_valid(target_hostile):
+		hostile_key = str(target_hostile.get_instance_id())
+	var refresh_required := refresh_timer <= 0.0 or hostile_key != String(entry.get("guardTargetHostileKey", ""))
+	if refresh_required and _guard_target_refresh_budget_available(entry):
+		target = npc_system.call("update_fighter_target", entry, body, target_hostile, weapon_id) if npc_system.has_method("update_fighter_target") else entry.get("guardPosition", body.global_position)
+		refresh_timer = _deterministic_seconds(entry, "guard_threat_refresh", 0.25, 0.45) if target_hostile != null else _deterministic_seconds(entry, "guard_post_refresh", 2.0, 3.2)
+		entry["guardTargetCache"] = target
+		entry["guardTargetHostileKey"] = hostile_key
+	elif refresh_required:
+		refresh_timer = minf(float(entry.get("guardTargetRefreshTimer", 0.0)), 0.05)
+	entry["guardTargetRefreshTimer"] = refresh_timer
+	if monitor != null:
+		monitor.end_section("npc_guard_target", target_start)
+	var move_start: int = monitor.begin_section("npc_guard_move") if monitor != null else Time.get_ticks_usec()
 	var moved := float(npc_system.call("move_npc", entry, target, 2.65 * delta, false, true, delta)) if npc_system.has_method("move_npc") else 0.0
+	if monitor != null:
+		monitor.end_section("npc_guard_move", move_start)
 	entry["lastMoveDistance"] = moved
 	entry["guardDutyState"] = "intercept_threat" if target_hostile != null else "patrol"
 	body.set_meta("npc_guard_duty_state", entry["guardDutyState"])
@@ -120,15 +198,59 @@ func _execute_job(entry: Dictionary, body: Node3D, delta: float) -> void:
 	entry["insideHome"] = false
 	body.set_meta("npc_inside_home", false)
 	entry["routePriority"] = 90
+	if not _job_selection_budget_available(entry, delta):
+		entry["lastMoveDistance"] = 0.0
+		entry["routeStatus"] = "idle"
+		return
+	var monitor = performance_monitor()
+	var job_state_start: int = monitor.begin_section("npc_update_day_job") if monitor != null else Time.get_ticks_usec()
 	var moving_job := _update_day_job(entry, delta)
+	if monitor != null:
+		monitor.end_section("npc_update_day_job", job_state_start)
 	if moving_job:
 		var target: Vector3 = entry.get("jobTarget", body.global_position)
-		var moved := float(npc_system.call("move_npc", entry, target, 2.45 * delta, false, true, delta)) if npc_system.has_method("move_npc") else 0.0
+		var job_move_start: int = monitor.begin_section("npc_job_move") if monitor != null else Time.get_ticks_usec()
+		var moved := float(npc_system.call("move_npc", entry, target, 3.10 * delta, false, true, delta)) if npc_system.has_method("move_npc") else 0.0
+		if monitor != null:
+			monitor.end_section("npc_job_move", job_move_start)
 		entry["lastMoveDistance"] = moved
-		if moved <= 0.001:
+		var route_status := String(entry.get("routeStatus", ""))
+		if moved <= 0.001 and route_status != "pending":
 			entry["routeForceReplan"] = true
 	else:
-		_execute_idle(entry, body, delta)
+		entry["lastMoveDistance"] = 0.0
+		entry["routeStatus"] = "idle"
+
+func _job_selection_budget_available(entry: Dictionary, delta: float) -> bool:
+	var phase := String(entry.get("jobPhase", "idle"))
+	if not (phase in ["idle", "searching", "gathering", "returning"]):
+		return true
+	var timer := float(entry.get("jobTimer", 0.0)) - delta
+	var hungry := float(entry.get("hunger", 100.0)) < 82.0
+	if phase in ["idle", "searching"] and timer > 0.0 and not hungry:
+		return true
+	if phase in ["gathering", "returning"]:
+		return true
+	var frame := update_frame_serial
+	if frame != job_selection_frame:
+		job_selection_frame = frame
+		job_selections_this_frame = 0
+	if job_selections_this_frame >= JOB_SELECTIONS_PER_FRAME:
+		entry["jobTimer"] = minf(float(entry.get("jobTimer", 0.0)), 0.05)
+		return false
+	job_selections_this_frame += 1
+	return true
+
+func _guard_target_refresh_budget_available(entry: Dictionary) -> bool:
+	var frame := update_frame_serial
+	if frame != guard_target_frame:
+		guard_target_frame = frame
+		guard_target_refreshes_this_frame = 0
+	if guard_target_refreshes_this_frame >= GUARD_TARGET_REFRESHES_PER_FRAME:
+		entry["guardTargetRefreshDeferredFrame"] = frame
+		return false
+	guard_target_refreshes_this_frame += 1
+	return true
 
 func _update_day_job(entry: Dictionary, delta: float) -> bool:
 	var body := entry.get("body") as Node3D
@@ -138,10 +260,17 @@ func _update_day_job(entry: Dictionary, delta: float) -> bool:
 	if not (job in ["forage", "wood", "stone", "trade"]):
 		return false
 	if job == "forage":
-		return _update_forager_goal(entry, body, delta)
+		var forage_start := _begin_job_phase_section(entry, job)
+		var forage_result := _update_forager_goal(entry, body, delta)
+		_end_job_phase_section("npc_job_phase_%s_%s" % [job, String(entry.get("jobPhase", "idle"))], forage_start)
+		return forage_result
 	if job == "trade":
-		return _update_trader_goal(entry, body, delta)
+		var trade_start := _begin_job_phase_section(entry, job)
+		var trade_result := _update_trader_goal(entry, body, delta)
+		_end_job_phase_section("npc_job_phase_%s_%s" % [job, String(entry.get("jobPhase", "idle"))], trade_start)
+		return trade_result
 	var phase := String(entry.get("jobPhase", "idle"))
+	var phase_start := _begin_job_phase_section(entry, job)
 	if phase in ["outbound", "gathering", "returning"]:
 		_clear_home_route_terminal(entry)
 	var timer := float(entry.get("jobTimer", 0.0)) - delta
@@ -177,7 +306,18 @@ func _update_day_job(entry: Dictionary, delta: float) -> bool:
 	entry["jobPhase"] = "idle"
 	entry["jobTimer"] = _deterministic_seconds(entry, "resource_idle_reset", 4.0, 9.0)
 	body.set_meta("npc_job_phase", "idle")
+	_end_job_phase_section("npc_job_phase_%s_%s" % [job, String(entry.get("jobPhase", "idle"))], phase_start)
 	return false
+
+func _begin_job_phase_section(entry: Dictionary, job: String) -> int:
+	var monitor = performance_monitor()
+	var phase := String(entry.get("jobPhase", "idle"))
+	return monitor.begin_section("npc_job_phase_%s_%s" % [job, phase]) if monitor != null else Time.get_ticks_usec()
+
+func _end_job_phase_section(section_name: String, start_usec: int) -> void:
+	var monitor = performance_monitor()
+	if monitor != null:
+		monitor.end_section(section_name, start_usec)
 
 func _update_outbound_job(entry: Dictionary, body: Node3D, timer: float) -> bool:
 	var target_node := _job_target_node(entry)
@@ -393,6 +533,7 @@ func _update_forager_goal(entry: Dictionary, body: Node3D, delta: float) -> bool
 			_play_npc_use(entry, "gather")
 			body.set_meta("npc_job_phase", "gathering")
 		else:
+			_set_npc_goal(entry, "forage berries" if phase == "outbound" else "search for berries")
 			if timer <= 0.0:
 				if target_node != null:
 					entry["jobTarget"] = _smart_object_approach_position(entry, target_node)
@@ -523,10 +664,20 @@ func _point_inside_town(entry: Dictionary, position: Vector3) -> bool:
 	return flat.length() <= radius
 
 func _find_job_resource_target(entry: Dictionary, job: String) -> Node3D:
-	return npc_system.call("find_job_resource_target", entry, job) if npc_system != null and npc_system.has_method("find_job_resource_target") else null
+	var monitor = performance_monitor()
+	var start: int = monitor.begin_section("npc_find_job_resource_target") if monitor != null else Time.get_ticks_usec()
+	var result = npc_system.call("find_job_resource_target", entry, job) if npc_system != null and npc_system.has_method("find_job_resource_target") else null
+	if monitor != null:
+		monitor.end_section("npc_find_job_resource_target", start)
+	return result
 
 func _find_forage_target(entry: Dictionary) -> Node3D:
-	return npc_system.call("find_forage_target", entry) if npc_system != null and npc_system.has_method("find_forage_target") else null
+	var monitor = performance_monitor()
+	var start: int = monitor.begin_section("npc_find_forage_target") if monitor != null else Time.get_ticks_usec()
+	var result = npc_system.call("find_forage_target", entry) if npc_system != null and npc_system.has_method("find_forage_target") else null
+	if monitor != null:
+		monitor.end_section("npc_find_forage_target", start)
+	return result
 
 func _find_trader_stall(entry: Dictionary) -> Node3D:
 	return npc_system.call("find_trader_stall", entry) if npc_system != null and npc_system.has_method("find_trader_stall") else null
@@ -535,7 +686,12 @@ func _job_target_node(entry: Dictionary) -> Node3D:
 	return npc_system.call("job_target_node", entry) if npc_system != null and npc_system.has_method("job_target_node") else null
 
 func _reserve_job_target(entry: Dictionary, target_node: Node3D, action: String) -> bool:
-	return bool(npc_system.call("reserve_job_target", entry, target_node, action)) if npc_system != null and npc_system.has_method("reserve_job_target") else false
+	var monitor = performance_monitor()
+	var start: int = monitor.begin_section("npc_reserve_job_target") if monitor != null else Time.get_ticks_usec()
+	var result := bool(npc_system.call("reserve_job_target", entry, target_node, action)) if npc_system != null and npc_system.has_method("reserve_job_target") else false
+	if monitor != null:
+		monitor.end_section("npc_reserve_job_target", start)
+	return result
 
 func _reserve_station_target(entry: Dictionary, station: Node3D, action: String) -> bool:
 	return bool(npc_system.call("reserve_station_target", entry, station, action)) if npc_system != null and npc_system.has_method("reserve_station_target") else false

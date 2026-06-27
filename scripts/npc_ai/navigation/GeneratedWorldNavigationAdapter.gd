@@ -15,22 +15,33 @@ var cached_doors := {}
 var cached_paths := {}
 var cached_props := {}
 var height_cache := {}
+var static_snapshot_revision := 1
 var topology_revision := 1
 var dynamic_revision := 0
+var semantic_revision := 0
+var door_state_revision := 0
 var last_event_revision := 0
+var nav_static_rebuild_count := 0
+var nav_dynamic_update_count := 0
 
 func setup(system_node, main_node) -> void:
     system = system_node
     main = main_node
 
+func performance_monitor():
+    return main.get("runtime_perf_monitor") if main != null else null
+
 func invalidate() -> void:
-    topology_revision += 1
+    static_snapshot_revision += 1
+    topology_revision = static_snapshot_revision
     cached_revision = ""
     height_cache = {}
 
 func apply_navigation_events(events: Array) -> void:
-    var topology_changed := false
+    var static_changed := false
     var dynamic_changed := false
+    var semantic_changed := false
+    var door_state_changed := false
     for event_value in events:
         if not (event_value is Dictionary):
             continue
@@ -38,34 +49,63 @@ func apply_navigation_events(events: Array) -> void:
         last_event_revision = maxi(last_event_revision, int(event.get("revision", 0)))
         var kinds: Array = event.get("changeKinds", [])
         if _event_changes_static_snapshot(kinds):
-            topology_changed = true
+            static_changed = true
+        elif _event_changes_door_state(kinds):
+            door_state_changed = true
+        elif _event_changes_semantic_state(kinds):
+            semantic_changed = true
         else:
             dynamic_changed = true
-    if topology_changed:
-        topology_revision = maxi(topology_revision + 1, last_event_revision)
+    if static_changed:
+        static_snapshot_revision = maxi(static_snapshot_revision + 1, last_event_revision)
+        topology_revision = static_snapshot_revision
         cached_revision = ""
         height_cache = {}
-    elif dynamic_changed:
+    if dynamic_changed:
         dynamic_revision = maxi(dynamic_revision + 1, last_event_revision)
+    if semantic_changed:
+        semantic_revision = maxi(semantic_revision + 1, last_event_revision)
+    if door_state_changed:
+        door_state_revision = maxi(door_state_revision + 1, last_event_revision)
 
 func build_snapshot(entry: Dictionary, allow_outside := false, moving_home := false) -> Dictionary:
+    var monitor = performance_monitor()
+    var static_revision_id := str(static_snapshot_revision)
     var revision_id := revision()
-    if revision_id != cached_revision:
-        rebuild_static_cells()
-        cached_revision = revision_id
+    if static_revision_id != cached_revision:
+        var rebuild_start: int = monitor.begin_section("navigation_snapshot_rebuild") if monitor != null else Time.get_ticks_usec()
+        var scanned := rebuild_static_cells()
+        nav_static_rebuild_count += 1
+        if monitor != null:
+            monitor.increment_counter("nav_static_rebuild_count")
+            monitor.increment_counter("prop_block_scan_count", scanned)
+            monitor.end_section("navigation_snapshot_rebuild", rebuild_start)
+        cached_revision = static_revision_id
+    var dynamic_start: int = monitor.begin_section("navigation_dynamic_update") if monitor != null else Time.get_ticks_usec()
+    var dynamic_cells := live_occupant_cells(entry)
+    nav_dynamic_update_count += 1
+    if monitor != null:
+        monitor.increment_counter("nav_dynamic_update_count")
+        monitor.end_section("navigation_dynamic_update", dynamic_start)
     return {
         "revision": revision_id,
+        "staticSnapshotRevision": static_snapshot_revision,
+        "dynamicRevision": dynamic_revision,
+        "semanticRevision": semantic_revision,
+        "doorStateRevision": door_state_revision,
+        "navStaticRebuildCount": nav_static_rebuild_count,
+        "navDynamicUpdateCount": nav_dynamic_update_count,
         "blocked": cached_blocked,
         "doors": cached_doors,
         "paths": cached_paths,
         "props": cached_props,
-        "dynamic": live_occupant_cells(entry),
+        "dynamic": dynamic_cells,
         "allowOutside": allow_outside,
         "movingHome": moving_home
     }
 
 func revision() -> String:
-    return "%d:%d:%d" % [topology_revision, dynamic_revision, last_event_revision]
+    return "%d:%d:%d:%d" % [static_snapshot_revision, dynamic_revision, semantic_revision, door_state_revision]
 
 func _event_changes_static_snapshot(kinds: Array) -> bool:
     for kind_value in kinds:
@@ -79,23 +119,35 @@ func _event_changes_static_snapshot(kinds: Array) -> bool:
             NpcEnumsScript.CHANGE_KIND_CHUNK_LOADED,
             NpcEnumsScript.CHANGE_KIND_CHUNK_UNLOADED,
             NpcEnumsScript.CHANGE_KIND_DOOR_REGISTERED,
-            NpcEnumsScript.CHANGE_KIND_DOOR_STATE,
-            NpcEnumsScript.CHANGE_KIND_STRUCTURE_METADATA,
-            NpcEnumsScript.CHANGE_KIND_SEMANTIC_CHANGED
+            NpcEnumsScript.CHANGE_KIND_STRUCTURE_METADATA
         ]:
             return true
     return false
 
-func rebuild_static_cells() -> void:
+func _event_changes_door_state(kinds: Array) -> bool:
+    for kind_value in kinds:
+        if StringName(kind_value) == NpcEnumsScript.CHANGE_KIND_DOOR_STATE:
+            return true
+    return false
+
+func _event_changes_semantic_state(kinds: Array) -> bool:
+    for kind_value in kinds:
+        if StringName(kind_value) == NpcEnumsScript.CHANGE_KIND_SEMANTIC_CHANGED:
+            return true
+    return false
+
+func rebuild_static_cells() -> int:
     cached_blocked = {}
     cached_doors = {}
     cached_paths = {}
     cached_props = {}
     height_cache = {}
     if main == null:
-        return
+        return 0
+    var scanned := 0
     var blocks: Dictionary = main.get("blocks")
     for block in blocks.values():
+        scanned += 1
         var body := block as Node
         if body == null or not is_instance_valid(body):
             continue
@@ -114,7 +166,8 @@ func rebuild_static_cells() -> void:
         if not block_xz_blocks_npc(block_cell, body):
             continue
         cached_blocked[block_cell] = body
-    add_prop_obstacle_cells()
+    scanned += add_prop_obstacle_cells()
+    return scanned
 
 func block_world_cell(body: Node) -> Vector2i:
     if body.has_meta("cell"):
@@ -127,7 +180,8 @@ func block_world_cell(body: Node) -> Vector2i:
         return world_cell((body as Node3D).global_position)
     return INVALID_CELL
 
-func add_prop_obstacle_cells() -> void:
+func add_prop_obstacle_cells() -> int:
+    var scanned := 0
     for root_value in [main.get("chunk_root"), main.get("prop_root")]:
         var root := root_value as Node
         if root == null:
@@ -135,6 +189,7 @@ func add_prop_obstacle_cells() -> void:
         var stack: Array[Node] = [root]
         while not stack.is_empty():
             var node := stack.pop_back() as Node
+            scanned += 1
             if node == null:
                 continue
             if node is Node3D and String(node.get_meta("kind", "")) == "prop":
@@ -145,6 +200,7 @@ func add_prop_obstacle_cells() -> void:
                     cached_props[cell] = prop
             for child in node.get_children():
                 stack.append(child)
+    return scanned
 
 func prop_blocks_npc(prop: Node3D) -> bool:
     var material := String(prop.get_meta("material", ""))
@@ -202,7 +258,7 @@ func height_for_cell(cell: Vector2i) -> float:
         return 0.0
     if height_cache.has(cell):
         return float(height_cache[cell])
-    var y: float = main.height_at_world(float(cell.x) * CELL, float(cell.y) * CELL)
+    var y: float = main.terrain_height_cell(cell.x, cell.y) if main.has_method("terrain_height_cell") else main.height_at_world(float(cell.x) * CELL, float(cell.y) * CELL)
     height_cache[cell] = y
     return y
 
@@ -230,7 +286,12 @@ func point_allowed(entry: Dictionary, position: Vector3, allow_outside := false,
     return point_inside_town(entry, position)
 
 func cell_allowed_area(entry: Dictionary, cell: Vector2i, allow_outside := false, moving_home := false) -> bool:
-    return point_allowed(entry, cell_position(cell), allow_outside, moving_home)
+    var center: Vector2i = entry.get("townCenter", Vector2i.ZERO)
+    var radius_cells := float(entry.get("townRadius", 18))
+    if allow_outside or moving_home:
+        radius_cells += 24.0
+    var flat := Vector2(float(cell.x - center.x), float(cell.y - center.y)) * CELL
+    return flat.length() <= radius_cells * CELL
 
 func terrain_allows_step(from_cell: Vector2i, to_cell: Vector2i, moving_home := false) -> Dictionary:
     if main == null:

@@ -2,6 +2,7 @@ extends RefCounted
 class_name NpcStats
 
 static func build(system) -> Dictionary:
+    var npcs: Array = system.get("npcs")
     var homed := 0
     var sheltered := 0
     var fighters := 0
@@ -15,7 +16,7 @@ static func build(system) -> Dictionary:
     var waiting_routes := 0
     var blocked_routes := 0
     var partial_routes := 0
-    for entry in system.npcs:
+    for entry in npcs:
         var body := entry.get("body") as Node
         if body == null or not is_instance_valid(body):
             continue
@@ -47,8 +48,17 @@ static func build(system) -> Dictionary:
             blocked_routes += 1
         elif route_status == "partial":
             partial_routes += 1
+    var autonomy_system = system.get("autonomy_system")
+    var traffic_reservations = autonomy_system.get("traffic_reservations") if autonomy_system else null
+    var traffic_stats: Dictionary = traffic_reservations.stats() if traffic_reservations else {}
+    var pathing = system.get("pathing")
+    var combat = system.get("combat")
+    var coordinator = pathing.get("coordinator") if pathing else null
+    var locomotion = coordinator.get("locomotion") if coordinator else null
+    var spawned_town_keys: Dictionary = system.get("spawned_town_keys")
+    var reservation_waits := int(system.get("npc_reservation_waits")) + int(traffic_stats.get("waiting", 0))
     return {
-        "npcs": system.npcs.size(),
+        "npcs": npcs.size(),
         "homed": homed,
         "sheltered": sheltered,
         "fighters": fighters,
@@ -56,39 +66,39 @@ static func build(system) -> Dictionary:
         "visibleWeapons": visible_weapons,
         "jobWorkers": job_workers,
         "outsideWorkers": outside_workers,
-        "jobRuns": system.job_runs_completed,
-        "forageRuns": system.npc_forage_runs,
+        "jobRuns": int(system.get("job_runs_completed")),
+        "forageRuns": int(system.get("npc_forage_runs")),
         "foragersWithFood": foragers_with_food,
         "hungry": hungry,
-        "foodEaten": system.npc_food_eaten,
-        "doorOpens": system.door_opens,
-        "doorCloses": system.door_closes,
-        "towns": system.spawned_town_keys.size(),
-        "guardShots": system.guard_shots,
-        "guardMeleeStrikes": system.guard_melee_strikes,
-        "useAnimations": system.npc_use_animations,
-        "pathDetours": system.npc_path_detours,
-        "blockedMoves": system.npc_blocked_moves,
+        "foodEaten": int(system.get("npc_food_eaten")),
+        "doorOpens": int(system.get("door_opens")),
+        "doorCloses": int(system.get("door_closes")),
+        "towns": spawned_town_keys.size(),
+        "guardShots": int(system.get("guard_shots")),
+        "guardMeleeStrikes": int(system.get("guard_melee_strikes")),
+        "useAnimations": int(system.get("npc_use_animations")),
+        "pathDetours": int(system.get("npc_path_detours")),
+        "blockedMoves": int(system.get("npc_blocked_moves")),
         "routeStatus": {
             "routed": routed,
             "waiting": waiting_routes,
             "blocked": blocked_routes,
             "partial": partial_routes
         },
-        "routeReplans": system.npc_route_replans,
-        "stuckRecoveries": system.npc_stuck_recoveries,
-        "reservationWaits": system.npc_reservation_waits,
-        "unreachableGoals": system.npc_unreachable_goals,
-        "validatedMoves": system.npc_validated_moves,
+        "routeReplans": int(system.get("npc_route_replans")),
+        "stuckRecoveries": int(system.get("npc_stuck_recoveries")),
+        "reservationWaits": reservation_waits,
+        "unreachableGoals": int(system.get("npc_unreachable_goals")),
+        "validatedMoves": int(system.get("npc_validated_moves")),
         "avoidance": {
-            "activeFrames": system.npc_avoidance_active_frames,
-            "callbackFrames": system.npc_avoidance_callback_frames,
-            "fallbackFrames": system.npc_avoidance_fallback_frames,
-            "peakActiveRegistrations": system.npc_avoidance_active_registrations,
-            "adapter": system.pathing.coordinator.locomotion.avoidance_stats() if system.pathing and system.pathing.coordinator and system.pathing.coordinator.locomotion else {},
-            "corridor": system.pathing.coordinator.locomotion.corridor_stats() if system.pathing and system.pathing.coordinator and system.pathing.coordinator.locomotion else {}
+            "activeFrames": int(system.get("npc_avoidance_active_frames")),
+            "callbackFrames": int(system.get("npc_avoidance_callback_frames")),
+            "fallbackFrames": int(system.get("npc_avoidance_fallback_frames")),
+            "peakActiveRegistrations": int(system.get("npc_avoidance_active_registrations")),
+            "adapter": locomotion.avoidance_stats() if locomotion else {},
+            "corridor": locomotion.corridor_stats() if locomotion else {}
         },
-        "traffic": system.autonomy_system.traffic_reservations.stats() if system.autonomy_system and system.autonomy_system.traffic_reservations else {},
-        "tracers": system.combat.tracers.size() if system.combat else 0,
-        "lastMessage": system.last_message
+        "traffic": traffic_stats,
+        "tracers": (combat.get("tracers") as Array).size() if combat else 0,
+        "lastMessage": String(system.get("last_message"))
     }
