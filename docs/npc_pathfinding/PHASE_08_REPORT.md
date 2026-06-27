@@ -5,9 +5,9 @@
 - Phase: 08 - Space-Time Traffic, Door Queues, Fairness, and Deadlock Recovery
 - Branch: `npc-pathfinding/phase-08-traffic-deadlock`
 - Date: 2026-06-26
-- Scope status: branch gate rerun is pending after the intentional world-signature baseline refresh is committed.
+- Scope status: branch gate passes after the intentional world-signature baseline refresh. `master` merge and `master` gate remain pending.
 - Base commit before Phase 08 branch changes: `ffc85a144d6fcd22f71102552563896078e19933`
-- Branch code commit: not yet created
+- Branch code commit: `89c2cd337fbd583b10f8ae3e54ddca8c0dfeb3d7`
 - Merge commit: not yet created
 
 ## 2. Objective
@@ -26,7 +26,7 @@ That file is tracked regression data, not a save file or disposable runner outpu
 
 Baseline refresh evidence:
 
-- Current dirty baseline SHA-256: `05290360F4ACA4965AC3EB6EA6B4D5E886A01F52CE02E073D1B845DCA87A63D5`
+- Accepted baseline SHA-256: `05290360F4ACA4965AC3EB6EA6B4D5E886A01F52CE02E073D1B845DCA87A63D5`
 - Fresh generated signature path: `artifacts/test-runners/world-signature-fresh-atlas-1492.json`
 - Fresh generated signature SHA-256: `05290360F4ACA4965AC3EB6EA6B4D5E886A01F52CE02E073D1B845DCA87A63D5`
 - Repeated generated signature artifacts under `artifacts/test-runners/` use the same `05290360...` hash.
@@ -198,7 +198,7 @@ Legacy NPC navigation wrapper:
 
 ## 8. Repository Gate Evidence On Branch
 
-Command:
+Initial command before baseline acceptance:
 
 ```powershell
 .\tools\run-all-test-runners.ps1 -ReportPath artifacts\test-runners\phase08-all-test-runners-latest-report.json -Seed atlas-1492
@@ -233,6 +233,39 @@ The broad playtest report from the repository gate:
 - Result count: 181
 - Failure count: 0
 
+Post-baseline command:
+
+```powershell
+.\tools\run-all-test-runners.ps1 -ReportPath artifacts\test-runners\phase08-all-test-runners-post-baseline-report.json -Seed atlas-1492
+```
+
+Post-baseline report:
+
+- `artifacts/test-runners/phase08-all-test-runners-post-baseline-report.json`
+- Started UTC: `2026-06-26T23:30:22.5091239Z`
+- Finished UTC: `2026-06-27T00:01:33.3662299Z`
+- Duration: `1870.858` seconds
+- Result count: 7
+- Failure count: 0
+
+Post-baseline runner results:
+
+- `npc_focused`: pass, `17.014` seconds, report fresh true
+- `world_signature`: pass, `17.441` seconds, report fresh true
+- `visual_manifest`: pass, `0.1` seconds
+- `npc_navigation_legacy`: pass, `129.453` seconds, report fresh true
+- `story_playtest`: pass, `81.234` seconds, report fresh true
+- `visual_captures`: pass, `72.902` seconds, report fresh true
+- `playtest`: pass, `1552.654` seconds, report fresh true
+
+Post-baseline broad playtest:
+
+- Report: `artifacts/test-runners/playtest-report.json`
+- Terminal flag: `finished=true`
+- Seed: `atlas-1492`
+- Result count: 181
+- Failure count: 0
+
 ## 9. Parser And Static Hygiene Evidence
 
 Commands:
@@ -258,7 +291,7 @@ Additional parser sweep:
 | Retreat/yield movement uses real routes and physics, not transform displacement. | `npc_traffic_pullout_retreat_physical` passes in day/night; locomotion waits use staging and route/motor movement rather than direct displacement. | Pass on focused suites |
 | Door queues and traffic share one authority. | Door traversal executor owns traffic reservation before door hold/open and releases on crossing/cancel/destroy; door swap and portal destruction cases pass. | Pass on focused suites |
 | Day/dusk/night traffic waves pass. | Day work, dusk return-home, and night guard/civilian inbound/outbound wave cases pass in day/night. | Pass on focused suites |
-| All focused and repository runners pass on branch and `master`. | Focused runners pass; branch repository gate rerun is pending after the accepted baseline refresh is committed; `master` not rerun for this phase. | Pending branch rerun |
+| All focused and repository runners pass on branch and `master`. | Focused runners pass; branch repository gate passes after the accepted baseline refresh; `master` not rerun for this phase. | Pass on branch, pending `master` |
 
 ## 11. Review Questions
 
@@ -284,9 +317,9 @@ Is deadlock recovery physical and deterministic?
 
 ## 12. Required Next Step
 
-Resolve `artifacts/baselines/world-signature/atlas-1492.json` explicitly:
+The `artifacts/baselines/world-signature/atlas-1492.json` decision is resolved:
 
-- restore the tracked baseline and rerun the branch all-runner; or
-- accept the current deterministic prop-signature drift as an intentional baseline update, document why, and rerun the branch all-runner.
+- the deterministic prop-signature drift is accepted as an intentional baseline refresh;
+- the branch all-runner passes with the accepted baseline.
 
-After the branch all-runner is green, update this report with green branch evidence, commit, non-fast-forward merge to `master`, rerun the repository gate on `master`, then create `npc-pathfinding/phase-09-purpose-schedules`.
+Next: commit this evidence update, non-fast-forward merge to `master`, rerun the repository gate on `master`, then create `npc-pathfinding/phase-09-purpose-schedules`.
