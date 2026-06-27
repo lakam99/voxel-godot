@@ -5,11 +5,11 @@
 - Phase: 10 - Environment Interaction, Jobs, Guards, and World-Aware Purpose
 - Branch: `npc-pathfinding/phase-10-world-interaction`
 - Date: 2026-06-27
-- Scope status: branch gates pass; merge and merged `master` gate pending.
+- Scope status: branch and merged `master` gates pass.
 - Base commit before Phase 10 branch changes: `7f1b77650c12019dc8626abf388360be6bbbf0ef`
-- Branch implementation/report commit: pending at this report draft
-- Merge commit: pending
-- Post-merge `master` evidence commit: pending
+- Branch implementation/report commit: `2554cbfee4dfcf9a33980463935b28c17b9498a8`
+- Merge commit: `1d2d2d6c520a9a02de8d27ac7677687c99c5d8d5`
+- Post-merge `master` evidence commit: this report update
 
 ## 2. Objective
 
@@ -283,22 +283,72 @@ Earlier branch all-runner failure, fixed before the green rerun:
 
 ## 12. Merged Master Evidence
 
-Pending. Required command after merge:
+Focused command:
+
+```powershell
+.\tools\npc\run-npc-interaction-tests.ps1 -TimeMode Both -ReportPath artifacts\npc\reports\phase10-master-interaction.json
+```
+
+Focused report:
+
+- Path: `artifacts/npc/reports/phase10-master-interaction.json`
+- Result count: 20
+- Failure count: 0
+- Assertion count: 31
+- Duration: 0.043 seconds
+
+NPC suite command:
+
+```powershell
+.\tools\npc\run-all-npc-tests.ps1 -TimeMode Both -ReportPath artifacts\npc\reports\phase10-master-all-npc.json
+```
+
+NPC suite report:
+
+- Path: `artifacts/npc/reports/phase10-master-all-npc.json`
+- Result count: 10
+- Failure count: 0
+- Duration: 14.092 seconds
+
+Full repository command:
 
 ```powershell
 .\tools\run-all-test-runners.ps1 -ReportPath artifacts\test-runners\phase10-master-all-test-runners.json -StopOnFailure
 ```
 
-This section must be updated after `npc-pathfinding/phase-10-world-interaction` is merged into `master` and the merged branch gate passes.
+Full repository report:
+
+- Path: `artifacts/test-runners/phase10-master-all-test-runners.json`
+- Seed: `atlas-1492`
+- Result count: 9
+- Failure count: 0
+- Duration: 1181.777 seconds
+- Stopped early: false
+
+Runner results:
+
+- `npc_focused`: pass, exit 0, 20.905 seconds
+- `npc_observation_dusk`: pass, exit 0, 0.673 seconds
+- `npc_observation_midnight`: pass, exit 0, 0.644 seconds
+- `world_signature`: pass, exit 0, 19.149 seconds
+- `visual_manifest`: pass, exit 0, 0.090 seconds
+- `npc_navigation_legacy`: pass, exit 0, 132.907 seconds
+- `story_playtest`: pass, exit 0, 81.929 seconds
+- `visual_captures`: pass, exit 0, 89.750 seconds
+- `playtest`: pass, exit 0, 835.666 seconds
 
 ## 13. Performance And Boundedness Metrics
 
 Measured runner durations:
 
 - Interaction focused suite: 0.039 seconds
+- Master interaction focused suite: 0.043 seconds
 - All NPC suites: 14.042 seconds
+- Master all NPC suites: 14.092 seconds
 - Branch all-runner: 1168.510 seconds
+- Master all-runner: 1181.777 seconds
 - Branch all-runner playtest: 836.388 seconds
+- Master all-runner playtest: 835.666 seconds
 - Standalone repaired playtest: 181 results, 0 failures
 
 Boundedness controls present:
@@ -340,7 +390,7 @@ No tracked world-signature baseline change is present in this phase. The generat
 - Tutorial/story integration remains green: yes, tutorial scripted action case, `story_playtest`, and broad `playtest` pass.
 - Save changes are additive: yes, `npcJobFacts` is optional on load and broad save/load playtest coverage passes.
 - Full focused and repository gates pass on branch: yes.
-- Full focused and repository gates pass on `master`: pending merge and master gate.
+- Full focused and repository gates pass on `master`: yes, focused interaction, all NPC, and full all-runner reports pass.
 
 ## 16. Deviation Register
 
@@ -348,7 +398,6 @@ None for Phase 10 branch scope.
 
 ## 17. Known Issues And Debt
 
-- Merged `master` evidence is pending until the branch is committed, merged, and rerun.
 - Legacy fallback and some legacy pacing fields remain for compatibility with later phases. They are no longer the authority for migrated resource effects.
 - Broad playtest remains long; this phase used explicit progress polling and stale-progress guards to avoid silent waits.
 
@@ -390,4 +439,4 @@ Main risks:
 
 ## 20. Verdict
 
-Phase 10 branch evidence passes and the branch is ready for the required commit, merge, and merged `master` gate. The phase is not ready for Phase 11 until merged `master` evidence is recorded in this report.
+Phase 10 branch and merged `master` evidence pass. Phase 11 may begin from updated `master`.
