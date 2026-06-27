@@ -54,6 +54,12 @@
       "description": "Phase 09 utility goals, symbolic task planning, and day/night schedule tests",
       "command": ".\\tools\\npc\\run-npc-behavior-tests.ps1",
       "defaultArgs": ["-TimeMode", "Both"]
+    },
+    {
+      "id": "interaction",
+      "description": "Phase 10 shared smart-object environment interaction, job, and guard tests",
+      "command": ".\\tools\\npc\\run-npc-interaction-tests.ps1",
+      "defaultArgs": ["-TimeMode", "Both"]
     }
   ]
 }

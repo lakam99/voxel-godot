@@ -25,6 +25,7 @@ var hostile_system
 var npc_root: Node3D
 var npcs: Array = []
 var npc_by_id := {}
+var pending_saved_npc_facts := {}
 var spawned_town_keys := {}
 var guard_shots := 0
 var guard_melee_strikes := 0
@@ -106,6 +107,7 @@ func clear() -> void:
     npc_by_id.clear()
     spawned_town_keys.clear()
     published_navigation_semantics.clear()
+    pending_saved_npc_facts.clear()
     focused_dialogue_body = null
     if autonomy_system:
         autonomy_system.clear()
@@ -209,6 +211,11 @@ func register_npc(body: Node3D, profile: Dictionary) -> Dictionary:
         "jobTimer": randf_range(2.0, 6.0),
         "jobTarget": body_position,
         "jobTargetNode": null,
+        "jobObjectId": "",
+        "jobReservationId": "",
+        "jobApproachSlotId": "",
+        "jobFailureReason": "",
+        "carriedResource": "",
         "goal": "idle",
         "personalInventory": {},
         "hunger": randf_range(72.0, 96.0),
@@ -247,6 +254,7 @@ func register_npc(body: Node3D, profile: Dictionary) -> Dictionary:
         "jumpIntentTime": 0.0,
         "motorProfile": CharacterMotorProfileScript.npc_default()
     }
+    apply_saved_npc_facts(entry)
     apply_npc_metadata(body, entry, home_cell, porch_cell, guard_cell, job)
     ensure_autonomy_system()
     var context = autonomy_system.register_legacy_npc(body, profile, entry)
@@ -259,6 +267,49 @@ func register_npc(body: Node3D, profile: Dictionary) -> Dictionary:
     npcs.append(entry)
     npc_by_id[body.get_instance_id()] = entry
     return entry
+
+func snapshot_job_facts() -> Array:
+    var facts := []
+    for entry in npcs:
+        var body := entry.get("body") as Node
+        if body == null or not is_instance_valid(body):
+            continue
+        facts.append({
+            "id": String(entry.get("id", "")),
+            "role": String(entry.get("role", "")),
+            "job": String(entry.get("job", "")),
+            "jobResource": String(entry.get("jobResource", "")),
+            "personalInventory": (entry.get("personalInventory", {}) as Dictionary).duplicate(true),
+            "hunger": float(entry.get("hunger", 100.0)),
+            "nightGuard": bool(entry.get("nightGuard", false)),
+            "guardDuty": String(body.get_meta("npc_guard_duty", "")),
+            "jobRuns": int(entry.get("jobRuns", 0))
+        })
+    return facts
+
+func restore_job_facts(facts) -> void:
+    pending_saved_npc_facts.clear()
+    if not (facts is Array):
+        return
+    for fact_value in facts:
+        if not (fact_value is Dictionary):
+            continue
+        var fact: Dictionary = fact_value
+        var npc_id := String(fact.get("id", ""))
+        if npc_id != "":
+            pending_saved_npc_facts[npc_id] = fact.duplicate(true)
+
+func apply_saved_npc_facts(entry: Dictionary) -> void:
+    var npc_id := String(entry.get("id", ""))
+    if npc_id == "" or not pending_saved_npc_facts.has(npc_id):
+        return
+    var fact: Dictionary = pending_saved_npc_facts[npc_id]
+    entry["job"] = String(fact.get("job", entry.get("job", "")))
+    entry["jobResource"] = String(fact.get("jobResource", entry.get("jobResource", "")))
+    entry["personalInventory"] = (fact.get("personalInventory", {}) as Dictionary).duplicate(true)
+    entry["hunger"] = clampf(float(fact.get("hunger", entry.get("hunger", 100.0))), 0.0, float(entry.get("maxHunger", 100.0)))
+    entry["nightGuard"] = bool(fact.get("nightGuard", entry.get("nightGuard", false)))
+    entry["jobRuns"] = max(0, int(fact.get("jobRuns", entry.get("jobRuns", 0))))
 
 func apply_npc_metadata(body: Node, entry: Dictionary, home_cell: Vector2i, porch_cell: Vector2i, guard_cell: Vector2i, job: String) -> void:
     body.set_meta("npc_home_cell", home_cell)
@@ -720,10 +771,12 @@ func update_day_job(entry: Dictionary, delta: float) -> bool:
     if body == null:
         return false
     var job := String(entry.get("job", ""))
-    if not (job in ["forage", "wood", "stone"]):
+    if not (job in ["forage", "wood", "stone", "trade"]):
         return false
     if job == "forage":
         return update_forager_goal(entry, body, delta)
+    if job == "trade":
+        return update_trader_goal(entry, body, delta)
     var phase := String(entry.get("jobPhase", "idle"))
     if phase in ["outbound", "gathering", "returning"]:
         clear_home_route_terminal(entry)
@@ -733,8 +786,19 @@ func update_day_job(entry: Dictionary, delta: float) -> bool:
             entry["jobTimer"] = timer
             body.set_meta("npc_job_phase", "idle")
             return false
+        var resource_target := find_job_resource_target(entry, job)
+        if resource_target == null:
+            entry["jobPhase"] = "searching"
+            entry["jobTarget"] = choose_job_target(entry)
+            entry["jobTimer"] = randf_range(3.0, 7.0)
+            set_npc_goal(entry, "search for %s" % String(entry.get("jobResource", "resource")))
+            body.set_meta("npc_job_phase", "searching")
+            return true
+        if not reserve_job_target(entry, resource_target, "harvest_resource"):
+            entry["jobTimer"] = randf_range(1.4, 3.0)
+            body.set_meta("npc_job_phase", "idle")
+            return false
         entry["jobPhase"] = "outbound"
-        entry["jobTarget"] = choose_job_target(entry)
         clear_home_route_terminal(entry)
         set_npc_goal(entry, "gather %s" % String(entry.get("jobResource", "resource")))
         entry["jobTimer"] = randf_range(6.0, 12.0)
@@ -752,16 +816,35 @@ func update_day_job(entry: Dictionary, delta: float) -> bool:
     return false
 
 func update_outbound_job(entry: Dictionary, body: Node3D, timer: float) -> bool:
+    var target_node := job_target_node(entry)
+    if target_node == null:
+        release_job_reservation(entry, "target_gone")
+        entry["jobPhase"] = "idle"
+        entry["jobTimer"] = 0.0
+        entry["routeForceReplan"] = true
+        body.set_meta("npc_job_phase", "idle")
+        return true
+    if String(entry.get("jobObjectId", "")) == "":
+        reserve_job_target(entry, target_node, "harvest_resource")
+    if current_route_failure_blocks_forager(entry):
+        release_job_reservation(entry, "route_blocked")
+        entry["jobPhase"] = "idle"
+        entry["jobTimer"] = 0.0
+        body.set_meta("npc_job_phase", "idle")
+        return true
     var target: Vector3 = entry.get("jobTarget", body.global_position)
     var outside_town := not point_inside_town(entry, body.global_position)
     var target_outside := not point_inside_town(entry, target)
-    if target_outside and (body.global_position.distance_to(target) <= CELL * 1.1 or (timer <= 0.0 and outside_town)):
+    var route_arrived := String(entry.get("routeStatus", "")) == "arrived"
+    if target_outside and (route_arrived or body.global_position.distance_to(target) <= CELL * 1.1 or body.global_position.distance_to(target_node.global_position) <= CELL * 1.75):
         entry["jobPhase"] = "gathering"
         entry["jobTimer"] = randf_range(1.8, 3.5)
+        play_npc_use(entry, "gather")
         body.set_meta("npc_job_phase", "gathering")
     elif timer <= 0.0:
-        entry["jobTarget"] = choose_job_target(entry)
+        entry["jobTarget"] = smart_object_approach_position(entry, target_node)
         entry["jobTimer"] = randf_range(4.0, 8.0)
+        entry["routeForceReplan"] = true
     else:
         entry["jobTimer"] = timer
     return true
@@ -772,36 +855,106 @@ func update_gathering_job(entry: Dictionary, body: Node3D, timer: float) -> bool
         body.set_meta("npc_job_phase", "gathering")
         return true
     if point_inside_town(entry, body.global_position):
+        release_job_reservation(entry, "inside_town_invalid_gather")
         entry["jobPhase"] = "outbound"
-        entry["jobTarget"] = choose_job_target(entry)
+        var replacement := find_job_resource_target(entry, String(entry.get("job", "")))
+        if replacement != null:
+            reserve_job_target(entry, replacement, "harvest_resource")
+        else:
+            entry["jobTarget"] = choose_job_target(entry)
         entry["jobTimer"] = randf_range(4.0, 8.0)
         body.set_meta("npc_job_phase", "outbound")
         return true
+    if not complete_worker_resource_target(entry):
+        release_job_reservation(entry, "complete_failed")
+        entry["jobPhase"] = "idle"
+        entry["jobTimer"] = randf_range(2.0, 5.0)
+        body.set_meta("npc_job_phase", "idle")
+        return false
     var runs := int(entry.get("jobRuns", 0)) + 1
     entry["jobRuns"] = runs
     job_runs_completed += 1
     entry["jobPhase"] = "returning"
-    entry["jobTarget"] = entry.get("porchPosition", body.global_position)
-    set_npc_goal(entry, "return home")
+    entry["jobTarget"] = entry.get("homePosition", body.global_position)
+    set_npc_goal(entry, "deliver %s" % String(entry.get("jobResource", "resource")))
     entry["jobTimer"] = randf_range(8.0, 14.0)
     body.set_meta("npc_job_phase", "returning")
     body.set_meta("npc_job_runs", runs)
-    body.set_meta("npc_carried_resource", String(entry.get("jobResource", "")))
+    body.set_meta("npc_carried_resource", String(entry.get("carriedResource", entry.get("jobResource", ""))))
     return true
 
 func update_returning_job(entry: Dictionary, body: Node3D, timer: float) -> bool:
-    var porch: Vector3 = entry.get("porchPosition", body.global_position)
-    if body.global_position.distance_to(porch) <= CELL * 1.0 or timer <= 0.0:
+    var home: Vector3 = entry.get("homePosition", entry.get("porchPosition", body.global_position))
+    var inside_semantic: bool = autonomy_system != null and autonomy_system.has_method("is_inside_home_interior") and bool(autonomy_system.is_inside_home_interior(entry, body.global_position))
+    if body.global_position.distance_to(home) <= CELL * 1.15 or inside_semantic or timer <= 0.0:
+        complete_deposit_interaction(entry)
         entry["jobPhase"] = "idle"
         set_npc_goal(entry, "idle")
         entry["jobTimer"] = randf_range(8.0, 18.0)
         body.set_meta("npc_job_phase", "idle")
         body.set_meta("npc_carried_resource", "")
         return false
-    entry["jobTarget"] = porch
+    entry["jobTarget"] = home
     entry["jobTimer"] = timer
     body.set_meta("npc_job_phase", "returning")
     return true
+
+func update_trader_goal(entry: Dictionary, body: Node3D, delta: float) -> bool:
+    var phase := String(entry.get("jobPhase", "idle"))
+    var timer := float(entry.get("jobTimer", 0.0)) - delta
+    if phase == "idle":
+        if timer > 0.0:
+            entry["jobTimer"] = timer
+            body.set_meta("npc_job_phase", "idle")
+            return false
+        var stall := find_trader_stall(entry)
+        if stall == null:
+            entry["jobTarget"] = choose_day_target(entry)
+            entry["jobPhase"] = "searching"
+            entry["jobTimer"] = randf_range(3.0, 7.0)
+            set_npc_goal(entry, "find trader stall")
+            body.set_meta("npc_job_phase", "searching")
+            return true
+        if not reserve_station_target(entry, stall, "use_trader_stall"):
+            entry["jobTimer"] = randf_range(2.0, 5.0)
+            return false
+        entry["jobPhase"] = "outbound"
+        entry["jobTimer"] = randf_range(8.0, 14.0)
+        set_npc_goal(entry, "open stall")
+        body.set_meta("npc_job_phase", "outbound")
+        return true
+    if phase == "searching":
+        if timer <= 0.0:
+            entry["jobPhase"] = "idle"
+            entry["jobTimer"] = 0.0
+        else:
+            entry["jobTimer"] = timer
+        return true
+    if phase == "outbound":
+        var target: Vector3 = entry.get("jobTarget", body.global_position)
+        if body.global_position.distance_to(target) <= CELL * 1.05:
+            entry["jobPhase"] = "stall"
+            entry["jobTimer"] = randf_range(5.0, 9.0)
+            complete_station_use(entry, "use_trader_stall")
+            set_npc_goal(entry, "tend stall")
+            body.set_meta("npc_job_phase", "stall")
+        elif timer <= 0.0:
+            entry["routeForceReplan"] = true
+            entry["jobTimer"] = randf_range(4.0, 7.0)
+        else:
+            entry["jobTimer"] = timer
+        return true
+    if phase == "stall":
+        if timer <= 0.0:
+            entry["jobTimer"] = randf_range(5.0, 10.0)
+            complete_station_use(entry, "use_trader_stall")
+        else:
+            entry["jobTimer"] = timer
+        body.set_meta("npc_job_phase", "stall")
+        return true
+    entry["jobPhase"] = "idle"
+    entry["jobTimer"] = randf_range(2.0, 5.0)
+    return false
 
 func update_forager_goal(entry: Dictionary, body: Node3D, delta: float) -> bool:
     var phase := String(entry.get("jobPhase", "idle"))
@@ -823,8 +976,13 @@ func update_forager_goal(entry: Dictionary, body: Node3D, delta: float) -> bool:
             set_npc_goal(entry, "search for berries")
             body.set_meta("npc_job_phase", "searching")
             return true
-        entry["jobTargetNode"] = forage
-        entry["jobTarget"] = pathing.forage_target_position(entry, forage) if pathing != null and pathing.has_method("forage_target_position") else forage.global_position
+        if not reserve_job_target(entry, forage, "harvest_resource"):
+            entry["jobPhase"] = "searching"
+            entry["jobTimer"] = randf_range(2.0, 4.5)
+            entry["jobTarget"] = choose_job_target(entry)
+            set_npc_goal(entry, "search for berries")
+            body.set_meta("npc_job_phase", "searching")
+            return true
         entry["jobPhase"] = "outbound"
         entry["jobTimer"] = randf_range(12.0, 22.0)
         clear_home_route_terminal(entry)
@@ -838,11 +996,15 @@ func update_forager_goal(entry: Dictionary, body: Node3D, delta: float) -> bool:
             target_node = target_value
         if target_node == null and phase == "outbound":
             entry["jobTargetNode"] = null
+            release_job_reservation(entry, "target_gone")
             entry["jobPhase"] = "idle"
             entry["jobTimer"] = 0.0
             return true
+        if target_node != null and String(entry.get("jobObjectId", "")) == "":
+            reserve_job_target(entry, target_node, "harvest_resource")
         if target_node != null and current_route_failure_blocks_forager(entry):
             mark_forager_target_unreachable(entry, target_node)
+            release_job_reservation(entry, "route_blocked")
             var failures := int(entry.get("forageRouteFailures", 0)) + 1
             entry["forageRouteFailures"] = failures
             entry["jobTargetNode"] = null
@@ -863,7 +1025,8 @@ func update_forager_goal(entry: Dictionary, body: Node3D, delta: float) -> bool:
         var outside_town := not point_inside_town(entry, body.global_position)
         var reached_target := body.global_position.distance_to(target) <= CELL * 1.15
         var reached_forage_node := target_node != null and body.global_position.distance_to(target_node.global_position) <= CELL * 1.75
-        if reached_target or reached_forage_node or (phase == "searching" and outside_town):
+        var route_arrived := String(entry.get("routeStatus", "")) == "arrived"
+        if route_arrived or reached_target or reached_forage_node or (phase == "searching" and outside_town):
             entry["jobPhase"] = "gathering"
             entry["jobTimer"] = randf_range(1.0, 1.8)
             set_npc_goal(entry, "pick berries")
@@ -872,7 +1035,7 @@ func update_forager_goal(entry: Dictionary, body: Node3D, delta: float) -> bool:
         else:
             if timer <= 0.0:
                 if target_node != null:
-                    entry["jobTarget"] = pathing.forage_target_position(entry, target_node) if pathing != null and pathing.has_method("forage_target_position") else target_node.global_position
+                    entry["jobTarget"] = smart_object_approach_position(entry, target_node)
                 else:
                     entry["jobTarget"] = choose_job_target(entry)
                 clear_home_route_terminal(entry)
@@ -886,14 +1049,19 @@ func update_forager_goal(entry: Dictionary, body: Node3D, delta: float) -> bool:
             set_npc_goal(entry, "pick berries")
             body.set_meta("npc_job_phase", "gathering")
             return true
-        harvest_forager_target(entry)
+        if not harvest_forager_target(entry):
+            release_job_reservation(entry, "harvest_failed")
+            entry["jobPhase"] = "idle"
+            entry["jobTimer"] = randf_range(2.0, 5.0)
+            body.set_meta("npc_job_phase", "idle")
+            return false
         entry["forageRouteFailures"] = 0
         var runs := int(entry.get("jobRuns", 0)) + 1
         entry["jobRuns"] = runs
         job_runs_completed += 1
         npc_forage_runs += 1
         entry["jobPhase"] = "returning"
-        entry["jobTarget"] = entry.get("porchPosition", body.global_position)
+        entry["jobTarget"] = entry.get("homePosition", body.global_position)
         entry["jobTimer"] = randf_range(10.0, 18.0)
         set_npc_goal(entry, "bring berries home")
         body.set_meta("npc_job_phase", "returning")
@@ -901,15 +1069,22 @@ func update_forager_goal(entry: Dictionary, body: Node3D, delta: float) -> bool:
         body.set_meta("npc_carried_resource", "berries")
         return true
     if phase == "returning":
-        var porch: Vector3 = entry.get("porchPosition", body.global_position)
-        if body.global_position.distance_to(porch) <= CELL * 1.0 or timer <= 0.0:
+        var home: Vector3 = entry.get("homePosition", entry.get("porchPosition", body.global_position))
+        var inside_semantic: bool = autonomy_system != null and autonomy_system.has_method("is_inside_home_interior") and bool(autonomy_system.is_inside_home_interior(entry, body.global_position))
+        if body.global_position.distance_to(home) <= CELL * 1.15 or inside_semantic or timer <= 0.0:
+            if float(entry.get("hunger", 100.0)) < 86.0 and npc_inventory_count(entry, "berries") > 0:
+                npc_inventory_add(entry, "berries", -1)
+                entry["hunger"] = minf(float(entry.get("maxHunger", 100.0)), float(entry.get("hunger", 100.0)) + 24.0)
+                npc_food_eaten += 1
+            else:
+                complete_deposit_interaction(entry)
             entry["jobPhase"] = "idle"
             entry["jobTimer"] = randf_range(5.0, 12.0)
             set_npc_goal(entry, "rest")
             body.set_meta("npc_job_phase", "idle")
             body.set_meta("npc_carried_resource", "")
             return false
-        entry["jobTarget"] = porch
+        entry["jobTarget"] = home
         entry["jobTimer"] = timer
         set_npc_goal(entry, "bring berries home")
         body.set_meta("npc_job_phase", "returning")
@@ -987,7 +1162,7 @@ func collect_forage_targets_in_tree(root: Node, entry: Dictionary, origin: Vecto
     return max_nodes - scanned
 
 func is_valid_forage_node(node: Node3D, entry: Dictionary) -> bool:
-    if not is_instance_valid(node) or bool(node.get_meta("npc_harvested", false)):
+    if not is_instance_valid(node) or bool(node.get_meta("npc_harvested", false)) or bool(node.get_meta("smart_object_depleted", false)):
         return false
     if bool(node.get_meta(forager_unreachable_meta_key(entry), false)):
         return false
@@ -998,6 +1173,8 @@ func is_valid_forage_node(node: Node3D, entry: Dictionary) -> bool:
     if not point_inside_work_area(entry, node.global_position):
         return false
     if point_inside_town(entry, node.global_position):
+        return false
+    if not smart_object_available(smart_object_id_for_node(node), String(entry.get("id", ""))):
         return false
     var h: float = main.height_at_world(node.global_position.x, node.global_position.z)
     return h >= main.WATER_LEVEL + 0.45
@@ -1015,10 +1192,304 @@ func mark_forager_target_unreachable(entry: Dictionary, node: Node3D) -> void:
 func forager_unreachable_meta_key(entry: Dictionary) -> String:
     return "npc_unreachable_forager_%s" % String(entry.get("id", "npc"))
 
-func harvest_forager_target(entry: Dictionary) -> void:
+func harvest_forager_target(entry: Dictionary) -> bool:
+    return complete_worker_resource_target(entry)
+
+func find_job_resource_target(entry: Dictionary, job: String) -> Node3D:
+    var body := entry.get("body") as Node3D
+    if body == null:
+        return null
+    var candidates: Array[Node3D] = []
+    var remaining_scan_nodes := FORAGE_SCAN_NODE_LIMIT
+    for root in [main.get("prop_root"), main.get("chunk_root")]:
+        remaining_scan_nodes = collect_job_resource_targets_in_tree(root as Node, entry, job, body.global_position, candidates, remaining_scan_nodes, FORAGE_SCAN_CANDIDATE_LIMIT)
+        if remaining_scan_nodes <= 0 or candidates.size() >= FORAGE_SCAN_CANDIDATE_LIMIT:
+            break
+    if candidates.is_empty():
+        return null
+    if autonomy_system != null and autonomy_system.get("smart_objects") != null:
+        var scored: Array = autonomy_system.get("smart_objects").score_candidates(entry, "harvest_resource", candidates)
+        for score in scored:
+            var object_id: String = String(score.get("objectId", ""))
+            var candidate := candidate_by_object_id(candidates, object_id)
+            if candidate != null and smart_object_available(object_id, String(entry.get("id", ""))):
+                return candidate
+    candidates.sort_custom(func(a: Node3D, b: Node3D) -> bool:
+        return a.global_position.distance_squared_to(body.global_position) < b.global_position.distance_squared_to(body.global_position)
+    )
+    for candidate in candidates:
+        var object_id: String = smart_object_id_for_node(candidate)
+        if smart_object_available(object_id, String(entry.get("id", ""))):
+            return candidate
+    return null
+
+func collect_job_resource_targets_in_tree(root: Node, entry: Dictionary, job: String, _origin: Vector3, candidates: Array[Node3D], max_nodes: int, max_candidates: int) -> int:
+    if root == null or max_nodes <= 0 or candidates.size() >= max_candidates:
+        return max_nodes
+    var stack: Array[Node] = [root]
+    var scanned := 0
+    while not stack.is_empty() and scanned < max_nodes and candidates.size() < max_candidates:
+        var node := stack.pop_back() as Node
+        scanned += 1
+        if node == null:
+            continue
+        if node is Node3D and is_valid_job_resource_node(node as Node3D, entry, job):
+            candidates.append(node as Node3D)
+        for child in node.get_children():
+            stack.append(child)
+    return max_nodes - scanned
+
+func is_valid_job_resource_node(node: Node3D, entry: Dictionary, job: String) -> bool:
+    if not is_instance_valid(node) or bool(node.get_meta("npc_harvested", false)) or bool(node.get_meta("smart_object_depleted", false)):
+        return false
+    if String(node.get_meta("kind", "")) != "prop":
+        return false
+    if not point_inside_work_area(entry, node.global_position) or point_inside_town(entry, node.global_position):
+        return false
+    var h: float = main.height_at_world(node.global_position.x, node.global_position.z)
+    if h < main.WATER_LEVEL + 0.45:
+        return false
+    var material := String(node.get_meta("material", ""))
+    var drop := String(node.get_meta("drop", ""))
+    if job == "wood":
+        return material == "tree" or drop == "logs"
+    if job == "stone":
+        return material in ["rock", "copperOre", "ironOre"] or drop in ["stones", "copperOre", "ironOre"]
+    if job == "forage":
+        return material == "berryBush" or drop == "berries"
+    return false
+
+func candidate_by_object_id(candidates: Array[Node3D], object_id: String) -> Node3D:
+    for candidate in candidates:
+        if smart_object_id_for_node(candidate) == object_id:
+            return candidate
+    return null
+
+func smart_object_id_for_node(node: Node) -> String:
+    if node == null:
+        return ""
+    if node.has_meta("prop_id"):
+        return "prop:%s" % String(node.get_meta("prop_id"))
+    if node.has_meta("cell"):
+        var cell = node.get_meta("cell")
+        var block_type := String(node.get_meta("block_type", node.name))
+        if cell is Vector3i:
+            return "block:%d,%d,%d:%s" % [cell.x, cell.y, cell.z, block_type]
+    return ""
+
+func smart_object_available(object_id: String, actor_id: String) -> bool:
+    if autonomy_system == null or autonomy_system.get("smart_objects") == null:
+        return true
+    var service = autonomy_system.get("smart_objects")
+    var available: Dictionary = service.object_available(object_id, actor_id)
+    return bool(available.get("ok", false))
+
+func reserve_job_target(entry: Dictionary, target_node: Node3D, action: String) -> bool:
+    if target_node == null or not is_instance_valid(target_node) or autonomy_system == null:
+        return false
+    var body := entry.get("body") as Node
+    var object_id: String = autonomy_system.register_smart_resource(target_node, { "action": action })
+    var result = autonomy_system.reserve_smart_object(object_id, target_node, body, String(entry.get("id", "")), action, {
+        "actorKind": "npc",
+        "requiresApproach": true
+    })
+    if result == null or String(result.get("status")) != "succeeded":
+        entry["jobFailureReason"] = String(result.get("reason")) if result != null else "missing_smart_object"
+        entry["jobObjectId"] = object_id
+        return false
+    var metrics: Dictionary = result.get("metrics")
+    entry["jobTargetNode"] = target_node
+    entry["jobObjectId"] = object_id
+    entry["jobReservationId"] = String(metrics.get("reservationId", ""))
+    entry["jobApproachSlotId"] = String(metrics.get("slotId", ""))
+    entry["jobTarget"] = vector_from_summary(metrics.get("approachPosition", []), target_node.global_position)
+    entry["jobFailureReason"] = ""
+    return true
+
+func reserve_station_target(entry: Dictionary, station: Node3D, action: String) -> bool:
+    if station == null or not is_instance_valid(station) or autonomy_system == null:
+        return false
+    var body := entry.get("body") as Node
+    var object_id: String = autonomy_system.register_smart_workstation(station, { "action": action, "capacity": 1 })
+    var result = autonomy_system.reserve_smart_object(object_id, station, body, String(entry.get("id", "")), action, {
+        "actorKind": "npc",
+        "requiresApproach": true
+    })
+    if result == null or String(result.get("status")) != "succeeded":
+        entry["jobFailureReason"] = String(result.get("reason")) if result != null else "missing_station"
+        entry["jobObjectId"] = object_id
+        return false
+    var metrics: Dictionary = result.get("metrics")
+    entry["jobTargetNode"] = station
+    entry["jobObjectId"] = object_id
+    entry["jobReservationId"] = String(metrics.get("reservationId", ""))
+    entry["jobApproachSlotId"] = String(metrics.get("slotId", ""))
+    entry["jobTarget"] = vector_from_summary(metrics.get("approachPosition", []), station.global_position)
+    entry["jobFailureReason"] = ""
+    return true
+
+func complete_station_use(entry: Dictionary, action: String) -> bool:
+    if autonomy_system == null:
+        return false
+    var station := job_target_node(entry)
+    var object_id: String = String(entry.get("jobObjectId", ""))
+    if object_id == "":
+        return false
+    var body := entry.get("body") as Node
+    var result = autonomy_system.complete_smart_object(object_id, station, body, String(entry.get("id", "")), action, {
+        "actorKind": "npc",
+        "reservationId": String(entry.get("jobReservationId", "")),
+        "requireReservation": true,
+        "requiresApproach": true,
+        "holdReservation": action == "use_trader_stall",
+        "request_id": "%s:%s:%s:%d" % [object_id, String(entry.get("id", "")), action, int(entry.get("jobRuns", 0))]
+    })
+    if result == null or String(result.get("status")) != "succeeded":
+        entry["jobFailureReason"] = String(result.get("reason")) if result != null else "station_use_failed"
+        return false
+    entry["jobFailureReason"] = ""
+    return true
+
+func find_trader_stall(entry: Dictionary) -> Node3D:
+    if main == null:
+        return null
+    var blocks: Dictionary = main.get("blocks")
+    var body := entry.get("body") as Node3D
+    var origin: Vector3 = body.global_position if body != null else entry.get("porchPosition", Vector3.ZERO)
+    var best: Node3D = null
+    var best_score := INF
+    for value in blocks.values():
+        var block := value as Node3D
+        if block == null or not is_instance_valid(block):
+            continue
+        if String(block.get_meta("block_type", "")) != "traderStall":
+            continue
+        if not point_inside_town(entry, block.global_position):
+            continue
+        var object_id: String = smart_object_id_for_node(block)
+        if object_id != "" and not smart_object_available(object_id, String(entry.get("id", ""))):
+            continue
+        var score := block.global_position.distance_squared_to(origin)
+        if score < best_score:
+            best = block
+            best_score = score
+    return best
+
+func release_job_reservation(entry: Dictionary, reason := "released") -> void:
+    if autonomy_system == null:
+        return
+    var object_id: String = String(entry.get("jobObjectId", ""))
+    if object_id == "":
+        return
+    var target_node := job_target_node(entry)
+    var body := entry.get("body") as Node
+    autonomy_system.release_smart_object(object_id, target_node, body, String(entry.get("id", "")), reason, {
+        "actorKind": "npc",
+        "reservationId": String(entry.get("jobReservationId", ""))
+    })
+    entry["jobReservationId"] = ""
+    entry["jobApproachSlotId"] = ""
+
+func job_target_node(entry: Dictionary) -> Node3D:
+    var target_value = entry.get("jobTargetNode")
+    return target_value if target_value is Node3D and is_instance_valid(target_value) else null
+
+func smart_object_approach_position(entry: Dictionary, target_node: Node3D) -> Vector3:
+    var target: Vector3 = target_node.global_position if target_node != null else entry.get("jobTarget", Vector3.ZERO)
+    if String(entry.get("jobObjectId", "")) == "" and target_node != null:
+        reserve_job_target(entry, target_node, "harvest_resource")
+    return entry.get("jobTarget", target)
+
+func complete_worker_resource_target(entry: Dictionary) -> bool:
+    var target_node := job_target_node(entry)
+    if target_node == null or autonomy_system == null:
+        entry["jobFailureReason"] = "target_gone"
+        return false
+    var object_id: String = String(entry.get("jobObjectId", ""))
+    if object_id == "":
+        if not reserve_job_target(entry, target_node, "harvest_resource"):
+            entry["jobFailureReason"] = "reservation_failed"
+            return false
+        object_id = String(entry.get("jobObjectId", ""))
+        entry["jobObjectId"] = object_id
+    var body := entry.get("body") as Node
+    var request_id := "%s:%s:%s:%d" % [object_id, String(entry.get("id", "")), "harvest", int(entry.get("jobRuns", 0))]
+    var result = autonomy_system.complete_smart_object(object_id, target_node, body, String(entry.get("id", "")), "harvest_resource", {
+        "actorKind": "npc",
+        "reservationId": String(entry.get("jobReservationId", "")),
+        "requireReservation": true,
+        "requiresApproach": true,
+        "request_id": request_id
+    })
+    if result == null or String(result.get("status")) != "succeeded":
+        entry["jobFailureReason"] = String(result.get("reason")) if result != null else "missing_smart_object"
+        return false
+    var metrics: Dictionary = result.get("metrics")
+    if not bool(metrics.get("effectApplied", false)):
+        entry["jobFailureReason"] = "idempotent_replay"
+        return false
+    var drop := String(metrics.get("drop", entry.get("jobResource", "")))
+    var amount: int = max(1, int(metrics.get("amount", 1)))
+    npc_inventory_add(entry, drop, amount)
+    entry["carriedResource"] = drop
+    entry["jobResource"] = drop
+    mark_prop_removed_after_smart_effect(target_node, metrics)
+    entry["jobTargetNode"] = null
+    entry["jobReservationId"] = ""
+    entry["jobApproachSlotId"] = ""
+    entry["jobFailureReason"] = ""
+    last_message = "%s gathered %s" % [String(entry.get("name", "NPC")), drop]
+    return true
+
+func mark_prop_removed_after_smart_effect(target_node: Node3D, metrics: Dictionary) -> void:
+    if target_node == null or not is_instance_valid(target_node):
+        return
+    var prop_id := String(metrics.get("propId", target_node.get_meta("prop_id", "")))
+    if prop_id != "" and main != null:
+        var removed: Dictionary = main.get("removed_props")
+        removed[prop_id] = true
+        if autonomy_system:
+            autonomy_system.notify_prop_removed(prop_id, target_node)
+    target_node.queue_free()
+
+func complete_deposit_interaction(entry: Dictionary) -> bool:
+    var item_id := String(entry.get("carriedResource", entry.get("jobResource", "")))
+    if item_id == "":
+        return false
+    var amount: int = npc_inventory_count(entry, item_id)
+    if amount <= 0:
+        entry["carriedResource"] = ""
+        return false
+    if autonomy_system != null:
+        var object_id: String = "deposit:%s" % String(entry.get("id", "npc"))
+        var home: Vector3 = entry.get("homePosition", entry.get("porchPosition", Vector3.ZERO))
+        autonomy_system.register_smart_anchor(object_id, "storage", home, { "capacity": 1, "action": "deposit_inventory" })
+        var body := entry.get("body") as Node
+        var result = autonomy_system.complete_smart_object(object_id, null, body, String(entry.get("id", "")), "deposit_inventory", {
+            "actorKind": "npc",
+            "requireReservation": false,
+            "requiresApproach": true,
+            "request_id": "%s:%s:%d" % [object_id, item_id, int(entry.get("jobRuns", 0))]
+        })
+        if result == null or String(result.get("status")) != "succeeded":
+            entry["jobFailureReason"] = String(result.get("reason")) if result != null else "deposit_failed"
+            return false
+    npc_inventory_add(entry, item_id, -amount)
+    entry["carriedResource"] = ""
+    last_message = "%s delivered %s" % [String(entry.get("name", "NPC")), item_id]
+    return true
+
+func vector_from_summary(value, fallback: Vector3) -> Vector3:
+    if value is Array and value.size() >= 3:
+        return Vector3(float(value[0]), float(value[1]), float(value[2]))
+    if value is Vector3:
+        return value
+    return fallback
+
+func harvest_forager_target_legacy(entry: Dictionary) -> void:
     var target_value = entry.get("jobTargetNode")
     var target_node: Node3D = target_value if target_value is Node3D and is_instance_valid(target_value) else null
-    var amount := 1
+    var amount: int = 1
     if target_node != null:
         amount = max(1, int(target_node.get_meta("drop_count", 1)))
         target_node.set_meta("npc_harvested", true)
@@ -1077,7 +1548,7 @@ func settle_home_if_reached(entry: Dictionary) -> void:
     var body := entry.get("body") as Node3D
     if body == null:
         return
-    var inside_semantic := false
+    var inside_semantic: bool = false
     if autonomy_system != null and autonomy_system.has_method("is_inside_home_interior"):
         inside_semantic = bool(autonomy_system.is_inside_home_interior(entry, body.global_position))
     if inside_semantic:
@@ -1174,6 +1645,38 @@ func request_npc_door_traversal(collider: Node, npc_body: Node3D = null, entry: 
         door_opens += 1
         last_message = "NPC opened a door"
     return result
+
+func request_shared_prop_harvest(prop: Node, actor: Node = null, actor_kind := "player", metadata := {}) -> Dictionary:
+    ensure_autonomy_system()
+    if prop == null or not is_instance_valid(prop) or String(prop.get_meta("kind", "")) != "prop":
+        return { "ok": false, "status": "failed", "reason": "missing_prop" }
+    if autonomy_system == null:
+        return { "ok": true, "status": "succeeded", "reason": "missing_autonomy_optional", "metrics": {} }
+    var object_id: String = autonomy_system.register_smart_resource(prop, metadata)
+    var request_metadata := metadata.duplicate(true) if metadata is Dictionary else {}
+    request_metadata["actorKind"] = actor_kind
+    request_metadata["command"] = &"harvest"
+    request_metadata["requireReservation"] = false
+    request_metadata["requiresApproach"] = bool(request_metadata.get("requiresApproach", actor != null))
+    if not request_metadata.has("request_id"):
+        request_metadata["request_id"] = "%s:%s:%s" % [actor_kind, object_id, String(prop.get_meta("prop_id", prop.name))]
+    var result = autonomy_system.complete_smart_object(object_id, prop, actor, actor_identifier(actor, actor_kind), "harvest_resource", request_metadata)
+    if result == null:
+        return { "ok": false, "status": "failed", "reason": "missing_smart_object", "metrics": {} }
+    return {
+        "ok": String(result.get("status")) == "succeeded",
+        "status": String(result.get("status")),
+        "reason": String(result.get("reason")),
+        "metrics": result.get("metrics")
+    }
+
+func actor_identifier(actor: Node, fallback := "actor") -> String:
+    if actor != null:
+        if actor.has_meta("npc_stable_id"):
+            return String(actor.get_meta("npc_stable_id"))
+        if actor.name != "":
+            return String(actor.name)
+    return fallback
 
 func request_npc_traffic_step(entry: Dictionary, previous: Vector3, candidate: Vector3, world, intent := {}) -> Dictionary:
     ensure_autonomy_system()

@@ -106,6 +106,7 @@ func create_save_snapshot() -> Dictionary:
         "objectives": objective_system.snapshot() if objective_system else {},
         "contracts": contract_system.snapshot() if contract_system else {},
         "story": story_director.snapshot() if story_director else {},
+        "npcJobFacts": npc_system.snapshot_job_facts() if npc_system and npc_system.has_method("snapshot_job_facts") else [],
         "exploration": snapshot_exploration(),
         "deathCount": death_count,
         "respawnPoint": vector3_to_array(respawn_point) if respawn_point is Vector3 else [],
@@ -136,6 +137,8 @@ func apply_save_snapshot(snapshot: Dictionary) -> bool:
         survival_system.restore(snapshot["survival"])
     restore_height_edits(snapshot.get("terrain", []))
     restore_removed_props(snapshot.get("removedProps", []))
+    if npc_system and npc_system.has_method("restore_job_facts"):
+        npc_system.restore_job_facts(snapshot.get("npcJobFacts", []))
     restore_player_state(snapshot.get("player", {}))
     if worldmark_encounter_controller and worldmark_encounter_controller.has_method("recover_after_load"):
         worldmark_encounter_controller.recover_after_load()

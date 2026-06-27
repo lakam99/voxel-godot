@@ -12,6 +12,7 @@ const NpcTelemetryServiceScript := preload("res://scripts/npc_ai/debug/NpcTeleme
 const DoorPortalServiceScript := preload("res://scripts/npc_ai/interactions/DoorPortalService.gd")
 const SmartObjectServiceScript := preload("res://scripts/npc_ai/interactions/SmartObjectService.gd")
 const DoorTraversalExecutorScript := preload("res://scripts/npc_ai/interactions/DoorTraversalExecutor.gd")
+const InteractionRequestScript := preload("res://scripts/npc_ai/contracts/InteractionRequest.gd")
 const BottleneckClassifierScript := preload("res://scripts/npc_ai/traffic/BottleneckClassifier.gd")
 const SafeIntervalPlannerScript := preload("res://scripts/npc_ai/traffic/SafeIntervalPlanner.gd")
 const WaitForGraphScript := preload("res://scripts/npc_ai/traffic/WaitForGraph.gd")
@@ -231,6 +232,8 @@ func notify_block_created(cell: Vector3i, block_type: String, block: Node = null
 
 func notify_block_removed(cell: Vector3i, block_type: String, block: Node = null) -> void:
 	var object_id := "block:%d,%d,%d:%s" % [cell.x, cell.y, cell.z, block_type]
+	if smart_objects != null:
+		smart_objects.notify_object_removed(object_id, block)
 	var bounds := _bounds_for_cell(cell)
 	change_bus.emit_change(NpcEnumsScript.CHANGE_KIND_BLOCK_REMOVED, object_id, bounds, [NavigationChangeBusScript.tile_key_for_cell(cell)])
 	telemetry.increment(&"change_block_removed")
@@ -248,6 +251,8 @@ func notify_prop_created(prop_id: String, prop: Node = null) -> void:
 	_emit_prop_change(NpcEnumsScript.CHANGE_KIND_PROP_CREATED, prop_id, prop)
 
 func notify_prop_removed(prop_id: String, prop: Node = null) -> void:
+	if smart_objects != null:
+		smart_objects.notify_object_removed("prop:%s" % prop_id, prop)
 	_emit_prop_change(NpcEnumsScript.CHANGE_KIND_PROP_REMOVED, prop_id, prop)
 
 func notify_chunk_loaded(chunk_key: Vector2i) -> void:
@@ -328,6 +333,50 @@ func request_door_toggle(door: Node, actor: Node = null, actor_kind := "player",
 			"metrics": result.metrics.duplicate(true) if result.metrics is Dictionary else {}
 		})
 	return result
+
+func register_smart_resource(prop: Node, metadata := {}) -> String:
+	return smart_objects.register_resource(prop, metadata) if smart_objects != null else ""
+
+func register_smart_workstation(block: Node, metadata := {}) -> String:
+	return smart_objects.register_workstation(block, metadata) if smart_objects != null else ""
+
+func register_smart_anchor(object_id: String, kind: String, position: Vector3, metadata := {}) -> String:
+	return smart_objects.register_anchor(object_id, kind, position, metadata) if smart_objects != null else ""
+
+func reserve_smart_object(object_id: String, object_node: Node, actor: Node, actor_id: String, action: String, metadata := {}):
+	if smart_objects == null:
+		return null
+	var request = InteractionRequestScript.make(SmartObjectServiceScript.COMMAND_RESERVE, object_id, actor_id, metadata)
+	request.object_node = object_node
+	request.actor_node = actor
+	request.actor_kind = String(metadata.get("actorKind", "npc"))
+	request.metadata["action"] = action
+	return smart_objects.request_interaction(request)
+
+func complete_smart_object(object_id: String, object_node: Node, actor: Node, actor_id: String, action: String, metadata := {}):
+	if smart_objects == null:
+		return null
+	var command := StringName(String(metadata.get("command", SmartObjectServiceScript.COMMAND_COMPLETE)))
+	var request = InteractionRequestScript.make(command, object_id, actor_id, metadata)
+	request.object_node = object_node
+	request.actor_node = actor
+	request.actor_kind = String(metadata.get("actorKind", "npc"))
+	request.metadata["action"] = action
+	if String(metadata.get("request_id", "")) != "":
+		request.request_id = String(metadata.get("request_id", ""))
+	elif String(request.request_id) == "":
+		request.request_id = "%s:%s:%s:%s" % [String(command), object_id, actor_id, action]
+	return smart_objects.request_interaction(request)
+
+func release_smart_object(object_id: String, object_node: Node, actor: Node, actor_id: String, reason := "released", metadata := {}):
+	if smart_objects == null:
+		return null
+	var request = InteractionRequestScript.make(SmartObjectServiceScript.COMMAND_RELEASE, object_id, actor_id, metadata)
+	request.object_node = object_node
+	request.actor_node = actor
+	request.actor_kind = String(metadata.get("actorKind", "npc"))
+	request.metadata["reason"] = reason
+	return smart_objects.request_interaction(request)
 
 func request_npc_door_traversal(door: Node, actor: Node, entry: Dictionary = {}, action: Dictionary = {}) -> Dictionary:
 	if door_traversal == null:

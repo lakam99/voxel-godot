@@ -5,8 +5,8 @@
 [resource]
 script = ExtResource("1")
 role_id = "trader"
-canonical_job = ""
-day_goal_kind = &"idle"
+canonical_job = "trade"
+day_goal_kind = &"work"
 dusk_goal_kind = &"home"
 night_goal_kind = &"home"
 can_take_night_guard = false
