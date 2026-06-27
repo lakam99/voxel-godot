@@ -5,11 +5,11 @@
 - Phase: 11 - Streaming, Save/Load, And Simulation LOD
 - Branch: `npc-pathfinding/phase-11-streaming-save`
 - Date: 2026-06-27
-- Scope status: branch gates pass; merged `master` gates are pending until merge.
+- Scope status: branch and merged `master` gates pass.
 - Base commit before Phase 11 branch changes: `2521122806da5d5b6583802a83fd83161a0c1875`
-- Branch implementation/report commit: pending before branch commit
-- Merge commit: pending
-- Post-merge `master` evidence commit: pending
+- Branch implementation/report commit: `3b60a7b00b285abe548e23224364162e050ed810`
+- Merge commit: `837f089af0dbb312b9d25f9e9e757baddd4800cb`
+- Post-merge `master` evidence commit: this report update
 
 ## 2. Objective
 
@@ -296,7 +296,60 @@ Runner results:
 
 ## 14. Merged Master Evidence
 
-Pending until Phase 11 is committed, no-ff merged to `master`, and the required `master` all-runner pass is recorded.
+Focused command:
+
+```powershell
+.\tools\npc\run-npc-streaming-save-tests.ps1 -TimeMode Both -ReportPath artifacts\npc\reports\phase11-master-streaming-save.json
+```
+
+Focused report:
+
+- Path: `artifacts/npc/reports/phase11-master-streaming-save.json`
+- Result count: 38
+- Failure count: 0
+- Assertion count: 86
+- Duration: 0.111 seconds
+
+NPC suite command:
+
+```powershell
+.\tools\npc\run-all-npc-tests.ps1 -TimeMode Both -ReportPath artifacts\npc\reports\phase11-master-all-npc.json
+```
+
+NPC suite report:
+
+- Path: `artifacts/npc/reports/phase11-master-all-npc.json`
+- Result count: 11
+- Failure count: 0
+- Duration: 16.057 seconds
+
+Full repository command:
+
+```powershell
+.\tools\run-all-test-runners.ps1 -ReportPath artifacts\test-runners\phase11-master-all-test-runners.json -Seed atlas-1492 -StopOnFailure
+```
+
+Full repository report:
+
+- Path: `artifacts/test-runners/phase11-master-all-test-runners.json`
+- Seed: `atlas-1492`
+- Result count: 9
+- Failure count: 0
+- Duration: 989.826 seconds
+- Stopped early: false
+- Stop on failure: true
+
+Runner results:
+
+- `npc_focused`: pass, exit 0, 23.638 seconds
+- `npc_observation_dusk`: pass, exit 0, 0.671 seconds
+- `npc_observation_midnight`: pass, exit 0, 0.659 seconds
+- `world_signature`: pass, exit 0, 18.589 seconds
+- `visual_manifest`: pass, exit 0, 0.099 seconds
+- `npc_navigation_legacy`: pass, exit 0, 131.832 seconds
+- `story_playtest`: pass, exit 0, 81.784 seconds
+- `visual_captures`: pass, exit 0, 90.962 seconds
+- `playtest`: pass, exit 0, 641.524 seconds
 
 ## 15. Performance And Boundedness Metrics
 
@@ -305,9 +358,14 @@ Measured runner durations:
 - Focused streaming/save suite: 0.102 seconds
 - Contract harness: 0.092 seconds
 - All NPC suites: 22.571 seconds
+- Master focused streaming/save suite: 0.111 seconds
+- Master all NPC suites: 16.057 seconds
 - Branch all-runner: 928.282 seconds
 - Branch all-runner playtest: 598.968 seconds
 - Branch all-runner visual captures: 91.687 seconds
+- Master all-runner: 989.826 seconds
+- Master all-runner playtest: 641.524 seconds
+- Master all-runner visual captures: 90.962 seconds
 
 Boundedness controls present:
 
@@ -353,12 +411,11 @@ No tracked world-signature baseline change is present in this phase. The generat
 - Transient route/planner/avoidance/reservation/debug state is absent from lifecycle snapshots: yes.
 - World signature is unchanged: yes.
 - Branch focused and repository gates pass: yes.
-- Merged `master` gates pass: pending.
+- Merged `master` gates pass: yes.
 
 ## 18. Deviation Register
 
 - Branch all-runner was run without `-StopOnFailure` so all runner outcomes were captured in one aggregate report. It reported zero failures and did not stop early.
-- Merged `master` evidence is pending in this branch report and must be added after merge and rerun.
 
 ## 19. Known Issues And Debt
 
@@ -412,4 +469,4 @@ Phase 12 should harden phase interactions under longer soak and regression condi
 
 ## 22. Verdict
 
-Phase 11 branch evidence passes. Do not begin Phase 12 until Phase 11 is committed, no-ff merged to `master`, the required `master` gates pass, and this report is updated with merged `master` evidence.
+Phase 11 branch and merged `master` evidence pass. Phase 12 may begin from updated `master`.
