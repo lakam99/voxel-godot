@@ -619,6 +619,17 @@ func corridor_stats() -> Dictionary:
 func avoidance_stats() -> Dictionary:
     return avoidance_adapter.stats() if avoidance_adapter != null and avoidance_adapter.has_method("stats") else {}
 
+func cleanup_actor_state(actor_id: String) -> Dictionary:
+    var before: Dictionary = avoidance_adapter.stats() if avoidance_adapter != null and avoidance_adapter.has_method("stats") else {}
+    if avoidance_adapter != null and avoidance_adapter.has_method("disable_actor"):
+        avoidance_adapter.disable_actor(actor_id, true)
+    var after: Dictionary = avoidance_adapter.stats() if avoidance_adapter != null and avoidance_adapter.has_method("stats") else {}
+    return {
+        "avoidance": max(0, int(before.get("registeredAgents", 0)) - int(after.get("registeredAgents", 0))),
+        "before": before,
+        "after": after
+    }
+
 func request_traffic_step(entry: Dictionary, previous: Vector3, candidate: Vector3, world, intent: Dictionary, priority: int) -> Dictionary:
     if system == null or not system.has_method("request_npc_traffic_step"):
         return { "ok": true, "status": "granted", "reason": "traffic_unavailable" }

@@ -63,6 +63,15 @@ const BRAIN_UPDATES_PER_TICK := 8
 const BRAIN_REGISTERED_AGENT_LIMIT := 256
 const CHANGE_BUS_MAX_PENDING_TILES := 512
 
+const LOD_ACTIVE_ENTER_DISTANCE := 42.0
+const LOD_ACTIVE_EXIT_DISTANCE := 52.0
+const LOD_NEARBY_ENTER_DISTANCE := 96.0
+const LOD_NEARBY_EXIT_DISTANCE := 112.0
+const LOD_NEARBY_BRAIN_INTERVAL_SECONDS := 0.45
+const LOD_ABSTRACT_EVENT_INTERVAL_SECONDS := 2.0
+const LOD_PREFETCH_BOUNDARY_MARGIN_CELLS := 3
+const LOD_SCHEMA_VERSION := 2
+
 # Existing layer values observed before Phase 01. These are documentation constants,
 # not a renumbering of physics layers.
 const COLLISION_WORLD_QUERY := 1
