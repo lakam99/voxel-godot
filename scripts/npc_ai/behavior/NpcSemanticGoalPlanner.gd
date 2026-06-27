@@ -28,9 +28,6 @@ func make_intent(entry: Dictionary, target: Vector3, max_distance: float, moving
         kind = "job"
     var target_cell: Vector2i = world.world_cell(target) if world != null else Vector2i(roundi(target.x / CELL), roundi(target.z / CELL))
     var fallback_cells: Array[Vector2i] = []
-    if moving_home:
-        fallback_cells.append(entry.get("porchCell", target_cell))
-        fallback_cells.append(entry.get("homeCell", target_cell))
     var arrival_radius := CELL * 0.72
     if moving_home:
         arrival_radius = CELL * 0.82
@@ -104,58 +101,63 @@ func choose_guard_target(entry: Dictionary, target_hostile: Node3D = null, melee
     return entry.get("porchPosition", Vector3.ZERO)
 
 func choose_best_forage(entry: Dictionary, candidates: Array[Node3D]) -> Node3D:
-    if world == null or planner == null:
+    if world == null:
         return candidates[0] if not candidates.is_empty() else null
     var body := entry.get("body") as Node3D
     var origin: Vector3 = body.global_position if body != null else entry.get("porchPosition", Vector3.ZERO)
     candidates.sort_custom(func(a: Node3D, b: Node3D) -> bool:
         if a == null or b == null:
             return a != null
-        return a.global_position.distance_squared_to(origin) < b.global_position.distance_squared_to(origin)
+        var a_distance := a.global_position.distance_squared_to(origin)
+        var b_distance := b.global_position.distance_squared_to(origin)
+        if is_equal_approx(a_distance, b_distance):
+            return stable_node_id(a) < stable_node_id(b)
+        return a_distance < b_distance
     )
-    var best_node: Node3D = null
-    var best_score: float = INF
-    var checked: int = 0
     for node in candidates:
         if node == null or not is_instance_valid(node):
             continue
-        checked += 1
-        if checked > 12:
-            break
         var approach_cells: Array[Vector2i] = world.approach_cells_for_target(entry, node.global_position, true)
-        if approach_cells.is_empty():
-            continue
-        var cost: float = planner.route_cost(entry, node.global_position, true, false, CELL * 1.0, approach_cells)
-        if cost < best_score:
-            best_score = cost
-            best_node = node
-    return best_node
+        if not approach_cells.is_empty():
+            return node
+    return null
 
 func forage_target_position(entry: Dictionary, node: Node3D) -> Vector3:
-    if node == null or world == null or planner == null:
+    if node == null or world == null:
         return node.global_position if node != null else Vector3.ZERO
     var approach_cells: Array[Vector2i] = world.approach_cells_for_target(entry, node.global_position, true)
-    var best_cell: Vector2i = Vector2i.ZERO
+    var body := entry.get("body") as Node3D
+    var origin: Vector3 = body.global_position if body != null else entry.get("porchPosition", node.global_position)
+    var best_position := node.global_position
     var best_score: float = INF
     for cell in approach_cells:
         var position: Vector3 = world.cell_position(cell)
-        var cost: float = planner.route_cost(entry, position, true, false, CELL * 0.75)
-        if cost < best_score:
-            best_score = cost
-            best_cell = cell
-    if best_score < INF:
-        return world.cell_position(best_cell)
-    return node.global_position
+        var score := position.distance_squared_to(origin)
+        if score < best_score or (is_equal_approx(score, best_score) and "%d,%d" % [cell.x, cell.y] < "%d,%d" % [world.world_cell(best_position).x, world.world_cell(best_position).y]):
+            best_score = score
+            best_position = position
+    return best_position
 
-func choose_best_reachable_position(entry: Dictionary, candidates: Array[Vector3], allow_outside := false, moving_home := false, arrival_radius := CELL * 0.85, max_checked := 8) -> Vector3:
+func stable_node_id(node: Node) -> String:
+    if node == null:
+        return ""
+    if node.has_meta("prop_id"):
+        return String(node.get_meta("prop_id"))
+    if node.has_meta("smart_object_id"):
+        return String(node.get_meta("smart_object_id"))
+    return String(node.name)
+
+func choose_best_reachable_position(entry: Dictionary, candidates: Array[Vector3], allow_outside := false, moving_home := false, _arrival_radius := CELL * 0.85, max_checked := 8) -> Vector3:
     var body := entry.get("body") as Node3D
     var origin: Vector3 = body.global_position if body != null else entry.get("porchPosition", Vector3.ZERO)
     var unique_candidates := unique_positions(candidates)
     unique_candidates.sort_custom(func(a: Vector3, b: Vector3) -> bool:
-        return a.distance_squared_to(origin) < b.distance_squared_to(origin)
+        var a_distance := a.distance_squared_to(origin)
+        var b_distance := b.distance_squared_to(origin)
+        if is_equal_approx(a_distance, b_distance):
+            return position_key(a) < position_key(b)
+        return a_distance < b_distance
     )
-    var best: Vector3 = Vector3.INF
-    var best_score: float = INF
     var checked: int = 0
     for candidate in unique_candidates:
         if not position_can_be_goal(entry, candidate, allow_outside, moving_home):
@@ -163,11 +165,8 @@ func choose_best_reachable_position(entry: Dictionary, candidates: Array[Vector3
         checked += 1
         if checked > max_checked:
             break
-        var cost: float = planner.route_cost(entry, candidate, allow_outside, moving_home, arrival_radius)
-        if cost < best_score:
-            best_score = cost
-            best = candidate
-    return best
+        return candidate
+    return Vector3.INF
 
 func town_anchor_candidates(entry: Dictionary) -> Array[Vector3]:
     var candidates: Array[Vector3] = []
@@ -274,12 +273,13 @@ func add_resource_prop_candidates(candidates: Array[Vector3], entry: Dictionary,
         return
     var body := entry.get("body") as Node3D
     var origin: Vector3 = body.global_position if body != null else entry.get("porchPosition", Vector3.ZERO)
-    var props: Array[Node3D] = []
-    var remaining_scan_nodes := RESOURCE_SCAN_NODE_LIMIT
-    for root_value in [main.get("prop_root"), main.get("chunk_root")]:
-        remaining_scan_nodes = collect_job_props(root_value as Node, entry, job, props, remaining_scan_nodes, RESOURCE_SCAN_CANDIDATE_LIMIT)
-        if remaining_scan_nodes <= 0 or props.size() >= RESOURCE_SCAN_CANDIDATE_LIMIT:
-            break
+    var props: Array[Node3D] = indexed_resource_props(entry, job)
+    if props.is_empty() and allow_resource_scan_fallback():
+        var remaining_scan_nodes := RESOURCE_SCAN_NODE_LIMIT
+        for root_value in [main.get("prop_root"), main.get("chunk_root")]:
+            remaining_scan_nodes = collect_job_props(root_value as Node, entry, job, props, remaining_scan_nodes, RESOURCE_SCAN_CANDIDATE_LIMIT)
+            if remaining_scan_nodes <= 0 or props.size() >= RESOURCE_SCAN_CANDIDATE_LIMIT:
+                break
     props.sort_custom(func(a: Node3D, b: Node3D) -> bool:
         return a.global_position.distance_squared_to(origin) < b.global_position.distance_squared_to(origin)
     )
@@ -298,6 +298,36 @@ func add_resource_prop_candidates(candidates: Array[Vector3], entry: Dictionary,
                 break
         if not added_for_prop:
             continue
+
+func indexed_resource_props(entry: Dictionary, job: String) -> Array[Node3D]:
+    var service = smart_object_service()
+    if service == null or not service.has_method("query_resource_nodes"):
+        return []
+    var options := {
+        "limit": RESOURCE_SCAN_CANDIDATE_LIMIT,
+        "outsideTown": true,
+        "workAreaOnly": true
+    }
+    if job == "forage":
+        options["drops"] = ["berries"]
+    return service.query_resource_nodes(entry, resource_kinds_for_job(job), options)
+
+func smart_object_service():
+    if system == null or not system.has_method("smart_object_service"):
+        return null
+    return system.smart_object_service()
+
+func resource_kinds_for_job(job: String) -> Array:
+    if job == "wood":
+        return ["tree_source"]
+    if job == "stone":
+        return ["stone_source"]
+    if job == "forage":
+        return ["forage_source"]
+    return []
+
+func allow_resource_scan_fallback() -> bool:
+    return OS.get_environment("VOXEL_NPC_ALLOW_RESOURCE_SCAN") == "1"
 
 func collect_job_props(root: Node, entry: Dictionary, job: String, props: Array[Node3D], max_nodes: int, max_props: int) -> int:
     if root == null or max_nodes <= 0 or props.size() >= max_props:
@@ -348,6 +378,7 @@ func hostile_intercept_candidates(entry: Dictionary, hostile: Node3D, melee := f
     var hostile_cell: Vector2i = world.world_cell(hostile.global_position)
     var min_radius := 1 if melee else 3
     var max_radius := 2 if melee else 6
+    var snapshot: Dictionary = world.build_snapshot(entry, true, false)
     for radius in range(min_radius, max_radius + 1):
         for dx in range(-radius, radius + 1):
             for dz in range(-radius, radius + 1):
@@ -359,13 +390,12 @@ func hostile_intercept_candidates(entry: Dictionary, hostile: Node3D, melee := f
                     continue
                 if main.height_at_world(pos.x, pos.z) < main.WATER_LEVEL + 0.45:
                     continue
-                if not line_of_sight_cells_clear(entry, pos, hostile.global_position):
+                if not line_of_sight_cells_clear(entry, snapshot, pos, hostile.global_position):
                     continue
                 candidates.append(pos)
     return candidates
 
-func line_of_sight_cells_clear(entry: Dictionary, from_pos: Vector3, to_pos: Vector3) -> bool:
-    var snapshot: Dictionary = world.build_snapshot(entry, true, false)
+func line_of_sight_cells_clear(_entry: Dictionary, snapshot: Dictionary, from_pos: Vector3, to_pos: Vector3) -> bool:
     var from_cell: Vector2i = world.world_cell(from_pos)
     var to_cell: Vector2i = world.world_cell(to_pos)
     var delta := to_pos - from_pos
@@ -394,12 +424,15 @@ func unique_positions(candidates: Array[Vector3]) -> Array[Vector3]:
     for pos in candidates:
         if pos == Vector3.INF:
             continue
-        var key := "%d,%d" % [roundi(pos.x / CELL), roundi(pos.z / CELL)]
+        var key := position_key(pos)
         if seen.has(key):
             continue
         seen[key] = true
         result.append(pos)
     return result
+
+func position_key(pos: Vector3) -> String:
+    return "%d,%d" % [roundi(pos.x / CELL), roundi(pos.z / CELL)]
 
 func set_goal_fallback(entry: Dictionary, status: String, reason: String) -> void:
     entry["routeStatus"] = status

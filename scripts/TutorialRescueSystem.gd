@@ -196,11 +196,59 @@ func start_rescue_escort() -> void:
         system.clear_dialogue_focus()
         guard.set_meta("npc_dialogue_focused", false)
         guard.set_meta("npc_force_hold", false)
-        var guard_target: Vector3 = system.rescue_site + Vector3(-CELL * 1.45, 0.0, -CELL * 1.0)
-        guard_target.y = main.height_at_world(guard_target.x, guard_target.z) + 0.04
+        var guard_target: Vector3 = rescue_guard_target(guard)
         main.npc_system.set_scripted_target(guard, guard_target, true, true)
     show_speech_bubble(RESCUE_GUARD_ID, "With me!", 2.5)
     show_speech_bubble(RESCUE_FORAGER_ID, "Over here!", 3.2)
+
+func rescue_guard_target(guard: Node3D) -> Vector3:
+    var fallback: Vector3 = system.rescue_site + Vector3(-CELL * 1.45, 0.0, -CELL * 1.0)
+    var origin: Vector3 = guard.global_position if guard != null else fallback
+    var to_rescue: Vector3 = system.rescue_site - origin
+    to_rescue.y = 0.0
+    var direction: Vector3 = to_rescue.normalized() if to_rescue.length_squared() > 0.001 else Vector3.FORWARD
+    var candidates: Array[Vector3] = [
+        origin + direction * CELL * 18.0,
+        origin + direction * CELL * 14.0,
+        origin + direction * CELL * 10.0,
+        origin + direction * CELL * 6.0,
+        fallback
+    ]
+    for candidate in candidates:
+        candidate.y = main.height_at_world(candidate.x, candidate.z) + 0.04
+        if rescue_guard_target_clear(candidate):
+            return candidate
+    fallback.y = main.height_at_world(fallback.x, fallback.z) + 0.04
+    return fallback
+
+func rescue_guard_target_clear(position: Vector3) -> bool:
+    if main == null:
+        return true
+    if main.height_at_world(position.x, position.z) < main.WATER_LEVEL + 0.8:
+        return false
+    var radius_sq := CELL * CELL * 1.6
+    for root in [main.get("prop_root"), main.get("chunk_root")]:
+        if rescue_root_has_near_prop(root as Node, position, radius_sq):
+            return false
+    return true
+
+func rescue_root_has_near_prop(root: Node, position: Vector3, radius_sq: float) -> bool:
+    if root == null:
+        return false
+    var stack: Array[Node] = [root]
+    var scanned := 0
+    while not stack.is_empty() and scanned < 400:
+        scanned += 1
+        var node := stack.pop_back() as Node
+        if node == null:
+            continue
+        if node is Node3D and String(node.get_meta("kind", "")) == "prop":
+            var prop := node as Node3D
+            if Vector2(prop.global_position.x - position.x, prop.global_position.z - position.z).length_squared() <= radius_sq:
+                return true
+        for child in node.get_children():
+            stack.append(child)
+    return false
 
 func refresh_rescue_progress(delta := -1.0) -> bool:
     if not system.final_night_active or system.final_night_complete:

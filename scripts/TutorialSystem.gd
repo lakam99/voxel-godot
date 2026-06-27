@@ -71,6 +71,24 @@ func setup(main_node) -> void:
     dialogue_system = TutorialDialogueSystemScript.new()
     dialogue_system.setup(self)
 
+func ensure_rescue_system() -> bool:
+    if rescue_system != null:
+        return true
+    rescue_system = TutorialRescueSystemScript.new()
+    if rescue_system == null:
+        return false
+    rescue_system.setup(self)
+    return true
+
+func ensure_dialogue_system() -> bool:
+    if dialogue_system != null:
+        return true
+    dialogue_system = TutorialDialogueSystemScript.new()
+    if dialogue_system == null:
+        return false
+    dialogue_system.setup(self)
+    return true
+
 func _process(delta: float) -> void:
     update_speech_bubbles(delta)
     if final_night_active:
@@ -315,8 +333,10 @@ func add_repair_marker_box(parent: Node3D, size: Vector3, offset: Vector3, mater
     repair_quest.add_marker_box(parent, size, offset, material, rotation)
 
 func on_door_opened(door: Node) -> bool:
-    if not started or intro_door_opened:
+    if not started:
         return false
+    if intro_door_opened:
+        return intro_repair_active and not intro_elder_dialogue_acknowledged
     intro_door_opened = true
     intro_elder_dialogue_acknowledged = false
     interacted["mira"] = true
@@ -422,12 +442,18 @@ func update_progress(state: Dictionary) -> bool:
     return changed
 
 func is_tutorial_npc(node: Node) -> bool:
+    if not ensure_dialogue_system():
+        return false
     return dialogue_system.is_tutorial_npc(node)
 
 func interact_with(node: Node) -> bool:
+    if not ensure_dialogue_system():
+        return false
     return dialogue_system.interact_with(node)
 
 func handle_npc_quest(npc_id: String) -> String:
+    if not ensure_dialogue_system():
+        return ""
     return dialogue_system.handle_npc_quest(npc_id)
 
 func award_once(step_id: String, reason: String, items: Dictionary, xp := 0) -> bool:
@@ -460,93 +486,153 @@ func mira_morning_briefed() -> bool:
     return bool(completed_steps.get("miraMorningBriefing", false))
 
 func start_final_night() -> bool:
+    if not ensure_rescue_system():
+        return false
     return rescue_system.start_final_night()
 
 func complete_final_night() -> bool:
+    if not ensure_rescue_system():
+        return false
     return rescue_system.complete_final_night()
 
 func final_night_defeats() -> int:
+    if not ensure_rescue_system():
+        return RESCUE_MONSTER_COUNT if final_night_complete else 0
     return rescue_system.final_night_defeats()
 
 func current_hostile_defeats() -> int:
+    if not ensure_rescue_system():
+        return 0
     return rescue_system.current_hostile_defeats()
 
 func setup_rescue_scene() -> void:
+    if not ensure_rescue_system():
+        return
     rescue_system.setup_rescue_scene()
 
 func choose_rescue_site() -> Vector3:
+    if not ensure_rescue_system():
+        return Vector3.ZERO
     return rescue_system.choose_rescue_site()
 
 func spawn_rescue_torch(position: Vector3) -> void:
+    if not ensure_rescue_system():
+        return
     rescue_system.spawn_rescue_torch(position)
 
 func clear_rescue_torch() -> void:
+    if not ensure_rescue_system():
+        return
     rescue_system.clear_rescue_torch()
 
 func spawn_rescue_hostiles() -> void:
+    if not ensure_rescue_system():
+        return
     rescue_system.spawn_rescue_hostiles()
 
 func start_rescue_escort() -> void:
+    if not ensure_rescue_system():
+        return
     rescue_system.start_rescue_escort()
 
 func refresh_rescue_progress(delta := -1.0) -> bool:
+    if not ensure_rescue_system():
+        return false
     return rescue_system.refresh_rescue_progress(delta)
 
 func rescue_remaining_hostiles() -> int:
+    if not ensure_rescue_system():
+        return 0
     return rescue_system.rescue_remaining_hostiles()
 
 func start_rescue_return() -> void:
+    if not ensure_rescue_system():
+        return
     rescue_system.start_rescue_return()
 
 func rescue_return_position() -> Vector3:
+    if not ensure_rescue_system():
+        return Vector3.ZERO
     return rescue_system.rescue_return_position()
 
 func rescue_party_home() -> bool:
+    if not ensure_rescue_system():
+        return true
     return rescue_system.rescue_party_home()
 
 func settle_rescue_party_home() -> void:
+    if not ensure_rescue_system():
+        return
     rescue_system.settle_rescue_party_home()
 
 func find_tutorial_npc(npc_id: String) -> Node3D:
+    if not ensure_rescue_system():
+        return null
     return rescue_system.find_tutorial_npc(npc_id)
 
 func show_speech_bubble(npc_id: String, text: String, duration := 2.6) -> void:
+    if not ensure_rescue_system():
+        return
     rescue_system.show_speech_bubble(npc_id, text, duration)
 
 func update_speech_bubbles(delta: float) -> void:
+    if not ensure_rescue_system():
+        return
     rescue_system.update_speech_bubbles(delta)
 
 func clear_speech_bubbles() -> void:
+    if not ensure_rescue_system():
+        return
     rescue_system.clear_speech_bubbles()
 
 func current_tutorial_stage() -> String:
+    if not ensure_dialogue_system():
+        return "intro" if not intro_bed_used else "wilds"
     return dialogue_system.current_tutorial_stage()
 
 func npc_allowed_for_current_stage(npc_id: String) -> bool:
+    if not ensure_dialogue_system():
+        return false
     return dialogue_system.npc_allowed_for_current_stage(npc_id)
 
 func locked_line_for_stage(npc_id: String) -> String:
+    if not ensure_dialogue_system():
+        return ""
     return dialogue_system.locked_line_for_stage(npc_id)
 
 func is_after_training_hours() -> bool:
+    if not ensure_dialogue_system():
+        return false
     return dialogue_system.is_after_training_hours()
 
 func inventory_count(item_id: String) -> int:
+    if not ensure_dialogue_system():
+        return 0
     return dialogue_system.inventory_count(item_id)
 
 func structure_count(block_type: String) -> int:
+    if not ensure_dialogue_system():
+        return 0
     return dialogue_system.structure_count(block_type)
 
 func has_weapon(totals: Dictionary) -> bool:
+    if not ensure_dialogue_system():
+        return false
     return dialogue_system.has_weapon(totals)
 
 func has_axe(totals: Dictionary) -> bool:
+    if not ensure_dialogue_system():
+        return false
     return dialogue_system.has_axe(totals)
 
 func has_pickaxe(totals: Dictionary) -> bool:
+    if not ensure_dialogue_system():
+        return false
     return dialogue_system.has_pickaxe(totals)
 
 func danger_profile(position: Vector3) -> Dictionary:
+    if not ensure_dialogue_system():
+        return {}
     return dialogue_system.danger_profile(position)
 
 func ensure_town_generated() -> void:

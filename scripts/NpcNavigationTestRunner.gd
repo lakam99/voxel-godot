@@ -216,6 +216,16 @@ func test_generic_town_npc_navigation() -> void:
     var forager_inventory: Dictionary = generic_forager.get("personalInventory", {}) if not generic_forager.is_empty() else {}
     var forager_food := int(forager_inventory.get("berries", 0))
     var forager_hunger := float(generic_forager.get("hunger", 0.0)) if not generic_forager.is_empty() else 0.0
+    var forager_target_distance := -1.0
+    var forager_node_distance := -1.0
+    if not generic_forager.is_empty():
+        var forager_body := generic_forager.get("body") as Node3D
+        var forager_target: Vector3 = generic_forager.get("jobTarget", Vector3.ZERO)
+        var forager_node := generic_forager.get("jobTargetNode") as Node3D
+        if forager_body != null and is_instance_valid(forager_body):
+            forager_target_distance = forager_body.global_position.distance_to(forager_target)
+            if forager_node != null and is_instance_valid(forager_node):
+                forager_node_distance = forager_body.global_position.distance_to(forager_node.global_position)
     var stats_worker_outside := int(job_stats.get("outsideWorkers", 0)) > 0
     add_result(
         "npc_nav_generic_job_outings",
@@ -236,7 +246,7 @@ func test_generic_town_npc_navigation() -> void:
             and int(job_stats.get("forageRuns", 0)) > forage_runs_before
             and forager_hunger > 38.0
             and targeted_forage_selected,
-        "goal %s, target selected %s, berries %d, hunger %.1f, forage %d->%d, phase %s, route %s/%s" % [
+        "goal %s, target selected %s, berries %d, hunger %.1f, forage %d->%d, phase %s, route %s/%s, dist target %.2f node %.2f" % [
             str(forager_goal_seen),
             str(targeted_forage_selected),
             forager_food,
@@ -245,7 +255,9 @@ func test_generic_town_npc_navigation() -> void:
             int(job_stats.get("forageRuns", 0)),
             String(generic_forager.get("jobPhase", "")),
             String(generic_forager.get("routeStatus", "")),
-            String(generic_forager.get("routeReason", ""))
+            String(generic_forager.get("routeReason", "")),
+            forager_target_distance,
+            forager_node_distance
         ]
     )
     add_result(
@@ -380,6 +392,7 @@ func test_npc_capsule_collision_gate() -> void:
             if block_body:
                 block_body.queue_free()
             blocks.erase(cell)
+    invalidate_navigation_fixture()
 
 func test_two_npcs_cross_narrow_door() -> void:
     if not main or not player:
@@ -567,6 +580,7 @@ func test_two_npcs_cross_narrow_door() -> void:
             if block_body:
                 block_body.queue_free()
         blocks.erase(cell)
+    invalidate_navigation_fixture()
 
 func test_home_return_fallback_semantics() -> void:
     if not main or not player:
@@ -804,6 +818,7 @@ func test_reachability_aware_goal_selection() -> void:
         rock.queue_free()
     if is_instance_valid(hostile):
         hostile.queue_free()
+    invalidate_navigation_fixture()
 
 func make_nav_test_npc(npc_system, npc_id: String, npc_name: String, job: String, town_center: Vector2i, town_radius: int, level: float, cell: Vector2i, can_fight := false) -> Dictionary:
     var body := npc_system.create_npc_body(npc_name, "npc") as CharacterBody3D

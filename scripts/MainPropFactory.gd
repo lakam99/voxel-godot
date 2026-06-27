@@ -122,6 +122,7 @@ func complete_destroy_target(hit: Dictionary, collider: Node, kind: String, mate
         var old_height: float = terrain_height_cell(cell.x, cell.y)
         var new_height: float = maxf(MIN_HEIGHT, old_height - CELL)
         height_edits[cell] = new_height
+        mark_world_dirty("terrain_edited")
         if npc_system and npc_system.has_method("notify_navigation_terrain_edited"):
             npc_system.notify_navigation_terrain_edited(cell, old_height, new_height)
         rebuild_chunks_around_cell(cell)
@@ -139,6 +140,7 @@ func complete_destroy_target(hit: Dictionary, collider: Node, kind: String, mate
         if npc_system and npc_system.has_method("notify_navigation_block_removed"):
             npc_system.notify_navigation_block_removed(block_cell, block_type, collider)
         blocks.erase(block_cell)
+        mark_world_dirty("block_removed")
         collider.queue_free()
         inventory_system.add_item(ItemCatalogScript.material_drop(material_id), 1)
         award_break_xp(material_id)
@@ -165,6 +167,7 @@ func complete_destroy_target(hit: Dictionary, collider: Node, kind: String, mate
             drop = String(metrics.get("drop", drop))
             drop_count = int(metrics.get("amount", drop_count))
         removed_props[prop_id] = true
+        mark_world_dirty("prop_removed")
         if npc_system and npc_system.has_method("notify_navigation_prop_removed"):
             npc_system.notify_navigation_prop_removed(prop_id, collider)
         if material_id == "wildlife":

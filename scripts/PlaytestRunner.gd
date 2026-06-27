@@ -393,7 +393,9 @@ func test_tutorial_start_system() -> void:
     var sera := npc_root.get_node_or_null("TutorialNPC_sera") if npc_root else null
     var audio_effects = main.get("audio_effects")
     var knock_started := audio_effects != null and bool(audio_effects.stats().get("knockLooping", false))
+    var intro_before_door: Dictionary = tutorial_system.state() if tutorial_system.has_method("state") else {}
     var door_opened := bool(tutorial_system.on_door_opened(null))
+    var intro_after_door: Dictionary = tutorial_system.state() if tutorial_system.has_method("state") else {}
     main.call("refresh_intro_knock_audio")
     var knock_stopped := audio_effects != null and not bool(audio_effects.stats().get("knockLooping", false))
     main.call("show_tutorial_dialogue", String(tutorial_system.get("last_message")))
@@ -420,13 +422,19 @@ func test_tutorial_start_system() -> void:
             and dialogue_acknowledged
             and mira_has_separate_home
             and String(tutorial_system.get("last_message")).find("Mira:") == 0,
-        "door %s, objective %s, knock %s->%s, dialogue open %s ack %s, mira home %s starter %s, message '%s'" % [
+        "door %s, objective %s, knock %s->%s, dialogue open %s ack %s, before open/ack/active %s/%s/%s after %s/%s/%s, mira home %s starter %s, message '%s'" % [
             str(door_opened),
             str(door_objective),
             str(knock_started),
             str(not knock_stopped),
             str(dialogue_open),
             str(dialogue_acknowledged),
+            str(intro_before_door.get("introDoorOpened", null)),
+            str(intro_before_door.get("introElderDialogueAcknowledged", null)),
+            str(intro_before_door.get("introRepairActive", null)),
+            str(intro_after_door.get("introDoorOpened", null)),
+            str(intro_after_door.get("introElderDialogueAcknowledged", null)),
+            str(intro_after_door.get("introRepairActive", null)),
             str(mira_home_cell),
             str(starter_cell),
             String(tutorial_system.get("last_message"))
@@ -3043,15 +3051,20 @@ func place_item_via_player(inventory_system, item_id: String, target_cell: Vecto
 
 func cleanup_test_blocks(keys: Array[Vector3i]) -> void:
     var blocks := get_blocks()
+    var changed := false
     for key in keys:
         if blocks.has(key):
             var body := blocks[key] as Node
             if body:
                 body.queue_free()
             blocks.erase(key)
+            changed = true
+    if changed:
+        invalidate_navigation_fixture()
 
 func clear_blocks_near_cell(center_cell: Vector2i, radius: int) -> void:
     var blocks := get_blocks()
+    var changed := false
     for key in blocks.keys():
         var cell: Vector3i = key
         if abs(cell.x - center_cell.x) > radius or abs(cell.z - center_cell.y) > radius:
@@ -3060,6 +3073,9 @@ func clear_blocks_near_cell(center_cell: Vector2i, radius: int) -> void:
         if body:
             body.queue_free()
         blocks.erase(key)
+        changed = true
+    if changed:
+        invalidate_navigation_fixture()
 
 func clear_blocks_along_segment(start: Vector3, end: Vector3, radius_cells: int = 1) -> void:
     var blocks := get_blocks()
@@ -3075,6 +3091,7 @@ func clear_blocks_along_segment(start: Vector3, end: Vector3, radius_cells: int 
         for dz in range(-radius_cells, radius_cells + 1):
             for dx in range(-radius_cells, radius_cells + 1):
                 cells[Vector2i(cell_x + dx, cell_z + dz)] = true
+    var changed := false
     for key in blocks.keys():
         var cell: Vector3i = key
         if not cells.has(Vector2i(cell.x, cell.z)):
@@ -3083,6 +3100,9 @@ func clear_blocks_along_segment(start: Vector3, end: Vector3, radius_cells: int 
         if body:
             body.queue_free()
         blocks.erase(key)
+        changed = true
+    if changed:
+        invalidate_navigation_fixture()
 
 func clear_props_near_cell(center_cell: Vector2i, radius: int) -> void:
     var roots := []
@@ -3092,10 +3112,14 @@ func clear_props_near_cell(center_cell: Vector2i, radius: int) -> void:
         roots.append(chunk_root)
     if prop_root:
         roots.append(prop_root)
+    var changed := false
     for root in roots:
-        clear_props_near_cell_recursive(root, center_cell, radius)
+        changed = clear_props_near_cell_recursive(root, center_cell, radius) or changed
+    if changed:
+        invalidate_navigation_fixture()
 
-func clear_props_near_cell_recursive(node: Node, center_cell: Vector2i, radius: int) -> void:
+func clear_props_near_cell_recursive(node: Node, center_cell: Vector2i, radius: int) -> bool:
+    var changed := false
     for child in node.get_children():
         var node3d := child as Node3D
         if node3d != null and node3d.has_meta("kind") and String(node3d.get_meta("kind")) == "prop":
@@ -3103,8 +3127,20 @@ func clear_props_near_cell_recursive(node: Node, center_cell: Vector2i, radius: 
             if abs(cell.x - center_cell.x) <= radius and abs(cell.y - center_cell.y) <= radius:
                 node.remove_child(child)
                 child.queue_free()
+                changed = true
                 continue
-        clear_props_near_cell_recursive(child, center_cell, radius)
+        changed = clear_props_near_cell_recursive(child, center_cell, radius) or changed
+    return changed
+
+func invalidate_navigation_fixture() -> void:
+    if main == null:
+        return
+    var npc_system = main.get("npc_system")
+    if npc_system == null:
+        return
+    var pathing = npc_system.get("pathing")
+    if pathing != null and pathing.has_method("invalidate"):
+        pathing.invalidate()
 
 func disable_prop_colliders(node: Node, disabled_shapes: Array[CollisionShape3D]) -> void:
     if node == null:
@@ -4650,7 +4686,7 @@ func test_npc_equipment_and_pathing() -> void:
         return
 
     var start_cell := Vector2i(roundi(player.global_position.x / CELL) + 72, roundi(player.global_position.z / CELL) + 72)
-    reset_player_on_flat_patch(start_cell)
+    reset_player_on_flat_patch(start_cell, 12)
     clear_blocks_near_cell(start_cell, 12)
     clear_props_near_cell(start_cell, 14)
     await wait_physics_frames(3)
@@ -7654,13 +7690,13 @@ func aim_player_at(world_point: Vector3) -> void:
     player.set("pitch", pitch_value)
     camera.rotation.x = pitch_value
 
-func reset_player_on_flat_patch(center_cell: Vector2i) -> void:
+func reset_player_on_flat_patch(center_cell: Vector2i, radius := 5) -> void:
     if not main or not player:
         return
     var base_height: float = main.call("terrain_height_cell", center_cell.x, center_cell.y)
     var edits := get_height_edits()
-    for dz in range(-5, 6):
-        for dx in range(-5, 6):
+    for dz in range(-radius, radius + 1):
+        for dx in range(-radius, radius + 1):
             edits[Vector2i(center_cell.x + dx, center_cell.y + dz)] = base_height
     main.call("rebuild_chunks_around_cell", center_cell)
     player.global_position = Vector3(center_cell.x * CELL, base_height, center_cell.y * CELL)

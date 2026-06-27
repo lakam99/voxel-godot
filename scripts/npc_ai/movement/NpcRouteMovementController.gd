@@ -36,7 +36,10 @@ func move(entry: Dictionary, intent: Dictionary, max_distance: float, planner, w
     var previous: Vector3 = body.global_position
     var target: Vector3 = intent.get("target", previous)
     var arrival_radius: float = float(intent.get("arrivalRadius", CELL * 0.75))
-    var strict_arrival := bool(intent.get("strictArrival", false)) or String(intent.get("kind", "")) == "scripted"
+    var moving_home := bool(intent.get("movingHome", false))
+    var strict_arrival := bool(intent.get("strictArrival", false)) or String(intent.get("kind", "")) == "scripted" or moving_home
+    if String(entry.get("activeDoorPortalId", "")) == "":
+        entry.erase("_activeDoorForwardStep")
     if flat_distance(previous, target) <= arrival_radius:
         clear_route(entry)
         set_route_status(entry, "arrived", "")
@@ -45,7 +48,8 @@ func move(entry: Dictionary, intent: Dictionary, max_distance: float, planner, w
     var route: Dictionary = ensure_route(entry, intent, planner, world)
     if not bool(route.get("ok", false)):
         set_route_status(entry, String(route.get("status", "blocked")), String(route.get("reason", "blocked")))
-        count_unreachable_once(entry, intent, String(route.get("reason", "blocked")))
+        if String(route.get("status", "")) != "pending":
+            count_unreachable_once(entry, intent, String(route.get("reason", "blocked")))
         return { "moved": 0.0, "status": String(route.get("status", "blocked")), "reason": String(route.get("reason", "blocked")) }
     if String(route.get("status", "")) == "arrived":
         if strict_arrival and flat_distance(previous, target) > arrival_radius:
@@ -63,8 +67,9 @@ func move(entry: Dictionary, intent: Dictionary, max_distance: float, planner, w
             set_route_status(entry, String(route.get("status", "blocked")), String(route.get("reason", "blocked")))
             count_unreachable_once(entry, intent, String(route.get("reason", "blocked")))
             return { "moved": 0.0, "status": String(route.get("status", "blocked")), "reason": String(route.get("reason", "blocked")) }
+        trim_active_door_approach_cells(entry, world)
 
-    trim_active_door_approach_cells(entry)
+    trim_active_door_approach_cells(entry, world)
     trim_reached_route_cells(entry, world)
     var path_waypoints: Array = entry.get("pathWaypoints", [])
     while not path_waypoints.is_empty() and flat_distance(previous, path_waypoints[0]) <= CELL * 0.36:
@@ -78,7 +83,16 @@ func move(entry: Dictionary, intent: Dictionary, max_distance: float, planner, w
             return { "moved": 0.0, "status": "arrived", "reason": "" }
         entry["routeForceReplan"] = true
         route = ensure_route(entry, intent, planner, world)
+        trim_active_door_approach_cells(entry, world)
         path_waypoints = entry.get("pathWaypoints", [])
+        if path_waypoints.is_empty():
+            if String(entry.get("activeDoorPortalId", "")) != "":
+                if seed_active_door_forward_step(entry, world):
+                    path_waypoints = entry.get("pathWaypoints", [])
+                else:
+                    release_stale_active_door_route(entry)
+                    set_route_status(entry, "waiting", "active_door_replan")
+                    return { "moved": 0.0, "status": "waiting", "reason": "active_door_replan" }
         if path_waypoints.is_empty():
             set_route_status(entry, "blocked", "empty_route")
             count_unreachable_once(entry, intent, "empty_route")
@@ -96,7 +110,6 @@ func move(entry: Dictionary, intent: Dictionary, max_distance: float, planner, w
         increment_reservation_wait(entry)
         return { "moved": 0.0, "status": "waiting", "reason": door_wait }
 
-    var moving_home := bool(intent.get("movingHome", false))
     var allow_outside := bool(intent.get("allowOutside", false))
     var actors := []
     if system != null and system.has_method("current_door_actors"):
@@ -121,6 +134,9 @@ func move(entry: Dictionary, intent: Dictionary, max_distance: float, planner, w
         set_route_status(entry, "arrived", "")
         return { "moved": 0.0, "status": "arrived", "reason": "" }
     if not bool(follow.get("ok", false)):
+        var portal_recenter_result := try_portal_clearance_recenter(entry, previous, follow, intent, max_distance, world, priority, String(follow.get("reason", "")))
+        if not portal_recenter_result.is_empty():
+            return portal_recenter_result
         var retreat_result := try_dynamic_yield_retreat(entry, previous, follow, intent, max_distance, world, actors, priority)
         if not retreat_result.is_empty():
             return retreat_result
@@ -244,7 +260,7 @@ func try_dynamic_yield_retreat(entry: Dictionary, previous: Vector3, follow: Dic
     return { "moved": moved, "status": "waiting", "reason": "yielding_retreat", "classification": "traffic_reservation" }
 
 func try_portal_clearance_recenter(entry: Dictionary, previous: Vector3, follow: Dictionary, intent: Dictionary, max_distance: float, world, priority: int, motor_reason: String) -> Dictionary:
-    if not bool(follow.get("portalMode", false)) or motor_reason != "static_or_dynamic_collision":
+    if not bool(follow.get("portalMode", false)) or not (motor_reason in ["static_or_dynamic_collision", "blocked_static", "blocked_capsule"]):
         return {}
     var direction := String(entry.get("activeDoorDirection", ""))
     var axis := axis_for_door_direction(direction)
@@ -401,6 +417,23 @@ func ensure_route(entry: Dictionary, intent: Dictionary, planner, world) -> Dict
 
     bump_traffic_generation(entry, "route_replacement")
     var route: Dictionary = planner.plan_route(entry, intent)
+    if String(route.get("status", "")) == "pending":
+        entry["routeForceReplan"] = true
+        if not current_waypoints.is_empty():
+            set_route_status(entry, "moving", "route_pending")
+            return {
+                "ok": true,
+                "status": "routed",
+                "reason": "route_pending",
+                "cells": entry.get("routeCells", []),
+                "waypoints": current_waypoints,
+                "actions": entry.get("routeActions", {}),
+                "targetCell": target_cell,
+                "fallbackCell": entry.get("routeFallbackCell", target_cell),
+                "snapshotRevision": String(entry.get("routeSnapshotRevision", snapshot_revision))
+            }
+        set_route_status(entry, "pending", String(route.get("reason", "route_pending")))
+        return route
     entry["routeForceReplan"] = false
     entry["routeKey"] = route_key
     entry["routeGoalCell"] = target_cell
@@ -429,6 +462,7 @@ func clear_route(entry: Dictionary) -> void:
     entry["routeCells"] = []
     entry["routeActions"] = {}
     entry["routeForceReplan"] = false
+    entry.erase("_activeDoorForwardStep")
 
 func seed_strict_final_waypoint(entry: Dictionary, target: Vector3, world) -> void:
     var target_cell: Vector2i = world.world_cell(target)
@@ -439,12 +473,26 @@ func seed_strict_final_waypoint(entry: Dictionary, target: Vector3, world) -> vo
     entry["routeFallbackCell"] = target_cell
     set_route_status(entry, "moving", "")
 
-func trim_active_door_approach_cells(entry: Dictionary) -> void:
+func trim_active_door_approach_cells(entry: Dictionary, world = null) -> void:
     var active_portal_id := String(entry.get("activeDoorPortalId", ""))
     if active_portal_id == "":
         return
     var cells: Array = entry.get("routeCells", [])
     var waypoints: Array = entry.get("pathWaypoints", [])
+    var direction := String(entry.get("activeDoorDirection", ""))
+    var body := entry.get("body") as Node3D
+    if world != null and direction != "" and body != null and is_instance_valid(body):
+        var current_cell: Vector2i = world.world_cell(body.global_position)
+        var pruned := 0
+        while not cells.is_empty() and cells[0] is Vector2i and route_cell_behind_active_door(cells[0], current_cell, direction):
+            cells.remove_at(0)
+            pruned += 1
+            if not waypoints.is_empty():
+                waypoints.remove_at(0)
+        if pruned > 0:
+            entry["routeForceReplan"] = true
+        entry["routeCells"] = cells
+        entry["pathWaypoints"] = waypoints
     if cells.size() <= 2 or waypoints.is_empty():
         return
     var actions: Dictionary = entry.get("routeActions", {})
@@ -470,6 +518,84 @@ func trim_active_door_approach_cells(entry: Dictionary) -> void:
         action_index -= 1
     entry["routeCells"] = cells
     entry["pathWaypoints"] = waypoints
+
+func route_cell_behind_active_door(cell: Vector2i, current_cell: Vector2i, direction: String) -> bool:
+    if direction == "x+":
+        return cell.x <= current_cell.x
+    if direction == "x-":
+        return cell.x >= current_cell.x
+    if direction == "z+":
+        return cell.y <= current_cell.y
+    if direction == "z-":
+        return cell.y >= current_cell.y
+    return false
+
+func release_stale_active_door_route(entry: Dictionary) -> void:
+    var actor_id := String(entry.get("activeDoorActorId", entry.get("id", "")))
+    if system != null and system.has_method("release_npc_door_hold") and actor_id != "":
+        system.release_npc_door_hold(actor_id, true)
+    if system != null and system.has_method("release_npc_traffic_reservations"):
+        system.release_npc_traffic_reservations(entry, "active_door_route_replan")
+    entry.erase("activeDoorPortalId")
+    entry.erase("activeDoorActorId")
+    entry.erase("activeDoorDirection")
+    entry.erase("activeDoorTrafficGroupId")
+    entry["routeActions"] = {}
+    entry["routeForceReplan"] = true
+    entry.erase("_activeDoorForwardStep")
+
+func seed_active_door_forward_step(entry: Dictionary, world) -> bool:
+    var direction := String(entry.get("activeDoorDirection", ""))
+    var body := entry.get("body") as Node3D
+    if direction == "" or body == null or not is_instance_valid(body) or world == null:
+        return false
+    var current_cell: Vector2i = world.world_cell(body.global_position)
+    var step := Vector2i.ZERO
+    if direction == "x+":
+        step = Vector2i(1, 0)
+    elif direction == "x-":
+        step = Vector2i(-1, 0)
+    elif direction == "z+":
+        step = Vector2i(0, 1)
+    elif direction == "z-":
+        step = Vector2i(0, -1)
+    if step == Vector2i.ZERO:
+        return false
+    var next_cell := current_cell + step
+    var door_cell := active_door_portal_cell(entry, world)
+    if door_cell != Vector2i(999999, 999999):
+        if direction == "x+" and next_cell.x <= door_cell.x:
+            next_cell = door_cell + step
+        elif direction == "x-" and next_cell.x >= door_cell.x:
+            next_cell = door_cell + step
+        elif direction == "z+" and next_cell.y <= door_cell.y:
+            next_cell = door_cell + step
+        elif direction == "z-" and next_cell.y >= door_cell.y:
+            next_cell = door_cell + step
+    entry["routeCells"] = [next_cell]
+    entry["pathWaypoints"] = [world.cell_position(next_cell)]
+    entry["routeForceReplan"] = false
+    entry["_activeDoorForwardStep"] = true
+    return true
+
+func active_door_portal_cell(entry: Dictionary, world) -> Vector2i:
+    if system == null or world == null:
+        return Vector2i(999999, 999999)
+    var portal_id := String(entry.get("activeDoorPortalId", ""))
+    if portal_id == "":
+        return Vector2i(999999, 999999)
+    var autonomy = system.get("autonomy_system") if system.has_method("get") else null
+    if autonomy == null:
+        return Vector2i(999999, 999999)
+    var door_portals = autonomy.get("door_portals") if autonomy.has_method("get") else null
+    if door_portals == null:
+        return Vector2i(999999, 999999)
+    var portals: Dictionary = door_portals.get("portals")
+    var portal = portals.get(portal_id)
+    if portal == null:
+        return Vector2i(999999, 999999)
+    var bounds: AABB = portal.get("threshold_bounds")
+    return world.world_cell(bounds.position + bounds.size * 0.5)
 
 func trim_reached_route_cells(entry: Dictionary, world) -> void:
     var body := entry.get("body") as Node3D
@@ -563,6 +689,8 @@ func handle_upcoming_door_action(entry: Dictionary, next_cell: Vector2i, world, 
 func apply_door_stage(entry: Dictionary, body: Node3D, stage_position: Vector3, world, portal_id: String) -> bool:
     if body == null or world == null:
         return false
+    if door_stage_position_occupied(entry, body, stage_position):
+        return false
     if flat_distance(body.global_position, stage_position) <= CELL * 0.24:
         return false
     entry["doorStageActive"] = true
@@ -571,6 +699,18 @@ func apply_door_stage(entry: Dictionary, body: Node3D, stage_position: Vector3, 
     entry["pathWaypoints"] = [stage_position]
     entry["routeCells"] = [world.world_cell(stage_position)]
     return true
+
+func door_stage_position_occupied(entry: Dictionary, body: Node3D, stage_position: Vector3) -> bool:
+    if system == null or not system.has_method("current_door_actors"):
+        return false
+    var actors: Array = system.call("current_door_actors")
+    for actor_value in actors:
+        var actor := actor_value as Node3D
+        if actor == null or not is_instance_valid(actor) or actor == body:
+            continue
+        if flat_distance(actor.global_position, stage_position) <= CELL * 0.72:
+            return true
+    return false
 
 func should_restore_from_door_stage(entry: Dictionary, position: Vector3) -> bool:
     if not bool(entry.get("doorStageActive", false)):
@@ -675,7 +815,7 @@ func validate_candidate(entry: Dictionary, previous: Vector3, candidate: Vector3
                 return { "ok": false, "reason": "yielding", "blocker": dynamic }
             return { "ok": false, "reason": "blocked_dynamic" }
     var body := entry.get("body") as CharacterBody3D
-    if body != null and capsule_hits_obstacle(entry, body, previous, candidate):
+    if body != null and not bool(entry.get("_activeDoorForwardStep", false)) and capsule_hits_obstacle(entry, body, previous, candidate):
         return { "ok": false, "reason": "blocked_capsule" }
     return { "ok": true, "candidate": candidate }
 

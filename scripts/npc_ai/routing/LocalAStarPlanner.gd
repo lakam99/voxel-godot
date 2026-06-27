@@ -9,12 +9,17 @@ func start_job(graph: Dictionary, start_key: String, goal_keys: Array, cost_mode
 	var goal_lookup := {}
 	for goal_key in goal_keys:
 		goal_lookup[String(goal_key)] = true
-	return {
+	var allowed_tile_lookup := {}
+	for tile_value in allowed_tiles:
+		allowed_tile_lookup[String(tile_value)] = true
+	var job := {
 		"graph": graph,
 		"start": start_key,
 		"goals": goal_lookup,
 		"allowedTiles": allowed_tiles.duplicate(),
-		"open": [start_key],
+		"allowedTileLookup": allowed_tile_lookup,
+		"open": [],
+		"openHeap": [],
 		"closed": {},
 		"cameFrom": {},
 		"cameEdge": {},
@@ -27,16 +32,18 @@ func start_job(graph: Dictionary, start_key: String, goal_keys: Array, cost_mode
 		"profile": profile,
 		"expansions": 0
 	}
+	_heap_push(job, start_key, 0.0, 0.0)
+	return job
 
-func step(job: Dictionary, max_expansions := 128) -> Dictionary:
+func step(job: Dictionary, max_expansions := 128, max_usec := 0) -> Dictionary:
 	last_expansions = 0
 	var graph: Dictionary = job.get("graph", {})
-	var open: Array = job.get("open", [])
 	var goals: Dictionary = job.get("goals", {})
-	if open.is_empty():
+	if _open_empty(job):
 		return _finish_without_open(job)
 	var budget := maxi(1, max_expansions)
-	while not open.is_empty() and last_expansions < budget:
+	var step_start_usec := Time.get_ticks_usec()
+	while not _open_empty(job) and last_expansions < budget:
 		var current := _pop_best_open(job)
 		if current == "":
 			break
@@ -63,9 +70,10 @@ func step(job: Dictionary, max_expansions := 128) -> Dictionary:
 				(job["cameFrom"] as Dictionary)[to_key] = current
 				(job["cameEdge"] as Dictionary)[to_key] = edge_record
 				(job["cameBreakdown"] as Dictionary)[to_key] = breakdown
-				if not open.has(to_key):
-					open.append(to_key)
-	if open.is_empty():
+				_heap_push(job, to_key, new_cost, new_cost)
+		if max_usec > 0 and last_expansions > 0 and Time.get_ticks_usec() - step_start_usec >= max_usec:
+			break
+	if _open_empty(job):
 		return _finish_without_open(job)
 	return {
 		"status": NpcEnumsScript.ROUTE_STATUS_PENDING,
@@ -88,7 +96,10 @@ func _finish_without_open(job: Dictionary) -> Dictionary:
 		"path": [],
 		"edges": [],
 		"breakdowns": [],
-		"expansions": last_expansions
+		"expansions": last_expansions,
+		"closedCount": (job.get("closed", {}) as Dictionary).size(),
+		"bestKey": best_key,
+		"bestGoalDistance": float(job.get("bestGoalDistance", INF))
 	}
 
 func _complete(job: Dictionary, goal_key: String) -> Dictionary:
@@ -113,27 +124,78 @@ func _complete(job: Dictionary, goal_key: String) -> Dictionary:
 	}
 
 func _pop_best_open(job: Dictionary) -> String:
-	var open: Array = job.get("open", [])
-	var graph: Dictionary = job.get("graph", {})
-	var goals: Dictionary = job.get("goals", {})
-	var best_index := -1
-	var best_score := INF
-	var best_cost := INF
-	var best_key := ""
-	for i in range(open.size()):
-		var key := String(open[i])
-		var cost := float((job.get("costSoFar", {}) as Dictionary).get(key, INF))
-		var heuristic := 0.0
-		var score := cost + heuristic
-		if score < best_score or (is_equal_approx(score, best_score) and (cost < best_cost or (is_equal_approx(cost, best_cost) and key < best_key))):
-			best_index = i
-			best_score = score
-			best_cost = cost
-			best_key = key
-	if best_index < 0:
-		return ""
-	open.remove_at(best_index)
-	return best_key
+	var heap: Array = job.get("openHeap", [])
+	while not heap.is_empty():
+		var item: Dictionary = _heap_pop(job)
+		var key := String(item.get("key", ""))
+		if key == "" or (job["closed"] as Dictionary).has(key):
+			continue
+		var item_cost := float(item.get("cost", INF))
+		var current_cost := float((job.get("costSoFar", {}) as Dictionary).get(key, INF))
+		if item_cost > current_cost + 0.0001:
+			continue
+		return key
+	return ""
+
+func _open_empty(job: Dictionary) -> bool:
+	var heap: Array = job.get("openHeap", [])
+	return heap.is_empty()
+
+func _heap_push(job: Dictionary, key: String, score: float, cost: float) -> void:
+	var heap: Array = job.get("openHeap", [])
+	heap.append({
+		"key": key,
+		"score": score,
+		"cost": cost
+	})
+	job["openHeap"] = heap
+	var index := heap.size() - 1
+	while index > 0:
+		var parent := int((index - 1) / 2)
+		if not _heap_less(heap[index], heap[parent]):
+			break
+		_heap_swap(heap, index, parent)
+		index = parent
+
+func _heap_pop(job: Dictionary) -> Dictionary:
+	var heap: Array = job.get("openHeap", [])
+	if heap.is_empty():
+		return {}
+	var result: Dictionary = heap[0]
+	var tail = heap.pop_back()
+	if not heap.is_empty():
+		heap[0] = tail
+		var index := 0
+		while true:
+			var left := index * 2 + 1
+			var right := left + 1
+			var smallest := index
+			if left < heap.size() and _heap_less(heap[left], heap[smallest]):
+				smallest = left
+			if right < heap.size() and _heap_less(heap[right], heap[smallest]):
+				smallest = right
+			if smallest == index:
+				break
+			_heap_swap(heap, index, smallest)
+			index = smallest
+	job["openHeap"] = heap
+	return result
+
+func _heap_less(a, b) -> bool:
+	var a_score := float((a as Dictionary).get("score", INF))
+	var b_score := float((b as Dictionary).get("score", INF))
+	if not is_equal_approx(a_score, b_score):
+		return a_score < b_score
+	var a_cost := float((a as Dictionary).get("cost", INF))
+	var b_cost := float((b as Dictionary).get("cost", INF))
+	if not is_equal_approx(a_cost, b_cost):
+		return a_cost < b_cost
+	return String((a as Dictionary).get("key", "")) < String((b as Dictionary).get("key", ""))
+
+func _heap_swap(heap: Array, a: int, b: int) -> void:
+	var value = heap[a]
+	heap[a] = heap[b]
+	heap[b] = value
 
 func _sorted_edges(graph: Dictionary, from_key: String) -> Array:
 	var edges: Array = (graph.get("edges", {}) as Dictionary).get(from_key, [])
@@ -145,12 +207,12 @@ func _sorted_edges(graph: Dictionary, from_key: String) -> Array:
 	return edges
 
 func _tile_allowed(job: Dictionary, edge_record: Dictionary) -> bool:
-	var allowed: Array = job.get("allowedTiles", [])
-	if allowed.is_empty():
+	var allowed_lookup: Dictionary = job.get("allowedTileLookup", {})
+	if allowed_lookup.is_empty():
 		return true
 	var to_tile := String(edge_record.get("toTile", ""))
 	var from_tile := String(edge_record.get("fromTile", ""))
-	return allowed.has(to_tile) and allowed.has(from_tile)
+	return allowed_lookup.has(to_tile) and allowed_lookup.has(from_tile)
 
 func _goal_distance(graph: Dictionary, key: String, goals: Dictionary) -> float:
 	var nodes: Dictionary = graph.get("nodes", {})

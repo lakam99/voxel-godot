@@ -7,9 +7,13 @@ playtest-report.json
 playtest-progress.txt
 npc-navigation-report.json
 npc-navigation-progress.txt
+direct-npc-navigation-report.json
+direct-npc-navigation-progress.txt
 artifacts/*.json
 artifacts/*.txt
 artifacts/npc/
+artifacts/performance/
+artifacts/verification/
 artifacts/test-runners/
 artifacts/ui-layout-fix/
 artifacts/visual/

@@ -467,54 +467,77 @@ func feedback_color_for_material(material_id: String) -> Color:
 
 func _process(delta: float) -> void:
     var frame_start := Time.get_ticks_usec()
+    if runtime_perf_monitor != null:
+        runtime_perf_monitor.begin_frame(delta)
     world_elapsed += delta
     if player:
         var chunk_start := Time.get_ticks_usec()
         update_chunks(false)
         perf_chunk_ms = profiled_ms(chunk_start)
+        if runtime_perf_monitor != null:
+            runtime_perf_monitor.observe_duration("chunk", perf_chunk_ms)
         water.position.x = player.position.x
         water.position.z = player.position.z
     var sky_start := Time.get_ticks_usec()
     update_sky(delta)
     update_local_light_rig_lod(delta)
     perf_sky_ms = profiled_ms(sky_start)
+    if runtime_perf_monitor != null:
+        runtime_perf_monitor.observe_duration("sky", perf_sky_ms)
     update_sleep_transition(delta)
     var utility_start := Time.get_ticks_usec()
     if utility_system:
         utility_system.update(delta)
     perf_utility_ms = profiled_ms(utility_start)
+    if runtime_perf_monitor != null:
+        runtime_perf_monitor.observe_duration("utility", perf_utility_ms)
     var pickups_start := Time.get_ticks_usec()
     update_dropped_pickups(delta)
     perf_pickups_ms = profiled_ms(pickups_start)
+    if runtime_perf_monitor != null:
+        runtime_perf_monitor.observe_duration("pickups", perf_pickups_ms)
     update_wildlife(delta)
     var survival_start := Time.get_ticks_usec()
     update_survival(delta)
     perf_survival_ms = profiled_ms(survival_start)
+    if runtime_perf_monitor != null:
+        runtime_perf_monitor.observe_duration("survival", perf_survival_ms)
     var hostiles_start := Time.get_ticks_usec()
     update_hostiles(delta)
     perf_hostiles_ms = profiled_ms(hostiles_start)
+    if runtime_perf_monitor != null:
+        runtime_perf_monitor.observe_duration("hostiles", perf_hostiles_ms)
+    var npc_start := Time.get_ticks_usec()
     update_npcs(delta)
+    perf_npc_ms = profiled_ms(npc_start)
+    if runtime_perf_monitor != null:
+        runtime_perf_monitor.observe_duration("update_npcs", perf_npc_ms)
     if region_aftermath_system:
         region_aftermath_system.update(delta)
     handle_collapse_if_needed()
     var beacon_start := Time.get_ticks_usec()
     update_beacon_charge(delta)
     perf_beacon_ms = profiled_ms(beacon_start)
-    var autosave_start := Time.get_ticks_usec()
-    if autosave_enabled:
-        autosave_elapsed += delta
-        if autosave_elapsed >= 5.0:
-            autosave_elapsed = 0.0
-            save_world(false)
-    perf_autosave_ms = profiled_ms(autosave_start)
+    if runtime_perf_monitor != null:
+        runtime_perf_monitor.observe_duration("beacon", perf_beacon_ms)
+    process_autosave(delta)
     var break_start := Time.get_ticks_usec()
     update_break_reset(delta)
     perf_break_ms = profiled_ms(break_start)
+    if runtime_perf_monitor != null:
+        runtime_perf_monitor.observe_duration("break", perf_break_ms)
     var hud_start := Time.get_ticks_usec()
     update_hud_frame(delta)
     perf_hud_ms = profiled_ms(hud_start)
+    if runtime_perf_monitor != null:
+        runtime_perf_monitor.observe_duration("hud", perf_hud_ms)
     update_performance_overlay(delta)
     perf_frame_ms = profiled_ms(frame_start)
+    if runtime_perf_monitor != null:
+        perf_frame_ms = runtime_perf_monitor.end_frame()
+        perf_route_plan_ms = runtime_perf_monitor.section_ms("route_planning")
+        perf_nav_snapshot_ms = runtime_perf_monitor.section_ms("navigation_snapshot_rebuild")
+        perf_job_scan_ms = runtime_perf_monitor.section_ms("job_forage_scan")
 
 func profiled_ms(start_usec: int) -> float:
     return float(Time.get_ticks_usec() - start_usec) / 1000.0

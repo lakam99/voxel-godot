@@ -30,12 +30,16 @@ func setup(system_node, main_node) -> void:
     goal_planner.setup(system, main, navigation_world, route_planner)
 
 func begin_frame() -> void:
+    if route_planner != null and route_planner.has_method("begin_frame"):
+        route_planner.begin_frame()
     if locomotion != null:
         locomotion.begin_frame()
 
 func invalidate() -> void:
     if navigation_world != null:
         navigation_world.invalidate()
+    if route_planner != null and route_planner.has_method("invalidate"):
+        route_planner.invalidate()
 
 func process_navigation_events(events: Array, max_expansions := 128) -> Array[Dictionary]:
     if navigation_world != null and navigation_world.has_method("apply_navigation_events"):

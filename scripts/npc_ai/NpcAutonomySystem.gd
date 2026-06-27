@@ -148,6 +148,10 @@ func setup_behavior_services() -> void:
 		"recovery": recovery_policy
 	})
 
+func begin_update_frame() -> void:
+	if plan_executor != null and plan_executor.has_method("begin_update_frame"):
+		plan_executor.begin_update_frame()
+
 func register_npc(body: Node, profile: Dictionary, entry: Dictionary):
 	if body == null:
 		return null
@@ -273,6 +277,11 @@ func blackboard_for_id(stable_id: String):
 
 func notify_block_created(cell: Vector3i, block_type: String, block: Node = null) -> void:
 	var object_id := "block:%d,%d,%d:%s" % [cell.x, cell.y, cell.z, block_type]
+	if smart_objects != null and block != null and block_type in ["chest", "traderStall", "bed", "workbench", "furnace", "campfire", "anvil"]:
+		smart_objects.register_workstation(block, {
+			"blockType": block_type,
+			"objectId": object_id
+		})
 	var bounds := _bounds_for_cell(cell)
 	change_bus.emit_change(NpcEnumsScript.CHANGE_KIND_BLOCK_CREATED, object_id, bounds, [NavigationChangeBusScript.tile_key_for_cell(cell)])
 	telemetry.increment(&"change_block_created")
@@ -295,6 +304,8 @@ func notify_terrain_edited(cell: Vector2i, old_height: float, new_height: float)
 	telemetry.increment(&"change_terrain_edit")
 
 func notify_prop_created(prop_id: String, prop: Node = null) -> void:
+	if smart_objects != null and prop != null:
+		smart_objects.register_resource(prop, { "propId": prop_id })
 	_emit_prop_change(NpcEnumsScript.CHANGE_KIND_PROP_CREATED, prop_id, prop)
 
 func notify_prop_removed(prop_id: String, prop: Node = null) -> void:
@@ -545,6 +556,10 @@ func notify_semantic_changed(semantic_id: String, bounds: AABB, metadata := {}) 
 func register_semantic_region(kind: StringName, region_id: String, bounds: AABB, metadata := {}) -> int:
 	if navigation_world == null or region_id == "":
 		return 0
+	if smart_objects != null and String(kind) in ["guard_post", "work_anchor"]:
+		var anchor_metadata := metadata.duplicate(true) if metadata is Dictionary else {}
+		anchor_metadata["bounds"] = bounds
+		smart_objects.register_anchor("semantic:%s" % region_id, String(kind), bounds.position + bounds.size * 0.5, anchor_metadata)
 	var revision: int = navigation_world.register_semantic_region(kind, region_id, bounds, metadata)
 	change_bus.emit_change(NpcEnumsScript.CHANGE_KIND_SEMANTIC_CHANGED, "semantic:%s" % region_id, bounds, NavigationChangeBusScript.tile_keys_for_bounds(bounds), revision)
 	telemetry.record_event("_system", &"semantic", "registered", kind, {
@@ -582,7 +597,10 @@ func build_navigation_tiles(max_jobs := 1) -> Array:
 		return []
 	var started := Time.get_ticks_usec()
 	var built: Array = navigation_world.build_next_tiles(max_jobs, NpcConstantsScript.NAV_BUILD_HARD_SLICE_USEC)
-	telemetry.record_duration(&"navigation_build_work", Time.get_ticks_usec() - started, NpcConstantsScript.NAV_BUILD_HARD_SLICE_USEC)
+	var duration_usec := Time.get_ticks_usec() - started
+	telemetry.record_duration(&"navigation_build_work", duration_usec, NpcConstantsScript.NAV_BUILD_HARD_SLICE_USEC)
+	if main != null and main.get("runtime_perf_monitor") != null:
+		main.get("runtime_perf_monitor").observe_duration("navigation_tile_build", float(duration_usec) / 1000.0)
 	telemetry.observe_navigation_stats(navigation_world.stats())
 	return built
 
