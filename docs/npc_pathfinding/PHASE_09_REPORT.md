@@ -5,12 +5,12 @@
 - Phase: 09 - Utility Goals, Symbolic Task Planning, and Day/Night Schedules
 - Branch: `npc-pathfinding/phase-09-purpose-schedules`
 - Date: 2026-06-27
-- Scope status: branch gates pass; merged `master` evidence is pending the required merge and rerun step.
+- Scope status: branch and merged `master` gates pass.
 - Base commit before Phase 09 branch changes: `2c0c6af59dfada2bbc290af51f581d9371fbd213`
 - Branch implementation commit: `35e0e07f0e505972e056953d4c8ebb4d6bef59e2`
-- Branch report commit: pending
-- Merge commit: pending
-- Post-merge `master` evidence commit: pending
+- Branch report commit: `b6b11627cd996ca4ef2bb585b662faeea301701a`
+- Merge commit: `082080d9931d2130742a60b6b8521e43bb5eb395`
+- Post-merge `master` evidence commit: this report update
 
 ## 2. Objective
 
@@ -353,13 +353,33 @@ Broad playtest branch evidence:
 
 ## 12. Merged Master Evidence
 
-Pending. Per protocol, after this branch report is committed, the branch will be merged into `master`, then:
+Command:
 
 ```powershell
 .\tools\run-all-test-runners.ps1 -ReportPath artifacts\test-runners\phase09-master-all-test-runners.json -Seed atlas-1492
 ```
 
-The report will be updated with the merge hash and master runner result.
+Report:
+
+- Path: `artifacts/test-runners/phase09-master-all-test-runners.json`
+- Seed: `atlas-1492`
+- Result count: 9
+- Failure count: 0
+- Duration: 1389.627 seconds
+- Stopped early: false
+- Stderr log: `artifacts/test-runners/phase09-master-all-test-runners.stderr.log`, empty
+
+Runner results:
+
+- `npc_focused`: pass, exit 0, 18.562 seconds
+- `npc_observation_dusk`: pass, exit 0, 0.652 seconds
+- `npc_observation_midnight`: pass, exit 0, 0.666 seconds
+- `world_signature`: pass, exit 0, 17.192 seconds
+- `visual_manifest`: pass, exit 0, 0.095 seconds
+- `npc_navigation_legacy`: pass, exit 0, 106.905 seconds
+- `story_playtest`: pass, exit 0, 76.092 seconds
+- `visual_captures`: pass, exit 0, 92.958 seconds
+- `playtest`: pass, exit 0, 1076.442 seconds
 
 ## 13. Performance And Boundedness Metrics
 
@@ -371,6 +391,7 @@ Measured runner durations:
 - Observation midnight: 0.0 seconds reported by runner
 - All NPC suites: 13.957 seconds
 - Branch all-runner: 1509.482 seconds
+- Master all-runner: 1389.627 seconds
 - Broad playtest: 1190.649 seconds inside the all-runner
 
 Boundedness controls present:
@@ -411,7 +432,7 @@ No tracked world-signature baseline change is present in this phase.
 - Observation artifacts prove day/night behavior: yes, reports include role counts, duty assignments, locations, exceptions, door crossings, ending door states, captures, and traces.
 - Existing story/tutorial behavior remains green: yes, `story_playtest` and broad `playtest` runners pass.
 - All focused suites and repository gate pass on branch: yes.
-- All focused suites and repository gate pass on `master`: pending required merge and rerun.
+- All focused suites and repository gate pass on `master`: yes, master all-runner result count 9, failure count 0.
 
 ## 16. Deviation Register
 
@@ -457,4 +478,4 @@ Phase 10 will attach real environment interactions to this schedule/planner laye
 
 ## 20. Verdict
 
-Phase 09 branch evidence passes and merge is allowed. Master evidence is pending the required merge and rerun step.
+Phase 09 branch and merged `master` evidence passes. The phase is ready for Phase 10 to begin from updated `master`.
