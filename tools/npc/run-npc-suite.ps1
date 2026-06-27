@@ -48,6 +48,7 @@ $branch = (& git -C $projectPath branch --show-current).Trim()
 $commit = (& git -C $projectPath rev-parse HEAD).Trim()
 
 $env:VOXEL_PLAYTEST = "1"
+$env:VOXEL_TEST_SEED = $Seed
 $env:VOXEL_NPC_TEST_SUITE = $Suite
 $env:VOXEL_NPC_TEST_CASE = $Case
 $env:VOXEL_NPC_TIME_MODE = $timeModeValue

@@ -74,6 +74,8 @@ func request_interaction(interaction_request, actors: Array = []):
 		var command: StringName = interaction_request.get("command")
 		if command == NpcEnumsScript.DOOR_COMMAND_OPEN or command == NpcEnumsScript.DOOR_COMMAND_HOLD:
 			scheduled_closes.erase(portal_id)
+		elif command == NpcEnumsScript.DOOR_COMMAND_DESTROY and owner != null and owner.get("traffic_reservations") != null:
+			owner.get("traffic_reservations").destroy_portal(portal_id)
 	return result
 
 func request_door_state(door: Node, desired_open: bool, actor: Node = null, actor_kind := "system", metadata := {}):
@@ -128,6 +130,9 @@ func process(delta: float, actors: Array = []) -> Dictionary:
 		var portal = portals[portal_id]
 		if portal != null:
 			portal.advance(delta)
+			if owner != null and owner.get("traffic_reservations") != null and owner.get("traffic_reservations").has_method("queued_owners_for_resource_prefix"):
+				for actor_id in owner.get("traffic_reservations").queued_owners_for_resource_prefix("portal:%s" % portal_id):
+					portal.queue(String(actor_id), "traffic")
 	for portal_id in scheduled_closes.keys().duplicate():
 		var remaining := float(scheduled_closes.get(portal_id, 0.0)) - delta
 		if remaining > 0.0:

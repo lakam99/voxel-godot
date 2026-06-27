@@ -12,6 +12,11 @@ const NpcTelemetryServiceScript := preload("res://scripts/npc_ai/debug/NpcTeleme
 const DoorPortalServiceScript := preload("res://scripts/npc_ai/interactions/DoorPortalService.gd")
 const SmartObjectServiceScript := preload("res://scripts/npc_ai/interactions/SmartObjectService.gd")
 const DoorTraversalExecutorScript := preload("res://scripts/npc_ai/interactions/DoorTraversalExecutor.gd")
+const BottleneckClassifierScript := preload("res://scripts/npc_ai/traffic/BottleneckClassifier.gd")
+const SafeIntervalPlannerScript := preload("res://scripts/npc_ai/traffic/SafeIntervalPlanner.gd")
+const WaitForGraphScript := preload("res://scripts/npc_ai/traffic/WaitForGraph.gd")
+const TrafficPriorityPolicyScript := preload("res://scripts/npc_ai/traffic/TrafficPriorityPolicy.gd")
+const TrafficReservationServiceScript := preload("res://scripts/npc_ai/traffic/TrafficReservationService.gd")
 
 var npc_system: Node
 var main: Node
@@ -27,6 +32,11 @@ var navigation_world
 var door_portals
 var smart_objects
 var door_traversal
+var bottleneck_classifier
+var safe_interval_planner
+var wait_for_graph
+var traffic_priority_policy
+var traffic_reservations
 
 func _init() -> void:
 	scheduler = NpcBrainSchedulerScript.new()
@@ -37,6 +47,12 @@ func _init() -> void:
 	door_portals = DoorPortalServiceScript.new()
 	smart_objects = SmartObjectServiceScript.new()
 	door_traversal = DoorTraversalExecutorScript.new()
+	bottleneck_classifier = BottleneckClassifierScript.new()
+	safe_interval_planner = SafeIntervalPlannerScript.new()
+	wait_for_graph = WaitForGraphScript.new()
+	traffic_priority_policy = TrafficPriorityPolicyScript.new()
+	traffic_reservations = TrafficReservationServiceScript.new()
+	traffic_reservations.setup(bottleneck_classifier, safe_interval_planner, wait_for_graph, traffic_priority_policy)
 
 func setup(system_node: Node, main_node: Node) -> void:
 	npc_system = system_node
@@ -44,7 +60,13 @@ func setup(system_node: Node, main_node: Node) -> void:
 	navigation_world.setup(main, change_bus)
 	door_portals.setup(main, self)
 	smart_objects.setup(self, door_portals)
-	door_traversal.setup(door_portals)
+	bottleneck_classifier = BottleneckClassifierScript.new()
+	safe_interval_planner = SafeIntervalPlannerScript.new()
+	wait_for_graph = WaitForGraphScript.new()
+	traffic_priority_policy = TrafficPriorityPolicyScript.new()
+	traffic_reservations = TrafficReservationServiceScript.new()
+	traffic_reservations.setup(bottleneck_classifier, safe_interval_planner, wait_for_graph, traffic_priority_policy)
+	door_traversal.setup(door_portals, traffic_reservations, bottleneck_classifier, traffic_priority_policy, wait_for_graph)
 	telemetry.record_event("_system", &"architecture", "setup", &"none", {
 		"architectureVersion": architecture_version,
 		"locomotionMode": locomotion_mode
@@ -68,7 +90,13 @@ func clear() -> void:
 	smart_objects = SmartObjectServiceScript.new()
 	smart_objects.setup(self, door_portals)
 	door_traversal = DoorTraversalExecutorScript.new()
-	door_traversal.setup(door_portals)
+	bottleneck_classifier = BottleneckClassifierScript.new()
+	safe_interval_planner = SafeIntervalPlannerScript.new()
+	wait_for_graph = WaitForGraphScript.new()
+	traffic_priority_policy = TrafficPriorityPolicyScript.new()
+	traffic_reservations = TrafficReservationServiceScript.new()
+	traffic_reservations.setup(bottleneck_classifier, safe_interval_planner, wait_for_graph, traffic_priority_policy)
+	door_traversal.setup(door_portals, traffic_reservations, bottleneck_classifier, traffic_priority_policy, wait_for_graph)
 
 func register_legacy_npc(body: Node, profile: Dictionary, legacy_entry: Dictionary):
 	if body == null:
@@ -250,6 +278,63 @@ func release_npc_door_hold(actor_or_id, schedule_close := true) -> void:
 	if door_traversal != null:
 		door_traversal.release_actor(actor_or_id, schedule_close)
 
+func advance_traffic(delta: float) -> void:
+	if traffic_reservations != null:
+		traffic_reservations.advance(delta)
+
+func request_npc_traffic_step(entry: Dictionary, previous: Vector3, candidate: Vector3, world, intent := {}) -> Dictionary:
+	if traffic_reservations == null or world == null:
+		return { "ok": true, "status": "granted", "reason": "missing_traffic_optional" }
+	var owner_id := String(entry.get("id", "npc"))
+	var from_cell: Vector2i = world.world_cell(previous)
+	var to_cell: Vector2i = world.world_cell(candidate)
+	if from_cell == to_cell:
+		return { "ok": true, "status": "granted", "reason": "same_cell" }
+	var generation := int(entry.get("trafficOwnerGeneration", 0))
+	if generation <= 0:
+		generation = int(entry.get("routeGeneration", entry.get("cancellation_generation", 1)))
+		if generation <= 0:
+			generation = 1
+		entry["trafficOwnerGeneration"] = generation
+	var priority_class: String = traffic_priority_policy.priority_class_for(entry, intent) if traffic_priority_policy != null else "idle"
+	var result: Dictionary = traffic_reservations.request_movement_step(owner_id, world.cell_key(from_cell), world.cell_key(to_cell), {
+		"ownerGeneration": generation,
+		"actionGeneration": int(entry.get("trafficActionGeneration", entry.get("actionGeneration", 0))),
+		"priority": int(intent.get("priority", entry.get("routePriority", 0))),
+		"priorityClass": priority_class,
+		"earliestStart": float(intent.get("trafficEarliestStart", traffic_reservations.get("now"))),
+		"duration": maxf(float(intent.get("physicsDelta", 1.0 / 60.0)), NpcConstantsScript.TRAFFIC_MOVEMENT_STEP_SECONDS),
+		"metadata": { "kind": "movement", "fromCell": [from_cell.x, from_cell.y], "toCell": [to_cell.x, to_cell.y] }
+	})
+	if bool(result.get("ok", false)):
+		entry["activeTrafficStepGroup"] = String(result.get("groupId", ""))
+	else:
+		entry["trafficWaitReason"] = String(result.get("reason", "traffic_wait"))
+	return result
+
+func release_npc_traffic_reservations(entry_or_id, reason := "released") -> int:
+	if traffic_reservations == null:
+		return 0
+	var owner_id := ""
+	if entry_or_id is Dictionary:
+		owner_id = String((entry_or_id as Dictionary).get("id", ""))
+	else:
+		owner_id = String(entry_or_id)
+	if owner_id == "":
+		return 0
+	return traffic_reservations.release_owner(owner_id, reason)
+
+func release_npc_traffic_generation(entry: Dictionary, reason := "generation_replaced") -> int:
+	if traffic_reservations == null:
+		return 0
+	var owner_id := String(entry.get("id", ""))
+	if owner_id == "":
+		return 0
+	var generation := int(entry.get("trafficOwnerGeneration", 0))
+	if generation <= 0:
+		return 0
+	return traffic_reservations.release_owner_generation(owner_id, generation, reason)
+
 func process_door_policies(delta: float, actors: Array = []) -> Dictionary:
 	if door_portals == null:
 		return { "closed": 0, "blocked": 0, "scheduled": 0 }
@@ -306,7 +391,8 @@ func stats() -> Dictionary:
 		"navigationWorld": navigation_world.stats(),
 		"smartObjects": smart_objects.stats() if smart_objects != null else {},
 		"doorPortals": door_portals.stats() if door_portals != null else {},
-		"doorTraversal": door_traversal.stats() if door_traversal != null else {}
+		"doorTraversal": door_traversal.stats() if door_traversal != null else {},
+		"traffic": traffic_reservations.stats() if traffic_reservations != null else {}
 	}
 
 func _bounds_for_cell(cell: Vector3i) -> AABB:

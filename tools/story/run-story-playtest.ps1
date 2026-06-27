@@ -1,6 +1,7 @@
 param(
     [string]$GodotExe = "C:\Users\arkam\Downloads\Godot_v4.6.1-stable_win64.exe\Godot_v4.6.1-stable_win64_console.exe",
     [string]$ReportPath = "",
+    [string]$Seed = "atlas-1492",
     [switch]$Visible
 )
 
@@ -14,6 +15,7 @@ $ReportPath = [System.IO.Path]::GetFullPath($ReportPath)
 New-Item -ItemType Directory -Force -Path ([System.IO.Path]::GetDirectoryName($ReportPath)) | Out-Null
 
 $env:VOXEL_PLAYTEST = "1"
+$env:VOXEL_TEST_SEED = $Seed
 $env:VOXEL_STORY_PLAYTEST = "1"
 $env:VOXEL_STORY_PLAYTEST_REPORT = $ReportPath
 $env:VOXEL_STORY_PLAYTEST_PROGRESS = Join-Path $projectPath "artifacts\story\story-playtest-progress.txt"

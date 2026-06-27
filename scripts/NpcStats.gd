@@ -88,6 +88,7 @@ static func build(system) -> Dictionary:
             "adapter": system.pathing.coordinator.locomotion.avoidance_stats() if system.pathing and system.pathing.coordinator and system.pathing.coordinator.locomotion else {},
             "corridor": system.pathing.coordinator.locomotion.corridor_stats() if system.pathing and system.pathing.coordinator and system.pathing.coordinator.locomotion else {}
         },
+        "traffic": system.autonomy_system.traffic_reservations.stats() if system.autonomy_system and system.autonomy_system.traffic_reservations else {},
         "tracers": system.combat.tracers.size() if system.combat else 0,
         "lastMessage": system.last_message
     }

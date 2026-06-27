@@ -1,6 +1,7 @@
 param(
     [ValidateSet("Day", "Night", "Both", "Transition", "day", "night", "both", "transition")]
     [string]$TimeMode = "Both",
+    [string]$Seed = "atlas-1492",
     [string]$ReportPath = ""
 )
 
@@ -27,12 +28,12 @@ try {
         $command = [string]$suite.command
         $commandPath = if ($command.StartsWith(".\")) { Join-Path $projectPath $command.Substring(2) } else { $command }
         $suiteReport = Join-Path $projectPath "artifacts\npc\reports\$id-$($TimeMode.ToLowerInvariant()).json"
-        $runnerArgs = @("-TimeMode", $TimeMode, "-ReportPath", $suiteReport)
+        $runnerArgs = @("-TimeMode", $TimeMode, "-Seed", $Seed, "-ReportPath", $suiteReport)
         $suiteStarted = Get-Date
         Write-Host "== NPC suite: $id =="
         $scriptFailed = $false
         try {
-            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $commandPath -TimeMode $TimeMode -ReportPath $suiteReport
+            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $commandPath -TimeMode $TimeMode -Seed $Seed -ReportPath $suiteReport
         } catch {
             Write-Error $_
             $scriptFailed = $true
@@ -62,6 +63,7 @@ $report = [pscustomobject]@{
     schemaVersion = 1
     suite = "all-npc"
     timeMode = $TimeMode
+    seed = $Seed
     startedUtc = $started.ToUniversalTime().ToString("o")
     finishedUtc = (Get-Date).ToUniversalTime().ToString("o")
     durationSeconds = [math]::Round(((Get-Date) - $started).TotalSeconds, 3)

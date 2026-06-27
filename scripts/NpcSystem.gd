@@ -116,6 +116,12 @@ func unregister_npc(body: Node) -> void:
     if body == null:
         return
     if autonomy_system:
+        var release_id := ""
+        if body.has_meta("npc_stable_id"):
+            release_id = String(body.get_meta("npc_stable_id"))
+        if release_id != "":
+            autonomy_system.release_npc_traffic_reservations(release_id, "actor_unregistered")
+    if autonomy_system:
         autonomy_system.unregister_legacy_npc(body)
     npc_by_id.erase(body.get_instance_id())
     if focused_dialogue_body == body:
@@ -475,6 +481,8 @@ func update_npcs(delta: float, day_factor: float) -> void:
     spawn_generic_town_npcs()
     if combat != null:
         combat.update_tracers(delta)
+    if autonomy_system != null and autonomy_system.has_method("advance_traffic"):
+        autonomy_system.advance_traffic(delta)
     update_door_policies(delta)
     if pathing != null and pathing.has_method("begin_frame"):
         pathing.begin_frame()
@@ -1102,6 +1110,24 @@ func request_npc_door_traversal(collider: Node, npc_body: Node3D = null, entry: 
         door_opens += 1
         last_message = "NPC opened a door"
     return result
+
+func request_npc_traffic_step(entry: Dictionary, previous: Vector3, candidate: Vector3, world, intent := {}) -> Dictionary:
+    ensure_autonomy_system()
+    if autonomy_system == null:
+        return { "ok": true, "status": "granted", "reason": "missing_autonomy_optional" }
+    return autonomy_system.request_npc_traffic_step(entry, previous, candidate, world, intent)
+
+func release_npc_traffic_reservations(entry_or_id, reason := "released") -> int:
+    ensure_autonomy_system()
+    if autonomy_system == null:
+        return 0
+    return autonomy_system.release_npc_traffic_reservations(entry_or_id, reason)
+
+func release_npc_traffic_generation(entry: Dictionary, reason := "generation_replaced") -> int:
+    ensure_autonomy_system()
+    if autonomy_system == null:
+        return 0
+    return autonomy_system.release_npc_traffic_generation(entry, reason)
 
 func request_door_state(collider: Node, desired_open: bool, actor: Node = null, actor_kind := "system", metadata := {}):
     ensure_autonomy_system()

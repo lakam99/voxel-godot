@@ -7,13 +7,10 @@ const NpcCorridorFollowerScript := preload("res://scripts/npc_ai/movement/NpcCor
 const ReciprocalAvoidanceAdapterScript := preload("res://scripts/npc_ai/movement/ReciprocalAvoidanceAdapter.gd")
 const CAPSULE_RADIUS := 0.34
 const CAPSULE_HEIGHT := 1.64
-const CELL_RESERVATION_TTL := 5
 
 var system
 var main
-var reservations := {}
 var capsule_shape: CapsuleShape3D
-var reservation_frame := 0
 var corridor_follower
 var avoidance_adapter
 
@@ -28,8 +25,6 @@ func setup(system_node, main_node) -> void:
     avoidance_adapter.setup(system, main)
 
 func begin_frame() -> void:
-    reservation_frame += 1
-    expire_reservations(reservations)
     if avoidance_adapter != null:
         avoidance_adapter.begin_frame()
 
@@ -143,16 +138,16 @@ func move(entry: Dictionary, intent: Dictionary, max_distance: float, planner, w
         return { "moved": 0.0, "status": "waiting", "reason": follow_reason, "classification": classification }
 
     var move_candidate: Vector3 = follow.get("candidate", previous)
-    var candidate_cell: Vector2i = world.world_cell(move_candidate)
-    var reservation_key: String = world.cell_key(candidate_cell)
-    if reservation_blocks_entry(reservations, reservation_key, entry, priority):
+    var traffic_result := request_traffic_step(entry, previous, move_candidate, world, intent, priority)
+    if not bool(traffic_result.get("ok", false)):
         increment_reservation_wait(entry)
-        var final_reason := reservation_conflict_reason(reservations, reservation_key, entry, priority)
-        if final_reason == "yielding" and int(entry.get("routeWaitTicks", 0)) > 4:
+        var final_reason := String(traffic_result.get("reason", "traffic_wait"))
+        if traffic_result.has("cycleResolution"):
+            final_reason = "yielding"
+        if final_reason in ["no_safe_interval", "planner_guard"] and int(entry.get("routeWaitTicks", 0)) > 4:
             entry["routeForceReplan"] = true
         set_route_status(entry, "waiting", final_reason)
-        return { "moved": 0.0, "status": "waiting", "reason": final_reason }
-    claim_reservation(reservations, reservation_key, entry, priority, CELL_RESERVATION_TTL)
+        return { "moved": 0.0, "status": "waiting", "reason": final_reason, "classification": "traffic_reservation", "traffic": traffic_result }
 
     var physics_delta := maxf(0.0001, float(intent.get("physicsDelta", 0.0166667)))
     var motor_result: Dictionary = {}
@@ -403,6 +398,7 @@ func ensure_route(entry: Dictionary, intent: Dictionary, planner, world) -> Dict
             "snapshotRevision": snapshot_revision
         }
 
+    bump_traffic_generation(entry, "route_replacement")
     var route: Dictionary = planner.plan_route(entry, intent)
     entry["routeForceReplan"] = false
     entry["routeKey"] = route_key
@@ -426,6 +422,8 @@ func ensure_route(entry: Dictionary, intent: Dictionary, planner, world) -> Dict
     return route
 
 func clear_route(entry: Dictionary) -> void:
+    if system != null and system.has_method("release_npc_traffic_reservations"):
+        system.release_npc_traffic_reservations(entry, "route_completed")
     entry["pathWaypoints"] = []
     entry["routeCells"] = []
     entry["routeActions"] = {}
@@ -621,6 +619,20 @@ func corridor_stats() -> Dictionary:
 func avoidance_stats() -> Dictionary:
     return avoidance_adapter.stats() if avoidance_adapter != null and avoidance_adapter.has_method("stats") else {}
 
+func request_traffic_step(entry: Dictionary, previous: Vector3, candidate: Vector3, world, intent: Dictionary, priority: int) -> Dictionary:
+    if system == null or not system.has_method("request_npc_traffic_step"):
+        return { "ok": true, "status": "granted", "reason": "traffic_unavailable" }
+    var traffic_intent := intent.duplicate(true)
+    traffic_intent["priority"] = priority
+    return system.request_npc_traffic_step(entry, previous, candidate, world, traffic_intent)
+
+func bump_traffic_generation(entry: Dictionary, reason: String) -> void:
+    if system != null and system.has_method("release_npc_traffic_generation"):
+        system.release_npc_traffic_generation(entry, reason)
+    entry["trafficOwnerGeneration"] = int(entry.get("trafficOwnerGeneration", 0)) + 1
+    entry.erase("activeTrafficStepGroup")
+    entry.erase("trafficWaitReason")
+
 func validate_candidate(entry: Dictionary, previous: Vector3, candidate: Vector3, moving_home := false, allow_outside := false, world = null, priority := 0) -> Dictionary:
     if world == null or main == null:
         return { "ok": false, "reason": "missing_world" }
@@ -650,9 +662,6 @@ func validate_candidate(entry: Dictionary, previous: Vector3, candidate: Vector3
             if entry_loses_to_dynamic(entry, dynamic, priority):
                 return { "ok": false, "reason": "yielding", "blocker": dynamic }
             return { "ok": false, "reason": "blocked_dynamic" }
-        var reservation_key: String = world.cell_key(footprint_cell)
-        if footprint_cell != previous_cell and reservation_blocks_entry(reservations, reservation_key, entry, priority):
-            return { "ok": false, "reason": reservation_conflict_reason(reservations, reservation_key, entry, priority) }
     var body := entry.get("body") as CharacterBody3D
     if body != null and capsule_hits_obstacle(entry, body, previous, candidate):
         return { "ok": false, "reason": "blocked_capsule" }
@@ -690,70 +699,6 @@ func capsule_footprint_cells(position: Vector3, world) -> Array[Vector2i]:
         if not cells.has(cell):
             cells.append(cell)
     return cells
-
-func expire_reservations(claims: Dictionary) -> void:
-    for key in claims.keys():
-        var value = claims.get(key)
-        if not (value is Dictionary):
-            claims.erase(key)
-            continue
-        var claim: Dictionary = value
-        if int(claim.get("expires", 0)) <= reservation_frame:
-            claims.erase(key)
-
-func claim_reservation(claims: Dictionary, key: String, entry: Dictionary, priority := 0, ttl := 1, locked := false) -> void:
-    var owner := String(entry.get("id", "npc"))
-    claims[key] = {
-        "owner": owner,
-        "priority": priority,
-        "wait": int(entry.get("routeWaitTicks", 0)),
-        "expires": reservation_frame + maxi(1, ttl),
-        "locked": locked
-    }
-
-func reservation_blocks_entry(claims: Dictionary, key: String, entry: Dictionary, priority := 0) -> bool:
-    if not claims.has(key):
-        return false
-    var value = claims.get(key)
-    if not (value is Dictionary):
-        claims.erase(key)
-        return false
-    var claim: Dictionary = value
-    if int(claim.get("expires", 0)) <= reservation_frame:
-        claims.erase(key)
-        return false
-    var owner := String(claim.get("owner", ""))
-    var npc_key := String(entry.get("id", "npc"))
-    if owner == "" or owner == npc_key:
-        return false
-    return not entry_beats_claim(entry, priority, claim)
-
-func entry_beats_claim(entry: Dictionary, priority := 0, claim: Dictionary = {}) -> bool:
-    if bool(claim.get("locked", false)):
-        return false
-    var claim_priority := int(claim.get("priority", 0))
-    if priority != claim_priority:
-        return priority > claim_priority
-    var wait_ticks := int(entry.get("routeWaitTicks", 0))
-    var claim_wait := int(claim.get("wait", 0))
-    if wait_ticks != claim_wait:
-        return wait_ticks > claim_wait
-    var npc_key := String(entry.get("id", "npc"))
-    var owner := String(claim.get("owner", ""))
-    return npc_key < owner
-
-func reservation_conflict_reason(claims: Dictionary, key: String, entry: Dictionary, priority := 0, default_reason := "cell_reserved") -> String:
-    var value = claims.get(key)
-    if not (value is Dictionary):
-        return default_reason
-    var claim: Dictionary = value
-    if bool(claim.get("locked", false)):
-        return default_reason
-    var claim_priority := int(claim.get("priority", 0))
-    var claim_wait := int(claim.get("wait", 0))
-    if priority < claim_priority or int(entry.get("routeWaitTicks", 0)) < claim_wait:
-        return "yielding"
-    return default_reason
 
 func entry_loses_to_dynamic(entry: Dictionary, blocker, priority := 0) -> bool:
     var blocker_node := blocker as Node

@@ -174,8 +174,8 @@ func run() -> void:
     await test_block_destroy_ray()
     mark_progress("saving_report")
     save_optional_screenshot()
-    save_report()
     finished = true
+    save_report()
     mark_progress("finished")
     get_tree().quit(1 if failed else 0)
 
@@ -1398,7 +1398,8 @@ func test_held_item_system() -> void:
     var torch_uniform_range_max := 0.0
     var torch_uniform_energy_min := INF
     var torch_uniform_energy_max := 0.0
-    for i in range(18):
+    var torch_uniform_samples := 48
+    for i in range(torch_uniform_samples):
         if main.has_method("update_terrain_local_light_uniforms"):
             main.call("update_terrain_local_light_uniforms")
         var torch_uniform_range := terrain_light_uniform_first_range(torch_terrain_material)
@@ -1413,7 +1414,8 @@ func test_held_item_system() -> void:
     add_result(
         "held_torch_terrain_material_flickers",
         torch_uniform_range_delta > 0.02 or torch_uniform_energy_delta > 0.02,
-        "range %.2f..%.2f delta %.2f energy %.2f..%.2f delta %.2f" % [
+        "samples %d range %.2f..%.2f delta %.2f energy %.2f..%.2f delta %.2f" % [
+            torch_uniform_samples,
             torch_uniform_range_min,
             torch_uniform_range_max,
             torch_uniform_range_delta,
@@ -2490,6 +2492,7 @@ func test_manual_playtest_cases() -> void:
     var setup_details := []
     for expectation in expectations:
         var case_id := String(expectation.get("id", ""))
+        mark_progress("manual_playtest_case_%s" % case_id)
         var ran: bool = bool(main.call("run_playtest_case", case_id))
         await wait_physics_frames(2)
         var counts: Dictionary = main.call("playtest_case_counts")
@@ -2505,6 +2508,7 @@ func test_manual_playtest_cases() -> void:
             int(counts.get("hostiles", 0))
         ])
 
+    mark_progress("manual_playtest_case_cleanup")
     main.call("cleanup_playtest_case_assets")
     var cleaned_counts: Dictionary = main.call("playtest_case_counts")
     var cleanup_ok: bool = int(cleaned_counts.get("props", 0)) == 0 and int(cleaned_counts.get("blocks", 0)) == 0 and int(cleaned_counts.get("hostiles", 0)) == 0
@@ -3074,6 +3078,29 @@ func disable_prop_colliders(node: Node, disabled_shapes: Array[CollisionShape3D]
         return
     for child in node.get_children():
         disable_prop_colliders(child, disabled_shapes)
+
+func disable_prop_colliders_near_cell(center_cell: Vector2i, radius: int, disabled_shapes: Array[CollisionShape3D]) -> void:
+    var roots := []
+    var chunk_root = main.get("chunk_root") as Node
+    var prop_root = main.get("prop_root") as Node
+    if chunk_root:
+        roots.append(chunk_root)
+    if prop_root:
+        roots.append(prop_root)
+    for root in roots:
+        disable_prop_colliders_near_cell_recursive(root, center_cell, radius, disabled_shapes)
+
+func disable_prop_colliders_near_cell_recursive(node: Node, center_cell: Vector2i, radius: int, disabled_shapes: Array[CollisionShape3D]) -> void:
+    if node == null:
+        return
+    var node3d := node as Node3D
+    if node3d != null and node.has_meta("kind") and String(node.get_meta("kind")) == "prop":
+        var cell := Vector2i(main.call("world_to_cell", node3d.global_position.x), main.call("world_to_cell", node3d.global_position.z))
+        if abs(cell.x - center_cell.x) <= radius and abs(cell.y - center_cell.y) <= radius:
+            collect_disabled_collision_shapes(node, disabled_shapes)
+        return
+    for child in node.get_children():
+        disable_prop_colliders_near_cell_recursive(child, center_cell, radius, disabled_shapes)
 
 func collect_disabled_collision_shapes(node: Node, disabled_shapes: Array[CollisionShape3D]) -> void:
     for child in node.get_children():
@@ -4426,6 +4453,7 @@ func test_structure_and_town_generation() -> void:
         var home_records: Dictionary = structure_system.call("town_home_records_snapshot")
         var generic_homes: Array = home_records.get(generic_key, [])
         var npc_entries: Array = npc_system.get("npcs")
+        var generic_entries: Array = []
         var generic_npcs := 0
         var generic_homed := 0
         var generic_fighters := 0
@@ -4433,6 +4461,7 @@ func test_structure_and_town_generation() -> void:
             var entry: Dictionary = entry_variant
             if String(entry.get("townKey", "")) != generic_key:
                 continue
+            generic_entries.append(entry)
             generic_npcs += 1
             var npc_body := entry.get("body") as Node
             if npc_body != null and bool(npc_body.get_meta("npc_has_home", false)):
@@ -4446,10 +4475,8 @@ func test_structure_and_town_generation() -> void:
         )
         var job_workers := 0
         var generic_forager: Dictionary = {}
-        for entry_variant in npc_entries:
+        for entry_variant in generic_entries:
             var entry: Dictionary = entry_variant
-            if String(entry.get("townKey", "")) != generic_key:
-                continue
             if String(entry.get("job", "")) in ["forage", "wood", "stone"]:
                 job_workers += 1
                 entry["jobPhase"] = "idle"
@@ -4474,12 +4501,12 @@ func test_structure_and_town_generation() -> void:
                 rng
             ) as Node3D
             if forage_node != null:
-                var pathing = npc_system.get("pathing")
-                if pathing != null and pathing.has_method("choose_forage_target"):
+                var npc_pathing = npc_system.get("pathing")
+                if npc_pathing != null and npc_pathing.has_method("choose_forage_target"):
                     var forage_candidates: Array[Node3D] = [forage_node]
-                    targeted_forage_selected = pathing.choose_forage_target(generic_forager, forage_candidates) == forage_node
+                    targeted_forage_selected = npc_pathing.choose_forage_target(generic_forager, forage_candidates) == forage_node
                 generic_forager["jobTargetNode"] = forage_node
-                generic_forager["jobTarget"] = pathing.forage_target_position(generic_forager, forage_node) if pathing != null and pathing.has_method("forage_target_position") else forage_node.global_position
+                generic_forager["jobTarget"] = npc_pathing.forage_target_position(generic_forager, forage_node) if npc_pathing != null and npc_pathing.has_method("forage_target_position") else forage_node.global_position
                 generic_forager["jobPhase"] = "outbound"
                 generic_forager["jobTimer"] = 24.0
                 generic_forager["routeForceReplan"] = true
@@ -4493,10 +4520,22 @@ func test_structure_and_town_generation() -> void:
         var town_radius_world := float(generic_town.get("radius", 32)) * CELL
         var town_center_world := Vector2(float(generic_center_x) * CELL, float(generic_center_z) * CELL)
         for step in range(520):
-            npc_system.update_npcs(0.2, 1.0)
-            for entry_variant in npc_entries:
+            if step % 40 == 0:
+                mark_progress("structures_npc_jobs_%03d" % step)
+            var autonomy = npc_system.get("autonomy_system")
+            if autonomy != null and autonomy.has_method("advance_traffic"):
+                autonomy.advance_traffic(0.2)
+            if npc_system.has_method("update_door_policies"):
+                npc_system.update_door_policies(0.2)
+            var loop_pathing = npc_system.get("pathing")
+            if loop_pathing != null and loop_pathing.has_method("begin_frame"):
+                loop_pathing.begin_frame()
+            for entry_to_update_variant in generic_entries:
+                var entry_to_update: Dictionary = entry_to_update_variant
+                npc_system.update_npc(entry_to_update, 0.2, 0.0)
+            for entry_variant in generic_entries:
                 var entry: Dictionary = entry_variant
-                if String(entry.get("townKey", "")) != generic_key or not (String(entry.get("job", "")) in ["forage", "wood", "stone"]):
+                if not (String(entry.get("job", "")) in ["forage", "wood", "stone"]):
                     continue
                 var npc_body := entry.get("body") as Node3D
                 if npc_body == null or not is_instance_valid(npc_body):
@@ -4514,6 +4553,7 @@ func test_structure_and_town_generation() -> void:
                 targeted_forage_done = int(inventory_now.get("berries", 0)) > 0 and hunger_now > 38.0
             if saw_generic_worker_outside and int(stats_now.get("jobRuns", 0)) > job_runs_before and targeted_forage_done:
                 break
+        mark_progress("structures_npc_jobs_done")
         var job_stats: Dictionary = npc_system.stats()
         var forager_inventory: Dictionary = generic_forager.get("personalInventory", {}) if not generic_forager.is_empty() else {}
         var forager_food := int(forager_inventory.get("berries", 0))
@@ -6234,6 +6274,7 @@ func test_airborne_obstacle_blocking() -> void:
         await get_tree().physics_frame
         peak_y = max(peak_y, player.global_position.y)
     player.set("automated_move", Vector3.ZERO)
+    player.set("automated_jump", false)
     await wait_physics_frames(8)
 
     var advanced: float = player.global_position.x - start_x
@@ -6248,9 +6289,15 @@ func test_jump() -> void:
     if not player:
         add_result("jump", false, "player missing")
         return
+    mark_progress("jump_reset")
+    player.set("automated_move", Vector3.ZERO)
+    player.set("automated_jump", false)
     reset_player_on_flat_patch(Vector2i(roundi(player.global_position.x / CELL) + 8, roundi(player.global_position.z / CELL)))
     await wait_physics_frames(8)
+    mark_progress("jump_wait_ground")
     for i in range(90):
+        if i > 0 and i % 30 == 0:
+            mark_progress("jump_wait_ground_%03d" % i)
         if is_player_grounded():
             break
         await get_tree().physics_frame
@@ -6262,7 +6309,10 @@ func test_jump() -> void:
     var jumped_seen := false
     var max_velocity_y := -999.0
     var max_snap_time := 0.0
+    mark_progress("jump_airborne")
     for i in range(90):
+        if i > 0 and i % 30 == 0:
+            mark_progress("jump_airborne_%03d" % i)
         await get_tree().physics_frame
         peak_y = max(peak_y, player.global_position.y)
         jumped_seen = jumped_seen or bool(player.get("jumped_this_frame"))
@@ -6273,6 +6323,7 @@ func test_jump() -> void:
         elif became_airborne:
             landing_frame = i + 1
             break
+    player.set("automated_jump", false)
     var rise: float = peak_y - start_y
     var natural_air_time := landing_frame >= 36 or landing_frame == -1
     add_result(
@@ -6771,6 +6822,7 @@ func test_material_hardness_and_reset() -> void:
     if not main or not player or not camera:
         add_result("material_hardness", false, "main/player/camera missing")
         return
+    mark_progress("material_hardness_setup")
     var inventory_system = main.get("inventory_system")
     if inventory_system == null:
         add_result("material_hardness", false, "inventory missing")
@@ -6784,24 +6836,31 @@ func test_material_hardness_and_reset() -> void:
     inventory_system.clear()
 
     var hardness_cell := Vector2i(roundi(player.global_position.x / CELL) + 8, roundi(player.global_position.z / CELL))
+    mark_progress("material_hardness_reset_patch")
     reset_player_on_flat_patch(hardness_cell)
+    mark_progress("material_hardness_clear_blocks")
     clear_blocks_near_cell(hardness_cell, 10)
+    mark_progress("material_hardness_clear_props")
     clear_props_near_cell(hardness_cell, 10)
     var disabled_prop_shapes: Array[CollisionShape3D] = []
-    disable_prop_colliders(main, disabled_prop_shapes)
+    mark_progress("material_hardness_disable_near_props")
+    disable_prop_colliders_near_cell(hardness_cell, 12, disabled_prop_shapes)
     player.rotation.y = 0.0
     player.set("pitch", 0.0)
     camera.rotation.x = 0.0
+    mark_progress("material_hardness_wait_settle")
     await wait_physics_frames(8)
 
     var forward: Vector3 = -camera.global_transform.basis.z
     var target_pos: Vector3 = camera.global_position + forward.normalized() * 2.2
     var test_cell := Vector3i(roundi(target_pos.x / CELL), roundi(target_pos.y / CELL), roundi(target_pos.z / CELL))
+    mark_progress("material_hardness_create_block")
     main.call("create_block", test_cell, "stoneBlock")
     await wait_physics_frames(4)
     var blocks := get_blocks()
     var block_center := Vector3(test_cell.x * CELL, test_cell.y * CELL, test_cell.z * CELL)
     aim_player_at(block_center)
+    mark_progress("material_hardness_aim")
     await wait_physics_frames(2)
 
     var pre_hit: Dictionary = player.call("view_ray", MELEE_RANGE)
@@ -6843,15 +6902,24 @@ func test_material_hardness_and_reset() -> void:
         ]
     )
 
-    await wait_physics_frames(160)
+    mark_progress("material_hardness_wait_reset")
+    for i in range(160):
+        if i > 0 and i % 40 == 0:
+            mark_progress("material_hardness_wait_reset_%03d" % i)
+        var reset_ready := float(main.get("break_progress")) == 0.0 and String(main.get("break_target_id")) == "" and overlay != null and not overlay.visible
+        if reset_ready:
+            break
+        await get_tree().physics_frame
     var reset := float(main.get("break_progress")) == 0.0 and String(main.get("break_target_id")) == "" and overlay != null and not overlay.visible
     add_result("break_progress_resets", reset, "progress %.2f, target '%s'" % [float(main.get("break_progress")), String(main.get("break_target_id"))])
 
+    mark_progress("material_hardness_destroy")
     for i in range(7):
         main.call("destroy_target")
         await wait_physics_frames(2)
     blocks = get_blocks()
     add_result("material_hardness_destroyed", not blocks.has(test_cell), "stone block removed after repeated strikes")
+    mark_progress("material_hardness_gating")
     inventory_system.clear()
     var tree_gate := String(main.call("unmet_tool_requirement_message", "tree")).find("Wooden Axe") >= 0
     var rock_gate := String(main.call("unmet_tool_requirement_message", "rock")).find("Wooden Pickaxe") >= 0
@@ -6892,9 +6960,16 @@ func save_report(verbose := true) -> void:
     if report_path == "":
         report_path = "user://playtest-report.json"
     var report: Dictionary = {
+        "finished": finished,
         "passed": not failed,
         "results": results
     }
+    var run_token := OS.get_environment("VOXEL_PLAYTEST_RUN_TOKEN")
+    if run_token != "":
+        report["runToken"] = run_token
+    var test_seed := OS.get_environment("VOXEL_TEST_SEED").strip_edges()
+    if test_seed != "":
+        report["seed"] = test_seed
     var file: FileAccess = FileAccess.open(report_path, FileAccess.WRITE)
     if file == null:
         push_error("Could not write playtest report: %s" % report_path)

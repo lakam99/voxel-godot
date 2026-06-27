@@ -1,7 +1,7 @@
 extends Node
 
 const MAIN_SCENE: PackedScene = preload("res://scenes/Main.tscn")
-const SEED := "atlas-1492"
+const DEFAULT_SEED := "atlas-1492"
 const CASES := [
     { "name": "town_noon", "playtest": "town", "clock": 12.0, "weather": "clear", "intensity": 0.0, "clouds": 0.22, "hud": false, "offset": Vector3(8.5, 0.0, 8.5), "pitch": -10.0 },
     { "name": "town_sunset", "playtest": "town", "clock": 18.7, "weather": "clear", "intensity": 0.0, "clouds": 0.26, "hud": false, "offset": Vector3(-9.0, 0.0, 7.5), "pitch": -8.0 },
@@ -20,6 +20,7 @@ var main
 var player: CharacterBody3D
 var camera: Camera3D
 var output_dir := ""
+var seed := DEFAULT_SEED
 var metadata: Array[Dictionary] = []
 var failed := false
 
@@ -30,6 +31,10 @@ func run() -> void:
     output_dir = OS.get_environment("VOXEL_VISUAL_CAPTURE_DIR")
     if output_dir == "":
         output_dir = ProjectSettings.globalize_path("res://artifacts/visual/latest")
+    seed = OS.get_environment("VOXEL_TEST_SEED").strip_edges()
+    if seed == "":
+        seed = DEFAULT_SEED
+    OS.set_environment("VOXEL_TEST_SEED", seed)
     ensure_dir(output_dir)
     apply_capture_resolution_override()
     main = MAIN_SCENE.instantiate()
@@ -397,7 +402,7 @@ func make_case_metadata(capture_case: Dictionary, png_path: String) -> Dictionar
     var ray_state := focused_ray_state()
     var overlay_state := hud_overlay_state(hud)
     return {
-        "seed": SEED,
+        "seed": seed,
         "case": String(capture_case["name"]),
         "playtestDestination": String(capture_case["playtest"]),
         "clockHour": float(capture_case["clock"]),
@@ -482,7 +487,7 @@ func stable_performance_values() -> Dictionary:
 
 func write_metadata() -> void:
     write_json(path_join(output_dir, "visual-captures.json"), {
-        "seed": SEED,
+        "seed": seed,
         "cases": metadata
     })
 
