@@ -6,7 +6,7 @@ Branch: `npc-pathfinding/phase-13-finalize`
 
 Base commit: `56119cef054cd444f6e9b87886b66054936785d0`
 
-Status: focused NPC suites, broad playtest, static audit, world signature, and branch all-runner pass on the phase branch. Merge commit, merged `master` all-runner, and final report hash rows are pending until those commands are run.
+Status: focused NPC suites, broad playtest, static audit, world signature, branch all-runner, merge, and merged `master` all-runner pass.
 
 ## Evidence Index
 
@@ -43,11 +43,20 @@ Branch all-runner evidence:
 - Aggregate: 10 runner entries, 0 failures, 861.809 seconds.
 - Runner rows: `npc_focused`, `npc_observation_dusk`, `npc_observation_midnight`, `npc_observation_phase12`, `world_signature`, `visual_manifest`, `npc_navigation_integration`, `story_playtest`, `visual_captures`, and `playtest` all passed with exit code 0.
 
-Pending evidence:
+Master all-runner evidence:
 
 - Merged `master` all-runner report: `artifacts/test-runners/phase13-master-all-test-runners-report.json`
+- Merged `master` HEAD during run: `772d54a048be1a31790f83f73277ce367b3cbe2b`
+- Aggregate: 10 runner entries, 0 failures, 854.414 seconds.
+- Runner rows: `npc_focused`, `npc_observation_dusk`, `npc_observation_midnight`, `npc_observation_phase12`, `world_signature`, `visual_manifest`, `npc_navigation_integration`, `story_playtest`, `visual_captures`, and `playtest` all passed with exit code 0.
+- Master stderr note: the log contains the known non-fatal Godot ObjectDB shutdown warning from world-signature cleanup; the aggregate exit code remained 0.
+
+Commits:
+
 - Branch implementation/report commit: `4e1d893ec9fd2de7e6dd90461250c2fdd4ce9521`
-- Merge commit: pending
+- Branch evidence commit: `2ebcf8e325a54129a0a3051ae5ea152003cce2be`
+- Merge commit: `772d54a048be1a31790f83f73277ce367b3cbe2b`
+- Post-merge evidence commit: this report update
 
 ## 23.1 Architecture and ownership
 
@@ -171,7 +180,7 @@ Pending evidence:
 - [x] Story playtest passes. Evidence: branch all-runner `story_playtest`, exit 0, 77.031s, report `artifacts/test-runners/story-playtest-report.json`.
 - [x] World signature passes with understood baseline. Evidence: `.\tools\run-world-signature.ps1`, matching baseline/latest hash `05290360F4ACA4965AC3EB6EA6B4D5E886A01F52CE02E073D1B845DCA87A63D5`.
 - [x] Visual captures and manifest validation pass. Evidence: branch all-runner `visual_manifest` exit 0, 0.090s; `visual_captures` exit 0, 71.934s, report `artifacts/test-runners/visual/visual-captures.json`.
-- [ ] Phase branch and merged `master` both pass the all-runner gate. Evidence pending branch and master all-runner reports.
+- [x] Phase branch and merged `master` both pass the all-runner gate. Evidence: branch report `phase13-branch-all-test-runners-report.json`, 10 runner entries, 0 failures, 861.809s; master report `phase13-master-all-test-runners-report.json`, 10 runner entries, 0 failures, 854.414s.
 - [x] Final observation artifacts were inspected and documented. Evidence: `phase13-observation-both-post-event.json` and Phase 13 report Section 9.
 
 A single unchecked mandatory box means the replacement is not complete.

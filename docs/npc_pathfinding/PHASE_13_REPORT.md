@@ -5,11 +5,11 @@
 - Phase: 13 - Legacy Removal, Static Audit, Release Gate, And Acceptance Report
 - Branch: `npc-pathfinding/phase-13-finalize`
 - Date: 2026-06-27
-- Scope status: focused NPC suites, broad playtest, static audit, world signature, and branch all-runner pass on the phase branch; merged `master` all-runner evidence pending.
+- Scope status: focused NPC suites, broad playtest, static audit, world signature, branch all-runner, merge, and merged `master` all-runner pass.
 - Base commit before Phase 13 branch changes: `56119cef054cd444f6e9b87886b66054936785d0`
 - Branch implementation/report commit: `4e1d893ec9fd2de7e6dd90461250c2fdd4ce9521`
-- Merge commit: pending
-- Post-merge `master` evidence commit: pending
+- Merge commit: `772d54a048be1a31790f83f73277ce367b3cbe2b`
+- Post-merge `master` evidence commit: this report update
 
 ## 2. Objective
 
@@ -246,11 +246,39 @@ Aggregate result: 10 runner entries, 0 failures, 861.809 seconds, exit code 0.
 
 ## 11. Full All-Runner Evidence On Merged Master
 
-Pending. Required after merge:
+Command:
 
 ```powershell
 .\tools\run-all-test-runners.ps1 -ReportPath artifacts\test-runners\phase13-master-all-test-runners-report.json -Seed atlas-1492
 ```
+
+Report: `artifacts/test-runners/phase13-master-all-test-runners-report.json`
+
+Merged `master` HEAD during run: `772d54a048be1a31790f83f73277ce367b3cbe2b`
+
+Aggregate result: 10 runner entries, 0 failures, 854.414 seconds, exit code 0.
+
+| Runner | Exit | Passed | Duration |
+| --- | ---: | --- | ---: |
+| `npc_focused` | 0 | true | 27.177s |
+| `npc_observation_dusk` | 0 | true | 0.680s |
+| `npc_observation_midnight` | 0 | true | 0.694s |
+| `npc_observation_phase12` | 0 | true | 1.295s |
+| `world_signature` | 0 | true | 17.304s |
+| `visual_manifest` | 0 | true | 0.092s |
+| `npc_navigation_integration` | 0 | true | 119.249s |
+| `story_playtest` | 0 | true | 75.692s |
+| `visual_captures` | 0 | true | 70.387s |
+| `playtest` | 0 | true | 541.780s |
+
+The master stderr log contains the known non-fatal Godot ObjectDB shutdown warning from the world-signature scene:
+
+```text
+WARNING: ObjectDB instances leaked at exit (run with --verbose for details).
+   at: cleanup (core/object/object.cpp:2641)
+```
+
+The all-runner exit code remained 0 and every required runner row passed.
 
 ## 12. Performance And Boundedness Metrics
 
@@ -289,19 +317,19 @@ The tracked world-signature baseline remains tracked and unchanged.
 | No prohibited legacy behavior remains | Pass | Static audit section below; allowed matches are rationale-listed. |
 | Every focused case passes in required modes/seeds | Pass | Focused test table in Section 8. |
 | All-runner gate passes on branch | Pass | `phase13-branch-all-test-runners-report.json`, 10 runner entries, 0 failures, 861.809s. |
-| All-runner gate passes on merged `master` | Pending | Section 11 command pending. |
+| All-runner gate passes on merged `master` | Pass | `phase13-master-all-test-runners-report.json`, 10 runner entries, 0 failures, 854.414s. |
 | Observation evidence matches assertions | Pass for headless evidence | `phase13-observation-both-post-event.json`, 7 results, 0 failures. |
-| Acceptance report has no failed mandatory row | Pending | Merged `master` all-runner row pending in `FINAL_ACCEPTANCE_REPORT.md`. |
-| Repository starts with no missing script references | Pass on branch | Branch all-runner startup, focused parser startup, story script load, and broad playtest pass. |
-| Save, story, visual, and deterministic world continuity green | Pass on branch, master pending | Save focused suite, story playtest, visual captures/manifest, broad playtest, and world signature pass on branch. |
+| Acceptance report has no failed mandatory row | Pass | `FINAL_ACCEPTANCE_REPORT.md` has every mandatory row checked with evidence. |
+| Repository starts with no missing script references | Pass | Branch and merged `master` all-runner startup, focused parser startup, story script load, and broad playtest pass. |
+| Save, story, visual, and deterministic world continuity green | Pass | Save focused suite, story playtest, visual captures/manifest, broad playtest, and world signature pass on branch and merged `master`. |
 
 ## 15. Deviation Register
 
-None approved or requested. Pending branch/master gates are not treated as debt; they remain required before merge acceptance.
+None.
 
 ## 16. Known Issues/Debt
 
-No known issue is being carried as a Phase 13 gate exception. The only pending items are the required merged `master` all-runner gate and the report hash updates after that gate.
+No known issue is being carried as a Phase 13 gate exception.
 
 ## 17. Static Audit Results
 
@@ -378,8 +406,8 @@ Allowed `canFight` matches:
 
 ## 18. Risk Assessment For Next Phase
 
-There is no next NPC pathfinding phase in this plan. After the pending branch/master gates pass, future NPC movement features should extend typed traversal actions, smart objects, semantic goals, traffic reservations, and door portals rather than adding direct movement loops or new `Main*.gd` layers.
+There is no next NPC pathfinding phase in this plan. Future NPC movement features should extend typed traversal actions, smart objects, semantic goals, traffic reservations, and door portals rather than adding direct movement loops or new `Main*.gd` layers.
 
 ## 19. Verdict
 
-Focused and branch all-runner Phase 13 evidence pass on the phase branch. Merge is allowed to proceed, but Phase 13 acceptance remains pending until merged `master` passes the required all-runner gate and the report is updated with that evidence.
+Phase 13 passes. The phase branch and merged `master` both passed the required all-runner gate, the final acceptance matrix has no unchecked mandatory row, and there is no unapproved deviation.
