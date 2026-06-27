@@ -45,7 +45,8 @@ func request_crossing(door: Node, actor: Node, entry: Dictionary = {}, action: D
 	var direction := _direction_for_action(action, entry)
 	if direction == "unknown" and portal != null:
 		direction = _direction_for_actor_goal(portal, actor, entry)
-	var active: Dictionary = active_crossings.get(portal_id, {})
+	var active_key := _active_key(portal_id, actor_id)
+	var active: Dictionary = active_crossings.get(active_key, {})
 	var traffic_result := _request_traffic(portal, actor, actor_id, direction, entry, action, active)
 	if not bool(traffic_result.get("ok", false)):
 		if portal != null:
@@ -72,7 +73,8 @@ func request_crossing(door: Node, actor: Node, entry: Dictionary = {}, action: D
 			traffic_reservations.release_group(String(traffic_result.get("groupId", "")), "door_open_failed")
 		metrics["waiting"] = int(metrics.get("waiting", 0)) + 1
 		return { "ok": false, "status": "waiting", "reason": String(result.reason) if result != null else "door_failed", "portalId": portal_id }
-	active_crossings[portal_id] = {
+	active_crossings[active_key] = {
+		"portalId": portal_id,
 		"actorId": actor_id,
 		"direction": direction,
 		"actor": actor,
@@ -97,10 +99,11 @@ func release_actor(actor_or_id, schedule_close := true) -> void:
 		actor_id = _actor_id(actor_or_id, {})
 	else:
 		actor_id = String(actor_or_id)
-	for portal_id in active_crossings.keys().duplicate():
-		var active: Dictionary = active_crossings[portal_id]
+	for active_key in active_crossings.keys().duplicate():
+		var active: Dictionary = active_crossings[active_key]
 		if String(active.get("actorId", "")) == actor_id:
-			active_crossings.erase(portal_id)
+			active_crossings.erase(active_key)
+			var portal_id := String(active.get("portalId", ""))
 			if traffic_reservations != null and String(active.get("groupId", "")) != "":
 				traffic_reservations.release_group(String(active.get("groupId", "")), "door_crossing_released")
 			door_portals.release_actor(portal_id, actor_id, schedule_close)
@@ -151,6 +154,9 @@ func _request_traffic(portal, actor: Node, actor_id: String, direction: String, 
 		}
 	})
 
+func _active_key(portal_id: String, actor_id: String) -> String:
+	return "%s:%s" % [portal_id, actor_id]
+
 func _actor_id(actor: Node, entry: Dictionary) -> String:
 	if entry is Dictionary and String(entry.get("id", "")) != "":
 		return String(entry.get("id"))
@@ -161,6 +167,9 @@ func _actor_id(actor: Node, entry: Dictionary) -> String:
 	return "npc"
 
 func _direction_for_action(action: Dictionary, entry: Dictionary) -> String:
+	var explicit_direction := String(action.get("direction", ""))
+	if explicit_direction != "":
+		return explicit_direction
 	var goal_cell: Vector2i = entry.get("routeGoalCell", Vector2i.ZERO)
 	var cell_value = action.get("cell")
 	if cell_value is Vector2i:

@@ -63,6 +63,8 @@ func make_ore(parent: Node, prop_id: String, position: Vector3, ore_type: String
     collider.position.y = radius * 0.42
     body.add_child(collider)
     parent.add_child(body)
+    if npc_system and npc_system.has_method("notify_navigation_prop_created"):
+        npc_system.notify_navigation_prop_created(prop_id, body)
     return body
 
 func make_forage(parent: Node, prop_id: String, position: Vector3, biome: String, rng: RandomNumberGenerator):
@@ -157,6 +159,8 @@ func make_forage(parent: Node, prop_id: String, position: Vector3, biome: String
     collider.position.y = shape.radius * 0.45
     body.add_child(collider)
     parent.add_child(body)
+    if npc_system and npc_system.has_method("notify_navigation_prop_created"):
+        npc_system.notify_navigation_prop_created(prop_id, body)
     return body
 
 func make_wildlife(parent: Node, prop_id: String, position: Vector3, biome: String, rng: RandomNumberGenerator):
@@ -186,6 +190,8 @@ func make_wildlife(parent: Node, prop_id: String, position: Vector3, biome: Stri
     collider.position.y = float(profile.get("collider_y", 0.52))
     body.add_child(collider)
     parent.add_child(body)
+    if npc_system and npc_system.has_method("notify_navigation_prop_created"):
+        npc_system.notify_navigation_prop_created(prop_id, body)
     register_wildlife(body, rng, cold)
     return body
 

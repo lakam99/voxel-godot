@@ -346,8 +346,7 @@ func try_use_active_consumable() -> bool: return false
 func fish_with_rod() -> bool: return false
 func find_fishing_spot() -> Dictionary: return {}
 func is_utility_block(block_type: String) -> bool: return false
-func toggle_door(door: Node) -> bool: return false
-func request_door_toggle(door: Node, actor: Node = null, actor_kind := "player", metadata := {}): return null
+func request_player_door_use(door: Node, actor: Node = null, actor_kind := "player", metadata := {}): return null
 func request_door_state(door: Node, desired_open: bool, actor: Node = null, actor_kind := "system", metadata := {}): return null
 func update_chunks(force: bool = false) -> void: pass
 func create_chunk(cx: int, cz: int) -> void: pass

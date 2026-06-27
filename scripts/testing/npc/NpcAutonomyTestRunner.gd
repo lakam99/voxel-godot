@@ -25,7 +25,7 @@ const CharacterMotorCommandScript := preload("res://scripts/npc_ai/contracts/Cha
 const CharacterMotorProfileScript := preload("res://scripts/npc_ai/contracts/CharacterMotorProfile.gd")
 const NpcMotionControllerScript := preload("res://scripts/npc_ai/NpcMotionController.gd")
 const NpcSafePlacementServiceScript := preload("res://scripts/npc_ai/NpcSafePlacementService.gd")
-const NpcLocomotionControllerScript := preload("res://scripts/npc_nav/NpcLocomotionController.gd")
+const NpcRouteMovementControllerScript := preload("res://scripts/npc_ai/movement/NpcRouteMovementController.gd")
 const NpcAgentScript := preload("res://scripts/npc_ai/NpcAgent.gd")
 
 var suite_filter := "contract"
@@ -608,7 +608,7 @@ func test_existing_npc_navigation_runner_callable(_mode: String) -> Dictionary:
 	return outcome(
 		passed,
 		"tool=%s scene=%s script=%s" % [str(tool_exists), str(scene_exists), str(script_exists)],
-		["legacy_focused_runner_files"],
+		["npc_navigation_runner_files"],
 		{ "tool": tool_exists, "scene": scene_exists, "script": script_exists }
 	)
 
@@ -621,7 +621,7 @@ func test_all_runner_registry_baseline(_mode: String) -> Dictionary:
 				ids.append(String(runner.get("id", "")))
 	var required := [
 		"npc_focused",
-		"npc_navigation_legacy",
+		"npc_navigation_integration",
 		"playtest",
 		"story_playtest",
 		"world_signature",
@@ -702,8 +702,8 @@ func test_stable_tie_break(_mode: String) -> Dictionary:
 	body_10.name = "fallback-10"
 	var body_02 := CharacterBody3D.new()
 	body_02.name = "fallback-02"
-	var context_10 = NpcAgentContextScript.from_legacy_profile(body_10, { "id": "npc-10", "name": "Ten" })
-	var context_02 = NpcAgentContextScript.from_legacy_profile(body_02, { "id": "npc-02", "name": "Two" })
+	var context_10 = NpcAgentContextScript.from_profile(body_10, { "id": "npc-10", "name": "Ten" })
+	var context_02 = NpcAgentContextScript.from_profile(body_02, { "id": "npc-02", "name": "Two" })
 	var sorted := NpcAgentContextScript.stable_sort_ids([context_10, { "stableId": "npc-01" }, context_02])
 	var scheduler := NpcBrainSchedulerScript.new()
 	scheduler.register_agent("npc-10")
@@ -721,9 +721,9 @@ func test_stable_tie_break(_mode: String) -> Dictionary:
 	)
 
 func test_profile_capability_filter(_mode: String) -> Dictionary:
-	var villager = TraversalProfileScript.from_legacy_profile({ "job": "forage" }, false)
-	var worker = TraversalProfileScript.from_legacy_profile({ "job": "wood" }, false)
-	var fighter = TraversalProfileScript.from_legacy_profile({ "job": "stone" }, true)
+	var villager = TraversalProfileScript.from_profile({ "job": "forage" }, false)
+	var worker = TraversalProfileScript.from_profile({ "job": "wood" }, false)
+	var fighter = TraversalProfileScript.from_profile({ "job": "stone" }, true)
 	var passed: bool = (
 		villager.can(&"walk")
 		and villager.can(&"open_doors")
@@ -745,8 +745,8 @@ func test_rng_stream_isolation(mode: String) -> Dictionary:
 	body_a.name = "NpcA"
 	var body_b := CharacterBody3D.new()
 	body_b.name = "NpcB"
-	var context_a = NpcAgentContextScript.from_legacy_profile(body_a, { "id": "npc-a" })
-	var context_b = NpcAgentContextScript.from_legacy_profile(body_b, { "id": "npc-b" })
+	var context_a = NpcAgentContextScript.from_profile(body_a, { "id": "npc-a" })
+	var context_b = NpcAgentContextScript.from_profile(body_b, { "id": "npc-b" })
 	var seed_a: int = context_a.rng_seed(seed, "goal", mode)
 	var seed_a_again: int = context_a.rng_seed(seed, "goal", mode)
 	var seed_b: int = context_b.rng_seed(seed, "goal", mode)
@@ -915,8 +915,8 @@ func test_guard_duty_not_can_fight(_mode: String) -> Dictionary:
 	fighter_body.name = "Fighter"
 	var night_body := CharacterBody3D.new()
 	night_body.name = "NightWatcher"
-	var fighter = NpcAgentContextScript.from_legacy_profile(fighter_body, { "id": "fighter", "canFight": true, "nightGuard": false })
-	var watcher = NpcAgentContextScript.from_legacy_profile(night_body, { "id": "watcher", "canFight": false, "nightGuard": true })
+	var fighter = NpcAgentContextScript.from_profile(fighter_body, { "id": "fighter", "canFight": true, "nightGuard": false })
+	var watcher = NpcAgentContextScript.from_profile(night_body, { "id": "watcher", "canFight": false, "nightGuard": true })
 	fighter_body.free()
 	night_body.free()
 	var passed: bool = bool(fighter.get("can_fight")) and fighter.get("guard_duty_kind") == NpcEnumsScript.GUARD_DUTY_NONE and not bool(watcher.get("can_fight")) and watcher.get("guard_duty_kind") == NpcEnumsScript.GUARD_DUTY_NIGHT
@@ -990,7 +990,7 @@ func test_autonomy_composition_no_main_layer(_mode: String) -> Dictionary:
 	return outcome(
 		passed,
 		"autonomyChild=%s context=%s blackboard=%s stats=%s unexpectedMain=%s" % [str(autonomy_child_ok), str(context_ok), str(blackboard_ok), JSON.stringify(stats), JSON.stringify(unexpected_main_scripts)],
-		["autonomy_system_child", "typed_context_association", "no_new_main_layer", "legacy_entry_preserved"],
+		["autonomy_system_child", "typed_context_association", "no_new_main_layer", "entry_preserved"],
 		{ "stats": stats, "mainScripts": main_scripts, "unexpectedMainScripts": unexpected_main_scripts, "entryId": entry.get("id", "") }
 	)
 
@@ -1083,7 +1083,7 @@ func test_motor_npc_safe_drop(_mode: String) -> Dictionary:
 	return outcome(passed, "drop=%.2f landing=%.2f" % [float(profile.get("terrain_walkable_drop")), float(profile.get("terrain_landing_distance"))], ["npc_safe_drop_limit", "npc_landing_snap_limit"], profile.to_summary())
 
 func test_motor_wall_slide_no_penetration(_mode: String) -> Dictionary:
-	var locomotion_text := read_text("res://scripts/npc_nav/NpcLocomotionController.gd")
+	var locomotion_text := read_text("res://scripts/npc_ai/movement/NpcRouteMovementController.gd")
 	var motor_text := read_text("res://scripts/npc_ai/motor/CharacterMotor3D.gd")
 	var passed := locomotion_text.find("global_position =") < 0 and motor_text.find("global_position.x =") < 0 and motor_text.find("global_position.z =") < 0 and motor_text.find("move_and_slide()") >= 0
 	return outcome(
@@ -1094,7 +1094,7 @@ func test_motor_wall_slide_no_penetration(_mode: String) -> Dictionary:
 	)
 
 func test_motor_fence_window_corner_no_penetration(_mode: String) -> Dictionary:
-	var locomotion_text := read_text("res://scripts/npc_nav/NpcLocomotionController.gd")
+	var locomotion_text := read_text("res://scripts/npc_ai/movement/NpcRouteMovementController.gd")
 	var passed := (
 		locomotion_text.find("capsule_hits_obstacle") >= 0
 		and locomotion_text.find("collider_blocks_capsule") >= 0
@@ -1109,7 +1109,7 @@ func test_motor_fence_window_corner_no_penetration(_mode: String) -> Dictionary:
 	)
 
 func test_motor_closed_door_blocks(_mode: String) -> Dictionary:
-	var controller = NpcLocomotionControllerScript.new()
+	var controller = NpcRouteMovementControllerScript.new()
 	var door := Node3D.new()
 	var body := CharacterBody3D.new()
 	door.set_meta("kind", "block")
@@ -1121,7 +1121,7 @@ func test_motor_closed_door_blocks(_mode: String) -> Dictionary:
 	return outcome(blocks, "closedDoorBlocks=%s" % str(blocks), ["closed_door_blocks_capsule"], { "closedDoorBlocks": blocks })
 
 func test_motor_open_door_clears(_mode: String) -> Dictionary:
-	var controller = NpcLocomotionControllerScript.new()
+	var controller = NpcRouteMovementControllerScript.new()
 	var door := Node3D.new()
 	var body := CharacterBody3D.new()
 	door.set_meta("kind", "block")
@@ -1173,7 +1173,7 @@ func test_motor_no_route_transform_write(_mode: String) -> Dictionary:
 	var files := {
 		"NpcSystem": read_text("res://scripts/NpcSystem.gd"),
 		"NpcPathing": read_text("res://scripts/NpcPathing.gd"),
-		"NpcLocomotionController": read_text("res://scripts/npc_nav/NpcLocomotionController.gd"),
+		"NpcRouteMovementController": read_text("res://scripts/npc_ai/movement/NpcRouteMovementController.gd"),
 		"NpcMotionController": read_text("res://scripts/npc_ai/NpcMotionController.gd")
 	}
 	var offenders: Array[String] = []
@@ -1185,7 +1185,7 @@ func test_motor_no_route_transform_write(_mode: String) -> Dictionary:
 	return outcome(passed, "offenders=%s" % JSON.stringify(offenders), ["no_route_global_position_assignment", "no_route_position_assignment"], { "offenders": offenders })
 
 func test_motor_no_unstick_teleport(_mode: String) -> Dictionary:
-	var locomotion_text := read_text("res://scripts/npc_nav/NpcLocomotionController.gd")
+	var locomotion_text := read_text("res://scripts/npc_ai/movement/NpcRouteMovementController.gd")
 	var passed := (
 		locomotion_text.find("increment_stuck_recovery") >= 0
 		and locomotion_text.find("safe_place_npc") < 0

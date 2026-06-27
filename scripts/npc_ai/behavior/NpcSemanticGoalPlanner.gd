@@ -1,5 +1,5 @@
 extends RefCounted
-class_name NpcGoalPlanner
+class_name NpcSemanticGoalPlanner
 
 const CELL := 1.35
 const MAX_ROUTE_SCORED_CANDIDATES := 16

@@ -190,6 +190,8 @@ func release_owner_generation(owner_id: String, generation: int, reason := "gene
 	for reservation_id in ids:
 		var reservation = reservations_by_id.get(reservation_id)
 		if reservation != null and int(reservation.get("owner_generation")) == generation:
+			if bool(reservation.get("active_crossing")) and String(reservation.get("status")) == TrafficReservationScript.STATUS_GRANTED:
+				continue
 			if _release_reservation(String(reservation_id), reason):
 				count += 1
 	if count > 0:
@@ -355,10 +357,8 @@ func _existing_group_result(owner_id: String, group_id: String, request: Diction
 			"interval": { "start": earliest, "end": latest_end },
 			"activeContinuity": true
 		}
-	var blockers := _blocking_before(earliest, reservations)
-	metrics["waiting"] = int(metrics.get("waiting", 0)) + 1
-	wait_graph.set_wait(owner_id, _blocker_owner_ids(blockers), "pending_interval")
-	return _waiting_result(group_id, request, blockers, "traffic_wait", { "start": earliest, "end": latest_end, "blockers": blockers })
+	release_group(group_id, "pending_replan")
+	return {}
 
 func _plan_group_interval(resources: Array, request: Dictionary) -> Dictionary:
 	var duration := maxf(0.001, float(request.get("duration", NpcConstantsScript.TRAFFIC_DEFAULT_INTERVAL_SECONDS)))

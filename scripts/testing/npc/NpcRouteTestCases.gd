@@ -33,7 +33,7 @@ func cases() -> Array[Dictionary]:
 		["npc_route_partial_explicit_only", "test_route_partial_explicit_only"],
 		["npc_route_unreachable_terminal_reason", "test_route_unreachable_terminal_reason"],
 		["npc_route_deterministic_replay", "test_route_deterministic_replay"],
-		["npc_route_legacy_goal_adapter_uses_new_corridor", "test_route_legacy_goal_adapter_uses_new_corridor"]
+		["npc_route_runtime_goal_adapter_uses_new_corridor", "test_route_runtime_goal_adapter_uses_new_corridor"]
 	]
 	var result: Array[Dictionary] = []
 	for spec in ids:
@@ -256,7 +256,7 @@ func test_route_no_iteration_cap_false_failure(_mode: String) -> Dictionary:
 	var corridor = result.get("corridor")
 	var step_count = corridor.steps.size() if corridor != null else 0
 	var passed = result.get("status") == NpcEnumsScript.ROUTE_STATUS_COMPLETE and step_count > 384
-	return outcome(passed, "steps=%d status=%s" % [step_count, str(result.get("status"))], ["long_route_over_legacy_cap", "no_false_iteration_failure"], { "steps": step_count, "route": route_summary(result) })
+	return outcome(passed, "steps=%d status=%s" % [step_count, str(result.get("status"))], ["long_route_over_removed_cap", "no_false_iteration_failure"], { "steps": step_count, "route": route_summary(result) })
 
 func test_route_pending_budget_resumes(_mode: String) -> Dictionary:
 	var setup = route_line_service(0, 12)
@@ -306,10 +306,10 @@ func test_route_deterministic_replay(_mode: String) -> Dictionary:
 	var passed = first_summary == second_summary
 	return outcome(passed, "first=%s second=%s" % [first_summary, second_summary], ["deterministic_replay"], { "first": route_summary(first), "second": route_summary(second) })
 
-func test_route_legacy_goal_adapter_uses_new_corridor(_mode: String) -> Dictionary:
-	var adapter_text = read_text("res://scripts/npc_nav/NpcRoutePlanner.gd")
-	var passed = adapter_text.find("HierarchicalRoutePlanner") >= 0 and adapter_text.find("MAX_ITERATIONS") < 0 and adapter_text.find("plan_legacy_route") >= 0 and adapter_text.find("route_from_cells") < 0
-	return outcome(passed, "adapterPlanner=%d maxIterations=%d" % [adapter_text.find("HierarchicalRoutePlanner"), adapter_text.find("MAX_ITERATIONS")], ["legacy_adapter_delegates_new_corridor", "old_iteration_cap_removed"], {})
+func test_route_runtime_goal_adapter_uses_new_corridor(_mode: String) -> Dictionary:
+	var adapter_text = read_text("res://scripts/npc_ai/routing/NpcRouteCoordinatorAdapter.gd")
+	var passed = adapter_text.find("HierarchicalRoutePlanner") >= 0 and adapter_text.find("MAX_ITERATIONS") < 0 and adapter_text.find("plan_runtime_route") >= 0 and adapter_text.find("route_from_cells") < 0
+	return outcome(passed, "adapterPlanner=%d maxIterations=%d" % [adapter_text.find("HierarchicalRoutePlanner"), adapter_text.find("MAX_ITERATIONS")], ["runtime_adapter_delegates_new_corridor", "old_iteration_cap_removed"], {})
 
 func route_line_service(start_x: int, end_x: int) -> Dictionary:
 	var tiles = {}

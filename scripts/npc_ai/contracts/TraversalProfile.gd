@@ -36,7 +36,7 @@ var traversal_cost_modifiers := {}
 static func default_adult_npc():
 	return load("res://scripts/npc_ai/contracts/TraversalProfile.gd").new()
 
-static func from_legacy_profile(profile: Dictionary, can_fight := false):
+static func from_profile(profile: Dictionary, can_fight := false):
 	var traversal = default_adult_npc()
 	traversal.profile_id = String(profile.get("traversalProfileId", "adult_npc"))
 	traversal.maximum_walk_speed = float(profile.get("walkSpeed", traversal.maximum_walk_speed))

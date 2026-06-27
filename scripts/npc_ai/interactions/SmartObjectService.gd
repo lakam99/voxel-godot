@@ -162,10 +162,10 @@ func request_door_state(door: Node, desired_open: bool, actor: Node = null, acto
 		return InteractionResultScript.make(NpcEnumsScript.INTERACTION_STATUS_FAILED, &"missing_door_service")
 	return door_portals.request_door_state(door, desired_open, actor, actor_kind, metadata)
 
-func request_door_toggle(door: Node, actor: Node = null, actor_kind := "player", metadata := {}):
+func request_player_door_use(door: Node, actor: Node = null, actor_kind := "player", metadata := {}):
 	if door_portals == null:
 		return InteractionResultScript.make(NpcEnumsScript.INTERACTION_STATUS_FAILED, &"missing_door_service")
-	return door_portals.request_door_toggle(door, actor, actor_kind, metadata)
+	return door_portals.request_player_door_use(door, actor, actor_kind, metadata)
 
 func reserve_interaction(request):
 	var registration = registration_for_request(request)

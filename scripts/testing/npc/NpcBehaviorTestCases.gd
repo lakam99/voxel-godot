@@ -62,10 +62,6 @@ class FakeNpcSystem:
 			entry["insideHome"] = true
 			body.set_meta("npc_inside_home", true)
 
-	func update_day_job(entry: Dictionary, _delta: float) -> bool:
-		entry["jobTarget"] = Vector3(5.4, 0.0, 0.0)
-		return true
-
 	func update_fighter_target(entry: Dictionary, _body: Node3D, target_hostile: Node3D, _weapon_id: String) -> Vector3:
 		entry["guardDutyState"] = "intercept_threat" if target_hostile != null else "patrol"
 		return Vector3(4.05, 0.0, 0.0)
@@ -142,7 +138,7 @@ func test_day_guard_patrol(_mode: String) -> Dictionary:
 	return outcome(passed, "goal=%s actions=%s" % [String(result.goal.get("goalKind")), JSON.stringify(actions)], ["day_guard_goal", "patrol_action"], result)
 
 func test_day_idle_semantic_anchor(_mode: String) -> Dictionary:
-	var source := read_text("res://scripts/npc_nav/NpcGoalPlanner.gd")
+	var source := read_text("res://scripts/npc_ai/behavior/NpcSemanticGoalPlanner.gd")
 	var town_anchor_start := source.find("func town_anchor_candidates")
 	var town_anchor_end := source.find("func job_anchor_candidates")
 	var town_anchor_source := source.substr(town_anchor_start, town_anchor_end - town_anchor_start)
@@ -226,7 +222,7 @@ func test_executor_decays_guard_cooldown(_mode: String) -> Dictionary:
 	var entry_data := entry("Guard", { "job": "guard", "canFight": true, "nightGuard": true })
 	entry_data["blackboard"] = NpcBlackboardScript.new()
 	entry_data["cooldown"] = 0.75
-	executor.update_legacy_npc(entry_data, 0.25, 1.0)
+	executor.update_npc(entry_data, 0.25, 1.0)
 	var cooldown_after := float(entry_data.get("cooldown", -1.0))
 	var passed := absf(cooldown_after - 0.5) <= 0.001
 	fake_autonomy.queue_free()
@@ -293,18 +289,21 @@ func test_all_generated_town_npcs_have_interior_home(_mode: String) -> Dictionar
 
 func test_no_raw_random_world_goal(_mode: String) -> Dictionary:
 	var npc_source := read_text("res://scripts/NpcSystem.gd")
-	var goal_source := read_text("res://scripts/npc_nav/NpcGoalPlanner.gd")
+	var goal_source := read_text("res://scripts/npc_ai/behavior/NpcSemanticGoalPlanner.gd")
 	var update_start := npc_source.find("func update_npc(entry")
-	var update_end := npc_source.find("func update_npc_legacy_fallback")
+	var update_end := npc_source.find("func npc_is_held_by_intro_or_dialogue")
 	var update_source := npc_source.substr(update_start, update_end - update_start)
 	var idle_start := goal_source.find("func town_anchor_candidates")
 	var idle_end := goal_source.find("func job_anchor_candidates")
 	var idle_source := goal_source.substr(idle_start, idle_end - idle_start)
-	var delegates: bool = update_source.find("update_legacy_npc") >= 0 and update_source.find("update_wander_target") < 0
+	var delegates: bool = update_source.find("autonomy_system.update_npc") >= 0
+	var removed_wander_method := "update_" + "wander_target"
+	var removed_wander_timer := "wander" + "Timer"
+	var no_raw_wander: bool = npc_source.find(removed_wander_method) < 0 and npc_source.find(removed_wander_timer) < 0
 	var no_idle_ring: bool = idle_source.find("add_deterministic_ring_candidates") < 0
 	var no_can_fight_guard: bool = read_text("res://scripts/NpcProfileRules.gd").find("if can_fight or role") < 0
-	var passed: bool = delegates and no_idle_ring and no_can_fight_guard
-	return outcome(passed, "delegates=%s noIdleRing=%s noCanFightGuard=%s" % [str(delegates), str(no_idle_ring), str(no_can_fight_guard)], ["executor_delegation", "idle_no_ring_candidates", "can_fight_not_guard_predicate"], {})
+	var passed: bool = delegates and no_raw_wander and no_idle_ring and no_can_fight_guard
+	return outcome(passed, "delegates=%s noRawWander=%s noIdleRing=%s noCanFightGuard=%s" % [str(delegates), str(no_raw_wander), str(no_idle_ring), str(no_can_fight_guard)], ["executor_delegation", "raw_wander_removed", "idle_no_ring_candidates", "can_fight_not_guard_predicate"], {})
 
 func expect_night_home_inside(entry_data: Dictionary, label: String) -> Dictionary:
 	var result := select_and_plan(entry_data, NpcEnumsScript.SCHEDULE_STATE_NIGHT, { "insideHome": true })

@@ -1,7 +1,8 @@
 extends RefCounted
-class_name NpcNavigationWorld
+class_name GeneratedWorldNavigationAdapter
 
 const NpcConstantsScript := preload("res://scripts/npc_ai/NpcConstants.gd")
+const NpcEnumsScript := preload("res://scripts/npc_ai/NpcEnums.gd")
 
 const CELL := 1.35
 const INVALID_CELL := Vector2i(999999, 999999)
@@ -14,18 +15,38 @@ var cached_doors := {}
 var cached_paths := {}
 var cached_props := {}
 var height_cache := {}
-var revision_frame_key := ""
-var cached_revision_value := ""
+var topology_revision := 1
+var dynamic_revision := 0
+var last_event_revision := 0
 
 func setup(system_node, main_node) -> void:
     system = system_node
     main = main_node
 
 func invalidate() -> void:
+    topology_revision += 1
     cached_revision = ""
-    cached_revision_value = ""
-    revision_frame_key = ""
     height_cache = {}
+
+func apply_navigation_events(events: Array) -> void:
+    var topology_changed := false
+    var dynamic_changed := false
+    for event_value in events:
+        if not (event_value is Dictionary):
+            continue
+        var event: Dictionary = event_value
+        last_event_revision = maxi(last_event_revision, int(event.get("revision", 0)))
+        var kinds: Array = event.get("changeKinds", [])
+        if _event_changes_static_snapshot(kinds):
+            topology_changed = true
+        else:
+            dynamic_changed = true
+    if topology_changed:
+        topology_revision = maxi(topology_revision + 1, last_event_revision)
+        cached_revision = ""
+        height_cache = {}
+    elif dynamic_changed:
+        dynamic_revision = maxi(dynamic_revision + 1, last_event_revision)
 
 func build_snapshot(entry: Dictionary, allow_outside := false, moving_home := false) -> Dictionary:
     var revision_id := revision()
@@ -44,31 +65,26 @@ func build_snapshot(entry: Dictionary, allow_outside := false, moving_home := fa
     }
 
 func revision() -> String:
-    if main == null:
-        return "empty"
-    var current_frame_key := "%d:%d" % [Engine.get_process_frames(), Engine.get_physics_frames()]
-    if revision_frame_key == current_frame_key and cached_revision_value != "":
-        return cached_revision_value
-    var blocks: Dictionary = main.get("blocks")
-    var block_count := blocks.size()
-    var block_hash := 0
-    for key in blocks.keys():
-        block_hash = int(hash("%d:%s" % [block_hash, str(key)]))
-    var root_count := 0
-    var height_edit_count := 0
-    var height_edits_value = main.get("height_edits")
-    if height_edits_value is Dictionary:
-        height_edit_count = (height_edits_value as Dictionary).size()
-    for root_value in [main.get("chunk_root"), main.get("prop_root")]:
-        var root := root_value as Node
-        if root:
-            root_count += root.get_child_count()
-    var npc_count := 0
-    if system != null:
-        npc_count = system.npcs.size()
-    cached_revision_value = "%d:%d:%d:%d:%d" % [block_count, block_hash, root_count, height_edit_count, npc_count]
-    revision_frame_key = current_frame_key
-    return cached_revision_value
+    return "%d:%d:%d" % [topology_revision, dynamic_revision, last_event_revision]
+
+func _event_changes_static_snapshot(kinds: Array) -> bool:
+    for kind_value in kinds:
+        var kind := StringName(kind_value)
+        if kind in [
+            NpcEnumsScript.CHANGE_KIND_BLOCK_CREATED,
+            NpcEnumsScript.CHANGE_KIND_BLOCK_REMOVED,
+            NpcEnumsScript.CHANGE_KIND_TERRAIN_EDIT,
+            NpcEnumsScript.CHANGE_KIND_PROP_CREATED,
+            NpcEnumsScript.CHANGE_KIND_PROP_REMOVED,
+            NpcEnumsScript.CHANGE_KIND_CHUNK_LOADED,
+            NpcEnumsScript.CHANGE_KIND_CHUNK_UNLOADED,
+            NpcEnumsScript.CHANGE_KIND_DOOR_REGISTERED,
+            NpcEnumsScript.CHANGE_KIND_DOOR_STATE,
+            NpcEnumsScript.CHANGE_KIND_STRUCTURE_METADATA,
+            NpcEnumsScript.CHANGE_KIND_SEMANTIC_CHANGED
+        ]:
+            return true
+    return false
 
 func rebuild_static_cells() -> void:
     cached_blocked = {}

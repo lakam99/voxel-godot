@@ -87,7 +87,7 @@ func request_door_state(door: Node, desired_open: bool, actor: Node = null, acto
 	interaction_request.desired_state = NpcEnumsScript.DOOR_STATE_OPEN if desired_open else NpcEnumsScript.DOOR_STATE_CLOSED
 	return request_interaction(interaction_request, Array(metadata.get("actors", [])))
 
-func request_door_toggle(door: Node, actor: Node = null, actor_kind := "player", metadata := {}):
+func request_player_door_use(door: Node, actor: Node = null, actor_kind := "player", metadata := {}):
 	door = _interaction_block_from_collider(door)
 	if door == null:
 		var result = load("res://scripts/npc_ai/contracts/InteractionResult.gd").make(NpcEnumsScript.INTERACTION_STATUS_FAILED, &"missing")

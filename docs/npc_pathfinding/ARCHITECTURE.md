@@ -1,104 +1,97 @@
 # NPC Pathfinding Architecture
 
-Phase 01 establishes the typed contracts and observability boundary for the NPC replacement. It does not move NPCs through the new stack yet. Legacy movement, jobs, combat, and door behavior remain active through `NpcSystem.gd` and `NpcPathing.gd`.
+This document describes the Phase 13 NPC autonomy, navigation, door, traffic, and movement stack. It replaces the earlier migration-era description that still referenced the legacy mover as the active runtime path.
 
-## Ownership
+## Runtime Ownership
 
-`NpcSystem.gd` remains the public integration point used by tutorial, story, combat, HUD, playtests, and world systems during migration. It owns the legacy NPC entry dictionaries and keeps save-facing state compatible.
+`NpcSystem.gd` remains the public gameplay integration point. It owns NPC registration, save-facing dictionaries, spawn/load placement, public stat adapters, tutorial/story/combat hooks, and the public methods used by tests and gameplay systems.
 
-`NpcAutonomySystem.gd` is a composed child of `NpcSystem.gd`. It owns new runtime-only state:
+The composed runtime stack under `scripts/npc_ai/` owns NPC decisions and traversal:
 
-- `NpcAgentContext`: stable NPC identity, role/profile data, traversal profile, guard duty, deterministic RNG streams, and weak body reference.
-- `NpcBlackboard`: transient decision state, route/action generations, current terminal state, reservations, blockers, and bounded progress history.
-- `NpcBrainScheduler`: deterministic staggered high-level update slots.
-- `NpcTelemetryService`: bounded structured events and counters.
-- `NavigationChangeBus`: bounded authoritative dirty events for future topology consumers.
+- `NpcAutonomySystem.gd`: service root for contexts, blackboards, telemetry, navigation events, doors, smart objects, traffic, schedules, and lifecycle cleanup.
+- `GeneratedWorldNavigationAdapter.gd`: event-driven generated-world topology adapter. It consumes navigation change events and rebuilds affected topology snapshots; it does not scan the scene tree to infer a revision every frame.
+- `NpcRouteCoordinatorAdapter.gd` and `HierarchicalRoutePlanner.gd`: deterministic route coordination, semantic costs, route repair, and explicit traversal actions.
+- `NpcRouteMovementController.gd`: route-following controller for `CharacterBody3D` NPCs. Normal route movement is applied through the shared character motor and Godot collision movement.
+- `NpcSemanticGoalPlanner.gd`, `NpcPlanExecutor.gd`, and behavior services: role, schedule, hunger, threat, work, guard, and scripted intent selection and execution.
+- `DoorPortalService.gd`, `DoorController.gd`, and `DoorTraversalExecutor.gd`: shared player/NPC door authority, logical portals, holds, queues, active crossings, and safe close policy.
+- `TrafficReservationService.gd`: space-time node, edge, portal, bridge, and interaction-slot reservations with deterministic priority, aging, pending replans, and explicit cleanup.
+- `SmartObjectService.gd`: shared resource and utility-object availability, capacity, reservations, and completion.
+- `NpcSimulationLodService.gd`: active/abstract transitions with safe placement on promotion and route/reservation cleanup on demotion/removal.
 
-Save snapshots remain dictionary-based at the persistence boundary. `agentContext`, `blackboard`, telemetry, scheduler state, and change-bus queues are runtime-only and are not written into save data.
+`NpcPathing.gd` is a thin public facade over `NpcNavigationCoordinator.gd` for older callers. It no longer owns topology, route search, movement, doors, or goal behavior.
 
 ```mermaid
 flowchart TD
-  Main["Main* gameplay systems"] --> NpcSystem["NpcSystem public integration point"]
-  NpcSystem --> Legacy["Legacy NPC movement and behavior"]
-  NpcSystem --> Autonomy["NpcAutonomySystem child service"]
-  Autonomy --> Context["NpcAgentContext typed identity/profile"]
-  Autonomy --> Blackboard["NpcBlackboard transient generations/state"]
-  Autonomy --> Scheduler["NpcBrainScheduler bounded slots"]
-  Autonomy --> Telemetry["NpcTelemetryService bounded traces"]
-  Autonomy --> ChangeBus["NavigationChangeBus dirty topology events"]
-  World["Block, chunk, and door mutations"] --> NpcSystem
-  NpcSystem --> ChangeBus
+  Main["Main gameplay systems"] --> NpcSystem["NpcSystem public integration"]
+  NpcSystem --> Facade["NpcPathing facade"]
+  Facade --> Coordinator["NpcNavigationCoordinator"]
+  Coordinator --> World["GeneratedWorldNavigationAdapter"]
+  Coordinator --> Routes["NpcRouteCoordinatorAdapter"]
+  Coordinator --> Movement["NpcRouteMovementController"]
+  Coordinator --> Goals["NpcSemanticGoalPlanner"]
+  NpcSystem --> Autonomy["NpcAutonomySystem"]
+  Autonomy --> Doors["DoorPortalService + DoorTraversalExecutor"]
+  Autonomy --> Traffic["TrafficReservationService"]
+  Autonomy --> SmartObjects["SmartObjectService"]
+  Autonomy --> LOD["NpcSimulationLodService"]
+  Autonomy --> Executor["NpcPlanExecutor"]
+  WorldEvents["Blocks, chunks, doors, props"] --> Autonomy
+  WorldEvents --> World
 ```
 
-## Event Flow
+## Movement Contract
 
-World mutation points send adapter events to `NpcSystem`, which forwards them to `NpcAutonomySystem`. The legacy navigation consumer still runs unchanged.
+Active NPC bodies are `CharacterBody3D` agents. Route progress is based on post-physics body position. Normal route movement does not write `position`, `global_position`, `transform`, or `global_transform`.
 
-- `MainChunkTerrain.create_block()` emits `block_created` with the exact `Vector3i` cell, block type, bounds, and tile key.
-- `MainChunkTerrain.collapse_structure_component()` emits `block_removed` before erasing the block.
-- `MainPropFactory.complete_destroy_target()` emits `block_removed` before erasing a player-destroyed block.
-- `MainRuntimeTools.create_chunk()` emits `chunk_loaded` after registering the chunk.
-- `MainRuntimeTools.update_chunks()` and `rebuild_chunk()` emit `chunk_unloaded` before erasing a chunk.
-- `MainRuntimeTools.toggle_door()` emits `door_state` after applying the legacy open/closed state.
+Direct placement is limited to named safe-placement paths:
 
-`NavigationChangeBus` increments a monotonic revision on every emitted change. Changes are coalesced by tile key until `flush_frame()`. A flushed event carries:
+- spawn and registration placement;
+- save/load restoration;
+- abstract/active LOD promotion;
+- explicit test or administrator setup.
 
-- `tileKey`
-- `revision`
-- `changeKinds`
-- `objectIds`
-- merged `bounds`
-- optional `sourceRevisions`
-- `coalescedCount`
+Those paths validate the capsule through the safe-placement service and do not count as route progress.
 
-The contract is event-driven. Consumers should use event bounds and tile keys instead of scanning the scene tree to infer revisions.
+## Navigation And Routing
 
-## Bounds
+Navigation topology is built from generated terrain, structures, interiors, doors, roads, work/resource approaches, guard posts, semantic areas, and dynamic blockers. Topology revisions are driven by events:
 
-All Phase 01 runtime observability structures have explicit limits.
+- block create/remove;
+- chunk load/unload;
+- door state and portal changes;
+- dynamic obstacle and smart-object premise changes.
 
-| Structure | Owner | Bound |
-| --- | --- | --- |
-| Per-NPC telemetry ring | `NpcTelemetryService` | `NpcConstants.TELEMETRY_RING_CAPACITY` = 256 |
-| Global telemetry counters | `NpcTelemetryService` | `NpcConstants.TELEMETRY_GLOBAL_COUNTER_LIMIT` = 128 |
-| Registered brain agents | `NpcBrainScheduler` | `NpcConstants.BRAIN_REGISTERED_AGENT_LIMIT` = 256 |
-| Brain updates per tick | `NpcBrainScheduler` | `NpcConstants.BRAIN_UPDATES_PER_TICK` = 8 |
-| Pending changed tiles | `NavigationChangeBus` | `NpcConstants.CHANGE_BUS_MAX_PENDING_TILES` = 512 |
-| Blackboard distance history | `NpcBlackboard.remember_distance()` | Caller supplied limit, default 16 |
+Route requests use explicit terminal states. `PARTIAL` is never silently accepted as arrival. Door traversal is represented as an action on the route and survives smoothing. Dynamic changes invalidate or repair only affected route segments when possible.
 
-Overflow behavior is deterministic: telemetry evicts oldest events per actor, scheduler rejects registrations over the bound and counts denials, and the change bus drops excess new tile buckets while counting dropped events.
+## Doors And Traffic
 
-## Contracts
+Doors are controlled by desired-state requests: open, hold, release, close, lock, unlock, destroy, or cancel. NPCs do not call blind toggles.
 
-Route terminal states are explicit:
+Every doorway is represented by a logical portal. Double doors share one portal. A door crossing acquires a traffic reservation before opening/holding the portal. Active crossing ownership is per actor and portal, so one actor cannot overwrite another actor's crossing state. Pending groups are replanned when re-requested after blockers release, and granted active crossings survive route-generation replacement until the door release path clears them.
 
-- `complete`
-- `partial`
-- `unreachable`
-- `invalidated`
-- `cancelled`
-- `failed_internal`
+Door close policy checks threshold, sweep, and clearance volumes against current actors. Timers only schedule attempts; they never override occupancy or active crossing safety.
 
-`pending` and `searching` are not terminal. A `partial` route is terminal but never satisfies arrival. Arrival checks require `complete` plus an arrival contract when the caller expects one.
+## Purpose And Schedules
 
-Route requests, blackboards, and action instances carry generations. Stale generations cannot cancel current requests or mutate current route/action terminal state.
+NPC decisions are selected from role, schedule, hunger, threats, orders, work facts, home/interior facts, and reachable world anchors. Ordinary movement targets semantic anchors, not raw random world coordinates.
 
-Stable ordering uses string stable IDs, not instance IDs or dictionary iteration order. Per-NPC randomness is generated from world seed, stable NPC ID, domain, and phase so it does not consume or reorder world-generation RNG.
+Night behavior is explicit:
 
-Guard duty is represented as `guard_duty_kind` and is separate from legacy `canFight`. Phase 01 records the distinction but does not migrate day/night behavior yet.
+- assigned guards may remain outside at a guard post, patrol, or threat intercept;
+- non-duty NPCs return through real entrances into assigned interiors;
+- porch, threshold, exterior edge, or roof positions do not count as inside;
+- threat, rescue, evacuation, script, or unreachable-home exceptions must be explicit goals/reasons.
 
-## Migration Switch
+`canFight` remains a combat capability field. It is not guard duty.
 
-Current architecture version:
+## Save Boundary
 
-```text
-phase01_contracts_observability
-```
+Saves persist durable identity, profile, inventory, home/job facts, schedule-reconstructable intent, and compatible public dictionary fields. Runtime queues, route cells/actions, traffic reservations, avoidance state, planner queues, telemetry rings, and RVO state are filtered from save snapshots.
 
-Current locomotion mode:
+Old saves load with missing NPC fields defaulted. New saves round-trip durable state only.
 
-```text
-legacy_static_body_adapter
-```
+## Extension Rules
 
-The switch is runtime-only and only reports telemetry/state. Production still uses the legacy `StaticBody3D` movement path. No actor runs two locomotion stacks in Phase 01.
+New movement capabilities should add typed traversal actions or edges. New doors and gates register logical portals. New smart objects register slots and effects through `SmartObjectService`. New roles add utility/schedule/action preferences instead of direct movement loops. New dynamic construction must emit navigation change events.
+
+Every extension needs focused tests in the matching suite and day/night coverage when schedule behavior is affected.

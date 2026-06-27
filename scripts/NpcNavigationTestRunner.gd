@@ -350,7 +350,7 @@ func test_npc_capsule_collision_gate() -> void:
         blocked_by_prop = not bool(prop_validation.get("ok", false)) and String(prop_validation.get("reason", "")).begins_with("blocked")
         var door := blocks.get(door_cell) as Node
         if door != null:
-            main.call("toggle_door", door)
+            main.call("request_door_state", door, true, null, "test", { "authorized": true })
             await wait_physics_frames(1)
             var door_candidate := Vector3(float(door_cell.x) * CELL, base_height + 0.04, float(door_cell.z) * CELL)
             var door_validation: Dictionary = locomotion.validate_candidate(entry, start_position, door_candidate, false, false, world)
@@ -502,6 +502,9 @@ func test_two_npcs_cross_narrow_door() -> void:
     var right_target_dist := Vector2(right_npc.global_position.x - left_start.x, right_npc.global_position.z - left_start.z).length()
     var left_entry_body := left_entry.get("body") as Node3D
     var right_entry_body := right_entry.get("body") as Node3D
+    var traffic_state := {}
+    if npc_system.get("autonomy_system") != null and npc_system.get("autonomy_system").has_method("stats"):
+        traffic_state = (npc_system.get("autonomy_system").stats() as Dictionary).get("traffic", {})
     add_result(
         "npc_nav_two_npc_door_crossing",
         both_crossed
@@ -511,7 +514,7 @@ func test_two_npcs_cross_narrow_door() -> void:
             and int(stats_after.get("doorOpens", 0)) > door_opens_before
             and int(stats_after.get("doorCloses", 0)) > door_closes_before
             and door_closed,
-        "crossed %s, shared %s, minSep %.2f, left %.2f cell %s wants %s dist %.2f goal %s body %s, right %.2f cell %s wants %s dist %.2f goal %s body %s, doorX %.2f, waits %d->%d, door %d/%d -> %d/%d, closed %s, routes %s/%s %s/%s" % [
+        "crossed %s, shared %s, minSep %.2f, left %.2f cell %s wants %s dist %.2f goal %s body %s actionCount %d activeDoor %s, right %.2f cell %s wants %s dist %.2f goal %s body %s actionCount %d activeDoor %s, doorX %.2f, waits %d->%d, door %d/%d -> %d/%d, closed %s, routes %s/%s %s/%s, traffic active=%s waiting=%s granted=%s denied=%s released=%s" % [
             str(both_crossed),
             str(shared_cell),
             min_separation,
@@ -521,12 +524,16 @@ func test_two_npcs_cross_narrow_door() -> void:
             left_target_dist,
             str(left_entry.get("routeGoalCell", Vector2i.ZERO)),
             str(left_entry_body == left_npc),
+            (left_entry.get("routeActions", {}) as Dictionary).size(),
+            String(left_entry.get("activeDoorPortalId", "")),
             right_npc.global_position.x,
             str(right_final_cell),
             str(right_requested_cell),
             right_target_dist,
             str(right_entry.get("routeGoalCell", Vector2i.ZERO)),
             str(right_entry_body == right_npc),
+            (right_entry.get("routeActions", {}) as Dictionary).size(),
+            String(right_entry.get("activeDoorPortalId", "")),
             door_world_x,
             reservation_waits_before,
             int(stats_after.get("reservationWaits", 0)),
@@ -538,7 +545,12 @@ func test_two_npcs_cross_narrow_door() -> void:
             String(left_entry.get("routeStatus", "")),
             String(left_entry.get("routeReason", "")),
             String(right_entry.get("routeStatus", "")),
-            String(right_entry.get("routeReason", ""))
+            String(right_entry.get("routeReason", "")),
+            str(traffic_state.get("activeReservations", "")),
+            str(traffic_state.get("waiting", "")),
+            str(traffic_state.get("granted", "")),
+            str(traffic_state.get("denied", "")),
+            str(traffic_state.get("released", ""))
         ]
     )
 

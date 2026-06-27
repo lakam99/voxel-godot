@@ -1,8 +1,8 @@
 extends RefCounted
 class_name NpcConstants
 
-const ARCHITECTURE_VERSION := "phase12_hardening_soak"
-const LEGACY_LOCOMOTION_MODE := "legacy_route_intent_motor_adapter"
+const ARCHITECTURE_VERSION := "phase13_authoritative_stack"
+const NPC_MOVEMENT_STACK := "character_body_route_motor"
 
 const CELL_SIZE := 1.35
 const NAV_TILE_CELL_SIZE := 16
@@ -22,7 +22,8 @@ const DOOR_BLOCKED_CLOSE_RETRY_SECONDS := 0.25
 const DOOR_TRACE_CAPACITY := 96
 const TRAFFIC_DEFAULT_INTERVAL_SECONDS := 0.45
 const TRAFFIC_MOVEMENT_STEP_SECONDS := 0.10
-const TRAFFIC_PORTAL_CROSSING_SECONDS := 0.85
+# Covers door lookahead acquisition plus physical portal clearance; released early when the actor clears.
+const TRAFFIC_PORTAL_CROSSING_SECONDS := 4.0
 const TRAFFIC_RESERVATION_HORIZON_SECONDS := 8.0
 const TRAFFIC_RESERVATION_EXPIRE_GRACE_SECONDS := 1.25
 const TRAFFIC_INTERVAL_CLEARANCE_SECONDS := 0.04
