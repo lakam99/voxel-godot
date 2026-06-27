@@ -63,6 +63,7 @@ func register_door(door: Node, metadata := {}) -> String:
 	var portal_id: String = door_portals.register_door(door, metadata)
 	if portal_id != "":
 		registrations[portal_id] = SmartObjectRegistrationScript.make(portal_id, "door", door, metadata)
+		_connect_registration_lifecycle(registrations[portal_id])
 	return portal_id
 
 func register_object(object_id: String, kind: String, node: Node = null, metadata := {}) -> String:
@@ -73,6 +74,7 @@ func register_object(object_id: String, kind: String, node: Node = null, metadat
 	var merged := metadata.duplicate(true) if metadata is Dictionary else {}
 	merged["kind"] = kind
 	merged["objectId"] = object_id
+	merged["nodeBacked"] = node != null
 	if not merged.has("slots"):
 		merged["slots"] = make_default_slots(node, kind, merged)
 	if not merged.has("capacity"):
@@ -90,6 +92,7 @@ func register_object(object_id: String, kind: String, node: Node = null, metadat
 		registrations[object_id] = SmartObjectRegistrationScript.make(object_id, kind, node, merged)
 	var registration = registrations[object_id]
 	registration.revision = _next_revision()
+	_connect_registration_lifecycle(registration)
 	_index_registration(registration)
 	_record("registered", object_id, kind, { "slots": registration.slots.size() })
 	return object_id
@@ -263,6 +266,9 @@ func complete_interaction(request):
 		return _result(NpcEnumsScript.INTERACTION_STATUS_FAILED, &"target_gone", { "requestId": request_id })
 	if registration.depleted and _is_single_use(registration):
 		return _result(NpcEnumsScript.INTERACTION_STATUS_FAILED, &"resource_depleted", { "objectId": registration.object_id })
+	if registration_node_is_stale(registration):
+		mark_registration_stale(registration, "freed_node")
+		return _result(NpcEnumsScript.INTERACTION_STATUS_FAILED, &"target_gone", { "objectId": registration.object_id })
 	var access := validate_access_policy(registration, request)
 	if not bool(access.get("ok", false)):
 		return _result(NpcEnumsScript.INTERACTION_STATUS_FAILED, StringName(String(access.get("reason", "access_denied"))), access)
@@ -282,9 +288,10 @@ func complete_interaction(request):
 	if _is_single_use(registration) or action_kind == "harvest_resource" or String(request_value(request, "command", "")) == String(COMMAND_HARVEST):
 		registration.depleted = true
 		registration.metadata["depleted"] = true
-		if registration.node != null and is_instance_valid(registration.node):
-			registration.node.set_meta("npc_harvested", true)
-			registration.node.set_meta("smart_object_depleted", true)
+		var live_node := live_registration_node_3d(registration)
+		if live_node != null:
+			live_node.set_meta("npc_harvested", true)
+			live_node.set_meta("smart_object_depleted", true)
 		release_object_reservations(registration, "completed")
 		_index_registration(registration)
 	elif not bool(metadata.get("holdReservation", false)):
@@ -317,7 +324,13 @@ func immediate_harvest(request):
 	complete_request.request_id = stable_request_id(request)
 	return complete_interaction(complete_request)
 
-func notify_object_removed(object_id: String, node: Node = null) -> void:
+func notify_object_removed(object_id: String, node_or_reason = null, reason := "node_removed") -> void:
+	var removal_reason := reason
+	var node: Node = null
+	if node_or_reason is String or node_or_reason is StringName:
+		removal_reason = String(node_or_reason)
+	elif node_or_reason != null and is_instance_valid(node_or_reason) and node_or_reason is Node:
+		node = node_or_reason as Node
 	if object_id == "" and node != null:
 		object_id = object_id_for_node(node)
 	if object_id == "":
@@ -325,15 +338,14 @@ func notify_object_removed(object_id: String, node: Node = null) -> void:
 	var registration = registrations.get(object_id)
 	if registration == null:
 		return
-	registration.depleted = true
-	registration.metadata["depleted"] = true
-	release_object_reservations(registration, "target_gone")
-	_index_registration(registration)
-	_record("removed", registration.object_id, registration.kind, { "reason": "target_gone" })
+	mark_registration_stale(registration, removal_reason)
 
 func object_available(object_id: String, actor_id := "") -> Dictionary:
 	var registration = registrations.get(object_id)
 	if registration == null:
+		return { "ok": false, "reason": "target_gone" }
+	if registration_node_is_stale(registration):
+		mark_registration_stale(registration, "freed_node")
 		return { "ok": false, "reason": "target_gone" }
 	if registration.depleted:
 		return { "ok": false, "reason": "resource_depleted" }
@@ -356,8 +368,11 @@ func query_resource_nodes(entry: Dictionary, kinds: Array, options := {}) -> Arr
 		if not cached_nodes.is_empty():
 			_count("indexed_query_cache_hits")
 			return cached_nodes
-	var body := entry.get("body") as Node3D
-	var origin: Vector3 = body.global_position if body != null else entry.get("porchPosition", Vector3.ZERO)
+	var body: Node3D = null
+	var body_value = entry.get("body")
+	if body_value != null and is_instance_valid(body_value) and body_value is Node3D:
+		body = body_value as Node3D
+	var origin: Vector3 = node_position(body) if body != null else entry.get("porchPosition", Vector3.ZERO)
 	var object_ids := candidate_object_ids_for_query(entry, kinds, option_map, origin)
 	var scored: Array[Dictionary] = []
 	for object_id in object_ids.keys():
@@ -534,22 +549,25 @@ func registration_matches_query(registration, entry: Dictionary, options: Dictio
 
 func score_candidates(entry: Dictionary, action_kind: String, candidates: Array) -> Array[Dictionary]:
 	var scored: Array[Dictionary] = []
-	var body := entry.get("body") as Node3D
-	var origin: Vector3 = body.global_position if body != null else entry.get("porchPosition", Vector3.ZERO)
+	var body: Node3D = null
+	var body_value = entry.get("body")
+	if body_value != null and is_instance_valid(body_value) and body_value is Node3D:
+		body = body_value as Node3D
+	var origin: Vector3 = node_position(body) if body != null else entry.get("porchPosition", Vector3.ZERO)
 	var role := String(entry.get("job", entry.get("role", ""))).to_lower()
 	for candidate in candidates:
 		var object_id := ""
 		var position := origin
 		var metadata := {}
-		if candidate is Node3D:
-			var node := candidate as Node3D
-			object_id = object_id_for_node(node)
-			position = node.global_position
-			metadata = { "material": String(node.get_meta("material", "")), "drop": String(node.get_meta("drop", "")) }
-		elif candidate is Dictionary:
+		if candidate is Dictionary:
 			object_id = String(candidate.get("objectId", ""))
 			position = candidate.get("position", origin)
 			metadata = candidate.get("metadata", {})
+		elif candidate != null and is_instance_valid(candidate) and candidate is Node3D:
+			var node := candidate as Node3D
+			object_id = object_id_for_node(node)
+			position = node_position(node)
+			metadata = { "material": String(node.get_meta("material", "")), "drop": String(node.get_meta("drop", "")) }
 		var distance := Vector2(position.x - origin.x, position.z - origin.z).length()
 		var congestion := 0
 		if registrations.has(object_id):
@@ -585,12 +603,15 @@ func score_candidates(entry: Dictionary, action_kind: String, candidates: Array)
 
 func registration_for_request(request):
 	var object_id := String(request_value(request, "object_id", ""))
-	if object_id == "" and request_value(request, "object_node", null) != null:
-		object_id = object_id_for_node(request_value(request, "object_node", null))
+	var node_value = request_value(request, "object_node", null)
+	if object_id == "" and node_value != null and is_instance_valid(node_value) and node_value is Node:
+		object_id = object_id_for_node(node_value)
 	if object_id != "" and registrations.has(object_id):
 		return registrations[object_id]
-	var node := request_value(request, "object_node", null) as Node
-	if node != null and is_instance_valid(node):
+	var node: Node = null
+	if node_value != null and is_instance_valid(node_value) and node_value is Node:
+		node = node_value as Node
+	if node != null:
 		if String(node.get_meta("kind", "")) == "prop":
 			object_id = register_resource(node, request_metadata(request))
 		elif node.has_meta("block_type"):
@@ -741,20 +762,21 @@ func slot_for_reservation(registration, reservation: Dictionary) -> Dictionary:
 func effect_metrics(registration, request, reservation: Dictionary, action_kind: String) -> Dictionary:
 	var drop := String(registration.metadata.get("drop", ""))
 	var amount: int = max(1, int(registration.metadata.get("dropCount", registration.metadata.get("amount", 1))))
-	if registration.node != null and is_instance_valid(registration.node):
-		drop = String(registration.node.get_meta("drop", drop))
-		amount = max(1, int(registration.node.get_meta("drop_count", amount)))
+	var live_node := live_registration_node_3d(registration)
+	if live_node != null:
+		drop = String(live_node.get_meta("drop", drop))
+		amount = max(1, int(live_node.get_meta("drop_count", amount)))
 	var metrics := reservation_metrics(registration, reservation, true)
 	metrics["action"] = action_kind
 	metrics["drop"] = drop
 	metrics["amount"] = amount
 	metrics["material"] = String(registration.metadata.get("material", ""))
 	metrics["propId"] = String(registration.metadata.get("propId", ""))
-	if registration.node != null and is_instance_valid(registration.node):
-		metrics["propId"] = String(registration.node.get_meta("prop_id", metrics["propId"]))
-		if registration.node.has_meta("extra_drop"):
-			metrics["extraDrop"] = String(registration.node.get_meta("extra_drop", ""))
-			metrics["extraAmount"] = int(registration.node.get_meta("extra_drop_count", 0))
+	if live_node != null:
+		metrics["propId"] = String(live_node.get_meta("prop_id", metrics["propId"]))
+		if live_node.has_meta("extra_drop"):
+			metrics["extraDrop"] = String(live_node.get_meta("extra_drop", ""))
+			metrics["extraAmount"] = int(live_node.get_meta("extra_drop_count", 0))
 	metrics["command"] = String(request_value(request, "command", ""))
 	return metrics
 
@@ -796,7 +818,7 @@ func make_default_slots(node: Node, kind: String, metadata: Dictionary) -> Dicti
 	return slots
 
 func object_id_for_node(node: Node) -> String:
-	if node == null:
+	if node == null or not is_instance_valid(node):
 		return ""
 	if node.has_meta("prop_id"):
 		return "prop:%s" % String(node.get_meta("prop_id"))
@@ -817,26 +839,50 @@ func object_position(registration) -> Vector3:
 func object_position_from_node_or_metadata(node, metadata: Dictionary) -> Vector3:
 	if metadata.has("position") and metadata["position"] is Vector3:
 		return metadata["position"]
-	if node != null and is_instance_valid(node) and node is Node3D:
-		var node_3d := node as Node3D
-		return node_3d.global_position if node_3d.is_inside_tree() else node_3d.position
+	if node == null:
+		return Vector3.ZERO
+	if not is_instance_valid(node):
+		return Vector3.ZERO
+	if not (node is Node3D):
+		return Vector3.ZERO
+	var node_3d := node as Node3D
+	return node_3d.global_position if node_3d.is_inside_tree() else node_3d.position
 	return Vector3.ZERO
 
 func live_registration_node_3d(registration) -> Node3D:
 	if registration == null:
 		return null
-	if registration_node_is_stale(registration):
-		mark_registration_stale(registration)
-		return null
 	var node = registration.node
-	if node is Node3D:
-		return node as Node3D
-	return null
+	if node == null:
+		if bool(registration.metadata.get("nodeBacked", false)) and not bool(registration.metadata.get("stale", false)):
+			mark_registration_stale(registration, "missing_node")
+		return null
+	if not is_instance_valid(node):
+		mark_registration_stale(registration, "freed_node")
+		return null
+	if not (node is Node3D):
+		mark_registration_stale(registration, "not_node_3d")
+		return null
+	return node as Node3D
 
 func registration_node_is_stale(registration) -> bool:
-	if registration == null or registration.node == null:
+	if registration == null:
 		return false
-	return not is_instance_valid(registration.node)
+	if bool(registration.metadata.get("stale", false)):
+		return false
+	var node = registration.node
+	if node == null:
+		return bool(registration.metadata.get("nodeBacked", false))
+	return not is_instance_valid(node)
+
+func registration_is_live(registration) -> bool:
+	if registration == null or registration.depleted:
+		return false
+	if bool(registration.metadata.get("stale", false)):
+		return false
+	if registration.node == null:
+		return registration.metadata.has("position")
+	return live_registration_node_3d(registration) != null
 
 func mark_registration_stale(registration, reason := "stale_node") -> void:
 	if registration == null:
@@ -850,21 +896,48 @@ func mark_registration_stale(registration, reason := "stale_node") -> void:
 	registration.node = null
 	registration.metadata["depleted"] = true
 	registration.metadata["available"] = false
+	registration.metadata["stale"] = true
 	_unindex_registration(registration)
-	_index_add(index_by_kind, registration.kind, object_id)
-	_index_add(depleted_index_by_kind, registration.kind, object_id)
 	registration.revision = _next_revision()
 	query_cache.clear()
 	_record("removed", object_id, registration.kind, { "reason": reason })
+
+func _connect_registration_lifecycle(registration) -> void:
+	if registration == null:
+		return
+	var node = registration.node
+	if node == null or not is_instance_valid(node) or not (node is Node):
+		return
+	var live_node := node as Node
+	var callback := Callable(self, "_on_registered_node_tree_exiting").bind(String(registration.object_id), int(live_node.get_instance_id()))
+	if not live_node.tree_exiting.is_connected(callback):
+		live_node.tree_exiting.connect(callback)
+
+func _on_registered_node_tree_exiting(object_id: String, instance_id: int) -> void:
+	if object_id == "":
+		return
+	var registration = registrations.get(object_id)
+	if registration == null:
+		return
+	var node = registration.node
+	if node != null and is_instance_valid(node) and int(node.get_instance_id()) != instance_id:
+		return
+	mark_registration_stale(registration, "node_removed")
 
 func actor_position_for_request(request) -> Vector3:
 	var metadata := request_metadata(request)
 	if metadata.has("actorPosition") and metadata["actorPosition"] is Vector3:
 		return metadata["actorPosition"]
-	var actor := request_value(request, "actor_node", null) as Node3D
-	if actor != null and is_instance_valid(actor):
-		return actor.global_position if actor.is_inside_tree() else actor.position
+	var actor_value = request_value(request, "actor_node", null)
+	if actor_value != null and is_instance_valid(actor_value) and actor_value is Node3D:
+		var actor := actor_value as Node3D
+		return node_position(actor)
 	return Vector3.INF
+
+func node_position(node: Node3D) -> Vector3:
+	if node == null or not is_instance_valid(node):
+		return Vector3.ZERO
+	return node.global_position if node.is_inside_tree() else node.position
 
 func line_of_sight_block_reason(from_position: Vector3, to_position: Vector3, registration) -> String:
 	var blockers: Array = registration.metadata.get("blockers", [])
@@ -911,6 +984,9 @@ func _index_registration(registration) -> void:
 	_unindex_registration(registration)
 	var object_id: String = registration.object_id
 	if object_id == "":
+		return
+	if bool(registration.metadata.get("stale", false)):
+		query_cache.clear()
 		return
 	var position: Vector3 = object_position(registration)
 	var cell := Vector2i(roundi(position.x / CELL), roundi(position.z / CELL))
