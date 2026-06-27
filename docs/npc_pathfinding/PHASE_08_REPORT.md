@@ -41,6 +41,8 @@ Baseline refresh evidence:
 
 The drift is deterministic and isolated to `props`. The regenerated signature is accepted intentionally as the tracked `atlas-1492` world-signature baseline for subsequent gates. It is not treated as disposable generated output.
 
+After the branch merge, Git checkout converted the local baseline JSON to CRLF while the index remained LF. `.gitattributes` now locks `artifacts/baselines/world-signature/*.json` to LF so the byte-level world-signature comparison remains stable after future checkouts.
+
 ## 4. Implementation Summary
 
 Added Phase 08 traffic services:
@@ -66,6 +68,7 @@ The test harness now defaults deterministic seed propagation to `atlas-1492` acr
 
 Added:
 
+- `.gitattributes`
 - `artifacts/baselines/README.md`
 - `artifacts/baselines/world-signature/README.md`
 - `docs/npc_pathfinding/PHASE_08_REPORT.md`
