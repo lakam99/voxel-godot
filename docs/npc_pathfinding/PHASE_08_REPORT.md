@@ -5,10 +5,11 @@
 - Phase: 08 - Space-Time Traffic, Door Queues, Fairness, and Deadlock Recovery
 - Branch: `npc-pathfinding/phase-08-traffic-deadlock`
 - Date: 2026-06-26
-- Scope status: branch gate passes after the intentional world-signature baseline refresh. `master` merge and `master` gate remain pending.
+- Scope status: branch and `master` gates pass after the intentional world-signature baseline refresh.
 - Base commit before Phase 08 branch changes: `ffc85a144d6fcd22f71102552563896078e19933`
 - Branch code commit: `89c2cd337fbd583b10f8ae3e54ddca8c0dfeb3d7`
-- Merge commit: not yet created
+- Merge commit: `c405b9163976a673b91138055dba91858bc8e137`
+- Post-merge baseline line-ending guard commit: `80e330a09d3c30fa4b078b42ec889fd4dd446e35`
 
 ## 2. Objective
 
@@ -294,7 +295,7 @@ Additional parser sweep:
 | Retreat/yield movement uses real routes and physics, not transform displacement. | `npc_traffic_pullout_retreat_physical` passes in day/night; locomotion waits use staging and route/motor movement rather than direct displacement. | Pass on focused suites |
 | Door queues and traffic share one authority. | Door traversal executor owns traffic reservation before door hold/open and releases on crossing/cancel/destroy; door swap and portal destruction cases pass. | Pass on focused suites |
 | Day/dusk/night traffic waves pass. | Day work, dusk return-home, and night guard/civilian inbound/outbound wave cases pass in day/night. | Pass on focused suites |
-| All focused and repository runners pass on branch and `master`. | Focused runners pass; branch repository gate passes after the accepted baseline refresh; `master` not rerun for this phase. | Pass on branch, pending `master` |
+| All focused and repository runners pass on branch and `master`. | Focused runners pass; branch repository gate passes after the accepted baseline refresh; `master` repository gate passes after the non-fast-forward merge and LF baseline guard. | Pass |
 
 ## 11. Review Questions
 
@@ -318,11 +319,44 @@ Is deadlock recovery physical and deterministic?
 
 - Cycle resolution uses a deterministic yielder plus pull-out/staging metadata. `npc_traffic_four_actor_cycle_resolved` and `npc_traffic_pullout_retreat_physical` pass in both time modes.
 
-## 12. Required Next Step
+## 12. Master Gate Evidence And Next Step
 
 The `artifacts/baselines/world-signature/atlas-1492.json` decision is resolved:
 
 - the deterministic prop-signature drift is accepted as an intentional baseline refresh;
 - the branch all-runner passes with the accepted baseline.
 
-Next: commit this evidence update, non-fast-forward merge to `master`, rerun the repository gate on `master`, then create `npc-pathfinding/phase-09-purpose-schedules`.
+Master command:
+
+```powershell
+.\tools\run-all-test-runners.ps1 -ReportPath artifacts\test-runners\phase08-master-all-test-runners-report.json -Seed atlas-1492
+```
+
+Master report:
+
+- `artifacts/test-runners/phase08-master-all-test-runners-report.json`
+- Started UTC: `2026-06-27T00:06:52.0980497Z`
+- Finished UTC: `2026-06-27T00:38:06.7327824Z`
+- Duration: `1874.636` seconds
+- Result count: 7
+- Failure count: 0
+
+Master runner results:
+
+- `npc_focused`: pass, `21.713` seconds, report fresh true
+- `world_signature`: pass, `18.427` seconds, report fresh true
+- `visual_manifest`: pass, `0.21` seconds
+- `npc_navigation_legacy`: pass, `129.513` seconds, report fresh true
+- `story_playtest`: pass, `76.705` seconds, report fresh true
+- `visual_captures`: pass, `70.817` seconds, report fresh true
+- `playtest`: pass, `1557.102` seconds, report fresh true
+
+Master broad playtest:
+
+- Report: `artifacts/test-runners/playtest-report.json`
+- Terminal flag: `finished=true`
+- Seed: `atlas-1492`
+- Result count: 181
+- Failure count: 0
+
+Next: create `npc-pathfinding/phase-09-purpose-schedules` from `master`.
