@@ -55,6 +55,7 @@ var traffic_case_provider = null
 var behavior_case_provider = null
 var interaction_case_provider = null
 var streaming_save_case_provider = null
+var soak_case_provider = null
 var metrics := {
 	"assertions": 0,
 	"selectedCases": 0,
@@ -297,6 +298,8 @@ func contract_cases() -> Array[Dictionary]:
 		cases.append_array(interaction_cases())
 	if suite_filter == "streaming_save" or suite_filter == "all" or suite_filter == "":
 		cases.append_array(streaming_save_cases())
+	if suite_filter == "soak" or suite_filter == "all" or suite_filter == "":
+		cases.append_array(soak_cases())
 	return cases
 
 func motor_cases() -> Array[Dictionary]:
@@ -417,6 +420,13 @@ func streaming_save_cases() -> Array[Dictionary]:
 		streaming_save_case_provider = provider_script.new()
 		streaming_save_case_provider.call("setup", self)
 	return streaming_save_case_provider.call("cases")
+
+func soak_cases() -> Array[Dictionary]:
+	if soak_case_provider == null:
+		var provider_script = load("res://scripts/testing/npc/NpcSoakTestCases.gd")
+		soak_case_provider = provider_script.new()
+		soak_case_provider.call("setup", self)
+	return soak_case_provider.call("cases")
 
 func suite_matches(case_suite: String) -> bool:
 	return suite_filter == "" or suite_filter == "all" or suite_filter == case_suite

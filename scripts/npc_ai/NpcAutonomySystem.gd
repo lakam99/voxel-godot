@@ -99,7 +99,7 @@ func setup(system_node: Node, main_node: Node) -> void:
 
 func _physics_process(_delta: float) -> void:
 	process_navigation_changes()
-	navigation_world.build_next_tiles(NpcConstantsScript.NAV_BUILD_MAX_JOBS_PER_TICK, NpcConstantsScript.NAV_BUILD_HARD_SLICE_USEC)
+	build_navigation_tiles(NpcConstantsScript.NAV_BUILD_MAX_JOBS_PER_TICK)
 
 func clear() -> void:
 	contexts_by_instance_id.clear()
@@ -186,8 +186,15 @@ func update_legacy_npc(entry: Dictionary, delta: float, night_factor: float) -> 
 func update_simulation_lod(entry: Dictionary, delta: float, observer_position := Vector3.INF, context := {}) -> Dictionary:
 	if simulation_lod == null:
 		return { "state": "active", "brainDue": true, "reason": "missing_lod_service" }
+	var previous_lod := String(entry.get("simulationLod", "active"))
 	var result: Dictionary = simulation_lod.update_actor(entry, delta, observer_position, context)
 	entry["npc_lod_brain_due"] = bool(result.get("brainDue", true))
+	var current_lod := String(entry.get("simulationLod", previous_lod))
+	if previous_lod != current_lod:
+		if current_lod == NpcSimulationLodServiceScript.STATE_ABSTRACT:
+			telemetry.observe_lod_transition("demotion")
+		elif current_lod == NpcSimulationLodServiceScript.STATE_ACTIVE:
+			telemetry.observe_lod_transition("promotion")
 	return result
 
 func inject_schedule_snapshot(snapshot: Dictionary) -> void:
@@ -241,15 +248,20 @@ func record_motion(entry: Dictionary, motor_state) -> void:
 	var displacement: Vector3 = motor_state.get("displacement")
 	var requested: Vector3 = motor_state.get("requested_velocity")
 	var applied: Vector3 = motor_state.get("applied_velocity")
+	var blocked_contact_category := String(motor_state.get("blocked_contact_category"))
+	var blocked := bool(motor_state.get("blocked"))
 	telemetry.increment(&"motor_frames")
-	if bool(motor_state.get("blocked")):
+	if blocked:
 		telemetry.increment(&"motor_blocked_contacts")
+		telemetry.increment(&"motor_blocked_ticks")
+	if blocked_contact_category != "":
+		telemetry.increment(&"motor_contacts")
 	telemetry.record_event(stable_id, &"motor", "motion", &"none", {
 		"requestedVelocity": [requested.x, requested.y, requested.z],
 		"appliedVelocity": [applied.x, applied.y, applied.z],
 		"displacement": [displacement.x, displacement.y, displacement.z],
-		"blocked": bool(motor_state.get("blocked")),
-		"blockedContact": String(motor_state.get("blocked_contact_category"))
+		"blocked": blocked,
+		"blockedContact": blocked_contact_category
 	})
 
 func context_for_body(body: Node):
@@ -423,8 +435,10 @@ func request_npc_door_traversal(door: Node, actor: Node, entry: Dictionary = {},
 	var result: Dictionary = door_traversal.request_crossing(door, actor, entry, action)
 	if bool(result.get("ok", false)):
 		telemetry.increment(&"door_traversal_granted")
+		telemetry.observe_door_event("hold")
 	else:
 		telemetry.increment(&"door_traversal_waiting")
+		telemetry.increment(&"reservation_waits")
 	return result
 
 func release_npc_door_hold(actor_or_id, schedule_close := true) -> void:
@@ -463,6 +477,10 @@ func request_npc_traffic_step(entry: Dictionary, previous: Vector3, candidate: V
 		entry["activeTrafficStepGroup"] = String(result.get("groupId", ""))
 	else:
 		entry["trafficWaitReason"] = String(result.get("reason", "traffic_wait"))
+		telemetry.increment(&"reservation_waits")
+		if String(result.get("reason", "")) == "capacity_conflict":
+			telemetry.increment(&"reservation_denials")
+	telemetry.observe_traffic_stats(traffic_reservations.stats())
 	return result
 
 func release_npc_traffic_reservations(entry_or_id, reason := "released") -> int:
@@ -491,7 +509,12 @@ func release_npc_traffic_generation(entry: Dictionary, reason := "generation_rep
 func process_door_policies(delta: float, actors: Array = []) -> Dictionary:
 	if door_portals == null:
 		return { "closed": 0, "blocked": 0, "scheduled": 0 }
-	return door_portals.process(delta, actors)
+	var result: Dictionary = door_portals.process(delta, actors)
+	if int(result.get("closed", 0)) > 0:
+		telemetry.observe_door_event("close")
+	if int(result.get("blocked", 0)) > 0:
+		telemetry.observe_door_event("obstruction_reverse")
+	return result
 
 func emit_door_state_revision(door: Node, open: bool, reason: String, revision: int) -> void:
 	if door != null and is_instance_valid(door):
@@ -528,7 +551,10 @@ func process_navigation_changes() -> Array:
 	return events
 
 func request_navigation_tile(snapshot: Dictionary, priority := 0, profile = null) -> Dictionary:
-	return navigation_world.request_tile(snapshot, priority, profile) if navigation_world != null else {}
+	var result: Dictionary = navigation_world.request_tile(snapshot, priority, profile) if navigation_world != null else {}
+	if navigation_world != null:
+		telemetry.observe_navigation_stats(navigation_world.stats())
+	return result
 
 func prefetch_for_entry(entry: Dictionary) -> Dictionary:
 	return simulation_lod.prefetch_for_entry(entry) if simulation_lod != null else {}
@@ -543,7 +569,13 @@ func snapshot_has_transient_lifecycle_state(snapshot: Dictionary) -> bool:
 	return simulation_lod.snapshot_has_transient_state(snapshot) if simulation_lod != null else false
 
 func build_navigation_tiles(max_jobs := 1) -> Array:
-	return navigation_world.build_next_tiles(max_jobs, NpcConstantsScript.NAV_BUILD_HARD_SLICE_USEC) if navigation_world != null else []
+	if navigation_world == null:
+		return []
+	var started := Time.get_ticks_usec()
+	var built: Array = navigation_world.build_next_tiles(max_jobs, NpcConstantsScript.NAV_BUILD_HARD_SLICE_USEC)
+	telemetry.record_duration(&"navigation_build_work", Time.get_ticks_usec() - started, NpcConstantsScript.NAV_BUILD_HARD_SLICE_USEC)
+	telemetry.observe_navigation_stats(navigation_world.stats())
+	return built
 
 func stats() -> Dictionary:
 	return {
