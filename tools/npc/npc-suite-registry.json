@@ -66,6 +66,12 @@
       "description": "Phase 11 streaming, abstract simulation, save migration, and lifecycle safety tests",
       "command": ".\\tools\\npc\\run-npc-streaming-save-tests.ps1",
       "defaultArgs": ["-TimeMode", "Both"]
+    },
+    {
+      "id": "soak",
+      "description": "Phase 12 deterministic fuzz, soak, performance, and recovery hardening tests",
+      "command": ".\\tools\\npc\\run-npc-soak-tests.ps1",
+      "defaultArgs": ["-TimeMode", "Both"]
     }
   ]
 }

@@ -25,6 +25,14 @@
       "required": true
     },
     {
+      "id": "npc_observation_phase12",
+      "description": "Phase 12 noon, dusk, midnight, dawn, crowded-door, shared-door, and dynamic-repair observation evidence",
+      "command": ".\\tools\\npc\\run-npc-observation-tests.ps1",
+      "args": ["-Scenario", "All", "-TimeMode", "Both", "-Seed", "atlas-1492", "-ReportPath", "artifacts\\test-runners\\npc-observation-phase12.json"],
+      "reportPath": "artifacts\\test-runners\\npc-observation-phase12.json",
+      "required": true
+    },
+    {
       "id": "world_signature",
       "description": "Deterministic world signature comparison",
       "command": ".\\tools\\run-world-signature.ps1",
