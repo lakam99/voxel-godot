@@ -5,11 +5,11 @@
 - Phase: 12 - Fuzzing, Soak, Performance, Failure Recovery, And Observation Hardening
 - Branch: `npc-pathfinding/phase-12-hardening-soak`
 - Date: 2026-06-27
-- Scope status: branch gates pass; merge and `master` all-runner evidence are pending.
+- Scope status: branch and merged `master` gates pass.
 - Base commit before Phase 12 branch changes: `3ea0b887ca711a6801916fb1729d604696c160a6`
-- Branch implementation/report commit: pending
-- Merge commit: pending
-- Post-merge `master` evidence commit: pending
+- Branch implementation/report commit: `c0189b21a5abe09313b70b28fbe0b07ba65367d9`
+- Merge commit: `f4ac43e022115ddb6ffe47eec344811198f671be`
+- Post-merge `master` evidence commit: this report update
 
 ## 2. Objective
 
@@ -292,7 +292,36 @@ The broad playtest was also run directly after the runtime telemetry fix and exi
 
 ## 13. Merged Master All-Runner Evidence
 
-Pending. This section will be updated after the non-fast-forward merge to `master` and the required `master` all-runner invocation.
+Command:
+
+```powershell
+.\tools\run-all-test-runners.ps1 -ReportPath artifacts\test-runners\phase12-master-all-test-runners.json -Seed atlas-1492 -StopOnFailure
+```
+
+Report:
+
+- Path: `artifacts/test-runners/phase12-master-all-test-runners.json`
+- Seed: `atlas-1492`
+- Exit code file: `artifacts/test-runners/phase12-master-all-test-runners.exitcode`, value `0`
+- Result count: 10
+- Failure count: 0
+- Duration: 1009.288 seconds
+- Stopped early: false
+
+| Runner | Exit | Result | Duration |
+| --- | ---: | --- | ---: |
+| `npc_focused` | 0 | pass | 28.005s |
+| `npc_observation_dusk` | 0 | pass | 0.677s |
+| `npc_observation_midnight` | 0 | pass | 0.690s |
+| `npc_observation_phase12` | 0 | pass | 1.386s |
+| `world_signature` | 0 | pass | 18.684s |
+| `visual_manifest` | 0 | pass | 0.089s |
+| `npc_navigation_legacy` | 0 | pass | 131.311s |
+| `story_playtest` | 0 | pass | 81.361s |
+| `visual_captures` | 0 | pass | 90.890s |
+| `playtest` | 0 | pass | 656.130s |
+
+The master run emitted the known Godot ObjectDB shutdown warning, but all registered runner exit codes were 0 and all required reports were fresh.
 
 ## 14. Performance And Boundedness Metrics
 
@@ -359,13 +388,13 @@ The tracked baseline is not a save file. `artifacts/baselines/world-signature/RE
 | Memory/queue bounds after long runs | zero active reservations, settled queues, bounded telemetry samples/gauges | pass |
 | Observation artifacts reviewed | Section 10 reviewed captures and trace counts | pass |
 | Branch all-runner pass | Section 12 | pass |
-| Merged `master` all-runner pass | pending merge | pending |
+| Merged `master` all-runner pass | Section 13 | pass |
 
 ## 17. Deviation Register
 
 - None approved or requested.
 - The 64-agent stress profile is not treated as the shipping 32-agent acceptance density; it is reported separately as required.
-- Merged `master` evidence is pending until after the planned non-fast-forward merge.
+- Merged `master` evidence passed after the planned non-fast-forward merge.
 
 ## 18. Static Audit Results
 
@@ -414,4 +443,4 @@ Phase 13 is the legacy-removal phase. The current risk is not new Phase 12 behav
 
 ## 20. Verdict
 
-Branch evidence passes the Phase 12 focused, all-NPC, broad playtest, story, visual, manifest, and world-signature gates listed above. Merge is allowed after committing the branch report and implementation. The required merged `master` all-runner gate is still pending and must pass before Phase 13 starts.
+Branch and merged `master` evidence pass the Phase 12 focused, all-NPC, broad playtest, story, visual, manifest, and world-signature gates listed above. Phase 13 may start only from this updated green `master` after the post-merge report evidence commit.
