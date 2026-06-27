@@ -54,6 +54,7 @@ var avoidance_case_provider = null
 var traffic_case_provider = null
 var behavior_case_provider = null
 var interaction_case_provider = null
+var streaming_save_case_provider = null
 var metrics := {
 	"assertions": 0,
 	"selectedCases": 0,
@@ -294,6 +295,8 @@ func contract_cases() -> Array[Dictionary]:
 		cases.append_array(behavior_cases())
 	if suite_filter == "interaction" or suite_filter == "all" or suite_filter == "":
 		cases.append_array(interaction_cases())
+	if suite_filter == "streaming_save" or suite_filter == "all" or suite_filter == "":
+		cases.append_array(streaming_save_cases())
 	return cases
 
 func motor_cases() -> Array[Dictionary]:
@@ -407,6 +410,13 @@ func interaction_cases() -> Array[Dictionary]:
 		interaction_case_provider = provider_script.new()
 		interaction_case_provider.call("setup", self)
 	return interaction_case_provider.call("cases")
+
+func streaming_save_cases() -> Array[Dictionary]:
+	if streaming_save_case_provider == null:
+		var provider_script = load("res://scripts/testing/npc/NpcStreamingSaveTestCases.gd")
+		streaming_save_case_provider = provider_script.new()
+		streaming_save_case_provider.call("setup", self)
+	return streaming_save_case_provider.call("cases")
 
 func suite_matches(case_suite: String) -> bool:
 	return suite_filter == "" or suite_filter == "all" or suite_filter == case_suite

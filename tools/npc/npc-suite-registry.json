@@ -60,6 +60,12 @@
       "description": "Phase 10 shared smart-object environment interaction, job, and guard tests",
       "command": ".\\tools\\npc\\run-npc-interaction-tests.ps1",
       "defaultArgs": ["-TimeMode", "Both"]
+    },
+    {
+      "id": "streaming_save",
+      "description": "Phase 11 streaming, abstract simulation, save migration, and lifecycle safety tests",
+      "command": ".\\tools\\npc\\run-npc-streaming-save-tests.ps1",
+      "defaultArgs": ["-TimeMode", "Both"]
     }
   ]
 }

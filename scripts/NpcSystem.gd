@@ -117,12 +117,20 @@ func clear() -> void:
 func unregister_npc(body: Node) -> void:
     if body == null:
         return
+    var matched_entry := {}
+    for entry in npcs:
+        if entry.get("body") == body:
+            matched_entry = entry
+            break
     if autonomy_system:
         var release_id := ""
         if body.has_meta("npc_stable_id"):
             release_id = String(body.get_meta("npc_stable_id"))
         if release_id != "":
-            autonomy_system.release_npc_traffic_reservations(release_id, "actor_unregistered")
+            if matched_entry.is_empty():
+                autonomy_system.cleanup_actor_ownership(release_id, "actor_unregistered")
+            else:
+                autonomy_system.cleanup_actor_ownership(matched_entry, "actor_unregistered")
     if autonomy_system:
         autonomy_system.unregister_legacy_npc(body)
     npc_by_id.erase(body.get_instance_id())
@@ -228,6 +236,13 @@ func register_npc(body: Node3D, profile: Dictionary) -> Dictionary:
         "homeReturnTime": 0.0,
         "dayTarget": body_position,
         "insideHome": false,
+        "simulationLod": "active",
+        "abstractSimulated": false,
+        "abstractRegionId": "",
+        "abstractTransit": null,
+        "interiorRegionId": "",
+        "restoredScheduleIntent": "",
+        "npc_lod_brain_due": true,
         "lastMoveDistance": 0.0,
         "detourTarget": NO_DETOUR,
         "detourTimer": 0.0,
@@ -255,7 +270,7 @@ func register_npc(body: Node3D, profile: Dictionary) -> Dictionary:
         "motorProfile": CharacterMotorProfileScript.npc_default()
     }
     apply_saved_npc_facts(entry)
-    apply_npc_metadata(body, entry, home_cell, porch_cell, guard_cell, job)
+    apply_npc_metadata(body, entry, home_cell, porch_cell, guard_cell, String(entry.get("job", job)))
     ensure_autonomy_system()
     var context = autonomy_system.register_legacy_npc(body, profile, entry)
     if context != null:
@@ -274,17 +289,23 @@ func snapshot_job_facts() -> Array:
         var body := entry.get("body") as Node
         if body == null or not is_instance_valid(body):
             continue
-        facts.append({
-            "id": String(entry.get("id", "")),
-            "role": String(entry.get("role", "")),
-            "job": String(entry.get("job", "")),
-            "jobResource": String(entry.get("jobResource", "")),
-            "personalInventory": (entry.get("personalInventory", {}) as Dictionary).duplicate(true),
-            "hunger": float(entry.get("hunger", 100.0)),
-            "nightGuard": bool(entry.get("nightGuard", false)),
-            "guardDuty": String(body.get_meta("npc_guard_duty", "")),
-            "jobRuns": int(entry.get("jobRuns", 0))
-        })
+        var fact := {}
+        if autonomy_system != null and autonomy_system.has_method("snapshot_lifecycle_fact"):
+            fact = autonomy_system.snapshot_lifecycle_fact(entry)
+        if fact.is_empty():
+            fact = {
+                "id": String(entry.get("id", "")),
+                "role": String(entry.get("role", "")),
+                "job": String(entry.get("job", "")),
+                "jobResource": String(entry.get("jobResource", "")),
+                "personalInventory": (entry.get("personalInventory", {}) as Dictionary).duplicate(true),
+                "hunger": float(entry.get("hunger", 100.0)),
+                "nightGuard": bool(entry.get("nightGuard", false)),
+                "guardDuty": String(body.get_meta("npc_guard_duty", "")),
+                "jobRuns": int(entry.get("jobRuns", 0))
+            }
+        facts.append(fact)
+    facts.sort_custom(func(a, b): return String((a as Dictionary).get("id", "")) < String((b as Dictionary).get("id", "")))
     return facts
 
 func restore_job_facts(facts) -> void:
@@ -304,12 +325,17 @@ func apply_saved_npc_facts(entry: Dictionary) -> void:
     if npc_id == "" or not pending_saved_npc_facts.has(npc_id):
         return
     var fact: Dictionary = pending_saved_npc_facts[npc_id]
-    entry["job"] = String(fact.get("job", entry.get("job", "")))
-    entry["jobResource"] = String(fact.get("jobResource", entry.get("jobResource", "")))
-    entry["personalInventory"] = (fact.get("personalInventory", {}) as Dictionary).duplicate(true)
-    entry["hunger"] = clampf(float(fact.get("hunger", entry.get("hunger", 100.0))), 0.0, float(entry.get("maxHunger", 100.0)))
-    entry["nightGuard"] = bool(fact.get("nightGuard", entry.get("nightGuard", false)))
-    entry["jobRuns"] = max(0, int(fact.get("jobRuns", entry.get("jobRuns", 0))))
+    ensure_autonomy_system()
+    if autonomy_system != null and autonomy_system.has_method("apply_lifecycle_fact"):
+        var time_of_day := float(main.get("time_of_day")) if main != null else -1.0
+        autonomy_system.apply_lifecycle_fact(entry, fact, { "timeOfDay": time_of_day })
+    else:
+        entry["job"] = String(fact.get("job", entry.get("job", "")))
+        entry["jobResource"] = String(fact.get("jobResource", entry.get("jobResource", "")))
+        entry["personalInventory"] = (fact.get("personalInventory", {}) as Dictionary).duplicate(true)
+        entry["hunger"] = clampf(float(fact.get("hunger", entry.get("hunger", 100.0))), 0.0, float(entry.get("maxHunger", 100.0)))
+        entry["nightGuard"] = bool(fact.get("nightGuard", entry.get("nightGuard", false)))
+        entry["jobRuns"] = max(0, int(fact.get("jobRuns", entry.get("jobRuns", 0))))
 
 func apply_npc_metadata(body: Node, entry: Dictionary, home_cell: Vector2i, porch_cell: Vector2i, guard_cell: Vector2i, job: String) -> void:
     body.set_meta("npc_home_cell", home_cell)
@@ -322,12 +348,13 @@ func apply_npc_metadata(body: Node, entry: Dictionary, home_cell: Vector2i, porc
     body.set_meta("npc_goal", String(entry.get("goal", "idle")))
     body.set_meta("npc_hunger", float(entry.get("hunger", 100.0)))
     body.set_meta("npc_inventory", entry.get("personalInventory", {}))
-    body.set_meta("npc_job_runs", 0)
+    body.set_meta("npc_job_runs", int(entry.get("jobRuns", 0)))
     body.set_meta("npc_has_home", true)
     body.set_meta("npc_inside_home", false)
     body.set_meta("npc_weapon", String(entry["weaponId"]))
     body.set_meta("npc_route_status", String(entry.get("routeStatus", "idle")))
     body.set_meta("npc_route_reason", String(entry.get("routeReason", "")))
+    body.set_meta("npc_simulation_lod", String(entry.get("simulationLod", "active")))
 
 func publish_navigation_profile_semantics(entry: Dictionary) -> void:
     if autonomy_system == null or not autonomy_system.has_method("register_semantic_region"):
@@ -564,11 +591,24 @@ func update_npcs(delta: float, day_factor: float) -> void:
         if body == null or not is_instance_valid(body):
             npcs.erase(entry)
             continue
+        if autonomy_system != null and autonomy_system.has_method("update_simulation_lod"):
+            var observer_position := Vector3.INF
+            if main != null and main.get("player") is Node3D:
+                observer_position = (main.get("player") as Node3D).global_position
+            var lod_result: Dictionary = autonomy_system.update_simulation_lod(entry, delta, observer_position)
+            if autonomy_system.has_method("prefetch_for_entry"):
+                autonomy_system.prefetch_for_entry(entry)
+            if String(lod_result.get("state", "active")) == "abstract":
+                continue
         update_npc_visual_state(entry, delta)
+        entry["_lodGateApplied"] = true
         update_npc(entry, delta, night_factor)
+        entry.erase("_lodGateApplied")
     npc_update_cursor = (npc_update_cursor + budget) % max(1, npcs.size())
 
 func update_npc(entry: Dictionary, delta: float, night_factor: float) -> void:
+    if not bool(entry.get("_lodGateApplied", false)):
+        entry["npc_lod_brain_due"] = true
     if autonomy_system != null and autonomy_system.has_method("update_legacy_npc"):
         autonomy_system.update_legacy_npc(entry, delta, night_factor)
         return
@@ -1695,6 +1735,47 @@ func release_npc_traffic_generation(entry: Dictionary, reason := "generation_rep
     if autonomy_system == null:
         return 0
     return autonomy_system.release_npc_traffic_generation(entry, reason)
+
+func cleanup_npc_route_state(actor_id: String, entry := {}, reason := "cleanup") -> Dictionary:
+    var route_state_released := 0
+    var entry_dict: Dictionary = entry if entry is Dictionary else {}
+    if not entry_dict.is_empty():
+        for key in [
+            "pathWaypoints",
+            "routeCells",
+            "routeActions",
+            "routeSnapshotRevision",
+            "routeForceReplan",
+            "activeTrafficStepGroup",
+            "activeDoorPortalId",
+            "activeDoorActorId",
+            "activeDoorDirection",
+            "activeDoorTrafficGroupId",
+            "jobReservationId",
+            "jobApproachSlotId",
+            "trafficWaitReason"
+        ]:
+            if entry_dict.has(key):
+                entry_dict.erase(key)
+                route_state_released += 1
+        entry_dict["routeStatus"] = "idle"
+        entry_dict["routeReason"] = reason
+    var avoidance := {}
+    if pathing != null and pathing.has_method("cleanup_actor_state"):
+        avoidance = pathing.cleanup_actor_state(actor_id)
+    return {
+        "routeState": route_state_released,
+        "avoidance": int(avoidance.get("avoidance", 0)) if avoidance is Dictionary else 0,
+        "avoidanceState": avoidance if avoidance is Dictionary else {}
+    }
+
+func npc_avoidance_registration_count() -> int:
+    if pathing == null:
+        return 0
+    var locomotion = pathing.get("locomotion")
+    if locomotion != null and locomotion.has_method("avoidance_stats"):
+        return int(locomotion.avoidance_stats().get("registeredAgents", 0))
+    return 0
 
 func request_door_state(collider: Node, desired_open: bool, actor: Node = null, actor_kind := "system", metadata := {}):
     ensure_autonomy_system()

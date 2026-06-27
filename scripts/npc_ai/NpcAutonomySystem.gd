@@ -26,6 +26,7 @@ const NpcActionLibraryScript := preload("res://scripts/npc_ai/behavior/NpcAction
 const NpcTaskPlannerScript := preload("res://scripts/npc_ai/behavior/NpcTaskPlanner.gd")
 const NpcRecoveryPolicyScript := preload("res://scripts/npc_ai/behavior/NpcRecoveryPolicy.gd")
 const NpcPlanExecutorScript := preload("res://scripts/npc_ai/behavior/NpcPlanExecutor.gd")
+const NpcSimulationLodServiceScript := preload("res://scripts/npc_ai/lifecycle/NpcSimulationLodService.gd")
 
 var npc_system: Node
 var main: Node
@@ -54,6 +55,7 @@ var action_library
 var task_planner
 var recovery_policy
 var plan_executor
+var simulation_lod
 
 func _init() -> void:
 	scheduler = NpcBrainSchedulerScript.new()
@@ -70,6 +72,8 @@ func _init() -> void:
 	traffic_priority_policy = TrafficPriorityPolicyScript.new()
 	traffic_reservations = TrafficReservationServiceScript.new()
 	traffic_reservations.setup(bottleneck_classifier, safe_interval_planner, wait_for_graph, traffic_priority_policy)
+	simulation_lod = NpcSimulationLodServiceScript.new()
+	simulation_lod.setup(self, npc_system, main)
 	setup_behavior_services()
 
 func setup(system_node: Node, main_node: Node) -> void:
@@ -85,6 +89,8 @@ func setup(system_node: Node, main_node: Node) -> void:
 	traffic_reservations = TrafficReservationServiceScript.new()
 	traffic_reservations.setup(bottleneck_classifier, safe_interval_planner, wait_for_graph, traffic_priority_policy)
 	door_traversal.setup(door_portals, traffic_reservations, bottleneck_classifier, traffic_priority_policy, wait_for_graph)
+	simulation_lod = NpcSimulationLodServiceScript.new()
+	simulation_lod.setup(self, npc_system, main)
 	setup_behavior_services()
 	telemetry.record_event("_system", &"architecture", "setup", &"none", {
 		"architectureVersion": architecture_version,
@@ -116,6 +122,8 @@ func clear() -> void:
 	traffic_reservations = TrafficReservationServiceScript.new()
 	traffic_reservations.setup(bottleneck_classifier, safe_interval_planner, wait_for_graph, traffic_priority_policy)
 	door_traversal.setup(door_portals, traffic_reservations, bottleneck_classifier, traffic_priority_policy, wait_for_graph)
+	simulation_lod = NpcSimulationLodServiceScript.new()
+	simulation_lod.setup(self, npc_system, main)
 	setup_behavior_services()
 
 func setup_behavior_services() -> void:
@@ -154,6 +162,8 @@ func register_legacy_npc(body: Node, profile: Dictionary, legacy_entry: Dictiona
 		guard_roster.migrate_legacy_duty(context, legacy_entry)
 	body.set_meta("npc_stable_id", context.stable_id)
 	body.set_meta("npc_guard_duty", String(context.guard_duty_kind))
+	if simulation_lod != null:
+		simulation_lod.register_actor(legacy_entry)
 	telemetry.record_event(context.stable_id, &"registration", "legacy_registered", &"none", {
 		"canFight": context.can_fight,
 		"guardDuty": String(context.guard_duty_kind)
@@ -163,7 +173,22 @@ func register_legacy_npc(body: Node, profile: Dictionary, legacy_entry: Dictiona
 func update_legacy_npc(entry: Dictionary, delta: float, night_factor: float) -> void:
 	if plan_executor == null:
 		return
+	if simulation_lod != null and simulation_lod.should_hold_active_movement(entry):
+		return
+	if bool(entry.get("abstractSimulated", false)) or String(entry.get("simulationLod", "")) == NpcSimulationLodServiceScript.STATE_ABSTRACT:
+		if simulation_lod != null:
+			simulation_lod.advance_abstract(entry, delta)
+		return
+	if not bool(entry.get("npc_lod_brain_due", true)):
+		return
 	plan_executor.update_legacy_npc(entry, delta, night_factor)
+
+func update_simulation_lod(entry: Dictionary, delta: float, observer_position := Vector3.INF, context := {}) -> Dictionary:
+	if simulation_lod == null:
+		return { "state": "active", "brainDue": true, "reason": "missing_lod_service" }
+	var result: Dictionary = simulation_lod.update_actor(entry, delta, observer_position, context)
+	entry["npc_lod_brain_due"] = bool(result.get("brainDue", true))
+	return result
 
 func inject_schedule_snapshot(snapshot: Dictionary) -> void:
 	if schedule_service != null:
@@ -182,6 +207,13 @@ func release_action_owned_state(entry: Dictionary, reason := "released") -> void
 	release_npc_traffic_reservations(entry, reason)
 	var body := entry.get("body") as Node
 	release_npc_door_hold(body if body != null else String(entry.get("id", "")), true)
+	if smart_objects != null and smart_objects.has_method("release_owner"):
+		smart_objects.release_owner(String(entry.get("id", "")), reason)
+
+func cleanup_actor_ownership(entry_or_id, reason := "cleanup") -> Dictionary:
+	if simulation_lod == null:
+		return {}
+	return simulation_lod.cleanup_actor_ownership(entry_or_id, reason)
 
 func unregister_legacy_npc(body: Node) -> void:
 	if body == null:
@@ -190,6 +222,8 @@ func unregister_legacy_npc(body: Node) -> void:
 	var context = contexts_by_instance_id.get(instance_id)
 	if context == null:
 		return
+	if simulation_lod != null:
+		simulation_lod.unregister_actor(context.stable_id, "actor_unregistered")
 	contexts_by_instance_id.erase(instance_id)
 	contexts_by_stable_id.erase(context.stable_id)
 	blackboards_by_stable_id.erase(context.stable_id)
@@ -262,7 +296,12 @@ func notify_chunk_loaded(chunk_key: Vector2i) -> void:
 
 func notify_chunk_unloaded(chunk_key: Vector2i) -> void:
 	var object_id := "chunk:%d,%d" % [chunk_key.x, chunk_key.y]
-	change_bus.emit_change(NpcEnumsScript.CHANGE_KIND_CHUNK_UNLOADED, object_id, _bounds_for_chunk(chunk_key), [NavigationChangeBusScript.tile_key_for_chunk(chunk_key)])
+	var tile_key := NavigationChangeBusScript.tile_key_for_chunk(chunk_key)
+	change_bus.emit_change(NpcEnumsScript.CHANGE_KIND_CHUNK_UNLOADED, object_id, _bounds_for_chunk(chunk_key), [tile_key])
+	if simulation_lod != null and npc_system != null:
+		var entries = npc_system.get("npcs")
+		if entries is Array:
+			simulation_lod.handle_tile_unloaded(tile_key, entries)
 	telemetry.increment(&"change_chunk_unloaded")
 
 func notify_door_state_changed(door: Node, open: bool) -> void:
@@ -491,6 +530,18 @@ func process_navigation_changes() -> Array:
 func request_navigation_tile(snapshot: Dictionary, priority := 0, profile = null) -> Dictionary:
 	return navigation_world.request_tile(snapshot, priority, profile) if navigation_world != null else {}
 
+func prefetch_for_entry(entry: Dictionary) -> Dictionary:
+	return simulation_lod.prefetch_for_entry(entry) if simulation_lod != null else {}
+
+func snapshot_lifecycle_fact(entry: Dictionary) -> Dictionary:
+	return simulation_lod.durable_snapshot(entry) if simulation_lod != null else {}
+
+func apply_lifecycle_fact(entry: Dictionary, fact, options := {}) -> Dictionary:
+	return simulation_lod.apply_durable_snapshot(entry, fact, options) if simulation_lod != null else {}
+
+func snapshot_has_transient_lifecycle_state(snapshot: Dictionary) -> bool:
+	return simulation_lod.snapshot_has_transient_state(snapshot) if simulation_lod != null else false
+
 func build_navigation_tiles(max_jobs := 1) -> Array:
 	return navigation_world.build_next_tiles(max_jobs, NpcConstantsScript.NAV_BUILD_HARD_SLICE_USEC) if navigation_world != null else []
 
@@ -507,6 +558,7 @@ func stats() -> Dictionary:
 		"doorPortals": door_portals.stats() if door_portals != null else {},
 		"doorTraversal": door_traversal.stats() if door_traversal != null else {},
 		"traffic": traffic_reservations.stats() if traffic_reservations != null else {},
+		"simulationLod": simulation_lod.stats() if simulation_lod != null else {},
 		"guardRoster": guard_roster.summary() if guard_roster != null else {},
 		"behavior": plan_executor.stats() if plan_executor != null else {}
 	}

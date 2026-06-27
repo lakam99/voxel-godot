@@ -42,6 +42,11 @@ func process_navigation_events(events: Array, max_expansions := 128) -> Array[Di
         return []
     return route_planner.process_navigation_events(events, max_expansions)
 
+func cleanup_actor_state(actor_id: String) -> Dictionary:
+    if locomotion == null or not locomotion.has_method("cleanup_actor_state"):
+        return { "avoidance": 0, "reason": "missing_locomotion" }
+    return locomotion.cleanup_actor_state(actor_id)
+
 func classify_navigation_event(event: Dictionary) -> Dictionary:
     var result := {}
     if route_repair == null:

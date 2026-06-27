@@ -441,6 +441,25 @@ func release_object_reservations(registration, reason: String) -> int:
 		released += release_reservation(registration, String(key), String(reservation.get("ownerId", "")), reason)
 	return released
 
+func release_owner(owner_id: String, reason := "owner_released") -> int:
+	if owner_id == "":
+		return 0
+	var released := 0
+	for registration in registrations.values():
+		released += release_reservation(registration, "", owner_id, reason)
+	return released
+
+func owner_reservation_count(owner_id: String) -> int:
+	if owner_id == "":
+		return 0
+	var count := 0
+	for registration in registrations.values():
+		for reservation_value in registration.reservations.values():
+			var reservation: Dictionary = reservation_value
+			if String(reservation.get("ownerId", "")) == owner_id:
+				count += 1
+	return count
+
 func validate_approach(registration, request, reservation: Dictionary) -> Dictionary:
 	var metadata := request_metadata(request)
 	if not bool(metadata.get("requiresApproach", registration.metadata.get("requiresApproach", true))):
@@ -696,8 +715,12 @@ func _record(action: String, object_id: String, kind: String, metadata := {}) ->
 			})
 
 func stats() -> Dictionary:
+	var reservation_count := 0
+	for registration in registrations.values():
+		reservation_count += registration.reservations.size()
 	return {
 		"registrations": registrations.size(),
+		"reservations": reservation_count,
 		"doorPortals": door_portals.stats() if door_portals != null else {},
 		"completedEffects": completed_effects.size(),
 		"counters": counters.duplicate(true)
