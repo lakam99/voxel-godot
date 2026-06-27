@@ -48,8 +48,8 @@
       "required": true
     },
     {
-      "id": "npc_navigation_legacy",
-      "description": "Existing dedicated NPC navigation regression runner",
+      "id": "npc_navigation_integration",
+      "description": "Dedicated NPC navigation integration regression runner",
       "command": ".\\tools\\run-npc-navigation-tests.ps1",
       "args": ["-ReportPath", "artifacts\\test-runners\\npc-navigation-report.json", "-Seed", "atlas-1492"],
       "reportPath": "artifacts\\test-runners\\npc-navigation-report.json",

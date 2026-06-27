@@ -22,9 +22,9 @@ var inventory_adapter = null
 var needs_adapter = null
 var rng_stream_seeds := {}
 
-static func from_legacy_profile(body: Node, profile: Dictionary):
+static func from_profile(body: Node, profile: Dictionary):
 	var context = load("res://scripts/npc_ai/NpcAgentContext.gd").new()
-	context.configure_from_legacy_profile(body, profile)
+	context.configure_from_profile(body, profile)
 	return context
 
 static func stable_hash(text: String) -> int:
@@ -47,7 +47,7 @@ static func stable_sort_ids(values: Array) -> Array:
 	result.sort()
 	return result
 
-func configure_from_legacy_profile(body: Node, profile: Dictionary) -> void:
+func configure_from_profile(body: Node, profile: Dictionary) -> void:
 	var fallback_id := String(body.name) if body != null else "npc"
 	stable_id = String(profile.get("id", fallback_id))
 	display_name = String(profile.get("name", fallback_id))
@@ -59,7 +59,7 @@ func configure_from_legacy_profile(body: Node, profile: Dictionary) -> void:
 	settlement_id = String(profile.get("townKey", ""))
 	can_fight = bool(profile.get("canFight", false))
 	guard_duty_kind = NpcEnumsScript.GUARD_DUTY_NIGHT if bool(profile.get("nightGuard", false)) else NpcEnumsScript.GUARD_DUTY_NONE
-	traversal_profile = TraversalProfileScript.from_legacy_profile(profile, can_fight)
+	traversal_profile = TraversalProfileScript.from_profile(profile, can_fight)
 	body_ref = weakref(body) if body != null else null
 
 func body() -> Node:

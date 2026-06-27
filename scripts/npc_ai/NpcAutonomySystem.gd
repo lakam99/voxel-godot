@@ -31,7 +31,7 @@ const NpcSimulationLodServiceScript := preload("res://scripts/npc_ai/lifecycle/N
 var npc_system: Node
 var main: Node
 var architecture_version := NpcConstantsScript.ARCHITECTURE_VERSION
-var locomotion_mode := NpcConstantsScript.LEGACY_LOCOMOTION_MODE
+var movement_stack := NpcConstantsScript.NPC_MOVEMENT_STACK
 var contexts_by_instance_id := {}
 var contexts_by_stable_id := {}
 var blackboards_by_stable_id := {}
@@ -47,6 +47,7 @@ var safe_interval_planner
 var wait_for_graph
 var traffic_priority_policy
 var traffic_reservations
+var external_traffic_advanced_since_policy := false
 var guard_roster
 var schedule_service
 var perception_service
@@ -94,7 +95,7 @@ func setup(system_node: Node, main_node: Node) -> void:
 	setup_behavior_services()
 	telemetry.record_event("_system", &"architecture", "setup", &"none", {
 		"architectureVersion": architecture_version,
-		"locomotionMode": locomotion_mode
+		"movementStack": movement_stack
 	})
 
 func _physics_process(_delta: float) -> void:
@@ -147,30 +148,30 @@ func setup_behavior_services() -> void:
 		"recovery": recovery_policy
 	})
 
-func register_legacy_npc(body: Node, profile: Dictionary, legacy_entry: Dictionary):
+func register_npc(body: Node, profile: Dictionary, entry: Dictionary):
 	if body == null:
 		return null
-	var context = NpcAgentContextScript.from_legacy_profile(body, profile)
+	var context = NpcAgentContextScript.from_profile(body, profile)
 	var blackboard = NpcBlackboardScript.new()
 	contexts_by_instance_id[body.get_instance_id()] = context
 	contexts_by_stable_id[context.stable_id] = context
 	blackboards_by_stable_id[context.stable_id] = blackboard
 	scheduler.register_agent(context.stable_id)
-	legacy_entry["agentContext"] = context
-	legacy_entry["blackboard"] = blackboard
+	entry["agentContext"] = context
+	entry["blackboard"] = blackboard
 	if guard_roster != null:
-		guard_roster.migrate_legacy_duty(context, legacy_entry)
+		guard_roster.assign_duty_from_entry(context, entry)
 	body.set_meta("npc_stable_id", context.stable_id)
 	body.set_meta("npc_guard_duty", String(context.guard_duty_kind))
 	if simulation_lod != null:
-		simulation_lod.register_actor(legacy_entry)
-	telemetry.record_event(context.stable_id, &"registration", "legacy_registered", &"none", {
+		simulation_lod.register_actor(entry)
+	telemetry.record_event(context.stable_id, &"registration", "registered", &"none", {
 		"canFight": context.can_fight,
 		"guardDuty": String(context.guard_duty_kind)
 	})
 	return context
 
-func update_legacy_npc(entry: Dictionary, delta: float, night_factor: float) -> void:
+func update_npc(entry: Dictionary, delta: float, night_factor: float) -> void:
 	if plan_executor == null:
 		return
 	if simulation_lod != null and simulation_lod.should_hold_active_movement(entry):
@@ -181,7 +182,7 @@ func update_legacy_npc(entry: Dictionary, delta: float, night_factor: float) -> 
 		return
 	if not bool(entry.get("npc_lod_brain_due", true)):
 		return
-	plan_executor.update_legacy_npc(entry, delta, night_factor)
+	plan_executor.update_npc(entry, delta, night_factor)
 
 func update_simulation_lod(entry: Dictionary, delta: float, observer_position := Vector3.INF, context := {}) -> Dictionary:
 	if simulation_lod == null:
@@ -222,7 +223,7 @@ func cleanup_actor_ownership(entry_or_id, reason := "cleanup") -> Dictionary:
 		return {}
 	return simulation_lod.cleanup_actor_ownership(entry_or_id, reason)
 
-func unregister_legacy_npc(body: Node) -> void:
+func unregister_npc(body: Node) -> void:
 	if body == null:
 		return
 	var instance_id := body.get_instance_id()
@@ -235,7 +236,7 @@ func unregister_legacy_npc(body: Node) -> void:
 	contexts_by_stable_id.erase(context.stable_id)
 	blackboards_by_stable_id.erase(context.stable_id)
 	scheduler.unregister_agent(context.stable_id)
-	telemetry.record_event(context.stable_id, &"registration", "legacy_unregistered")
+	telemetry.record_event(context.stable_id, &"registration", "unregistered")
 
 func record_motion(entry: Dictionary, motor_state) -> void:
 	if motor_state == null:
@@ -373,12 +374,12 @@ func request_door_state(door: Node, desired_open: bool, actor: Node = null, acto
 		})
 	return result
 
-func request_door_toggle(door: Node, actor: Node = null, actor_kind := "player", metadata := {}):
+func request_player_door_use(door: Node, actor: Node = null, actor_kind := "player", metadata := {}):
 	if smart_objects == null:
 		return null
-	var result = smart_objects.request_door_toggle(door, actor, actor_kind, metadata)
+	var result = smart_objects.request_player_door_use(door, actor, actor_kind, metadata)
 	if result != null:
-		telemetry.record_event("_system", &"door", "toggle_request", StringName(String(result.reason)), {
+		telemetry.record_event("_system", &"door", "player_use_request", StringName(String(result.reason)), {
 			"actorKind": actor_kind,
 			"status": String(result.status),
 			"metrics": result.metrics.duplicate(true) if result.metrics is Dictionary else {}
@@ -445,9 +446,17 @@ func release_npc_door_hold(actor_or_id, schedule_close := true) -> void:
 	if door_traversal != null:
 		door_traversal.release_actor(actor_or_id, schedule_close)
 
-func advance_traffic(delta: float) -> void:
+func advance_traffic(delta: float, mark_external := true) -> void:
 	if traffic_reservations != null:
 		traffic_reservations.advance(delta)
+	if mark_external:
+		external_traffic_advanced_since_policy = true
+
+func consume_external_traffic_advance() -> bool:
+	if external_traffic_advanced_since_policy:
+		external_traffic_advanced_since_policy = false
+		return true
+	return false
 
 func request_npc_traffic_step(entry: Dictionary, previous: Vector3, candidate: Vector3, world, intent := {}) -> Dictionary:
 	if traffic_reservations == null or world == null:
@@ -580,7 +589,7 @@ func build_navigation_tiles(max_jobs := 1) -> Array:
 func stats() -> Dictionary:
 	return {
 		"architectureVersion": architecture_version,
-		"locomotionMode": locomotion_mode,
+		"movementStack": movement_stack,
 		"contexts": contexts_by_stable_id.size(),
 		"scheduler": scheduler.stats(),
 		"telemetry": telemetry.stats(),

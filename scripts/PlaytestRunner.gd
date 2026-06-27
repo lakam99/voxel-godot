@@ -4439,14 +4439,14 @@ func test_structure_and_town_generation() -> void:
         var pivot := door.get_node_or_null("DoorPivot") as Node3D
         var proxy := door.get_node_or_null("DoorInteraction") as Area3D
         var closed_body_rotation := door.rotation.y
-        main.call("toggle_door", door)
+        main.call("request_door_state", door, true, null, "test", { "authorized": true })
         var opened_once: bool = bool(door.get_meta("open")) and closed_shape != null and closed_shape.disabled and pivot != null and abs(pivot.rotation.y) > 0.5 and abs(door.rotation.y - closed_body_rotation) < 0.001
         var closed_via_proxy := false
         var reopened_via_proxy := false
         if proxy:
-            main.call("toggle_door", proxy)
+            main.call("request_door_state", proxy, false, null, "test", { "authorized": true })
             closed_via_proxy = not bool(door.get_meta("open")) and closed_shape != null and not closed_shape.disabled and pivot != null and abs(pivot.rotation.y) < 0.001
-            main.call("toggle_door", proxy)
+            main.call("request_door_state", proxy, true, null, "test", { "authorized": true })
             reopened_via_proxy = bool(door.get_meta("open")) and closed_shape != null and closed_shape.disabled and pivot != null and abs(pivot.rotation.y) > 0.5
         add_result(
             "door_toggle_collision",

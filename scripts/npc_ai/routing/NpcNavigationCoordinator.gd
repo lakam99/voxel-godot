@@ -1,10 +1,10 @@
 extends RefCounted
 class_name NpcNavigationCoordinator
 
-const NpcNavigationWorldScript := preload("res://scripts/npc_nav/NpcNavigationWorld.gd")
-const NpcRoutePlannerScript := preload("res://scripts/npc_nav/NpcRoutePlanner.gd")
-const NpcLocomotionControllerScript := preload("res://scripts/npc_nav/NpcLocomotionController.gd")
-const NpcGoalPlannerScript := preload("res://scripts/npc_nav/NpcGoalPlanner.gd")
+const GeneratedWorldNavigationAdapterScript := preload("res://scripts/npc_ai/navigation/GeneratedWorldNavigationAdapter.gd")
+const NpcRouteCoordinatorAdapterScript := preload("res://scripts/npc_ai/routing/NpcRouteCoordinatorAdapter.gd")
+const NpcRouteMovementControllerScript := preload("res://scripts/npc_ai/movement/NpcRouteMovementController.gd")
+const NpcSemanticGoalPlannerScript := preload("res://scripts/npc_ai/behavior/NpcSemanticGoalPlanner.gd")
 
 const CELL := 1.35
 
@@ -19,14 +19,14 @@ var route_repair
 func setup(system_node, main_node) -> void:
     system = system_node
     main = main_node
-    navigation_world = NpcNavigationWorldScript.new()
+    navigation_world = GeneratedWorldNavigationAdapterScript.new()
     navigation_world.setup(system, main)
-    route_planner = NpcRoutePlannerScript.new()
+    route_planner = NpcRouteCoordinatorAdapterScript.new()
     route_planner.setup(system, main, navigation_world)
     route_repair = route_planner.get("repair_service")
-    locomotion = NpcLocomotionControllerScript.new()
+    locomotion = NpcRouteMovementControllerScript.new()
     locomotion.setup(system, main)
-    goal_planner = NpcGoalPlannerScript.new()
+    goal_planner = NpcSemanticGoalPlannerScript.new()
     goal_planner.setup(system, main, navigation_world, route_planner)
 
 func begin_frame() -> void:
@@ -38,6 +38,8 @@ func invalidate() -> void:
         navigation_world.invalidate()
 
 func process_navigation_events(events: Array, max_expansions := 128) -> Array[Dictionary]:
+    if navigation_world != null and navigation_world.has_method("apply_navigation_events"):
+        navigation_world.apply_navigation_events(events)
     if route_planner == null or not route_planner.has_method("process_navigation_events"):
         return []
     return route_planner.process_navigation_events(events, max_expansions)

@@ -156,7 +156,8 @@ func use_or_place() -> void:
         if block and block.has_meta("kind") and String(block.get_meta("kind")) == "block":
             var block_type := String(block.get_meta("block_type"))
             if block_type == "door":
-                if toggle_door(block):
+                var door_result = request_player_door_use(block, player, "player")
+                if door_result != null and String(door_result.get("status")) == "succeeded":
                     var door_open := bool(block.get_meta("open"))
                     play_feedback("doorOpen" if door_open else "doorClose", block.global_position if block is Node3D else Vector3.INF, feedback_color_for_material("door"), 2)
                     if door_open and tutorial_system and tutorial_system.has_method("on_door_opened") and bool(tutorial_system.on_door_opened(block)):
@@ -287,16 +288,12 @@ func find_fishing_spot() -> Dictionary:
 func is_utility_block(block_type: String) -> bool:
     return block_type in ["workbench", "anvil", "chest", "furnace", "campfire", "bed", "traderStall"]
 
-func toggle_door(door: Node) -> bool:
-    var result = request_door_toggle(door, player, "player")
-    return result != null and String(result.get("status")) == "succeeded"
-
-func request_door_toggle(door: Node, actor: Node = null, actor_kind := "player", metadata := {}):
+func request_player_door_use(door: Node, actor: Node = null, actor_kind := "player", metadata := {}):
     door = interaction_block_from_collider(door)
     if not door or not door.has_meta("block_type") or String(door.get_meta("block_type")) != "door":
         return null
-    if npc_system and npc_system.has_method("request_door_toggle"):
-        return npc_system.request_door_toggle(door, actor, actor_kind, metadata)
+    if npc_system and npc_system.has_method("request_player_door_use"):
+        return npc_system.request_player_door_use(door, actor, actor_kind, metadata)
     return null
 
 func request_door_state(door: Node, desired_open: bool, actor: Node = null, actor_kind := "system", metadata := {}):

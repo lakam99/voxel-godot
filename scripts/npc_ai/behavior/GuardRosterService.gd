@@ -9,11 +9,11 @@ func role_allows_guard_duty(role: String) -> bool:
 	var lowered := role.to_lower()
 	return lowered.find("guard") >= 0 or lowered.find("watch") >= 0
 
-func migrate_legacy_duty(context, entry: Dictionary) -> bool:
+func assign_duty_from_entry(context, entry: Dictionary) -> bool:
 	var role := String(entry.get("role", context.get("role") if context != null else ""))
-	var explicit_legacy := bool(entry.get("nightGuard", false))
+	var explicit_night_guard := bool(entry.get("nightGuard", false))
 	var actual_guard := role_allows_guard_duty(role)
-	var assigned := explicit_legacy and actual_guard
+	var assigned := explicit_night_guard and actual_guard
 	if context != null:
 		context.set("guard_duty_kind", NpcEnumsScript.GUARD_DUTY_NIGHT if assigned else NpcEnumsScript.GUARD_DUTY_NONE)
 	entry["nightGuard"] = assigned

@@ -140,20 +140,20 @@ func _route_graph_metrics(graph: Dictionary, start_key: String, goal_keys: Array
 		"allowedTileCount": allowed_tiles.size()
 	}
 
-func plan_legacy_route(entry: Dictionary, intent: Dictionary, legacy_world, max_expansions := 200000) -> Dictionary:
-	var request = legacy_request(entry, intent, legacy_world)
+func plan_runtime_route(entry: Dictionary, intent: Dictionary, world_adapter, max_expansions := 200000) -> Dictionary:
+	var request = runtime_request(entry, intent, world_adapter)
 	var result = plan_route(request, max_expansions)
 	_record_route_result(entry, result)
-	return compatibility_dictionary(result, intent, legacy_world)
+	return route_dictionary_from_result(result, intent, world_adapter)
 
-func route_cost_for_legacy(entry: Dictionary, target: Vector3, allow_outside := false, moving_home := false, arrival_radius := NpcConstantsScript.CELL_SIZE * 0.85, approach_cells: Array = [], legacy_world = null) -> float:
-	if legacy_world == null:
+func route_cost_for_runtime(entry: Dictionary, target: Vector3, allow_outside := false, moving_home := false, arrival_radius := NpcConstantsScript.CELL_SIZE * 0.85, approach_cells: Array = [], world_adapter = null) -> float:
+	if world_adapter == null:
 		return INF
 	var body := entry.get("body") as Node3D
 	var start_position: Vector3 = body.global_position if body != null else entry.get("porchPosition", Vector3.ZERO)
-	var target_cell: Vector2i = legacy_world.world_cell(target)
-	var start_cell: Vector2i = legacy_world.world_cell(start_position)
-	var snapshot: Dictionary = legacy_world.build_snapshot(entry, allow_outside, moving_home)
+	var target_cell: Vector2i = world_adapter.world_cell(target)
+	var start_cell: Vector2i = world_adapter.world_cell(start_position)
+	var snapshot: Dictionary = world_adapter.build_snapshot(entry, allow_outside, moving_home)
 	var intent := {
 		"kind": "cost",
 		"target": target,
@@ -166,7 +166,7 @@ func route_cost_for_legacy(entry: Dictionary, target: Vector3, allow_outside := 
 		"interruptible": true,
 		"approachCells": approach_cells
 	}
-	var target_cells: Dictionary = _legacy_target_cells(entry, intent, legacy_world, snapshot, target_cell, start_cell)
+	var target_cells: Dictionary = _runtime_target_cells(entry, intent, world_adapter, snapshot, target_cell, start_cell)
 	if target_cells.is_empty():
 		return INF
 	var best := INF
@@ -175,11 +175,11 @@ func route_cost_for_legacy(entry: Dictionary, target: Vector3, allow_outside := 
 			continue
 		var delta := Vector2(float(cell.x - start_cell.x), float(cell.y - start_cell.y))
 		var cost := delta.length()
-		cost += _legacy_line_blocker_penalty(entry, legacy_world, snapshot, start_cell, cell)
+		cost += _runtime_line_blocker_penalty(entry, world_adapter, snapshot, start_cell, cell)
 		best = minf(best, cost)
 	return best
 
-func compatibility_dictionary(result, intent: Dictionary, legacy_world) -> Dictionary:
+func route_dictionary_from_result(result, intent: Dictionary, world_adapter) -> Dictionary:
 	var target_cell: Vector2i = intent.get("targetCell", Vector2i(999999, 999999))
 	if result == null:
 		return _route_failure("blocked", "missing_result", target_cell)
@@ -386,13 +386,13 @@ func resolve_goal_keys(graph: Dictionary, request, profile = null) -> Array:
 	result.sort()
 	return result
 
-func legacy_request(entry: Dictionary, intent: Dictionary, legacy_world):
+func runtime_request(entry: Dictionary, intent: Dictionary, world_adapter):
 	var request = RouteRequestScript.new()
-	request.request_id = "legacy:%s:%s:%s" % [String(entry.get("id", "npc")), String(intent.get("kind", "move")), str(intent.get("targetCell", Vector2i.ZERO))]
+	request.request_id = "runtime:%s:%s:%s" % [String(entry.get("id", "npc")), String(intent.get("kind", "move")), str(intent.get("targetCell", Vector2i.ZERO))]
 	request.owner_npc_id = String(entry.get("id", "npc"))
 	var body := entry.get("body") as Node3D
 	request.start_position = body.global_position if body != null else entry.get("porchPosition", Vector3.ZERO)
-	request.start_span = _legacy_span_key(legacy_world.world_cell(request.start_position))
+	request.start_span = _runtime_span_key(world_adapter.world_cell(request.start_position))
 	request.goal_kind = StringName(String(intent.get("kind", "move")))
 	request.priority_class = int(intent.get("priority", 0))
 	request.allow_partial = bool(intent.get("allowPartial", false))
@@ -402,7 +402,7 @@ func legacy_request(entry: Dictionary, intent: Dictionary, legacy_world):
 		"kind": "point_region",
 		"center": target,
 		"radius": request.maximum_acceptable_goal_distance,
-		"_graph": _build_legacy_graph(entry, intent, legacy_world, request.start_position)
+		"_graph": _build_runtime_graph(entry, intent, world_adapter, request.start_position)
 	}
 	var blackboard = entry.get("blackboard")
 	if blackboard != null and blackboard.has_method("next_route_generation"):
@@ -411,28 +411,28 @@ func legacy_request(entry: Dictionary, intent: Dictionary, legacy_world):
 		request.next_generation()
 	return request
 
-func _build_legacy_graph(entry: Dictionary, intent: Dictionary, legacy_world, start_position: Vector3) -> Dictionary:
+func _build_runtime_graph(entry: Dictionary, intent: Dictionary, world_adapter, start_position: Vector3) -> Dictionary:
 	var graph := _empty_graph()
-	if legacy_world == null:
+	if world_adapter == null:
 		return graph
 	var allow_outside := bool(intent.get("allowOutside", false))
 	var moving_home := bool(intent.get("movingHome", false))
-	var snapshot: Dictionary = legacy_world.build_snapshot(entry, allow_outside, moving_home)
-	var start_cell: Vector2i = legacy_world.world_cell(start_position)
-	var target_cell: Vector2i = intent.get("targetCell", legacy_world.world_cell(intent.get("target", start_position)))
-	var target_cells: Dictionary = _legacy_target_cells(entry, intent, legacy_world, snapshot, target_cell, start_cell)
+	var snapshot: Dictionary = world_adapter.build_snapshot(entry, allow_outside, moving_home)
+	var start_cell: Vector2i = world_adapter.world_cell(start_position)
+	var target_cell: Vector2i = intent.get("targetCell", world_adapter.world_cell(intent.get("target", start_position)))
+	var target_cells: Dictionary = _runtime_target_cells(entry, intent, world_adapter, snapshot, target_cell, start_cell)
 	if target_cells.is_empty():
 		target_cells[target_cell] = true
-	var margin := _legacy_margin_for_intent(intent)
-	var candidate_cells: Dictionary = _legacy_graph_cells(start_cell, target_cell, target_cells, margin)
+	var margin := _runtime_margin_for_intent(intent)
+	var candidate_cells: Dictionary = _runtime_graph_cells(start_cell, target_cell, target_cells, margin)
 	var cells := candidate_cells.keys()
 	cells.sort_custom(func(a: Vector2i, b: Vector2i) -> bool:
 		return a.x < b.x or (a.x == b.x and a.y < b.y)
 	)
 	for cell: Vector2i in cells:
-		if not _legacy_cell_can_be_node(entry, legacy_world, snapshot, cell, start_cell, target_cells):
+		if not _runtime_cell_can_be_node(entry, world_adapter, snapshot, cell, start_cell, target_cells):
 			continue
-		var span = _legacy_span_for_cell(legacy_world, snapshot, cell)
+		var span = _runtime_span_for_cell(world_adapter, snapshot, cell)
 		_add_node(graph, span, NavigationChangeBusScript.tile_key_for_cell(cell))
 	var node_keys := (graph.get("nodes", {}) as Dictionary).keys()
 	node_keys.sort()
@@ -445,21 +445,21 @@ func _build_legacy_graph(entry: Dictionary, intent: Dictionary, legacy_world, st
 		var from_cell: Vector2i = Vector2i(from_cell3.x, from_cell3.z)
 		for offset in [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1), Vector2i(1, 1), Vector2i(1, -1), Vector2i(-1, 1), Vector2i(-1, -1)]:
 			var to_cell: Vector2i = from_cell + offset
-			var to_key := _legacy_span_key(to_cell)
+			var to_key := _runtime_span_key(to_cell)
 			if not (graph.get("nodes", {}) as Dictionary).has(to_key):
 				continue
-			if offset.x != 0 and offset.y != 0 and (_legacy_step_blocked(entry, legacy_world, snapshot, from_cell, Vector2i(offset.x, 0), target_lookup) or _legacy_step_blocked(entry, legacy_world, snapshot, from_cell, Vector2i(0, offset.y), target_lookup)):
+			if offset.x != 0 and offset.y != 0 and (_runtime_step_blocked(entry, world_adapter, snapshot, from_cell, Vector2i(offset.x, 0), target_lookup) or _runtime_step_blocked(entry, world_adapter, snapshot, from_cell, Vector2i(0, offset.y), target_lookup)):
 				continue
-			if _legacy_step_blocked(entry, legacy_world, snapshot, from_cell, offset, target_lookup):
+			if _runtime_step_blocked(entry, world_adapter, snapshot, from_cell, offset, target_lookup):
 				continue
 			var to_span = (graph.get("nodes", {}) as Dictionary)[to_key]
 			var kind := NpcEnumsScript.TRAVERSAL_KIND_WALK
 			var cost := 1.414 if offset.x != 0 and offset.y != 0 else 1.0
-			var door: Node = legacy_world.door_at(snapshot, to_cell)
+			var door: Node = world_adapter.door_at(snapshot, to_cell)
 			if door != null:
 				kind = NpcEnumsScript.TRAVERSAL_KIND_DOOR
 				cost += 1.0
-			elif legacy_world.is_path_cell(snapshot, to_cell):
+			elif world_adapter.is_path_cell(snapshot, to_cell):
 				cost *= 0.78
 			var edge = NavEdgeDataScript.make(from_key, to_key, kind, cost)
 			if door != null:
@@ -478,23 +478,23 @@ func _empty_graph() -> Dictionary:
 		"tiles": []
 	}
 
-func _legacy_graph_cells(start_cell: Vector2i, target_cell: Vector2i, target_cells: Dictionary, margin: int) -> Dictionary:
+func _runtime_graph_cells(start_cell: Vector2i, target_cell: Vector2i, target_cells: Dictionary, margin: int) -> Dictionary:
 	var cells := {}
-	_legacy_add_cell_radius(cells, start_cell, margin)
-	_legacy_add_cell_radius(cells, target_cell, margin)
-	_legacy_add_line_corridor(cells, start_cell, target_cell, margin)
+	_runtime_add_cell_radius(cells, start_cell, margin)
+	_runtime_add_cell_radius(cells, target_cell, margin)
+	_runtime_add_line_corridor(cells, start_cell, target_cell, margin)
 	for target in target_cells.keys():
 		if target is Vector2i:
-			_legacy_add_cell_radius(cells, target, margin)
-			_legacy_add_line_corridor(cells, start_cell, target, margin)
+			_runtime_add_cell_radius(cells, target, margin)
+			_runtime_add_line_corridor(cells, start_cell, target, margin)
 	return cells
 
-func _legacy_add_cell_radius(cells: Dictionary, center: Vector2i, radius: int) -> void:
+func _runtime_add_cell_radius(cells: Dictionary, center: Vector2i, radius: int) -> void:
 	for z in range(center.y - radius, center.y + radius + 1):
 		for x in range(center.x - radius, center.x + radius + 1):
 			cells[Vector2i(x, z)] = true
 
-func _legacy_add_line_corridor(cells: Dictionary, start_cell: Vector2i, end_cell: Vector2i, radius: int) -> void:
+func _runtime_add_line_corridor(cells: Dictionary, start_cell: Vector2i, end_cell: Vector2i, radius: int) -> void:
 	var x := start_cell.x
 	var z := start_cell.y
 	var dx := absi(end_cell.x - start_cell.x)
@@ -503,7 +503,7 @@ func _legacy_add_line_corridor(cells: Dictionary, start_cell: Vector2i, end_cell
 	var sz := 1 if start_cell.y < end_cell.y else -1
 	var err := dx - dz
 	while true:
-		_legacy_add_cell_radius(cells, Vector2i(x, z), radius)
+		_runtime_add_cell_radius(cells, Vector2i(x, z), radius)
 		if x == end_cell.x and z == end_cell.y:
 			break
 		var e2 := err * 2
@@ -617,28 +617,28 @@ func _base_result(request, status: StringName, reason: StringName, metrics := {}
 	result.metrics = metrics.duplicate(true)
 	return result
 
-func _legacy_target_cells(entry: Dictionary, intent: Dictionary, legacy_world, snapshot: Dictionary, target_cell: Vector2i, start_cell: Vector2i) -> Dictionary:
+func _runtime_target_cells(entry: Dictionary, intent: Dictionary, world_adapter, snapshot: Dictionary, target_cell: Vector2i, start_cell: Vector2i) -> Dictionary:
 	var target_cells := {}
 	var arrival_radius := float(intent.get("arrivalRadius", NpcConstantsScript.CELL_SIZE * 0.75))
 	var strict_arrival := bool(intent.get("strictArrival", false)) or String(intent.get("kind", "")) == "scripted"
 	var radius: int = 0 if strict_arrival else clampi(ceili(arrival_radius / NpcConstantsScript.CELL_SIZE), 0, 3)
 	for cell_value in intent.get("approachCells", []):
-		if cell_value is Vector2i and _legacy_cell_can_be_goal(entry, legacy_world, snapshot, cell_value, start_cell):
+		if cell_value is Vector2i and _runtime_cell_can_be_goal(entry, world_adapter, snapshot, cell_value, start_cell):
 			target_cells[cell_value] = true
 	if not target_cells.is_empty():
 		return target_cells
 	var search_radius := radius if strict_arrival else maxi(1, radius)
 	if bool(intent.get("movingHome", false)):
 		search_radius = maxi(search_radius, 2)
-	for cell in legacy_world.candidate_cells_near(entry, target_cell, bool(intent.get("allowOutside", false)), bool(intent.get("movingHome", false)), search_radius):
-		if _legacy_cell_can_be_goal(entry, legacy_world, snapshot, cell, start_cell):
+	for cell in world_adapter.candidate_cells_near(entry, target_cell, bool(intent.get("allowOutside", false)), bool(intent.get("movingHome", false)), search_radius):
+		if _runtime_cell_can_be_goal(entry, world_adapter, snapshot, cell, start_cell):
 			target_cells[cell] = true
 	for cell_value in intent.get("fallbackCells", []):
-		if cell_value is Vector2i and _legacy_cell_can_be_goal(entry, legacy_world, snapshot, cell_value, start_cell):
+		if cell_value is Vector2i and _runtime_cell_can_be_goal(entry, world_adapter, snapshot, cell_value, start_cell):
 			target_cells[cell_value] = true
 	return target_cells
 
-func _legacy_margin_for_intent(intent: Dictionary) -> int:
+func _runtime_margin_for_intent(intent: Dictionary) -> int:
 	var kind := String(intent.get("kind", "move"))
 	if bool(intent.get("movingHome", false)):
 		return 26
@@ -648,33 +648,33 @@ func _legacy_margin_for_intent(intent: Dictionary) -> int:
 		return 12
 	return 8
 
-func _legacy_cell_can_be_goal(entry: Dictionary, legacy_world, snapshot: Dictionary, cell: Vector2i, start_cell: Vector2i) -> bool:
+func _runtime_cell_can_be_goal(entry: Dictionary, world_adapter, snapshot: Dictionary, cell: Vector2i, start_cell: Vector2i) -> bool:
 	if cell == start_cell:
 		return true
-	if legacy_world.static_blocker(snapshot, cell) != null:
+	if world_adapter.static_blocker(snapshot, cell) != null:
 		return false
-	var height: float = legacy_world.height_for_cell(cell)
-	var main = legacy_world.get("main")
+	var height: float = world_adapter.height_for_cell(cell)
+	var main = world_adapter.get("main")
 	return main == null or height >= main.WATER_LEVEL + 0.45
 
-func _legacy_cell_can_be_node(entry: Dictionary, legacy_world, snapshot: Dictionary, cell: Vector2i, start_cell: Vector2i, target_cells: Dictionary) -> bool:
+func _runtime_cell_can_be_node(entry: Dictionary, world_adapter, snapshot: Dictionary, cell: Vector2i, start_cell: Vector2i, target_cells: Dictionary) -> bool:
 	if cell == start_cell or target_cells.has(cell):
 		return true
-	if not legacy_world.cell_allowed_area(entry, cell, bool(snapshot.get("allowOutside", false)), bool(snapshot.get("movingHome", false))):
+	if not world_adapter.cell_allowed_area(entry, cell, bool(snapshot.get("allowOutside", false)), bool(snapshot.get("movingHome", false))):
 		return false
-	if legacy_world.static_blocker(snapshot, cell) != null and legacy_world.door_at(snapshot, cell) == null:
+	if world_adapter.static_blocker(snapshot, cell) != null and world_adapter.door_at(snapshot, cell) == null:
 		return false
-	var main = legacy_world.get("main")
-	if main != null and legacy_world.height_for_cell(cell) < main.WATER_LEVEL + 0.45:
+	var main = world_adapter.get("main")
+	if main != null and world_adapter.height_for_cell(cell) < main.WATER_LEVEL + 0.45:
 		return false
 	return true
 
-func _legacy_step_blocked(entry: Dictionary, legacy_world, snapshot: Dictionary, from_cell: Vector2i, offset: Vector2i, target_lookup: Dictionary) -> bool:
+func _runtime_step_blocked(entry: Dictionary, world_adapter, snapshot: Dictionary, from_cell: Vector2i, offset: Vector2i, target_lookup: Dictionary) -> bool:
 	var to_cell := from_cell + offset
-	var allowed: Dictionary = legacy_world.cell_pathable(entry, snapshot, from_cell, to_cell, target_lookup, true)
+	var allowed: Dictionary = world_adapter.cell_pathable(entry, snapshot, from_cell, to_cell, target_lookup, true)
 	return not bool(allowed.get("ok", false))
 
-func _legacy_line_blocker_penalty(entry: Dictionary, legacy_world, snapshot: Dictionary, start_cell: Vector2i, end_cell: Vector2i) -> float:
+func _runtime_line_blocker_penalty(entry: Dictionary, world_adapter, snapshot: Dictionary, start_cell: Vector2i, end_cell: Vector2i) -> float:
 	var dx := end_cell.x - start_cell.x
 	var dz := end_cell.y - start_cell.y
 	var samples := clampi(maxi(absi(dx), absi(dz)), 1, 48)
@@ -689,28 +689,28 @@ func _legacy_line_blocker_penalty(entry: Dictionary, legacy_world, snapshot: Dic
 		var offset := cell - previous
 		offset.x = clampi(offset.x, -1, 1)
 		offset.y = clampi(offset.y, -1, 1)
-		if _legacy_step_blocked(entry, legacy_world, snapshot, previous, offset, target_lookup):
+		if _runtime_step_blocked(entry, world_adapter, snapshot, previous, offset, target_lookup):
 			penalty += 8.0
 		previous = previous + offset
 	return penalty
 
-func _legacy_span_for_cell(legacy_world, snapshot: Dictionary, cell: Vector2i):
+func _runtime_span_for_cell(world_adapter, snapshot: Dictionary, cell: Vector2i):
 	var surface := {
 		"cell": Vector3i(cell.x, 0, cell.y),
-		"worldPosition": legacy_world.cell_position(cell),
+		"worldPosition": world_adapter.cell_position(cell),
 		"headroom": 2.4,
 		"lateralClearance": 1.0,
 		"floorNormal": Vector3.UP,
 		"semanticRegionIds": [],
 		"traversalTags": ["terrain"]
 	}
-	if legacy_world.is_path_cell(snapshot, cell):
+	if world_adapter.is_path_cell(snapshot, cell):
 		surface["semanticRegionIds"] = ["road"]
-	if legacy_world.door_at(snapshot, cell) != null:
+	if world_adapter.door_at(snapshot, cell) != null:
 		surface["semanticRegionIds"] = ["door"]
 	return NavSpanDataScript.from_surface(NavigationChangeBusScript.tile_key_for_cell(cell), surface, 0)
 
-func _legacy_span_key(cell: Vector2i) -> String:
+func _runtime_span_key(cell: Vector2i) -> String:
 	return "%s:%d,%d,%d:0" % [NavigationChangeBusScript.tile_key_for_cell(cell), cell.x, 0, cell.y]
 
 func _cache_local_cost(edge_record: Dictionary, profile = null) -> void:

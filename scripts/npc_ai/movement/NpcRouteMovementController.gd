@@ -1,5 +1,5 @@
 extends RefCounted
-class_name NpcLocomotionController
+class_name NpcRouteMovementController
 
 const CELL := 1.35
 const NpcConstantsScript := preload("res://scripts/npc_ai/NpcConstants.gd")
@@ -7,6 +7,7 @@ const NpcCorridorFollowerScript := preload("res://scripts/npc_ai/movement/NpcCor
 const ReciprocalAvoidanceAdapterScript := preload("res://scripts/npc_ai/movement/ReciprocalAvoidanceAdapter.gd")
 const CAPSULE_RADIUS := 0.34
 const CAPSULE_HEIGHT := 1.64
+const DOOR_ACTION_LOOKAHEAD_CELLS := 4
 
 var system
 var main
@@ -540,7 +541,7 @@ func handle_upcoming_door_action(entry: Dictionary, next_cell: Vector2i, world, 
         if action_cell == next_cell:
             continue
         var action_index: int = route_cells.find(action_cell)
-        if action_index < 0 or action_index > 2:
+        if action_index < 0 or action_index > DOOR_ACTION_LOOKAHEAD_CELLS:
             continue
         var door_value = action.get("door")
         if door_value == null or not is_instance_valid(door_value) or not (door_value is Node):

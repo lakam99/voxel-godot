@@ -77,6 +77,27 @@ NPC pathfinding replacement harness:
 .\tools\run-all-test-runners.ps1
 ```
 
+Phase 13 focused NPC release checks:
+
+```powershell
+.\tools\npc\run-npc-contract-tests.ps1 -TimeMode Both
+.\tools\npc\run-npc-motor-tests.ps1 -TimeMode Both
+.\tools\npc\run-npc-nav-world-tests.ps1 -TimeMode Both
+.\tools\npc\run-npc-route-tests.ps1 -TimeMode Both
+.\tools\npc\run-npc-repair-tests.ps1 -TimeMode Both
+.\tools\npc\run-npc-door-tests.ps1 -TimeMode Both
+.\tools\npc\run-npc-avoidance-tests.ps1 -TimeMode Both
+.\tools\npc\run-npc-traffic-tests.ps1 -TimeMode Both
+.\tools\npc\run-npc-behavior-tests.ps1 -TimeMode Both
+.\tools\npc\run-npc-behavior-tests.ps1 -TimeMode Transition
+.\tools\npc\run-npc-interaction-tests.ps1 -TimeMode Both
+.\tools\npc\run-npc-streaming-save-tests.ps1 -TimeMode Both
+.\tools\npc\run-npc-soak-tests.ps1 -TimeMode Both
+.\tools\npc\run-npc-soak-tests.ps1 -TimeMode Transition
+.\tools\npc\run-npc-observation-tests.ps1 -TimeMode Both
+.\tools\run-npc-navigation-tests.ps1
+```
+
 Visual captures:
 
 ```powershell
@@ -137,7 +158,18 @@ Avoid:
 
 ## NPC And AI Expectations
 
-For the full NPC autonomy/pathfinding replacement, `CODEX_NPC_PATHFINDING_FINAL_IMPLEMENTATION_PLAN.md` supersedes older NPC pathing plans. Implement only the active phase on its required branch, write the phase report under `docs/npc_pathfinding/`, keep the branch and merged `master` green, and do not skip ahead to later-phase runtime behavior.
+For the NPC autonomy/pathfinding replacement, `CODEX_NPC_PATHFINDING_FINAL_IMPLEMENTATION_PLAN.md` supersedes older NPC pathing plans. Phase work must keep the phase branch and merged `master` green and must tie every acceptance claim to a command, report, trace, capture, static audit, or commit.
+
+Current ownership:
+
+- `scripts/NpcSystem.gd` is the gameplay integration, spawn/registry, save-facing, and public stats adapter. Do not move new route search, direct movement loops, or door authority back into it.
+- `scripts/NpcPathing.gd` is a thin facade over `scripts/npc_ai/routing/NpcNavigationCoordinator.gd` for existing callers.
+- `scripts/npc_ai/navigation/GeneratedWorldNavigationAdapter.gd` owns generated-world navigation topology snapshots and consumes navigation events.
+- `scripts/npc_ai/routing/NpcRouteCoordinatorAdapter.gd` and `HierarchicalRoutePlanner.gd` own deterministic route planning, route repair, and traversal actions.
+- `scripts/npc_ai/movement/NpcRouteMovementController.gd` owns route-following through the shared `CharacterBody3D` motor.
+- `scripts/npc_ai/interactions/DoorPortalService.gd`, `DoorController.gd`, and `DoorTraversalExecutor.gd` own shared player/NPC door authority.
+- `scripts/npc_ai/traffic/TrafficReservationService.gd` owns bottleneck reservations, pending replans, priority aging, and active crossing cleanup.
+- `scripts/npc_ai/behavior/NpcPlanExecutor.gd` and related behavior services own job phases, schedule execution, and semantic goals.
 
 NPCs should move with purpose:
 
@@ -148,6 +180,9 @@ NPCs should move with purpose:
 - NPCs should not wander aimlessly into walls.
 - Pathing should account for terrain, obstacles, doors, town limits, and reachable work areas.
 - Door behavior should open before crossing, clear collision while open, and close after NPC/player clearance.
+- Door crossings should keep per-actor active ownership until the actor clears or is cancelled; route replacement must not silently drop an active portal reservation.
+- `canFight` is combat capability only. Explicit guard-duty assignment decides who may stay outside at night.
+- Porch, threshold, exterior wall edge, or roof locations do not count as inside.
 
 When changing NPC pathing, add or update playtest coverage around:
 

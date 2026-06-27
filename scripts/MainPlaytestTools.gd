@@ -619,6 +619,8 @@ func make_tree(parent: Node, prop_id: String, position: Vector3, biome: String, 
     body.add_child(collider)
 
     parent.add_child(body)
+    if npc_system and npc_system.has_method("notify_navigation_prop_created"):
+        npc_system.notify_navigation_prop_created(prop_id, body)
     return body
 
 func rock_visual_spec(rng: RandomNumberGenerator) -> Dictionary:
@@ -715,6 +717,8 @@ func make_rock(parent: Node, prop_id: String, position: Vector3, rng: RandomNumb
     collider.position.y = radius * 0.42
     body.add_child(collider)
     parent.add_child(body)
+    if npc_system and npc_system.has_method("notify_navigation_prop_created"):
+        npc_system.notify_navigation_prop_created(prop_id, body)
     return body
 
 func make_ore_cluster(parent: Node, prop_id: String, position: Vector3, ore_type: String, rng: RandomNumberGenerator, count: int = 3) -> Array:

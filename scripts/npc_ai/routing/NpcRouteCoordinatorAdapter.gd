@@ -1,5 +1,5 @@
 extends RefCounted
-class_name NpcRoutePlanner
+class_name NpcRouteCoordinatorAdapter
 
 const NpcConstantsScript := preload("res://scripts/npc_ai/NpcConstants.gd")
 const NpcEnumsScript := preload("res://scripts/npc_ai/NpcEnums.gd")
@@ -32,7 +32,7 @@ func plan_route(entry: Dictionary, intent: Dictionary) -> Dictionary:
 		repair_service.setup(coordinator)
 	if world == null:
 		return route_failure("blocked", "missing_world", intent.get("targetCell", Vector2i(999999, 999999)))
-	var result: Dictionary = coordinator.plan_legacy_route(entry, intent, world)
+	var result: Dictionary = coordinator.plan_runtime_route(entry, intent, world)
 	_register_repair_route(entry, result)
 	return result
 
@@ -41,7 +41,7 @@ func route_cost(entry: Dictionary, target: Vector3, allow_outside := false, movi
 		coordinator = HierarchicalRoutePlannerScript.new()
 	if world == null:
 		return INF
-	return coordinator.route_cost_for_legacy(entry, target, allow_outside, moving_home, arrival_radius, approach_cells, world)
+	return coordinator.route_cost_for_runtime(entry, target, allow_outside, moving_home, arrival_radius, approach_cells, world)
 
 func route_failure(status: String, reason: String, target_cell := Vector2i(999999, 999999)) -> Dictionary:
 	return {
@@ -116,4 +116,4 @@ func _apply_repair_response(route_id: String, response: Dictionary) -> void:
 	entry["routeReason"] = String(reason)
 
 func _route_id_for_entry(entry: Dictionary) -> String:
-	return "legacy:%s" % String(entry.get("id", "npc"))
+	return "runtime:%s" % String(entry.get("id", "npc"))

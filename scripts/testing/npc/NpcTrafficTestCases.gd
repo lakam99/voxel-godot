@@ -8,7 +8,7 @@ const WaitForGraphScript := preload("res://scripts/npc_ai/traffic/WaitForGraph.g
 const TrafficPriorityPolicyScript := preload("res://scripts/npc_ai/traffic/TrafficPriorityPolicy.gd")
 const DoorPortalServiceScript := preload("res://scripts/npc_ai/interactions/DoorPortalService.gd")
 const DoorTraversalExecutorScript := preload("res://scripts/npc_ai/interactions/DoorTraversalExecutor.gd")
-const NpcLocomotionControllerScript := preload("res://scripts/npc_nav/NpcLocomotionController.gd")
+const NpcRouteMovementControllerScript := preload("res://scripts/npc_ai/movement/NpcRouteMovementController.gd")
 
 const CELL := 1.35
 
@@ -217,10 +217,10 @@ func test_pullout_retreat_physical(_mode: String) -> Dictionary:
 	var fake_system := FakeMotionSystem.new()
 	if runner is Node:
 		runner.add_child(fake_system)
-	var locomotion = NpcLocomotionControllerScript.new()
+	var locomotion = NpcRouteMovementControllerScript.new()
 	locomotion.setup(fake_system, FakeMain.new())
 	var result: Dictionary = locomotion.try_dynamic_yield_retreat({ "id": "npc-a" }, body.global_position, { "reason": "yielding", "candidate": Vector3(0.5, 0.0, 0.0), "blocker": blocker }, { "physicsDelta": 1.0 / 60.0, "allowOutside": true }, CELL * 0.35, OpenWorld.new(), [body, blocker], 0)
-	var text := read_text("res://scripts/npc_nav/NpcLocomotionController.gd")
+	var text := read_text("res://scripts/npc_ai/movement/NpcRouteMovementController.gd")
 	var passed: bool = String(result.get("reason", "")) == "yielding_retreat" and int(fake_system.get("motion_calls")) == 1 and text.find("global_position =") < 0
 	return outcome(passed, "result=%s calls=%d globalWrite=%d" % [JSON.stringify(result), int(fake_system.get("motion_calls")), text.find("global_position =")], ["retreat_uses_motion_adapter", "no_locomotion_transform_write"], { "result": result, "motionCalls": int(fake_system.get("motion_calls")) })
 
