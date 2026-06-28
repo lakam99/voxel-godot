@@ -19,6 +19,11 @@ var unregistered_region_count := 0
 var installed_region_count := 0
 var installed_surface_count := 0
 var last_install_usec := 0
+var path_query_count := 0
+var path_query_failure_count := 0
+var last_path_query_usec := 0
+var total_path_query_usec := 0
+var max_path_query_usec := 0
 
 func setup(config = null) -> void:
 	backend_config = config if config != null else NavigationBackendConfigScript.from_environment()
@@ -38,6 +43,11 @@ func clear() -> void:
 	installed_region_count = 0
 	installed_surface_count = 0
 	last_install_usec = 0
+	path_query_count = 0
+	path_query_failure_count = 0
+	last_path_query_usec = 0
+	total_path_query_usec = 0
+	max_path_query_usec = 0
 	if owns_navigation_map and navigation_map.is_valid():
 		NavigationServer3D.free_rid(navigation_map)
 	navigation_map = RID()
@@ -116,15 +126,45 @@ func closest_walkable(position: Vector3, max_distance := INF) -> Dictionary:
 	return _closest_walkable_from_descriptors(position, max_distance)
 
 func query_route(start: Vector3, target: Vector3, options := {}) -> Dictionary:
-	return {
-		"status": "pending",
-		"reason": "navmesh_query_not_live",
-		"backend": backend_config.backend,
+	var started := Time.get_ticks_usec()
+	path_query_count += 1
+	if not backend_config.use_navmesh():
+		return _finish_route_query(started, _route_query_failure("disabled", "navmesh_backend_disabled", start, target, options))
+	if not navigation_map.is_valid() or region_rids_by_region.is_empty():
+		return _finish_route_query(started, _route_query_failure("blocked", "missing_navmesh_regions", start, target, options))
+	var max_snap := float(options.get("maxSnapDistance", INF))
+	var start_walkable := closest_walkable(start, max_snap)
+	if not bool(start_walkable.get("found", false)):
+		return _finish_route_query(started, _route_query_failure("blocked", "no_start_walkable", start, target, options, start_walkable))
+	var target_walkable := closest_walkable(target, max_snap)
+	if not bool(target_walkable.get("found", false)):
+		return _finish_route_query(started, _route_query_failure("blocked", "no_target_walkable", start, target, options, target_walkable))
+	var query_start: Vector3 = start_walkable.get("position", start)
+	var query_target: Vector3 = target_walkable.get("position", target)
+	var path: Array[Vector3] = _query_path_points(query_start, query_target, options)
+	if path.is_empty():
+		return _finish_route_query(started, _route_query_failure("blocked", "no_route", start, target, options, {
+			"startWalkable": start_walkable,
+			"targetWalkable": target_walkable
+		}))
+	return _finish_route_query(started, {
+		"ok": true,
+		"status": "complete",
+		"reason": "",
+		"source": "navmesh",
+		"queryApi": "query_path" if NavigationServer3D.has_method("query_path") else "map_get_path",
 		"start": start,
 		"target": target,
-		"options": options,
-		"topologyRevision": topology_revision
-	}
+		"startPosition": query_start,
+		"targetPosition": query_target,
+		"path": path,
+		"distance": _path_distance(path),
+		"pointCount": path.size(),
+		"snapshotRevision": revision(),
+		"options": options.duplicate(true),
+		"startWalkable": start_walkable,
+		"targetWalkable": target_walkable
+	})
 
 func debug_snapshot() -> Dictionary:
 	var regions := {}
@@ -158,8 +198,16 @@ func stats() -> Dictionary:
 		"dynamicRevision": dynamic_revision,
 		"registeredRegionCount": registered_region_count,
 		"unregisteredRegionCount": unregistered_region_count,
-		"lastInstallUsec": last_install_usec
+		"lastInstallUsec": last_install_usec,
+		"pathQueryCount": path_query_count,
+		"pathQueryFailureCount": path_query_failure_count,
+		"lastPathQueryUsec": last_path_query_usec,
+		"avgPathQueryUsec": float(total_path_query_usec) / float(maxi(1, path_query_count)),
+		"maxPathQueryUsec": max_path_query_usec
 	}
+
+func revision() -> String:
+	return "%d:%d" % [topology_revision, dynamic_revision]
 
 func _closest_walkable_from_descriptors(position: Vector3, max_distance := INF) -> Dictionary:
 	var best := {}
@@ -172,25 +220,38 @@ func _closest_walkable_from_descriptors(position: Vector3, max_distance := INF) 
 			continue
 		var surfaces: Array = descriptor.get("walkable_surfaces")
 		for surface in surfaces:
-			var center: Vector3 = surface.get("center", Vector3.ZERO)
-			var distance := position.distance_to(center)
+			var closest: Vector3 = _closest_point_on_surface(surface, position)
+			var distance := position.distance_to(closest)
 			if distance <= max_distance and distance < best_distance:
 				best_distance = distance
 				best = {
 					"found": true,
 					"regionId": String(region_id),
 					"surfaceId": String(surface.get("id", "")),
-					"position": center,
+					"position": closest,
 					"distance": distance
 				}
 	if best.is_empty():
 		return { "found": false, "reason": "no_walkable_surface", "position": position, "maxDistance": max_distance }
 	return best
 
+func _closest_point_on_surface(surface: Dictionary, position: Vector3) -> Vector3:
+	var center: Vector3 = surface.get("center", Vector3.ZERO)
+	var size: Vector3 = surface.get("size", Vector3.ONE)
+	var half_x := maxf(size.x, 0.01) * 0.5
+	var half_z := maxf(size.z, 0.01) * 0.5
+	return Vector3(
+		clampf(position.x, center.x - half_x, center.x + half_x),
+		center.y,
+		clampf(position.z, center.z - half_z, center.z + half_z)
+	)
+
 func _ensure_navigation_map() -> void:
 	if navigation_map.is_valid():
 		return
 	navigation_map = NavigationServer3D.map_create()
+	if NavigationServer3D.has_method("map_set_active"):
+		NavigationServer3D.call("map_set_active", navigation_map, true)
 	owns_navigation_map = true
 
 func _install_region(region_id: String, descriptor) -> Dictionary:
@@ -263,9 +324,9 @@ func _surface_polygon(surface: Dictionary) -> Array[Vector3]:
 	var half_z := maxf(size.z, 0.01) * 0.5
 	return [
 		Vector3(center.x - half_x, center.y, center.z - half_z),
-		Vector3(center.x + half_x, center.y, center.z - half_z),
+		Vector3(center.x - half_x, center.y, center.z + half_z),
 		Vector3(center.x + half_x, center.y, center.z + half_z),
-		Vector3(center.x - half_x, center.y, center.z + half_z)
+		Vector3(center.x + half_x, center.y, center.z - half_z)
 	]
 
 func _release_region(region_id: String) -> void:
@@ -322,6 +383,76 @@ func _closest_surface_id(region_id: String, position: Vector3) -> String:
 			best_distance = distance
 			best_id = String(surface.get("id", ""))
 	return best_id
+
+func _query_path_points(start: Vector3, target: Vector3, options := {}) -> Array[Vector3]:
+	var points: Array[Vector3] = []
+	if NavigationServer3D.has_method("query_path"):
+		for attempt in range(2):
+			if NavigationServer3D.has_method("map_force_update"):
+				NavigationServer3D.call("map_force_update", navigation_map)
+			var parameters := NavigationPathQueryParameters3D.new()
+			parameters.map = navigation_map
+			parameters.start_position = start
+			parameters.target_position = target
+			parameters.navigation_layers = int(options.get("navigationLayers", 1))
+			var result := NavigationPathQueryResult3D.new()
+			var returned_path = NavigationServer3D.call("query_path", parameters, result)
+			var raw_path = result.call("get_path") if result.has_method("get_path") else result.get("path")
+			points = _vector_path_to_array(raw_path)
+			if points.is_empty():
+				points = _vector_path_to_array(returned_path)
+			if not points.is_empty():
+				break
+	if points.is_empty() and NavigationServer3D.has_method("map_get_path"):
+		if NavigationServer3D.has_method("map_force_update"):
+			NavigationServer3D.call("map_force_update", navigation_map)
+		var raw_map_path = NavigationServer3D.call("map_get_path", navigation_map, start, target, true)
+		points = _vector_path_to_array(raw_map_path)
+	return points
+
+func _vector_path_to_array(path_value) -> Array[Vector3]:
+	var points: Array[Vector3] = []
+	if path_value is PackedVector3Array:
+		for point in path_value:
+			points.append(point)
+	elif path_value is Array:
+		for point in path_value:
+			if point is Vector3:
+				points.append(point)
+	return points
+
+func _path_distance(points: Array[Vector3]) -> float:
+	if points.size() < 2:
+		return 0.0
+	var distance := 0.0
+	for index in range(1, points.size()):
+		distance += points[index - 1].distance_to(points[index])
+	return distance
+
+func _finish_route_query(started_usec: int, result: Dictionary) -> Dictionary:
+	last_path_query_usec = Time.get_ticks_usec() - started_usec
+	total_path_query_usec += last_path_query_usec
+	max_path_query_usec = maxi(max_path_query_usec, last_path_query_usec)
+	if not bool(result.get("ok", false)):
+		path_query_failure_count += 1
+	result["durationUsec"] = last_path_query_usec
+	return result
+
+func _route_query_failure(status: String, reason: String, start: Vector3, target: Vector3, options := {}, details := {}) -> Dictionary:
+	return {
+		"ok": false,
+		"status": status,
+		"reason": reason,
+		"source": "navmesh",
+		"queryApi": "query_path" if NavigationServer3D.has_method("query_path") else ("map_get_path" if NavigationServer3D.has_method("map_get_path") else ""),
+		"start": start,
+		"target": target,
+		"path": [],
+		"distance": -1.0,
+		"snapshotRevision": revision(),
+		"options": options.duplicate(true),
+		"details": details
+	}
 
 func _event_needs_rebuild(kinds: Array) -> bool:
 	for kind_value in kinds:

@@ -6,7 +6,11 @@ const TraversalProfileScript := preload("res://scripts/npc_ai/contracts/Traversa
 const RouteRequestScript := preload("res://scripts/npc_ai/contracts/RouteRequest.gd")
 const NavigationChangeBusScript := preload("res://scripts/npc_ai/navigation/NavigationChangeBus.gd")
 const NavigationWorldServiceScript := preload("res://scripts/npc_ai/navigation/NavigationWorldService.gd")
+const NavigationBakeDescriptorScript := preload("res://scripts/npc_ai/contracts/NavigationBakeDescriptor.gd")
+const NavigationBackendConfigScript := preload("res://scripts/npc_ai/navigation/NavigationBackendConfig.gd")
+const NavmeshWorldServiceScript := preload("res://scripts/npc_ai/navigation/NavmeshWorldService.gd")
 const HierarchicalRoutePlannerScript := preload("res://scripts/npc_ai/routing/HierarchicalRoutePlanner.gd")
+const NavmeshRoutePlannerScript := preload("res://scripts/npc_ai/routing/NavmeshRoutePlanner.gd")
 
 var runner = null
 
@@ -33,6 +37,9 @@ func cases() -> Array[Dictionary]:
 		["npc_route_partial_explicit_only", "test_route_partial_explicit_only"],
 		["npc_route_unreachable_terminal_reason", "test_route_unreachable_terminal_reason"],
 		["npc_route_deterministic_replay", "test_route_deterministic_replay"],
+		["npc_route_navmesh_query_path_uses_navigation_server", "test_route_navmesh_query_path_uses_navigation_server"],
+		["npc_route_navmesh_planner_goal_kinds", "test_route_navmesh_planner_goal_kinds"],
+		["npc_route_navmesh_adapter_no_legacy_fallback", "test_route_navmesh_adapter_no_legacy_fallback"],
 		["npc_route_runtime_goal_adapter_uses_new_corridor", "test_route_runtime_goal_adapter_uses_new_corridor"]
 	]
 	var result: Array[Dictionary] = []
@@ -306,10 +313,125 @@ func test_route_deterministic_replay(_mode: String) -> Dictionary:
 	var passed = first_summary == second_summary
 	return outcome(passed, "first=%s second=%s" % [first_summary, second_summary], ["deterministic_replay"], { "first": route_summary(first), "second": route_summary(second) })
 
+func test_route_navmesh_query_path_uses_navigation_server(_mode: String) -> Dictionary:
+	var service = navmesh_test_service("query-path", Vector3(0.0, 0.0, 0.0), Vector3(10.8, 0.0, 5.4))
+	var closest_start: Dictionary = service.closest_walkable(Vector3(0.2, 0.0, 0.2), 10.0)
+	var closest_target: Dictionary = service.closest_walkable(Vector3(8.8, 0.0, 3.8), 10.0)
+	var route: Dictionary = service.query_route(Vector3(0.2, 0.0, 0.2), Vector3(8.8, 0.0, 3.8), { "kind": "scripted" })
+	var stats: Dictionary = service.stats()
+	service.clear()
+	var passed := bool(route.get("ok", false)) and String(route.get("source", "")) == "navmesh" and String(route.get("queryApi", "")) in ["query_path", "map_get_path"] and (route.get("path", []) as Array).size() >= 1 and int(stats.get("pathQueryCount", 0)) == 1 and int(stats.get("pathQueryFailureCount", -1)) == 0
+	return outcome(passed, "route=%s start=%s target=%s stats=%s" % [JSON.stringify(navmesh_route_summary(route)), JSON.stringify(closest_start), JSON.stringify(closest_target), JSON.stringify(stats)], ["navmesh_query_path_returns_route", "navmesh_query_records_metrics"], { "route": navmesh_route_summary(route), "closestStart": closest_start, "closestTarget": closest_target, "stats": stats })
+
+func test_route_navmesh_planner_goal_kinds(_mode: String) -> Dictionary:
+	var service = navmesh_test_service("goal-kinds", Vector3(-2.7, 0.0, -2.7), Vector3(14.85, 0.0, 6.75))
+	var planner = NavmeshRoutePlannerScript.new()
+	planner.setup(service, null, null, null)
+	var body := Node3D.new()
+	body.global_position = Vector3(0.0, 0.0, 0.0)
+	var entry := {
+		"id": "navmesh_goal_test",
+		"body": body,
+		"porchPosition": Vector3.ZERO,
+		"townCenter": Vector2i.ZERO,
+		"townRadius": 12
+	}
+	var kinds := ["home", "guard", "job", "forage", "scripted"]
+	var results := {}
+	for index in range(kinds.size()):
+		var kind := String(kinds[index])
+		var target := Vector3(2.7 + float(index) * 2.025, 0.0, 2.7)
+		var intent := {
+			"kind": kind,
+			"target": target,
+			"targetCell": Vector2i(roundi(target.x / NpcConstantsScript.CELL_SIZE), roundi(target.z / NpcConstantsScript.CELL_SIZE)),
+			"allowOutside": kind in ["job", "forage"],
+			"movingHome": kind == "home",
+			"arrivalRadius": NpcConstantsScript.CELL_SIZE * 0.72,
+			"strictArrival": kind == "scripted"
+		}
+		var route: Dictionary = planner.plan_runtime_route(entry, intent, null, 0)
+		results[kind] = navmesh_route_dictionary_summary(route)
+	body.free()
+	var stats: Dictionary = service.stats()
+	service.clear()
+	var passed := true
+	for kind in kinds:
+		var summary: Dictionary = results.get(kind, {})
+		passed = passed and bool(summary.get("ok", false)) and String(summary.get("source", "")) == "navmesh" and not bool(summary.get("legacyFallbackUsed", true))
+	passed = passed and int(stats.get("pathQueryCount", 0)) == kinds.size()
+	return outcome(passed, "results=%s stats=%s" % [JSON.stringify(results), JSON.stringify(stats)], ["navmesh_routes_home_guard_job_forage_scripted", "navmesh_planner_no_legacy_fallback"], { "results": results, "stats": stats })
+
+func test_route_navmesh_adapter_no_legacy_fallback(_mode: String) -> Dictionary:
+	var adapter_text = read_text("res://scripts/npc_ai/routing/NpcRouteCoordinatorAdapter.gd")
+	var planner_text = read_text("res://scripts/npc_ai/routing/NavmeshRoutePlanner.gd")
+	var service_text = read_text("res://scripts/npc_ai/navigation/NavmeshWorldService.gd")
+	var passed = adapter_text.find("NavmeshRoutePlannerScript") >= 0 and adapter_text.find("_use_navmesh_backend") >= 0 and adapter_text.find("\"source\": String(route.get(\"source\"") >= 0 and adapter_text.find("\"legacyFallbackUsed\": bool(route.get(\"legacyFallbackUsed\"") >= 0 and planner_text.find("legacyFallbackUsed") >= 0 and planner_text.find("HierarchicalRoutePlanner") < 0 and service_text.find("query_path") >= 0
+	return outcome(passed, "adapterNavmesh=%d plannerLegacy=%d queryPath=%d" % [adapter_text.find("NavmeshRoutePlannerScript"), planner_text.find("HierarchicalRoutePlanner"), service_text.find("query_path")], ["adapter_selects_navmesh_backend", "navmesh_planner_has_no_legacy_planner_dependency", "navmesh_service_uses_navigationserver_query_path"], {})
+
 func test_route_runtime_goal_adapter_uses_new_corridor(_mode: String) -> Dictionary:
 	var adapter_text = read_text("res://scripts/npc_ai/routing/NpcRouteCoordinatorAdapter.gd")
 	var passed = adapter_text.find("HierarchicalRoutePlanner") >= 0 and adapter_text.find("MAX_ITERATIONS") < 0 and adapter_text.find("plan_runtime_route") >= 0 and adapter_text.find("route_from_cells") < 0
 	return outcome(passed, "adapterPlanner=%d maxIterations=%d" % [adapter_text.find("HierarchicalRoutePlanner"), adapter_text.find("MAX_ITERATIONS")], ["runtime_adapter_delegates_new_corridor", "old_iteration_cap_removed"], {})
+
+func navmesh_test_service(label: String, min_pos: Vector3, size: Vector3):
+	var service = NavmeshWorldServiceScript.new()
+	service.setup(NavigationBackendConfigScript.from_value("navmesh", "test"))
+	var center := min_pos + size * 0.5
+	var descriptor = NavigationBakeDescriptorScript.create("region:chunk:%s" % label, label, AABB(min_pos, size))
+	descriptor.add_walkable_surface("surface:%s:main" % label, center, Vector3(maxf(size.x, NpcConstantsScript.CELL_SIZE), 0.05, maxf(size.z, NpcConstantsScript.CELL_SIZE)), {
+		"semanticRegionIds": ["test_navmesh"],
+		"traversalTags": ["terrain"]
+	})
+	service.register_chunk_descriptor(descriptor)
+	return service
+
+func navmesh_route_summary(route: Dictionary) -> Dictionary:
+	return {
+		"ok": bool(route.get("ok", false)),
+		"status": String(route.get("status", "")),
+		"reason": String(route.get("reason", "")),
+		"source": String(route.get("source", "")),
+		"queryApi": String(route.get("queryApi", "")),
+		"pointCount": int(route.get("pointCount", 0)),
+		"distance": snappedf(float(route.get("distance", 0.0)), 0.001),
+		"snapshotRevision": String(route.get("snapshotRevision", ""))
+	}
+
+func navmesh_route_dictionary_summary(route: Dictionary) -> Dictionary:
+	var navmesh_route: Dictionary = route.get("navmeshRoute", {})
+	var start_walkable := navmesh_walkable_summary(navmesh_route, "startWalkable")
+	var target_walkable := navmesh_walkable_summary(navmesh_route, "targetWalkable")
+	return {
+		"ok": bool(route.get("ok", false)),
+		"status": String(route.get("status", "")),
+		"reason": String(route.get("reason", "")),
+		"source": String(route.get("source", "")),
+		"legacyFallbackUsed": bool(route.get("legacyFallbackUsed", true)),
+		"waypointCount": (route.get("waypoints", []) as Array).size(),
+		"cellCount": (route.get("cells", []) as Array).size(),
+		"snapshotRevision": String(route.get("snapshotRevision", "")),
+		"navmeshReason": String(navmesh_route.get("reason", "")),
+		"navmeshQueryApi": String(navmesh_route.get("queryApi", "")),
+		"navmeshPointCount": int(navmesh_route.get("pointCount", 0)),
+		"startWalkable": start_walkable,
+		"targetWalkable": target_walkable
+	}
+
+func navmesh_walkable_summary(route: Dictionary, key: String) -> Dictionary:
+	var value = route.get(key, {})
+	if not (value is Dictionary):
+		var details: Dictionary = route.get("details", {})
+		value = details.get(key, {})
+	if not (value is Dictionary):
+		return { "found": false }
+	var walkable: Dictionary = value
+	return {
+		"found": bool(walkable.get("found", false)),
+		"regionId": String(walkable.get("regionId", "")),
+		"surfaceId": String(walkable.get("surfaceId", "")),
+		"distance": snappedf(float(walkable.get("distance", 0.0)), 0.001)
+	}
 
 func route_line_service(start_x: int, end_x: int) -> Dictionary:
 	var tiles = {}

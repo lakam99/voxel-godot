@@ -3,8 +3,10 @@ class_name NpcRouteCoordinatorAdapter
 
 const NpcConstantsScript := preload("res://scripts/npc_ai/NpcConstants.gd")
 const NpcEnumsScript := preload("res://scripts/npc_ai/NpcEnums.gd")
+const NavigationBackendConfigScript := preload("res://scripts/npc_ai/navigation/NavigationBackendConfig.gd")
 const HierarchicalRoutePlannerScript := preload("res://scripts/npc_ai/routing/HierarchicalRoutePlanner.gd")
 const IncrementalRouteRepairScript := preload("res://scripts/npc_ai/routing/IncrementalRouteRepair.gd")
+const NavmeshRoutePlannerScript := preload("res://scripts/npc_ai/routing/NavmeshRoutePlanner.gd")
 
 const CELL := NpcConstantsScript.CELL_SIZE
 const LIVE_ROUTE_JOBS_PER_FRAME := 2
@@ -20,7 +22,10 @@ const FULL_REPAIR_REGISTRATION_NODE_LIMIT := 128
 var system
 var main
 var world
+var backend_config
 var coordinator
+var navmesh_planner
+var navmesh_world
 var repair_service
 var active_route_entries := {}
 var route_budget_frame := -1
@@ -39,8 +44,12 @@ func setup(system_node, main_node, navigation_world) -> void:
 	system = system_node
 	main = main_node
 	world = navigation_world
+	backend_config = NavigationBackendConfigScript.from_environment()
 	coordinator = HierarchicalRoutePlannerScript.new()
 	coordinator.setup(null)
+	navmesh_world = _navmesh_world_from_system()
+	navmesh_planner = NavmeshRoutePlannerScript.new()
+	navmesh_planner.setup(navmesh_world, system, main, world)
 	repair_service = IncrementalRouteRepairScript.new()
 	repair_service.setup(coordinator)
 
@@ -62,6 +71,10 @@ func invalidate() -> void:
 func plan_route(entry: Dictionary, intent: Dictionary) -> Dictionary:
 	if coordinator == null:
 		coordinator = HierarchicalRoutePlannerScript.new()
+	if navmesh_planner == null:
+		navmesh_world = _navmesh_world_from_system()
+		navmesh_planner = NavmeshRoutePlannerScript.new()
+		navmesh_planner.setup(navmesh_world, system, main, world)
 	if repair_service == null:
 		repair_service = IncrementalRouteRepairScript.new()
 		repair_service.setup(coordinator)
@@ -79,6 +92,19 @@ func plan_route(entry: Dictionary, intent: Dictionary) -> Dictionary:
 		if monitor != null:
 			monitor.increment_counter("route_jobs_pending")
 		return route_failure("pending", "route_budget", intent.get("targetCell", Vector2i(999999, 999999)))
+	if _use_navmesh_backend():
+		var navmesh_start: int = monitor.begin_section("navmesh_route_query") if monitor != null else Time.get_ticks_usec()
+		var navmesh_result: Dictionary = navmesh_planner.plan_runtime_route(entry, intent, world, 0)
+		if monitor != null:
+			monitor.end_section("navmesh_route_query", navmesh_start)
+			monitor.increment_counter("navmesh_route_queries")
+			if bool(navmesh_result.get("ok", false)):
+				monitor.increment_counter("navmesh_route_successes")
+			else:
+				monitor.increment_counter("navmesh_route_failures")
+		if String(navmesh_result.get("status", "")) != "pending":
+			_store_route_cache(cache_key, navmesh_result)
+		return navmesh_result
 	var external_direct_route := entry.has("_externalDirectMoveFrame")
 	var route_section := "route_planning_external_direct" if external_direct_route else "route_planning"
 	var route_start: int = monitor.begin_section(route_section) if monitor != null else Time.get_ticks_usec()
@@ -100,6 +126,12 @@ func route_cost(entry: Dictionary, target: Vector3, allow_outside := false, movi
 		coordinator = HierarchicalRoutePlannerScript.new()
 	if world == null:
 		return INF
+	if _use_navmesh_backend():
+		if navmesh_planner == null:
+			navmesh_world = _navmesh_world_from_system()
+			navmesh_planner = NavmeshRoutePlannerScript.new()
+			navmesh_planner.setup(navmesh_world, system, main, world)
+		return navmesh_planner.route_cost_for_runtime(entry, target, allow_outside, moving_home, arrival_radius, approach_cells, world)
 	return coordinator.route_cost_for_runtime(entry, target, allow_outside, moving_home, arrival_radius, approach_cells, world)
 
 func route_failure(status: String, reason: String, target_cell := Vector2i(999999, 999999)) -> Dictionary:
@@ -129,9 +161,31 @@ func process_navigation_events(events: Array, max_expansions := 128) -> Array[Di
 
 func stats() -> Dictionary:
 	var result: Dictionary = coordinator.stats() if coordinator != null and coordinator.has_method("stats") else {}
+	result["backend"] = backend_config.to_summary() if backend_config != null else NavigationBackendConfigScript.default_config().to_summary()
+	if navmesh_planner != null and navmesh_planner.has_method("stats"):
+		result["navmesh"] = navmesh_planner.stats()
 	if repair_service != null:
 		result["repair"] = repair_service.stats()
 	return result
+
+func _use_navmesh_backend() -> bool:
+	if backend_config == null:
+		backend_config = NavigationBackendConfigScript.from_environment()
+	if not backend_config.use_navmesh():
+		return false
+	if navmesh_world == null:
+		navmesh_world = _navmesh_world_from_system()
+		if navmesh_planner != null:
+			navmesh_planner.setup(navmesh_world, system, main, world)
+	return navmesh_world != null
+
+func _navmesh_world_from_system():
+	if system == null:
+		return null
+	var autonomy = system.get("autonomy_system")
+	if autonomy == null:
+		return null
+	return autonomy.get("navmesh_world")
 
 func _register_repair_route(entry: Dictionary, route: Dictionary) -> void:
 	if repair_service == null or not bool(route.get("ok", false)):
@@ -312,7 +366,10 @@ func _compact_route_for_cache(route: Dictionary) -> Dictionary:
 		"actions": (route.get("actions", {}) as Dictionary).duplicate(true),
 		"targetCell": route.get("targetCell", Vector2i(999999, 999999)),
 		"fallbackCell": route.get("fallbackCell", Vector2i(999999, 999999)),
-		"snapshotRevision": String(route.get("snapshotRevision", ""))
+		"snapshotRevision": String(route.get("snapshotRevision", "")),
+		"source": String(route.get("source", "")),
+		"legacyFallbackUsed": bool(route.get("legacyFallbackUsed", false)),
+		"navmeshRoute": (route.get("navmeshRoute", {}) as Dictionary).duplicate(true)
 	}
 
 func _copy_cached_route(route: Dictionary) -> Dictionary:
@@ -325,5 +382,8 @@ func _copy_cached_route(route: Dictionary) -> Dictionary:
 		"actions": (route.get("actions", {}) as Dictionary).duplicate(true),
 		"targetCell": route.get("targetCell", Vector2i(999999, 999999)),
 		"fallbackCell": route.get("fallbackCell", Vector2i(999999, 999999)),
-		"snapshotRevision": String(route.get("snapshotRevision", ""))
+		"snapshotRevision": String(route.get("snapshotRevision", "")),
+		"source": String(route.get("source", "")),
+		"legacyFallbackUsed": bool(route.get("legacyFallbackUsed", false)),
+		"navmeshRoute": (route.get("navmeshRoute", {}) as Dictionary).duplicate(true)
 	}
