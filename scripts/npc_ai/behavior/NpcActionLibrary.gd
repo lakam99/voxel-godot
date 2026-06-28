@@ -2,73 +2,72 @@ extends RefCounted
 class_name NpcActionLibrary
 
 const NpcEnumsScript := preload("res://scripts/npc_ai/NpcEnums.gd")
+const DEFAULT_CATALOG_PATH := "res://resources/npc_behavior/task_catalog.tres"
 
 var definitions := {}
+var catalog = null
+var catalog_path := DEFAULT_CATALOG_PATH
+var load_errors: Array[String] = []
 
-func _init() -> void:
-	_register_defaults()
+func _init(path := DEFAULT_CATALOG_PATH) -> void:
+	catalog_path = path
+	load_catalog(catalog_path)
 
 func definition(action_id: String) -> Dictionary:
 	return definitions.get(action_id, {}).duplicate(true)
 
 func sequence_for_goal(goal_kind: StringName, context := {}) -> Array:
-	match goal_kind:
-		NpcEnumsScript.GOAL_KIND_SCRIPTED:
-			return [_action("scripted_order")]
-		NpcEnumsScript.GOAL_KIND_HOME:
-			return [_action("navigate_home_approach"), _action("open_cross_home_door"), _action("navigate_home_interior"), _action("remain_inside")]
-		NpcEnumsScript.GOAL_KIND_GUARD:
-			if bool(context.get("activeThreat", false)):
-				return [_action("choose_intercept"), _action("navigate_guard_intercept"), _action("engage_threat"), _action("resume_guard_duty")]
-			return [_action("report_to_guard_post"), _action("patrol_guard_post")]
-		NpcEnumsScript.GOAL_KIND_FORAGE:
-			return [_action("select_forage_target"), _action("navigate_to_resource"), _action("harvest_resource"), _action("eat_if_hungry")]
-		NpcEnumsScript.GOAL_KIND_WORK:
-			return [_action("choose_work_target"), _action("navigate_to_work"), _action("perform_work"), _action("return_or_deliver")]
-	return [_action("relocate_semantic_anchor"), _action("remain_idle")]
+	if catalog == null or not catalog.has_method("sequences_for_goal"):
+		return []
+	var sequences: Array = catalog.sequences_for_goal(goal_kind, context)
+	if sequences.is_empty():
+		sequences = catalog.sequences_for_goal(NpcEnumsScript.GOAL_KIND_IDLE, {})
+	if sequences.is_empty():
+		return []
+	var sequence: Dictionary = sequences[0]
+	var result := []
+	for action_id_value in sequence.get("actionIds", []):
+		result.append(_action(String(action_id_value)))
+	return result
 
-func _register_defaults() -> void:
-	_add("scripted_order", ["scripted_target_present"], ["scripted_target_reached_or_cancelled"], 0.1, false, 60.0, "scripted_move")
-	_add("navigate_home_approach", ["assigned_home", "route_available_or_pending"], ["at_home_approach"], 1.0, true, 45.0, "route")
-	_add("open_cross_home_door", ["at_home_approach", "door_openable"], ["inside_portal_side", "door_hold_released"], 1.5, false, 12.0, "door_traversal")
-	_add("navigate_home_interior", ["inside_portal_side", "interior_anchor_known"], ["inside_home_interior"], 0.7, true, 20.0, "route")
-	_add("remain_inside", ["inside_home_interior"], ["schedule_compliant_inside"], 0.1, true, 0.0, "idle")
-	_add("report_to_guard_post", ["assigned_guard_duty", "guard_post_known"], ["at_guard_post"], 0.9, true, 35.0, "route")
-	_add("patrol_guard_post", ["at_guard_post"], ["guard_duty_active"], 0.4, true, 0.0, "patrol")
-	_add("choose_intercept", ["active_threat", "can_fight"], ["reachable_intercept_selected"], 0.3, true, 3.0, "target_select")
-	_add("navigate_guard_intercept", ["reachable_intercept_selected"], ["in_threat_range"], 0.9, true, 20.0, "route")
-	_add("engage_threat", ["in_threat_range", "weapon_available"], ["threat_handled_or_reassess"], 0.7, false, 8.0, "combat")
-	_add("resume_guard_duty", ["guard_duty_or_schedule_known"], ["post_threat_schedule_restored"], 0.2, true, 4.0, "restore")
-	_add("select_forage_target", ["forager_role", "hunger_or_role_need"], ["forage_target_selected"], 0.2, true, 4.0, "target_select")
-	_add("reserve_resource_slot", ["resource_target_selected", "smart_object_available"], ["resource_slot_owned"], 0.2, true, 4.0, "smart_object")
-	_add("navigate_to_resource", ["resource_target_selected"], ["at_resource_approach"], 1.0, true, 35.0, "route")
-	_add("harvest_resource", ["at_resource_approach", "resource_available"], ["resource_in_inventory"], 0.6, false, 8.0, "smart_object")
-	_add("eat_if_hungry", ["food_in_inventory_or_not_hungry"], ["hunger_improved"], 0.1, true, 2.0, "needs")
-	_add("choose_work_target", ["worker_role"], ["work_target_selected"], 0.2, true, 4.0, "target_select")
-	_add("reserve_work_slot", ["work_target_selected", "smart_object_available"], ["work_slot_owned"], 0.2, true, 4.0, "smart_object")
-	_add("navigate_to_work", ["work_target_selected"], ["at_work_target"], 1.0, true, 35.0, "route")
-	_add("perform_work", ["at_work_target"], ["job_effect_applied"], 0.8, false, 12.0, "job")
-	_add("deposit_inventory", ["job_effect_applied", "storage_slot_available"], ["inventory_deposited"], 0.4, false, 8.0, "smart_object")
-	_add("use_trader_stall", ["stall_slot_owned", "at_work_target"], ["stall_occupied"], 0.3, true, 0.0, "smart_object")
-	_add("rest_at_bed", ["bed_slot_available", "at_home_interior"], ["rest_anchor_occupied"], 0.2, true, 0.0, "smart_object")
-	_add("occupy_guard_post", ["assigned_guard_duty", "guard_post_known"], ["guard_slot_occupied"], 0.3, true, 0.0, "smart_object")
-	_add("complete_tutorial_world_action", ["scripted_target_present", "smart_object_available"], ["tutorial_action_effect_applied"], 0.4, false, 8.0, "smart_object")
-	_add("return_or_deliver", ["job_effect_applied"], ["job_loop_continues"], 0.5, true, 20.0, "route")
-	_add("relocate_semantic_anchor", ["semantic_anchor_available"], ["at_idle_anchor"], 0.4, true, 16.0, "route")
-	_add("remain_idle", ["at_idle_anchor_or_no_anchor"], ["idle_stable"], 0.1, true, 0.0, "idle")
+func sequence_metadata_for_goal(goal_kind: StringName, context := {}) -> Dictionary:
+	if catalog == null or not catalog.has_method("sequences_for_goal"):
+		return {}
+	var sequences: Array = catalog.sequences_for_goal(goal_kind, context)
+	if sequences.is_empty():
+		sequences = catalog.sequences_for_goal(NpcEnumsScript.GOAL_KIND_IDLE, {})
+	return sequences[0].duplicate(true) if not sequences.is_empty() else {}
 
-func _add(action_id: String, preconditions: Array, effects: Array, base_cost: float, interruptible: bool, timeout_seconds: float, execution: String) -> void:
-	definitions[action_id] = {
-		"actionId": action_id,
-		"preconditions": preconditions.duplicate(),
-		"effects": effects.duplicate(),
-		"baseCost": base_cost,
-		"contextCost": {},
-		"interruptible": interruptible,
-		"timeoutSeconds": timeout_seconds,
-		"execution": execution,
-		"failureReasons": ["precondition_failed", "timeout", "target_invalidated", "route_terminal_failure"]
-	}
+func load_catalog(path: String) -> void:
+	load_errors.clear()
+	definitions.clear()
+	if not ResourceLoader.exists(path):
+		load_errors.append("missing_catalog:%s" % path)
+		return
+	var loaded = ResourceLoader.load(path)
+	if loaded == null:
+		load_errors.append("load_failed:%s" % path)
+		return
+	if not loaded.has_method("actions_by_id"):
+		load_errors.append("invalid_catalog:%s" % path)
+		return
+	catalog = loaded
+	definitions = catalog.actions_by_id()
+
+func validate_catalog() -> Dictionary:
+	if catalog == null or not catalog.has_method("validate_catalog"):
+		return {
+			"ok": false,
+			"actionCount": definitions.size(),
+			"sequenceCount": 0,
+			"missingFields": [],
+			"missingActions": [],
+			"errors": load_errors.duplicate()
+		}
+	var result: Dictionary = catalog.validate_catalog()
+	result["errors"] = load_errors.duplicate()
+	result["catalogPath"] = catalog_path
+	return result
 
 func _action(action_id: String) -> Dictionary:
 	return definition(action_id)
