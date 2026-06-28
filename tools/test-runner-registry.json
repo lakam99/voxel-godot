@@ -9,6 +9,102 @@
       "required": true
     },
     {
+      "id": "npc_contract_tests",
+      "description": "R06 explicit NPC contract suite gate",
+      "command": ".\\tools\\npc\\run-npc-contract-tests.ps1",
+      "args": ["-TimeMode", "Both", "-Seed", "atlas-1492", "-ReportPath", "artifacts\\test-runners\\npc-contract-both.json"],
+      "reportPath": "artifacts\\test-runners\\npc-contract-both.json",
+      "required": true
+    },
+    {
+      "id": "npc_motor_tests",
+      "description": "R06 explicit NPC motor suite gate",
+      "command": ".\\tools\\npc\\run-npc-motor-tests.ps1",
+      "args": ["-TimeMode", "Both", "-Seed", "atlas-1492", "-ReportPath", "artifacts\\test-runners\\npc-motor-both.json"],
+      "reportPath": "artifacts\\test-runners\\npc-motor-both.json",
+      "required": true
+    },
+    {
+      "id": "npc_route_tests",
+      "description": "R06 explicit NPC route suite gate",
+      "command": ".\\tools\\npc\\run-npc-route-tests.ps1",
+      "args": ["-TimeMode", "Both", "-Seed", "atlas-1492", "-ReportPath", "artifacts\\test-runners\\npc-route-both.json"],
+      "reportPath": "artifacts\\test-runners\\npc-route-both.json",
+      "required": true
+    },
+    {
+      "id": "npc_repair_tests",
+      "description": "R06 explicit NPC repair suite gate",
+      "command": ".\\tools\\npc\\run-npc-repair-tests.ps1",
+      "args": ["-TimeMode", "Both", "-Seed", "atlas-1492", "-ReportPath", "artifacts\\test-runners\\npc-repair-both.json"],
+      "reportPath": "artifacts\\test-runners\\npc-repair-both.json",
+      "required": true
+    },
+    {
+      "id": "npc_door_tests",
+      "description": "R06 explicit NPC door suite gate",
+      "command": ".\\tools\\npc\\run-npc-door-tests.ps1",
+      "args": ["-TimeMode", "Both", "-Seed", "atlas-1492", "-ReportPath", "artifacts\\test-runners\\npc-door-both.json"],
+      "reportPath": "artifacts\\test-runners\\npc-door-both.json",
+      "required": true
+    },
+    {
+      "id": "npc_avoidance_tests",
+      "description": "R06 explicit NPC avoidance suite gate",
+      "command": ".\\tools\\npc\\run-npc-avoidance-tests.ps1",
+      "args": ["-TimeMode", "Both", "-Seed", "atlas-1492", "-ReportPath", "artifacts\\test-runners\\npc-avoidance-both.json"],
+      "reportPath": "artifacts\\test-runners\\npc-avoidance-both.json",
+      "required": true
+    },
+    {
+      "id": "npc_traffic_tests",
+      "description": "R06 explicit NPC traffic suite gate",
+      "command": ".\\tools\\npc\\run-npc-traffic-tests.ps1",
+      "args": ["-TimeMode", "Both", "-Seed", "atlas-1492", "-ReportPath", "artifacts\\test-runners\\npc-traffic-both.json"],
+      "reportPath": "artifacts\\test-runners\\npc-traffic-both.json",
+      "required": true
+    },
+    {
+      "id": "npc_behavior_tests",
+      "description": "R06 explicit NPC behavior suite gate",
+      "command": ".\\tools\\npc\\run-npc-behavior-tests.ps1",
+      "args": ["-TimeMode", "Both", "-Seed", "atlas-1492", "-ReportPath", "artifacts\\test-runners\\npc-behavior-both.json"],
+      "reportPath": "artifacts\\test-runners\\npc-behavior-both.json",
+      "required": true
+    },
+    {
+      "id": "npc_behavior_transition_tests",
+      "description": "R06 explicit NPC behavior transition suite gate",
+      "command": ".\\tools\\npc\\run-npc-behavior-tests.ps1",
+      "args": ["-TimeMode", "Transition", "-Seed", "atlas-1492", "-ReportPath", "artifacts\\test-runners\\npc-behavior-transition.json"],
+      "reportPath": "artifacts\\test-runners\\npc-behavior-transition.json",
+      "required": true
+    },
+    {
+      "id": "npc_interaction_tests",
+      "description": "R06 explicit NPC interaction suite gate",
+      "command": ".\\tools\\npc\\run-npc-interaction-tests.ps1",
+      "args": ["-TimeMode", "Both", "-Seed", "atlas-1492", "-ReportPath", "artifacts\\test-runners\\npc-interaction-both.json"],
+      "reportPath": "artifacts\\test-runners\\npc-interaction-both.json",
+      "required": true
+    },
+    {
+      "id": "npc_streaming_save_tests",
+      "description": "R06 explicit NPC streaming/save suite gate",
+      "command": ".\\tools\\npc\\run-npc-streaming-save-tests.ps1",
+      "args": ["-TimeMode", "Both", "-Seed", "atlas-1492", "-ReportPath", "artifacts\\test-runners\\npc-streaming-save-both.json"],
+      "reportPath": "artifacts\\test-runners\\npc-streaming-save-both.json",
+      "required": true
+    },
+    {
+      "id": "npc_soak_tests",
+      "description": "R06 explicit NPC soak suite gate",
+      "command": ".\\tools\\npc\\run-npc-soak-tests.ps1",
+      "args": ["-TimeMode", "Both", "-Seed", "atlas-1492", "-ReportPath", "artifacts\\test-runners\\npc-soak-both.json"],
+      "reportPath": "artifacts\\test-runners\\npc-soak-both.json",
+      "required": true
+    },
+    {
       "id": "npc_observation_dusk",
       "description": "Phase 09 dusk return-home observation evidence",
       "command": ".\\tools\\npc\\run-npc-observation-tests.ps1",

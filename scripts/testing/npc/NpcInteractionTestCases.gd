@@ -7,6 +7,7 @@ const NpcActionLibraryScript := preload("res://scripts/npc_ai/behavior/NpcAction
 const NpcGoalSelectorScript := preload("res://scripts/npc_ai/behavior/NpcGoalSelector.gd")
 const NpcBlackboardScript := preload("res://scripts/npc_ai/NpcBlackboard.gd")
 const NpcProfileRulesScript := preload("res://scripts/NpcProfileRules.gd")
+const CELL := 1.35
 
 var runner = null
 var transient_nodes: Array[Node] = []
@@ -33,6 +34,13 @@ func cases() -> Array[Dictionary]:
 		case("npc_interaction_stale_resource_reservation_released", "day", "test_stale_resource_reservation_released"),
 		case("npc_interaction_query_cache_invalidates_on_resource_removal", "day", "test_query_cache_invalidates_on_resource_removal"),
 		case("npc_interaction_forager_query_after_harvest_no_crash", "day", "test_forager_query_after_harvest_no_crash"),
+		case("npc_interaction_forager_live_candidate_only", "day", "test_forager_live_candidate_only"),
+		case("npc_interaction_forager_reachable_approach_slot", "day", "test_forager_reachable_approach_slot"),
+		case("npc_interaction_forager_no_wall_bump_on_morning_exit", "day", "test_forager_no_wall_bump_on_morning_exit"),
+		case("npc_interaction_forager_target_gone_reselects", "day", "test_forager_target_gone_reselects"),
+		case("npc_interaction_forager_route_blocked_marks_target_unreachable", "day", "test_forager_route_blocked_marks_target_unreachable"),
+		case("npc_interaction_forager_harvest_requires_reservation_and_arrival", "day", "test_forager_harvest_requires_reservation_and_arrival"),
+		case("npc_interaction_niko_full_forage_cycle_morning", "day", "test_niko_full_forage_cycle_morning"),
 		case("npc_interaction_wood_worker_gather_deliver", "day", "test_wood_worker_gather_deliver"),
 		case("npc_interaction_stone_worker_gather_deliver", "day", "test_stone_worker_gather_deliver"),
 		case("npc_interaction_trader_day_stall_night_home", "day", "test_trader_day_stall_night_home"),
@@ -234,6 +242,111 @@ func test_forager_query_after_harvest_no_crash(_mode: String) -> Dictionary:
 	var passed: bool = before.size() == 1 and succeeded(harvested) and after.is_empty()
 	return outcome(passed, "harvest=%s before=%d after=%d" % [summary(harvested), before.size(), after.size()], ["forager_query_before_harvest", "harvest_depletes_resource", "forager_query_after_harvest_empty_no_crash"], state(service))
 
+func test_forager_live_candidate_only(_mode: String) -> Dictionary:
+	var service = make_service()
+	var live := make_prop("forager-live", "berryBush", "berries", 2, Vector3(12.0, 0.0, 0.0))
+	var stale := make_prop("forager-stale", "berryBush", "berries", 2, Vector3(13.35, 0.0, 0.0))
+	service.register_resource(live)
+	var stale_id: String = service.register_resource(stale)
+	stale.free()
+	var queried: Array[Node3D] = query_forage_nodes(service)
+	var stale_available: Dictionary = service.object_available(stale_id, "forager")
+	var passed: bool = queried.size() == 1 and queried[0] == live and String(stale_available.get("reason", "")) in ["target_gone", "resource_depleted"]
+	return outcome(passed, "queried=%d stale=%s" % [queried.size(), JSON.stringify(stale_available)], ["forager_query_returns_only_live_candidate", "stale_candidate_suppressed"], state(service))
+
+func test_forager_reachable_approach_slot(_mode: String) -> Dictionary:
+	var service = make_service()
+	var prop := make_prop("forager-slot", "berryBush", "berries", 2, Vector3.ZERO)
+	var object_id: String = service.register_resource(prop)
+	var actor := make_actor("forager", Vector3(CELL * 1.05, 0.0, 0.0))
+	var first = reserve(service, object_id, prop, actor, "forager")
+	var completed = complete(service, object_id, prop, actor, "forager", first)
+	var slot_id: String = String(first.metrics.get("slotId", "")) if succeeded(first) else ""
+	var approach_position = first.metrics.get("approachPosition", null) if succeeded(first) else null
+	var passed: bool = succeeded(first) and slot_id != "" and approach_position != null and succeeded(completed)
+	return outcome(passed, "reserve=%s complete=%s" % [summary(first), summary(completed)], ["forager_reserves_registered_approach_slot", "forager_harvests_from_reachable_slot"], state(service))
+
+func test_forager_no_wall_bump_on_morning_exit(_mode: String) -> Dictionary:
+	var service = make_service()
+	var blocked := make_prop("forager-wall-blocked", "berryBush", "berries", 2, Vector3.ZERO)
+	var blocked_id: String = service.register_resource(blocked, {
+		"blockers": [AABB(Vector3(0.45, -0.2, -0.4), Vector3(0.25, 1.8, 0.8))]
+	})
+	var actor := make_actor("niko", Vector3(1.3, 0.0, 0.0))
+	var first = reserve(service, blocked_id, blocked, actor, "niko")
+	var blocked_result = complete(service, blocked_id, blocked, actor, "niko", first)
+	var released = release(service, blocked_id, blocked, actor, "niko", first)
+	var alternate := make_prop("forager-wall-clear", "berryBush", "berries", 2, Vector3(12.0, 0.0, 0.0))
+	service.register_resource(alternate)
+	var queried: Array[Node3D] = query_forage_nodes(service)
+	var passed: bool = succeeded(first) and failed_reason(blocked_result, "line_of_sight_blocked") and succeeded(released) and queried.has(alternate)
+	return outcome(passed, "blocked=%s release=%s queried=%d" % [summary(blocked_result), summary(released), queried.size()], ["wall_contact_blocks_forage_effect", "blocked_reservation_released_before_reselect"], state(service))
+
+func test_forager_target_gone_reselects(_mode: String) -> Dictionary:
+	var service = make_service()
+	var removed := make_prop("forager-gone", "berryBush", "berries", 2, Vector3(12.0, 0.0, 0.0))
+	var alternate := make_prop("forager-reselect", "berryBush", "berries", 2, Vector3(13.35, 0.0, 0.0))
+	var removed_id: String = service.register_resource(removed)
+	service.register_resource(alternate)
+	var actor := make_actor("forager", Vector3(12.0, 0.0, CELL * 1.05))
+	var first = reserve(service, removed_id, removed, actor, "forager")
+	service.notify_object_removed(removed_id, removed)
+	var completed = complete(service, removed_id, removed, actor, "forager", first)
+	var queried: Array[Node3D] = query_forage_nodes(service)
+	var terminal_reason: bool = failed_reason(completed, "target_gone") or failed_reason(completed, "resource_depleted")
+	var passed: bool = succeeded(first) and terminal_reason and queried.size() == 1 and queried[0] == alternate
+	return outcome(passed, "complete=%s queried=%d" % [summary(completed), queried.size()], ["target_gone_is_terminal_for_old_resource", "forager_reselects_live_alternate"], state(service))
+
+func test_forager_route_blocked_marks_target_unreachable(_mode: String) -> Dictionary:
+	var service = make_service()
+	var blocked := make_prop("forager-unreachable", "berryBush", "berries", 2, Vector3(12.0, 0.0, 0.0))
+	var alternate := make_prop("forager-reachable-after-unreachable", "berryBush", "berries", 2, Vector3(13.35, 0.0, 0.0))
+	service.register_resource(blocked)
+	service.register_resource(alternate)
+	blocked.set_meta("npc_unreachable_forager", true)
+	var queried: Array[Node3D] = service.query_resource_nodes(make_query_entry(), ["forage_source"], {
+		"drops": ["berries"],
+		"limit": 8,
+		"cacheFrames": 0,
+		"unreachableMetaKey": "npc_unreachable_forager"
+	})
+	var passed: bool = queried.size() == 1 and queried[0] == alternate
+	return outcome(passed, "queried=%d" % queried.size(), ["route_blocked_target_retry_suppressed", "reachable_alternate_remains_queryable"], state(service))
+
+func test_forager_harvest_requires_reservation_and_arrival(_mode: String) -> Dictionary:
+	var service = make_service()
+	var prop := make_prop("forager-authority", "berryBush", "berries", 2, Vector3.ZERO)
+	var object_id: String = service.register_resource(prop)
+	var actor := make_actor("forager", Vector3(CELL * 1.05, 0.0, 0.0))
+	var missing_reservation = complete_with_metadata(service, object_id, prop, actor, "forager", {
+		"action": "harvest_resource",
+		"actorKind": "npc",
+		"requireReservation": true
+	})
+	actor.position = Vector3(CELL * 4.0, 0.0, 0.0)
+	var first = reserve(service, object_id, prop, actor, "forager")
+	var far_complete = complete(service, object_id, prop, actor, "forager", first)
+	actor.position = Vector3(CELL * 1.05, 0.0, 0.0)
+	var arrived_complete = complete(service, object_id, prop, actor, "forager", first)
+	var passed: bool = failed_reason(missing_reservation, "missing_reservation") and succeeded(first) and failed_reason(far_complete, "outside_action_reach") and succeeded(arrived_complete)
+	return outcome(passed, "missing=%s far=%s arrived=%s" % [summary(missing_reservation), summary(far_complete), summary(arrived_complete)], ["harvest_requires_reservation", "harvest_requires_physical_arrival", "arrival_applies_effect"], state(service))
+
+func test_niko_full_forage_cycle_morning(_mode: String) -> Dictionary:
+	var service = make_service()
+	var prop := make_prop("niko-morning-berries", "berryBush", "berries", 3, Vector3(12.0, 0.0, 0.0))
+	var object_id: String = service.register_resource(prop)
+	var queried: Array[Node3D] = query_forage_nodes(service)
+	var niko := make_actor("niko", Vector3(12.0 + CELL * 1.05, 0.0, 0.0))
+	var first = reserve(service, object_id, prop, niko, "niko")
+	var completed = complete(service, object_id, prop, niko, "niko", first)
+	var after: Array[Node3D] = query_forage_nodes(service)
+	var carried: int = int(completed.metrics.get("amount", 0)) if succeeded(completed) else 0
+	var hunger: float = 38.0
+	if carried > 0:
+		hunger = minf(100.0, hunger + 24.0)
+	var passed: bool = queried.size() == 1 and succeeded(first) and succeeded(completed) and carried == 3 and hunger > 38.0 and after.is_empty()
+	return outcome(passed, "queried=%d reserve=%s complete=%s hunger=%.1f after=%d" % [queried.size(), summary(first), summary(completed), hunger, after.size()], ["niko_selects_live_forage_source", "niko_reserves_arrives_harvests", "niko_consumes_or_carries_food"], state(service))
+
 func test_wood_worker_gather_deliver(_mode: String) -> Dictionary:
 	return worker_gather_deliver("tree-logs", "tree", "logs", "wood")
 
@@ -413,6 +526,13 @@ func complete(service, object_id: String, object_node: Node, actor: Node, actor_
 	request.actor_kind = "npc"
 	if request_id != "":
 		request.request_id = request_id
+	return service.request_interaction(request)
+
+func complete_with_metadata(service, object_id: String, object_node: Node, actor: Node, actor_id: String, metadata: Dictionary):
+	var request = InteractionRequestScript.make(SmartObjectServiceScript.COMMAND_COMPLETE, object_id, actor_id, metadata)
+	request.object_node = object_node
+	request.actor_node = actor
+	request.actor_kind = String(metadata.get("actorKind", "npc"))
 	return service.request_interaction(request)
 
 func harvest(service, object_id: String, object_node: Node, actor: Node, actor_id: String, actor_kind := "player"):

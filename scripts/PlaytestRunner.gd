@@ -413,7 +413,7 @@ func test_tutorial_start_system() -> void:
     var mira_has_separate_home := mira != null and mira_home_cell != starter_cell
     var mira_route_bounds: Dictionary = building_bounds_near(starter_cell, 9)
     add_result(
-        "tutorial_intro_knock_elder",
+        "tutorial_contract_intro_knock_elder",
         door_opened
             and door_objective
             and knock_started
@@ -491,7 +491,7 @@ func test_tutorial_start_system() -> void:
     var rowan_objective_locked := not bool(objective_system.is_complete("tutorial_rowan", locked_objective_state))
     var rowan_step_locked := not bool(locked_talks.get("rowan", false))
     add_result(
-        "tutorial_followups_locked_until_sleep",
+        "tutorial_contract_followups_locked_until_sleep",
         rowan_locked_interaction and rowan_objective_locked and rowan_step_locked and String(tutorial_system.get("last_message")).find("after dawn") >= 0,
         "interact %s, objective locked %s, rowan talk locked %s, message '%s'" % [
             str(rowan_locked_interaction),
@@ -565,7 +565,7 @@ func test_tutorial_start_system() -> void:
     main.call("update_objectives_and_contracts")
     var sleep_objective := bool(objective_system.is_complete("tutorial_sleep_after_repair", main.call("objective_state")))
     add_result(
-        "tutorial_repair_and_sleep_gate",
+        "tutorial_contract_repair_and_sleep_gate",
         blocked_sleep and marker_count_before >= expected_marker_count and marker_count_after == 0 and repaired_all and repair_complete and repair_objective and slept_after_repair and sleep_objective and float(main.get("time_of_day")) < 0.36,
         "blocked %s, markers %d/%d->%d, repaired %s, complete %s, repair objective %s, slept %s, sleep objective %s, time %.2f, state %s" % [
             str(blocked_sleep),
@@ -611,7 +611,7 @@ func test_tutorial_start_system() -> void:
     var objective_complete := bool(objective_system.is_complete("tutorial_mira", objective_state))
     var message := String(tutorial_system.get("last_message"))
     add_result(
-        "tutorial_npc_interaction",
+        "tutorial_contract_npc_interaction",
         interacted and objective_complete and dialogue_focus_ok and message.find("Mira:") == 0,
         "interacted %s, objective %s, focus %s, message '%s'" % [str(interacted), str(objective_complete), str(dialogue_focus_ok), message]
     )
@@ -622,7 +622,7 @@ func test_tutorial_start_system() -> void:
     tutorial_system.interact_with(niko)
     var niko_steps: Dictionary = tutorial_system.state().get("completedSteps", {})
     add_result(
-        "tutorial_niko_food_errand",
+        "tutorial_contract_niko_food_errand",
         rowan_blocked_until_niko and bool(niko_steps.get("nikoBerries", false)) and inventory_system.count("fieldRation") >= 1 and inventory_system.count("berries") == 0,
         "rowan blocked %s, steps %s, ration %d, berries %d" % [str(rowan_blocked_until_niko), str(niko_steps), inventory_system.count("fieldRation"), inventory_system.count("berries")]
     )
@@ -649,7 +649,7 @@ func test_tutorial_start_system() -> void:
     var rowan_state: Dictionary = tutorial_system.state()
     var rowan_steps: Dictionary = rowan_state.get("completedSteps", {})
     add_result(
-        "tutorial_rowan_errand_chain",
+        "tutorial_contract_rowan_errand_chain",
         rowan_logs_ready
             and crafted_axe
             and crafted_pickaxe
@@ -679,7 +679,7 @@ func test_tutorial_start_system() -> void:
     var ready_before_final := bool(objective_system.is_complete("tutorial_ready", weapon_state))
     var final_objective_available := bool(objective_system.is_available("tutorial_final_night", weapon_state))
     add_result(
-        "tutorial_weapon_preps_final_night",
+        "tutorial_contract_weapon_preps_final_night",
         crafted_sword
             and bool(final_steps.get("seraWeapon", false))
             and bool(final_steps.get("readyForWilds", false))
@@ -768,7 +768,7 @@ func test_tutorial_start_system() -> void:
     var final_objective_complete := bool(objective_system.is_complete("tutorial_final_night", main.call("objective_state")))
     var ready_objective := bool(objective_system.is_complete("tutorial_ready", main.call("objective_state")))
     add_result(
-        "tutorial_final_rescue_mission",
+        "tutorial_contract_final_rescue_mission",
         final_started
             and final_active
             and final_bed_locked
