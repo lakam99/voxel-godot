@@ -138,6 +138,11 @@ func _cache_motion_intent(entry: Dictionary, goal: Dictionary, plan: Dictionary,
 	entry["activeMotionPerception"] = perception.duplicate(false)
 
 func _cached_goal_for_motion(entry: Dictionary, body: Node3D) -> Dictionary:
+	var order_kind := _scripted_order_kind(body)
+	if order_kind == "go_home":
+		return { "goalKind": NpcEnumsScript.GOAL_KIND_HOME, "reason": "scripted_go_home_order" }
+	if order_kind in ["go_to", "wait", "face_player"]:
+		return { "goalKind": NpcEnumsScript.GOAL_KIND_SCRIPTED, "reason": "scripted_%s_order" % order_kind }
 	if body.has_meta("npc_scripted_target"):
 		return { "goalKind": NpcEnumsScript.GOAL_KIND_SCRIPTED, "reason": "scripted_target" }
 	var active_job_phase := String(entry.get("jobPhase", "idle"))
@@ -154,7 +159,8 @@ func _cached_goal_for_motion(entry: Dictionary, body: Node3D) -> Dictionary:
 	return { "goalKind": StringName(goal_kind), "reason": "cached_entry_goal" }
 
 func _advance_scripted_motion(entry: Dictionary, body: Node3D, delta: float) -> Dictionary:
-	if not body.has_meta("npc_scripted_target"):
+	var order_kind := _scripted_order_kind(body)
+	if order_kind == "" and not body.has_meta("npc_scripted_target"):
 		_release_action_owned_state(entry, "scripted_order_cancelled")
 		return { "advanced": false, "reason": "scripted_order_cancelled", "intentKind": "scripted" }
 	_execute_scripted(entry, body, delta)
@@ -243,6 +249,27 @@ func _motion_result(entry: Dictionary, intent_kind: String, reason: String) -> D
 		"classification": "door_state" if String(entry.get("activeDoorPortalId", "")) != "" else ""
 	}
 
+func _scripted_order_kind(body: Node) -> String:
+	if body == null or not is_instance_valid(body):
+		return ""
+	var state := String(body.get_meta("npc_scripted_order_state", ""))
+	if not (state in ["PENDING", "ACTIVE"]):
+		return ""
+	return String(body.get_meta("npc_scripted_order_kind", ""))
+
+func _mark_scripted_order(entry: Dictionary, state: String, reason: String) -> void:
+	if npc_system != null and npc_system.has_method("scripted_order_result"):
+		npc_system.call("scripted_order_result", entry, state, reason, "")
+		return
+	entry["scriptedOrder"] = {
+		"state": state,
+		"reason": reason
+	}
+	var body := entry.get("body") as Node
+	if body != null and is_instance_valid(body):
+		body.set_meta("npc_scripted_order_state", state)
+		body.set_meta("npc_scripted_order_reason", reason)
+
 func _execute_plan(entry: Dictionary, body: Node3D, goal: Dictionary, plan: Dictionary, perception: Dictionary, schedule: Dictionary, delta: float) -> void:
 	var goal_kind: StringName = goal.get("goalKind", NpcEnumsScript.GOAL_KIND_IDLE)
 	var monitor = performance_monitor()
@@ -280,10 +307,23 @@ func _execute_plan(entry: Dictionary, body: Node3D, goal: Dictionary, plan: Dict
 
 func _execute_scripted(entry: Dictionary, body: Node3D, delta: float) -> void:
 	entry["routePriority"] = 180
-	if body.has_meta("npc_scripted_target") and npc_system.has_method("update_scripted_npc"):
+	var order_kind := _scripted_order_kind(body)
+	if order_kind == "wait":
+		entry["lastMoveDistance"] = 0.0
+		_mark_scripted_order(entry, "ACTIVE", "wait")
+	elif order_kind == "face_player":
+		entry["lastMoveDistance"] = 0.0
+		var face_target: Vector3 = body.get_meta("npc_dialogue_face_position", body.global_position)
+		if main != null and main.get("player") is Node3D:
+			face_target = (main.get("player") as Node3D).global_position
+		if npc_system.has_method("face_position"):
+			npc_system.call("face_position", body, face_target)
+		_mark_scripted_order(entry, "ARRIVED", "face_player")
+	elif body.has_meta("npc_scripted_target") and npc_system.has_method("update_scripted_npc"):
 		npc_system.call("update_scripted_npc", entry, body, delta)
 	else:
 		_release_action_owned_state(entry, "scripted_order_cancelled")
+		_mark_scripted_order(entry, "FAILED_TARGET_GONE", "missing_scripted_target")
 
 func _execute_home(entry: Dictionary, body: Node3D, perception: Dictionary, delta: float) -> void:
 	entry["homeReturnTime"] = float(entry.get("homeReturnTime", 0.0)) + delta
@@ -295,10 +335,17 @@ func _execute_home(entry: Dictionary, body: Node3D, perception: Dictionary, delt
 	entry["lastMoveDistance"] = moved
 	if npc_system.has_method("settle_home_if_reached"):
 		npc_system.call("settle_home_if_reached", entry)
+	if _scripted_order_kind(body) == "go_home":
+		if bool(entry.get("insideHome", false)):
+			_mark_scripted_order(entry, "ARRIVED", "home_interior_reached")
+		else:
+			_mark_scripted_order(entry, "ACTIVE", "go_home")
 	var now_perception: Dictionary = perception_service.snapshot(entry, { "scheduleState": NpcEnumsScript.SCHEDULE_STATE_NIGHT })
 	var active_target_cell: Vector2i = entry.get("homeActiveTargetCell", entry.get("homeCell", Vector2i.ZERO))
 	var home_cell: Vector2i = entry.get("homeCell", active_target_cell)
 	if not bool(now_perception.get("insideHome", false)) and active_target_cell == home_cell and _home_route_terminal(entry):
+		if _scripted_order_kind(body) == "go_home":
+			_mark_scripted_order(entry, "FAILED_BLOCKED", _home_failure_reason(entry, now_perception))
 		recovery_policy.mark_home_blocked(entry, _home_failure_reason(entry, now_perception))
 
 func _execute_guard(entry: Dictionary, body: Node3D, perception: Dictionary, schedule: Dictionary, delta: float) -> void:

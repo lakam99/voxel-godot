@@ -23,12 +23,21 @@ func snapshot(entry: Dictionary, schedule: Dictionary) -> Dictionary:
 	var threshold := on_porch and not inside_home
 	var route_status := String(entry.get("routeStatus", ""))
 	var route_reason := String(entry.get("routeReason", ""))
+	var scripted_order_kind := String(body.get_meta("npc_scripted_order_kind", "")) if body != null else ""
+	var scripted_order_state := String(body.get_meta("npc_scripted_order_state", "")) if body != null else ""
+	var active_scripted_order := body != null and (
+		body.has_meta("npc_scripted_target")
+		or scripted_order_state in ["PENDING", "ACTIVE"]
+	)
 	return {
 		"position": position,
 		"insideHome": inside_home,
 		"onPorch": on_porch,
 		"onThreshold": threshold,
-		"scriptedOrder": body != null and body.has_meta("npc_scripted_target"),
+		"scriptedOrder": active_scripted_order and scripted_order_kind != "go_home",
+		"scriptedHomeOrder": active_scripted_order and scripted_order_kind == "go_home",
+		"scriptedOrderKind": scripted_order_kind,
+		"scriptedOrderState": scripted_order_state,
 		"scriptedAllowOutside": body != null and bool(body.get_meta("npc_scripted_allow_outside", true)),
 		"heldByScript": _held_by_script(entry, body),
 		"activeThreat": active_threat != null and is_instance_valid(active_threat),
@@ -74,6 +83,8 @@ func compliance(entry: Dictionary, perception: Dictionary, schedule: Dictionary)
 func _held_by_script(entry: Dictionary, body: Node3D) -> bool:
 	if body == null:
 		return false
+	if npc_system != null and npc_system.has_method("npc_is_held_by_intro_or_dialogue"):
+		return bool(npc_system.call("npc_is_held_by_intro_or_dialogue", entry, body))
 	if bool(body.get_meta("npc_dialogue_focused", false)):
 		return true
 	return bool(entry.get("holdIntroDoor", false))

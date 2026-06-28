@@ -34,6 +34,8 @@ class FakeNpcSystem:
 	extends Node
 	var chosen_anchor := Vector3(2.7, 0.0, 0.0)
 	var move_calls := 0
+	var moving_home_calls := 0
+	var max_requested_distance := 0.0
 	var moved_actor_ids := {}
 
 	func update_npc_needs(_entry: Dictionary, _delta: float, _night_factor: float) -> void:
@@ -50,6 +52,9 @@ class FakeNpcSystem:
 		if body == null:
 			return 0.0
 		move_calls += 1
+		if _moving_home:
+			moving_home_calls += 1
+		max_requested_distance = maxf(max_requested_distance, max_distance)
 		moved_actor_ids[String(entry.get("id", "npc"))] = int(moved_actor_ids.get(String(entry.get("id", "npc")), 0)) + 1
 		var previous := body.global_position
 		if bool(entry.get("blockMovement", false)):
@@ -85,6 +90,28 @@ class FakeNpcSystem:
 	func face_hostile_if_needed(_body: Node3D, _target_hostile: Node3D) -> void:
 		pass
 
+	func face_position(body: Node3D, target: Vector3) -> void:
+		if body == null:
+			return
+		var to_target := target - body.global_position
+		to_target.y = 0.0
+		if to_target.length_squared() > 0.001:
+			body.rotation.y = atan2(to_target.x, to_target.z)
+
+	func scripted_order_result(entry: Dictionary, state: String, reason: String, failure_reason := "") -> Dictionary:
+		var result: Dictionary = entry.get("scriptedOrder", {}) if entry.get("scriptedOrder", {}) is Dictionary else {}
+		result = result.duplicate(true)
+		result["state"] = state
+		result["reason"] = reason
+		result["failureReason"] = failure_reason
+		entry["scriptedOrder"] = result
+		var body := entry.get("body") as Node
+		if body != null:
+			body.set_meta("npc_scripted_order_state", state)
+			body.set_meta("npc_scripted_order_reason", reason)
+			body.set_meta("npc_scripted_order_failure_reason", failure_reason)
+		return result
+
 func setup(owner) -> void:
 	runner = owner
 	roster = GuardRosterServiceScript.new()
@@ -119,6 +146,12 @@ func cases() -> Array[Dictionary]:
 		case("npc_behavior_goal_hysteresis_no_thrashing", "day", "test_goal_hysteresis_no_thrashing"),
 		case("npc_behavior_action_interrupt_releases_resources", "day", "test_action_interrupt_releases_resources"),
 		case("npc_behavior_scripted_order_priority_and_cancel", "day", "test_scripted_order_priority_and_cancel"),
+		case("npc_behavior_scripted_order_go_home_uses_route_stack", "day", "test_scripted_order_go_home_uses_route_stack"),
+		case("npc_behavior_scripted_order_normal_profile_speed", "day", "test_scripted_order_normal_profile_speed"),
+		case("npc_behavior_scripted_order_no_transform_write", "day", "test_scripted_order_no_transform_write"),
+		case("npc_behavior_mira_dialogue_ack_releases_go_home_order", "day", "test_mira_dialogue_ack_releases_go_home_order"),
+		case("npc_behavior_mira_home_arrival_requires_interior", "day", "test_mira_home_arrival_requires_interior"),
+		case("npc_behavior_hold_intro_door_not_speed_override", "day", "test_hold_intro_door_not_speed_override"),
 		case("npc_motor_every_active_actor_motion_tick_32_npcs", "day", "test_every_active_actor_motion_tick_32_npcs"),
 		case("npc_behavior_brain_budget_does_not_skip_route_motion", "day", "test_brain_budget_does_not_skip_route_motion"),
 		case("npc_behavior_scripted_order_moves_while_brain_skipped", "day", "test_scripted_order_moves_while_brain_skipped"),
@@ -286,6 +319,67 @@ func test_scripted_order_priority_and_cancel(_mode: String) -> Dictionary:
 	var after_cancel: Dictionary = select_and_plan(entry_data, NpcEnumsScript.SCHEDULE_STATE_DAY, { "scriptedOrder": false })
 	var passed: bool = active.goal.get("goalKind") == NpcEnumsScript.GOAL_KIND_SCRIPTED and after_cancel.goal.get("goalKind") != NpcEnumsScript.GOAL_KIND_SCRIPTED
 	return outcome(passed, "active=%s cancel=%s" % [String(active.goal.get("goalKind")), String(after_cancel.goal.get("goalKind"))], ["scripted_priority", "scripted_cancel_restores_selector"], { "active": active, "afterCancel": after_cancel })
+
+func test_scripted_order_go_home_uses_route_stack(_mode: String) -> Dictionary:
+	var fake_npc := FakeNpcSystem.new()
+	var executor: Variant = make_executor(fake_npc)
+	var entry_data := entry("Villager", { "id": "mira", "position": Vector3.ZERO, "homeCell": Vector2i(1, 0), "homePosition": Vector3(0.22, 0.0, 0.0) })
+	var body := entry_data.get("body") as Node3D
+	set_scripted_order_meta(entry_data, body, "go_home", "intro_acknowledged_return_home")
+	for i in range(8):
+		executor.advance_motion_npc(entry_data, 1.0 / 60.0, 0.0)
+	var order: Dictionary = entry_data.get("scriptedOrder", {})
+	var passed: bool = fake_npc.move_calls > 0 and fake_npc.moving_home_calls == fake_npc.move_calls and not body.has_meta("npc_scripted_target") and String(order.get("state", "")) in ["ACTIVE", "ARRIVED"]
+	fake_npc.queue_free()
+	return outcome(passed, "moveCalls=%d homeCalls=%d targetMeta=%s order=%s" % [fake_npc.move_calls, fake_npc.moving_home_calls, str(body.has_meta("npc_scripted_target")), JSON.stringify(order)], ["go_home_uses_home_route", "go_home_no_scripted_target", "order_state_recorded"], { "order": order })
+
+func test_scripted_order_normal_profile_speed(_mode: String) -> Dictionary:
+	var fake_npc := FakeNpcSystem.new()
+	var executor: Variant = make_executor(fake_npc)
+	var entry_data := entry("Villager", { "id": "scripted_speed", "position": Vector3.ZERO })
+	var body := entry_data.get("body") as Node3D
+	set_scripted_order_meta(entry_data, body, "go_to", "speed_check", Vector3(3.0, 0.0, 0.0))
+	for i in range(4):
+		executor.advance_motion_npc(entry_data, 1.0 / 60.0, 0.0)
+	var source := read_text("res://scripts/npc_ai/behavior/NpcPlanExecutor.gd") + "\n" + read_text("res://scripts/NpcSystem.gd")
+	var no_hack_speed := source.find("speed = 20.0") < 0 and not text_contains_near(source, "holdIntroDoor", "speed", 160) and not text_contains_near(source, "speed", "holdIntroDoor", 160)
+	var profile_speed_ok := fake_npc.max_requested_distance <= (3.05 * (1.0 / 60.0)) + 0.0001
+	var passed: bool = fake_npc.move_calls == 4 and profile_speed_ok and no_hack_speed
+	fake_npc.queue_free()
+	return outcome(passed, "moveCalls=%d maxDistance=%.4f noHack=%s" % [fake_npc.move_calls, fake_npc.max_requested_distance, str(no_hack_speed)], ["normal_scripted_speed", "no_20_speed_override"], { "maxRequestedDistance": fake_npc.max_requested_distance })
+
+func test_scripted_order_no_transform_write(_mode: String) -> Dictionary:
+	var source := read_text("res://scripts/NpcSystem.gd")
+	var start := source.find("func update_scripted_npc")
+	var end := source.find("func update_fighter_target", start)
+	var update_source := source.substr(start, end - start)
+	var passed: bool = update_source.find("global_position =") < 0 and update_source.find("position =") < 0 and update_source.find("move_npc(") >= 0
+	return outcome(passed, "usesMove=%s directGlobal=%s directPosition=%s" % [str(update_source.find("move_npc(") >= 0), str(update_source.find("global_position =") >= 0), str(update_source.find("position =") >= 0)], ["scripted_order_uses_move_npc", "scripted_order_no_transform_assignment"], {})
+
+func test_mira_dialogue_ack_releases_go_home_order(_mode: String) -> Dictionary:
+	var tutorial_source := read_text("res://scripts/TutorialSystem.gd")
+	var npc_source := read_text("res://scripts/NpcSystem.gd")
+	var has_ack_hook := tutorial_source.find("release_intro_elder_home_order") >= 0 and tutorial_source.find("intro_acknowledged_return_home") >= 0 and tutorial_source.find("order_go_home") >= 0
+	var has_order_api := npc_source.find("func order_go_home") >= 0 and npc_source.find("func order_resume_schedule") >= 0 and npc_source.find("func cancel_order") >= 0
+	var passed: bool = has_ack_hook and has_order_api
+	return outcome(passed, "ackHook=%s api=%s" % [str(has_ack_hook), str(has_order_api)], ["dialogue_ack_orders_mira_home", "scripted_order_api_present"], {})
+
+func test_mira_home_arrival_requires_interior(_mode: String) -> Dictionary:
+	var source := read_text("res://scripts/NpcSystem.gd")
+	var start := source.find("func settle_home_if_reached")
+	var end := source.find("func mark_npc_home_blocked", start)
+	var settle_source := source.substr(start, end - start)
+	var has_interior_check := settle_source.find("is_inside_home_interior") >= 0
+	var porch_blocked := settle_source.find("home_porch_fallback_not_inside") >= 0
+	var passed: bool = has_interior_check and porch_blocked
+	return outcome(passed, "interiorCheck=%s porchBlocked=%s" % [str(has_interior_check), str(porch_blocked)], ["mira_home_requires_interior_semantics", "porch_fallback_not_inside"], {})
+
+func test_hold_intro_door_not_speed_override(_mode: String) -> Dictionary:
+	var source := read_text("res://scripts/NpcSystem.gd") + "\n" + read_text("res://scripts/npc_ai/behavior/NpcPlanExecutor.gd") + "\n" + read_text("res://scripts/TutorialSystem.gd") + "\n" + read_text("res://scripts/TutorialDialogueSystem.gd")
+	var forbidden := source.find("speed = 20.0") >= 0 or text_contains_near(source, "holdIntroDoor", "speed", 160) or text_contains_near(source, "speed", "holdIntroDoor", 160)
+	var hold_still_state_only := source.find("holdIntroDoor") >= 0 and source.find("npc_is_held_by_intro_or_dialogue") >= 0
+	var passed: bool = not forbidden and hold_still_state_only
+	return outcome(passed, "forbidden=%s holdStateOnly=%s" % [str(forbidden), str(hold_still_state_only)], ["hold_intro_door_not_speed", "hold_intro_door_state_only"], {})
 
 func test_every_active_actor_motion_tick_32_npcs(_mode: String) -> Dictionary:
 	var fake_npc := FakeNpcSystem.new()
@@ -473,6 +567,9 @@ func default_perception() -> Dictionary:
 		"onPorch": false,
 		"onThreshold": false,
 		"scriptedOrder": false,
+		"scriptedHomeOrder": false,
+		"scriptedOrderKind": "",
+		"scriptedOrderState": "",
 		"activeThreat": false,
 		"threat": null
 	}
@@ -505,6 +602,25 @@ func entry(role: String, options := {}) -> Dictionary:
 		"personalInventory": {}
 	}
 
+func set_scripted_order_meta(entry_data: Dictionary, body: Node, kind: String, reason: String, target := Vector3.INF) -> void:
+	entry_data["scriptedOrder"] = {
+		"kind": kind,
+		"state": "PENDING",
+		"reason": reason,
+		"target": target,
+		"arrivalRadius": 0.45,
+		"usesRouteStack": kind in ["go_to", "go_home"]
+	}
+	entry_data["activeMotionGoal"] = { "goalKind": NpcEnumsScript.GOAL_KIND_HOME if kind == "go_home" else NpcEnumsScript.GOAL_KIND_SCRIPTED, "reason": reason }
+	body.set_meta("npc_scripted_order_kind", kind)
+	body.set_meta("npc_scripted_order_state", "PENDING")
+	body.set_meta("npc_scripted_order_reason", reason)
+	body.set_meta("npc_scripted_arrival_radius", 0.45)
+	body.set_meta("npc_scripted_allow_outside", true)
+	body.set_meta("npc_scripted_hold_on_arrival", true)
+	if kind == "go_to":
+		body.set_meta("npc_scripted_target", target)
+
 func read_text(path: String) -> String:
 	var file := FileAccess.open(path, FileAccess.READ)
 	if file == null:
@@ -512,6 +628,18 @@ func read_text(path: String) -> String:
 	var text := file.get_as_text()
 	file.close()
 	return text
+
+func text_contains_near(text: String, first: String, second: String, window: int) -> bool:
+	var cursor := 0
+	while true:
+		var first_index := text.find(first, cursor)
+		if first_index < 0:
+			return false
+		var second_index := text.find(second, first_index)
+		if second_index >= 0 and second_index - first_index <= window:
+			return true
+		cursor = first_index + first.length()
+	return false
 
 func compact_result(result: Dictionary) -> Dictionary:
 	var copy := result.duplicate(true)

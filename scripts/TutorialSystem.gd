@@ -397,12 +397,20 @@ func is_intro_elder_waiting_for_ack() -> bool:
 
 func acknowledge_dialogue(context := {}) -> void:
     var state: Dictionary = context if context is Dictionary else {}
-    if bool(state.get("introElder", false)) or (String(state.get("npcId", "")) == "mira" and is_intro_elder_waiting_for_ack()):
+    var intro_ack := bool(state.get("introElder", false)) or (String(state.get("npcId", "")) == "mira" and is_intro_elder_waiting_for_ack())
+    if intro_ack:
         intro_elder_dialogue_acknowledged = true
+        release_intro_elder_home_order()
     clear_dialogue_focus()
 
 func dialogue_payload() -> Dictionary:
     return last_dialogue.duplicate(true)
+
+func release_intro_elder_home_order() -> void:
+    if main == null or main.npc_system == null or not main.npc_system.has_method("order_go_home"):
+        return
+    var actor = last_dialogue_node if last_dialogue_node != null and is_instance_valid(last_dialogue_node) else "mira"
+    main.npc_system.order_go_home(actor, "intro_acknowledged_return_home")
 
 func focus_dialogue_npc() -> void:
     if last_dialogue_node == null or main == null or main.npc_system == null or main.player == null:

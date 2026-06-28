@@ -7,6 +7,7 @@ const NpcCombatScript := preload("res://scripts/NpcCombat.gd")
 const NpcProfileRulesScript := preload("res://scripts/NpcProfileRules.gd")
 const NpcStatsScript := preload("res://scripts/NpcStats.gd")
 const NpcAutonomySystemScript := preload("res://scripts/npc_ai/NpcAutonomySystem.gd")
+const NpcEnumsScript := preload("res://scripts/npc_ai/NpcEnums.gd")
 const NpcAgentScene := preload("res://scenes/npc/NpcAgent.tscn")
 const NpcAgentScript := preload("res://scripts/npc_ai/NpcAgent.gd")
 const NpcConstantsScript := preload("res://scripts/npc_ai/NpcConstants.gd")
@@ -167,18 +168,178 @@ func clear_dialogue_focus() -> void:
         focused_dialogue_body.set_meta("npc_dialogue_focused", false)
     focused_dialogue_body = null
 
+func order_wait(actor_id, reason := "scripted_wait") -> Dictionary:
+    var entry := npc_entry_for_actor(actor_id)
+    if entry.is_empty():
+        return scripted_order_result(null, "FAILED_TARGET_GONE", reason, "missing_actor")
+    return apply_scripted_order(entry, "wait", reason, Vector3.INF, -1.0, true, true)
+
+func order_go_to(actor_id, target: Vector3, reason := "scripted_go_to", arrival_radius := -1.0) -> Dictionary:
+    var entry := npc_entry_for_actor(actor_id)
+    if entry.is_empty():
+        return scripted_order_result(null, "FAILED_TARGET_GONE", reason, "missing_actor")
+    return apply_scripted_order(entry, "go_to", reason, target, arrival_radius, true, true)
+
+func order_go_home(actor_id, reason := "scripted_go_home") -> Dictionary:
+    var entry := npc_entry_for_actor(actor_id)
+    if entry.is_empty():
+        return scripted_order_result(null, "FAILED_TARGET_GONE", reason, "missing_actor")
+    return apply_scripted_order(entry, "go_home", reason, entry.get("homePosition", Vector3.INF), CELL * 0.82, false, true)
+
+func order_face_player(actor_id, reason := "scripted_face_player") -> Dictionary:
+    var entry := npc_entry_for_actor(actor_id)
+    if entry.is_empty():
+        return scripted_order_result(null, "FAILED_TARGET_GONE", reason, "missing_actor")
+    return apply_scripted_order(entry, "face_player", reason, Vector3.INF, -1.0, true, true)
+
+func order_resume_schedule(actor_id) -> Dictionary:
+    return cancel_order(actor_id, "resume_schedule")
+
+func cancel_order(actor_id, reason := "scripted_cancelled") -> Dictionary:
+    var entry := npc_entry_for_actor(actor_id)
+    if entry.is_empty():
+        return scripted_order_result(null, "FAILED_TARGET_GONE", reason, "missing_actor")
+    var body := entry.get("body") as Node
+    var result := scripted_order_result(entry, "CANCELLED", reason, "")
+    clear_scripted_order_metadata(body)
+    entry["scriptedOrder"] = result
+    entry["activeGoalKind"] = "idle"
+    entry.erase("activeMotionGoal")
+    entry.erase("activeMotionPlan")
+    if body != null and is_instance_valid(body):
+        body.set_meta("npc_scripted_order_state", "CANCELLED")
+        body.set_meta("npc_scripted_order_reason", reason)
+    return result
+
+func scripted_order_status(actor_id) -> Dictionary:
+    var entry := npc_entry_for_actor(actor_id)
+    if entry.is_empty():
+        return { "state": "FAILED_TARGET_GONE", "reason": "missing_actor" }
+    return entry.get("scriptedOrder", {}) if entry.get("scriptedOrder", {}) is Dictionary else {}
+
 func set_scripted_target(body: Node, target: Vector3, allow_outside := true, hold_on_arrival := true) -> void:
     if body == null or not is_instance_valid(body):
         return
-    body.set_meta("npc_scripted_target", target)
-    body.set_meta("npc_scripted_allow_outside", allow_outside)
-    body.set_meta("npc_scripted_hold_on_arrival", hold_on_arrival)
-    body.set_meta("npc_scripted_arrived", false)
+    var entry := npc_entry_for_actor(body)
+    if entry.is_empty():
+        body.set_meta("npc_scripted_target", target)
+        body.set_meta("npc_scripted_allow_outside", allow_outside)
+        body.set_meta("npc_scripted_hold_on_arrival", hold_on_arrival)
+        body.set_meta("npc_scripted_arrived", false)
+        body.set_meta("npc_scripted_order_kind", "go_to")
+        body.set_meta("npc_scripted_order_state", "PENDING")
+        body.set_meta("npc_scripted_order_reason", "legacy_set_scripted_target")
+        return
+    apply_scripted_order(entry, "go_to", "legacy_set_scripted_target", target, -1.0, allow_outside, hold_on_arrival)
 
 func clear_scripted_target(body: Node) -> void:
     if body == null or not is_instance_valid(body):
         return
-    body.remove_meta("npc_scripted_target")
+    var entry := npc_entry_for_actor(body)
+    if not entry.is_empty():
+        cancel_order(body, "clear_scripted_target")
+        return
+    clear_scripted_order_metadata(body)
+
+func npc_entry_for_actor(actor_id) -> Dictionary:
+    if actor_id == null:
+        return {}
+    if actor_id is Dictionary:
+        return actor_id
+    if actor_id is Node:
+        for entry in npcs:
+            if entry.get("body") == actor_id:
+                return entry
+        return {}
+    var actor_key := String(actor_id)
+    if actor_key == "":
+        return {}
+    for entry in npcs:
+        var body := entry.get("body") as Node
+        if String(entry.get("id", "")) == actor_key:
+            return entry
+        if body == null or not is_instance_valid(body):
+            continue
+        if body.name == actor_key:
+            return entry
+        if body.has_meta("npc_stable_id") and String(body.get_meta("npc_stable_id")) == actor_key:
+            return entry
+        if body.has_meta("npc_id") and String(body.get_meta("npc_id")) == actor_key:
+            return entry
+    return {}
+
+func apply_scripted_order(entry: Dictionary, kind: String, reason: String, target: Vector3, arrival_radius: float, allow_outside: bool, hold_on_arrival: bool) -> Dictionary:
+    var body := entry.get("body") as Node
+    if body == null or not is_instance_valid(body):
+        return scripted_order_result(entry, "FAILED_TARGET_GONE", reason, "missing_body")
+    var order_serial := int(entry.get("scriptedOrderSerial", 0)) + 1
+    entry["scriptedOrderSerial"] = order_serial
+    var order_id := "%s:%s:%d" % [String(entry.get("id", body.name)), kind, order_serial]
+    var normalized_radius := arrival_radius if arrival_radius > 0.0 else CELL * 0.45
+    if kind == "go_home":
+        normalized_radius = arrival_radius if arrival_radius > 0.0 else CELL * 0.82
+    var result := {
+        "id": order_id,
+        "kind": kind,
+        "state": "PENDING",
+        "reason": reason,
+        "failureReason": "",
+        "target": target,
+        "arrivalRadius": normalized_radius,
+        "allowOutside": allow_outside,
+        "holdOnArrival": hold_on_arrival,
+        "usesRouteStack": kind in ["go_to", "go_home"]
+    }
+    entry["scriptedOrder"] = result
+    entry["activeGoalKind"] = "home" if kind == "go_home" else "scripted"
+    entry["routePriority"] = 190 if kind == "go_home" else 180
+    body.set_meta("npc_scripted_order_id", order_id)
+    body.set_meta("npc_scripted_order_kind", kind)
+    body.set_meta("npc_scripted_order_state", "PENDING")
+    body.set_meta("npc_scripted_order_reason", reason)
+    body.set_meta("npc_scripted_order_failure_reason", "")
+    body.set_meta("npc_scripted_arrived", false)
+    body.set_meta("npc_scripted_arrival_radius", normalized_radius)
+    body.set_meta("npc_scripted_allow_outside", allow_outside)
+    body.set_meta("npc_scripted_hold_on_arrival", hold_on_arrival)
+    if kind == "go_to":
+        body.set_meta("npc_scripted_target", target)
+    elif body.has_meta("npc_scripted_target"):
+        body.remove_meta("npc_scripted_target")
+    entry["activeMotionGoal"] = { "goalKind": NpcEnumsScript.GOAL_KIND_HOME if kind == "go_home" else NpcEnumsScript.GOAL_KIND_SCRIPTED, "reason": reason }
+    return result
+
+func scripted_order_result(entry, state: String, reason: String, failure_reason := "") -> Dictionary:
+    var result := {}
+    if entry is Dictionary:
+        result = (entry as Dictionary).get("scriptedOrder", {}) if (entry as Dictionary).get("scriptedOrder", {}) is Dictionary else {}
+    result = result.duplicate(true)
+    result["state"] = state
+    result["reason"] = reason
+    result["failureReason"] = failure_reason
+    if entry is Dictionary:
+        (entry as Dictionary)["scriptedOrder"] = result
+        var body := (entry as Dictionary).get("body") as Node
+        if body != null and is_instance_valid(body):
+            body.set_meta("npc_scripted_order_state", state)
+            body.set_meta("npc_scripted_order_reason", reason)
+            body.set_meta("npc_scripted_order_failure_reason", failure_reason)
+    return result
+
+func clear_scripted_order_metadata(body: Node) -> void:
+    if body == null or not is_instance_valid(body):
+        return
+    for meta_key in [
+        "npc_scripted_target",
+        "npc_scripted_order_id",
+        "npc_scripted_order_kind",
+        "npc_scripted_order_state",
+        "npc_scripted_order_reason",
+        "npc_scripted_order_failure_reason",
+        "npc_scripted_arrival_radius"
+    ]:
+        if body.has_meta(meta_key):
+            body.remove_meta(meta_key)
     body.set_meta("npc_scripted_arrived", false)
 
 func deterministic_profile_float(profile: Dictionary, body: Node, domain: String, minimum: float, maximum: float) -> float:
@@ -716,11 +877,18 @@ func npc_is_held_by_intro_or_dialogue(entry: Dictionary, body: Node3D) -> bool:
 func update_scripted_npc(entry: Dictionary, body: Node3D, delta: float) -> void:
     var scripted_target: Vector3 = body.get_meta("npc_scripted_target", body.global_position)
     var allow_outside := bool(body.get_meta("npc_scripted_allow_outside", true))
+    var arrival_radius := float(body.get_meta("npc_scripted_arrival_radius", CELL * 0.45))
+    scripted_order_result(entry, "ACTIVE", "go_to", "")
     entry["lastMoveDistance"] = move_npc(entry, scripted_target, 3.05 * delta, false, allow_outside, delta)
-    if body.global_position.distance_to(scripted_target) <= CELL * 0.95:
+    if body.global_position.distance_to(scripted_target) <= arrival_radius:
         body.set_meta("npc_scripted_arrived", true)
+        scripted_order_result(entry, "ARRIVED", "target_reached", "")
         if not bool(body.get_meta("npc_scripted_hold_on_arrival", true)):
-            clear_scripted_target(body)
+            body.remove_meta("npc_scripted_target")
+            entry.erase("activeMotionGoal")
+            entry.erase("activeMotionPlan")
+    elif String(entry.get("routeStatus", "")) in ["blocked", "unreachable"]:
+        scripted_order_result(entry, "FAILED_BLOCKED", "route_blocked", String(entry.get("routeReason", "")))
 
 func update_fighter_target(entry: Dictionary, body: Node3D, target_hostile: Node3D, weapon_id: String) -> Vector3:
     entry["insideHome"] = false

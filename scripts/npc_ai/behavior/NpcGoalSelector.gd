@@ -16,6 +16,9 @@ func select_goal(context, blackboard, entry: Dictionary, perception: Dictionary,
 	}
 	var reasons := {}
 	var schedule_state := String(schedule.get("scheduleState", "day"))
+	if bool(perception.get("scriptedHomeOrder", false)):
+		scores[String(NpcEnumsScript.GOAL_KIND_HOME)] = 2.05
+		reasons[String(NpcEnumsScript.GOAL_KIND_HOME)] = "scripted_go_home_order"
 	if bool(perception.get("scriptedOrder", false)):
 		scores[String(NpcEnumsScript.GOAL_KIND_SCRIPTED)] = 2.00
 		reasons[String(NpcEnumsScript.GOAL_KIND_SCRIPTED)] = "active_scripted_order"
@@ -75,7 +78,7 @@ func _best_goal(scores: Dictionary) -> StringName:
 func _apply_hysteresis(candidate: StringName, scores: Dictionary, blackboard, perception: Dictionary, schedule: Dictionary) -> StringName:
 	if blackboard == null:
 		return candidate
-	if bool(perception.get("scriptedOrder", false)) or bool(perception.get("activeThreat", false)) or bool(schedule.get("mustBeInside", false)) or bool(schedule.get("activeGuardDuty", false)):
+	if bool(perception.get("scriptedOrder", false)) or bool(perception.get("scriptedHomeOrder", false)) or bool(perception.get("activeThreat", false)) or bool(schedule.get("mustBeInside", false)) or bool(schedule.get("activeGuardDuty", false)):
 		return candidate
 	var previous: StringName = blackboard.get("selected_goal_kind")
 	if String(previous) == "" or previous == candidate:
