@@ -360,6 +360,11 @@ func nav_world_cases() -> Array[Dictionary]:
 		["npc_navmesh_backend_default_custom", "test_navmesh_backend_default_custom"],
 		["npc_navmesh_backend_explicit_navmesh", "test_navmesh_backend_explicit_navmesh"],
 		["npc_navmesh_descriptor_deterministic_signature", "test_navmesh_descriptor_deterministic_signature"],
+		["npc_navmesh_tile_snapshot_descriptor_deterministic", "test_navmesh_tile_snapshot_descriptor_deterministic"],
+		["npc_navmesh_service_installs_navigation_region", "test_navmesh_service_installs_navigation_region"],
+		["npc_navmesh_chunk_unload_cleans_region", "test_navmesh_chunk_unload_cleans_region"],
+		["npc_navmesh_semantic_interior_descriptor_registered", "test_navmesh_semantic_interior_descriptor_registered"],
+		["npc_navmesh_autonomy_semantic_backend_registers", "test_navmesh_autonomy_semantic_backend_registers"],
 		["npc_navmesh_service_register_unregister_descriptor", "test_navmesh_service_register_unregister_descriptor"],
 		["npc_navmesh_closest_walkable_descriptor_point", "test_navmesh_closest_walkable_descriptor_point"],
 		["npc_navmesh_no_scene_visual_mesh_scan", "test_navmesh_no_scene_visual_mesh_scan"],
@@ -1507,6 +1512,73 @@ func test_navmesh_descriptor_deterministic_signature(_mode: String) -> Dictionar
 	var passed: bool = first.stable_signature() == second.stable_signature()
 	return outcome(passed, "signature=%s" % first.stable_signature(), ["navmesh_descriptor_signature_sorts_ids", "navmesh_descriptor_signature_sorts_metadata"], { "signature": first.stable_signature(), "summary": first.to_summary() })
 
+func test_navmesh_tile_snapshot_descriptor_deterministic(_mode: String) -> Dictionary:
+	var snapshot := nav_snapshot("2,-1", [
+		nav_surface(Vector3i(32, 0, -16), { "semanticRegionIds": ["road:main"] }),
+		nav_surface(Vector3i(33, 0, -16), { "semanticRegionIds": ["road:main"] }),
+		nav_surface(Vector3i(34, 0, -16), { "blocked": true, "blockerKind": "wall" })
+	], {
+		"semanticRegions": [{ "id": "road:main", "kind": "road", "position": Vector3(43.875, 0.0, -21.6) }],
+		"doorPortals": [{ "id": "door:test", "entrance": Vector3(43.2, 0.0, -21.6), "exit": Vector3(44.55, 0.0, -21.6) }]
+	})
+	var first = NavigationBakeDescriptorScript.from_tile_snapshot(snapshot)
+	var second = NavigationBakeDescriptorScript.from_tile_snapshot(snapshot)
+	var summary: Dictionary = first.to_summary()
+	var passed: bool = first.stable_signature() == second.stable_signature() and String(first.get("region_id")) == "region:chunk:2,-1" and summary.get("walkableSurfaces", []).size() == 2 and summary.get("blockers", []).size() == 1 and summary.get("doorPortals", []).size() == 1
+	return outcome(passed, "signature=%s summary=%s" % [first.stable_signature(), JSON.stringify(summary)], ["tile_snapshot_descriptor_deterministic", "tile_snapshot_keeps_blockers", "tile_snapshot_keeps_door_portals"], { "summary": summary })
+
+func test_navmesh_service_installs_navigation_region(_mode: String) -> Dictionary:
+	var service = NavmeshWorldServiceScript.new()
+	service.setup(NavigationBackendConfigScript.from_value("navmesh", "test"))
+	var descriptor = navmesh_descriptor("region:chunk:install", "install")
+	var registered: Dictionary = service.register_chunk_descriptor(descriptor)
+	var stats: Dictionary = service.stats()
+	var snapshot: Dictionary = service.debug_snapshot()
+	service.clear()
+	var passed: bool = String(registered.get("status", "")) == "installed" and bool(registered.get("installed", false)) and int(stats.get("installedRegionCount", 0)) == 1 and int(stats.get("installedSurfaceCount", 0)) == 2 and bool(snapshot.get("hasNavigationMap", false))
+	return outcome(passed, "registered=%s stats=%s" % [JSON.stringify(registered), JSON.stringify(stats)], ["navmesh_descriptor_installs_region_rid", "navmesh_install_counts_surfaces", "navmesh_debug_reports_map"], { "registered": registered, "stats": stats, "snapshot": snapshot })
+
+func test_navmesh_chunk_unload_cleans_region(_mode: String) -> Dictionary:
+	var service = NavmeshWorldServiceScript.new()
+	service.setup(NavigationBackendConfigScript.from_value("navmesh", "test"))
+	service.register_tile_snapshot(nav_snapshot("4,5", [
+		nav_surface(Vector3i(64, 0, 80)),
+		nav_surface(Vector3i(65, 0, 80))
+	]))
+	var after_register: Dictionary = service.stats()
+	var events := [{ "tileKey": "4,5", "changeKinds": ["chunk_unloaded"] }]
+	var responses: Array = service.apply_navigation_events(events)
+	var after_unload: Dictionary = service.stats()
+	service.clear()
+	var passed: bool = int(after_register.get("installedRegionCount", 0)) == 1 and int(after_unload.get("installedRegionCount", -1)) == 0 and int(after_unload.get("regionCount", -1)) == 0 and not responses.is_empty() and String((responses[0] as Dictionary).get("status", "")) == "unregistered"
+	return outcome(passed, "afterRegister=%s afterUnload=%s responses=%s" % [JSON.stringify(after_register), JSON.stringify(after_unload), JSON.stringify(responses)], ["chunk_unload_unregisters_navmesh_region", "chunk_unload_releases_region_rid"], { "afterRegister": after_register, "afterUnload": after_unload, "responses": responses })
+
+func test_navmesh_semantic_interior_descriptor_registered(_mode: String) -> Dictionary:
+	var service = NavmeshWorldServiceScript.new()
+	service.setup(NavigationBackendConfigScript.from_value("navmesh", "test"))
+	var bounds := AABB(Vector3(10.0, 0.0, 20.0), Vector3(5.4, 3.0, 4.05))
+	var registered: Dictionary = service.register_semantic_descriptor("home_interior", "home:starter:mira", bounds, { "npcId": "mira", "inside": true, "tileKey": "starter-home" })
+	var closest: Dictionary = service.closest_walkable(bounds.position + bounds.size * 0.5, 10.0)
+	var snapshot: Dictionary = service.debug_snapshot()
+	service.clear()
+	var region: Dictionary = (snapshot.get("regions", {}) as Dictionary).get("region:semantic:home:starter:mira", {})
+	var passed: bool = String(registered.get("status", "")) == "installed" and bool(closest.get("found", false)) and String(region.get("metadata", {}).get("semanticKind", "")) == "home_interior" and int(snapshot.get("installedRegionCount", 0)) == 1
+	return outcome(passed, "registered=%s closest=%s" % [JSON.stringify(registered), JSON.stringify(closest)], ["semantic_home_interior_installs_navmesh_region", "semantic_home_interior_closest_walkable"], { "registered": registered, "closest": closest, "region": region })
+
+func test_navmesh_autonomy_semantic_backend_registers(_mode: String) -> Dictionary:
+	var previous_backend := OS.get_environment(NavigationBackendConfigScript.ENV_BACKEND)
+	OS.set_environment(NavigationBackendConfigScript.ENV_BACKEND, "navmesh")
+	var autonomy := NpcAutonomySystemScript.new()
+	autonomy.setup(null, null)
+	var revision := autonomy.register_semantic_region(&"home_interior", "home:test:niko", AABB(Vector3(2.0, 0.0, 3.0), Vector3(4.05, 2.7, 4.05)), { "npcId": "niko", "inside": true })
+	var stats: Dictionary = autonomy.stats()
+	var summary: Dictionary = autonomy.navigation_backend_summary()
+	autonomy.free()
+	OS.set_environment(NavigationBackendConfigScript.ENV_BACKEND, previous_backend)
+	var navmesh_stats: Dictionary = stats.get("navmeshWorld", {})
+	var passed: bool = revision > 0 and bool(summary.get("navmeshEnabled", false)) and int(navmesh_stats.get("installedRegionCount", 0)) == 1 and int(navmesh_stats.get("installedSurfaceCount", 0)) == 1
+	return outcome(passed, "summary=%s navmesh=%s revision=%d" % [JSON.stringify(summary), JSON.stringify(navmesh_stats), revision], ["autonomy_navmesh_backend_enabled", "autonomy_semantic_registers_navmesh_region"], { "summary": summary, "navmesh": navmesh_stats, "revision": revision })
+
 func test_navmesh_service_register_unregister_descriptor(_mode: String) -> Dictionary:
 	var service = NavmeshWorldServiceScript.new()
 	service.setup(NavigationBackendConfigScript.from_value("navmesh", "test"))
@@ -1516,7 +1588,7 @@ func test_navmesh_service_register_unregister_descriptor(_mode: String) -> Dicti
 	var unregistered: Dictionary = service.unregister_chunk("region:chunk:0,0")
 	var after_unregister: Dictionary = service.stats()
 	service.clear()
-	var passed: bool = String(registered.get("status", "")) == "registered" and int(after_register.get("regionCount", 0)) == 1 and String(unregistered.get("status", "")) == "unregistered" and int(after_unregister.get("regionCount", -1)) == 0 and int(after_unregister.get("topologyRevision", 0)) == 2
+	var passed: bool = String(registered.get("status", "")) == "installed" and int(after_register.get("regionCount", 0)) == 1 and int(after_register.get("installedRegionCount", 0)) == 1 and String(unregistered.get("status", "")) == "unregistered" and int(after_unregister.get("regionCount", -1)) == 0 and int(after_unregister.get("installedRegionCount", -1)) == 0 and int(after_unregister.get("topologyRevision", 0)) == 2
 	return outcome(passed, "registered=%s unregistered=%s" % [JSON.stringify(registered), JSON.stringify(unregistered)], ["navmesh_descriptor_registers_region", "navmesh_descriptor_unregisters_region", "navmesh_topology_revision_tracks_cleanup"], { "registered": registered, "afterRegister": after_register, "unregistered": unregistered, "afterUnregister": after_unregister })
 
 func test_navmesh_closest_walkable_descriptor_point(_mode: String) -> Dictionary:

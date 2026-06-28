@@ -9,6 +9,7 @@ const NpcEnumsScript := preload("res://scripts/npc_ai/NpcEnums.gd")
 const NavigationChangeBusScript := preload("res://scripts/npc_ai/navigation/NavigationChangeBus.gd")
 const NavigationWorldServiceScript := preload("res://scripts/npc_ai/navigation/NavigationWorldService.gd")
 const NavigationBackendConfigScript := preload("res://scripts/npc_ai/navigation/NavigationBackendConfig.gd")
+const NavmeshWorldServiceScript := preload("res://scripts/npc_ai/navigation/NavmeshWorldService.gd")
 const NpcTelemetryServiceScript := preload("res://scripts/npc_ai/debug/NpcTelemetryService.gd")
 const DoorPortalServiceScript := preload("res://scripts/npc_ai/interactions/DoorPortalService.gd")
 const SmartObjectServiceScript := preload("res://scripts/npc_ai/interactions/SmartObjectService.gd")
@@ -41,6 +42,7 @@ var telemetry
 var change_bus
 var navigation_backend_config
 var navigation_world
+var navmesh_world
 var door_portals
 var smart_objects
 var door_traversal
@@ -67,6 +69,8 @@ func _init() -> void:
 	navigation_backend_config = NavigationBackendConfigScript.from_environment()
 	navigation_world = NavigationWorldServiceScript.new()
 	navigation_world.setup(null, change_bus)
+	navmesh_world = NavmeshWorldServiceScript.new()
+	navmesh_world.setup(navigation_backend_config)
 	door_portals = DoorPortalServiceScript.new()
 	smart_objects = SmartObjectServiceScript.new()
 	door_traversal = DoorTraversalExecutorScript.new()
@@ -85,6 +89,9 @@ func setup(system_node: Node, main_node: Node) -> void:
 	main = main_node
 	navigation_backend_config = NavigationBackendConfigScript.from_environment()
 	navigation_world.setup(main, change_bus)
+	if navmesh_world == null:
+		navmesh_world = NavmeshWorldServiceScript.new()
+	navmesh_world.setup(navigation_backend_config)
 	door_portals.setup(main, self)
 	smart_objects.setup(self, door_portals)
 	bottleneck_classifier = BottleneckClassifierScript.new()
@@ -107,6 +114,10 @@ func _physics_process(_delta: float) -> void:
 	process_navigation_changes()
 	build_navigation_tiles(NpcConstantsScript.NAV_BUILD_MAX_JOBS_PER_TICK)
 
+func _notification(what: int) -> void:
+	if what == NOTIFICATION_PREDELETE:
+		_clear_navmesh_world()
+
 func clear() -> void:
 	contexts_by_instance_id.clear()
 	contexts_by_stable_id.clear()
@@ -117,6 +128,9 @@ func clear() -> void:
 	navigation_backend_config = NavigationBackendConfigScript.from_environment()
 	navigation_world = NavigationWorldServiceScript.new()
 	navigation_world.setup(main, change_bus)
+	_clear_navmesh_world()
+	navmesh_world = NavmeshWorldServiceScript.new()
+	navmesh_world.setup(navigation_backend_config)
 	door_portals = DoorPortalServiceScript.new()
 	door_portals.setup(main, self)
 	smart_objects = SmartObjectServiceScript.new()
@@ -132,6 +146,10 @@ func clear() -> void:
 	simulation_lod = NpcSimulationLodServiceScript.new()
 	simulation_lod.setup(self, npc_system, main)
 	setup_behavior_services()
+
+func _clear_navmesh_world() -> void:
+	if navmesh_world != null:
+		navmesh_world.clear()
 
 func setup_behavior_services() -> void:
 	guard_roster = GuardRosterServiceScript.new()
@@ -644,6 +662,8 @@ func register_semantic_region(kind: StringName, region_id: String, bounds: AABB,
 		anchor_metadata["bounds"] = bounds
 		smart_objects.register_anchor("semantic:%s" % region_id, String(kind), bounds.position + bounds.size * 0.5, anchor_metadata)
 	var revision: int = navigation_world.register_semantic_region(kind, region_id, bounds, metadata)
+	if navmesh_world != null and navigation_backend_config != null and navigation_backend_config.use_navmesh():
+		navmesh_world.register_semantic_descriptor(String(kind), region_id, bounds, metadata)
 	change_bus.emit_change(NpcEnumsScript.CHANGE_KIND_SEMANTIC_CHANGED, "semantic:%s" % region_id, bounds, NavigationChangeBusScript.tile_keys_for_bounds(bounds), revision)
 	telemetry.record_event("_system", &"semantic", "registered", kind, {
 		"regionId": region_id,
@@ -653,12 +673,16 @@ func register_semantic_region(kind: StringName, region_id: String, bounds: AABB,
 
 func process_navigation_changes() -> Array:
 	var events: Array = navigation_world.process_change_bus() if navigation_world != null else []
+	if navmesh_world != null and navigation_backend_config != null and navigation_backend_config.use_navmesh() and not events.is_empty():
+		navmesh_world.apply_navigation_events(events)
 	if npc_system != null and npc_system.has_method("process_navigation_route_changes") and not events.is_empty():
 		npc_system.call("process_navigation_route_changes", events)
 	return events
 
 func request_navigation_tile(snapshot: Dictionary, priority := 0, profile = null) -> Dictionary:
 	var result: Dictionary = navigation_world.request_tile(snapshot, priority, profile) if navigation_world != null else {}
+	if navmesh_world != null and navigation_backend_config != null and navigation_backend_config.use_navmesh():
+		navmesh_world.register_tile_snapshot(snapshot)
 	if navigation_world != null:
 		telemetry.observe_navigation_stats(navigation_world.stats())
 	return result
@@ -688,7 +712,10 @@ func build_navigation_tiles(max_jobs := 1) -> Array:
 	return built
 
 func navigation_backend_summary() -> Dictionary:
-	return navigation_backend_config.to_summary() if navigation_backend_config != null else NavigationBackendConfigScript.default_config().to_summary()
+	var summary: Dictionary = navigation_backend_config.to_summary() if navigation_backend_config != null else NavigationBackendConfigScript.default_config().to_summary()
+	if navmesh_world != null:
+		summary["navmeshWorld"] = navmesh_world.stats()
+	return summary
 
 func stats() -> Dictionary:
 	return {
@@ -700,6 +727,7 @@ func stats() -> Dictionary:
 		"telemetry": telemetry.stats(),
 		"changeBus": change_bus.stats(),
 		"navigationWorld": navigation_world.stats(),
+		"navmeshWorld": navmesh_world.stats() if navmesh_world != null else {},
 		"smartObjects": smart_objects.stats() if smart_objects != null else {},
 		"doorPortals": door_portals.stats() if door_portals != null else {},
 		"doorTraversal": door_traversal.stats() if door_traversal != null else {},

@@ -1,6 +1,8 @@
 extends RefCounted
 class_name NavigationBakeDescriptor
 
+const NpcConstantsScript := preload("res://scripts/npc_ai/NpcConstants.gd")
+
 const SCHEMA_VERSION := 1
 
 var region_id := ""
@@ -19,6 +21,95 @@ static func create(region_id_value: String, tile_key_value: String, bounds_value
 	descriptor.region_id = region_id_value
 	descriptor.tile_key = tile_key_value
 	descriptor.bounds = bounds_value
+	return descriptor
+
+static func chunk_region_id(tile_key_value: String) -> String:
+	return "region:chunk:%s" % tile_key_value
+
+static func semantic_region_id(region_id_value: String) -> String:
+	return "region:semantic:%s" % region_id_value
+
+static func from_tile_snapshot(snapshot: Dictionary):
+	var tile_key_value := String(snapshot.get("tileKey", "0,0"))
+	var region_id_value := String(snapshot.get("regionId", chunk_region_id(tile_key_value)))
+	var descriptor = create(region_id_value, tile_key_value)
+	descriptor.loaded = not bool(snapshot.get("unloaded", false))
+	descriptor.revision = int(snapshot.get("sourceRevision", snapshot.get("topologyRevision", 1)))
+	descriptor.metadata = {
+		"source": "tile_snapshot",
+		"dynamicRevision": int(snapshot.get("dynamicRevision", 0)),
+		"semanticRevision": int(snapshot.get("semanticRevision", 0))
+	}
+	var has_bounds := false
+	var merged_bounds := AABB()
+	var index := 0
+	for surface_value in snapshot.get("surfaces", []):
+		if not (surface_value is Dictionary):
+			continue
+		var surface: Dictionary = surface_value
+		var cell: Vector3i = surface.get("cell", Vector3i.ZERO)
+		if not (cell is Vector3i):
+			cell = Vector3i(int(surface.get("x", 0)), int(surface.get("y", 0)), int(surface.get("z", 0)))
+		var center: Vector3 = surface.get("worldPosition", Vector3(float(cell.x) * NpcConstantsScript.CELL_SIZE, float(cell.y) * NpcConstantsScript.CELL_SIZE, float(cell.z) * NpcConstantsScript.CELL_SIZE))
+		var size := Vector3(NpcConstantsScript.CELL_SIZE, 0.05, NpcConstantsScript.CELL_SIZE)
+		var span_index := int(surface.get("spanIndex", index))
+		var surface_id := "surface:%s:%d,%d,%d:%d" % [tile_key_value, cell.x, cell.y, cell.z, span_index]
+		var extra := {
+			"cell": cell,
+			"floorNormal": surface.get("floorNormal", Vector3.UP),
+			"headroom": float(surface.get("headroom", 0.0)),
+			"lateralClearance": float(surface.get("lateralClearance", 0.0)),
+			"semanticRegionIds": surface.get("semanticRegionIds", []),
+			"traversalTags": surface.get("traversalTags", [])
+		}
+		var surface_bounds := _surface_bounds(center, size)
+		if bool(surface.get("blocked", false)):
+			descriptor.add_blocker("blocker:%s" % surface_id, surface_bounds, {
+				"cell": cell,
+				"blockerKind": String(surface.get("blockerKind", "blocked_surface"))
+			})
+		else:
+			descriptor.add_walkable_surface(surface_id, center, size, extra)
+		merged_bounds = surface_bounds if not has_bounds else merged_bounds.merge(surface_bounds)
+		has_bounds = true
+		index += 1
+	for semantic_value in snapshot.get("semanticRegions", []):
+		if not (semantic_value is Dictionary):
+			continue
+		var semantic: Dictionary = semantic_value
+		var semantic_id := String(semantic.get("id", ""))
+		if semantic_id == "":
+			continue
+		var semantic_position := _position_from_semantic(semantic, merged_bounds if has_bounds else AABB())
+		descriptor.add_semantic_anchor("semantic:%s" % semantic_id, String(semantic.get("kind", "semantic")), semantic_position, semantic)
+	for portal_value in snapshot.get("doorPortals", []):
+		if not (portal_value is Dictionary):
+			continue
+		var portal: Dictionary = portal_value
+		var portal_id := String(portal.get("id", ""))
+		if portal_id == "":
+			continue
+		descriptor.add_door_portal(portal_id, portal.get("entrance", Vector3.ZERO), portal.get("exit", Vector3.ZERO), portal)
+	if has_bounds:
+		descriptor.bounds = merged_bounds
+	return descriptor
+
+static func from_semantic_region(kind: String, region_id_value: String, bounds_value: AABB, metadata_value := {}):
+	var descriptor = create(semantic_region_id(region_id_value), String(metadata_value.get("tileKey", region_id_value)), bounds_value)
+	descriptor.metadata = {
+		"source": "semantic_region",
+		"semanticKind": kind,
+		"semanticRegionId": region_id_value,
+		"metadata": metadata_value.duplicate(true) if metadata_value is Dictionary else {}
+	}
+	var center := bounds_value.position + bounds_value.size * 0.5
+	var surface_center := Vector3(center.x, bounds_value.position.y + 0.05, center.z)
+	var surface_size := Vector3(maxf(bounds_value.size.x, NpcConstantsScript.CELL_SIZE), 0.05, maxf(bounds_value.size.z, NpcConstantsScript.CELL_SIZE))
+	descriptor.add_walkable_surface("surface:semantic:%s" % region_id_value, surface_center, surface_size, {
+		"semanticRegionIds": [region_id_value],
+		"semanticKind": kind
+	})
+	descriptor.add_semantic_anchor("anchor:%s" % region_id_value, kind, center, metadata_value)
 	return descriptor
 
 func add_walkable_surface(surface_id: String, center: Vector3, size := Vector3.ONE, extra := {}) -> void:
@@ -123,3 +214,17 @@ func _aabb_summary(value: AABB) -> Dictionary:
 
 func _vector3_summary(value: Vector3) -> Array:
 	return [snappedf(value.x, 0.001), snappedf(value.y, 0.001), snappedf(value.z, 0.001)]
+
+static func _surface_bounds(center: Vector3, size: Vector3) -> AABB:
+	var safe_size := Vector3(maxf(size.x, 0.01), maxf(size.y, 0.05), maxf(size.z, 0.01))
+	return AABB(center - safe_size * 0.5, safe_size)
+
+static func _position_from_semantic(semantic: Dictionary, fallback_bounds: AABB) -> Vector3:
+	if semantic.has("position") and semantic["position"] is Vector3:
+		return semantic["position"]
+	if semantic.has("bounds") and semantic["bounds"] is AABB:
+		var bounds: AABB = semantic["bounds"]
+		return bounds.position + bounds.size * 0.5
+	if fallback_bounds.size != Vector3.ZERO:
+		return fallback_bounds.position + fallback_bounds.size * 0.5
+	return Vector3.ZERO
