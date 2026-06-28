@@ -52,6 +52,7 @@ static func set_performance(hud, state: Dictionary) -> void:
     var story: Dictionary = state.get("story", {})
     var story_overlay: Dictionary = story.get("overlay", {}) if story is Dictionary else {}
     var story_encounter: Dictionary = story.get("encounter", {}) if story is Dictionary else {}
+    var npc_debug: Dictionary = state.get("npcDebug", {}) if state.get("npcDebug", {}) is Dictionary else {}
     var spike_sections := []
     for row in state.get("lastSpikeTopSections", []):
         if row is Dictionary:
@@ -59,7 +60,7 @@ static func set_performance(hud, state: Dictionary) -> void:
     var spike_text := ", ".join(spike_sections)
     if spike_text == "":
         spike_text = "none"
-    hud.performance_label.text = "FPS %d | frame %.2fms | chunks %d | props %d | blocks %d\nhostiles %d | pickups %d | bodies %d | draw est %d\nchunk %.2f | sky %.2f | hostile %.2f | survival %.2f | hud %.2f\nnpc %.2f | route %.2f | nav %.2f | job %.2f | save %.2f\nutility %.2f | pickups %.2f | beacon %.2f | break %.2f\nframe p50 %.2f | p95 %.2f | p99 %.2f | max %.2f\nspike %.2f %s | top %s\nsave jobs %d/%d fail %d | dirty %s | interval %.0fs\nHUD refresh %d/%d skip %d | chunk cache h/m/i %d/%d/%d\nstory overlay %d/%d | encounter %d/%d" % [
+    var performance_text := "FPS %d | frame %.2fms | chunks %d | props %d | blocks %d\nhostiles %d | pickups %d | bodies %d | draw est %d\nchunk %.2f | sky %.2f | hostile %.2f | survival %.2f | hud %.2f\nnpc %.2f | route %.2f | nav %.2f | job %.2f | save %.2f\nutility %.2f | pickups %.2f | beacon %.2f | break %.2f\nframe p50 %.2f | p95 %.2f | p99 %.2f | max %.2f\nspike %.2f %s | top %s\nsave jobs %d/%d fail %d | dirty %s | interval %.0fs\nHUD refresh %d/%d skip %d | chunk cache h/m/i %d/%d/%d\nstory overlay %d/%d | encounter %d/%d" % [
         roundi(float(state.get("fps", 0.0))),
         float(state.get("frameMs", 0.0)),
         int(state.get("chunks", 0)),
@@ -106,6 +107,36 @@ static func set_performance(hud, state: Dictionary) -> void:
         int(story_encounter.get("nodeCount", 0)),
         int(story_encounter.get("nodeBudget", 0))
     ]
+    var npc_debug_text := npc_debug_overlay_text(npc_debug)
+    if npc_debug_text != "":
+        performance_text += "\n" + npc_debug_text
+    hud.performance_label.text = performance_text
+
+static func npc_debug_overlay_text(npc_debug: Dictionary) -> String:
+    if npc_debug.is_empty():
+        return ""
+    var overlay_value = npc_debug.get("overlayLines", [])
+    var lines := []
+    if overlay_value is Array:
+        for line_value in overlay_value:
+            var line := String(line_value)
+            if line == "":
+                continue
+            lines.append(line)
+            if lines.size() >= 4:
+                break
+    if lines.is_empty():
+        var summary: Dictionary = npc_debug.get("summary", {}) if npc_debug.get("summary", {}) is Dictionary else {}
+        if summary.is_empty():
+            return ""
+        lines.append("NPC Debug: runtime")
+        lines.append("Routes %d  Tasks %d  Doors %d  Slots %d" % [
+            int(summary.get("routes", 0)),
+            int(summary.get("tasks", 0)),
+            int(summary.get("doors", 0)),
+            int(summary.get("slots", 0))
+        ])
+    return "\n".join(lines)
 
 static func apply_story_accessibility(hud) -> void:
     if hud.dialogue_body_label:
