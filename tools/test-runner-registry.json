@@ -56,6 +56,14 @@
       "required": true
     },
     {
+      "id": "npc_real_tutorial_playthrough",
+      "description": "R00 real tutorial knock-to-morning NPC playthrough characterization",
+      "command": ".\\tools\\npc\\run-real-tutorial-playthrough.ps1",
+      "args": ["-Seed", "atlas-1492", "-ReportPath", "artifacts\\test-runners\\npc-real-tutorial-playthrough.json"],
+      "reportPath": "artifacts\\test-runners\\npc-real-tutorial-playthrough.json",
+      "required": true
+    },
+    {
       "id": "story_playtest",
       "description": "Story continuity playtest",
       "command": ".\\tools\\story\\run-story-playtest.ps1",

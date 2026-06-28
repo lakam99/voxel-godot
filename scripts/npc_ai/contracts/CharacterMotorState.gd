@@ -12,6 +12,10 @@ var terrain_grounded := false
 var jumped := false
 var blocked := false
 var blocked_contact_category := ""
+var blocked_contact_name := ""
+var blocked_contact_kind := ""
+var blocked_contact_type := ""
+var slide_collision_count := 0
 var jump_snap_time := 0.0
 var upward_terrain_correction := 0.0
 var downward_terrain_correction := 0.0
@@ -34,6 +38,10 @@ func to_summary() -> Dictionary:
 		"jumped": jumped,
 		"blocked": blocked,
 		"blockedContactCategory": blocked_contact_category,
+		"blockedContactName": blocked_contact_name,
+		"blockedContactKind": blocked_contact_kind,
+		"blockedContactType": blocked_contact_type,
+		"slideCollisionCount": slide_collision_count,
 		"jumpSnapTime": jump_snap_time,
 		"upwardTerrainCorrection": upward_terrain_correction,
 		"downwardTerrainCorrection": downward_terrain_correction,

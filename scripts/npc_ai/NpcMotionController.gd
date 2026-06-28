@@ -37,6 +37,10 @@ func apply_route_motion(entry: Dictionary, previous: Vector3, candidate: Vector3
 	body.set_meta("npc_requested_velocity", desired_velocity)
 	body.set_meta("npc_applied_velocity", state.get("applied_velocity"))
 	body.set_meta("npc_blocked_contact", String(state.get("blocked_contact_category")))
+	body.set_meta("npc_blocked_contact_name", String(state.get("blocked_contact_name")))
+	body.set_meta("npc_blocked_contact_kind", String(state.get("blocked_contact_kind")))
+	body.set_meta("npc_blocked_contact_type", String(state.get("blocked_contact_type")))
+	body.set_meta("npc_slide_collision_count", int(state.get("slide_collision_count")))
 	body.set_meta("npc_last_displacement", state.get("displacement"))
 	if body.get_script() == NpcAgentScript:
 		body.set("last_motor_state", state)

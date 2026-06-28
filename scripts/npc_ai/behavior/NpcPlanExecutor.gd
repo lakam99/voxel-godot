@@ -65,7 +65,9 @@ func update_npc(entry: Dictionary, delta: float, night_factor: float) -> void:
 		monitor.end_section("npc_perception", perception_start)
 	if npc_system.has_method("npc_is_held_by_intro_or_dialogue") and bool(npc_system.call("npc_is_held_by_intro_or_dialogue", entry, body)):
 		_release_action_owned_state(entry, "script_hold")
-		_publish_debug(entry, blackboard, { "goalKind": NpcEnumsScript.GOAL_KIND_IDLE, "reason": "held_by_script" }, {}, schedule, perception)
+		var held_goal := { "goalKind": NpcEnumsScript.GOAL_KIND_IDLE, "reason": "held_by_script" }
+		_publish_debug(entry, blackboard, held_goal, {}, schedule, perception)
+		_cache_motion_intent(entry, held_goal, {}, schedule, perception)
 		return
 	var goal_start: int = monitor.begin_section("npc_goal_select") if monitor != null else Time.get_ticks_usec()
 	var goal: Dictionary = goal_selector.select_goal(context, blackboard, entry, perception, schedule)
@@ -88,15 +90,158 @@ func update_npc(entry: Dictionary, delta: float, night_factor: float) -> void:
 	_publish_debug(entry, blackboard, goal, plan, schedule, perception)
 	if monitor != null:
 		monitor.end_section("npc_debug_publish", debug_start)
-	var execute_start: int = monitor.begin_section("npc_execute_plan") if monitor != null else Time.get_ticks_usec()
-	_execute_plan(entry, body, goal, plan, perception, schedule, delta)
+	_cache_motion_intent(entry, goal, plan, schedule, perception)
+
+func advance_motion_npc(entry: Dictionary, delta: float, _night_factor := 0.0) -> Dictionary:
+	if npc_system == null:
+		return { "advanced": false, "reason": "missing_npc_system" }
+	var body := entry.get("body") as Node3D
+	if body == null or not is_instance_valid(body):
+		return { "advanced": false, "reason": "missing_body" }
+	if npc_system.has_method("npc_is_held_by_intro_or_dialogue") and bool(npc_system.call("npc_is_held_by_intro_or_dialogue", entry, body)):
+		_release_action_owned_state(entry, "script_hold")
+		return { "advanced": false, "reason": "held_by_script" }
+	var goal: Dictionary = _cached_goal_for_motion(entry, body)
+	var goal_kind: StringName = goal.get("goalKind", NpcEnumsScript.GOAL_KIND_IDLE)
+	var schedule: Dictionary = entry.get("activeMotionSchedule", {}) if entry.get("activeMotionSchedule", {}) is Dictionary else {}
+	var perception: Dictionary = entry.get("activeMotionPerception", {}) if entry.get("activeMotionPerception", {}) is Dictionary else {}
+	var monitor = performance_monitor()
+	var execute_start: int = monitor.begin_section("npc_execute_motion") if monitor != null else Time.get_ticks_usec()
+	var result: Dictionary = {}
+	match goal_kind:
+		NpcEnumsScript.GOAL_KIND_SCRIPTED:
+			result = _advance_scripted_motion(entry, body, delta)
+		NpcEnumsScript.GOAL_KIND_HOME:
+			result = _advance_home_motion(entry, body, delta)
+		NpcEnumsScript.GOAL_KIND_GUARD:
+			result = _advance_guard_motion(entry, body, perception, schedule, delta)
+		NpcEnumsScript.GOAL_KIND_WORK, NpcEnumsScript.GOAL_KIND_FORAGE:
+			result = _advance_job_motion(entry, body, delta)
+		NpcEnumsScript.GOAL_KIND_IDLE:
+			result = _advance_idle_motion(entry, body, delta)
+		_:
+			result = { "advanced": false, "reason": "no_motion_intent", "intentKind": "idle" }
 	if monitor != null:
-		monitor.end_section("npc_execute_plan", execute_start)
+		monitor.end_section("npc_execute_motion", execute_start)
 	if npc_system.has_method("face_hostile_if_needed"):
+		var threat = perception.get("threat") if perception is Dictionary else null
 		var face_start: int = monitor.begin_section("npc_face_hostile") if monitor != null else Time.get_ticks_usec()
-		npc_system.call("face_hostile_if_needed", body, perception.get("threat"))
+		npc_system.call("face_hostile_if_needed", body, threat)
 		if monitor != null:
 			monitor.end_section("npc_face_hostile", face_start)
+	return result
+
+func _cache_motion_intent(entry: Dictionary, goal: Dictionary, plan: Dictionary, schedule: Dictionary, perception: Dictionary) -> void:
+	entry["activeMotionGoal"] = goal.duplicate(false)
+	entry["activeMotionPlan"] = plan.duplicate(false)
+	entry["activeMotionSchedule"] = schedule.duplicate(false)
+	entry["activeMotionPerception"] = perception.duplicate(false)
+
+func _cached_goal_for_motion(entry: Dictionary, body: Node3D) -> Dictionary:
+	if body.has_meta("npc_scripted_target"):
+		return { "goalKind": NpcEnumsScript.GOAL_KIND_SCRIPTED, "reason": "scripted_target" }
+	var active_job_phase := String(entry.get("jobPhase", "idle"))
+	if active_job_phase in ["outbound", "searching", "gathering", "returning", "stall"]:
+		var active_job := String(entry.get("job", ""))
+		if active_job == "forage":
+			return { "goalKind": NpcEnumsScript.GOAL_KIND_FORAGE, "reason": "active_job_phase" }
+		if active_job in ["wood", "stone", "trade"]:
+			return { "goalKind": NpcEnumsScript.GOAL_KIND_WORK, "reason": "active_job_phase" }
+	var cached = entry.get("activeMotionGoal", {})
+	if cached is Dictionary and not (cached as Dictionary).is_empty():
+		return cached
+	var goal_kind := String(entry.get("activeGoalKind", entry.get("goal", String(NpcEnumsScript.GOAL_KIND_IDLE))))
+	return { "goalKind": StringName(goal_kind), "reason": "cached_entry_goal" }
+
+func _advance_scripted_motion(entry: Dictionary, body: Node3D, delta: float) -> Dictionary:
+	if not body.has_meta("npc_scripted_target"):
+		_release_action_owned_state(entry, "scripted_order_cancelled")
+		return { "advanced": false, "reason": "scripted_order_cancelled", "intentKind": "scripted" }
+	_execute_scripted(entry, body, delta)
+	return _motion_result(entry, "scripted", "scripted_order")
+
+func _advance_home_motion(entry: Dictionary, body: Node3D, delta: float) -> Dictionary:
+	_execute_home(entry, body, entry.get("activeMotionPerception", {}) if entry.get("activeMotionPerception", {}) is Dictionary else {}, delta)
+	return _motion_result(entry, "home", "home_route")
+
+func _advance_guard_motion(entry: Dictionary, body: Node3D, perception: Dictionary, schedule: Dictionary, delta: float) -> Dictionary:
+	entry["insideHome"] = false
+	body.set_meta("npc_inside_home", false)
+	entry["homeReturnTime"] = 0.0
+	entry["homeRouteIndex"] = 0
+	entry["routePriority"] = 130 if bool(schedule.get("activeGuardDuty", false)) else 170
+	var weapon_id := String(entry.get("weaponId", ""))
+	var target_hostile = perception.get("threat") if bool(perception.get("activeThreat", false)) else null
+	var hostile_key := ""
+	if target_hostile != null and is_instance_valid(target_hostile):
+		hostile_key = str(target_hostile.get_instance_id())
+	var target: Vector3 = entry.get("guardTargetCache", entry.get("guardPosition", body.global_position))
+	var refresh_timer := float(entry.get("guardTargetRefreshTimer", 0.0)) - delta
+	var refresh_required := refresh_timer <= 0.0 or hostile_key != String(entry.get("guardTargetHostileKey", ""))
+	var monitor = performance_monitor()
+	var target_start: int = monitor.begin_section("npc_guard_target") if monitor != null else Time.get_ticks_usec()
+	if refresh_required and _guard_target_refresh_budget_available(entry):
+		target = npc_system.call("update_fighter_target", entry, body, target_hostile, weapon_id) if npc_system.has_method("update_fighter_target") else entry.get("guardPosition", body.global_position)
+		refresh_timer = _deterministic_seconds(entry, "guard_threat_refresh", 0.25, 0.45) if target_hostile != null else _deterministic_seconds(entry, "guard_post_refresh", 2.0, 3.2)
+		entry["guardTargetCache"] = target
+		entry["guardTargetHostileKey"] = hostile_key
+	elif refresh_required:
+		refresh_timer = minf(float(entry.get("guardTargetRefreshTimer", 0.0)), 0.05)
+	entry["guardTargetRefreshTimer"] = refresh_timer
+	if monitor != null:
+		monitor.end_section("npc_guard_target", target_start)
+	var move_start: int = performance_monitor().begin_section("npc_guard_move") if performance_monitor() != null else Time.get_ticks_usec()
+	var moved := float(npc_system.call("move_npc", entry, target, 2.65 * delta, false, true, delta)) if npc_system.has_method("move_npc") else 0.0
+	if performance_monitor() != null:
+		performance_monitor().end_section("npc_guard_move", move_start)
+	entry["lastMoveDistance"] = moved
+	entry["guardDutyState"] = "intercept_threat" if target_hostile != null else "patrol"
+	body.set_meta("npc_guard_duty_state", entry["guardDutyState"])
+	return _motion_result(entry, "guard", "guard_route")
+
+func _advance_job_motion(entry: Dictionary, body: Node3D, delta: float) -> Dictionary:
+	var phase_before := String(entry.get("jobPhase", "idle"))
+	var route_only_outbound := phase_before == "outbound" and entry.get("jobTarget", null) is Vector3 and String(entry.get("jobObjectId", "")) == "" and _job_target_node(entry) == null
+	if not route_only_outbound:
+		var monitor = performance_monitor()
+		var state_start: int = monitor.begin_section("npc_update_day_job") if monitor != null else Time.get_ticks_usec()
+		if _job_selection_budget_available(entry, delta):
+			_update_day_job(entry, delta)
+		else:
+			entry["jobTimer"] = minf(float(entry.get("jobTimer", 0.0)), 0.05)
+		if monitor != null:
+			monitor.end_section("npc_update_day_job", state_start)
+	var phase := String(entry.get("jobPhase", "idle"))
+	if not (phase in ["outbound", "searching", "returning"]):
+		entry["lastMoveDistance"] = 0.0
+		return { "advanced": false, "reason": "job_phase_not_moving", "intentKind": "job" }
+	var target: Vector3 = entry.get("jobTarget", body.global_position)
+	entry["routePriority"] = 90
+	var moved := float(npc_system.call("move_npc", entry, target, 3.10 * delta, false, true, delta)) if npc_system.has_method("move_npc") else 0.0
+	entry["lastMoveDistance"] = moved
+	var route_status := String(entry.get("routeStatus", ""))
+	if moved <= 0.001 and route_status != "pending":
+		entry["routeForceReplan"] = true
+	return _motion_result(entry, "job", "job_route")
+
+func _advance_idle_motion(entry: Dictionary, body: Node3D, delta: float) -> Dictionary:
+	if not entry.has("dayTarget"):
+		return { "advanced": false, "reason": "idle_no_anchor", "intentKind": "idle" }
+	entry["routePriority"] = 35
+	var target: Vector3 = entry.get("dayTarget", body.global_position)
+	var moved := float(npc_system.call("move_npc", entry, target, 2.25 * delta, false, false, delta)) if npc_system.has_method("move_npc") else 0.0
+	entry["lastMoveDistance"] = moved
+	return _motion_result(entry, "idle", "idle_anchor")
+
+func _motion_result(entry: Dictionary, intent_kind: String, reason: String) -> Dictionary:
+	return {
+		"advanced": true,
+		"reason": reason,
+		"intentKind": intent_kind,
+		"moved": float(entry.get("lastMoveDistance", 0.0)),
+		"routeStatus": String(entry.get("routeStatus", "")),
+		"classification": "door_state" if String(entry.get("activeDoorPortalId", "")) != "" else ""
+	}
 
 func _execute_plan(entry: Dictionary, body: Node3D, goal: Dictionary, plan: Dictionary, perception: Dictionary, schedule: Dictionary, delta: float) -> void:
 	var goal_kind: StringName = goal.get("goalKind", NpcEnumsScript.GOAL_KIND_IDLE)
@@ -146,8 +291,6 @@ func _execute_home(entry: Dictionary, body: Node3D, perception: Dictionary, delt
 	var target: Vector3 = npc_system.call("home_route_target", entry) if npc_system.has_method("home_route_target") else entry.get("homePosition", body.global_position)
 	entry["homeActiveTargetCell"] = _flat_cell_for_position(target)
 	var speed := 6.4
-	if bool(entry.get("holdIntroDoor", false)):
-		speed = 20.0
 	var moved := float(npc_system.call("move_npc", entry, target, speed * delta, true, false, delta)) if npc_system.has_method("move_npc") else 0.0
 	entry["lastMoveDistance"] = moved
 	if npc_system.has_method("settle_home_if_reached"):
@@ -503,35 +646,45 @@ func _update_forager_goal(entry: Dictionary, body: Node3D, delta: float) -> bool
 		if target_node != null and String(entry.get("jobObjectId", "")) == "":
 			_reserve_job_target(entry, target_node, "harvest_resource")
 		if target_node != null and _current_route_failure_blocks_forager(entry):
-			_mark_forager_target_unreachable(entry, target_node)
 			_release_job_reservation(entry, "route_blocked")
 			var failures := int(entry.get("forageRouteFailures", 0)) + 1
 			entry["forageRouteFailures"] = failures
-			entry["jobTargetNode"] = null
 			entry["routeForceReplan"] = true
 			if failures >= NpcConstantsScript.ROUTE_REPAIR_FAILURE_LIMIT:
+				_mark_forager_target_unreachable(entry, target_node)
+				entry["jobTargetNode"] = null
 				entry["jobPhase"] = "searching"
 				entry["jobTarget"] = _choose_job_target(entry)
 				entry["jobTimer"] = _deterministic_seconds(entry, "forage_blocked_search", 3.0, 7.0)
 				_set_npc_goal(entry, "search for berries")
 				body.set_meta("npc_job_phase", "searching")
 				return true
-			entry["jobPhase"] = "idle"
-			entry["jobTimer"] = 0.0
+			entry["jobTargetNode"] = target_node
+			entry["jobPhase"] = "outbound"
+			entry["jobTimer"] = _deterministic_seconds(entry, "forage_route_retry", 3.0, 7.0)
+			entry["routeStatus"] = "waiting"
+			entry["routeReason"] = "retry_forage_route"
 			_set_npc_goal(entry, "forage berries")
-			body.set_meta("npc_job_phase", "idle")
+			body.set_meta("npc_job_phase", "outbound")
 			return true
 		var target: Vector3 = entry.get("jobTarget", body.global_position)
 		var outside_town := not _point_inside_town(entry, body.global_position)
-		var reached_target := body.global_position.distance_to(target) <= NpcConstantsScript.CELL_SIZE * 1.15
-		var reached_forage_node := target_node != null and body.global_position.distance_to(target_node.global_position) <= NpcConstantsScript.CELL_SIZE * 1.75
-		var route_arrived := String(entry.get("routeStatus", "")) == "arrived"
-		if route_arrived or reached_target or reached_forage_node or (phase == "searching" and outside_town):
+		var forage_action_reach := NpcConstantsScript.CELL_SIZE * 2.50
+		var vertical_ok := target_node == null or absf(body.global_position.y - target_node.global_position.y) <= NpcConstantsScript.CELL_SIZE * 2.0
+		var reached_target := body.global_position.distance_to(target) <= forage_action_reach
+		var reached_forage_node := target_node != null and body.global_position.distance_to(target_node.global_position) <= forage_action_reach + NpcConstantsScript.CELL_SIZE * 0.75
+		if target_node != null and vertical_ok and (reached_target or reached_forage_node):
 			entry["jobPhase"] = "gathering"
 			entry["jobTimer"] = _deterministic_seconds(entry, "forage_gather_duration", 1.0, 1.8)
 			_set_npc_goal(entry, "pick berries")
 			_play_npc_use(entry, "gather")
 			body.set_meta("npc_job_phase", "gathering")
+		elif phase == "searching" and outside_town and target_node == null:
+			entry["jobPhase"] = "idle"
+			entry["jobTimer"] = 0.0
+			entry["routeForceReplan"] = true
+			_set_npc_goal(entry, "search for berries")
+			body.set_meta("npc_job_phase", "idle")
 		else:
 			_set_npc_goal(entry, "forage berries" if phase == "outbound" else "search for berries")
 			if timer <= 0.0:

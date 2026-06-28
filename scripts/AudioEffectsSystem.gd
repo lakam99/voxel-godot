@@ -90,6 +90,36 @@ func _ready() -> void:
     setup_effect_mesh()
     set_process(true)
 
+func _exit_tree() -> void:
+    shutdown_audio()
+
+func shutdown_audio() -> void:
+    set_process(false)
+    knock_looping = false
+    knock_repeat_timer = 0.0
+    for sfx_player in sfx_players:
+        release_audio_player(sfx_player)
+    release_audio_player(rain_player)
+    release_audio_player(knock_player)
+    release_audio_player(music_player)
+    release_audio_player(nature_player)
+    release_audio_player(night_player)
+    streams.clear()
+    daytime_music_tracks.clear()
+    current_music = ""
+    current_music_source = ""
+    visual_effects.clear()
+    visual_effect_pool.clear()
+    material_cache.clear()
+    effect_mesh = null
+
+func release_audio_player(audio_player: AudioStreamPlayer) -> void:
+    if audio_player == null or not is_instance_valid(audio_player):
+        return
+    if audio_player.playing:
+        audio_player.stop()
+    audio_player.stream = null
+
 func build_streams() -> void:
     streams["strike"] = make_tone_stream([150.0], 0.055, "square")
     streams["break"] = make_tone_stream([220.0, 330.0, 480.0], 0.07, "triangle")

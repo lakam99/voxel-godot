@@ -204,7 +204,8 @@ func _claim_route_budget(entry: Dictionary) -> bool:
 		route_jobs_this_frame += 1
 		return true
 	var route_actions: Dictionary = entry.get("routeActions", {})
-	var external_direct_move := entry.has("_externalDirectMoveFrame") and String(entry.get("activeDoorPortalId", "")) == "" and route_actions.is_empty()
+	var direct_update_move := entry.has("_externalDirectMoveFrame") or entry.has("_standaloneNpcUpdateFrame")
+	var external_direct_move := direct_update_move and String(entry.get("activeDoorPortalId", "")) == "" and route_actions.is_empty()
 	if not external_direct_move and actor_id == route_last_granted_actor_id and int(entry.get("routeBudgetYieldedFrame", -999999)) != route_budget_frame - 1:
 		entry["routeBudgetYieldedFrame"] = route_budget_frame
 		var monitor = performance_monitor()
@@ -217,7 +218,7 @@ func _claim_route_budget(entry: Dictionary) -> bool:
 	return true
 
 func _expansion_budget_for(entry: Dictionary, intent: Dictionary) -> int:
-	if entry.has("_externalDirectMoveFrame"):
+	if entry.has("_externalDirectMoveFrame") or entry.has("_standaloneNpcUpdateFrame"):
 		return EXTERNAL_DIRECT_ROUTE_EXPANSIONS
 	if bool(intent.get("movingHome", false)) or String(intent.get("kind", "")) in ["home", "scripted"]:
 		return EXTERNAL_DIRECT_ROUTE_EXPANSIONS

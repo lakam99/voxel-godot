@@ -9,6 +9,7 @@ const NpcBlackboardScript := preload("res://scripts/npc_ai/NpcBlackboard.gd")
 const NpcProfileRulesScript := preload("res://scripts/NpcProfileRules.gd")
 
 var runner = null
+var transient_nodes: Array[Node] = []
 
 func setup(owner) -> void:
 	runner = owner
@@ -26,6 +27,12 @@ func cases() -> Array[Dictionary]:
 		case("npc_interaction_access_policy_shared", "day", "test_access_policy_shared"),
 		case("npc_interaction_idempotent_effect", "day", "test_idempotent_effect"),
 		case("npc_interaction_forager_harvest_carry_eat", "day", "test_forager_harvest_carry_eat"),
+		case("npc_interaction_stale_registered_resource_ignored", "day", "test_stale_registered_resource_ignored"),
+		case("npc_interaction_queue_free_resource_query_no_script_error", "day", "test_queue_free_resource_query_no_script_error"),
+		case("npc_interaction_stale_resource_unindexed", "day", "test_stale_resource_unindexed"),
+		case("npc_interaction_stale_resource_reservation_released", "day", "test_stale_resource_reservation_released"),
+		case("npc_interaction_query_cache_invalidates_on_resource_removal", "day", "test_query_cache_invalidates_on_resource_removal"),
+		case("npc_interaction_forager_query_after_harvest_no_crash", "day", "test_forager_query_after_harvest_no_crash"),
 		case("npc_interaction_wood_worker_gather_deliver", "day", "test_wood_worker_gather_deliver"),
 		case("npc_interaction_stone_worker_gather_deliver", "day", "test_stone_worker_gather_deliver"),
 		case("npc_interaction_trader_day_stall_night_home", "day", "test_trader_day_stall_night_home"),
@@ -158,6 +165,75 @@ func test_forager_harvest_carry_eat(_mode: String) -> Dictionary:
 	var passed: bool = succeeded(completed) and String(completed.metrics.get("drop", "")) == "berries" and int(completed.metrics.get("amount", 0)) == 3 and hunger > 42.0
 	return outcome(passed, "complete=%s hunger=%.1f" % [summary(completed), hunger], ["forager_harvests_berries", "forager_can_eat_carried_food"], state(service))
 
+func test_stale_registered_resource_ignored(_mode: String) -> Dictionary:
+	var service = make_service()
+	var prop := make_prop("stale-ignored", "berryBush", "berries", 2, Vector3(12.0, 0.0, 0.0))
+	var object_id: String = service.register_resource(prop)
+	var before: Array[Node3D] = query_forage_nodes(service)
+	prop.free()
+	var after: Array[Node3D] = query_forage_nodes(service)
+	var availability: Dictionary = service.object_available(object_id, "forager")
+	var passed: bool = before.size() == 1 and after.is_empty() and String(availability.get("reason", "")) in ["target_gone", "resource_depleted"]
+	return outcome(passed, "before=%d after=%d availability=%s" % [before.size(), after.size(), JSON.stringify(availability)], ["stale_resource_skipped", "query_continues_after_stale_node"], state(service))
+
+func test_queue_free_resource_query_no_script_error(_mode: String) -> Dictionary:
+	var service = make_service()
+	var prop := make_prop("freed-query", "berryBush", "berries", 2, Vector3(12.0, 0.0, 0.0))
+	service.register_resource(prop)
+	prop.free()
+	var first: Array[Node3D] = query_forage_nodes(service)
+	var second: Array[Node3D] = query_forage_nodes(service)
+	var passed: bool = first.is_empty() and second.is_empty()
+	return outcome(passed, "first=%d second=%d" % [first.size(), second.size()], ["freed_node_query_no_result", "repeat_query_no_script_error"], state(service))
+
+func test_stale_resource_unindexed(_mode: String) -> Dictionary:
+	var service = make_service()
+	var prop := make_prop("stale-unindexed", "berryBush", "berries", 2, Vector3(12.0, 0.0, 0.0))
+	var object_id: String = service.register_resource(prop)
+	var indexed_before: bool = index_contains(service.get("available_index_by_kind"), "forage_source", object_id)
+	prop.free()
+	query_forage_nodes(service)
+	var indexed_after: bool = index_contains(service.get("available_index_by_kind"), "forage_source", object_id)
+	var depleted_indexed: bool = index_contains(service.get("depleted_index_by_kind"), "forage_source", object_id)
+	var passed: bool = indexed_before and not indexed_after and not depleted_indexed
+	return outcome(passed, "indexedBefore=%s indexedAfter=%s depletedIndexed=%s" % [str(indexed_before), str(indexed_after), str(depleted_indexed)], ["stale_removed_from_available_index", "stale_removed_from_depleted_index"], state(service))
+
+func test_stale_resource_reservation_released(_mode: String) -> Dictionary:
+	var service = make_service()
+	var prop := make_prop("stale-reservation", "berryBush", "berries", 2, Vector3(12.0, 0.0, 0.0))
+	var object_id: String = service.register_resource(prop)
+	var actor := make_actor("forager", Vector3(12.0, 0.0, 1.4))
+	var first = reserve(service, object_id, prop, actor, "forager")
+	var before: int = int(service.owner_reservation_count("forager"))
+	prop.free()
+	query_forage_nodes(service)
+	var after: int = int(service.owner_reservation_count("forager"))
+	var passed: bool = succeeded(first) and before == 1 and after == 0
+	return outcome(passed, "reserve=%s before=%d after=%d" % [summary(first), before, after], ["stale_resource_releases_owner_reservation"], state(service))
+
+func test_query_cache_invalidates_on_resource_removal(_mode: String) -> Dictionary:
+	var service = make_service()
+	var prop := make_prop("cache-removal", "berryBush", "berries", 2, Vector3(12.0, 0.0, 0.0))
+	var object_id: String = service.register_resource(prop)
+	var before: Array[Node3D] = query_forage_nodes(service)
+	var cache_before: Dictionary = service.get("query_cache").duplicate(true)
+	service.notify_object_removed(object_id, "test_removed")
+	var cache_after_remove: Dictionary = service.get("query_cache").duplicate(true)
+	var after: Array[Node3D] = query_forage_nodes(service)
+	var passed: bool = before.size() == 1 and cache_before.size() > 0 and cache_after_remove.is_empty() and after.is_empty()
+	return outcome(passed, "before=%d cacheBefore=%d cacheAfterRemove=%d after=%d" % [before.size(), cache_before.size(), cache_after_remove.size(), after.size()], ["query_cache_populated", "query_cache_invalidated_on_removal", "removed_resource_not_returned"], state(service))
+
+func test_forager_query_after_harvest_no_crash(_mode: String) -> Dictionary:
+	var service = make_service()
+	var prop := make_prop("harvest-query", "berryBush", "berries", 3, Vector3(12.0, 0.0, 0.0))
+	var object_id: String = service.register_resource(prop)
+	var before: Array[Node3D] = query_forage_nodes(service)
+	var actor := make_actor("forager", Vector3(12.0, 0.0, 1.4))
+	var harvested = harvest(service, object_id, prop, actor, "forager", "npc")
+	var after: Array[Node3D] = query_forage_nodes(service)
+	var passed: bool = before.size() == 1 and succeeded(harvested) and after.is_empty()
+	return outcome(passed, "harvest=%s before=%d after=%d" % [summary(harvested), before.size(), after.size()], ["forager_query_before_harvest", "harvest_depletes_resource", "forager_query_after_harvest_empty_no_crash"], state(service))
+
 func test_wood_worker_gather_deliver(_mode: String) -> Dictionary:
 	return worker_gather_deliver("tree-logs", "tree", "logs", "wood")
 
@@ -249,7 +325,7 @@ func make_actor(id: String, position: Vector3) -> Node3D:
 	actor.name = id
 	actor.position = position
 	actor.set_meta("npc_stable_id", id)
-	return actor
+	return track_transient_node(actor)
 
 func make_prop(prop_id: String, material: String, drop: String, count: int, position: Vector3) -> Node3D:
 	var prop := Node3D.new()
@@ -260,7 +336,30 @@ func make_prop(prop_id: String, material: String, drop: String, count: int, posi
 	prop.set_meta("material", material)
 	prop.set_meta("drop", drop)
 	prop.set_meta("drop_count", count)
-	return prop
+	return track_transient_node(prop)
+
+func query_forage_nodes(service) -> Array[Node3D]:
+	return service.query_resource_nodes(make_query_entry(), ["forage_source"], {
+		"drops": ["berries"],
+		"limit": 8,
+		"cacheFrames": 60
+	})
+
+func make_query_entry() -> Dictionary:
+	return {
+		"id": "forager",
+		"job": "forage",
+		"townCenter": Vector2i.ZERO,
+		"townRadius": 4,
+		"porchPosition": Vector3.ZERO
+	}
+
+func index_contains(index_value, kind: String, object_id: String) -> bool:
+	if not (index_value is Dictionary):
+		return false
+	var index: Dictionary = index_value
+	var bucket: Dictionary = index.get(kind, {})
+	return bucket.has(object_id)
 
 func make_block(block_type: String, position: Vector3) -> Node3D:
 	var block := Node3D.new()
@@ -269,7 +368,17 @@ func make_block(block_type: String, position: Vector3) -> Node3D:
 	block.set_meta("kind", "block")
 	block.set_meta("block_type", block_type)
 	block.set_meta("cell", Vector3i(roundi(position.x / 1.35), roundi(position.y / 1.35), roundi(position.z / 1.35)))
-	return block
+	return track_transient_node(block)
+
+func track_transient_node(node: Node3D) -> Node3D:
+	transient_nodes.append(node)
+	return node
+
+func cleanup_transient_nodes() -> void:
+	for node in transient_nodes:
+		if node != null and is_instance_valid(node):
+			node.free()
+	transient_nodes.clear()
 
 func reserve(service, object_id: String, object_node: Node, actor: Node, actor_id: String, action := "harvest_resource", actor_kind := "npc"):
 	var request = InteractionRequestScript.make(SmartObjectServiceScript.COMMAND_RESERVE, object_id, actor_id, {
@@ -346,9 +455,11 @@ func state(service) -> Dictionary:
 	return { "smartObjects": service.stats() }
 
 func outcome(passed: bool, details: String, assertions: Array, key_state: Dictionary) -> Dictionary:
-	return runner.outcome(passed, details, assertions, key_state) if runner != null else {
+	var result: Dictionary = runner.outcome(passed, details, assertions, key_state) if runner != null else {
 		"passed": passed,
 		"details": details,
 		"assertions": assertions,
 		"keyState": key_state
 	}
+	cleanup_transient_nodes()
+	return result

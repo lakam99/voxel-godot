@@ -179,14 +179,91 @@ func update_npc(entry: Dictionary, delta: float, night_factor: float) -> void:
 	if plan_executor == null:
 		return
 	if simulation_lod != null and simulation_lod.should_hold_active_movement(entry):
+		record_motion_skipped(entry, "topology_hold")
 		return
 	if bool(entry.get("abstractSimulated", false)) or String(entry.get("simulationLod", "")) == NpcSimulationLodServiceScript.STATE_ABSTRACT:
 		if simulation_lod != null:
 			simulation_lod.advance_abstract(entry, delta)
+		record_motion_skipped(entry, "abstract")
 		return
 	if not bool(entry.get("npc_lod_brain_due", true)):
+		record_brain_budget_skipped(entry, "lod_brain_not_due")
 		return
+	record_brain_update(entry)
 	plan_executor.update_npc(entry, delta, night_factor)
+
+func advance_npc_motion(entry: Dictionary, delta: float, night_factor: float) -> Dictionary:
+	if plan_executor == null:
+		return record_motion_skipped(entry, "missing_plan_executor")
+	if simulation_lod != null and simulation_lod.should_hold_active_movement(entry):
+		return record_motion_skipped(entry, "topology_hold")
+	if bool(entry.get("abstractSimulated", false)) or String(entry.get("simulationLod", "")) == NpcSimulationLodServiceScript.STATE_ABSTRACT:
+		return record_motion_skipped(entry, "abstract")
+	var result: Dictionary = plan_executor.advance_motion_npc(entry, delta, night_factor)
+	if bool(result.get("advanced", false)):
+		record_motion_update(entry, result)
+	else:
+		record_motion_skipped(entry, String(result.get("reason", "no_motion_intent")))
+	return result
+
+func record_brain_update(entry: Dictionary) -> void:
+	var tick := Engine.get_physics_frames()
+	entry["npc_brain_updates"] = int(entry.get("npc_brain_updates", 0)) + 1
+	entry["npc_last_brain_tick"] = tick
+	entry["npc_brain_budget_skipped"] = int(entry.get("npc_brain_budget_skipped", 0))
+	var body := entry.get("body") as Node
+	if body != null and is_instance_valid(body):
+		body.set_meta("npc_brain_updates", int(entry.get("npc_brain_updates", 0)))
+		body.set_meta("npc_last_brain_tick", tick)
+	telemetry.increment(&"npc_brain_updates")
+
+func record_brain_budget_skipped(entry: Dictionary, reason := "budget") -> void:
+	var count := int(entry.get("npc_brain_budget_skipped", 0)) + 1
+	entry["npc_brain_budget_skipped"] = count
+	entry["npc_brain_skipped_reason"] = reason
+	var body := entry.get("body") as Node
+	if body != null and is_instance_valid(body):
+		body.set_meta("npc_brain_budget_skipped", count)
+		body.set_meta("npc_brain_skipped_reason", reason)
+	telemetry.increment(&"npc_brain_budget_skipped")
+
+func record_motion_update(entry: Dictionary, result := {}) -> Dictionary:
+	var tick := Engine.get_physics_frames()
+	entry["npc_motion_updates"] = int(entry.get("npc_motion_updates", 0)) + 1
+	entry["npc_last_motion_tick"] = tick
+	entry["npc_motion_skipped_reason"] = ""
+	var intent_kind := String(result.get("intentKind", ""))
+	if intent_kind == "" and String(entry.get("routeStatus", "")) in ["moving", "waiting", "pending"]:
+		intent_kind = "route"
+	if intent_kind == "scripted":
+		entry["npc_scripted_order_motion_ticks"] = int(entry.get("npc_scripted_order_motion_ticks", 0)) + 1
+	if intent_kind in ["route", "home", "guard", "job", "idle"]:
+		entry["npc_active_route_motion_ticks"] = int(entry.get("npc_active_route_motion_ticks", 0)) + 1
+	if intent_kind == "door" or String(entry.get("activeDoorPortalId", "")) != "" or String(result.get("classification", "")) == "door_state":
+		entry["npc_door_action_motion_ticks"] = int(entry.get("npc_door_action_motion_ticks", 0)) + 1
+	var body := entry.get("body") as Node
+	if body != null and is_instance_valid(body):
+		body.set_meta("npc_motion_updates", int(entry.get("npc_motion_updates", 0)))
+		body.set_meta("npc_last_motion_tick", tick)
+		body.set_meta("npc_motion_skipped_reason", "")
+		body.set_meta("npc_active_route_motion_ticks", int(entry.get("npc_active_route_motion_ticks", 0)))
+		body.set_meta("npc_scripted_order_motion_ticks", int(entry.get("npc_scripted_order_motion_ticks", 0)))
+		body.set_meta("npc_door_action_motion_ticks", int(entry.get("npc_door_action_motion_ticks", 0)))
+	telemetry.increment(&"npc_motion_updates")
+	if intent_kind == "scripted":
+		telemetry.increment(&"npc_scripted_order_motion_ticks")
+	if intent_kind in ["route", "home", "guard", "job", "idle"]:
+		telemetry.increment(&"npc_active_route_motion_ticks")
+	if intent_kind == "door" or String(entry.get("activeDoorPortalId", "")) != "" or String(result.get("classification", "")) == "door_state":
+		telemetry.increment(&"npc_door_action_motion_ticks")
+	return result
+
+func record_motion_skipped(entry: Dictionary, reason := "no_motion_intent") -> Dictionary:
+	entry["npc_motion_skipped_reason"] = reason
+	var body := entry.get("body") as Node
+	if body != null and is_instance_valid(body):
+		body.set_meta("npc_motion_skipped_reason", reason)
+	return { "advanced": false, "reason": reason }
 
 func update_simulation_lod(entry: Dictionary, delta: float, observer_position := Vector3.INF, context := {}) -> Dictionary:
 	if simulation_lod == null:
