@@ -101,7 +101,7 @@ func advance_motion_npc(entry: Dictionary, delta: float, _night_factor := 0.0) -
 	if npc_system.has_method("npc_is_held_by_intro_or_dialogue") and bool(npc_system.call("npc_is_held_by_intro_or_dialogue", entry, body)):
 		_release_action_owned_state(entry, "script_hold")
 		return { "advanced": false, "reason": "held_by_script" }
-	var goal: Dictionary = _cached_goal_for_motion(entry, body)
+	var goal: Dictionary = _cached_goal_for_motion(entry, body, _night_factor)
 	var goal_kind: StringName = goal.get("goalKind", NpcEnumsScript.GOAL_KIND_IDLE)
 	var schedule: Dictionary = entry.get("activeMotionSchedule", {}) if entry.get("activeMotionSchedule", {}) is Dictionary else {}
 	var perception: Dictionary = entry.get("activeMotionPerception", {}) if entry.get("activeMotionPerception", {}) is Dictionary else {}
@@ -137,7 +137,7 @@ func _cache_motion_intent(entry: Dictionary, goal: Dictionary, plan: Dictionary,
 	entry["activeMotionSchedule"] = schedule.duplicate(false)
 	entry["activeMotionPerception"] = perception.duplicate(false)
 
-func _cached_goal_for_motion(entry: Dictionary, body: Node3D) -> Dictionary:
+func _cached_goal_for_motion(entry: Dictionary, body: Node3D, current_night_factor := 0.0) -> Dictionary:
 	var order_kind := _scripted_order_kind(body)
 	if order_kind == "go_home":
 		return { "goalKind": NpcEnumsScript.GOAL_KIND_HOME, "reason": "scripted_go_home_order" }
@@ -148,7 +148,15 @@ func _cached_goal_for_motion(entry: Dictionary, body: Node3D) -> Dictionary:
 	var cached = entry.get("activeMotionGoal", {})
 	if cached is Dictionary and not (cached as Dictionary).is_empty():
 		var cached_kind := String((cached as Dictionary).get("goalKind", ""))
-		if cached_kind in [String(NpcEnumsScript.GOAL_KIND_HOME), String(NpcEnumsScript.GOAL_KIND_GUARD), String(NpcEnumsScript.GOAL_KIND_SCRIPTED)]:
+		var cached_schedule: Dictionary = entry.get("activeMotionSchedule", {}) if entry.get("activeMotionSchedule", {}) is Dictionary else {}
+		var cached_reason := String((cached as Dictionary).get("reason", ""))
+		var current_home_time := current_night_factor > 0.05
+		var cached_requires_home := current_home_time and (bool(cached_schedule.get("mustBeInside", false)) or String(cached_schedule.get("scheduleState", "")) in [String(NpcEnumsScript.SCHEDULE_STATE_DUSK), String(NpcEnumsScript.SCHEDULE_STATE_NIGHT)])
+		if cached_kind == String(NpcEnumsScript.GOAL_KIND_SCRIPTED):
+			return cached
+		if cached_kind == String(NpcEnumsScript.GOAL_KIND_HOME) and (cached_requires_home or cached_reason.begins_with("scripted_")):
+			return cached
+		if cached_kind == String(NpcEnumsScript.GOAL_KIND_GUARD) and (bool(cached_schedule.get("activeGuardDuty", false)) or cached_reason.find("threat") >= 0):
 			return cached
 	var active_job_phase := String(entry.get("jobPhase", "idle"))
 	if active_job_phase in ["outbound", "searching", "gathering", "returning", "stall"]:

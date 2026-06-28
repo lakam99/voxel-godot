@@ -144,6 +144,7 @@ func cases() -> Array[Dictionary]:
 		case("npc_behavior_executor_decays_guard_cooldown", "night", "test_executor_decays_guard_cooldown"),
 		case("npc_behavior_post_threat_schedule_restored", "night", "test_post_threat_schedule_restored"),
 		case("npc_behavior_night_job_phase_does_not_override_home_motion", "night", "test_night_job_phase_does_not_override_home_motion"),
+		case("npc_behavior_day_job_phase_overrides_stale_home_motion", "day", "test_day_job_phase_overrides_stale_home_motion"),
 		case("npc_behavior_goal_hysteresis_no_thrashing", "day", "test_goal_hysteresis_no_thrashing"),
 		case("npc_behavior_action_interrupt_releases_resources", "day", "test_action_interrupt_releases_resources"),
 		case("npc_behavior_scripted_order_priority_and_cancel", "day", "test_scripted_order_priority_and_cancel"),
@@ -303,6 +304,25 @@ func test_night_job_phase_does_not_override_home_motion(_mode: String) -> Dictio
 	var passed: bool = fake_npc.moving_home_calls == 1 and bool(result.get("advanced", false)) and String(result.get("intentKind", "")) == "home" and moved_toward_home
 	fake_npc.queue_free()
 	return outcome(passed, "result=%s movingHome=%d before=%s after=%s" % [JSON.stringify(result), fake_npc.moving_home_calls, str(before), str(after)], ["night_home_goal_preempts_job_phase", "home_motion_moves_toward_interior"], { "result": result, "movingHomeCalls": fake_npc.moving_home_calls, "before": before, "after": after })
+
+func test_day_job_phase_overrides_stale_home_motion(_mode: String) -> Dictionary:
+	var fake_npc := FakeNpcSystem.new()
+	var executor: Variant = make_executor(fake_npc)
+	var entry_data := entry("Forager", { "job": "forage", "position": Vector3(2.7, 0.0, 0.0), "homeCell": Vector2i(0, 0), "porchCell": Vector2i(1, 0) })
+	entry_data["jobPhase"] = "outbound"
+	entry_data["jobTarget"] = Vector3(10.0, 0.0, 0.0)
+	entry_data["jobTimer"] = 4.0
+	entry_data["activeMotionGoal"] = { "goalKind": NpcEnumsScript.GOAL_KIND_HOME, "reason": "schedule_requires_interior" }
+	entry_data["activeMotionSchedule"] = { "scheduleState": NpcEnumsScript.SCHEDULE_STATE_NIGHT, "mustBeInside": true }
+	entry_data["activeMotionPerception"] = { "insideHome": false, "onPorch": false, "onThreshold": false }
+	var body := entry_data.get("body") as Node3D
+	var before := body.global_position
+	var result: Dictionary = executor.advance_motion_npc(entry_data, 1.0 / 60.0, 0.0)
+	var after := body.global_position
+	var moved_toward_job := after.distance_to(entry_data.get("jobTarget", Vector3.ZERO)) < before.distance_to(entry_data.get("jobTarget", Vector3.ZERO))
+	var passed: bool = fake_npc.moving_home_calls == 0 and bool(result.get("advanced", false)) and String(result.get("intentKind", "")) == "job" and moved_toward_job
+	fake_npc.queue_free()
+	return outcome(passed, "result=%s movingHome=%d before=%s after=%s" % [JSON.stringify(result), fake_npc.moving_home_calls, str(before), str(after)], ["day_job_goal_preempts_stale_home", "job_motion_moves_toward_target"], { "result": result, "movingHomeCalls": fake_npc.moving_home_calls, "before": before, "after": after })
 
 func test_goal_hysteresis_no_thrashing(_mode: String) -> Dictionary:
 	var entry_data := entry("Trader", { "job": "" })
