@@ -48,6 +48,7 @@ func cases() -> Array[Dictionary]:
 		["npc_avoidance_portal_mode_no_frame_sidestep", "test_portal_mode_no_frame_sidestep"],
 		["npc_avoidance_inactive_agents_disabled", "test_inactive_agents_disabled"],
 		["npc_avoidance_stale_callback_safe_stop", "test_stale_callback_safe_stop"],
+		["npc_avoidance_zero_fresh_callback_falls_back", "test_zero_fresh_callback_falls_back"],
 		["npc_follow_arrival_no_orbit", "test_follow_arrival_no_orbit"],
 		["npc_follow_progress_watchdog_classifies_blocker", "test_progress_watchdog_classifies_blocker"],
 		["npc_follow_day_crowd_progress", "test_day_crowd_progress"],
@@ -199,6 +200,19 @@ func test_stale_callback_safe_stop(_mode: String) -> Dictionary:
 	var avoidance: Dictionary = follow.get("avoidance", {})
 	var passed := not bool(follow.get("ok", true)) and bool(avoidance.get("fallbackUsed", false)) and String(follow.get("classification", "")) == "static_collision"
 	return outcome(passed, "follow=%s" % JSON.stringify(compact_follow(follow)), ["stale_callback_not_reused", "safe_stop_or_validated_direct"], { "follow": compact_follow(follow) })
+
+func test_zero_fresh_callback_falls_back(_mode: String) -> Dictionary:
+	var adapter := ReciprocalAvoidanceAdapterScript.new()
+	var body := make_actor("npc-a", Vector3.ZERO)
+	adapter.record_safe_velocity("npc-a", Vector3.ZERO)
+	var result: Dictionary = adapter.compute_safe_velocity({ "id": "npc-a" }, body, Vector3.RIGHT * 1.2, {
+		"actors": [body],
+		"forceAvoidance": true,
+		"maxSpeed": 1.2
+	})
+	var safe_velocity: Vector3 = result.get("safeVelocity", Vector3.ZERO)
+	var passed := bool(result.get("active", false)) and bool(result.get("fallbackUsed", false)) and not bool(result.get("callbackFresh", true)) and safe_velocity.length() > 0.1
+	return outcome(passed, "result=%s stats=%s" % [JSON.stringify(result), JSON.stringify(adapter.stats())], ["fresh_zero_callback_not_permanent_stop", "predictive_fallback_progress"], { "result": result, "stats": adapter.stats() })
 
 func test_follow_arrival_no_orbit(_mode: String) -> Dictionary:
 	var body := make_actor("npc-a", Vector3.ZERO)

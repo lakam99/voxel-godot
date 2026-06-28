@@ -43,7 +43,13 @@ const REQUIRED_COUNTERS := [
 	"schedule_compliance",
 	"lod_promotions",
 	"lod_demotions",
-	"memory_cache_size"
+	"memory_cache_size",
+	"npc_brain_updates",
+	"npc_motion_updates",
+	"npc_active_route_motion_ticks",
+	"npc_scripted_order_motion_ticks",
+	"npc_door_action_motion_ticks",
+	"npc_brain_budget_skipped"
 ]
 
 func _init() -> void:

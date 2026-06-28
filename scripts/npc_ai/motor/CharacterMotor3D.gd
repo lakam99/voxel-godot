@@ -40,6 +40,17 @@ func apply(body: CharacterBody3D, command, profile, delta: float, terrain_provid
 
 	var pre_slide_position := body.global_position
 	body.move_and_slide()
+	state.slide_collision_count = body.get_slide_collision_count()
+	if state.slide_collision_count > 0:
+		var collision := body.get_slide_collision(0)
+		var collider = collision.get_collider() if collision != null else null
+		if collider is Node:
+			var collider_node := collider as Node
+			state.blocked_contact_name = collider_node.name
+			state.blocked_contact_kind = String(collider_node.get_meta("kind", ""))
+			state.blocked_contact_type = collider_node.get_class()
+		elif collider != null:
+			state.blocked_contact_type = str(collider)
 	if state.jumped:
 		move_vertical_toward(body, pre_slide_position.y + float(profile.get("jump_speed")) * delta)
 		body.velocity.y = maxf(body.velocity.y, float(profile.get("jump_speed")))

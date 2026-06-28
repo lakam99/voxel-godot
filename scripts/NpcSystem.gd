@@ -103,7 +103,16 @@ func ensure_components() -> void:
         safe_placement_service.setup(self, main)
     components_initialized = visual_factory != null and pathing != null and combat != null and motion_controller != null and safe_placement_service != null
 
+func _exit_tree() -> void:
+    cleanup_pathing_agents()
+
+func cleanup_pathing_agents() -> Dictionary:
+    if pathing != null and pathing.has_method("cleanup_all"):
+        return pathing.cleanup_all()
+    return { "avoidance": 0, "reason": "missing_pathing" }
+
 func clear() -> void:
+    cleanup_pathing_agents()
     for entry in npcs:
         var body := entry.get("body") as Node
         if body and is_instance_valid(body) and bool(body.get_meta("npc_owned_by_system", false)):
@@ -596,7 +605,33 @@ func update_npcs(delta: float, day_factor: float) -> void:
         autonomy_system.begin_update_frame()
     var night_factor := clampf((1.0 - day_factor - 0.30) / 0.55, 0.0, 1.0)
     var update_entries := npcs.duplicate()
-    var update_count := update_entries.size()
+    var active_entries: Array[Dictionary] = []
+    for entry_value in update_entries:
+        var entry: Dictionary = entry_value
+        var body := entry.get("body") as Node3D
+        if body == null or not is_instance_valid(body):
+            npcs.erase(entry)
+            continue
+        if bool(body.get_meta("npc_force_hold", false)) and not body.has_meta("npc_scripted_target"):
+            if main.player:
+                face_position(body, main.player.global_position)
+            entry["lastMoveDistance"] = 0.0
+            if autonomy_system != null and autonomy_system.has_method("record_motion_skipped"):
+                autonomy_system.record_motion_skipped(entry, "force_hold")
+            continue
+        var lod_state := "active"
+        if autonomy_system != null and autonomy_system.has_method("update_simulation_lod"):
+            var observer_position := Vector3.INF
+            if main != null and main.get("player") is Node3D:
+                observer_position = (main.get("player") as Node3D).global_position
+            var lod_result: Dictionary = autonomy_system.update_simulation_lod(entry, delta, observer_position)
+            lod_state = String(lod_result.get("state", "active"))
+            if autonomy_system.has_method("prefetch_for_entry"):
+                autonomy_system.prefetch_for_entry(entry)
+        if lod_state == "abstract":
+            continue
+        active_entries.append(entry)
+    var update_count := active_entries.size()
     var budget := update_count
     if update_count > 24:
         budget = 4
@@ -608,44 +643,52 @@ func update_npcs(delta: float, day_factor: float) -> void:
     npc_update_active = true
     var scanned := 0
     var processed := 0
+    var brain_processed_entries: Array = []
     while scanned < update_count and processed < budget:
-        var entry: Dictionary = update_entries[(npc_update_cursor + scanned) % update_count]
+        var entry: Dictionary = active_entries[(npc_update_cursor + scanned) % update_count]
         scanned += 1
         var body := entry.get("body") as Node3D
         if body == null or not is_instance_valid(body):
             npcs.erase(entry)
             continue
-        if bool(body.get_meta("npc_force_hold", false)) and not body.has_meta("npc_scripted_target"):
-            if main.player:
-                face_position(body, main.player.global_position)
-            entry["lastMoveDistance"] = 0.0
-            continue
-        if autonomy_system != null and autonomy_system.has_method("update_simulation_lod"):
-            var observer_position := Vector3.INF
-            if main != null and main.get("player") is Node3D:
-                observer_position = (main.get("player") as Node3D).global_position
-            var lod_result: Dictionary = autonomy_system.update_simulation_lod(entry, delta, observer_position)
-            if autonomy_system.has_method("prefetch_for_entry"):
-                autonomy_system.prefetch_for_entry(entry)
-            if String(lod_result.get("state", "active")) == "abstract":
-                continue
-        update_npc_visual_state(entry, delta)
         entry["_lodGateApplied"] = true
         update_npc(entry, delta, night_factor)
         entry.erase("_lodGateApplied")
+        brain_processed_entries.append(entry)
         processed += 1
-    npc_update_active = false
     npc_update_cursor = (npc_update_cursor + max(1, scanned)) % max(1, npcs.size())
+    if autonomy_system != null and autonomy_system.has_method("record_brain_budget_skipped"):
+        for entry in active_entries:
+            if not brain_processed_entries.has(entry):
+                autonomy_system.record_brain_budget_skipped(entry, "budget_cursor")
+    for entry in active_entries:
+        if autonomy_system != null and autonomy_system.has_method("advance_npc_motion"):
+            autonomy_system.advance_npc_motion(entry, delta, night_factor)
+        update_npc_visual_state(entry, delta)
+    npc_update_active = false
 
 func update_npc(entry: Dictionary, delta: float, night_factor: float) -> void:
+    var standalone_update := not npc_update_active
+    if standalone_update and pathing != null and pathing.has_method("begin_frame"):
+        pathing.begin_frame()
     if not npc_update_active and autonomy_system != null and autonomy_system.has_method("begin_update_frame"):
         autonomy_system.begin_update_frame()
-    if not bool(entry.get("_lodGateApplied", false)):
+    if standalone_update:
+        entry["npc_lod_brain_due"] = true
+    elif not bool(entry.get("_lodGateApplied", false)):
         entry["npc_lod_brain_due"] = true
     if autonomy_system != null:
         var monitor = performance_monitor()
         var autonomy_start: int = monitor.begin_section("NpcAutonomySystem") if monitor != null else Time.get_ticks_usec()
+        if standalone_update:
+            npc_update_active = true
+            entry["_standaloneNpcUpdateFrame"] = Engine.get_process_frames()
         autonomy_system.update_npc(entry, delta, night_factor)
+        if standalone_update and autonomy_system.has_method("advance_npc_motion"):
+            autonomy_system.advance_npc_motion(entry, delta, night_factor)
+        if standalone_update:
+            entry.erase("_standaloneNpcUpdateFrame")
+            npc_update_active = false
         if monitor != null:
             monitor.end_section("NpcAutonomySystem", autonomy_start)
 
@@ -1020,18 +1063,63 @@ func smart_object_available(object_id: String, actor_id: String) -> bool:
     var available: Dictionary = service.object_available(object_id, actor_id)
     return bool(available.get("ok", false))
 
+func resource_approach_slots_for_entry(entry: Dictionary, target_node: Node3D) -> Dictionary:
+    if target_node == null or not is_instance_valid(target_node) or pathing == null:
+        return {}
+    var navigation_world = pathing.get("navigation_world")
+    if navigation_world == null or not navigation_world.has_method("approach_cells_for_target") or not navigation_world.has_method("cell_position"):
+        return {}
+    var cells: Array = navigation_world.call("approach_cells_for_target", entry, target_node.global_position, true)
+    var positions: Array[Vector3] = []
+    for cell_value in cells:
+        if not (cell_value is Vector2i):
+            continue
+        var position: Vector3 = navigation_world.call("cell_position", cell_value)
+        if not point_inside_work_area(entry, position) or point_inside_town(entry, position):
+            continue
+        positions.append(position)
+    if positions.is_empty():
+        return {}
+    var body := entry.get("body") as Node3D
+    var origin: Vector3 = body.global_position if body != null else entry.get("porchPosition", target_node.global_position)
+    positions.sort_custom(func(a: Vector3, b: Vector3) -> bool:
+        var a_distance := Vector2(a.x - origin.x, a.z - origin.z).length_squared()
+        var b_distance := Vector2(b.x - origin.x, b.z - origin.z).length_squared()
+        if is_equal_approx(a_distance, b_distance):
+            return "%0.3f,%0.3f" % [a.x, a.z] < "%0.3f,%0.3f" % [b.x, b.z]
+        return a_distance < b_distance
+    )
+    var slots := {}
+    var slot_count := mini(4, positions.size())
+    for i in range(slot_count):
+        var position: Vector3 = positions[i]
+        slots["slot:%d" % i] = {
+            "slotId": "slot:%d" % i,
+            "position": position,
+            "facing": target_node.global_position - position,
+            "capacity": 1,
+            "occupants": []
+        }
+    return slots
+
 func reserve_job_target(entry: Dictionary, target_node: Node3D, action: String) -> bool:
     if target_node == null or not is_instance_valid(target_node) or autonomy_system == null:
         return false
     var body := entry.get("body") as Node
-    var object_id: String = autonomy_system.register_smart_resource(target_node, { "action": action })
+    var resource_metadata := { "action": action }
+    var approach_slots := resource_approach_slots_for_entry(entry, target_node)
+    if not approach_slots.is_empty():
+        resource_metadata["slots"] = approach_slots
+    var object_id: String = autonomy_system.register_smart_resource(target_node, resource_metadata)
     var result = autonomy_system.reserve_smart_object(object_id, target_node, body, String(entry.get("id", "")), action, {
         "actorKind": "npc",
         "requiresApproach": true
     })
     if result == null or String(result.get("status")) != "succeeded":
         entry["jobFailureReason"] = String(result.get("reason")) if result != null else "missing_smart_object"
-        entry["jobObjectId"] = object_id
+        entry["jobObjectId"] = ""
+        entry["jobReservationId"] = ""
+        entry["jobApproachSlotId"] = ""
         return false
     var metrics: Dictionary = result.get("metrics")
     entry["jobTargetNode"] = target_node
@@ -1053,7 +1141,9 @@ func reserve_station_target(entry: Dictionary, station: Node3D, action: String) 
     })
     if result == null or String(result.get("status")) != "succeeded":
         entry["jobFailureReason"] = String(result.get("reason")) if result != null else "missing_station"
-        entry["jobObjectId"] = object_id
+        entry["jobObjectId"] = ""
+        entry["jobReservationId"] = ""
+        entry["jobApproachSlotId"] = ""
         return false
     var metrics: Dictionary = result.get("metrics")
     entry["jobTargetNode"] = station
@@ -1135,6 +1225,7 @@ func release_job_reservation(entry: Dictionary, reason := "released") -> void:
         "actorKind": "npc",
         "reservationId": String(entry.get("jobReservationId", ""))
     })
+    entry["jobObjectId"] = ""
     entry["jobReservationId"] = ""
     entry["jobApproachSlotId"] = ""
 

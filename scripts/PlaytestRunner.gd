@@ -4560,8 +4560,31 @@ func test_structure_and_town_generation() -> void:
         if not generic_forager.is_empty():
             generic_forager["hunger"] = 38.0
             var prop_root := main.get("prop_root") as Node
-            var forage_cell := Vector2i(generic_center_x + int(generic_town.get("radius", 32)) + 8, generic_center_z + 2)
+            var porch_cell: Vector2i = generic_forager.get("porchCell", Vector2i(generic_center_x + 1, generic_center_z))
+            var outward := Vector2(float(porch_cell.x - generic_center_x), float(porch_cell.y - generic_center_z))
+            if outward.length_squared() < 0.001:
+                outward = Vector2.RIGHT
+            outward = outward.normalized()
+            var forage_distance := float(generic_town.get("radius", 32)) + 2.0
+            var forage_cell := Vector2i(
+                roundi(float(generic_center_x) + outward.x * forage_distance),
+                roundi(float(generic_center_z) + outward.y * forage_distance)
+            )
             var forage_ground: float = main.call("height_at_world", float(forage_cell.x) * CELL, float(forage_cell.y) * CELL)
+            if forage_ground < main.WATER_LEVEL + 0.55:
+                for fallback_direction in [Vector2.RIGHT, Vector2.LEFT, Vector2.DOWN, Vector2.UP]:
+                    var fallback_cell := Vector2i(
+                        roundi(float(generic_center_x) + fallback_direction.x * forage_distance),
+                        roundi(float(generic_center_z) + fallback_direction.y * forage_distance)
+                    )
+                    var fallback_ground: float = main.call("height_at_world", float(fallback_cell.x) * CELL, float(fallback_cell.y) * CELL)
+                    if fallback_ground >= main.WATER_LEVEL + 0.55:
+                        forage_cell = fallback_cell
+                        forage_ground = fallback_ground
+                        break
+            clear_props_near_cell(forage_cell, 5)
+            clear_blocks_near_cell(forage_cell, 3)
+            forage_ground = main.call("height_at_world", float(forage_cell.x) * CELL, float(forage_cell.y) * CELL)
             var rng := RandomNumberGenerator.new()
             rng.seed = 77031
             forage_node = main.call(
@@ -4591,20 +4614,10 @@ func test_structure_and_town_generation() -> void:
         var forager_goal_seen := false
         var town_radius_world := float(generic_town.get("radius", 32)) * CELL
         var town_center_world := Vector2(float(generic_center_x) * CELL, float(generic_center_z) * CELL)
-        for step in range(520):
+        for step in range(1400):
             if step % 40 == 0:
                 mark_progress("structures_npc_jobs_%03d" % step)
-            var autonomy = npc_system.get("autonomy_system")
-            if autonomy != null and autonomy.has_method("advance_traffic"):
-                autonomy.advance_traffic(0.2)
-            if npc_system.has_method("update_door_policies"):
-                npc_system.update_door_policies(0.2)
-            var loop_pathing = npc_system.get("pathing")
-            if loop_pathing != null and loop_pathing.has_method("begin_frame"):
-                loop_pathing.begin_frame()
-            for entry_to_update_variant in generic_entries:
-                var entry_to_update: Dictionary = entry_to_update_variant
-                npc_system.update_npc(entry_to_update, 0.2, 0.0)
+            npc_system.update_npcs(0.2, 1.0)
             for entry_variant in generic_entries:
                 var entry: Dictionary = entry_variant
                 if not (String(entry.get("job", "")) in ["forage", "wood", "stone"]):
@@ -4631,6 +4644,20 @@ func test_structure_and_town_generation() -> void:
         var forager_food := int(forager_inventory.get("berries", 0))
         var forager_hunger := float(generic_forager.get("hunger", 0.0)) if not generic_forager.is_empty() else 0.0
         var forager_clear_goal := forager_goal_seen and forager_food > 0
+        var forager_target_distance := -1.0
+        var forager_node_distance := -1.0
+        var forager_motion_goal := ""
+        if not generic_forager.is_empty():
+            var forager_body := generic_forager.get("body") as Node3D
+            var forager_target: Vector3 = generic_forager.get("jobTarget", Vector3.ZERO)
+            var active_motion_goal = generic_forager.get("activeMotionGoal", {})
+            if active_motion_goal is Dictionary:
+                forager_motion_goal = String((active_motion_goal as Dictionary).get("goalKind", ""))
+            if forager_body != null and is_instance_valid(forager_body):
+                forager_target_distance = forager_body.global_position.distance_to(forager_target)
+                var forager_node := generic_forager.get("jobTargetNode") as Node3D
+                if forager_node != null and is_instance_valid(forager_node):
+                    forager_node_distance = forager_body.global_position.distance_to(forager_node.global_position)
         var stats_worker_outside := int(job_stats.get("outsideWorkers", 0)) > 0
         add_result(
             "generic_npc_job_outings",
@@ -4650,7 +4677,7 @@ func test_structure_and_town_generation() -> void:
                 and forager_clear_goal
                 and int(job_stats.get("forageRuns", 0)) > forage_runs_before
                 and forager_hunger > 38.0,
-            "goal %s, target selected %s, berries %d, hunger %.1f, forage %d->%d, node gone %s, phase %s, route %s/%s" % [
+            "goal %s, target selected %s, berries %d, hunger %.1f, forage %d->%d, node gone %s, phase %s, timer %.2f, motion %s, reason %s, route %s/%s, dist target %.2f node %.2f" % [
                 str(forager_goal_seen),
                 str(targeted_forage_selected),
                 forager_food,
@@ -4659,8 +4686,13 @@ func test_structure_and_town_generation() -> void:
                 int(job_stats.get("forageRuns", 0)),
                 str(forage_node == null or not is_instance_valid(forage_node)),
                 String(generic_forager.get("jobPhase", "")),
+                float(generic_forager.get("jobTimer", 0.0)),
+                forager_motion_goal,
+                String(generic_forager.get("jobFailureReason", "")),
                 String(generic_forager.get("routeStatus", "")),
-                String(generic_forager.get("routeReason", ""))
+                String(generic_forager.get("routeReason", "")),
+                forager_target_distance,
+                forager_node_distance
             ]
         )
         add_result(

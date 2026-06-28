@@ -55,6 +55,12 @@ func cleanup_actor_state(actor_id: String) -> Dictionary:
         return { "avoidance": 0, "reason": "missing_coordinator" }
     return coordinator.cleanup_actor_state(actor_id)
 
+func cleanup_all() -> Dictionary:
+    ensure_ready()
+    if coordinator == null or not coordinator.has_method("cleanup_all"):
+        return { "avoidance": 0, "reason": "missing_coordinator" }
+    return coordinator.cleanup_all()
+
 func move_npc(entry: Dictionary, target: Vector3, max_distance: float, moving_home := false, allow_outside := false, physics_delta := 0.0166667) -> float:
     ensure_ready()
     if coordinator == null:

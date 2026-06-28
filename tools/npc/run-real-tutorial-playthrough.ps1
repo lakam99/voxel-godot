@@ -241,7 +241,14 @@ if ($report.runToken -ne $runToken) {
 }
 
 Get-Content -LiteralPath $ReportPath
-if ($exitCode -ne 0 -or [int]$report.failureCount -gt 0 -or $report.scriptErrorScan.status -eq "failed") {
+$wrapperExitCode = [int]$exitCode
+$reportFailureCount = [int]$report.failureCount
+$scriptScanStatus = [string]$report.scriptErrorScan.status
+$wrapperFailed = ($wrapperExitCode -ne 0) -or ($reportFailureCount -gt 0) -or ($scriptScanStatus -eq "failed")
+Write-Host "Real tutorial wrapper result: exitCode=$wrapperExitCode failureCount=$reportFailureCount scriptScan=$scriptScanStatus"
+if ($wrapperFailed) {
+    $global:LASTEXITCODE = 1
     exit 1
 }
+$global:LASTEXITCODE = 0
 exit 0

@@ -119,8 +119,10 @@ func register_resource(prop: Node, metadata := {}) -> String:
 	merged["action"] = "harvest_resource"
 	merged["singleUse"] = true
 	merged["requiresApproach"] = true
-	merged["actionReach"] = float(merged.get("actionReach", CELL * 1.65))
-	merged["verticalTolerance"] = float(merged.get("verticalTolerance", CELL * 0.72))
+	var default_action_reach := CELL * 2.50 if kind == "forage_source" else CELL * 1.65
+	merged["actionReach"] = float(merged.get("actionReach", default_action_reach))
+	var default_vertical_tolerance := CELL * 2.0 if kind == "forage_source" else CELL * 0.72
+	merged["verticalTolerance"] = float(merged.get("verticalTolerance", default_vertical_tolerance))
 	return register_object(object_id, kind, prop, merged)
 
 func register_workstation(block: Node, metadata := {}) -> String:

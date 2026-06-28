@@ -466,9 +466,8 @@ func clear_route(entry: Dictionary) -> void:
 
 func seed_strict_final_waypoint(entry: Dictionary, target: Vector3, world) -> void:
     var target_cell: Vector2i = world.world_cell(target)
-    var target_position: Vector3 = world.cell_position(target_cell)
     entry["routeCells"] = [target_cell]
-    entry["pathWaypoints"] = [target_position]
+    entry["pathWaypoints"] = [target]
     entry["routeActions"] = {}
     entry["routeFallbackCell"] = target_cell
     set_route_status(entry, "moving", "")
@@ -767,6 +766,18 @@ func cleanup_actor_state(actor_id: String) -> Dictionary:
     var after: Dictionary = avoidance_adapter.stats() if avoidance_adapter != null and avoidance_adapter.has_method("stats") else {}
     return {
         "avoidance": max(0, int(before.get("registeredAgents", 0)) - int(after.get("registeredAgents", 0))),
+        "before": before,
+        "after": after
+    }
+
+func cleanup_all() -> Dictionary:
+    var before: Dictionary = avoidance_adapter.stats() if avoidance_adapter != null and avoidance_adapter.has_method("stats") else {}
+    var released := 0
+    if avoidance_adapter != null and avoidance_adapter.has_method("cleanup_all"):
+        released = int(avoidance_adapter.cleanup_all())
+    var after: Dictionary = avoidance_adapter.stats() if avoidance_adapter != null and avoidance_adapter.has_method("stats") else {}
+    return {
+        "avoidance": max(released, max(0, int(before.get("registeredAgents", 0)) - int(after.get("registeredAgents", 0)))),
         "before": before,
         "after": after
     }

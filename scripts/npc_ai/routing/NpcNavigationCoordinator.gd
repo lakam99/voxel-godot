@@ -53,6 +53,11 @@ func cleanup_actor_state(actor_id: String) -> Dictionary:
         return { "avoidance": 0, "reason": "missing_locomotion" }
     return locomotion.cleanup_actor_state(actor_id)
 
+func cleanup_all() -> Dictionary:
+    if locomotion == null or not locomotion.has_method("cleanup_all"):
+        return { "avoidance": 0, "reason": "missing_locomotion" }
+    return locomotion.cleanup_all()
+
 func classify_navigation_event(event: Dictionary) -> Dictionary:
     var result := {}
     if route_repair == null:

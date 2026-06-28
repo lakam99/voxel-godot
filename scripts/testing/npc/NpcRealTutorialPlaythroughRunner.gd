@@ -407,8 +407,38 @@ func npc_summary(entry: Dictionary) -> Dictionary:
     var body_valid := body != null and is_instance_valid(body)
     var position := body.global_position if body_valid else Vector3.ZERO
     var body_home_meta := false
+    var force_hold_meta := false
+    var dialogue_focused_meta := false
+    var scripted_target_meta := false
+    var scripted_arrived_meta := false
+    var requested_velocity_meta := Vector3.ZERO
+    var applied_velocity_meta := Vector3.ZERO
+    var last_displacement_meta := Vector3.ZERO
+    var blocked_contact_meta := ""
+    var blocked_contact_name_meta := ""
+    var blocked_contact_kind_meta := ""
+    var blocked_contact_type_meta := ""
+    var slide_collision_count_meta := 0
     if body_valid:
         body_home_meta = bool(body.get_meta("npc_inside_home", false))
+        force_hold_meta = bool(body.get_meta("npc_force_hold", false))
+        dialogue_focused_meta = bool(body.get_meta("npc_dialogue_focused", false))
+        scripted_target_meta = body.has_meta("npc_scripted_target")
+        scripted_arrived_meta = bool(body.get_meta("npc_scripted_arrived", false))
+        requested_velocity_meta = body.get_meta("npc_requested_velocity", Vector3.ZERO)
+        applied_velocity_meta = body.get_meta("npc_applied_velocity", Vector3.ZERO)
+        last_displacement_meta = body.get_meta("npc_last_displacement", Vector3.ZERO)
+        blocked_contact_meta = String(body.get_meta("npc_blocked_contact", ""))
+        blocked_contact_name_meta = String(body.get_meta("npc_blocked_contact_name", ""))
+        blocked_contact_kind_meta = String(body.get_meta("npc_blocked_contact_kind", ""))
+        blocked_contact_type_meta = String(body.get_meta("npc_blocked_contact_type", ""))
+        slide_collision_count_meta = int(body.get_meta("npc_slide_collision_count", 0))
+    var path_waypoints: Array = entry.get("pathWaypoints", [])
+    var first_waypoint := Vector3.ZERO
+    var first_waypoint_valid := false
+    if not path_waypoints.is_empty() and path_waypoints[0] is Vector3:
+        first_waypoint = path_waypoints[0]
+        first_waypoint_valid = true
     return {
         "id": String(entry.get("id", "")),
         "name": String(entry.get("name", "")),
@@ -429,7 +459,36 @@ func npc_summary(entry: Dictionary) -> Dictionary:
         "routeStatus": String(entry.get("routeStatus", "")),
         "routeReason": String(entry.get("routeReason", "")),
         "routePriority": int(entry.get("routePriority", 0)),
-        "lastMoveDistance": rounded(float(entry.get("lastMoveDistance", 0.0)))
+        "lastMoveDistance": rounded(float(entry.get("lastMoveDistance", 0.0))),
+        "simulationLod": String(entry.get("simulationLod", "")),
+        "movementHeldForTopology": bool(entry.get("movementHeldForTopology", false)),
+        "npcMotionSkippedReason": String(entry.get("npc_motion_skipped_reason", "")),
+        "npcMotionUpdates": int(entry.get("npc_motion_updates", 0)),
+        "npcBrainUpdates": int(entry.get("npc_brain_updates", 0)),
+        "forceHoldMeta": force_hold_meta,
+        "dialogueFocusedMeta": dialogue_focused_meta,
+        "scriptedTargetMeta": scripted_target_meta,
+        "scriptedArrivedMeta": scripted_arrived_meta,
+        "activeMotionGoal": entry.get("activeMotionGoal", {}),
+        "activeDoorPortalId": String(entry.get("activeDoorPortalId", "")),
+        "activeTrafficStepGroup": String(entry.get("activeTrafficStepGroup", "")),
+        "blockedMoveTime": rounded(float(entry.get("blockedMoveTime", 0.0))),
+        "routeWaitTicks": int(entry.get("routeWaitTicks", 0)),
+        "motorBlockedContact": blocked_contact_meta,
+        "motorBlockedContactName": blocked_contact_name_meta,
+        "motorBlockedContactKind": blocked_contact_kind_meta,
+        "motorBlockedContactType": blocked_contact_type_meta,
+        "motorSlideCollisionCount": slide_collision_count_meta,
+        "motorRequestedVelocity": vec3(requested_velocity_meta),
+        "motorAppliedVelocity": vec3(applied_velocity_meta),
+        "motorLastDisplacement": vec3(last_displacement_meta),
+        "routeFallbackCell": vec2i(entry.get("routeFallbackCell", Vector2i.ZERO)),
+        "routeCells": vec2i_array_limited(entry.get("routeCells", []), 8),
+        "pathWaypointCount": path_waypoints.size(),
+        "firstPathWaypointValid": first_waypoint_valid,
+        "firstPathWaypoint": vec3(first_waypoint),
+        "corridorFollow": entry.get("corridorFollow", {}),
+        "corridorProgress": entry.get("corridorProgress", {})
     }
 
 func strict_home_status(entry: Dictionary) -> Dictionary:
@@ -599,6 +658,16 @@ func vec2i_array(values) -> Array:
     if not (values is Array):
         return result
     for value in values:
+        result.append(vec2i(value))
+    return result
+
+func vec2i_array_limited(values, limit := 8) -> Array:
+    var result := []
+    if not (values is Array):
+        return result
+    for value in values:
+        if result.size() >= limit:
+            break
         result.append(vec2i(value))
     return result
 

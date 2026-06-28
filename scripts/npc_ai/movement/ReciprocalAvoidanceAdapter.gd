@@ -17,6 +17,7 @@ var metrics := {
 	"callbackHits": 0,
 	"staleCallbacks": 0,
 	"fallbackPredictions": 0,
+	"zeroCallbackFallbacks": 0,
 	"inactiveSkips": 0,
 	"portalModeFrames": 0
 }
@@ -68,6 +69,7 @@ func compute_safe_velocity(entry: Dictionary, body: CharacterBody3D, desired_vel
 
 	var safe_velocity := Vector3.ZERO
 	var callback_fresh := false
+	var fallback_used := false
 	if safe_velocity_by_actor_id.has(actor_id):
 		var safe_frame := int(safe_velocity_frame_by_actor_id.get(actor_id, -9999))
 		callback_fresh = frame_index - safe_frame <= NpcConstantsScript.AVOIDANCE_CALLBACK_STALE_FRAMES
@@ -78,10 +80,19 @@ func compute_safe_velocity(entry: Dictionary, body: CharacterBody3D, desired_vel
 		if safe_velocity_by_actor_id.has(actor_id):
 			metrics["staleCallbacks"] = int(metrics.get("staleCallbacks", 0)) + 1
 		safe_velocity = predictive_velocity(entry, body, desired_velocity, relevant_actors, corridor_direction, max_speed)
+		fallback_used = true
 		metrics["fallbackPredictions"] = int(metrics.get("fallbackPredictions", 0)) + 1
+	elif safe_velocity.length_squared() <= 0.000001 and desired_velocity.length_squared() > 0.000001:
+		var predicted_velocity := predictive_velocity(entry, body, desired_velocity, relevant_actors, corridor_direction, max_speed)
+		if predicted_velocity.length_squared() > 0.000001:
+			safe_velocity = predicted_velocity
+			callback_fresh = false
+			fallback_used = true
+			metrics["fallbackPredictions"] = int(metrics.get("fallbackPredictions", 0)) + 1
+			metrics["zeroCallbackFallbacks"] = int(metrics.get("zeroCallbackFallbacks", 0)) + 1
 	if max_speed > 0.0 and safe_velocity.length() > max_speed:
 		safe_velocity = safe_velocity.normalized() * max_speed
-	return result(true, desired_velocity, safe_velocity, "active", "safe_velocity", callback_fresh, not callback_fresh)
+	return result(true, desired_velocity, safe_velocity, "active", "safe_velocity", callback_fresh, fallback_used)
 
 func record_safe_velocity(actor_id: String, safe_velocity: Vector3) -> void:
 	if actor_id == "":
@@ -102,6 +113,12 @@ func cleanup_missing_actors(valid_actor_ids: Array[String]) -> void:
 	for actor_id in agents_by_actor_id.keys().duplicate():
 		if not valid_actor_ids.has(String(actor_id)):
 			disable_actor(String(actor_id), true)
+
+func cleanup_all() -> int:
+	var count := agents_by_actor_id.size()
+	for actor_id in agents_by_actor_id.keys().duplicate():
+		disable_actor(String(actor_id), true)
+	return count
 
 func ensure_agent(actor_id: String, body: CharacterBody3D, profile, max_speed: float, priority: int):
 	if actor_id == "" or body == null or not is_instance_valid(body):
@@ -232,7 +249,10 @@ func disable_actor(actor_id: String, erase := false) -> void:
 	if agent != null and is_instance_valid(agent):
 		agent.set("avoidance_enabled", false)
 		if erase:
-			agent.queue_free()
+			var parent: Node = agent.get_parent() as Node
+			if parent != null:
+				parent.remove_child(agent)
+			agent.free()
 	if erase:
 		agents_by_actor_id.erase(actor_id)
 		safe_velocity_by_actor_id.erase(actor_id)
