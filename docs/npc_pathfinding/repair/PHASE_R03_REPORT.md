@@ -4,11 +4,11 @@ Branch: `npc-pathfinding/repair-03-scripted-orders`
 
 Base commit: `3de2710fe2b1c096829bfb421752cb01763c03e1` (`master`, after R02 merge)
 
-Branch final commit: to be recorded after the branch commit is fixed and before/after merge.
+Branch final commit: `af9d1f388e02fb339042aca6dbc381828586074e`
 
-Merge commit: pending.
+Merge commit: `c70131beb3026c498678c124dfa24e0b319bc848`
 
-Status: PASS for R03 branch gates. Merge to `master` is allowed after commit.
+Status: PASS for R03 branch and merged-`master` gates.
 
 ## Implementation Summary
 
@@ -200,14 +200,35 @@ Result: no whitespace errors; Git reported LF-to-CRLF warnings for touched files
 
 ## Merged Master Verification
 
-Pending until branch merge. After merge, rerun:
+Command:
 
 ```powershell
-.\tools\run-all-test-runners.ps1 -Seed atlas-1492
+.\tools\run-all-test-runners.ps1 -Seed atlas-1492 -ReportPath artifacts\test-runners\all-test-runners-master-after-r03-merge.json
 ```
 
-and record the result in this report or the final handoff.
+Result:
+
+- wrapper exit code `0`
+- `resultCount=11`
+- `failureCount=0`
+- `stoppedEarly=false`
+
+Merged `master` runner evidence:
+
+| Runner | Exit | Passed | Duration |
+| --- | ---: | --- | ---: |
+| `npc_focused` | 0 | true | 57.491s |
+| `npc_observation_dusk` | 0 | true | 0.648s |
+| `npc_observation_midnight` | 0 | true | 0.638s |
+| `npc_observation_phase12` | 0 | true | 0.946s |
+| `world_signature` | 0 | true | 12.393s |
+| `visual_manifest` | 0 | true | 0.090s |
+| `npc_navigation_integration` | 0 | true | 25.732s |
+| `npc_real_tutorial_playthrough` | 0 | true | 28.660s |
+| `story_playtest` | 0 | true | 60.657s |
+| `visual_captures` | 0 | true | 47.274s |
+| `playtest` | 0 | true | 140.144s |
 
 ## Verdict
 
-R03 branch gates pass. Merge is allowed.
+R03 branch and merged-`master` gates pass.
