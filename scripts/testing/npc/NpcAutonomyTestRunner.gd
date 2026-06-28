@@ -19,7 +19,10 @@ const InteractionResultScript := preload("res://scripts/npc_ai/contracts/Interac
 const NpcTelemetryServiceScript := preload("res://scripts/npc_ai/debug/NpcTelemetryService.gd")
 const NavigationChangeBusScript := preload("res://scripts/npc_ai/navigation/NavigationChangeBus.gd")
 const NavigationWorldServiceScript := preload("res://scripts/npc_ai/navigation/NavigationWorldService.gd")
+const NavigationBackendConfigScript := preload("res://scripts/npc_ai/navigation/NavigationBackendConfig.gd")
+const NavmeshWorldServiceScript := preload("res://scripts/npc_ai/navigation/NavmeshWorldService.gd")
 const NavigationSemanticServiceScript := preload("res://scripts/npc_ai/navigation/NavigationSemanticService.gd")
+const NavigationBakeDescriptorScript := preload("res://scripts/npc_ai/contracts/NavigationBakeDescriptor.gd")
 const CharacterMotor3DScript := preload("res://scripts/npc_ai/motor/CharacterMotor3D.gd")
 const CharacterMotorCommandScript := preload("res://scripts/npc_ai/contracts/CharacterMotorCommand.gd")
 const CharacterMotorProfileScript := preload("res://scripts/npc_ai/contracts/CharacterMotorProfile.gd")
@@ -353,7 +356,14 @@ func nav_world_cases() -> Array[Dictionary]:
 		["npc_navworld_semantic_road_and_work_anchor", "test_navworld_semantic_road_and_work_anchor"],
 		["npc_navworld_unloaded_tile_not_traversable", "test_navworld_unloaded_tile_not_traversable"],
 		["npc_navworld_build_budget_yields_and_resumes", "test_navworld_build_budget_yields_and_resumes"],
-		["npc_navworld_deterministic_tile_output", "test_navworld_deterministic_tile_output"]
+		["npc_navworld_deterministic_tile_output", "test_navworld_deterministic_tile_output"],
+		["npc_navmesh_backend_default_custom", "test_navmesh_backend_default_custom"],
+		["npc_navmesh_backend_explicit_navmesh", "test_navmesh_backend_explicit_navmesh"],
+		["npc_navmesh_descriptor_deterministic_signature", "test_navmesh_descriptor_deterministic_signature"],
+		["npc_navmesh_service_register_unregister_descriptor", "test_navmesh_service_register_unregister_descriptor"],
+		["npc_navmesh_closest_walkable_descriptor_point", "test_navmesh_closest_walkable_descriptor_point"],
+		["npc_navmesh_no_scene_visual_mesh_scan", "test_navmesh_no_scene_visual_mesh_scan"],
+		["npc_navmesh_legacy_audit_detects_current_stack", "test_navmesh_legacy_audit_detects_current_stack"]
 	]
 	var cases: Array[Dictionary] = []
 	for spec in ids:
@@ -1464,6 +1474,93 @@ func test_navworld_deterministic_tile_output(_mode: String) -> Dictionary:
 	var passed: bool = first.stable_signature() == second.stable_signature()
 	return outcome(passed, "first=%s second=%s" % [first.stable_signature(), second.stable_signature()], ["deterministic_tile_signature"], { "first": first.stable_signature(), "second": second.stable_signature() })
 
+func test_navmesh_backend_default_custom(_mode: String) -> Dictionary:
+	var config = NavigationBackendConfigScript.default_config()
+	var explicit_empty = NavigationBackendConfigScript.from_value("", "test")
+	var autonomy := NpcAutonomySystemScript.new()
+	autonomy.setup(null, null)
+	var summary: Dictionary = autonomy.navigation_backend_summary()
+	autonomy.free()
+	var passed: bool = String(config.backend) == NavigationBackendConfigScript.BACKEND_CUSTOM and String(explicit_empty.backend) == NavigationBackendConfigScript.BACKEND_CUSTOM and String(summary.get("backend", "")) == NavigationBackendConfigScript.BACKEND_CUSTOM and not bool(summary.get("navmeshEnabled", true))
+	return outcome(passed, "config=%s summary=%s" % [JSON.stringify(config.to_summary()), JSON.stringify(summary)], ["nav_backend_default_custom", "autonomy_reports_custom_backend"], { "config": config.to_summary(), "autonomy": summary })
+
+func test_navmesh_backend_explicit_navmesh(_mode: String) -> Dictionary:
+	var config = NavigationBackendConfigScript.from_value("navmesh", "test")
+	var service = NavmeshWorldServiceScript.new()
+	service.setup(config)
+	var stats: Dictionary = service.stats()
+	service.clear()
+	var passed: bool = config.use_navmesh() and String(stats.get("backend", "")) == NavigationBackendConfigScript.BACKEND_NAVMESH and bool(stats.get("navmeshEnabled", false)) and bool(stats.get("hasNavigationMap", false))
+	return outcome(passed, "stats=%s" % JSON.stringify(stats), ["nav_backend_explicit_navmesh", "navmesh_service_owns_map"], { "stats": stats })
+
+func test_navmesh_descriptor_deterministic_signature(_mode: String) -> Dictionary:
+	var first = NavigationBakeDescriptorScript.create("region:town:0", "0,0", AABB(Vector3.ZERO, Vector3(4, 2, 4)))
+	first.metadata = { "seed": seed, "source": "test" }
+	first.add_walkable_surface("surface:b", Vector3(2, 0, 0), Vector3.ONE, { "semantic": ["road"] })
+	first.add_walkable_surface("surface:a", Vector3.ZERO, Vector3.ONE, { "semantic": ["home"] })
+	first.add_semantic_anchor("anchor:work", "work_anchor", Vector3(1, 0, 1))
+	var second = NavigationBakeDescriptorScript.create("region:town:0", "0,0", AABB(Vector3.ZERO, Vector3(4, 2, 4)))
+	second.metadata = { "source": "test", "seed": seed }
+	second.add_semantic_anchor("anchor:work", "work_anchor", Vector3(1, 0, 1))
+	second.add_walkable_surface("surface:a", Vector3.ZERO, Vector3.ONE, { "semantic": ["home"] })
+	second.add_walkable_surface("surface:b", Vector3(2, 0, 0), Vector3.ONE, { "semantic": ["road"] })
+	var passed: bool = first.stable_signature() == second.stable_signature()
+	return outcome(passed, "signature=%s" % first.stable_signature(), ["navmesh_descriptor_signature_sorts_ids", "navmesh_descriptor_signature_sorts_metadata"], { "signature": first.stable_signature(), "summary": first.to_summary() })
+
+func test_navmesh_service_register_unregister_descriptor(_mode: String) -> Dictionary:
+	var service = NavmeshWorldServiceScript.new()
+	service.setup(NavigationBackendConfigScript.from_value("navmesh", "test"))
+	var descriptor = navmesh_descriptor("region:chunk:0,0", "0,0")
+	var registered: Dictionary = service.register_chunk_descriptor(descriptor)
+	var after_register: Dictionary = service.stats()
+	var unregistered: Dictionary = service.unregister_chunk("region:chunk:0,0")
+	var after_unregister: Dictionary = service.stats()
+	service.clear()
+	var passed: bool = String(registered.get("status", "")) == "registered" and int(after_register.get("regionCount", 0)) == 1 and String(unregistered.get("status", "")) == "unregistered" and int(after_unregister.get("regionCount", -1)) == 0 and int(after_unregister.get("topologyRevision", 0)) == 2
+	return outcome(passed, "registered=%s unregistered=%s" % [JSON.stringify(registered), JSON.stringify(unregistered)], ["navmesh_descriptor_registers_region", "navmesh_descriptor_unregisters_region", "navmesh_topology_revision_tracks_cleanup"], { "registered": registered, "afterRegister": after_register, "unregistered": unregistered, "afterUnregister": after_unregister })
+
+func test_navmesh_closest_walkable_descriptor_point(_mode: String) -> Dictionary:
+	var service = NavmeshWorldServiceScript.new()
+	service.setup(NavigationBackendConfigScript.from_value("navmesh", "test"))
+	var descriptor = NavigationBakeDescriptorScript.create("region:chunk:near", "0,0", AABB(Vector3.ZERO, Vector3(8, 2, 8)))
+	descriptor.add_walkable_surface("surface:far", Vector3(7.0, 0.0, 7.0))
+	descriptor.add_walkable_surface("surface:near", Vector3(2.0, 0.0, 1.0))
+	service.register_chunk_descriptor(descriptor)
+	var closest: Dictionary = service.closest_walkable(Vector3(2.2, 0.0, 1.1), 2.0)
+	var missed: Dictionary = service.closest_walkable(Vector3(40.0, 0.0, 40.0), 2.0)
+	service.clear()
+	var passed: bool = bool(closest.get("found", false)) and String(closest.get("surfaceId", "")) == "surface:near" and not bool(missed.get("found", true))
+	return outcome(passed, "closest=%s missed=%s" % [JSON.stringify(closest), JSON.stringify(missed)], ["closest_walkable_from_descriptor_surface", "closest_walkable_honors_max_distance"], { "closest": closest, "missed": missed })
+
+func test_navmesh_no_scene_visual_mesh_scan(_mode: String) -> Dictionary:
+	var service_text := read_text("res://scripts/npc_ai/navigation/NavmeshWorldService.gd")
+	var descriptor_text := read_text("res://scripts/npc_ai/contracts/NavigationBakeDescriptor.gd")
+	var passed := (
+		service_text.find("get_tree(") < 0
+		and service_text.find("find_children") < 0
+		and service_text.find("MeshInstance3D") < 0
+		and service_text.find("parse_source_geometry_data") < 0
+		and service_text.find(".mesh") < 0
+		and descriptor_text.find("stable_signature") >= 0
+	)
+	return outcome(passed, "getTree=%d meshInstance=%d parse=%d" % [service_text.find("get_tree("), service_text.find("MeshInstance3D"), service_text.find("parse_source_geometry_data")], ["navmesh_service_uses_explicit_descriptors", "navmesh_descriptor_owns_deterministic_signature"], {})
+
+func test_navmesh_legacy_audit_detects_current_stack(_mode: String) -> Dictionary:
+	var audit_text := read_text("res://tools/npc/audit-npc-navmesh-backend.ps1")
+	var planner_text := read_text("res://scripts/npc_ai/routing/HierarchicalRoutePlanner.gd")
+	var route_adapter_text := read_text("res://scripts/npc_ai/routing/NpcRouteCoordinatorAdapter.gd")
+	var coordinator_text := read_text("res://scripts/npc_ai/routing/NpcNavigationCoordinator.gd")
+	var passed := (
+		audit_text.find("LocalAStarPlannerScript") >= 0
+		and audit_text.find("HierarchicalRoutePlannerScript") >= 0
+		and audit_text.find("NpcRouteCoordinatorAdapterScript") >= 0
+		and planner_text.find("LocalAStarPlannerScript") >= 0
+		and route_adapter_text.find("HierarchicalRoutePlannerScript") >= 0
+		and coordinator_text.find("NpcRouteCoordinatorAdapterScript") >= 0
+		and coordinator_text.find("GeneratedWorldNavigationAdapterScript") >= 0
+	)
+	return outcome(passed, "audit=%d planner=%d adapter=%d coordinator=%d" % [audit_text.length(), planner_text.find("LocalAStarPlannerScript"), route_adapter_text.find("HierarchicalRoutePlannerScript"), coordinator_text.find("NpcRouteCoordinatorAdapterScript")], ["navmesh_audit_has_legacy_patterns", "current_custom_stack_detectable_before_cutover"], {})
+
 func nav_event_setup() -> Dictionary:
 	var bus := NavigationChangeBusScript.new()
 	var service := NavigationWorldServiceScript.new()
@@ -1493,6 +1590,15 @@ func nav_surface(cell: Vector3i, extra := {}) -> Dictionary:
 	for key in extra.keys():
 		surface[key] = extra[key]
 	return surface
+
+func navmesh_descriptor(region_id: String, tile_key: String):
+	var descriptor = NavigationBakeDescriptorScript.create(region_id, tile_key, AABB(Vector3.ZERO, Vector3(4, 2, 4)))
+	descriptor.add_walkable_surface("surface:a", Vector3.ZERO)
+	descriptor.add_walkable_surface("surface:b", Vector3(2.0, 0.0, 0.0))
+	descriptor.add_blocker("blocker:wall", AABB(Vector3(3.0, 0.0, 0.0), Vector3(1.0, 2.0, 1.0)))
+	descriptor.add_semantic_anchor("anchor:guard", "guard_post", Vector3(1.0, 0.0, 1.0))
+	descriptor.add_door_portal("door:home", Vector3(0.5, 0.0, 0.0), Vector3(0.5, 0.0, 1.0))
+	return descriptor
 
 func motor_body(node_name: String) -> CharacterBody3D:
 	var body := CharacterBody3D.new()

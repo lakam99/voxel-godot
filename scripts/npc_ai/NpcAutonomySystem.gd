@@ -8,6 +8,7 @@ const NpcConstantsScript := preload("res://scripts/npc_ai/NpcConstants.gd")
 const NpcEnumsScript := preload("res://scripts/npc_ai/NpcEnums.gd")
 const NavigationChangeBusScript := preload("res://scripts/npc_ai/navigation/NavigationChangeBus.gd")
 const NavigationWorldServiceScript := preload("res://scripts/npc_ai/navigation/NavigationWorldService.gd")
+const NavigationBackendConfigScript := preload("res://scripts/npc_ai/navigation/NavigationBackendConfig.gd")
 const NpcTelemetryServiceScript := preload("res://scripts/npc_ai/debug/NpcTelemetryService.gd")
 const DoorPortalServiceScript := preload("res://scripts/npc_ai/interactions/DoorPortalService.gd")
 const SmartObjectServiceScript := preload("res://scripts/npc_ai/interactions/SmartObjectService.gd")
@@ -38,6 +39,7 @@ var blackboards_by_stable_id := {}
 var scheduler
 var telemetry
 var change_bus
+var navigation_backend_config
 var navigation_world
 var door_portals
 var smart_objects
@@ -62,6 +64,7 @@ func _init() -> void:
 	scheduler = NpcBrainSchedulerScript.new()
 	telemetry = NpcTelemetryServiceScript.new()
 	change_bus = NavigationChangeBusScript.new()
+	navigation_backend_config = NavigationBackendConfigScript.from_environment()
 	navigation_world = NavigationWorldServiceScript.new()
 	navigation_world.setup(null, change_bus)
 	door_portals = DoorPortalServiceScript.new()
@@ -80,6 +83,7 @@ func _init() -> void:
 func setup(system_node: Node, main_node: Node) -> void:
 	npc_system = system_node
 	main = main_node
+	navigation_backend_config = NavigationBackendConfigScript.from_environment()
 	navigation_world.setup(main, change_bus)
 	door_portals.setup(main, self)
 	smart_objects.setup(self, door_portals)
@@ -95,7 +99,8 @@ func setup(system_node: Node, main_node: Node) -> void:
 	setup_behavior_services()
 	telemetry.record_event("_system", &"architecture", "setup", &"none", {
 		"architectureVersion": architecture_version,
-		"movementStack": movement_stack
+		"movementStack": movement_stack,
+		"navigationBackend": navigation_backend_config.to_summary()
 	})
 
 func _physics_process(_delta: float) -> void:
@@ -109,6 +114,7 @@ func clear() -> void:
 	scheduler = NpcBrainSchedulerScript.new()
 	telemetry = NpcTelemetryServiceScript.new()
 	change_bus = NavigationChangeBusScript.new()
+	navigation_backend_config = NavigationBackendConfigScript.from_environment()
 	navigation_world = NavigationWorldServiceScript.new()
 	navigation_world.setup(main, change_bus)
 	door_portals = DoorPortalServiceScript.new()
@@ -681,10 +687,14 @@ func build_navigation_tiles(max_jobs := 1) -> Array:
 	telemetry.observe_navigation_stats(navigation_world.stats())
 	return built
 
+func navigation_backend_summary() -> Dictionary:
+	return navigation_backend_config.to_summary() if navigation_backend_config != null else NavigationBackendConfigScript.default_config().to_summary()
+
 func stats() -> Dictionary:
 	return {
 		"architectureVersion": architecture_version,
 		"movementStack": movement_stack,
+		"navigationBackend": navigation_backend_summary(),
 		"contexts": contexts_by_stable_id.size(),
 		"scheduler": scheduler.stats(),
 		"telemetry": telemetry.stats(),
