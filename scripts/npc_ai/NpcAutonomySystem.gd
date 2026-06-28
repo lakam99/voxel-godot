@@ -161,7 +161,7 @@ func setup_behavior_services() -> void:
 	goal_selector = NpcGoalSelectorScript.new()
 	action_library = NpcActionLibraryScript.new()
 	task_planner = NpcTaskPlannerScript.new()
-	task_planner.setup(action_library)
+	task_planner.setup(action_library, navmesh_world if _navmesh_backend_active() else navigation_world)
 	recovery_policy = NpcRecoveryPolicyScript.new()
 	plan_executor = NpcPlanExecutorScript.new()
 	plan_executor.setup(self, npc_system, main, {

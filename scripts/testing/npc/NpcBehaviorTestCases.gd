@@ -30,6 +30,15 @@ class FakeAutonomy:
 	func release_npc_door_hold(_actor_or_id, _schedule_close := true) -> void:
 		door_releases += 1
 
+class FakeNavigationService:
+	extends RefCounted
+	var unreachable_x_threshold := INF
+
+	func closest_walkable(position: Vector3, max_distance := INF) -> Dictionary:
+		if position.x >= unreachable_x_threshold:
+			return { "found": false, "reason": "test_unreachable", "position": position, "maxDistance": max_distance }
+		return { "found": true, "position": position, "distance": 0.0, "source": "test_navmesh" }
+
 class FakeNpcSystem:
 	extends Node
 	var chosen_anchor := Vector3(2.7, 0.0, 0.0)
@@ -125,6 +134,9 @@ func setup(owner) -> void:
 
 func cases() -> Array[Dictionary]:
 	return [
+		case("npc_behavior_task_catalog_resource_backed", "day", "test_task_catalog_resource_backed"),
+		case("npc_behavior_shared_task_definitions_cover_phase4_goals", "day", "test_shared_task_definitions_cover_phase4_goals"),
+		case("npc_behavior_goal_target_validation_reachable_navmesh", "day", "test_goal_target_validation_reachable_navmesh"),
 		case("npc_behavior_day_worker_reachable_job", "day", "test_day_worker_reachable_job"),
 		case("npc_behavior_day_forager_goal_plan_shape", "day", "test_day_forager_goal_plan_shape"),
 		case("npc_behavior_day_guard_patrol", "day", "test_day_guard_patrol"),
@@ -182,8 +194,59 @@ func test_day_worker_reachable_job(_mode: String) -> Dictionary:
 func test_day_forager_goal_plan_shape(_mode: String) -> Dictionary:
 	var result := select_and_plan(entry("Forager", { "job": "forage" }), NpcEnumsScript.SCHEDULE_STATE_DAY)
 	var actions: Array = result.plan.get("actionIds", [])
-	var passed: bool = result.goal.get("goalKind") == NpcEnumsScript.GOAL_KIND_FORAGE and actions == ["select_forage_target", "navigate_to_resource", "harvest_resource", "eat_if_hungry"]
+	var target: Dictionary = result.plan.get("semanticTarget", {})
+	var passed: bool = result.goal.get("goalKind") == NpcEnumsScript.GOAL_KIND_FORAGE and actions == ["select_forage_target", "reserve_resource_slot", "navigate_to_resource", "harvest_resource", "eat_if_hungry"] and String(target.get("targetKind", "")) == "forage_source" and String(target.get("status", "")) == "pending"
 	return outcome(passed, "actions=%s" % JSON.stringify(actions), ["forager_goal", "forager_symbolic_sequence"], result)
+
+func test_task_catalog_resource_backed(_mode: String) -> Dictionary:
+	var library := NpcActionLibraryScript.new()
+	var validation: Dictionary = library.validate_catalog()
+	var library_source := read_text("res://scripts/npc_ai/behavior/NpcActionLibrary.gd")
+	var catalog_exists := ResourceLoader.exists("res://resources/npc_behavior/task_catalog.tres")
+	var hardcoded_defaults_removed := library_source.find("func _register_defaults") < 0 and library_source.find("_add(") < 0
+	var rest: Dictionary = library.definition("rest_at_bed")
+	var tutorial: Dictionary = library.definition("complete_tutorial_world_action")
+	var passed := bool(validation.get("ok", false)) and catalog_exists and hardcoded_defaults_removed and int(validation.get("actionCount", 0)) >= 28 and int(validation.get("sequenceCount", 0)) >= 9 and String(rest.get("targetKind", "")) == "bed" and bool(rest.get("reservationRequired", false)) and bool(rest.get("routeRequired", false)) and String(tutorial.get("targetKind", "")) == "tutorial_action"
+	return outcome(passed, "validation=%s catalog=%s hardcoded=%s" % [JSON.stringify(validation), str(catalog_exists), str(hardcoded_defaults_removed)], ["resource_catalog_loads", "hardcoded_action_defaults_removed", "task_fields_declared"], { "validation": validation, "rest": rest, "tutorial": tutorial })
+
+func test_shared_task_definitions_cover_phase4_goals(_mode: String) -> Dictionary:
+	var forage := select_and_plan(entry("Forager", { "job": "forage", "jobTarget": Vector3(8.1, 0.0, 0.0) }), NpcEnumsScript.SCHEDULE_STATE_DAY)
+	var trader := select_and_plan(entry("Trader", { "job": "trade", "jobTarget": Vector3(2.7, 0.0, 0.0), "stallPosition": Vector3(2.7, 0.0, 0.0) }), NpcEnumsScript.SCHEDULE_STATE_DAY)
+	var guard := select_and_plan(entry("Guard", { "job": "guard", "canFight": true, "nightGuard": true }), NpcEnumsScript.SCHEDULE_STATE_DAY)
+	var home := select_and_plan(entry("Villager", { "job": "" }), NpcEnumsScript.SCHEDULE_STATE_NIGHT, { "insideHome": false })
+	var tutorial_entry := entry("Villager", { "id": "tutorial_npc", "tutorialActionPosition": Vector3(1.35, 0.0, 0.0) })
+	var tutorial_body := tutorial_entry.get("body") as Node3D
+	tutorial_body.set_meta("npc_scripted_order_kind", "tutorial_action")
+	tutorial_body.set_meta("npc_scripted_order_state", "PENDING")
+	tutorial_body.set_meta("npc_scripted_target", Vector3(1.35, 0.0, 0.0))
+	var tutorial := select_and_plan(tutorial_entry, NpcEnumsScript.SCHEDULE_STATE_DAY, { "scriptedOrder": true, "scriptedOrderKind": "tutorial_action", "scriptedOrderState": "PENDING" })
+	var passed := (
+		(forage.plan.get("actionIds", []) as Array).has("reserve_resource_slot")
+		and String(forage.plan.get("targetKind", "")) == "forage_source"
+		and (trader.plan.get("actionIds", []) as Array).has("use_trader_stall")
+		and String(trader.plan.get("sequenceId", "")) == "trader_stall_work"
+		and (guard.plan.get("actionIds", []) as Array).has("occupy_guard_post")
+		and (home.plan.get("actionIds", []) as Array).has("rest_at_bed")
+		and (tutorial.plan.get("actionIds", []) as Array).has("complete_tutorial_world_action")
+		and String(tutorial.plan.get("sequenceId", "")) == "tutorial_scripted_action"
+	)
+	return outcome(passed, "forage=%s trader=%s guard=%s home=%s tutorial=%s" % [JSON.stringify(forage.plan.get("actionIds", [])), JSON.stringify(trader.plan.get("actionIds", [])), JSON.stringify(guard.plan.get("actionIds", [])), JSON.stringify(home.plan.get("actionIds", [])), JSON.stringify(tutorial.plan.get("actionIds", []))], ["forage_task_definition", "trader_stall_task_definition", "guard_post_task_definition", "home_bed_task_definition", "tutorial_scripted_task_definition"], { "forage": forage.plan, "trader": trader.plan, "guard": guard.plan, "home": home.plan, "tutorial": tutorial.plan })
+
+func test_goal_target_validation_reachable_navmesh(_mode: String) -> Dictionary:
+	var library := NpcActionLibraryScript.new()
+	var fake_nav := FakeNavigationService.new()
+	var reachable_planner := NpcTaskPlannerScript.new()
+	reachable_planner.setup(library, fake_nav)
+	var reachable := select_and_plan(entry("Forager", { "job": "forage", "jobTarget": Vector3(8.1, 0.0, 0.0) }), NpcEnumsScript.SCHEDULE_STATE_DAY, {}, reachable_planner)
+	var blocked_nav := FakeNavigationService.new()
+	blocked_nav.unreachable_x_threshold = 50.0
+	var blocked_planner := NpcTaskPlannerScript.new()
+	blocked_planner.setup(library, blocked_nav)
+	var blocked := select_and_plan(entry("Forager", { "job": "forage", "jobTarget": Vector3(99.0, 0.0, 0.0) }), NpcEnumsScript.SCHEDULE_STATE_DAY, {}, blocked_planner)
+	var reachable_target: Dictionary = reachable.plan.get("semanticTarget", {})
+	var blocked_target: Dictionary = blocked.plan.get("semanticTarget", {})
+	var passed := bool(reachable_target.get("reachable", false)) and String(reachable_target.get("status", "")) == "reachable" and String(reachable_target.get("reason", "")) == "navmesh_walkable" and String(blocked.plan.get("status", "")) == "failed" and String(blocked.plan.get("failureReason", "")) == "semantic_target_unreachable" and String(blocked_target.get("reason", "")) == "test_unreachable"
+	return outcome(passed, "reachable=%s blocked=%s" % [JSON.stringify(reachable_target), JSON.stringify(blocked_target)], ["reachable_semantic_target_validated_by_navmesh", "unreachable_semantic_target_fails_plan"], { "reachable": reachable.plan, "blocked": blocked.plan })
 
 func test_day_guard_patrol(_mode: String) -> Dictionary:
 	var result := select_and_plan(entry("Guard", { "job": "guard", "canFight": true, "nightGuard": true }), NpcEnumsScript.SCHEDULE_STATE_DAY)
@@ -574,14 +637,15 @@ func expect_night_home_inside(entry_data: Dictionary, label: String) -> Dictiona
 	var passed: bool = result.goal.get("goalKind") == NpcEnumsScript.GOAL_KIND_HOME and bool(compliance.get("ok", false))
 	return outcome(passed, "%s goal=%s compliance=%s" % [label, String(result.goal.get("goalKind")), JSON.stringify(compliance)], ["night_home_goal", "%s_inside_ok" % label], { "goal": result.goal, "plan": result.plan, "compliance": compliance })
 
-func select_and_plan(entry_data: Dictionary, state: StringName, overrides := {}) -> Dictionary:
+func select_and_plan(entry_data: Dictionary, state: StringName, overrides := {}, custom_planner = null) -> Dictionary:
 	var blackboard = NpcBlackboardScript.new()
 	var schedule_data := schedule_for(entry_data, state)
 	var perception := default_perception()
 	for key in overrides.keys():
 		perception[key] = overrides[key]
 	var goal: Dictionary = selector.select_goal(null, blackboard, entry_data, perception, schedule_data)
-	var plan: Dictionary = planner.plan(goal, null, entry_data, perception, schedule_data)
+	var active_planner = custom_planner if custom_planner != null else planner
+	var plan: Dictionary = active_planner.plan(goal, null, entry_data, perception, schedule_data)
 	return { "goal": goal, "plan": plan, "schedule": schedule_data, "perception": perception }
 
 func make_executor(fake_npc: FakeNpcSystem, fake_autonomy: Variant = null) -> Variant:
@@ -641,7 +705,7 @@ func entry(role: String, options := {}) -> Dictionary:
 	body.global_position = position
 	var home_cell: Vector2i = options.get("homeCell", Vector2i.ZERO)
 	var porch_cell: Vector2i = options.get("porchCell", Vector2i(1, 0))
-	return {
+	var result := {
 		"body": body,
 		"id": String(options.get("id", "npc_%s" % role.to_lower())),
 		"role": role,
@@ -659,6 +723,10 @@ func entry(role: String, options := {}) -> Dictionary:
 		"routeReason": "",
 		"personalInventory": {}
 	}
+	for optional_key in ["jobTarget", "jobTargetNode", "stallPosition", "tutorialActionPosition", "dayTarget", "guardTargetCache"]:
+		if options.has(optional_key):
+			result[optional_key] = options[optional_key]
+	return result
 
 func set_scripted_order_meta(entry_data: Dictionary, body: Node, kind: String, reason: String, target := Vector3.INF) -> void:
 	entry_data["scriptedOrder"] = {
