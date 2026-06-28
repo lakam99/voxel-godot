@@ -113,6 +113,7 @@ func setup(system_node: Node, main_node: Node) -> void:
 func _physics_process(_delta: float) -> void:
 	process_navigation_changes()
 	build_navigation_tiles(NpcConstantsScript.NAV_BUILD_MAX_JOBS_PER_TICK)
+	process_navmesh_dirty_regions(1)
 
 func _notification(what: int) -> void:
 	if what == NOTIFICATION_PREDELETE:
@@ -468,6 +469,7 @@ func register_door(door: Node, metadata := {}) -> String:
 		return ""
 	var portal_id: String = smart_objects.register_door(door, metadata)
 	if portal_id != "":
+		_publish_door_portal_to_navmesh(door)
 		telemetry.record_event("_system", &"door", "registered", &"none", {
 			"portalId": portal_id
 		})
@@ -640,6 +642,7 @@ func process_door_policies(delta: float, actors: Array = []) -> Dictionary:
 func emit_door_state_revision(door: Node, open: bool, reason: String, revision: int) -> void:
 	if door != null and is_instance_valid(door):
 		door.set_meta("door_state_revision", revision)
+	_publish_door_portal_to_navmesh(door, { "open": open, "stateRevision": revision, "reason": reason })
 	notify_door_state_changed(door, open)
 	telemetry.record_event("_system", &"door", "revision", NpcEnumsScript.DOOR_STATE_OPEN if open else NpcEnumsScript.DOOR_STATE_CLOSED, {
 		"reason": reason,
@@ -679,6 +682,13 @@ func process_navigation_changes() -> Array:
 		npc_system.call("process_navigation_route_changes", events)
 	return events
 
+func process_navmesh_dirty_regions(max_jobs := 1) -> Array:
+	if not _navmesh_backend_active():
+		return []
+	if navmesh_world == null or not navmesh_world.has_method("process_dirty_regions"):
+		return []
+	return navmesh_world.process_dirty_regions(max_jobs)
+
 func request_navigation_tile(snapshot: Dictionary, priority := 0, profile = null) -> Dictionary:
 	var result: Dictionary = navigation_world.request_tile(snapshot, priority, profile) if navigation_world != null else {}
 	if navmesh_world != null and navigation_backend_config != null and navigation_backend_config.use_navmesh():
@@ -686,6 +696,24 @@ func request_navigation_tile(snapshot: Dictionary, priority := 0, profile = null
 	if navigation_world != null:
 		telemetry.observe_navigation_stats(navigation_world.stats())
 	return result
+
+func _publish_door_portal_to_navmesh(door: Node, extra := {}) -> void:
+	if not _navmesh_backend_active() or navmesh_world == null or door_portals == null:
+		return
+	var portal = door_portals.portal_for_door(door) if door != null and door_portals.has_method("portal_for_door") else null
+	if portal == null:
+		return
+	var summary: Dictionary = portal.to_summary() if portal.has_method("to_summary") else {}
+	if extra is Dictionary:
+		for key in (extra as Dictionary).keys():
+			summary[key] = (extra as Dictionary)[key]
+	if door != null and is_instance_valid(door):
+		summary["door"] = door
+	if navmesh_world.has_method("set_door_portal_state"):
+		navmesh_world.set_door_portal_state(summary)
+
+func _navmesh_backend_active() -> bool:
+	return navmesh_world != null and navigation_backend_config != null and navigation_backend_config.use_navmesh()
 
 func prefetch_for_entry(entry: Dictionary) -> Dictionary:
 	return simulation_lod.prefetch_for_entry(entry) if simulation_lod != null else {}
