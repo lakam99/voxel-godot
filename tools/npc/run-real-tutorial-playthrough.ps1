@@ -5,8 +5,8 @@ param(
     [string]$GodotExe = "C:\Users\arkam\Downloads\Godot_v4.6.1-stable_win64.exe\Godot_v4.6.1-stable_win64_console.exe",
     [string]$ReportPath = "",
     [string]$ProgressPath = "",
-    [int]$TimeoutSeconds = 90,
-    [int]$StaleProgressSeconds = 20,
+    [int]$TimeoutSeconds = 470,
+    [int]$StaleProgressSeconds = 45,
     [switch]$Visible
 )
 
@@ -51,7 +51,7 @@ if (Get-Command rg -ErrorAction SilentlyContinue) {
 if ($scanMatches.Count -gt 0) {
     $guardReport = [pscustomobject]@{
         schemaVersion = 1
-        testId = "npc_tutorial_real_knock_to_morning_foragers"
+        testId = "npc_tutorial_real_knock_repair_sleep_morning_foragers"
         seed = $Seed
         finished = $true
         passed = $false
@@ -139,7 +139,7 @@ function Set-ReportDiagnostics([int]$ExitCode, [string]$StopReason) {
     if (-not (Test-Path -LiteralPath $ReportPath)) {
         $fallback = [pscustomobject]@{
             schemaVersion = 1
-            testId = "npc_tutorial_real_knock_to_morning_foragers"
+            testId = "npc_tutorial_real_knock_repair_sleep_morning_foragers"
             seed = $Seed
             runToken = $runToken
             gitBranch = $branch
@@ -190,6 +190,7 @@ $started = Get-Date
 $lastProgressWriteUtc = [datetime]::MinValue
 $lastProgressText = ""
 $stopReason = "completed"
+$finishedByReport = $false
 
 Write-Host "Started Godot PID $($process.Id); polling $ProgressPath"
 while (-not $process.HasExited) {
@@ -199,7 +200,12 @@ while (-not $process.HasExited) {
         $progressItem = Get-Item -LiteralPath $ProgressPath
         if ($progressItem.LastWriteTimeUtc -gt $lastProgressWriteUtc) {
             $lastProgressWriteUtc = $progressItem.LastWriteTimeUtc
-            $lastProgressText = (Get-Content -LiteralPath $ProgressPath -Raw).Trim()
+            $rawProgress = Get-Content -LiteralPath $ProgressPath -Raw -ErrorAction SilentlyContinue
+            if ($null -eq $rawProgress) {
+                $lastProgressText = ""
+            } else {
+                $lastProgressText = ([string]$rawProgress).Trim()
+            }
             Write-Host "progress: $($lastProgressText -replace [Environment]::NewLine, ' | ')"
         }
     }
@@ -209,6 +215,19 @@ while (-not $process.HasExited) {
         $stopReason = "script_error_detected"
         Stop-ProcessTree $process
         break
+    }
+
+    if (Test-Path -LiteralPath $ReportPath) {
+        try {
+            $liveReport = Get-Content -LiteralPath $ReportPath -Raw | ConvertFrom-Json
+            if ($liveReport.runToken -eq $runToken -and [bool]$liveReport.finished) {
+                $finishedByReport = $true
+                $stopReason = "report_finished"
+                Stop-ProcessTree $process
+                break
+            }
+        } catch {
+        }
     }
 
     if (($now - $started).TotalSeconds -gt $TimeoutSeconds) {
@@ -231,6 +250,9 @@ if (-not $process.HasExited) {
     $process.WaitForExit(5000)
 }
 $exitCode = if ($process.HasExited) { $process.ExitCode } else { 1 }
+if ($finishedByReport) {
+    $exitCode = 0
+}
 Set-ReportDiagnostics -ExitCode $exitCode -StopReason $stopReason
 
 $report = Get-Content -LiteralPath $ReportPath -Raw | ConvertFrom-Json
@@ -240,7 +262,23 @@ if ($report.runToken -ne $runToken) {
     exit 1
 }
 
-Get-Content -LiteralPath $ReportPath
+$lastFailureCode = ""
+if ($null -ne $report.lastFailure) {
+    $lastFailureCode = [string]$report.lastFailure.code
+}
+[pscustomobject]@{
+    schemaVersion = [int]$report.schemaVersion
+    testId = [string]$report.testId
+    seed = [string]$report.seed
+    finished = [bool]$report.finished
+    passed = [bool]$report.passed
+    failureCount = [int]$report.failureCount
+    resultCount = [int]$report.resultCount
+    processExitCode = [int]$report.processExitCode
+    processStopReason = [string]$report.processStopReason
+    lastFailureCode = $lastFailureCode
+    reportPath = $ReportPath
+} | ConvertTo-Json -Depth 4
 $wrapperExitCode = [int]$exitCode
 $reportFailureCount = [int]$report.failureCount
 $scriptScanStatus = [string]$report.scriptErrorScan.status

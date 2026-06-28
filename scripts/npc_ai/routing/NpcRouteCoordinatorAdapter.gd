@@ -10,6 +10,10 @@ const CELL := NpcConstantsScript.CELL_SIZE
 const LIVE_ROUTE_JOBS_PER_FRAME := 2
 const LIVE_ROUTE_EXPANSIONS_PER_FRAME := 8
 const EXTERNAL_DIRECT_ROUTE_EXPANSIONS := 64
+const ROUTE_BUDGET_GRANT_COOLDOWN_FRAMES := 2
+const URGENT_ROUTE_EXTRA_JOBS_PER_FRAME := 12
+const STARVED_ROUTE_BUDGET_FRAMES := 12
+const STARVED_ROUTE_EXTRA_JOBS_PER_FRAME := 1
 const ROUTE_CACHE_LIMIT := 128
 const FULL_REPAIR_REGISTRATION_NODE_LIMIT := 128
 
@@ -25,6 +29,8 @@ var route_budget_engine_frame := -1
 var route_budget_seen_tick := -1
 var route_budget_serial := 0
 var route_jobs_this_frame := 0
+var urgent_route_jobs_this_frame := 0
+var starved_route_jobs_this_frame := 0
 var route_last_granted_actor_id := ""
 var route_cache := {}
 var route_cache_order: Array[String] = []
@@ -69,7 +75,7 @@ func plan_route(entry: Dictionary, intent: Dictionary) -> Dictionary:
 		return _copy_cached_route(route_cache[cache_key])
 	if monitor != null:
 		monitor.increment_counter("route_cache_misses")
-	if not _claim_route_budget(entry):
+	if not _claim_route_budget(entry, intent):
 		if monitor != null:
 			monitor.increment_counter("route_jobs_pending")
 		return route_failure("pending", "route_budget", intent.get("targetCell", Vector2i(999999, 999999)))
@@ -194,11 +200,11 @@ func _begin_route_budget_frame() -> void:
 	route_budget_serial += 1
 	route_budget_frame = route_budget_serial
 	route_jobs_this_frame = 0
+	urgent_route_jobs_this_frame = 0
+	starved_route_jobs_this_frame = 0
 
-func _claim_route_budget(entry: Dictionary) -> bool:
+func _claim_route_budget(entry: Dictionary, intent: Dictionary) -> bool:
 	_begin_route_budget_frame()
-	if route_jobs_this_frame >= LIVE_ROUTE_JOBS_PER_FRAME:
-		return false
 	var actor_id := String(entry.get("id", ""))
 	if actor_id == "":
 		route_jobs_this_frame += 1
@@ -206,8 +212,33 @@ func _claim_route_budget(entry: Dictionary) -> bool:
 	var route_actions: Dictionary = entry.get("routeActions", {})
 	var direct_update_move := entry.has("_externalDirectMoveFrame") or entry.has("_standaloneNpcUpdateFrame")
 	var external_direct_move := direct_update_move and String(entry.get("activeDoorPortalId", "")) == "" and route_actions.is_empty()
-	if not external_direct_move and actor_id == route_last_granted_actor_id and int(entry.get("routeBudgetYieldedFrame", -999999)) != route_budget_frame - 1:
+	var priority := maxi(int(intent.get("priority", 0)), int(entry.get("routePriority", 0)))
+	var route_kind := String(intent.get("kind", "move"))
+	var urgent_route := priority >= 90 or route_kind in ["home", "scripted", "job"]
+	var waited_frames := int(entry.get("routeBudgetWaitFrames", 0))
+	var frames_since_grant := route_budget_frame - int(entry.get("routeBudgetGrantedFrame", -999999))
+	if not external_direct_move and not urgent_route and waited_frames < STARVED_ROUTE_BUDGET_FRAMES and frames_since_grant >= 0 and frames_since_grant <= ROUTE_BUDGET_GRANT_COOLDOWN_FRAMES:
+		entry["routeBudgetWaitFrames"] = waited_frames + 1
+		var cooldown_monitor = performance_monitor()
+		if cooldown_monitor != null:
+			cooldown_monitor.increment_counter("route_budget_cooldown_yields")
+		return false
+	var starved_overflow := false
+	var urgent_overflow := false
+	if route_jobs_this_frame >= LIVE_ROUTE_JOBS_PER_FRAME:
+		waited_frames += 1
+		entry["routeBudgetWaitFrames"] = waited_frames
+		if urgent_route and urgent_route_jobs_this_frame < URGENT_ROUTE_EXTRA_JOBS_PER_FRAME:
+			urgent_route_jobs_this_frame += 1
+			urgent_overflow = true
+		elif not external_direct_move and waited_frames >= STARVED_ROUTE_BUDGET_FRAMES and starved_route_jobs_this_frame < STARVED_ROUTE_EXTRA_JOBS_PER_FRAME:
+			starved_route_jobs_this_frame += 1
+			starved_overflow = true
+		else:
+			return false
+	if not external_direct_move and not starved_overflow and not urgent_overflow and actor_id == route_last_granted_actor_id and int(entry.get("routeBudgetYieldedFrame", -999999)) != route_budget_frame - 1:
 		entry["routeBudgetYieldedFrame"] = route_budget_frame
+		entry["routeBudgetWaitFrames"] = waited_frames + 1
 		var monitor = performance_monitor()
 		if monitor != null:
 			monitor.increment_counter("route_budget_yields")
@@ -215,6 +246,15 @@ func _claim_route_budget(entry: Dictionary) -> bool:
 	route_jobs_this_frame += 1
 	route_last_granted_actor_id = actor_id
 	entry["routeBudgetGrantedFrame"] = route_budget_frame
+	entry["routeBudgetWaitFrames"] = 0
+	if urgent_overflow:
+		var urgent_monitor = performance_monitor()
+		if urgent_monitor != null:
+			urgent_monitor.increment_counter("route_budget_urgent_grants")
+	if starved_overflow:
+		var monitor = performance_monitor()
+		if monitor != null:
+			monitor.increment_counter("route_budget_starved_grants")
 	return true
 
 func _expansion_budget_for(entry: Dictionary, intent: Dictionary) -> int:
@@ -237,7 +277,7 @@ func _route_cache_key(entry: Dictionary, intent: Dictionary) -> String:
 	var context = entry.get("agentContext")
 	if context != null:
 		profile_id = String(context.get("traversal_profile_id")) if context.get("traversal_profile_id") != null else profile_id
-	return "%s|%d|%d,%d|%d,%d|%s|%s|%s|%s" % [
+	return "%s|%d|%d,%d|%d,%d|%s|%s|%s|%s|%s|%.3f" % [
 		profile_id,
 		static_revision,
 		start_cell.x,
@@ -247,7 +287,9 @@ func _route_cache_key(entry: Dictionary, intent: Dictionary) -> String:
 		String(intent.get("kind", "move")),
 		str(bool(intent.get("allowOutside", false))),
 		str(bool(intent.get("movingHome", false))),
-		String(intent.get("action", ""))
+		String(intent.get("action", "")),
+		str(bool(intent.get("strictArrival", false))),
+		float(intent.get("arrivalRadius", CELL * 0.75))
 	]
 
 func _store_route_cache(cache_key: String, route: Dictionary) -> void:

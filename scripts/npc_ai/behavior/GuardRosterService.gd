@@ -10,10 +10,8 @@ func role_allows_guard_duty(role: String) -> bool:
 	return lowered.find("guard") >= 0 or lowered.find("watch") >= 0
 
 func assign_duty_from_entry(context, entry: Dictionary) -> bool:
-	var role := String(entry.get("role", context.get("role") if context != null else ""))
 	var explicit_night_guard := bool(entry.get("nightGuard", false))
-	var actual_guard := role_allows_guard_duty(role)
-	var assigned := explicit_night_guard and actual_guard
+	var assigned := explicit_night_guard
 	if context != null:
 		context.set("guard_duty_kind", NpcEnumsScript.GUARD_DUTY_NIGHT if assigned else NpcEnumsScript.GUARD_DUTY_NONE)
 	entry["nightGuard"] = assigned
@@ -35,7 +33,7 @@ func assign_duty_from_entry(context, entry: Dictionary) -> bool:
 func has_active_night_duty(context, entry: Dictionary) -> bool:
 	if context != null and context.get("guard_duty_kind") == NpcEnumsScript.GUARD_DUTY_NIGHT:
 		return true
-	return bool(entry.get("nightGuard", false)) and role_allows_guard_duty(String(entry.get("role", "")))
+	return bool(entry.get("nightGuard", false))
 
 func duty_for(entry: Dictionary) -> Dictionary:
 	return duty_by_npc.get(String(entry.get("id", "")), {})

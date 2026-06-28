@@ -890,28 +890,35 @@ func update_scripted_npc(entry: Dictionary, body: Node3D, delta: float) -> void:
     elif String(entry.get("routeStatus", "")) in ["blocked", "unreachable"]:
         scripted_order_result(entry, "FAILED_BLOCKED", "route_blocked", String(entry.get("routeReason", "")))
 
-func update_fighter_target(entry: Dictionary, body: Node3D, target_hostile: Node3D, weapon_id: String) -> Vector3:
+func update_fighter_target(entry: Dictionary, body: Node3D, target_hostile, weapon_id: String) -> Vector3:
     entry["insideHome"] = false
     body.set_meta("npc_inside_home", false)
     var melee := npc_weapon_is_melee(weapon_id)
-    var target: Vector3 = choose_guard_target(entry, target_hostile, melee)
-    if target_hostile == null:
+    var hostile := valid_hostile_node(target_hostile)
+    var target: Vector3 = choose_guard_target(entry, hostile, melee)
+    if hostile == null:
         return target
     if melee:
-        var flat_distance := Vector2(target_hostile.global_position.x - body.global_position.x, target_hostile.global_position.z - body.global_position.z).length()
+        var flat_distance := Vector2(hostile.global_position.x - body.global_position.x, hostile.global_position.z - body.global_position.z).length()
         if flat_distance <= CELL * 1.72:
-            strike_hostile(entry, target_hostile)
+            strike_hostile(entry, hostile)
     else:
-        fire_at_hostile(entry, target_hostile)
+        fire_at_hostile(entry, hostile)
     return target
 
-func face_hostile_if_needed(body: Node3D, target_hostile: Node3D) -> void:
-    if target_hostile == null or body.global_position.distance_to(target_hostile.global_position) <= 0.1:
+func face_hostile_if_needed(body: Node3D, target_hostile) -> void:
+    var hostile := valid_hostile_node(target_hostile)
+    if hostile == null or body.global_position.distance_to(hostile.global_position) <= 0.1:
         return
-    var to_target := target_hostile.global_position - body.global_position
+    var to_target := hostile.global_position - body.global_position
     to_target.y = 0.0
     if to_target.length_squared() > 0.001:
         body.rotation.y = atan2(to_target.x, to_target.z)
+
+func valid_hostile_node(value) -> Node3D:
+    if value == null or not is_instance_valid(value):
+        return null
+    return value as Node3D
 
 func update_npc_visual_state(entry: Dictionary, delta: float) -> void:
     entry["detourTimer"] = maxf(0.0, float(entry.get("detourTimer", 0.0)) - delta)
@@ -1091,6 +1098,14 @@ func is_valid_forage_node(node: Node3D, entry: Dictionary) -> bool:
 func current_route_failure_blocks_forager(entry: Dictionary) -> bool:
     if String(entry.get("routeStatus", "")) != "blocked":
         return false
+    if String(entry.get("activeDoorPortalId", "")) != "":
+        return false
+    var body := entry.get("body") as Node3D
+    if body != null and is_instance_valid(body):
+        var current_cell := flat_cell_for_position(body.global_position)
+        var porch_cell: Vector2i = entry.get("porchCell", current_cell)
+        if abs(current_cell.x - porch_cell.x) <= 1 and abs(current_cell.y - porch_cell.y) <= 1:
+            return false
     return String(entry.get("routeReason", "")) in ["no_route", "no_goal_span", "empty_route"]
 
 func mark_forager_target_unreachable(entry: Dictionary, node: Node3D) -> void:
@@ -1518,19 +1533,29 @@ func home_route_step_reached(entry: Dictionary, route_target: Vector3) -> bool:
     var body := entry.get("body") as Node3D
     if body == null:
         return true
-    if body.global_position.distance_to(route_target) <= CELL * 0.82:
-        return true
     var target_cell := flat_cell_for_position(route_target)
     var current_cell := flat_cell_for_position(body.global_position)
     var porch_cell: Vector2i = entry.get("porchCell", target_cell)
+    var home_cell: Vector2i = entry.get("homeCell", target_cell)
     var route_status := String(entry.get("routeStatus", ""))
+    var route_arrived_at_target := false
+    if route_status == "arrived" and entry.has("homeActiveTargetCell"):
+        var active_cell: Vector2i = entry.get("homeActiveTargetCell", target_cell)
+        route_arrived_at_target = active_cell == target_cell
+    if route_arrived_at_target and target_cell != home_cell:
+        return true
+    if target_cell != porch_cell and abs(target_cell.x - porch_cell.x) + abs(target_cell.y - porch_cell.y) == 1:
+        if current_cell == target_cell or body.global_position.distance_to(route_target) <= CELL * 0.35:
+            return true
+        return false
+    if body.global_position.distance_to(route_target) <= CELL * 0.82:
+        return true
     if target_cell == porch_cell and abs(current_cell.x - target_cell.x) <= 1 and abs(current_cell.y - target_cell.y) <= 1:
         return true
-    if route_status != "arrived" or not entry.has("homeActiveTargetCell"):
+    if not route_arrived_at_target:
         return false
-    var active_cell: Vector2i = entry.get("homeActiveTargetCell", target_cell)
-    if active_cell != target_cell:
-        return false
+    if target_cell != home_cell:
+        return current_cell == target_cell or body.global_position.distance_to(route_target) <= CELL * 0.35
     return abs(current_cell.x - target_cell.x) <= 1 and abs(current_cell.y - target_cell.y) <= 1
 
 func settle_home_if_reached(entry: Dictionary) -> void:
@@ -2027,10 +2052,10 @@ func choose_job_target(entry: Dictionary) -> Vector3:
         return entry.get("porchPosition", Vector3.ZERO)
     return pathing.choose_job_target(entry)
 
-func choose_guard_target(entry: Dictionary, target_hostile: Node3D = null, melee := false) -> Vector3:
+func choose_guard_target(entry: Dictionary, target_hostile = null, melee := false) -> Vector3:
     if pathing == null:
         return entry.get("guardPosition", entry.get("porchPosition", Vector3.ZERO))
-    return pathing.choose_guard_target(entry, target_hostile, melee)
+    return pathing.choose_guard_target(entry, valid_hostile_node(target_hostile), melee)
 
 func point_inside_town(entry: Dictionary, position: Vector3) -> bool:
     if pathing == null:

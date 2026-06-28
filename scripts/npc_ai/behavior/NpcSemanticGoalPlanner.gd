@@ -29,8 +29,10 @@ func make_intent(entry: Dictionary, target: Vector3, max_distance: float, moving
     var target_cell: Vector2i = world.world_cell(target) if world != null else Vector2i(roundi(target.x / CELL), roundi(target.z / CELL))
     var fallback_cells: Array[Vector2i] = []
     var arrival_radius := CELL * 0.72
+    var home_route_positions: Array = entry.get("homeRoutePositions", []) if entry.get("homeRoutePositions", []) is Array else []
+    var strict_home_route := moving_home and not home_route_positions.is_empty()
     if moving_home:
-        arrival_radius = CELL * 0.82
+        arrival_radius = CELL * 0.35 if strict_home_route else CELL * 0.82
     elif kind == "scripted":
         arrival_radius = CELL * 0.45
     return {
@@ -44,7 +46,7 @@ func make_intent(entry: Dictionary, target: Vector3, max_distance: float, moving
         "action": "",
         "interruptible": not moving_home,
         "allowPartial": moving_home,
-        "strictArrival": kind == "scripted" or kind == "job",
+        "strictArrival": strict_home_route or kind == "scripted" or kind == "job",
         "fallbackCells": fallback_cells
     }
 

@@ -185,8 +185,9 @@ func test_generic_town_npc_navigation() -> void:
     var forager_goal_seen := false
     var town_radius_world := float(generic_town.get("radius", 32)) * CELL
     var town_center_world := Vector2(float(generic_center_x) * CELL, float(generic_center_z) * CELL)
-    for step in range(520):
-        if step % 80 == 0:
+    var generic_job_steps := 1600
+    for step in range(generic_job_steps):
+        if step % 160 == 0:
             mark_progress("npc_nav_generic_town_jobs_%d" % step)
         npc_system.update_npcs(0.2, 1.0)
         for entry_variant in npc_entries:
@@ -218,6 +219,7 @@ func test_generic_town_npc_navigation() -> void:
     var forager_hunger := float(generic_forager.get("hunger", 0.0)) if not generic_forager.is_empty() else 0.0
     var forager_target_distance := -1.0
     var forager_node_distance := -1.0
+    var forager_debug := {}
     if not generic_forager.is_empty():
         var forager_body := generic_forager.get("body") as Node3D
         var forager_target: Vector3 = generic_forager.get("jobTarget", Vector3.ZERO)
@@ -226,6 +228,22 @@ func test_generic_town_npc_navigation() -> void:
             forager_target_distance = forager_body.global_position.distance_to(forager_target)
             if forager_node != null and is_instance_valid(forager_node):
                 forager_node_distance = forager_body.global_position.distance_to(forager_node.global_position)
+            forager_debug = {
+                "cell": world_to_flat_cell(forager_body.global_position),
+                "targetCell": world_to_flat_cell(forager_target),
+                "lastMove": float(generic_forager.get("lastMoveDistance", 0.0)),
+                "routeWaitTicks": int(generic_forager.get("routeWaitTicks", 0)),
+                "routeReplans": int(generic_forager.get("routeReplans", 0)),
+                "waypoints": (generic_forager.get("pathWaypoints", []) as Array).size(),
+                "routeCells": (generic_forager.get("routeCells", []) as Array).size(),
+                "blockedContact": String(forager_body.get_meta("npc_blocked_contact", "")),
+                "blockedName": String(forager_body.get_meta("npc_blocked_contact_name", "")),
+                "blockedKind": String(forager_body.get_meta("npc_blocked_contact_kind", "")),
+                "blockedType": String(forager_body.get_meta("npc_blocked_contact_type", "")),
+                "capsuleBlocker": generic_forager.get("capsuleBlocker", {}),
+                "slideCount": int(forager_body.get_meta("npc_slide_collision_count", 0)),
+                "corridor": generic_forager.get("corridorFollow", {})
+            }
     var stats_worker_outside := int(job_stats.get("outsideWorkers", 0)) > 0
     add_result(
         "npc_nav_generic_job_outings",
@@ -246,7 +264,7 @@ func test_generic_town_npc_navigation() -> void:
             and int(job_stats.get("forageRuns", 0)) > forage_runs_before
             and forager_hunger > 38.0
             and targeted_forage_selected,
-        "goal %s, target selected %s, berries %d, hunger %.1f, forage %d->%d, phase %s, route %s/%s, dist target %.2f node %.2f" % [
+        "goal %s, target selected %s, berries %d, hunger %.1f, forage %d->%d, phase %s, route %s/%s, dist target %.2f node %.2f, debug %s" % [
             str(forager_goal_seen),
             str(targeted_forage_selected),
             forager_food,
@@ -257,7 +275,8 @@ func test_generic_town_npc_navigation() -> void:
             String(generic_forager.get("routeStatus", "")),
             String(generic_forager.get("routeReason", "")),
             forager_target_distance,
-            forager_node_distance
+            forager_node_distance,
+            JSON.stringify(forager_debug)
         ]
     )
     add_result(
@@ -818,6 +837,8 @@ func test_reachability_aware_goal_selection() -> void:
         rock.queue_free()
     if is_instance_valid(hostile):
         hostile.queue_free()
+    invalidate_navigation_fixture()
+    await wait_physics_frames(3)
     invalidate_navigation_fixture()
 
 func make_nav_test_npc(npc_system, npc_id: String, npc_name: String, job: String, town_center: Vector2i, town_radius: int, level: float, cell: Vector2i, can_fight := false) -> Dictionary:

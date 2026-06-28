@@ -488,7 +488,7 @@ func runtime_request(entry: Dictionary, intent: Dictionary, world_adapter):
 	var revision_key := "0"
 	if world_adapter != null:
 		revision_key = str(int(world_adapter.get("static_snapshot_revision")))
-	request.request_id = "runtime:%s:%s:%d,%d:%s:%s:%s:%s" % [
+	request.request_id = "runtime:%s:%s:%d,%d:%s:%s:%s:%s:%s:%.3f" % [
 		String(entry.get("id", "npc")),
 		String(intent.get("kind", "move")),
 		target_cell_value.x,
@@ -496,7 +496,9 @@ func runtime_request(entry: Dictionary, intent: Dictionary, world_adapter):
 		str(bool(intent.get("allowOutside", false))),
 		str(bool(intent.get("movingHome", false))),
 		String(intent.get("action", "")),
-		revision_key
+		revision_key,
+		str(bool(intent.get("strictArrival", false))),
+		float(intent.get("arrivalRadius", NpcConstantsScript.CELL_SIZE * 0.75))
 	]
 	request.owner_npc_id = String(entry.get("id", "npc"))
 	var body := entry.get("body") as Node3D
@@ -662,7 +664,7 @@ func _runtime_graph_cache_key(entry: Dictionary, intent: Dictionary, world_adapt
 		profile_id = String(context.get("traversal_profile_id"))
 	var start_tile := NavigationChangeBusScript.tile_key_for_cell(start_cell)
 	var target_tile := NavigationChangeBusScript.tile_key_for_cell(target_cell)
-	return "%s|%d|%s|%s|%s|%d|%s|%s" % [
+	return "%s|%d|%s|%s|%s|%d|%s|%s|%s|%.3f" % [
 		profile_id,
 		static_revision,
 		start_tile,
@@ -670,7 +672,9 @@ func _runtime_graph_cache_key(entry: Dictionary, intent: Dictionary, world_adapt
 		String(intent.get("kind", "move")),
 		margin,
 		str(bool(intent.get("allowOutside", false))),
-		str(bool(intent.get("movingHome", false)))
+		str(bool(intent.get("movingHome", false))),
+		str(bool(intent.get("strictArrival", false))),
+		float(intent.get("arrivalRadius", NpcConstantsScript.CELL_SIZE * 0.75))
 	]
 
 func _runtime_graph_covers(graph: Dictionary, start_cell: Vector2i, target_cells: Dictionary) -> bool:
@@ -809,7 +813,10 @@ func _runtime_graph_foreground_route(entry: Dictionary, intent: Dictionary = {})
 	if bool(intent.get("movingHome", false)):
 		return true
 	var kind := String(intent.get("kind", ""))
-	if kind in ["scripted", "home"]:
+	if kind in ["scripted", "home", "job"]:
+		return true
+	var job := String(entry.get("job", ""))
+	if job in ["forage", "wood", "stone"] and int(entry.get("routePriority", 0)) >= 90:
 		return true
 	return int(entry.get("routePriority", 0)) >= 140
 
@@ -1010,7 +1017,7 @@ func _runtime_target_cells(entry: Dictionary, intent: Dictionary, world_adapter,
 	if not target_cells.is_empty():
 		return target_cells
 	var search_radius := radius if strict_arrival else maxi(1, radius)
-	if bool(intent.get("movingHome", false)):
+	if bool(intent.get("movingHome", false)) and not strict_arrival:
 		search_radius = maxi(search_radius, 2)
 	for cell in world_adapter.candidate_cells_near(entry, target_cell, bool(intent.get("allowOutside", false)), bool(intent.get("movingHome", false)), search_radius):
 		if _runtime_cell_can_be_goal(entry, world_adapter, snapshot, cell, start_cell):
@@ -1027,6 +1034,9 @@ func _runtime_margin_for_intent(intent: Dictionary, entry: Dictionary = {}) -> i
 		return 8 if external_direct else 4
 	if kind == "scripted":
 		return 4 if external_direct else 1
+	var job := String(entry.get("job", ""))
+	if kind == "job" or job in ["forage", "wood", "stone"]:
+		return 8 if external_direct else 6
 	if bool(intent.get("allowOutside", false)):
 		return 3 if external_direct else 2
 	return 3 if external_direct else 2
@@ -1035,6 +1045,8 @@ func _runtime_cell_can_be_goal(entry: Dictionary, world_adapter, snapshot: Dicti
 	if cell == start_cell:
 		return true
 	if world_adapter.static_blocker(snapshot, cell) != null:
+		return false
+	if world_adapter.prop_clearance_blocker(snapshot, cell) != null:
 		return false
 	var height: float = world_adapter.height_for_cell(cell)
 	var main = world_adapter.get("main")
@@ -1046,6 +1058,8 @@ func _runtime_cell_can_be_node(entry: Dictionary, world_adapter, snapshot: Dicti
 	if not world_adapter.cell_allowed_area(entry, cell, bool(snapshot.get("allowOutside", false)), bool(snapshot.get("movingHome", false))):
 		return false
 	if world_adapter.static_blocker(snapshot, cell) != null and world_adapter.door_at(snapshot, cell) == null:
+		return false
+	if world_adapter.prop_clearance_blocker(snapshot, cell) != null:
 		return false
 	var main = world_adapter.get("main")
 	if main != null and world_adapter.height_for_cell(cell) < main.WATER_LEVEL + 0.45:

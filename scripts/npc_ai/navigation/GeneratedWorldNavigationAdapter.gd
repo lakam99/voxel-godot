@@ -6,6 +6,7 @@ const NpcEnumsScript := preload("res://scripts/npc_ai/NpcEnums.gd")
 
 const CELL := 1.35
 const INVALID_CELL := Vector2i(999999, 999999)
+const PROP_CLEARANCE_RADIUS := CELL * 0.82
 
 var system
 var main
@@ -314,6 +315,30 @@ func static_blocker(snapshot: Dictionary, cell: Vector2i):
         return null
     return blocker
 
+func prop_clearance_blocker(snapshot: Dictionary, cell: Vector2i):
+    var props: Dictionary = snapshot.get("props", {})
+    if props.is_empty():
+        return null
+    var cell_position_value := cell_position(cell)
+    for dz in range(-1, 2):
+        for dx in range(-1, 2):
+            if dx == 0 and dz == 0:
+                continue
+            var neighbor := cell + Vector2i(dx, dz)
+            var prop = props.get(neighbor, null)
+            if prop == null:
+                continue
+            if prop is Object and not is_instance_valid(prop):
+                props.erase(neighbor)
+                continue
+            var prop_body := prop as Node3D
+            if prop_body == null:
+                continue
+            var flat_distance := Vector2(cell_position_value.x - prop_body.global_position.x, cell_position_value.z - prop_body.global_position.z).length()
+            if flat_distance <= PROP_CLEARANCE_RADIUS:
+                return prop
+    return null
+
 func door_at(snapshot: Dictionary, cell: Vector2i) -> Node:
     var doors: Dictionary = snapshot.get("doors", {})
     var door_value = doors.get(cell, null)
@@ -348,6 +373,8 @@ func cell_pathable(entry: Dictionary, snapshot: Dictionary, from_cell: Vector2i,
         return terrain
     if static_blocker(snapshot, to_cell) != null and not target_cells.has(to_cell):
         return { "ok": false, "reason": "blocked_static" }
+    if to_cell != from_cell and prop_clearance_blocker(snapshot, to_cell) != null and not target_cells.has(to_cell):
+        return { "ok": false, "reason": "blocked_prop_clearance" }
     if not ignore_dynamic and dynamic_blocker(snapshot, to_cell) != null and not target_cells.has(to_cell):
         return { "ok": false, "reason": "blocked_dynamic" }
     return { "ok": true, "reason": "" }

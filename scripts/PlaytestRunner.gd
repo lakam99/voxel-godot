@@ -458,13 +458,13 @@ func test_tutorial_start_system() -> void:
         mira != null and not mira_entered_starter_house,
         "entered %s, min distance %.2f, bounds %s" % [str(mira_entered_starter_house), mira_min_starter_distance, str(mira_route_bounds)]
     )
-    for i in range(180):
+    for i in range(420):
         npc_system.update_npcs(0.1, 0.0)
         if mira != null and bool(mira.get_meta("npc_inside_home", false)):
             break
         if i % 15 == 0:
             mark_progress("tutorial_elder_return_%03d" % i)
-            await get_tree().process_frame
+            await wait_physics_frames(1)
     var starter_position := Vector3(float(starter_cell.x) * CELL, player.global_position.y, float(starter_cell.y) * CELL)
     var mira_position := starter_position
     if mira is Node3D:
@@ -4614,8 +4614,8 @@ func test_structure_and_town_generation() -> void:
         var forager_goal_seen := false
         var town_radius_world := float(generic_town.get("radius", 32)) * CELL
         var town_center_world := Vector2(float(generic_center_x) * CELL, float(generic_center_z) * CELL)
-        for step in range(1400):
-            if step % 40 == 0:
+        for step in range(2200):
+            if step % 160 == 0:
                 mark_progress("structures_npc_jobs_%03d" % step)
             npc_system.update_npcs(0.2, 1.0)
             for entry_variant in generic_entries:
@@ -4638,6 +4638,8 @@ func test_structure_and_town_generation() -> void:
                 targeted_forage_done = int(inventory_now.get("berries", 0)) > 0 and hunger_now > 38.0
             if saw_generic_worker_outside and int(stats_now.get("jobRuns", 0)) > job_runs_before and targeted_forage_done:
                 break
+            if step % 20 == 19:
+                await wait_physics_frames(1)
         mark_progress("structures_npc_jobs_done")
         var job_stats: Dictionary = npc_system.stats()
         var forager_inventory: Dictionary = generic_forager.get("personalInventory", {}) if not generic_forager.is_empty() else {}

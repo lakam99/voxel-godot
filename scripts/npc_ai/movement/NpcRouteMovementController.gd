@@ -47,10 +47,27 @@ func move(entry: Dictionary, intent: Dictionary, max_distance: float, planner, w
 
     var route: Dictionary = ensure_route(entry, intent, planner, world)
     if not bool(route.get("ok", false)):
-        set_route_status(entry, String(route.get("status", "blocked")), String(route.get("reason", "blocked")))
-        if String(route.get("status", "")) != "pending":
-            count_unreachable_once(entry, intent, String(route.get("reason", "blocked")))
-        return { "moved": 0.0, "status": String(route.get("status", "blocked")), "reason": String(route.get("reason", "blocked")) }
+        if String(entry.get("activeDoorPortalId", "")) != "" and (entry.get("pathWaypoints", []) as Array).is_empty() and seed_active_door_forward_step(entry, world):
+            route = {
+                "ok": true,
+                "status": "routed",
+                "reason": "active_door_forward_clearance",
+                "cells": entry.get("routeCells", []),
+                "waypoints": entry.get("pathWaypoints", []),
+                "actions": entry.get("routeActions", {}),
+                "targetCell": intent.get("targetCell", world.world_cell(target)),
+                "fallbackCell": entry.get("routeFallbackCell", world.world_cell(target)),
+                "snapshotRevision": world.revision()
+            }
+        else:
+            if String(entry.get("activeDoorPortalId", "")) != "" and String(route.get("status", "")) != "pending":
+                release_stale_active_door_route(entry)
+                set_route_status(entry, "waiting", "active_door_replan")
+                return { "moved": 0.0, "status": "waiting", "reason": "active_door_replan" }
+            set_route_status(entry, String(route.get("status", "blocked")), String(route.get("reason", "blocked")))
+            if String(route.get("status", "")) != "pending":
+                count_unreachable_once(entry, intent, String(route.get("reason", "blocked")))
+            return { "moved": 0.0, "status": String(route.get("status", "blocked")), "reason": String(route.get("reason", "blocked")) }
     if String(route.get("status", "")) == "arrived":
         if strict_arrival and flat_distance(previous, target) > arrival_radius:
             seed_strict_final_waypoint(entry, target, world)
@@ -151,6 +168,10 @@ func move(entry: Dictionary, intent: Dictionary, max_distance: float, planner, w
         var classification := String(follow.get("classification", "blocked"))
         if classification == "traffic_reservation":
             increment_reservation_wait(entry)
+        if follow_reason == "yielding" and String(entry.get("activeDoorPortalId", "")) != "" and not bool(entry.get("holdDoorOrder", false)) and int(entry.get("routeWaitTicks", 0)) > 30:
+            release_stale_active_door_route(entry)
+            set_route_status(entry, "waiting", "active_door_replan")
+            return { "moved": 0.0, "status": "waiting", "reason": "active_door_replan", "classification": "door_state" }
         set_route_status(entry, "waiting", follow_reason)
         return { "moved": 0.0, "status": "waiting", "reason": follow_reason, "classification": classification }
 
@@ -161,6 +182,10 @@ func move(entry: Dictionary, intent: Dictionary, max_distance: float, planner, w
         var final_reason := String(traffic_result.get("reason", "traffic_wait"))
         if traffic_result.has("cycleResolution"):
             final_reason = "yielding"
+        if final_reason == "yielding" and String(entry.get("activeDoorPortalId", "")) != "" and not bool(entry.get("holdDoorOrder", false)) and int(entry.get("routeWaitTicks", 0)) > 30:
+            release_stale_active_door_route(entry)
+            set_route_status(entry, "waiting", "active_door_replan")
+            return { "moved": 0.0, "status": "waiting", "reason": "active_door_replan", "classification": "door_state" }
         if final_reason in ["no_safe_interval", "planner_guard"] and int(entry.get("routeWaitTicks", 0)) > 4:
             entry["routeForceReplan"] = true
         set_route_status(entry, "waiting", final_reason)
@@ -382,13 +407,15 @@ func nearest_dynamic_blocker(position: Vector3, entry: Dictionary, actors: Array
 
 func ensure_route(entry: Dictionary, intent: Dictionary, planner, world) -> Dictionary:
     var target_cell: Vector2i = intent.get("targetCell", world.world_cell(intent.get("target", Vector3.ZERO)))
-    var route_key: String = "%s:%d,%d:%s:%s:%s" % [
+    var route_key: String = "%s:%d,%d:%s:%s:%s:%s:%.3f" % [
         String(intent.get("kind", "move")),
         target_cell.x,
         target_cell.y,
         str(bool(intent.get("allowOutside", false))),
         str(bool(intent.get("movingHome", false))),
-        String(intent.get("action", ""))
+        String(intent.get("action", "")),
+        str(bool(intent.get("strictArrival", false))),
+        float(intent.get("arrivalRadius", CELL * 0.75))
     ]
     var snapshot_revision: String = world.revision()
     var route_known := String(entry.get("routeKey", "")) != ""
@@ -884,6 +911,8 @@ func entry_loses_to_dynamic(entry: Dictionary, blocker, priority := 0) -> bool:
 func capsule_hits_obstacle(entry: Dictionary, body: CharacterBody3D, previous: Vector3, candidate: Vector3) -> bool:
     if system == null or body == null or capsule_shape == null:
         return false
+    entry.erase("capsuleBlocker")
+    body.set_meta("npc_capsule_blocker", {})
     var delta: Vector3 = candidate - previous
     delta.y = 0.0
     var samples: int = clampi(ceili(delta.length() / (CELL * 0.28)), 1, 5)
@@ -903,9 +932,41 @@ func capsule_hits_obstacle(entry: Dictionary, body: CharacterBody3D, previous: V
             var collider := hit_dict.get("collider") as Node
             if collider == null or collider == body:
                 continue
+            if collider_allows_overlap_escape(collider, previous, candidate):
+                continue
             if collider_blocks_capsule(entry, collider, body):
+                var collider_body := collider as Node3D
+                var collider_position := collider_body.global_position if collider_body != null else Vector3.ZERO
+                var blocker := {
+                    "name": collider.name,
+                    "kind": String(collider.get_meta("kind", "")),
+                    "blockType": String(collider.get_meta("block_type", "")),
+                    "class": collider.get_class(),
+                    "position": collider_position,
+                    "cell": Vector2i(roundi(collider_position.x / CELL), roundi(collider_position.z / CELL)),
+                    "sample": sample,
+                    "sampleCell": Vector2i(roundi(sample.x / CELL), roundi(sample.z / CELL)),
+                    "candidate": candidate,
+                    "candidateCell": Vector2i(roundi(candidate.x / CELL), roundi(candidate.z / CELL))
+                }
+                entry["capsuleBlocker"] = blocker
+                body.set_meta("npc_capsule_blocker", blocker)
                 return true
     return false
+
+func collider_allows_overlap_escape(collider: Node, previous: Vector3, candidate: Vector3) -> bool:
+    if collider == null or String(collider.get_meta("kind", "")) != "prop":
+        return false
+    var collider_body := collider as Node3D
+    if collider_body == null:
+        return false
+    var previous_cell := Vector2i(roundi(previous.x / CELL), roundi(previous.z / CELL))
+    var collider_cell := Vector2i(roundi(collider_body.global_position.x / CELL), roundi(collider_body.global_position.z / CELL))
+    if collider_cell != previous_cell:
+        return false
+    var previous_distance := flat_distance(previous, collider_body.global_position)
+    var candidate_distance := flat_distance(candidate, collider_body.global_position)
+    return candidate_distance + 0.02 >= previous_distance
 
 func collider_blocks_capsule(entry: Dictionary, collider: Node, body: CharacterBody3D) -> bool:
     var kind := String(collider.get_meta("kind", ""))

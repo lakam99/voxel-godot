@@ -196,6 +196,7 @@ func _advance_guard_motion(entry: Dictionary, body: Node3D, perception: Dictiona
 	entry["guardTargetRefreshTimer"] = refresh_timer
 	if monitor != null:
 		monitor.end_section("npc_guard_target", target_start)
+	target = _staged_departure_motion_target(entry, body, target)
 	var move_start: int = performance_monitor().begin_section("npc_guard_move") if performance_monitor() != null else Time.get_ticks_usec()
 	var moved := float(npc_system.call("move_npc", entry, target, 2.65 * delta, false, true, delta)) if npc_system.has_method("move_npc") else 0.0
 	if performance_monitor() != null:
@@ -222,6 +223,7 @@ func _advance_job_motion(entry: Dictionary, body: Node3D, delta: float) -> Dicti
 		entry["lastMoveDistance"] = 0.0
 		return { "advanced": false, "reason": "job_phase_not_moving", "intentKind": "job" }
 	var target: Vector3 = entry.get("jobTarget", body.global_position)
+	target = _staged_departure_motion_target(entry, body, target)
 	entry["routePriority"] = 90
 	var moved := float(npc_system.call("move_npc", entry, target, 3.10 * delta, false, true, delta)) if npc_system.has_method("move_npc") else 0.0
 	entry["lastMoveDistance"] = moved
@@ -333,6 +335,10 @@ func _execute_home(entry: Dictionary, body: Node3D, perception: Dictionary, delt
 	var speed := 6.4
 	var moved := float(npc_system.call("move_npc", entry, target, speed * delta, true, false, delta)) if npc_system.has_method("move_npc") else 0.0
 	entry["lastMoveDistance"] = moved
+	if moved <= 0.001 and npc_system.has_method("home_route_step_reached") and not bool(npc_system.call("home_route_step_reached", entry, target)):
+		var route_status := String(entry.get("routeStatus", ""))
+		if route_status in ["arrived", "partial", "blocked", "unreachable"] and (entry.get("pathWaypoints", []) as Array).is_empty():
+			entry["routeForceReplan"] = true
 	if npc_system.has_method("settle_home_if_reached"):
 		npc_system.call("settle_home_if_reached", entry)
 	if _scripted_order_kind(body) == "go_home":
@@ -399,6 +405,7 @@ func _execute_job(entry: Dictionary, body: Node3D, delta: float) -> void:
 		monitor.end_section("npc_update_day_job", job_state_start)
 	if moving_job:
 		var target: Vector3 = entry.get("jobTarget", body.global_position)
+		target = _staged_departure_motion_target(entry, body, target)
 		var job_move_start: int = monitor.begin_section("npc_job_move") if monitor != null else Time.get_ticks_usec()
 		var moved := float(npc_system.call("move_npc", entry, target, 3.10 * delta, false, true, delta)) if npc_system.has_method("move_npc") else 0.0
 		if monitor != null:
@@ -498,6 +505,84 @@ func _update_day_job(entry: Dictionary, delta: float) -> bool:
 	body.set_meta("npc_job_phase", "idle")
 	_end_job_phase_section("npc_job_phase_%s_%s" % [job, String(entry.get("jobPhase", "idle"))], phase_start)
 	return false
+
+func _staged_departure_motion_target(entry: Dictionary, body: Node3D, target: Vector3) -> Vector3:
+	if body == null:
+		return target
+	var leaving_town := _point_inside_town(entry, body.global_position) and not _point_inside_town(entry, target)
+	if _inside_home_now(entry, body) or (leaving_town and _near_home_exit_needs_clearance(entry, body)):
+		return _home_exit_clearance_target(entry, body.global_position.y)
+	if leaving_town:
+		return _town_exit_toward(entry, target, body.global_position.y)
+	return target
+
+func _near_home_exit_needs_clearance(entry: Dictionary, body: Node3D) -> bool:
+	if body == null:
+		return false
+	var porch_cell: Vector2i = entry.get("porchCell", entry.get("homeCell", Vector2i.ZERO))
+	var current_cell := _flat_cell_for_position(body.global_position)
+	if abs(current_cell.x - porch_cell.x) > 1 or abs(current_cell.y - porch_cell.y) > 1:
+		return false
+	return current_cell != _home_exit_clearance_cell(entry)
+
+func _inside_home_now(entry: Dictionary, body: Node3D) -> bool:
+	if body == null:
+		return false
+	if autonomy_system != null and autonomy_system.has_method("is_inside_home_interior"):
+		return bool(autonomy_system.call("is_inside_home_interior", entry, body.global_position))
+	return bool(entry.get("insideHome", false))
+
+func _home_exit_clearance_cell(entry: Dictionary) -> Vector2i:
+	var home_cell: Vector2i = entry.get("homeCell", Vector2i.ZERO)
+	var porch_cell: Vector2i = entry.get("porchCell", home_cell)
+	var delta := porch_cell - home_cell
+	var step := Vector2i.ZERO
+	if abs(delta.x) > abs(delta.y):
+		step.x = 1 if delta.x >= 0 else -1
+	elif delta.y != 0:
+		step.y = 1 if delta.y >= 0 else -1
+	if step == Vector2i.ZERO:
+		var min_cell: Vector2i = entry.get("interiorMinCell", home_cell)
+		var max_cell: Vector2i = entry.get("interiorMaxCell", home_cell)
+		if porch_cell.x < min_cell.x:
+			step.x = -1
+		elif porch_cell.x > max_cell.x:
+			step.x = 1
+		elif porch_cell.y < min_cell.y:
+			step.y = -1
+		elif porch_cell.y > max_cell.y:
+			step.y = 1
+	if step == Vector2i.ZERO:
+		return porch_cell
+	return porch_cell + Vector2i(step.x * 3, step.y * 3)
+
+func _home_exit_clearance_target(entry: Dictionary, fallback_y: float) -> Vector3:
+	var porch_cell: Vector2i = entry.get("porchCell", entry.get("homeCell", Vector2i.ZERO))
+	var exit_cell := _home_exit_clearance_cell(entry)
+	if exit_cell == porch_cell:
+		return entry.get("porchPosition", Vector3(float(porch_cell.x) * NpcConstantsScript.CELL_SIZE, fallback_y, float(porch_cell.y) * NpcConstantsScript.CELL_SIZE))
+	var position := Vector3(float(exit_cell.x) * NpcConstantsScript.CELL_SIZE, fallback_y, float(exit_cell.y) * NpcConstantsScript.CELL_SIZE)
+	var main = npc_system.get("main") if npc_system != null else null
+	if main != null and main.has_method("height_at_world"):
+		position.y = float(main.call("height_at_world", position.x, position.z)) + 0.04
+	return position
+
+func _town_exit_toward(entry: Dictionary, target: Vector3, fallback_y: float) -> Vector3:
+	var center: Vector2i = entry.get("townCenter", Vector2i.ZERO)
+	var radius := maxi(1, int(entry.get("townRadius", 18)))
+	var center_position := Vector3(float(center.x) * NpcConstantsScript.CELL_SIZE, fallback_y, float(center.y) * NpcConstantsScript.CELL_SIZE)
+	var delta := target - center_position
+	delta.y = 0.0
+	var exit_cell := Vector2(float(center.x) + 0.5, float(center.y) + float(radius + 1))
+	if absf(delta.x) > absf(delta.z):
+		exit_cell = Vector2(float(center.x + radius + 1), float(center.y) + 0.5) if delta.x >= 0.0 else Vector2(float(center.x - radius - 1), float(center.y) + 0.5)
+	else:
+		exit_cell = Vector2(float(center.x) + 0.5, float(center.y + radius + 1)) if delta.z >= 0.0 else Vector2(float(center.x) + 0.5, float(center.y - radius - 1))
+	var position := Vector3(exit_cell.x * NpcConstantsScript.CELL_SIZE, fallback_y, exit_cell.y * NpcConstantsScript.CELL_SIZE)
+	var main = npc_system.get("main") if npc_system != null else null
+	if main != null and main.has_method("height_at_world"):
+		position.y = float(main.call("height_at_world", position.x, position.z)) + 0.04
+	return position
 
 func _begin_job_phase_section(entry: Dictionary, job: String) -> int:
 	var monitor = performance_monitor()
@@ -684,6 +769,28 @@ func _update_forager_goal(entry: Dictionary, body: Node3D, delta: float) -> bool
 		return true
 	if phase == "outbound" or phase == "searching":
 		var target_node := _job_target_node(entry)
+		if phase == "searching" and target_node == null and timer <= 0.0:
+			var forage_retry := _find_forage_target(entry)
+			if forage_retry != null and _reserve_job_target(entry, forage_retry, "harvest_resource"):
+				entry["jobPhase"] = "outbound"
+				entry["jobTimer"] = _deterministic_seconds(entry, "forage_outbound_timeout", 12.0, 22.0)
+				entry["forageRouteFailures"] = 0
+				entry["routeForceReplan"] = true
+				_clear_home_route_terminal(entry)
+				_set_npc_goal(entry, "forage berries")
+				body.set_meta("npc_job_phase", "outbound")
+				return true
+			entry["jobTarget"] = _choose_job_target(entry)
+			entry["jobTimer"] = _deterministic_seconds(entry, "forage_search_retry", 3.0, 7.0)
+			entry["routeForceReplan"] = true
+			_set_npc_goal(entry, "search for berries")
+			body.set_meta("npc_job_phase", "searching")
+			return true
+		if phase == "searching" and target_node != null:
+			phase = "outbound"
+			entry["jobPhase"] = "outbound"
+			_set_npc_goal(entry, "forage berries")
+			body.set_meta("npc_job_phase", "outbound")
 		if target_node == null and phase == "outbound":
 			entry["jobTargetNode"] = null
 			_release_job_reservation(entry, "target_gone")
