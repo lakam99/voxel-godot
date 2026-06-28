@@ -4,11 +4,11 @@ Branch: `npc-pathfinding/repair-06-final-cleanup-gate`
 
 Base commit: `c8e381f975a95a3848eb1c5f7eeb43605dab5cfa`
 
-Branch final commit: commit containing this report.
+Branch final commit: `5ffebd2` (`Complete NPC repair final gate coverage`).
 
-Merge commit: pending final merge to `master`.
+Merge commit: `84cbfaf` (`Merge NPC repair final gate coverage`).
 
-Status: branch gate passed; in progress until the merged-`master` all-runner gate completes.
+Status: complete. Branch and merged-`master` aggregate gates passed.
 
 ## Implementation Summary
 
@@ -157,12 +157,14 @@ Required runner IDs passed:
 
 ## Merged Master Evidence
 
-Pending command after merge:
+Command after merge:
 
 ```powershell
 .\tools\run-all-test-runners.ps1 -Seed atlas-1492 -ReportPath artifacts\test-runners\all-test-runners-r06-master.json -StopOnFailure
 ```
 
+Result: `resultCount=23`, `failureCount=0`, `stoppedEarly=false`, `durationSeconds=697.697`, exit code `0`.
+
 ## Verdict
 
-R06 code/report cleanup passed the branch all-runner gate. Final verdict remains pending until the merged-`master` aggregate gate passes.
+R06 code/report cleanup passed both the branch and merged-`master` aggregate gates.

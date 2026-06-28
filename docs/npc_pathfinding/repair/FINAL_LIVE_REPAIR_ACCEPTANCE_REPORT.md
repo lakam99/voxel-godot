@@ -1,6 +1,6 @@
 # Final Live Repair Acceptance Report
 
-Status: branch aggregate gate passed; in progress until the merged-`master` aggregate gate passes.
+Status: complete. Branch and merged-`master` aggregate gates passed.
 
 Branch: `npc-pathfinding/repair-06-final-cleanup-gate`
 
@@ -133,11 +133,13 @@ Result: `resultCount=23`, `failureCount=0`, `stoppedEarly=false`, `durationSecon
 
 ## Merged Master All-Runner Evidence
 
-Pending:
+Command:
 
 ```powershell
 .\tools\run-all-test-runners.ps1 -Seed atlas-1492 -ReportPath artifacts\test-runners\all-test-runners-r06-master.json -StopOnFailure
 ```
+
+Result: `resultCount=23`, `failureCount=0`, `stoppedEarly=false`, `durationSeconds=697.697`, exit code `0`.
 
 ## Deviations
 
@@ -146,4 +148,4 @@ Pending:
 
 ## Final Verdict
 
-Pending merged-`master` all-runner gate.
+Accepted. The live NPC repair branch was merged to `master`, and merged `master` passed the expanded aggregate gate.
