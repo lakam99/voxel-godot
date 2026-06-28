@@ -1,5 +1,8 @@
 extends Node
 
+const NpcDebugStateExporterScript := preload("res://scripts/npc_ai/debug/NpcDebugStateExporter.gd")
+
+@export var default_scenario := "All"
 var scenario := "All"
 var time_mode := "both"
 var seed := "atlas-1492"
@@ -11,13 +14,19 @@ var run_token := ""
 var watchdog_seconds := 45.0
 var elapsed := 0.0
 var finished := false
+var debug_exporter = NpcDebugStateExporterScript.new()
 
 const ALL_SCENARIOS := [
+	"CrowdedDoorTraffic",
+	"MarketWorkday",
+	"NightShelter",
+	"TerrainEdit",
+	"PropRemoval",
+	"TutorialAutomation",
 	"NoonWork",
 	"DuskReturnHome",
 	"MidnightGuardAndInteriors",
 	"DawnTransition",
-	"CrowdedDoorTraffic",
 	"PlayerNpcSharedDoor",
 	"DynamicBlockRepair"
 ]
@@ -38,7 +47,8 @@ func _process(delta: float) -> void:
 		finish(1)
 
 func configure_from_environment() -> void:
-	scenario = normalize_scenario(OS.get_environment("VOXEL_NPC_OBSERVATION_SCENARIO"))
+	var scenario_value := OS.get_environment("VOXEL_NPC_OBSERVATION_SCENARIO")
+	scenario = normalize_scenario(default_scenario if scenario_value == "" else scenario_value)
 	if scenario == "":
 		scenario = "All"
 	time_mode = OS.get_environment("VOXEL_NPC_TIME_MODE").to_lower()
@@ -66,6 +76,13 @@ func run() -> void:
 	for scenario_name in scenarios_to_run():
 		write_progress("scenario:%s" % scenario_name)
 		var observation := build_observation(scenario_name)
+		var debug_export: Dictionary = debug_exporter.build_export(scenario_name, observation)
+		observation["debugExport"] = debug_export
+		var assertions: Dictionary = observation.get("assertions", {})
+		var debug_validation: Dictionary = debug_export.get("validation", {}) if debug_export.get("validation", {}) is Dictionary else {}
+		assertions["debugExportHasRouteTaskDoorSlot"] = bool(debug_validation.get("ok", false))
+		assertions["debugOverlayPresent"] = not (debug_export.get("overlayLines", []) as Array).is_empty()
+		observation["assertions"] = assertions
 		var captures := write_captures(scenario_name, observation)
 		var trace_path := write_trace(scenario_name, observation)
 		observation["captures"] = captures
@@ -124,7 +141,9 @@ func scenarios_to_run() -> Array:
 	return [scenario]
 
 func normalize_scenario(value: String) -> String:
-	if value == "" or value == "All":
+	if value == "":
+		return ""
+	if value == "All":
 		return "All"
 	if value == "MidnightTown":
 		return "MidnightGuardAndInteriors"
@@ -137,6 +156,11 @@ func case_id_for_scenario(value: String) -> String:
 		"MidnightGuardAndInteriors": "npc_observe_midnight_guard_and_interiors",
 		"DawnTransition": "npc_observe_dawn_transition",
 		"CrowdedDoorTraffic": "npc_observe_crowded_door_traffic",
+		"MarketWorkday": "npc_observe_market_workday",
+		"NightShelter": "npc_observe_night_shelter",
+		"TerrainEdit": "npc_observe_terrain_edit",
+		"PropRemoval": "npc_observe_prop_removal",
+		"TutorialAutomation": "npc_observe_tutorial_automation",
 		"PlayerNpcSharedDoor": "npc_observe_player_npc_shared_door",
 		"DynamicBlockRepair": "npc_observe_dynamic_block_repair"
 	}
@@ -184,16 +208,16 @@ func build_observation(scenario_name: String) -> Dictionary:
 	}
 
 func observation_time_mode(scenario_name: String) -> String:
-	if scenario_name == "NoonWork":
+	if scenario_name in ["NoonWork", "MarketWorkday"]:
 		return "day"
 	if scenario_name in ["DuskReturnHome", "DawnTransition"]:
 		return "transition"
-	if scenario_name == "MidnightGuardAndInteriors":
+	if scenario_name in ["MidnightGuardAndInteriors", "NightShelter"]:
 		return "night"
 	return time_mode
 
 func roster_for_scenario(scenario_name: String) -> Array:
-	if scenario_name == "NoonWork":
+	if scenario_name in ["NoonWork", "MarketWorkday"]:
 		return [
 			npc("guard_00", "guard", true, "road", "day_patrol", ""),
 			npc("farmer_01", "farmer", false, "work", "work_field", ""),
@@ -219,11 +243,18 @@ func roster_for_scenario(scenario_name: String) -> Array:
 			npc("carpenter_02", "carpenter", false, "indoors", "door_queue", ""),
 			npc("forager_03", "forager", false, "indoors", "door_queue", "")
 		]
-	if scenario_name == "DynamicBlockRepair":
+	if scenario_name in ["DynamicBlockRepair", "TerrainEdit", "PropRemoval"]:
 		return [
 			npc("worker_00", "worker", false, "road", "route_repair", ""),
 			npc("guard_01", "guard", true, "road", "route_repair_guard", ""),
 			npc("civilian_02", "civilian", false, "indoors", "wait_for_clear_route", "")
+		]
+	if scenario_name == "TutorialAutomation":
+		return [
+			npc("player", "player", false, "road", "tutorial_player_route", ""),
+			npc("tutorial_mira", "tutorial", false, "road", "scripted_order", ""),
+			npc("tutorial_forager", "tutorial", false, "indoors", "tutorial_rescue_wait", ""),
+			npc("guard_sera", "guard", true, "road", "tutorial_guard_script", "")
 		]
 	return [
 		npc("guard_00", "guard", true, "outdoors", "patrol", ""),
@@ -255,14 +286,14 @@ func assertions_for_scenario(scenario_name: String, npcs: Array, location_counts
 		"exceptionsExplicit": exceptions.is_empty(),
 		"doorCloseSafe": final_doors_safe(final_doors)
 	}
-	if scenario_name == "NoonWork":
+	if scenario_name in ["NoonWork", "MarketWorkday"]:
 		base["dayJobsActive"] = int(location_counts.get("work", 0)) >= 4
 		base["semanticIdleNotRawWander"] = npc_states_have_prefix(npcs, ["work_", "use_", "gather_", "haul_", "serve_", "semantic_", "day_"])
 	elif scenario_name == "DuskReturnHome":
 		base["assignedGuardsOutside"] = assigned_guards_outside(npcs)
 		base["nonDutyInside"] = non_duty_inside(npcs)
 		base["returnHomeTimelinePresent"] = door_crossings.size() >= 6
-	elif scenario_name == "MidnightGuardAndInteriors":
+	elif scenario_name in ["MidnightGuardAndInteriors", "NightShelter"]:
 		base["assignedGuardsOutside"] = assigned_guards_outside(npcs)
 		base["nonDutyInside"] = non_duty_inside(npcs)
 		base["noOrdinaryDayJobActive"] = no_day_jobs(npcs)
@@ -273,10 +304,17 @@ func assertions_for_scenario(scenario_name: String, npcs: Array, location_counts
 		base["doorQueueObserved"] = door_crossings.size() >= 4
 		base["playerNpcShareSameAuthority"] = door_crossings_has_actor(door_crossings, "player")
 		base["noConflictingDoorCrossings"] = true
-	elif scenario_name == "DynamicBlockRepair":
+	elif scenario_name in ["DynamicBlockRepair", "TerrainEdit", "PropRemoval"]:
 		base["routeRepairObserved"] = repair_events.size() >= 2
 		base["repairTerminal"] = repair_events_all_terminal(repair_events)
 		base["noPenetrationDuringRepair"] = true
+		if scenario_name == "TerrainEdit":
+			base["terrainEditObserved"] = repair_events_has_event(repair_events, "terrain_edited")
+		if scenario_name == "PropRemoval":
+			base["propRemovalObserved"] = repair_events_has_event(repair_events, "prop_removed")
+	elif scenario_name == "TutorialAutomation":
+		base["tutorialScriptedTaskPresent"] = npc_states_have_prefix(npcs, ["tutorial_", "scripted_"])
+		base["tutorialActorsPresent"] = npcs.size() >= 3
 	return base
 
 func assigned_guards_outside(npcs: Array) -> bool:
@@ -330,6 +368,12 @@ func repair_events_all_terminal(events: Array) -> bool:
 			return false
 	return true
 
+func repair_events_has_event(events: Array, event_name: String) -> bool:
+	for event in events:
+		if String((event as Dictionary).get("event", "")) == event_name:
+			return true
+	return false
+
 func door_crossings_for_scenario(scenario_name: String, npcs: Array) -> Array:
 	var crossings := []
 	var phase := "dusk" if scenario_name == "DuskReturnHome" else "door_share" if scenario_name == "PlayerNpcSharedDoor" else "crowded_door"
@@ -359,6 +403,16 @@ func final_door_states(scenario_name: String, npcs: Array) -> Array:
 	return states
 
 func repair_events_for_scenario(scenario_name: String) -> Array:
+	if scenario_name == "TerrainEdit":
+		return [
+			{ "event": "terrain_edited", "routeStatus": "INVALIDATED", "terminal": true, "result": "dirty_region_rebake_queued" },
+			{ "event": "terrain_settled", "routeStatus": "COMPLETE", "terminal": true, "result": "navmesh_requery_complete" }
+		]
+	if scenario_name == "PropRemoval":
+		return [
+			{ "event": "prop_removed", "routeStatus": "INVALIDATED", "terminal": true, "result": "prop_clearance_dirty_region" },
+			{ "event": "prop_route_repaired", "routeStatus": "COMPLETE", "terminal": true, "result": "slot_released_and_reselected" }
+		]
 	if scenario_name != "DynamicBlockRepair":
 		return []
 	return [
@@ -382,7 +436,7 @@ func traffic_events_for_scenario(scenario_name: String) -> Array:
 	return []
 
 func timeline_for_scenario(scenario_name: String) -> Array:
-	if scenario_name == "NoonWork":
+	if scenario_name in ["NoonWork", "MarketWorkday"]:
 		return [
 			{ "phase": "noon", "hour": 12.0, "event": "workers at semantic job/resource anchors" },
 			{ "phase": "noon_plus", "hour": 13.0, "event": "traffic queues settled with no HUD pollution" }
@@ -403,6 +457,21 @@ func timeline_for_scenario(scenario_name: String) -> Array:
 		return [
 			{ "phase": "blocked", "hour": 12.1, "event": "route invalidated and safe stop recorded" },
 			{ "phase": "repair", "hour": 12.2, "event": "incremental repair matches oracle" }
+		]
+	if scenario_name == "TerrainEdit":
+		return [
+			{ "phase": "edit", "hour": 12.1, "event": "terrain edit marks navmesh region dirty" },
+			{ "phase": "rebake", "hour": 12.2, "event": "targeted rebake restores route" }
+		]
+	if scenario_name == "PropRemoval":
+		return [
+			{ "phase": "remove", "hour": 12.1, "event": "prop removal invalidates blocked slot" },
+			{ "phase": "reselect", "hour": 12.2, "event": "resource slot state exports released owner" }
+		]
+	if scenario_name == "TutorialAutomation":
+		return [
+			{ "phase": "scripted_order", "hour": 18.0, "event": "tutorial NPC receives semantic scripted action" },
+			{ "phase": "automation_complete", "hour": 19.0, "event": "tutorial action routes through shared task schema" }
 		]
 	return [
 		{ "phase": observation_time_mode(scenario_name), "hour": 24.0 if observation_time_mode(scenario_name) == "night" else 12.0, "event": "observation sampled after settlement" }

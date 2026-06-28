@@ -1,5 +1,7 @@
 extends "res://scripts/MainHudFlow.gd"
 
+const NpcDebugStateExporterScript := preload("res://scripts/npc_ai/debug/NpcDebugStateExporter.gd")
+
 func apply_runtime_setting(setting: String, value, sync_hud: bool = true) -> void:
     if setting == "mouseSensitivity":
         value = clampf(float(value), 0.25, 2.5)
@@ -127,8 +129,24 @@ func debug_performance_state() -> Dictionary:
         "hudMs": perf_hud_ms,
         "hudRefresh": hud_refresh_stats(),
         "chunkCache": chunk_asset_cache_stats(),
+        "npcDebug": npc_debug_overlay_state(),
         "story": story_perf
     }
+
+func npc_debug_overlay_state() -> Dictionary:
+    if npc_system == null or not npc_system.has_method("stats"):
+        return {}
+    var npc_stats: Dictionary = npc_system.stats()
+    var autonomy_stats: Dictionary = {}
+    var autonomy = npc_system.get("autonomy_system")
+    if autonomy != null and autonomy.has_method("stats"):
+        autonomy_stats = autonomy.stats()
+    var npc_entries := []
+    var entries_value = npc_system.get("npcs")
+    if entries_value is Array:
+        npc_entries = entries_value
+    var exporter = NpcDebugStateExporterScript.new()
+    return exporter.build_runtime_export(npc_stats, autonomy_stats, npc_entries)
 
 func count_nodes_with_meta(node: Node, key: String, expected: String = "") -> int:
     if node == null:

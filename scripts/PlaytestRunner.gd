@@ -2398,6 +2398,16 @@ func test_settings_playtest_debug() -> void:
     main.call("update_performance_overlay", 1.0)
     var performance_state: Dictionary = main.call("debug_performance_state")
     var performance_text: String = hud.performance_label.text
+    var npc_debug: Dictionary = performance_state.get("npcDebug", {}) if performance_state.get("npcDebug", {}) is Dictionary else {}
+    var npc_debug_validation: Dictionary = npc_debug.get("validation", {}) if npc_debug.get("validation", {}) is Dictionary else {}
+    var npc_debug_overlay_ok: bool = (
+        performance_text.find("NPC Debug") >= 0
+        and npc_debug.has("routeState")
+        and npc_debug.has("taskState")
+        and npc_debug.has("doorState")
+        and npc_debug.has("slotState")
+        and bool(npc_debug_validation.get("ok", false))
+    )
     var performance_visible: bool = (
         hud.performance_label.visible
         and performance_text.find("FPS") >= 0
@@ -2407,6 +2417,7 @@ func test_settings_playtest_debug() -> void:
         and performance_state.has("hostilesMs")
         and performance_state.has("hudRefresh")
         and performance_state.has("chunkCache")
+        and npc_debug_overlay_ok
     )
     var town_target: Dictionary = main.call("playtest_case_target", "town")
     var forest_target: Dictionary = main.call("playtest_case_target", "forest")
@@ -2427,12 +2438,13 @@ func test_settings_playtest_debug() -> void:
     add_result(
         "performance_playtest_debug_hud",
         settings_blocks_mouse and playtest_blocks_mouse and playtest_case_buttons and performance_visible and targets_available,
-        "blocks mouse %s/%s, playtest buttons %s, route %s, perf %s, targets %s/%s, frame %.2f, hostiles %.2f, hud refresh keys %d" % [
+        "blocks mouse %s/%s, playtest buttons %s, route %s, perf %s, npc debug %s, targets %s/%s, frame %.2f, hostiles %.2f, hud refresh keys %d" % [
             str(settings_blocks_mouse),
             str(playtest_blocks_mouse),
             str(playtest_case_buttons),
             str(route_overlay_ok),
             str(performance_visible),
+            str(npc_debug_overlay_ok),
             str(not town_target.is_empty()),
             str(not forest_target.is_empty()),
             float(performance_state.get("frameMs", 0.0)),

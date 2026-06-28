@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("All", "NoonWork", "DuskReturnHome", "MidnightTown", "MidnightGuardAndInteriors", "DawnTransition", "CrowdedDoorTraffic", "PlayerNpcSharedDoor", "DynamicBlockRepair")]
+    [ValidateSet("All", "NoonWork", "DuskReturnHome", "MidnightTown", "MidnightGuardAndInteriors", "DawnTransition", "CrowdedDoorTraffic", "MarketWorkday", "NightShelter", "TerrainEdit", "PropRemoval", "TutorialAutomation", "PlayerNpcSharedDoor", "DynamicBlockRepair")]
     [string]$Scenario = "All",
     [ValidateSet("Day", "Night", "Both", "Transition", "day", "night", "both", "transition")]
     [string]$TimeMode = "Transition",
