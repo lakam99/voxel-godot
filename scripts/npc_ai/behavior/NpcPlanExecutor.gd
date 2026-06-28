@@ -340,6 +340,20 @@ func _execute_scripted(entry: Dictionary, body: Node3D, delta: float) -> void:
 		_mark_scripted_order(entry, "FAILED_TARGET_GONE", "missing_scripted_target")
 
 func _execute_home(entry: Dictionary, body: Node3D, perception: Dictionary, delta: float) -> void:
+	if npc_system.has_method("settle_home_if_reached"):
+		npc_system.call("settle_home_if_reached", entry)
+	if bool(entry.get("insideHome", false)):
+		entry["homeReturnTime"] = 0.0
+		entry["lastMoveDistance"] = 0.0
+		entry["routeStatus"] = "arrived"
+		entry["routeReason"] = ""
+		entry["pathWaypoints"] = []
+		entry["routeCells"] = []
+		body.set_meta("npc_route_status", "arrived")
+		body.set_meta("npc_route_reason", "")
+		if _scripted_order_kind(body) == "go_home":
+			_mark_scripted_order(entry, "ARRIVED", "home_interior_reached")
+		return
 	entry["homeReturnTime"] = float(entry.get("homeReturnTime", 0.0)) + delta
 	entry["routePriority"] = 140
 	var target: Vector3 = npc_system.call("home_route_target", entry) if npc_system.has_method("home_route_target") else entry.get("homePosition", body.global_position)
