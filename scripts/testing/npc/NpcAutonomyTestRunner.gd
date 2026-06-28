@@ -361,8 +361,14 @@ func nav_world_cases() -> Array[Dictionary]:
 		["npc_navmesh_backend_explicit_navmesh", "test_navmesh_backend_explicit_navmesh"],
 		["npc_navmesh_descriptor_deterministic_signature", "test_navmesh_descriptor_deterministic_signature"],
 		["npc_navmesh_tile_snapshot_descriptor_deterministic", "test_navmesh_tile_snapshot_descriptor_deterministic"],
+		["npc_navmesh_descriptor_keeps_door_links", "test_navmesh_descriptor_keeps_door_links"],
 		["npc_navmesh_service_installs_navigation_region", "test_navmesh_service_installs_navigation_region"],
 		["npc_navmesh_chunk_unload_cleans_region", "test_navmesh_chunk_unload_cleans_region"],
+		["npc_navmesh_door_portal_installs_nav_link", "test_navmesh_door_portal_installs_nav_link"],
+		["npc_navmesh_route_through_door_link_emits_action", "test_navmesh_route_through_door_link_emits_action"],
+		["npc_navmesh_door_state_toggles_nav_link", "test_navmesh_door_state_toggles_nav_link"],
+		["npc_navmesh_dirty_region_rebuild_after_world_edit", "test_navmesh_dirty_region_rebuild_after_world_edit"],
+		["npc_navmesh_chunk_unload_cleans_door_links", "test_navmesh_chunk_unload_cleans_door_links"],
 		["npc_navmesh_semantic_interior_descriptor_registered", "test_navmesh_semantic_interior_descriptor_registered"],
 		["npc_navmesh_autonomy_semantic_backend_registers", "test_navmesh_autonomy_semantic_backend_registers"],
 		["npc_navmesh_service_register_unregister_descriptor", "test_navmesh_service_register_unregister_descriptor"],
@@ -1513,19 +1519,38 @@ func test_navmesh_descriptor_deterministic_signature(_mode: String) -> Dictionar
 	return outcome(passed, "signature=%s" % first.stable_signature(), ["navmesh_descriptor_signature_sorts_ids", "navmesh_descriptor_signature_sorts_metadata"], { "signature": first.stable_signature(), "summary": first.to_summary() })
 
 func test_navmesh_tile_snapshot_descriptor_deterministic(_mode: String) -> Dictionary:
+	var from_key := "surface:2,-1:32,0,-16:0"
+	var to_key := "surface:2,-1:33,0,-16:1"
 	var snapshot := nav_snapshot("2,-1", [
 		nav_surface(Vector3i(32, 0, -16), { "semanticRegionIds": ["road:main"] }),
 		nav_surface(Vector3i(33, 0, -16), { "semanticRegionIds": ["road:main"] }),
 		nav_surface(Vector3i(34, 0, -16), { "blocked": true, "blockerKind": "wall" })
 	], {
 		"semanticRegions": [{ "id": "road:main", "kind": "road", "position": Vector3(43.875, 0.0, -21.6) }],
-		"doorPortals": [{ "id": "door:test", "entrance": Vector3(43.2, 0.0, -21.6), "exit": Vector3(44.55, 0.0, -21.6) }]
+		"doorPortals": [{ "id": "door:test", "entrance": Vector3(43.2, 0.0, -21.6), "exit": Vector3(44.55, 0.0, -21.6) }],
+		"doorLinks": [{ "from": from_key, "to": to_key, "portalId": "door:test", "cost": 1.25 }]
 	})
 	var first = NavigationBakeDescriptorScript.from_tile_snapshot(snapshot)
 	var second = NavigationBakeDescriptorScript.from_tile_snapshot(snapshot)
 	var summary: Dictionary = first.to_summary()
-	var passed: bool = first.stable_signature() == second.stable_signature() and String(first.get("region_id")) == "region:chunk:2,-1" and summary.get("walkableSurfaces", []).size() == 2 and summary.get("blockers", []).size() == 1 and summary.get("doorPortals", []).size() == 1
-	return outcome(passed, "signature=%s summary=%s" % [first.stable_signature(), JSON.stringify(summary)], ["tile_snapshot_descriptor_deterministic", "tile_snapshot_keeps_blockers", "tile_snapshot_keeps_door_portals"], { "summary": summary })
+	var passed: bool = first.stable_signature() == second.stable_signature() and String(first.get("region_id")) == "region:chunk:2,-1" and summary.get("walkableSurfaces", []).size() == 2 and summary.get("blockers", []).size() == 1 and summary.get("doorPortals", []).size() == 1 and summary.get("doorLinks", []).size() == 1
+	return outcome(passed, "signature=%s summary=%s" % [first.stable_signature(), JSON.stringify(summary)], ["tile_snapshot_descriptor_deterministic", "tile_snapshot_keeps_blockers", "tile_snapshot_keeps_door_portals", "tile_snapshot_keeps_door_links"], { "summary": summary })
+
+func test_navmesh_descriptor_keeps_door_links(_mode: String) -> Dictionary:
+	var first = NavigationBakeDescriptorScript.create("region:chunk:links", "links", AABB(Vector3.ZERO, Vector3(6, 2, 6)))
+	first.add_walkable_surface("surface:left", Vector3(0.0, 0.0, 0.0))
+	first.add_walkable_surface("surface:right", Vector3(0.0, 0.0, 2.7))
+	first.add_door_portal("door:links", Vector3(0.0, 0.0, 0.65), Vector3(0.0, 0.0, 2.05), { "state": "closed", "openable": true })
+	first.add_door_link("surface:left", "surface:right", "door:links", { "cost": 2.0, "actionId": "open" })
+	var second = NavigationBakeDescriptorScript.create("region:chunk:links", "links", AABB(Vector3.ZERO, Vector3(6, 2, 6)))
+	second.add_door_link("surface:left", "surface:right", "door:links", { "actionId": "open", "cost": 2.0 })
+	second.add_door_portal("door:links", Vector3(0.0, 0.0, 0.65), Vector3(0.0, 0.0, 2.05), { "openable": true, "state": "closed" })
+	second.add_walkable_surface("surface:right", Vector3(0.0, 0.0, 2.7))
+	second.add_walkable_surface("surface:left", Vector3(0.0, 0.0, 0.0))
+	var summary: Dictionary = first.to_summary()
+	var link: Dictionary = summary.get("doorLinks", [])[0] if summary.get("doorLinks", []).size() > 0 else {}
+	var passed: bool = first.stable_signature() == second.stable_signature() and summary.get("doorLinks", []).size() == 1 and String(link.get("portalId", "")) == "door:links" and String(link.get("actionId", "")) == "open"
+	return outcome(passed, "summary=%s" % JSON.stringify(summary), ["navmesh_descriptor_keeps_door_links", "door_link_signature_deterministic"], { "summary": summary })
 
 func test_navmesh_service_installs_navigation_region(_mode: String) -> Dictionary:
 	var service = NavmeshWorldServiceScript.new()
@@ -1552,6 +1577,82 @@ func test_navmesh_chunk_unload_cleans_region(_mode: String) -> Dictionary:
 	service.clear()
 	var passed: bool = int(after_register.get("installedRegionCount", 0)) == 1 and int(after_unload.get("installedRegionCount", -1)) == 0 and int(after_unload.get("regionCount", -1)) == 0 and not responses.is_empty() and String((responses[0] as Dictionary).get("status", "")) == "unregistered"
 	return outcome(passed, "afterRegister=%s afterUnload=%s responses=%s" % [JSON.stringify(after_register), JSON.stringify(after_unload), JSON.stringify(responses)], ["chunk_unload_unregisters_navmesh_region", "chunk_unload_releases_region_rid"], { "afterRegister": after_register, "afterUnload": after_unload, "responses": responses })
+
+func test_navmesh_door_portal_installs_nav_link(_mode: String) -> Dictionary:
+	var service = NavmeshWorldServiceScript.new()
+	service.setup(NavigationBackendConfigScript.from_value("navmesh", "test"))
+	var descriptor = navmesh_door_descriptor("region:chunk:door-link", "door-link", "door:phase3")
+	var registered: Dictionary = service.register_chunk_descriptor(descriptor)
+	var stats: Dictionary = service.stats()
+	var snapshot: Dictionary = service.debug_snapshot()
+	service.clear()
+	var links: Array = (snapshot.get("doorLinks", {}) as Dictionary).get("door:phase3", [])
+	var link: Dictionary = links[0] if not links.is_empty() and links[0] is Dictionary else {}
+	var passed: bool = String(registered.get("status", "")) == "installed" and int(stats.get("installedDoorLinkCount", 0)) == 1 and not links.is_empty() and bool(link.get("enabled", false)) and String(link.get("state", "")) == "closed"
+	return outcome(passed, "registered=%s stats=%s links=%s" % [JSON.stringify(registered), JSON.stringify(stats), JSON.stringify(links)], ["door_portal_installs_nav_link_rid", "closed_openable_door_link_enabled"], { "registered": registered, "stats": stats, "links": links })
+
+func test_navmesh_route_through_door_link_emits_action(_mode: String) -> Dictionary:
+	var service = NavmeshWorldServiceScript.new()
+	service.setup(NavigationBackendConfigScript.from_value("navmesh", "test"))
+	service.register_chunk_descriptor(navmesh_door_descriptor("region:chunk:door-route", "door-route", "door:route"))
+	var route: Dictionary = service.query_route(Vector3(0.0, 0.0, 0.0), Vector3(0.0, 0.0, 2.7), { "maxSnapDistance": 4.0 })
+	var actions: Dictionary = route.get("actions", {})
+	var door_action := {}
+	for action_value in actions.values():
+		if action_value is Dictionary and String((action_value as Dictionary).get("portalId", "")) == "door:route":
+			door_action = action_value
+			break
+	var stats: Dictionary = service.stats()
+	service.clear()
+	var passed: bool = bool(route.get("ok", false)) and not door_action.is_empty() and String(door_action.get("kind", "")) == "door" and bool(door_action.get("requiresSmartObject", false)) and bool(door_action.get("navLink", false)) and int(stats.get("pathQueryFailureCount", 0)) == 0
+	return outcome(passed, "route=%s action=%s stats=%s" % [JSON.stringify(route), JSON.stringify(door_action), JSON.stringify(stats)], ["navmesh_query_uses_door_link", "door_link_route_emits_smart_object_action"], { "route": route, "action": door_action, "stats": stats })
+
+func test_navmesh_door_state_toggles_nav_link(_mode: String) -> Dictionary:
+	var service = NavmeshWorldServiceScript.new()
+	service.setup(NavigationBackendConfigScript.from_value("navmesh", "test"))
+	service.register_chunk_descriptor(navmesh_door_descriptor("region:chunk:door-toggle", "door-toggle", "door:toggle"))
+	var closed: Dictionary = service.set_door_portal_state("door:toggle", "closed", { "openable": true, "locked": false })
+	var closed_snapshot: Dictionary = service.debug_snapshot()
+	var locked: Dictionary = service.set_door_portal_state("door:toggle", "locked", { "locked": true })
+	var locked_snapshot: Dictionary = service.debug_snapshot()
+	var reopened: Dictionary = service.set_door_portal_state("door:toggle", "open", { "locked": false, "jammed": false, "destroyed": false, "unloaded": false })
+	var reopened_snapshot: Dictionary = service.debug_snapshot()
+	var stats: Dictionary = service.stats()
+	service.clear()
+	var closed_link: Dictionary = _first_portal_debug_link(closed_snapshot, "door:toggle")
+	var locked_link: Dictionary = _first_portal_debug_link(locked_snapshot, "door:toggle")
+	var reopened_link: Dictionary = _first_portal_debug_link(reopened_snapshot, "door:toggle")
+	var passed: bool = bool(closed_link.get("enabled", false)) and not bool(locked_link.get("enabled", true)) and bool(reopened_link.get("enabled", false)) and int(closed.get("updatedLinks", 0)) == 1 and int(locked.get("updatedLinks", 0)) == 1 and int(reopened.get("updatedLinks", 0)) == 1 and int(stats.get("doorLinkStateRevision", 0)) >= 3
+	return outcome(passed, "closed=%s locked=%s reopened=%s stats=%s" % [JSON.stringify(closed_link), JSON.stringify(locked_link), JSON.stringify(reopened_link), JSON.stringify(stats)], ["closed_openable_link_remains_enabled", "locked_door_disables_nav_link", "reopened_door_enables_nav_link"], { "closed": closed, "locked": locked, "reopened": reopened, "stats": stats })
+
+func test_navmesh_dirty_region_rebuild_after_world_edit(_mode: String) -> Dictionary:
+	var service = NavmeshWorldServiceScript.new()
+	service.setup(NavigationBackendConfigScript.from_value("navmesh", "test"))
+	service.register_tile_snapshot(nav_snapshot("6,6", [
+		nav_surface(Vector3i(96, 0, 96)),
+		nav_surface(Vector3i(97, 0, 96))
+	]))
+	var responses: Array = service.apply_navigation_events([{ "tileKey": "6,6", "changeKinds": ["block_removed"], "revision": 7 }])
+	var dirty_stats: Dictionary = service.stats()
+	var dirty_snapshot: Dictionary = service.debug_snapshot()
+	var rebuilt: Array = service.process_dirty_regions(1, 100000)
+	var rebuilt_stats: Dictionary = service.stats()
+	service.clear()
+	var dirty_state := String((dirty_snapshot.get("regionStates", {}) as Dictionary).get("region:chunk:6,6", ""))
+	var passed: bool = not responses.is_empty() and String((responses[0] as Dictionary).get("status", "")) == "dirty" and dirty_state == "dirty" and int(dirty_stats.get("dirtyRegionCount", 0)) == 1 and not rebuilt.is_empty() and String((rebuilt[0] as Dictionary).get("status", "")) == "rebuilt" and int(rebuilt_stats.get("dirtyRegionCount", -1)) == 0 and int(rebuilt_stats.get("rebuildCount", 0)) == 1 and int(rebuilt_stats.get("installedRegionCount", 0)) == 1
+	return outcome(passed, "responses=%s dirty=%s rebuilt=%s stats=%s" % [JSON.stringify(responses), JSON.stringify(dirty_stats), JSON.stringify(rebuilt), JSON.stringify(rebuilt_stats)], ["world_edit_marks_navmesh_region_dirty", "dirty_region_rebuild_clears_queue"], { "responses": responses, "dirtyStats": dirty_stats, "rebuilt": rebuilt, "rebuiltStats": rebuilt_stats })
+
+func test_navmesh_chunk_unload_cleans_door_links(_mode: String) -> Dictionary:
+	var service = NavmeshWorldServiceScript.new()
+	service.setup(NavigationBackendConfigScript.from_value("navmesh", "test"))
+	service.register_chunk_descriptor(navmesh_door_descriptor("region:chunk:8,8", "8,8", "door:unload"))
+	var after_register: Dictionary = service.stats()
+	var responses: Array = service.apply_navigation_events([{ "tileKey": "8,8", "changeKinds": ["chunk_unloaded"], "revision": 8 }])
+	var after_unload: Dictionary = service.stats()
+	var snapshot: Dictionary = service.debug_snapshot()
+	service.clear()
+	var passed: bool = int(after_register.get("installedDoorLinkCount", 0)) == 1 and int(after_unload.get("installedDoorLinkCount", -1)) == 0 and int(after_unload.get("installedRegionCount", -1)) == 0 and (snapshot.get("doorLinks", {}) as Dictionary).is_empty() and not responses.is_empty() and String((responses[0] as Dictionary).get("status", "")) == "unregistered"
+	return outcome(passed, "afterRegister=%s afterUnload=%s responses=%s" % [JSON.stringify(after_register), JSON.stringify(after_unload), JSON.stringify(responses)], ["chunk_unload_releases_door_link_rids", "chunk_unload_clears_door_link_debug_state"], { "afterRegister": after_register, "afterUnload": after_unload, "responses": responses, "snapshot": snapshot })
 
 func test_navmesh_semantic_interior_descriptor_registered(_mode: String) -> Dictionary:
 	var service = NavmeshWorldServiceScript.new()
@@ -1671,6 +1772,21 @@ func navmesh_descriptor(region_id: String, tile_key: String):
 	descriptor.add_semantic_anchor("anchor:guard", "guard_post", Vector3(1.0, 0.0, 1.0))
 	descriptor.add_door_portal("door:home", Vector3(0.5, 0.0, 0.0), Vector3(0.5, 0.0, 1.0))
 	return descriptor
+
+func navmesh_door_descriptor(region_id: String, tile_key: String, portal_id: String):
+	var descriptor = NavigationBakeDescriptorScript.create(region_id, tile_key, AABB(Vector3(-1.5, -0.1, -1.5), Vector3(3.0, 1.2, 5.7)))
+	descriptor.add_walkable_surface("surface:%s:left" % tile_key, Vector3(0.0, 0.0, 0.0), Vector3(1.35, 0.05, 1.35))
+	descriptor.add_walkable_surface("surface:%s:right" % tile_key, Vector3(0.0, 0.0, 2.7), Vector3(1.35, 0.05, 1.35))
+	descriptor.add_door_portal(portal_id, Vector3(0.0, 0.0, 0.65), Vector3(0.0, 0.0, 2.05), { "state": "closed", "openable": true })
+	descriptor.add_door_link("surface:%s:left" % tile_key, "surface:%s:right" % tile_key, portal_id, { "cost": 1.0, "actionId": "open" })
+	return descriptor
+
+func _first_portal_debug_link(snapshot: Dictionary, portal_id: String) -> Dictionary:
+	var links_by_portal: Dictionary = snapshot.get("doorLinks", {})
+	var links: Array = links_by_portal.get(portal_id, [])
+	if links.is_empty() or not (links[0] is Dictionary):
+		return {}
+	return links[0]
 
 func motor_body(node_name: String) -> CharacterBody3D:
 	var body := CharacterBody3D.new()

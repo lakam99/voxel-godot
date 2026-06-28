@@ -3,6 +3,10 @@ class_name NavmeshWorldService
 
 const NavigationBackendConfigScript := preload("res://scripts/npc_ai/navigation/NavigationBackendConfig.gd")
 const NavigationBakeDescriptorScript := preload("res://scripts/npc_ai/contracts/NavigationBakeDescriptor.gd")
+const NpcConstantsScript := preload("res://scripts/npc_ai/NpcConstants.gd")
+const NpcEnumsScript := preload("res://scripts/npc_ai/NpcEnums.gd")
+
+const CELL := NpcConstantsScript.CELL_SIZE
 
 var backend_config = NavigationBackendConfigScript.default_config()
 var navigation_map := RID()
@@ -24,6 +28,16 @@ var path_query_failure_count := 0
 var last_path_query_usec := 0
 var total_path_query_usec := 0
 var max_path_query_usec := 0
+var dirty_regions_by_region := {}
+var dirty_region_queue: Array[String] = []
+var rebuild_count := 0
+var last_rebuild_usec := 0
+var door_link_records_by_region := {}
+var door_link_records_by_portal := {}
+var door_portal_states := {}
+var installed_door_link_count := 0
+var door_link_state_revision := 0
+var door_link_install_failure_count := 0
 
 func setup(config = null) -> void:
 	backend_config = config if config != null else NavigationBackendConfigScript.from_environment()
@@ -36,6 +50,11 @@ func clear() -> void:
 	descriptors_by_region.clear()
 	region_states.clear()
 	region_metrics_by_region.clear()
+	dirty_regions_by_region.clear()
+	dirty_region_queue.clear()
+	door_link_records_by_region.clear()
+	door_link_records_by_portal.clear()
+	door_portal_states.clear()
 	topology_revision = 0
 	dynamic_revision = 0
 	registered_region_count = 0
@@ -43,11 +62,16 @@ func clear() -> void:
 	installed_region_count = 0
 	installed_surface_count = 0
 	last_install_usec = 0
+	rebuild_count = 0
+	last_rebuild_usec = 0
 	path_query_count = 0
 	path_query_failure_count = 0
 	last_path_query_usec = 0
 	total_path_query_usec = 0
 	max_path_query_usec = 0
+	installed_door_link_count = 0
+	door_link_state_revision = 0
+	door_link_install_failure_count = 0
 	if owns_navigation_map and navigation_map.is_valid():
 		NavigationServer3D.free_rid(navigation_map)
 	navigation_map = RID()
@@ -63,6 +87,7 @@ func register_chunk_descriptor(descriptor) -> Dictionary:
 	if region_rids_by_region.has(region_id):
 		_release_region(region_id)
 	descriptors_by_region[region_id] = descriptor
+	_clear_dirty_region(region_id)
 	var loaded := bool(descriptor.get("loaded"))
 	var install_result := _install_region(region_id, descriptor) if loaded else { "status": "unloaded", "regionId": region_id }
 	region_states[region_id] = "installed" if String(install_result.get("status", "")) == "installed" else String(install_result.get("status", "unloaded"))
@@ -80,11 +105,14 @@ func register_chunk_descriptor(descriptor) -> Dictionary:
 
 func unregister_chunk(region_id: String) -> Dictionary:
 	if not descriptors_by_region.has(region_id):
+		_release_region(region_id)
+		_clear_dirty_region(region_id)
 		return { "status": "missing", "regionId": region_id, "topologyRevision": topology_revision }
 	_release_region(region_id)
 	descriptors_by_region.erase(region_id)
 	region_states[region_id] = "unregistered"
 	region_metrics_by_region.erase(region_id)
+	_clear_dirty_region(region_id)
 	topology_revision += 1
 	unregistered_region_count += 1
 	return { "status": "unregistered", "regionId": region_id, "topologyRevision": topology_revision }
@@ -107,17 +135,89 @@ func apply_navigation_events(events: Array) -> Array[Dictionary]:
 		var event: Dictionary = event_value
 		var tile_key := String(event.get("tileKey", ""))
 		var kinds: Array = event.get("changeKinds", [])
-		if kinds.has("chunk_unloaded") and tile_key != "":
-			results.append(unregister_chunk(NavigationBakeDescriptorScript.chunk_region_id(tile_key)))
-		elif kinds.has("chunk_loaded") and tile_key != "":
-			region_states[NavigationBakeDescriptorScript.chunk_region_id(tile_key)] = "dirty"
-			topology_revision += 1
-			results.append({ "status": "dirty", "regionId": NavigationBakeDescriptorScript.chunk_region_id(tile_key), "topologyRevision": topology_revision })
-		elif tile_key != "" and _event_needs_rebuild(kinds):
-			region_states[NavigationBakeDescriptorScript.chunk_region_id(tile_key)] = "dirty"
+		if tile_key == "":
+			continue
+		var region_id := NavigationBakeDescriptorScript.chunk_region_id(tile_key)
+		if _has_kind(kinds, NpcEnumsScript.CHANGE_KIND_CHUNK_UNLOADED):
+			results.append(unregister_chunk(region_id))
+		elif _has_kind(kinds, NpcEnumsScript.CHANGE_KIND_DOOR_STATE):
 			dynamic_revision += 1
-			results.append({ "status": "dirty", "regionId": NavigationBakeDescriptorScript.chunk_region_id(tile_key), "dynamicRevision": dynamic_revision })
+			results.append({ "status": "dynamic", "regionId": region_id, "dynamicRevision": dynamic_revision })
+		elif _event_needs_rebuild(kinds):
+			topology_revision += 1
+			results.append(_mark_dirty_region(region_id, event, "navigation_event"))
 	return results
+
+func process_dirty_regions(max_jobs := 1, max_usec := 4000) -> Array[Dictionary]:
+	var started := Time.get_ticks_usec()
+	var results: Array[Dictionary] = []
+	var jobs := maxi(0, max_jobs)
+	for region_id_value in dirty_region_queue.duplicate():
+		if jobs > 0 and results.size() >= jobs:
+			break
+		if max_usec > 0 and Time.get_ticks_usec() - started >= max_usec:
+			break
+		var region_id := String(region_id_value)
+		dirty_region_queue.erase(region_id)
+		var dirty_record: Dictionary = dirty_regions_by_region.get(region_id, {})
+		if not descriptors_by_region.has(region_id):
+			dirty_regions_by_region.erase(region_id)
+			region_states[region_id] = "missing"
+			results.append({ "status": "missing", "regionId": region_id, "dirty": dirty_record })
+			continue
+		var descriptor = descriptors_by_region[region_id]
+		if descriptor == null:
+			dirty_regions_by_region.erase(region_id)
+			region_states[region_id] = "missing"
+			results.append({ "status": "missing_descriptor", "regionId": region_id, "dirty": dirty_record })
+			continue
+		_release_region(region_id)
+		var install_result := _install_region(region_id, descriptor) if bool(descriptor.get("loaded")) else { "status": "unloaded", "regionId": region_id }
+		region_states[region_id] = "installed" if String(install_result.get("status", "")) == "installed" else String(install_result.get("status", "unloaded"))
+		dirty_regions_by_region.erase(region_id)
+		rebuild_count += 1
+		last_rebuild_usec = Time.get_ticks_usec() - started
+		results.append({
+			"status": "rebuilt" if String(install_result.get("status", "")) == "installed" else String(install_result.get("status", "unloaded")),
+			"regionId": region_id,
+			"install": install_result,
+			"dirty": dirty_record,
+			"topologyRevision": topology_revision,
+			"rebuildCount": rebuild_count
+		})
+	return results
+
+func set_door_portal_state(portal_or_id, state_value := "", metadata := {}) -> Dictionary:
+	var portal_state := {}
+	if portal_or_id is Dictionary:
+		portal_state = (portal_or_id as Dictionary).duplicate(true)
+	else:
+		portal_state = metadata.duplicate(true) if metadata is Dictionary else {}
+		portal_state["portalId"] = String(portal_or_id)
+	if String(state_value) != "":
+		portal_state["state"] = String(state_value)
+	elif portal_state.has("open"):
+		portal_state["state"] = String(NpcEnumsScript.DOOR_STATE_OPEN if bool(portal_state.get("open", false)) else NpcEnumsScript.DOOR_STATE_CLOSED)
+	var portal_id := String(portal_state.get("portalId", portal_state.get("id", "")))
+	if portal_id == "":
+		return { "status": "rejected", "reason": "missing_portal_id" }
+	portal_state["portalId"] = portal_id
+	door_portal_states[portal_id] = portal_state
+	var updated := 0
+	for record in door_link_records_by_portal.get(portal_id, []):
+		if not (record is Dictionary):
+			continue
+		_apply_portal_state_to_link_record(record, portal_state)
+		updated += 1
+	door_link_state_revision += 1
+	dynamic_revision += 1
+	return {
+		"status": "updated" if updated > 0 else "recorded",
+		"portalId": portal_id,
+		"updatedLinks": updated,
+		"doorLinkStateRevision": door_link_state_revision,
+		"dynamicRevision": dynamic_revision
+	}
 
 func closest_walkable(position: Vector3, max_distance := INF) -> Dictionary:
 	var server_result := _closest_walkable_from_server(position, max_distance)
@@ -147,6 +247,7 @@ func query_route(start: Vector3, target: Vector3, options := {}) -> Dictionary:
 			"startWalkable": start_walkable,
 			"targetWalkable": target_walkable
 		}))
+	var door_actions := _door_actions_for_path(path)
 	return _finish_route_query(started, {
 		"ok": true,
 		"status": "complete",
@@ -158,6 +259,8 @@ func query_route(start: Vector3, target: Vector3, options := {}) -> Dictionary:
 		"startPosition": query_start,
 		"targetPosition": query_target,
 		"path": path,
+		"actions": door_actions,
+		"doorLinks": _door_links_for_actions(door_actions),
 		"distance": _path_distance(path),
 		"pointCount": path.size(),
 		"snapshotRevision": revision(),
@@ -182,8 +285,12 @@ func debug_snapshot() -> Dictionary:
 		"dynamicRevision": dynamic_revision,
 		"regions": regions,
 		"regionStates": region_states.duplicate(true),
+		"dirtyRegions": _dirty_regions_summary(),
+		"doorLinks": _door_links_debug_summary(),
+		"doorPortalStates": _door_portal_states_summary(),
 		"installedRegionCount": region_rids_by_region.size(),
-		"installedSurfaceCount": installed_surface_count
+		"installedSurfaceCount": installed_surface_count,
+		"installedDoorLinkCount": installed_door_link_count
 	}
 
 func stats() -> Dictionary:
@@ -194,11 +301,19 @@ func stats() -> Dictionary:
 		"regionCount": descriptors_by_region.size(),
 		"installedRegionCount": region_rids_by_region.size(),
 		"installedSurfaceCount": installed_surface_count,
+		"installedDoorLinkCount": installed_door_link_count,
 		"topologyRevision": topology_revision,
 		"dynamicRevision": dynamic_revision,
+		"doorLinkStateRevision": door_link_state_revision,
 		"registeredRegionCount": registered_region_count,
 		"unregisteredRegionCount": unregistered_region_count,
 		"lastInstallUsec": last_install_usec,
+		"dirtyRegionCount": dirty_regions_by_region.size(),
+		"dirtyRegionQueueCount": dirty_region_queue.size(),
+		"rebuildCount": rebuild_count,
+		"lastRebuildUsec": last_rebuild_usec,
+		"doorLinkInstallFailureCount": door_link_install_failure_count,
+		"linkApiSupported": _link_api_supported(),
 		"pathQueryCount": path_query_count,
 		"pathQueryFailureCount": path_query_failure_count,
 		"lastPathQueryUsec": last_path_query_usec,
@@ -271,6 +386,7 @@ func _install_region(region_id: String, descriptor) -> Dictionary:
 		NavigationServer3D.call("map_force_update", navigation_map)
 	region_rids_by_region[region_id] = region_rid
 	region_ids_by_rid[region_rid] = region_id
+	var link_metrics := _install_door_links_for_region(region_id, descriptor)
 	last_install_usec = Time.get_ticks_usec() - started
 	installed_region_count += 1
 	installed_surface_count += polygon_count
@@ -278,7 +394,8 @@ func _install_region(region_id: String, descriptor) -> Dictionary:
 		"status": "installed",
 		"polygonCount": polygon_count,
 		"vertexCount": vertex_count,
-		"durationUsec": last_install_usec
+		"durationUsec": last_install_usec,
+		"doorLinks": link_metrics
 	}
 	region_metrics_by_region[region_id] = metrics
 	return metrics.duplicate(true)
@@ -330,6 +447,7 @@ func _surface_polygon(surface: Dictionary) -> Array[Vector3]:
 	]
 
 func _release_region(region_id: String) -> void:
+	_release_door_links_for_region(region_id)
 	if not region_rids_by_region.has(region_id):
 		return
 	var region_rid: RID = region_rids_by_region[region_id]
@@ -454,9 +572,364 @@ func _route_query_failure(status: String, reason: String, start: Vector3, target
 		"details": details
 	}
 
+func _install_door_links_for_region(region_id: String, descriptor) -> Dictionary:
+	var door_portals: Array = _descriptor_array(descriptor, "door_portals")
+	var door_links: Array = _descriptor_array(descriptor, "door_links")
+	if not _link_api_supported():
+		if not door_portals.is_empty() or not door_links.is_empty():
+			door_link_install_failure_count += 1
+		return { "status": "unsupported", "installed": 0 }
+	var portal_by_id := {}
+	for portal_value in door_portals:
+		if not (portal_value is Dictionary):
+			continue
+		var portal: Dictionary = portal_value
+		var portal_id := String(portal.get("id", portal.get("portalId", "")))
+		if portal_id != "":
+			portal_by_id[portal_id] = portal
+	var link_specs: Array = []
+	for link_value in door_links:
+		if link_value is Dictionary:
+			link_specs.append((link_value as Dictionary).duplicate(true))
+	if link_specs.is_empty():
+		var portal_ids := portal_by_id.keys()
+		portal_ids.sort()
+		for portal_id_value in portal_ids:
+			var portal_id := String(portal_id_value)
+			link_specs.append({
+				"id": "door-link:%s" % portal_id,
+				"portalId": portal_id,
+				"actionId": "open",
+				"bidirectional": true,
+				"openable": true,
+				"enabled": true
+			})
+	link_specs.sort_custom(func(a, b): return String(a.get("id", a.get("portalId", ""))) < String(b.get("id", b.get("portalId", ""))))
+	var installed := 0
+	var failures := 0
+	for link_spec_value in link_specs:
+		if not (link_spec_value is Dictionary):
+			continue
+		var link_spec: Dictionary = link_spec_value
+		var portal_id := String(link_spec.get("portalId", link_spec.get("portal_id", "")))
+		if portal_id == "":
+			failures += 1
+			continue
+		var portal: Dictionary = portal_by_id.get(portal_id, {})
+		var base_metadata := _merged_link_metadata(portal, link_spec, door_portal_states.get(portal_id, {}))
+		var start_position := _door_link_position(link_spec, portal, ["start", "startPosition", "fromPosition", "entrance"], Vector3.ZERO)
+		var end_position := _door_link_position(link_spec, portal, ["end", "endPosition", "toPosition", "exit"], Vector3.ZERO)
+		if start_position == end_position:
+			failures += 1
+			continue
+		var link_value = NavigationServer3D.call("link_create")
+		if not (link_value is RID):
+			failures += 1
+			continue
+		var link_rid: RID = link_value
+		NavigationServer3D.call("link_set_map", link_rid, navigation_map)
+		NavigationServer3D.call("link_set_start_position", link_rid, start_position)
+		NavigationServer3D.call("link_set_end_position", link_rid, end_position)
+		NavigationServer3D.call("link_set_bidirectional", link_rid, bool(base_metadata.get("bidirectional", true)))
+		if NavigationServer3D.has_method("link_set_navigation_layers"):
+			NavigationServer3D.call("link_set_navigation_layers", link_rid, int(base_metadata.get("navigationLayers", 1)))
+		if NavigationServer3D.has_method("link_set_enter_cost"):
+			NavigationServer3D.call("link_set_enter_cost", link_rid, float(base_metadata.get("enterCost", base_metadata.get("cost", 1.0))))
+		if NavigationServer3D.has_method("link_set_travel_cost"):
+			NavigationServer3D.call("link_set_travel_cost", link_rid, float(base_metadata.get("travelCost", base_metadata.get("cost", 1.0))))
+		var enabled := _door_link_enabled(base_metadata)
+		_set_link_enabled(link_rid, enabled)
+		var record := {
+			"rid": link_rid,
+			"regionId": region_id,
+			"portalId": portal_id,
+			"linkId": String(base_metadata.get("id", "door-link:%s" % portal_id)),
+			"start": start_position,
+			"end": end_position,
+			"enabled": enabled,
+			"baseMetadata": base_metadata.duplicate(true),
+			"metadata": base_metadata.duplicate(true)
+		}
+		if not door_link_records_by_region.has(region_id):
+			door_link_records_by_region[region_id] = []
+		door_link_records_by_region[region_id].append(record)
+		if not door_link_records_by_portal.has(portal_id):
+			door_link_records_by_portal[portal_id] = []
+		door_link_records_by_portal[portal_id].append(record)
+		installed += 1
+	if NavigationServer3D.has_method("map_force_update"):
+		NavigationServer3D.call("map_force_update", navigation_map)
+	installed_door_link_count += installed
+	door_link_install_failure_count += failures
+	return { "status": "installed", "installed": installed, "failed": failures }
+
+func _descriptor_array(descriptor, property_name: String) -> Array:
+	if descriptor == null:
+		return []
+	var value = descriptor.get(property_name)
+	if value is Array:
+		return value
+	return []
+
+func _release_door_links_for_region(region_id: String) -> int:
+	var records: Array = door_link_records_by_region.get(region_id, [])
+	var released := 0
+	for record_value in records:
+		if not (record_value is Dictionary):
+			continue
+		var record: Dictionary = record_value
+		var link_rid: RID = record.get("rid", RID())
+		if link_rid.is_valid():
+			NavigationServer3D.free_rid(link_rid)
+			released += 1
+		var portal_id := String(record.get("portalId", ""))
+		if door_link_records_by_portal.has(portal_id):
+			var kept: Array = []
+			for portal_record in door_link_records_by_portal[portal_id]:
+				if portal_record is Dictionary and String((portal_record as Dictionary).get("regionId", "")) != region_id:
+					kept.append(portal_record)
+			if kept.is_empty():
+				door_link_records_by_portal.erase(portal_id)
+			else:
+				door_link_records_by_portal[portal_id] = kept
+	door_link_records_by_region.erase(region_id)
+	installed_door_link_count = maxi(0, installed_door_link_count - released)
+	return released
+
+func _apply_portal_state_to_link_record(record: Dictionary, portal_state: Dictionary) -> void:
+	var base_metadata: Dictionary = record.get("baseMetadata", {})
+	var metadata := _merged_link_metadata(base_metadata, {}, portal_state)
+	record["metadata"] = metadata
+	var enabled := _door_link_enabled(metadata)
+	record["enabled"] = enabled
+	var link_rid: RID = record.get("rid", RID())
+	if link_rid.is_valid():
+		_set_link_enabled(link_rid, enabled)
+
+func _set_link_enabled(link_rid: RID, enabled: bool) -> void:
+	if not link_rid.is_valid():
+		return
+	if NavigationServer3D.has_method("link_set_enabled"):
+		NavigationServer3D.call("link_set_enabled", link_rid, enabled)
+	elif NavigationServer3D.has_method("link_set_navigation_layers"):
+		NavigationServer3D.call("link_set_navigation_layers", link_rid, 1 if enabled else 0)
+
+func _door_link_enabled(metadata: Dictionary) -> bool:
+	if not bool(metadata.get("enabled", true)):
+		return false
+	if bool(metadata.get("locked", false)) or bool(metadata.get("jammed", false)) or bool(metadata.get("destroyed", false)) or bool(metadata.get("unloaded", false)):
+		return false
+	var state := String(metadata.get("state", NpcEnumsScript.DOOR_STATE_CLOSED))
+	if state in [String(NpcEnumsScript.DOOR_STATE_LOCKED), String(NpcEnumsScript.DOOR_STATE_JAMMED), String(NpcEnumsScript.DOOR_STATE_DESTROYED), String(NpcEnumsScript.DOOR_STATE_UNLOADED)]:
+		return false
+	if state == String(NpcEnumsScript.DOOR_STATE_CLOSED) and not bool(metadata.get("openable", true)):
+		return false
+	return true
+
+func _merged_link_metadata(portal: Dictionary, link: Dictionary, live_state: Dictionary) -> Dictionary:
+	var result := {}
+	for source in [portal, link, live_state]:
+		if not (source is Dictionary):
+			continue
+		for key in (source as Dictionary).keys():
+			result[key] = (source as Dictionary)[key]
+	if not result.has("state"):
+		result["state"] = String(NpcEnumsScript.DOOR_STATE_CLOSED)
+	if not result.has("openable"):
+		result["openable"] = true
+	if not result.has("enabled"):
+		result["enabled"] = true
+	return result
+
+func _door_link_position(link: Dictionary, portal: Dictionary, keys: Array, fallback: Vector3) -> Vector3:
+	for key_value in keys:
+		var key := String(key_value)
+		if link.has(key) and link[key] is Vector3:
+			return link[key]
+		if portal.has(key) and portal[key] is Vector3:
+			return portal[key]
+	return fallback
+
+func _door_actions_for_path(path: Array[Vector3]) -> Dictionary:
+	var actions := {}
+	if path.size() < 2:
+		return actions
+	var portal_ids := door_link_records_by_portal.keys()
+	portal_ids.sort()
+	for portal_id_value in portal_ids:
+		var portal_id := String(portal_id_value)
+		for record_value in door_link_records_by_portal.get(portal_id, []):
+			if not (record_value is Dictionary):
+				continue
+			var record: Dictionary = record_value
+			if not bool(record.get("enabled", false)):
+				continue
+			if not _path_uses_door_link(path, record):
+				continue
+			var metadata: Dictionary = record.get("metadata", {})
+			var end_position: Vector3 = record.get("end", Vector3.ZERO)
+			var action_cell := _cell_for_position(end_position)
+			var action_key := _cell_key(action_cell)
+			var action := {
+				"kind": "door",
+				"portalId": portal_id,
+				"actionId": String(metadata.get("actionId", "open")),
+				"cell": action_cell,
+				"entryPosition": record.get("start", Vector3.ZERO),
+				"exitPosition": end_position,
+				"navLink": true,
+				"requiresSmartObject": true,
+				"enabled": bool(record.get("enabled", false))
+			}
+			var door_value = metadata.get("door", null)
+			if door_value is Node and is_instance_valid(door_value):
+				action["door"] = door_value
+			actions[action_key] = action
+	return actions
+
+func _door_links_for_actions(actions: Dictionary) -> Array:
+	var result := []
+	var keys := actions.keys()
+	keys.sort()
+	for key in keys:
+		var action: Dictionary = actions[key]
+		result.append({
+			"cellKey": String(key),
+			"portalId": String(action.get("portalId", "")),
+			"actionId": String(action.get("actionId", "open")),
+			"navLink": bool(action.get("navLink", false))
+		})
+	return result
+
+func _path_uses_door_link(path: Array[Vector3], record: Dictionary) -> bool:
+	var start: Vector3 = record.get("start", Vector3.ZERO)
+	var end: Vector3 = record.get("end", Vector3.ZERO)
+	var tolerance := CELL * 0.35
+	for index in range(1, path.size()):
+		var from_point := path[index - 1]
+		var to_point := path[index]
+		if from_point.distance_to(start) <= tolerance and to_point.distance_to(end) <= tolerance:
+			return true
+		if from_point.distance_to(end) <= tolerance and to_point.distance_to(start) <= tolerance:
+			return true
+		if _point_segment_distance(start, from_point, to_point) <= tolerance and _point_segment_distance(end, from_point, to_point) <= tolerance:
+			return true
+	return false
+
+func _point_segment_distance(point: Vector3, segment_start: Vector3, segment_end: Vector3) -> float:
+	var segment := segment_end - segment_start
+	var length_sq := segment.length_squared()
+	if length_sq <= 0.0001:
+		return point.distance_to(segment_start)
+	var t := clampf((point - segment_start).dot(segment) / length_sq, 0.0, 1.0)
+	return point.distance_to(segment_start + segment * t)
+
+func _cell_for_position(position: Vector3) -> Vector2i:
+	return Vector2i(roundi(position.x / CELL), roundi(position.z / CELL))
+
+func _cell_key(cell: Vector2i) -> String:
+	return "%d,%d" % [cell.x, cell.y]
+
+func _mark_dirty_region(region_id: String, event: Dictionary, reason: String) -> Dictionary:
+	if region_id == "":
+		return { "status": "rejected", "reason": "missing_region_id" }
+	var record := {
+		"reason": reason,
+		"tileKey": String(event.get("tileKey", "")),
+		"changeKinds": (event.get("changeKinds", []) as Array).duplicate(),
+		"sourceRevision": int(event.get("revision", 0))
+	}
+	dirty_regions_by_region[region_id] = record
+	if not dirty_region_queue.has(region_id):
+		dirty_region_queue.append(region_id)
+	region_states[region_id] = "dirty"
+	return {
+		"status": "dirty",
+		"regionId": region_id,
+		"topologyRevision": topology_revision,
+		"dirtyRegionCount": dirty_regions_by_region.size(),
+		"queuedRebuild": true
+	}
+
+func _clear_dirty_region(region_id: String) -> void:
+	dirty_regions_by_region.erase(region_id)
+	dirty_region_queue.erase(region_id)
+
+func _dirty_regions_summary() -> Dictionary:
+	var result := {}
+	var keys := dirty_regions_by_region.keys()
+	keys.sort()
+	for region_id in keys:
+		result[String(region_id)] = dirty_regions_by_region[region_id].duplicate(true)
+	return result
+
+func _door_links_debug_summary() -> Dictionary:
+	var result := {}
+	var portal_ids := door_link_records_by_portal.keys()
+	portal_ids.sort()
+	for portal_id in portal_ids:
+		var summaries := []
+		for record_value in door_link_records_by_portal[portal_id]:
+			if not (record_value is Dictionary):
+				continue
+			var record: Dictionary = record_value
+			var metadata: Dictionary = record.get("metadata", {})
+			summaries.append({
+				"linkId": String(record.get("linkId", "")),
+				"regionId": String(record.get("regionId", "")),
+				"portalId": String(record.get("portalId", "")),
+				"enabled": bool(record.get("enabled", false)),
+				"state": String(metadata.get("state", "")),
+				"locked": bool(metadata.get("locked", false)),
+				"jammed": bool(metadata.get("jammed", false)),
+				"destroyed": bool(metadata.get("destroyed", false)),
+				"unloaded": bool(metadata.get("unloaded", false)),
+				"openable": bool(metadata.get("openable", true)),
+				"start": _vector3_summary(record.get("start", Vector3.ZERO)),
+				"end": _vector3_summary(record.get("end", Vector3.ZERO))
+			})
+		result[String(portal_id)] = summaries
+	return result
+
+func _door_portal_states_summary() -> Dictionary:
+	var result := {}
+	var portal_ids := door_portal_states.keys()
+	portal_ids.sort()
+	for portal_id in portal_ids:
+		var state: Dictionary = door_portal_states[portal_id]
+		result[String(portal_id)] = {
+			"portalId": String(state.get("portalId", portal_id)),
+			"state": String(state.get("state", "")),
+			"locked": bool(state.get("locked", false)),
+			"jammed": bool(state.get("jammed", false)),
+			"destroyed": bool(state.get("destroyed", false)),
+			"unloaded": bool(state.get("unloaded", false)),
+			"stateRevision": int(state.get("stateRevision", 0))
+		}
+	return result
+
+func _link_api_supported() -> bool:
+	return (
+		NavigationServer3D.has_method("link_create")
+		and NavigationServer3D.has_method("link_set_map")
+		and NavigationServer3D.has_method("link_set_start_position")
+		and NavigationServer3D.has_method("link_set_end_position")
+		and NavigationServer3D.has_method("link_set_bidirectional")
+	)
+
+func _has_kind(kinds: Array, expected) -> bool:
+	var expected_string := String(expected)
+	for kind_value in kinds:
+		if String(kind_value) == expected_string:
+			return true
+	return false
+
 func _event_needs_rebuild(kinds: Array) -> bool:
 	for kind_value in kinds:
 		var kind := String(kind_value)
-		if kind in ["block_created", "block_removed", "terrain_edit", "prop_removed", "door_registered", "structure_metadata", "semantic_changed"]:
+		if kind in ["block_created", "block_removed", "terrain_edit", "prop_created", "prop_removed", "chunk_loaded", "door_registered", "structure_metadata", "semantic_changed"]:
 			return true
 	return false
+
+func _vector3_summary(value: Vector3) -> Array:
+	return [snappedf(value.x, 0.001), snappedf(value.y, 0.001), snappedf(value.z, 0.001)]

@@ -15,6 +15,7 @@ var walkable_surfaces: Array[Dictionary] = []
 var blockers: Array[Dictionary] = []
 var semantic_anchors: Array[Dictionary] = []
 var door_portals: Array[Dictionary] = []
+var door_links: Array[Dictionary] = []
 
 static func create(region_id_value: String, tile_key_value: String, bounds_value := AABB()):
 	var descriptor = load("res://scripts/npc_ai/contracts/NavigationBakeDescriptor.gd").new()
@@ -90,6 +91,14 @@ static func from_tile_snapshot(snapshot: Dictionary):
 		if portal_id == "":
 			continue
 		descriptor.add_door_portal(portal_id, portal.get("entrance", Vector3.ZERO), portal.get("exit", Vector3.ZERO), portal)
+	for link_value in snapshot.get("doorLinks", []):
+		if not (link_value is Dictionary):
+			continue
+		var link: Dictionary = link_value
+		var portal_id := String(link.get("portalId", ""))
+		if portal_id == "":
+			continue
+		descriptor.add_door_link(String(link.get("from", "")), String(link.get("to", "")), portal_id, link)
 	if has_bounds:
 		descriptor.bounds = merged_bounds
 	return descriptor
@@ -150,6 +159,22 @@ func add_door_portal(portal_id: String, entrance: Vector3, exit: Vector3, extra 
 	_merge_extra(portal, extra)
 	door_portals.append(portal)
 
+func add_door_link(from_key: String, to_key: String, portal_id: String, extra := {}) -> void:
+	var link_id := String(extra.get("id", "door-link:%s:%s:%s" % [portal_id, from_key, to_key]))
+	var link := {
+		"id": link_id,
+		"from": from_key,
+		"to": to_key,
+		"portalId": portal_id,
+		"actionId": String(extra.get("actionId", "open")),
+		"cost": float(extra.get("cost", 1.5)),
+		"bidirectional": bool(extra.get("bidirectional", true)),
+		"openable": bool(extra.get("openable", true)),
+		"enabled": bool(extra.get("enabled", true))
+	}
+	_merge_extra(link, extra)
+	door_links.append(link)
+
 func stable_signature() -> String:
 	return JSON.stringify(to_summary())
 
@@ -165,7 +190,8 @@ func to_summary() -> Dictionary:
 		"walkableSurfaces": _sorted_summary_array(walkable_surfaces),
 		"blockers": _sorted_summary_array(blockers),
 		"semanticAnchors": _sorted_summary_array(semantic_anchors),
-		"doorPortals": _sorted_summary_array(door_portals)
+		"doorPortals": _sorted_summary_array(door_portals),
+		"doorLinks": _sorted_summary_array(door_links)
 	}
 
 func _merge_extra(target: Dictionary, extra := {}) -> void:
