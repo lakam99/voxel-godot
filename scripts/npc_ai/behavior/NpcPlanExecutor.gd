@@ -145,6 +145,11 @@ func _cached_goal_for_motion(entry: Dictionary, body: Node3D) -> Dictionary:
 		return { "goalKind": NpcEnumsScript.GOAL_KIND_SCRIPTED, "reason": "scripted_%s_order" % order_kind }
 	if body.has_meta("npc_scripted_target"):
 		return { "goalKind": NpcEnumsScript.GOAL_KIND_SCRIPTED, "reason": "scripted_target" }
+	var cached = entry.get("activeMotionGoal", {})
+	if cached is Dictionary and not (cached as Dictionary).is_empty():
+		var cached_kind := String((cached as Dictionary).get("goalKind", ""))
+		if cached_kind in [String(NpcEnumsScript.GOAL_KIND_HOME), String(NpcEnumsScript.GOAL_KIND_GUARD), String(NpcEnumsScript.GOAL_KIND_SCRIPTED)]:
+			return cached
 	var active_job_phase := String(entry.get("jobPhase", "idle"))
 	if active_job_phase in ["outbound", "searching", "gathering", "returning", "stall"]:
 		var active_job := String(entry.get("job", ""))
@@ -152,7 +157,6 @@ func _cached_goal_for_motion(entry: Dictionary, body: Node3D) -> Dictionary:
 			return { "goalKind": NpcEnumsScript.GOAL_KIND_FORAGE, "reason": "active_job_phase" }
 		if active_job in ["wood", "stone", "trade"]:
 			return { "goalKind": NpcEnumsScript.GOAL_KIND_WORK, "reason": "active_job_phase" }
-	var cached = entry.get("activeMotionGoal", {})
 	if cached is Dictionary and not (cached as Dictionary).is_empty():
 		return cached
 	var goal_kind := String(entry.get("activeGoalKind", entry.get("goal", String(NpcEnumsScript.GOAL_KIND_IDLE))))
