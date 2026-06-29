@@ -34,6 +34,7 @@ var repair_placement_events: Array[Dictionary] = []
 var sleep_timeline: Array[Dictionary] = []
 var inventory_timeline: Array[Dictionary] = []
 var interaction_timeline: Array[Dictionary] = []
+var non_guard_home_visual_matrix: Array[Dictionary] = []
 var morning_departure_matrix: Array[Dictionary] = []
 var niko_timeline: Array[Dictionary] = []
 var visual_captures: Array[Dictionary] = []
@@ -49,9 +50,14 @@ var screenshot_dir := ""
 var visual_required := false
 var mira_home_only := false
 var captured_mira_start := false
+var captured_mira_route_departure := false
+var captured_mira_route_midpoint := false
 var captured_mira_at_door := false
 var captured_mira_door_open := false
 var captured_mira_inside_closed := false
+var mira_route_start_position := Vector3.ZERO
+var mira_route_start_valid := false
+var last_observer_camera_target := Vector3.ZERO
 
 func _ready() -> void:
     physics_dt = 1.0 / float(Engine.physics_ticks_per_second)
@@ -218,11 +224,13 @@ func run_real_knock_to_morning_foragers() -> void:
         add_failure("mira_did_not_reach_strict_home_interior", JSON.stringify(report_data["miraFinalHomeInteriorStatus"]))
     elif visual_required and not required_mira_captures_saved():
         add_failure("mira_visual_captures_missing", JSON.stringify(capture_names()))
-    elif mira_home_only:
+    elif visual_required:
+        await verify_other_non_guard_npcs_home_visual()
+    if not failed and mira_home_only:
         results.append({
             "name": "mira_real_tutorial_go_home_visual",
             "passed": true,
-            "details": "Mira reached strict home interior and the home door closed; captures=%s" % JSON.stringify(capture_names())
+            "details": "Mira reached strict home interior, other non-guard NPCs are visually home, and doors closed; captures=%s" % JSON.stringify(capture_names())
         })
     if mira_home_only:
         return
@@ -290,17 +298,28 @@ func observe_mira_until_home(seconds: float) -> void:
 func maybe_capture_mira_return_home(frame: int, mira: Dictionary, home_status: Dictionary) -> void:
     if mira.is_empty():
         return
+    var body := mira.get("body") as Node3D
+    if body == null or not is_instance_valid(body):
+        return
     if not captured_mira_start:
-        await capture_mira_stage("mira_go_home_start", "wide")
+        mira_route_start_position = body.global_position
+        mira_route_start_valid = true
+        await capture_mira_stage("mira_go_home_start", "route")
         captured_mira_start = true
     var door := mira_home_door(mira)
     if door == null:
         return
-    var body := mira.get("body") as Node3D
-    if body == null or not is_instance_valid(body):
-        return
     var distance_to_door := flat_distance(body.global_position, door.global_position)
     var door_open := bool(door.get_meta("open", false))
+    var home_position := entry_position(mira, "homePosition", door.global_position)
+    var route_progress := mira_route_progress(body.global_position, home_position)
+    var moved_from_start := flat_distance(body.global_position, mira_route_start_position)
+    if not captured_mira_route_departure and moved_from_start >= CELL * 1.5 and distance_to_door > CELL * 4.0:
+        await capture_mira_stage("mira_route_departure", "route")
+        captured_mira_route_departure = true
+    if not captured_mira_route_midpoint and route_progress >= 0.35 and distance_to_door > CELL * 3.0:
+        await capture_mira_stage("mira_route_midpoint", "route")
+        captured_mira_route_midpoint = true
     if not captured_mira_at_door and distance_to_door <= CELL * 1.9:
         await capture_mira_stage("mira_at_home_door", "front")
         captured_mira_at_door = true
@@ -348,6 +367,87 @@ func capture_mira_stage(stage: String, camera_mode: String) -> void:
     visual_captures.append(capture)
     report_data["visualCaptures"] = visual_captures
 
+func verify_other_non_guard_npcs_home_visual() -> void:
+    var rows := npc_schedule_matrix()
+    var failures: Array[Dictionary] = []
+    non_guard_home_visual_matrix = []
+    for row in rows:
+        var npc_id := String(row.get("id", ""))
+        if npc_id == "" or npc_id == "mira" or bool(row.get("nightGuard", false)):
+            continue
+        var entry := npc_entry(npc_id)
+        var strict_inside := bool(row.get("strictInsideHome", false))
+        var stage := "non_guard_home_%s" % safe_capture_id(npc_id)
+        var capture_saved := false
+        if visual_required:
+            capture_saved = await capture_npc_home_stage(entry, stage)
+        var proof := {
+            "id": npc_id,
+            "name": String(row.get("name", "")),
+            "nightGuard": false,
+            "strictInsideHome": strict_inside,
+            "stage": stage,
+            "captureSaved": capture_saved,
+            "summary": npc_summary(entry) if not entry.is_empty() else row
+        }
+        non_guard_home_visual_matrix.append(proof)
+        if not strict_inside or not capture_saved:
+            failures.append(proof)
+    report_data["nonGuardHomeVisualMatrix"] = non_guard_home_visual_matrix
+    if non_guard_home_visual_matrix.is_empty():
+        add_failure("non_guard_home_visual_no_targets", "no non-guard NPCs besides Mira were available to visually verify")
+    elif not failures.is_empty():
+        add_failure("non_guard_npcs_not_visually_home_after_mira", JSON.stringify(failures))
+    else:
+        results.append({
+            "name": "other_non_guard_npcs_visually_home_after_mira",
+            "passed": true,
+            "details": "verified=%d captures=%s" % [non_guard_home_visual_matrix.size(), JSON.stringify(capture_names())]
+        })
+
+func capture_npc_home_stage(entry: Dictionary, stage: String) -> bool:
+    if entry.is_empty():
+        return false
+    setup_observer_camera()
+    position_npc_home_observer_camera(entry)
+    configure_observer_torch("inside")
+    await wait_process_frames(3)
+    var image := get_viewport().get_texture().get_image()
+    var path := screenshot_dir.path_join("%s.png" % stage)
+    var err := image.save_png(path)
+    var capture := {
+        "stage": stage,
+        "path": path,
+        "saved": err == OK,
+        "cameraMode": "non_guard_home_inside",
+        "time": rounded(elapsed),
+        "sample": npc_home_visual_sample(entry)
+    }
+    visual_captures.append(capture)
+    report_data["visualCaptures"] = visual_captures
+    return err == OK
+
+func position_npc_home_observer_camera(entry: Dictionary) -> void:
+    if observer_camera == null:
+        return
+    var body := entry.get("body") as Node3D
+    if body == null or not is_instance_valid(body):
+        return
+    var body_position := body.global_position
+    var home_position := entry_position(entry, "homePosition", body_position)
+    var inside_direction := Vector3(home_position.x - body_position.x, 0.0, home_position.z - body_position.z)
+    if inside_direction.length() < 0.05:
+        inside_direction = Vector3(1.0, 0.0, 1.0)
+    inside_direction = inside_direction.normalized()
+    var side_direction := Vector3(-inside_direction.z, 0.0, inside_direction.x)
+    var target := body_position + Vector3(0.0, CELL * 0.75, 0.0)
+    var camera_position := body_position + inside_direction * CELL * 2.45 + side_direction * CELL * 0.65 + Vector3(0.0, CELL * 1.2, 0.0)
+    camera_position.y = body_position.y + CELL * 1.15
+    observer_camera.global_position = camera_position
+    observer_camera.look_at(target, Vector3.UP)
+    last_observer_camera_target = target
+    observer_camera.make_current()
+
 func position_mira_observer_camera(mode: String) -> void:
     if observer_camera == null:
         return
@@ -364,13 +464,20 @@ func position_mira_observer_camera(mode: String) -> void:
         outside_direction = Vector3(0.0, 0.0, -1.0)
     outside_direction = outside_direction.normalized()
     var side_direction := Vector3(-outside_direction.z, 0.0, outside_direction.x)
+    var route_direction := mira_route_direction(body_position, home_position)
+    var route_side_direction := Vector3(-route_direction.z, 0.0, route_direction.x)
     var target := door_position + Vector3(0.0, CELL * 0.85, 0.0)
     var camera_position := door_position + outside_direction * CELL * 8.5 + Vector3(0.0, CELL * 3.2, 0.0)
     var camera_height := CELL * 3.2
-    if mode == "wide":
-        target = (body_position + home_position) * 0.5 + Vector3(0.0, CELL * 1.0, 0.0)
-        camera_position = body_position + outside_direction * CELL * 7.0 + side_direction * CELL * 5.5 + Vector3(0.0, CELL * 5.0, 0.0)
-        camera_height = CELL * 5.0
+    if mode == "route":
+        var route_lookahead := body_position + route_direction * CELL * 5.0
+        target = (body_position + route_lookahead) * 0.5 + Vector3(0.0, CELL * 0.9, 0.0)
+        camera_position = body_position - route_direction * CELL * 4.6 + route_side_direction * CELL * 3.1 + Vector3(0.0, CELL * 1.85, 0.0)
+        camera_height = CELL * 1.85
+    elif mode == "wide":
+        target = (body_position + home_position) * 0.5 + Vector3(0.0, CELL * 0.95, 0.0)
+        camera_position = body_position - route_direction * CELL * 5.2 + route_side_direction * CELL * 3.4 + Vector3(0.0, CELL * 2.25, 0.0)
+        camera_height = CELL * 2.25
     elif mode == "inside":
         target = (body_position + door_position) * 0.5 + Vector3(0.0, CELL * 0.85, 0.0)
         camera_position = body_position - outside_direction * CELL * 2.15 + side_direction * CELL * 1.15 + Vector3(0.0, CELL * 1.05, 0.0)
@@ -381,7 +488,27 @@ func position_mira_observer_camera(mode: String) -> void:
         camera_position.y = maxf(camera_position.y, level + camera_height)
     observer_camera.global_position = camera_position
     observer_camera.look_at(target, Vector3.UP)
+    last_observer_camera_target = target
     observer_camera.make_current()
+
+func mira_route_direction(body_position: Vector3, home_position: Vector3) -> Vector3:
+    var route_start := mira_route_start_position if mira_route_start_valid else body_position
+    var direction := Vector3(home_position.x - route_start.x, 0.0, home_position.z - route_start.z)
+    if direction.length() < 0.05:
+        direction = Vector3(home_position.x - body_position.x, 0.0, home_position.z - body_position.z)
+    if direction.length() < 0.05:
+        direction = Vector3(0.0, 0.0, -1.0)
+    return direction.normalized()
+
+func mira_route_progress(body_position: Vector3, home_position: Vector3) -> float:
+    if not mira_route_start_valid:
+        return 0.0
+    var start_to_home := Vector2(home_position.x - mira_route_start_position.x, home_position.z - mira_route_start_position.z)
+    var route_length := start_to_home.length()
+    if route_length < 0.05:
+        return 0.0
+    var start_to_body := Vector2(body_position.x - mira_route_start_position.x, body_position.z - mira_route_start_position.z)
+    return clampf(start_to_body.dot(start_to_home.normalized()) / route_length, 0.0, 1.0)
 
 func configure_observer_torch(mode: String) -> void:
     if observer_torch == null or not is_instance_valid(observer_torch):
@@ -410,7 +537,32 @@ func mira_visual_sample(mira: Dictionary) -> Dictionary:
         "doorOpen": bool(door.get_meta("open", false)) if door != null else false,
         "distanceToDoor": rounded(flat_distance(position, door.global_position)) if door != null else -1.0,
         "observerTorch": observer_torch_summary(),
+        "observerCamera": observer_camera_summary(),
         "position": vec3(position)
+    }
+
+func npc_home_visual_sample(entry: Dictionary) -> Dictionary:
+    var body := entry.get("body") as Node3D
+    var door := npc_home_door(entry)
+    var position := body.global_position if body != null and is_instance_valid(body) else Vector3.ZERO
+    return {
+        "npc": npc_summary(entry) if not entry.is_empty() else {},
+        "strictHome": strict_home_status(entry),
+        "door": block_summary(door),
+        "doorPortal": door_portal_summary(door),
+        "doorOpen": bool(door.get_meta("open", false)) if door != null else false,
+        "distanceToDoor": rounded(flat_distance(position, door.global_position)) if door != null else -1.0,
+        "observerTorch": observer_torch_summary(),
+        "observerCamera": observer_camera_summary(),
+        "position": vec3(position)
+    }
+
+func observer_camera_summary() -> Dictionary:
+    if observer_camera == null or not is_instance_valid(observer_camera):
+        return {}
+    return {
+        "position": vec3(observer_camera.global_position),
+        "target": vec3(last_observer_camera_target)
     }
 
 func observer_torch_summary() -> Dictionary:
@@ -440,13 +592,16 @@ func door_portal_summary(door: Node) -> Dictionary:
     return portal.call("to_summary")
 
 func mira_home_door(mira: Dictionary) -> Node3D:
-    if mira.is_empty() or main == null:
+    return npc_home_door(mira)
+
+func npc_home_door(entry: Dictionary) -> Node3D:
+    if entry.is_empty() or main == null:
         return null
     var blocks_value = main.get("blocks")
     if not (blocks_value is Dictionary):
         return null
-    var porch_position := entry_position(mira, "porchPosition", entry_position(mira, "homePosition", Vector3.ZERO))
-    var home_position := entry_position(mira, "homePosition", porch_position)
+    var porch_position := entry_position(entry, "porchPosition", entry_position(entry, "homePosition", Vector3.ZERO))
+    var home_position := entry_position(entry, "homePosition", porch_position)
     var best: Node3D = null
     var best_distance := INF
     for block_value in (blocks_value as Dictionary).values():
@@ -460,6 +615,12 @@ func mira_home_door(mira: Dictionary) -> Node3D:
             best_distance = distance
             best = block
     return best
+
+func safe_capture_id(value: String) -> String:
+    var result := value.to_lower()
+    for character in [" ", "/", "\\", ":", ";", ".", ",", "'", "\"", "(", ")", "[", "]"]:
+        result = result.replace(character, "_")
+    return result
 
 func any_mira_home_door_open(mira: Dictionary) -> bool:
     var door := mira_home_door(mira)
@@ -485,7 +646,14 @@ func any_mira_home_door_open(mira: Dictionary) -> bool:
 func required_mira_captures_saved() -> bool:
     if not visual_required:
         return true
-    var required := ["mira_go_home_start", "mira_at_home_door", "mira_home_door_open", "mira_inside_home_closed_door"]
+    var required := [
+        "mira_go_home_start",
+        "mira_route_departure",
+        "mira_route_midpoint",
+        "mira_at_home_door",
+        "mira_home_door_open",
+        "mira_inside_home_closed_door"
+    ]
     var saved := {}
     for capture in visual_captures:
         if bool(capture.get("saved", false)):
@@ -1825,6 +1993,7 @@ func add_failure(code: String, details: String) -> void:
     report_data["miraRouteOrderTimeline"] = route_order_timeline
     report_data["miraSpeedSamples"] = mira_speed_samples
     report_data["visualCaptures"] = visual_captures
+    report_data["nonGuardHomeVisualMatrix"] = non_guard_home_visual_matrix
     report_data["npcScheduleMatrix"] = schedule_matrix
     var mira := npc_entry("mira")
     if not mira.is_empty():
@@ -1848,6 +2017,7 @@ func finish() -> void:
     report_data["miraRouteOrderTimeline"] = route_order_timeline
     report_data["miraSpeedSamples"] = mira_speed_samples
     report_data["visualCaptures"] = visual_captures
+    report_data["nonGuardHomeVisualMatrix"] = non_guard_home_visual_matrix
     report_data["npcScheduleMatrix"] = schedule_matrix
     report_data["nightGuardNonGuardMatrix"] = night_matrix
     report_data["repairPlacementEvents"] = repair_placement_events

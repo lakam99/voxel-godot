@@ -130,12 +130,19 @@
       "defaultArgs": ["-TimeMode", "Both", "-Visible", "-MiraHomeOnly"],
       "supportsScreenshotDir": true,
       "evidenceLevel": "acceptance_visual",
-      "acceptanceClaims": ["tutorial_mira_enters_home_and_closes_door"],
+      "acceptanceClaims": [
+        "tutorial_mira_enters_home_and_closes_door",
+        "tutorial_other_non_guard_npcs_visually_home_after_mira"
+      ],
       "requiredScreenshots": [
         "mira_go_home_start.png",
+        "mira_route_departure.png",
+        "mira_route_midpoint.png",
         "mira_at_home_door.png",
         "mira_home_door_open.png",
-        "mira_inside_home_closed_door.png"
+        "mira_inside_home_closed_door.png",
+        "non_guard_home_rowan.png",
+        "non_guard_home_niko.png"
       ],
       "requiresForbiddenCallSelfScan": true,
       "requiresVisualProof": true

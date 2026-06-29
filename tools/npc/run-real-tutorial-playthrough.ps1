@@ -252,9 +252,13 @@ if ($Visible) {
     }
     $requiredScreenshots = @(
         "mira_go_home_start.png",
+        "mira_route_departure.png",
+        "mira_route_midpoint.png",
         "mira_at_home_door.png",
         "mira_home_door_open.png",
-        "mira_inside_home_closed_door.png"
+        "mira_inside_home_closed_door.png",
+        "non_guard_home_rowan.png",
+        "non_guard_home_niko.png"
     )
     foreach ($fileName in $requiredScreenshots) {
         $path = Join-Path $ScreenshotDir $fileName
@@ -268,7 +272,12 @@ if ($Visible) {
 
 $evidenceScript = Join-Path $projectPath "tools\assert-test-evidence-report.ps1"
 $evidenceLevel = if ($Visible) { "acceptance_visual" } else { "integration" }
-$acceptanceClaims = if ($Visible) { @("tutorial_mira_enters_home_and_closes_door") } else { @() }
+$acceptanceClaims = if ($Visible) {
+    @(
+        "tutorial_mira_enters_home_and_closes_door",
+        "tutorial_other_non_guard_npcs_visually_home_after_mira"
+    )
+} else { @() }
 $evidenceArgs = @(
     "-ReportPath", $ReportPath,
     "-RunnerId", "npc_real_tutorial_playthrough",
