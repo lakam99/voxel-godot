@@ -9,10 +9,15 @@ param(
     [int]$TimeoutSeconds = 470,
     [int]$StaleProgressSeconds = 45,
     [switch]$Visible,
-    [switch]$MiraHomeOnly
+    [switch]$MiraHomeOnly,
+    [switch]$MorningOutsideOnly
 )
 
 $ErrorActionPreference = "Stop"
+if ($MiraHomeOnly -and $MorningOutsideOnly) {
+    Write-Error "Use either -MiraHomeOnly or -MorningOutsideOnly, not both."
+    exit 1
+}
 
 $projectPath = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 $runnerPath = Join-Path $projectPath "scripts\testing\npc\NpcRealTutorialPlaythroughRunner.gd"
@@ -64,6 +69,7 @@ $env:VOXEL_REAL_TUTORIAL_PROGRESS = $ProgressPath
 $env:VOXEL_REAL_TUTORIAL_SCREENSHOT_DIR = $ScreenshotDir
 $env:VOXEL_REAL_TUTORIAL_VISUAL_REQUIRED = if ($Visible) { "1" } else { "0" }
 $env:VOXEL_REAL_TUTORIAL_MIRA_HOME_ONLY = if ($MiraHomeOnly) { "1" } else { "0" }
+$env:VOXEL_REAL_TUTORIAL_MORNING_OUTSIDE_ONLY = if ($MorningOutsideOnly) { "1" } else { "0" }
 $env:VOXEL_REAL_TUTORIAL_RUN_TOKEN = $runToken
 $env:VOXEL_REAL_TUTORIAL_WATCHDOG_SECONDS = [string]$TimeoutSeconds
 $env:VOXEL_GIT_BRANCH = $branch
@@ -250,16 +256,25 @@ if ($Visible) {
         Get-Content -LiteralPath $ReportPath
         exit 1
     }
-    $requiredScreenshots = @(
-        "mira_go_home_start.png",
-        "mira_route_departure.png",
-        "mira_route_midpoint.png",
-        "mira_at_home_door.png",
-        "mira_home_door_open.png",
-        "mira_inside_home_closed_door.png",
-        "non_guard_home_rowan.png",
-        "non_guard_home_niko.png"
-    )
+    if ($MorningOutsideOnly) {
+        $requiredScreenshots = @(
+            "morning_outside_group.png",
+            "morning_outside_rowan.png",
+            "morning_outside_mira.png",
+            "morning_outside_niko.png"
+        )
+    } else {
+        $requiredScreenshots = @(
+            "mira_go_home_start.png",
+            "mira_route_departure.png",
+            "mira_route_midpoint.png",
+            "mira_at_home_door.png",
+            "mira_home_door_open.png",
+            "mira_inside_home_closed_door.png",
+            "non_guard_home_rowan.png",
+            "non_guard_home_niko.png"
+        )
+    }
     foreach ($fileName in $requiredScreenshots) {
         $path = Join-Path $ScreenshotDir $fileName
         if (-not (Test-Path -LiteralPath $path)) {
@@ -272,15 +287,20 @@ if ($Visible) {
 
 $evidenceScript = Join-Path $projectPath "tools\assert-test-evidence-report.ps1"
 $evidenceLevel = if ($Visible) { "acceptance_visual" } else { "integration" }
+$runnerId = if ($MorningOutsideOnly) { "npc_real_tutorial_morning_outside" } else { "npc_real_tutorial_playthrough" }
 $acceptanceClaims = if ($Visible) {
-    @(
-        "tutorial_mira_enters_home_and_closes_door",
-        "tutorial_other_non_guard_npcs_visually_home_after_mira"
-    )
+    if ($MorningOutsideOnly) {
+        @("tutorial_following_morning_rowan_mira_niko_outside_visual")
+    } else {
+        @(
+            "tutorial_mira_enters_home_and_closes_door",
+            "tutorial_other_non_guard_npcs_visually_home_after_mira"
+        )
+    }
 } else { @() }
 $evidenceArgs = @(
     "-ReportPath", $ReportPath,
-    "-RunnerId", "npc_real_tutorial_playthrough",
+    "-RunnerId", $runnerId,
     "-EvidenceLevel", $evidenceLevel,
     "-RegistryPath", (Join-Path $projectPath "tools\test-runner-registry.json")
 )
@@ -310,6 +330,7 @@ $report = Get-Content -LiteralPath $ReportPath -Raw | ConvertFrom-Json
     processStopReason = [string]$report.processStopReason
     lastFailureCode = $lastFailureCode
     miraHomeOnly = [bool]$report.miraHomeOnly
+    morningOutsideOnly = [bool]$report.morningOutsideOnly
     reportPath = $ReportPath
 } | ConvertTo-Json -Depth 4
 $wrapperExitCode = [int]$exitCode

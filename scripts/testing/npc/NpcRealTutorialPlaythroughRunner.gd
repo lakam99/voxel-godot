@@ -9,6 +9,9 @@ const SAMPLE_EVERY_FRAMES := 6
 const MIRA_HOME_TIMEOUT_SECONDS := 36.0
 const MIRA_HOME_SETTLED_FRAMES := 30
 const MORNING_FORAGE_TIMEOUT_SECONDS := 70.0
+const MORNING_OUTSIDE_TIMEOUT_SECONDS := 60.0
+const MORNING_OUTSIDE_TARGETS := ["rowan", "mira", "niko"]
+const FOLLOWING_MORNING_TIME := 0.04
 const CAPTURE_WIDTH := 1280
 const CAPTURE_HEIGHT := 720
 
@@ -34,7 +37,9 @@ var repair_placement_events: Array[Dictionary] = []
 var sleep_timeline: Array[Dictionary] = []
 var inventory_timeline: Array[Dictionary] = []
 var interaction_timeline: Array[Dictionary] = []
+var morning_observation_timeline: Array[Dictionary] = []
 var non_guard_home_visual_matrix: Array[Dictionary] = []
+var morning_outside_visual_matrix: Array[Dictionary] = []
 var morning_departure_matrix: Array[Dictionary] = []
 var niko_timeline: Array[Dictionary] = []
 var visual_captures: Array[Dictionary] = []
@@ -49,6 +54,7 @@ var gameplay_started := false
 var screenshot_dir := ""
 var visual_required := false
 var mira_home_only := false
+var morning_outside_only := false
 var captured_mira_start := false
 var captured_mira_route_departure := false
 var captured_mira_route_midpoint := false
@@ -76,6 +82,7 @@ func _process(delta: float) -> void:
 func configure_visual_capture() -> void:
     visual_required = OS.get_environment("VOXEL_REAL_TUTORIAL_VISUAL_REQUIRED").strip_edges() == "1"
     mira_home_only = OS.get_environment("VOXEL_REAL_TUTORIAL_MIRA_HOME_ONLY").strip_edges() == "1"
+    morning_outside_only = OS.get_environment("VOXEL_REAL_TUTORIAL_MORNING_OUTSIDE_ONLY").strip_edges() == "1"
     screenshot_dir = OS.get_environment("VOXEL_REAL_TUTORIAL_SCREENSHOT_DIR")
     if screenshot_dir == "":
         screenshot_dir = ProjectSettings.globalize_path("res://artifacts/npc/screenshots/real-tutorial-playthrough")
@@ -92,8 +99,11 @@ func run() -> void:
         "gitCommit": OS.get_environment("VOXEL_GIT_COMMIT"),
         "nonHeadlessVisualRequired": visual_required,
         "miraHomeOnly": mira_home_only,
+        "morningOutsideOnly": morning_outside_only,
         "screenshotDir": screenshot_dir,
         "visualCaptures": visual_captures,
+        "timeline": morning_observation_timeline,
+        "morningOutsideVisualMatrix": morning_outside_visual_matrix,
         "deterministicSetup": {},
         "scriptErrorScan": { "status": "pending-wrapper-scan", "matches": [] },
         "forbiddenCallSelfScan": { "status": "passed-by-wrapper-before-launch" }
@@ -121,7 +131,10 @@ func run() -> void:
     gameplay_started = true
     mark_progress("gameplay_started")
 
-    await run_real_knock_to_morning_foragers()
+    if morning_outside_only:
+        await run_following_morning_outside_observation()
+    else:
+        await run_real_knock_to_morning_foragers()
     finish()
 
 func prepare_tutorial_world() -> void:
@@ -142,6 +155,114 @@ func prepare_tutorial_world() -> void:
     if main != null and main.has_method("refresh_intro_knock_audio"):
         main.call("refresh_intro_knock_audio")
     await wait_physics_frames(20)
+
+func run_following_morning_outside_observation() -> void:
+    mark_progress("staging_following_morning")
+    sample_player("following_morning_player_house_start")
+    stage_following_morning_without_npc_forcing()
+    await wait_physics_frames(POST_ACTION_FRAMES)
+    if observer_camera != null and is_instance_valid(observer_camera):
+        observer_camera.make_current()
+    mark_progress("observing_following_morning_npcs")
+    await observe_following_morning_outside_targets(MORNING_OUTSIDE_TIMEOUT_SECONDS)
+
+func stage_following_morning_without_npc_forcing() -> void:
+    var tutorial = main.get("tutorial_system") if main != null else null
+    var before_state := tutorial_state_summary(tutorial)
+    if tutorial != null:
+        tutorial.set("intro_door_opened", true)
+        tutorial.set("intro_elder_dialogue_acknowledged", true)
+        tutorial.set("intro_repair_active", false)
+        tutorial.set("intro_repair_complete", true)
+        tutorial.set("intro_repair_chest_opened", true)
+        tutorial.set("intro_bed_used", true)
+    if main != null:
+        main.set("time_of_day", FOLLOWING_MORNING_TIME)
+        if main.has_method("update_sky"):
+            main.call("update_sky", 0.0)
+        if main.has_method("update_objectives_and_contracts"):
+            main.call("update_objectives_and_contracts")
+    var after_state := tutorial_state_summary(tutorial)
+    report_data["morningObservationSetup"] = {
+        "stagedTutorialMorning": true,
+        "forcedNpcActions": false,
+        "forcedNpcIds": [],
+        "playerStartsInHouse": true,
+        "activeCameraMode": "freeform_morning_observer",
+        "timeOfDay": rounded(float(main.get("time_of_day"))) if main != null else 0.0,
+        "displayHour": rounded(clock_display_hour()),
+        "tutorialBefore": before_state,
+        "tutorialAfter": after_state,
+        "playerStartSample": player_timeline[player_timeline.size() - 1] if not player_timeline.is_empty() else {}
+    }
+
+func observe_following_morning_outside_targets(seconds: float) -> void:
+    var frame_count := ceili(seconds * float(Engine.physics_ticks_per_second))
+    var settled_frames := 0
+    for frame in range(frame_count):
+        await get_tree().physics_frame
+        if frame % SAMPLE_EVERY_FRAMES == 0:
+            morning_outside_visual_matrix = morning_outside_target_matrix()
+            report_data["morningOutsideVisualMatrix"] = morning_outside_visual_matrix
+            schedule_matrix = npc_schedule_matrix()
+            morning_observation_timeline.append({
+                "label": "morning_outside_%03d" % frame,
+                "time": rounded(elapsed),
+                "timeOfDay": rounded(float(main.get("time_of_day"))) if main != null else 0.0,
+                "displayHour": rounded(clock_display_hour()),
+                "targets": morning_outside_visual_matrix
+            })
+            report_data["timeline"] = morning_observation_timeline
+            mark_progress("morning_outside_%03d" % frame)
+        if morning_targets_outside(morning_outside_visual_matrix):
+            settled_frames += 1
+        else:
+            settled_frames = 0
+        if settled_frames >= MIRA_HOME_SETTLED_FRAMES:
+            break
+    morning_outside_visual_matrix = morning_outside_target_matrix()
+    report_data["morningOutsideVisualMatrix"] = morning_outside_visual_matrix
+    var outside := morning_targets_outside(morning_outside_visual_matrix)
+    if not outside:
+        add_failure("following_morning_targets_not_outside", JSON.stringify(morning_outside_visual_matrix))
+        return
+    var group_capture_saved := false
+    var capture_map := {}
+    if visual_required:
+        group_capture_saved = await capture_morning_outside_group("morning_outside_group")
+        for npc_id in MORNING_OUTSIDE_TARGETS:
+            var entry := npc_entry(String(npc_id))
+            var stage := "morning_outside_%s" % safe_capture_id(String(npc_id))
+            capture_map[String(npc_id)] = await capture_npc_outside_stage(entry, stage)
+    morning_outside_visual_matrix = morning_outside_target_matrix(capture_map)
+    report_data["morningOutsideVisualMatrix"] = morning_outside_visual_matrix
+    report_data["morningOutsideGroupCaptureSaved"] = group_capture_saved
+    morning_observation_timeline.append({
+        "label": "morning_outside_visual_proof",
+        "time": rounded(elapsed),
+        "timeOfDay": rounded(float(main.get("time_of_day"))) if main != null else 0.0,
+        "displayHour": rounded(clock_display_hour()),
+        "groupCaptureSaved": group_capture_saved,
+        "captures": capture_names(),
+        "targets": morning_outside_visual_matrix
+    })
+    report_data["timeline"] = morning_observation_timeline
+    if visual_required and (not group_capture_saved or not morning_outside_captures_saved(capture_map)):
+        add_failure("following_morning_visual_captures_missing", JSON.stringify({
+            "groupCaptureSaved": group_capture_saved,
+            "targets": morning_outside_visual_matrix,
+            "captures": capture_names()
+        }))
+        return
+    results.append({
+        "name": "following_morning_rowan_mira_niko_outside_visual",
+        "passed": true,
+        "details": "targets=%s groupCapture=%s captures=%s" % [
+            JSON.stringify(MORNING_OUTSIDE_TARGETS),
+            str(group_capture_saved),
+            JSON.stringify(capture_names())
+        ]
+    })
 
 func run_real_knock_to_morning_foragers() -> void:
     var tutorial = main.get("tutorial_system")
@@ -427,6 +548,52 @@ func capture_npc_home_stage(entry: Dictionary, stage: String) -> bool:
     report_data["visualCaptures"] = visual_captures
     return err == OK
 
+func capture_morning_outside_group(stage: String) -> bool:
+    setup_observer_camera()
+    position_morning_group_observer_camera()
+    configure_observer_torch("wide")
+    await wait_process_frames(3)
+    var image := get_viewport().get_texture().get_image()
+    var path := screenshot_dir.path_join("%s.png" % stage)
+    var err := image.save_png(path)
+    var capture := {
+        "stage": stage,
+        "path": path,
+        "saved": err == OK,
+        "cameraMode": "freeform_morning_observer_group",
+        "time": rounded(elapsed),
+        "sample": {
+            "targets": morning_outside_target_matrix(),
+            "observerTorch": observer_torch_summary(),
+            "observerCamera": observer_camera_summary()
+        }
+    }
+    visual_captures.append(capture)
+    report_data["visualCaptures"] = visual_captures
+    return err == OK
+
+func capture_npc_outside_stage(entry: Dictionary, stage: String) -> bool:
+    if entry.is_empty():
+        return false
+    setup_observer_camera()
+    position_npc_outside_observer_camera(entry)
+    configure_observer_torch("wide")
+    await wait_process_frames(3)
+    var image := get_viewport().get_texture().get_image()
+    var path := screenshot_dir.path_join("%s.png" % stage)
+    var err := image.save_png(path)
+    var capture := {
+        "stage": stage,
+        "path": path,
+        "saved": err == OK,
+        "cameraMode": "freeform_morning_observer_npc",
+        "time": rounded(elapsed),
+        "sample": npc_outside_visual_sample(entry)
+    }
+    visual_captures.append(capture)
+    report_data["visualCaptures"] = visual_captures
+    return err == OK
+
 func position_npc_home_observer_camera(entry: Dictionary) -> void:
     if observer_camera == null:
         return
@@ -443,6 +610,48 @@ func position_npc_home_observer_camera(entry: Dictionary) -> void:
     var target := body_position + Vector3(0.0, CELL * 0.75, 0.0)
     var camera_position := body_position + inside_direction * CELL * 2.45 + side_direction * CELL * 0.65 + Vector3(0.0, CELL * 1.2, 0.0)
     camera_position.y = body_position.y + CELL * 1.15
+    observer_camera.global_position = camera_position
+    observer_camera.look_at(target, Vector3.UP)
+    last_observer_camera_target = target
+    observer_camera.make_current()
+
+func position_morning_group_observer_camera() -> void:
+    if observer_camera == null:
+        return
+    var positions: Array[Vector3] = []
+    for npc_id in MORNING_OUTSIDE_TARGETS:
+        var entry := npc_entry(String(npc_id))
+        var body := entry.get("body") as Node3D
+        if body != null and is_instance_valid(body):
+            positions.append(body.global_position)
+    var center := player.global_position if player != null else Vector3.ZERO
+    if not positions.is_empty():
+        center = Vector3.ZERO
+        for position in positions:
+            center += position
+        center /= float(positions.size())
+    var target := center + Vector3(0.0, CELL * 0.85, 0.0)
+    var camera_position := center + Vector3(CELL * 6.2, CELL * 3.7, CELL * 6.2)
+    observer_camera.global_position = camera_position
+    observer_camera.look_at(target, Vector3.UP)
+    last_observer_camera_target = target
+    observer_camera.make_current()
+
+func position_npc_outside_observer_camera(entry: Dictionary) -> void:
+    if observer_camera == null or entry.is_empty():
+        return
+    var body := entry.get("body") as Node3D
+    if body == null or not is_instance_valid(body):
+        return
+    var body_position := body.global_position
+    var home_position := entry_position(entry, "homePosition", body_position)
+    var away_from_home := Vector3(body_position.x - home_position.x, 0.0, body_position.z - home_position.z)
+    if away_from_home.length() < 0.05:
+        away_from_home = Vector3(1.0, 0.0, 1.0)
+    away_from_home = away_from_home.normalized()
+    var side_direction := Vector3(-away_from_home.z, 0.0, away_from_home.x)
+    var target := body_position + Vector3(0.0, CELL * 0.85, 0.0)
+    var camera_position := body_position + away_from_home * CELL * 4.0 + side_direction * CELL * 1.8 + Vector3(0.0, CELL * 1.75, 0.0)
     observer_camera.global_position = camera_position
     observer_camera.look_at(target, Vector3.UP)
     last_observer_camera_target = target
@@ -557,6 +766,24 @@ func npc_home_visual_sample(entry: Dictionary) -> Dictionary:
         "position": vec3(position)
     }
 
+func npc_outside_visual_sample(entry: Dictionary) -> Dictionary:
+    var body := entry.get("body") as Node3D
+    var door := npc_home_door(entry)
+    var position := body.global_position if body != null and is_instance_valid(body) else Vector3.ZERO
+    var home_status := strict_home_status(entry)
+    return {
+        "npc": npc_summary(entry) if not entry.is_empty() else {},
+        "outsideOwnHome": not bool(home_status.get("strictInside", false)) and not entry.is_empty(),
+        "strictHome": home_status,
+        "door": block_summary(door),
+        "doorPortal": door_portal_summary(door),
+        "doorOpen": bool(door.get_meta("open", false)) if door != null else false,
+        "distanceToDoor": rounded(flat_distance(position, door.global_position)) if door != null else -1.0,
+        "observerTorch": observer_torch_summary(),
+        "observerCamera": observer_camera_summary(),
+        "position": vec3(position)
+    }
+
 func observer_camera_summary() -> Dictionary:
     if observer_camera == null or not is_instance_valid(observer_camera):
         return {}
@@ -660,6 +887,41 @@ func required_mira_captures_saved() -> bool:
             saved[String(capture.get("stage", ""))] = true
     for stage in required:
         if not bool(saved.get(stage, false)):
+            return false
+    return true
+
+func morning_outside_target_matrix(capture_map := {}) -> Array[Dictionary]:
+    var rows: Array[Dictionary] = []
+    for npc_id_value in MORNING_OUTSIDE_TARGETS:
+        var npc_id := String(npc_id_value)
+        var entry := npc_entry(npc_id)
+        var found := not entry.is_empty()
+        var home_status := strict_home_status(entry)
+        var outside_home := found and not bool(home_status.get("strictInside", false))
+        var stage := "morning_outside_%s" % safe_capture_id(npc_id)
+        rows.append({
+            "id": npc_id,
+            "name": String(entry.get("name", "")) if found else "",
+            "found": found,
+            "outsideOwnHome": outside_home,
+            "stage": stage,
+            "captureSaved": bool(capture_map.get(npc_id, false)),
+            "strictHome": home_status,
+            "summary": npc_summary(entry) if found else {}
+        })
+    return rows
+
+func morning_targets_outside(rows: Array[Dictionary]) -> bool:
+    if rows.size() != MORNING_OUTSIDE_TARGETS.size():
+        return false
+    for row in rows:
+        if not bool(row.get("found", false)) or not bool(row.get("outsideOwnHome", false)):
+            return false
+    return true
+
+func morning_outside_captures_saved(capture_map: Dictionary) -> bool:
+    for npc_id_value in MORNING_OUTSIDE_TARGETS:
+        if not bool(capture_map.get(String(npc_id_value), false)):
             return false
     return true
 
@@ -1987,6 +2249,7 @@ func add_failure(code: String, details: String) -> void:
     report_data["results"] = results
     report_data["failureReasons"] = failure_reasons
     report_data["lastFailure"] = failure_reasons[failure_reasons.size() - 1]
+    report_data["timeline"] = morning_observation_timeline
     report_data["playerTimeline"] = player_timeline
     report_data["doorStateTimeline"] = door_timeline
     report_data["miraTimeline"] = mira_timeline
@@ -1994,6 +2257,7 @@ func add_failure(code: String, details: String) -> void:
     report_data["miraSpeedSamples"] = mira_speed_samples
     report_data["visualCaptures"] = visual_captures
     report_data["nonGuardHomeVisualMatrix"] = non_guard_home_visual_matrix
+    report_data["morningOutsideVisualMatrix"] = morning_outside_visual_matrix
     report_data["npcScheduleMatrix"] = schedule_matrix
     var mira := npc_entry("mira")
     if not mira.is_empty():
@@ -2011,6 +2275,7 @@ func finish() -> void:
     report_data["resultCount"] = results.size()
     report_data["results"] = results
     report_data["failureReasons"] = failure_reasons
+    report_data["timeline"] = morning_observation_timeline
     report_data["playerTimeline"] = player_timeline
     report_data["doorStateTimeline"] = door_timeline
     report_data["miraTimeline"] = mira_timeline
@@ -2018,6 +2283,7 @@ func finish() -> void:
     report_data["miraSpeedSamples"] = mira_speed_samples
     report_data["visualCaptures"] = visual_captures
     report_data["nonGuardHomeVisualMatrix"] = non_guard_home_visual_matrix
+    report_data["morningOutsideVisualMatrix"] = morning_outside_visual_matrix
     report_data["npcScheduleMatrix"] = schedule_matrix
     report_data["nightGuardNonGuardMatrix"] = night_matrix
     report_data["repairPlacementEvents"] = repair_placement_events
@@ -2114,3 +2380,8 @@ func vec2i_array_limited(values, limit := 8) -> Array:
 
 func rounded(value: float) -> float:
     return roundf(value * 1000.0) / 1000.0
+
+func clock_display_hour() -> float:
+    if main == null:
+        return 0.0
+    return fposmod(float(main.get("time_of_day")) + 0.25, 1.0) * 24.0

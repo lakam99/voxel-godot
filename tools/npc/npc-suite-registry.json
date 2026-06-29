@@ -146,6 +146,23 @@
       ],
       "requiresForbiddenCallSelfScan": true,
       "requiresVisualProof": true
+    },
+    {
+      "id": "real_tutorial_morning_outside",
+      "description": "Headed real tutorial following-morning NPC outside observation acceptance",
+      "command": ".\\tools\\npc\\run-real-tutorial-playthrough.ps1",
+      "defaultArgs": ["-TimeMode", "Both", "-Visible", "-MorningOutsideOnly"],
+      "supportsScreenshotDir": true,
+      "evidenceLevel": "acceptance_visual",
+      "acceptanceClaims": ["tutorial_following_morning_rowan_mira_niko_outside_visual"],
+      "requiredScreenshots": [
+        "morning_outside_group.png",
+        "morning_outside_rowan.png",
+        "morning_outside_mira.png",
+        "morning_outside_niko.png"
+      ],
+      "requiresForbiddenCallSelfScan": true,
+      "requiresVisualProof": true
     }
   ]
 }
