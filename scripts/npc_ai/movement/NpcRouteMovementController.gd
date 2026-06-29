@@ -1505,14 +1505,59 @@ func route_has_door_action(entry: Dictionary, door: Node) -> bool:
 
 func route_door_action(entry: Dictionary, door: Node) -> Dictionary:
     door = interaction_door_for_collider(door)
+    if door == null:
+        return {}
+    var door_portal_id := door_match_portal_id(door)
+    var door_group_id := door_match_group_id(door)
     var actions: Dictionary = entry.get("routeActions", {})
     for action_value in actions.values():
         if not (action_value is Dictionary):
             continue
         var action: Dictionary = action_value
-        if interaction_door_for_collider(action.get("door") as Node) == door:
+        if String(action.get("kind", "")) != "door":
+            continue
+        if route_action_matches_door(action, door, door_portal_id, door_group_id):
             return action
     return {}
+
+func route_action_matches_door(action: Dictionary, door: Node, door_portal_id: String, door_group_id: String) -> bool:
+    var action_door_value = action.get("door")
+    var action_door := interaction_door_for_collider(action_door_value as Node) if action_door_value is Node else null
+    if action_door == door:
+        return true
+    var action_portal_id := String(action.get("portalId", ""))
+    if action_portal_id != "" and door_portal_id != "" and action_portal_id == door_portal_id:
+        return true
+    if action_door != null:
+        var action_door_portal_id := door_match_portal_id(action_door)
+        if action_door_portal_id != "" and door_portal_id != "" and action_door_portal_id == door_portal_id:
+            return true
+        var action_group_id := door_match_group_id(action_door)
+        if action_group_id != "" and door_group_id != "" and action_group_id == door_group_id:
+            return true
+    return false
+
+func door_match_portal_id(door: Node) -> String:
+    door = interaction_door_for_collider(door)
+    if door == null:
+        return ""
+    if system != null:
+        var autonomy_system = system.get("autonomy_system")
+        if autonomy_system != null:
+            var door_portals = autonomy_system.get("door_portals")
+            if door_portals != null and door_portals.has_method("resolve_portal_id"):
+                var resolved := String(door_portals.resolve_portal_id(door, ""))
+                if resolved != "":
+                    return resolved
+    if door.has_meta("door_portal_id"):
+        return String(door.get_meta("door_portal_id"))
+    return ""
+
+func door_match_group_id(door: Node) -> String:
+    door = interaction_door_for_collider(door)
+    if door != null and door.has_meta("door_group_id"):
+        return String(door.get_meta("door_group_id"))
+    return ""
 
 func interaction_door_for_collider(collider: Node) -> Node:
     if collider == null:

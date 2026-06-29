@@ -5,9 +5,11 @@ param(
     [string]$GodotExe = "C:\Users\arkam\Downloads\Godot_v4.6.1-stable_win64.exe\Godot_v4.6.1-stable_win64_console.exe",
     [string]$ReportPath = "",
     [string]$ProgressPath = "",
+    [string]$ScreenshotDir = "",
     [int]$TimeoutSeconds = 470,
     [int]$StaleProgressSeconds = 45,
-    [switch]$Visible
+    [switch]$Visible,
+    [switch]$MiraHomeOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -20,17 +22,23 @@ if ($ReportPath -eq "") {
 if ($ProgressPath -eq "") {
     $ProgressPath = Join-Path $projectPath "artifacts\npc\progress\real-tutorial-playthrough.txt"
 }
+if ($ScreenshotDir -eq "") {
+    $ScreenshotDir = Join-Path $projectPath "artifacts\npc\screenshots\real-tutorial-playthrough"
+}
 $ReportPath = [System.IO.Path]::GetFullPath($ReportPath)
 $ProgressPath = [System.IO.Path]::GetFullPath($ProgressPath)
+$ScreenshotDir = [System.IO.Path]::GetFullPath($ScreenshotDir)
 $logDir = Join-Path $projectPath "artifacts\npc\logs"
 $outLog = Join-Path $logDir "real-tutorial-playthrough.out.log"
 $errLog = Join-Path $logDir "real-tutorial-playthrough.err.log"
 
 New-Item -ItemType Directory -Force -Path ([System.IO.Path]::GetDirectoryName($ReportPath)) | Out-Null
 New-Item -ItemType Directory -Force -Path ([System.IO.Path]::GetDirectoryName($ProgressPath)) | Out-Null
+New-Item -ItemType Directory -Force -Path $ScreenshotDir | Out-Null
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 Remove-Item -LiteralPath $ReportPath -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath $ProgressPath -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath (Join-Path $ScreenshotDir "*.png") -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath $outLog -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath $errLog -ErrorAction SilentlyContinue
 
@@ -87,6 +95,9 @@ $env:VOXEL_PLAYTEST = "1"
 $env:VOXEL_TEST_SEED = $Seed
 $env:VOXEL_REAL_TUTORIAL_REPORT = $ReportPath
 $env:VOXEL_REAL_TUTORIAL_PROGRESS = $ProgressPath
+$env:VOXEL_REAL_TUTORIAL_SCREENSHOT_DIR = $ScreenshotDir
+$env:VOXEL_REAL_TUTORIAL_VISUAL_REQUIRED = if ($Visible) { "1" } else { "0" }
+$env:VOXEL_REAL_TUTORIAL_MIRA_HOME_ONLY = if ($MiraHomeOnly) { "1" } else { "0" }
 $env:VOXEL_REAL_TUTORIAL_RUN_TOKEN = $runToken
 $env:VOXEL_REAL_TUTORIAL_WATCHDOG_SECONDS = [string]$TimeoutSeconds
 $env:VOXEL_GIT_BRANCH = $branch
@@ -167,7 +178,7 @@ function Set-ReportDiagnostics([int]$ExitCode, [string]$StopReason) {
     $report | ConvertTo-Json -Depth 24 | Set-Content -LiteralPath $ReportPath
 }
 
-$godotArgs = @("--fixed-fps", "60", "--path", $projectPath, "--scene", "res://scenes/testing/npc/NpcRealTutorialPlaythroughTest.tscn")
+$godotArgs = @("--fixed-fps", "60", "--resolution", "1280x720", "--path", $projectPath, "--scene", "res://scenes/testing/npc/NpcRealTutorialPlaythroughTest.tscn")
 if (-not $Visible) {
     $godotArgs = @("--headless") + $godotArgs
 }
@@ -266,6 +277,27 @@ $lastFailureCode = ""
 if ($null -ne $report.lastFailure) {
     $lastFailureCode = [string]$report.lastFailure.code
 }
+if ($Visible) {
+    if ($true -ne $report.nonHeadlessVisualRequired) {
+        Write-Error "Visible tutorial run did not mark nonHeadlessVisualRequired=true"
+        Get-Content -LiteralPath $ReportPath
+        exit 1
+    }
+    $requiredScreenshots = @(
+        "mira_go_home_start.png",
+        "mira_at_home_door.png",
+        "mira_home_door_open.png",
+        "mira_inside_home_closed_door.png"
+    )
+    foreach ($fileName in $requiredScreenshots) {
+        $path = Join-Path $ScreenshotDir $fileName
+        if (-not (Test-Path -LiteralPath $path)) {
+            Write-Error "Missing visible tutorial proof screenshot: $path"
+            Get-Content -LiteralPath $ReportPath
+            exit 1
+        }
+    }
+}
 [pscustomobject]@{
     schemaVersion = [int]$report.schemaVersion
     testId = [string]$report.testId
@@ -277,6 +309,7 @@ if ($null -ne $report.lastFailure) {
     processExitCode = [int]$report.processExitCode
     processStopReason = [string]$report.processStopReason
     lastFailureCode = $lastFailureCode
+    miraHomeOnly = [bool]$report.miraHomeOnly
     reportPath = $ReportPath
 } | ConvertTo-Json -Depth 4
 $wrapperExitCode = [int]$exitCode

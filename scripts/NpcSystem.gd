@@ -1592,6 +1592,15 @@ func settle_home_if_reached(entry: Dictionary) -> void:
     if autonomy_system != null and autonomy_system.has_method("is_inside_home_interior"):
         inside_semantic = bool(autonomy_system.is_inside_home_interior(entry, body.global_position))
     if inside_semantic:
+        if body_occupies_open_door_clearance(entry):
+            entry["homeSettleDebug"] = {
+                "insideSemantic": true,
+                "doorClearanceOccupied": true,
+                "routeStatus": String(entry.get("routeStatus", "")),
+                "currentCell": flat_cell_for_position(body.global_position),
+                "activeDoorPortalId": String(entry.get("activeDoorPortalId", ""))
+            }
+            return
         mark_npc_inside_home(entry)
         return
     var home_cell: Vector2i = entry.get("homeCell", Vector2i.ZERO)
@@ -1636,6 +1645,22 @@ func settle_home_if_reached(entry: Dictionary) -> void:
     }
     if target_is_home and route_terminal and fallback_supports_safe_edge and at_safe_porch:
         mark_npc_home_blocked(entry, "home_porch_fallback_not_inside")
+
+func body_occupies_open_door_clearance(entry: Dictionary) -> bool:
+    if autonomy_system == null or autonomy_system.door_portals == null:
+        return false
+    var body := entry.get("body") as Node3D
+    if body == null or not is_instance_valid(body):
+        return false
+    var portals: Dictionary = autonomy_system.door_portals.portals
+    for portal_value in portals.values():
+        if portal_value == null:
+            continue
+        if portal_value.state != NpcEnumsScript.DOOR_STATE_OPEN:
+            continue
+        if not portal_value.occupied_actors([body], "clearance").is_empty():
+            return true
+    return false
 
 func mark_npc_home_blocked(entry: Dictionary, reason := "home_blocked") -> void:
     var body := entry.get("body") as Node3D

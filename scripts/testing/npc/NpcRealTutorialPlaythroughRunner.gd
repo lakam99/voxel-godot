@@ -7,11 +7,16 @@ const STARTUP_FRAMES := 80
 const POST_ACTION_FRAMES := 24
 const SAMPLE_EVERY_FRAMES := 6
 const MIRA_HOME_TIMEOUT_SECONDS := 36.0
+const MIRA_HOME_SETTLED_FRAMES := 30
 const MORNING_FORAGE_TIMEOUT_SECONDS := 70.0
+const CAPTURE_WIDTH := 1280
+const CAPTURE_HEIGHT := 720
 
 var main: Node3D
 var player: CharacterBody3D
 var camera: Camera3D
+var observer_camera: Camera3D
+var observer_torch: OmniLight3D
 var elapsed := 0.0
 var finished := false
 var failed := false
@@ -31,16 +36,26 @@ var inventory_timeline: Array[Dictionary] = []
 var interaction_timeline: Array[Dictionary] = []
 var morning_departure_matrix: Array[Dictionary] = []
 var niko_timeline: Array[Dictionary] = []
+var visual_captures: Array[Dictionary] = []
 var niko_proof := {}
 var max_mira_flat_speed := 0.0
 var mira_total_flat_distance := 0.0
 var previous_mira_position := Vector3.ZERO
 var previous_mira_valid := false
+var previous_mira_elapsed := 0.0
 var physics_dt := 1.0 / 60.0
 var gameplay_started := false
+var screenshot_dir := ""
+var visual_required := false
+var mira_home_only := false
+var captured_mira_start := false
+var captured_mira_at_door := false
+var captured_mira_door_open := false
+var captured_mira_inside_closed := false
 
 func _ready() -> void:
     physics_dt = 1.0 / float(Engine.physics_ticks_per_second)
+    configure_visual_capture()
     call_deferred("run")
 
 func _process(delta: float) -> void:
@@ -52,6 +67,14 @@ func _process(delta: float) -> void:
         add_failure("runner_watchdog", "runner exceeded %.1f seconds" % limit)
         finish()
 
+func configure_visual_capture() -> void:
+    visual_required = OS.get_environment("VOXEL_REAL_TUTORIAL_VISUAL_REQUIRED").strip_edges() == "1"
+    mira_home_only = OS.get_environment("VOXEL_REAL_TUTORIAL_MIRA_HOME_ONLY").strip_edges() == "1"
+    screenshot_dir = OS.get_environment("VOXEL_REAL_TUTORIAL_SCREENSHOT_DIR")
+    if screenshot_dir == "":
+        screenshot_dir = ProjectSettings.globalize_path("res://artifacts/npc/screenshots/real-tutorial-playthrough")
+    ensure_dir(screenshot_dir)
+
 func run() -> void:
     mark_progress("start")
     report_data = {
@@ -61,6 +84,10 @@ func run() -> void:
         "runToken": OS.get_environment("VOXEL_REAL_TUTORIAL_RUN_TOKEN"),
         "gitBranch": OS.get_environment("VOXEL_GIT_BRANCH"),
         "gitCommit": OS.get_environment("VOXEL_GIT_COMMIT"),
+        "nonHeadlessVisualRequired": visual_required,
+        "miraHomeOnly": mira_home_only,
+        "screenshotDir": screenshot_dir,
+        "visualCaptures": visual_captures,
         "deterministicSetup": {},
         "scriptErrorScan": { "status": "pending-wrapper-scan", "matches": [] },
         "forbiddenCallSelfScan": { "status": "passed-by-wrapper-before-launch" }
@@ -84,6 +111,7 @@ func run() -> void:
     player.set("automated_move", Vector3.ZERO)
     player.set("automated_sprint", false)
     Input.set_mouse_mode(Input.MOUSE_MODE_VISIBLE)
+    setup_observer_camera()
     gameplay_started = true
     mark_progress("gameplay_started")
 
@@ -162,6 +190,8 @@ func run_real_knock_to_morning_foragers() -> void:
 
     mark_progress("observing_mira_return_home")
     await observe_mira_until_home(MIRA_HOME_TIMEOUT_SECONDS)
+    if visual_required and not captured_mira_inside_closed:
+        await capture_mira_stage("mira_timeout_final_state", "front")
     var mira := npc_entry("mira")
     var speed_limit := profile_speed_limit(mira)
     report_data["miraSpeedLimit"] = rounded(speed_limit)
@@ -186,6 +216,16 @@ func run_real_knock_to_morning_foragers() -> void:
         })
     if not bool(report_data["miraFinalHomeInteriorStatus"].get("strictInside", false)):
         add_failure("mira_did_not_reach_strict_home_interior", JSON.stringify(report_data["miraFinalHomeInteriorStatus"]))
+    elif visual_required and not required_mira_captures_saved():
+        add_failure("mira_visual_captures_missing", JSON.stringify(capture_names()))
+    elif mira_home_only:
+        results.append({
+            "name": "mira_real_tutorial_go_home_visual",
+            "passed": true,
+            "details": "Mira reached strict home interior and the home door closed; captures=%s" % JSON.stringify(capture_names())
+        })
+    if mira_home_only:
+        return
     await observe_night_matrix_until_ready(120.0)
     night_matrix = validate_night_matrix()
     report_data["nightGuardNonGuardMatrix"] = night_matrix
@@ -228,7 +268,13 @@ func observe_mira_until_home(seconds: float) -> void:
         track_mira_speed()
         var mira := npc_entry("mira")
         var home_status := strict_home_status(mira)
-        if bool(home_status.get("strictInside", false)):
+        if visual_required:
+            await maybe_capture_mira_return_home(frame, mira, home_status)
+        var strict_inside := bool(home_status.get("strictInside", false))
+        var visual_settled := true
+        if visual_required:
+            visual_settled = captured_mira_inside_closed and not any_mira_home_door_open(mira)
+        if strict_inside and visual_settled:
             settled_frames += 1
         else:
             settled_frames = 0
@@ -238,8 +284,222 @@ func observe_mira_until_home(seconds: float) -> void:
             route_order_timeline.append(route_order_sample("mira_home_%03d" % frame))
             schedule_matrix = npc_schedule_matrix()
             mark_progress("mira_home_%03d" % frame)
-        if settled_frames >= 30:
+        if settled_frames >= MIRA_HOME_SETTLED_FRAMES:
             break
+
+func maybe_capture_mira_return_home(frame: int, mira: Dictionary, home_status: Dictionary) -> void:
+    if mira.is_empty():
+        return
+    if not captured_mira_start:
+        await capture_mira_stage("mira_go_home_start", "wide")
+        captured_mira_start = true
+    var door := mira_home_door(mira)
+    if door == null:
+        return
+    var body := mira.get("body") as Node3D
+    if body == null or not is_instance_valid(body):
+        return
+    var distance_to_door := flat_distance(body.global_position, door.global_position)
+    var door_open := bool(door.get_meta("open", false))
+    if not captured_mira_at_door and distance_to_door <= CELL * 1.9:
+        await capture_mira_stage("mira_at_home_door", "front")
+        captured_mira_at_door = true
+    if not captured_mira_door_open and door_open:
+        await capture_mira_stage("mira_home_door_open", "front")
+        captured_mira_door_open = true
+    if not captured_mira_inside_closed and bool(home_status.get("strictInside", false)) and not any_mira_home_door_open(mira):
+        await capture_mira_stage("mira_inside_home_closed_door", "inside")
+        captured_mira_inside_closed = true
+
+func setup_observer_camera() -> void:
+    if observer_camera != null and is_instance_valid(observer_camera):
+        return
+    observer_camera = Camera3D.new()
+    observer_camera.name = "RealTutorialMiraObserverCamera"
+    observer_camera.fov = 62.0
+    observer_camera.near = 0.04
+    add_child(observer_camera)
+    observer_torch = OmniLight3D.new()
+    observer_torch.name = "RealTutorialObserverTorch"
+    observer_torch.light_color = Color(1.0, 0.72, 0.42)
+    observer_torch.light_energy = 3.8
+    observer_torch.omni_range = CELL * 9.0
+    observer_torch.shadow_enabled = false
+    observer_torch.set_meta("visual_test_torch", true)
+    observer_camera.add_child(observer_torch)
+
+func capture_mira_stage(stage: String, camera_mode: String) -> void:
+    setup_observer_camera()
+    position_mira_observer_camera(camera_mode)
+    configure_observer_torch(camera_mode)
+    await wait_process_frames(3)
+    var image := get_viewport().get_texture().get_image()
+    var path := screenshot_dir.path_join("%s.png" % stage)
+    var err := image.save_png(path)
+    var mira := npc_entry("mira")
+    var capture := {
+        "stage": stage,
+        "path": path,
+        "saved": err == OK,
+        "cameraMode": camera_mode,
+        "time": rounded(elapsed),
+        "sample": mira_visual_sample(mira)
+    }
+    visual_captures.append(capture)
+    report_data["visualCaptures"] = visual_captures
+
+func position_mira_observer_camera(mode: String) -> void:
+    if observer_camera == null:
+        return
+    var mira := npc_entry("mira")
+    var body := mira.get("body") as Node3D
+    var body_position := body.global_position if body != null and is_instance_valid(body) else player.global_position
+    var door := mira_home_door(mira)
+    var door_position := door.global_position if door != null else body_position
+    var home_position := entry_position(mira, "homePosition", door_position)
+    var porch_position := entry_position(mira, "porchPosition", door_position)
+    var level := maxf(home_position.y, body_position.y)
+    var outside_direction := Vector3(porch_position.x - home_position.x, 0.0, porch_position.z - home_position.z)
+    if outside_direction.length() < 0.05:
+        outside_direction = Vector3(0.0, 0.0, -1.0)
+    outside_direction = outside_direction.normalized()
+    var side_direction := Vector3(-outside_direction.z, 0.0, outside_direction.x)
+    var target := door_position + Vector3(0.0, CELL * 0.85, 0.0)
+    var camera_position := door_position + outside_direction * CELL * 8.5 + Vector3(0.0, CELL * 3.2, 0.0)
+    var camera_height := CELL * 3.2
+    if mode == "wide":
+        target = (body_position + home_position) * 0.5 + Vector3(0.0, CELL * 1.0, 0.0)
+        camera_position = body_position + outside_direction * CELL * 7.0 + side_direction * CELL * 5.5 + Vector3(0.0, CELL * 5.0, 0.0)
+        camera_height = CELL * 5.0
+    elif mode == "inside":
+        target = (body_position + door_position) * 0.5 + Vector3(0.0, CELL * 0.85, 0.0)
+        camera_position = body_position - outside_direction * CELL * 2.15 + side_direction * CELL * 1.15 + Vector3(0.0, CELL * 1.05, 0.0)
+        camera_height = CELL * 1.05
+    if mode == "inside":
+        camera_position.y = level + camera_height
+    else:
+        camera_position.y = maxf(camera_position.y, level + camera_height)
+    observer_camera.global_position = camera_position
+    observer_camera.look_at(target, Vector3.UP)
+    observer_camera.make_current()
+
+func configure_observer_torch(mode: String) -> void:
+    if observer_torch == null or not is_instance_valid(observer_torch):
+        return
+    observer_torch.position = Vector3.ZERO
+    observer_torch.visible = true
+    if mode == "inside":
+        observer_torch.light_energy = 5.5
+        observer_torch.omni_range = CELL * 6.0
+    elif mode == "wide":
+        observer_torch.light_energy = 4.5
+        observer_torch.omni_range = CELL * 12.0
+    else:
+        observer_torch.light_energy = 4.8
+        observer_torch.omni_range = CELL * 10.0
+
+func mira_visual_sample(mira: Dictionary) -> Dictionary:
+    var body := mira.get("body") as Node3D
+    var door := mira_home_door(mira)
+    var position := body.global_position if body != null and is_instance_valid(body) else Vector3.ZERO
+    return {
+        "mira": npc_summary(mira) if not mira.is_empty() else {},
+        "strictHome": strict_home_status(mira),
+        "door": block_summary(door),
+        "doorPortal": door_portal_summary(door),
+        "doorOpen": bool(door.get_meta("open", false)) if door != null else false,
+        "distanceToDoor": rounded(flat_distance(position, door.global_position)) if door != null else -1.0,
+        "observerTorch": observer_torch_summary(),
+        "position": vec3(position)
+    }
+
+func observer_torch_summary() -> Dictionary:
+    if observer_torch == null or not is_instance_valid(observer_torch):
+        return {}
+    return {
+        "enabled": observer_torch.visible,
+        "energy": rounded(observer_torch.light_energy),
+        "range": rounded(observer_torch.omni_range)
+    }
+
+func door_portal_summary(door: Node) -> Dictionary:
+    if door == null or main == null:
+        return {}
+    var npc_system = main.get("npc_system")
+    if npc_system == null:
+        return {}
+    var autonomy = npc_system.get("autonomy_system")
+    if autonomy == null:
+        return {}
+    var door_portals = autonomy.get("door_portals")
+    if door_portals == null or not door_portals.has_method("portal_for_door"):
+        return {}
+    var portal = door_portals.call("portal_for_door", door)
+    if portal == null or not portal.has_method("to_summary"):
+        return {}
+    return portal.call("to_summary")
+
+func mira_home_door(mira: Dictionary) -> Node3D:
+    if mira.is_empty() or main == null:
+        return null
+    var blocks_value = main.get("blocks")
+    if not (blocks_value is Dictionary):
+        return null
+    var porch_position := entry_position(mira, "porchPosition", entry_position(mira, "homePosition", Vector3.ZERO))
+    var home_position := entry_position(mira, "homePosition", porch_position)
+    var best: Node3D = null
+    var best_distance := INF
+    for block_value in (blocks_value as Dictionary).values():
+        var block := block_value as Node3D
+        if block == null or not is_instance_valid(block):
+            continue
+        if String(block.get_meta("block_type", "")) != "door":
+            continue
+        var distance := minf(flat_distance(block.global_position, porch_position), flat_distance(block.global_position, home_position))
+        if distance < best_distance:
+            best_distance = distance
+            best = block
+    return best
+
+func any_mira_home_door_open(mira: Dictionary) -> bool:
+    var door := mira_home_door(mira)
+    if door == null:
+        return false
+    var group_id := String(door.get_meta("door_group_id", ""))
+    var portal_id := String(door.get_meta("door_portal_id", ""))
+    var blocks_value = main.get("blocks") if main != null else {}
+    if not (blocks_value is Dictionary):
+        return bool(door.get_meta("open", false))
+    for block_value in (blocks_value as Dictionary).values():
+        var block := block_value as Node
+        if block == null or not is_instance_valid(block):
+            continue
+        if String(block.get_meta("block_type", "")) != "door":
+            continue
+        var same_group := group_id != "" and String(block.get_meta("door_group_id", "")) == group_id
+        var same_portal := portal_id != "" and String(block.get_meta("door_portal_id", "")) == portal_id
+        if (same_group or same_portal or block == door) and bool(block.get_meta("open", false)):
+            return true
+    return false
+
+func required_mira_captures_saved() -> bool:
+    if not visual_required:
+        return true
+    var required := ["mira_go_home_start", "mira_at_home_door", "mira_home_door_open", "mira_inside_home_closed_door"]
+    var saved := {}
+    for capture in visual_captures:
+        if bool(capture.get("saved", false)):
+            saved[String(capture.get("stage", ""))] = true
+    for stage in required:
+        if not bool(saved.get(stage, false)):
+            return false
+    return true
+
+func capture_names() -> Array[String]:
+    var names: Array[String] = []
+    for capture in visual_captures:
+        names.append(String(capture.get("stage", "")))
+    return names
 
 func observe_night_matrix_until_ready(seconds: float) -> void:
     var frame_count := ceili(seconds * float(Engine.physics_ticks_per_second))
@@ -529,19 +789,23 @@ func track_mira_speed() -> void:
     var mira := npc_entry("mira")
     if mira.is_empty():
         previous_mira_valid = false
+        previous_mira_elapsed = elapsed
         return
     var body := mira.get("body") as Node3D
     if body == null or not is_instance_valid(body):
         previous_mira_valid = false
+        previous_mira_elapsed = elapsed
         return
     var current := body.global_position
     if previous_mira_valid:
         var flat_delta := Vector2(current.x - previous_mira_position.x, current.z - previous_mira_position.z).length()
         mira_total_flat_distance += flat_delta
-        var speed := flat_delta / maxf(physics_dt, 0.0001)
+        var sample_dt := maxf(elapsed - previous_mira_elapsed, physics_dt)
+        var speed := flat_delta / maxf(sample_dt, 0.0001)
         max_mira_flat_speed = maxf(max_mira_flat_speed, speed)
         mira_speed_samples.append({
             "time": rounded(elapsed),
+            "sampleDt": rounded(sample_dt),
             "flatSpeed": rounded(speed),
             "flatDelta": rounded(flat_delta),
             "position": vec3(current),
@@ -550,6 +814,7 @@ func track_mira_speed() -> void:
             "routeReason": String(mira.get("routeReason", ""))
         })
     previous_mira_position = current
+    previous_mira_elapsed = elapsed
     previous_mira_valid = true
 
 func walk_near(target: Vector3, stop_distance: float, timeout_seconds: float, label := "walking") -> bool:
@@ -987,6 +1252,15 @@ func world_position_for_flat_coords(cell_x: float, cell_z: float) -> Vector3:
         y = float(main.call("height_at_world", x, z)) + 0.08
     return Vector3(x, y, z)
 
+func entry_position(entry: Dictionary, key: String, fallback: Vector3) -> Vector3:
+    var value = entry.get(key, fallback)
+    if value is Vector3:
+        return value
+    return fallback
+
+func flat_distance(a: Vector3, b: Vector3) -> float:
+    return Vector2(a.x - b.x, a.z - b.z).length()
+
 func aim_at(target: Vector3) -> void:
     if player == null or camera == null:
         return
@@ -1100,6 +1374,15 @@ func runtime_action_state() -> Dictionary:
 func wait_physics_frames(count: int) -> void:
     for i in range(count):
         await get_tree().physics_frame
+
+func wait_process_frames(count: int) -> void:
+    for i in range(count):
+        await get_tree().process_frame
+
+func ensure_dir(path: String) -> void:
+    if path == "":
+        return
+    DirAccess.make_dir_recursive_absolute(path)
 
 func bind_scene_nodes() -> void:
     if main == null:
@@ -1541,6 +1824,7 @@ func add_failure(code: String, details: String) -> void:
     report_data["miraTimeline"] = mira_timeline
     report_data["miraRouteOrderTimeline"] = route_order_timeline
     report_data["miraSpeedSamples"] = mira_speed_samples
+    report_data["visualCaptures"] = visual_captures
     report_data["npcScheduleMatrix"] = schedule_matrix
     var mira := npc_entry("mira")
     if not mira.is_empty():
@@ -1563,6 +1847,7 @@ func finish() -> void:
     report_data["miraTimeline"] = mira_timeline
     report_data["miraRouteOrderTimeline"] = route_order_timeline
     report_data["miraSpeedSamples"] = mira_speed_samples
+    report_data["visualCaptures"] = visual_captures
     report_data["npcScheduleMatrix"] = schedule_matrix
     report_data["nightGuardNonGuardMatrix"] = night_matrix
     report_data["repairPlacementEvents"] = repair_placement_events

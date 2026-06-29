@@ -162,6 +162,8 @@ func cases() -> Array[Dictionary]:
 		case("npc_behavior_action_interrupt_releases_resources", "day", "test_action_interrupt_releases_resources"),
 		case("npc_behavior_scripted_order_priority_and_cancel", "day", "test_scripted_order_priority_and_cancel"),
 		case("npc_behavior_scripted_order_go_home_uses_route_stack", "day", "test_scripted_order_go_home_uses_route_stack"),
+		case("npc_behavior_scripted_go_home_arrival_clears_cached_motion", "day", "test_scripted_go_home_arrival_clears_cached_motion"),
+		case("npc_behavior_scripted_go_home_hold_arrival_stays_home", "day", "test_scripted_go_home_hold_arrival_stays_home"),
 		case("npc_behavior_scripted_order_normal_profile_speed", "day", "test_scripted_order_normal_profile_speed"),
 		case("npc_behavior_scripted_order_no_transform_write", "day", "test_scripted_order_no_transform_write"),
 		case("npc_behavior_mira_dialogue_ack_releases_go_home_order", "day", "test_mira_dialogue_ack_releases_go_home_order"),
@@ -453,6 +455,52 @@ func test_scripted_order_go_home_uses_route_stack(_mode: String) -> Dictionary:
 	var passed: bool = fake_npc.move_calls > 0 and fake_npc.moving_home_calls == fake_npc.move_calls and not body.has_meta("npc_scripted_target") and String(order.get("state", "")) in ["ACTIVE", "ARRIVED"]
 	fake_npc.queue_free()
 	return outcome(passed, "moveCalls=%d homeCalls=%d targetMeta=%s order=%s" % [fake_npc.move_calls, fake_npc.moving_home_calls, str(body.has_meta("npc_scripted_target")), JSON.stringify(order)], ["go_home_uses_home_route", "go_home_no_scripted_target", "order_state_recorded"], { "order": order })
+
+func test_scripted_go_home_arrival_clears_cached_motion(_mode: String) -> Dictionary:
+	var fake_npc := FakeNpcSystem.new()
+	var executor: Variant = make_executor(fake_npc)
+	var entry_data := entry("Villager", { "id": "go_home_done", "position": Vector3.ZERO, "homeCell": Vector2i(6, 0), "homePosition": Vector3(8.1, 0.0, 0.0) })
+	var body := entry_data.get("body") as Node3D
+	entry_data["activeGoalKind"] = "home"
+	entry_data["activeMotionGoal"] = { "goalKind": NpcEnumsScript.GOAL_KIND_HOME, "reason": "scripted_go_home_order" }
+	entry_data["activeMotionSchedule"] = { "scheduleState": NpcEnumsScript.SCHEDULE_STATE_DAY, "mustBeInside": false }
+	entry_data["scriptedOrder"] = { "kind": "go_home", "state": "ARRIVED", "reason": "home_interior_reached" }
+	body.set_meta("npc_scripted_order_kind", "go_home")
+	body.set_meta("npc_scripted_order_state", "ARRIVED")
+	body.set_meta("npc_scripted_order_reason", "home_interior_reached")
+	var result: Dictionary = executor.advance_motion_npc(entry_data, 1.0 / 60.0, 0.0)
+	var passed: bool = fake_npc.move_calls == 0 and String(result.get("reason", "")) == "idle_no_anchor"
+	fake_npc.queue_free()
+	return outcome(
+		passed,
+		"moveCalls=%d result=%s" % [fake_npc.move_calls, JSON.stringify(result)],
+		["completed_go_home_cache_not_reused", "completed_go_home_does_not_walk_back_out"],
+		{ "moveCalls": fake_npc.move_calls, "result": result }
+	)
+
+func test_scripted_go_home_hold_arrival_stays_home(_mode: String) -> Dictionary:
+	var fake_npc := FakeNpcSystem.new()
+	var executor: Variant = make_executor(fake_npc)
+	var entry_data := entry("Villager", { "id": "go_home_hold", "position": Vector3.ZERO, "homeCell": Vector2i(0, 0), "homePosition": Vector3.ZERO })
+	var body := entry_data.get("body") as Node3D
+	entry_data["insideHome"] = true
+	entry_data["activeMotionGoal"] = { "goalKind": NpcEnumsScript.GOAL_KIND_IDLE, "reason": "highest_utility" }
+	entry_data["scriptedOrder"] = { "kind": "go_home", "state": "ARRIVED", "reason": "home_interior_reached", "holdOnArrival": true }
+	body.set_meta("npc_inside_home", true)
+	body.set_meta("npc_scripted_order_kind", "go_home")
+	body.set_meta("npc_scripted_order_state", "ARRIVED")
+	body.set_meta("npc_scripted_order_reason", "home_interior_reached")
+	body.set_meta("npc_scripted_hold_on_arrival", true)
+	var result: Dictionary = executor.advance_motion_npc(entry_data, 1.0 / 60.0, 0.0)
+	var order: Dictionary = entry_data.get("scriptedOrder", {})
+	var passed: bool = fake_npc.move_calls == 0 and bool(result.get("advanced", false)) and String(result.get("intentKind", "")) == "home" and String(order.get("state", "")) == "ARRIVED"
+	fake_npc.queue_free()
+	return outcome(
+		passed,
+		"moveCalls=%d result=%s order=%s" % [fake_npc.move_calls, JSON.stringify(result), JSON.stringify(order)],
+		["held_go_home_arrival_keeps_home_goal", "held_go_home_does_not_resume_idle"],
+		{ "moveCalls": fake_npc.move_calls, "result": result, "order": order }
+	)
 
 func test_scripted_order_normal_profile_speed(_mode: String) -> Dictionary:
 	var fake_npc := FakeNpcSystem.new()

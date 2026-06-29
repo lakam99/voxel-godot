@@ -139,6 +139,7 @@ func _cache_motion_intent(entry: Dictionary, goal: Dictionary, plan: Dictionary,
 
 func _cached_goal_for_motion(entry: Dictionary, body: Node3D, current_night_factor := 0.0) -> Dictionary:
 	var order_kind := _scripted_order_kind(body)
+	var active_scripted_order := order_kind != "" or body.has_meta("npc_scripted_target")
 	if order_kind == "go_home":
 		return { "goalKind": NpcEnumsScript.GOAL_KIND_HOME, "reason": "scripted_go_home_order" }
 	if order_kind in ["go_to", "wait", "face_player"]:
@@ -146,18 +147,24 @@ func _cached_goal_for_motion(entry: Dictionary, body: Node3D, current_night_fact
 	if body.has_meta("npc_scripted_target"):
 		return { "goalKind": NpcEnumsScript.GOAL_KIND_SCRIPTED, "reason": "scripted_target" }
 	var cached = entry.get("activeMotionGoal", {})
+	var stale_scripted_cache := false
 	if cached is Dictionary and not (cached as Dictionary).is_empty():
 		var cached_kind := String((cached as Dictionary).get("goalKind", ""))
 		var cached_schedule: Dictionary = entry.get("activeMotionSchedule", {}) if entry.get("activeMotionSchedule", {}) is Dictionary else {}
 		var cached_reason := String((cached as Dictionary).get("reason", ""))
-		var current_home_time := current_night_factor > 0.05
-		var cached_requires_home := current_home_time and (bool(cached_schedule.get("mustBeInside", false)) or String(cached_schedule.get("scheduleState", "")) in [String(NpcEnumsScript.SCHEDULE_STATE_DUSK), String(NpcEnumsScript.SCHEDULE_STATE_NIGHT)])
-		if cached_kind == String(NpcEnumsScript.GOAL_KIND_SCRIPTED):
-			return cached
-		if cached_kind == String(NpcEnumsScript.GOAL_KIND_HOME) and (cached_requires_home or cached_reason.begins_with("scripted_")):
-			return cached
-		if cached_kind == String(NpcEnumsScript.GOAL_KIND_GUARD) and (bool(cached_schedule.get("activeGuardDuty", false)) or cached_reason.find("threat") >= 0):
-			return cached
+		var cached_from_script := cached_kind == String(NpcEnumsScript.GOAL_KIND_SCRIPTED) or cached_reason == "active_scripted_order" or cached_reason.begins_with("scripted_")
+		if cached_from_script and not active_scripted_order:
+			stale_scripted_cache = true
+			cached = {}
+		else:
+			var current_home_time := current_night_factor > 0.05
+			var cached_requires_home := current_home_time and (bool(cached_schedule.get("mustBeInside", false)) or String(cached_schedule.get("scheduleState", "")) in [String(NpcEnumsScript.SCHEDULE_STATE_DUSK), String(NpcEnumsScript.SCHEDULE_STATE_NIGHT)])
+			if cached_kind == String(NpcEnumsScript.GOAL_KIND_SCRIPTED):
+				return cached
+			if cached_kind == String(NpcEnumsScript.GOAL_KIND_HOME) and cached_requires_home:
+				return cached
+			if cached_kind == String(NpcEnumsScript.GOAL_KIND_GUARD) and (bool(cached_schedule.get("activeGuardDuty", false)) or cached_reason.find("threat") >= 0):
+				return cached
 	var active_job_phase := String(entry.get("jobPhase", "idle"))
 	if active_job_phase in ["outbound", "searching", "gathering", "returning", "stall"]:
 		var active_job := String(entry.get("job", ""))
@@ -167,6 +174,8 @@ func _cached_goal_for_motion(entry: Dictionary, body: Node3D, current_night_fact
 			return { "goalKind": NpcEnumsScript.GOAL_KIND_WORK, "reason": "active_job_phase" }
 	if cached is Dictionary and not (cached as Dictionary).is_empty():
 		return cached
+	if stale_scripted_cache:
+		return { "goalKind": NpcEnumsScript.GOAL_KIND_IDLE, "reason": "completed_scripted_order" }
 	var goal_kind := String(entry.get("activeGoalKind", entry.get("goal", String(NpcEnumsScript.GOAL_KIND_IDLE))))
 	return { "goalKind": StringName(goal_kind), "reason": "cached_entry_goal" }
 
@@ -268,6 +277,8 @@ func _scripted_order_kind(body: Node) -> String:
 		return ""
 	var state := String(body.get_meta("npc_scripted_order_state", ""))
 	if not (state in ["PENDING", "ACTIVE"]):
+		if state == "ARRIVED" and bool(body.get_meta("npc_scripted_hold_on_arrival", false)) and String(body.get_meta("npc_scripted_order_kind", "")) == "go_home":
+			return "go_home"
 		return ""
 	return String(body.get_meta("npc_scripted_order_kind", ""))
 

@@ -25,9 +25,11 @@ func snapshot(entry: Dictionary, schedule: Dictionary) -> Dictionary:
 	var route_reason := String(entry.get("routeReason", ""))
 	var scripted_order_kind := String(body.get_meta("npc_scripted_order_kind", "")) if body != null else ""
 	var scripted_order_state := String(body.get_meta("npc_scripted_order_state", "")) if body != null else ""
+	var held_arrived_go_home := body != null and scripted_order_kind == "go_home" and scripted_order_state == "ARRIVED" and bool(body.get_meta("npc_scripted_hold_on_arrival", false))
 	var active_scripted_order := body != null and (
 		body.has_meta("npc_scripted_target")
 		or scripted_order_state in ["PENDING", "ACTIVE"]
+		or held_arrived_go_home
 	)
 	return {
 		"position": position,

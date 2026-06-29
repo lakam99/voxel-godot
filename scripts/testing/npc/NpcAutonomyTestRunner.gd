@@ -338,6 +338,7 @@ func motor_cases() -> Array[Dictionary]:
 		["npc_motor_fence_window_corner_no_penetration", "test_motor_fence_window_corner_no_penetration"],
 		["npc_motor_closed_door_blocks", "test_motor_closed_door_blocks"],
 		["npc_motor_open_door_clears", "test_motor_open_door_clears"],
+		["npc_motor_door_action_matches_portal_id", "test_motor_door_action_matches_portal_id"],
 		["npc_motor_player_npc_solid_separation", "test_motor_player_npc_solid_separation"],
 		["npc_motor_decorative_path_torch_nonblocking_mask", "test_motor_decorative_path_torch_nonblocking_mask"],
 		["npc_motor_no_route_transform_write", "test_motor_no_route_transform_write"],
@@ -1177,6 +1178,56 @@ func test_motor_open_door_clears(_mode: String) -> Dictionary:
 	body.free()
 	return outcome(clears, "openDoorClears=%s" % str(clears), ["open_door_clears_capsule"], { "openDoorClears": clears })
 
+func test_motor_door_action_matches_portal_id(_mode: String) -> Dictionary:
+	var controller = NpcRouteMovementControllerScript.new()
+	var portal_id := "door:door-group:10,0,4:0"
+	var group_id := "door-group:10,0,4:0"
+	var primary := motor_door_leaf("PrimaryDoorLeaf", portal_id, group_id)
+	var sibling := motor_door_leaf("SiblingDoorLeaf", portal_id, group_id)
+	var portal_only_entry := {
+		"routeActions": {
+			"10,5": {
+				"kind": "door",
+				"portalId": portal_id,
+				"cell": Vector2i(10, 5)
+			}
+		}
+	}
+	var sibling_leaf_entry := {
+		"routeActions": {
+			"10,5": {
+				"kind": "door",
+				"portalId": portal_id,
+				"door": primary,
+				"cell": Vector2i(10, 5)
+			}
+		}
+	}
+	var portal_only_action: Dictionary = controller.route_door_action(portal_only_entry, sibling)
+	var sibling_leaf_action: Dictionary = controller.route_door_action(sibling_leaf_entry, sibling)
+	var portal_only_summary := {
+		"matched": not portal_only_action.is_empty(),
+		"portalId": String(portal_only_action.get("portalId", ""))
+	}
+	var sibling_leaf_summary := {
+		"matched": not sibling_leaf_action.is_empty(),
+		"portalId": String(sibling_leaf_action.get("portalId", ""))
+	}
+	var passed := (
+		bool(portal_only_summary.get("matched", false))
+		and String(portal_only_summary.get("portalId", "")) == portal_id
+		and bool(sibling_leaf_summary.get("matched", false))
+		and String(sibling_leaf_summary.get("portalId", "")) == portal_id
+	)
+	primary.free()
+	sibling.free()
+	return outcome(
+		passed,
+		"portalOnly=%s siblingLeaf=%s" % [JSON.stringify(portal_only_summary), JSON.stringify(sibling_leaf_summary)],
+		["door_action_matches_portal_id", "double_door_sibling_leaf_matches_route_action"],
+		{ "portalOnly": portal_only_summary, "siblingLeaf": sibling_leaf_summary }
+	)
+
 func test_motor_player_npc_solid_separation(_mode: String) -> Dictionary:
 	var npc_mask: int = NpcConstantsScript.COLLISION_NPC_BODY_MASK
 	var passed := (
@@ -1958,6 +2009,17 @@ func motor_body(node_name: String) -> CharacterBody3D:
 	body.add_child(collider)
 	add_child(body)
 	return body
+
+func motor_door_leaf(node_name: String, portal_id: String, group_id: String) -> Node3D:
+	var door := Node3D.new()
+	door.name = node_name
+	door.set_meta("kind", "block")
+	door.set_meta("block_type", "door")
+	door.set_meta("open", false)
+	door.set_meta("door_portal_id", portal_id)
+	door.set_meta("door_group_id", group_id)
+	add_child(door)
+	return door
 
 func run_motor_once(profile, command, grounded := true) -> Dictionary:
 	var body := motor_body("MotorTestBody")
