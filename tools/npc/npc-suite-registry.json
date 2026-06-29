@@ -1,83 +1,144 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
+  "allowedEvidenceLevels": [
+    "unit",
+    "contract",
+    "synthetic",
+    "static_audit",
+    "integration",
+    "acceptance_visual"
+  ],
   "suites": [
     {
       "id": "contract",
-      "description": "Phase 00 focused contract and baseline characterization tests",
+      "description": "Phase 00 focused contract and baseline characterization tests; not live gameplay acceptance",
       "command": ".\\tools\\npc\\run-npc-contract-tests.ps1",
-      "defaultArgs": ["-TimeMode", "Both"]
+      "defaultArgs": ["-TimeMode", "Both"],
+      "evidenceLevel": "contract",
+      "notAcceptanceReason": "Runs the NPC autonomy harness, not the real gameplay scene."
     },
     {
       "id": "motor",
-      "description": "Phase 02 shared character motor and CharacterBody3D NPC migration tests",
+      "description": "Phase 02 shared character motor and CharacterBody3D NPC migration tests; not live gameplay acceptance",
       "command": ".\\tools\\npc\\run-npc-motor-tests.ps1",
-      "defaultArgs": ["-TimeMode", "Both"]
+      "defaultArgs": ["-TimeMode", "Both"],
+      "evidenceLevel": "contract",
+      "notAcceptanceReason": "Validates motor contracts in the focused harness."
     },
     {
       "id": "nav_world",
-      "description": "Phase 03 multi-surface navigation world and authoritative invalidation tests",
+      "description": "Phase 03 multi-surface navigation world and invalidation tests; not live gameplay acceptance",
       "command": ".\\tools\\npc\\run-npc-nav-world-tests.ps1",
-      "defaultArgs": ["-TimeMode", "Both"]
+      "defaultArgs": ["-TimeMode", "Both"],
+      "evidenceLevel": "contract",
+      "notAcceptanceReason": "Validates topology contracts in the focused harness."
     },
     {
       "id": "route",
-      "description": "Phase 04 hierarchical route planner, semantic costs, and corridor tests",
+      "description": "Phase 04 hierarchical route planner, semantic costs, and corridor service tests; not live gameplay acceptance",
       "command": ".\\tools\\npc\\run-npc-route-tests.ps1",
-      "defaultArgs": ["-TimeMode", "Both"]
+      "defaultArgs": ["-TimeMode", "Both"],
+      "evidenceLevel": "synthetic",
+      "notAcceptanceReason": "Uses synthetic route fixtures and cannot prove an NPC walked a real generated-world route."
     },
     {
       "id": "repair",
-      "description": "Phase 05 incremental route repair and dynamic world response tests",
+      "description": "Phase 05 incremental route repair and dynamic response service tests; not live gameplay acceptance",
       "command": ".\\tools\\npc\\run-npc-repair-tests.ps1",
-      "defaultArgs": ["-TimeMode", "Both"]
+      "defaultArgs": ["-TimeMode", "Both"],
+      "evidenceLevel": "synthetic",
+      "notAcceptanceReason": "Uses controlled repair fixtures and cannot prove live NPC recovery."
     },
     {
       "id": "door",
-      "description": "Phase 06 smart door portal, controller, shared authority, and safety tests",
+      "description": "Phase 06 smart door portal, controller, authority, and safety service tests; not live gameplay acceptance",
       "command": ".\\tools\\npc\\run-npc-door-tests.ps1",
-      "defaultArgs": ["-TimeMode", "Both"]
+      "defaultArgs": ["-TimeMode", "Both"],
+      "evidenceLevel": "synthetic",
+      "notAcceptanceReason": "Exercises door services directly and cannot prove a live NPC opened and crossed a generated-world door."
     },
     {
       "id": "avoidance",
-      "description": "Phase 07 predictive local avoidance and stable corridor follower tests",
+      "description": "Phase 07 predictive local avoidance and stable corridor follower tests; not live gameplay acceptance",
       "command": ".\\tools\\npc\\run-npc-avoidance-tests.ps1",
-      "defaultArgs": ["-TimeMode", "Both"]
+      "defaultArgs": ["-TimeMode", "Both"],
+      "evidenceLevel": "synthetic",
+      "notAcceptanceReason": "Uses focused avoidance scenarios outside the full gameplay loop."
     },
     {
       "id": "traffic",
-      "description": "Phase 08 space-time traffic, door queue fairness, and deadlock recovery tests",
+      "description": "Phase 08 traffic reservation, door queue fairness, and deadlock recovery service tests; not live gameplay acceptance",
       "command": ".\\tools\\npc\\run-npc-traffic-tests.ps1",
-      "defaultArgs": ["-TimeMode", "Both"]
+      "defaultArgs": ["-TimeMode", "Both"],
+      "evidenceLevel": "synthetic",
+      "notAcceptanceReason": "Uses controlled reservation fixtures and cannot prove live crowd behavior."
     },
     {
       "id": "behavior",
-      "description": "Phase 09 utility goals, symbolic task planning, and day/night schedule tests",
+      "description": "Phase 09 utility goals, symbolic task planning, and schedule service tests; not live gameplay acceptance",
       "command": ".\\tools\\npc\\run-npc-behavior-tests.ps1",
-      "defaultArgs": ["-TimeMode", "Both"]
+      "defaultArgs": ["-TimeMode", "Both"],
+      "evidenceLevel": "synthetic",
+      "notAcceptanceReason": "Validates behavior services and schedules without proving live scripted NPC execution."
     },
     {
       "id": "interaction",
-      "description": "Phase 10 shared smart-object environment interaction, job, and guard tests",
+      "description": "Phase 10 smart-object interaction, job, and guard service tests; not live gameplay acceptance",
       "command": ".\\tools\\npc\\run-npc-interaction-tests.ps1",
-      "defaultArgs": ["-TimeMode", "Both"]
+      "defaultArgs": ["-TimeMode", "Both"],
+      "evidenceLevel": "synthetic",
+      "notAcceptanceReason": "Uses focused smart-object scenarios outside full generated-world gameplay."
     },
     {
       "id": "streaming_save",
-      "description": "Phase 11 streaming, abstract simulation, save migration, and lifecycle safety tests",
+      "description": "Phase 11 streaming, abstract simulation, save migration, and lifecycle service tests; not live gameplay acceptance",
       "command": ".\\tools\\npc\\run-npc-streaming-save-tests.ps1",
-      "defaultArgs": ["-TimeMode", "Both"]
+      "defaultArgs": ["-TimeMode", "Both"],
+      "evidenceLevel": "synthetic",
+      "notAcceptanceReason": "Validates persistence and lifecycle contracts without proving live path traversal."
     },
     {
       "id": "soak",
-      "description": "Phase 12 deterministic fuzz, soak, performance, and recovery hardening tests",
+      "description": "Phase 12 deterministic fuzz, soak, performance, and recovery hardening tests; not live gameplay acceptance",
       "command": ".\\tools\\npc\\run-npc-soak-tests.ps1",
-      "defaultArgs": ["-TimeMode", "Both"]
+      "defaultArgs": ["-TimeMode", "Both"],
+      "evidenceLevel": "synthetic",
+      "notAcceptanceReason": "Uses deterministic synthetic stress scenarios and cannot prove visible gameplay acceptance."
+    },
+    {
+      "id": "go_home_visual",
+      "description": "Headed generated-world NPC go-home door traversal acceptance",
+      "command": ".\\tools\\npc\\run-npc-go-home-visual-playtest.ps1",
+      "defaultArgs": [],
+      "supportsTimeMode": false,
+      "supportsScreenshotDir": true,
+      "evidenceLevel": "acceptance_visual",
+      "acceptanceClaims": ["npc_go_home_opens_crosses_closes_home_door"],
+      "requiredScreenshots": [
+        "spawn_behind_home.png",
+        "at_home_door.png",
+        "door_open.png",
+        "inside_closed_door.png"
+      ],
+      "requiresForbiddenCallSelfScan": true,
+      "requiresVisualProof": true
     },
     {
       "id": "real_tutorial_playthrough",
-      "description": "R00 real tutorial knock-to-morning NPC playthrough characterization",
+      "description": "Headed real tutorial Mira-home path acceptance",
       "command": ".\\tools\\npc\\run-real-tutorial-playthrough.ps1",
-      "defaultArgs": ["-TimeMode", "Both"]
+      "defaultArgs": ["-TimeMode", "Both", "-Visible", "-MiraHomeOnly"],
+      "supportsScreenshotDir": true,
+      "evidenceLevel": "acceptance_visual",
+      "acceptanceClaims": ["tutorial_mira_enters_home_and_closes_door"],
+      "requiredScreenshots": [
+        "mira_go_home_start.png",
+        "mira_at_home_door.png",
+        "mira_home_door_open.png",
+        "mira_inside_home_closed_door.png"
+      ],
+      "requiresForbiddenCallSelfScan": true,
+      "requiresVisualProof": true
     }
   ]
 }

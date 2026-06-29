@@ -42,54 +42,20 @@ Remove-Item -LiteralPath (Join-Path $ScreenshotDir "*.png") -ErrorAction Silentl
 Remove-Item -LiteralPath $outLog -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath $errLog -ErrorAction SilentlyContinue
 
-$forbiddenPattern = 'on_door_opened|interact_with\(|complete_step|on_block_placed|on_bed_used|intro_.*=|inventory_system\.add_item|player\.global_position\s*=|npc_system\.move_npc|safe_place_npc'
-$scanMatches = @()
-if (Get-Command rg -ErrorAction SilentlyContinue) {
-    $rgOutput = & rg -n $forbiddenPattern $runnerPath 2>&1
-    $rgExit = $LASTEXITCODE
-    if ($rgExit -eq 0) {
-        $scanMatches = @($rgOutput)
-    } elseif ($rgExit -gt 1) {
-        Write-Error "Static guard failed to scan runner: $rgOutput"
-        exit 1
-    }
-} else {
-    $scanMatches = @(Select-String -Path $runnerPath -Pattern $forbiddenPattern -AllMatches | ForEach-Object { "$($_.LineNumber):$($_.Line)" })
+$guardScript = Join-Path $PSScriptRoot "assert-npc-acceptance-runner-clean.ps1"
+$guardJson = & $guardScript `
+    -RunnerPath $runnerPath `
+    -ReportPath $ReportPath `
+    -TestId "npc_tutorial_real_knock_repair_sleep_morning_foragers" `
+    -PassThruJson
+if ($LASTEXITCODE -ne 0) {
+    exit $LASTEXITCODE
 }
-if ($scanMatches.Count -gt 0) {
-    $guardReport = [pscustomobject]@{
-        schemaVersion = 1
-        testId = "npc_tutorial_real_knock_repair_sleep_morning_foragers"
-        seed = $Seed
-        finished = $true
-        passed = $false
-        failureCount = 1
-        resultCount = 1
-        forbiddenCallSelfScan = [pscustomobject]@{
-            status = "failed"
-            pattern = $forbiddenPattern
-            matches = $scanMatches
-        }
-        results = @([pscustomobject]@{
-            name = "real_tutorial_runner_static_guard"
-            passed = $false
-            details = "runner source contains forbidden shortcut calls"
-        })
-    }
-    $guardReport | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $ReportPath
-    Get-Content -LiteralPath $ReportPath
-    exit 1
-}
+$staticScan = $guardJson | ConvertFrom-Json
 
 $runToken = [guid]::NewGuid().ToString("N")
 $branch = (& git -C $projectPath branch --show-current).Trim()
 $commit = (& git -C $projectPath rev-parse HEAD).Trim()
-$staticScan = [pscustomobject]@{
-    status = "passed"
-    pattern = $forbiddenPattern
-    matches = @()
-    runnerPath = $runnerPath
-}
 
 $env:VOXEL_PLAYTEST = "1"
 $env:VOXEL_TEST_SEED = $Seed
@@ -277,6 +243,7 @@ $lastFailureCode = ""
 if ($null -ne $report.lastFailure) {
     $lastFailureCode = [string]$report.lastFailure.code
 }
+$requiredScreenshots = @()
 if ($Visible) {
     if ($true -ne $report.nonHeadlessVisualRequired) {
         Write-Error "Visible tutorial run did not mark nonHeadlessVisualRequired=true"
@@ -298,6 +265,30 @@ if ($Visible) {
         }
     }
 }
+
+$evidenceScript = Join-Path $projectPath "tools\assert-test-evidence-report.ps1"
+$evidenceLevel = if ($Visible) { "acceptance_visual" } else { "integration" }
+$acceptanceClaims = if ($Visible) { @("tutorial_mira_enters_home_and_closes_door") } else { @() }
+$evidenceArgs = @(
+    "-ReportPath", $ReportPath,
+    "-RunnerId", "npc_real_tutorial_playthrough",
+    "-EvidenceLevel", $evidenceLevel,
+    "-RegistryPath", (Join-Path $projectPath "tools\test-runner-registry.json")
+)
+if ($acceptanceClaims.Count -gt 0) {
+    $evidenceArgs += @("-AcceptanceClaims", ($acceptanceClaims -join ";"))
+}
+if ($requiredScreenshots.Count -gt 0) {
+    $evidenceArgs += @("-RequiredScreenshots", ($requiredScreenshots -join ";"))
+    $evidenceArgs += @("-ScreenshotDir", $ScreenshotDir, "-RequireForbiddenCallSelfScan", "-RequireVisualProof")
+}
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $evidenceScript @evidenceArgs | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    Get-Content -LiteralPath $ReportPath
+    exit $LASTEXITCODE
+}
+$report = Get-Content -LiteralPath $ReportPath -Raw | ConvertFrom-Json
+
 [pscustomobject]@{
     schemaVersion = [int]$report.schemaVersion
     testId = [string]$report.testId

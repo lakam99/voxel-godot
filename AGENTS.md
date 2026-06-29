@@ -48,6 +48,17 @@ Prefer composed systems under `scripts/` or `scripts/story/` over expanding that
 - Visual assets, Blender generators, generated GLBs, and registries are first-class project assets. Do not replace them with a parallel pipeline.
 - Browser/Three.js work is historical context. New gameplay work should target this Godot project unless the user says otherwise.
 
+## DO NOT FAKE GAMEPLAY TESTS
+
+- Tests may use mocks only when they are explicitly named and reported as unit, contract, synthetic, static-audit, or service-level tests.
+- A mocked, synthetic, direct-service, metadata-only, source-scan, direct-helper-call, or teleport-driven test MUST NOT be cited as acceptance evidence for live gameplay.
+- NPC/pathfinding acceptance must run through the real game scene or a real headed gameplay fixture with real `CharacterBody3D` NPCs, real physics frames, real generated-world doors/buildings, real behavior scheduling, and real player/NPC interaction paths.
+- NPC/pathfinding acceptance must not directly call tutorial progression handlers, `interact_with`, `on_door_opened`, `on_block_placed`, `sleep_at_bed`, `npc_system.move_npc`, `request_door_state`, `request_crossing`, or mark success through metadata such as `npc_inside_home`.
+- Fixture setup may use narrowly documented placement helpers before the act phase, but the behavior being proven must proceed through live game systems.
+- Door/home acceptance must prove the visible sequence: approach the door, open it before crossing, enter a strict interior location, clear the threshold, and close the door after clearance. Stats and metadata may support the claim, but they cannot be the only proof.
+- New headed NPC acceptance runners must call `tools/npc/assert-npc-acceptance-runner-clean.ps1` before launching Godot.
+- Every NPC/pathfinding acceptance claim must include the command, report path, screenshots or trace/timeline evidence when visual behavior matters, and a brief statement of what the test does and does not prove.
+
 ## Important Plans And Docs
 
 - `CODEX_NPC_PATHFINDING_FINAL_IMPLEMENTATION_PLAN.md`: controlling mandatory specification for the NPC autonomy/pathfinding replacement. When executing this work, reread the current phase, global invariants, test protocol, and prohibited-shortcuts section before editing. Follow one phase branch/report/merge cycle at a time.

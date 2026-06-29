@@ -9,6 +9,9 @@ param(
     [string]$ProgressPath = "",
     [string]$TraceDir = "",
     [string]$ScreenshotDir = "",
+    [ValidateSet("", "unit", "contract", "synthetic", "static_audit", "integration", "acceptance_visual")]
+    [string]$EvidenceLevel = "",
+    [string[]]$AcceptanceClaims = @(),
     [int]$WatchdogSeconds = 45,
     [switch]$Visible
 )
@@ -118,6 +121,44 @@ if ($null -eq $report.failureCount) {
     Get-Content -LiteralPath $ReportPath
     exit 1
 }
+
+$defaultEvidenceLevels = @{
+    contract = "contract"
+    motor = "contract"
+    nav_world = "contract"
+    route = "synthetic"
+    repair = "synthetic"
+    door = "synthetic"
+    avoidance = "contract"
+    traffic = "synthetic"
+    behavior = "synthetic"
+    interaction = "contract"
+    streaming_save = "contract"
+    soak = "synthetic"
+}
+if ($EvidenceLevel -eq "") {
+    if ($defaultEvidenceLevels.ContainsKey($Suite)) {
+        $EvidenceLevel = [string]$defaultEvidenceLevels[$Suite]
+    } else {
+        $EvidenceLevel = "contract"
+    }
+}
+$evidenceScript = Join-Path $projectPath "tools\assert-test-evidence-report.ps1"
+$evidenceArgs = @(
+    "-ReportPath", $ReportPath,
+    "-RunnerId", $Suite,
+    "-EvidenceLevel", $EvidenceLevel,
+    "-RegistryPath", (Join-Path $projectPath "tools\npc\npc-suite-registry.json")
+)
+if ($AcceptanceClaims.Count -gt 0) {
+    $evidenceArgs += @("-AcceptanceClaims", ($AcceptanceClaims -join ";"))
+}
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $evidenceScript @evidenceArgs | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    Get-Content -LiteralPath $ReportPath
+    exit $LASTEXITCODE
+}
+$report = Get-Content -LiteralPath $ReportPath -Raw | ConvertFrom-Json
 
 Get-Content -LiteralPath $ReportPath
 if ($exitCode -ne 0 -or [int]$report.failureCount -gt 0) {

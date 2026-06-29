@@ -9,12 +9,101 @@ $ErrorActionPreference = "Continue"
 
 $projectPath = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 $registryPath = Join-Path $PSScriptRoot "npc-suite-registry.json"
+$evidenceScript = Join-Path $projectPath "tools\assert-test-evidence-report.ps1"
 if ($ReportPath -eq "") {
     $ReportPath = Join-Path $projectPath "artifacts\npc\reports\all-npc-$($TimeMode.ToLowerInvariant()).json"
 }
 $ReportPath = [System.IO.Path]::GetFullPath($ReportPath)
 New-Item -ItemType Directory -Force -Path ([System.IO.Path]::GetDirectoryName($ReportPath)) | Out-Null
 Remove-Item -LiteralPath $ReportPath -ErrorAction SilentlyContinue
+
+function Get-PropValue($Object, [string]$Name) {
+    if ($null -eq $Object) {
+        return $null
+    }
+    $prop = $Object.PSObject.Properties[$Name]
+    if ($null -eq $prop) {
+        return $null
+    }
+    return $prop.Value
+}
+
+function To-StringArray($Value) {
+    $items = @()
+    if ($null -eq $Value) {
+        return $items
+    }
+    if ($Value -is [System.Array]) {
+        foreach ($item in $Value) {
+            if ($null -ne $item) {
+                $items += [string]$item
+            }
+        }
+        return $items
+    }
+    $items += [string]$Value
+    return $items
+}
+
+function Bool-Prop($Object, [string]$Name, [bool]$DefaultValue) {
+    $value = Get-PropValue $Object $Name
+    if ($null -eq $value) {
+        return $DefaultValue
+    }
+    return [bool]$value
+}
+
+function Set-NamedArg([string[]]$Args, [string]$Name, [string]$Value) {
+    $items = @($Args)
+    $index = [array]::IndexOf($items, $Name)
+    if ($index -ge 0) {
+        if ($index + 1 -lt $items.Count) {
+            $items[$index + 1] = $Value
+        } else {
+            $items += $Value
+        }
+    } else {
+        $items += @($Name, $Value)
+    }
+    return $items
+}
+
+function Invoke-EvidenceValidation($Suite, [string]$SuiteReport, [string]$ScreenshotDir) {
+    $id = [string]$Suite.id
+    $level = [string](Get-PropValue $Suite "evidenceLevel")
+    if ($level -eq "") {
+        Write-Error "NPC suite $id is missing evidenceLevel in $registryPath"
+        return 1
+    }
+    $claims = @(To-StringArray (Get-PropValue $Suite "acceptanceClaims"))
+    $screenshots = @(To-StringArray (Get-PropValue $Suite "requiredScreenshots"))
+    $args = @(
+        "-ReportPath", $SuiteReport,
+        "-RunnerId", $id,
+        "-EvidenceLevel", $level,
+        "-RegistryPath", $registryPath
+    )
+    if ($claims.Count -gt 0) {
+        $args += @("-AcceptanceClaims", ($claims -join ";"))
+    }
+    if ($screenshots.Count -gt 0) {
+        $args += @("-RequiredScreenshots", ($screenshots -join ";"))
+    }
+    if ($ScreenshotDir -ne "") {
+        $args += @("-ScreenshotDir", $ScreenshotDir)
+    }
+    if (Bool-Prop $Suite "requiresForbiddenCallSelfScan" $false) {
+        $args += "-RequireForbiddenCallSelfScan"
+    }
+    if (Bool-Prop $Suite "requiresVisualProof" $false) {
+        $args += "-RequireVisualProof"
+    }
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $evidenceScript @args | Out-Null
+    if ($null -eq $LASTEXITCODE) {
+        return 0
+    }
+    return [int]$LASTEXITCODE
+}
 
 $registry = Get-Content -LiteralPath $registryPath -Raw | ConvertFrom-Json
 $results = @()
@@ -28,19 +117,44 @@ try {
         $command = [string]$suite.command
         $commandPath = if ($command.StartsWith(".\")) { Join-Path $projectPath $command.Substring(2) } else { $command }
         $suiteReport = Join-Path $projectPath "artifacts\npc\reports\$id-$($TimeMode.ToLowerInvariant()).json"
-        $runnerArgs = @("-TimeMode", $TimeMode, "-Seed", $Seed, "-ReportPath", $suiteReport)
+        $screenshotDir = ""
+        if (Bool-Prop $suite "supportsScreenshotDir" $false) {
+            $screenshotDir = Join-Path $projectPath "artifacts\npc\screenshots\$id-$($TimeMode.ToLowerInvariant())"
+        }
+        $runnerArgs = @(To-StringArray $suite.defaultArgs)
+        if (Bool-Prop $suite "supportsTimeMode" $true) {
+            $runnerArgs = @(Set-NamedArg $runnerArgs "-TimeMode" $TimeMode)
+        }
+        if (Bool-Prop $suite "supportsSeed" $true) {
+            $runnerArgs = @(Set-NamedArg $runnerArgs "-Seed" $Seed)
+        }
+        if (Bool-Prop $suite "supportsReportPath" $true) {
+            $runnerArgs = @(Set-NamedArg $runnerArgs "-ReportPath" $suiteReport)
+        }
+        if ($screenshotDir -ne "") {
+            $runnerArgs = @(Set-NamedArg $runnerArgs "-ScreenshotDir" $screenshotDir)
+        }
+
         $suiteStarted = Get-Date
         Write-Host "== NPC suite: $id =="
         $scriptFailed = $false
         try {
-            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $commandPath -TimeMode $TimeMode -Seed $Seed -ReportPath $suiteReport
+            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $commandPath @runnerArgs
         } catch {
             Write-Error $_
             $scriptFailed = $true
         }
-        $exitCode = if ($scriptFailed) { 1 } elseif ($null -eq $LASTEXITCODE) { 0 } else { $LASTEXITCODE }
+        $exitCode = if ($scriptFailed) { 1 } elseif ($null -eq $LASTEXITCODE) { 0 } else { [int]$LASTEXITCODE }
+        $evidenceExitCode = 0
+        $evidenceValid = $false
+        if (Test-Path -LiteralPath $suiteReport) {
+            $evidenceExitCode = Invoke-EvidenceValidation -Suite $suite -SuiteReport $suiteReport -ScreenshotDir $screenshotDir
+            $evidenceValid = $evidenceExitCode -eq 0
+        } else {
+            $evidenceExitCode = 1
+        }
         $duration = ((Get-Date) - $suiteStarted).TotalSeconds
-        $passed = $exitCode -eq 0
+        $passed = ($exitCode -eq 0) -and $evidenceValid
         if (-not $passed) {
             $failureCount += 1
         }
@@ -52,6 +166,11 @@ try {
             passed = $passed
             durationSeconds = [math]::Round($duration, 3)
             reportPath = $suiteReport
+            evidenceLevel = [string](Get-PropValue $suite "evidenceLevel")
+            acceptanceClaims = @(To-StringArray (Get-PropValue $suite "acceptanceClaims"))
+            evidenceValid = $evidenceValid
+            evidenceExitCode = $evidenceExitCode
+            screenshotDir = $screenshotDir
         }
     }
 }
@@ -60,8 +179,10 @@ finally {
 }
 
 $report = [pscustomobject]@{
-    schemaVersion = 1
+    schemaVersion = 2
     suite = "all-npc"
+    evidenceLevel = "integration"
+    acceptanceClaims = @()
     timeMode = $TimeMode
     seed = $Seed
     startedUtc = $started.ToUniversalTime().ToString("o")
@@ -71,8 +192,16 @@ $report = [pscustomobject]@{
     failureCount = $failureCount
     results = $results
     registryPath = $registryPath
+    testIntegrity = [pscustomobject]@{
+        registryId = "npc_focused"
+        registryPath = $registryPath
+        evidenceLevel = "integration"
+        liveGameplayAcceptance = $false
+        validationStatus = if ($failureCount -eq 0) { "passed" } else { "failed" }
+        stampedUtc = (Get-Date).ToUniversalTime().ToString("o")
+    }
 }
-$report | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $ReportPath
+$report | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $ReportPath
 Get-Content -LiteralPath $ReportPath
 
 if ($failureCount -gt 0) {

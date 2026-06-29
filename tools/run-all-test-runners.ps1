@@ -17,7 +17,93 @@ if ($ReportPath -eq "") {
 }
 $RegistryPath = [System.IO.Path]::GetFullPath($RegistryPath)
 $ReportPath = [System.IO.Path]::GetFullPath($ReportPath)
+$evidenceScript = Join-Path $projectPath "tools\assert-test-evidence-report.ps1"
 New-Item -ItemType Directory -Force -Path ([System.IO.Path]::GetDirectoryName($ReportPath)) | Out-Null
+
+function Get-PropValue($Object, [string]$Name) {
+    if ($null -eq $Object) {
+        return $null
+    }
+    $prop = $Object.PSObject.Properties[$Name]
+    if ($null -eq $prop) {
+        return $null
+    }
+    return $prop.Value
+}
+
+function To-StringArray($Value) {
+    $items = @()
+    if ($null -eq $Value) {
+        return $items
+    }
+    if ($Value -is [System.Array]) {
+        foreach ($item in $Value) {
+            if ($null -ne $item) {
+                $items += [string]$item
+            }
+        }
+        return $items
+    }
+    $items += [string]$Value
+    return $items
+}
+
+function Bool-Prop($Object, [string]$Name, [bool]$DefaultValue) {
+    $value = Get-PropValue $Object $Name
+    if ($null -eq $value) {
+        return $DefaultValue
+    }
+    return [bool]$value
+}
+
+function Invoke-EvidenceValidation($Runner, [string]$RunnerReport) {
+    $id = [string]$Runner.id
+    $level = [string](Get-PropValue $Runner "evidenceLevel")
+    if ($level -eq "") {
+        Write-Error "Test runner $id is missing evidenceLevel in $RegistryPath"
+        return 1
+    }
+    if ($RunnerReport -eq "") {
+        return 0
+    }
+    $claims = @(To-StringArray (Get-PropValue $Runner "acceptanceClaims"))
+    $screenshots = @(To-StringArray (Get-PropValue $Runner "requiredScreenshots"))
+    $screenshotDirValue = [string](Get-PropValue $Runner "screenshotDir")
+    $screenshotDir = ""
+    if ($screenshotDirValue -ne "") {
+        $screenshotDir = if ([System.IO.Path]::IsPathRooted($screenshotDirValue)) {
+            $screenshotDirValue
+        } else {
+            Join-Path $projectPath $screenshotDirValue
+        }
+    }
+    $args = @(
+        "-ReportPath", $RunnerReport,
+        "-RunnerId", $id,
+        "-EvidenceLevel", $level,
+        "-RegistryPath", $RegistryPath
+    )
+    if ($claims.Count -gt 0) {
+        $args += @("-AcceptanceClaims", ($claims -join ";"))
+    }
+    if ($screenshots.Count -gt 0) {
+        $args += @("-RequiredScreenshots", ($screenshots -join ";"))
+    }
+    if ($screenshotDir -ne "") {
+        $args += @("-ScreenshotDir", $screenshotDir)
+    }
+    if (Bool-Prop $Runner "requiresForbiddenCallSelfScan" $false) {
+        $args += "-RequireForbiddenCallSelfScan"
+    }
+    if (Bool-Prop $Runner "requiresVisualProof" $false) {
+        $args += "-RequireVisualProof"
+    }
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $evidenceScript @args | Out-Null
+    if ($null -eq $LASTEXITCODE) {
+        return 0
+    }
+    return [int]$LASTEXITCODE
+}
 
 $registry = Get-Content -LiteralPath $RegistryPath -Raw | ConvertFrom-Json
 $results = @()
@@ -66,13 +152,21 @@ try {
             Write-Error $_
             $scriptFailed = $true
         }
-        $exitCode = if ($scriptFailed) { 1 } elseif ($null -eq $LASTEXITCODE) { 0 } else { $LASTEXITCODE }
+        $exitCode = if ($scriptFailed) { 1 } elseif ($null -eq $LASTEXITCODE) { 0 } else { [int]$LASTEXITCODE }
         $duration = ((Get-Date) - $runnerStarted).TotalSeconds
         $reportFresh = $true
         if ($runnerReport -ne "") {
             $reportFresh = Test-Path -LiteralPath $runnerReport
         }
-        $passed = ($exitCode -eq 0) -and $reportFresh
+        $evidenceExitCode = 0
+        $evidenceValid = $false
+        if ($reportFresh) {
+            $evidenceExitCode = Invoke-EvidenceValidation -Runner $runner -RunnerReport $runnerReport
+            $evidenceValid = $evidenceExitCode -eq 0
+        } else {
+            $evidenceExitCode = 1
+        }
+        $passed = ($exitCode -eq 0) -and $reportFresh -and $evidenceValid
         if (-not $passed) {
             $failureCount += 1
         }
@@ -85,6 +179,10 @@ try {
             durationSeconds = [math]::Round($duration, 3)
             reportPath = $runnerReport
             reportFresh = $reportFresh
+            evidenceLevel = [string](Get-PropValue $runner "evidenceLevel")
+            acceptanceClaims = @(To-StringArray (Get-PropValue $runner "acceptanceClaims"))
+            evidenceValid = $evidenceValid
+            evidenceExitCode = $evidenceExitCode
         }
         if (-not $passed -and $StopOnFailure) {
             Write-Error "Stopping after failed runner: $id"
@@ -98,8 +196,10 @@ finally {
 }
 
 $report = [pscustomobject]@{
-    schemaVersion = 1
+    schemaVersion = 2
     registryPath = $RegistryPath
+    evidenceLevel = "integration"
+    acceptanceClaims = @()
     seed = $Seed
     startedUtc = $started.ToUniversalTime().ToString("o")
     finishedUtc = (Get-Date).ToUniversalTime().ToString("o")
@@ -110,8 +210,16 @@ $report = [pscustomobject]@{
     stopOnFailure = [bool]$StopOnFailure
     continueOnFailure = [bool]$ContinueOnFailure
     results = $results
+    testIntegrity = [pscustomobject]@{
+        registryId = "all-test-runners"
+        registryPath = $RegistryPath
+        evidenceLevel = "integration"
+        liveGameplayAcceptance = $false
+        validationStatus = if ($failureCount -eq 0) { "passed" } else { "failed" }
+        stampedUtc = (Get-Date).ToUniversalTime().ToString("o")
+    }
 }
-$report | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $ReportPath
+$report | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $ReportPath
 Get-Content -LiteralPath $ReportPath
 
 if ($failureCount -gt 0) {

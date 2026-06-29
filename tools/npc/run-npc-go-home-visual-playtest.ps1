@@ -10,6 +10,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 $projectPath = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
+$runnerPath = Join-Path $projectPath "scripts\testing\npc\NpcGoHomeVisualPlaytestRunner.gd"
 if ($ReportPath -eq "") {
     $ReportPath = Join-Path $projectPath "artifacts\npc\reports\go-home-visual-playtest.json"
 }
@@ -30,6 +31,22 @@ New-Item -ItemType Directory -Force -Path $ScreenshotDir | Out-Null
 Remove-Item -LiteralPath $ReportPath -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath $ProgressPath -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath (Join-Path $ScreenshotDir "*.png") -ErrorAction SilentlyContinue
+
+$guardScript = Join-Path $PSScriptRoot "assert-npc-acceptance-runner-clean.ps1"
+$guardAllowed = @(
+    'safe_place_npc.*visual_go_home_spawn',
+    'player\.global_position\s*=\s*Vector3\(float\(center\.x - 10\)'
+)
+$guardJson = & $guardScript `
+    -RunnerPath $runnerPath `
+    -ReportPath $ReportPath `
+    -TestId "npc_go_home_visual_door_traversal" `
+    -AllowedShortcutPattern $guardAllowed `
+    -PassThruJson
+if ($LASTEXITCODE -ne 0) {
+    exit $LASTEXITCODE
+}
+$staticScan = $guardJson | ConvertFrom-Json
 
 $runToken = [guid]::NewGuid().ToString("N")
 $env:VOXEL_PLAYTEST = "1"
@@ -112,6 +129,26 @@ foreach ($fileName in $requiredScreenshots) {
     }
 }
 
+$report | Add-Member -Force -NotePropertyName forbiddenCallSelfScan -NotePropertyValue $staticScan
+$report | ConvertTo-Json -Depth 32 | Set-Content -LiteralPath $ReportPath
+
+$evidenceScript = Join-Path $projectPath "tools\assert-test-evidence-report.ps1"
+& $evidenceScript `
+    -ReportPath $ReportPath `
+    -RunnerId "npc_go_home_visual_playtest" `
+    -EvidenceLevel "acceptance_visual" `
+    -AcceptanceClaims @("npc_go_home_opens_crosses_closes_home_door") `
+    -RequiredScreenshots $requiredScreenshots `
+    -ScreenshotDir $ScreenshotDir `
+    -RegistryPath (Join-Path $projectPath "tools\npc\npc-suite-registry.json") `
+    -RequireForbiddenCallSelfScan `
+    -RequireVisualProof | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    Get-Content -LiteralPath $ReportPath
+    exit $LASTEXITCODE
+}
+
+$report = Get-Content -LiteralPath $ReportPath -Raw | ConvertFrom-Json
 Get-Content -LiteralPath $ReportPath
 if ($exitCode -ne 0 -or [int]$report.failureCount -gt 0) {
     exit 1

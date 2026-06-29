@@ -1,131 +1,174 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
+  "allowedEvidenceLevels": [
+    "unit",
+    "contract",
+    "synthetic",
+    "static_audit",
+    "integration",
+    "acceptance_visual"
+  ],
   "runners": [
     {
       "id": "npc_focused",
-      "description": "All focused NPC suites implemented up to the active phase",
+      "description": "All focused NPC suites implemented up to the active phase; aggregate report only, not live NPC/pathfinding acceptance",
       "command": ".\\tools\\npc\\run-all-npc-tests.ps1",
-      "args": ["-TimeMode", "Both", "-Seed", "atlas-1492"],
+      "args": ["-TimeMode", "Both", "-Seed", "atlas-1492", "-ReportPath", "artifacts\\test-runners\\all-npc-both.json"],
+      "reportPath": "artifacts\\test-runners\\all-npc-both.json",
+      "evidenceLevel": "integration",
+      "required": true
+    },
+    {
+      "id": "npc_acceptance_guard_self_test",
+      "description": "Static acceptance-runner guard self-test",
+      "command": ".\\tools\\npc\\test-npc-acceptance-guard.ps1",
+      "args": ["-ReportPath", "artifacts\\test-runners\\npc-acceptance-guard-self-test.json"],
+      "reportPath": "artifacts\\test-runners\\npc-acceptance-guard-self-test.json",
+      "evidenceLevel": "static_audit",
+      "required": true
+    },
+    {
+      "id": "test_evidence_registry_self_test",
+      "description": "Registry/report evidence taxonomy enforcement self-test",
+      "command": ".\\tools\\test-evidence-registry-self-test.ps1",
+      "args": ["-ReportPath", "artifacts\\test-runners\\test-evidence-registry-self-test.json"],
+      "reportPath": "artifacts\\test-runners\\test-evidence-registry-self-test.json",
+      "evidenceLevel": "static_audit",
       "required": true
     },
     {
       "id": "npc_contract_tests",
-      "description": "R06 explicit NPC contract suite gate",
+      "description": "R06 explicit NPC contract suite gate; not live gameplay acceptance",
       "command": ".\\tools\\npc\\run-npc-contract-tests.ps1",
       "args": ["-TimeMode", "Both", "-Seed", "atlas-1492", "-ReportPath", "artifacts\\test-runners\\npc-contract-both.json"],
       "reportPath": "artifacts\\test-runners\\npc-contract-both.json",
+      "evidenceLevel": "contract",
       "required": true
     },
     {
       "id": "npc_motor_tests",
-      "description": "R06 explicit NPC motor suite gate",
+      "description": "R06 explicit NPC motor suite gate; not live gameplay acceptance",
       "command": ".\\tools\\npc\\run-npc-motor-tests.ps1",
       "args": ["-TimeMode", "Both", "-Seed", "atlas-1492", "-ReportPath", "artifacts\\test-runners\\npc-motor-both.json"],
       "reportPath": "artifacts\\test-runners\\npc-motor-both.json",
+      "evidenceLevel": "contract",
       "required": true
     },
     {
       "id": "npc_route_tests",
-      "description": "R06 explicit NPC route suite gate",
+      "description": "R06 explicit NPC route service suite gate; not live gameplay acceptance",
       "command": ".\\tools\\npc\\run-npc-route-tests.ps1",
       "args": ["-TimeMode", "Both", "-Seed", "atlas-1492", "-ReportPath", "artifacts\\test-runners\\npc-route-both.json"],
       "reportPath": "artifacts\\test-runners\\npc-route-both.json",
+      "evidenceLevel": "synthetic",
       "required": true
     },
     {
       "id": "npc_repair_tests",
-      "description": "R06 explicit NPC repair suite gate",
+      "description": "R06 explicit NPC repair service suite gate; not live gameplay acceptance",
       "command": ".\\tools\\npc\\run-npc-repair-tests.ps1",
       "args": ["-TimeMode", "Both", "-Seed", "atlas-1492", "-ReportPath", "artifacts\\test-runners\\npc-repair-both.json"],
       "reportPath": "artifacts\\test-runners\\npc-repair-both.json",
+      "evidenceLevel": "synthetic",
       "required": true
     },
     {
       "id": "npc_door_tests",
-      "description": "R06 explicit NPC door suite gate",
+      "description": "R06 explicit NPC door service suite gate; not live gameplay acceptance",
       "command": ".\\tools\\npc\\run-npc-door-tests.ps1",
       "args": ["-TimeMode", "Both", "-Seed", "atlas-1492", "-ReportPath", "artifacts\\test-runners\\npc-door-both.json"],
       "reportPath": "artifacts\\test-runners\\npc-door-both.json",
+      "evidenceLevel": "synthetic",
       "required": true
     },
     {
       "id": "npc_avoidance_tests",
-      "description": "R06 explicit NPC avoidance suite gate",
+      "description": "R06 explicit NPC avoidance suite gate; not live gameplay acceptance",
       "command": ".\\tools\\npc\\run-npc-avoidance-tests.ps1",
       "args": ["-TimeMode", "Both", "-Seed", "atlas-1492", "-ReportPath", "artifacts\\test-runners\\npc-avoidance-both.json"],
       "reportPath": "artifacts\\test-runners\\npc-avoidance-both.json",
+      "evidenceLevel": "synthetic",
       "required": true
     },
     {
       "id": "npc_traffic_tests",
-      "description": "R06 explicit NPC traffic suite gate",
+      "description": "R06 explicit NPC traffic service suite gate; not live gameplay acceptance",
       "command": ".\\tools\\npc\\run-npc-traffic-tests.ps1",
       "args": ["-TimeMode", "Both", "-Seed", "atlas-1492", "-ReportPath", "artifacts\\test-runners\\npc-traffic-both.json"],
       "reportPath": "artifacts\\test-runners\\npc-traffic-both.json",
+      "evidenceLevel": "synthetic",
       "required": true
     },
     {
       "id": "npc_behavior_tests",
-      "description": "R06 explicit NPC behavior suite gate",
+      "description": "R06 explicit NPC behavior service suite gate; not live gameplay acceptance",
       "command": ".\\tools\\npc\\run-npc-behavior-tests.ps1",
       "args": ["-TimeMode", "Both", "-Seed", "atlas-1492", "-ReportPath", "artifacts\\test-runners\\npc-behavior-both.json"],
       "reportPath": "artifacts\\test-runners\\npc-behavior-both.json",
+      "evidenceLevel": "synthetic",
       "required": true
     },
     {
       "id": "npc_behavior_transition_tests",
-      "description": "R06 explicit NPC behavior transition suite gate",
+      "description": "R06 explicit NPC behavior transition service suite gate; not live gameplay acceptance",
       "command": ".\\tools\\npc\\run-npc-behavior-tests.ps1",
       "args": ["-TimeMode", "Transition", "-Seed", "atlas-1492", "-ReportPath", "artifacts\\test-runners\\npc-behavior-transition.json"],
       "reportPath": "artifacts\\test-runners\\npc-behavior-transition.json",
+      "evidenceLevel": "synthetic",
       "required": true
     },
     {
       "id": "npc_interaction_tests",
-      "description": "R06 explicit NPC interaction suite gate",
+      "description": "R06 explicit NPC interaction service suite gate; not live gameplay acceptance",
       "command": ".\\tools\\npc\\run-npc-interaction-tests.ps1",
       "args": ["-TimeMode", "Both", "-Seed", "atlas-1492", "-ReportPath", "artifacts\\test-runners\\npc-interaction-both.json"],
       "reportPath": "artifacts\\test-runners\\npc-interaction-both.json",
+      "evidenceLevel": "synthetic",
       "required": true
     },
     {
       "id": "npc_streaming_save_tests",
-      "description": "R06 explicit NPC streaming/save suite gate",
+      "description": "R06 explicit NPC streaming/save service suite gate; not live gameplay acceptance",
       "command": ".\\tools\\npc\\run-npc-streaming-save-tests.ps1",
       "args": ["-TimeMode", "Both", "-Seed", "atlas-1492", "-ReportPath", "artifacts\\test-runners\\npc-streaming-save-both.json"],
       "reportPath": "artifacts\\test-runners\\npc-streaming-save-both.json",
+      "evidenceLevel": "synthetic",
       "required": true
     },
     {
       "id": "npc_soak_tests",
-      "description": "R06 explicit NPC soak suite gate",
+      "description": "R06 explicit NPC soak suite gate; not live gameplay acceptance",
       "command": ".\\tools\\npc\\run-npc-soak-tests.ps1",
       "args": ["-TimeMode", "Both", "-Seed", "atlas-1492", "-ReportPath", "artifacts\\test-runners\\npc-soak-both.json"],
       "reportPath": "artifacts\\test-runners\\npc-soak-both.json",
+      "evidenceLevel": "synthetic",
       "required": true
     },
     {
       "id": "npc_observation_dusk",
-      "description": "Phase 09 dusk return-home observation evidence",
+      "description": "Phase 09 dusk return-home observation evidence; integration only, not acceptance",
       "command": ".\\tools\\npc\\run-npc-observation-tests.ps1",
       "args": ["-Scenario", "DuskReturnHome", "-TimeMode", "Transition", "-Seed", "atlas-1492", "-ReportPath", "artifacts\\test-runners\\npc-observation-dusk.json"],
       "reportPath": "artifacts\\test-runners\\npc-observation-dusk.json",
+      "evidenceLevel": "integration",
       "required": true
     },
     {
       "id": "npc_observation_midnight",
-      "description": "Phase 09 midnight guard/interior observation evidence",
+      "description": "Phase 09 midnight guard/interior observation evidence; integration only, not acceptance",
       "command": ".\\tools\\npc\\run-npc-observation-tests.ps1",
       "args": ["-Scenario", "MidnightTown", "-TimeMode", "Night", "-Seed", "atlas-1492", "-ReportPath", "artifacts\\test-runners\\npc-observation-midnight.json"],
       "reportPath": "artifacts\\test-runners\\npc-observation-midnight.json",
+      "evidenceLevel": "integration",
       "required": true
     },
     {
       "id": "npc_observation_phase12",
-      "description": "Phase 12 noon, dusk, midnight, dawn, crowded-door, shared-door, and dynamic-repair observation evidence",
+      "description": "Phase 12 noon, dusk, midnight, dawn, crowded-door, shared-door, and dynamic-repair observation evidence; integration only, not acceptance",
       "command": ".\\tools\\npc\\run-npc-observation-tests.ps1",
       "args": ["-Scenario", "All", "-TimeMode", "Both", "-Seed", "atlas-1492", "-ReportPath", "artifacts\\test-runners\\npc-observation-phase12.json"],
       "reportPath": "artifacts\\test-runners\\npc-observation-phase12.json",
+      "evidenceLevel": "integration",
       "required": true
     },
     {
@@ -134,6 +177,7 @@
       "command": ".\\tools\\run-world-signature.ps1",
       "args": ["-OutputPath", "artifacts\\test-runners\\world-signature-atlas-1492.json", "-Seed", "atlas-1492"],
       "reportPath": "artifacts\\test-runners\\world-signature-atlas-1492.json",
+      "evidenceLevel": "static_audit",
       "required": true
     },
     {
@@ -141,6 +185,7 @@
       "description": "Generated visual manifest validation",
       "command": "node",
       "args": [".\\tools\\art\\validate-visual-manifest.mjs"],
+      "evidenceLevel": "static_audit",
       "required": true
     },
     {
@@ -149,14 +194,45 @@
       "command": ".\\tools\\run-npc-navigation-tests.ps1",
       "args": ["-ReportPath", "artifacts\\test-runners\\npc-navigation-report.json", "-Seed", "atlas-1492"],
       "reportPath": "artifacts\\test-runners\\npc-navigation-report.json",
+      "evidenceLevel": "integration",
+      "required": true
+    },
+    {
+      "id": "npc_go_home_visual_playtest",
+      "description": "Headed generated-world NPC go-home door traversal acceptance",
+      "command": ".\\tools\\npc\\run-npc-go-home-visual-playtest.ps1",
+      "args": ["-Seed", "atlas-1492", "-ReportPath", "artifacts\\test-runners\\npc-go-home-visual-playtest.json", "-ScreenshotDir", "artifacts\\test-runners\\screenshots\\npc-go-home-visual"],
+      "reportPath": "artifacts\\test-runners\\npc-go-home-visual-playtest.json",
+      "screenshotDir": "artifacts\\test-runners\\screenshots\\npc-go-home-visual",
+      "evidenceLevel": "acceptance_visual",
+      "acceptanceClaims": ["npc_go_home_opens_crosses_closes_home_door"],
+      "requiredScreenshots": [
+        "spawn_behind_home.png",
+        "at_home_door.png",
+        "door_open.png",
+        "inside_closed_door.png"
+      ],
+      "requiresForbiddenCallSelfScan": true,
+      "requiresVisualProof": true,
       "required": true
     },
     {
       "id": "npc_real_tutorial_playthrough",
-      "description": "R00 real tutorial knock-to-morning NPC playthrough characterization",
+      "description": "Headed real tutorial Mira-home path acceptance",
       "command": ".\\tools\\npc\\run-real-tutorial-playthrough.ps1",
-      "args": ["-Seed", "atlas-1492", "-ReportPath", "artifacts\\test-runners\\npc-real-tutorial-playthrough.json"],
+      "args": ["-TimeMode", "Both", "-Seed", "atlas-1492", "-ReportPath", "artifacts\\test-runners\\npc-real-tutorial-playthrough.json", "-ScreenshotDir", "artifacts\\test-runners\\screenshots\\npc-real-tutorial-playthrough", "-Visible", "-MiraHomeOnly"],
       "reportPath": "artifacts\\test-runners\\npc-real-tutorial-playthrough.json",
+      "screenshotDir": "artifacts\\test-runners\\screenshots\\npc-real-tutorial-playthrough",
+      "evidenceLevel": "acceptance_visual",
+      "acceptanceClaims": ["tutorial_mira_enters_home_and_closes_door"],
+      "requiredScreenshots": [
+        "mira_go_home_start.png",
+        "mira_at_home_door.png",
+        "mira_home_door_open.png",
+        "mira_inside_home_closed_door.png"
+      ],
+      "requiresForbiddenCallSelfScan": true,
+      "requiresVisualProof": true,
       "required": true
     },
     {
@@ -165,6 +241,7 @@
       "command": ".\\tools\\story\\run-story-playtest.ps1",
       "args": ["-ReportPath", "artifacts\\test-runners\\story-playtest-report.json", "-Seed", "atlas-1492"],
       "reportPath": "artifacts\\test-runners\\story-playtest-report.json",
+      "evidenceLevel": "integration",
       "required": true
     },
     {
@@ -173,14 +250,16 @@
       "command": ".\\tools\\run-visual-captures.ps1",
       "args": ["-OutputDir", "artifacts\\test-runners\\visual", "-Seed", "atlas-1492"],
       "reportPath": "artifacts\\test-runners\\visual\\visual-captures.json",
+      "evidenceLevel": "integration",
       "required": true
     },
     {
       "id": "playtest",
-      "description": "Broad gameplay continuity playtest",
+      "description": "Broad gameplay continuity playtest; integration smoke only, not NPC/pathfinding acceptance",
       "command": ".\\tools\\run-playtest.ps1",
       "args": ["-ReportPath", "artifacts\\test-runners\\playtest-report.json", "-Seed", "atlas-1492"],
       "reportPath": "artifacts\\test-runners\\playtest-report.json",
+      "evidenceLevel": "integration",
       "required": true
     }
   ]
