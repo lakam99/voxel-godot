@@ -575,9 +575,11 @@ func walk_near(target: Vector3, stop_distance: float, timeout_seconds: float, la
 func walk_intro_path_to_town_center(tutorial, label: String) -> bool:
     var start_cell := intro_state_cell(tutorial, "startCell", flat_cell(player.global_position))
     var town_center := intro_state_cell(tutorial, "townCenter", start_cell)
+    var inside_door_cell := Vector2i(start_cell.x, start_cell.y - 1)
+    var starter_door_cell := Vector2i(start_cell.x, start_cell.y - 3)
     var exit_cell := Vector2i(start_cell.x, start_cell.y - 5)
     var center_north := Vector2i(town_center.x, exit_cell.y)
-    return await walk_intro_waypoints([exit_cell, center_north], label, CELL * 1.25, 12.0)
+    return await walk_intro_waypoints([inside_door_cell, starter_door_cell, exit_cell, center_north], label, CELL * 1.25, 12.0)
 
 func walk_intro_path_to_starter_bed(tutorial, label: String) -> bool:
     var start_cell := intro_state_cell(tutorial, "startCell", flat_cell(player.global_position))
@@ -1301,6 +1303,9 @@ func route_order_sample(label: String) -> Dictionary:
             "routePriority": int(mira.get("routePriority", 0)),
             "routeStatus": String(mira.get("routeStatus", "")),
             "routeReason": String(mira.get("routeReason", "")),
+            "activeDoorPortalId": String(mira.get("activeDoorPortalId", "")),
+            "activeDoorDirection": String(mira.get("activeDoorDirection", "")),
+            "portalRecenterTicks": int(mira.get("portalRecenterTicks", 0)),
             "lastMoveDistance": rounded(float(mira.get("lastMoveDistance", 0.0)))
         }
     return row
@@ -1407,6 +1412,8 @@ func npc_summary(entry: Dictionary) -> Dictionary:
         "scriptedArrivedMeta": scripted_arrived_meta,
         "activeMotionGoal": entry.get("activeMotionGoal", {}),
         "activeDoorPortalId": String(entry.get("activeDoorPortalId", "")),
+        "activeDoorDirection": String(entry.get("activeDoorDirection", "")),
+        "portalRecenterTicks": int(entry.get("portalRecenterTicks", 0)),
         "activeTrafficStepGroup": String(entry.get("activeTrafficStepGroup", "")),
         "blockedMoveTime": rounded(float(entry.get("blockedMoveTime", 0.0))),
         "routeWaitTicks": int(entry.get("routeWaitTicks", 0)),
@@ -1423,6 +1430,7 @@ func npc_summary(entry: Dictionary) -> Dictionary:
         "pathWaypointCount": path_waypoints.size(),
         "firstPathWaypointValid": first_waypoint_valid,
         "firstPathWaypoint": vec3(first_waypoint),
+        "lastRoutePlanDebug": entry.get("lastRoutePlanDebug", {}),
         "corridorFollow": entry.get("corridorFollow", {}),
         "corridorProgress": entry.get("corridorProgress", {})
     }
@@ -1528,6 +1536,15 @@ func add_failure(code: String, details: String) -> void:
     report_data["results"] = results
     report_data["failureReasons"] = failure_reasons
     report_data["lastFailure"] = failure_reasons[failure_reasons.size() - 1]
+    report_data["playerTimeline"] = player_timeline
+    report_data["doorStateTimeline"] = door_timeline
+    report_data["miraTimeline"] = mira_timeline
+    report_data["miraRouteOrderTimeline"] = route_order_timeline
+    report_data["miraSpeedSamples"] = mira_speed_samples
+    report_data["npcScheduleMatrix"] = schedule_matrix
+    var mira := npc_entry("mira")
+    if not mira.is_empty():
+        report_data["miraFailureSnapshot"] = npc_summary(mira)
     save_report()
 
 func finish() -> void:

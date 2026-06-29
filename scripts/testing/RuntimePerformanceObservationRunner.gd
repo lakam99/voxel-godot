@@ -110,7 +110,7 @@ func run_scenario(scenario_name: String) -> Dictionary:
     var metrics := summarize_samples(samples)
     var failures: Array[String] = performance_failures(metrics)
     var passed := not samples.is_empty() and failures.is_empty()
-    var details := "samples=%d p99=%.2f max=%.2f npcMax=%.2f routeMax=%.2f navMax=%.2f jobMax=%.2f saveMax=%.2f" % [
+    var details := "samples=%d p99=%.2f max=%.2f npcMax=%.2f routeMax=%.2f navMax=%.2f jobMax=%.2f saveMax=%.2f navmeshInstallP95=%dus navmeshQueryP95=%dus" % [
         samples.size(),
         float(metrics.get("frameP99Ms", 0.0)),
         float(metrics.get("frameMaxMs", 0.0)),
@@ -118,7 +118,9 @@ func run_scenario(scenario_name: String) -> Dictionary:
         float(metrics.get("maxRoutePlanMs", 0.0)),
         float(metrics.get("maxNavSnapshotMs", 0.0)),
         float(metrics.get("maxJobScanMs", 0.0)),
-        float(metrics.get("maxAutosaveMs", 0.0))
+        float(metrics.get("maxAutosaveMs", 0.0)),
+        int(metrics.get("maxNavmeshInstallP95Usec", 0)),
+        int(metrics.get("maxNavmeshPathQueryP95Usec", 0))
     ]
     if main != null:
         main.queue_free()
@@ -284,6 +286,11 @@ func summarize_samples(samples: Array) -> Dictionary:
     var job_scan_nodes := 0
     var forage_scan_nodes := 0
     var indexed_resource_queries := 0
+    var max_navmesh_install_usec := 0
+    var max_navmesh_install_p95_usec := 0
+    var max_navmesh_path_query_usec := 0
+    var max_navmesh_path_query_p95_usec := 0
+    var max_navmesh_path_query_failures := 0
     var last_spike := {}
     for sample_value in samples:
         var sample: Dictionary = sample_value
@@ -322,6 +329,12 @@ func summarize_samples(samples: Array) -> Dictionary:
         job_scan_nodes = max(job_scan_nodes, int(counters.get("job_scan_nodes", job_scan_nodes)))
         forage_scan_nodes = max(forage_scan_nodes, int(counters.get("forage_scan_nodes", forage_scan_nodes)))
         indexed_resource_queries = max(indexed_resource_queries, int(counters.get("indexed_resource_queries", indexed_resource_queries)))
+        var navmesh_stats: Dictionary = sample.get("navmeshWorld", {}) if sample.get("navmeshWorld", {}) is Dictionary else {}
+        max_navmesh_install_usec = max(max_navmesh_install_usec, int(navmesh_stats.get("lastInstallUsec", 0)))
+        max_navmesh_install_p95_usec = max(max_navmesh_install_p95_usec, int(navmesh_stats.get("installP95Usec", 0)))
+        max_navmesh_path_query_usec = max(max_navmesh_path_query_usec, int(navmesh_stats.get("maxPathQueryUsec", 0)))
+        max_navmesh_path_query_p95_usec = max(max_navmesh_path_query_p95_usec, int(navmesh_stats.get("pathQueryP95Usec", 0)))
+        max_navmesh_path_query_failures = max(max_navmesh_path_query_failures, int(navmesh_stats.get("pathQueryFailureCount", 0)))
         if float(sample.get("lastSpikeFrameMs", 0.0)) >= float(last_spike.get("frameMs", 0.0)):
             last_spike = {
                 "frameMs": float(sample.get("lastSpikeFrameMs", 0.0)),
@@ -361,6 +374,11 @@ func summarize_samples(samples: Array) -> Dictionary:
         "jobScanNodes": job_scan_nodes,
         "forageScanNodes": forage_scan_nodes,
         "indexedResourceQueries": indexed_resource_queries,
+        "maxNavmeshInstallUsec": max_navmesh_install_usec,
+        "maxNavmeshInstallP95Usec": max_navmesh_install_p95_usec,
+        "maxNavmeshPathQueryUsec": max_navmesh_path_query_usec,
+        "maxNavmeshPathQueryP95Usec": max_navmesh_path_query_p95_usec,
+        "maxNavmeshPathQueryFailures": max_navmesh_path_query_failures,
         "lastSpike": last_spike
     }
 
@@ -380,6 +398,10 @@ func performance_failures(metrics: Dictionary) -> Array[String]:
         failures.append("autosave exceeded 2ms main-thread budget")
     if int(metrics.get("jobScanNodes", 0)) > 0 or int(metrics.get("forageScanNodes", 0)) > 0:
         failures.append("job/forage target selection used recursive scan nodes")
+    if int(metrics.get("maxNavmeshInstallP95Usec", 0)) > 4000:
+        failures.append("navmesh install p95 exceeded 4ms budget")
+    if int(metrics.get("maxNavmeshPathQueryP95Usec", 0)) > 1000:
+        failures.append("navmesh path query p95 exceeded 1ms budget")
     return failures
 
 func summarize_results(results: Array) -> Dictionary:

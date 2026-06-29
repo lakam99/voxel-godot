@@ -65,6 +65,26 @@ var metrics := {
 	"selectedRuns": 0
 }
 
+class FakeRouteWorld:
+	var revision_value := "rev-b"
+
+	func revision() -> String:
+		return revision_value
+
+	func world_cell(position: Vector3) -> Vector2i:
+		return Vector2i(roundi(position.x), roundi(position.z))
+
+class FakeRoutePlanner:
+	var result := {}
+	var calls := 0
+
+	func _init(route_result := {}) -> void:
+		result = route_result
+
+	func plan_route(_entry: Dictionary, _intent: Dictionary) -> Dictionary:
+		calls += 1
+		return result.duplicate(true)
+
 func _ready() -> void:
 	configure_from_environment()
 	started_unix = Time.get_unix_time_from_system()
@@ -322,6 +342,8 @@ func motor_cases() -> Array[Dictionary]:
 		["npc_motor_decorative_path_torch_nonblocking_mask", "test_motor_decorative_path_torch_nonblocking_mask"],
 		["npc_motor_no_route_transform_write", "test_motor_no_route_transform_write"],
 		["npc_motor_no_unstick_teleport", "test_motor_no_unstick_teleport"],
+		["npc_motor_preserves_active_route_on_transient_replan_failure", "test_motor_preserves_active_route_on_transient_replan_failure"],
+		["npc_motor_skips_optional_home_threshold_on_endpoint_snap_failure", "test_motor_skips_optional_home_threshold_on_endpoint_snap_failure"],
 		["npc_motor_spawn_safe_placement", "test_motor_spawn_safe_placement"],
 		["npc_motor_spawn_rejects_occupied_capsule", "test_motor_spawn_rejects_occupied_capsule"],
 		["npc_motor_every_active_actor_physics_tick", "test_motor_every_active_actor_physics_tick"]
@@ -357,8 +379,9 @@ func nav_world_cases() -> Array[Dictionary]:
 		["npc_navworld_unloaded_tile_not_traversable", "test_navworld_unloaded_tile_not_traversable"],
 		["npc_navworld_build_budget_yields_and_resumes", "test_navworld_build_budget_yields_and_resumes"],
 		["npc_navworld_deterministic_tile_output", "test_navworld_deterministic_tile_output"],
-		["npc_navmesh_backend_default_custom", "test_navmesh_backend_default_custom"],
+		["npc_navmesh_backend_default_navmesh", "test_navmesh_backend_default_navmesh"],
 		["npc_navmesh_backend_explicit_navmesh", "test_navmesh_backend_explicit_navmesh"],
+		["npc_navmesh_backend_custom_alias_navmesh", "test_navmesh_backend_custom_alias_navmesh"],
 		["npc_navmesh_descriptor_deterministic_signature", "test_navmesh_descriptor_deterministic_signature"],
 		["npc_navmesh_tile_snapshot_descriptor_deterministic", "test_navmesh_tile_snapshot_descriptor_deterministic"],
 		["npc_navmesh_descriptor_keeps_door_links", "test_navmesh_descriptor_keeps_door_links"],
@@ -366,6 +389,7 @@ func nav_world_cases() -> Array[Dictionary]:
 		["npc_navmesh_chunk_unload_cleans_region", "test_navmesh_chunk_unload_cleans_region"],
 		["npc_navmesh_door_portal_installs_nav_link", "test_navmesh_door_portal_installs_nav_link"],
 		["npc_navmesh_route_through_door_link_emits_action", "test_navmesh_route_through_door_link_emits_action"],
+		["npc_navmesh_actor_path_status", "test_navmesh_actor_path_status"],
 		["npc_navmesh_door_state_toggles_nav_link", "test_navmesh_door_state_toggles_nav_link"],
 		["npc_navmesh_dirty_region_rebuild_after_world_edit", "test_navmesh_dirty_region_rebuild_after_world_edit"],
 		["npc_navmesh_chunk_unload_cleans_door_links", "test_navmesh_chunk_unload_cleans_door_links"],
@@ -374,7 +398,7 @@ func nav_world_cases() -> Array[Dictionary]:
 		["npc_navmesh_service_register_unregister_descriptor", "test_navmesh_service_register_unregister_descriptor"],
 		["npc_navmesh_closest_walkable_descriptor_point", "test_navmesh_closest_walkable_descriptor_point"],
 		["npc_navmesh_no_scene_visual_mesh_scan", "test_navmesh_no_scene_visual_mesh_scan"],
-		["npc_navmesh_legacy_audit_detects_current_stack", "test_navmesh_legacy_audit_detects_current_stack"]
+		["npc_navmesh_live_legacy_audit_passes", "test_navmesh_live_legacy_audit_passes"]
 	]
 	var cases: Array[Dictionary] = []
 	for spec in ids:
@@ -1220,6 +1244,113 @@ func test_motor_no_unstick_teleport(_mode: String) -> Dictionary:
 		{}
 	)
 
+func test_motor_preserves_active_route_on_transient_replan_failure(_mode: String) -> Dictionary:
+	var controller = NpcRouteMovementControllerScript.new()
+	var target_cell := Vector2i(8, 4)
+	var old_waypoints := [Vector3(1.0, 0.0, 0.0), Vector3(2.0, 0.0, 0.0)]
+	var old_cells := [Vector2i(1, 0), Vector2i(2, 0)]
+	var arrival_radius := NpcConstantsScript.CELL_SIZE * 0.75
+	var route_key := "%s:%d,%d:%s:%s:%s:%s:%.3f" % ["job", target_cell.x, target_cell.y, str(true), str(false), "", str(false), arrival_radius]
+	var entry := {
+		"id": "niko",
+		"routeKey": route_key,
+		"routeSnapshotRevision": "rev-a",
+		"routeForceReplan": true,
+		"routeStatus": "moving",
+		"routeReason": "",
+		"pathWaypoints": old_waypoints.duplicate(),
+		"routeCells": old_cells.duplicate(),
+		"routeActions": {},
+		"routeFallbackCell": old_cells[old_cells.size() - 1]
+	}
+	var intent := {
+		"kind": "job",
+		"target": Vector3(8.0, 0.0, 4.0),
+		"targetCell": target_cell,
+		"allowOutside": true,
+		"movingHome": false,
+		"action": "",
+		"strictArrival": false,
+		"arrivalRadius": arrival_radius
+	}
+	var failed_route := {
+		"ok": false,
+		"status": "blocked",
+		"reason": "endpoint_not_server_walkable",
+		"cells": [],
+		"waypoints": [],
+		"actions": {},
+		"targetCell": target_cell,
+		"fallbackCell": Vector2i(999999, 999999),
+		"snapshotRevision": "",
+		"navmeshRoute": {
+			"reason": "endpoint_not_server_walkable",
+			"startWalkable": { "found": false, "source": "installed_descriptor_endpoint" },
+			"targetWalkable": { "found": true, "source": "navigation_server" }
+		}
+	}
+	var planner = FakeRoutePlanner.new(failed_route)
+	var world = FakeRouteWorld.new()
+	var route: Dictionary = controller.ensure_route(entry, intent, planner, world)
+	var preserved_waypoints := (entry.get("pathWaypoints", []) as Array)
+	var preserved_cells := (entry.get("routeCells", []) as Array)
+	var passed := (
+		bool(route.get("ok", false))
+		and String(route.get("status", "")) == "routed"
+		and String(route.get("reason", "")) == "endpoint_not_server_walkable"
+		and bool(entry.get("routeForceReplan", false))
+		and String(entry.get("routeStatus", "")) == "moving"
+		and String(entry.get("routeReason", "")) == "endpoint_not_server_walkable"
+		and preserved_waypoints == old_waypoints
+		and preserved_cells == old_cells
+		and int(planner.get("calls")) == 1
+	)
+	return outcome(
+		passed,
+		"route=%s entryStatus=%s force=%s calls=%d" % [JSON.stringify(route), String(entry.get("routeStatus", "")), str(entry.get("routeForceReplan", false)), int(planner.get("calls"))],
+		["active_route_survives_endpoint_transient", "same_target_retry_preserved"],
+		{ "route": route, "entryRouteReason": entry.get("routeReason", ""), "lastDebug": entry.get("lastRoutePlanDebug", {}) }
+	)
+
+func test_motor_skips_optional_home_threshold_on_endpoint_snap_failure(_mode: String) -> Dictionary:
+	var controller = NpcRouteMovementControllerScript.new()
+	var body := motor_body("HomeThresholdEndpointNPC")
+	body.global_position = Vector3(0.0, 0.0, 0.0)
+	var entry := {
+		"id": "mira",
+		"body": body,
+		"routeMovingHome": true,
+		"homeRouteIndex": 1,
+		"homeRoutePositions": [
+			Vector3(0.0, 0.0, 1.35),
+			Vector3(0.0, 0.0, 0.0),
+			Vector3(0.0, 0.0, -1.35),
+			Vector3(1.35, 0.0, -1.35)
+		],
+		"homeActiveTargetCell": Vector2i(0, -1),
+		"routeGoalCell": Vector2i(0, -1),
+		"porchCell": Vector2i(0, 0),
+		"homeCell": Vector2i(1, -1),
+		"porchPosition": Vector3(0.0, 0.0, 0.0),
+		"routeCells": [Vector2i(0, -1)],
+		"pathWaypoints": [],
+		"routeActions": {}
+	}
+	var skipped := controller.skip_optional_home_waypoint_if_endpoint_unsnappable(entry, "endpoint_not_server_walkable")
+	var skipped_index := int(entry.get("homeRouteIndex", 0))
+	var force_replan := bool(entry.get("routeForceReplan", false))
+	entry["homeRouteIndex"] = 1
+	entry["homeActiveTargetCell"] = Vector2i(0, 0)
+	var porch_not_skipped := not controller.skip_optional_home_waypoint_if_endpoint_unsnappable(entry, "endpoint_not_server_walkable")
+	var passed := skipped and skipped_index == 2 and force_replan and porch_not_skipped
+	body.queue_free()
+	return outcome(
+		passed,
+		"skipped=%s index=%d porchNotSkipped=%s force=%s" % [str(skipped), skipped_index, str(porch_not_skipped), str(force_replan)],
+		["home_threshold_endpoint_skip", "porch_endpoint_not_skipped"],
+		{ "homeRouteIndex": skipped_index, "routeForceReplan": force_replan }
+	)
+
 func test_motor_spawn_safe_placement(_mode: String) -> Dictionary:
 	var service = NpcSafePlacementServiceScript.new()
 	service.setup(null, null)
@@ -1485,15 +1616,15 @@ func test_navworld_deterministic_tile_output(_mode: String) -> Dictionary:
 	var passed: bool = first.stable_signature() == second.stable_signature()
 	return outcome(passed, "first=%s second=%s" % [first.stable_signature(), second.stable_signature()], ["deterministic_tile_signature"], { "first": first.stable_signature(), "second": second.stable_signature() })
 
-func test_navmesh_backend_default_custom(_mode: String) -> Dictionary:
+func test_navmesh_backend_default_navmesh(_mode: String) -> Dictionary:
 	var config = NavigationBackendConfigScript.default_config()
 	var explicit_empty = NavigationBackendConfigScript.from_value("", "test")
 	var autonomy := NpcAutonomySystemScript.new()
 	autonomy.setup(null, null)
 	var summary: Dictionary = autonomy.navigation_backend_summary()
 	autonomy.free()
-	var passed: bool = String(config.backend) == NavigationBackendConfigScript.BACKEND_CUSTOM and String(explicit_empty.backend) == NavigationBackendConfigScript.BACKEND_CUSTOM and String(summary.get("backend", "")) == NavigationBackendConfigScript.BACKEND_CUSTOM and not bool(summary.get("navmeshEnabled", true))
-	return outcome(passed, "config=%s summary=%s" % [JSON.stringify(config.to_summary()), JSON.stringify(summary)], ["nav_backend_default_custom", "autonomy_reports_custom_backend"], { "config": config.to_summary(), "autonomy": summary })
+	var passed: bool = String(config.backend) == NavigationBackendConfigScript.BACKEND_NAVMESH and String(explicit_empty.backend) == NavigationBackendConfigScript.BACKEND_NAVMESH and String(summary.get("backend", "")) == NavigationBackendConfigScript.BACKEND_NAVMESH and bool(summary.get("navmeshEnabled", false))
+	return outcome(passed, "config=%s summary=%s" % [JSON.stringify(config.to_summary()), JSON.stringify(summary)], ["nav_backend_default_navmesh", "autonomy_reports_navmesh_backend"], { "config": config.to_summary(), "autonomy": summary })
 
 func test_navmesh_backend_explicit_navmesh(_mode: String) -> Dictionary:
 	var config = NavigationBackendConfigScript.from_value("navmesh", "test")
@@ -1503,6 +1634,15 @@ func test_navmesh_backend_explicit_navmesh(_mode: String) -> Dictionary:
 	service.clear()
 	var passed: bool = config.use_navmesh() and String(stats.get("backend", "")) == NavigationBackendConfigScript.BACKEND_NAVMESH and bool(stats.get("navmeshEnabled", false)) and bool(stats.get("hasNavigationMap", false))
 	return outcome(passed, "stats=%s" % JSON.stringify(stats), ["nav_backend_explicit_navmesh", "navmesh_service_owns_map"], { "stats": stats })
+
+func test_navmesh_backend_custom_alias_navmesh(_mode: String) -> Dictionary:
+	var previous_backend := OS.get_environment(NavigationBackendConfigScript.ENV_BACKEND)
+	var explicit_custom = NavigationBackendConfigScript.from_value("custom", "test")
+	OS.set_environment(NavigationBackendConfigScript.ENV_BACKEND, "custom")
+	var env_custom = NavigationBackendConfigScript.from_environment()
+	OS.set_environment(NavigationBackendConfigScript.ENV_BACKEND, previous_backend)
+	var passed: bool = String(explicit_custom.backend) == NavigationBackendConfigScript.BACKEND_NAVMESH and String(env_custom.backend) == NavigationBackendConfigScript.BACKEND_NAVMESH and explicit_custom.use_navmesh() and env_custom.use_navmesh()
+	return outcome(passed, "explicit=%s env=%s" % [JSON.stringify(explicit_custom.to_summary()), JSON.stringify(env_custom.to_summary())], ["legacy_custom_backend_aliases_navmesh", "navmesh_backend_cannot_be_disabled_by_env"], { "explicit": explicit_custom.to_summary(), "environment": env_custom.to_summary() })
 
 func test_navmesh_descriptor_deterministic_signature(_mode: String) -> Dictionary:
 	var first = NavigationBakeDescriptorScript.create("region:town:0", "0,0", AABB(Vector3.ZERO, Vector3(4, 2, 4)))
@@ -1606,6 +1746,19 @@ func test_navmesh_route_through_door_link_emits_action(_mode: String) -> Diction
 	service.clear()
 	var passed: bool = bool(route.get("ok", false)) and not door_action.is_empty() and String(door_action.get("kind", "")) == "door" and bool(door_action.get("requiresSmartObject", false)) and bool(door_action.get("navLink", false)) and int(stats.get("pathQueryFailureCount", 0)) == 0
 	return outcome(passed, "route=%s action=%s stats=%s" % [JSON.stringify(route), JSON.stringify(door_action), JSON.stringify(stats)], ["navmesh_query_uses_door_link", "door_link_route_emits_smart_object_action"], { "route": route, "action": door_action, "stats": stats })
+
+func test_navmesh_actor_path_status(_mode: String) -> Dictionary:
+	var service = NavmeshWorldServiceScript.new()
+	service.setup(NavigationBackendConfigScript.from_value("navmesh", "test"))
+	service.register_chunk_descriptor(navmesh_door_descriptor("region:chunk:actor-status", "actor-status", "door:actor-status"))
+	var route: Dictionary = service.query_route(Vector3(0.0, 0.0, 0.0), Vector3(0.0, 0.0, 2.7), { "actorId": "npc:test:actor-status", "kind": "scripted", "maxSnapDistance": 4.0 })
+	var status: Dictionary = service.actor_path_status("npc:test:actor-status")
+	var unknown: Dictionary = service.actor_path_status("npc:missing")
+	var snapshot: Dictionary = service.debug_snapshot()
+	var all_status: Dictionary = snapshot.get("actorPathStatus", {})
+	service.clear()
+	var passed: bool = bool(route.get("ok", false)) and bool(status.get("ok", false)) and String(status.get("actorId", "")) == "npc:test:actor-status" and String(status.get("source", "")) == "navmesh" and String(status.get("nextDoorPortalId", "")) == "door:actor-status" and int(status.get("pathPointCount", 0)) >= 2 and String(unknown.get("reason", "")) == "no_query_record" and int(all_status.get("count", 0)) == 1
+	return outcome(passed, "route=%s status=%s unknown=%s all=%s" % [JSON.stringify(route), JSON.stringify(status), JSON.stringify(unknown), JSON.stringify(all_status)], ["navmesh_records_actor_path_status", "navmesh_debug_exports_actor_path_status"], { "route": route, "status": status, "unknown": unknown, "all": all_status })
 
 func test_navmesh_door_state_toggles_nav_link(_mode: String) -> Dictionary:
 	var service = NavmeshWorldServiceScript.new()
@@ -1718,7 +1871,7 @@ func test_navmesh_no_scene_visual_mesh_scan(_mode: String) -> Dictionary:
 	)
 	return outcome(passed, "getTree=%d meshInstance=%d parse=%d" % [service_text.find("get_tree("), service_text.find("MeshInstance3D"), service_text.find("parse_source_geometry_data")], ["navmesh_service_uses_explicit_descriptors", "navmesh_descriptor_owns_deterministic_signature"], {})
 
-func test_navmesh_legacy_audit_detects_current_stack(_mode: String) -> Dictionary:
+func test_navmesh_live_legacy_audit_passes(_mode: String) -> Dictionary:
 	var audit_text := read_text("res://tools/npc/audit-npc-navmesh-backend.ps1")
 	var planner_text := read_text("res://scripts/npc_ai/routing/HierarchicalRoutePlanner.gd")
 	var route_adapter_text := read_text("res://scripts/npc_ai/routing/NpcRouteCoordinatorAdapter.gd")
@@ -1726,13 +1879,15 @@ func test_navmesh_legacy_audit_detects_current_stack(_mode: String) -> Dictionar
 	var passed := (
 		audit_text.find("LocalAStarPlannerScript") >= 0
 		and audit_text.find("HierarchicalRoutePlannerScript") >= 0
-		and audit_text.find("NpcRouteCoordinatorAdapterScript") >= 0
+		and audit_text.find("LiveRuntimeFiles") >= 0
 		and planner_text.find("LocalAStarPlannerScript") >= 0
-		and route_adapter_text.find("HierarchicalRoutePlannerScript") >= 0
+		and route_adapter_text.find("HierarchicalRoutePlannerScript") < 0
+		and route_adapter_text.find("LocalAStarPlannerScript") < 0
+		and route_adapter_text.find("navmesh_planner.plan_runtime_route") >= 0
 		and coordinator_text.find("NpcRouteCoordinatorAdapterScript") >= 0
 		and coordinator_text.find("GeneratedWorldNavigationAdapterScript") >= 0
 	)
-	return outcome(passed, "audit=%d planner=%d adapter=%d coordinator=%d" % [audit_text.length(), planner_text.find("LocalAStarPlannerScript"), route_adapter_text.find("HierarchicalRoutePlannerScript"), coordinator_text.find("NpcRouteCoordinatorAdapterScript")], ["navmesh_audit_has_legacy_patterns", "current_custom_stack_detectable_before_cutover"], {})
+	return outcome(passed, "audit=%d planner=%d adapterLegacy=%d coordinator=%d" % [audit_text.length(), planner_text.find("LocalAStarPlannerScript"), route_adapter_text.find("HierarchicalRoutePlannerScript"), coordinator_text.find("NpcRouteCoordinatorAdapterScript")], ["navmesh_audit_scans_live_runtime", "live_adapter_has_no_legacy_planner_dependency"], {})
 
 func nav_event_setup() -> Dictionary:
 	var bus := NavigationChangeBusScript.new()

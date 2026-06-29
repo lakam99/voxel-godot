@@ -82,7 +82,7 @@ func validate_semantic_target(goal_kind: StringName, sequence_metadata: Dictiona
 		result["reason"] = "target_selection_pending" if result["status"] == "pending" else "missing_semantic_target"
 		return result
 	result["position"] = target_position
-	var reachability := _reachable_target(target_position)
+	var reachability := _reachable_target(target_position, entry)
 	result["reachable"] = bool(reachability.get("reachable", false))
 	result["status"] = String(reachability.get("status", "reachable" if bool(result["reachable"]) else "unreachable"))
 	result["reason"] = String(reachability.get("reason", ""))
@@ -156,7 +156,7 @@ func _semantic_target_position(goal_kind: StringName, target_kind: String, entry
 		return entry.get("homePosition", Vector3.INF)
 	return entry.get("porchPosition", Vector3.INF)
 
-func _reachable_target(target_position: Vector3) -> Dictionary:
+func _reachable_target(target_position: Vector3, entry: Dictionary) -> Dictionary:
 	if navigation_service != null and navigation_service.has_method("closest_walkable"):
 		var closest: Dictionary = navigation_service.closest_walkable(target_position, 2.70)
 		if bool(closest.get("found", false)):
@@ -167,13 +167,36 @@ func _reachable_target(target_position: Vector3) -> Dictionary:
 				"walkablePosition": closest.get("position", target_position),
 				"walkableDistance": float(closest.get("distance", 0.0))
 			}
+		var generated_fallback := _generated_approach_reachability(target_position, entry)
+		if bool(generated_fallback.get("reachable", false)):
+			return generated_fallback
 		return {
 			"reachable": false,
 			"status": "unreachable",
 			"reason": String(closest.get("reason", "no_walkable_target"))
 		}
+	var generated_only := _generated_approach_reachability(target_position, entry)
+	if bool(generated_only.get("reachable", false)):
+		return generated_only
 	return {
 		"reachable": target_position != Vector3.INF,
 		"status": "reachable" if target_position != Vector3.INF else "missing",
 		"reason": "no_navigation_validator"
+	}
+
+func _generated_approach_reachability(target_position: Vector3, entry: Dictionary) -> Dictionary:
+	if navigation_service == null or not navigation_service.has_method("approach_cells_for_target"):
+		return {}
+	var approach_cells: Array = navigation_service.approach_cells_for_target(entry, target_position, true)
+	if approach_cells.is_empty():
+		return {}
+	var walkable_position := target_position
+	if navigation_service.has_method("cell_position") and approach_cells[0] is Vector2i:
+		walkable_position = navigation_service.cell_position(approach_cells[0])
+	return {
+		"reachable": true,
+		"status": "reachable",
+		"reason": "generated_approach_cell",
+		"walkablePosition": walkable_position,
+		"walkableDistance": Vector2(walkable_position.x - target_position.x, walkable_position.z - target_position.z).length()
 	}

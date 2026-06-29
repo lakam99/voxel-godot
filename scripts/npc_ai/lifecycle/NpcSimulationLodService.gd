@@ -58,6 +58,7 @@ var counters := {
 	"demotionRejected": 0,
 	"prefetchRequests": 0,
 	"tileUnloadHolds": 0,
+	"tileUnloadReleases": 0,
 	"saveMigrations": 0,
 	"cleanupCalls": 0
 }
@@ -373,7 +374,36 @@ func handle_tile_unloaded(tile_key: String, entries: Array) -> Dictionary:
 	return { "tileKey": tile_key, "affectedActors": affected, "action": "hold_and_request_topology" }
 
 func should_hold_active_movement(entry: Dictionary) -> bool:
-	return bool(entry.get("movementHeldForTopology", false)) and String(entry.get("simulationLod", STATE_ACTIVE)) != STATE_ABSTRACT
+	if not bool(entry.get("movementHeldForTopology", false)):
+		return false
+	if String(entry.get("simulationLod", STATE_ACTIVE)) == STATE_ABSTRACT:
+		return false
+	if _release_topology_hold_if_ready(entry):
+		return false
+	return true
+
+func _release_topology_hold_if_ready(entry: Dictionary) -> bool:
+	var tile_key := String(entry.get("requestedTopologyTile", ""))
+	if tile_key == "":
+		_clear_topology_hold(entry, "missing_topology_tile")
+		return true
+	if not entry_uses_tile(entry, tile_key):
+		_clear_topology_hold(entry, "route_changed_off_unloaded_tile")
+		return true
+	var navigation_world = autonomy_system.get("navigation_world") if autonomy_system != null else null
+	if navigation_world != null and navigation_world.has_method("is_tile_traversable") and bool(navigation_world.is_tile_traversable(tile_key)):
+		_clear_topology_hold(entry, "topology_ready")
+		return true
+	return false
+
+func _clear_topology_hold(entry: Dictionary, reason: String) -> void:
+	entry.erase("movementHeldForTopology")
+	entry.erase("requestedTopologyTile")
+	entry["routeForceReplan"] = true
+	if String(entry.get("routeStatus", "")) == "PENDING" and String(entry.get("routeReason", "")) == "waiting_for_topology":
+		entry["routeStatus"] = "waiting"
+		entry["routeReason"] = reason
+	counters["tileUnloadReleases"] = int(counters.get("tileUnloadReleases", 0)) + 1
 
 func durable_snapshot(entry: Dictionary) -> Dictionary:
 	var body := entry.get("body") as Node3D

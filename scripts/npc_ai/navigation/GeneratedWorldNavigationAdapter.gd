@@ -4,9 +4,13 @@ class_name GeneratedWorldNavigationAdapter
 const NpcConstantsScript := preload("res://scripts/npc_ai/NpcConstants.gd")
 const NpcEnumsScript := preload("res://scripts/npc_ai/NpcEnums.gd")
 
-const CELL := 1.35
+const CELL := NpcConstantsScript.CELL_SIZE
+const NAV_TILE_CELL_SIZE := NpcConstantsScript.NAV_TILE_CELL_SIZE
 const INVALID_CELL := Vector2i(999999, 999999)
 const PROP_CLEARANCE_RADIUS := CELL * 0.82
+const DOOR_LINK_ENTER_COST := CELL * 18.0
+const ROUTE_NAVMESH_MARGIN_CELLS := 10
+const ROUTE_NAVMESH_MAX_TILES := 64
 
 var system
 var main
@@ -107,6 +111,66 @@ func build_snapshot(entry: Dictionary, allow_outside := false, moving_home := fa
 
 func revision() -> String:
     return "%d:%d:%d:%d" % [static_snapshot_revision, dynamic_revision, semantic_revision, door_state_revision]
+
+func navmesh_tile_source_key() -> String:
+    return "%d:%d" % [static_snapshot_revision, semantic_revision]
+
+func route_navmesh_tile_keys(entry: Dictionary, start: Vector3, target: Vector3, allow_outside := false, moving_home := false, margin_cells := ROUTE_NAVMESH_MARGIN_CELLS) -> Array[String]:
+    var start_cell := world_cell(start)
+    var target_cell := world_cell(target)
+    var min_x := mini(start_cell.x, target_cell.x) - margin_cells
+    var max_x := maxi(start_cell.x, target_cell.x) + margin_cells
+    var min_z := mini(start_cell.y, target_cell.y) - margin_cells
+    var max_z := maxi(start_cell.y, target_cell.y) + margin_cells
+    if entry != null and not entry.is_empty():
+        var center: Vector2i = entry.get("townCenter", start_cell)
+        var radius := int(entry.get("townRadius", 18))
+        if allow_outside or moving_home:
+            radius += 24
+        var clamp_margin := maxi(margin_cells, 4)
+        min_x = maxi(min_x, center.x - radius - clamp_margin)
+        max_x = mini(max_x, center.x + radius + clamp_margin)
+        min_z = maxi(min_z, center.y - radius - clamp_margin)
+        max_z = mini(max_z, center.y + radius + clamp_margin)
+    var min_tile_x := floori(float(min_x) / float(NAV_TILE_CELL_SIZE))
+    var max_tile_x := floori(float(max_x) / float(NAV_TILE_CELL_SIZE))
+    var min_tile_z := floori(float(min_z) / float(NAV_TILE_CELL_SIZE))
+    var max_tile_z := floori(float(max_z) / float(NAV_TILE_CELL_SIZE))
+    var keys: Array[String] = []
+    for tile_z in range(min_tile_z, max_tile_z + 1):
+        for tile_x in range(min_tile_x, max_tile_x + 1):
+            keys.append("%d,%d" % [tile_x, tile_z])
+    keys.sort()
+    if keys.size() <= ROUTE_NAVMESH_MAX_TILES:
+        return keys
+    return _nearest_route_tiles(keys, start_cell, target_cell)
+
+func build_navmesh_tile_snapshot(tile_key: String) -> Dictionary:
+    var snapshot: Dictionary = build_snapshot({}, true, true)
+    var tile := _parse_tile_key(tile_key)
+    var min_x := tile.x * NAV_TILE_CELL_SIZE
+    var min_z := tile.y * NAV_TILE_CELL_SIZE
+    var surfaces: Array[Dictionary] = []
+    var semantic_regions: Array[Dictionary] = []
+    for z in range(min_z, min_z + NAV_TILE_CELL_SIZE):
+        for x in range(min_x, min_x + NAV_TILE_CELL_SIZE):
+            var cell := Vector2i(x, z)
+            var surface := _navmesh_surface_for_cell(snapshot, cell)
+            if not surface.is_empty():
+                surfaces.append(surface)
+    var door_summary := _navmesh_door_summary_for_tile(snapshot, tile_key)
+    return {
+        "tileKey": tile_key,
+        "regionId": "region:chunk:%s" % tile_key,
+        "sourceRevision": static_snapshot_revision,
+        "topologyRevision": static_snapshot_revision,
+        "dynamicRevision": dynamic_revision,
+        "semanticRevision": semantic_revision,
+        "surfaces": surfaces,
+        "semanticRegions": semantic_regions,
+        "doorPortals": door_summary.get("doorPortals", []),
+        "doorLinks": door_summary.get("doorLinks", [])
+    }
 
 func _event_changes_static_snapshot(kinds: Array) -> bool:
     for kind_value in kinds:
@@ -269,6 +333,9 @@ func cell_distance(a: Vector2i, b: Vector2i) -> float:
 func cell_key(cell: Vector2i) -> String:
     return "%d,%d" % [cell.x, cell.y]
 
+func tile_key_for_cell(cell: Vector2i) -> String:
+    return "%d,%d" % [floori(float(cell.x) / float(NAV_TILE_CELL_SIZE)), floori(float(cell.y) / float(NAV_TILE_CELL_SIZE))]
+
 func point_inside_town(entry: Dictionary, position: Vector3) -> bool:
     var center: Vector2i = entry.get("townCenter", Vector2i.ZERO)
     var radius := float(entry.get("townRadius", 18)) * CELL
@@ -392,6 +459,148 @@ func candidate_cells_near(entry: Dictionary, target_cell: Vector2i, allow_outsid
     result.sort_custom(func(a: Vector2i, b: Vector2i) -> bool:
         return cell_distance(a, target_cell) < cell_distance(b, target_cell)
     )
+    return result
+
+func _navmesh_surface_for_cell(snapshot: Dictionary, cell: Vector2i) -> Dictionary:
+    if main == null:
+        return {}
+    if height_for_cell(cell) < main.WATER_LEVEL + 0.45:
+        return {}
+    var door := door_at(snapshot, cell)
+    if door != null:
+        var door_state := String(door.get_meta("door_state", NpcEnumsScript.DOOR_STATE_CLOSED))
+        if bool(door.get_meta("locked", false)) or bool(door.get_meta("jammed", false)) or bool(door.get_meta("destroyed", false)) or bool(door.get_meta("unloaded", false)):
+            return {}
+        if door_state in [String(NpcEnumsScript.DOOR_STATE_LOCKED), String(NpcEnumsScript.DOOR_STATE_JAMMED), String(NpcEnumsScript.DOOR_STATE_DESTROYED), String(NpcEnumsScript.DOOR_STATE_UNLOADED)]:
+            return {}
+    if static_blocker(snapshot, cell) != null:
+        return {}
+    if prop_clearance_blocker(snapshot, cell) != null:
+        return {}
+    var position := cell_position(cell)
+    var span_y := floori(position.y / CELL)
+    position.y = float(span_y) * CELL + 0.04
+    var surface := {
+        "cell": Vector3i(cell.x, span_y, cell.y),
+        "spanIndex": 0,
+        "worldPosition": position,
+        "floorNormal": Vector3.UP,
+        "headroom": 3.0,
+        "lateralClearance": 1.0,
+        "blocked": false,
+        "semanticRegionIds": [],
+        "traversalTags": ["terrain", "door"] if door != null else ["terrain"]
+    }
+    if is_path_cell(snapshot, cell):
+        surface["traversalTags"] = ["terrain", "path"]
+    return surface
+
+func _navmesh_door_summary_for_tile(snapshot: Dictionary, tile_key: String) -> Dictionary:
+    var portals: Array[Dictionary] = []
+    var links: Array[Dictionary] = []
+    var doors: Dictionary = snapshot.get("doors", {})
+    var cells: Array = doors.keys()
+    cells.sort_custom(func(a, b): return cell_key(a) < cell_key(b))
+    for cell_value in cells:
+        if not (cell_value is Vector2i):
+            continue
+        var cell: Vector2i = cell_value
+        if tile_key_for_cell(cell) != tile_key:
+            continue
+        var door := door_at(snapshot, cell)
+        if door == null:
+            continue
+        var portal_id := _door_portal_id(door, cell)
+        if portal_id == "":
+            continue
+        var axis := _door_crossing_axis(door)
+        var step := Vector2i(1, 0) if axis == "x" else Vector2i(0, 1)
+        var entrance_cell := cell - step
+        var exit_cell := cell + step
+        var entrance := cell_position(entrance_cell)
+        var exit := cell_position(exit_cell)
+        portals.append({
+            "id": portal_id,
+            "entrance": entrance,
+            "exit": exit,
+            "state": String(door.get_meta("door_state", NpcEnumsScript.DOOR_STATE_CLOSED)),
+            "openable": true,
+            "enabled": not bool(door.get_meta("destroyed", false)) and not bool(door.get_meta("unloaded", false)),
+            "locked": bool(door.get_meta("locked", false)),
+            "jammed": bool(door.get_meta("jammed", false)),
+            "destroyed": bool(door.get_meta("destroyed", false)),
+            "unloaded": bool(door.get_meta("unloaded", false)),
+            "crossingAxis": axis,
+            "cell": cell
+        })
+        links.append({
+            "id": "door-link:%s:%s" % [portal_id, tile_key],
+            "from": _nav_span_key(tile_key, entrance_cell),
+            "to": _nav_span_key(tile_key, exit_cell),
+            "portalId": portal_id,
+            "actionId": "open",
+            "start": entrance,
+            "end": exit,
+            "bidirectional": true,
+            "openable": true,
+            "enabled": true,
+            "cost": 1.0,
+            "enterCost": DOOR_LINK_ENTER_COST,
+            "travelCost": 1.0,
+            "cell": cell
+        })
+    return { "doorPortals": portals, "doorLinks": links }
+
+func _door_portal_id(door: Node, cell: Vector2i) -> String:
+    if door == null:
+        return ""
+    if door.has_meta("door_portal_id"):
+        return String(door.get_meta("door_portal_id"))
+    if door.has_meta("cell"):
+        var door_cell = door.get_meta("cell")
+        if door_cell is Vector3i:
+            return "door:%d,%d,%d" % [door_cell.x, door_cell.y, door_cell.z]
+    return "door:%d,0,%d" % [cell.x, cell.y]
+
+func _door_crossing_axis(door: Node) -> String:
+    if door == null:
+        return "z"
+    var side := int(door.get_meta("door_side", -1))
+    if side == 1 or side == 3:
+        return "x"
+    if side == 0 or side == 2:
+        return "z"
+    var facing := float(door.get_meta("closed_rotation", (door as Node3D).rotation.y if door is Node3D else 0.0))
+    return "x" if absf(sin(facing)) > absf(cos(facing)) else "z"
+
+func _nav_span_key(tile_key: String, cell: Vector2i) -> String:
+    var position := cell_position(cell)
+    return "%s:%d,%d,%d:0" % [tile_key, cell.x, floori(position.y / CELL), cell.y]
+
+func _parse_tile_key(tile_key: String) -> Vector2i:
+    var parts := tile_key.split(",")
+    if parts.size() < 2:
+        return Vector2i.ZERO
+    return Vector2i(int(parts[0]), int(parts[1]))
+
+func _nearest_route_tiles(keys: Array[String], start_cell: Vector2i, target_cell: Vector2i) -> Array[String]:
+    var midpoint := Vector2(float(start_cell.x + target_cell.x) * 0.5, float(start_cell.y + target_cell.y) * 0.5)
+    var scored := []
+    for key in keys:
+        var tile := _parse_tile_key(String(key))
+        var center := Vector2(float(tile.x * NAV_TILE_CELL_SIZE) + float(NAV_TILE_CELL_SIZE) * 0.5, float(tile.y * NAV_TILE_CELL_SIZE) + float(NAV_TILE_CELL_SIZE) * 0.5)
+        scored.append({ "key": String(key), "score": center.distance_squared_to(midpoint) })
+    scored.sort_custom(func(a, b):
+        if is_equal_approx(float(a.get("score", 0.0)), float(b.get("score", 0.0))):
+            return String(a.get("key", "")) < String(b.get("key", ""))
+        return float(a.get("score", 0.0)) < float(b.get("score", 0.0))
+    )
+    var result: Array[String] = []
+    for item in scored:
+        if result.size() >= ROUTE_NAVMESH_MAX_TILES:
+            break
+        result.append(String((item as Dictionary).get("key", "")))
+    result.sort()
     return result
 
 func approach_cells_for_target(entry: Dictionary, target_position: Vector3, allow_outside := true) -> Array[Vector2i]:

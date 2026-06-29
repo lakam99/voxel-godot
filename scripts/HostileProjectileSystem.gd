@@ -52,15 +52,22 @@ func spawn_projectile(start: Vector3, target: Vector3, damage := 8.0, owner: Nod
 
 func update_projectiles(delta: float) -> void:
     for projectile_state in projectiles.duplicate():
-        var mesh := projectile_state.get("mesh") as MeshInstance3D
-        if mesh == null or not is_instance_valid(mesh):
+        var mesh_value = projectile_state.get("mesh")
+        if not is_instance_valid(mesh_value):
+            projectiles.erase(projectile_state)
+            continue
+        var mesh := mesh_value as MeshInstance3D
+        if mesh == null:
             projectiles.erase(projectile_state)
             continue
         var previous: Vector3 = projectile_state.get("position", mesh.global_position)
         var velocity: Vector3 = projectile_state.get("velocity", Vector3.ZERO)
         var next := previous + velocity * delta
         var query := PhysicsRayQueryParameters3D.create(previous, next)
-        var owner := projectile_state.get("owner") as Node
+        var owner_value = projectile_state.get("owner")
+        var owner: Node = null
+        if is_instance_valid(owner_value):
+            owner = owner_value as Node
         query.exclude = [owner] if owner != null else []
         var hit: Dictionary = get_world_3d().direct_space_state.intersect_ray(query)
         var block_hit: Dictionary = projectile_block_hit(previous, next)
@@ -73,7 +80,10 @@ func update_projectiles(delta: float) -> void:
                 remove_projectile(projectile_state)
                 continue
         if not hit.is_empty():
-            var collider := hit.get("collider") as Node
+            var collider_value = hit.get("collider")
+            var collider: Node = null
+            if is_instance_valid(collider_value):
+                collider = collider_value as Node
             if collider == player and survival:
                 survival.apply_damage(float(projectile_state.get("damage", 8.0)), "Rift bolt", "hostile")
             remove_projectile(projectile_state)
@@ -100,8 +110,11 @@ func acquire_projectile_node() -> MeshInstance3D:
     return projectile
 
 func recycle_projectile_node(projectile_state: Dictionary) -> void:
-    var mesh := projectile_state.get("mesh") as MeshInstance3D
-    if mesh == null or not is_instance_valid(mesh):
+    var mesh_value = projectile_state.get("mesh")
+    if not is_instance_valid(mesh_value):
+        return
+    var mesh := mesh_value as MeshInstance3D
+    if mesh == null:
         return
     mesh.visible = false
     mesh.scale = Vector3.ONE

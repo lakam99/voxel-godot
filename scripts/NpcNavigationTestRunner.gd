@@ -25,22 +25,24 @@ func run() -> void:
     var case_filter := OS.get_environment("VOXEL_NPC_NAV_CASE")
     mark_progress("npc_nav_warmup")
     await wait_physics_frames(80)
-    if case_filter == "" or case_filter == "capsule" or case_filter == "door":
+    var run_all := case_filter == ""
+    var run_prelude_generic := case_filter == "prelude_generic"
+    if run_all or run_prelude_generic or case_filter == "capsule" or case_filter == "door":
         mark_progress("npc_nav_capsule_gate")
         await test_npc_capsule_collision_gate()
-    if case_filter == "" or case_filter == "door":
+    if run_all or run_prelude_generic or case_filter == "door":
         mark_progress("npc_nav_two_npc_door")
         await test_two_npcs_cross_narrow_door()
-    if case_filter == "" or case_filter == "home":
+    if run_all or run_prelude_generic or case_filter == "home":
         mark_progress("npc_nav_home_fallback")
         await test_home_return_fallback_semantics()
-    if case_filter == "" or case_filter == "goals":
+    if run_all or run_prelude_generic or case_filter == "goals":
         mark_progress("npc_nav_reachable_goals")
         await test_reachability_aware_goal_selection()
-    if case_filter == "" or case_filter == "generic":
+    if run_all or run_prelude_generic or case_filter == "generic":
         mark_progress("npc_nav_generic_town")
         await test_generic_town_npc_navigation()
-    if case_filter == "" or case_filter == "route":
+    if run_all or case_filter == "route":
         mark_progress("npc_nav_route_core")
         await test_npc_equipment_and_pathing()
 
@@ -64,6 +66,33 @@ func hold_existing_ambient_npcs() -> void:
         var body := entry.get("body") as Node
         if body != null and is_instance_valid(body):
             body.set_meta("npc_force_hold", true)
+
+func snapshot_height_fixture() -> Array:
+    if main != null and main.has_method("snapshot_height_edits"):
+        var snapshot = main.call("snapshot_height_edits")
+        if snapshot is Array:
+            return snapshot
+    return []
+
+func restore_height_fixture(snapshot: Array, centers: Array) -> void:
+    if main == null:
+        return
+    if main.has_method("restore_height_edits"):
+        main.call("restore_height_edits", snapshot)
+    for center_value in centers:
+        if center_value is Vector2i and main.has_method("rebuild_chunks_around_cell"):
+            main.call("rebuild_chunks_around_cell", center_value)
+    invalidate_navigation_fixture()
+
+func move_player_to_fixture_cell(cell: Vector2i) -> void:
+    if main == null or player == null:
+        return
+    var height: float = main.call("terrain_height_cell", cell.x, cell.y)
+    player.global_position = Vector3(float(cell.x) * CELL, height + 0.04, float(cell.y) * CELL)
+    player.velocity = Vector3.ZERO
+    player.set("terrain_grounded", true)
+    if main.has_method("update_chunks"):
+        main.call("update_chunks", true)
 
 func test_generic_town_npc_navigation() -> void:
     if not main:
@@ -89,6 +118,8 @@ func test_generic_town_npc_navigation() -> void:
         "radius": 32,
         "level": level
     }
+    move_player_to_fixture_cell(Vector2i(generic_center_x, generic_center_z))
+    await wait_physics_frames(5)
     structure_system.call("build_town", generic_town)
     npc_system.spawn_generic_town_npcs()
     npc_system.update_npcs(0.1, 1.0)
@@ -236,7 +267,16 @@ func test_generic_town_npc_navigation() -> void:
                 "routeReplans": int(generic_forager.get("routeReplans", 0)),
                 "waypoints": (generic_forager.get("pathWaypoints", []) as Array).size(),
                 "routeCells": (generic_forager.get("routeCells", []) as Array).size(),
-                "blockedContact": String(forager_body.get_meta("npc_blocked_contact", "")),
+                "job": String(generic_forager.get("job", "")),
+                "forceHold": bool(forager_body.get_meta("npc_force_hold", false)),
+                "lod": String(generic_forager.get("simulationLod", "")),
+                "brainDue": bool(generic_forager.get("npc_lod_brain_due", false)),
+                "motionUpdates": int(generic_forager.get("npc_motion_updates", 0)),
+                "motionSkipped": String(generic_forager.get("npc_motion_skipped_reason", "")),
+				"jobObjectId": String(generic_forager.get("jobObjectId", "")),
+				"lastRoutePlanDebug": generic_forager.get("lastRoutePlanDebug", {}),
+				"routeFallbackCell": generic_forager.get("routeFallbackCell", Vector2i.ZERO),
+				"blockedContact": String(forager_body.get_meta("npc_blocked_contact", "")),
                 "blockedName": String(forager_body.get_meta("npc_blocked_contact_name", "")),
                 "blockedKind": String(forager_body.get_meta("npc_blocked_contact_kind", "")),
                 "blockedType": String(forager_body.get_meta("npc_blocked_contact_type", "")),
@@ -300,6 +340,7 @@ func test_npc_capsule_collision_gate() -> void:
         add_result("npc_nav_capsule_collision_gate", false, "npc system missing")
         return
     var start_cell := Vector2i(roundi(player.global_position.x / CELL) + 58, roundi(player.global_position.z / CELL) + 58)
+    var height_snapshot := snapshot_height_fixture()
     reset_player_on_flat_patch(start_cell)
     clear_blocks_near_cell(start_cell, 10)
     clear_props_near_cell(start_cell, 12)
@@ -411,6 +452,7 @@ func test_npc_capsule_collision_gate() -> void:
             if block_body:
                 block_body.queue_free()
             blocks.erase(cell)
+    restore_height_fixture(height_snapshot, [start_cell])
     invalidate_navigation_fixture()
 
 func test_two_npcs_cross_narrow_door() -> void:
@@ -422,7 +464,8 @@ func test_two_npcs_cross_narrow_door() -> void:
         add_result("npc_nav_two_npc_door_crossing", false, "npc system missing")
         return
     var start_cell := Vector2i(roundi(player.global_position.x / CELL) + 64, roundi(player.global_position.z / CELL) + 64)
-    reset_player_on_flat_patch(start_cell)
+    var height_snapshot := snapshot_height_fixture()
+    reset_player_on_flat_patch(start_cell, 9)
     clear_blocks_near_cell(start_cell, 12)
     clear_props_near_cell(start_cell, 14)
     await wait_physics_frames(3)
@@ -546,7 +589,7 @@ func test_two_npcs_cross_narrow_door() -> void:
             and int(stats_after.get("doorOpens", 0)) > door_opens_before
             and int(stats_after.get("doorCloses", 0)) > door_closes_before
             and door_closed,
-        "crossed %s, shared %s, minSep %.2f, left %.2f cell %s wants %s dist %.2f goal %s body %s actionCount %d activeDoor %s, right %.2f cell %s wants %s dist %.2f goal %s body %s actionCount %d activeDoor %s, doorX %.2f, waits %d->%d, door %d/%d -> %d/%d, closed %s, routes %s/%s %s/%s, traffic active=%s waiting=%s granted=%s denied=%s released=%s" % [
+        "crossed %s, shared %s, minSep %.2f, left %.2f cell %s wants %s dist %.2f goal %s body %s actionCount %d activeDoor %s, right %.2f cell %s wants %s dist %.2f goal %s body %s actionCount %d activeDoor %s, doorX %.2f, waits %d->%d, door %d/%d -> %d/%d, closed %s, routes %s/%s %s/%s, leftDebug %s, rightDebug %s, leftTiles %s, rightTiles %s, traffic active=%s waiting=%s granted=%s denied=%s released=%s" % [
             str(both_crossed),
             str(shared_cell),
             min_separation,
@@ -578,6 +621,10 @@ func test_two_npcs_cross_narrow_door() -> void:
             String(left_entry.get("routeReason", "")),
             String(right_entry.get("routeStatus", "")),
             String(right_entry.get("routeReason", "")),
+            JSON.stringify(left_entry.get("lastRoutePlanDebug", {})),
+            JSON.stringify(right_entry.get("lastRoutePlanDebug", {})),
+            JSON.stringify(left_entry.get("lastNavmeshTilePublishDebug", [])),
+            JSON.stringify(right_entry.get("lastNavmeshTilePublishDebug", [])),
             str(traffic_state.get("activeReservations", "")),
             str(traffic_state.get("waiting", "")),
             str(traffic_state.get("granted", "")),
@@ -599,6 +646,7 @@ func test_two_npcs_cross_narrow_door() -> void:
             if block_body:
                 block_body.queue_free()
         blocks.erase(cell)
+    restore_height_fixture(height_snapshot, [start_cell])
     invalidate_navigation_fixture()
 
 func test_home_return_fallback_semantics() -> void:
@@ -671,6 +719,7 @@ func test_home_return_fallback_semantics() -> void:
 
     var porch_position: Vector3 = entry.get("porchPosition", body.global_position)
     npc_system.safe_place_npc(body, porch_position, null, "test_home_setup")
+    var blocked_start_position := body.global_position
     entry["insideHome"] = false
     body.set_meta("npc_inside_home", false)
     entry["homeRoutePositions"] = []
@@ -688,7 +737,7 @@ func test_home_return_fallback_semantics() -> void:
         and String(entry.get("routeStatus", "")) == "blocked" \
         and String(entry.get("routeReason", "")) == "home_porch_fallback_not_inside" \
         and unreachable_after > unreachable_before \
-        and body.global_position.distance_to(porch_position) <= 0.001
+        and body.global_position.distance_to(blocked_start_position) <= 0.001
 
     add_result(
         "npc_nav_home_return_fallback_semantics",
@@ -723,6 +772,7 @@ func test_reachability_aware_goal_selection() -> void:
         add_result("npc_nav_reachability_goal_selection", false, "pathing missing")
         return
     var start_cell := Vector2i(roundi(player.global_position.x / CELL) + 78, roundi(player.global_position.z / CELL) + 78)
+    var height_snapshot := snapshot_height_fixture()
     reset_player_on_flat_patch(start_cell)
     clear_blocks_near_cell(start_cell, 18)
     clear_props_near_cell(start_cell, 36)
@@ -837,6 +887,7 @@ func test_reachability_aware_goal_selection() -> void:
         rock.queue_free()
     if is_instance_valid(hostile):
         hostile.queue_free()
+    restore_height_fixture(height_snapshot, [start_cell])
     invalidate_navigation_fixture()
     await wait_physics_frames(3)
     invalidate_navigation_fixture()

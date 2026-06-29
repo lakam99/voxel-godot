@@ -4661,17 +4661,26 @@ func test_structure_and_town_generation() -> void:
         var forager_target_distance := -1.0
         var forager_node_distance := -1.0
         var forager_motion_goal := ""
+        var forager_body_position := Vector3.ZERO
+        var forager_target_position := Vector3.ZERO
+        var forager_node_position := Vector3.ZERO
+        var forager_node_object_id := ""
         if not generic_forager.is_empty():
             var forager_body := generic_forager.get("body") as Node3D
             var forager_target: Vector3 = generic_forager.get("jobTarget", Vector3.ZERO)
+            forager_target_position = forager_target
             var active_motion_goal = generic_forager.get("activeMotionGoal", {})
             if active_motion_goal is Dictionary:
                 forager_motion_goal = String((active_motion_goal as Dictionary).get("goalKind", ""))
             if forager_body != null and is_instance_valid(forager_body):
+                forager_body_position = forager_body.global_position
                 forager_target_distance = forager_body.global_position.distance_to(forager_target)
                 var forager_node := generic_forager.get("jobTargetNode") as Node3D
                 if forager_node != null and is_instance_valid(forager_node):
+                    forager_node_position = forager_node.global_position
                     forager_node_distance = forager_body.global_position.distance_to(forager_node.global_position)
+                    if npc_system.has_method("smart_object_id_for_node"):
+                        forager_node_object_id = String(npc_system.call("smart_object_id_for_node", forager_node))
         var stats_worker_outside := int(job_stats.get("outsideWorkers", 0)) > 0
         add_result(
             "generic_npc_job_outings",
@@ -4685,29 +4694,56 @@ func test_structure_and_town_generation() -> void:
                 str(job_stats)
             ]
         )
-        add_result(
-            "forager_goal_inventory_hunger",
+        var forager_passed := (
             not generic_forager.is_empty()
                 and forager_clear_goal
                 and int(job_stats.get("forageRuns", 0)) > forage_runs_before
-                and forager_hunger > 38.0,
-            "goal %s, target selected %s, berries %d, hunger %.1f, forage %d->%d, node gone %s, phase %s, timer %.2f, motion %s, reason %s, route %s/%s, dist target %.2f node %.2f" % [
-                str(forager_goal_seen),
-                str(targeted_forage_selected),
-                forager_food,
-                forager_hunger,
-                forage_runs_before,
-                int(job_stats.get("forageRuns", 0)),
-                str(forage_node == null or not is_instance_valid(forage_node)),
-                String(generic_forager.get("jobPhase", "")),
-                float(generic_forager.get("jobTimer", 0.0)),
-                forager_motion_goal,
-                String(generic_forager.get("jobFailureReason", "")),
-                String(generic_forager.get("routeStatus", "")),
-                String(generic_forager.get("routeReason", "")),
-                forager_target_distance,
-                forager_node_distance
-            ]
+                and forager_hunger > 38.0
+        )
+        var forager_details := "goal %s, target selected %s, berries %d, hunger %.1f, forage %d->%d, node gone %s, phase %s, timer %.2f, motion %s, reason %s, route %s/%s, dist target %.2f node %.2f" % [
+            str(forager_goal_seen),
+            str(targeted_forage_selected),
+            forager_food,
+            forager_hunger,
+            forage_runs_before,
+            int(job_stats.get("forageRuns", 0)),
+            str(forage_node == null or not is_instance_valid(forage_node)),
+            String(generic_forager.get("jobPhase", "")),
+            float(generic_forager.get("jobTimer", 0.0)),
+            forager_motion_goal,
+            String(generic_forager.get("jobFailureReason", "")),
+            String(generic_forager.get("routeStatus", "")),
+            String(generic_forager.get("routeReason", "")),
+            forager_target_distance,
+            forager_node_distance
+        ]
+        if not forager_passed:
+            var forager_debug := {
+                "id": String(generic_forager.get("id", "")),
+                "body": str(forager_body_position),
+                "target": str(forager_target_position),
+                "node": str(forager_node_position),
+                "jobObjectId": String(generic_forager.get("jobObjectId", "")),
+                "jobReservationId": String(generic_forager.get("jobReservationId", "")),
+                "jobApproachSlotId": String(generic_forager.get("jobApproachSlotId", "")),
+                "forageNodeObjectId": forager_node_object_id,
+                "jobObjectMatchesNode": String(generic_forager.get("jobObjectId", "")) == forager_node_object_id,
+                "routeForceReplan": bool(generic_forager.get("routeForceReplan", false)),
+                "movementHeldForTopology": bool(generic_forager.get("movementHeldForTopology", false)),
+                "requestedTopologyTile": String(generic_forager.get("requestedTopologyTile", "")),
+                "pathWaypoints": (generic_forager.get("pathWaypoints", []) as Array).size(),
+                "routeCells": (generic_forager.get("routeCells", []) as Array).size(),
+                "routeGoalCell": str(generic_forager.get("routeGoalCell", Vector2i.ZERO)),
+                "activeGoalKind": String(generic_forager.get("activeGoalKind", "")),
+                "activeMotionGoal": generic_forager.get("activeMotionGoal", {}),
+                "lastRoutePlanDebug": generic_forager.get("lastRoutePlanDebug", {}),
+                "lastNavmeshTilePublishDebug": generic_forager.get("lastNavmeshTilePublishDebug", [])
+            }
+            forager_details += ", debug %s" % JSON.stringify(forager_debug)
+        add_result(
+            "forager_goal_inventory_hunger",
+            forager_passed,
+            forager_details
         )
         add_result(
             "npc_door_open_close_cycle",
@@ -4809,22 +4845,39 @@ func test_npc_equipment_and_pathing() -> void:
     var wall_world_x := float(wall_x) * CELL
     var progressed_past_wall := body.global_position.x > wall_world_x + CELL * 0.12
     var detoured_around_wall := detours_after > detours_before and max_lateral > CELL * 0.75 and progressed_past_wall
+    var pathing_passed := weapon_visible and sword_animated and detoured_around_wall and not entered_wall_cell and validated_after > validated_before
+    var pathing_details := "weapon %s, sword animated %s, detours %d->%d, validated %d->%d, lateral %.2f, end %.2f %.2f, wall %.2f, entered wall %s" % [
+        str(weapon_visible),
+        str(sword_animated),
+        detours_before,
+        detours_after,
+        validated_before,
+        validated_after,
+        max_lateral,
+        body.global_position.x,
+        body.global_position.z,
+        wall_world_x,
+        str(entered_wall_cell)
+    ]
+    if not pathing_passed:
+        var pathing_debug := {
+            "routeStatus": String(entry.get("routeStatus", "")),
+            "routeReason": String(entry.get("routeReason", "")),
+            "routeReplans": int(entry.get("routeReplans", 0)),
+            "waypoints": (entry.get("pathWaypoints", []) as Array).size(),
+            "routeCells": (entry.get("routeCells", []) as Array).size(),
+            "lastMove": float(entry.get("lastMoveDistance", 0.0)),
+            "corridor": entry.get("corridorFollow", {}),
+            "progress": entry.get("corridorProgress", {}),
+            "capsuleBlocker": entry.get("capsuleBlocker", {}),
+            "tilePublish": entry.get("lastNavmeshTilePublishDebug", []),
+            "lastRoutePlanDebug": entry.get("lastRoutePlanDebug", {})
+        }
+        pathing_details += ", debug %s" % JSON.stringify(pathing_debug)
     add_result(
         "npc_equipment_and_pathing",
-        weapon_visible and sword_animated and detoured_around_wall and not entered_wall_cell and validated_after > validated_before,
-        "weapon %s, sword animated %s, detours %d->%d, validated %d->%d, lateral %.2f, end %.2f %.2f, wall %.2f, entered wall %s" % [
-            str(weapon_visible),
-            str(sword_animated),
-            detours_before,
-            detours_after,
-            validated_before,
-            validated_after,
-            max_lateral,
-            body.global_position.x,
-            body.global_position.z,
-            wall_world_x,
-            str(entered_wall_cell)
-        ]
+        pathing_passed,
+        pathing_details
     )
 
     npc_system.safe_place_npc(body, start_position, null, "playtest_reset")

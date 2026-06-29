@@ -38,6 +38,7 @@ func cases() -> Array[Dictionary]:
 		["npc_route_unreachable_terminal_reason", "test_route_unreachable_terminal_reason"],
 		["npc_route_deterministic_replay", "test_route_deterministic_replay"],
 		["npc_route_navmesh_query_path_uses_navigation_server", "test_route_navmesh_query_path_uses_navigation_server"],
+		["npc_route_navmesh_preserves_door_action_cells", "test_route_navmesh_preserves_door_action_cells"],
 		["npc_route_navmesh_planner_goal_kinds", "test_route_navmesh_planner_goal_kinds"],
 		["npc_route_navmesh_adapter_no_legacy_fallback", "test_route_navmesh_adapter_no_legacy_fallback"],
 		["npc_route_runtime_goal_adapter_uses_new_corridor", "test_route_runtime_goal_adapter_uses_new_corridor"]
@@ -323,6 +324,37 @@ func test_route_navmesh_query_path_uses_navigation_server(_mode: String) -> Dict
 	var passed := bool(route.get("ok", false)) and String(route.get("source", "")) == "navmesh" and String(route.get("queryApi", "")) in ["query_path", "map_get_path"] and (route.get("path", []) as Array).size() >= 1 and int(stats.get("pathQueryCount", 0)) == 1 and int(stats.get("pathQueryFailureCount", -1)) == 0
 	return outcome(passed, "route=%s start=%s target=%s stats=%s" % [JSON.stringify(navmesh_route_summary(route)), JSON.stringify(closest_start), JSON.stringify(closest_target), JSON.stringify(stats)], ["navmesh_query_path_returns_route", "navmesh_query_records_metrics"], { "route": navmesh_route_summary(route), "closestStart": closest_start, "closestTarget": closest_target, "stats": stats })
 
+func test_route_navmesh_preserves_door_action_cells(_mode: String) -> Dictionary:
+	var planner = NavmeshRoutePlannerScript.new()
+	var action_cell := Vector2i(280, 26)
+	var actions := {
+		"280,26": {
+			"kind": "door",
+			"cell": action_cell,
+			"entryCell": Vector2i(280, 25),
+			"direction": "z+"
+		}
+	}
+	var condensed_cells: Array[Vector2i] = [Vector2i(279, 26), Vector2i(278, 26), Vector2i(276, 26)]
+	var preserved: Array[Vector2i] = planner._preserve_route_action_cells(condensed_cells, actions)
+	var service = NavmeshWorldServiceScript.new()
+	service.setup(NavigationBackendConfigScript.from_value("navmesh", "test"))
+	service.register_chunk_descriptor(navmesh_door_descriptor("region:chunk:door-action-cell", "door-action-cell", "door:action-cell"))
+	var route: Dictionary = service.query_route(Vector3(0.0, 0.0, 0.0), Vector3(0.0, 0.0, 2.7), { "maxSnapDistance": 4.0 })
+	var route_actions: Dictionary = route.get("actions", {})
+	var emitted_action := {}
+	for action_value in route_actions.values():
+		if action_value is Dictionary and String((action_value as Dictionary).get("portalId", "")) == "door:action-cell":
+			emitted_action = action_value
+			break
+	var stats: Dictionary = service.stats()
+	service.clear()
+	var action_preserved := not preserved.is_empty() and preserved[0] == action_cell
+	var direction_preserved := String(emitted_action.get("direction", "")) == "z+"
+	var entry_cell_preserved := emitted_action.get("entryCell") is Vector2i
+	var passed := action_preserved and bool(route.get("ok", false)) and not emitted_action.is_empty() and direction_preserved and entry_cell_preserved and int(stats.get("pathQueryFailureCount", 0)) == 0
+	return outcome(passed, "preserved=%s route=%s action=%s stats=%s" % [JSON.stringify(vec2i_array_summary(preserved)), JSON.stringify(navmesh_route_summary(route)), JSON.stringify(emitted_action), JSON.stringify(stats)], ["navmesh_preserves_door_action_cell_after_waypoint_prune", "navmesh_door_action_direction_matches_link"], { "preserved": vec2i_array_summary(preserved), "route": navmesh_route_summary(route), "action": emitted_action, "stats": stats })
+
 func test_route_navmesh_planner_goal_kinds(_mode: String) -> Dictionary:
 	var service = navmesh_test_service("goal-kinds", Vector3(-2.7, 0.0, -2.7), Vector3(14.85, 0.0, 6.75))
 	var planner = NavmeshRoutePlannerScript.new()
@@ -366,13 +398,13 @@ func test_route_navmesh_adapter_no_legacy_fallback(_mode: String) -> Dictionary:
 	var adapter_text = read_text("res://scripts/npc_ai/routing/NpcRouteCoordinatorAdapter.gd")
 	var planner_text = read_text("res://scripts/npc_ai/routing/NavmeshRoutePlanner.gd")
 	var service_text = read_text("res://scripts/npc_ai/navigation/NavmeshWorldService.gd")
-	var passed = adapter_text.find("NavmeshRoutePlannerScript") >= 0 and adapter_text.find("_use_navmesh_backend") >= 0 and adapter_text.find("\"source\": String(route.get(\"source\"") >= 0 and adapter_text.find("\"legacyFallbackUsed\": bool(route.get(\"legacyFallbackUsed\"") >= 0 and planner_text.find("legacyFallbackUsed") >= 0 and planner_text.find("HierarchicalRoutePlanner") < 0 and service_text.find("query_path") >= 0
-	return outcome(passed, "adapterNavmesh=%d plannerLegacy=%d queryPath=%d" % [adapter_text.find("NavmeshRoutePlannerScript"), planner_text.find("HierarchicalRoutePlanner"), service_text.find("query_path")], ["adapter_selects_navmesh_backend", "navmesh_planner_has_no_legacy_planner_dependency", "navmesh_service_uses_navigationserver_query_path"], {})
+	var passed = adapter_text.find("NavmeshRoutePlannerScript") >= 0 and adapter_text.find("navmesh_planner.plan_runtime_route") >= 0 and adapter_text.find("HierarchicalRoutePlanner") < 0 and adapter_text.find("LocalAStarPlanner") < 0 and adapter_text.find("_use_navmesh_backend") < 0 and planner_text.find("legacyFallbackUsed") >= 0 and planner_text.find("HierarchicalRoutePlanner") < 0 and service_text.find("query_path") >= 0
+	return outcome(passed, "adapterNavmesh=%d adapterLegacy=%d plannerLegacy=%d queryPath=%d" % [adapter_text.find("NavmeshRoutePlannerScript"), adapter_text.find("HierarchicalRoutePlanner"), planner_text.find("HierarchicalRoutePlanner"), service_text.find("query_path")], ["adapter_uses_navmesh_authority", "live_adapter_has_no_legacy_fallback_branch", "navmesh_service_uses_navigationserver_query_path"], {})
 
 func test_route_runtime_goal_adapter_uses_new_corridor(_mode: String) -> Dictionary:
 	var adapter_text = read_text("res://scripts/npc_ai/routing/NpcRouteCoordinatorAdapter.gd")
-	var passed = adapter_text.find("HierarchicalRoutePlanner") >= 0 and adapter_text.find("MAX_ITERATIONS") < 0 and adapter_text.find("plan_runtime_route") >= 0 and adapter_text.find("route_from_cells") < 0
-	return outcome(passed, "adapterPlanner=%d maxIterations=%d" % [adapter_text.find("HierarchicalRoutePlanner"), adapter_text.find("MAX_ITERATIONS")], ["runtime_adapter_delegates_new_corridor", "old_iteration_cap_removed"], {})
+	var passed = adapter_text.find("HierarchicalRoutePlanner") < 0 and adapter_text.find("LocalAStarPlanner") < 0 and adapter_text.find("MAX_ITERATIONS") < 0 and adapter_text.find("navmesh_planner.plan_runtime_route") >= 0 and adapter_text.find("coordinator.plan_runtime_route") < 0 and adapter_text.find("route_from_cells") < 0
+	return outcome(passed, "adapterLegacy=%d maxIterations=%d navmeshCall=%d" % [adapter_text.find("HierarchicalRoutePlanner"), adapter_text.find("MAX_ITERATIONS"), adapter_text.find("navmesh_planner.plan_runtime_route")], ["runtime_adapter_delegates_navmesh_authority", "old_iteration_cap_removed", "custom_runtime_route_search_removed"], {})
 
 func navmesh_test_service(label: String, min_pos: Vector3, size: Vector3):
 	var service = NavmeshWorldServiceScript.new()
@@ -385,6 +417,22 @@ func navmesh_test_service(label: String, min_pos: Vector3, size: Vector3):
 	})
 	service.register_chunk_descriptor(descriptor)
 	return service
+
+func navmesh_door_descriptor(region_id: String, tile_key: String, portal_id: String):
+	var descriptor = NavigationBakeDescriptorScript.create(region_id, tile_key, AABB(Vector3(-1.5, -0.1, -1.5), Vector3(3.0, 1.2, 5.7)))
+	descriptor.add_walkable_surface("surface:%s:left" % tile_key, Vector3(0.0, 0.0, 0.0), Vector3(NpcConstantsScript.CELL_SIZE, 0.05, NpcConstantsScript.CELL_SIZE))
+	descriptor.add_walkable_surface("surface:%s:right" % tile_key, Vector3(0.0, 0.0, 2.7), Vector3(NpcConstantsScript.CELL_SIZE, 0.05, NpcConstantsScript.CELL_SIZE))
+	descriptor.add_door_portal(portal_id, Vector3(0.0, 0.0, 0.65), Vector3(0.0, 0.0, 2.05), { "state": "closed", "openable": true })
+	descriptor.add_door_link("surface:%s:left" % tile_key, "surface:%s:right" % tile_key, portal_id, { "cost": 1.0, "actionId": "open" })
+	return descriptor
+
+func vec2i_array_summary(cells: Array) -> Array:
+	var result := []
+	for cell_value in cells:
+		if cell_value is Vector2i:
+			var cell: Vector2i = cell_value
+			result.append([cell.x, cell.y])
+	return result
 
 func navmesh_route_summary(route: Dictionary) -> Dictionary:
 	return {
@@ -420,7 +468,7 @@ func navmesh_route_dictionary_summary(route: Dictionary) -> Dictionary:
 
 func navmesh_walkable_summary(route: Dictionary, key: String) -> Dictionary:
 	var value = route.get(key, {})
-	if not (value is Dictionary):
+	if not (value is Dictionary) or (value is Dictionary and (value as Dictionary).is_empty()):
 		var details: Dictionary = route.get("details", {})
 		value = details.get(key, {})
 	if not (value is Dictionary):

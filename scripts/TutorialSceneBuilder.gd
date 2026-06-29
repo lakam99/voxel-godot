@@ -172,7 +172,12 @@ func spawn_tutorial_npcs() -> void:
     var west_home: Dictionary = system.tutorial_home_record(2, Vector2i(cx - 13, cz + 12), Vector2i(cx - 13, cz + 17))
     var elder_home: Dictionary = system.tutorial_home_record(3, Vector2i(cx + 13, cz + 12), Vector2i(cx + 13, cz + 17))
     var elder_porch: Vector2i = elder_home.get("porchCell", Vector2i(cx + 13, cz + 17))
-    var elder_route := [Vector2i(cx - 6, cz - 16), Vector2i(cx, cz - 8), Vector2i(cx + 20, cz - 8), elder_porch]
+    var elder_home_cell: Vector2i = elder_home.get("homeCell", Vector2i(cx + 13, cz + 12))
+    var elder_route := [Vector2i(cx - 6, cz - 16), Vector2i(cx, cz - 8), elder_porch]
+    var elder_inside_route := home_route_cells_from_porch(elder_porch, elder_home_cell, false)
+    if not elder_inside_route.is_empty():
+        elder_inside_route.remove_at(0)
+    elder_route.append_array(elder_inside_route)
     for spec in tutorial_npc_specs(cx, cz, north_home, west_home, elder_home, elder_route):
         spawn_npc(spec, level, Vector3(float(cx) * CELL, level, float(cz) * CELL))
 
@@ -182,6 +187,7 @@ func tutorial_npc_specs(cx: int, cz: int, north_home: Dictionary, west_home: Dic
     var west_porch: Vector2i = west_home.get("porchCell", Vector2i(cx - 13, cz + 17))
     var west_home_cell: Vector2i = west_home.get("homeCell", Vector2i(cx - 13, cz + 12))
     var north_home_route := home_route_cells_from_porch(north_porch, north_home_cell, true)
+    north_home_route.erase(north_porch)
     var west_home_route := home_route_cells_from_porch(west_porch, west_home_cell, false)
     return [
         npc_spec("mira", "Mira", "Elder", Vector2i(cx - 13, cz - 15), elder_home, Color(0.70, 0.46, 0.34), Color(0.92, 0.76, 0.42), ["Storms bring the dark close. Start by meeting Rowan near the workbench.", "The lights mark the safe ground. Beyond them, shadows notice you."], { "holdIntroDoor": true, "homeRouteCells": elder_route }),

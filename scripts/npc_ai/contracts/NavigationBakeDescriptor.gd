@@ -111,13 +111,16 @@ static func from_semantic_region(kind: String, region_id_value: String, bounds_v
 		"semanticRegionId": region_id_value,
 		"metadata": metadata_value.duplicate(true) if metadata_value is Dictionary else {}
 	}
+	var routeable := bool(metadata_value.get("routeable", true)) if metadata_value is Dictionary else true
+	descriptor.metadata["routeable"] = routeable
 	var center := bounds_value.position + bounds_value.size * 0.5
-	var surface_center := Vector3(center.x, bounds_value.position.y + 0.05, center.z)
-	var surface_size := Vector3(maxf(bounds_value.size.x, NpcConstantsScript.CELL_SIZE), 0.05, maxf(bounds_value.size.z, NpcConstantsScript.CELL_SIZE))
-	descriptor.add_walkable_surface("surface:semantic:%s" % region_id_value, surface_center, surface_size, {
-		"semanticRegionIds": [region_id_value],
-		"semanticKind": kind
-	})
+	if routeable:
+		var surface_center := Vector3(center.x, bounds_value.position.y + 0.05, center.z)
+		var surface_size := Vector3(maxf(bounds_value.size.x, NpcConstantsScript.CELL_SIZE), 0.05, maxf(bounds_value.size.z, NpcConstantsScript.CELL_SIZE))
+		descriptor.add_walkable_surface("surface:semantic:%s" % region_id_value, surface_center, surface_size, {
+			"semanticRegionIds": [region_id_value],
+			"semanticKind": kind
+		})
 	descriptor.add_semantic_anchor("anchor:%s" % region_id_value, kind, center, metadata_value)
 	return descriptor
 

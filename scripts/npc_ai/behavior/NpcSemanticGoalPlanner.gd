@@ -128,17 +128,11 @@ func forage_target_position(entry: Dictionary, node: Node3D) -> Vector3:
     if node == null or world == null:
         return node.global_position if node != null else Vector3.ZERO
     var approach_cells: Array[Vector2i] = world.approach_cells_for_target(entry, node.global_position, true)
-    var body := entry.get("body") as Node3D
-    var origin: Vector3 = body.global_position if body != null else entry.get("porchPosition", node.global_position)
-    var best_position := node.global_position
-    var best_score: float = INF
+    var approach_positions: Array[Vector3] = []
     for cell in approach_cells:
-        var position: Vector3 = world.cell_position(cell)
-        var score := position.distance_squared_to(origin)
-        if score < best_score or (is_equal_approx(score, best_score) and "%d,%d" % [cell.x, cell.y] < "%d,%d" % [world.world_cell(best_position).x, world.world_cell(best_position).y]):
-            best_score = score
-            best_position = position
-    return best_position
+        approach_positions.append(world.cell_position(cell))
+    var reachable := choose_best_reachable_position(entry, approach_positions, true, false, CELL * 0.85, approach_positions.size())
+    return reachable if reachable != Vector3.INF else node.global_position
 
 func stable_node_id(node: Node) -> String:
     if node == null:
@@ -167,7 +161,11 @@ func choose_best_reachable_position(entry: Dictionary, candidates: Array[Vector3
         checked += 1
         if checked > max_checked:
             break
-        return candidate
+        var cost: float = INF
+        if planner != null and planner.has_method("route_cost"):
+            cost = float(planner.route_cost(entry, candidate, allow_outside, moving_home, _arrival_radius))
+        if cost < INF:
+            return candidate
     return Vector3.INF
 
 func town_anchor_candidates(entry: Dictionary) -> Array[Vector3]:
