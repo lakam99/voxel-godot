@@ -23,7 +23,12 @@ func setup(system_node, main_node) -> void:
 func ensure_ready() -> void:
     if system == null or main == null:
         return
-    if coordinator != null:
+    var coordinator_ready := coordinator != null \
+        and coordinator.get("navigation_world") != null \
+        and coordinator.get("route_planner") != null \
+        and coordinator.get("locomotion") != null \
+        and coordinator.get("goal_planner") != null
+    if coordinator_ready:
         return
     coordinator = NpcNavigationCoordinatorScript.new()
     coordinator.setup(system, main)

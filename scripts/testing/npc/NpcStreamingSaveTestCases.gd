@@ -70,6 +70,7 @@ func cases() -> Array[Dictionary]:
 		["npc_stream_route_across_chunk_boundary", "test_route_across_chunk_boundary"],
 		["npc_stream_prefetch_before_boundary", "test_prefetch_before_boundary"],
 		["npc_stream_unloaded_goal_pending_not_teleport", "test_unloaded_goal_pending_not_teleport"],
+		["npc_stream_topology_hold_releases_when_ready", "test_topology_hold_releases_when_ready"],
 		["npc_stream_abstract_respects_locked_portal", "test_abstract_respects_locked_portal"],
 		["npc_stream_lod_hysteresis_no_thrashing", "test_lod_hysteresis_no_thrashing"],
 		["npc_stream_actor_removal_releases_all_ownership", "test_actor_removal_releases_all_ownership"],
@@ -159,6 +160,17 @@ func test_unloaded_goal_pending_not_teleport(_mode: String) -> Dictionary:
 	var after: Vector3 = (entry.get("body") as CharacterBody3D).position
 	var passed: bool = bool(entry.get("movementHeldForTopology", false)) and String(entry.get("routeStatus", "")) == "PENDING" and before.distance_to(after) <= 0.001
 	return outcome(passed, "result=%s before=%s after=%s" % [JSON.stringify(result), str(before), str(after)], ["unloaded_goal_sets_pending", "body_not_teleported"], { "result": result, "position": vec3(after), "entry": entry_summary(entry) })
+
+func test_topology_hold_releases_when_ready(_mode: String) -> Dictionary:
+	var setup := lod_setup()
+	var entry := make_entry("stream-topology-ready", Vector3(2.0, 0.0, 2.0))
+	entry["routeGoalCell"] = Vector2i(18, 2)
+	setup.service.handle_tile_unloaded("1,0", [entry])
+	var held_before: bool = setup.service.should_hold_active_movement(entry)
+	setup.autonomy.navigation_world.ready_tiles["1,0"] = true
+	var held_after: bool = setup.service.should_hold_active_movement(entry)
+	var passed: bool = held_before and not held_after and not bool(entry.get("movementHeldForTopology", false)) and bool(entry.get("routeForceReplan", false)) and String(entry.get("routeStatus", "")) == "waiting" and String(entry.get("routeReason", "")) == "topology_ready"
+	return outcome(passed, "held %s->%s entry=%s stats=%s" % [str(held_before), str(held_after), JSON.stringify(entry_summary(entry)), JSON.stringify(setup.service.stats())], ["hold_persists_until_tile_ready", "ready_tile_releases_hold", "route_replan_forced"], { "entry": entry_summary(entry), "stats": setup.service.stats() })
 
 func test_abstract_respects_locked_portal(_mode: String) -> Dictionary:
 	var setup := lod_setup()
@@ -308,9 +320,16 @@ func lod_setup() -> Dictionary:
 	autonomy.service = service
 	return { "service": service, "fake": fake, "autonomy": autonomy }
 
+class FakeNavigationWorld:
+	var ready_tiles := {}
+
+	func is_tile_traversable(tile_key: String) -> bool:
+		return bool(ready_tiles.get(tile_key, false))
+
 class FakeAutonomy:
 	var service = null
 	var requested_tiles := []
+	var navigation_world = FakeNavigationWorld.new()
 
 	func request_navigation_tile(snapshot: Dictionary, priority := 0, _profile = null) -> Dictionary:
 		var tile_key := String(snapshot.get("tileKey", ""))

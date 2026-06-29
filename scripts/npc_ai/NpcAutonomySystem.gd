@@ -161,7 +161,7 @@ func setup_behavior_services() -> void:
 	goal_selector = NpcGoalSelectorScript.new()
 	action_library = NpcActionLibraryScript.new()
 	task_planner = NpcTaskPlannerScript.new()
-	task_planner.setup(action_library, navmesh_world if _navmesh_backend_active() else navigation_world)
+	task_planner.setup(action_library, self if _navmesh_backend_active() else navigation_world)
 	recovery_policy = NpcRecoveryPolicyScript.new()
 	plan_executor = NpcPlanExecutorScript.new()
 	plan_executor.setup(self, npc_system, main, {
@@ -172,6 +172,36 @@ func setup_behavior_services() -> void:
 		"taskPlanner": task_planner,
 		"recovery": recovery_policy
 	})
+
+func closest_walkable(position: Vector3, max_distance := INF) -> Dictionary:
+	if navmesh_world != null and navmesh_world.has_method("closest_walkable"):
+		return navmesh_world.closest_walkable(position, max_distance)
+	return { "found": false, "reason": "missing_navmesh_world", "position": position, "maxDistance": max_distance }
+
+func approach_cells_for_target(entry: Dictionary, target_position: Vector3, allow_outside := true) -> Array[Vector2i]:
+	var generated_world = generated_navigation_adapter()
+	if generated_world != null and generated_world.has_method("approach_cells_for_target"):
+		return generated_world.approach_cells_for_target(entry, target_position, allow_outside)
+	return []
+
+func cell_position(cell: Vector2i) -> Vector3:
+	var generated_world = generated_navigation_adapter()
+	if generated_world != null and generated_world.has_method("cell_position"):
+		return generated_world.cell_position(cell)
+	var y := 0.0
+	if main != null and main.has_method("terrain_height_cell"):
+		y = float(main.call("terrain_height_cell", cell.x, cell.y)) + 0.04
+	return Vector3(float(cell.x) * NpcConstantsScript.CELL_SIZE, y, float(cell.y) * NpcConstantsScript.CELL_SIZE)
+
+func generated_navigation_adapter():
+	if npc_system == null:
+		return null
+	var pathing = npc_system.get("pathing")
+	if pathing == null:
+		return null
+	if pathing.has_method("ensure_ready"):
+		pathing.ensure_ready()
+	return pathing.get("navigation_world")
 
 func begin_update_frame() -> void:
 	if plan_executor != null and plan_executor.has_method("begin_update_frame"):

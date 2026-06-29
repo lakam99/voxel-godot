@@ -86,6 +86,16 @@ func debug_performance_state() -> Dictionary:
     }
     var perf_summary: Dictionary = runtime_perf_monitor.summary() if runtime_perf_monitor != null else {}
     var save_stats: Dictionary = save_system.stats() if save_system != null and save_system.has_method("stats") else {}
+    var navigation_backend := {}
+    var navmesh_world_stats := {}
+    if npc_system != null:
+        var autonomy = npc_system.get("autonomy_system")
+        if autonomy != null:
+            if autonomy.has_method("navigation_backend_summary"):
+                navigation_backend = autonomy.navigation_backend_summary()
+            if autonomy.has_method("stats"):
+                var autonomy_stats: Dictionary = autonomy.stats()
+                navmesh_world_stats = autonomy_stats.get("navmeshWorld", {}) if autonomy_stats.get("navmeshWorld", {}) is Dictionary else {}
     return {
         "fps": Engine.get_frames_per_second(),
         "chunks": chunks.size(),
@@ -130,6 +140,8 @@ func debug_performance_state() -> Dictionary:
         "hudRefresh": hud_refresh_stats(),
         "chunkCache": chunk_asset_cache_stats(),
         "npcDebug": npc_debug_overlay_state(),
+        "navigationBackend": navigation_backend,
+        "navmeshWorld": navmesh_world_stats,
         "story": story_perf
     }
 

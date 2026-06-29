@@ -31,6 +31,7 @@ func apply_route_motion(entry: Dictionary, previous: Vector3, candidate: Vector3
 	if profile == null:
 		profile = CharacterMotorProfileScript.npc_default()
 		entry["motorProfile"] = profile
+	prealign_to_validated_terrain_step(body, candidate, profile)
 	var state = motor.call("apply", body, command, profile, motor_delta, main)
 	body.set_meta("npc_terrain_grounded", bool(state.get("terrain_grounded")))
 	body.set_meta("npc_jump_snap_time", float(state.get("jump_snap_time")))
@@ -56,6 +57,23 @@ func apply_route_motion(entry: Dictionary, previous: Vector3, candidate: Vector3
 		"blocked": bool(state.get("blocked")),
 		"reason": String(state.get("blocked_contact_category"))
 	}
+
+func prealign_to_validated_terrain_step(body: CharacterBody3D, candidate: Vector3, profile) -> void:
+	if body == null or profile == null:
+		return
+	if not bool(profile.get("use_terrain_grounding")):
+		return
+	if not candidate.is_finite():
+		return
+	var vertical_delta := candidate.y - body.global_position.y
+	if vertical_delta <= 0.015:
+		return
+	var walkable_limit := float(profile.get("terrain_walkable_rise"))
+	if vertical_delta > walkable_limit + 0.02:
+		return
+	var max_step := maxf(0.05, float(profile.get("terrain_ascend_speed")) * slide_delta())
+	body.move_and_collide(Vector3(0.0, minf(vertical_delta, max_step), 0.0))
+	body.velocity.y = 0.0
 
 func slide_delta() -> float:
 	var ticks_per_second := float(Engine.physics_ticks_per_second)

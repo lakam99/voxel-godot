@@ -5,13 +5,13 @@ const BACKEND_CUSTOM := "custom"
 const BACKEND_NAVMESH := "navmesh"
 const ENV_BACKEND := "VOXEL_NPC_NAV_BACKEND"
 
-var backend := BACKEND_CUSTOM
+var backend := BACKEND_NAVMESH
 var source := "default"
 
 static func default_config():
-	return from_value(BACKEND_CUSTOM, "default")
+	return from_value(BACKEND_NAVMESH, "default")
 
-static func from_environment(default_backend := BACKEND_CUSTOM):
+static func from_environment(default_backend := BACKEND_NAVMESH):
 	var value := OS.get_environment(ENV_BACKEND)
 	if value == "":
 		value = default_backend
@@ -28,7 +28,11 @@ static func normalize_backend(value: String) -> String:
 	var normalized := value.strip_edges().to_lower()
 	if normalized == BACKEND_NAVMESH:
 		return BACKEND_NAVMESH
-	return BACKEND_CUSTOM
+	if normalized == BACKEND_CUSTOM:
+		return BACKEND_NAVMESH
+	if normalized == "":
+		return BACKEND_NAVMESH
+	return BACKEND_NAVMESH
 
 static func valid_backend(value: String) -> bool:
 	var normalized := value.strip_edges().to_lower()

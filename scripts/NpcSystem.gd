@@ -16,7 +16,7 @@ const NpcSafePlacementServiceScript := preload("res://scripts/npc_ai/NpcSafePlac
 const CharacterMotorProfileScript := preload("res://scripts/npc_ai/contracts/CharacterMotorProfile.gd")
 
 const CELL := 1.35
-const DOOR_TRAFFIC_RELEASE_RADIUS := CELL * 1.65
+const DOOR_TRAFFIC_RELEASE_RADIUS := CELL * 0.72
 const FORAGE_SCAN_NODE_LIMIT := 1200
 const FORAGE_SCAN_CANDIDATE_LIMIT := 16
 const NO_DETOUR := Vector3(9999999.0, 9999999.0, 9999999.0)
@@ -606,7 +606,10 @@ func register_navigation_semantic_once(kind: StringName, region_id: String, boun
     if region_id == "" or published_navigation_semantics.has(region_id):
         return
     published_navigation_semantics[region_id] = true
-    autonomy_system.register_semantic_region(kind, region_id, bounds, metadata)
+    var nav_metadata: Dictionary = metadata.duplicate(true) if metadata is Dictionary else {}
+    if not nav_metadata.has("routeable"):
+        nav_metadata["routeable"] = false
+    autonomy_system.register_semantic_region(kind, region_id, bounds, nav_metadata)
 
 func navigation_cell_bounds(cell: Vector2i, level: float, radius_cells := 1, height := CELL * 2.0) -> AABB:
     var footprint_cells: int = radius_cells * 2 + 1
@@ -1265,11 +1268,25 @@ func resource_approach_slots_for_entry(entry: Dictionary, target_node: Node3D) -
         return {}
     var body := entry.get("body") as Node3D
     var origin: Vector3 = body.global_position if body != null else entry.get("porchPosition", target_node.global_position)
+    var town_center: Vector2i = entry.get("townCenter", Vector2i.ZERO)
+    var town_position := Vector3(float(town_center.x) * CELL, origin.y, float(town_center.y) * CELL)
+    var prefer_near_object_slot := String(entry.get("job", "")) == "forage"
     positions.sort_custom(func(a: Vector3, b: Vector3) -> bool:
+        var a_key := "%0.3f,%0.3f" % [a.x, a.z]
+        var b_key := "%0.3f,%0.3f" % [b.x, b.z]
+        if prefer_near_object_slot:
+            var a_object_distance := Vector2(a.x - target_node.global_position.x, a.z - target_node.global_position.z).length_squared()
+            var b_object_distance := Vector2(b.x - target_node.global_position.x, b.z - target_node.global_position.z).length_squared()
+            if not is_equal_approx(a_object_distance, b_object_distance):
+                return a_object_distance < b_object_distance
+            var a_town_distance := Vector2(a.x - town_position.x, a.z - town_position.z).length_squared()
+            var b_town_distance := Vector2(b.x - town_position.x, b.z - town_position.z).length_squared()
+            if not is_equal_approx(a_town_distance, b_town_distance):
+                return a_town_distance < b_town_distance
         var a_distance := Vector2(a.x - origin.x, a.z - origin.z).length_squared()
         var b_distance := Vector2(b.x - origin.x, b.z - origin.z).length_squared()
         if is_equal_approx(a_distance, b_distance):
-            return "%0.3f,%0.3f" % [a.x, a.z] < "%0.3f,%0.3f" % [b.x, b.z]
+            return a_key < b_key
         return a_distance < b_distance
     )
     var slots := {}
@@ -1516,6 +1533,8 @@ func home_route_target(entry: Dictionary) -> Vector3:
         return home
     var route_positions: Array = entry.get("homeRoutePositions", [])
     var route_index := int(entry.get("homeRouteIndex", 0))
+    if route_index <= 0:
+        entry.erase("homeOptionalSkipSignature")
     while route_index < route_positions.size():
         var route_target: Vector3 = route_positions[route_index]
         if not home_route_step_reached(entry, route_target):
@@ -1543,11 +1562,15 @@ func home_route_step_reached(entry: Dictionary, route_target: Vector3) -> bool:
         var active_cell: Vector2i = entry.get("homeActiveTargetCell", target_cell)
         route_arrived_at_target = active_cell == target_cell
     if route_arrived_at_target and target_cell != home_cell:
+        if target_cell == porch_cell and route_requires_exact_porch_arrival(entry):
+            return current_cell == target_cell or body.global_position.distance_to(route_target) <= CELL * 0.35
         return true
     if target_cell != porch_cell and abs(target_cell.x - porch_cell.x) + abs(target_cell.y - porch_cell.y) == 1:
         if current_cell == target_cell or body.global_position.distance_to(route_target) <= CELL * 0.35:
             return true
         return false
+    if target_cell == porch_cell and route_requires_exact_porch_arrival(entry):
+        return current_cell == target_cell or body.global_position.distance_to(route_target) <= CELL * 0.35
     if body.global_position.distance_to(route_target) <= CELL * 0.82:
         return true
     if target_cell == porch_cell and abs(current_cell.x - target_cell.x) <= 1 and abs(current_cell.y - target_cell.y) <= 1:
@@ -1557,6 +1580,9 @@ func home_route_step_reached(entry: Dictionary, route_target: Vector3) -> bool:
     if target_cell != home_cell:
         return current_cell == target_cell or body.global_position.distance_to(route_target) <= CELL * 0.35
     return abs(current_cell.x - target_cell.x) <= 1 and abs(current_cell.y - target_cell.y) <= 1
+
+func route_requires_exact_porch_arrival(entry: Dictionary) -> bool:
+    return bool(entry.get("holdDoorOrder", false)) or bool(entry.get("holdIntroDoor", false))
 
 func settle_home_if_reached(entry: Dictionary) -> void:
     var body := entry.get("body") as Node3D
@@ -1734,7 +1760,10 @@ func cleanup_npc_route_state(actor_id: String, entry := {}, reason := "cleanup")
             "activeDoorTrafficGroupId",
             "jobReservationId",
             "jobApproachSlotId",
-            "trafficWaitReason"
+            "trafficWaitReason",
+            "_yieldRetreatTicks",
+            "_yieldRetreatDirection",
+            "_yieldRetreatBlockerId"
         ]:
             if entry_dict.has(key):
                 entry_dict.erase(key)

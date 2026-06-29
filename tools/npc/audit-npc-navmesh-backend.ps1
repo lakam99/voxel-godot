@@ -6,13 +6,20 @@ $ErrorActionPreference = "Stop"
 $RepoRoot = Resolve-Path (Join-Path $PSScriptRoot "..\..")
 $Patterns = @(
   @{ Name = "LocalAStarPlanner"; Pattern = "LocalAStarPlannerScript" },
-  @{ Name = "HierarchicalRoutePlanner"; Pattern = "HierarchicalRoutePlannerScript" },
-  @{ Name = "RouteCoordinatorAdapter"; Pattern = "NpcRouteCoordinatorAdapterScript" },
-  @{ Name = "GeneratedWorldNavigationAdapter"; Pattern = "GeneratedWorldNavigationAdapterScript" }
+  @{ Name = "HierarchicalRoutePlanner"; Pattern = "HierarchicalRoutePlannerScript" }
+)
+$LiveRuntimeFiles = @(
+  "scripts\NpcPathing.gd",
+  "scripts\npc_ai\NpcAutonomySystem.gd",
+  "scripts\npc_ai\routing\NpcNavigationCoordinator.gd",
+  "scripts\npc_ai\routing\NpcRouteCoordinatorAdapter.gd",
+  "scripts\npc_ai\movement\NpcRouteMovementController.gd",
+  "scripts\npc_ai\behavior\NpcSemanticGoalPlanner.gd",
+  "scripts\npc_ai\behavior\NpcTaskPlanner.gd",
+  "scripts\npc_ai\behavior\NpcPlanExecutor.gd"
 )
 $RuntimePaths = @(
-  (Join-Path $RepoRoot "scripts\npc_ai"),
-  (Join-Path $RepoRoot "scripts\NpcPathing.gd")
+  $LiveRuntimeFiles | ForEach-Object { Join-Path $RepoRoot $_ }
 )
 
 $Matches = @()
@@ -32,6 +39,7 @@ $Result = [ordered]@{
   mode = if ($FailOnLegacy) { "fail_on_legacy" } else { "detect" }
   legacyPatternCount = $Matches.Count
   failOnLegacy = [bool]$FailOnLegacy
+  scannedFiles = $LiveRuntimeFiles
   matches = $Matches
 }
 

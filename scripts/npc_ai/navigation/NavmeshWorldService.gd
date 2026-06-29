@@ -7,6 +7,8 @@ const NpcConstantsScript := preload("res://scripts/npc_ai/NpcConstants.gd")
 const NpcEnumsScript := preload("res://scripts/npc_ai/NpcEnums.gd")
 
 const CELL := NpcConstantsScript.CELL_SIZE
+const MAX_TIMING_SAMPLES := 512
+const SERVER_CLOSEST_RETRIES := 8
 
 var backend_config = NavigationBackendConfigScript.default_config()
 var navigation_map := RID()
@@ -28,6 +30,8 @@ var path_query_failure_count := 0
 var last_path_query_usec := 0
 var total_path_query_usec := 0
 var max_path_query_usec := 0
+var install_duration_samples_usec: Array[int] = []
+var path_query_duration_samples_usec: Array[int] = []
 var dirty_regions_by_region := {}
 var dirty_region_queue: Array[String] = []
 var rebuild_count := 0
@@ -38,6 +42,7 @@ var door_portal_states := {}
 var installed_door_link_count := 0
 var door_link_state_revision := 0
 var door_link_install_failure_count := 0
+var actor_path_records := {}
 
 func setup(config = null) -> void:
 	backend_config = config if config != null else NavigationBackendConfigScript.from_environment()
@@ -55,6 +60,7 @@ func clear() -> void:
 	door_link_records_by_region.clear()
 	door_link_records_by_portal.clear()
 	door_portal_states.clear()
+	actor_path_records.clear()
 	topology_revision = 0
 	dynamic_revision = 0
 	registered_region_count = 0
@@ -69,6 +75,8 @@ func clear() -> void:
 	last_path_query_usec = 0
 	total_path_query_usec = 0
 	max_path_query_usec = 0
+	install_duration_samples_usec.clear()
+	path_query_duration_samples_usec.clear()
 	installed_door_link_count = 0
 	door_link_state_revision = 0
 	door_link_install_failure_count = 0
@@ -221,39 +229,95 @@ func set_door_portal_state(portal_or_id, state_value := "", metadata := {}) -> D
 
 func closest_walkable(position: Vector3, max_distance := INF) -> Dictionary:
 	var server_result := _closest_walkable_from_server(position, max_distance)
-	if not server_result.is_empty():
+	if bool(server_result.get("found", false)):
 		return server_result
-	return _closest_walkable_from_descriptors(position, max_distance)
+	var descriptor_result := _closest_walkable_from_descriptors(position, max_distance)
+	if bool(descriptor_result.get("found", false)):
+		if not server_result.is_empty():
+			descriptor_result["serverFallbackReason"] = String(server_result.get("reason", "navigation_server_not_found"))
+		return descriptor_result
+	return server_result if not server_result.is_empty() else descriptor_result
 
 func query_route(start: Vector3, target: Vector3, options := {}) -> Dictionary:
 	var started := Time.get_ticks_usec()
 	path_query_count += 1
 	if not backend_config.use_navmesh():
-		return _finish_route_query(started, _route_query_failure("disabled", "navmesh_backend_disabled", start, target, options))
+		return _finish_route_query(started, _route_query_failure("disabled", "navmesh_backend_disabled", start, target, options), options)
 	if not navigation_map.is_valid() or region_rids_by_region.is_empty():
-		return _finish_route_query(started, _route_query_failure("blocked", "missing_navmesh_regions", start, target, options))
+		return _finish_route_query(started, _route_query_failure("blocked", "missing_navmesh_regions", start, target, options), options)
 	var max_snap := float(options.get("maxSnapDistance", INF))
-	var start_walkable := closest_walkable(start, max_snap)
+	var start_walkable := _closest_walkable_for_route_endpoint(start, max_snap)
 	if not bool(start_walkable.get("found", false)):
-		return _finish_route_query(started, _route_query_failure("blocked", "no_start_walkable", start, target, options, start_walkable))
-	var target_walkable := closest_walkable(target, max_snap)
+		return _finish_route_query(started, _route_query_failure("blocked", "no_start_server_walkable", start, target, options, {
+			"startWalkable": start_walkable,
+			"descriptorStartWalkable": _closest_walkable_from_descriptors(start, max_snap)
+		}), options)
+	var target_walkable := _closest_walkable_for_route_endpoint(target, max_snap)
 	if not bool(target_walkable.get("found", false)):
-		return _finish_route_query(started, _route_query_failure("blocked", "no_target_walkable", start, target, options, target_walkable))
+		return _finish_route_query(started, _route_query_failure("blocked", "no_target_server_walkable", start, target, options, {
+			"startWalkable": start_walkable,
+			"targetWalkable": target_walkable,
+			"descriptorTargetWalkable": _closest_walkable_from_descriptors(target, max_snap)
+		}), options)
 	var query_start: Vector3 = start_walkable.get("position", start)
 	var query_target: Vector3 = target_walkable.get("position", target)
+	var query_api_used := _route_query_api(options)
+	if not _route_endpoint_owned_by_server(start_walkable) or not _route_endpoint_owned_by_server(target_walkable):
+		var direct_door_route := _direct_door_route_for_points(query_start, query_target, [])
+		if not direct_door_route.is_empty():
+			var direct_path: Array[Vector3] = []
+			for point in direct_door_route.get("path", []):
+				if point is Vector3:
+					direct_path.append(point)
+			var direct_actions: Dictionary = direct_door_route.get("actions", {}) if direct_door_route.get("actions", {}) is Dictionary else {}
+			if not direct_path.is_empty():
+				return _finish_route_query(started, {
+					"ok": true,
+					"status": "complete",
+					"reason": "",
+					"source": "navmesh",
+					"queryApi": "direct_door_route",
+					"start": start,
+					"target": target,
+					"startPosition": query_start,
+					"targetPosition": query_target,
+					"path": direct_path,
+					"pointCount": direct_path.size(),
+					"distance": float(direct_door_route.get("distance", _path_distance(direct_path))),
+					"actions": direct_actions,
+					"doorLinks": _door_links_for_actions(direct_actions),
+					"snapshotRevision": revision(),
+					"options": options.duplicate(true),
+					"startWalkable": start_walkable,
+					"targetWalkable": target_walkable
+				}, options)
+		return _finish_route_query(started, _route_query_failure("blocked", "endpoint_not_server_walkable", start, target, options, {
+			"startWalkable": start_walkable,
+			"targetWalkable": target_walkable
+		}), options)
 	var path: Array[Vector3] = _query_path_points(query_start, query_target, options)
 	if path.is_empty():
 		return _finish_route_query(started, _route_query_failure("blocked", "no_route", start, target, options, {
 			"startWalkable": start_walkable,
 			"targetWalkable": target_walkable
-		}))
+		}), options)
 	var door_actions := _door_actions_for_path(path)
+	if door_actions.is_empty():
+		var direct_door_route := _direct_door_route_for_points(query_start, query_target, path)
+		if not direct_door_route.is_empty():
+			var direct_path: Array[Vector3] = []
+			for point in direct_door_route.get("path", []):
+				if point is Vector3:
+					direct_path.append(point)
+			if not direct_path.is_empty():
+				path = direct_path
+			door_actions = direct_door_route.get("actions", {})
 	return _finish_route_query(started, {
 		"ok": true,
 		"status": "complete",
 		"reason": "",
 		"source": "navmesh",
-		"queryApi": "query_path" if NavigationServer3D.has_method("query_path") else "map_get_path",
+		"queryApi": query_api_used,
 		"start": start,
 		"target": target,
 		"startPosition": query_start,
@@ -267,7 +331,35 @@ func query_route(start: Vector3, target: Vector3, options := {}) -> Dictionary:
 		"options": options.duplicate(true),
 		"startWalkable": start_walkable,
 		"targetWalkable": target_walkable
-	})
+	}, options)
+
+func _route_endpoint_owned_by_server(walkable: Dictionary) -> bool:
+	var source := String(walkable.get("source", ""))
+	return source.begins_with("navigation_server")
+
+func actor_path_status(actor_id := "") -> Dictionary:
+	if String(actor_id) == "":
+		var actors := {}
+		var keys := actor_path_records.keys()
+		keys.sort()
+		for key_value in keys:
+			var key := String(key_value)
+			actors[key] = _actor_path_record_with_age(actor_path_records[key])
+		return {
+			"status": "ok",
+			"count": actors.size(),
+			"revision": revision(),
+			"actors": actors
+		}
+	var id := String(actor_id)
+	if not actor_path_records.has(id):
+		return {
+			"actorId": id,
+			"status": "unknown",
+			"reason": "no_query_record",
+			"revision": revision()
+		}
+	return _actor_path_record_with_age(actor_path_records[id])
 
 func debug_snapshot() -> Dictionary:
 	var regions := {}
@@ -288,9 +380,30 @@ func debug_snapshot() -> Dictionary:
 		"dirtyRegions": _dirty_regions_summary(),
 		"doorLinks": _door_links_debug_summary(),
 		"doorPortalStates": _door_portal_states_summary(),
+		"actorPathStatus": actor_path_status(),
 		"installedRegionCount": region_rids_by_region.size(),
 		"installedSurfaceCount": installed_surface_count,
 		"installedDoorLinkCount": installed_door_link_count
+	}
+
+func tile_region_status(tile_key: String) -> Dictionary:
+	var region_id := NavigationBakeDescriptorScript.chunk_region_id(tile_key)
+	var descriptor = descriptors_by_region.get(region_id)
+	var surface_count := 0
+	if descriptor != null:
+		var surfaces = descriptor.get("walkable_surfaces")
+		if surfaces is Array:
+			surface_count = surfaces.size()
+	var metrics: Dictionary = region_metrics_by_region.get(region_id, {})
+	return {
+		"tileKey": tile_key,
+		"regionId": region_id,
+		"registered": descriptor != null,
+		"state": String(region_states.get(region_id, "")),
+		"surfaceCount": surface_count,
+		"installed": region_rids_by_region.has(region_id),
+		"dirty": dirty_regions_by_region.has(region_id),
+		"installStatus": String(metrics.get("status", ""))
 	}
 
 func stats() -> Dictionary:
@@ -308,17 +421,20 @@ func stats() -> Dictionary:
 		"registeredRegionCount": registered_region_count,
 		"unregisteredRegionCount": unregistered_region_count,
 		"lastInstallUsec": last_install_usec,
+		"installP95Usec": _percentile_usec(install_duration_samples_usec, 0.95),
 		"dirtyRegionCount": dirty_regions_by_region.size(),
 		"dirtyRegionQueueCount": dirty_region_queue.size(),
 		"rebuildCount": rebuild_count,
 		"lastRebuildUsec": last_rebuild_usec,
+		"actorPathStatusCount": actor_path_records.size(),
 		"doorLinkInstallFailureCount": door_link_install_failure_count,
 		"linkApiSupported": _link_api_supported(),
 		"pathQueryCount": path_query_count,
 		"pathQueryFailureCount": path_query_failure_count,
 		"lastPathQueryUsec": last_path_query_usec,
 		"avgPathQueryUsec": float(total_path_query_usec) / float(maxi(1, path_query_count)),
-		"maxPathQueryUsec": max_path_query_usec
+		"maxPathQueryUsec": max_path_query_usec,
+		"pathQueryP95Usec": _percentile_usec(path_query_duration_samples_usec, 0.95)
 	}
 
 func revision() -> String:
@@ -388,6 +504,7 @@ func _install_region(region_id: String, descriptor) -> Dictionary:
 	region_ids_by_rid[region_rid] = region_id
 	var link_metrics := _install_door_links_for_region(region_id, descriptor)
 	last_install_usec = Time.get_ticks_usec() - started
+	_record_timing_sample(install_duration_samples_usec, last_install_usec)
 	installed_region_count += 1
 	installed_surface_count += polygon_count
 	var metrics := {
@@ -461,20 +578,63 @@ func _release_region(region_id: String) -> void:
 func _closest_walkable_from_server(position: Vector3, max_distance := INF) -> Dictionary:
 	if not navigation_map.is_valid() or region_rids_by_region.is_empty():
 		return {}
-	if NavigationServer3D.has_method("map_force_update"):
-		NavigationServer3D.call("map_force_update", navigation_map)
 	if not NavigationServer3D.has_method("map_get_closest_point") or not NavigationServer3D.has_method("map_get_closest_point_owner"):
 		return {}
-	var closest_value = NavigationServer3D.call("map_get_closest_point", navigation_map, position)
-	var owner_value = NavigationServer3D.call("map_get_closest_point_owner", navigation_map, position)
-	if not (closest_value is Vector3) or not (owner_value is RID):
-		return {}
-	var owner: RID = owner_value
+	var direct_result := _server_closest_for_sample(position, position, max_distance, "navigation_server")
+	if bool(direct_result.get("found", false)):
+		return direct_result
+	var probe_result := _descriptor_guided_server_probe(position, max_distance)
+	if bool(probe_result.get("found", false)):
+		return probe_result
+	return direct_result
+
+func _closest_walkable_for_route_endpoint(position: Vector3, max_distance := INF) -> Dictionary:
+	var server_result := _closest_walkable_from_server(position, max_distance)
+	if bool(server_result.get("found", false)):
+		return server_result
+	var descriptor_result := _closest_walkable_from_descriptors(position, max_distance)
+	if not bool(descriptor_result.get("found", false)):
+		return server_result if not server_result.is_empty() else descriptor_result
+	var region_id := String(descriptor_result.get("regionId", ""))
+	if region_id == "" or not region_rids_by_region.has(region_id):
+		var missing_region := descriptor_result.duplicate(true)
+		missing_region["found"] = false
+		missing_region["reason"] = "descriptor_region_not_installed"
+		if not server_result.is_empty():
+			missing_region["serverFallbackReason"] = String(server_result.get("reason", "navigation_server_owner_missing"))
+		return missing_region
+	var endpoint := descriptor_result.duplicate(true)
+	endpoint["source"] = "installed_descriptor_endpoint"
+	endpoint["serverFallbackReason"] = String(server_result.get("reason", "navigation_server_owner_missing")) if not server_result.is_empty() else "navigation_server_owner_missing"
+	return endpoint
+
+func _server_closest_for_sample(sample_position: Vector3, original_position: Vector3, max_distance := INF, source_label := "navigation_server") -> Dictionary:
+	var closest_value = Vector3.ZERO
+	var owner := RID()
+	for _attempt in range(SERVER_CLOSEST_RETRIES):
+		if NavigationServer3D.has_method("map_force_update"):
+			NavigationServer3D.call("map_force_update", navigation_map)
+		var candidate_closest = NavigationServer3D.call("map_get_closest_point", navigation_map, sample_position)
+		var owner_value = NavigationServer3D.call("map_get_closest_point_owner", navigation_map, sample_position)
+		if candidate_closest is Vector3:
+			closest_value = candidate_closest
+		if owner_value is RID:
+			owner = owner_value
+		if owner.is_valid():
+			break
 	if not owner.is_valid():
 		return {}
-	var distance := position.distance_to(closest_value)
+	var distance := original_position.distance_to(closest_value)
 	if distance > max_distance:
-		return { "found": false, "reason": "no_walkable_surface", "position": position, "maxDistance": max_distance, "source": "navigation_server" }
+		return {
+			"found": false,
+			"reason": "no_walkable_surface",
+			"position": original_position,
+			"closestPosition": closest_value,
+			"closestDistance": distance,
+			"maxDistance": max_distance,
+			"source": source_label
+		}
 	var region_id := String(region_ids_by_rid.get(owner, ""))
 	var surface_id := _closest_surface_id(region_id, closest_value)
 	return {
@@ -483,8 +643,51 @@ func _closest_walkable_from_server(position: Vector3, max_distance := INF) -> Di
 		"surfaceId": surface_id,
 		"position": closest_value,
 		"distance": distance,
-		"source": "navigation_server"
+		"source": source_label
 	}
+
+func _descriptor_guided_server_probe(position: Vector3, max_distance := INF) -> Dictionary:
+	var descriptor_result := _closest_walkable_from_descriptors(position, max_distance)
+	if not bool(descriptor_result.get("found", false)):
+		return {}
+	var region_id := String(descriptor_result.get("regionId", ""))
+	var surface_id := String(descriptor_result.get("surfaceId", ""))
+	var surface := _descriptor_surface(region_id, surface_id)
+	if surface.is_empty():
+		return {}
+	var center: Vector3 = surface.get("center", descriptor_result.get("position", position))
+	var descriptor_position: Vector3 = descriptor_result.get("position", position)
+	var size: Vector3 = surface.get("size", Vector3(CELL, 0.05, CELL))
+	var inset := minf(CELL * 0.18, maxf(0.05, minf(maxf(size.x, 0.01), maxf(size.z, 0.01)) * 0.25))
+	var samples: Array[Vector3] = [
+		descriptor_position,
+		descriptor_position.lerp(center, 0.35),
+		center,
+		_closest_point_on_surface(surface, descriptor_position + Vector3(inset, 0.0, 0.0)),
+		_closest_point_on_surface(surface, descriptor_position + Vector3(-inset, 0.0, 0.0)),
+		_closest_point_on_surface(surface, descriptor_position + Vector3(0.0, 0.0, inset)),
+		_closest_point_on_surface(surface, descriptor_position + Vector3(0.0, 0.0, -inset))
+	]
+	for sample in samples:
+		var result := _server_closest_for_sample(sample, position, max_distance, "navigation_server_descriptor_probe")
+		if bool(result.get("found", false)):
+			result["probePosition"] = sample
+			result["descriptorPosition"] = descriptor_position
+			return result
+	return {}
+
+func _descriptor_surface(region_id: String, surface_id: String) -> Dictionary:
+	var descriptor = descriptors_by_region.get(region_id)
+	if descriptor == null:
+		return {}
+	var surfaces: Array = descriptor.get("walkable_surfaces")
+	for surface_value in surfaces:
+		if not (surface_value is Dictionary):
+			continue
+		var surface: Dictionary = surface_value
+		if String(surface.get("id", "")) == surface_id:
+			return surface
+	return {}
 
 func _closest_surface_id(region_id: String, position: Vector3) -> String:
 	var descriptor = descriptors_by_region.get(region_id)
@@ -504,7 +707,8 @@ func _closest_surface_id(region_id: String, position: Vector3) -> String:
 
 func _query_path_points(start: Vector3, target: Vector3, options := {}) -> Array[Vector3]:
 	var points: Array[Vector3] = []
-	if NavigationServer3D.has_method("query_path"):
+	var use_map_get_path := _route_query_api(options) == "map_get_path"
+	if not use_map_get_path and NavigationServer3D.has_method("query_path"):
 		for attempt in range(2):
 			if NavigationServer3D.has_method("map_force_update"):
 				NavigationServer3D.call("map_force_update", navigation_map)
@@ -513,6 +717,9 @@ func _query_path_points(start: Vector3, target: Vector3, options := {}) -> Array
 			parameters.start_position = start
 			parameters.target_position = target
 			parameters.navigation_layers = int(options.get("navigationLayers", 1))
+			parameters.path_postprocessing = int(options.get("pathPostprocessing", NavigationPathQueryParameters3D.PATH_POSTPROCESSING_EDGECENTERED))
+			parameters.simplify_path = bool(options.get("simplifyPath", false))
+			parameters.simplify_epsilon = float(options.get("simplifyEpsilon", 0.0))
 			var result := NavigationPathQueryResult3D.new()
 			var returned_path = NavigationServer3D.call("query_path", parameters, result)
 			var raw_path = result.call("get_path") if result.has_method("get_path") else result.get("path")
@@ -521,12 +728,21 @@ func _query_path_points(start: Vector3, target: Vector3, options := {}) -> Array
 				points = _vector_path_to_array(returned_path)
 			if not points.is_empty():
 				break
-	if points.is_empty() and NavigationServer3D.has_method("map_get_path"):
+	if points.is_empty() and use_map_get_path and NavigationServer3D.has_method("map_get_path"):
 		if NavigationServer3D.has_method("map_force_update"):
 			NavigationServer3D.call("map_force_update", navigation_map)
-		var raw_map_path = NavigationServer3D.call("map_get_path", navigation_map, start, target, true)
+		var optimize_path := bool(options.get("optimizePath", true))
+		var raw_map_path = NavigationServer3D.call("map_get_path", navigation_map, start, target, optimize_path)
 		points = _vector_path_to_array(raw_map_path)
 	return points
+
+func _route_query_api(options := {}) -> String:
+	var requested := String(options.get("queryApi", "query_path"))
+	if requested == "map_get_path" and NavigationServer3D.has_method("map_get_path"):
+		return "map_get_path"
+	if requested == "query_path" and NavigationServer3D.has_method("query_path"):
+		return "query_path"
+	return "map_get_path"
 
 func _vector_path_to_array(path_value) -> Array[Vector3]:
 	var points: Array[Vector3] = []
@@ -547,14 +763,68 @@ func _path_distance(points: Array[Vector3]) -> float:
 		distance += points[index - 1].distance_to(points[index])
 	return distance
 
-func _finish_route_query(started_usec: int, result: Dictionary) -> Dictionary:
+func _finish_route_query(started_usec: int, result: Dictionary, options := {}) -> Dictionary:
 	last_path_query_usec = Time.get_ticks_usec() - started_usec
 	total_path_query_usec += last_path_query_usec
 	max_path_query_usec = maxi(max_path_query_usec, last_path_query_usec)
+	_record_timing_sample(path_query_duration_samples_usec, last_path_query_usec)
 	if not bool(result.get("ok", false)):
 		path_query_failure_count += 1
 	result["durationUsec"] = last_path_query_usec
+	_record_actor_path_status(result, options)
 	return result
+
+func _record_actor_path_status(route: Dictionary, options := {}) -> void:
+	if not (options is Dictionary):
+		return
+	var actor_id := String((options as Dictionary).get("actorId", ""))
+	if actor_id == "":
+		return
+	var door_links: Array = route.get("doorLinks", []) if route.get("doorLinks", []) is Array else []
+	var next_portal_id := ""
+	for link_value in door_links:
+		if link_value is Dictionary:
+			next_portal_id = String((link_value as Dictionary).get("portalId", ""))
+			if next_portal_id != "":
+				break
+	actor_path_records[actor_id] = {
+		"actorId": actor_id,
+		"ok": bool(route.get("ok", false)),
+		"status": String(route.get("status", "")),
+		"reason": String(route.get("reason", "")),
+		"source": String(route.get("source", "navmesh")),
+		"queryApi": String(route.get("queryApi", "")),
+		"start": route.get("start", Vector3.ZERO),
+		"target": route.get("target", Vector3.ZERO),
+		"startPosition": route.get("startPosition", route.get("start", Vector3.ZERO)),
+		"targetPosition": route.get("targetPosition", route.get("target", Vector3.ZERO)),
+		"pathPointCount": int(route.get("pointCount", 0)),
+		"distance": float(route.get("distance", -1.0)),
+		"nextDoorPortalId": next_portal_id,
+		"doorLinkCount": door_links.size(),
+		"snapshotRevision": String(route.get("snapshotRevision", revision())),
+		"durationUsec": int(route.get("durationUsec", 0)),
+		"updatedMsec": Time.get_ticks_msec()
+	}
+
+func _actor_path_record_with_age(record_value) -> Dictionary:
+	var record: Dictionary = record_value.duplicate(true) if record_value is Dictionary else {}
+	var updated_msec := int(record.get("updatedMsec", Time.get_ticks_msec()))
+	record["ageMsec"] = maxi(0, Time.get_ticks_msec() - updated_msec)
+	return record
+
+func _record_timing_sample(samples: Array[int], value: int) -> void:
+	samples.append(maxi(0, value))
+	while samples.size() > MAX_TIMING_SAMPLES:
+		samples.pop_front()
+
+func _percentile_usec(samples: Array[int], ratio: float) -> int:
+	if samples.is_empty():
+		return 0
+	var sorted := samples.duplicate()
+	sorted.sort()
+	var index := clampi(ceili(float(sorted.size()) * ratio) - 1, 0, sorted.size() - 1)
+	return int(sorted[index])
 
 func _route_query_failure(status: String, reason: String, start: Vector3, target: Vector3, options := {}, details := {}) -> Dictionary:
 	return {
@@ -562,7 +832,7 @@ func _route_query_failure(status: String, reason: String, start: Vector3, target
 		"status": status,
 		"reason": reason,
 		"source": "navmesh",
-		"queryApi": "query_path" if NavigationServer3D.has_method("query_path") else ("map_get_path" if NavigationServer3D.has_method("map_get_path") else ""),
+		"queryApi": _route_query_api(options),
 		"start": start,
 		"target": target,
 		"path": [],
@@ -764,28 +1034,118 @@ func _door_actions_for_path(path: Array[Vector3]) -> Dictionary:
 			var record: Dictionary = record_value
 			if not bool(record.get("enabled", false)):
 				continue
-			if not _path_uses_door_link(path, record):
+			var link_direction := _path_door_link_direction(path, record)
+			if link_direction == "":
 				continue
 			var metadata: Dictionary = record.get("metadata", {})
+			var start_position: Vector3 = record.get("start", Vector3.ZERO)
 			var end_position: Vector3 = record.get("end", Vector3.ZERO)
-			var action_cell := _cell_for_position(end_position)
-			var action_key := _cell_key(action_cell)
-			var action := {
-				"kind": "door",
-				"portalId": portal_id,
-				"actionId": String(metadata.get("actionId", "open")),
-				"cell": action_cell,
-				"entryPosition": record.get("start", Vector3.ZERO),
-				"exitPosition": end_position,
-				"navLink": true,
-				"requiresSmartObject": true,
-				"enabled": bool(record.get("enabled", false))
-			}
-			var door_value = metadata.get("door", null)
-			if door_value is Node and is_instance_valid(door_value):
-				action["door"] = door_value
-			actions[action_key] = action
+			var action := _door_action_for_record(portal_id, record, link_direction)
+			if not action.is_empty():
+				actions[_cell_key(action.get("cell", Vector2i.ZERO))] = action
 	return actions
+
+func _direct_door_route_for_points(start: Vector3, target: Vector3, current_path: Array[Vector3]) -> Dictionary:
+	var best := {}
+	var best_distance := INF
+	var current_distance := _path_distance(current_path)
+	var portal_ids := door_link_records_by_portal.keys()
+	portal_ids.sort()
+	for portal_id_value in portal_ids:
+		var portal_id := String(portal_id_value)
+		for record_value in door_link_records_by_portal.get(portal_id, []):
+			if not (record_value is Dictionary):
+				continue
+			var record: Dictionary = record_value
+			if not bool(record.get("enabled", false)):
+				continue
+			var start_position: Vector3 = record.get("start", Vector3.ZERO)
+			var end_position: Vector3 = record.get("end", Vector3.ZERO)
+			var axis := end_position - start_position
+			axis.y = 0.0
+			if axis.length_squared() <= 0.0001:
+				continue
+			axis = axis.normalized()
+			var center := (start_position + end_position) * 0.5
+			var from_start := start - center
+			var from_target := target - center
+			from_start.y = 0.0
+			from_target.y = 0.0
+			var start_along := from_start.dot(axis)
+			var target_along := from_target.dot(axis)
+			if start_along == 0.0 or target_along == 0.0 or start_along * target_along > 0.0:
+				continue
+			var start_lateral := (from_start - axis * start_along).length()
+			var target_lateral := (from_target - axis * target_along).length()
+			if maxf(start_lateral, target_lateral) > CELL * 1.35:
+				continue
+			var direction := "forward" if start_along < target_along else "reverse"
+			var action := _door_action_for_record(portal_id, record, direction)
+			if action.is_empty():
+				continue
+			var entry_position: Vector3 = action.get("entryPosition", start_position)
+			var exit_position: Vector3 = action.get("exitPosition", end_position)
+			var metadata: Dictionary = record.get("metadata", {})
+			var link_distance := entry_position.distance_to(exit_position)
+			var geometric_distance := start.distance_to(entry_position) + link_distance + exit_position.distance_to(target)
+			var weighted_distance := start.distance_to(entry_position) + _door_link_query_cost(metadata, link_distance) + exit_position.distance_to(target)
+			var mandatory_local_crossing := maxf(absf(start_along), absf(target_along)) <= CELL * 2.35
+			if not mandatory_local_crossing and current_distance > 0.0 and weighted_distance > current_distance + CELL * 1.5:
+				continue
+			var distance := geometric_distance if mandatory_local_crossing else weighted_distance
+			if distance < best_distance:
+				best_distance = distance
+				best = {
+					"path": [start, entry_position, exit_position, target],
+					"actions": { _cell_key(action.get("cell", Vector2i.ZERO)): action },
+					"distance": distance
+				}
+	return best
+
+func _door_link_query_cost(metadata: Dictionary, link_distance: float) -> float:
+	var enter_cost := float(metadata.get("enterCost", metadata.get("cost", 1.0)))
+	var travel_cost := float(metadata.get("travelCost", metadata.get("cost", 1.0)))
+	return maxf(0.0, enter_cost) + maxf(0.0, travel_cost) * maxf(0.0, link_distance)
+
+func _door_action_for_record(portal_id: String, record: Dictionary, direction: String) -> Dictionary:
+	var metadata: Dictionary = record.get("metadata", {})
+	var start_position: Vector3 = record.get("start", Vector3.ZERO)
+	var end_position: Vector3 = record.get("end", Vector3.ZERO)
+	var entry_position := start_position
+	var exit_position := end_position
+	if direction == "reverse":
+		entry_position = end_position
+		exit_position = start_position
+	var entry_cell := _cell_for_position(entry_position)
+	var action_cell := _cell_for_position(exit_position)
+	var action := {
+		"kind": "door",
+		"portalId": portal_id,
+		"actionId": String(metadata.get("actionId", "open")),
+		"cell": action_cell,
+		"entryCell": entry_cell,
+		"entryPosition": entry_position,
+		"exitPosition": exit_position,
+		"direction": _door_action_direction(entry_position, exit_position),
+		"navLink": true,
+		"requiresSmartObject": true,
+		"enabled": bool(record.get("enabled", false))
+	}
+	var door_value = metadata.get("door", null)
+	if door_value is Node and is_instance_valid(door_value):
+		action["door"] = door_value
+	return action
+
+func _door_action_direction(entry_position: Vector3, exit_position: Vector3) -> String:
+	var delta := exit_position - entry_position
+	delta.y = 0.0
+	if delta.length_squared() <= 0.0001:
+		return ""
+	if absf(delta.x) >= absf(delta.z) and absf(delta.x) > 0.0001:
+		return "x+" if delta.x > 0.0 else "x-"
+	if absf(delta.z) > 0.0001:
+		return "z+" if delta.z > 0.0 else "z-"
+	return ""
 
 func _door_links_for_actions(actions: Dictionary) -> Array:
 	var result := []
@@ -802,6 +1162,9 @@ func _door_links_for_actions(actions: Dictionary) -> Array:
 	return result
 
 func _path_uses_door_link(path: Array[Vector3], record: Dictionary) -> bool:
+	return _path_door_link_direction(path, record) != ""
+
+func _path_door_link_direction(path: Array[Vector3], record: Dictionary) -> String:
 	var start: Vector3 = record.get("start", Vector3.ZERO)
 	var end: Vector3 = record.get("end", Vector3.ZERO)
 	var tolerance := CELL * 0.35
@@ -809,12 +1172,33 @@ func _path_uses_door_link(path: Array[Vector3], record: Dictionary) -> bool:
 		var from_point := path[index - 1]
 		var to_point := path[index]
 		if from_point.distance_to(start) <= tolerance and to_point.distance_to(end) <= tolerance:
-			return true
+			return "forward"
 		if from_point.distance_to(end) <= tolerance and to_point.distance_to(start) <= tolerance:
-			return true
+			return "reverse"
 		if _point_segment_distance(start, from_point, to_point) <= tolerance and _point_segment_distance(end, from_point, to_point) <= tolerance:
-			return true
-	return false
+			var link_axis := end - start
+			link_axis.y = 0.0
+			var path_axis := to_point - from_point
+			path_axis.y = 0.0
+			if link_axis.length_squared() <= 0.0001 or path_axis.length_squared() <= 0.0001:
+				return "forward"
+			return "forward" if link_axis.dot(path_axis) >= 0.0 else "reverse"
+	var cell_value = (record.get("metadata", {}) as Dictionary).get("cell") if record.get("metadata", {}) is Dictionary else null
+	if cell_value is Vector2i:
+		var door_center := Vector3(float((cell_value as Vector2i).x) * CELL, (start.y + end.y) * 0.5, float((cell_value as Vector2i).y) * CELL)
+		for index in range(1, path.size()):
+			var from_point := path[index - 1]
+			var to_point := path[index]
+			if _point_segment_distance(door_center, from_point, to_point) > CELL * 0.48:
+				continue
+			var link_axis := end - start
+			link_axis.y = 0.0
+			var path_axis := to_point - from_point
+			path_axis.y = 0.0
+			if link_axis.length_squared() <= 0.0001 or path_axis.length_squared() <= 0.0001:
+				return "forward"
+			return "forward" if link_axis.dot(path_axis) >= 0.0 else "reverse"
+	return ""
 
 func _point_segment_distance(point: Vector3, segment_start: Vector3, segment_end: Vector3) -> float:
 	var segment := segment_end - segment_start
