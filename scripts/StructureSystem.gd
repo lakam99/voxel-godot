@@ -670,7 +670,9 @@ func place_structure_block(cell_x: int, cell_z: int, level: float, dy: int, bloc
     var cell_y: int = floori(world_y / main.CELL) + 1
     var options := {
         "generated": true,
-        "world_y": world_y
+        "world_y": world_y,
+        "structureDy": dy,
+        "structureLevel": level
     }
     for key in extra_options.keys():
         options[key] = extra_options[key]

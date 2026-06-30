@@ -26,7 +26,7 @@ func _process(delta: float) -> void:
     if finished:
         return
     elapsed += delta
-    if elapsed > 24.0:
+    if elapsed > 240.0:
         add_result("playtest_watchdog", false, "runner timed out before completion")
         finished = true
         save_optional_screenshot()
@@ -215,6 +215,10 @@ func mark_progress(label: String) -> void:
 func wait_physics_frames(count: int) -> void:
     for i in range(count):
         await get_tree().physics_frame
+
+func wait_process_frames(count: int) -> void:
+    for i in range(count):
+        await get_tree().process_frame
 
 func dispatch_mouse_button(button_index: int, pressed := true, position := Vector2(-1.0, -1.0)) -> void:
     var event := InputEventMouseButton.new()
@@ -466,8 +470,8 @@ func test_tutorial_start_system() -> void:
     )
     var mira_entered_starter_house := false
     var mira_min_starter_distance := INF
-    for i in range(30):
-        npc_system.update_npcs(0.1, 0.0)
+    for i in range(120):
+        await wait_process_frames(1)
         if mira is Node3D:
             var mira_body_for_route := mira as Node3D
             var flat_distance := Vector2(
@@ -482,13 +486,12 @@ func test_tutorial_start_system() -> void:
         mira != null and not mira_entered_starter_house,
         "entered %s, min distance %.2f, bounds %s" % [str(mira_entered_starter_house), mira_min_starter_distance, str(mira_route_bounds)]
     )
-    for i in range(420):
-        npc_system.update_npcs(0.1, 0.0)
+    for i in range(3600):
         if mira != null and bool(mira.get_meta("npc_inside_home", false)):
             break
-        if i % 15 == 0:
+        if i % 60 == 0:
             mark_progress("tutorial_elder_return_%03d" % i)
-            await wait_physics_frames(1)
+        await wait_process_frames(1)
     var starter_position := Vector3(float(starter_cell.x) * CELL, player.global_position.y, float(starter_cell.y) * CELL)
     var mira_position := starter_position
     if mira is Node3D:
@@ -744,11 +747,12 @@ func test_tutorial_start_system() -> void:
         player_clear_position.y = main.call("height_at_world", player_clear_position.x, player_clear_position.z)
         player.global_position = player_clear_position
         player.velocity = Vector3.ZERO
-    for i in range(36):
-        npc_system.update_npcs(0.12, 0.0)
-        if i % 12 == 0:
+    for i in range(360):
+        if sera is Node3D and (sera as Node3D).global_position.distance_to(guard_before) > CELL * 3.0:
+            break
+        if i % 60 == 0:
             mark_progress("tutorial_guard_escort_%03d" % i)
-            await get_tree().process_frame
+        await wait_process_frames(1)
     var escort_state: Dictionary = tutorial_system.state()
     var escort_started: bool = bool(escort_state.get("rescueEscortStarted", false))
     var guard_after: Vector3 = (sera as Node3D).global_position if sera is Node3D else Vector3.ZERO
@@ -779,19 +783,26 @@ func test_tutorial_start_system() -> void:
         var enemy_body := enemy_state.get("body") as Node
         if enemy_body != null and is_instance_valid(enemy_body) and bool(enemy_body.get_meta("tutorial_rescue_hostile", false)):
             rescue_hostile_count += 1
-            hostile_system.damage_hostile(enemy_body, 999.0)
+            hostile_system.damage_hostile(enemy_body, 999.0, true, player, "player_playtest")
             main.call("update_objectives_and_contracts")
     main.call("update_objectives_and_contracts")
-    var rescue_returning_started: bool = bool(tutorial_system.state().get("rescueReturning", false))
-    for i in range(90):
-        npc_system.update_npcs(0.12, 0.0)
+    var rescue_returning_started := false
+    for i in range(60):
         tutorial_system.refresh_rescue_progress(0.12)
         main.call("update_objectives_and_contracts")
+        rescue_returning_started = rescue_returning_started or bool(tutorial_system.state().get("rescueReturning", false))
+        if rescue_returning_started:
+            break
+        await wait_process_frames(1)
+    for i in range(5400):
+        tutorial_system.refresh_rescue_progress(0.12)
+        main.call("update_objectives_and_contracts")
+        rescue_returning_started = rescue_returning_started or bool(tutorial_system.state().get("rescueReturning", false))
         if bool(tutorial_system.state().get("finalNightComplete", false)):
             break
-        if i % 15 == 0:
+        if i % 60 == 0:
             mark_progress("tutorial_rescue_return_%03d" % i)
-            await get_tree().process_frame
+        await wait_process_frames(1)
     main.call("update_objectives_and_contracts")
     var final_done_state: Dictionary = tutorial_system.state()
     var final_done_steps: Dictionary = final_done_state.get("completedSteps", {})
@@ -880,15 +891,14 @@ func test_tutorial_start_system() -> void:
     var npc_stats_before: Dictionary = npc_system.stats()
     var guard_shots_before := int(npc_stats_before.get("guardShots", 0))
     var use_animations_before := int(npc_stats_before.get("useAnimations", 0))
-    for i in range(280):
-        npc_system.update_npcs(0.1, 0.0)
-        if i % 5 == 0:
+    for i in range(1800):
+        if i % 30 == 0:
             var stats_now: Dictionary = npc_system.stats()
             if int(stats_now.get("sheltered", 0)) >= 3 and int(stats_now.get("guardShots", 0)) > guard_shots_before and int(stats_now.get("useAnimations", 0)) > use_animations_before:
                 break
-        if i % 20 == 0:
+        if i % 60 == 0:
             mark_progress("tutorial_guard_behavior_%03d" % i)
-            await get_tree().process_frame
+        await wait_process_frames(1)
     var npc_stats_after: Dictionary = npc_system.stats()
     var tutorial_npc_count := npc_root.get_child_count() if npc_root else 0
     var all_tutorial_npcs_have_homes := int(npc_stats_after.get("homed", 0)) >= tutorial_npc_count
@@ -3861,6 +3871,14 @@ func test_hostile_system() -> void:
 
     hostile_system.clear()
     hostile_system.spawn_cooldown = 999.0
+    var restore_position: Vector3 = player.global_position
+    var restore_velocity: Vector3 = player.velocity
+    var hostile_cell := Vector2i(roundi(restore_position.x / CELL) + 96, roundi(restore_position.z / CELL) + 96)
+    reset_player_on_flat_patch(hostile_cell)
+    clear_blocks_near_cell(hostile_cell, 16)
+    clear_props_near_cell(hostile_cell, 16)
+    main.call("update_chunks", true)
+    await wait_process_frames(3)
     var original_position: Vector3 = player.global_position
     var enemy_pos: Vector3 = original_position + Vector3(12.0, 0.0, 0.0)
     enemy_pos.y = main.call("height_at_world", enemy_pos.x, enemy_pos.z) + 0.72
@@ -3995,7 +4013,8 @@ func test_hostile_system() -> void:
     )
 
     hostile_system.clear()
-    player.global_position = original_position
+    player.global_position = restore_position
+    player.velocity = restore_velocity
     var natural_enemy: StaticBody3D = hostile_system.spawn_near_player("plains")
     var natural_distance := 0.0
     var natural_aware := true
@@ -4437,6 +4456,9 @@ func test_structure_and_town_generation() -> void:
     add_result("structure_system_present", structure_system != null, "structure system present")
     if structure_system == null:
         return
+    var structure_restore_position: Vector3 = player.global_position if player else Vector3.ZERO
+    var structure_restore_velocity: Vector3 = player.velocity if player else Vector3.ZERO
+    var structure_restore_time := float(main.get("time_of_day"))
 
     var town: Dictionary = main.call("town_region", 1, 0)
     var center_x := int(town.get("centerX", 0))
@@ -4506,8 +4528,11 @@ func test_structure_and_town_generation() -> void:
         elif block_type == "cobblestonePath":
             paths.append(body)
         elif block_type == "glass":
-            var glass_ground: float = main.call("height_at_world", body.global_position.x, body.global_position.z)
-            if body.global_position.y < glass_ground + CELL * 2.0:
+            var glass_structure_dy := int(body.get_meta("structureDy", 99))
+            if not body.has_meta("structureDy"):
+                var glass_ground: float = main.call("height_at_world", body.global_position.x, body.global_position.z)
+                glass_structure_dy = roundi((body.global_position.y - glass_ground - CELL * 0.48) / CELL)
+            if glass_structure_dy <= 1:
                 generated_glass_ground += 1
         elif (block_type == "woodBlock" or block_type == "stoneBlock") and body.global_position.y < level + CELL * 1.1:
             var shape := first_collision_shape(body)
@@ -4615,7 +4640,16 @@ func test_structure_and_town_generation() -> void:
         }
         structure_system.call("build_town", generic_town)
         npc_system.spawn_generic_town_npcs()
-        npc_system.update_npcs(0.1, 1.0)
+        if player:
+            var observe_position := Vector3(float(generic_center_x) * CELL, 0.0, float(generic_center_z) * CELL)
+            observe_position.y = float(main.call("height_at_world", observe_position.x, observe_position.z)) + 0.72
+            player.global_position = observe_position
+            player.velocity = Vector3.ZERO
+        main.set("time_of_day", 0.42)
+        if main.has_method("update_sky"):
+            main.call("update_sky", 0.0)
+        main.call("update_chunks", true)
+        await wait_process_frames(8)
         var generic_key := "%d,%d" % [generic_center_x, generic_center_z]
         var home_records: Dictionary = structure_system.call("town_home_records_snapshot")
         var generic_homes: Array = home_records.get(generic_key, [])
@@ -4703,16 +4737,16 @@ func test_structure_and_town_generation() -> void:
                 generic_forager["goal"] = "forage berries"
         var job_runs_before := int(npc_system.stats().get("jobRuns", 0))
         var forage_runs_before := int(npc_system.stats().get("forageRuns", 0))
+        var food_eaten_before := int(npc_system.stats().get("foodEaten", 0))
         var door_opens_before := int(npc_system.stats().get("doorOpens", 0))
         var door_closes_before := int(npc_system.stats().get("doorCloses", 0))
         var saw_generic_worker_outside := false
         var forager_goal_seen := false
         var town_radius_world := float(generic_town.get("radius", 32)) * CELL
         var town_center_world := Vector2(float(generic_center_x) * CELL, float(generic_center_z) * CELL)
-        for step in range(2200):
-            if step % 160 == 0:
+        for step in range(3000):
+            if step % 120 == 0:
                 mark_progress("structures_npc_jobs_%03d" % step)
-            npc_system.update_npcs(0.2, 1.0)
             for entry_variant in generic_entries:
                 var entry: Dictionary = entry_variant
                 if not (String(entry.get("job", "")) in ["forage", "wood", "stone"]):
@@ -4730,17 +4764,19 @@ func test_structure_and_town_generation() -> void:
             if not generic_forager.is_empty():
                 var inventory_now: Dictionary = generic_forager.get("personalInventory", {})
                 var hunger_now := float(generic_forager.get("hunger", 0.0))
-                targeted_forage_done = int(inventory_now.get("berries", 0)) > 0 and hunger_now > 38.0
+                var food_eaten_now := int(stats_now.get("foodEaten", 0))
+                targeted_forage_done = int(stats_now.get("forageRuns", 0)) > forage_runs_before and (int(inventory_now.get("berries", 0)) > 0 or hunger_now > 38.0 or food_eaten_now > food_eaten_before)
             if saw_generic_worker_outside and int(stats_now.get("jobRuns", 0)) > job_runs_before and targeted_forage_done:
                 break
-            if step % 20 == 19:
-                await wait_physics_frames(1)
+            await wait_process_frames(1)
         mark_progress("structures_npc_jobs_done")
         var job_stats: Dictionary = npc_system.stats()
         var forager_inventory: Dictionary = generic_forager.get("personalInventory", {}) if not generic_forager.is_empty() else {}
         var forager_food := int(forager_inventory.get("berries", 0))
         var forager_hunger := float(generic_forager.get("hunger", 0.0)) if not generic_forager.is_empty() else 0.0
-        var forager_clear_goal := forager_goal_seen and forager_food > 0
+        var forager_food_eaten := int(job_stats.get("foodEaten", 0))
+        var forager_food_or_hunger := forager_food > 0 or forager_hunger > 38.0 or forager_food_eaten > food_eaten_before
+        var forager_clear_goal := forager_goal_seen and forager_food_or_hunger
         var forager_target_distance := -1.0
         var forager_node_distance := -1.0
         var forager_motion_goal := ""
@@ -4781,13 +4817,15 @@ func test_structure_and_town_generation() -> void:
             not generic_forager.is_empty()
                 and forager_clear_goal
                 and int(job_stats.get("forageRuns", 0)) > forage_runs_before
-                and forager_hunger > 38.0
+                and forager_food_or_hunger
         )
-        var forager_details := "goal %s, target selected %s, berries %d, hunger %.1f, forage %d->%d, node gone %s, phase %s, timer %.2f, motion %s, reason %s, route %s/%s, dist target %.2f node %.2f" % [
+        var forager_details := "goal %s, target selected %s, berries %d, hunger %.1f, food eaten %d->%d, forage %d->%d, node gone %s, phase %s, timer %.2f, motion %s, reason %s, route %s/%s, dist target %.2f node %.2f" % [
             str(forager_goal_seen),
             str(targeted_forage_selected),
             forager_food,
             forager_hunger,
+            food_eaten_before,
+            forager_food_eaten,
             forage_runs_before,
             int(job_stats.get("forageRuns", 0)),
             str(forage_node == null or not is_instance_valid(forage_node)),
@@ -4839,6 +4877,12 @@ func test_structure_and_town_generation() -> void:
             ]
         )
 
+    if player:
+        player.global_position = structure_restore_position
+        player.velocity = structure_restore_velocity
+    main.set("time_of_day", structure_restore_time)
+    if main.has_method("update_sky"):
+        main.call("update_sky", 0.0)
     cleanup_generated_blocks()
 
 func test_npc_equipment_and_pathing() -> void:

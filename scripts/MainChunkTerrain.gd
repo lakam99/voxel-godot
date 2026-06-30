@@ -498,6 +498,10 @@ func create_block(cell: Vector3i, block_type: String, options: Dictionary = {}) 
         body.set_meta("generatedTier", String(options.get("generatedTier", "")))
     if options.has("cacheKey"):
         body.set_meta("cacheKey", String(options.get("cacheKey", "")))
+    if options.has("structureDy"):
+        body.set_meta("structureDy", int(options.get("structureDy", 0)))
+    if options.has("structureLevel"):
+        body.set_meta("structureLevel", float(options.get("structureLevel", world_y)))
     if options.has("storageSlots"):
         body.set_meta("storage_slots", options.get("storageSlots", []))
     for visual_key in [
