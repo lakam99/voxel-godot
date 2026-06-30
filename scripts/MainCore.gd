@@ -405,7 +405,7 @@ func setup_game_systems() -> void:
         ItemCatalogScript.HOTBAR_SIZE
     )
     crafting_system = CraftingSystemScript.new(
-        ItemCatalogScript.RECIPES,
+        ItemCatalogScript.crafting_recipes(),
         ItemCatalogScript.ITEMS,
         inventory_system,
         Callable(self, "is_station_near")
@@ -735,6 +735,28 @@ func grant_starter_inventory() -> void:
     inventory_system.add_item("stones", 12)
     inventory_system.add_item("sand", 12)
     inventory_system.add_item("dirt", 12)
+
+func reset_crafting_unlocks(initial_groups := []) -> void:
+    if crafting_system == null:
+        return
+    crafting_system.reset_unlocks(initial_groups)
+    mark_world_dirty("crafting_unlocks_reset")
+
+func unlock_crafting_group(group_id: String, reason := "") -> bool:
+    if crafting_system == null or not crafting_system.has_method("unlock_group"):
+        return false
+    var changed: bool = bool(crafting_system.unlock_group(group_id))
+    if changed:
+        mark_world_dirty("crafting_unlock:%s" % group_id)
+        if reason != "":
+            crafting_system.last_message = "Unlocked: %s" % reason
+    return changed
+
+func unlock_all_crafting_groups_for_tests() -> void:
+    if crafting_system == null or not crafting_system.has_method("unlock_all_groups"):
+        return
+    if bool(crafting_system.unlock_all_groups()):
+        mark_world_dirty("crafting_unlock:test_all")
 
 func _sync_inventory_totals() -> void:
     if inventory_system:

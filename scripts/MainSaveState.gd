@@ -57,6 +57,8 @@ func reset_runtime_world_state() -> void:
             "size": ItemCatalogScript.INVENTORY_SIZE,
             "selectedSlot": 0
         })
+    if crafting_system and crafting_system.has_method("reset_unlocks"):
+        crafting_system.reset_unlocks()
     if equipment_system:
         equipment_system.reset()
     if progression_system:
@@ -98,6 +100,7 @@ func create_save_snapshot() -> Dictionary:
             "size": inventory_system.size if inventory_system else ItemCatalogScript.INVENTORY_SIZE,
             "selectedSlot": inventory_system.selected_slot if inventory_system else 0
         },
+        "crafting": crafting_system.snapshot() if crafting_system and crafting_system.has_method("snapshot") else {},
         "terrain": snapshot_height_edits(),
         "removedProps": removed_props.keys(),
         "survival": survival_system.snapshot() if survival_system else {},
@@ -122,6 +125,8 @@ func apply_save_snapshot(snapshot: Dictionary) -> bool:
     time_of_day = clampf(float(snapshot.get("timeOfDay", time_of_day)), 0.0, 1.0)
     if inventory_system and snapshot.has("inventory"):
         inventory_system.restore(snapshot["inventory"])
+    if crafting_system and crafting_system.has_method("restore"):
+        crafting_system.restore(snapshot.get("crafting", {}))
     if progression_system and snapshot.has("progression"):
         progression_system.restore(snapshot["progression"])
     if equipment_system and snapshot.has("equipment"):
@@ -147,6 +152,10 @@ func apply_save_snapshot(snapshot: Dictionary) -> bool:
     restore_player_blocks(snapshot.get("blocks", []))
     if tutorial_system:
         tutorial_system.restore(snapshot.get("tutorial", {}))
+        if not snapshot.has("crafting") and bool(tutorial_system.get("started")) and tutorial_system.has_method("sync_crafting_unlocks_from_tutorial"):
+            tutorial_system.sync_crafting_unlocks_from_tutorial()
+        elif not snapshot.has("crafting") and crafting_system and crafting_system.has_method("unlock_all_groups"):
+            crafting_system.unlock_all_groups()
     ensure_story_handoff_for_completed_tutorial_save()
     death_count = max(0, int(snapshot.get("deathCount", snapshot.get("runStats", {}).get("deathCount", 0))))
     respawn_point = optional_vector3(snapshot.get("respawnPoint", []))

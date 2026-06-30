@@ -134,6 +134,9 @@ func setup_visual_asset_registry() -> void: pass
 func setup_static_item_asset_registry() -> void: pass
 func setup_animated_asset_registry() -> void: pass
 func grant_starter_inventory() -> void: pass
+func reset_crafting_unlocks(initial_groups := []) -> void: pass
+func unlock_crafting_group(group_id: String, reason := "") -> bool: return false
+func unlock_all_crafting_groups_for_tests() -> void: pass
 func _sync_inventory_totals() -> void: pass
 func save_world(show_message := true) -> bool: return false
 func try_load_world(show_message := false) -> bool: return false

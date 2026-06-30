@@ -13,6 +13,7 @@ artifacts/*.json
 artifacts/*.txt
 artifacts/npc/
 artifacts/performance/
+artifacts/crafting/
 artifacts/verification/
 artifacts/test-runners/
 artifacts/ui-layout-fix/

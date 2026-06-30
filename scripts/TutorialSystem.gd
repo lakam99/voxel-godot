@@ -151,6 +151,7 @@ func restore(snapshot_value = {}) -> void:
     setup_intro_repair_quest(false)
     spawn_tutorial_npcs()
     last_message = String(state.get("lastMessage", ""))
+    sync_crafting_unlocks_from_tutorial()
 
 func reserve_tutorial_town_layout() -> void:
     if main == null or town.is_empty():
@@ -253,7 +254,23 @@ func configure_starting_inventory() -> void:
     if main == null or main.inventory_system == null:
         return
     main.inventory_system.clear()
+    if main.has_method("reset_crafting_unlocks"):
+        main.reset_crafting_unlocks(["tutorial_repair"])
     main._sync_inventory_totals()
+
+func unlock_crafting_group(group_id: String, reason := "") -> bool:
+    if main == null or not main.has_method("unlock_crafting_group"):
+        return false
+    return bool(main.unlock_crafting_group(group_id, reason))
+
+func sync_crafting_unlocks_from_tutorial() -> void:
+    if main == null:
+        return
+    unlock_crafting_group("tutorial_repair", "tutorial repair crafting")
+    if bool(interacted.get("rowan", false)) or bool(completed_steps.get("rowanAxe", false)) or bool(completed_steps.get("rowanPickaxe", false)) or bool(completed_steps.get("rowanBlocks", false)):
+        unlock_crafting_group("rowan_basic_tools", "Rowan's basic tools")
+    if bool(interacted.get("sera", false)) or bool(completed_steps.get("seraWeapon", false)) or bool(completed_steps.get("readyForWilds", false)) or final_night_active or final_night_complete:
+        unlock_crafting_group("rescue_weapon", "rescue weapon training")
 
 func intro_snapshot() -> Dictionary:
     return {

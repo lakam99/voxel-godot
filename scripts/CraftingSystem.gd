@@ -9,6 +9,25 @@ var catalog := {}
 var inventory
 var station_provider := Callable()
 var last_message := ""
+var unlocked_groups := {}
+
+const UNLOCK_GROUP_LABELS := {
+    "tutorial_repair": "tutorial repair crafting",
+    "rowan_basic_tools": "Rowan's basic tools",
+    "rescue_weapon": "rescue weapon training",
+    "book_stone_tools": "stone crafting book",
+    "book_settlement_basics": "settlement crafting book",
+    "book_survival_crafting": "survival crafting book",
+    "book_hunting": "hunting crafting book",
+    "book_metalworking": "metalworking crafting book",
+    "book_wardcraft": "wardcraft book",
+    "book_packs": "pack crafting book",
+    "book_defense": "defense crafting book",
+    "rare_bow": "rare bow book",
+    "rare_compass": "rare compass book",
+    "rare_map": "rare map book",
+    "rare_survey_lens": "rare survey lens book"
+}
 
 func _init(recipe_list := [], catalog_value := {}, inventory_system = null, station_provider_value := Callable()) -> void:
     recipes = recipe_list
@@ -43,6 +62,8 @@ func state_for_with_stations(recipe: Dictionary, has_bench: bool, has_anvil: boo
     var output := String(recipe.get("output", ""))
     var amount := int(recipe.get("amount", 1))
     var upgrade: Dictionary = recipe.get("upgrade", {})
+    var unlock_group := recipe_unlock_group(recipe)
+    var unlock_locked := not is_recipe_unlocked(recipe)
     var has_space := true
     var upgrade_locked := false
     if upgrade.is_empty():
@@ -51,9 +72,11 @@ func state_for_with_stations(recipe: Dictionary, has_bench: bool, has_anvil: boo
         upgrade_locked = inventory == null or inventory.size >= int(upgrade["inventorySize"])
     var bench_locked := bool(recipe.get("requiresWorkbench", false)) and not has_bench
     var anvil_locked := bool(recipe.get("requiresAnvil", false)) and not has_anvil
-    var disabled: bool = not enough or not has_space or bench_locked or anvil_locked or upgrade_locked
+    var disabled: bool = unlock_locked or not enough or not has_space or bench_locked or anvil_locked or upgrade_locked
     var status := format_costs(costs)
-    if upgrade_locked:
+    if unlock_locked:
+        status = "locked: %s" % unlock_label(unlock_group)
+    elif upgrade_locked:
         status = "already upgraded"
     elif anvil_locked:
         status = "needs anvil"
@@ -67,6 +90,8 @@ func state_for_with_stations(recipe: Dictionary, has_bench: bool, has_anvil: boo
         "recipe": recipe,
         "enough": enough,
         "hasSpace": has_space,
+        "unlockGroup": unlock_group,
+        "unlockLocked": unlock_locked,
         "benchLocked": bench_locked,
         "anvilLocked": anvil_locked,
         "upgradeLocked": upgrade_locked,
@@ -105,6 +130,70 @@ func craft(recipe_id: String) -> bool:
     crafted.emit(recipe_id, output, added)
     changed.emit()
     return added > 0
+
+func recipe_unlock_group(recipe: Dictionary) -> String:
+    return String(recipe.get("unlockGroup", recipe.get("unlock", "")))
+
+func is_recipe_unlocked(recipe: Dictionary) -> bool:
+    var group_id := recipe_unlock_group(recipe)
+    return group_id == "" or bool(unlocked_groups.get(group_id, false))
+
+func unlock_group(group_id: String) -> bool:
+    group_id = group_id.strip_edges()
+    if group_id == "":
+        return false
+    if bool(unlocked_groups.get(group_id, false)):
+        return false
+    unlocked_groups[group_id] = true
+    last_message = "Unlocked: %s" % unlock_label(group_id)
+    changed.emit()
+    return true
+
+func unlock_groups(group_ids: Array) -> bool:
+    var changed_any := false
+    for group_id_value in group_ids:
+        changed_any = unlock_group(String(group_id_value)) or changed_any
+    return changed_any
+
+func unlock_all_groups() -> bool:
+    return unlock_groups(UNLOCK_GROUP_LABELS.keys())
+
+func reset_unlocks(initial_groups := []) -> void:
+    unlocked_groups.clear()
+    for group_id_value in initial_groups:
+        var group_id := String(group_id_value).strip_edges()
+        if group_id != "":
+            unlocked_groups[group_id] = true
+    changed.emit()
+
+func has_unlock_group(group_id: String) -> bool:
+    group_id = group_id.strip_edges()
+    return group_id == "" or bool(unlocked_groups.get(group_id, false))
+
+func snapshot() -> Dictionary:
+    var groups := unlocked_groups.keys()
+    groups.sort()
+    return { "unlockedGroups": groups }
+
+func restore(snapshot_value = {}) -> void:
+    unlocked_groups.clear()
+    var state: Dictionary = snapshot_value if snapshot_value is Dictionary else {}
+    var groups_value = state.get("unlockedGroups", [])
+    if groups_value is Dictionary:
+        for group_id_variant in groups_value.keys():
+            if bool(groups_value[group_id_variant]):
+                var group_id := String(group_id_variant).strip_edges()
+                if group_id != "":
+                    unlocked_groups[group_id] = true
+    elif groups_value is Array:
+        for group_id_value in groups_value:
+            var group_id := String(group_id_value).strip_edges()
+            if group_id != "":
+                unlocked_groups[group_id] = true
+    changed.emit()
+
+func unlock_label(group_id: String) -> String:
+    return String(UNLOCK_GROUP_LABELS.get(group_id, group_id))
 
 func has_station(station_id: String) -> bool:
     if station_provider.is_valid():

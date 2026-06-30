@@ -141,6 +141,7 @@ func handle_mira_quest() -> String:
     return "One step at a time. Forage, gather, build, then arm yourself."
 
 func handle_rowan_quest() -> String:
+    system.unlock_crafting_group("rowan_basic_tools", "Rowan's basic tools")
     var rowan_totals: Dictionary = main.inventory_system.totals() if main and main.inventory_system else {}
     if not bool(system.completed_steps.get("rowanAxe", false)):
         if has_axe(rowan_totals):
@@ -194,6 +195,7 @@ func handle_niko_quest() -> String:
     return "Keep a ration ready before you leave the lanterns."
 
 func handle_sera_quest() -> String:
+    system.unlock_crafting_group("rescue_weapon", "rescue weapon training")
     var sera_totals: Dictionary = main.inventory_system.totals() if main and main.inventory_system else {}
     if system.final_night_active and not system.final_night_complete:
         if not system.rescue_escort_started:

@@ -165,6 +165,62 @@ const RECIPES := [
     { "id": "riftAnchor", "label": "Rift Anchor", "output": "riftAnchor", "amount": 1, "costs": { "riftCore": 1, "wardLantern": 1, "stoneBlock": 4, "glass": 4, "ironIngot": 2 }, "requiresAnvil": true }
 ]
 
+const RECIPE_UNLOCK_GROUPS := {
+    "woodBlock": "tutorial_repair",
+    "torch": "tutorial_repair",
+    "woodenAxe": "rowan_basic_tools",
+    "woodenPickaxe": "rowan_basic_tools",
+    "woodenSword": "rescue_weapon",
+    "stoneAxe": "book_stone_tools",
+    "stonePickaxe": "book_stone_tools",
+    "stoneShovel": "book_stone_tools",
+    "stoneSword": "book_stone_tools",
+    "stoneArmor": "book_stone_tools",
+    "stoneBlock": "book_stone_tools",
+    "cobblestonePath": "book_stone_tools",
+    "furnace": "book_stone_tools",
+    "workbench": "book_settlement_basics",
+    "woodenShovel": "book_settlement_basics",
+    "dirtBlock": "book_settlement_basics",
+    "door": "book_settlement_basics",
+    "bed": "book_settlement_basics",
+    "glass": "book_settlement_basics",
+    "chest": "book_settlement_basics",
+    "campfire": "book_survival_crafting",
+    "fieldRation": "book_survival_crafting",
+    "hunterStew": "book_survival_crafting",
+    "aloeSalve": "book_survival_crafting",
+    "fishingRod": "book_survival_crafting",
+    "trailCharm": "book_survival_crafting",
+    "hideVest": "book_hunting",
+    "arrows": "rare_bow",
+    "hunterBow": "rare_bow",
+    "compass": "rare_compass",
+    "surveyLens": "rare_survey_lens",
+    "trailPack": "book_packs",
+    "expeditionPack": "book_packs",
+    "spikeTrap": "book_defense",
+    "anvil": "book_metalworking",
+    "copperAxe": "book_metalworking",
+    "copperPickaxe": "book_metalworking",
+    "copperShovel": "book_metalworking",
+    "copperSword": "book_metalworking",
+    "copperArmor": "book_metalworking",
+    "ironAxe": "book_metalworking",
+    "ironPickaxe": "book_metalworking",
+    "ironShovel": "book_metalworking",
+    "ironSword": "book_metalworking",
+    "ironCrossbow": "book_metalworking",
+    "ironArmor": "book_metalworking",
+    "wardTonic": "book_wardcraft",
+    "wardArmor": "book_wardcraft",
+    "wardAmulet": "book_wardcraft",
+    "nightBlade": "book_wardcraft",
+    "wardLantern": "book_wardcraft",
+    "sanctuaryBeacon": "book_wardcraft",
+    "riftAnchor": "book_wardcraft"
+}
+
 const MATERIALS := {
     "grass": { "label": "Grass", "hardness": 3, "drop": "grass" },
     "dirt": { "label": "Dirt", "hardness": 4, "drop": "dirt" },
@@ -236,8 +292,19 @@ static func material_required_tool(material_id: String) -> String:
 static func material_required_tier(material_id: String) -> int:
     return int(material_spec(material_id).get("requiredTier", 0))
 
+static func crafting_recipes() -> Array:
+    var result := []
+    for recipe in RECIPES:
+        var copy: Dictionary = recipe.duplicate(true)
+        var recipe_id := String(copy.get("id", ""))
+        copy["unlockGroup"] = String(RECIPE_UNLOCK_GROUPS.get(recipe_id, ""))
+        result.append(copy)
+    return result
+
 static func recipe_by_id(recipe_id: String) -> Dictionary:
     for recipe in RECIPES:
         if recipe.get("id", "") == recipe_id:
-            return recipe
+            var copy: Dictionary = recipe.duplicate(true)
+            copy["unlockGroup"] = String(RECIPE_UNLOCK_GROUPS.get(recipe_id, ""))
+            return copy
     return {}

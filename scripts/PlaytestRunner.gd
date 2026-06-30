@@ -53,6 +53,11 @@ func run() -> void:
     test_scene_bootstrap()
     if finish_if_only_section("scene_bootstrap", only_section):
         return
+    if only_section == "inventory_and_crafting":
+        mark_progress("inventory_and_crafting")
+        await test_inventory_and_crafting_systems()
+        finish_playtest()
+        return
     if only_section != "" and only_section != "tutorial_start":
         add_result("playtest_section_filter", false, "unsupported VOXEL_PLAYTEST_ONLY '%s'" % only_section)
         finish_playtest()
@@ -385,6 +390,25 @@ func test_tutorial_start_system() -> void:
             str(counts)
         ]
     )
+    var initial_wood_state: Dictionary = crafting_system.state_for(crafting_system.recipe_for("woodBlock"))
+    var initial_torch_state: Dictionary = crafting_system.state_for(crafting_system.recipe_for("torch"))
+    var initial_axe_state: Dictionary = crafting_system.state_for(crafting_system.recipe_for("woodenAxe"))
+    var initial_sword_state: Dictionary = crafting_system.state_for(crafting_system.recipe_for("woodenSword"))
+    add_result(
+        "tutorial_crafting_initial_gate",
+        bool(crafting_system.has_unlock_group("tutorial_repair"))
+            and not bool(initial_wood_state.get("unlockLocked", true))
+            and not bool(initial_torch_state.get("unlockLocked", true))
+            and bool(initial_axe_state.get("unlockLocked", false))
+            and bool(initial_sword_state.get("unlockLocked", false)),
+        "groups %s wood %s torch %s axe %s sword %s" % [
+            str(crafting_system.snapshot()),
+            str(initial_wood_state),
+            str(initial_torch_state),
+            str(initial_axe_state),
+            str(initial_sword_state)
+        ]
+    )
 
     var npc_root = tutorial_system.get("npc_root") as Node
     var mira := npc_root.get_node_or_null("TutorialNPC_mira") if npc_root else null
@@ -633,6 +657,7 @@ func test_tutorial_start_system() -> void:
         player.set("terrain_grounded", true)
     move_player_near_first_block_type("workbench")
     tutorial_system.interact_with(rowan)
+    var rowan_tools_unlocked := bool(crafting_system.has_unlock_group("rowan_basic_tools"))
     inventory_system.add_item("logs", 10)
     var crafted_axe := bool(crafting_system.craft("woodenAxe"))
     tutorial_system.interact_with(rowan)
@@ -651,6 +676,7 @@ func test_tutorial_start_system() -> void:
     add_result(
         "tutorial_contract_rowan_errand_chain",
         rowan_logs_ready
+            and rowan_tools_unlocked
             and crafted_axe
             and crafted_pickaxe
             and bool(rowan_steps.get("rowanAxe", false))
@@ -659,8 +685,9 @@ func test_tutorial_start_system() -> void:
             and bool(rowan_steps.get("rowanStones", false))
             and bool(rowan_steps.get("rowanBlocks", false))
             and inventory_system.count("stones") >= 4,
-        "logs %s, axe %s, pickaxe %s, steps %s, stones %d" % [
+        "logs %s, rowan unlock %s, axe %s, pickaxe %s, steps %s, stones %d" % [
             str(rowan_logs_ready),
+            str(rowan_tools_unlocked),
             str(crafted_axe),
             str(crafted_pickaxe),
             str(rowan_steps),
@@ -669,6 +696,7 @@ func test_tutorial_start_system() -> void:
     )
 
     tutorial_system.interact_with(sera)
+    var rescue_weapon_unlocked := bool(crafting_system.has_unlock_group("rescue_weapon"))
     move_player_near_first_block_type("workbench")
     var crafted_sword := bool(crafting_system.craft("woodenSword"))
     tutorial_system.interact_with(sera)
@@ -681,13 +709,15 @@ func test_tutorial_start_system() -> void:
     add_result(
         "tutorial_contract_weapon_preps_final_night",
         crafted_sword
+            and rescue_weapon_unlocked
             and bool(final_steps.get("seraWeapon", false))
             and bool(final_steps.get("readyForWilds", false))
             and bool(final_tutorial_state.get("readyForWilds", false))
             and final_objective_available
             and not ready_before_final,
-        "crafted sword %s, steps %s, final available %s, ready before final %s" % [
+        "crafted sword %s, rescue unlock %s, steps %s, final available %s, ready before final %s" % [
             str(crafted_sword),
+            str(rescue_weapon_unlocked),
             str(final_steps),
             str(final_objective_available),
             str(ready_before_final)
@@ -1030,6 +1060,58 @@ func test_inventory_and_crafting_systems() -> void:
     add_result("inventory_system_present", has_systems, "inventory/crafting/hud present")
     if not has_systems:
         return
+
+    var gate_slots := []
+    for i in range(inventory_system.size):
+        gate_slots.append({ "item": "", "count": 0 })
+    gate_slots[0] = { "item": "logs", "count": 24 }
+    gate_slots[1] = { "item": "stones", "count": 8 }
+    inventory_system.restore({
+        "slots": gate_slots,
+        "size": inventory_system.size,
+        "selectedSlot": 0
+    })
+    crafting_system.restore({ "unlockedGroups": ["tutorial_repair"] })
+    var gate_station_cell := Vector3i(roundi(player.global_position.x / CELL) + 3, roundi(player.global_position.y / CELL), roundi(player.global_position.z / CELL))
+    var gate_station = main.call("create_block", gate_station_cell, "workbench")
+    var locked_axe_state: Dictionary = crafting_system.state_for(crafting_system.recipe_for("woodenAxe"))
+    var locked_sword_state: Dictionary = crafting_system.state_for(crafting_system.recipe_for("woodenSword"))
+    var unlocked_repair_state: Dictionary = crafting_system.state_for(crafting_system.recipe_for("woodBlock"))
+    var logs_before_gate: int = inventory_system.count("logs")
+    var locked_axe_crafted: bool = bool(crafting_system.craft("woodenAxe"))
+    var repair_crafted_under_gate: bool = bool(crafting_system.craft("woodBlock"))
+    var logs_after_repair_gate: int = inventory_system.count("logs")
+    crafting_system.unlock_group("rowan_basic_tools")
+    var rowan_axe_state: Dictionary = crafting_system.state_for(crafting_system.recipe_for("woodenAxe"))
+    var rowan_axe_crafted: bool = bool(crafting_system.craft("woodenAxe"))
+    var gate_blocks := get_blocks()
+    if gate_station:
+        gate_station.queue_free()
+    if gate_blocks.has(gate_station_cell):
+        gate_blocks.erase(gate_station_cell)
+    add_result(
+        "crafting_recipe_unlock_authority",
+        bool(locked_axe_state.get("unlockLocked", false))
+            and bool(locked_sword_state.get("unlockLocked", false))
+            and not bool(unlocked_repair_state.get("unlockLocked", true))
+            and not locked_axe_crafted
+            and logs_after_repair_gate == logs_before_gate - 2
+            and repair_crafted_under_gate
+            and bool(crafting_system.has_unlock_group("rowan_basic_tools"))
+            and not bool(rowan_axe_state.get("unlockLocked", true))
+            and rowan_axe_crafted,
+        "locked axe %s sword %s repair %s locked craft %s repair craft %s rowan state %s rowan craft %s inventory %s" % [
+            str(locked_axe_state),
+            str(locked_sword_state),
+            str(unlocked_repair_state),
+            str(locked_axe_crafted),
+            str(repair_crafted_under_gate),
+            str(rowan_axe_state),
+            str(rowan_axe_crafted),
+            str(inventory_system.totals())
+        ]
+    )
+    crafting_system.unlock_all_groups()
 
     add_result(
         "inventory_slots",
@@ -1679,6 +1761,7 @@ func test_tool_weapon_catalog_parity() -> void:
     if not present:
         add_result("tool_weapon_catalog_parity", false, "inventory/crafting/blocks missing")
         return
+    crafting_system.unlock_all_groups()
 
     var expected_items := [
         "copperAxe", "copperPickaxe", "copperShovel", "copperSword",
@@ -6829,6 +6912,7 @@ func test_mining_upgrade_progression() -> void:
     if inventory_system == null or crafting_system == null or objective_system == null or contract_system == null or progression_system == null or utility_system == null:
         add_result("mining_upgrade_progression", false, "required systems missing")
         return
+    crafting_system.unlock_all_groups()
 
     var original_inventory := {
         "slots": inventory_system.snapshot(),
