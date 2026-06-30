@@ -54,7 +54,20 @@ const ITEMS := {
     "trailCharm": { "label": "Trail Charm", "texture": "trail-charm", "stackMax": 1, "tags": ["accessory", "exploration", "crafting"], "equipment": { "slot": "accessory", "staminaBonus": 15, "hungerBonus": 10 } },
     "wardAmulet": { "label": "Ward Amulet", "texture": "ward-amulet", "stackMax": 1, "tags": ["accessory", "ward", "combat", "crafting"], "equipment": { "slot": "accessory", "combatProtection": 0.12, "exposureProtection": 0.20, "staminaBonus": 10 } },
     "compass": { "label": "Compass", "texture": "compass", "stackMax": 1, "tags": ["navigation", "crafting"] },
+    "map": { "label": "Map", "texture": "map", "stackMax": 1, "tags": ["navigation", "crafting"] },
     "surveyLens": { "label": "Survey Lens", "texture": "survey-lens", "stackMax": 1, "tags": ["accessory", "navigation", "exploration", "crafting"], "equipment": { "slot": "accessory", "mapRangeBonus": 64, "staminaBonus": 5 } },
+    "craftingBookStone": { "label": "Stone Crafting Book", "texture": "crafting-book-stone", "stackMax": 4, "tags": ["book", "crafting", "consumable"], "craftingUnlockGroup": "book_stone_tools" },
+    "craftingBookSettlement": { "label": "Settlement Crafting Book", "texture": "crafting-book-settlement", "stackMax": 4, "tags": ["book", "crafting", "consumable"], "craftingUnlockGroup": "book_settlement_basics" },
+    "craftingBookSurvival": { "label": "Survival Crafting Book", "texture": "crafting-book-survival", "stackMax": 4, "tags": ["book", "crafting", "consumable"], "craftingUnlockGroup": "book_survival_crafting" },
+    "craftingBookHunting": { "label": "Hunting Crafting Book", "texture": "crafting-book-hunting", "stackMax": 4, "tags": ["book", "crafting", "consumable"], "craftingUnlockGroup": "book_hunting" },
+    "craftingBookMetalworking": { "label": "Metalworking Crafting Book", "texture": "crafting-book-metalworking", "stackMax": 4, "tags": ["book", "crafting", "consumable"], "craftingUnlockGroup": "book_metalworking" },
+    "craftingBookWardcraft": { "label": "Wardcraft Book", "texture": "crafting-book-wardcraft", "stackMax": 4, "tags": ["book", "crafting", "consumable"], "craftingUnlockGroup": "book_wardcraft" },
+    "craftingBookPacks": { "label": "Pack Crafting Book", "texture": "crafting-book-packs", "stackMax": 4, "tags": ["book", "crafting", "consumable"], "craftingUnlockGroup": "book_packs" },
+    "craftingBookDefense": { "label": "Defense Crafting Book", "texture": "crafting-book-defense", "stackMax": 4, "tags": ["book", "crafting", "consumable"], "craftingUnlockGroup": "book_defense" },
+    "rareBookBow": { "label": "Rare Crafting Book: Bow", "texture": "rare-book-bow", "stackMax": 2, "tags": ["book", "rare", "crafting", "consumable"], "craftingUnlockGroup": "rare_bow" },
+    "rareBookCompass": { "label": "Rare Crafting Book: Compass", "texture": "rare-book-compass", "stackMax": 2, "tags": ["book", "rare", "crafting", "consumable"], "craftingUnlockGroup": "rare_compass" },
+    "rareBookMap": { "label": "Rare Crafting Book: Map", "texture": "rare-book-map", "stackMax": 2, "tags": ["book", "rare", "crafting", "consumable"], "craftingUnlockGroup": "rare_map" },
+    "rareBookSurveyLens": { "label": "Rare Crafting Book: Survey Lens", "texture": "rare-book-survey-lens", "stackMax": 2, "tags": ["book", "rare", "crafting", "consumable"], "craftingUnlockGroup": "rare_survey_lens" },
     "trailPack": { "label": "Trail Pack", "texture": "trail-pack", "stackMax": 1, "tags": ["upgrade", "storage", "crafting"] },
     "expeditionPack": { "label": "Expedition Pack", "texture": "expedition-pack", "stackMax": 1, "tags": ["upgrade", "storage", "crafting"] },
     "logs": { "label": "Logs", "texture": "logs", "stackMax": 32, "tags": ["wood", "fuel", "crafting"] },
@@ -148,6 +161,7 @@ const RECIPES := [
     { "id": "wardTonic", "label": "Ward Tonic", "output": "wardTonic", "amount": 1, "costs": { "aloe": 1, "frostHerb": 1, "nightShard": 1, "glass": 1 }, "requiresAnvil": true },
     { "id": "glass", "label": "Glass", "output": "glass", "amount": 2, "costs": { "sand": 3 }, "requiresWorkbench": true },
     { "id": "compass", "label": "Compass", "output": "compass", "amount": 1, "costs": { "logs": 1, "stones": 2, "glass": 1 }, "requiresWorkbench": true },
+    { "id": "map", "label": "Map", "output": "map", "amount": 1, "costs": { "logs": 1, "grass": 2 }, "requiresWorkbench": true },
     { "id": "surveyLens", "label": "Survey Lens", "output": "surveyLens", "amount": 1, "costs": { "compass": 1, "relicFragment": 3, "glass": 2, "copperIngot": 1 }, "requiresAnvil": true },
     { "id": "trailCharm", "label": "Trail Charm", "output": "trailCharm", "amount": 1, "costs": { "hide": 2, "grass": 3, "copperIngot": 1 }, "requiresWorkbench": true },
     { "id": "wardArmor", "label": "Ward Armor", "output": "wardArmor", "amount": 1, "costs": { "stoneArmor": 1, "nightShard": 4, "glass": 2 }, "requiresAnvil": true },
@@ -196,6 +210,7 @@ const RECIPE_UNLOCK_GROUPS := {
     "arrows": "rare_bow",
     "hunterBow": "rare_bow",
     "compass": "rare_compass",
+    "map": "rare_map",
     "surveyLens": "rare_survey_lens",
     "trailPack": "book_packs",
     "expeditionPack": "book_packs",
@@ -308,3 +323,10 @@ static func recipe_by_id(recipe_id: String) -> Dictionary:
             copy["unlockGroup"] = String(RECIPE_UNLOCK_GROUPS.get(recipe_id, ""))
             return copy
     return {}
+
+static func crafting_unlock_group_for_item(item_id: String) -> String:
+    var spec: Dictionary = item_spec(item_id)
+    return String(spec.get("craftingUnlockGroup", ""))
+
+static func is_crafting_book(item_id: String) -> bool:
+    return crafting_unlock_group_for_item(item_id) != ""

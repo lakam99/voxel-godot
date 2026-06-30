@@ -39,6 +39,8 @@ func setup_materials() -> void:
     materials["frost"] = make_material(Color(0.72, 0.92, 0.96), 0.46, false, Color(0.28, 0.66, 0.78), 0.22)
     materials["flame"] = make_material(Color(1.0, 0.73, 0.42, 0.92), 0.30, true, Color(1.0, 0.68, 0.38), 1.10)
     materials["string"] = make_material(Color(0.92, 0.82, 0.62), 0.58)
+    materials["parchment"] = make_material(Color(0.86, 0.76, 0.52), 0.72)
+    materials["ink"] = make_material(Color(0.16, 0.12, 0.08), 0.90)
 
 func make_material(color: Color, roughness := 0.82, transparent := false, emission := Color.BLACK, emission_energy := 0.0, metalness := 0.0) -> StandardMaterial3D:
     var material := StandardMaterial3D.new()
@@ -106,8 +108,10 @@ func build_item(root: Node3D, item_id: String, held: bool) -> void:
         build_armor(root, item_id, held)
     elif item_id in ["trailPack", "expeditionPack"]:
         build_pack(root, item_id, held)
-    elif item_id in ["trailCharm", "wardAmulet", "compass", "surveyLens"]:
+    elif item_id in ["trailCharm", "wardAmulet", "compass", "map", "surveyLens"]:
         build_trinket(root, item_id, held)
+    elif is_crafting_book(item_id):
+        build_crafting_book(root, item_id, held)
     elif item_id.ends_with("Block") or item_id in ["glass", "cobblestonePath"]:
         build_block(root, item_id, held)
     elif item_id in ["logs", "stones", "dirt", "sand", "grass", "mud", "snow"]:
@@ -378,6 +382,11 @@ func build_trinket(root: Node3D, item_id: String, held: bool) -> void:
     elif item_id == "surveyLens":
         add_cylinder(root, 0.22 * scale, 0.035 * scale, materials["glass"], Vector3.ZERO, Vector3(deg_to_rad(90.0), 0.0, 0.0), 16)
         add_box(root, Vector3(0.34, 0.04, 0.04) * scale, materials["copper"], Vector3(0.0, -0.24 * scale, 0.0), Vector3(0.0, 0.0, deg_to_rad(-28.0)))
+    elif item_id == "map":
+        add_box(root, Vector3(0.36, 0.030, 0.44) * scale, materials["parchment"], Vector3.ZERO, Vector3(deg_to_rad(8.0), 0.0, deg_to_rad(-6.0)))
+        add_box(root, Vector3(0.012, 0.036, 0.42) * scale, materials["gold"], Vector3(-0.10 * scale, 0.018 * scale, 0.0), Vector3(deg_to_rad(8.0), 0.0, deg_to_rad(-6.0)))
+        add_box(root, Vector3(0.012, 0.036, 0.42) * scale, materials["gold"], Vector3(0.10 * scale, 0.018 * scale, 0.0), Vector3(deg_to_rad(8.0), 0.0, deg_to_rad(-6.0)))
+        add_box(root, Vector3(0.22, 0.012, 0.016) * scale, materials["herb"], Vector3(0.02 * scale, 0.036 * scale, -0.08 * scale), Vector3(deg_to_rad(8.0), 0.0, deg_to_rad(-18.0)))
     else:
         add_sphere(root, 0.18 * scale, material_for(item_id), Vector3.ZERO, Vector3(1.0, 1.0, 0.38))
         add_cylinder(root, 0.012 * scale, 0.54 * scale, materials["string"], Vector3(0.0, 0.08 * scale, 0.0), Vector3(0.0, 0.0, deg_to_rad(90.0)), 6)
@@ -437,6 +446,15 @@ func build_crafting_resource(root: Node3D, item_id: String, held: bool) -> void:
     else:
         add_sphere(root, 0.18 * scale, material_for(item_id), Vector3.ZERO, Vector3(1.08, 0.78, 0.92))
 
+func build_crafting_book(root: Node3D, item_id: String, held: bool) -> void:
+    var scale := 0.86 if held else 1.0
+    var cover := material_for(item_id)
+    add_box(root, Vector3(0.34, 0.045, 0.44) * scale, cover, Vector3.ZERO, Vector3(deg_to_rad(6.0), 0.0, deg_to_rad(-8.0)))
+    add_box(root, Vector3(0.26, 0.050, 0.34) * scale, materials["parchment"], Vector3(0.022 * scale, 0.030 * scale, 0.0), Vector3(deg_to_rad(6.0), 0.0, deg_to_rad(-8.0)))
+    add_box(root, Vector3(0.030, 0.060, 0.45) * scale, materials["gold"] if item_id.begins_with("rareBook") else materials["wood_dark"], Vector3(-0.17 * scale, 0.028 * scale, 0.0), Vector3(deg_to_rad(6.0), 0.0, deg_to_rad(-8.0)))
+    for z in [-0.09, 0.0, 0.09]:
+        add_box(root, Vector3(0.16, 0.012, 0.010) * scale, materials["ink"], Vector3(0.04 * scale, 0.062 * scale, z * scale), Vector3(deg_to_rad(6.0), 0.0, deg_to_rad(-8.0)))
+
 func build_generic(root: Node3D, item_id: String, held: bool) -> void:
     var scale := 0.88 if held else 1.0
     add_box(root, Vector3(0.34, 0.20, 0.34) * scale, material_for(item_id))
@@ -444,7 +462,18 @@ func build_generic(root: Node3D, item_id: String, held: bool) -> void:
 func is_tool(item_id: String) -> bool:
     return item_id.ends_with("Axe") or item_id.ends_with("Pickaxe") or item_id.ends_with("Shovel") or item_id.ends_with("Sword") or item_id == "nightBlade"
 
+func is_crafting_book(item_id: String) -> bool:
+    return ItemCatalogScript.is_crafting_book(item_id)
+
 func material_for(item_id: String) -> Material:
+    if item_id == "craftingBookStone":
+        return materials["stone"]
+    if item_id == "rareBookBow":
+        return materials["cloth_teal"]
+    if item_id.begins_with("rareBook"):
+        return materials["gold"]
+    if item_id.find("Book") >= 0:
+        return materials["leather"]
     if item_id == "nightBlade" or item_id == "nightShard":
         return materials["night"]
     if item_id == "riftCore" or item_id == "riftAnchor":
@@ -485,7 +514,7 @@ func material_for(item_id: String) -> Material:
         return materials["leather"]
     if item_id == "expeditionPack":
         return materials["cloth_teal"]
-    if item_id in ["compass", "wardAmulet", "aloeSalve", "wardTonic"]:
+    if item_id in ["compass", "map", "wardAmulet", "aloeSalve", "wardTonic"]:
         return materials["gold"]
     return materials["stone"]
 
@@ -506,6 +535,8 @@ func pickup_rotation(item_id: String) -> Vector3:
     return Vector3(deg_to_rad(10.0), randf() * TAU, deg_to_rad(6.0))
 
 func held_scale(item_id: String) -> float:
+    if is_crafting_book(item_id):
+        return 0.92
     if item_id.ends_with("Block") or item_id in ["glass", "cobblestonePath"]:
         return 0.92
     if is_tool(item_id) or item_id in ["hunterBow", "ironCrossbow", "fishingRod"]:

@@ -16,6 +16,7 @@ func run() -> void:
     test_tutorial_repair_group_only_unlocks_repair_recipes()
     test_rowan_and_rescue_unlocks_gate_wood_tools_and_sword()
     test_book_and_rare_groups_gate_post_tutorial_recipes()
+    test_crafting_books_unlock_groups_when_read()
     test_crafting_unlock_snapshot_round_trip()
     save_report()
     quit(0 if all_passed() else 1)
@@ -148,6 +149,60 @@ func test_book_and_rare_groups_gate_post_tutorial_recipes() -> void:
             str(bow_unlocked_craft),
             str(compass_locked_craft),
             str(compass_unlocked_craft)
+        ]
+    )
+
+func test_crafting_books_unlock_groups_when_read() -> void:
+    setup_system(["tutorial_repair", "rowan_basic_tools", "rescue_weapon"])
+    inventory.restore({
+        "slots": [
+            { "item": "craftingBookStone", "count": 1 },
+            { "item": "logs", "count": 24 },
+            { "item": "stones", "count": 24 },
+            { "item": "grass", "count": 8 },
+            { "item": "rareBookBow", "count": 1 }
+        ],
+        "size": ItemCatalogScript.INVENTORY_SIZE,
+        "selectedSlot": 0
+    })
+    var stone_before: Dictionary = crafting.state_for(crafting.recipe_for("stonePickaxe"))
+    var stone_locked_craft: bool = bool(crafting.craft("stonePickaxe"))
+    var read_stone_book: bool = bool(crafting.use_active_unlock_item())
+    var stone_book_count := int(inventory.count("craftingBookStone"))
+    var stone_after: Dictionary = crafting.state_for(crafting.recipe_for("stonePickaxe"))
+    var stone_unlocked_craft: bool = bool(crafting.craft("stonePickaxe"))
+    inventory.select(4)
+    var bow_before: Dictionary = crafting.state_for(crafting.recipe_for("hunterBow"))
+    var read_bow_book: bool = bool(crafting.use_active_unlock_item())
+    var bow_book_count := int(inventory.count("rareBookBow"))
+    var bow_after: Dictionary = crafting.state_for(crafting.recipe_for("hunterBow"))
+    var bow_unlocked_craft: bool = bool(crafting.craft("hunterBow"))
+    add_result(
+        "crafting_books_unlock_groups_when_read",
+        bool(stone_before.get("unlockLocked", false))
+            and not stone_locked_craft
+            and read_stone_book
+            and stone_book_count == 0
+            and bool(crafting.has_unlock_group("book_stone_tools"))
+            and not bool(stone_after.get("unlockLocked", true))
+            and stone_unlocked_craft
+            and bool(bow_before.get("unlockLocked", false))
+            and read_bow_book
+            and bow_book_count == 0
+            and bool(crafting.has_unlock_group("rare_bow"))
+            and not bool(bow_after.get("unlockLocked", true))
+            and bow_unlocked_craft,
+        "stone before=%s read=%s count=%d after=%s craft=%s; bow before=%s read=%s count=%d after=%s craft=%s" % [
+            JSON.stringify(stone_before),
+            str(read_stone_book),
+            stone_book_count,
+            JSON.stringify(stone_after),
+            str(stone_unlocked_craft),
+            JSON.stringify(bow_before),
+            str(read_bow_book),
+            bow_book_count,
+            JSON.stringify(bow_after),
+            str(bow_unlocked_craft)
         ]
     )
 

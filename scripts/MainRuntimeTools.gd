@@ -194,6 +194,13 @@ func try_use_active_consumable() -> bool:
         return false
     var active: Dictionary = inventory_system.active_stack()
     var item_id := String(active.get("item", ""))
+    if crafting_system and crafting_system.has_method("use_active_unlock_item") and bool(crafting_system.use_active_unlock_item()):
+        if held_item:
+            held_item.play_use("read")
+        play_feedback("pickup", Vector3.INF, Color(0.78, 0.70, 0.46), 5)
+        mark_world_dirty("crafting_book:%s" % item_id)
+        update_hud(crafting_system.last_message)
+        return true
     if item_id == "fishingRod":
         return fish_with_rod()
     if equipment_system and equipment_system.is_equippable(item_id):

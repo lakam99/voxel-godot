@@ -23,10 +23,10 @@ const UNLOCK_GROUP_LABELS := {
     "book_wardcraft": "wardcraft book",
     "book_packs": "pack crafting book",
     "book_defense": "defense crafting book",
-    "rare_bow": "rare bow book",
-    "rare_compass": "rare compass book",
-    "rare_map": "rare map book",
-    "rare_survey_lens": "rare survey lens book"
+    "rare_bow": "rare crafting book: bow",
+    "rare_compass": "rare crafting book: compass",
+    "rare_map": "rare crafting book: map",
+    "rare_survey_lens": "rare crafting book: survey lens"
 }
 
 func _init(recipe_list := [], catalog_value := {}, inventory_system = null, station_provider_value := Callable()) -> void:
@@ -130,6 +130,39 @@ func craft(recipe_id: String) -> bool:
     crafted.emit(recipe_id, output, added)
     changed.emit()
     return added > 0
+
+func unlock_group_for_item(item_id: String) -> String:
+    var spec: Dictionary = catalog.get(item_id, {})
+    return String(spec.get("craftingUnlockGroup", ""))
+
+func is_unlock_item(item_id: String) -> bool:
+    return unlock_group_for_item(item_id) != ""
+
+func use_active_unlock_item() -> bool:
+    if inventory == null:
+        return false
+    var active: Dictionary = inventory.active_stack()
+    var item_id := String(active.get("item", ""))
+    var group_id := unlock_group_for_item(item_id)
+    if group_id == "":
+        return false
+    var item_label := String(catalog.get(item_id, {}).get("label", item_id))
+    if has_unlock_group(group_id):
+        last_message = "Already learned: %s" % unlock_label(group_id)
+        changed.emit()
+        return true
+    if int(active.get("count", 0)) <= 0:
+        last_message = "No %s to read" % item_label
+        changed.emit()
+        return false
+    if not inventory.consume_active(1):
+        last_message = "Could not read %s" % item_label
+        changed.emit()
+        return false
+    unlocked_groups[group_id] = true
+    last_message = "Read: %s; learned %s" % [item_label, unlock_label(group_id)]
+    changed.emit()
+    return true
 
 func recipe_unlock_group(recipe: Dictionary) -> String:
     return String(recipe.get("unlockGroup", recipe.get("unlock", "")))

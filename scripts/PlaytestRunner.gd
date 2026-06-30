@@ -1121,6 +1121,50 @@ func test_inventory_and_crafting_systems() -> void:
             str(inventory_system.totals())
         ]
     )
+
+    var book_slots := []
+    for i in range(inventory_system.size):
+        book_slots.append({ "item": "", "count": 0 })
+    book_slots[0] = { "item": "rareBookBow", "count": 1 }
+    book_slots[1] = { "item": "logs", "count": 12 }
+    book_slots[2] = { "item": "grass", "count": 8 }
+    inventory_system.restore({
+        "slots": book_slots,
+        "size": inventory_system.size,
+        "selectedSlot": 0
+    })
+    crafting_system.restore({ "unlockedGroups": ["tutorial_repair", "rowan_basic_tools", "rescue_weapon"] })
+    var book_station_cell := Vector3i(roundi(player.global_position.x / CELL) + 3, roundi(player.global_position.y / CELL), roundi(player.global_position.z / CELL))
+    var book_station = main.call("create_block", book_station_cell, "workbench")
+    var bow_locked_before_book: Dictionary = crafting_system.state_for(crafting_system.recipe_for("hunterBow"))
+    var bow_craft_before_book: bool = bool(crafting_system.craft("hunterBow"))
+    var read_book_with_active_use: bool = bool(main.call("try_use_active_consumable"))
+    var bow_state_after_book: Dictionary = crafting_system.state_for(crafting_system.recipe_for("hunterBow"))
+    var bow_craft_after_book: bool = bool(crafting_system.craft("hunterBow"))
+    var book_blocks := get_blocks()
+    if book_station:
+        book_station.queue_free()
+    if book_blocks.has(book_station_cell):
+        book_blocks.erase(book_station_cell)
+    add_result(
+        "crafting_book_active_use_unlocks_recipe",
+        bool(bow_locked_before_book.get("unlockLocked", false))
+            and not bow_craft_before_book
+            and read_book_with_active_use
+            and inventory_system.count("rareBookBow") == 0
+            and bool(crafting_system.has_unlock_group("rare_bow"))
+            and not bool(bow_state_after_book.get("unlockLocked", true))
+            and bow_craft_after_book,
+        "before %s craft_before %s read %s book_count %d after %s craft_after %s message '%s'" % [
+            str(bow_locked_before_book),
+            str(bow_craft_before_book),
+            str(read_book_with_active_use),
+            inventory_system.count("rareBookBow"),
+            str(bow_state_after_book),
+            str(bow_craft_after_book),
+            String(crafting_system.get("last_message"))
+        ]
+    )
     crafting_system.unlock_all_groups()
 
     add_result(

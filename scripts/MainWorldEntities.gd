@@ -536,6 +536,8 @@ func has_compass() -> bool:
 func has_map() -> bool:
     if inventory_system == null:
         return false
+    if inventory_system.count("map") > 0:
+        return true
     if inventory_system.count("surveyLens") > 0:
         return true
     if equipment_system != null and String(equipment_system.equipped_item("accessory")) == "surveyLens":

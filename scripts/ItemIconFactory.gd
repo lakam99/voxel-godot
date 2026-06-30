@@ -39,6 +39,8 @@ func setup_palette() -> void:
     palette["frost"] = Color(0.72, 0.92, 0.96, 1.0)
     palette["flame"] = Color(1.0, 0.72, 0.38, 1.0)
     palette["string"] = Color(0.92, 0.82, 0.62, 1.0)
+    palette["parchment"] = Color(0.86, 0.76, 0.52, 1.0)
+    palette["ink"] = Color(0.16, 0.12, 0.08, 1.0)
 
 func icon_for(item_id: String) -> Texture2D:
     if cache.has(item_id):
@@ -83,8 +85,10 @@ func draw_item(image: Image, item_id: String) -> void:
         draw_armor(image, item_id)
     elif item_id in ["trailPack", "expeditionPack"]:
         draw_pack(image, item_id)
-    elif item_id in ["trailCharm", "wardAmulet", "compass", "surveyLens"]:
+    elif item_id in ["trailCharm", "wardAmulet", "compass", "map", "surveyLens"]:
         draw_trinket(image, item_id)
+    elif is_crafting_book(item_id):
+        draw_crafting_book(image, item_id)
     elif item_id.ends_with("Block") or item_id in ["glass", "cobblestonePath"]:
         draw_block(image, item_id)
     elif item_id in ["logs", "stones", "dirt", "sand", "grass", "mud", "snow"]:
@@ -285,10 +289,34 @@ func draw_trinket(image: Image, item_id: String) -> void:
         draw_circle_outline(image, Vector2i(22, 21), 13, palette["copper"])
         draw_line(image, Vector2i(31, 31), Vector2i(39, 39), palette["copper"], 5)
         return
+    if item_id == "map":
+        draw_rect(image, Rect2i(12, 12, 24, 26), palette["parchment"])
+        draw_line(image, Vector2i(20, 12), Vector2i(20, 38), palette["gold"].darkened(0.20), 1)
+        draw_line(image, Vector2i(28, 12), Vector2i(28, 38), palette["gold"].darkened(0.20), 1)
+        draw_line(image, Vector2i(16, 24), Vector2i(32, 18), palette["herb"], 2)
+        draw_line(image, Vector2i(18, 31), Vector2i(33, 29), palette["ward"], 1)
+        draw_outline_rect(image, Rect2i(12, 12, 24, 26), palette["outline"])
+        return
     draw_circle(image, Vector2i(24, 25), 10, material_for(item_id))
     draw_line(image, Vector2i(14, 13), Vector2i(34, 13), palette["string"], 2)
     draw_line(image, Vector2i(14, 13), Vector2i(24, 25), palette["string"], 2)
     draw_line(image, Vector2i(34, 13), Vector2i(24, 25), palette["string"], 2)
+
+func draw_crafting_book(image: Image, item_id: String) -> void:
+    var cover := material_for(item_id)
+    var rare := item_id.begins_with("rareBook")
+    draw_shadow(image)
+    draw_rect(image, Rect2i(14, 9, 22, 30), cover.darkened(0.18))
+    draw_rect(image, Rect2i(17, 11, 17, 26), cover)
+    draw_rect(image, Rect2i(19, 13, 13, 22), palette["parchment"])
+    draw_line(image, Vector2i(19, 16), Vector2i(31, 16), palette["ink"], 1)
+    draw_line(image, Vector2i(19, 20), Vector2i(31, 20), palette["ink"], 1)
+    draw_line(image, Vector2i(19, 24), Vector2i(28, 24), palette["ink"], 1)
+    draw_line(image, Vector2i(16, 10), Vector2i(16, 38), palette["gold"] if rare else palette["wood_dark"], 2)
+    draw_outline_rect(image, Rect2i(14, 9, 22, 30), palette["outline"])
+    if rare:
+        draw_line(image, Vector2i(33, 10), Vector2i(38, 15), palette["gold"], 2)
+        draw_line(image, Vector2i(38, 10), Vector2i(33, 15), palette["gold"], 2)
 
 func draw_basic_resource(image: Image, item_id: String) -> void:
     if item_id == "logs":
@@ -384,7 +412,7 @@ func draw_shadow(image: Image) -> void:
     draw_rect(image, Rect2i(10, 36, 28, 4), palette["shadow"])
 
 func add_corner_spark(image: Image, item_id: String) -> void:
-    if item_id.find("ward") >= 0 or item_id.find("night") >= 0 or item_id == "riftCore" or item_id == "riftAnchor" or item_id == "surveyLens":
+    if item_id.find("ward") >= 0 or item_id.find("night") >= 0 or item_id == "riftCore" or item_id == "riftAnchor" or item_id == "surveyLens" or item_id.begins_with("rareBook"):
         var color := material_for(item_id).lightened(0.35)
         draw_line(image, Vector2i(38, 8), Vector2i(38, 14), color, 1)
         draw_line(image, Vector2i(35, 11), Vector2i(41, 11), color, 1)
@@ -392,7 +420,18 @@ func add_corner_spark(image: Image, item_id: String) -> void:
 func is_tool(item_id: String) -> bool:
     return item_id.ends_with("Axe") or item_id.ends_with("Pickaxe") or item_id.ends_with("Shovel") or item_id.ends_with("Sword") or item_id == "nightBlade"
 
+func is_crafting_book(item_id: String) -> bool:
+    return ItemCatalogScript.is_crafting_book(item_id)
+
 func material_for(item_id: String) -> Color:
+    if item_id == "craftingBookStone":
+        return palette["stone"]
+    if item_id == "rareBookBow":
+        return palette["cloth_teal"]
+    if item_id.begins_with("rareBook"):
+        return palette["gold"]
+    if item_id.find("Book") >= 0:
+        return palette["leather"]
     if item_id == "nightBlade" or item_id == "nightShard":
         return palette["night"]
     if item_id == "riftCore" or item_id == "riftAnchor":
@@ -433,7 +472,7 @@ func material_for(item_id: String) -> Color:
         return palette["leather"]
     if item_id == "expeditionPack":
         return palette["cloth_teal"]
-    if item_id in ["compass", "wardAmulet", "aloeSalve", "wardTonic"]:
+    if item_id in ["compass", "map", "wardAmulet", "aloeSalve", "wardTonic"]:
         return palette["gold"]
     return palette["stone"]
 
