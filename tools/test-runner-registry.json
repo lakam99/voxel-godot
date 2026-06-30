@@ -329,6 +329,33 @@
       "required": true
     },
     {
+      "id": "cave_generation_integration",
+      "description": "Procedural cave generation, pathable floor, terrain shaping, and final crafting-book chest integration coverage",
+      "command": ".\\tools\\run-cave-generation-tests.ps1",
+      "args": ["-Seed", "atlas-1492", "-ReportPath", "artifacts\\test-runners\\cave-generation-report.json"],
+      "reportPath": "artifacts\\test-runners\\cave-generation-report.json",
+      "evidenceLevel": "integration",
+      "required": true
+    },
+    {
+      "id": "cave_visual_playtest",
+      "description": "Headed procedural cave visual proof for entrance, traversable tunnel path, and final chamber crafting-book chest",
+      "command": ".\\tools\\run-cave-visual-playtest.ps1",
+      "args": ["-Seed", "atlas-1492", "-ReportPath", "artifacts\\test-runners\\cave-visual-playtest.json", "-ScreenshotDir", "artifacts\\test-runners\\screenshots\\cave-visual-playtest"],
+      "reportPath": "artifacts\\test-runners\\cave-visual-playtest.json",
+      "screenshotDir": "artifacts\\test-runners\\screenshots\\cave-visual-playtest",
+      "evidenceLevel": "acceptance_visual",
+      "acceptanceClaims": ["procedural_cave_entrance_tunnel_final_chamber_visual"],
+      "requiredScreenshots": [
+        "cave_entrance.png",
+        "cave_tunnel_path.png",
+        "cave_final_chamber_chest.png"
+      ],
+      "requiresForbiddenCallSelfScan": true,
+      "requiresVisualProof": true,
+      "required": true
+    },
+    {
       "id": "playtest",
       "description": "Broad gameplay continuity playtest; integration smoke only, not NPC/pathfinding acceptance",
       "command": ".\\tools\\run-playtest.ps1",

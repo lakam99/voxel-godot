@@ -518,7 +518,12 @@ func create_block(cell: Vector3i, block_type: String, options: Dictionary = {}) 
         "windowSide",
         "cornerX",
         "cornerZ",
-        "fenceAxis"
+        "fenceAxis",
+        "caveId",
+        "caveKind",
+        "caveRole",
+        "caveDepthIndex",
+        "caveFinalLoot"
     ]:
         if options.has(visual_key):
             body.set_meta(visual_key, options.get(visual_key))

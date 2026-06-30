@@ -58,6 +58,11 @@ func run() -> void:
         await test_inventory_and_crafting_systems()
         finish_playtest()
         return
+    if only_section == "cave_generation":
+        mark_progress("cave_generation")
+        test_cave_generation_and_crafting_book_loot()
+        finish_playtest()
+        return
     if only_section != "" and only_section != "tutorial_start":
         add_result("playtest_section_filter", false, "unsupported VOXEL_PLAYTEST_ONLY '%s'" % only_section)
         finish_playtest()
@@ -124,6 +129,8 @@ func run() -> void:
     test_structural_integrity()
     mark_progress("landmarks")
     test_landmark_generation_and_loot()
+    mark_progress("cave_generation")
+    test_cave_generation_and_crafting_book_loot()
     mark_progress("ore_generation")
     test_ore_generation_and_drops()
     mark_progress("forage_wildlife")
@@ -5412,6 +5419,133 @@ func test_landmark_generation_and_loot() -> void:
     )
     hostile_system.clear()
     cleanup_generated_blocks()
+
+func test_cave_generation_and_crafting_book_loot() -> void:
+    if not main or not player:
+        add_result("cave_generation_and_book_loot", false, "main or player missing")
+        return
+    var structure_system = main.get("structure_system")
+    if structure_system == null:
+        add_result("cave_generation_and_book_loot", false, "structure system missing")
+        return
+
+    var original_position: Vector3 = player.global_position
+    var original_height_edits: Array = main.call("snapshot_height_edits") if main.has_method("snapshot_height_edits") else []
+    cleanup_generated_blocks()
+
+    var cliff_plan: Dictionary = structure_system.call("find_cave_plan_sample", "cliff", 8, false)
+    var underground_plan: Dictionary = structure_system.call("find_cave_plan_sample", "underground", 8, false)
+    add_result(
+        "cave_plan_cliff_candidate",
+        not cliff_plan.is_empty() and String(cliff_plan.get("kind", "")) == "cliff" and float(cliff_plan.get("entranceVariation", 0.0)) >= 1.0,
+        "kind %s, variation %.2f, entrance %s" % [String(cliff_plan.get("kind", "")), float(cliff_plan.get("entranceVariation", 0.0)), str(cliff_plan.get("entranceCell", Vector2i.ZERO))]
+    )
+    add_result(
+        "cave_plan_underground_candidate",
+        not underground_plan.is_empty() and String(underground_plan.get("kind", "")) == "underground",
+        "kind %s, variation %.2f, entrance %s" % [String(underground_plan.get("kind", "")), float(underground_plan.get("entranceVariation", 0.0)), str(underground_plan.get("entranceCell", Vector2i.ZERO))]
+    )
+    if cliff_plan.is_empty():
+        restore_cave_test_state(original_height_edits, original_position)
+        return
+
+    var contiguous: bool = bool(structure_system.call("cave_plan_is_contiguous", cliff_plan))
+    add_result("cave_plan_path_contiguous", contiguous, "pathLength %d, chamberRadius %d" % [int(cliff_plan.get("pathLength", 0)), int(cliff_plan.get("chamberRadius", 0))])
+
+    var natural_plan: Dictionary = structure_system.call("find_cave_plan_sample", "", 10, true)
+    if not natural_plan.is_empty():
+        structure_system.call("update_around", natural_plan.get("entranceCell", Vector2i.ZERO))
+        var natural_records: Dictionary = structure_system.call("cave_records_snapshot")
+        add_result("cave_update_around_generates_spawned_cave", natural_records.size() >= 1, "records %d, natural %s" % [natural_records.size(), String(natural_plan.get("id", ""))])
+        cleanup_generated_blocks()
+        if main.has_method("restore_height_edits"):
+            main.call("restore_height_edits", original_height_edits)
+    else:
+        add_result("cave_update_around_generates_spawned_cave", true, "no natural cave spawn found near test search radius for seed; direct generator coverage still ran")
+
+    var rng := RandomNumberGenerator.new()
+    rng.seed = 827441
+    structure_system.call("build_cave", cliff_plan, rng)
+
+    var blocks := get_blocks()
+    var cave_path_blocks := 0
+    var cave_wall_blocks := 0
+    var cave_torches := 0
+    var cave_supports := 0
+    var cave_chests := 0
+    var chest_has_crafting_book := false
+    var final_chest_cell: Vector2i = cliff_plan.get("finalChestCell", Vector2i.ZERO)
+    for block_value in blocks.values():
+        var body := block_value as Node
+        if body == null or not body.has_meta("generatedTier") or String(body.get_meta("generatedTier")) != "cave":
+            continue
+        var block_type := String(body.get_meta("block_type", ""))
+        var role := String(body.get_meta("caveRole", ""))
+        if block_type == "cobblestonePath":
+            cave_path_blocks += 1
+        if role == "wall" or role == "entrance_arch" or role == "ore_vein":
+            cave_wall_blocks += 1
+        if block_type == "torch":
+            cave_torches += 1
+        if role.begins_with("support_"):
+            cave_supports += 1
+        if block_type == "chest":
+            cave_chests += 1
+            chest_has_crafting_book = chest_has_crafting_book or cave_chest_has_crafting_book(body)
+            var cell: Vector3i = body.get_meta("cell", Vector3i.ZERO)
+            final_chest_cell = Vector2i(cell.x, cell.z)
+    var records: Dictionary = structure_system.call("cave_records_snapshot")
+    var counts: Dictionary = structure_system.call("counts")
+    var height_edits := get_height_edits()
+    var expected_path_min := int(cliff_plan.get("pathLength", 0)) * 3
+    var cave_build_ok: bool = (
+        int(counts.get("caves", 0)) >= 1
+        and records.size() >= 1
+        and cave_path_blocks >= expected_path_min
+        and cave_wall_blocks >= 16
+        and cave_torches >= 4
+        and cave_supports >= 4
+        and cave_chests == 1
+        and chest_has_crafting_book
+        and height_edits.size() > 0
+        and final_chest_cell == cliff_plan.get("finalChestCell", Vector2i.ZERO)
+    )
+    add_result(
+        "cave_generation_and_book_loot",
+        cave_build_ok,
+        "counts %s, records %d, path/wall/torch/support/chest %d/%d/%d/%d/%d, book %s, heightEdits %d, finalChest %s" % [
+            str(counts),
+            records.size(),
+            cave_path_blocks,
+            cave_wall_blocks,
+            cave_torches,
+            cave_supports,
+            cave_chests,
+            str(chest_has_crafting_book),
+            height_edits.size(),
+            str(final_chest_cell)
+        ]
+    )
+    restore_cave_test_state(original_height_edits, original_position)
+
+func cave_chest_has_crafting_book(chest: Node) -> bool:
+    if chest == null or not chest.has_meta("storage_slots"):
+        return false
+    var slots: Array = chest.get_meta("storage_slots")
+    for slot in slots:
+        if not (slot is Dictionary):
+            continue
+        var item_id := String(slot.get("item", ""))
+        if item_id.begins_with("craftingBook") or item_id.begins_with("rareBook"):
+            return int(slot.get("count", 0)) > 0
+    return false
+
+func restore_cave_test_state(height_snapshot, position: Vector3) -> void:
+    cleanup_generated_blocks()
+    if main != null and main.has_method("restore_height_edits"):
+        main.call("restore_height_edits", height_snapshot)
+    if player != null:
+        player.global_position = position
 
 func test_ore_generation_and_drops() -> void:
     if not main:

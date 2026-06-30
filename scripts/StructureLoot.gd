@@ -32,6 +32,13 @@ func make_loot_slots(rng: RandomNumberGenerator, tier: String) -> Array:
         add_loot(slots, "fieldRation", 1)
     return slots
 
+func make_cave_final_loot_slots(rng: RandomNumberGenerator) -> Array:
+    var slots := make_loot_slots(rng, "cave")
+    add_loot(slots, "craftingBookStone", 1)
+    if rng.randf() < 0.18:
+        add_loot(slots, rare_crafting_book_for_roll(rng), 1)
+    return slots
+
 func empty_storage_slots() -> Array:
     var slots := []
     for i in range(CHEST_SIZE):
@@ -81,6 +88,18 @@ func loot_table_for(tier: String) -> Array:
             { "item": "arrows", "min": 6, "max": 14, "weight": 2 },
             { "item": "stonePickaxe", "min": 1, "max": 1, "weight": 1 },
             { "item": "copperPickaxe", "min": 1, "max": 1, "weight": 1 }
+        ]
+    if tier == "cave":
+        return [
+            { "item": "stones", "min": 5, "max": 12, "weight": 5 },
+            { "item": "torch", "min": 2, "max": 5, "weight": 4 },
+            { "item": "copperOre", "min": 2, "max": 6, "weight": 4 },
+            { "item": "ironOre", "min": 1, "max": 4, "weight": 3 },
+            { "item": "fieldRation", "min": 1, "max": 2, "weight": 3 },
+            { "item": "cookedBerries", "min": 1, "max": 3, "weight": 2 },
+            { "item": "relicFragment", "min": 1, "max": 2, "weight": 2 },
+            { "item": "stonePickaxe", "min": 1, "max": 1, "weight": 1 },
+            { "item": "craftingBookSurvival", "min": 1, "max": 1, "weight": 1 }
         ]
     if tier == "ruin":
         return [
@@ -133,6 +152,10 @@ func weighted_loot(table: Array, rng: RandomNumberGenerator) -> Dictionary:
         if roll <= 0.0:
             return entry
     return table.back() if not table.is_empty() else { "item": "stones", "min": 1, "max": 1, "weight": 1 }
+
+func rare_crafting_book_for_roll(rng: RandomNumberGenerator) -> String:
+    var books := ["rareBookBow", "rareBookCompass", "rareBookMap", "rareBookSurveyLens"]
+    return books[rng.randi_range(0, books.size() - 1)]
 
 func add_loot(slots: Array, item_id: String, amount: int) -> void:
     if not ItemCatalogScript.ITEMS.has(item_id) or amount <= 0:

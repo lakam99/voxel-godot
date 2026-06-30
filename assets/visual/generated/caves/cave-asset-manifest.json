@@ -1,0 +1,825 @@
+{
+  "schemaVersion": 1,
+  "generator": "cave-assets-preview-v1",
+  "seed": 1492,
+  "coordinateSystem": "Blender Z-up source; GLB import pending Godot integration after approval",
+  "triangleLimit": 1800,
+  "assetDirectory": "assets/visual/generated/caves",
+  "contactSheet": "assets/visual/generated/caves/contact-sheet.png",
+  "interiorPreview": "assets/visual/generated/caves/cave-interior-preview.png",
+  "assets": [
+    {
+      "id": "cave_support_01",
+      "path": "assets/visual/generated/caves/cave_support_01.glb",
+      "family": "cave_support",
+      "anchor": "ground",
+      "tags": [
+        "cave",
+        "generated",
+        "cave_support"
+      ],
+      "triangleCount": 128,
+      "boundingBox": {
+        "min": [
+          -1.4077,
+          -0.1075,
+          0.0
+        ],
+        "max": [
+          1.4077,
+          0.075,
+          2.56
+        ],
+        "size": [
+          2.8154,
+          0.1825,
+          2.56
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "anchorAligned": true,
+        "minZ": 0.0,
+        "maxZ": 2.56,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "cave_wood",
+        "cave_wood_dark"
+      ],
+      "previewNotes": "single tunnel support"
+    },
+    {
+      "id": "cave_support_02",
+      "path": "assets/visual/generated/caves/cave_support_02.glb",
+      "family": "cave_support",
+      "anchor": "ground",
+      "tags": [
+        "cave",
+        "generated",
+        "cave_support"
+      ],
+      "triangleCount": 176,
+      "boundingBox": {
+        "min": [
+          -1.5077,
+          -0.1075,
+          0.0
+        ],
+        "max": [
+          1.5077,
+          0.075,
+          2.68
+        ],
+        "size": [
+          3.0154,
+          0.1825,
+          2.68
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          -0.0,
+          0.0
+        ],
+        "anchorAligned": true,
+        "minZ": 0.0,
+        "maxZ": 2.68,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "cave_wood",
+        "cave_wood_dark"
+      ],
+      "previewNotes": "reinforced tunnel support"
+    },
+    {
+      "id": "wall_torch_01",
+      "path": "assets/visual/generated/caves/wall_torch_01.glb",
+      "family": "cave_wall_torch",
+      "anchor": "wall",
+      "tags": [
+        "cave",
+        "generated",
+        "cave_wall_torch"
+      ],
+      "triangleCount": 104,
+      "boundingBox": {
+        "min": [
+          -0.1267,
+          -0.5971,
+          0.46
+        ],
+        "max": [
+          0.1267,
+          0.055,
+          1.3694
+        ],
+        "size": [
+          0.2535,
+          0.6521,
+          0.9094
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          -0.0,
+          -0.0
+        ],
+        "anchorAligned": true,
+        "minZ": 0.46,
+        "maxZ": 1.3694,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "iron_dark",
+        "cave_wood_dark",
+        "torch_flame",
+        "torch_ember"
+      ],
+      "previewNotes": "wall mounted torch and bracket"
+    },
+    {
+      "id": "wall_torch_02",
+      "path": "assets/visual/generated/caves/wall_torch_02.glb",
+      "family": "cave_wall_torch",
+      "anchor": "wall",
+      "tags": [
+        "cave",
+        "generated",
+        "cave_wall_torch"
+      ],
+      "triangleCount": 104,
+      "boundingBox": {
+        "min": [
+          -0.1267,
+          -0.5971,
+          0.46
+        ],
+        "max": [
+          0.1267,
+          0.055,
+          1.3408
+        ],
+        "size": [
+          0.2535,
+          0.6521,
+          0.8808
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          -0.0,
+          -0.0
+        ],
+        "anchorAligned": true,
+        "minZ": 0.46,
+        "maxZ": 1.3408,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "iron_dark",
+        "cave_wood_dark",
+        "torch_flame",
+        "torch_ember"
+      ],
+      "previewNotes": "angled wall mounted torch"
+    },
+    {
+      "id": "cave_rubble_01",
+      "path": "assets/visual/generated/caves/cave_rubble_01.glb",
+      "family": "cave_rubble",
+      "anchor": "ground",
+      "tags": [
+        "cave",
+        "generated",
+        "cave_rubble"
+      ],
+      "triangleCount": 100,
+      "boundingBox": {
+        "min": [
+          -0.371,
+          -0.4698,
+          -0.0128
+        ],
+        "max": [
+          0.451,
+          0.5865,
+          0.393
+        ],
+        "size": [
+          0.822,
+          1.0564,
+          0.4058
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "anchorAligned": true,
+        "minZ": -0.0128,
+        "maxZ": 0.393,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "cave_stone_dark",
+        "cave_stone"
+      ],
+      "previewNotes": "small passable rock scatter"
+    },
+    {
+      "id": "cave_rubble_02",
+      "path": "assets/visual/generated/caves/cave_rubble_02.glb",
+      "family": "cave_rubble",
+      "anchor": "ground",
+      "tags": [
+        "cave",
+        "generated",
+        "cave_rubble"
+      ],
+      "triangleCount": 140,
+      "boundingBox": {
+        "min": [
+          -0.5326,
+          -0.7052,
+          -0.0772
+        ],
+        "max": [
+          0.4469,
+          0.4615,
+          0.4354
+        ],
+        "size": [
+          0.9795,
+          1.1668,
+          0.5126
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "anchorAligned": false,
+        "minZ": -0.0772,
+        "maxZ": 0.4354,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "cave_stone_dark",
+        "cave_stone"
+      ],
+      "previewNotes": "medium passable rock scatter"
+    },
+    {
+      "id": "cave_rubble_03",
+      "path": "assets/visual/generated/caves/cave_rubble_03.glb",
+      "family": "cave_rubble",
+      "anchor": "ground",
+      "tags": [
+        "cave",
+        "generated",
+        "cave_rubble"
+      ],
+      "triangleCount": 180,
+      "boundingBox": {
+        "min": [
+          -0.7158,
+          -0.5477,
+          -0.0844
+        ],
+        "max": [
+          0.6107,
+          0.7387,
+          0.5199
+        ],
+        "size": [
+          1.3265,
+          1.2863,
+          0.6043
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "anchorAligned": false,
+        "minZ": -0.0844,
+        "maxZ": 0.5199,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "cave_stone_dark",
+        "cave_stone"
+      ],
+      "previewNotes": "larger edge dressing rock scatter"
+    },
+    {
+      "id": "mineral_vein_copper_01",
+      "path": "assets/visual/generated/caves/mineral_vein_copper_01.glb",
+      "family": "cave_mineral_vein",
+      "anchor": "wall",
+      "tags": [
+        "cave",
+        "generated",
+        "cave_mineral_vein"
+      ],
+      "triangleCount": 112,
+      "boundingBox": {
+        "min": [
+          -0.41,
+          -0.1988,
+          0.145
+        ],
+        "max": [
+          0.4606,
+          0.08,
+          0.695
+        ],
+        "size": [
+          0.8706,
+          0.2788,
+          0.55
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "anchorAligned": true,
+        "minZ": 0.145,
+        "maxZ": 0.695,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "cave_stone_dark",
+        "ore_copper"
+      ],
+      "previewNotes": "wall copper seam"
+    },
+    {
+      "id": "mineral_vein_iron_01",
+      "path": "assets/visual/generated/caves/mineral_vein_iron_01.glb",
+      "family": "cave_mineral_vein",
+      "anchor": "wall",
+      "tags": [
+        "cave",
+        "generated",
+        "cave_mineral_vein"
+      ],
+      "triangleCount": 112,
+      "boundingBox": {
+        "min": [
+          -0.41,
+          -0.2095,
+          0.145
+        ],
+        "max": [
+          0.41,
+          0.08,
+          0.7043
+        ],
+        "size": [
+          0.82,
+          0.2895,
+          0.5593
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "anchorAligned": true,
+        "minZ": 0.145,
+        "maxZ": 0.7043,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "cave_stone_dark",
+        "ore_iron"
+      ],
+      "previewNotes": "wall iron seam"
+    },
+    {
+      "id": "mineral_vein_coal_01",
+      "path": "assets/visual/generated/caves/mineral_vein_coal_01.glb",
+      "family": "cave_mineral_vein",
+      "anchor": "wall",
+      "tags": [
+        "cave",
+        "generated",
+        "cave_mineral_vein"
+      ],
+      "triangleCount": 112,
+      "boundingBox": {
+        "min": [
+          -0.4496,
+          -0.1104,
+          0.145
+        ],
+        "max": [
+          0.41,
+          0.08,
+          0.695
+        ],
+        "size": [
+          0.8596,
+          0.1904,
+          0.55
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "anchorAligned": true,
+        "minZ": 0.145,
+        "maxZ": 0.695,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "cave_stone_dark",
+        "ore_coal"
+      ],
+      "previewNotes": "wall coal seam"
+    },
+    {
+      "id": "glow_mushroom_01",
+      "path": "assets/visual/generated/caves/glow_mushroom_01.glb",
+      "family": "cave_glow_flora",
+      "anchor": "ground",
+      "tags": [
+        "cave",
+        "generated",
+        "cave_glow_flora"
+      ],
+      "triangleCount": 64,
+      "boundingBox": {
+        "min": [
+          -0.222,
+          -0.1878,
+          -0.0299
+        ],
+        "max": [
+          0.2249,
+          0.1874,
+          0.4099
+        ],
+        "size": [
+          0.4469,
+          0.3752,
+          0.4397
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "anchorAligned": true,
+        "minZ": -0.0299,
+        "maxZ": 0.4099,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "book_pages",
+        "glow_blue",
+        "cave_moss"
+      ],
+      "previewNotes": "singular blue cave mushroom"
+    },
+    {
+      "id": "glow_mushroom_02",
+      "path": "assets/visual/generated/caves/glow_mushroom_02.glb",
+      "family": "cave_glow_flora",
+      "anchor": "ground",
+      "tags": [
+        "cave",
+        "generated",
+        "cave_glow_flora"
+      ],
+      "triangleCount": 64,
+      "boundingBox": {
+        "min": [
+          -0.2282,
+          -0.1633,
+          -0.0042
+        ],
+        "max": [
+          0.2196,
+          0.1755,
+          0.493
+        ],
+        "size": [
+          0.4478,
+          0.3388,
+          0.4972
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "anchorAligned": true,
+        "minZ": -0.0042,
+        "maxZ": 0.493,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "book_pages",
+        "glow_green",
+        "cave_moss"
+      ],
+      "previewNotes": "singular green cave mushroom"
+    },
+    {
+      "id": "glow_crystal_01",
+      "path": "assets/visual/generated/caves/glow_crystal_01.glb",
+      "family": "cave_glow_crystal",
+      "anchor": "ground",
+      "tags": [
+        "cave",
+        "generated",
+        "cave_glow_crystal"
+      ],
+      "triangleCount": 100,
+      "boundingBox": {
+        "min": [
+          -0.3273,
+          -0.2469,
+          -0.0202
+        ],
+        "max": [
+          0.3608,
+          0.2676,
+          0.693
+        ],
+        "size": [
+          0.688,
+          0.5145,
+          0.7132
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          -0.0,
+          0.0,
+          0.0
+        ],
+        "anchorAligned": true,
+        "minZ": -0.0202,
+        "maxZ": 0.693,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "glow_blue",
+        "cave_stone_dark"
+      ],
+      "previewNotes": "blue floor crystal cluster"
+    },
+    {
+      "id": "glow_crystal_02",
+      "path": "assets/visual/generated/caves/glow_crystal_02.glb",
+      "family": "cave_glow_crystal",
+      "anchor": "wall",
+      "tags": [
+        "cave",
+        "generated",
+        "cave_glow_crystal"
+      ],
+      "triangleCount": 80,
+      "boundingBox": {
+        "min": [
+          -0.3554,
+          -0.3512,
+          -0.0284
+        ],
+        "max": [
+          0.326,
+          0.2176,
+          0.62
+        ],
+        "size": [
+          0.6814,
+          0.5688,
+          0.6484
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "anchorAligned": false,
+        "minZ": -0.0284,
+        "maxZ": 0.62,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "glow_violet",
+        "cave_stone_dark"
+      ],
+      "previewNotes": "violet wall crystal cluster"
+    },
+    {
+      "id": "cave_roots_01",
+      "path": "assets/visual/generated/caves/cave_roots_01.glb",
+      "family": "cave_roots",
+      "anchor": "ceiling",
+      "tags": [
+        "cave",
+        "generated",
+        "cave_roots"
+      ],
+      "triangleCount": 132,
+      "boundingBox": {
+        "min": [
+          -0.46,
+          -0.11,
+          -1.0303
+        ],
+        "max": [
+          0.46,
+          0.11,
+          0.05
+        ],
+        "size": [
+          0.92,
+          0.22,
+          1.0803
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "anchorAligned": true,
+        "minZ": -1.0303,
+        "maxZ": 0.05,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "root",
+        "cave_soil"
+      ],
+      "previewNotes": "hanging roots near entrances"
+    },
+    {
+      "id": "crafting_book_progression",
+      "path": "assets/visual/generated/caves/crafting_book_progression.glb",
+      "family": "cave_crafting_book",
+      "anchor": "ground",
+      "tags": [
+        "cave",
+        "generated",
+        "cave_crafting_book"
+      ],
+      "triangleCount": 48,
+      "boundingBox": {
+        "min": [
+          -0.2386,
+          -0.1646,
+          0.0525
+        ],
+        "max": [
+          0.2091,
+          0.1646,
+          0.1775
+        ],
+        "size": [
+          0.4477,
+          0.3292,
+          0.125
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "anchorAligned": true,
+        "minZ": 0.0525,
+        "maxZ": 0.1775,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "book_pages",
+        "book_cover",
+        "cave_wood"
+      ],
+      "previewNotes": "standard crafting book pickup"
+    },
+    {
+      "id": "crafting_book_rare",
+      "path": "assets/visual/generated/caves/crafting_book_rare.glb",
+      "family": "cave_crafting_book",
+      "anchor": "ground",
+      "tags": [
+        "cave",
+        "generated",
+        "cave_crafting_book"
+      ],
+      "triangleCount": 68,
+      "boundingBox": {
+        "min": [
+          -0.2386,
+          -0.1646,
+          0.0525
+        ],
+        "max": [
+          0.2091,
+          0.1646,
+          0.2096
+        ],
+        "size": [
+          0.4477,
+          0.3292,
+          0.1571
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "anchorAligned": true,
+        "minZ": 0.0525,
+        "maxZ": 0.2096,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "book_pages",
+        "book_rare",
+        "gold_trim",
+        "glow_violet"
+      ],
+      "previewNotes": "rare crafting book pickup"
+    }
+  ],
+  "families": {
+    "cave_support": 2,
+    "cave_wall_torch": 2,
+    "cave_rubble": 3,
+    "cave_mineral_vein": 3,
+    "cave_glow_flora": 2,
+    "cave_glow_crystal": 2,
+    "cave_roots": 1,
+    "cave_crafting_book": 2
+  },
+  "placementGuidance": {
+    "cave_support": "Use sparingly in mined or reinforced sections, not throughout every natural cave.",
+    "cave_glow_flora": "Singular mushroom assets; place individually or let gameplay systems decide clustering.",
+    "stalactitesAndStalagmites": "Generate procedurally from terrain/cave shaping, not from fixed GLB assets.",
+    "caveMouth": "Entrance should be a procedural terrain opening into the cavern, not a fixed GLB mouth."
+  },
+  "materialVocabulary": [
+    "book_cover",
+    "book_pages",
+    "book_rare",
+    "cave_moss",
+    "cave_soil",
+    "cave_stone",
+    "cave_stone_dark",
+    "cave_stone_warm",
+    "cave_wood",
+    "cave_wood_dark",
+    "glow_blue",
+    "glow_green",
+    "glow_violet",
+    "gold_trim",
+    "iron_dark",
+    "ore_coal",
+    "ore_copper",
+    "ore_iron",
+    "root",
+    "torch_ember",
+    "torch_flame"
+  ]
+}
