@@ -1121,7 +1121,7 @@ func is_valid_forage_node(node: Node3D, entry: Dictionary) -> bool:
         return false
     if not point_inside_work_area(entry, node.global_position):
         return false
-    if point_inside_town(entry, node.global_position):
+    if point_inside_town_footprint(entry, node.global_position):
         return false
     if not smart_object_available(smart_object_id_for_node(node), String(entry.get("id", ""))):
         return false
@@ -1139,7 +1139,7 @@ func current_route_failure_blocks_forager(entry: Dictionary) -> bool:
         var porch_cell: Vector2i = entry.get("porchCell", current_cell)
         if abs(current_cell.x - porch_cell.x) <= 1 and abs(current_cell.y - porch_cell.y) <= 1:
             return false
-    return String(entry.get("routeReason", "")) in ["no_route", "no_goal_span", "empty_route"]
+    return String(entry.get("routeReason", "")) in ["no_route", "no_goal_span", "empty_route", "target_blocked"]
 
 func mark_forager_target_unreachable(entry: Dictionary, node: Node3D) -> void:
     if node == null or not is_instance_valid(node):
@@ -1254,9 +1254,9 @@ func is_valid_job_resource_node(node: Node3D, entry: Dictionary, job: String) ->
     if not point_inside_work_area(entry, node.global_position):
         return false
     if job == "forage":
-        if point_inside_town(entry, node.global_position):
+        if point_inside_town_footprint(entry, node.global_position):
             return false
-    elif not point_inside_town(entry, node.global_position):
+    elif not point_inside_town_footprint(entry, node.global_position):
         return false
     var h: float = main.height_at_world(node.global_position.x, node.global_position.z)
     if h < main.WATER_LEVEL + 0.45:
@@ -1311,9 +1311,9 @@ func resource_approach_slots_for_entry(entry: Dictionary, target_node: Node3D) -
         var position: Vector3 = navigation_world.call("cell_position", cell_value)
         if not point_inside_work_area(entry, position):
             continue
-        if prefer_near_object_slot and point_inside_town(entry, position):
+        if prefer_near_object_slot and point_inside_town_footprint(entry, position):
             continue
-        if not prefer_near_object_slot and not point_inside_town(entry, position):
+        if not prefer_near_object_slot and not point_inside_town_footprint(entry, position):
             continue
         positions.append(position)
     if positions.is_empty():
@@ -2214,6 +2214,12 @@ func point_inside_town(entry: Dictionary, position: Vector3) -> bool:
         var flat := Vector2(position.x - float(center.x) * CELL, position.z - float(center.y) * CELL)
         return flat.length() <= radius
     return pathing.point_inside_town(entry, position)
+
+func point_inside_town_footprint(entry: Dictionary, position: Vector3, margin_cells := 0) -> bool:
+    var center: Vector2i = entry.get("townCenter", Vector2i.ZERO)
+    var radius := maxi(0, int(entry.get("townRadius", 18)) + margin_cells)
+    var cell := flat_cell_for_position(position)
+    return absi(cell.x - center.x) <= radius and absi(cell.y - center.y) <= radius
 
 func point_inside_work_area(entry: Dictionary, position: Vector3) -> bool:
     if pathing == null:

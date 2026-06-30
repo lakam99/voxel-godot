@@ -1107,26 +1107,57 @@ func skip_optional_home_waypoint_if_endpoint_unsnappable(entry: Dictionary, reas
     var active_target_cell: Vector2i = entry.get("homeActiveTargetCell", entry.get("routeGoalCell", Vector2i.ZERO))
     var porch_cell: Vector2i = entry.get("porchCell", active_target_cell)
     var home_cell: Vector2i = entry.get("homeCell", active_target_cell)
-    if active_target_cell == porch_cell or active_target_cell == home_cell:
+    var skip_to_index := route_index + 1
+    if active_target_cell == home_cell:
         return false
-    if abs(active_target_cell.x - porch_cell.x) + abs(active_target_cell.y - porch_cell.y) != 1:
-        return false
-    var body := entry.get("body") as Node3D
-    if body != null:
-        var current_cell := Vector2i(roundi(body.global_position.x / CELL), roundi(body.global_position.z / CELL))
-        var porch_position: Vector3 = entry.get("porchPosition", body.global_position)
-        if current_cell != porch_cell and body.global_position.distance_to(porch_position) > CELL * 1.75:
+    if active_target_cell == porch_cell:
+        var body := entry.get("body") as Node3D
+        if body != null:
+            var current_cell := Vector2i(roundi(body.global_position.x / CELL), roundi(body.global_position.z / CELL))
+            var porch_position: Vector3 = entry.get("porchPosition", body.global_position)
+            if current_cell != porch_cell and body.global_position.distance_to(porch_position) > CELL * 1.75:
+                return false
+        var interior_index := next_home_route_interior_index(entry, route_positions, route_index, home_cell)
+        if interior_index < 0:
             return false
+        skip_to_index = interior_index
+    elif abs(active_target_cell.x - porch_cell.x) + abs(active_target_cell.y - porch_cell.y) != 1:
+        return false
+    else:
+        var body := entry.get("body") as Node3D
+        if body != null:
+            var current_cell := Vector2i(roundi(body.global_position.x / CELL), roundi(body.global_position.z / CELL))
+            var porch_position: Vector3 = entry.get("porchPosition", body.global_position)
+            if current_cell != porch_cell and body.global_position.distance_to(porch_position) > CELL * 1.75:
+                return false
     var signature := "%d:%d,%d:%s" % [route_index, active_target_cell.x, active_target_cell.y, reason]
     if String(entry.get("homeOptionalSkipSignature", "")) == signature:
         return false
     entry["homeOptionalSkipSignature"] = signature
-    entry["homeRouteIndex"] = mini(route_index + 1, route_positions.size())
+    entry["homeRouteIndex"] = mini(skip_to_index, route_positions.size())
     entry["routeForceReplan"] = true
     entry["routeCells"] = []
     entry["pathWaypoints"] = []
     entry["routeActions"] = {}
     return true
+
+func next_home_route_interior_index(entry: Dictionary, route_positions: Array, route_index: int, home_cell: Vector2i) -> int:
+    if route_index < 0 or route_index >= route_positions.size() - 1:
+        return -1
+    var interior_min: Vector2i = entry.get("interiorMinCell", home_cell)
+    var interior_max: Vector2i = entry.get("interiorMaxCell", home_cell)
+    for index in range(route_index + 1, route_positions.size()):
+        var next_position_value = route_positions[index]
+        if not (next_position_value is Vector3):
+            continue
+        var next_position: Vector3 = next_position_value
+        var next_cell := Vector2i(roundi(next_position.x / CELL), roundi(next_position.z / CELL))
+        if next_cell.x >= mini(interior_min.x, interior_max.x) \
+            and next_cell.x <= maxi(interior_min.x, interior_max.x) \
+            and next_cell.y >= mini(interior_min.y, interior_max.y) \
+            and next_cell.y <= maxi(interior_min.y, interior_max.y):
+            return index
+    return -1
 
 func next_route_cell(entry: Dictionary, world) -> Vector2i:
     trim_reached_route_cells(entry, world)

@@ -129,9 +129,18 @@ func build_town(town: Dictionary) -> void:
     generated_town_count += 1
     build_town_paths(center_x, center_z, int(town["radius"]), level)
     build_town_perimeter(center_x, center_z, int(town["radius"]), level, town_key)
+    var desired_home_count := town_home_count(town)
     var sites := town_home_sites(town, rng)
+    var built_home_count := 0
     for i in range(sites.size()):
+        if built_home_count >= desired_home_count:
+            break
         var site: Dictionary = sites[i]
+        var base_x := center_x + int(site["dx"])
+        var base_z := center_z + int(site["dz"])
+        var side := int(site["side"])
+        if town_home_site_excluded(town, base_x, base_z, 10, 10, side):
+            continue
         var width := rng.randi_range(7, 9)
         var depth := rng.randi_range(7, 9)
         var wall_height := rng.randi_range(4, 5)
@@ -139,10 +148,11 @@ func build_town(town: Dictionary) -> void:
         if rng.randf() < 0.35:
             wall_type = "stoneBlock" if wall_type == "woodBlock" else "woodBlock"
         var roof_type := "stoneBlock" if wall_type == "woodBlock" else "woodBlock"
-        var base_x := center_x + int(site["dx"])
-        var base_z := center_z + int(site["dz"])
-        build_building(base_x, base_z, level, width, depth, wall_height, wall_type, roof_type, int(site["side"]), rng, true)
-        record_town_home(town_key, town, base_x, base_z, width, depth, int(site["side"]), i)
+        if town_home_site_excluded(town, base_x, base_z, width, depth, side):
+            continue
+        build_building(base_x, base_z, level, width, depth, wall_height, wall_type, roof_type, side, rng, true)
+        record_town_home(town_key, town, base_x, base_z, width, depth, side, built_home_count)
+        built_home_count += 1
     build_town_market(center_x, center_z, level, rng)
     place_utility(center_x - 2, center_z + 1, level, "chest", {
         "storageSlots": loot.make_loot_slots(rng, "town"),
@@ -169,7 +179,6 @@ func town_home_count(town: Dictionary) -> int:
 
 func town_home_sites(town: Dictionary, _rng: RandomNumberGenerator) -> Array:
     var radius := int(town.get("radius", main.TOWN_RADIUS_CELLS))
-    var desired_count := town_home_count(town)
     var candidates := [
         { "dx": -16, "dz": -13, "side": 2 },
         { "dx": 8, "dz": -14, "side": 2 },
@@ -192,9 +201,64 @@ func town_home_sites(town: Dictionary, _rng: RandomNumberGenerator) -> Array:
         if maxi(absi(dx), absi(dz)) > radius - 4:
             continue
         sites.append(candidate)
-        if sites.size() >= desired_count:
-            break
     return sites
+
+func town_home_site_excluded(town: Dictionary, base_x: int, base_z: int, width: int, depth: int, door_side: int) -> bool:
+    var rings_value = town.get("homeExclusionRings", [])
+    if not (rings_value is Array):
+        return false
+    var min_x := base_x - 1
+    var max_x := base_x + width
+    var min_z := base_z - 1
+    var max_z := base_z + depth
+    var door_entries := StructureDoorRulesScript.door_cells(width, depth, door_side)
+    for entry_value in door_entries:
+        var entry: Dictionary = entry_value
+        var door_x := base_x + int(entry.get("x", 0))
+        var door_z := base_z + int(entry.get("z", 0))
+        if door_side == 0:
+            max_z = maxi(max_z, door_z + 1)
+        elif door_side == 2:
+            min_z = mini(min_z, door_z - 1)
+        elif door_side == 1:
+            max_x = maxi(max_x, door_x + 1)
+        elif door_side == 3:
+            min_x = mini(min_x, door_x - 1)
+    var center_x := int(town.get("centerX", 0))
+    var center_z := int(town.get("centerZ", 0))
+    for ring_value in rings_value:
+        if not (ring_value is Dictionary):
+            continue
+        var ring: Dictionary = ring_value
+        var radius := int(ring.get("radius", 0))
+        if radius <= 0:
+            continue
+        var margin := maxi(0, int(ring.get("margin", 0)))
+        if rect_intersects_town_ring(min_x, max_x, min_z, max_z, center_x, center_z, radius, margin):
+            return true
+    return false
+
+func rect_intersects_town_ring(min_x: int, max_x: int, min_z: int, max_z: int, center_x: int, center_z: int, radius: int, margin: int) -> bool:
+    var west := center_x - radius
+    var east := center_x + radius
+    var north := center_z - radius
+    var south := center_z + radius
+    var min_ring_x := west - margin
+    var max_ring_x := east + margin
+    var min_ring_z := north - margin
+    var max_ring_z := south + margin
+    if ranges_intersect(min_z, max_z, north - margin, north + margin) and ranges_intersect(min_x, max_x, min_ring_x, max_ring_x):
+        return true
+    if ranges_intersect(min_z, max_z, south - margin, south + margin) and ranges_intersect(min_x, max_x, min_ring_x, max_ring_x):
+        return true
+    if ranges_intersect(min_x, max_x, west - margin, west + margin) and ranges_intersect(min_z, max_z, min_ring_z, max_ring_z):
+        return true
+    if ranges_intersect(min_x, max_x, east - margin, east + margin) and ranges_intersect(min_z, max_z, min_ring_z, max_ring_z):
+        return true
+    return false
+
+func ranges_intersect(a_min: int, a_max: int, b_min: int, b_max: int) -> bool:
+    return a_min <= b_max and b_min <= a_max
 
 func build_town_perimeter(center_x: int, center_z: int, radius: int, level: float, town_key: String) -> void:
     var gate_cells := {}
@@ -287,6 +351,9 @@ func record_town_home(town_key: String, town: Dictionary, base_x: int, base_z: i
         interior_landing.y = clampi(interior_landing.y, interior_min_cell.y, interior_max_cell.y)
         home_cell.x = clampi(home_cell.x, interior_min_cell.x, interior_max_cell.x)
         home_cell.y = clampi(home_cell.y, interior_min_cell.y, interior_max_cell.y)
+        var exterior_approach := porch_cell - inward
+        if exterior_approach != porch_cell:
+            home_route_cells.append(exterior_approach)
         home_route_cells.append(porch_cell)
         if interior_landing != porch_cell:
             home_route_cells.append(interior_landing)

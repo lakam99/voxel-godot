@@ -14,6 +14,7 @@ const MORNING_OUTSIDE_TARGETS := ["rowan", "mira", "niko"]
 const FOLLOWING_MORNING_TIME := 0.04
 const CAPTURE_WIDTH := 1280
 const CAPTURE_HEIGHT := 720
+const TUTORIAL_REPAIR_RADIUS_CELLS := 25
 
 var main: Node3D
 var player: CharacterBody3D
@@ -100,6 +101,7 @@ func run() -> void:
         "nonHeadlessVisualRequired": visual_required,
         "miraHomeOnly": mira_home_only,
         "morningOutsideOnly": morning_outside_only,
+        "fullPlayerPov": full_player_pov_visual_mode(),
         "screenshotDir": screenshot_dir,
         "visualCaptures": visual_captures,
         "timeline": morning_observation_timeline,
@@ -269,6 +271,20 @@ func run_real_knock_to_morning_foragers() -> void:
     var before_state := tutorial_state_summary(tutorial)
     report_data["initialTutorialState"] = before_state
     sample_player("initial")
+    var layout_proof := tutorial_layout_proof(tutorial)
+    report_data["tutorialLayoutProof"] = layout_proof
+    var single_perimeter_radius := bool(layout_proof.get("singlePerimeterRadius", false))
+    results.append({
+        "name": "tutorial_generated_perimeter_matches_repair_radius",
+        "passed": single_perimeter_radius,
+        "details": "townRadius=%d repairRadius=%d" % [
+            int(layout_proof.get("townRadius", 0)),
+            int(layout_proof.get("repairRadius", TUTORIAL_REPAIR_RADIUS_CELLS))
+        ]
+    })
+    if not single_perimeter_radius:
+        add_failure("tutorial_double_perimeter_radius_mismatch", JSON.stringify(layout_proof))
+        return
     var starter_door := nearest_block("door", player.global_position)
     if starter_door == null:
         add_failure("starter_door_missing", "no door block found near tutorial start")
@@ -276,18 +292,36 @@ func run_real_knock_to_morning_foragers() -> void:
     sample_door("initial", starter_door)
 
     var door_position := starter_door.global_position
+    if full_player_pov_visual_mode():
+        await capture_player_pov_stage(
+            "player_pov_start",
+            door_position + Vector3(0.0, CELL * 0.75, 0.0),
+            { "stageReason": "tutorial_start_before_intro_door_walk" }
+        )
     mark_progress("walking_to_door")
     await walk_near(door_position, CELL * 1.55, 9.0)
     sample_player("near_door")
     aim_at(door_position + Vector3(0.0, CELL * 0.75, 0.0))
     await wait_physics_frames(POST_ACTION_FRAMES)
     sample_door("before_click", starter_door)
+    if full_player_pov_visual_mode():
+        await capture_player_pov_stage(
+            "player_pov_intro_door_before_click",
+            door_position + Vector3(0.0, CELL * 0.75, 0.0),
+            { "door": block_summary(starter_door) }
+        )
     mark_progress("dispatching_door_action")
     dispatch_mouse_button(MOUSE_BUTTON_RIGHT, true)
     dispatch_mouse_button(MOUSE_BUTTON_RIGHT, false)
     await wait_physics_frames(POST_ACTION_FRAMES)
     sample_door("after_click", starter_door)
     sample_player("after_door_action")
+    if full_player_pov_visual_mode():
+        await capture_player_pov_stage(
+            "player_pov_intro_dialogue_open",
+            door_position + Vector3(0.0, CELL * 0.75, 0.0),
+            { "door": block_summary(starter_door), "dialogueOpen": hud_dialogue_open() }
+        )
 
     var after_state := tutorial_state_summary(tutorial)
     report_data["afterDoorTutorialState"] = after_state
@@ -308,6 +342,12 @@ func run_real_knock_to_morning_foragers() -> void:
     await wait_physics_frames(POST_ACTION_FRAMES)
     report_data["afterDialogueTutorialState"] = tutorial_state_summary(tutorial)
     sample_player("after_dialogue_ack")
+    if full_player_pov_visual_mode():
+        await capture_player_pov_stage(
+            "player_pov_dialogue_acknowledged",
+            door_position + Vector3(0.0, CELL * 0.75, 0.0),
+            { "tutorialState": report_data["afterDialogueTutorialState"] }
+        )
     if hud_dialogue_open():
         add_failure("dialogue_still_open_after_real_ack", "HUD dialogue remained open after Escape close input")
         return
@@ -317,14 +357,23 @@ func run_real_knock_to_morning_foragers() -> void:
 
     mark_progress("observing_mira_return_home")
     await observe_mira_until_home(MIRA_HOME_TIMEOUT_SECONDS)
-    if visual_required and not captured_mira_inside_closed:
+    if focused_mira_visual_mode() and not captured_mira_inside_closed:
         await capture_mira_stage("mira_timeout_final_state", "front")
     var mira := npc_entry("mira")
+    if full_player_pov_visual_mode():
+        var mira_body := mira.get("body") as Node3D
+        var mira_target := mira_body.global_position + Vector3(0.0, CELL * 0.75, 0.0) if mira_body != null and is_instance_valid(mira_body) else player.global_position
+        await capture_player_pov_stage(
+            "player_pov_after_mira_home",
+            mira_target,
+            { "mira": npc_summary(mira) if not mira.is_empty() else {} }
+        )
     var speed_limit := profile_speed_limit(mira)
     report_data["miraSpeedLimit"] = rounded(speed_limit)
     report_data["miraMaxFlatSpeed"] = rounded(max_mira_flat_speed)
     report_data["miraTotalFlatDistance"] = rounded(mira_total_flat_distance)
     report_data["miraFinalHomeInteriorStatus"] = strict_home_status(mira)
+    report_data["miraDoorWalkableProbe"] = home_door_walkable_probe(mira)
     if max_mira_flat_speed > speed_limit:
         add_failure(
             "mira_non_profile_speed",
@@ -343,10 +392,12 @@ func run_real_knock_to_morning_foragers() -> void:
         })
     if not bool(report_data["miraFinalHomeInteriorStatus"].get("strictInside", false)):
         add_failure("mira_did_not_reach_strict_home_interior", JSON.stringify(report_data["miraFinalHomeInteriorStatus"]))
-    elif visual_required and not required_mira_captures_saved():
+    elif focused_mira_visual_mode() and not required_mira_captures_saved():
         add_failure("mira_visual_captures_missing", JSON.stringify(capture_names()))
-    elif visual_required:
+    elif focused_mira_visual_mode():
         await verify_other_non_guard_npcs_home_visual()
+    if failed:
+        return
     if not failed and mira_home_only:
         results.append({
             "name": "mira_real_tutorial_go_home_visual",
@@ -358,18 +409,57 @@ func run_real_knock_to_morning_foragers() -> void:
     await observe_night_matrix_until_ready(120.0)
     night_matrix = validate_night_matrix()
     report_data["nightGuardNonGuardMatrix"] = night_matrix
+    if full_player_pov_visual_mode():
+        await capture_player_pov_stage(
+            "player_pov_night_matrix_ready",
+            null,
+            { "nightMatrix": night_matrix }
+        )
 
     mark_progress("checking_bed_locked_before_repair")
+    var failures_before_stage := failure_reasons.size()
     await attempt_sleep_before_repair(tutorial)
+    if full_player_pov_visual_mode():
+        await capture_player_pov_stage(
+            "player_pov_sleep_blocked_before_repair",
+            null,
+            { "sleepTimeline": sleep_timeline }
+        )
+    if failure_reasons.size() > failures_before_stage:
+        return
 
     mark_progress("running_repair_flow")
+    failures_before_stage = failure_reasons.size()
     await run_repair_flow(tutorial)
+    if full_player_pov_visual_mode():
+        await capture_player_pov_stage(
+            "player_pov_after_repair_flow",
+            null,
+            { "repairEvents": repair_placement_events, "inventory": inventory_totals() }
+        )
+    if failure_reasons.size() > failures_before_stage:
+        return
 
     mark_progress("sleeping_after_repair")
+    failures_before_stage = failure_reasons.size()
     await attempt_sleep_after_repair(tutorial)
+    if full_player_pov_visual_mode():
+        await capture_player_pov_stage(
+            "player_pov_after_sleep_attempt",
+            null,
+            { "sleepTimeline": sleep_timeline }
+        )
+    if failure_reasons.size() > failures_before_stage:
+        return
 
     mark_progress("observing_morning_foragers")
     await observe_morning_npcs_and_foragers(MORNING_FORAGE_TIMEOUT_SECONDS)
+    if full_player_pov_visual_mode():
+        await capture_player_pov_stage(
+            "player_pov_after_morning_forager_observation",
+            final_morning_player_pov_target(),
+            { "nikoProof": niko_proof }
+        )
 
     report_data["nikoForagerState"] = forager_state_summary()
     report_data["repairTargetPlacementProof"] = repair_target_proof(tutorial)
@@ -397,11 +487,11 @@ func observe_mira_until_home(seconds: float) -> void:
         track_mira_speed()
         var mira := npc_entry("mira")
         var home_status := strict_home_status(mira)
-        if visual_required:
+        if focused_mira_visual_mode():
             await maybe_capture_mira_return_home(frame, mira, home_status)
         var strict_inside := bool(home_status.get("strictInside", false))
         var visual_settled := true
-        if visual_required:
+        if focused_mira_visual_mode():
             visual_settled = captured_mira_inside_closed and not any_mira_home_door_open(mira)
         if strict_inside and visual_settled:
             settled_frames += 1
@@ -487,6 +577,7 @@ func capture_mira_stage(stage: String, camera_mode: String) -> void:
     }
     visual_captures.append(capture)
     report_data["visualCaptures"] = visual_captures
+    restore_gameplay_camera()
 
 func verify_other_non_guard_npcs_home_visual() -> void:
     var rows := npc_schedule_matrix()
@@ -546,6 +637,7 @@ func capture_npc_home_stage(entry: Dictionary, stage: String) -> bool:
     }
     visual_captures.append(capture)
     report_data["visualCaptures"] = visual_captures
+    restore_gameplay_camera()
     return err == OK
 
 func capture_morning_outside_group(stage: String) -> bool:
@@ -570,6 +662,7 @@ func capture_morning_outside_group(stage: String) -> bool:
     }
     visual_captures.append(capture)
     report_data["visualCaptures"] = visual_captures
+    restore_gameplay_camera()
     return err == OK
 
 func capture_npc_outside_stage(entry: Dictionary, stage: String) -> bool:
@@ -592,7 +685,70 @@ func capture_npc_outside_stage(entry: Dictionary, stage: String) -> bool:
     }
     visual_captures.append(capture)
     report_data["visualCaptures"] = visual_captures
+    restore_gameplay_camera()
     return err == OK
+
+func restore_gameplay_camera() -> void:
+    if camera != null and is_instance_valid(camera):
+        camera.make_current()
+
+func focused_mira_visual_mode() -> bool:
+    return visual_required and mira_home_only and not morning_outside_only
+
+func full_player_pov_visual_mode() -> bool:
+    return visual_required and not mira_home_only and not morning_outside_only
+
+func capture_player_pov_stage(stage: String, look_target = null, extra_sample: Dictionary = {}) -> bool:
+    if not full_player_pov_visual_mode():
+        return true
+    restore_gameplay_camera()
+    if look_target is Vector3:
+        aim_at(look_target)
+    await wait_process_frames(3)
+    var image := get_viewport().get_texture().get_image()
+    var path := screenshot_dir.path_join("%s.png" % stage)
+    var err := image.save_png(path)
+    var capture := {
+        "stage": stage,
+        "path": path,
+        "saved": err == OK,
+        "cameraMode": "player_pov",
+        "time": rounded(elapsed),
+        "sample": player_pov_capture_sample(extra_sample)
+    }
+    visual_captures.append(capture)
+    report_data["visualCaptures"] = visual_captures
+    return err == OK
+
+func player_pov_capture_sample(extra_sample: Dictionary = {}) -> Dictionary:
+    var sample := extra_sample.duplicate(true)
+    if player != null and is_instance_valid(player):
+        sample["player"] = {
+            "position": vec3(player.global_position),
+            "velocity": vec3(player.velocity),
+            "automatedMove": vec3(player.get("automated_move")),
+            "flatCell": vec2i(flat_cell(player.global_position))
+        }
+    if camera != null and is_instance_valid(camera):
+        var active_camera := get_viewport().get_camera_3d()
+        sample["camera"] = {
+            "position": vec3(camera.global_position),
+            "rotation": vec3(camera.global_rotation),
+            "isActiveViewportCamera": active_camera == camera
+        }
+    var tutorial = main.get("tutorial_system") if main != null else null
+    sample["tutorialState"] = tutorial_state_summary(tutorial)
+    sample["runtimeActionState"] = runtime_action_state()
+    sample["timeOfDay"] = rounded(float(main.get("time_of_day"))) if main != null else 0.0
+    return sample
+
+func final_morning_player_pov_target():
+    if player == null or not is_instance_valid(player):
+        return null
+    var starter_door := nearest_block("door", player.global_position)
+    if starter_door != null:
+        return starter_door.global_position + Vector3(0.0, CELL * 0.75, 0.0)
+    return player.global_position + (-player.global_transform.basis.z * CELL * 4.0) + Vector3(0.0, CELL * 0.75, 0.0)
 
 func position_npc_home_observer_camera(entry: Dictionary) -> void:
     if observer_camera == null:
@@ -1096,6 +1252,7 @@ func run_repair_flow(tutorial) -> void:
     var fence_targets: Array = targets.get("fence", [])
     var lamp_targets: Array = targets.get("lamps", [])
     var town_center := intro_state_cell(tutorial, "townCenter", flat_cell(player.global_position))
+    var failures_before_repair := failure_reasons.size()
     for north_side in [true, false]:
         if not north_side:
             var bypass_reached := await walk_to_south_repair_bypass(town_center)
@@ -1106,11 +1263,15 @@ func run_repair_flow(tutorial) -> void:
                 var fence_cell: Vector2i = fence_targets[index]
                 if (fence_cell.y <= town_center.y) == north_side:
                     await place_repair_item("woodBlock", fence_cell, "repair_fence_%02d" % index, tutorial)
+                    if failure_reasons.size() > failures_before_repair:
+                        return
         for index in repair_target_indices(lamp_targets.size(), north_side):
             if lamp_targets[index] is Vector2i:
                 var lamp_cell: Vector2i = lamp_targets[index]
                 if (lamp_cell.y <= town_center.y) == north_side:
                     await place_repair_item("torch", lamp_cell, "repair_lamp_%02d" % index, tutorial)
+                    if failure_reasons.size() > failures_before_repair:
+                        return
     var final_state := tutorial_state_summary(tutorial)
     if not bool(final_state.get("repairComplete", false)):
         add_failure("repair_not_completed_by_real_placements", JSON.stringify({
@@ -1298,6 +1459,19 @@ func walk_intro_waypoints(cells: Array, label: String, stop_distance: float, tim
         var reached := await walk_near(world_position_for_flat_cell(cell), stop_distance, timeout_seconds, "%s_%02d_%d_%d" % [label, index, cell.x, cell.y])
         if reached:
             continue
+        if full_player_pov_visual_mode():
+            await capture_player_pov_stage(
+                "player_pov_failure_%s_%02d" % [safe_capture_id(label), index],
+                world_position_for_flat_cell(cell),
+                {
+                    "failureCandidate": "intro_route_waypoint_not_reached",
+                    "label": label,
+                    "index": index,
+                    "cell": vec2i(cell),
+                    "target": vec3(world_position_for_flat_cell(cell)),
+                    "stopDistance": rounded(stop_distance)
+                }
+            )
         add_failure("intro_route_waypoint_not_reached", JSON.stringify({
             "label": label,
             "index": index,
@@ -1325,6 +1499,16 @@ func use_block_with_real_action(block: Node3D, label: String, stop_distance: flo
     mark_progress("walking_to_%s" % label)
     var reached := await walk_near(block.global_position, stop_distance, timeout_seconds, "walking_to_%s" % label)
     if not reached:
+        if full_player_pov_visual_mode():
+            await capture_player_pov_stage(
+                "player_pov_failure_%s_not_reached" % safe_capture_id(label),
+                block.global_position + Vector3(0.0, CELL * 0.65, 0.0),
+                {
+                    "failureCandidate": "%s_not_reached_for_real_action" % label,
+                    "block": block_summary(block),
+                    "stopDistance": rounded(stop_distance)
+                }
+            )
         add_failure("%s_not_reached_for_real_action" % label, JSON.stringify({
             "player": vec3(player.global_position),
             "block": vec3(block.global_position),
@@ -1399,6 +1583,16 @@ func use_bed_with_real_action(bed: Node3D, label: String, timeout_seconds: float
             })
             sample_player("after_%s_action" % label)
             return true
+    if full_player_pov_visual_mode():
+        await capture_player_pov_stage(
+            "player_pov_failure_%s_no_reachable_bed_hit" % safe_capture_id(label),
+            bed.global_position + Vector3(0.0, CELL * 0.45, 0.0),
+            {
+                "failureCandidate": "%s_no_reachable_bed_hit" % label,
+                "bed": block_summary(bed),
+                "lastHit": last_hit
+            }
+        )
     add_failure("%s_no_reachable_bed_hit" % label, JSON.stringify({
         "player": vec3(player.global_position),
         "bed": block_summary(bed),
@@ -1470,6 +1664,12 @@ func place_repair_item(item_id: String, cell: Vector2i, label: String, tutorial)
             "inventory": inventory_totals()
         }
         repair_placement_events.append(stand_event)
+        if full_player_pov_visual_mode():
+            await capture_player_pov_stage(
+                "player_pov_failure_%s_stand_not_reached" % safe_capture_id(label),
+                target_position + Vector3(0.0, CELL * 0.75, 0.0),
+                stand_event
+            )
         add_failure("repair_placement_stand_not_reached", JSON.stringify(stand_event))
         return
     var preview := await aim_until_placement_preview(item_id, cell, label)
@@ -1484,8 +1684,27 @@ func place_repair_item(item_id: String, cell: Vector2i, label: String, tutorial)
             "inventory": inventory_totals()
         }
         repair_placement_events.append(preview_event)
+        if full_player_pov_visual_mode():
+            await capture_player_pov_stage(
+                "player_pov_failure_%s_preview_miss" % safe_capture_id(label),
+                target_position + Vector3(0.0, CELL * 0.75, 0.0),
+                preview_event
+            )
         add_failure("repair_placement_preview_miss", JSON.stringify(preview_event))
         return
+    if not active_hotbar_item_is(item_id):
+        var reselected := await select_hotbar_item(item_id)
+        if not reselected:
+            var active_event := {
+                "label": label,
+                "item": item_id,
+                "targetCell": vec2i(cell),
+                "activeStack": active_stack_summary(),
+                "inventory": inventory_totals()
+            }
+            repair_placement_events.append(active_event)
+            add_failure("repair_item_selection_lost_before_place", JSON.stringify(active_event))
+            return
     dispatch_mouse_button(MOUSE_BUTTON_RIGHT, true)
     dispatch_mouse_button(MOUSE_BUTTON_RIGHT, false)
     await wait_physics_frames(POST_ACTION_FRAMES)
@@ -1509,6 +1728,12 @@ func place_repair_item(item_id: String, cell: Vector2i, label: String, tutorial)
     }
     repair_placement_events.append(event)
     if not counted:
+        if full_player_pov_visual_mode():
+            await capture_player_pov_stage(
+                "player_pov_failure_%s_not_counted" % safe_capture_id(label),
+                target_position + Vector3(0.0, CELL * 0.75, 0.0),
+                event
+            )
         add_failure("repair_placement_not_counted", JSON.stringify(event))
 
 func select_hotbar_item(item_id: String) -> bool:
@@ -1525,9 +1750,19 @@ func select_hotbar_item(item_id: String) -> bool:
         dispatch_key(keycode, true)
         dispatch_key(keycode, false)
         await wait_physics_frames(6)
-        var active: Dictionary = inventory_system.call("active_stack")
-        return String(active.get("item", "")) == item_id
+        return active_hotbar_item_is(item_id)
     return false
+
+func active_hotbar_item_is(item_id: String) -> bool:
+    var active := active_stack_summary()
+    return String(active.get("item", "")) == item_id
+
+func active_stack_summary() -> Dictionary:
+    var inventory_system = main.get("inventory_system") if main != null else null
+    if inventory_system == null or not inventory_system.has_method("active_stack"):
+        return {}
+    var active: Dictionary = inventory_system.call("active_stack")
+    return active.duplicate(true)
 
 func placement_stand_position(cell: Vector2i, tutorial) -> Vector3:
     var town_center := Vector2i.ZERO
@@ -1564,6 +1799,18 @@ func walk_to_south_repair_bypass(town_center: Vector2i) -> bool:
         var timeout := clampf(distance / (CELL * 3.0) + 5.0, 10.0, 34.0)
         var reached := await walk_near(waypoint_position, CELL * 1.65, timeout, "walking_to_south_repair_bypass_%02d_%d_%d" % [index, waypoint.x, waypoint.y])
         if not reached:
+            if full_player_pov_visual_mode():
+                await capture_player_pov_stage(
+                    "player_pov_failure_south_repair_bypass_%02d" % index,
+                    waypoint_position,
+                    {
+                        "failureCandidate": "south_repair_bypass_not_reached",
+                        "index": index,
+                        "cell": vec2i(waypoint),
+                        "target": vec3(waypoint_position),
+                        "stopDistance": rounded(CELL * 1.65)
+                    }
+                )
             add_failure("south_repair_bypass_not_reached", JSON.stringify({
                 "index": index,
                 "cell": vec2i(waypoint),
@@ -1682,6 +1929,50 @@ func world_position_for_flat_coords(cell_x: float, cell_z: float) -> Vector3:
         y = float(main.call("height_at_world", x, z)) + 0.08
     return Vector3(x, y, z)
 
+func home_door_walkable_probe(entry: Dictionary) -> Array[Dictionary]:
+    var npc_system = main.npc_system if main != null else null
+    if npc_system == null:
+        return []
+    var autonomy = npc_system.get("autonomy_system")
+    if autonomy == null or not autonomy.has_method("closest_walkable"):
+        return []
+    var porch_cell: Vector2i = entry.get("porchCell", entry.get("homeCell", Vector2i.ZERO))
+    var result: Array[Dictionary] = []
+    for dz in range(-5, 6):
+        for dx in range(-5, 6):
+            var cell := Vector2i(porch_cell.x + dx, porch_cell.y + dz)
+            var position := world_position_for_flat_cell(cell)
+            var walkable_value = autonomy.call("closest_walkable", position, CELL * 0.65)
+            if not (walkable_value is Dictionary):
+                continue
+            var walkable: Dictionary = walkable_value
+            if not bool(walkable.get("found", false)):
+                continue
+            result.append({
+                "cell": vec2i(cell),
+                "offset": [dx, dz],
+                "position": vec3(position),
+                "walkablePosition": vec3(walkable.get("position", Vector3.ZERO)),
+                "distance": rounded(float(walkable.get("distance", -1.0))),
+                "source": String(walkable.get("source", "")),
+                "regionId": String(walkable.get("regionId", "")),
+                "surfaceId": String(walkable.get("surfaceId", ""))
+            })
+    result.sort_custom(func(a, b):
+        var a_offset: Array = a.get("offset", [0, 0])
+        var b_offset: Array = b.get("offset", [0, 0])
+        var ad := absi(int(a_offset[0])) + absi(int(a_offset[1]))
+        var bd := absi(int(b_offset[0])) + absi(int(b_offset[1]))
+        if ad == bd:
+            var a_cell: Array = a.get("cell", [0, 0])
+            var b_cell: Array = b.get("cell", [0, 0])
+            if int(a_cell[0]) == int(b_cell[0]):
+                return int(a_cell[1]) < int(b_cell[1])
+            return int(a_cell[0]) < int(b_cell[0])
+        return ad < bd
+    )
+    return result
+
 func entry_position(entry: Dictionary, key: String, fallback: Vector3) -> Vector3:
     var value = entry.get(key, fallback)
     if value is Vector3:
@@ -1784,7 +2075,10 @@ func dispatch_key(keycode: int, pressed: bool) -> void:
     var event := InputEventKey.new()
     event.keycode = keycode
     event.pressed = pressed
-    get_viewport().push_input(event)
+    if main != null and main.has_method("_unhandled_input"):
+        main.call("_unhandled_input", event)
+    else:
+        get_viewport().push_input(event)
 
 func runtime_action_state() -> Dictionary:
     var utility = main.get("utility_system") if main != null else null
@@ -1911,6 +2205,45 @@ func chest_storage_summary(chest: Node) -> Array[Dictionary]:
 func hud_dialogue_open() -> bool:
     var hud = main.get("hud") if main != null else null
     return hud != null and hud.has_method("is_dialogue_open") and bool(hud.call("is_dialogue_open"))
+
+func tutorial_layout_proof(tutorial) -> Dictionary:
+    var town: Dictionary = {}
+    if tutorial != null:
+        var town_value = tutorial.get("town")
+        if town_value is Dictionary:
+            town = town_value
+    var town_center := Vector2i(int(town.get("centerX", 0)), int(town.get("centerZ", 0)))
+    var town_radius := int(town.get("radius", 0))
+    var repair_radius := TUTORIAL_REPAIR_RADIUS_CELLS
+    return {
+        "townCenter": vec2i(town_center),
+        "townRadius": town_radius,
+        "repairRadius": repair_radius,
+        "singlePerimeterRadius": town_radius == repair_radius,
+        "townRingBlockCount": perimeter_ring_block_count(town_center, town_radius),
+        "repairRingBlockCount": perimeter_ring_block_count(town_center, repair_radius)
+    }
+
+func perimeter_ring_block_count(center: Vector2i, radius: int) -> int:
+    if main == null or radius <= 0:
+        return 0
+    var blocks_value = main.get("blocks")
+    if not (blocks_value is Dictionary):
+        return 0
+    var count := 0
+    for block_value in (blocks_value as Dictionary).values():
+        var body := block_value as Node
+        if body == null or not is_instance_valid(body):
+            continue
+        var block_type := String(body.get_meta("block_type", ""))
+        if block_type != "woodBlock" and block_type != "door" and block_type != "torch":
+            continue
+        var cell: Vector3i = body.get_meta("cell", Vector3i.ZERO)
+        var dx := absi(cell.x - center.x)
+        var dz := absi(cell.z - center.y)
+        if dx <= radius and dz <= radius and maxi(dx, dz) == radius:
+            count += 1
+    return count
 
 func tutorial_state_summary(tutorial) -> Dictionary:
     if tutorial == null or not tutorial.has_method("state"):

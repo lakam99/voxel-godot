@@ -43,7 +43,8 @@ New-Item -ItemType Directory -Force -Path $ScreenshotDir | Out-Null
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 Remove-Item -LiteralPath $ReportPath -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath $ProgressPath -ErrorAction SilentlyContinue
-Remove-Item -LiteralPath (Join-Path $ScreenshotDir "*.png") -ErrorAction SilentlyContinue
+Get-ChildItem -LiteralPath $ScreenshotDir -Filter "*.png" -File -ErrorAction SilentlyContinue |
+    Remove-Item -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath $outLog -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath $errLog -ErrorAction SilentlyContinue
 
@@ -61,6 +62,8 @@ $staticScan = $guardJson | ConvertFrom-Json
 $runToken = [guid]::NewGuid().ToString("N")
 $branch = (& git -C $projectPath branch --show-current).Trim()
 $commit = (& git -C $projectPath rev-parse HEAD).Trim()
+$focusedVisualAcceptance = $Visible -and ($MiraHomeOnly -or $MorningOutsideOnly)
+$fullPlayerPovVisible = $Visible -and (-not $MiraHomeOnly) -and (-not $MorningOutsideOnly)
 
 $env:VOXEL_PLAYTEST = "1"
 $env:VOXEL_TEST_SEED = $Seed
@@ -263,7 +266,7 @@ if ($Visible) {
             "morning_outside_mira.png",
             "morning_outside_niko.png"
         )
-    } else {
+    } elseif ($MiraHomeOnly) {
         $requiredScreenshots = @(
             "mira_go_home_start.png",
             "mira_route_departure.png",
@@ -286,9 +289,17 @@ if ($Visible) {
 }
 
 $evidenceScript = Join-Path $projectPath "tools\assert-test-evidence-report.ps1"
-$evidenceLevel = if ($Visible) { "acceptance_visual" } else { "integration" }
-$runnerId = if ($MorningOutsideOnly) { "npc_real_tutorial_morning_outside" } else { "npc_real_tutorial_playthrough" }
-$acceptanceClaims = if ($Visible) {
+$evidenceLevel = if ($focusedVisualAcceptance) { "acceptance_visual" } else { "integration" }
+$runnerId = if ($MorningOutsideOnly) {
+    "npc_real_tutorial_morning_outside"
+} elseif ($MiraHomeOnly) {
+    "npc_real_tutorial_playthrough"
+} elseif ($fullPlayerPovVisible) {
+    "npc_real_tutorial_full_player_pov"
+} else {
+    "npc_real_tutorial_playthrough_integration"
+}
+$acceptanceClaims = if ($focusedVisualAcceptance) {
     if ($MorningOutsideOnly) {
         @("tutorial_following_morning_rowan_mira_niko_outside_visual")
     } else {
@@ -307,9 +318,12 @@ $evidenceArgs = @(
 if ($acceptanceClaims.Count -gt 0) {
     $evidenceArgs += @("-AcceptanceClaims", ($acceptanceClaims -join ";"))
 }
+if ($Visible) {
+    $evidenceArgs += @("-RequireForbiddenCallSelfScan")
+}
 if ($requiredScreenshots.Count -gt 0) {
     $evidenceArgs += @("-RequiredScreenshots", ($requiredScreenshots -join ";"))
-    $evidenceArgs += @("-ScreenshotDir", $ScreenshotDir, "-RequireForbiddenCallSelfScan", "-RequireVisualProof")
+    $evidenceArgs += @("-ScreenshotDir", $ScreenshotDir, "-RequireVisualProof")
 }
 & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $evidenceScript @evidenceArgs | Out-Null
 if ($LASTEXITCODE -ne 0) {
@@ -331,6 +345,8 @@ $report = Get-Content -LiteralPath $ReportPath -Raw | ConvertFrom-Json
     lastFailureCode = $lastFailureCode
     miraHomeOnly = [bool]$report.miraHomeOnly
     morningOutsideOnly = [bool]$report.morningOutsideOnly
+    fullPlayerPov = [bool]$report.fullPlayerPov
+    evidenceLevel = [string]$report.evidenceLevel
     reportPath = $ReportPath
 } | ConvertTo-Json -Depth 4
 $wrapperExitCode = [int]$exitCode

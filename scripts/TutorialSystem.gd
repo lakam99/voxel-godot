@@ -101,6 +101,7 @@ func start_new_world() -> bool:
     town = main.town_region(TUTORIAL_TOWN_REGION.x, TUTORIAL_TOWN_REGION.y)
     if town.is_empty():
         return false
+    reserve_tutorial_town_layout()
     started = true
     interacted.clear()
     completed_steps.clear()
@@ -141,6 +142,7 @@ func restore(snapshot_value = {}) -> void:
         town = {}
         return
     town = main.town_region(TUTORIAL_TOWN_REGION.x, TUTORIAL_TOWN_REGION.y)
+    reserve_tutorial_town_layout()
     ensure_town_generated()
     ensure_village_perimeter()
     ensure_village_lights()
@@ -149,6 +151,21 @@ func restore(snapshot_value = {}) -> void:
     setup_intro_repair_quest(false)
     spawn_tutorial_npcs()
     last_message = String(state.get("lastMessage", ""))
+
+func reserve_tutorial_town_layout() -> void:
+    if main == null or town.is_empty():
+        return
+    town["radius"] = FENCE_RADIUS_CELLS
+    town["homeExclusionRings"] = [
+        {
+            "radius": FENCE_RADIUS_CELLS,
+            "margin": 3,
+            "reason": "tutorial_repair_perimeter"
+        }
+    ]
+    if main.get("town_region_cache") is Dictionary:
+        var cache: Dictionary = main.get("town_region_cache")
+        cache[Vector2i(TUTORIAL_TOWN_REGION.x, TUTORIAL_TOWN_REGION.y)] = town
 
 func snapshot() -> Dictionary:
     return {

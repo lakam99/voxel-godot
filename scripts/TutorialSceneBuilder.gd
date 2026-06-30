@@ -173,11 +173,11 @@ func spawn_tutorial_npcs() -> void:
     var elder_home: Dictionary = system.tutorial_home_record(3, Vector2i(cx + 13, cz + 12), Vector2i(cx + 13, cz + 17))
     var elder_porch: Vector2i = elder_home.get("porchCell", Vector2i(cx + 13, cz + 17))
     var elder_home_cell: Vector2i = elder_home.get("homeCell", Vector2i(cx + 13, cz + 12))
-    var elder_route := [Vector2i(cx - 6, cz - 16), Vector2i(cx, cz - 8), elder_porch]
-    var elder_inside_route := home_route_cells_from_porch(elder_porch, elder_home_cell, false)
-    if not elder_inside_route.is_empty():
-        elder_inside_route.remove_at(0)
-    elder_route.append_array(elder_inside_route)
+    var elder_door_route := home_route_cells_from_porch(elder_porch, elder_home_cell, true)
+    var elder_route := [Vector2i(cx - 6, cz - 16), Vector2i(cx, cz - 8)]
+    for route_cell in elder_door_route:
+        if route_cell is Vector2i and not elder_route.has(route_cell):
+            elder_route.append(route_cell)
     for spec in tutorial_npc_specs(cx, cz, north_home, west_home, elder_home, elder_route):
         spawn_npc(spec, level, Vector3(float(cx) * CELL, level, float(cz) * CELL))
 
