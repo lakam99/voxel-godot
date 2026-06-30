@@ -464,6 +464,8 @@ func horizontal_move(body: Node3D, displacement: Vector3, variant: String, ignor
         return 0.0
     if hostile_obstacle_between(body, previous, candidate, variant):
         return 0.0
+    if hostile_body_overlaps_block(candidate, variant):
+        return 0.0
     if hostile_spacing_blocks(body, previous, candidate, variant):
         return 0.0
     body.global_position.x = candidate.x
@@ -521,6 +523,40 @@ func hostile_movement_obstacle(collider: Node) -> bool:
         return String(collider.get_meta("block_type", "")) != "cobblestonePath"
     if kind == "prop" or kind == "tutorial_npc" or kind == "npc":
         return true
+    return false
+
+func hostile_body_overlaps_block(candidate: Vector3, variant: String) -> bool:
+    if main == null:
+        return false
+    var blocks_value = main.get("blocks")
+    if not (blocks_value is Dictionary):
+        return false
+    var blocks: Dictionary = blocks_value
+    var radius := CELL * (0.45 if variant == "rift" else 0.34)
+    var half_block := CELL * 0.48
+    var search_radius := radius + half_block
+    var min_x := floori((candidate.x - search_radius) / CELL)
+    var max_x := ceili((candidate.x + search_radius) / CELL)
+    var min_z := floori((candidate.z - search_radius) / CELL)
+    var max_z := ceili((candidate.z + search_radius) / CELL)
+    var ground_y: float = main.height_at_world(candidate.x, candidate.z)
+    var center_y := floori((ground_y + CELL * 0.48) / CELL) + 1
+    for x in range(min_x, max_x + 1):
+        for z in range(min_z, max_z + 1):
+            for y in range(center_y - 1, center_y + 3):
+                var key := Vector3i(x, y, z)
+                if not blocks.has(key):
+                    continue
+                var block := blocks[key] as Node
+                if not hostile_movement_obstacle(block):
+                    continue
+                var block_body := block as Node3D
+                if block_body == null:
+                    continue
+                if absf(block_body.global_position.y - (ground_y + CELL * 0.48)) > CELL * 1.35:
+                    continue
+                if absf(candidate.x - block_body.global_position.x) <= search_radius and absf(candidate.z - block_body.global_position.z) <= search_radius:
+                    return true
     return false
 
 func hostile_spacing_blocks(body: Node3D, previous: Vector3, candidate: Vector3, variant: String) -> bool:
