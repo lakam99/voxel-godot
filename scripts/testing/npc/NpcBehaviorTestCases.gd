@@ -10,6 +10,8 @@ const NpcTaskPlannerScript := preload("res://scripts/npc_ai/behavior/NpcTaskPlan
 const NpcRecoveryPolicyScript := preload("res://scripts/npc_ai/behavior/NpcRecoveryPolicy.gd")
 const NpcPlanExecutorScript := preload("res://scripts/npc_ai/behavior/NpcPlanExecutor.gd")
 const NpcPerceptionServiceScript := preload("res://scripts/npc_ai/behavior/NpcPerceptionService.gd")
+const NpcRouteMovementControllerScript := preload("res://scripts/npc_ai/movement/NpcRouteMovementController.gd")
+const CELL := 1.35
 
 var runner = null
 var roster
@@ -39,11 +41,54 @@ class FakeNavigationService:
 			return { "found": false, "reason": "test_unreachable", "position": position, "maxDistance": max_distance }
 		return { "found": true, "position": position, "distance": 0.0, "source": "test_navmesh" }
 
+class FakeMain:
+	extends Node
+	const WATER_LEVEL := -100.0
+
+	func height_at_world(_x: float, _z: float) -> float:
+		return 0.0
+
+class FakeRouteWorld:
+	extends RefCounted
+
+	func point_allowed(_entry: Dictionary, _position: Vector3, _allow_outside := false, _moving_home := false) -> bool:
+		return true
+
+	func world_cell(position: Vector3) -> Vector2i:
+		return Vector2i(roundi(position.x / CELL), roundi(position.z / CELL))
+
+	func terrain_allows_step(_from_cell: Vector2i, _to_cell: Vector2i, _moving_home := false) -> Dictionary:
+		return { "ok": true, "height": 0.0 }
+
+	func build_snapshot(_entry: Dictionary, allow_outside := false, moving_home := false) -> Dictionary:
+		return {
+			"allowOutside": allow_outside,
+			"movingHome": moving_home,
+			"blocked": {},
+			"dynamic": {},
+			"doors": {},
+			"paths": {}
+		}
+
+	func static_blocker(_snapshot: Dictionary, _cell: Vector2i):
+		return null
+
+	func dynamic_blocker(_snapshot: Dictionary, _cell: Vector2i):
+		return null
+
+	func revision() -> String:
+		return "fake-route-world"
+
+	func cell_key(cell: Vector2i) -> String:
+		return "%d,%d" % [cell.x, cell.y]
+
 class FakeNpcSystem:
 	extends Node
 	var chosen_anchor := Vector3(2.7, 0.0, 0.0)
 	var move_calls := 0
 	var moving_home_calls := 0
+	var route_motion_calls := 0
+	var motor_block_until_distance := -1.0
 	var max_requested_distance := 0.0
 	var moved_actor_ids := {}
 
@@ -75,6 +120,18 @@ class FakeNpcSystem:
 			entry["routeReason"] = ""
 		return moved
 
+	func apply_npc_route_motion(entry: Dictionary, previous: Vector3, candidate: Vector3, _physics_delta := 0.0166667) -> Dictionary:
+		route_motion_calls += 1
+		var body := entry.get("body") as Node3D
+		if body == null:
+			return { "moved": 0.0, "position": previous, "blocked": true, "reason": "missing_body" }
+		var flat := Vector2(candidate.x - previous.x, candidate.z - previous.z).length()
+		if motor_block_until_distance >= 0.0 and flat < motor_block_until_distance:
+			return { "moved": 0.0, "position": previous, "blocked": true, "reason": "static_or_dynamic_collision" }
+		body.global_position = candidate
+		entry["lastMoveDistance"] = flat
+		return { "moved": flat, "position": candidate, "blocked": false, "reason": "" }
+
 	func home_route_target(entry: Dictionary) -> Vector3:
 		return entry.get("homePosition", Vector3.ZERO)
 
@@ -88,9 +145,30 @@ class FakeNpcSystem:
 		entry["guardDutyState"] = "intercept_threat" if target_hostile != null else "patrol"
 		return Vector3(4.05, 0.0, 0.0)
 
+	func normalize_npc_speed_mode(speed_mode) -> String:
+		var mode := String(speed_mode).strip_edges().to_lower()
+		return "sprinting" if mode in ["sprint", "sprinting", "rush", "rushing", "run", "running"] else "walking"
+
+	func npc_speed_for_mode(_entry: Dictionary, speed_mode := "walking") -> float:
+		return 6.4 if normalize_npc_speed_mode(speed_mode) == "sprinting" else 2.6
+
+	func set_npc_speed_mode(entry: Dictionary, speed_mode := "walking", reason := "") -> String:
+		var mode := normalize_npc_speed_mode(speed_mode)
+		entry["npcSpeedMode"] = mode
+		entry["npcSpeed"] = npc_speed_for_mode(entry, mode)
+		entry["npcSpeedReason"] = reason
+		entry["npcRushing"] = mode == "sprinting"
+		var body := entry.get("body") as Node
+		if body != null:
+			body.set_meta("npc_speed_mode", mode)
+			body.set_meta("npc_speed", float(entry["npcSpeed"]))
+			body.set_meta("npc_rushing", bool(entry["npcRushing"]))
+		return mode
+
 	func update_scripted_npc(entry: Dictionary, body: Node3D, delta: float) -> void:
 		var target: Vector3 = body.get_meta("npc_scripted_target", body.global_position)
-		var moved := move_npc(entry, target, 3.05 * delta, false, true, delta)
+		var mode := set_npc_speed_mode(entry, body.get_meta("npc_scripted_speed_mode", "walking"), "scripted_go_to")
+		var moved := move_npc(entry, target, npc_speed_for_mode(entry, mode) * delta, false, true, delta)
 		if body.global_position.distance_to(target) <= 1.35 * 0.95:
 			body.set_meta("npc_scripted_arrived", true)
 		entry["lastMoveDistance"] = moved
@@ -165,6 +243,7 @@ func cases() -> Array[Dictionary]:
 		case("npc_behavior_scripted_go_home_arrival_clears_cached_motion", "day", "test_scripted_go_home_arrival_clears_cached_motion"),
 		case("npc_behavior_scripted_go_home_hold_arrival_stays_home", "day", "test_scripted_go_home_hold_arrival_stays_home"),
 		case("npc_behavior_scripted_order_normal_profile_speed", "day", "test_scripted_order_normal_profile_speed"),
+		case("npc_behavior_scripted_order_sprint_profile_speed", "day", "test_scripted_order_sprint_profile_speed"),
 		case("npc_behavior_scripted_order_no_transform_write", "day", "test_scripted_order_no_transform_write"),
 		case("npc_behavior_mira_dialogue_ack_releases_go_home_order", "day", "test_mira_dialogue_ack_releases_go_home_order"),
 		case("npc_behavior_mira_home_arrival_requires_interior", "day", "test_mira_home_arrival_requires_interior"),
@@ -175,6 +254,7 @@ func cases() -> Array[Dictionary]:
 		case("npc_behavior_mira_no_inching_after_dialogue", "day", "test_mira_no_inching_after_dialogue"),
 		case("npc_behavior_morning_departures_not_brain_starved", "day", "test_morning_departures_not_brain_starved"),
 		case("npc_traffic_door_crossing_continues_while_brain_skipped", "day", "test_door_crossing_continues_while_brain_skipped"),
+		case("npc_behavior_motor_blocked_local_escape_forces_replan", "day", "test_motor_blocked_local_escape_forces_replan"),
 		case("npc_behavior_unreachable_goal_terminal", "day", "test_unreachable_goal_terminal"),
 		case("npc_behavior_all_generated_town_npcs_have_interior_home", "day", "test_all_generated_town_npcs_have_interior_home"),
 		case("npc_behavior_no_raw_random_world_goal", "day", "test_no_raw_random_world_goal")
@@ -512,10 +592,24 @@ func test_scripted_order_normal_profile_speed(_mode: String) -> Dictionary:
 		executor.advance_motion_npc(entry_data, 1.0 / 60.0, 0.0)
 	var source := read_text("res://scripts/npc_ai/behavior/NpcPlanExecutor.gd") + "\n" + read_text("res://scripts/NpcSystem.gd")
 	var no_hack_speed := source.find("speed = 20.0") < 0 and not text_contains_near(source, "holdIntroDoor", "speed", 160) and not text_contains_near(source, "speed", "holdIntroDoor", 160)
-	var profile_speed_ok := fake_npc.max_requested_distance <= (3.05 * (1.0 / 60.0)) + 0.0001
+	var profile_speed_ok := fake_npc.max_requested_distance <= (2.6 * (1.0 / 60.0)) + 0.0001
 	var passed: bool = fake_npc.move_calls == 4 and profile_speed_ok and no_hack_speed
 	fake_npc.queue_free()
 	return outcome(passed, "moveCalls=%d maxDistance=%.4f noHack=%s" % [fake_npc.move_calls, fake_npc.max_requested_distance, str(no_hack_speed)], ["normal_scripted_speed", "no_20_speed_override"], { "maxRequestedDistance": fake_npc.max_requested_distance })
+
+func test_scripted_order_sprint_profile_speed(_mode: String) -> Dictionary:
+	var fake_npc := FakeNpcSystem.new()
+	var executor: Variant = make_executor(fake_npc)
+	var entry_data := entry("Villager", { "id": "scripted_sprint_speed", "position": Vector3.ZERO })
+	var body := entry_data.get("body") as Node3D
+	set_scripted_order_meta(entry_data, body, "go_to", "speed_check", Vector3(3.0, 0.0, 0.0), "sprinting")
+	for i in range(4):
+		executor.advance_motion_npc(entry_data, 1.0 / 60.0, 0.0)
+	var lower_bound_ok := fake_npc.max_requested_distance >= (6.4 * (1.0 / 60.0)) - 0.0001
+	var mode_ok := String(entry_data.get("npcSpeedMode", "")) == "sprinting" and bool(entry_data.get("npcRushing", false))
+	var passed: bool = fake_npc.move_calls == 4 and lower_bound_ok and mode_ok
+	fake_npc.queue_free()
+	return outcome(passed, "moveCalls=%d maxDistance=%.4f mode=%s" % [fake_npc.move_calls, fake_npc.max_requested_distance, String(entry_data.get("npcSpeedMode", ""))], ["scripted_sprint_speed", "scripted_rushing_mode"], { "maxRequestedDistance": fake_npc.max_requested_distance, "mode": entry_data.get("npcSpeedMode", "") })
 
 func test_scripted_order_no_transform_write(_mode: String) -> Dictionary:
 	var source := read_text("res://scripts/NpcSystem.gd")
@@ -612,7 +706,7 @@ func test_mira_no_inching_after_dialogue(_mode: String) -> Dictionary:
 		executor.advance_motion_npc(entry_data, 1.0 / 60.0, 0.0)
 		if float(entry_data.get("lastMoveDistance", 0.0)) > 0.001:
 			moving_frames += 1
-	var passed: bool = moving_frames == 8 and body.global_position.x > 0.35
+	var passed: bool = moving_frames == 8 and body.global_position.x > 0.33
 	fake_npc.queue_free()
 	return outcome(passed, "movingFrames=%d x=%.3f" % [moving_frames, body.global_position.x], ["mira_like_every_frame_motion", "mira_like_no_inching"], { "movingFrames": moving_frames, "position": body.global_position })
 
@@ -626,7 +720,7 @@ func test_morning_departures_not_brain_starved(_mode: String) -> Dictionary:
 	for i in range(10):
 		executor.advance_motion_npc(entry_data, 1.0 / 60.0, 0.0)
 	var body := entry_data.get("body") as Node3D
-	var passed: bool = fake_npc.move_calls == 10 and body.global_position.x > 0.45 and String(entry_data.get("routeStatus", "moving")) != "idle"
+	var passed: bool = fake_npc.move_calls == 10 and body.global_position.x > 0.42 and String(entry_data.get("routeStatus", "moving")) != "idle"
 	fake_npc.queue_free()
 	return outcome(passed, "moveCalls=%d x=%.3f route=%s" % [fake_npc.move_calls, body.global_position.x, String(entry_data.get("routeStatus", ""))], ["morning_job_motion_every_frame", "morning_departure_not_brain_starved"], { "moveCalls": fake_npc.move_calls, "position": body.global_position, "routeStatus": entry_data.get("routeStatus", "") })
 
@@ -642,6 +736,41 @@ func test_door_crossing_continues_while_brain_skipped(_mode: String) -> Dictiona
 	var passed: bool = fake_npc.move_calls == 1 and bool(result.get("advanced", false)) and String(result.get("classification", "")) == "door_state" and float(entry_data.get("lastMoveDistance", 0.0)) > 0.001
 	fake_npc.queue_free()
 	return outcome(passed, "result=%s moveCalls=%d" % [JSON.stringify(result), fake_npc.move_calls], ["door_motion_tick_without_brain", "traffic_state_preserved_during_motion"], { "result": result, "entry": { "door": entry_data.get("activeDoorPortalId", ""), "traffic": entry_data.get("activeTrafficStepGroup", "") } })
+
+func test_motor_blocked_local_escape_forces_replan(_mode: String) -> Dictionary:
+	var fake_npc := FakeNpcSystem.new()
+	fake_npc.motor_block_until_distance = CELL * 0.15
+	var fake_main := FakeMain.new()
+	var controller = NpcRouteMovementControllerScript.new()
+	controller.setup(fake_npc, fake_main)
+	var entry_data := entry("Villager", { "id": "motor_escape", "position": Vector3.ZERO })
+	entry_data["corridorNoProgressTicks"] = 24
+	entry_data["blockedMoveTime"] = CELL * 0.25
+	entry_data["pathWaypoints"] = [Vector3(CELL * 2.0, 0.0, 0.0)]
+	entry_data["_activeDoorForwardStep"] = true
+	var follow := {
+		"desiredVelocity": Vector3(2.45, 0.0, 0.0),
+		"safeVelocity": Vector3(2.45, 0.0, 0.0)
+	}
+	var intent := {
+		"target": Vector3(CELL * 4.0, 0.0, 0.0),
+		"physicsDelta": 1.0 / 60.0,
+		"movingHome": false,
+		"allowOutside": true
+	}
+	var result: Dictionary = controller.try_motor_blocked_local_escape(entry_data, Vector3.ZERO, follow, intent, 2.45 / 60.0, FakeRouteWorld.new(), 100, "static_or_dynamic_collision")
+	var body := entry_data.get("body") as Node3D
+	var moved := body.global_position.length() if body != null else 0.0
+	var passed := (
+		String(result.get("reason", "")) == "motor_local_escape"
+		and float(result.get("moved", 0.0)) >= CELL * 0.15
+		and bool(entry_data.get("routeForceReplan", false))
+		and fake_npc.route_motion_calls > 0
+		and moved >= CELL * 0.15
+	)
+	fake_main.queue_free()
+	fake_npc.queue_free()
+	return outcome(passed, "result=%s moved=%.3f calls=%d replan=%s" % [JSON.stringify(result), moved, fake_npc.route_motion_calls, str(entry_data.get("routeForceReplan", false))], ["motor_local_escape_moves_actor", "motor_local_escape_forces_replan", "escape_uses_route_motion"], { "result": result, "moved": moved, "routeMotionCalls": fake_npc.route_motion_calls, "lastEscape": entry_data.get("lastMotorLocalEscape", {}) })
 
 func test_unreachable_goal_terminal(_mode: String) -> Dictionary:
 	var entry_data := entry("Villager", {})
@@ -776,13 +905,14 @@ func entry(role: String, options := {}) -> Dictionary:
 			result[optional_key] = options[optional_key]
 	return result
 
-func set_scripted_order_meta(entry_data: Dictionary, body: Node, kind: String, reason: String, target := Vector3.INF) -> void:
+func set_scripted_order_meta(entry_data: Dictionary, body: Node, kind: String, reason: String, target := Vector3.INF, speed_mode := "walking") -> void:
 	entry_data["scriptedOrder"] = {
 		"kind": kind,
 		"state": "PENDING",
 		"reason": reason,
 		"target": target,
 		"arrivalRadius": 0.45,
+		"speedMode": speed_mode,
 		"usesRouteStack": kind in ["go_to", "go_home"]
 	}
 	entry_data["activeMotionGoal"] = { "goalKind": NpcEnumsScript.GOAL_KIND_HOME if kind == "go_home" else NpcEnumsScript.GOAL_KIND_SCRIPTED, "reason": reason }
@@ -792,6 +922,7 @@ func set_scripted_order_meta(entry_data: Dictionary, body: Node, kind: String, r
 	body.set_meta("npc_scripted_arrival_radius", 0.45)
 	body.set_meta("npc_scripted_allow_outside", true)
 	body.set_meta("npc_scripted_hold_on_arrival", true)
+	body.set_meta("npc_scripted_speed_mode", speed_mode)
 	if kind == "go_to":
 		body.set_meta("npc_scripted_target", target)
 

@@ -99,10 +99,6 @@ func choose_guard_target(entry: Dictionary, target_hostile: Node3D = null, melee
         if intercept != Vector3.INF:
             clear_goal_fallback(entry)
             return intercept
-    var assigned_guard_post: Vector3 = entry.get("guardPosition", entry.get("porchPosition", Vector3.ZERO))
-    if position_can_be_goal(entry, assigned_guard_post, false, false):
-        clear_goal_fallback(entry)
-        return assigned_guard_post
     candidates = guard_post_candidates(entry)
     var guard_target := choose_best_reachable_position(entry, candidates, false, false, CELL * 0.85, 10)
     if guard_target != Vector3.INF:
@@ -395,10 +391,19 @@ func job_position_allowed(entry: Dictionary, position: Vector3, outside_town_job
     return world.point_inside_town(entry, position)
 
 func guard_post_candidates(entry: Dictionary) -> Array[Vector3]:
+    var assigned_guard_post: Vector3 = entry.get("guardPosition", entry.get("porchPosition", Vector3.ZERO))
     var candidates: Array[Vector3] = [
-        entry.get("guardPosition", entry.get("porchPosition", Vector3.ZERO)),
+        assigned_guard_post,
         entry.get("porchPosition", Vector3.ZERO)
     ]
+    if world != null and assigned_guard_post != Vector3.INF:
+        var guard_cell: Vector2i = world.world_cell(assigned_guard_post)
+        for radius in range(1, 3):
+            for dx in range(-radius, radius + 1):
+                for dz in range(-radius, radius + 1):
+                    if max(absi(dx), absi(dz)) != radius:
+                        continue
+                    candidates.append(world.cell_position(guard_cell + Vector2i(dx, dz)))
     add_path_candidates(candidates, entry, false)
     add_utility_anchor_candidates(candidates, entry)
     return candidates

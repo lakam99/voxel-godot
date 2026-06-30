@@ -12,6 +12,7 @@ var projectile_material: StandardMaterial3D
 var projectile_mesh: SphereMesh
 var projectile_nodes_created := 0
 var projectile_nodes_reused := 0
+var npc_target_hits := 0
 
 func setup(main_node, player_node: CharacterBody3D, survival_system) -> void:
     main = main_node
@@ -35,7 +36,7 @@ func clear() -> void:
         recycle_projectile_node(projectile_state)
     projectiles.clear()
 
-func spawn_projectile(start: Vector3, target: Vector3, damage := 8.0, owner: Node = null) -> MeshInstance3D:
+func spawn_projectile(start: Vector3, target: Vector3, damage := 8.0, owner: Node = null, target_node: Node = null, target_kind := "") -> MeshInstance3D:
     var direction: Vector3 = (target - start).normalized()
     var projectile := acquire_projectile_node()
     projectile.global_position = start
@@ -46,6 +47,8 @@ func spawn_projectile(start: Vector3, target: Vector3, damage := 8.0, owner: Nod
         "velocity": direction * 18.0,
         "damage": damage,
         "owner": owner,
+        "target": target_node,
+        "targetKind": target_kind,
         "age": 0.0
     })
     return projectile
@@ -84,8 +87,14 @@ func update_projectiles(delta: float) -> void:
             var collider: Node = null
             if is_instance_valid(collider_value):
                 collider = collider_value as Node
+            var collider_kind := String(collider.get_meta("kind", "")) if collider != null and collider.has_meta("kind") else ""
             if collider == player and survival:
                 survival.apply_damage(float(projectile_state.get("damage", 8.0)), "Rift bolt", "hostile")
+            elif collider_kind in ["npc", "tutorial_npc"]:
+                npc_target_hits += 1
+                collider.set_meta("npc_hostile_projectile_hits", int(collider.get_meta("npc_hostile_projectile_hits", 0)) + 1)
+                collider.set_meta("npc_last_hostile_attack", "projectile")
+                collider.set_meta("npc_last_hostile_attacker", owner.name if owner != null else "")
             remove_projectile(projectile_state)
             continue
         projectile_state["position"] = next
@@ -183,5 +192,6 @@ func stats() -> Dictionary:
         "projectiles": projectiles.size(),
         "projectilePool": projectile_pool.size(),
         "projectileNodesCreated": projectile_nodes_created,
-        "projectileNodesReused": projectile_nodes_reused
+        "projectileNodesReused": projectile_nodes_reused,
+        "hostileNpcProjectileHits": npc_target_hits
     }

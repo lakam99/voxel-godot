@@ -15,6 +15,9 @@ const FOLLOWING_MORNING_TIME := 0.04
 const CAPTURE_WIDTH := 1280
 const CAPTURE_HEIGHT := 720
 const TUTORIAL_REPAIR_RADIUS_CELLS := 25
+const FINAL_RESCUE_TIMEOUT_SECONDS := 190.0
+const FINAL_RESCUE_MONSTER_COUNT := 6
+const FINAL_RESCUE_RETURN_STALL_SAMPLES := 80
 
 var main: Node3D
 var player: CharacterBody3D
@@ -40,7 +43,11 @@ var inventory_timeline: Array[Dictionary] = []
 var interaction_timeline: Array[Dictionary] = []
 var morning_observation_timeline: Array[Dictionary] = []
 var day_one_timeline: Array[Dictionary] = []
+var final_rescue_timeline: Array[Dictionary] = []
+var final_rescue_normal_behavior_timeline: Array[Dictionary] = []
+var final_rescue_speed_proofs: Array[Dictionary] = []
 var resource_gather_events: Array[Dictionary] = []
+var final_rescue_combat_events: Array[Dictionary] = []
 var non_guard_home_visual_matrix: Array[Dictionary] = []
 var morning_outside_visual_matrix: Array[Dictionary] = []
 var morning_departure_matrix: Array[Dictionary] = []
@@ -59,6 +66,8 @@ var visual_required := false
 var mira_home_only := false
 var morning_outside_only := false
 var day_one_tutorial := false
+var final_rescue_tutorial := false
+var playtest_god_mode := false
 var captured_mira_start := false
 var captured_mira_route_departure := false
 var captured_mira_route_midpoint := false
@@ -87,7 +96,9 @@ func configure_visual_capture() -> void:
     visual_required = OS.get_environment("VOXEL_REAL_TUTORIAL_VISUAL_REQUIRED").strip_edges() == "1"
     mira_home_only = OS.get_environment("VOXEL_REAL_TUTORIAL_MIRA_HOME_ONLY").strip_edges() == "1"
     morning_outside_only = OS.get_environment("VOXEL_REAL_TUTORIAL_MORNING_OUTSIDE_ONLY").strip_edges() == "1"
-    day_one_tutorial = OS.get_environment("VOXEL_REAL_TUTORIAL_DAY_ONE").strip_edges() == "1"
+    final_rescue_tutorial = OS.get_environment("VOXEL_REAL_TUTORIAL_FINAL_RESCUE").strip_edges() == "1"
+    playtest_god_mode = OS.get_environment("VOXEL_REAL_TUTORIAL_GOD_MODE").strip_edges() == "1"
+    day_one_tutorial = OS.get_environment("VOXEL_REAL_TUTORIAL_DAY_ONE").strip_edges() == "1" or final_rescue_tutorial
     screenshot_dir = OS.get_environment("VOXEL_REAL_TUTORIAL_SCREENSHOT_DIR")
     if screenshot_dir == "":
         screenshot_dir = ProjectSettings.globalize_path("res://artifacts/npc/screenshots/real-tutorial-playthrough")
@@ -102,15 +113,24 @@ func run() -> void:
         "runToken": OS.get_environment("VOXEL_REAL_TUTORIAL_RUN_TOKEN"),
         "gitBranch": OS.get_environment("VOXEL_GIT_BRANCH"),
         "gitCommit": OS.get_environment("VOXEL_GIT_COMMIT"),
+        "finished": false,
+        "passed": false,
+        "failureCount": 0,
+        "resultCount": 0,
         "nonHeadlessVisualRequired": visual_required,
         "miraHomeOnly": mira_home_only,
         "morningOutsideOnly": morning_outside_only,
         "dayOneTutorial": day_one_tutorial,
+        "finalRescueTutorial": final_rescue_tutorial,
+        "playtestGodMode": playtest_god_mode,
         "fullPlayerPov": full_player_pov_visual_mode(),
         "screenshotDir": screenshot_dir,
         "visualCaptures": visual_captures,
         "timeline": morning_observation_timeline,
         "dayOneTimeline": day_one_timeline,
+        "finalRescueTimeline": final_rescue_timeline,
+        "finalRescueNormalBehaviorTimeline": final_rescue_normal_behavior_timeline,
+        "finalRescueCombatEvents": final_rescue_combat_events,
         "morningOutsideVisualMatrix": morning_outside_visual_matrix,
         "deterministicSetup": {},
         "scriptErrorScan": { "status": "pending-wrapper-scan", "matches": [] },
@@ -130,6 +150,9 @@ func run() -> void:
         add_failure("scene_bootstrap_failed", "main/player/camera missing")
         finish()
         return
+    if not await apply_playtest_damage_policy():
+        finish()
+        return
 
     player.set("automated_input", true)
     player.set("automated_move", Vector3.ZERO)
@@ -139,7 +162,9 @@ func run() -> void:
     gameplay_started = true
     mark_progress("gameplay_started")
 
-    if morning_outside_only:
+    if final_rescue_tutorial:
+        await run_final_rescue_from_ready_fixture()
+    elif morning_outside_only:
         await run_following_morning_outside_observation()
     else:
         await run_real_knock_to_morning_foragers()
@@ -162,6 +187,27 @@ func prepare_tutorial_world() -> void:
         main.call("update_chunks", true)
     if main != null and main.has_method("refresh_intro_knock_audio"):
         main.call("refresh_intro_knock_audio")
+
+func apply_playtest_damage_policy() -> bool:
+    var survival = main.get("survival_system") if main != null else null
+    if survival == null:
+        if playtest_god_mode:
+            add_failure("playtest_god_mode_missing_survival", "survival system was not available")
+            return false
+        report_data["playtestDamagePolicy"] = { "godMode": false, "reason": "survival_unavailable" }
+        return true
+    if playtest_god_mode:
+        if not survival.has_method("set_test_god_mode"):
+            add_failure("playtest_god_mode_unsupported", "survival system does not expose set_test_god_mode")
+            return false
+        survival.call("set_test_god_mode", true, TEST_ID)
+    var state: Dictionary = survival.call("test_god_mode_state") if survival.has_method("test_god_mode_state") else { "enabled": false, "reason": "" }
+    report_data["playtestDamagePolicy"] = {
+        "godMode": bool(state.get("enabled", false)),
+        "reason": String(state.get("reason", "")),
+        "damageExpected": "zero" if bool(state.get("enabled", false)) else "normal"
+    }
+    return true
     await wait_physics_frames(20)
 
 func run_following_morning_outside_observation() -> void:
@@ -203,6 +249,152 @@ func stage_following_morning_without_npc_forcing() -> void:
         "tutorialAfter": after_state,
         "playerStartSample": player_timeline[player_timeline.size() - 1] if not player_timeline.is_empty() else {}
     }
+
+func run_final_rescue_from_ready_fixture() -> void:
+    mark_progress("staging_final_rescue_ready_fixture")
+    var tutorial = main.get("tutorial_system") if main != null else null
+    stage_final_rescue_ready_fixture(tutorial)
+    await wait_physics_frames(POST_ACTION_FRAMES * 2)
+    if full_player_pov_visual_mode():
+        await capture_player_pov_stage(
+            "player_pov_final_rescue_ready_fixture",
+            npc_target_position("mira"),
+            { "fixture": report_data.get("finalRescueFixtureSetup", {}), "state": final_rescue_state_summary(tutorial) }
+        )
+    var exited_starter_house := await ensure_player_outside_starter_house_for_final_rescue(tutorial)
+    if failed or not exited_starter_house:
+        return
+    if full_player_pov_visual_mode():
+        await capture_player_pov_stage(
+            "player_pov_final_rescue_starter_exit",
+            npc_target_position("mira"),
+            { "state": final_rescue_state_summary(tutorial) }
+        )
+    await run_final_rescue_tutorial(tutorial)
+
+func stage_final_rescue_ready_fixture(tutorial) -> void:
+    var before_state := tutorial_state_summary(tutorial)
+    var before_inventory := inventory_totals()
+    if tutorial != null:
+        tutorial.set("intro_door_opened", true)
+        tutorial.set("intro_elder_dialogue_acknowledged", true)
+        tutorial.set("intro_repair_active", false)
+        tutorial.set("intro_repair_complete", true)
+        tutorial.set("intro_repair_chest_opened", true)
+        tutorial.set("intro_bed_used", true)
+        tutorial.set("final_night_active", false)
+        tutorial.set("final_night_complete", false)
+        tutorial.set("rescue_escort_started", false)
+        tutorial.set("rescue_returning", false)
+        tutorial.set("rescue_site", Vector3.ZERO)
+        tutorial.set("completed_steps", {
+            "introDoorOpened": true,
+            "introRepairChest": true,
+            "introFenceBuilt": true,
+            "introPerimeterRepaired": true,
+            "introFirstSleep": true,
+            "miraMorningBriefing": true,
+            "nikoBerries": true,
+            "nikoFoodReward": true,
+            "rowanAxe": true,
+            "rowanLogs": true,
+            "rowanLogsReward": true,
+            "rowanPickaxe": true,
+            "rowanStones": true,
+            "rowanBlocks": true,
+            "rowanBlocksReward": true,
+            "seraWeapon": true,
+            "seraWeaponReward": true,
+            "readyForWilds": true
+        })
+        tutorial.set("interacted", {
+            "mira": true,
+            "niko": true,
+            "rowan": true,
+            "sera": true
+        })
+    var granted_items := grant_final_rescue_fixture_items()
+    if main != null:
+        main.set("time_of_day", FOLLOWING_MORNING_TIME + 0.20)
+        if main.has_method("update_sky"):
+            main.call("update_sky", 0.0)
+        if main.has_method("update_objectives_and_contracts"):
+            main.call("update_objectives_and_contracts")
+        var hostile_system = main.get("hostile_system")
+        if hostile_system != null and hostile_system.has_method("clear"):
+            hostile_system.call("clear")
+    report_data["finalRescueFixtureSetup"] = {
+        "stagedPriorQuestState": true,
+        "acceptanceClaimStartsAfterSetup": true,
+        "notAcceptanceForPriorQuests": true,
+        "forcedNpcActions": false,
+        "directFinalNightStart": false,
+        "directRescueEscortStart": false,
+        "directHostileDamage": false,
+        "grantedItems": granted_items,
+        "beforeTutorial": before_state,
+        "afterTutorial": tutorial_state_summary(tutorial),
+        "beforeInventory": before_inventory,
+        "afterInventory": inventory_totals()
+    }
+
+func grant_final_rescue_fixture_items() -> Array[String]:
+    var granted: Array[String] = []
+    var final_rescue_fixture_inventory_system = main.get("inventory_system") if main != null else null
+    if final_rescue_fixture_inventory_system == null:
+        return granted
+    var needed := {
+        "woodenSword": 1,
+        "fieldRation": 1,
+        "torch": 1
+    }
+    for item_id in needed.keys():
+        var current := int(inventory_totals().get(String(item_id), 0))
+        var missing := int(needed[item_id]) - current
+        if missing <= 0:
+            continue
+        final_rescue_fixture_inventory_system.add_item(String(item_id), missing) # final_rescue_fixture_setup_allowance
+        granted.append(String(item_id))
+    return granted
+
+func ensure_player_outside_starter_house_for_final_rescue(tutorial) -> bool:
+    var start_cell := intro_state_cell(tutorial, "startCell", flat_cell(player.global_position))
+    var current_cell := flat_cell(player.global_position)
+    if abs(current_cell.x - start_cell.x) > 8 or current_cell.y <= start_cell.y - 4:
+        return true
+    var starter_door_cell := Vector2i(start_cell.x, start_cell.y - 3)
+    var starter_door := nearest_block("door", world_position_for_flat_cell(starter_door_cell))
+    if starter_door == null or not is_instance_valid(starter_door):
+        add_failure("final_rescue_starter_exit_door_missing", JSON.stringify({
+            "startCell": vec2i(start_cell),
+            "doorCell": vec2i(starter_door_cell),
+            "player": vec3(player.global_position)
+        }))
+        return false
+    if not bool(starter_door.get_meta("open", false)):
+        var opened := await use_block_with_real_action(starter_door, "final_rescue_starter_exit_door", CELL * 1.85, 14.0)
+        if not opened:
+            return false
+        await wait_physics_frames(POST_ACTION_FRAMES)
+    var exit_cell := Vector2i(start_cell.x, start_cell.y - 5)
+    var reached_exit := await walk_intro_waypoints(
+        [Vector2i(start_cell.x, start_cell.y - 1), starter_door_cell, exit_cell],
+        "final_rescue_starter_exit",
+        CELL * 1.05,
+        14.0
+    )
+    interaction_timeline.append({
+        "label": "final_rescue_starter_house_exit",
+        "player": vec3(player.global_position),
+        "startCell": vec2i(start_cell),
+        "door": block_summary(starter_door),
+        "exitCell": vec2i(exit_cell),
+        "reached": reached_exit
+    })
+    if not reached_exit:
+        return false
+    await wait_physics_frames(POST_ACTION_FRAMES)
+    return true
 
 func observe_following_morning_outside_targets(seconds: float) -> void:
     var frame_count := ceili(seconds * float(Engine.physics_ticks_per_second))
@@ -254,7 +446,7 @@ func observe_following_morning_outside_targets(seconds: float) -> void:
         "captures": capture_names(),
         "targets": morning_outside_visual_matrix
     })
-    report_data["timeline"] = morning_observation_timeline
+    report_data["timeline"] = final_rescue_timeline if final_rescue_tutorial else morning_observation_timeline
     if visual_required and (not group_capture_saved or not morning_outside_captures_saved(capture_map)):
         add_failure("following_morning_visual_captures_missing", JSON.stringify({
             "groupCaptureSaved": group_capture_saved,
@@ -461,6 +653,11 @@ func run_real_knock_to_morning_foragers() -> void:
     if day_one_tutorial:
         mark_progress("running_day_one_tutorial")
         await run_day_one_tutorial(tutorial)
+        if failed:
+            return
+        if final_rescue_tutorial:
+            mark_progress("running_final_rescue_tutorial")
+            await run_final_rescue_tutorial(tutorial)
         return
 
     mark_progress("observing_morning_foragers")
@@ -1521,6 +1718,942 @@ func run_day_one_tutorial(tutorial) -> void:
             str(steps.has("rowanStones"))
         ]
     })
+
+func run_final_rescue_tutorial(tutorial) -> void:
+    var started_at := elapsed
+    record_final_rescue_step("final_rescue_start", tutorial)
+    if not tutorial_step_completed(tutorial, "readyForWilds"):
+        add_failure("final_rescue_not_ready_for_wilds", JSON.stringify(final_rescue_snapshot(tutorial)))
+        return
+
+    await talk_to_tutorial_npc("mira", "final_rescue_mira_briefing", 70.0)
+    if failed:
+        return
+    await wait_physics_frames(POST_ACTION_FRAMES)
+    var after_mira := final_rescue_state_summary(tutorial)
+    record_final_rescue_step("final_rescue_mira_briefing", tutorial, { "state": after_mira })
+    if full_player_pov_visual_mode():
+        await capture_player_pov_stage("player_pov_final_rescue_mira_briefing", null, final_rescue_snapshot(tutorial))
+    if not bool(after_mira.get("finalNightActive", false)) or int(after_mira.get("rescueRemaining", 0)) <= 0:
+        add_failure("final_rescue_mira_did_not_start_final_night", JSON.stringify(after_mira))
+        return
+    var staged_hostiles := final_rescue_snapshot(tutorial)
+    var staged_assertion := rescue_hostile_phase_assertion(staged_hostiles, "circle_niko", false, false)
+    report_data["finalRescuePreBattleHostileProof"] = staged_assertion
+    record_final_rescue_step("final_rescue_hostiles_staged_circling", tutorial, { "phaseProof": staged_assertion })
+    if not bool(staged_assertion.get("ok", false)):
+        add_failure("final_rescue_hostiles_not_staged_before_battle", JSON.stringify(staged_assertion))
+        return
+
+    await talk_to_tutorial_npc("sera", "final_rescue_sera_escort", 70.0)
+    if failed:
+        return
+    await wait_physics_frames(POST_ACTION_FRAMES)
+    var after_sera := final_rescue_state_summary(tutorial)
+    record_final_rescue_step("final_rescue_sera_escort_started", tutorial, { "state": after_sera })
+    var escort_speed := final_rescue_speed_phase_snapshot("escort_outbound")
+    final_rescue_speed_proofs.append(escort_speed)
+    report_data["finalRescueSpeedProofs"] = final_rescue_speed_proofs
+    if full_player_pov_visual_mode():
+        await capture_player_pov_stage("player_pov_final_rescue_sera_escort", npc_target_position("sera"), final_rescue_snapshot(tutorial))
+    if not bool(after_sera.get("rescueEscortStarted", false)):
+        add_failure("final_rescue_sera_did_not_start_escort", JSON.stringify(after_sera))
+        return
+    if not bool((escort_speed.get("seraSprintToNiko", {}) as Dictionary).get("ok", false)):
+        add_failure("final_rescue_sera_not_sprinting_to_niko", JSON.stringify(escort_speed))
+        return
+
+    var gate_opened := await open_final_rescue_gate(tutorial)
+    if failed or not gate_opened:
+        return
+
+    var rescue_site := final_rescue_site(tutorial)
+    if rescue_site == Vector3.ZERO:
+        add_failure("final_rescue_site_missing", JSON.stringify(final_rescue_snapshot(tutorial)))
+        return
+    var reached_site := await walk_final_rescue_route_to_site(tutorial, rescue_site, CELL * 3.0, 95.0)
+    record_final_rescue_step("final_rescue_site_arrival", tutorial, {
+        "reachedSite": reached_site,
+        "rescueSite": vec3(rescue_site),
+        "player": vec3(player.global_position)
+    })
+    if full_player_pov_visual_mode():
+        await capture_player_pov_stage("player_pov_final_rescue_site_arrival", rescue_site + Vector3(0.0, CELL * 0.85, 0.0), final_rescue_snapshot(tutorial))
+    if not reached_site:
+        add_failure("final_rescue_site_not_reached", JSON.stringify(final_rescue_snapshot(tutorial)))
+        return
+    var sera_approached := await wait_for_sera_rescue_approach(tutorial, rescue_site, 32.0)
+    if full_player_pov_visual_mode() and sera_approached:
+        await capture_player_pov_stage("player_pov_final_rescue_sera_at_site", npc_target_position("sera"), final_rescue_snapshot(tutorial))
+    if not sera_approached:
+        return
+    var sera_attacked := await wait_for_sera_rescue_attack(tutorial, 12.0)
+    if full_player_pov_visual_mode() and sera_attacked:
+        await capture_player_pov_stage("player_pov_final_rescue_sera_attack", npc_target_position("sera"), final_rescue_snapshot(tutorial))
+    if not sera_attacked:
+        return
+    var battle_assertion := rescue_hostile_battle_assertion(final_rescue_snapshot(tutorial))
+    report_data["finalRescueBattleCommencedProof"] = battle_assertion
+    record_final_rescue_step("final_rescue_battle_commenced", tutorial, { "phaseProof": battle_assertion })
+    if not bool(battle_assertion.get("ok", false)):
+        add_failure("final_rescue_battle_not_commenced_by_allowed_actor", JSON.stringify(battle_assertion))
+        return
+    await maybe_record_rescue_hostile_npc_target(tutorial, true)
+
+    await defeat_rescue_hostiles_with_player_input(tutorial, 155.0)
+    if failed:
+        return
+    if not report_data.has("finalRescueHostileNpcTargetProof"):
+        add_failure("final_rescue_hostiles_did_not_target_npcs", JSON.stringify({
+            "snapshot": final_rescue_snapshot(tutorial),
+            "combatEvents": final_rescue_combat_events
+        }))
+        return
+    var after_combat := final_rescue_state_summary(tutorial)
+    record_final_rescue_step("final_rescue_hostiles_defeated", tutorial, { "state": after_combat })
+    if full_player_pov_visual_mode():
+        await capture_player_pov_stage("player_pov_final_rescue_combat_complete", npc_target_position("niko"), final_rescue_snapshot(tutorial))
+    if int(after_combat.get("rescueRemaining", 0)) > 0:
+        add_failure("final_rescue_hostiles_remaining_after_combat", JSON.stringify(after_combat))
+        return
+
+    await wait_for_final_rescue_return(tutorial, maxf(55.0, FINAL_RESCUE_TIMEOUT_SECONDS - (elapsed - started_at)))
+    if failed:
+        return
+    await wait_for_final_rescue_normal_behavior(tutorial, 150.0)
+    if failed:
+        return
+    var final_state := final_rescue_state_summary(tutorial)
+    report_data["finalRescueProof"] = final_rescue_snapshot(tutorial)
+    if not bool(final_state.get("finalNightComplete", false)):
+        add_failure("final_rescue_not_completed", JSON.stringify(final_state))
+        return
+    if not tutorial_step_completed(tutorial, "finalNightComplete"):
+        add_failure("final_rescue_step_missing", JSON.stringify(final_state))
+        return
+    results.append({
+        "name": "tutorial_final_rescue_real_player_pov",
+        "passed": true,
+        "details": "Mira briefing, Sera escort, gate crossing, %d hostile defeats, Niko returned home, and Sera resumed guard duty through live player/NPC systems; captures=%s" % [
+            int(final_state.get("finalNightDefeats", final_rescue_combat_events.size())),
+            JSON.stringify(capture_names())
+        ]
+    })
+
+func record_final_rescue_step(label: String, tutorial, extra: Dictionary = {}) -> void:
+    var row := final_rescue_snapshot(tutorial)
+    row["label"] = label
+    row["time"] = rounded(elapsed)
+    for key in extra.keys():
+        row[key] = extra[key]
+    final_rescue_timeline.append(row)
+    report_data["finalRescueTimeline"] = final_rescue_timeline
+    report_data["finalRescueCombatEvents"] = final_rescue_combat_events
+
+func final_rescue_snapshot(tutorial) -> Dictionary:
+    return {
+        "state": final_rescue_state_summary(tutorial),
+        "completedSteps": tutorial_completed_steps(tutorial),
+        "inventory": inventory_totals(),
+        "survival": survival_snapshot(),
+        "mira": npc_summary(npc_entry("mira")) if not npc_entry("mira").is_empty() else {},
+        "niko": npc_summary(npc_entry("niko")) if not npc_entry("niko").is_empty() else {},
+        "sera": npc_summary(npc_entry("sera")) if not npc_entry("sera").is_empty() else {},
+        "hostiles": rescue_hostile_summaries(),
+        "hostileStats": hostile_stats_summary(),
+        "combatEvents": final_rescue_combat_events.duplicate(true)
+    }
+
+func final_rescue_state_summary(tutorial) -> Dictionary:
+    if tutorial == null or not tutorial.has_method("state"):
+        return {}
+    var state: Dictionary = tutorial.call("state")
+    return {
+        "stage": String(state.get("tutorialStage", "")),
+        "finalNightActive": bool(state.get("finalNightActive", false)),
+        "finalNightComplete": bool(state.get("finalNightComplete", false)),
+        "finalNightDefeats": int(state.get("finalNightDefeats", 0)),
+        "rescueEscortStarted": bool(state.get("rescueEscortStarted", false)),
+        "rescueReturning": bool(state.get("rescueReturning", false)),
+        "rescueRemaining": int(state.get("rescueRemaining", 0)),
+        "rescueRequired": int(state.get("rescueRequired", FINAL_RESCUE_MONSTER_COUNT)),
+        "rescueSite": vec3(state.get("rescueSite", Vector3.ZERO)),
+        "timeOfDay": rounded(float(main.get("time_of_day"))) if main != null else 0.0,
+        "displayHour": rounded(clock_display_hour())
+    }
+
+func final_rescue_site(tutorial) -> Vector3:
+    if tutorial == null or not tutorial.has_method("state"):
+        return Vector3.ZERO
+    var state: Dictionary = tutorial.call("state")
+    var value = state.get("rescueSite", Vector3.ZERO)
+    if value is Vector3:
+        return value
+    return Vector3.ZERO
+
+func open_final_rescue_gate(tutorial) -> bool:
+    var state: Dictionary = tutorial.call("state") if tutorial != null and tutorial.has_method("state") else {}
+    var town_center: Vector2i = state.get("townCenter", flat_cell(player.global_position))
+    var gate_position := world_position_for_flat_cell(Vector2i(town_center.x + TUTORIAL_REPAIR_RADIUS_CELLS, town_center.y))
+    var gate := nearest_block("door", gate_position)
+    if gate == null or not is_instance_valid(gate):
+        add_failure("final_rescue_gate_missing", JSON.stringify({
+            "gatePosition": vec3(gate_position),
+            "townCenter": vec2i(town_center)
+        }))
+        return false
+    var reached := await walk_tutorial_route_near(gate.global_position, CELL * 1.65, 36.0, "walking_to_final_rescue_gate")
+    if not reached:
+        add_failure("final_rescue_gate_not_reached", JSON.stringify({
+            "gate": block_summary(gate),
+            "player": vec3(player.global_position)
+        }))
+        return false
+    if not bool(gate.get_meta("open", false)):
+        var hit := await aim_until_interaction_hit(gate, "final_rescue_gate")
+        if not interaction_hit_matches_block(hit, gate):
+            add_failure("final_rescue_gate_aim_miss", JSON.stringify({
+                "gate": block_summary(gate),
+                "hit": hit,
+                "player": vec3(player.global_position)
+            }))
+            return false
+        dispatch_mouse_button(MOUSE_BUTTON_RIGHT, true)
+        dispatch_mouse_button(MOUSE_BUTTON_RIGHT, false)
+        await wait_physics_frames(POST_ACTION_FRAMES)
+    var opened := bool(gate.get_meta("open", false))
+    record_final_rescue_step("final_rescue_gate_open", tutorial, {
+        "gate": block_summary(gate),
+        "opened": opened,
+        "player": vec3(player.global_position)
+    })
+    if full_player_pov_visual_mode():
+        await capture_player_pov_stage("player_pov_final_rescue_gate_open", gate.global_position + Vector3(0.0, CELL * 0.75, 0.0), final_rescue_snapshot(tutorial))
+    if not opened:
+        add_failure("final_rescue_gate_did_not_open", JSON.stringify(block_summary(gate)))
+        return false
+    return true
+
+func walk_final_rescue_route_to_site(tutorial, rescue_site: Vector3, stop_distance: float, timeout_seconds: float) -> bool:
+    var state: Dictionary = tutorial.call("state") if tutorial != null and tutorial.has_method("state") else {}
+    var town_center: Vector2i = state.get("townCenter", flat_cell(player.global_position))
+    var target_cell := flat_cell(rescue_site)
+    var route_cells: Array[Vector2i] = [
+        Vector2i(town_center.x + TUTORIAL_REPAIR_RADIUS_CELLS - 2, town_center.y),
+        Vector2i(town_center.x + TUTORIAL_REPAIR_RADIUS_CELLS + 2, town_center.y),
+        Vector2i(target_cell.x, town_center.y),
+        target_cell
+    ]
+    var started_at := elapsed
+    for index in range(route_cells.size()):
+        var remaining := timeout_seconds - (elapsed - started_at)
+        if remaining <= 0.0:
+            return false
+        var cell := route_cells[index]
+        var waypoint_position := world_position_for_flat_cell(cell)
+        var waypoint_stop := stop_distance if index == route_cells.size() - 1 else CELL * 1.2
+        var reached := await walk_near(waypoint_position, waypoint_stop, minf(remaining, 28.0), "walking_final_rescue_route_%02d_%d_%d" % [index, cell.x, cell.y])
+        var encounter_reached := player_near_active_rescue_fight(tutorial, rescue_site)
+        record_final_rescue_step("final_rescue_route_%02d" % index, tutorial, {
+            "cell": vec2i(cell),
+            "reached": reached,
+            "encounterReached": encounter_reached,
+            "player": vec3(player.global_position)
+        })
+        if encounter_reached:
+            report_data["finalRescuePlayerEncounterReachProof"] = final_rescue_snapshot(tutorial)
+            return true
+        if not reached:
+            return false
+    if flat_distance(player.global_position, rescue_site) <= stop_distance:
+        return true
+    var final_encounter_reached := player_near_active_rescue_fight(tutorial, rescue_site)
+    if final_encounter_reached:
+        report_data["finalRescuePlayerEncounterReachProof"] = final_rescue_snapshot(tutorial)
+    return final_encounter_reached
+
+func player_near_active_rescue_fight(tutorial, rescue_site: Vector3) -> bool:
+    var row := final_rescue_snapshot(tutorial)
+    if not rescue_hostiles_engaging_sera(row):
+        return false
+    var nearest := nearest_rescue_hostile_body(alive_rescue_hostile_bodies())
+    if nearest != null and is_instance_valid(nearest) and flat_distance(player.global_position, nearest.global_position) <= CELL * 9.5:
+        return true
+    return flat_distance(player.global_position, rescue_site) <= CELL * 10.0
+
+func wait_for_sera_rescue_approach(tutorial, rescue_site: Vector3, timeout_seconds: float) -> bool:
+    var started_at := elapsed
+    var saw_beyond_gate := false
+    var best_distance := INF
+    var best_row := {}
+    while elapsed - started_at < timeout_seconds:
+        await get_tree().physics_frame
+        if int(Engine.get_physics_frames()) % SAMPLE_EVERY_FRAMES != 0:
+            continue
+        var row := final_rescue_sera_approach_snapshot(tutorial, rescue_site)
+        row["label"] = "final_rescue_sera_approach_%03d" % final_rescue_timeline.size()
+        row["time"] = rounded(elapsed)
+        final_rescue_timeline.append(row)
+        report_data["finalRescueTimeline"] = final_rescue_timeline
+        saw_beyond_gate = saw_beyond_gate or bool(row.get("beyondEastGate", false))
+        var distance := float(row.get("distanceToRescueSite", INF))
+        if distance < best_distance:
+            best_distance = distance
+            best_row = row
+        var engaged_at_rescue_edge := rescue_hostiles_engaging_sera(row)
+        if saw_beyond_gate and bool(row.get("sprinting", false)) and (bool(row.get("nearRescueSite", false)) or engaged_at_rescue_edge):
+            row["sawBeyondEastGate"] = saw_beyond_gate
+            row["engagedAtRescueEdge"] = engaged_at_rescue_edge
+            report_data["finalRescueSeraApproachProof"] = row
+            record_final_rescue_step("final_rescue_sera_reached_rescue_site", tutorial, row)
+            return true
+        mark_progress("final_rescue_sera_approach")
+    var failure := {
+        "sawBeyondEastGate": saw_beyond_gate,
+        "bestDistanceToRescueSite": rounded(best_distance),
+        "bestRow": best_row,
+        "snapshot": final_rescue_snapshot(tutorial)
+    }
+    report_data["finalRescueSeraApproachProof"] = failure
+    add_failure("final_rescue_sera_did_not_approach_niko", JSON.stringify(failure))
+    return false
+
+func rescue_hostiles_engaging_sera(row: Dictionary) -> bool:
+    var sera: Dictionary = row.get("sera", {}) if row.get("sera", {}) is Dictionary else {}
+    if int(sera.get("guardShots", 0)) > 0 or int(sera.get("guardMeleeStrikes", 0)) > 0:
+        return true
+    if int(sera.get("hostileTargetedCount", 0)) > 0 or int(sera.get("hostileProjectileHits", 0)) > 0:
+        return true
+    var hostiles: Array = row.get("hostiles", []) if row.get("hostiles", []) is Array else []
+    for hostile_value in hostiles:
+        var hostile: Dictionary = hostile_value if hostile_value is Dictionary else {}
+        if String(hostile.get("targetName", "")).to_lower().find("sera") >= 0:
+            return true
+    return false
+
+func wait_for_sera_rescue_attack(tutorial, timeout_seconds: float) -> bool:
+    var started_at := elapsed
+    var best_row := {}
+    while elapsed - started_at < timeout_seconds:
+        await get_tree().physics_frame
+        if int(Engine.get_physics_frames()) % SAMPLE_EVERY_FRAMES != 0:
+            continue
+        var entry := npc_entry("sera")
+        var row := final_rescue_snapshot(tutorial)
+        var sera_summary := npc_summary(entry) if not entry.is_empty() else {}
+        row["label"] = "final_rescue_sera_attack_%03d" % final_rescue_timeline.size()
+        row["time"] = rounded(elapsed)
+        row["sera"] = sera_summary
+        final_rescue_timeline.append(row)
+        report_data["finalRescueTimeline"] = final_rescue_timeline
+        best_row = row
+        if int(sera_summary.get("guardShots", 0)) > 0 or int(sera_summary.get("guardMeleeStrikes", 0)) > 0:
+            report_data["finalRescueSeraAttackProof"] = row
+            record_final_rescue_step("final_rescue_sera_attacked_hostile", tutorial, row)
+            return true
+        mark_progress("final_rescue_sera_attack")
+    var failure := {
+        "snapshot": final_rescue_snapshot(tutorial),
+        "lastRow": best_row
+    }
+    report_data["finalRescueSeraAttackProof"] = failure
+    add_failure("final_rescue_sera_did_not_attack_hostile", JSON.stringify(failure))
+    return false
+
+func wait_for_rescue_hostile_npc_target(tutorial, timeout_seconds: float) -> bool:
+    var started_at := elapsed
+    var best_row := {}
+    while elapsed - started_at < timeout_seconds:
+        await get_tree().physics_frame
+        if int(Engine.get_physics_frames()) % SAMPLE_EVERY_FRAMES != 0:
+            continue
+        var row := final_rescue_snapshot(tutorial)
+        row["label"] = "final_rescue_hostile_npc_target_%03d" % final_rescue_timeline.size()
+        row["time"] = rounded(elapsed)
+        final_rescue_timeline.append(row)
+        report_data["finalRescueTimeline"] = final_rescue_timeline
+        best_row = row
+        if rescue_hostiles_targeting_npcs(row):
+            report_data["finalRescueHostileNpcTargetProof"] = row
+            record_final_rescue_step("final_rescue_hostiles_targeted_npc", tutorial, row)
+            return true
+        mark_progress("final_rescue_hostile_npc_target")
+    var failure := {
+        "snapshot": final_rescue_snapshot(tutorial),
+        "lastRow": best_row
+    }
+    report_data["finalRescueHostileNpcTargetProof"] = failure
+    add_failure("final_rescue_hostiles_did_not_target_npcs", JSON.stringify(failure))
+    return false
+
+func maybe_record_rescue_hostile_npc_target(tutorial, capture_on_seen := false) -> bool:
+    if report_data.has("finalRescueHostileNpcTargetProof"):
+        return true
+    var row := final_rescue_snapshot(tutorial)
+    row["label"] = "final_rescue_hostile_npc_target_%03d" % final_rescue_timeline.size()
+    row["time"] = rounded(elapsed)
+    final_rescue_timeline.append(row)
+    report_data["finalRescueTimeline"] = final_rescue_timeline
+    if not rescue_hostiles_targeting_npcs(row):
+        return false
+    report_data["finalRescueHostileNpcTargetProof"] = row
+    record_final_rescue_step("final_rescue_hostiles_targeted_npc", tutorial, row)
+    if capture_on_seen and full_player_pov_visual_mode():
+        await capture_player_pov_stage("player_pov_final_rescue_hostiles_target_npc", npc_target_position("sera"), final_rescue_snapshot(tutorial))
+    return true
+
+func rescue_hostiles_targeting_npcs(row: Dictionary) -> bool:
+    var hostiles: Array = row.get("hostiles", [])
+    for hostile_value in hostiles:
+        var hostile: Dictionary = hostile_value if hostile_value is Dictionary else {}
+        if String(hostile.get("targetKind", "")) in ["npc", "tutorial_npc"]:
+            return true
+    for npc_id in ["sera", "niko"]:
+        var summary: Dictionary = row.get(npc_id, {}) if row.get(npc_id, {}) is Dictionary else {}
+        if int(summary.get("hostileTargetedCount", 0)) > 0 or int(summary.get("hostileProjectileHits", 0)) > 0:
+            return true
+    var stats: Dictionary = row.get("hostileStats", {}) if row.get("hostileStats", {}) is Dictionary else {}
+    return int(stats.get("hostileNpcTargetAttacks", 0)) > 0 or int(stats.get("hostileNpcTargetProjectiles", 0)) > 0
+
+func rescue_hostile_phase_assertion(row: Dictionary, expected_phase: String, expected_damageable: bool, expected_can_attack: bool) -> Dictionary:
+    var hostiles: Array = row.get("hostiles", [])
+    var violations: Array[Dictionary] = []
+    for hostile_value in hostiles:
+        var hostile: Dictionary = hostile_value if hostile_value is Dictionary else {}
+        var hostile_violation := {
+            "name": String(hostile.get("name", "")),
+            "phase": String(hostile.get("scriptedPhase", "")),
+            "damageable": bool(hostile.get("damageable", true)),
+            "canAttack": bool(hostile.get("canAttack", true)),
+            "targetKind": String(hostile.get("targetKind", "")),
+            "targetName": String(hostile.get("targetName", ""))
+        }
+        if (
+            String(hostile.get("scriptedPhase", "")) != expected_phase
+            or bool(hostile.get("damageable", true)) != expected_damageable
+            or bool(hostile.get("canAttack", true)) != expected_can_attack
+        ):
+            violations.append(hostile_violation)
+    return {
+        "ok": hostiles.size() == FINAL_RESCUE_MONSTER_COUNT and violations.is_empty(),
+        "requires": "%d rescue hostiles phase=%s damageable=%s canAttack=%s" % [
+            FINAL_RESCUE_MONSTER_COUNT,
+            expected_phase,
+            str(expected_damageable),
+            str(expected_can_attack)
+        ],
+        "count": hostiles.size(),
+        "violations": violations,
+        "hostiles": hostiles
+    }
+
+func rescue_hostile_battle_assertion(row: Dictionary) -> Dictionary:
+    var hostiles: Array = row.get("hostiles", [])
+    var phase_violations: Array[Dictionary] = []
+    var invalid_starters: Array[Dictionary] = []
+    for hostile_value in hostiles:
+        var hostile: Dictionary = hostile_value if hostile_value is Dictionary else {}
+        if (
+            String(hostile.get("scriptedPhase", "")) != "battle"
+            or not bool(hostile.get("damageable", false))
+            or not bool(hostile.get("canAttack", false))
+        ):
+            phase_violations.append({
+                "name": String(hostile.get("name", "")),
+                "phase": String(hostile.get("scriptedPhase", "")),
+                "damageable": bool(hostile.get("damageable", false)),
+                "canAttack": bool(hostile.get("canAttack", false))
+            })
+        var started_by := String(hostile.get("battleStartedBy", ""))
+        if not (started_by in ["player", "sera"]):
+            invalid_starters.append({
+                "name": String(hostile.get("name", "")),
+                "battleStartedBy": started_by,
+                "phase": String(hostile.get("scriptedPhase", ""))
+            })
+    var stats: Dictionary = row.get("hostileStats", {}) if row.get("hostileStats", {}) is Dictionary else {}
+    return {
+        "ok": hostiles.size() > 0 and phase_violations.is_empty() and invalid_starters.is_empty() and int(stats.get("scriptedBattleStarts", 0)) > 0,
+        "requires": "all remaining rescue hostiles entered battle, became damageable, can attack, and battleStartedBy is player or sera",
+        "remainingCount": hostiles.size(),
+        "phaseViolations": phase_violations,
+        "invalidStarters": invalid_starters,
+        "hostileStats": stats
+    }
+
+func final_rescue_sera_approach_snapshot(tutorial, rescue_site: Vector3) -> Dictionary:
+    var state: Dictionary = tutorial.call("state") if tutorial != null and tutorial.has_method("state") else {}
+    var town_center: Vector2i = state.get("townCenter", flat_cell(player.global_position))
+    var entry := npc_entry("sera")
+    var body := entry.get("body") as Node3D
+    var position := body.global_position if body != null and is_instance_valid(body) else Vector3.ZERO
+    var cell := flat_cell(position)
+    var beyond_gate := cell.x > town_center.x + TUTORIAL_REPAIR_RADIUS_CELLS
+    var outside_perimeter := absi(cell.x - town_center.x) > TUTORIAL_REPAIR_RADIUS_CELLS or absi(cell.y - town_center.y) > TUTORIAL_REPAIR_RADIUS_CELLS
+    var distance := flat_distance(position, rescue_site) if body != null and is_instance_valid(body) else INF
+    var summary := npc_summary(entry) if not entry.is_empty() else {}
+    return {
+        "state": final_rescue_state_summary(tutorial),
+        "townCenter": vec2i(town_center),
+        "eastGateCell": vec2i(Vector2i(town_center.x + TUTORIAL_REPAIR_RADIUS_CELLS, town_center.y)),
+        "rescueSite": vec3(rescue_site),
+        "seraCell": vec2i(cell),
+        "seraPosition": vec3(position),
+        "beyondEastGate": beyond_gate,
+        "outsidePerimeter": outside_perimeter,
+        "nearRescueSite": distance <= CELL * 4.2,
+        "distanceToRescueSite": rounded(distance),
+        "sprinting": String(summary.get("npcSpeedMode", "")) == "sprinting" or String(summary.get("scriptedSpeedMode", "")) == "sprinting",
+        "sera": summary
+    }
+
+func defeat_rescue_hostiles_with_player_input(tutorial, timeout_seconds: float) -> void:
+    var selected_sword := await select_hotbar_item("woodenSword")
+    if not selected_sword:
+        add_failure("final_rescue_sword_not_selectable", JSON.stringify({
+            "inventory": inventory_totals(),
+            "active": active_stack_summary()
+        }))
+        return
+    var started_at := elapsed
+    var captured_combat := false
+    var previous_remaining := alive_rescue_hostile_bodies().size()
+    while elapsed - started_at < timeout_seconds:
+        var bodies := alive_rescue_hostile_bodies()
+        if bodies.is_empty():
+            break
+        await maybe_use_field_ration_for_rescue()
+        var target := nearest_rescue_hostile_body(bodies)
+        if target == null or not is_instance_valid(target):
+            await wait_physics_frames(POST_ACTION_FRAMES)
+            continue
+        await maybe_record_rescue_hostile_npc_target(tutorial, true)
+        var reached := await walk_near(target.global_position, CELL * 1.35, 8.0, "walking_to_final_rescue_hostile")
+        var defeated := await attack_rescue_hostile_with_player_input(target, "final_rescue_hostile_%02d" % final_rescue_combat_events.size())
+        var remaining := alive_rescue_hostile_bodies().size()
+        record_final_rescue_step("final_rescue_combat_%02d" % final_rescue_combat_events.size(), tutorial, {
+            "targetReached": reached,
+            "defeated": defeated,
+            "remainingBefore": previous_remaining,
+            "remainingAfter": remaining
+        })
+        if full_player_pov_visual_mode() and not captured_combat:
+            captured_combat = await capture_player_pov_stage("player_pov_final_rescue_combat", npc_target_position("niko"), final_rescue_snapshot(tutorial))
+        previous_remaining = remaining
+        if survival_health() <= 0.0:
+            add_failure("final_rescue_player_collapsed", JSON.stringify(final_rescue_snapshot(tutorial)))
+            return
+    var remaining_after := alive_rescue_hostile_bodies().size()
+    if remaining_after > 0:
+        add_failure("final_rescue_hostiles_not_defeated", JSON.stringify({
+            "remaining": remaining_after,
+            "snapshot": final_rescue_snapshot(tutorial)
+        }))
+
+func attack_rescue_hostile_with_player_input(target: Node3D, label: String) -> bool:
+    var started_at := elapsed
+    var attempts := 0
+    while elapsed - started_at < 15.0 and hostile_body_alive(target):
+        var target_position := target.global_position + Vector3(0.0, CELL * 0.65, 0.0)
+        if flat_distance(player.global_position, target.global_position) > CELL * 1.55:
+            await walk_near(target.global_position, CELL * 1.25, 3.0, "closing_%s" % label)
+        aim_at(target_position)
+        await wait_physics_frames(3)
+        var before_hit := combat_hit_summary()
+        dispatch_mouse_button(MOUSE_BUTTON_LEFT, true)
+        await wait_physics_frames(2)
+        dispatch_mouse_button(MOUSE_BUTTON_LEFT, false)
+        await wait_physics_frames(12)
+        var alive_after := hostile_body_alive(target)
+        attempts += 1
+        final_rescue_combat_events.append({
+            "label": label,
+            "attempt": attempts,
+            "time": rounded(elapsed),
+            "hitBeforeAttack": before_hit,
+            "targetPosition": vec3(target.global_position) if is_instance_valid(target) else [],
+            "aliveAfter": alive_after,
+            "remainingAfter": alive_rescue_hostile_bodies().size(),
+            "survival": survival_snapshot(),
+            "activeItem": active_stack_summary()
+        })
+        report_data["finalRescueCombatEvents"] = final_rescue_combat_events
+        if not alive_after:
+            return true
+    return not hostile_body_alive(target)
+
+func wait_for_final_rescue_return(tutorial, timeout_seconds: float) -> void:
+    var started_at := elapsed
+    var saw_returning := false
+    var captured_returning := false
+    var niko_sprint_home_ok := false
+    var sera_walk_home_ok := false
+    var return_stall_samples := { "niko": 0, "sera": 0 }
+    while elapsed - started_at < timeout_seconds:
+        await get_tree().physics_frame
+        if int(Engine.get_physics_frames()) % SAMPLE_EVERY_FRAMES != 0:
+            continue
+        var state := final_rescue_state_summary(tutorial)
+        var row := final_rescue_snapshot(tutorial)
+        row["label"] = "final_rescue_return_%03d" % final_rescue_timeline.size()
+        row["time"] = rounded(elapsed)
+        final_rescue_timeline.append(row)
+        report_data["finalRescueTimeline"] = final_rescue_timeline
+        if final_rescue_timeline.size() % 12 == 0:
+            save_live_report_checkpoint("final_rescue_return")
+        var stall_failure := final_rescue_return_stall_failure(row, return_stall_samples)
+        if not stall_failure.is_empty():
+            add_failure("final_rescue_return_actor_stalled", JSON.stringify(stall_failure))
+            return
+        if bool(state.get("rescueReturning", false)):
+            saw_returning = true
+            var speed_proof := final_rescue_speed_phase_snapshot("return_home")
+            final_rescue_speed_proofs.append(speed_proof)
+            report_data["finalRescueSpeedProofs"] = final_rescue_speed_proofs
+            niko_sprint_home_ok = niko_sprint_home_ok or bool((speed_proof.get("nikoSprintHome", {}) as Dictionary).get("ok", false))
+            sera_walk_home_ok = sera_walk_home_ok or bool((speed_proof.get("seraWalkHome", {}) as Dictionary).get("ok", false))
+            if full_player_pov_visual_mode() and not captured_returning:
+                captured_returning = await capture_player_pov_stage("player_pov_final_rescue_niko_returning", npc_target_position("niko"), final_rescue_snapshot(tutorial))
+        if bool(state.get("finalNightComplete", false)):
+            if not niko_sprint_home_ok or not sera_walk_home_ok:
+                add_failure("final_rescue_return_speed_modes_not_verified", JSON.stringify({
+                    "nikoSprintHomeOk": niko_sprint_home_ok,
+                    "seraWalkHomeOk": sera_walk_home_ok,
+                    "proofs": final_rescue_speed_proofs
+                }))
+                return
+            if full_player_pov_visual_mode():
+                await capture_player_pov_stage("player_pov_final_rescue_complete", npc_target_position("niko"), final_rescue_snapshot(tutorial))
+            return
+        mark_progress("final_rescue_returning")
+    if not saw_returning:
+        add_failure("final_rescue_return_never_started", JSON.stringify(final_rescue_snapshot(tutorial)))
+        return
+    if not niko_sprint_home_ok or not sera_walk_home_ok:
+        add_failure("final_rescue_return_speed_modes_not_verified", JSON.stringify({
+            "nikoSprintHomeOk": niko_sprint_home_ok,
+            "seraWalkHomeOk": sera_walk_home_ok,
+            "proofs": final_rescue_speed_proofs
+        }))
+        return
+    add_failure("final_rescue_party_did_not_return", JSON.stringify(final_rescue_snapshot(tutorial)))
+
+func final_rescue_return_stall_failure(row: Dictionary, counters: Dictionary) -> Dictionary:
+    for npc_id in ["niko", "sera"]:
+        var summary: Dictionary = row.get(npc_id, {}) if row.get(npc_id, {}) is Dictionary else {}
+        if summary.is_empty():
+            continue
+        var done := final_rescue_return_actor_done(npc_id, summary)
+        var moved := float(summary.get("lastMoveDistance", 0.0))
+        var route_status := String(summary.get("routeStatus", ""))
+        var active_return := not done and route_status != "arrived"
+        if active_return and moved <= 0.005:
+            counters[npc_id] = int(counters.get(npc_id, 0)) + 1
+        else:
+            counters[npc_id] = 0
+        if int(counters.get(npc_id, 0)) >= FINAL_RESCUE_RETURN_STALL_SAMPLES:
+            return {
+                "npcId": npc_id,
+                "sampleCount": int(counters.get(npc_id, 0)),
+                "seconds": rounded(float(counters.get(npc_id, 0)) * float(SAMPLE_EVERY_FRAMES) / float(Engine.physics_ticks_per_second)),
+                "routeStatus": route_status,
+                "routeReason": String(summary.get("routeReason", "")),
+                "cell": summary.get("cell", []),
+                "position": summary.get("position", []),
+                "lastMoveDistance": moved,
+                "motorRequestedVelocity": summary.get("motorRequestedVelocity", []),
+                "motorBlockedContactKind": String(summary.get("motorBlockedContactKind", "")),
+                "motorBlockedContactName": String(summary.get("motorBlockedContactName", "")),
+                "corridorFollow": summary.get("corridorFollow", {}),
+                "corridorProgress": summary.get("corridorProgress", {}),
+                "row": row
+            }
+    return {}
+
+func final_rescue_return_actor_done(npc_id: String, summary: Dictionary) -> bool:
+    if npc_id == "niko":
+        return bool(summary.get("strictInsideHome", false))
+    if npc_id == "sera":
+        return String(summary.get("routeStatus", "")) == "arrived"
+    return false
+
+func final_rescue_speed_phase_snapshot(label: String) -> Dictionary:
+    var sera_sprint := npc_speed_mode_assertion("sera", "sprinting")
+    var niko_sprint := npc_speed_mode_assertion("niko", "sprinting")
+    var sera_walk := npc_speed_mode_assertion("sera", "walking")
+    return {
+        "label": label,
+        "time": rounded(elapsed),
+        "seraSprintToNiko": sera_sprint,
+        "nikoSprintHome": niko_sprint,
+        "seraWalkHome": sera_walk,
+        "niko": npc_summary(npc_entry("niko")) if not npc_entry("niko").is_empty() else {},
+        "sera": npc_summary(npc_entry("sera")) if not npc_entry("sera").is_empty() else {}
+    }
+
+func npc_speed_mode_assertion(npc_id: String, expected_mode: String) -> Dictionary:
+    var entry := npc_entry(npc_id)
+    if entry.is_empty():
+        return { "ok": false, "npcId": npc_id, "expected": expected_mode, "reason": "entry_missing" }
+    var summary := npc_summary(entry)
+    var mode := String(summary.get("npcSpeedMode", ""))
+    var scripted_mode := String(summary.get("scriptedSpeedMode", ""))
+    var ok := mode == expected_mode or scripted_mode == expected_mode
+    return {
+        "ok": ok,
+        "npcId": npc_id,
+        "expected": expected_mode,
+        "mode": mode,
+        "scriptedMode": scripted_mode,
+        "rushing": bool(summary.get("npcRushing", false)),
+        "speed": summary.get("npcSpeed", 0.0),
+        "scriptedOrder": summary.get("scriptedOrder", {}),
+        "routeStatus": String(summary.get("routeStatus", "")),
+        "lastMoveDistance": summary.get("lastMoveDistance", 0.0),
+        "motorRequestedVelocity": summary.get("motorRequestedVelocity", [])
+    }
+
+func wait_for_final_rescue_normal_behavior(tutorial, timeout_seconds: float) -> void:
+    var started_at := elapsed
+    var settled_samples := 0
+    var captured_niko_home := false
+    var captured_sera_guard := false
+    while elapsed - started_at < timeout_seconds:
+        await get_tree().physics_frame
+        if int(Engine.get_physics_frames()) % SAMPLE_EVERY_FRAMES != 0:
+            continue
+        var row := final_rescue_normal_behavior_snapshot(tutorial)
+        row["label"] = "final_rescue_normal_behavior_%03d" % final_rescue_normal_behavior_timeline.size()
+        row["time"] = rounded(elapsed)
+        final_rescue_normal_behavior_timeline.append(row)
+        report_data["finalRescueNormalBehaviorTimeline"] = final_rescue_normal_behavior_timeline
+        if final_rescue_normal_behavior_timeline.size() % 12 == 0:
+            save_live_report_checkpoint("final_rescue_normal_behavior")
+        var niko_ok := bool((row.get("nikoNormal", {}) as Dictionary).get("ok", false))
+        var sera_ok := bool((row.get("seraNormal", {}) as Dictionary).get("ok", false))
+        if visual_required and niko_ok and not captured_niko_home:
+            captured_niko_home = await capture_npc_home_stage(npc_entry("niko"), "final_rescue_niko_home_normal")
+        if visual_required and sera_ok and not captured_sera_guard:
+            captured_sera_guard = await capture_npc_outside_stage(npc_entry("sera"), "final_rescue_sera_guard_normal")
+        var visual_ok := (not visual_required) or (captured_niko_home and captured_sera_guard)
+        if niko_ok and sera_ok and visual_ok:
+            settled_samples += 1
+        else:
+            settled_samples = 0
+        if settled_samples >= 5:
+            row["nikoHomeCaptureSaved"] = captured_niko_home
+            row["seraGuardCaptureSaved"] = captured_sera_guard
+            report_data["finalRescueNormalBehaviorProof"] = row
+            record_final_rescue_step("final_rescue_normal_behavior_restored", tutorial, row)
+            return
+        mark_progress("final_rescue_normal_behavior")
+    var final_row := final_rescue_normal_behavior_snapshot(tutorial)
+    final_row["elapsedWaiting"] = rounded(elapsed - started_at)
+    report_data["finalRescueNormalBehaviorProof"] = final_row
+    add_failure("final_rescue_normal_behavior_not_restored", JSON.stringify(final_row))
+
+func final_rescue_normal_behavior_snapshot(tutorial) -> Dictionary:
+    var niko := npc_entry("niko")
+    var sera := npc_entry("sera")
+    return {
+        "state": final_rescue_state_summary(tutorial),
+        "nikoNormal": final_rescue_niko_home_assertion(niko),
+        "seraNormal": final_rescue_sera_guard_assertion(sera),
+        "niko": npc_summary(niko) if not niko.is_empty() else {},
+        "sera": npc_summary(sera) if not sera.is_empty() else {},
+        "captures": capture_names()
+    }
+
+func final_rescue_niko_home_assertion(entry: Dictionary) -> Dictionary:
+    var body := entry.get("body") as Node3D
+    var body_valid := body != null and is_instance_valid(body)
+    var strict := strict_home_status(entry)
+    var door := npc_home_door(entry)
+    var door_closed := door == null or not bool(door.get_meta("open", false))
+    var scripted := body_valid and body.has_meta("npc_scripted_target")
+    var force_hold := body_valid and bool(body.get_meta("npc_force_hold", false))
+    var stranded := body_valid and bool(body.get_meta("npc_rescue_stranded", false))
+    var goal: Dictionary = entry.get("activeMotionGoal", {}) if entry.get("activeMotionGoal", {}) is Dictionary else {}
+    var ok := bool(strict.get("strictInside", false)) and door_closed and not scripted and not force_hold and not stranded
+    return {
+        "ok": ok,
+        "requires": "strict home interior, closed home door, no scripted target, no force hold, no rescue stranded flag",
+        "strictHome": strict,
+        "doorClosed": door_closed,
+        "door": block_summary(door),
+        "scriptedTarget": scripted,
+        "forceHold": force_hold,
+        "rescueStranded": stranded,
+        "goalKind": String(goal.get("goalKind", "")),
+        "goalReason": String(goal.get("reason", "")),
+        "routeStatus": String(entry.get("routeStatus", "")),
+        "cell": vec2i(flat_cell(body.global_position)) if body_valid else []
+    }
+
+func final_rescue_sera_guard_assertion(entry: Dictionary) -> Dictionary:
+    var body := entry.get("body") as Node3D
+    var body_valid := body != null and is_instance_valid(body)
+    var guard_cell: Vector2i = entry.get("guardCell", entry.get("routeFallbackCell", Vector2i.ZERO))
+    var guard_position := world_position_for_flat_cell(guard_cell)
+    var distance_to_guard := flat_distance(body.global_position, guard_position) if body_valid else INF
+    var goal: Dictionary = entry.get("activeMotionGoal", {}) if entry.get("activeMotionGoal", {}) is Dictionary else {}
+    var goal_kind := String(goal.get("goalKind", ""))
+    var route_status := String(entry.get("routeStatus", ""))
+    var route_reason := String(entry.get("routeReason", ""))
+    var route_ok := route_status in ["moving", "arrived"] and route_reason != "no_route"
+    var scripted := body_valid and body.has_meta("npc_scripted_target")
+    var force_hold := body_valid and bool(body.get_meta("npc_force_hold", false))
+    var ok := (
+        body_valid
+        and bool(entry.get("nightGuard", false))
+        and goal_kind == "guard"
+        and route_ok
+        and distance_to_guard <= CELL * 2.35
+        and not scripted
+        and not force_hold
+    )
+    return {
+        "ok": ok,
+        "requires": "night guard assignment, guard goal, near guard cell, no scripted target, no force hold",
+        "nightGuard": bool(entry.get("nightGuard", false)),
+        "goalKind": goal_kind,
+        "goalReason": String(goal.get("reason", "")),
+        "routeOk": route_ok,
+        "guardCell": vec2i(guard_cell),
+        "guardPosition": vec3(guard_position),
+        "distanceToGuard": rounded(distance_to_guard),
+        "scriptedTarget": scripted,
+        "forceHold": force_hold,
+        "routeStatus": route_status,
+        "routeReason": route_reason,
+        "cell": vec2i(flat_cell(body.global_position)) if body_valid else []
+    }
+
+func alive_rescue_hostile_bodies() -> Array[Node3D]:
+    var result: Array[Node3D] = []
+    var hostile_system = main.get("hostile_system") if main != null else null
+    if hostile_system == null:
+        return result
+    var enemies: Array = hostile_system.get("enemies")
+    for enemy_value in enemies:
+        var enemy: Dictionary = enemy_value if enemy_value is Dictionary else {}
+        var body := enemy.get("body") as Node3D
+        if body == null or not is_instance_valid(body):
+            continue
+        if bool(body.get_meta("tutorial_rescue_hostile", false)) or bool(enemy.get("tutorialRescue", false)):
+            result.append(body)
+    return result
+
+func nearest_rescue_hostile_body(bodies: Array[Node3D]) -> Node3D:
+    var best: Node3D = null
+    var best_distance := INF
+    for body in bodies:
+        if body == null or not is_instance_valid(body):
+            continue
+        var distance := flat_distance(player.global_position, body.global_position)
+        if distance < best_distance:
+            best_distance = distance
+            best = body
+    return best
+
+func hostile_body_alive(body) -> bool:
+    if body == null or not is_instance_valid(body):
+        return false
+    var hostile_system = main.get("hostile_system") if main != null else null
+    if hostile_system == null or not hostile_system.has_method("enemy_for_body"):
+        return false
+    var enemy: Dictionary = hostile_system.call("enemy_for_body", body)
+    return not enemy.is_empty()
+
+func rescue_hostile_summaries() -> Array[Dictionary]:
+    var rows: Array[Dictionary] = []
+    var hostile_system = main.get("hostile_system") if main != null else null
+    if hostile_system == null:
+        return rows
+    var enemies: Array = hostile_system.get("enemies")
+    for enemy_value in enemies:
+        var enemy: Dictionary = enemy_value if enemy_value is Dictionary else {}
+        var body := enemy.get("body") as Node3D
+        if body == null or not is_instance_valid(body):
+            continue
+        if not (bool(body.get_meta("tutorial_rescue_hostile", false)) or bool(enemy.get("tutorialRescue", false))):
+            continue
+        rows.append({
+            "name": body.name,
+            "variant": String(enemy.get("variant", body.get_meta("variant", ""))),
+            "position": vec3(body.global_position),
+            "health": rounded(float(enemy.get("health", 0.0))),
+            "aware": bool(enemy.get("aware", false)),
+            "frenzy": bool(enemy.get("frenzy", body.get_meta("hostile_frenzy", false))),
+            "scriptedEncounter": String(enemy.get("scriptedEncounter", body.get_meta("hostile_scripted_encounter", ""))),
+            "scriptedPhase": String(enemy.get("scriptedPhase", body.get_meta("hostile_scripted_phase", ""))),
+            "damageable": bool(enemy.get("damageable", body.get_meta("hostile_damageable", true))),
+            "canAttack": bool(enemy.get("canAttack", body.get_meta("hostile_can_attack", true))),
+            "battleStartedBy": String(enemy.get("scriptedBattleStartedBy", body.get_meta("hostile_scripted_battle_started_by", ""))),
+            "targetKind": String(enemy.get("targetKind", body.get_meta("hostile_target_kind", ""))),
+            "targetName": String(enemy.get("targetName", body.get_meta("hostile_target_name", ""))),
+            "targetDistance": rounded(float(enemy.get("targetDistance", INF))),
+            "lastMoveDistance": rounded(float(enemy.get("lastMoveDistance", 0.0))),
+            "cooldown": rounded(float(enemy.get("cooldown", 0.0)))
+        })
+    return rows
+
+func hostile_stats_summary() -> Dictionary:
+    var hostile_system = main.get("hostile_system") if main != null else null
+    if hostile_system == null or not hostile_system.has_method("stats"):
+        return {}
+    return (hostile_system.call("stats") as Dictionary).duplicate(true)
+
+func combat_hit_summary() -> Dictionary:
+    if player == null or not player.has_method("view_ray"):
+        return { "hit": false, "reason": "missing_player_view_ray" }
+    var hit: Dictionary = player.call("view_ray", 5.4, true)
+    if hit.is_empty():
+        return { "hit": false }
+    var collider := hit.get("collider") as Node
+    var position: Vector3 = hit.get("position", Vector3.ZERO)
+    return {
+        "hit": true,
+        "collider": collider.name if collider != null else "",
+        "colliderKind": String(collider.get_meta("kind", "")) if collider != null and collider.has_meta("kind") else "",
+        "colliderPath": String(collider.get_path()) if collider != null else "",
+        "variant": String(collider.get_meta("variant", "")) if collider != null and collider.has_meta("variant") else "",
+        "distance": rounded(player.global_position.distance_to(position)),
+        "position": vec3(position)
+    }
+
+func maybe_use_field_ration_for_rescue() -> void:
+    if survival_health() > 46.0 or int(inventory_totals().get("fieldRation", 0)) <= 0:
+        return
+    var selected := await select_hotbar_item("fieldRation")
+    if selected:
+        dispatch_mouse_button(MOUSE_BUTTON_RIGHT, true)
+        dispatch_mouse_button(MOUSE_BUTTON_RIGHT, false)
+        await wait_physics_frames(POST_ACTION_FRAMES)
+        final_rescue_combat_events.append({
+            "label": "final_rescue_used_field_ration",
+            "time": rounded(elapsed),
+            "survival": survival_snapshot(),
+            "inventory": inventory_totals()
+        })
+    await select_hotbar_item("woodenSword")
+
+func survival_snapshot() -> Dictionary:
+    var survival = main.get("survival_system") if main != null else null
+    if survival == null or not survival.has_method("snapshot"):
+        return {}
+    var snapshot: Dictionary = survival.call("snapshot")
+    return snapshot.duplicate(true)
+
+func survival_health() -> float:
+    return float(survival_snapshot().get("health", 100.0))
+
+func npc_target_position(npc_id: String) -> Vector3:
+    var entry := npc_entry(npc_id)
+    var body := entry.get("body") as Node3D
+    if body != null and is_instance_valid(body):
+        return body.global_position + Vector3(0.0, CELL * 0.8, 0.0)
+    return player.global_position + Vector3(0.0, CELL * 0.8, 0.0)
 
 func talk_to_tutorial_npc(npc_id: String, label: String, timeout_seconds: float) -> void:
     mark_progress("talk_%s" % label)
@@ -3280,6 +4413,18 @@ func npc_summary(entry: Dictionary) -> Dictionary:
     var blocked_contact_kind_meta := ""
     var blocked_contact_type_meta := ""
     var slide_collision_count_meta := 0
+    var speed_mode_meta := ""
+    var scripted_speed_mode_meta := ""
+    var npc_speed_meta := 0.0
+    var npc_rushing_meta := false
+    var npc_sprint_requested_meta := false
+    var hostile_targeted_meta := false
+    var hostile_targeted_count_meta := 0
+    var hostile_projectile_hits_meta := 0
+    var hostile_target_immune_meta := false
+    var last_hostile_attack_meta := ""
+    var last_hostile_attacker_meta := ""
+    var last_hostile_variant_meta := ""
     if body_valid:
         body_home_meta = bool(body.get_meta("npc_inside_home", false))
         force_hold_meta = bool(body.get_meta("npc_force_hold", false))
@@ -3294,6 +4439,18 @@ func npc_summary(entry: Dictionary) -> Dictionary:
         blocked_contact_kind_meta = String(body.get_meta("npc_blocked_contact_kind", ""))
         blocked_contact_type_meta = String(body.get_meta("npc_blocked_contact_type", ""))
         slide_collision_count_meta = int(body.get_meta("npc_slide_collision_count", 0))
+        speed_mode_meta = String(body.get_meta("npc_speed_mode", ""))
+        scripted_speed_mode_meta = String(body.get_meta("npc_scripted_speed_mode", ""))
+        npc_speed_meta = float(body.get_meta("npc_speed", 0.0))
+        npc_rushing_meta = bool(body.get_meta("npc_rushing", false))
+        npc_sprint_requested_meta = bool(body.get_meta("npc_sprint_requested", false))
+        hostile_targeted_meta = bool(body.get_meta("npc_hostile_targeted", false))
+        hostile_targeted_count_meta = int(body.get_meta("npc_hostile_targeted_count", 0))
+        hostile_projectile_hits_meta = int(body.get_meta("npc_hostile_projectile_hits", 0))
+        hostile_target_immune_meta = bool(body.get_meta("npc_hostile_target_immune", false)) or bool(body.get_meta("hostile_target_immune", false))
+        last_hostile_attack_meta = String(body.get_meta("npc_last_hostile_attack", ""))
+        last_hostile_attacker_meta = String(body.get_meta("npc_last_hostile_attacker", ""))
+        last_hostile_variant_meta = String(body.get_meta("npc_last_hostile_variant", ""))
     var path_waypoints: Array = entry.get("pathWaypoints", [])
     var first_waypoint := Vector3.ZERO
     var first_waypoint_valid := false
@@ -3321,6 +4478,7 @@ func npc_summary(entry: Dictionary) -> Dictionary:
         "cell": vec2i(flat_cell(position)),
         "homeCell": vec2i(entry.get("homeCell", Vector2i.ZERO)),
         "porchCell": vec2i(entry.get("porchCell", Vector2i.ZERO)),
+        "guardCell": vec2i(entry.get("guardCell", Vector2i.ZERO)),
         "interiorMinCell": vec2i(entry.get("interiorMinCell", Vector2i.ZERO)),
         "interiorMaxCell": vec2i(entry.get("interiorMaxCell", Vector2i.ZERO)),
         "insideHomeMeta": body_home_meta,
@@ -3328,6 +4486,24 @@ func npc_summary(entry: Dictionary) -> Dictionary:
         "routeStatus": String(entry.get("routeStatus", "")),
         "routeReason": String(entry.get("routeReason", "")),
         "routePriority": int(entry.get("routePriority", 0)),
+        "npcSpeedMode": String(entry.get("npcSpeedMode", speed_mode_meta)),
+        "scriptedSpeedMode": scripted_speed_mode_meta,
+        "npcSpeed": rounded(float(entry.get("npcSpeed", npc_speed_meta))),
+        "npcSpeedReason": String(entry.get("npcSpeedReason", "")),
+        "npcRushing": bool(entry.get("npcRushing", npc_rushing_meta)),
+        "npcSprintRequested": npc_sprint_requested_meta,
+        "scriptedCombatOverlay": bool(entry.get("scriptedCombatOverlay", false)),
+        "guardShots": int(entry.get("guardShots", 0)),
+        "guardMeleeStrikes": int(entry.get("guardMeleeStrikes", 0)),
+        "lastCombatAction": String(entry.get("lastCombatAction", "")),
+        "hostileTargeted": hostile_targeted_meta,
+        "hostileTargetedCount": hostile_targeted_count_meta,
+        "hostileProjectileHits": hostile_projectile_hits_meta,
+        "hostileTargetImmune": hostile_target_immune_meta,
+        "lastHostileAttack": last_hostile_attack_meta,
+        "lastHostileAttacker": last_hostile_attacker_meta,
+        "lastHostileVariant": last_hostile_variant_meta,
+        "scriptedOrder": entry.get("scriptedOrder", {}),
         "homeRouteIndex": int(entry.get("homeRouteIndex", 0)),
         "homeRouteCount": (entry.get("homeRoutePositions", []) as Array).size(),
         "homeActiveTargetCell": vec2i(entry.get("homeActiveTargetCell", Vector2i.ZERO)),
@@ -3363,7 +4539,9 @@ func npc_summary(entry: Dictionary) -> Dictionary:
         "firstPathWaypoint": vec3(first_waypoint),
         "lastRoutePlanDebug": entry.get("lastRoutePlanDebug", {}),
         "corridorFollow": entry.get("corridorFollow", {}),
-        "corridorProgress": entry.get("corridorProgress", {})
+        "corridorProgress": entry.get("corridorProgress", {}),
+        "lastMotorLocalEscape": entry.get("lastMotorLocalEscape", {}),
+        "lastMotorLocalEscapeFailed": entry.get("lastMotorLocalEscapeFailed", {})
     }
 
 func strict_home_status(entry: Dictionary) -> Dictionary:
@@ -3467,7 +4645,7 @@ func add_failure(code: String, details: String) -> void:
     report_data["results"] = results
     report_data["failureReasons"] = failure_reasons
     report_data["lastFailure"] = failure_reasons[failure_reasons.size() - 1]
-    report_data["timeline"] = morning_observation_timeline
+    report_data["timeline"] = final_rescue_timeline if final_rescue_tutorial else morning_observation_timeline
     report_data["playerTimeline"] = player_timeline
     report_data["doorStateTimeline"] = door_timeline
     report_data["miraTimeline"] = mira_timeline
@@ -3479,6 +4657,10 @@ func add_failure(code: String, details: String) -> void:
     report_data["npcScheduleMatrix"] = schedule_matrix
     report_data["dayOneTimeline"] = day_one_timeline
     report_data["dayOneResourceGatherEvents"] = resource_gather_events
+    report_data["finalRescueTimeline"] = final_rescue_timeline
+    report_data["finalRescueNormalBehaviorTimeline"] = final_rescue_normal_behavior_timeline
+    report_data["finalRescueSpeedProofs"] = final_rescue_speed_proofs
+    report_data["finalRescueCombatEvents"] = final_rescue_combat_events
     var mira := npc_entry("mira")
     if not mira.is_empty():
         report_data["miraFailureSnapshot"] = npc_summary(mira)
@@ -3495,7 +4677,7 @@ func finish() -> void:
     report_data["resultCount"] = results.size()
     report_data["results"] = results
     report_data["failureReasons"] = failure_reasons
-    report_data["timeline"] = morning_observation_timeline
+    report_data["timeline"] = final_rescue_timeline if final_rescue_tutorial else morning_observation_timeline
     report_data["playerTimeline"] = player_timeline
     report_data["doorStateTimeline"] = door_timeline
     report_data["miraTimeline"] = mira_timeline
@@ -3516,6 +4698,10 @@ func finish() -> void:
     report_data["nikoForagerState"] = forager_state_summary()
     report_data["dayOneTimeline"] = day_one_timeline
     report_data["dayOneResourceGatherEvents"] = resource_gather_events
+    report_data["finalRescueTimeline"] = final_rescue_timeline
+    report_data["finalRescueNormalBehaviorTimeline"] = final_rescue_normal_behavior_timeline
+    report_data["finalRescueSpeedProofs"] = final_rescue_speed_proofs
+    report_data["finalRescueCombatEvents"] = final_rescue_combat_events
     save_report()
     mark_progress("finished")
     get_tree().quit(1 if failed else 0)
@@ -3535,6 +4721,27 @@ func save_report() -> void:
         return
     file.store_string(JSON.stringify(report_data, "  "))
     file.close()
+
+func save_live_report_checkpoint(label: String) -> void:
+    if finished:
+        return
+    report_data["finished"] = false
+    report_data["passed"] = false
+    report_data["failureCount"] = failure_reasons.size()
+    report_data["resultCount"] = results.size()
+    report_data["liveCheckpoint"] = {
+        "label": label,
+        "time": rounded(elapsed),
+        "physicsFrame": int(Engine.get_physics_frames())
+    }
+    report_data["timeline"] = final_rescue_timeline if final_rescue_tutorial else morning_observation_timeline
+    report_data["playerTimeline"] = player_timeline
+    report_data["visualCaptures"] = visual_captures
+    report_data["finalRescueTimeline"] = final_rescue_timeline
+    report_data["finalRescueNormalBehaviorTimeline"] = final_rescue_normal_behavior_timeline
+    report_data["finalRescueSpeedProofs"] = final_rescue_speed_proofs
+    report_data["finalRescueCombatEvents"] = final_rescue_combat_events
+    save_report()
 
 func mark_progress(label: String) -> void:
     var path := OS.get_environment("VOXEL_REAL_TUTORIAL_PROGRESS")

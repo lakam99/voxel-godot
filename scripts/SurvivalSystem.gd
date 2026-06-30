@@ -22,6 +22,8 @@ var ward_timer := 0.0
 var shelter_comfort := 0.0
 var last_danger := "Safe"
 var last_message := ""
+var test_god_mode := false
+var test_god_mode_reason := ""
 
 func setup(catalog_value: Dictionary, consume_active_callable: Callable) -> void:
     catalog = catalog_value
@@ -30,6 +32,17 @@ func setup(catalog_value: Dictionary, consume_active_callable: Callable) -> void
 
 func set_damage_multiplier_provider(provider: Callable) -> void:
     damage_multiplier_provider = provider
+
+func set_test_god_mode(enabled: bool, reason := "playtest") -> void:
+    test_god_mode = enabled
+    test_god_mode_reason = reason if enabled else ""
+    changed.emit()
+
+func test_god_mode_state() -> Dictionary:
+    return {
+        "enabled": test_god_mode,
+        "reason": test_god_mode_reason
+    }
 
 func reset() -> void:
     health = max_health()
@@ -140,6 +153,11 @@ func use_active_item(item_id: String) -> bool:
 
 func apply_damage(amount: float, label: String, kind := "generic") -> void:
     if amount <= 0.0 or health <= 0.0:
+        return
+    if test_god_mode:
+        last_danger = label
+        last_message = label
+        changed.emit()
         return
     var armor_multiplier := 1.0 - clampf(armor / 100.0, 0.0, 0.82)
     if damage_multiplier_provider.is_valid():

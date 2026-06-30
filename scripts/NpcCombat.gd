@@ -29,6 +29,8 @@ func nearest_hostile(origin: Vector3, radius: float) -> Node3D:
         var body := enemy.get("body") as Node3D
         if body == null or not is_instance_valid(body):
             continue
+        if hostile_system.has_method("hostile_available_for_npc_combat") and not bool(hostile_system.hostile_available_for_npc_combat(body, origin)):
+            continue
         var distance := origin.distance_to(body.global_position)
         if distance < best_dist:
             best_dist = distance
@@ -48,9 +50,12 @@ func fire_at_hostile(entry: Dictionary, target: Node3D) -> void:
     system.face_position(body, target.global_position)
     system.play_npc_use(entry, "shoot")
     spawn_tracer(start, end)
-    if not bool(target.get_meta("tutorial_rescue_hostile", false)):
-        hostile_system.damage_hostile(target, 7.0, false)
+    hostile_system.damage_hostile(target, 7.0, false, body, "npc_ranged")
     entry["cooldown"] = randf_range(1.65, 2.55)
+    entry["guardShots"] = int(entry.get("guardShots", 0)) + 1
+    entry["lastCombatAction"] = "shoot"
+    body.set_meta("npc_guard_shots", int(entry["guardShots"]))
+    body.set_meta("npc_last_combat_action", "shoot")
     system.guard_shots += 1
     system.last_message = "%s fired at a hostile" % String(entry.get("name", "Guard"))
 
@@ -68,9 +73,12 @@ func strike_hostile(entry: Dictionary, target: Node3D) -> void:
         return
     system.face_position(body, target.global_position)
     system.play_npc_use(entry, "strike")
-    if not bool(target.get_meta("tutorial_rescue_hostile", false)):
-        hostile_system.damage_hostile(target, 9.0, false)
+    hostile_system.damage_hostile(target, 9.0, false, body, "npc_melee")
     entry["cooldown"] = randf_range(1.05, 1.55)
+    entry["guardMeleeStrikes"] = int(entry.get("guardMeleeStrikes", 0)) + 1
+    entry["lastCombatAction"] = "strike"
+    body.set_meta("npc_guard_melee_strikes", int(entry["guardMeleeStrikes"]))
+    body.set_meta("npc_last_combat_action", "strike")
     system.guard_melee_strikes += 1
     system.last_message = "%s struck a hostile" % String(entry.get("name", "Guard"))
 

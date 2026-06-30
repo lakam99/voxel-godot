@@ -30,7 +30,7 @@ static func npc_default():
 	var profile = load("res://scripts/npc_ai/contracts/CharacterMotorProfile.gd").new()
 	profile.id = "npc"
 	profile.walk_speed = 2.6
-	profile.sprint_speed = 6.4
+	profile.sprint_speed = 10.8
 	profile.acceleration = 64.0
 	profile.air_control = 1.0
 	profile.jump_speed = 6.2

@@ -11,7 +11,9 @@
     [switch]$Visible,
     [switch]$MiraHomeOnly,
     [switch]$MorningOutsideOnly,
-    [switch]$DayOne
+    [switch]$DayOne,
+    [switch]$FinalRescue,
+    [switch]$GodMode
 )
 
 $ErrorActionPreference = "Stop"
@@ -21,6 +23,10 @@ if ($MiraHomeOnly -and $MorningOutsideOnly) {
 }
 if ($DayOne -and ($MiraHomeOnly -or $MorningOutsideOnly)) {
     Write-Error "Use -DayOne by itself; it cannot be combined with -MiraHomeOnly or -MorningOutsideOnly."
+    exit 1
+}
+if ($FinalRescue -and ($MiraHomeOnly -or $MorningOutsideOnly -or $DayOne)) {
+    Write-Error "Use -FinalRescue by itself; it cannot be combined with -MiraHomeOnly, -MorningOutsideOnly, or -DayOne."
     exit 1
 }
 
@@ -58,6 +64,7 @@ $guardJson = & $guardScript `
     -RunnerPath $runnerPath `
     -ReportPath $ReportPath `
     -TestId "npc_tutorial_real_knock_repair_sleep_morning_foragers" `
+    -AllowedShortcutPattern "final_rescue_fixture_setup_allowance" `
     -PassThruJson
 if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
@@ -67,8 +74,9 @@ $staticScan = $guardJson | ConvertFrom-Json
 $runToken = [guid]::NewGuid().ToString("N")
 $branch = (& git -C $projectPath branch --show-current).Trim()
 $commit = (& git -C $projectPath rev-parse HEAD).Trim()
-$focusedVisualAcceptance = $Visible -and ($MiraHomeOnly -or $MorningOutsideOnly)
+$focusedVisualAcceptance = $Visible -and ($MiraHomeOnly -or $MorningOutsideOnly -or $FinalRescue)
 $fullPlayerPovVisible = $Visible -and (-not $MiraHomeOnly) -and (-not $MorningOutsideOnly)
+$godModeEnabled = $GodMode -or $FinalRescue
 
 $env:VOXEL_PLAYTEST = "1"
 $env:VOXEL_TEST_SEED = $Seed
@@ -79,6 +87,8 @@ $env:VOXEL_REAL_TUTORIAL_VISUAL_REQUIRED = if ($Visible) { "1" } else { "0" }
 $env:VOXEL_REAL_TUTORIAL_MIRA_HOME_ONLY = if ($MiraHomeOnly) { "1" } else { "0" }
 $env:VOXEL_REAL_TUTORIAL_MORNING_OUTSIDE_ONLY = if ($MorningOutsideOnly) { "1" } else { "0" }
 $env:VOXEL_REAL_TUTORIAL_DAY_ONE = if ($DayOne) { "1" } else { "0" }
+$env:VOXEL_REAL_TUTORIAL_FINAL_RESCUE = if ($FinalRescue) { "1" } else { "0" }
+$env:VOXEL_REAL_TUTORIAL_GOD_MODE = if ($godModeEnabled) { "1" } else { "0" }
 $env:VOXEL_REAL_TUTORIAL_RUN_TOKEN = $runToken
 $env:VOXEL_REAL_TUTORIAL_WATCHDOG_SECONDS = [string]$TimeoutSeconds
 $env:VOXEL_GIT_BRANCH = $branch
@@ -102,7 +112,7 @@ function Stop-ProcessTree([System.Diagnostics.Process]$Process) {
 }
 
 function Read-LogMatches {
-    $pattern = 'SCRIPT ERROR|previously freed instance|Invalid get index|Invalid call|ObjectDB instances leaked|ERROR:'
+    $pattern = 'SCRIPT ERROR|Parse Error|previously freed instance|Invalid get index|Invalid call|Attempt to call|ERROR:'
     $matches = @()
     foreach ($path in @($outLog, $errLog)) {
         if (Test-Path -LiteralPath $path) {
@@ -156,6 +166,36 @@ function Set-ReportDiagnostics([int]$ExitCode, [string]$StopReason) {
     $report | Add-Member -Force -NotePropertyName scriptErrorScan -NotePropertyValue $scriptScan
     $report | Add-Member -Force -NotePropertyName processExitCode -NotePropertyValue $ExitCode
     $report | Add-Member -Force -NotePropertyName processStopReason -NotePropertyValue $StopReason
+    $processFailed = ($ExitCode -ne 0) -or ($StopReason -notin @("completed", "report_finished"))
+    if ($processFailed) {
+        $failureCode = "real_tutorial_process_$($StopReason -replace '[^A-Za-z0-9_]', '_')"
+        $failureDetails = "Godot process did not finish cleanly; exitCode=$ExitCode stopReason=$StopReason"
+        $existingFailures = @()
+        if ($null -ne $report.PSObject.Properties["failureReasons"] -and $null -ne $report.failureReasons) {
+            $existingFailures += @($report.failureReasons)
+        }
+        $existingFailures += [pscustomobject]@{
+            code = $failureCode
+            details = $failureDetails
+            time = $null
+        }
+        $existingResults = @()
+        if ($null -ne $report.PSObject.Properties["results"] -and $null -ne $report.results) {
+            $existingResults += @($report.results)
+        }
+        $existingResults += [pscustomobject]@{
+            name = "real_tutorial_playthrough_process"
+            passed = $false
+            details = $failureDetails
+        }
+        $report | Add-Member -Force -NotePropertyName passed -NotePropertyValue $false
+        $report | Add-Member -Force -NotePropertyName failureCount -NotePropertyValue $existingFailures.Count
+        $report | Add-Member -Force -NotePropertyName resultCount -NotePropertyValue $existingResults.Count
+        $report | Add-Member -Force -NotePropertyName results -NotePropertyValue $existingResults
+        $report | Add-Member -Force -NotePropertyName failureReasons -NotePropertyValue $existingFailures
+        $report | Add-Member -Force -NotePropertyName lastFailure -NotePropertyValue $existingFailures[$existingFailures.Count - 1]
+        $report | Add-Member -Force -NotePropertyName processFailure -NotePropertyValue $true
+    }
     $report | ConvertTo-Json -Depth 24 | Set-Content -LiteralPath $ReportPath
 }
 
@@ -265,7 +305,23 @@ if ($Visible) {
         Get-Content -LiteralPath $ReportPath
         exit 1
     }
-    if ($DayOne) {
+    if ($FinalRescue) {
+        $requiredScreenshots = @(
+            "player_pov_final_rescue_mira_briefing.png",
+            "player_pov_final_rescue_sera_escort.png",
+            "player_pov_final_rescue_gate_open.png",
+            "player_pov_final_rescue_site_arrival.png",
+            "player_pov_final_rescue_sera_at_site.png",
+            "player_pov_final_rescue_sera_attack.png",
+            "player_pov_final_rescue_hostiles_target_npc.png",
+            "player_pov_final_rescue_combat.png",
+            "player_pov_final_rescue_combat_complete.png",
+            "player_pov_final_rescue_niko_returning.png",
+            "player_pov_final_rescue_complete.png",
+            "final_rescue_niko_home_normal.png",
+            "final_rescue_sera_guard_normal.png"
+        )
+    } elseif ($DayOne) {
         $requiredScreenshots = @(
             "player_pov_day_one_wake.png",
             "player_pov_day_one_mira_briefing.png",
@@ -310,7 +366,9 @@ if ($Visible) {
 
 $evidenceScript = Join-Path $projectPath "tools\assert-test-evidence-report.ps1"
 $evidenceLevel = if ($focusedVisualAcceptance) { "acceptance_visual" } else { "integration" }
-$runnerId = if ($MorningOutsideOnly) {
+$runnerId = if ($FinalRescue) {
+    "npc_real_tutorial_final_rescue"
+} elseif ($MorningOutsideOnly) {
     "npc_real_tutorial_morning_outside"
 } elseif ($MiraHomeOnly) {
     "npc_real_tutorial_playthrough"
@@ -320,7 +378,9 @@ $runnerId = if ($MorningOutsideOnly) {
     "npc_real_tutorial_playthrough_integration"
 }
 $acceptanceClaims = if ($focusedVisualAcceptance) {
-    if ($MorningOutsideOnly) {
+    if ($FinalRescue) {
+        @("tutorial_final_rescue_combat_niko_home_sera_guard_visual")
+    } elseif ($MorningOutsideOnly) {
         @("tutorial_following_morning_rowan_mira_niko_outside_visual")
     } else {
         @(
@@ -365,6 +425,9 @@ $report = Get-Content -LiteralPath $ReportPath -Raw | ConvertFrom-Json
     lastFailureCode = $lastFailureCode
     miraHomeOnly = [bool]$report.miraHomeOnly
     morningOutsideOnly = [bool]$report.morningOutsideOnly
+    finalRescueTutorial = [bool]$report.finalRescueTutorial
+    playtestGodMode = [bool]$report.playtestGodMode
+    playtestDamagePolicy = $report.playtestDamagePolicy
     fullPlayerPov = [bool]$report.fullPlayerPov
     evidenceLevel = [string]$report.evidenceLevel
     reportPath = $ReportPath

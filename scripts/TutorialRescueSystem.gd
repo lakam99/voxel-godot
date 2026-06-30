@@ -5,6 +5,7 @@ const CELL := 1.35
 const LocalLightRigScript := preload("res://scripts/LocalLightRig.gd")
 const FENCE_RADIUS_CELLS := 25
 const RESCUE_MONSTER_COUNT := 6
+const RESCUE_ELDER_ID := "mira"
 const RESCUE_GUARD_ID := "sera"
 const RESCUE_FORAGER_ID := "niko"
 
@@ -33,6 +34,7 @@ func start_final_night() -> bool:
             main.hostile_system.clear()
             main.hostile_system.spawn_cooldown = 0.0
         setup_rescue_scene()
+        send_elder_home_after_rescue_briefing()
         if main.has_method("update_sky"):
             main.update_sky(0.0)
     return true
@@ -53,6 +55,8 @@ func complete_final_night() -> bool:
         var guard := find_tutorial_npc(RESCUE_GUARD_ID)
         if forager:
             forager.set_meta("npc_force_hold", false)
+            forager.set_meta("npc_hostile_target_immune", false)
+            forager.set_meta("hostile_target_immune", false)
         if main.npc_system:
             if forager:
                 main.npc_system.clear_scripted_target(forager)
@@ -94,25 +98,62 @@ func setup_rescue_scene() -> void:
         safe_place_tutorial_npc(forager, system.rescue_site, "rescue_encounter_spawn")
         forager.set_meta("npc_force_hold", true)
         forager.set_meta("npc_rescue_stranded", true)
+        forager.set_meta("npc_hostile_target_immune", true)
+        forager.set_meta("hostile_target_immune", true)
         show_speech_bubble(RESCUE_FORAGER_ID, "Help!", 3.8)
     spawn_rescue_hostiles()
 
 func choose_rescue_site() -> Vector3:
     var center_x := int(system.town.get("centerX", 0))
     var center_z := int(system.town.get("centerZ", 0))
+    var preferred_offsets: Array[Vector2i] = [
+        Vector2i(FENCE_RADIUS_CELLS + 13, 0),
+        Vector2i(FENCE_RADIUS_CELLS + 14, 3),
+        Vector2i(FENCE_RADIUS_CELLS + 14, -3),
+        Vector2i(FENCE_RADIUS_CELLS + 12, 6),
+        Vector2i(FENCE_RADIUS_CELLS + 12, -6),
+        Vector2i(FENCE_RADIUS_CELLS + 16, 0)
+    ]
+    for offset in preferred_offsets:
+        var preferred := Vector3(float(center_x + offset.x) * CELL, 0.0, float(center_z + offset.y) * CELL)
+        preferred.y = main.height_at_world(preferred.x, preferred.z) + 0.06
+        if rescue_encounter_site_clear(preferred):
+            return preferred
     var base_angle := -0.55
     var radius := float(FENCE_RADIUS_CELLS + 13) * CELL
     for attempt in range(12):
         var angle := base_angle + float(attempt) * 0.28
         var position := Vector3(float(center_x) * CELL + cos(angle) * radius, 0.0, float(center_z) * CELL + sin(angle) * radius)
-        var ground_y: float = main.height_at_world(position.x, position.z)
-        if ground_y < main.WATER_LEVEL + 0.8:
-            continue
-        position.y = ground_y + 0.06
-        return position
+        position.y = main.height_at_world(position.x, position.z) + 0.06
+        if rescue_encounter_site_clear(position):
+            return position
     var fallback := Vector3(float(center_x + FENCE_RADIUS_CELLS + 10) * CELL, 0.0, float(center_z + 4) * CELL)
     fallback.y = main.height_at_world(fallback.x, fallback.z) + 0.06
     return fallback
+
+func rescue_encounter_site_clear(position: Vector3) -> bool:
+    if main == null:
+        return true
+    var town_level := float(system.town.get("level", main.height_at_world(float(int(system.town.get("centerX", 0))) * CELL, float(int(system.town.get("centerZ", 0))) * CELL)))
+    var ground_y: float = main.height_at_world(position.x, position.z)
+    if ground_y < main.WATER_LEVEL + 0.8:
+        return false
+    if absf(ground_y - town_level) > CELL * 2.0:
+        return false
+    if rescue_root_has_near_prop(main.get("prop_root") as Node, position, CELL * CELL * 14.0):
+        return false
+    for i in range(RESCUE_MONSTER_COUNT):
+        var angle := TAU * float(i) / float(RESCUE_MONSTER_COUNT)
+        var ring_radius := CELL * (3.7 + 0.35 * float(i % 2))
+        var ring_position := position + Vector3(cos(angle) * ring_radius, 0.0, sin(angle) * ring_radius)
+        var ring_ground_y: float = main.height_at_world(ring_position.x, ring_position.z)
+        if ring_ground_y < main.WATER_LEVEL + 0.8:
+            return false
+        if absf(ring_ground_y - town_level) > CELL * 2.4:
+            return false
+        if rescue_root_has_near_prop(main.get("prop_root") as Node, ring_position, CELL * CELL * 3.0):
+            return false
+    return true
 
 func spawn_rescue_torch(position: Vector3) -> void:
     if system.light_root == null:
@@ -178,13 +219,30 @@ func spawn_rescue_hostiles() -> void:
         if body == null:
             continue
         body.set_meta("tutorial_rescue_hostile", true)
+        body.set_meta("hostile_frenzy", true)
         var enemy: Dictionary = main.hostile_system.enemy_for_body(body)
         if not enemy.is_empty():
             enemy["aware"] = false
             enemy["daylightImmune"] = true
             enemy["tutorialRescue"] = true
+            enemy["frenzy"] = true
             enemy["spawnOrigin"] = system.rescue_site
             enemy["awarenessDelay"] = 0.0
+        if main.hostile_system.has_method("configure_scripted_encounter"):
+            main.hostile_system.configure_scripted_encounter(body, "tutorial_final_rescue", "circle_niko", {
+                "targetName": "Niko",
+                "targetNpcId": RESCUE_FORAGER_ID,
+                "battleSourceNpcId": RESCUE_GUARD_ID,
+                "damageable": false,
+                "canAttack": false,
+                "frenzy": true,
+                "circleAnchor": system.rescue_site,
+                "circleRadius": radius,
+                "circleIndex": i,
+                "circleCount": RESCUE_MONSTER_COUNT,
+                "circleAngularSpeed": 0.17,
+                "circlePhase": 0.0
+            })
         system.rescue_hostiles.append(body)
 
 func start_rescue_escort() -> void:
@@ -197,7 +255,7 @@ func start_rescue_escort() -> void:
         guard.set_meta("npc_dialogue_focused", false)
         guard.set_meta("npc_force_hold", false)
         var guard_target: Vector3 = rescue_guard_target(guard)
-        main.npc_system.set_scripted_target(guard, guard_target, true, true)
+        main.npc_system.set_scripted_target(guard, guard_target, true, true, "sprinting")
     show_speech_bubble(RESCUE_GUARD_ID, "With me!", 2.5)
     show_speech_bubble(RESCUE_FORAGER_ID, "Over here!", 3.2)
 
@@ -207,12 +265,14 @@ func rescue_guard_target(guard: Node3D) -> Vector3:
     var to_rescue: Vector3 = system.rescue_site - origin
     to_rescue.y = 0.0
     var direction: Vector3 = to_rescue.normalized() if to_rescue.length_squared() > 0.001 else Vector3.FORWARD
+    var lateral := Vector3(-direction.z, 0.0, direction.x)
     var candidates: Array[Vector3] = [
+        system.rescue_site - direction * CELL * 2.4,
+        system.rescue_site - direction * CELL * 3.4 + lateral * CELL * 1.1,
+        system.rescue_site - direction * CELL * 3.4 - lateral * CELL * 1.1,
+        fallback,
         origin + direction * CELL * 18.0,
-        origin + direction * CELL * 14.0,
-        origin + direction * CELL * 10.0,
-        origin + direction * CELL * 6.0,
-        fallback
+        origin + direction * CELL * 14.0
     ]
     for candidate in candidates:
         candidate.y = main.height_at_world(candidate.x, candidate.z) + 0.04
@@ -260,9 +320,7 @@ func refresh_rescue_progress(delta := -1.0) -> bool:
         return true
     if system.rescue_returning:
         system.rescue_return_elapsed += delta if delta >= 0.0 else system.get_process_delta_time()
-        if rescue_party_home() or system.rescue_return_elapsed >= 8.0:
-            if system.rescue_return_elapsed >= 8.0:
-                settle_rescue_party_home()
+        if rescue_party_home():
             return complete_final_night()
     return false
 
@@ -290,25 +348,81 @@ func start_rescue_return() -> void:
     if forager:
         forager.set_meta("npc_force_hold", false)
         forager.set_meta("npc_rescue_stranded", false)
+        forager.set_meta("npc_hostile_target_immune", false)
+        forager.set_meta("hostile_target_immune", false)
         if main and main.npc_system:
-            main.npc_system.set_scripted_target(forager, home, true, true)
+            main.npc_system.order_go_home(forager, "rescue_return_home", "sprinting")
     if guard and main and main.npc_system:
-        main.npc_system.set_scripted_target(guard, home + Vector3(CELL * 0.65, 0.0, CELL * 0.65), true, true)
+        main.npc_system.set_scripted_target(guard, rescue_guard_return_position(), true, true, "walking")
     show_speech_bubble(RESCUE_FORAGER_ID, "I can move!", 2.8)
     show_speech_bubble(RESCUE_GUARD_ID, "Back to town!", 2.8)
 
 func rescue_return_position() -> Vector3:
-    var forager := find_tutorial_npc(RESCUE_FORAGER_ID)
-    if forager:
-        var home_cell: Vector2i = forager.get_meta("npc_home_cell", Vector2i(int(system.town.get("centerX", 0)), int(system.town.get("centerZ", 0))))
-        return Vector3(float(home_cell.x) * CELL, float(system.town.get("level", 16.0)) + 0.04, float(home_cell.y) * CELL)
-    return Vector3(float(system.town.get("centerX", 0)) * CELL, float(system.town.get("level", 16.0)) + 0.04, float(system.town.get("centerZ", 0)) * CELL)
+    var center_x := int(system.town.get("centerX", 0))
+    var center_z := int(system.town.get("centerZ", 0))
+    var level := float(system.town.get("level", 16.0))
+    return Vector3(float(center_x + FENCE_RADIUS_CELLS - 5) * CELL, level + 0.04, float(center_z) * CELL)
+
+func rescue_guard_return_position() -> Vector3:
+    var guard := find_tutorial_npc(RESCUE_GUARD_ID)
+    if guard != null and main != null and main.npc_system != null and main.npc_system.has_method("npc_entry_for_actor"):
+        var entry: Dictionary = main.npc_system.npc_entry_for_actor(guard)
+        if not entry.is_empty():
+            var guard_position: Vector3 = entry.get("guardPosition", Vector3.INF)
+            if guard_position.is_finite():
+                guard_position.y = main.height_at_world(guard_position.x, guard_position.z) + 0.04
+                return guard_position
+            var guard_cell: Vector2i = entry.get("guardCell", Vector2i.ZERO)
+            var level := float(entry.get("level", 16.0))
+            var cell_target := Vector3(float(guard_cell.x) * CELL, level + 0.04, float(guard_cell.y) * CELL)
+            cell_target.y = main.height_at_world(cell_target.x, cell_target.z) + 0.04
+            return cell_target
+    var target := rescue_return_position() + Vector3(CELL * 0.65, 0.0, CELL * 0.65)
+    if main != null:
+        target.y = main.height_at_world(target.x, target.z) + 0.04
+    return target
+
+func send_elder_home_after_rescue_briefing() -> void:
+    if main == null or main.npc_system == null or not main.npc_system.has_method("order_go_home"):
+        return
+    var elder := find_tutorial_npc(RESCUE_ELDER_ID)
+    if elder == null:
+        return
+    elder.set_meta("npc_force_hold", false)
+    main.npc_system.order_go_home(elder, "final_rescue_briefing_return_home", "walking")
 
 func rescue_party_home() -> bool:
     var forager := find_tutorial_npc(RESCUE_FORAGER_ID)
-    if forager == null:
+    var forager_home := true if forager == null else tutorial_npc_strictly_inside_home(forager)
+    if not forager_home:
+        return false
+    var guard := find_tutorial_npc(RESCUE_GUARD_ID)
+    if guard == null:
         return true
-    return forager.global_position.distance_to(rescue_return_position()) <= CELL * 1.35
+    return rescue_guard_returned(guard)
+
+func rescue_guard_returned(guard: Node3D) -> bool:
+    if guard == null:
+        return true
+    var target := rescue_guard_return_position()
+    var flat := Vector2(guard.global_position.x - target.x, guard.global_position.z - target.z)
+    return flat.length() <= CELL * 1.45
+
+func tutorial_npc_strictly_inside_home(body: Node3D) -> bool:
+    if body == null or main == null or main.npc_system == null:
+        return false
+    var entry: Dictionary = main.npc_system.npc_entry_for_actor(body) if main.npc_system.has_method("npc_entry_for_actor") else {}
+    if entry.is_empty():
+        return false
+    var cell := Vector2i(roundi(body.global_position.x / CELL), roundi(body.global_position.z / CELL))
+    var min_cell: Vector2i = entry.get("interiorMinCell", entry.get("homeCell", cell))
+    var max_cell: Vector2i = entry.get("interiorMaxCell", entry.get("homeCell", cell))
+    return (
+        cell.x >= mini(min_cell.x, max_cell.x)
+        and cell.x <= maxi(min_cell.x, max_cell.x)
+        and cell.y >= mini(min_cell.y, max_cell.y)
+        and cell.y <= maxi(min_cell.y, max_cell.y)
+    )
 
 func settle_rescue_party_home() -> void:
     var home := rescue_return_position()
@@ -317,7 +431,7 @@ func settle_rescue_party_home() -> void:
     if forager:
         safe_place_tutorial_npc(forager, home, "rescue_return_home")
     if guard:
-        safe_place_tutorial_npc(guard, home + Vector3(CELL * 0.75, 0.0, CELL * 0.75), "rescue_return_home")
+        safe_place_tutorial_npc(guard, rescue_guard_return_position(), "rescue_return_home")
 
 func safe_place_tutorial_npc(body: Node3D, position: Vector3, reason: String) -> void:
     if body == null or main == null or main.npc_system == null or not main.npc_system.has_method("safe_place_npc"):

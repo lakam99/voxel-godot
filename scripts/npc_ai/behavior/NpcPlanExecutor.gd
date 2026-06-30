@@ -110,7 +110,7 @@ func advance_motion_npc(entry: Dictionary, delta: float, _night_factor := 0.0) -
 	var result: Dictionary = {}
 	match goal_kind:
 		NpcEnumsScript.GOAL_KIND_SCRIPTED:
-			result = _advance_scripted_motion(entry, body, delta)
+			result = _advance_scripted_motion(entry, body, perception, delta)
 		NpcEnumsScript.GOAL_KIND_HOME:
 			result = _advance_home_motion(entry, body, delta)
 		NpcEnumsScript.GOAL_KIND_GUARD:
@@ -181,12 +181,12 @@ func _cached_goal_for_motion(entry: Dictionary, body: Node3D, current_night_fact
 	var goal_kind := String(entry.get("activeGoalKind", entry.get("goal", String(NpcEnumsScript.GOAL_KIND_IDLE))))
 	return { "goalKind": StringName(goal_kind), "reason": "cached_entry_goal" }
 
-func _advance_scripted_motion(entry: Dictionary, body: Node3D, delta: float) -> Dictionary:
+func _advance_scripted_motion(entry: Dictionary, body: Node3D, perception: Dictionary, delta: float) -> Dictionary:
 	var order_kind := _scripted_order_kind(body)
 	if order_kind == "" and not body.has_meta("npc_scripted_target"):
 		_release_action_owned_state(entry, "scripted_order_cancelled")
 		return { "advanced": false, "reason": "scripted_order_cancelled", "intentKind": "scripted" }
-	_execute_scripted(entry, body, delta)
+	_execute_scripted(entry, body, perception, delta)
 	return _motion_result(entry, "scripted", "scripted_order")
 
 func _advance_home_motion(entry: Dictionary, body: Node3D, delta: float) -> Dictionary:
@@ -224,7 +224,8 @@ func _advance_guard_motion(entry: Dictionary, body: Node3D, perception: Dictiona
 	target = _staged_departure_motion_target(entry, body, target)
 	var move_start: int = performance_monitor().begin_section("npc_guard_move") if performance_monitor() != null else Time.get_ticks_usec()
 	entry["routeIntentKind"] = "guard"
-	var moved := float(npc_system.call("move_npc", entry, target, 2.65 * delta, false, true, delta)) if npc_system.has_method("move_npc") else 0.0
+	var speed := _set_motion_speed_mode(entry, "walking", "guard_route")
+	var moved := float(npc_system.call("move_npc", entry, target, speed * delta, false, true, delta)) if npc_system.has_method("move_npc") else 0.0
 	entry.erase("routeIntentKind")
 	if performance_monitor() != null:
 		performance_monitor().end_section("npc_guard_move", move_start)
@@ -256,7 +257,8 @@ func _advance_job_motion(entry: Dictionary, body: Node3D, delta: float) -> Dicti
 	entry["routePriority"] = 90
 	var job_intent_kind := "forage" if String(entry.get("job", "")) == "forage" else "work"
 	entry["routeIntentKind"] = job_intent_kind
-	var moved := float(npc_system.call("move_npc", entry, target, 3.10 * delta, false, _job_allows_outside_movement(entry), delta)) if npc_system.has_method("move_npc") else 0.0
+	var speed := _set_motion_speed_mode(entry, "walking", "%s_route" % job_intent_kind)
+	var moved := float(npc_system.call("move_npc", entry, target, speed * delta, false, _job_allows_outside_movement(entry), delta)) if npc_system.has_method("move_npc") else 0.0
 	entry.erase("routeIntentKind")
 	entry["lastMoveDistance"] = moved
 	var route_status := String(entry.get("routeStatus", ""))
@@ -270,7 +272,8 @@ func _advance_idle_motion(entry: Dictionary, body: Node3D, delta: float) -> Dict
 	entry["routePriority"] = 35
 	var target: Vector3 = entry.get("dayTarget", body.global_position)
 	entry["routeIntentKind"] = "idle"
-	var moved := float(npc_system.call("move_npc", entry, target, 2.25 * delta, false, false, delta)) if npc_system.has_method("move_npc") else 0.0
+	var speed := _set_motion_speed_mode(entry, "walking", "idle_anchor")
+	var moved := float(npc_system.call("move_npc", entry, target, speed * delta, false, false, delta)) if npc_system.has_method("move_npc") else 0.0
 	entry.erase("routeIntentKind")
 	entry["lastMoveDistance"] = moved
 	return _motion_result(entry, "idle", "idle_anchor")
@@ -314,7 +317,7 @@ func _execute_plan(entry: Dictionary, body: Node3D, goal: Dictionary, plan: Dict
 	match goal_kind:
 		NpcEnumsScript.GOAL_KIND_SCRIPTED:
 			var scripted_start: int = monitor.begin_section("npc_execute_scripted") if monitor != null else Time.get_ticks_usec()
-			_execute_scripted(entry, body, delta)
+			_execute_scripted(entry, body, perception, delta)
 			if monitor != null:
 				monitor.end_section("npc_execute_scripted", scripted_start)
 		NpcEnumsScript.GOAL_KIND_HOME:
@@ -343,7 +346,7 @@ func _execute_plan(entry: Dictionary, body: Node3D, goal: Dictionary, plan: Dict
 			if monitor != null:
 				monitor.end_section("npc_execute_idle", idle_start)
 
-func _execute_scripted(entry: Dictionary, body: Node3D, delta: float) -> void:
+func _execute_scripted(entry: Dictionary, body: Node3D, perception: Dictionary, delta: float) -> void:
 	entry["routePriority"] = 180
 	var order_kind := _scripted_order_kind(body)
 	if order_kind == "wait":
@@ -358,10 +361,28 @@ func _execute_scripted(entry: Dictionary, body: Node3D, delta: float) -> void:
 			npc_system.call("face_position", body, face_target)
 		_mark_scripted_order(entry, "ARRIVED", "face_player")
 	elif body.has_meta("npc_scripted_target") and npc_system.has_method("update_scripted_npc"):
+		_execute_scripted_combat_overlay(entry, body, perception)
 		npc_system.call("update_scripted_npc", entry, body, delta)
 	else:
 		_release_action_owned_state(entry, "scripted_order_cancelled")
 		_mark_scripted_order(entry, "FAILED_TARGET_GONE", "missing_scripted_target")
+
+func _execute_scripted_combat_overlay(entry: Dictionary, body: Node3D, perception: Dictionary) -> void:
+	entry["scriptedCombatOverlay"] = false
+	body.set_meta("npc_scripted_combat_overlay", false)
+	if npc_system == null or not npc_system.has_method("update_fighter_target"):
+		return
+	if not bool(entry.get("canFight", false)):
+		return
+	if not bool(perception.get("activeThreat", false)):
+		return
+	var target_hostile = perception.get("threat")
+	if target_hostile == null or not is_instance_valid(target_hostile):
+		return
+	var weapon_id := String(entry.get("weaponId", ""))
+	npc_system.call("update_fighter_target", entry, body, target_hostile, weapon_id)
+	entry["scriptedCombatOverlay"] = true
+	body.set_meta("npc_scripted_combat_overlay", true)
 
 func _execute_home(entry: Dictionary, body: Node3D, perception: Dictionary, delta: float) -> void:
 	_preempt_job_for_home(entry)
@@ -384,7 +405,8 @@ func _execute_home(entry: Dictionary, body: Node3D, perception: Dictionary, delt
 	entry["routePriority"] = 140
 	var target: Vector3 = npc_system.call("home_route_target", entry) if npc_system.has_method("home_route_target") else entry.get("homePosition", body.global_position)
 	entry["homeActiveTargetCell"] = _flat_cell_for_position(target)
-	var speed := 6.4
+	var speed_mode := _scripted_speed_mode(body) if _scripted_order_kind(body) == "go_home" else "walking"
+	var speed := _set_motion_speed_mode(entry, speed_mode, "home_route")
 	var moved := float(npc_system.call("move_npc", entry, target, speed * delta, true, false, delta)) if npc_system.has_method("move_npc") else 0.0
 	entry["lastMoveDistance"] = moved
 	if moved <= 0.001 and npc_system.has_method("home_route_step_reached") and not bool(npc_system.call("home_route_step_reached", entry, target)):
@@ -451,7 +473,8 @@ func _execute_guard(entry: Dictionary, body: Node3D, perception: Dictionary, sch
 	if monitor != null:
 		monitor.end_section("npc_guard_target", target_start)
 	var move_start: int = monitor.begin_section("npc_guard_move") if monitor != null else Time.get_ticks_usec()
-	var moved := float(npc_system.call("move_npc", entry, target, 2.65 * delta, false, true, delta)) if npc_system.has_method("move_npc") else 0.0
+	var speed := _set_motion_speed_mode(entry, "walking", "guard_route")
+	var moved := float(npc_system.call("move_npc", entry, target, speed * delta, false, true, delta)) if npc_system.has_method("move_npc") else 0.0
 	if monitor != null:
 		monitor.end_section("npc_guard_move", move_start)
 	entry["lastMoveDistance"] = moved
@@ -477,7 +500,8 @@ func _execute_job(entry: Dictionary, body: Node3D, delta: float) -> void:
 		var target: Vector3 = entry.get("jobTarget", body.global_position)
 		target = _staged_departure_motion_target(entry, body, target)
 		var job_move_start: int = monitor.begin_section("npc_job_move") if monitor != null else Time.get_ticks_usec()
-		var moved := float(npc_system.call("move_npc", entry, target, 3.10 * delta, false, _job_allows_outside_movement(entry), delta)) if npc_system.has_method("move_npc") else 0.0
+		var speed := _set_motion_speed_mode(entry, "walking", "job_route")
+		var moved := float(npc_system.call("move_npc", entry, target, speed * delta, false, _job_allows_outside_movement(entry), delta)) if npc_system.has_method("move_npc") else 0.0
 		if monitor != null:
 			monitor.end_section("npc_job_move", job_move_start)
 		entry["lastMoveDistance"] = moved
@@ -513,7 +537,8 @@ func _advance_worker_town_recovery(entry: Dictionary, body: Node3D, delta: float
 	entry["jobTarget"] = target
 	entry["routePriority"] = 120
 	_reset_route_for_replan(entry, "worker_outside_town_recovery")
-	var moved := float(npc_system.call("move_npc", entry, target, 4.40 * delta, true, false, delta)) if npc_system.has_method("move_npc") else 0.0
+	var speed := _set_motion_speed_mode(entry, "walking", "worker_outside_town_recovery")
+	var moved := float(npc_system.call("move_npc", entry, target, speed * delta, true, false, delta)) if npc_system.has_method("move_npc") else 0.0
 	entry["lastMoveDistance"] = moved
 	if _point_inside_town(entry, body.global_position):
 		entry["routeForceReplan"] = true
@@ -1062,7 +1087,8 @@ func _execute_idle(entry: Dictionary, body: Node3D, delta: float) -> void:
 	entry["idleAnchorTimer"] = timer
 	entry["dayTarget"] = target
 	entry["idleAnchorKind"] = "semantic"
-	var moved := float(npc_system.call("move_npc", entry, target, 2.25 * delta, false, false, delta)) if npc_system.has_method("move_npc") else 0.0
+	var speed := _set_motion_speed_mode(entry, "walking", "idle_anchor")
+	var moved := float(npc_system.call("move_npc", entry, target, speed * delta, false, false, delta)) if npc_system.has_method("move_npc") else 0.0
 	entry["lastMoveDistance"] = moved
 
 func _choose_semantic_idle_anchor(entry: Dictionary, body: Node3D) -> Vector3:
@@ -1081,6 +1107,21 @@ func _deterministic_seconds(entry: Dictionary, domain: String, minimum: float, m
 	]
 	var unit := float(abs(hash(key)) % 100000) / 99999.0
 	return lerpf(minimum, maximum, unit)
+
+func _scripted_speed_mode(body: Node) -> String:
+	if body == null or not is_instance_valid(body):
+		return "walking"
+	return String(body.get_meta("npc_scripted_speed_mode", "walking"))
+
+func _set_motion_speed_mode(entry: Dictionary, speed_mode: String, reason: String) -> float:
+	var normalized := speed_mode
+	if npc_system != null and npc_system.has_method("set_npc_speed_mode"):
+		normalized = String(npc_system.call("set_npc_speed_mode", entry, speed_mode, reason))
+	if npc_system != null and npc_system.has_method("npc_speed_for_mode"):
+		return float(npc_system.call("npc_speed_for_mode", entry, normalized))
+	if normalized in ["sprint", "sprinting", "rush", "rushing", "run", "running"]:
+		return 6.4
+	return 2.6
 
 func _set_npc_goal(entry: Dictionary, goal: String) -> void:
 	if npc_system != null and npc_system.has_method("set_npc_goal"):

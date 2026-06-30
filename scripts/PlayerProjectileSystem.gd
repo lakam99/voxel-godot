@@ -79,7 +79,7 @@ func fire_active() -> bool:
     var collider := hit.get("collider") as Node
     if collider and collider.has_meta("kind") and String(collider.get_meta("kind")) == "hostile" and hostile_system:
         var variant := String(collider.get_meta("variant", "shadow"))
-        var defeated: bool = hostile_system.damage_hostile(collider, maxf(1.0, float(spec.get("damage", 1.0))))
+        var defeated: bool = hostile_system.damage_hostile(collider, maxf(1.0, float(spec.get("damage", 1.0))), true, player, "player_ranged")
         hostile_hit.emit(variant, defeated, target)
         last_message = hostile_system.last_message
         return true

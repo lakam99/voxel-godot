@@ -20,6 +20,8 @@ const DOOR_TRAFFIC_RELEASE_RADIUS := CELL * 0.72
 const FORAGE_SCAN_NODE_LIMIT := 1200
 const FORAGE_SCAN_CANDIDATE_LIMIT := 16
 const NO_DETOUR := Vector3(9999999.0, 9999999.0, 9999999.0)
+const NPC_SPEED_MODE_WALKING := "walking"
+const NPC_SPEED_MODE_SPRINTING := "sprinting"
 
 var main
 var hostile_system
@@ -172,25 +174,25 @@ func order_wait(actor_id, reason := "scripted_wait") -> Dictionary:
     var entry := npc_entry_for_actor(actor_id)
     if entry.is_empty():
         return scripted_order_result(null, "FAILED_TARGET_GONE", reason, "missing_actor")
-    return apply_scripted_order(entry, "wait", reason, Vector3.INF, -1.0, true, true)
+    return apply_scripted_order(entry, "wait", reason, Vector3.INF, -1.0, true, true, NPC_SPEED_MODE_WALKING)
 
-func order_go_to(actor_id, target: Vector3, reason := "scripted_go_to", arrival_radius := -1.0) -> Dictionary:
+func order_go_to(actor_id, target: Vector3, reason := "scripted_go_to", arrival_radius := -1.0, speed_mode := NPC_SPEED_MODE_WALKING) -> Dictionary:
     var entry := npc_entry_for_actor(actor_id)
     if entry.is_empty():
         return scripted_order_result(null, "FAILED_TARGET_GONE", reason, "missing_actor")
-    return apply_scripted_order(entry, "go_to", reason, target, arrival_radius, true, true)
+    return apply_scripted_order(entry, "go_to", reason, target, arrival_radius, true, true, speed_mode)
 
-func order_go_home(actor_id, reason := "scripted_go_home") -> Dictionary:
+func order_go_home(actor_id, reason := "scripted_go_home", speed_mode := NPC_SPEED_MODE_WALKING) -> Dictionary:
     var entry := npc_entry_for_actor(actor_id)
     if entry.is_empty():
         return scripted_order_result(null, "FAILED_TARGET_GONE", reason, "missing_actor")
-    return apply_scripted_order(entry, "go_home", reason, entry.get("homePosition", Vector3.INF), CELL * 0.82, false, true)
+    return apply_scripted_order(entry, "go_home", reason, entry.get("homePosition", Vector3.INF), CELL * 0.82, false, true, speed_mode)
 
 func order_face_player(actor_id, reason := "scripted_face_player") -> Dictionary:
     var entry := npc_entry_for_actor(actor_id)
     if entry.is_empty():
         return scripted_order_result(null, "FAILED_TARGET_GONE", reason, "missing_actor")
-    return apply_scripted_order(entry, "face_player", reason, Vector3.INF, -1.0, true, true)
+    return apply_scripted_order(entry, "face_player", reason, Vector3.INF, -1.0, true, true, NPC_SPEED_MODE_WALKING)
 
 func order_resume_schedule(actor_id) -> Dictionary:
     return cancel_order(actor_id, "resume_schedule")
@@ -206,6 +208,7 @@ func cancel_order(actor_id, reason := "scripted_cancelled") -> Dictionary:
     entry["activeGoalKind"] = "idle"
     entry.erase("activeMotionGoal")
     entry.erase("activeMotionPlan")
+    set_npc_speed_mode(entry, NPC_SPEED_MODE_WALKING, reason)
     if body != null and is_instance_valid(body):
         body.set_meta("npc_scripted_order_state", "CANCELLED")
         body.set_meta("npc_scripted_order_reason", reason)
@@ -217,9 +220,10 @@ func scripted_order_status(actor_id) -> Dictionary:
         return { "state": "FAILED_TARGET_GONE", "reason": "missing_actor" }
     return entry.get("scriptedOrder", {}) if entry.get("scriptedOrder", {}) is Dictionary else {}
 
-func set_scripted_target(body: Node, target: Vector3, allow_outside := true, hold_on_arrival := true) -> void:
+func set_scripted_target(body: Node, target: Vector3, allow_outside := true, hold_on_arrival := true, speed_mode := NPC_SPEED_MODE_WALKING) -> void:
     if body == null or not is_instance_valid(body):
         return
+    var normalized_speed_mode := normalize_npc_speed_mode(speed_mode)
     var entry := npc_entry_for_actor(body)
     if entry.is_empty():
         body.set_meta("npc_scripted_target", target)
@@ -229,8 +233,11 @@ func set_scripted_target(body: Node, target: Vector3, allow_outside := true, hol
         body.set_meta("npc_scripted_order_kind", "go_to")
         body.set_meta("npc_scripted_order_state", "PENDING")
         body.set_meta("npc_scripted_order_reason", "legacy_set_scripted_target")
+        body.set_meta("npc_scripted_speed_mode", normalized_speed_mode)
+        body.set_meta("npc_speed_mode", normalized_speed_mode)
+        body.set_meta("npc_rushing", normalized_speed_mode == NPC_SPEED_MODE_SPRINTING)
         return
-    apply_scripted_order(entry, "go_to", "legacy_set_scripted_target", target, -1.0, allow_outside, hold_on_arrival)
+    apply_scripted_order(entry, "go_to", "legacy_set_scripted_target", target, -1.0, allow_outside, hold_on_arrival, normalized_speed_mode)
 
 func clear_scripted_target(body: Node) -> void:
     if body == null or not is_instance_valid(body):
@@ -268,7 +275,7 @@ func npc_entry_for_actor(actor_id) -> Dictionary:
             return entry
     return {}
 
-func apply_scripted_order(entry: Dictionary, kind: String, reason: String, target: Vector3, arrival_radius: float, allow_outside: bool, hold_on_arrival: bool) -> Dictionary:
+func apply_scripted_order(entry: Dictionary, kind: String, reason: String, target: Vector3, arrival_radius: float, allow_outside: bool, hold_on_arrival: bool, speed_mode := NPC_SPEED_MODE_WALKING) -> Dictionary:
     var body := entry.get("body") as Node
     if body == null or not is_instance_valid(body):
         return scripted_order_result(entry, "FAILED_TARGET_GONE", reason, "missing_body")
@@ -278,6 +285,8 @@ func apply_scripted_order(entry: Dictionary, kind: String, reason: String, targe
     var normalized_radius := arrival_radius if arrival_radius > 0.0 else CELL * 0.45
     if kind == "go_home":
         normalized_radius = arrival_radius if arrival_radius > 0.0 else CELL * 0.82
+    var normalized_speed_mode := set_npc_speed_mode(entry, speed_mode, reason)
+    var movement_speed := npc_speed_for_mode(entry, normalized_speed_mode)
     var result := {
         "id": order_id,
         "kind": kind,
@@ -288,11 +297,13 @@ func apply_scripted_order(entry: Dictionary, kind: String, reason: String, targe
         "arrivalRadius": normalized_radius,
         "allowOutside": allow_outside,
         "holdOnArrival": hold_on_arrival,
+        "speedMode": normalized_speed_mode,
+        "speed": movement_speed,
         "usesRouteStack": kind in ["go_to", "go_home"]
     }
     entry["scriptedOrder"] = result
     entry["activeGoalKind"] = "home" if kind == "go_home" else "scripted"
-    entry["routePriority"] = 190 if kind == "go_home" else 180
+    entry["routePriority"] = 210 if normalized_speed_mode == NPC_SPEED_MODE_SPRINTING else (190 if kind == "go_home" else 180)
     body.set_meta("npc_scripted_order_id", order_id)
     body.set_meta("npc_scripted_order_kind", kind)
     body.set_meta("npc_scripted_order_state", "PENDING")
@@ -302,6 +313,8 @@ func apply_scripted_order(entry: Dictionary, kind: String, reason: String, targe
     body.set_meta("npc_scripted_arrival_radius", normalized_radius)
     body.set_meta("npc_scripted_allow_outside", allow_outside)
     body.set_meta("npc_scripted_hold_on_arrival", hold_on_arrival)
+    body.set_meta("npc_scripted_speed_mode", normalized_speed_mode)
+    body.set_meta("npc_scripted_speed", movement_speed)
     if kind == "go_to":
         body.set_meta("npc_scripted_target", target)
     elif body.has_meta("npc_scripted_target"):
@@ -336,11 +349,47 @@ func clear_scripted_order_metadata(body: Node) -> void:
         "npc_scripted_order_state",
         "npc_scripted_order_reason",
         "npc_scripted_order_failure_reason",
-        "npc_scripted_arrival_radius"
+        "npc_scripted_arrival_radius",
+        "npc_scripted_speed_mode",
+        "npc_scripted_speed"
     ]:
         if body.has_meta(meta_key):
             body.remove_meta(meta_key)
     body.set_meta("npc_scripted_arrived", false)
+    body.set_meta("npc_speed_mode", NPC_SPEED_MODE_WALKING)
+    body.set_meta("npc_rushing", false)
+
+func normalize_npc_speed_mode(speed_mode) -> String:
+    var mode := String(speed_mode).strip_edges().to_lower()
+    if mode in ["sprint", "sprinting", "rush", "rushing", "run", "running"]:
+        return NPC_SPEED_MODE_SPRINTING
+    return NPC_SPEED_MODE_WALKING
+
+func npc_speed_for_mode(entry: Dictionary, speed_mode := NPC_SPEED_MODE_WALKING) -> float:
+    var profile = entry.get("motorProfile") if entry is Dictionary else null
+    if profile == null:
+        profile = CharacterMotorProfileScript.npc_default()
+    var mode := normalize_npc_speed_mode(speed_mode)
+    if mode == NPC_SPEED_MODE_SPRINTING:
+        return maxf(0.1, float(profile.get("sprint_speed")))
+    return maxf(0.1, float(profile.get("walk_speed")))
+
+func set_npc_speed_mode(entry: Dictionary, speed_mode := NPC_SPEED_MODE_WALKING, reason := "") -> String:
+    if entry.is_empty():
+        return normalize_npc_speed_mode(speed_mode)
+    var mode := normalize_npc_speed_mode(speed_mode)
+    var movement_speed := npc_speed_for_mode(entry, mode)
+    entry["npcSpeedMode"] = mode
+    entry["npcSpeed"] = movement_speed
+    entry["npcSpeedReason"] = reason
+    entry["npcRushing"] = mode == NPC_SPEED_MODE_SPRINTING
+    var body := entry.get("body") as Node
+    if body != null and is_instance_valid(body):
+        body.set_meta("npc_speed_mode", mode)
+        body.set_meta("npc_speed", movement_speed)
+        body.set_meta("npc_speed_reason", reason)
+        body.set_meta("npc_rushing", mode == NPC_SPEED_MODE_SPRINTING)
+    return mode
 
 func deterministic_profile_float(profile: Dictionary, body: Node, domain: String, minimum: float, maximum: float) -> float:
     var stable_id := String(profile.get("id", body.name if body != null else "npc"))
@@ -459,6 +508,7 @@ func register_npc(body: Node3D, profile: Dictionary) -> Dictionary:
         entry["motorProfile"] = CharacterMotorProfileScript.from_traversal_profile(context.get("traversal_profile"))
     if body.get_script() == NpcAgentScript and body.has_method("configure_agent"):
         body.call("configure_agent", entry.get("motorProfile"))
+    set_npc_speed_mode(entry, NPC_SPEED_MODE_WALKING, "spawn")
     publish_navigation_profile_semantics(entry)
     ensure_npc_held_item(entry)
     npcs.append(entry)
@@ -537,6 +587,8 @@ func apply_npc_metadata(body: Node, entry: Dictionary, home_cell: Vector2i, porc
     body.set_meta("npc_route_status", String(entry.get("routeStatus", "idle")))
     body.set_meta("npc_route_reason", String(entry.get("routeReason", "")))
     body.set_meta("npc_simulation_lod", String(entry.get("simulationLod", "active")))
+    body.set_meta("npc_speed_mode", normalize_npc_speed_mode(entry.get("npcSpeedMode", NPC_SPEED_MODE_WALKING)))
+    body.set_meta("npc_rushing", false)
 
 func publish_navigation_profile_semantics(entry: Dictionary) -> void:
     if autonomy_system == null or not autonomy_system.has_method("register_semantic_region"):
@@ -903,8 +955,10 @@ func update_scripted_npc(entry: Dictionary, body: Node3D, delta: float) -> void:
     var scripted_target: Vector3 = body.get_meta("npc_scripted_target", body.global_position)
     var allow_outside := bool(body.get_meta("npc_scripted_allow_outside", true))
     var arrival_radius := float(body.get_meta("npc_scripted_arrival_radius", CELL * 0.45))
+    var speed_mode := set_npc_speed_mode(entry, body.get_meta("npc_scripted_speed_mode", entry.get("npcSpeedMode", NPC_SPEED_MODE_WALKING)), "scripted_go_to")
+    var movement_speed := npc_speed_for_mode(entry, speed_mode)
     scripted_order_result(entry, "ACTIVE", "go_to", "")
-    entry["lastMoveDistance"] = move_npc(entry, scripted_target, 3.05 * delta, false, allow_outside, delta)
+    entry["lastMoveDistance"] = move_npc(entry, scripted_target, movement_speed * delta, false, allow_outside, delta)
     if body.global_position.distance_to(scripted_target) <= arrival_radius:
         body.set_meta("npc_scripted_arrived", true)
         scripted_order_result(entry, "ARRIVED", "target_reached", "")

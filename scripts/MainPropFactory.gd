@@ -37,7 +37,7 @@ func destroy_target() -> void:
             held_item.play_use("strike")
         if hostile_system:
             var variant := String(collider.get_meta("variant", "shadow"))
-            var defeated_hostile: bool = hostile_system.damage_hostile(collider, melee_damage_for_active_item())
+            var defeated_hostile: bool = hostile_system.damage_hostile(collider, melee_damage_for_active_item(), true, player, "player_melee")
             if defeated_hostile:
                 award_hostile_xp(variant)
                 play_feedback("defeat", collider.global_position + Vector3(0.0, 1.0, 0.0) if collider is Node3D else Vector3.INF, Color(0.62, 0.24, 0.82), 16)

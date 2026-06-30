@@ -262,6 +262,34 @@
       "required": true
     },
     {
+      "id": "npc_real_tutorial_final_rescue",
+      "description": "Headed real tutorial final rescue acceptance from Mira briefing through Sera escort, combat, and Niko return",
+      "command": ".\\tools\\npc\\run-real-tutorial-playthrough.ps1",
+      "args": ["-TimeMode", "Both", "-Seed", "atlas-1492", "-ReportPath", "artifacts\\test-runners\\npc-real-tutorial-final-rescue.json", "-ScreenshotDir", "artifacts\\test-runners\\screenshots\\npc-real-tutorial-final-rescue", "-Visible", "-FinalRescue"],
+      "reportPath": "artifacts\\test-runners\\npc-real-tutorial-final-rescue.json",
+      "screenshotDir": "artifacts\\test-runners\\screenshots\\npc-real-tutorial-final-rescue",
+      "evidenceLevel": "acceptance_visual",
+      "acceptanceClaims": ["tutorial_final_rescue_combat_niko_home_sera_guard_visual"],
+      "requiredScreenshots": [
+        "player_pov_final_rescue_mira_briefing.png",
+        "player_pov_final_rescue_sera_escort.png",
+        "player_pov_final_rescue_gate_open.png",
+        "player_pov_final_rescue_site_arrival.png",
+        "player_pov_final_rescue_sera_at_site.png",
+        "player_pov_final_rescue_sera_attack.png",
+        "player_pov_final_rescue_hostiles_target_npc.png",
+        "player_pov_final_rescue_combat.png",
+        "player_pov_final_rescue_combat_complete.png",
+        "player_pov_final_rescue_niko_returning.png",
+        "player_pov_final_rescue_complete.png",
+        "final_rescue_niko_home_normal.png",
+        "final_rescue_sera_guard_normal.png"
+      ],
+      "requiresForbiddenCallSelfScan": true,
+      "requiresVisualProof": true,
+      "required": true
+    },
+    {
       "id": "npc_town_job_cycle_visual_playtest",
       "description": "Headed non-tutorial generated-town day/night/day NPC job-cycle natural-observation acceptance",
       "command": ".\\tools\\npc\\run-npc-town-job-cycle-visual-playtest.ps1",

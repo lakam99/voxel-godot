@@ -372,6 +372,7 @@ func point_inside_role_leash(entry: Dictionary, position: Vector3, allow_outside
 
 func role_leash_radius_cells(entry: Dictionary, allow_outside := false, moving_home := false) -> float:
     var base_radius := float(entry.get("townRadius", 18))
+    var center: Vector2i = entry.get("townCenter", Vector2i.ZERO)
     var job := String(entry.get("job", ""))
     var role := String(entry.get("role", "")).to_lower()
     var leash_radius := base_radius
@@ -381,15 +382,30 @@ func role_leash_radius_cells(entry: Dictionary, allow_outside := false, moving_h
         leash_radius = base_radius + 8.0
     elif allow_outside:
         leash_radius = base_radius + 2.0
+    if allow_outside:
+        leash_radius = scripted_target_leash_radius_cells(entry, center, leash_radius)
     if not moving_home:
         return leash_radius
     var body := entry.get("body") as Node3D
     if body != null and is_instance_valid(body):
-        var center: Vector2i = entry.get("townCenter", Vector2i.ZERO)
         var body_cell := world_cell(body.global_position)
         var current_radius := Vector2(float(body_cell.x - center.x), float(body_cell.y - center.y)).length()
         leash_radius = maxf(leash_radius, minf(current_radius + 8.0, 640.0))
     return leash_radius
+
+func scripted_target_leash_radius_cells(entry: Dictionary, center: Vector2i, fallback_radius: float) -> float:
+    var body := entry.get("body") as Node3D
+    if body == null or not is_instance_valid(body):
+        return fallback_radius
+    if not body.has_meta("npc_scripted_target") or not bool(body.get_meta("npc_scripted_allow_outside", false)):
+        return fallback_radius
+    var target_value = body.get_meta("npc_scripted_target")
+    if not (target_value is Vector3):
+        return fallback_radius
+    var target: Vector3 = target_value
+    var target_radius := Vector2(target.x - float(center.x) * CELL, target.z - float(center.y) * CELL).length() / CELL
+    var current_radius := Vector2(body.global_position.x - float(center.x) * CELL, body.global_position.z - float(center.y) * CELL).length() / CELL
+    return minf(maxf(maxf(fallback_radius, target_radius + 4.0), current_radius + 4.0), 640.0)
 
 func dynamic_work_radius_cells(entry: Dictionary, moving_home := false) -> float:
     return role_leash_radius_cells(entry, true, moving_home)

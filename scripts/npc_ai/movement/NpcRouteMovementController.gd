@@ -18,6 +18,8 @@ const YIELD_RETREAT_HOLD_TICKS := 10
 const PORTAL_RECENTER_FORWARD_STEP_TICKS := 12
 const PORTAL_RECENTER_REPLAN_TICKS := 30
 const DYNAMIC_DETOUR_WAIT_TICKS := 24
+const MOTOR_LOCAL_ESCAPE_MIN_DISTANCE := CELL * 0.16
+const MOTOR_LOCAL_ESCAPE_MAX_DISTANCE := CELL * 0.30
 
 var system
 var main
@@ -252,6 +254,9 @@ func move(entry: Dictionary, intent: Dictionary, max_distance: float, planner, w
         var motor_static_escape_result := try_static_collision_escape(entry, previous, follow, intent, max_distance, world, priority)
         if not motor_static_escape_result.is_empty():
             return motor_static_escape_result
+        var motor_local_escape_result := try_motor_blocked_local_escape(entry, previous, follow, intent, max_distance, world, priority, motor_reason)
+        if not motor_local_escape_result.is_empty():
+            return motor_local_escape_result
         if skip_optional_home_waypoint_if_static_blocked(entry, motor_reason):
             set_route_status(entry, "waiting", "home_optional_waypoint_skip")
             return { "moved": 0.0, "status": "waiting", "reason": "home_optional_waypoint_skip", "classification": "static_collision" }
@@ -519,6 +524,81 @@ func try_static_collision_escape(entry: Dictionary, previous: Vector3, follow: D
         clear_dynamic_yield_retreat(entry)
         set_route_status(entry, "moving", "static_detour")
         return { "moved": moved, "status": "moving", "reason": "static_detour", "classification": "static_collision" }
+    return {}
+
+func try_motor_blocked_local_escape(entry: Dictionary, previous: Vector3, follow: Dictionary, intent: Dictionary, max_distance: float, world, priority: int, motor_reason: String) -> Dictionary:
+    if not (motor_reason in ["blocked_static", "blocked_capsule", "static_or_dynamic_collision", "terrain_step_rejected"]):
+        return {}
+    if int(entry.get("corridorNoProgressTicks", 0)) < NpcConstantsScript.CORRIDOR_NO_PROGRESS_TICKS and float(entry.get("blockedMoveTime", 0.0)) < CELL * 0.24:
+        return {}
+    var axis: Vector3 = follow.get("desiredVelocity", Vector3.ZERO)
+    axis.y = 0.0
+    if axis.length_squared() <= 0.0001:
+        axis = follow.get("safeVelocity", Vector3.ZERO)
+        axis.y = 0.0
+    if axis.length_squared() <= 0.0001:
+        var target_position: Vector3 = intent.get("target", previous)
+        axis = target_position - previous
+        axis.y = 0.0
+    if axis.length_squared() <= 0.0001:
+        return {}
+    axis = axis.normalized()
+    var side := Vector3(-axis.z, 0.0, axis.x)
+    var escape_distance := clampf(maxf(max_distance * 2.5, MOTOR_LOCAL_ESCAPE_MIN_DISTANCE), MOTOR_LOCAL_ESCAPE_MIN_DISTANCE, MOTOR_LOCAL_ESCAPE_MAX_DISTANCE)
+    var target: Vector3 = intent.get("target", previous)
+    var directions: Array[Vector3] = [
+        side,
+        -side,
+        (axis + side).normalized(),
+        (axis - side).normalized(),
+        (-axis + side).normalized(),
+        (-axis - side).normalized(),
+        axis,
+        -axis
+    ]
+    var candidates: Array[Vector3] = []
+    for direction in directions:
+        if direction.length_squared() <= 0.0001:
+            continue
+        candidates.append(previous + direction * escape_distance)
+    candidates.sort_custom(func(a: Vector3, b: Vector3) -> bool:
+        return flat_distance(a, target) < flat_distance(b, target)
+    )
+    for candidate in candidates:
+        candidate.y = previous.y
+        var validation: Dictionary = validate_candidate(entry, previous, candidate, bool(intent.get("movingHome", false)), bool(intent.get("allowOutside", false)), world, priority)
+        if not bool(validation.get("ok", false)):
+            continue
+        var physics_delta := maxf(0.0001, float(intent.get("physicsDelta", 0.0166667)))
+        var motor_result: Dictionary = {}
+        if system != null and system.has_method("apply_npc_route_motion"):
+            motor_result = system.apply_npc_route_motion(entry, previous, validation.get("candidate", candidate), physics_delta)
+        else:
+            return {}
+        var actual_position: Vector3 = motor_result.get("position", previous)
+        var moved := float(motor_result.get("moved", flat_distance(previous, actual_position)))
+        if moved <= 0.001:
+            continue
+        if corridor_follower != null and corridor_follower.has_method("record_motion"):
+            entry["corridorProgress"] = corridor_follower.record_motion(entry, previous, actual_position, entry.get("pathWaypoints", []), "motor_local_escape")
+        entry["blockedMoveTime"] = 0.0
+        entry["routeWaitTicks"] = 0
+        entry["routeYieldTicks"] = 0
+        entry["routeForceReplan"] = true
+        entry["lastMotorLocalEscape"] = {
+            "from": previous,
+            "to": actual_position,
+            "requested": validation.get("candidate", candidate),
+            "motorReason": motor_reason
+        }
+        clear_dynamic_yield_retreat(entry)
+        set_route_status(entry, "moving", "motor_local_escape")
+        return { "moved": moved, "status": "moving", "reason": "motor_local_escape", "classification": String(entry.get("corridorBlockerClass", "blocked")) }
+    entry["lastMotorLocalEscapeFailed"] = {
+        "position": previous,
+        "motorReason": motor_reason,
+        "candidateCount": candidates.size()
+    }
     return {}
 
 func yield_retreat_blocker(entry: Dictionary, actors: Array) -> Node3D:
