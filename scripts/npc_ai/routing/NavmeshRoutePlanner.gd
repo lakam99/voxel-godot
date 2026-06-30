@@ -33,6 +33,7 @@ func plan_runtime_route(entry: Dictionary, intent: Dictionary, generated_world =
 	var blocked_target := _target_cell_blocked(entry, target_cell, generated_world, bool(intent.get("allowOutside", false)), bool(intent.get("movingHome", false)))
 	if blocked_target:
 		return _route_failure("blocked", "target_blocked", target_cell, { "targetCell": target_cell })
+	var query_api := _runtime_query_api(intent)
 	var route: Dictionary = navmesh_world.query_route(query_start_position, query_target, {
 		"actorId": String(entry.get("id", "")),
 		"kind": String(intent.get("kind", "move")),
@@ -41,7 +42,7 @@ func plan_runtime_route(entry: Dictionary, intent: Dictionary, generated_world =
 		"arrivalRadius": float(intent.get("arrivalRadius", CELL * 0.75)),
 		"targetCell": target_cell,
 		"maxSnapDistance": maxf(float(intent.get("arrivalRadius", CELL * 0.75)), CELL * 0.95),
-		"queryApi": "query_path"
+		"queryApi": query_api
 	})
 	last_stats = navmesh_world.stats() if navmesh_world.has_method("stats") else {}
 	last_stats["lastRouteSource"] = String(route.get("source", "navmesh"))
@@ -96,6 +97,11 @@ func route_cost_for_runtime(entry: Dictionary, target: Vector3, allow_outside :=
 
 func stats() -> Dictionary:
 	return last_stats.duplicate(true)
+
+func _runtime_query_api(intent: Dictionary) -> String:
+	if bool(intent.get("movingHome", false)) or String(intent.get("kind", "")) == "scripted":
+		return "query_path"
+	return "map_get_path"
 
 func _path_waypoints(path_value, start: Vector3, target: Vector3, generated_world = null, entry := {}, allow_outside := false, moving_home := false) -> Array[Vector3]:
 	var result: Array[Vector3] = []

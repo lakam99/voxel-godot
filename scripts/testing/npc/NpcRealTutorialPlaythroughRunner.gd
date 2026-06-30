@@ -39,6 +39,8 @@ var sleep_timeline: Array[Dictionary] = []
 var inventory_timeline: Array[Dictionary] = []
 var interaction_timeline: Array[Dictionary] = []
 var morning_observation_timeline: Array[Dictionary] = []
+var day_one_timeline: Array[Dictionary] = []
+var resource_gather_events: Array[Dictionary] = []
 var non_guard_home_visual_matrix: Array[Dictionary] = []
 var morning_outside_visual_matrix: Array[Dictionary] = []
 var morning_departure_matrix: Array[Dictionary] = []
@@ -56,6 +58,7 @@ var screenshot_dir := ""
 var visual_required := false
 var mira_home_only := false
 var morning_outside_only := false
+var day_one_tutorial := false
 var captured_mira_start := false
 var captured_mira_route_departure := false
 var captured_mira_route_midpoint := false
@@ -84,6 +87,7 @@ func configure_visual_capture() -> void:
     visual_required = OS.get_environment("VOXEL_REAL_TUTORIAL_VISUAL_REQUIRED").strip_edges() == "1"
     mira_home_only = OS.get_environment("VOXEL_REAL_TUTORIAL_MIRA_HOME_ONLY").strip_edges() == "1"
     morning_outside_only = OS.get_environment("VOXEL_REAL_TUTORIAL_MORNING_OUTSIDE_ONLY").strip_edges() == "1"
+    day_one_tutorial = OS.get_environment("VOXEL_REAL_TUTORIAL_DAY_ONE").strip_edges() == "1"
     screenshot_dir = OS.get_environment("VOXEL_REAL_TUTORIAL_SCREENSHOT_DIR")
     if screenshot_dir == "":
         screenshot_dir = ProjectSettings.globalize_path("res://artifacts/npc/screenshots/real-tutorial-playthrough")
@@ -101,10 +105,12 @@ func run() -> void:
         "nonHeadlessVisualRequired": visual_required,
         "miraHomeOnly": mira_home_only,
         "morningOutsideOnly": morning_outside_only,
+        "dayOneTutorial": day_one_tutorial,
         "fullPlayerPov": full_player_pov_visual_mode(),
         "screenshotDir": screenshot_dir,
         "visualCaptures": visual_captures,
         "timeline": morning_observation_timeline,
+        "dayOneTimeline": day_one_timeline,
         "morningOutsideVisualMatrix": morning_outside_visual_matrix,
         "deterministicSetup": {},
         "scriptErrorScan": { "status": "pending-wrapper-scan", "matches": [] },
@@ -452,6 +458,11 @@ func run_real_knock_to_morning_foragers() -> void:
     if failure_reasons.size() > failures_before_stage:
         return
 
+    if day_one_tutorial:
+        mark_progress("running_day_one_tutorial")
+        await run_day_one_tutorial(tutorial)
+        return
+
     mark_progress("observing_morning_foragers")
     await observe_morning_npcs_and_foragers(MORNING_FORAGE_TIMEOUT_SECONDS)
     if full_player_pov_visual_mode():
@@ -708,17 +719,24 @@ func capture_player_pov_stage(stage: String, look_target = null, extra_sample: D
     var image := get_viewport().get_texture().get_image()
     var path := screenshot_dir.path_join("%s.png" % stage)
     var err := image.save_png(path)
+    var byte_count := 0
+    if FileAccess.file_exists(path):
+        byte_count = FileAccess.get_file_as_bytes(path).size()
+    var saved_ok := err == OK and byte_count > 0
     var capture := {
         "stage": stage,
         "path": path,
-        "saved": err == OK,
+        "saved": saved_ok,
+        "bytes": byte_count,
         "cameraMode": "player_pov",
         "time": rounded(elapsed),
         "sample": player_pov_capture_sample(extra_sample)
     }
     visual_captures.append(capture)
     report_data["visualCaptures"] = visual_captures
-    return err == OK
+    if not saved_ok:
+        add_failure("player_pov_screenshot_empty", JSON.stringify(capture))
+    return saved_ok
 
 func player_pov_capture_sample(extra_sample: Dictionary = {}) -> Dictionary:
     var sample := extra_sample.duplicate(true)
@@ -1376,6 +1394,743 @@ func observe_morning_npcs_and_foragers(seconds: float) -> void:
     else:
         results.append({ "name": "niko_real_forage_cycle_completed", "passed": true, "details": "object=%s reservation=%s slot=%s runs=%d->%d" % [selected_object_id, reservation_id, approach_slot_id, before_runs, final_runs] })
 
+func run_day_one_tutorial(tutorial) -> void:
+    var initial_inventory := inventory_totals()
+    day_one_timeline.append({
+        "label": "day_one_start",
+        "time": rounded(elapsed),
+        "tutorial": tutorial_state_summary(tutorial),
+        "completedSteps": tutorial_completed_steps(tutorial),
+        "inventory": initial_inventory
+    })
+    report_data["dayOneRepairLeftoverInventory"] = initial_inventory
+    if full_player_pov_visual_mode():
+        await capture_player_pov_stage(
+            "player_pov_day_one_wake",
+            null,
+            { "tutorial": tutorial_state_summary(tutorial), "inventory": initial_inventory }
+        )
+
+    await talk_to_tutorial_npc("mira", "day_one_mira_briefing", 52.0)
+    if failed:
+        return
+    if not tutorial_step_completed(tutorial, "miraMorningBriefing"):
+        add_failure("day_one_mira_briefing_not_completed", JSON.stringify(day_one_snapshot(tutorial)))
+        return
+    if full_player_pov_visual_mode():
+        await capture_player_pov_stage("player_pov_day_one_mira_briefing", null, day_one_snapshot(tutorial))
+
+    await gather_resource_from_generated_prop("berries", "", 2, "day_one_gather_berries", 80.0)
+    if failed:
+        return
+    await talk_to_tutorial_npc("niko", "day_one_niko_food", 120.0)
+    if failed:
+        return
+    if not tutorial_step_completed(tutorial, "nikoBerries"):
+        add_failure("day_one_niko_food_not_completed", JSON.stringify(day_one_snapshot(tutorial)))
+        return
+    if full_player_pov_visual_mode():
+        await capture_player_pov_stage("player_pov_day_one_niko_food", null, day_one_snapshot(tutorial))
+
+    await talk_to_tutorial_npc("rowan", "day_one_rowan_intro", 52.0)
+    if failed:
+        return
+    await craft_recipe_at_workbench("woodenAxe", "day_one_craft_wooden_axe")
+    if failed:
+        return
+    await talk_to_tutorial_npc("rowan", "day_one_rowan_axe_ready", 38.0)
+    if failed:
+        return
+    if not tutorial_step_completed(tutorial, "rowanLogs"):
+        await gather_resource_from_generated_prop("logs", "woodenAxe", 4, "day_one_gather_logs", 95.0)
+        if failed:
+            return
+        await talk_to_tutorial_npc("rowan", "day_one_rowan_logs_ready", 38.0)
+        if failed:
+            return
+    else:
+        record_day_one_step_already_completed("day_one_rowan_logs_already_completed", tutorial)
+    await craft_recipe_at_workbench("woodenPickaxe", "day_one_craft_wooden_pickaxe")
+    if failed:
+        return
+    await talk_to_tutorial_npc("rowan", "day_one_rowan_pickaxe_ready", 38.0)
+    if failed:
+        return
+    if not tutorial_step_completed(tutorial, "rowanStones"):
+        await gather_resource_from_generated_prop("stones", "woodenPickaxe", 4, "day_one_gather_stones", 95.0)
+        if failed:
+            return
+        await talk_to_tutorial_npc("rowan", "day_one_rowan_stones_ready", 38.0)
+        if failed:
+            return
+    else:
+        record_day_one_step_already_completed("day_one_rowan_stones_already_completed", tutorial)
+    if full_player_pov_visual_mode():
+        await capture_player_pov_stage("player_pov_day_one_rowan_tools", null, day_one_snapshot(tutorial))
+
+    await talk_to_tutorial_npc("sera", "day_one_sera_intro", 52.0)
+    if failed:
+        return
+    await craft_recipe_at_workbench("woodenSword", "day_one_craft_wooden_sword")
+    if failed:
+        return
+    await talk_to_tutorial_npc("sera", "day_one_sera_weapon_ready", 38.0)
+    if failed:
+        return
+    if full_player_pov_visual_mode():
+        await capture_player_pov_stage("player_pov_day_one_ready", null, day_one_snapshot(tutorial))
+
+    var steps := tutorial_completed_steps(tutorial)
+    var required_steps := ["miraMorningBriefing", "nikoBerries", "rowanAxe", "rowanLogs", "rowanPickaxe", "rowanStones", "rowanBlocks", "seraWeapon", "readyForWilds"]
+    var missing_steps := []
+    for step_id in required_steps:
+        if not steps.has(step_id):
+            missing_steps.append(step_id)
+    var berries_gathered_ok := resource_gather_delta("berries") >= 2
+    var rowan_logs_ok := resource_gather_delta("logs") >= 4 or steps.has("rowanLogs")
+    var rowan_stones_ok := resource_gather_delta("stones") >= 4 or steps.has("rowanStones")
+    var gathered_ok := berries_gathered_ok and rowan_logs_ok and rowan_stones_ok
+    report_data["dayOneTutorialProof"] = day_one_snapshot(tutorial)
+    report_data["dayOneResourceGatherEvents"] = resource_gather_events
+    if not missing_steps.is_empty() or not gathered_ok:
+        add_failure("day_one_tutorial_not_verified", JSON.stringify({
+            "missingSteps": missing_steps,
+            "gatheredOk": gathered_ok,
+            "resourceRequirements": {
+                "berriesGatheredOk": berries_gathered_ok,
+                "rowanLogsOk": rowan_logs_ok,
+                "rowanStonesOk": rowan_stones_ok
+            },
+            "resourceDeltas": {
+                "berries": resource_gather_delta("berries"),
+                "logs": resource_gather_delta("logs"),
+                "stones": resource_gather_delta("stones")
+            },
+            "snapshot": day_one_snapshot(tutorial)
+        }))
+        return
+    results.append({
+        "name": "day_one_post_storm_tutorial_real_playthrough",
+        "passed": true,
+        "details": "steps=%s resource deltas berries/logs/stones=%d/%d/%d rowanLogsStep=%s rowanStonesStep=%s" % [
+            JSON.stringify(required_steps),
+            resource_gather_delta("berries"),
+            resource_gather_delta("logs"),
+            resource_gather_delta("stones"),
+            str(steps.has("rowanLogs")),
+            str(steps.has("rowanStones"))
+        ]
+    })
+
+func talk_to_tutorial_npc(npc_id: String, label: String, timeout_seconds: float) -> void:
+    mark_progress("talk_%s" % label)
+    var entry := npc_entry(npc_id)
+    var body := entry.get("body") as Node3D
+    if body == null or not is_instance_valid(body):
+        add_failure("day_one_npc_missing", "%s npc=%s" % [label, npc_id])
+        return
+    if bool(strict_home_status(entry).get("strictInside", false)):
+        var initial_access := await ensure_npc_home_access_for_talk(entry, label, 18.0)
+        if failed or not initial_access:
+            return
+    var started_at := elapsed
+    var reached := false
+    var talk_reach_distance := CELL * 1.35
+    while elapsed - started_at < timeout_seconds:
+        entry = npc_entry(npc_id)
+        body = entry.get("body") as Node3D
+        if body == null or not is_instance_valid(body):
+            break
+        var remaining := maxf(1.5, timeout_seconds - (elapsed - started_at))
+        var home_status := strict_home_status(entry)
+        if bool(home_status.get("strictInside", false)):
+            var access_ok := await ensure_npc_home_access_for_talk(entry, label, remaining)
+            if failed or not access_ok:
+                return
+            entry = npc_entry(npc_id)
+            body = entry.get("body") as Node3D
+            if body == null or not is_instance_valid(body):
+                break
+            if not player_inside_entry_home(entry):
+                var door := npc_home_door(entry)
+                var porch_position := entry_position(entry, "porchPosition", door.global_position if door != null and is_instance_valid(door) else body.global_position)
+                if flat_distance(player.global_position, porch_position) > CELL * 0.95:
+                    var porch_reached := false
+                    if day_one_tutorial:
+                        porch_reached = await walk_tutorial_route_near(porch_position, CELL * 0.85, minf(14.0, remaining), "walking_to_%s_home_porch" % label)
+                    else:
+                        porch_reached = await walk_near(porch_position, CELL * 0.85, minf(6.0, remaining), "walking_to_%s_home_porch" % label)
+                    interaction_timeline.append({
+                        "label": "approach_%s_home_porch_for_talk" % label,
+                        "npcId": npc_id,
+                        "player": vec3(player.global_position),
+                        "npc": vec3(body.global_position),
+                        "porch": vec3(porch_position),
+                        "strictHome": home_status,
+                        "reached": porch_reached
+                    })
+                    if not porch_reached:
+                        add_failure("day_one_npc_home_porch_not_reached", JSON.stringify({
+                            "label": label,
+                            "npcId": npc_id,
+                            "player": vec3(player.global_position),
+                            "npc": vec3(body.global_position),
+                            "porch": vec3(porch_position),
+                            "strictHome": home_status
+                        }))
+                        return
+                    await wait_physics_frames(POST_ACTION_FRAMES)
+                    continue
+                var inside_door_position := home_inside_door_position(entry, body.global_position)
+                if flat_distance(player.global_position, inside_door_position) > CELL * 0.7:
+                    var inside_reached := false
+                    if day_one_tutorial:
+                        inside_reached = await walk_tutorial_route_near(inside_door_position, CELL * 0.52, minf(10.0, remaining), "walking_to_%s_home_inside_door" % label)
+                    else:
+                        inside_reached = await walk_near(inside_door_position, CELL * 0.52, minf(5.0, remaining), "walking_to_%s_home_inside_door" % label)
+                    interaction_timeline.append({
+                        "label": "approach_%s_home_inside_door_for_talk" % label,
+                        "npcId": npc_id,
+                        "player": vec3(player.global_position),
+                        "npc": vec3(body.global_position),
+                        "insideDoor": vec3(inside_door_position),
+                        "strictHome": home_status,
+                        "reached": inside_reached
+                    })
+                    if not inside_reached:
+                        add_failure("day_one_npc_home_inside_door_not_reached", JSON.stringify({
+                            "label": label,
+                            "npcId": npc_id,
+                            "player": vec3(player.global_position),
+                            "npc": vec3(body.global_position),
+                            "insideDoor": vec3(inside_door_position),
+                            "strictHome": home_status
+                        }))
+                        return
+                    await wait_physics_frames(POST_ACTION_FRAMES)
+                    continue
+        var threshold_door := npc_home_door(entry)
+        if threshold_door != null and is_instance_valid(threshold_door) and not player_inside_entry_home(entry):
+            var npc_at_home_threshold := flat_distance(body.global_position, threshold_door.global_position) <= CELL * 1.35
+            var player_near_home_threshold := flat_distance(player.global_position, threshold_door.global_position) <= CELL * 10.0
+            if npc_at_home_threshold and player_near_home_threshold and flat_distance(player.global_position, body.global_position) > talk_reach_distance:
+                var threshold_porch_position := entry_position(entry, "porchPosition", threshold_door.global_position)
+                if flat_distance(player.global_position, threshold_porch_position) > CELL * 0.95:
+                    var threshold_porch_reached := false
+                    if day_one_tutorial:
+                        threshold_porch_reached = await walk_tutorial_route_near(threshold_porch_position, CELL * 0.85, minf(32.0, remaining), "walking_to_%s_home_threshold_porch" % label)
+                    else:
+                        threshold_porch_reached = await walk_near(threshold_porch_position, CELL * 0.85, minf(5.0, remaining), "walking_to_%s_home_threshold_porch" % label)
+                    interaction_timeline.append({
+                        "label": "approach_%s_home_threshold_porch_for_talk" % label,
+                        "npcId": npc_id,
+                        "player": vec3(player.global_position),
+                        "npc": vec3(body.global_position),
+                        "porch": vec3(threshold_porch_position),
+                        "door": block_summary(threshold_door),
+                        "reached": threshold_porch_reached
+                    })
+                    if not threshold_porch_reached:
+                        add_failure("day_one_npc_home_threshold_porch_not_reached", JSON.stringify({
+                            "label": label,
+                            "npcId": npc_id,
+                            "player": vec3(player.global_position),
+                            "npc": vec3(body.global_position),
+                            "porch": vec3(threshold_porch_position),
+                            "door": block_summary(threshold_door)
+                        }))
+                        return
+                    await wait_physics_frames(POST_ACTION_FRAMES)
+                    continue
+        if day_one_tutorial:
+            reached = await walk_tutorial_route_near(body.global_position, talk_reach_distance, minf(24.0, remaining), "walking_to_%s" % label)
+        else:
+            reached = await walk_near(body.global_position, talk_reach_distance, minf(4.5, remaining), "walking_to_%s" % label)
+        if reached:
+            entry = npc_entry(npc_id)
+            body = entry.get("body") as Node3D
+            if body != null and is_instance_valid(body) and flat_distance(player.global_position, body.global_position) <= talk_reach_distance:
+                break
+            reached = false
+        await wait_physics_frames(6)
+    if not reached:
+        add_failure("day_one_npc_not_reached", JSON.stringify({
+            "label": label,
+            "npcId": npc_id,
+            "player": vec3(player.global_position),
+            "npc": vec3(body.global_position) if body != null and is_instance_valid(body) else [],
+            "strictHome": strict_home_status(entry),
+            "homeDoor": block_summary(npc_home_door(entry)) if not entry.is_empty() else {}
+        }))
+        return
+    var hit := await aim_until_npc_interaction_hit(body, label)
+    interaction_timeline.append({
+        "label": "before_%s_talk" % label,
+        "npcId": npc_id,
+        "player": vec3(player.global_position),
+        "hit": hit
+    })
+    if not npc_interaction_hit_matches(hit, body):
+        hit = await retry_npc_talk_after_obstructed_view(npc_id, label, hit, talk_reach_distance, maxf(4.0, timeout_seconds - (elapsed - started_at)))
+        entry = npc_entry(npc_id)
+        body = entry.get("body") as Node3D
+        interaction_timeline.append({
+            "label": "before_%s_talk_after_obstruction_retry" % label,
+            "npcId": npc_id,
+            "player": vec3(player.global_position),
+            "hit": hit
+        })
+    if not npc_interaction_hit_matches(hit, body):
+        add_failure("day_one_npc_aim_miss", JSON.stringify({
+            "label": label,
+            "npcId": npc_id,
+            "hit": hit,
+            "player": vec3(player.global_position),
+            "npc": vec3(body.global_position)
+        }))
+        return
+    dispatch_mouse_button(MOUSE_BUTTON_RIGHT, true)
+    dispatch_mouse_button(MOUSE_BUTTON_RIGHT, false)
+    await wait_physics_frames(POST_ACTION_FRAMES)
+    var dialogue_open := hud_dialogue_open()
+    var tutorial = main.get("tutorial_system") if main != null else null
+    var row := {
+        "label": label,
+        "npcId": npc_id,
+        "dialogueOpen": dialogue_open,
+        "tutorial": tutorial_state_summary(tutorial),
+        "completedSteps": tutorial_completed_steps(tutorial),
+        "inventory": inventory_totals(),
+        "lastMessage": String(tutorial.get("last_message")) if tutorial != null else ""
+    }
+    day_one_timeline.append(row)
+    if not dialogue_open:
+        add_failure("day_one_npc_dialogue_not_opened", JSON.stringify(row))
+        return
+    dispatch_key(KEY_ESCAPE, true)
+    dispatch_key(KEY_ESCAPE, false)
+    await wait_physics_frames(POST_ACTION_FRAMES)
+    if hud_dialogue_open():
+        add_failure("day_one_npc_dialogue_not_closed", JSON.stringify(row))
+        return
+    if day_one_tutorial:
+        await leave_npc_home_after_talk(entry, label)
+
+func ensure_npc_home_access_for_talk(entry: Dictionary, label: String, time_remaining: float) -> bool:
+    var home_status := strict_home_status(entry)
+    if not bool(home_status.get("strictInside", false)):
+        return true
+    var door := npc_home_door(entry)
+    if door == null or not is_instance_valid(door):
+        interaction_timeline.append({
+            "label": "missing_home_door_before_%s_talk" % label,
+            "strictHome": home_status,
+            "player": vec3(player.global_position)
+        })
+        return true
+    if bool(door.get_meta("open", false)):
+        return true
+    if day_one_tutorial and not player_inside_entry_home(entry):
+        var porch_position := entry_position(entry, "porchPosition", door.global_position)
+        if flat_distance(player.global_position, porch_position) > CELL * 0.95:
+            var porch_reached := await walk_tutorial_route_near(
+                porch_position,
+                CELL * 0.85,
+                minf(maxf(time_remaining, 8.0), 18.0),
+                "walking_to_%s_home_porch_before_door" % label
+            )
+            interaction_timeline.append({
+                "label": "approach_%s_home_porch_before_door" % label,
+                "player": vec3(player.global_position),
+                "porch": vec3(porch_position),
+                "door": block_summary(door),
+                "strictHome": home_status,
+                "reached": porch_reached
+            })
+            if not porch_reached:
+                add_failure("day_one_npc_home_porch_not_reached", JSON.stringify({
+                    "label": label,
+                    "player": vec3(player.global_position),
+                    "porch": vec3(porch_position),
+                    "door": block_summary(door),
+                    "strictHome": home_status
+                }))
+                return false
+    var opened := await use_block_with_real_action(door, "%s_open_home_door" % label, CELL * 1.85, minf(maxf(time_remaining, 10.0), 28.0))
+    if not opened:
+        return false
+    await wait_physics_frames(POST_ACTION_FRAMES)
+    return true
+
+func home_inside_door_position(entry: Dictionary, fallback: Vector3) -> Vector3:
+    if entry.is_empty():
+        return fallback
+    var porch: Vector2i = entry.get("porchCell", entry.get("homeCell", flat_cell(fallback)))
+    var home: Vector2i = entry.get("homeCell", porch)
+    var delta := home - porch
+    var step := Vector2i.ZERO
+    if abs(delta.y) >= abs(delta.x):
+        step.y = signi(delta.y)
+    else:
+        step.x = signi(delta.x)
+    if step == Vector2i.ZERO:
+        return entry_position(entry, "homePosition", fallback)
+    var inside_cell := Vector2i(porch.x + step.x * 2, porch.y + step.y * 2)
+    return world_position_for_flat_cell(inside_cell)
+
+func leave_npc_home_after_talk(entry: Dictionary, label: String) -> void:
+    if entry.is_empty() or not player_inside_entry_home(entry):
+        return
+    var door := npc_home_door(entry)
+    if door != null and is_instance_valid(door) and not bool(door.get_meta("open", false)):
+        var opened := await use_block_with_real_action(door, "%s_exit_home_door" % label, CELL * 1.85, 18.0)
+        if not opened:
+            return
+        await wait_physics_frames(POST_ACTION_FRAMES)
+    var porch := entry_position(entry, "porchPosition", player.global_position)
+    await walk_tutorial_route_near(porch, CELL * 0.75, 18.0, "walking_out_of_%s_home" % label)
+
+func player_inside_entry_home(entry: Dictionary) -> bool:
+    if player == null or entry.is_empty():
+        return false
+    var cell: Vector2i = flat_cell(player.global_position)
+    var min_cell: Vector2i = entry.get("interiorMinCell", entry.get("homeCell", cell))
+    var max_cell: Vector2i = entry.get("interiorMaxCell", entry.get("homeCell", cell))
+    return cell.x >= min_cell.x and cell.x <= max_cell.x and cell.y >= min_cell.y and cell.y <= max_cell.y
+
+func aim_until_npc_interaction_hit(body: Node3D, label: String) -> Dictionary:
+    var summary := {}
+    for height_scale in [0.35, 0.65, 0.95, 1.20]:
+        if body == null or not is_instance_valid(body):
+            break
+        aim_at(body.global_position + Vector3(0.0, CELL * float(height_scale), 0.0))
+        await wait_physics_frames(6)
+        summary = interaction_hit_summary()
+        if npc_interaction_hit_matches(summary, body):
+            return summary
+    interaction_timeline.append({
+        "label": "aim_npc_miss_%s" % label,
+        "player": vec3(player.global_position),
+        "npc": vec3(body.global_position) if body != null and is_instance_valid(body) else [],
+        "hit": summary
+    })
+    return summary
+
+func retry_npc_talk_after_obstructed_view(npc_id: String, label: String, hit: Dictionary, talk_reach_distance: float, time_remaining: float) -> Dictionary:
+    var block_type := String(hit.get("blockType", ""))
+    if block_type == "":
+        return hit
+    var blocker := node_from_summary_path(String(hit.get("blockPath", ""))) as Node3D
+    if blocker == null or not is_instance_valid(blocker):
+        return hit
+    interaction_timeline.append({
+        "label": "obstructed_view_before_%s_talk" % label,
+        "npcId": npc_id,
+        "player": vec3(player.global_position),
+        "blocker": block_summary(blocker),
+        "hit": hit
+    })
+    if block_type == "door" and not bool(blocker.get_meta("open", false)):
+        var opened := await use_block_with_real_action(blocker, "%s_open_obstructing_door" % label, CELL * 1.85, minf(maxf(time_remaining, 8.0), 24.0))
+        if not opened:
+            return hit
+        await wait_physics_frames(POST_ACTION_FRAMES)
+    var entry := npc_entry(npc_id)
+    var body := entry.get("body") as Node3D
+    if body == null or not is_instance_valid(body):
+        return hit
+    var reach_time := minf(maxf(time_remaining, 8.0), 24.0)
+    var tighter_reach := minf(talk_reach_distance, CELL * 0.62)
+    if day_one_tutorial:
+        await walk_tutorial_route_near(body.global_position, tighter_reach, reach_time, "walking_to_%s_after_obstructed_view" % label)
+    else:
+        await walk_near(body.global_position, tighter_reach, minf(reach_time, 6.0), "walking_to_%s_after_obstructed_view" % label)
+    return await aim_until_npc_interaction_hit(body, label)
+
+func node_from_summary_path(path: String) -> Node:
+    if path == "":
+        return null
+    var direct := get_node_or_null(NodePath(path))
+    if direct != null:
+        return direct
+    if path.begins_with("/root/") and get_tree() != null and get_tree().root != null:
+        return get_tree().root.get_node_or_null(NodePath(path.trim_prefix("/root/")))
+    return null
+
+func npc_interaction_hit_matches(summary: Dictionary, body: Node3D) -> bool:
+    if body == null or not bool(summary.get("hit", false)):
+        return false
+    return String(summary.get("colliderPath", "")) == String(body.get_path()) and bool(summary.get("withinReach", false))
+
+func craft_recipe_at_workbench(recipe_id: String, label: String) -> void:
+    mark_progress("craft_%s" % label)
+    var workbench := nearest_block("workbench", player.global_position)
+    if workbench == null:
+        add_failure("day_one_workbench_missing", label)
+        return
+    if day_one_tutorial:
+        var threshold_clear := await leave_nearby_home_threshold_for_route(label)
+        if not threshold_clear:
+            add_failure("day_one_home_threshold_exit_not_reached", JSON.stringify({
+                "label": label,
+                "player": vec3(player.global_position),
+                "workbench": block_summary(workbench)
+            }))
+            return
+    var reached := false
+    if day_one_tutorial:
+        reached = await walk_tutorial_route_near(workbench.global_position, CELL * 1.65, 24.0, "walking_to_%s_workbench" % label)
+    else:
+        reached = await walk_near(workbench.global_position, CELL * 1.65, 16.0, "walking_to_%s_workbench" % label)
+    if not reached:
+        add_failure("day_one_workbench_not_reached", JSON.stringify({
+            "label": label,
+            "player": vec3(player.global_position),
+            "workbench": block_summary(workbench)
+        }))
+        return
+    aim_at(workbench.global_position + Vector3(0.0, CELL * 0.6, 0.0))
+    var hud = main.get("hud") if main != null else null
+    if hud == null:
+        add_failure("day_one_hud_missing_for_crafting", label)
+        return
+    if not bool(hud.call("is_inventory_open")):
+        dispatch_key(KEY_I, true)
+        dispatch_key(KEY_I, false)
+        await wait_physics_frames(POST_ACTION_FRAMES)
+    if not bool(hud.call("is_inventory_open")):
+        add_failure("day_one_inventory_not_open_for_crafting", label)
+        return
+    await press_craft_button(recipe_id, label)
+    var totals := inventory_totals()
+    if int(totals.get(recipe_id, 0)) <= 0:
+        add_failure("day_one_craft_missing_output", "%s inventory=%s" % [label, JSON.stringify(totals)])
+        return
+    day_one_timeline.append({ "label": label, "recipeId": recipe_id, "inventory": totals })
+    dispatch_key(KEY_ESCAPE, true)
+    dispatch_key(KEY_ESCAPE, false)
+    await wait_physics_frames(POST_ACTION_FRAMES)
+
+func leave_nearby_home_threshold_for_route(label: String) -> bool:
+    for npc_id in ["mira", "niko", "rowan", "sera"]:
+        var entry := npc_entry(npc_id)
+        if entry.is_empty():
+            continue
+        var door := npc_home_door(entry)
+        if door == null or not is_instance_valid(door):
+            continue
+        if player_inside_entry_home(entry):
+            continue
+        if flat_distance(player.global_position, door.global_position) > CELL * 1.65:
+            continue
+        var porch_position := entry_position(entry, "porchPosition", door.global_position)
+        if flat_distance(player.global_position, porch_position) <= CELL * 0.75:
+            return true
+        var reached := await walk_tutorial_route_near(porch_position, CELL * 0.65, 8.0, "walking_to_%s_leave_%s_threshold" % [label, npc_id])
+        interaction_timeline.append({
+            "label": "leave_%s_home_threshold_before_route" % npc_id,
+            "routeLabel": label,
+            "player": vec3(player.global_position),
+            "door": block_summary(door),
+            "porch": vec3(porch_position),
+            "reached": reached
+        })
+        return reached
+    return true
+
+func gather_resource_from_generated_prop(drop_id: String, tool_item: String, required_delta: int, label: String, search_radius: float) -> void:
+    mark_progress(label)
+    var before_total := int(inventory_totals().get(drop_id, 0))
+    var attempted := {}
+    while int(inventory_totals().get(drop_id, 0)) - before_total < required_delta:
+        var prop := nearest_prop_with_drop(drop_id, player.global_position, search_radius, attempted)
+        if prop == null:
+            add_failure("day_one_resource_prop_missing", JSON.stringify({
+                "label": label,
+                "drop": drop_id,
+                "requiredDelta": required_delta,
+                "currentDelta": int(inventory_totals().get(drop_id, 0)) - before_total,
+                "attempted": attempted.keys()
+            }))
+            return
+        attempted[String(prop.get_meta("prop_id", prop.name))] = true
+        var failures_before_attempt := failure_reasons.size()
+        var harvested := await harvest_prop_with_real_action(prop, drop_id, tool_item, label)
+        if failure_reasons.size() > failures_before_attempt:
+            return
+        if not harvested:
+            continue
+    var after_total := int(inventory_totals().get(drop_id, 0))
+    resource_gather_events.append({
+        "label": label,
+        "drop": drop_id,
+        "before": before_total,
+        "after": after_total,
+        "delta": after_total - before_total,
+        "requiredDelta": required_delta,
+        "tool": tool_item
+    })
+    day_one_timeline.append({ "label": label, "inventory": inventory_totals(), "resourceEvents": resource_gather_events.duplicate(true) })
+
+func harvest_prop_with_real_action(prop: Node3D, drop_id: String, tool_item: String, label: String) -> bool:
+    if prop == null or not is_instance_valid(prop):
+        add_failure("day_one_resource_prop_invalid", label)
+        return false
+    if tool_item != "":
+        var selected := await select_hotbar_item(tool_item)
+        if not selected:
+            add_failure("day_one_tool_not_selectable", "%s tool=%s inventory=%s" % [label, tool_item, JSON.stringify(inventory_totals())])
+            return false
+    var before_count := int(inventory_totals().get(drop_id, 0))
+    var target := prop.global_position
+    var distance := Vector2(target.x - player.global_position.x, target.z - player.global_position.z).length()
+    var reached := await walk_near(target, CELL * 1.65, clampf(distance / (CELL * 2.8) + 5.0, 8.0, 36.0), "walking_to_%s" % label)
+    if not reached:
+        resource_gather_events.append({
+            "label": label,
+            "drop": drop_id,
+            "tool": tool_item,
+            "prop": prop_summary(prop),
+            "player": vec3(player.global_position),
+            "attempt": "unreachable"
+        })
+        return false
+    var last_hit := {}
+    for attempt in range(72):
+        if prop == null or not is_instance_valid(prop):
+            break
+        last_hit = await aim_until_prop_hit(prop, label)
+        dispatch_mouse_button(MOUSE_BUTTON_LEFT, true)
+        await wait_physics_frames(2)
+        dispatch_mouse_button(MOUSE_BUTTON_LEFT, false)
+        await wait_physics_frames(8)
+        var current_count := int(inventory_totals().get(drop_id, 0))
+        if current_count > before_count:
+            resource_gather_events.append({
+                "label": "%s_hit_%02d" % [label, attempt],
+                "drop": drop_id,
+                "before": before_count,
+                "after": current_count,
+                "delta": current_count - before_count,
+                "tool": tool_item,
+                "prop": prop_summary(prop) if prop != null and is_instance_valid(prop) else {},
+                "lastHit": last_hit
+            })
+            return true
+    var after_count := int(inventory_totals().get(drop_id, 0))
+    add_failure("day_one_resource_not_harvested", JSON.stringify({
+        "label": label,
+        "drop": drop_id,
+        "tool": tool_item,
+        "before": before_count,
+        "after": after_count,
+        "lastHit": last_hit,
+        "lastHudMessage": String(main.get("last_hud_refresh_message")) if main != null else "",
+        "breakProgress": float(main.get("break_progress")) if main != null else 0.0,
+        "breakTarget": String(main.get("break_target_id")) if main != null else ""
+    }))
+    return false
+
+func aim_until_prop_hit(prop: Node3D, label: String) -> Dictionary:
+    var summary := {}
+    for height_scale in [0.35, 0.70, 1.15, 1.70, 2.30]:
+        if prop == null or not is_instance_valid(prop):
+            break
+        aim_at(prop.global_position + Vector3(0.0, CELL * float(height_scale), 0.0))
+        await wait_physics_frames(3)
+        summary = interaction_hit_summary()
+        if prop_interaction_hit_matches(summary, prop):
+            return summary
+    interaction_timeline.append({
+        "label": "aim_prop_miss_%s" % label,
+        "player": vec3(player.global_position),
+        "prop": prop_summary(prop) if prop != null and is_instance_valid(prop) else {},
+        "hit": summary
+    })
+    return summary
+
+func prop_interaction_hit_matches(summary: Dictionary, prop: Node3D) -> bool:
+    if prop == null or not bool(summary.get("hit", false)):
+        return false
+    return String(summary.get("colliderPath", "")) == String(prop.get_path()) and bool(summary.get("withinReach", false))
+
+func nearest_prop_with_drop(drop_id: String, origin: Vector3, max_distance: float, excluded: Dictionary) -> Node3D:
+    var candidates: Array[Node3D] = []
+    collect_props_with_drop(get_tree().root, drop_id, candidates)
+    var best: Node3D = null
+    var best_distance := INF
+    for candidate in candidates:
+        if candidate == null or not is_instance_valid(candidate):
+            continue
+        var prop_id := String(candidate.get_meta("prop_id", candidate.name))
+        if excluded.has(prop_id):
+            continue
+        var distance := Vector2(candidate.global_position.x - origin.x, candidate.global_position.z - origin.z).length()
+        if distance > max_distance or distance >= best_distance:
+            continue
+        best = candidate
+        best_distance = distance
+    return best
+
+func collect_props_with_drop(node: Node, drop_id: String, out: Array[Node3D]) -> void:
+    if node == null:
+        return
+    if node is Node3D and node.has_meta("kind") and String(node.get_meta("kind")) == "prop" and String(node.get_meta("drop", "")) == drop_id:
+        out.append(node as Node3D)
+    for child in node.get_children():
+        collect_props_with_drop(child, drop_id, out)
+
+func prop_summary(prop: Node3D) -> Dictionary:
+    if prop == null:
+        return {}
+    return {
+        "name": prop.name,
+        "path": String(prop.get_path()),
+        "propId": String(prop.get_meta("prop_id", "")),
+        "drop": String(prop.get_meta("drop", "")),
+        "material": String(prop.get_meta("material", "")),
+        "position": vec3(prop.global_position)
+    }
+
+func tutorial_completed_steps(tutorial) -> Dictionary:
+    if tutorial == null or not tutorial.has_method("snapshot"):
+        return {}
+    var snapshot: Dictionary = tutorial.call("snapshot")
+    var result := {}
+    var steps = snapshot.get("completedSteps", [])
+    if steps is Array:
+        for step in steps:
+            result[String(step)] = true
+    return result
+
+func tutorial_step_completed(tutorial, step_id: String) -> bool:
+    return tutorial_completed_steps(tutorial).has(step_id)
+
+func resource_gather_delta(drop_id: String) -> int:
+    var total := 0
+    for event in resource_gather_events:
+        if String(event.get("drop", "")) == drop_id:
+            total += int(event.get("delta", 0))
+    return total
+
+func day_one_snapshot(tutorial) -> Dictionary:
+    return {
+        "tutorial": tutorial_state_summary(tutorial),
+        "completedSteps": tutorial_completed_steps(tutorial),
+        "inventory": inventory_totals(),
+        "resourceGatherEvents": resource_gather_events,
+        "timeline": day_one_timeline
+    }
+
+func record_day_one_step_already_completed(label: String, tutorial) -> void:
+    day_one_timeline.append({
+        "label": label,
+        "reason": "already_completed_by_live_tutorial_state",
+        "tutorial": tutorial_state_summary(tutorial),
+        "completedSteps": tutorial_completed_steps(tutorial),
+        "inventory": inventory_totals()
+    })
+
 func track_mira_speed() -> void:
     var mira := npc_entry("mira")
     if mira.is_empty():
@@ -1427,6 +2182,87 @@ func walk_near(target: Vector3, stop_distance: float, timeout_seconds: float, la
         var final_offset := Vector3(target.x - player.global_position.x, 0.0, target.z - player.global_position.z)
         reached = final_offset.length() <= stop_distance
     return reached
+
+func walk_tutorial_route_near(target: Vector3, stop_distance: float, timeout_seconds: float, label: String) -> bool:
+    var tutorial = main.get("tutorial_system") if main != null else null
+    if tutorial == null or not tutorial.has_method("state"):
+        return await walk_near(target, stop_distance, timeout_seconds, label)
+    var state: Dictionary = tutorial.call("state")
+    var town_center: Vector2i = state.get("townCenter", flat_cell(target))
+    var start_cell: Vector2i = state.get("startCell", flat_cell(player.global_position))
+    var target_cell := flat_cell(target)
+    var route_target_cell := target_cell
+    if stop_distance >= CELL * 1.5:
+        var target_y_direction := 0
+        if target_cell.y > town_center.y:
+            target_y_direction = 1
+        elif target_cell.y < town_center.y:
+            target_y_direction = -1
+        if target_y_direction != 0:
+            route_target_cell = Vector2i(target_cell.x, target_cell.y + target_y_direction)
+    var route_cells: Array[Vector2i] = []
+    var current_cell := flat_cell(player.global_position)
+    if flat_distance(player.global_position, target) <= CELL * 8.0:
+        return await walk_near(target, stop_distance, timeout_seconds, label)
+    var side_direction := 1
+    if target_cell.x < town_center.x:
+        side_direction = -1
+    elif target_cell.x == town_center.x and current_cell.x < town_center.x:
+        side_direction = -1
+    var side_lane_x: int = town_center.x + side_direction * 6
+    var use_side_lane: bool = abs(route_target_cell.x - town_center.x) >= 5 or abs(current_cell.x - town_center.x) >= 5
+    var crossing_town_sides := (
+        use_side_lane
+        and (
+            (current_cell.x < town_center.x - 4 and route_target_cell.x > town_center.x + 4)
+            or (current_cell.x > town_center.x + 4 and route_target_cell.x < town_center.x - 4)
+        )
+    )
+    var leaving_intro_home_lane: bool = (
+        abs(current_cell.x - start_cell.x) <= 8
+        and current_cell.y <= start_cell.y + 2
+    )
+    if leaving_intro_home_lane:
+        append_unique_route_cell(route_cells, Vector2i(start_cell.x, start_cell.y - 1))
+        append_unique_route_cell(route_cells, Vector2i(start_cell.x, start_cell.y - 3))
+        append_unique_route_cell(route_cells, Vector2i(start_cell.x, start_cell.y - 5))
+        append_unique_route_cell(route_cells, Vector2i(town_center.x, start_cell.y - 5))
+        if use_side_lane:
+            append_unique_route_cell(route_cells, Vector2i(side_lane_x, start_cell.y - 5))
+    else:
+        if crossing_town_sides:
+            append_unique_route_cell(route_cells, Vector2i(town_center.x, current_cell.y))
+            append_unique_route_cell(route_cells, town_center)
+            append_unique_route_cell(route_cells, Vector2i(side_lane_x, town_center.y))
+        else:
+            append_unique_route_cell(route_cells, Vector2i(side_lane_x if use_side_lane else town_center.x, current_cell.y))
+    if use_side_lane:
+        append_unique_route_cell(route_cells, Vector2i(side_lane_x, route_target_cell.y))
+    else:
+        append_unique_route_cell(route_cells, town_center)
+        append_unique_route_cell(route_cells, Vector2i(town_center.x, route_target_cell.y))
+    append_unique_route_cell(route_cells, route_target_cell)
+    var started_at := elapsed
+    for index in range(route_cells.size()):
+        var remaining := timeout_seconds - (elapsed - started_at)
+        if remaining <= 0.0:
+            return false
+        var waypoint: Vector2i = route_cells[index]
+        var waypoint_position := world_position_for_flat_cell(waypoint)
+        var waypoint_stop := stop_distance if index == route_cells.size() - 1 else CELL * 0.85
+        var distance := Vector2(waypoint_position.x - player.global_position.x, waypoint_position.z - player.global_position.z).length()
+        var step_timeout := minf(remaining, clampf(distance / (CELL * 2.15) + 3.0, 3.0, 12.0))
+        var reached := await walk_near(waypoint_position, waypoint_stop, step_timeout, "%s_route_%02d_%d_%d" % [label, index, waypoint.x, waypoint.y])
+        if not reached:
+            return false
+    var remaining_final := timeout_seconds - (elapsed - started_at)
+    if remaining_final <= 0.0:
+        return flat_distance(player.global_position, target) <= stop_distance
+    return await walk_near(target, stop_distance, remaining_final, "%s_final" % label)
+
+func append_unique_route_cell(route_cells: Array[Vector2i], cell: Vector2i) -> void:
+    if route_cells.is_empty() or route_cells[route_cells.size() - 1] != cell:
+        route_cells.append(cell)
 
 func walk_intro_path_to_town_center(tutorial, label: String) -> bool:
     var start_cell := intro_state_cell(tutorial, "startCell", flat_cell(player.global_position))
@@ -1497,7 +2333,11 @@ func use_block_with_real_action(block: Node3D, label: String, stop_distance: flo
         add_failure("%s_block_missing_for_real_action" % label, "block was null or invalid")
         return false
     mark_progress("walking_to_%s" % label)
-    var reached := await walk_near(block.global_position, stop_distance, timeout_seconds, "walking_to_%s" % label)
+    var reached := false
+    if day_one_tutorial and label.begins_with("day_one"):
+        reached = await walk_tutorial_route_near(block.global_position, stop_distance, maxf(timeout_seconds, 36.0), "walking_to_%s" % label)
+    else:
+        reached = await walk_near(block.global_position, stop_distance, timeout_seconds, "walking_to_%s" % label)
     if not reached:
         if full_player_pov_visual_mode():
             await capture_player_pov_stage(
@@ -1523,6 +2363,8 @@ func use_block_with_real_action(block: Node3D, label: String, stop_distance: flo
         await walk_near(stand_position, CELL * 0.35, 4.0, "adjusting_%s_stand" % label)
     await wait_physics_frames(POST_ACTION_FRAMES)
     var before_hit := await aim_until_interaction_hit(block, label)
+    if not interaction_hit_matches_block(before_hit, block):
+        before_hit = await reposition_and_aim_for_block_interaction(block, label)
     interaction_timeline.append({
         "label": "before_%s_action" % label,
         "player": vec3(player.global_position),
@@ -1530,6 +2372,13 @@ func use_block_with_real_action(block: Node3D, label: String, stop_distance: flo
         "hit": before_hit
     })
     sample_player("before_%s_action" % label)
+    if not interaction_hit_matches_block(before_hit, block):
+        add_failure("%s_aim_miss_for_real_action" % label, JSON.stringify({
+            "player": vec3(player.global_position),
+            "block": block_summary(block),
+            "hit": before_hit
+        }))
+        return false
     dispatch_mouse_button(MOUSE_BUTTON_RIGHT, true)
     dispatch_mouse_button(MOUSE_BUTTON_RIGHT, false)
     await wait_physics_frames(POST_ACTION_FRAMES)
@@ -1541,6 +2390,41 @@ func use_block_with_real_action(block: Node3D, label: String, stop_distance: flo
     })
     sample_player("after_%s_action" % label)
     return true
+
+func reposition_and_aim_for_block_interaction(block: Node3D, label: String) -> Dictionary:
+    var last_hit := interaction_hit_summary()
+    if block == null or not is_instance_valid(block):
+        return last_hit
+    var offsets := [
+        Vector3(0.0, 0.0, CELL * 1.65),
+        Vector3(0.0, 0.0, -CELL * 1.65),
+        Vector3(CELL * 1.65, 0.0, 0.0),
+        Vector3(-CELL * 1.65, 0.0, 0.0),
+        Vector3(CELL * 1.25, 0.0, CELL * 1.25),
+        Vector3(-CELL * 1.25, 0.0, CELL * 1.25),
+        Vector3(CELL * 1.25, 0.0, -CELL * 1.25),
+        Vector3(-CELL * 1.25, 0.0, -CELL * 1.25)
+    ]
+    for index in range(offsets.size()):
+        var stand_position: Vector3 = block.global_position + offsets[index]
+        var reached := false
+        if day_one_tutorial:
+            reached = await walk_tutorial_route_near(stand_position, CELL * 0.45, 6.0, "adjusting_%s_stand_%02d" % [label, index])
+        else:
+            reached = await walk_near(stand_position, CELL * 0.45, 4.0, "adjusting_%s_stand_%02d" % [label, index])
+        await wait_physics_frames(POST_ACTION_FRAMES)
+        last_hit = await aim_until_interaction_hit(block, "%s_stand_%02d" % [label, index])
+        interaction_timeline.append({
+            "label": "stand_%s_%02d" % [label, index],
+            "player": vec3(player.global_position),
+            "block": block_summary(block),
+            "stand": vec3(stand_position),
+            "reached": reached,
+            "hit": last_hit
+        })
+        if interaction_hit_matches_block(last_hit, block):
+            return last_hit
+    return last_hit
 
 func use_bed_with_real_action(bed: Node3D, label: String, timeout_seconds: float) -> bool:
     if bed == null or not is_instance_valid(bed):
@@ -2053,14 +2937,15 @@ func dispatch_mouse_button(button_index: int, pressed: bool) -> void:
     event.position = center
     event.global_position = center
     var has_use_or_place := main != null and main.has_method("use_or_place")
+    var routes_to_use_or_place := pressed and button_index == MOUSE_BUTTON_RIGHT and has_use_or_place
     interaction_timeline.append({
         "label": "dispatch_mouse",
         "button": button_index,
         "pressed": pressed,
         "hasUseOrPlace": has_use_or_place,
-        "usingUseOrPlace": pressed and has_use_or_place
+        "usingUseOrPlace": routes_to_use_or_place
     })
-    if pressed and has_use_or_place:
+    if routes_to_use_or_place:
         main.call("use_or_place")
         interaction_timeline.append({
             "label": "after_use_or_place_call",
@@ -2592,6 +3477,8 @@ func add_failure(code: String, details: String) -> void:
     report_data["nonGuardHomeVisualMatrix"] = non_guard_home_visual_matrix
     report_data["morningOutsideVisualMatrix"] = morning_outside_visual_matrix
     report_data["npcScheduleMatrix"] = schedule_matrix
+    report_data["dayOneTimeline"] = day_one_timeline
+    report_data["dayOneResourceGatherEvents"] = resource_gather_events
     var mira := npc_entry("mira")
     if not mira.is_empty():
         report_data["miraFailureSnapshot"] = npc_summary(mira)
@@ -2627,6 +3514,8 @@ func finish() -> void:
     report_data["nikoTimeline"] = niko_timeline
     report_data["nikoForageProof"] = niko_proof
     report_data["nikoForagerState"] = forager_state_summary()
+    report_data["dayOneTimeline"] = day_one_timeline
+    report_data["dayOneResourceGatherEvents"] = resource_gather_events
     save_report()
     mark_progress("finished")
     get_tree().quit(1 if failed else 0)

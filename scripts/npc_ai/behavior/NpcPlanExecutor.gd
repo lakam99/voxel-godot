@@ -223,7 +223,9 @@ func _advance_guard_motion(entry: Dictionary, body: Node3D, perception: Dictiona
 		monitor.end_section("npc_guard_target", target_start)
 	target = _staged_departure_motion_target(entry, body, target)
 	var move_start: int = performance_monitor().begin_section("npc_guard_move") if performance_monitor() != null else Time.get_ticks_usec()
+	entry["routeIntentKind"] = "guard"
 	var moved := float(npc_system.call("move_npc", entry, target, 2.65 * delta, false, true, delta)) if npc_system.has_method("move_npc") else 0.0
+	entry.erase("routeIntentKind")
 	if performance_monitor() != null:
 		performance_monitor().end_section("npc_guard_move", move_start)
 	entry["lastMoveDistance"] = moved
@@ -252,7 +254,10 @@ func _advance_job_motion(entry: Dictionary, body: Node3D, delta: float) -> Dicti
 	var target: Vector3 = entry.get("jobTarget", body.global_position)
 	target = _staged_departure_motion_target(entry, body, target)
 	entry["routePriority"] = 90
+	var job_intent_kind := "forage" if String(entry.get("job", "")) == "forage" else "work"
+	entry["routeIntentKind"] = job_intent_kind
 	var moved := float(npc_system.call("move_npc", entry, target, 3.10 * delta, false, _job_allows_outside_movement(entry), delta)) if npc_system.has_method("move_npc") else 0.0
+	entry.erase("routeIntentKind")
 	entry["lastMoveDistance"] = moved
 	var route_status := String(entry.get("routeStatus", ""))
 	if moved <= 0.001 and route_status != "pending":
@@ -264,7 +269,9 @@ func _advance_idle_motion(entry: Dictionary, body: Node3D, delta: float) -> Dict
 		return { "advanced": false, "reason": "idle_no_anchor", "intentKind": "idle" }
 	entry["routePriority"] = 35
 	var target: Vector3 = entry.get("dayTarget", body.global_position)
+	entry["routeIntentKind"] = "idle"
 	var moved := float(npc_system.call("move_npc", entry, target, 2.25 * delta, false, false, delta)) if npc_system.has_method("move_npc") else 0.0
+	entry.erase("routeIntentKind")
 	entry["lastMoveDistance"] = moved
 	return _motion_result(entry, "idle", "idle_anchor")
 

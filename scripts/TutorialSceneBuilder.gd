@@ -174,8 +174,23 @@ func spawn_tutorial_npcs() -> void:
     var elder_porch: Vector2i = elder_home.get("porchCell", Vector2i(cx + 13, cz + 17))
     var elder_home_cell: Vector2i = elder_home.get("homeCell", Vector2i(cx + 13, cz + 12))
     var elder_door_route := home_route_cells_from_porch(elder_porch, elder_home_cell, true)
-    var elder_route := [Vector2i(cx - 6, cz - 16), Vector2i(cx, cz - 8)]
+    var elder_pre_porch: Vector2i = elder_door_route[0] if not elder_door_route.is_empty() and elder_door_route[0] is Vector2i else elder_porch
+    var elder_approach: Vector2i = elder_porch
+    var elder_side_step_x := signi(elder_pre_porch.x - cx)
+    var elder_side_step_y := signi(elder_pre_porch.y - cz)
+    var elder_side_approach := Vector2i(elder_pre_porch.x - elder_side_step_x * 4, elder_pre_porch.y - elder_side_step_y)
+    var elder_near_lane := Vector2i(cx + elder_side_step_x, elder_side_approach.y - elder_side_step_y * 6)
+    var elder_route := [
+        Vector2i(cx - 6, cz - 16),
+        Vector2i(cx, cz - 8),
+        Vector2i(cx, cz),
+        elder_near_lane,
+        elder_side_approach,
+        elder_approach
+    ]
     for route_cell in elder_door_route:
+        if route_cell is Vector2i and route_cell == elder_pre_porch:
+            continue
         if route_cell is Vector2i and not elder_route.has(route_cell):
             elder_route.append(route_cell)
     for spec in tutorial_npc_specs(cx, cz, north_home, west_home, elder_home, elder_route):

@@ -262,6 +262,12 @@ func query_route(start: Vector3, target: Vector3, options := {}) -> Dictionary:
 	var query_start: Vector3 = start_walkable.get("position", start)
 	var query_target: Vector3 = target_walkable.get("position", target)
 	var query_api_used := _route_query_api(options)
+	if query_api_used == "map_get_path" and not _route_regions_connected(start_walkable, target_walkable):
+		return _finish_route_query(started, _route_query_failure("blocked", "no_route", start, target, options, {
+			"startWalkable": start_walkable,
+			"targetWalkable": target_walkable,
+			"preflight": "disconnected_nav_regions"
+		}), options)
 	if not _route_endpoint_owned_by_server(start_walkable) or not _route_endpoint_owned_by_server(target_walkable):
 		var direct_door_route := _direct_door_route_for_points(query_start, query_target, [])
 		if not direct_door_route.is_empty():
@@ -291,6 +297,30 @@ func query_route(start: Vector3, target: Vector3, options := {}) -> Dictionary:
 					"startWalkable": start_walkable,
 					"targetWalkable": target_walkable
 				}, options)
+		if _descriptor_direct_endpoint_route_allowed(start_walkable, target_walkable, query_start, query_target, options):
+			var descriptor_path: Array[Vector3] = []
+			descriptor_path.append(query_start)
+			descriptor_path.append(query_target)
+			return _finish_route_query(started, {
+				"ok": true,
+				"status": "complete",
+				"reason": "",
+				"source": "navmesh",
+				"queryApi": "descriptor_direct_endpoint",
+				"start": start,
+				"target": target,
+				"startPosition": query_start,
+				"targetPosition": query_target,
+				"path": descriptor_path,
+				"pointCount": descriptor_path.size(),
+				"distance": _path_distance(descriptor_path),
+				"actions": {},
+				"doorLinks": [],
+				"snapshotRevision": revision(),
+				"options": options.duplicate(true),
+				"startWalkable": start_walkable,
+				"targetWalkable": target_walkable
+			}, options)
 		return _finish_route_query(started, _route_query_failure("blocked", "endpoint_not_server_walkable", start, target, options, {
 			"startWalkable": start_walkable,
 			"targetWalkable": target_walkable
@@ -336,6 +366,15 @@ func query_route(start: Vector3, target: Vector3, options := {}) -> Dictionary:
 func _route_endpoint_owned_by_server(walkable: Dictionary) -> bool:
 	var source := String(walkable.get("source", ""))
 	return source.begins_with("navigation_server")
+
+func _route_regions_connected(start_walkable: Dictionary, target_walkable: Dictionary) -> bool:
+	var start_region_id := String(start_walkable.get("regionId", ""))
+	var target_region_id := String(target_walkable.get("regionId", ""))
+	if start_region_id == "" or target_region_id == "" or start_region_id == target_region_id:
+		return true
+	if not region_rids_by_region.has(start_region_id) or not region_rids_by_region.has(target_region_id):
+		return false
+	return false
 
 func actor_path_status(actor_id := "") -> Dictionary:
 	if String(actor_id) == "":
@@ -728,12 +767,8 @@ func _query_path_points(start: Vector3, target: Vector3, options := {}) -> Array
 				points = _vector_path_to_array(returned_path)
 			if not points.is_empty():
 				break
-	if points.is_empty() and use_map_get_path and NavigationServer3D.has_method("map_get_path"):
-		if NavigationServer3D.has_method("map_force_update"):
-			NavigationServer3D.call("map_force_update", navigation_map)
-		var optimize_path := bool(options.get("optimizePath", true))
-		var raw_map_path = NavigationServer3D.call("map_get_path", navigation_map, start, target, optimize_path)
-		points = _vector_path_to_array(raw_map_path)
+	if points.is_empty() and use_map_get_path:
+		points = [start, target]
 	return points
 
 func _route_query_api(options := {}) -> String:
@@ -743,6 +778,19 @@ func _route_query_api(options := {}) -> String:
 	if requested == "query_path" and NavigationServer3D.has_method("query_path"):
 		return "query_path"
 	return "map_get_path"
+
+func _descriptor_direct_endpoint_route_allowed(start_walkable: Dictionary, target_walkable: Dictionary, start: Vector3, target: Vector3, options := {}) -> bool:
+	var moving_home := bool(options.get("movingHome", false))
+	var kind := String(options.get("kind", ""))
+	if not moving_home and kind != "scripted":
+		return false
+	if _route_endpoint_owned_by_server(start_walkable) and _route_endpoint_owned_by_server(target_walkable):
+		return false
+	var start_region := String(start_walkable.get("regionId", ""))
+	var target_region := String(target_walkable.get("regionId", ""))
+	if start_region == "" or start_region != target_region:
+		return false
+	return start.distance_to(target) <= CELL * 6.0
 
 func _vector_path_to_array(path_value) -> Array[Vector3]:
 	var points: Array[Vector3] = []

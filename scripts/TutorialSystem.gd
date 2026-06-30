@@ -397,6 +397,7 @@ func on_bed_used() -> void:
         return
     intro_bed_used = true
     intro_repair_active = false
+    resume_intro_elder_schedule()
     complete_step("introFirstSleep")
     last_message = "You slept through the storm. Dawn breaks over the repaired village."
     last_dialogue.clear()
@@ -428,6 +429,11 @@ func release_intro_elder_home_order() -> void:
         return
     var actor = last_dialogue_node if last_dialogue_node != null and is_instance_valid(last_dialogue_node) else "mira"
     main.npc_system.order_go_home(actor, "intro_acknowledged_return_home")
+
+func resume_intro_elder_schedule() -> void:
+    if main == null or main.npc_system == null or not main.npc_system.has_method("order_resume_schedule"):
+        return
+    main.npc_system.order_resume_schedule("mira")
 
 func focus_dialogue_npc() -> void:
     if last_dialogue_node == null or main == null or main.npc_system == null or main.player == null:

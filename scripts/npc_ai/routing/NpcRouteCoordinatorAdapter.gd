@@ -232,7 +232,8 @@ func _claim_route_budget(entry: Dictionary, intent: Dictionary) -> bool:
 	var external_direct_move := direct_update_move and String(entry.get("activeDoorPortalId", "")) == "" and route_actions.is_empty()
 	var priority := maxi(int(intent.get("priority", 0)), int(entry.get("routePriority", 0)))
 	var route_kind := String(intent.get("kind", "move"))
-	var urgent_route := priority >= 90 or route_kind in ["home", "scripted", "job"]
+	var urgent_route := priority >= 90 or route_kind in ["home", "scripted", "job", "work", "forage", "guard"]
+	var critical_ordered_route := route_kind in ["home", "scripted"]
 	var waited_frames := int(entry.get("routeBudgetWaitFrames", 0))
 	var frames_since_grant := route_budget_frame - int(entry.get("routeBudgetGrantedFrame", -999999))
 	if not external_direct_move and not urgent_route and waited_frames < STARVED_ROUTE_BUDGET_FRAMES and frames_since_grant >= 0 and frames_since_grant <= ROUTE_BUDGET_GRANT_COOLDOWN_FRAMES:
@@ -254,7 +255,7 @@ func _claim_route_budget(entry: Dictionary, intent: Dictionary) -> bool:
 			starved_overflow = true
 		else:
 			return false
-	if not external_direct_move and not starved_overflow and not urgent_overflow and actor_id == route_last_granted_actor_id and int(entry.get("routeBudgetYieldedFrame", -999999)) != route_budget_frame - 1:
+	if not critical_ordered_route and not external_direct_move and not starved_overflow and not urgent_overflow and actor_id == route_last_granted_actor_id and int(entry.get("routeBudgetYieldedFrame", -999999)) != route_budget_frame - 1:
 		entry["routeBudgetYieldedFrame"] = route_budget_frame
 		entry["routeBudgetWaitFrames"] = waited_frames + 1
 		var monitor = performance_monitor()

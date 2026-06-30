@@ -19,13 +19,18 @@ func setup(system_node, main_node, navigation_world, route_planner) -> void:
 
 func make_intent(entry: Dictionary, target: Vector3, max_distance: float, moving_home := false, allow_outside := false) -> Dictionary:
     var body := entry.get("body") as Node3D
-    var kind: String = String(entry.get("goal", "move"))
+    var kind: String = String(entry.get("routeIntentKind", entry.get("activeGoalKind", entry.get("goal", "move"))))
     if moving_home:
         kind = "home"
     elif body != null and body.has_meta("npc_scripted_target"):
         kind = "scripted"
-    elif allow_outside and String(entry.get("job", "")) != "":
-        kind = "job"
+    elif not (kind in ["work", "forage", "guard", "job"]):
+        var job_phase := String(entry.get("jobPhase", "idle"))
+        var job := String(entry.get("job", ""))
+        if job_phase in ["outbound", "searching", "gathering", "returning", "stall"] and job != "":
+            kind = "forage" if job == "forage" else "work"
+        elif allow_outside and job != "":
+            kind = "job"
     var target_cell: Vector2i = world.world_cell(target) if world != null else Vector2i(roundi(target.x / CELL), roundi(target.z / CELL))
     var fallback_cells: Array[Vector2i] = []
     var arrival_radius := CELL * 0.72
@@ -45,7 +50,7 @@ func make_intent(entry: Dictionary, target: Vector3, max_distance: float, moving
         "action": "",
         "interruptible": not moving_home,
         "allowPartial": moving_home,
-        "strictArrival": strict_home_route or kind == "scripted" or kind == "job",
+        "strictArrival": strict_home_route or kind == "scripted" or kind in ["job", "work", "forage", "guard"],
         "fallbackCells": fallback_cells
     }
 

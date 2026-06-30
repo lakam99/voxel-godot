@@ -1,4 +1,4 @@
-param(
+﻿param(
     [ValidateSet("Day", "Night", "Both", "Transition", "day", "night", "both", "transition")]
     [string]$TimeMode = "Both",
     [string]$Seed = "atlas-1492",
@@ -10,12 +10,17 @@ param(
     [int]$StaleProgressSeconds = 45,
     [switch]$Visible,
     [switch]$MiraHomeOnly,
-    [switch]$MorningOutsideOnly
+    [switch]$MorningOutsideOnly,
+    [switch]$DayOne
 )
 
 $ErrorActionPreference = "Stop"
 if ($MiraHomeOnly -and $MorningOutsideOnly) {
     Write-Error "Use either -MiraHomeOnly or -MorningOutsideOnly, not both."
+    exit 1
+}
+if ($DayOne -and ($MiraHomeOnly -or $MorningOutsideOnly)) {
+    Write-Error "Use -DayOne by itself; it cannot be combined with -MiraHomeOnly or -MorningOutsideOnly."
     exit 1
 }
 
@@ -73,6 +78,7 @@ $env:VOXEL_REAL_TUTORIAL_SCREENSHOT_DIR = $ScreenshotDir
 $env:VOXEL_REAL_TUTORIAL_VISUAL_REQUIRED = if ($Visible) { "1" } else { "0" }
 $env:VOXEL_REAL_TUTORIAL_MIRA_HOME_ONLY = if ($MiraHomeOnly) { "1" } else { "0" }
 $env:VOXEL_REAL_TUTORIAL_MORNING_OUTSIDE_ONLY = if ($MorningOutsideOnly) { "1" } else { "0" }
+$env:VOXEL_REAL_TUTORIAL_DAY_ONE = if ($DayOne) { "1" } else { "0" }
 $env:VOXEL_REAL_TUTORIAL_RUN_TOKEN = $runToken
 $env:VOXEL_REAL_TUTORIAL_WATCHDOG_SECONDS = [string]$TimeoutSeconds
 $env:VOXEL_GIT_BRANCH = $branch
@@ -259,7 +265,15 @@ if ($Visible) {
         Get-Content -LiteralPath $ReportPath
         exit 1
     }
-    if ($MorningOutsideOnly) {
+    if ($DayOne) {
+        $requiredScreenshots = @(
+            "player_pov_day_one_wake.png",
+            "player_pov_day_one_mira_briefing.png",
+            "player_pov_day_one_niko_food.png",
+            "player_pov_day_one_rowan_tools.png",
+            "player_pov_day_one_ready.png"
+        )
+    } elseif ($MorningOutsideOnly) {
         $requiredScreenshots = @(
             "morning_outside_group.png",
             "morning_outside_rowan.png",
@@ -282,6 +296,12 @@ if ($Visible) {
         $path = Join-Path $ScreenshotDir $fileName
         if (-not (Test-Path -LiteralPath $path)) {
             Write-Error "Missing visible tutorial proof screenshot: $path"
+            Get-Content -LiteralPath $ReportPath
+            exit 1
+        }
+        $size = (Get-Item -LiteralPath $path).Length
+        if ($size -le 0) {
+            Write-Error "Empty visible tutorial proof screenshot: $path"
             Get-Content -LiteralPath $ReportPath
             exit 1
         }

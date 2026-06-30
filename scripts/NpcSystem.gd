@@ -1612,13 +1612,24 @@ func home_route_step_reached(entry: Dictionary, route_target: Vector3) -> bool:
     if route_status == "arrived" and entry.has("homeActiveTargetCell"):
         var active_cell: Vector2i = entry.get("homeActiveTargetCell", target_cell)
         route_arrived_at_target = active_cell == target_cell
+    var exact_ordered_home_step: bool = route_requires_exact_porch_arrival(entry) and target_cell != home_cell
+    var distance_from_porch: int = abs(target_cell.x - porch_cell.x) + abs(target_cell.y - porch_cell.y)
+    var exact_door_threshold_step: bool = exact_ordered_home_step and distance_from_porch <= 1
     var distance_to_target := body.global_position.distance_to(route_target)
     if route_arrived_at_target and target_cell != home_cell:
+        if exact_door_threshold_step:
+            return distance_to_target <= CELL * 0.35
+        if exact_ordered_home_step:
+            return current_cell == target_cell or distance_to_target <= CELL * 0.35
         if target_cell == porch_cell and route_requires_exact_porch_arrival(entry):
             return current_cell == target_cell or distance_to_target <= CELL * 0.35
         if target_cell != porch_cell and abs(target_cell.x - porch_cell.x) + abs(target_cell.y - porch_cell.y) == 1:
             return current_cell == target_cell or distance_to_target <= CELL * 0.35
         return current_cell == target_cell or distance_to_target <= CELL * 0.82
+    if exact_door_threshold_step:
+        return distance_to_target <= CELL * 0.35
+    if exact_ordered_home_step:
+        return current_cell == target_cell or distance_to_target <= CELL * 0.35
     if target_cell != porch_cell and abs(target_cell.x - porch_cell.x) + abs(target_cell.y - porch_cell.y) == 1:
         if current_cell == target_cell or distance_to_target <= CELL * 0.35:
             return true
