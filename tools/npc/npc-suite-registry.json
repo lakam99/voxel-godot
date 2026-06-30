@@ -163,6 +163,26 @@
       ],
       "requiresForbiddenCallSelfScan": true,
       "requiresVisualProof": true
+    },
+    {
+      "id": "town_job_cycle_visual",
+      "description": "Headed non-tutorial generated-town day/night/day NPC job-cycle natural-observation acceptance",
+      "command": ".\\tools\\npc\\run-npc-town-job-cycle-visual-playtest.ps1",
+      "defaultArgs": [],
+      "supportsTimeMode": false,
+      "supportsScreenshotDir": true,
+      "evidenceLevel": "acceptance_visual",
+      "acceptanceClaims": ["generated_town_job_cycle_day_night_day_natural_observation"],
+      "requiredScreenshots": [
+        "town_setup_fenced_gate.png",
+        "day_jobs_overview.png",
+        "day_forager_forage.png",
+        "day_guard_guarding.png",
+        "night_all_inside_homes.png",
+        "morning_emerge_jobs.png"
+      ],
+      "requiresForbiddenCallSelfScan": true,
+      "requiresVisualProof": true
     }
   ]
 }

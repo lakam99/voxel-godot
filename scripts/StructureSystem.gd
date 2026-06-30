@@ -128,12 +128,8 @@ func build_town(town: Dictionary) -> void:
     town_home_records[town_key] = []
     generated_town_count += 1
     build_town_paths(center_x, center_z, int(town["radius"]), level)
-    var sites := [
-        { "dx": -16, "dz": -13, "side": 2 },
-        { "dx": 8, "dz": -14, "side": 2 },
-        { "dx": -17, "dz": 8, "side": 0 },
-        { "dx": 9, "dz": 9, "side": 0 }
-    ]
+    build_town_perimeter(center_x, center_z, int(town["radius"]), level, town_key)
+    var sites := town_home_sites(town, rng)
     for i in range(sites.size()):
         var site: Dictionary = sites[i]
         var width := rng.randi_range(7, 9)
@@ -157,13 +153,75 @@ func build_town(town: Dictionary) -> void:
     place_utility(center_x, center_z - 3, level, "workbench")
 
 func build_town_paths(center_x: int, center_z: int, radius: int, level: float) -> void:
-    var path_span: int = max(10, int(float(radius) * 0.52))
+    var path_span: int = max(10, radius - 2)
     for offset in range(-path_span, path_span + 1):
         place_path(center_x + offset, center_z, level)
         place_path(center_x, center_z + offset, level)
         if offset % 4 == 0:
             place_path(center_x + offset, center_z + 1, level)
             place_path(center_x + 1, center_z + offset, level)
+
+func town_home_count(town: Dictionary) -> int:
+    var radius := int(town.get("radius", main.TOWN_RADIUS_CELLS))
+    var extra_from_radius: int = clampi(floori(float(radius - main.TOWN_RADIUS_CELLS) * 0.75), 0, 7)
+    var bonus := int(main.hash01("town-home-count:%d,%d" % [int(town.get("regionX", 0)), int(town.get("regionZ", 0))]) * 3.0)
+    return clampi(4 + extra_from_radius + bonus, 4, 12)
+
+func town_home_sites(town: Dictionary, _rng: RandomNumberGenerator) -> Array:
+    var radius := int(town.get("radius", main.TOWN_RADIUS_CELLS))
+    var desired_count := town_home_count(town)
+    var candidates := [
+        { "dx": -16, "dz": -13, "side": 2 },
+        { "dx": 8, "dz": -14, "side": 2 },
+        { "dx": -17, "dz": 8, "side": 0 },
+        { "dx": 9, "dz": 9, "side": 0 },
+        { "dx": -5, "dz": -25, "side": 2 },
+        { "dx": 22, "dz": -4, "side": 1 },
+        { "dx": -29, "dz": -4, "side": 3 },
+        { "dx": -5, "dz": 20, "side": 0 },
+        { "dx": 18, "dz": 18, "side": 0 },
+        { "dx": -24, "dz": 18, "side": 0 },
+        { "dx": 18, "dz": -24, "side": 2 },
+        { "dx": -24, "dz": -24, "side": 2 }
+    ]
+    var sites := []
+    for candidate_value in candidates:
+        var candidate: Dictionary = candidate_value
+        var dx := int(candidate.get("dx", 0))
+        var dz := int(candidate.get("dz", 0))
+        if maxi(absi(dx), absi(dz)) > radius - 4:
+            continue
+        sites.append(candidate)
+        if sites.size() >= desired_count:
+            break
+    return sites
+
+func build_town_perimeter(center_x: int, center_z: int, radius: int, level: float, town_key: String) -> void:
+    var gate_cells := {}
+    for offset in [0, 1]:
+        gate_cells[Vector2i(center_x + offset, center_z - radius)] = { "side": 2, "secondary": offset == 1, "axis": "x" }
+        gate_cells[Vector2i(center_x + offset, center_z + radius)] = { "side": 0, "secondary": offset == 1, "axis": "x" }
+        gate_cells[Vector2i(center_x - radius, center_z + offset)] = { "side": 3, "secondary": offset == 1, "axis": "z" }
+        gate_cells[Vector2i(center_x + radius, center_z + offset)] = { "side": 1, "secondary": offset == 1, "axis": "z" }
+    for offset in range(-radius, radius + 1):
+        place_town_perimeter_cell(center_x + offset, center_z - radius, level, gate_cells, "x", town_key)
+        place_town_perimeter_cell(center_x + offset, center_z + radius, level, gate_cells, "x", town_key)
+        place_town_perimeter_cell(center_x - radius, center_z + offset, level, gate_cells, "z", town_key)
+        place_town_perimeter_cell(center_x + radius, center_z + offset, level, gate_cells, "z", town_key)
+
+func place_town_perimeter_cell(cell_x: int, cell_z: int, level: float, gate_cells: Dictionary, axis: String, town_key: String) -> void:
+    var cell := Vector2i(cell_x, cell_z)
+    if gate_cells.has(cell):
+        var gate: Dictionary = gate_cells[cell]
+        place_path(cell_x, cell_z, level, { "generatedTier": "town", "cacheKey": "%s:town-gate-path:%s:%d,%d" % [main.seed_text, town_key, cell_x, cell_z] })
+        place_door(cell_x, cell_z, level, int(gate.get("side", 0)), bool(gate.get("secondary", false)), "public_gate")
+        return
+    place_structure_block(cell_x, cell_z, level, 0, "woodBlock", {
+        "generatedTier": "town",
+        "accentRole": "fencePost",
+        "fenceAxis": axis,
+        "cacheKey": "%s:town-fence:%s:%d,%d" % [main.seed_text, town_key, cell_x, cell_z]
+    })
 
 func build_town_market(center_x: int, center_z: int, level: float, rng: RandomNumberGenerator) -> void:
     var stalls := [
@@ -188,25 +246,52 @@ func record_town_home(town_key: String, town: Dictionary, base_x: int, base_z: i
         return
     if not town_home_records.has(town_key):
         town_home_records[town_key] = []
-    var home_cell := Vector2i(base_x + int(width / 2), base_z + int(depth / 2))
+    var center_cell := Vector2i(base_x + int(width / 2), base_z + int(depth / 2))
+    var home_cell := center_cell
     var porch_cell := home_cell
     var guard_cell := home_cell
+    var home_route_cells: Array[Vector2i] = []
+    var interior_min_cell := Vector2i(base_x + 1, base_z + 1)
+    var interior_max_cell := Vector2i(base_x + width - 2, base_z + depth - 2)
     var door_entries := StructureDoorRulesScript.door_cells(width, depth, door_side)
     if not door_entries.is_empty():
         var entry: Dictionary = door_entries[0]
-        porch_cell = Vector2i(base_x + int(entry.get("x", 0)), base_z + int(entry.get("z", 0)))
+        var door_cell := Vector2i(base_x + int(entry.get("x", 0)), base_z + int(entry.get("z", 0)))
+        var interior_landing := door_cell
+        var inward := Vector2i.ZERO
+        porch_cell = door_cell
         if door_side == 0:
             porch_cell.y += 1
             guard_cell = Vector2i(porch_cell.x, porch_cell.y + 4)
+            inward = Vector2i(0, -1)
         elif door_side == 2:
             porch_cell.y -= 1
             guard_cell = Vector2i(porch_cell.x, porch_cell.y - 4)
+            inward = Vector2i(0, 1)
         elif door_side == 1:
             porch_cell.x += 1
             guard_cell = Vector2i(porch_cell.x + 4, porch_cell.y)
+            inward = Vector2i(-1, 0)
         else:
             porch_cell.x -= 1
             guard_cell = Vector2i(porch_cell.x - 4, porch_cell.y)
+            inward = Vector2i(1, 0)
+        interior_landing = door_cell + inward
+        home_cell = door_cell + inward * 3
+        var lateral := Vector2i(-inward.y, inward.x)
+        if lateral != Vector2i.ZERO:
+            var center_delta := (center_cell.x - door_cell.x) * lateral.x + (center_cell.y - door_cell.y) * lateral.y
+            var lateral_sign := 1 if center_delta >= 0 else -1
+            home_cell += lateral * lateral_sign * 2
+        interior_landing.x = clampi(interior_landing.x, interior_min_cell.x, interior_max_cell.x)
+        interior_landing.y = clampi(interior_landing.y, interior_min_cell.y, interior_max_cell.y)
+        home_cell.x = clampi(home_cell.x, interior_min_cell.x, interior_max_cell.x)
+        home_cell.y = clampi(home_cell.y, interior_min_cell.y, interior_max_cell.y)
+        home_route_cells.append(porch_cell)
+        if interior_landing != porch_cell:
+            home_route_cells.append(interior_landing)
+        if home_cell != interior_landing:
+            home_route_cells.append(home_cell)
     var record := {
         "id": "%s:home:%d" % [town_key, index],
         "townKey": town_key,
@@ -216,8 +301,9 @@ func record_town_home(town_key: String, town: Dictionary, base_x: int, base_z: i
         "homeCell": home_cell,
         "porchCell": porch_cell,
         "guardCell": guard_cell,
-        "interiorMinCell": Vector2i(base_x, base_z),
-        "interiorMaxCell": Vector2i(base_x + width - 1, base_z + depth - 1),
+        "interiorMinCell": interior_min_cell,
+        "interiorMaxCell": interior_max_cell,
+        "homeRouteCells": home_route_cells,
         "buildingIndex": index
     }
     town_home_records[town_key].append(record)
@@ -549,7 +635,7 @@ func place_utility(cell_x: int, cell_z: int, level: float, block_type: String, e
         generated_utility_count += 1
     return block
 
-func place_door(cell_x: int, cell_z: int, level: float, side: int, secondary: bool) -> void:
+func place_door(cell_x: int, cell_z: int, level: float, side: int, secondary: bool, door_policy := "private_home") -> void:
     var world_y: float = level + main.CELL * 0.48
     var cell_y: int = floori(world_y / main.CELL) + 1
     var facing: float = StructureDoorRulesScript.door_facing(side)
@@ -571,7 +657,7 @@ func place_door(cell_x: int, cell_z: int, level: float, side: int, secondary: bo
         "doorGroupId": group_id,
         "doorPortalId": "door:%s" % group_id,
         "doorPublicAccess": true,
-        "doorPolicy": "private_home",
+        "doorPolicy": door_policy,
         "door": true,
         "accentRole": "doorFrame",
         "doorTrimMaterial": "trimWood"

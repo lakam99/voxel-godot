@@ -51,18 +51,21 @@ func snapshot(entry: Dictionary, schedule: Dictionary) -> Dictionary:
 	}
 
 func is_inside_home_interior(entry: Dictionary, position: Vector3) -> bool:
+	var strict_cell_inside := _strict_cell_inside_home(entry, position)
+	if not strict_cell_inside:
+		return false
 	if autonomy_system == null or autonomy_system.get("navigation_world") == null:
-		return _fallback_inside_home(entry, position)
+		return strict_cell_inside
 	var world = autonomy_system.get("navigation_world")
 	if world.get("semantic_service") == null:
-		return _fallback_inside_home(entry, position)
+		return strict_cell_inside
 	var regions: Array = world.get("semantic_service").regions_at_position(position, &"home_interior")
 	var npc_id := String(entry.get("id", ""))
 	for region in regions:
 		var metadata: Dictionary = region.get("metadata", {})
 		if String(metadata.get("npcId", "")) == npc_id or String(metadata.get("npcId", "")) == "":
 			return bool(metadata.get("inside", true))
-	return false
+	return strict_cell_inside
 
 func compliance(entry: Dictionary, perception: Dictionary, schedule: Dictionary) -> Dictionary:
 	var state := String(schedule.get("scheduleState", "day"))
@@ -95,3 +98,16 @@ func _fallback_inside_home(entry: Dictionary, position: Vector3) -> bool:
 	var home_cell: Vector2i = entry.get("homeCell", Vector2i.ZERO)
 	var current_cell := Vector2i(roundi(position.x / NpcConstantsScript.CELL_SIZE), roundi(position.z / NpcConstantsScript.CELL_SIZE))
 	return current_cell == home_cell and position.distance_to(entry.get("homePosition", position)) <= NpcConstantsScript.CELL_SIZE * 0.82
+
+func _strict_cell_inside_home(entry: Dictionary, position: Vector3) -> bool:
+	var home_cell: Vector2i = entry.get("homeCell", Vector2i.ZERO)
+	var porch_cell: Vector2i = entry.get("porchCell", home_cell)
+	var min_cell: Vector2i = entry.get("interiorMinCell", home_cell)
+	var max_cell: Vector2i = entry.get("interiorMaxCell", home_cell)
+	var current_cell := Vector2i(roundi(position.x / NpcConstantsScript.CELL_SIZE), roundi(position.z / NpcConstantsScript.CELL_SIZE))
+	if current_cell == porch_cell:
+		return false
+	return current_cell.x >= mini(min_cell.x, max_cell.x) \
+		and current_cell.x <= maxi(min_cell.x, max_cell.x) \
+		and current_cell.y >= mini(min_cell.y, max_cell.y) \
+		and current_cell.y <= maxi(min_cell.y, max_cell.y)

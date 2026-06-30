@@ -7,6 +7,8 @@ const NpcRouteMovementControllerScript := preload("res://scripts/npc_ai/movement
 const NpcSemanticGoalPlannerScript := preload("res://scripts/npc_ai/behavior/NpcSemanticGoalPlanner.gd")
 
 const CELL := 1.35
+const ROUTE_MOTION_MAX_SUBSTEP_DISTANCE := CELL * 0.55
+const ROUTE_MOTION_MAX_SUBSTEPS := 48
 
 var system
 var main
@@ -69,6 +71,30 @@ func classify_navigation_event(event: Dictionary) -> Dictionary:
 func move_npc(entry: Dictionary, target: Vector3, max_distance: float, moving_home := false, allow_outside := false, physics_delta := 0.0166667) -> float:
     var body := entry.get("body") as CharacterBody3D
     if body == null or max_distance <= 0.0 or goal_planner == null or locomotion == null:
+        return 0.0
+    var substeps := clampi(ceili(max_distance / ROUTE_MOTION_MAX_SUBSTEP_DISTANCE), 1, ROUTE_MOTION_MAX_SUBSTEPS)
+    if substeps <= 1:
+        return _move_npc_step(entry, target, max_distance, moving_home, allow_outside, physics_delta)
+    var total_moved := 0.0
+    var remaining_distance := max_distance
+    var remaining_delta := maxf(0.0001, physics_delta)
+    for step_index in range(substeps):
+        if remaining_distance <= 0.001:
+            break
+        var steps_left := maxi(1, substeps - step_index)
+        var step_distance := minf(ROUTE_MOTION_MAX_SUBSTEP_DISTANCE, remaining_distance)
+        var step_delta := remaining_delta / float(steps_left)
+        var moved := _move_npc_step(entry, target, step_distance, moving_home, allow_outside, physics_delta)
+        total_moved += moved
+        remaining_distance -= step_distance
+        remaining_delta = maxf(0.0001, remaining_delta - step_delta)
+        var status := String(entry.get("routeStatus", ""))
+        if status in ["arrived", "blocked", "unreachable", "pending", "waiting"] and moved <= 0.001:
+            break
+    return total_moved
+
+func _move_npc_step(entry: Dictionary, target: Vector3, max_distance: float, moving_home := false, allow_outside := false, physics_delta := 0.0166667) -> float:
+    if max_distance <= 0.0:
         return 0.0
     var intent: Dictionary = goal_planner.make_intent(entry, target, max_distance, moving_home, allow_outside)
     intent["physicsDelta"] = physics_delta

@@ -1009,7 +1009,7 @@ func _base_result(request, status: StringName, reason: StringName, metrics := {}
 func _runtime_target_cells(entry: Dictionary, intent: Dictionary, world_adapter, snapshot: Dictionary, target_cell: Vector2i, start_cell: Vector2i) -> Dictionary:
 	var target_cells := {}
 	var arrival_radius := float(intent.get("arrivalRadius", NpcConstantsScript.CELL_SIZE * 0.75))
-	var strict_arrival := bool(intent.get("strictArrival", false)) or String(intent.get("kind", "")) == "scripted"
+	var strict_arrival := bool(intent.get("strictArrival", false)) or String(intent.get("kind", "")) == "scripted" or bool(intent.get("movingHome", false))
 	var radius: int = 0 if strict_arrival else clampi(ceili(arrival_radius / NpcConstantsScript.CELL_SIZE), 0, 3)
 	for cell_value in intent.get("approachCells", []):
 		if cell_value is Vector2i and _runtime_cell_can_be_goal(entry, world_adapter, snapshot, cell_value, start_cell):

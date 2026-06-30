@@ -29,8 +29,7 @@ func make_intent(entry: Dictionary, target: Vector3, max_distance: float, moving
     var target_cell: Vector2i = world.world_cell(target) if world != null else Vector2i(roundi(target.x / CELL), roundi(target.z / CELL))
     var fallback_cells: Array[Vector2i] = []
     var arrival_radius := CELL * 0.72
-    var home_route_positions: Array = entry.get("homeRoutePositions", []) if entry.get("homeRoutePositions", []) is Array else []
-    var strict_home_route := moving_home and not home_route_positions.is_empty()
+    var strict_home_route := moving_home
     if moving_home:
         arrival_radius = CELL * 0.35 if strict_home_route else CELL * 0.82
     elif kind == "scripted":
@@ -65,15 +64,16 @@ func choose_job_target(entry: Dictionary) -> Vector3:
     if world == null or planner == null:
         return entry.get("porchPosition", Vector3.ZERO)
     var job := String(entry.get("job", ""))
+    var outside_town_job := job == "forage"
     var resource_candidates: Array[Vector3] = []
     add_resource_prop_candidates(resource_candidates, entry, job)
-    var resource_reachable := choose_best_reachable_position(entry, resource_candidates, true, false, CELL * 0.85, MAX_ROUTE_SCORED_CANDIDATES)
-    if resource_reachable != Vector3.INF and world.point_inside_work_area(entry, resource_reachable) and not world.point_inside_town(entry, resource_reachable):
+    var resource_reachable := choose_best_reachable_position(entry, resource_candidates, outside_town_job, false, CELL * 0.85, MAX_ROUTE_SCORED_CANDIDATES)
+    if resource_reachable != Vector3.INF and job_position_allowed(entry, resource_reachable, outside_town_job):
         clear_goal_fallback(entry)
         return resource_reachable
-    var candidates: Array[Vector3] = job_anchor_candidates(entry)
-    var reachable := choose_best_reachable_position(entry, candidates, true, false, CELL * 0.85, MAX_ROUTE_SCORED_CANDIDATES)
-    if reachable != Vector3.INF and world.point_inside_work_area(entry, reachable) and not world.point_inside_town(entry, reachable):
+    var candidates: Array[Vector3] = job_anchor_candidates(entry, outside_town_job)
+    var reachable := choose_best_reachable_position(entry, candidates, outside_town_job, false, CELL * 0.85, MAX_ROUTE_SCORED_CANDIDATES)
+    if reachable != Vector3.INF and job_position_allowed(entry, reachable, outside_town_job):
         clear_goal_fallback(entry)
         return reachable
     set_goal_fallback(entry, "blocked", "no_reachable_job_anchor")
@@ -94,6 +94,10 @@ func choose_guard_target(entry: Dictionary, target_hostile: Node3D = null, melee
         if intercept != Vector3.INF:
             clear_goal_fallback(entry)
             return intercept
+    var assigned_guard_post: Vector3 = entry.get("guardPosition", entry.get("porchPosition", Vector3.ZERO))
+    if position_can_be_goal(entry, assigned_guard_post, false, false):
+        clear_goal_fallback(entry)
+        return assigned_guard_post
     candidates = guard_post_candidates(entry)
     var guard_target := choose_best_reachable_position(entry, candidates, false, false, CELL * 0.85, 10)
     if guard_target != Vector3.INF:
@@ -179,14 +183,19 @@ func town_anchor_candidates(entry: Dictionary) -> Array[Vector3]:
     add_utility_anchor_candidates(candidates, entry)
     return candidates
 
-func job_anchor_candidates(entry: Dictionary) -> Array[Vector3]:
+func job_anchor_candidates(entry: Dictionary, outside_town := true) -> Array[Vector3]:
     var candidates: Array[Vector3] = []
-    add_resource_prop_candidates(candidates, entry, String(entry.get("job", "")))
-    add_path_candidates(candidates, entry, true)
-    var outward := outward_work_anchor(entry)
-    if outward != Vector3.INF:
-        candidates.append(outward)
-    add_deterministic_ring_candidates(candidates, entry, true)
+    if outside_town:
+        add_resource_prop_candidates(candidates, entry, String(entry.get("job", "")))
+        add_path_candidates(candidates, entry, true)
+        var outward := outward_work_anchor(entry)
+        if outward != Vector3.INF:
+            candidates.append(outward)
+        add_deterministic_ring_candidates(candidates, entry, true)
+    else:
+        add_path_candidates(candidates, entry, false)
+        add_utility_anchor_candidates(candidates, entry)
+        add_deterministic_ring_candidates(candidates, entry, false)
     candidates.append(entry.get("porchPosition", Vector3.ZERO))
     return candidates
 
@@ -273,7 +282,9 @@ func add_resource_prop_candidates(candidates: Array[Vector3], entry: Dictionary,
         return
     var body := entry.get("body") as Node3D
     var origin: Vector3 = body.global_position if body != null else entry.get("porchPosition", Vector3.ZERO)
+    var outside_town_job := job == "forage"
     var props: Array[Node3D] = indexed_resource_props(entry, job)
+    props = filter_job_props(entry, job, props)
     if props.is_empty() and allow_resource_scan_fallback():
         var remaining_scan_nodes := RESOURCE_SCAN_NODE_LIMIT
         for root_value in [main.get("prop_root"), main.get("chunk_root")]:
@@ -292,7 +303,7 @@ func add_resource_prop_candidates(candidates: Array[Vector3], entry: Dictionary,
         var added_for_prop := false
         for cell in approach_cells:
             var pos: Vector3 = world.cell_position(cell)
-            if world.point_inside_work_area(entry, pos) and not world.point_inside_town(entry, pos):
+            if job_position_allowed(entry, pos, outside_town_job):
                 candidates.append(pos)
                 added_for_prop = true
                 break
@@ -305,12 +316,19 @@ func indexed_resource_props(entry: Dictionary, job: String) -> Array[Node3D]:
         return []
     var options := {
         "limit": RESOURCE_SCAN_CANDIDATE_LIMIT,
-        "outsideTown": true,
+        "outsideTown": job == "forage",
         "workAreaOnly": true
     }
     if job == "forage":
         options["drops"] = ["berries"]
     return service.query_resource_nodes(entry, resource_kinds_for_job(job), options)
+
+func filter_job_props(entry: Dictionary, job: String, props: Array[Node3D]) -> Array[Node3D]:
+    var filtered: Array[Node3D] = []
+    for prop in props:
+        if prop_matches_job(prop, entry, job):
+            filtered.append(prop)
+    return filtered
 
 func smart_object_service():
     if system == null or not system.has_method("smart_object_service"):
@@ -350,7 +368,7 @@ func prop_matches_job(prop: Node3D, entry: Dictionary, job: String) -> bool:
         return false
     if String(prop.get_meta("kind", "")) != "prop":
         return false
-    if not world.point_inside_work_area(entry, prop.global_position) or world.point_inside_town(entry, prop.global_position):
+    if not job_position_allowed(entry, prop.global_position, job == "forage"):
         return false
     if main.height_at_world(prop.global_position.x, prop.global_position.z) < main.WATER_LEVEL + 0.45:
         return false
@@ -363,6 +381,13 @@ func prop_matches_job(prop: Node3D, entry: Dictionary, job: String) -> bool:
     if job == "forage":
         return material == "berryBush" or drop == "berries"
     return false
+
+func job_position_allowed(entry: Dictionary, position: Vector3, outside_town_job: bool) -> bool:
+    if not world.point_inside_work_area(entry, position):
+        return false
+    if outside_town_job:
+        return not world.point_inside_town(entry, position)
+    return world.point_inside_town(entry, position)
 
 func guard_post_candidates(entry: Dictionary) -> Array[Vector3]:
     var candidates: Array[Vector3] = [

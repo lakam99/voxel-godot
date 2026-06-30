@@ -10,7 +10,7 @@ func town_region(region_x: int, region_z: int) -> Dictionary:
         return {}
     var center_x: int = region_x * TOWN_REGION_CELLS
     var center_z: int = region_z * TOWN_REGION_CELLS
-    var radius: int = TOWN_RADIUS_CELLS + int(hash01("town-radius:%d,%d" % [region_x, region_z]) * 8.0)
+    var radius: int = town_radius_for_region(region_x, region_z, forced)
     var natural_level: float = natural_base_height_cell(center_x, center_z)
     var level: float = clamp(round(max(natural_level, WATER_LEVEL + 3.0) / CELL) * CELL, WATER_LEVEL + 3.0, 52.0)
     var town := {
@@ -23,6 +23,17 @@ func town_region(region_x: int, region_z: int) -> Dictionary:
     }
     town_region_cache[cache_key] = town
     return town
+
+func town_radius_for_region(region_x: int, region_z: int, forced := false) -> int:
+    var radius_roll := hash01("town-radius:%d,%d" % [region_x, region_z])
+    if forced:
+        return TOWN_RADIUS_CELLS + int(radius_roll * 8.0)
+    var class_roll := hash01("town-size-class:%d,%d" % [region_x, region_z])
+    if class_roll < 0.34:
+        return 22 + int(radius_roll * 7.0)
+    if class_roll > 0.82:
+        return 38 + int(radius_roll * 9.0)
+    return TOWN_RADIUS_CELLS + int(radius_roll * 8.0)
 
 func hash01(text: String) -> float:
     return float(abs(hash_string("%s:%s" % [seed_text, text])) % 100000) / 100000.0

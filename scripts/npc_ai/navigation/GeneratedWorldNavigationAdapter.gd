@@ -344,22 +344,55 @@ func point_inside_town(entry: Dictionary, position: Vector3) -> bool:
 
 func point_inside_work_area(entry: Dictionary, position: Vector3) -> bool:
     var center: Vector2i = entry.get("townCenter", Vector2i.ZERO)
-    var radius := (float(entry.get("townRadius", 18)) + 24.0) * CELL
+    var radius := role_leash_radius_cells(entry, true, false) * CELL
     var flat := Vector2(position.x - float(center.x) * CELL, position.z - float(center.y) * CELL)
     return flat.length() <= radius
 
 func point_allowed(entry: Dictionary, position: Vector3, allow_outside := false, moving_home := false) -> bool:
     if allow_outside or moving_home:
-        return point_inside_work_area(entry, position)
+        return point_inside_role_leash(entry, position, allow_outside, moving_home)
     return point_inside_town(entry, position)
 
 func cell_allowed_area(entry: Dictionary, cell: Vector2i, allow_outside := false, moving_home := false) -> bool:
     var center: Vector2i = entry.get("townCenter", Vector2i.ZERO)
     var radius_cells := float(entry.get("townRadius", 18))
     if allow_outside or moving_home:
-        radius_cells += 24.0
+        radius_cells = role_leash_radius_cells(entry, allow_outside, moving_home)
     var flat := Vector2(float(cell.x - center.x), float(cell.y - center.y)) * CELL
     return flat.length() <= radius_cells * CELL
+
+func point_inside_dynamic_work_area(entry: Dictionary, position: Vector3, moving_home := false) -> bool:
+    return point_inside_role_leash(entry, position, true, moving_home)
+
+func point_inside_role_leash(entry: Dictionary, position: Vector3, allow_outside := false, moving_home := false) -> bool:
+    var center: Vector2i = entry.get("townCenter", Vector2i.ZERO)
+    var radius := role_leash_radius_cells(entry, allow_outside, moving_home) * CELL
+    var flat := Vector2(position.x - float(center.x) * CELL, position.z - float(center.y) * CELL)
+    return flat.length() <= radius
+
+func role_leash_radius_cells(entry: Dictionary, allow_outside := false, moving_home := false) -> float:
+    var base_radius := float(entry.get("townRadius", 18))
+    var job := String(entry.get("job", ""))
+    var role := String(entry.get("role", "")).to_lower()
+    var leash_radius := base_radius
+    if job == "forage":
+        leash_radius = base_radius + 24.0
+    elif job == "guard" or role.find("guard") >= 0:
+        leash_radius = base_radius + 8.0
+    elif allow_outside:
+        leash_radius = base_radius + 2.0
+    if not moving_home:
+        return leash_radius
+    var body := entry.get("body") as Node3D
+    if body != null and is_instance_valid(body):
+        var center: Vector2i = entry.get("townCenter", Vector2i.ZERO)
+        var body_cell := world_cell(body.global_position)
+        var current_radius := Vector2(float(body_cell.x - center.x), float(body_cell.y - center.y)).length()
+        leash_radius = maxf(leash_radius, minf(current_radius + 8.0, 640.0))
+    return leash_radius
+
+func dynamic_work_radius_cells(entry: Dictionary, moving_home := false) -> float:
+    return role_leash_radius_cells(entry, true, moving_home)
 
 func terrain_allows_step(from_cell: Vector2i, to_cell: Vector2i, moving_home := false) -> Dictionary:
     if main == null:
@@ -438,6 +471,9 @@ func cell_pathable(entry: Dictionary, snapshot: Dictionary, from_cell: Vector2i,
     var terrain := terrain_allows_step(from_cell, to_cell, moving_home)
     if not bool(terrain.get("ok", false)):
         return terrain
+    var door := door_at(snapshot, to_cell)
+    if door != null and not door_allows_route_for_entry(entry, door, from_cell, moving_home):
+        return { "ok": false, "reason": "private_door_not_routeable" }
     if static_blocker(snapshot, to_cell) != null and not target_cells.has(to_cell):
         return { "ok": false, "reason": "blocked_static" }
     if to_cell != from_cell and prop_clearance_blocker(snapshot, to_cell) != null and not target_cells.has(to_cell):
@@ -445,6 +481,62 @@ func cell_pathable(entry: Dictionary, snapshot: Dictionary, from_cell: Vector2i,
     if not ignore_dynamic and dynamic_blocker(snapshot, to_cell) != null and not target_cells.has(to_cell):
         return { "ok": false, "reason": "blocked_dynamic" }
     return { "ok": true, "reason": "" }
+
+func door_allows_route_for_entry(entry: Dictionary, door: Node, from_cell: Vector2i, moving_home := false) -> bool:
+    if door == null:
+        return true
+    var policy := String(door.get_meta("door_policy", "private_home"))
+    if policy != "private_home":
+        return true
+    if not private_home_door_matches_entry(entry, door):
+        return false
+    if moving_home:
+        return true
+    if entry_body_inside_home(entry):
+        return true
+    return cell_inside_entry_home(entry, from_cell)
+
+func private_home_door_matches_entry(entry: Dictionary, door: Node) -> bool:
+    var door_cell := door_flat_cell(door)
+    if door_cell == Vector2i(999999, 999999):
+        return false
+    var porch_cell: Vector2i = entry.get("porchCell", entry.get("homeCell", Vector2i.ZERO))
+    if maxi(absi(door_cell.x - porch_cell.x), absi(door_cell.y - porch_cell.y)) <= 1:
+        return true
+    var interior_min: Vector2i = entry.get("interiorMinCell", entry.get("homeCell", Vector2i.ZERO))
+    var interior_max: Vector2i = entry.get("interiorMaxCell", entry.get("homeCell", Vector2i.ZERO))
+    if door_cell.x < mini(interior_min.x, interior_max.x) \
+        or door_cell.x > maxi(interior_min.x, interior_max.x) \
+        or door_cell.y < mini(interior_min.y, interior_max.y) \
+        or door_cell.y > maxi(interior_min.y, interior_max.y):
+        return false
+    return maxi(absi(door_cell.x - porch_cell.x), absi(door_cell.y - porch_cell.y)) <= 1
+
+func door_flat_cell(door: Node) -> Vector2i:
+    if door == null:
+        return Vector2i(999999, 999999)
+    var cell_value = door.get_meta("cell", Vector3i(999999, 0, 999999))
+    if cell_value is Vector3i:
+        var cell: Vector3i = cell_value
+        return Vector2i(cell.x, cell.z)
+    var body := door as Node3D
+    if body != null:
+        return world_cell(body.global_position)
+    return Vector2i(999999, 999999)
+
+func entry_body_inside_home(entry: Dictionary) -> bool:
+    var body := entry.get("body") as Node3D
+    if body == null or not is_instance_valid(body):
+        return false
+    return cell_inside_entry_home(entry, world_cell(body.global_position))
+
+func cell_inside_entry_home(entry: Dictionary, cell: Vector2i) -> bool:
+    var interior_min: Vector2i = entry.get("interiorMinCell", entry.get("homeCell", Vector2i.ZERO))
+    var interior_max: Vector2i = entry.get("interiorMaxCell", entry.get("homeCell", Vector2i.ZERO))
+    return cell.x >= mini(interior_min.x, interior_max.x) \
+        and cell.x <= maxi(interior_min.x, interior_max.x) \
+        and cell.y >= mini(interior_min.y, interior_max.y) \
+        and cell.y <= maxi(interior_min.y, interior_max.y)
 
 func candidate_cells_near(entry: Dictionary, target_cell: Vector2i, allow_outside := false, moving_home := false, radius := 2) -> Array[Vector2i]:
     var result: Array[Vector2i] = []

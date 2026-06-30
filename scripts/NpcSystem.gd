@@ -584,7 +584,7 @@ func publish_navigation_profile_semantics(entry: Dictionary) -> void:
         "center": cell_key(town_center),
         "radius": town_radius
     })
-    var path_span: int = maxi(10, int(float(town_radius) * 0.52))
+    var path_span: int = maxi(10, town_radius - 2)
     register_navigation_semantic_once(&"road", "road:%s:x" % town_key, navigation_road_bounds(town_center, level, path_span, true), {
         "townKey": town_key,
         "axis": "x",
@@ -719,16 +719,20 @@ func tutorial_town_key() -> String:
 
 func spawn_town_npc(record: Dictionary, index: int) -> CharacterBody3D:
     ensure_components()
-    var can_fight: bool = index == 0 or index % 4 == 3
-    var roles := ["Farmer", "Carpenter", "Forager", "Mason", "Trader"]
+    var roles := ["Guard", "Farmer", "Forager", "Carpenter", "Mason", "Trader"]
     var names := ["Iven", "Mara", "Pell", "Ona", "Brin", "Tess", "Cal"]
-    var role: String = "Guard" if can_fight else String(roles[index % roles.size()])
+    var role: String = String(roles[index % roles.size()])
+    var can_fight: bool = role.to_lower().find("guard") >= 0
     var name: String = String(names[index % names.size()])
     var body := create_npc_body("TownNPC_%s_%d" % [String(record.get("townKey", "town")).replace(",", "_"), index], "npc")
     body.set_meta("npc_name", name)
     body.set_meta("npc_role", role)
     var level := float(record.get("level", 16.0))
     var porch_cell: Vector2i = record.get("porchCell", record.get("homeCell", Vector2i.ZERO))
+    var guard_cell: Vector2i = record.get("guardCell", porch_cell)
+    if can_fight:
+        var guard_slot := int(floori(float(index) / float(maxi(1, roles.size()))))
+        guard_cell = generated_town_guard_cell(record, guard_slot, guard_cell)
     add_npc_visual(body, visual_factory.body_material(index), visual_factory.accent_material(index), name, role, can_fight)
     add_npc_collider(body)
     npc_root.add_child(body)
@@ -745,11 +749,29 @@ func spawn_town_npc(record: Dictionary, index: int) -> CharacterBody3D:
         "porchCell": porch_cell,
         "interiorMinCell": record.get("interiorMinCell", record.get("homeCell", Vector2i.ZERO)),
         "interiorMaxCell": record.get("interiorMaxCell", record.get("homeCell", Vector2i.ZERO)),
-        "guardCell": record.get("guardCell", porch_cell),
+        "homeRouteCells": record.get("homeRouteCells", []),
+        "guardCell": guard_cell,
         "canFight": can_fight,
         "nightGuard": role.to_lower().find("guard") >= 0
     })
     return body
+
+func generated_town_guard_cell(record: Dictionary, guard_slot: int, fallback: Vector2i) -> Vector2i:
+    var center: Vector2i = record.get("townCenter", fallback)
+    var radius := int(record.get("townRadius", 0))
+    if radius < 12:
+        return fallback
+    var inset := clampi(3, 2, radius - 2)
+    var candidates: Array[Vector2i] = [
+        Vector2i(center.x, center.y - radius + inset),
+        Vector2i(center.x + 1, center.y + radius - inset),
+        Vector2i(center.x - radius + inset, center.y + 2),
+        Vector2i(center.x + radius - inset, center.y - 2)
+    ]
+    var slot := guard_slot % candidates.size()
+    if slot < 0:
+        slot += candidates.size()
+    return candidates[slot]
 
 func update_npcs(delta: float, day_factor: float) -> void:
     if main == null:
@@ -1049,6 +1071,7 @@ func find_forage_target(entry: Dictionary) -> Node3D:
         "outsideTown": true,
         "workAreaOnly": true
     })
+    candidates = filter_forage_candidates(entry, candidates)
     var scanned_nodes := 0
     if candidates.is_empty() and allow_resource_scan_fallback():
         var remaining_scan_nodes := FORAGE_SCAN_NODE_LIMIT
@@ -1063,6 +1086,13 @@ func find_forage_target(entry: Dictionary) -> Node3D:
     if pathing != null and pathing.has_method("choose_forage_target"):
         return pathing.choose_forage_target(entry, candidates)
     return candidates[0] if not candidates.is_empty() else null
+
+func filter_forage_candidates(entry: Dictionary, candidates: Array[Node3D]) -> Array[Node3D]:
+    var filtered: Array[Node3D] = []
+    for candidate in candidates:
+        if is_valid_forage_node(candidate, entry):
+            filtered.append(candidate)
+    return filtered
 
 func collect_forage_targets_in_tree(root: Node, entry: Dictionary, origin: Vector3, candidates: Array[Node3D], max_nodes: int, max_candidates: int) -> int:
     if root == null or max_nodes <= 0 or candidates.size() >= max_candidates:
@@ -1128,14 +1158,9 @@ func find_job_resource_target(entry: Dictionary, job: String) -> Node3D:
         return null
     var monitor = performance_monitor()
     var scan_start: int = monitor.begin_section("job_forage_scan") if monitor != null else Time.get_ticks_usec()
-    var query_options := {
-        "limit": FORAGE_SCAN_CANDIDATE_LIMIT,
-        "outsideTown": true,
-        "workAreaOnly": true
-    }
-    if job == "forage":
-        query_options["drops"] = ["berries"]
+    var query_options := resource_query_options_for_job(job)
     var candidates: Array[Node3D] = indexed_resource_candidates(entry, resource_kinds_for_job(job), query_options)
+    candidates = filter_job_resource_candidates(entry, job, candidates)
     var scanned_nodes := 0
     if candidates.is_empty() and allow_resource_scan_fallback():
         var remaining_scan_nodes := FORAGE_SCAN_NODE_LIMIT
@@ -1164,6 +1189,23 @@ func find_job_resource_target(entry: Dictionary, job: String) -> Node3D:
         if smart_object_available(object_id, String(entry.get("id", ""))):
             return candidate
     return null
+
+func resource_query_options_for_job(job: String) -> Dictionary:
+    var options := {
+        "limit": FORAGE_SCAN_CANDIDATE_LIMIT,
+        "outsideTown": job == "forage",
+        "workAreaOnly": true
+    }
+    if job == "forage":
+        options["drops"] = ["berries"]
+    return options
+
+func filter_job_resource_candidates(entry: Dictionary, job: String, candidates: Array[Node3D]) -> Array[Node3D]:
+    var filtered: Array[Node3D] = []
+    for candidate in candidates:
+        if is_valid_job_resource_node(candidate, entry, job):
+            filtered.append(candidate)
+    return filtered
 
 func indexed_resource_candidates(entry: Dictionary, kinds: Array, options: Dictionary) -> Array[Node3D]:
     var service = smart_object_service()
@@ -1209,7 +1251,12 @@ func is_valid_job_resource_node(node: Node3D, entry: Dictionary, job: String) ->
         return false
     if String(node.get_meta("kind", "")) != "prop":
         return false
-    if not point_inside_work_area(entry, node.global_position) or point_inside_town(entry, node.global_position):
+    if not point_inside_work_area(entry, node.global_position):
+        return false
+    if job == "forage":
+        if point_inside_town(entry, node.global_position):
+            return false
+    elif not point_inside_town(entry, node.global_position):
         return false
     var h: float = main.height_at_world(node.global_position.x, node.global_position.z)
     if h < main.WATER_LEVEL + 0.45:
@@ -1257,11 +1304,16 @@ func resource_approach_slots_for_entry(entry: Dictionary, target_node: Node3D) -
         return {}
     var cells: Array = navigation_world.call("approach_cells_for_target", entry, target_node.global_position, true)
     var positions: Array[Vector3] = []
+    var prefer_near_object_slot := String(entry.get("job", "")) == "forage"
     for cell_value in cells:
         if not (cell_value is Vector2i):
             continue
         var position: Vector3 = navigation_world.call("cell_position", cell_value)
-        if not point_inside_work_area(entry, position) or point_inside_town(entry, position):
+        if not point_inside_work_area(entry, position):
+            continue
+        if prefer_near_object_slot and point_inside_town(entry, position):
+            continue
+        if not prefer_near_object_slot and not point_inside_town(entry, position):
             continue
         positions.append(position)
     if positions.is_empty():
@@ -1270,7 +1322,6 @@ func resource_approach_slots_for_entry(entry: Dictionary, target_node: Node3D) -
     var origin: Vector3 = body.global_position if body != null else entry.get("porchPosition", target_node.global_position)
     var town_center: Vector2i = entry.get("townCenter", Vector2i.ZERO)
     var town_position := Vector3(float(town_center.x) * CELL, origin.y, float(town_center.y) * CELL)
-    var prefer_near_object_slot := String(entry.get("job", "")) == "forage"
     positions.sort_custom(func(a: Vector3, b: Vector3) -> bool:
         var a_key := "%0.3f,%0.3f" % [a.x, a.z]
         var b_key := "%0.3f,%0.3f" % [b.x, b.z]
@@ -1561,24 +1612,27 @@ func home_route_step_reached(entry: Dictionary, route_target: Vector3) -> bool:
     if route_status == "arrived" and entry.has("homeActiveTargetCell"):
         var active_cell: Vector2i = entry.get("homeActiveTargetCell", target_cell)
         route_arrived_at_target = active_cell == target_cell
+    var distance_to_target := body.global_position.distance_to(route_target)
     if route_arrived_at_target and target_cell != home_cell:
         if target_cell == porch_cell and route_requires_exact_porch_arrival(entry):
-            return current_cell == target_cell or body.global_position.distance_to(route_target) <= CELL * 0.35
-        return true
+            return current_cell == target_cell or distance_to_target <= CELL * 0.35
+        if target_cell != porch_cell and abs(target_cell.x - porch_cell.x) + abs(target_cell.y - porch_cell.y) == 1:
+            return current_cell == target_cell or distance_to_target <= CELL * 0.35
+        return current_cell == target_cell or distance_to_target <= CELL * 0.82
     if target_cell != porch_cell and abs(target_cell.x - porch_cell.x) + abs(target_cell.y - porch_cell.y) == 1:
-        if current_cell == target_cell or body.global_position.distance_to(route_target) <= CELL * 0.35:
+        if current_cell == target_cell or distance_to_target <= CELL * 0.35:
             return true
         return false
     if target_cell == porch_cell and route_requires_exact_porch_arrival(entry):
-        return current_cell == target_cell or body.global_position.distance_to(route_target) <= CELL * 0.35
-    if body.global_position.distance_to(route_target) <= CELL * 0.82:
+        return current_cell == target_cell or distance_to_target <= CELL * 0.35
+    if distance_to_target <= CELL * 0.82:
         return true
     if target_cell == porch_cell and abs(current_cell.x - target_cell.x) <= 1 and abs(current_cell.y - target_cell.y) <= 1:
         return true
     if not route_arrived_at_target:
         return false
     if target_cell != home_cell:
-        return current_cell == target_cell or body.global_position.distance_to(route_target) <= CELL * 0.35
+        return current_cell == target_cell or distance_to_target <= CELL * 0.35
     return abs(current_cell.x - target_cell.x) <= 1 and abs(current_cell.y - target_cell.y) <= 1
 
 func route_requires_exact_porch_arrival(entry: Dictionary) -> bool:
@@ -1603,6 +1657,9 @@ func settle_home_if_reached(entry: Dictionary) -> void:
             return
         mark_npc_inside_home(entry)
         return
+    if bool(entry.get("insideHome", false)):
+        entry["insideHome"] = false
+        body.set_meta("npc_inside_home", false)
     var home_cell: Vector2i = entry.get("homeCell", Vector2i.ZERO)
     var porch_cell: Vector2i = entry.get("porchCell", home_cell)
     var porch: Vector3 = entry.get("porchPosition", body.global_position)
@@ -1898,6 +1955,8 @@ func route_still_needs_active_door(entry: Dictionary, portal_id: String) -> bool
         return false
     if String(entry.get("routeStatus", "")) in ["arrived", "partial"] and (entry.get("pathWaypoints", []) as Array).is_empty():
         return false
+    if active_private_home_door_can_release(entry, portal_id):
+        return false
     if active_door_crossing_still_needs_hold(entry, portal_id):
         return true
     if active_door_crossing_has_cleared(entry, portal_id):
@@ -1914,6 +1973,43 @@ func route_still_needs_active_door(entry: Dictionary, portal_id: String) -> bool
         if autonomy_system != null and autonomy_system.door_portals != null:
             action_portal_id = autonomy_system.door_portals.resolve_portal_id(action_door, "")
         if action_portal_id == portal_id and route_still_needs_door(entry, action):
+            return true
+    return false
+
+func active_private_home_door_can_release(entry: Dictionary, portal_id: String) -> bool:
+    if autonomy_system == null or autonomy_system.door_portals == null:
+        return false
+    var portal = autonomy_system.door_portals.portals.get(portal_id)
+    if portal == null or String(portal.get("policy_id")) != "private_home":
+        return false
+    if route_has_active_door_action(entry, portal_id):
+        return false
+    var active_goal = entry.get("activeMotionGoal", {})
+    if active_goal is Dictionary and String((active_goal as Dictionary).get("goalKind", "")) == String(NpcEnumsScript.GOAL_KIND_HOME):
+        return false
+    if bool(entry.get("routeMovingHome", false)):
+        return false
+    var body := entry.get("body") as Node3D
+    if body == null or not is_instance_valid(body):
+        return true
+    if autonomy_system.has_method("is_inside_home_interior") and bool(autonomy_system.is_inside_home_interior(entry, body.global_position)):
+        return false
+    return true
+
+func route_has_active_door_action(entry: Dictionary, portal_id: String) -> bool:
+    var actions: Dictionary = entry.get("routeActions", {})
+    for action_value in actions.values():
+        if not (action_value is Dictionary):
+            continue
+        var action: Dictionary = action_value
+        if String(action.get("kind", "")) != "door":
+            continue
+        if String(action.get("portalId", "")) == portal_id:
+            return true
+        var action_door := interaction_door_for_npc(action.get("door") as Node)
+        if action_door == null:
+            continue
+        if autonomy_system != null and autonomy_system.door_portals != null and autonomy_system.door_portals.resolve_portal_id(action_door, "") == portal_id:
             return true
     return false
 

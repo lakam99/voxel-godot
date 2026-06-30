@@ -8,6 +8,12 @@ const ReciprocalAvoidanceAdapterScript := preload("res://scripts/npc_ai/movement
 const CAPSULE_RADIUS := 0.34
 const CAPSULE_HEIGHT := 1.64
 const DOOR_ACTION_LOOKAHEAD_CELLS := 4
+const DOOR_ACTION_DIRECT_MAX_CELL_STEPS := 2
+const DOOR_ACTION_LOOKAHEAD_MAX_CELL_STEPS := 3
+const DOOR_ACTION_COLLISION_MAX_CELL_STEPS := 2
+const DOOR_ACTION_DIRECT_MAX_DISTANCE := CELL * 2.75
+const DOOR_ACTION_LOOKAHEAD_MAX_DISTANCE := CELL * 3.15
+const DOOR_ACTION_COLLISION_MAX_DISTANCE := CELL * 2.35
 const YIELD_RETREAT_HOLD_TICKS := 10
 const PORTAL_RECENTER_FORWARD_STEP_TICKS := 12
 const PORTAL_RECENTER_REPLAN_TICKS := 30
@@ -1143,6 +1149,8 @@ func handle_door_action(entry: Dictionary, next_cell: Vector2i, world, priority 
     if door_value == null or not is_instance_valid(door_value) or not (door_value is Node):
         return ""
     var door: Node = door_value
+    if not door_action_request_is_local(entry, action, door, body, world, next_cell, "direct"):
+        return ""
     if system != null:
         var traversal: Dictionary = system.request_npc_door_traversal(door, body, entry, action) if system.has_method("request_npc_door_traversal") else {}
         if not bool(traversal.get("ok", false)):
@@ -1190,6 +1198,8 @@ func handle_upcoming_door_action(entry: Dictionary, next_cell: Vector2i, world, 
         if system == null or not system.has_method("request_npc_door_traversal"):
             continue
         var door: Node = door_value as Node
+        if not door_action_request_is_local(entry, action, door, body, world, next_cell, "lookahead"):
+            continue
         var traversal: Dictionary = system.request_npc_door_traversal(door, body, entry, action)
         if bool(traversal.get("ok", false)):
             clear_door_stage(entry)
@@ -1491,7 +1501,7 @@ func collider_blocks_capsule(entry: Dictionary, collider: Node, body: CharacterB
             if bool(collider.get_meta("open", false)):
                 return false
             var door := interaction_door_for_collider(collider)
-            var action := route_door_action(entry, door)
+            var action := route_door_action(entry, door, body, null, "collision")
             if not action.is_empty():
                 if system != null and system.has_method("request_npc_door_traversal"):
                     system.request_npc_door_traversal(door, body, entry, action)
@@ -1503,7 +1513,7 @@ func collider_blocks_capsule(entry: Dictionary, collider: Node, body: CharacterB
 func route_has_door_action(entry: Dictionary, door: Node) -> bool:
     return not route_door_action(entry, door).is_empty()
 
-func route_door_action(entry: Dictionary, door: Node) -> Dictionary:
+func route_door_action(entry: Dictionary, door: Node, body: Node3D = null, world = null, source := "identity") -> Dictionary:
     door = interaction_door_for_collider(door)
     if door == null:
         return {}
@@ -1517,6 +1527,8 @@ func route_door_action(entry: Dictionary, door: Node) -> Dictionary:
         if String(action.get("kind", "")) != "door":
             continue
         if route_action_matches_door(action, door, door_portal_id, door_group_id):
+            if body != null and not door_action_request_is_local(entry, action, door, body, world, Vector2i(999999, 999999), source):
+                continue
             return action
     return {}
 
@@ -1536,6 +1548,102 @@ func route_action_matches_door(action: Dictionary, door: Node, door_portal_id: S
         if action_group_id != "" and door_group_id != "" and action_group_id == door_group_id:
             return true
     return false
+
+func door_action_request_is_local(entry: Dictionary, action: Dictionary, door: Node, body: Node3D, world, next_cell := Vector2i(999999, 999999), source := "direct") -> bool:
+    if body == null or not is_instance_valid(body):
+        return false
+    var action_cell := door_action_cell(action, door, body, world)
+    var current_cell := body_route_cell(body, world)
+    var door_distance := 999999.0
+    var door_body := door as Node3D
+    if door_body != null and is_instance_valid(door_body):
+        door_distance = flat_distance(body.global_position, door_body.global_position)
+    if action_cell == Vector2i(999999, 999999):
+        if door_distance >= 999998.0:
+            return true
+        if door_distance <= door_action_max_distance(source):
+            clear_door_action_reject(entry, body)
+            return true
+        record_door_action_reject(entry, body, source, "door_too_far", current_cell, action_cell, next_cell, -1, door_distance)
+        return false
+    var route_cells: Array = entry.get("routeCells", [])
+    var action_index := route_cells.find(action_cell)
+    var current_steps := cell_manhattan(current_cell, action_cell)
+    var next_steps := 999999
+    if next_cell != Vector2i(999999, 999999):
+        next_steps = cell_manhattan(next_cell, action_cell)
+    var max_steps := door_action_max_cell_steps(source)
+    var max_distance := door_action_max_distance(source)
+    var route_supports_action := action_index >= 0 and action_index <= DOOR_ACTION_LOOKAHEAD_CELLS
+    if source == "collision":
+        route_supports_action = action_index >= 0 and action_index <= DOOR_ACTION_COLLISION_MAX_CELL_STEPS
+    var local_by_cell := current_steps <= max_steps
+    var local_by_distance := door_distance <= max_distance
+    var next_is_action := next_steps <= 1
+    if (local_by_cell or local_by_distance) and (route_supports_action or next_is_action or source == "direct"):
+        clear_door_action_reject(entry, body)
+        return true
+    var reason := "door_action_not_local"
+    if not route_supports_action and not next_is_action and source != "direct":
+        reason = "door_action_not_on_near_route"
+    elif not local_by_cell and not local_by_distance:
+        reason = "door_action_actor_too_far"
+    record_door_action_reject(entry, body, source, reason, current_cell, action_cell, next_cell, action_index, door_distance)
+    return false
+
+func door_action_cell(action: Dictionary, door: Node, body: Node3D, world) -> Vector2i:
+    var cell_value = action.get("cell")
+    if cell_value is Vector2i:
+        return cell_value
+    var door_body := door as Node3D
+    if door_body != null and is_instance_valid(door_body):
+        return body_route_cell(door_body, world)
+    if body != null:
+        return body_route_cell(body, world)
+    return Vector2i(999999, 999999)
+
+func body_route_cell(node: Node3D, world) -> Vector2i:
+    if node == null:
+        return Vector2i(999999, 999999)
+    if world != null and world.has_method("world_cell"):
+        return world.world_cell(node.global_position)
+    return Vector2i(roundi(node.global_position.x / CELL), roundi(node.global_position.z / CELL))
+
+func door_action_max_cell_steps(source: String) -> int:
+    if source == "lookahead":
+        return DOOR_ACTION_LOOKAHEAD_MAX_CELL_STEPS
+    if source == "collision":
+        return DOOR_ACTION_COLLISION_MAX_CELL_STEPS
+    return DOOR_ACTION_DIRECT_MAX_CELL_STEPS
+
+func door_action_max_distance(source: String) -> float:
+    if source == "lookahead":
+        return DOOR_ACTION_LOOKAHEAD_MAX_DISTANCE
+    if source == "collision":
+        return DOOR_ACTION_COLLISION_MAX_DISTANCE
+    return DOOR_ACTION_DIRECT_MAX_DISTANCE
+
+func record_door_action_reject(entry: Dictionary, body: Node3D, source: String, reason: String, current_cell: Vector2i, action_cell: Vector2i, next_cell: Vector2i, action_index: int, door_distance: float) -> void:
+    var reject := {
+        "source": source,
+        "reason": reason,
+        "currentCell": current_cell,
+        "actionCell": action_cell,
+        "nextCell": next_cell,
+        "actionIndex": action_index,
+        "doorDistance": snappedf(door_distance, 0.001)
+    }
+    entry["doorActionReject"] = reject
+    if body != null and is_instance_valid(body):
+        body.set_meta("npc_door_action_reject", reject)
+
+func clear_door_action_reject(entry: Dictionary, body: Node3D) -> void:
+    entry.erase("doorActionReject")
+    if body != null and is_instance_valid(body) and body.has_meta("npc_door_action_reject"):
+        body.remove_meta("npc_door_action_reject")
+
+func cell_manhattan(a: Vector2i, b: Vector2i) -> int:
+    return abs(a.x - b.x) + abs(a.y - b.y)
 
 func door_match_portal_id(door: Node) -> String:
     door = interaction_door_for_collider(door)

@@ -45,8 +45,24 @@ func request_crossing(door: Node, actor: Node, entry: Dictionary = {}, action: D
 	var direction := _direction_for_action(action, entry)
 	if direction == "unknown" and portal != null:
 		direction = _direction_for_actor_goal(portal, actor, entry)
+	if portal != null:
+		direction = _normalize_direction_for_portal(portal, direction, actor, entry)
 	var active_key := _active_key(portal_id, actor_id)
 	var active: Dictionary = active_crossings.get(active_key, {})
+	if active.is_empty():
+		var stage_check := _portal_stage_check(portal, actor, actor_id, direction)
+		if not bool(stage_check.get("ok", true)):
+			metrics["waiting"] = int(metrics.get("waiting", 0)) + 1
+			var stage_wait := {
+				"ok": false,
+				"status": "waiting",
+				"reason": String(stage_check.get("reason", "door_stage_required")),
+				"portalId": portal_id,
+				"direction": direction,
+				"stagePosition": stage_check.get("stagePosition", Vector3.ZERO),
+				"stageCheck": stage_check
+			}
+			return stage_wait
 	var traffic_result := _request_traffic(portal, actor, actor_id, direction, entry, action, active)
 	if not bool(traffic_result.get("ok", false)):
 		if portal != null:
@@ -67,7 +83,13 @@ func request_crossing(door: Node, actor: Node, entry: Dictionary = {}, action: D
 			waiting["cycleResolution"] = traffic_result.get("cycleResolution")
 			waiting["reason"] = "door_retreat"
 		return waiting
-	var result = door_portals.hold_open(door, actor, "npc", { "portalId": portal_id, "actors": [actor], "authorized": bool(entry.get("canUseLockedDoors", false)) })
+	var result = door_portals.hold_open(door, actor, "npc", {
+		"portalId": portal_id,
+		"actors": [actor],
+		"authorized": bool(entry.get("canUseLockedDoors", false)),
+		"direction": direction,
+		"actionCell": _cell_summary(action.get("cell"))
+	})
 	if result == null or result.status != NpcEnumsScript.INTERACTION_STATUS_SUCCEEDED:
 		if traffic_reservations != null and String(traffic_result.get("groupId", "")) != "":
 			traffic_reservations.release_group(String(traffic_result.get("groupId", "")), "door_open_failed")
@@ -197,6 +219,74 @@ func _direction_for_actor_goal(portal, actor: Node, entry: Dictionary) -> String
 			return "x+" if position.x <= center.x else "x-"
 		return "z+" if position.z <= center.z else "z-"
 	return "unknown"
+
+func _normalize_direction_for_portal(portal, direction: String, actor: Node, entry: Dictionary) -> String:
+	if portal == null:
+		return direction
+	var axis := String(portal.get("crossing_axis"))
+	if axis == "x":
+		if direction == "x+" or direction == "x-":
+			return direction
+		return _direction_for_actor_goal(portal, actor, entry)
+	if axis == "z":
+		if direction == "z+" or direction == "z-":
+			return direction
+		return _direction_for_actor_goal(portal, actor, entry)
+	return direction
+
+func _portal_stage_check(portal, actor: Node, actor_id: String, direction: String) -> Dictionary:
+	if portal == null or not (actor is Node3D) or not is_instance_valid(actor):
+		return { "ok": true }
+	var actor_body := actor as Node3D
+	if portal.has_method("has_any_occupancy") and bool(portal.has_any_occupancy([actor_body])):
+		return { "ok": true, "reason": "already_in_portal_volume" }
+	var center: Vector3 = portal.get("threshold_bounds").position + portal.get("threshold_bounds").size * 0.5
+	var threshold: AABB = portal.get("threshold_bounds")
+	var clearance: AABB = portal.get("clearance_bounds")
+	var axis := String(portal.get("crossing_axis"))
+	var radius := NpcConstantsScript.DEFAULT_NPC_RADIUS
+	var lateral_delta := 0.0
+	var lateral_limit := 0.0
+	var axis_delta := 0.0
+	var axis_limit := 0.0
+	var wrong_side := false
+	if axis == "x":
+		lateral_delta = absf(actor_body.global_position.z - center.z)
+		lateral_limit = threshold.size.z * 0.5 + radius * 1.25
+		axis_delta = absf(actor_body.global_position.x - center.x)
+		axis_limit = clearance.size.x * 0.5 + NpcConstantsScript.CELL_SIZE * 1.85
+		wrong_side = (direction == "x+" and actor_body.global_position.x > center.x + radius) or (direction == "x-" and actor_body.global_position.x < center.x - radius)
+	elif axis == "z":
+		lateral_delta = absf(actor_body.global_position.x - center.x)
+		lateral_limit = threshold.size.x * 0.5 + radius * 1.25
+		axis_delta = absf(actor_body.global_position.z - center.z)
+		axis_limit = clearance.size.z * 0.5 + NpcConstantsScript.CELL_SIZE * 1.85
+		wrong_side = (direction == "z+" and actor_body.global_position.z > center.z + radius) or (direction == "z-" and actor_body.global_position.z < center.z - radius)
+	else:
+		return { "ok": true, "reason": "unknown_axis" }
+	if lateral_delta <= lateral_limit and axis_delta <= axis_limit and not wrong_side:
+		return {
+			"ok": true,
+			"reason": "staged",
+			"lateralDelta": lateral_delta,
+			"lateralLimit": lateral_limit,
+			"axisDelta": axis_delta,
+			"axisLimit": axis_limit
+		}
+	var stage_position := _stage_position_for_waiting_actor(portal, actor_body)
+	if bottleneck_classifier != null:
+		stage_position = bottleneck_classifier.stage_position_for_portal(portal, actor_id, direction, actor_body.global_position)
+	return {
+		"ok": false,
+		"reason": "door_stage_required",
+		"stagePosition": stage_position,
+		"direction": direction,
+		"lateralDelta": lateral_delta,
+		"lateralLimit": lateral_limit,
+		"axisDelta": axis_delta,
+		"axisLimit": axis_limit,
+		"wrongSide": wrong_side
+	}
 
 func _stage_position_for_waiting_actor(portal, actor: Node) -> Vector3:
 	if bottleneck_classifier != null:

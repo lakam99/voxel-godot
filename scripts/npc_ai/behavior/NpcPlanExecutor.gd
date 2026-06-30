@@ -20,7 +20,7 @@ var guard_target_frame := -1
 var guard_target_refreshes_this_frame := 0
 var update_frame_serial := 0
 
-const JOB_SELECTIONS_PER_FRAME := 1
+const JOB_SELECTIONS_PER_FRAME := 12
 const GUARD_TARGET_REFRESHES_PER_FRAME := 1
 
 func setup(autonomy, system_node, main_node, services: Dictionary) -> void:
@@ -165,6 +165,8 @@ func _cached_goal_for_motion(entry: Dictionary, body: Node3D, current_night_fact
 				return cached
 			if cached_kind == String(NpcEnumsScript.GOAL_KIND_GUARD) and (bool(cached_schedule.get("activeGuardDuty", false)) or cached_reason.find("threat") >= 0):
 				return cached
+	if current_night_factor > 0.05 and not bool(entry.get("nightGuard", false)):
+		return { "goalKind": NpcEnumsScript.GOAL_KIND_HOME, "reason": "schedule_preempts_job_for_home" }
 	var active_job_phase := String(entry.get("jobPhase", "idle"))
 	if active_job_phase in ["outbound", "searching", "gathering", "returning", "stall"]:
 		var active_job := String(entry.get("job", ""))
@@ -188,6 +190,8 @@ func _advance_scripted_motion(entry: Dictionary, body: Node3D, delta: float) -> 
 	return _motion_result(entry, "scripted", "scripted_order")
 
 func _advance_home_motion(entry: Dictionary, body: Node3D, delta: float) -> Dictionary:
+	_preempt_job_for_home(entry)
+	_invalidate_stale_home_arrival(entry, body)
 	_execute_home(entry, body, entry.get("activeMotionPerception", {}) if entry.get("activeMotionPerception", {}) is Dictionary else {}, delta)
 	return _motion_result(entry, "home", "home_route")
 
@@ -228,6 +232,8 @@ func _advance_guard_motion(entry: Dictionary, body: Node3D, perception: Dictiona
 	return _motion_result(entry, "guard", "guard_route")
 
 func _advance_job_motion(entry: Dictionary, body: Node3D, delta: float) -> Dictionary:
+	if _worker_needs_town_recovery(entry, body):
+		return _advance_worker_town_recovery(entry, body, delta)
 	var phase_before := String(entry.get("jobPhase", "idle"))
 	var route_only_outbound := phase_before == "outbound" and entry.get("jobTarget", null) is Vector3 and String(entry.get("jobObjectId", "")) == "" and _job_target_node(entry) == null
 	if not route_only_outbound:
@@ -246,7 +252,7 @@ func _advance_job_motion(entry: Dictionary, body: Node3D, delta: float) -> Dicti
 	var target: Vector3 = entry.get("jobTarget", body.global_position)
 	target = _staged_departure_motion_target(entry, body, target)
 	entry["routePriority"] = 90
-	var moved := float(npc_system.call("move_npc", entry, target, 3.10 * delta, false, true, delta)) if npc_system.has_method("move_npc") else 0.0
+	var moved := float(npc_system.call("move_npc", entry, target, 3.10 * delta, false, _job_allows_outside_movement(entry), delta)) if npc_system.has_method("move_npc") else 0.0
 	entry["lastMoveDistance"] = moved
 	var route_status := String(entry.get("routeStatus", ""))
 	if moved <= 0.001 and route_status != "pending":
@@ -351,6 +357,8 @@ func _execute_scripted(entry: Dictionary, body: Node3D, delta: float) -> void:
 		_mark_scripted_order(entry, "FAILED_TARGET_GONE", "missing_scripted_target")
 
 func _execute_home(entry: Dictionary, body: Node3D, perception: Dictionary, delta: float) -> void:
+	_preempt_job_for_home(entry)
+	_invalidate_stale_home_arrival(entry, body)
 	if npc_system.has_method("settle_home_if_reached"):
 		npc_system.call("settle_home_if_reached", entry)
 	if bool(entry.get("insideHome", false)):
@@ -378,6 +386,7 @@ func _execute_home(entry: Dictionary, body: Node3D, perception: Dictionary, delt
 			entry["routeForceReplan"] = true
 	if npc_system.has_method("settle_home_if_reached"):
 		npc_system.call("settle_home_if_reached", entry)
+	_invalidate_stale_home_arrival(entry, body)
 	if _scripted_order_kind(body) == "go_home":
 		if bool(entry.get("insideHome", false)):
 			_mark_scripted_order(entry, "ARRIVED", "home_interior_reached")
@@ -390,6 +399,23 @@ func _execute_home(entry: Dictionary, body: Node3D, perception: Dictionary, delt
 		if _scripted_order_kind(body) == "go_home":
 			_mark_scripted_order(entry, "FAILED_BLOCKED", _home_failure_reason(entry, now_perception))
 		recovery_policy.mark_home_blocked(entry, _home_failure_reason(entry, now_perception))
+
+func _preempt_job_for_home(entry: Dictionary) -> void:
+	var phase := String(entry.get("jobPhase", "idle"))
+	if not (phase in ["outbound", "searching", "gathering", "returning", "stall"]):
+		return
+	_release_job_reservation(entry, "schedule_home")
+	entry["jobPhase"] = "idle"
+	entry["jobTimer"] = 0.0
+	entry["jobTargetNode"] = null
+	entry["jobObjectId"] = ""
+	entry["jobReservationId"] = ""
+	entry["jobApproachSlotId"] = ""
+	entry["jobTarget"] = entry.get("homePosition", entry.get("porchPosition", Vector3.ZERO))
+	entry["routeForceReplan"] = true
+	var body := entry.get("body") as Node
+	if body != null:
+		body.set_meta("npc_job_phase", "idle")
 
 func _execute_guard(entry: Dictionary, body: Node3D, perception: Dictionary, schedule: Dictionary, delta: float) -> void:
 	entry["insideHome"] = false
@@ -444,7 +470,7 @@ func _execute_job(entry: Dictionary, body: Node3D, delta: float) -> void:
 		var target: Vector3 = entry.get("jobTarget", body.global_position)
 		target = _staged_departure_motion_target(entry, body, target)
 		var job_move_start: int = monitor.begin_section("npc_job_move") if monitor != null else Time.get_ticks_usec()
-		var moved := float(npc_system.call("move_npc", entry, target, 3.10 * delta, false, true, delta)) if npc_system.has_method("move_npc") else 0.0
+		var moved := float(npc_system.call("move_npc", entry, target, 3.10 * delta, false, _job_allows_outside_movement(entry), delta)) if npc_system.has_method("move_npc") else 0.0
 		if monitor != null:
 			monitor.end_section("npc_job_move", job_move_start)
 		entry["lastMoveDistance"] = moved
@@ -455,6 +481,63 @@ func _execute_job(entry: Dictionary, body: Node3D, delta: float) -> void:
 		entry["lastMoveDistance"] = 0.0
 		if String(entry.get("jobPhase", "")) != "gathering":
 			entry["routeStatus"] = "idle"
+
+func _job_allows_outside_movement(entry: Dictionary) -> bool:
+	return String(entry.get("job", "")) == "forage"
+
+func _worker_needs_town_recovery(entry: Dictionary, body: Node3D) -> bool:
+	if body == null:
+		return false
+	if String(entry.get("job", "")) in ["forage", "guard", ""]:
+		return false
+	if _point_inside_town(entry, body.global_position):
+		return false
+	return String(entry.get("activeGoalKind", "")) in [String(NpcEnumsScript.GOAL_KIND_WORK), "work", ""]
+
+func _advance_worker_town_recovery(entry: Dictionary, body: Node3D, delta: float) -> Dictionary:
+	_release_job_reservation(entry, "outside_town_recovery")
+	entry["jobPhase"] = "idle"
+	entry["jobTimer"] = 0.0
+	entry["jobTargetNode"] = null
+	entry["jobObjectId"] = ""
+	entry["jobReservationId"] = ""
+	entry["jobApproachSlotId"] = ""
+	var target: Vector3 = entry.get("porchPosition", entry.get("homePosition", body.global_position))
+	entry["jobTarget"] = target
+	entry["routePriority"] = 120
+	_reset_route_for_replan(entry, "worker_outside_town_recovery")
+	var moved := float(npc_system.call("move_npc", entry, target, 4.40 * delta, true, false, delta)) if npc_system.has_method("move_npc") else 0.0
+	entry["lastMoveDistance"] = moved
+	if _point_inside_town(entry, body.global_position):
+		entry["routeForceReplan"] = true
+	body.set_meta("npc_job_phase", "idle")
+	return _motion_result(entry, "job", "worker_town_recovery")
+
+func _invalidate_stale_home_arrival(entry: Dictionary, body: Node3D) -> void:
+	if body == null:
+		return
+	if String(entry.get("routeStatus", "")) != "arrived":
+		return
+	var perception: Dictionary = perception_service.snapshot(entry, { "scheduleState": NpcEnumsScript.SCHEDULE_STATE_NIGHT })
+	if bool(perception.get("insideHome", false)):
+		return
+	entry["insideHome"] = false
+	body.set_meta("npc_inside_home", false)
+	_reset_route_for_replan(entry, "stale_home_arrival")
+
+func _reset_route_for_replan(entry: Dictionary, reason: String) -> void:
+	entry["routeStatus"] = "waiting"
+	entry["routeReason"] = reason
+	entry["routeForceReplan"] = true
+	entry["pathWaypoints"] = []
+	entry["routeCells"] = []
+	entry["routeActions"] = {}
+	entry["routeWaitTicks"] = 0
+	entry["blockedMoveTime"] = 0.0
+	var body := entry.get("body") as Node
+	if body != null:
+		body.set_meta("npc_route_status", "waiting")
+		body.set_meta("npc_route_reason", reason)
 
 func _job_selection_budget_available(entry: Dictionary, delta: float) -> bool:
 	var phase := String(entry.get("jobPhase", "idle"))
@@ -510,7 +593,7 @@ func _update_day_job(entry: Dictionary, delta: float) -> bool:
 		_clear_home_route_terminal(entry)
 	var timer := float(entry.get("jobTimer", 0.0)) - delta
 	if phase == "idle":
-		if timer > 0.0:
+		if timer > 0.0 and not _inside_home_now(entry, body):
 			entry["jobTimer"] = timer
 			body.set_meta("npc_job_phase", "idle")
 			return false
@@ -650,8 +733,18 @@ func _update_outbound_job(entry: Dictionary, body: Node3D, timer: float) -> bool
 		return true
 	var target: Vector3 = entry.get("jobTarget", body.global_position)
 	var target_outside := not _point_inside_town(entry, target)
+	var job := String(entry.get("job", ""))
+	if job in ["wood", "stone"] and target_outside:
+		_release_job_reservation(entry, "outside_town_worker_target")
+		entry["jobTargetNode"] = null
+		entry["jobPhase"] = "idle"
+		entry["jobTimer"] = 0.0
+		entry["routeForceReplan"] = true
+		body.set_meta("npc_job_phase", "idle")
+		return true
 	var route_arrived := String(entry.get("routeStatus", "")) == "arrived"
-	if target_outside and (route_arrived or body.global_position.distance_to(target) <= NpcConstantsScript.CELL_SIZE * 1.1):
+	var can_gather_at_target := target_outside if job == "forage" else not target_outside
+	if can_gather_at_target and (route_arrived or body.global_position.distance_to(target) <= NpcConstantsScript.CELL_SIZE * 1.1):
 		entry["jobPhase"] = "gathering"
 		entry["jobTimer"] = _deterministic_seconds(entry, "resource_gather_duration", 1.8, 3.5)
 		_clear_route_for_action(entry, "gathering")
@@ -671,8 +764,11 @@ func _update_gathering_job(entry: Dictionary, body: Node3D, timer: float) -> boo
 		entry["jobTimer"] = timer
 		body.set_meta("npc_job_phase", "gathering")
 		return false
-	if _point_inside_town(entry, body.global_position):
-		_release_job_reservation(entry, "inside_town_invalid_gather")
+	var job := String(entry.get("job", ""))
+	var inside_town := _point_inside_town(entry, body.global_position)
+	if (job == "forage" and inside_town) or (job in ["wood", "stone"] and not inside_town):
+		var invalid_reason := "inside_town_invalid_gather" if job == "forage" else "outside_town_worker_gather"
+		_release_job_reservation(entry, invalid_reason)
 		entry["jobPhase"] = "outbound"
 		var replacement := _find_job_resource_target(entry, String(entry.get("job", "")))
 		if replacement != null:
@@ -720,7 +816,7 @@ func _update_trader_goal(entry: Dictionary, body: Node3D, delta: float) -> bool:
 	var phase := String(entry.get("jobPhase", "idle"))
 	var timer := float(entry.get("jobTimer", 0.0)) - delta
 	if phase == "idle":
-		if timer > 0.0:
+		if timer > 0.0 and not _inside_home_now(entry, body):
 			entry["jobTimer"] = timer
 			body.set_meta("npc_job_phase", "idle")
 			return false
@@ -780,7 +876,7 @@ func _update_forager_goal(entry: Dictionary, body: Node3D, delta: float) -> bool
 	var timer := float(entry.get("jobTimer", 0.0)) - delta
 	if phase == "idle":
 		var hungry := float(entry.get("hunger", 100.0)) < 82.0
-		if timer > 0.0 and not hungry:
+		if timer > 0.0 and not hungry and not _inside_home_now(entry, body):
 			entry["jobTimer"] = timer
 			_set_npc_goal(entry, "rest")
 			body.set_meta("npc_job_phase", "idle")
