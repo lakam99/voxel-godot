@@ -339,15 +339,17 @@
     },
     {
       "id": "cave_visual_playtest",
-      "description": "Headed procedural cave visual proof for entrance, traversable tunnel path, and final chamber crafting-book chest",
+      "description": "Headed procedural cave visual proof for entrance, branch fork, dead-end chamber, traversable tunnel path, and final chamber crafting-book chest",
       "command": ".\\tools\\run-cave-visual-playtest.ps1",
       "args": ["-Seed", "atlas-1492", "-ReportPath", "artifacts\\test-runners\\cave-visual-playtest.json", "-ScreenshotDir", "artifacts\\test-runners\\screenshots\\cave-visual-playtest"],
       "reportPath": "artifacts\\test-runners\\cave-visual-playtest.json",
       "screenshotDir": "artifacts\\test-runners\\screenshots\\cave-visual-playtest",
       "evidenceLevel": "acceptance_visual",
-      "acceptanceClaims": ["procedural_cave_entrance_tunnel_final_chamber_visual"],
+      "acceptanceClaims": ["procedural_cave_graph_entrance_branch_dead_end_final_visual"],
       "requiredScreenshots": [
         "cave_entrance.png",
+        "cave_branch_fork.png",
+        "cave_dead_end_chamber.png",
         "cave_tunnel_path.png",
         "cave_final_chamber_chest.png"
       ],

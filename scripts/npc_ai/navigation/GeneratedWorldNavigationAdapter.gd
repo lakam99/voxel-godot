@@ -588,6 +588,16 @@ func _navmesh_surface_for_cell(snapshot: Dictionary, cell: Vector2i) -> Dictiona
     var position := cell_position(cell)
     var span_y := floori(position.y / CELL)
     position.y = float(span_y) * CELL + 0.04
+    var traversal_tags: Array[String] = ["terrain"]
+    var semantic_region_ids: Array[String] = []
+    var cave_id := cave_navigation_id_for_cell(cell)
+    if cave_id != "":
+        traversal_tags.append("cave")
+        semantic_region_ids.append("cave:%s" % cave_id)
+    if door != null:
+        traversal_tags.append("door")
+    if is_path_cell(snapshot, cell):
+        traversal_tags.append("path")
     var surface := {
         "cell": Vector3i(cell.x, span_y, cell.y),
         "spanIndex": 0,
@@ -596,12 +606,18 @@ func _navmesh_surface_for_cell(snapshot: Dictionary, cell: Vector2i) -> Dictiona
         "headroom": 3.0,
         "lateralClearance": 1.0,
         "blocked": false,
-        "semanticRegionIds": [],
-        "traversalTags": ["terrain", "door"] if door != null else ["terrain"]
+        "semanticRegionIds": semantic_region_ids,
+        "traversalTags": traversal_tags
     }
-    if is_path_cell(snapshot, cell):
-        surface["traversalTags"] = ["terrain", "path"]
     return surface
+
+func cave_navigation_id_for_cell(cell: Vector2i) -> String:
+    if main == null:
+        return ""
+    var structure_system = main.get("structure_system")
+    if structure_system == null or not structure_system.has_method("cave_navigation_id_for_cell"):
+        return ""
+    return String(structure_system.call("cave_navigation_id_for_cell", cell.x, cell.y))
 
 func _navmesh_door_summary_for_tile(snapshot: Dictionary, tile_key: String) -> Dictionary:
     var portals: Array[Dictionary] = []

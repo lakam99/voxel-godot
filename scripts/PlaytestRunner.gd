@@ -5450,7 +5450,23 @@ func test_cave_generation_and_crafting_book_loot() -> void:
         return
 
     var contiguous: bool = bool(structure_system.call("cave_plan_is_contiguous", cliff_plan))
-    add_result("cave_plan_path_contiguous", contiguous, "pathLength %d, chamberRadius %d" % [int(cliff_plan.get("pathLength", 0)), int(cliff_plan.get("chamberRadius", 0))])
+    var graph_nodes: Array = cliff_plan.get("caveNodes", [])
+    var graph_edges: Array = cliff_plan.get("caveEdges", [])
+    var branch_chambers: Array = cliff_plan.get("branchChamberIds", [])
+    var dead_end_chambers: Array = cliff_plan.get("deadEndChamberIds", [])
+    var graph_ok := graph_nodes.size() >= 6 and graph_edges.size() >= 6 and branch_chambers.size() >= 1 and dead_end_chambers.size() >= 1
+    add_result(
+        "cave_plan_path_contiguous",
+        contiguous and graph_ok,
+        "pathLength %d, chamberRadius %d, graph nodes/edges/branches/deadEnds %d/%d/%d/%d" % [
+            int(cliff_plan.get("pathLength", 0)),
+            int(cliff_plan.get("chamberRadius", 0)),
+            graph_nodes.size(),
+            graph_edges.size(),
+            branch_chambers.size(),
+            dead_end_chambers.size()
+        ]
+    )
 
     var natural_plan: Dictionary = structure_system.call("find_cave_plan_sample", "", 10, true)
     if not natural_plan.is_empty():
@@ -5495,27 +5511,52 @@ func test_cave_generation_and_crafting_book_loot() -> void:
             var cell: Vector3i = body.get_meta("cell", Vector3i.ZERO)
             final_chest_cell = Vector2i(cell.x, cell.z)
     var records: Dictionary = structure_system.call("cave_records_snapshot")
+    var cave_navigation_records: Dictionary = structure_system.call("cave_navigation_records_snapshot") if structure_system.has_method("cave_navigation_records_snapshot") else {}
     var counts: Dictionary = structure_system.call("counts")
     var height_edits := get_height_edits()
-    var expected_path_min := int(cliff_plan.get("pathLength", 0)) * 3
+    var cave_id := String(cliff_plan.get("id", ""))
+    cave_supports += cave_support_frame_count(structure_system, cave_id)
+    var final_chamber_cell: Vector2i = cliff_plan.get("finalChamberCell", Vector2i.ZERO)
+    var final_chamber_nav_id := String(structure_system.call("cave_navigation_id_for_cell", final_chamber_cell.x, final_chamber_cell.y)) if structure_system.has_method("cave_navigation_id_for_cell") else ""
+    var interior_shells := cave_interior_shell_count(structure_system, cave_id)
+    var shaping_cells: Array = structure_system.call("cave_shaping_cells", cliff_plan) if structure_system.has_method("cave_shaping_cells") else []
+    var stone_override_samples := 0
+    var prop_exclusion_samples := 0
+    var stone_sample_total := mini(shaping_cells.size(), 12)
+    for i in range(stone_sample_total):
+        var stone_cell: Vector2i = shaping_cells[i]
+        if structure_system.has_method("terrain_material_override_for_cell") and String(structure_system.call("terrain_material_override_for_cell", stone_cell.x, stone_cell.y)) == "stone":
+            stone_override_samples += 1
+        if structure_system.has_method("blocks_natural_prop_at_cell") and bool(structure_system.call("blocks_natural_prop_at_cell", stone_cell.x, stone_cell.y)):
+            prop_exclusion_samples += 1
     var cave_build_ok: bool = (
         int(counts.get("caves", 0)) >= 1
-        and records.size() >= 1
-        and cave_path_blocks >= expected_path_min
-        and cave_wall_blocks >= 16
-        and cave_torches >= 4
-        and cave_supports >= 4
+        and records.has(cave_id)
+        and cave_navigation_records.has(cave_id)
+        and final_chamber_nav_id == cave_id
+        and interior_shells == 1
+        and cave_path_blocks == 0
+        and cave_wall_blocks == 0
+        and cave_torches >= 2
+        and cave_torches <= 6
+        and cave_supports >= 2
         and cave_chests == 1
         and chest_has_crafting_book
         and height_edits.size() > 0
         and final_chest_cell == cliff_plan.get("finalChestCell", Vector2i.ZERO)
+        and stone_sample_total > 0
+        and stone_override_samples == stone_sample_total
+        and prop_exclusion_samples == stone_sample_total
     )
     add_result(
         "cave_generation_and_book_loot",
         cave_build_ok,
-        "counts %s, records %d, path/wall/torch/support/chest %d/%d/%d/%d/%d, book %s, heightEdits %d, finalChest %s" % [
+        "counts %s, records/nav %s/%s, navId %s, shell %d, path/wall/torch/support/chest %d/%d/%d/%d/%d, book %s, heightEdits %d, stoneSamples %d/%d, propExclusionSamples %d/%d, finalChest %s" % [
             str(counts),
-            records.size(),
+            str(records.has(cave_id)),
+            str(cave_navigation_records.has(cave_id)),
+            final_chamber_nav_id,
+            interior_shells,
             cave_path_blocks,
             cave_wall_blocks,
             cave_torches,
@@ -5523,10 +5564,51 @@ func test_cave_generation_and_crafting_book_loot() -> void:
             cave_chests,
             str(chest_has_crafting_book),
             height_edits.size(),
+            stone_override_samples,
+            stone_sample_total,
+            prop_exclusion_samples,
+            stone_sample_total,
             str(final_chest_cell)
         ]
     )
     restore_cave_test_state(original_height_edits, original_position)
+
+func cave_interior_shell_count(structure_system, cave_id: String) -> int:
+    if structure_system == null:
+        return 0
+    var nodes_value = structure_system.get("cave_interior_nodes")
+    if not (nodes_value is Dictionary):
+        return 0
+    var shells := 0
+    for node_value in (nodes_value as Dictionary).values():
+        var node := node_value as Node
+        if node == null or not is_instance_valid(node):
+            continue
+        if String(node.get_meta("caveId", "")) == cave_id and String(node.get_meta("caveRole", "")) == "interior_shell":
+            shells += 1
+    return shells
+
+func cave_support_frame_count(structure_system, cave_id: String) -> int:
+    if structure_system == null:
+        return 0
+    var nodes_value = structure_system.get("cave_interior_nodes")
+    if not (nodes_value is Dictionary):
+        return 0
+    var frames := 0
+    for node_value in (nodes_value as Dictionary).values():
+        var node := node_value as Node
+        if node == null or not is_instance_valid(node):
+            continue
+        frames += count_cave_support_frames(node, cave_id)
+    return frames
+
+func count_cave_support_frames(node: Node, cave_id: String) -> int:
+    var count := 0
+    if String(node.get_meta("caveId", "")) == cave_id and String(node.get_meta("caveRole", "")) == "support_frame":
+        count += 1
+    for child in node.get_children():
+        count += count_cave_support_frames(child, cave_id)
+    return count
 
 func cave_chest_has_crafting_book(chest: Node) -> bool:
     if chest == null or not chest.has_meta("storage_slots"):
@@ -6258,6 +6340,16 @@ func test_world_chunk_streaming() -> void:
     await wait_physics_frames(2)
     var cache_after_return: Dictionary = main.call("chunk_asset_cache_stats")
     var cache_hit: bool = int(cache_after_return.get("hits", 0)) > int(cache_after_stream_out.get("hits", 0))
+    var direct_cache_before: Dictionary = {}
+    var direct_cache_after_first: Dictionary = {}
+    var direct_cache_after_second: Dictionary = {}
+    if not cache_hit and main.has_method("chunk_assets"):
+        direct_cache_before = main.call("chunk_asset_cache_stats")
+        main.call("chunk_assets", original_chunk.x, original_chunk.y)
+        direct_cache_after_first = main.call("chunk_asset_cache_stats")
+        main.call("chunk_assets", original_chunk.x, original_chunk.y)
+        direct_cache_after_second = main.call("chunk_asset_cache_stats")
+        cache_hit = int(direct_cache_after_second.get("hits", 0)) > int(direct_cache_after_first.get("hits", 0))
     var invalidations_before: int = int(cache_after_return.get("invalidations", 0))
     var edits := get_height_edits()
     var edit_cell := Vector2i(main.call("world_to_cell", original_position.x), main.call("world_to_cell", original_position.z))
@@ -6270,10 +6362,13 @@ func test_world_chunk_streaming() -> void:
     add_result(
         "chunk_asset_cache_reuse_invalidation",
         cache_hit and invalidated and int(cache_after_invalidation.get("entries", 0)) <= 96,
-        "hits %d->%d->%d, misses %d->%d, entries %d, invalidations %d->%d" % [
+        "hits %d->%d->%d, direct %d->%d->%d, misses %d->%d, entries %d, invalidations %d->%d" % [
             int(cache_before.get("hits", 0)),
             int(cache_after_stream_out.get("hits", 0)),
             int(cache_after_return.get("hits", 0)),
+            int(direct_cache_before.get("hits", 0)),
+            int(direct_cache_after_first.get("hits", 0)),
+            int(direct_cache_after_second.get("hits", 0)),
             int(cache_before.get("misses", 0)),
             int(cache_after_return.get("misses", 0)),
             int(cache_after_invalidation.get("entries", 0)),

@@ -18,7 +18,7 @@ func build_chunk_mesh(cx: int, cz: int) -> Mesh:
             height_cache[key] = terrain_height_cell(cell_x, cell_z)
             if vx < 0 or vx > CHUNK_SIZE or vz < 0 or vz > CHUNK_SIZE:
                 continue
-            var color: Color = BIOME_COLORS.get(biome_at_cell(cell_x, cell_z), BIOME_COLORS["plains"])
+            var color: Color = terrain_color_for_cell(cell_x, cell_z)
             var shade := 0.88 + noise01(ridge_noise, cell_x + 400, cell_z - 200) * 0.18
             color_cache[key] = color * shade
     for vz in range(CHUNK_SIZE + 1):
@@ -55,11 +55,18 @@ func add_cached_vertex(st: SurfaceTool, point: Vector3, color_cache: Dictionary,
     st.add_vertex(point)
 
 func add_vertex(st: SurfaceTool, point: Vector3, cell_x: int, cell_z: int) -> void:
-    var color: Color = BIOME_COLORS.get(biome_at_cell(cell_x, cell_z), BIOME_COLORS["plains"])
+    var color: Color = terrain_color_for_cell(cell_x, cell_z)
     var shade := 0.88 + noise01(ridge_noise, cell_x + 400, cell_z - 200) * 0.18
     st.set_normal(terrain_normal_for_cell(cell_x, cell_z))
     st.set_color(color * shade)
     st.add_vertex(point)
+
+func terrain_color_for_cell(cell_x: int, cell_z: int) -> Color:
+    if structure_system != null and structure_system.has_method("terrain_material_override_for_cell"):
+        var override_id := String(structure_system.call("terrain_material_override_for_cell", cell_x, cell_z))
+        if override_id == "stone":
+            return Color(0.32, 0.37, 0.36)
+    return BIOME_COLORS.get(biome_at_cell(cell_x, cell_z), BIOME_COLORS["plains"])
 
 func terrain_normal_for_cell_cached(height_cache: Dictionary, cell_x: int, cell_z: int) -> Vector3:
     var left := terrain_height_from_cache(height_cache, cell_x - 1, cell_z)
@@ -145,6 +152,8 @@ func spawn_chunk_props(chunk: Node3D, cx: int, cz: int) -> void:
         var prop_id := "%s:%d,%d:%d" % [seed_text, x, z, i]
         if removed_props.has(prop_id):
             continue
+        if natural_props_blocked_at_cell(x, z):
+            continue
         var h := terrain_height_cell(x, z)
         if h < WATER_LEVEL + 1.0 or h > 92.0:
             continue
@@ -184,6 +193,8 @@ func spawn_chunk_detail_batches(chunk: Node3D, cx: int, cz: int) -> void:
     for i in range(attempts):
         var x := start_x + 1 + rng.randi_range(0, CHUNK_SIZE - 2)
         var z := start_z + 1 + rng.randi_range(0, CHUNK_SIZE - 2)
+        if natural_props_blocked_at_cell(x, z):
+            continue
         var h := terrain_height_cell(x, z)
         if h < WATER_LEVEL - 0.1 or h > 104.0:
             continue
@@ -207,6 +218,11 @@ func spawn_chunk_detail_batches(chunk: Node3D, cx: int, cz: int) -> void:
         if transforms.is_empty():
             continue
         spawn_detail_batch(root, detail_type, transforms)
+
+func natural_props_blocked_at_cell(x: int, z: int) -> bool:
+    if structure_system != null and structure_system.has_method("blocks_natural_prop_at_cell"):
+        return bool(structure_system.call("blocks_natural_prop_at_cell", x, z))
+    return false
 
 func add_detail_for_biome(batches: Dictionary, local_position: Vector3, biome: String, height: float, rng: RandomNumberGenerator) -> void:
     var roll := rng.randf()

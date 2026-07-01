@@ -3,6 +3,7 @@ class_name StructureSystem
 
 const StructureDoorRulesScript := preload("res://scripts/StructureDoorRules.gd")
 const StructureLootScript := preload("res://scripts/StructureLoot.gd")
+const CaveInteriorBuilderScript := preload("res://scripts/CaveInteriorBuilder.gd")
 const CAVE_SPAWN_CHANCE := 0.18
 const CAVE_SEARCH_ATTEMPTS := 72
 const CAVE_CLIFF_VARIATION_MIN := 1.15
@@ -25,10 +26,18 @@ var generated_door_count := 0
 var generated_utility_count := 0
 var town_home_records := {}
 var cave_records := {}
+var cave_interior_nodes := {}
+var cave_terrain_cells := {}
+var cave_prop_exclusion_cells := {}
+var cave_navigation_records := {}
+var cave_navigation_cells := {}
+var cave_interior_builder
 
 func setup(main_node) -> void:
     main = main_node
     loot = StructureLootScript.new()
+    cave_interior_builder = CaveInteriorBuilderScript.new()
+    cave_interior_builder.setup(main)
 
 func reset() -> void:
     generated_towns.clear()
@@ -45,7 +54,30 @@ func reset() -> void:
     generated_door_count = 0
     generated_utility_count = 0
     town_home_records.clear()
+    clear_generated_cave_runtime_state(false)
+
+func clear_generated_cave_runtime_state(remove_blocks := true) -> void:
     cave_records.clear()
+    cave_terrain_cells.clear()
+    cave_prop_exclusion_cells.clear()
+    cave_navigation_records.clear()
+    cave_navigation_cells.clear()
+    for node in cave_interior_nodes.values():
+        if node is Node and is_instance_valid(node):
+            (node as Node).queue_free()
+    cave_interior_nodes.clear()
+    if remove_blocks and main != null:
+        var blocks_value = main.get("blocks")
+        if blocks_value is Dictionary:
+            var blocks: Dictionary = blocks_value
+            for key in blocks.keys().duplicate():
+                var block := blocks[key] as Node
+                if block == null or String(block.get_meta("generatedTier", "")) != "cave":
+                    continue
+                if main.get("npc_system") != null and main.get("npc_system").has_method("notify_navigation_block_removed") and block.has_meta("cell"):
+                    main.get("npc_system").notify_navigation_block_removed(block.get_meta("cell"), String(block.get_meta("block_type", "")), block)
+                block.queue_free()
+                blocks.erase(key)
 
 func update_around(center_cell: Vector2i) -> void:
     if main == null:
@@ -143,22 +175,27 @@ func cave_plan_for_region(region_x: int, region_z: int, preferred_kind := "", re
     return plan
 
 func find_cave_plan_sample(preferred_kind := "", search_radius_regions := 8, require_spawn_roll := false) -> Dictionary:
-    var best_plan := {}
-    var best_score := INF
-    for rz in range(-search_radius_regions, search_radius_regions + 1):
-        for rx in range(-search_radius_regions, search_radius_regions + 1):
-            var plan := cave_plan_for_region(rx, rz, preferred_kind, require_spawn_roll)
-            if plan.is_empty():
-                continue
-            var distance_score := Vector2(float(rx), float(rz)).length()
-            var plan_score: float = distance_score + main.hash01("cave-sample:%d,%d:%s" % [rx, rz, String(plan.get("kind", ""))])
-            if plan_score < best_score:
-                best_score = plan_score
-                best_plan = plan
-    return best_plan
+    for radius in range(0, search_radius_regions + 1):
+        var best_plan := {}
+        var best_score := INF
+        for rz in range(-radius, radius + 1):
+            for rx in range(-radius, radius + 1):
+                if radius > 0 and absi(rx) != radius and absi(rz) != radius:
+                    continue
+                var plan := cave_plan_for_region(rx, rz, preferred_kind, require_spawn_roll)
+                if plan.is_empty():
+                    continue
+                var distance_score := Vector2(float(rx), float(rz)).length()
+                var plan_score: float = distance_score + main.hash01("cave-sample:%d,%d:%s" % [rx, rz, String(plan.get("kind", ""))])
+                if plan_score < best_score:
+                    best_score = plan_score
+                    best_plan = plan
+        if not best_plan.is_empty():
+            return best_plan
+    return {}
 
 func best_cave_plan_candidate(region_x: int, region_z: int, kind: String, rng: RandomNumberGenerator) -> Dictionary:
-    var best := {}
+    var best_data := {}
     var best_score := -INF
     var region_size := int(main.STRUCTURE_REGION_CELLS)
     var margin := 18
@@ -167,7 +204,7 @@ func best_cave_plan_candidate(region_x: int, region_z: int, kind: String, rng: R
         var entrance_z := region_z * region_size + rng.randi_range(margin, region_size - margin)
         var entrance := Vector2i(entrance_x, entrance_z)
         var height := float(main.terrain_height_cell(entrance.x, entrance.y))
-        if height <= float(main.WATER_LEVEL) + 2.4:
+        if height <= float(main.WATER_LEVEL) + main.CELL * 6.0:
             continue
         var variation := float(main.height_variation_cell(entrance.x, entrance.y, 3)) / float(main.CELL)
         if kind == "cliff" and variation < CAVE_CLIFF_VARIATION_MIN:
@@ -183,28 +220,46 @@ func best_cave_plan_candidate(region_x: int, region_z: int, kind: String, rng: R
         if score <= best_score:
             continue
         best_score = score
-        best = make_cave_plan(region_x, region_z, entrance, side, path_length, chamber_radius, kind, height, variation)
-    return best
+        best_data = {
+            "entrance": entrance,
+            "side": side,
+            "pathLength": path_length,
+            "chamberRadius": chamber_radius,
+            "height": height,
+            "variation": variation
+        }
+    if best_data.is_empty():
+        return {}
+    return make_cave_plan(
+        region_x,
+        region_z,
+        best_data.get("entrance", Vector2i.ZERO),
+        int(best_data.get("side", 0)),
+        int(best_data.get("pathLength", 16)),
+        int(best_data.get("chamberRadius", 3)),
+        kind,
+        float(best_data.get("height", 0.0)),
+        float(best_data.get("variation", 0.0))
+    )
 
 func make_cave_plan(region_x: int, region_z: int, entrance: Vector2i, side: int, path_length: int, chamber_radius: int, kind: String, level: float, entrance_variation: float) -> Dictionary:
     var inward := inward_for_side(side)
     var right := Vector2i(-inward.y, inward.x)
+    var id := "cave:%d,%d:%d,%d" % [region_x, region_z, entrance.x, entrance.y]
+    var floor_drop: float = main.CELL * (5.35 if kind == "cliff" else 6.1)
+    var floor_level := maxf(float(main.WATER_LEVEL) + main.CELL * 2.0, level - floor_drop)
+    var desired_clearance: float = main.CELL * (3.15 + main.hash01("cave-clearance:%s" % id) * 0.72)
+    var ceiling_level := minf(level - main.CELL * 1.15, floor_level + desired_clearance)
+    if ceiling_level < floor_level + main.CELL * 2.65:
+        ceiling_level = floor_level + main.CELL * 2.65
     var approach_cells: Array[Vector2i] = []
-    var tunnel_cells: Array[Vector2i] = []
-    var chamber_cells: Array[Vector2i] = []
     for z in range(-5, 0):
         for x in range(-1, 2):
             approach_cells.append(entrance + right * x + inward * z)
-    for z in range(0, path_length + 1):
-        for x in range(-1, 2):
-            tunnel_cells.append(entrance + right * x + inward * z)
-    var chamber_center := entrance + inward * (path_length + chamber_radius)
-    for dz in range(-chamber_radius, chamber_radius + 1):
-        for dx in range(-chamber_radius, chamber_radius + 1):
-            if Vector2(float(dx), float(dz)).length() <= float(chamber_radius) + 0.25:
-                chamber_cells.append(chamber_center + right * dx + inward * dz)
-    var chest_cell := chamber_center + inward * maxi(1, chamber_radius - 1)
-    var id := "cave:%d,%d:%d,%d" % [region_x, region_z, entrance.x, entrance.y]
+    var graph := make_cave_graph(id, entrance, inward, right, path_length, chamber_radius)
+    var final_chamber_id := String(graph.get("finalChamberId", "final"))
+    var final_chamber_cell := cave_graph_node_cell(graph.get("nodes", []), final_chamber_id, entrance + inward * path_length)
+    var chest_cell: Vector2i = graph.get("finalChestCell", final_chamber_cell + inward * maxi(1, chamber_radius - 1))
     return {
         "id": id,
         "region": Vector2i(region_x, region_z),
@@ -213,16 +268,216 @@ func make_cave_plan(region_x: int, region_z: int, entrance: Vector2i, side: int,
         "entranceCell": entrance,
         "inward": inward,
         "right": right,
-        "level": level,
+        "surfaceLevel": level,
+        "level": floor_level,
+        "ceilingLevel": ceiling_level,
+        "entranceOpenDepth": 4,
         "entranceVariation": entrance_variation,
         "pathLength": path_length,
         "chamberRadius": chamber_radius,
         "approachCells": approach_cells,
-        "pathCells": tunnel_cells,
-        "chamberCells": chamber_cells,
-        "finalChamberCell": chamber_center,
+        "pathCells": graph.get("pathCells", []),
+        "chamberCells": graph.get("chamberCells", []),
+        "caveNodes": graph.get("nodes", []),
+        "caveEdges": graph.get("edges", []),
+        "branchChamberIds": graph.get("branchChamberIds", []),
+        "deadEndChamberIds": graph.get("deadEndChamberIds", []),
+        "finalChamberId": final_chamber_id,
+        "finalChamberCell": final_chamber_cell,
         "finalChestCell": chest_cell
     }
+
+func make_cave_graph(id: String, entrance: Vector2i, inward: Vector2i, right: Vector2i, path_length: int, chamber_radius: int) -> Dictionary:
+    var final_depth: int = path_length + chamber_radius + 4 + int(main.hash01("cave-graph-final-depth:%s" % id) * 5.0)
+    var main_count: int = 3 + int(main.hash01("cave-graph-main-count:%s" % id) * 3.0)
+    var dead_end_count: int = 1 + int(main.hash01("cave-graph-dead-end-count:%s" % id) * 3.0)
+    var side_chamber_count: int = 1 + int(main.hash01("cave-graph-side-chamber-count:%s" % id) * 2.0)
+    var nodes: Array[Dictionary] = [cave_graph_node("entrance", "entrance", entrance, 2)]
+    var edges: Array[Dictionary] = []
+    var main_node_ids: Array[String] = []
+    var main_depths: Array[int] = []
+    var main_laterals: Array[int] = []
+    var last_depth := 0
+    for i in range(1, main_count + 1):
+        var node_id := "main_%d" % i
+        var progress := float(i) / float(main_count + 1)
+        var jitter: int = roundi(lerpf(-2.0, 2.0, main.hash01("cave-graph-main-depth-jitter:%s:%d" % [id, i])))
+        var depth: int = clampi(roundi(lerpf(5.0, float(final_depth - 4), progress)) + jitter, last_depth + 4, final_depth - 3)
+        var lateral_range: int = 2 + i
+        var lateral := cave_graph_lateral(id, node_id, lateral_range)
+        var radius := 3 + int(main.hash01("cave-graph-main-radius:%s:%d" % [id, i]) * 2.0)
+        var kind := "junction" if i == 1 else "chamber"
+        nodes.append(cave_graph_node(node_id, kind, cave_axis_cell(entrance, inward, right, depth, lateral), radius))
+        main_node_ids.append(node_id)
+        main_depths.append(depth)
+        main_laterals.append(lateral)
+        last_depth = depth
+    var final_lateral := cave_graph_lateral(id, "final", maxi(4, main_count + 2))
+    nodes.append(cave_graph_node("final", "final", cave_axis_cell(entrance, inward, right, final_depth, final_lateral), chamber_radius + 2))
+    var previous_id := "entrance"
+    for node_id in main_node_ids:
+        edges.append(cave_graph_edge("%s_to_%s" % [previous_id, node_id], previous_id, node_id, 1.72 + main.hash01("cave-graph-main-edge:%s:%s" % [id, node_id]) * 0.35))
+        previous_id = node_id
+    edges.append(cave_graph_edge("%s_to_final" % previous_id, previous_id, "final", 1.86))
+    for i in range(dead_end_count):
+        var anchor_index: int = int(main.hash01("cave-graph-dead-anchor:%s:%d" % [id, i]) * float(main_node_ids.size()))
+        anchor_index = clampi(anchor_index, 0, main_node_ids.size() - 1)
+        var anchor_id := main_node_ids[anchor_index]
+        var anchor_depth := main_depths[anchor_index]
+        var anchor_lateral := main_laterals[anchor_index]
+        var side_sign := -1 if main.hash01("cave-graph-dead-side:%s:%d" % [id, i]) < 0.5 else 1
+        var depth_offset: int = roundi(lerpf(-1.0, 3.0, main.hash01("cave-graph-dead-depth:%s:%d" % [id, i])))
+        var lateral_offset: int = side_sign * (5 + int(main.hash01("cave-graph-dead-lateral:%s:%d" % [id, i]) * 5.0) + i)
+        var dead_id := "dead_end_%d" % (i + 1)
+        var dead_depth: int = clampi(anchor_depth + depth_offset, 4, final_depth - 2)
+        var dead_lateral := anchor_lateral + lateral_offset
+        nodes.append(cave_graph_node(dead_id, "dead_end", cave_axis_cell(entrance, inward, right, dead_depth, dead_lateral), 3))
+        edges.append(cave_graph_edge("%s_to_%s" % [anchor_id, dead_id], anchor_id, dead_id, 1.45))
+    for i in range(side_chamber_count):
+        var anchor_index: int = int(main.hash01("cave-graph-side-anchor:%s:%d" % [id, i]) * float(main_node_ids.size()))
+        anchor_index = clampi(anchor_index, 0, main_node_ids.size() - 1)
+        var target_index: int = clampi(anchor_index + 1 + int(main.hash01("cave-graph-side-target:%s:%d" % [id, i]) * 2.0), 0, main_node_ids.size())
+        var anchor_id := main_node_ids[anchor_index]
+        var target_id := "final" if target_index >= main_node_ids.size() else main_node_ids[target_index]
+        if target_id == anchor_id:
+            target_id = "final"
+        var anchor_depth := main_depths[anchor_index]
+        var target_depth := final_depth if target_id == "final" else main_depths[target_index]
+        var anchor_lateral := main_laterals[anchor_index]
+        var target_lateral := final_lateral if target_id == "final" else main_laterals[target_index]
+        var side_sign := -1 if main.hash01("cave-graph-loop-side:%s:%d" % [id, i]) < 0.5 else 1
+        var side_id := "side_chamber_%d" % (i + 1)
+        var side_depth: int = clampi(roundi((float(anchor_depth) + float(target_depth)) * 0.5) + roundi(lerpf(-2.0, 2.0, main.hash01("cave-graph-loop-depth:%s:%d" % [id, i]))), anchor_depth + 2, target_depth - 1)
+        var side_lateral: int = roundi((float(anchor_lateral) + float(target_lateral)) * 0.5) + side_sign * (4 + int(main.hash01("cave-graph-loop-lateral:%s:%d" % [id, i]) * 4.0))
+        nodes.append(cave_graph_node(side_id, "side_chamber", cave_axis_cell(entrance, inward, right, side_depth, side_lateral), 3))
+        edges.append(cave_graph_edge("%s_to_%s" % [anchor_id, side_id], anchor_id, side_id, 1.48))
+        edges.append(cave_graph_edge("%s_to_%s" % [side_id, target_id], side_id, target_id, 1.48))
+    if main_node_ids.is_empty():
+        edges.append(cave_graph_edge("entrance_to_final", "entrance", "final", 1.85))
+    var path_lookup := {}
+    var chamber_lookup := {}
+    for node_value in nodes:
+        var node: Dictionary = node_value
+        cave_add_chamber_cells(chamber_lookup, node, id)
+    for index in range(edges.size()):
+        var edge: Dictionary = edges[index]
+        var from_cell := cave_graph_node_cell(nodes, String(edge.get("from", "")), entrance)
+        var to_cell := cave_graph_node_cell(nodes, String(edge.get("to", "")), entrance)
+        var center_cells := cave_edge_center_cells(from_cell, to_cell)
+        edge["centerCells"] = center_cells
+        edges[index] = edge
+        cave_add_tunnel_cells(path_lookup, center_cells, float(edge.get("radius", 1.6)), id, String(edge.get("id", "")))
+    var degree := {}
+    for edge_value in edges:
+        var edge: Dictionary = edge_value
+        var from_id := String(edge.get("from", ""))
+        var to_id := String(edge.get("to", ""))
+        degree[from_id] = int(degree.get(from_id, 0)) + 1
+        degree[to_id] = int(degree.get(to_id, 0)) + 1
+    var branch_ids: Array[String] = []
+    var dead_end_ids: Array[String] = []
+    for node_value in nodes:
+        var node: Dictionary = node_value
+        var node_id := String(node.get("id", ""))
+        if node_id == "entrance":
+            continue
+        var node_degree := int(degree.get(node_id, 0))
+        if node_degree >= 3:
+            branch_ids.append(node_id)
+        if String(node.get("kind", "")) == "dead_end" or (node_degree <= 1 and node_id != "final"):
+            dead_end_ids.append(node_id)
+    var final_cell := cave_graph_node_cell(nodes, "final", entrance + inward * final_depth)
+    return {
+        "nodes": nodes,
+        "edges": edges,
+        "branchChamberIds": branch_ids,
+        "deadEndChamberIds": dead_end_ids,
+        "finalChamberId": "final",
+        "finalChestCell": final_cell + inward * maxi(1, chamber_radius - 1),
+        "pathCells": sorted_cave_cells_from_lookup(path_lookup),
+        "chamberCells": sorted_cave_cells_from_lookup(chamber_lookup)
+    }
+
+func cave_axis_cell(entrance: Vector2i, inward: Vector2i, right: Vector2i, depth: int, lateral: int) -> Vector2i:
+    return entrance + inward * depth + right * lateral
+
+func cave_graph_lateral(id: String, salt: String, max_abs: int) -> int:
+    return roundi(lerpf(float(-max_abs), float(max_abs), main.hash01("cave-graph-lateral:%s:%s" % [id, salt])))
+
+func cave_graph_node(node_id: String, kind: String, cell: Vector2i, radius: int) -> Dictionary:
+    return {
+        "id": node_id,
+        "kind": kind,
+        "cell": cell,
+        "radius": radius
+    }
+
+func cave_graph_edge(edge_id: String, from_id: String, to_id: String, radius: float) -> Dictionary:
+    return {
+        "id": edge_id,
+        "from": from_id,
+        "to": to_id,
+        "radius": radius
+    }
+
+func cave_graph_node_cell(nodes: Array, node_id: String, fallback: Vector2i) -> Vector2i:
+    for node_value in nodes:
+        if not (node_value is Dictionary):
+            continue
+        var node: Dictionary = node_value
+        if String(node.get("id", "")) == node_id:
+            return node.get("cell", fallback)
+    return fallback
+
+func cave_edge_center_cells(from_cell: Vector2i, to_cell: Vector2i) -> Array[Vector2i]:
+    var result: Array[Vector2i] = []
+    var steps: int = maxi(absi(to_cell.x - from_cell.x), absi(to_cell.y - from_cell.y))
+    if steps <= 0:
+        return [from_cell]
+    var used := {}
+    for i in range(steps + 1):
+        var t := float(i) / float(steps)
+        var cell := Vector2i(roundi(lerpf(float(from_cell.x), float(to_cell.x), t)), roundi(lerpf(float(from_cell.y), float(to_cell.y), t)))
+        if used.has(cell):
+            continue
+        used[cell] = true
+        result.append(cell)
+    return result
+
+func cave_add_tunnel_cells(lookup: Dictionary, center_cells: Array[Vector2i], radius: float, id: String, edge_id: String) -> void:
+    var expanded := ceili(radius + 1.35)
+    for center in center_cells:
+        for dz in range(-expanded, expanded + 1):
+            for dx in range(-expanded, expanded + 1):
+                var offset := Vector2(float(dx), float(dz))
+                var rough: float = radius + main.hash01("cave-tunnel-rough:%s:%s:%d,%d" % [id, edge_id, center.x + dx, center.y + dz]) * 0.74
+                if offset.length() <= rough:
+                    lookup[center + Vector2i(dx, dz)] = true
+
+func cave_add_chamber_cells(lookup: Dictionary, node: Dictionary, id: String) -> void:
+    var center: Vector2i = node.get("cell", Vector2i.ZERO)
+    var radius := int(node.get("radius", 3))
+    var expanded := radius + 2
+    var stretch_x: float = 0.86 + main.hash01("cave-chamber-stretch-x:%s:%s" % [id, String(node.get("id", ""))]) * 0.34
+    var stretch_z: float = 0.86 + main.hash01("cave-chamber-stretch-z:%s:%s" % [id, String(node.get("id", ""))]) * 0.34
+    for dz in range(-expanded, expanded + 1):
+        for dx in range(-expanded, expanded + 1):
+            var rough: float = float(radius) + main.hash01("cave-chamber-rough:%s:%s:%d,%d" % [id, String(node.get("id", "")), dx, dz]) * 1.15
+            var shaped: float = Vector2(float(dx) / stretch_x, float(dz) / stretch_z).length()
+            if shaped <= rough:
+                lookup[center + Vector2i(dx, dz)] = true
+
+func sorted_cave_cells_from_lookup(lookup: Dictionary) -> Array[Vector2i]:
+    var cells: Array[Vector2i] = []
+    for key in lookup.keys():
+        var cell: Vector2i = key
+        cells.append(cell)
+    cells.sort_custom(func(a: Vector2i, b: Vector2i) -> bool:
+        if a.x == b.x:
+            return a.y < b.y
+        return a.x < b.x
+    )
+    return cells
 
 func inward_for_side(side: int) -> Vector2i:
     if side == 0:
@@ -774,21 +1029,10 @@ func build_cave(plan: Dictionary, rng: RandomNumberGenerator = null) -> void:
         "caveKind": kind
     }
     apply_cave_terrain_edits(plan)
-    var floor_lookup := cave_floor_lookup(plan)
-    var approach_cells: Array = plan.get("approachCells", [])
-    var path_cells: Array = plan.get("pathCells", [])
-    var chamber_cells: Array = plan.get("chamberCells", [])
-    for i in range(approach_cells.size()):
-        var cell: Vector2i = approach_cells[i]
-        place_path(cell.x, cell.y, level, cave_options(base_options, "approach", i))
-    for i in range(path_cells.size()):
-        var cell: Vector2i = path_cells[i]
-        place_path(cell.x, cell.y, level, cave_options(base_options, "tunnel_floor", i))
-    for i in range(chamber_cells.size()):
-        var cell: Vector2i = chamber_cells[i]
-        place_path(cell.x, cell.y, level, cave_options(base_options, "final_chamber_floor", i))
-    build_cave_boundary_walls(floor_lookup, level, base_options, cave_rng)
-    build_cave_entrance_arch(plan, level, base_options)
+    if cave_interior_builder != null:
+        var interior: Node3D = cave_interior_builder.build(plan, cave_rng, base_options)
+        if interior != null:
+            cave_interior_nodes[cave_id] = interior
     build_cave_supports(plan, level, base_options)
     var chest_cell: Vector2i = plan.get("finalChestCell", plan.get("finalChamberCell", Vector2i.ZERO))
     place_utility(chest_cell.x, chest_cell.y, level, "chest", cave_options(base_options, "final_chest", int(plan.get("pathLength", 0)), {
@@ -796,6 +1040,12 @@ func build_cave(plan: Dictionary, rng: RandomNumberGenerator = null) -> void:
         "caveFinalLoot": true
     }))
     cave_records[cave_id] = cave_record_from_plan(plan, cache_key)
+    cave_navigation_records[cave_id] = cave_navigation_record_from_plan(plan, cache_key)
+    for cell_value in cave_walkable_cells(plan, false):
+        var cell: Vector2i = cell_value
+        cave_navigation_cells[cell] = cave_id
+    var region: Vector2i = plan.get("region", Vector2i.ZERO)
+    generated_caves[region] = true
 
 func apply_cave_terrain_edits(plan: Dictionary) -> void:
     if main == null:
@@ -805,7 +1055,12 @@ func apply_cave_terrain_edits(plan: Dictionary) -> void:
         return
     var npc_system = main.get("npc_system")
     var level := float(plan.get("level", 0.0))
-    var cells := cave_shaping_cells(plan)
+    var cells := cave_terrain_opening_cells(plan)
+    var shaping_cells := cave_shaping_cells(plan)
+    for cell_value in shaping_cells:
+        var stone_cell: Vector2i = cell_value
+        cave_terrain_cells[stone_cell] = true
+        cave_prop_exclusion_cells[stone_cell] = true
     var edited := {}
     for cell_value in cells:
         var cell: Vector2i = cell_value
@@ -813,12 +1068,161 @@ func apply_cave_terrain_edits(plan: Dictionary) -> void:
             continue
         edited[cell] = true
         var old_height := float(main.terrain_height_cell(cell.x, cell.y))
-        edits[cell] = level
+        var target_height := cave_opening_height_for_cell(plan, cell)
+        edits[cell] = target_height
         if npc_system != null and npc_system.has_method("notify_navigation_terrain_edited"):
-            npc_system.notify_navigation_terrain_edited(cell, old_height, level)
-    if main.has_method("rebuild_chunks_around_cell"):
-        main.rebuild_chunks_around_cell(plan.get("entranceCell", Vector2i.ZERO))
-        main.rebuild_chunks_around_cell(plan.get("finalChamberCell", Vector2i.ZERO))
+            npc_system.notify_navigation_terrain_edited(cell, old_height, target_height)
+    rebuild_loaded_chunks_for_cells(shaping_cells)
+
+func terrain_material_override_for_cell(x: int, z: int) -> String:
+    return "stone" if cave_terrain_cells.has(Vector2i(x, z)) else ""
+
+func blocks_natural_prop_at_cell(x: int, z: int) -> bool:
+    return cave_prop_exclusion_cells.has(Vector2i(x, z))
+
+func cave_navigation_id_for_cell(x: int, z: int) -> String:
+    return String(cave_navigation_cells.get(Vector2i(x, z), ""))
+
+func rebuild_loaded_chunks_for_cells(cells: Array[Vector2i]) -> void:
+    if main == null or not main.has_method("cell_to_chunk") or not main.has_method("rebuild_chunk"):
+        return
+    var chunks_value = main.get("chunks")
+    if not (chunks_value is Dictionary):
+        return
+    var chunks: Dictionary = chunks_value
+    if chunks.is_empty():
+        return
+    var touched_chunks := {}
+    for cell in cells:
+        var chunk_key: Vector2i = main.call("cell_to_chunk", cell.x, cell.y)
+        touched_chunks[chunk_key] = true
+    for key_value in touched_chunks.keys():
+        var key: Vector2i = key_value
+        if chunks.has(key):
+            main.call("rebuild_chunk", key.x, key.y)
+
+func cave_navigation_records_snapshot() -> Dictionary:
+    return cave_navigation_records.duplicate(true)
+
+func snapshot_caves() -> Array:
+    var result := []
+    var ids: Array = cave_records.keys()
+    ids.sort()
+    for id_value in ids:
+        var cave_id := String(id_value)
+        var record: Dictionary = cave_records.get(cave_id, {})
+        if record.is_empty():
+            continue
+        result.append({
+            "id": cave_id,
+            "kind": String(record.get("kind", "")),
+            "region": vector2i_to_save(record.get("region", Vector2i.ZERO)),
+            "entranceCell": vector2i_to_save(record.get("entranceCell", Vector2i.ZERO)),
+            "finalChestCell": vector2i_to_save(record.get("finalChestCell", Vector2i.ZERO)),
+            "finalChestSlots": cave_final_chest_slots_snapshot(cave_id)
+        })
+    return result
+
+func restore_caves(entries) -> void:
+    clear_generated_cave_runtime_state(true)
+    generated_caves.clear()
+    generated_cave_count = 0
+    if not (entries is Array):
+        return
+    for entry_value in entries:
+        if not (entry_value is Dictionary):
+            continue
+        var entry: Dictionary = entry_value
+        var region := save_to_vector2i(entry.get("region", {}), Vector2i(999999, 999999))
+        if region == Vector2i(999999, 999999):
+            continue
+        var kind := String(entry.get("kind", ""))
+        var plan := cave_plan_for_region(region.x, region.y, kind, false)
+        if plan.is_empty():
+            continue
+        var expected_id := String(entry.get("id", ""))
+        if expected_id != "" and String(plan.get("id", "")) != expected_id:
+            continue
+        var rng := RandomNumberGenerator.new()
+        rng.seed = main.hash_string("%s:cave-build:%d,%d" % [main.seed_text, region.x, region.y])
+        build_cave(plan, rng)
+        apply_saved_cave_final_chest_slots(String(plan.get("id", "")), entry.get("finalChestSlots", []))
+
+func cave_final_chest_slots_snapshot(cave_id: String) -> Array:
+    if main == null:
+        return []
+    var blocks_value = main.get("blocks")
+    if not (blocks_value is Dictionary):
+        return []
+    for block_value in (blocks_value as Dictionary).values():
+        var block := block_value as Node
+        if block == null or not is_instance_valid(block):
+            continue
+        if String(block.get_meta("generatedTier", "")) != "cave":
+            continue
+        if String(block.get_meta("caveId", "")) != cave_id:
+            continue
+        if String(block.get_meta("caveRole", "")) != "final_chest":
+            continue
+        return cave_serialize_slots(block.get_meta("storage_slots", []))
+    return []
+
+func apply_saved_cave_final_chest_slots(cave_id: String, slots_value) -> void:
+    if main == null or not (slots_value is Array):
+        return
+    var blocks_value = main.get("blocks")
+    if not (blocks_value is Dictionary):
+        return
+    var slots := cave_restore_slots(slots_value)
+    for block_value in (blocks_value as Dictionary).values():
+        var block := block_value as Node
+        if block == null or not is_instance_valid(block):
+            continue
+        if String(block.get_meta("generatedTier", "")) == "cave" \
+            and String(block.get_meta("caveId", "")) == cave_id \
+            and String(block.get_meta("caveRole", "")) == "final_chest":
+            block.set_meta("storage_slots", slots)
+            return
+
+func cave_serialize_slots(slots_value) -> Array:
+    var result := []
+    if not (slots_value is Array):
+        return result
+    for slot_value in slots_value:
+        if not (slot_value is Dictionary):
+            continue
+        result.append({
+            "item": String(slot_value.get("item", "")),
+            "count": int(slot_value.get("count", 0))
+        })
+    return result
+
+func cave_restore_slots(slots_value) -> Array:
+    var result := []
+    if not (slots_value is Array):
+        return result
+    for slot_value in slots_value:
+        if not (slot_value is Dictionary):
+            continue
+        result.append({
+            "item": String(slot_value.get("item", "")),
+            "count": maxi(0, int(slot_value.get("count", 0)))
+        })
+    return result
+
+func vector2i_to_save(value) -> Dictionary:
+    if value is Vector2i:
+        return { "x": value.x, "z": value.y }
+    return { "x": 0, "z": 0 }
+
+func save_to_vector2i(value, fallback := Vector2i.ZERO) -> Vector2i:
+    if value is Vector2i:
+        return value
+    if value is Dictionary:
+        return Vector2i(int(value.get("x", fallback.x)), int(value.get("z", fallback.y)))
+    if value is Array and value.size() >= 2:
+        return Vector2i(int(value[0]), int(value[1]))
+    return fallback
 
 func cave_walkable_cells(plan: Dictionary, include_approach := false) -> Array[Vector2i]:
     var cells: Array[Vector2i] = []
@@ -851,6 +1255,32 @@ func cave_shaping_cells(plan: Dictionary) -> Array[Vector2i]:
         cells.append(key)
     return cells
 
+func cave_terrain_opening_cells(plan: Dictionary) -> Array[Vector2i]:
+    var lookup := {}
+    for cell_value in cave_walkable_cells(plan, true):
+        var cell: Vector2i = cell_value
+        for dz in range(-1, 2):
+            for dx in range(-1, 2):
+                if Vector2(float(dx), float(dz)).length() > 1.45:
+                    continue
+                lookup[cell + Vector2i(dx, dz)] = true
+    var cells: Array[Vector2i] = []
+    for key in lookup.keys():
+        cells.append(key)
+    return cells
+
+func cave_opening_height_for_cell(plan: Dictionary, cell: Vector2i) -> float:
+    var entrance: Vector2i = plan.get("entranceCell", Vector2i.ZERO)
+    var inward: Vector2i = plan.get("inward", Vector2i(0, 1))
+    var surface_level := float(plan.get("surfaceLevel", plan.get("level", 0.0)))
+    var floor_level := float(plan.get("level", surface_level))
+    var delta := cell - entrance
+    var depth := delta.x * inward.x + delta.y * inward.y
+    if depth < 0:
+        var ramp_t := clampf(float(depth + 5) / 5.0, 0.0, 1.0)
+        return lerpf(surface_level, floor_level, ramp_t)
+    return floor_level
+
 func build_cave_boundary_walls(floor_lookup: Dictionary, level: float, base_options: Dictionary, rng: RandomNumberGenerator) -> void:
     var wall_cells := {}
     var directions := [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]
@@ -881,28 +1311,86 @@ func build_cave_entrance_arch(plan: Dictionary, level: float, base_options: Dict
         place_structure_block(torch_cell.x, torch_cell.y, level, 1, "torch", cave_options(base_options, "entrance_torch", 1))
 
 func build_cave_supports(plan: Dictionary, level: float, base_options: Dictionary) -> void:
+    if cave_has_graph(plan):
+        build_graph_cave_supports(plan, level, base_options)
+        return
     var entrance: Vector2i = plan.get("entranceCell", Vector2i.ZERO)
     var inward: Vector2i = plan.get("inward", Vector2i(0, 1))
     var right: Vector2i = plan.get("right", Vector2i(1, 0))
     var path_length := int(plan.get("pathLength", 12))
-    var support_depths := [4, 9, maxi(12, path_length - 4)]
-    for depth in support_depths:
+    var torch_depths := [3, maxi(5, int(path_length / 2)), maxi(6, path_length - 3)]
+    var used_depths := {}
+    for depth in torch_depths:
         if depth >= path_length:
             continue
-        for side_offset in [-2, 2]:
-            var post: Vector2i = entrance + inward * depth + right * side_offset
-            for dy in range(3):
-                place_structure_block(post.x, post.y, level, dy, "woodBlock", cave_options(base_options, "support_post", depth))
-        for cross_offset in range(-2, 3):
-            var beam: Vector2i = entrance + inward * depth + right * cross_offset
-            place_structure_block(beam.x, beam.y, level, 3, "woodBlock", cave_options(base_options, "support_beam", depth))
-        if depth % 2 == 1:
-            var torch: Vector2i = entrance + inward * (depth + 1) + right * -1
-            place_structure_block(torch.x, torch.y, level, 1, "torch", cave_options(base_options, "tunnel_torch", depth))
+        if used_depths.has(depth):
+            continue
+        used_depths[depth] = true
+        var torch_side := -1 if depth % 2 == 0 else 1
+        var torch: Vector2i = entrance + inward * depth + right * torch_side
+        place_structure_block(torch.x, torch.y, level, 1, "torch", cave_options(base_options, "tunnel_torch", depth))
     var chamber_center: Vector2i = plan.get("finalChamberCell", entrance + inward * path_length)
-    for offset in [Vector2i(2, 0), Vector2i(-2, 0), Vector2i(0, 2), Vector2i(0, -2)]:
+    for offset in [Vector2i(2, 0), Vector2i(-2, 0)]:
         var torch_cell: Vector2i = chamber_center + right * offset.x + inward * offset.y
         place_structure_block(torch_cell.x, torch_cell.y, level, 1, "torch", cave_options(base_options, "chamber_torch", path_length))
+
+func cave_has_graph(plan: Dictionary) -> bool:
+    var nodes = plan.get("caveNodes", [])
+    var edges = plan.get("caveEdges", [])
+    return nodes is Array and edges is Array and not (nodes as Array).is_empty() and not (edges as Array).is_empty()
+
+func build_graph_cave_supports(plan: Dictionary, level: float, base_options: Dictionary) -> void:
+    var used_cells := {}
+    var edges: Array = plan.get("caveEdges", [])
+    var branch_ids: Array = plan.get("branchChamberIds", [])
+    var torch_candidates: Array[Dictionary] = []
+    for edge_value in edges:
+        if not (edge_value is Dictionary):
+            continue
+        var edge: Dictionary = edge_value
+        var center_cells = edge.get("centerCells", [])
+        if not (center_cells is Array) or (center_cells as Array).size() < 5:
+            continue
+        var samples: Array = center_cells
+        var sample_index := clampi(roundi(float(samples.size() - 1) * 0.52), 2, samples.size() - 3)
+        var torch_cell: Vector2i = samples[sample_index]
+        torch_candidates.append({
+            "cell": torch_cell,
+            "role": "tunnel_torch",
+            "depth": sample_index,
+            "score": int(samples.size()) + int(main.hash01("cave-torch-edge:%s:%s" % [String(plan.get("id", "")), String(edge.get("id", ""))]) * 100.0)
+        })
+    var nodes: Array = plan.get("caveNodes", [])
+    var final_id := String(plan.get("finalChamberId", "final"))
+    for node_value in nodes:
+        if not (node_value is Dictionary):
+            continue
+        var node: Dictionary = node_value
+        var node_id := String(node.get("id", ""))
+        if node_id == "entrance":
+            continue
+        if String(node.get("kind", "")) == "dead_end" or node_id == final_id or branch_ids.has(node_id):
+            var cell: Vector2i = node.get("cell", Vector2i.ZERO)
+            torch_candidates.append({
+                "cell": cell,
+                "role": "chamber_torch",
+                "depth": int(node.get("radius", 3)),
+                "score": 160 if node_id == final_id else 80 + int(main.hash01("cave-torch-node:%s:%s" % [String(plan.get("id", "")), node_id]) * 90.0)
+            })
+    torch_candidates.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+        return int(a.get("score", 0)) > int(b.get("score", 0))
+    )
+    var torch_budget := clampi(2 + int(edges.size() / 5), 3, 5)
+    var placed := 0
+    for candidate in torch_candidates:
+        if placed >= torch_budget:
+            break
+        var cell: Vector2i = candidate.get("cell", Vector2i.ZERO)
+        if used_cells.has(cell):
+            continue
+        used_cells[cell] = true
+        placed += 1
+        place_structure_block(cell.x, cell.y, level, 1, "torch", cave_options(base_options, String(candidate.get("role", "cave_torch")), int(candidate.get("depth", 0))))
 
 func cave_options(base_options: Dictionary, role: String, depth_index := -1, extra_options: Dictionary = {}) -> Dictionary:
     var options := base_options.duplicate()
@@ -923,15 +1411,44 @@ func cave_record_from_plan(plan: Dictionary, cache_key: String) -> Dictionary:
         "finalChamberCell": plan.get("finalChamberCell", Vector2i.ZERO),
         "finalChestCell": plan.get("finalChestCell", Vector2i.ZERO),
         "level": float(plan.get("level", 0.0)),
+        "surfaceLevel": float(plan.get("surfaceLevel", plan.get("level", 0.0))),
+        "ceilingLevel": float(plan.get("ceilingLevel", plan.get("level", 0.0))),
         "entranceVariation": float(plan.get("entranceVariation", 0.0)),
         "pathLength": int(plan.get("pathLength", 0)),
         "chamberRadius": int(plan.get("chamberRadius", 0)),
+        "chamberCount": cave_array_size(plan, "caveNodes"),
+        "edgeCount": cave_array_size(plan, "caveEdges"),
+        "branchChamberCount": cave_array_size(plan, "branchChamberIds"),
+        "deadEndChamberCount": cave_array_size(plan, "deadEndChamberIds"),
         "walkableCellCount": cave_walkable_cells(plan, false).size(),
         "approachCellCount": cave_array_size(plan, "approachCells")
     }
 
 func cave_records_snapshot() -> Dictionary:
     return cave_records.duplicate(true)
+
+func cave_navigation_record_from_plan(plan: Dictionary, cache_key: String) -> Dictionary:
+    return {
+        "id": String(plan.get("id", "")),
+        "cacheKey": cache_key,
+        "kind": String(plan.get("kind", "")),
+        "region": plan.get("region", Vector2i.ZERO),
+        "entranceCell": plan.get("entranceCell", Vector2i.ZERO),
+        "finalChamberCell": plan.get("finalChamberCell", Vector2i.ZERO),
+        "finalChestCell": plan.get("finalChestCell", Vector2i.ZERO),
+        "level": float(plan.get("level", 0.0)),
+        "surfaceLevel": float(plan.get("surfaceLevel", plan.get("level", 0.0))),
+        "ceilingLevel": float(plan.get("ceilingLevel", plan.get("level", 0.0))),
+        "walkableCells": cave_walkable_cells(plan, false),
+        "approachCells": plan.get("approachCells", []),
+        "pathCells": plan.get("pathCells", []),
+        "chamberCells": plan.get("chamberCells", []),
+        "graphNodes": plan.get("caveNodes", []),
+        "graphEdges": plan.get("caveEdges", []),
+        "branchChamberIds": plan.get("branchChamberIds", []),
+        "deadEndChamberIds": plan.get("deadEndChamberIds", []),
+        "finalChamberId": String(plan.get("finalChamberId", "final"))
+    }
 
 func cave_plan_is_contiguous(plan: Dictionary) -> bool:
     var cells := cave_walkable_cells(plan, false)

@@ -108,6 +108,7 @@ func create_save_snapshot() -> Dictionary:
         "equipment": equipment_system.snapshot() if equipment_system else {},
         "objectives": objective_system.snapshot() if objective_system else {},
         "contracts": contract_system.snapshot() if contract_system else {},
+        "caves": structure_system.snapshot_caves() if structure_system and structure_system.has_method("snapshot_caves") else [],
         "story": story_director.snapshot() if story_director else {},
         "npcJobFacts": npc_system.snapshot_job_facts() if npc_system and npc_system.has_method("snapshot_job_facts") else [],
         "exploration": snapshot_exploration(),
@@ -142,6 +143,8 @@ func apply_save_snapshot(snapshot: Dictionary) -> bool:
         survival_system.restore(snapshot["survival"])
     restore_height_edits(snapshot.get("terrain", []))
     restore_removed_props(snapshot.get("removedProps", []))
+    if structure_system and structure_system.has_method("restore_caves"):
+        structure_system.restore_caves(snapshot.get("caves", []))
     if npc_system and npc_system.has_method("restore_job_facts"):
         npc_system.restore_job_facts(snapshot.get("npcJobFacts", []))
     restore_player_state(snapshot.get("player", {}))

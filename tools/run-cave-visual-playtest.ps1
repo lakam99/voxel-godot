@@ -101,7 +101,13 @@ if ($true -ne $report.nonHeadlessRequired) {
     exit 1
 }
 
-$requiredScreenshots = @("cave_entrance.png", "cave_tunnel_path.png", "cave_final_chamber_chest.png")
+$requiredScreenshots = @(
+    "cave_entrance.png",
+    "cave_branch_fork.png",
+    "cave_dead_end_chamber.png",
+    "cave_tunnel_path.png",
+    "cave_final_chamber_chest.png"
+)
 foreach ($fileName in $requiredScreenshots) {
     $path = Join-Path $ScreenshotDir $fileName
     if (-not (Test-Path -LiteralPath $path)) {
@@ -116,7 +122,7 @@ $evidenceScript = Join-Path $projectPath "tools\assert-test-evidence-report.ps1"
     -ReportPath $ReportPath `
     -RunnerId "cave_visual_playtest" `
     -EvidenceLevel "acceptance_visual" `
-    -AcceptanceClaims @("procedural_cave_entrance_tunnel_final_chamber_visual") `
+    -AcceptanceClaims @("procedural_cave_graph_entrance_branch_dead_end_final_visual") `
     -RequiredScreenshots $requiredScreenshots `
     -ScreenshotDir $ScreenshotDir `
     -RegistryPath (Join-Path $projectPath "tools\test-runner-registry.json") `

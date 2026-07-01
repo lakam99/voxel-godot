@@ -7,6 +7,8 @@ const CAPTURE_WIDTH := 1280
 const CAPTURE_HEIGHT := 720
 const REQUIRED_CAPTURE_STAGES := [
     "cave_entrance",
+    "cave_branch_fork",
+    "cave_dead_end_chamber",
     "cave_tunnel_path",
     "cave_final_chamber_chest"
 ]
@@ -96,9 +98,15 @@ func run() -> void:
     add_result("cave_visual_plan_selected", not plan.is_empty(), JSON.stringify(sanitize_plan_summary(plan)))
     add_result("cave_visual_headed_mode", DisplayServer.get_name().to_lower() != "headless", "display=%s" % DisplayServer.get_name())
     add_result("cave_visual_path_contiguous", bool(structure_system.call("cave_plan_is_contiguous", plan)), "pathLength %d" % int(plan.get("pathLength", 0)))
+    add_result("cave_visual_graph_has_branches", cave_graph_has_branches(), JSON.stringify(cave_graph_summary()))
+    add_result("cave_visual_interior_shell_generated", cave_interior_shell_generated(), JSON.stringify(cave_vertical_summary()))
     add_result("cave_visual_final_chest_has_book", final_chest_has_crafting_book(), JSON.stringify(final_chest_summary()))
+    var prop_summary := cave_natural_props_inside_summary()
+    add_result("cave_visual_no_natural_props_inside", int(prop_summary.get("count", 0)) == 0, JSON.stringify(prop_summary))
 
     await capture_stage("cave_entrance", "entrance")
+    await capture_stage("cave_branch_fork", "fork")
+    await capture_stage("cave_dead_end_chamber", "dead_end")
     await capture_stage("cave_tunnel_path", "tunnel")
     await capture_stage("cave_final_chamber_chest", "final_chamber")
     add_result("cave_visual_required_screenshots_saved", required_captures_saved(), JSON.stringify(capture_names()))
@@ -148,12 +156,12 @@ func place_player_for_loading() -> void:
 func configure_camera_and_light() -> void:
     camera = Camera3D.new()
     camera.name = "CaveVisualPlaytestCamera"
-    camera.fov = 64.0
+    camera.fov = 72.0
     add_child(camera)
     observer_light = OmniLight3D.new()
     observer_light.name = "CaveVisualPlaytestLight"
-    observer_light.light_energy = 5.0
-    observer_light.omni_range = CELL * 18.0
+    observer_light.light_energy = 2.6
+    observer_light.omni_range = CELL * 8.0
     add_child(observer_light)
 
 func capture_stage(stage: String, mode: String) -> void:
@@ -178,20 +186,31 @@ func position_camera(mode: String) -> void:
         return
     var entrance: Vector2i = plan.get("entranceCell", Vector2i.ZERO)
     var inward: Vector2i = plan.get("inward", Vector2i(0, 1))
-    var right: Vector2i = plan.get("right", Vector2i(1, 0))
     var chamber: Vector2i = plan.get("finalChamberCell", entrance)
     var chest: Vector2i = plan.get("finalChestCell", chamber)
+    var path_length := int(plan.get("pathLength", 0))
+    var final_id := String(plan.get("finalChamberId", "final"))
+    var fork_id := first_string(plan.get("branchChamberIds", []), "fork")
+    var dead_end_id := first_string(plan.get("deadEndChamberIds", []), "side_dead_end")
     var camera_pos := Vector3.ZERO
     var target := Vector3.ZERO
     if mode == "entrance":
-        camera_pos = world_for_cell(entrance - inward * 7 + right * 7, 8.0)
-        target = world_for_cell(entrance + inward * 3, 1.6)
+        camera_pos = terrain_world_for_cell(entrance - inward * 2, 1.15)
+        target = cave_world_for_cell(entrance + inward * 4, 1.35)
+    elif mode == "fork":
+        var fork_cell := cave_node_cell(fork_id, entrance + inward * maxi(4, int(path_length * 0.45)))
+        camera_pos = cave_world_for_cell(camera_cell_near_node(fork_id, fork_cell - inward * 3), 1.55)
+        target = cave_world_for_cell(fork_cell, 1.30)
+    elif mode == "dead_end":
+        var dead_cell := cave_node_cell(dead_end_id, entrance + inward * maxi(5, int(path_length * 0.5)))
+        camera_pos = cave_world_for_cell(camera_cell_near_node(dead_end_id, dead_cell - inward * 3), 1.55)
+        target = cave_world_for_cell(dead_cell, 1.20)
     elif mode == "tunnel":
-        camera_pos = world_for_cell(entrance + inward * 7 + right * -1, 2.4)
-        target = world_for_cell(entrance + inward * 13, 1.2)
+        camera_pos = cave_world_for_cell(edge_mid_cell("fork_to_mid", path_center_cell(mini(6, maxi(1, path_length - 4)))), 1.55)
+        target = cave_world_for_cell(edge_mid_cell("mid_to_final", path_center_cell(mini(13, maxi(2, path_length - 1)))), 1.35)
     else:
-        camera_pos = world_for_cell(chamber - inward * 2 + right * 1, 2.2)
-        target = world_for_cell(chest, 1.2)
+        camera_pos = cave_world_for_cell(camera_cell_near_node(final_id, path_center_cell(maxi(1, path_length - 2))), 1.55)
+        target = cave_world_for_cell(chest, 1.15)
     camera.global_position = camera_pos
     camera.look_at(target, Vector3.UP)
     camera.make_current()
@@ -244,16 +263,203 @@ func make_sample(stage: String, mode: String) -> Dictionary:
         "plan": sanitize_plan_summary(plan),
         "camera": vec3(camera.global_position if camera != null else Vector3.ZERO),
         "light": vec3(observer_light.global_position if observer_light != null else Vector3.ZERO),
-        "finalChest": final_chest_summary()
+        "finalChest": final_chest_summary(),
+        "graph": cave_graph_summary(),
+        "vertical": cave_vertical_summary()
     }
 
 func world_for_cell(cell: Vector2i, lift := 0.0) -> Vector3:
+    return terrain_world_for_cell(cell, lift)
+
+func terrain_world_for_cell(cell: Vector2i, lift := 0.0) -> Vector3:
     var x := float(cell.x) * CELL
     var z := float(cell.y) * CELL
     var y := float(plan.get("level", 0.0)) + lift
     if main != null and main.has_method("height_at_world"):
         y = float(main.call("height_at_world", x, z)) + lift
     return Vector3(x, y, z)
+
+func cave_world_for_cell(cell: Vector2i, lift := 0.0) -> Vector3:
+    return Vector3(float(cell.x) * CELL, float(plan.get("level", 0.0)) + lift, float(cell.y) * CELL)
+
+func path_center_cell(depth: int) -> Vector2i:
+    var entrance: Vector2i = plan.get("entranceCell", Vector2i.ZERO)
+    var inward: Vector2i = plan.get("inward", Vector2i(0, 1))
+    var cells_value = plan.get("pathCells", [])
+    if not (cells_value is Array):
+        return entrance + inward * depth
+    var sum_x := 0.0
+    var sum_z := 0.0
+    var count := 0
+    for cell_value in cells_value:
+        var cell: Vector2i = cell_value
+        var delta := cell - entrance
+        var cell_depth := delta.x * inward.x + delta.y * inward.y
+        if cell_depth != depth:
+            continue
+        sum_x += float(cell.x)
+        sum_z += float(cell.y)
+        count += 1
+    if count <= 0:
+        return entrance + inward * depth
+    return Vector2i(roundi(sum_x / float(count)), roundi(sum_z / float(count)))
+
+func first_string(value, fallback: String) -> String:
+    if value is Array and not (value as Array).is_empty():
+        return String((value as Array)[0])
+    return fallback
+
+func cave_node_cell(node_id: String, fallback: Vector2i) -> Vector2i:
+    var nodes_value = plan.get("caveNodes", [])
+    if not (nodes_value is Array):
+        return fallback
+    for node_value in nodes_value:
+        if not (node_value is Dictionary):
+            continue
+        var node: Dictionary = node_value
+        if String(node.get("id", "")) == node_id:
+            return node.get("cell", fallback)
+    return fallback
+
+func camera_cell_near_node(node_id: String, fallback: Vector2i) -> Vector2i:
+    var edges_value = plan.get("caveEdges", [])
+    if not (edges_value is Array):
+        return fallback
+    for edge_value in edges_value:
+        if not (edge_value is Dictionary):
+            continue
+        var edge: Dictionary = edge_value
+        var center_cells = edge.get("centerCells", [])
+        if not (center_cells is Array) or (center_cells as Array).is_empty():
+            continue
+        var cells: Array = center_cells
+        if String(edge.get("to", "")) == node_id:
+            return cells[maxi(0, cells.size() - 4)]
+        if String(edge.get("from", "")) == node_id:
+            return cells[mini(cells.size() - 1, 3)]
+    return fallback
+
+func edge_mid_cell(edge_id: String, fallback: Vector2i) -> Vector2i:
+    var edges_value = plan.get("caveEdges", [])
+    if not (edges_value is Array):
+        return fallback
+    for edge_value in edges_value:
+        if not (edge_value is Dictionary):
+            continue
+        var edge: Dictionary = edge_value
+        if String(edge.get("id", "")) != edge_id:
+            continue
+        var center_cells = edge.get("centerCells", [])
+        if not (center_cells is Array) or (center_cells as Array).is_empty():
+            return fallback
+        var cells: Array = center_cells
+        return cells[int(cells.size() / 2)]
+    return fallback
+
+func cave_graph_has_branches() -> bool:
+    var summary := cave_graph_summary()
+    return int(summary.get("nodeCount", 0)) >= 5 \
+        and int(summary.get("edgeCount", 0)) >= 5 \
+        and int(summary.get("branchCount", 0)) >= 1 \
+        and int(summary.get("deadEndCount", 0)) >= 1
+
+func cave_graph_summary() -> Dictionary:
+    var nodes: Array = plan.get("caveNodes", [])
+    var edges: Array = plan.get("caveEdges", [])
+    var roles := []
+    for node_value in nodes:
+        if node_value is Dictionary:
+            roles.append(String((node_value as Dictionary).get("kind", "")))
+    return {
+        "nodeCount": nodes.size(),
+        "edgeCount": edges.size(),
+        "branchCount": array_size(plan.get("branchChamberIds", [])),
+        "deadEndCount": array_size(plan.get("deadEndChamberIds", [])),
+        "roles": roles
+    }
+
+func array_size(value) -> int:
+    return value.size() if value is Array else 0
+
+func cave_vertical_summary() -> Dictionary:
+    var floor_level := float(plan.get("level", 0.0))
+    var ceiling_level := float(plan.get("ceilingLevel", floor_level))
+    var surface_level := float(plan.get("surfaceLevel", ceiling_level))
+    return {
+        "surfaceLevel": rounded(surface_level),
+        "floorLevel": rounded(floor_level),
+        "ceilingLevel": rounded(ceiling_level),
+        "ceilingClearance": rounded(ceiling_level - floor_level),
+        "earthCover": rounded(surface_level - ceiling_level),
+        "interiorShells": cave_interior_shell_count()
+    }
+
+func cave_interior_shell_generated() -> bool:
+    var vertical := cave_vertical_summary()
+    return int(vertical.get("interiorShells", 0)) >= 1 \
+        and float(vertical.get("ceilingClearance", 0.0)) >= CELL * 2.0 \
+        and float(vertical.get("earthCover", 0.0)) > 0.0
+
+func cave_interior_shell_count() -> int:
+    if structure_system == null:
+        return 0
+    var nodes_value = structure_system.get("cave_interior_nodes")
+    if not (nodes_value is Dictionary):
+        return 0
+    var nodes: Dictionary = nodes_value
+    var cave_id := String(plan.get("id", ""))
+    var count := 0
+    for node_value in nodes.values():
+        var node := node_value as Node
+        if node != null and is_instance_valid(node) and String(node.get_meta("caveId", "")) == cave_id:
+            count += 1
+    return count
+
+func cave_natural_props_inside_summary() -> Dictionary:
+    if main == null or structure_system == null:
+        return { "count": 0, "samples": [] }
+    var cells_value = structure_system.call("cave_shaping_cells", plan) if structure_system.has_method("cave_shaping_cells") else []
+    var lookup := {}
+    if cells_value is Array:
+        for cell_value in cells_value:
+            if cell_value is Vector2i:
+                lookup[cell_value] = true
+    var samples := []
+    var count := 0
+    for root_value in [main.get("chunk_root"), main.get("prop_root")]:
+        var root_node := root_value as Node
+        if root_node == null:
+            continue
+        var summary := cave_natural_props_inside_node(root_node, lookup, samples)
+        count += int(summary.get("count", 0))
+    return {
+        "count": count,
+        "samples": samples
+    }
+
+func cave_natural_props_inside_node(node: Node, lookup: Dictionary, samples: Array) -> Dictionary:
+    var count := 0
+    if String(node.get_meta("kind", "")) == "prop" and node is Node3D:
+        var node3d := node as Node3D
+        var cell := Vector2i(world_to_cell_value(node3d.global_position.x), world_to_cell_value(node3d.global_position.z))
+        if lookup.has(cell):
+            count += 1
+            if samples.size() < 8:
+                samples.append({
+                    "name": node.name,
+                    "cell": vec2i(cell),
+                    "material": String(node.get_meta("material", "")),
+                    "propId": String(node.get_meta("prop_id", ""))
+                })
+    for child in node.get_children():
+        var child_summary := cave_natural_props_inside_node(child, lookup, samples)
+        count += int(child_summary.get("count", 0))
+    return { "count": count }
+
+func world_to_cell_value(value: float) -> int:
+    if main != null and main.has_method("world_to_cell"):
+        return int(main.call("world_to_cell", value))
+    return roundi(value / CELL)
 
 func required_captures_saved() -> bool:
     for stage in REQUIRED_CAPTURE_STAGES:
@@ -305,7 +511,7 @@ func write_report() -> void:
         "finished": finished,
         "passed": failure_count() == 0,
         "evidenceLevel": "acceptance_visual",
-        "acceptanceClaims": ["procedural_cave_entrance_tunnel_final_chamber_visual"],
+        "acceptanceClaims": ["procedural_cave_graph_entrance_branch_dead_end_final_visual"],
         "failureCount": failure_count(),
         "resultCount": results.size(),
         "results": results,
@@ -359,6 +565,10 @@ func sanitize_plan_summary(plan_value: Dictionary) -> Dictionary:
         "finalChestCell": vec2i(plan_value.get("finalChestCell", Vector2i.ZERO)),
         "pathLength": int(plan_value.get("pathLength", 0)),
         "chamberRadius": int(plan_value.get("chamberRadius", 0)),
+        "nodeCount": array_size(plan_value.get("caveNodes", [])),
+        "edgeCount": array_size(plan_value.get("caveEdges", [])),
+        "branchCount": array_size(plan_value.get("branchChamberIds", [])),
+        "deadEndCount": array_size(plan_value.get("deadEndChamberIds", [])),
         "entranceVariation": rounded(float(plan_value.get("entranceVariation", 0.0)))
     }
 
