@@ -1410,11 +1410,29 @@ func place_cave_wall_torch(plan: Dictionary, preferred_cell: Vector2i, level: fl
     var anchor := cave_wall_torch_anchor(plan, preferred_cell)
     var cell: Vector2i = anchor.get("cell", preferred_cell)
     var normal: Vector2i = anchor.get("normal", Vector2i.ZERO)
+    var surface: Vector2 = anchor.get("surface", Vector2(float(cell.x) * main.CELL, float(cell.y) * main.CELL))
+    var normal_world: Vector2 = anchor.get("normalWorld", Vector2(float(normal.x), float(normal.y)))
+    if normal_world.length() <= 0.01:
+        normal_world = Vector2(float(normal.x), float(normal.y))
+    if normal_world.length() <= 0.01:
+        normal_world = Vector2(0.0, 1.0)
+    normal_world = normal_world.normalized()
+    var floor_y := float(anchor.get("floorY", level))
+    var target_y: float = maxf(floor_y + float(main.CELL) * 1.05, level + float(main.CELL) * 0.98)
     var options := cave_options(base_options, role, depth_index, {
         "torchWallMount": true,
         "torchWallNormalX": normal.x,
         "torchWallNormalZ": normal.y,
-        "facing": torch_wall_facing(normal)
+        "torchWallSurfaceX": surface.x,
+        "torchWallSurfaceZ": surface.y,
+        "torchWallNormalWorldX": normal_world.x,
+        "torchWallNormalWorldZ": normal_world.y,
+        "torchWallAnchorCellX": cell.x,
+        "torchWallAnchorCellZ": cell.y,
+        "worldYOffset": target_y - (level + main.CELL * 0.48),
+        "world_x": surface.x,
+        "world_z": surface.y,
+        "facing": torch_wall_facing_vector(normal_world)
     })
     place_structure_block(cell.x, cell.y, level, 0, "torch", options)
 
@@ -1444,12 +1462,158 @@ func cave_wall_torch_anchor(plan: Dictionary, preferred_cell: Vector2i) -> Dicti
                         best["cell"] = walk_cell
                         best["normal"] = -dir
                         best["score"] = score
+    var best_normal: Vector2i = best.get("normal", Vector2i.ZERO)
+    if best_normal != Vector2i.ZERO:
+        var best_cell: Vector2i = best.get("cell", preferred_cell)
+        var sample := cave_wall_mount_sample(plan, best_cell, best_normal)
+        var surface: Vector2 = sample.get("surface", cave_wall_surface_point(plan, best_cell, best_normal))
+        best["surface"] = surface
+        best["normalWorld"] = sample.get("normalWorld", Vector2(float(best_normal.x), float(best_normal.y)))
+        best["floorY"] = cave_floor_y_at_surface(plan, surface, float(plan.get("level", 0.0)))
     return best
+
+func cave_wall_mount_sample(plan: Dictionary, walk_cell: Vector2i, wall_normal: Vector2i) -> Dictionary:
+    if cave_interior_builder != null and cave_interior_builder.has_method("wall_mount_sample"):
+        var rendered_sample = cave_interior_builder.call("wall_mount_sample", plan, walk_cell, wall_normal)
+        if rendered_sample is Dictionary and not (rendered_sample as Dictionary).is_empty():
+            return rendered_sample
+    var cell_size := float(main.CELL)
+    var center := Vector2(float(walk_cell.x) * cell_size, float(walk_cell.y) * cell_size)
+    var cardinal_inward := Vector2(float(wall_normal.x), float(wall_normal.y))
+    if cardinal_inward.length() <= 0.01:
+        cardinal_inward = Vector2(0.0, 1.0)
+    cardinal_inward = cardinal_inward.normalized()
+    var preferred_outward := -cardinal_inward
+    var inside_point := cave_wall_inside_point(plan, center, cardinal_inward)
+    var best := {
+        "surface": cave_wall_surface_point(plan, walk_cell, wall_normal),
+        "normalWorld": cardinal_inward,
+        "score": INF
+    }
+    var ray_count := 25
+    var angle_span := deg_to_rad(70.0)
+    var base_angle := preferred_outward.angle()
+    for index in range(ray_count):
+        var t := 0.0 if ray_count <= 1 else float(index) / float(ray_count - 1)
+        var angle := base_angle - angle_span * 0.5 + angle_span * t
+        var outward := Vector2.RIGHT.rotated(angle).normalized()
+        if outward.dot(preferred_outward) < 0.65:
+            continue
+        var hit := cave_wall_ray_hit(plan, inside_point, outward, cell_size * 5.0)
+        if hit.is_empty():
+            continue
+        var surface: Vector2 = hit.get("surface", inside_point)
+        var distance := inside_point.distance_to(surface)
+        var alignment_penalty := (1.0 - outward.dot(preferred_outward)) * cell_size * 0.18
+        var score := distance + alignment_penalty
+        if score < float(best.get("score", INF)):
+            var normal_world := cave_wall_inward_normal(plan, surface, -outward)
+            best["surface"] = surface - normal_world * cell_size * 0.025
+            best["normalWorld"] = normal_world
+            best["score"] = score
+    return best
+
+func cave_wall_inside_point(plan: Dictionary, center: Vector2, inward: Vector2) -> Vector2:
+    if cave_interior_builder == null or not cave_interior_builder.has_method("cave_volume_value"):
+        return center
+    var threshold := 1.08
+    if float(cave_interior_builder.call("cave_volume_value", plan, center)) <= threshold:
+        return center
+    var step := float(main.CELL) * 0.10
+    for index in range(1, 13):
+        var point := center + inward * step * float(index)
+        if float(cave_interior_builder.call("cave_volume_value", plan, point)) <= threshold:
+            return point
+    return center
+
+func cave_wall_ray_hit(plan: Dictionary, origin: Vector2, outward: Vector2, max_distance: float) -> Dictionary:
+    if cave_interior_builder == null or not cave_interior_builder.has_method("cave_volume_value"):
+        return {}
+    var threshold := 1.08
+    var previous := origin
+    var step := float(main.CELL) * 0.08
+    var steps := ceili(max_distance / step)
+    for index in range(1, steps + 1):
+        var distance := minf(max_distance, float(index) * step)
+        var point := origin + outward * distance
+        if float(cave_interior_builder.call("cave_volume_value", plan, point)) > threshold:
+            var low := previous
+            var high := point
+            for _i in range(9):
+                var mid := (low + high) * 0.5
+                if float(cave_interior_builder.call("cave_volume_value", plan, mid)) <= threshold:
+                    low = mid
+                else:
+                    high = mid
+            return { "surface": low }
+        previous = point
+    return {}
+
+func cave_wall_inward_normal(plan: Dictionary, surface: Vector2, fallback_inward: Vector2) -> Vector2:
+    if cave_interior_builder == null or not cave_interior_builder.has_method("cave_volume_value"):
+        return fallback_inward.normalized()
+    var sample_step := float(main.CELL) * 0.08
+    var dx := float(cave_interior_builder.call("cave_volume_value", plan, surface + Vector2(sample_step, 0.0))) \
+        - float(cave_interior_builder.call("cave_volume_value", plan, surface - Vector2(sample_step, 0.0)))
+    var dz := float(cave_interior_builder.call("cave_volume_value", plan, surface + Vector2(0.0, sample_step))) \
+        - float(cave_interior_builder.call("cave_volume_value", plan, surface - Vector2(0.0, sample_step)))
+    var outward := Vector2(dx, dz)
+    if outward.length() <= 0.01:
+        return fallback_inward.normalized()
+    var inward := -outward.normalized()
+    if inward.dot(fallback_inward.normalized()) < 0.0:
+        inward = -inward
+    return inward
+
+func cave_wall_surface_point(plan: Dictionary, walk_cell: Vector2i, wall_normal: Vector2i) -> Vector2:
+    var cell_size := float(main.CELL)
+    var center := Vector2(float(walk_cell.x) * cell_size, float(walk_cell.y) * cell_size)
+    if wall_normal == Vector2i.ZERO:
+        return center
+    var inward := Vector2(float(wall_normal.x), float(wall_normal.y)).normalized()
+    var outward := -inward
+    if cave_interior_builder != null and cave_interior_builder.has_method("cave_volume_value"):
+        var threshold := 1.08
+        var inside_point := center
+        if float(cave_interior_builder.call("cave_volume_value", plan, inside_point)) > threshold:
+            inside_point = center + inward * cell_size * 0.25
+        var previous := inside_point
+        var max_distance := cell_size * 4.0
+        var step := cell_size * 0.12
+        var steps := ceili(max_distance / step)
+        for index in range(1, steps + 1):
+            var distance := minf(max_distance, float(index) * step)
+            var point := inside_point + outward * distance
+            if float(cave_interior_builder.call("cave_volume_value", plan, point)) > threshold:
+                var low := previous
+                var high := point
+                for _i in range(8):
+                    var mid := (low + high) * 0.5
+                    if float(cave_interior_builder.call("cave_volume_value", plan, mid)) <= threshold:
+                        low = mid
+                    else:
+                        high = mid
+                return low + inward * cell_size * 0.005
+            previous = point
+    return center - inward * cell_size * 0.50
+
+func cave_floor_y_at_surface(plan: Dictionary, surface: Vector2, fallback_level: float) -> float:
+    if cave_interior_builder != null and cave_interior_builder.has_method("floor_point"):
+        var floor_value = cave_interior_builder.call("floor_point", plan, surface)
+        if floor_value is Vector3:
+            return float((floor_value as Vector3).y)
+    return fallback_level
 
 func torch_wall_facing(normal: Vector2i) -> float:
     if normal == Vector2i.ZERO:
         return 0.0
     return atan2(-float(normal.x), -float(normal.y))
+
+func torch_wall_facing_vector(normal: Vector2) -> float:
+    if normal.length() <= 0.01:
+        return 0.0
+    var n := normal.normalized()
+    return atan2(-n.x, -n.y)
 
 func cave_options(base_options: Dictionary, role: String, depth_index := -1, extra_options: Dictionary = {}) -> Dictionary:
     var options := base_options.duplicate()
@@ -1588,7 +1752,7 @@ func flat_level_for_footprint(base_x: int, base_z: int, width: int, depth: int) 
     return (min_h + max_h) * 0.5
 
 func place_structure_block(cell_x: int, cell_z: int, level: float, dy: int, block_type: String, extra_options: Dictionary = {}) -> void:
-    var world_y: float = level + main.CELL * 0.48 + float(dy) * main.CELL
+    var world_y: float = level + main.CELL * 0.48 + float(dy) * main.CELL + float(extra_options.get("worldYOffset", 0.0))
     var cell_y: int = floori(world_y / main.CELL) + 1
     var options := {
         "generated": true,

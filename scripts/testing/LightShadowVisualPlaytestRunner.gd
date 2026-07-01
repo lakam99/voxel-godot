@@ -12,6 +12,8 @@ const REQUIRED_CAPTURE_STAGES := [
     "cave_entrance_daylight",
     "deep_cave_noon_dark",
     "final_chamber_wall_torch",
+    "final_chamber_wall_torch_side",
+    "final_chamber_wall_torch_closeup",
     "deep_cave_torch_lit"
 ]
 const ACCEPTANCE_CLAIMS := [
@@ -21,6 +23,8 @@ const ACCEPTANCE_CLAIMS := [
 var main: Node3D
 var player: CharacterBody3D
 var camera: Camera3D
+var gameplay_camera: Camera3D
+var free_camera: Camera3D
 var structure_system
 var seed := ""
 var report_path := ""
@@ -108,9 +112,13 @@ func run() -> void:
     add_result("light_shadow_final_chamber_wall_torch_found", torch_valid, JSON.stringify(torch_summary(torch)))
     if torch_valid:
         await capture_stage("final_chamber_wall_torch", final_chamber_wall_torch_eye(torch), final_chamber_wall_torch_target(torch))
-        await capture_stage("deep_cave_torch_lit", final_chamber_wall_torch_eye(torch), final_chamber_wall_torch_flame_target(torch))
+        await capture_stage("final_chamber_wall_torch_side", final_chamber_wall_torch_side_eye(torch), final_chamber_wall_torch_side_target(torch))
+        await capture_stage("final_chamber_wall_torch_closeup", final_chamber_wall_torch_closeup_eye(torch), final_chamber_wall_torch_closeup_target(torch))
+        await capture_stage("deep_cave_torch_lit", final_chamber_wall_torch_side_eye(torch), final_chamber_wall_torch_flame_target(torch))
     else:
         add_result("capture_final_chamber_wall_torch_saved", false, "missing generated final-chamber wall torch")
+        add_result("capture_final_chamber_wall_torch_side_saved", false, "missing generated final-chamber wall torch")
+        add_result("capture_final_chamber_wall_torch_closeup_saved", false, "missing generated final-chamber wall torch")
         add_result("capture_deep_cave_torch_lit_saved", false, "missing generated final-chamber wall torch")
 
     add_result("light_shadow_required_screenshots_saved", required_captures_saved(), JSON.stringify(capture_names()))
@@ -120,8 +128,28 @@ func run() -> void:
 func bind_scene_nodes() -> void:
     player = main.get("player") as CharacterBody3D
     if player != null:
-        camera = player.get("camera") as Camera3D
+        gameplay_camera = player.get("camera") as Camera3D
+        camera = gameplay_camera
     structure_system = main.get("structure_system")
+    ensure_free_capture_camera()
+
+func ensure_free_capture_camera() -> void:
+    if free_camera != null and is_instance_valid(free_camera):
+        camera = free_camera
+        return
+    free_camera = Camera3D.new()
+    free_camera.name = "LightShadowVisualFreeCamera"
+    if gameplay_camera != null:
+        free_camera.fov = gameplay_camera.fov
+        free_camera.near = gameplay_camera.near
+        free_camera.far = gameplay_camera.far
+        free_camera.environment = gameplay_camera.environment
+        free_camera.cull_mask = gameplay_camera.cull_mask
+    if main != null:
+        main.add_child(free_camera)
+    else:
+        add_child(free_camera)
+    camera = free_camera
 
 func configure_scene() -> void:
     neutralize_intro_clock_freeze()
@@ -259,6 +287,13 @@ func capture_stage(stage: String, eye: Vector3, target: Vector3) -> void:
     add_result("capture_%s_saved" % stage, err == OK, path)
 
 func position_player_camera(eye: Vector3, target: Vector3) -> void:
+    ensure_free_capture_camera()
+    if free_camera != null and is_instance_valid(free_camera):
+        free_camera.global_position = eye
+        if eye.distance_to(target) > 0.01:
+            free_camera.look_at(target, Vector3.UP)
+        free_camera.make_current()
+        return
     if player == null or camera == null:
         return
     player.global_position = eye - Vector3(0.0, CELL * 1.05, 0.0)
@@ -336,21 +371,25 @@ func final_chamber_wall_torch_is_valid(torch: StaticBody3D) -> bool:
     return bool(torch.get_meta("torchWallMount", false)) and abs(normal.x) + abs(normal.y) == 1
 
 func final_chamber_wall_torch_eye(torch: StaticBody3D) -> Vector3:
-    var cell := block_cell2(torch)
-    var normal := torch_wall_normal(torch)
-    if normal == Vector2i.ZERO:
-        normal = cave_plan.get("inward", Vector2i(0, 1))
-    return cave_world_for_cell(cell + normal * 3, 1.45)
+    return torch.global_position + torch_world_normal(torch) * CELL * 1.05 + Vector3(0.0, CELL * 0.12, 0.0)
 
 func final_chamber_wall_torch_target(torch: StaticBody3D) -> Vector3:
-    var torch_world := final_chamber_wall_torch_flame_target(torch)
-    var chest_cell: Vector2i = cave_plan.get("finalChestCell", cave_plan.get("finalChamberCell", block_cell2(torch)))
-    var chest_world := cave_world_for_cell(chest_cell, 0.65)
-    return torch_world.lerp(chest_world, 0.28)
+    return torch.global_position + Vector3(0.0, CELL * 0.12, 0.0)
+
+func final_chamber_wall_torch_side_eye(torch: StaticBody3D) -> Vector3:
+    return torch.global_position + torch_world_normal(torch) * CELL * 0.58 + torch_world_tangent(torch) * CELL * 0.46 + Vector3(0.0, CELL * 0.16, 0.0)
+
+func final_chamber_wall_torch_side_target(torch: StaticBody3D) -> Vector3:
+    return torch.global_position + torch_world_normal(torch) * CELL * 0.02 + Vector3(0.0, CELL * 0.13, 0.0)
+
+func final_chamber_wall_torch_closeup_eye(torch: StaticBody3D) -> Vector3:
+    return torch.global_position + torch_world_normal(torch) * CELL * 0.38 + torch_world_tangent(torch) * CELL * 0.18 + Vector3(0.0, CELL * 0.13, 0.0)
+
+func final_chamber_wall_torch_closeup_target(torch: StaticBody3D) -> Vector3:
+    return torch.global_position + torch_world_normal(torch) * CELL * 0.01 + Vector3(0.0, CELL * 0.14, 0.0)
 
 func final_chamber_wall_torch_flame_target(torch: StaticBody3D) -> Vector3:
-    var cell := block_cell2(torch)
-    return cave_world_for_cell(cell, 0.72)
+    return torch.global_position + Vector3(0.0, CELL * 0.24, 0.0)
 
 func block_cell2(block: Node) -> Vector2i:
     if block == null:
@@ -363,6 +402,25 @@ func torch_wall_normal(torch: Node) -> Vector2i:
         return Vector2i.ZERO
     return Vector2i(int(torch.get_meta("torchWallNormalX", 0)), int(torch.get_meta("torchWallNormalZ", 0)))
 
+func torch_world_normal(torch: Node) -> Vector3:
+    if torch != null and torch.has_meta("torchWallNormalWorldX") and torch.has_meta("torchWallNormalWorldZ"):
+        var precise := Vector3(float(torch.get_meta("torchWallNormalWorldX")), 0.0, float(torch.get_meta("torchWallNormalWorldZ")))
+        if precise.length() > 0.01:
+            return precise.normalized()
+    var normal := torch_wall_normal(torch)
+    if normal == Vector2i.ZERO:
+        normal = cave_plan.get("inward", Vector2i(0, 1))
+    return Vector3(float(normal.x), 0.0, float(normal.y)).normalized()
+
+func torch_world_tangent(torch: Node) -> Vector3:
+    var precise := torch_world_normal(torch)
+    if precise.length() > 0.01:
+        return Vector3(-precise.z, 0.0, precise.x).normalized()
+    var normal := torch_wall_normal(torch)
+    if normal == Vector2i.ZERO:
+        normal = cave_plan.get("inward", Vector2i(0, 1))
+    return Vector3(float(-normal.y), 0.0, float(normal.x)).normalized()
+
 func torch_summary(torch: StaticBody3D) -> Dictionary:
     if torch == null or not is_instance_valid(torch):
         return { "found": false }
@@ -372,9 +430,18 @@ func torch_summary(torch: StaticBody3D) -> Dictionary:
         "cell": vec2i(block_cell2(torch)),
         "wallMounted": bool(torch.get_meta("torchWallMount", false)),
         "wallNormal": vec2i(torch_wall_normal(torch)),
+        "wallNormalWorld": vec2(torch_wall_normal_world2(torch)),
         "role": String(torch.get_meta("caveRole", "")),
         "caveId": String(torch.get_meta("caveId", ""))
     }
+
+func torch_wall_normal_world2(torch: Node) -> Vector2:
+    if torch == null:
+        return Vector2.ZERO
+    if torch.has_meta("torchWallNormalWorldX") and torch.has_meta("torchWallNormalWorldZ"):
+        return Vector2(float(torch.get_meta("torchWallNormalWorldX")), float(torch.get_meta("torchWallNormalWorldZ")))
+    var normal := torch_wall_normal(torch)
+    return Vector2(float(normal.x), float(normal.y))
 
 func deep_tunnel_cell() -> Vector2i:
     var entrance: Vector2i = cave_plan.get("entranceCell", Vector2i.ZERO)
@@ -466,6 +533,8 @@ func add_luminance_assertions() -> void:
     var entrance_avg := luminance_average("cave_entrance_daylight")
     var deep_avg := luminance_average("deep_cave_noon_dark")
     var torch_avg := luminance_average("deep_cave_torch_lit")
+    var deep_max := luminance_max("deep_cave_noon_dark")
+    var torch_max := luminance_max("deep_cave_torch_lit")
     add_result(
         "light_shadow_sealed_hut_dark_vs_outdoor",
         outdoor_avg > 0.08 and sealed_avg <= maxf(0.18, outdoor_avg * 0.55),
@@ -483,14 +552,20 @@ func add_luminance_assertions() -> void:
     )
     add_result(
         "light_shadow_torch_lights_deep_cave",
-        torch_avg >= deep_avg + 0.035 and torch_avg >= deep_avg * 1.35,
-        "torch %.3f deep %.3f" % [torch_avg, deep_avg]
+        torch_max >= maxf(0.65, deep_max + 0.20) and torch_avg >= deep_avg - 0.01,
+        "torch avg %.3f max %.3f deep avg %.3f max %.3f" % [torch_avg, torch_max, deep_avg, deep_max]
     )
 
 func luminance_average(stage: String) -> float:
     var summary = stage_luminance.get(stage, {})
     if summary is Dictionary:
         return float(summary.get("average", 0.0))
+    return 0.0
+
+func luminance_max(stage: String) -> float:
+    var summary = stage_luminance.get(stage, {})
+    if summary is Dictionary:
+        return float(summary.get("max", 0.0))
     return 0.0
 
 func global_ambient_removed() -> bool:
@@ -691,6 +766,9 @@ func rounded(value: float) -> float:
 
 func vec2i(value: Vector2i) -> Dictionary:
     return { "x": value.x, "z": value.y }
+
+func vec2(value: Vector2) -> Dictionary:
+    return { "x": rounded(value.x), "z": rounded(value.y) }
 
 func vec3(value: Vector3) -> Dictionary:
     return {

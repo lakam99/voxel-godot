@@ -347,6 +347,104 @@ func cave_volume_value(plan: Dictionary, point: Vector2) -> float:
         best = minf(best, value)
     return best
 
+func wall_mount_sample(plan: Dictionary, walk_cell: Vector2i, wall_normal: Vector2i) -> Dictionary:
+    if main == null:
+        return {}
+    var cell_size := float(main.CELL)
+    var inward := Vector2(float(wall_normal.x), float(wall_normal.y))
+    if inward.length() <= 0.01:
+        inward = Vector2(0.0, 1.0)
+    inward = inward.normalized()
+    var outward_base := -inward
+    var origin := rendered_shell_inside_point(plan, cell_world2(walk_cell), inward)
+    var best := {}
+    var ray_count := 17
+    var angle_span := deg_to_rad(36.0)
+    var base_angle := outward_base.angle()
+    for index in range(ray_count):
+        var t := 0.0 if ray_count <= 1 else float(index) / float(ray_count - 1)
+        var outward := Vector2.RIGHT.rotated(base_angle - angle_span * 0.5 + angle_span * t).normalized()
+        if outward.dot(outward_base) < 0.90:
+            continue
+        var hit := rendered_shell_wall_ray_hit(plan, origin, outward, cell_size * 5.0)
+        if hit.is_empty():
+            continue
+        var surface: Vector2 = hit.get("surface", origin)
+        var hit_inward: Vector2 = hit.get("normalWorld", -outward)
+        if hit_inward.length() <= 0.01:
+            hit_inward = -outward
+        hit_inward = hit_inward.normalized()
+        var distance := origin.distance_to(surface)
+        var alignment_penalty := (1.0 - outward.dot(outward_base)) * cell_size * 0.22
+        var score := distance + alignment_penalty
+        if best.is_empty() or score < float(best.get("score", INF)):
+            best = {
+                "surface": surface - hit_inward * cell_size * 0.055,
+                "normalWorld": hit_inward,
+                "score": score
+            }
+    return best
+
+func rendered_shell_inside_point(plan: Dictionary, center: Vector2, inward: Vector2) -> Vector2:
+    var step := float(main.CELL) * 0.10
+    if rendered_shell_inside_at_point(plan, center):
+        return center
+    for index in range(1, 18):
+        var point := center + inward * step * float(index)
+        if rendered_shell_inside_at_point(plan, point):
+            return point
+    return center
+
+func rendered_shell_wall_ray_hit(plan: Dictionary, origin: Vector2, outward: Vector2, max_distance: float) -> Dictionary:
+    if not rendered_shell_inside_at_point(plan, origin):
+        return {}
+    var previous := origin
+    var step := float(main.CELL) / (GRID_SUBDIVISIONS * 3.0)
+    var steps := ceili(max_distance / step)
+    for index in range(1, steps + 1):
+        var distance := minf(max_distance, float(index) * step)
+        var point := origin + outward * distance
+        if not rendered_shell_inside_at_point(plan, point):
+            var low := previous
+            var high := point
+            for _i in range(12):
+                var mid := (low + high) * 0.5
+                if rendered_shell_inside_at_point(plan, mid):
+                    low = mid
+                else:
+                    high = mid
+            var surface := (low + high) * 0.5
+            return {
+                "surface": surface,
+                "normalWorld": rendered_shell_wall_inward_normal(plan, surface, -outward)
+            }
+        previous = point
+    return {}
+
+func rendered_shell_inside_at_point(plan: Dictionary, point: Vector2) -> bool:
+    var step := float(main.CELL) / GRID_SUBDIVISIONS
+    var gx := floori(point.x / step)
+    var gz := floori(point.y / step)
+    var center := Vector2((float(gx) + 0.5) * step, (float(gz) + 0.5) * step)
+    return cave_volume_value(plan, center) <= 1.08
+
+func rendered_shell_wall_inward_normal(plan: Dictionary, surface: Vector2, fallback_inward: Vector2) -> Vector2:
+    var sample_step := float(main.CELL) / GRID_SUBDIVISIONS
+    var inside_x_plus := rendered_shell_inside_at_point(plan, surface + Vector2(sample_step, 0.0))
+    var inside_x_minus := rendered_shell_inside_at_point(plan, surface - Vector2(sample_step, 0.0))
+    var inside_z_plus := rendered_shell_inside_at_point(plan, surface + Vector2(0.0, sample_step))
+    var inside_z_minus := rendered_shell_inside_at_point(plan, surface - Vector2(0.0, sample_step))
+    var inward := Vector2.ZERO
+    if inside_x_plus != inside_x_minus:
+        inward.x = 1.0 if inside_x_plus else -1.0
+    if inside_z_plus != inside_z_minus:
+        inward.y = 1.0 if inside_z_plus else -1.0
+    if inward.length() <= 0.01:
+        inward = fallback_inward
+    if inward.length() <= 0.01:
+        inward = Vector2(0.0, 1.0)
+    return inward.normalized()
+
 func path_center_cell(plan: Dictionary, depth: int) -> Vector2i:
     var entrance: Vector2i = plan.get("entranceCell", Vector2i.ZERO)
     var inward: Vector2i = plan.get("inward", Vector2i(0, 1))

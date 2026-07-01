@@ -176,6 +176,10 @@ func test_cave_build_interior_and_book_loot() -> void:
         and int(summary.get("smallTorches", 0)) == int(summary.get("torches", 0)) \
         and int(summary.get("wallMountedTorches", 0)) == int(summary.get("torches", 0)) \
         and int(summary.get("validWallTorchNormals", 0)) == int(summary.get("torches", 0)) \
+        and int(summary.get("surfaceAlignedWallTorches", 0)) == int(summary.get("torches", 0)) \
+        and float(summary.get("minWallTorchBaseHeight", 0.0)) >= CELL * 0.90 \
+        and float(summary.get("maxWallTorchSurfaceError", 999.0)) <= CELL * 0.04 \
+        and float(summary.get("minWallTorchVisibleBackInset", 0.0)) >= CELL * 0.035 \
         and int(summary.get("caveBlockNonCaveLayerVisuals", 0)) == 0 \
         and int(summary.get("pathBlocks", 0)) == 0 \
         and int(summary.get("wallBlocks", 0)) == 0 \
@@ -252,6 +256,10 @@ func test_cave_save_load_persistence() -> void:
         and int(restored_summary.get("smallTorches", 0)) == int(restored_summary.get("torches", 0)) \
         and int(restored_summary.get("wallMountedTorches", 0)) == int(restored_summary.get("torches", 0)) \
         and int(restored_summary.get("validWallTorchNormals", 0)) == int(restored_summary.get("torches", 0)) \
+        and int(restored_summary.get("surfaceAlignedWallTorches", 0)) == int(restored_summary.get("torches", 0)) \
+        and float(restored_summary.get("minWallTorchBaseHeight", 0.0)) >= CELL * 0.90 \
+        and float(restored_summary.get("maxWallTorchSurfaceError", 999.0)) <= CELL * 0.04 \
+        and float(restored_summary.get("minWallTorchVisibleBackInset", 0.0)) >= CELL * 0.035 \
         and int(restored_summary.get("caveBlockNonCaveLayerVisuals", 0)) == 0 \
         and int(restored_summary.get("finalChests", 0)) == 1 \
         and int(restored_terrain.get("stoneOverrideCells", 0)) >= int(restored_terrain.get("walkableCells", 0)) \
@@ -368,6 +376,10 @@ func cave_block_summary(plan: Dictionary) -> Dictionary:
     var small_torches := 0
     var wall_mounted_torches := 0
     var valid_wall_torch_normals := 0
+    var min_wall_torch_base_height := INF
+    var surface_aligned_wall_torches := 0
+    var max_wall_torch_surface_error := 0.0
+    var min_wall_torch_visible_back_inset := INF
     var final_chests := 0
     var final_chest_has_book := false
     var cave_block_layer_summary := { "visuals": 0, "nonCaveLayerVisuals": 0 }
@@ -388,6 +400,19 @@ func cave_block_summary(plan: Dictionary) -> Dictionary:
                 small_torches += 1
             if bool(block.get_meta("torchWallMount", false)):
                 wall_mounted_torches += 1
+                var torch_floor_level := float(block.get_meta("structureLevel", plan.get("level", 0.0)))
+                min_wall_torch_base_height = minf(min_wall_torch_base_height, float(block.global_position.y) - torch_floor_level)
+                min_wall_torch_visible_back_inset = minf(min_wall_torch_visible_back_inset, wall_torch_visible_back_inset(block))
+                if block.has_meta("torchWallSurfaceX") and block.has_meta("torchWallSurfaceZ"):
+                    var block3d := block as Node3D
+                    if block3d == null:
+                        continue
+                    var surface := Vector2(float(block.get_meta("torchWallSurfaceX")), float(block.get_meta("torchWallSurfaceZ")))
+                    var actual := Vector2(float(block3d.global_position.x), float(block3d.global_position.z))
+                    var surface_error := actual.distance_to(surface)
+                    max_wall_torch_surface_error = maxf(max_wall_torch_surface_error, surface_error)
+                    if surface_error <= CELL * 0.04:
+                        surface_aligned_wall_torches += 1
             var wall_normal := Vector2i(int(block.get_meta("torchWallNormalX", 0)), int(block.get_meta("torchWallNormalZ", 0)))
             if abs(wall_normal.x) + abs(wall_normal.y) == 1:
                 valid_wall_torch_normals += 1
@@ -404,6 +429,10 @@ func cave_block_summary(plan: Dictionary) -> Dictionary:
         "smallTorches": small_torches,
         "wallMountedTorches": wall_mounted_torches,
         "validWallTorchNormals": valid_wall_torch_normals,
+        "minWallTorchBaseHeight": snappedf(0.0 if min_wall_torch_base_height == INF else min_wall_torch_base_height, 0.001),
+        "surfaceAlignedWallTorches": surface_aligned_wall_torches,
+        "maxWallTorchSurfaceError": snappedf(max_wall_torch_surface_error, 0.001),
+        "minWallTorchVisibleBackInset": snappedf(0.0 if min_wall_torch_visible_back_inset == INF else min_wall_torch_visible_back_inset, 0.001),
         "finalChests": final_chests,
         "finalChestHasCraftingBook": final_chest_has_book,
         "heightEditCells": edits.size(),
@@ -447,6 +476,19 @@ func cave_terrain_summary(plan: Dictionary) -> Dictionary:
         "stoneOverrideCells": stone_override_cells,
         "propExclusionCells": prop_exclusion_cells
     }
+
+func wall_torch_visible_back_inset(torch: Node) -> float:
+    if torch == null:
+        return 0.0
+    var max_back := -INF
+    for child in torch.get_children():
+        var visual := child as MeshInstance3D
+        if visual == null:
+            continue
+        if visual.name != "WallTorchBackplate" and visual.name != "WallTorchSocket":
+            continue
+        max_back = maxf(max_back, visual.position.z + absf(visual.scale.z) * 0.5)
+    return 0.0 if max_back == -INF else max_back
 
 func cave_navigation_summary(plan: Dictionary) -> Dictionary:
     var cave_id := String(plan.get("id", ""))
