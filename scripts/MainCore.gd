@@ -237,10 +237,13 @@ func _ready() -> void:
         playtest_progress("main_tutorial_start_done")
     update_chunks(true)
     playtest_progress("main_initial_chunks_done")
+    var interactive_cave_message := apply_interactive_cave_launch_if_requested()
     refresh_intro_knock_audio()
     var ready_message := "Loaded saved world" if loaded else "Godot slice ready"
     if not loaded and tutorial_system and tutorial_system.last_message != "":
         ready_message = tutorial_system.last_message
+    if interactive_cave_message != "":
+        ready_message = interactive_cave_message
     update_hud(ready_message)
     reset_autosave_dirty_tracking(not loaded, "new_world")
 
@@ -391,6 +394,155 @@ func random_world_seed(exclude_seed := "") -> String:
 
 func test_seed_text() -> String:
     return OS.get_environment("VOXEL_TEST_SEED").strip_edges()
+
+func apply_interactive_cave_launch_if_requested() -> String:
+    if OS.get_environment("VOXEL_CAVE_INTERACTIVE").strip_edges() != "1":
+        return ""
+    if player == null or structure_system == null:
+        return "Interactive cave launch failed: player or structure system missing"
+    neutralize_interactive_cave_tutorial()
+    var preferred_kind := OS.get_environment("VOXEL_CAVE_INTERACTIVE_KIND").strip_edges().to_lower()
+    if preferred_kind == "any":
+        preferred_kind = ""
+    var radius_text := OS.get_environment("VOXEL_CAVE_INTERACTIVE_SEARCH_RADIUS").strip_edges()
+    var search_radius := clampi(int(radius_text) if radius_text != "" else 12, 1, 32)
+    var require_spawn_roll := OS.get_environment("VOXEL_CAVE_INTERACTIVE_REQUIRE_NATURAL_ROLL").strip_edges() == "1"
+    var plan: Dictionary = structure_system.call("find_cave_plan_sample", preferred_kind, search_radius, require_spawn_roll)
+    if plan.is_empty():
+        return "Interactive cave launch failed: no cave found within %d regions" % search_radius
+    var cave_id := String(plan.get("id", "cave"))
+    var cave_rng := RandomNumberGenerator.new()
+    cave_rng.seed = hash_string("%s:interactive-cave:%s" % [seed_text, cave_id])
+    structure_system.call("build_cave", plan, cave_rng)
+    var spawn_cell := interactive_cave_spawn_cell(plan)
+    var spawn_position := interactive_cave_spawn_position(plan, spawn_cell)
+    player.global_position = spawn_position
+    player.velocity = Vector3.ZERO
+    aim_player_at_interactive_cave(plan)
+    configure_interactive_cave_inventory()
+    if OS.get_environment("VOXEL_CAVE_INTERACTIVE_GOD_MODE").strip_edges() == "1" and survival_system != null and survival_system.has_method("set_test_god_mode"):
+        survival_system.call("set_test_god_mode", true, "interactive_cave_playtest")
+    rebuild_chunks_around_cell(spawn_cell)
+    rebuild_chunks_around_cell(plan.get("entranceCell", spawn_cell))
+    rebuild_chunks_around_cell(plan.get("finalChamberCell", spawn_cell))
+    last_center_chunk = Vector2i(999999, 999999)
+    update_chunks(true)
+    if hud != null:
+        if hud.has_method("hide_dialogue"):
+            hud.hide_dialogue(false)
+        hud.set_inventory_open(false)
+        hud.set_teleport_open(false)
+        hud.set_settings_open(false)
+        hud.set_playtest_open(false)
+        hud.set_game_menu_open(false)
+    Input.set_mouse_mode(Input.MOUSE_MODE_CAPTURED)
+    write_interactive_cave_launch_info(plan, spawn_position)
+    return "Interactive cave ready: %s %s" % [String(plan.get("kind", "cave")), cave_id]
+
+func neutralize_interactive_cave_tutorial() -> void:
+    if tutorial_system == null:
+        return
+    tutorial_system.set("intro_repair_active", false)
+    tutorial_system.set("intro_repair_complete", true)
+    tutorial_system.set("intro_bed_used", true)
+    tutorial_system.set("intro_elder_dialogue_acknowledged", true)
+    tutorial_system.set("final_night_active", false)
+    tutorial_system.set("final_night_complete", true)
+    if tutorial_system.has_method("clear_dialogue_focus"):
+        tutorial_system.call("clear_dialogue_focus")
+    tutorial_system.set("last_dialogue", {})
+    var weather = weather_system
+    if weather != null and weather.has_method("force_weather"):
+        weather.force_weather("clear", 0.0, 0.16, Vector3.ZERO)
+    time_of_day = fposmod((13.0 / 24.0) - 0.25, 1.0)
+    if has_method("update_sky"):
+        call("update_sky", 0.0)
+
+func interactive_cave_spawn_cell(plan: Dictionary) -> Vector2i:
+    var entrance: Vector2i = plan.get("entranceCell", Vector2i.ZERO)
+    var inward: Vector2i = plan.get("inward", Vector2i(0, 1))
+    var approach_cells = plan.get("approachCells", [])
+    if not (approach_cells is Array) or (approach_cells as Array).is_empty():
+        return entrance - inward * 5
+    var best_cell := entrance - inward * 5
+    var best_depth := INF
+    var best_lateral := INF
+    var right: Vector2i = plan.get("right", Vector2i(-inward.y, inward.x))
+    for cell_value in approach_cells:
+        if not (cell_value is Vector2i):
+            continue
+        var cell: Vector2i = cell_value
+        var delta := cell - entrance
+        var depth := float(delta.x * inward.x + delta.y * inward.y)
+        var lateral := absf(float(delta.x * right.x + delta.y * right.y))
+        if depth < best_depth or (is_equal_approx(depth, best_depth) and lateral < best_lateral):
+            best_cell = cell
+            best_depth = depth
+            best_lateral = lateral
+    return best_cell
+
+func interactive_cave_spawn_position(plan: Dictionary, spawn_cell: Vector2i) -> Vector3:
+    var x := float(spawn_cell.x) * CELL
+    var z := float(spawn_cell.y) * CELL
+    var y := height_at_world(x, z) + 1.15
+    return Vector3(x, y, z)
+
+func aim_player_at_interactive_cave(plan: Dictionary) -> void:
+    if player == null:
+        return
+    var entrance: Vector2i = plan.get("entranceCell", Vector2i.ZERO)
+    var target := Vector3(float(entrance.x) * CELL, player.global_position.y, float(entrance.y) * CELL)
+    if target.distance_to(player.global_position) > 0.05:
+        player.look_at(target, Vector3.UP)
+    player.set("pitch", 0.0)
+    var camera := player.get("camera") as Camera3D
+    if camera != null:
+        camera.rotation.x = 0.0
+        camera.make_current()
+
+func configure_interactive_cave_inventory() -> void:
+    if inventory_system == null:
+        return
+    inventory_system.clear()
+    inventory_system.add_item("torch", 16)
+    inventory_system.add_item("stonePickaxe", 1)
+    inventory_system.add_item("fieldRation", 4)
+    inventory_system.add_item("stoneSword", 1)
+    inventory_system.select(0)
+
+func write_interactive_cave_launch_info(plan: Dictionary, spawn_position: Vector3) -> void:
+    var path := OS.get_environment("VOXEL_CAVE_INTERACTIVE_LAUNCH_INFO").strip_edges()
+    if path == "":
+        return
+    var dir := path.get_base_dir()
+    if dir != "":
+        DirAccess.make_dir_recursive_absolute(dir)
+    var file := FileAccess.open(path, FileAccess.WRITE)
+    if file == null:
+        return
+    var report := {
+        "seed": seed_text,
+        "caveId": String(plan.get("id", "")),
+        "kind": String(plan.get("kind", "")),
+        "region": vec2i_dictionary(plan.get("region", Vector2i.ZERO)),
+        "entranceCell": vec2i_dictionary(plan.get("entranceCell", Vector2i.ZERO)),
+        "finalChamberCell": vec2i_dictionary(plan.get("finalChamberCell", Vector2i.ZERO)),
+        "finalChestCell": vec2i_dictionary(plan.get("finalChestCell", Vector2i.ZERO)),
+        "spawnPosition": vec3_dictionary(spawn_position),
+        "godMode": OS.get_environment("VOXEL_CAVE_INTERACTIVE_GOD_MODE").strip_edges() == "1"
+    }
+    file.store_string(JSON.stringify(report, "  "))
+    file.close()
+
+func vec2i_dictionary(value: Vector2i) -> Dictionary:
+    return { "x": value.x, "z": value.y }
+
+func vec3_dictionary(value: Vector3) -> Dictionary:
+    return {
+        "x": snappedf(value.x, 0.001),
+        "y": snappedf(value.y, 0.001),
+        "z": snappedf(value.z, 0.001)
+    }
 
 func setup_game_systems() -> void:
     setup_visual_asset_registry()
