@@ -6,6 +6,7 @@ const CELL := 1.35
 const CAPTURE_WIDTH := 1280
 const CAPTURE_HEIGHT := 720
 const REQUIRED_CAPTURE_STAGES := [
+    "cave_dark_default",
     "cave_entrance",
     "cave_branch_fork",
     "cave_dead_end_chamber",
@@ -100,10 +101,14 @@ func run() -> void:
     add_result("cave_visual_path_contiguous", bool(structure_system.call("cave_plan_is_contiguous", plan)), "pathLength %d" % int(plan.get("pathLength", 0)))
     add_result("cave_visual_graph_has_branches", cave_graph_has_branches(), JSON.stringify(cave_graph_summary()))
     add_result("cave_visual_interior_shell_generated", cave_interior_shell_generated(), JSON.stringify(cave_vertical_summary()))
+    var floor_summary := cave_floor_variation_summary()
+    add_result("cave_visual_floor_height_varies_gently", float(floor_summary.get("range", 0.0)) >= 0.35 and float(floor_summary.get("maxNeighborStep", 999.0)) <= CELL * 0.60, JSON.stringify(floor_summary))
+    add_result("cave_visual_daylight_excluded_from_cave_layer", cave_daylight_excluded_from_cave_layer(), JSON.stringify(cave_layer_lighting_summary()))
     add_result("cave_visual_final_chest_has_book", final_chest_has_crafting_book(), JSON.stringify(final_chest_summary()))
     var prop_summary := cave_natural_props_inside_summary()
     add_result("cave_visual_no_natural_props_inside", int(prop_summary.get("count", 0)) == 0, JSON.stringify(prop_summary))
 
+    await capture_stage("cave_dark_default", "tunnel", 0.0)
     await capture_stage("cave_entrance", "entrance")
     await capture_stage("cave_branch_fork", "fork")
     await capture_stage("cave_dead_end_chamber", "dead_end")
@@ -164,22 +169,30 @@ func configure_camera_and_light() -> void:
     observer_light.omni_range = CELL * 8.0
     add_child(observer_light)
 
-func capture_stage(stage: String, mode: String) -> void:
+func capture_stage(stage: String, mode: String, observer_energy := 2.6) -> void:
+    if observer_light != null:
+        observer_light.light_energy = observer_energy
     position_camera(mode)
     await wait_process_frames(4)
     var image := get_viewport().get_texture().get_image()
     var path := screenshot_dir.path_join("%s.png" % stage)
     var err := image.save_png(path)
+    var luminance := image_luminance_summary(image)
     var sample := make_sample(stage, mode)
+    sample["luminance"] = luminance
     captures.append({
         "stage": stage,
         "path": path,
         "saved": err == OK,
         "cameraMode": mode,
-        "sample": sample
+        "observerLightEnergy": observer_energy,
+        "sample": sample,
+        "luminance": luminance
     })
     timeline.append(sample)
     add_result("capture_%s_saved" % stage, err == OK, path)
+    if stage == "cave_dark_default":
+        add_result("cave_visual_dark_default_without_observer_light", float(luminance.get("average", 1.0)) <= 0.24, JSON.stringify(luminance))
 
 func position_camera(mode: String) -> void:
     if camera == null:
@@ -263,6 +276,7 @@ func make_sample(stage: String, mode: String) -> Dictionary:
         "plan": sanitize_plan_summary(plan),
         "camera": vec3(camera.global_position if camera != null else Vector3.ZERO),
         "light": vec3(observer_light.global_position if observer_light != null else Vector3.ZERO),
+        "observerLightEnergy": rounded(observer_light.light_energy if observer_light != null else 0.0),
         "finalChest": final_chest_summary(),
         "graph": cave_graph_summary(),
         "vertical": cave_vertical_summary()
@@ -361,20 +375,33 @@ func cave_graph_has_branches() -> bool:
     return int(summary.get("nodeCount", 0)) >= 5 \
         and int(summary.get("edgeCount", 0)) >= 5 \
         and int(summary.get("branchCount", 0)) >= 1 \
-        and int(summary.get("deadEndCount", 0)) >= 1
+        and int(summary.get("deadEndCount", 0)) >= 1 \
+        and int(summary.get("narrowEdgeCount", 0)) >= 1
 
 func cave_graph_summary() -> Dictionary:
     var nodes: Array = plan.get("caveNodes", [])
     var edges: Array = plan.get("caveEdges", [])
     var roles := []
+    var min_edge_radius := INF
+    var narrow_edge_count := 0
     for node_value in nodes:
         if node_value is Dictionary:
             roles.append(String((node_value as Dictionary).get("kind", "")))
+    for edge_value in edges:
+        if not (edge_value is Dictionary):
+            continue
+        var edge: Dictionary = edge_value
+        var radius := float(edge.get("radius", 0.0))
+        min_edge_radius = minf(min_edge_radius, radius)
+        if radius <= 1.25:
+            narrow_edge_count += 1
     return {
         "nodeCount": nodes.size(),
         "edgeCount": edges.size(),
         "branchCount": array_size(plan.get("branchChamberIds", [])),
         "deadEndCount": array_size(plan.get("deadEndChamberIds", [])),
+        "minEdgeRadius": rounded(0.0 if min_edge_radius == INF else min_edge_radius),
+        "narrowEdgeCount": narrow_edge_count,
         "roles": roles
     }
 
@@ -385,12 +412,15 @@ func cave_vertical_summary() -> Dictionary:
     var floor_level := float(plan.get("level", 0.0))
     var ceiling_level := float(plan.get("ceilingLevel", floor_level))
     var surface_level := float(plan.get("surfaceLevel", ceiling_level))
+    var floor_summary := cave_floor_variation_summary()
     return {
         "surfaceLevel": rounded(surface_level),
         "floorLevel": rounded(floor_level),
         "ceilingLevel": rounded(ceiling_level),
         "ceilingClearance": rounded(ceiling_level - floor_level),
         "earthCover": rounded(surface_level - ceiling_level),
+        "floorHeightRange": rounded(float(floor_summary.get("range", 0.0))),
+        "maxFloorNeighborStep": rounded(float(floor_summary.get("maxNeighborStep", 0.0))),
         "interiorShells": cave_interior_shell_count()
     }
 
@@ -414,6 +444,52 @@ func cave_interior_shell_count() -> int:
         if node != null and is_instance_valid(node) and String(node.get_meta("caveId", "")) == cave_id:
             count += 1
     return count
+
+func cave_floor_variation_summary() -> Dictionary:
+    if structure_system == null:
+        return {}
+    var builder = structure_system.get("cave_interior_builder")
+    if builder == null or not builder.has_method("floor_variation_summary"):
+        return {}
+    return builder.call("floor_variation_summary", plan)
+
+func cave_daylight_excluded_from_cave_layer() -> bool:
+    var summary := cave_layer_lighting_summary()
+    return int(summary.get("caveVisuals", 0)) >= 1 \
+        and int(summary.get("nonCaveLayerCaveVisuals", 0)) == 0 \
+        and int(summary.get("sunLightsCaveLayer", 1)) == 0 \
+        and int(summary.get("moonLightsCaveLayer", 1)) == 0
+
+func cave_layer_lighting_summary() -> Dictionary:
+    var layer_summary := { "caveVisuals": 0, "nonCaveLayerCaveVisuals": 0 }
+    var cave_id := String(plan.get("id", ""))
+    var nodes_value = structure_system.get("cave_interior_nodes") if structure_system != null else {}
+    if nodes_value is Dictionary:
+        for node_value in (nodes_value as Dictionary).values():
+            var node := node_value as Node
+            if node != null and String(node.get_meta("caveId", "")) == cave_id:
+                add_cave_layer_summary(layer_summary, node)
+    var blocks_value = main.get("blocks") if main != null else {}
+    if blocks_value is Dictionary:
+        for block_value in (blocks_value as Dictionary).values():
+            var block := block_value as Node
+            if block != null and String(block.get_meta("generatedTier", "")) == "cave" and String(block.get_meta("caveId", "")) == cave_id:
+                add_cave_layer_summary(layer_summary, block)
+    var sun := main.get_node_or_null("Sun") as Light3D if main != null else null
+    var moon := main.get_node_or_null("Moon") as Light3D if main != null else null
+    layer_summary["sunCullMask"] = int(sun.light_cull_mask) if sun != null else -1
+    layer_summary["moonCullMask"] = int(moon.light_cull_mask) if moon != null else -1
+    layer_summary["sunLightsCaveLayer"] = 1 if sun != null and (int(sun.light_cull_mask) & 2) != 0 else 0
+    layer_summary["moonLightsCaveLayer"] = 1 if moon != null and (int(moon.light_cull_mask) & 2) != 0 else 0
+    return layer_summary
+
+func add_cave_layer_summary(summary: Dictionary, node: Node) -> void:
+    if node is VisualInstance3D:
+        summary["caveVisuals"] = int(summary.get("caveVisuals", 0)) + 1
+        if int((node as VisualInstance3D).layers) != 2:
+            summary["nonCaveLayerCaveVisuals"] = int(summary.get("nonCaveLayerCaveVisuals", 0)) + 1
+    for child in node.get_children():
+        add_cave_layer_summary(summary, child)
 
 func cave_natural_props_inside_summary() -> Dictionary:
     if main == null or structure_system == null:
@@ -477,6 +553,27 @@ func capture_names() -> Array[String]:
     for capture in captures:
         names.append(String(capture.get("stage", "")))
     return names
+
+func image_luminance_summary(image: Image) -> Dictionary:
+    var total := 0.0
+    var max_luma := 0.0
+    var sample_count := 0
+    var width := image.get_width()
+    var height := image.get_height()
+    var step := 16
+    for y in range(0, height, step):
+        for x in range(0, width, step):
+            var color := image.get_pixel(x, y)
+            var luma := color.r * 0.2126 + color.g * 0.7152 + color.b * 0.0722
+            total += luma
+            max_luma = maxf(max_luma, luma)
+            sample_count += 1
+    var average := total / float(maxi(1, sample_count))
+    return {
+        "average": rounded(average),
+        "max": rounded(max_luma),
+        "samples": sample_count
+    }
 
 func add_result(name: String, passed: bool, details := "") -> void:
     results.append({

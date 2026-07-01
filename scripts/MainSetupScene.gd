@@ -1,5 +1,7 @@
 extends "res://scripts/MainSaveState.gd"
 
+const DEFAULT_VISUAL_LIGHT_LAYER := 1
+
 var last_requested_mouse_mode: int = Input.MOUSE_MODE_VISIBLE
 
 func set_game_mouse_mode(mode: int) -> void:
@@ -170,6 +172,7 @@ func setup_environment() -> void:
     sun.name = "Sun"
     sun.light_color = visual_style.sun_color_day
     sun.light_energy = visual_style.sun_max_energy
+    sun.light_cull_mask = DEFAULT_VISUAL_LIGHT_LAYER
     sun.shadow_enabled = true
     configure_directional_shadow_style(sun, visual_style.sun_angular_distance)
     add_child(sun)
@@ -178,6 +181,7 @@ func setup_environment() -> void:
     moon.name = "Moon"
     moon.light_color = visual_style.moon_color
     moon.light_energy = visual_style.moon_max_energy
+    moon.light_cull_mask = DEFAULT_VISUAL_LIGHT_LAYER
     moon.shadow_enabled = false
     configure_directional_shadow_style(moon, visual_style.moon_angular_distance)
     add_child(moon)

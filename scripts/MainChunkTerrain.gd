@@ -2,6 +2,7 @@ extends "res://scripts/MainInteractionFlow.gd"
 
 const LocalLightRigScript := preload("res://scripts/LocalLightRig.gd")
 const NpcConstantsScript := preload("res://scripts/npc_ai/NpcConstants.gd")
+const CAVE_VISUAL_LAYER := 1 << 1
 
 func add_block_mesh(parent: Node3D, size: Vector3, offset: Vector3, material_key: String, rotation := Vector3.ZERO) -> MeshInstance3D:
     var mesh_instance := MeshInstance3D.new()
@@ -313,13 +314,14 @@ func add_campfire_visual(parent: Node3D) -> void:
     add_block_mesh(parent, Vector3(CELL * 0.15, CELL * 0.38, CELL * 0.15), Vector3(0.0, -CELL * 0.03, 0.0), "furnaceGlow", Vector3(0.0, -0.78, 0.0))
     add_world_light_rig(parent, "campfire")
 
-func add_torch_visual(parent: Node3D) -> void:
-    if add_generated_static_utility_visual(parent, "torch") != null:
+func add_torch_visual(parent: Node3D, visual_scale := 1.0) -> void:
+    visual_scale = clampf(float(visual_scale), 0.25, 1.5)
+    if add_generated_static_utility_visual(parent, "torch", CELL * visual_scale) != null:
         add_world_light_rig(parent, "torch")
         return
-    add_block_mesh(parent, Vector3(CELL * 0.10, CELL * 0.78, CELL * 0.10), Vector3(0.0, -CELL * 0.04, 0.0), "trunk")
-    add_block_mesh(parent, Vector3(CELL * 0.22, CELL * 0.12, CELL * 0.22), Vector3(0.0, CELL * 0.38, 0.0), "torch")
-    add_block_mesh(parent, Vector3(CELL * 0.18, CELL * 0.24, CELL * 0.18), Vector3(0.0, CELL * 0.56, 0.0), "flame")
+    add_block_mesh(parent, Vector3(CELL * 0.10, CELL * 0.78, CELL * 0.10) * visual_scale, Vector3(0.0, -CELL * 0.04 * visual_scale, 0.0), "trunk")
+    add_block_mesh(parent, Vector3(CELL * 0.22, CELL * 0.12, CELL * 0.22) * visual_scale, Vector3(0.0, CELL * 0.38 * visual_scale, 0.0), "torch")
+    add_block_mesh(parent, Vector3(CELL * 0.18, CELL * 0.24, CELL * 0.18) * visual_scale, Vector3(0.0, CELL * 0.56 * visual_scale, 0.0), "flame")
     add_world_light_rig(parent, "torch")
 
 func add_spike_trap_visual(parent: Node3D) -> void:
@@ -523,7 +525,8 @@ func create_block(cell: Vector3i, block_type: String, options: Dictionary = {}) 
         "caveKind",
         "caveRole",
         "caveDepthIndex",
-        "caveFinalLoot"
+        "caveFinalLoot",
+        "torchVisualScale"
     ]:
         if options.has(visual_key):
             body.set_meta(visual_key, options.get(visual_key))
@@ -567,8 +570,9 @@ func create_block(cell: Vector3i, block_type: String, options: Dictionary = {}) 
         body.set_meta("open_swing", swing * PI * 0.5)
         body.set_meta("open_rotation", body.rotation.y)
     elif block_type == "torch":
-        mesh_size = Vector3(CELL * 0.18, CELL * 0.82, CELL * 0.18)
-        mesh_offset.y = CELL * 0.10
+        var torch_visual_scale := clampf(float(options.get("torchVisualScale", 1.0)), 0.25, 1.5)
+        mesh_size = Vector3(CELL * 0.18, CELL * 0.82, CELL * 0.18) * torch_visual_scale
+        mesh_offset.y = CELL * 0.10 * torch_visual_scale
     elif block_type == "spikeTrap":
         mesh_size = Vector3(CELL * 0.82, CELL * 0.30, CELL * 0.82)
         mesh_offset.y = -CELL * 0.28
@@ -596,7 +600,7 @@ func create_block(cell: Vector3i, block_type: String, options: Dictionary = {}) 
     elif block_type == "campfire":
         add_campfire_visual(body)
     elif block_type == "torch":
-        add_torch_visual(body)
+        add_torch_visual(body, float(options.get("torchVisualScale", 1.0)))
     elif block_type == "spikeTrap":
         add_spike_trap_visual(body)
     elif block_type == "wardLantern" or block_type == "sanctuaryBeacon" or block_type == "riftAnchor":
@@ -610,6 +614,8 @@ func create_block(cell: Vector3i, block_type: String, options: Dictionary = {}) 
     else:
         add_block_mesh(body, mesh_size, mesh_offset, block_type)
     add_block_accent_visuals(body, block_type, options)
+    if String(body.get_meta("generatedTier", "")) == "cave":
+        apply_cave_visual_layer(body)
 
     var shape := BoxShape3D.new()
     shape.size = collider_size
@@ -631,6 +637,12 @@ func create_block(cell: Vector3i, block_type: String, options: Dictionary = {}) 
     if block_type == "door" and npc_system and npc_system.has_method("notify_navigation_door_registered"):
         npc_system.notify_navigation_door_registered(body)
     return body
+
+func apply_cave_visual_layer(node: Node) -> void:
+    if node is VisualInstance3D:
+        (node as VisualInstance3D).layers = CAVE_VISUAL_LAYER
+    for child in node.get_children():
+        apply_cave_visual_layer(child)
 
 func is_structural_block_type(block_type: String) -> bool:
     return not NON_STRUCTURAL_BLOCK_TYPES.has(block_type)

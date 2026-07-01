@@ -316,9 +316,12 @@ func make_cave_graph(id: String, entrance: Vector2i, inward: Vector2i, right: Ve
     nodes.append(cave_graph_node("final", "final", cave_axis_cell(entrance, inward, right, final_depth, final_lateral), chamber_radius + 2))
     var previous_id := "entrance"
     for node_id in main_node_ids:
-        edges.append(cave_graph_edge("%s_to_%s" % [previous_id, node_id], previous_id, node_id, 1.72 + main.hash01("cave-graph-main-edge:%s:%s" % [id, node_id]) * 0.35))
+        var main_edge_id := "%s_to_%s" % [previous_id, node_id]
+        var base_radius: float = 1.72 + main.hash01("cave-graph-main-edge:%s:%s" % [id, node_id]) * 0.35
+        edges.append(cave_graph_edge(main_edge_id, previous_id, node_id, cave_edge_radius(id, main_edge_id, base_radius)))
         previous_id = node_id
-    edges.append(cave_graph_edge("%s_to_final" % previous_id, previous_id, "final", 1.86))
+    var final_edge_id := "%s_to_final" % previous_id
+    edges.append(cave_graph_edge(final_edge_id, previous_id, "final", cave_edge_radius(id, final_edge_id, 1.86)))
     for i in range(dead_end_count):
         var anchor_index: int = int(main.hash01("cave-graph-dead-anchor:%s:%d" % [id, i]) * float(main_node_ids.size()))
         anchor_index = clampi(anchor_index, 0, main_node_ids.size() - 1)
@@ -332,7 +335,8 @@ func make_cave_graph(id: String, entrance: Vector2i, inward: Vector2i, right: Ve
         var dead_depth: int = clampi(anchor_depth + depth_offset, 4, final_depth - 2)
         var dead_lateral := anchor_lateral + lateral_offset
         nodes.append(cave_graph_node(dead_id, "dead_end", cave_axis_cell(entrance, inward, right, dead_depth, dead_lateral), 3))
-        edges.append(cave_graph_edge("%s_to_%s" % [anchor_id, dead_id], anchor_id, dead_id, 1.45))
+        var dead_edge_id := "%s_to_%s" % [anchor_id, dead_id]
+        edges.append(cave_graph_edge(dead_edge_id, anchor_id, dead_id, cave_edge_radius(id, dead_edge_id, 1.45)))
     for i in range(side_chamber_count):
         var anchor_index: int = int(main.hash01("cave-graph-side-anchor:%s:%d" % [id, i]) * float(main_node_ids.size()))
         anchor_index = clampi(anchor_index, 0, main_node_ids.size() - 1)
@@ -350,10 +354,12 @@ func make_cave_graph(id: String, entrance: Vector2i, inward: Vector2i, right: Ve
         var side_depth: int = clampi(roundi((float(anchor_depth) + float(target_depth)) * 0.5) + roundi(lerpf(-2.0, 2.0, main.hash01("cave-graph-loop-depth:%s:%d" % [id, i]))), anchor_depth + 2, target_depth - 1)
         var side_lateral: int = roundi((float(anchor_lateral) + float(target_lateral)) * 0.5) + side_sign * (4 + int(main.hash01("cave-graph-loop-lateral:%s:%d" % [id, i]) * 4.0))
         nodes.append(cave_graph_node(side_id, "side_chamber", cave_axis_cell(entrance, inward, right, side_depth, side_lateral), 3))
-        edges.append(cave_graph_edge("%s_to_%s" % [anchor_id, side_id], anchor_id, side_id, 1.48))
-        edges.append(cave_graph_edge("%s_to_%s" % [side_id, target_id], side_id, target_id, 1.48))
+        var edge_to_side_id := "%s_to_%s" % [anchor_id, side_id]
+        var edge_from_side_id := "%s_to_%s" % [side_id, target_id]
+        edges.append(cave_graph_edge(edge_to_side_id, anchor_id, side_id, cave_edge_radius(id, edge_to_side_id, 1.48)))
+        edges.append(cave_graph_edge(edge_from_side_id, side_id, target_id, cave_edge_radius(id, edge_from_side_id, 1.48)))
     if main_node_ids.is_empty():
-        edges.append(cave_graph_edge("entrance_to_final", "entrance", "final", 1.85))
+        edges.append(cave_graph_edge("entrance_to_final", "entrance", "final", cave_edge_radius(id, "entrance_to_final", 1.85)))
     var path_lookup := {}
     var chamber_lookup := {}
     for node_value in nodes:
@@ -420,6 +426,14 @@ func cave_graph_edge(edge_id: String, from_id: String, to_id: String, radius: fl
         "radius": radius
     }
 
+func cave_edge_radius(cave_id: String, edge_id: String, base_radius: float) -> float:
+    var roll: float = main.hash01("cave-edge-tightness:%s:%s" % [cave_id, edge_id])
+    if roll < 0.42:
+        return maxf(0.86, base_radius * 0.58)
+    if roll < 0.72:
+        return maxf(1.05, base_radius * 0.78)
+    return base_radius
+
 func cave_graph_node_cell(nodes: Array, node_id: String, fallback: Vector2i) -> Vector2i:
     for node_value in nodes:
         if not (node_value is Dictionary):
@@ -445,12 +459,12 @@ func cave_edge_center_cells(from_cell: Vector2i, to_cell: Vector2i) -> Array[Vec
     return result
 
 func cave_add_tunnel_cells(lookup: Dictionary, center_cells: Array[Vector2i], radius: float, id: String, edge_id: String) -> void:
-    var expanded := ceili(radius + 1.35)
+    var expanded := ceili(radius + 1.0)
     for center in center_cells:
         for dz in range(-expanded, expanded + 1):
             for dx in range(-expanded, expanded + 1):
                 var offset := Vector2(float(dx), float(dz))
-                var rough: float = radius + main.hash01("cave-tunnel-rough:%s:%s:%d,%d" % [id, edge_id, center.x + dx, center.y + dz]) * 0.74
+                var rough: float = radius + main.hash01("cave-tunnel-rough:%s:%s:%d,%d" % [id, edge_id, center.x + dx, center.y + dz]) * 0.46
                 if offset.length() <= rough:
                     lookup[center + Vector2i(dx, dz)] = true
 
@@ -1395,6 +1409,8 @@ func build_graph_cave_supports(plan: Dictionary, level: float, base_options: Dic
 func cave_options(base_options: Dictionary, role: String, depth_index := -1, extra_options: Dictionary = {}) -> Dictionary:
     var options := base_options.duplicate()
     options["caveRole"] = role
+    if role.contains("torch"):
+        options["torchVisualScale"] = 0.35
     if depth_index >= 0:
         options["caveDepthIndex"] = depth_index
     for key in extra_options.keys():

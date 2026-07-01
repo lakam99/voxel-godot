@@ -102,6 +102,7 @@ if ($true -ne $report.nonHeadlessRequired) {
 }
 
 $requiredScreenshots = @(
+    "cave_dark_default.png",
     "cave_entrance.png",
     "cave_branch_fork.png",
     "cave_dead_end_chamber.png",

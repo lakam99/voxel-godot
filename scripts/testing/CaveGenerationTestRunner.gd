@@ -1,6 +1,7 @@
 extends SceneTree
 
 const MAIN_SCENE: PackedScene = preload("res://scenes/Main.tscn")
+const CELL := 1.35
 
 var results: Array[Dictionary] = []
 var main: Node3D
@@ -159,14 +160,21 @@ func test_cave_build_interior_and_book_loot() -> void:
         and int(graph_summary.get("edgeCount", 0)) >= 5 \
         and int(graph_summary.get("branchCount", 0)) >= 1 \
         and int(graph_summary.get("deadEndCount", 0)) >= 1 \
+        and int(graph_summary.get("narrowEdgeCount", 0)) >= 1 \
         and bool(graph_summary.get("finalChestInFinalChamber", false)) \
         and int(summary.get("interiorShells", 0)) == 1 \
         and int(summary.get("interiorMeshes", 0)) >= 1 \
         and int(summary.get("interiorCollisionBodies", 0)) >= 1 \
         and int(summary.get("supportFrames", 0)) >= 1 \
         and int(summary.get("supportFrames", 0)) <= 2 \
+        and int(summary.get("interiorCaveLayerVisuals", 0)) >= 1 \
+        and int(summary.get("interiorNonCaveLayerVisuals", 0)) == 0 \
+        and float(summary.get("floorHeightRange", 0.0)) >= 0.35 \
+        and float(summary.get("maxFloorNeighborStep", 999.0)) <= CELL * 0.60 \
         and int(summary.get("torches", 0)) >= 2 \
         and int(summary.get("torches", 0)) <= 6 \
+        and int(summary.get("smallTorches", 0)) == int(summary.get("torches", 0)) \
+        and int(summary.get("caveBlockNonCaveLayerVisuals", 0)) == 0 \
         and int(summary.get("pathBlocks", 0)) == 0 \
         and int(summary.get("wallBlocks", 0)) == 0 \
         and int(summary.get("finalChests", 0)) == 1 \
@@ -236,6 +244,11 @@ func test_cave_save_load_persistence() -> void:
         and int(restored_summary.get("interiorShells", 0)) == 1 \
         and int(restored_summary.get("supportFrames", 0)) >= 1 \
         and int(restored_summary.get("supportFrames", 0)) <= 2 \
+        and int(restored_summary.get("interiorNonCaveLayerVisuals", 0)) == 0 \
+        and float(restored_summary.get("floorHeightRange", 0.0)) >= 0.35 \
+        and float(restored_summary.get("maxFloorNeighborStep", 999.0)) <= CELL * 0.60 \
+        and int(restored_summary.get("smallTorches", 0)) == int(restored_summary.get("torches", 0)) \
+        and int(restored_summary.get("caveBlockNonCaveLayerVisuals", 0)) == 0 \
         and int(restored_summary.get("finalChests", 0)) == 1 \
         and int(restored_terrain.get("stoneOverrideCells", 0)) >= int(restored_terrain.get("walkableCells", 0)) \
         and int(restored_terrain.get("propExclusionCells", 0)) == int(restored_terrain.get("shapingCells", 0)) \
@@ -268,6 +281,8 @@ func cave_graph_summary(plan: Dictionary) -> Dictionary:
     var final_cell: Vector2i = plan.get("finalChamberCell", Vector2i.ZERO)
     var final_radius := 0
     var node_roles := []
+    var min_edge_radius := INF
+    var narrow_edge_count := 0
     for node_value in nodes:
         if not (node_value is Dictionary):
             continue
@@ -275,6 +290,14 @@ func cave_graph_summary(plan: Dictionary) -> Dictionary:
         node_roles.append(String(node.get("kind", "")))
         if String(node.get("id", "")) == final_id:
             final_radius = int(node.get("radius", 0))
+    for edge_value in edges:
+        if not (edge_value is Dictionary):
+            continue
+        var edge: Dictionary = edge_value
+        var radius := float(edge.get("radius", 0.0))
+        min_edge_radius = minf(min_edge_radius, radius)
+        if radius <= 1.25:
+            narrow_edge_count += 1
     var chest_cell: Vector2i = plan.get("finalChestCell", Vector2i.ZERO)
     var chest_distance := Vector2(float(chest_cell.x - final_cell.x), float(chest_cell.y - final_cell.y)).length()
     return {
@@ -283,6 +306,8 @@ func cave_graph_summary(plan: Dictionary) -> Dictionary:
         "branchCount": cave_array_size(plan, "branchChamberIds"),
         "deadEndCount": cave_array_size(plan, "deadEndChamberIds"),
         "nodeRoles": node_roles,
+        "minEdgeRadius": snappedf(0.0 if min_edge_radius == INF else min_edge_radius, 0.001),
+        "narrowEdgeCount": narrow_edge_count,
         "finalChestInFinalChamber": chest_distance <= float(final_radius + 1)
     }
 
@@ -336,12 +361,15 @@ func cave_block_summary(plan: Dictionary) -> Dictionary:
     var path_blocks := 0
     var wall_blocks := 0
     var torches := 0
+    var small_torches := 0
     var final_chests := 0
     var final_chest_has_book := false
+    var cave_block_layer_summary := { "visuals": 0, "nonCaveLayerVisuals": 0 }
     for block_value in blocks.values():
         var block := block_value as Node
         if block == null or String(block.get_meta("generatedTier", "")) != "cave":
             continue
+        add_cave_layer_summary(cave_block_layer_summary, block)
         var block_type := String(block.get_meta("block_type", ""))
         var role := String(block.get_meta("caveRole", ""))
         if block_type == "cobblestonePath":
@@ -350,6 +378,8 @@ func cave_block_summary(plan: Dictionary) -> Dictionary:
             wall_blocks += 1
         if block_type == "torch":
             torches += 1
+            if float(block.get_meta("torchVisualScale", 1.0)) <= 0.36:
+                small_torches += 1
         if block_type == "chest" and role == "final_chest":
             final_chests += 1
             final_chest_has_book = final_chest_has_book or chest_has_crafting_book(block)
@@ -360,6 +390,7 @@ func cave_block_summary(plan: Dictionary) -> Dictionary:
         "pathBlocks": path_blocks,
         "wallBlocks": wall_blocks,
         "torches": torches,
+        "smallTorches": small_torches,
         "finalChests": final_chests,
         "finalChestHasCraftingBook": final_chest_has_book,
         "heightEditCells": edits.size(),
@@ -367,7 +398,13 @@ func cave_block_summary(plan: Dictionary) -> Dictionary:
         "interiorShells": int(interior.get("shells", 0)),
         "interiorMeshes": int(interior.get("meshes", 0)),
         "interiorCollisionBodies": int(interior.get("collisionBodies", 0)),
-        "supportFrames": int(interior.get("supportFrames", 0))
+        "supportFrames": int(interior.get("supportFrames", 0)),
+        "interiorCaveLayerVisuals": int(interior.get("caveLayerVisuals", 0)),
+        "interiorNonCaveLayerVisuals": int(interior.get("nonCaveLayerVisuals", 0)),
+        "floorHeightRange": float(interior.get("floorHeightRange", 0.0)),
+        "maxFloorNeighborStep": float(interior.get("maxFloorNeighborStep", 0.0)),
+        "caveBlockVisuals": int(cave_block_layer_summary.get("visuals", 0)),
+        "caveBlockNonCaveLayerVisuals": int(cave_block_layer_summary.get("nonCaveLayerVisuals", 0))
     }
 
 func cave_terrain_summary(plan: Dictionary) -> Dictionary:
@@ -475,6 +512,7 @@ func cave_interior_summary(plan: Dictionary) -> Dictionary:
     var meshes := 0
     var collision_bodies := 0
     var support_frames := 0
+    var layer_summary := { "visuals": 0, "nonCaveLayerVisuals": 0 }
     for node_value in nodes.values():
         var node := node_value as Node
         if node == null or not is_instance_valid(node):
@@ -485,11 +523,17 @@ func cave_interior_summary(plan: Dictionary) -> Dictionary:
         meshes += count_cave_interior_visuals(node)
         collision_bodies += count_cave_interior_bodies(node)
         support_frames += count_cave_support_frames(node)
+        add_cave_layer_summary(layer_summary, node)
+    var floor_summary := cave_floor_variation_summary(plan)
     return {
         "shells": shells,
         "meshes": meshes,
         "collisionBodies": collision_bodies,
-        "supportFrames": support_frames
+        "supportFrames": support_frames,
+        "caveLayerVisuals": int(layer_summary.get("visuals", 0)) - int(layer_summary.get("nonCaveLayerVisuals", 0)),
+        "nonCaveLayerVisuals": int(layer_summary.get("nonCaveLayerVisuals", 0)),
+        "floorHeightRange": float(floor_summary.get("range", 0.0)),
+        "maxFloorNeighborStep": float(floor_summary.get("maxNeighborStep", 0.0))
     }
 
 func count_cave_interior_visuals(node: Node) -> int:
@@ -515,6 +559,22 @@ func count_cave_support_frames(node: Node) -> int:
     for child in node.get_children():
         count += count_cave_support_frames(child)
     return count
+
+func add_cave_layer_summary(summary: Dictionary, node: Node) -> void:
+    if node is VisualInstance3D:
+        summary["visuals"] = int(summary.get("visuals", 0)) + 1
+        if int((node as VisualInstance3D).layers) != 2:
+            summary["nonCaveLayerVisuals"] = int(summary.get("nonCaveLayerVisuals", 0)) + 1
+    for child in node.get_children():
+        add_cave_layer_summary(summary, child)
+
+func cave_floor_variation_summary(plan: Dictionary) -> Dictionary:
+    if structure_system == null:
+        return {}
+    var builder = structure_system.get("cave_interior_builder")
+    if builder == null or not builder.has_method("floor_variation_summary"):
+        return {}
+    return builder.call("floor_variation_summary", plan)
 
 func chest_has_crafting_book(chest: Node) -> bool:
     if chest == null or not chest.has_meta("storage_slots"):

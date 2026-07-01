@@ -5,6 +5,7 @@ const GRID_SUBDIVISIONS := 3.0
 const WALL_VERTICAL_SEGMENTS := 5
 const FORMATION_SEGMENTS := 6
 const WALL_OVERLAP := 0.46
+const CAVE_VISUAL_LAYER := 1 << 1
 
 var main
 var cave_material: StandardMaterial3D
@@ -35,6 +36,7 @@ func build(plan: Dictionary, rng: RandomNumberGenerator, metadata: Dictionary = 
     visual.name = "CaveInteriorVisual"
     visual.mesh = visual_mesh
     visual.material_override = material()
+    visual.layers = CAVE_VISUAL_LAYER
     visual.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
     root.add_child(visual)
 
@@ -66,8 +68,10 @@ func material() -> StandardMaterial3D:
         return cave_material
     cave_material = StandardMaterial3D.new()
     cave_material.vertex_color_use_as_albedo = true
+    cave_material.albedo_color = Color(0.40, 0.43, 0.42)
     cave_material.roughness = 0.96
     cave_material.cull_mode = BaseMaterial3D.CULL_DISABLED
+    cave_material.set("disable_ambient_light", true)
     return cave_material
 
 func cave_support_material() -> StandardMaterial3D:
@@ -182,9 +186,14 @@ func boundary_offset(plan: Dictionary, point: Vector2, outward: Vector2) -> floa
 func floor_point(plan: Dictionary, point: Vector2) -> Vector3:
     var floor_y := float(plan.get("level", 0.0)) + 0.22
     var cell_size := float(main.CELL)
-    var wave := stable_signed(plan, "floor-warp", floori(point.x / (cell_size * 0.5)), floori(point.y / (cell_size * 0.5))) * 0.20
+    var phase_x := stable_signed(plan, "floor-phase-x", 0, 0) * PI * 2.0
+    var phase_z := stable_signed(plan, "floor-phase-z", 1, 0) * PI * 2.0
+    var micro := stable_signed(plan, "floor-warp", floori(point.x / (cell_size * 0.5)), floori(point.y / (cell_size * 0.5))) * 0.08
+    var broad_roll := (sin(point.x * 0.105 + phase_x) + cos(point.y * 0.098 + phase_z)) * cell_size * 0.16
+    var diagonal := sin((point.x + point.y) * 0.075 + phase_x * 0.5) * cell_size * 0.10
+    var ridge := sin(point.x * 0.18 + phase_z) * cos(point.y * 0.16 + phase_x) * cell_size * 0.10
     var center_lift := maxf(0.0, 1.0 - cave_volume_value(plan, point)) * 0.08
-    return Vector3(point.x, floor_y + wave + center_lift, point.y)
+    return Vector3(point.x, floor_y + micro + broad_roll + diagonal + ridge + center_lift, point.y)
 
 func ceiling_point(plan: Dictionary, point: Vector2) -> Vector3:
     var ceiling_y := float(plan.get("ceilingLevel", float(plan.get("level", 0.0)) + float(main.CELL) * 3.0))
@@ -272,7 +281,7 @@ func cave_graph_profile_points(plan: Dictionary, graph_nodes: Array, graph_edges
             continue
         var edge: Dictionary = edge_value
         var edge_id := String(edge.get("id", "edge"))
-        var radius := maxf(cell_size * 2.05, float(edge.get("radius", 1.7)) * cell_size * 1.34)
+        var radius := maxf(cell_size * 1.18, float(edge.get("radius", 1.7)) * cell_size * 1.05)
         var center_cells = edge.get("centerCells", [])
         if not (center_cells is Array):
             continue
@@ -282,7 +291,7 @@ func cave_graph_profile_points(plan: Dictionary, graph_nodes: Array, graph_edges
             if seen_edges.has(key):
                 continue
             seen_edges[key] = true
-            var profile_radius := radius * (0.92 + stable01(plan, "graph-edge-radius:%s" % edge_id, cell.x, cell.y) * 0.22)
+            var profile_radius := radius * (0.88 + stable01(plan, "graph-edge-radius:%s" % edge_id, cell.x, cell.y) * 0.20)
             profiles.append({
                 "center": cell_world2(cell),
                 "radius": profile_radius,
@@ -456,8 +465,36 @@ func add_support_beam(frame: Node3D, local_position: Vector3, size: Vector3) -> 
     beam.mesh = mesh
     beam.material_override = cave_support_material()
     beam.position = local_position
+    beam.layers = CAVE_VISUAL_LAYER
     beam.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
     frame.add_child(beam)
+
+func floor_variation_summary(plan: Dictionary) -> Dictionary:
+    var cells := cave_walkable_cells(plan)
+    if cells.is_empty():
+        return { "sampleCount": 0, "minY": 0.0, "maxY": 0.0, "range": 0.0, "maxNeighborStep": 0.0 }
+    var heights := {}
+    var min_y := INF
+    var max_y := -INF
+    for cell in cells:
+        var y := floor_point(plan, cell_world2(cell)).y
+        heights[cell] = y
+        min_y = minf(min_y, y)
+        max_y = maxf(max_y, y)
+    var max_step := 0.0
+    for cell in cells:
+        var height := float(heights.get(cell, 0.0))
+        for direction in [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]:
+            var next: Vector2i = cell + direction
+            if heights.has(next):
+                max_step = maxf(max_step, absf(height - float(heights.get(next, height))))
+    return {
+        "sampleCount": cells.size(),
+        "minY": snappedf(min_y, 0.001),
+        "maxY": snappedf(max_y, 0.001),
+        "range": snappedf(max_y - min_y, 0.001),
+        "maxNeighborStep": snappedf(max_step, 0.001)
+    }
 
 func cave_support_frame_specs(plan: Dictionary) -> Array[Dictionary]:
     var specs: Array[Dictionary] = []

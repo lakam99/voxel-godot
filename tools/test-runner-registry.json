@@ -347,6 +347,7 @@
       "evidenceLevel": "acceptance_visual",
       "acceptanceClaims": ["procedural_cave_graph_entrance_branch_dead_end_final_visual"],
       "requiredScreenshots": [
+        "cave_dark_default.png",
         "cave_entrance.png",
         "cave_branch_fork.png",
         "cave_dead_end_chamber.png",
