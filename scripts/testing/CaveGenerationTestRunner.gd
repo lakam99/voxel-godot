@@ -196,7 +196,7 @@ func test_cave_build_interior_and_book_loot() -> void:
         and int(terrain_summary.get("editedOpeningCells", 0)) == int(terrain_summary.get("openingCells", 0)) \
         and int(terrain_summary.get("editedInteriorWalkableCells", 999)) == 0 \
         and int(terrain_summary.get("editedPortalCells", 0)) == int(terrain_summary.get("portalCells", -1)) \
-        and int(terrain_summary.get("hiddenPortalCells", 999)) == 0 \
+        and int(terrain_summary.get("hiddenPortalCells", 0)) == int(terrain_summary.get("portalCells", -1)) \
         and float(terrain_summary.get("openingToWalkableRatio", 1.0)) <= 0.45 \
         and int(terrain_summary.get("stoneOverrideCells", 0)) == int(terrain_summary.get("openingCells", 0)) \
         and int(terrain_summary.get("propExclusionCells", 0)) == int(terrain_summary.get("shapingCells", 0)) \
@@ -281,7 +281,7 @@ func test_cave_save_load_persistence() -> void:
         and int(restored_summary.get("finalChests", 0)) == 1 \
         and int(restored_terrain.get("editedInteriorWalkableCells", 999)) == 0 \
         and int(restored_terrain.get("editedPortalCells", 0)) == int(restored_terrain.get("portalCells", -1)) \
-        and int(restored_terrain.get("hiddenPortalCells", 999)) == 0 \
+        and int(restored_terrain.get("hiddenPortalCells", 0)) == int(restored_terrain.get("portalCells", -1)) \
         and float(restored_terrain.get("openingToWalkableRatio", 1.0)) <= 0.45 \
         and int(restored_terrain.get("stoneOverrideCells", 0)) == int(restored_terrain.get("openingCells", 0)) \
         and int(restored_terrain.get("propExclusionCells", 0)) == int(restored_terrain.get("shapingCells", 0)) \
@@ -751,7 +751,7 @@ func cave_mouth_access_summary(plan: Dictionary) -> Dictionary:
 
 func cave_mouth_access_passed(summary: Dictionary) -> bool:
     return int(summary.get("portalCells", 0)) > 0 \
-        and int(summary.get("hiddenPortalCells", 999)) == 0 \
+        and int(summary.get("hiddenPortalCells", 0)) == int(summary.get("portalCells", -1)) \
         and float(summary.get("outsideHeightRange", 999.0)) <= CELL * 1.25 \
         and float(summary.get("maxCenterRouteStep", 999.0)) <= CELL * 0.85 \
         and float(summary.get("minPlayerClearance", 0.0)) >= CELL * 2.05 \

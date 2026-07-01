@@ -6200,9 +6200,12 @@ func test_terrain_mesh_topology_signature() -> void:
     var expected_vertices := CHUNK_SIZE * CHUNK_SIZE * 6 + CHUNK_SIZE * 4 * 6
     var checked := 0
     var matching := 0
+    var cave_cut_chunks := 0
+    var unexpected_mismatches := 0
     var with_normals := 0
-    for chunk_node in chunks.values():
-        var chunk := chunk_node as Node
+    for key_value in chunks.keys():
+        var chunk_key: Vector2i = key_value
+        var chunk := chunks.get(chunk_key) as Node
         var mesh := terrain_mesh_for_chunk(chunk)
         if mesh == null or mesh.get_surface_count() == 0:
             continue
@@ -6212,13 +6215,28 @@ func test_terrain_mesh_topology_signature() -> void:
         var normals: PackedVector3Array = arrays[Mesh.ARRAY_NORMAL]
         if vertices.size() == expected_vertices:
             matching += 1
+        elif terrain_chunk_has_hidden_quads(chunk_key):
+            cave_cut_chunks += 1
+        else:
+            unexpected_mismatches += 1
         if normals.size() == vertices.size() and normals.size() > 0:
             with_normals += 1
     add_result(
         "terrain_mesh_topology_signature",
-        checked > 0 and checked == matching and checked == with_normals,
-        "%d/%d chunks match %d vertices, normals %d/%d" % [matching, checked, expected_vertices, with_normals, checked]
+        checked > 0 and unexpected_mismatches == 0 and checked == matching + cave_cut_chunks and checked == with_normals,
+        "%d/%d chunks match %d vertices, cave cuts %d, unexpected mismatches %d, normals %d/%d" % [matching, checked, expected_vertices, cave_cut_chunks, unexpected_mismatches, with_normals, checked]
     )
+
+func terrain_chunk_has_hidden_quads(chunk_key: Vector2i) -> bool:
+    if main == null or not main.has_method("terrain_quad_hidden_for_cell"):
+        return false
+    var start_x := chunk_key.x * CHUNK_SIZE
+    var start_z := chunk_key.y * CHUNK_SIZE
+    for z in range(CHUNK_SIZE):
+        for x in range(CHUNK_SIZE):
+            if bool(main.call("terrain_quad_hidden_for_cell", start_x + x, start_z + z)):
+                return true
+    return false
 
 func test_terrain_shader_material() -> void:
     var material := main.get("terrain_material") as ShaderMaterial if main else null

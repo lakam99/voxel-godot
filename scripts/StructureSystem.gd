@@ -1317,6 +1317,7 @@ func apply_cave_terrain_edits(plan: Dictionary) -> void:
         cave_prop_exclusion_cells[opening_cell] = true
     for cell_value in portal_cells:
         var portal_cell: Vector2i = cell_value
+        cave_terrain_hole_cells[portal_cell] = true
         cave_prop_exclusion_cells[portal_cell] = true
     var height_cells := unique_cave_cells(opening_cells, portal_cells)
     var edited := {}
@@ -1336,7 +1337,7 @@ func terrain_material_override_for_cell(x: int, z: int) -> String:
     return "stone" if cave_terrain_cells.has(Vector2i(x, z)) else ""
 
 func terrain_quad_hidden_for_cell(x: int, z: int) -> bool:
-    return false
+    return cave_terrain_hole_cells.has(Vector2i(x, z))
 
 func blocks_natural_prop_at_cell(x: int, z: int) -> bool:
     return cave_prop_exclusion_cells.has(Vector2i(x, z))
@@ -1574,23 +1575,105 @@ func cave_terrain_opening_cells(plan: Dictionary) -> Array[Vector2i]:
     return cells
 
 func cave_mouth_portal_cells(plan: Dictionary) -> Array[Vector2i]:
+    return cave_terrain_pipe_cut_cells(plan)
+
+func cave_terrain_pipe_cut_cells(plan: Dictionary) -> Array[Vector2i]:
+    var lookup := {}
+    for cell in cave_terrain_pipe_cut_candidate_cells(plan):
+        if cave_terrain_quad_cut_by_pipe(plan, cell):
+            lookup[cell] = true
+    return sorted_cave_cells_from_lookup(lookup)
+
+func cave_terrain_pipe_cut_candidate_cells(plan: Dictionary) -> Array[Vector2i]:
     var lookup := {}
     var entrance: Vector2i = plan.get("entranceCell", Vector2i.ZERO)
     var inward: Vector2i = plan.get("inward", Vector2i(0, 1))
     var right: Vector2i = plan.get("right", Vector2i(1, 0))
     var interior_depth := int(plan.get("entranceOpenDepth", CAVE_MOUTH_INTERIOR_DEPTH))
-    for depth in range(1, interior_depth + 1):
+    var mouth_width := float(plan.get("entranceMouthHalfWidth", CAVE_MOUTH_HALF_WIDTH))
+    var lateral_limit := ceili(mouth_width + 3.0)
+    for depth in range(-1, interior_depth + 2):
         var half_width := cave_mouth_half_width(plan, depth)
-        var lateral_limit := ceili(half_width + 1.0)
-        for lateral in range(-lateral_limit, lateral_limit + 1):
+        var row_lateral_limit := maxi(lateral_limit, ceili(half_width + 2.0))
+        for lateral in range(-row_lateral_limit, row_lateral_limit + 1):
             if not cave_mouth_cell_inside_semicircle(plan, depth, lateral, false):
                 continue
-            var cell: Vector2i = entrance + inward * int(depth) + right * int(lateral)
-            lookup[cell] = true
+            var anchor: Vector2i = entrance + inward * int(depth) + right * int(lateral)
+            for dz in range(-1, 2):
+                for dx in range(-1, 2):
+                    lookup[anchor + Vector2i(dx, dz)] = true
     var cells: Array[Vector2i] = []
     for key in lookup.keys():
         cells.append(key)
     return cells
+
+func cave_terrain_quad_cut_by_pipe(plan: Dictionary, cell: Vector2i) -> bool:
+    if main == null:
+        return false
+    var cell_size := float(main.CELL)
+    var samples := [
+        Vector2((float(cell.x) + 0.5) * cell_size, (float(cell.y) + 0.5) * cell_size),
+        Vector2(float(cell.x) * cell_size, float(cell.y) * cell_size),
+        Vector2(float(cell.x + 1) * cell_size, float(cell.y) * cell_size),
+        Vector2(float(cell.x) * cell_size, float(cell.y + 1) * cell_size),
+        Vector2(float(cell.x + 1) * cell_size, float(cell.y + 1) * cell_size)
+    ]
+    var inside_samples := 0
+    for index in range(samples.size()):
+        var point: Vector2 = samples[index]
+        if not cave_terrain_pipe_cut_depth_accepts_point(plan, point):
+            continue
+        if cave_terrain_pipe_volume_contains_point(plan, point):
+            inside_samples += 1
+            if index == 0:
+                return true
+    return inside_samples >= 2
+
+func cave_terrain_pipe_cut_depth_accepts_point(plan: Dictionary, point: Vector2) -> bool:
+    var axes := cave_mouth_depth_lateral_for_point(plan, point)
+    var depth := axes.x
+    if depth < -0.15:
+        return false
+    var interior_depth := float(maxi(1, int(plan.get("entranceOpenDepth", CAVE_MOUTH_INTERIOR_DEPTH))))
+    if depth > interior_depth + 0.85:
+        return false
+    var width := cave_mouth_width_for_depth_float(plan, depth)
+    return width > 0.0 and absf(axes.y) <= width + 0.85
+
+func cave_terrain_pipe_volume_contains_point(plan: Dictionary, point: Vector2) -> bool:
+    if cave_interior_builder != null and cave_interior_builder.has_method("cave_volume_value"):
+        return float(cave_interior_builder.call("cave_volume_value", plan, point)) <= 1.08
+    var axes := cave_mouth_depth_lateral_for_point(plan, point)
+    var width := cave_mouth_width_for_depth_float(plan, axes.x)
+    if width <= 0.0:
+        return false
+    return absf(axes.y) <= width
+
+func cave_mouth_depth_lateral_for_point(plan: Dictionary, point: Vector2) -> Vector2:
+    var cell_size := float(main.CELL)
+    var entrance: Vector2i = plan.get("entranceCell", Vector2i.ZERO)
+    var inward_cell: Vector2i = plan.get("inward", Vector2i(0, 1))
+    var right_cell: Vector2i = plan.get("right", Vector2i(1, 0))
+    var inward := Vector2(float(inward_cell.x), float(inward_cell.y))
+    var right := Vector2(float(right_cell.x), float(right_cell.y))
+    if inward.length() <= 0.01:
+        inward = Vector2(0.0, 1.0)
+    if right.length() <= 0.01:
+        right = Vector2(1.0, 0.0)
+    inward = inward.normalized()
+    right = right.normalized()
+    var delta := (point - Vector2(float(entrance.x) * cell_size, float(entrance.y) * cell_size)) / cell_size
+    return Vector2(delta.dot(inward), delta.dot(right))
+
+func cave_mouth_width_for_depth_float(plan: Dictionary, depth: float) -> float:
+    var interior_depth := float(maxi(1, int(plan.get("entranceOpenDepth", CAVE_MOUTH_INTERIOR_DEPTH))))
+    var mouth_width := float(plan.get("entranceMouthHalfWidth", CAVE_MOUTH_HALF_WIDTH))
+    if depth < -0.25 or depth > interior_depth + 1.25:
+        return 0.0
+    if depth <= 2.0:
+        return maxf(mouth_width, CAVE_MOUTH_HALF_WIDTH)
+    var taper_t := smoothstep(2.0, interior_depth + 1.25, depth)
+    return lerpf(maxf(mouth_width, CAVE_MOUTH_HALF_WIDTH), 2.20, taper_t)
 
 func cave_opening_height_for_cell(plan: Dictionary, cell: Vector2i, current_height := INF) -> float:
     var entrance: Vector2i = plan.get("entranceCell", Vector2i.ZERO)

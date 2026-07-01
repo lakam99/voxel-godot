@@ -680,7 +680,7 @@ func cave_mouth_terrain_passed(summary: Dictionary) -> bool:
     return int(summary.get("openingCells", 0)) > 0 \
         and int(summary.get("editedOpeningCells", 0)) == int(summary.get("openingCells", 0)) \
         and int(summary.get("editedPortalCells", 0)) == int(summary.get("portalCells", -1)) \
-        and int(summary.get("hiddenPortalCells", 999)) == 0 \
+        and int(summary.get("hiddenPortalCells", 0)) == int(summary.get("portalCells", -1)) \
         and int(summary.get("editedInteriorWalkableCells", 999)) == 0 \
         and float(summary.get("openingToWalkableRatio", 1.0)) <= 0.45 \
         and int(summary.get("stoneOverrideCells", 0)) == int(summary.get("openingCells", 0))
@@ -816,7 +816,7 @@ func cave_mouth_access_summary() -> Dictionary:
 
 func cave_mouth_access_passed(summary: Dictionary) -> bool:
     return int(summary.get("portalCells", 0)) > 0 \
-        and int(summary.get("hiddenPortalCells", 999)) == 0 \
+        and int(summary.get("hiddenPortalCells", 0)) == int(summary.get("portalCells", -1)) \
         and float(summary.get("outsideHeightRange", 999.0)) <= CELL * 1.25 \
         and float(summary.get("maxCenterRouteStep", 999.0)) <= CELL * 0.85 \
         and float(summary.get("minPlayerClearance", 0.0)) >= CELL * 2.05 \
