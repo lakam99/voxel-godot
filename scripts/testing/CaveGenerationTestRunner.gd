@@ -174,6 +174,8 @@ func test_cave_build_interior_and_book_loot() -> void:
         and int(summary.get("torches", 0)) >= 2 \
         and int(summary.get("torches", 0)) <= 6 \
         and int(summary.get("smallTorches", 0)) == int(summary.get("torches", 0)) \
+        and int(summary.get("wallMountedTorches", 0)) == int(summary.get("torches", 0)) \
+        and int(summary.get("validWallTorchNormals", 0)) == int(summary.get("torches", 0)) \
         and int(summary.get("caveBlockNonCaveLayerVisuals", 0)) == 0 \
         and int(summary.get("pathBlocks", 0)) == 0 \
         and int(summary.get("wallBlocks", 0)) == 0 \
@@ -248,6 +250,8 @@ func test_cave_save_load_persistence() -> void:
         and float(restored_summary.get("floorHeightRange", 0.0)) >= 0.35 \
         and float(restored_summary.get("maxFloorNeighborStep", 999.0)) <= CELL * 0.60 \
         and int(restored_summary.get("smallTorches", 0)) == int(restored_summary.get("torches", 0)) \
+        and int(restored_summary.get("wallMountedTorches", 0)) == int(restored_summary.get("torches", 0)) \
+        and int(restored_summary.get("validWallTorchNormals", 0)) == int(restored_summary.get("torches", 0)) \
         and int(restored_summary.get("caveBlockNonCaveLayerVisuals", 0)) == 0 \
         and int(restored_summary.get("finalChests", 0)) == 1 \
         and int(restored_terrain.get("stoneOverrideCells", 0)) >= int(restored_terrain.get("walkableCells", 0)) \
@@ -362,6 +366,8 @@ func cave_block_summary(plan: Dictionary) -> Dictionary:
     var wall_blocks := 0
     var torches := 0
     var small_torches := 0
+    var wall_mounted_torches := 0
+    var valid_wall_torch_normals := 0
     var final_chests := 0
     var final_chest_has_book := false
     var cave_block_layer_summary := { "visuals": 0, "nonCaveLayerVisuals": 0 }
@@ -380,6 +386,11 @@ func cave_block_summary(plan: Dictionary) -> Dictionary:
             torches += 1
             if float(block.get_meta("torchVisualScale", 1.0)) <= 0.36:
                 small_torches += 1
+            if bool(block.get_meta("torchWallMount", false)):
+                wall_mounted_torches += 1
+            var wall_normal := Vector2i(int(block.get_meta("torchWallNormalX", 0)), int(block.get_meta("torchWallNormalZ", 0)))
+            if abs(wall_normal.x) + abs(wall_normal.y) == 1:
+                valid_wall_torch_normals += 1
         if block_type == "chest" and role == "final_chest":
             final_chests += 1
             final_chest_has_book = final_chest_has_book or chest_has_crafting_book(block)
@@ -391,6 +402,8 @@ func cave_block_summary(plan: Dictionary) -> Dictionary:
         "wallBlocks": wall_blocks,
         "torches": torches,
         "smallTorches": small_torches,
+        "wallMountedTorches": wall_mounted_torches,
+        "validWallTorchNormals": valid_wall_torch_normals,
         "finalChests": final_chests,
         "finalChestHasCraftingBook": final_chest_has_book,
         "heightEditCells": edits.size(),

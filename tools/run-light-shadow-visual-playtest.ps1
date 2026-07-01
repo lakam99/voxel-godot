@@ -107,6 +107,7 @@ $requiredScreenshots = @(
     "doorway_hut_light_bleed.png",
     "cave_entrance_daylight.png",
     "deep_cave_noon_dark.png",
+    "final_chamber_wall_torch.png",
     "deep_cave_torch_lit.png"
 )
 foreach ($fileName in $requiredScreenshots) {

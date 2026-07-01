@@ -11,6 +11,7 @@ const REQUIRED_CAPTURE_STAGES := [
     "doorway_hut_light_bleed",
     "cave_entrance_daylight",
     "deep_cave_noon_dark",
+    "final_chamber_wall_torch",
     "deep_cave_torch_lit"
 ]
 const ACCEPTANCE_CLAIMS := [
@@ -102,10 +103,15 @@ func run() -> void:
     await capture_stage("doorway_hut_light_bleed", doorway_hut["insideEye"], doorway_hut["outsideTarget"])
     await capture_stage("cave_entrance_daylight", cave_entrance_eye(), cave_entrance_target())
     await capture_stage("deep_cave_noon_dark", cave_deep_eye(), cave_deep_target())
-    var torch := place_deep_cave_torch()
-    await wait_process_frames(12)
-    add_result("light_shadow_cave_torch_spawned", torch != null, torch.name if torch != null else "missing")
-    await capture_stage("deep_cave_torch_lit", cave_deep_eye(), cave_deep_target())
+    var torch := final_chamber_wall_torch()
+    var torch_valid := final_chamber_wall_torch_is_valid(torch)
+    add_result("light_shadow_final_chamber_wall_torch_found", torch_valid, JSON.stringify(torch_summary(torch)))
+    if torch_valid:
+        await capture_stage("final_chamber_wall_torch", final_chamber_wall_torch_eye(torch), final_chamber_wall_torch_target(torch))
+        await capture_stage("deep_cave_torch_lit", final_chamber_wall_torch_eye(torch), final_chamber_wall_torch_flame_target(torch))
+    else:
+        add_result("capture_final_chamber_wall_torch_saved", false, "missing generated final-chamber wall torch")
+        add_result("capture_deep_cave_torch_lit_saved", false, "missing generated final-chamber wall torch")
 
     add_result("light_shadow_required_screenshots_saved", required_captures_saved(), JSON.stringify(capture_names()))
     add_luminance_assertions()
@@ -294,24 +300,81 @@ func cave_deep_target() -> Vector3:
     var right: Vector2i = cave_plan.get("right", Vector2i(-inward.y, inward.x))
     return cave_world_for_cell(sample + right * 3, 1.10)
 
-func place_deep_cave_torch() -> StaticBody3D:
+func final_chamber_wall_torch() -> StaticBody3D:
     if main == null or cave_plan.is_empty():
         return null
-    var sample := deep_tunnel_cell()
-    var inward: Vector2i = cave_plan.get("inward", Vector2i(0, 1))
-    var right: Vector2i = cave_plan.get("right", Vector2i(-inward.y, inward.x))
-    var torch_cell := sample + right * 2
-    var level := float(cave_plan.get("level", 0.0))
-    var world_y := level + CELL * 0.48
-    var cell_y := floori(world_y / CELL) + 1
-    var block = main.create_block(Vector3i(torch_cell.x, cell_y, torch_cell.y), "torch", {
-        "generated": true,
-        "world_y": world_y,
-        "generatedTier": "light_test",
-        "cacheKey": "light-shadow",
-        "torchVisualScale": 0.45
-    })
-    return block
+    var cave_id := String(cave_plan.get("id", ""))
+    var target_cell: Vector2i = cave_plan.get("finalChestCell", cave_plan.get("finalChamberCell", Vector2i.ZERO))
+    var blocks_value = main.get("blocks")
+    if not (blocks_value is Dictionary):
+        return null
+    var best: StaticBody3D = null
+    var best_distance := INF
+    for block_value in (blocks_value as Dictionary).values():
+        var block := block_value as StaticBody3D
+        if block == null or not is_instance_valid(block):
+            continue
+        if String(block.get_meta("generatedTier", "")) != "cave":
+            continue
+        if String(block.get_meta("caveId", "")) != cave_id:
+            continue
+        if String(block.get_meta("block_type", "")) != "torch":
+            continue
+        if not final_chamber_wall_torch_is_valid(block):
+            continue
+        var cell := block_cell2(block)
+        var distance := cell.distance_to(target_cell)
+        if distance < best_distance:
+            best_distance = distance
+            best = block
+    return best
+
+func final_chamber_wall_torch_is_valid(torch: StaticBody3D) -> bool:
+    if torch == null or not is_instance_valid(torch):
+        return false
+    var normal := torch_wall_normal(torch)
+    return bool(torch.get_meta("torchWallMount", false)) and abs(normal.x) + abs(normal.y) == 1
+
+func final_chamber_wall_torch_eye(torch: StaticBody3D) -> Vector3:
+    var cell := block_cell2(torch)
+    var normal := torch_wall_normal(torch)
+    if normal == Vector2i.ZERO:
+        normal = cave_plan.get("inward", Vector2i(0, 1))
+    return cave_world_for_cell(cell + normal * 3, 1.45)
+
+func final_chamber_wall_torch_target(torch: StaticBody3D) -> Vector3:
+    var torch_world := final_chamber_wall_torch_flame_target(torch)
+    var chest_cell: Vector2i = cave_plan.get("finalChestCell", cave_plan.get("finalChamberCell", block_cell2(torch)))
+    var chest_world := cave_world_for_cell(chest_cell, 0.65)
+    return torch_world.lerp(chest_world, 0.28)
+
+func final_chamber_wall_torch_flame_target(torch: StaticBody3D) -> Vector3:
+    var cell := block_cell2(torch)
+    return cave_world_for_cell(cell, 0.72)
+
+func block_cell2(block: Node) -> Vector2i:
+    if block == null:
+        return Vector2i.ZERO
+    var cell: Vector3i = block.get_meta("cell", Vector3i.ZERO)
+    return Vector2i(cell.x, cell.z)
+
+func torch_wall_normal(torch: Node) -> Vector2i:
+    if torch == null:
+        return Vector2i.ZERO
+    return Vector2i(int(torch.get_meta("torchWallNormalX", 0)), int(torch.get_meta("torchWallNormalZ", 0)))
+
+func torch_summary(torch: StaticBody3D) -> Dictionary:
+    if torch == null or not is_instance_valid(torch):
+        return { "found": false }
+    return {
+        "found": true,
+        "name": torch.name,
+        "cell": vec2i(block_cell2(torch)),
+        "wallMounted": bool(torch.get_meta("torchWallMount", false)),
+        "wallNormal": vec2i(torch_wall_normal(torch)),
+        "role": String(torch.get_meta("caveRole", "")),
+        "caveId": String(torch.get_meta("caveId", ""))
+    }
 
 func deep_tunnel_cell() -> Vector2i:
     var entrance: Vector2i = cave_plan.get("entranceCell", Vector2i.ZERO)

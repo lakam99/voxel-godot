@@ -1426,19 +1426,24 @@ func cave_wall_torch_anchor(plan: Dictionary, preferred_cell: Vector2i) -> Dicti
         "normal": Vector2i.ZERO,
         "score": 999999
     }
-    for radius in range(0, 5):
-        for dir in directions:
-            var walk_cell: Vector2i = preferred_cell + dir * radius
-            var wall_cell: Vector2i = walk_cell + dir
-            if not floor_lookup.has(walk_cell):
-                continue
-            if floor_lookup.has(wall_cell):
-                continue
-            var score: int = radius * 10 + abs(walk_cell.x - preferred_cell.x) + abs(walk_cell.y - preferred_cell.y)
-            if score < int(best.get("score", 999999)):
-                best["cell"] = walk_cell
-                best["normal"] = -dir
-                best["score"] = score
+    for radius in range(0, 9):
+        for dx in range(-radius, radius + 1):
+            for dz in range(-radius, radius + 1):
+                if maxi(abs(dx), abs(dz)) != radius:
+                    continue
+                var walk_cell: Vector2i = preferred_cell + Vector2i(dx, dz)
+                if not floor_lookup.has(walk_cell):
+                    continue
+                for dir in directions:
+                    var wall_cell: Vector2i = walk_cell + dir
+                    if floor_lookup.has(wall_cell):
+                        continue
+                    var distance_score: int = abs(walk_cell.x - preferred_cell.x) + abs(walk_cell.y - preferred_cell.y)
+                    var score: int = radius * 10 + distance_score
+                    if score < int(best.get("score", 999999)):
+                        best["cell"] = walk_cell
+                        best["normal"] = -dir
+                        best["score"] = score
     return best
 
 func torch_wall_facing(normal: Vector2i) -> float:
