@@ -35,7 +35,6 @@ func build(plan: Dictionary, rng: RandomNumberGenerator, metadata: Dictionary = 
 
     var visual_mesh := build_visual_mesh(plan, rng)
     var formation_mesh := build_formation_mesh(plan, rng)
-    var collision_mesh := build_collision_mesh(plan)
     var visual := MeshInstance3D.new()
     visual.name = "CaveInteriorVisual"
     visual.mesh = visual_mesh
@@ -59,11 +58,10 @@ func build(plan: Dictionary, rng: RandomNumberGenerator, metadata: Dictionary = 
     formations.layers = CAVE_VISUAL_LAYER
     formations.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
     root.add_child(formations)
-    add_mouth_arch_visual(root, plan)
 
     var body := StaticBody3D.new()
     body.name = "CaveInteriorBody"
-    body.collision_layer = 2
+    body.collision_layer = 1 | 2
     body.collision_mask = 0
     body.set_meta("kind", "terrain")
     body.set_meta("generated", true)
@@ -72,7 +70,7 @@ func build(plan: Dictionary, rng: RandomNumberGenerator, metadata: Dictionary = 
     body.set_meta("caveRole", "interior_collision")
     var collision := CollisionShape3D.new()
     collision.name = "CaveInteriorCollision"
-    collision.shape = collision_mesh.create_trimesh_shape()
+    collision.shape = visual_mesh.create_trimesh_shape()
     body.add_child(collision)
     root.add_child(body)
     add_support_frames(root, plan)
@@ -809,10 +807,14 @@ func is_entrance_mouth_edge(plan: Dictionary, point: Vector2, direction: Vector2
     var delta := (point - cell_world2(entrance)) / cell_size
     var depth := delta.dot(Vector2(float(inward.x), float(inward.y)))
     var lateral := delta.dot(Vector2(float(right.x), float(right.y)))
-    var mouth_width := float(plan.get("entranceMouthHalfWidth", 3.85))
-    if depth >= -0.35 and depth <= 4.25 and absf(lateral) <= mouth_width + 0.80:
-        return true
-    return direction == outward and depth <= 2.8 and depth >= -1.2 and absf(lateral) <= mouth_width + 0.65
+    if direction != outward:
+        return false
+    if depth < -1.15 or depth > 1.35:
+        return false
+    var mouth_width := cave_mouth_width_at_depth(plan, maxf(0.0, depth))
+    if mouth_width <= 0.0:
+        mouth_width = float(plan.get("entranceMouthHalfWidth", 3.85))
+    return absf(lateral) <= mouth_width + 0.50
 
 func is_entrance_mouth_visual_opening(plan: Dictionary, point: Vector2) -> bool:
     var axes := cave_mouth_depth_lateral(plan, point)

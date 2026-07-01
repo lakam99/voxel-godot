@@ -12,6 +12,8 @@ const CAVE_MOUTH_APPROACH_DEPTH := 7
 const CAVE_MOUTH_INTERIOR_DEPTH := 7
 const CAVE_MOUTH_HALF_WIDTH := 3.85
 const CAVE_MOUTH_CLEARANCE := 3.05
+const CAVE_MIN_CORRIDOR_RADIUS_CELLS := 1.55
+const CAVE_TIGHT_CORRIDOR_RADIUS_CELLS := 1.70
 
 var main
 var loot
@@ -662,10 +664,10 @@ func cave_graph_edge(edge_id: String, from_id: String, to_id: String, radius: fl
 func cave_edge_radius(cave_id: String, edge_id: String, base_radius: float) -> float:
     var roll: float = main.hash01("cave-edge-tightness:%s:%s" % [cave_id, edge_id])
     if roll < 0.42:
-        return maxf(0.86, base_radius * 0.58)
+        return maxf(CAVE_MIN_CORRIDOR_RADIUS_CELLS, base_radius * 0.82)
     if roll < 0.72:
-        return maxf(1.05, base_radius * 0.78)
-    return base_radius
+        return maxf(CAVE_TIGHT_CORRIDOR_RADIUS_CELLS, base_radius * 0.92)
+    return maxf(CAVE_TIGHT_CORRIDOR_RADIUS_CELLS, base_radius)
 
 func cave_graph_node_cell(nodes: Array, node_id: String, fallback: Vector2i) -> Vector2i:
     for node_value in nodes:
@@ -1315,7 +1317,6 @@ func apply_cave_terrain_edits(plan: Dictionary) -> void:
         cave_prop_exclusion_cells[opening_cell] = true
     for cell_value in portal_cells:
         var portal_cell: Vector2i = cell_value
-        cave_terrain_hole_cells[portal_cell] = true
         cave_prop_exclusion_cells[portal_cell] = true
     var height_cells := unique_cave_cells(opening_cells, portal_cells)
     var edited := {}
@@ -1335,7 +1336,7 @@ func terrain_material_override_for_cell(x: int, z: int) -> String:
     return "stone" if cave_terrain_cells.has(Vector2i(x, z)) else ""
 
 func terrain_quad_hidden_for_cell(x: int, z: int) -> bool:
-    return cave_terrain_hole_cells.has(Vector2i(x, z))
+    return false
 
 func blocks_natural_prop_at_cell(x: int, z: int) -> bool:
     return cave_prop_exclusion_cells.has(Vector2i(x, z))
@@ -1578,7 +1579,7 @@ func cave_mouth_portal_cells(plan: Dictionary) -> Array[Vector2i]:
     var inward: Vector2i = plan.get("inward", Vector2i(0, 1))
     var right: Vector2i = plan.get("right", Vector2i(1, 0))
     var interior_depth := int(plan.get("entranceOpenDepth", CAVE_MOUTH_INTERIOR_DEPTH))
-    for depth in range(0, interior_depth + 1):
+    for depth in range(1, interior_depth + 1):
         var half_width := cave_mouth_half_width(plan, depth)
         var lateral_limit := ceili(half_width + 1.0)
         for lateral in range(-lateral_limit, lateral_limit + 1):

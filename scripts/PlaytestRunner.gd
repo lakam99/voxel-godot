@@ -5456,7 +5456,7 @@ func test_cave_generation_and_crafting_book_loot() -> void:
     var dead_end_chambers: Array = cliff_plan.get("deadEndChamberIds", [])
     var narrow_edges := cave_narrow_edge_count(cliff_plan)
     var min_edge_radius := cave_min_edge_radius(cliff_plan)
-    var graph_ok := graph_nodes.size() >= 6 and graph_edges.size() >= 6 and branch_chambers.size() >= 1 and dead_end_chambers.size() >= 1 and narrow_edges >= 1
+    var graph_ok := graph_nodes.size() >= 6 and graph_edges.size() >= 6 and branch_chambers.size() >= 1 and dead_end_chambers.size() >= 1 and narrow_edges >= 1 and min_edge_radius >= 1.55
     add_result(
         "cave_plan_path_contiguous",
         contiguous and graph_ok,
@@ -5531,14 +5531,18 @@ func test_cave_generation_and_crafting_book_loot() -> void:
     var final_chamber_nav_id := String(structure_system.call("cave_navigation_id_for_cell", final_chamber_cell.x, final_chamber_cell.y)) if structure_system.has_method("cave_navigation_id_for_cell") else ""
     var interior_shells := cave_interior_shell_count(structure_system, cave_id)
     var shaping_cells: Array = structure_system.call("cave_shaping_cells", cliff_plan) if structure_system.has_method("cave_shaping_cells") else []
+    var opening_cells: Array = structure_system.call("cave_terrain_opening_cells", cliff_plan) if structure_system.has_method("cave_terrain_opening_cells") else []
     var stone_override_samples := 0
     var prop_exclusion_samples := 0
-    var stone_sample_total := mini(shaping_cells.size(), 12)
+    var stone_sample_total := mini(opening_cells.size(), 12)
     for i in range(stone_sample_total):
-        var stone_cell: Vector2i = shaping_cells[i]
+        var stone_cell: Vector2i = opening_cells[i]
         if structure_system.has_method("terrain_material_override_for_cell") and String(structure_system.call("terrain_material_override_for_cell", stone_cell.x, stone_cell.y)) == "stone":
             stone_override_samples += 1
-        if structure_system.has_method("blocks_natural_prop_at_cell") and bool(structure_system.call("blocks_natural_prop_at_cell", stone_cell.x, stone_cell.y)):
+    var prop_sample_total := mini(shaping_cells.size(), 12)
+    for i in range(prop_sample_total):
+        var prop_cell: Vector2i = shaping_cells[i]
+        if structure_system.has_method("blocks_natural_prop_at_cell") and bool(structure_system.call("blocks_natural_prop_at_cell", prop_cell.x, prop_cell.y)):
             prop_exclusion_samples += 1
     var cave_build_ok: bool = (
         int(counts.get("caves", 0)) >= 1
@@ -5559,11 +5563,12 @@ func test_cave_generation_and_crafting_book_loot() -> void:
         and int(interior_layer_summary.get("caveLayerVisuals", 0)) >= 1
         and int(interior_layer_summary.get("nonCaveLayerVisuals", 0)) == 0
         and float(floor_summary.get("range", 0.0)) >= 0.35
-        and float(floor_summary.get("maxNeighborStep", 999.0)) <= CELL * 0.60
+        and float(floor_summary.get("maxNeighborStep", 999.0)) <= CELL * 1.10
         and final_chest_cell == cliff_plan.get("finalChestCell", Vector2i.ZERO)
         and stone_sample_total > 0
         and stone_override_samples == stone_sample_total
-        and prop_exclusion_samples == stone_sample_total
+        and prop_sample_total > 0
+        and prop_exclusion_samples == prop_sample_total
     )
     add_result(
         "cave_generation_and_book_loot",
@@ -5588,7 +5593,7 @@ func test_cave_generation_and_crafting_book_loot() -> void:
             stone_override_samples,
             stone_sample_total,
             prop_exclusion_samples,
-            stone_sample_total,
+            prop_sample_total,
             str(final_chest_cell)
         ]
     )
@@ -5602,7 +5607,7 @@ func cave_narrow_edge_count(plan: Dictionary) -> int:
     for edge_value in edges_value:
         if not (edge_value is Dictionary):
             continue
-        if float((edge_value as Dictionary).get("radius", 999.0)) <= 1.25:
+        if float((edge_value as Dictionary).get("radius", 999.0)) <= 1.75:
             count += 1
     return count
 

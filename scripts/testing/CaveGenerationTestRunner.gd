@@ -171,6 +171,7 @@ func test_cave_build_interior_and_book_loot() -> void:
         and int(summary.get("interiorShells", 0)) == 1 \
         and int(summary.get("interiorMeshes", 0)) >= 1 \
         and int(summary.get("interiorCollisionBodies", 0)) >= 1 \
+        and int(summary.get("interiorPlayerBlockingBodies", 0)) == int(summary.get("interiorCollisionBodies", -1)) \
         and int(summary.get("supportFrames", 0)) >= 1 \
         and int(summary.get("supportFrames", 0)) <= 2 \
         and int(summary.get("interiorCaveLayerVisuals", 0)) >= 1 \
@@ -195,6 +196,7 @@ func test_cave_build_interior_and_book_loot() -> void:
         and int(terrain_summary.get("editedOpeningCells", 0)) == int(terrain_summary.get("openingCells", 0)) \
         and int(terrain_summary.get("editedInteriorWalkableCells", 999)) == 0 \
         and int(terrain_summary.get("editedPortalCells", 0)) == int(terrain_summary.get("portalCells", -1)) \
+        and int(terrain_summary.get("hiddenPortalCells", 999)) == 0 \
         and float(terrain_summary.get("openingToWalkableRatio", 1.0)) <= 0.45 \
         and int(terrain_summary.get("stoneOverrideCells", 0)) == int(terrain_summary.get("openingCells", 0)) \
         and int(terrain_summary.get("propExclusionCells", 0)) == int(terrain_summary.get("shapingCells", 0)) \
@@ -261,6 +263,8 @@ func test_cave_save_load_persistence() -> void:
         and restored_chest != null \
         and restored_slot_ok \
         and int(restored_summary.get("interiorShells", 0)) == 1 \
+        and int(restored_summary.get("interiorCollisionBodies", 0)) >= 1 \
+        and int(restored_summary.get("interiorPlayerBlockingBodies", 0)) == int(restored_summary.get("interiorCollisionBodies", -1)) \
         and int(restored_summary.get("supportFrames", 0)) >= 1 \
         and int(restored_summary.get("supportFrames", 0)) <= 2 \
         and int(restored_summary.get("interiorNonCaveLayerVisuals", 0)) == 0 \
@@ -277,6 +281,7 @@ func test_cave_save_load_persistence() -> void:
         and int(restored_summary.get("finalChests", 0)) == 1 \
         and int(restored_terrain.get("editedInteriorWalkableCells", 999)) == 0 \
         and int(restored_terrain.get("editedPortalCells", 0)) == int(restored_terrain.get("portalCells", -1)) \
+        and int(restored_terrain.get("hiddenPortalCells", 999)) == 0 \
         and float(restored_terrain.get("openingToWalkableRatio", 1.0)) <= 0.45 \
         and int(restored_terrain.get("stoneOverrideCells", 0)) == int(restored_terrain.get("openingCells", 0)) \
         and int(restored_terrain.get("propExclusionCells", 0)) == int(restored_terrain.get("shapingCells", 0)) \
@@ -328,7 +333,7 @@ func cave_graph_summary(plan: Dictionary) -> Dictionary:
         var edge: Dictionary = edge_value
         var radius := float(edge.get("radius", 0.0))
         min_edge_radius = minf(min_edge_radius, radius)
-        if radius <= 1.25:
+        if radius <= 1.75:
             narrow_edge_count += 1
     var chest_cell: Vector2i = plan.get("finalChestCell", Vector2i.ZERO)
     var chest_distance := Vector2(float(chest_cell.x - final_cell.x), float(chest_cell.y - final_cell.y)).length()
@@ -535,6 +540,7 @@ func cave_block_summary(plan: Dictionary) -> Dictionary:
         "interiorShells": int(interior.get("shells", 0)),
         "interiorMeshes": int(interior.get("meshes", 0)),
         "interiorCollisionBodies": int(interior.get("collisionBodies", 0)),
+        "interiorPlayerBlockingBodies": int(interior.get("playerBlockingBodies", 0)),
         "supportFrames": int(interior.get("supportFrames", 0)),
         "interiorCaveLayerVisuals": int(interior.get("caveLayerVisuals", 0)),
         "interiorNonCaveLayerVisuals": int(interior.get("nonCaveLayerVisuals", 0)),
@@ -653,6 +659,7 @@ func cave_mouth_access_summary(plan: Dictionary) -> Dictionary:
     var mouth_rows_checked := 0
     var arch_center_clearance := 0.0
     var arch_side_clearance := 0.0
+    var front_floor_gap := 0.0
     var mouth_width := float(plan.get("entranceMouthHalfWidth", 0.0))
     if builder.has_method("rendered_shell_inside_at_point"):
         var lateral_limit := ceili(mouth_width + 0.5)
@@ -697,6 +704,7 @@ func cave_mouth_access_summary(plan: Dictionary) -> Dictionary:
         var center_ceiling_value = builder.call("ceiling_point", plan, cave_cell_world2(entrance))
         if center_floor_value is Vector3 and center_ceiling_value is Vector3:
             arch_center_clearance = float((center_ceiling_value as Vector3).y - (center_floor_value as Vector3).y)
+            front_floor_gap = absf(float(main.call("terrain_height_cell", entrance.x, entrance.y)) - float((center_floor_value as Vector3).y))
         var side_lateral := maxi(1, roundi(mouth_width * 0.82))
         var side_cell := entrance + right * side_lateral
         var side_floor_value = builder.call("floor_point", plan, cave_cell_world2(side_cell))
@@ -737,12 +745,13 @@ func cave_mouth_access_summary(plan: Dictionary) -> Dictionary:
         "frontArchCenterClearance": snappedf(arch_center_clearance, 0.001),
         "frontArchSideClearance": snappedf(arch_side_clearance, 0.001),
         "frontArchRise": snappedf(arch_center_clearance - arch_side_clearance, 0.001),
+        "frontFloorGap": snappedf(front_floor_gap, 0.001),
         "entranceCell": vec2i(entrance)
     }
 
 func cave_mouth_access_passed(summary: Dictionary) -> bool:
     return int(summary.get("portalCells", 0)) > 0 \
-        and int(summary.get("hiddenPortalCells", 0)) == int(summary.get("portalCells", -1)) \
+        and int(summary.get("hiddenPortalCells", 999)) == 0 \
         and float(summary.get("outsideHeightRange", 999.0)) <= CELL * 1.25 \
         and float(summary.get("maxCenterRouteStep", 999.0)) <= CELL * 0.85 \
         and float(summary.get("minPlayerClearance", 0.0)) >= CELL * 2.05 \
@@ -754,6 +763,7 @@ func cave_mouth_access_passed(summary: Dictionary) -> bool:
         and int(summary.get("jaggedMouthRows", 999)) == 0 \
         and int(summary.get("blockedCenterSamples", 999)) == 0 \
         and int(summary.get("exteriorShellSamples", 999)) == 0 \
+        and float(summary.get("frontFloorGap", 999.0)) <= CELL * 0.30 \
         and float(summary.get("frontArchRise", 0.0)) >= CELL * 0.55
 
 func cave_negative_y_growth_summary(plan: Dictionary) -> Dictionary:
@@ -972,6 +982,7 @@ func cave_interior_summary(plan: Dictionary) -> Dictionary:
     var shells := 0
     var meshes := 0
     var collision_bodies := 0
+    var player_blocking_bodies := 0
     var support_frames := 0
     var layer_summary := { "visuals": 0, "nonCaveLayerVisuals": 0 }
     for node_value in nodes.values():
@@ -983,6 +994,7 @@ func cave_interior_summary(plan: Dictionary) -> Dictionary:
         shells += 1
         meshes += count_cave_interior_visuals(node)
         collision_bodies += count_cave_interior_bodies(node)
+        player_blocking_bodies += count_cave_interior_player_blocking_bodies(node)
         support_frames += count_cave_support_frames(node)
         add_cave_layer_summary(layer_summary, node)
     var floor_summary := cave_floor_variation_summary(plan)
@@ -990,6 +1002,7 @@ func cave_interior_summary(plan: Dictionary) -> Dictionary:
         "shells": shells,
         "meshes": meshes,
         "collisionBodies": collision_bodies,
+        "playerBlockingBodies": player_blocking_bodies,
         "supportFrames": support_frames,
         "caveLayerVisuals": int(layer_summary.get("visuals", 0)) - int(layer_summary.get("nonCaveLayerVisuals", 0)),
         "nonCaveLayerVisuals": int(layer_summary.get("nonCaveLayerVisuals", 0)),
@@ -1011,6 +1024,16 @@ func count_cave_interior_bodies(node: Node) -> int:
         count += 1
     for child in node.get_children():
         count += count_cave_interior_bodies(child)
+    return count
+
+func count_cave_interior_player_blocking_bodies(node: Node) -> int:
+    var count := 0
+    if node is StaticBody3D and node.name == "CaveInteriorBody":
+        var body := node as StaticBody3D
+        if (int(body.collision_layer) & 1) != 0:
+            count += 1
+    for child in node.get_children():
+        count += count_cave_interior_player_blocking_bodies(child)
     return count
 
 func count_cave_support_frames(node: Node) -> int:

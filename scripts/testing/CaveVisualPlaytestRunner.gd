@@ -533,7 +533,7 @@ func cave_graph_summary() -> Dictionary:
         var edge: Dictionary = edge_value
         var radius := float(edge.get("radius", 0.0))
         min_edge_radius = minf(min_edge_radius, radius)
-        if radius <= 1.25:
+        if radius <= 1.75:
             narrow_edge_count += 1
     return {
         "nodeCount": nodes.size(),
@@ -680,6 +680,7 @@ func cave_mouth_terrain_passed(summary: Dictionary) -> bool:
     return int(summary.get("openingCells", 0)) > 0 \
         and int(summary.get("editedOpeningCells", 0)) == int(summary.get("openingCells", 0)) \
         and int(summary.get("editedPortalCells", 0)) == int(summary.get("portalCells", -1)) \
+        and int(summary.get("hiddenPortalCells", 999)) == 0 \
         and int(summary.get("editedInteriorWalkableCells", 999)) == 0 \
         and float(summary.get("openingToWalkableRatio", 1.0)) <= 0.45 \
         and int(summary.get("stoneOverrideCells", 0)) == int(summary.get("openingCells", 0))
@@ -723,6 +724,7 @@ func cave_mouth_access_summary() -> Dictionary:
     var mouth_rows_checked := 0
     var arch_center_clearance := 0.0
     var arch_side_clearance := 0.0
+    var front_floor_gap := 0.0
     var mouth_width := float(plan.get("entranceMouthHalfWidth", 0.0))
     if builder.has_method("rendered_shell_inside_at_point"):
         var lateral_limit := ceili(mouth_width + 0.5)
@@ -767,6 +769,7 @@ func cave_mouth_access_summary() -> Dictionary:
         var center_ceiling_value = builder.call("ceiling_point", plan, cave_cell_world2(entrance))
         if center_floor_value is Vector3 and center_ceiling_value is Vector3:
             arch_center_clearance = float((center_ceiling_value as Vector3).y - (center_floor_value as Vector3).y)
+            front_floor_gap = absf(float(main.call("terrain_height_cell", entrance.x, entrance.y)) - float((center_floor_value as Vector3).y))
         var side_lateral := maxi(1, roundi(mouth_width * 0.82))
         var side_cell := entrance + right * side_lateral
         var side_floor_value = builder.call("floor_point", plan, cave_cell_world2(side_cell))
@@ -807,12 +810,13 @@ func cave_mouth_access_summary() -> Dictionary:
         "frontArchCenterClearance": rounded(arch_center_clearance),
         "frontArchSideClearance": rounded(arch_side_clearance),
         "frontArchRise": rounded(arch_center_clearance - arch_side_clearance),
+        "frontFloorGap": rounded(front_floor_gap),
         "entranceCell": vec2i(entrance)
     }
 
 func cave_mouth_access_passed(summary: Dictionary) -> bool:
     return int(summary.get("portalCells", 0)) > 0 \
-        and int(summary.get("hiddenPortalCells", 0)) == int(summary.get("portalCells", -1)) \
+        and int(summary.get("hiddenPortalCells", 999)) == 0 \
         and float(summary.get("outsideHeightRange", 999.0)) <= CELL * 1.25 \
         and float(summary.get("maxCenterRouteStep", 999.0)) <= CELL * 0.85 \
         and float(summary.get("minPlayerClearance", 0.0)) >= CELL * 2.05 \
@@ -824,6 +828,7 @@ func cave_mouth_access_passed(summary: Dictionary) -> bool:
         and int(summary.get("jaggedMouthRows", 999)) == 0 \
         and int(summary.get("blockedCenterSamples", 999)) == 0 \
         and int(summary.get("exteriorShellSamples", 999)) == 0 \
+        and float(summary.get("frontFloorGap", 999.0)) <= CELL * 0.30 \
         and float(summary.get("frontArchRise", 0.0)) >= CELL * 0.55
 
 func cave_negative_y_growth_summary() -> Dictionary:
