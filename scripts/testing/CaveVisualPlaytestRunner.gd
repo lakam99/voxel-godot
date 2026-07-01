@@ -103,7 +103,7 @@ func run() -> void:
     add_result("cave_visual_interior_shell_generated", cave_interior_shell_generated(), JSON.stringify(cave_vertical_summary()))
     var floor_summary := cave_floor_variation_summary()
     add_result("cave_visual_floor_height_varies_gently", float(floor_summary.get("range", 0.0)) >= 0.35 and float(floor_summary.get("maxNeighborStep", 999.0)) <= CELL * 0.60, JSON.stringify(floor_summary))
-    add_result("cave_visual_daylight_excluded_from_cave_layer", cave_daylight_excluded_from_cave_layer(), JSON.stringify(cave_layer_lighting_summary()))
+    add_result("cave_visual_daylight_shadow_authoritative_on_cave_layer", cave_daylight_shadow_authoritative_on_cave_layer(), JSON.stringify(cave_layer_lighting_summary()))
     add_result("cave_visual_final_chest_has_book", final_chest_has_crafting_book(), JSON.stringify(final_chest_summary()))
     var prop_summary := cave_natural_props_inside_summary()
     add_result("cave_visual_no_natural_props_inside", int(prop_summary.get("count", 0)) == 0, JSON.stringify(prop_summary))
@@ -453,12 +453,12 @@ func cave_floor_variation_summary() -> Dictionary:
         return {}
     return builder.call("floor_variation_summary", plan)
 
-func cave_daylight_excluded_from_cave_layer() -> bool:
+func cave_daylight_shadow_authoritative_on_cave_layer() -> bool:
     var summary := cave_layer_lighting_summary()
     return int(summary.get("caveVisuals", 0)) >= 1 \
         and int(summary.get("nonCaveLayerCaveVisuals", 0)) == 0 \
-        and int(summary.get("sunLightsCaveLayer", 1)) == 0 \
-        and int(summary.get("moonLightsCaveLayer", 1)) == 0
+        and int(summary.get("sunLightsCaveLayer", 0)) == 1 \
+        and int(summary.get("moonLightsCaveLayer", 0)) == 1
 
 func cave_layer_lighting_summary() -> Dictionary:
     var layer_summary := { "caveVisuals": 0, "nonCaveLayerCaveVisuals": 0 }

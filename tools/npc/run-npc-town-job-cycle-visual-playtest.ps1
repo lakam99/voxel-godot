@@ -408,7 +408,7 @@ if ($LASTEXITCODE -ne 0) {
 
 $report = Get-Content -LiteralPath $ReportPath -Raw | ConvertFrom-Json
 Get-Content -LiteralPath $ReportPath
-if ($exitCode -ne 0 -or [int]$report.failureCount -gt 0 -or $report.scriptErrorScan.status -ne "passed") {
+if (($exitCode -ne 0) -or ([int]$report.failureCount -gt 0) -or ($report.scriptErrorScan.status -ne "passed")) {
     exit 1
 }
 

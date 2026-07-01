@@ -359,6 +359,27 @@
       "required": true
     },
     {
+      "id": "light_shadow_visual_playtest",
+      "description": "Headed shadow-authoritative daylight proof for sealed interiors, cave depth darkness, and local torch lighting",
+      "command": ".\\tools\\run-light-shadow-visual-playtest.ps1",
+      "args": ["-Seed", "atlas-1492", "-ReportPath", "artifacts\\test-runners\\light-shadow-visual-playtest.json", "-ScreenshotDir", "artifacts\\test-runners\\screenshots\\light-shadow-visual-playtest"],
+      "reportPath": "artifacts\\test-runners\\light-shadow-visual-playtest.json",
+      "screenshotDir": "artifacts\\test-runners\\screenshots\\light-shadow-visual-playtest",
+      "evidenceLevel": "acceptance_visual",
+      "acceptanceClaims": ["shadow_authoritative_daylight_blocks_sealed_interiors_and_deep_caves"],
+      "requiredScreenshots": [
+        "outdoor_noon_reference.png",
+        "sealed_hut_noon_dark.png",
+        "doorway_hut_light_bleed.png",
+        "cave_entrance_daylight.png",
+        "deep_cave_noon_dark.png",
+        "deep_cave_torch_lit.png"
+      ],
+      "requiresForbiddenCallSelfScan": true,
+      "requiresVisualProof": true,
+      "required": true
+    },
+    {
       "id": "playtest",
       "description": "Broad gameplay continuity playtest; integration smoke only, not NPC/pathfinding acceptance",
       "command": ".\\tools\\run-playtest.ps1",

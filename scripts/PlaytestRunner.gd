@@ -6580,15 +6580,15 @@ func test_environment_visual_style() -> void:
     main.call("update_sky", 0.0)
     var range_ok := noon_sun >= 0.55 \
         and noon_sun <= 1.70 \
-        and noon_ambient >= 0.34 \
-        and noon_ambient <= 0.62 \
+        and noon_ambient >= 0.0 \
+        and noon_ambient <= 0.01 \
         and noon_fog >= 0.002 \
         and noon_fog <= 0.020 \
         and night_sun <= 0.04 \
         and night_moon >= 0.02 \
         and night_moon <= 0.12 \
-        and night_ambient >= 0.02 \
-        and night_ambient <= 0.09 \
+        and night_ambient >= 0.0 \
+        and night_ambient <= 0.01 \
         and night_fog >= 0.004 \
         and night_fog <= 0.030 \
         and night_fog_energy <= 0.14 \

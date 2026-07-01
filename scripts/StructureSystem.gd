@@ -1322,7 +1322,7 @@ func build_cave_entrance_arch(plan: Dictionary, level: float, base_options: Dict
         var cap_cell: Vector2i = entrance + right * top_offset
         place_structure_block(cap_cell.x, cap_cell.y, level, 3, "stoneBlock", cave_options(base_options, "entrance_arch", 3))
     for torch_cell in [entrance + right * -2, entrance + right * 2]:
-        place_structure_block(torch_cell.x, torch_cell.y, level, 1, "torch", cave_options(base_options, "entrance_torch", 1))
+        place_cave_wall_torch(plan, torch_cell, level, base_options, "entrance_torch", 1)
 
 func build_cave_supports(plan: Dictionary, level: float, base_options: Dictionary) -> void:
     if cave_has_graph(plan):
@@ -1342,11 +1342,11 @@ func build_cave_supports(plan: Dictionary, level: float, base_options: Dictionar
         used_depths[depth] = true
         var torch_side := -1 if depth % 2 == 0 else 1
         var torch: Vector2i = entrance + inward * depth + right * torch_side
-        place_structure_block(torch.x, torch.y, level, 1, "torch", cave_options(base_options, "tunnel_torch", depth))
+        place_cave_wall_torch(plan, torch, level, base_options, "tunnel_torch", depth)
     var chamber_center: Vector2i = plan.get("finalChamberCell", entrance + inward * path_length)
     for offset in [Vector2i(2, 0), Vector2i(-2, 0)]:
         var torch_cell: Vector2i = chamber_center + right * offset.x + inward * offset.y
-        place_structure_block(torch_cell.x, torch_cell.y, level, 1, "torch", cave_options(base_options, "chamber_torch", path_length))
+        place_cave_wall_torch(plan, torch_cell, level, base_options, "chamber_torch", path_length)
 
 func cave_has_graph(plan: Dictionary) -> bool:
     var nodes = plan.get("caveNodes", [])
@@ -1404,7 +1404,47 @@ func build_graph_cave_supports(plan: Dictionary, level: float, base_options: Dic
             continue
         used_cells[cell] = true
         placed += 1
-        place_structure_block(cell.x, cell.y, level, 1, "torch", cave_options(base_options, String(candidate.get("role", "cave_torch")), int(candidate.get("depth", 0))))
+        place_cave_wall_torch(plan, cell, level, base_options, String(candidate.get("role", "cave_torch")), int(candidate.get("depth", 0)))
+
+func place_cave_wall_torch(plan: Dictionary, preferred_cell: Vector2i, level: float, base_options: Dictionary, role: String, depth_index := -1) -> void:
+    var anchor := cave_wall_torch_anchor(plan, preferred_cell)
+    var cell: Vector2i = anchor.get("cell", preferred_cell)
+    var normal: Vector2i = anchor.get("normal", Vector2i.ZERO)
+    var options := cave_options(base_options, role, depth_index, {
+        "torchWallMount": true,
+        "torchWallNormalX": normal.x,
+        "torchWallNormalZ": normal.y,
+        "facing": torch_wall_facing(normal)
+    })
+    place_structure_block(cell.x, cell.y, level, 0, "torch", options)
+
+func cave_wall_torch_anchor(plan: Dictionary, preferred_cell: Vector2i) -> Dictionary:
+    var floor_lookup := cave_floor_lookup(plan)
+    var directions := [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]
+    var best := {
+        "cell": preferred_cell,
+        "normal": Vector2i.ZERO,
+        "score": 999999
+    }
+    for radius in range(0, 5):
+        for dir in directions:
+            var walk_cell: Vector2i = preferred_cell + dir * radius
+            var wall_cell: Vector2i = walk_cell + dir
+            if not floor_lookup.has(walk_cell):
+                continue
+            if floor_lookup.has(wall_cell):
+                continue
+            var score: int = radius * 10 + abs(walk_cell.x - preferred_cell.x) + abs(walk_cell.y - preferred_cell.y)
+            if score < int(best.get("score", 999999)):
+                best["cell"] = walk_cell
+                best["normal"] = -dir
+                best["score"] = score
+    return best
+
+func torch_wall_facing(normal: Vector2i) -> float:
+    if normal == Vector2i.ZERO:
+        return 0.0
+    return atan2(-float(normal.x), -float(normal.y))
 
 func cave_options(base_options: Dictionary, role: String, depth_index := -1, extra_options: Dictionary = {}) -> Dictionary:
     var options := base_options.duplicate()

@@ -135,7 +135,7 @@ if ($LASTEXITCODE -ne 0) {
 
 $report = Get-Content -LiteralPath $ReportPath -Raw | ConvertFrom-Json
 Get-Content -LiteralPath $ReportPath
-if ($exitCode -ne 0 -or [int]$report.failureCount -gt 0) {
+if (($exitCode -ne 0) -or ([int]$report.failureCount -gt 0)) {
     exit 1
 }
 

@@ -113,7 +113,7 @@ if ($null -eq $report.failureCount) {
 }
 
 Get-Content -LiteralPath $ReportPath
-if ($exitCode -ne 0 -or [int]$report.failureCount -gt 0) {
+if (($exitCode -ne 0) -or ([int]$report.failureCount -gt 0)) {
     exit 1
 }
 

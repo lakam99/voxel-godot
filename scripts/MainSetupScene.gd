@@ -1,6 +1,8 @@
 extends "res://scripts/MainSaveState.gd"
 
 const DEFAULT_VISUAL_LIGHT_LAYER := 1
+const CAVE_VISUAL_LIGHT_LAYER := 1 << 1
+const SHADOW_AUTHORITATIVE_LIGHT_MASK := DEFAULT_VISUAL_LIGHT_LAYER | CAVE_VISUAL_LIGHT_LAYER
 
 var last_requested_mouse_mode: int = Input.MOUSE_MODE_VISIBLE
 
@@ -40,6 +42,7 @@ func setup_materials() -> void:
     materials["furnace"] = make_building_material(Color(0.34, 0.36, 0.34), Color(0.20, 0.22, 0.21), 0.90, 0.12, 0.14)
     materials["campfire"] = make_material(Color(0.64, 0.34, 0.12), 0.78)
     materials["torch"] = make_material(Color(0.80, 0.52, 0.22), 0.72)
+    materials["flame"] = make_emissive_material(Color(1.0, 0.62, 0.28), 0.42)
     materials["spikeTrap"] = make_material(Color(0.38, 0.31, 0.25), 0.86)
     materials["wardLantern"] = make_material(Color(0.72, 0.58, 0.28), 0.42)
     materials["sanctuaryBeacon"] = make_material(Color(0.54, 0.74, 0.92), 0.34)
@@ -172,7 +175,7 @@ func setup_environment() -> void:
     sun.name = "Sun"
     sun.light_color = visual_style.sun_color_day
     sun.light_energy = visual_style.sun_max_energy
-    sun.light_cull_mask = DEFAULT_VISUAL_LIGHT_LAYER
+    sun.light_cull_mask = SHADOW_AUTHORITATIVE_LIGHT_MASK
     sun.shadow_enabled = true
     configure_directional_shadow_style(sun, visual_style.sun_angular_distance)
     add_child(sun)
@@ -181,7 +184,7 @@ func setup_environment() -> void:
     moon.name = "Moon"
     moon.light_color = visual_style.moon_color
     moon.light_energy = visual_style.moon_max_energy
-    moon.light_cull_mask = DEFAULT_VISUAL_LIGHT_LAYER
+    moon.light_cull_mask = SHADOW_AUTHORITATIVE_LIGHT_MASK
     moon.shadow_enabled = false
     configure_directional_shadow_style(moon, visual_style.moon_angular_distance)
     add_child(moon)
