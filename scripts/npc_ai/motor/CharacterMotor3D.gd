@@ -35,7 +35,7 @@ func apply(body: CharacterBody3D, command, profile, delta: float, terrain_provid
 		body.velocity.y -= float(profile.get("gravity")) * delta
 
 	if state.jumped and terrain_provider != null and terrain_provider.has_method("height_at_world"):
-		var jump_ground_y: float = terrain_provider.call("height_at_world", body.global_position.x, body.global_position.z)
+		var jump_ground_y: float = ground_height_for_body(terrain_provider, body.global_position)
 		move_vertical_toward(body, jump_ground_y + 0.08)
 
 	var pre_slide_position := body.global_position
@@ -81,11 +81,11 @@ func apply_terrain_grounding(body: CharacterBody3D, profile, delta: float, terra
 		state.terrain_grounded = body.is_on_floor()
 		return
 
-	var ground_y: float = terrain_provider.call("height_at_world", body.global_position.x, body.global_position.z)
+	var ground_y: float = ground_height_for_body(terrain_provider, body.global_position)
 	var distance_above_ground: float = body.global_position.y - ground_y
 	if distance_above_ground < 0.0:
 		var rise_needed: float = -distance_above_ground
-		var previous_ground_y: float = terrain_provider.call("height_at_world", previous_position.x, previous_position.z)
+		var previous_ground_y: float = ground_height_for_body(terrain_provider, previous_position)
 		var horizontal_move: float = Vector2(body.global_position.x - previous_position.x, body.global_position.z - previous_position.z).length()
 		var obstacle_rise: float = ground_y - previous_ground_y
 		if was_grounded and not jumped and rise_needed <= float(profile.get("terrain_walkable_rise")):
@@ -144,6 +144,13 @@ func apply_terrain_grounding(body: CharacterBody3D, profile, delta: float, terra
 		state.terrain_grounded = true
 	else:
 		state.terrain_grounded = false
+
+func ground_height_for_body(terrain_provider: Node, position: Vector3) -> float:
+	if terrain_provider != null and terrain_provider.has_method("ground_height_at_world"):
+		return float(terrain_provider.call("ground_height_at_world", position.x, position.z, position.y))
+	if terrain_provider != null and terrain_provider.has_method("height_at_world"):
+		return float(terrain_provider.call("height_at_world", position.x, position.z))
+	return position.y
 
 func move_vertical_toward(body: CharacterBody3D, target_y: float) -> void:
 	var delta_y := target_y - body.global_position.y

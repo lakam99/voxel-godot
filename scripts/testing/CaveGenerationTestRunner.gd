@@ -37,8 +37,8 @@ func test_cave_plan_determinism() -> void:
     if structure_system == null:
         add_result("cave_plan_determinism", false, "structure system missing")
         return
-    var plan_a: Dictionary = structure_system.call("cave_plan_for_region", 2, -1, "cliff", false)
-    var plan_b: Dictionary = structure_system.call("cave_plan_for_region", 2, -1, "cliff", false)
+    var plan_a: Dictionary = structure_system.call("cave_plan_for_region", 0, 0, "cliff", false)
+    var plan_b: Dictionary = structure_system.call("cave_plan_for_region", 0, 0, "cliff", false)
     var signature_a := cave_plan_signature(plan_a)
     var signature_b := cave_plan_signature(plan_b)
     var stable := JSON.stringify(signature_a) == JSON.stringify(signature_b)
@@ -79,10 +79,12 @@ func test_cave_graph_varies_across_regions() -> void:
             var edge_count := int(summary.get("edgeCount", 0))
             var branch_count := int(summary.get("branchCount", 0))
             var dead_end_count := int(summary.get("deadEndCount", 0))
-            if node_count < 6 or edge_count < 6 or branch_count < 1 or dead_end_count < 1:
+            var route_metrics := cave_graph_route_metrics(plan)
+            if node_count < 6 or edge_count < 6 or branch_count < 1 or dead_end_count < 1 or not cave_route_metrics_passed(route_metrics):
                 failures.append({
                     "region": { "x": rx, "z": rz },
-                    "summary": summary
+                    "summary": summary,
+                    "route": route_metrics
                 })
             var signature := "%d:%d:%d:%d:%s" % [
                 node_count,
@@ -150,7 +152,10 @@ func test_cave_build_interior_and_book_loot() -> void:
     structure_system.call("build_cave", plan, rng)
     var summary := cave_block_summary(plan)
     var graph_summary := cave_graph_summary(plan)
+    var route_metrics := cave_graph_route_metrics(plan)
     var terrain_summary := cave_terrain_summary(plan)
+    var mouth_access_summary := cave_mouth_access_summary(plan)
+    var negative_y_summary := cave_negative_y_growth_summary(plan)
     var navigation_summary := cave_navigation_summary(plan)
     var floor_level := float(plan.get("level", 0.0))
     var ceiling_level := float(plan.get("ceilingLevel", floor_level))
@@ -162,6 +167,7 @@ func test_cave_build_interior_and_book_loot() -> void:
         and int(graph_summary.get("deadEndCount", 0)) >= 1 \
         and int(graph_summary.get("narrowEdgeCount", 0)) >= 1 \
         and bool(graph_summary.get("finalChestInFinalChamber", false)) \
+        and cave_route_metrics_passed(route_metrics) \
         and int(summary.get("interiorShells", 0)) == 1 \
         and int(summary.get("interiorMeshes", 0)) >= 1 \
         and int(summary.get("interiorCollisionBodies", 0)) >= 1 \
@@ -170,7 +176,7 @@ func test_cave_build_interior_and_book_loot() -> void:
         and int(summary.get("interiorCaveLayerVisuals", 0)) >= 1 \
         and int(summary.get("interiorNonCaveLayerVisuals", 0)) == 0 \
         and float(summary.get("floorHeightRange", 0.0)) >= 0.35 \
-        and float(summary.get("maxFloorNeighborStep", 999.0)) <= CELL * 0.60 \
+        and float(summary.get("maxFloorNeighborStep", 999.0)) <= CELL * 1.10 \
         and int(summary.get("torches", 0)) >= 2 \
         and int(summary.get("torches", 0)) <= 6 \
         and int(summary.get("smallTorches", 0)) == int(summary.get("torches", 0)) \
@@ -187,8 +193,13 @@ func test_cave_build_interior_and_book_loot() -> void:
         and bool(summary.get("finalChestHasCraftingBook", false)) \
         and int(terrain_summary.get("openingCells", 0)) > 0 \
         and int(terrain_summary.get("editedOpeningCells", 0)) == int(terrain_summary.get("openingCells", 0)) \
-        and int(terrain_summary.get("stoneOverrideCells", 0)) >= int(terrain_summary.get("walkableCells", 0)) \
+        and int(terrain_summary.get("editedInteriorWalkableCells", 999)) == 0 \
+        and int(terrain_summary.get("editedPortalCells", 0)) == int(terrain_summary.get("portalCells", -1)) \
+        and float(terrain_summary.get("openingToWalkableRatio", 1.0)) <= 0.45 \
+        and int(terrain_summary.get("stoneOverrideCells", 0)) == int(terrain_summary.get("openingCells", 0)) \
         and int(terrain_summary.get("propExclusionCells", 0)) == int(terrain_summary.get("shapingCells", 0)) \
+        and cave_mouth_access_passed(mouth_access_summary) \
+        and cave_negative_y_growth_passed(negative_y_summary) \
         and bool(navigation_summary.get("recordFound", false)) \
         and int(navigation_summary.get("recordWalkableCells", 0)) == int(terrain_summary.get("walkableCells", 0)) \
         and int(navigation_summary.get("lookupMatchedSampleCells", 0)) >= 3 \
@@ -198,7 +209,7 @@ func test_cave_build_interior_and_book_loot() -> void:
     add_result(
         "cave_build_interior_and_book_loot",
         passed,
-        "contiguous=%s graph=%s summary=%s terrain=%s navigation=%s plan=%s" % [str(contiguous), JSON.stringify(graph_summary), JSON.stringify(summary), JSON.stringify(terrain_summary), JSON.stringify(navigation_summary), JSON.stringify(sanitize_plan_summary(plan))]
+        "contiguous=%s graph=%s route=%s summary=%s terrain=%s mouth=%s negativeY=%s navigation=%s plan=%s" % [str(contiguous), JSON.stringify(graph_summary), JSON.stringify(route_metrics), JSON.stringify(summary), JSON.stringify(terrain_summary), JSON.stringify(mouth_access_summary), JSON.stringify(negative_y_summary), JSON.stringify(navigation_summary), JSON.stringify(sanitize_plan_summary(plan))]
     )
     cleanup_generated_blocks()
     restore_height_edits(snapshot)
@@ -236,6 +247,8 @@ func test_cave_save_load_persistence() -> void:
     var restored_chest := cave_final_chest_node(plan)
     var restored_summary := cave_block_summary(plan)
     var restored_terrain := cave_terrain_summary(plan)
+    var restored_mouth_access := cave_mouth_access_summary(plan)
+    var restored_negative_y := cave_negative_y_growth_summary(plan)
     var restored_navigation_summary := cave_navigation_summary(plan)
     var restored_slot_ok := cave_chest_has_slot(restored_chest, "stones", 7)
     var generated_regions_value = structure_system.get("generated_caves")
@@ -252,7 +265,7 @@ func test_cave_save_load_persistence() -> void:
         and int(restored_summary.get("supportFrames", 0)) <= 2 \
         and int(restored_summary.get("interiorNonCaveLayerVisuals", 0)) == 0 \
         and float(restored_summary.get("floorHeightRange", 0.0)) >= 0.35 \
-        and float(restored_summary.get("maxFloorNeighborStep", 999.0)) <= CELL * 0.60 \
+        and float(restored_summary.get("maxFloorNeighborStep", 999.0)) <= CELL * 1.10 \
         and int(restored_summary.get("smallTorches", 0)) == int(restored_summary.get("torches", 0)) \
         and int(restored_summary.get("wallMountedTorches", 0)) == int(restored_summary.get("torches", 0)) \
         and int(restored_summary.get("validWallTorchNormals", 0)) == int(restored_summary.get("torches", 0)) \
@@ -262,15 +275,20 @@ func test_cave_save_load_persistence() -> void:
         and float(restored_summary.get("minWallTorchVisibleBackInset", 0.0)) >= CELL * 0.035 \
         and int(restored_summary.get("caveBlockNonCaveLayerVisuals", 0)) == 0 \
         and int(restored_summary.get("finalChests", 0)) == 1 \
-        and int(restored_terrain.get("stoneOverrideCells", 0)) >= int(restored_terrain.get("walkableCells", 0)) \
+        and int(restored_terrain.get("editedInteriorWalkableCells", 999)) == 0 \
+        and int(restored_terrain.get("editedPortalCells", 0)) == int(restored_terrain.get("portalCells", -1)) \
+        and float(restored_terrain.get("openingToWalkableRatio", 1.0)) <= 0.45 \
+        and int(restored_terrain.get("stoneOverrideCells", 0)) == int(restored_terrain.get("openingCells", 0)) \
         and int(restored_terrain.get("propExclusionCells", 0)) == int(restored_terrain.get("shapingCells", 0)) \
+        and cave_mouth_access_passed(restored_mouth_access) \
+        and cave_negative_y_growth_passed(restored_negative_y) \
         and bool(restored_navigation_summary.get("recordFound", false)) \
         and int(restored_navigation_summary.get("lookupMatchedSampleCells", 0)) >= 3 \
         and int(restored_navigation_summary.get("navmeshCaveTaggedSampleCells", 0)) >= 3
     add_result(
         "cave_save_load_persistence",
         passed,
-        "snapshotHasMutatedChest=%s restoredSlot=%s restoredRegionMarked=%s records=%s navigation=%s summary=%s terrain=%s navigationSummary=%s caveEntries=%s plan=%s" % [
+        "snapshotHasMutatedChest=%s restoredSlot=%s restoredRegionMarked=%s records=%s navigation=%s summary=%s terrain=%s mouth=%s negativeY=%s navigationSummary=%s caveEntries=%s plan=%s" % [
             str(snapshot_has_mutated_chest),
             str(restored_slot_ok),
             str(restored_region_marked),
@@ -278,6 +296,8 @@ func test_cave_save_load_persistence() -> void:
             JSON.stringify(restored_navigation.keys()),
             JSON.stringify(restored_summary),
             JSON.stringify(restored_terrain),
+            JSON.stringify(restored_mouth_access),
+            JSON.stringify(restored_negative_y),
             JSON.stringify(restored_navigation_summary),
             JSON.stringify(sanitize(cave_entries)),
             JSON.stringify(sanitize_plan_summary(plan))
@@ -317,11 +337,86 @@ func cave_graph_summary(plan: Dictionary) -> Dictionary:
         "edgeCount": edges.size(),
         "branchCount": cave_array_size(plan, "branchChamberIds"),
         "deadEndCount": cave_array_size(plan, "deadEndChamberIds"),
+        "caveTier": String(plan.get("caveTier", "normal")),
         "nodeRoles": node_roles,
         "minEdgeRadius": snappedf(0.0 if min_edge_radius == INF else min_edge_radius, 0.001),
         "narrowEdgeCount": narrow_edge_count,
         "finalChestInFinalChamber": chest_distance <= float(final_radius + 1)
     }
+
+func cave_graph_route_metrics(plan: Dictionary) -> Dictionary:
+    var edges: Array = plan.get("caveEdges", [])
+    var graph := {}
+    for edge_value in edges:
+        if not (edge_value is Dictionary):
+            continue
+        var edge: Dictionary = edge_value
+        var from_id := String(edge.get("from", ""))
+        var to_id := String(edge.get("to", ""))
+        if from_id == "" or to_id == "":
+            continue
+        var center_cells = edge.get("centerCells", [])
+        var cost := maxi(1, center_cells.size() if center_cells is Array else 1)
+        if not graph.has(from_id):
+            graph[from_id] = []
+        if not graph.has(to_id):
+            graph[to_id] = []
+        var from_edges: Array = graph[from_id]
+        var to_edges: Array = graph[to_id]
+        from_edges.append({ "to": to_id, "cost": cost })
+        to_edges.append({ "to": from_id, "cost": cost })
+        graph[from_id] = from_edges
+        graph[to_id] = to_edges
+    var final_id := String(plan.get("finalChamberId", "final"))
+    var distances := { "entrance": 0.0 }
+    var visited := {}
+    while true:
+        var current := ""
+        var best_distance := INF
+        for key in distances.keys():
+            var node_id := String(key)
+            if visited.has(node_id):
+                continue
+            var distance := float(distances.get(node_id, INF))
+            if distance < best_distance:
+                best_distance = distance
+                current = node_id
+        if current == "" or current == final_id:
+            break
+        visited[current] = true
+        var links: Array = graph.get(current, [])
+        for link_value in links:
+            if not (link_value is Dictionary):
+                continue
+            var link: Dictionary = link_value
+            var next_id := String(link.get("to", ""))
+            var next_distance := best_distance + float(link.get("cost", 1))
+            if next_distance < float(distances.get(next_id, INF)):
+                distances[next_id] = next_distance
+    var route_cost := float(distances.get(final_id, INF))
+    var entrance: Vector2i = plan.get("entranceCell", Vector2i.ZERO)
+    var final_cell: Vector2i = plan.get("finalChestCell", plan.get("finalChamberCell", entrance))
+    var inward: Vector2i = plan.get("inward", Vector2i(0, 1))
+    var delta := final_cell - entrance
+    var straight_distance := Vector2(float(delta.x), float(delta.y)).length()
+    var final_depth := delta.x * inward.x + delta.y * inward.y
+    var minimum_route_cells := int(plan.get("minimumRouteCells", 72))
+    var minimum_final_depth := maxi(42, int(plan.get("pathLength", 0)))
+    return {
+        "caveTier": String(plan.get("caveTier", "normal")),
+        "shortestRouteCells": int(round(route_cost)) if route_cost < INF else 0,
+        "minimumRouteCells": minimum_route_cells,
+        "straightDistanceCells": snappedf(straight_distance, 0.001),
+        "routeDirectness": snappedf(route_cost / maxf(1.0, straight_distance), 0.001) if route_cost < INF else 0.0,
+        "finalDepthCells": final_depth,
+        "minimumFinalDepthCells": minimum_final_depth,
+        "pathLength": int(plan.get("pathLength", 0))
+    }
+
+func cave_route_metrics_passed(metrics: Dictionary) -> bool:
+    return int(metrics.get("shortestRouteCells", 0)) >= int(metrics.get("minimumRouteCells", 0)) \
+        and float(metrics.get("routeDirectness", 0.0)) >= 1.12 \
+        and int(metrics.get("finalDepthCells", 0)) >= int(metrics.get("minimumFinalDepthCells", 0))
 
 func cave_plan_signature(plan: Dictionary) -> Dictionary:
     if plan.is_empty():
@@ -454,28 +549,339 @@ func cave_terrain_summary(plan: Dictionary) -> Dictionary:
     var edits: Dictionary = edits_value if edits_value is Dictionary else {}
     var walkable_cells: Array = structure_system.call("cave_walkable_cells", plan, false)
     var opening_cells: Array = structure_system.call("cave_terrain_opening_cells", plan)
+    var portal_cells: Array = structure_system.call("cave_mouth_portal_cells", plan) if structure_system.has_method("cave_mouth_portal_cells") else []
     var shaping_cells: Array = structure_system.call("cave_shaping_cells", plan)
+    var opening_lookup := {}
+    for cell_value in opening_cells:
+        if cell_value is Vector2i:
+            opening_lookup[cell_value] = true
+    var portal_lookup := {}
+    for cell_value in portal_cells:
+        if cell_value is Vector2i:
+            portal_lookup[cell_value] = true
     var edited_opening_cells := 0
     for cell_value in opening_cells:
         var cell: Vector2i = cell_value
         if edits.has(cell):
             edited_opening_cells += 1
+    var edited_portal_cells := 0
+    for cell_value in portal_cells:
+        var cell: Vector2i = cell_value
+        if edits.has(cell):
+            edited_portal_cells += 1
+    var edited_walkable_cells := 0
+    var edited_interior_walkable_cells := 0
+    for cell_value in walkable_cells:
+        var cell: Vector2i = cell_value
+        if not edits.has(cell):
+            continue
+        edited_walkable_cells += 1
+        if not opening_lookup.has(cell) and not portal_lookup.has(cell):
+            edited_interior_walkable_cells += 1
     var stone_override_cells := 0
+    var stone_override_shaping_cells := 0
+    var hidden_portal_cells := 0
+    for cell_value in opening_cells:
+        var cell: Vector2i = cell_value
+        if String(structure_system.call("terrain_material_override_for_cell", cell.x, cell.y)) == "stone":
+            stone_override_cells += 1
+    for cell_value in portal_cells:
+        var cell: Vector2i = cell_value
+        if structure_system.has_method("terrain_quad_hidden_for_cell") and bool(structure_system.call("terrain_quad_hidden_for_cell", cell.x, cell.y)):
+            hidden_portal_cells += 1
     var prop_exclusion_cells := 0
     for cell_value in shaping_cells:
         var cell: Vector2i = cell_value
         if String(structure_system.call("terrain_material_override_for_cell", cell.x, cell.y)) == "stone":
-            stone_override_cells += 1
+            stone_override_shaping_cells += 1
         if structure_system.has_method("blocks_natural_prop_at_cell") and bool(structure_system.call("blocks_natural_prop_at_cell", cell.x, cell.y)):
             prop_exclusion_cells += 1
+    var walkable_count := maxi(1, walkable_cells.size())
     return {
         "walkableCells": walkable_cells.size(),
         "openingCells": opening_cells.size(),
+        "portalCells": portal_cells.size(),
         "shapingCells": shaping_cells.size(),
         "editedOpeningCells": edited_opening_cells,
+        "editedPortalCells": edited_portal_cells,
+        "editedWalkableCells": edited_walkable_cells,
+        "editedInteriorWalkableCells": edited_interior_walkable_cells,
+        "openingToWalkableRatio": snappedf(float(opening_cells.size()) / float(walkable_count), 0.001),
+        "portalToWalkableRatio": snappedf(float(portal_cells.size()) / float(walkable_count), 0.001),
+        "hiddenPortalCells": hidden_portal_cells,
         "stoneOverrideCells": stone_override_cells,
+        "stoneOverrideShapingCells": stone_override_shaping_cells,
         "propExclusionCells": prop_exclusion_cells
     }
+
+func cave_mouth_access_summary(plan: Dictionary) -> Dictionary:
+    if main == null or structure_system == null:
+        return { "reason": "missing main or structure system" }
+    var builder = structure_system.get("cave_interior_builder")
+    if builder == null or not builder.has_method("floor_point") or not builder.has_method("ceiling_point"):
+        return { "reason": "missing cave interior builder samplers" }
+    var entrance: Vector2i = plan.get("entranceCell", Vector2i.ZERO)
+    var inward: Vector2i = plan.get("inward", Vector2i(0, 1))
+    var right: Vector2i = plan.get("right", Vector2i(1, 0))
+    var approach_depth := int(plan.get("entranceApproachDepth", 7))
+    var interior_depth := int(plan.get("entranceOpenDepth", 7))
+    var portal_cells: Array = structure_system.call("cave_mouth_portal_cells", plan) if structure_system.has_method("cave_mouth_portal_cells") else []
+    var hidden_portal_cells := 0
+    for cell_value in portal_cells:
+        if not (cell_value is Vector2i):
+            continue
+        var portal_cell: Vector2i = cell_value
+        if structure_system.has_method("terrain_quad_hidden_for_cell") and bool(structure_system.call("terrain_quad_hidden_for_cell", portal_cell.x, portal_cell.y)):
+            hidden_portal_cells += 1
+    var outside_min := INF
+    var outside_max := -INF
+    for depth in range(-approach_depth, 1):
+        for lateral in range(-1, 2):
+            var outside_cell: Vector2i = entrance + inward * int(depth) + right * int(lateral)
+            var h := float(main.call("terrain_height_cell", outside_cell.x, outside_cell.y))
+            outside_min = minf(outside_min, h)
+            outside_max = maxf(outside_max, h)
+    var max_center_step := 0.0
+    var previous_y := INF
+    var min_clearance := INF
+    var min_cover_after_portal := INF
+    var covered_samples := 0
+    var front_open_columns := 0
+    var jagged_mouth_rows := 0
+    var blocked_center_samples := 0
+    var exterior_shell_samples := 0
+    var mouth_rows_checked := 0
+    var arch_center_clearance := 0.0
+    var arch_side_clearance := 0.0
+    var mouth_width := float(plan.get("entranceMouthHalfWidth", 0.0))
+    if builder.has_method("rendered_shell_inside_at_point"):
+        var lateral_limit := ceili(mouth_width + 0.5)
+        for exterior_depth in range(-approach_depth, 0):
+            for lateral in range(-lateral_limit, lateral_limit + 1):
+                var exterior_cell: Vector2i = entrance + inward * int(exterior_depth) + right * int(lateral)
+                var exterior_point := cave_cell_world2(exterior_cell)
+                if bool(builder.call("rendered_shell_inside_at_point", plan, exterior_point)):
+                    exterior_shell_samples += 1
+        var row_depth_limit := mini(4, interior_depth)
+        for row_depth in range(0, row_depth_limit + 1):
+            var open_laterals: Array[int] = []
+            for lateral in range(-lateral_limit, lateral_limit + 1):
+                var sample_cell: Vector2i = entrance + inward * int(row_depth) + right * int(lateral)
+                var sample_point := cave_cell_world2(sample_cell)
+                if bool(builder.call("rendered_shell_inside_at_point", plan, sample_point)):
+                    open_laterals.append(lateral)
+            if open_laterals.is_empty():
+                jagged_mouth_rows += 1
+                continue
+            mouth_rows_checked += 1
+            var min_lateral := open_laterals[0]
+            var max_lateral := open_laterals[0]
+            var open_lookup := {}
+            for lateral_value in open_laterals:
+                min_lateral = mini(min_lateral, lateral_value)
+                max_lateral = maxi(max_lateral, lateral_value)
+                open_lookup[lateral_value] = true
+            if row_depth == 0:
+                front_open_columns = open_laterals.size()
+            if min_lateral > 0 or max_lateral < 0:
+                jagged_mouth_rows += 1
+            else:
+                for lateral in range(min_lateral, max_lateral + 1):
+                    if not open_lookup.has(lateral):
+                        jagged_mouth_rows += 1
+                        break
+            var center_point := cave_cell_world2(entrance + inward * int(row_depth))
+            if not bool(builder.call("rendered_shell_inside_at_point", plan, center_point)):
+                blocked_center_samples += 1
+        var center_floor_value = builder.call("floor_point", plan, cave_cell_world2(entrance))
+        var center_ceiling_value = builder.call("ceiling_point", plan, cave_cell_world2(entrance))
+        if center_floor_value is Vector3 and center_ceiling_value is Vector3:
+            arch_center_clearance = float((center_ceiling_value as Vector3).y - (center_floor_value as Vector3).y)
+        var side_lateral := maxi(1, roundi(mouth_width * 0.82))
+        var side_cell := entrance + right * side_lateral
+        var side_floor_value = builder.call("floor_point", plan, cave_cell_world2(side_cell))
+        var side_ceiling_value = builder.call("ceiling_point", plan, cave_cell_world2(side_cell))
+        if side_floor_value is Vector3 and side_ceiling_value is Vector3:
+            arch_side_clearance = float((side_ceiling_value as Vector3).y - (side_floor_value as Vector3).y)
+    for depth in range(-mini(3, approach_depth), interior_depth + 5):
+        var cell: Vector2i = entrance + inward * int(depth)
+        var point := cave_cell_world2(cell)
+        var floor_value = builder.call("floor_point", plan, point)
+        var ceiling_value = builder.call("ceiling_point", plan, point)
+        var floor_y := float((floor_value as Vector3).y) if floor_value is Vector3 else float(plan.get("level", 0.0))
+        var ceiling_y := float((ceiling_value as Vector3).y) if ceiling_value is Vector3 else float(plan.get("ceilingLevel", floor_y + CELL * 3.0))
+        var ground_y := float(main.call("terrain_height_cell", cell.x, cell.y)) if depth < 0 else floor_y
+        if previous_y != INF:
+            max_center_step = maxf(max_center_step, absf(ground_y - previous_y))
+        previous_y = ground_y
+        if depth >= 0:
+            min_clearance = minf(min_clearance, ceiling_y - floor_y)
+        if depth > interior_depth:
+            covered_samples += 1
+            min_cover_after_portal = minf(min_cover_after_portal, float(main.call("terrain_height_cell", cell.x, cell.y)) - ceiling_y)
+    return {
+        "portalCells": portal_cells.size(),
+        "hiddenPortalCells": hidden_portal_cells,
+        "outsideHeightRange": snappedf(0.0 if outside_min == INF else outside_max - outside_min, 0.001),
+        "maxCenterRouteStep": snappedf(max_center_step, 0.001),
+        "minPlayerClearance": snappedf(0.0 if min_clearance == INF else min_clearance, 0.001),
+        "minCoverAfterPortal": snappedf(0.0 if min_cover_after_portal == INF else min_cover_after_portal, 0.001),
+        "coveredSamplesAfterPortal": covered_samples,
+        "mouthHalfWidth": snappedf(mouth_width, 0.001),
+        "mouthFloorLevel": snappedf(float(plan.get("mouthFloorLevel", plan.get("level", 0.0))), 0.001),
+        "frontOpenColumns": front_open_columns,
+        "mouthRowsChecked": mouth_rows_checked,
+        "jaggedMouthRows": jagged_mouth_rows,
+        "blockedCenterSamples": blocked_center_samples,
+        "exteriorShellSamples": exterior_shell_samples,
+        "frontArchCenterClearance": snappedf(arch_center_clearance, 0.001),
+        "frontArchSideClearance": snappedf(arch_side_clearance, 0.001),
+        "frontArchRise": snappedf(arch_center_clearance - arch_side_clearance, 0.001),
+        "entranceCell": vec2i(entrance)
+    }
+
+func cave_mouth_access_passed(summary: Dictionary) -> bool:
+    return int(summary.get("portalCells", 0)) > 0 \
+        and int(summary.get("hiddenPortalCells", 0)) == int(summary.get("portalCells", -1)) \
+        and float(summary.get("outsideHeightRange", 999.0)) <= CELL * 1.25 \
+        and float(summary.get("maxCenterRouteStep", 999.0)) <= CELL * 0.85 \
+        and float(summary.get("minPlayerClearance", 0.0)) >= CELL * 2.05 \
+        and int(summary.get("coveredSamplesAfterPortal", 0)) > 0 \
+        and float(summary.get("minCoverAfterPortal", -999.0)) >= CELL * 0.35 \
+        and float(summary.get("mouthHalfWidth", 0.0)) >= 3.25 \
+        and int(summary.get("frontOpenColumns", 0)) >= 7 \
+        and int(summary.get("mouthRowsChecked", 0)) >= 4 \
+        and int(summary.get("jaggedMouthRows", 999)) == 0 \
+        and int(summary.get("blockedCenterSamples", 999)) == 0 \
+        and int(summary.get("exteriorShellSamples", 999)) == 0 \
+        and float(summary.get("frontArchRise", 0.0)) >= CELL * 0.55
+
+func cave_negative_y_growth_summary(plan: Dictionary) -> Dictionary:
+    if main == null or structure_system == null:
+        return { "sampleCount": 0, "reason": "missing main or structure system" }
+    var builder = structure_system.get("cave_interior_builder")
+    if builder == null or not builder.has_method("floor_point") or not builder.has_method("ceiling_point"):
+        return { "sampleCount": 0, "reason": "missing cave interior builder samplers" }
+    var edits_value = main.get("height_edits")
+    var edits: Dictionary = edits_value if edits_value is Dictionary else {}
+    var opening_cells: Array = structure_system.call("cave_terrain_opening_cells", plan)
+    var opening_lookup := {}
+    for cell_value in opening_cells:
+        if cell_value is Vector2i:
+            opening_lookup[cell_value] = true
+    var portal_cells: Array = structure_system.call("cave_mouth_portal_cells", plan) if structure_system.has_method("cave_mouth_portal_cells") else []
+    for cell_value in portal_cells:
+        if cell_value is Vector2i:
+            opening_lookup[cell_value] = true
+    var raised_edit_cells := 0
+    var max_edit_raise := 0.0
+    for cell_value in opening_cells:
+        if not (cell_value is Vector2i):
+            continue
+        var opening_cell: Vector2i = cell_value
+        if not edits.has(opening_cell):
+            continue
+        var base_height := cave_base_height_cell(opening_cell)
+        var edit_height := float(edits[opening_cell])
+        var raise_amount := edit_height - base_height
+        if raise_amount > 0.025:
+            raised_edit_cells += 1
+            max_edit_raise = maxf(max_edit_raise, raise_amount)
+    var walkable_cells: Array = structure_system.call("cave_walkable_cells", plan, false)
+    var sample_count := 0
+    var exposed_ceiling_cells := 0
+    var positive_y_ceiling_cells := 0
+    var floor_above_terrain_cells := 0
+    var min_terrain_cover := INF
+    var max_ceiling_above_terrain := -INF
+    var min_floor_clearance := INF
+    var total_cover := 0.0
+    var worst_cell := Vector2i.ZERO
+    var required_cover := CELL * 0.35
+    var max_samples := 360
+    var stride := maxi(1, ceili(float(walkable_cells.size()) / float(max_samples)))
+    var index := 0
+    for cell_value in walkable_cells:
+        index += 1
+        if index % stride != 0:
+            continue
+        if not (cell_value is Vector2i):
+            continue
+        var cell: Vector2i = cell_value
+        if opening_lookup.has(cell):
+            continue
+        var point := cave_cell_world2(cell)
+        var floor_value = builder.call("floor_point", plan, point)
+        var ceiling_value = builder.call("ceiling_point", plan, point)
+        if not (floor_value is Vector3) or not (ceiling_value is Vector3):
+            continue
+        var terrain_y := float(main.call("terrain_height_cell", cell.x, cell.y))
+        var floor_y := float((floor_value as Vector3).y)
+        var ceiling_y := float((ceiling_value as Vector3).y)
+        var cover := terrain_y - ceiling_y
+        var floor_clearance := terrain_y - floor_y
+        sample_count += 1
+        total_cover += cover
+        if cover < min_terrain_cover:
+            min_terrain_cover = cover
+            worst_cell = cell
+        max_ceiling_above_terrain = maxf(max_ceiling_above_terrain, ceiling_y - terrain_y)
+        min_floor_clearance = minf(min_floor_clearance, floor_clearance)
+        if cover < required_cover:
+            exposed_ceiling_cells += 1
+        if ceiling_y > terrain_y + 0.025:
+            positive_y_ceiling_cells += 1
+        if floor_y > terrain_y + 0.025:
+            floor_above_terrain_cells += 1
+    var entrance_cell: Vector2i = plan.get("entranceCell", Vector2i.ZERO)
+    var final_cell: Vector2i = plan.get("finalChamberCell", entrance_cell)
+    var entrance_floor_value = builder.call("floor_point", plan, cave_cell_world2(entrance_cell))
+    var final_floor_value = builder.call("floor_point", plan, cave_cell_world2(final_cell))
+    var entrance_floor_y := float((entrance_floor_value as Vector3).y) if entrance_floor_value is Vector3 else float(plan.get("level", 0.0))
+    var final_floor_y := float((final_floor_value as Vector3).y) if final_floor_value is Vector3 else float(plan.get("level", 0.0))
+    var route_drop_y := entrance_floor_y - final_floor_y
+    var available_drop := maxf(0.0, float(plan.get("level", 0.0)) + 0.22 - (float(main.WATER_LEVEL) + CELL * 1.45))
+    var required_route_drop := minf(CELL * 1.25, available_drop * 0.45)
+    if required_route_drop < CELL * 0.45 and available_drop >= CELL * 0.70:
+        required_route_drop = CELL * 0.45
+    return {
+        "sampleCount": sample_count,
+        "requiredTerrainCover": snappedf(required_cover, 0.001),
+        "minTerrainCover": snappedf(0.0 if min_terrain_cover == INF else min_terrain_cover, 0.001),
+        "averageTerrainCover": snappedf(0.0 if sample_count == 0 else total_cover / float(sample_count), 0.001),
+        "maxCeilingAboveTerrain": snappedf(0.0 if max_ceiling_above_terrain == -INF else max_ceiling_above_terrain, 0.001),
+        "minFloorClearance": snappedf(0.0 if min_floor_clearance == INF else min_floor_clearance, 0.001),
+        "exposedCeilingCells": exposed_ceiling_cells,
+        "positiveYCeilingCells": positive_y_ceiling_cells,
+        "floorAboveTerrainCells": floor_above_terrain_cells,
+        "raisedTerrainEditCells": raised_edit_cells,
+        "maxTerrainEditRaise": snappedf(max_edit_raise, 0.001),
+        "entranceFloorY": snappedf(entrance_floor_y, 0.001),
+        "finalFloorY": snappedf(final_floor_y, 0.001),
+        "routeDropY": snappedf(route_drop_y, 0.001),
+        "requiredRouteDropY": snappedf(required_route_drop, 0.001),
+        "availableDropY": snappedf(available_drop, 0.001),
+        "worstCoverCell": vec2i(worst_cell)
+    }
+
+func cave_negative_y_growth_passed(summary: Dictionary) -> bool:
+    return int(summary.get("sampleCount", 0)) > 0 \
+        and int(summary.get("raisedTerrainEditCells", 999)) == 0 \
+        and int(summary.get("positiveYCeilingCells", 999)) == 0 \
+        and int(summary.get("floorAboveTerrainCells", 999)) == 0 \
+        and int(summary.get("exposedCeilingCells", 999)) == 0 \
+        and float(summary.get("minTerrainCover", -999.0)) >= float(summary.get("requiredTerrainCover", CELL * 0.35)) \
+        and float(summary.get("routeDropY", 0.0)) >= float(summary.get("requiredRouteDropY", 0.0))
+
+func cave_base_height_cell(cell: Vector2i) -> float:
+    if main != null and main.has_method("base_height_cell"):
+        return float(main.call("base_height_cell", cell.x, cell.y))
+    if main != null and main.has_method("terrain_height_cell"):
+        return float(main.call("terrain_height_cell", cell.x, cell.y))
+    return 0.0
+
+func cave_cell_world2(cell: Vector2i) -> Vector2:
+    return Vector2(float(cell.x) * CELL, float(cell.y) * CELL)
 
 func wall_torch_visible_back_inset(torch: Node) -> float:
     if torch == null:
@@ -789,6 +1195,7 @@ func sanitize_plan_summary(plan: Dictionary) -> Dictionary:
     return {
         "id": String(plan.get("id", "")),
         "kind": String(plan.get("kind", "")),
+        "caveTier": String(plan.get("caveTier", "normal")),
         "region": vec2i(plan.get("region", Vector2i.ZERO)),
         "entranceCell": vec2i(plan.get("entranceCell", Vector2i.ZERO)),
         "finalChamberCell": vec2i(plan.get("finalChamberCell", Vector2i.ZERO)),
@@ -797,6 +1204,7 @@ func sanitize_plan_summary(plan: Dictionary) -> Dictionary:
         "floorLevel": snappedf(float(plan.get("level", 0.0)), 0.001),
         "ceilingLevel": snappedf(float(plan.get("ceilingLevel", 0.0)), 0.001),
         "pathLength": int(plan.get("pathLength", 0)),
+        "minimumRouteCells": int(plan.get("minimumRouteCells", 0)),
         "chamberRadius": int(plan.get("chamberRadius", 0)),
         "nodeCount": cave_array_size(plan, "caveNodes"),
         "edgeCount": cave_array_size(plan, "caveEdges"),

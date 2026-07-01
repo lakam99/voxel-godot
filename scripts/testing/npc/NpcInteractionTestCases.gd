@@ -7,6 +7,7 @@ const NpcActionLibraryScript := preload("res://scripts/npc_ai/behavior/NpcAction
 const NpcGoalSelectorScript := preload("res://scripts/npc_ai/behavior/NpcGoalSelector.gd")
 const NpcBlackboardScript := preload("res://scripts/npc_ai/NpcBlackboard.gd")
 const NpcProfileRulesScript := preload("res://scripts/NpcProfileRules.gd")
+const NpcSystemScript := preload("res://scripts/NpcSystem.gd")
 const CELL := 1.35
 
 var runner = null
@@ -39,6 +40,7 @@ func cases() -> Array[Dictionary]:
 		case("npc_interaction_forager_no_wall_bump_on_morning_exit", "day", "test_forager_no_wall_bump_on_morning_exit"),
 		case("npc_interaction_forager_target_gone_reselects", "day", "test_forager_target_gone_reselects"),
 		case("npc_interaction_forager_route_blocked_marks_target_unreachable", "day", "test_forager_route_blocked_marks_target_unreachable"),
+		case("npc_interaction_forager_unreachable_key_sanitizes_npc_id", "day", "test_forager_unreachable_key_sanitizes_npc_id"),
 		case("npc_interaction_forager_harvest_requires_reservation_and_arrival", "day", "test_forager_harvest_requires_reservation_and_arrival"),
 		case("npc_interaction_niko_full_forage_cycle_morning", "day", "test_niko_full_forage_cycle_morning"),
 		case("npc_interaction_wood_worker_gather_deliver", "day", "test_wood_worker_gather_deliver"),
@@ -312,6 +314,24 @@ func test_forager_route_blocked_marks_target_unreachable(_mode: String) -> Dicti
 	})
 	var passed: bool = queried.size() == 1 and queried[0] == alternate
 	return outcome(passed, "queried=%d" % queried.size(), ["route_blocked_target_retry_suppressed", "reachable_alternate_remains_queryable"], state(service))
+
+func test_forager_unreachable_key_sanitizes_npc_id(_mode: String) -> Dictionary:
+	var service = make_service()
+	var blocked := make_prop("forager-unsafe-id-blocked", "berryBush", "berries", 2, Vector3(12.0, 0.0, 0.0))
+	var alternate := make_prop("forager-unsafe-id-alternate", "berryBush", "berries", 2, Vector3(13.35, 0.0, 0.0))
+	service.register_resource(blocked)
+	service.register_resource(alternate)
+	var npc_system := track_transient_node(NpcSystemScript.new()) as NpcSystem
+	var entry := make_query_entry()
+	entry["id"] = "forager_0,0:home:2"
+	var key := npc_system.forager_unreachable_meta_key(entry)
+	blocked.set_meta(key, true)
+	var options: Dictionary = npc_system.resource_query_options_for_job(entry, "forage")
+	options["cacheFrames"] = 0
+	var queried: Array[Node3D] = service.query_resource_nodes(entry, ["forage_source"], options)
+	var safe_key := key.find(":") < 0 and key.find(",") < 0
+	var passed: bool = safe_key and bool(blocked.get_meta(key, false)) and queried.size() == 1 and queried[0] == alternate
+	return outcome(passed, "key=%s queried=%d" % [key, queried.size()], ["unsafe_npc_id_produces_valid_meta_key", "unsafe_id_unreachable_target_suppressed"], state(service))
 
 func test_forager_harvest_requires_reservation_and_arrival(_mode: String) -> Dictionary:
 	var service = make_service()

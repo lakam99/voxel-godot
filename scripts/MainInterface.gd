@@ -445,6 +445,7 @@ func _on_player_projectile_story_worldmark_hit(resolved: bool, position: Vector3
 func show_break_overlay(hit_position: Vector3, normal: Vector3, ratio: float) -> void: pass
 func add_crack_line(mesh: ImmediateMesh, a: Vector3, b: Vector3) -> void: pass
 func height_at_world(x: float, z: float) -> float: return 0.0
+func ground_height_at_world(x: float, z: float, current_y: float) -> float: return height_at_world(x, z)
 func terrain_height_cell(x: int, z: int) -> float: return 0.0
 func base_height_cell(x: int, z: int) -> float: return 0.0
 func natural_base_height_cell(x: int, z: int) -> float: return 0.0

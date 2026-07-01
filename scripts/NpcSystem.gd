@@ -64,6 +64,7 @@ var npc_update_cursor := 0
 var npc_update_active := false
 var external_move_budget_physics_frame := -1
 var published_navigation_semantics := {}
+var metadata_key_sanitizer: RegEx = null
 
 func performance_monitor():
     return main.get("runtime_perf_monitor") if main != null else null
@@ -1201,7 +1202,25 @@ func mark_forager_target_unreachable(entry: Dictionary, node: Node3D) -> void:
     node.set_meta(forager_unreachable_meta_key(entry), true)
 
 func forager_unreachable_meta_key(entry: Dictionary) -> String:
-    return "npc_unreachable_forager_%s" % String(entry.get("id", "npc"))
+    var cached := String(entry.get("foragerUnreachableMetaKey", ""))
+    if cached != "":
+        return cached
+    var raw_id := String(entry.get("id", "npc"))
+    var safe_id := metadata_identifier_suffix(raw_id)
+    var raw_hash := int(raw_id.hash())
+    if raw_hash < 0:
+        raw_hash = -raw_hash
+    var key := "npc_unreachable_forager_%s_%d" % [safe_id, raw_hash]
+    entry["foragerUnreachableMetaKey"] = key
+    return key
+
+func metadata_identifier_suffix(value: String) -> String:
+    if metadata_key_sanitizer == null:
+        metadata_key_sanitizer = RegEx.new()
+        if metadata_key_sanitizer.compile("[^A-Za-z0-9_]") != OK:
+            return "npc"
+    var safe := metadata_key_sanitizer.sub(value, "_", true)
+    return safe if safe != "" else "npc"
 
 func harvest_forager_target(entry: Dictionary) -> bool:
     return complete_worker_resource_target(entry)
@@ -1212,7 +1231,7 @@ func find_job_resource_target(entry: Dictionary, job: String) -> Node3D:
         return null
     var monitor = performance_monitor()
     var scan_start: int = monitor.begin_section("job_forage_scan") if monitor != null else Time.get_ticks_usec()
-    var query_options := resource_query_options_for_job(job)
+    var query_options := resource_query_options_for_job(entry, job)
     var candidates: Array[Node3D] = indexed_resource_candidates(entry, resource_kinds_for_job(job), query_options)
     candidates = filter_job_resource_candidates(entry, job, candidates)
     var scanned_nodes := 0
@@ -1244,7 +1263,7 @@ func find_job_resource_target(entry: Dictionary, job: String) -> Node3D:
             return candidate
     return null
 
-func resource_query_options_for_job(job: String) -> Dictionary:
+func resource_query_options_for_job(entry: Dictionary, job: String) -> Dictionary:
     var options := {
         "limit": FORAGE_SCAN_CANDIDATE_LIMIT,
         "outsideTown": job == "forage",
@@ -1252,6 +1271,7 @@ func resource_query_options_for_job(job: String) -> Dictionary:
     }
     if job == "forage":
         options["drops"] = ["berries"]
+        options["unreachableMetaKey"] = forager_unreachable_meta_key(entry)
     return options
 
 func filter_job_resource_candidates(entry: Dictionary, job: String, candidates: Array[Node3D]) -> Array[Node3D]:
@@ -1322,6 +1342,8 @@ func is_valid_job_resource_node(node: Node3D, entry: Dictionary, job: String) ->
     if job == "stone":
         return material in ["rock", "copperOre", "ironOre"] or drop in ["stones", "copperOre", "ironOre"]
     if job == "forage":
+        if bool(node.get_meta(forager_unreachable_meta_key(entry), false)):
+            return false
         return material == "berryBush" or drop == "berries"
     return false
 

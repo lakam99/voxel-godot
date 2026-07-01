@@ -432,6 +432,13 @@ func add_crack_line(mesh: ImmediateMesh, a: Vector3, b: Vector3) -> void:
 func height_at_world(x: float, z: float) -> float:
     return terrain_height_cell(world_to_cell(x), world_to_cell(z))
 
+func ground_height_at_world(x: float, z: float, current_y: float) -> float:
+    if structure_system != null and structure_system.has_method("cave_ground_height_at_world"):
+        var cave_y := float(structure_system.call("cave_ground_height_at_world", x, z, current_y))
+        if not is_nan(cave_y):
+            return cave_y
+    return height_at_world(x, z)
+
 func terrain_height_cell(x: int, z: int) -> float:
     var key := Vector2i(x, z)
     if height_edits.has(key):

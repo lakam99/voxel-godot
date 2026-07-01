@@ -9,8 +9,11 @@ const CAVE_VISUAL_LAYER := 1 << 1
 
 var main
 var cave_material: StandardMaterial3D
+var cave_shadow_material: StandardMaterial3D
+var formation_material: StandardMaterial3D
 var support_material: StandardMaterial3D
 var profile_cache := {}
+var cover_drop_cache := {}
 
 func setup(main_node) -> void:
     main = main_node
@@ -31,6 +34,7 @@ func build(plan: Dictionary, rng: RandomNumberGenerator, metadata: Dictionary = 
         root.set_meta(String(key), metadata[key])
 
     var visual_mesh := build_visual_mesh(plan, rng)
+    var formation_mesh := build_formation_mesh(plan, rng)
     var collision_mesh := build_collision_mesh(plan)
     var visual := MeshInstance3D.new()
     visual.name = "CaveInteriorVisual"
@@ -39,6 +43,23 @@ func build(plan: Dictionary, rng: RandomNumberGenerator, metadata: Dictionary = 
     visual.layers = CAVE_VISUAL_LAYER
     visual.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
     root.add_child(visual)
+
+    var shadow := MeshInstance3D.new()
+    shadow.name = "CaveInteriorShadow"
+    shadow.mesh = visual_mesh
+    shadow.material_override = shadow_only_material()
+    shadow.layers = CAVE_VISUAL_LAYER
+    shadow.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_SHADOWS_ONLY
+    root.add_child(shadow)
+
+    var formations := MeshInstance3D.new()
+    formations.name = "CaveInteriorFormations"
+    formations.mesh = formation_mesh
+    formations.material_override = cave_formation_material()
+    formations.layers = CAVE_VISUAL_LAYER
+    formations.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+    root.add_child(formations)
+    add_mouth_arch_visual(root, plan)
 
     var body := StaticBody3D.new()
     body.name = "CaveInteriorBody"
@@ -63,6 +84,57 @@ func build(plan: Dictionary, rng: RandomNumberGenerator, metadata: Dictionary = 
         main.add_child(root)
     return root
 
+func add_mouth_arch_visual(root: Node3D, plan: Dictionary) -> void:
+    if root == null or main == null:
+        return
+    var st := SurfaceTool.new()
+    st.begin(Mesh.PRIMITIVE_TRIANGLES)
+    var entrance: Vector2i = plan.get("entranceCell", Vector2i.ZERO)
+    var inward_cell: Vector2i = plan.get("inward", Vector2i(0, 1))
+    var right_cell: Vector2i = plan.get("right", Vector2i(1, 0))
+    var inward := Vector2(float(inward_cell.x), float(inward_cell.y)).normalized()
+    var right := Vector2(float(right_cell.x), float(right_cell.y)).normalized()
+    if inward.length() <= 0.01:
+        inward = Vector2(0.0, 1.0)
+    if right.length() <= 0.01:
+        right = Vector2(1.0, 0.0)
+    var cell_size := float(main.CELL)
+    var origin := cell_world2(entrance) - inward * cell_size * 0.12
+    var floor_y := floor_point(plan, cell_world2(entrance)).y - 0.02
+    var inner_radius := maxf(float(plan.get("entranceMouthHalfWidth", 3.85)) * cell_size * 0.98, cell_size * 3.55)
+    var outer_radius := inner_radius + cell_size * 0.72
+    var color := Color(0.34, 0.37, 0.35)
+    var segments := 24
+    for index in range(segments):
+        var a0 := PI - (float(index) / float(segments)) * PI
+        var a1 := PI - (float(index + 1) / float(segments)) * PI
+        var outer0 := mouth_arch_vertex(origin, right, floor_y, outer_radius, a0)
+        var outer1 := mouth_arch_vertex(origin, right, floor_y, outer_radius, a1)
+        var inner1 := mouth_arch_vertex(origin, right, floor_y, inner_radius, a1)
+        var inner0 := mouth_arch_vertex(origin, right, floor_y, inner_radius, a0)
+        add_quad(st, outer0, outer1, inner1, inner0, color)
+    st.generate_normals()
+    var mesh := st.commit()
+    if mesh == null:
+        return
+    var arch := MeshInstance3D.new()
+    arch.name = "CaveMouthSemicircle"
+    arch.mesh = mesh
+    arch.material_override = material()
+    arch.layers = CAVE_VISUAL_LAYER
+    arch.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+    arch.set_meta("generated", true)
+    arch.set_meta("generatedTier", "cave")
+    arch.set_meta("caveRole", "mouth_semicircle")
+    arch.set_meta("caveId", String(plan.get("id", "")))
+    root.add_child(arch)
+
+func mouth_arch_vertex(origin: Vector2, right: Vector2, floor_y: float, radius: float, angle: float) -> Vector3:
+    var lateral := cos(angle) * radius
+    var y := floor_y + sin(angle) * radius
+    var point := origin + right * lateral
+    return Vector3(point.x, y, point.y)
+
 func material() -> StandardMaterial3D:
     if cave_material != null:
         return cave_material
@@ -73,6 +145,28 @@ func material() -> StandardMaterial3D:
     cave_material.cull_mode = BaseMaterial3D.CULL_DISABLED
     cave_material.set("disable_ambient_light", true)
     return cave_material
+
+func shadow_only_material() -> StandardMaterial3D:
+    if cave_shadow_material != null:
+        return cave_shadow_material
+    cave_shadow_material = StandardMaterial3D.new()
+    cave_shadow_material.vertex_color_use_as_albedo = true
+    cave_shadow_material.albedo_color = Color(0.08, 0.09, 0.09)
+    cave_shadow_material.roughness = 1.0
+    cave_shadow_material.cull_mode = BaseMaterial3D.CULL_DISABLED
+    cave_shadow_material.set("disable_ambient_light", true)
+    return cave_shadow_material
+
+func cave_formation_material() -> StandardMaterial3D:
+    if formation_material != null:
+        return formation_material
+    formation_material = StandardMaterial3D.new()
+    formation_material.vertex_color_use_as_albedo = true
+    formation_material.albedo_color = Color(0.32, 0.35, 0.33)
+    formation_material.roughness = 0.96
+    formation_material.cull_mode = BaseMaterial3D.CULL_DISABLED
+    formation_material.set("disable_ambient_light", true)
+    return formation_material
 
 func cave_support_material() -> StandardMaterial3D:
     if support_material != null:
@@ -86,6 +180,12 @@ func build_visual_mesh(plan: Dictionary, rng: RandomNumberGenerator) -> ArrayMes
     var st := SurfaceTool.new()
     st.begin(Mesh.PRIMITIVE_TRIANGLES)
     add_carved_volume(st, plan, true)
+    st.generate_normals()
+    return st.commit()
+
+func build_formation_mesh(plan: Dictionary, rng: RandomNumberGenerator) -> ArrayMesh:
+    var st := SurfaceTool.new()
+    st.begin(Mesh.PRIMITIVE_TRIANGLES)
     add_procedural_formations(st, plan, rng)
     st.generate_normals()
     return st.commit()
@@ -184,24 +284,198 @@ func boundary_offset(plan: Dictionary, point: Vector2, outward: Vector2) -> floa
     return 0.0
 
 func floor_point(plan: Dictionary, point: Vector2) -> Vector3:
-    var floor_y := float(plan.get("level", 0.0)) + 0.22
+    var route_drop := cave_depth_drop_at_point(plan, point)
+    var base_ceiling_y := float(plan.get("ceilingLevel", float(plan.get("level", 0.0)) + float(main.CELL) * 3.0)) - route_drop
+    var cover_drop := cave_cover_drop_at_point(plan, point, base_ceiling_y)
+    var floor_y := cave_base_floor_y(plan, route_drop, cover_drop, base_ceiling_y - cover_drop)
     var cell_size := float(main.CELL)
+    var variation_scale := cave_floor_variation_scale(plan, point)
     var phase_x := stable_signed(plan, "floor-phase-x", 0, 0) * PI * 2.0
     var phase_z := stable_signed(plan, "floor-phase-z", 1, 0) * PI * 2.0
-    var micro := stable_signed(plan, "floor-warp", floori(point.x / (cell_size * 0.5)), floori(point.y / (cell_size * 0.5))) * 0.08
-    var broad_roll := (sin(point.x * 0.105 + phase_x) + cos(point.y * 0.098 + phase_z)) * cell_size * 0.16
-    var diagonal := sin((point.x + point.y) * 0.075 + phase_x * 0.5) * cell_size * 0.10
-    var ridge := sin(point.x * 0.18 + phase_z) * cos(point.y * 0.16 + phase_x) * cell_size * 0.10
-    var center_lift := maxf(0.0, 1.0 - cave_volume_value(plan, point)) * 0.08
+    var micro := stable_signed(plan, "floor-warp", floori(point.x / (cell_size * 0.5)), floori(point.y / (cell_size * 0.5))) * 0.08 * variation_scale
+    var broad_roll := (sin(point.x * 0.105 + phase_x) + cos(point.y * 0.098 + phase_z)) * cell_size * 0.16 * variation_scale
+    var diagonal := sin((point.x + point.y) * 0.075 + phase_x * 0.5) * cell_size * 0.10 * variation_scale
+    var ridge := sin(point.x * 0.18 + phase_z) * cos(point.y * 0.16 + phase_x) * cell_size * 0.10 * variation_scale
+    var center_lift := maxf(0.0, 1.0 - cave_volume_value(plan, point)) * 0.08 * variation_scale
     return Vector3(point.x, floor_y + micro + broad_roll + diagonal + ridge + center_lift, point.y)
 
+func cave_floor_variation_scale(plan: Dictionary, point: Vector2) -> float:
+    var entrance: Vector2i = plan.get("entranceCell", Vector2i.ZERO)
+    var inward_cell: Vector2i = plan.get("inward", Vector2i(0, 1))
+    var inward := Vector2(float(inward_cell.x), float(inward_cell.y))
+    if inward.length() <= 0.01:
+        return 1.0
+    inward = inward.normalized()
+    var depth := (point - cell_world2(entrance)).dot(inward) / float(main.CELL)
+    return smoothstep(1.4, 7.0, depth)
+
 func ceiling_point(plan: Dictionary, point: Vector2) -> Vector3:
-    var ceiling_y := float(plan.get("ceilingLevel", float(plan.get("level", 0.0)) + float(main.CELL) * 3.0))
+    var route_drop := cave_depth_drop_at_point(plan, point)
+    var base_ceiling_y := float(plan.get("ceilingLevel", float(plan.get("level", 0.0)) + float(main.CELL) * 3.0)) - route_drop
+    var cover_drop := cave_cover_drop_at_point(plan, point, base_ceiling_y)
+    var ceiling_y := base_ceiling_y - cover_drop
+    var floor_y := cave_base_floor_y(plan, route_drop, cover_drop, ceiling_y)
+    var mouth_arch_blend := cave_mouth_arch_blend(plan, point)
+    if mouth_arch_blend > 0.001:
+        ceiling_y = lerpf(ceiling_y, cave_mouth_arch_ceiling_y(plan, point, floor_y), mouth_arch_blend)
     var cell_size := float(main.CELL)
     var value := cave_volume_value(plan, point)
-    var dome := maxf(0.0, 1.0 - value) * cell_size * 0.34
-    var wave := stable_signed(plan, "ceiling-warp", floori(point.x / (cell_size * 0.5)), floori(point.y / (cell_size * 0.5))) * 0.34
+    var dome := maxf(0.0, 1.0 - value) * cell_size * 0.34 * (1.0 - mouth_arch_blend * 0.85)
+    var wave := stable_signed(plan, "ceiling-warp", floori(point.x / (cell_size * 0.5)), floori(point.y / (cell_size * 0.5))) * 0.34 * (1.0 - mouth_arch_blend)
     return Vector3(point.x, ceiling_y + dome + wave, point.y)
+
+func cave_mouth_depth_lateral(plan: Dictionary, point: Vector2) -> Vector2:
+    var cell_size := float(main.CELL)
+    var entrance: Vector2i = plan.get("entranceCell", Vector2i.ZERO)
+    var inward_cell: Vector2i = plan.get("inward", Vector2i(0, 1))
+    var right_cell: Vector2i = plan.get("right", Vector2i(1, 0))
+    var inward := Vector2(float(inward_cell.x), float(inward_cell.y))
+    var right := Vector2(float(right_cell.x), float(right_cell.y))
+    if inward.length() <= 0.01:
+        inward = Vector2(0.0, 1.0)
+    if right.length() <= 0.01:
+        right = Vector2(1.0, 0.0)
+    inward = inward.normalized()
+    right = right.normalized()
+    var delta := (point - cell_world2(entrance)) / cell_size
+    return Vector2(delta.dot(inward), delta.dot(right))
+
+func cave_mouth_width_at_depth(plan: Dictionary, depth_cells: float) -> float:
+    var interior_depth := float(maxi(1, int(plan.get("entranceOpenDepth", 7))))
+    var mouth_width := maxf(3.75, float(plan.get("entranceMouthHalfWidth", 3.85)))
+    if depth_cells < 0.0 or depth_cells > interior_depth + 1.75:
+        return 0.0
+    if depth_cells <= 2.0:
+        return mouth_width
+    var taper_t := smoothstep(2.0, interior_depth + 1.75, depth_cells)
+    return lerpf(mouth_width, 2.45, taper_t)
+
+func cave_mouth_arch_blend(plan: Dictionary, point: Vector2) -> float:
+    var axes := cave_mouth_depth_lateral(plan, point)
+    var depth_cells := axes.x
+    var width := cave_mouth_width_at_depth(plan, depth_cells)
+    if width <= 0.0:
+        return 0.0
+    var lateral_t := absf(axes.y) / maxf(0.001, width)
+    if lateral_t > 1.08:
+        return 0.0
+    var interior_depth := float(maxi(1, int(plan.get("entranceOpenDepth", 7))))
+    var depth_blend := 1.0 - smoothstep(3.0, interior_depth + 1.5, depth_cells)
+    var front_blend := smoothstep(-0.65, 0.0, depth_cells)
+    return clampf(depth_blend * front_blend, 0.0, 1.0)
+
+func cave_mouth_arch_ceiling_y(plan: Dictionary, point: Vector2, floor_y: float) -> float:
+    var axes := cave_mouth_depth_lateral(plan, point)
+    var width := cave_mouth_width_at_depth(plan, axes.x)
+    if width <= 0.0:
+        return float(plan.get("ceilingLevel", floor_y + float(main.CELL) * 3.0))
+    var lateral_t := clampf(absf(axes.y) / maxf(0.001, width), 0.0, 1.0)
+    var arch := sqrt(maxf(0.0, 1.0 - lateral_t * lateral_t))
+    var arch_height := clampf(width * float(main.CELL) * 0.98, float(main.CELL) * 2.70, float(main.CELL) * 4.65)
+    return floor_y + maxf(float(main.CELL) * 0.55, arch_height * arch)
+
+func cave_base_floor_y(plan: Dictionary, route_drop: float, cover_drop: float, ceiling_y: float) -> float:
+    var floor_y := float(plan.get("level", 0.0)) + 0.22 - route_drop - cover_drop * 0.68
+    var minimum_clearance := float(main.CELL) * 2.45
+    if ceiling_y != INF:
+        floor_y = minf(floor_y, ceiling_y - minimum_clearance)
+    return floor_y
+
+func cave_depth_drop_at_point(plan: Dictionary, point: Vector2) -> float:
+    var max_drop := cave_max_vertical_drop(plan)
+    if max_drop <= 0.01:
+        return 0.0
+    var progress := cave_depth_progress(plan, point)
+    var route_drop := smoothstep(0.03, 1.0, progress) * max_drop
+    var cell_size := float(main.CELL)
+    var local_extra := maxf(
+        0.0,
+        stable_signed(
+            plan,
+            "depth-local-dip",
+            floori(point.x / (cell_size * 1.5)),
+            floori(point.y / (cell_size * 1.5))
+        )
+    ) * cell_size * 0.16 * smoothstep(0.12, 0.95, progress)
+    return clampf(route_drop + local_extra, 0.0, max_drop + cell_size * 0.18)
+
+func cave_cover_drop_at_point(plan: Dictionary, point: Vector2, base_ceiling_y: float) -> float:
+    if main == null:
+        return 0.0
+    var cell_size := float(main.CELL)
+    var cell_x := roundi(point.x / cell_size)
+    var cell_z := roundi(point.y / cell_size)
+    var cache_key := "%s:%d,%d:%d" % [String(plan.get("id", "cave")), cell_x, cell_z, roundi(base_ceiling_y * 10.0)]
+    if cover_drop_cache.has(cache_key):
+        return float(cover_drop_cache[cache_key])
+    var progress := cave_depth_progress(plan, point)
+    var mouth_clear_t := smoothstep(0.08, 0.24, progress)
+    if mouth_clear_t <= 0.001:
+        cover_drop_cache[cache_key] = 0.0
+        return 0.0
+    var required_cover := float(main.CELL) * 0.82
+    var max_deficit := 0.0
+    var weighted_deficit := 0.0
+    var total_weight := 0.0
+    for dz in range(-2, 3):
+        for dx in range(-2, 3):
+            var distance := Vector2(float(dx), float(dz)).length()
+            if distance > 2.35:
+                continue
+            var sample_point := point + Vector2(float(dx) * cell_size, float(dz) * cell_size)
+            var terrain_y := cave_surface_height_at_point(sample_point)
+            var deficit := maxf(0.0, base_ceiling_y - (terrain_y - required_cover))
+            var weight := 1.0 - smoothstep(0.0, 2.35, distance)
+            max_deficit = maxf(max_deficit, deficit * maxf(0.35, weight))
+            weighted_deficit += deficit * weight
+            total_weight += weight
+    var smoothed_deficit := maxf(max_deficit, weighted_deficit / maxf(0.001, total_weight))
+    if smoothed_deficit <= 0.0:
+        cover_drop_cache[cache_key] = 0.0
+        return 0.0
+    var drop := (smoothed_deficit + float(main.CELL) * 0.16) * mouth_clear_t
+    cover_drop_cache[cache_key] = drop
+    return drop
+
+func cave_surface_height_at_point(point: Vector2) -> float:
+    var cell_x := roundi(point.x / float(main.CELL))
+    var cell_z := roundi(point.y / float(main.CELL))
+    if main != null and main.has_method("base_height_cell"):
+        return float(main.call("base_height_cell", cell_x, cell_z))
+    if main != null and main.has_method("terrain_height_cell"):
+        return float(main.call("terrain_height_cell", cell_x, cell_z))
+    return 0.0
+
+func cave_max_vertical_drop(plan: Dictionary) -> float:
+    if main == null:
+        return 0.0
+    var cell_size := float(main.CELL)
+    var tier := String(plan.get("caveTier", "normal"))
+    var tier_bonus := 0.0
+    if tier == "rare_long":
+        tier_bonus = 2.45
+    elif tier == "deep":
+        tier_bonus = 1.35
+    var desired := cell_size * (5.75 + tier_bonus)
+    if String(plan.get("kind", "")) == "underground":
+        desired += cell_size * 0.55
+    var safe_floor := float(main.WATER_LEVEL) + cell_size * 1.45
+    var available := maxf(0.0, float(plan.get("level", 0.0)) + 0.22 - safe_floor)
+    return minf(desired, available * 0.90)
+
+func cave_depth_progress(plan: Dictionary, point: Vector2) -> float:
+    var entrance: Vector2i = plan.get("entranceCell", Vector2i.ZERO)
+    var final_cell: Vector2i = plan.get("finalChamberCell", entrance)
+    var inward_cell: Vector2i = plan.get("inward", Vector2i(0, 1))
+    var inward := Vector2(float(inward_cell.x), float(inward_cell.y))
+    if inward.length() <= 0.01:
+        inward = Vector2(0.0, 1.0)
+    inward = inward.normalized()
+    var entrance_world := cell_world2(entrance)
+    var final_world := cell_world2(final_cell)
+    var final_depth := maxf(float(main.CELL) * 8.0, (final_world - entrance_world).dot(inward))
+    var point_depth := (point - entrance_world).dot(inward)
+    return clampf(point_depth / final_depth, 0.0, 1.0)
 
 func cave_world_bounds(plan: Dictionary) -> Dictionary:
     var profiles := cached_profile_points(plan)
@@ -275,6 +549,19 @@ func cave_profile_points(plan: Dictionary) -> Array[Dictionary]:
 func cave_graph_profile_points(plan: Dictionary, graph_nodes: Array, graph_edges: Array) -> Array[Dictionary]:
     var profiles: Array[Dictionary] = []
     var cell_size := float(main.CELL)
+    var entrance: Vector2i = plan.get("entranceCell", Vector2i.ZERO)
+    var inward: Vector2i = plan.get("inward", Vector2i(0, 1))
+    var right: Vector2i = plan.get("right", Vector2i(1, 0))
+    var mouth_width := float(plan.get("entranceMouthHalfWidth", 3.85))
+    var mouth_depth := int(plan.get("entranceOpenDepth", 7))
+    for depth in range(-1, 4):
+        var width_t := clampf(float(depth + 1) / 4.0, 0.0, 1.0)
+        var radius_cells := lerpf(mouth_width * 0.92, mouth_width * 1.08, 1.0 - absf(width_t - 0.42))
+        profiles.append({
+            "center": cell_world2(entrance + inward * depth),
+            "radius": radius_cells * cell_size,
+            "kind": "mouth"
+        })
     var seen_edges := {}
     for edge_value in graph_edges:
         if not (edge_value is Dictionary):
@@ -291,6 +578,8 @@ func cave_graph_profile_points(plan: Dictionary, graph_nodes: Array, graph_edges
             if seen_edges.has(key):
                 continue
             seen_edges[key] = true
+            if cell_inside_mouth_corridor(plan, cell, mouth_depth, mouth_width, inward, right):
+                continue
             var profile_radius := radius * (0.88 + stable01(plan, "graph-edge-radius:%s" % edge_id, cell.x, cell.y) * 0.20)
             profiles.append({
                 "center": cell_world2(cell),
@@ -304,12 +593,12 @@ func cave_graph_profile_points(plan: Dictionary, graph_nodes: Array, graph_edges
         var node_id := String(node.get("id", "node"))
         var node_kind := String(node.get("kind", "chamber"))
         var node_cell: Vector2i = node.get("cell", Vector2i.ZERO)
+        if node_kind == "entrance":
+            continue
         var radius_cells := float(node.get("radius", 3))
         var radius_scale := 1.16
         if node_kind == "final":
             radius_scale = 1.36
-        elif node_kind == "entrance":
-            radius_scale = 0.92
         elif node_kind == "junction":
             radius_scale = 1.22
         profiles.append({
@@ -317,8 +606,6 @@ func cave_graph_profile_points(plan: Dictionary, graph_nodes: Array, graph_edges
             "radius": radius_cells * cell_size * radius_scale,
             "kind": node_kind
         })
-        if node_kind == "entrance":
-            continue
         for lobe_index in range(2):
             var lobe_angle := TAU * stable01(plan, "graph-node-lobe-angle:%s" % node_id, lobe_index, 0)
             var lobe_distance := radius_cells * cell_size * (0.34 + stable01(plan, "graph-node-lobe-distance:%s" % node_id, lobe_index, 0) * 0.24)
@@ -331,14 +618,30 @@ func cave_graph_profile_points(plan: Dictionary, graph_nodes: Array, graph_edges
             })
     return profiles
 
+func cell_inside_mouth_corridor(plan: Dictionary, cell: Vector2i, mouth_depth: int, mouth_width: float, inward: Vector2i, right: Vector2i) -> bool:
+    var entrance: Vector2i = plan.get("entranceCell", Vector2i.ZERO)
+    var delta := cell - entrance
+    var depth := delta.x * inward.x + delta.y * inward.y
+    if depth < 0:
+        return true
+    if depth > mouth_depth + 1:
+        return false
+    var lateral := delta.x * right.x + delta.y * right.y
+    var width_at_depth := cave_mouth_width_at_depth(plan, float(depth))
+    if width_at_depth <= 0.0:
+        width_at_depth = mouth_width
+    return absf(float(lateral)) <= width_at_depth + 1.25
+
 func cave_volume_value(plan: Dictionary, point: Vector2) -> float:
-    var best := INF
+    var best := cave_mouth_volume_value(plan, point)
     var cell_size := float(main.CELL)
     var noise_x := floori(point.x / (cell_size * 0.75))
     var noise_z := floori(point.y / (cell_size * 0.75))
     var edge_noise := 0.88 + stable01(plan, "volume-edge", noise_x, noise_z) * 0.24
     for profile_value in cached_profile_points(plan):
         var profile: Dictionary = profile_value
+        if String(profile.get("kind", "")) == "mouth":
+            continue
         var center: Vector2 = profile.get("center", Vector2.ZERO)
         var radius := float(profile.get("radius", cell_size * 2.0)) * edge_noise
         if radius <= 0.01:
@@ -346,6 +649,17 @@ func cave_volume_value(plan: Dictionary, point: Vector2) -> float:
         var value := center.distance_to(point) / radius
         best = minf(best, value)
     return best
+
+func cave_mouth_volume_value(plan: Dictionary, point: Vector2) -> float:
+    var axes := cave_mouth_depth_lateral(plan, point)
+    var depth_cells := axes.x
+    var width := cave_mouth_width_at_depth(plan, depth_cells)
+    if width <= 0.0:
+        return INF
+    var lateral_value := absf(axes.y) / maxf(0.001, width)
+    var interior_depth := float(maxi(1, int(plan.get("entranceOpenDepth", 7))))
+    var back_cap := maxf(0.0, (depth_cells - (interior_depth + 1.75)) / 1.0)
+    return maxf(lateral_value, back_cap)
 
 func wall_mount_sample(plan: Dictionary, walk_cell: Vector2i, wall_normal: Vector2i) -> Dictionary:
     if main == null:
@@ -489,15 +803,26 @@ func path_depth(plan: Dictionary, cell: Vector2i) -> int:
 func is_entrance_mouth_edge(plan: Dictionary, point: Vector2, direction: Vector2i) -> bool:
     var inward: Vector2i = plan.get("inward", Vector2i(0, 1))
     var outward := Vector2i(-inward.x, -inward.y)
-    if direction != outward:
-        return false
     var entrance: Vector2i = plan.get("entranceCell", Vector2i.ZERO)
     var right: Vector2i = plan.get("right", Vector2i(1, 0))
     var cell_size := float(main.CELL)
     var delta := (point - cell_world2(entrance)) / cell_size
     var depth := delta.dot(Vector2(float(inward.x), float(inward.y)))
     var lateral := delta.dot(Vector2(float(right.x), float(right.y)))
-    return depth <= 1.2 and absf(lateral) <= 2.4
+    var mouth_width := float(plan.get("entranceMouthHalfWidth", 3.85))
+    if depth >= -0.35 and depth <= 4.25 and absf(lateral) <= mouth_width + 0.80:
+        return true
+    return direction == outward and depth <= 2.8 and depth >= -1.2 and absf(lateral) <= mouth_width + 0.65
+
+func is_entrance_mouth_visual_opening(plan: Dictionary, point: Vector2) -> bool:
+    var axes := cave_mouth_depth_lateral(plan, point)
+    var depth := axes.x
+    if depth < -0.05 or depth > 2.75:
+        return false
+    var width := cave_mouth_width_at_depth(plan, depth)
+    if width <= 0.0:
+        width = float(plan.get("entranceMouthHalfWidth", 3.85))
+    return absf(axes.y) <= width + 0.35
 
 func add_procedural_formations(st: SurfaceTool, plan: Dictionary, rng: RandomNumberGenerator) -> void:
     var entrance: Vector2i = plan.get("entranceCell", Vector2i.ZERO)
@@ -507,7 +832,7 @@ func add_procedural_formations(st: SurfaceTool, plan: Dictionary, rng: RandomNum
     for cell in cells:
         if placed >= 24:
             break
-        if cell_distance(cell, entrance) < 5.0 or cell_distance(cell, chest) < 3.0:
+        if cell_distance(cell, entrance) < 9.0 or cell_distance(cell, chest) < 3.0:
             continue
         if rng.randf() > 0.42:
             continue

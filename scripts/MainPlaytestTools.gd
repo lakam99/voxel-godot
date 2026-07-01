@@ -30,6 +30,8 @@ func build_chunk_mesh(cx: int, cz: int) -> Mesh:
         for x in range(CHUNK_SIZE):
             var gx: int = start_x + x
             var gz: int = start_z + z
+            if terrain_quad_hidden_for_cell(gx, gz):
+                continue
             var p00: Vector3 = terrain_vertex_local_cached(height_cache, gx, gz, start_x, start_z)
             var p10: Vector3 = terrain_vertex_local_cached(height_cache, gx + 1, gz, start_x, start_z)
             var p01: Vector3 = terrain_vertex_local_cached(height_cache, gx, gz + 1, start_x, start_z)
@@ -68,6 +70,11 @@ func terrain_color_for_cell(cell_x: int, cell_z: int) -> Color:
             return Color(0.32, 0.37, 0.36)
     return BIOME_COLORS.get(biome_at_cell(cell_x, cell_z), BIOME_COLORS["plains"])
 
+func terrain_quad_hidden_for_cell(cell_x: int, cell_z: int) -> bool:
+    return structure_system != null \
+        and structure_system.has_method("terrain_quad_hidden_for_cell") \
+        and bool(structure_system.call("terrain_quad_hidden_for_cell", cell_x, cell_z))
+
 func terrain_normal_for_cell_cached(height_cache: Dictionary, cell_x: int, cell_z: int) -> Vector3:
     var left := terrain_height_from_cache(height_cache, cell_x - 1, cell_z)
     var right := terrain_height_from_cache(height_cache, cell_x + 1, cell_z)
@@ -93,11 +100,30 @@ func add_chunk_skirts(st: SurfaceTool, start_x: int, start_z: int, bottom_y: flo
     var end_x := start_x + CHUNK_SIZE
     var end_z := start_z + CHUNK_SIZE
     for x in range(start_x, end_x):
-        add_skirt_quad(st, x, start_z, x + 1, start_z, start_x, start_z, bottom_y)
-        add_skirt_quad(st, x + 1, end_z, x, end_z, start_x, start_z, bottom_y)
+        if not terrain_skirt_hidden_for_segment(x, start_z, x + 1, start_z):
+            add_skirt_quad(st, x, start_z, x + 1, start_z, start_x, start_z, bottom_y)
+        if not terrain_skirt_hidden_for_segment(x + 1, end_z, x, end_z):
+            add_skirt_quad(st, x + 1, end_z, x, end_z, start_x, start_z, bottom_y)
     for z in range(start_z, end_z):
-        add_skirt_quad(st, start_x, z + 1, start_x, z, start_x, start_z, bottom_y)
-        add_skirt_quad(st, end_x, z, end_x, z + 1, start_x, start_z, bottom_y)
+        if not terrain_skirt_hidden_for_segment(start_x, z + 1, start_x, z):
+            add_skirt_quad(st, start_x, z + 1, start_x, z, start_x, start_z, bottom_y)
+        if not terrain_skirt_hidden_for_segment(end_x, z, end_x, z + 1):
+            add_skirt_quad(st, end_x, z, end_x, z + 1, start_x, start_z, bottom_y)
+
+func terrain_skirt_hidden_for_segment(ax: int, az: int, bx: int, bz: int) -> bool:
+    if ax == bx:
+        var z0 := mini(az, bz)
+        var z1 := maxi(az, bz)
+        for z in range(z0, z1):
+            if terrain_quad_hidden_for_cell(ax, z) or terrain_quad_hidden_for_cell(ax - 1, z):
+                return true
+    elif az == bz:
+        var x0 := mini(ax, bx)
+        var x1 := maxi(ax, bx)
+        for x in range(x0, x1):
+            if terrain_quad_hidden_for_cell(x, az) or terrain_quad_hidden_for_cell(x, az - 1):
+                return true
+    return false
 
 func add_skirt_quad(
     st: SurfaceTool,
