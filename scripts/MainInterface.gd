@@ -13,6 +13,8 @@ const StaticItemAssetRegistryScript := preload("res://scripts/visual/StaticItemA
 const AnimatedAssetRegistryScript := preload("res://scripts/visual/AnimatedAssetRegistry.gd")
 const ObjectiveSystemScript := preload("res://scripts/ObjectiveSystem.gd")
 const StructureSystemScript := preload("res://scripts/StructureSystem.gd")
+const WorldGenerationSystemScript := preload("res://scripts/WorldGenerationSystem.gd")
+const SubsurfaceSystemScript := preload("res://scripts/SubsurfaceSystem.gd")
 const UtilityBlockSystemScript := preload("res://scripts/UtilityBlockSystem.gd")
 const SaveSystemScript := preload("res://scripts/SaveSystem.gd")
 const RuntimePerformanceMonitorScript := preload("res://scripts/perf/RuntimePerformanceMonitor.gd")
@@ -108,7 +110,8 @@ const BIOME_COLORS := {
     "town": Color(0.43, 0.67, 0.38),
     "alpine": Color(0.50, 0.55, 0.53),
     "tundra": Color(0.58, 0.66, 0.58),
-    "snow": Color(0.86, 0.91, 0.90)
+    "snow": Color(0.86, 0.91, 0.90),
+    "cave": Color(0.20, 0.22, 0.21)
 }
 
 
@@ -119,6 +122,7 @@ func apply_world_seed(new_seed: String, remember := false) -> void: pass
 func random_world_seed(exclude_seed := "") -> String: return ""
 func setup_game_systems() -> void: pass
 func setup_story_systems() -> void: pass
+func setup_world_generation_system() -> void: pass
 func story_region_id_for_cell(cell: Vector2i) -> String: return ""
 func story_region_id_for_world_position(position: Vector3) -> String: return ""
 func emit_story_event(event_type: String, subject_id := "", region_id := "", dedupe_key := "", position := Vector3.INF, payload := {}) -> bool: return false
@@ -450,6 +454,9 @@ func terrain_height_cell(x: int, z: int) -> float: return 0.0
 func base_height_cell(x: int, z: int) -> float: return 0.0
 func natural_base_height_cell(x: int, z: int) -> float: return 0.0
 func biome_at_cell(x: int, z: int) -> String: return ""
+func biome_at_cell3(cell: Vector3i) -> String: return ""
+func biome_at_world(position: Vector3) -> String: return ""
+func world_material_at_cell(cell: Vector3i) -> String: return ""
 func town_region_at_cell(x: int, z: int) -> Dictionary: return {}
 func town_region(region_x: int, region_z: int) -> Dictionary: return {}
 func hash01(text: String) -> float: return 0.0

@@ -1,4 +1,4 @@
-extends "res://scripts/MainInterface.gd"
+﻿extends "res://scripts/MainInterface.gd"
 
 const DEFAULT_VISUAL_STYLE := preload("res://resources/visual/gamecube_style.tres")
 
@@ -43,7 +43,9 @@ var inventory := {}
 var inventory_system
 var crafting_system
 var objective_system
+var world_generation_system
 var structure_system
+var subsurface_system
 var utility_system
 var save_system
 var survival_system
@@ -352,6 +354,9 @@ func apply_world_seed(new_seed: String, remember := false) -> void:
     town_slope_apron_cache.clear()
     fishing_rng.seed = hash_string("%s:fishing" % seed_text)
     setup_noise()
+    setup_world_generation_system()
+    if world_generation_system and world_generation_system.has_method("reset_for_seed"):
+        world_generation_system.reset_for_seed()
     if weather_system and weather_system.has_method("reset_for_seed"):
         weather_system.reset_for_seed(seed_hash)
     if region_story_generator and region_story_generator.has_method("setup"):
@@ -563,6 +568,9 @@ func setup_game_systems() -> void:
         Callable(self, "is_station_near")
     )
     objective_system = ObjectiveSystemScript.new()
+    setup_world_generation_system()
+    subsurface_system = SubsurfaceSystemScript.new()
+    subsurface_system.setup(self)
     structure_system = StructureSystemScript.new()
     structure_system.setup(self)
     utility_system = UtilityBlockSystemScript.new()
@@ -591,6 +599,11 @@ func setup_game_systems() -> void:
     last_survival_health = survival_system.health
     grant_starter_inventory()
     _sync_inventory_totals()
+
+func setup_world_generation_system() -> void:
+    if world_generation_system == null:
+        world_generation_system = WorldGenerationSystemScript.new()
+    world_generation_system.setup(self)
 
 func setup_story_systems() -> void:
     if region_story_generator == null:

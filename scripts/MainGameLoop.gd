@@ -37,8 +37,7 @@ func update_sky(delta: float) -> void:
 
     apply_environment_style(day, warmth, 0.0)
     if weather_system:
-        var cell := Vector2i(world_to_cell(observer.x), world_to_cell(observer.z))
-        var biome := biome_at_cell(cell.x, cell.y)
+        var biome := biome_at_world(observer)
         var weather_state: Dictionary
         if freeze_intro_night:
             weather_system.force_weather("rain", 0.88, 0.94, observer)
@@ -164,8 +163,7 @@ func apply_environment_style(day: float, warmth: float, weather_tint: float) -> 
 func update_music_state(observer: Vector3, day: float) -> void:
     if audio_effects == null:
         return
-    var cell := Vector2i(world_to_cell(observer.x), world_to_cell(observer.z))
-    var biome := biome_at_cell(cell.x, cell.y)
+    var biome := biome_at_world(observer)
     var track := ""
     var music_fade := smoothstep(0.10, 0.46, day)
     if music_fade > 0.01:
@@ -228,8 +226,7 @@ func apply_weather_lighting(weather: Dictionary, day: float) -> void:
 func update_survival(delta: float) -> void:
     if survival_system == null or player == null:
         return
-    var cell := Vector2i(world_to_cell(player.position.x), world_to_cell(player.position.z))
-    var biome := biome_at_cell(cell.x, cell.y)
+    var biome := biome_at_world(player.global_position)
     var day_factor := clock_day_factor()
     var weather_state: Dictionary = weather_system.snapshot() if weather_system else { "kind": "clear", "intensity": 0.0 }
     var shelter_state := shelter_state_at_player(delta)

@@ -1,4 +1,4 @@
-extends "res://scripts/MainChunkTerrain.gd"
+﻿extends "res://scripts/MainChunkTerrain.gd"
 
 func destroy_target() -> void:
     if try_fire_ranged():
@@ -91,6 +91,8 @@ func strike_effect_for_material(material_id: String) -> String:
     return "strike"
 
 func break_target_for_hit(hit: Dictionary, collider: Node, kind: String) -> Dictionary:
+    if (kind == "terrain" or kind == "subsurface") and subsurface_system != null and subsurface_system.has_method("break_target_for_hit"):
+        return subsurface_system.break_target_for_hit(hit, collider, kind)
     if kind == "terrain":
         var sample_pos: Vector3 = hit.position - hit.normal * (CELL * 0.35)
         var cell := Vector2i(world_to_cell(sample_pos.x), world_to_cell(sample_pos.z))
@@ -116,7 +118,18 @@ func break_target_for_hit(hit: Dictionary, collider: Node, kind: String) -> Dict
 
 func complete_destroy_target(hit: Dictionary, collider: Node, kind: String, material_id: String) -> void:
     play_feedback("break", hit["position"], feedback_color_for_material(material_id), 12)
-    if kind == "terrain":
+    if (kind == "terrain" or kind == "subsurface") and subsurface_system != null and subsurface_system.has_method("excavate_from_hit"):
+        var excavation: Dictionary = subsurface_system.excavate_from_hit(hit, collider)
+        mark_world_dirty("subsurface_excavated")
+        for affected_cell in excavation.get("affectedCells", []):
+            if affected_cell is Vector2i and npc_system and npc_system.has_method("notify_navigation_terrain_edited"):
+                var old_height := terrain_height_cell(affected_cell.x, affected_cell.y)
+                npc_system.notify_navigation_terrain_edited(affected_cell, old_height, old_height)
+        inventory_system.add_item(ItemCatalogScript.material_drop(material_id), 1)
+        award_break_xp(material_id)
+        complete_break_objectives(material_id)
+        update_hud("Dug %s" % ItemCatalogScript.material_label(material_id))
+    elif kind == "terrain":
         var sample_pos: Vector3 = hit.position - hit.normal * (CELL * 0.35)
         var cell := Vector2i(world_to_cell(sample_pos.x), world_to_cell(sample_pos.z))
         var old_height: float = terrain_height_cell(cell.x, cell.y)
@@ -219,16 +232,8 @@ func is_station_near(station_id: String) -> bool:
     return false
 
 func terrain_material_id_for_cell(x: int, z: int) -> String:
-    var biome := biome_at_cell(x, z)
-    var height := terrain_height_cell(x, z)
-    if biome == "beach" or biome == "desert":
-        return "sand"
-    if biome == "swamp":
-        return "mud"
-    if biome == "snow":
-        return "snow"
-    if biome == "alpine" or biome == "tundra" or height > 46.0:
-        return "stone"
+    if world_generation_system != null and world_generation_system.has_method("top_material_for_biome"):
+        return String(world_generation_system.call("top_material_for_biome", biome_at_cell(x, z)))
     return "grass"
 
 func unmet_tool_requirement_message(material_id: String) -> String:
@@ -430,9 +435,15 @@ func add_crack_line(mesh: ImmediateMesh, a: Vector3, b: Vector3) -> void:
     mesh.surface_add_vertex(b)
 
 func height_at_world(x: float, z: float) -> float:
+    if world_generation_system != null and world_generation_system.has_method("surface_height_at_world"):
+        return float(world_generation_system.call("surface_height_at_world", x, z))
     return terrain_height_cell(world_to_cell(x), world_to_cell(z))
 
 func ground_height_at_world(x: float, z: float, current_y: float) -> float:
+    if subsurface_system != null and subsurface_system.has_method("ground_height_at_world"):
+        var subsurface_y := float(subsurface_system.call("ground_height_at_world", x, z, current_y))
+        if not is_nan(subsurface_y):
+            return subsurface_y
     if structure_system != null and structure_system.has_method("cave_ground_height_at_world"):
         var cave_y := float(structure_system.call("cave_ground_height_at_world", x, z, current_y))
         if not is_nan(cave_y):
@@ -440,134 +451,51 @@ func ground_height_at_world(x: float, z: float, current_y: float) -> float:
     return height_at_world(x, z)
 
 func terrain_height_cell(x: int, z: int) -> float:
-    var key := Vector2i(x, z)
-    if height_edits.has(key):
-        return float(height_edits[key])
-    return base_height_cell(x, z)
+    if world_generation_system != null and world_generation_system.has_method("surface_height_for_cell3"):
+        return float(world_generation_system.call("surface_height_for_cell3", Vector3i(x, 0, z)))
+    return 0.0
 
 func base_height_cell(x: int, z: int) -> float:
-    var town: Dictionary = town_region_for_height_cell(x, z)
-    if not town.is_empty():
-        var center_x := int(town["centerX"])
-        var center_z := int(town["centerZ"])
-        var radius := float(town["radius"])
-        var distance := Vector2(float(x - center_x), float(z - center_z)).length()
-        var level := float(town["level"])
-        if distance <= radius:
-            return level
-        var apron := float(town_slope_apron_cells(town))
-        var natural := natural_base_height_cell(x, z)
-        var blend := clampf((distance - radius) / maxf(1.0, apron), 0.0, 1.0)
-        var eased := blend * blend * (3.0 - 2.0 * blend)
-        return lerp(level, natural, eased)
-    return natural_base_height_cell(x, z)
+    if world_generation_system != null and world_generation_system.has_method("base_surface_height_for_cell3"):
+        return float(world_generation_system.call("base_surface_height_for_cell3", Vector3i(x, 0, z)))
+    return 0.0
 
 func natural_base_height_cell(x: int, z: int) -> float:
-    var continent: float = noise01(height_noise, x, z)
-    var broad_hill: float = noise01(height_noise, x + 12000, z - 12200)
-    var plain_field: float = noise01(flat_noise, x - 8400, z + 7200)
-    var ridges: float = abs(noise01(ridge_noise, x - 200, z + 510) - 0.5) * 2.0
-    var flatland_mask: float = smoothstep_range(plain_field, 0.42, 0.68)
-    var mountain_mask: float = smoothstep_range(noise01(height_noise, x + 1800, z - 1500), 0.58, 0.82)
-    var peak_mask: float = smoothstep_range(noise01(ridge_noise, x - 3900, z + 2600), 0.74, 0.93) * mountain_mask
-    var plains: float = 6.0 + continent * 10.0 + (broad_hill - 0.5) * 2.0
-    var hills: float = 7.2 + continent * 15.5 + pow(maxf(broad_hill - 0.18, 0.0), 1.45) * 12.0
-    var mountains: float = 10.0 + continent * 21.0 + pow(ridges, 1.92) * (16.0 + mountain_mask * 44.0) + pow(peak_mask, 2.05) * 34.0
-    var lowland: float = lerp(hills, plains, flatland_mask)
-    var detail: float = (noise01(ridge_noise, x + 7800, z - 9100) - 0.5) * lerp(0.28, 1.35, mountain_mask)
-    var raw: float = MIN_HEIGHT + lerp(lowland, mountains, mountain_mask) + detail
-    var terrace: float = lerp(CELL * 0.34, CELL * 1.15, mountain_mask)
-    return clamp(round(raw / terrace) * terrace, MIN_HEIGHT, MAX_HEIGHT)
+    if world_generation_system != null and world_generation_system.has_method("natural_surface_height_for_cell3"):
+        return float(world_generation_system.call("natural_surface_height_for_cell3", Vector3i(x, 0, z)))
+    return 0.0
 
 func biome_at_cell(x: int, z: int) -> String:
-    if not town_region_at_cell(x, z).is_empty():
-        return "town"
-    var h: float = terrain_height_cell(x, z)
-    var moisture: float = noise01(moisture_noise, x - 1200, z + 800)
-    var temp: float = clamp(0.42 + noise01(temp_noise, x + 1500, z - 900) * 0.46 - abs(z) / 1300.0 - max(0.0, h - 38.0) / 180.0, 0.0, 1.0)
-    if h < WATER_LEVEL + 0.3:
-        return "ocean"
-    if h < WATER_LEVEL + 1.7:
-        return "beach"
-    if h > 78.0:
-        return "snow"
-    if h > 56.0:
-        return "alpine" if temp < 0.48 else "tundra"
-    if h > 42.0 and moisture < 0.5:
-        return "alpine"
-    if moisture > 0.78 and h < WATER_LEVEL + 6.0:
-        return "swamp"
-    if temp > 0.68 and moisture < 0.32:
-        return "desert"
-    if temp > 0.61 and moisture < 0.48:
-        return "savanna"
-    if temp < 0.33 and moisture > 0.42:
-        return "taiga"
-    if moisture > 0.64:
-        return "forest"
+    if world_generation_system != null and world_generation_system.has_method("surface_biome_for_cell3"):
+        return String(world_generation_system.call("surface_biome_for_cell3", Vector3i(x, 0, z)))
     return "plains"
 
+func biome_at_cell3(cell: Vector3i) -> String:
+    if world_generation_system != null and world_generation_system.has_method("biome_at_cell3"):
+        return String(world_generation_system.call("biome_at_cell3", cell))
+    return biome_at_cell(cell.x, cell.z)
+
+func biome_at_world(position: Vector3) -> String:
+    if world_generation_system != null and world_generation_system.has_method("biome_at_world"):
+        return String(world_generation_system.call("biome_at_world", position))
+    return biome_at_cell(world_to_cell(position.x), world_to_cell(position.z))
+
+func world_material_at_cell(cell: Vector3i) -> String:
+    if world_generation_system != null and world_generation_system.has_method("material_at_cell3"):
+        return String(world_generation_system.call("material_at_cell3", cell))
+    return terrain_material_id_for_cell(cell.x, cell.z)
+
 func town_region_at_cell(x: int, z: int) -> Dictionary:
-    var region_x := floori(float(x) / float(TOWN_REGION_CELLS))
-    var region_z := floori(float(z) / float(TOWN_REGION_CELLS))
-    for rz in range(region_z - 1, region_z + 2):
-        for rx in range(region_x - 1, region_x + 2):
-            var town: Dictionary = town_region(rx, rz)
-            if town.is_empty():
-                continue
-            var distance := Vector2(float(x - int(town["centerX"])), float(z - int(town["centerZ"]))).length()
-            if distance <= float(town["radius"]):
-                return town
+    if world_generation_system != null and world_generation_system.has_method("town_region_at_cell3"):
+        return world_generation_system.call("town_region_at_cell3", Vector3i(x, 0, z))
     return {}
 
 func town_region_for_height_cell(x: int, z: int) -> Dictionary:
-    var region_x := floori(float(x) / float(TOWN_REGION_CELLS))
-    var region_z := floori(float(z) / float(TOWN_REGION_CELLS))
-    var best_town := {}
-    var best_distance := INF
-    for rz in range(region_z - 1, region_z + 2):
-        for rx in range(region_x - 1, region_x + 2):
-            var town: Dictionary = town_region(rx, rz)
-            if town.is_empty():
-                continue
-            var distance := Vector2(float(x - int(town["centerX"])), float(z - int(town["centerZ"]))).length()
-            var max_distance := float(town["radius"]) + float(town_slope_apron_cells(town))
-            if distance <= max_distance and distance < best_distance:
-                best_town = town
-                best_distance = distance
-    return best_town
+    if world_generation_system != null and world_generation_system.has_method("town_region_for_surface_cell3"):
+        return world_generation_system.call("town_region_for_surface_cell3", Vector3i(x, 0, z))
+    return {}
 
 func town_slope_apron_cells(town: Dictionary) -> int:
-    var key: Vector2i = Vector2i(int(town.get("regionX", 0)), int(town.get("regionZ", 0)))
-    if town_slope_apron_cache.has(key):
-        return int(town_slope_apron_cache[key])
-    var radius: int = int(town.get("radius", TOWN_RADIUS_CELLS))
-    var center_x: int = int(town.get("centerX", 0))
-    var center_z: int = int(town.get("centerZ", 0))
-    var level: float = float(town.get("level", WATER_LEVEL + 3.0))
-    var apron: int = maxi(18, ceili(float(radius) * 0.55))
-    var max_apron: int = maxi(apron, int(float(TOWN_REGION_CELLS) * 0.5) - radius - 6)
-    var sample_dirs: Array[Vector2] = [
-        Vector2(1.0, 0.0),
-        Vector2(-1.0, 0.0),
-        Vector2(0.0, 1.0),
-        Vector2(0.0, -1.0),
-        Vector2(1.0, 1.0).normalized(),
-        Vector2(-1.0, 1.0).normalized(),
-        Vector2(1.0, -1.0).normalized(),
-        Vector2(-1.0, -1.0).normalized()
-    ]
-    for _pass in range(3):
-        var max_diff: float = 0.0
-        var sample_distance: float = float(radius + apron)
-        for direction in sample_dirs:
-            var sample_x: int = center_x + roundi(direction.x * sample_distance)
-            var sample_z: int = center_z + roundi(direction.y * sample_distance)
-            max_diff = maxf(max_diff, absf(natural_base_height_cell(sample_x, sample_z) - level))
-        var needed: int = ceili(max_diff / maxf(0.01, CELL * 0.72)) + 4
-        var next_apron: int = mini(max_apron, maxi(apron, needed))
-        if next_apron == apron:
-            break
-        apron = next_apron
-    town_slope_apron_cache[key] = apron
-    return apron
+    if world_generation_system != null and world_generation_system.has_method("town_slope_apron_cells"):
+        return int(world_generation_system.call("town_slope_apron_cells", town))
+    return 18

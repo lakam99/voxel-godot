@@ -5529,16 +5529,23 @@ func test_cave_generation_and_crafting_book_loot() -> void:
     var floor_summary := cave_floor_variation_summary(structure_system, cliff_plan)
     var final_chamber_cell: Vector2i = cliff_plan.get("finalChamberCell", Vector2i.ZERO)
     var final_chamber_nav_id := String(structure_system.call("cave_navigation_id_for_cell", final_chamber_cell.x, final_chamber_cell.y)) if structure_system.has_method("cave_navigation_id_for_cell") else ""
-    var interior_shells := cave_interior_shell_count(structure_system, cave_id)
+    var cave_volume_nodes := cave_authoritative_volume_count(structure_system, cave_id)
     var shaping_cells: Array = structure_system.call("cave_shaping_cells", cliff_plan) if structure_system.has_method("cave_shaping_cells") else []
     var opening_cells: Array = structure_system.call("cave_terrain_opening_cells", cliff_plan) if structure_system.has_method("cave_terrain_opening_cells") else []
     var stone_override_samples := 0
+    var hidden_opening_samples := 0
     var prop_exclusion_samples := 0
     var stone_sample_total := mini(opening_cells.size(), 12)
+    var world_generation = main.get("world_generation_system") if main != null else null
     for i in range(stone_sample_total):
         var stone_cell: Vector2i = opening_cells[i]
         if structure_system.has_method("terrain_material_override_for_cell") and String(structure_system.call("terrain_material_override_for_cell", stone_cell.x, stone_cell.y)) == "stone":
             stone_override_samples += 1
+        if world_generation != null and world_generation.has_method("surface_quad_hidden_for_cell3"):
+            if bool(world_generation.call("surface_quad_hidden_for_cell3", Vector3i(stone_cell.x, 0, stone_cell.y))):
+                hidden_opening_samples += 1
+        elif main.has_method("terrain_quad_hidden_for_cell") and bool(main.call("terrain_quad_hidden_for_cell", stone_cell.x, stone_cell.y)):
+            hidden_opening_samples += 1
     var prop_sample_total := mini(shaping_cells.size(), 12)
     for i in range(prop_sample_total):
         var prop_cell: Vector2i = shaping_cells[i]
@@ -5549,7 +5556,7 @@ func test_cave_generation_and_crafting_book_loot() -> void:
         and records.has(cave_id)
         and cave_navigation_records.has(cave_id)
         and final_chamber_nav_id == cave_id
-        and interior_shells == 1
+        and cave_volume_nodes == 1
         and cave_path_blocks == 0
         and cave_wall_blocks == 0
         and cave_torches >= 2
@@ -5558,7 +5565,6 @@ func test_cave_generation_and_crafting_book_loot() -> void:
         and cave_supports >= 2
         and cave_chests == 1
         and chest_has_crafting_book
-        and height_edits.size() > 0
         and int(cave_block_layer_summary.get("nonCaveLayerVisuals", 0)) == 0
         and int(interior_layer_summary.get("caveLayerVisuals", 0)) >= 1
         and int(interior_layer_summary.get("nonCaveLayerVisuals", 0)) == 0
@@ -5566,19 +5572,20 @@ func test_cave_generation_and_crafting_book_loot() -> void:
         and float(floor_summary.get("maxNeighborStep", 999.0)) <= CELL * 1.10
         and final_chest_cell == cliff_plan.get("finalChestCell", Vector2i.ZERO)
         and stone_sample_total > 0
-        and stone_override_samples == stone_sample_total
+        and stone_override_samples == 0
+        and hidden_opening_samples > 0
         and prop_sample_total > 0
         and prop_exclusion_samples == prop_sample_total
     )
     add_result(
         "cave_generation_and_book_loot",
         cave_build_ok,
-        "counts %s, records/nav %s/%s, navId %s, shell %d, path/wall/torch/smallTorch/support/chest %d/%d/%d/%d/%d/%d, book %s, heightEdits %d, layers blocks/interior %s/%s, floor %s, stoneSamples %d/%d, propExclusionSamples %d/%d, finalChest %s" % [
+        "counts %s, records/nav %s/%s, navId %s, volume %d, path/wall/torch/smallTorch/support/chest %d/%d/%d/%d/%d/%d, book %s, heightEdits %d, layers blocks/interior %s/%s, floor %s, stoneOverrides %d/%d, hiddenOpeningSamples %d/%d, propExclusionSamples %d/%d, finalChest %s" % [
             str(counts),
             str(records.has(cave_id)),
             str(cave_navigation_records.has(cave_id)),
             final_chamber_nav_id,
-            interior_shells,
+            cave_volume_nodes,
             cave_path_blocks,
             cave_wall_blocks,
             cave_torches,
@@ -5591,6 +5598,8 @@ func test_cave_generation_and_crafting_book_loot() -> void:
             JSON.stringify(interior_layer_summary),
             JSON.stringify(floor_summary),
             stone_override_samples,
+            stone_sample_total,
+            hidden_opening_samples,
             stone_sample_total,
             prop_exclusion_samples,
             prop_sample_total,
@@ -5622,20 +5631,23 @@ func cave_min_edge_radius(plan: Dictionary) -> float:
         min_radius = minf(min_radius, float((edge_value as Dictionary).get("radius", 0.0)))
     return snappedf(0.0 if min_radius == INF else min_radius, 0.001)
 
-func cave_interior_shell_count(structure_system, cave_id: String) -> int:
+func cave_authoritative_volume_count(structure_system, cave_id: String) -> int:
     if structure_system == null:
         return 0
     var nodes_value = structure_system.get("cave_interior_nodes")
     if not (nodes_value is Dictionary):
         return 0
-    var shells := 0
+    var volumes := 0
     for node_value in (nodes_value as Dictionary).values():
         var node := node_value as Node
         if node == null or not is_instance_valid(node):
             continue
-        if String(node.get_meta("caveId", "")) == cave_id and String(node.get_meta("caveRole", "")) == "interior_shell":
-            shells += 1
-    return shells
+        if String(node.get_meta("caveId", "")) != cave_id:
+            continue
+        if String(node.get_meta("caveRole", "")) == "world_volume" \
+            and String(node.get_meta("geometryAuthority", "")) == "subsurface_solid_air_volume":
+            volumes += 1
+    return volumes
 
 func cave_support_frame_count(structure_system, cave_id: String) -> int:
     if structure_system == null:

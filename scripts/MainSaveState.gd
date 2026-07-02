@@ -1,4 +1,4 @@
-extends "res://scripts/MainCore.gd"
+﻿extends "res://scripts/MainCore.gd"
 
 const FIRST_STORY_QUEST_ID := "story.gloam_hart.storm"
 
@@ -8,6 +8,10 @@ func reset_runtime_world_state() -> void:
     time_of_day = 0.32
     next_fishing_ready_at = 0.0
     height_edits.clear()
+    if world_generation_system and world_generation_system.has_method("reset"):
+        world_generation_system.reset()
+    if subsurface_system and subsurface_system.has_method("reset"):
+        subsurface_system.reset()
     removed_props.clear()
     clear_chunk_asset_cache()
     clear_dropped_pickups()
@@ -102,6 +106,7 @@ func create_save_snapshot() -> Dictionary:
         },
         "crafting": crafting_system.snapshot() if crafting_system and crafting_system.has_method("snapshot") else {},
         "terrain": snapshot_height_edits(),
+        "subsurface": snapshot_subsurface(),
         "removedProps": removed_props.keys(),
         "survival": survival_system.snapshot() if survival_system else {},
         "progression": progression_system.snapshot() if progression_system else {},
@@ -142,6 +147,7 @@ func apply_save_snapshot(snapshot: Dictionary) -> bool:
     if survival_system and snapshot.has("survival"):
         survival_system.restore(snapshot["survival"])
     restore_height_edits(snapshot.get("terrain", []))
+    restore_subsurface(snapshot.get("subsurface", {}))
     restore_removed_props(snapshot.get("removedProps", []))
     if structure_system and structure_system.has_method("restore_caves"):
         structure_system.restore_caves(snapshot.get("caves", []))
@@ -284,6 +290,15 @@ func restore_height_edits(entries) -> void:
         height_edits[key] = new_height
         if npc_system and npc_system.has_method("notify_navigation_terrain_edited"):
             npc_system.notify_navigation_terrain_edited(key, old_height, new_height)
+
+func snapshot_subsurface() -> Dictionary:
+    if subsurface_system and subsurface_system.has_method("snapshot"):
+        return subsurface_system.snapshot()
+    return {}
+
+func restore_subsurface(snapshot_value) -> void:
+    if subsurface_system and subsurface_system.has_method("restore"):
+        subsurface_system.restore(snapshot_value)
 
 func restore_removed_props(entries) -> void:
     removed_props.clear()

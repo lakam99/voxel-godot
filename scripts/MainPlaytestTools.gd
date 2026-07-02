@@ -1,4 +1,4 @@
-extends "res://scripts/MainRuntimeTools.gd"
+﻿extends "res://scripts/MainRuntimeTools.gd"
 
 func build_chunk_mesh(cx: int, cz: int) -> Mesh:
     var st := SurfaceTool.new()
@@ -15,7 +15,7 @@ func build_chunk_mesh(cx: int, cz: int) -> Mesh:
             var cell_x: int = start_x + vx
             var cell_z: int = start_z + vz
             var key := Vector2i(cell_x, cell_z)
-            height_cache[key] = terrain_height_cell(cell_x, cell_z)
+            height_cache[key] = terrain_surface_height_cell(cell_x, cell_z)
             if vx < 0 or vx > CHUNK_SIZE or vz < 0 or vz > CHUNK_SIZE:
                 continue
             var color: Color = terrain_color_for_cell(cell_x, cell_z)
@@ -47,7 +47,7 @@ func build_chunk_mesh(cx: int, cz: int) -> Mesh:
 
 func terrain_vertex_local_cached(height_cache: Dictionary, cell_x: int, cell_z: int, origin_cell_x: int, origin_cell_z: int) -> Vector3:
     var key := Vector2i(cell_x, cell_z)
-    var y: float = float(height_cache[key]) if height_cache.has(key) else terrain_height_cell(cell_x, cell_z)
+    var y: float = float(height_cache[key]) if height_cache.has(key) else terrain_surface_height_cell(cell_x, cell_z)
     return Vector3((cell_x - origin_cell_x) * CELL, y, (cell_z - origin_cell_z) * CELL)
 
 func add_cached_vertex(st: SurfaceTool, point: Vector3, color_cache: Dictionary, normal_cache: Dictionary, cell_x: int, cell_z: int) -> void:
@@ -64,13 +64,15 @@ func add_vertex(st: SurfaceTool, point: Vector3, cell_x: int, cell_z: int) -> vo
     st.add_vertex(point)
 
 func terrain_color_for_cell(cell_x: int, cell_z: int) -> Color:
-    if structure_system != null and structure_system.has_method("terrain_material_override_for_cell"):
-        var override_id := String(structure_system.call("terrain_material_override_for_cell", cell_x, cell_z))
-        if override_id == "stone":
-            return Color(0.32, 0.37, 0.36)
+    if world_generation_system != null and world_generation_system.has_method("surface_color_for_cell3"):
+        return world_generation_system.call("surface_color_for_cell3", Vector3i(cell_x, 0, cell_z))
     return BIOME_COLORS.get(biome_at_cell(cell_x, cell_z), BIOME_COLORS["plains"])
 
 func terrain_quad_hidden_for_cell(cell_x: int, cell_z: int) -> bool:
+    if world_generation_system != null \
+        and world_generation_system.has_method("surface_quad_hidden_for_cell3") \
+        and bool(world_generation_system.call("surface_quad_hidden_for_cell3", Vector3i(cell_x, 0, cell_z))):
+        return true
     return structure_system != null \
         and structure_system.has_method("terrain_quad_hidden_for_cell") \
         and bool(structure_system.call("terrain_quad_hidden_for_cell", cell_x, cell_z))
@@ -83,18 +85,23 @@ func terrain_normal_for_cell_cached(height_cache: Dictionary, cell_x: int, cell_
     return Vector3(left - right, CELL * 2.0, back - forward).normalized()
 
 func terrain_normal_for_cell(cell_x: int, cell_z: int) -> Vector3:
-    var left := terrain_height_cell(cell_x - 1, cell_z)
-    var right := terrain_height_cell(cell_x + 1, cell_z)
-    var back := terrain_height_cell(cell_x, cell_z - 1)
-    var forward := terrain_height_cell(cell_x, cell_z + 1)
+    var left := terrain_surface_height_cell(cell_x - 1, cell_z)
+    var right := terrain_surface_height_cell(cell_x + 1, cell_z)
+    var back := terrain_surface_height_cell(cell_x, cell_z - 1)
+    var forward := terrain_surface_height_cell(cell_x, cell_z + 1)
     return Vector3(left - right, CELL * 2.0, back - forward).normalized()
 
 func terrain_height_from_cache(height_cache: Dictionary, cell_x: int, cell_z: int) -> float:
     var key := Vector2i(cell_x, cell_z)
-    return float(height_cache[key]) if height_cache.has(key) else terrain_height_cell(cell_x, cell_z)
+    return float(height_cache[key]) if height_cache.has(key) else terrain_surface_height_cell(cell_x, cell_z)
 
 func terrain_vertex_local(cell_x: int, cell_z: int, origin_cell_x: int, origin_cell_z: int) -> Vector3:
-    return Vector3((cell_x - origin_cell_x) * CELL, terrain_height_cell(cell_x, cell_z), (cell_z - origin_cell_z) * CELL)
+    return Vector3((cell_x - origin_cell_x) * CELL, terrain_surface_height_cell(cell_x, cell_z), (cell_z - origin_cell_z) * CELL)
+
+func terrain_surface_height_cell(cell_x: int, cell_z: int) -> float:
+    if world_generation_system != null and world_generation_system.has_method("surface_height_for_cell3"):
+        return float(world_generation_system.call("surface_height_for_cell3", Vector3i(cell_x, 0, cell_z)))
+    return terrain_height_cell(cell_x, cell_z)
 
 func add_chunk_skirts(st: SurfaceTool, start_x: int, start_z: int, bottom_y: float) -> void:
     var end_x := start_x + CHUNK_SIZE

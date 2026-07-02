@@ -176,9 +176,8 @@ func wildlife_blocked_at(position: Vector3) -> bool:
 func update_hostiles(delta: float) -> void:
     if hostile_system == null or player == null:
         return
-    var cell := Vector2i(world_to_cell(player.position.x), world_to_cell(player.position.z))
     var day_factor := clock_day_factor()
-    hostile_system.update_hostiles(delta, day_factor, biome_at_cell(cell.x, cell.y), sanctuary_established)
+    hostile_system.update_hostiles(delta, day_factor, biome_at_world(player.global_position), sanctuary_established)
 
 func update_npcs(delta: float) -> void:
     if npc_system == null:
