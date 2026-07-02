@@ -131,10 +131,27 @@ var pickup_nodes_discarded := 0
 var wildlife_nodes: Array = []
 var map_sample_cache_key := ""
 var map_sample_cache: Array = []
+var map_sample_build_key := ""
+var map_sample_build_center_cell := Vector2i.ZERO
+var map_sample_build_center_key := Vector2i.ZERO
+var map_sample_build_radius := 0.0
+var map_sample_build_row := 0
+var map_sample_build_samples: Array = []
+var map_sample_build_rows_per_call := 2
+var navigation_marker_cache_source_key := ""
+var navigation_marker_cache: Array = []
+var navigation_marker_scan_source_key := ""
+var navigation_marker_scan_keys: Array = []
+var navigation_marker_scan_index := 0
+var navigation_marker_scan_seen := {}
+var navigation_marker_scan_budget := 64
 var navigation_map_state_cache_key := ""
 var navigation_map_state_cache := {}
 var navigation_map_state_cache_elapsed := 999.0
 var navigation_map_state_cache_interval := 0.75
+var block_stats_cache := {}
+var block_stats_cache_size := -1
+var block_stats_cache_dirty := true
 var visual_quality := {
     "decorativeDensity": 0.74,
     "decorativeDetailCap": 72,

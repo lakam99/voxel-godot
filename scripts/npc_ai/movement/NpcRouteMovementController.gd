@@ -18,8 +18,19 @@ const YIELD_RETREAT_HOLD_TICKS := 10
 const PORTAL_RECENTER_FORWARD_STEP_TICKS := 12
 const PORTAL_RECENTER_REPLAN_TICKS := 30
 const DYNAMIC_DETOUR_WAIT_TICKS := 24
+const DYNAMIC_ROUTE_AVOID_WAIT_TICKS := 12
+const DYNAMIC_ROUTE_AVOID_TTL_FRAMES := 180
+const DYNAMIC_ROUTE_AVOID_MAX_CELLS := 8
+const STATIC_FOOTPRINT_VALIDATION_RADIUS := CAPSULE_RADIUS * 0.52
 const MOTOR_LOCAL_ESCAPE_MIN_DISTANCE := CELL * 0.16
 const MOTOR_LOCAL_ESCAPE_MAX_DISTANCE := CELL * 0.30
+const PENDING_ROUTE_RETRY_DEFAULT_FRAMES := 4
+const PENDING_ROUTE_RETRY_DOOR_FRAMES := 2
+const PENDING_ROUTE_RETRY_ACTIVE_PORTAL_FRAMES := 1
+const PENDING_ROUTE_RETRY_LOW_PRIORITY_FRAMES := 8
+const FAILED_ROUTE_RETRY_DEFAULT_FRAMES := 8
+const FAILED_ROUTE_RETRY_ACTIVE_PORTAL_FRAMES := 1
+const FAILED_ROUTE_RETRY_LOW_PRIORITY_FRAMES := 12
 
 var system
 var main
@@ -41,6 +52,9 @@ func begin_frame() -> void:
     if avoidance_adapter != null:
         avoidance_adapter.begin_frame()
 
+func performance_monitor():
+    return main.get("runtime_perf_monitor") if main != null else null
+
 func move(entry: Dictionary, intent: Dictionary, max_distance: float, planner, world) -> Dictionary:
     var body := entry.get("body") as CharacterBody3D
     if body == null or main == null or planner == null or world == null or max_distance <= 0.0:
@@ -57,7 +71,11 @@ func move(entry: Dictionary, intent: Dictionary, max_distance: float, planner, w
         set_route_status(entry, "arrived", "")
         return { "moved": 0.0, "status": "arrived", "reason": "" }
 
+    var monitor = performance_monitor()
+    var route_start: int = monitor.begin_section("npc_motion_ensure_route") if monitor != null else Time.get_ticks_usec()
     var route: Dictionary = ensure_route(entry, intent, planner, world)
+    if monitor != null:
+        monitor.end_section("npc_motion_ensure_route", route_start)
     if not bool(route.get("ok", false)):
         if String(entry.get("activeDoorPortalId", "")) != "" and (entry.get("pathWaypoints", []) as Array).is_empty() and seed_active_door_forward_step(entry, world):
             route = {
@@ -69,7 +87,7 @@ func move(entry: Dictionary, intent: Dictionary, max_distance: float, planner, w
                 "actions": entry.get("routeActions", {}),
                 "targetCell": intent.get("targetCell", world.world_cell(target)),
                 "fallbackCell": entry.get("routeFallbackCell", world.world_cell(target)),
-                "snapshotRevision": world.revision()
+                "snapshotRevision": route_reuse_revision(world)
             }
         else:
             var route_failure_reason := String(route.get("reason", "blocked"))
@@ -95,7 +113,10 @@ func move(entry: Dictionary, intent: Dictionary, max_distance: float, planner, w
     if should_restore_from_door_stage(entry, previous):
         clear_door_stage(entry)
         entry["routeForceReplan"] = true
+        route_start = monitor.begin_section("npc_motion_ensure_route") if monitor != null else Time.get_ticks_usec()
         route = ensure_route(entry, intent, planner, world)
+        if monitor != null:
+            monitor.end_section("npc_motion_ensure_route", route_start)
         if not bool(route.get("ok", false)):
             set_route_status(entry, String(route.get("status", "blocked")), String(route.get("reason", "blocked")))
             count_unreachable_once(entry, intent, String(route.get("reason", "blocked")))
@@ -122,7 +143,10 @@ func move(entry: Dictionary, intent: Dictionary, max_distance: float, planner, w
             set_route_status(entry, "arrived", "")
             return { "moved": 0.0, "status": "arrived", "reason": "" }
         entry["routeForceReplan"] = true
+        route_start = monitor.begin_section("npc_motion_ensure_route") if monitor != null else Time.get_ticks_usec()
         route = ensure_route(entry, intent, planner, world)
+        if monitor != null:
+            monitor.end_section("npc_motion_ensure_route", route_start)
         trim_active_door_approach_cells(entry, world)
         path_waypoints = entry.get("pathWaypoints", [])
         if path_waypoints.is_empty():
@@ -157,6 +181,7 @@ func move(entry: Dictionary, intent: Dictionary, max_distance: float, planner, w
     var held_retreat_result := continue_dynamic_yield_retreat(entry, previous, intent, max_distance, world, actors, priority)
     if not held_retreat_result.is_empty():
         return held_retreat_result
+    var follow_start: int = monitor.begin_section("npc_corridor_follow") if monitor != null else Time.get_ticks_usec()
     var follow: Dictionary = corridor_follower.compute_step(
         entry,
         body,
@@ -170,6 +195,8 @@ func move(entry: Dictionary, intent: Dictionary, max_distance: float, planner, w
         avoidance_adapter,
         actors
     )
+    if monitor != null:
+        monitor.end_section("npc_corridor_follow", follow_start)
     entry["corridorFollow"] = compact_follow_result(follow)
     record_follow_metrics(follow)
     if bool(follow.get("arrived", false)):
@@ -208,7 +235,10 @@ func move(entry: Dictionary, intent: Dictionary, max_distance: float, planner, w
         return { "moved": 0.0, "status": "waiting", "reason": follow_reason, "classification": classification }
 
     var move_candidate: Vector3 = follow.get("candidate", previous)
+    var traffic_start: int = monitor.begin_section("npc_traffic_step_request") if monitor != null else Time.get_ticks_usec()
     var traffic_result := request_traffic_step(entry, previous, move_candidate, world, intent, priority)
+    if monitor != null:
+        monitor.end_section("npc_traffic_step_request", traffic_start)
     if not bool(traffic_result.get("ok", false)):
         increment_reservation_wait(entry)
         var final_reason := String(traffic_result.get("reason", "traffic_wait"))
@@ -233,7 +263,10 @@ func move(entry: Dictionary, intent: Dictionary, max_distance: float, planner, w
     var physics_delta := maxf(0.0001, float(intent.get("physicsDelta", 0.0166667)))
     var motor_result: Dictionary = {}
     if system != null and system.has_method("apply_npc_route_motion"):
+        var motor_start: int = monitor.begin_section("npc_motion_motor_call") if monitor != null else Time.get_ticks_usec()
         motor_result = system.apply_npc_route_motion(entry, previous, move_candidate, physics_delta)
+        if monitor != null:
+            monitor.end_section("npc_motion_motor_call", motor_start)
     else:
         return { "moved": 0.0, "status": "blocked", "reason": "missing_motion_adapter" }
     var actual_position: Vector3 = motor_result.get("position", body.global_position)
@@ -328,6 +361,9 @@ func try_dynamic_yield_retreat(entry: Dictionary, previous: Vector3, follow: Dic
         blocker = nearest_dynamic_blocker(previous, entry, actors)
     if blocker == null or not is_instance_valid(blocker):
         return {}
+    if int(entry.get("routeWaitTicks", 0)) >= DYNAMIC_ROUTE_AVOID_WAIT_TICKS and mark_dynamic_route_avoidance_for_yield(entry, blocker, previous, follow, intent, world):
+        set_route_status(entry, "waiting", "dynamic_avoid_replan")
+        return { "moved": 0.0, "status": "waiting", "reason": "dynamic_avoid_replan", "classification": "traffic_reservation" }
     var detour_result := try_dynamic_detour_around_blocker(entry, previous, follow, intent, max_distance, world, blocker, priority)
     if not detour_result.is_empty():
         return detour_result
@@ -747,7 +783,60 @@ func nearest_dynamic_blocker(position: Vector3, entry: Dictionary, actors: Array
             best = other
     return best
 
+func mark_dynamic_route_avoidance_cell(entry: Dictionary, blocker: Node3D, previous: Vector3, intent: Dictionary, world) -> bool:
+    if blocker == null or world == null:
+        return false
+    return mark_dynamic_route_avoidance_cell_value(entry, world.world_cell(blocker.global_position), previous, intent, world)
+
+func mark_dynamic_route_avoidance_for_yield(entry: Dictionary, blocker: Node3D, previous: Vector3, follow: Dictionary, intent: Dictionary, world) -> bool:
+    if world == null:
+        return false
+    var marked := false
+    if blocker != null and is_instance_valid(blocker):
+        marked = mark_dynamic_route_avoidance_cell_value(entry, world.world_cell(blocker.global_position), previous, intent, world) or marked
+    if String(entry.get("activeDoorPortalId", "")) == "":
+        var candidate: Vector3 = follow.get("candidate", previous)
+        marked = mark_dynamic_route_avoidance_cell_value(entry, world.world_cell(candidate), previous, intent, world) or marked
+    return marked
+
+func mark_dynamic_route_avoidance_cell_value(entry: Dictionary, blocker_cell: Vector2i, previous: Vector3, intent: Dictionary, world) -> bool:
+    if world == null:
+        return false
+    var current_cell: Vector2i = world.world_cell(previous)
+    if blocker_cell == current_cell:
+        return false
+    var target_cell: Vector2i = intent.get("targetCell", world.world_cell(intent.get("target", previous)))
+    if blocker_cell == target_cell:
+        return false
+    prune_dynamic_route_avoidance(entry)
+    var cells: Array = entry.get("routeDynamicAvoidCells", [])
+    if not cells.has(blocker_cell):
+        cells.append(blocker_cell)
+    while cells.size() > DYNAMIC_ROUTE_AVOID_MAX_CELLS:
+        cells.remove_at(0)
+    entry["routeDynamicAvoidCells"] = cells
+    entry["routeDynamicAvoidUntilFrame"] = Engine.get_physics_frames() + DYNAMIC_ROUTE_AVOID_TTL_FRAMES
+    entry["routeForceReplan"] = true
+    return true
+
+func prune_dynamic_route_avoidance(entry: Dictionary) -> void:
+    if not entry.has("routeDynamicAvoidCells"):
+        return
+    var until_frame := int(entry.get("routeDynamicAvoidUntilFrame", -1))
+    if until_frame >= Engine.get_physics_frames():
+        return
+    entry.erase("routeDynamicAvoidCells")
+    entry.erase("routeDynamicAvoidUntilFrame")
+
+func route_reuse_revision(world) -> String:
+    if world != null and world.has_method("navmesh_tile_source_key"):
+        return String(world.navmesh_tile_source_key())
+    if world != null and world.has_method("revision"):
+        return String(world.revision())
+    return ""
+
 func ensure_route(entry: Dictionary, intent: Dictionary, planner, world) -> Dictionary:
+    prune_dynamic_route_avoidance(entry)
     var target_cell: Vector2i = intent.get("targetCell", world.world_cell(intent.get("target", Vector3.ZERO)))
     var route_key: String = "%s:%d,%d:%s:%s:%s:%s:%.3f" % [
         String(intent.get("kind", "move")),
@@ -759,13 +848,19 @@ func ensure_route(entry: Dictionary, intent: Dictionary, planner, world) -> Dict
         str(bool(intent.get("strictArrival", false))),
         float(intent.get("arrivalRadius", CELL * 0.75))
     ]
-    var snapshot_revision: String = world.revision()
-    var route_known := String(entry.get("routeKey", "")) != ""
+    var snapshot_revision: String = route_reuse_revision(world)
+    var stored_route_key := String(entry.get("routeKey", ""))
+    var pending_route_key := String(entry.get("routePendingKey", ""))
+    var comparison_route_key := stored_route_key if stored_route_key != "" else pending_route_key
+    var comparison_snapshot_revision := String(entry.get("routeSnapshotRevision", ""))
+    if comparison_snapshot_revision == "" and pending_route_key != "":
+        comparison_snapshot_revision = String(entry.get("routePendingSnapshotRevision", ""))
+    var route_known := comparison_route_key != ""
     var current_waypoints: Array = entry.get("pathWaypoints", [])
     var cached_status := String(entry.get("routeStatus", "idle"))
     var empty_route_waiting_for_reason := current_waypoints.is_empty() and cached_status in ["blocked", "waiting"]
-    var route_key_changed := String(entry.get("routeKey", "")) != route_key
-    var snapshot_revision_changed := String(entry.get("routeSnapshotRevision", "")) != snapshot_revision
+    var route_key_changed := comparison_route_key != route_key
+    var snapshot_revision_changed := comparison_snapshot_revision != snapshot_revision
     var needs_route: bool = bool(entry.get("routeForceReplan", false))
     needs_route = needs_route or route_key_changed
     needs_route = needs_route or snapshot_revision_changed
@@ -778,9 +873,46 @@ func ensure_route(entry: Dictionary, intent: Dictionary, planner, world) -> Dict
         "local_blocked",
         "endpoint_not_server_walkable",
         "no_start_server_walkable",
-        "no_target_server_walkable"
+        "no_target_server_walkable",
+        "path_endpoint_mismatch"
     ]
     needs_route = needs_route or (current_waypoints.is_empty() and (not route_known or not empty_route_waiting_for_reason or transient_empty_route))
+    if needs_route and current_waypoints.is_empty() and cached_status == "pending" and not route_key_changed and not snapshot_revision_changed:
+        var retry_frame := int(entry.get("routePendingRetryFrame", -1))
+        var current_frame := Engine.get_physics_frames()
+        if retry_frame > current_frame:
+            var monitor = performance_monitor()
+            if monitor != null:
+                monitor.increment_counter("route_pending_backoff")
+            return {
+                "ok": false,
+                "status": "pending",
+                "reason": cached_reason,
+                "cells": [],
+                "waypoints": [],
+                "actions": {},
+                "targetCell": target_cell,
+                "fallbackCell": entry.get("routeFallbackCell", target_cell),
+                "snapshotRevision": snapshot_revision
+            }
+    if needs_route and current_waypoints.is_empty() and transient_empty_route and not route_key_changed and not snapshot_revision_changed:
+        var failure_retry_frame := int(entry.get("routeFailureRetryFrame", -1))
+        var failure_current_frame := Engine.get_physics_frames()
+        if failure_retry_frame > failure_current_frame:
+            var failure_monitor = performance_monitor()
+            if failure_monitor != null:
+                failure_monitor.increment_counter("route_failure_backoff")
+            return {
+                "ok": false,
+                "status": cached_status,
+                "reason": cached_reason,
+                "cells": [],
+                "waypoints": [],
+                "actions": {},
+                "targetCell": target_cell,
+                "fallbackCell": entry.get("routeFallbackCell", target_cell),
+                "snapshotRevision": snapshot_revision
+            }
     if not needs_route:
         var has_cached_route := not current_waypoints.is_empty()
         return {
@@ -800,6 +932,9 @@ func ensure_route(entry: Dictionary, intent: Dictionary, planner, world) -> Dict
     entry["lastRoutePlanDebug"] = compact_route_plan_debug(route)
     if String(route.get("status", "")) == "pending":
         entry["routeForceReplan"] = true
+        entry["routePendingKey"] = route_key
+        entry["routePendingSnapshotRevision"] = snapshot_revision
+        entry["routePendingRetryFrame"] = Engine.get_physics_frames() + pending_route_retry_frames(entry, intent, String(route.get("reason", "route_pending")))
         if not current_waypoints.is_empty():
             set_route_status(entry, "moving", "route_pending")
             return {
@@ -831,6 +966,9 @@ func ensure_route(entry: Dictionary, intent: Dictionary, planner, world) -> Dict
             "snapshotRevision": String(entry.get("routeSnapshotRevision", snapshot_revision))
         }
     entry["routeForceReplan"] = false
+    entry.erase("routePendingRetryFrame")
+    entry.erase("routePendingKey")
+    entry.erase("routePendingSnapshotRevision")
     entry["routeKey"] = route_key
     entry["routeGoalCell"] = target_cell
     entry["routeAllowOutside"] = bool(intent.get("allowOutside", false))
@@ -842,8 +980,13 @@ func ensure_route(entry: Dictionary, intent: Dictionary, planner, world) -> Dict
     entry["routeFallbackCell"] = route.get("fallbackCell", target_cell)
     if bool(route.get("ok", false)) and not (route.get("waypoints", []) as Array).is_empty():
         entry["routeRetryTicks"] = 0
+        entry.erase("routeFailureRetryFrame")
     elif String(route.get("status", "")) != "arrived":
         entry["routeRetryTicks"] = 0
+        if not bool(route.get("ok", false)):
+            entry["routeFailureRetryFrame"] = Engine.get_physics_frames() + failed_route_retry_frames(entry, intent, String(route.get("reason", "")))
+        else:
+            entry.erase("routeFailureRetryFrame")
     if bool(route.get("ok", false)) and not (route.get("waypoints", []) as Array).is_empty():
         increment_route_replan(entry)
     set_route_status(entry, String(route.get("status", "blocked")), String(route.get("reason", "")))
@@ -851,14 +994,35 @@ func ensure_route(entry: Dictionary, intent: Dictionary, planner, world) -> Dict
         count_unreachable_once(entry, intent, String(route.get("reason", "partial_route")))
     return route
 
+func pending_route_retry_frames(entry: Dictionary, intent: Dictionary, reason: String) -> int:
+    if String(entry.get("activeDoorPortalId", "")) != "":
+        return PENDING_ROUTE_RETRY_ACTIVE_PORTAL_FRAMES
+    if bool(intent.get("movingHome", false)) or String(intent.get("kind", "")) == "scripted":
+        return PENDING_ROUTE_RETRY_DOOR_FRAMES
+    if int(entry.get("routePriority", int(intent.get("priority", 0)))) < 90:
+        return PENDING_ROUTE_RETRY_LOW_PRIORITY_FRAMES
+    if reason in ["navmesh_tile_budget", "route_budget"]:
+        return PENDING_ROUTE_RETRY_DEFAULT_FRAMES
+    return PENDING_ROUTE_RETRY_DEFAULT_FRAMES
+
+func failed_route_retry_frames(entry: Dictionary, intent: Dictionary, reason: String) -> int:
+    if String(entry.get("activeDoorPortalId", "")) != "":
+        return FAILED_ROUTE_RETRY_ACTIVE_PORTAL_FRAMES
+    if int(entry.get("routePriority", int(intent.get("priority", 0)))) < 90:
+        return FAILED_ROUTE_RETRY_LOW_PRIORITY_FRAMES
+    if reason in ["endpoint_not_server_walkable", "no_start_server_walkable", "no_target_server_walkable", "path_endpoint_mismatch", "no_route"]:
+        return FAILED_ROUTE_RETRY_DEFAULT_FRAMES
+    return FAILED_ROUTE_RETRY_DEFAULT_FRAMES
+
 func failed_replan_preserves_active_route(route: Dictionary, current_waypoints: Array) -> bool:
     if current_waypoints.is_empty() or bool(route.get("ok", false)):
         return false
     var reason := String(route.get("reason", ""))
-    return reason in ["endpoint_not_server_walkable", "no_start_server_walkable"]
+    return reason in ["endpoint_not_server_walkable", "no_start_server_walkable", "path_endpoint_mismatch"]
 
 func compact_route_plan_debug(route: Dictionary) -> Dictionary:
     var navmesh_route: Dictionary = route.get("navmeshRoute", {}) if route.get("navmeshRoute", {}) is Dictionary else {}
+    var navmesh_details: Dictionary = navmesh_route.get("details", {}) if navmesh_route.get("details", {}) is Dictionary else {}
     var actions: Dictionary = route.get("actions", {}) if route.get("actions", {}) is Dictionary else {}
     var path_value = navmesh_route.get("path", [])
     var path_count := 0
@@ -866,6 +1030,8 @@ func compact_route_plan_debug(route: Dictionary) -> Dictionary:
         path_count = path_value.size()
     return {
         "ok": bool(route.get("ok", false)),
+        "source": String(route.get("source", "")),
+        "navmeshFallbackReason": String(route.get("navmeshFallbackReason", "")),
         "status": String(route.get("status", "")),
         "reason": String(route.get("reason", "")),
         "cells": (route.get("cells", []) as Array).size(),
@@ -878,9 +1044,58 @@ func compact_route_plan_debug(route: Dictionary) -> Dictionary:
         "target": _compact_vector3_debug(navmesh_route.get("target", Vector3.ZERO)),
         "startPosition": _compact_vector3_debug(navmesh_route.get("startPosition", Vector3.ZERO)),
         "targetPosition": _compact_vector3_debug(navmesh_route.get("targetPosition", Vector3.ZERO)),
-        "startWalkable": _compact_walkable_debug(navmesh_route.get("startWalkable", {})),
-        "targetWalkable": _compact_walkable_debug(navmesh_route.get("targetWalkable", {})),
+        "startWalkable": _compact_walkable_debug(navmesh_route.get("startWalkable", navmesh_details.get("startWalkable", {}))),
+        "targetWalkable": _compact_walkable_debug(navmesh_route.get("targetWalkable", navmesh_details.get("targetWalkable", {}))),
+        "descriptorStartWalkable": _compact_walkable_debug(navmesh_details.get("descriptorStartWalkable", {})),
+        "descriptorTargetWalkable": _compact_walkable_debug(navmesh_details.get("descriptorTargetWalkable", {})),
+        "generatedFallback": compact_generated_fallback_debug(route.get("generatedFallbackRoute", {})),
+        "typed": compact_typed_route_debug(route.get("typedResult")),
         "durationUsec": int(navmesh_route.get("durationUsec", 0))
+    }
+
+func compact_generated_fallback_debug(fallback_value) -> Dictionary:
+    if not (fallback_value is Dictionary):
+        return {}
+    var fallback: Dictionary = fallback_value
+    var typed_result = fallback.get("typedResult")
+    var typed_summary := compact_typed_route_debug(typed_result)
+    return {
+        "ok": bool(fallback.get("ok", false)),
+        "status": String(fallback.get("status", "")),
+        "reason": String(fallback.get("reason", "")),
+        "source": String(fallback.get("source", "")),
+        "cells": (fallback.get("cells", []) as Array).size(),
+        "waypoints": (fallback.get("waypoints", []) as Array).size(),
+        "typed": typed_summary
+    }
+
+func compact_typed_route_debug(typed_result) -> Dictionary:
+    if typed_result == null:
+        return {}
+    var metrics_value = typed_result.get("metrics")
+    var metrics: Dictionary = metrics_value if metrics_value is Dictionary else {}
+    var graph: Dictionary = metrics.get("graph", {}) if metrics.get("graph", {}) is Dictionary else {}
+    var hierarchy: Dictionary = metrics.get("hierarchy", {}) if metrics.get("hierarchy", {}) is Dictionary else {}
+    var search: Dictionary = metrics.get("search", {}) if metrics.get("search", {}) is Dictionary else {}
+    var goals: Array = graph.get("goalKeys", []) if graph.get("goalKeys", []) is Array else []
+    return {
+        "status": str(typed_result.get("status")),
+        "reason": str(typed_result.get("reason")),
+        "graphNodes": int(graph.get("nodeCount", -1)),
+        "graphEdges": int(graph.get("edgeCount", -1)),
+        "startKey": String(graph.get("startKey", "")),
+        "startEdges": int(graph.get("startEdgeCount", -1)),
+        "goalCount": goals.size(),
+        "goalSample": goals.slice(0, mini(goals.size(), 6)),
+        "runtimeDebug": (graph.get("runtimeDebug", {}) as Dictionary).duplicate(true) if graph.get("runtimeDebug", {}) is Dictionary else {},
+        "allowedTiles": int(graph.get("allowedTileCount", -1)),
+        "hierarchyTiles": int(hierarchy.get("tileCount", -1)),
+        "hierarchyEntrances": int(hierarchy.get("entranceCount", -1)),
+        "abstractReason": String(metrics.get("abstractReason", "")),
+        "fallback": String(metrics.get("fallback", "")),
+        "searchBestKey": String(search.get("bestKey", "")),
+        "searchBestGoalDistance": snappedf(float(search.get("bestGoalDistance", -1.0)), 0.001),
+        "searchClosedCount": int(search.get("closedCount", -1))
     }
 
 func _compact_path_debug(path_value, limit := 6) -> Array:
@@ -929,6 +1144,8 @@ func clear_route(entry: Dictionary) -> void:
     entry["routeCells"] = []
     entry["routeActions"] = {}
     entry["routeForceReplan"] = false
+    entry.erase("routeDynamicAvoidCells")
+    entry.erase("routeDynamicAvoidUntilFrame")
     entry.erase("_activeDoorForwardStep")
     entry.erase("portalRecenterTicks")
 
@@ -1105,121 +1322,13 @@ func trim_reached_route_cells(entry: Dictionary, world) -> void:
     entry["routeCells"] = cells
 
 func skip_optional_home_approach_if_oscillating(entry: Dictionary) -> bool:
-    if not bool(entry.get("routeMovingHome", false)):
-        return false
-    var active_target_cell: Vector2i = entry.get("homeActiveTargetCell", entry.get("routeGoalCell", Vector2i.ZERO))
-    var porch_cell: Vector2i = entry.get("porchCell", active_target_cell)
-    var home_cell: Vector2i = entry.get("homeCell", active_target_cell)
-    if active_target_cell == porch_cell or active_target_cell == home_cell:
-        return false
-    var interior_min: Vector2i = entry.get("interiorMinCell", home_cell)
-    var interior_max: Vector2i = entry.get("interiorMaxCell", home_cell)
-    if active_target_cell.x >= mini(interior_min.x, interior_max.x) \
-        and active_target_cell.x <= maxi(interior_min.x, interior_max.x) \
-        and active_target_cell.y >= mini(interior_min.y, interior_max.y) \
-        and active_target_cell.y <= maxi(interior_min.y, interior_max.y):
-        return false
-    if abs(active_target_cell.x - porch_cell.x) + abs(active_target_cell.y - porch_cell.y) != 1:
-        return false
-    var cells: Array = entry.get("routeCells", [])
-    if cells.size() < 4 or not (cells[0] is Vector2i) or not (cells[1] is Vector2i):
-        return false
-    var first: Vector2i = cells[0]
-    var second: Vector2i = cells[1]
-    if first == second:
-        return false
-    var alternating_count := 0
-    while alternating_count < cells.size() and cells[alternating_count] is Vector2i:
-        var expected := first if alternating_count % 2 == 0 else second
-        if cells[alternating_count] != expected:
-            break
-        alternating_count += 1
-    if alternating_count < 4:
-        return false
-    entry["homeRouteIndex"] = mini(int(entry.get("homeRouteIndex", 0)) + 1, (entry.get("homeRoutePositions", []) as Array).size())
-    entry["routeForceReplan"] = true
-    entry["routeCells"] = []
-    entry["pathWaypoints"] = []
-    entry["routeActions"] = {}
-    return true
+    return false
 
 func skip_optional_home_waypoint_if_static_blocked(entry: Dictionary, reason: String) -> bool:
-    if not bool(entry.get("routeMovingHome", false)):
-        return false
-    if not (reason in ["blocked_static", "blocked_capsule", "static_or_dynamic_collision"]):
-        return false
-    var route_positions: Array = entry.get("homeRoutePositions", [])
-    var route_index := int(entry.get("homeRouteIndex", 0))
-    if route_index <= 0 or route_index >= route_positions.size() - 1:
-        return false
-    var active_target_cell: Vector2i = entry.get("homeActiveTargetCell", entry.get("routeGoalCell", Vector2i.ZERO))
-    var porch_cell: Vector2i = entry.get("porchCell", active_target_cell)
-    var home_cell: Vector2i = entry.get("homeCell", active_target_cell)
-    if active_target_cell == porch_cell or active_target_cell == home_cell:
-        return false
-    var interior_min: Vector2i = entry.get("interiorMinCell", home_cell)
-    var interior_max: Vector2i = entry.get("interiorMaxCell", home_cell)
-    if active_target_cell.x >= mini(interior_min.x, interior_max.x) \
-        and active_target_cell.x <= maxi(interior_min.x, interior_max.x) \
-        and active_target_cell.y >= mini(interior_min.y, interior_max.y) \
-        and active_target_cell.y <= maxi(interior_min.y, interior_max.y):
-        return false
-    var signature := "%d:%d,%d" % [route_index, active_target_cell.x, active_target_cell.y]
-    if String(entry.get("homeOptionalSkipSignature", "")) == signature:
-        return false
-    entry["homeOptionalSkipSignature"] = signature
-    entry["homeRouteIndex"] = mini(route_index + 1, route_positions.size())
-    entry["routeForceReplan"] = true
-    entry["routeCells"] = []
-    entry["pathWaypoints"] = []
-    entry["routeActions"] = {}
-    return true
+    return false
 
 func skip_optional_home_waypoint_if_endpoint_unsnappable(entry: Dictionary, reason: String) -> bool:
-    if not bool(entry.get("routeMovingHome", false)):
-        return false
-    if not (reason in ["endpoint_not_server_walkable", "no_target_server_walkable"]):
-        return false
-    var route_positions: Array = entry.get("homeRoutePositions", [])
-    var route_index := int(entry.get("homeRouteIndex", 0))
-    if route_index <= 0 or route_index >= route_positions.size() - 1:
-        return false
-    var active_target_cell: Vector2i = entry.get("homeActiveTargetCell", entry.get("routeGoalCell", Vector2i.ZERO))
-    var porch_cell: Vector2i = entry.get("porchCell", active_target_cell)
-    var home_cell: Vector2i = entry.get("homeCell", active_target_cell)
-    var skip_to_index := route_index + 1
-    if active_target_cell == home_cell:
-        return false
-    if active_target_cell == porch_cell:
-        var body := entry.get("body") as Node3D
-        if body != null:
-            var current_cell := Vector2i(roundi(body.global_position.x / CELL), roundi(body.global_position.z / CELL))
-            var porch_position: Vector3 = entry.get("porchPosition", body.global_position)
-            if current_cell != porch_cell and body.global_position.distance_to(porch_position) > CELL * 1.75:
-                return false
-        var interior_index := next_home_route_interior_index(entry, route_positions, route_index, home_cell)
-        if interior_index < 0:
-            return false
-        skip_to_index = interior_index
-    elif abs(active_target_cell.x - porch_cell.x) + abs(active_target_cell.y - porch_cell.y) != 1:
-        return false
-    else:
-        var body := entry.get("body") as Node3D
-        if body != null:
-            var current_cell := Vector2i(roundi(body.global_position.x / CELL), roundi(body.global_position.z / CELL))
-            var porch_position: Vector3 = entry.get("porchPosition", body.global_position)
-            if current_cell != porch_cell and body.global_position.distance_to(porch_position) > CELL * 1.75:
-                return false
-    var signature := "%d:%d,%d:%s" % [route_index, active_target_cell.x, active_target_cell.y, reason]
-    if String(entry.get("homeOptionalSkipSignature", "")) == signature:
-        return false
-    entry["homeOptionalSkipSignature"] = signature
-    entry["homeRouteIndex"] = mini(skip_to_index, route_positions.size())
-    entry["routeForceReplan"] = true
-    entry["routeCells"] = []
-    entry["pathWaypoints"] = []
-    entry["routeActions"] = {}
-    return true
+    return false
 
 func next_home_route_interior_index(entry: Dictionary, route_positions: Array, route_index: int, home_cell: Vector2i) -> int:
     if route_index < 0 or route_index >= route_positions.size() - 1:
@@ -1460,18 +1569,38 @@ func bump_traffic_generation(entry: Dictionary, reason: String) -> void:
 func validate_candidate(entry: Dictionary, previous: Vector3, candidate: Vector3, moving_home := false, allow_outside := false, world = null, priority := 0) -> Dictionary:
     if world == null or main == null:
         return { "ok": false, "reason": "missing_world" }
+    var monitor = performance_monitor()
+    var section_start: int = monitor.begin_section("npc_validate_point_allowed") if monitor != null else Time.get_ticks_usec()
     if not world.point_allowed(entry, candidate, allow_outside, moving_home):
+        if monitor != null:
+            monitor.end_section("npc_validate_point_allowed", section_start)
         return { "ok": false, "reason": "outside_area" }
+    if monitor != null:
+        monitor.end_section("npc_validate_point_allowed", section_start)
     var previous_cell: Vector2i = world.world_cell(previous)
     var candidate_cell: Vector2i = world.world_cell(candidate)
+    section_start = monitor.begin_section("npc_validate_terrain_step") if monitor != null else Time.get_ticks_usec()
     var terrain: Dictionary = world.terrain_allows_step(previous_cell, candidate_cell, moving_home)
     if not bool(terrain.get("ok", false)):
+        if monitor != null:
+            monitor.end_section("npc_validate_terrain_step", section_start)
         return terrain
+    if monitor != null:
+        monitor.end_section("npc_validate_terrain_step", section_start)
     candidate.y = float(terrain.get("height", main.call("surface_y_at_position", candidate) if main.has_method("surface_y_at_position") else candidate.y)) + 0.04
-    var snapshot: Dictionary = world.build_snapshot(entry, allow_outside, moving_home)
+    section_start = monitor.begin_section("npc_validate_snapshot") if monitor != null else Time.get_ticks_usec()
+    var snapshot: Dictionary = world.cached_validation_snapshot(entry, allow_outside, moving_home) if world.has_method("cached_validation_snapshot") else world.build_snapshot(entry, allow_outside, moving_home)
+    if monitor != null:
+        monitor.end_section("npc_validate_snapshot", section_start)
+    section_start = monitor.begin_section("npc_validate_center_sweep") if monitor != null else Time.get_ticks_usec()
     var center_sweep: Dictionary = center_sweep_blocker(snapshot, previous, candidate, world, previous_cell)
     if not bool(center_sweep.get("ok", false)):
+        if monitor != null:
+            monitor.end_section("npc_validate_center_sweep", section_start)
         return center_sweep
+    if monitor != null:
+        monitor.end_section("npc_validate_center_sweep", section_start)
+    section_start = monitor.begin_section("npc_validate_footprint") if monitor != null else Time.get_ticks_usec()
     var previous_footprint: Array[Vector2i] = capsule_footprint_cells(previous, world)
     for footprint_cell in capsule_footprint_cells(candidate, world):
         var blocker = world.static_blocker(snapshot, footprint_cell)
@@ -1480,15 +1609,28 @@ func validate_candidate(entry: Dictionary, previous: Vector3, candidate: Vector3
                 continue
             var door := blocker as Node
             if door == null or String(door.get_meta("block_type", "")) != "door":
+                if monitor != null:
+                    monitor.end_section("npc_validate_footprint", section_start)
                 return { "ok": false, "reason": "blocked_static" }
         var dynamic = world.dynamic_blocker(snapshot, footprint_cell)
         if dynamic != null and footprint_cell != previous_cell:
             if entry_loses_to_dynamic(entry, dynamic, priority):
+                if monitor != null:
+                    monitor.end_section("npc_validate_footprint", section_start)
                 return { "ok": false, "reason": "yielding", "blocker": dynamic }
+            if monitor != null:
+                monitor.end_section("npc_validate_footprint", section_start)
             return { "ok": false, "reason": "blocked_dynamic" }
+    if monitor != null:
+        monitor.end_section("npc_validate_footprint", section_start)
     var body := entry.get("body") as CharacterBody3D
+    section_start = monitor.begin_section("npc_validate_capsule_sweep") if monitor != null else Time.get_ticks_usec()
     if body != null and not bool(entry.get("_activeDoorForwardStep", false)) and capsule_hits_obstacle(entry, body, previous, candidate):
+        if monitor != null:
+            monitor.end_section("npc_validate_capsule_sweep", section_start)
         return { "ok": false, "reason": "blocked_capsule", "blocker": entry.get("capsuleBlocker", {}) }
+    if monitor != null:
+        monitor.end_section("npc_validate_capsule_sweep", section_start)
     return { "ok": true, "candidate": candidate }
 
 func center_sweep_blocker(snapshot: Dictionary, previous: Vector3, candidate: Vector3, world, previous_cell: Vector2i) -> Dictionary:
@@ -1512,12 +1654,13 @@ func center_sweep_blocker(snapshot: Dictionary, previous: Vector3, candidate: Ve
 
 func capsule_footprint_cells(position: Vector3, world) -> Array[Vector2i]:
     var cells: Array[Vector2i] = []
+    var radius := STATIC_FOOTPRINT_VALIDATION_RADIUS
     for offset in [
         Vector3.ZERO,
-        Vector3(CAPSULE_RADIUS, 0.0, 0.0),
-        Vector3(-CAPSULE_RADIUS, 0.0, 0.0),
-        Vector3(0.0, 0.0, CAPSULE_RADIUS),
-        Vector3(0.0, 0.0, -CAPSULE_RADIUS)
+        Vector3(radius, 0.0, 0.0),
+        Vector3(-radius, 0.0, 0.0),
+        Vector3(0.0, 0.0, radius),
+        Vector3(0.0, 0.0, -radius)
     ]:
         var cell: Vector2i = world.world_cell(position + offset)
         if not cells.has(cell):

@@ -89,6 +89,9 @@ func _finish_without_open(job: Dictionary) -> Dictionary:
 		var result := _complete(job, best_key)
 		result["status"] = NpcEnumsScript.ROUTE_STATUS_PARTIAL
 		result["reason"] = NpcEnumsScript.ROUTE_REASON_PARTIAL_ONLY
+		result["closedCount"] = (job.get("closed", {}) as Dictionary).size()
+		result["bestKey"] = best_key
+		result["bestGoalDistance"] = _report_distance(float(job.get("bestGoalDistance", INF)))
 		return result
 	return {
 		"status": NpcEnumsScript.ROUTE_STATUS_UNREACHABLE,
@@ -99,7 +102,7 @@ func _finish_without_open(job: Dictionary) -> Dictionary:
 		"expansions": last_expansions,
 		"closedCount": (job.get("closed", {}) as Dictionary).size(),
 		"bestKey": best_key,
-		"bestGoalDistance": float(job.get("bestGoalDistance", INF))
+		"bestGoalDistance": _report_distance(float(job.get("bestGoalDistance", INF)))
 	}
 
 func _complete(job: Dictionary, goal_key: String) -> Dictionary:
@@ -228,6 +231,9 @@ func _goal_distance(graph: Dictionary, key: String, goals: Dictionary) -> float:
 		var goal_pos: Vector3 = goal_span.get("world_position")
 		best = minf(best, from_pos.distance_to(goal_pos))
 	return best
+
+func _report_distance(value: float) -> float:
+	return value if value < INF else -1.0
 
 func stats() -> Dictionary:
 	return { "lastExpansions": last_expansions }

@@ -282,6 +282,7 @@ func navigation_waypoints_text(points: Array) -> String: return ""
 func map_marker_summary(points: Array) -> String: return ""
 func map_terrain_samples(center_cell: Vector2i, radius: float) -> Array: return []
 func map_color_for_sample(biome: String, height: float) -> Color: return Color.WHITE
+func invalidate_navigation_marker_cache() -> void: pass
 func _on_ui_slot_clicked(index: int) -> void: pass
 func _on_ui_slot_moved(from_index: int, to_index: int) -> void: pass
 func _on_craft_requested(recipe_id: String) -> void: pass

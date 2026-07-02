@@ -18,6 +18,7 @@ func cases() -> Array[Dictionary]:
 		["npc_door_idempotent_close", "test_idempotent_close"],
 		["npc_door_single_open_cross_close", "test_single_open_cross_close"],
 		["npc_door_double_coordinated_portal", "test_double_coordinated_portal"],
+		["npc_door_metadata_portal_overrides_stale_action_id", "test_metadata_portal_overrides_stale_action_id"],
 		["npc_door_player_npc_shared_authority", "test_player_npc_shared_authority"],
 		["npc_door_threshold_occupied_no_close", "test_threshold_occupied_no_close"],
 		["npc_door_sweep_occupied_no_close", "test_sweep_occupied_no_close"],
@@ -82,6 +83,31 @@ func test_double_coordinated_portal(_mode: String) -> Dictionary:
 	var both_clear: bool = primary_collider(setup.door).disabled and primary_collider(setup.secondDoor).disabled
 	var passed: bool = succeeded(open) and same_portal and both_open and both_clear and portal.leaf_nodes.size() == 2
 	return outcome(passed, "portal=%s open=%s" % [JSON.stringify(portal.to_summary()), summary(open)], ["logical_double_portal", "coordinated_leaves"], { "portal": portal.to_summary(), "bothOpen": both_open, "bothClear": both_clear })
+
+func test_metadata_portal_overrides_stale_action_id(_mode: String) -> Dictionary:
+	var setup := door_setup({ "double": true })
+	var executor = DoorTraversalExecutorScript.new()
+	executor.setup(setup.service)
+	var actor := make_actor("npc-a", Vector3.ZERO)
+	var entry := { "id": actor_id(actor), "routeGoalCell": Vector2i(0, 1) }
+	var stale_action := { "cell": Vector2i(0, 1), "portalId": "door:%s" % String(setup.door.name) }
+	var crossing: Dictionary = executor.request_crossing(setup.door, actor, entry, stale_action)
+	var portal = setup.service.portal_for_door(setup.door)
+	var both_open: bool = bool(setup.door.get_meta("open", false)) and bool(setup.secondDoor.get_meta("open", false))
+	var both_clear: bool = primary_collider(setup.door).disabled and primary_collider(setup.secondDoor).disabled
+	var passed: bool = bool(crossing.get("ok", false)) \
+		and String(crossing.get("portalId", "")) == setup.portalId \
+		and String(entry.get("activeDoorPortalId", "")) == setup.portalId \
+		and portal != null \
+		and portal.leaf_nodes.size() == 2 \
+		and both_open \
+		and both_clear
+	return outcome(
+		passed,
+		"crossing=%s entryPortal=%s expected=%s leaves=%d" % [JSON.stringify(crossing), String(entry.get("activeDoorPortalId", "")), setup.portalId, portal.leaf_nodes.size() if portal != null else 0],
+		["door_service_prefers_authoritative_portal_metadata", "stale_leaf_action_opens_all_grouped_leaves"],
+		{ "crossing": crossing, "entryPortal": String(entry.get("activeDoorPortalId", "")), "expectedPortal": setup.portalId, "bothOpen": both_open, "bothClear": both_clear }
+	)
 
 func test_player_npc_shared_authority(_mode: String) -> Dictionary:
 	var setup := door_setup()

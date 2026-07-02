@@ -14,10 +14,14 @@ func setup(system_node, main_node) -> void:
 	system = system_node
 	main = main_node
 
+func performance_monitor():
+	return main.get("runtime_perf_monitor") if main != null else null
+
 func apply_route_motion(entry: Dictionary, previous: Vector3, candidate: Vector3, physics_delta: float) -> Dictionary:
 	var body := entry.get("body") as CharacterBody3D
 	if body == null or physics_delta <= 0.0:
 		return { "moved": 0.0, "reason": "missing_character_body" }
+	var monitor = performance_monitor()
 	var motor_delta := maxf(0.0001, physics_delta)
 	var displacement := candidate - previous
 	displacement.y = 0.0
@@ -34,10 +38,19 @@ func apply_route_motion(entry: Dictionary, previous: Vector3, candidate: Vector3
 	if profile == null:
 		profile = CharacterMotorProfileScript.npc_default()
 		entry["motorProfile"] = profile
+	var prealign_start: int = monitor.begin_section("npc_motor_prealign") if monitor != null else Time.get_ticks_usec()
 	prealign_to_validated_terrain_step(body, candidate, profile, motor_delta)
+	if monitor != null:
+		monitor.end_section("npc_motor_prealign", prealign_start)
+	var motor_start: int = monitor.begin_section("npc_motor_apply") if monitor != null else Time.get_ticks_usec()
 	var state = motor.call("apply", body, command, profile, motor_delta, main)
+	if monitor != null:
+		monitor.end_section("npc_motor_apply", motor_start)
 	if route_terrain_axis_fallback_needed(state, displacement):
+		var fallback_start: int = monitor.begin_section("npc_motor_axis_fallback") if monitor != null else Time.get_ticks_usec()
 		var fallback_state = try_route_terrain_axis_fallback(body, command, displacement, profile, motor_delta)
+		if monitor != null:
+			monitor.end_section("npc_motor_axis_fallback", fallback_start)
 		if fallback_state != null and float(fallback_state.call("flat_displacement")) > 0.001:
 			state = fallback_state
 			body.set_meta("npc_terrain_axis_fallback", true)
@@ -45,6 +58,7 @@ func apply_route_motion(entry: Dictionary, previous: Vector3, candidate: Vector3
 			body.set_meta("npc_terrain_axis_fallback", false)
 	else:
 		body.set_meta("npc_terrain_axis_fallback", false)
+	var metadata_start: int = monitor.begin_section("npc_motor_metadata") if monitor != null else Time.get_ticks_usec()
 	body.set_meta("npc_terrain_grounded", bool(state.get("terrain_grounded")))
 	body.set_meta("npc_jump_snap_time", float(state.get("jump_snap_time")))
 	body.set_meta("npc_requested_velocity", desired_velocity)
@@ -66,6 +80,8 @@ func apply_route_motion(entry: Dictionary, previous: Vector3, candidate: Vector3
 		body.rotation.y = atan2(facing_step.x, facing_step.z)
 	if system != null and system.get("autonomy_system") != null:
 		system.autonomy_system.record_motion(entry, state)
+	if monitor != null:
+		monitor.end_section("npc_motor_metadata", metadata_start)
 	return {
 		"moved": Vector2(facing_step.x, facing_step.z).length(),
 		"position": body.global_position,

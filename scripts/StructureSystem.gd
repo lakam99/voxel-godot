@@ -316,7 +316,6 @@ func record_town_home(town_key: String, town: Dictionary, base_x: int, base_z: i
     var home_cell := center_cell
     var porch_cell := home_cell
     var guard_cell := home_cell
-    var home_route_cells: Array[Vector2i] = []
     var interior_min_cell := Vector2i(base_x + 1, base_z + 1)
     var interior_max_cell := Vector2i(base_x + width - 2, base_z + depth - 2)
     var door_entries := StructureDoorRulesScript.door_cells(width, depth, door_side)
@@ -353,14 +352,6 @@ func record_town_home(town_key: String, town: Dictionary, base_x: int, base_z: i
         interior_landing.y = clampi(interior_landing.y, interior_min_cell.y, interior_max_cell.y)
         home_cell.x = clampi(home_cell.x, interior_min_cell.x, interior_max_cell.x)
         home_cell.y = clampi(home_cell.y, interior_min_cell.y, interior_max_cell.y)
-        var exterior_approach := porch_cell - inward
-        if exterior_approach != porch_cell:
-            home_route_cells.append(exterior_approach)
-        home_route_cells.append(porch_cell)
-        if interior_landing != porch_cell:
-            home_route_cells.append(interior_landing)
-        if home_cell != interior_landing:
-            home_route_cells.append(home_cell)
     var record := {
         "id": "%s:home:%d" % [town_key, index],
         "townKey": town_key,
@@ -372,7 +363,6 @@ func record_town_home(town_key: String, town: Dictionary, base_x: int, base_z: i
         "guardCell": guard_cell,
         "interiorMinCell": interior_min_cell,
         "interiorMaxCell": interior_max_cell,
-        "homeRouteCells": home_route_cells,
         "buildingIndex": index
     }
     town_home_records[town_key].append(record)

@@ -20,7 +20,7 @@ var guard_target_frame := -1
 var guard_target_refreshes_this_frame := 0
 var update_frame_serial := 0
 
-const JOB_SELECTIONS_PER_FRAME := 12
+const JOB_SELECTIONS_PER_FRAME := 1
 const GUARD_TARGET_REFRESHES_PER_FRAME := 1
 
 func setup(autonomy, system_node, main_node, services: Dictionary) -> void:
@@ -224,9 +224,11 @@ func _advance_guard_motion(entry: Dictionary, body: Node3D, perception: Dictiona
 	target = _staged_departure_motion_target(entry, body, target)
 	var move_start: int = performance_monitor().begin_section("npc_guard_move") if performance_monitor() != null else Time.get_ticks_usec()
 	entry["routeIntentKind"] = "guard"
+	entry["guardRouteCritical"] = target_hostile != null
 	var speed := _set_motion_speed_mode(entry, "walking", "guard_route")
 	var moved := float(npc_system.call("move_npc", entry, target, speed * delta, false, true, delta)) if npc_system.has_method("move_npc") else 0.0
 	entry.erase("routeIntentKind")
+	entry.erase("guardRouteCritical")
 	if performance_monitor() != null:
 		performance_monitor().end_section("npc_guard_move", move_start)
 	entry["lastMoveDistance"] = moved
@@ -473,8 +475,10 @@ func _execute_guard(entry: Dictionary, body: Node3D, perception: Dictionary, sch
 	if monitor != null:
 		monitor.end_section("npc_guard_target", target_start)
 	var move_start: int = monitor.begin_section("npc_guard_move") if monitor != null else Time.get_ticks_usec()
+	entry["guardRouteCritical"] = target_hostile != null
 	var speed := _set_motion_speed_mode(entry, "walking", "guard_route")
 	var moved := float(npc_system.call("move_npc", entry, target, speed * delta, false, true, delta)) if npc_system.has_method("move_npc") else 0.0
+	entry.erase("guardRouteCritical")
 	if monitor != null:
 		monitor.end_section("npc_guard_move", move_start)
 	entry["lastMoveDistance"] = moved

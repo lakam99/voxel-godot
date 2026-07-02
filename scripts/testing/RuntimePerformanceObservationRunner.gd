@@ -291,6 +291,8 @@ func summarize_samples(samples: Array) -> Dictionary:
     var max_navmesh_path_query_usec := 0
     var max_navmesh_path_query_p95_usec := 0
     var max_navmesh_path_query_failures := 0
+    var slowest_navmesh_path_query := {}
+    var section_maxima := {}
     var last_spike := {}
     for sample_value in samples:
         var sample: Dictionary = sample_value
@@ -298,6 +300,8 @@ func summarize_samples(samples: Array) -> Dictionary:
         rolling_frame_max = maxf(rolling_frame_max, float(sample.get("frameMaxMs", 0.0)))
         max_npc = maxf(max_npc, float(sample.get("npcMs", 0.0)))
         var section_max: Dictionary = sample.get("perfSectionMaxMs", {}) if sample.get("perfSectionMaxMs", {}) is Dictionary else {}
+        for section_name in section_max.keys():
+            section_maxima[String(section_name)] = maxf(float(section_maxima.get(String(section_name), 0.0)), float(section_max.get(section_name, 0.0)))
         max_route = maxf(max_route, maxf(float(sample.get("routePlanMs", 0.0)), float(section_max.get("route_planning", 0.0))))
         max_route_request = maxf(max_route_request, float(section_max.get("route_runtime_request", 0.0)))
         max_route_search = maxf(max_route_search, float(section_max.get("route_search_step", 0.0)))
@@ -332,7 +336,10 @@ func summarize_samples(samples: Array) -> Dictionary:
         var navmesh_stats: Dictionary = sample.get("navmeshWorld", {}) if sample.get("navmeshWorld", {}) is Dictionary else {}
         max_navmesh_install_usec = max(max_navmesh_install_usec, int(navmesh_stats.get("lastInstallUsec", 0)))
         max_navmesh_install_p95_usec = max(max_navmesh_install_p95_usec, int(navmesh_stats.get("installP95Usec", 0)))
-        max_navmesh_path_query_usec = max(max_navmesh_path_query_usec, int(navmesh_stats.get("maxPathQueryUsec", 0)))
+        var sample_navmesh_path_query_usec := int(navmesh_stats.get("maxPathQueryUsec", 0))
+        if sample_navmesh_path_query_usec >= max_navmesh_path_query_usec:
+            slowest_navmesh_path_query = navmesh_stats.get("slowestPathQuery", {}) if navmesh_stats.get("slowestPathQuery", {}) is Dictionary else {}
+        max_navmesh_path_query_usec = max(max_navmesh_path_query_usec, sample_navmesh_path_query_usec)
         max_navmesh_path_query_p95_usec = max(max_navmesh_path_query_p95_usec, int(navmesh_stats.get("pathQueryP95Usec", 0)))
         max_navmesh_path_query_failures = max(max_navmesh_path_query_failures, int(navmesh_stats.get("pathQueryFailureCount", 0)))
         if float(sample.get("lastSpikeFrameMs", 0.0)) >= float(last_spike.get("frameMs", 0.0)):
@@ -379,8 +386,24 @@ func summarize_samples(samples: Array) -> Dictionary:
         "maxNavmeshPathQueryUsec": max_navmesh_path_query_usec,
         "maxNavmeshPathQueryP95Usec": max_navmesh_path_query_p95_usec,
         "maxNavmeshPathQueryFailures": max_navmesh_path_query_failures,
+        "slowestNavmeshPathQuery": slowest_navmesh_path_query,
+        "topSectionMaxMs": top_section_maxima(section_maxima, 12),
         "lastSpike": last_spike
     }
+
+func top_section_maxima(section_maxima: Dictionary, limit: int) -> Array:
+    var rows := []
+    for section_name in section_maxima.keys():
+        rows.append({
+            "name": String(section_name),
+            "ms": float(section_maxima.get(section_name, 0.0))
+        })
+    rows.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+        return float(a.get("ms", 0.0)) > float(b.get("ms", 0.0))
+    )
+    if rows.size() > limit:
+        rows.resize(limit)
+    return rows
 
 func performance_failures(metrics: Dictionary) -> Array[String]:
     var failures: Array[String] = []

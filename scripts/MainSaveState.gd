@@ -385,6 +385,7 @@ func restore_player_blocks(entries) -> void:
             request_door_state(block, true, null, "save", { "authorized": true })
 
 func clear_player_blocks() -> void:
+    var removed_any := false
     for key in blocks.keys():
         var body := blocks[key] as Node
         if body != null and bool(body.get_meta("player_placed", false)):
@@ -392,8 +393,12 @@ func clear_player_blocks() -> void:
                 npc_system.notify_navigation_block_removed(body.get_meta("cell"), String(body.get_meta("block_type", "")), body)
             body.queue_free()
             blocks.erase(key)
+            removed_any = true
+    if removed_any:
+        invalidate_navigation_marker_cache()
 
 func clear_all_blocks() -> void:
+    var removed_any := false
     for key in blocks.keys():
         var body := blocks[key] as Node
         if body != null:
@@ -401,6 +406,9 @@ func clear_all_blocks() -> void:
                 npc_system.notify_navigation_block_removed(body.get_meta("cell"), String(body.get_meta("block_type", "")), body)
             body.queue_free()
         blocks.erase(key)
+        removed_any = true
+    if removed_any:
+        invalidate_navigation_marker_cache()
 
 func serialize_slots(slots_value) -> Array:
     var result := []

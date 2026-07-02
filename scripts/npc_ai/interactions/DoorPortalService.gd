@@ -222,10 +222,12 @@ func lifecycle_trace_snapshot(portal_id := "", limit := 96) -> Array[Dictionary]
 	return rows
 
 func _portal_id_for_door(door: Node, metadata := {}) -> String:
+	if door.has_meta("door_portal_id"):
+		var door_portal_id := String(door.get_meta("door_portal_id", ""))
+		if door_portal_id != "":
+			return door_portal_id
 	if metadata is Dictionary and String(metadata.get("portalId", "")) != "":
 		return String(metadata.get("portalId"))
-	if door.has_meta("door_portal_id"):
-		return String(door.get_meta("door_portal_id"))
 	var cell: Vector3i = door.get_meta("cell", Vector3i.ZERO)
 	return "door:%d,%d,%d" % [cell.x, cell.y, cell.z]
 

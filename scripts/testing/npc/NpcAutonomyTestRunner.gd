@@ -1389,61 +1389,31 @@ func test_motor_skips_optional_home_threshold_on_endpoint_snap_failure(_mode: St
 		"pathWaypoints": [],
 		"routeActions": {}
 	}
-	var skipped := controller.skip_optional_home_waypoint_if_endpoint_unsnappable(entry, "endpoint_not_server_walkable")
-	var skipped_index := int(entry.get("homeRouteIndex", 0))
-	var force_replan := bool(entry.get("routeForceReplan", false))
-	entry["homeRouteIndex"] = 1
-	entry["homeActiveTargetCell"] = Vector2i(0, 0)
-	entry["homeOptionalSkipSignature"] = ""
-	entry["routeForceReplan"] = false
-	var porch_skipped_to_interior := controller.skip_optional_home_waypoint_if_endpoint_unsnappable(entry, "endpoint_not_server_walkable")
-	var porch_skip_index := int(entry.get("homeRouteIndex", 0))
-	entry["homeRouteIndex"] = 1
-	entry["homeActiveTargetCell"] = Vector2i(0, 0)
-	entry["homeOptionalSkipSignature"] = ""
-	entry["routeForceReplan"] = false
-	entry["homeRoutePositions"] = [
-		Vector3(0.0, 0.0, 1.35),
-		Vector3(0.0, 0.0, 0.0),
-		Vector3(0.0, 0.0, 1.35)
-	]
-	var porch_without_interior_not_skipped := not controller.skip_optional_home_waypoint_if_endpoint_unsnappable(entry, "endpoint_not_server_walkable")
-	body.global_position = Vector3(0.0, 0.0, 4.05)
-	entry["homeRoutePositions"] = [
-		Vector3(0.0, 0.0, 1.35),
-		Vector3(0.0, 0.0, 0.0),
-		Vector3(0.0, 0.0, -1.35),
-		Vector3(1.35, 0.0, -1.35)
-	]
-	entry["homeRouteIndex"] = 1
-	entry["homeActiveTargetCell"] = Vector2i(0, 0)
-	entry["homeOptionalSkipSignature"] = ""
-	entry["routeForceReplan"] = false
-	var far_porch_not_skipped := not controller.skip_optional_home_waypoint_if_endpoint_unsnappable(entry, "endpoint_not_server_walkable")
-	var passed := skipped \
-		and skipped_index == 2 \
-		and force_replan \
-		and porch_skipped_to_interior \
-		and porch_skip_index == 2 \
-		and porch_without_interior_not_skipped \
-		and far_porch_not_skipped
+	var original_index := int(entry.get("homeRouteIndex", 0))
+	var endpoint_not_skipped := not controller.skip_optional_home_waypoint_if_endpoint_unsnappable(entry, "endpoint_not_server_walkable")
+	var static_not_skipped := not controller.skip_optional_home_waypoint_if_static_blocked(entry, "blocked_capsule")
+	var oscillation_not_skipped := not controller.skip_optional_home_approach_if_oscillating(entry)
+	var index_unchanged := int(entry.get("homeRouteIndex", 0)) == original_index
+	var force_replan_unchanged := not bool(entry.get("routeForceReplan", false))
+	var passed := endpoint_not_skipped \
+		and static_not_skipped \
+		and oscillation_not_skipped \
+		and index_unchanged \
+		and force_replan_unchanged
 	body.queue_free()
 	return outcome(
 		passed,
-		"skipped=%s index=%d porchInterior=%s porchIndex=%d porchNoInteriorNotSkipped=%s farPorchNotSkipped=%s force=%s" % [
-			str(skipped),
-			skipped_index,
-			str(porch_skipped_to_interior),
-			porch_skip_index,
-			str(porch_without_interior_not_skipped),
-			str(far_porch_not_skipped),
-			str(force_replan)
+		"endpointNotSkipped=%s staticNotSkipped=%s oscillationNotSkipped=%s index=%d force=%s" % [
+			str(endpoint_not_skipped),
+			str(static_not_skipped),
+			str(oscillation_not_skipped),
+			int(entry.get("homeRouteIndex", 0)),
+			str(bool(entry.get("routeForceReplan", false)))
 		],
-		["home_threshold_endpoint_skip", "porch_endpoint_skips_to_interior", "porch_endpoint_requires_interior_continuation", "porch_endpoint_requires_near_approach"],
+		["home_navigation_no_authored_waypoint_skip", "home_navigation_surfaces_route_failures"],
 		{
-			"homeRouteIndex": skipped_index,
-			"porchSkipIndex": porch_skip_index,
-			"routeForceReplan": force_replan
+			"homeRouteIndex": int(entry.get("homeRouteIndex", 0)),
+			"routeForceReplan": bool(entry.get("routeForceReplan", false))
 		}
 	)
 

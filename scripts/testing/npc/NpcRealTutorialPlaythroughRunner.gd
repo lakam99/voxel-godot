@@ -554,7 +554,9 @@ func run_real_knock_to_morning_foragers() -> void:
         return
 
     mark_progress("observing_mira_return_home")
-    await observe_mira_until_home(MIRA_HOME_TIMEOUT_SECONDS)
+    var mira_home_timeout := mira_home_observation_timeout(MIRA_HOME_TIMEOUT_SECONDS)
+    report_data["miraHomeObservationTimeout"] = rounded(mira_home_timeout)
+    await observe_mira_until_home(mira_home_timeout)
     if focused_mira_visual_mode() and not captured_mira_inside_closed:
         await capture_mira_stage("mira_timeout_final_state", "front")
     var mira := npc_entry("mira")
@@ -713,6 +715,47 @@ func observe_mira_until_home(seconds: float) -> void:
             mark_progress("mira_home_%03d" % frame)
         if settled_frames >= MIRA_HOME_SETTLED_FRAMES:
             break
+
+func mira_home_observation_timeout(minimum_seconds: float) -> float:
+    var mira := npc_entry("mira")
+    if mira.is_empty():
+        return minimum_seconds
+    var body := mira.get("body") as Node3D
+    if body == null or not is_instance_valid(body):
+        return minimum_seconds
+    var home_position := entry_position(mira, "homePosition", body.global_position)
+    var direct_distance := flat_distance(body.global_position, home_position)
+    var route_distance := maxf(direct_distance, estimate_flat_route_distance(mira))
+    var walk_speed := npc_walk_speed_for_timeout(mira)
+    var travel_seconds := route_distance / walk_speed
+    var door_and_settle_seconds := 12.0 + float(MIRA_HOME_SETTLED_FRAMES) / float(Engine.physics_ticks_per_second)
+    return clampf(travel_seconds + door_and_settle_seconds, minimum_seconds, 78.0)
+
+func estimate_flat_route_distance(entry: Dictionary) -> float:
+    var cells: Array = entry.get("routeCells", [])
+    if cells.is_empty():
+        return 0.0
+    var previous := flat_cell((entry.get("body") as Node3D).global_position) if entry.get("body") is Node3D else Vector2i.ZERO
+    var total := 0.0
+    for cell_value in cells:
+        if not (cell_value is Vector2i):
+            continue
+        var cell: Vector2i = cell_value
+        total += Vector2(float(cell.x - previous.x), float(cell.y - previous.y)).length() * CELL
+        previous = cell
+    return total
+
+func npc_walk_speed_for_timeout(entry: Dictionary) -> float:
+    var speed := float(entry.get("npcSpeed", 0.0))
+    if speed <= 0.01:
+        var profile = entry.get("motorProfile")
+        if profile != null:
+            var walk_value = profile.get("walk_speed")
+            if walk_value != null:
+                speed = float(walk_value)
+    if speed <= 0.01:
+        speed = CELL * 1.8
+    return maxf(speed * 0.72, CELL * 1.1)
 
 func maybe_capture_mira_return_home(frame: int, mira: Dictionary, home_status: Dictionary) -> void:
     if mira.is_empty():
@@ -4534,6 +4577,8 @@ func npc_summary(entry: Dictionary) -> Dictionary:
         "motorLastDisplacement": vec3(last_displacement_meta),
         "routeFallbackCell": vec2i(entry.get("routeFallbackCell", Vector2i.ZERO)),
         "routeCells": vec2i_array_limited(entry.get("routeCells", []), 8),
+        "routeDynamicAvoidCells": vec2i_array_limited(entry.get("routeDynamicAvoidCells", []), 8),
+        "trafficWaitReason": String(entry.get("trafficWaitReason", "")),
         "pathWaypointCount": path_waypoints.size(),
         "firstPathWaypointValid": first_waypoint_valid,
         "firstPathWaypoint": vec3(first_waypoint),

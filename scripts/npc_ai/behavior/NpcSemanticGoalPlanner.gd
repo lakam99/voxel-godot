@@ -3,6 +3,7 @@ class_name NpcSemanticGoalPlanner
 
 const CELL := 1.35
 const MAX_ROUTE_SCORED_CANDIDATES := 16
+const MAX_HOME_INTERIOR_GOAL_CELLS := 64
 const RESOURCE_SCAN_NODE_LIMIT := 1200
 const RESOURCE_SCAN_CANDIDATE_LIMIT := 48
 
@@ -21,6 +22,13 @@ func surface_y_at_position(position: Vector3) -> float:
     if main != null and main.has_method("surface_y_at_position"):
         return float(main.call("surface_y_at_position", position))
     return position.y
+
+func navigation_snapshot(entry: Dictionary, allow_outside := false, moving_home := false) -> Dictionary:
+    if world == null:
+        return {}
+    if world.has_method("cached_validation_snapshot"):
+        return world.cached_validation_snapshot(entry, allow_outside, moving_home)
+    return world.build_snapshot(entry, allow_outside, moving_home) if world.has_method("build_snapshot") else {}
 
 func make_intent(entry: Dictionary, target: Vector3, max_distance: float, moving_home := false, allow_outside := false) -> Dictionary:
     var body := entry.get("body") as Node3D
@@ -42,6 +50,7 @@ func make_intent(entry: Dictionary, target: Vector3, max_distance: float, moving
     var strict_home_route := moving_home
     if moving_home:
         arrival_radius = CELL * 0.35 if strict_home_route else CELL * 0.82
+        fallback_cells = home_interior_goal_cells(entry)
     elif kind == "scripted":
         arrival_radius = CELL * 0.45
     return {
@@ -58,6 +67,31 @@ func make_intent(entry: Dictionary, target: Vector3, max_distance: float, moving
         "strictArrival": strict_home_route or kind == "scripted" or kind in ["job", "work", "forage", "guard"],
         "fallbackCells": fallback_cells
     }
+
+func home_interior_goal_cells(entry: Dictionary) -> Array[Vector2i]:
+    var result: Array[Vector2i] = []
+    var home_cell: Vector2i = entry.get("homeCell", Vector2i.ZERO)
+    var interior_min: Vector2i = entry.get("interiorMinCell", home_cell)
+    var interior_max: Vector2i = entry.get("interiorMaxCell", home_cell)
+    var min_x := mini(interior_min.x, interior_max.x)
+    var max_x := maxi(interior_min.x, interior_max.x)
+    var min_z := mini(interior_min.y, interior_max.y)
+    var max_z := maxi(interior_min.y, interior_max.y)
+    for z in range(min_z, max_z + 1):
+        for x in range(min_x, max_x + 1):
+            result.append(Vector2i(x, z))
+    result.sort_custom(func(a: Vector2i, b: Vector2i) -> bool:
+        var a_home := Vector2(float(a.x - home_cell.x), float(a.y - home_cell.y)).length_squared()
+        var b_home := Vector2(float(b.x - home_cell.x), float(b.y - home_cell.y)).length_squared()
+        if not is_equal_approx(a_home, b_home):
+            return a_home < b_home
+        if a.x != b.x:
+            return a.x < b.x
+        return a.y < b.y
+    )
+    if result.size() > MAX_HOME_INTERIOR_GOAL_CELLS:
+        result.resize(MAX_HOME_INTERIOR_GOAL_CELLS)
+    return result
 
 func choose_day_target(entry: Dictionary) -> Vector3:
     if world == null or planner == null:
@@ -164,6 +198,7 @@ func choose_best_reachable_position(entry: Dictionary, candidates: Array[Vector3
             return position_key(a) < position_key(b)
         return a_distance < b_distance
     )
+    var score_with_route_cost := moving_home or OS.get_environment("VOXEL_NPC_ROUTE_SCORE_TARGETS") == "1"
     var checked: int = 0
     for candidate in unique_candidates:
         if not position_can_be_goal(entry, candidate, allow_outside, moving_home):
@@ -171,6 +206,8 @@ func choose_best_reachable_position(entry: Dictionary, candidates: Array[Vector3
         checked += 1
         if checked > max_checked:
             break
+        if not score_with_route_cost:
+            return candidate
         var cost: float = INF
         if planner != null and planner.has_method("route_cost"):
             cost = float(planner.route_cost(entry, candidate, allow_outside, moving_home, _arrival_radius))
@@ -182,9 +219,6 @@ func town_anchor_candidates(entry: Dictionary) -> Array[Vector3]:
     var candidates: Array[Vector3] = []
     candidates.append(entry.get("porchPosition", Vector3.ZERO))
     candidates.append(entry.get("guardPosition", entry.get("porchPosition", Vector3.ZERO)))
-    for pos in entry.get("homeRoutePositions", []):
-        if pos is Vector3:
-            candidates.append(pos)
     add_path_candidates(candidates, entry, false)
     add_utility_anchor_candidates(candidates, entry)
     return candidates
@@ -229,28 +263,32 @@ func outward_work_anchor(entry: Dictionary) -> Vector3:
     return Vector3.INF
 
 func add_path_candidates(candidates: Array[Vector3], entry: Dictionary, outside_only := false) -> void:
-    var snapshot: Dictionary = world.build_snapshot(entry, outside_only, false)
-    var paths: Dictionary = snapshot.get("paths", {})
-    var body := entry.get("body") as Node3D
-    var origin: Vector3 = body.global_position if body != null else entry.get("porchPosition", Vector3.ZERO)
-    var ordered: Array[Vector2i] = []
-    for cell in paths.keys():
-        if cell is Vector2i:
-            ordered.append(cell)
-    ordered.sort_custom(func(a: Vector2i, b: Vector2i) -> bool:
-        return world.cell_position(a).distance_squared_to(origin) < world.cell_position(b).distance_squared_to(origin)
-    )
-    var added: int = 0
-    for cell in ordered:
-        var pos: Vector3 = world.cell_position(cell)
-        if outside_only and world.point_inside_town(entry, pos):
-            continue
-        if not outside_only and not world.point_inside_town(entry, pos):
-            continue
-        candidates.append(pos)
-        added += 1
-        if added >= 5:
-            break
+    if world == null:
+        return
+    var center: Vector2i = entry.get("townCenter", entry.get("homeCell", Vector2i.ZERO))
+    var radius := maxi(6, int(entry.get("townRadius", 18)))
+    var offsets: Array[int] = []
+    if outside_only:
+        offsets = [radius + 3, -(radius + 3)]
+    else:
+        var near_step := maxi(3, radius / 4)
+        var far_step := maxi(near_step + 2, radius / 2)
+        offsets = [0, near_step, -near_step, far_step, -far_step]
+    var seen := {}
+    for offset in offsets:
+        for cell in [center + Vector2i(offset, 0), center + Vector2i(0, offset)]:
+            var key := "%d,%d" % [cell.x, cell.y]
+            if seen.has(key):
+                continue
+            seen[key] = true
+            var pos: Vector3 = world.cell_position(cell)
+            if outside_only and world.point_inside_town(entry, pos):
+                continue
+            if not outside_only and not world.point_inside_town(entry, pos):
+                continue
+            if not world.point_inside_work_area(entry, pos):
+                continue
+            candidates.append(pos)
 
 func add_utility_anchor_candidates(candidates: Array[Vector3], entry: Dictionary) -> void:
     if main == null or world == null:
@@ -418,7 +456,7 @@ func hostile_intercept_candidates(entry: Dictionary, hostile: Node3D, melee := f
     var hostile_cell: Vector2i = world.world_cell(hostile.global_position)
     var min_radius := 1 if melee else 3
     var max_radius := 2 if melee else 6
-    var snapshot: Dictionary = world.build_snapshot(entry, true, false)
+    var snapshot: Dictionary = navigation_snapshot(entry, true, false)
     for radius in range(min_radius, max_radius + 1):
         for dx in range(-radius, radius + 1):
             for dz in range(-radius, radius + 1):

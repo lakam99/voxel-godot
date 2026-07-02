@@ -34,6 +34,7 @@ func plan_runtime_route(entry: Dictionary, intent: Dictionary, generated_world =
 	if blocked_target:
 		return _route_failure("blocked", "target_blocked", target_cell, { "targetCell": target_cell })
 	var query_api := _runtime_query_api(intent)
+	var forbidden_private_door_ids := _forbidden_private_door_portal_ids(entry, generated_world)
 	var route: Dictionary = navmesh_world.query_route(query_start_position, query_target, {
 		"actorId": String(entry.get("id", "")),
 		"kind": String(intent.get("kind", "move")),
@@ -42,7 +43,8 @@ func plan_runtime_route(entry: Dictionary, intent: Dictionary, generated_world =
 		"arrivalRadius": float(intent.get("arrivalRadius", CELL * 0.75)),
 		"targetCell": target_cell,
 		"maxSnapDistance": maxf(float(intent.get("arrivalRadius", CELL * 0.75)), CELL * 0.95),
-		"queryApi": query_api
+		"queryApi": query_api,
+		"forbiddenDoorPortalIds": forbidden_private_door_ids
 	})
 	last_stats = navmesh_world.stats() if navmesh_world.has_method("stats") else {}
 	last_stats["lastRouteSource"] = String(route.get("source", "navmesh"))
@@ -79,6 +81,7 @@ func route_cost_for_runtime(entry: Dictionary, target: Vector3, allow_outside :=
 	var start_cell := _world_cell(start, generated_world)
 	if _target_cell_blocked(entry, target_cell, generated_world, allow_outside, moving_home):
 		return INF
+	var forbidden_private_door_ids := _forbidden_private_door_portal_ids(entry, generated_world)
 	var route: Dictionary = navmesh_world.query_route(_nav_query_position(start, start_cell, generated_world), _nav_query_position(target, target_cell, generated_world), {
 		"actorId": String(entry.get("id", "")),
 		"kind": "cost",
@@ -89,7 +92,8 @@ func route_cost_for_runtime(entry: Dictionary, target: Vector3, allow_outside :=
 		"maxSnapDistance": maxf(arrival_radius, CELL * 0.95),
 		"costOnly": true,
 		"queryApi": "map_get_path",
-		"optimizePath": false
+		"optimizePath": false,
+		"forbiddenDoorPortalIds": forbidden_private_door_ids
 	})
 	if not bool(route.get("ok", false)):
 		return INF
@@ -102,6 +106,12 @@ func _runtime_query_api(intent: Dictionary) -> String:
 	if bool(intent.get("movingHome", false)) or String(intent.get("kind", "")) == "scripted":
 		return "query_path"
 	return "map_get_path"
+
+func _forbidden_private_door_portal_ids(entry: Dictionary, generated_world = null) -> Array[String]:
+	var source = generated_world if generated_world != null else world_adapter
+	if source == null or not source.has_method("forbidden_private_door_portal_ids_for_entry"):
+		return []
+	return source.forbidden_private_door_portal_ids_for_entry(entry)
 
 func _path_waypoints(path_value, start: Vector3, target: Vector3, generated_world = null, entry := {}, allow_outside := false, moving_home := false) -> Array[Vector3]:
 	var result: Array[Vector3] = []
@@ -234,6 +244,8 @@ func _nav_query_position(position: Vector3, cell: Vector2i, generated_world = nu
 func _target_cell_blocked(entry: Dictionary, target_cell: Vector2i, generated_world = null, allow_outside := false, moving_home := false) -> bool:
 	var source = generated_world if generated_world != null else world_adapter
 	if source == null or not source.has_method("build_snapshot"):
+		return false
+	if moving_home and source.has_method("cell_inside_entry_home") and source.cell_inside_entry_home(entry, target_cell):
 		return false
 	var snapshot: Dictionary = source.build_snapshot(entry, allow_outside, moving_home)
 	if source.has_method("static_blocker") and source.static_blocker(snapshot, target_cell) != null:

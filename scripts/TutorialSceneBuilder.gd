@@ -97,7 +97,7 @@ func place_perimeter_cell(cell_x: int, cell_z: int, level: float, gate_cells: Di
     var cell := Vector2i(cell_x, cell_z)
     if gate_cells.has(cell):
         var gate: Dictionary = gate_cells[cell]
-        main.structure_system.place_door(cell_x, cell_z, level, int(gate.get("side", 0)), bool(gate.get("secondary", false)))
+        main.structure_system.place_door(cell_x, cell_z, level, int(gate.get("side", 0)), bool(gate.get("secondary", false)), "public_gate")
         return
     main.structure_system.place_structure_block(cell_x, cell_z, level, 0, "woodBlock", {
         "generatedTier": "town",
@@ -171,82 +171,18 @@ func spawn_tutorial_npcs() -> void:
     var north_home: Dictionary = system.tutorial_home_record(1, Vector2i(cx + 12, cz - 10), Vector2i(cx + 12, cz - 15))
     var west_home: Dictionary = system.tutorial_home_record(2, Vector2i(cx - 13, cz + 12), Vector2i(cx - 13, cz + 17))
     var elder_home: Dictionary = system.tutorial_home_record(3, Vector2i(cx + 13, cz + 12), Vector2i(cx + 13, cz + 17))
-    var elder_porch: Vector2i = elder_home.get("porchCell", Vector2i(cx + 13, cz + 17))
-    var elder_home_cell: Vector2i = elder_home.get("homeCell", Vector2i(cx + 13, cz + 12))
-    var elder_door_route := home_route_cells_from_porch(elder_porch, elder_home_cell, true)
-    var elder_pre_porch: Vector2i = elder_door_route[0] if not elder_door_route.is_empty() and elder_door_route[0] is Vector2i else elder_porch
-    var elder_approach: Vector2i = elder_porch
-    var elder_side_step_x := signi(elder_pre_porch.x - cx)
-    var elder_side_step_y := signi(elder_pre_porch.y - cz)
-    var elder_side_approach := Vector2i(elder_pre_porch.x - elder_side_step_x * 4, elder_pre_porch.y - elder_side_step_y)
-    var elder_near_lane := Vector2i(cx + elder_side_step_x, elder_side_approach.y - elder_side_step_y * 6)
-    var elder_route := [
-        Vector2i(cx - 6, cz - 16),
-        Vector2i(cx, cz - 8),
-        Vector2i(cx, cz),
-        elder_near_lane,
-        elder_side_approach,
-        elder_approach
-    ]
-    for route_cell in elder_door_route:
-        if route_cell is Vector2i and route_cell == elder_pre_porch:
-            continue
-        if route_cell is Vector2i and not elder_route.has(route_cell):
-            elder_route.append(route_cell)
-    for spec in tutorial_npc_specs(cx, cz, north_home, west_home, elder_home, elder_route):
+    for spec in tutorial_npc_specs(cx, cz, north_home, west_home, elder_home):
         spawn_npc(spec, level, Vector3(float(cx) * CELL, level, float(cz) * CELL))
 
-func tutorial_npc_specs(cx: int, cz: int, north_home: Dictionary, west_home: Dictionary, elder_home: Dictionary, elder_route: Array) -> Array:
-    var north_porch: Vector2i = north_home.get("porchCell", Vector2i(cx + 12, cz - 15))
-    var north_home_cell: Vector2i = north_home.get("homeCell", Vector2i(cx + 12, cz - 10))
-    var west_porch: Vector2i = west_home.get("porchCell", Vector2i(cx - 13, cz + 17))
-    var west_home_cell: Vector2i = west_home.get("homeCell", Vector2i(cx - 13, cz + 12))
-    var north_home_route := home_route_cells_from_porch(north_porch, north_home_cell, true)
-    north_home_route.erase(north_porch)
-    var west_home_route := home_route_cells_from_porch(west_porch, west_home_cell, false)
+func tutorial_npc_specs(cx: int, cz: int, north_home: Dictionary, west_home: Dictionary, elder_home: Dictionary) -> Array:
     return [
-        npc_spec("mira", "Mira", "Elder", Vector2i(cx - 13, cz - 15), elder_home, Color(0.70, 0.46, 0.34), Color(0.92, 0.76, 0.42), ["Storms bring the dark close. Start by meeting Rowan near the workbench.", "The lights mark the safe ground. Beyond them, shadows notice you."], { "holdIntroDoor": true, "homeRouteCells": elder_route }),
-        npc_spec("rowan", "Rowan", "Carpenter", Vector2i(cx, cz - 6), north_home, Color(0.48, 0.32, 0.18), Color(0.73, 0.52, 0.28), ["Workbench first. Logs become blocks, blocks become shelter.", "Bring me wood when you're ready and we'll turn it into something sturdy."], { "job": "wood", "homeRouteCells": north_home_route }),
-        npc_spec("niko", "Niko", "Forager", Vector2i(cx - 5, cz + 5), west_home, Color(0.31, 0.50, 0.28), Color(0.82, 0.42, 0.35), ["Food keeps your hands steady. Berries, fish, and cooked meat all matter.", "Stay near the path while the rain is heavy."], { "job": "forage", "homeRouteCells": west_home_route }),
+        npc_spec("mira", "Mira", "Elder", Vector2i(cx - 13, cz - 15), elder_home, Color(0.70, 0.46, 0.34), Color(0.92, 0.76, 0.42), ["Storms bring the dark close. Start by meeting Rowan near the workbench.", "The lights mark the safe ground. Beyond them, shadows notice you."], { "holdIntroDoor": true }),
+        npc_spec("rowan", "Rowan", "Carpenter", Vector2i(cx, cz - 6), north_home, Color(0.48, 0.32, 0.18), Color(0.73, 0.52, 0.28), ["Workbench first. Logs become blocks, blocks become shelter.", "Bring me wood when you're ready and we'll turn it into something sturdy."], { "job": "wood" }),
+        npc_spec("niko", "Niko", "Forager", Vector2i(cx - 5, cz + 5), west_home, Color(0.31, 0.50, 0.28), Color(0.82, 0.42, 0.35), ["Food keeps your hands steady. Berries, fish, and cooked meat all matter.", "Stay near the path while the rain is heavy."], { "job": "forage" }),
         npc_spec("sera", "Sera", "Watch", Vector2i(cx + 7, cz), north_home, Color(0.30, 0.34, 0.42), Color(0.66, 0.72, 0.86), ["Do not cross the last lantern unarmed. Hostiles gather outside the village lights.", "Craft a blade or bow before you brave the wilds."], { "job": "guard", "guardCell": Vector2i(cx + FENCE_RADIUS_CELLS - 3, cz), "canFight": true, "nightGuard": true, "weapon": "hunterBow" }),
         npc_spec("toma", "Toma", "Gate Watch", Vector2i(cx, cz - FENCE_RADIUS_CELLS + 4), north_home, Color(0.34, 0.34, 0.30), Color(0.78, 0.66, 0.38), ["The fence slows them. Arrows finish the rest.", "Stay behind the lantern line when the gate splinters."], { "job": "guard", "guardCell": Vector2i(cx, cz - FENCE_RADIUS_CELLS + 2), "canFight": true, "nightGuard": true, "weapon": "hunterBow" }),
         npc_spec("lyra", "Lyra", "Lantern Archer", Vector2i(cx - FENCE_RADIUS_CELLS + 4, cz), west_home, Color(0.28, 0.38, 0.44), Color(0.68, 0.78, 0.88), ["If a rail breaks, we hold the gap.", "Watch their movement. They hate the light."], { "job": "guard", "guardCell": Vector2i(cx - FENCE_RADIUS_CELLS + 2, cz), "canFight": true, "nightGuard": true, "weapon": "hunterBow" })
     ]
-
-func home_route_cells_from_porch(porch: Vector2i, home: Vector2i, include_approach := false) -> Array:
-    var delta := home - porch
-    var step := Vector2i.ZERO
-    if abs(delta.y) >= abs(delta.x):
-        step.y = signi(delta.y)
-    else:
-        step.x = signi(delta.x)
-    if step == Vector2i.ZERO:
-        return [home]
-    var route := []
-    if include_approach:
-        route.append(porch - step)
-    route.append(porch)
-    var threshold := porch + step
-    var interior := threshold + step
-    route.append(threshold)
-    route.append(interior)
-    if home.x != interior.x:
-        route.append(Vector2i(home.x, interior.y))
-    elif home.y != interior.y:
-        route.append(Vector2i(interior.x, home.y))
-    route.append(home)
-    var deduped := []
-    for cell in route:
-        if cell is Vector2i and not deduped.has(cell):
-            deduped.append(cell)
-    return deduped
-
-func signi(value: int) -> int:
-    if value > 0:
-        return 1
-    if value < 0:
-        return -1
-    return 0
 
 func npc_spec(id: String, npc_name: String, role: String, cell: Vector2i, home: Dictionary, color: Color, accent: Color, dialogue: Array, extra := {}) -> Dictionary:
     var result := extra.duplicate(true)
@@ -308,7 +244,6 @@ func register_with_npc_system(body: Node3D, spec: Dictionary, level: float, cell
         "weapon": String(spec.get("weapon", "")),
         "job": String(spec.get("job", "")),
         "holdIntroDoor": bool(spec.get("holdIntroDoor", false)),
-        "homeRouteCells": spec.get("homeRouteCells", []),
         "tutorial": true
     })
 

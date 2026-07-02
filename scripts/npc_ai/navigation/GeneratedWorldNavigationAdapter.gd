@@ -9,8 +9,8 @@ const NAV_TILE_CELL_SIZE := NpcConstantsScript.NAV_TILE_CELL_SIZE
 const INVALID_CELL := Vector2i(999999, 999999)
 const PROP_CLEARANCE_RADIUS := CELL * 0.82
 const DOOR_LINK_ENTER_COST := CELL * 18.0
-const ROUTE_NAVMESH_MARGIN_CELLS := 10
-const ROUTE_NAVMESH_MAX_TILES := 64
+const ROUTE_NAVMESH_MARGIN_CELLS := 4
+const ROUTE_NAVMESH_MAX_TILES := 32
 
 var system
 var main
@@ -124,9 +124,7 @@ func route_navmesh_tile_keys(entry: Dictionary, start: Vector3, target: Vector3,
     var max_z := maxi(start_cell.y, target_cell.y) + margin_cells
     if entry != null and not entry.is_empty():
         var center: Vector2i = entry.get("townCenter", start_cell)
-        var radius := int(entry.get("townRadius", 18))
-        if allow_outside or moving_home:
-            radius += 24
+        var radius := int(ceili(role_leash_radius_cells(entry, allow_outside, moving_home)))
         var clamp_margin := maxi(margin_cells, 4)
         min_x = maxi(min_x, center.x - radius - clamp_margin)
         max_x = mini(max_x, center.x + radius + clamp_margin)
@@ -146,7 +144,7 @@ func route_navmesh_tile_keys(entry: Dictionary, start: Vector3, target: Vector3,
     return _nearest_route_tiles(keys, start_cell, target_cell)
 
 func build_navmesh_tile_snapshot(tile_key: String) -> Dictionary:
-    var snapshot: Dictionary = build_snapshot({}, true, true)
+    var snapshot: Dictionary = cached_static_tile_snapshot(true, true)
     var tile := _parse_tile_key(tile_key)
     var min_x := tile.x * NAV_TILE_CELL_SIZE
     var min_z := tile.y * NAV_TILE_CELL_SIZE
@@ -170,6 +168,53 @@ func build_navmesh_tile_snapshot(tile_key: String) -> Dictionary:
         "semanticRegions": semantic_regions,
         "doorPortals": door_summary.get("doorPortals", []),
         "doorLinks": door_summary.get("doorLinks", [])
+    }
+
+func cached_static_tile_snapshot(allow_outside := false, moving_home := false) -> Dictionary:
+    if cached_revision == "" and cached_blocked.is_empty() and cached_doors.is_empty() and cached_paths.is_empty() and cached_props.is_empty():
+        return build_snapshot({}, allow_outside, moving_home)
+    return {
+        "revision": revision(),
+        "staticSnapshotRevision": static_snapshot_revision,
+        "dynamicRevision": dynamic_revision,
+        "semanticRevision": semantic_revision,
+        "doorStateRevision": door_state_revision,
+        "navStaticRebuildCount": nav_static_rebuild_count,
+        "navDynamicUpdateCount": nav_dynamic_update_count,
+        "blocked": cached_blocked,
+        "doors": cached_doors,
+        "paths": cached_paths,
+        "props": cached_props,
+        "dynamic": {},
+        "allowOutside": allow_outside,
+        "movingHome": moving_home
+    }
+
+func cached_validation_snapshot(entry: Dictionary, allow_outside := false, moving_home := false) -> Dictionary:
+    if cached_revision == "" and cached_blocked.is_empty() and cached_doors.is_empty() and cached_paths.is_empty() and cached_props.is_empty():
+        return build_snapshot(entry, allow_outside, moving_home)
+    var monitor = performance_monitor()
+    var dynamic_start: int = monitor.begin_section("navigation_dynamic_update") if monitor != null else Time.get_ticks_usec()
+    var dynamic_cells := live_occupant_cells(entry)
+    nav_dynamic_update_count += 1
+    if monitor != null:
+        monitor.increment_counter("nav_dynamic_update_count")
+        monitor.end_section("navigation_dynamic_update", dynamic_start)
+    return {
+        "revision": revision(),
+        "staticSnapshotRevision": static_snapshot_revision,
+        "dynamicRevision": dynamic_revision,
+        "semanticRevision": semantic_revision,
+        "doorStateRevision": door_state_revision,
+        "navStaticRebuildCount": nav_static_rebuild_count,
+        "navDynamicUpdateCount": nav_dynamic_update_count,
+        "blocked": cached_blocked,
+        "doors": cached_doors,
+        "paths": cached_paths,
+        "props": cached_props,
+        "dynamic": dynamic_cells,
+        "allowOutside": allow_outside,
+        "movingHome": moving_home
     }
 
 func _event_changes_static_snapshot(kinds: Array) -> bool:
@@ -539,6 +584,27 @@ func door_flat_cell(door: Node) -> Vector2i:
     if body != null:
         return world_cell(body.global_position)
     return Vector2i(999999, 999999)
+
+func forbidden_private_door_portal_ids_for_entry(entry: Dictionary) -> Array[String]:
+    var result: Array[String] = []
+    var snapshot := cached_static_tile_snapshot(true, true)
+    var doors: Dictionary = snapshot.get("doors", {})
+    for cell_value in doors.keys():
+        if not (cell_value is Vector2i):
+            continue
+        var cell: Vector2i = cell_value
+        var door := door_at(snapshot, cell)
+        if door == null:
+            continue
+        if String(door.get_meta("door_policy", "private_home")) != "private_home":
+            continue
+        if private_home_door_matches_entry(entry, door):
+            continue
+        var portal_id := _door_portal_id(door, cell)
+        if portal_id != "" and not result.has(portal_id):
+            result.append(portal_id)
+    result.sort()
+    return result
 
 func entry_body_inside_home(entry: Dictionary) -> bool:
     var body := entry.get("body") as Node3D

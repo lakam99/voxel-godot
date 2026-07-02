@@ -221,9 +221,11 @@ func speed_scale_for_corridor(previous: Vector3, path_waypoints: Array, entry: D
 		a.y = 0.0
 		b.y = 0.0
 		if a.length_squared() > 0.0001 and b.length_squared() > 0.0001:
-			var angle := rad_to_deg(acos(clampf(a.normalized().dot(b.normalized()), -1.0, 1.0)))
-			if angle >= NpcConstantsScript.CORRIDOR_TURN_SLOW_ANGLE_DEGREES:
-				scale = minf(scale, NpcConstantsScript.CORRIDOR_TURN_SLOW_FACTOR)
+			var distance_to_turn := a.length()
+			if distance_to_turn <= NpcConstantsScript.CORRIDOR_LOOKAHEAD_MAX_DISTANCE:
+				var angle := rad_to_deg(acos(clampf(a.normalized().dot(b.normalized()), -1.0, 1.0)))
+				if angle >= NpcConstantsScript.CORRIDOR_TURN_SLOW_ANGLE_DEGREES:
+					scale = minf(scale, NpcConstantsScript.CORRIDOR_TURN_SLOW_FACTOR)
 	var actions: Dictionary = entry.get("routeActions", {})
 	if not actions.is_empty() and not path_waypoints.is_empty():
 		var first_distance := flat_distance(previous, path_waypoints[0])

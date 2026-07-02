@@ -22,6 +22,13 @@ const FORAGE_SCAN_CANDIDATE_LIMIT := 16
 const NO_DETOUR := Vector3(9999999.0, 9999999.0, 9999999.0)
 const NPC_SPEED_MODE_WALKING := "walking"
 const NPC_SPEED_MODE_SPRINTING := "sprinting"
+const NPC_MOTION_BUDGET_ACTIVE_THRESHOLD := 16
+const NPC_MOTION_BUDGET_CROWDED_THRESHOLD := 24
+const NPC_MOTION_BUDGET_VERY_CROWDED_THRESHOLD := 30
+const NPC_MOTION_BUDGET_ACTIVE := 14
+const NPC_MOTION_BUDGET_CROWDED := 4
+const NPC_MOTION_BUDGET_VERY_CROWDED := 3
+const NPC_MOTION_ACCUMULATED_DELTA_CAP := 10.0
 
 var main
 var hostile_system
@@ -61,6 +68,7 @@ var components_initialized := false
 var component_init_attempted := false
 var last_spawn_scan_frame := -1
 var npc_update_cursor := 0
+var npc_motion_cursor := 0
 var npc_update_active := false
 var external_move_budget_physics_frame := -1
 var published_navigation_semantics := {}
@@ -436,7 +444,6 @@ func register_npc(body: Node3D, profile: Dictionary) -> Dictionary:
         "interiorMinCell": profile.get("interiorMinCell", home_cell),
         "interiorMaxCell": profile.get("interiorMaxCell", home_cell),
         "guardPosition": cell_to_position(guard_cell, level),
-        "homeRoutePositions": route_positions_from_profile(profile.get("homeRouteCells", []), level),
         "homeRouteIndex": 0,
         "canFight": can_fight,
         "nightGuard": bool(profile.get("nightGuard", false)),
@@ -696,16 +703,6 @@ func navigation_road_bounds(center: Vector2i, level: float, span_cells: int, hor
 func cell_key(cell: Vector2i) -> String:
     return "%d,%d" % [cell.x, cell.y]
 
-func route_positions_from_profile(route_cells_value, level: float) -> Array[Vector3]:
-    var result: Array[Vector3] = []
-    var route_cells: Array = route_cells_value if route_cells_value is Array else []
-    for cell_value in route_cells:
-        if cell_value is Vector2i:
-            result.append(cell_to_position(cell_value, level))
-        elif cell_value is Vector3:
-            result.append(cell_value)
-    return result
-
 func create_npc_body(npc_name: String, kind := "npc") -> CharacterBody3D:
     ensure_components()
     var body := NpcAgentScene.instantiate() as CharacterBody3D
@@ -802,7 +799,6 @@ func spawn_town_npc(record: Dictionary, index: int) -> CharacterBody3D:
         "porchCell": porch_cell,
         "interiorMinCell": record.get("interiorMinCell", record.get("homeCell", Vector2i.ZERO)),
         "interiorMaxCell": record.get("interiorMaxCell", record.get("homeCell", Vector2i.ZERO)),
-        "homeRouteCells": record.get("homeRouteCells", []),
         "guardCell": guard_cell,
         "canFight": can_fight,
         "nightGuard": role.to_lower().find("guard") >= 0
@@ -900,11 +896,67 @@ func update_npcs(delta: float, day_factor: float) -> void:
         for entry in active_entries:
             if not brain_processed_entries.has(entry):
                 autonomy_system.record_brain_budget_skipped(entry, "budget_cursor")
+    var motion_entries := select_motion_entries(active_entries, delta)
     for entry in active_entries:
+        if not motion_entries.has(entry):
+            if autonomy_system != null and autonomy_system.has_method("record_motion_skipped"):
+                autonomy_system.record_motion_skipped(entry, "motion_budget")
+            update_npc_visual_state(entry, delta)
+            continue
         if autonomy_system != null and autonomy_system.has_method("advance_npc_motion"):
-            autonomy_system.advance_npc_motion(entry, delta, night_factor)
+            var accumulated_delta := float(entry.get("npcMotionAccumulatedDelta", delta))
+            var motion_delta := minf(accumulated_delta, delta * NPC_MOTION_ACCUMULATED_DELTA_CAP)
+            entry["npcMotionAccumulatedDelta"] = maxf(0.0, accumulated_delta - motion_delta)
+            autonomy_system.advance_npc_motion(entry, motion_delta, night_factor)
         update_npc_visual_state(entry, delta)
     npc_update_active = false
+
+func select_motion_entries(active_entries: Array, delta: float) -> Array:
+    var selected: Array = []
+    var budgeted: Array = []
+    var motion_budget: int = npc_motion_budget(active_entries.size())
+    for entry in active_entries:
+        entry["npcMotionAccumulatedDelta"] = minf(
+            float(entry.get("npcMotionAccumulatedDelta", 0.0)) + delta,
+            delta * NPC_MOTION_ACCUMULATED_DELTA_CAP
+        )
+        if npc_motion_requires_immediate_update(entry):
+            selected.append(entry)
+        else:
+            budgeted.append(entry)
+    var remaining_budget: int = maxi(0, motion_budget - selected.size())
+    if remaining_budget > 0 and not budgeted.is_empty():
+        npc_motion_cursor = npc_motion_cursor % budgeted.size()
+        var scanned: int = 0
+        var processed: int = 0
+        while scanned < budgeted.size() and processed < remaining_budget:
+            selected.append(budgeted[(npc_motion_cursor + scanned) % budgeted.size()])
+            scanned += 1
+            processed += 1
+        npc_motion_cursor = (npc_motion_cursor + max(1, scanned)) % max(1, budgeted.size())
+    var monitor = performance_monitor()
+    if monitor != null:
+        monitor.increment_counter("npc_motion_budget_selected", selected.size())
+        monitor.increment_counter("npc_motion_budget_skipped", max(0, active_entries.size() - selected.size()))
+    return selected
+
+func npc_motion_budget(active_count: int) -> int:
+    if active_count > NPC_MOTION_BUDGET_VERY_CROWDED_THRESHOLD:
+        return NPC_MOTION_BUDGET_VERY_CROWDED
+    if active_count > NPC_MOTION_BUDGET_CROWDED_THRESHOLD:
+        return NPC_MOTION_BUDGET_CROWDED
+    if active_count > NPC_MOTION_BUDGET_ACTIVE_THRESHOLD:
+        return NPC_MOTION_BUDGET_ACTIVE
+    return active_count
+
+func npc_motion_requires_immediate_update(entry: Dictionary) -> bool:
+    if String(entry.get("activeDoorPortalId", "")) != "":
+        return true
+    if bool(entry.get("holdDoorOrder", false)):
+        return true
+    if String(entry.get("routeReason", "")) in ["active_door_forward_clearance", "portal_retreat", "yielding_retreat"]:
+        return true
+    return false
 
 func update_npc(entry: Dictionary, delta: float, night_factor: float) -> void:
     var standalone_update := not npc_update_active
@@ -975,9 +1027,9 @@ func update_fighter_target(entry: Dictionary, body: Node3D, target_hostile, weap
     body.set_meta("npc_inside_home", false)
     var melee := npc_weapon_is_melee(weapon_id)
     var hostile := valid_hostile_node(target_hostile)
-    var target: Vector3 = choose_guard_target(entry, hostile, melee)
     if hostile == null:
-        return target
+        return entry.get("guardPosition", entry.get("porchPosition", body.global_position))
+    var target: Vector3 = choose_guard_target(entry, hostile, melee)
     if melee:
         var flat_distance := Vector2(hostile.global_position.x - body.global_position.x, hostile.global_position.z - body.global_position.z).length()
         if flat_distance <= CELL * 1.72:
@@ -1654,26 +1706,9 @@ func vector_from_summary(value, fallback: Vector3) -> Vector3:
 
 func home_route_target(entry: Dictionary) -> Vector3:
     var body := entry.get("body") as Node3D
-    var porch: Vector3 = entry.get("porchPosition", body.global_position)
-    var home: Vector3 = entry.get("homePosition", body.global_position)
-    if bool(entry.get("insideHome", false)):
-        return home
-    var route_positions: Array = entry.get("homeRoutePositions", [])
-    var route_index := int(entry.get("homeRouteIndex", 0))
-    if route_index <= 0:
-        entry.erase("homeOptionalSkipSignature")
-    while route_index < route_positions.size():
-        var route_target: Vector3 = route_positions[route_index]
-        if not home_route_step_reached(entry, route_target):
-            entry["homeRouteIndex"] = route_index
-            return route_target
-        route_index += 1
-    entry["homeRouteIndex"] = route_index
-    var current_cell := flat_cell_for_position(body.global_position)
-    var porch_cell: Vector2i = entry.get("porchCell", entry.get("homeCell", Vector2i.ZERO))
-    if abs(current_cell.x - porch_cell.x) <= 1 and abs(current_cell.y - porch_cell.y) <= 1:
-        return home
-    return home
+    if body == null:
+        return entry.get("homePosition", Vector3.ZERO)
+    return entry.get("homePosition", body.global_position)
 
 func home_route_step_reached(entry: Dictionary, route_target: Vector3) -> bool:
     var body := entry.get("body") as Node3D
@@ -1825,8 +1860,10 @@ func mark_npc_inside_home(entry: Dictionary, fallback_reason := "") -> void:
     if body == null:
         return
     entry["insideHome"] = true
+    entry["homeBlocked"] = false
     entry["homeRouteIndex"] = int((entry.get("homeRoutePositions", []) as Array).size())
     body.set_meta("npc_inside_home", true)
+    body.set_meta("npc_home_blocked", false)
     if fallback_reason != "":
         record_home_fallback(entry, fallback_reason)
         entry["routeStatus"] = "partial"

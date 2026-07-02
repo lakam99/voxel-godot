@@ -137,6 +137,7 @@ func complete_destroy_target(hit: Dictionary, collider: Node, kind: String, mate
         if npc_system and npc_system.has_method("notify_navigation_block_removed"):
             npc_system.notify_navigation_block_removed(block_cell, block_type, collider)
         blocks.erase(block_cell)
+        invalidate_navigation_marker_cache()
         mark_world_dirty("block_removed")
         collider.queue_free()
         inventory_system.add_item(ItemCatalogScript.material_drop(material_id), 1)
@@ -419,8 +420,6 @@ func add_crack_line(mesh: ImmediateMesh, a: Vector3, b: Vector3) -> void:
     mesh.surface_add_vertex(b)
 
 func surface_y_at_position(position: Vector3) -> float:
-    if world_generation_system != null and world_generation_system.has_method("surface_y_at"):
-        return float(world_generation_system.call("surface_y_at", position))
     return surface_y_at_cell(Vector3i(world_to_cell(position.x), world_to_cell(position.y), world_to_cell(position.z)))
 
 func ground_y_near_position(position: Vector3) -> float:
@@ -431,6 +430,9 @@ func ground_y_near_position(position: Vector3) -> float:
     return surface_y_at_position(position)
 
 func surface_y_at_cell(cell: Vector3i) -> float:
+    var edit_key := Vector2i(cell.x, cell.z)
+    if volume_edit_markers.has(edit_key):
+        return float(volume_edit_markers[edit_key])
     if world_generation_system != null and world_generation_system.has_method("surface_y_for_cell"):
         return float(world_generation_system.call("surface_y_for_cell", cell))
     return 0.0

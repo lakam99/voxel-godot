@@ -27,49 +27,67 @@ func navigation_map_state() -> Dictionary:
     var cache_cell := Vector2i(int(floor(float(player_cell.x) / 2.0)) * 2, int(floor(float(player_cell.y) / 2.0)) * 2)
     var hostile_count: int = hostile_system.enemies.size() if hostile_system else 0
     var cache_key := "%d,%d:%d:%s:%d:%d" % [cache_cell.x, cache_cell.y, roundi(radius), str(map_visible), blocks.size(), hostile_count]
+    var sample_key := map_sample_key_for(player_cell, radius) if map_visible else ""
     if cache_key == navigation_map_state_cache_key and navigation_map_state_cache_elapsed < navigation_map_state_cache_interval and not navigation_map_state_cache.is_empty():
-        var cached_state: Dictionary = navigation_map_state_cache.duplicate(true)
+        var cached_state: Dictionary = navigation_map_state_cache.duplicate(false)
         cached_state["heading"] = heading
+        if map_visible and sample_key != "" and map_sample_cache_key != sample_key:
+            var cached_sample_start := Time.get_ticks_usec()
+            cached_state["terrainSamples"] = map_terrain_samples(player_cell, radius)
+            if runtime_perf_monitor != null:
+                runtime_perf_monitor.observe_duration("hud_navigation_terrain_samples", profiled_ms(cached_sample_start))
+            cached_state["sampleCount"] = MAP_SAMPLE_GRID
+            navigation_map_state_cache["terrainSamples"] = cached_state["terrainSamples"]
+            navigation_map_state_cache["sampleCount"] = cached_state["sampleCount"]
+        cached_state["renderKey"] = navigation_map_render_key(cache_key, sample_key, cached_state)
         return cached_state
     var town := town_region_at_cell(player_cell.x, player_cell.y)
     if not town.is_empty():
         add_map_point(points, "town", "Town", Vector2(float(town.get("centerX", 0)) * CELL - player.global_position.x, float(town.get("centerZ", 0)) * CELL - player.global_position.z), 4.8, radius)
-    var seen_landmarks := {}
-    for block in blocks.values():
-        var body := block as Node3D
-        if body == null or not body.has_meta("block_type"):
-            continue
-        var block_type := String(body.get_meta("block_type"))
-        var marker := navigation_marker_for(body, block_type)
-        if marker.is_empty():
-            continue
-        var marker_key := String(marker.get("key", ""))
-        if marker_key != "" and seen_landmarks.has(marker_key):
-            continue
-        if marker_key != "":
-            seen_landmarks[marker_key] = true
-        add_map_point(points, String(marker.get("kind", "structure")), String(marker.get("label", ItemCatalogScript.label(block_type))), Vector2(body.global_position.x - player.global_position.x, body.global_position.z - player.global_position.z), float(marker.get("size", 3.3)), radius)
-        if points.size() >= 28:
-            break
+    var marker_scan_start := Time.get_ticks_usec()
+    append_navigation_marker_points(points, radius)
+    if runtime_perf_monitor != null:
+        runtime_perf_monitor.observe_duration("hud_navigation_marker_scan", profiled_ms(marker_scan_start))
     if hostile_system:
         for enemy in hostile_system.enemies:
             var body := enemy.get("body") as Node3D
             if body and is_instance_valid(body):
                 add_map_point(points, "hostile", "Hostile", Vector2(body.global_position.x - player.global_position.x, body.global_position.z - player.global_position.z), 3.8, radius)
+    var terrain_sample_start := Time.get_ticks_usec()
+    var terrain_samples := map_terrain_samples(player_cell, radius) if map_visible else []
+    if runtime_perf_monitor != null:
+        runtime_perf_monitor.observe_duration("hud_navigation_terrain_samples", profiled_ms(terrain_sample_start))
     var state := {
         "radius": radius,
         "heading": heading,
         "points": points,
         "pointCount": points.size(),
-        "terrainSamples": map_terrain_samples(player_cell, radius) if map_visible else [],
+        "terrainSamples": terrain_samples,
         "sampleCount": MAP_SAMPLE_GRID if map_visible else 0,
         "waypointsText": navigation_waypoints_text(points),
         "markerSummary": map_marker_summary(points)
     }
+    state["renderKey"] = navigation_map_render_key(cache_key, sample_key, state)
     navigation_map_state_cache_key = cache_key
     navigation_map_state_cache_elapsed = 0.0
-    navigation_map_state_cache = state.duplicate(true)
+    navigation_map_state_cache = state.duplicate(false)
     return state
+
+func navigation_map_render_key(cache_key: String, sample_key: String, state: Dictionary) -> String:
+    var point_count := 0
+    var sample_total := 0
+    if state.get("points", []) is Array:
+        point_count = (state.get("points", []) as Array).size()
+    if state.get("terrainSamples", []) is Array:
+        sample_total = (state.get("terrainSamples", []) as Array).size()
+    return "%s:%s:%d:%d:%d:%d" % [
+        cache_key,
+        sample_key,
+        roundi(rad_to_deg(float(state.get("heading", 0.0)))),
+        point_count,
+        sample_total,
+        int(state.get("sampleCount", 0))
+    ]
 
 func add_map_point(points: Array, kind: String, label: String, offset: Vector2, size: float, radius: float) -> void:
     if offset.length() > radius:
@@ -161,14 +179,22 @@ func map_terrain_samples(center_cell: Vector2i, radius: float) -> Array:
     var map_visible := has_map()
     if not map_visible:
         return []
-    var center_key := Vector2i(int(floor(float(center_cell.x) / 2.0)) * 2, int(floor(float(center_cell.y) / 2.0)) * 2)
-    var cache_key := "%d,%d:%d" % [center_key.x, center_key.y, roundi(radius)]
+    var center_key := map_sample_center_key(center_cell)
+    var cache_key := map_sample_key_for(center_cell, radius)
     if cache_key == map_sample_cache_key:
         return map_sample_cache
-    var samples := []
+    if cache_key != map_sample_build_key:
+        map_sample_build_key = cache_key
+        map_sample_build_center_cell = center_cell
+        map_sample_build_center_key = center_key
+        map_sample_build_radius = radius
+        map_sample_build_row = 0
+        map_sample_build_samples = []
     var radius_cells := maxf(8.0, radius / CELL)
     var grid := MAP_SAMPLE_GRID
-    for row in range(grid):
+    var rows_this_call := maxi(1, int(map_sample_build_rows_per_call))
+    var row_end := mini(grid, map_sample_build_row + rows_this_call)
+    for row in range(map_sample_build_row, row_end):
         for col in range(grid):
             var nx := (float(col) + 0.5) / float(grid) - 0.5
             var nz := (float(row) + 0.5) / float(grid) - 0.5
@@ -179,13 +205,100 @@ func map_terrain_samples(center_cell: Vector2i, radius: float) -> Array:
                 continue
             var height := surface_y_at_cell(Vector3i(cell_x, 0, cell_z))
             var biome := surface_biome_at_cell(Vector3i(cell_x, 0, cell_z))
-            samples.append({
+            map_sample_build_samples.append({
                 "offset": offset,
                 "color": map_color_for_sample(biome, height)
             })
-    map_sample_cache_key = cache_key
-    map_sample_cache = samples
-    return samples
+    map_sample_build_row = row_end
+    if map_sample_build_row >= grid:
+        map_sample_cache_key = cache_key
+        map_sample_cache = map_sample_build_samples
+        map_sample_build_key = ""
+        return map_sample_cache
+    return map_sample_build_samples
+
+func map_sample_center_key(center_cell: Vector2i) -> Vector2i:
+    return Vector2i(int(floor(float(center_cell.x) / 2.0)) * 2, int(floor(float(center_cell.y) / 2.0)) * 2)
+
+func map_sample_key_for(center_cell: Vector2i, radius: float) -> String:
+    var center_key := map_sample_center_key(center_cell)
+    return "%d,%d:%d" % [center_key.x, center_key.y, roundi(radius)]
+
+func invalidate_navigation_marker_cache() -> void:
+    block_stats_cache_dirty = true
+    navigation_marker_cache_source_key = ""
+    navigation_marker_cache = []
+    navigation_marker_scan_source_key = ""
+    navigation_marker_scan_keys = []
+    navigation_marker_scan_index = 0
+    navigation_marker_scan_seen = {}
+    navigation_map_state_cache_key = ""
+    navigation_map_state_cache = {}
+    navigation_map_state_cache_elapsed = navigation_map_state_cache_interval
+
+func append_navigation_marker_points(points: Array, radius: float) -> void:
+    var source_key := navigation_marker_source_key()
+    if source_key != navigation_marker_cache_source_key:
+        advance_navigation_marker_cache(source_key)
+    for marker_value in navigation_marker_cache:
+        if points.size() >= 28:
+            break
+        if not (marker_value is Dictionary):
+            continue
+        var marker: Dictionary = marker_value
+        var body := marker.get("body") as Node3D
+        if body == null or not is_instance_valid(body):
+            continue
+        add_map_point(
+            points,
+            String(marker.get("kind", "structure")),
+            String(marker.get("label", "Marker")),
+            Vector2(body.global_position.x - player.global_position.x, body.global_position.z - player.global_position.z),
+            float(marker.get("size", 3.3)),
+            radius
+        )
+
+func navigation_marker_source_key() -> String:
+    return str(blocks.size())
+
+func advance_navigation_marker_cache(source_key: String) -> void:
+    if source_key != navigation_marker_scan_source_key:
+        navigation_marker_scan_source_key = source_key
+        navigation_marker_scan_keys = blocks.keys()
+        navigation_marker_scan_index = 0
+        navigation_marker_scan_seen = {}
+        navigation_marker_cache = []
+    var budget := maxi(1, int(navigation_marker_scan_budget))
+    var processed := 0
+    while navigation_marker_scan_index < navigation_marker_scan_keys.size() and processed < budget:
+        var block_key = navigation_marker_scan_keys[navigation_marker_scan_index]
+        navigation_marker_scan_index += 1
+        processed += 1
+        var body := blocks.get(block_key) as Node3D
+        if body == null or not is_instance_valid(body) or not body.has_meta("block_type"):
+            continue
+        var block_type := String(body.get_meta("block_type"))
+        var marker := navigation_marker_for(body, block_type)
+        if marker.is_empty():
+            continue
+        var marker_key := String(marker.get("key", "%s:%s" % [block_type, str(block_key)]))
+        if marker_key != "" and navigation_marker_scan_seen.has(marker_key):
+            continue
+        if marker_key != "":
+            navigation_marker_scan_seen[marker_key] = true
+        navigation_marker_cache.append({
+            "body": body,
+            "kind": String(marker.get("kind", "structure")),
+            "label": String(marker.get("label", ItemCatalogScript.label(block_type))),
+            "size": float(marker.get("size", 3.3)),
+            "key": marker_key
+        })
+    if navigation_marker_scan_index >= navigation_marker_scan_keys.size():
+        navigation_marker_cache_source_key = source_key
+        navigation_marker_scan_source_key = ""
+        navigation_marker_scan_keys = []
+        navigation_marker_scan_index = 0
+        navigation_marker_scan_seen = {}
 
 func map_color_for_sample(biome: String, height: float) -> Color:
     if height <= WATER_LEVEL + 0.15:

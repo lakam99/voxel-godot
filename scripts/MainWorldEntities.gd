@@ -491,35 +491,48 @@ func objective_state() -> Dictionary:
         "beaconCharge": beacon_charge
     }
 
-func structure_counts() -> Dictionary:
-    var counts := {}
+func block_stats() -> Dictionary:
+    if not block_stats_cache_dirty and block_stats_cache_size == blocks.size() and not block_stats_cache.is_empty():
+        return block_stats_cache
+    var structure_counts_by_type := {}
+    var generated_counts_by_tier := {}
+    var player_placed_total := 0
+    var navigation_beacon_present := false
     for block in blocks.values():
         var body := block as Node
         if body == null or not body.has_meta("block_type"):
             continue
         var block_type := String(body.get_meta("block_type"))
-        counts[block_type] = int(counts.get(block_type, 0)) + 1
-    return counts
+        structure_counts_by_type[block_type] = int(structure_counts_by_type.get(block_type, 0)) + 1
+        if bool(body.get_meta("player_placed", false)):
+            player_placed_total += 1
+        if block_type == "sanctuaryBeacon":
+            navigation_beacon_present = true
+        var tier := String(body.get_meta("generatedTier", ""))
+        if tier != "":
+            generated_counts_by_tier[tier] = int(generated_counts_by_tier.get(tier, 0)) + 1
+    block_stats_cache = {
+        "structureCounts": structure_counts_by_type,
+        "generatedTierCounts": generated_counts_by_tier,
+        "placedBlocks": player_placed_total,
+        "hasNavigationBeacon": navigation_beacon_present
+    }
+    block_stats_cache_size = blocks.size()
+    block_stats_cache_dirty = false
+    return block_stats_cache
+
+func structure_counts() -> Dictionary:
+    var stats := block_stats()
+    var counts: Dictionary = stats.get("structureCounts", {}) if stats.get("structureCounts", {}) is Dictionary else {}
+    return counts.duplicate()
 
 func generated_tier_counts() -> Dictionary:
-    var counts := {}
-    for block in blocks.values():
-        var body := block as Node
-        if body == null or not body.has_meta("generatedTier"):
-            continue
-        var tier := String(body.get_meta("generatedTier"))
-        if tier == "":
-            continue
-        counts[tier] = int(counts.get(tier, 0)) + 1
-    return counts
+    var stats := block_stats()
+    var counts: Dictionary = stats.get("generatedTierCounts", {}) if stats.get("generatedTierCounts", {}) is Dictionary else {}
+    return counts.duplicate()
 
 func placed_block_count() -> int:
-    var total := 0
-    for block in blocks.values():
-        var body := block as Node
-        if body != null and bool(body.get_meta("player_placed", false)):
-            total += 1
-    return total
+    return int(block_stats().get("placedBlocks", 0))
 
 func has_any_tool(totals: Dictionary) -> bool:
     for item_id_variant in totals.keys():
@@ -545,8 +558,4 @@ func has_map() -> bool:
     return inventory_system.count("compass") > 0 or has_navigation_beacon()
 
 func has_navigation_beacon() -> bool:
-    for block in blocks.values():
-        var body := block as Node
-        if body != null and String(body.get_meta("block_type", "")) == "sanctuaryBeacon":
-            return true
-    return false
+    return bool(block_stats().get("hasNavigationBeacon", false))

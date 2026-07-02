@@ -231,7 +231,6 @@ func setup_one_house_one_npc_fixture() -> void:
 		"interiorMinCell": Vector2i(base_x + 1, base_z + 1),
 		"interiorMaxCell": Vector2i(base_x + width - 2, base_z + depth - 2),
 		"guardCell": porch_cell,
-		"homeRouteCells": [porch_cell, home_cell],
 		"canFight": false,
 		"nightGuard": false,
 		"job": ""

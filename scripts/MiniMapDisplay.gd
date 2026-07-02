@@ -6,14 +6,32 @@ var terrain_samples: Array = []
 var sample_count := 0
 var radius := 96.0
 var heading := 0.0
+var render_key := ""
 
 func set_map_state(state: Dictionary) -> void:
+    var next_key := String(state.get("renderKey", ""))
+    if next_key == "":
+        next_key = fallback_render_key(state)
+    if next_key == render_key:
+        return
+    render_key = next_key
     points = state.get("points", [])
     terrain_samples = state.get("terrainSamples", [])
     sample_count = int(state.get("sampleCount", 0))
     radius = maxf(12.0, float(state.get("radius", 96.0)))
     heading = float(state.get("heading", 0.0))
     queue_redraw()
+
+func fallback_render_key(state: Dictionary) -> String:
+    var state_points: Array = state.get("points", []) if state.get("points", []) is Array else []
+    var state_samples: Array = state.get("terrainSamples", []) if state.get("terrainSamples", []) is Array else []
+    return "%.1f:%d:%d:%d:%d" % [
+        float(state.get("radius", 96.0)),
+        roundi(rad_to_deg(float(state.get("heading", 0.0)))),
+        state_points.size(),
+        state_samples.size(),
+        int(state.get("sampleCount", 0))
+    ]
 
 func _draw() -> void:
     var size_min: float = min(size.x, size.y)

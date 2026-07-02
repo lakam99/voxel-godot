@@ -200,7 +200,7 @@ static func set_progression(hud, state: Dictionary) -> void:
 
 static func set_navigation(hud, compass_visible: bool, map_visible: bool, heading_text: String, map_state: Dictionary) -> void:
     hud.map_enabled = map_visible
-    hud.current_map_state = map_state.duplicate(true)
+    hud.current_map_state = map_state.duplicate(false)
     if hud.compass_label:
         hud.compass_label.visible = compass_visible
         hud.compass_label.text = heading_text

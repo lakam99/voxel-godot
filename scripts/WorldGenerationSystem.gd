@@ -110,10 +110,10 @@ func clear_excavation_brushes() -> void:
 	surface_projection_cache.clear()
 
 func surface_y_at(position: Vector3) -> float:
-	return volume_surface_y_for_cell(world_to_cell3(position))
+	return terrain_reference_surface_y_at(position)
 
 func surface_y_for_cell(cell: Vector3i) -> float:
-	return volume_surface_y_for_cell(cell)
+	return terrain_reference_surface_y_for_cell(cell)
 
 func volume_surface_y_for_cell(cell: Vector3i) -> float:
 	var key := Vector2i(cell.x, cell.z)

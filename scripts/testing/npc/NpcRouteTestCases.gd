@@ -9,6 +9,7 @@ const NavigationWorldServiceScript := preload("res://scripts/npc_ai/navigation/N
 const NavigationBakeDescriptorScript := preload("res://scripts/npc_ai/contracts/NavigationBakeDescriptor.gd")
 const NavigationBackendConfigScript := preload("res://scripts/npc_ai/navigation/NavigationBackendConfig.gd")
 const NavmeshWorldServiceScript := preload("res://scripts/npc_ai/navigation/NavmeshWorldService.gd")
+const GeneratedWorldNavigationAdapterScript := preload("res://scripts/npc_ai/navigation/GeneratedWorldNavigationAdapter.gd")
 const HierarchicalRoutePlannerScript := preload("res://scripts/npc_ai/routing/HierarchicalRoutePlanner.gd")
 const NavmeshRoutePlannerScript := preload("res://scripts/npc_ai/routing/NavmeshRoutePlanner.gd")
 
@@ -37,10 +38,12 @@ func cases() -> Array[Dictionary]:
 		["npc_route_partial_explicit_only", "test_route_partial_explicit_only"],
 		["npc_route_unreachable_terminal_reason", "test_route_unreachable_terminal_reason"],
 		["npc_route_deterministic_replay", "test_route_deterministic_replay"],
-		["npc_route_navmesh_query_path_uses_navigation_server", "test_route_navmesh_query_path_uses_navigation_server"],
+		["npc_route_navmesh_query_or_same_surface_returns_route", "test_route_navmesh_query_or_same_surface_returns_route"],
 		["npc_route_navmesh_preserves_door_action_cells", "test_route_navmesh_preserves_door_action_cells"],
 		["npc_route_navmesh_planner_goal_kinds", "test_route_navmesh_planner_goal_kinds"],
 		["npc_route_navmesh_adapter_no_legacy_fallback", "test_route_navmesh_adapter_no_legacy_fallback"],
+		["npc_route_runtime_door_uses_group_portal_id", "test_route_runtime_door_uses_group_portal_id"],
+		["npc_route_scripted_target_expands_navmesh_tiles", "test_route_scripted_target_expands_navmesh_tiles"],
 		["npc_route_runtime_goal_adapter_uses_new_corridor", "test_route_runtime_goal_adapter_uses_new_corridor"]
 	]
 	var result: Array[Dictionary] = []
@@ -314,15 +317,26 @@ func test_route_deterministic_replay(_mode: String) -> Dictionary:
 	var passed = first_summary == second_summary
 	return outcome(passed, "first=%s second=%s" % [first_summary, second_summary], ["deterministic_replay"], { "first": route_summary(first), "second": route_summary(second) })
 
-func test_route_navmesh_query_path_uses_navigation_server(_mode: String) -> Dictionary:
+func test_route_navmesh_query_or_same_surface_returns_route(_mode: String) -> Dictionary:
 	var service = navmesh_test_service("query-path", Vector3(0.0, 0.0, 0.0), Vector3(10.8, 0.0, 5.4))
 	var closest_start: Dictionary = service.closest_walkable(Vector3(0.2, 0.0, 0.2), 10.0)
 	var closest_target: Dictionary = service.closest_walkable(Vector3(8.8, 0.0, 3.8), 10.0)
 	var route: Dictionary = service.query_route(Vector3(0.2, 0.0, 0.2), Vector3(8.8, 0.0, 3.8), { "kind": "scripted" })
 	var stats: Dictionary = service.stats()
 	service.clear()
-	var passed := bool(route.get("ok", false)) and String(route.get("source", "")) == "navmesh" and String(route.get("queryApi", "")) in ["query_path", "map_get_path"] and (route.get("path", []) as Array).size() >= 1 and int(stats.get("pathQueryCount", 0)) == 1 and int(stats.get("pathQueryFailureCount", -1)) == 0
-	return outcome(passed, "route=%s start=%s target=%s stats=%s" % [JSON.stringify(navmesh_route_summary(route)), JSON.stringify(closest_start), JSON.stringify(closest_target), JSON.stringify(stats)], ["navmesh_query_path_returns_route", "navmesh_query_records_metrics"], { "route": navmesh_route_summary(route), "closestStart": closest_start, "closestTarget": closest_target, "stats": stats })
+	var query_api := String(route.get("queryApi", ""))
+	var same_surface_direct_ok := query_api != "descriptor_direct_endpoint" or (
+		String(closest_start.get("surfaceId", "")) != ""
+		and String(closest_start.get("surfaceId", "")) == String(closest_target.get("surfaceId", ""))
+	)
+	var passed := bool(route.get("ok", false)) \
+		and String(route.get("source", "")) == "navmesh" \
+		and query_api in ["query_path", "map_get_path", "descriptor_direct_endpoint"] \
+		and same_surface_direct_ok \
+		and (route.get("path", []) as Array).size() >= 1 \
+		and int(stats.get("pathQueryCount", 0)) == 1 \
+		and int(stats.get("pathQueryFailureCount", -1)) == 0
+	return outcome(passed, "route=%s start=%s target=%s stats=%s" % [JSON.stringify(navmesh_route_summary(route)), JSON.stringify(closest_start), JSON.stringify(closest_target), JSON.stringify(stats)], ["navmesh_query_or_same_surface_returns_route", "descriptor_direct_requires_same_surface", "navmesh_query_records_metrics"], { "route": navmesh_route_summary(route), "closestStart": closest_start, "closestTarget": closest_target, "stats": stats })
 
 func test_route_navmesh_preserves_door_action_cells(_mode: String) -> Dictionary:
 	var planner = NavmeshRoutePlannerScript.new()
@@ -405,6 +419,54 @@ func test_route_runtime_goal_adapter_uses_new_corridor(_mode: String) -> Diction
 	var adapter_text = read_text("res://scripts/npc_ai/routing/NpcRouteCoordinatorAdapter.gd")
 	var passed = adapter_text.find("HierarchicalRoutePlanner") < 0 and adapter_text.find("LocalAStarPlanner") < 0 and adapter_text.find("MAX_ITERATIONS") < 0 and adapter_text.find("navmesh_planner.plan_runtime_route") >= 0 and adapter_text.find("coordinator.plan_runtime_route") < 0 and adapter_text.find("route_from_cells") < 0
 	return outcome(passed, "adapterLegacy=%d maxIterations=%d navmeshCall=%d" % [adapter_text.find("HierarchicalRoutePlanner"), adapter_text.find("MAX_ITERATIONS"), adapter_text.find("navmesh_planner.plan_runtime_route")], ["runtime_adapter_delegates_navmesh_authority", "old_iteration_cap_removed", "custom_runtime_route_search_removed"], {})
+
+func test_route_runtime_door_uses_group_portal_id(_mode: String) -> Dictionary:
+	var planner = HierarchicalRoutePlannerScript.new()
+	var door := Node3D.new()
+	door.name = "Block_door_305_16_0"
+	door.set_meta("door_portal_id", "door:door-group:305,16,0:1")
+	door.set_meta("door_group_id", "door-group:305,16,0:1")
+	door.set_meta("cell", Vector3i(305, 16, 0))
+	var portal_id := planner.runtime_door_portal_id(door)
+	var passed := portal_id == "door:door-group:305,16,0:1" and not portal_id.contains("Block_door")
+	door.free()
+	return outcome(
+		passed,
+		"runtimePortalId=%s" % portal_id,
+		["runtime_door_action_uses_group_portal_id", "runtime_door_action_not_leaf_node_id"],
+		{ "portalId": portal_id }
+	)
+
+func test_route_scripted_target_expands_navmesh_tiles(_mode: String) -> Dictionary:
+	var adapter = GeneratedWorldNavigationAdapterScript.new()
+	var body := Node3D.new()
+	body.global_position = Vector3.ZERO
+	var target_cell := Vector2i(110, -18)
+	var target := Vector3(float(target_cell.x) * NpcConstantsScript.CELL_SIZE, 0.0, float(target_cell.y) * NpcConstantsScript.CELL_SIZE)
+	body.set_meta("npc_scripted_target", target)
+	body.set_meta("npc_scripted_allow_outside", true)
+	var entry := {
+		"id": "scripted_far_guard",
+		"body": body,
+		"townCenter": Vector2i.ZERO,
+		"townRadius": 18,
+		"job": "guard",
+		"role": "Watch"
+	}
+	var keys: Array[String] = adapter.route_navmesh_tile_keys(entry, body.global_position, target, true, false, 12)
+	var target_tile := "%d,%d" % [
+		floori(float(target_cell.x) / float(NpcConstantsScript.NAV_TILE_CELL_SIZE)),
+		floori(float(target_cell.y) / float(NpcConstantsScript.NAV_TILE_CELL_SIZE))
+	]
+	var start_tile := "%d,%d" % [0, 0]
+	var passed := keys.has(target_tile) and keys.has(start_tile)
+	body.free()
+	return outcome(
+		passed,
+		"targetTile=%s startTile=%s keys=%s" % [target_tile, start_tile, JSON.stringify(keys)],
+		["scripted_target_leash_included_in_navmesh_publication", "start_and_target_tiles_published"],
+		{ "targetTile": target_tile, "startTile": start_tile, "keys": keys }
+	)
 
 func navmesh_test_service(label: String, min_pos: Vector3, size: Vector3):
 	var service = NavmeshWorldServiceScript.new()

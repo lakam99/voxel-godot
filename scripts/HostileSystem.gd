@@ -7,6 +7,8 @@ const HostileVisualFactoryScript := preload("res://scripts/HostileVisualFactory.
 const CELL := 1.35
 const HOSTILE_SPACING_RADIUS := CELL * 0.95
 const HOSTILE_RIFT_SPACING_RADIUS := CELL * 1.25
+const HOSTILE_UPDATE_BUDGET := 4
+const HOSTILE_ACCUMULATED_DELTA_CAP := 4.0
 
 var main
 var player: CharacterBody3D
@@ -24,6 +26,7 @@ var projectile_system
 var npc_target_attacks := 0
 var npc_target_projectiles := 0
 var scripted_battle_starts := 0
+var hostile_update_cursor := 0
 
 func setup(main_node, player_node: CharacterBody3D, survival_system, inventory_system) -> void:
     main = main_node
@@ -89,8 +92,39 @@ func update_hostiles(delta: float, day_factor: float, biome: String, sanctuary_e
     elif night_factor > 0.34 and player_safety < 0.82 and spawn_cooldown <= 0.0 and enemies.size() < enemy_capacity:
         spawn_near_player(biome)
         spawn_cooldown = 16.0 + randf() * 12.0
-    for enemy in enemies.duplicate():
-        update_enemy(enemy, delta, night_factor)
+    update_enemy_budgeted(delta, night_factor)
+
+func update_enemy_budgeted(delta: float, night_factor: float) -> void:
+    var active_enemies: Array = enemies.duplicate()
+    if active_enemies.is_empty():
+        hostile_update_cursor = 0
+        return
+    if active_enemies.size() <= HOSTILE_UPDATE_BUDGET:
+        hostile_update_cursor = 0
+        for enemy in active_enemies:
+            if enemy is Dictionary:
+                (enemy as Dictionary)["hostileAccumulatedDelta"] = 0.0
+                update_enemy(enemy, delta, night_factor)
+        return
+    for enemy in active_enemies:
+        if enemy is Dictionary:
+            (enemy as Dictionary)["hostileAccumulatedDelta"] = minf(
+                float((enemy as Dictionary).get("hostileAccumulatedDelta", 0.0)) + delta,
+                delta * HOSTILE_ACCUMULATED_DELTA_CAP
+            )
+    hostile_update_cursor = hostile_update_cursor % active_enemies.size()
+    var processed := 0
+    var scanned := 0
+    while scanned < active_enemies.size() and processed < HOSTILE_UPDATE_BUDGET:
+        var enemy = active_enemies[(hostile_update_cursor + scanned) % active_enemies.size()]
+        scanned += 1
+        if not (enemy is Dictionary):
+            continue
+        var enemy_delta := float((enemy as Dictionary).get("hostileAccumulatedDelta", delta))
+        (enemy as Dictionary)["hostileAccumulatedDelta"] = 0.0
+        update_enemy(enemy, enemy_delta, night_factor)
+        processed += 1
+    hostile_update_cursor = (hostile_update_cursor + max(1, scanned)) % max(1, active_enemies.size())
 
 func tutorial_danger_profile(night_factor: float) -> Dictionary:
     if night_factor <= 0.34 or main == null or player == null:

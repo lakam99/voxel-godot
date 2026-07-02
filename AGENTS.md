@@ -145,6 +145,10 @@ If a playtest times out, inspect `playtest-progress.txt` and `playtest-report.js
 - `scripts/visual/*Registry.gd`: generated visual asset registries.
 - `scripts/ItemVisualFactory.gd`, `HeldItemSystem.gd`, `ItemIconFactory.gd`: item meshes, held visuals, UI icons.
 
+## Known Bugs
+
+- Tutorial town perimeter gate/fence: the game can destroy the perimeter gate, which causes the entire bridge to appear as pickup material. This breaks the perimeter fence repair quest because there is no intact fence/gate structure left for the player to repair. Future fixes should preserve tutorial-town gate, fence, and bridge structures from unintended destruction, cleanup, or resource-drop conversion during the tutorial flow.
+
 ## Visual Style
 
 Target style: cozy voxel, not flat prototype cubes.

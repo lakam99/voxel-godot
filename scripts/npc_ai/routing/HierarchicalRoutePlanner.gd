@@ -183,12 +183,19 @@ func _step_route_job(request, job_key: String, graph: Dictionary, start_key: Str
 				"expansions": int(search.get("expansions", 0)),
 				"closedCount": int(search.get("closedCount", 0)),
 				"bestKey": String(search.get("bestKey", "")),
-				"bestGoalDistance": float(search.get("bestGoalDistance", INF))
+				"bestGoalDistance": _debug_distance(float(search.get("bestGoalDistance", INF)))
 			}
 		})
 	var corridor = corridor_builder.build(graph, search.get("path", []), search.get("edges", []), search.get("breakdowns", []), request, true)
 	var result = _base_result(request, status, search.get("reason", NpcEnumsScript.ROUTE_REASON_NONE), {
 		"hierarchy": hierarchy,
+		"graph": _route_graph_metrics(graph, start_key, goal_keys, allowed_tiles),
+		"search": {
+			"expansions": int(search.get("expansions", 0)),
+			"closedCount": int(search.get("closedCount", 0)),
+			"bestKey": String(search.get("bestKey", "")),
+			"bestGoalDistance": _debug_distance(float(search.get("bestGoalDistance", INF)))
+		},
 		"costBreakdown": cost_model.path_cost_breakdown(search.get("breakdowns", [])),
 		"dependencies": corridor.dependencies.duplicate(true),
 		"path": search.get("path", [])
@@ -204,7 +211,7 @@ func _step_route_job(request, job_key: String, graph: Dictionary, start_key: Str
 
 func _route_graph_metrics(graph: Dictionary, start_key: String, goal_keys: Array, allowed_tiles: Array) -> Dictionary:
 	var edges: Dictionary = graph.get("edges", {})
-	return {
+	var metrics := {
 		"nodeCount": (graph.get("nodes", {}) as Dictionary).size(),
 		"edgeCount": int(graph.get("edgeCount", -1)),
 		"startKey": start_key,
@@ -212,6 +219,9 @@ func _route_graph_metrics(graph: Dictionary, start_key: String, goal_keys: Array
 		"goalKeys": goal_keys.duplicate(),
 		"allowedTileCount": allowed_tiles.size()
 	}
+	if graph.has("_debug"):
+		metrics["runtimeDebug"] = (graph.get("_debug", {}) as Dictionary).duplicate(true)
+	return metrics
 
 func _route_pending_graph_metrics(graph: Dictionary, start_key: String, goal_keys: Array, allowed_tiles: Array) -> Dictionary:
 	return {
@@ -593,6 +603,8 @@ func _build_runtime_graph(entry: Dictionary, intent: Dictionary, world_adapter, 
 		monitor.increment_counter("runtime_graph_cache_misses")
 	var candidates_start: int = monitor.begin_section("runtime_graph_candidates") if monitor != null else Time.get_ticks_usec()
 	var candidate_cells: Dictionary = _runtime_graph_cells(start_cell, target_cell, target_cells, margin)
+	_runtime_add_home_portal_bridge_cells(candidate_cells, entry, intent, world_adapter, snapshot, start_cell, target_cell, target_cells, margin)
+	_runtime_add_public_portal_bridge_cells(candidate_cells, entry, intent, world_adapter, snapshot, start_cell, target_cell, target_cells, margin)
 	var cells := candidate_cells.keys()
 	cells.sort_custom(func(a: Vector2i, b: Vector2i) -> bool:
 		return a.x < b.x or (a.x == b.x and a.y < b.y)
@@ -611,8 +623,9 @@ func _build_runtime_graph(entry: Dictionary, intent: Dictionary, world_adapter, 
 			monitor.end_section("runtime_graph_build", graph_start)
 		return pending_graph
 	var sync_start: int = monitor.begin_section("runtime_graph_sync_nodes") if monitor != null else Time.get_ticks_usec()
+	var dynamic_avoid_lookup := _runtime_dynamic_avoid_lookup(entry)
 	for cell: Vector2i in cells:
-		if not _runtime_cell_can_be_node(entry, world_adapter, snapshot, cell, start_cell, target_cells):
+		if not _runtime_cell_can_be_node(entry, world_adapter, snapshot, cell, start_cell, target_cells, dynamic_avoid_lookup):
 			continue
 		var span = _runtime_span_for_cell(world_adapter, snapshot, cell)
 		_add_node(graph, span, NavigationChangeBusScript.tile_key_for_cell(cell))
@@ -628,6 +641,7 @@ func _build_runtime_graph(entry: Dictionary, intent: Dictionary, world_adapter, 
 	if monitor != null:
 		monitor.end_section("runtime_graph_build", graph_start)
 	graph["_targetSpanKeys"] = _runtime_target_span_keys(target_cells)
+	graph["_debug"] = _runtime_graph_debug_summary(graph, entry, intent, world_adapter, snapshot, target_cells, target_lookup, start_cell)
 	_store_runtime_graph_cache(cache_key, graph)
 	return graph
 
@@ -654,6 +668,80 @@ func _runtime_graph_cells(start_cell: Vector2i, target_cell: Vector2i, target_ce
 			_runtime_add_line_corridor(cells, start_cell, target, margin)
 	return cells
 
+func _runtime_add_home_portal_bridge_cells(cells: Dictionary, entry: Dictionary, intent: Dictionary, world_adapter, snapshot: Dictionary, start_cell: Vector2i, target_cell: Vector2i, target_cells: Dictionary, margin: int) -> void:
+	if not bool(intent.get("movingHome", false)):
+		return
+	var home_cell: Vector2i = entry.get("homeCell", target_cell)
+	var porch_cell: Vector2i = entry.get("porchCell", home_cell)
+	var bridge_radius := maxi(2, mini(margin, 4))
+	var anchors: Array[Vector2i] = []
+	_runtime_append_unique_cell(anchors, porch_cell)
+	_runtime_append_unique_cell(anchors, home_cell)
+	var doors: Dictionary = snapshot.get("doors", {})
+	for cell_value in doors.keys():
+		if not (cell_value is Vector2i):
+			continue
+		var door_cell: Vector2i = cell_value
+		var door: Node = world_adapter.door_at(snapshot, door_cell)
+		if door == null:
+			continue
+		if world_adapter.has_method("private_home_door_matches_entry") and not world_adapter.private_home_door_matches_entry(entry, door):
+			continue
+		_runtime_append_unique_cell(anchors, door_cell)
+		for offset_value in RUNTIME_CARDINAL_EDGE_OFFSETS:
+			var offset: Vector2i = offset_value
+			_runtime_append_unique_cell(anchors, door_cell + offset)
+			_runtime_append_unique_cell(anchors, door_cell + offset * 2)
+	if anchors.is_empty():
+		return
+	for anchor in anchors:
+		_runtime_add_cell_radius(cells, anchor, bridge_radius)
+	_runtime_add_line_corridor(cells, start_cell, porch_cell, margin)
+	for anchor in anchors:
+		if anchor == start_cell or anchor == porch_cell:
+			continue
+		_runtime_add_line_corridor(cells, porch_cell, anchor, bridge_radius)
+	for target_value in target_cells.keys():
+		if target_value is Vector2i:
+			_runtime_add_line_corridor(cells, porch_cell, target_value, bridge_radius)
+
+func _runtime_add_public_portal_bridge_cells(cells: Dictionary, entry: Dictionary, intent: Dictionary, world_adapter, snapshot: Dictionary, start_cell: Vector2i, target_cell: Vector2i, target_cells: Dictionary, margin: int) -> void:
+	if not bool(intent.get("allowOutside", false)):
+		return
+	var anchors: Array[Vector2i] = []
+	var doors: Dictionary = snapshot.get("doors", {})
+	for cell_value in doors.keys():
+		if not (cell_value is Vector2i):
+			continue
+		var door_cell: Vector2i = cell_value
+		var door: Node = world_adapter.door_at(snapshot, door_cell)
+		if door == null:
+			continue
+		if String(door.get_meta("door_policy", "private_home")) == "private_home":
+			continue
+		_runtime_append_unique_cell(anchors, door_cell)
+		for offset_value in RUNTIME_CARDINAL_EDGE_OFFSETS:
+			var offset: Vector2i = offset_value
+			_runtime_append_unique_cell(anchors, door_cell + offset)
+			_runtime_append_unique_cell(anchors, door_cell + offset * 2)
+	if anchors.is_empty():
+		return
+	var bridge_radius := maxi(3, mini(maxi(margin, 3), 5))
+	for anchor in anchors:
+		_runtime_add_cell_radius(cells, anchor, bridge_radius)
+		_runtime_add_line_corridor(cells, start_cell, anchor, bridge_radius)
+		_runtime_add_line_corridor(cells, anchor, target_cell, bridge_radius)
+	for target_value in target_cells.keys():
+		if not (target_value is Vector2i):
+			continue
+		var target: Vector2i = target_value
+		for anchor in anchors:
+			_runtime_add_line_corridor(cells, anchor, target, bridge_radius)
+
+func _runtime_append_unique_cell(cells: Array[Vector2i], cell: Vector2i) -> void:
+	if not cells.has(cell):
+		cells.append(cell)
+
 func _runtime_graph_cache_key(entry: Dictionary, intent: Dictionary, world_adapter, start_cell: Vector2i, target_cell: Vector2i, margin: int) -> String:
 	var static_revision := 0
 	if world_adapter != null:
@@ -664,11 +752,23 @@ func _runtime_graph_cache_key(entry: Dictionary, intent: Dictionary, world_adapt
 		profile_id = String(context.get("traversal_profile_id"))
 	var start_tile := NavigationChangeBusScript.tile_key_for_cell(start_cell)
 	var target_tile := NavigationChangeBusScript.tile_key_for_cell(target_cell)
-	return "%s|%d|%s|%s|%s|%d|%s|%s|%s|%.3f" % [
+	var home_cell: Vector2i = entry.get("homeCell", target_cell)
+	var porch_cell: Vector2i = entry.get("porchCell", home_cell)
+	var dynamic_avoid_key := _runtime_dynamic_avoid_key(entry)
+	return "%s|%d|%s|%s|%d,%d|%d,%d|%d,%d|%d,%d|%s|%s|%d|%s|%s|%s|%.3f" % [
 		profile_id,
 		static_revision,
 		start_tile,
 		target_tile,
+		start_cell.x,
+		start_cell.y,
+		target_cell.x,
+		target_cell.y,
+		home_cell.x,
+		home_cell.y,
+		porch_cell.x,
+		porch_cell.y,
+		dynamic_avoid_key,
 		String(intent.get("kind", "move")),
 		margin,
 		str(bool(intent.get("allowOutside", false))),
@@ -724,11 +824,12 @@ func _continue_runtime_graph_build_job(cache_key: String, entry: Dictionary, int
 	var processed := 0
 	var unit_budget := maxi(1, max_units)
 	var phase := String(job.get("phase", "nodes"))
+	var dynamic_avoid_lookup := _runtime_dynamic_avoid_lookup(entry)
 	if phase == "nodes":
 		var cell_index := int(job.get("cellIndex", 0))
 		while cell_index < job_cells.size() and processed < unit_budget:
 			var cell: Vector2i = job_cells[cell_index]
-			if _runtime_cell_can_be_node(entry, world_adapter, snapshot, cell, start_cell, job_target_cells):
+			if _runtime_cell_can_be_node(entry, world_adapter, snapshot, cell, start_cell, job_target_cells, dynamic_avoid_lookup):
 				var span = _runtime_span_for_cell(world_adapter, snapshot, cell)
 				_add_node(graph, span, NavigationChangeBusScript.tile_key_for_cell(cell))
 			cell_index += 1
@@ -766,6 +867,7 @@ func _continue_runtime_graph_build_job(cache_key: String, entry: Dictionary, int
 			runtime_graph_build_jobs.erase(cache_key)
 			graph.erase("_pending")
 			graph["_targetSpanKeys"] = job.get("targetSpanKeys", [])
+			graph["_debug"] = _runtime_graph_debug_summary(graph, entry, intent, world_adapter, snapshot, job_target_cells, job_target_lookup, start_cell)
 			_store_runtime_graph_cache(cache_key, graph)
 			if not entry.has("_externalDirectMoveFrame"):
 				graph["_yieldAfterBuild"] = true
@@ -775,6 +877,196 @@ func _continue_runtime_graph_build_job(cache_key: String, entry: Dictionary, int
 	graph["_pending"] = true
 	graph["_targetSpanKeys"] = job.get("targetSpanKeys", [])
 	return graph
+
+func _runtime_graph_debug_summary(graph: Dictionary, entry: Dictionary, intent: Dictionary, world_adapter, snapshot: Dictionary, target_cells: Dictionary, target_lookup: Dictionary, start_cell: Vector2i) -> Dictionary:
+	var nodes: Dictionary = graph.get("nodes", {})
+	var edges: Dictionary = graph.get("edges", {})
+	var start_key := _runtime_span_key(start_cell)
+	var reachable := _runtime_reachable_keys(graph, start_key)
+	var target_node_count := 0
+	var target_reachable_count := 0
+	var nearest_reachable_target_distance := INF
+	var nearest_reachable_key := ""
+	for cell_value in target_cells.keys():
+		if cell_value is Vector2i and nodes.has(_runtime_span_key(cell_value)):
+			target_node_count += 1
+			var target_key := _runtime_span_key(cell_value)
+			if reachable.has(target_key):
+				target_reachable_count += 1
+			else:
+				var nearest := _nearest_reachable_key_to_cell(graph, reachable, cell_value)
+				var nearest_distance := float(nearest.get("distance", INF))
+				if nearest_distance < nearest_reachable_target_distance:
+					nearest_reachable_target_distance = nearest_distance
+					nearest_reachable_key = String(nearest.get("key", ""))
+	var door_summaries: Array[Dictionary] = []
+	var doors: Dictionary = snapshot.get("doors", {})
+	var door_cells := doors.keys()
+	door_cells.sort_custom(func(a, b) -> bool:
+		if not (a is Vector2i) or not (b is Vector2i):
+			return str(a) < str(b)
+		return a.x < b.x or (a.x == b.x and a.y < b.y)
+	)
+	for door_cell_value in door_cells:
+		if not (door_cell_value is Vector2i):
+			continue
+		var door_cell: Vector2i = door_cell_value
+		var door: Node = world_adapter.door_at(snapshot, door_cell)
+		if door == null:
+			continue
+		var policy := String(door.get_meta("door_policy", ""))
+		if policy == "private_home" and world_adapter.has_method("private_home_door_matches_entry") and not world_adapter.private_home_door_matches_entry(entry, door):
+			continue
+		var door_key := _runtime_span_key(door_cell)
+		var incoming := 0
+		for from_key in edges.keys():
+			for edge_record in (edges.get(from_key, []) as Array):
+				if String((edge_record as Dictionary).get("toKey", "")) == door_key:
+					incoming += 1
+		var neighbor_checks: Array[Dictionary] = []
+		for offset_value in RUNTIME_CARDINAL_EDGE_OFFSETS:
+			var offset: Vector2i = offset_value
+			var from_cell: Vector2i = door_cell - offset
+			var to_cell: Vector2i = door_cell + offset
+			var into_door: Dictionary = world_adapter.cell_pathable(entry, snapshot, from_cell, door_cell, target_lookup, true)
+			var out_of_door: Dictionary = world_adapter.cell_pathable(entry, snapshot, door_cell, to_cell, target_lookup, true)
+			neighbor_checks.append({
+				"from": _debug_cell(from_cell),
+				"to": _debug_cell(to_cell),
+				"fromNode": nodes.has(_runtime_span_key(from_cell)),
+				"toNode": nodes.has(_runtime_span_key(to_cell)),
+				"intoDoorOk": bool(into_door.get("ok", false)),
+				"intoDoorReason": String(into_door.get("reason", "")),
+				"outOfDoorOk": bool(out_of_door.get("ok", false)),
+				"outOfDoorReason": String(out_of_door.get("reason", ""))
+			})
+		door_summaries.append({
+			"cell": _debug_cell(door_cell),
+			"name": String(door.name),
+			"node": nodes.has(door_key),
+			"reachable": reachable.has(door_key),
+			"incoming": incoming,
+			"outgoing": (edges.get(door_key, []) as Array).size(),
+			"policy": policy,
+			"portalId": String(door.get_meta("door_portal_id", "")),
+			"neighbors": neighbor_checks
+		})
+	var home_rejection_counts := {}
+	var route_rejection_counts := {}
+	var target_for_window: Vector2i = intent.get("targetCell", start_cell)
+	var route_min_x: int = mini(start_cell.x, target_for_window.x) - 4
+	var route_max_x: int = maxi(start_cell.x, target_for_window.x) + 4
+	var route_min_z: int = mini(start_cell.y, target_for_window.y) - 4
+	var route_max_z: int = maxi(start_cell.y, target_for_window.y) + 4
+	for from_key in nodes.keys():
+		var route_from_span = nodes[from_key]
+		var route_from_cell3: Vector3i = route_from_span.get("cell")
+		var route_from_cell := Vector2i(route_from_cell3.x, route_from_cell3.z)
+		if route_from_cell.x < route_min_x or route_from_cell.x > route_max_x or route_from_cell.y < route_min_z or route_from_cell.y > route_max_z:
+			continue
+		for offset_value in _runtime_edge_offsets_for_entry(entry, intent):
+			var offset: Vector2i = offset_value
+			var route_to_cell: Vector2i = route_from_cell + offset
+			if route_to_cell.x < route_min_x or route_to_cell.x > route_max_x or route_to_cell.y < route_min_z or route_to_cell.y > route_max_z:
+				continue
+			if not nodes.has(_runtime_span_key(route_to_cell)):
+				route_rejection_counts["missing_node"] = int(route_rejection_counts.get("missing_node", 0)) + 1
+				continue
+			var route_allowed: Dictionary = world_adapter.cell_pathable(entry, snapshot, route_from_cell, route_to_cell, target_lookup, true)
+			if not bool(route_allowed.get("ok", false)):
+				var route_reason := String(route_allowed.get("reason", "blocked"))
+				route_rejection_counts[route_reason] = int(route_rejection_counts.get(route_reason, 0)) + 1
+	var home_fallback_cell := start_cell
+	if not target_lookup.is_empty():
+		var first_target_value = target_lookup.keys()[0]
+		if first_target_value is Vector2i:
+			home_fallback_cell = first_target_value
+	var home_cell: Vector2i = entry.get("homeCell", home_fallback_cell)
+	var min_cell: Vector2i = entry.get("interiorMinCell", home_cell)
+	var max_cell: Vector2i = entry.get("interiorMaxCell", home_cell)
+	var min_x := mini(min_cell.x, max_cell.x) - 4
+	var max_x := maxi(min_cell.x, max_cell.x) + 4
+	var min_z := mini(min_cell.y, max_cell.y) - 4
+	var max_z := maxi(min_cell.y, max_cell.y) + 4
+	for from_key in nodes.keys():
+		var from_span = nodes[from_key]
+		var from_cell3: Vector3i = from_span.get("cell")
+		var from_cell := Vector2i(from_cell3.x, from_cell3.z)
+		if from_cell.x < min_x or from_cell.x > max_x or from_cell.y < min_z or from_cell.y > max_z:
+			continue
+		for offset_value in _runtime_edge_offsets_for_entry(entry, intent):
+			var offset: Vector2i = offset_value
+			var to_cell: Vector2i = from_cell + offset
+			if to_cell.x < min_x or to_cell.x > max_x or to_cell.y < min_z or to_cell.y > max_z:
+				continue
+			if not nodes.has(_runtime_span_key(to_cell)):
+				home_rejection_counts["missing_node"] = int(home_rejection_counts.get("missing_node", 0)) + 1
+				continue
+			var allowed: Dictionary = world_adapter.cell_pathable(entry, snapshot, from_cell, to_cell, target_lookup, true)
+			if not bool(allowed.get("ok", false)):
+				var reason := String(allowed.get("reason", "blocked"))
+				home_rejection_counts[reason] = int(home_rejection_counts.get(reason, 0)) + 1
+	return {
+		"movingHome": bool(intent.get("movingHome", false)),
+		"targetCell": _debug_cell(intent.get("targetCell", home_cell)),
+		"startCell": _debug_cell(start_cell),
+		"startKey": start_key,
+		"startNode": nodes.has(start_key),
+		"reachableCount": reachable.size(),
+		"targetCellCount": target_cells.size(),
+		"targetNodeCount": target_node_count,
+		"targetReachableCount": target_reachable_count,
+		"nearestReachableTargetDistance": nearest_reachable_target_distance if nearest_reachable_target_distance < INF else -1.0,
+		"nearestReachableKey": nearest_reachable_key,
+		"homeDoorCount": door_summaries.size(),
+		"homeDoors": door_summaries,
+		"routeEdgeRejectionCounts": route_rejection_counts,
+		"homeEdgeRejectionCounts": home_rejection_counts
+	}
+
+func _debug_cell(cell: Vector2i) -> Array[int]:
+	return [cell.x, cell.y]
+
+func _debug_distance(value: float) -> float:
+	return value if value < INF else -1.0
+
+func _runtime_reachable_keys(graph: Dictionary, start_key: String) -> Dictionary:
+	var nodes: Dictionary = graph.get("nodes", {})
+	if start_key == "" or not nodes.has(start_key):
+		return {}
+	var edges: Dictionary = graph.get("edges", {})
+	var reachable := { start_key: true }
+	var queue: Array[String] = [start_key]
+	var index := 0
+	while index < queue.size():
+		var key := queue[index]
+		index += 1
+		for edge_record in (edges.get(key, []) as Array):
+			var to_key := String((edge_record as Dictionary).get("toKey", ""))
+			if to_key == "" or reachable.has(to_key):
+				continue
+			reachable[to_key] = true
+			queue.append(to_key)
+	return reachable
+
+func _nearest_reachable_key_to_cell(graph: Dictionary, reachable: Dictionary, target_cell: Vector2i) -> Dictionary:
+	var nodes: Dictionary = graph.get("nodes", {})
+	var target_position := Vector3(float(target_cell.x) * NpcConstantsScript.CELL_SIZE, 0.0, float(target_cell.y) * NpcConstantsScript.CELL_SIZE)
+	var best_key := ""
+	var best_distance := INF
+	for key in reachable.keys():
+		if not nodes.has(key):
+			continue
+		var span = nodes[key]
+		var position: Vector3 = span.get("world_position")
+		var distance := Vector2(position.x - target_position.x, position.z - target_position.z).length()
+		if distance < best_distance:
+			best_distance = distance
+			best_key = String(key)
+	return {
+		"key": best_key,
+		"distance": best_distance
+	}
 
 func _runtime_graph_step_time_exhausted(entry: Dictionary, step_start_usec: int, processed: int, ignore_time_budget := false) -> bool:
 	if ignore_time_budget:
@@ -872,11 +1164,24 @@ func _add_runtime_edge_offset_for_key(graph: Dictionary, from_key: String, offse
 		"metadata": {}
 	}
 	if door != null:
-		edge["portal_id"] = "door:%s" % String(door.name)
+		edge["portal_id"] = runtime_door_portal_id(door)
 		edge["action_id"] = "open"
 		edge["required_capabilities"] = [&"open_doors"]
 		edge["metadata"] = { "door": door }
 	_add_edge_record(graph, from_key, to_key, edge, NavigationChangeBusScript.tile_key_for_cell(from_cell), NavigationChangeBusScript.tile_key_for_cell(to_cell))
+
+func runtime_door_portal_id(door: Node) -> String:
+	if door == null:
+		return ""
+	if door.has_meta("door_portal_id"):
+		var portal_id := String(door.get_meta("door_portal_id", ""))
+		if portal_id != "":
+			return portal_id
+	if door.has_meta("cell"):
+		var cell = door.get_meta("cell")
+		if cell is Vector3i:
+			return "door:%d,%d,%d" % [cell.x, cell.y, cell.z]
+	return "door:%s" % String(door.name)
 
 func _runtime_add_cell_radius(cells: Dictionary, center: Vector2i, radius: int) -> void:
 	for z in range(center.y - radius, center.y + radius + 1):
@@ -1044,6 +1349,11 @@ func _runtime_margin_for_intent(intent: Dictionary, entry: Dictionary = {}) -> i
 func _runtime_cell_can_be_goal(entry: Dictionary, world_adapter, snapshot: Dictionary, cell: Vector2i, start_cell: Vector2i) -> bool:
 	if cell == start_cell:
 		return true
+	var moving_home := bool(snapshot.get("movingHome", false))
+	if moving_home and world_adapter.has_method("cell_inside_entry_home") and world_adapter.cell_inside_entry_home(entry, cell):
+		var home_height: float = world_adapter.height_for_cell(cell)
+		var home_main = world_adapter.get("main")
+		return home_main == null or home_height >= home_main.WATER_LEVEL + 0.45
 	if world_adapter.static_blocker(snapshot, cell) != null:
 		return false
 	if world_adapter.prop_clearance_blocker(snapshot, cell) != null:
@@ -1052,9 +1362,11 @@ func _runtime_cell_can_be_goal(entry: Dictionary, world_adapter, snapshot: Dicti
 	var main = world_adapter.get("main")
 	return main == null or height >= main.WATER_LEVEL + 0.45
 
-func _runtime_cell_can_be_node(entry: Dictionary, world_adapter, snapshot: Dictionary, cell: Vector2i, start_cell: Vector2i, target_cells: Dictionary) -> bool:
+func _runtime_cell_can_be_node(entry: Dictionary, world_adapter, snapshot: Dictionary, cell: Vector2i, start_cell: Vector2i, target_cells: Dictionary, dynamic_avoid_lookup := {}) -> bool:
 	if cell == start_cell or target_cells.has(cell):
 		return true
+	if dynamic_avoid_lookup.has(cell):
+		return false
 	if not world_adapter.cell_allowed_area(entry, cell, bool(snapshot.get("allowOutside", false)), bool(snapshot.get("movingHome", false))):
 		return false
 	if world_adapter.static_blocker(snapshot, cell) != null and world_adapter.door_at(snapshot, cell) == null:
@@ -1065,6 +1377,26 @@ func _runtime_cell_can_be_node(entry: Dictionary, world_adapter, snapshot: Dicti
 	if main != null and world_adapter.height_for_cell(cell) < main.WATER_LEVEL + 0.45:
 		return false
 	return true
+
+func _runtime_dynamic_avoid_lookup(entry: Dictionary) -> Dictionary:
+	var lookup := {}
+	for cell_value in entry.get("routeDynamicAvoidCells", []):
+		if cell_value is Vector2i:
+			lookup[cell_value] = true
+	return lookup
+
+func _runtime_dynamic_avoid_key(entry: Dictionary) -> String:
+	var cells: Array[Vector2i] = []
+	for cell_value in entry.get("routeDynamicAvoidCells", []):
+		if cell_value is Vector2i:
+			cells.append(cell_value)
+	cells.sort_custom(func(a: Vector2i, b: Vector2i) -> bool:
+		return a.x < b.x or (a.x == b.x and a.y < b.y)
+	)
+	var parts: Array[String] = []
+	for cell in cells:
+		parts.append("%d,%d" % [cell.x, cell.y])
+	return ";".join(parts)
 
 func _runtime_step_blocked(entry: Dictionary, world_adapter, snapshot: Dictionary, from_cell: Vector2i, offset: Vector2i, target_lookup: Dictionary) -> bool:
 	var to_cell := from_cell + offset

@@ -3,10 +3,14 @@ class_name CharacterMotor3D
 
 const CharacterMotorStateScript := preload("res://scripts/npc_ai/contracts/CharacterMotorState.gd")
 
+func performance_monitor(terrain_provider: Node = null):
+	return terrain_provider.get("runtime_perf_monitor") if terrain_provider != null else null
+
 func apply(body: CharacterBody3D, command, profile, delta: float, terrain_provider: Node = null):
 	var state = CharacterMotorStateScript.new()
 	if body == null or command == null or profile == null or delta <= 0.0:
 		return state
+	var monitor = performance_monitor(terrain_provider)
 
 	state.previous_position = body.global_position
 	var snap_time := float(command.get("jump_snap_time"))
@@ -39,7 +43,10 @@ func apply(body: CharacterBody3D, command, profile, delta: float, terrain_provid
 		move_vertical_toward(body, jump_ground_y + 0.08)
 
 	var pre_slide_position := body.global_position
+	var slide_start: int = monitor.begin_section("npc_motor_move_and_slide") if monitor != null else Time.get_ticks_usec()
 	body.move_and_slide()
+	if monitor != null:
+		monitor.end_section("npc_motor_move_and_slide", slide_start)
 	state.slide_collision_count = body.get_slide_collision_count()
 	if state.slide_collision_count > 0:
 		var collision := body.get_slide_collision(0)
@@ -56,7 +63,10 @@ func apply(body: CharacterBody3D, command, profile, delta: float, terrain_provid
 		body.velocity.y = maxf(body.velocity.y, float(profile.get("jump_speed")))
 
 	if bool(profile.get("use_terrain_grounding")):
+		var grounding_start: int = monitor.begin_section("npc_motor_terrain_grounding") if monitor != null else Time.get_ticks_usec()
 		apply_terrain_grounding(body, profile, delta, terrain_provider, grounded, state.jumped, pre_slide_position, state)
+		if monitor != null:
+			monitor.end_section("npc_motor_terrain_grounding", grounding_start)
 	else:
 		state.terrain_grounded = body.is_on_floor()
 

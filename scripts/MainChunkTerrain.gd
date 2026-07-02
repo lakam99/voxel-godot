@@ -680,6 +680,7 @@ func create_block(cell: Vector3i, block_type: String, options: Dictionary = {}) 
 
     block_root.add_child(body)
     blocks[cell] = body
+    invalidate_navigation_marker_cache()
     if bool(options.get("player_placed", false)):
         mark_world_dirty("block_created")
     if npc_system and npc_system.has_method("notify_navigation_block_created"):
@@ -818,6 +819,7 @@ func collapse_structure_component(component: Array) -> int:
         block.queue_free()
         collapsed += 1
     if collapsed > 0:
+        invalidate_navigation_marker_cache()
         mark_world_dirty("structure_collapsed")
         center /= float(collapsed)
         play_feedback("break", center, Color(0.80, 0.64, 0.42), min(18, collapsed + 4))

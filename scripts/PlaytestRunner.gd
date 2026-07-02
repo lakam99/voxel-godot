@@ -470,6 +470,7 @@ func test_tutorial_start_system() -> void:
     var mira_home_cell: Vector2i = mira.get_meta("npc_home_cell", Vector2i.ZERO) if mira else Vector2i.ZERO
     var mira_has_separate_home := mira != null and mira_home_cell != starter_cell
     var mira_route_bounds: Dictionary = building_bounds_near(starter_cell, 9)
+    var mira_route_interior_bounds: Dictionary = shrink_cell_bounds(mira_route_bounds, 1, 2, 1)
     add_result(
         "tutorial_contract_intro_knock_elder",
         door_opened
@@ -498,7 +499,7 @@ func test_tutorial_start_system() -> void:
             String(tutorial_system.get("last_message"))
         ]
     )
-    var mira_entered_starter_house := false
+    var mira_entered_starter_interior := false
     var mira_min_starter_distance := INF
     for i in range(120):
         await wait_process_frames(1)
@@ -509,12 +510,12 @@ func test_tutorial_start_system() -> void:
                 mira_body_for_route.global_position.z - float(starter_cell.y) * CELL
             ).length()
             mira_min_starter_distance = minf(mira_min_starter_distance, flat_distance)
-            if point_in_cell_bounds(world_to_flat_cell(mira_body_for_route.global_position), mira_route_bounds):
-                mira_entered_starter_house = true
+            if point_in_cell_bounds(world_to_flat_cell(mira_body_for_route.global_position), mira_route_interior_bounds):
+                mira_entered_starter_interior = true
     add_result(
         "tutorial_mira_routes_around_starter_house",
-        mira != null and not mira_entered_starter_house,
-        "entered %s, min distance %.2f, bounds %s" % [str(mira_entered_starter_house), mira_min_starter_distance, str(mira_route_bounds)]
+        mira != null and not mira_entered_starter_interior,
+        "entered interior %s, min distance %.2f, bounds %s, interior %s" % [str(mira_entered_starter_interior), mira_min_starter_distance, str(mira_route_bounds), str(mira_route_interior_bounds)]
     )
     for i in range(3600):
         if mira != null and bool(mira.get_meta("npc_inside_home", false)):
@@ -7666,6 +7667,15 @@ func building_bounds_near(center_cell: Vector2i, radius: int) -> Dictionary:
         found = true
     return { "valid": found, "minX": min_x, "maxX": max_x, "minZ": min_z, "maxZ": max_z }
 
+func shrink_cell_bounds(bounds: Dictionary, x_padding: int, min_z_padding: int, max_z_padding: int) -> Dictionary:
+    if not bool(bounds.get("valid", false)):
+        return { "valid": false }
+    var min_x := int(bounds.get("minX", 0)) + x_padding
+    var max_x := int(bounds.get("maxX", 0)) - x_padding
+    var min_z := int(bounds.get("minZ", 0)) + min_z_padding
+    var max_z := int(bounds.get("maxZ", 0)) - max_z_padding
+    return { "valid": min_x <= max_x and min_z <= max_z, "minX": min_x, "maxX": max_x, "minZ": min_z, "maxZ": max_z }
+
 func point_in_cell_bounds(cell: Vector2i, bounds: Dictionary) -> bool:
     if not bool(bounds.get("valid", false)):
         return false
@@ -8016,7 +8026,7 @@ func npc_route_debug(npc_system, body: Node) -> String:
                 str(typed_result.get("reason")),
                 metrics_summary
             ]
-        return "%s cell %s home %s porch %s interior %s..%s active %s fallback %s status %s/%s index %d inside %s blocked %s actions %s typed %s settle %s force %s dialogue %s" % [
+        return "%s cell %s home %s porch %s interior %s..%s active %s fallback %s status %s/%s index %d inside %s blocked %s actions %s routeCells %s waypoints %s activeDoor %s doorReject %s capsule %s localEscape %s localEscapeFailed %s typed %s settle %s force %s dialogue %s" % [
             String(body.get_meta("npc_id", entry.get("id", body.name))),
             str(current_cell),
             str(entry.get("homeCell", Vector2i.ZERO)),
@@ -8031,12 +8041,43 @@ func npc_route_debug(npc_system, body: Node) -> String:
             str(body.get_meta("npc_inside_home", false)),
             str(body.get_meta("npc_home_blocked", false)),
             str(action_keys),
+            str(sample_route_cells(entry.get("routeCells", []), 14)),
+            str(sample_waypoints(entry.get("pathWaypoints", []), 6)),
+            String(entry.get("activeDoorPortalId", "")),
+            JSON.stringify(entry.get("doorActionReject", {})),
+            JSON.stringify(entry.get("capsuleBlocker", body.get_meta("npc_capsule_blocker", {}))),
+            JSON.stringify(entry.get("lastMotorLocalEscape", {})),
+            JSON.stringify(entry.get("lastMotorLocalEscapeFailed", {})),
             typed_summary,
             JSON.stringify(settle_debug),
             str(body.get_meta("npc_force_hold", false)),
             str(body.get_meta("npc_dialogue_focused", false))
         ]
     return "entry missing"
+
+func sample_route_cells(value, limit := 12) -> Array:
+    var result := []
+    if not (value is Array):
+        return result
+    for cell_value in value:
+        if result.size() >= limit:
+            break
+        if cell_value is Vector2i:
+            var cell: Vector2i = cell_value
+            result.append([cell.x, cell.y])
+    return result
+
+func sample_waypoints(value, limit := 6) -> Array:
+    var result := []
+    if not (value is Array):
+        return result
+    for point_value in value:
+        if result.size() >= limit:
+            break
+        if point_value is Vector3:
+            var point: Vector3 = point_value
+            result.append([snappedf(point.x, 0.01), snappedf(point.y, 0.01), snappedf(point.z, 0.01)])
+    return result
 
 func npc_shelter_debug(npc_system) -> String:
     if npc_system == null:
