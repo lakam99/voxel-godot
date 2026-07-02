@@ -11,7 +11,7 @@ func town_region(region_x: int, region_z: int) -> Dictionary:
     var center_x: int = region_x * TOWN_REGION_CELLS
     var center_z: int = region_z * TOWN_REGION_CELLS
     var radius: int = town_radius_for_region(region_x, region_z, forced)
-    var natural_level: float = natural_base_height_cell(center_x, center_z)
+    var natural_level: float = natural_surface_y_at_cell(Vector3i(center_x, 0, center_z))
     var level: float = clamp(round(max(natural_level, WATER_LEVEL + 3.0) / CELL) * CELL, WATER_LEVEL + 3.0, 52.0)
     var town := {
         "regionX": region_x,

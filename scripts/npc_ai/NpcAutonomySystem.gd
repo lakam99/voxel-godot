@@ -189,8 +189,8 @@ func cell_position(cell: Vector2i) -> Vector3:
 	if generated_world != null and generated_world.has_method("cell_position"):
 		return generated_world.cell_position(cell)
 	var y := 0.0
-	if main != null and main.has_method("terrain_height_cell"):
-		y = float(main.call("terrain_height_cell", cell.x, cell.y)) + 0.04
+	if main != null and main.has_method("surface_y_at_cell"):
+		y = float(main.call("surface_y_at_cell", Vector3i(cell.x, 0, cell.y))) + 0.04
 	return Vector3(float(cell.x) * NpcConstantsScript.CELL_SIZE, y, float(cell.y) * NpcConstantsScript.CELL_SIZE)
 
 func generated_navigation_adapter():

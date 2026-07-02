@@ -16,8 +16,8 @@ func place_spawn(body: CharacterBody3D, requested_position: Vector3, profile = n
 		return result(false, requested_position, "missing_body")
 	var motor_profile = profile if profile != null else CharacterMotorProfileScript.npc_default()
 	var position := requested_position
-	if main != null and main.has_method("height_at_world"):
-		var ground_y: float = main.call("height_at_world", position.x, position.z)
+	if main != null and main.has_method("surface_y_at_position"):
+		var ground_y: float = main.call("surface_y_at_position", position)
 		position.y = maxf(position.y, ground_y)
 	var validation := validate_capsule(body, position, motor_profile)
 	if not bool(validation.get("ok", false)):

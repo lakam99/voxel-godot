@@ -45,7 +45,7 @@ class FakeMain:
 	extends Node
 	const WATER_LEVEL := -100.0
 
-	func height_at_world(_x: float, _z: float) -> float:
+	func surface_y_at_position(_position: Vector3) -> float:
 		return 0.0
 
 class FakeRouteWorld:

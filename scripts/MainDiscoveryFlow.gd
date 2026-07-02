@@ -253,7 +253,7 @@ func teleport_to(value: String) -> bool:
         return false
     var x := float(coords.get("x", 0.0))
     var z := float(coords.get("z", 0.0))
-    var y := float(coords.get("y", maxf(height_at_world(x, z), WATER_LEVEL) + 0.35))
+    var y := float(coords.get("y", maxf(surface_y_at_position(Vector3(x, 0.0, z)), WATER_LEVEL) + 0.35))
     if player == null:
         return false
     player.global_position = Vector3(x, y, z)
@@ -271,7 +271,7 @@ func teleport_to_cell(cell: Vector2i, message: String = "") -> bool:
         return false
     var x := float(cell.x) * CELL
     var z := float(cell.y) * CELL
-    var y := maxf(height_at_world(x, z), WATER_LEVEL) + 0.55
+    var y := maxf(surface_y_at_position(Vector3(x, 0.0, z)), WATER_LEVEL) + 0.55
     player.global_position = Vector3(x, y, z)
     player.velocity = Vector3.ZERO
     player.set("terrain_grounded", false)
@@ -438,7 +438,7 @@ func playtest_rng(case_id: String, cell: Vector2i) -> RandomNumberGenerator:
 func playtest_position(cell: Vector2i, offset: Vector2i = Vector2i.ZERO, lift: float = 0.0) -> Vector3:
     var x := float(cell.x + offset.x) * CELL
     var z := float(cell.y + offset.y) * CELL
-    var y := maxf(height_at_world(x, z), WATER_LEVEL) + lift
+    var y := maxf(surface_y_at_position(Vector3(x, 0.0, z)), WATER_LEVEL) + lift
     return Vector3(x, y, z)
 
 func mark_playtest_node(node: Node, case_id: String) -> void:
@@ -486,7 +486,7 @@ func setup_playtest_mine_case(cell: Vector2i) -> void:
 
 func setup_playtest_forest_case(cell: Vector2i) -> void:
     var rng := playtest_rng("forest", cell)
-    var biome := biome_at_cell(cell.x, cell.y)
+    var biome := surface_biome_at_cell(Vector3i(cell.x, 0, cell.y))
     if biome == "":
         biome = "forest"
     for offset in [Vector2i(3, 1), Vector2i(5, -2), Vector2i(7, 2), Vector2i(-3, 3), Vector2i(-5, -2)]:

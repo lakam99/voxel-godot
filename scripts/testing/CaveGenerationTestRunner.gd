@@ -1,779 +1,450 @@
 extends SceneTree
 
-const MAIN_SCENE: PackedScene = preload("res://scenes/Main.tscn")
-const CELL := 1.35
+const WorldGenerationSystemScript := preload("res://scripts/WorldGenerationSystem.gd")
+const SubsurfaceSystemScript := preload("res://scripts/SubsurfaceSystem.gd")
+
+class FakeMain:
+	const CELL := 1.35
+	const MIN_HEIGHT := 4.0
+	const MAX_HEIGHT := 120.0
+	const WATER_LEVEL := 11.1
+	const TOWN_REGION_CELLS := 280
+	const TOWN_RADIUS_CELLS := 30
+
+	var seed_text := "atlas-1492"
+	var height_noise: FastNoiseLite
+	var ridge_noise: FastNoiseLite
+	var flat_noise: FastNoiseLite
+	var moisture_noise: FastNoiseLite
+	var temp_noise: FastNoiseLite
+	var town_slope_apron_cache := {}
+	var world_generation_system
+
+	func _init() -> void:
+		setup_noise()
+
+	func setup_noise() -> void:
+		height_noise = make_noise(13811, 0.018, 4)
+		ridge_noise = make_noise(28191, 0.031, 4)
+		flat_noise = make_noise(57831, 0.013, 3)
+		moisture_noise = make_noise(77237, 0.010, 3)
+		temp_noise = make_noise(91333, 0.009, 3)
+
+	func make_noise(noise_seed: int, frequency: float, octaves: int) -> FastNoiseLite:
+		var noise := FastNoiseLite.new()
+		noise.seed = noise_seed
+		noise.frequency = frequency
+		noise.fractal_octaves = octaves
+		noise.fractal_gain = 0.52
+		return noise
+
+	func town_region(_region_x: int, _region_z: int) -> Dictionary:
+		return {}
+
+	func noise01(noise: FastNoiseLite, x: float, z: float) -> float:
+		return noise.get_noise_2d(x, z) * 0.5 + 0.5
+
+	func smoothstep_range(value: float, low: float, high: float) -> float:
+		if high == low:
+			return 1.0 if value >= high else 0.0
+		var t: float = clamp((value - low) / (high - low), 0.0, 1.0)
+		return t * t * (3.0 - 2.0 * t)
+
+	func hash01(text: String) -> float:
+		return float(abs(hash_string("%s:%s" % [seed_text, text])) % 100000) / 100000.0
+
+	func hash_string(text: String) -> int:
+		var h := 2166136261
+		for i in range(text.length()):
+			h = int((h ^ text.unicode_at(i)) * 16777619) & 0xffffffff
+		return h
 
 var results: Array[Dictionary] = []
-var main: Node3D
-var structure_system
+var main
+var world_generation
+var subsurface
 var seed := ""
 
 func _init() -> void:
-    call_deferred("run")
+	call_deferred("run")
 
 func run() -> void:
-    seed = OS.get_environment("VOXEL_TEST_SEED").strip_edges()
-    if seed == "":
-        seed = "atlas-1492"
-    OS.set_environment("VOXEL_TEST_SEED", seed)
-    main = MAIN_SCENE.instantiate()
-    root.add_child(main)
-    await wait_frames(90)
-    structure_system = main.get("structure_system") if main != null else null
-    test_scene_ready()
-    test_cave_plan_determinism()
-    test_cave_graph_varies_across_regions()
-    test_cave_candidate_types()
-    test_cave_update_around_generation()
-    test_cave_build_interior_and_book_loot()
-    test_cave_save_load_persistence()
-    save_report()
-    quit(0 if all_passed() else 1)
+	seed = OS.get_environment("VOXEL_TEST_SEED").strip_edges()
+	if seed == "":
+		seed = "atlas-1492"
+	main = FakeMain.new()
+	main.seed_text = seed
+	world_generation = WorldGenerationSystemScript.new()
+	world_generation.setup(main)
+	main.world_generation_system = world_generation
+	subsurface = SubsurfaceSystemScript.new()
+	subsurface.setup(main)
+	test_sampler_ready()
+	test_world_sample_determinism()
+	test_surface_projection_uses_volume_samples()
+	test_cave_biome_is_world_volume()
+	test_cave_volume_continuity_and_cover()
+	test_cave_profile_is_arched_volume()
+	test_subsurface_queries_use_volume()
+	test_subsurface_excavation_save_load()
+	save_report()
+	quit(0 if all_passed() else 1)
 
-func test_scene_ready() -> void:
-    add_result("cave_scene_ready", main != null and structure_system != null, "main + structure_system present")
+func test_sampler_ready() -> void:
+	add_result(
+		"true_3d_sampler_ready",
+		world_generation != null \
+			and world_generation.has_method("sample_cell") \
+			and world_generation.has_method("sample_world") \
+			and world_generation.has_method("density_at") \
+			and world_generation.has_method("solid_at") \
+			and world_generation.has_method("biome_at") \
+			and world_generation.has_method("material_at"),
+		"world generation exposes authoritative 3D sample API"
+	)
 
-func test_cave_plan_determinism() -> void:
-    if structure_system == null:
-        add_result("cave_plan_determinism", false, "structure system missing")
-        return
-    var plan_a: Dictionary = structure_system.call("cave_plan_for_region", 2, -1, "cliff", false)
-    var plan_b: Dictionary = structure_system.call("cave_plan_for_region", 2, -1, "cliff", false)
-    var signature_a := cave_plan_signature(plan_a)
-    var signature_b := cave_plan_signature(plan_b)
-    var stable := JSON.stringify(signature_a) == JSON.stringify(signature_b)
-    add_result(
-        "cave_plan_determinism",
-        not plan_a.is_empty() and stable,
-        "signatureA=%s signatureB=%s" % [JSON.stringify(signature_a), JSON.stringify(signature_b)]
-    )
+func test_world_sample_determinism() -> void:
+	var cells: Array[Vector3i] = [
+		Vector3i(0, 12, 0),
+		Vector3i(18, 8, -24),
+		Vector3i(-35, 20, 42),
+		Vector3i(96, 16, 96)
+	]
+	var stable := true
+	var signatures := []
+	for cell in cells:
+		var first: Dictionary = world_generation.call("sample_cell", cell)
+		var second: Dictionary = world_generation.call("sample_cell", cell)
+		var first_signature := sample_signature(first)
+		var second_signature := sample_signature(second)
+		stable = stable and JSON.stringify(first_signature) == JSON.stringify(second_signature)
+		signatures.append(first_signature)
+	add_result("true_3d_sample_determinism", stable, JSON.stringify(signatures))
 
-func test_cave_candidate_types() -> void:
-    if structure_system == null:
-        add_result("cave_candidate_types", false, "structure system missing")
-        return
-    var cliff: Dictionary = structure_system.call("find_cave_plan_sample", "cliff", 10, false)
-    var underground: Dictionary = structure_system.call("find_cave_plan_sample", "underground", 10, false)
-    var cliff_ok := not cliff.is_empty() and String(cliff.get("kind", "")) == "cliff" and float(cliff.get("entranceVariation", 0.0)) >= 1.0
-    var underground_ok := not underground.is_empty() and String(underground.get("kind", "")) == "underground"
-    add_result(
-        "cave_candidate_types",
-        cliff_ok and underground_ok,
-        "cliff=%s underground=%s" % [JSON.stringify(sanitize_plan_summary(cliff)), JSON.stringify(sanitize_plan_summary(underground))]
-    )
+func test_surface_projection_uses_volume_samples() -> void:
+	var columns: Array[Vector2i] = [
+		Vector2i(0, 0),
+		Vector2i(20, 20),
+		Vector2i(-35, 42)
+	]
+	var passed := true
+	var summaries := []
+	for column in columns:
+		var surface_y := float(world_generation.call("surface_y_for_cell", Vector3i(column.x, 0, column.y)))
+		var air_y := roundi(surface_y / main.CELL)
+		var solid_cell := Vector3i(column.x, air_y - 1, column.y)
+		var air_cell := Vector3i(column.x, air_y, column.y)
+		var solid_sample: Dictionary = world_generation.call("sample_cell", solid_cell)
+		var air_sample: Dictionary = world_generation.call("sample_cell", air_cell)
+		var column_ok := bool(solid_sample.get("solid", false)) and not bool(air_sample.get("solid", true))
+		passed = passed and column_ok
+		summaries.append({
+			"column": sanitize(column),
+			"surfaceY": snapped_float(surface_y),
+			"solidCell": sanitize(solid_cell),
+			"solidSample": sample_signature(solid_sample),
+			"airCell": sanitize(air_cell),
+			"airSample": sample_signature(air_sample),
+			"passed": column_ok
+		})
+	add_result("surface_projection_uses_3d_volume_samples", passed, JSON.stringify(summaries))
 
-func test_cave_graph_varies_across_regions() -> void:
-    if structure_system == null:
-        add_result("cave_graph_varies_across_regions", false, "structure system missing")
-        return
-    var signatures := {}
-    var sampled := []
-    var failures := []
-    for rx in range(-2, 3):
-        for rz in range(-2, 3):
-            var plan: Dictionary = structure_system.call("cave_plan_for_region", rx, rz, "", false)
-            if plan.is_empty():
-                continue
-            var summary := cave_graph_summary(plan)
-            var node_count := int(summary.get("nodeCount", 0))
-            var edge_count := int(summary.get("edgeCount", 0))
-            var branch_count := int(summary.get("branchCount", 0))
-            var dead_end_count := int(summary.get("deadEndCount", 0))
-            if node_count < 6 or edge_count < 6 or branch_count < 1 or dead_end_count < 1:
-                failures.append({
-                    "region": { "x": rx, "z": rz },
-                    "summary": summary
-                })
-            var signature := "%d:%d:%d:%d:%s" % [
-                node_count,
-                edge_count,
-                branch_count,
-                dead_end_count,
-                JSON.stringify(summary.get("nodeRoles", []))
-            ]
-            signatures[signature] = true
-            sampled.append({
-                "region": { "x": rx, "z": rz },
-                "id": String(plan.get("id", "")),
-                "signature": signature,
-                "summary": summary
-            })
-            if sampled.size() >= 10:
-                break
-        if sampled.size() >= 10:
-            break
-    var passed := sampled.size() >= 5 and signatures.size() >= 3 and failures.is_empty()
-    add_result(
-        "cave_graph_varies_across_regions",
-        passed,
-        "sampled=%d uniqueSignatures=%d failures=%s samples=%s" % [sampled.size(), signatures.size(), JSON.stringify(failures), JSON.stringify(sampled)]
-    )
+func test_cave_biome_is_world_volume() -> void:
+	var found := find_required_cave()
+	var sample: Dictionary = found.get("sample", {}) if found.has("sample") else {}
+	var position: Vector3 = found.get("position", Vector3.ZERO)
+	var by_world: Dictionary = world_generation.call("sample_world", position)
+	var passed := not found.is_empty() \
+		and String(sample.get("biome", "")) == "cave" \
+		and String(sample.get("material", "")) == "air" \
+		and not bool(sample.get("solid", true)) \
+		and JSON.stringify(sample_signature(sample)) == JSON.stringify(sample_signature(by_world))
+	add_result("true_3d_cave_biome_from_volume", passed, JSON.stringify(sanitize(found)))
 
-func test_cave_update_around_generation() -> void:
-    if structure_system == null:
-        add_result("cave_update_around_generation", false, "structure system missing")
-        return
-    cleanup_generated_blocks()
-    var snapshot = main.call("snapshot_height_edits") if main.has_method("snapshot_height_edits") else []
-    structure_system.call("reset")
-    var natural_plan: Dictionary = structure_system.call("find_cave_plan_sample", "", 12, true)
-    if natural_plan.is_empty():
-        add_result("cave_update_around_generation", true, "seed has no natural cave spawn in focused search radius")
-        restore_height_edits(snapshot)
-        return
-    structure_system.call("update_around", natural_plan.get("entranceCell", Vector2i.ZERO))
-    var records: Dictionary = structure_system.call("cave_records_snapshot")
-    var found := records.has(String(natural_plan.get("id", "")))
-    add_result(
-        "cave_update_around_generation",
-        found,
-        "natural=%s records=%s" % [String(natural_plan.get("id", "")), JSON.stringify(sanitize(records))]
-    )
-    cleanup_generated_blocks()
-    restore_height_edits(snapshot)
+func test_cave_volume_continuity_and_cover() -> void:
+	var found := find_required_cave()
+	if found.is_empty():
+		add_result("true_3d_cave_continuity_and_cover", false, "no cave biome sample")
+		return
+	var feature: Dictionary = found.get("feature", {})
+	var entrance_cell: Vector2i = feature.get("entranceCell", Vector2i.ZERO)
+	var inward_cell: Vector2i = feature.get("inward", Vector2i(0, 1))
+	var right_cell: Vector2i = feature.get("right", Vector2i(1, 0))
+	var inward := Vector2(float(inward_cell.x), float(inward_cell.y)).normalized()
+	var right := Vector2(float(right_cell.x), float(right_cell.y)).normalized()
+	var entrance := Vector2(float(entrance_cell.x) * main.CELL, float(entrance_cell.y) * main.CELL)
+	var radius := float(feature.get("radius", main.CELL * 2.0))
+	var length := float(feature.get("length", main.CELL * 24.0))
+	var front_depths := [0.0, main.CELL * 0.75, main.CELL * 1.5]
+	var interior_depth := clampf(main.CELL * 8.0, main.CELL * 3.0, length * 0.55)
+	var front_air_samples := 0
+	var blocked_front_samples := []
+	var tunnel_air_samples := 0
+	var blocked_tunnel_samples := []
+	var wall_samples := 0
+	var missing_wall_samples := []
+	var cover_samples := 0
+	var missing_cover_samples := []
+	for depth in front_depths:
+		var center2 := entrance + inward * float(depth)
+		var center_y := float(world_generation.call("cave_feature_center_y", feature, center2, float(depth)))
+		for lateral_scale in [-0.62, 0.0, 0.62]:
+			var sample_pos := Vector3(center2.x + right.x * radius * float(lateral_scale), center_y, center2.y + right.y * radius * float(lateral_scale))
+			var sample: Dictionary = world_generation.call("sample_world", sample_pos)
+			if String(sample.get("biome", "")) == "cave" and not bool(sample.get("solid", true)):
+				front_air_samples += 1
+			else:
+				blocked_front_samples.append(sanitize(sample_pos))
+	for depth in [main.CELL * 3.0, interior_depth]:
+		var center2 := entrance + inward * float(depth)
+		var center_y := float(world_generation.call("cave_feature_center_y", feature, center2, float(depth)))
+		var center_pos := Vector3(center2.x, center_y, center2.y)
+		var tunnel_sample: Dictionary = world_generation.call("sample_world", center_pos)
+		if String(tunnel_sample.get("biome", "")) == "cave" and not bool(tunnel_sample.get("solid", true)):
+			tunnel_air_samples += 1
+		else:
+			blocked_tunnel_samples.append(sanitize(center_pos))
+		for side in [-1.0, 1.0]:
+			var side_pos := Vector3(center2.x + right.x * radius * 1.22 * float(side), center_y, center2.y + right.y * radius * 1.22 * float(side))
+			var side_sample: Dictionary = world_generation.call("sample_world", side_pos)
+			if bool(side_sample.get("solid", false)):
+				wall_samples += 1
+			else:
+				missing_wall_samples.append(sanitize(side_pos))
+		if float(depth) >= main.CELL * 7.0:
+			var cover_pos := Vector3(center2.x, center_y + radius * 0.96, center2.y)
+			var cover_sample: Dictionary = world_generation.call("sample_world", cover_pos)
+			if bool(cover_sample.get("solid", false)):
+				cover_samples += 1
+			else:
+				missing_cover_samples.append(sanitize(cover_pos))
+	var passed := front_air_samples >= 6 \
+		and tunnel_air_samples == 2 \
+		and wall_samples == 4 \
+		and cover_samples >= 1 \
+		and blocked_front_samples.is_empty() \
+		and blocked_tunnel_samples.is_empty() \
+		and missing_wall_samples.is_empty() \
+		and missing_cover_samples.is_empty()
+	add_result(
+		"true_3d_cave_continuity_and_cover",
+		passed,
+		JSON.stringify({
+			"featureId": String(feature.get("id", "")),
+			"frontAirSamples": front_air_samples,
+			"tunnelAirSamples": tunnel_air_samples,
+			"wallSamples": wall_samples,
+			"coverSamples": cover_samples,
+			"blockedFront": blocked_front_samples,
+			"blockedTunnel": blocked_tunnel_samples,
+			"missingWalls": missing_wall_samples,
+			"missingCover": missing_cover_samples
+		})
+	)
 
-func test_cave_build_interior_and_book_loot() -> void:
-    if structure_system == null:
-        add_result("cave_build_interior_and_book_loot", false, "structure system missing")
-        return
-    cleanup_generated_blocks()
-    var snapshot = main.call("snapshot_height_edits") if main.has_method("snapshot_height_edits") else []
-    structure_system.call("reset")
-    var plan: Dictionary = structure_system.call("find_cave_plan_sample", "cliff", 10, false)
-    if plan.is_empty():
-        add_result("cave_build_interior_and_book_loot", false, "no cliff cave plan")
-        restore_height_edits(snapshot)
-        return
-    var contiguous := bool(structure_system.call("cave_plan_is_contiguous", plan))
-    var rng := RandomNumberGenerator.new()
-    rng.seed = 51093
-    structure_system.call("build_cave", plan, rng)
-    var summary := cave_block_summary(plan)
-    var graph_summary := cave_graph_summary(plan)
-    var terrain_summary := cave_terrain_summary(plan)
-    var navigation_summary := cave_navigation_summary(plan)
-    var floor_level := float(plan.get("level", 0.0))
-    var ceiling_level := float(plan.get("ceilingLevel", floor_level))
-    var surface_level := float(plan.get("surfaceLevel", ceiling_level))
-    var passed := contiguous \
-        and int(graph_summary.get("nodeCount", 0)) >= 5 \
-        and int(graph_summary.get("edgeCount", 0)) >= 5 \
-        and int(graph_summary.get("branchCount", 0)) >= 1 \
-        and int(graph_summary.get("deadEndCount", 0)) >= 1 \
-        and int(graph_summary.get("narrowEdgeCount", 0)) >= 1 \
-        and bool(graph_summary.get("finalChestInFinalChamber", false)) \
-        and int(summary.get("interiorShells", 0)) == 1 \
-        and int(summary.get("interiorMeshes", 0)) >= 1 \
-        and int(summary.get("interiorCollisionBodies", 0)) >= 1 \
-        and int(summary.get("supportFrames", 0)) >= 1 \
-        and int(summary.get("supportFrames", 0)) <= 2 \
-        and int(summary.get("interiorCaveLayerVisuals", 0)) >= 1 \
-        and int(summary.get("interiorNonCaveLayerVisuals", 0)) == 0 \
-        and float(summary.get("floorHeightRange", 0.0)) >= 0.35 \
-        and float(summary.get("maxFloorNeighborStep", 999.0)) <= CELL * 0.60 \
-        and int(summary.get("torches", 0)) >= 2 \
-        and int(summary.get("torches", 0)) <= 6 \
-        and int(summary.get("smallTorches", 0)) == int(summary.get("torches", 0)) \
-        and int(summary.get("caveBlockNonCaveLayerVisuals", 0)) == 0 \
-        and int(summary.get("pathBlocks", 0)) == 0 \
-        and int(summary.get("wallBlocks", 0)) == 0 \
-        and int(summary.get("finalChests", 0)) == 1 \
-        and bool(summary.get("finalChestHasCraftingBook", false)) \
-        and int(terrain_summary.get("openingCells", 0)) > 0 \
-        and int(terrain_summary.get("editedOpeningCells", 0)) == int(terrain_summary.get("openingCells", 0)) \
-        and int(terrain_summary.get("stoneOverrideCells", 0)) >= int(terrain_summary.get("walkableCells", 0)) \
-        and int(terrain_summary.get("propExclusionCells", 0)) == int(terrain_summary.get("shapingCells", 0)) \
-        and bool(navigation_summary.get("recordFound", false)) \
-        and int(navigation_summary.get("recordWalkableCells", 0)) == int(terrain_summary.get("walkableCells", 0)) \
-        and int(navigation_summary.get("lookupMatchedSampleCells", 0)) >= 3 \
-        and int(navigation_summary.get("navmeshCaveTaggedSampleCells", 0)) >= 3 \
-        and surface_level > ceiling_level \
-        and ceiling_level > floor_level
-    add_result(
-        "cave_build_interior_and_book_loot",
-        passed,
-        "contiguous=%s graph=%s summary=%s terrain=%s navigation=%s plan=%s" % [str(contiguous), JSON.stringify(graph_summary), JSON.stringify(summary), JSON.stringify(terrain_summary), JSON.stringify(navigation_summary), JSON.stringify(sanitize_plan_summary(plan))]
-    )
-    cleanup_generated_blocks()
-    restore_height_edits(snapshot)
+func test_cave_profile_is_arched_volume() -> void:
+	var found := find_required_cave()
+	if found.is_empty():
+		add_result("true_3d_cave_profile_is_arched_volume", false, "no cave biome sample")
+		return
+	var feature: Dictionary = found.get("feature", {})
+	var entrance_cell: Vector2i = feature.get("entranceCell", Vector2i.ZERO)
+	var inward_cell: Vector2i = feature.get("inward", Vector2i(0, 1))
+	var right_cell: Vector2i = feature.get("right", Vector2i(1, 0))
+	var inward := Vector2(float(inward_cell.x), float(inward_cell.y)).normalized()
+	var right := Vector2(float(right_cell.x), float(right_cell.y)).normalized()
+	var entrance := Vector2(float(entrance_cell.x) * main.CELL, float(entrance_cell.y) * main.CELL)
+	var depth: float = main.CELL * 2.25
+	var center2: Vector2 = entrance + inward * depth
+	var center_y := float(world_generation.call("cave_feature_center_y", feature, center2, depth))
+	var radius := float(world_generation.call("cave_feature_radius_at_depth", feature, depth))
+	var vertical_radius := radius * 0.78
+	var center_air := cave_profile_feature_air(feature, center2, right, center_y, radius, vertical_radius, 0.0, 0.0)
+	var left_air := cave_profile_feature_air(feature, center2, right, center_y, radius, vertical_radius, -0.68, 0.0)
+	var right_air := cave_profile_feature_air(feature, center2, right, center_y, radius, vertical_radius, 0.68, 0.0)
+	var top_air := cave_profile_feature_air(feature, center2, right, center_y, radius, vertical_radius, 0.0, 0.72)
+	var floor_solid := cave_profile_feature_solid(feature, center2, right, center_y, radius, vertical_radius, 0.0, -1.08)
+	var left_upper_corner_solid := cave_profile_feature_solid(feature, center2, right, center_y, radius, vertical_radius, -0.82, 0.72)
+	var right_upper_corner_solid := cave_profile_feature_solid(feature, center2, right, center_y, radius, vertical_radius, 0.82, 0.72)
+	var passed := center_air \
+		and left_air \
+		and right_air \
+		and top_air \
+		and floor_solid \
+		and left_upper_corner_solid \
+		and right_upper_corner_solid
+	add_result(
+		"true_3d_cave_profile_is_arched_volume",
+		passed,
+		JSON.stringify({
+			"featureId": String(feature.get("id", "")),
+			"depth": snapped_float(depth),
+			"radius": snapped_float(radius),
+			"centerAir": center_air,
+			"leftAir": left_air,
+			"rightAir": right_air,
+			"topAir": top_air,
+			"floorSolid": floor_solid,
+			"leftUpperCornerSolid": left_upper_corner_solid,
+			"rightUpperCornerSolid": right_upper_corner_solid
+		})
+	)
 
-func test_cave_save_load_persistence() -> void:
-    if structure_system == null or main == null or not main.has_method("create_save_snapshot"):
-        add_result("cave_save_load_persistence", false, "missing save-capable main or structure system")
-        return
-    cleanup_generated_blocks()
-    var snapshot = main.call("snapshot_height_edits") if main.has_method("snapshot_height_edits") else []
-    structure_system.call("reset")
-    var plan: Dictionary = structure_system.call("find_cave_plan_sample", "cliff", 10, false)
-    if plan.is_empty():
-        add_result("cave_save_load_persistence", false, "no cliff cave plan")
-        restore_height_edits(snapshot)
-        return
-    var rng := RandomNumberGenerator.new()
-    rng.seed = 72177
-    structure_system.call("build_cave", plan, rng)
-    var cave_id := String(plan.get("id", ""))
-    var chest := cave_final_chest_node(plan)
-    if chest == null:
-        add_result("cave_save_load_persistence", false, "final cave chest missing before save")
-        cleanup_generated_blocks()
-        restore_height_edits(snapshot)
-        return
-    chest.set_meta("storage_slots", cave_test_slots())
-    var save_snapshot: Dictionary = main.call("create_save_snapshot")
-    var cave_entries: Array = save_snapshot.get("caves", []) if save_snapshot.get("caves", []) is Array else []
-    var snapshot_has_mutated_chest := cave_snapshot_has_slot(cave_entries, cave_id, "stones", 7)
-    cleanup_generated_blocks()
-    structure_system.call("restore_caves", save_snapshot.get("caves", []))
-    var restored_records: Dictionary = structure_system.call("cave_records_snapshot") if structure_system.has_method("cave_records_snapshot") else {}
-    var restored_navigation: Dictionary = structure_system.call("cave_navigation_records_snapshot") if structure_system.has_method("cave_navigation_records_snapshot") else {}
-    var restored_chest := cave_final_chest_node(plan)
-    var restored_summary := cave_block_summary(plan)
-    var restored_terrain := cave_terrain_summary(plan)
-    var restored_navigation_summary := cave_navigation_summary(plan)
-    var restored_slot_ok := cave_chest_has_slot(restored_chest, "stones", 7)
-    var generated_regions_value = structure_system.get("generated_caves")
-    var generated_regions: Dictionary = generated_regions_value if generated_regions_value is Dictionary else {}
-    var restored_region_marked := generated_regions.has(plan.get("region", Vector2i.ZERO))
-    var passed := snapshot_has_mutated_chest \
-        and restored_records.has(cave_id) \
-        and restored_navigation.has(cave_id) \
-        and restored_region_marked \
-        and restored_chest != null \
-        and restored_slot_ok \
-        and int(restored_summary.get("interiorShells", 0)) == 1 \
-        and int(restored_summary.get("supportFrames", 0)) >= 1 \
-        and int(restored_summary.get("supportFrames", 0)) <= 2 \
-        and int(restored_summary.get("interiorNonCaveLayerVisuals", 0)) == 0 \
-        and float(restored_summary.get("floorHeightRange", 0.0)) >= 0.35 \
-        and float(restored_summary.get("maxFloorNeighborStep", 999.0)) <= CELL * 0.60 \
-        and int(restored_summary.get("smallTorches", 0)) == int(restored_summary.get("torches", 0)) \
-        and int(restored_summary.get("caveBlockNonCaveLayerVisuals", 0)) == 0 \
-        and int(restored_summary.get("finalChests", 0)) == 1 \
-        and int(restored_terrain.get("stoneOverrideCells", 0)) >= int(restored_terrain.get("walkableCells", 0)) \
-        and int(restored_terrain.get("propExclusionCells", 0)) == int(restored_terrain.get("shapingCells", 0)) \
-        and bool(restored_navigation_summary.get("recordFound", false)) \
-        and int(restored_navigation_summary.get("lookupMatchedSampleCells", 0)) >= 3 \
-        and int(restored_navigation_summary.get("navmeshCaveTaggedSampleCells", 0)) >= 3
-    add_result(
-        "cave_save_load_persistence",
-        passed,
-        "snapshotHasMutatedChest=%s restoredSlot=%s restoredRegionMarked=%s records=%s navigation=%s summary=%s terrain=%s navigationSummary=%s caveEntries=%s plan=%s" % [
-            str(snapshot_has_mutated_chest),
-            str(restored_slot_ok),
-            str(restored_region_marked),
-            JSON.stringify(restored_records.keys()),
-            JSON.stringify(restored_navigation.keys()),
-            JSON.stringify(restored_summary),
-            JSON.stringify(restored_terrain),
-            JSON.stringify(restored_navigation_summary),
-            JSON.stringify(sanitize(cave_entries)),
-            JSON.stringify(sanitize_plan_summary(plan))
-        ]
-    )
-    cleanup_generated_blocks()
-    restore_height_edits(snapshot)
+func cave_profile_feature_air(feature: Dictionary, center2: Vector2, right: Vector2, center_y: float, radius: float, vertical_radius: float, lateral_scale: float, vertical_scale: float) -> bool:
+	var position := cave_profile_position(center2, right, center_y, radius, vertical_radius, lateral_scale, vertical_scale)
+	return float(world_generation.call("cave_feature_air_value", feature, position)) < 0.0
 
-func cave_graph_summary(plan: Dictionary) -> Dictionary:
-    var nodes: Array = plan.get("caveNodes", [])
-    var edges: Array = plan.get("caveEdges", [])
-    var final_id := String(plan.get("finalChamberId", ""))
-    var final_cell: Vector2i = plan.get("finalChamberCell", Vector2i.ZERO)
-    var final_radius := 0
-    var node_roles := []
-    var min_edge_radius := INF
-    var narrow_edge_count := 0
-    for node_value in nodes:
-        if not (node_value is Dictionary):
-            continue
-        var node: Dictionary = node_value
-        node_roles.append(String(node.get("kind", "")))
-        if String(node.get("id", "")) == final_id:
-            final_radius = int(node.get("radius", 0))
-    for edge_value in edges:
-        if not (edge_value is Dictionary):
-            continue
-        var edge: Dictionary = edge_value
-        var radius := float(edge.get("radius", 0.0))
-        min_edge_radius = minf(min_edge_radius, radius)
-        if radius <= 1.25:
-            narrow_edge_count += 1
-    var chest_cell: Vector2i = plan.get("finalChestCell", Vector2i.ZERO)
-    var chest_distance := Vector2(float(chest_cell.x - final_cell.x), float(chest_cell.y - final_cell.y)).length()
-    return {
-        "nodeCount": nodes.size(),
-        "edgeCount": edges.size(),
-        "branchCount": cave_array_size(plan, "branchChamberIds"),
-        "deadEndCount": cave_array_size(plan, "deadEndChamberIds"),
-        "nodeRoles": node_roles,
-        "minEdgeRadius": snappedf(0.0 if min_edge_radius == INF else min_edge_radius, 0.001),
-        "narrowEdgeCount": narrow_edge_count,
-        "finalChestInFinalChamber": chest_distance <= float(final_radius + 1)
-    }
+func cave_profile_feature_solid(feature: Dictionary, center2: Vector2, right: Vector2, center_y: float, radius: float, vertical_radius: float, lateral_scale: float, vertical_scale: float) -> bool:
+	var position := cave_profile_position(center2, right, center_y, radius, vertical_radius, lateral_scale, vertical_scale)
+	return float(world_generation.call("cave_feature_air_value", feature, position)) >= 0.0
 
-func cave_plan_signature(plan: Dictionary) -> Dictionary:
-    if plan.is_empty():
-        return {}
-    var node_signature := []
-    for node_value in plan.get("caveNodes", []):
-        if not (node_value is Dictionary):
-            continue
-        var node: Dictionary = node_value
-        node_signature.append({
-            "id": String(node.get("id", "")),
-            "kind": String(node.get("kind", "")),
-            "cell": vec2i(node.get("cell", Vector2i.ZERO)),
-            "radius": int(node.get("radius", 0))
-        })
-    var edge_signature := []
-    for edge_value in plan.get("caveEdges", []):
-        if not (edge_value is Dictionary):
-            continue
-        var edge: Dictionary = edge_value
-        edge_signature.append({
-            "id": String(edge.get("id", "")),
-            "from": String(edge.get("from", "")),
-            "to": String(edge.get("to", "")),
-            "centerHash": cave_cell_array_hash(edge.get("centerCells", []))
-        })
-    return {
-        "summary": sanitize_plan_summary(plan),
-        "nodes": node_signature,
-        "edges": edge_signature,
-        "pathHash": cave_cell_array_hash(plan.get("pathCells", [])),
-        "chamberHash": cave_cell_array_hash(plan.get("chamberCells", []))
-    }
+func cave_profile_position(center2: Vector2, right: Vector2, center_y: float, radius: float, vertical_radius: float, lateral_scale: float, vertical_scale: float) -> Vector3:
+	return Vector3(
+		center2.x + right.x * radius * lateral_scale,
+		center_y + vertical_radius * vertical_scale,
+		center2.y + right.y * radius * lateral_scale
+	)
 
-func cave_cell_array_hash(values) -> int:
-    var hash := 17
-    if not (values is Array):
-        return hash
-    for value in values:
-        if not (value is Vector2i):
-            continue
-        var cell: Vector2i = value
-        hash = int((hash * 31 + cell.x * 92821 + cell.y * 68917) & 0x7fffffff)
-    return hash
+func test_subsurface_queries_use_volume() -> void:
+	var surface := find_exposed_surface_cell(Vector2i(20, 20))
+	var solid_cell: Vector3i = surface.get("solidCell", Vector3i.ZERO)
+	var air_cell: Vector3i = surface.get("airCell", Vector3i.ZERO)
+	var solid_material := String(subsurface.call("subsurface_material_at", solid_cell))
+	var air_material := String(subsurface.call("subsurface_material_at", air_cell))
+	var biome := String(subsurface.call("subsurface_biome_at", solid_cell))
+	var passed := not surface.is_empty() \
+		and solid_material != "" \
+		and solid_material != "air" \
+		and air_material == "air" \
+		and biome != ""
+	add_result(
+		"subsurface_queries_use_3d_volume",
+		passed,
+		"solid=%s air=%s biome=%s cells=%s" % [solid_material, air_material, biome, JSON.stringify(sanitize(surface))]
+	)
 
-func cave_block_summary(plan: Dictionary) -> Dictionary:
-    var blocks_value = main.get("blocks") if main != null else {}
-    var blocks: Dictionary = blocks_value if blocks_value is Dictionary else {}
-    var path_blocks := 0
-    var wall_blocks := 0
-    var torches := 0
-    var small_torches := 0
-    var final_chests := 0
-    var final_chest_has_book := false
-    var cave_block_layer_summary := { "visuals": 0, "nonCaveLayerVisuals": 0 }
-    for block_value in blocks.values():
-        var block := block_value as Node
-        if block == null or String(block.get_meta("generatedTier", "")) != "cave":
-            continue
-        add_cave_layer_summary(cave_block_layer_summary, block)
-        var block_type := String(block.get_meta("block_type", ""))
-        var role := String(block.get_meta("caveRole", ""))
-        if block_type == "cobblestonePath":
-            path_blocks += 1
-        if role == "wall" or role == "entrance_arch" or role == "ore_vein":
-            wall_blocks += 1
-        if block_type == "torch":
-            torches += 1
-            if float(block.get_meta("torchVisualScale", 1.0)) <= 0.36:
-                small_torches += 1
-        if block_type == "chest" and role == "final_chest":
-            final_chests += 1
-            final_chest_has_book = final_chest_has_book or chest_has_crafting_book(block)
-    var edits_value = main.get("height_edits") if main != null else {}
-    var edits: Dictionary = edits_value if edits_value is Dictionary else {}
-    var interior := cave_interior_summary(plan)
-    return {
-        "pathBlocks": path_blocks,
-        "wallBlocks": wall_blocks,
-        "torches": torches,
-        "smallTorches": small_torches,
-        "finalChests": final_chests,
-        "finalChestHasCraftingBook": final_chest_has_book,
-        "heightEditCells": edits.size(),
-        "finalChestCell": vec2i(plan.get("finalChestCell", Vector2i.ZERO)),
-        "interiorShells": int(interior.get("shells", 0)),
-        "interiorMeshes": int(interior.get("meshes", 0)),
-        "interiorCollisionBodies": int(interior.get("collisionBodies", 0)),
-        "supportFrames": int(interior.get("supportFrames", 0)),
-        "interiorCaveLayerVisuals": int(interior.get("caveLayerVisuals", 0)),
-        "interiorNonCaveLayerVisuals": int(interior.get("nonCaveLayerVisuals", 0)),
-        "floorHeightRange": float(interior.get("floorHeightRange", 0.0)),
-        "maxFloorNeighborStep": float(interior.get("maxFloorNeighborStep", 0.0)),
-        "caveBlockVisuals": int(cave_block_layer_summary.get("visuals", 0)),
-        "caveBlockNonCaveLayerVisuals": int(cave_block_layer_summary.get("nonCaveLayerVisuals", 0))
-    }
+func test_subsurface_excavation_save_load() -> void:
+	var surface := find_exposed_surface_cell(Vector2i(24, 24))
+	if surface.is_empty():
+		add_result("subsurface_excavation_save_load", false, "no exposed surface sample")
+		return
+	if subsurface.has_method("reset"):
+		subsurface.call("reset")
+	var solid_cell: Vector3i = surface.get("solidCell", Vector3i.ZERO)
+	var center := Vector3((float(solid_cell.x) + 0.5) * main.CELL, (float(solid_cell.y) + 0.5) * main.CELL, (float(solid_cell.z) + 0.5) * main.CELL)
+	var brush: Dictionary = subsurface.call("add_excavation_brush", center, main.CELL * 1.35, "")
+	var air_after_brush := not bool(subsurface.call("subsurface_is_solid", solid_cell))
+	var snapshot: Dictionary = subsurface.call("snapshot")
+	subsurface.call("reset")
+	var solid_after_reset := bool(subsurface.call("subsurface_is_solid", solid_cell))
+	subsurface.call("restore", snapshot)
+	var air_after_restore := not bool(subsurface.call("subsurface_is_solid", solid_cell))
+	var saved_count := array_size(snapshot.get("excavationBrushes", []))
+	add_result(
+		"subsurface_excavation_save_load",
+		air_after_brush and solid_after_reset and air_after_restore and saved_count == 1 and String(brush.get("id", "")) != "",
+		"brush=%s savedCount=%d airAfterBrush=%s solidAfterReset=%s airAfterRestore=%s" % [JSON.stringify(sanitize(brush)), saved_count, str(air_after_brush), str(solid_after_reset), str(air_after_restore)]
+	)
 
-func cave_terrain_summary(plan: Dictionary) -> Dictionary:
-    var edits_value = main.get("height_edits") if main != null else {}
-    var edits: Dictionary = edits_value if edits_value is Dictionary else {}
-    var walkable_cells: Array = structure_system.call("cave_walkable_cells", plan, false)
-    var opening_cells: Array = structure_system.call("cave_terrain_opening_cells", plan)
-    var shaping_cells: Array = structure_system.call("cave_shaping_cells", plan)
-    var edited_opening_cells := 0
-    for cell_value in opening_cells:
-        var cell: Vector2i = cell_value
-        if edits.has(cell):
-            edited_opening_cells += 1
-    var stone_override_cells := 0
-    var prop_exclusion_cells := 0
-    for cell_value in shaping_cells:
-        var cell: Vector2i = cell_value
-        if String(structure_system.call("terrain_material_override_for_cell", cell.x, cell.y)) == "stone":
-            stone_override_cells += 1
-        if structure_system.has_method("blocks_natural_prop_at_cell") and bool(structure_system.call("blocks_natural_prop_at_cell", cell.x, cell.y)):
-            prop_exclusion_cells += 1
-    return {
-        "walkableCells": walkable_cells.size(),
-        "openingCells": opening_cells.size(),
-        "shapingCells": shaping_cells.size(),
-        "editedOpeningCells": edited_opening_cells,
-        "stoneOverrideCells": stone_override_cells,
-        "propExclusionCells": prop_exclusion_cells
-    }
+func find_required_cave() -> Dictionary:
+	return world_generation.call("find_cave_biome_sample", 16) if world_generation != null else {}
 
-func cave_navigation_summary(plan: Dictionary) -> Dictionary:
-    var cave_id := String(plan.get("id", ""))
-    var records: Dictionary = structure_system.call("cave_navigation_records_snapshot") if structure_system.has_method("cave_navigation_records_snapshot") else {}
-    var record: Dictionary = records.get(cave_id, {}) if records.has(cave_id) else {}
-    var record_walkable: Array = record.get("walkableCells", []) if record.has("walkableCells") else []
-    var samples: Array[Vector2i] = cave_navigation_sample_cells(plan)
-    var lookup_matches := 0
-    for cell in samples:
-        if String(structure_system.call("cave_navigation_id_for_cell", cell.x, cell.y)) == cave_id:
-            lookup_matches += 1
-    var navmesh_tagged := cave_navmesh_cave_tagged_sample_count(samples)
-    return {
-        "recordFound": not record.is_empty(),
-        "recordWalkableCells": record_walkable.size(),
-        "recordNodeCount": array_size(record.get("graphNodes", [])),
-        "recordEdgeCount": array_size(record.get("graphEdges", [])),
-        "sampleCells": vec2i_array(samples),
-        "lookupMatchedSampleCells": lookup_matches,
-        "navmeshCaveTaggedSampleCells": navmesh_tagged
-    }
+func find_exposed_surface_cell(column: Vector2i) -> Dictionary:
+	for y in range(96, -16, -1):
+		var air_cell := Vector3i(column.x, y + 1, column.y)
+		var solid_cell := Vector3i(column.x, y, column.y)
+		var air_sample: Dictionary = world_generation.call("sample_cell", air_cell)
+		var solid_sample: Dictionary = world_generation.call("sample_cell", solid_cell)
+		if not bool(air_sample.get("solid", true)) and bool(solid_sample.get("solid", false)):
+			return {
+				"airCell": air_cell,
+				"solidCell": solid_cell,
+				"airSample": sample_signature(air_sample),
+				"solidSample": sample_signature(solid_sample)
+			}
+	return {}
 
-func cave_navigation_sample_cells(plan: Dictionary) -> Array[Vector2i]:
-    var samples: Array[Vector2i] = []
-    samples.append(plan.get("entranceCell", Vector2i.ZERO))
-    samples.append(plan.get("finalChamberCell", Vector2i.ZERO))
-    var nodes_value = plan.get("caveNodes", [])
-    if nodes_value is Array:
-        for node_value in nodes_value:
-            if not (node_value is Dictionary):
-                continue
-            var node: Dictionary = node_value
-            if String(node.get("kind", "")) == "dead_end":
-                samples.append(node.get("cell", Vector2i.ZERO))
-                break
-    var path_value = plan.get("pathCells", [])
-    if path_value is Array and not (path_value as Array).is_empty():
-        var path_cells: Array = path_value
-        var middle_cell: Vector2i = path_cells[int(path_cells.size() / 2)]
-        samples.append(middle_cell)
-    var unique: Array[Vector2i] = []
-    var seen := {}
-    for cell in samples:
-        if seen.has(cell):
-            continue
-        seen[cell] = true
-        unique.append(cell)
-    return unique
+func sample_signature(sample: Dictionary) -> Dictionary:
+	return {
+		"density": snapped_float(float(sample.get("density", 0.0))),
+		"solid": bool(sample.get("solid", false)),
+		"biome": String(sample.get("biome", "")),
+		"material": String(sample.get("material", "")),
+		"surface": bool(sample.get("surface", false))
+	}
 
-func cave_navmesh_cave_tagged_sample_count(samples: Array[Vector2i]) -> int:
-    var npc_system = main.get("npc_system") if main != null else null
-    if npc_system == null:
-        return 0
-    var pathing = npc_system.get("pathing")
-    if pathing == null:
-        return 0
-    if pathing.has_method("ensure_ready"):
-        pathing.ensure_ready()
-    var navigation_world = pathing.get("navigation_world")
-    if navigation_world == null or not navigation_world.has_method("build_snapshot") or not navigation_world.has_method("_navmesh_surface_for_cell"):
-        return 0
-    var snapshot: Dictionary = navigation_world.call("build_snapshot", {}, true, true)
-    var tagged := 0
-    for cell in samples:
-        var surface: Dictionary = navigation_world.call("_navmesh_surface_for_cell", snapshot, cell)
-        var tags: Array = surface.get("traversalTags", []) if not surface.is_empty() else []
-        if tags.has("cave"):
-            tagged += 1
-    return tagged
-
-func cave_interior_summary(plan: Dictionary) -> Dictionary:
-    var nodes_value = structure_system.get("cave_interior_nodes") if structure_system != null else {}
-    var nodes: Dictionary = nodes_value if nodes_value is Dictionary else {}
-    var cave_id := String(plan.get("id", ""))
-    var shells := 0
-    var meshes := 0
-    var collision_bodies := 0
-    var support_frames := 0
-    var layer_summary := { "visuals": 0, "nonCaveLayerVisuals": 0 }
-    for node_value in nodes.values():
-        var node := node_value as Node
-        if node == null or not is_instance_valid(node):
-            continue
-        if String(node.get_meta("caveId", "")) != cave_id:
-            continue
-        shells += 1
-        meshes += count_cave_interior_visuals(node)
-        collision_bodies += count_cave_interior_bodies(node)
-        support_frames += count_cave_support_frames(node)
-        add_cave_layer_summary(layer_summary, node)
-    var floor_summary := cave_floor_variation_summary(plan)
-    return {
-        "shells": shells,
-        "meshes": meshes,
-        "collisionBodies": collision_bodies,
-        "supportFrames": support_frames,
-        "caveLayerVisuals": int(layer_summary.get("visuals", 0)) - int(layer_summary.get("nonCaveLayerVisuals", 0)),
-        "nonCaveLayerVisuals": int(layer_summary.get("nonCaveLayerVisuals", 0)),
-        "floorHeightRange": float(floor_summary.get("range", 0.0)),
-        "maxFloorNeighborStep": float(floor_summary.get("maxNeighborStep", 0.0))
-    }
-
-func count_cave_interior_visuals(node: Node) -> int:
-    var count := 0
-    if node is MeshInstance3D and node.name == "CaveInteriorVisual" and (node as MeshInstance3D).mesh != null:
-        count += 1
-    for child in node.get_children():
-        count += count_cave_interior_visuals(child)
-    return count
-
-func count_cave_interior_bodies(node: Node) -> int:
-    var count := 0
-    if node is StaticBody3D and node.name == "CaveInteriorBody":
-        count += 1
-    for child in node.get_children():
-        count += count_cave_interior_bodies(child)
-    return count
-
-func count_cave_support_frames(node: Node) -> int:
-    var count := 0
-    if String(node.get_meta("caveRole", "")) == "support_frame":
-        count += 1
-    for child in node.get_children():
-        count += count_cave_support_frames(child)
-    return count
-
-func add_cave_layer_summary(summary: Dictionary, node: Node) -> void:
-    if node is VisualInstance3D:
-        summary["visuals"] = int(summary.get("visuals", 0)) + 1
-        if int((node as VisualInstance3D).layers) != 2:
-            summary["nonCaveLayerVisuals"] = int(summary.get("nonCaveLayerVisuals", 0)) + 1
-    for child in node.get_children():
-        add_cave_layer_summary(summary, child)
-
-func cave_floor_variation_summary(plan: Dictionary) -> Dictionary:
-    if structure_system == null:
-        return {}
-    var builder = structure_system.get("cave_interior_builder")
-    if builder == null or not builder.has_method("floor_variation_summary"):
-        return {}
-    return builder.call("floor_variation_summary", plan)
-
-func chest_has_crafting_book(chest: Node) -> bool:
-    if chest == null or not chest.has_meta("storage_slots"):
-        return false
-    var slots: Array = chest.get_meta("storage_slots")
-    for slot in slots:
-        if not (slot is Dictionary):
-            continue
-        var item_id := String(slot.get("item", ""))
-        if (item_id.begins_with("craftingBook") or item_id.begins_with("rareBook")) and int(slot.get("count", 0)) > 0:
-            return true
-    return false
-
-func cave_final_chest_node(plan: Dictionary) -> Node:
-    var blocks_value = main.get("blocks") if main != null else {}
-    var blocks: Dictionary = blocks_value if blocks_value is Dictionary else {}
-    var cave_id := String(plan.get("id", ""))
-    for block_value in blocks.values():
-        var block := block_value as Node
-        if block == null or not is_instance_valid(block):
-            continue
-        if String(block.get_meta("generatedTier", "")) == "cave" \
-            and String(block.get_meta("caveId", "")) == cave_id \
-            and String(block.get_meta("caveRole", "")) == "final_chest":
-            return block
-    return null
-
-func cave_test_slots() -> Array:
-    var slots := []
-    for i in range(12):
-        slots.append({ "item": "", "count": 0 })
-    slots[0] = { "item": "stones", "count": 7 }
-    slots[1] = { "item": "craftingBookStone", "count": 1 }
-    return slots
-
-func cave_chest_has_slot(chest: Node, item_id: String, count: int) -> bool:
-    if chest == null or not chest.has_meta("storage_slots"):
-        return false
-    var slots_value = chest.get_meta("storage_slots")
-    if not (slots_value is Array):
-        return false
-    for slot_value in slots_value:
-        if not (slot_value is Dictionary):
-            continue
-        var slot: Dictionary = slot_value
-        if String(slot.get("item", "")) == item_id and int(slot.get("count", 0)) == count:
-            return true
-    return false
-
-func cave_snapshot_has_slot(cave_entries: Array, cave_id: String, item_id: String, count: int) -> bool:
-    for entry_value in cave_entries:
-        if not (entry_value is Dictionary):
-            continue
-        var entry: Dictionary = entry_value
-        if String(entry.get("id", "")) != cave_id:
-            continue
-        var slots_value = entry.get("finalChestSlots", [])
-        if not (slots_value is Array):
-            return false
-        for slot_value in slots_value:
-            if not (slot_value is Dictionary):
-                continue
-            var slot: Dictionary = slot_value
-            if String(slot.get("item", "")) == item_id and int(slot.get("count", 0)) == count:
-                return true
-    return false
-
-func cleanup_generated_blocks() -> void:
-    if main == null:
-        return
-    var blocks_value = main.get("blocks")
-    if not (blocks_value is Dictionary):
-        return
-    var blocks: Dictionary = blocks_value
-    for key in blocks.keys().duplicate():
-        var block := blocks[key] as Node
-        if block != null and bool(block.get_meta("generated", false)):
-            block.queue_free()
-            blocks.erase(key)
-    cleanup_cave_interiors()
-
-func cleanup_cave_interiors() -> void:
-    if structure_system == null:
-        return
-    var nodes_value = structure_system.get("cave_interior_nodes")
-    if not (nodes_value is Dictionary):
-        return
-    var nodes: Dictionary = nodes_value
-    for node_key in nodes.keys().duplicate():
-        var node := nodes[node_key] as Node
-        if node != null and is_instance_valid(node):
-            node.queue_free()
-        nodes.erase(node_key)
-
-func restore_height_edits(snapshot) -> void:
-    if main != null and main.has_method("restore_height_edits"):
-        main.call("restore_height_edits", snapshot)
+func snapped_float(value: float) -> float:
+	return snappedf(value, 0.001)
 
 func add_result(name: String, passed: bool, details := "") -> void:
-    results.append({
-        "name": name,
-        "passed": passed,
-        "details": details
-    })
-    print("[%s] %s %s" % ["PASS" if passed else "FAIL", name, details])
+	results.append({
+		"name": name,
+		"passed": passed,
+		"details": details
+	})
+	print("[%s] %s %s" % ["PASS" if passed else "FAIL", name, details])
 
 func all_passed() -> bool:
-    for result in results:
-        if not bool(result.get("passed", false)):
-            return false
-    return true
+	for result in results:
+		if not bool(result.get("passed", false)):
+			return false
+	return true
 
 func save_report() -> void:
-    var report := {
-        "schemaVersion": 1,
-        "testId": "cave_generation_integration",
-        "seed": seed,
-        "finished": true,
-        "passed": all_passed(),
-        "evidenceLevel": "integration",
-        "scope": "Procedural cave generator, structure block metadata, terrain shaping, and cave chest loot; not player visual acceptance.",
-        "resultCount": results.size(),
-        "failureCount": failure_count(),
-        "results": results
-    }
-    var report_path := OS.get_environment("VOXEL_CAVE_GENERATION_REPORT")
-    if report_path == "":
-        report_path = ProjectSettings.globalize_path("res://artifacts/caves/cave-generation-report.json")
-    DirAccess.make_dir_recursive_absolute(report_path.get_base_dir())
-    var file := FileAccess.open(report_path, FileAccess.WRITE)
-    if file != null:
-        file.store_string(JSON.stringify(report, "  "))
-        file.close()
-    print(JSON.stringify(report, "  "))
+	var report := {
+		"schemaVersion": 2,
+		"testId": "true_3d_cave_generation_contract",
+		"seed": seed,
+		"finished": true,
+		"passed": all_passed(),
+		"evidenceLevel": "contract",
+		"scope": "Authoritative 3D solid/air/biome/material cave generation and excavation contracts; not headed visual acceptance.",
+		"resultCount": results.size(),
+		"failureCount": failure_count(),
+		"results": results
+	}
+	var report_path := OS.get_environment("VOXEL_CAVE_GENERATION_REPORT")
+	if report_path == "":
+		report_path = ProjectSettings.globalize_path("res://artifacts/caves/cave-generation-report.json")
+	DirAccess.make_dir_recursive_absolute(report_path.get_base_dir())
+	var file := FileAccess.open(report_path, FileAccess.WRITE)
+	if file != null:
+		file.store_string(JSON.stringify(report, "  "))
+		file.close()
+	print(JSON.stringify(report, "  "))
 
 func failure_count() -> int:
-    var count := 0
-    for result in results:
-        if not bool(result.get("passed", false)):
-            count += 1
-    return count
-
-func wait_frames(count: int) -> void:
-    for i in range(count):
-        await process_frame
-
-func cave_array_size(plan: Dictionary, key: String) -> int:
-    var value = plan.get(key, [])
-    return value.size() if value is Array else 0
+	var count := 0
+	for result in results:
+		if not bool(result.get("passed", false)):
+			count += 1
+	return count
 
 func array_size(value) -> int:
-    return value.size() if value is Array else 0
-
-func sanitize_plan_summary(plan: Dictionary) -> Dictionary:
-    if plan.is_empty():
-        return {}
-    return {
-        "id": String(plan.get("id", "")),
-        "kind": String(plan.get("kind", "")),
-        "region": vec2i(plan.get("region", Vector2i.ZERO)),
-        "entranceCell": vec2i(plan.get("entranceCell", Vector2i.ZERO)),
-        "finalChamberCell": vec2i(plan.get("finalChamberCell", Vector2i.ZERO)),
-        "finalChestCell": vec2i(plan.get("finalChestCell", Vector2i.ZERO)),
-        "surfaceLevel": snappedf(float(plan.get("surfaceLevel", 0.0)), 0.001),
-        "floorLevel": snappedf(float(plan.get("level", 0.0)), 0.001),
-        "ceilingLevel": snappedf(float(plan.get("ceilingLevel", 0.0)), 0.001),
-        "pathLength": int(plan.get("pathLength", 0)),
-        "chamberRadius": int(plan.get("chamberRadius", 0)),
-        "nodeCount": cave_array_size(plan, "caveNodes"),
-        "edgeCount": cave_array_size(plan, "caveEdges"),
-        "branchCount": cave_array_size(plan, "branchChamberIds"),
-        "deadEndCount": cave_array_size(plan, "deadEndChamberIds"),
-        "entranceVariation": snappedf(float(plan.get("entranceVariation", 0.0)), 0.001)
-    }
+	return value.size() if value is Array else 0
 
 func sanitize(value):
-    if value is Vector2i:
-        return vec2i(value)
-    if value is Vector3i:
-        return { "x": value.x, "y": value.y, "z": value.z }
-    if value is Vector3:
-        return { "x": snappedf(value.x, 0.001), "y": snappedf(value.y, 0.001), "z": snappedf(value.z, 0.001) }
-    if value is Array:
-        var result := []
-        for item in value:
-            result.append(sanitize(item))
-        return result
-    if value is Dictionary:
-        var result := {}
-        for key in value.keys():
-            result[String(key)] = sanitize(value[key])
-        return result
-    return value
-
-func vec2i(value: Vector2i) -> Dictionary:
-    return { "x": value.x, "z": value.y }
-
-func vec2i_array(values: Array[Vector2i]) -> Array:
-    var result := []
-    for value in values:
-        result.append(vec2i(value))
-    return result
+	if value is Vector2i:
+		return { "x": value.x, "z": value.y }
+	if value is Vector3i:
+		return { "x": value.x, "y": value.y, "z": value.z }
+	if value is Vector3:
+		return { "x": snapped_float(value.x), "y": snapped_float(value.y), "z": snapped_float(value.z) }
+	if value is Array:
+		var result := []
+		for item in value:
+			result.append(sanitize(item))
+		return result
+	if value is Dictionary:
+		var result := {}
+		for key in value.keys():
+			var key_text := ""
+			if key is Vector2i:
+				key_text = "%d,%d" % [key.x, key.y]
+			elif key is Vector3i:
+				key_text = "%d,%d,%d" % [key.x, key.y, key.z]
+			else:
+				key_text = str(key)
+			result[key_text] = sanitize(value[key])
+		return result
+	return value

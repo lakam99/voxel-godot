@@ -172,7 +172,7 @@ func setup_crowded_door_traffic() -> void:
     if npc_system == null or player_body == null:
         return
     var center := Vector2i(main.call("world_to_cell", player_body.global_position.x), main.call("world_to_cell", player_body.global_position.z)) + Vector2i(22, 0)
-    var base_height: float = main.call("terrain_height_cell", center.x, center.y)
+    var base_height: float = main.call("surface_y_at_cell", Vector3i(center.x, 0, center.y))
     var wall_y := base_height + 1.35 * 0.48
     var wall_cell_y := floori(wall_y / 1.35) + 1
     var door_cell := Vector3i(center.x, wall_cell_y, center.y)
@@ -189,8 +189,8 @@ func setup_crowded_door_traffic() -> void:
         var lane := int(i / 2) % 8 - 4
         var start_cell := center + Vector2i(side * 6, lane)
         var target_cell := center + Vector2i(-side * 6, -lane)
-        var start_position := Vector3(float(start_cell.x) * 1.35, main.call("height_at_world", float(start_cell.x) * 1.35, float(start_cell.y) * 1.35) + 0.04, float(start_cell.y) * 1.35)
-        var target_position := Vector3(float(target_cell.x) * 1.35, main.call("height_at_world", float(target_cell.x) * 1.35, float(target_cell.y) * 1.35) + 0.04, float(target_cell.y) * 1.35)
+        var start_position := Vector3(float(start_cell.x) * 1.35, float(main.call("surface_y_at_cell", Vector3i(start_cell.x, 0, start_cell.y))) + 0.04, float(start_cell.y) * 1.35)
+        var target_position := Vector3(float(target_cell.x) * 1.35, float(main.call("surface_y_at_cell", Vector3i(target_cell.x, 0, target_cell.y))) + 0.04, float(target_cell.y) * 1.35)
         npc_system.safe_place_npc(body, start_position, entry.get("motorProfile"), "runtime_perf_crowded_door")
         entry["townCenter"] = center
         entry["townRadius"] = 30
@@ -212,7 +212,7 @@ func force_npc_count(target_count: int) -> void:
     var player_body := main.get("player") as Node3D
     var origin := player_body.global_position if player_body != null else Vector3.ZERO
     var center := Vector2i(main.call("world_to_cell", origin.x), main.call("world_to_cell", origin.z))
-    var level := float(main.call("height_at_world", origin.x, origin.z))
+    var level := float(main.call("surface_y_at_position", origin))
     var start_index := entries.size()
     for i in range(start_index, target_count):
         var offset := Vector2i((i % 8) * 2 - 8, int(i / 8) * 2 + 6)

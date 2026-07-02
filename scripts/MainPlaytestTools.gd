@@ -1,4 +1,31 @@
-extends "res://scripts/MainRuntimeTools.gd"
+﻿extends "res://scripts/MainRuntimeTools.gd"
+
+const VOLUME_CUBE_CORNER_OFFSETS := [
+    Vector3i(0, 0, 0),
+    Vector3i(1, 0, 0),
+    Vector3i(1, 0, 1),
+    Vector3i(0, 0, 1),
+    Vector3i(0, 1, 0),
+    Vector3i(1, 1, 0),
+    Vector3i(1, 1, 1),
+    Vector3i(0, 1, 1)
+]
+const VOLUME_TETRAHEDRA := [
+    [0, 5, 1, 6],
+    [0, 1, 2, 6],
+    [0, 2, 3, 6],
+    [0, 3, 7, 6],
+    [0, 7, 4, 6],
+    [0, 4, 5, 6]
+]
+const VOLUME_TETRAHEDRON_EDGES := [
+    [0, 1],
+    [0, 2],
+    [0, 3],
+    [1, 2],
+    [1, 3],
+    [2, 3]
+]
 
 func build_chunk_mesh(cx: int, cz: int) -> Mesh:
     var st := SurfaceTool.new()
@@ -6,8 +33,24 @@ func build_chunk_mesh(cx: int, cz: int) -> Mesh:
     st.set_material(terrain_material)
     var start_x: int = cx * CHUNK_SIZE
     var start_z: int = cz * CHUNK_SIZE
-    var skirt_bottom: float = min(MIN_HEIGHT - CELL * 2.0, WATER_LEVEL - CELL * 7.0)
-    var height_cache := {}
+    var cave_features := chunk_cave_features(start_x, start_z)
+    add_natural_exterior_surface(st, start_x, start_z)
+    var bounds := chunk_volume_y_bounds_from_features(start_x, start_z, cave_features)
+    var min_y := int(bounds.get("minY", floori((MIN_HEIGHT - CELL * 4.0) / CELL))) - 1
+    var max_y := int(bounds.get("maxY", ceili((MAX_HEIGHT + CELL * 2.0) / CELL))) + 1
+    var sample_cache := {}
+    if not cave_features.is_empty():
+        for z in range(start_z, start_z + CHUNK_SIZE):
+            for x in range(start_x, start_x + CHUNK_SIZE):
+                var cell_bounds := mesh_cell_volume_y_bounds(x, z, min_y, max_y, cave_features)
+                var cell_min_y := int(cell_bounds.get("minY", min_y))
+                var cell_max_y := int(cell_bounds.get("maxY", max_y))
+                for y in range(cell_min_y, cell_max_y):
+                    extract_volume_iso_cube(st, Vector3i(x, y, z), start_x, start_z, sample_cache)
+    return st.commit()
+
+func add_natural_exterior_surface(st: SurfaceTool, start_x: int, start_z: int) -> void:
+    var surface_cache := {}
     var color_cache := {}
     var normal_cache := {}
     for vz in range(-1, CHUNK_SIZE + 2):
@@ -15,131 +58,479 @@ func build_chunk_mesh(cx: int, cz: int) -> Mesh:
             var cell_x: int = start_x + vx
             var cell_z: int = start_z + vz
             var key := Vector2i(cell_x, cell_z)
-            height_cache[key] = terrain_height_cell(cell_x, cell_z)
+            surface_cache[key] = exterior_surface_y_cell(cell_x, cell_z)
             if vx < 0 or vx > CHUNK_SIZE or vz < 0 or vz > CHUNK_SIZE:
                 continue
-            var color: Color = terrain_color_for_cell(cell_x, cell_z)
+            var color: Color = exterior_surface_color_for_cell(cell_x, cell_z)
             var shade := 0.88 + noise01(ridge_noise, cell_x + 400, cell_z - 200) * 0.18
             color_cache[key] = color * shade
     for vz in range(CHUNK_SIZE + 1):
         for vx in range(CHUNK_SIZE + 1):
             var cell_x: int = start_x + vx
             var cell_z: int = start_z + vz
-            normal_cache[Vector2i(cell_x, cell_z)] = terrain_normal_for_cell_cached(height_cache, cell_x, cell_z)
+            normal_cache[Vector2i(cell_x, cell_z)] = exterior_surface_normal_cached(surface_cache, cell_x, cell_z)
     for z in range(CHUNK_SIZE):
         for x in range(CHUNK_SIZE):
             var gx: int = start_x + x
             var gz: int = start_z + z
-            var p00: Vector3 = terrain_vertex_local_cached(height_cache, gx, gz, start_x, start_z)
-            var p10: Vector3 = terrain_vertex_local_cached(height_cache, gx + 1, gz, start_x, start_z)
-            var p01: Vector3 = terrain_vertex_local_cached(height_cache, gx, gz + 1, start_x, start_z)
-            var p11: Vector3 = terrain_vertex_local_cached(height_cache, gx + 1, gz + 1, start_x, start_z)
-            add_cached_vertex(st, p00, color_cache, normal_cache, gx, gz)
-            add_cached_vertex(st, p01, color_cache, normal_cache, gx, gz + 1)
-            add_cached_vertex(st, p10, color_cache, normal_cache, gx + 1, gz)
-            add_cached_vertex(st, p10, color_cache, normal_cache, gx + 1, gz)
-            add_cached_vertex(st, p01, color_cache, normal_cache, gx, gz + 1)
-            add_cached_vertex(st, p11, color_cache, normal_cache, gx + 1, gz + 1)
-    add_chunk_skirts(st, start_x, start_z, skirt_bottom)
-    return st.commit()
+            var p00 := exterior_surface_vertex_cached(surface_cache, gx, gz, start_x, start_z)
+            var p10 := exterior_surface_vertex_cached(surface_cache, gx + 1, gz, start_x, start_z)
+            var p01 := exterior_surface_vertex_cached(surface_cache, gx, gz + 1, start_x, start_z)
+            var p11 := exterior_surface_vertex_cached(surface_cache, gx + 1, gz + 1, start_x, start_z)
+            add_exterior_surface_triangle(st, p00, p01, p10, color_cache, normal_cache, [Vector2i(gx, gz), Vector2i(gx, gz + 1), Vector2i(gx + 1, gz)], start_x, start_z)
+            add_exterior_surface_triangle(st, p10, p01, p11, color_cache, normal_cache, [Vector2i(gx + 1, gz), Vector2i(gx, gz + 1), Vector2i(gx + 1, gz + 1)], start_x, start_z)
 
-func terrain_vertex_local_cached(height_cache: Dictionary, cell_x: int, cell_z: int, origin_cell_x: int, origin_cell_z: int) -> Vector3:
+func exterior_surface_vertex_cached(surface_cache: Dictionary, cell_x: int, cell_z: int, origin_cell_x: int, origin_cell_z: int) -> Vector3:
     var key := Vector2i(cell_x, cell_z)
-    var y: float = float(height_cache[key]) if height_cache.has(key) else terrain_height_cell(cell_x, cell_z)
+    var y := float(surface_cache[key]) if surface_cache.has(key) else exterior_surface_y_cell(cell_x, cell_z)
     return Vector3((cell_x - origin_cell_x) * CELL, y, (cell_z - origin_cell_z) * CELL)
 
-func add_cached_vertex(st: SurfaceTool, point: Vector3, color_cache: Dictionary, normal_cache: Dictionary, cell_x: int, cell_z: int) -> void:
+func add_exterior_surface_vertex(st: SurfaceTool, point: Vector3, color_cache: Dictionary, normal_cache: Dictionary, cell_x: int, cell_z: int) -> void:
     var key := Vector2i(cell_x, cell_z)
     st.set_normal(normal_cache.get(key, Vector3.UP))
     st.set_color(color_cache.get(key, BIOME_COLORS["plains"]))
     st.add_vertex(point)
 
-func add_vertex(st: SurfaceTool, point: Vector3, cell_x: int, cell_z: int) -> void:
-    var color: Color = terrain_color_for_cell(cell_x, cell_z)
-    var shade := 0.88 + noise01(ridge_noise, cell_x + 400, cell_z - 200) * 0.18
-    st.set_normal(terrain_normal_for_cell(cell_x, cell_z))
-    st.set_color(color * shade)
-    st.add_vertex(point)
-
-func terrain_color_for_cell(cell_x: int, cell_z: int) -> Color:
-    if structure_system != null and structure_system.has_method("terrain_material_override_for_cell"):
-        var override_id := String(structure_system.call("terrain_material_override_for_cell", cell_x, cell_z))
-        if override_id == "stone":
-            return Color(0.32, 0.37, 0.36)
-    return BIOME_COLORS.get(biome_at_cell(cell_x, cell_z), BIOME_COLORS["plains"])
-
-func terrain_normal_for_cell_cached(height_cache: Dictionary, cell_x: int, cell_z: int) -> Vector3:
-    var left := terrain_height_from_cache(height_cache, cell_x - 1, cell_z)
-    var right := terrain_height_from_cache(height_cache, cell_x + 1, cell_z)
-    var back := terrain_height_from_cache(height_cache, cell_x, cell_z - 1)
-    var forward := terrain_height_from_cache(height_cache, cell_x, cell_z + 1)
-    return Vector3(left - right, CELL * 2.0, back - forward).normalized()
-
-func terrain_normal_for_cell(cell_x: int, cell_z: int) -> Vector3:
-    var left := terrain_height_cell(cell_x - 1, cell_z)
-    var right := terrain_height_cell(cell_x + 1, cell_z)
-    var back := terrain_height_cell(cell_x, cell_z - 1)
-    var forward := terrain_height_cell(cell_x, cell_z + 1)
-    return Vector3(left - right, CELL * 2.0, back - forward).normalized()
-
-func terrain_height_from_cache(height_cache: Dictionary, cell_x: int, cell_z: int) -> float:
-    var key := Vector2i(cell_x, cell_z)
-    return float(height_cache[key]) if height_cache.has(key) else terrain_height_cell(cell_x, cell_z)
-
-func terrain_vertex_local(cell_x: int, cell_z: int, origin_cell_x: int, origin_cell_z: int) -> Vector3:
-    return Vector3((cell_x - origin_cell_x) * CELL, terrain_height_cell(cell_x, cell_z), (cell_z - origin_cell_z) * CELL)
-
-func add_chunk_skirts(st: SurfaceTool, start_x: int, start_z: int, bottom_y: float) -> void:
-    var end_x := start_x + CHUNK_SIZE
-    var end_z := start_z + CHUNK_SIZE
-    for x in range(start_x, end_x):
-        add_skirt_quad(st, x, start_z, x + 1, start_z, start_x, start_z, bottom_y)
-        add_skirt_quad(st, x + 1, end_z, x, end_z, start_x, start_z, bottom_y)
-    for z in range(start_z, end_z):
-        add_skirt_quad(st, start_x, z + 1, start_x, z, start_x, start_z, bottom_y)
-        add_skirt_quad(st, end_x, z, end_x, z + 1, start_x, start_z, bottom_y)
-
-func add_skirt_quad(
+func add_exterior_surface_triangle(
     st: SurfaceTool,
-    ax: int,
-    az: int,
-    bx: int,
-    bz: int,
-    origin_x: int,
-    origin_z: int,
-    bottom_y: float
+    a: Vector3,
+    b: Vector3,
+    c: Vector3,
+    color_cache: Dictionary,
+    normal_cache: Dictionary,
+    cells: Array,
+    origin_cell_x: int,
+    origin_cell_z: int
 ) -> void:
-    var top_a := terrain_vertex_local(ax, az, origin_x, origin_z)
-    var top_b := terrain_vertex_local(bx, bz, origin_x, origin_z)
-    var bottom_a := Vector3((ax - origin_x) * CELL, bottom_y, (az - origin_z) * CELL)
-    var bottom_b := Vector3((bx - origin_x) * CELL, bottom_y, (bz - origin_z) * CELL)
-    var normal := skirt_outward_normal(ax, az, bx, bz, origin_x, origin_z)
-    add_skirt_vertex(st, top_a, ax, az, normal)
-    add_skirt_vertex(st, bottom_a, ax, az, normal)
-    add_skirt_vertex(st, top_b, bx, bz, normal)
-    add_skirt_vertex(st, top_b, bx, bz, normal)
-    add_skirt_vertex(st, bottom_a, ax, az, normal)
-    add_skirt_vertex(st, bottom_b, bx, bz, normal)
+    if exterior_surface_triangle_opens_to_cave_air(a, b, c, origin_cell_x, origin_cell_z):
+        return
+    add_exterior_surface_vertex(st, a, color_cache, normal_cache, cells[0].x, cells[0].y)
+    add_exterior_surface_vertex(st, b, color_cache, normal_cache, cells[1].x, cells[1].y)
+    add_exterior_surface_vertex(st, c, color_cache, normal_cache, cells[2].x, cells[2].y)
 
-func add_skirt_vertex(st: SurfaceTool, point: Vector3, cell_x: int, cell_z: int, normal: Vector3) -> void:
-    var color: Color = BIOME_COLORS.get(biome_at_cell(cell_x, cell_z), BIOME_COLORS["plains"])
-    var shade := 0.88 + noise01(ridge_noise, cell_x + 400, cell_z - 200) * 0.18
+func exterior_surface_triangle_opens_to_cave_air(a: Vector3, b: Vector3, c: Vector3, origin_cell_x: int, origin_cell_z: int) -> bool:
+    if world_generation_system == null or not world_generation_system.has_method("sample_world"):
+        return false
+    var world_a := Vector3(a.x + float(origin_cell_x) * CELL, a.y, a.z + float(origin_cell_z) * CELL)
+    var world_b := Vector3(b.x + float(origin_cell_x) * CELL, b.y, b.z + float(origin_cell_z) * CELL)
+    var world_c := Vector3(c.x + float(origin_cell_x) * CELL, c.y, c.z + float(origin_cell_z) * CELL)
+    var normal := (world_b - world_a).cross(world_c - world_a)
+    if normal.length_squared() <= 0.0001:
+        normal = Vector3.UP
+    else:
+        normal = normal.normalized()
+    var center := (world_a + world_b + world_c) / 3.0
+    for depth in [CELL * 0.32, CELL * 0.68, CELL * 1.05]:
+        var inward_sample := volume_sample_world(center - normal * float(depth))
+        if String(inward_sample.get("biome", "")) == "cave" and not bool(inward_sample.get("solid", true)):
+            return true
+    return false
+
+func exterior_surface_y_cell(cell_x: int, cell_z: int) -> float:
+    return surface_y_at_cell(Vector3i(cell_x, 0, cell_z))
+
+func exterior_surface_color_for_cell(cell_x: int, cell_z: int) -> Color:
+    if world_generation_system != null and world_generation_system.has_method("surface_color_for_cell3"):
+        return world_generation_system.call("surface_color_for_cell3", Vector3i(cell_x, 0, cell_z))
+    return BIOME_COLORS.get(surface_biome_at_cell(Vector3i(cell_x, 0, cell_z)), BIOME_COLORS["plains"])
+
+func exterior_surface_normal_cached(surface_cache: Dictionary, cell_x: int, cell_z: int) -> Vector3:
+    var left := exterior_surface_y_from_cache(surface_cache, cell_x - 1, cell_z)
+    var right := exterior_surface_y_from_cache(surface_cache, cell_x + 1, cell_z)
+    var back := exterior_surface_y_from_cache(surface_cache, cell_x, cell_z - 1)
+    var forward := exterior_surface_y_from_cache(surface_cache, cell_x, cell_z + 1)
+    return Vector3(left - right, CELL * 2.0, back - forward).normalized()
+
+func exterior_surface_y_from_cache(surface_cache: Dictionary, cell_x: int, cell_z: int) -> float:
+    var key := Vector2i(cell_x, cell_z)
+    return float(surface_cache[key]) if surface_cache.has(key) else exterior_surface_y_cell(cell_x, cell_z)
+
+func chunk_volume_y_bounds(start_x: int, start_z: int) -> Dictionary:
+    return chunk_volume_y_bounds_from_features(start_x, start_z, chunk_cave_features(start_x, start_z))
+
+func chunk_volume_y_bounds_from_features(start_x: int, start_z: int, cave_features: Array) -> Dictionary:
+    var min_height := INF
+    var max_height := -INF
+    for z in range(start_z - 2, start_z + CHUNK_SIZE + 3):
+        for x in range(start_x - 2, start_x + CHUNK_SIZE + 3):
+            var h := chunk_bound_surface_y_at_cell(Vector3i(x, 0, z))
+            min_height = minf(min_height, h)
+            max_height = maxf(max_height, h)
+    if min_height == INF:
+        min_height = MIN_HEIGHT
+        max_height = MAX_HEIGHT
+    var min_bound: float = min_height - CELL * 4.0
+    var max_bound: float = max_height + CELL * 3.0
+    for feature in cave_features:
+        var radius := float(feature.get("radius", CELL * 2.0))
+        var chamber_radius := float(feature.get("chamberRadius", radius * 1.8))
+        var drop := float(feature.get("drop", CELL * 4.0))
+        var entrance_surface := float(feature.get("entranceSurfaceY", min_height))
+        var cave_extent := maxf(radius, chamber_radius)
+        min_bound = minf(min_bound, entrance_surface - drop - cave_extent * 1.70 - CELL * 2.0)
+        max_bound = maxf(max_bound, entrance_surface + cave_extent * 1.20 + CELL * 2.0)
+    return {
+        "minY": floori(min_bound / CELL),
+        "maxY": ceili(max_bound / CELL)
+    }
+
+func column_volume_y_bounds(cell_x: int, cell_z: int, chunk_min_y: int, chunk_max_y: int, cave_features: Array) -> Dictionary:
+    var surface := chunk_bound_surface_y_at_cell(Vector3i(cell_x, 0, cell_z))
+    var min_bound := surface - CELL * 4.0
+    var max_bound := surface + CELL * 3.0
+    for feature in cave_features:
+        if not cave_feature_may_touch_column(feature, cell_x, cell_z):
+            continue
+        var radius := float(feature.get("radius", CELL * 2.0))
+        var chamber_radius := float(feature.get("chamberRadius", radius * 1.8))
+        var drop := float(feature.get("drop", CELL * 4.0))
+        var entrance_surface := float(feature.get("entranceSurfaceY", surface))
+        var cave_extent := maxf(radius, chamber_radius)
+        min_bound = minf(min_bound, entrance_surface - drop - cave_extent * 1.70 - CELL * 2.0)
+        max_bound = maxf(max_bound, entrance_surface + cave_extent * 1.20 + CELL * 2.0)
+    return {
+        "minY": clampi(floori(min_bound / CELL), chunk_min_y, chunk_max_y),
+        "maxY": clampi(ceili(max_bound / CELL), chunk_min_y, chunk_max_y)
+    }
+
+func mesh_cell_volume_y_bounds(cell_x: int, cell_z: int, chunk_min_y: int, chunk_max_y: int, cave_features: Array) -> Dictionary:
+    var min_surface := INF
+    var max_surface := -INF
+    for dz in [0, 1]:
+        for dx in [0, 1]:
+            var surface := chunk_bound_surface_y_at_cell(Vector3i(cell_x + int(dx), 0, cell_z + int(dz)))
+            min_surface = minf(min_surface, surface)
+            max_surface = maxf(max_surface, surface)
+    if min_surface == INF:
+        min_surface = MIN_HEIGHT
+        max_surface = MAX_HEIGHT
+    var min_bound := min_surface - CELL * 4.0
+    var max_bound := max_surface + CELL * 3.0
+    for feature in cave_features:
+        if not cave_feature_may_touch_mesh_cell(feature, cell_x, cell_z):
+            continue
+        var radius := float(feature.get("radius", CELL * 2.0))
+        var chamber_radius := float(feature.get("chamberRadius", radius * 1.8))
+        var drop := float(feature.get("drop", CELL * 4.0))
+        var entrance_surface := float(feature.get("entranceSurfaceY", min_surface))
+        var cave_extent := maxf(radius, chamber_radius)
+        min_bound = minf(min_bound, entrance_surface - drop - cave_extent * 1.70 - CELL * 2.0)
+        max_bound = maxf(max_bound, entrance_surface + cave_extent * 1.20 + CELL * 2.0)
+    return {
+        "minY": clampi(floori(min_bound / CELL) - 1, chunk_min_y, chunk_max_y),
+        "maxY": clampi(ceili(max_bound / CELL) + 1, chunk_min_y, chunk_max_y)
+    }
+
+func cave_feature_may_touch_mesh_cell(feature: Dictionary, cell_x: int, cell_z: int) -> bool:
+    if cave_feature_may_touch_column(feature, cell_x, cell_z):
+        return true
+    if cave_feature_may_touch_column(feature, cell_x + 1, cell_z):
+        return true
+    if cave_feature_may_touch_column(feature, cell_x, cell_z + 1):
+        return true
+    return cave_feature_may_touch_column(feature, cell_x + 1, cell_z + 1)
+
+func chunk_bound_surface_y_at_cell(cell: Vector3i) -> float:
+    if world_generation_system != null and world_generation_system.has_method("terrain_reference_surface_y_for_cell"):
+        return float(world_generation_system.call("terrain_reference_surface_y_for_cell", cell))
+    return surface_y_at_cell(cell)
+
+func chunk_cave_features(start_x: int, start_z: int) -> Array[Dictionary]:
+    var features: Array[Dictionary] = []
+    if world_generation_system == null or not world_generation_system.has_method("cave_features_near_world"):
+        return features
+    var seen := {}
+    for dz in [-1, 0, 1]:
+        for dx in [-1, 0, 1]:
+            var sample_cell_x := start_x + CHUNK_SIZE / 2 + int(dx) * CHUNK_SIZE
+            var sample_cell_z := start_z + CHUNK_SIZE / 2 + int(dz) * CHUNK_SIZE
+            var sample_world := Vector3(float(sample_cell_x) * CELL, 0.0, float(sample_cell_z) * CELL)
+            var nearby = world_generation_system.call("cave_features_near_world", sample_world)
+            if not (nearby is Array):
+                continue
+            for feature_value in nearby:
+                if not (feature_value is Dictionary):
+                    continue
+                var feature: Dictionary = feature_value
+                var feature_id := String(feature.get("id", ""))
+                if feature_id == "" or seen.has(feature_id):
+                    continue
+                if not cave_feature_may_touch_chunk(feature, start_x, start_z):
+                    continue
+                seen[feature_id] = true
+                features.append(feature)
+    return features
+
+func cave_feature_may_touch_chunk(feature: Dictionary, start_x: int, start_z: int) -> bool:
+    var entrance_cell: Vector2i = feature.get("entranceCell", Vector2i.ZERO)
+    var inward_cell: Vector2i = feature.get("inward", Vector2i(0, 1))
+    var right_cell: Vector2i = feature.get("right", Vector2i(1, 0))
+    var inward := Vector2(float(inward_cell.x), float(inward_cell.y)).normalized()
+    var right := Vector2(float(right_cell.x), float(right_cell.y)).normalized()
+    var radius_cells := float(feature.get("radius", CELL * 2.0)) / maxf(0.001, CELL)
+    var chamber_cells := float(feature.get("chamberRadius", CELL * 4.0)) / maxf(0.001, CELL)
+    var length_cells := float(feature.get("length", CELL * 24.0)) / maxf(0.001, CELL)
+    var branch_depth_cells := float(feature.get("branchDepth", CELL * 12.0)) / maxf(0.001, CELL)
+    var branch_length_cells := float(feature.get("branchLength", CELL * 10.0)) / maxf(0.001, CELL)
+    var branch_side := float(feature.get("branchSide", 1.0))
+    var entrance := Vector2(float(entrance_cell.x), float(entrance_cell.y))
+    var chamber := entrance + inward * length_cells
+    var branch_origin := entrance + inward * branch_depth_cells
+    var branch_dir := (inward * 0.34 + right * branch_side).normalized()
+    var branch_end := branch_origin + branch_dir * branch_length_cells
+    var margin := ceili(maxf(radius_cells, chamber_cells) + 4.0)
+    var min_x := floori(minf(entrance.x, minf(chamber.x, minf(branch_origin.x, branch_end.x)))) - margin
+    var max_x := ceili(maxf(entrance.x, maxf(chamber.x, maxf(branch_origin.x, branch_end.x)))) + margin
+    var min_z := floori(minf(entrance.y, minf(chamber.y, minf(branch_origin.y, branch_end.y)))) - margin
+    var max_z := ceili(maxf(entrance.y, maxf(chamber.y, maxf(branch_origin.y, branch_end.y)))) + margin
+    var chunk_min_x := start_x - 1
+    var chunk_max_x := start_x + CHUNK_SIZE + 1
+    var chunk_min_z := start_z - 1
+    var chunk_max_z := start_z + CHUNK_SIZE + 1
+    return max_x >= chunk_min_x and min_x <= chunk_max_x and max_z >= chunk_min_z and min_z <= chunk_max_z
+
+func cave_feature_may_touch_column(feature: Dictionary, cell_x: int, cell_z: int) -> bool:
+    var entrance_cell: Vector2i = feature.get("entranceCell", Vector2i.ZERO)
+    var inward_cell: Vector2i = feature.get("inward", Vector2i(0, 1))
+    var right_cell: Vector2i = feature.get("right", Vector2i(1, 0))
+    var inward := Vector2(float(inward_cell.x), float(inward_cell.y)).normalized()
+    var right := Vector2(float(right_cell.x), float(right_cell.y)).normalized()
+    var radius_cells := float(feature.get("radius", CELL * 2.0)) / maxf(0.001, CELL)
+    var chamber_cells := float(feature.get("chamberRadius", CELL * 4.0)) / maxf(0.001, CELL)
+    var length_cells := float(feature.get("length", CELL * 24.0)) / maxf(0.001, CELL)
+    var branch_depth_cells := float(feature.get("branchDepth", CELL * 12.0)) / maxf(0.001, CELL)
+    var branch_length_cells := float(feature.get("branchLength", CELL * 10.0)) / maxf(0.001, CELL)
+    var branch_side := float(feature.get("branchSide", 1.0))
+    var entrance := Vector2(float(entrance_cell.x), float(entrance_cell.y))
+    var chamber := entrance + inward * length_cells
+    var branch_origin := entrance + inward * branch_depth_cells
+    var branch_dir := (inward * 0.34 + right * branch_side).normalized()
+    var branch_end := branch_origin + branch_dir * branch_length_cells
+    var column := Vector2(float(cell_x), float(cell_z))
+    var margin := maxf(radius_cells, chamber_cells) + 4.0
+    if column.distance_to(chamber) <= chamber_cells + 4.0:
+        return true
+    if point_segment_distance(column, entrance, chamber) <= margin:
+        return true
+    return point_segment_distance(column, branch_origin, branch_end) <= margin
+
+func point_segment_distance(point: Vector2, a: Vector2, b: Vector2) -> float:
+    var ab := b - a
+    var ab_len_sq := ab.length_squared()
+    if ab_len_sq <= 0.0001:
+        return point.distance_to(a)
+    var t := clampf((point - a).dot(ab) / ab_len_sq, 0.0, 1.0)
+    return point.distance_to(a + ab * t)
+
+func volume_grid_sample(grid_cell: Vector3i, sample_cache: Dictionary) -> Dictionary:
+    if sample_cache.has(grid_cell):
+        return sample_cache[grid_cell]
+    var position := Vector3(float(grid_cell.x) * CELL, float(grid_cell.y) * CELL, float(grid_cell.z) * CELL)
+    var sample := {}
+    if world_generation_system != null and world_generation_system.has_method("sample_world"):
+        sample = world_generation_system.call("sample_world", position)
+    elif world_generation_system != null and world_generation_system.has_method("sample_cell"):
+        sample = world_generation_system.call("sample_cell", grid_cell)
+        sample["position"] = position
+    else:
+        var surface_y := surface_y_at_cell(Vector3i(grid_cell.x, 0, grid_cell.z))
+        var density := surface_y - position.y
+        sample = {
+            "cell": grid_cell,
+            "position": position,
+            "solid": density >= 0.0,
+            "biome": surface_biome_at_cell(Vector3i(grid_cell.x, 0, grid_cell.z)),
+            "material": "air" if density < 0.0 else surface_material_at_cell(Vector3i(grid_cell.x, 0, grid_cell.z)),
+            "density": density
+        }
+    sample_cache[grid_cell] = sample
+    return sample
+
+func extract_volume_iso_cube(st: SurfaceTool, base_cell: Vector3i, origin_x: int, origin_z: int, sample_cache: Dictionary) -> void:
+    var corners := []
+    var solid_count := 0
+    for offset in VOLUME_CUBE_CORNER_OFFSETS:
+        var grid_cell: Vector3i = base_cell + offset
+        var sample := volume_grid_sample(grid_cell, sample_cache)
+        var density := float(sample.get("density", 0.0))
+        var solid := density > 0.0
+        if solid:
+            solid_count += 1
+        corners.append({
+            "grid": grid_cell,
+            "local": Vector3(float(grid_cell.x - origin_x) * CELL, float(grid_cell.y) * CELL, float(grid_cell.z - origin_z) * CELL),
+            "world": Vector3(float(grid_cell.x) * CELL, float(grid_cell.y) * CELL, float(grid_cell.z) * CELL),
+            "density": density,
+            "solid": solid,
+            "sample": sample
+        })
+    if solid_count == 0 or solid_count == corners.size():
+        return
+    for tet in VOLUME_TETRAHEDRA:
+        extract_volume_iso_tetrahedron(st, [
+            corners[int(tet[0])],
+            corners[int(tet[1])],
+            corners[int(tet[2])],
+            corners[int(tet[3])]
+        ])
+
+func extract_volume_iso_tetrahedron(st: SurfaceTool, tetra: Array) -> void:
+    var solid_corners := []
+    var air_corners := []
+    for corner in tetra:
+        if bool(corner.get("solid", false)):
+            solid_corners.append(corner)
+        else:
+            air_corners.append(corner)
+    if solid_corners.is_empty() or air_corners.is_empty():
+        return
+    if not volume_air_corners_need_iso_surface(air_corners):
+        return
+    if solid_corners.size() == 1:
+        var solid: Dictionary = solid_corners[0]
+        var desired := average_corner_world(air_corners) - (solid.get("world", Vector3.ZERO) as Vector3)
+        add_volume_iso_triangle_oriented(
+            st,
+            interpolate_volume_iso_edge(solid, air_corners[0]),
+            interpolate_volume_iso_edge(solid, air_corners[1]),
+            interpolate_volume_iso_edge(solid, air_corners[2]),
+            desired
+        )
+    elif solid_corners.size() == 3:
+        var air: Dictionary = air_corners[0]
+        var desired := (air.get("world", Vector3.ZERO) as Vector3) - average_corner_world(solid_corners)
+        add_volume_iso_triangle_oriented(
+            st,
+            interpolate_volume_iso_edge(solid_corners[0], air),
+            interpolate_volume_iso_edge(solid_corners[1], air),
+            interpolate_volume_iso_edge(solid_corners[2], air),
+            desired
+        )
+    elif solid_corners.size() == 2 and air_corners.size() == 2:
+        var desired := average_corner_world(air_corners) - average_corner_world(solid_corners)
+        var p00 := interpolate_volume_iso_edge(solid_corners[0], air_corners[0])
+        var p10 := interpolate_volume_iso_edge(solid_corners[1], air_corners[0])
+        var p11 := interpolate_volume_iso_edge(solid_corners[1], air_corners[1])
+        var p01 := interpolate_volume_iso_edge(solid_corners[0], air_corners[1])
+        add_volume_iso_triangle_oriented(st, p00, p10, p11, desired)
+        add_volume_iso_triangle_oriented(st, p00, p11, p01, desired)
+
+func average_corner_world(corners: Array) -> Vector3:
+    var total := Vector3.ZERO
+    for corner in corners:
+        total += corner.get("world", Vector3.ZERO)
+    return total / maxf(1.0, float(corners.size()))
+
+func volume_air_corners_need_iso_surface(air_corners: Array) -> bool:
+    for corner in air_corners:
+        var sample: Dictionary = corner.get("sample", {})
+        if String(sample.get("biome", "")) == "cave":
+            return true
+        var world: Vector3 = corner.get("world", Vector3.ZERO)
+        var surface_y := chunk_bound_surface_y_at_cell(Vector3i(world_to_cell(world.x), 0, world_to_cell(world.z)))
+        if world.y < surface_y - CELL * 0.35:
+            return true
+    return false
+
+func interpolate_volume_iso_edge(a: Dictionary, b: Dictionary) -> Dictionary:
+    var da := float(a.get("density", 0.0))
+    var db := float(b.get("density", 0.0))
+    var t := 0.5
+    var denominator := da - db
+    if absf(denominator) > 0.0001:
+        t = clampf(da / denominator, 0.0, 1.0)
+    var local: Vector3 = (a.get("local", Vector3.ZERO) as Vector3).lerp(b.get("local", Vector3.ZERO) as Vector3, t)
+    var world: Vector3 = (a.get("world", Vector3.ZERO) as Vector3).lerp(b.get("world", Vector3.ZERO) as Vector3, t)
+    var a_sample: Dictionary = a.get("sample", {})
+    var b_sample: Dictionary = b.get("sample", {})
+    var solid_sample := a_sample if bool(a.get("solid", false)) else b_sample
+    var air_sample := b_sample if bool(a.get("solid", false)) else a_sample
+    return {
+        "local": local,
+        "world": world,
+        "solidSample": solid_sample,
+        "airSample": air_sample
+    }
+
+func add_volume_iso_triangle_oriented(st: SurfaceTool, a: Dictionary, b: Dictionary, c: Dictionary, desired_normal: Vector3) -> void:
+    var a_local: Vector3 = a.get("local", Vector3.ZERO)
+    var b_local: Vector3 = b.get("local", Vector3.ZERO)
+    var c_local: Vector3 = c.get("local", Vector3.ZERO)
+    var cross := (b_local - a_local).cross(c_local - a_local)
+    if cross.length_squared() <= 0.000001:
+        return
+    if desired_normal.length_squared() <= 0.0001:
+        desired_normal = cross.normalized()
+    else:
+        desired_normal = desired_normal.normalized()
+    if cross.normalized().dot(desired_normal) < 0.0:
+        var swap := b
+        b = c
+        c = swap
+        cross = -cross
+    var normal := cross.normalized()
+    add_volume_iso_vertex(st, a, normal)
+    add_volume_iso_vertex(st, b, normal)
+    add_volume_iso_vertex(st, c, normal)
+
+func add_volume_iso_vertex(st: SurfaceTool, point: Dictionary, normal: Vector3) -> void:
     st.set_normal(normal)
-    st.set_color(color * shade)
-    st.add_vertex(point)
+    st.set_color(volume_iso_vertex_color(point, normal))
+    st.add_vertex(point.get("local", Vector3.ZERO))
 
-func skirt_outward_normal(ax: int, az: int, bx: int, bz: int, origin_x: int, origin_z: int) -> Vector3:
-    var end_x := origin_x + CHUNK_SIZE
-    var end_z := origin_z + CHUNK_SIZE
-    if ax == origin_x and bx == origin_x:
-        return Vector3.LEFT
-    if ax == end_x and bx == end_x:
-        return Vector3.RIGHT
-    if az == origin_z and bz == origin_z:
-        return Vector3.BACK
-    if az == end_z and bz == end_z:
-        return Vector3.FORWARD
-    return Vector3.UP
+func volume_density_at_world(position: Vector3) -> float:
+    if world_generation_system != null and world_generation_system.has_method("density_at"):
+        return float(world_generation_system.call("density_at", position))
+    return surface_y_at_position(position) - position.y
+
+func volume_sample_world(position: Vector3) -> Dictionary:
+    if world_generation_system != null and world_generation_system.has_method("sample_world"):
+        return world_generation_system.call("sample_world", position)
+    var density := volume_density_at_world(position)
+    return {
+        "cell": Vector3i(world_to_cell(position.x), world_to_cell(position.y), world_to_cell(position.z)),
+        "position": position,
+        "solid": density >= 0.0,
+        "biome": surface_biome_at_cell(Vector3i(world_to_cell(position.x), 0, world_to_cell(position.z))),
+        "material": "air" if density < 0.0 else surface_material_at_cell(Vector3i(world_to_cell(position.x), 0, world_to_cell(position.z))),
+        "density": density
+    }
+
+func volume_iso_vertex_color(point: Dictionary, normal: Vector3) -> Color:
+    var solid_sample: Dictionary = point.get("solidSample", {})
+    var air_sample: Dictionary = point.get("airSample", {})
+    var world: Vector3 = point.get("world", Vector3.ZERO)
+    var material_id := String(solid_sample.get("material", "stone"))
+    if material_id == "air":
+        var inside_sample := volume_sample_world(world - normal * CELL * 0.18)
+        material_id = String(inside_sample.get("material", "stone"))
+        solid_sample = inside_sample
+    var air_biome := String(air_sample.get("biome", ""))
+    var biome := String(solid_sample.get("biome", surface_biome_at_cell(Vector3i(world_to_cell(world.x), 0, world_to_cell(world.z)))))
+    var shade := 0.88 + hash01("volume-iso-shade:%d,%d,%d" % [roundi(world.x * 9.0), roundi(world.y * 9.0), roundi(world.z * 9.0)]) * 0.16
+    if air_biome == "cave":
+        if normal.y < -0.35:
+            return Color(0.055, 0.060, 0.060) * shade
+        if normal.y > 0.35:
+            return Color(0.150, 0.158, 0.142) * shade
+        return Color(0.170, 0.182, 0.170) * shade
+    if normal.y > 0.42 and material_id in ["grass", "sand", "mud", "snow"]:
+        return BIOME_COLORS.get(biome, BIOME_COLORS["plains"]) * shade
+    match material_id:
+        "sand":
+            return Color(0.62, 0.57, 0.42) * shade
+        "mud":
+            return Color(0.30, 0.35, 0.25) * shade
+        "snow":
+            return Color(0.77, 0.82, 0.82) * shade
+        "dirt":
+            return Color(0.32, 0.27, 0.18) * shade
+        "copperOre":
+            return Color(0.48, 0.30, 0.20) * shade
+        "ironOre":
+            return Color(0.40, 0.39, 0.36) * shade
+        _:
+            return Color(0.36, 0.38, 0.35) * shade
 
 func spawn_chunk_props(chunk: Node3D, cx: int, cz: int) -> void:
     var rng := RandomNumberGenerator.new()
@@ -154,10 +545,10 @@ func spawn_chunk_props(chunk: Node3D, cx: int, cz: int) -> void:
             continue
         if natural_props_blocked_at_cell(x, z):
             continue
-        var h := terrain_height_cell(x, z)
+        var h := surface_y_at_cell(Vector3i(x, 0, z))
         if h < WATER_LEVEL + 1.0 or h > 92.0:
             continue
-        var biome := biome_at_cell(x, z)
+        var biome := surface_biome_at_cell(Vector3i(x, 0, z))
         if biome == "town":
             continue
         var rock_roll := rock_chance(biome, h)
@@ -195,10 +586,10 @@ func spawn_chunk_detail_batches(chunk: Node3D, cx: int, cz: int) -> void:
         var z := start_z + 1 + rng.randi_range(0, CHUNK_SIZE - 2)
         if natural_props_blocked_at_cell(x, z):
             continue
-        var h := terrain_height_cell(x, z)
+        var h := surface_y_at_cell(Vector3i(x, 0, z))
         if h < WATER_LEVEL - 0.1 or h > 104.0:
             continue
-        var biome := biome_at_cell(x, z)
+        var biome := surface_biome_at_cell(Vector3i(x, 0, z))
         if biome == "town":
             continue
         var variation := height_variation_cell(x, z, 1)
@@ -707,7 +1098,7 @@ func prop_biome_for_position(parent: Node, position: Vector3) -> String:
     var parent_node := parent as Node3D
     if parent_node:
         world_position = parent_node.global_transform * position
-    return biome_at_cell(world_to_cell(world_position.x), world_to_cell(world_position.z))
+    return surface_biome_at_cell(Vector3i(world_to_cell(world_position.x), world_to_cell(world_position.y), world_to_cell(world_position.z)))
 
 func make_rock(parent: Node, prop_id: String, position: Vector3, rng: RandomNumberGenerator):
     var spec := rock_visual_spec(rng)

@@ -47,10 +47,10 @@ func find_biome_playtest_cell(biomes: Array, min_height: float, max_height: floa
     var best_score := INF
     for z in range(-560, 561, 7):
         for x in range(-560, 561, 7):
-            var height := terrain_height_cell(x, z)
+            var height := surface_y_at_cell(Vector3i(x, 0, z))
             if height < min_height or height > max_height:
                 continue
-            var biome := biome_at_cell(x, z)
+            var biome := surface_biome_at_cell(Vector3i(x, 0, z))
             if not biomes.has(biome):
                 continue
             var variation := height_variation_cell(x, z, 2)
@@ -95,7 +95,7 @@ func find_standalone_structure_target(kind: String) -> Dictionary:
 func create_playtest_ground_block(base_cell: Vector2i, offset: Vector2i, block_type: String, case_id: String, dy: int = 0) -> Node:
     var cell_x := base_cell.x + offset.x
     var cell_z := base_cell.y + offset.y
-    var level := terrain_height_cell(cell_x, cell_z)
+    var level := surface_y_at_cell(Vector3i(cell_x, 0, cell_z))
     return create_playtest_structure_block(cell_x, cell_z, level, dy, block_type, case_id)
 
 func create_playtest_structure_block(cell_x: int, cell_z: int, level: float, dy: int, block_type: String, case_id: String = "collapse") -> Node:
@@ -118,7 +118,7 @@ func create_playtest_collapse_case(base_cell: Vector2i) -> void:
         if body and body.has_meta("playtest_case") and String(body.get_meta("playtest_case")) == "collapse":
             body.queue_free()
             blocks.erase(cell_variant)
-    var level := terrain_height_cell(base_cell.x, base_cell.y)
+    var level := surface_y_at_cell(Vector3i(base_cell.x, 0, base_cell.y))
     var supports := [
         Vector2i(-2, -2),
         Vector2i(2, -2),
@@ -238,7 +238,7 @@ func fish_with_rod() -> bool:
         return true
 
     var cell := Vector2i(world_to_cell(float(spot.get("x", 0.0))), world_to_cell(float(spot.get("z", 0.0))))
-    var biome := biome_at_cell(cell.x, cell.y)
+    var biome := surface_biome_at_cell(Vector3i(cell.x, 0, cell.y))
     var catch_chance := 0.58
     if biome == "ocean":
         catch_chance = 0.86
@@ -276,7 +276,7 @@ func find_fishing_spot() -> Dictionary:
     for distance in [4.0, 6.0, 8.0, 10.0, 12.0]:
         var x: float = player.camera.global_position.x + forward.x * float(distance)
         var z: float = player.camera.global_position.z + forward.z * float(distance)
-        if height_at_world(x, z) <= WATER_LEVEL + 0.35:
+        if surface_y_at_position(Vector3(x, 0.0, z)) <= WATER_LEVEL + 0.35:
             return { "x": x, "z": z }
 
     var cell_x := world_to_cell(player.camera.global_position.x)
@@ -288,7 +288,7 @@ func find_fishing_spot() -> Dictionary:
                     continue
                 var x: float = float(cell_x + dx) * CELL
                 var z: float = float(cell_z + dz) * CELL
-                if height_at_world(x, z) <= WATER_LEVEL + 0.35:
+                if surface_y_at_position(Vector3(x, 0.0, z)) <= WATER_LEVEL + 0.35:
                     return { "x": x, "z": z }
     return {}
 
@@ -346,6 +346,8 @@ func create_chunk(cx: int, cz: int) -> void:
     var mesh_instance := MeshInstance3D.new()
     mesh_instance.name = "TerrainMesh"
     mesh_instance.mesh = mesh
+    mesh_instance.set_meta("geometry_source", "volume_sample_extraction")
+    mesh_instance.set_meta("chunk", Vector2i(cx, cz))
     chunk.add_child(mesh_instance)
 
     var body := StaticBody3D.new()
@@ -354,9 +356,13 @@ func create_chunk(cx: int, cz: int) -> void:
     body.collision_mask = 0
     body.set_meta("kind", "terrain")
     body.set_meta("chunk", Vector2i(cx, cz))
+    body.set_meta("geometry_source", "volume_sample_extraction")
+    body.set_meta("collision_source", "terrain_mesh_create_trimesh_shape")
     var collision := CollisionShape3D.new()
     collision.name = "TerrainCollision"
     collision.shape = assets.get("shape") as Shape3D
+    collision.set_meta("geometry_source", "volume_sample_extraction")
+    collision.set_meta("collision_source", "terrain_mesh_create_trimesh_shape")
     body.add_child(collision)
     chunk.add_child(body)
 

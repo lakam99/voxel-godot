@@ -1,6 +1,8 @@
 extends "res://scripts/MainSaveState.gd"
 
 const DEFAULT_VISUAL_LIGHT_LAYER := 1
+const CAVE_VISUAL_LIGHT_LAYER := 1 << 1
+const SHADOW_AUTHORITATIVE_LIGHT_MASK := DEFAULT_VISUAL_LIGHT_LAYER | CAVE_VISUAL_LIGHT_LAYER
 
 var last_requested_mouse_mode: int = Input.MOUSE_MODE_VISIBLE
 
@@ -40,6 +42,7 @@ func setup_materials() -> void:
     materials["furnace"] = make_building_material(Color(0.34, 0.36, 0.34), Color(0.20, 0.22, 0.21), 0.90, 0.12, 0.14)
     materials["campfire"] = make_material(Color(0.64, 0.34, 0.12), 0.78)
     materials["torch"] = make_material(Color(0.80, 0.52, 0.22), 0.72)
+    materials["flame"] = make_emissive_material(Color(1.0, 0.62, 0.28), 0.42)
     materials["spikeTrap"] = make_material(Color(0.38, 0.31, 0.25), 0.86)
     materials["wardLantern"] = make_material(Color(0.72, 0.58, 0.28), 0.42)
     materials["sanctuaryBeacon"] = make_material(Color(0.54, 0.74, 0.92), 0.34)
@@ -172,7 +175,7 @@ func setup_environment() -> void:
     sun.name = "Sun"
     sun.light_color = visual_style.sun_color_day
     sun.light_energy = visual_style.sun_max_energy
-    sun.light_cull_mask = DEFAULT_VISUAL_LIGHT_LAYER
+    sun.light_cull_mask = SHADOW_AUTHORITATIVE_LIGHT_MASK
     sun.shadow_enabled = true
     configure_directional_shadow_style(sun, visual_style.sun_angular_distance)
     add_child(sun)
@@ -181,7 +184,7 @@ func setup_environment() -> void:
     moon.name = "Moon"
     moon.light_color = visual_style.moon_color
     moon.light_energy = visual_style.moon_max_energy
-    moon.light_cull_mask = DEFAULT_VISUAL_LIGHT_LAYER
+    moon.light_cull_mask = SHADOW_AUTHORITATIVE_LIGHT_MASK
     moon.shadow_enabled = false
     configure_directional_shadow_style(moon, visual_style.moon_angular_distance)
     add_child(moon)
@@ -283,7 +286,7 @@ func find_spawn_position() -> Vector3:
         best_cell = find_spawn_cell(CELL * 1.6)
     if best_cell == Vector2i(999999, 999999):
         best_cell = Vector2i(0, 28)
-    var spawn_height: float = terrain_height_cell(best_cell.x, best_cell.y)
+    var spawn_height: float = surface_y_at_cell(Vector3i(best_cell.x, 0, best_cell.y))
     return Vector3(best_cell.x * CELL, spawn_height + 5.0, best_cell.y * CELL)
 
 func find_spawn_cell(max_variation: float) -> Vector2i:
@@ -291,13 +294,13 @@ func find_spawn_cell(max_variation: float) -> Vector2i:
     var best_score: float = -999999.0
     for z in range(-72, 73):
         for x in range(-72, 73):
-            var h: float = terrain_height_cell(x, z)
+            var h: float = surface_y_at_cell(Vector3i(x, 0, z))
             if h <= WATER_LEVEL + 2.4:
                 continue
             var variation: float = height_variation_cell(x, z, 2)
             if variation > max_variation:
                 continue
-            var biome: String = biome_at_cell(x, z)
+            var biome: String = surface_biome_at_cell(Vector3i(x, 0, z))
             var biome_score: float = 0.0
             if biome == "plains" or biome == "forest" or biome == "savanna":
                 biome_score = 18.0
@@ -313,11 +316,11 @@ func find_spawn_cell(max_variation: float) -> Vector2i:
     return best_cell
 
 func height_variation_cell(x: int, z: int, radius: int) -> float:
-    var center_height: float = terrain_height_cell(x, z)
+    var center_height: float = surface_y_at_cell(Vector3i(x, 0, z))
     var max_delta := 0.0
     for dz in range(-radius, radius + 1):
         for dx in range(-radius, radius + 1):
-            var sample_height: float = terrain_height_cell(x + dx, z + dz)
+            var sample_height: float = surface_y_at_cell(Vector3i(x + dx, 0, z + dz))
             max_delta = max(max_delta, abs(sample_height - center_height))
     return max_delta
 

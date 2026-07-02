@@ -16,6 +16,11 @@ func setup(tutorial_system) -> void:
     system = tutorial_system
     main = system.main
 
+func surface_y_at_position(position: Vector3) -> float:
+    if main != null and main.has_method("surface_y_at_position"):
+        return float(main.call("surface_y_at_position", position))
+    return position.y
+
 func start_final_night() -> bool:
     if system.final_night_active or system.final_night_complete:
         return false
@@ -116,7 +121,7 @@ func choose_rescue_site() -> Vector3:
     ]
     for offset in preferred_offsets:
         var preferred := Vector3(float(center_x + offset.x) * CELL, 0.0, float(center_z + offset.y) * CELL)
-        preferred.y = main.height_at_world(preferred.x, preferred.z) + 0.06
+        preferred.y = surface_y_at_position(preferred) + 0.06
         if rescue_encounter_site_clear(preferred):
             return preferred
     var base_angle := -0.55
@@ -124,18 +129,19 @@ func choose_rescue_site() -> Vector3:
     for attempt in range(12):
         var angle := base_angle + float(attempt) * 0.28
         var position := Vector3(float(center_x) * CELL + cos(angle) * radius, 0.0, float(center_z) * CELL + sin(angle) * radius)
-        position.y = main.height_at_world(position.x, position.z) + 0.06
+        position.y = surface_y_at_position(position) + 0.06
         if rescue_encounter_site_clear(position):
             return position
     var fallback := Vector3(float(center_x + FENCE_RADIUS_CELLS + 10) * CELL, 0.0, float(center_z + 4) * CELL)
-    fallback.y = main.height_at_world(fallback.x, fallback.z) + 0.06
+    fallback.y = surface_y_at_position(fallback) + 0.06
     return fallback
 
 func rescue_encounter_site_clear(position: Vector3) -> bool:
     if main == null:
         return true
-    var town_level := float(system.town.get("level", main.height_at_world(float(int(system.town.get("centerX", 0))) * CELL, float(int(system.town.get("centerZ", 0))) * CELL)))
-    var ground_y: float = main.height_at_world(position.x, position.z)
+    var town_center_position := Vector3(float(int(system.town.get("centerX", 0))) * CELL, 0.0, float(int(system.town.get("centerZ", 0))) * CELL)
+    var town_level := float(system.town.get("level", surface_y_at_position(town_center_position)))
+    var ground_y: float = surface_y_at_position(position)
     if ground_y < main.WATER_LEVEL + 0.8:
         return false
     if absf(ground_y - town_level) > CELL * 2.0:
@@ -146,7 +152,7 @@ func rescue_encounter_site_clear(position: Vector3) -> bool:
         var angle := TAU * float(i) / float(RESCUE_MONSTER_COUNT)
         var ring_radius := CELL * (3.7 + 0.35 * float(i % 2))
         var ring_position := position + Vector3(cos(angle) * ring_radius, 0.0, sin(angle) * ring_radius)
-        var ring_ground_y: float = main.height_at_world(ring_position.x, ring_position.z)
+        var ring_ground_y: float = surface_y_at_position(ring_position)
         if ring_ground_y < main.WATER_LEVEL + 0.8:
             return false
         if absf(ring_ground_y - town_level) > CELL * 2.4:
@@ -213,7 +219,7 @@ func spawn_rescue_hostiles() -> void:
         var angle := TAU * float(i) / float(RESCUE_MONSTER_COUNT)
         var radius := CELL * (3.7 + 0.35 * float(i % 2))
         var position: Vector3 = system.rescue_site + Vector3(cos(angle) * radius, 0.0, sin(angle) * radius)
-        position.y = main.height_at_world(position.x, position.z) + 0.72
+        position.y = surface_y_at_position(position) + 0.72
         var variant := "seer" if i == RESCUE_MONSTER_COUNT - 1 else "shadow"
         var body: StaticBody3D = main.hostile_system.spawn_enemy(position, variant)
         if body == null:
@@ -275,16 +281,16 @@ func rescue_guard_target(guard: Node3D) -> Vector3:
         origin + direction * CELL * 14.0
     ]
     for candidate in candidates:
-        candidate.y = main.height_at_world(candidate.x, candidate.z) + 0.04
+        candidate.y = surface_y_at_position(candidate) + 0.04
         if rescue_guard_target_clear(candidate):
             return candidate
-    fallback.y = main.height_at_world(fallback.x, fallback.z) + 0.04
+    fallback.y = surface_y_at_position(fallback) + 0.04
     return fallback
 
 func rescue_guard_target_clear(position: Vector3) -> bool:
     if main == null:
         return true
-    if main.height_at_world(position.x, position.z) < main.WATER_LEVEL + 0.8:
+    if surface_y_at_position(position) < main.WATER_LEVEL + 0.8:
         return false
     var radius_sq := CELL * CELL * 1.6
     for root in [main.get("prop_root"), main.get("chunk_root")]:
@@ -370,16 +376,16 @@ func rescue_guard_return_position() -> Vector3:
         if not entry.is_empty():
             var guard_position: Vector3 = entry.get("guardPosition", Vector3.INF)
             if guard_position.is_finite():
-                guard_position.y = main.height_at_world(guard_position.x, guard_position.z) + 0.04
+                guard_position.y = surface_y_at_position(guard_position) + 0.04
                 return guard_position
             var guard_cell: Vector2i = entry.get("guardCell", Vector2i.ZERO)
             var level := float(entry.get("level", 16.0))
             var cell_target := Vector3(float(guard_cell.x) * CELL, level + 0.04, float(guard_cell.y) * CELL)
-            cell_target.y = main.height_at_world(cell_target.x, cell_target.z) + 0.04
+            cell_target.y = surface_y_at_position(cell_target) + 0.04
             return cell_target
     var target := rescue_return_position() + Vector3(CELL * 0.65, 0.0, CELL * 0.65)
     if main != null:
-        target.y = main.height_at_world(target.x, target.z) + 0.04
+        target.y = surface_y_at_position(target) + 0.04
     return target
 
 func send_elder_home_after_rescue_briefing() -> void:

@@ -33,6 +33,29 @@ func _process(delta: float) -> void:
         save_report()
         get_tree().quit(1)
 
+func surface_y_at_position(position: Vector3) -> float:
+    if main != null and main.has_method("surface_y_at_position"):
+        return float(main.call("surface_y_at_position", position))
+    return position.y
+
+func ground_y_near_position(position: Vector3) -> float:
+    if main != null and main.has_method("ground_y_near_position"):
+        return float(main.call("ground_y_near_position", position))
+    return surface_y_at_position(position)
+
+func surface_y_at_cell2(cell: Vector2i) -> float:
+    if main != null and main.has_method("surface_y_at_cell"):
+        return float(main.call("surface_y_at_cell", Vector3i(cell.x, 0, cell.y)))
+    return 0.0
+
+func surface_y_at_cell_coords(x: int, z: int) -> float:
+    return surface_y_at_cell2(Vector2i(x, z))
+
+func surface_biome_at_cell2(cell: Vector2i) -> String:
+    if main != null and main.has_method("surface_biome_at_cell"):
+        return String(main.call("surface_biome_at_cell", Vector3i(cell.x, 0, cell.y)))
+    return "plains"
+
 func run() -> void:
     var only_section := OS.get_environment("VOXEL_PLAYTEST_ONLY").strip_edges()
     mark_progress("start")
@@ -332,7 +355,7 @@ func test_tutorial_start_system() -> void:
     var tutorial_original_position: Vector3 = player.global_position
     var tutorial_original_velocity: Vector3 = player.velocity
     var cell := Vector2i(main.call("world_to_cell", player.global_position.x), main.call("world_to_cell", player.global_position.z))
-    var biome := String(main.call("biome_at_cell", cell.x, cell.y))
+    var biome := surface_biome_at_cell2(cell)
     var weather_state: Dictionary = weather_system.snapshot()
     var counts: Dictionary = main.call("structure_counts")
     var time_of_day := float(main.get("time_of_day"))
@@ -751,7 +774,7 @@ func test_tutorial_start_system() -> void:
     var guard_briefed: bool = sera != null and bool(tutorial_system.interact_with(sera))
     if sera is Node3D:
         var player_clear_position := guard_before + Vector3(-CELL * 2.25, 0.0, CELL * 2.25)
-        player_clear_position.y = main.call("height_at_world", player_clear_position.x, player_clear_position.z)
+        player_clear_position.y = surface_y_at_position(player_clear_position)
         player.global_position = player_clear_position
         player.velocity = Vector3.ZERO
     for i in range(360):
@@ -893,7 +916,7 @@ func test_tutorial_start_system() -> void:
     )
 
     var guard_target_position := Vector3(center.x, center.y, center.z - CELL * float(25 - 5))
-    guard_target_position.y = float(main.call("height_at_world", guard_target_position.x, guard_target_position.z)) + 0.72
+    guard_target_position.y = surface_y_at_position(guard_target_position) + 0.72
     hostile_system.spawn_enemy(guard_target_position, "shadow")
     var npc_stats_before: Dictionary = npc_system.stats()
     var guard_shots_before := int(npc_stats_before.get("guardShots", 0))
@@ -992,7 +1015,7 @@ func test_escape_menu_new_game() -> void:
     var new_seed := String(main.get("seed_text"))
 
     var cell := Vector2i(main.call("world_to_cell", player.global_position.x), main.call("world_to_cell", player.global_position.z))
-    var biome := String(main.call("biome_at_cell", cell.x, cell.y))
+    var biome := surface_biome_at_cell2(cell)
     var shelter_state: Dictionary = main.call("shelter_state_at", player.global_position)
     var weather_state: Dictionary = weather_system.snapshot()
     var tutorial_state: Dictionary = tutorial_system.state()
@@ -1436,7 +1459,7 @@ func test_held_item_system() -> void:
 
     var original_player_position: Vector3 = player.global_position
     held_item.set("use_time", 0.0)
-    var local_ground: float = main.call("height_at_world", original_player_position.x, original_player_position.z)
+    var local_ground: float = surface_y_at_position(original_player_position)
     player.global_position = Vector3(original_player_position.x, local_ground + 8.0, original_player_position.z)
     player.rotation.y = 0.0
     player.set("pitch", 0.0)
@@ -1485,15 +1508,15 @@ func test_held_item_system() -> void:
     camera.rotation.x = 0.0
     await wait_physics_frames(2)
     var torch_fill_level_pos := held_torch_ground_fill.global_position if held_torch_ground_fill else Vector3.ZERO
-    var torch_fill_level_ground := float(main.call("height_at_world", torch_fill_level_pos.x, torch_fill_level_pos.z)) if held_torch_ground_fill else 0.0
+    var torch_fill_level_ground := surface_y_at_position(torch_fill_level_pos) if held_torch_ground_fill else 0.0
     camera.rotation.x = deg_to_rad(62.0)
     await wait_physics_frames(2)
     var torch_fill_up_pos := held_torch_ground_fill.global_position if held_torch_ground_fill and is_instance_valid(held_torch_ground_fill) else Vector3.ZERO
-    var torch_fill_up_ground := float(main.call("height_at_world", torch_fill_up_pos.x, torch_fill_up_pos.z)) if held_torch_ground_fill and is_instance_valid(held_torch_ground_fill) else 0.0
+    var torch_fill_up_ground := surface_y_at_position(torch_fill_up_pos) if held_torch_ground_fill and is_instance_valid(held_torch_ground_fill) else 0.0
     camera.rotation.x = deg_to_rad(-62.0)
     await wait_physics_frames(2)
     var torch_fill_down_pos := held_torch_ground_fill.global_position if held_torch_ground_fill and is_instance_valid(held_torch_ground_fill) else Vector3.ZERO
-    var torch_fill_down_ground := float(main.call("height_at_world", torch_fill_down_pos.x, torch_fill_down_pos.z)) if held_torch_ground_fill and is_instance_valid(held_torch_ground_fill) else 0.0
+    var torch_fill_down_ground := surface_y_at_position(torch_fill_down_pos) if held_torch_ground_fill and is_instance_valid(held_torch_ground_fill) else 0.0
     camera.rotation.x = torch_original_pitch
     var torch_fill_level_height := torch_fill_level_pos.y - torch_fill_level_ground
     var torch_fill_up_height := torch_fill_up_pos.y - torch_fill_up_ground
@@ -1639,15 +1662,15 @@ func test_held_item_system() -> void:
     camera.rotation.x = 0.0
     await wait_physics_frames(2)
     var ward_fill_level_pos := held_ward_ground_fill.global_position if held_ward_ground_fill else Vector3.ZERO
-    var ward_fill_level_ground := float(main.call("height_at_world", ward_fill_level_pos.x, ward_fill_level_pos.z)) if held_ward_ground_fill else 0.0
+    var ward_fill_level_ground := surface_y_at_position(ward_fill_level_pos) if held_ward_ground_fill else 0.0
     camera.rotation.x = deg_to_rad(62.0)
     await wait_physics_frames(2)
     var ward_fill_up_pos := held_ward_ground_fill.global_position if held_ward_ground_fill and is_instance_valid(held_ward_ground_fill) else Vector3.ZERO
-    var ward_fill_up_ground := float(main.call("height_at_world", ward_fill_up_pos.x, ward_fill_up_pos.z)) if held_ward_ground_fill and is_instance_valid(held_ward_ground_fill) else 0.0
+    var ward_fill_up_ground := surface_y_at_position(ward_fill_up_pos) if held_ward_ground_fill and is_instance_valid(held_ward_ground_fill) else 0.0
     camera.rotation.x = deg_to_rad(-62.0)
     await wait_physics_frames(2)
     var ward_fill_down_pos := held_ward_ground_fill.global_position if held_ward_ground_fill and is_instance_valid(held_ward_ground_fill) else Vector3.ZERO
-    var ward_fill_down_ground := float(main.call("height_at_world", ward_fill_down_pos.x, ward_fill_down_pos.z)) if held_ward_ground_fill and is_instance_valid(held_ward_ground_fill) else 0.0
+    var ward_fill_down_ground := surface_y_at_position(ward_fill_down_pos) if held_ward_ground_fill and is_instance_valid(held_ward_ground_fill) else 0.0
     camera.rotation.x = ward_original_pitch
     var ward_fill_level_height := ward_fill_level_pos.y - ward_fill_level_ground
     var ward_fill_up_height := ward_fill_up_pos.y - ward_fill_up_ground
@@ -2457,7 +2480,7 @@ func test_teleport_system() -> void:
         panel_open = hud.is_teleport_open() and hud.teleport_panel.visible
     var teleported_xz: bool = bool(main.call("teleport_to", "64 -32"))
     await wait_physics_frames(4)
-    var terrain_y: float = main.call("height_at_world", 64.0, -32.0)
+    var terrain_y: float = surface_y_at_position(Vector3(64.0, 0.0, -32.0))
     var horizontal_ok := Vector2(player.global_position.x - 64.0, player.global_position.z + 32.0).length() < 0.35
     var safe_y := player.global_position.y >= maxf(terrain_y, WATER_LEVEL) - 0.1
     var teleported_xyz: bool = bool(main.call("teleport_to", "12 40 -18"))
@@ -3108,7 +3131,7 @@ func test_player_placement_system() -> void:
 
 func place_item_far_from_player(inventory_system, item_id: String, target_cell: Vector2i) -> Dictionary:
     var blocks := get_blocks()
-    var target_ground: float = main.call("terrain_height_cell", target_cell.x, target_cell.y)
+    var target_ground: float = surface_y_at_cell2(target_cell)
     var anchor_cell := Vector3i(target_cell.x, roundi(camera.global_position.y / CELL), target_cell.y)
     if blocks.has(anchor_cell):
         var old_anchor := blocks[anchor_cell] as Node
@@ -3164,7 +3187,7 @@ func place_item_via_player(inventory_system, item_id: String, target_cell: Vecto
     if not set_active_inventory_item(inventory_system, item_id):
         return { "placed": false, "consumed": false, "grounded": false, "reason": "not active" }
     var count_before: int = inventory_system.count(item_id)
-    var target_ground: float = main.call("terrain_height_cell", target_cell.x, target_cell.y)
+    var target_ground: float = surface_y_at_cell2(target_cell)
     aim_player_at(Vector3(float(target_cell.x) * CELL, target_ground - CELL * 1.5, float(target_cell.y) * CELL))
     await wait_physics_frames(2)
     main.call("place_selected_block")
@@ -3344,9 +3367,9 @@ func restore_collision_shapes(shapes: Array[CollisionShape3D]) -> void:
             shape.disabled = false
 
 func make_relative_slope_patch(center_cell: Vector2i) -> Dictionary:
-    var edits := get_height_edits()
+    var edits := get_volume_edit_markers()
     var restore := {}
-    var base_height: float = main.call("terrain_height_cell", center_cell.x, center_cell.y)
+    var base_height: float = surface_y_at_cell2(center_cell)
     for dz in range(-1, 2):
         for dx in range(-1, 2):
             var key := Vector2i(center_cell.x + dx, center_cell.y + dz)
@@ -3355,7 +3378,7 @@ func make_relative_slope_patch(center_cell: Vector2i) -> Dictionary:
     return restore
 
 func restore_height_patch(restore: Dictionary) -> void:
-    var edits := get_height_edits()
+    var edits := get_volume_edit_markers()
     for key in restore.keys():
         var entry: Dictionary = restore[key]
         if bool(entry.get("had", false)):
@@ -3442,7 +3465,7 @@ func test_fishing_system() -> void:
     var original_camera_pitch := camera.rotation.x
     var center_cell := Vector2i(roundi(player.global_position.x / CELL) + 7, roundi(player.global_position.z / CELL))
     var water_cell := Vector2i(center_cell.x, center_cell.y - 5)
-    var edits := get_height_edits()
+    var edits := get_volume_edit_markers()
     var touched_edits := {}
     for dz in range(-5, 6):
         for dx in range(-5, 6):
@@ -3458,7 +3481,7 @@ func test_fishing_system() -> void:
     player.rotation.y = 0.0
     player.set("pitch", 0.0)
     camera.rotation.x = 0.0
-    edits = get_height_edits()
+    edits = get_volume_edit_markers()
     for dz in range(-1, 2):
         for dx in range(-2, 3):
             edits[Vector2i(water_cell.x + dx, water_cell.y + dz)] = WATER_LEVEL - 0.25
@@ -3492,7 +3515,7 @@ func test_fishing_system() -> void:
     var rod_visible: bool = String(held_item.get("current_item")) == "fishingRod" and held_item.visible
     var cast_animation: bool = String(held_item.get("use_action")) == "cast"
     var passed: bool = not spot.is_empty() and cast_used and caught and rod_visible and cast_animation
-    edits = get_height_edits()
+    edits = get_volume_edit_markers()
     for key in touched_edits.keys():
         var entry: Dictionary = touched_edits[key]
         if bool(entry.get("had", false)):
@@ -3540,7 +3563,7 @@ func test_save_load_round_trip() -> void:
     var save_cell := Vector3i(roundi(player.global_position.x / CELL) + 14, roundi(player.global_position.y / CELL), roundi(player.global_position.z / CELL) + 4)
     var save_block := main.call("create_block", save_cell, "woodBlock", { "player_placed": true }) as StaticBody3D
     var edit_key := Vector2i(187, -91)
-    var edits := get_height_edits()
+    var edits := get_volume_edit_markers()
     edits[edit_key] = 33.75
     var saved_position: Vector3 = player.global_position + Vector3(2.0, 0.0, 1.0)
     player.global_position = saved_position
@@ -3558,7 +3581,7 @@ func test_save_load_round_trip() -> void:
     discovered_ruins.clear()
     discovered_camps.clear()
     var saved_cell_2d := Vector2i(main.call("world_to_cell", saved_position.x), main.call("world_to_cell", saved_position.z))
-    discovered_biomes[String(main.call("biome_at_cell", saved_cell_2d.x, saved_cell_2d.y))] = true
+    discovered_biomes[surface_biome_at_cell2(saved_cell_2d)] = true
     var saved_town: Dictionary = main.call("town_region_at_cell", saved_cell_2d.x, saved_cell_2d.y)
     if not saved_town.is_empty():
         discovered_towns["%d,%d" % [int(saved_town.get("centerX", 0)), int(saved_town.get("centerZ", 0))]] = true
@@ -3619,7 +3642,7 @@ func test_save_load_round_trip() -> void:
     var loaded: bool = main.call("try_load_world", false)
     main.set("autosave_enabled", original_autosave_enabled)
     blocks = get_blocks()
-    edits = get_height_edits()
+    edits = get_volume_edit_markers()
     var player_restored := player.global_position.distance_to(saved_position) < 0.05
     var inventory_restored: bool = inventory_system.count("woodBlock") == saved_wood_count
     var survival_restored: bool = abs(float(survival_system.health) - 72.0) < 0.05 and abs(float(survival_system.hunger) - 44.0) < 0.05
@@ -3750,7 +3773,7 @@ func test_survival_system() -> void:
     var sheltered_status := String(survival_system.last_danger)
 
     var base_cell := Vector2i(roundi(player.global_position.x / CELL) + 18, roundi(player.global_position.z / CELL) + 18)
-    var base_height: float = main.call("terrain_height_cell", base_cell.x, base_cell.y)
+    var base_height: float = surface_y_at_cell2(base_cell)
     for offset in [Vector2i(-1, -1), Vector2i(0, -1), Vector2i(1, -1), Vector2i(-1, 0), Vector2i(1, 0), Vector2i(-1, 1), Vector2i(0, 1), Vector2i(1, 1)]:
         main.call("create_playtest_ground_block", base_cell, offset, "woodBlock", "shelter_test", 0)
         main.call("create_playtest_ground_block", base_cell, offset, "woodBlock", "shelter_test", 1)
@@ -3833,7 +3856,7 @@ func test_bed_respawn_and_death_drop() -> void:
     var blocks := get_blocks()
 
     var bed_center := player.global_position + Vector3(CELL * 4.0, 0.0, 0.0)
-    var bed_level: float = main.call("height_at_world", bed_center.x, bed_center.z)
+    var bed_level: float = surface_y_at_position(bed_center)
     var bed_cell := Vector3i(roundi(bed_center.x / CELL), floori((bed_level + CELL * 0.48) / CELL) + 1, roundi(bed_center.z / CELL))
     if blocks.has(bed_cell):
         var old_block := blocks[bed_cell] as Node
@@ -3932,7 +3955,7 @@ func test_hostile_system() -> void:
     await wait_process_frames(3)
     var original_position: Vector3 = player.global_position
     var enemy_pos: Vector3 = original_position + Vector3(12.0, 0.0, 0.0)
-    enemy_pos.y = main.call("height_at_world", enemy_pos.x, enemy_pos.z) + 0.72
+    enemy_pos.y = surface_y_at_position(enemy_pos) + 0.72
     var enemy: StaticBody3D = hostile_system.spawn_enemy(enemy_pos, "shadow")
     var enemy_start: Vector3 = enemy.global_position if enemy else enemy_pos
     hostile_system.update_hostiles(0.25, 0.0, "plains")
@@ -3959,7 +3982,7 @@ func test_hostile_system() -> void:
 
     hostile_system.clear()
     var wall_blocks := get_blocks()
-    var wall_ground: float = main.call("height_at_world", original_position.x + CELL * 4.0, original_position.z)
+    var wall_ground: float = surface_y_at_position(original_position + Vector3(CELL * 4.0, 0.0, 0.0))
     var wall_y: float = wall_ground + CELL * 0.48
     var wall_cells: Array[Vector3i] = []
     var wall_x := roundi((original_position.x + CELL * 4.0) / CELL)
@@ -3976,7 +3999,7 @@ func test_hostile_system() -> void:
         main.call("create_block", wall_cell, "stoneBlock", { "world_y": wall_y })
     await wait_physics_frames(3)
     var blocked_enemy_pos := original_position + Vector3(CELL * 8.0, 0.0, 0.0)
-    blocked_enemy_pos.y = main.call("height_at_world", blocked_enemy_pos.x, blocked_enemy_pos.z) + 0.72
+    blocked_enemy_pos.y = surface_y_at_position(blocked_enemy_pos) + 0.72
     var blocked_enemy: StaticBody3D = hostile_system.spawn_enemy(blocked_enemy_pos, "shadow")
     var blocked_start_x := blocked_enemy.global_position.x if blocked_enemy else blocked_enemy_pos.x
     for i in range(28):
@@ -4115,7 +4138,7 @@ func test_rift_hostile_system() -> void:
     hostile_system.clear()
     var original_position: Vector3 = player.global_position
     var rift_position: Vector3 = original_position + Vector3(10.0, 0.0, -8.0)
-    rift_position.y = main.call("height_at_world", rift_position.x, rift_position.z) + 0.78
+    rift_position.y = surface_y_at_position(rift_position) + 0.78
     var cores_before: int = inventory_system.count("riftCore")
     var shards_before: int = inventory_system.count("nightShard")
     var meat_before: int = inventory_system.count("rawMeat")
@@ -4175,7 +4198,7 @@ func test_sanctuary_beacon_raid_system() -> void:
     hostile_system.clear()
     var original_position: Vector3 = player.global_position
     var beacon_cell := Vector2i(roundi(player.global_position.x / CELL) + 14, roundi(player.global_position.z / CELL) + 4)
-    var level: float = main.call("terrain_height_cell", beacon_cell.x, beacon_cell.y)
+    var level: float = surface_y_at_cell2(beacon_cell)
     var block_cell := Vector3i(beacon_cell.x, floori((level + CELL * 0.48) / CELL) + 1, beacon_cell.y)
     var blocks := get_blocks()
     if blocks.has(block_cell):
@@ -4281,7 +4304,7 @@ func test_defensive_blocks() -> void:
     main.call("update_chunks", true)
     await wait_physics_frames(4)
     var blocks := get_blocks()
-    var level: float = main.call("height_at_world", player.global_position.x, player.global_position.z)
+    var level: float = ground_y_near_position(player.global_position)
     var torch_cell := Vector3i(roundi(player.global_position.x / CELL) + 1, floori((level + CELL * 0.48) / CELL) + 1, roundi(player.global_position.z / CELL))
     if blocks.has(torch_cell):
         var existing_torch := blocks[torch_cell] as Node
@@ -4302,7 +4325,7 @@ func test_defensive_blocks() -> void:
         blocks.erase(torch_cell)
 
     var trap_center := player.global_position + Vector3(8.0, 0.0, 0.0)
-    var trap_level: float = main.call("height_at_world", trap_center.x, trap_center.z)
+    var trap_level: float = surface_y_at_position(trap_center)
     var trap_cell := Vector3i(roundi(trap_center.x / CELL), floori((trap_level + CELL * 0.48) / CELL) + 1, roundi(trap_center.z / CELL))
     if blocks.has(trap_cell):
         var existing_trap := blocks[trap_cell] as Node
@@ -4524,8 +4547,8 @@ func test_structure_and_town_generation() -> void:
     )
     add_result(
         "town_biome_flattened",
-        String(main.call("biome_at_cell", center_x, center_z)) == "town" and main.call("height_variation_cell", center_x, center_z, 5) <= 0.05,
-        "biome %s, variation %.2f" % [String(main.call("biome_at_cell", center_x, center_z)), float(main.call("height_variation_cell", center_x, center_z, 5))]
+            surface_biome_at_cell2(Vector2i(center_x, center_z)) == "town" and main.call("height_variation_cell", center_x, center_z, 5) <= 0.05,
+            "biome %s, variation %.2f" % [surface_biome_at_cell2(Vector2i(center_x, center_z)), float(main.call("height_variation_cell", center_x, center_z, 5))]
     )
     var town_radius: int = int(town.get("radius", main.TOWN_RADIUS_CELLS))
     var town_apron: int = maxi(8, ceili(float(town_radius) * 0.34))
@@ -4535,11 +4558,11 @@ func test_structure_and_town_generation() -> void:
     var max_exit_step: float = 0.0
     var worst_exit: String = ""
     for direction in exit_dirs:
-        var previous_height: float = float(main.call("terrain_height_cell", center_x + direction.x * (town_radius - 1), center_z + direction.y * (town_radius - 1)))
+        var previous_height: float = surface_y_at_cell_coords(center_x + direction.x * (town_radius - 1), center_z + direction.y * (town_radius - 1))
         for offset in range(town_radius, town_radius + town_apron + 1):
             var sample_x: int = center_x + direction.x * offset
             var sample_z: int = center_z + direction.y * offset
-            var sample_height: float = float(main.call("terrain_height_cell", sample_x, sample_z))
+            var sample_height: float = surface_y_at_cell_coords(sample_x, sample_z)
             var step_delta: float = absf(sample_height - previous_height)
             if step_delta > max_exit_step:
                 max_exit_step = step_delta
@@ -4581,7 +4604,7 @@ func test_structure_and_town_generation() -> void:
         elif block_type == "glass":
             var glass_structure_dy := int(body.get_meta("structureDy", 99))
             if not body.has_meta("structureDy"):
-                var glass_ground: float = main.call("height_at_world", body.global_position.x, body.global_position.z)
+                var glass_ground: float = surface_y_at_position(body.global_position)
                 glass_structure_dy = roundi((body.global_position.y - glass_ground - CELL * 0.48) / CELL)
             if glass_structure_dy <= 1:
                 generated_glass_ground += 1
@@ -4693,7 +4716,7 @@ func test_structure_and_town_generation() -> void:
         npc_system.spawn_generic_town_npcs()
         if player:
             var observe_position := Vector3(float(generic_center_x) * CELL, 0.0, float(generic_center_z) * CELL)
-            observe_position.y = float(main.call("height_at_world", observe_position.x, observe_position.z)) + 0.72
+            observe_position.y = surface_y_at_position(observe_position) + 0.72
             player.global_position = observe_position
             player.velocity = Vector3.ZERO
         main.set("time_of_day", 0.42)
@@ -4750,21 +4773,21 @@ func test_structure_and_town_generation() -> void:
                 roundi(float(generic_center_x) + outward.x * forage_distance),
                 roundi(float(generic_center_z) + outward.y * forage_distance)
             )
-            var forage_ground: float = main.call("height_at_world", float(forage_cell.x) * CELL, float(forage_cell.y) * CELL)
+            var forage_ground: float = surface_y_at_cell2(forage_cell)
             if forage_ground < main.WATER_LEVEL + 0.55:
                 for fallback_direction in [Vector2.RIGHT, Vector2.LEFT, Vector2.DOWN, Vector2.UP]:
                     var fallback_cell := Vector2i(
                         roundi(float(generic_center_x) + fallback_direction.x * forage_distance),
                         roundi(float(generic_center_z) + fallback_direction.y * forage_distance)
                     )
-                    var fallback_ground: float = main.call("height_at_world", float(fallback_cell.x) * CELL, float(fallback_cell.y) * CELL)
+                    var fallback_ground: float = surface_y_at_cell2(fallback_cell)
                     if fallback_ground >= main.WATER_LEVEL + 0.55:
                         forage_cell = fallback_cell
                         forage_ground = fallback_ground
                         break
             clear_props_near_cell(forage_cell, 5)
             clear_blocks_near_cell(forage_cell, 3)
-            forage_ground = main.call("height_at_world", float(forage_cell.x) * CELL, float(forage_cell.y) * CELL)
+            forage_ground = surface_y_at_cell2(forage_cell)
             var rng := RandomNumberGenerator.new()
             rng.seed = 77031
             forage_node = main.call(
@@ -4951,7 +4974,7 @@ func test_npc_equipment_and_pathing() -> void:
     clear_props_near_cell(start_cell, 14)
     await wait_physics_frames(3)
 
-    var base_height: float = main.call("terrain_height_cell", start_cell.x, start_cell.y)
+    var base_height: float = surface_y_at_cell2(start_cell)
     var start_position := Vector3(float(start_cell.x) * CELL, base_height + 0.04, float(start_cell.y) * CELL)
     var target_position := Vector3(float(start_cell.x + 8) * CELL, base_height + 0.04, float(start_cell.y) * CELL)
     player.global_position = Vector3(float(start_cell.x - 4) * CELL, base_height, float(start_cell.y - 4) * CELL)
@@ -5174,7 +5197,7 @@ func test_structural_integrity() -> void:
     var blocks := get_blocks()
     var base_x := roundi(player.global_position.x / CELL) + 78
     var base_z := roundi(player.global_position.z / CELL) + 41
-    var ground: float = float(main.call("terrain_height_cell", base_x, base_z))
+    var ground: float = surface_y_at_cell_coords(base_x, base_z)
     var world_y := ground + CELL * 0.48
     var grounded_cell := Vector3i(base_x, floori(world_y / CELL) + 1, base_z)
     var grounded_top := grounded_cell + Vector3i(0, 1, 0)
@@ -5242,8 +5265,8 @@ func test_landmark_generation_and_loot() -> void:
     discovered_ruins.clear()
     discovered_camps.clear()
     var base_cell := Vector2i(roundi(player.global_position.x / CELL) + 34, roundi(player.global_position.z / CELL) + 18)
-    var level: float = maxf(float(main.call("terrain_height_cell", base_cell.x, base_cell.y)), WATER_LEVEL + 2.4)
-    var edits := get_height_edits()
+    var level: float = maxf(surface_y_at_cell2(base_cell), WATER_LEVEL + 2.4)
+    var edits := get_volume_edit_markers()
     for dz in range(-8, 24):
         for dx in range(-8, 76):
             edits[Vector2i(base_cell.x + dx, base_cell.y + dz)] = level
@@ -5422,289 +5445,201 @@ func test_landmark_generation_and_loot() -> void:
 
 func test_cave_generation_and_crafting_book_loot() -> void:
     if not main or not player:
-        add_result("cave_generation_and_book_loot", false, "main or player missing")
+        add_result("cave_biome_volume_generation", false, "main or player missing")
         return
-    var structure_system = main.get("structure_system")
-    if structure_system == null:
-        add_result("cave_generation_and_book_loot", false, "structure system missing")
+    var world_generation = main.get("world_generation_system")
+    if world_generation == null or not world_generation.has_method("find_cave_biome_sample"):
+        add_result("cave_biome_volume_generation", false, "world generation sampler missing")
         return
 
     var original_position: Vector3 = player.global_position
-    var original_height_edits: Array = main.call("snapshot_height_edits") if main.has_method("snapshot_height_edits") else []
-    cleanup_generated_blocks()
-
-    var cliff_plan: Dictionary = structure_system.call("find_cave_plan_sample", "cliff", 8, false)
-    var underground_plan: Dictionary = structure_system.call("find_cave_plan_sample", "underground", 8, false)
-    add_result(
-        "cave_plan_cliff_candidate",
-        not cliff_plan.is_empty() and String(cliff_plan.get("kind", "")) == "cliff" and float(cliff_plan.get("entranceVariation", 0.0)) >= 1.0,
-        "kind %s, variation %.2f, entrance %s" % [String(cliff_plan.get("kind", "")), float(cliff_plan.get("entranceVariation", 0.0)), str(cliff_plan.get("entranceCell", Vector2i.ZERO))]
-    )
-    add_result(
-        "cave_plan_underground_candidate",
-        not underground_plan.is_empty() and String(underground_plan.get("kind", "")) == "underground",
-        "kind %s, variation %.2f, entrance %s" % [String(underground_plan.get("kind", "")), float(underground_plan.get("entranceVariation", 0.0)), str(underground_plan.get("entranceCell", Vector2i.ZERO))]
-    )
-    if cliff_plan.is_empty():
-        restore_cave_test_state(original_height_edits, original_position)
+    var found: Dictionary = world_generation.call("find_cave_biome_sample", 16)
+    var feature: Dictionary = found.get("feature", {}) if found.has("feature") else {}
+    if feature.is_empty():
+        add_result("cave_biome_volume_generation", false, "no cave biome volume found")
         return
 
-    var contiguous: bool = bool(structure_system.call("cave_plan_is_contiguous", cliff_plan))
-    var graph_nodes: Array = cliff_plan.get("caveNodes", [])
-    var graph_edges: Array = cliff_plan.get("caveEdges", [])
-    var branch_chambers: Array = cliff_plan.get("branchChamberIds", [])
-    var dead_end_chambers: Array = cliff_plan.get("deadEndChamberIds", [])
-    var narrow_edges := cave_narrow_edge_count(cliff_plan)
-    var min_edge_radius := cave_min_edge_radius(cliff_plan)
-    var graph_ok := graph_nodes.size() >= 6 and graph_edges.size() >= 6 and branch_chambers.size() >= 1 and dead_end_chambers.size() >= 1 and narrow_edges >= 1
+    var continuity := cave_volume_smoke_summary(world_generation, feature)
+    var load_position := cave_outside_player_position(world_generation, feature)
+    player.global_position = load_position
+    player.velocity = Vector3.ZERO
+    if main.has_method("update_chunks"):
+        main.call("update_chunks", true)
+    for cell in cave_volume_focus_cells(world_generation, feature):
+        if main.has_method("rebuild_chunks_around_cell"):
+            main.call("rebuild_chunks_around_cell", cell)
+    if main.has_method("update_chunks"):
+        main.call("update_chunks", true)
+    var geometry := cave_volume_chunk_geometry_summary()
+    var sample: Dictionary = found.get("sample", {}) if found.has("sample") else {}
+    var passed := not found.is_empty() \
+        and String(sample.get("biome", "")) == "cave" \
+        and String(sample.get("material", "")) == "air" \
+        and not bool(sample.get("solid", true)) \
+        and bool(continuity.get("passed", false)) \
+        and bool(geometry.get("passed", false))
     add_result(
-        "cave_plan_path_contiguous",
-        contiguous and graph_ok,
-        "pathLength %d, chamberRadius %d, graph nodes/edges/branches/deadEnds %d/%d/%d/%d, narrowEdges %d, minEdgeRadius %.2f" % [
-            int(cliff_plan.get("pathLength", 0)),
-            int(cliff_plan.get("chamberRadius", 0)),
-            graph_nodes.size(),
-            graph_edges.size(),
-            branch_chambers.size(),
-            dead_end_chambers.size(),
-            narrow_edges,
-            min_edge_radius
+        "cave_biome_volume_generation",
+        passed,
+        "found %s, continuity %s, geometry %s" % [
+            JSON.stringify(cave_volume_summary(found)),
+            JSON.stringify(continuity),
+            JSON.stringify(geometry)
         ]
     )
+    player.global_position = original_position
+    player.velocity = Vector3.ZERO
 
-    var natural_plan: Dictionary = structure_system.call("find_cave_plan_sample", "", 10, true)
-    if not natural_plan.is_empty():
-        structure_system.call("update_around", natural_plan.get("entranceCell", Vector2i.ZERO))
-        var natural_records: Dictionary = structure_system.call("cave_records_snapshot")
-        add_result("cave_update_around_generates_spawned_cave", natural_records.size() >= 1, "records %d, natural %s" % [natural_records.size(), String(natural_plan.get("id", ""))])
-        cleanup_generated_blocks()
-        if main.has_method("restore_height_edits"):
-            main.call("restore_height_edits", original_height_edits)
-    else:
-        add_result("cave_update_around_generates_spawned_cave", true, "no natural cave spawn found near test search radius for seed; direct generator coverage still ran")
-
-    var rng := RandomNumberGenerator.new()
-    rng.seed = 827441
-    structure_system.call("build_cave", cliff_plan, rng)
-
-    var blocks := get_blocks()
-    var cave_path_blocks := 0
-    var cave_wall_blocks := 0
-    var cave_torches := 0
-    var small_cave_torches := 0
-    var cave_supports := 0
-    var cave_chests := 0
-    var chest_has_crafting_book := false
-    var cave_block_layer_summary := { "visuals": 0, "nonCaveLayerVisuals": 0 }
-    var final_chest_cell: Vector2i = cliff_plan.get("finalChestCell", Vector2i.ZERO)
-    for block_value in blocks.values():
-        var body := block_value as Node
-        if body == null or not body.has_meta("generatedTier") or String(body.get_meta("generatedTier")) != "cave":
-            continue
-        add_cave_layer_summary(cave_block_layer_summary, body)
-        var block_type := String(body.get_meta("block_type", ""))
-        var role := String(body.get_meta("caveRole", ""))
-        if block_type == "cobblestonePath":
-            cave_path_blocks += 1
-        if role == "wall" or role == "entrance_arch" or role == "ore_vein":
-            cave_wall_blocks += 1
-        if block_type == "torch":
-            cave_torches += 1
-            if float(body.get_meta("torchVisualScale", 1.0)) <= 0.36:
-                small_cave_torches += 1
-        if role.begins_with("support_"):
-            cave_supports += 1
-        if block_type == "chest":
-            cave_chests += 1
-            chest_has_crafting_book = chest_has_crafting_book or cave_chest_has_crafting_book(body)
-            var cell: Vector3i = body.get_meta("cell", Vector3i.ZERO)
-            final_chest_cell = Vector2i(cell.x, cell.z)
-    var records: Dictionary = structure_system.call("cave_records_snapshot")
-    var cave_navigation_records: Dictionary = structure_system.call("cave_navigation_records_snapshot") if structure_system.has_method("cave_navigation_records_snapshot") else {}
-    var counts: Dictionary = structure_system.call("counts")
-    var height_edits := get_height_edits()
-    var cave_id := String(cliff_plan.get("id", ""))
-    cave_supports += cave_support_frame_count(structure_system, cave_id)
-    var interior_layer_summary := cave_interior_layer_summary(structure_system, cave_id)
-    var floor_summary := cave_floor_variation_summary(structure_system, cliff_plan)
-    var final_chamber_cell: Vector2i = cliff_plan.get("finalChamberCell", Vector2i.ZERO)
-    var final_chamber_nav_id := String(structure_system.call("cave_navigation_id_for_cell", final_chamber_cell.x, final_chamber_cell.y)) if structure_system.has_method("cave_navigation_id_for_cell") else ""
-    var interior_shells := cave_interior_shell_count(structure_system, cave_id)
-    var shaping_cells: Array = structure_system.call("cave_shaping_cells", cliff_plan) if structure_system.has_method("cave_shaping_cells") else []
-    var stone_override_samples := 0
-    var prop_exclusion_samples := 0
-    var stone_sample_total := mini(shaping_cells.size(), 12)
-    for i in range(stone_sample_total):
-        var stone_cell: Vector2i = shaping_cells[i]
-        if structure_system.has_method("terrain_material_override_for_cell") and String(structure_system.call("terrain_material_override_for_cell", stone_cell.x, stone_cell.y)) == "stone":
-            stone_override_samples += 1
-        if structure_system.has_method("blocks_natural_prop_at_cell") and bool(structure_system.call("blocks_natural_prop_at_cell", stone_cell.x, stone_cell.y)):
-            prop_exclusion_samples += 1
-    var cave_build_ok: bool = (
-        int(counts.get("caves", 0)) >= 1
-        and records.has(cave_id)
-        and cave_navigation_records.has(cave_id)
-        and final_chamber_nav_id == cave_id
-        and interior_shells == 1
-        and cave_path_blocks == 0
-        and cave_wall_blocks == 0
-        and cave_torches >= 2
-        and cave_torches <= 6
-        and small_cave_torches == cave_torches
-        and cave_supports >= 2
-        and cave_chests == 1
-        and chest_has_crafting_book
-        and height_edits.size() > 0
-        and int(cave_block_layer_summary.get("nonCaveLayerVisuals", 0)) == 0
-        and int(interior_layer_summary.get("caveLayerVisuals", 0)) >= 1
-        and int(interior_layer_summary.get("nonCaveLayerVisuals", 0)) == 0
-        and float(floor_summary.get("range", 0.0)) >= 0.35
-        and float(floor_summary.get("maxNeighborStep", 999.0)) <= CELL * 0.60
-        and final_chest_cell == cliff_plan.get("finalChestCell", Vector2i.ZERO)
-        and stone_sample_total > 0
-        and stone_override_samples == stone_sample_total
-        and prop_exclusion_samples == stone_sample_total
-    )
-    add_result(
-        "cave_generation_and_book_loot",
-        cave_build_ok,
-        "counts %s, records/nav %s/%s, navId %s, shell %d, path/wall/torch/smallTorch/support/chest %d/%d/%d/%d/%d/%d, book %s, heightEdits %d, layers blocks/interior %s/%s, floor %s, stoneSamples %d/%d, propExclusionSamples %d/%d, finalChest %s" % [
-            str(counts),
-            str(records.has(cave_id)),
-            str(cave_navigation_records.has(cave_id)),
-            final_chamber_nav_id,
-            interior_shells,
-            cave_path_blocks,
-            cave_wall_blocks,
-            cave_torches,
-            small_cave_torches,
-            cave_supports,
-            cave_chests,
-            str(chest_has_crafting_book),
-            height_edits.size(),
-            JSON.stringify(cave_block_layer_summary),
-            JSON.stringify(interior_layer_summary),
-            JSON.stringify(floor_summary),
-            stone_override_samples,
-            stone_sample_total,
-            prop_exclusion_samples,
-            stone_sample_total,
-            str(final_chest_cell)
-        ]
-    )
-    restore_cave_test_state(original_height_edits, original_position)
-
-func cave_narrow_edge_count(plan: Dictionary) -> int:
-    var count := 0
-    var edges_value = plan.get("caveEdges", [])
-    if not (edges_value is Array):
-        return 0
-    for edge_value in edges_value:
-        if not (edge_value is Dictionary):
-            continue
-        if float((edge_value as Dictionary).get("radius", 999.0)) <= 1.25:
-            count += 1
-    return count
-
-func cave_min_edge_radius(plan: Dictionary) -> float:
-    var min_radius := INF
-    var edges_value = plan.get("caveEdges", [])
-    if not (edges_value is Array):
-        return 0.0
-    for edge_value in edges_value:
-        if not (edge_value is Dictionary):
-            continue
-        min_radius = minf(min_radius, float((edge_value as Dictionary).get("radius", 0.0)))
-    return snappedf(0.0 if min_radius == INF else min_radius, 0.001)
-
-func cave_interior_shell_count(structure_system, cave_id: String) -> int:
-    if structure_system == null:
-        return 0
-    var nodes_value = structure_system.get("cave_interior_nodes")
-    if not (nodes_value is Dictionary):
-        return 0
-    var shells := 0
-    for node_value in (nodes_value as Dictionary).values():
-        var node := node_value as Node
-        if node == null or not is_instance_valid(node):
-            continue
-        if String(node.get_meta("caveId", "")) == cave_id and String(node.get_meta("caveRole", "")) == "interior_shell":
-            shells += 1
-    return shells
-
-func cave_support_frame_count(structure_system, cave_id: String) -> int:
-    if structure_system == null:
-        return 0
-    var nodes_value = structure_system.get("cave_interior_nodes")
-    if not (nodes_value is Dictionary):
-        return 0
-    var frames := 0
-    for node_value in (nodes_value as Dictionary).values():
-        var node := node_value as Node
-        if node == null or not is_instance_valid(node):
-            continue
-        frames += count_cave_support_frames(node, cave_id)
-    return frames
-
-func count_cave_support_frames(node: Node, cave_id: String) -> int:
-    var count := 0
-    if String(node.get_meta("caveId", "")) == cave_id and String(node.get_meta("caveRole", "")) == "support_frame":
-        count += 1
-    for child in node.get_children():
-        count += count_cave_support_frames(child, cave_id)
-    return count
-
-func cave_interior_layer_summary(structure_system, cave_id: String) -> Dictionary:
-    var summary := { "visuals": 0, "caveLayerVisuals": 0, "nonCaveLayerVisuals": 0 }
-    if structure_system == null:
-        return summary
-    var nodes_value = structure_system.get("cave_interior_nodes")
-    if not (nodes_value is Dictionary):
-        return summary
-    for node_value in (nodes_value as Dictionary).values():
-        var node := node_value as Node
-        if node == null or not is_instance_valid(node):
-            continue
-        if String(node.get_meta("caveId", "")) == cave_id:
-            add_cave_layer_summary(summary, node)
-    return summary
-
-func add_cave_layer_summary(summary: Dictionary, node: Node) -> void:
-    if node is VisualInstance3D:
-        summary["visuals"] = int(summary.get("visuals", 0)) + 1
-        if int((node as VisualInstance3D).layers) == 2:
-            summary["caveLayerVisuals"] = int(summary.get("caveLayerVisuals", 0)) + 1
+func cave_volume_smoke_summary(world_generation, feature: Dictionary) -> Dictionary:
+    var radius := float(feature.get("radius", CELL * 2.0))
+    var length := float(feature.get("length", CELL * 24.0))
+    var front_air := 0
+    var interior_air := 0
+    var wall_solids := 0
+    var cover_solids := 0
+    var failures := []
+    for depth in [0.0, CELL * 0.75, CELL * 1.5]:
+        for lateral_scale in [-0.62, 0.0, 0.62]:
+            var pos := cave_volume_tunnel_position(world_generation, feature, float(depth), radius * float(lateral_scale), 0.0)
+            var sample: Dictionary = world_generation.call("sample_world", pos)
+            if String(sample.get("biome", "")) == "cave" and not bool(sample.get("solid", true)):
+                front_air += 1
+            else:
+                failures.append({ "kind": "front", "position": vec3_dictionary(pos), "sample": cave_sample_signature(sample) })
+    for depth in [CELL * 3.0, clampf(CELL * 8.0, CELL * 3.0, length * 0.55)]:
+        var center := cave_volume_tunnel_position(world_generation, feature, float(depth), 0.0, 0.0)
+        var center_sample: Dictionary = world_generation.call("sample_world", center)
+        if String(center_sample.get("biome", "")) == "cave" and not bool(center_sample.get("solid", true)):
+            interior_air += 1
         else:
-            summary["nonCaveLayerVisuals"] = int(summary.get("nonCaveLayerVisuals", 0)) + 1
-    for child in node.get_children():
-        add_cave_layer_summary(summary, child)
+            failures.append({ "kind": "interior", "position": vec3_dictionary(center), "sample": cave_sample_signature(center_sample) })
+        for side in [-1.0, 1.0]:
+            var side_pos := cave_volume_tunnel_position(world_generation, feature, float(depth), radius * 1.22 * float(side), 0.0)
+            var side_sample: Dictionary = world_generation.call("sample_world", side_pos)
+            if bool(side_sample.get("solid", false)):
+                wall_solids += 1
+            else:
+                failures.append({ "kind": "wall", "position": vec3_dictionary(side_pos), "sample": cave_sample_signature(side_sample) })
+        if float(depth) >= CELL * 7.0:
+            var cover_pos := cave_volume_tunnel_position(world_generation, feature, float(depth), 0.0, radius * 0.96)
+            var cover_sample: Dictionary = world_generation.call("sample_world", cover_pos)
+            if bool(cover_sample.get("solid", false)):
+                cover_solids += 1
+            else:
+                failures.append({ "kind": "cover", "position": vec3_dictionary(cover_pos), "sample": cave_sample_signature(cover_sample) })
+    return {
+        "passed": front_air >= 6 and interior_air == 2 and wall_solids == 4 and cover_solids >= 1 and failures.is_empty(),
+        "frontAirSamples": front_air,
+        "interiorAirSamples": interior_air,
+        "wallSolidSamples": wall_solids,
+        "coverSolidSamples": cover_solids,
+        "failures": failures
+    }
 
-func cave_floor_variation_summary(structure_system, plan: Dictionary) -> Dictionary:
-    if structure_system == null:
-        return {}
-    var builder = structure_system.get("cave_interior_builder")
-    if builder == null or not builder.has_method("floor_variation_summary"):
-        return {}
-    return builder.call("floor_variation_summary", plan)
-
-func cave_chest_has_crafting_book(chest: Node) -> bool:
-    if chest == null or not chest.has_meta("storage_slots"):
-        return false
-    var slots: Array = chest.get_meta("storage_slots")
-    for slot in slots:
-        if not (slot is Dictionary):
+func cave_volume_chunk_geometry_summary() -> Dictionary:
+    var chunks := get_chunks()
+    var meshes := 0
+    var bodies := 0
+    var shapes := 0
+    for chunk_value in chunks.values():
+        var chunk := chunk_value as Node
+        if chunk == null:
             continue
-        var item_id := String(slot.get("item", ""))
-        if item_id.begins_with("craftingBook") or item_id.begins_with("rareBook"):
-            return int(slot.get("count", 0)) > 0
-    return false
+        var mesh := chunk.get_node_or_null("TerrainMesh") as MeshInstance3D
+        if mesh != null and mesh.mesh != null:
+            meshes += 1
+        var body := chunk.get_node_or_null("TerrainBody") as StaticBody3D
+        if body != null:
+            bodies += 1
+            var shape := body.get_node_or_null("TerrainCollision") as CollisionShape3D
+            if shape != null and shape.shape != null:
+                shapes += 1
+    return {
+        "passed": meshes > 0 and meshes == bodies and bodies == shapes,
+        "chunks": chunks.size(),
+        "meshes": meshes,
+        "bodies": bodies,
+        "shapes": shapes
+    }
 
-func restore_cave_test_state(height_snapshot, position: Vector3) -> void:
-    cleanup_generated_blocks()
-    if main != null and main.has_method("restore_height_edits"):
-        main.call("restore_height_edits", height_snapshot)
-    if player != null:
-        player.global_position = position
+func cave_volume_focus_cells(world_generation, feature: Dictionary) -> Array[Vector2i]:
+    var cells: Array[Vector2i] = []
+    cells.append(feature.get("entranceCell", Vector2i.ZERO))
+    var mid := cave_volume_tunnel_position(world_generation, feature, CELL * 8.0, 0.0, 0.0)
+    var chamber := cave_volume_tunnel_position(world_generation, feature, float(feature.get("length", CELL * 24.0)), 0.0, 0.0)
+    cells.append(Vector2i(roundi(mid.x / CELL), roundi(mid.z / CELL)))
+    cells.append(Vector2i(roundi(chamber.x / CELL), roundi(chamber.z / CELL)))
+    return cells
+
+func cave_outside_player_position(world_generation, feature: Dictionary) -> Vector3:
+    var radius := float(feature.get("radius", CELL * 2.0))
+    var entrance := cave_volume_entrance_world2(feature)
+    var outside2 := entrance - cave_volume_inward2(feature) * radius * 4.0
+    var ground_y := cave_volume_ground_y(world_generation, outside2, float(feature.get("entranceSurfaceY", 0.0)))
+    return Vector3(outside2.x, ground_y + 1.35, outside2.y)
+
+func cave_volume_tunnel_position(world_generation, feature: Dictionary, depth: float, lateral := 0.0, lift := 0.0) -> Vector3:
+    var clamped_depth := clampf(depth, 0.0, float(feature.get("length", CELL * 24.0)))
+    var center2 := cave_volume_entrance_world2(feature) + cave_volume_inward2(feature) * clamped_depth
+    var center_y := float(world_generation.call("cave_feature_center_y", feature, center2, clamped_depth))
+    var right := cave_volume_right2(feature)
+    return Vector3(center2.x + right.x * lateral, center_y + lift, center2.y + right.y * lateral)
+
+func cave_volume_ground_y(world_generation, pos2: Vector2, fallback_y: float) -> float:
+    var cell_x := roundi(pos2.x / CELL)
+    var cell_z := roundi(pos2.y / CELL)
+    for y in range(96, -16, -1):
+        var solid_sample: Dictionary = world_generation.call("sample_cell", Vector3i(cell_x, y, cell_z))
+        var air_sample: Dictionary = world_generation.call("sample_cell", Vector3i(cell_x, y + 1, cell_z))
+        if bool(solid_sample.get("solid", false)) and not bool(air_sample.get("solid", true)):
+            return float(y + 1) * CELL
+    return fallback_y
+
+func cave_volume_entrance_world2(feature: Dictionary) -> Vector2:
+    var entrance_cell: Vector2i = feature.get("entranceCell", Vector2i.ZERO)
+    return Vector2(float(entrance_cell.x) * CELL, float(entrance_cell.y) * CELL)
+
+func cave_volume_inward2(feature: Dictionary) -> Vector2:
+    var cell: Vector2i = feature.get("inward", Vector2i(0, 1))
+    return Vector2(float(cell.x), float(cell.y)).normalized()
+
+func cave_volume_right2(feature: Dictionary) -> Vector2:
+    var cell: Vector2i = feature.get("right", Vector2i(1, 0))
+    return Vector2(float(cell.x), float(cell.y)).normalized()
+
+func cave_volume_summary(found: Dictionary) -> Dictionary:
+    var feature: Dictionary = found.get("feature", {}) if found.has("feature") else {}
+    var sample: Dictionary = found.get("sample", {}) if found.has("sample") else {}
+    return {
+        "id": String(feature.get("id", "")),
+        "region": vec2i_dictionary(feature.get("region", Vector2i.ZERO)),
+        "entranceCell": vec2i_dictionary(feature.get("entranceCell", Vector2i.ZERO)),
+        "position": vec3_dictionary(found.get("position", Vector3.ZERO)),
+        "radius": snappedf(float(feature.get("radius", 0.0)), 0.001),
+        "length": snappedf(float(feature.get("length", 0.0)), 0.001),
+        "sample": cave_sample_signature(sample)
+    }
+
+func cave_sample_signature(sample: Dictionary) -> Dictionary:
+    return {
+        "density": snappedf(float(sample.get("density", 0.0)), 0.001),
+        "solid": bool(sample.get("solid", false)),
+        "biome": String(sample.get("biome", "")),
+        "material": String(sample.get("material", "")),
+        "surface": bool(sample.get("surface", false))
+    }
+
+func vec2i_dictionary(value) -> Dictionary:
+    var vector: Vector2i = value if value is Vector2i else Vector2i.ZERO
+    return { "x": vector.x, "z": vector.y }
+
+func vec3_dictionary(value) -> Dictionary:
+    var vector: Vector3 = value if value is Vector3 else Vector3.ZERO
+    return {
+        "x": snappedf(vector.x, 0.001),
+        "y": snappedf(vector.y, 0.001),
+        "z": snappedf(vector.z, 0.001)
+    }
 
 func test_ore_generation_and_drops() -> void:
     if not main:
@@ -5931,7 +5866,7 @@ func test_generated_environment_prop_visuals() -> void:
         disabled_tree = registry.select_tree_asset_id("forest", "playtest:fallback:tree")
         var fallback_position := player.global_position + Vector3(10.5, 0.0, 7.0)
         var fallback_rock_position := fallback_position + Vector3(1.7, 0.0, 0.0)
-        var fallback_rock_biome: String = main.call("biome_at_cell", roundi(fallback_rock_position.x / CELL), roundi(fallback_rock_position.z / CELL))
+        var fallback_rock_biome: String = surface_biome_at_cell2(Vector2i(roundi(fallback_rock_position.x / CELL), roundi(fallback_rock_position.z / CELL)))
         disabled_rock = registry.select_rock_asset_id(fallback_rock_biome, "playtest:fallback:rock")
         registry.disable_asset_for_test(disabled_tree)
         registry.disable_asset_for_test(disabled_rock)
@@ -6167,7 +6102,7 @@ func test_spawn_clearance() -> void:
     if not player or not camera:
         add_result("spawn_clearance", false, "player or camera missing")
         return
-    var terrain_height: float = main.call("height_at_world", player.global_position.x, player.global_position.z)
+    var terrain_height: float = ground_y_near_position(player.global_position)
     var camera_clearance: float = camera.global_position.y - terrain_height
     var above_water: bool = player.global_position.y > WATER_LEVEL + 1.2
     var clear: bool = camera_clearance > 1.25 and above_water
@@ -6192,12 +6127,13 @@ func test_terrain_collision_shapes() -> void:
 
 func test_terrain_mesh_topology_signature() -> void:
     var chunks := get_chunks()
-    var expected_vertices := CHUNK_SIZE * CHUNK_SIZE * 6 + CHUNK_SIZE * 4 * 6
     var checked := 0
-    var matching := 0
+    var nonempty := 0
+    var volume_sourced := 0
+    var mesh_collision_sourced := 0
     var with_normals := 0
-    for chunk_node in chunks.values():
-        var chunk := chunk_node as Node
+    for key_value in chunks.keys():
+        var chunk := chunks.get(key_value) as Node
         var mesh := terrain_mesh_for_chunk(chunk)
         if mesh == null or mesh.get_surface_count() == 0:
             continue
@@ -6205,14 +6141,21 @@ func test_terrain_mesh_topology_signature() -> void:
         var arrays := mesh.surface_get_arrays(0)
         var vertices: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
         var normals: PackedVector3Array = arrays[Mesh.ARRAY_NORMAL]
-        if vertices.size() == expected_vertices:
-            matching += 1
+        if vertices.size() > 0:
+            nonempty += 1
         if normals.size() == vertices.size() and normals.size() > 0:
             with_normals += 1
+        var mesh_instance := chunk.get_node_or_null("TerrainMesh") as MeshInstance3D
+        var body := chunk.get_node_or_null("TerrainBody") as StaticBody3D
+        var collision := body.get_node_or_null("TerrainCollision") as CollisionShape3D if body != null else null
+        if mesh_instance != null and String(mesh_instance.get_meta("geometry_source", "")) == "volume_sample_extraction":
+            volume_sourced += 1
+        if collision != null and collision.shape != null and String(collision.get_meta("collision_source", "")) == "terrain_mesh_create_trimesh_shape":
+            mesh_collision_sourced += 1
     add_result(
         "terrain_mesh_topology_signature",
-        checked > 0 and checked == matching and checked == with_normals,
-        "%d/%d chunks match %d vertices, normals %d/%d" % [matching, checked, expected_vertices, with_normals, checked]
+        checked > 0 and checked == nonempty and checked == with_normals and checked == volume_sourced and checked == mesh_collision_sourced,
+        "%d/%d nonempty, normals %d/%d, volume source %d/%d, mesh collision %d/%d" % [nonempty, checked, with_normals, checked, volume_sourced, checked, mesh_collision_sourced, checked]
     )
 
 func test_terrain_shader_material() -> void:
@@ -6340,8 +6283,8 @@ func test_terrain_generation_profile() -> void:
     var max_mountain := 0.0
     for z in range(-360, 361, 12):
         for x in range(-360, 361, 12):
-            var height := float(main.call("terrain_height_cell", x, z))
-            var biome := String(main.call("biome_at_cell", x, z))
+            var height := surface_y_at_cell_coords(x, z)
+            var biome := surface_biome_at_cell2(Vector2i(x, z))
             if normal_biomes.has(biome) and height > WATER_LEVEL + 2.4 and height < 56.0:
                 var variation := float(main.call("height_variation_cell", x, z, 1))
                 variation_total += variation
@@ -6357,7 +6300,7 @@ func test_terrain_generation_profile() -> void:
     var mountain_target_found := mountain_cell != Vector2i(999999, 999999)
     var mountain_target_height := 0.0
     if mountain_target_found:
-        mountain_target_height = float(main.call("terrain_height_cell", mountain_cell.x, mountain_cell.y))
+        mountain_target_height = surface_y_at_cell2(mountain_cell)
         max_mountain = maxf(max_mountain, mountain_target_height)
     var mountain_ok := (mountain_samples > 0 and max_mountain >= 62.0) or (mountain_target_found and mountain_target_height >= 62.0)
     add_result(
@@ -6388,7 +6331,7 @@ func test_world_chunk_streaming() -> void:
     var cache_before: Dictionary = main.call("chunk_asset_cache_stats")
     var target_x := original_position.x + CELL * 128.0
     var target_z := original_position.z + CELL * 96.0
-    var target_y: float = float(main.call("height_at_world", target_x, target_z)) + 0.45
+    var target_y: float = surface_y_at_position(Vector3(target_x, 0.0, target_z)) + 0.45
     player.global_position = Vector3(target_x, target_y, target_z)
     main.call("update_chunks", true)
     await wait_physics_frames(2)
@@ -6428,9 +6371,9 @@ func test_world_chunk_streaming() -> void:
         direct_cache_after_second = main.call("chunk_asset_cache_stats")
         cache_hit = int(direct_cache_after_second.get("hits", 0)) > int(direct_cache_after_first.get("hits", 0))
     var invalidations_before: int = int(cache_after_return.get("invalidations", 0))
-    var edits := get_height_edits()
+    var edits := get_volume_edit_markers()
     var edit_cell := Vector2i(main.call("world_to_cell", original_position.x), main.call("world_to_cell", original_position.z))
-    edits[edit_cell] = float(main.call("terrain_height_cell", edit_cell.x, edit_cell.y)) + CELL
+    edits[edit_cell] = surface_y_at_cell2(edit_cell) + CELL
     main.call("rebuild_chunks_around_cell", edit_cell)
     var cache_after_invalidation: Dictionary = main.call("chunk_asset_cache_stats")
     var invalidated: bool = int(cache_after_invalidation.get("invalidations", 0)) > invalidations_before
@@ -6580,15 +6523,15 @@ func test_environment_visual_style() -> void:
     main.call("update_sky", 0.0)
     var range_ok := noon_sun >= 0.55 \
         and noon_sun <= 1.70 \
-        and noon_ambient >= 0.34 \
-        and noon_ambient <= 0.62 \
+        and noon_ambient >= 0.0 \
+        and noon_ambient <= 0.01 \
         and noon_fog >= 0.002 \
         and noon_fog <= 0.020 \
         and night_sun <= 0.04 \
         and night_moon >= 0.02 \
         and night_moon <= 0.12 \
-        and night_ambient >= 0.02 \
-        and night_ambient <= 0.09 \
+        and night_ambient >= 0.0 \
+        and night_ambient <= 0.01 \
         and night_fog >= 0.004 \
         and night_fog <= 0.030 \
         and night_fog_energy <= 0.14 \
@@ -6769,7 +6712,7 @@ func test_player_movement() -> void:
     var path_base := Vector2i(roundi(player.global_position.x / CELL) + 8, roundi(player.global_position.z / CELL) + 2)
     reset_player_on_flat_patch(path_base)
     await wait_physics_frames(8)
-    var path_ground: float = main.call("terrain_height_cell", path_base.x, path_base.y)
+    var path_ground: float = surface_y_at_cell2(path_base)
     var path_cells: Array[Vector3i] = []
     var blocks := get_blocks()
     for dx in range(0, 6):
@@ -6821,8 +6764,8 @@ func test_uphill_smoothing() -> void:
     clear_blocks_near_cell(start_cell, 8)
     clear_props_near_cell(start_cell, 8)
     await wait_physics_frames(4)
-    var base_height: float = main.call("terrain_height_cell", start_cell.x, start_cell.y)
-    var edits := get_height_edits()
+    var base_height: float = surface_y_at_cell2(start_cell)
+    var edits := get_volume_edit_markers()
 
     for dz in range(-1, 2):
         edits[Vector2i(start_cell.x, start_cell.y + dz)] = base_height
@@ -6859,8 +6802,8 @@ func test_steep_uphill_blocking() -> void:
         return
 
     var start_cell := Vector2i(roundi(player.global_position.x / CELL) + 6, roundi(player.global_position.z / CELL))
-    var base_height: float = main.call("terrain_height_cell", start_cell.x, start_cell.y)
-    var edits := get_height_edits()
+    var base_height: float = surface_y_at_cell2(start_cell)
+    var edits := get_volume_edit_markers()
 
     for dz in range(-1, 2):
         edits[Vector2i(start_cell.x, start_cell.y + dz)] = base_height
@@ -6896,9 +6839,9 @@ func test_airborne_obstacle_blocking() -> void:
         return
 
     var start_cell := Vector2i(roundi(player.global_position.x / CELL) + 9, roundi(player.global_position.z / CELL))
-    var base_height: float = main.call("terrain_height_cell", start_cell.x, start_cell.y)
+    var base_height: float = surface_y_at_cell2(start_cell)
     var obstacle_height: float = base_height + CELL * 4.0
-    var edits := get_height_edits()
+    var edits := get_volume_edit_markers()
 
     for dz in range(-2, 3):
         for dx in range(-2, 4):
@@ -7113,7 +7056,7 @@ func test_right_mouse_interaction_input() -> void:
     clear_props_near_cell(base_cell, 8)
     await wait_physics_frames(8)
 
-    var ground_y: float = main.call("terrain_height_cell", base_cell.x, base_cell.y - 2)
+    var ground_y: float = surface_y_at_cell2(base_cell + Vector2i(0, -2))
     var door_cell := Vector3i(base_cell.x, floori(ground_y / CELL) + 1, base_cell.y - 2)
     var door := main.call("create_block", door_cell, "door") as StaticBody3D
     await wait_physics_frames(6)
@@ -7644,10 +7587,10 @@ func get_blocks() -> Dictionary:
         return value
     return {}
 
-func get_height_edits() -> Dictionary:
+func get_volume_edit_markers() -> Dictionary:
     if not main:
         return {}
-    var value: Variant = main.get("height_edits")
+    var value: Variant = main.get("volume_edit_markers")
     if value is Dictionary:
         return value
     return {}
@@ -8270,8 +8213,8 @@ func aim_player_at(world_point: Vector3) -> void:
 func reset_player_on_flat_patch(center_cell: Vector2i, radius := 5) -> void:
     if not main or not player:
         return
-    var base_height: float = main.call("terrain_height_cell", center_cell.x, center_cell.y)
-    var edits := get_height_edits()
+    var base_height: float = surface_y_at_cell2(center_cell)
+    var edits := get_volume_edit_markers()
     for dz in range(-radius, radius + 1):
         for dx in range(-radius, radius + 1):
             edits[Vector2i(center_cell.x + dx, center_cell.y + dz)] = base_height

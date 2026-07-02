@@ -29,9 +29,9 @@ class_name VisualStyle
 @export_range(0.0, 3.0, 0.01) var sun_max_energy := 1.48
 @export_range(0.0, 3.0, 0.01) var moon_min_energy := 0.012
 @export_range(0.0, 3.0, 0.01) var moon_max_energy := 0.08
-@export_range(0.0, 2.0, 0.01) var ambient_min_energy := 0.035
-@export_range(0.0, 2.0, 0.01) var ambient_max_energy := 0.52
-@export_range(0.0, 1.0, 0.01) var ambient_sky_contribution := 0.34
+@export_range(0.0, 2.0, 0.01) var ambient_min_energy := 0.0
+@export_range(0.0, 2.0, 0.01) var ambient_max_energy := 0.0
+@export_range(0.0, 1.0, 0.01) var ambient_sky_contribution := 0.0
 @export_range(0.0, 2.0, 0.01) var sunset_sun_boost := 0.08
 
 @export_group("Weather")
@@ -46,7 +46,7 @@ class_name VisualStyle
 @export_range(0.0, 1.0, 0.01) var rain_moon_shade := 0.34
 @export_range(0.0, 1.0, 0.01) var max_weather_tint := 0.46
 @export_range(0.0, 1.0, 0.01) var weather_ambient_tint := 0.16
-@export_range(0.0, 1.0, 0.01) var weather_ambient_floor := 0.38
+@export_range(0.0, 1.0, 0.01) var weather_ambient_floor := 0.0
 
 @export_group("Fog")
 @export var fog_day := Color(0.64, 0.76, 0.76)

@@ -323,7 +323,7 @@ func height_for_cell(cell: Vector2i) -> float:
         return 0.0
     if height_cache.has(cell):
         return float(height_cache[cell])
-    var y: float = main.terrain_height_cell(cell.x, cell.y) if main.has_method("terrain_height_cell") else main.height_at_world(float(cell.x) * CELL, float(cell.y) * CELL)
+    var y: float = float(main.call("surface_y_at_cell", Vector3i(cell.x, 0, cell.y))) if main.has_method("surface_y_at_cell") else 0.0
     height_cache[cell] = y
     return y
 

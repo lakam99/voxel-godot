@@ -314,8 +314,12 @@ func add_campfire_visual(parent: Node3D) -> void:
     add_block_mesh(parent, Vector3(CELL * 0.15, CELL * 0.38, CELL * 0.15), Vector3(0.0, -CELL * 0.03, 0.0), "furnaceGlow", Vector3(0.0, -0.78, 0.0))
     add_world_light_rig(parent, "campfire")
 
-func add_torch_visual(parent: Node3D, visual_scale := 1.0) -> void:
+func add_torch_visual(parent: Node3D, visual_scale := 1.0, options: Dictionary = {}) -> void:
     visual_scale = clampf(float(visual_scale), 0.25, 1.5)
+    if bool(options.get("torchWallMount", false)):
+        add_wall_torch_visual(parent, visual_scale)
+        add_wall_torch_light_rig(parent, visual_scale)
+        return
     if add_generated_static_utility_visual(parent, "torch", CELL * visual_scale) != null:
         add_world_light_rig(parent, "torch")
         return
@@ -323,6 +327,35 @@ func add_torch_visual(parent: Node3D, visual_scale := 1.0) -> void:
     add_block_mesh(parent, Vector3(CELL * 0.22, CELL * 0.12, CELL * 0.22) * visual_scale, Vector3(0.0, CELL * 0.38 * visual_scale, 0.0), "torch")
     add_block_mesh(parent, Vector3(CELL * 0.18, CELL * 0.24, CELL * 0.18) * visual_scale, Vector3(0.0, CELL * 0.56 * visual_scale, 0.0), "flame")
     add_world_light_rig(parent, "torch")
+
+func add_wall_torch_light_rig(parent: Node3D, visual_scale := 1.0) -> Dictionary:
+    var s := clampf(float(visual_scale), 0.25, 0.75)
+    var flame_position := Vector3(0.0, CELL * 0.52 * s, -CELL * 0.32 * s)
+    return LocalLightRigScript.add_rig(parent, "torch", {
+        "context": "placed",
+        "scale": CELL,
+        "source_position": flame_position,
+        "terrain_position": flame_position + Vector3(0.0, -CELL * 0.22, -CELL * 0.06),
+        "bounce_position": flame_position + Vector3(0.0, CELL * 0.24, -CELL * 0.03),
+        "source_energy": 6.60,
+        "source_range": 11.75,
+        "terrain_energy": 2.85,
+        "terrain_range": 8.90,
+        "bounce_energy": 1.35,
+        "bounce_range": 10.10,
+        "shadows": shadows_enabled
+    })
+
+func add_wall_torch_visual(parent: Node3D, visual_scale := 1.0) -> void:
+    var s := clampf(float(visual_scale), 0.25, 0.75)
+    var plate := add_block_mesh(parent, Vector3(CELL * 0.24, CELL * 0.58, CELL * 0.20) * s, Vector3(0.0, CELL * 0.42 * s, CELL * 0.02 * s), "trunk")
+    plate.name = "WallTorchBackplate"
+    plate.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+    var bracket := add_block_mesh(parent, Vector3(CELL * 0.14, CELL * 0.12, CELL * 0.34) * s, Vector3(0.0, CELL * 0.41 * s, -CELL * 0.15 * s), "hingeMetal")
+    bracket.name = "WallTorchBracket"
+    bracket.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+    var body := add_block_mesh(parent, Vector3(CELL * 0.24, CELL * 0.30, CELL * 0.24) * s, Vector3(0.0, CELL * 0.52 * s, -CELL * 0.32 * s), "furnaceGlow")
+    body.name = "WallTorchGlow"
 
 func add_spike_trap_visual(parent: Node3D) -> void:
     if add_generated_static_utility_visual(parent, "spikeTrap") != null:
@@ -489,7 +522,9 @@ func create_block(cell: Vector3i, block_type: String, options: Dictionary = {}) 
     var body := StaticBody3D.new()
     body.name = "Block_%s_%d_%d_%d" % [block_type, cell.x, cell.y, cell.z]
     var world_y := float(options.get("world_y", cell.y * CELL))
-    body.position = Vector3(cell.x * CELL, world_y, cell.z * CELL)
+    var world_x := float(options.get("world_x", cell.x * CELL))
+    var world_z := float(options.get("world_z", cell.z * CELL))
+    body.position = Vector3(world_x, world_y, world_z)
     body.rotation.y = float(options.get("facing", 0.0))
     body.set_meta("kind", "block")
     body.set_meta("cell", cell)
@@ -526,7 +561,16 @@ func create_block(cell: Vector3i, block_type: String, options: Dictionary = {}) 
         "caveRole",
         "caveDepthIndex",
         "caveFinalLoot",
-        "torchVisualScale"
+        "torchVisualScale",
+        "torchWallMount",
+        "torchWallNormalX",
+        "torchWallNormalZ",
+        "torchWallSurfaceX",
+        "torchWallSurfaceZ",
+        "torchWallNormalWorldX",
+        "torchWallNormalWorldZ",
+        "torchWallAnchorCellX",
+        "torchWallAnchorCellZ"
     ]:
         if options.has(visual_key):
             body.set_meta(visual_key, options.get(visual_key))
@@ -573,6 +617,12 @@ func create_block(cell: Vector3i, block_type: String, options: Dictionary = {}) 
         var torch_visual_scale := clampf(float(options.get("torchVisualScale", 1.0)), 0.25, 1.5)
         mesh_size = Vector3(CELL * 0.18, CELL * 0.82, CELL * 0.18) * torch_visual_scale
         mesh_offset.y = CELL * 0.10 * torch_visual_scale
+        if bool(options.get("torchWallMount", false)):
+            var wall_normal := Vector2i(int(options.get("torchWallNormalX", 0)), int(options.get("torchWallNormalZ", 0)))
+            if wall_normal != Vector2i.ZERO and not options.has("facing"):
+                body.rotation.y = yaw_for_cell_direction(wall_normal)
+            mesh_size = Vector3(CELL * 0.30, CELL * 0.74, CELL * 0.30) * torch_visual_scale
+            mesh_offset.y = CELL * 0.38
     elif block_type == "spikeTrap":
         mesh_size = Vector3(CELL * 0.82, CELL * 0.30, CELL * 0.82)
         mesh_offset.y = -CELL * 0.28
@@ -600,7 +650,7 @@ func create_block(cell: Vector3i, block_type: String, options: Dictionary = {}) 
     elif block_type == "campfire":
         add_campfire_visual(body)
     elif block_type == "torch":
-        add_torch_visual(body, float(options.get("torchVisualScale", 1.0)))
+        add_torch_visual(body, float(options.get("torchVisualScale", 1.0)), options)
     elif block_type == "spikeTrap":
         add_spike_trap_visual(body)
     elif block_type == "wardLantern" or block_type == "sanctuaryBeacon" or block_type == "riftAnchor":
@@ -638,6 +688,11 @@ func create_block(cell: Vector3i, block_type: String, options: Dictionary = {}) 
         npc_system.notify_navigation_door_registered(body)
     return body
 
+func yaw_for_cell_direction(direction: Vector2i) -> float:
+    if direction == Vector2i.ZERO:
+        return 0.0
+    return atan2(-float(direction.x), -float(direction.y))
+
 func apply_cave_visual_layer(node: Node) -> void:
     if node is VisualInstance3D:
         (node as VisualInstance3D).layers = CAVE_VISUAL_LAYER
@@ -658,7 +713,7 @@ func block_bottom_y(block: Node3D) -> float:
     return block.global_position.y - CELL * 0.48
 
 func block_touches_terrain(block: Node3D) -> bool:
-    var ground := height_at_world(block.global_position.x, block.global_position.z)
+    var ground := surface_y_at_position(block.global_position)
     return block_bottom_y(block) <= ground + CELL * 0.55
 
 func adjacent_structure_blocks(block: Node) -> Array:

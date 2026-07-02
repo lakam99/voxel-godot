@@ -60,8 +60,8 @@ func terrain_samples() -> Array:
     for cell in SAMPLE_CELLS:
         samples.append({
             "cell": vec2i(cell),
-            "height": snapped_float(main.terrain_height_cell(cell.x, cell.y)),
-            "biome": main.biome_at_cell(cell.x, cell.y)
+            "height": snapped_float(float(main.call("surface_y_at_cell", Vector3i(cell.x, 0, cell.y)))),
+            "biome": String(main.call("surface_biome_at_cell", Vector3i(cell.x, 0, cell.y)))
         })
     return samples
 

@@ -33,7 +33,7 @@ class FakeMain:
 		player = Node3D.new()
 		player.name = "Player"
 
-	func height_at_world(_x: float, _z: float) -> float:
+	func surface_y_at_position(_position: Vector3) -> float:
 		return 0.0
 
 class FakeNpcSystem:

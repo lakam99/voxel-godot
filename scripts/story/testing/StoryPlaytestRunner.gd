@@ -2338,9 +2338,9 @@ func story_site_validation(sites: Array) -> Dictionary:
 func story_site_cell_valid(cell: Vector2i) -> bool:
     if main == null:
         return false
-    if main.terrain_height_cell(cell.x, cell.y) <= main.WATER_LEVEL + 1.2:
+    if float(main.call("surface_y_at_cell", Vector3i(cell.x, 0, cell.y))) <= main.WATER_LEVEL + 1.2:
         return false
-    if String(main.biome_at_cell(cell.x, cell.y)) in ["ocean", "beach", "town"]:
+    if String(main.call("surface_biome_at_cell", Vector3i(cell.x, 0, cell.y))) in ["ocean", "beach", "town"]:
         return false
     var town: Dictionary = main.town_region_at_cell(cell.x, cell.y)
     if not town.is_empty():
@@ -2364,9 +2364,9 @@ func enter_story_region(region_id: String, biome: String) -> void:
     var center: Vector2i = generator.region_center_cell(region_id)
     var resolved_biome := biome
     if resolved_biome == "":
-        resolved_biome = String(main.biome_at_cell(center.x, center.y))
+        resolved_biome = String(main.call("surface_biome_at_cell", Vector3i(center.x, 0, center.y)))
     main.set("last_story_region_id", "")
-    main.update_story_region_entry(center, Vector3(float(center.x) * main.CELL, main.terrain_height_cell(center.x, center.y), float(center.y) * main.CELL), resolved_biome)
+    main.update_story_region_entry(center, Vector3(float(center.x) * main.CELL, float(main.call("surface_y_at_cell", Vector3i(center.x, 0, center.y))), float(center.y) * main.CELL), resolved_biome)
 
 func story_site_node(definition_id: String) -> Node:
     if main == null:

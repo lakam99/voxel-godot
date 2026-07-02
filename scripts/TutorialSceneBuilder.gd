@@ -377,8 +377,8 @@ func add_warm_light(position: Vector3, radius: float, energy: float) -> void:
         return
     var cast_shadows := main != null and bool(main.get("shadows_enabled"))
     var fill_position := position
-    if main != null and main.has_method("height_at_world"):
-        fill_position.y = main.height_at_world(position.x, position.z) + CELL * 0.36
+    if main != null and main.has_method("surface_y_at_position"):
+        fill_position.y = float(main.call("surface_y_at_position", position)) + CELL * 0.36
     else:
         fill_position.y = position.y - CELL * 0.85
     LocalLightRigScript.add_rig(system.light_root, "tutorial_lantern", {

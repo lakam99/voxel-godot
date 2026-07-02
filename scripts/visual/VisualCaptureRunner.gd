@@ -199,10 +199,10 @@ func position_camera(capture_case: Dictionary) -> void:
         position_water_camera(capture_case, target_cell)
         return
     var target := Vector3(float(target_cell.x) * main.CELL, 0.0, float(target_cell.y) * main.CELL)
-    target.y = main.height_at_world(target.x, target.z)
+    target.y = float(main.call("surface_y_at_position", target))
     var offset: Vector3 = capture_case.get("offset", Vector3(8.0, 0.0, 8.0))
     var position := target + offset
-    position.y = main.height_at_world(position.x, position.z) + float(capture_case.get("eyeHeight", 0.08))
+    position.y = float(main.call("surface_y_at_position", position)) + float(capture_case.get("eyeHeight", 0.08))
     player.global_position = position
     player.velocity = Vector3.ZERO
     player.look_at(Vector3(target.x, position.y, target.z), Vector3.UP)
@@ -217,10 +217,10 @@ func position_block_focus_camera(capture_case: Dictionary, target_cell: Vector2i
     if focus_block_type != "":
         create_capture_block(block_cell, 0, focus_block_type)
     var target := Vector3(float(block_cell.x) * main.CELL, 0.0, float(block_cell.y) * main.CELL)
-    target.y = main.height_at_world(target.x, target.z) + main.CELL * 0.75
+    target.y = float(main.call("surface_y_at_position", target)) + main.CELL * 0.75
     var offset: Vector3 = capture_case.get("offset", Vector3(-4.0, 0.0, -4.0))
     var position := target + offset
-    position.y = main.height_at_world(position.x, position.z) + 0.18
+    position.y = float(main.call("surface_y_at_position", position)) + 0.18
     player.global_position = position
     player.velocity = Vector3.ZERO
     player.look_at(target, Vector3.UP)
@@ -234,7 +234,7 @@ func position_water_camera(capture_case: Dictionary, target_cell: Vector2i) -> v
     var view_cell := find_capture_water_vantage_cell(water_cell)
     var water_target := Vector3(float(water_cell.x) * main.CELL, main.WATER_LEVEL, float(water_cell.y) * main.CELL)
     var position := Vector3(float(view_cell.x) * main.CELL, 0.0, float(view_cell.y) * main.CELL)
-    position.y = maxf(main.height_at_world(position.x, position.z), main.WATER_LEVEL) + 0.08
+    position.y = maxf(float(main.call("surface_y_at_position", position)), main.WATER_LEVEL) + 0.08
     player.global_position = position
     player.velocity = Vector3.ZERO
     player.look_at(Vector3(water_target.x, position.y, water_target.z), Vector3.UP)
@@ -243,7 +243,7 @@ func position_water_camera(capture_case: Dictionary, target_cell: Vector2i) -> v
     camera.rotation.x = deg_to_rad(float(capture_case.get("pitch", -16.0)))
 
 func prepare_capture_water_patch(center: Vector2i) -> void:
-    var edits_value: Variant = main.get("height_edits")
+    var edits_value: Variant = main.get("volume_edit_markers")
     if not (edits_value is Dictionary):
         return
     var edits: Dictionary = edits_value
@@ -265,7 +265,7 @@ func find_capture_water_vantage_cell(water_cell: Vector2i) -> Vector2i:
     for radius in range(8, 28, 2):
         for direction in directions:
             var cell: Vector2i = water_cell + direction * radius
-            var height := float(main.terrain_height_cell(cell.x, cell.y))
+            var height := float(main.call("surface_y_at_cell", Vector3i(cell.x, 0, cell.y)))
             if height < main.WATER_LEVEL + 0.75:
                 continue
             var variation := float(main.height_variation_cell(cell.x, cell.y, 1))
@@ -381,7 +381,7 @@ func place_capture_light_fixture() -> void:
     create_capture_block(center_cell + Vector2i(-2, -2), 0, "torch")
 
 func create_capture_block(cell: Vector2i, y_offset: int, block_type: String) -> void:
-    var ground := float(main.terrain_height_cell(cell.x, cell.y))
+    var ground := float(main.call("surface_y_at_cell", Vector3i(cell.x, 0, cell.y)))
     var y_cell := floori((ground + main.CELL * 0.5) / main.CELL) + y_offset
     var block_cell := Vector3i(cell.x, y_cell, cell.y)
     var blocks: Dictionary = main.get("blocks")

@@ -120,7 +120,7 @@ func enter_region(region_id: String) -> Dictionary:
     if generator == null:
         return remember(false, "enter_region", "Region generator unavailable")
     var center: Vector2i = generator.region_center_cell(region_id)
-    var biome := String(main.biome_at_cell(center.x, center.y)) if main != null and main.has_method("biome_at_cell") else ""
+    var biome := String(main.call("surface_biome_at_cell", Vector3i(center.x, 0, center.y))) if main != null and main.has_method("surface_biome_at_cell") else ""
     if main != null:
         main.set("last_story_region_id", "")
         main.update_story_region_entry(center, Vector3(float(center.x) * main.CELL, 0.0, float(center.y) * main.CELL), biome)

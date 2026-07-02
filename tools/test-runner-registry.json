@@ -339,21 +339,46 @@
     },
     {
       "id": "cave_visual_playtest",
-      "description": "Headed procedural cave visual proof for entrance, branch fork, dead-end chamber, traversable tunnel path, and final chamber crafting-book chest",
+      "description": "Headed procedural cave-biome player-POV visual proof for outside profile, entrance approach, continuous tunnel, branch tunnel, and inner chamber",
       "command": ".\\tools\\run-cave-visual-playtest.ps1",
       "args": ["-Seed", "atlas-1492", "-ReportPath", "artifacts\\test-runners\\cave-visual-playtest.json", "-ScreenshotDir", "artifacts\\test-runners\\screenshots\\cave-visual-playtest"],
       "reportPath": "artifacts\\test-runners\\cave-visual-playtest.json",
       "screenshotDir": "artifacts\\test-runners\\screenshots\\cave-visual-playtest",
       "evidenceLevel": "acceptance_visual",
-      "acceptanceClaims": ["procedural_cave_graph_entrance_branch_dead_end_final_visual"],
+      "acceptanceClaims": ["procedural_cave_biome_volume_visual"],
       "requiredScreenshots": [
         "cave_dark_default.png",
-        "cave_entrance.png",
-        "cave_branch_fork.png",
-        "cave_dead_end_chamber.png",
-        "cave_tunnel_path.png",
-        "cave_final_chamber_chest.png"
+        "cave_outside_profile.png",
+        "cave_entrance_approach.png",
+        "cave_first_tunnel.png",
+        "cave_mid_tunnel.png",
+        "cave_branch_tunnel.png",
+        "cave_inner_chamber.png"
       ],
+      "requiresForbiddenCallSelfScan": true,
+      "requiresVisualProof": true,
+      "required": true
+    },
+    {
+      "id": "light_shadow_visual_playtest",
+      "description": "Headed shadow-authoritative daylight proof for sealed interiors, cave depth darkness, and local torch lighting",
+      "command": ".\\tools\\run-light-shadow-visual-playtest.ps1",
+      "args": ["-Seed", "atlas-1492", "-ReportPath", "artifacts\\test-runners\\light-shadow-visual-playtest.json", "-ScreenshotDir", "artifacts\\test-runners\\screenshots\\light-shadow-visual-playtest"],
+      "reportPath": "artifacts\\test-runners\\light-shadow-visual-playtest.json",
+      "screenshotDir": "artifacts\\test-runners\\screenshots\\light-shadow-visual-playtest",
+      "evidenceLevel": "acceptance_visual",
+      "acceptanceClaims": ["shadow_authoritative_daylight_blocks_sealed_interiors_and_deep_caves"],
+      "requiredScreenshots": [
+        "outdoor_noon_reference.png",
+        "sealed_hut_noon_dark.png",
+        "doorway_hut_light_bleed.png",
+          "cave_entrance_daylight.png",
+          "deep_cave_noon_dark.png",
+          "final_chamber_wall_torch.png",
+          "final_chamber_wall_torch_side.png",
+          "final_chamber_wall_torch_closeup.png",
+          "deep_cave_torch_lit.png"
+        ],
       "requiresForbiddenCallSelfScan": true,
       "requiresVisualProof": true,
       "required": true

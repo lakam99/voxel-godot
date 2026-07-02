@@ -177,8 +177,8 @@ func map_terrain_samples(center_cell: Vector2i, radius: float) -> Array:
             var offset := Vector2(float(cell_x - center_cell.x) * CELL, float(cell_z - center_cell.y) * CELL)
             if offset.length() > radius:
                 continue
-            var height := terrain_height_cell(cell_x, cell_z)
-            var biome := biome_at_cell(cell_x, cell_z)
+            var height := surface_y_at_cell(Vector3i(cell_x, 0, cell_z))
+            var biome := surface_biome_at_cell(Vector3i(cell_x, 0, cell_z))
             samples.append({
                 "offset": offset,
                 "color": map_color_for_sample(biome, height)

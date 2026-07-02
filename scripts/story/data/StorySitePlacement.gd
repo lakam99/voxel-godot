@@ -127,7 +127,7 @@ func is_site_valid(cell: Vector2i, existing_sites: Array) -> bool:
         return true
     if terrain_height(cell) <= water_level() + WATER_MARGIN:
         return false
-    if String(main.biome_at_cell(cell.x, cell.y)) in ["ocean", "beach", "town"]:
+    if String(main.call("surface_biome_at_cell", Vector3i(cell.x, 0, cell.y))) in ["ocean", "beach", "town"]:
         return false
     var town_region: Dictionary = main.town_region_at_cell(cell.x, cell.y)
     if not town_region.is_empty():
@@ -154,7 +154,7 @@ func nearby_reachable(cell: Vector2i) -> bool:
             var sample := cell + Vector2i(dx, dz)
             if terrain_height(sample) <= water_level() + WATER_MARGIN:
                 continue
-            if String(main.biome_at_cell(sample.x, sample.y)) in ["ocean", "beach"]:
+            if String(main.call("surface_biome_at_cell", Vector3i(sample.x, 0, sample.y))) in ["ocean", "beach"]:
                 continue
             return true
     return false
@@ -168,7 +168,7 @@ func site_cell(site: Dictionary) -> Vector2i:
 func terrain_height(cell: Vector2i) -> float:
     if main == null:
         return 0.0
-    return float(main.terrain_height_cell(cell.x, cell.y))
+    return float(main.call("surface_y_at_cell", Vector3i(cell.x, 0, cell.y)))
 
 func water_level() -> float:
     if main == null:
