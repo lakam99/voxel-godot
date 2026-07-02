@@ -7,7 +7,7 @@ func reset_runtime_world_state() -> void:
     autosave_elapsed = 0.0
     time_of_day = 0.32
     next_fishing_ready_at = 0.0
-    height_edits.clear()
+    volume_edit_markers.clear()
     if world_generation_system and world_generation_system.has_method("reset"):
         world_generation_system.reset()
     if subsurface_system and subsurface_system.has_method("reset"):
@@ -105,7 +105,7 @@ func create_save_snapshot() -> Dictionary:
             "selectedSlot": inventory_system.selected_slot if inventory_system else 0
         },
         "crafting": crafting_system.snapshot() if crafting_system and crafting_system.has_method("snapshot") else {},
-        "terrain": snapshot_height_edits(),
+        "terrain": snapshot_volume_edits(),
         "subsurface": snapshot_subsurface(),
         "removedProps": removed_props.keys(),
         "survival": survival_system.snapshot() if survival_system else {},
@@ -146,7 +146,7 @@ func apply_save_snapshot(snapshot: Dictionary) -> bool:
     restore_exploration(snapshot.get("exploration", {}))
     if survival_system and snapshot.has("survival"):
         survival_system.restore(snapshot["survival"])
-    restore_height_edits(snapshot.get("terrain", []))
+    restore_volume_edits(snapshot.get("terrain", []))
     restore_subsurface(snapshot.get("subsurface", {}))
     restore_removed_props(snapshot.get("removedProps", []))
     if structure_system and structure_system.has_method("restore_caves"):
@@ -264,20 +264,20 @@ func restore_exploration(snapshot_value) -> void:
         if camp_key_string != "":
             discovered_camp_keys[camp_key_string] = true
 
-func snapshot_height_edits() -> Array:
+func snapshot_volume_edits() -> Array:
     var result := []
-    for key in height_edits.keys():
+    for key in volume_edit_markers.keys():
         if not (key is Vector2i):
             continue
         result.append({
             "x": key.x,
             "z": key.y,
-            "height": float(height_edits[key])
+            "surfaceY": float(volume_edit_markers[key])
         })
     return result
 
-func restore_height_edits(entries) -> void:
-    height_edits.clear()
+func restore_volume_edits(entries) -> void:
+    volume_edit_markers.clear()
     clear_chunk_asset_cache()
     if not (entries is Array):
         return
@@ -285,11 +285,13 @@ func restore_height_edits(entries) -> void:
         if not (entry is Dictionary):
             continue
         var key := Vector2i(int(entry.get("x", 0)), int(entry.get("z", 0)))
-        var old_height := terrain_height_cell(key.x, key.y)
-        var new_height := float(entry.get("height", MIN_HEIGHT))
-        height_edits[key] = new_height
+        var old_surface_y := 0.0
+        if world_generation_system != null and world_generation_system.has_method("surface_y_for_cell"):
+            old_surface_y = float(world_generation_system.call("surface_y_for_cell", Vector3i(key.x, 0, key.y)))
+        var new_surface_y := float(entry.get("surfaceY", entry.get("height", old_surface_y)))
+        volume_edit_markers[key] = new_surface_y
         if npc_system and npc_system.has_method("notify_navigation_terrain_edited"):
-            npc_system.notify_navigation_terrain_edited(key, old_height, new_height)
+            npc_system.notify_navigation_terrain_edited(key, old_surface_y, new_surface_y)
 
 func snapshot_subsurface() -> Dictionary:
     if subsurface_system and subsurface_system.has_method("snapshot"):

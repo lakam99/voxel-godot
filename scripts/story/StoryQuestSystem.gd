@@ -393,7 +393,7 @@ func region_suitability(region_id: String) -> Dictionary:
     var dry_samples := 0
     for offset in offsets:
         var sample: Vector2i = center + offset
-        var biome := String(main.biome_at_cell(sample.x, sample.y))
+        var biome := String(main.call("surface_biome_at_cell", Vector3i(sample.x, 0, sample.y)))
         counts[biome] = int(counts.get(biome, 0)) + 1
         if not (biome in ["ocean", "beach"]):
             dry_samples += 1

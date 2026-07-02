@@ -2,38 +2,96 @@ extends RefCounted
 class_name WorldGenerationSystem
 
 const CAVE_AIR_THRESHOLD := 1.0
+const CAVE_REGION_CELLS := 96
+const CAVE_FEATURE_SEARCH_RADIUS := 1
 
 var main
-var cave_plan_records := {}
 var excavation_brushes: Array[Dictionary] = []
-var cave_graph_profile_cache := {}
+var cave_feature_cache := {}
+var surface_projection_cache := {}
 
 func setup(main_node) -> void:
 	main = main_node
 
 func reset() -> void:
-	cave_plan_records.clear()
 	excavation_brushes.clear()
-	cave_graph_profile_cache.clear()
+	cave_feature_cache.clear()
+	surface_projection_cache.clear()
 
 func reset_for_seed() -> void:
-	cave_plan_records.clear()
 	excavation_brushes.clear()
-	cave_graph_profile_cache.clear()
+	cave_feature_cache.clear()
+	surface_projection_cache.clear()
 
-func register_cave_plan(plan: Dictionary, metadata: Dictionary = {}) -> void:
-	if plan.is_empty():
-		return
-	var cave_id := String(plan.get("id", "cave"))
-	cave_graph_profile_cache.erase(cave_id)
-	cave_plan_records[cave_id] = {
-		"plan": plan.duplicate(true),
-		"metadata": metadata.duplicate(true)
+func sample_cell(cell: Vector3i) -> Dictionary:
+	var s := cell_size()
+	return sample_world(Vector3((float(cell.x) + 0.5) * s, (float(cell.y) + 0.5) * s, (float(cell.z) + 0.5) * s))
+
+func sample_world(position: Vector3) -> Dictionary:
+	var surface_y := terrain_reference_surface_y_at(position)
+	var cave_value := cave_biome_value_at(position)
+	var density := density_from_components(position, surface_y, cave_value)
+	var solid := density >= 0.0
+	var cave_influence := cave_value <= 0.0
+	var cell := world_to_cell3(position)
+	var biome := "cave" if cave_influence and not solid else surface_biome_for_cell3(Vector3i(cell.x, 0, cell.z))
+	var material := material_from_sample_components(position, density, cave_value, surface_y, cell)
+	return {
+		"cell": cell,
+		"position": position,
+		"density": density,
+		"solid": solid,
+		"biome": biome,
+		"material": material,
+		"surface": absf(density) <= cell_size() * 0.75,
+		"caveValue": cave_value
 	}
 
-func unregister_cave(cave_id: String) -> void:
-	cave_plan_records.erase(cave_id)
-	cave_graph_profile_cache.erase(cave_id)
+func density_at(position: Vector3) -> float:
+	var surface_y := terrain_reference_surface_y_at(position)
+	var cave_value := cave_biome_value_at(position)
+	return density_from_components(position, surface_y, cave_value)
+
+func density_from_components(position: Vector3, surface_y: float, cave_value: float) -> float:
+	var density := surface_y - position.y
+	if cave_value < density:
+		density = cave_value
+	for brush in merged_excavation_brushes([]):
+		var center: Vector3 = brush.get("center", Vector3.ZERO)
+		var radius := float(brush.get("radius", 0.0))
+		if radius > 0.0:
+			density = minf(density, center.distance_to(position) - radius)
+	return density
+
+func solid_at(position: Vector3) -> bool:
+	return density_at(position) >= 0.0
+
+func biome_at(position: Vector3) -> String:
+	return String(sample_world(position).get("biome", "plains"))
+
+func material_at(position: Vector3) -> String:
+	var surface_y := terrain_reference_surface_y_at(position)
+	var cave_value := cave_biome_value_at(position)
+	var density := density_from_components(position, surface_y, cave_value)
+	var cell := world_to_cell3(position)
+	return material_from_sample_components(position, density, cave_value, surface_y, cell)
+
+func material_from_sample_components(position: Vector3, density: float, cave_value: float, surface_y: float, cell: Vector3i) -> String:
+	if density < 0.0:
+		return "air"
+	var depth := maxf(0.0, surface_y - position.y)
+	if cave_value <= cell_size() * 0.85:
+		var ore := ore_material_at(cell, depth)
+		return ore if ore != "" else "stone"
+	var biome := surface_biome_for_cell3(Vector3i(cell.x, 0, cell.z))
+	if depth <= cell_size() * 1.20:
+		return top_material_for_biome(biome)
+	if depth <= cell_size() * 4.65:
+		return subsoil_material_for_biome(biome)
+	var ore := ore_material_at(cell, depth)
+	if ore != "":
+		return ore
+	return "stone"
 
 func register_excavation_brush(brush: Dictionary) -> void:
 	var brush_id := String(brush.get("id", ""))
@@ -42,30 +100,58 @@ func register_excavation_brush(brush: Dictionary) -> void:
 	for index in range(excavation_brushes.size()):
 		if String(excavation_brushes[index].get("id", "")) == brush_id:
 			excavation_brushes[index] = brush.duplicate(true)
+			surface_projection_cache.clear()
 			return
 	excavation_brushes.append(brush.duplicate(true))
+	surface_projection_cache.clear()
 
 func clear_excavation_brushes() -> void:
 	excavation_brushes.clear()
+	surface_projection_cache.clear()
 
-func surface_height_for_cell3(cell: Vector3i, active_plan_records = null) -> float:
-	var base := edited_surface_height_for_cell3(cell)
-	var point := Vector2(float(cell.x) * cell_size(), float(cell.z) * cell_size())
-	var overlay := 0.0
-	for plan in active_plans_from_records(active_plan_records):
-		overlay = maxf(overlay, cave_mound_overlay(plan, point))
-	return base + overlay
+func surface_y_at(position: Vector3) -> float:
+	return volume_surface_y_for_cell(world_to_cell3(position))
 
-func edited_surface_height_for_cell3(cell: Vector3i) -> float:
-	var edits_value = main.get("height_edits") if main != null else {}
-	if edits_value is Dictionary:
-		var edits: Dictionary = edits_value
-		var key := Vector2i(cell.x, cell.z)
-		if edits.has(key):
-			return float(edits[key])
-	return base_surface_height_for_cell3(cell)
+func surface_y_for_cell(cell: Vector3i) -> float:
+	return volume_surface_y_for_cell(cell)
 
-func base_surface_height_for_cell3(cell: Vector3i) -> float:
+func volume_surface_y_for_cell(cell: Vector3i) -> float:
+	var key := Vector2i(cell.x, cell.z)
+	if surface_projection_cache.has(key):
+		return float(surface_projection_cache[key])
+	var high := ceili((float(main.MAX_HEIGHT) + cell_size() * 4.0) / cell_size()) if main != null else 96
+	var low := floori((float(main.MIN_HEIGHT) - cell_size() * 24.0) / cell_size()) if main != null else -16
+	for y in range(high, low, -1):
+		var solid_sample := sample_cell(Vector3i(cell.x, y, cell.z))
+		if not bool(solid_sample.get("solid", false)):
+			continue
+		var air_sample := sample_cell(Vector3i(cell.x, y + 1, cell.z))
+		if not bool(air_sample.get("solid", true)):
+			var projected_y := surface_boundary_y_between_samples(y, solid_sample, air_sample)
+			surface_projection_cache[key] = projected_y
+			return projected_y
+	var fallback := terrain_reference_surface_y_for_cell(cell)
+	surface_projection_cache[key] = fallback
+	return fallback
+
+func surface_boundary_y_between_samples(solid_cell_y: int, solid_sample: Dictionary, air_sample: Dictionary) -> float:
+	var solid_density := float(solid_sample.get("density", 1.0))
+	var air_density := float(air_sample.get("density", -1.0))
+	var denominator := solid_density - air_density
+	if absf(denominator) <= 0.0001:
+		return float(solid_cell_y + 1) * cell_size()
+	var solid_center_y := (float(solid_cell_y) + 0.5) * cell_size()
+	var air_center_y := (float(solid_cell_y) + 1.5) * cell_size()
+	var t := clampf(solid_density / denominator, 0.0, 1.0)
+	return lerp(solid_center_y, air_center_y, t)
+
+func terrain_reference_surface_y_at(position: Vector3) -> float:
+	return terrain_reference_surface_y_for_cell(Vector3i(roundi(position.x / cell_size()), 0, roundi(position.z / cell_size())))
+
+func terrain_reference_surface_y_for_cell(cell: Vector3i) -> float:
+	return base_surface_y_for_cell(cell)
+
+func base_surface_y_for_cell(cell: Vector3i) -> float:
 	var town: Dictionary = town_region_for_surface_cell3(cell)
 	if not town.is_empty():
 		var center_x := int(town["centerX"])
@@ -76,13 +162,13 @@ func base_surface_height_for_cell3(cell: Vector3i) -> float:
 		if distance <= radius:
 			return level
 		var apron := float(town_slope_apron_cells(town))
-		var natural := natural_surface_height_for_cell3(cell)
+		var natural := natural_surface_y_for_cell(cell)
 		var blend := clampf((distance - radius) / maxf(1.0, apron), 0.0, 1.0)
 		var eased := blend * blend * (3.0 - 2.0 * blend)
 		return lerp(level, natural, eased)
-	return natural_surface_height_for_cell3(cell)
+	return natural_surface_y_for_cell(cell)
 
-func natural_surface_height_for_cell3(cell: Vector3i) -> float:
+func natural_surface_y_for_cell(cell: Vector3i) -> float:
 	if main == null:
 		return 0.0
 	var x := cell.x
@@ -106,7 +192,7 @@ func natural_surface_height_for_cell3(cell: Vector3i) -> float:
 func surface_biome_for_cell3(cell: Vector3i) -> String:
 	if not town_region_at_cell3(cell).is_empty():
 		return "town"
-	var h: float = surface_height_for_cell3(cell)
+	var h: float = terrain_reference_surface_y_for_cell(cell)
 	var moisture: float = main.noise01(main.moisture_noise, cell.x - 1200, cell.z + 800) if main != null else 0.5
 	var temp: float = clamp(0.42 + (main.noise01(main.temp_noise, cell.x + 1500, cell.z - 900) if main != null else 0.5) * 0.46 - abs(cell.z) / 1300.0 - max(0.0, h - 38.0) / 180.0, 0.0, 1.0)
 	if h < float(main.WATER_LEVEL) + 0.3:
@@ -131,38 +217,17 @@ func surface_biome_for_cell3(cell: Vector3i) -> String:
 		return "forest"
 	return "plains"
 
-func biome_at_cell3(cell: Vector3i) -> String:
-	var world_pos := Vector3(float(cell.x) * cell_size(), float(cell.y) * cell_size(), float(cell.z) * cell_size())
-	if cave_air_value_at_world_from_records(world_pos) <= CAVE_AIR_THRESHOLD:
-		return "cave"
-	return surface_biome_for_cell3(cell)
+func biome_at_volume_cell(cell: Vector3i) -> String:
+	return biome_at(Vector3((float(cell.x) + 0.5) * cell_size(), (float(cell.y) + 0.5) * cell_size(), (float(cell.z) + 0.5) * cell_size()))
 
 func biome_at_world(world_pos: Vector3) -> String:
-	if cave_air_value_at_world_from_records(world_pos) <= CAVE_AIR_THRESHOLD:
-		return "cave"
-	return surface_biome_for_cell3(world_to_cell3(world_pos))
+	return biome_at(world_pos)
 
 func material_at_cell3(cell: Vector3i) -> String:
-	var world_pos := Vector3(float(cell.x) * cell_size(), float(cell.y) * cell_size(), float(cell.z) * cell_size())
-	if not solid_at_world(world_pos):
-		return "air"
-	var surface_y := surface_height_for_cell3(Vector3i(cell.x, 0, cell.z))
-	var depth := maxf(0.0, surface_y - world_pos.y)
-	var biome := surface_biome_for_cell3(cell)
-	if depth <= cell_size() * 1.20:
-		return top_material_for_biome(biome)
-	if depth <= cell_size() * 4.65:
-		return subsoil_material_for_biome(biome)
-	var ore := ore_material_at(cell, depth)
-	if ore != "":
-		return ore
-	return "stone"
+	return material_at(Vector3((float(cell.x) + 0.5) * cell_size(), (float(cell.y) + 0.5) * cell_size(), (float(cell.z) + 0.5) * cell_size()))
 
 func solid_at_world(world_pos: Vector3, active_plan_records = null, extra_excavation_brushes := []) -> bool:
-	var surface_y := surface_height_at_world(world_pos.x, world_pos.z, active_plan_records)
-	if world_pos.y > surface_y:
-		return false
-	if cave_air_value_at_world_from_records(world_pos, active_plan_records) <= CAVE_AIR_THRESHOLD:
+	if density_at(world_pos) < 0.0:
 		return false
 	for brush in merged_excavation_brushes(extra_excavation_brushes):
 		var center: Vector3 = brush.get("center", Vector3.ZERO)
@@ -171,24 +236,8 @@ func solid_at_world(world_pos: Vector3, active_plan_records = null, extra_excava
 			return false
 	return true
 
-func solid_at_world_for_plan(plan: Dictionary, world_pos: Vector3, extra_excavation_brushes := []) -> bool:
-	var surface_y := surface_height_for_plan_point(plan, Vector2(world_pos.x, world_pos.z))
-	if world_pos.y > surface_y:
-		return false
-	if cave_contains_world(plan, world_pos):
-		return false
-	for brush_value in extra_excavation_brushes:
-		if not (brush_value is Dictionary):
-			continue
-		var brush: Dictionary = brush_value
-		var center: Vector3 = brush.get("center", Vector3.ZERO)
-		var radius := float(brush.get("radius", 0.0))
-		if radius > 0.0 and center.distance_to(world_pos) <= radius:
-			return false
-	return true
-
 func is_air_at_world(world_pos: Vector3, active_plan_records = null, extra_excavation_brushes := []) -> bool:
-	if world_pos.y > surface_height_at_world(world_pos.x, world_pos.z, active_plan_records) + cell_size() * 0.12:
+	if density_at(world_pos) < 0.0:
 		return true
 	for brush_value in merged_excavation_brushes(extra_excavation_brushes):
 		if not (brush_value is Dictionary):
@@ -198,450 +247,243 @@ func is_air_at_world(world_pos: Vector3, active_plan_records = null, extra_excav
 		var radius := float(brush.get("radius", 0.0))
 		if radius > 0.0 and center.distance_to(world_pos) <= radius:
 			return true
-	for plan in active_plans_from_records(active_plan_records):
-		if cave_contains_world(plan, world_pos):
-			return true
 	return false
 
-func cave_air_value_at_world_from_records(world_pos: Vector3, active_plan_records = null) -> float:
+func terrain_surface_y_at(position: Vector3) -> float:
+	return surface_y_at(position)
+
+func cave_biome_value_at(world_pos: Vector3) -> float:
 	var best := INF
-	for plan in active_plans_from_records(active_plan_records):
-		best = minf(best, cave_air_value_at_world(plan, world_pos))
+	for feature in cave_features_near_world(world_pos):
+		best = minf(best, cave_feature_air_value(feature, world_pos))
 	return best
 
-func cave_contains_world(plan: Dictionary, world_pos: Vector3) -> bool:
-	return cave_air_value_at_world(plan, world_pos) <= CAVE_AIR_THRESHOLD
+func cave_features_near_world(world_pos: Vector3) -> Array[Dictionary]:
+	var features: Array[Dictionary] = []
+	var region_world_size := float(CAVE_REGION_CELLS) * cell_size()
+	var region_x := floori(world_pos.x / region_world_size)
+	var region_z := floori(world_pos.z / region_world_size)
+	for rz in range(region_z - CAVE_FEATURE_SEARCH_RADIUS, region_z + CAVE_FEATURE_SEARCH_RADIUS + 1):
+		for rx in range(region_x - CAVE_FEATURE_SEARCH_RADIUS, region_x + CAVE_FEATURE_SEARCH_RADIUS + 1):
+			var feature := cave_feature_for_region(rx, rz)
+			if not feature.is_empty():
+				features.append(feature)
+	return features
 
-func cave_air_value_at_world(plan: Dictionary, world_pos: Vector3) -> float:
-	if plan.is_empty():
-		return INF
-	var point := Vector2(world_pos.x, world_pos.z)
-	var surface_y := surface_height_for_plan_point(plan, point)
-	if world_pos.y > surface_y + cell_size() * 0.08:
-		return INF
-	var best := cave_mouth_air_value_at_world(plan, world_pos)
-	best = minf(best, cave_graph_air_value_at_world(plan, world_pos))
-	return best
-
-func cave_mouth_air_value_at_world(plan: Dictionary, world_pos: Vector3) -> float:
-	var point := Vector2(world_pos.x, world_pos.z)
-	var axes := cave_mouth_depth_lateral(plan, point)
-	var depth_cells := axes.x
-	var width := cave_mouth_width_at_depth(plan, depth_cells)
-	if width <= 0.0:
-		return INF
-	var floor_y := cave_floor_y_at_surface(plan, point, float(plan.get("level", 0.0)))
-	var arch_height := float(plan.get("entranceMouthArchHeight", clampf(width * cell_size() * 0.98, cell_size() * 2.05, cell_size() * 4.2)))
-	if world_pos.y < floor_y - cell_size() * 0.06:
-		return INF
-	var lateral_t := absf(axes.y) / maxf(0.001, width)
-	var vertical_t := (world_pos.y - floor_y) / maxf(cell_size() * 0.58, arch_height)
-	var semicircle := sqrt(lateral_t * lateral_t + vertical_t * vertical_t)
-	var interior_depth := float(maxi(1, int(plan.get("entranceOpenDepth", 7))))
-	var front_cap := maxf(0.0, (cave_mouth_front_depth(plan) - depth_cells) / 0.85)
-	var back_cap := maxf(0.0, (depth_cells - (interior_depth + 1.75)) / 1.0)
-	return maxf(maxf(semicircle, front_cap), back_cap)
-
-func cave_graph_air_value_at_world(plan: Dictionary, world_pos: Vector3) -> float:
-	var profiles := cave_graph_profiles_for_point(plan, Vector2(world_pos.x, world_pos.z))
-	if profiles.is_empty():
-		return INF
-	var best := INF
-	var point := Vector2(world_pos.x, world_pos.z)
-	for profile_value in profiles:
-		if not (profile_value is Dictionary):
+func cave_feature_for_region(region_x: int, region_z: int) -> Dictionary:
+	var key := Vector2i(region_x, region_z)
+	if cave_feature_cache.has(key):
+		var cached = cave_feature_cache[key]
+		return (cached as Dictionary) if cached is Dictionary else {}
+	if volume_hash01("spawn", region_x, region_z, 0) > 0.62:
+		cave_feature_cache[key] = {}
+		return {}
+	var best := {}
+	var best_score := -INF
+	var margin := 14
+	var usable := CAVE_REGION_CELLS - margin * 2
+	var directions: Array[Vector2i] = [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]
+	for attempt in range(18):
+		var local_x := margin + floori(volume_hash01("candidate-x", region_x, region_z, attempt) * float(usable))
+		var local_z := margin + floori(volume_hash01("candidate-z", region_x, region_z, attempt) * float(usable))
+		var entrance := Vector2i(region_x * CAVE_REGION_CELLS + local_x, region_z * CAVE_REGION_CELLS + local_z)
+		if not town_region_at_cell3(Vector3i(entrance.x, 0, entrance.y)).is_empty():
 			continue
-		var profile: Dictionary = profile_value
-		var center2: Vector2 = profile.get("center", Vector2.ZERO)
-		var radius := float(profile.get("radius", cell_size() * 2.0))
-		var half_height := float(profile.get("halfHeight", cell_size()))
-		var center_y := float(profile.get("centerY", 0.0))
-		var horizontal_value := center2.distance_to(point) / maxf(0.001, radius)
-		var vertical_value := absf(world_pos.y - center_y) / maxf(0.001, half_height)
-		best = minf(best, maxf(horizontal_value, vertical_value))
-	return best
-
-func cave_graph_air_value_at_world_bruteforce(plan: Dictionary, world_pos: Vector3) -> float:
-	var best := INF
-	var point := Vector2(world_pos.x, world_pos.z)
-	for edge_value in plan.get("caveEdges", []):
-		if not (edge_value is Dictionary):
+		var entrance_biome := surface_biome_for_cell3(Vector3i(entrance.x, 0, entrance.y))
+		if entrance_biome in ["ocean", "beach", "swamp", "town"]:
 			continue
-		var edge: Dictionary = edge_value
-		var radius := float(edge.get("radius", 1.6)) * cell_size()
-		var edge_id := String(edge.get("id", "edge"))
-		var edge_noise := 0.92 + stable01(plan, "edge-radius:%s" % edge_id, 0, 0) * 0.18
-		for cell_value in edge.get("centerCells", []):
-			if not (cell_value is Vector2i):
+		var entrance_h := base_surface_y_for_cell(Vector3i(entrance.x, 0, entrance.y))
+		if main != null and entrance_h < float(main.WATER_LEVEL) + cell_size() * 4.0:
+			continue
+		for dir in directions:
+			var front := entrance - dir * 7
+			var back := entrance + dir * 12
+			var front_h := base_surface_y_for_cell(Vector3i(front.x, 0, front.y))
+			var back_h := base_surface_y_for_cell(Vector3i(back.x, 0, back.y))
+			var side_a := entrance + Vector2i(-dir.y, dir.x) * 5
+			var side_b := entrance + Vector2i(dir.y, -dir.x) * 5
+			var side_h := minf(
+				base_surface_y_for_cell(Vector3i(side_a.x, 0, side_a.y)),
+				base_surface_y_for_cell(Vector3i(side_b.x, 0, side_b.y))
+			)
+			var slope := back_h - front_h
+			var cover := minf(back_h, side_h) - entrance_h
+			if slope < cell_size() * 1.15 or cover < cell_size() * 0.80:
 				continue
-			var center2 := cell_world2(cell_value)
-			var floor_y := cave_floor_y_at_surface(plan, center2, float(plan.get("level", 0.0)))
-			var ceiling_y := cave_ceiling_y_at_surface(plan, center2, floor_y + cell_size() * 3.0)
-			var half_height := maxf(cell_size() * 0.72, (ceiling_y - floor_y) * 0.5)
-			var center_y := (floor_y + ceiling_y) * 0.5
-			var horizontal_value := center2.distance_to(point) / maxf(0.001, radius * edge_noise)
-			var vertical_value := absf(world_pos.y - center_y) / half_height
-			best = minf(best, maxf(horizontal_value, vertical_value))
-	for node_value in plan.get("caveNodes", []):
-		if not (node_value is Dictionary):
-			continue
-		var node: Dictionary = node_value
-		var center2 := cell_world2(node.get("cell", Vector2i.ZERO))
-		var radius := float(node.get("radius", 2.0)) * cell_size()
-		var kind := String(node.get("kind", ""))
-		if kind == "entrance":
-			radius *= 0.88
-		else:
-			radius *= 1.04 + stable01(plan, "node-radius:%s" % String(node.get("id", "")), 0, 0) * 0.18
-		var floor_y := cave_floor_y_at_surface(plan, center2, float(plan.get("level", 0.0)))
-		var ceiling_y := cave_ceiling_y_at_surface(plan, center2, floor_y + cell_size() * 3.0)
-		var half_height := maxf(cell_size() * 0.85, (ceiling_y - floor_y) * 0.5)
-		var center_y := (floor_y + ceiling_y) * 0.5
-		var horizontal_value := center2.distance_to(point) / maxf(0.001, radius)
-		var vertical_value := absf(world_pos.y - center_y) / half_height
-		best = minf(best, maxf(horizontal_value, vertical_value))
+			var roughness := absf(base_surface_y_for_cell(Vector3i(entrance.x + dir.y * 3, 0, entrance.y - dir.x * 3)) - base_surface_y_for_cell(Vector3i(entrance.x - dir.y * 3, 0, entrance.y + dir.x * 3)))
+			var score := slope + cover * 0.85 + roughness * 0.25 + volume_hash01("candidate-score", region_x, region_z, attempt) * cell_size() * 4.0
+			if score <= best_score:
+				continue
+			var right := Vector2i(-dir.y, dir.x)
+			var candidate := {
+				"id": "cave-biome:%d,%d" % [region_x, region_z],
+				"region": Vector2i(region_x, region_z),
+				"entranceCell": entrance,
+				"entranceSurfaceY": entrance_h,
+				"inward": dir,
+				"right": right,
+				"radius": cell_size() * lerpf(2.75, 3.75, volume_hash01("radius", region_x, region_z, attempt)),
+				"length": cell_size() * lerpf(20.0, 34.0, volume_hash01("length", region_x, region_z, attempt)),
+				"drop": cell_size() * lerpf(2.4, 6.2, volume_hash01("drop", region_x, region_z, attempt)),
+				"chamberRadius": cell_size() * lerpf(3.1, 5.2, volume_hash01("chamber", region_x, region_z, attempt)),
+				"branchDepth": cell_size() * lerpf(8.0, 17.0, volume_hash01("branch-depth", region_x, region_z, attempt)),
+				"branchLength": cell_size() * lerpf(8.0, 16.0, volume_hash01("branch-length", region_x, region_z, attempt)),
+				"branchSide": -1.0 if volume_hash01("branch-side", region_x, region_z, attempt) < 0.5 else 1.0
+			}
+			if not cave_feature_volume_is_contained(candidate):
+				continue
+			best_score = score
+			best = candidate
+	if best.is_empty():
+		cave_feature_cache[key] = {}
+		return {}
+	cave_feature_cache[key] = best
 	return best
 
-func cave_point_is_inside(plan: Dictionary, point: Vector2) -> bool:
-	return cave_column_has_air(plan, point)
-
-func cave_column_has_air(plan: Dictionary, point: Vector2) -> bool:
-	if plan.is_empty():
+func cave_feature_volume_is_contained(feature: Dictionary) -> bool:
+	var entrance_cell: Vector2i = feature.get("entranceCell", Vector2i.ZERO)
+	var entrance_biome := surface_biome_for_cell3(Vector3i(entrance_cell.x, 0, entrance_cell.y))
+	if entrance_biome in ["ocean", "beach", "swamp", "town"]:
 		return false
-	var floor_y := cave_floor_y_at_surface(plan, point, float(plan.get("level", 0.0)))
-	var ceiling_y := cave_ceiling_y_at_surface(plan, point, floor_y + cell_size() * 3.0)
-	if ceiling_y <= floor_y:
-		return false
-	var samples := [
-		floor_y + cell_size() * 0.18,
-		lerpf(floor_y, ceiling_y, 0.38),
-		lerpf(floor_y, ceiling_y, 0.62),
-		ceiling_y - cell_size() * 0.18
-	]
-	for y in samples:
-		if cave_contains_world(plan, Vector3(point.x, y, point.y)):
-			return true
-	return false
-
-func cave_volume_value(plan: Dictionary, sample) -> float:
-	if sample is Vector3:
-		return cave_air_value_at_world(plan, sample)
-	if sample is Vector2:
-		return cave_planar_value_at_point(plan, sample)
-	return INF
-
-func cave_planar_value_at_point(plan: Dictionary, point: Vector2) -> float:
-	if plan.is_empty():
-		return INF
-	var best := cave_mouth_planar_value(plan, point)
-	best = minf(best, cave_graph_planar_value(plan, point))
-	return best
-
-func cave_graph_planar_value(plan: Dictionary, point: Vector2) -> float:
-	var profiles := cave_graph_profiles_for_point(plan, point)
-	if profiles.is_empty():
-		return INF
-	var best := INF
-	for profile_value in profiles:
-		if not (profile_value is Dictionary):
-			continue
-		var profile: Dictionary = profile_value
-		var center: Vector2 = profile.get("center", Vector2.ZERO)
-		var radius := float(profile.get("radius", cell_size() * 2.0))
-		best = minf(best, center.distance_to(point) / maxf(0.001, radius))
-	return best
-
-func cave_graph_planar_value_bruteforce(plan: Dictionary, point: Vector2) -> float:
-	var best := INF
-	for edge_value in plan.get("caveEdges", []):
-		if not (edge_value is Dictionary):
-			continue
-		var edge: Dictionary = edge_value
-		var radius := float(edge.get("radius", 1.6)) * cell_size()
-		var edge_id := String(edge.get("id", "edge"))
-		var edge_noise := 0.92 + stable01(plan, "edge-radius:%s" % edge_id, 0, 0) * 0.18
-		for cell_value in edge.get("centerCells", []):
-			if not (cell_value is Vector2i):
-				continue
-			var center := cell_world2(cell_value)
-			best = minf(best, center.distance_to(point) / maxf(0.001, radius * edge_noise))
-	for node_value in plan.get("caveNodes", []):
-		if not (node_value is Dictionary):
-			continue
-		var node: Dictionary = node_value
-		var center := cell_world2(node.get("cell", Vector2i.ZERO))
-		var radius := float(node.get("radius", 2.0)) * cell_size()
-		var kind := String(node.get("kind", ""))
-		if kind == "entrance":
-			radius *= 0.88
-		else:
-			radius *= 1.04 + stable01(plan, "node-radius:%s" % String(node.get("id", "")), 0, 0) * 0.18
-		best = minf(best, center.distance_to(point) / maxf(0.001, radius))
-	return best
-
-func cave_graph_profiles_for_point(plan: Dictionary, point: Vector2) -> Array:
-	var grid := cave_graph_profile_grid(plan)
-	if grid.is_empty():
-		return []
-	var key := Vector2i(roundi(point.x / cell_size()), roundi(point.y / cell_size()))
-	var search_radius := int(grid.get("_maxRadiusCells", 8))
-	var result := []
-	for dz in range(-search_radius, search_radius + 1):
-		for dx in range(-search_radius, search_radius + 1):
-			var profiles = grid.get(key + Vector2i(dx, dz), [])
-			if profiles is Array:
-				result.append_array(profiles)
-	return result
-
-func cave_graph_profile_grid(plan: Dictionary) -> Dictionary:
-	var cave_id := String(plan.get("id", "cave"))
-	if cave_graph_profile_cache.has(cave_id):
-		var cached = cave_graph_profile_cache[cave_id]
-		return cached if cached is Dictionary else {}
-	var grid := {}
-	var s := cell_size()
-	for edge_value in plan.get("caveEdges", []):
-		if not (edge_value is Dictionary):
-			continue
-		var edge: Dictionary = edge_value
-		var edge_id := String(edge.get("id", "edge"))
-		var radius := float(edge.get("radius", 1.6)) * s
-		var edge_noise := 0.92 + stable01(plan, "edge-radius:%s" % edge_id, 0, 0) * 0.18
-		radius *= edge_noise
-		for cell_value in edge.get("centerCells", []):
-			if not (cell_value is Vector2i):
-				continue
-			var center_cell: Vector2i = cell_value
-			var center2 := cell_world2(center_cell)
-			var floor_y := cave_floor_y_at_surface(plan, center2, float(plan.get("level", 0.0)))
-			var ceiling_y := cave_profile_ceiling_y(plan, center2, floor_y)
-			add_cave_graph_profile(grid, center_cell, {
-				"center": center2,
-				"radius": radius,
-				"halfHeight": maxf(s * 0.72, (ceiling_y - floor_y) * 0.5),
-				"centerY": (floor_y + ceiling_y) * 0.5
-			})
-	for node_value in plan.get("caveNodes", []):
-		if not (node_value is Dictionary):
-			continue
-		var node: Dictionary = node_value
-		var center_cell: Vector2i = node.get("cell", Vector2i.ZERO)
-		var center2 := cell_world2(center_cell)
-		var radius := float(node.get("radius", 2.0)) * s
-		var kind := String(node.get("kind", ""))
-		if kind == "entrance":
-			radius *= 0.88
-		else:
-			radius *= 1.04 + stable01(plan, "node-radius:%s" % String(node.get("id", "")), 0, 0) * 0.18
-		var floor_y := cave_floor_y_at_surface(plan, center2, float(plan.get("level", 0.0)))
-		var ceiling_y := cave_profile_ceiling_y(plan, center2, floor_y)
-		add_cave_graph_profile(grid, center_cell, {
-			"center": center2,
-			"radius": radius,
-			"halfHeight": maxf(s * 0.85, (ceiling_y - floor_y) * 0.5),
-			"centerY": (floor_y + ceiling_y) * 0.5
-		})
-	cave_graph_profile_cache[cave_id] = grid
-	return grid
-
-func add_cave_graph_profile(grid: Dictionary, center_cell: Vector2i, profile: Dictionary) -> void:
-	var radius_cells := ceili(float(profile.get("radius", cell_size() * 2.0)) / cell_size() * 1.35) + 2
-	grid["_maxRadiusCells"] = maxi(int(grid.get("_maxRadiusCells", 0)), radius_cells)
-	if not grid.has(center_cell):
-		grid[center_cell] = []
-	(grid[center_cell] as Array).append(profile)
-
-func cave_mouth_volume_value(plan: Dictionary, point: Vector2) -> float:
-	return cave_mouth_planar_value(plan, point)
-
-func cave_mouth_planar_value(plan: Dictionary, point: Vector2) -> float:
-	var axes := cave_mouth_depth_lateral(plan, point)
-	var depth_cells := axes.x
-	var width := cave_mouth_width_at_depth(plan, depth_cells)
-	if width <= 0.0:
-		return INF
-	var lateral_value := absf(axes.y) / maxf(0.001, width)
-	var interior_depth := float(maxi(1, int(plan.get("entranceOpenDepth", 7))))
-	var front_cap := maxf(0.0, (cave_mouth_front_depth(plan) - depth_cells) / 0.85)
-	var back_cap := maxf(0.0, (depth_cells - (interior_depth + 1.75)) / 1.0)
-	return maxf(maxf(lateral_value, front_cap), back_cap)
-
-func cave_mouth_depth_lateral(plan: Dictionary, point: Vector2) -> Vector2:
-	var entrance: Vector2i = plan.get("entranceCell", Vector2i.ZERO)
-	var inward_cell: Vector2i = plan.get("inward", Vector2i(0, 1))
-	var right_cell: Vector2i = plan.get("right", Vector2i(1, 0))
-	var inward := Vector2(float(inward_cell.x), float(inward_cell.y))
-	var right := Vector2(float(right_cell.x), float(right_cell.y))
-	if inward.length() <= 0.01:
-		inward = Vector2(0.0, 1.0)
-	if right.length() <= 0.01:
-		right = Vector2(1.0, 0.0)
-	inward = inward.normalized()
-	right = right.normalized()
-	var delta := (point - cell_world2(entrance)) / cell_size()
-	return Vector2(delta.dot(inward), delta.dot(right))
-
-func cave_mouth_width_at_depth(plan: Dictionary, depth_cells: float) -> float:
-	var interior_depth := float(maxi(1, int(plan.get("entranceOpenDepth", 7))))
-	var mouth_width := maxf(1.35, float(plan.get("entranceMouthHalfWidth", 3.85)))
-	var front_depth := cave_mouth_front_depth(plan)
-	if depth_cells < front_depth or depth_cells > interior_depth + 1.75:
-		return 0.0
-	if depth_cells <= 0.0:
-		var front_t := smoothstep(front_depth, 0.0, depth_cells)
-		return lerpf(mouth_width * 0.86, mouth_width, front_t)
-	if depth_cells <= 2.0:
-		return mouth_width
-	var taper_t := smoothstep(2.0, interior_depth + 1.75, depth_cells)
-	return lerpf(mouth_width, cave_mouth_inner_half_width(mouth_width), taper_t)
-
-func cave_mouth_front_depth(plan: Dictionary) -> float:
-	var approach_depth := float(maxi(2, int(plan.get("entranceApproachDepth", 4))))
-	return -minf(4.25, maxf(2.25, approach_depth))
-
-func cave_mouth_inner_half_width(mouth_width: float) -> float:
-	return clampf(mouth_width * 0.68, 1.35, mouth_width)
-
-func cave_floor_point(plan: Dictionary, point: Vector2) -> Vector3:
-	return Vector3(point.x, cave_floor_y_at_surface(plan, point, float(plan.get("level", 0.0))), point.y)
-
-func cave_ceiling_point(plan: Dictionary, point: Vector2) -> Vector3:
-	return Vector3(point.x, cave_ceiling_y_at_surface(plan, point, float(plan.get("ceilingLevel", float(plan.get("level", 0.0)) + cell_size() * 3.0))), point.y)
-
-func cave_floor_y_at_surface(plan: Dictionary, point: Vector2, fallback_level: float) -> float:
-	var base_floor := float(plan.get("level", fallback_level)) + 0.10
-	var axes := cave_mouth_depth_lateral(plan, point)
-	var path_length := maxf(1.0, float(plan.get("pathLength", 16)))
-	var progress := clampf(axes.x / path_length, 0.0, 1.0)
-	var available_drop := maxf(0.0, base_floor - (float(main.WATER_LEVEL) + cell_size() * 1.55)) if main != null else 0.0
-	var max_drop := minf(cell_size() * 2.4, available_drop * 0.62)
-	var route_drop := smoothstep(0.08, 1.0, progress) * max_drop
-	var variation_scale := smoothstep(2.0, 7.0, axes.x)
-	var wave := stable_signed(plan, "floor-wave", floori(point.x / cell_size()), floori(point.y / cell_size())) * cell_size() * 0.10 * variation_scale
-	var mouth_floor := float(plan.get("mouthFloorLevel", base_floor))
-	var mouth_blend := 1.0 - smoothstep(0.0, 3.0, axes.x)
-	if axes.x < 0.0 and cave_mouth_width_at_depth(plan, axes.x) > 0.0:
-		mouth_blend = 1.0
-	var floor_y := base_floor - route_drop + wave
-	return lerpf(floor_y, mouth_floor, clampf(mouth_blend, 0.0, 1.0))
-
-func cave_ceiling_y_at_surface(plan: Dictionary, point: Vector2, fallback_level: float) -> float:
-	var floor_y := cave_floor_y_at_surface(plan, point, float(plan.get("level", 0.0)))
-	var axes := cave_mouth_depth_lateral(plan, point)
-	var surface_y := surface_height_for_plan_point(plan, point)
-	var width := cave_mouth_width_at_depth(plan, axes.x)
-	if width > 0.0 and axes.x <= float(plan.get("entranceOpenDepth", 7)) + 1.5:
-		var lateral_t := clampf(absf(axes.y) / maxf(0.001, width), 0.0, 1.0)
-		var arch := sqrt(maxf(0.0, 1.0 - lateral_t * lateral_t))
-		var arch_height := float(plan.get("entranceMouthArchHeight", clampf(width * cell_size() * 0.98, cell_size() * 2.05, cell_size() * 4.2)))
-		var mouth_ceiling := floor_y + maxf(cell_size() * 0.58, arch_height * arch)
-		var interior_ceiling := minf(surface_y - cell_size() * 0.70, floor_y + cell_size() * 2.90)
-		var blend := 1.0 - smoothstep(2.5, float(plan.get("entranceOpenDepth", 7)) + 1.5, axes.x)
-		return minf(surface_y - cell_size() * 0.28, lerpf(interior_ceiling, mouth_ceiling, clampf(blend, 0.0, 1.0)))
-	var base_ceiling := float(plan.get("ceilingLevel", fallback_level))
-	var dome := maxf(0.0, 1.0 - cave_planar_value_at_point(plan, point)) * cell_size() * 0.35
-	var wave := stable_signed(plan, "ceiling-wave", floori(point.x / cell_size()), floori(point.y / cell_size())) * cell_size() * 0.14
-	return minf(surface_y - cell_size() * 0.72, maxf(floor_y + cell_size() * 2.15, base_ceiling + dome + wave))
-
-func cave_profile_ceiling_y(plan: Dictionary, point: Vector2, floor_y: float) -> float:
-	var surface_y := surface_height_for_plan_point(plan, point)
-	var base_ceiling := float(plan.get("ceilingLevel", floor_y + cell_size() * 2.8))
-	var axes := cave_mouth_depth_lateral(plan, point)
-	var width := cave_mouth_width_at_depth(plan, axes.x)
-	if width > 0.0 and axes.x <= float(plan.get("entranceOpenDepth", 7)) + 1.5:
-		var lateral_t := clampf(absf(axes.y) / maxf(0.001, width), 0.0, 1.0)
-		var arch := sqrt(maxf(0.0, 1.0 - lateral_t * lateral_t))
-		var arch_height := float(plan.get("entranceMouthArchHeight", clampf(width * cell_size() * 0.98, cell_size() * 2.05, cell_size() * 4.2)))
-		var mouth_ceiling := floor_y + maxf(cell_size() * 0.58, arch_height * arch)
-		var interior_ceiling := minf(surface_y - cell_size() * 0.70, floor_y + cell_size() * 2.90)
-		var blend := 1.0 - smoothstep(2.5, float(plan.get("entranceOpenDepth", 7)) + 1.5, axes.x)
-		return minf(surface_y - cell_size() * 0.28, lerpf(interior_ceiling, mouth_ceiling, clampf(blend, 0.0, 1.0)))
-	return minf(surface_y - cell_size() * 0.72, maxf(floor_y + cell_size() * 2.15, base_ceiling))
-
-func surface_height_at_world(x: float, z: float, active_plan_records = null) -> float:
-	return surface_height_for_cell(roundi(x / cell_size()), roundi(z / cell_size()), active_plan_records)
-
-func surface_height_for_cell(x: int, z: int, active_plan_records = null) -> float:
-	return surface_height_for_cell3(Vector3i(x, 0, z), active_plan_records)
-
-func surface_height_for_plan_point(plan: Dictionary, point: Vector2) -> float:
-	var cell_x := roundi(point.x / cell_size())
-	var cell_z := roundi(point.y / cell_size())
-	var base := base_surface_height_for_cell3(Vector3i(cell_x, 0, cell_z))
-	return base + cave_mound_overlay(plan, point)
-
-func cave_mound_overlay(plan: Dictionary, point: Vector2) -> float:
-	if plan.is_empty() or not bool(plan.get("moundBacked", false)):
-		return 0.0
-	var entrance: Vector2i = plan.get("entranceCell", Vector2i.ZERO)
-	var inward_cell: Vector2i = plan.get("inward", Vector2i(0, 1))
-	var right_cell: Vector2i = plan.get("right", Vector2i(1, 0))
+	var inward_cell: Vector2i = feature.get("inward", Vector2i(0, 1))
+	var right_cell: Vector2i = feature.get("right", Vector2i(1, 0))
 	var inward := Vector2(float(inward_cell.x), float(inward_cell.y)).normalized()
 	var right := Vector2(float(right_cell.x), float(right_cell.y)).normalized()
-	if inward.length() <= 0.01:
-		inward = Vector2(0.0, 1.0)
-	if right.length() <= 0.01:
-		right = Vector2(1.0, 0.0)
-	var entrance_world := cell_world2(entrance)
-	var entrance_delta := point - entrance_world
-	var entrance_depth := entrance_delta.dot(inward) / cell_size()
-	var front_toe := smoothstep(-4.25, 1.35, entrance_depth)
-	if front_toe <= 0.001:
-		return 0.0
-	var path_length := float(plan.get("pathLength", 16))
-	var mouth_half_width := float(plan.get("entranceMouthHalfWidth", 2.85))
-	var mound_center := entrance_world + inward * cell_size() * maxf(4.0, path_length * 0.28)
-	var delta := point - mound_center
-	var depth := delta.dot(inward) / (cell_size() * maxf(8.0, path_length * 0.72))
-	var lateral := delta.dot(right) / (cell_size() * maxf(12.0, maxf(path_length * 0.30, mouth_half_width * 3.2)))
-	var distance := depth * depth + lateral * lateral
-	if distance >= 1.0:
-		return 0.0
-	var existing := base_surface_height_for_cell3(Vector3i(roundi(point.x / cell_size()), 0, roundi(point.y / cell_size())))
-	var required_cover := cave_ceiling_y_without_surface_clamp(plan, point) + cell_size() * 1.45
-	var needed := maxf(0.0, required_cover - existing)
-	var base_height := maxf(cell_size() * 2.2, needed)
-	var falloff := pow(1.0 - distance, 1.65)
-	var phase_a := stable01(plan, "mound-phase-a", 0, 0) * TAU
-	var phase_b := stable01(plan, "mound-phase-b", 0, 0) * TAU
-	var noise := clampf(0.96 + sin(point.x * 0.021 + phase_a) * 0.045 + cos(point.y * 0.027 + phase_b) * 0.045, 0.88, 1.08)
-	return base_height * falloff * front_toe * noise
+	var entrance := cell_world2(entrance_cell)
+	var radius := float(feature.get("radius", cell_size() * 2.4))
+	var length := float(feature.get("length", cell_size() * 24.0))
+	var vertical_radius := radius * 0.78
+	var depths := [
+		cell_size() * 2.0,
+		cell_size() * 4.0,
+		cell_size() * 7.5,
+		minf(length * 0.42, cell_size() * 13.0)
+	]
+	for depth_value in depths:
+		var depth := clampf(float(depth_value), 0.0, length)
+		var center2 := entrance + inward * depth
+		var center_y := cave_feature_center_y(feature, center2, depth)
+		var local_surface := terrain_reference_surface_y_at(Vector3(center2.x, 0.0, center2.y))
+		if depth >= cell_size() * 4.0 and local_surface < center_y + vertical_radius + cell_size() * 0.42:
+			return false
+		if main != null and center_y - vertical_radius < float(main.WATER_LEVEL) + cell_size() * 0.35:
+			return false
+		for side in [-1.0, 1.0]:
+			var side2 := center2 + right * radius * 1.28 * float(side)
+			var side_y := center_y + vertical_radius * 0.08
+			var side_surface := terrain_reference_surface_y_at(Vector3(side2.x, 0.0, side2.y))
+			if side_surface < side_y + cell_size() * 0.32:
+				return false
+			var side_pos := Vector3(side2.x, side_y, side2.y)
+			if cave_feature_air_value(feature, side_pos) < 0.0:
+				return false
+	return true
 
-func cave_ceiling_y_without_surface_clamp(plan: Dictionary, point: Vector2) -> float:
-	var floor_y := cave_floor_y_at_surface(plan, point, float(plan.get("level", 0.0)))
-	var axes := cave_mouth_depth_lateral(plan, point)
-	var base_ceiling := float(plan.get("ceilingLevel", floor_y + cell_size() * 2.8))
-	var width := cave_mouth_width_at_depth(plan, axes.x)
-	if width > 0.0:
-		var lateral_t := clampf(absf(axes.y) / maxf(0.001, width), 0.0, 1.0)
-		var arch := sqrt(maxf(0.0, 1.0 - lateral_t * lateral_t))
-		var arch_height := float(plan.get("entranceMouthArchHeight", clampf(width * cell_size() * 0.98, cell_size() * 2.05, cell_size() * 4.2)))
-		return floor_y + maxf(cell_size() * 0.58, arch_height * arch)
-	return maxf(floor_y + cell_size() * 2.15, base_ceiling)
+func cave_feature_air_value(feature: Dictionary, world_pos: Vector3) -> float:
+	if feature.is_empty():
+		return INF
+	var point := Vector2(world_pos.x, world_pos.z)
+	var entrance_cell: Vector2i = feature.get("entranceCell", Vector2i.ZERO)
+	var inward_cell: Vector2i = feature.get("inward", Vector2i(0, 1))
+	var right_cell: Vector2i = feature.get("right", Vector2i(1, 0))
+	var inward := Vector2(float(inward_cell.x), float(inward_cell.y)).normalized()
+	var right := Vector2(float(right_cell.x), float(right_cell.y)).normalized()
+	var entrance := cell_world2(entrance_cell)
+	var delta := point - entrance
+	var depth := delta.dot(inward)
+	var lateral := delta.dot(right)
+	var length := float(feature.get("length", cell_size() * 24.0))
+	var radius := cave_feature_radius_at_depth(feature, depth)
+	var clamped_depth := clampf(depth, 0.0, length)
+	var center2 := entrance + inward * clamped_depth
+	var center_y := cave_feature_center_y(feature, center2, clamped_depth)
+	var tube := cave_ellipsoid_value(world_pos, center2, center_y, radius, radius * 0.78)
+	var front_cap := maxf(0.0, (-radius * 1.15 - depth) / maxf(0.001, radius))
+	var back_cap := maxf(0.0, (depth - length) / maxf(0.001, radius))
+	var best := maxf(tube, maxf(front_cap, back_cap)) - 1.0
+	var chamber_center2 := entrance + inward * length
+	var chamber_y := cave_feature_center_y(feature, chamber_center2, length) - radius * 0.10
+	var chamber_radius := float(feature.get("chamberRadius", radius * 1.8))
+	best = minf(best, cave_ellipsoid_value(world_pos, chamber_center2, chamber_y, chamber_radius, chamber_radius * 0.58) - 1.0)
+	best = minf(best, cave_branch_air_value(feature, world_pos, entrance, inward, right))
+	return best
 
-func surface_patch_quad_cut_by_cave_pipe(plan: Dictionary, p00: Vector2, p10: Vector2, p11: Vector2, p01: Vector2) -> bool:
-	for point in [p00, p10, p11, p01, (p00 + p11) * 0.5]:
-		if cave_surface_point_opens_to_air(plan, point):
-			return true
-	return false
+func cave_branch_air_value(feature: Dictionary, world_pos: Vector3, entrance: Vector2, inward: Vector2, right: Vector2) -> float:
+	var branch_depth := float(feature.get("branchDepth", cell_size() * 12.0))
+	var branch_length := float(feature.get("branchLength", cell_size() * 10.0))
+	var branch_side := float(feature.get("branchSide", 1.0))
+	var branch_dir := (inward * 0.34 + right * branch_side).normalized()
+	var branch_origin := entrance + inward * branch_depth
+	var point := Vector2(world_pos.x, world_pos.z)
+	var delta := point - branch_origin
+	var depth := delta.dot(branch_dir)
+	var lateral := absf(delta.cross(branch_dir))
+	var radius := float(feature.get("radius", cell_size() * 2.0)) * 0.78
+	var clamped_depth := clampf(depth, 0.0, branch_length)
+	var center2 := branch_origin + branch_dir * clamped_depth
+	var center_y := cave_feature_center_y(feature, center2, branch_depth + clamped_depth) - radius * 0.12
+	var tube := sqrt(pow(lateral / maxf(0.001, radius), 2.0) + pow(absf(world_pos.y - center_y) / maxf(0.001, radius * 0.70), 2.0))
+	var front_cap := maxf(0.0, (-radius - depth) / maxf(0.001, radius))
+	var back_cap := maxf(0.0, (depth - branch_length) / maxf(0.001, radius))
+	return maxf(tube, maxf(front_cap, back_cap)) - 1.0
 
-func cave_surface_point_opens_to_air(plan: Dictionary, point: Vector2) -> bool:
-	var axes := cave_mouth_depth_lateral(plan, point)
-	if axes.x < cave_mouth_front_depth(plan) - 0.35 or axes.x > float(plan.get("entranceOpenDepth", 7)) + 0.65:
-		return false
-	var surface_y := surface_height_for_plan_point(plan, point)
-	var floor_y := cave_floor_y_at_surface(plan, point, float(plan.get("level", 0.0)))
-	var ceiling_y := cave_ceiling_y_at_surface(plan, point, floor_y + cell_size() * 3.0)
-	var max_cover := cell_size() * (1.20 if axes.x <= 0.25 else (0.88 if axes.x <= 2.25 else 0.46))
-	if surface_y - ceiling_y > max_cover:
-		return false
-	for offset in [0.30, 0.62, 0.95, 1.28]:
-		var sample_y := surface_y - cell_size() * float(offset)
-		if sample_y < floor_y - cell_size() * 0.08:
-			continue
-		if cave_contains_world(plan, Vector3(point.x, sample_y, point.y)):
-			return true
-	return false
+func cave_feature_radius_at_depth(feature: Dictionary, depth: float) -> float:
+	var radius := float(feature.get("radius", cell_size() * 2.0))
+	var length := float(feature.get("length", cell_size() * 24.0))
+	var t := clampf(depth / maxf(0.001, length), 0.0, 1.0)
+	var swell := sin(t * PI) * radius * 0.18
+	var entrance_blend := smoothstep(-radius * 1.15, radius * 2.5, depth)
+	return maxf(cell_size() * 1.10, (radius + swell) * lerpf(0.72, 1.0, entrance_blend))
+
+func cave_feature_center_y(feature: Dictionary, center2: Vector2, depth: float) -> float:
+	var entrance_surface := float(feature.get("entranceSurfaceY", 0.0))
+	var radius := float(feature.get("radius", cell_size() * 2.0))
+	var length := float(feature.get("length", cell_size() * 24.0))
+	var drop := float(feature.get("drop", cell_size() * 4.0))
+	var t := clampf(depth / maxf(0.001, length), 0.0, 1.0)
+	var nominal := entrance_surface + radius * 0.10 - smoothstep(0.0, 1.0, t) * drop
+	var cover := lerpf(radius * 0.10, radius * 1.20, smoothstep(0.0, cell_size() * 8.0, depth))
+	var local_surface := terrain_reference_surface_y_at(Vector3(center2.x, 0.0, center2.y))
+	return minf(nominal, local_surface - cover)
+
+func cave_ellipsoid_value(world_pos: Vector3, center2: Vector2, center_y: float, horizontal_radius: float, vertical_radius: float) -> float:
+	var horizontal := Vector2(world_pos.x, world_pos.z).distance_to(center2) / maxf(0.001, horizontal_radius)
+	var vertical := absf(world_pos.y - center_y) / maxf(0.001, vertical_radius)
+	return sqrt(horizontal * horizontal + vertical * vertical)
+
+func find_cave_biome_sample(search_radius_regions := 8) -> Dictionary:
+	for radius in range(0, search_radius_regions + 1):
+		for rz in range(-radius, radius + 1):
+			for rx in range(-radius, radius + 1):
+				if radius > 0 and absi(rx) != radius and absi(rz) != radius:
+					continue
+				var feature := cave_feature_for_region(rx, rz)
+				if feature.is_empty():
+					continue
+				var entrance: Vector2i = feature.get("entranceCell", Vector2i.ZERO)
+				var inward_cell: Vector2i = feature.get("inward", Vector2i(0, 1))
+				var inward := Vector2(float(inward_cell.x), float(inward_cell.y)).normalized()
+				var depth := cell_size() * 6.0
+				var center2 := cell_world2(entrance) + inward * depth
+				var center_y := cave_feature_center_y(feature, center2, depth)
+				var position := Vector3(center2.x, center_y, center2.y)
+				if biome_at(position) == "cave":
+					return {
+						"id": String(feature.get("id", "")),
+						"region": feature.get("region", Vector2i.ZERO),
+						"entranceCell": entrance,
+						"position": position,
+						"sample": sample_world(position),
+						"feature": feature.duplicate(true)
+					}
+	return {}
+
+func volume_hash01(salt: String, x: int, z: int, index: int) -> float:
+	var text := "volume-cave:%s:%d,%d:%d" % [salt, x, z, index]
+	if main != null and main.has_method("hash01"):
+		return float(main.call("hash01", text))
+	var h := hash(text)
+	return float(abs(h) % 100000) / 100000.0
 
 func town_region_at_cell3(cell: Vector3i) -> Dictionary:
 	if main == null:
@@ -707,7 +549,7 @@ func town_slope_apron_cells(town: Dictionary) -> int:
 		for direction in sample_dirs:
 			var sample_x: int = center_x + roundi(direction.x * sample_distance)
 			var sample_z: int = center_z + roundi(direction.y * sample_distance)
-			max_diff = maxf(max_diff, absf(natural_surface_height_for_cell3(Vector3i(sample_x, 0, sample_z)) - level))
+			max_diff = maxf(max_diff, absf(natural_surface_y_for_cell(Vector3i(sample_x, 0, sample_z)) - level))
 		var needed: int = ceili(max_diff / maxf(0.01, cell_size() * 0.72)) + 4
 		var next_apron: int = mini(max_apron, maxi(apron, needed))
 		if next_apron == apron:
@@ -762,21 +604,6 @@ func surface_color_for_cell3(cell: Vector3i) -> Color:
 		return Color(0.20, 0.22, 0.21)
 	return Color(0.37, 0.47, 0.34)
 
-func surface_quad_hidden_for_cell3(cell: Vector3i) -> bool:
-	var cell_size_value := cell_size()
-	var p00 := Vector2(float(cell.x) * cell_size_value, float(cell.z) * cell_size_value)
-	var p10 := Vector2(float(cell.x + 1) * cell_size_value, float(cell.z) * cell_size_value)
-	var p01 := Vector2(float(cell.x) * cell_size_value, float(cell.z + 1) * cell_size_value)
-	var p11 := Vector2(float(cell.x + 1) * cell_size_value, float(cell.z + 1) * cell_size_value)
-	for plan in active_plans_from_records(null):
-		if surface_patch_quad_cut_by_cave_pipe(plan, p00, p10, p11, p01):
-			return true
-	for brush in excavation_brushes:
-		var hidden_cells = brush.get("hiddenCells", {})
-		if hidden_cells is Dictionary and (hidden_cells as Dictionary).has(Vector2i(cell.x, cell.z)):
-			return true
-	return false
-
 func world_to_cell3(position: Vector3) -> Vector3i:
 	var s := cell_size()
 	return Vector3i(roundi(position.x / s), roundi(position.y / s), roundi(position.z / s))
@@ -791,29 +618,8 @@ func merged_excavation_brushes(extra_excavation_brushes) -> Array[Dictionary]:
 				result.append(value)
 	return result
 
-func active_plans_from_records(active_plan_records) -> Array[Dictionary]:
-	var plans: Array[Dictionary] = []
-	var records = cave_plan_records if active_plan_records == null else active_plan_records
-	if not (records is Dictionary):
-		return plans
-	for value in (records as Dictionary).values():
-		if value is Dictionary:
-			var record: Dictionary = value
-			var plan_value = record.get("plan", record)
-			if plan_value is Dictionary:
-				plans.append(plan_value)
-	return plans
-
 func cell_world2(cell: Vector2i) -> Vector2:
 	return Vector2(float(cell.x) * cell_size(), float(cell.y) * cell_size())
 
 func cell_size() -> float:
 	return float(main.CELL) if main != null else 1.35
-
-func stable01(plan: Dictionary, salt: String, x: int, z: int) -> float:
-	var text := "%s:%s:%s:%d,%d" % [String(main.get("seed_text")) if main != null else "", String(plan.get("id", "cave")), salt, x, z]
-	var h := int(main.hash_string(text)) if main != null and main.has_method("hash_string") else hash(text)
-	return float(abs(h) % 100000) / 99999.0
-
-func stable_signed(plan: Dictionary, salt: String, x: int, z: int) -> float:
-	return stable01(plan, salt, x, z) * 2.0 - 1.0

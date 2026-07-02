@@ -68,8 +68,8 @@ func hold_existing_ambient_npcs() -> void:
             body.set_meta("npc_force_hold", true)
 
 func snapshot_height_fixture() -> Array:
-    if main != null and main.has_method("snapshot_height_edits"):
-        var snapshot = main.call("snapshot_height_edits")
+    if main != null and main.has_method("snapshot_volume_edits"):
+        var snapshot = main.call("snapshot_volume_edits")
         if snapshot is Array:
             return snapshot
     return []
@@ -77,8 +77,8 @@ func snapshot_height_fixture() -> Array:
 func restore_height_fixture(snapshot: Array, centers: Array) -> void:
     if main == null:
         return
-    if main.has_method("restore_height_edits"):
-        main.call("restore_height_edits", snapshot)
+    if main.has_method("restore_volume_edits"):
+        main.call("restore_volume_edits", snapshot)
     for center_value in centers:
         if center_value is Vector2i and main.has_method("rebuild_chunks_around_cell"):
             main.call("rebuild_chunks_around_cell", center_value)
@@ -87,7 +87,7 @@ func restore_height_fixture(snapshot: Array, centers: Array) -> void:
 func move_player_to_fixture_cell(cell: Vector2i) -> void:
     if main == null or player == null:
         return
-    var height: float = main.call("terrain_height_cell", cell.x, cell.y)
+    var height: float = surface_y_at_cell2(cell)
     player.global_position = Vector3(float(cell.x) * CELL, height + 0.04, float(cell.y) * CELL)
     player.velocity = Vector3.ZERO
     player.set("terrain_grounded", true)
@@ -171,21 +171,21 @@ func test_generic_town_npc_navigation() -> void:
             roundi(float(generic_center_x) + outward.x * forage_distance),
             roundi(float(generic_center_z) + outward.y * forage_distance)
         )
-        var forage_ground: float = main.call("height_at_world", float(forage_cell.x) * CELL, float(forage_cell.y) * CELL)
+        var forage_ground: float = surface_y_at_cell2(forage_cell)
         if forage_ground < main.WATER_LEVEL + 0.55:
             for fallback_direction in [Vector2.RIGHT, Vector2.LEFT, Vector2.DOWN, Vector2.UP]:
                 var fallback_cell := Vector2i(
                     roundi(float(generic_center_x) + fallback_direction.x * forage_distance),
                     roundi(float(generic_center_z) + fallback_direction.y * forage_distance)
                 )
-                var fallback_ground: float = main.call("height_at_world", float(fallback_cell.x) * CELL, float(fallback_cell.y) * CELL)
+                var fallback_ground: float = surface_y_at_cell2(fallback_cell)
                 if fallback_ground >= main.WATER_LEVEL + 0.55:
                     forage_cell = fallback_cell
                     forage_ground = fallback_ground
                     break
         clear_props_near_cell(forage_cell, 5)
         clear_blocks_near_cell(forage_cell, 3)
-        forage_ground = main.call("height_at_world", float(forage_cell.x) * CELL, float(forage_cell.y) * CELL)
+        forage_ground = surface_y_at_cell2(forage_cell)
         var rng := RandomNumberGenerator.new()
         rng.seed = 77031
         forage_node = main.call(
@@ -346,7 +346,7 @@ func test_npc_capsule_collision_gate() -> void:
     clear_props_near_cell(start_cell, 12)
     await wait_physics_frames(3)
 
-    var base_height: float = main.call("terrain_height_cell", start_cell.x, start_cell.y)
+    var base_height: float = surface_y_at_cell2(start_cell)
     var start_position := Vector3(float(start_cell.x) * CELL, base_height + 0.04, float(start_cell.y) * CELL)
     var wall_y := base_height + CELL * 0.48
     var wall_cell_y := floori(wall_y / CELL) + 1
@@ -470,7 +470,7 @@ func test_two_npcs_cross_narrow_door() -> void:
     clear_props_near_cell(start_cell, 14)
     await wait_physics_frames(3)
 
-    var base_height: float = main.call("terrain_height_cell", start_cell.x, start_cell.y)
+    var base_height: float = surface_y_at_cell2(start_cell)
     var wall_y := base_height + CELL * 0.48
     var wall_cell_y := floori(wall_y / CELL) + 1
     var door_cell := Vector3i(start_cell.x + 4, wall_cell_y, start_cell.y)
@@ -665,7 +665,7 @@ func test_home_return_fallback_semantics() -> void:
     clear_props_near_cell(start_cell, 18)
     await wait_physics_frames(2)
 
-    var level: float = main.call("terrain_height_cell", home_cell.x, home_cell.y)
+    var level: float = surface_y_at_cell2(home_cell)
     var body := npc_system.create_npc_body("NpcNavHomeFallback", "npc") as CharacterBody3D
     npc_system.call("add_npc_collider", body)
     var npc_root := npc_system.get("npc_root") as Node3D
@@ -778,7 +778,7 @@ func test_reachability_aware_goal_selection() -> void:
     clear_props_near_cell(start_cell, 36)
     await wait_physics_frames(3)
 
-    var base_height: float = main.call("terrain_height_cell", start_cell.x, start_cell.y)
+    var base_height: float = surface_y_at_cell2(start_cell)
     var town_radius := 12
     var tree_cell := dry_work_cell(start_cell, town_radius + 8, town_radius + 22)
     var rock_cell := dry_work_cell(Vector2i(start_cell.x, start_cell.y + 2), town_radius + 8, town_radius + 24)
@@ -786,8 +786,8 @@ func test_reachability_aware_goal_selection() -> void:
     var prop_root := main.get("prop_root") as Node
     var rng := RandomNumberGenerator.new()
     rng.seed = 908177
-    var tree_pos := Vector3(float(tree_cell.x) * CELL, main.call("height_at_world", float(tree_cell.x) * CELL, float(tree_cell.y) * CELL), float(tree_cell.y) * CELL)
-    var rock_pos := Vector3(float(rock_cell.x) * CELL, main.call("height_at_world", float(rock_cell.x) * CELL, float(rock_cell.y) * CELL), float(rock_cell.y) * CELL)
+    var tree_pos := Vector3(float(tree_cell.x) * CELL, surface_y_at_cell2(tree_cell), float(tree_cell.y) * CELL)
+    var rock_pos := Vector3(float(rock_cell.x) * CELL, surface_y_at_cell2(rock_cell), float(rock_cell.y) * CELL)
     var tree := main.call("make_tree", prop_root, "npc-nav:wood-target", tree_pos, "forest", rng) as Node3D
     var rock := main.call("make_rock", prop_root, "npc-nav:stone-target", rock_pos, rng) as Node3D
     await wait_physics_frames(3)
@@ -804,7 +804,7 @@ func test_reachability_aware_goal_selection() -> void:
             if body != null:
                 bodies.append(body)
 
-    var hostile_height: float = main.call("terrain_height_cell", hostile_cell.x, hostile_cell.y)
+    var hostile_height: float = surface_y_at_cell2(hostile_cell)
     var hostile := StaticBody3D.new()
     hostile.name = "NpcNavGoalHostile"
     hostile.position = Vector3(float(hostile_cell.x) * CELL, hostile_height + 0.04, float(hostile_cell.y) * CELL)
@@ -921,7 +921,7 @@ func dry_work_cell(center: Vector2i, min_radius: int, max_radius: int) -> Vector
     for radius in range(min_radius, max_radius + 1):
         for direction in [Vector2i.RIGHT, Vector2i.LEFT, Vector2i.DOWN, Vector2i.UP, Vector2i(1, 1), Vector2i(-1, 1), Vector2i(1, -1), Vector2i(-1, -1)]:
             var cell: Vector2i = center + direction * radius
-            var height: float = main.call("terrain_height_cell", cell.x, cell.y)
+            var height: float = surface_y_at_cell2(cell)
             if height >= main.WATER_LEVEL + 0.55:
                 return cell
     return center + Vector2i(max_radius, 0)

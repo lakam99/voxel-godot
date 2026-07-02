@@ -183,7 +183,7 @@ func update_hud(message: String = "", throttled: bool = false) -> void:
         if not throttled:
             hud_refresh_elapsed = 0.0
     var cell := Vector2i(world_to_cell(player.position.x), world_to_cell(player.position.z))
-    var biome := biome_at_cell(cell.x, cell.y)
+    var biome := surface_biome_at_cell(Vector3i(cell.x, 0, cell.y))
     update_exploration_state(cell, biome)
     update_objectives_and_contracts()
     var time_text := "Day %d %s" % [max(1, int(floor(world_elapsed / DAY_LENGTH)) + 1), clock_time_text()]

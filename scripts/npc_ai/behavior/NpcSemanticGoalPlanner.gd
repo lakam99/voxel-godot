@@ -17,6 +17,11 @@ func setup(system_node, main_node, navigation_world, route_planner) -> void:
     world = navigation_world
     planner = route_planner
 
+func surface_y_at_position(position: Vector3) -> float:
+    if main != null and main.has_method("surface_y_at_position"):
+        return float(main.call("surface_y_at_position", position))
+    return position.y
+
 func make_intent(entry: Dictionary, target: Vector3, max_distance: float, moving_home := false, allow_outside := false) -> Dictionary:
     var body := entry.get("body") as Node3D
     var kind: String = String(entry.get("routeIntentKind", entry.get("activeGoalKind", entry.get("goal", "move"))))
@@ -215,7 +220,7 @@ func outward_work_anchor(entry: Dictionary) -> Vector3:
     direction = direction.normalized()
     var radius := (maxf(32.0, float(entry.get("townRadius", 18))) + 4.0) * CELL
     var position := center + direction * radius
-    var ground_y: float = main.height_at_world(position.x, position.z)
+    var ground_y: float = surface_y_at_position(position)
     if ground_y < main.WATER_LEVEL + 0.55:
         return Vector3.INF
     position.y = ground_y + 0.04
@@ -371,7 +376,7 @@ func prop_matches_job(prop: Node3D, entry: Dictionary, job: String) -> bool:
         return false
     if not job_position_allowed(entry, prop.global_position, job == "forage"):
         return false
-    if main.height_at_world(prop.global_position.x, prop.global_position.z) < main.WATER_LEVEL + 0.45:
+    if surface_y_at_position(prop.global_position) < main.WATER_LEVEL + 0.45:
         return false
     var material := String(prop.get_meta("material", ""))
     var drop := String(prop.get_meta("drop", ""))
@@ -423,7 +428,7 @@ func hostile_intercept_candidates(entry: Dictionary, hostile: Node3D, melee := f
                 var pos: Vector3 = world.cell_position(cell)
                 if not world.point_inside_work_area(entry, pos):
                     continue
-                if main.height_at_world(pos.x, pos.z) < main.WATER_LEVEL + 0.45:
+                if surface_y_at_position(pos) < main.WATER_LEVEL + 0.45:
                     continue
                 if not line_of_sight_cells_clear(entry, snapshot, pos, hostile.global_position):
                     continue
@@ -451,7 +456,7 @@ func position_can_be_goal(entry: Dictionary, position: Vector3, allow_outside :=
         return false
     if not world.point_allowed(entry, position, allow_outside, moving_home):
         return false
-    return main.height_at_world(position.x, position.z) >= main.WATER_LEVEL + 0.45
+    return surface_y_at_position(position) >= main.WATER_LEVEL + 0.45
 
 func unique_positions(candidates: Array[Vector3]) -> Array[Vector3]:
     var result: Array[Vector3] = []
@@ -495,7 +500,7 @@ func add_deterministic_ring_candidates(candidates: Array[Vector3], entry: Dictio
             base_radius += rng.randf_range(4.0, 9.0)
         var angle: float = rng.randf() * TAU + float(attempt) * 0.29
         var position: Vector3 = Vector3(float(center.x) * CELL + cos(angle) * base_radius * CELL, 0.0, float(center.y) * CELL + sin(angle) * base_radius * CELL)
-        var ground_y: float = main.height_at_world(position.x, position.z)
+        var ground_y: float = surface_y_at_position(position)
         if ground_y < main.WATER_LEVEL + 0.5:
             continue
         position.y = ground_y + 0.04

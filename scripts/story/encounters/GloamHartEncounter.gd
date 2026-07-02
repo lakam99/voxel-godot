@@ -56,8 +56,8 @@ func setup(main_node, controller_node, config: Dictionary) -> void:
     health = phase_start_health(phase)
     status = "active"
     global_position = config.get("position", global_position)
-    if main != null and main.has_method("height_at_world"):
-        global_position.y = main.height_at_world(global_position.x, global_position.z) + 0.15
+    if main != null and main.has_method("surface_y_at_position"):
+        global_position.y = float(main.call("surface_y_at_position", global_position)) + 0.15
     play_animation_state("idle_breathe")
     set_process(true)
 
@@ -201,8 +201,8 @@ func spawn_phase_minions() -> int:
     for i in range(2):
         var angle := (float(i) / 2.0) * TAU + PI * 0.25
         var position := global_position + Vector3(cos(angle) * 7.0, 0.0, sin(angle) * 7.0)
-        if main.has_method("height_at_world"):
-            position.y = main.height_at_world(position.x, position.z) + 0.72
+        if main.has_method("surface_y_at_position"):
+            position.y = float(main.call("surface_y_at_position", position)) + 0.72
         var body: StaticBody3D = hostile_system.spawn_enemy(position, "shadow") if hostile_system.has_method("spawn_enemy") else null
         if body == null:
             continue

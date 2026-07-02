@@ -3942,8 +3942,8 @@ func world_position_for_flat_coords(cell_x: float, cell_z: float) -> Vector3:
     var x := cell_x * CELL
     var z := cell_z * CELL
     var y := 0.0
-    if main != null and main.has_method("height_at_world"):
-        y = float(main.call("height_at_world", x, z)) + 0.08
+    if main != null and main.has_method("surface_y_at_position"):
+        y = float(main.call("surface_y_at_position", Vector3(x, 0.0, z))) + 0.08
     return Vector3(x, y, z)
 
 func home_door_walkable_probe(entry: Dictionary) -> Array[Dictionary]:

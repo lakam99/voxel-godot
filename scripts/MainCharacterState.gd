@@ -117,7 +117,7 @@ func update_single_wildlife(body: StaticBody3D, delta: float) -> void:
     if moved > 0.001:
         body.rotation.y = atan2(-direction.x, -direction.z)
     update_wildlife_animation(body, moved, speed)
-    var ground_y := height_at_world(body.global_position.x, body.global_position.z)
+    var ground_y := surface_y_at_position(body.global_position)
     body.global_position.y = ground_y
     body.set_meta("wildlife_direction", direction)
     body.set_meta("wildlife_timer", timer)
@@ -142,9 +142,9 @@ func move_wildlife(body: StaticBody3D, displacement: Vector3) -> float:
     if body == null or displacement.length_squared() < 0.000001:
         return 0.0
     var previous := body.global_position
-    var previous_ground := height_at_world(previous.x, previous.z)
+    var previous_ground := surface_y_at_position(previous)
     var candidate := previous + displacement
-    var next_ground := height_at_world(candidate.x, candidate.z)
+    var next_ground := surface_y_at_position(candidate)
     if next_ground < WATER_LEVEL + 0.45:
         return 0.0
     if absf(next_ground - previous_ground) > CELL * 0.72:
@@ -275,7 +275,7 @@ func victory_stats() -> Array:
     var hostile_state: Dictionary = state.get("hostiles", {})
     var defeated_variants: Dictionary = hostile_state.get("defeatedVariants", {})
     var totals: Dictionary = state.get("totals", {})
-    var world_edits: int = height_edits.size() + removed_props.size() + blocks.size()
+    var world_edits: int = volume_edit_markers.size() + removed_props.size() + blocks.size()
     var time_text := clock_time_text()
     return [
         { "label": "Seed", "value": seed_text },

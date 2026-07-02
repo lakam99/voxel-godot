@@ -714,8 +714,8 @@ func _home_exit_clearance_target(entry: Dictionary, fallback_y: float) -> Vector
 		return entry.get("porchPosition", Vector3(float(porch_cell.x) * NpcConstantsScript.CELL_SIZE, fallback_y, float(porch_cell.y) * NpcConstantsScript.CELL_SIZE))
 	var position := Vector3(float(exit_cell.x) * NpcConstantsScript.CELL_SIZE, fallback_y, float(exit_cell.y) * NpcConstantsScript.CELL_SIZE)
 	var main = npc_system.get("main") if npc_system != null else null
-	if main != null and main.has_method("height_at_world"):
-		position.y = float(main.call("height_at_world", position.x, position.z)) + 0.04
+	if main != null and main.has_method("surface_y_at_position"):
+		position.y = float(main.call("surface_y_at_position", position)) + 0.04
 	return position
 
 func _town_exit_toward(entry: Dictionary, target: Vector3, fallback_y: float) -> Vector3:
@@ -732,8 +732,8 @@ func _town_exit_toward(entry: Dictionary, target: Vector3, fallback_y: float) ->
 		exit_cell = Vector2(float(center.x) + 0.5, float(center.y) + exit_distance) if delta.z >= 0.0 else Vector2(float(center.x) + 0.5, float(center.y) - exit_distance)
 	var position := Vector3(exit_cell.x * NpcConstantsScript.CELL_SIZE, fallback_y, exit_cell.y * NpcConstantsScript.CELL_SIZE)
 	var main = npc_system.get("main") if npc_system != null else null
-	if main != null and main.has_method("height_at_world"):
-		position.y = float(main.call("height_at_world", position.x, position.z)) + 0.04
+	if main != null and main.has_method("surface_y_at_position"):
+		position.y = float(main.call("surface_y_at_position", position)) + 0.04
 	return position
 
 func _begin_job_phase_section(entry: Dictionary, job: String) -> int:

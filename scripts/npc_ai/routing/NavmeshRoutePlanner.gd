@@ -227,8 +227,8 @@ func _nav_query_position(position: Vector3, cell: Vector2i, generated_world = nu
 	if source != null and source.has_method("cell_position"):
 		var cell_position: Vector3 = source.cell_position(cell)
 		result.y = cell_position.y
-	elif main != null and main.has_method("height_at_world"):
-		result.y = float(main.height_at_world(position.x, position.z)) + 0.04
+	elif main != null and main.has_method("surface_y_at_position"):
+		result.y = float(main.call("surface_y_at_position", position)) + 0.04
 	return result
 
 func _target_cell_blocked(entry: Dictionary, target_cell: Vector2i, generated_world = null, allow_outside := false, moving_home := false) -> bool:

@@ -326,7 +326,7 @@ func random_precip_position(observer: Vector3, index: int, snowing: bool, initia
     return Vector3(x, y, z)
 
 func water_influence_at_cell(cell: Vector2i) -> float:
-    if main == null or not main.has_method("terrain_height_cell"):
+    if main == null or not main.has_method("surface_y_at_cell"):
         return 0.0
     var offsets := [
         Vector2i(0, 0), Vector2i(6, 0), Vector2i(-6, 0), Vector2i(0, 6), Vector2i(0, -6),
@@ -335,7 +335,7 @@ func water_influence_at_cell(cell: Vector2i) -> float:
     ]
     var wet := 0
     for offset in offsets:
-        if float(main.terrain_height_cell(cell.x + offset.x, cell.y + offset.y)) <= WATER_LEVEL + 0.45:
+        if float(main.call("surface_y_at_cell", Vector3i(cell.x + offset.x, 0, cell.y + offset.y))) <= WATER_LEVEL + 0.45:
             wet += 1
     return float(wet) / float(offsets.size())
 
@@ -359,8 +359,8 @@ func profile_for_biome(biome: String) -> Dictionary:
 func is_cold(biome: String, observer: Vector3) -> bool:
     if biome in ["snow", "tundra", "alpine", "taiga"]:
         return true
-    if main and main.has_method("height_at_world"):
-        return float(main.height_at_world(observer.x, observer.z)) > 54.0
+    if main and main.has_method("surface_y_at_position"):
+        return float(main.call("surface_y_at_position", observer)) > 54.0
     return false
 
 func weather_roll(cell: Vector2i) -> float:

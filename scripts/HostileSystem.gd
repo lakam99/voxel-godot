@@ -37,6 +37,21 @@ func setup(main_node, player_node: CharacterBody3D, survival_system, inventory_s
     projectile_system.setup(main, player, survival)
     projectiles = projectile_system.projectiles
 
+func surface_y_at_position(position: Vector3) -> float:
+    if main != null and main.has_method("surface_y_at_position"):
+        return float(main.call("surface_y_at_position", position))
+    return position.y
+
+func ground_y_near_position(position: Vector3) -> float:
+    if main != null and main.has_method("ground_y_near_position"):
+        return float(main.call("ground_y_near_position", position))
+    return surface_y_at_position(position)
+
+func surface_biome_at_position(position: Vector3) -> String:
+    if main != null and main.has_method("surface_biome_at_cell"):
+        return String(main.call("surface_biome_at_cell", Vector3i(main.world_to_cell(position.x), 0, main.world_to_cell(position.z))))
+    return "plains"
+
 func clear() -> void:
     for enemy in enemies:
         var body := enemy.get("body") as Node
@@ -247,7 +262,7 @@ func spawn_tutorial_perimeter(profile: Dictionary, biome: String) -> StaticBody3
         var position := center + Vector3(cos(angle) * radius, 0.0, sin(angle) * radius)
         if position.distance_to(player.global_position) < CELL * 13.0:
             continue
-        var ground_y: float = main.height_at_world(position.x, position.z)
+        var ground_y: float = surface_y_at_position(position)
         if ground_y < main.WATER_LEVEL + 0.8:
             continue
         position.y = ground_y + 0.72
@@ -269,7 +284,7 @@ func spawn_near_player(biome: String) -> StaticBody3D:
         var angle: float = randf() * TAU
         var distance: float = 48.0 + randf() * 46.0
         var position: Vector3 = player.global_position + Vector3(cos(angle) * distance, 0.0, sin(angle) * distance)
-        var ground_y: float = main.height_at_world(position.x, position.z)
+        var ground_y: float = surface_y_at_position(position)
         if ground_y < main.WATER_LEVEL + 0.8:
             continue
         position.y = ground_y + 0.72
@@ -313,14 +328,13 @@ func spawn_beacon_raid(beacon: Node3D, stage: int = 1) -> int:
         var angle := rng.randf() * TAU
         var radius := 13.0 + rng.randf() * 13.0 + float(stage) * 1.8
         var position := beacon.global_position + Vector3(cos(angle) * radius, 0.0, sin(angle) * radius)
-        var ground_y: float = main.height_at_world(position.x, position.z)
+        var ground_y: float = surface_y_at_position(position)
         if ground_y < main.WATER_LEVEL + 0.8:
             continue
         position.y = ground_y + 0.72
         if player and position.distance_to(player.global_position) < 8.0:
             continue
-        var cell: Vector2i = Vector2i(main.world_to_cell(position.x), main.world_to_cell(position.z))
-        var biome: String = main.biome_at_cell(cell.x, cell.y)
+        var biome: String = surface_biome_at_position(position)
         var is_rift_boss: bool = stage >= 3 and spawned == 0
         var variant: String = "rift" if is_rift_boss else ("seer" if rng.randf() > 0.72 else ("frost" if biome in ["snow", "tundra", "alpine", "taiga"] else "shadow"))
         var body: StaticBody3D = spawn_enemy(position, variant)
@@ -355,7 +369,7 @@ func spawn_landmark_ambush(origin: Vector3, tier := "ruin") -> int:
         var angle := rng.randf() * TAU
         var radius := 7.0 + rng.randf() * 7.0 if tier == "camp" else 5.0 + rng.randf() * 6.0
         var position := origin + Vector3(cos(angle) * radius, 0.0, sin(angle) * radius)
-        var ground_y: float = main.height_at_world(position.x, position.z)
+        var ground_y: float = surface_y_at_position(position)
         if ground_y < main.WATER_LEVEL + 0.8:
             continue
         position.y = ground_y + 0.72
@@ -392,7 +406,7 @@ func spawn_shrine_guardians(origin: Vector3, count := 3) -> int:
         var angle := rng.randf() * TAU
         var radius := 8.0 + rng.randf() * 7.0
         var position := origin + Vector3(cos(angle) * radius, 0.0, sin(angle) * radius)
-        var ground_y: float = main.height_at_world(position.x, position.z)
+        var ground_y: float = surface_y_at_position(position)
         if ground_y < main.WATER_LEVEL + 0.8:
             continue
         position.y = ground_y + 0.72
@@ -452,9 +466,9 @@ func horizontal_move(body: Node3D, displacement: Vector3, variant: String, ignor
         return 0.0
     displacement.y = 0.0
     var previous := body.global_position
-    var previous_ground: float = main.height_at_world(previous.x, previous.z)
+    var previous_ground: float = ground_y_near_position(previous)
     var candidate := previous + displacement
-    var next_ground: float = main.height_at_world(candidate.x, candidate.z)
+    var next_ground: float = ground_y_near_position(candidate)
     if next_ground < main.WATER_LEVEL + 0.35:
         return 0.0
     var max_step := CELL * (1.38 if variant == "rift" else 0.92)
@@ -539,7 +553,7 @@ func hostile_body_overlaps_block(candidate: Vector3, variant: String) -> bool:
     var max_x := ceili((candidate.x + search_radius) / CELL)
     var min_z := floori((candidate.z - search_radius) / CELL)
     var max_z := ceili((candidate.z + search_radius) / CELL)
-    var ground_y: float = main.height_at_world(candidate.x, candidate.z)
+    var ground_y: float = surface_y_at_position(candidate)
     var center_y := floori((ground_y + CELL * 0.48) / CELL) + 1
     for x in range(min_x, max_x + 1):
         for z in range(min_z, max_z + 1):
@@ -726,7 +740,7 @@ func update_enemy(enemy: Dictionary, delta: float, night_factor: float) -> void:
         enemy["roamTimer"] = roam_timer
     enemy["lastMoveDistance"] = move_distance
 
-    var ground_y: float = main.height_at_world(body.global_position.x, body.global_position.z)
+    var ground_y: float = ground_y_near_position(body.global_position)
     var hover: float = 0.78 if variant == "rift" else 0.72
     var bob: float = 0.03 if variant == "rift" else 0.05
     body.global_position.y = ground_y + hover + sin(float(enemy.get("wobble", 0.0))) * bob
@@ -778,7 +792,7 @@ func update_scripted_enemy(enemy: Dictionary, body: StaticBody3D, delta: float, 
             speed *= 0.85
         move_distance = horizontal_move(body, to_desired.normalized() * minf(speed * delta, to_desired.length()), variant, frenzy)
     enemy["lastMoveDistance"] = move_distance
-    var ground_y: float = main.height_at_world(body.global_position.x, body.global_position.z)
+    var ground_y: float = ground_y_near_position(body.global_position)
     var hover: float = 0.78 if variant == "rift" else 0.72
     var bob: float = 0.03 if variant == "rift" else 0.05
     enemy["wobble"] = float(enemy.get("wobble", 0.0)) + delta * 4.0

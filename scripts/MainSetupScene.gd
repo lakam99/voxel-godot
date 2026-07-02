@@ -286,7 +286,7 @@ func find_spawn_position() -> Vector3:
         best_cell = find_spawn_cell(CELL * 1.6)
     if best_cell == Vector2i(999999, 999999):
         best_cell = Vector2i(0, 28)
-    var spawn_height: float = terrain_height_cell(best_cell.x, best_cell.y)
+    var spawn_height: float = surface_y_at_cell(Vector3i(best_cell.x, 0, best_cell.y))
     return Vector3(best_cell.x * CELL, spawn_height + 5.0, best_cell.y * CELL)
 
 func find_spawn_cell(max_variation: float) -> Vector2i:
@@ -294,13 +294,13 @@ func find_spawn_cell(max_variation: float) -> Vector2i:
     var best_score: float = -999999.0
     for z in range(-72, 73):
         for x in range(-72, 73):
-            var h: float = terrain_height_cell(x, z)
+            var h: float = surface_y_at_cell(Vector3i(x, 0, z))
             if h <= WATER_LEVEL + 2.4:
                 continue
             var variation: float = height_variation_cell(x, z, 2)
             if variation > max_variation:
                 continue
-            var biome: String = biome_at_cell(x, z)
+            var biome: String = surface_biome_at_cell(Vector3i(x, 0, z))
             var biome_score: float = 0.0
             if biome == "plains" or biome == "forest" or biome == "savanna":
                 biome_score = 18.0
@@ -316,11 +316,11 @@ func find_spawn_cell(max_variation: float) -> Vector2i:
     return best_cell
 
 func height_variation_cell(x: int, z: int, radius: int) -> float:
-    var center_height: float = terrain_height_cell(x, z)
+    var center_height: float = surface_y_at_cell(Vector3i(x, 0, z))
     var max_delta := 0.0
     for dz in range(-radius, radius + 1):
         for dx in range(-radius, radius + 1):
-            var sample_height: float = terrain_height_cell(x + dx, z + dz)
+            var sample_height: float = surface_y_at_cell(Vector3i(x + dx, 0, z + dz))
             max_delta = max(max_delta, abs(sample_height - center_height))
     return max_delta
 

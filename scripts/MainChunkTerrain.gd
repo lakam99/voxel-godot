@@ -713,7 +713,7 @@ func block_bottom_y(block: Node3D) -> float:
     return block.global_position.y - CELL * 0.48
 
 func block_touches_terrain(block: Node3D) -> bool:
-    var ground := height_at_world(block.global_position.x, block.global_position.z)
+    var ground := surface_y_at_position(block.global_position)
     return block_bottom_y(block) <= ground + CELL * 0.55
 
 func adjacent_structure_blocks(block: Node) -> Array:

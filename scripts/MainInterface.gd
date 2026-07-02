@@ -150,8 +150,8 @@ func create_save_snapshot() -> Dictionary: return {}
 func apply_save_snapshot(snapshot: Dictionary) -> bool: return false
 func snapshot_exploration() -> Dictionary: return {}
 func restore_exploration(snapshot_value) -> void: pass
-func snapshot_height_edits() -> Array: return []
-func restore_height_edits(entries) -> void: pass
+func snapshot_volume_edits() -> Array: return []
+func restore_volume_edits(entries) -> void: pass
 func restore_removed_props(entries) -> void: pass
 func restore_player_state(state) -> void: pass
 func snapshot_player_blocks() -> Array: return []
@@ -436,7 +436,7 @@ func break_target_for_hit(hit: Dictionary, collider: Node, kind: String) -> Dict
 func complete_destroy_target(hit: Dictionary, collider: Node, kind: String, material_id: String) -> void: pass
 func complete_break_objectives(material_id: String) -> void: pass
 func is_station_near(station_id: String) -> bool: return false
-func terrain_material_id_for_cell(x: int, z: int) -> String: return ""
+func surface_material_at_cell(cell: Vector3i) -> String: return ""
 func unmet_tool_requirement_message(material_id: String) -> String: return ""
 func active_tool_info() -> Dictionary: return {}
 func tool_class_for_item(item_id: String) -> String: return ""
@@ -448,13 +448,13 @@ func _on_player_projectile_hostile_hit(variant: String, defeated: bool, position
 func _on_player_projectile_story_worldmark_hit(resolved: bool, position: Vector3) -> void: pass
 func show_break_overlay(hit_position: Vector3, normal: Vector3, ratio: float) -> void: pass
 func add_crack_line(mesh: ImmediateMesh, a: Vector3, b: Vector3) -> void: pass
-func height_at_world(x: float, z: float) -> float: return 0.0
-func ground_height_at_world(x: float, z: float, current_y: float) -> float: return height_at_world(x, z)
-func terrain_height_cell(x: int, z: int) -> float: return 0.0
-func base_height_cell(x: int, z: int) -> float: return 0.0
-func natural_base_height_cell(x: int, z: int) -> float: return 0.0
-func biome_at_cell(x: int, z: int) -> String: return ""
-func biome_at_cell3(cell: Vector3i) -> String: return ""
+func surface_y_at_position(position: Vector3) -> float: return 0.0
+func ground_y_near_position(position: Vector3) -> float: return surface_y_at_position(position)
+func surface_y_at_cell(cell: Vector3i) -> float: return 0.0
+func base_surface_y_at_cell(cell: Vector3i) -> float: return 0.0
+func natural_surface_y_at_cell(cell: Vector3i) -> float: return 0.0
+func surface_biome_at_cell(cell: Vector3i) -> String: return ""
+func biome_at_volume_cell(cell: Vector3i) -> String: return ""
 func biome_at_world(position: Vector3) -> String: return ""
 func world_material_at_cell(cell: Vector3i) -> String: return ""
 func town_region_at_cell(x: int, z: int) -> Dictionary: return {}

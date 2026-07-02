@@ -192,18 +192,35 @@ func neutralize_intro_clock_freeze() -> void:
 func build_fixtures() -> void:
     sealed_hut = build_hut_fixture(Vector2i(26, 26), true)
     doorway_hut = build_hut_fixture(Vector2i(36, 26), false)
-    cave_plan = structure_system.call("find_cave_plan_sample", "cliff", 10, false)
-    if cave_plan.is_empty():
-        add_result("light_shadow_cave_plan_selected", false, "no cave found")
+    var world_generation = main.get("world_generation_system") if main != null else null
+    if world_generation == null or not world_generation.has_method("find_cave_biome_sample"):
+        add_result("light_shadow_cave_biome_selected", false, "world cave sampler missing")
         return
-    var rng := RandomNumberGenerator.new()
-    rng.seed = 602214
-    structure_system.call("build_cave", cave_plan, rng)
+    var cave_record: Dictionary = world_generation.call("find_cave_biome_sample", 16)
+    var feature: Dictionary = cave_record.get("feature", {}) if cave_record.has("feature") else {}
+    if feature.is_empty():
+        add_result("light_shadow_cave_biome_selected", false, "no cave biome found")
+        return
+    cave_plan = light_shadow_cave_metadata(feature)
     var entrance: Vector2i = cave_plan.get("entranceCell", Vector2i.ZERO)
     if main.has_method("rebuild_chunks_around_cell"):
         main.call("rebuild_chunks_around_cell", entrance)
         main.call("rebuild_chunks_around_cell", cave_plan.get("finalChamberCell", entrance))
-    add_result("light_shadow_cave_plan_selected", true, JSON.stringify(sanitize_plan_summary(cave_plan)))
+    add_result("light_shadow_cave_biome_selected", true, JSON.stringify(sanitize_plan_summary(cave_plan)))
+
+func light_shadow_cave_metadata(feature: Dictionary) -> Dictionary:
+    var entrance: Vector2i = feature.get("entranceCell", Vector2i.ZERO)
+    var inward: Vector2i = feature.get("inward", Vector2i(0, 1))
+    var length_cells := maxi(8, roundi(float(feature.get("length", CELL * 24.0)) / CELL))
+    var path_cells: Array[Vector2i] = []
+    for depth in range(0, length_cells + 1):
+        path_cells.append(entrance + inward * depth)
+    var result := feature.duplicate(true)
+    result["pathLength"] = length_cells
+    result["pathCells"] = path_cells
+    result["finalChamberCell"] = entrance + inward * length_cells
+    result["finalChestCell"] = result["finalChamberCell"]
+    return result
 
 func build_hut_fixture(base: Vector2i, sealed: bool) -> Dictionary:
     var width := 5
@@ -252,8 +269,8 @@ func build_hut_fixture(base: Vector2i, sealed: bool) -> Dictionary:
 
 func flatten_rect(base: Vector2i, width: int, depth: int) -> float:
     var center := Vector2i(base.x + int(width / 2), base.y + int(depth / 2))
-    var level: float = main.call("terrain_height_cell", center.x, center.y)
-    var edits = main.get("height_edits")
+    var level: float = main.call("surface_y_at_cell", Vector3i(center.x, 0, center.y))
+    var edits = main.get("volume_edit_markers")
     if edits is Dictionary:
         for x in range(base.x - 2, base.x + width + 2):
             for z in range(base.y - 2, base.y + depth + 2):
@@ -607,12 +624,21 @@ func terrain_world_for_cell(cell: Vector2i, lift := 0.0) -> Vector3:
     var x := float(cell.x) * CELL
     var z := float(cell.y) * CELL
     var y := 0.0
-    if main != null and main.has_method("height_at_world"):
-        y = float(main.call("height_at_world", x, z))
+    if main != null and main.has_method("surface_y_at_position"):
+        y = float(main.call("surface_y_at_position", Vector3(x, 0.0, z)))
     return Vector3(x, y + lift, z)
 
 func cave_world_for_cell(cell: Vector2i, lift := 0.0) -> Vector3:
-    return Vector3(float(cell.x) * CELL, float(cave_plan.get("level", 0.0)) + lift, float(cell.y) * CELL)
+    var world_generation = main.get("world_generation_system") if main != null else null
+    var y := float(cave_plan.get("entranceSurfaceY", 0.0))
+    if world_generation != null and world_generation.has_method("cave_feature_center_y"):
+        var entrance: Vector2i = cave_plan.get("entranceCell", Vector2i.ZERO)
+        var inward: Vector2i = cave_plan.get("inward", Vector2i(0, 1))
+        var delta := cell - entrance
+        var depth := float(delta.x * inward.x + delta.y * inward.y) * CELL
+        var center2 := Vector2(float(cell.x) * CELL, float(cell.y) * CELL)
+        y = float(world_generation.call("cave_feature_center_y", cave_plan, center2, depth))
+    return Vector3(float(cell.x) * CELL, y + lift, float(cell.y) * CELL)
 
 func image_luminance_summary(image: Image) -> Dictionary:
     var width := image.get_width()

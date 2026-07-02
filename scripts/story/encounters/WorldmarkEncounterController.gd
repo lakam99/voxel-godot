@@ -245,8 +245,8 @@ func facts_for_quest(quest: Dictionary) -> Dictionary:
 func encounter_position(region_id: String, fallback: Vector3) -> Vector3:
     if is_finite(fallback.x) and is_finite(fallback.z):
         var adjusted := fallback
-        if main != null and main.has_method("height_at_world"):
-            adjusted.y = main.height_at_world(adjusted.x, adjusted.z) + 0.15
+        if main != null and main.has_method("surface_y_at_position"):
+            adjusted.y = float(main.call("surface_y_at_position", adjusted)) + 0.15
         return adjusted
     var site_position := encounter_site_position(region_id)
     if is_finite(site_position.x) and is_finite(site_position.z):
@@ -267,8 +267,8 @@ func encounter_site_position(region_id: String) -> Vector3:
         var cell_value = site.get("cell", [])
         if cell_value is Array and cell_value.size() >= 2:
             var pos := Vector3(float(cell_value[0]) * 1.35, float(site.get("worldY", 0.0)), float(cell_value[1]) * 1.35)
-            if main != null and main.has_method("height_at_world"):
-                pos.y = main.height_at_world(pos.x, pos.z) + 0.15
+            if main != null and main.has_method("surface_y_at_position"):
+                pos.y = float(main.call("surface_y_at_position", pos)) + 0.15
             return pos
     return Vector3.INF
 
@@ -279,8 +279,8 @@ func move_player_to_recovery_position(position: Vector3) -> void:
     if player_node == null:
         return
     var recovery := position + Vector3(0.0, 0.0, 5.4)
-    if main.has_method("height_at_world"):
-        recovery.y = main.height_at_world(recovery.x, recovery.z) + 1.2
+    if main.has_method("surface_y_at_position"):
+        recovery.y = float(main.call("surface_y_at_position", recovery)) + 1.2
     player_node.global_position = recovery
 
 func active_position() -> Vector3:

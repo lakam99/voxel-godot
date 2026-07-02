@@ -1467,7 +1467,7 @@ func validate_candidate(entry: Dictionary, previous: Vector3, candidate: Vector3
     var terrain: Dictionary = world.terrain_allows_step(previous_cell, candidate_cell, moving_home)
     if not bool(terrain.get("ok", false)):
         return terrain
-    candidate.y = float(terrain.get("height", main.height_at_world(candidate.x, candidate.z))) + 0.04
+    candidate.y = float(terrain.get("height", main.call("surface_y_at_position", candidate) if main.has_method("surface_y_at_position") else candidate.y)) + 0.04
     var snapshot: Dictionary = world.build_snapshot(entry, allow_outside, moving_home)
     var center_sweep: Dictionary = center_sweep_blocker(snapshot, previous, candidate, world, previous_cell)
     if not bool(center_sweep.get("ok", false)):
@@ -1552,7 +1552,7 @@ func capsule_hits_obstacle(entry: Dictionary, body: CharacterBody3D, previous: V
     var samples: int = clampi(ceili(delta.length() / (CELL * 0.28)), 1, 5)
     for i in range(1, samples + 1):
         var sample: Vector3 = previous.lerp(candidate, float(i) / float(samples))
-        sample.y = main.height_at_world(sample.x, sample.z) + 0.04
+        sample.y = float(main.call("surface_y_at_position", sample)) + 0.04 if main.has_method("surface_y_at_position") else sample.y + 0.04
         var query := PhysicsShapeQueryParameters3D.new()
         query.shape = capsule_shape
         query.transform = Transform3D(Basis(), sample + Vector3(0.0, CAPSULE_HEIGHT * 0.5, 0.0))

@@ -104,11 +104,11 @@ if ($true -ne $report.nonHeadlessRequired) {
 $requiredScreenshots = @(
     "cave_dark_default.png",
     "cave_outside_profile.png",
-    "cave_mouth_approach.png",
+    "cave_entrance_approach.png",
     "cave_first_tunnel.png",
-    "cave_mid_route_branch.png",
-    "cave_dead_end_chamber.png",
-    "cave_final_chamber_chest.png"
+    "cave_mid_tunnel.png",
+    "cave_branch_tunnel.png",
+    "cave_inner_chamber.png"
 )
 foreach ($fileName in $requiredScreenshots) {
     $path = Join-Path $ScreenshotDir $fileName
@@ -124,7 +124,7 @@ $evidenceScript = Join-Path $projectPath "tools\assert-test-evidence-report.ps1"
     -ReportPath $ReportPath `
     -RunnerId "cave_visual_playtest" `
     -EvidenceLevel "acceptance_visual" `
-    -AcceptanceClaims @("procedural_cave_player_pov_route_depth_visual") `
+    -AcceptanceClaims @("procedural_cave_biome_volume_visual") `
     -RequiredScreenshots $requiredScreenshots `
     -ScreenshotDir $ScreenshotDir `
     -RegistryPath (Join-Path $projectPath "tools\test-runner-registry.json") `

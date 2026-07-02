@@ -339,21 +339,21 @@
     },
     {
       "id": "cave_visual_playtest",
-      "description": "Headed procedural cave player-POV visual proof for outside profile, mouth approach, first tunnel, mid-route branch, dead-end chamber, and final crafting-book chest",
+      "description": "Headed procedural cave-biome player-POV visual proof for outside profile, entrance approach, continuous tunnel, branch tunnel, and inner chamber",
       "command": ".\\tools\\run-cave-visual-playtest.ps1",
       "args": ["-Seed", "atlas-1492", "-ReportPath", "artifacts\\test-runners\\cave-visual-playtest.json", "-ScreenshotDir", "artifacts\\test-runners\\screenshots\\cave-visual-playtest"],
       "reportPath": "artifacts\\test-runners\\cave-visual-playtest.json",
       "screenshotDir": "artifacts\\test-runners\\screenshots\\cave-visual-playtest",
       "evidenceLevel": "acceptance_visual",
-      "acceptanceClaims": ["procedural_cave_player_pov_route_depth_visual"],
+      "acceptanceClaims": ["procedural_cave_biome_volume_visual"],
       "requiredScreenshots": [
         "cave_dark_default.png",
         "cave_outside_profile.png",
-        "cave_mouth_approach.png",
+        "cave_entrance_approach.png",
         "cave_first_tunnel.png",
-        "cave_mid_route_branch.png",
-        "cave_dead_end_chamber.png",
-        "cave_final_chamber_chest.png"
+        "cave_mid_tunnel.png",
+        "cave_branch_tunnel.png",
+        "cave_inner_chamber.png"
       ],
       "requiresForbiddenCallSelfScan": true,
       "requiresVisualProof": true,

@@ -178,7 +178,7 @@ func configure_playtest_scene() -> void:
 
 func setup_one_house_one_npc_fixture() -> void:
 	var center := find_dry_fixture_center()
-	var level := maxf(float(main.call("terrain_height_cell", center.x, center.y)), WATER_LEVEL + 3.0)
+	var level := maxf(float(main.call("surface_y_at_cell", Vector3i(center.x, 0, center.y))), WATER_LEVEL + 3.0)
 	flatten_fixture(center, level, 24)
 	clear_blocks_near_cell(center, 24)
 	clear_props_near_cell(center, 30)
@@ -414,13 +414,13 @@ func find_dry_fixture_center() -> Vector2i:
 		Vector2i(-220, -180)
 	]
 	for candidate in candidates:
-		var height := float(main.call("terrain_height_cell", candidate.x, candidate.y))
+		var height := float(main.call("surface_y_at_cell", Vector3i(candidate.x, 0, candidate.y)))
 		if height > WATER_LEVEL + 2.5:
 			return candidate
 	return Vector2i(180, -180)
 
 func flatten_fixture(center: Vector2i, level: float, radius: int) -> void:
-	var edits: Dictionary = main.get("height_edits")
+	var edits: Dictionary = main.get("volume_edit_markers")
 	for z in range(center.y - radius, center.y + radius + 1):
 		for x in range(center.x - radius, center.x + radius + 1):
 			edits[Vector2i(x, z)] = level

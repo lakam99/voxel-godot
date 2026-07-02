@@ -389,12 +389,12 @@ func fallback_ground_placement_hit(max_distance: float) -> Dictionary:
     var forward: Vector3 = -player.camera.global_transform.basis.z.normalized()
     if forward.y > -0.04:
         return {}
-    var previous_delta: float = origin.y - height_at_world(origin.x, origin.z)
+    var previous_delta: float = origin.y - surface_y_at_position(origin)
     var steps := 18
     for i in range(1, steps + 1):
         var distance := max_distance * float(i) / float(steps)
         var sample: Vector3 = origin + forward * distance
-        var ground_y := height_at_world(sample.x, sample.z)
+        var ground_y := surface_y_at_position(sample)
         var delta := sample.y - ground_y
         if previous_delta >= 0.0 and delta <= 0.08:
             return {
@@ -483,11 +483,11 @@ func placement_surface_height(x: float, z: float, block_type: String) -> float:
         Vector2(radius_x, -radius_z),
         Vector2(-radius_x, -radius_z)
     ]
-    var center_height := height_at_world(x, z)
+    var center_height := surface_y_at_position(Vector3(x, 0.0, z))
     var min_height := center_height
     var max_height := center_height
     for sample in samples:
-        var h := height_at_world(x + sample.x, z + sample.y)
+        var h := surface_y_at_position(Vector3(x + sample.x, 0.0, z + sample.y))
         min_height = minf(min_height, h)
         max_height = maxf(max_height, h)
     var variation := max_height - min_height

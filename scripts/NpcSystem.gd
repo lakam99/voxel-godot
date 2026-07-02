@@ -1180,7 +1180,7 @@ func is_valid_forage_node(node: Node3D, entry: Dictionary) -> bool:
         return false
     if not smart_object_available(smart_object_id_for_node(node), String(entry.get("id", ""))):
         return false
-    var h: float = main.height_at_world(node.global_position.x, node.global_position.z)
+    var h: float = main.surface_y_at_position(node.global_position)
     return h >= main.WATER_LEVEL + 0.45
 
 func current_route_failure_blocks_forager(entry: Dictionary) -> bool:
@@ -1332,7 +1332,7 @@ func is_valid_job_resource_node(node: Node3D, entry: Dictionary, job: String) ->
             return false
     elif not point_inside_town_footprint(entry, node.global_position):
         return false
-    var h: float = main.height_at_world(node.global_position.x, node.global_position.z)
+    var h: float = main.surface_y_at_position(node.global_position)
     if h < main.WATER_LEVEL + 0.45:
         return false
     var material := String(node.get_meta("material", ""))

@@ -156,8 +156,8 @@ func update_held_ground_fill_lights() -> void:
         var fill_height := float(light.get_meta("held_fill_height", 1.45))
         var anchor := basis_source.global_position + forward * fill_forward + right * fill_right
         var ground_y := anchor.y - fill_height
-        if main_node != null and main_node.has_method("height_at_world"):
-            ground_y = float(main_node.call("height_at_world", anchor.x, anchor.z))
+        if main_node != null and main_node.has_method("surface_y_at_position"):
+            ground_y = float(main_node.call("surface_y_at_position", anchor))
         var target := Vector3(anchor.x, ground_y + fill_height, anchor.z)
         light.global_position = target
         light.global_rotation = Vector3.ZERO

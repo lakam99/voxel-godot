@@ -94,11 +94,11 @@ func break_target_for_hit(hit: Dictionary, collider: Node, kind: String) -> Dict
     if (kind == "terrain" or kind == "subsurface") and subsurface_system != null and subsurface_system.has_method("break_target_for_hit"):
         return subsurface_system.break_target_for_hit(hit, collider, kind)
     if kind == "terrain":
-        var sample_pos: Vector3 = hit.position - hit.normal * (CELL * 0.35)
-        var cell := Vector2i(world_to_cell(sample_pos.x), world_to_cell(sample_pos.z))
+        var sample_pos: Vector3 = hit.get("position", Vector3.ZERO) - hit.get("normal", Vector3.UP) * (CELL * 0.35)
+        var cell := Vector3i(world_to_cell(sample_pos.x), world_to_cell(sample_pos.y), world_to_cell(sample_pos.z))
         return {
-            "id": "terrain:%d,%d" % [cell.x, cell.y],
-            "material": terrain_material_id_for_cell(cell.x, cell.y)
+            "id": "terrain:%d,%d,%d" % [cell.x, cell.y, cell.z],
+            "material": world_material_at_cell(cell)
         }
     if kind == "block":
         var block_cell: Vector3i = collider.get_meta("cell")
@@ -123,30 +123,14 @@ func complete_destroy_target(hit: Dictionary, collider: Node, kind: String, mate
         mark_world_dirty("subsurface_excavated")
         for affected_cell in excavation.get("affectedCells", []):
             if affected_cell is Vector2i and npc_system and npc_system.has_method("notify_navigation_terrain_edited"):
-                var old_height := terrain_height_cell(affected_cell.x, affected_cell.y)
+                var old_height := surface_y_at_cell(Vector3i(affected_cell.x, 0, affected_cell.y))
                 npc_system.notify_navigation_terrain_edited(affected_cell, old_height, old_height)
         inventory_system.add_item(ItemCatalogScript.material_drop(material_id), 1)
         award_break_xp(material_id)
         complete_break_objectives(material_id)
         update_hud("Dug %s" % ItemCatalogScript.material_label(material_id))
     elif kind == "terrain":
-        var sample_pos: Vector3 = hit.position - hit.normal * (CELL * 0.35)
-        var cell := Vector2i(world_to_cell(sample_pos.x), world_to_cell(sample_pos.z))
-        var old_height: float = terrain_height_cell(cell.x, cell.y)
-        var new_height: float = maxf(MIN_HEIGHT, old_height - CELL)
-        height_edits[cell] = new_height
-        mark_world_dirty("terrain_edited")
-        if npc_system and npc_system.has_method("notify_navigation_terrain_edited"):
-            npc_system.notify_navigation_terrain_edited(cell, old_height, new_height)
-        rebuild_chunks_around_cell(cell)
-        inventory_system.add_item(ItemCatalogScript.material_drop(material_id), 1)
-        award_break_xp(material_id)
-        complete_break_objectives(material_id)
-        var collapsed_terrain_blocks := collapse_unsupported_structures()
-        var terrain_message := "Dug %s" % ItemCatalogScript.material_label(material_id)
-        if collapsed_terrain_blocks > 0:
-            terrain_message = "Structure collapsed: %d blocks" % collapsed_terrain_blocks
-        update_hud(terrain_message)
+        update_hud("Cannot dig terrain until the volume sampler is ready")
     elif kind == "block":
         var block_cell: Vector3i = collider.get_meta("cell")
         var block_type: String = collider.get_meta("block_type")
@@ -231,9 +215,9 @@ func is_station_near(station_id: String) -> bool:
             return true
     return false
 
-func terrain_material_id_for_cell(x: int, z: int) -> String:
+func surface_material_at_cell(cell: Vector3i) -> String:
     if world_generation_system != null and world_generation_system.has_method("top_material_for_biome"):
-        return String(world_generation_system.call("top_material_for_biome", biome_at_cell(x, z)))
+        return String(world_generation_system.call("top_material_for_biome", surface_biome_at_cell(cell)))
     return "grass"
 
 func unmet_tool_requirement_message(material_id: String) -> String:
@@ -434,56 +418,52 @@ func add_crack_line(mesh: ImmediateMesh, a: Vector3, b: Vector3) -> void:
     mesh.surface_add_vertex(a)
     mesh.surface_add_vertex(b)
 
-func height_at_world(x: float, z: float) -> float:
-    if world_generation_system != null and world_generation_system.has_method("surface_height_at_world"):
-        return float(world_generation_system.call("surface_height_at_world", x, z))
-    return terrain_height_cell(world_to_cell(x), world_to_cell(z))
+func surface_y_at_position(position: Vector3) -> float:
+    if world_generation_system != null and world_generation_system.has_method("surface_y_at"):
+        return float(world_generation_system.call("surface_y_at", position))
+    return surface_y_at_cell(Vector3i(world_to_cell(position.x), world_to_cell(position.y), world_to_cell(position.z)))
 
-func ground_height_at_world(x: float, z: float, current_y: float) -> float:
-    if subsurface_system != null and subsurface_system.has_method("ground_height_at_world"):
-        var subsurface_y := float(subsurface_system.call("ground_height_at_world", x, z, current_y))
+func ground_y_near_position(position: Vector3) -> float:
+    if subsurface_system != null and subsurface_system.has_method("ground_y_near_position"):
+        var subsurface_y := float(subsurface_system.call("ground_y_near_position", position))
         if not is_nan(subsurface_y):
             return subsurface_y
-    if structure_system != null and structure_system.has_method("cave_ground_height_at_world"):
-        var cave_y := float(structure_system.call("cave_ground_height_at_world", x, z, current_y))
-        if not is_nan(cave_y):
-            return cave_y
-    return height_at_world(x, z)
+    return surface_y_at_position(position)
 
-func terrain_height_cell(x: int, z: int) -> float:
-    if world_generation_system != null and world_generation_system.has_method("surface_height_for_cell3"):
-        return float(world_generation_system.call("surface_height_for_cell3", Vector3i(x, 0, z)))
+func surface_y_at_cell(cell: Vector3i) -> float:
+    if world_generation_system != null and world_generation_system.has_method("surface_y_for_cell"):
+        return float(world_generation_system.call("surface_y_for_cell", cell))
     return 0.0
 
-func base_height_cell(x: int, z: int) -> float:
-    if world_generation_system != null and world_generation_system.has_method("base_surface_height_for_cell3"):
-        return float(world_generation_system.call("base_surface_height_for_cell3", Vector3i(x, 0, z)))
+func base_surface_y_at_cell(cell: Vector3i) -> float:
+    if world_generation_system != null and world_generation_system.has_method("base_surface_y_for_cell"):
+        return float(world_generation_system.call("base_surface_y_for_cell", cell))
     return 0.0
 
-func natural_base_height_cell(x: int, z: int) -> float:
-    if world_generation_system != null and world_generation_system.has_method("natural_surface_height_for_cell3"):
-        return float(world_generation_system.call("natural_surface_height_for_cell3", Vector3i(x, 0, z)))
+func natural_surface_y_at_cell(cell: Vector3i) -> float:
+    if world_generation_system != null and world_generation_system.has_method("natural_surface_y_for_cell"):
+        return float(world_generation_system.call("natural_surface_y_for_cell", cell))
     return 0.0
 
-func biome_at_cell(x: int, z: int) -> String:
+func surface_biome_at_cell(cell: Vector3i) -> String:
     if world_generation_system != null and world_generation_system.has_method("surface_biome_for_cell3"):
-        return String(world_generation_system.call("surface_biome_for_cell3", Vector3i(x, 0, z)))
+        return String(world_generation_system.call("surface_biome_for_cell3", cell))
     return "plains"
 
-func biome_at_cell3(cell: Vector3i) -> String:
-    if world_generation_system != null and world_generation_system.has_method("biome_at_cell3"):
-        return String(world_generation_system.call("biome_at_cell3", cell))
-    return biome_at_cell(cell.x, cell.z)
+func biome_at_volume_cell(cell: Vector3i) -> String:
+    if world_generation_system != null and world_generation_system.has_method("biome_at_volume_cell"):
+        return String(world_generation_system.call("biome_at_volume_cell", cell))
+    return surface_biome_at_cell(Vector3i(cell.x, 0, cell.z))
 
 func biome_at_world(position: Vector3) -> String:
     if world_generation_system != null and world_generation_system.has_method("biome_at_world"):
         return String(world_generation_system.call("biome_at_world", position))
-    return biome_at_cell(world_to_cell(position.x), world_to_cell(position.z))
+    return surface_biome_at_cell(Vector3i(world_to_cell(position.x), world_to_cell(position.y), world_to_cell(position.z)))
 
 func world_material_at_cell(cell: Vector3i) -> String:
     if world_generation_system != null and world_generation_system.has_method("material_at_cell3"):
         return String(world_generation_system.call("material_at_cell3", cell))
-    return terrain_material_id_for_cell(cell.x, cell.z)
+    return surface_material_at_cell(cell)
 
 func town_region_at_cell(x: int, z: int) -> Dictionary:
     if world_generation_system != null and world_generation_system.has_method("town_region_at_cell3"):

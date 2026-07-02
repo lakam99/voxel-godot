@@ -272,7 +272,7 @@ func respawn_player() -> void:
 func respawn_position() -> Vector3:
     if respawn_point is Vector3:
         var point: Vector3 = respawn_point
-        var ground_y := maxf(height_at_world(point.x, point.z), WATER_LEVEL)
+        var ground_y := maxf(surface_y_at_position(point), WATER_LEVEL)
         return Vector3(point.x, maxf(point.y, ground_y + 0.35), point.z)
     return find_spawn_position()
 
@@ -383,12 +383,12 @@ func bed_respawn_point(block: Node) -> Vector3:
             continue
         var x := float(target_cell.x) * CELL
         var z := float(target_cell.z) * CELL
-        var ground_y := maxf(height_at_world(x, z), WATER_LEVEL)
+        var ground_y := maxf(surface_y_at_position(Vector3(x, 0.0, z)), WATER_LEVEL)
         var bed_y := (block as Node3D).global_position.y if block is Node3D else ground_y
         return Vector3(x, maxf(ground_y + 0.35, bed_y + CELL * 0.12), z)
     var fallback_x := float(cell.x) * CELL
     var fallback_z := float(cell.z) * CELL
-    return Vector3(fallback_x, maxf(height_at_world(fallback_x, fallback_z), WATER_LEVEL) + 0.35, fallback_z)
+    return Vector3(fallback_x, maxf(surface_y_at_position(Vector3(fallback_x, 0.0, fallback_z)), WATER_LEVEL) + 0.35, fallback_z)
 
 func shelter_state_at_player(delta: float) -> Dictionary:
     if player == null:
@@ -465,7 +465,7 @@ func drop_inventory_at(position: Vector3) -> int:
     var stacks := inventory_stacks()
     if stacks.is_empty():
         return 0
-    var terrain_y := maxf(height_at_world(position.x, position.z), WATER_LEVEL) + 0.65
+    var terrain_y := maxf(surface_y_at_position(position), WATER_LEVEL) + 0.65
     var drop_position := Vector3(position.x, maxf(position.y + 0.4, terrain_y), position.z)
     var dropped := 0
     for stack in stacks:
