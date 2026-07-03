@@ -372,13 +372,15 @@ func _execute_scripted(entry: Dictionary, body: Node3D, perception: Dictionary, 
 func _execute_scripted_combat_overlay(entry: Dictionary, body: Node3D, perception: Dictionary) -> void:
 	entry["scriptedCombatOverlay"] = false
 	body.set_meta("npc_scripted_combat_overlay", false)
+	if not bool(body.get_meta("npc_scripted_combat_overlay_enabled", false)):
+		return
 	if npc_system == null or not npc_system.has_method("update_fighter_target"):
 		return
 	if not bool(entry.get("canFight", false)):
 		return
-	if not bool(perception.get("activeThreat", false)):
-		return
-	var target_hostile = perception.get("threat")
+	var target_hostile = perception.get("threat") if bool(perception.get("activeThreat", false)) else null
+	if target_hostile == null and npc_system.has_method("scripted_combat_target"):
+		target_hostile = npc_system.call("scripted_combat_target", entry, body, 42.0)
 	if target_hostile == null or not is_instance_valid(target_hostile):
 		return
 	var weapon_id := String(entry.get("weaponId", ""))

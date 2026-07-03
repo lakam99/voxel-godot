@@ -11,6 +11,8 @@ const PROP_CLEARANCE_RADIUS := CELL * 0.82
 const DOOR_LINK_ENTER_COST := CELL * 18.0
 const ROUTE_NAVMESH_MARGIN_CELLS := 4
 const ROUTE_NAVMESH_MAX_TILES := 32
+const TRANSITION_COLLISION_INFLATION := NpcConstantsScript.DEFAULT_NPC_RADIUS + NpcConstantsScript.DEFAULT_PERSONAL_SPACE_MARGIN
+const TRANSITION_RECORD_INDEX_MARGIN_CELLS := 2
 
 var system
 var main
@@ -19,6 +21,10 @@ var cached_blocked := {}
 var cached_doors := {}
 var cached_paths := {}
 var cached_props := {}
+var cached_static_collision_records: Array[Dictionary] = []
+var cached_static_collision_by_cell := {}
+var cached_door_collision_records: Array[Dictionary] = []
+var cached_door_collision_by_cell := {}
 var height_cache := {}
 var static_snapshot_revision := 1
 var topology_revision := 1
@@ -104,6 +110,10 @@ func build_snapshot(entry: Dictionary, allow_outside := false, moving_home := fa
         "doors": cached_doors,
         "paths": cached_paths,
         "props": cached_props,
+        "staticCollision": cached_static_collision_records,
+        "staticCollisionByCell": cached_static_collision_by_cell,
+        "doorCollision": cached_door_collision_records,
+        "doorCollisionByCell": cached_door_collision_by_cell,
         "dynamic": dynamic_cells,
         "allowOutside": allow_outside,
         "movingHome": moving_home
@@ -185,6 +195,10 @@ func cached_static_tile_snapshot(allow_outside := false, moving_home := false) -
         "doors": cached_doors,
         "paths": cached_paths,
         "props": cached_props,
+        "staticCollision": cached_static_collision_records,
+        "staticCollisionByCell": cached_static_collision_by_cell,
+        "doorCollision": cached_door_collision_records,
+        "doorCollisionByCell": cached_door_collision_by_cell,
         "dynamic": {},
         "allowOutside": allow_outside,
         "movingHome": moving_home
@@ -212,6 +226,10 @@ func cached_validation_snapshot(entry: Dictionary, allow_outside := false, movin
         "doors": cached_doors,
         "paths": cached_paths,
         "props": cached_props,
+        "staticCollision": cached_static_collision_records,
+        "staticCollisionByCell": cached_static_collision_by_cell,
+        "doorCollision": cached_door_collision_records,
+        "doorCollisionByCell": cached_door_collision_by_cell,
         "dynamic": dynamic_cells,
         "allowOutside": allow_outside,
         "movingHome": moving_home
@@ -251,6 +269,10 @@ func rebuild_static_cells() -> int:
     cached_doors = {}
     cached_paths = {}
     cached_props = {}
+    cached_static_collision_records = []
+    cached_static_collision_by_cell = {}
+    cached_door_collision_records = []
+    cached_door_collision_by_cell = {}
     height_cache = {}
     if main == null:
         return 0
@@ -267,6 +289,7 @@ func rebuild_static_cells() -> int:
             continue
         if block_type == "door":
             cached_doors[block_cell] = body
+            _add_collision_records(body, block_cell, block_type, true)
             continue
         if block_type == "cobblestonePath":
             cached_paths[block_cell] = true
@@ -276,6 +299,7 @@ func rebuild_static_cells() -> int:
         if not block_xz_blocks_npc(block_cell, body):
             continue
         cached_blocked[block_cell] = body
+        _add_collision_records(body, block_cell, block_type, false)
     scanned += add_prop_obstacle_cells()
     return scanned
 
@@ -289,6 +313,106 @@ func block_world_cell(body: Node) -> Vector2i:
     if body is Node3D:
         return world_cell((body as Node3D).global_position)
     return INVALID_CELL
+
+func _add_collision_records(body: Node, cell: Vector2i, block_type: String, is_door: bool) -> void:
+    var records := _collision_records_for_body(body, cell, block_type, is_door)
+    if records.is_empty() and body is Node3D:
+        records.append(_fallback_collision_record(body as Node3D, cell, block_type, is_door))
+    for record in records:
+        if is_door:
+            cached_door_collision_records.append(record)
+            _index_collision_record(cached_door_collision_by_cell, record)
+        else:
+            cached_static_collision_records.append(record)
+            _index_collision_record(cached_static_collision_by_cell, record)
+
+func _collision_records_for_body(body: Node, cell: Vector2i, block_type: String, is_door: bool) -> Array[Dictionary]:
+    var result: Array[Dictionary] = []
+    var body3d := body as Node3D
+    if body3d == null:
+        return result
+    var stack: Array[Node] = [body]
+    var collider_index := 0
+    while not stack.is_empty():
+        var node := stack.pop_back() as Node
+        if node == null:
+            continue
+        var collider := node as CollisionShape3D
+        if collider != null and not collider.disabled and collider.shape is BoxShape3D:
+            var box := collider.shape as BoxShape3D
+            var record := _box_collision_record(body3d, collider, box, cell, block_type, is_door, collider_index)
+            if not record.is_empty():
+                result.append(record)
+                collider_index += 1
+        for child in node.get_children():
+            stack.append(child)
+    return result
+
+func _box_collision_record(body: Node3D, collider: CollisionShape3D, box: BoxShape3D, cell: Vector2i, block_type: String, is_door: bool, collider_index: int) -> Dictionary:
+    var body_transform := body.global_transform if body.is_inside_tree() else body.transform
+    var transform: Transform3D = collider.global_transform if collider.is_inside_tree() else body_transform * collider.transform
+    if collider.get_parent() == body:
+        transform = body_transform * collider.transform
+    var half := box.size * 0.5
+    var corners := [
+        Vector3(-half.x, 0.0, -half.z),
+        Vector3(half.x, 0.0, -half.z),
+        Vector3(half.x, 0.0, half.z),
+        Vector3(-half.x, 0.0, half.z)
+    ]
+    var min_x := INF
+    var max_x := -INF
+    var min_z := INF
+    var max_z := -INF
+    for corner in corners:
+        var world_corner: Vector3 = transform * corner
+        min_x = minf(min_x, world_corner.x)
+        max_x = maxf(max_x, world_corner.x)
+        min_z = minf(min_z, world_corner.z)
+        max_z = maxf(max_z, world_corner.z)
+    if min_x == INF or min_z == INF:
+        return {}
+    return {
+        "id": "%s:%s:%s:%d" % ["door" if is_door else "static", cell_key(cell), String(body.name), collider_index],
+        "cell": cell,
+        "blockType": block_type,
+        "node": body,
+        "isDoor": is_door,
+        "minX": min_x,
+        "maxX": max_x,
+        "minZ": min_z,
+        "maxZ": max_z,
+        "inflation": TRANSITION_COLLISION_INFLATION
+    }
+
+func _fallback_collision_record(body: Node3D, cell: Vector2i, block_type: String, is_door: bool) -> Dictionary:
+    var radius := PROP_CLEARANCE_RADIUS if block_type == "prop" else CELL * 0.48
+    var center := body.global_position
+    return {
+        "id": "%s:%s:%s:fallback" % ["door" if is_door else "static", cell_key(cell), String(body.name)],
+        "cell": cell,
+        "blockType": block_type,
+        "node": body,
+        "isDoor": is_door,
+        "minX": center.x - radius,
+        "maxX": center.x + radius,
+        "minZ": center.z - radius,
+        "maxZ": center.z + radius,
+        "inflation": TRANSITION_COLLISION_INFLATION
+    }
+
+func _index_collision_record(index: Dictionary, record: Dictionary) -> void:
+    var inflation := float(record.get("inflation", TRANSITION_COLLISION_INFLATION))
+    var min_x := floori((float(record.get("minX", 0.0)) - inflation) / CELL) - TRANSITION_RECORD_INDEX_MARGIN_CELLS
+    var max_x := floori((float(record.get("maxX", 0.0)) + inflation) / CELL) + TRANSITION_RECORD_INDEX_MARGIN_CELLS
+    var min_z := floori((float(record.get("minZ", 0.0)) - inflation) / CELL) - TRANSITION_RECORD_INDEX_MARGIN_CELLS
+    var max_z := floori((float(record.get("maxZ", 0.0)) + inflation) / CELL) + TRANSITION_RECORD_INDEX_MARGIN_CELLS
+    for z in range(min_z, max_z + 1):
+        for x in range(min_x, max_x + 1):
+            var key := Vector2i(x, z)
+            if not index.has(key):
+                index[key] = []
+            (index[key] as Array).append(record)
 
 func add_prop_obstacle_cells() -> int:
     var scanned := 0
@@ -308,6 +432,7 @@ func add_prop_obstacle_cells() -> int:
                     var cell := world_cell(prop.global_position)
                     cached_blocked[cell] = prop
                     cached_props[cell] = prop
+                    _add_collision_records(prop, cell, "prop", false)
             for child in node.get_children():
                 stack.append(child)
     return scanned
@@ -537,11 +662,206 @@ func cell_pathable(entry: Dictionary, snapshot: Dictionary, from_cell: Vector2i,
         return { "ok": false, "reason": "private_door_not_routeable" }
     if static_blocker(snapshot, to_cell) != null and not target_cells.has(to_cell):
         return { "ok": false, "reason": "blocked_static" }
+    if door == null:
+        var collision_blocker := static_collision_blocker(snapshot, to_cell)
+        if not collision_blocker.is_empty():
+            return {
+                "ok": false,
+                "reason": "blocked_static_collision",
+                "transitionReason": "blocked_static_collision",
+                "blockerCell": collision_blocker.get("cell", INVALID_CELL),
+                "blockType": collision_blocker.get("blockType", "")
+            }
     if to_cell != from_cell and prop_clearance_blocker(snapshot, to_cell) != null and not target_cells.has(to_cell):
         return { "ok": false, "reason": "blocked_prop_clearance" }
     if not ignore_dynamic and dynamic_blocker(snapshot, to_cell) != null and not target_cells.has(to_cell):
         return { "ok": false, "reason": "blocked_dynamic" }
     return { "ok": true, "reason": "" }
+
+func cell_transition_pathable(entry: Dictionary, snapshot: Dictionary, from_cell: Vector2i, to_cell: Vector2i, target_cells: Dictionary, ignore_dynamic := false) -> Dictionary:
+    var base := cell_pathable(entry, snapshot, from_cell, to_cell, target_cells, ignore_dynamic)
+    if not bool(base.get("ok", false)):
+        return base
+    var moving_home := bool(snapshot.get("movingHome", false))
+    var door_check := _transition_door_collision_pathable(entry, snapshot, from_cell, to_cell, moving_home)
+    if not bool(door_check.get("ok", false)):
+        return door_check
+    var static_check := _transition_static_collision_pathable(snapshot, from_cell, to_cell)
+    if not bool(static_check.get("ok", false)):
+        return static_check
+    return { "ok": true, "reason": "" }
+
+func validate_waypoint_route(entry: Dictionary, snapshot: Dictionary, points: Array, target_cells: Dictionary, ignore_dynamic := true) -> Dictionary:
+    if points.size() < 2:
+        return { "ok": true, "reason": "" }
+    var previous_point: Vector3 = points[0]
+    var previous_cell := world_cell(previous_point)
+    for index in range(1, points.size()):
+        if not (points[index] is Vector3):
+            continue
+        var next_point: Vector3 = points[index]
+        var flat_distance := Vector2(next_point.x - previous_point.x, next_point.z - previous_point.z).length()
+        var samples := maxi(1, ceili(flat_distance / maxf(CELL * 0.35, 0.01)))
+        for sample_index in range(1, samples + 1):
+            var t := float(sample_index) / float(samples)
+            var sample_point := previous_point.lerp(next_point, t)
+            var sample_cell := world_cell(sample_point)
+            if sample_cell == previous_cell:
+                continue
+            var cursor := previous_cell
+            while cursor != sample_cell:
+                var delta := sample_cell - cursor
+                var step := Vector2i(clampi(delta.x, -1, 1), clampi(delta.y, -1, 1))
+                var transition := cell_transition_pathable(entry, snapshot, cursor, cursor + step, target_cells, ignore_dynamic)
+                if not bool(transition.get("ok", false)):
+                    var transition_reason := String(transition.get("transitionReason", transition.get("reason", "transition_blocked")))
+                    transition["ok"] = false
+                    transition["reason"] = "path_crosses_static_collision"
+                    transition["transitionReason"] = transition_reason
+                    transition["fromCell"] = cursor
+                    transition["toCell"] = cursor + step
+                    transition["segmentIndex"] = index - 1
+                    return transition
+                cursor += step
+            previous_cell = sample_cell
+        previous_point = next_point
+    return { "ok": true, "reason": "" }
+
+func _transition_door_collision_pathable(entry: Dictionary, snapshot: Dictionary, from_cell: Vector2i, to_cell: Vector2i, moving_home := false) -> Dictionary:
+    var from_position := cell_position(from_cell)
+    var to_position := cell_position(to_cell)
+    var records := _transition_collision_records(snapshot, "doorCollisionByCell", from_cell, to_cell)
+    for record in records:
+        if not _segment_intersects_collision_record(from_position, to_position, record):
+            continue
+        var door := record.get("node") as Node
+        if door == null or not is_instance_valid(door):
+            continue
+        if not _door_transition_allows(entry, door, from_cell, to_cell, moving_home):
+            return {
+                "ok": false,
+                "reason": "door_transition_blocked",
+                "transitionReason": "door_transition_blocked",
+                "blockerCell": record.get("cell", INVALID_CELL),
+                "blockType": record.get("blockType", ""),
+                "portalId": _door_portal_id(door, door_flat_cell(door))
+            }
+    return { "ok": true, "reason": "" }
+
+func _transition_static_collision_pathable(snapshot: Dictionary, from_cell: Vector2i, to_cell: Vector2i) -> Dictionary:
+    var from_position := cell_position(from_cell)
+    var to_position := cell_position(to_cell)
+    var records := _transition_collision_records(snapshot, "staticCollisionByCell", from_cell, to_cell)
+    for record in records:
+        if not _segment_intersects_collision_record(from_position, to_position, record):
+            continue
+        var node := record.get("node") as Object
+        if node != null and not is_instance_valid(node):
+            continue
+        return {
+            "ok": false,
+            "reason": "blocked_static_transition",
+            "transitionReason": "blocked_static_transition",
+            "blockerCell": record.get("cell", INVALID_CELL),
+            "blockType": record.get("blockType", "")
+        }
+    return { "ok": true, "reason": "" }
+
+func static_collision_blocker(snapshot: Dictionary, cell: Vector2i) -> Dictionary:
+    var position := cell_position(cell)
+    var records := _transition_collision_records(snapshot, "staticCollisionByCell", cell, cell)
+    for record in records:
+        var node := record.get("node") as Object
+        if node != null and not is_instance_valid(node):
+            continue
+        if _point_inside_collision_record(position, record):
+            return record
+    return {}
+
+func _transition_collision_records(snapshot: Dictionary, index_key: String, from_cell: Vector2i, to_cell: Vector2i) -> Array:
+    var index: Dictionary = snapshot.get(index_key, {})
+    if index.is_empty():
+        return []
+    var min_x := mini(from_cell.x, to_cell.x) - TRANSITION_RECORD_INDEX_MARGIN_CELLS
+    var max_x := maxi(from_cell.x, to_cell.x) + TRANSITION_RECORD_INDEX_MARGIN_CELLS
+    var min_z := mini(from_cell.y, to_cell.y) - TRANSITION_RECORD_INDEX_MARGIN_CELLS
+    var max_z := maxi(from_cell.y, to_cell.y) + TRANSITION_RECORD_INDEX_MARGIN_CELLS
+    var result := []
+    var seen := {}
+    for z in range(min_z, max_z + 1):
+        for x in range(min_x, max_x + 1):
+            var key := Vector2i(x, z)
+            for record_value in index.get(key, []):
+                if not (record_value is Dictionary):
+                    continue
+                var record: Dictionary = record_value
+                var id := String(record.get("id", ""))
+                if id == "" or seen.has(id):
+                    continue
+                seen[id] = true
+                result.append(record)
+    return result
+
+func _segment_intersects_collision_record(from_position: Vector3, to_position: Vector3, record: Dictionary) -> bool:
+    var inflation := float(record.get("inflation", TRANSITION_COLLISION_INFLATION))
+    var min_point := Vector2(float(record.get("minX", 0.0)) - inflation, float(record.get("minZ", 0.0)) - inflation)
+    var max_point := Vector2(float(record.get("maxX", 0.0)) + inflation, float(record.get("maxZ", 0.0)) + inflation)
+    return _segment_intersects_aabb_2d(Vector2(from_position.x, from_position.z), Vector2(to_position.x, to_position.z), min_point, max_point)
+
+func _point_inside_collision_record(position: Vector3, record: Dictionary) -> bool:
+    var inflation := float(record.get("inflation", TRANSITION_COLLISION_INFLATION))
+    var x := position.x
+    var z := position.z
+    return x >= float(record.get("minX", 0.0)) - inflation \
+        and x <= float(record.get("maxX", 0.0)) + inflation \
+        and z >= float(record.get("minZ", 0.0)) - inflation \
+        and z <= float(record.get("maxZ", 0.0)) + inflation
+
+func _segment_intersects_aabb_2d(from_point: Vector2, to_point: Vector2, min_point: Vector2, max_point: Vector2) -> bool:
+    var delta := to_point - from_point
+    var t_min := 0.0
+    var t_max := 1.0
+    if absf(delta.x) < 0.0001:
+        if from_point.x < min_point.x or from_point.x > max_point.x:
+            return false
+    else:
+        var tx1 := (min_point.x - from_point.x) / delta.x
+        var tx2 := (max_point.x - from_point.x) / delta.x
+        t_min = maxf(t_min, minf(tx1, tx2))
+        t_max = minf(t_max, maxf(tx1, tx2))
+    if absf(delta.y) < 0.0001:
+        if from_point.y < min_point.y or from_point.y > max_point.y:
+            return false
+    else:
+        var ty1 := (min_point.y - from_point.y) / delta.y
+        var ty2 := (max_point.y - from_point.y) / delta.y
+        t_min = maxf(t_min, minf(ty1, ty2))
+        t_max = minf(t_max, maxf(ty1, ty2))
+    return t_max >= t_min and t_max >= 0.0 and t_min <= 1.0
+
+func _door_transition_allows(entry: Dictionary, door: Node, from_cell: Vector2i, to_cell: Vector2i, moving_home := false) -> bool:
+    if door == null:
+        return false
+    if bool(door.get_meta("locked", false)) or bool(door.get_meta("jammed", false)) or bool(door.get_meta("destroyed", false)) or bool(door.get_meta("unloaded", false)):
+        return false
+    var door_state := String(door.get_meta("door_state", NpcEnumsScript.DOOR_STATE_CLOSED))
+    if door_state in [String(NpcEnumsScript.DOOR_STATE_LOCKED), String(NpcEnumsScript.DOOR_STATE_JAMMED), String(NpcEnumsScript.DOOR_STATE_DESTROYED), String(NpcEnumsScript.DOOR_STATE_UNLOADED)]:
+        return false
+    var door_cell := door_flat_cell(door)
+    if door_cell == INVALID_CELL:
+        return false
+    if from_cell != door_cell and to_cell != door_cell:
+        return false
+    var delta := to_cell - from_cell
+    if maxi(absi(delta.x), absi(delta.y)) != 1:
+        return false
+    var axis := _door_crossing_axis(door)
+    if axis == "x" and not (absi(delta.x) == 1 and delta.y == 0):
+        return false
+    if axis == "z" and not (delta.x == 0 and absi(delta.y) == 1):
+        return false
+    var reference_cell := from_cell if to_cell == door_cell else to_cell
+    return door_allows_route_for_entry(entry, door, reference_cell, moving_home)
 
 func door_allows_route_for_entry(entry: Dictionary, door: Node, from_cell: Vector2i, moving_home := false) -> bool:
     if door == null:

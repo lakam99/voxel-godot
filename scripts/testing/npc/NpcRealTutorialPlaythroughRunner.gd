@@ -8,6 +8,7 @@ const POST_ACTION_FRAMES := 24
 const SAMPLE_EVERY_FRAMES := 6
 const MIRA_HOME_TIMEOUT_SECONDS := 36.0
 const MIRA_HOME_SETTLED_FRAMES := 30
+const MIRA_STARTER_WALL_STUCK_FRAMES := 240
 const MORNING_FORAGE_TIMEOUT_SECONDS := 70.0
 const MORNING_OUTSIDE_TIMEOUT_SECONDS := 60.0
 const MORNING_OUTSIDE_TARGETS := ["rowan", "mira", "niko"]
@@ -76,6 +77,7 @@ var captured_mira_door_open := false
 var captured_mira_inside_closed := false
 var mira_route_start_position := Vector3.ZERO
 var mira_route_start_valid := false
+var mira_starter_route_regression := {}
 var last_observer_camera_target := Vector3.ZERO
 
 func _ready() -> void:
@@ -692,10 +694,37 @@ func observe_npcs_for_seconds(seconds: float) -> void:
 func observe_mira_until_home(seconds: float) -> void:
     var frame_count := ceili(seconds * float(Engine.physics_ticks_per_second))
     var settled_frames := 0
+    var starter_wall_stuck_frames := 0
+    var starter_wall_stuck_sample := {}
     for frame in range(frame_count):
         await get_tree().physics_frame
         track_mira_speed()
         var mira := npc_entry("mira")
+        var starter_regression := mira_starter_house_route_regression_sample(mira)
+        if bool(starter_regression.get("enteredStarterInterior", false)):
+            mira_starter_route_regression = starter_regression
+            report_data["miraStarterRouteRegression"] = mira_starter_route_regression
+            if visual_required:
+                var body := mira.get("body") as Node3D
+                var target := body.global_position + Vector3(0.0, CELL * 0.75, 0.0) if body != null and is_instance_valid(body) else player.global_position
+                await capture_player_pov_stage("player_pov_mira_starter_route_regression", target, starter_regression)
+            add_failure("mira_route_crossed_starter_house_collision", JSON.stringify(starter_regression))
+            break
+        if bool(starter_regression.get("hitStarterWall", false)) and bool(starter_regression.get("routeStalled", false)):
+            starter_wall_stuck_frames += 1
+            starter_wall_stuck_sample = starter_regression
+            starter_wall_stuck_sample["stuckFrames"] = starter_wall_stuck_frames
+        else:
+            starter_wall_stuck_frames = 0
+        if starter_wall_stuck_frames >= MIRA_STARTER_WALL_STUCK_FRAMES:
+            mira_starter_route_regression = starter_wall_stuck_sample
+            report_data["miraStarterRouteRegression"] = mira_starter_route_regression
+            if visual_required:
+                var stuck_body := mira.get("body") as Node3D
+                var stuck_target := stuck_body.global_position + Vector3(0.0, CELL * 0.75, 0.0) if stuck_body != null and is_instance_valid(stuck_body) else player.global_position
+                await capture_player_pov_stage("player_pov_mira_starter_route_stuck", stuck_target, starter_wall_stuck_sample)
+            add_failure("mira_stuck_on_starter_house_collision", JSON.stringify(starter_wall_stuck_sample))
+            break
         var home_status := strict_home_status(mira)
         if focused_mira_visual_mode():
             await maybe_capture_mira_return_home(frame, mira, home_status)
@@ -3503,6 +3532,98 @@ func intro_state_cell(tutorial, key: String, fallback: Vector2i) -> Vector2i:
     if value is Vector2i:
         return value
     return fallback
+
+func mira_starter_house_route_regression_sample(mira: Dictionary) -> Dictionary:
+    if main == null or player == null or mira.is_empty():
+        return { "violation": false }
+    var body := mira.get("body") as Node3D
+    if body == null or not is_instance_valid(body):
+        return { "violation": false }
+    var tutorial = main.get("tutorial_system")
+    var start_cell := intro_state_cell(tutorial, "startCell", flat_cell(player.global_position))
+    var bounds := starter_house_bounds(start_cell)
+    var strict_bounds := shrink_flat_bounds(bounds, 1, 2, 1)
+    var mira_cell := flat_cell(body.global_position)
+    var entered_interior := cell_in_flat_bounds(mira_cell, strict_bounds)
+    var blocker_value = body.get_meta("npc_capsule_blocker", {})
+    var blocker: Dictionary = blocker_value if blocker_value is Dictionary else {}
+    var blocker_cell := Vector2i(999999, 999999)
+    if blocker.get("cell") is Vector2i:
+        blocker_cell = blocker.get("cell")
+    var blocker_type := String(blocker.get("blockType", ""))
+    var hit_starter_wall := blocker_type != "" and blocker_type != "door" and cell_in_flat_bounds(blocker_cell, bounds)
+    var route_status := String(mira.get("routeStatus", ""))
+    var route_reason := String(mira.get("routeReason", ""))
+    var route_stalled := route_status == "waiting" or route_status == "blocked" or route_reason in ["blocked_capsule", "blocked_static", "static_or_dynamic_collision"]
+    return {
+        "violation": entered_interior,
+        "enteredStarterInterior": entered_interior,
+        "hitStarterWall": hit_starter_wall,
+        "routeStalled": route_stalled,
+        "miraCell": vec2i(mira_cell),
+        "startCell": vec2i(start_cell),
+        "bounds": flat_bounds_summary(bounds),
+        "strictInteriorBounds": flat_bounds_summary(strict_bounds),
+        "blocker": blocker.duplicate(true),
+        "routeStatus": route_status,
+        "routeReason": route_reason,
+        "routeCells": vec2i_array_limited(mira.get("routeCells", []), 10),
+        "time": rounded(elapsed)
+    }
+
+func starter_house_bounds(start_cell: Vector2i) -> Dictionary:
+    var min_cell := Vector2i(start_cell.x - 4, start_cell.y - 5)
+    var max_cell := Vector2i(start_cell.x + 4, start_cell.y + 4)
+    if main == null:
+        return { "min": min_cell, "max": max_cell }
+    var blocks: Dictionary = main.get("blocks")
+    var found := false
+    for block_value in blocks.values():
+        var block := block_value as Node
+        if block == null or not is_instance_valid(block) or not block.has_meta("cell"):
+            continue
+        var block_type := String(block.get_meta("block_type", ""))
+        if block_type == "torch" or block_type == "cobblestonePath":
+            continue
+        var cell_value = block.get_meta("cell")
+        if not (cell_value is Vector3i):
+            continue
+        var cell3: Vector3i = cell_value
+        var flat := Vector2i(cell3.x, cell3.z)
+        if abs(flat.x - start_cell.x) > 9 or abs(flat.y - start_cell.y) > 9:
+            continue
+        if not found:
+            min_cell = flat
+            max_cell = flat
+            found = true
+        else:
+            min_cell.x = mini(min_cell.x, flat.x)
+            min_cell.y = mini(min_cell.y, flat.y)
+            max_cell.x = maxi(max_cell.x, flat.x)
+            max_cell.y = maxi(max_cell.y, flat.y)
+    return { "min": min_cell, "max": max_cell }
+
+func shrink_flat_bounds(bounds: Dictionary, x_padding: int, min_z_padding: int, max_z_padding: int) -> Dictionary:
+    var min_cell: Vector2i = bounds.get("min", Vector2i.ZERO)
+    var max_cell: Vector2i = bounds.get("max", Vector2i.ZERO)
+    return {
+        "min": Vector2i(min_cell.x + x_padding, min_cell.y + min_z_padding),
+        "max": Vector2i(max_cell.x - x_padding, max_cell.y - max_z_padding)
+    }
+
+func cell_in_flat_bounds(cell: Vector2i, bounds: Dictionary) -> bool:
+    var min_cell: Vector2i = bounds.get("min", Vector2i.ZERO)
+    var max_cell: Vector2i = bounds.get("max", Vector2i.ZERO)
+    return cell.x >= mini(min_cell.x, max_cell.x) \
+        and cell.x <= maxi(min_cell.x, max_cell.x) \
+        and cell.y >= mini(min_cell.y, max_cell.y) \
+        and cell.y <= maxi(min_cell.y, max_cell.y)
+
+func flat_bounds_summary(bounds: Dictionary) -> Dictionary:
+    return {
+        "min": vec2i(bounds.get("min", Vector2i.ZERO)),
+        "max": vec2i(bounds.get("max", Vector2i.ZERO))
+    }
 
 func use_block_with_real_action(block: Node3D, label: String, stop_distance: float, timeout_seconds: float) -> bool:
     if block == null or not is_instance_valid(block):

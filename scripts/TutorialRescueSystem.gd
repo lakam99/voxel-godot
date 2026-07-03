@@ -261,7 +261,7 @@ func start_rescue_escort() -> void:
         guard.set_meta("npc_dialogue_focused", false)
         guard.set_meta("npc_force_hold", false)
         var guard_target: Vector3 = rescue_guard_target(guard)
-        main.npc_system.set_scripted_target(guard, guard_target, true, true, "sprinting")
+        main.npc_system.order_go_to(guard, guard_target, "rescue_escort_to_niko", CELL * 1.2, "sprinting", true)
     show_speech_bubble(RESCUE_GUARD_ID, "With me!", 2.5)
     show_speech_bubble(RESCUE_FORAGER_ID, "Over here!", 3.2)
 
@@ -359,7 +359,7 @@ func start_rescue_return() -> void:
         if main and main.npc_system:
             main.npc_system.order_go_home(forager, "rescue_return_home", "sprinting")
     if guard and main and main.npc_system:
-        main.npc_system.set_scripted_target(guard, rescue_guard_return_position(), true, true, "walking")
+        main.npc_system.order_go_to(guard, rescue_guard_return_position(), "rescue_return_guard_post", CELL * 0.72, "walking")
     show_speech_bubble(RESCUE_FORAGER_ID, "I can move!", 2.8)
     show_speech_bubble(RESCUE_GUARD_ID, "Back to town!", 2.8)
 

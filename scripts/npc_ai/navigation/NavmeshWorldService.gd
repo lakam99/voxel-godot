@@ -974,8 +974,6 @@ func _route_query_api(options := {}) -> String:
 func _descriptor_direct_endpoint_route_allowed(start_walkable: Dictionary, target_walkable: Dictionary, start: Vector3, target: Vector3, options := {}) -> bool:
 	var moving_home := bool(options.get("movingHome", false))
 	var kind := String(options.get("kind", ""))
-	if not moving_home and kind != "scripted":
-		return false
 	if _route_endpoint_owned_by_server(start_walkable) and _route_endpoint_owned_by_server(target_walkable):
 		return false
 	var start_region := String(start_walkable.get("regionId", ""))
@@ -986,6 +984,8 @@ func _descriptor_direct_endpoint_route_allowed(start_walkable: Dictionary, targe
 	var target_surface := String(target_walkable.get("surfaceId", ""))
 	if start_surface != "" and start_surface == target_surface:
 		return true
+	if not moving_home and kind != "scripted":
+		return false
 	return start.distance_to(target) <= CELL * 6.0
 
 func _server_same_surface_direct_route_allowed(start_walkable: Dictionary, target_walkable: Dictionary, _start: Vector3, _target: Vector3) -> bool:

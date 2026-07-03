@@ -284,6 +284,26 @@ func hostile_available_for_npc_combat(body: Node, origin: Vector3) -> bool:
         return true
     return tutorial_rescue_escort_started() and scripted_origin_near_anchor(enemy, origin)
 
+func nearest_scripted_encounter_hostile_for_npc(source: Node, origin: Vector3, radius := 42.0, encounter_id := "") -> Node3D:
+    var best: Node3D = null
+    var best_distance := radius
+    for enemy in enemies:
+        var body := enemy.get("body") as Node3D
+        if body == null or not is_instance_valid(body):
+            continue
+        var enemy_encounter := String(enemy.get("scriptedEncounter", ""))
+        if enemy_encounter == "":
+            continue
+        if encounter_id != "" and enemy_encounter != encounter_id:
+            continue
+        if not scripted_battle_source_allowed(enemy, source, "npc_scripted_combat"):
+            continue
+        var distance := origin.distance_to(body.global_position)
+        if distance < best_distance:
+            best_distance = distance
+            best = body
+    return best
+
 func spawn_tutorial_perimeter(profile: Dictionary, biome: String) -> StaticBody3D:
     if main == null or player == null or profile.is_empty():
         return null

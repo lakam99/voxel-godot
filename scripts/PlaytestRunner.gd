@@ -500,6 +500,10 @@ func test_tutorial_start_system() -> void:
         ]
     )
     var mira_entered_starter_interior := false
+    var mira_hit_starter_wall := false
+    var mira_starter_wall_blocker := {}
+    var mira_starter_wall_stuck_frames := 0
+    var mira_starter_wall_blocker_key := ""
     var mira_min_starter_distance := INF
     for i in range(120):
         await wait_process_frames(1)
@@ -512,10 +516,32 @@ func test_tutorial_start_system() -> void:
             mira_min_starter_distance = minf(mira_min_starter_distance, flat_distance)
             if point_in_cell_bounds(world_to_flat_cell(mira_body_for_route.global_position), mira_route_interior_bounds):
                 mira_entered_starter_interior = true
+            var blocker_value = mira_body_for_route.get_meta("npc_capsule_blocker", {})
+            if blocker_value is Dictionary and not (blocker_value as Dictionary).is_empty():
+                var blocker: Dictionary = blocker_value
+                var blocker_cell_value = blocker.get("cell", Vector2i(999999, 999999))
+                var blocker_cell: Vector2i = blocker_cell_value if blocker_cell_value is Vector2i else Vector2i(999999, 999999)
+                var blocker_type := String(blocker.get("blockType", ""))
+                if blocker_type != "" and blocker_type != "door" and point_in_cell_bounds(blocker_cell, mira_route_bounds):
+                    var blocker_key := "%s:%s" % [String(blocker.get("name", "")), str(blocker_cell)]
+                    if blocker_key == mira_starter_wall_blocker_key:
+                        mira_starter_wall_stuck_frames += 1
+                    else:
+                        mira_starter_wall_blocker_key = blocker_key
+                        mira_starter_wall_stuck_frames = 1
+                    mira_starter_wall_blocker = blocker.duplicate(true)
+                    if mira_starter_wall_stuck_frames >= 90:
+                        mira_hit_starter_wall = true
+                else:
+                    mira_starter_wall_stuck_frames = 0
+                    mira_starter_wall_blocker_key = ""
+            else:
+                mira_starter_wall_stuck_frames = 0
+                mira_starter_wall_blocker_key = ""
     add_result(
         "tutorial_mira_routes_around_starter_house",
-        mira != null and not mira_entered_starter_interior,
-        "entered interior %s, min distance %.2f, bounds %s, interior %s" % [str(mira_entered_starter_interior), mira_min_starter_distance, str(mira_route_bounds), str(mira_route_interior_bounds)]
+        mira != null and not mira_entered_starter_interior and not mira_hit_starter_wall,
+        "entered interior %s, sustained starter wall stuck %s (%d frames), blocker %s, min distance %.2f, bounds %s, interior %s" % [str(mira_entered_starter_interior), str(mira_hit_starter_wall), mira_starter_wall_stuck_frames, JSON.stringify(mira_starter_wall_blocker), mira_min_starter_distance, str(mira_route_bounds), str(mira_route_interior_bounds)]
     )
     for i in range(3600):
         if mira != null and bool(mira.get_meta("npc_inside_home", false)):
@@ -794,6 +820,22 @@ func test_tutorial_start_system() -> void:
     var guard_scripted := sera is Node and (sera as Node).has_meta("npc_scripted_target")
     var guard_focused := sera is Node and bool((sera as Node).get_meta("npc_dialogue_focused", false))
     var guard_held := sera is Node and bool((sera as Node).get_meta("npc_force_hold", false))
+    var rescue_battle_engaged := false
+    var rescue_guard_shots_start := int(npc_system.stats().get("guardShots", 0)) if npc_system else 0
+    var rescue_scripted_battles_start := int(hostile_system.stats().get("scriptedBattleStarts", 0)) if hostile_system else 0
+    for i in range(1800):
+        tutorial_system.refresh_rescue_progress(1.0 / 60.0)
+        main.call("update_objectives_and_contracts")
+        var hostile_stats_now: Dictionary = hostile_system.stats() if hostile_system else {}
+        var npc_stats_now: Dictionary = npc_system.stats() if npc_system else {}
+        var scripted_battles_now := int(hostile_stats_now.get("scriptedBattleStarts", 0))
+        var guard_shots_now := int(npc_stats_now.get("guardShots", 0))
+        rescue_battle_engaged = scripted_battles_now > rescue_scripted_battles_start or guard_shots_now > rescue_guard_shots_start
+        if rescue_battle_engaged:
+            break
+        if i % 60 == 0:
+            mark_progress("tutorial_guard_escort_battle_%03d" % i)
+        await get_tree().physics_frame
     var guard_target: Vector3 = (sera as Node).get_meta("npc_scripted_target", Vector3.ZERO) if guard_scripted else Vector3.ZERO
     var guard_requested: Vector3 = (sera as Node).get_meta("npc_requested_velocity", Vector3.ZERO) if sera is Node else Vector3.ZERO
     var guard_applied: Vector3 = (sera as Node).get_meta("npc_applied_velocity", Vector3.ZERO) if sera is Node else Vector3.ZERO
@@ -818,22 +860,22 @@ func test_tutorial_start_system() -> void:
             main.call("update_objectives_and_contracts")
     main.call("update_objectives_and_contracts")
     var rescue_returning_started := false
-    for i in range(60):
-        tutorial_system.refresh_rescue_progress(0.12)
+    for i in range(180):
+        tutorial_system.refresh_rescue_progress(1.0 / 60.0)
         main.call("update_objectives_and_contracts")
         rescue_returning_started = rescue_returning_started or bool(tutorial_system.state().get("rescueReturning", false))
         if rescue_returning_started:
             break
-        await wait_process_frames(1)
-    for i in range(5400):
-        tutorial_system.refresh_rescue_progress(0.12)
+        await get_tree().physics_frame
+    for i in range(10800):
+        tutorial_system.refresh_rescue_progress(1.0 / 60.0)
         main.call("update_objectives_and_contracts")
         rescue_returning_started = rescue_returning_started or bool(tutorial_system.state().get("rescueReturning", false))
         if bool(tutorial_system.state().get("finalNightComplete", false)):
             break
         if i % 60 == 0:
             mark_progress("tutorial_rescue_return_%03d" % i)
-        await wait_process_frames(1)
+        await get_tree().physics_frame
     main.call("update_objectives_and_contracts")
     var final_done_state: Dictionary = tutorial_system.state()
     var final_done_steps: Dictionary = final_done_state.get("completedSteps", {})
@@ -852,6 +894,7 @@ func test_tutorial_start_system() -> void:
             and rescue_bubble_present
             and rescue_remaining_start == rescue_required
             and rescue_hostile_count == rescue_required
+            and rescue_battle_engaged
             and rescue_returning_started
             and bool(final_done_state.get("finalNightComplete", false))
             and bool(final_done_steps.get("finalNightComplete", false))
@@ -859,7 +902,7 @@ func test_tutorial_start_system() -> void:
             and not bool(tutorial_system.is_bed_locked())
             and final_objective_complete
             and ready_objective,
-        "started %s, active %s, bed locked %s, guard %s/%s/%s dist %.2f route %s/%s scripted %s focused %s held %s, motion [%s], niko held %s, torch %s, bubble %s, rescue %d/%d, returning %s, complete %s, objective %s, ready %s, steps %s" % [
+        "started %s, active %s, bed locked %s, guard %s/%s/%s dist %.2f route %s/%s scripted %s focused %s held %s, motion [%s], niko held %s, torch %s, bubble %s, rescue %d/%d, battle %s, returning %s, complete %s, objective %s, ready %s, steps %s" % [
             str(final_started),
             str(final_active),
             str(final_bed_locked),
@@ -878,6 +921,7 @@ func test_tutorial_start_system() -> void:
             str(rescue_bubble_present),
             rescue_hostile_count,
             rescue_required,
+            str(rescue_battle_engaged),
             str(rescue_returning_started),
             str(final_done_state.get("finalNightComplete", false)),
             str(final_objective_complete),

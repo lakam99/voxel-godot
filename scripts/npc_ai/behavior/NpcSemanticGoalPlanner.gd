@@ -48,11 +48,13 @@ func make_intent(entry: Dictionary, target: Vector3, max_distance: float, moving
     var fallback_cells: Array[Vector2i] = []
     var arrival_radius := CELL * 0.72
     var strict_home_route := moving_home
+    var strict_scripted_route := false
     if moving_home:
         arrival_radius = CELL * 0.35 if strict_home_route else CELL * 0.82
         fallback_cells = home_interior_goal_cells(entry)
     elif kind == "scripted":
-        arrival_radius = CELL * 0.45
+        arrival_radius = float(body.get_meta("npc_scripted_arrival_radius", CELL * 0.45)) if body != null else CELL * 0.45
+        strict_scripted_route = arrival_radius < CELL * 0.95
     return {
         "kind": kind,
         "target": target,
@@ -64,7 +66,7 @@ func make_intent(entry: Dictionary, target: Vector3, max_distance: float, moving
         "action": "",
         "interruptible": not moving_home,
         "allowPartial": moving_home,
-        "strictArrival": strict_home_route or kind == "scripted" or kind in ["job", "work", "forage", "guard"],
+        "strictArrival": strict_home_route or strict_scripted_route or kind in ["job", "work", "forage", "guard"],
         "fallbackCells": fallback_cells
     }
 

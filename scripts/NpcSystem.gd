@@ -185,11 +185,11 @@ func order_wait(actor_id, reason := "scripted_wait") -> Dictionary:
         return scripted_order_result(null, "FAILED_TARGET_GONE", reason, "missing_actor")
     return apply_scripted_order(entry, "wait", reason, Vector3.INF, -1.0, true, true, NPC_SPEED_MODE_WALKING)
 
-func order_go_to(actor_id, target: Vector3, reason := "scripted_go_to", arrival_radius := -1.0, speed_mode := NPC_SPEED_MODE_WALKING) -> Dictionary:
+func order_go_to(actor_id, target: Vector3, reason := "scripted_go_to", arrival_radius := -1.0, speed_mode := NPC_SPEED_MODE_WALKING, combat_overlay := false) -> Dictionary:
     var entry := npc_entry_for_actor(actor_id)
     if entry.is_empty():
         return scripted_order_result(null, "FAILED_TARGET_GONE", reason, "missing_actor")
-    return apply_scripted_order(entry, "go_to", reason, target, arrival_radius, true, true, speed_mode)
+    return apply_scripted_order(entry, "go_to", reason, target, arrival_radius, true, true, speed_mode, combat_overlay)
 
 func order_go_home(actor_id, reason := "scripted_go_home", speed_mode := NPC_SPEED_MODE_WALKING) -> Dictionary:
     var entry := npc_entry_for_actor(actor_id)
@@ -284,7 +284,7 @@ func npc_entry_for_actor(actor_id) -> Dictionary:
             return entry
     return {}
 
-func apply_scripted_order(entry: Dictionary, kind: String, reason: String, target: Vector3, arrival_radius: float, allow_outside: bool, hold_on_arrival: bool, speed_mode := NPC_SPEED_MODE_WALKING) -> Dictionary:
+func apply_scripted_order(entry: Dictionary, kind: String, reason: String, target: Vector3, arrival_radius: float, allow_outside: bool, hold_on_arrival: bool, speed_mode := NPC_SPEED_MODE_WALKING, combat_overlay := false) -> Dictionary:
     var body := entry.get("body") as Node
     if body == null or not is_instance_valid(body):
         return scripted_order_result(entry, "FAILED_TARGET_GONE", reason, "missing_body")
@@ -308,6 +308,7 @@ func apply_scripted_order(entry: Dictionary, kind: String, reason: String, targe
         "holdOnArrival": hold_on_arrival,
         "speedMode": normalized_speed_mode,
         "speed": movement_speed,
+        "combatOverlay": combat_overlay,
         "usesRouteStack": kind in ["go_to", "go_home"]
     }
     entry["scriptedOrder"] = result
@@ -324,6 +325,7 @@ func apply_scripted_order(entry: Dictionary, kind: String, reason: String, targe
     body.set_meta("npc_scripted_hold_on_arrival", hold_on_arrival)
     body.set_meta("npc_scripted_speed_mode", normalized_speed_mode)
     body.set_meta("npc_scripted_speed", movement_speed)
+    body.set_meta("npc_scripted_combat_overlay_enabled", combat_overlay)
     if kind == "go_to":
         body.set_meta("npc_scripted_target", target)
     elif body.has_meta("npc_scripted_target"):
@@ -360,7 +362,8 @@ func clear_scripted_order_metadata(body: Node) -> void:
         "npc_scripted_order_failure_reason",
         "npc_scripted_arrival_radius",
         "npc_scripted_speed_mode",
-        "npc_scripted_speed"
+        "npc_scripted_speed",
+        "npc_scripted_combat_overlay_enabled"
     ]:
         if body.has_meta(meta_key):
             body.remove_meta(meta_key)
@@ -1012,15 +1015,42 @@ func update_scripted_npc(entry: Dictionary, body: Node3D, delta: float) -> void:
     var movement_speed := npc_speed_for_mode(entry, speed_mode)
     scripted_order_result(entry, "ACTIVE", "go_to", "")
     entry["lastMoveDistance"] = move_npc(entry, scripted_target, movement_speed * delta, false, allow_outside, delta)
+    if float(entry.get("lastMoveDistance", 0.0)) > 0.001:
+        entry.erase("scriptedRouteBlockedTime")
     if body.global_position.distance_to(scripted_target) <= arrival_radius:
         body.set_meta("npc_scripted_arrived", true)
+        entry.erase("scriptedRouteBlockedTime")
         scripted_order_result(entry, "ARRIVED", "target_reached", "")
         if not bool(body.get_meta("npc_scripted_hold_on_arrival", true)):
             body.remove_meta("npc_scripted_target")
             entry.erase("activeMotionGoal")
             entry.erase("activeMotionPlan")
     elif String(entry.get("routeStatus", "")) in ["blocked", "unreachable"]:
-        scripted_order_result(entry, "FAILED_BLOCKED", "route_blocked", String(entry.get("routeReason", "")))
+        var route_reason := String(entry.get("routeReason", ""))
+        if scripted_route_failure_retryable(route_reason):
+            entry["scriptedRouteBlockedTime"] = float(entry.get("scriptedRouteBlockedTime", 0.0)) + delta
+            entry["routeForceReplan"] = true
+            scripted_order_result(entry, "ACTIVE", "route_retry", route_reason)
+        else:
+            scripted_order_result(entry, "FAILED_BLOCKED", "route_blocked", route_reason)
+
+func scripted_route_failure_retryable(reason: String) -> bool:
+    return reason in [
+        "route_budget",
+        "navmesh_tile_budget",
+        "endpoint_not_server_walkable",
+        "no_start_server_walkable",
+        "no_target_server_walkable",
+        "path_endpoint_mismatch",
+        "path_crosses_static_collision",
+        "target_blocked",
+        "no_route",
+        "empty_route",
+        "blocked_dynamic",
+        "yielding",
+        "local_blocked",
+        "static_or_dynamic_collision"
+    ]
 
 func update_fighter_target(entry: Dictionary, body: Node3D, target_hostile, weapon_id: String) -> Vector3:
     entry["insideHome"] = false
@@ -2357,6 +2387,15 @@ func nearest_hostile(origin: Vector3, radius: float) -> Node3D:
     if combat == null:
         return null
     return combat.nearest_hostile(origin, radius)
+
+func scripted_combat_target(entry: Dictionary, body: Node3D, radius := 42.0) -> Node3D:
+    if hostile_system == null or body == null or not is_instance_valid(body):
+        return null
+    if hostile_system.has_method("nearest_scripted_encounter_hostile_for_npc"):
+        var target = hostile_system.nearest_scripted_encounter_hostile_for_npc(body, body.global_position, radius)
+        if target is Node3D:
+            return target
+    return null
 
 func fire_at_hostile(entry: Dictionary, target: Node3D) -> void:
     if combat == null:

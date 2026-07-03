@@ -928,8 +928,8 @@ func _runtime_graph_debug_summary(graph: Dictionary, entry: Dictionary, intent: 
 			var offset: Vector2i = offset_value
 			var from_cell: Vector2i = door_cell - offset
 			var to_cell: Vector2i = door_cell + offset
-			var into_door: Dictionary = world_adapter.cell_pathable(entry, snapshot, from_cell, door_cell, target_lookup, true)
-			var out_of_door: Dictionary = world_adapter.cell_pathable(entry, snapshot, door_cell, to_cell, target_lookup, true)
+			var into_door: Dictionary = world_adapter.cell_transition_pathable(entry, snapshot, from_cell, door_cell, target_lookup, true) if world_adapter.has_method("cell_transition_pathable") else world_adapter.cell_pathable(entry, snapshot, from_cell, door_cell, target_lookup, true)
+			var out_of_door: Dictionary = world_adapter.cell_transition_pathable(entry, snapshot, door_cell, to_cell, target_lookup, true) if world_adapter.has_method("cell_transition_pathable") else world_adapter.cell_pathable(entry, snapshot, door_cell, to_cell, target_lookup, true)
 			neighbor_checks.append({
 				"from": _debug_cell(from_cell),
 				"to": _debug_cell(to_cell),
@@ -972,7 +972,7 @@ func _runtime_graph_debug_summary(graph: Dictionary, entry: Dictionary, intent: 
 			if not nodes.has(_runtime_span_key(route_to_cell)):
 				route_rejection_counts["missing_node"] = int(route_rejection_counts.get("missing_node", 0)) + 1
 				continue
-			var route_allowed: Dictionary = world_adapter.cell_pathable(entry, snapshot, route_from_cell, route_to_cell, target_lookup, true)
+			var route_allowed: Dictionary = world_adapter.cell_transition_pathable(entry, snapshot, route_from_cell, route_to_cell, target_lookup, true) if world_adapter.has_method("cell_transition_pathable") else world_adapter.cell_pathable(entry, snapshot, route_from_cell, route_to_cell, target_lookup, true)
 			if not bool(route_allowed.get("ok", false)):
 				var route_reason := String(route_allowed.get("reason", "blocked"))
 				route_rejection_counts[route_reason] = int(route_rejection_counts.get(route_reason, 0)) + 1
@@ -1002,7 +1002,7 @@ func _runtime_graph_debug_summary(graph: Dictionary, entry: Dictionary, intent: 
 			if not nodes.has(_runtime_span_key(to_cell)):
 				home_rejection_counts["missing_node"] = int(home_rejection_counts.get("missing_node", 0)) + 1
 				continue
-			var allowed: Dictionary = world_adapter.cell_pathable(entry, snapshot, from_cell, to_cell, target_lookup, true)
+			var allowed: Dictionary = world_adapter.cell_transition_pathable(entry, snapshot, from_cell, to_cell, target_lookup, true) if world_adapter.has_method("cell_transition_pathable") else world_adapter.cell_pathable(entry, snapshot, from_cell, to_cell, target_lookup, true)
 			if not bool(allowed.get("ok", false)):
 				var reason := String(allowed.get("reason", "blocked"))
 				home_rejection_counts[reason] = int(home_rejection_counts.get(reason, 0)) + 1
@@ -1314,7 +1314,7 @@ func _base_result(request, status: StringName, reason: StringName, metrics := {}
 func _runtime_target_cells(entry: Dictionary, intent: Dictionary, world_adapter, snapshot: Dictionary, target_cell: Vector2i, start_cell: Vector2i) -> Dictionary:
 	var target_cells := {}
 	var arrival_radius := float(intent.get("arrivalRadius", NpcConstantsScript.CELL_SIZE * 0.75))
-	var strict_arrival := bool(intent.get("strictArrival", false)) or String(intent.get("kind", "")) == "scripted" or bool(intent.get("movingHome", false))
+	var strict_arrival := bool(intent.get("strictArrival", false)) or bool(intent.get("movingHome", false))
 	var radius: int = 0 if strict_arrival else clampi(ceili(arrival_radius / NpcConstantsScript.CELL_SIZE), 0, 3)
 	for cell_value in intent.get("approachCells", []):
 		if cell_value is Vector2i and _runtime_cell_can_be_goal(entry, world_adapter, snapshot, cell_value, start_cell):
@@ -1356,6 +1356,10 @@ func _runtime_cell_can_be_goal(entry: Dictionary, world_adapter, snapshot: Dicti
 		return home_main == null or home_height >= home_main.WATER_LEVEL + 0.45
 	if world_adapter.static_blocker(snapshot, cell) != null:
 		return false
+	if world_adapter.has_method("static_collision_blocker") and world_adapter.door_at(snapshot, cell) == null:
+		var static_collision: Dictionary = world_adapter.static_collision_blocker(snapshot, cell)
+		if not static_collision.is_empty():
+			return false
 	if world_adapter.prop_clearance_blocker(snapshot, cell) != null:
 		return false
 	var height: float = world_adapter.height_for_cell(cell)
@@ -1371,6 +1375,10 @@ func _runtime_cell_can_be_node(entry: Dictionary, world_adapter, snapshot: Dicti
 		return false
 	if world_adapter.static_blocker(snapshot, cell) != null and world_adapter.door_at(snapshot, cell) == null:
 		return false
+	if world_adapter.has_method("static_collision_blocker") and world_adapter.door_at(snapshot, cell) == null:
+		var static_collision: Dictionary = world_adapter.static_collision_blocker(snapshot, cell)
+		if not static_collision.is_empty():
+			return false
 	if world_adapter.prop_clearance_blocker(snapshot, cell) != null:
 		return false
 	var main = world_adapter.get("main")
@@ -1400,7 +1408,7 @@ func _runtime_dynamic_avoid_key(entry: Dictionary) -> String:
 
 func _runtime_step_blocked(entry: Dictionary, world_adapter, snapshot: Dictionary, from_cell: Vector2i, offset: Vector2i, target_lookup: Dictionary) -> bool:
 	var to_cell := from_cell + offset
-	var allowed: Dictionary = world_adapter.cell_pathable(entry, snapshot, from_cell, to_cell, target_lookup, true)
+	var allowed: Dictionary = world_adapter.cell_transition_pathable(entry, snapshot, from_cell, to_cell, target_lookup, true) if world_adapter.has_method("cell_transition_pathable") else world_adapter.cell_pathable(entry, snapshot, from_cell, to_cell, target_lookup, true)
 	return not bool(allowed.get("ok", false))
 
 func _runtime_line_blocker_penalty(entry: Dictionary, world_adapter, snapshot: Dictionary, start_cell: Vector2i, end_cell: Vector2i) -> float:

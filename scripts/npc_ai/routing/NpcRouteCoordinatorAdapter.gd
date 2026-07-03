@@ -153,7 +153,8 @@ func _should_use_generated_corridor_fallback(result: Dictionary, entry: Dictiona
 		"path_endpoint_mismatch",
 		"no_route",
 		"target_blocked",
-		"forbidden_private_door_link"
+		"forbidden_private_door_link",
+		"path_crosses_static_collision"
 	]
 
 func route_cost(entry: Dictionary, target: Vector3, allow_outside := false, moving_home := false, arrival_radius := CELL * 0.85, approach_cells: Array = []) -> float:
