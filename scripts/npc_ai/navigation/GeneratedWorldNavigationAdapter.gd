@@ -21,6 +21,7 @@ var cached_blocked := {}
 var cached_doors := {}
 var cached_paths := {}
 var cached_props := {}
+var cached_prop_clearance := {}
 var cached_static_collision_records: Array[Dictionary] = []
 var cached_static_collision_by_cell := {}
 var cached_door_collision_records: Array[Dictionary] = []
@@ -110,6 +111,7 @@ func build_snapshot(entry: Dictionary, allow_outside := false, moving_home := fa
         "doors": cached_doors,
         "paths": cached_paths,
         "props": cached_props,
+        "propClearance": cached_prop_clearance,
         "staticCollision": cached_static_collision_records,
         "staticCollisionByCell": cached_static_collision_by_cell,
         "doorCollision": cached_door_collision_records,
@@ -195,6 +197,7 @@ func cached_static_tile_snapshot(allow_outside := false, moving_home := false) -
         "doors": cached_doors,
         "paths": cached_paths,
         "props": cached_props,
+        "propClearance": cached_prop_clearance,
         "staticCollision": cached_static_collision_records,
         "staticCollisionByCell": cached_static_collision_by_cell,
         "doorCollision": cached_door_collision_records,
@@ -226,6 +229,7 @@ func cached_validation_snapshot(entry: Dictionary, allow_outside := false, movin
         "doors": cached_doors,
         "paths": cached_paths,
         "props": cached_props,
+        "propClearance": cached_prop_clearance,
         "staticCollision": cached_static_collision_records,
         "staticCollisionByCell": cached_static_collision_by_cell,
         "doorCollision": cached_door_collision_records,
@@ -269,6 +273,7 @@ func rebuild_static_cells() -> int:
     cached_doors = {}
     cached_paths = {}
     cached_props = {}
+    cached_prop_clearance = {}
     cached_static_collision_records = []
     cached_static_collision_by_cell = {}
     cached_door_collision_records = []
@@ -432,6 +437,7 @@ func add_prop_obstacle_cells() -> int:
                     var cell := world_cell(prop.global_position)
                     cached_blocked[cell] = prop
                     cached_props[cell] = prop
+                    _index_prop_clearance(prop, cell)
                     _add_collision_records(prop, cell, "prop", false)
             for child in node.get_children():
                 stack.append(child)
@@ -443,6 +449,18 @@ func prop_blocks_npc(prop: Node3D) -> bool:
     if material in ["tree", "rock", "copperOre", "ironOre", "wildlife", "berryBush"]:
         return true
     return drop in ["logs", "stones", "berries"]
+
+func _index_prop_clearance(prop: Node3D, prop_cell: Vector2i) -> void:
+    if prop == null:
+        return
+    for dz in range(-1, 2):
+        for dx in range(-1, 2):
+            if dx == 0 and dz == 0:
+                continue
+            var cell := prop_cell + Vector2i(dx, dz)
+            var flat_distance := Vector2(float(cell.x) * CELL - prop.global_position.x, float(cell.y) * CELL - prop.global_position.z).length()
+            if flat_distance <= PROP_CLEARANCE_RADIUS:
+                cached_prop_clearance[cell] = prop
 
 func block_xz_blocks_npc(cell: Vector2i, body: Node) -> bool:
     if main == null or not (body is Node3D):
@@ -602,28 +620,14 @@ func static_blocker(snapshot: Dictionary, cell: Vector2i):
     return blocker
 
 func prop_clearance_blocker(snapshot: Dictionary, cell: Vector2i):
-    var props: Dictionary = snapshot.get("props", {})
-    if props.is_empty():
+    var clearance: Dictionary = snapshot.get("propClearance", {})
+    var prop = clearance.get(cell, null)
+    if prop == null:
         return null
-    var cell_position_value := cell_position(cell)
-    for dz in range(-1, 2):
-        for dx in range(-1, 2):
-            if dx == 0 and dz == 0:
-                continue
-            var neighbor := cell + Vector2i(dx, dz)
-            var prop = props.get(neighbor, null)
-            if prop == null:
-                continue
-            if prop is Object and not is_instance_valid(prop):
-                props.erase(neighbor)
-                continue
-            var prop_body := prop as Node3D
-            if prop_body == null:
-                continue
-            var flat_distance := Vector2(cell_position_value.x - prop_body.global_position.x, cell_position_value.z - prop_body.global_position.z).length()
-            if flat_distance <= PROP_CLEARANCE_RADIUS:
-                return prop
-    return null
+    if prop is Object and not is_instance_valid(prop):
+        clearance.erase(cell)
+        return null
+    return prop
 
 func door_at(snapshot: Dictionary, cell: Vector2i) -> Node:
     var doors: Dictionary = snapshot.get("doors", {})
@@ -696,37 +700,39 @@ func validate_waypoint_route(entry: Dictionary, snapshot: Dictionary, points: Ar
         return { "ok": true, "reason": "" }
     var previous_point: Vector3 = points[0]
     var previous_cell := world_cell(previous_point)
+    var checked_transitions := {}
     for index in range(1, points.size()):
         if not (points[index] is Vector3):
             continue
         var next_point: Vector3 = points[index]
-        var flat_distance := Vector2(next_point.x - previous_point.x, next_point.z - previous_point.z).length()
-        var samples := maxi(1, ceili(flat_distance / maxf(CELL * 0.35, 0.01)))
-        for sample_index in range(1, samples + 1):
-            var t := float(sample_index) / float(samples)
-            var sample_point := previous_point.lerp(next_point, t)
-            var sample_cell := world_cell(sample_point)
-            if sample_cell == previous_cell:
+        var sample_cell := world_cell(next_point)
+        if sample_cell == previous_cell:
+            previous_point = next_point
+            continue
+        var cursor := previous_cell
+        while cursor != sample_cell:
+            var delta := sample_cell - cursor
+            var step := Vector2i(clampi(delta.x, -1, 1), clampi(delta.y, -1, 1))
+            var next_cursor := cursor + step
+            var transition_key := "%d,%d>%d,%d" % [cursor.x, cursor.y, next_cursor.x, next_cursor.y]
+            if checked_transitions.has(transition_key):
+                cursor = next_cursor
                 continue
-            var cursor := previous_cell
-            while cursor != sample_cell:
-                var delta := sample_cell - cursor
-                var step := Vector2i(clampi(delta.x, -1, 1), clampi(delta.y, -1, 1))
-                var transition := cell_transition_pathable(entry, snapshot, cursor, cursor + step, target_cells, ignore_dynamic)
-                if not bool(transition.get("ok", false)):
-                    var transition_reason := String(transition.get("transitionReason", transition.get("reason", "transition_blocked")))
-                    transition["ok"] = false
-                    transition["reason"] = "path_crosses_static_collision"
-                    transition["transitionReason"] = transition_reason
-                    transition["fromCell"] = cursor
-                    transition["toCell"] = cursor + step
-                    transition["segmentIndex"] = index - 1
-                    return transition
-                cursor += step
-            previous_cell = sample_cell
+            var transition := cell_transition_pathable(entry, snapshot, cursor, next_cursor, target_cells, ignore_dynamic)
+            if not bool(transition.get("ok", false)):
+                var transition_reason := String(transition.get("transitionReason", transition.get("reason", "transition_blocked")))
+                transition["ok"] = false
+                transition["reason"] = "path_crosses_static_collision"
+                transition["transitionReason"] = transition_reason
+                transition["fromCell"] = cursor
+                transition["toCell"] = next_cursor
+                transition["segmentIndex"] = index - 1
+                return transition
+            checked_transitions[transition_key] = true
+            cursor = next_cursor
+        previous_cell = sample_cell
         previous_point = next_point
     return { "ok": true, "reason": "" }
-
 func _transition_door_collision_pathable(entry: Dictionary, snapshot: Dictionary, from_cell: Vector2i, to_cell: Vector2i, moving_home := false) -> Dictionary:
     var from_position := cell_position(from_cell)
     var to_position := cell_position(to_cell)
@@ -782,10 +788,10 @@ func _transition_collision_records(snapshot: Dictionary, index_key: String, from
     var index: Dictionary = snapshot.get(index_key, {})
     if index.is_empty():
         return []
-    var min_x := mini(from_cell.x, to_cell.x) - TRANSITION_RECORD_INDEX_MARGIN_CELLS
-    var max_x := maxi(from_cell.x, to_cell.x) + TRANSITION_RECORD_INDEX_MARGIN_CELLS
-    var min_z := mini(from_cell.y, to_cell.y) - TRANSITION_RECORD_INDEX_MARGIN_CELLS
-    var max_z := maxi(from_cell.y, to_cell.y) + TRANSITION_RECORD_INDEX_MARGIN_CELLS
+    var min_x := mini(from_cell.x, to_cell.x)
+    var max_x := maxi(from_cell.x, to_cell.x)
+    var min_z := mini(from_cell.y, to_cell.y)
+    var max_z := maxi(from_cell.y, to_cell.y)
     var result := []
     var seen := {}
     for z in range(min_z, max_z + 1):

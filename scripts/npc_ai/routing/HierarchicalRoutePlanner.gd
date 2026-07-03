@@ -1100,6 +1100,8 @@ func _runtime_graph_resume_units(entry: Dictionary, intent: Dictionary = {}) -> 
 	return 1
 
 func _runtime_graph_foreground_route(entry: Dictionary, intent: Dictionary = {}) -> bool:
+	if bool(intent.get("generatedFallback", false)) and String(intent.get("kind", "")) == "scripted":
+		return false
 	if bool(entry.get("tutorial", false)):
 		return true
 	if bool(intent.get("movingHome", false)):

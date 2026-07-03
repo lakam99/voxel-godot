@@ -49,6 +49,7 @@ var door_link_install_failure_count := 0
 var actor_path_records := {}
 var navigation_map_dirty_serial := 0
 var navigation_map_synced_serial := 0
+var reusable_path_query_parameters := NavigationPathQueryParameters3D.new()
 
 func setup(config = null) -> void:
 	backend_config = config if config != null else NavigationBackendConfigScript.from_environment()
@@ -259,13 +260,14 @@ func query_route(start: Vector3, target: Vector3, options := {}) -> Dictionary:
 		return _finish_route_query(started, _route_query_failure("blocked", "missing_navmesh_regions", start, target, options), options)
 	var max_snap := float(options.get("maxSnapDistance", INF))
 	var query_api_used := _route_query_api(options)
-	var start_walkable := _closest_walkable_for_direct_route_endpoint(start, max_snap) if query_api_used == "map_get_path" else _closest_walkable_for_route_endpoint(start, max_snap)
+	var prefer_descriptor_endpoint := bool(options.get("preferDescriptorEndpoint", false))
+	var start_walkable := _closest_walkable_for_query_endpoint(start, max_snap, query_api_used, prefer_descriptor_endpoint)
 	if not bool(start_walkable.get("found", false)):
 		return _finish_route_query(started, _route_query_failure("blocked", "no_start_server_walkable", start, target, options, {
 			"startWalkable": start_walkable,
 			"descriptorStartWalkable": _closest_walkable_from_descriptors(start, max_snap)
 		}), options)
-	var target_walkable := _closest_walkable_for_direct_route_endpoint(target, max_snap) if query_api_used == "map_get_path" else _closest_walkable_for_route_endpoint(target, max_snap)
+	var target_walkable := _closest_walkable_for_query_endpoint(target, max_snap, query_api_used, prefer_descriptor_endpoint)
 	if not bool(target_walkable.get("found", false)):
 		return _finish_route_query(started, _route_query_failure("blocked", "no_target_server_walkable", start, target, options, {
 			"startWalkable": start_walkable,
@@ -527,6 +529,17 @@ func tile_region_status(tile_key: String) -> Dictionary:
 
 func sync_navigation_map_if_dirty() -> bool:
 	return _sync_navigation_map_if_dirty()
+
+func reset_timing_stats() -> void:
+	last_install_usec = 0
+	install_duration_samples_usec.clear()
+	last_path_query_usec = 0
+	total_path_query_usec = 0
+	max_path_query_usec = 0
+	path_query_count = 0
+	path_query_failure_count = 0
+	path_query_duration_samples_usec.clear()
+	slowest_path_query.clear()
 
 func stats() -> Dictionary:
 	return {
@@ -812,6 +825,31 @@ func _closest_walkable_from_server(position: Vector3, max_distance := INF) -> Di
 		return probe_result
 	return direct_result
 
+func _closest_walkable_for_query_endpoint(position: Vector3, max_distance: float, query_api_used: String, prefer_descriptor_endpoint: bool) -> Dictionary:
+	if query_api_used == "map_get_path":
+		return _closest_walkable_for_direct_route_endpoint(position, max_distance)
+	if prefer_descriptor_endpoint:
+		var descriptor_endpoint := _closest_installed_descriptor_route_endpoint(position, max_distance)
+		if bool(descriptor_endpoint.get("found", false)):
+			return descriptor_endpoint
+	return _closest_walkable_for_route_endpoint(position, max_distance)
+
+func _closest_installed_descriptor_route_endpoint(position: Vector3, max_distance := INF) -> Dictionary:
+	var descriptor_result := _closest_walkable_from_descriptors(position, max_distance)
+	if not bool(descriptor_result.get("found", false)):
+		return descriptor_result
+	var region_id := String(descriptor_result.get("regionId", ""))
+	if region_id == "" or not region_rids_by_region.has(region_id):
+		var missing_region := descriptor_result.duplicate(true)
+		missing_region["found"] = false
+		missing_region["reason"] = "descriptor_region_not_installed"
+		missing_region["serverFallbackReason"] = "descriptor_preferred"
+		return missing_region
+	var endpoint := descriptor_result.duplicate(true)
+	endpoint["source"] = "installed_descriptor_endpoint"
+	endpoint["serverFallbackReason"] = "descriptor_preferred"
+	return endpoint
+
 func _closest_walkable_for_route_endpoint(position: Vector3, max_distance := INF) -> Dictionary:
 	var server_result := _closest_walkable_from_server(position, max_distance)
 	if bool(server_result.get("found", false)):
@@ -941,7 +979,7 @@ func _query_path_points(start: Vector3, target: Vector3, options := {}) -> Array
 	if not use_map_get_path and NavigationServer3D.has_method("query_path"):
 		for attempt in range(SERVER_PATH_QUERY_ATTEMPTS):
 			_sync_navigation_map_if_dirty()
-			var parameters := NavigationPathQueryParameters3D.new()
+			var parameters := reusable_path_query_parameters
 			parameters.map = navigation_map
 			parameters.start_position = start
 			parameters.target_position = target
@@ -1127,6 +1165,7 @@ func _route_options_summary(options := {}) -> Dictionary:
 		"queryApi": _route_query_api(options),
 		"allowOutside": bool(options.get("allowOutside", false)),
 		"movingHome": bool(options.get("movingHome", false)),
+		"preferDescriptorEndpoint": bool(options.get("preferDescriptorEndpoint", false)),
 		"targetCell": options.get("targetCell", Vector2i(999999, 999999))
 	}
 

@@ -240,7 +240,6 @@ func invalidate_navigation_marker_cache() -> void:
     navigation_map_state_cache_elapsed = navigation_map_state_cache_interval
 
 func append_navigation_marker_points(points: Array, radius: float) -> void:
-    var immediate_keys := append_nearby_navigation_marker_points(points, radius)
     var source_key := navigation_marker_source_key()
     if source_key != navigation_marker_cache_source_key:
         advance_navigation_marker_cache(source_key)
@@ -251,8 +250,6 @@ func append_navigation_marker_points(points: Array, radius: float) -> void:
             continue
         var marker: Dictionary = marker_value
         var marker_key := String(marker.get("key", ""))
-        if marker_key != "" and immediate_keys.has(marker_key):
-            continue
         var body := marker.get("body") as Node3D
         if body == null or not is_instance_valid(body):
             continue

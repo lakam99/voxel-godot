@@ -1,11 +1,12 @@
 param(
-    [ValidateSet("All", "DayWork", "DuskReturnHome", "MidnightTown", "CrowdedDoorTraffic", "AutosaveEnabled", "AutosaveDisabled")]
+    [ValidateSet("All", "DayWork", "DuskReturnHome", "MidnightTown", "CrowdedDoorTraffic", "SprintTraversal", "AutosaveEnabled", "AutosaveDisabled")]
     [string]$Scenario = "All",
     [string]$Seed = "atlas-1492",
     [int]$DurationSeconds = 60,
     [string]$GodotExe = "C:\Users\arkam\Downloads\Godot_v4.6.1-stable_win64.exe\Godot_v4.6.1-stable_win64_console.exe",
     [string]$ReportPath = "",
     [string]$ProgressPath = "",
+    [string]$LogPath = "",
     [int]$WatchdogSeconds = 0,
     [switch]$Visible
 )
@@ -23,14 +24,20 @@ if ($ReportPath -eq "") {
 if ($ProgressPath -eq "") {
     $ProgressPath = Join-Path $projectPath "artifacts\performance\runtime-observation-$Scenario-progress.txt"
 }
+if ($LogPath -eq "") {
+    $LogPath = Join-Path $projectPath "artifacts\performance\runtime-observation-$Scenario-godot.log"
+}
 
 $ReportPath = [System.IO.Path]::GetFullPath($ReportPath)
 $ProgressPath = [System.IO.Path]::GetFullPath($ProgressPath)
+$LogPath = [System.IO.Path]::GetFullPath($LogPath)
 
 New-Item -ItemType Directory -Force -Path ([System.IO.Path]::GetDirectoryName($ReportPath)) | Out-Null
 New-Item -ItemType Directory -Force -Path ([System.IO.Path]::GetDirectoryName($ProgressPath)) | Out-Null
+New-Item -ItemType Directory -Force -Path ([System.IO.Path]::GetDirectoryName($LogPath)) | Out-Null
 Remove-Item -LiteralPath $ReportPath -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath $ProgressPath -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath $LogPath -ErrorAction SilentlyContinue
 
 $runToken = [guid]::NewGuid().ToString("N")
 $env:VOXEL_PLAYTEST = "1"
@@ -42,7 +49,7 @@ $env:VOXEL_RUNTIME_PERF_RUN_TOKEN = $runToken
 $env:VOXEL_RUNTIME_PERF_DURATION_SECONDS = [string]$DurationSeconds
 $env:VOXEL_RUNTIME_PERF_WATCHDOG_SECONDS = [string]$WatchdogSeconds
 
-$args = @("--fixed-fps", "60", "--path", $projectPath, "--scene", "res://scenes/testing/RuntimePerformanceObservation.tscn")
+$args = @("--fixed-fps", "60", "--log-file", $LogPath, "--path", $projectPath, "--scene", "res://scenes/testing/RuntimePerformanceObservation.tscn")
 if (-not $Visible) {
     $args = @("--headless") + $args
 }

@@ -44,6 +44,7 @@ func plan_runtime_route(entry: Dictionary, intent: Dictionary, generated_world =
 		"targetCell": target_cell,
 		"maxSnapDistance": maxf(float(intent.get("arrivalRadius", CELL * 0.75)), CELL * 0.95),
 		"queryApi": query_api,
+		"preferDescriptorEndpoint": true,
 		"forbiddenDoorPortalIds": forbidden_private_door_ids
 	})
 	last_stats = navmesh_world.stats() if navmesh_world.has_method("stats") else {}
@@ -54,7 +55,9 @@ func plan_runtime_route(entry: Dictionary, intent: Dictionary, generated_world =
 	var query_start: Vector3 = route.get("startPosition", start)
 	var route_target: Vector3 = route.get("targetPosition", query_target)
 	var raw_points := _route_points_for_validation(route.get("path", []), query_start, route_target)
-	var validation := _validate_generated_world_route(entry, intent, generated_world, raw_points, target_cell, route)
+	var validation := { "ok": true, "reason": "" }
+	if String(intent.get("kind", "move")) != "scripted":
+		validation = _validate_generated_world_route(entry, intent, generated_world, raw_points, target_cell, route)
 	if not bool(validation.get("ok", false)):
 		var rejected_route := route.duplicate(true)
 		rejected_route["validation"] = validation
@@ -138,7 +141,7 @@ func _validate_generated_world_route(entry: Dictionary, intent: Dictionary, gene
 		return { "ok": true, "reason": "" }
 	var allow_outside := bool(intent.get("allowOutside", false))
 	var moving_home := bool(intent.get("movingHome", false))
-	var snapshot: Dictionary = source.cached_validation_snapshot(entry, allow_outside, moving_home) if source.has_method("cached_validation_snapshot") else source.build_snapshot(entry, allow_outside, moving_home)
+	var snapshot: Dictionary = source.cached_static_tile_snapshot(allow_outside, moving_home) if source.has_method("cached_static_tile_snapshot") else source.build_snapshot(entry, allow_outside, moving_home)
 	var target_lookup := { target_cell: true }
 	var actions: Dictionary = route.get("actions", {}) if route.get("actions", {}) is Dictionary else {}
 	for action_value in actions.values():
@@ -284,7 +287,7 @@ func _target_cell_blocked(entry: Dictionary, target_cell: Vector2i, generated_wo
 		return false
 	if moving_home and source.has_method("cell_inside_entry_home") and source.cell_inside_entry_home(entry, target_cell):
 		return false
-	var snapshot: Dictionary = source.build_snapshot(entry, allow_outside, moving_home)
+	var snapshot: Dictionary = source.cached_static_tile_snapshot(allow_outside, moving_home) if source.has_method("cached_static_tile_snapshot") else source.build_snapshot(entry, allow_outside, moving_home)
 	if source.has_method("static_blocker") and source.static_blocker(snapshot, target_cell) != null:
 		return true
 	if source.has_method("prop_clearance_blocker") and source.prop_clearance_blocker(snapshot, target_cell) != null:
