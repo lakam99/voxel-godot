@@ -132,8 +132,7 @@ func prealign_to_validated_terrain_step(body: CharacterBody3D, candidate: Vector
 		var walkable_drop := float(profile.get("terrain_walkable_drop"))
 		if absf(vertical_delta) > walkable_drop + 0.02:
 			return
-		var max_drop := maxf(0.05, float(profile.get("terrain_descend_speed")) * maxf(0.0001, motor_delta))
-		body.move_and_collide(Vector3(0.0, -minf(absf(vertical_delta), max_drop), 0.0))
+		body.move_and_collide(Vector3(0.0, vertical_delta, 0.0))
 		body.velocity.y = 0.0
 		return
 	if vertical_delta <= 0.015:
@@ -141,8 +140,7 @@ func prealign_to_validated_terrain_step(body: CharacterBody3D, candidate: Vector
 	var walkable_limit := float(profile.get("terrain_walkable_rise"))
 	if vertical_delta > walkable_limit + 0.02:
 		return
-	var max_step := maxf(0.05, float(profile.get("terrain_ascend_speed")) * maxf(0.0001, motor_delta))
-	body.move_and_collide(Vector3(0.0, minf(vertical_delta, max_step), 0.0))
+	body.move_and_collide(Vector3(0.0, vertical_delta, 0.0))
 	body.velocity.y = 0.0
 
 func slide_delta() -> float:

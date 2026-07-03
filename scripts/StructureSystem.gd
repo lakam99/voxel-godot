@@ -4,6 +4,10 @@ class_name StructureSystem
 const StructureDoorRulesScript := preload("res://scripts/StructureDoorRules.gd")
 const StructureLootScript := preload("res://scripts/StructureLoot.gd")
 
+const STREAMING_STRUCTURE_OPS_PER_FRAME := 24
+const STREAMING_STRUCTURE_FRAME_BUDGET_MS := 6.0
+const STREAMING_STRUCTURE_QUEUE_COMPACT_THRESHOLD := 256
+
 var main
 var loot
 var generated_towns := {}
@@ -19,6 +23,10 @@ var generated_path_count := 0
 var generated_door_count := 0
 var generated_utility_count := 0
 var town_home_records := {}
+var pending_structure_ops: Array = []
+var pending_structure_op_index := 0
+var defer_structure_ops := false
+var deferred_town_home_records := {}
 
 func setup(main_node) -> void:
     main = main_node
@@ -38,6 +46,10 @@ func reset() -> void:
     generated_door_count = 0
     generated_utility_count = 0
     town_home_records.clear()
+    pending_structure_ops.clear()
+    pending_structure_op_index = 0
+    defer_structure_ops = false
+    deferred_town_home_records.clear()
 
 func update_around(center_cell: Vector2i) -> void:
     if main == null:
@@ -45,7 +57,25 @@ func update_around(center_cell: Vector2i) -> void:
     update_towns(center_cell)
     update_standalone_structures(center_cell)
 
-func update_towns(center_cell: Vector2i) -> void:
+func update_around_budgeted(center_cell: Vector2i, allow_builds := true) -> int:
+    if main == null:
+        return 0
+    var monitor = performance_monitor()
+    var towns_start: int = monitor.begin_section("structure_scan_towns") if monitor != null else Time.get_ticks_usec()
+    update_towns(center_cell, true)
+    if monitor != null:
+        monitor.end_section("structure_scan_towns", towns_start)
+    var standalone_start: int = monitor.begin_section("structure_scan_standalone") if monitor != null else Time.get_ticks_usec()
+    update_standalone_structures(center_cell, true)
+    if monitor != null:
+        monitor.end_section("structure_scan_standalone", standalone_start)
+    if not allow_builds:
+        if monitor != null:
+            monitor.increment_counter("structure_op_queue_depth", pending_structure_op_count())
+        return 0
+    return process_pending_structure_ops()
+
+func update_towns(center_cell: Vector2i, defer_builds := false) -> void:
     var center_region := Vector2i(floori(float(center_cell.x) / float(main.TOWN_REGION_CELLS)), floori(float(center_cell.y) / float(main.TOWN_REGION_CELLS)))
     for rz in range(center_region.y - 1, center_region.y + 2):
         for rx in range(center_region.x - 1, center_region.x + 2):
@@ -63,9 +93,14 @@ func update_towns(center_cell: Vector2i) -> void:
             if distance > activation_range:
                 continue
             generated_towns[key] = true
-            build_town(town)
+            if defer_builds:
+                enqueue_deferred_build(func() -> void:
+                    build_town(town)
+                )
+            else:
+                build_town(town)
 
-func update_standalone_structures(center_cell: Vector2i) -> void:
+func update_standalone_structures(center_cell: Vector2i, defer_builds := false) -> void:
     var center_region := Vector2i(floori(float(center_cell.x) / float(main.STRUCTURE_REGION_CELLS)), floori(float(center_cell.y) / float(main.STRUCTURE_REGION_CELLS)))
     for rz in range(center_region.y - 1, center_region.y + 2):
         for rx in range(center_region.x - 1, center_region.x + 2):
@@ -86,6 +121,9 @@ func update_standalone_structures(center_cell: Vector2i) -> void:
                 generated_structures[key] = false
                 continue
             generated_structures[key] = true
+            if defer_builds:
+                enqueue_standalone_structure_build(structure_type, base_x, base_z, level, dimensions, rng)
+                continue
             if structure_type == "mine":
                 build_mine(base_x, base_z, level, dimensions.x, dimensions.y, rng)
             elif structure_type == "ruin":
@@ -98,6 +136,100 @@ func update_standalone_structures(center_cell: Vector2i) -> void:
                 var wall_type := "woodBlock" if rng.randf() < 0.5 else "stoneBlock"
                 var roof_type := "stoneBlock" if wall_type == "woodBlock" else "woodBlock"
                 build_building(base_x, base_z, level, dimensions.x, dimensions.y, rng.randi_range(4, 5), wall_type, roof_type, rng.randi_range(0, 3), rng, false)
+
+func enqueue_standalone_structure_build(structure_type: String, base_x: int, base_z: int, level: float, dimensions: Vector2i, rng: RandomNumberGenerator) -> void:
+    if structure_type == "mine":
+        enqueue_deferred_build(func() -> void:
+            build_mine(base_x, base_z, level, dimensions.x, dimensions.y, rng)
+        )
+    elif structure_type == "ruin":
+        enqueue_deferred_build(func() -> void:
+            build_ruin(base_x, base_z, level, dimensions.x, dimensions.y, rng)
+        )
+    elif structure_type == "shrine":
+        enqueue_deferred_build(func() -> void:
+            build_shrine(base_x, base_z, level, dimensions.x, dimensions.y, rng)
+        )
+    elif structure_type == "camp":
+        enqueue_deferred_build(func() -> void:
+            build_camp(base_x, base_z, level, dimensions.x, dimensions.y, rng)
+        )
+    else:
+        var wall_type := "woodBlock" if rng.randf() < 0.5 else "stoneBlock"
+        var roof_type := "stoneBlock" if wall_type == "woodBlock" else "woodBlock"
+        var wall_height := rng.randi_range(4, 5)
+        var door_side := rng.randi_range(0, 3)
+        enqueue_deferred_build(func() -> void:
+            build_building(base_x, base_z, level, dimensions.x, dimensions.y, wall_height, wall_type, roof_type, door_side, rng, false)
+        )
+
+func enqueue_deferred_build(build_callable: Callable) -> void:
+    var previous := defer_structure_ops
+    defer_structure_ops = true
+    build_callable.call()
+    defer_structure_ops = previous
+
+func performance_monitor():
+    if main == null:
+        return null
+    return main.get("runtime_perf_monitor")
+
+func pending_structure_op_count() -> int:
+    return max(0, pending_structure_ops.size() - pending_structure_op_index)
+
+func enqueue_structure_op(op: Dictionary) -> void:
+    pending_structure_ops.append(op)
+
+func process_pending_structure_ops(max_ops := STREAMING_STRUCTURE_OPS_PER_FRAME, budget_ms := STREAMING_STRUCTURE_FRAME_BUDGET_MS) -> int:
+    if pending_structure_op_index >= pending_structure_ops.size():
+        pending_structure_ops.clear()
+        pending_structure_op_index = 0
+        return 0
+    var monitor = performance_monitor()
+    var queue_start: int = monitor.begin_section("structure_op_queue") if monitor != null else Time.get_ticks_usec()
+    var processed := 0
+    var frame_start := Time.get_ticks_usec()
+    while pending_structure_op_index < pending_structure_ops.size() and processed < max_ops:
+        var op: Dictionary = pending_structure_ops[pending_structure_op_index]
+        pending_structure_op_index += 1
+        execute_structure_op(op)
+        processed += 1
+        if float(Time.get_ticks_usec() - frame_start) / 1000.0 >= budget_ms:
+            break
+    if pending_structure_op_index >= pending_structure_ops.size():
+        pending_structure_ops.clear()
+        pending_structure_op_index = 0
+    elif pending_structure_op_index >= STREAMING_STRUCTURE_QUEUE_COMPACT_THRESHOLD:
+        pending_structure_ops = pending_structure_ops.slice(pending_structure_op_index)
+        pending_structure_op_index = 0
+    if monitor != null:
+        monitor.increment_counter("structure_ops_processed", processed)
+        monitor.increment_counter("structure_op_queue_depth", pending_structure_op_count())
+        monitor.end_section("structure_op_queue", queue_start)
+    return processed
+
+func execute_structure_op(op: Dictionary) -> void:
+    var previous := defer_structure_ops
+    defer_structure_ops = false
+    var op_type := String(op.get("type", ""))
+    if op_type == "block":
+        place_structure_block(int(op.get("cellX", 0)), int(op.get("cellZ", 0)), float(op.get("level", 0.0)), int(op.get("dy", 0)), String(op.get("blockType", "")), op.get("options", {}))
+    elif op_type == "path":
+        place_path(int(op.get("cellX", 0)), int(op.get("cellZ", 0)), float(op.get("level", 0.0)), op.get("options", {}))
+    elif op_type == "utility":
+        place_utility(int(op.get("cellX", 0)), int(op.get("cellZ", 0)), float(op.get("level", 0.0)), String(op.get("blockType", "")), op.get("options", {}))
+    elif op_type == "door":
+        place_door(int(op.get("cellX", 0)), int(op.get("cellZ", 0)), float(op.get("level", 0.0)), int(op.get("side", 0)), bool(op.get("secondary", false)), String(op.get("doorPolicy", "private_home")))
+    elif op_type == "publish_town_home_records":
+        publish_deferred_town_home_records(String(op.get("townKey", "")))
+    defer_structure_ops = previous
+
+func publish_deferred_town_home_records(town_key: String) -> void:
+    if town_key == "":
+        return
+    var records: Array = deferred_town_home_records.get(town_key, [])
+    town_home_records[town_key] = records.duplicate(true)
+    deferred_town_home_records.erase(town_key)
 
 func standalone_structure_type(rng: RandomNumberGenerator) -> String:
     var roll := rng.randf()
@@ -127,7 +259,10 @@ func build_town(town: Dictionary) -> void:
     var center_z := int(town["centerZ"])
     var level := float(town["level"])
     var town_key := town_key_for(town)
-    town_home_records[town_key] = []
+    if defer_structure_ops:
+        deferred_town_home_records[town_key] = []
+    else:
+        town_home_records[town_key] = []
     generated_town_count += 1
     build_town_paths(center_x, center_z, int(town["radius"]), level)
     build_town_perimeter(center_x, center_z, int(town["radius"]), level, town_key)
@@ -163,6 +298,11 @@ func build_town(town: Dictionary) -> void:
     })
     place_utility(center_x + 2, center_z + 1, level, "furnace")
     place_utility(center_x, center_z - 3, level, "workbench")
+    if defer_structure_ops:
+        enqueue_structure_op({
+            "type": "publish_town_home_records",
+            "townKey": town_key
+        })
 
 func build_town_paths(center_x: int, center_z: int, radius: int, level: float) -> void:
     var path_span: int = max(10, radius - 2)
@@ -365,6 +505,11 @@ func record_town_home(town_key: String, town: Dictionary, base_x: int, base_z: i
         "interiorMaxCell": interior_max_cell,
         "buildingIndex": index
     }
+    if defer_structure_ops:
+        if not deferred_town_home_records.has(town_key):
+            deferred_town_home_records[town_key] = []
+        (deferred_town_home_records[town_key] as Array).append(record)
+        return
     town_home_records[town_key].append(record)
 
 func town_home_records_snapshot() -> Dictionary:
@@ -658,6 +803,17 @@ func flat_level_for_footprint(base_x: int, base_z: int, width: int, depth: int) 
     return (min_h + max_h) * 0.5
 
 func place_structure_block(cell_x: int, cell_z: int, level: float, dy: int, block_type: String, extra_options: Dictionary = {}) -> void:
+    if defer_structure_ops:
+        enqueue_structure_op({
+            "type": "block",
+            "cellX": cell_x,
+            "cellZ": cell_z,
+            "level": level,
+            "dy": dy,
+            "blockType": block_type,
+            "options": extra_options.duplicate(true)
+        })
+        return
     var world_y: float = level + main.CELL * 0.48 + float(dy) * main.CELL + float(extra_options.get("worldYOffset", 0.0))
     var cell_y: int = floori(world_y / main.CELL) + 1
     var options := {
@@ -671,6 +827,15 @@ func place_structure_block(cell_x: int, cell_z: int, level: float, dy: int, bloc
     main.create_block(Vector3i(cell_x, cell_y, cell_z), block_type, options)
 
 func place_path(cell_x: int, cell_z: int, level: float, extra_options: Dictionary = {}) -> void:
+    if defer_structure_ops:
+        enqueue_structure_op({
+            "type": "path",
+            "cellX": cell_x,
+            "cellZ": cell_z,
+            "level": level,
+            "options": extra_options.duplicate(true)
+        })
+        return
     var cell_y: int = roundi(level / main.CELL)
     var options := {
         "generated": true,
@@ -683,6 +848,16 @@ func place_path(cell_x: int, cell_z: int, level: float, extra_options: Dictionar
         generated_path_count += 1
 
 func place_utility(cell_x: int, cell_z: int, level: float, block_type: String, extra_options: Dictionary = {}) -> StaticBody3D:
+    if defer_structure_ops:
+        enqueue_structure_op({
+            "type": "utility",
+            "cellX": cell_x,
+            "cellZ": cell_z,
+            "level": level,
+            "blockType": block_type,
+            "options": extra_options.duplicate(true)
+        })
+        return null
     var world_y: float = level + main.CELL * 0.48
     var cell_y: int = floori(world_y / main.CELL) + 1
     var options := {
@@ -697,6 +872,17 @@ func place_utility(cell_x: int, cell_z: int, level: float, block_type: String, e
     return block
 
 func place_door(cell_x: int, cell_z: int, level: float, side: int, secondary: bool, door_policy := "private_home") -> void:
+    if defer_structure_ops:
+        enqueue_structure_op({
+            "type": "door",
+            "cellX": cell_x,
+            "cellZ": cell_z,
+            "level": level,
+            "side": side,
+            "secondary": secondary,
+            "doorPolicy": door_policy
+        })
+        return
     var world_y: float = level + main.CELL * 0.48
     var cell_y: int = floori(world_y / main.CELL) + 1
     var facing: float = StructureDoorRulesScript.door_facing(side)

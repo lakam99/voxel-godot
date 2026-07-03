@@ -12,8 +12,47 @@ const NavmeshWorldServiceScript := preload("res://scripts/npc_ai/navigation/Navm
 const GeneratedWorldNavigationAdapterScript := preload("res://scripts/npc_ai/navigation/GeneratedWorldNavigationAdapter.gd")
 const HierarchicalRoutePlannerScript := preload("res://scripts/npc_ai/routing/HierarchicalRoutePlanner.gd")
 const NavmeshRoutePlannerScript := preload("res://scripts/npc_ai/routing/NavmeshRoutePlanner.gd")
+const CELL := NpcConstantsScript.CELL_SIZE
 
 var runner = null
+
+class RouteTestMain:
+	extends Node
+	var WATER_LEVEL := -1000.0
+	var blocks := {}
+	var chunk_root := Node.new()
+	var prop_root := Node.new()
+
+	func _init() -> void:
+		add_child(chunk_root)
+		add_child(prop_root)
+
+	func surface_y_at_cell(_cell) -> float:
+		return 0.0
+
+class FakeNavmeshRouteService:
+	extends RefCounted
+	var query_count := 0
+
+	func query_route(start: Vector3, target: Vector3, _options := {}) -> Dictionary:
+		query_count += 1
+		return {
+			"ok": true,
+			"status": "complete",
+			"reason": "",
+			"source": "navmesh",
+			"queryApi": "fake_direct",
+			"startPosition": start,
+			"targetPosition": target,
+			"path": [start, target],
+			"actions": {},
+			"snapshotRevision": "fake:%d" % query_count,
+			"pointCount": 2,
+			"distance": start.distance_to(target)
+		}
+
+	func stats() -> Dictionary:
+		return { "pathQueryCount": query_count }
 
 func setup(owner) -> void:
 	runner = owner
@@ -43,6 +82,11 @@ func cases() -> Array[Dictionary]:
 		["npc_route_navmesh_planner_goal_kinds", "test_route_navmesh_planner_goal_kinds"],
 		["npc_route_navmesh_adapter_no_legacy_fallback", "test_route_navmesh_adapter_no_legacy_fallback"],
 		["npc_route_runtime_door_uses_group_portal_id", "test_route_runtime_door_uses_group_portal_id"],
+		["npc_route_collision_boundary_blocks_open_destination", "test_route_collision_boundary_blocks_open_destination"],
+		["npc_route_collision_occupied_cell_blocks_node", "test_route_collision_occupied_cell_blocks_node"],
+		["npc_route_collision_door_requires_portal_axis", "test_route_collision_door_requires_portal_axis"],
+		["npc_route_collision_rejects_diagonal_corner_cut", "test_route_collision_rejects_diagonal_corner_cut"],
+		["npc_route_navmesh_post_validation_rejects_wall_cross", "test_route_navmesh_post_validation_rejects_wall_cross"],
 		["npc_route_scripted_target_expands_navmesh_tiles", "test_route_scripted_target_expands_navmesh_tiles"],
 		["npc_route_runtime_goal_adapter_uses_new_corridor", "test_route_runtime_goal_adapter_uses_new_corridor"]
 	]
@@ -371,6 +415,7 @@ func test_route_navmesh_preserves_door_action_cells(_mode: String) -> Dictionary
 
 func test_route_navmesh_planner_goal_kinds(_mode: String) -> Dictionary:
 	var service = navmesh_test_service("goal-kinds", Vector3(-2.7, 0.0, -2.7), Vector3(14.85, 0.0, 6.75))
+	service.sync_navigation_map_if_dirty()
 	var planner = NavmeshRoutePlannerScript.new()
 	planner.setup(service, null, null, null)
 	var body := Node3D.new()
@@ -412,13 +457,25 @@ func test_route_navmesh_adapter_no_legacy_fallback(_mode: String) -> Dictionary:
 	var adapter_text = read_text("res://scripts/npc_ai/routing/NpcRouteCoordinatorAdapter.gd")
 	var planner_text = read_text("res://scripts/npc_ai/routing/NavmeshRoutePlanner.gd")
 	var service_text = read_text("res://scripts/npc_ai/navigation/NavmeshWorldService.gd")
-	var passed = adapter_text.find("NavmeshRoutePlannerScript") >= 0 and adapter_text.find("navmesh_planner.plan_runtime_route") >= 0 and adapter_text.find("HierarchicalRoutePlanner") < 0 and adapter_text.find("LocalAStarPlanner") < 0 and adapter_text.find("_use_navmesh_backend") < 0 and planner_text.find("legacyFallbackUsed") >= 0 and planner_text.find("HierarchicalRoutePlanner") < 0 and service_text.find("query_path") >= 0
-	return outcome(passed, "adapterNavmesh=%d adapterLegacy=%d plannerLegacy=%d queryPath=%d" % [adapter_text.find("NavmeshRoutePlannerScript"), adapter_text.find("HierarchicalRoutePlanner"), planner_text.find("HierarchicalRoutePlanner"), service_text.find("query_path")], ["adapter_uses_navmesh_authority", "live_adapter_has_no_legacy_fallback_branch", "navmesh_service_uses_navigationserver_query_path"], {})
+	var passed = adapter_text.find("NavmeshRoutePlannerScript") >= 0 \
+		and adapter_text.find("navmesh_planner.plan_runtime_route") >= 0 \
+		and adapter_text.find("generated_corridor_planner.plan_runtime_route") >= 0 \
+		and adapter_text.find("path_crosses_static_collision") >= 0 \
+		and adapter_text.find("route_from_cells") < 0 \
+		and adapter_text.find("MAX_ITERATIONS") < 0 \
+		and planner_text.find("validate_waypoint_route") >= 0 \
+		and planner_text.find("legacyFallbackUsed") >= 0 \
+		and service_text.find("query_path") >= 0
+	return outcome(passed, "adapterNavmesh=%d fallback=%d validation=%d queryPath=%d" % [adapter_text.find("NavmeshRoutePlannerScript"), adapter_text.find("generated_corridor_planner.plan_runtime_route"), planner_text.find("validate_waypoint_route"), service_text.find("query_path")], ["adapter_uses_navmesh_authority", "navmesh_routes_are_collision_validated_before_acceptance", "generated_corridor_fallback_handles_rejected_navmesh_paths"], {})
 
 func test_route_runtime_goal_adapter_uses_new_corridor(_mode: String) -> Dictionary:
 	var adapter_text = read_text("res://scripts/npc_ai/routing/NpcRouteCoordinatorAdapter.gd")
-	var passed = adapter_text.find("HierarchicalRoutePlanner") < 0 and adapter_text.find("LocalAStarPlanner") < 0 and adapter_text.find("MAX_ITERATIONS") < 0 and adapter_text.find("navmesh_planner.plan_runtime_route") >= 0 and adapter_text.find("coordinator.plan_runtime_route") < 0 and adapter_text.find("route_from_cells") < 0
-	return outcome(passed, "adapterLegacy=%d maxIterations=%d navmeshCall=%d" % [adapter_text.find("HierarchicalRoutePlanner"), adapter_text.find("MAX_ITERATIONS"), adapter_text.find("navmesh_planner.plan_runtime_route")], ["runtime_adapter_delegates_navmesh_authority", "old_iteration_cap_removed", "custom_runtime_route_search_removed"], {})
+	var passed = adapter_text.find("MAX_ITERATIONS") < 0 \
+		and adapter_text.find("navmesh_planner.plan_runtime_route") >= 0 \
+		and adapter_text.find("generated_corridor_planner.plan_runtime_route") >= 0 \
+		and adapter_text.find("coordinator.plan_runtime_route") < 0 \
+		and adapter_text.find("route_from_cells") < 0
+	return outcome(passed, "maxIterations=%d navmeshCall=%d generatedFallback=%d" % [adapter_text.find("MAX_ITERATIONS"), adapter_text.find("navmesh_planner.plan_runtime_route"), adapter_text.find("generated_corridor_planner.plan_runtime_route")], ["runtime_adapter_delegates_navmesh_authority", "old_iteration_cap_removed", "generated_corridor_fallback_is_explicit"], {})
 
 func test_route_runtime_door_uses_group_portal_id(_mode: String) -> Dictionary:
 	var planner = HierarchicalRoutePlannerScript.new()
@@ -427,8 +484,8 @@ func test_route_runtime_door_uses_group_portal_id(_mode: String) -> Dictionary:
 	door.set_meta("door_portal_id", "door:door-group:305,16,0:1")
 	door.set_meta("door_group_id", "door-group:305,16,0:1")
 	door.set_meta("cell", Vector3i(305, 16, 0))
-	var portal_id := planner.runtime_door_portal_id(door)
-	var passed := portal_id == "door:door-group:305,16,0:1" and not portal_id.contains("Block_door")
+	var portal_id: String = planner.runtime_door_portal_id(door)
+	var passed: bool = portal_id == "door:door-group:305,16,0:1" and not portal_id.contains("Block_door")
 	door.free()
 	return outcome(
 		passed,
@@ -436,6 +493,87 @@ func test_route_runtime_door_uses_group_portal_id(_mode: String) -> Dictionary:
 		["runtime_door_action_uses_group_portal_id", "runtime_door_action_not_leaf_node_id"],
 		{ "portalId": portal_id }
 	)
+
+func test_route_collision_boundary_blocks_open_destination(_mode: String) -> Dictionary:
+	var wall := collision_block(Vector2i(50, 0), "woodBlock", Vector3(CELL * 0.5, 0.0, 0.0), Vector3(CELL * 0.14, CELL * 1.8, CELL * 0.96))
+	var setup := collision_adapter_with_blocks([wall])
+	var adapter = setup.get("adapter")
+	var snapshot: Dictionary = setup.get("snapshot", {})
+	var entry: Dictionary = setup.get("entry", {})
+	var destination_open := adapter.static_blocker(snapshot, Vector2i(1, 0)) == null
+	var result: Dictionary = adapter.cell_transition_pathable(entry, snapshot, Vector2i(0, 0), Vector2i(1, 0), {}, true)
+	var passed := destination_open and not bool(result.get("ok", true)) and String(result.get("reason", "")) == "blocked_static_transition"
+	free_collision_setup(setup)
+	return outcome(passed, "destinationOpen=%s result=%s" % [str(destination_open), JSON.stringify(result)], ["transition_checks_swept_collision", "open_destination_still_blocked_by_boundary_wall"], { "result": result })
+
+func test_route_collision_occupied_cell_blocks_node(_mode: String) -> Dictionary:
+	var wall := collision_block(Vector2i(50, 0), "woodBlock", Vector3(CELL, 0.0, 0.0), Vector3(CELL * 0.18, CELL * 1.8, CELL * 0.96))
+	var setup := collision_adapter_with_blocks([wall])
+	var adapter = setup.get("adapter")
+	var snapshot: Dictionary = setup.get("snapshot", {})
+	var entry: Dictionary = setup.get("entry", {})
+	var metadata_open := adapter.static_blocker(snapshot, Vector2i(1, 0)) == null
+	var collision_blocker: Dictionary = adapter.static_collision_blocker(snapshot, Vector2i(1, 0))
+	var result: Dictionary = adapter.cell_pathable(entry, snapshot, Vector2i(0, 0), Vector2i(1, 0), {}, true)
+	var passed := metadata_open and not collision_blocker.is_empty() and not bool(result.get("ok", true)) and String(result.get("reason", "")) == "blocked_static_collision"
+	free_collision_setup(setup)
+	return outcome(passed, "metadataOpen=%s collision=%s result=%s" % [str(metadata_open), JSON.stringify(collision_blocker), JSON.stringify(result)], ["collision_footprint_blocks_standing_cell", "route_nodes_use_physics_occupancy_not_metadata_only"], { "result": result, "collision": collision_blocker })
+
+func test_route_collision_door_requires_portal_axis(_mode: String) -> Dictionary:
+	var door := collision_door(Vector2i(0, 0), 0, "public_gate")
+	var setup := collision_adapter_with_blocks([door])
+	var adapter = setup.get("adapter")
+	var snapshot: Dictionary = setup.get("snapshot", {})
+	var entry: Dictionary = setup.get("entry", {})
+	var through_portal: Dictionary = adapter.cell_transition_pathable(entry, snapshot, Vector2i(0, -1), Vector2i(0, 0), {}, true)
+	var side_cut: Dictionary = adapter.cell_transition_pathable(entry, snapshot, Vector2i(-1, 0), Vector2i(0, 0), {}, true)
+	var passed := bool(through_portal.get("ok", false)) and not bool(side_cut.get("ok", true)) and String(side_cut.get("reason", "")) == "door_transition_blocked"
+	free_collision_setup(setup)
+	return outcome(passed, "portal=%s side=%s" % [JSON.stringify(through_portal), JSON.stringify(side_cut)], ["door_crossing_requires_matching_axis", "sideways_door_collision_not_routeable"], { "portal": through_portal, "side": side_cut })
+
+func test_route_collision_rejects_diagonal_corner_cut(_mode: String) -> Dictionary:
+	var east_wall := collision_block(Vector2i(1, 0), "woodBlock")
+	var north_wall := collision_block(Vector2i(0, 1), "woodBlock")
+	var setup := collision_adapter_with_blocks([east_wall, north_wall])
+	var adapter = setup.get("adapter")
+	var snapshot: Dictionary = setup.get("snapshot", {})
+	var entry: Dictionary = setup.get("entry", {})
+	var destination_open := adapter.static_blocker(snapshot, Vector2i(1, 1)) == null
+	var result: Dictionary = adapter.cell_transition_pathable(entry, snapshot, Vector2i(0, 0), Vector2i(1, 1), {}, true)
+	var passed := destination_open and not bool(result.get("ok", true)) and String(result.get("reason", "")) == "blocked_static_transition"
+	free_collision_setup(setup)
+	return outcome(passed, "destinationOpen=%s result=%s" % [str(destination_open), JSON.stringify(result)], ["diagonal_corner_cut_checks_collision_sweep", "corner_wall_pair_blocks_diagonal_route"], { "result": result })
+
+func test_route_navmesh_post_validation_rejects_wall_cross(_mode: String) -> Dictionary:
+	var wall := collision_block(Vector2i(50, 0), "woodBlock", Vector3(CELL * 0.5, 0.0, 0.0), Vector3(CELL * 0.14, CELL * 1.8, CELL * 0.96))
+	var setup := collision_adapter_with_blocks([wall])
+	var adapter = setup.get("adapter")
+	var service := FakeNavmeshRouteService.new()
+	var planner := NavmeshRoutePlannerScript.new()
+	planner.setup(service, null, null, adapter)
+	var body := Node3D.new()
+	body.global_position = Vector3.ZERO
+	var entry := {
+		"id": "navmesh-wall-cross",
+		"body": body,
+		"townCenter": Vector2i.ZERO,
+		"townRadius": 12,
+		"porchPosition": Vector3.ZERO
+	}
+	var target := Vector3(CELL, 0.0, 0.0)
+	var route: Dictionary = planner.plan_runtime_route(entry, {
+		"kind": "scripted",
+		"target": target,
+		"targetCell": Vector2i(1, 0),
+		"allowOutside": false,
+		"movingHome": false,
+		"arrivalRadius": CELL * 0.5,
+		"strictArrival": true
+	}, adapter, 0)
+	var passed := not bool(route.get("ok", true)) and String(route.get("reason", "")) == "path_crosses_static_collision"
+	body.free()
+	free_collision_setup(setup)
+	return outcome(passed, "route=%s" % JSON.stringify(navmesh_route_dictionary_summary(route)), ["navmesh_route_post_validation_rejects_wall_crossing", "bad_navmesh_path_not_accepted"], { "route": navmesh_route_dictionary_summary(route) })
 
 func test_route_scripted_target_expands_navmesh_tiles(_mode: String) -> Dictionary:
 	var adapter = GeneratedWorldNavigationAdapterScript.new()
@@ -467,6 +605,79 @@ func test_route_scripted_target_expands_navmesh_tiles(_mode: String) -> Dictiona
 		["scripted_target_leash_included_in_navmesh_publication", "start_and_target_tiles_published"],
 		{ "targetTile": target_tile, "startTile": start_tile, "keys": keys }
 	)
+
+func collision_adapter_with_blocks(block_nodes: Array) -> Dictionary:
+	var main := RouteTestMain.new()
+	for node_value in block_nodes:
+		var body := node_value as Node
+		if body == null:
+			continue
+		main.add_child(body)
+		var cell_value = body.get_meta("cell", Vector3i.ZERO)
+		main.blocks[cell_value] = body
+	var adapter = GeneratedWorldNavigationAdapterScript.new()
+	adapter.setup(null, main)
+	adapter.rebuild_static_cells()
+	var body := Node3D.new()
+	body.global_position = Vector3.ZERO
+	var entry := {
+		"id": "collision-route-test",
+		"body": body,
+		"townCenter": Vector2i.ZERO,
+		"townRadius": 128,
+		"porchPosition": Vector3.ZERO
+	}
+	var snapshot: Dictionary = adapter.cached_validation_snapshot(entry, false, false)
+	return {
+		"main": main,
+		"adapter": adapter,
+		"entry": entry,
+		"snapshot": snapshot,
+		"body": body,
+		"blocks": block_nodes
+	}
+
+func free_collision_setup(setup: Dictionary) -> void:
+	var body := setup.get("body") as Node
+	if body != null and is_instance_valid(body):
+		body.free()
+	for block_value in setup.get("blocks", []):
+		var block := block_value as Node
+		if block != null and is_instance_valid(block):
+			block.free()
+	var main := setup.get("main") as Node
+	if main != null and is_instance_valid(main):
+		main.free()
+
+func collision_block(cell: Vector2i, block_type := "woodBlock", position_value = null, size_value = null, yaw := 0.0) -> StaticBody3D:
+	var body := StaticBody3D.new()
+	body.name = "TestBlock_%s_%d_%d" % [block_type, cell.x, cell.y]
+	var block_position: Vector3 = position_value if position_value is Vector3 else Vector3(float(cell.x) * CELL, 0.0, float(cell.y) * CELL)
+	body.position = block_position
+	body.rotation.y = yaw
+	body.set_meta("kind", "block")
+	body.set_meta("cell", Vector3i(cell.x, 0, cell.y))
+	body.set_meta("block_type", block_type)
+	var shape := BoxShape3D.new()
+	shape.size = size_value if size_value is Vector3 else Vector3(CELL * 0.96, CELL * 1.0, CELL * 0.96)
+	var collider := CollisionShape3D.new()
+	collider.shape = shape
+	body.add_child(collider)
+	return body
+
+func collision_door(cell: Vector2i, side := 0, policy := "public_gate") -> StaticBody3D:
+	var door := collision_block(cell, "door", Vector3(float(cell.x) * CELL, 0.0, float(cell.y) * CELL), Vector3(CELL * 0.92, CELL * 1.72, CELL * 0.16), 0.0)
+	door.set_meta("door_side", side)
+	door.set_meta("door_policy", policy)
+	door.set_meta("door_portal_id", "door:test:%d,%d" % [cell.x, cell.y])
+	door.set_meta("door_group_id", "door-test:%d,%d" % [cell.x, cell.y])
+	door.set_meta("door_state", String(NpcEnumsScript.DOOR_STATE_CLOSED))
+	door.set_meta("open", false)
+	door.set_meta("locked", false)
+	door.set_meta("jammed", false)
+	door.set_meta("destroyed", false)
+	door.set_meta("unloaded", false)
+	return door
 
 func navmesh_test_service(label: String, min_pos: Vector3, size: Vector3):
 	var service = NavmeshWorldServiceScript.new()

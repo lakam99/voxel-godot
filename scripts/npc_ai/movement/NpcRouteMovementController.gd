@@ -25,11 +25,11 @@ const STATIC_FOOTPRINT_VALIDATION_RADIUS := CAPSULE_RADIUS * 0.52
 const MOTOR_LOCAL_ESCAPE_MIN_DISTANCE := CELL * 0.16
 const MOTOR_LOCAL_ESCAPE_MAX_DISTANCE := CELL * 0.30
 const PENDING_ROUTE_RETRY_DEFAULT_FRAMES := 4
-const PENDING_ROUTE_RETRY_DOOR_FRAMES := 2
-const PENDING_ROUTE_RETRY_ACTIVE_PORTAL_FRAMES := 1
+const PENDING_ROUTE_RETRY_DOOR_FRAMES := 4
+const PENDING_ROUTE_RETRY_ACTIVE_PORTAL_FRAMES := 4
 const PENDING_ROUTE_RETRY_LOW_PRIORITY_FRAMES := 8
 const FAILED_ROUTE_RETRY_DEFAULT_FRAMES := 8
-const FAILED_ROUTE_RETRY_ACTIVE_PORTAL_FRAMES := 1
+const FAILED_ROUTE_RETRY_ACTIVE_PORTAL_FRAMES := 4
 const FAILED_ROUTE_RETRY_LOW_PRIORITY_FRAMES := 12
 
 var system
@@ -63,7 +63,7 @@ func move(entry: Dictionary, intent: Dictionary, max_distance: float, planner, w
     var target: Vector3 = intent.get("target", previous)
     var arrival_radius: float = float(intent.get("arrivalRadius", CELL * 0.75))
     var moving_home := bool(intent.get("movingHome", false))
-    var strict_arrival := bool(intent.get("strictArrival", false)) or String(intent.get("kind", "")) == "scripted" or moving_home
+    var strict_arrival := bool(intent.get("strictArrival", false)) or moving_home
     if String(entry.get("activeDoorPortalId", "")) == "":
         entry.erase("_activeDoorForwardStep")
     if flat_distance(previous, target) <= arrival_radius:

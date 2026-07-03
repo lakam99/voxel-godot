@@ -9,6 +9,9 @@ var main
 var excavation_brushes: Array[Dictionary] = []
 var cave_feature_cache := {}
 var surface_projection_cache := {}
+var natural_surface_y_cache := {}
+var base_surface_y_cache := {}
+var surface_biome_cache := {}
 
 func setup(main_node) -> void:
 	main = main_node
@@ -17,11 +20,17 @@ func reset() -> void:
 	excavation_brushes.clear()
 	cave_feature_cache.clear()
 	surface_projection_cache.clear()
+	natural_surface_y_cache.clear()
+	base_surface_y_cache.clear()
+	surface_biome_cache.clear()
 
 func reset_for_seed() -> void:
 	excavation_brushes.clear()
 	cave_feature_cache.clear()
 	surface_projection_cache.clear()
+	natural_surface_y_cache.clear()
+	base_surface_y_cache.clear()
+	surface_biome_cache.clear()
 
 func sample_cell(cell: Vector3i) -> Dictionary:
 	var s := cell_size()
@@ -152,6 +161,9 @@ func terrain_reference_surface_y_for_cell(cell: Vector3i) -> float:
 	return base_surface_y_for_cell(cell)
 
 func base_surface_y_for_cell(cell: Vector3i) -> float:
+	var key := Vector2i(cell.x, cell.z)
+	if base_surface_y_cache.has(key):
+		return float(base_surface_y_cache[key])
 	var town: Dictionary = town_region_for_surface_cell3(cell)
 	if not town.is_empty():
 		var center_x := int(town["centerX"])
@@ -160,17 +172,25 @@ func base_surface_y_for_cell(cell: Vector3i) -> float:
 		var distance := Vector2(float(cell.x - center_x), float(cell.z - center_z)).length()
 		var level := float(town["level"])
 		if distance <= radius:
+			base_surface_y_cache[key] = level
 			return level
 		var apron := float(town_slope_apron_cells(town))
 		var natural := natural_surface_y_for_cell(cell)
 		var blend := clampf((distance - radius) / maxf(1.0, apron), 0.0, 1.0)
 		var eased := blend * blend * (3.0 - 2.0 * blend)
-		return lerp(level, natural, eased)
-	return natural_surface_y_for_cell(cell)
+		var value: float = lerp(level, natural, eased)
+		base_surface_y_cache[key] = value
+		return value
+	var value: float = natural_surface_y_for_cell(cell)
+	base_surface_y_cache[key] = value
+	return value
 
 func natural_surface_y_for_cell(cell: Vector3i) -> float:
 	if main == null:
 		return 0.0
+	var key := Vector2i(cell.x, cell.z)
+	if natural_surface_y_cache.has(key):
+		return float(natural_surface_y_cache[key])
 	var x := cell.x
 	var z := cell.z
 	var continent: float = main.noise01(main.height_noise, x, z)
@@ -187,34 +207,52 @@ func natural_surface_y_for_cell(cell: Vector3i) -> float:
 	var detail: float = (main.noise01(main.ridge_noise, x + 7800, z - 9100) - 0.5) * lerp(0.28, 1.35, mountain_mask)
 	var raw: float = float(main.MIN_HEIGHT) + lerp(lowland, mountains, mountain_mask) + detail
 	var terrace: float = lerp(float(main.CELL) * 0.34, float(main.CELL) * 1.15, mountain_mask)
-	return clamp(round(raw / terrace) * terrace, float(main.MIN_HEIGHT), float(main.MAX_HEIGHT))
+	var value: float = clamp(round(raw / terrace) * terrace, float(main.MIN_HEIGHT), float(main.MAX_HEIGHT))
+	natural_surface_y_cache[key] = value
+	return value
 
 func surface_biome_for_cell3(cell: Vector3i) -> String:
+	var key := Vector2i(cell.x, cell.z)
+	if surface_biome_cache.has(key):
+		return String(surface_biome_cache[key])
 	if not town_region_at_cell3(cell).is_empty():
+		surface_biome_cache[key] = "town"
 		return "town"
 	var h: float = terrain_reference_surface_y_for_cell(cell)
 	var moisture: float = main.noise01(main.moisture_noise, cell.x - 1200, cell.z + 800) if main != null else 0.5
 	var temp: float = clamp(0.42 + (main.noise01(main.temp_noise, cell.x + 1500, cell.z - 900) if main != null else 0.5) * 0.46 - abs(cell.z) / 1300.0 - max(0.0, h - 38.0) / 180.0, 0.0, 1.0)
 	if h < float(main.WATER_LEVEL) + 0.3:
+		surface_biome_cache[key] = "ocean"
 		return "ocean"
 	if h < float(main.WATER_LEVEL) + 1.7:
+		surface_biome_cache[key] = "beach"
 		return "beach"
 	if h > 78.0:
+		surface_biome_cache[key] = "snow"
 		return "snow"
 	if h > 56.0:
-		return "alpine" if temp < 0.48 else "tundra"
+		var value := "alpine" if temp < 0.48 else "tundra"
+		surface_biome_cache[key] = value
+		return value
 	if h > 42.0 and moisture < 0.5:
+		surface_biome_cache[key] = "alpine"
 		return "alpine"
 	if moisture > 0.78 and h < float(main.WATER_LEVEL) + 6.0:
+		surface_biome_cache[key] = "swamp"
 		return "swamp"
 	if temp > 0.68 and moisture < 0.32:
+		surface_biome_cache[key] = "desert"
 		return "desert"
 	if temp > 0.61 and moisture < 0.48:
+		surface_biome_cache[key] = "savanna"
 		return "savanna"
 	if temp < 0.33 and moisture > 0.42:
+		surface_biome_cache[key] = "taiga"
 		return "taiga"
 	if moisture > 0.64:
+		surface_biome_cache[key] = "forest"
 		return "forest"
+	surface_biome_cache[key] = "plains"
 	return "plains"
 
 func biome_at_volume_cell(cell: Vector3i) -> String:

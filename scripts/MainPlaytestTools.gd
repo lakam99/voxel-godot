@@ -33,13 +33,30 @@ func build_chunk_mesh(cx: int, cz: int) -> Mesh:
     st.set_material(terrain_material)
     var start_x: int = cx * CHUNK_SIZE
     var start_z: int = cz * CHUNK_SIZE
+    var monitor = runtime_perf_monitor
+    var cave_start: int = monitor.begin_section("chunk_cave_feature_query") if monitor != null else Time.get_ticks_usec()
     var cave_features := chunk_cave_features(start_x, start_z)
-    add_natural_exterior_surface(st, start_x, start_z)
+    if monitor != null:
+        monitor.end_section("chunk_cave_feature_query", cave_start)
+    if monitor != null and not cave_features.is_empty():
+        monitor.increment_counter("chunk_cave_feature_chunks")
+        monitor.increment_counter("chunk_cave_features", cave_features.size())
+    if cave_features.is_empty():
+        var exterior_start_no_caves: int = monitor.begin_section("chunk_exterior_surface_mesh") if monitor != null else Time.get_ticks_usec()
+        var exterior_mesh := build_natural_exterior_array_mesh(start_x, start_z)
+        if monitor != null:
+            monitor.end_section("chunk_exterior_surface_mesh", exterior_start_no_caves)
+        return exterior_mesh
+    var exterior_start: int = monitor.begin_section("chunk_exterior_surface_mesh") if monitor != null else Time.get_ticks_usec()
+    add_natural_exterior_surface(st, start_x, start_z, cave_features)
+    if monitor != null:
+        monitor.end_section("chunk_exterior_surface_mesh", exterior_start)
     var bounds := chunk_volume_y_bounds_from_features(start_x, start_z, cave_features)
     var min_y := int(bounds.get("minY", floori((MIN_HEIGHT - CELL * 4.0) / CELL))) - 1
     var max_y := int(bounds.get("maxY", ceili((MAX_HEIGHT + CELL * 2.0) / CELL))) + 1
     var sample_cache := {}
     if not cave_features.is_empty():
+        var volume_start: int = monitor.begin_section("chunk_volume_mesh") if monitor != null else Time.get_ticks_usec()
         for z in range(start_z, start_z + CHUNK_SIZE):
             for x in range(start_x, start_x + CHUNK_SIZE):
                 var cell_bounds := mesh_cell_volume_y_bounds(x, z, min_y, max_y, cave_features)
@@ -47,38 +64,166 @@ func build_chunk_mesh(cx: int, cz: int) -> Mesh:
                 var cell_max_y := int(cell_bounds.get("maxY", max_y))
                 for y in range(cell_min_y, cell_max_y):
                     extract_volume_iso_cube(st, Vector3i(x, y, z), start_x, start_z, sample_cache)
-    return st.commit()
+        if monitor != null:
+            monitor.end_section("chunk_volume_mesh", volume_start)
+    var commit_start: int = monitor.begin_section("chunk_mesh_commit") if monitor != null else Time.get_ticks_usec()
+    var mesh := st.commit()
+    if monitor != null:
+        monitor.end_section("chunk_mesh_commit", commit_start)
+    return mesh
 
-func add_natural_exterior_surface(st: SurfaceTool, start_x: int, start_z: int) -> void:
-    var surface_cache := {}
-    var color_cache := {}
-    var normal_cache := {}
+func build_natural_exterior_array_mesh(start_x: int, start_z: int) -> Mesh:
+    var monitor = runtime_perf_monitor
+    var border_size := CHUNK_SIZE + 3
+    var surface_cache := PackedFloat32Array()
+    surface_cache.resize(border_size * border_size)
+    var height_start: int = monitor.begin_section("chunk_exterior_height_grid") if monitor != null else Time.get_ticks_usec()
     for vz in range(-1, CHUNK_SIZE + 2):
+        var row_index := (vz + 1) * border_size
+        for vx in range(-1, CHUNK_SIZE + 2):
+            surface_cache[row_index + vx + 1] = exterior_surface_y_cell(start_x + vx, start_z + vz)
+    if monitor != null:
+        monitor.end_section("chunk_exterior_height_grid", height_start)
+
+    var grid_size := CHUNK_SIZE + 1
+    var vertex_count := grid_size * grid_size
+    var vertices := PackedVector3Array()
+    var normals := PackedVector3Array()
+    var colors := PackedColorArray()
+    vertices.resize(vertex_count)
+    normals.resize(vertex_count)
+    colors.resize(vertex_count)
+    var vertex_start: int = monitor.begin_section("chunk_exterior_vertex_grid") if monitor != null else Time.get_ticks_usec()
+    for vz in range(grid_size):
+        var vertex_row := vz * grid_size
+        var border_row := (vz + 1) * border_size
+        for vx in range(grid_size):
+            var vertex_index := vertex_row + vx
+            var border_index := border_row + vx + 1
+            var cell_x := start_x + vx
+            var cell_z := start_z + vz
+            vertices[vertex_index] = Vector3(float(vx) * CELL, float(surface_cache[border_index]), float(vz) * CELL)
+            normals[vertex_index] = exterior_surface_normal_grid(surface_cache, border_index, border_size)
+            var color: Color = exterior_surface_color_for_cell(cell_x, cell_z)
+            var shade := 0.88 + noise01(ridge_noise, cell_x + 400, cell_z - 200) * 0.18
+            colors[vertex_index] = color * shade
+    if monitor != null:
+        monitor.end_section("chunk_exterior_vertex_grid", vertex_start)
+
+    var index_count := CHUNK_SIZE * CHUNK_SIZE * 6
+    var indices := PackedInt32Array()
+    indices.resize(index_count)
+    var write_index := 0
+    var index_start: int = monitor.begin_section("chunk_exterior_index_grid") if monitor != null else Time.get_ticks_usec()
+    for z in range(CHUNK_SIZE):
+        var row := z * grid_size
+        var next_row := (z + 1) * grid_size
+        for x in range(CHUNK_SIZE):
+            var i00 := row + x
+            var i10 := i00 + 1
+            var i01 := next_row + x
+            var i11 := i01 + 1
+            indices[write_index] = i00
+            indices[write_index + 1] = i01
+            indices[write_index + 2] = i10
+            indices[write_index + 3] = i10
+            indices[write_index + 4] = i01
+            indices[write_index + 5] = i11
+            write_index += 6
+    if monitor != null:
+        monitor.end_section("chunk_exterior_index_grid", index_start)
+
+    var arrays := []
+    arrays.resize(Mesh.ARRAY_MAX)
+    arrays[Mesh.ARRAY_VERTEX] = vertices
+    arrays[Mesh.ARRAY_NORMAL] = normals
+    arrays[Mesh.ARRAY_COLOR] = colors
+    arrays[Mesh.ARRAY_INDEX] = indices
+    var commit_start: int = monitor.begin_section("chunk_mesh_commit") if monitor != null else Time.get_ticks_usec()
+    var mesh := ArrayMesh.new()
+    mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+    mesh.surface_set_material(0, terrain_material)
+    if monitor != null:
+        monitor.end_section("chunk_mesh_commit", commit_start)
+    return mesh
+
+func add_natural_exterior_surface(st: SurfaceTool, start_x: int, start_z: int, cave_features: Array = []) -> void:
+    var grid_size := CHUNK_SIZE + 3
+    var surface_cache := PackedFloat32Array()
+    surface_cache.resize(grid_size * grid_size)
+    var color_cache: Array[Color] = []
+    color_cache.resize(grid_size * grid_size)
+    var normal_cache: Array[Vector3] = []
+    normal_cache.resize(grid_size * grid_size)
+    for vz in range(-1, CHUNK_SIZE + 2):
+        var row_index := (vz + 1) * grid_size
         for vx in range(-1, CHUNK_SIZE + 2):
             var cell_x: int = start_x + vx
             var cell_z: int = start_z + vz
-            var key := Vector2i(cell_x, cell_z)
-            surface_cache[key] = exterior_surface_y_cell(cell_x, cell_z)
+            var cache_index := row_index + vx + 1
+            surface_cache[cache_index] = exterior_surface_y_cell(cell_x, cell_z)
             if vx < 0 or vx > CHUNK_SIZE or vz < 0 or vz > CHUNK_SIZE:
                 continue
             var color: Color = exterior_surface_color_for_cell(cell_x, cell_z)
             var shade := 0.88 + noise01(ridge_noise, cell_x + 400, cell_z - 200) * 0.18
-            color_cache[key] = color * shade
+            color_cache[cache_index] = color * shade
     for vz in range(CHUNK_SIZE + 1):
+        var row_index := (vz + 1) * grid_size
         for vx in range(CHUNK_SIZE + 1):
-            var cell_x: int = start_x + vx
-            var cell_z: int = start_z + vz
-            normal_cache[Vector2i(cell_x, cell_z)] = exterior_surface_normal_cached(surface_cache, cell_x, cell_z)
+            var cache_index := row_index + vx + 1
+            normal_cache[cache_index] = exterior_surface_normal_grid(surface_cache, cache_index, grid_size)
     for z in range(CHUNK_SIZE):
         for x in range(CHUNK_SIZE):
             var gx: int = start_x + x
             var gz: int = start_z + z
-            var p00 := exterior_surface_vertex_cached(surface_cache, gx, gz, start_x, start_z)
-            var p10 := exterior_surface_vertex_cached(surface_cache, gx + 1, gz, start_x, start_z)
-            var p01 := exterior_surface_vertex_cached(surface_cache, gx, gz + 1, start_x, start_z)
-            var p11 := exterior_surface_vertex_cached(surface_cache, gx + 1, gz + 1, start_x, start_z)
-            add_exterior_surface_triangle(st, p00, p01, p10, color_cache, normal_cache, [Vector2i(gx, gz), Vector2i(gx, gz + 1), Vector2i(gx + 1, gz)], start_x, start_z)
-            add_exterior_surface_triangle(st, p10, p01, p11, color_cache, normal_cache, [Vector2i(gx + 1, gz), Vector2i(gx, gz + 1), Vector2i(gx + 1, gz + 1)], start_x, start_z)
+            var p00 := exterior_surface_vertex_grid(surface_cache, x, z, grid_size)
+            var p10 := exterior_surface_vertex_grid(surface_cache, x + 1, z, grid_size)
+            var p01 := exterior_surface_vertex_grid(surface_cache, x, z + 1, grid_size)
+            var p11 := exterior_surface_vertex_grid(surface_cache, x + 1, z + 1, grid_size)
+            var check_cave_air := exterior_cell_may_touch_cave(cave_features, gx, gz)
+            add_exterior_surface_triangle_grid(st, p00, p01, p10, color_cache, normal_cache, x, z, x, z + 1, x + 1, z, grid_size, start_x, start_z, check_cave_air)
+            add_exterior_surface_triangle_grid(st, p10, p01, p11, color_cache, normal_cache, x + 1, z, x, z + 1, x + 1, z + 1, grid_size, start_x, start_z, check_cave_air)
+
+func exterior_surface_vertex_grid(surface_cache: PackedFloat32Array, vx: int, vz: int, grid_size: int) -> Vector3:
+    var cache_index := (vz + 1) * grid_size + vx + 1
+    return Vector3(float(vx) * CELL, float(surface_cache[cache_index]), float(vz) * CELL)
+
+func exterior_surface_normal_grid(surface_cache: PackedFloat32Array, cache_index: int, grid_size: int) -> Vector3:
+    var left := float(surface_cache[cache_index - 1])
+    var right := float(surface_cache[cache_index + 1])
+    var back := float(surface_cache[cache_index - grid_size])
+    var forward := float(surface_cache[cache_index + grid_size])
+    return Vector3(left - right, CELL * 2.0, back - forward).normalized()
+
+func add_exterior_surface_vertex_grid(st: SurfaceTool, point: Vector3, color_cache: Array[Color], normal_cache: Array[Vector3], vx: int, vz: int, grid_size: int) -> void:
+    var cache_index := (vz + 1) * grid_size + vx + 1
+    st.set_normal(normal_cache[cache_index])
+    st.set_color(color_cache[cache_index])
+    st.add_vertex(point)
+
+func add_exterior_surface_triangle_grid(
+    st: SurfaceTool,
+    a: Vector3,
+    b: Vector3,
+    c: Vector3,
+    color_cache: Array[Color],
+    normal_cache: Array[Vector3],
+    cell_ax: int,
+    cell_az: int,
+    cell_bx: int,
+    cell_bz: int,
+    cell_cx: int,
+    cell_cz: int,
+    grid_size: int,
+    origin_cell_x: int,
+    origin_cell_z: int,
+    check_cave_air := false
+) -> void:
+    if check_cave_air and exterior_surface_triangle_opens_to_cave_air(a, b, c, origin_cell_x, origin_cell_z):
+        return
+    add_exterior_surface_vertex_grid(st, a, color_cache, normal_cache, cell_ax, cell_az, grid_size)
+    add_exterior_surface_vertex_grid(st, b, color_cache, normal_cache, cell_bx, cell_bz, grid_size)
+    add_exterior_surface_vertex_grid(st, c, color_cache, normal_cache, cell_cx, cell_cz, grid_size)
 
 func exterior_surface_vertex_cached(surface_cache: Dictionary, cell_x: int, cell_z: int, origin_cell_x: int, origin_cell_z: int) -> Vector3:
     var key := Vector2i(cell_x, cell_z)
@@ -98,15 +243,26 @@ func add_exterior_surface_triangle(
     c: Vector3,
     color_cache: Dictionary,
     normal_cache: Dictionary,
-    cells: Array,
+    cell_a: Vector2i,
+    cell_b: Vector2i,
+    cell_c: Vector2i,
     origin_cell_x: int,
-    origin_cell_z: int
+    origin_cell_z: int,
+    check_cave_air := false
 ) -> void:
-    if exterior_surface_triangle_opens_to_cave_air(a, b, c, origin_cell_x, origin_cell_z):
+    if check_cave_air and exterior_surface_triangle_opens_to_cave_air(a, b, c, origin_cell_x, origin_cell_z):
         return
-    add_exterior_surface_vertex(st, a, color_cache, normal_cache, cells[0].x, cells[0].y)
-    add_exterior_surface_vertex(st, b, color_cache, normal_cache, cells[1].x, cells[1].y)
-    add_exterior_surface_vertex(st, c, color_cache, normal_cache, cells[2].x, cells[2].y)
+    add_exterior_surface_vertex(st, a, color_cache, normal_cache, cell_a.x, cell_a.y)
+    add_exterior_surface_vertex(st, b, color_cache, normal_cache, cell_b.x, cell_b.y)
+    add_exterior_surface_vertex(st, c, color_cache, normal_cache, cell_c.x, cell_c.y)
+
+func exterior_cell_may_touch_cave(cave_features: Array, cell_x: int, cell_z: int) -> bool:
+    if cave_features.is_empty():
+        return false
+    for feature in cave_features:
+        if cave_feature_may_touch_mesh_cell(feature, cell_x, cell_z):
+            return true
+    return false
 
 func exterior_surface_triangle_opens_to_cave_air(a: Vector3, b: Vector3, c: Vector3, origin_cell_x: int, origin_cell_z: int) -> bool:
     if world_generation_system == null or not world_generation_system.has_method("sample_world"):
@@ -127,11 +283,16 @@ func exterior_surface_triangle_opens_to_cave_air(a: Vector3, b: Vector3, c: Vect
     return false
 
 func exterior_surface_y_cell(cell_x: int, cell_z: int) -> float:
-    return surface_y_at_cell(Vector3i(cell_x, 0, cell_z))
+    var edit_key := Vector2i(cell_x, cell_z)
+    if volume_edit_markers.has(edit_key):
+        return float(volume_edit_markers[edit_key])
+    if world_generation_system != null:
+        return world_generation_system.surface_y_for_cell(Vector3i(cell_x, 0, cell_z))
+    return 0.0
 
 func exterior_surface_color_for_cell(cell_x: int, cell_z: int) -> Color:
-    if world_generation_system != null and world_generation_system.has_method("surface_color_for_cell3"):
-        return world_generation_system.call("surface_color_for_cell3", Vector3i(cell_x, 0, cell_z))
+    if world_generation_system != null:
+        return world_generation_system.surface_color_for_cell3(Vector3i(cell_x, 0, cell_z))
     return BIOME_COLORS.get(surface_biome_at_cell(Vector3i(cell_x, 0, cell_z)), BIOME_COLORS["plains"])
 
 func exterior_surface_normal_cached(surface_cache: Dictionary, cell_x: int, cell_z: int) -> Vector3:
@@ -231,8 +392,8 @@ func cave_feature_may_touch_mesh_cell(feature: Dictionary, cell_x: int, cell_z: 
     return cave_feature_may_touch_column(feature, cell_x + 1, cell_z + 1)
 
 func chunk_bound_surface_y_at_cell(cell: Vector3i) -> float:
-    if world_generation_system != null and world_generation_system.has_method("terrain_reference_surface_y_for_cell"):
-        return float(world_generation_system.call("terrain_reference_surface_y_for_cell", cell))
+    if world_generation_system != null:
+        return world_generation_system.terrain_reference_surface_y_for_cell(cell)
     return surface_y_at_cell(cell)
 
 func chunk_cave_features(start_x: int, start_z: int) -> Array[Dictionary]:

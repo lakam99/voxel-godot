@@ -1,9 +1,11 @@
 extends Node
 
 const MAIN_SCENE := preload("res://scenes/Main.tscn")
-const DEFAULT_SCENARIOS := ["DayWork", "DuskReturnHome", "MidnightTown", "CrowdedDoorTraffic", "AutosaveEnabled", "AutosaveDisabled"]
+const DEFAULT_SCENARIOS := ["DayWork", "DuskReturnHome", "MidnightTown", "CrowdedDoorTraffic", "SprintTraversal", "AutosaveEnabled", "AutosaveDisabled"]
 const TARGET_NPC_COUNT := 32
 const SAMPLE_EVERY_FRAMES := 6
+const SPRINT_TRAVERSAL_DIRECTION := Vector3(1.0, 0.0, 0.0)
+const SPRINT_TRAVERSAL_CELL_DIRECTION := Vector2i(1, 0)
 
 var scenario := "All"
 var seed := "atlas-1492"
@@ -15,6 +17,8 @@ var watchdog_seconds := 300.0
 var elapsed := 0.0
 var finished := false
 var main: Node = null
+var measured_player_start := Vector3.INF
+var measured_player_end := Vector3.INF
 
 func _ready() -> void:
     configure_from_environment()
@@ -98,22 +102,29 @@ func run_scenario(scenario_name: String) -> Dictionary:
     var warmup_count := 90
     if scenario_name == "CrowdedDoorTraffic":
         warmup_count = 240
+    elif scenario_name == "SprintTraversal":
+        warmup_count = 120
     await warmup_frames(warmup_count)
     prime_navigation_snapshot()
     reset_performance_monitor()
+    measured_player_start = measured_player_position()
     var samples := []
     var frame_count := maxi(1, roundi(duration_seconds * 60.0))
     for frame in range(frame_count):
+        update_scenario_frame(scenario_name, frame)
         await get_tree().process_frame
         if frame % SAMPLE_EVERY_FRAMES == 0 and main != null and main.has_method("debug_performance_state"):
             samples.append(main.debug_performance_state())
+    measured_player_end = measured_player_position()
     var metrics := summarize_samples(samples)
+    append_scenario_metrics(metrics, scenario_name)
     var failures: Array[String] = performance_failures(metrics)
     var passed := not samples.is_empty() and failures.is_empty()
-    var details := "samples=%d p99=%.2f max=%.2f npcMax=%.2f routeMax=%.2f navMax=%.2f jobMax=%.2f saveMax=%.2f navmeshInstallP95=%dus navmeshQueryP95=%dus" % [
+    var details := "samples=%d p99=%.2f max=%.2f chunkMax=%.2f npcMax=%.2f routeMax=%.2f navMax=%.2f jobMax=%.2f saveMax=%.2f navmeshInstallP95=%dus navmeshQueryP95=%dus" % [
         samples.size(),
         float(metrics.get("frameP99Ms", 0.0)),
         float(metrics.get("frameMaxMs", 0.0)),
+        float(metrics.get("maxChunkMs", 0.0)),
         float(metrics.get("maxNpcMs", 0.0)),
         float(metrics.get("maxRoutePlanMs", 0.0)),
         float(metrics.get("maxNavSnapshotMs", 0.0)),
@@ -160,9 +171,92 @@ func configure_main_for_scenario(scenario_name: String) -> void:
         main.mark_world_dirty("performance_observation")
     if main.get("player") != null:
         main.get("player").set("automated_input", true)
+        main.get("player").set("automated_sprint", false)
+        main.get("player").set("automated_move", Vector3.ZERO)
     force_npc_count(TARGET_NPC_COUNT)
     if scenario_name == "CrowdedDoorTraffic":
         setup_crowded_door_traffic()
+    elif scenario_name == "SprintTraversal":
+        setup_sprint_traversal()
+
+func setup_sprint_traversal() -> void:
+    if main == null:
+        return
+    var player_body := main.get("player") as CharacterBody3D
+    if player_body == null:
+        return
+    var start_cell := sprint_traversal_start_cell()
+    var start_y := float(main.call("surface_y_at_cell", Vector3i(start_cell.x, 0, start_cell.y))) + 0.08
+    player_body.global_position = Vector3(float(start_cell.x) * 1.35, start_y, float(start_cell.y) * 1.35)
+    player_body.velocity = Vector3.ZERO
+    player_body.set("automated_input", true)
+    player_body.set("automated_sprint", true)
+    player_body.set("automated_move", SPRINT_TRAVERSAL_DIRECTION)
+    if main.has_method("update_chunks"):
+        main.call("update_chunks", true)
+
+func sprint_traversal_start_cell() -> Vector2i:
+    var player_body := main.get("player") as Node3D
+    var origin := player_body.global_position if player_body != null else Vector3.ZERO
+    var origin_cell := Vector2i(int(main.call("world_to_cell", origin.x)), int(main.call("world_to_cell", origin.z)))
+    var offsets: Array[Vector2i] = [
+        Vector2i(96, 24),
+        Vector2i(128, -32),
+        Vector2i(160, 48),
+        Vector2i(192, -64),
+        Vector2i(224, 80),
+        Vector2i(256, -96)
+    ]
+    for offset in offsets:
+        var candidate: Vector2i = origin_cell + offset
+        if sprint_traversal_lane_ok(candidate):
+            return candidate
+    return origin_cell + offsets[0]
+
+func sprint_traversal_lane_ok(start_cell: Vector2i) -> bool:
+    var previous_height: float = INF
+    for step in range(48):
+        var cell: Vector2i = start_cell + SPRINT_TRAVERSAL_CELL_DIRECTION * step
+        var height := float(main.call("surface_y_at_cell", Vector3i(cell.x, 0, cell.y)))
+        if height < 1.35 * 3.0 or height > 92.0:
+            return false
+        var biome := String(main.call("surface_biome_at_cell", Vector3i(cell.x, 0, cell.y)))
+        if biome in ["ocean", "beach", "town"]:
+            return false
+        if previous_height != INF and absf(height - previous_height) > 1.35 * 1.15:
+            return false
+        previous_height = height
+    return true
+
+func update_scenario_frame(scenario_name: String, _frame: int) -> void:
+    if scenario_name != "SprintTraversal" or main == null:
+        return
+    var player_body := main.get("player") as CharacterBody3D
+    if player_body == null:
+        return
+    player_body.set("automated_input", true)
+    player_body.set("automated_sprint", true)
+    player_body.set("automated_move", SPRINT_TRAVERSAL_DIRECTION)
+
+func measured_player_position() -> Vector3:
+    if main == null:
+        return Vector3.INF
+    var player_body := main.get("player") as Node3D
+    if player_body == null:
+        return Vector3.INF
+    return player_body.global_position
+
+func append_scenario_metrics(metrics: Dictionary, scenario_name: String) -> void:
+    if scenario_name != "SprintTraversal":
+        return
+    if measured_player_start == Vector3.INF or measured_player_end == Vector3.INF:
+        metrics["playerTravelDistance"] = 0.0
+        return
+    var delta := measured_player_end - measured_player_start
+    delta.y = 0.0
+    metrics["playerTravelDistance"] = delta.length()
+    metrics["playerStart"] = [measured_player_start.x, measured_player_start.y, measured_player_start.z]
+    metrics["playerEnd"] = [measured_player_end.x, measured_player_end.y, measured_player_end.z]
 
 func setup_crowded_door_traffic() -> void:
     if main == null:
@@ -255,6 +349,11 @@ func reset_performance_monitor() -> void:
     var monitor = main.get("runtime_perf_monitor")
     if monitor != null and monitor.has_method("reset"):
         monitor.reset()
+    var npc_system = main.get("npc_system")
+    var autonomy = npc_system.get("autonomy_system") if npc_system != null else null
+    var navmesh_world = autonomy.get("navmesh_world") if autonomy != null else null
+    if navmesh_world != null and navmesh_world.has_method("reset_timing_stats"):
+        navmesh_world.reset_timing_stats()
 
 func summarize_samples(samples: Array) -> Dictionary:
     var frames := []
@@ -265,6 +364,13 @@ func summarize_samples(samples: Array) -> Dictionary:
     var max_route_search := 0.0
     var max_route_record := 0.0
     var max_route_convert := 0.0
+    var max_chunk := 0.0
+    var max_chunk_create := 0.0
+    var max_chunk_build_mesh := 0.0
+    var max_chunk_trimesh := 0.0
+    var max_chunk_spawn_props := 0.0
+    var chunks_created := 0
+    var chunk_asset_cache_misses := 0
     var max_runtime_graph := 0.0
     var max_runtime_graph_snapshot := 0.0
     var max_runtime_graph_targets := 0.0
@@ -307,6 +413,11 @@ func summarize_samples(samples: Array) -> Dictionary:
         max_route_search = maxf(max_route_search, float(section_max.get("route_search_step", 0.0)))
         max_route_record = maxf(max_route_record, float(section_max.get("route_record_result", 0.0)))
         max_route_convert = maxf(max_route_convert, float(section_max.get("route_result_convert", 0.0)))
+        max_chunk = maxf(max_chunk, maxf(float(sample.get("chunkMs", 0.0)), float(section_max.get("chunk", 0.0))))
+        max_chunk_create = maxf(max_chunk_create, float(section_max.get("chunk_create", 0.0)))
+        max_chunk_build_mesh = maxf(max_chunk_build_mesh, float(section_max.get("chunk_build_mesh", 0.0)))
+        max_chunk_trimesh = maxf(max_chunk_trimesh, float(section_max.get("chunk_create_trimesh_shape", 0.0)))
+        max_chunk_spawn_props = maxf(max_chunk_spawn_props, float(section_max.get("chunk_spawn_props", 0.0)))
         max_runtime_graph = maxf(max_runtime_graph, float(section_max.get("runtime_graph_build", 0.0)))
         max_runtime_graph_snapshot = maxf(max_runtime_graph_snapshot, float(section_max.get("runtime_graph_snapshot", 0.0)))
         max_runtime_graph_targets = maxf(max_runtime_graph_targets, float(section_max.get("runtime_graph_targets", 0.0)))
@@ -328,6 +439,8 @@ func summarize_samples(samples: Array) -> Dictionary:
         ))
         autosave_completed = max(autosave_completed, int(autosave_stats.get("asyncCompleted", autosave_completed)))
         autosave_pending = autosave_pending or bool(autosave_stats.get("asyncPending", false))
+        chunks_created = max(chunks_created, int(counters.get("chunks_created", chunks_created)))
+        chunk_asset_cache_misses = max(chunk_asset_cache_misses, int(counters.get("chunk_asset_cache_misses", chunk_asset_cache_misses)))
         route_jobs_completed = max(route_jobs_completed, int(counters.get("route_jobs_completed", route_jobs_completed)))
         route_jobs_pending = max(route_jobs_pending, int(counters.get("route_jobs_pending", route_jobs_pending)))
         job_scan_nodes = max(job_scan_nodes, int(counters.get("job_scan_nodes", job_scan_nodes)))
@@ -360,6 +473,13 @@ func summarize_samples(samples: Array) -> Dictionary:
         "maxRouteSearchMs": max_route_search,
         "maxRouteRecordMs": max_route_record,
         "maxRouteConvertMs": max_route_convert,
+        "maxChunkMs": max_chunk,
+        "maxChunkCreateMs": max_chunk_create,
+        "maxChunkBuildMeshMs": max_chunk_build_mesh,
+        "maxChunkCreateTrimeshShapeMs": max_chunk_trimesh,
+        "maxChunkSpawnPropsMs": max_chunk_spawn_props,
+        "chunksCreated": chunks_created,
+        "chunkAssetCacheMisses": chunk_asset_cache_misses,
         "maxRuntimeGraphBuildMs": max_runtime_graph,
         "maxRuntimeGraphSnapshotMs": max_runtime_graph_snapshot,
         "maxRuntimeGraphTargetsMs": max_runtime_graph_targets,
@@ -387,7 +507,7 @@ func summarize_samples(samples: Array) -> Dictionary:
         "maxNavmeshPathQueryP95Usec": max_navmesh_path_query_p95_usec,
         "maxNavmeshPathQueryFailures": max_navmesh_path_query_failures,
         "slowestNavmeshPathQuery": slowest_navmesh_path_query,
-        "topSectionMaxMs": top_section_maxima(section_maxima, 12),
+        "topSectionMaxMs": top_section_maxima(section_maxima, 20),
         "lastSpike": last_spike
     }
 

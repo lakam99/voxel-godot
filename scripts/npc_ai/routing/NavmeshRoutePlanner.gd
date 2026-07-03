@@ -44,6 +44,7 @@ func plan_runtime_route(entry: Dictionary, intent: Dictionary, generated_world =
 		"targetCell": target_cell,
 		"maxSnapDistance": maxf(float(intent.get("arrivalRadius", CELL * 0.75)), CELL * 0.95),
 		"queryApi": query_api,
+		"preferDescriptorEndpoint": true,
 		"forbiddenDoorPortalIds": forbidden_private_door_ids
 	})
 	last_stats = navmesh_world.stats() if navmesh_world.has_method("stats") else {}
@@ -53,7 +54,15 @@ func plan_runtime_route(entry: Dictionary, intent: Dictionary, generated_world =
 		return _route_failure(String(route.get("status", "blocked")), String(route.get("reason", "no_route")), target_cell, route)
 	var query_start: Vector3 = route.get("startPosition", start)
 	var route_target: Vector3 = route.get("targetPosition", query_target)
-	var waypoints: Array = _path_waypoints(route.get("path", []), query_start, route_target, generated_world, entry, bool(intent.get("allowOutside", false)), bool(intent.get("movingHome", false)))
+	var raw_points := _route_points_for_validation(route.get("path", []), query_start, route_target)
+	var validation := { "ok": true, "reason": "" }
+	if String(intent.get("kind", "move")) != "scripted":
+		validation = _validate_generated_world_route(entry, intent, generated_world, raw_points, target_cell, route)
+	if not bool(validation.get("ok", false)):
+		var rejected_route := route.duplicate(true)
+		rejected_route["validation"] = validation
+		return _route_failure("blocked", "path_crosses_static_collision", target_cell, rejected_route)
+	var waypoints: Array = _path_waypoints(raw_points, query_start, route_target, generated_world, entry, bool(intent.get("allowOutside", false)), bool(intent.get("movingHome", false)))
 	var cells: Array[Vector2i] = _cells_for_waypoints(waypoints, generated_world)
 	cells = _preserve_route_action_cells(cells, route.get("actions", {}))
 	var status := "arrived" if waypoints.is_empty() else "routed"
@@ -103,15 +112,46 @@ func stats() -> Dictionary:
 	return last_stats.duplicate(true)
 
 func _runtime_query_api(intent: Dictionary) -> String:
-	if bool(intent.get("movingHome", false)) or String(intent.get("kind", "")) == "scripted":
-		return "query_path"
-	return "map_get_path"
+	return "query_path"
 
 func _forbidden_private_door_portal_ids(entry: Dictionary, generated_world = null) -> Array[String]:
 	var source = generated_world if generated_world != null else world_adapter
 	if source == null or not source.has_method("forbidden_private_door_portal_ids_for_entry"):
 		return []
 	return source.forbidden_private_door_portal_ids_for_entry(entry)
+
+func _route_points_for_validation(path_value, start: Vector3, target: Vector3) -> Array:
+	var points: Array = []
+	if path_value is PackedVector3Array:
+		for point in path_value:
+			points.append(point)
+	elif path_value is Array:
+		for point in path_value:
+			if point is Vector3:
+				points.append(point)
+	if points.is_empty() or (points[0] as Vector3).distance_to(start) > CELL * 0.08:
+		points.push_front(start)
+	if points.is_empty() or (points[points.size() - 1] as Vector3).distance_to(target) > CELL * 0.12:
+		points.append(target)
+	return points
+
+func _validate_generated_world_route(entry: Dictionary, intent: Dictionary, generated_world, points: Array, target_cell: Vector2i, route: Dictionary) -> Dictionary:
+	var source = generated_world if generated_world != null else world_adapter
+	if source == null or not source.has_method("validate_waypoint_route"):
+		return { "ok": true, "reason": "" }
+	var allow_outside := bool(intent.get("allowOutside", false))
+	var moving_home := bool(intent.get("movingHome", false))
+	var snapshot: Dictionary = source.cached_static_tile_snapshot(allow_outside, moving_home) if source.has_method("cached_static_tile_snapshot") else source.build_snapshot(entry, allow_outside, moving_home)
+	var target_lookup := { target_cell: true }
+	var actions: Dictionary = route.get("actions", {}) if route.get("actions", {}) is Dictionary else {}
+	for action_value in actions.values():
+		if not (action_value is Dictionary):
+			continue
+		var action: Dictionary = action_value
+		var action_cell = action.get("cell")
+		if action_cell is Vector2i:
+			target_lookup[action_cell] = true
+	return source.validate_waypoint_route(entry, snapshot, points, target_lookup, true)
 
 func _path_waypoints(path_value, start: Vector3, target: Vector3, generated_world = null, entry := {}, allow_outside := false, moving_home := false) -> Array[Vector3]:
 	var result: Array[Vector3] = []
@@ -247,7 +287,7 @@ func _target_cell_blocked(entry: Dictionary, target_cell: Vector2i, generated_wo
 		return false
 	if moving_home and source.has_method("cell_inside_entry_home") and source.cell_inside_entry_home(entry, target_cell):
 		return false
-	var snapshot: Dictionary = source.build_snapshot(entry, allow_outside, moving_home)
+	var snapshot: Dictionary = source.cached_static_tile_snapshot(allow_outside, moving_home) if source.has_method("cached_static_tile_snapshot") else source.build_snapshot(entry, allow_outside, moving_home)
 	if source.has_method("static_blocker") and source.static_blocker(snapshot, target_cell) != null:
 		return true
 	if source.has_method("prop_clearance_blocker") and source.prop_clearance_blocker(snapshot, target_cell) != null:

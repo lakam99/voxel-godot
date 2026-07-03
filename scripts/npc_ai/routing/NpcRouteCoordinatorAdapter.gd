@@ -103,7 +103,9 @@ func plan_route(entry: Dictionary, intent: Dictionary) -> Dictionary:
 	var result: Dictionary = navmesh_planner.plan_runtime_route(entry, intent, world, 0)
 	if _should_use_generated_corridor_fallback(result, entry, intent):
 		var fallback_start: int = monitor.begin_section("generated_corridor_route_query") if monitor != null else Time.get_ticks_usec()
-		var fallback_result: Dictionary = generated_corridor_planner.plan_runtime_route(entry, intent, world, 200000)
+		var fallback_intent: Dictionary = intent.duplicate(true)
+		fallback_intent["generatedFallback"] = true
+		var fallback_result: Dictionary = generated_corridor_planner.plan_runtime_route(entry, fallback_intent, world, 4096)
 		if monitor != null:
 			monitor.end_section("generated_corridor_route_query", fallback_start)
 			monitor.increment_counter("generated_corridor_route_queries")
@@ -137,7 +139,10 @@ func plan_route(entry: Dictionary, intent: Dictionary) -> Dictionary:
 func _should_use_generated_corridor_fallback(result: Dictionary, entry: Dictionary, intent: Dictionary) -> bool:
 	if generated_corridor_planner == null or world == null:
 		return false
-	if not (bool(intent.get("movingHome", false)) or String(intent.get("kind", "")) in ["home", "scripted"]):
+	var route_kind := String(intent.get("kind", ""))
+	if route_kind == "scripted":
+		return false
+	if not (bool(intent.get("movingHome", false)) or route_kind == "home"):
 		return false
 	if String(result.get("status", "")) == "pending":
 		return false
@@ -153,7 +158,8 @@ func _should_use_generated_corridor_fallback(result: Dictionary, entry: Dictiona
 		"path_endpoint_mismatch",
 		"no_route",
 		"target_blocked",
-		"forbidden_private_door_link"
+		"forbidden_private_door_link",
+		"path_crosses_static_collision"
 	]
 
 func route_cost(entry: Dictionary, target: Vector3, allow_outside := false, moving_home := false, arrival_radius := CELL * 0.85, approach_cells: Array = []) -> float:
@@ -264,8 +270,9 @@ func _ensure_navmesh_route_tiles(entry: Dictionary, intent: Dictionary) -> bool:
 	var allow_outside := bool(intent.get("allowOutside", false))
 	var moving_home := bool(intent.get("movingHome", false))
 	var route_kind := String(intent.get("kind", "move"))
-	var ordered_route := moving_home or route_kind in ["home", "scripted"] or String(entry.get("activeDoorPortalId", "")) != ""
-	var margin_cells := 12 if moving_home or route_kind in ["home", "scripted"] else 4
+	var inline_publish_route := moving_home or route_kind in ["home", "scripted"] or String(entry.get("activeDoorPortalId", "")) != ""
+	var burst_publish_route := moving_home or route_kind == "home"
+	var margin_cells := 6 if moving_home or route_kind in ["home", "scripted"] else 4
 	var tile_keys: Array = world.route_navmesh_tile_keys(entry, start, target, allow_outside, moving_home, margin_cells)
 	var source_key: String = String(world.navmesh_tile_source_key() if world.has_method("navmesh_tile_source_key") else world.revision())
 	var monitor = performance_monitor()
@@ -284,7 +291,7 @@ func _ensure_navmesh_route_tiles(entry: Dictionary, intent: Dictionary) -> bool:
 			if bool(tile_status.get("installed", false)) and not bool(tile_status.get("dirty", false)) and int(tile_status.get("surfaceCount", 0)) > 0:
 				publish_debug.append({ "tile": tile_key, "status": "cached", "region": tile_status })
 				continue
-		var extra_publishes := ORDERED_ROUTE_NAVMESH_TILE_EXTRA_PUBLISHES if ordered_route else 0
+		var extra_publishes := ORDERED_ROUTE_NAVMESH_TILE_EXTRA_PUBLISHES if burst_publish_route else 1 if inline_publish_route else 0
 		if not _claim_navmesh_tile_publish_budget(extra_publishes):
 			if monitor != null:
 				monitor.increment_counter("navmesh_tile_publish_pending")
@@ -311,11 +318,11 @@ func _ensure_navmesh_route_tiles(entry: Dictionary, intent: Dictionary) -> bool:
 			"installed": bool(publish_result.get("installed", false))
 		})
 	entry["lastNavmeshTilePublishDebug"] = publish_debug
-	if published_tile_this_call and not ordered_route:
+	if published_tile_this_call and not inline_publish_route:
 		if monitor != null:
 			monitor.increment_counter("navmesh_tile_publish_deferred_queries")
 		return false
-	if published_tile_this_call and ordered_route and monitor != null:
+	if published_tile_this_call and inline_publish_route and monitor != null:
 		monitor.increment_counter("navmesh_tile_publish_inline_ordered_queries")
 	return true
 
@@ -365,10 +372,9 @@ func _claim_route_budget(entry: Dictionary, intent: Dictionary) -> bool:
 	var external_direct_move := direct_update_move and String(entry.get("activeDoorPortalId", "")) == "" and route_actions.is_empty()
 	var priority := maxi(int(intent.get("priority", 0)), int(entry.get("routePriority", 0)))
 	var route_kind := String(intent.get("kind", "move"))
-	var active_portal_route := String(entry.get("activeDoorPortalId", "")) != "" or bool(entry.get("holdDoorOrder", false))
-	var critical_ordered_route := active_portal_route or route_kind in ["home", "scripted"]
+	var critical_ordered_route := route_kind == "home"
 	var threat_guard_route := route_kind == "guard" and bool(entry.get("guardRouteCritical", false))
-	var routine_route := route_kind in ["guard", "work", "forage", "job", "idle", "move"]
+	var routine_route := route_kind in ["guard", "work", "forage", "job", "idle", "move", "scripted"]
 	var urgent_route := critical_ordered_route or threat_guard_route or (priority >= 180 and not routine_route)
 	var waited_frames := int(entry.get("routeBudgetWaitFrames", 0))
 	var frames_since_grant := route_budget_frame - int(entry.get("routeBudgetGrantedFrame", -999999))
@@ -386,7 +392,7 @@ func _claim_route_budget(entry: Dictionary, intent: Dictionary) -> bool:
 		if urgent_route and urgent_route_jobs_this_frame < URGENT_ROUTE_EXTRA_JOBS_PER_FRAME:
 			urgent_route_jobs_this_frame += 1
 			urgent_overflow = true
-		elif not external_direct_move and waited_frames >= STARVED_ROUTE_BUDGET_FRAMES and starved_route_jobs_this_frame < STARVED_ROUTE_EXTRA_JOBS_PER_FRAME:
+		elif route_kind != "scripted" and not external_direct_move and waited_frames >= STARVED_ROUTE_BUDGET_FRAMES and starved_route_jobs_this_frame < STARVED_ROUTE_EXTRA_JOBS_PER_FRAME:
 			starved_route_jobs_this_frame += 1
 			starved_overflow = true
 		else:
@@ -430,7 +436,8 @@ func _route_cache_key(entry: Dictionary, intent: Dictionary) -> String:
 	var context = entry.get("agentContext")
 	if context != null:
 		profile_id = String(context.get("traversal_profile_id")) if context.get("traversal_profile_id") != null else profile_id
-	var dynamic_avoid_key := _route_dynamic_avoid_key(entry)
+	var route_kind_for_cache := String(intent.get("kind", "move"))
+	var dynamic_avoid_key := "" if route_kind_for_cache == "scripted" else _route_dynamic_avoid_key(entry)
 	return "%s|%s|%s|%d,%d|%d,%d|%s|%s|%s|%s|%s|%s|%.3f" % [
 		profile_id,
 		world_revision,

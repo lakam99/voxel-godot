@@ -89,17 +89,20 @@ func navigation_map_render_key(cache_key: String, sample_key: String, state: Dic
         int(state.get("sampleCount", 0))
     ]
 
-func add_map_point(points: Array, kind: String, label: String, offset: Vector2, size: float, radius: float) -> void:
+func add_map_point(points: Array, kind: String, label: String, offset: Vector2, size: float, radius: float, marker_key := "") -> void:
     if offset.length() > radius:
         return
-    points.append({
+    var point := {
         "kind": kind,
         "label": label,
         "offset": offset,
         "size": size,
         "distance": offset.length(),
         "bearing": cardinal_for_offset(offset)
-    })
+    }
+    if marker_key != "":
+        point["key"] = marker_key
+    points.append(point)
 
 func navigation_marker_for(body: Node, block_type: String) -> Dictionary:
     var tier := String(body.get_meta("generatedTier", ""))
@@ -246,6 +249,7 @@ func append_navigation_marker_points(points: Array, radius: float) -> void:
         if not (marker_value is Dictionary):
             continue
         var marker: Dictionary = marker_value
+        var marker_key := String(marker.get("key", ""))
         var body := marker.get("body") as Node3D
         if body == null or not is_instance_valid(body):
             continue
@@ -255,8 +259,48 @@ func append_navigation_marker_points(points: Array, radius: float) -> void:
             String(marker.get("label", "Marker")),
             Vector2(body.global_position.x - player.global_position.x, body.global_position.z - player.global_position.z),
             float(marker.get("size", 3.3)),
-            radius
+            radius,
+            marker_key
         )
+
+func append_nearby_navigation_marker_points(points: Array, radius: float) -> Dictionary:
+    var added := {}
+    if player == null or blocks.is_empty():
+        return added
+    var center := Vector2i(world_to_cell(player.global_position.x), world_to_cell(player.global_position.z))
+    var scan_radius_cells := ceili(minf(radius, CELL * 14.0) / CELL)
+    var center_y := roundi(player.global_position.y / CELL)
+    for z in range(center.y - scan_radius_cells, center.y + scan_radius_cells + 1):
+        for x in range(center.x - scan_radius_cells, center.x + scan_radius_cells + 1):
+            for y in range(center_y - 8, center_y + 9):
+                var block_key := Vector3i(x, y, z)
+                var body := blocks.get(block_key) as Node3D
+                if body == null or not is_instance_valid(body) or not body.has_meta("block_type"):
+                    continue
+                var offset := Vector2(body.global_position.x - player.global_position.x, body.global_position.z - player.global_position.z)
+                if offset.length() > radius:
+                    continue
+                var block_type := String(body.get_meta("block_type"))
+                var marker := navigation_marker_for(body, block_type)
+                if marker.is_empty():
+                    continue
+                var marker_key := String(marker.get("key", "%s:%s" % [block_type, str(block_key)]))
+                if marker_key != "" and added.has(marker_key):
+                    continue
+                if marker_key != "":
+                    added[marker_key] = true
+                add_map_point(
+                    points,
+                    String(marker.get("kind", "structure")),
+                    String(marker.get("label", ItemCatalogScript.label(block_type))),
+                    offset,
+                    float(marker.get("size", 3.3)),
+                    radius,
+                    marker_key
+                )
+                if points.size() >= 28:
+                    return added
+    return added
 
 func navigation_marker_source_key() -> String:
     return str(blocks.size())

@@ -132,6 +132,17 @@ Useful generated asset commands:
 
 If a playtest times out, inspect `playtest-progress.txt` and `playtest-report.json` before changing code.
 
+## Performance Standards
+
+- Treat visible hitches and whole-game freezes as correctness bugs, especially during sprinting, chunk streaming, generated town/structure activation, NPC updates, autosave, and tutorial-town play.
+- Profile before optimizing. Use runtime performance reports to identify the actual spike source, and report the command, report path, worst frame, last spike reason, and top sections.
+- Do not spend project time chasing tiny threshold noise, such as sub-0.1ms differences, unless the user explicitly asks. Prefer fixes that remove noticeable spikes or reduce high-percentile/max frame stalls.
+- For broad changes to terrain generation, chunk streaming, structures, NPC/nav, autosave, or HUD frame work, run a representative runtime performance observation. Include sprinting/traversal coverage when movement can load new world content.
+- Do not perform large synchronous work in a gameplay frame when it can be queued or budgeted. Chunk creation, prop spawning, generated structures/towns, navmesh publishing, route work, and expensive scans should be spread across frames with measured budgets.
+- Preserve deterministic world generation while optimizing. Caches, queues, and budgets must not reorder terrain/town/prop RNG or change generated-world results unless that behavior change is intentional and tested.
+- If performance changes touch visual or gameplay systems, run relevant playtests in addition to benchmarks. For tutorial-town, NPC, or navigation-affecting changes, use real visual/playtest runners and inspect screenshots/trace evidence rather than relying only on metadata.
+- Keep performance instrumentation useful and bounded. Add timers/counters for diagnosis, but remove or reduce noisy temporary probes once the spike source is understood.
+
 ## Key Systems
 
 - `scripts/PlaytestRunner.gd`: broad integration coverage. Add only small smoke coverage here; use dedicated runners for large new domains.
