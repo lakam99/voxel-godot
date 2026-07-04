@@ -55,9 +55,7 @@ func plan_runtime_route(entry: Dictionary, intent: Dictionary, generated_world =
 	var query_start: Vector3 = route.get("startPosition", start)
 	var route_target: Vector3 = route.get("targetPosition", query_target)
 	var raw_points := _route_points_for_validation(route.get("path", []), query_start, route_target)
-	var validation := { "ok": true, "reason": "" }
-	if String(intent.get("kind", "move")) != "scripted":
-		validation = _validate_generated_world_route(entry, intent, generated_world, raw_points, target_cell, route)
+	var validation := _validate_generated_world_route(entry, intent, generated_world, raw_points, target_cell, route)
 	if not bool(validation.get("ok", false)):
 		var rejected_route := route.duplicate(true)
 		rejected_route["validation"] = validation

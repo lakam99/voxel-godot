@@ -25,10 +25,12 @@ const NPC_SPEED_MODE_SPRINTING := "sprinting"
 const NPC_MOTION_BUDGET_ACTIVE_THRESHOLD := 16
 const NPC_MOTION_BUDGET_CROWDED_THRESHOLD := 24
 const NPC_MOTION_BUDGET_VERY_CROWDED_THRESHOLD := 30
-const NPC_MOTION_BUDGET_ACTIVE := 14
+const NPC_MOTION_BUDGET_ACTIVE := 10
 const NPC_MOTION_BUDGET_CROWDED := 4
 const NPC_MOTION_BUDGET_VERY_CROWDED := 3
 const NPC_MOTION_ACCUMULATED_DELTA_CAP := 4.0
+const NPC_BRAIN_FRAME_BUDGET_MS := 4.0
+const NPC_MOTION_FRAME_BUDGET_MS := 8.0
 
 var main
 var hostile_system
@@ -877,12 +879,15 @@ func update_npcs(delta: float, day_factor: float) -> void:
         budget = 6
     if update_count <= 0:
         return
+    var npc_frame_start := Time.get_ticks_usec()
     npc_update_cursor = npc_update_cursor % update_count
     npc_update_active = true
     var scanned := 0
     var processed := 0
     var brain_processed_entries: Array = []
     while scanned < update_count and processed < budget:
+        if processed > 0 and npc_elapsed_ms(npc_frame_start) >= NPC_BRAIN_FRAME_BUDGET_MS:
+            break
         var entry: Dictionary = active_entries[(npc_update_cursor + scanned) % update_count]
         scanned += 1
         var body := entry.get("body") as Node3D
@@ -900,10 +905,16 @@ func update_npcs(delta: float, day_factor: float) -> void:
             if not brain_processed_entries.has(entry):
                 autonomy_system.record_brain_budget_skipped(entry, "budget_cursor")
     var motion_entries := select_motion_entries(active_entries, delta)
+    var motion_processed := 0
     for entry in active_entries:
         if not motion_entries.has(entry):
             if autonomy_system != null and autonomy_system.has_method("record_motion_skipped"):
                 autonomy_system.record_motion_skipped(entry, "motion_budget")
+            update_npc_visual_state(entry, delta)
+            continue
+        if motion_processed > 0 and not npc_motion_requires_immediate_update(entry) and npc_elapsed_ms(npc_frame_start) >= NPC_MOTION_FRAME_BUDGET_MS:
+            if autonomy_system != null and autonomy_system.has_method("record_motion_skipped"):
+                autonomy_system.record_motion_skipped(entry, "frame_time_budget")
             update_npc_visual_state(entry, delta)
             continue
         if autonomy_system != null and autonomy_system.has_method("advance_npc_motion"):
@@ -911,8 +922,12 @@ func update_npcs(delta: float, day_factor: float) -> void:
             var motion_delta := minf(accumulated_delta, delta * NPC_MOTION_ACCUMULATED_DELTA_CAP)
             entry["npcMotionAccumulatedDelta"] = maxf(0.0, accumulated_delta - motion_delta)
             autonomy_system.advance_npc_motion(entry, motion_delta, night_factor)
+        motion_processed += 1
         update_npc_visual_state(entry, delta)
     npc_update_active = false
+
+func npc_elapsed_ms(start_usec: int) -> float:
+    return float(Time.get_ticks_usec() - start_usec) / 1000.0
 
 func select_motion_entries(active_entries: Array, delta: float) -> Array:
     var selected: Array = []
@@ -2435,6 +2450,22 @@ func notify_navigation_block_removed(cell: Vector3i, block_type: String, block: 
 func notify_navigation_terrain_edited(cell: Vector2i, old_height: float, new_height: float) -> void:
     if autonomy_system:
         autonomy_system.notify_terrain_edited(cell, old_height, new_height)
+        flush_navigation_change_bus()
+
+func notify_navigation_terrain_cells_edited(cells: Array) -> void:
+    if autonomy_system == null:
+        return
+    var emitted := 0
+    for value in cells:
+        if not (value is Vector2i):
+            continue
+        var cell: Vector2i = value
+        var height := 0.0
+        if main != null and main.has_method("surface_y_at_cell"):
+            height = float(main.call("surface_y_at_cell", Vector3i(cell.x, 0, cell.y)))
+        autonomy_system.notify_terrain_edited(cell, height, height)
+        emitted += 1
+    if emitted > 0:
         flush_navigation_change_bus()
 
 func notify_navigation_prop_created(prop_id: String, prop: Node = null) -> void:

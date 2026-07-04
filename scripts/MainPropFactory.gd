@@ -121,10 +121,14 @@ func complete_destroy_target(hit: Dictionary, collider: Node, kind: String, mate
     if (kind == "terrain" or kind == "subsurface") and subsurface_system != null and subsurface_system.has_method("excavate_from_hit"):
         var excavation: Dictionary = subsurface_system.excavate_from_hit(hit, collider)
         mark_world_dirty("subsurface_excavated")
-        for affected_cell in excavation.get("affectedCells", []):
-            if affected_cell is Vector2i and npc_system and npc_system.has_method("notify_navigation_terrain_edited"):
-                var old_height := surface_y_at_cell(Vector3i(affected_cell.x, 0, affected_cell.y))
-                npc_system.notify_navigation_terrain_edited(affected_cell, old_height, old_height)
+        var affected_cells: Array = excavation.get("affectedCells", [])
+        if npc_system and npc_system.has_method("notify_navigation_terrain_cells_edited"):
+            npc_system.notify_navigation_terrain_cells_edited(affected_cells)
+        else:
+            for affected_cell in affected_cells:
+                if affected_cell is Vector2i and npc_system and npc_system.has_method("notify_navigation_terrain_edited"):
+                    var old_height := surface_y_at_cell(Vector3i(affected_cell.x, 0, affected_cell.y))
+                    npc_system.notify_navigation_terrain_edited(affected_cell, old_height, old_height)
         inventory_system.add_item(ItemCatalogScript.material_drop(material_id), 1)
         award_break_xp(material_id)
         complete_break_objectives(material_id)

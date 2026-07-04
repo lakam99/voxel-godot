@@ -740,9 +740,10 @@ func _transition_door_collision_pathable(entry: Dictionary, snapshot: Dictionary
     for record in records:
         if not _segment_intersects_collision_record(from_position, to_position, record):
             continue
-        var door := record.get("node") as Node
-        if door == null or not is_instance_valid(door):
+        var door_value = record.get("node", null)
+        if door_value == null or not is_instance_valid(door_value) or not (door_value is Node):
             continue
+        var door: Node = door_value
         if not _door_transition_allows(entry, door, from_cell, to_cell, moving_home):
             return {
                 "ok": false,
@@ -761,8 +762,8 @@ func _transition_static_collision_pathable(snapshot: Dictionary, from_cell: Vect
     for record in records:
         if not _segment_intersects_collision_record(from_position, to_position, record):
             continue
-        var node := record.get("node") as Object
-        if node != null and not is_instance_valid(node):
+        var node_value = record.get("node", null)
+        if node_value != null and not is_instance_valid(node_value):
             continue
         return {
             "ok": false,
@@ -777,8 +778,8 @@ func static_collision_blocker(snapshot: Dictionary, cell: Vector2i) -> Dictionar
     var position := cell_position(cell)
     var records := _transition_collision_records(snapshot, "staticCollisionByCell", cell, cell)
     for record in records:
-        var node := record.get("node") as Object
-        if node != null and not is_instance_valid(node):
+        var node_value = record.get("node", null)
+        if node_value != null and not is_instance_valid(node_value):
             continue
         if _point_inside_collision_record(position, record):
             return record
@@ -982,10 +983,6 @@ func _navmesh_surface_for_cell(snapshot: Dictionary, cell: Vector2i) -> Dictiona
     position.y = float(span_y) * CELL + 0.04
     var traversal_tags: Array[String] = ["terrain"]
     var semantic_region_ids: Array[String] = []
-    var cave_id := cave_navigation_id_for_cell(cell)
-    if cave_id != "":
-        traversal_tags.append("cave")
-        semantic_region_ids.append("cave:%s" % cave_id)
     if door != null:
         traversal_tags.append("door")
     if is_path_cell(snapshot, cell):
@@ -1002,14 +999,6 @@ func _navmesh_surface_for_cell(snapshot: Dictionary, cell: Vector2i) -> Dictiona
         "traversalTags": traversal_tags
     }
     return surface
-
-func cave_navigation_id_for_cell(cell: Vector2i) -> String:
-    if main == null:
-        return ""
-    var structure_system = main.get("structure_system")
-    if structure_system == null or not structure_system.has_method("cave_navigation_id_for_cell"):
-        return ""
-    return String(structure_system.call("cave_navigation_id_for_cell", cell.x, cell.y))
 
 func _navmesh_door_summary_for_tile(snapshot: Dictionary, tile_key: String) -> Dictionary:
     var portals: Array[Dictionary] = []

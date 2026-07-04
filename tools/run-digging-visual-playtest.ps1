@@ -4,20 +4,22 @@ param(
     [string]$ReportPath = "",
     [string]$ProgressPath = "",
     [string]$ScreenshotDir = "",
-    [int]$WatchdogSeconds = 90
+    [string]$PreferredMaterial = "",
+    [int]$WatchdogSeconds = 120,
+    [switch]$LiveProcess
 )
 
 $ErrorActionPreference = "Stop"
 
 $projectPath = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 if ($ReportPath -eq "") {
-    $ReportPath = Join-Path $projectPath "artifacts\light\light-shadow-visual-playtest.json"
+    $ReportPath = Join-Path $projectPath "artifacts\underground\digging-visual-playtest.json"
 }
 if ($ProgressPath -eq "") {
-    $ProgressPath = Join-Path $projectPath "artifacts\light\light-shadow-visual-playtest-progress.txt"
+    $ProgressPath = Join-Path $projectPath "artifacts\underground\digging-visual-playtest-progress.txt"
 }
 if ($ScreenshotDir -eq "") {
-    $ScreenshotDir = Join-Path $projectPath "artifacts\light\screenshots\light-shadow"
+    $ScreenshotDir = Join-Path $projectPath "artifacts\underground\screenshots\digging-visual"
 }
 
 $ReportPath = [System.IO.Path]::GetFullPath($ReportPath)
@@ -33,17 +35,19 @@ Remove-Item -Path (Join-Path $ScreenshotDir "*.png") -ErrorAction SilentlyContin
 $runToken = [guid]::NewGuid().ToString("N")
 $env:VOXEL_PLAYTEST = "1"
 $env:VOXEL_TEST_SEED = $Seed
-$env:VOXEL_LIGHT_SHADOW_REPORT = $ReportPath
-$env:VOXEL_LIGHT_SHADOW_PROGRESS = $ProgressPath
-$env:VOXEL_LIGHT_SHADOW_SCREENSHOT_DIR = $ScreenshotDir
-$env:VOXEL_LIGHT_SHADOW_RUN_TOKEN = $runToken
-$env:VOXEL_LIGHT_SHADOW_WATCHDOG_SECONDS = [string]$WatchdogSeconds
+$env:VOXEL_DIGGING_VISUAL_REPORT = $ReportPath
+$env:VOXEL_DIGGING_VISUAL_PROGRESS = $ProgressPath
+$env:VOXEL_DIGGING_VISUAL_SCREENSHOT_DIR = $ScreenshotDir
+$env:VOXEL_DIGGING_VISUAL_RUN_TOKEN = $runToken
+$env:VOXEL_DIGGING_VISUAL_PREFERRED_MATERIAL = $PreferredMaterial
+$env:VOXEL_DIGGING_VISUAL_WATCHDOG_SECONDS = [string]$WatchdogSeconds
+$env:VOXEL_DIGGING_VISUAL_LIVE_PROCESS = if ($LiveProcess) { "1" } else { "0" }
 
 $args = @(
     "--fixed-fps", "60",
     "--resolution", "1280x720",
     "--path", $projectPath,
-    "--scene", "res://scenes/testing/LightShadowVisualPlaytest.tscn"
+    "--scene", "res://scenes/testing/DiggingVisualPlaytest.tscn"
 )
 
 function Stop-ProcessTree([System.Diagnostics.Process]$Process) {
@@ -72,7 +76,7 @@ while (-not $process.HasExited) {
     Start-Sleep -Milliseconds 250
     if (((Get-Date) - $started).TotalSeconds -gt $WatchdogSeconds) {
         Stop-ProcessTree $process
-        Write-Error "Light shadow visual playtest watchdog exceeded $WatchdogSeconds seconds"
+        Write-Error "Digging visual playtest watchdog exceeded $WatchdogSeconds seconds"
         if (Test-Path -LiteralPath $ProgressPath) {
             Get-Content -LiteralPath $ProgressPath
         }
@@ -85,32 +89,32 @@ while (-not $process.HasExited) {
 
 $exitCode = $process.ExitCode
 if (-not (Test-Path -LiteralPath $ReportPath)) {
-    Write-Error "Missing fresh light shadow report: $ReportPath"
+    Write-Error "Missing fresh digging visual report: $ReportPath"
     exit 1
 }
 
 $report = Get-Content -LiteralPath $ReportPath -Raw | ConvertFrom-Json
 if ($report.runToken -ne $runToken) {
-    Write-Error "Light shadow report token mismatch; refusing stale report. Expected $runToken, got $($report.runToken)"
+    Write-Error "Digging visual report token mismatch; refusing stale report. Expected $runToken, got $($report.runToken)"
     Get-Content -LiteralPath $ReportPath
     exit 1
 }
 if ($true -ne $report.nonHeadlessRequired) {
-    Write-Error "Light shadow report did not mark nonHeadlessRequired=true"
+    Write-Error "Digging visual report did not mark nonHeadlessRequired=true"
     Get-Content -LiteralPath $ReportPath
     exit 1
 }
 
 $requiredScreenshots = @(
-    "outdoor_noon_reference.png",
-    "underground_noon_dark.png",
-    "underground_torch_lit.png",
-    "underground_torch_closeup.png"
+    "digging_before_surface.png",
+    "digging_after_first_dig.png",
+    "digging_after_second_dig.png",
+    "digging_material_drop_inventory.png"
 )
 foreach ($fileName in $requiredScreenshots) {
     $path = Join-Path $ScreenshotDir $fileName
     if (-not (Test-Path -LiteralPath $path)) {
-        Write-Error "Missing light shadow proof screenshot: $path"
+        Write-Error "Missing digging visual proof screenshot: $path"
         Get-Content -LiteralPath $ReportPath
         exit 1
     }
@@ -119,9 +123,9 @@ foreach ($fileName in $requiredScreenshots) {
 $evidenceScript = Join-Path $projectPath "tools\assert-test-evidence-report.ps1"
 & $evidenceScript `
     -ReportPath $ReportPath `
-    -RunnerId "light_shadow_visual_playtest" `
+    -RunnerId "digging_visual_playtest" `
     -EvidenceLevel "acceptance_visual" `
-    -AcceptanceClaims @("shadow_authoritative_daylight_blocks_deep_underground") `
+    -AcceptanceClaims @("digging_reveals_generated_subsurface_material_and_drops_item") `
     -RequiredScreenshots $requiredScreenshots `
     -ScreenshotDir $ScreenshotDir `
     -RegistryPath (Join-Path $projectPath "tools\test-runner-registry.json") `
@@ -133,7 +137,8 @@ if ($LASTEXITCODE -ne 0) {
 
 $report = Get-Content -LiteralPath $ReportPath -Raw | ConvertFrom-Json
 Get-Content -LiteralPath $ReportPath
-if (($exitCode -ne 0) -or ([int]$report.failureCount -gt 0)) {
+if (($exitCode -ne 0) -or ([int]$report.failureCount -gt 0) -or ($true -ne $report.passed) -or ($report.status -ne "passed")) {
+    Write-Error "Digging visual playtest failed"
     exit 1
 }
 

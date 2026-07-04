@@ -32,8 +32,8 @@ func make_loot_slots(rng: RandomNumberGenerator, tier: String) -> Array:
         add_loot(slots, "fieldRation", 1)
     return slots
 
-func make_cave_final_loot_slots(rng: RandomNumberGenerator) -> Array:
-    var slots := make_loot_slots(rng, "cave")
+func make_underground_final_loot_slots(rng: RandomNumberGenerator) -> Array:
+    var slots := make_loot_slots(rng, "underground")
     add_loot(slots, "craftingBookStone", 1)
     if rng.randf() < 0.18:
         add_loot(slots, rare_crafting_book_for_roll(rng), 1)
@@ -89,7 +89,7 @@ func loot_table_for(tier: String) -> Array:
             { "item": "stonePickaxe", "min": 1, "max": 1, "weight": 1 },
             { "item": "copperPickaxe", "min": 1, "max": 1, "weight": 1 }
         ]
-    if tier == "cave":
+    if tier == "underground":
         return [
             { "item": "stones", "min": 5, "max": 12, "weight": 5 },
             { "item": "torch", "min": 2, "max": 5, "weight": 4 },

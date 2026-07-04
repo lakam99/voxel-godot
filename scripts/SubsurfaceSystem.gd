@@ -65,22 +65,37 @@ func excavate_from_hit(hit: Dictionary, _collider: Node = null) -> Dictionary:
 	var sample_pos := hit_sample_position(hit)
 	var brush := add_excavation_brush(sample_pos, float(main.CELL) * EXCAVATION_RADIUS_CELLS)
 	var affected := affected_surface_cells_for_brush(brush)
-	for cell in affected:
-		if main != null and main.has_method("rebuild_chunks_around_cell"):
-			main.call("rebuild_chunks_around_cell", cell)
+	if main != null and main.has_method("rebuild_chunks_for_cells"):
+		main.call("rebuild_chunks_for_cells", affected, 0, true)
+	else:
+		for cell in affected:
+			if main != null and main.has_method("rebuild_chunks_around_cell"):
+				main.call("rebuild_chunks_around_cell", cell)
 	return {
 		"brush": brush,
-		"affectedCells": affected,
-		"caveId": ""
+		"affectedCells": affected
 	}
 
-func add_excavation_brush(center: Vector3, radius: float, _cave_id := "") -> Dictionary:
+func add_excavation_brush(center: Vector3, radius: float) -> Dictionary:
 	excavation_sequence += 1
 	var brush := {
 		"id": "dig:%d" % excavation_sequence,
 		"center": center,
 		"radius": radius
 	}
+	var surface_y := center.y
+	var sample_source: Object = sampler()
+	if sample_source != null and sample_source.has_method("surface_y_at"):
+		surface_y = float(sample_source.call("surface_y_at", center))
+	var surface_depth := surface_y - center.y
+	if surface_depth <= radius * 1.45:
+		var cell_size := float(main.CELL) if main != null else radius
+		brush["mode"] = "surface_deform"
+		brush["surfaceY"] = surface_y
+		brush["surfaceTargetY"] = minf(surface_y - cell_size * 0.95, center.y - cell_size * 0.45)
+		brush["deformRadius"] = radius * 2.35
+	else:
+		brush["mode"] = "volume"
 	excavation_brushes.append(brush)
 	if sampler().has_method("register_excavation_brush"):
 		sampler().call("register_excavation_brush", brush)
@@ -90,13 +105,22 @@ func snapshot() -> Dictionary:
 	var brushes := []
 	for brush in excavation_brushes:
 		var center: Vector3 = brush.get("center", Vector3.ZERO)
-		brushes.append({
+		var entry := {
 			"id": String(brush.get("id", "")),
 			"x": center.x,
 			"y": center.y,
 			"z": center.z,
 			"radius": float(brush.get("radius", float(main.CELL) * EXCAVATION_RADIUS_CELLS))
-		})
+		}
+		if brush.has("mode"):
+			entry["mode"] = String(brush.get("mode", ""))
+		if brush.has("surfaceY"):
+			entry["surfaceY"] = float(brush.get("surfaceY", center.y))
+		if brush.has("surfaceTargetY"):
+			entry["surfaceTargetY"] = float(brush.get("surfaceTargetY", center.y))
+		if brush.has("deformRadius"):
+			entry["deformRadius"] = float(brush.get("deformRadius", brush.get("radius", 0.0)))
+		brushes.append(entry)
 	return {
 		"version": 3,
 		"excavationSequence": excavation_sequence,
@@ -123,14 +147,26 @@ func restore(snapshot_value) -> void:
 			"center": Vector3(float(entry.get("x", 0.0)), float(entry.get("y", 0.0)), float(entry.get("z", 0.0))),
 			"radius": float(entry.get("radius", float(main.CELL) * EXCAVATION_RADIUS_CELLS))
 		}
+		if entry.has("mode"):
+			brush["mode"] = String(entry.get("mode", ""))
+		if entry.has("surfaceY"):
+			brush["surfaceY"] = float(entry.get("surfaceY", brush["center"].y))
+		if entry.has("surfaceTargetY"):
+			brush["surfaceTargetY"] = float(entry.get("surfaceTargetY", brush["center"].y))
+		if entry.has("deformRadius"):
+			brush["deformRadius"] = float(entry.get("deformRadius", brush["radius"]))
 		excavation_brushes.append(brush)
 		if sampler().has_method("register_excavation_brush"):
 			sampler().call("register_excavation_brush", brush)
 		for cell in affected_surface_cells_for_brush(brush):
 			affected_lookup[cell] = true
-	for cell in affected_lookup.keys():
-		if main != null and main.has_method("rebuild_chunks_around_cell"):
-			main.call("rebuild_chunks_around_cell", cell)
+	var affected_cells := affected_lookup.keys()
+	if main != null and main.has_method("rebuild_chunks_for_cells"):
+		main.call("rebuild_chunks_for_cells", affected_cells, 0, true)
+	else:
+		for cell in affected_cells:
+			if main != null and main.has_method("rebuild_chunks_around_cell"):
+				main.call("rebuild_chunks_around_cell", cell)
 
 func ground_y_near_position(position: Vector3) -> float:
 	var s := float(main.CELL)
@@ -169,7 +205,7 @@ func world_to_cell3(position: Vector3) -> Vector3i:
 
 func affected_surface_cells_for_brush(brush: Dictionary) -> Array[Vector2i]:
 	var center: Vector3 = brush.get("center", Vector3.ZERO)
-	var radius := float(brush.get("radius", float(main.CELL)))
+	var radius := maxf(float(brush.get("radius", float(main.CELL))), float(brush.get("deformRadius", 0.0)))
 	var cell_size := float(main.CELL)
 	var center_cell := Vector2i(roundi(center.x / cell_size), roundi(center.z / cell_size))
 	var cell_radius := ceili(radius / cell_size) + 2

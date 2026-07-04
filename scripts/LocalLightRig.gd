@@ -13,7 +13,7 @@ const RIFT_COLOR := Color(0.78, 0.44, 1.0)
 const BEACON_COLOR := Color(0.58, 0.86, 1.0)
 const TUTORIAL_COLOR := Color(1.0, 0.90, 0.74)
 const TORCH_RADIUS_SCALE := 0.55
-const WORLD_AND_CAVE_VISUAL_LIGHT_MASK := 1 | (1 << 1)
+const WORLD_VISUAL_LIGHT_MASK := 1
 
 static func add_rig(parent: Node3D, profile_id: String, options := {}) -> Dictionary:
     var context := String(options.get("context", "placed"))
@@ -286,7 +286,7 @@ static func create_light(parent: Node3D, prefix: String, profile_id: String, con
         role,
         true
     )
-    light.light_cull_mask = WORLD_AND_CAVE_VISUAL_LIGHT_MASK
+    light.light_cull_mask = WORLD_VISUAL_LIGHT_MASK
     if bool(profile.get("day_suppressed", false)) and light.has_method("set_day_suppressed"):
         light.set_day_suppressed(true)
     light.set_meta("local_light_rig", true)

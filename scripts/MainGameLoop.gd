@@ -59,7 +59,6 @@ func update_fire_light_day_factor(day: float) -> void:
 func update_local_light_rig_lod(delta: float) -> void:
     local_light_lod_elapsed += delta
     if local_light_lod_elapsed < 0.25:
-        update_terrain_local_light_uniforms()
         return
     local_light_lod_elapsed = 0.0
     if player == null or get_tree() == null:
@@ -237,7 +236,7 @@ func update_survival(delta: float) -> void:
         "biome": biome,
         "dayFactor": day_factor,
         "weather": weather_state,
-        "lightSafety": light_safety_at(player.global_position),
+        "lightSafety": light_safety_at_player(delta),
         "shelterComfort": float(shelter_state.get("comfort", 0.0)),
         "sanctuaryEstablished": sanctuary_established
     })
@@ -394,12 +393,23 @@ func shelter_state_at_player(delta: float) -> Dictionary:
     if player == null:
         return { "comfort": 0.0, "label": "Exposed" }
     shelter_sample_elapsed += delta
-    if shelter_sample_elapsed >= 0.35:
+    if shelter_sample_elapsed >= 0.75:
         shelter_sample_elapsed = 0.0
         var state := shelter_state_at(player.global_position)
         cached_shelter_comfort = float(state.get("comfort", 0.0))
         cached_shelter_label = String(state.get("label", "Exposed"))
     return { "comfort": cached_shelter_comfort, "label": cached_shelter_label }
+
+func light_safety_at_player(delta: float) -> float:
+    if player == null:
+        return 0.0
+    light_safety_sample_elapsed += delta
+    var moved := cached_light_safety_position == Vector3.INF or player.global_position.distance_to(cached_light_safety_position) >= CELL * 1.5
+    if moved or light_safety_sample_elapsed >= 0.30:
+        light_safety_sample_elapsed = 0.0
+        cached_light_safety_position = player.global_position
+        cached_light_safety = light_safety_at(player.global_position)
+    return cached_light_safety
 
 func shelter_state_at(position: Vector3) -> Dictionary:
     var roof_score := 0.0

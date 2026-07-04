@@ -25,6 +25,7 @@ var sky_resource: Sky
 var sky_material: ProceduralSkyMaterial
 var visual_capture_active := false
 var visual_debug_enabled := false
+var force_underground_volume_debug := false
 
 var terrain_material: Material
 var materials := {}
@@ -36,6 +37,8 @@ var chunk_asset_cache_misses := 0
 var chunk_asset_cache_invalidations := 0
 var pending_chunk_loads := {}
 var pending_chunk_prop_spawns := {}
+var pending_chunk_terrain_refreshes := {}
+var pending_chunk_collision_refreshes := {}
 var volume_edit_markers := {}
 var town_region_cache := {}
 var town_slope_apron_cache := {}
@@ -114,6 +117,9 @@ var last_survival_health := 100.0
 var shelter_sample_elapsed := 0.0
 var cached_shelter_comfort := 0.0
 var cached_shelter_label := "Exposed"
+var light_safety_sample_elapsed := 999.0
+var cached_light_safety := 0.0
+var cached_light_safety_position := Vector3.INF
 var beacon_charge := 0.0
 var beacon_raid_stage := 0
 var sanctuary_established := false
@@ -212,7 +218,7 @@ var block_meshes := {}
 
 func _ready() -> void:
     playtest_progress("main_ready_start")
-    var cave_visual_fast_boot := OS.get_environment("VOXEL_CAVE_VISUAL_FAST_BOOT").strip_edges() == "1"
+    var underground_visual_fast_boot := OS.get_environment("VOXEL_UNDERGROUND_VISUAL_FAST_BOOT").strip_edges() == "1"
     setup_save_system()
     var active_seed := ""
     if autosave_enabled and save_system and save_system.has_method("active_seed"):
@@ -252,25 +258,25 @@ func _ready() -> void:
     var loaded := try_load_world()
     var started_intro_tutorial := false
     playtest_progress("main_load_done")
-    if not loaded and tutorial_system and not cave_visual_fast_boot:
+    if not loaded and tutorial_system and not underground_visual_fast_boot:
         if autosave_enabled:
             apply_world_seed(random_world_seed(seed_text), true)
         started_intro_tutorial = tutorial_system.start_new_world()
         playtest_progress("main_tutorial_start_done")
-    if not cave_visual_fast_boot:
+    if not underground_visual_fast_boot:
         update_chunks(true)
         playtest_progress("main_initial_chunks_done")
-    var interactive_cave_message := "" if cave_visual_fast_boot else apply_interactive_cave_launch_if_requested()
-    if not cave_visual_fast_boot:
+    var interactive_underground_message := "" if underground_visual_fast_boot else apply_interactive_underground_launch_if_requested()
+    if not underground_visual_fast_boot:
         refresh_intro_knock_audio()
     var ready_message := "Loaded saved world" if loaded else "Godot slice ready"
     if not loaded and tutorial_system and tutorial_system.last_message != "":
         ready_message = tutorial_system.last_message
-    if interactive_cave_message != "":
-        ready_message = interactive_cave_message
-    if not cave_visual_fast_boot:
+    if interactive_underground_message != "":
+        ready_message = interactive_underground_message
+    if not underground_visual_fast_boot:
         update_hud(ready_message)
-    reset_autosave_dirty_tracking(not loaded and not cave_visual_fast_boot, "new_world")
+    reset_autosave_dirty_tracking(not loaded and not underground_visual_fast_boot, "new_world")
 
 func playtest_progress(label: String) -> void:
     var path: String = OS.get_environment("VOXEL_PLAYTEST_PROGRESS")
@@ -423,31 +429,34 @@ func random_world_seed(exclude_seed := "") -> String:
 func test_seed_text() -> String:
     return OS.get_environment("VOXEL_TEST_SEED").strip_edges()
 
-func apply_interactive_cave_launch_if_requested() -> String:
-    if OS.get_environment("VOXEL_CAVE_INTERACTIVE").strip_edges() != "1":
+func apply_interactive_underground_launch_if_requested() -> String:
+    if OS.get_environment("VOXEL_UNDERGROUND_INTERACTIVE").strip_edges() != "1":
         return ""
     if player == null or world_generation_system == null:
-        return "Interactive cave launch failed: player or world generation missing"
-    neutralize_interactive_cave_tutorial()
-    var radius_text := OS.get_environment("VOXEL_CAVE_INTERACTIVE_SEARCH_RADIUS").strip_edges()
+        return "Interactive underground launch failed: player or world generation missing"
+    neutralize_interactive_underground_tutorial()
+    var radius_text := OS.get_environment("VOXEL_UNDERGROUND_INTERACTIVE_SEARCH_RADIUS").strip_edges()
     var search_radius := clampi(int(radius_text) if radius_text != "" else 12, 1, 32)
-    if not world_generation_system.has_method("find_cave_biome_sample"):
-        return "Interactive cave launch failed: cave biome sampler missing"
-    var cave_record: Dictionary = world_generation_system.call("find_cave_biome_sample", search_radius)
-    var cave_feature: Dictionary = cave_record.get("feature", {}) if cave_record.has("feature") else {}
-    if cave_feature.is_empty():
-        return "Interactive cave launch failed: no cave biome found within %d regions" % search_radius
-    var spawn_cell := interactive_cave_spawn_cell(cave_feature)
-    var spawn_position := interactive_cave_spawn_position(cave_feature, spawn_cell)
+    var min_depth_text := OS.get_environment("VOXEL_UNDERGROUND_INTERACTIVE_MIN_DEPTH").strip_edges()
+    var max_depth_text := OS.get_environment("VOXEL_UNDERGROUND_INTERACTIVE_MAX_DEPTH").strip_edges()
+    var min_depth := clampi(int(min_depth_text) if min_depth_text != "" else 4, 1, 32)
+    var max_depth := clampi(int(max_depth_text) if max_depth_text != "" else 30, min_depth, 32)
+    if not world_generation_system.has_method("find_underground_air_sample"):
+        return "Interactive underground launch failed: underground sampler missing"
+    var underground_record: Dictionary = world_generation_system.call("find_underground_air_sample", search_radius, min_depth, max_depth)
+    if underground_record.is_empty():
+        return "Interactive underground launch failed: no underground_air found within %d search radius" % search_radius
+    var sample_cell: Vector3i = underground_record.get("cell", Vector3i.ZERO)
+    var sample_position: Vector3 = underground_record.get("position", Vector3.ZERO)
+    var spawn_position := sample_position + Vector3(0.0, CELL * 0.65, 0.0)
     player.global_position = spawn_position
     player.velocity = Vector3.ZERO
-    aim_player_at_interactive_cave(cave_feature)
-    configure_interactive_cave_inventory()
-    if OS.get_environment("VOXEL_CAVE_INTERACTIVE_GOD_MODE").strip_edges() == "1" and survival_system != null and survival_system.has_method("set_test_god_mode"):
-        survival_system.call("set_test_god_mode", true, "interactive_cave_playtest")
-    rebuild_chunks_around_cell(spawn_cell)
-    rebuild_chunks_around_cell(cave_feature.get("entranceCell", spawn_cell))
-    rebuild_chunks_around_cell(interactive_cave_chamber_cell(cave_feature))
+    force_underground_volume_debug = true
+    aim_player_at_interactive_underground(sample_position)
+    configure_interactive_underground_inventory()
+    if OS.get_environment("VOXEL_UNDERGROUND_INTERACTIVE_GOD_MODE").strip_edges() == "1" and survival_system != null and survival_system.has_method("set_test_god_mode"):
+        survival_system.call("set_test_god_mode", true, "interactive_underground_playtest")
+    rebuild_chunks_around_cell(Vector2i(sample_cell.x, sample_cell.z))
     last_center_chunk = Vector2i(999999, 999999)
     update_chunks(true)
     if hud != null:
@@ -459,10 +468,10 @@ func apply_interactive_cave_launch_if_requested() -> String:
         hud.set_playtest_open(false)
         hud.set_game_menu_open(false)
     Input.set_mouse_mode(Input.MOUSE_MODE_CAPTURED)
-    write_interactive_cave_launch_info(cave_feature, spawn_position)
-    return "Interactive cave biome ready: %s" % String(cave_feature.get("id", "cave"))
+    write_interactive_underground_launch_info(underground_record, spawn_position)
+    return "Interactive underground volume ready: %s" % String(underground_record.get("id", "underground_air"))
 
-func neutralize_interactive_cave_tutorial() -> void:
+func neutralize_interactive_underground_tutorial() -> void:
     if tutorial_system == null:
         return
     tutorial_system.set("intro_repair_active", false)
@@ -481,46 +490,10 @@ func neutralize_interactive_cave_tutorial() -> void:
     if has_method("update_sky"):
         call("update_sky", 0.0)
 
-func interactive_cave_spawn_cell(plan: Dictionary) -> Vector2i:
-    var entrance: Vector2i = plan.get("entranceCell", Vector2i.ZERO)
-    var inward: Vector2i = plan.get("inward", Vector2i(0, 1))
-    var approach_cells = plan.get("approachCells", [])
-    if not (approach_cells is Array) or (approach_cells as Array).is_empty():
-        return entrance - inward * 5
-    var best_cell := entrance - inward * 5
-    var best_depth := INF
-    var best_lateral := INF
-    var right: Vector2i = plan.get("right", Vector2i(-inward.y, inward.x))
-    for cell_value in approach_cells:
-        if not (cell_value is Vector2i):
-            continue
-        var cell: Vector2i = cell_value
-        var delta := cell - entrance
-        var depth := float(delta.x * inward.x + delta.y * inward.y)
-        var lateral := absf(float(delta.x * right.x + delta.y * right.y))
-        if depth < best_depth or (is_equal_approx(depth, best_depth) and lateral < best_lateral):
-            best_cell = cell
-            best_depth = depth
-            best_lateral = lateral
-    return best_cell
-
-func interactive_cave_spawn_position(plan: Dictionary, spawn_cell: Vector2i) -> Vector3:
-    var x := float(spawn_cell.x) * CELL
-    var z := float(spawn_cell.y) * CELL
-    var y := surface_y_at_position(Vector3(x, 0.0, z)) + 1.15
-    return Vector3(x, y, z)
-
-func interactive_cave_chamber_cell(feature: Dictionary) -> Vector2i:
-    var entrance: Vector2i = feature.get("entranceCell", Vector2i.ZERO)
-    var inward: Vector2i = feature.get("inward", Vector2i(0, 1))
-    var length_cells := roundi(float(feature.get("length", CELL * 24.0)) / CELL)
-    return entrance + inward * length_cells
-
-func aim_player_at_interactive_cave(plan: Dictionary) -> void:
+func aim_player_at_interactive_underground(sample_position: Vector3) -> void:
     if player == null:
         return
-    var entrance: Vector2i = plan.get("entranceCell", Vector2i.ZERO)
-    var target := Vector3(float(entrance.x) * CELL, player.global_position.y, float(entrance.y) * CELL)
+    var target := Vector3(sample_position.x + CELL, player.global_position.y, sample_position.z + CELL)
     if target.distance_to(player.global_position) > 0.05:
         player.look_at(target, Vector3.UP)
     player.set("pitch", 0.0)
@@ -529,7 +502,7 @@ func aim_player_at_interactive_cave(plan: Dictionary) -> void:
         camera.rotation.x = 0.0
         camera.make_current()
 
-func configure_interactive_cave_inventory() -> void:
+func configure_interactive_underground_inventory() -> void:
     if inventory_system == null:
         return
     inventory_system.clear()
@@ -539,8 +512,8 @@ func configure_interactive_cave_inventory() -> void:
     inventory_system.add_item("stoneSword", 1)
     inventory_system.select(0)
 
-func write_interactive_cave_launch_info(plan: Dictionary, spawn_position: Vector3) -> void:
-    var path := OS.get_environment("VOXEL_CAVE_INTERACTIVE_LAUNCH_INFO").strip_edges()
+func write_interactive_underground_launch_info(record: Dictionary, spawn_position: Vector3) -> void:
+    var path := OS.get_environment("VOXEL_UNDERGROUND_INTERACTIVE_LAUNCH_INFO").strip_edges()
     if path == "":
         return
     var dir := path.get_base_dir()
@@ -551,19 +524,22 @@ func write_interactive_cave_launch_info(plan: Dictionary, spawn_position: Vector
         return
     var report := {
         "seed": seed_text,
-        "caveId": String(plan.get("id", "")),
-        "kind": "cave-biome",
-        "region": vec2i_dictionary(plan.get("region", Vector2i.ZERO)),
-        "entranceCell": vec2i_dictionary(plan.get("entranceCell", Vector2i.ZERO)),
-        "finalChamberCell": vec2i_dictionary(interactive_cave_chamber_cell(plan)),
+        "sampleId": String(record.get("id", "")),
+        "kind": "underground-air",
+        "cell": vec3i_dictionary(record.get("cell", Vector3i.ZERO)),
+        "surfaceCell": vec2i_dictionary(record.get("surfaceCell", Vector2i.ZERO)),
+        "depthCells": int(record.get("depthCells", 0)),
         "spawnPosition": vec3_dictionary(spawn_position),
-        "godMode": OS.get_environment("VOXEL_CAVE_INTERACTIVE_GOD_MODE").strip_edges() == "1"
+        "godMode": OS.get_environment("VOXEL_UNDERGROUND_INTERACTIVE_GOD_MODE").strip_edges() == "1"
     }
     file.store_string(JSON.stringify(report, "  "))
     file.close()
 
 func vec2i_dictionary(value: Vector2i) -> Dictionary:
     return { "x": value.x, "z": value.y }
+
+func vec3i_dictionary(value: Vector3i) -> Dictionary:
+    return { "x": value.x, "y": value.y, "z": value.z }
 
 func vec3_dictionary(value: Vector3) -> Dictionary:
     return {

@@ -11,13 +11,13 @@ $ErrorActionPreference = "Stop"
 
 $projectPath = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 if ($ReportPath -eq "") {
-    $ReportPath = Join-Path $projectPath "artifacts\caves\cave-visual-playtest.json"
+    $ReportPath = Join-Path $projectPath "artifacts\underground\underground-visual-playtest.json"
 }
 if ($ProgressPath -eq "") {
-    $ProgressPath = Join-Path $projectPath "artifacts\caves\cave-visual-playtest-progress.txt"
+    $ProgressPath = Join-Path $projectPath "artifacts\underground\underground-visual-playtest-progress.txt"
 }
 if ($ScreenshotDir -eq "") {
-    $ScreenshotDir = Join-Path $projectPath "artifacts\caves\screenshots\cave-visual"
+    $ScreenshotDir = Join-Path $projectPath "artifacts\underground\screenshots\underground-visual"
 }
 
 $ReportPath = [System.IO.Path]::GetFullPath($ReportPath)
@@ -33,17 +33,17 @@ Remove-Item -Path (Join-Path $ScreenshotDir "*.png") -ErrorAction SilentlyContin
 $runToken = [guid]::NewGuid().ToString("N")
 $env:VOXEL_PLAYTEST = "1"
 $env:VOXEL_TEST_SEED = $Seed
-$env:VOXEL_CAVE_VISUAL_REPORT = $ReportPath
-$env:VOXEL_CAVE_VISUAL_PROGRESS = $ProgressPath
-$env:VOXEL_CAVE_VISUAL_SCREENSHOT_DIR = $ScreenshotDir
-$env:VOXEL_CAVE_VISUAL_RUN_TOKEN = $runToken
-$env:VOXEL_CAVE_VISUAL_WATCHDOG_SECONDS = [string]$WatchdogSeconds
+$env:VOXEL_UNDERGROUND_VISUAL_REPORT = $ReportPath
+$env:VOXEL_UNDERGROUND_VISUAL_PROGRESS = $ProgressPath
+$env:VOXEL_UNDERGROUND_VISUAL_SCREENSHOT_DIR = $ScreenshotDir
+$env:VOXEL_UNDERGROUND_VISUAL_RUN_TOKEN = $runToken
+$env:VOXEL_UNDERGROUND_VISUAL_WATCHDOG_SECONDS = [string]$WatchdogSeconds
 
 $args = @(
     "--fixed-fps", "60",
     "--resolution", "1280x720",
     "--path", $projectPath,
-    "--scene", "res://scenes/testing/CaveVisualPlaytest.tscn"
+    "--scene", "res://scenes/testing/UndergroundVisualPlaytest.tscn"
 )
 
 function Stop-ProcessTree([System.Diagnostics.Process]$Process) {
@@ -72,7 +72,7 @@ while (-not $process.HasExited) {
     Start-Sleep -Milliseconds 250
     if (((Get-Date) - $started).TotalSeconds -gt $WatchdogSeconds) {
         Stop-ProcessTree $process
-        Write-Error "Cave visual playtest watchdog exceeded $WatchdogSeconds seconds"
+        Write-Error "Underground visual playtest watchdog exceeded $WatchdogSeconds seconds"
         if (Test-Path -LiteralPath $ProgressPath) {
             Get-Content -LiteralPath $ProgressPath
         }
@@ -85,35 +85,34 @@ while (-not $process.HasExited) {
 
 $exitCode = $process.ExitCode
 if (-not (Test-Path -LiteralPath $ReportPath)) {
-    Write-Error "Missing fresh cave visual report: $ReportPath"
+    Write-Error "Missing fresh underground visual report: $ReportPath"
     exit 1
 }
 
 $report = Get-Content -LiteralPath $ReportPath -Raw | ConvertFrom-Json
 if ($report.runToken -ne $runToken) {
-    Write-Error "Cave visual report token mismatch; refusing stale report. Expected $runToken, got $($report.runToken)"
+    Write-Error "Underground visual report token mismatch; refusing stale report. Expected $runToken, got $($report.runToken)"
     Get-Content -LiteralPath $ReportPath
     exit 1
 }
 if ($true -ne $report.nonHeadlessRequired) {
-    Write-Error "Cave visual report did not mark nonHeadlessRequired=true"
+    Write-Error "Underground visual report did not mark nonHeadlessRequired=true"
     Get-Content -LiteralPath $ReportPath
     exit 1
 }
 
 $requiredScreenshots = @(
-    "cave_dark_default.png",
-    "cave_outside_profile.png",
-    "cave_entrance_approach.png",
-    "cave_first_tunnel.png",
-    "cave_mid_tunnel.png",
-    "cave_branch_tunnel.png",
-    "cave_inner_chamber.png"
+    "underground_air_reference.png",
+    "underground_wall_boundary.png",
+    "underground_floor_boundary.png",
+    "underground_ceiling_boundary.png",
+    "underground_material_probe.png",
+    "underground_collision_probe.png"
 )
 foreach ($fileName in $requiredScreenshots) {
     $path = Join-Path $ScreenshotDir $fileName
     if (-not (Test-Path -LiteralPath $path)) {
-        Write-Error "Missing cave visual proof screenshot: $path"
+        Write-Error "Missing underground visual proof screenshot: $path"
         Get-Content -LiteralPath $ReportPath
         exit 1
     }
@@ -122,9 +121,9 @@ foreach ($fileName in $requiredScreenshots) {
 $evidenceScript = Join-Path $projectPath "tools\assert-test-evidence-report.ps1"
 & $evidenceScript `
     -ReportPath $ReportPath `
-    -RunnerId "cave_visual_playtest" `
+    -RunnerId "underground_visual_playtest" `
     -EvidenceLevel "acceptance_visual" `
-    -AcceptanceClaims @("procedural_cave_biome_volume_visual") `
+    -AcceptanceClaims @("procedural_underground_volume_visual") `
     -RequiredScreenshots $requiredScreenshots `
     -ScreenshotDir $ScreenshotDir `
     -RegistryPath (Join-Path $projectPath "tools\test-runner-registry.json") `

@@ -58,7 +58,7 @@ func save(seed_text: String, snapshot: Dictionary) -> bool:
     if seed_text == "" or snapshot.is_empty():
         return false
     poll_async_save(true)
-    var payload := _prepared_snapshot(seed_text, snapshot)
+    var payload := _prepared_snapshot(seed_text, snapshot, true)
     var stringify_start := Time.get_ticks_usec()
     var text := JSON.stringify(payload)
     var stringify_ms := float(Time.get_ticks_usec() - stringify_start) / 1000.0
@@ -75,7 +75,7 @@ func save_async(seed_text: String, snapshot: Dictionary) -> bool:
     poll_async_save(false)
     if has_async_save_pending():
         return false
-    var payload := _prepared_snapshot(seed_text, snapshot)
+    var payload := _prepared_snapshot(seed_text, snapshot, false)
     var job := {
         "seed": seed_text,
         "slotPath": _slot_path(seed_text),
@@ -164,8 +164,8 @@ func _validated_save(save) -> Dictionary:
         return {}
     return save_data
 
-func _prepared_snapshot(seed_text: String, snapshot: Dictionary) -> Dictionary:
-    var payload := snapshot.duplicate(true)
+func _prepared_snapshot(seed_text: String, snapshot: Dictionary, deep := true) -> Dictionary:
+    var payload := snapshot.duplicate(deep)
     payload["seed"] = seed_text
     payload["version"] = SAVE_VERSION
     payload["savedAtUnix"] = Time.get_unix_time_from_system()

@@ -78,7 +78,7 @@ const MAP_SAMPLE_GRID := 24
 const CHUNK_ASSET_CACHE_LIMIT := 96
 const PLAYTEST_CASE_SPECS := [
     { "id": "town", "label": "Town", "detail": "doors, paths, interiors", "validates": "town flattening, double doors, path collision, traders" },
-    { "id": "mine", "label": "Mine", "detail": "ore, rocks, loot points", "validates": "ore readability, mining requirements, loot, cave props" },
+    { "id": "mine", "label": "Mine", "detail": "ore, rocks, loot points", "validates": "ore readability, mining requirements, loot, underground props" },
     { "id": "camp", "label": "Camp", "detail": "ambush, barricades, loot", "validates": "hostile camps, traps, ranged combat, camp rewards" },
     { "id": "forest", "label": "Forest", "detail": "trees, forage, wildlife", "validates": "tree fall, forage drops, wildlife drops, biome props" },
     { "id": "mountain", "label": "Mountain", "detail": "steep terrain, stone, snow", "validates": "slope movement, mountain props, snow forage, ore props" },
@@ -111,7 +111,7 @@ const BIOME_COLORS := {
     "alpine": Color(0.50, 0.55, 0.53),
     "tundra": Color(0.58, 0.66, 0.58),
     "snow": Color(0.86, 0.91, 0.90),
-    "cave": Color(0.20, 0.22, 0.21)
+    "underground_air": Color(0.20, 0.22, 0.21)
 }
 
 
@@ -358,14 +358,15 @@ func is_utility_block(block_type: String) -> bool: return false
 func request_player_door_use(door: Node, actor: Node = null, actor_kind := "player", metadata := {}): return null
 func request_door_state(door: Node, desired_open: bool, actor: Node = null, actor_kind := "system", metadata := {}): return null
 func update_chunks(force: bool = false) -> void: pass
-func create_chunk(cx: int, cz: int) -> void: pass
+func create_chunk(cx: int, cz: int, defer_props := false) -> void: pass
 func chunk_assets(cx: int, cz: int) -> Dictionary: return {}
 func touch_chunk_asset_cache_key(key: Vector2i) -> void: pass
 func prune_chunk_asset_cache() -> void: pass
 func invalidate_chunk_asset_cache(key: Vector2i) -> void: pass
 func clear_chunk_asset_cache() -> void: pass
 func chunk_asset_cache_stats() -> Dictionary: return {}
-func rebuild_chunk(cx: int, cz: int) -> void: pass
+func rebuild_chunk(cx: int, cz: int, defer_props := false) -> void: pass
+func rebuild_chunks_for_cells(cells: Array, neighbor_radius := 0, defer_props := false) -> void: pass
 func rebuild_chunks_around_cell(cell: Vector2i) -> void: pass
 func build_chunk_mesh(cx: int, cz: int) -> Mesh: return null
 func terrain_vertex_local_cached(height_cache: Dictionary, cell_x: int, cell_z: int, origin_cell_x: int, origin_cell_z: int) -> Vector3: return Vector3.ZERO
@@ -380,6 +381,8 @@ func add_skirt_quad( st: SurfaceTool, ax: int, az: int, bx: int, bz: int, origin
 func add_skirt_vertex(st: SurfaceTool, point: Vector3, cell_x: int, cell_z: int, normal: Vector3) -> void: pass
 func skirt_outward_normal(ax: int, az: int, bx: int, bz: int, origin_x: int, origin_z: int) -> Vector3: return Vector3.UP
 func spawn_chunk_props(chunk: Node3D, cx: int, cz: int) -> void: pass
+func begin_chunk_prop_spawn_state(chunk: Node3D, cx: int, cz: int) -> Dictionary: return {}
+func process_chunk_prop_spawn_state(state: Dictionary, prop_attempt_budget: int, detail_attempt_budget: int, time_budget_ms := -1.0, budget_start_usec := 0) -> bool: return true
 func spawn_chunk_detail_batches(chunk: Node3D, cx: int, cz: int) -> void: pass
 func add_detail_for_biome(batches: Dictionary, local_position: Vector3, biome: String, height: float, rng: RandomNumberGenerator) -> void: pass
 func append_flower_detail(batches: Dictionary, local_position: Vector3, rng: RandomNumberGenerator) -> void: pass

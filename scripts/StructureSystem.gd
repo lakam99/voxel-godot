@@ -18,7 +18,6 @@ var generated_mine_count := 0
 var generated_ruin_count := 0
 var generated_shrine_count := 0
 var generated_camp_count := 0
-var generated_cave_count := 0
 var generated_path_count := 0
 var generated_door_count := 0
 var generated_utility_count := 0
@@ -41,7 +40,6 @@ func reset() -> void:
     generated_ruin_count = 0
     generated_shrine_count = 0
     generated_camp_count = 0
-    generated_cave_count = 0
     generated_path_count = 0
     generated_door_count = 0
     generated_utility_count = 0
@@ -84,6 +82,7 @@ func update_towns(center_cell: Vector2i, defer_builds := false) -> void:
                 continue
             var town: Dictionary = main.town_region(rx, rz)
             if town.is_empty():
+                generated_towns[key] = false
                 continue
             var distance := Vector2(float(center_cell.x - int(town["centerX"])), float(center_cell.y - int(town["centerZ"]))).length()
             var active_render_distance: int = int(main.get("render_distance"))
@@ -94,9 +93,7 @@ func update_towns(center_cell: Vector2i, defer_builds := false) -> void:
                 continue
             generated_towns[key] = true
             if defer_builds:
-                enqueue_deferred_build(func() -> void:
-                    build_town(town)
-                )
+                enqueue_deferred_town_build(town)
             else:
                 build_town(town)
 
@@ -109,6 +106,7 @@ func update_standalone_structures(center_cell: Vector2i, defer_builds := false) 
                 continue
             var roll: float = main.hash01("structure:%d,%d" % [rx, rz])
             if roll > main.STRUCTURE_SPAWN_CHANCE:
+                generated_structures[key] = false
                 continue
             var rng := RandomNumberGenerator.new()
             rng.seed = main.hash_string("%s:structure:%d,%d" % [main.seed_text, rx, rz])
@@ -169,6 +167,112 @@ func enqueue_deferred_build(build_callable: Callable) -> void:
     build_callable.call()
     defer_structure_ops = previous
 
+func enqueue_deferred_town_build(town: Dictionary) -> void:
+    var rng := RandomNumberGenerator.new()
+    rng.seed = main.hash_string("%s:town-build:%d,%d" % [main.seed_text, int(town["regionX"]), int(town["regionZ"])])
+    var town_key := town_key_for(town)
+    deferred_town_home_records[town_key] = []
+    generated_town_count += 1
+    enqueue_structure_op({
+        "type": "town_build_phase",
+        "state": {
+            "town": town.duplicate(true),
+            "townKey": town_key,
+            "phase": "paths",
+            "rng": rng,
+            "sites": town_home_sites(town, rng),
+            "desiredHomeCount": town_home_count(town),
+            "homeSiteIndex": 0,
+            "builtHomeCount": 0
+        }
+    })
+
+func process_deferred_town_build_phase(state_value) -> void:
+    if not (state_value is Dictionary):
+        return
+    var state: Dictionary = state_value
+    var town: Dictionary = state.get("town", {}) if state.get("town", {}) is Dictionary else {}
+    if town.is_empty():
+        return
+    var rng := state.get("rng") as RandomNumberGenerator
+    if rng == null:
+        return
+    var center_x := int(town["centerX"])
+    var center_z := int(town["centerZ"])
+    var level := float(town["level"])
+    var town_key := String(state.get("townKey", town_key_for(town)))
+    var phase := String(state.get("phase", "paths"))
+    var complete := false
+    var previous := defer_structure_ops
+    defer_structure_ops = true
+    if phase == "paths":
+        build_town_paths(center_x, center_z, int(town["radius"]), level)
+        state["phase"] = "perimeter"
+    elif phase == "perimeter":
+        build_town_perimeter(center_x, center_z, int(town["radius"]), level, town_key)
+        state["phase"] = "homes"
+    elif phase == "homes":
+        process_deferred_town_home_phase(state, town, rng, town_key, level)
+    elif phase == "market":
+        build_town_market(center_x, center_z, level, rng)
+        state["phase"] = "utilities"
+    elif phase == "utilities":
+        place_utility(center_x - 2, center_z + 1, level, "chest", {
+            "storageSlots": loot.make_loot_slots(rng, "town"),
+            "generatedTier": "town",
+            "cacheKey": "%s:town-cache:%d,%d" % [main.seed_text, center_x, center_z]
+        })
+        place_utility(center_x + 2, center_z + 1, level, "furnace")
+        place_utility(center_x, center_z - 3, level, "workbench")
+        state["phase"] = "publish"
+    elif phase == "publish":
+        enqueue_structure_op({
+            "type": "publish_town_home_records",
+            "townKey": town_key
+        })
+        complete = true
+    else:
+        complete = true
+    defer_structure_ops = previous
+    if not complete:
+        enqueue_structure_op({
+            "type": "town_build_phase",
+            "state": state
+        })
+
+func process_deferred_town_home_phase(state: Dictionary, town: Dictionary, rng: RandomNumberGenerator, town_key: String, level: float) -> void:
+    var sites: Array = state.get("sites", []) if state.get("sites", []) is Array else []
+    var desired_home_count := int(state.get("desiredHomeCount", town_home_count(town)))
+    var built_home_count := int(state.get("builtHomeCount", 0))
+    var site_index := int(state.get("homeSiteIndex", 0))
+    while site_index < sites.size() and built_home_count < desired_home_count:
+        var site: Dictionary = sites[site_index] if sites[site_index] is Dictionary else {}
+        site_index += 1
+        if site.is_empty():
+            continue
+        var base_x := int(town["centerX"]) + int(site["dx"])
+        var base_z := int(town["centerZ"]) + int(site["dz"])
+        var side := int(site["side"])
+        if town_home_site_excluded(town, base_x, base_z, 10, 10, side):
+            continue
+        var width := rng.randi_range(7, 9)
+        var depth := rng.randi_range(7, 9)
+        var wall_height := rng.randi_range(4, 5)
+        var wall_type := "woodBlock" if site_index % 2 == 1 else "stoneBlock"
+        if rng.randf() < 0.35:
+            wall_type = "stoneBlock" if wall_type == "woodBlock" else "woodBlock"
+        var roof_type := "stoneBlock" if wall_type == "woodBlock" else "woodBlock"
+        if town_home_site_excluded(town, base_x, base_z, width, depth, side):
+            continue
+        build_building(base_x, base_z, level, width, depth, wall_height, wall_type, roof_type, side, rng, true)
+        record_town_home(town_key, town, base_x, base_z, width, depth, side, built_home_count)
+        built_home_count += 1
+        break
+    state["homeSiteIndex"] = site_index
+    state["builtHomeCount"] = built_home_count
+    if built_home_count >= desired_home_count or site_index >= sites.size():
+        state["phase"] = "market"
+
 func performance_monitor():
     if main == null:
         return null
@@ -222,6 +326,8 @@ func execute_structure_op(op: Dictionary) -> void:
         place_door(int(op.get("cellX", 0)), int(op.get("cellZ", 0)), float(op.get("level", 0.0)), int(op.get("side", 0)), bool(op.get("secondary", false)), String(op.get("doorPolicy", "private_home")))
     elif op_type == "publish_town_home_records":
         publish_deferred_town_home_records(String(op.get("townKey", "")))
+    elif op_type == "town_build_phase":
+        process_deferred_town_build_phase(op.get("state", {}))
     defer_structure_ops = previous
 
 func publish_deferred_town_home_records(town_key: String) -> void:
@@ -934,7 +1040,6 @@ func counts() -> Dictionary:
         "ruins": generated_ruin_count,
         "shrines": generated_shrine_count,
         "camps": generated_camp_count,
-        "caves": generated_cave_count,
         "paths": generated_path_count,
         "doors": generated_door_count,
         "utilities": generated_utility_count

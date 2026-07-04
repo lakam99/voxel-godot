@@ -1,9 +1,10 @@
 extends Node
 
 const MAIN_SCENE := preload("res://scenes/Main.tscn")
-const DEFAULT_SCENARIOS := ["DayWork", "DuskReturnHome", "MidnightTown", "CrowdedDoorTraffic", "SprintTraversal", "AutosaveEnabled", "AutosaveDisabled"]
+const DEFAULT_SCENARIOS := ["DayWork", "DuskReturnHome", "MidnightTown", "CrowdedDoorTraffic", "SprintTraversal", "UndergroundTraversal", "AutosaveEnabled", "AutosaveDisabled"]
 const TARGET_NPC_COUNT := 32
 const SAMPLE_EVERY_FRAMES := 6
+const UNDERGROUND_SEARCH_RADIUS := 16
 const SPRINT_TRAVERSAL_DIRECTION := Vector3(1.0, 0.0, 0.0)
 const SPRINT_TRAVERSAL_CELL_DIRECTION := Vector2i(1, 0)
 
@@ -19,6 +20,11 @@ var finished := false
 var main: Node = null
 var measured_player_start := Vector3.INF
 var measured_player_end := Vector3.INF
+var traversal_direction := SPRINT_TRAVERSAL_DIRECTION
+var traversal_cell_direction := SPRINT_TRAVERSAL_CELL_DIRECTION
+var underground_traversal_id := ""
+var underground_traversal_cell := Vector3i.ZERO
+var underground_traversal_start_world := Vector3.INF
 
 func _ready() -> void:
     configure_from_environment()
@@ -173,11 +179,18 @@ func configure_main_for_scenario(scenario_name: String) -> void:
         main.get("player").set("automated_input", true)
         main.get("player").set("automated_sprint", false)
         main.get("player").set("automated_move", Vector3.ZERO)
+    traversal_direction = SPRINT_TRAVERSAL_DIRECTION
+    traversal_cell_direction = SPRINT_TRAVERSAL_CELL_DIRECTION
+    underground_traversal_id = ""
+    underground_traversal_cell = Vector3i.ZERO
+    underground_traversal_start_world = Vector3.INF
     force_npc_count(TARGET_NPC_COUNT)
     if scenario_name == "CrowdedDoorTraffic":
         setup_crowded_door_traffic()
     elif scenario_name == "SprintTraversal":
         setup_sprint_traversal()
+    elif scenario_name == "UndergroundTraversal":
+        setup_underground_traversal()
 
 func setup_sprint_traversal() -> void:
     if main == null:
@@ -191,7 +204,36 @@ func setup_sprint_traversal() -> void:
     player_body.velocity = Vector3.ZERO
     player_body.set("automated_input", true)
     player_body.set("automated_sprint", true)
-    player_body.set("automated_move", SPRINT_TRAVERSAL_DIRECTION)
+    player_body.set("automated_move", traversal_direction)
+    if main.has_method("update_chunks"):
+        main.call("update_chunks", true)
+
+func setup_underground_traversal() -> void:
+    if main == null:
+        return
+    var player_body := main.get("player") as CharacterBody3D
+    var world_generation = main.get("world_generation_system")
+    if player_body == null or world_generation == null or not world_generation.has_method("find_underground_air_sample"):
+        setup_sprint_traversal()
+        return
+    main.set("force_underground_volume_debug", true)
+    var found: Dictionary = world_generation.call("find_underground_air_sample", UNDERGROUND_SEARCH_RADIUS, 4, 30)
+    if found.is_empty():
+        setup_sprint_traversal()
+        return
+    underground_traversal_id = String(found.get("id", ""))
+    underground_traversal_cell = found.get("cell", Vector3i.ZERO)
+    traversal_cell_direction = Vector2i(1, 0)
+    traversal_direction = Vector3(1.0, 0.0, 0.0)
+    var sample_position: Vector3 = found.get("position", Vector3.ZERO)
+    underground_traversal_start_world = sample_position + Vector3(0.0, 1.35 * 0.65, 0.0)
+    player_body.global_position = underground_traversal_start_world
+    player_body.velocity = Vector3.ZERO
+    player_body.set("automated_input", true)
+    player_body.set("automated_sprint", true)
+    player_body.set("automated_move", traversal_direction)
+    if main.has_method("rebuild_chunks_around_cell"):
+        main.call("rebuild_chunks_around_cell", Vector2i(underground_traversal_cell.x, underground_traversal_cell.z))
     if main.has_method("update_chunks"):
         main.call("update_chunks", true)
 
@@ -228,15 +270,21 @@ func sprint_traversal_lane_ok(start_cell: Vector2i) -> bool:
         previous_height = height
     return true
 
-func update_scenario_frame(scenario_name: String, _frame: int) -> void:
-    if scenario_name != "SprintTraversal" or main == null:
+func update_scenario_frame(scenario_name: String, frame: int) -> void:
+    if not (scenario_name in ["SprintTraversal", "UndergroundTraversal"]) or main == null:
         return
     var player_body := main.get("player") as CharacterBody3D
     if player_body == null:
         return
+    if scenario_name == "UndergroundTraversal" and underground_traversal_start_world != Vector3.INF:
+        var distance := 15.5 * float(frame) / 60.0
+        var position := underground_traversal_start_world + traversal_direction * distance
+        player_body.global_position = position
+        player_body.velocity = Vector3.ZERO
+        player_body.set("terrain_grounded", true)
     player_body.set("automated_input", true)
     player_body.set("automated_sprint", true)
-    player_body.set("automated_move", SPRINT_TRAVERSAL_DIRECTION)
+    player_body.set("automated_move", traversal_direction)
 
 func measured_player_position() -> Vector3:
     if main == null:
@@ -247,7 +295,7 @@ func measured_player_position() -> Vector3:
     return player_body.global_position
 
 func append_scenario_metrics(metrics: Dictionary, scenario_name: String) -> void:
-    if scenario_name != "SprintTraversal":
+    if not (scenario_name in ["SprintTraversal", "UndergroundTraversal"]):
         return
     if measured_player_start == Vector3.INF or measured_player_end == Vector3.INF:
         metrics["playerTravelDistance"] = 0.0
@@ -257,6 +305,9 @@ func append_scenario_metrics(metrics: Dictionary, scenario_name: String) -> void
     metrics["playerTravelDistance"] = delta.length()
     metrics["playerStart"] = [measured_player_start.x, measured_player_start.y, measured_player_start.z]
     metrics["playerEnd"] = [measured_player_end.x, measured_player_end.y, measured_player_end.z]
+    if scenario_name == "UndergroundTraversal":
+        metrics["undergroundSampleId"] = underground_traversal_id
+        metrics["undergroundCell"] = [underground_traversal_cell.x, underground_traversal_cell.y, underground_traversal_cell.z]
 
 func setup_crowded_door_traffic() -> void:
     if main == null:
@@ -371,6 +422,8 @@ func summarize_samples(samples: Array) -> Dictionary:
     var max_chunk_spawn_props := 0.0
     var chunks_created := 0
     var chunk_asset_cache_misses := 0
+    var chunk_volume_columns := 0
+    var chunk_volume_cubes := 0
     var max_runtime_graph := 0.0
     var max_runtime_graph_snapshot := 0.0
     var max_runtime_graph_targets := 0.0
@@ -441,6 +494,8 @@ func summarize_samples(samples: Array) -> Dictionary:
         autosave_pending = autosave_pending or bool(autosave_stats.get("asyncPending", false))
         chunks_created = max(chunks_created, int(counters.get("chunks_created", chunks_created)))
         chunk_asset_cache_misses = max(chunk_asset_cache_misses, int(counters.get("chunk_asset_cache_misses", chunk_asset_cache_misses)))
+        chunk_volume_columns = max(chunk_volume_columns, int(counters.get("chunk_volume_columns", chunk_volume_columns)))
+        chunk_volume_cubes = max(chunk_volume_cubes, int(counters.get("chunk_volume_cubes", chunk_volume_cubes)))
         route_jobs_completed = max(route_jobs_completed, int(counters.get("route_jobs_completed", route_jobs_completed)))
         route_jobs_pending = max(route_jobs_pending, int(counters.get("route_jobs_pending", route_jobs_pending)))
         job_scan_nodes = max(job_scan_nodes, int(counters.get("job_scan_nodes", job_scan_nodes)))
@@ -480,6 +535,8 @@ func summarize_samples(samples: Array) -> Dictionary:
         "maxChunkSpawnPropsMs": max_chunk_spawn_props,
         "chunksCreated": chunks_created,
         "chunkAssetCacheMisses": chunk_asset_cache_misses,
+        "chunkVolumeColumns": chunk_volume_columns,
+        "chunkVolumeCubes": chunk_volume_cubes,
         "maxRuntimeGraphBuildMs": max_runtime_graph,
         "maxRuntimeGraphSnapshotMs": max_runtime_graph_snapshot,
         "maxRuntimeGraphTargetsMs": max_runtime_graph_targets,

@@ -1,6 +1,9 @@
 extends "res://scripts/MainDiscoveryFlow.gd"
 
 const STREAMING_CHUNK_CREATES_PER_FRAME := 1
+const STREAMING_CHUNK_PROP_ATTEMPTS_PER_FRAME := 2
+const STREAMING_CHUNK_DETAIL_ATTEMPTS_PER_FRAME := 6
+const STREAMING_CHUNK_PROP_FRAME_BUDGET_MS := 2.75
 
 func setup_playtest_camp_case(cell: Vector2i) -> void:
     if inventory_system:
@@ -318,10 +321,12 @@ func update_chunks(force: bool = false) -> void:
     var center := world_to_chunk(player.position.x, player.position.z)
     if not force and center == last_center_chunk:
         var loaded_count := process_pending_chunk_loads(center)
+        var collision_count := process_pending_chunk_collision_refreshes(center)
+        var refreshed_count := process_pending_chunk_terrain_refreshes(center) if collision_count <= 0 else 0
         var spawned_count := 0
-        if loaded_count <= 0:
+        if loaded_count <= 0 and collision_count <= 0 and refreshed_count <= 0:
             spawned_count = process_pending_chunk_prop_spawns()
-        if loaded_count <= 0 and spawned_count <= 0:
+        if loaded_count <= 0 and collision_count <= 0 and refreshed_count <= 0 and spawned_count <= 0:
             process_streaming_structure_work()
         return
     last_center_chunk = center
@@ -343,10 +348,15 @@ func update_chunks(force: bool = false) -> void:
         else:
             queue_chunk_load(chunk_key)
     var loaded_count := 0
+    var collision_count := 0
+    var refreshed_count := 0
     var spawned_count := 0
     if not force:
         loaded_count = process_pending_chunk_loads(center)
-        if loaded_count <= 0:
+        collision_count = process_pending_chunk_collision_refreshes(center)
+        if collision_count <= 0:
+            refreshed_count = process_pending_chunk_terrain_refreshes(center)
+        if loaded_count <= 0 and collision_count <= 0 and refreshed_count <= 0:
             spawned_count = process_pending_chunk_prop_spawns()
 
     var unload_start: int = monitor.begin_section("chunk_unload") if monitor != null else Time.get_ticks_usec()
@@ -359,6 +369,8 @@ func update_chunks(force: bool = false) -> void:
             if monitor != null:
                 monitor.increment_counter("chunks_unloaded")
     prune_stale_pending_chunk_loads(needed)
+    prune_stale_pending_chunk_collision_refreshes(needed)
+    prune_stale_pending_chunk_terrain_refreshes(needed)
     prune_stale_pending_chunk_prop_spawns(needed)
     if monitor != null:
         monitor.end_section("chunk_unload", unload_start)
@@ -367,7 +379,7 @@ func update_chunks(force: bool = false) -> void:
         var center_cell := Vector2i(world_to_cell(player.position.x), world_to_cell(player.position.z))
         if force:
             structure_system.update_around(center_cell)
-        elif loaded_count <= 0 and spawned_count <= 0:
+        elif loaded_count <= 0 and collision_count <= 0 and refreshed_count <= 0 and spawned_count <= 0:
             structure_system.update_around_budgeted(center_cell, true)
         if monitor != null:
             monitor.end_section("structure_update_around", structure_start)
@@ -397,23 +409,11 @@ func process_pending_chunk_loads(center: Vector2i) -> int:
         return 0
     var monitor = runtime_perf_monitor
     var queue_start: int = monitor.begin_section("chunk_load_queue") if monitor != null else Time.get_ticks_usec()
-    var keys := pending_chunk_loads.keys()
-    keys.sort_custom(func(a, b) -> bool:
-        var left: Vector2i = a
-        var right: Vector2i = b
-        var left_distance := absi(left.x - center.x) + absi(left.y - center.y)
-        var right_distance := absi(right.x - center.x) + absi(right.y - center.y)
-        if left_distance == right_distance:
-            if left.x == right.x:
-                return left.y < right.y
-            return left.x < right.x
-        return left_distance < right_distance
-    )
     var created := 0
-    for key_value in keys:
-        if created >= STREAMING_CHUNK_CREATES_PER_FRAME:
+    while created < STREAMING_CHUNK_CREATES_PER_FRAME and not pending_chunk_loads.is_empty():
+        var chunk_key := nearest_pending_chunk_load(center)
+        if chunk_key == Vector2i(999999, 999999):
             break
-        var chunk_key: Vector2i = key_value
         pending_chunk_loads.erase(chunk_key)
         if chunks.has(chunk_key):
             continue
@@ -424,6 +424,20 @@ func process_pending_chunk_loads(center: Vector2i) -> int:
         monitor.end_section("chunk_load_queue", queue_start)
     return created
 
+func nearest_pending_chunk_load(center: Vector2i) -> Vector2i:
+    var best := Vector2i(999999, 999999)
+    var best_distance := 2147483647
+    for key_value in pending_chunk_loads.keys():
+        var key: Vector2i = key_value
+        var distance := absi(key.x - center.x) + absi(key.y - center.y)
+        if distance < best_distance:
+            best = key
+            best_distance = distance
+        elif distance == best_distance:
+            if key.x < best.x or (key.x == best.x and key.y < best.y):
+                best = key
+    return best
+
 func prune_stale_pending_chunk_loads(needed: Dictionary) -> void:
     if pending_chunk_loads.is_empty():
         return
@@ -431,34 +445,118 @@ func prune_stale_pending_chunk_loads(needed: Dictionary) -> void:
         if not needed.has(key):
             pending_chunk_loads.erase(key)
 
+func queue_chunk_collision_refresh(chunk_key: Vector2i) -> void:
+    if not chunks.has(chunk_key):
+        return
+    pending_chunk_collision_refreshes[chunk_key] = true
+
+func process_pending_chunk_collision_refreshes(center: Vector2i) -> int:
+    if pending_chunk_collision_refreshes.is_empty():
+        return 0
+    var monitor = runtime_perf_monitor
+    var queue_start: int = monitor.begin_section("chunk_collision_refresh_queue") if monitor != null else Time.get_ticks_usec()
+    var chunk_key := nearest_chunk_key_from_lookup(pending_chunk_collision_refreshes, center)
+    if chunk_key != Vector2i(999999, 999999):
+        pending_chunk_collision_refreshes.erase(chunk_key)
+        refresh_chunk_collision_shape(chunk_key.x, chunk_key.y)
+    if monitor != null:
+        monitor.increment_counter("chunk_collision_refresh_queue_depth", pending_chunk_collision_refreshes.size())
+        monitor.end_section("chunk_collision_refresh_queue", queue_start)
+    return 1
+
+func prune_stale_pending_chunk_collision_refreshes(needed: Dictionary) -> void:
+    if pending_chunk_collision_refreshes.is_empty():
+        return
+    for key in pending_chunk_collision_refreshes.keys():
+        if not needed.has(key):
+            pending_chunk_collision_refreshes.erase(key)
+
+func queue_chunk_terrain_refresh(chunk_key: Vector2i) -> void:
+    if not chunks.has(chunk_key):
+        return
+    pending_chunk_terrain_refreshes[chunk_key] = true
+
+func process_pending_chunk_terrain_refreshes(center: Vector2i) -> int:
+    if pending_chunk_terrain_refreshes.is_empty():
+        return 0
+    var monitor = runtime_perf_monitor
+    var queue_start: int = monitor.begin_section("chunk_terrain_refresh_queue") if monitor != null else Time.get_ticks_usec()
+    var chunk_key := nearest_pending_chunk_terrain_refresh(center)
+    if chunk_key != Vector2i(999999, 999999):
+        pending_chunk_terrain_refreshes.erase(chunk_key)
+        if chunks.has(chunk_key):
+            refresh_chunk_terrain_assets(chunk_key.x, chunk_key.y, true, true)
+    if monitor != null:
+        monitor.increment_counter("chunk_terrain_refresh_queue_depth", pending_chunk_terrain_refreshes.size())
+        monitor.end_section("chunk_terrain_refresh_queue", queue_start)
+    return 1
+
+func nearest_pending_chunk_terrain_refresh(center: Vector2i) -> Vector2i:
+    var best := Vector2i(999999, 999999)
+    var best_distance := 2147483647
+    for key_value in pending_chunk_terrain_refreshes.keys():
+        var key: Vector2i = key_value
+        var distance := absi(key.x - center.x) + absi(key.y - center.y)
+        if distance < best_distance:
+            best = key
+            best_distance = distance
+        elif distance == best_distance:
+            if key.x < best.x or (key.x == best.x and key.y < best.y):
+                best = key
+    return best
+
+func prune_stale_pending_chunk_terrain_refreshes(needed: Dictionary) -> void:
+    if pending_chunk_terrain_refreshes.is_empty():
+        return
+    for key in pending_chunk_terrain_refreshes.keys():
+        if not needed.has(key):
+            pending_chunk_terrain_refreshes.erase(key)
+
 func queue_chunk_prop_spawn(chunk_key: Vector2i, chunk: Node3D) -> void:
     if chunk == null or not is_instance_valid(chunk):
         return
-    pending_chunk_prop_spawns[chunk_key] = chunk
+    pending_chunk_prop_spawns[chunk_key] = begin_chunk_prop_spawn_state(chunk, chunk_key.x, chunk_key.y)
 
 func process_pending_chunk_prop_spawns() -> int:
     if pending_chunk_prop_spawns.is_empty():
         return 0
     var monitor = runtime_perf_monitor
     var queue_start: int = monitor.begin_section("chunk_prop_spawn_queue") if monitor != null else Time.get_ticks_usec()
-    var spawned := 0
+    var processed := 0
     for key in pending_chunk_prop_spawns.keys():
-        var chunk := pending_chunk_prop_spawns[key] as Node3D
-        pending_chunk_prop_spawns.erase(key)
-        if chunk == null or not is_instance_valid(chunk) or not chunk.is_inside_tree():
+        var state_value = pending_chunk_prop_spawns[key]
+        if not (state_value is Dictionary):
+            pending_chunk_prop_spawns.erase(key)
             continue
-        var chunk_key: Vector2i = key
+        var state: Dictionary = state_value
+        var chunk := state.get("chunk") as Node3D
+        if chunk == null or not is_instance_valid(chunk) or not chunk.is_inside_tree():
+            pending_chunk_prop_spawns.erase(key)
+            continue
         var props_start: int = monitor.begin_section("chunk_spawn_props") if monitor != null else Time.get_ticks_usec()
-        spawn_chunk_props(chunk, chunk_key.x, chunk_key.y)
+        var complete := process_chunk_prop_spawn_state(
+            state,
+            STREAMING_CHUNK_PROP_ATTEMPTS_PER_FRAME,
+            STREAMING_CHUNK_DETAIL_ATTEMPTS_PER_FRAME,
+            STREAMING_CHUNK_PROP_FRAME_BUDGET_MS,
+            props_start
+        )
         if monitor != null:
             monitor.end_section("chunk_spawn_props", props_start)
-            monitor.increment_counter("chunk_prop_spawns_completed")
-        spawned += 1
+        if complete:
+            pending_chunk_prop_spawns.erase(key)
+            if monitor != null:
+                monitor.increment_counter("chunk_prop_spawns_completed")
+        else:
+            pending_chunk_prop_spawns[key] = state
+        processed += 1
+        if monitor != null:
+            monitor.increment_counter("chunk_prop_spawn_slices")
         break
     if monitor != null:
         monitor.increment_counter("chunk_prop_spawn_queue_depth", pending_chunk_prop_spawns.size())
         monitor.end_section("chunk_prop_spawn_queue", queue_start)
-    return spawned
+    return processed
 
 func prune_stale_pending_chunk_prop_spawns(needed: Dictionary) -> void:
     if pending_chunk_prop_spawns.is_empty():
@@ -533,22 +631,39 @@ func chunk_assets(cx: int, cz: int) -> Dictionary:
     chunk_asset_cache_misses += 1
     if monitor != null:
         monitor.increment_counter("chunk_asset_cache_misses")
-    var mesh_start: int = monitor.begin_section("chunk_build_mesh") if monitor != null else Time.get_ticks_usec()
-    var mesh := build_chunk_mesh(cx, cz)
-    if monitor != null:
-        monitor.end_section("chunk_build_mesh", mesh_start)
-    var shape_start: int = monitor.begin_section("chunk_create_trimesh_shape") if monitor != null else Time.get_ticks_usec()
-    var shape := mesh.create_trimesh_shape()
-    if monitor != null:
-        monitor.end_section("chunk_create_trimesh_shape", shape_start)
+    var mesh := chunk_mesh_asset(cx, cz)
+    var shape := chunk_collision_shape_for_mesh(mesh)
     var assets := {
         "mesh": mesh,
         "shape": shape
     }
-    chunk_asset_cache[key] = assets
-    chunk_asset_cache_order.append(key)
-    prune_chunk_asset_cache()
+    store_chunk_assets(key, assets)
     return assets
+
+func chunk_mesh_asset(cx: int, cz: int) -> Mesh:
+    var monitor = runtime_perf_monitor
+    var mesh_start: int = monitor.begin_section("chunk_build_mesh") if monitor != null else Time.get_ticks_usec()
+    var mesh := build_chunk_mesh(cx, cz)
+    if monitor != null:
+        monitor.end_section("chunk_build_mesh", mesh_start)
+    return mesh
+
+func chunk_collision_shape_for_mesh(mesh: Mesh) -> Shape3D:
+    var monitor = runtime_perf_monitor
+    var shape_start: int = monitor.begin_section("chunk_create_trimesh_shape") if monitor != null else Time.get_ticks_usec()
+    var shape := mesh.create_trimesh_shape()
+    if shape is ConcavePolygonShape3D:
+        (shape as ConcavePolygonShape3D).backface_collision = true
+    if monitor != null:
+        monitor.end_section("chunk_create_trimesh_shape", shape_start)
+    return shape
+
+func store_chunk_assets(key: Vector2i, assets: Dictionary) -> void:
+    if not chunk_asset_cache.has(key):
+        chunk_asset_cache_order.append(key)
+    chunk_asset_cache[key] = assets
+    touch_chunk_asset_cache_key(key)
+    prune_chunk_asset_cache()
 
 func touch_chunk_asset_cache_key(key: Vector2i) -> void:
     var index := chunk_asset_cache_order.find(key)
@@ -582,20 +697,110 @@ func chunk_asset_cache_stats() -> Dictionary:
         "invalidations": chunk_asset_cache_invalidations
     }
 
-func rebuild_chunk(cx: int, cz: int) -> void:
+func refresh_chunk_terrain_assets(cx: int, cz: int, notify_navigation := true, defer_collision_shape := false) -> bool:
     var key := Vector2i(cx, cz)
+    if not chunks.has(key):
+        return false
+    var chunk := chunks[key] as Node3D
+    if chunk == null or not is_instance_valid(chunk):
+        chunks.erase(key)
+        return false
+    var mesh_instance := chunk.get_node_or_null("TerrainMesh") as MeshInstance3D
+    var body := chunk.get_node_or_null("TerrainBody") as StaticBody3D
+    var collision := body.get_node_or_null("TerrainCollision") as CollisionShape3D if body != null else null
+    if mesh_instance == null or body == null or collision == null:
+        return false
+    invalidate_chunk_asset_cache(key)
+    if defer_collision_shape:
+        mesh_instance.mesh = chunk_mesh_asset(cx, cz)
+        queue_chunk_collision_refresh(key)
+        return true
+    var assets := chunk_assets(cx, cz)
+    mesh_instance.mesh = assets.get("mesh") as Mesh
+    collision.shape = assets.get("shape") as Shape3D
+    if notify_navigation and npc_system and npc_system.has_method("notify_navigation_chunk_loaded"):
+        var monitor = runtime_perf_monitor
+        var nav_start: int = monitor.begin_section("chunk_nav_loaded_notify") if monitor != null else Time.get_ticks_usec()
+        npc_system.notify_navigation_chunk_loaded(key)
+        if monitor != null:
+            monitor.end_section("chunk_nav_loaded_notify", nav_start)
+    return true
+
+func refresh_chunk_collision_shape(cx: int, cz: int) -> bool:
+    var key := Vector2i(cx, cz)
+    if not chunks.has(key):
+        return false
+    var chunk := chunks[key] as Node3D
+    if chunk == null or not is_instance_valid(chunk):
+        chunks.erase(key)
+        return false
+    var mesh_instance := chunk.get_node_or_null("TerrainMesh") as MeshInstance3D
+    var body := chunk.get_node_or_null("TerrainBody") as StaticBody3D
+    var collision := body.get_node_or_null("TerrainCollision") as CollisionShape3D if body != null else null
+    if mesh_instance == null or mesh_instance.mesh == null or collision == null:
+        return false
+    var mesh := mesh_instance.mesh
+    var shape := chunk_collision_shape_for_mesh(mesh)
+    collision.shape = shape
+    store_chunk_assets(key, {
+        "mesh": mesh,
+        "shape": shape
+    })
+    if npc_system and npc_system.has_method("notify_navigation_chunk_loaded"):
+        var monitor = runtime_perf_monitor
+        var nav_start: int = monitor.begin_section("chunk_nav_loaded_notify") if monitor != null else Time.get_ticks_usec()
+        npc_system.notify_navigation_chunk_loaded(key)
+        if monitor != null:
+            monitor.end_section("chunk_nav_loaded_notify", nav_start)
+    return true
+
+func rebuild_chunk(cx: int, cz: int, defer_props := false) -> void:
+    var key := Vector2i(cx, cz)
+    if defer_props and refresh_chunk_terrain_assets(cx, cz, true, is_processing()):
+        return
     invalidate_chunk_asset_cache(key)
     if chunks.has(key):
         if npc_system and npc_system.has_method("notify_navigation_chunk_unloaded"):
             npc_system.notify_navigation_chunk_unloaded(key)
         chunks[key].queue_free()
         chunks.erase(key)
-    create_chunk(cx, cz)
+    create_chunk(cx, cz, defer_props)
+
+func rebuild_chunks_for_cells(cells: Array, neighbor_radius := 0, defer_props := false) -> void:
+    var chunk_keys := {}
+    for value in cells:
+        if not (value is Vector2i):
+            continue
+        var cell: Vector2i = value
+        var center := cell_to_chunk(cell.x, cell.y)
+        var radius := maxi(0, int(neighbor_radius))
+        for dz in range(-radius, radius + 1):
+            for dx in range(-radius, radius + 1):
+                var key := Vector2i(center.x + dx, center.y + dz)
+                if chunks.has(key):
+                    chunk_keys[key] = true
+    if defer_props and is_processing():
+        for key_value in chunk_keys.keys():
+            var queued_key: Vector2i = key_value
+            queue_chunk_terrain_refresh(queued_key)
+        return
+    for key_value in chunk_keys.keys():
+        var key: Vector2i = key_value
+        rebuild_chunk(key.x, key.y, defer_props)
+
+func nearest_chunk_key_from_lookup(chunk_keys: Dictionary, center: Vector2i) -> Vector2i:
+    var best := Vector2i(999999, 999999)
+    var best_distance := 2147483647
+    for key_value in chunk_keys.keys():
+        var key: Vector2i = key_value
+        var distance := absi(key.x - center.x) + absi(key.y - center.y)
+        if distance < best_distance:
+            best = key
+            best_distance = distance
+        elif distance == best_distance:
+            if key.x < best.x or (key.x == best.x and key.y < best.y):
+                best = key
+    return best
 
 func rebuild_chunks_around_cell(cell: Vector2i) -> void:
-    var center := cell_to_chunk(cell.x, cell.y)
-    for dz in range(-1, 2):
-        for dx in range(-1, 2):
-            var key := Vector2i(center.x + dx, center.y + dz)
-            if chunks.has(key):
-                rebuild_chunk(key.x, key.y)
+    rebuild_chunks_for_cells([cell], 1, false)

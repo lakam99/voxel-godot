@@ -1,4 +1,4 @@
-﻿extends "res://scripts/MainRuntimeTools.gd"
+extends "res://scripts/MainRuntimeTools.gd"
 
 const VOLUME_CUBE_CORNER_OFFSETS := [
     Vector3i(0, 0, 0),
@@ -26,62 +26,82 @@ const VOLUME_TETRAHEDRON_EDGES := [
     [1, 3],
     [2, 3]
 ]
+const UNDERGROUND_VOLUME_MESH_STEP_CELLS := 16
+const UNDERGROUND_VOLUME_COARSE_STEP_CELLS := 8
+const UNDERGROUND_VOLUME_EXTERIOR_LOD_STEP_CELLS := 4
+const UNDERGROUND_VOLUME_FOCUS_STEP_CELLS := 2
+const UNDERGROUND_VOLUME_FOCUS_RADIUS_CELLS := 9
+const UNDERGROUND_VOLUME_Y_PADDING := CELL * 0.85
+const UNDERGROUND_GENERATED_DEPTH_CELLS := 32
+
+var full_exterior_indices_cache := PackedInt32Array()
 
 func build_chunk_mesh(cx: int, cz: int) -> Mesh:
-    var st := SurfaceTool.new()
-    st.begin(Mesh.PRIMITIVE_TRIANGLES)
-    st.set_material(terrain_material)
     var start_x: int = cx * CHUNK_SIZE
     var start_z: int = cz * CHUNK_SIZE
     var monitor = runtime_perf_monitor
-    var cave_start: int = monitor.begin_section("chunk_cave_feature_query") if monitor != null else Time.get_ticks_usec()
-    var cave_features := chunk_cave_features(start_x, start_z)
+    var volume_scan_start: int = monitor.begin_section("chunk_volume_boundary_scan") if monitor != null else Time.get_ticks_usec()
+    var has_excavation := chunk_has_excavation_overlap(start_x, start_z)
+    var generated_volume_required := chunk_needs_generated_underground_volume_mesh(start_x, start_z)
+    var volume_required := has_excavation or generated_volume_required
     if monitor != null:
-        monitor.end_section("chunk_cave_feature_query", cave_start)
-    if monitor != null and not cave_features.is_empty():
-        monitor.increment_counter("chunk_cave_feature_chunks")
-        monitor.increment_counter("chunk_cave_features", cave_features.size())
-    if cave_features.is_empty():
-        var exterior_start_no_caves: int = monitor.begin_section("chunk_exterior_surface_mesh") if monitor != null else Time.get_ticks_usec()
+        monitor.end_section("chunk_volume_boundary_scan", volume_scan_start)
+    if not volume_required:
+        var exterior_start_fast: int = monitor.begin_section("chunk_exterior_surface_mesh") if monitor != null else Time.get_ticks_usec()
         var exterior_mesh := build_natural_exterior_array_mesh(start_x, start_z)
         if monitor != null:
-            monitor.end_section("chunk_exterior_surface_mesh", exterior_start_no_caves)
+            monitor.end_section("chunk_exterior_surface_mesh", exterior_start_fast)
         return exterior_mesh
+    var mesh := ArrayMesh.new()
     var exterior_start: int = monitor.begin_section("chunk_exterior_surface_mesh") if monitor != null else Time.get_ticks_usec()
-    add_natural_exterior_surface(st, start_x, start_z, cave_features)
+    var volume_context := {}
+    var exterior_arrays := build_natural_exterior_arrays_lod(start_x, start_z, UNDERGROUND_VOLUME_EXTERIOR_LOD_STEP_CELLS) if generated_volume_required and not has_excavation else build_natural_exterior_arrays(start_x, start_z)
     if monitor != null:
         monitor.end_section("chunk_exterior_surface_mesh", exterior_start)
-    var bounds := chunk_volume_y_bounds_from_features(start_x, start_z, cave_features)
+    var bounds := chunk_volume_y_bounds(start_x, start_z) if generated_volume_required else excavation_volume_y_bounds_for_chunk(start_x, start_z)
     var min_y := int(bounds.get("minY", floori((MIN_HEIGHT - CELL * 4.0) / CELL))) - 1
     var max_y := int(bounds.get("maxY", ceili((MAX_HEIGHT + CELL * 2.0) / CELL))) + 1
-    var sample_cache := {}
-    if not cave_features.is_empty():
-        var volume_start: int = monitor.begin_section("chunk_volume_mesh") if monitor != null else Time.get_ticks_usec()
-        for z in range(start_z, start_z + CHUNK_SIZE):
-            for x in range(start_x, start_x + CHUNK_SIZE):
-                var cell_bounds := mesh_cell_volume_y_bounds(x, z, min_y, max_y, cave_features)
-                var cell_min_y := int(cell_bounds.get("minY", min_y))
-                var cell_max_y := int(cell_bounds.get("maxY", max_y))
-                for y in range(cell_min_y, cell_max_y):
-                    extract_volume_iso_cube(st, Vector3i(x, y, z), start_x, start_z, sample_cache)
-        if monitor != null:
-            monitor.end_section("chunk_volume_mesh", volume_start)
-    var commit_start: int = monitor.begin_section("chunk_mesh_commit") if monitor != null else Time.get_ticks_usec()
-    var mesh := st.commit()
+    var volume_arrays := {}
+    var volume_start: int = monitor.begin_section("chunk_volume_mesh") if monitor != null else Time.get_ticks_usec()
+    if generated_volume_required:
+        volume_arrays = build_volume_iso_arrays(start_x, start_z, min_y, max_y, volume_context)
+    else:
+        volume_arrays = build_excavation_volume_iso_arrays(start_x, start_z, min_y, max_y, volume_context)
     if monitor != null:
-        monitor.end_section("chunk_mesh_commit", commit_start)
+        monitor.increment_counter("chunk_volume_columns", int(volume_arrays.get("columns", 0)))
+        monitor.increment_counter("chunk_volume_cubes", int(volume_arrays.get("cubes", 0)))
+        monitor.increment_counter("chunk_volume_faces", int(volume_arrays.get("faces", 0)))
+        monitor.end_section("chunk_volume_mesh", volume_start)
+    var combined_arrays := combine_terrain_surface_arrays(exterior_arrays, volume_arrays)
+    add_terrain_array_surface(mesh, combined_arrays, terrain_material)
+    mesh.set_meta("chunk_volume_faces", int(volume_arrays.get("faces", 0)))
+    mesh.set_meta("chunk_volume_vertices", (volume_arrays.get("vertices", PackedVector3Array()) as PackedVector3Array).size())
     return mesh
+
+func align_down_to_step(value: int, step: int) -> int:
+    if step <= 1:
+        return value
+    return floori(float(value) / float(step)) * step
+
+func align_up_to_step(value: int, step: int) -> int:
+    if step <= 1:
+        return value
+    return ceili(float(value) / float(step)) * step
+
+func underground_volume_mesh_step_for_chunk(_start_x: int, _start_z: int) -> int:
+    return UNDERGROUND_VOLUME_MESH_STEP_CELLS
 
 func build_natural_exterior_array_mesh(start_x: int, start_z: int) -> Mesh:
     var monitor = runtime_perf_monitor
     var border_size := CHUNK_SIZE + 3
     var surface_cache := PackedFloat32Array()
     surface_cache.resize(border_size * border_size)
+    var surface_context := exterior_surface_chunk_context(start_x, start_z)
     var height_start: int = monitor.begin_section("chunk_exterior_height_grid") if monitor != null else Time.get_ticks_usec()
     for vz in range(-1, CHUNK_SIZE + 2):
         var row_index := (vz + 1) * border_size
         for vx in range(-1, CHUNK_SIZE + 2):
-            surface_cache[row_index + vx + 1] = exterior_surface_y_cell(start_x + vx, start_z + vz)
+            surface_cache[row_index + vx + 1] = exterior_surface_y_cell_from_context(start_x + vx, start_z + vz, surface_context)
     if monitor != null:
         monitor.end_section("chunk_exterior_height_grid", height_start)
 
@@ -104,32 +124,14 @@ func build_natural_exterior_array_mesh(start_x: int, start_z: int) -> Mesh:
             var cell_z := start_z + vz
             vertices[vertex_index] = Vector3(float(vx) * CELL, float(surface_cache[border_index]), float(vz) * CELL)
             normals[vertex_index] = exterior_surface_normal_grid(surface_cache, border_index, border_size)
-            var color: Color = exterior_surface_color_for_cell(cell_x, cell_z)
+            var color: Color = exterior_surface_color_for_cell_from_context(cell_x, cell_z, float(surface_cache[border_index]), surface_context)
             var shade := 0.88 + noise01(ridge_noise, cell_x + 400, cell_z - 200) * 0.18
             colors[vertex_index] = color * shade
     if monitor != null:
         monitor.end_section("chunk_exterior_vertex_grid", vertex_start)
 
-    var index_count := CHUNK_SIZE * CHUNK_SIZE * 6
-    var indices := PackedInt32Array()
-    indices.resize(index_count)
-    var write_index := 0
     var index_start: int = monitor.begin_section("chunk_exterior_index_grid") if monitor != null else Time.get_ticks_usec()
-    for z in range(CHUNK_SIZE):
-        var row := z * grid_size
-        var next_row := (z + 1) * grid_size
-        for x in range(CHUNK_SIZE):
-            var i00 := row + x
-            var i10 := i00 + 1
-            var i01 := next_row + x
-            var i11 := i01 + 1
-            indices[write_index] = i00
-            indices[write_index + 1] = i01
-            indices[write_index + 2] = i10
-            indices[write_index + 3] = i10
-            indices[write_index + 4] = i01
-            indices[write_index + 5] = i11
-            write_index += 6
+    var indices := full_exterior_indices()
     if monitor != null:
         monitor.end_section("chunk_exterior_index_grid", index_start)
 
@@ -147,7 +149,669 @@ func build_natural_exterior_array_mesh(start_x: int, start_z: int) -> Mesh:
         monitor.end_section("chunk_mesh_commit", commit_start)
     return mesh
 
-func add_natural_exterior_surface(st: SurfaceTool, start_x: int, start_z: int, cave_features: Array = []) -> void:
+func build_natural_exterior_arrays(start_x: int, start_z: int) -> Dictionary:
+    var monitor = runtime_perf_monitor
+    var border_size := CHUNK_SIZE + 3
+    var surface_cache := PackedFloat32Array()
+    surface_cache.resize(border_size * border_size)
+    var surface_context := exterior_surface_chunk_context(start_x, start_z)
+    var height_start: int = monitor.begin_section("chunk_exterior_height_grid") if monitor != null else Time.get_ticks_usec()
+    for vz in range(-1, CHUNK_SIZE + 2):
+        var row_index := (vz + 1) * border_size
+        for vx in range(-1, CHUNK_SIZE + 2):
+            surface_cache[row_index + vx + 1] = exterior_surface_y_cell_from_context(start_x + vx, start_z + vz, surface_context)
+    if monitor != null:
+        monitor.end_section("chunk_exterior_height_grid", height_start)
+
+    var grid_size := CHUNK_SIZE + 1
+    var vertex_count := grid_size * grid_size
+    var vertices := PackedVector3Array()
+    var normals := PackedVector3Array()
+    var colors := PackedColorArray()
+    vertices.resize(vertex_count)
+    normals.resize(vertex_count)
+    colors.resize(vertex_count)
+    var vertex_start: int = monitor.begin_section("chunk_exterior_vertex_grid") if monitor != null else Time.get_ticks_usec()
+    for vz in range(grid_size):
+        var vertex_row := vz * grid_size
+        var border_row := (vz + 1) * border_size
+        for vx in range(grid_size):
+            var vertex_index := vertex_row + vx
+            var border_index := border_row + vx + 1
+            var cell_x := start_x + vx
+            var cell_z := start_z + vz
+            vertices[vertex_index] = Vector3(float(vx) * CELL, float(surface_cache[border_index]), float(vz) * CELL)
+            normals[vertex_index] = exterior_surface_normal_grid(surface_cache, border_index, border_size)
+            var color: Color = exterior_surface_color_for_cell_from_context(cell_x, cell_z, float(surface_cache[border_index]), surface_context)
+            var shade := 0.88 + noise01(ridge_noise, cell_x + 400, cell_z - 200) * 0.18
+            colors[vertex_index] = color * shade
+    if monitor != null:
+        monitor.end_section("chunk_exterior_vertex_grid", vertex_start)
+
+    var indices := PackedInt32Array()
+    var index_start: int = monitor.begin_section("chunk_exterior_index_grid") if monitor != null else Time.get_ticks_usec()
+    indices = exterior_indices_for_surface(start_x, start_z, surface_cache, border_size, active_volume_excavation_brushes())
+    if monitor != null:
+        monitor.end_section("chunk_exterior_index_grid", index_start)
+    return {
+        "vertices": vertices,
+        "normals": normals,
+        "colors": colors,
+        "indices": indices
+    }
+
+func build_natural_exterior_arrays_lod(start_x: int, start_z: int, step_cells: int) -> Dictionary:
+    var step := maxi(1, step_cells)
+    var local_xs: Array[int] = []
+    var local_zs: Array[int] = []
+    var local_x := 0
+    while local_x < CHUNK_SIZE:
+        local_xs.append(local_x)
+        local_x += step
+    if local_xs.is_empty() or local_xs[local_xs.size() - 1] != CHUNK_SIZE:
+        local_xs.append(CHUNK_SIZE)
+    var local_z := 0
+    while local_z < CHUNK_SIZE:
+        local_zs.append(local_z)
+        local_z += step
+    if local_zs.is_empty() or local_zs[local_zs.size() - 1] != CHUNK_SIZE:
+        local_zs.append(CHUNK_SIZE)
+    var surface_context := exterior_surface_chunk_context(start_x, start_z)
+    var vertices := PackedVector3Array()
+    var normals := PackedVector3Array()
+    var colors := PackedColorArray()
+    var vertex_count := local_xs.size() * local_zs.size()
+    vertices.resize(vertex_count)
+    normals.resize(vertex_count)
+    colors.resize(vertex_count)
+    for z_index in range(local_zs.size()):
+        var vz: int = local_zs[z_index]
+        for x_index in range(local_xs.size()):
+            var vx: int = local_xs[x_index]
+            var vertex_index := z_index * local_xs.size() + x_index
+            var cell_x := start_x + vx
+            var cell_z := start_z + vz
+            var surface_y := exterior_surface_y_cell_from_context(cell_x, cell_z, surface_context)
+            vertices[vertex_index] = Vector3(float(vx) * CELL, surface_y, float(vz) * CELL)
+            normals[vertex_index] = exterior_surface_normal_lod(cell_x, cell_z, surface_context, step)
+            var color: Color = exterior_surface_color_for_cell_from_context(cell_x, cell_z, surface_y, surface_context)
+            var shade := 0.88 + noise01(ridge_noise, cell_x + 400, cell_z - 200) * 0.18
+            colors[vertex_index] = color * shade
+    var indices := PackedInt32Array()
+    for z_index in range(local_zs.size() - 1):
+        var row := z_index * local_xs.size()
+        var next_row := (z_index + 1) * local_xs.size()
+        for x_index in range(local_xs.size() - 1):
+            var i00 := row + x_index
+            var i10 := i00 + 1
+            var i01 := next_row + x_index
+            var i11 := i01 + 1
+            indices.append(i00)
+            indices.append(i01)
+            indices.append(i10)
+            indices.append(i10)
+            indices.append(i01)
+            indices.append(i11)
+    return {
+        "vertices": vertices,
+        "normals": normals,
+        "colors": colors,
+        "indices": indices
+    }
+
+func exterior_surface_normal_lod(cell_x: int, cell_z: int, context: Dictionary, step_cells: int) -> Vector3:
+    var step := maxi(1, step_cells)
+    var left := exterior_surface_y_cell_from_context(cell_x - step, cell_z, context)
+    var right := exterior_surface_y_cell_from_context(cell_x + step, cell_z, context)
+    var back := exterior_surface_y_cell_from_context(cell_x, cell_z - step, context)
+    var forward := exterior_surface_y_cell_from_context(cell_x, cell_z + step, context)
+    return Vector3(left - right, CELL * float(step) * 2.0, back - forward).normalized()
+
+func build_volume_iso_arrays(start_x: int, start_z: int, min_y: int, max_y: int, volume_context: Dictionary) -> Dictionary:
+    var vertices := PackedVector3Array()
+    var normals := PackedVector3Array()
+    var colors := PackedColorArray()
+    var sample_cache := {}
+    var volume_columns := 0
+    var volume_cubes := 0
+    var iso_triangles := 0
+    var step_cells := underground_volume_mesh_step_for_chunk(start_x, start_z)
+    for z in range(start_z, start_z + CHUNK_SIZE, step_cells):
+        for x in range(start_x, start_x + CHUNK_SIZE, step_cells):
+            if not volume_block_may_touch_underground_boundary(x, z, step_cells, min_y, max_y, sample_cache, volume_context):
+                continue
+            var fine_result := append_volume_iso_block_arrays(
+                vertices,
+                normals,
+                colors,
+                x,
+                z,
+                step_cells,
+                start_x,
+                start_z,
+                min_y,
+                max_y,
+                volume_context,
+                sample_cache
+            )
+            volume_columns += int(fine_result.get("columns", 0))
+            volume_cubes += int(fine_result.get("cubes", 0))
+            iso_triangles += int(fine_result.get("faces", 0))
+    var boundary_faces := append_excavation_boundary_arrays(vertices, normals, colors, start_x, start_z, min_y, max_y, volume_context)
+    iso_triangles += boundary_faces
+    var focus_faces := append_underground_focus_boundary_arrays(vertices, normals, colors, start_x, start_z, min_y, max_y, volume_context)
+    iso_triangles += focus_faces
+    return {
+        "vertices": vertices,
+        "normals": normals,
+        "colors": colors,
+        "columns": volume_columns,
+        "cubes": volume_cubes,
+        "faces": iso_triangles
+    }
+
+func build_excavation_volume_iso_arrays(start_x: int, start_z: int, min_y: int, max_y: int, volume_context: Dictionary) -> Dictionary:
+    var vertices := PackedVector3Array()
+    var normals := PackedVector3Array()
+    var colors := PackedColorArray()
+    var boundary_faces := append_excavation_boundary_arrays(vertices, normals, colors, start_x, start_z, min_y, max_y, volume_context)
+    return {
+        "vertices": vertices,
+        "normals": normals,
+        "colors": colors,
+        "columns": 0,
+        "cubes": 0,
+        "faces": boundary_faces
+    }
+
+func append_underground_focus_boundary_arrays(
+    vertices: PackedVector3Array,
+    normals: PackedVector3Array,
+    colors: PackedColorArray,
+    start_x: int,
+    start_z: int,
+    min_y: int,
+    max_y: int,
+    volume_context: Dictionary
+) -> int:
+    if not force_underground_volume_debug or player == null:
+        return 0
+    var focus := player.global_position
+    if world_generation_system != null and world_generation_system.has_method("sample_world"):
+        var focus_sample: Dictionary = world_generation_system.call("sample_world", focus)
+        if String(focus_sample.get("biome", "")) != "underground_air" and bool(focus_sample.get("solid", false)):
+            return 0
+    var step := maxi(1, UNDERGROUND_VOLUME_FOCUS_STEP_CELLS)
+    var radius_cells := maxi(step, UNDERGROUND_VOLUME_FOCUS_RADIUS_CELLS)
+    var center_cell := Vector3i(world_to_cell(focus.x), world_to_cell(focus.y), world_to_cell(focus.z))
+    var chunk_min_x := start_x - step
+    var chunk_max_x := start_x + CHUNK_SIZE + step
+    var chunk_min_z := start_z - step
+    var chunk_max_z := start_z + CHUNK_SIZE + step
+    if center_cell.x + radius_cells < chunk_min_x or center_cell.x - radius_cells > chunk_max_x:
+        return 0
+    if center_cell.z + radius_cells < chunk_min_z or center_cell.z - radius_cells > chunk_max_z:
+        return 0
+    var iso_triangles := 0
+    var sample_cache := {}
+    var radius_world := float(radius_cells) * CELL
+    for z in range(center_cell.z - radius_cells, center_cell.z + radius_cells + 1, step):
+        if z < chunk_min_z or z > chunk_max_z:
+            continue
+        for x in range(center_cell.x - radius_cells, center_cell.x + radius_cells + 1, step):
+            if x < chunk_min_x or x > chunk_max_x:
+                continue
+            for y in range(maxi(min_y, center_cell.y - radius_cells), mini(max_y, center_cell.y + radius_cells) + 1, step):
+                var cube_center := Vector3((float(x) + float(step) * 0.5) * CELL, (float(y) + float(step) * 0.5) * CELL, (float(z) + float(step) * 0.5) * CELL)
+                if focus.distance_to(cube_center) > radius_world + float(step) * CELL:
+                    continue
+                var before_vertices := vertices.size()
+                extract_volume_iso_cube_arrays(
+                    vertices,
+                    normals,
+                    colors,
+                    Vector3i(x, y, z),
+                    start_x,
+                    start_z,
+                    sample_cache,
+                    volume_context,
+                    step
+                )
+                iso_triangles += int((vertices.size() - before_vertices) / 3)
+    return iso_triangles
+
+func append_excavation_boundary_arrays(
+    vertices: PackedVector3Array,
+    normals: PackedVector3Array,
+    colors: PackedColorArray,
+    start_x: int,
+    start_z: int,
+    min_y: int,
+    max_y: int,
+    volume_context: Dictionary
+) -> int:
+    var brushes := active_volume_excavation_brushes()
+    if brushes.is_empty():
+        return 0
+    var iso_triangles := 0
+    var iso_sample_cache := {}
+    var chunk_min_x := start_x - 1
+    var chunk_max_x := start_x + CHUNK_SIZE + 1
+    var chunk_min_z := start_z - 1
+    var chunk_max_z := start_z + CHUNK_SIZE + 1
+    var visited := {}
+    for brush_value in brushes:
+        if not (brush_value is Dictionary):
+            continue
+        var brush: Dictionary = brush_value
+        var center: Vector3 = brush.get("center", Vector3.ZERO)
+        var radius := float(brush.get("radius", 0.0))
+        if radius <= 0.0:
+            continue
+        var center_cell := Vector3i(world_to_cell(center.x), world_to_cell(center.y), world_to_cell(center.z))
+        var cell_radius := ceili(radius / CELL) + 2
+        for z in range(center_cell.z - cell_radius, center_cell.z + cell_radius + 1):
+            if z < chunk_min_z or z > chunk_max_z:
+                continue
+            for x in range(center_cell.x - cell_radius, center_cell.x + cell_radius + 1):
+                if x < chunk_min_x or x > chunk_max_x:
+                    continue
+                for y in range(maxi(min_y, center_cell.y - cell_radius), mini(max_y, center_cell.y + cell_radius) + 1):
+                    var cell := Vector3i(x, y, z)
+                    if visited.has(cell):
+                        continue
+                    var cube_center := Vector3((float(x) + 0.5) * CELL, (float(y) + 0.5) * CELL, (float(z) + 0.5) * CELL)
+                    if center.distance_to(cube_center) > radius + CELL * 1.65:
+                        continue
+                    visited[cell] = true
+                    var before_vertices := vertices.size()
+                    extract_volume_iso_cube_arrays(
+                        vertices,
+                        normals,
+                        colors,
+                        cell,
+                        start_x,
+                        start_z,
+                        iso_sample_cache,
+                        volume_context,
+                        1
+                    )
+                    iso_triangles += int((vertices.size() - before_vertices) / 3)
+    return iso_triangles
+
+func append_volume_iso_block_arrays(
+    vertices: PackedVector3Array,
+    normals: PackedVector3Array,
+    colors: PackedColorArray,
+    x: int,
+    z: int,
+    step_cells: int,
+    start_x: int,
+    start_z: int,
+    min_y: int,
+    max_y: int,
+    volume_context: Dictionary,
+    sample_cache: Dictionary
+) -> Dictionary:
+    var cell_min_y := align_down_to_step(min_y, step_cells)
+    var cell_max_y := align_up_to_step(max_y, step_cells)
+    if cell_max_y <= cell_min_y:
+        return {
+            "columns": 0,
+            "cubes": 0,
+            "faces": 0
+        }
+    var volume_cubes := 0
+    var iso_triangles := 0
+    for y in range(cell_min_y, cell_max_y, step_cells):
+        volume_cubes += 1
+        var before_vertices := vertices.size()
+        extract_volume_iso_cube_arrays(
+            vertices,
+            normals,
+            colors,
+            Vector3i(x, y, z),
+            start_x,
+            start_z,
+            sample_cache,
+            volume_context,
+            step_cells
+        )
+        iso_triangles += int((vertices.size() - before_vertices) / 3)
+    return {
+        "columns": 1,
+        "cubes": volume_cubes,
+        "faces": iso_triangles
+    }
+
+func volume_block_may_touch_underground_boundary(cell_x: int, cell_z: int, step_cells: int, min_y: int, max_y: int, sample_cache: Dictionary, volume_context := {}) -> bool:
+    var step := maxi(1, step_cells)
+    for y in range(min_y, max_y, step):
+        if volume_cube_has_density_boundary(Vector3i(cell_x, y, cell_z), step, sample_cache, volume_context):
+            return true
+    return false
+
+func volume_cube_has_density_boundary(origin_cell: Vector3i, step_cells: int, sample_cache: Dictionary, volume_context := {}) -> bool:
+    var solid_count := 0
+    var surface_ys := PackedFloat32Array()
+    var densities := PackedFloat32Array()
+    var world_positions: Array[Vector3] = []
+    surface_ys.resize(8)
+    densities.resize(8)
+    world_positions.resize(8)
+    for index in range(8):
+        var offset: Vector3i = VOLUME_CUBE_CORNER_OFFSETS[index]
+        var grid_cell := origin_cell + offset * step_cells
+        var sample := volume_grid_sample_numeric(grid_cell, sample_cache, volume_context)
+        var density := sample.x
+        densities[index] = density
+        surface_ys[index] = sample.z
+        world_positions[index] = Vector3(float(grid_cell.x) * CELL, float(grid_cell.y) * CELL, float(grid_cell.z) * CELL)
+        if density > 0.0:
+            solid_count += 1
+    if solid_count <= 0 or solid_count >= 8:
+        return false
+    for index in range(8):
+        if densities[index] <= 0.0 and world_positions[index].y < surface_ys[index] - CELL * 0.35:
+            return true
+    return false
+
+func combine_terrain_surface_arrays(exterior_arrays: Dictionary, volume_arrays: Dictionary) -> Dictionary:
+    var exterior_vertices: PackedVector3Array = exterior_arrays.get("vertices", PackedVector3Array())
+    var exterior_normals: PackedVector3Array = exterior_arrays.get("normals", PackedVector3Array())
+    var exterior_colors: PackedColorArray = exterior_arrays.get("colors", PackedColorArray())
+    var exterior_indices: PackedInt32Array = exterior_arrays.get("indices", PackedInt32Array())
+    var vertices := PackedVector3Array(exterior_vertices)
+    var normals := PackedVector3Array(exterior_normals)
+    var colors := PackedColorArray(exterior_colors)
+    var indices := PackedInt32Array(exterior_indices)
+    if indices.is_empty() and not exterior_vertices.is_empty():
+        indices.resize(exterior_vertices.size())
+        for i in range(exterior_vertices.size()):
+            indices[i] = i
+    if volume_arrays.is_empty():
+        return {
+            "vertices": vertices,
+            "normals": normals,
+            "colors": colors,
+            "indices": indices
+        }
+    var volume_vertices: PackedVector3Array = volume_arrays.get("vertices", PackedVector3Array())
+    if volume_vertices.is_empty():
+        return {
+            "vertices": vertices,
+            "normals": normals,
+            "colors": colors,
+            "indices": indices
+        }
+    var volume_normals: PackedVector3Array = volume_arrays.get("normals", PackedVector3Array())
+    var volume_colors: PackedColorArray = volume_arrays.get("colors", PackedColorArray())
+    var volume_offset := vertices.size()
+    vertices.append_array(volume_vertices)
+    if volume_normals.size() == volume_vertices.size():
+        normals.append_array(volume_normals)
+    else:
+        for i in range(volume_vertices.size()):
+            normals.append(Vector3.UP)
+    if volume_colors.size() == volume_vertices.size():
+        colors.append_array(volume_colors)
+    else:
+        for i in range(volume_vertices.size()):
+            colors.append(Color(0.36, 0.38, 0.35))
+    var volume_indices: PackedInt32Array = volume_arrays.get("indices", PackedInt32Array())
+    if volume_indices.is_empty():
+        for i in range(volume_vertices.size()):
+            indices.append(volume_offset + i)
+    else:
+        for index in volume_indices:
+            indices.append(volume_offset + int(index))
+    return {
+        "vertices": vertices,
+        "normals": normals,
+        "colors": colors,
+        "indices": indices
+    }
+
+func full_exterior_indices() -> PackedInt32Array:
+    if not full_exterior_indices_cache.is_empty():
+        return full_exterior_indices_cache
+    var grid_size := CHUNK_SIZE + 1
+    full_exterior_indices_cache.resize(CHUNK_SIZE * CHUNK_SIZE * 6)
+    var write_index := 0
+    for z in range(CHUNK_SIZE):
+        var row := z * grid_size
+        var next_row := (z + 1) * grid_size
+        for x in range(CHUNK_SIZE):
+            var i00 := row + x
+            var i10 := i00 + 1
+            var i01 := next_row + x
+            var i11 := i01 + 1
+            full_exterior_indices_cache[write_index] = i00
+            full_exterior_indices_cache[write_index + 1] = i01
+            full_exterior_indices_cache[write_index + 2] = i10
+            full_exterior_indices_cache[write_index + 3] = i10
+            full_exterior_indices_cache[write_index + 4] = i01
+            full_exterior_indices_cache[write_index + 5] = i11
+            write_index += 6
+    return full_exterior_indices_cache
+
+func exterior_indices_for_surface(start_x: int, start_z: int, surface_cache: PackedFloat32Array, border_size: int, brushes: Array) -> PackedInt32Array:
+    if brushes.is_empty():
+        return full_exterior_indices()
+    var grid_size := CHUNK_SIZE + 1
+    var indices := PackedInt32Array()
+    for z in range(CHUNK_SIZE):
+        var row := z * grid_size
+        var next_row := (z + 1) * grid_size
+        for x in range(CHUNK_SIZE):
+            if exterior_surface_quad_cut_by_excavation(start_x, start_z, x, z, surface_cache, border_size, brushes):
+                continue
+            var i00 := row + x
+            var i10 := i00 + 1
+            var i01 := next_row + x
+            var i11 := i01 + 1
+            indices.append(i00)
+            indices.append(i01)
+            indices.append(i10)
+            indices.append(i10)
+            indices.append(i01)
+            indices.append(i11)
+    return indices
+
+func exterior_surface_quad_cut_by_excavation(start_x: int, start_z: int, local_x: int, local_z: int, surface_cache: PackedFloat32Array, border_size: int, brushes: Array) -> bool:
+    var cell_x := start_x + local_x
+    var cell_z := start_z + local_z
+    var center_x := (float(cell_x) + 0.5) * CELL
+    var center_z := (float(cell_z) + 0.5) * CELL
+    var surface_y := exterior_surface_quad_average_y(surface_cache, local_x, local_z, border_size)
+    for brush_value in brushes:
+        if not (brush_value is Dictionary):
+            continue
+        var brush: Dictionary = brush_value
+        var brush_center: Vector3 = brush.get("center", Vector3.ZERO)
+        var brush_radius := float(brush.get("radius", 0.0))
+        if brush_radius <= 0.0:
+            continue
+        var horizontal_distance := Vector2(brush_center.x - center_x, brush_center.z - center_z).length()
+        if horizontal_distance > brush_radius + CELL * 0.35:
+            continue
+        if absf(brush_center.y - surface_y) > brush_radius + CELL * 0.95:
+            continue
+        return true
+    return false
+
+func exterior_surface_quad_average_y(surface_cache: PackedFloat32Array, local_x: int, local_z: int, border_size: int) -> float:
+    var i00 := (local_z + 1) * border_size + local_x + 1
+    var i10 := i00 + 1
+    var i01 := i00 + border_size
+    var i11 := i01 + 1
+    return (float(surface_cache[i00]) + float(surface_cache[i10]) + float(surface_cache[i01]) + float(surface_cache[i11])) * 0.25
+
+func append_density_boundary_faces_for_cell(
+    vertices: PackedVector3Array,
+    normals: PackedVector3Array,
+    colors: PackedColorArray,
+    cell: Vector3i,
+    origin_x: int,
+    origin_z: int,
+    sample_cache: Dictionary,
+    volume_context: Dictionary
+) -> int:
+    var air_sample := volume_cell_center_sample(cell, sample_cache, volume_context)
+    if not volume_sample_is_subtracted_air(air_sample):
+        return 0
+    var face_count := 0
+    var directions := [
+        Vector3i(1, 0, 0),
+        Vector3i(-1, 0, 0),
+        Vector3i(0, 1, 0),
+        Vector3i(0, -1, 0),
+        Vector3i(0, 0, 1),
+        Vector3i(0, 0, -1)
+    ]
+    for direction in directions:
+        var neighbor_cell: Vector3i = cell + direction
+        var solid_sample := volume_cell_center_sample(neighbor_cell, sample_cache, volume_context)
+        if float(solid_sample.get("density", 0.0)) < 0.0:
+            continue
+        append_density_boundary_face(vertices, normals, colors, cell, direction, origin_x, origin_z, air_sample, solid_sample, volume_context)
+        face_count += 1
+    return face_count
+
+func volume_cell_center_sample(cell: Vector3i, sample_cache: Dictionary, volume_context: Dictionary) -> Dictionary:
+    if sample_cache.has(cell):
+        return sample_cache[cell]
+    var position := Vector3((float(cell.x) + 0.5) * CELL, (float(cell.y) + 0.5) * CELL, (float(cell.z) + 0.5) * CELL)
+    var sample := volume_sample_from_context(position, cell, volume_context) if not volume_context.is_empty() else volume_sample_world(position)
+    sample_cache[cell] = sample
+    return sample
+
+func volume_sample_is_subtracted_air(sample: Dictionary) -> bool:
+    if float(sample.get("density", 0.0)) >= 0.0:
+        return false
+    if String(sample.get("biome", "")) == "underground_air":
+        return true
+    var position: Vector3 = sample.get("position", Vector3.ZERO)
+    var surface_y := float(sample.get("surfaceY", position.y))
+    return position.y < surface_y - CELL * 0.20
+
+func append_density_boundary_face(
+    vertices: PackedVector3Array,
+    normals: PackedVector3Array,
+    colors: PackedColorArray,
+    cell: Vector3i,
+    direction: Vector3i,
+    origin_x: int,
+    origin_z: int,
+    air_sample: Dictionary,
+    solid_sample: Dictionary,
+    volume_context: Dictionary
+) -> void:
+    var corners := density_boundary_face_corners(cell, direction)
+    var normal := Vector3(-float(direction.x), -float(direction.y), -float(direction.z)).normalized()
+    var color := volume_boundary_face_color(corners[0], air_sample, solid_sample, normal, volume_context)
+    append_density_boundary_triangle(vertices, normals, colors, corners[0], corners[1], corners[2], normal, color, origin_x, origin_z)
+    append_density_boundary_triangle(vertices, normals, colors, corners[0], corners[2], corners[3], normal, color, origin_x, origin_z)
+
+func density_boundary_face_corners(cell: Vector3i, direction: Vector3i) -> Array[Vector3]:
+    var x0 := float(cell.x) * CELL
+    var x1 := float(cell.x + 1) * CELL
+    var y0 := float(cell.y) * CELL
+    var y1 := float(cell.y + 1) * CELL
+    var z0 := float(cell.z) * CELL
+    var z1 := float(cell.z + 1) * CELL
+    if direction == Vector3i(1, 0, 0):
+        return [Vector3(x1, y0, z0), Vector3(x1, y1, z0), Vector3(x1, y1, z1), Vector3(x1, y0, z1)]
+    if direction == Vector3i(-1, 0, 0):
+        return [Vector3(x0, y0, z1), Vector3(x0, y1, z1), Vector3(x0, y1, z0), Vector3(x0, y0, z0)]
+    if direction == Vector3i(0, 1, 0):
+        return [Vector3(x0, y1, z1), Vector3(x1, y1, z1), Vector3(x1, y1, z0), Vector3(x0, y1, z0)]
+    if direction == Vector3i(0, -1, 0):
+        return [Vector3(x0, y0, z0), Vector3(x1, y0, z0), Vector3(x1, y0, z1), Vector3(x0, y0, z1)]
+    if direction == Vector3i(0, 0, 1):
+        return [Vector3(x1, y0, z1), Vector3(x1, y1, z1), Vector3(x0, y1, z1), Vector3(x0, y0, z1)]
+    return [Vector3(x0, y0, z0), Vector3(x0, y1, z0), Vector3(x1, y1, z0), Vector3(x1, y0, z0)]
+
+func append_density_boundary_triangle(
+    vertices: PackedVector3Array,
+    normals: PackedVector3Array,
+    colors: PackedColorArray,
+    a_world: Vector3,
+    b_world: Vector3,
+    c_world: Vector3,
+    normal: Vector3,
+    color: Color,
+    origin_x: int,
+    origin_z: int
+) -> void:
+    var a_local := Vector3(a_world.x - float(origin_x) * CELL, a_world.y, a_world.z - float(origin_z) * CELL)
+    var b_local := Vector3(b_world.x - float(origin_x) * CELL, b_world.y, b_world.z - float(origin_z) * CELL)
+    var c_local := Vector3(c_world.x - float(origin_x) * CELL, c_world.y, c_world.z - float(origin_z) * CELL)
+    var cross := (b_local - a_local).cross(c_local - a_local)
+    if cross.length_squared() <= 0.000001:
+        return
+    if cross.normalized().dot(normal) < 0.0:
+        var swap := b_local
+        b_local = c_local
+        c_local = swap
+    vertices.append(a_local)
+    vertices.append(b_local)
+    vertices.append(c_local)
+    normals.append(normal)
+    normals.append(normal)
+    normals.append(normal)
+    colors.append(color)
+    colors.append(color)
+    colors.append(color)
+
+func volume_boundary_face_color(world: Vector3, air_sample: Dictionary, solid_sample: Dictionary, normal: Vector3, volume_context: Dictionary) -> Color:
+    var shade := volume_iso_shade(world)
+    if String(air_sample.get("biome", "")) == "underground_air":
+        shade *= underground_wall_visual_shade(world)
+        if normal.y < -0.35:
+            return Color(0.055, 0.060, 0.060) * shade
+        if normal.y > 0.35:
+            return Color(0.150, 0.158, 0.142) * shade
+        return Color(0.170, 0.182, 0.170) * shade
+    var solid_cell: Vector3i = solid_sample.get("cell", Vector3i(world_to_cell(world.x), world_to_cell(world.y), world_to_cell(world.z)))
+    var surface_y := float(solid_sample.get("surfaceY", volume_context_surface_y_at_cell(solid_cell.x, solid_cell.z, volume_context) if not volume_context.is_empty() else chunk_bound_surface_y_at_cell(Vector3i(solid_cell.x, 0, solid_cell.z))))
+    var density := float(solid_sample.get("density", surface_y - world.y))
+    var biome := volume_context_surface_biome_at_cell(solid_cell.x, solid_cell.z, volume_context) if not volume_context.is_empty() else surface_biome_at_cell(Vector3i(solid_cell.x, 0, solid_cell.z))
+    var material_id := volume_material_from_components(world, solid_cell, density, surface_y, biome)
+    if normal.y > 0.42 and material_id in ["grass", "mud", "snow"]:
+        return BIOME_COLORS.get(biome, BIOME_COLORS["plains"]) * shade
+    match material_id:
+        "sand":
+            return Color(0.62, 0.57, 0.42) * shade
+        "mud":
+            return Color(0.30, 0.35, 0.25) * shade
+        "snow":
+            return Color(0.77, 0.82, 0.82) * shade
+        "dirt":
+            return Color(0.32, 0.27, 0.18) * shade
+        "copperOre":
+            return Color(0.48, 0.30, 0.20) * shade
+        "ironOre":
+            return Color(0.40, 0.39, 0.36) * shade
+        _:
+            return Color(0.36, 0.38, 0.35) * shade
+
+func add_terrain_array_surface(mesh: ArrayMesh, surface_data: Dictionary, material: Material = null) -> void:
+    var vertices: PackedVector3Array = surface_data.get("vertices", PackedVector3Array())
+    if vertices.is_empty():
+        return
+    var arrays := []
+    arrays.resize(Mesh.ARRAY_MAX)
+    arrays[Mesh.ARRAY_VERTEX] = vertices
+    arrays[Mesh.ARRAY_NORMAL] = surface_data.get("normals", PackedVector3Array())
+    arrays[Mesh.ARRAY_COLOR] = surface_data.get("colors", PackedColorArray())
+    var indices: PackedInt32Array = surface_data.get("indices", PackedInt32Array())
+    if not indices.is_empty():
+        arrays[Mesh.ARRAY_INDEX] = indices
+    mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+    mesh.surface_set_material(mesh.get_surface_count() - 1, material if material != null else terrain_material)
+
+func add_natural_exterior_surface(st: SurfaceTool, start_x: int, start_z: int) -> void:
     var grid_size := CHUNK_SIZE + 3
     var surface_cache := PackedFloat32Array()
     surface_cache.resize(grid_size * grid_size)
@@ -180,9 +844,8 @@ func add_natural_exterior_surface(st: SurfaceTool, start_x: int, start_z: int, c
             var p10 := exterior_surface_vertex_grid(surface_cache, x + 1, z, grid_size)
             var p01 := exterior_surface_vertex_grid(surface_cache, x, z + 1, grid_size)
             var p11 := exterior_surface_vertex_grid(surface_cache, x + 1, z + 1, grid_size)
-            var check_cave_air := exterior_cell_may_touch_cave(cave_features, gx, gz)
-            add_exterior_surface_triangle_grid(st, p00, p01, p10, color_cache, normal_cache, x, z, x, z + 1, x + 1, z, grid_size, start_x, start_z, check_cave_air)
-            add_exterior_surface_triangle_grid(st, p10, p01, p11, color_cache, normal_cache, x + 1, z, x, z + 1, x + 1, z + 1, grid_size, start_x, start_z, check_cave_air)
+            add_exterior_surface_triangle_grid(st, p00, p01, p10, color_cache, normal_cache, x, z, x, z + 1, x + 1, z, grid_size)
+            add_exterior_surface_triangle_grid(st, p10, p01, p11, color_cache, normal_cache, x + 1, z, x, z + 1, x + 1, z + 1, grid_size)
 
 func exterior_surface_vertex_grid(surface_cache: PackedFloat32Array, vx: int, vz: int, grid_size: int) -> Vector3:
     var cache_index := (vz + 1) * grid_size + vx + 1
@@ -214,13 +877,8 @@ func add_exterior_surface_triangle_grid(
     cell_bz: int,
     cell_cx: int,
     cell_cz: int,
-    grid_size: int,
-    origin_cell_x: int,
-    origin_cell_z: int,
-    check_cave_air := false
+    grid_size: int
 ) -> void:
-    if check_cave_air and exterior_surface_triangle_opens_to_cave_air(a, b, c, origin_cell_x, origin_cell_z):
-        return
     add_exterior_surface_vertex_grid(st, a, color_cache, normal_cache, cell_ax, cell_az, grid_size)
     add_exterior_surface_vertex_grid(st, b, color_cache, normal_cache, cell_bx, cell_bz, grid_size)
     add_exterior_surface_vertex_grid(st, c, color_cache, normal_cache, cell_cx, cell_cz, grid_size)
@@ -245,42 +903,11 @@ func add_exterior_surface_triangle(
     normal_cache: Dictionary,
     cell_a: Vector2i,
     cell_b: Vector2i,
-    cell_c: Vector2i,
-    origin_cell_x: int,
-    origin_cell_z: int,
-    check_cave_air := false
+    cell_c: Vector2i
 ) -> void:
-    if check_cave_air and exterior_surface_triangle_opens_to_cave_air(a, b, c, origin_cell_x, origin_cell_z):
-        return
     add_exterior_surface_vertex(st, a, color_cache, normal_cache, cell_a.x, cell_a.y)
     add_exterior_surface_vertex(st, b, color_cache, normal_cache, cell_b.x, cell_b.y)
     add_exterior_surface_vertex(st, c, color_cache, normal_cache, cell_c.x, cell_c.y)
-
-func exterior_cell_may_touch_cave(cave_features: Array, cell_x: int, cell_z: int) -> bool:
-    if cave_features.is_empty():
-        return false
-    for feature in cave_features:
-        if cave_feature_may_touch_mesh_cell(feature, cell_x, cell_z):
-            return true
-    return false
-
-func exterior_surface_triangle_opens_to_cave_air(a: Vector3, b: Vector3, c: Vector3, origin_cell_x: int, origin_cell_z: int) -> bool:
-    if world_generation_system == null or not world_generation_system.has_method("sample_world"):
-        return false
-    var world_a := Vector3(a.x + float(origin_cell_x) * CELL, a.y, a.z + float(origin_cell_z) * CELL)
-    var world_b := Vector3(b.x + float(origin_cell_x) * CELL, b.y, b.z + float(origin_cell_z) * CELL)
-    var world_c := Vector3(c.x + float(origin_cell_x) * CELL, c.y, c.z + float(origin_cell_z) * CELL)
-    var normal := (world_b - world_a).cross(world_c - world_a)
-    if normal.length_squared() <= 0.0001:
-        normal = Vector3.UP
-    else:
-        normal = normal.normalized()
-    var center := (world_a + world_b + world_c) / 3.0
-    for depth in [CELL * 0.32, CELL * 0.68, CELL * 1.05]:
-        var inward_sample := volume_sample_world(center - normal * float(depth))
-        if String(inward_sample.get("biome", "")) == "cave" and not bool(inward_sample.get("solid", true)):
-            return true
-    return false
 
 func exterior_surface_y_cell(cell_x: int, cell_z: int) -> float:
     var edit_key := Vector2i(cell_x, cell_z)
@@ -290,10 +917,124 @@ func exterior_surface_y_cell(cell_x: int, cell_z: int) -> float:
         return world_generation_system.surface_y_for_cell(Vector3i(cell_x, 0, cell_z))
     return 0.0
 
+func exterior_surface_chunk_context(start_x: int, start_z: int) -> Dictionary:
+    var context := {
+        "towns": [],
+        "hasSurfaceDeformation": world_generation_system != null and world_generation_system.has_method("has_surface_deformation") and bool(world_generation_system.call("has_surface_deformation"))
+    }
+    if world_generation_system == null or not world_generation_system.has_method("town_slope_apron_cells"):
+        return context
+    var min_x := start_x - 1
+    var max_x := start_x + CHUNK_SIZE + 1
+    var min_z := start_z - 1
+    var max_z := start_z + CHUNK_SIZE + 1
+    var region_min_x := floori(float(min_x) / float(TOWN_REGION_CELLS)) - 1
+    var region_max_x := floori(float(max_x) / float(TOWN_REGION_CELLS)) + 1
+    var region_min_z := floori(float(min_z) / float(TOWN_REGION_CELLS)) - 1
+    var region_max_z := floori(float(max_z) / float(TOWN_REGION_CELLS)) + 1
+    var towns: Array[Dictionary] = []
+    for rz in range(region_min_z, region_max_z + 1):
+        for rx in range(region_min_x, region_max_x + 1):
+            var town: Dictionary = town_region(rx, rz)
+            if town.is_empty():
+                continue
+            var center_x := float(town.get("centerX", 0))
+            var center_z := float(town.get("centerZ", 0))
+            var radius := float(town.get("radius", TOWN_RADIUS_CELLS))
+            var apron := float(world_generation_system.call("town_slope_apron_cells", town))
+            var influence_radius := radius + apron
+            var nearest_x := clampf(center_x, float(min_x), float(max_x))
+            var nearest_z := clampf(center_z, float(min_z), float(max_z))
+            var distance := Vector2(center_x - nearest_x, center_z - nearest_z).length()
+            if distance > influence_radius + 1.0:
+                continue
+            towns.append({
+                "centerX": center_x,
+                "centerZ": center_z,
+                "radius": radius,
+                "apron": apron,
+                "level": float(town.get("level", float(WATER_LEVEL) + 3.0))
+            })
+    context["towns"] = towns
+    return context
+
+func exterior_surface_y_cell_from_context(cell_x: int, cell_z: int, context: Dictionary) -> float:
+    var edit_key := Vector2i(cell_x, cell_z)
+    if volume_edit_markers.has(edit_key):
+        return float(volume_edit_markers[edit_key])
+    if bool(context.get("hasSurfaceDeformation", false)) and world_generation_system != null and world_generation_system.has_method("surface_y_for_cell"):
+        return float(world_generation_system.call("surface_y_for_cell", Vector3i(cell_x, 0, cell_z)))
+    var towns_value = context.get("towns", [])
+    var towns: Array = towns_value if towns_value is Array else []
+    var best_town := {}
+    var best_distance := INF
+    for town_value in towns:
+        if not (town_value is Dictionary):
+            continue
+        var town: Dictionary = town_value
+        var center_x := float(town.get("centerX", 0.0))
+        var center_z := float(town.get("centerZ", 0.0))
+        var distance := Vector2(float(cell_x) - center_x, float(cell_z) - center_z).length()
+        var max_distance := float(town.get("radius", TOWN_RADIUS_CELLS)) + float(town.get("apron", 18.0))
+        if distance <= max_distance and distance < best_distance:
+            best_town = town
+            best_distance = distance
+    if best_town.is_empty():
+        return natural_exterior_surface_y_cell(cell_x, cell_z)
+    var radius := float(best_town.get("radius", TOWN_RADIUS_CELLS))
+    var level := float(best_town.get("level", float(WATER_LEVEL) + 3.0))
+    if best_distance <= radius:
+        return level
+    var natural := natural_exterior_surface_y_cell(cell_x, cell_z)
+    var apron := float(best_town.get("apron", 18.0))
+    var blend := clampf((best_distance - radius) / maxf(1.0, apron), 0.0, 1.0)
+    var eased := blend * blend * (3.0 - 2.0 * blend)
+    return lerp(level, natural, eased)
+
+func natural_exterior_surface_y_cell(cell_x: int, cell_z: int) -> float:
+    if world_generation_system != null and world_generation_system.has_method("natural_surface_y_for_cell"):
+        return float(world_generation_system.call("natural_surface_y_for_cell", Vector3i(cell_x, 0, cell_z)))
+    if world_generation_system != null:
+        return world_generation_system.surface_y_for_cell(Vector3i(cell_x, 0, cell_z))
+    return 0.0
+
 func exterior_surface_color_for_cell(cell_x: int, cell_z: int) -> Color:
     if world_generation_system != null:
         return world_generation_system.surface_color_for_cell3(Vector3i(cell_x, 0, cell_z))
     return BIOME_COLORS.get(surface_biome_at_cell(Vector3i(cell_x, 0, cell_z)), BIOME_COLORS["plains"])
+
+func exterior_surface_color_for_cell_from_context(cell_x: int, cell_z: int, surface_y: float, context: Dictionary) -> Color:
+    if exterior_surface_context_contains_town_cell(cell_x, cell_z, context):
+        return Color(0.37, 0.47, 0.34)
+    var moisture: float = noise01(moisture_noise, cell_x - 1200, cell_z + 800)
+    var temp: float = clampf(0.42 + noise01(temp_noise, cell_x + 1500, cell_z - 900) * 0.46 - abs(cell_z) / 1300.0 - maxf(0.0, surface_y - 38.0) / 180.0, 0.0, 1.0)
+    if surface_y < float(WATER_LEVEL) + 1.7:
+        return Color(0.62, 0.57, 0.42)
+    if surface_y > 78.0:
+        return Color(0.77, 0.82, 0.82)
+    if surface_y > 56.0:
+        return Color(0.38, 0.41, 0.39)
+    if surface_y > 42.0 and moisture < 0.5:
+        return Color(0.38, 0.41, 0.39)
+    if moisture > 0.78 and surface_y < float(WATER_LEVEL) + 6.0:
+        return Color(0.30, 0.38, 0.29)
+    if temp > 0.68 and moisture < 0.32:
+        return Color(0.62, 0.57, 0.42)
+    return Color(0.37, 0.47, 0.34)
+
+func exterior_surface_context_contains_town_cell(cell_x: int, cell_z: int, context: Dictionary) -> bool:
+    var towns_value = context.get("towns", [])
+    var towns: Array = towns_value if towns_value is Array else []
+    for town_value in towns:
+        if not (town_value is Dictionary):
+            continue
+        var town: Dictionary = town_value
+        var center_x := float(town.get("centerX", 0.0))
+        var center_z := float(town.get("centerZ", 0.0))
+        var radius := float(town.get("radius", TOWN_RADIUS_CELLS))
+        if Vector2(float(cell_x) - center_x, float(cell_z) - center_z).length() <= radius:
+            return true
+    return false
 
 func exterior_surface_normal_cached(surface_cache: Dictionary, cell_x: int, cell_z: int) -> Vector3:
     var left := exterior_surface_y_from_cache(surface_cache, cell_x - 1, cell_z)
@@ -306,10 +1047,100 @@ func exterior_surface_y_from_cache(surface_cache: Dictionary, cell_x: int, cell_
     var key := Vector2i(cell_x, cell_z)
     return float(surface_cache[key]) if surface_cache.has(key) else exterior_surface_y_cell(cell_x, cell_z)
 
-func chunk_volume_y_bounds(start_x: int, start_z: int) -> Dictionary:
-    return chunk_volume_y_bounds_from_features(start_x, start_z, chunk_cave_features(start_x, start_z))
+func chunk_needs_generated_underground_volume_mesh(start_x: int, start_z: int) -> bool:
+    if not force_underground_volume_debug:
+        return false
+    if world_generation_system == null or not world_generation_system.has_method("sample_world"):
+        return false
+    if chunk_has_underground_focus_overlap(start_x, start_z):
+        return true
+    var step := maxi(1, UNDERGROUND_VOLUME_COARSE_STEP_CELLS)
+    for z in range(start_z - step, start_z + CHUNK_SIZE + step + 1, step):
+        for x in range(start_x - step, start_x + CHUNK_SIZE + step + 1, step):
+            var surface_y := chunk_bound_surface_y_at_cell(Vector3i(x, 0, z))
+            var surface_cell_y := floori(surface_y / CELL)
+            var min_cell_y := surface_cell_y - UNDERGROUND_GENERATED_DEPTH_CELLS
+            for y in range(surface_cell_y - step, min_cell_y - 1, -step):
+                var position := Vector3(float(x) * CELL, float(y) * CELL, float(z) * CELL)
+                var sample: Dictionary = world_generation_system.call("sample_world", position)
+                if String(sample.get("biome", "")) == "underground_air" and not bool(sample.get("solid", true)):
+                    return true
+    return false
 
-func chunk_volume_y_bounds_from_features(start_x: int, start_z: int, cave_features: Array) -> Dictionary:
+func chunk_has_underground_focus_overlap(start_x: int, start_z: int) -> bool:
+    if player == null:
+        return false
+    var focus := player.global_position
+    if world_generation_system != null and world_generation_system.has_method("sample_world"):
+        var focus_sample: Dictionary = world_generation_system.call("sample_world", focus)
+        if String(focus_sample.get("biome", "")) != "underground_air" and bool(focus_sample.get("solid", false)):
+            return false
+    var radius := float(maxi(UNDERGROUND_VOLUME_FOCUS_RADIUS_CELLS, UNDERGROUND_VOLUME_FOCUS_STEP_CELLS)) * CELL
+    var min_x := float(start_x) * CELL - radius
+    var max_x := float(start_x + CHUNK_SIZE) * CELL + radius
+    var min_z := float(start_z) * CELL - radius
+    var max_z := float(start_z + CHUNK_SIZE) * CELL + radius
+    return focus.x >= min_x and focus.x <= max_x and focus.z >= min_z and focus.z <= max_z
+
+func chunk_has_excavation_overlap(start_x: int, start_z: int) -> bool:
+    var brushes := active_volume_excavation_brushes()
+    if brushes.is_empty():
+        return false
+    var min_x := float(start_x) * CELL - CELL
+    var max_x := float(start_x + CHUNK_SIZE) * CELL + CELL
+    var min_z := float(start_z) * CELL - CELL
+    var max_z := float(start_z + CHUNK_SIZE) * CELL + CELL
+    for brush_value in brushes:
+        if not (brush_value is Dictionary):
+            continue
+        var brush: Dictionary = brush_value
+        var center: Vector3 = brush.get("center", Vector3.ZERO)
+        var radius := float(brush.get("radius", 0.0))
+        if radius <= 0.0:
+            continue
+        if center.x + radius < min_x or center.x - radius > max_x:
+            continue
+        if center.z + radius < min_z or center.z - radius > max_z:
+            continue
+        return true
+    return false
+
+func excavation_volume_y_bounds_for_chunk(start_x: int, start_z: int) -> Dictionary:
+    var min_y := 999999
+    var max_y := -999999
+    var found := false
+    var chunk_min_x := float(start_x) * CELL - CELL
+    var chunk_max_x := float(start_x + CHUNK_SIZE) * CELL + CELL
+    var chunk_min_z := float(start_z) * CELL - CELL
+    var chunk_max_z := float(start_z + CHUNK_SIZE) * CELL + CELL
+    for brush_value in active_volume_excavation_brushes():
+        if not (brush_value is Dictionary):
+            continue
+        var brush: Dictionary = brush_value
+        var center: Vector3 = brush.get("center", Vector3.ZERO)
+        var radius := float(brush.get("radius", 0.0))
+        if radius <= 0.0:
+            continue
+        if center.x + radius < chunk_min_x or center.x - radius > chunk_max_x:
+            continue
+        if center.z + radius < chunk_min_z or center.z - radius > chunk_max_z:
+            continue
+        var center_y := world_to_cell(center.y)
+        var radius_cells := ceili(radius / CELL) + 3
+        min_y = mini(min_y, center_y - radius_cells)
+        max_y = maxi(max_y, center_y + radius_cells)
+        found = true
+    if not found:
+        return {
+            "minY": 0,
+            "maxY": 0
+        }
+    return {
+        "minY": min_y,
+        "maxY": max_y
+    }
+
+func chunk_volume_y_bounds(start_x: int, start_z: int) -> Dictionary:
     var min_height := INF
     var max_height := -INF
     for z in range(start_z - 2, start_z + CHUNK_SIZE + 3):
@@ -320,175 +1151,60 @@ func chunk_volume_y_bounds_from_features(start_x: int, start_z: int, cave_featur
     if min_height == INF:
         min_height = MIN_HEIGHT
         max_height = MAX_HEIGHT
-    var min_bound: float = min_height - CELL * 4.0
-    var max_bound: float = max_height + CELL * 3.0
-    for feature in cave_features:
-        var radius := float(feature.get("radius", CELL * 2.0))
-        var chamber_radius := float(feature.get("chamberRadius", radius * 1.8))
-        var drop := float(feature.get("drop", CELL * 4.0))
-        var entrance_surface := float(feature.get("entranceSurfaceY", min_height))
-        var cave_extent := maxf(radius, chamber_radius)
-        min_bound = minf(min_bound, entrance_surface - drop - cave_extent * 1.70 - CELL * 2.0)
-        max_bound = maxf(max_bound, entrance_surface + cave_extent * 1.20 + CELL * 2.0)
+    var min_bound: float = min_height - float(UNDERGROUND_GENERATED_DEPTH_CELLS) * CELL - UNDERGROUND_VOLUME_Y_PADDING
+    var max_bound: float = max_height + CELL * 2.0
     return {
         "minY": floori(min_bound / CELL),
         "maxY": ceili(max_bound / CELL)
     }
 
-func column_volume_y_bounds(cell_x: int, cell_z: int, chunk_min_y: int, chunk_max_y: int, cave_features: Array) -> Dictionary:
+func column_volume_y_bounds(cell_x: int, cell_z: int, chunk_min_y: int, chunk_max_y: int) -> Dictionary:
     var surface := chunk_bound_surface_y_at_cell(Vector3i(cell_x, 0, cell_z))
-    var min_bound := surface - CELL * 4.0
-    var max_bound := surface + CELL * 3.0
-    for feature in cave_features:
-        if not cave_feature_may_touch_column(feature, cell_x, cell_z):
-            continue
-        var radius := float(feature.get("radius", CELL * 2.0))
-        var chamber_radius := float(feature.get("chamberRadius", radius * 1.8))
-        var drop := float(feature.get("drop", CELL * 4.0))
-        var entrance_surface := float(feature.get("entranceSurfaceY", surface))
-        var cave_extent := maxf(radius, chamber_radius)
-        min_bound = minf(min_bound, entrance_surface - drop - cave_extent * 1.70 - CELL * 2.0)
-        max_bound = maxf(max_bound, entrance_surface + cave_extent * 1.20 + CELL * 2.0)
+    var min_bound := surface - float(UNDERGROUND_GENERATED_DEPTH_CELLS) * CELL - UNDERGROUND_VOLUME_Y_PADDING
+    var max_bound := surface + CELL * 2.0
     return {
         "minY": clampi(floori(min_bound / CELL), chunk_min_y, chunk_max_y),
         "maxY": clampi(ceili(max_bound / CELL), chunk_min_y, chunk_max_y)
     }
 
-func mesh_cell_volume_y_bounds(cell_x: int, cell_z: int, chunk_min_y: int, chunk_max_y: int, cave_features: Array) -> Dictionary:
-    var min_surface := INF
-    var max_surface := -INF
-    for dz in [0, 1]:
-        for dx in [0, 1]:
-            var surface := chunk_bound_surface_y_at_cell(Vector3i(cell_x + int(dx), 0, cell_z + int(dz)))
-            min_surface = minf(min_surface, surface)
-            max_surface = maxf(max_surface, surface)
-    if min_surface == INF:
-        min_surface = MIN_HEIGHT
-        max_surface = MAX_HEIGHT
-    var min_bound := min_surface - CELL * 4.0
-    var max_bound := max_surface + CELL * 3.0
-    for feature in cave_features:
-        if not cave_feature_may_touch_mesh_cell(feature, cell_x, cell_z):
-            continue
-        var radius := float(feature.get("radius", CELL * 2.0))
-        var chamber_radius := float(feature.get("chamberRadius", radius * 1.8))
-        var drop := float(feature.get("drop", CELL * 4.0))
-        var entrance_surface := float(feature.get("entranceSurfaceY", min_surface))
-        var cave_extent := maxf(radius, chamber_radius)
-        min_bound = minf(min_bound, entrance_surface - drop - cave_extent * 1.70 - CELL * 2.0)
-        max_bound = maxf(max_bound, entrance_surface + cave_extent * 1.20 + CELL * 2.0)
+func mesh_block_volume_y_bounds(cell_x: int, cell_z: int, step_cells: int, chunk_min_y: int, chunk_max_y: int) -> Dictionary:
+    var min_bound := chunk_max_y
+    var max_bound := chunk_min_y
+    var found := false
+    var step := maxi(1, step_cells)
+    for dz in range(step):
+        for dx in range(step):
+            var bounds := column_volume_y_bounds(cell_x + dx, cell_z + dz, chunk_min_y, chunk_max_y)
+            var bound_min := int(bounds.get("minY", chunk_min_y))
+            var bound_max := int(bounds.get("maxY", chunk_min_y))
+            if bound_max <= bound_min:
+                continue
+            min_bound = mini(min_bound, bound_min)
+            max_bound = maxi(max_bound, bound_max)
+            found = true
+    if not found:
+        return {
+            "minY": chunk_min_y,
+            "maxY": chunk_min_y
+        }
     return {
-        "minY": clampi(floori(min_bound / CELL) - 1, chunk_min_y, chunk_max_y),
-        "maxY": clampi(ceili(max_bound / CELL) + 1, chunk_min_y, chunk_max_y)
+        "minY": min_bound,
+        "maxY": max_bound
     }
-
-func cave_feature_may_touch_mesh_cell(feature: Dictionary, cell_x: int, cell_z: int) -> bool:
-    if cave_feature_may_touch_column(feature, cell_x, cell_z):
-        return true
-    if cave_feature_may_touch_column(feature, cell_x + 1, cell_z):
-        return true
-    if cave_feature_may_touch_column(feature, cell_x, cell_z + 1):
-        return true
-    return cave_feature_may_touch_column(feature, cell_x + 1, cell_z + 1)
 
 func chunk_bound_surface_y_at_cell(cell: Vector3i) -> float:
     if world_generation_system != null:
-        return world_generation_system.terrain_reference_surface_y_for_cell(cell)
+        return world_generation_system.surface_y_for_cell(cell)
     return surface_y_at_cell(cell)
 
-func chunk_cave_features(start_x: int, start_z: int) -> Array[Dictionary]:
-    var features: Array[Dictionary] = []
-    if world_generation_system == null or not world_generation_system.has_method("cave_features_near_world"):
-        return features
-    var seen := {}
-    for dz in [-1, 0, 1]:
-        for dx in [-1, 0, 1]:
-            var sample_cell_x := start_x + CHUNK_SIZE / 2 + int(dx) * CHUNK_SIZE
-            var sample_cell_z := start_z + CHUNK_SIZE / 2 + int(dz) * CHUNK_SIZE
-            var sample_world := Vector3(float(sample_cell_x) * CELL, 0.0, float(sample_cell_z) * CELL)
-            var nearby = world_generation_system.call("cave_features_near_world", sample_world)
-            if not (nearby is Array):
-                continue
-            for feature_value in nearby:
-                if not (feature_value is Dictionary):
-                    continue
-                var feature: Dictionary = feature_value
-                var feature_id := String(feature.get("id", ""))
-                if feature_id == "" or seen.has(feature_id):
-                    continue
-                if not cave_feature_may_touch_chunk(feature, start_x, start_z):
-                    continue
-                seen[feature_id] = true
-                features.append(feature)
-    return features
-
-func cave_feature_may_touch_chunk(feature: Dictionary, start_x: int, start_z: int) -> bool:
-    var entrance_cell: Vector2i = feature.get("entranceCell", Vector2i.ZERO)
-    var inward_cell: Vector2i = feature.get("inward", Vector2i(0, 1))
-    var right_cell: Vector2i = feature.get("right", Vector2i(1, 0))
-    var inward := Vector2(float(inward_cell.x), float(inward_cell.y)).normalized()
-    var right := Vector2(float(right_cell.x), float(right_cell.y)).normalized()
-    var radius_cells := float(feature.get("radius", CELL * 2.0)) / maxf(0.001, CELL)
-    var chamber_cells := float(feature.get("chamberRadius", CELL * 4.0)) / maxf(0.001, CELL)
-    var length_cells := float(feature.get("length", CELL * 24.0)) / maxf(0.001, CELL)
-    var branch_depth_cells := float(feature.get("branchDepth", CELL * 12.0)) / maxf(0.001, CELL)
-    var branch_length_cells := float(feature.get("branchLength", CELL * 10.0)) / maxf(0.001, CELL)
-    var branch_side := float(feature.get("branchSide", 1.0))
-    var entrance := Vector2(float(entrance_cell.x), float(entrance_cell.y))
-    var chamber := entrance + inward * length_cells
-    var branch_origin := entrance + inward * branch_depth_cells
-    var branch_dir := (inward * 0.34 + right * branch_side).normalized()
-    var branch_end := branch_origin + branch_dir * branch_length_cells
-    var margin := ceili(maxf(radius_cells, chamber_cells) + 4.0)
-    var min_x := floori(minf(entrance.x, minf(chamber.x, minf(branch_origin.x, branch_end.x)))) - margin
-    var max_x := ceili(maxf(entrance.x, maxf(chamber.x, maxf(branch_origin.x, branch_end.x)))) + margin
-    var min_z := floori(minf(entrance.y, minf(chamber.y, minf(branch_origin.y, branch_end.y)))) - margin
-    var max_z := ceili(maxf(entrance.y, maxf(chamber.y, maxf(branch_origin.y, branch_end.y)))) + margin
-    var chunk_min_x := start_x - 1
-    var chunk_max_x := start_x + CHUNK_SIZE + 1
-    var chunk_min_z := start_z - 1
-    var chunk_max_z := start_z + CHUNK_SIZE + 1
-    return max_x >= chunk_min_x and min_x <= chunk_max_x and max_z >= chunk_min_z and min_z <= chunk_max_z
-
-func cave_feature_may_touch_column(feature: Dictionary, cell_x: int, cell_z: int) -> bool:
-    var entrance_cell: Vector2i = feature.get("entranceCell", Vector2i.ZERO)
-    var inward_cell: Vector2i = feature.get("inward", Vector2i(0, 1))
-    var right_cell: Vector2i = feature.get("right", Vector2i(1, 0))
-    var inward := Vector2(float(inward_cell.x), float(inward_cell.y)).normalized()
-    var right := Vector2(float(right_cell.x), float(right_cell.y)).normalized()
-    var radius_cells := float(feature.get("radius", CELL * 2.0)) / maxf(0.001, CELL)
-    var chamber_cells := float(feature.get("chamberRadius", CELL * 4.0)) / maxf(0.001, CELL)
-    var length_cells := float(feature.get("length", CELL * 24.0)) / maxf(0.001, CELL)
-    var branch_depth_cells := float(feature.get("branchDepth", CELL * 12.0)) / maxf(0.001, CELL)
-    var branch_length_cells := float(feature.get("branchLength", CELL * 10.0)) / maxf(0.001, CELL)
-    var branch_side := float(feature.get("branchSide", 1.0))
-    var entrance := Vector2(float(entrance_cell.x), float(entrance_cell.y))
-    var chamber := entrance + inward * length_cells
-    var branch_origin := entrance + inward * branch_depth_cells
-    var branch_dir := (inward * 0.34 + right * branch_side).normalized()
-    var branch_end := branch_origin + branch_dir * branch_length_cells
-    var column := Vector2(float(cell_x), float(cell_z))
-    var margin := maxf(radius_cells, chamber_cells) + 4.0
-    if column.distance_to(chamber) <= chamber_cells + 4.0:
-        return true
-    if point_segment_distance(column, entrance, chamber) <= margin:
-        return true
-    return point_segment_distance(column, branch_origin, branch_end) <= margin
-
-func point_segment_distance(point: Vector2, a: Vector2, b: Vector2) -> float:
-    var ab := b - a
-    var ab_len_sq := ab.length_squared()
-    if ab_len_sq <= 0.0001:
-        return point.distance_to(a)
-    var t := clampf((point - a).dot(ab) / ab_len_sq, 0.0, 1.0)
-    return point.distance_to(a + ab * t)
-
-func volume_grid_sample(grid_cell: Vector3i, sample_cache: Dictionary) -> Dictionary:
+func volume_grid_sample(grid_cell: Vector3i, sample_cache: Dictionary, volume_context := {}) -> Dictionary:
     if sample_cache.has(grid_cell):
         return sample_cache[grid_cell]
     var position := Vector3(float(grid_cell.x) * CELL, float(grid_cell.y) * CELL, float(grid_cell.z) * CELL)
     var sample := {}
-    if world_generation_system != null and world_generation_system.has_method("sample_world"):
+    if not volume_context.is_empty():
+        sample = volume_sample_from_context(position, grid_cell, volume_context)
+    elif world_generation_system != null and world_generation_system.has_method("sample_world"):
         sample = world_generation_system.call("sample_world", position)
     elif world_generation_system != null and world_generation_system.has_method("sample_cell"):
         sample = world_generation_system.call("sample_cell", grid_cell)
@@ -507,33 +1223,878 @@ func volume_grid_sample(grid_cell: Vector3i, sample_cache: Dictionary) -> Dictio
     sample_cache[grid_cell] = sample
     return sample
 
-func extract_volume_iso_cube(st: SurfaceTool, base_cell: Vector3i, origin_x: int, origin_z: int, sample_cache: Dictionary) -> void:
-    var corners := []
+func volume_grid_sample_numeric(grid_cell: Vector3i, sample_cache: Dictionary, volume_context := {}) -> Vector3:
+    if sample_cache.has(grid_cell):
+        var cached = sample_cache[grid_cell]
+        if cached is Vector3:
+            return cached
+    var position := Vector3(float(grid_cell.x) * CELL, float(grid_cell.y) * CELL, float(grid_cell.z) * CELL)
+    var surface_y := 0.0
+    var generated_air_value := INF
+    var density := 0.0
+    if world_generation_system != null and world_generation_system.has_method("sample_world"):
+        var sample: Dictionary = world_generation_system.call("sample_world", position)
+        density = float(sample.get("density", 0.0))
+        generated_air_value = 0.0 if String(sample.get("biome", "")) == "underground_air" and not bool(sample.get("solid", true)) else INF
+        surface_y = float(sample.get("surfaceY", chunk_bound_surface_y_at_cell(Vector3i(grid_cell.x, 0, grid_cell.z))))
+    else:
+        surface_y = surface_y_at_cell(Vector3i(grid_cell.x, 0, grid_cell.z))
+        density = surface_y - position.y
+    var result := Vector3(density, generated_air_value, surface_y)
+    sample_cache[grid_cell] = result
+    return result
+
+func extract_volume_iso_cube_arrays(
+    vertices: PackedVector3Array,
+    normals: PackedVector3Array,
+    colors: PackedColorArray,
+    base_cell: Vector3i,
+    origin_x: int,
+    origin_z: int,
+    sample_cache: Dictionary,
+    volume_context := {},
+    step_cells := 1
+) -> void:
+    var local_positions: Array[Vector3] = []
+    var world_positions: Array[Vector3] = []
+    var densities := PackedFloat32Array()
+    var generated_air_values := PackedFloat32Array()
+    var surface_ys := PackedFloat32Array()
+    var solids: Array[bool] = []
+    local_positions.resize(8)
+    world_positions.resize(8)
+    densities.resize(8)
+    generated_air_values.resize(8)
+    surface_ys.resize(8)
+    solids.resize(8)
     var solid_count := 0
-    for offset in VOLUME_CUBE_CORNER_OFFSETS:
+    for index in range(VOLUME_CUBE_CORNER_OFFSETS.size()):
+        var offset: Vector3i = VOLUME_CUBE_CORNER_OFFSETS[index]
+        offset = Vector3i(offset.x * step_cells, offset.y * step_cells, offset.z * step_cells)
         var grid_cell: Vector3i = base_cell + offset
-        var sample := volume_grid_sample(grid_cell, sample_cache)
+        var sample := volume_grid_sample_numeric(grid_cell, sample_cache, volume_context)
+        var density := sample.x
+        var solid := density > 0.0
+        if solid:
+            solid_count += 1
+        local_positions[index] = Vector3(float(grid_cell.x - origin_x) * CELL, float(grid_cell.y) * CELL, float(grid_cell.z - origin_z) * CELL)
+        world_positions[index] = Vector3(float(grid_cell.x) * CELL, float(grid_cell.y) * CELL, float(grid_cell.z) * CELL)
+        densities[index] = density
+        generated_air_values[index] = sample.y
+        surface_ys[index] = sample.z
+        solids[index] = solid
+    if solid_count == 0 or solid_count == local_positions.size():
+        return
+    extract_volume_iso_tetrahedron_indices_numeric(vertices, normals, colors, 0, 5, 1, 6, local_positions, world_positions, densities, generated_air_values, surface_ys, solids, volume_context)
+    extract_volume_iso_tetrahedron_indices_numeric(vertices, normals, colors, 0, 1, 2, 6, local_positions, world_positions, densities, generated_air_values, surface_ys, solids, volume_context)
+    extract_volume_iso_tetrahedron_indices_numeric(vertices, normals, colors, 0, 2, 3, 6, local_positions, world_positions, densities, generated_air_values, surface_ys, solids, volume_context)
+    extract_volume_iso_tetrahedron_indices_numeric(vertices, normals, colors, 0, 3, 7, 6, local_positions, world_positions, densities, generated_air_values, surface_ys, solids, volume_context)
+    extract_volume_iso_tetrahedron_indices_numeric(vertices, normals, colors, 0, 7, 4, 6, local_positions, world_positions, densities, generated_air_values, surface_ys, solids, volume_context)
+    extract_volume_iso_tetrahedron_indices_numeric(vertices, normals, colors, 0, 4, 5, 6, local_positions, world_positions, densities, generated_air_values, surface_ys, solids, volume_context)
+
+func extract_volume_iso_tetrahedron_indices_numeric(
+    vertices: PackedVector3Array,
+    normals: PackedVector3Array,
+    colors: PackedColorArray,
+    i0: int,
+    i1: int,
+    i2: int,
+    i3: int,
+    local_positions: Array[Vector3],
+    world_positions: Array[Vector3],
+    densities: PackedFloat32Array,
+    generated_air_values: PackedFloat32Array,
+    surface_ys: PackedFloat32Array,
+    solids: Array[bool],
+    volume_context := {}
+) -> void:
+    var solid0 := -1
+    var solid1 := -1
+    var solid2 := -1
+    var air0 := -1
+    var air1 := -1
+    var air2 := -1
+    var solid_count := 0
+    var air_count := 0
+    if bool(solids[i0]):
+        solid0 = i0
+        solid_count += 1
+    else:
+        air0 = i0
+        air_count += 1
+    if bool(solids[i1]):
+        if solid_count == 0:
+            solid0 = i1
+        elif solid_count == 1:
+            solid1 = i1
+        else:
+            solid2 = i1
+        solid_count += 1
+    else:
+        if air_count == 0:
+            air0 = i1
+        elif air_count == 1:
+            air1 = i1
+        else:
+            air2 = i1
+        air_count += 1
+    if bool(solids[i2]):
+        if solid_count == 0:
+            solid0 = i2
+        elif solid_count == 1:
+            solid1 = i2
+        else:
+            solid2 = i2
+        solid_count += 1
+    else:
+        if air_count == 0:
+            air0 = i2
+        elif air_count == 1:
+            air1 = i2
+        else:
+            air2 = i2
+        air_count += 1
+    if bool(solids[i3]):
+        if solid_count == 0:
+            solid0 = i3
+        elif solid_count == 1:
+            solid1 = i3
+        else:
+            solid2 = i3
+        solid_count += 1
+    else:
+        if air_count == 0:
+            air0 = i3
+        elif air_count == 1:
+            air1 = i3
+        else:
+            air2 = i3
+        air_count += 1
+    if solid_count == 0 or air_count == 0:
+        return
+    if not volume_air_indices_need_iso_surface_numeric(air0, air1, air2, air_count, generated_air_values, surface_ys, world_positions):
+        return
+    if solid_count == 1:
+        var desired := average_world_positions_fast(air0, air1, air2, air_count, world_positions) - world_positions[solid0]
+        add_volume_iso_triangle_edges_numeric(
+            vertices,
+            normals,
+            colors,
+            solid0,
+            air0,
+            solid0,
+            air1,
+            solid0,
+            air2,
+            local_positions,
+            world_positions,
+            densities,
+            generated_air_values,
+            desired,
+            volume_context
+        )
+    elif solid_count == 3:
+        var desired := world_positions[air0] - average_world_positions_fast(solid0, solid1, solid2, solid_count, world_positions)
+        add_volume_iso_triangle_edges_numeric(
+            vertices,
+            normals,
+            colors,
+            solid0,
+            air0,
+            solid1,
+            air0,
+            solid2,
+            air0,
+            local_positions,
+            world_positions,
+            densities,
+            generated_air_values,
+            desired,
+            volume_context
+        )
+    elif solid_count == 2 and air_count == 2:
+        var desired := average_world_positions_fast(air0, air1, -1, air_count, world_positions) - average_world_positions_fast(solid0, solid1, -1, solid_count, world_positions)
+        add_volume_iso_triangle_edges_numeric(vertices, normals, colors, solid0, air0, solid1, air0, solid1, air1, local_positions, world_positions, densities, generated_air_values, desired, volume_context)
+        add_volume_iso_triangle_edges_numeric(vertices, normals, colors, solid0, air0, solid1, air1, solid0, air1, local_positions, world_positions, densities, generated_air_values, desired, volume_context)
+
+func volume_air_indices_need_iso_surface_numeric(
+    air0: int,
+    air1: int,
+    air2: int,
+    air_count: int,
+    generated_air_values: PackedFloat32Array,
+    surface_ys: PackedFloat32Array,
+    world_positions: Array[Vector3]
+) -> bool:
+    if air_count >= 1 and volume_air_index_needs_iso_surface_numeric(air0, generated_air_values, surface_ys, world_positions):
+        return true
+    if air_count >= 2 and volume_air_index_needs_iso_surface_numeric(air1, generated_air_values, surface_ys, world_positions):
+        return true
+    if air_count >= 3 and volume_air_index_needs_iso_surface_numeric(air2, generated_air_values, surface_ys, world_positions):
+        return true
+    return false
+
+func volume_air_index_needs_iso_surface_numeric(index: int, generated_air_values: PackedFloat32Array, surface_ys: PackedFloat32Array, world_positions: Array[Vector3]) -> bool:
+    if index < 0:
+        return false
+    if float(generated_air_values[index]) <= 0.0:
+        return true
+    return world_positions[index].y < float(surface_ys[index]) - CELL * 0.35
+
+func interpolate_volume_iso_edge_numeric(
+    solid_index: int,
+    air_index: int,
+    local_positions: Array[Vector3],
+    world_positions: Array[Vector3],
+    densities: PackedFloat32Array,
+    generated_air_values: PackedFloat32Array
+) -> Array:
+    var da := float(densities[solid_index])
+    var db := float(densities[air_index])
+    var t := 0.5
+    var denominator := da - db
+    if absf(denominator) > 0.0001:
+        t = clampf(da / denominator, 0.0, 1.0)
+    return [
+        local_positions[solid_index].lerp(local_positions[air_index], t),
+        world_positions[solid_index].lerp(world_positions[air_index], t),
+        float(generated_air_values[air_index])
+    ]
+
+func add_volume_iso_triangle_edges_numeric(
+    vertices: PackedVector3Array,
+    normals: PackedVector3Array,
+    colors: PackedColorArray,
+    solid_a: int,
+    air_a: int,
+    solid_b: int,
+    air_b: int,
+    solid_c: int,
+    air_c: int,
+    local_positions: Array[Vector3],
+    world_positions: Array[Vector3],
+    densities: PackedFloat32Array,
+    generated_air_values: PackedFloat32Array,
+    desired_normal: Vector3,
+    volume_context := {}
+) -> void:
+    var da := float(densities[solid_a])
+    var db := float(densities[air_a])
+    var ta := 0.5
+    var denominator := da - db
+    if absf(denominator) > 0.0001:
+        ta = clampf(da / denominator, 0.0, 1.0)
+    da = float(densities[solid_b])
+    db = float(densities[air_b])
+    var tb := 0.5
+    denominator = da - db
+    if absf(denominator) > 0.0001:
+        tb = clampf(da / denominator, 0.0, 1.0)
+    da = float(densities[solid_c])
+    db = float(densities[air_c])
+    var tc := 0.5
+    denominator = da - db
+    if absf(denominator) > 0.0001:
+        tc = clampf(da / denominator, 0.0, 1.0)
+    add_volume_iso_triangle_values_numeric(
+        vertices,
+        normals,
+        colors,
+        local_positions[solid_a].lerp(local_positions[air_a], ta),
+        world_positions[solid_a].lerp(world_positions[air_a], ta),
+        float(generated_air_values[air_a]),
+        local_positions[solid_b].lerp(local_positions[air_b], tb),
+        world_positions[solid_b].lerp(world_positions[air_b], tb),
+        float(generated_air_values[air_b]),
+        local_positions[solid_c].lerp(local_positions[air_c], tc),
+        world_positions[solid_c].lerp(world_positions[air_c], tc),
+        float(generated_air_values[air_c]),
+        desired_normal,
+        volume_context
+    )
+
+func add_volume_iso_triangle_values_numeric(
+    vertices: PackedVector3Array,
+    normals: PackedVector3Array,
+    colors: PackedColorArray,
+    a_local: Vector3,
+    a_world: Vector3,
+    a_air_value: float,
+    b_local: Vector3,
+    b_world: Vector3,
+    b_air_value: float,
+    c_local: Vector3,
+    c_world: Vector3,
+    c_air_value: float,
+    desired_normal: Vector3,
+    volume_context := {}
+) -> void:
+    var cross := (b_local - a_local).cross(c_local - a_local)
+    if cross.length_squared() <= 0.000001:
+        return
+    if desired_normal.length_squared() <= 0.0001:
+        desired_normal = cross.normalized()
+    else:
+        desired_normal = desired_normal.normalized()
+    if cross.normalized().dot(desired_normal) < 0.0:
+        var swap_local := b_local
+        var swap_world := b_world
+        var swap_air_value := b_air_value
+        b_local = c_local
+        b_world = c_world
+        b_air_value = c_air_value
+        c_local = swap_local
+        c_world = swap_world
+        c_air_value = swap_air_value
+        cross = -cross
+    var normal := cross.normalized()
+    var face_world := (a_world + b_world + c_world) / 3.0
+    var face_air_value := minf(a_air_value, minf(b_air_value, c_air_value))
+    var face_color := volume_iso_vertex_color_numeric(face_world, face_air_value, normal, volume_context)
+    vertices.append(a_local)
+    normals.append(normal)
+    colors.append(face_color)
+    vertices.append(b_local)
+    normals.append(normal)
+    colors.append(face_color)
+    vertices.append(c_local)
+    normals.append(normal)
+    colors.append(face_color)
+
+func add_volume_iso_triangle_oriented_arrays_numeric(
+    vertices: PackedVector3Array,
+    normals: PackedVector3Array,
+    colors: PackedColorArray,
+    a: Array,
+    b: Array,
+    c: Array,
+    desired_normal: Vector3,
+    volume_context := {}
+) -> void:
+    var a_local: Vector3 = a[0]
+    var b_local: Vector3 = b[0]
+    var c_local: Vector3 = c[0]
+    var cross := (b_local - a_local).cross(c_local - a_local)
+    if cross.length_squared() <= 0.000001:
+        return
+    if desired_normal.length_squared() <= 0.0001:
+        desired_normal = cross.normalized()
+    else:
+        desired_normal = desired_normal.normalized()
+    if cross.normalized().dot(desired_normal) < 0.0:
+        var swap := b
+        b = c
+        c = swap
+        cross = -cross
+    var normal := cross.normalized()
+    append_volume_iso_vertex_arrays_numeric(vertices, normals, colors, a, normal, volume_context)
+    append_volume_iso_vertex_arrays_numeric(vertices, normals, colors, b, normal, volume_context)
+    append_volume_iso_vertex_arrays_numeric(vertices, normals, colors, c, normal, volume_context)
+
+func append_volume_iso_vertex_arrays_numeric(
+    vertices: PackedVector3Array,
+    normals: PackedVector3Array,
+    colors: PackedColorArray,
+    point: Array,
+    normal: Vector3,
+    volume_context := {}
+) -> void:
+    var world: Vector3 = point[1]
+    var air_value := float(point[2])
+    vertices.append(point[0])
+    normals.append(normal)
+    colors.append(volume_iso_vertex_color_numeric(world, air_value, normal, volume_context))
+
+func volume_iso_vertex_color_numeric(world: Vector3, air_value: float, normal: Vector3, volume_context := {}) -> Color:
+    var shade := volume_iso_shade(world)
+    if air_value <= 0.0:
+        shade *= underground_wall_visual_shade(world)
+        if normal.y < -0.35:
+            return Color(0.055, 0.060, 0.060) * shade
+        if normal.y > 0.35:
+            return Color(0.150, 0.158, 0.142) * shade
+        return Color(0.170, 0.182, 0.170) * shade
+    var cell := Vector3i(world_to_cell(world.x), world_to_cell(world.y), world_to_cell(world.z))
+    var surface_y := volume_context_surface_y_at_cell(cell.x, cell.z, volume_context) if not volume_context.is_empty() else chunk_bound_surface_y_at_cell(Vector3i(cell.x, 0, cell.z))
+    var biome := volume_context_surface_biome_at_cell(cell.x, cell.z, volume_context) if not volume_context.is_empty() else surface_biome_at_cell(Vector3i(cell.x, 0, cell.z))
+    var density := surface_y - world.y
+    var material_id := volume_material_from_components(world, cell, density, surface_y, biome)
+    if normal.y > 0.42 and material_id in ["grass", "mud", "snow"]:
+        return BIOME_COLORS.get(biome, BIOME_COLORS["plains"]) * shade
+    match material_id:
+        "sand":
+            return Color(0.62, 0.57, 0.42) * shade
+        "mud":
+            return Color(0.30, 0.35, 0.25) * shade
+        "snow":
+            return Color(0.77, 0.82, 0.82) * shade
+        "dirt":
+            return Color(0.32, 0.27, 0.18) * shade
+        "copperOre":
+            return Color(0.48, 0.30, 0.20) * shade
+        "ironOre":
+            return Color(0.40, 0.39, 0.36) * shade
+        _:
+            return Color(0.36, 0.38, 0.35) * shade
+
+func extract_volume_iso_tetrahedron_indices(
+    vertices: PackedVector3Array,
+    normals: PackedVector3Array,
+    colors: PackedColorArray,
+    i0: int,
+    i1: int,
+    i2: int,
+    i3: int,
+    local_positions: Array[Vector3],
+    world_positions: Array[Vector3],
+    densities: PackedFloat32Array,
+    solids: Array[bool],
+    samples: Array[Dictionary],
+    volume_context := {}
+) -> void:
+    var solid0 := -1
+    var solid1 := -1
+    var solid2 := -1
+    var air0 := -1
+    var air1 := -1
+    var air2 := -1
+    var solid_count := 0
+    var air_count := 0
+    if bool(solids[i0]):
+        solid0 = i0
+        solid_count += 1
+    else:
+        air0 = i0
+        air_count += 1
+    if bool(solids[i1]):
+        if solid_count == 0:
+            solid0 = i1
+        elif solid_count == 1:
+            solid1 = i1
+        else:
+            solid2 = i1
+        solid_count += 1
+    else:
+        if air_count == 0:
+            air0 = i1
+        elif air_count == 1:
+            air1 = i1
+        else:
+            air2 = i1
+        air_count += 1
+    if bool(solids[i2]):
+        if solid_count == 0:
+            solid0 = i2
+        elif solid_count == 1:
+            solid1 = i2
+        else:
+            solid2 = i2
+        solid_count += 1
+    else:
+        if air_count == 0:
+            air0 = i2
+        elif air_count == 1:
+            air1 = i2
+        else:
+            air2 = i2
+        air_count += 1
+    if bool(solids[i3]):
+        if solid_count == 0:
+            solid0 = i3
+        elif solid_count == 1:
+            solid1 = i3
+        else:
+            solid2 = i3
+        solid_count += 1
+    else:
+        if air_count == 0:
+            air0 = i3
+        elif air_count == 1:
+            air1 = i3
+        else:
+            air2 = i3
+        air_count += 1
+    if solid_count == 0 or air_count == 0:
+        return
+    if not volume_air_indices_need_iso_surface_fast(air0, air1, air2, air_count, samples, world_positions):
+        return
+    if solid_count == 1:
+        var desired := average_world_positions_fast(air0, air1, air2, air_count, world_positions) - world_positions[solid0]
+        add_volume_iso_triangle_oriented_arrays(
+            vertices,
+            normals,
+            colors,
+            interpolate_volume_iso_edge_fast(solid0, air0, local_positions, world_positions, densities, samples),
+            interpolate_volume_iso_edge_fast(solid0, air1, local_positions, world_positions, densities, samples),
+            interpolate_volume_iso_edge_fast(solid0, air2, local_positions, world_positions, densities, samples),
+            desired,
+            volume_context
+        )
+    elif solid_count == 3:
+        var desired := world_positions[air0] - average_world_positions_fast(solid0, solid1, solid2, solid_count, world_positions)
+        add_volume_iso_triangle_oriented_arrays(
+            vertices,
+            normals,
+            colors,
+            interpolate_volume_iso_edge_fast(solid0, air0, local_positions, world_positions, densities, samples),
+            interpolate_volume_iso_edge_fast(solid1, air0, local_positions, world_positions, densities, samples),
+            interpolate_volume_iso_edge_fast(solid2, air0, local_positions, world_positions, densities, samples),
+            desired,
+            volume_context
+        )
+    elif solid_count == 2 and air_count == 2:
+        var desired := average_world_positions_fast(air0, air1, -1, air_count, world_positions) - average_world_positions_fast(solid0, solid1, -1, solid_count, world_positions)
+        var p00 := interpolate_volume_iso_edge_fast(solid0, air0, local_positions, world_positions, densities, samples)
+        var p10 := interpolate_volume_iso_edge_fast(solid1, air0, local_positions, world_positions, densities, samples)
+        var p11 := interpolate_volume_iso_edge_fast(solid1, air1, local_positions, world_positions, densities, samples)
+        var p01 := interpolate_volume_iso_edge_fast(solid0, air1, local_positions, world_positions, densities, samples)
+        add_volume_iso_triangle_oriented_arrays(vertices, normals, colors, p00, p10, p11, desired, volume_context)
+        add_volume_iso_triangle_oriented_arrays(vertices, normals, colors, p00, p11, p01, desired, volume_context)
+
+func volume_air_indices_need_iso_surface_fast(air0: int, air1: int, air2: int, air_count: int, samples: Array[Dictionary], world_positions: Array[Vector3]) -> bool:
+    if air_count >= 1 and volume_air_index_needs_iso_surface(air0, samples, world_positions):
+        return true
+    if air_count >= 2 and volume_air_index_needs_iso_surface(air1, samples, world_positions):
+        return true
+    if air_count >= 3 and volume_air_index_needs_iso_surface(air2, samples, world_positions):
+        return true
+    return false
+
+func volume_air_index_needs_iso_surface(index: int, samples: Array[Dictionary], world_positions: Array[Vector3]) -> bool:
+    if index < 0:
+        return false
+    var sample: Dictionary = samples[index]
+    if String(sample.get("biome", "")) == "underground_air":
+        return true
+    var world := world_positions[index]
+    var surface_y := float(sample.get("surfaceY", chunk_bound_surface_y_at_cell(Vector3i(world_to_cell(world.x), 0, world_to_cell(world.z)))))
+    return world.y < surface_y - CELL * 0.35
+
+func average_world_positions_fast(i0: int, i1: int, i2: int, count: int, world_positions: Array[Vector3]) -> Vector3:
+    var total := Vector3.ZERO
+    if count >= 1 and i0 >= 0:
+        total += world_positions[i0]
+    if count >= 2 and i1 >= 0:
+        total += world_positions[i1]
+    if count >= 3 and i2 >= 0:
+        total += world_positions[i2]
+    return total / maxf(1.0, float(count))
+
+func extract_volume_iso_tetrahedron_arrays(
+    vertices: PackedVector3Array,
+    normals: PackedVector3Array,
+    colors: PackedColorArray,
+    tet: Array,
+    local_positions: Array[Vector3],
+    world_positions: Array[Vector3],
+    densities: PackedFloat32Array,
+    solids: Array[bool],
+    samples: Array[Dictionary],
+    volume_context := {}
+) -> void:
+    var solid_indices: Array[int] = []
+    var air_indices: Array[int] = []
+    for index_value in tet:
+        var index := int(index_value)
+        if bool(solids[index]):
+            solid_indices.append(index)
+        else:
+            air_indices.append(index)
+    if solid_indices.is_empty() or air_indices.is_empty():
+        return
+    if not volume_air_indices_need_iso_surface(air_indices, samples, world_positions):
+        return
+    if solid_indices.size() == 1:
+        var solid_index := solid_indices[0]
+        var desired := average_world_positions(air_indices, world_positions) - world_positions[solid_index]
+        add_volume_iso_triangle_oriented_arrays(
+            vertices,
+            normals,
+            colors,
+            interpolate_volume_iso_edge_fast(solid_index, air_indices[0], local_positions, world_positions, densities, samples),
+            interpolate_volume_iso_edge_fast(solid_index, air_indices[1], local_positions, world_positions, densities, samples),
+            interpolate_volume_iso_edge_fast(solid_index, air_indices[2], local_positions, world_positions, densities, samples),
+            desired,
+            volume_context
+        )
+    elif solid_indices.size() == 3:
+        var air_index := air_indices[0]
+        var desired := world_positions[air_index] - average_world_positions(solid_indices, world_positions)
+        add_volume_iso_triangle_oriented_arrays(
+            vertices,
+            normals,
+            colors,
+            interpolate_volume_iso_edge_fast(solid_indices[0], air_index, local_positions, world_positions, densities, samples),
+            interpolate_volume_iso_edge_fast(solid_indices[1], air_index, local_positions, world_positions, densities, samples),
+            interpolate_volume_iso_edge_fast(solid_indices[2], air_index, local_positions, world_positions, densities, samples),
+            desired,
+            volume_context
+        )
+    elif solid_indices.size() == 2 and air_indices.size() == 2:
+        var desired := average_world_positions(air_indices, world_positions) - average_world_positions(solid_indices, world_positions)
+        var p00 := interpolate_volume_iso_edge_fast(solid_indices[0], air_indices[0], local_positions, world_positions, densities, samples)
+        var p10 := interpolate_volume_iso_edge_fast(solid_indices[1], air_indices[0], local_positions, world_positions, densities, samples)
+        var p11 := interpolate_volume_iso_edge_fast(solid_indices[1], air_indices[1], local_positions, world_positions, densities, samples)
+        var p01 := interpolate_volume_iso_edge_fast(solid_indices[0], air_indices[1], local_positions, world_positions, densities, samples)
+        add_volume_iso_triangle_oriented_arrays(vertices, normals, colors, p00, p10, p11, desired, volume_context)
+        add_volume_iso_triangle_oriented_arrays(vertices, normals, colors, p00, p11, p01, desired, volume_context)
+
+func add_volume_iso_triangle_oriented_arrays(
+    vertices: PackedVector3Array,
+    normals: PackedVector3Array,
+    colors: PackedColorArray,
+    a: Array,
+    b: Array,
+    c: Array,
+    desired_normal: Vector3,
+    volume_context := {}
+) -> void:
+    var a_local: Vector3 = a[0]
+    var b_local: Vector3 = b[0]
+    var c_local: Vector3 = c[0]
+    var cross := (b_local - a_local).cross(c_local - a_local)
+    if cross.length_squared() <= 0.000001:
+        return
+    if desired_normal.length_squared() <= 0.0001:
+        desired_normal = cross.normalized()
+    else:
+        desired_normal = desired_normal.normalized()
+    if cross.normalized().dot(desired_normal) < 0.0:
+        var swap := b
+        b = c
+        c = swap
+        cross = -cross
+    var normal := cross.normalized()
+    append_volume_iso_vertex_arrays(vertices, normals, colors, a, normal, volume_context)
+    append_volume_iso_vertex_arrays(vertices, normals, colors, b, normal, volume_context)
+    append_volume_iso_vertex_arrays(vertices, normals, colors, c, normal, volume_context)
+
+func append_volume_iso_vertex_arrays(
+    vertices: PackedVector3Array,
+    normals: PackedVector3Array,
+    colors: PackedColorArray,
+    point: Array,
+    normal: Vector3,
+    volume_context := {}
+) -> void:
+    var world: Vector3 = point[1]
+    var solid_sample: Dictionary = point[2]
+    var air_sample: Dictionary = point[3]
+    vertices.append(point[0])
+    normals.append(normal)
+    colors.append(volume_iso_vertex_color_fast(world, solid_sample, air_sample, normal, volume_context))
+
+func extract_volume_iso_cube(st: SurfaceTool, base_cell: Vector3i, origin_x: int, origin_z: int, sample_cache: Dictionary, volume_context := {}, step_cells := 1) -> void:
+    var local_positions: Array[Vector3] = []
+    var world_positions: Array[Vector3] = []
+    var samples: Array[Dictionary] = []
+    var densities := PackedFloat32Array()
+    var solids: Array[bool] = []
+    local_positions.resize(8)
+    world_positions.resize(8)
+    samples.resize(8)
+    densities.resize(8)
+    solids.resize(8)
+    var solid_count := 0
+    for index in range(VOLUME_CUBE_CORNER_OFFSETS.size()):
+        var offset: Vector3i = VOLUME_CUBE_CORNER_OFFSETS[index]
+        offset = Vector3i(offset.x * step_cells, offset.y * step_cells, offset.z * step_cells)
+        var grid_cell: Vector3i = base_cell + offset
+        var sample := volume_grid_sample(grid_cell, sample_cache, volume_context)
         var density := float(sample.get("density", 0.0))
         var solid := density > 0.0
         if solid:
             solid_count += 1
-        corners.append({
-            "grid": grid_cell,
-            "local": Vector3(float(grid_cell.x - origin_x) * CELL, float(grid_cell.y) * CELL, float(grid_cell.z - origin_z) * CELL),
-            "world": Vector3(float(grid_cell.x) * CELL, float(grid_cell.y) * CELL, float(grid_cell.z) * CELL),
-            "density": density,
-            "solid": solid,
-            "sample": sample
-        })
-    if solid_count == 0 or solid_count == corners.size():
+        local_positions[index] = Vector3(float(grid_cell.x - origin_x) * CELL, float(grid_cell.y) * CELL, float(grid_cell.z - origin_z) * CELL)
+        world_positions[index] = Vector3(float(grid_cell.x) * CELL, float(grid_cell.y) * CELL, float(grid_cell.z) * CELL)
+        samples[index] = sample
+        densities[index] = density
+        solids[index] = solid
+    if solid_count == 0 or solid_count == local_positions.size():
         return
     for tet in VOLUME_TETRAHEDRA:
-        extract_volume_iso_tetrahedron(st, [
-            corners[int(tet[0])],
-            corners[int(tet[1])],
-            corners[int(tet[2])],
-            corners[int(tet[3])]
-        ])
+        extract_volume_iso_tetrahedron_fast(st, tet, local_positions, world_positions, densities, solids, samples, volume_context)
+
+func extract_volume_iso_tetrahedron_fast(
+    st: SurfaceTool,
+    tet: Array,
+    local_positions: Array[Vector3],
+    world_positions: Array[Vector3],
+    densities: PackedFloat32Array,
+    solids: Array[bool],
+    samples: Array[Dictionary],
+    volume_context := {}
+) -> void:
+    var solid_indices: Array[int] = []
+    var air_indices: Array[int] = []
+    for index_value in tet:
+        var index := int(index_value)
+        if bool(solids[index]):
+            solid_indices.append(index)
+        else:
+            air_indices.append(index)
+    if solid_indices.is_empty() or air_indices.is_empty():
+        return
+    if not volume_air_indices_need_iso_surface(air_indices, samples, world_positions):
+        return
+    if solid_indices.size() == 1:
+        var solid_index := solid_indices[0]
+        var desired := average_world_positions(air_indices, world_positions) - world_positions[solid_index]
+        add_volume_iso_triangle_oriented_fast(
+            st,
+            interpolate_volume_iso_edge_fast(solid_index, air_indices[0], local_positions, world_positions, densities, samples),
+            interpolate_volume_iso_edge_fast(solid_index, air_indices[1], local_positions, world_positions, densities, samples),
+            interpolate_volume_iso_edge_fast(solid_index, air_indices[2], local_positions, world_positions, densities, samples),
+            desired,
+            volume_context
+        )
+    elif solid_indices.size() == 3:
+        var air_index := air_indices[0]
+        var desired := world_positions[air_index] - average_world_positions(solid_indices, world_positions)
+        add_volume_iso_triangle_oriented_fast(
+            st,
+            interpolate_volume_iso_edge_fast(solid_indices[0], air_index, local_positions, world_positions, densities, samples),
+            interpolate_volume_iso_edge_fast(solid_indices[1], air_index, local_positions, world_positions, densities, samples),
+            interpolate_volume_iso_edge_fast(solid_indices[2], air_index, local_positions, world_positions, densities, samples),
+            desired,
+            volume_context
+        )
+    elif solid_indices.size() == 2 and air_indices.size() == 2:
+        var desired := average_world_positions(air_indices, world_positions) - average_world_positions(solid_indices, world_positions)
+        var p00 := interpolate_volume_iso_edge_fast(solid_indices[0], air_indices[0], local_positions, world_positions, densities, samples)
+        var p10 := interpolate_volume_iso_edge_fast(solid_indices[1], air_indices[0], local_positions, world_positions, densities, samples)
+        var p11 := interpolate_volume_iso_edge_fast(solid_indices[1], air_indices[1], local_positions, world_positions, densities, samples)
+        var p01 := interpolate_volume_iso_edge_fast(solid_indices[0], air_indices[1], local_positions, world_positions, densities, samples)
+        add_volume_iso_triangle_oriented_fast(st, p00, p10, p11, desired, volume_context)
+        add_volume_iso_triangle_oriented_fast(st, p00, p11, p01, desired, volume_context)
+
+func volume_air_indices_need_iso_surface(air_indices: Array[int], samples: Array[Dictionary], world_positions: Array[Vector3]) -> bool:
+    for index in air_indices:
+        var sample: Dictionary = samples[index]
+        if String(sample.get("biome", "")) == "underground_air":
+            return true
+        var world := world_positions[index]
+        var surface_y := float(sample.get("surfaceY", chunk_bound_surface_y_at_cell(Vector3i(world_to_cell(world.x), 0, world_to_cell(world.z)))))
+        if world.y < surface_y - CELL * 0.35:
+            return true
+    return false
+
+func average_world_positions(indices: Array[int], world_positions: Array[Vector3]) -> Vector3:
+    var total := Vector3.ZERO
+    for index in indices:
+        total += world_positions[index]
+    return total / maxf(1.0, float(indices.size()))
+
+func interpolate_volume_iso_edge_fast(
+    solid_index: int,
+    air_index: int,
+    local_positions: Array[Vector3],
+    world_positions: Array[Vector3],
+    densities: PackedFloat32Array,
+    samples: Array[Dictionary]
+) -> Array:
+    var da := float(densities[solid_index])
+    var db := float(densities[air_index])
+    var t := 0.5
+    var denominator := da - db
+    if absf(denominator) > 0.0001:
+        t = clampf(da / denominator, 0.0, 1.0)
+    return [
+        local_positions[solid_index].lerp(local_positions[air_index], t),
+        world_positions[solid_index].lerp(world_positions[air_index], t),
+        samples[solid_index],
+        samples[air_index]
+    ]
+
+func add_volume_iso_triangle_oriented_fast(st: SurfaceTool, a: Array, b: Array, c: Array, desired_normal: Vector3, volume_context := {}) -> void:
+    var a_local: Vector3 = a[0]
+    var b_local: Vector3 = b[0]
+    var c_local: Vector3 = c[0]
+    var cross := (b_local - a_local).cross(c_local - a_local)
+    if cross.length_squared() <= 0.000001:
+        return
+    if desired_normal.length_squared() <= 0.0001:
+        desired_normal = cross.normalized()
+    else:
+        desired_normal = desired_normal.normalized()
+    if cross.normalized().dot(desired_normal) < 0.0:
+        var swap := b
+        b = c
+        c = swap
+        cross = -cross
+    var normal := cross.normalized()
+    add_volume_iso_vertex_fast(st, a, normal, volume_context)
+    add_volume_iso_vertex_fast(st, b, normal, volume_context)
+    add_volume_iso_vertex_fast(st, c, normal, volume_context)
+
+func add_volume_iso_vertex_fast(st: SurfaceTool, point: Array, normal: Vector3, volume_context := {}) -> void:
+    var world: Vector3 = point[1]
+    var solid_sample: Dictionary = point[2]
+    var air_sample: Dictionary = point[3]
+    st.set_normal(normal)
+    st.set_color(volume_iso_vertex_color_fast(world, solid_sample, air_sample, normal, volume_context))
+    st.add_vertex(point[0])
+
+func volume_iso_vertex_color_fast(world: Vector3, solid_sample: Dictionary, air_sample: Dictionary, normal: Vector3, volume_context := {}) -> Color:
+    var shade := volume_iso_shade(world)
+    var air_biome_is_underground := String(air_sample.get("biome", "")) == "underground_air"
+    if air_biome_is_underground:
+        shade *= underground_wall_visual_shade(world)
+        if normal.y < -0.35:
+            return Color(0.055, 0.060, 0.060) * shade
+        if normal.y > 0.35:
+            return Color(0.150, 0.158, 0.142) * shade
+        return Color(0.170, 0.182, 0.170) * shade
+    var solid_cell: Vector3i = solid_sample.get("cell", Vector3i(world_to_cell(world.x), world_to_cell(world.y), world_to_cell(world.z)))
+    var surface_cell := Vector3i(solid_cell.x, 0, solid_cell.z)
+    var solid_surface_y := float(solid_sample.get("surfaceY", volume_context_surface_y_at_cell(solid_cell.x, solid_cell.z, volume_context) if not volume_context.is_empty() else chunk_bound_surface_y_at_cell(surface_cell)))
+    var solid_density := float(solid_sample.get("density", solid_surface_y - world.y))
+    var biome := String(solid_sample.get("biome", ""))
+    if biome == "":
+        biome = volume_context_surface_biome_at_cell(solid_cell.x, solid_cell.z, volume_context) if not volume_context.is_empty() else surface_biome_at_cell(surface_cell)
+    var material_id := String(solid_sample.get("material", ""))
+    if material_id == "":
+        material_id = volume_material_from_components(world, solid_cell, solid_density, solid_surface_y, biome)
+    if material_id == "air":
+        var inside_sample := volume_sample_world(world - normal * CELL * 0.18, volume_context)
+        var inside_cell: Vector3i = inside_sample.get("cell", solid_cell)
+        var inside_surface_cell := Vector3i(inside_cell.x, 0, inside_cell.z)
+        var inside_surface_y := float(inside_sample.get("surfaceY", volume_context_surface_y_at_cell(inside_cell.x, inside_cell.z, volume_context) if not volume_context.is_empty() else chunk_bound_surface_y_at_cell(inside_surface_cell)))
+        var inside_density := float(inside_sample.get("density", inside_surface_y - world.y))
+        biome = String(inside_sample.get("biome", ""))
+        if biome == "":
+            biome = volume_context_surface_biome_at_cell(inside_cell.x, inside_cell.z, volume_context) if not volume_context.is_empty() else surface_biome_at_cell(inside_surface_cell)
+        material_id = String(inside_sample.get("material", ""))
+        if material_id == "":
+            material_id = volume_material_from_components(world, inside_cell, inside_density, inside_surface_y, biome)
+    if normal.y > 0.42 and material_id in ["grass", "mud", "snow"]:
+        return BIOME_COLORS.get(biome, BIOME_COLORS["plains"]) * shade
+    match material_id:
+        "sand":
+            return Color(0.62, 0.57, 0.42) * shade
+        "mud":
+            return Color(0.30, 0.35, 0.25) * shade
+        "snow":
+            return Color(0.77, 0.82, 0.82) * shade
+        "dirt":
+            return Color(0.32, 0.27, 0.18) * shade
+        "copperOre":
+            return Color(0.48, 0.30, 0.20) * shade
+        "ironOre":
+            return Color(0.40, 0.39, 0.36) * shade
+        _:
+            return Color(0.36, 0.38, 0.35) * shade
+
+func volume_iso_shade(world: Vector3) -> float:
+    var key := Vector3i(roundi(world.x * 9.0), roundi(world.y * 9.0), roundi(world.z * 9.0))
+    return 0.88 + float(absi(hash(key)) % 100000) / 100000.0 * 0.16
+
+func underground_wall_visual_shade(world: Vector3) -> float:
+    if ridge_noise == null:
+        return 1.0
+    var broad := ridge_noise.get_noise_3d(world.x * 5.5 + 4100.0, world.y * 7.0 - 2300.0, world.z * 5.5 + 1700.0)
+    var fine := ridge_noise.get_noise_3d(world.x * 13.0 - 7200.0, world.y * 11.0 + 3300.0, world.z * 13.0 - 5100.0)
+    return clampf(0.96 + broad * 0.08 + fine * 0.035, 0.82, 1.12)
 
 func extract_volume_iso_tetrahedron(st: SurfaceTool, tetra: Array) -> void:
     var solid_corners := []
@@ -585,7 +2146,7 @@ func average_corner_world(corners: Array) -> Vector3:
 func volume_air_corners_need_iso_surface(air_corners: Array) -> bool:
     for corner in air_corners:
         var sample: Dictionary = corner.get("sample", {})
-        if String(sample.get("biome", "")) == "cave":
+        if String(sample.get("biome", "")) == "underground_air":
             return true
         var world: Vector3 = corner.get("world", Vector3.ZERO)
         var surface_y := chunk_bound_surface_y_at_cell(Vector3i(world_to_cell(world.x), 0, world_to_cell(world.z)))
@@ -639,12 +2200,136 @@ func add_volume_iso_vertex(st: SurfaceTool, point: Dictionary, normal: Vector3) 
     st.set_color(volume_iso_vertex_color(point, normal))
     st.add_vertex(point.get("local", Vector3.ZERO))
 
+func active_volume_excavation_brushes() -> Array:
+    if world_generation_system == null:
+        return []
+    var brush_values = world_generation_system.get("excavation_brushes")
+    if not (brush_values is Array):
+        return []
+    var result := []
+    for brush_value in brush_values:
+        if not (brush_value is Dictionary):
+            continue
+        var brush: Dictionary = brush_value
+        if excavation_brush_is_surface_deformation(brush):
+            continue
+        result.append(brush)
+    return result
+
+func excavation_brush_is_surface_deformation(brush: Dictionary) -> bool:
+    var mode := String(brush.get("mode", ""))
+    if mode == "surface_deform":
+        return true
+    if mode == "volume":
+        return false
+    if brush.has("surfaceTargetY") or brush.has("deformRadius"):
+        return true
+    if world_generation_system != null and world_generation_system.has_method("brush_is_surface_deformation"):
+        return bool(world_generation_system.call("brush_is_surface_deformation", brush))
+    return false
+
+func volume_sample_from_context(position: Vector3, sample_cell: Vector3i, volume_context: Dictionary) -> Dictionary:
+    if world_generation_system != null and world_generation_system.has_method("sample_world"):
+        return world_generation_system.call("sample_world", position)
+    var surface_y := volume_context_surface_y_at_cell(sample_cell.x, sample_cell.z, volume_context)
+    var density := surface_y - position.y
+    return {
+        "cell": sample_cell,
+        "position": position,
+        "solid": density >= 0.0,
+        "density": density,
+        "surface": absf(density) <= CELL * 0.75,
+        "biome": surface_biome_at_cell(Vector3i(sample_cell.x, 0, sample_cell.z)),
+        "material": "air" if density < 0.0 else surface_material_at_cell(Vector3i(sample_cell.x, 0, sample_cell.z)),
+        "surfaceY": surface_y
+    }
+
+func volume_context_surface_y_at_cell(cell_x: int, cell_z: int, volume_context: Dictionary) -> float:
+    var cache_value = volume_context.get("surfaceY", null)
+    if not (cache_value is Dictionary):
+        cache_value = {}
+        volume_context["surfaceY"] = cache_value
+    var cache: Dictionary = cache_value
+    var key := Vector2i(cell_x, cell_z)
+    if cache.has(key):
+        return float(cache[key])
+    var value := chunk_bound_surface_y_at_cell(Vector3i(cell_x, 0, cell_z))
+    cache[key] = value
+    return value
+
+func volume_context_surface_biome_at_cell(cell_x: int, cell_z: int, volume_context: Dictionary) -> String:
+    var cache_value = volume_context.get("surfaceBiome", null)
+    if not (cache_value is Dictionary):
+        cache_value = {}
+        volume_context["surfaceBiome"] = cache_value
+    var cache: Dictionary = cache_value
+    var key := Vector2i(cell_x, cell_z)
+    if cache.has(key):
+        return String(cache[key])
+    var biome := surface_biome_at_cell(Vector3i(cell_x, 0, cell_z))
+    cache[key] = biome
+    return biome
+
+func volume_material_from_components(position: Vector3, sample_cell: Vector3i, density: float, surface_y: float, biome: String) -> String:
+    if density < 0.0:
+        return "air"
+    var depth := maxf(0.0, surface_y - position.y)
+    if depth <= CELL * 1.20:
+        return volume_top_material_for_biome(biome)
+    if depth <= CELL * 4.65:
+        return volume_subsoil_material_for_biome(biome)
+    var deep_ore := volume_ore_material_at(sample_cell, depth)
+    return deep_ore if deep_ore != "" else "stone"
+
+func volume_top_material_for_biome(biome: String) -> String:
+    if biome == "beach" or biome == "desert":
+        return "sand"
+    if biome == "swamp":
+        return "mud"
+    if biome == "snow":
+        return "snow"
+    if biome == "alpine" or biome == "tundra":
+        return "stone"
+    return "grass"
+
+func volume_subsoil_material_for_biome(biome: String) -> String:
+    if biome == "beach" or biome == "desert":
+        return "sand"
+    if biome == "swamp":
+        return "mud"
+    if biome == "snow":
+        return "snow"
+    return "dirt"
+
+func volume_ore_material_at(sample_cell: Vector3i, depth: float) -> String:
+    var depth_cells := depth / maxf(0.001, CELL)
+    var copper_noise := hash01("subsurface-copper:%s:%d,%d,%d" % [
+        String(seed_text),
+        int(sample_cell.x / 3),
+        int(sample_cell.y / 3),
+        int(sample_cell.z / 3)
+    ])
+    if depth_cells >= 8.0 and copper_noise > 0.985:
+        return "copperOre"
+    var iron_noise := hash01("subsurface-iron:%s:%d,%d,%d" % [
+        String(seed_text),
+        int(sample_cell.x / 4),
+        int(sample_cell.y / 4),
+        int(sample_cell.z / 4)
+    ])
+    if depth_cells >= 15.0 and iron_noise > 0.992:
+        return "ironOre"
+    return ""
+
 func volume_density_at_world(position: Vector3) -> float:
     if world_generation_system != null and world_generation_system.has_method("density_at"):
         return float(world_generation_system.call("density_at", position))
     return surface_y_at_position(position) - position.y
 
-func volume_sample_world(position: Vector3) -> Dictionary:
+func volume_sample_world(position: Vector3, volume_context := {}) -> Dictionary:
+    if not volume_context.is_empty():
+        var cell := Vector3i(world_to_cell(position.x), world_to_cell(position.y), world_to_cell(position.z))
+        return volume_sample_from_context(position, cell, volume_context)
     if world_generation_system != null and world_generation_system.has_method("sample_world"):
         return world_generation_system.call("sample_world", position)
     var density := volume_density_at_world(position)
@@ -668,14 +2353,15 @@ func volume_iso_vertex_color(point: Dictionary, normal: Vector3) -> Color:
         solid_sample = inside_sample
     var air_biome := String(air_sample.get("biome", ""))
     var biome := String(solid_sample.get("biome", surface_biome_at_cell(Vector3i(world_to_cell(world.x), 0, world_to_cell(world.z)))))
-    var shade := 0.88 + hash01("volume-iso-shade:%d,%d,%d" % [roundi(world.x * 9.0), roundi(world.y * 9.0), roundi(world.z * 9.0)]) * 0.16
-    if air_biome == "cave":
+    var shade := volume_iso_shade(world)
+    if air_biome == "underground_air":
+        shade *= underground_wall_visual_shade(world)
         if normal.y < -0.35:
             return Color(0.055, 0.060, 0.060) * shade
         if normal.y > 0.35:
             return Color(0.150, 0.158, 0.142) * shade
         return Color(0.170, 0.182, 0.170) * shade
-    if normal.y > 0.42 and material_id in ["grass", "sand", "mud", "snow"]:
+    if normal.y > 0.42 and material_id in ["grass", "mud", "snow"]:
         return BIOME_COLORS.get(biome, BIOME_COLORS["plains"]) * shade
     match material_id:
         "sand":
@@ -694,43 +2380,217 @@ func volume_iso_vertex_color(point: Dictionary, normal: Vector3) -> Color:
             return Color(0.36, 0.38, 0.35) * shade
 
 func spawn_chunk_props(chunk: Node3D, cx: int, cz: int) -> void:
+    var state := begin_chunk_prop_spawn_state(chunk, cx, cz)
+    while not process_chunk_prop_spawn_state(state, 28, 999999):
+        pass
+
+func begin_chunk_prop_spawn_state(chunk: Node3D, cx: int, cz: int) -> Dictionary:
     var rng := RandomNumberGenerator.new()
     rng.seed = hash_string("%s:props:%d,%d" % [seed_text, cx, cz])
-    var start_x := cx * CHUNK_SIZE
-    var start_z := cz * CHUNK_SIZE
-    for i in range(28):
-        var x := start_x + 2 + rng.randi_range(0, CHUNK_SIZE - 4)
-        var z := start_z + 2 + rng.randi_range(0, CHUNK_SIZE - 4)
-        var prop_id := "%s:%d,%d:%d" % [seed_text, x, z, i]
-        if removed_props.has(prop_id):
+    var detail_rng := RandomNumberGenerator.new()
+    detail_rng.seed = hash_string("%s:details:%d,%d" % [seed_text, cx, cz])
+    return {
+        "chunk": chunk,
+        "cx": cx,
+        "cz": cz,
+        "startX": cx * CHUNK_SIZE,
+        "startZ": cz * CHUNK_SIZE,
+        "rng": rng,
+        "propIndex": 0,
+        "phase": "props",
+        "detailRng": detail_rng,
+        "detailIndex": 0,
+        "detailAttempts": -1,
+        "detailBatches": {},
+        "detailBatchKeys": [],
+        "detailBatchIndex": 0,
+        "detailBatchRoot": null
+    }
+
+func process_chunk_prop_spawn_state(
+    state: Dictionary,
+    prop_attempt_budget: int,
+    detail_attempt_budget: int,
+    time_budget_ms := -1.0,
+    budget_start_usec := 0
+) -> bool:
+    var chunk := state.get("chunk") as Node3D
+    if chunk == null or not is_instance_valid(chunk):
+        return true
+    var start_usec := budget_start_usec if budget_start_usec > 0 else Time.get_ticks_usec()
+    var phase := String(state.get("phase", "props"))
+    if phase == "props":
+        var rng := state.get("rng") as RandomNumberGenerator
+        if rng == null:
+            return true
+        var processed := 0
+        var prop_index := int(state.get("propIndex", 0))
+        while prop_index < 28 and processed < maxi(1, prop_attempt_budget):
+            if processed > 0 and chunk_prop_spawn_budget_elapsed(start_usec, time_budget_ms):
+                break
+            spawn_chunk_prop_attempt(state, prop_index, rng)
+            prop_index += 1
+            processed += 1
+        state["propIndex"] = prop_index
+        if prop_index < 28:
+            return false
+        if chunk_prop_spawn_budget_elapsed(start_usec, time_budget_ms):
+            return false
+        state["phase"] = "details"
+    if String(state.get("phase", "")) == "details":
+        return process_chunk_detail_spawn_state(state, detail_attempt_budget, time_budget_ms, start_usec)
+    if String(state.get("phase", "")) == "detail_batches":
+        return process_chunk_detail_batch_spawn_state(state, time_budget_ms, start_usec)
+    return true
+
+func chunk_prop_spawn_budget_elapsed(start_usec: int, time_budget_ms: float) -> bool:
+    if time_budget_ms <= 0.0:
+        return false
+    return float(Time.get_ticks_usec() - start_usec) / 1000.0 >= time_budget_ms
+
+func spawn_chunk_prop_attempt(state: Dictionary, i: int, rng: RandomNumberGenerator) -> void:
+    var chunk := state.get("chunk") as Node3D
+    if chunk == null or not is_instance_valid(chunk):
+        return
+    var start_x := int(state.get("startX", int(state.get("cx", 0)) * CHUNK_SIZE))
+    var start_z := int(state.get("startZ", int(state.get("cz", 0)) * CHUNK_SIZE))
+    var x := start_x + 2 + rng.randi_range(0, CHUNK_SIZE - 4)
+    var z := start_z + 2 + rng.randi_range(0, CHUNK_SIZE - 4)
+    var prop_id := "%s:%d,%d:%d" % [seed_text, x, z, i]
+    if removed_props.has(prop_id):
+        return
+    if natural_props_blocked_at_cell(x, z):
+        return
+    var h := surface_y_at_cell(Vector3i(x, 0, z))
+    if h < WATER_LEVEL + 1.0 or h > 92.0:
+        return
+    var biome := surface_biome_at_cell(Vector3i(x, 0, z))
+    if biome == "town":
+        return
+    var rock_roll := rock_chance(biome, h)
+    var tree_roll := tree_chance(biome) if h <= 70.0 else 0.0
+    var forage_roll := forage_chance(biome)
+    var wildlife_roll := wildlife_chance(biome, h)
+    var prop_roll := rng.randf()
+    var local_position := Vector3((x - start_x) * CELL, h, (z - start_z) * CELL)
+    if prop_roll < rock_roll:
+        var ore := ore_for_cell(biome, h, rng)
+        if ore != "":
+            make_ore_cluster(chunk, prop_id, local_position, ore, rng, 2)
+        else:
+            make_rock(chunk, prop_id, local_position, rng)
+    elif prop_roll < rock_roll + tree_roll:
+        make_tree(chunk, prop_id, local_position, biome, rng)
+    elif prop_roll < rock_roll + tree_roll + forage_roll:
+        make_forage(chunk, prop_id, local_position, biome, rng)
+    elif prop_roll < rock_roll + tree_roll + forage_roll + wildlife_roll:
+        make_wildlife(chunk, prop_id, local_position, biome, rng)
+
+func process_chunk_detail_spawn_state(
+    state: Dictionary,
+    detail_attempt_budget: int,
+    time_budget_ms := -1.0,
+    budget_start_usec := 0
+) -> bool:
+    var chunk := state.get("chunk") as Node3D
+    if chunk == null or not is_instance_valid(chunk):
+        return true
+    var density: float = clampf(float(visual_quality.get("decorativeDensity", 0.74)), 0.0, 1.0)
+    if density <= 0.01:
+        return true
+    if int(state.get("detailAttempts", -1)) < 0:
+        state["detailAttempts"] = maxi(8, int(round(float(visual_quality.get("decorativeDetailCap", 72)) * density)))
+    var rng := state.get("detailRng") as RandomNumberGenerator
+    if rng == null:
+        return true
+    var batches: Dictionary = state.get("detailBatches", {}) if state.get("detailBatches", {}) is Dictionary else {}
+    var attempts := int(state.get("detailAttempts", 0))
+    var detail_index := int(state.get("detailIndex", 0))
+    var processed := 0
+    var start_usec := budget_start_usec if budget_start_usec > 0 else Time.get_ticks_usec()
+    while detail_index < attempts and processed < maxi(1, detail_attempt_budget):
+        if processed > 0 and chunk_prop_spawn_budget_elapsed(start_usec, time_budget_ms):
+            break
+        spawn_chunk_detail_attempt(state, detail_index, rng, batches)
+        detail_index += 1
+        processed += 1
+    state["detailIndex"] = detail_index
+    state["detailBatches"] = batches
+    if detail_index < attempts:
+        return false
+    state["phase"] = "detail_batches"
+    state["detailBatchKeys"] = batches.keys()
+    state["detailBatchIndex"] = 0
+    if chunk_prop_spawn_budget_elapsed(start_usec, time_budget_ms):
+        return false
+    return process_chunk_detail_batch_spawn_state(state, time_budget_ms, start_usec)
+
+func process_chunk_detail_batch_spawn_state(state: Dictionary, time_budget_ms := -1.0, budget_start_usec := 0) -> bool:
+    var chunk := state.get("chunk") as Node3D
+    if chunk == null or not is_instance_valid(chunk):
+        return true
+    var batches: Dictionary = state.get("detailBatches", {}) if state.get("detailBatches", {}) is Dictionary else {}
+    if batches.is_empty():
+        return true
+    var keys: Array = state.get("detailBatchKeys", []) if state.get("detailBatchKeys", []) is Array else []
+    if keys.is_empty():
+        keys = batches.keys()
+        state["detailBatchKeys"] = keys
+    var root := state.get("detailBatchRoot") as Node3D
+    if root == null or not is_instance_valid(root):
+        root = Node3D.new()
+        root.name = "DecorBatches"
+        root.set_meta("kind", "decor")
+        chunk.add_child(root)
+        state["detailBatchRoot"] = root
+    var start_usec := budget_start_usec if budget_start_usec > 0 else Time.get_ticks_usec()
+    var batch_index := int(state.get("detailBatchIndex", 0))
+    var processed := 0
+    while batch_index < keys.size():
+        if processed > 0 and chunk_prop_spawn_budget_elapsed(start_usec, time_budget_ms):
+            state["detailBatchIndex"] = batch_index
+            return false
+        var detail_type_variant = keys[batch_index]
+        var transforms: Array = batches.get(detail_type_variant, [])
+        if not transforms.is_empty():
+            spawn_detail_batch(root, String(detail_type_variant), transforms)
+        batch_index += 1
+        processed += 1
+    state["detailBatchIndex"] = batch_index
+    return true
+
+func spawn_chunk_detail_attempt(state: Dictionary, _index: int, rng: RandomNumberGenerator, batches: Dictionary) -> void:
+    var start_x := int(state.get("startX", int(state.get("cx", 0)) * CHUNK_SIZE))
+    var start_z := int(state.get("startZ", int(state.get("cz", 0)) * CHUNK_SIZE))
+    var x := start_x + 1 + rng.randi_range(0, CHUNK_SIZE - 2)
+    var z := start_z + 1 + rng.randi_range(0, CHUNK_SIZE - 2)
+    if natural_props_blocked_at_cell(x, z):
+        return
+    var h := surface_y_at_cell(Vector3i(x, 0, z))
+    if h < WATER_LEVEL - 0.1 or h > 104.0:
+        return
+    var biome := surface_biome_at_cell(Vector3i(x, 0, z))
+    if biome == "town":
+        return
+    var variation := height_variation_cell(x, z, 1)
+    if variation > CELL * 1.35:
+        return
+    var local_position := Vector3((x - start_x) * CELL + rng.randf_range(-0.42, 0.42), h, (z - start_z) * CELL + rng.randf_range(-0.42, 0.42))
+    add_detail_for_biome(batches, local_position, biome, h, rng)
+
+func spawn_chunk_detail_batches_from_transforms(chunk: Node3D, batches: Dictionary) -> void:
+    if batches.is_empty():
+        return
+    var root := Node3D.new()
+    root.name = "DecorBatches"
+    root.set_meta("kind", "decor")
+    chunk.add_child(root)
+    for detail_type_variant in batches.keys():
+        var detail_type := String(detail_type_variant)
+        var transforms: Array = batches[detail_type_variant]
+        if transforms.is_empty():
             continue
-        if natural_props_blocked_at_cell(x, z):
-            continue
-        var h := surface_y_at_cell(Vector3i(x, 0, z))
-        if h < WATER_LEVEL + 1.0 or h > 92.0:
-            continue
-        var biome := surface_biome_at_cell(Vector3i(x, 0, z))
-        if biome == "town":
-            continue
-        var rock_roll := rock_chance(biome, h)
-        var tree_roll := tree_chance(biome) if h <= 70.0 else 0.0
-        var forage_roll := forage_chance(biome)
-        var wildlife_roll := wildlife_chance(biome, h)
-        var prop_roll := rng.randf()
-        var local_position := Vector3((x - start_x) * CELL, h, (z - start_z) * CELL)
-        if prop_roll < rock_roll:
-            var ore := ore_for_cell(biome, h, rng)
-            if ore != "":
-                make_ore_cluster(chunk, prop_id, local_position, ore, rng, 2)
-            else:
-                make_rock(chunk, prop_id, local_position, rng)
-        elif prop_roll < rock_roll + tree_roll:
-            make_tree(chunk, prop_id, local_position, biome, rng)
-        elif prop_roll < rock_roll + tree_roll + forage_roll:
-            make_forage(chunk, prop_id, local_position, biome, rng)
-        elif prop_roll < rock_roll + tree_roll + forage_roll + wildlife_roll:
-            make_wildlife(chunk, prop_id, local_position, biome, rng)
-    spawn_chunk_detail_batches(chunk, cx, cz)
+        spawn_detail_batch(root, detail_type, transforms)
 
 func spawn_chunk_detail_batches(chunk: Node3D, cx: int, cz: int) -> void:
     var density: float = clampf(float(visual_quality.get("decorativeDensity", 0.74)), 0.0, 1.0)
@@ -758,18 +2618,7 @@ func spawn_chunk_detail_batches(chunk: Node3D, cx: int, cz: int) -> void:
             continue
         var local_position := Vector3((x - start_x) * CELL + rng.randf_range(-0.42, 0.42), h, (z - start_z) * CELL + rng.randf_range(-0.42, 0.42))
         add_detail_for_biome(batches, local_position, biome, h, rng)
-    if batches.is_empty():
-        return
-    var root := Node3D.new()
-    root.name = "DecorBatches"
-    root.set_meta("kind", "decor")
-    chunk.add_child(root)
-    for detail_type_variant in batches.keys():
-        var detail_type := String(detail_type_variant)
-        var transforms: Array = batches[detail_type_variant]
-        if transforms.is_empty():
-            continue
-        spawn_detail_batch(root, detail_type, transforms)
+    spawn_chunk_detail_batches_from_transforms(chunk, batches)
 
 func natural_props_blocked_at_cell(x: int, z: int) -> bool:
     if structure_system != null and structure_system.has_method("blocks_natural_prop_at_cell"):

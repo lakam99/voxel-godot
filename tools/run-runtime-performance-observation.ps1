@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("All", "DayWork", "DuskReturnHome", "MidnightTown", "CrowdedDoorTraffic", "SprintTraversal", "AutosaveEnabled", "AutosaveDisabled")]
+    [ValidateSet("All", "DayWork", "DuskReturnHome", "MidnightTown", "CrowdedDoorTraffic", "SprintTraversal", "UndergroundTraversal", "AutosaveEnabled", "AutosaveDisabled")]
     [string]$Scenario = "All",
     [string]$Seed = "atlas-1492",
     [int]$DurationSeconds = 60,
@@ -15,7 +15,7 @@ $ErrorActionPreference = "Stop"
 
 $projectPath = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 if ($WatchdogSeconds -le 0) {
-    $scenarioCount = if ($Scenario -eq "All") { 6 } else { 1 }
+    $scenarioCount = if ($Scenario -eq "All") { 8 } else { 1 }
     $WatchdogSeconds = [Math]::Max(300, ($DurationSeconds * $scenarioCount) + 90)
 }
 if ($ReportPath -eq "") {

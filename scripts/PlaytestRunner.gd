@@ -81,9 +81,9 @@ func run() -> void:
         await test_inventory_and_crafting_systems()
         finish_playtest()
         return
-    if only_section == "cave_generation":
-        mark_progress("cave_generation")
-        test_cave_generation_and_crafting_book_loot()
+    if only_section == "underground_volume":
+        mark_progress("underground_volume")
+        test_underground_volume_generation()
         finish_playtest()
         return
     if only_section != "" and only_section != "tutorial_start":
@@ -152,8 +152,8 @@ func run() -> void:
     test_structural_integrity()
     mark_progress("landmarks")
     test_landmark_generation_and_loot()
-    mark_progress("cave_generation")
-    test_cave_generation_and_crafting_book_loot()
+    mark_progress("underground_volume")
+    test_underground_volume_generation()
     mark_progress("ore_generation")
     test_ore_generation_and_drops()
     mark_progress("forage_wildlife")
@@ -5488,46 +5488,45 @@ func test_landmark_generation_and_loot() -> void:
     hostile_system.clear()
     cleanup_generated_blocks()
 
-func test_cave_generation_and_crafting_book_loot() -> void:
+func test_underground_volume_generation() -> void:
     if not main or not player:
-        add_result("cave_biome_volume_generation", false, "main or player missing")
+        add_result("underground_volume_generation", false, "main or player missing")
         return
     var world_generation = main.get("world_generation_system")
-    if world_generation == null or not world_generation.has_method("find_cave_biome_sample"):
-        add_result("cave_biome_volume_generation", false, "world generation sampler missing")
+    if world_generation == null or not world_generation.has_method("find_underground_air_sample"):
+        add_result("underground_volume_generation", false, "world generation sampler missing")
         return
 
     var original_position: Vector3 = player.global_position
-    var found: Dictionary = world_generation.call("find_cave_biome_sample", 16)
-    var feature: Dictionary = found.get("feature", {}) if found.has("feature") else {}
-    if feature.is_empty():
-        add_result("cave_biome_volume_generation", false, "no cave biome volume found")
+    var found: Dictionary = world_generation.call("find_underground_air_sample", 16, 4, 30)
+    if found.is_empty():
+        add_result("underground_volume_generation", false, "no underground_air volume found")
         return
 
-    var continuity := cave_volume_smoke_summary(world_generation, feature)
-    var load_position := cave_outside_player_position(world_generation, feature)
-    player.global_position = load_position
+    var continuity := underground_volume_smoke_summary(world_generation, found)
+    var sample_position: Vector3 = found.get("position", Vector3.ZERO)
+    player.global_position = sample_position + Vector3(0.0, CELL * 0.65, 0.0)
     player.velocity = Vector3.ZERO
     if main.has_method("update_chunks"):
         main.call("update_chunks", true)
-    for cell in cave_volume_focus_cells(world_generation, feature):
+    for cell in underground_volume_focus_cells(found):
         if main.has_method("rebuild_chunks_around_cell"):
             main.call("rebuild_chunks_around_cell", cell)
     if main.has_method("update_chunks"):
         main.call("update_chunks", true)
-    var geometry := cave_volume_chunk_geometry_summary()
+    var geometry := underground_volume_chunk_geometry_summary()
     var sample: Dictionary = found.get("sample", {}) if found.has("sample") else {}
     var passed := not found.is_empty() \
-        and String(sample.get("biome", "")) == "cave" \
+        and String(sample.get("biome", "")) == "underground_air" \
         and String(sample.get("material", "")) == "air" \
         and not bool(sample.get("solid", true)) \
         and bool(continuity.get("passed", false)) \
         and bool(geometry.get("passed", false))
     add_result(
-        "cave_biome_volume_generation",
+        "underground_volume_generation",
         passed,
         "found %s, continuity %s, geometry %s" % [
-            JSON.stringify(cave_volume_summary(found)),
+            JSON.stringify(underground_volume_summary(found)),
             JSON.stringify(continuity),
             JSON.stringify(geometry)
         ]
@@ -5535,53 +5534,48 @@ func test_cave_generation_and_crafting_book_loot() -> void:
     player.global_position = original_position
     player.velocity = Vector3.ZERO
 
-func cave_volume_smoke_summary(world_generation, feature: Dictionary) -> Dictionary:
-    var radius := float(feature.get("radius", CELL * 2.0))
-    var length := float(feature.get("length", CELL * 24.0))
-    var front_air := 0
-    var interior_air := 0
-    var wall_solids := 0
-    var cover_solids := 0
+func underground_volume_smoke_summary(world_generation, found: Dictionary) -> Dictionary:
+    var cell: Vector3i = found.get("cell", Vector3i.ZERO)
+    var center_sample: Dictionary = world_generation.call("sample_cell", cell)
+    var air_samples := 0
+    var solid_neighbors := 0
+    var solid_materials := {}
     var failures := []
-    for depth in [0.0, CELL * 0.75, CELL * 1.5]:
-        for lateral_scale in [-0.62, 0.0, 0.62]:
-            var pos := cave_volume_tunnel_position(world_generation, feature, float(depth), radius * float(lateral_scale), 0.0)
-            var sample: Dictionary = world_generation.call("sample_world", pos)
-            if String(sample.get("biome", "")) == "cave" and not bool(sample.get("solid", true)):
-                front_air += 1
-            else:
-                failures.append({ "kind": "front", "position": vec3_dictionary(pos), "sample": cave_sample_signature(sample) })
-    for depth in [CELL * 3.0, clampf(CELL * 8.0, CELL * 3.0, length * 0.55)]:
-        var center := cave_volume_tunnel_position(world_generation, feature, float(depth), 0.0, 0.0)
-        var center_sample: Dictionary = world_generation.call("sample_world", center)
-        if String(center_sample.get("biome", "")) == "cave" and not bool(center_sample.get("solid", true)):
-            interior_air += 1
-        else:
-            failures.append({ "kind": "interior", "position": vec3_dictionary(center), "sample": cave_sample_signature(center_sample) })
-        for side in [-1.0, 1.0]:
-            var side_pos := cave_volume_tunnel_position(world_generation, feature, float(depth), radius * 1.22 * float(side), 0.0)
-            var side_sample: Dictionary = world_generation.call("sample_world", side_pos)
-            if bool(side_sample.get("solid", false)):
-                wall_solids += 1
-            else:
-                failures.append({ "kind": "wall", "position": vec3_dictionary(side_pos), "sample": cave_sample_signature(side_sample) })
-        if float(depth) >= CELL * 7.0:
-            var cover_pos := cave_volume_tunnel_position(world_generation, feature, float(depth), 0.0, radius * 0.96)
-            var cover_sample: Dictionary = world_generation.call("sample_world", cover_pos)
-            if bool(cover_sample.get("solid", false)):
-                cover_solids += 1
-            else:
-                failures.append({ "kind": "cover", "position": vec3_dictionary(cover_pos), "sample": cave_sample_signature(cover_sample) })
+    if String(center_sample.get("biome", "")) == "underground_air" and not bool(center_sample.get("solid", true)):
+        air_samples += 1
+    else:
+        failures.append({ "kind": "center_air", "cell": vec3i_dictionary(cell), "sample": underground_sample_signature(center_sample) })
+    var directions := [
+        Vector3i(1, 0, 0),
+        Vector3i(-1, 0, 0),
+        Vector3i(0, 1, 0),
+        Vector3i(0, -1, 0),
+        Vector3i(0, 0, 1),
+        Vector3i(0, 0, -1)
+    ]
+    for direction in directions:
+        var neighbor_cell := cell + direction
+        var neighbor_sample: Dictionary = world_generation.call("sample_cell", neighbor_cell)
+        if bool(neighbor_sample.get("solid", false)):
+            solid_neighbors += 1
+            solid_materials[String(neighbor_sample.get("material", ""))] = true
+        elif String(neighbor_sample.get("biome", "")) == "underground_air":
+            air_samples += 1
+    var surface_y := float(found.get("surfaceY", 0.0))
+    var deep_position := Vector3(float(cell.x) * CELL, surface_y - CELL * 34.0, float(cell.z) * CELL)
+    var deep_sample: Dictionary = world_generation.call("sample_world", deep_position)
+    if not bool(deep_sample.get("solid", false)):
+        failures.append({ "kind": "depth_cap_not_solid", "position": vec3_dictionary(deep_position), "sample": underground_sample_signature(deep_sample) })
     return {
-        "passed": front_air >= 6 and interior_air == 2 and wall_solids == 4 and cover_solids >= 1 and failures.is_empty(),
-        "frontAirSamples": front_air,
-        "interiorAirSamples": interior_air,
-        "wallSolidSamples": wall_solids,
-        "coverSolidSamples": cover_solids,
+        "passed": air_samples >= 1 and solid_neighbors >= 2 and not solid_materials.is_empty() and bool(deep_sample.get("solid", false)) and failures.is_empty(),
+        "airSamples": air_samples,
+        "solidNeighbors": solid_neighbors,
+        "solidMaterials": solid_materials.keys(),
+        "deepSolid": bool(deep_sample.get("solid", false)),
         "failures": failures
     }
 
-func cave_volume_chunk_geometry_summary() -> Dictionary:
+func underground_volume_chunk_geometry_summary() -> Dictionary:
     var chunks := get_chunks()
     var meshes := 0
     var bodies := 0
@@ -5607,65 +5601,27 @@ func cave_volume_chunk_geometry_summary() -> Dictionary:
         "shapes": shapes
     }
 
-func cave_volume_focus_cells(world_generation, feature: Dictionary) -> Array[Vector2i]:
-    var cells: Array[Vector2i] = []
-    cells.append(feature.get("entranceCell", Vector2i.ZERO))
-    var mid := cave_volume_tunnel_position(world_generation, feature, CELL * 8.0, 0.0, 0.0)
-    var chamber := cave_volume_tunnel_position(world_generation, feature, float(feature.get("length", CELL * 24.0)), 0.0, 0.0)
-    cells.append(Vector2i(roundi(mid.x / CELL), roundi(mid.z / CELL)))
-    cells.append(Vector2i(roundi(chamber.x / CELL), roundi(chamber.z / CELL)))
-    return cells
+func underground_volume_focus_cells(found: Dictionary) -> Array[Vector2i]:
+    var cell: Vector3i = found.get("cell", Vector3i.ZERO)
+    return [
+        Vector2i(cell.x, cell.z),
+        Vector2i(cell.x + 1, cell.z),
+        Vector2i(cell.x, cell.z + 1)
+    ]
 
-func cave_outside_player_position(world_generation, feature: Dictionary) -> Vector3:
-    var radius := float(feature.get("radius", CELL * 2.0))
-    var entrance := cave_volume_entrance_world2(feature)
-    var outside2 := entrance - cave_volume_inward2(feature) * radius * 4.0
-    var ground_y := cave_volume_ground_y(world_generation, outside2, float(feature.get("entranceSurfaceY", 0.0)))
-    return Vector3(outside2.x, ground_y + 1.35, outside2.y)
-
-func cave_volume_tunnel_position(world_generation, feature: Dictionary, depth: float, lateral := 0.0, lift := 0.0) -> Vector3:
-    var clamped_depth := clampf(depth, 0.0, float(feature.get("length", CELL * 24.0)))
-    var center2 := cave_volume_entrance_world2(feature) + cave_volume_inward2(feature) * clamped_depth
-    var center_y := float(world_generation.call("cave_feature_center_y", feature, center2, clamped_depth))
-    var right := cave_volume_right2(feature)
-    return Vector3(center2.x + right.x * lateral, center_y + lift, center2.y + right.y * lateral)
-
-func cave_volume_ground_y(world_generation, pos2: Vector2, fallback_y: float) -> float:
-    var cell_x := roundi(pos2.x / CELL)
-    var cell_z := roundi(pos2.y / CELL)
-    for y in range(96, -16, -1):
-        var solid_sample: Dictionary = world_generation.call("sample_cell", Vector3i(cell_x, y, cell_z))
-        var air_sample: Dictionary = world_generation.call("sample_cell", Vector3i(cell_x, y + 1, cell_z))
-        if bool(solid_sample.get("solid", false)) and not bool(air_sample.get("solid", true)):
-            return float(y + 1) * CELL
-    return fallback_y
-
-func cave_volume_entrance_world2(feature: Dictionary) -> Vector2:
-    var entrance_cell: Vector2i = feature.get("entranceCell", Vector2i.ZERO)
-    return Vector2(float(entrance_cell.x) * CELL, float(entrance_cell.y) * CELL)
-
-func cave_volume_inward2(feature: Dictionary) -> Vector2:
-    var cell: Vector2i = feature.get("inward", Vector2i(0, 1))
-    return Vector2(float(cell.x), float(cell.y)).normalized()
-
-func cave_volume_right2(feature: Dictionary) -> Vector2:
-    var cell: Vector2i = feature.get("right", Vector2i(1, 0))
-    return Vector2(float(cell.x), float(cell.y)).normalized()
-
-func cave_volume_summary(found: Dictionary) -> Dictionary:
-    var feature: Dictionary = found.get("feature", {}) if found.has("feature") else {}
+func underground_volume_summary(found: Dictionary) -> Dictionary:
     var sample: Dictionary = found.get("sample", {}) if found.has("sample") else {}
     return {
-        "id": String(feature.get("id", "")),
-        "region": vec2i_dictionary(feature.get("region", Vector2i.ZERO)),
-        "entranceCell": vec2i_dictionary(feature.get("entranceCell", Vector2i.ZERO)),
+        "id": String(found.get("id", "")),
+        "cell": vec3i_dictionary(found.get("cell", Vector3i.ZERO)),
+        "surfaceCell": vec2i_dictionary(found.get("surfaceCell", Vector2i.ZERO)),
         "position": vec3_dictionary(found.get("position", Vector3.ZERO)),
-        "radius": snappedf(float(feature.get("radius", 0.0)), 0.001),
-        "length": snappedf(float(feature.get("length", 0.0)), 0.001),
-        "sample": cave_sample_signature(sample)
+        "surfaceY": snappedf(float(found.get("surfaceY", 0.0)), 0.001),
+        "depthCells": int(found.get("depthCells", 0)),
+        "sample": underground_sample_signature(sample)
     }
 
-func cave_sample_signature(sample: Dictionary) -> Dictionary:
+func underground_sample_signature(sample: Dictionary) -> Dictionary:
     return {
         "density": snappedf(float(sample.get("density", 0.0)), 0.001),
         "solid": bool(sample.get("solid", false)),
@@ -5677,6 +5633,10 @@ func cave_sample_signature(sample: Dictionary) -> Dictionary:
 func vec2i_dictionary(value) -> Dictionary:
     var vector: Vector2i = value if value is Vector2i else Vector2i.ZERO
     return { "x": vector.x, "z": vector.y }
+
+func vec3i_dictionary(value) -> Dictionary:
+    var vector: Vector3i = value if value is Vector3i else Vector3i.ZERO
+    return { "x": vector.x, "y": vector.y, "z": vector.z }
 
 func vec3_dictionary(value) -> Dictionary:
     var vector: Vector3 = value if value is Vector3 else Vector3.ZERO
@@ -6650,9 +6610,11 @@ func test_water_visual_material() -> void:
     if material:
         cloud_param = float(material.get_shader_parameter("cloud_cover"))
         weather_param = float(material.get_shader_parameter("weather_intensity"))
-    var plane := water.mesh as PlaneMesh if water else null
+    var mesh: Mesh = water.mesh if water else null
+    var plane := mesh as PlaneMesh
+    var array_mesh := mesh as ArrayMesh
     var water_level_ok := water != null and absf(water.position.y - WATER_LEVEL) <= 0.001
-    var plane_ok := plane != null and plane.size.x >= 2999.0 and plane.size.y >= 2999.0
+    var mesh_ok := (plane != null and plane.size.x >= 2999.0 and plane.size.y >= 2999.0) or array_mesh != null
     var param_ok := absf(cloud_param - 0.82) <= 0.002 and absf(weather_param - 0.46) <= 0.002
     add_result(
         "water_visual_material",
@@ -6661,12 +6623,12 @@ func test_water_visual_material() -> void:
             and water != null
             and water.material_override == material
             and water_level_ok
-            and plane_ok
+            and mesh_ok
             and param_ok,
-        "shader %s, water y %.2f, plane %s, params %.2f/%.2f" % [
+        "shader %s, water y %.2f, mesh %s, params %.2f/%.2f" % [
             shader_path,
             water.position.y if water else -999.0,
-            str(plane.size if plane else Vector2.ZERO),
+            str(plane.size if plane else Vector2i(array_mesh.get_surface_count(), 0) if array_mesh else Vector2.ZERO),
             cloud_param,
             weather_param
         ]

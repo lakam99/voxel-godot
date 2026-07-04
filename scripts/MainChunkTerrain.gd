@@ -2,7 +2,6 @@ extends "res://scripts/MainInteractionFlow.gd"
 
 const LocalLightRigScript := preload("res://scripts/LocalLightRig.gd")
 const NpcConstantsScript := preload("res://scripts/npc_ai/NpcConstants.gd")
-const CAVE_VISUAL_LAYER := 1 << 1
 
 func add_block_mesh(parent: Node3D, size: Vector3, offset: Vector3, material_key: String, rotation := Vector3.ZERO) -> MeshInstance3D:
     var mesh_instance := MeshInstance3D.new()
@@ -556,11 +555,6 @@ func create_block(cell: Vector3i, block_type: String, options: Dictionary = {}) 
         "cornerX",
         "cornerZ",
         "fenceAxis",
-        "caveId",
-        "caveKind",
-        "caveRole",
-        "caveDepthIndex",
-        "caveFinalLoot",
         "torchVisualScale",
         "torchWallMount",
         "torchWallNormalX",
@@ -664,8 +658,6 @@ func create_block(cell: Vector3i, block_type: String, options: Dictionary = {}) 
     else:
         add_block_mesh(body, mesh_size, mesh_offset, block_type)
     add_block_accent_visuals(body, block_type, options)
-    if String(body.get_meta("generatedTier", "")) == "cave":
-        apply_cave_visual_layer(body)
 
     var shape := BoxShape3D.new()
     shape.size = collider_size
@@ -693,12 +685,6 @@ func yaw_for_cell_direction(direction: Vector2i) -> float:
     if direction == Vector2i.ZERO:
         return 0.0
     return atan2(-float(direction.x), -float(direction.y))
-
-func apply_cave_visual_layer(node: Node) -> void:
-    if node is VisualInstance3D:
-        (node as VisualInstance3D).layers = CAVE_VISUAL_LAYER
-    for child in node.get_children():
-        apply_cave_visual_layer(child)
 
 func is_structural_block_type(block_type: String) -> bool:
     return not NON_STRUCTURAL_BLOCK_TYPES.has(block_type)

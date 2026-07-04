@@ -1,10 +1,17 @@
 extends "res://scripts/MainSaveState.gd"
 
 const DEFAULT_VISUAL_LIGHT_LAYER := 1
-const CAVE_VISUAL_LIGHT_LAYER := 1 << 1
-const SHADOW_AUTHORITATIVE_LIGHT_MASK := DEFAULT_VISUAL_LIGHT_LAYER | CAVE_VISUAL_LIGHT_LAYER
+const SHADOW_AUTHORITATIVE_LIGHT_MASK := DEFAULT_VISUAL_LIGHT_LAYER
+const STREAMING_FRAME_DEFER_NONCRITICAL_MS := 8.0
+const FRAME_BUDGET_DEFER_OPTIONAL_MS := 11.0
+const FRAME_BUDGET_DEFER_SIMULATION_MS := 14.0
+const FRAME_BUDGET_DEFER_REMAINING_MS := 20.0
+const WATER_MESH_RADIUS_CELLS := 160
+const WATER_MESH_STEP_CELLS := 4
+const WATER_MESH_REBUILD_STEP_CELLS := 16
 
 var last_requested_mouse_mode: int = Input.MOUSE_MODE_VISIBLE
+var water_mesh_key := Vector2i(999999, 999999)
 
 func set_game_mouse_mode(mode: int) -> void:
     last_requested_mouse_mode = mode
@@ -194,15 +201,11 @@ func setup_environment() -> void:
     add_child(sun_visual)
     add_child(moon_visual)
 
-    var plane := PlaneMesh.new()
-    plane.size = Vector2(3000.0, 3000.0)
-    plane.subdivide_width = 96
-    plane.subdivide_depth = 96
     water = MeshInstance3D.new()
     water.name = "Water"
-    water.mesh = plane
     water.material_override = materials["water"]
     water.position.y = WATER_LEVEL
+    water.mesh = ArrayMesh.new()
     add_child(water)
 
     weather_system = WeatherSystemScript.new()
@@ -472,6 +475,79 @@ func feedback_color_for_material(material_id: String) -> Color:
             return material.albedo_color
     return Color(0.72, 0.68, 0.58)
 
+func update_water_surface_mesh() -> void:
+    if water == null or player == null:
+        return
+    var center_cell := Vector2i(roundi(player.position.x / CELL), roundi(player.position.z / CELL))
+    var key := Vector2i(
+        floori(float(center_cell.x) / float(WATER_MESH_REBUILD_STEP_CELLS)),
+        floori(float(center_cell.y) / float(WATER_MESH_REBUILD_STEP_CELLS))
+    )
+    if key == water_mesh_key:
+        return
+    water_mesh_key = key
+    var mesh_center := Vector2i(key.x * WATER_MESH_REBUILD_STEP_CELLS, key.y * WATER_MESH_REBUILD_STEP_CELLS)
+    water.position = Vector3(float(mesh_center.x) * CELL, WATER_LEVEL, float(mesh_center.y) * CELL)
+    water.mesh = build_water_surface_mesh(mesh_center)
+
+func build_water_surface_mesh(center_cell: Vector2i) -> ArrayMesh:
+    var mesh := ArrayMesh.new()
+    var vertices := PackedVector3Array()
+    var normals := PackedVector3Array()
+    var uvs := PackedVector2Array()
+    var indices := PackedInt32Array()
+    var origin_x := float(center_cell.x) * CELL
+    var origin_z := float(center_cell.y) * CELL
+    var half := WATER_MESH_RADIUS_CELLS
+    var step := WATER_MESH_STEP_CELLS
+    for z_offset in range(-half, half, step):
+        for x_offset in range(-half, half, step):
+            var sample_x := center_cell.x + x_offset + step / 2
+            var sample_z := center_cell.y + z_offset + step / 2
+            if not water_surface_cell_has_natural_water(sample_x, sample_z):
+                continue
+            var base_index := vertices.size()
+            var x0 := float(center_cell.x + x_offset) * CELL - origin_x
+            var z0 := float(center_cell.y + z_offset) * CELL - origin_z
+            var x1 := float(center_cell.x + x_offset + step) * CELL - origin_x
+            var z1 := float(center_cell.y + z_offset + step) * CELL - origin_z
+            vertices.append(Vector3(x0, 0.0, z0))
+            vertices.append(Vector3(x1, 0.0, z0))
+            vertices.append(Vector3(x0, 0.0, z1))
+            vertices.append(Vector3(x1, 0.0, z1))
+            normals.append(Vector3.UP)
+            normals.append(Vector3.UP)
+            normals.append(Vector3.UP)
+            normals.append(Vector3.UP)
+            uvs.append(Vector2(float(center_cell.x + x_offset), float(center_cell.y + z_offset)))
+            uvs.append(Vector2(float(center_cell.x + x_offset + step), float(center_cell.y + z_offset)))
+            uvs.append(Vector2(float(center_cell.x + x_offset), float(center_cell.y + z_offset + step)))
+            uvs.append(Vector2(float(center_cell.x + x_offset + step), float(center_cell.y + z_offset + step)))
+            indices.append(base_index)
+            indices.append(base_index + 2)
+            indices.append(base_index + 1)
+            indices.append(base_index + 1)
+            indices.append(base_index + 2)
+            indices.append(base_index + 3)
+    if vertices.is_empty():
+        return mesh
+    var arrays := []
+    arrays.resize(Mesh.ARRAY_MAX)
+    arrays[Mesh.ARRAY_VERTEX] = vertices
+    arrays[Mesh.ARRAY_NORMAL] = normals
+    arrays[Mesh.ARRAY_TEX_UV] = uvs
+    arrays[Mesh.ARRAY_INDEX] = indices
+    mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+    return mesh
+
+func water_surface_cell_has_natural_water(cell_x: int, cell_z: int) -> bool:
+    var surface_y := 0.0
+    if world_generation_system != null and world_generation_system.has_method("terrain_reference_surface_y_for_cell"):
+        surface_y = float(world_generation_system.call("terrain_reference_surface_y_for_cell", Vector3i(cell_x, 0, cell_z)))
+    else:
+        surface_y = natural_surface_y_at_cell(Vector3i(cell_x, 0, cell_z))
+    return surface_y <= float(WATER_LEVEL) + 0.30
+
 func _process(delta: float) -> void:
     var frame_start := Time.get_ticks_usec()
     if runtime_perf_monitor != null:
@@ -483,59 +559,115 @@ func _process(delta: float) -> void:
         perf_chunk_ms = profiled_ms(chunk_start)
         if runtime_perf_monitor != null:
             runtime_perf_monitor.observe_duration("chunk", perf_chunk_ms)
-        water.position.x = player.position.x
-        water.position.z = player.position.z
+        update_water_surface_mesh()
+    var defer_noncritical_frame_work := perf_chunk_ms >= STREAMING_FRAME_DEFER_NONCRITICAL_MS
     var sky_start := Time.get_ticks_usec()
-    update_sky(delta)
-    update_local_light_rig_lod(delta)
-    perf_sky_ms = profiled_ms(sky_start)
+    var defer_sky := should_defer_frame_work(frame_start, defer_noncritical_frame_work, FRAME_BUDGET_DEFER_OPTIONAL_MS)
+    if defer_sky:
+        perf_sky_ms = 0.0
+        increment_defer_counter("streaming_frame_sky_deferred", "frame_budget_sky_deferred", defer_noncritical_frame_work)
+    else:
+        update_sky(delta)
+        update_local_light_rig_lod(delta)
+        perf_sky_ms = profiled_ms(sky_start)
     if runtime_perf_monitor != null:
         runtime_perf_monitor.observe_duration("sky", perf_sky_ms)
     update_sleep_transition(delta)
     var utility_start := Time.get_ticks_usec()
-    if utility_system:
+    var defer_utility := should_defer_frame_work(frame_start, defer_noncritical_frame_work, FRAME_BUDGET_DEFER_OPTIONAL_MS)
+    if defer_utility:
+        perf_utility_ms = 0.0
+        increment_defer_counter("streaming_frame_utility_deferred", "frame_budget_utility_deferred", defer_noncritical_frame_work)
+    elif utility_system:
         utility_system.update(delta)
-    perf_utility_ms = profiled_ms(utility_start)
+        perf_utility_ms = profiled_ms(utility_start)
+    else:
+        perf_utility_ms = 0.0
     if runtime_perf_monitor != null:
         runtime_perf_monitor.observe_duration("utility", perf_utility_ms)
     var pickups_start := Time.get_ticks_usec()
-    update_dropped_pickups(delta)
-    perf_pickups_ms = profiled_ms(pickups_start)
+    var defer_pickups := should_defer_frame_work(frame_start, defer_noncritical_frame_work, FRAME_BUDGET_DEFER_OPTIONAL_MS)
+    if defer_pickups:
+        perf_pickups_ms = 0.0
+        increment_defer_counter("streaming_frame_pickups_deferred", "frame_budget_pickups_deferred", defer_noncritical_frame_work)
+    else:
+        update_dropped_pickups(delta)
+        perf_pickups_ms = profiled_ms(pickups_start)
     if runtime_perf_monitor != null:
         runtime_perf_monitor.observe_duration("pickups", perf_pickups_ms)
-    update_wildlife(delta)
+    var defer_wildlife := should_defer_frame_work(frame_start, defer_noncritical_frame_work, FRAME_BUDGET_DEFER_OPTIONAL_MS)
+    if defer_wildlife:
+        increment_defer_counter("streaming_frame_wildlife_deferred", "frame_budget_wildlife_deferred", defer_noncritical_frame_work)
+    else:
+        update_wildlife(delta)
     var survival_start := Time.get_ticks_usec()
-    update_survival(delta)
-    perf_survival_ms = profiled_ms(survival_start)
+    var defer_survival := should_defer_frame_work(frame_start, defer_noncritical_frame_work, FRAME_BUDGET_DEFER_OPTIONAL_MS)
+    if defer_survival:
+        perf_survival_ms = 0.0
+        increment_defer_counter("streaming_frame_survival_deferred", "frame_budget_survival_deferred", defer_noncritical_frame_work)
+    else:
+        update_survival(delta)
+        perf_survival_ms = profiled_ms(survival_start)
     if runtime_perf_monitor != null:
         runtime_perf_monitor.observe_duration("survival", perf_survival_ms)
     var hostiles_start := Time.get_ticks_usec()
-    update_hostiles(delta)
-    perf_hostiles_ms = profiled_ms(hostiles_start)
+    var defer_hostiles := should_defer_frame_work(frame_start, defer_noncritical_frame_work, FRAME_BUDGET_DEFER_SIMULATION_MS)
+    if defer_hostiles:
+        perf_hostiles_ms = 0.0
+        increment_defer_counter("streaming_frame_hostiles_deferred", "frame_budget_hostiles_deferred", defer_noncritical_frame_work)
+    else:
+        update_hostiles(delta)
+        perf_hostiles_ms = profiled_ms(hostiles_start)
     if runtime_perf_monitor != null:
         runtime_perf_monitor.observe_duration("hostiles", perf_hostiles_ms)
     var npc_start := Time.get_ticks_usec()
-    update_npcs(delta)
-    perf_npc_ms = profiled_ms(npc_start)
+    var defer_npc := should_defer_frame_work(frame_start, defer_noncritical_frame_work, FRAME_BUDGET_DEFER_SIMULATION_MS)
+    if defer_npc:
+        perf_npc_ms = 0.0
+        increment_defer_counter("streaming_frame_npc_deferred", "frame_budget_npc_deferred", defer_noncritical_frame_work)
+    else:
+        update_npcs(delta)
+        perf_npc_ms = profiled_ms(npc_start)
     if runtime_perf_monitor != null:
         runtime_perf_monitor.observe_duration("update_npcs", perf_npc_ms)
     if region_aftermath_system:
         region_aftermath_system.update(delta)
     handle_collapse_if_needed()
+    var defer_remaining_frame_work := defer_noncritical_frame_work or profiled_ms(frame_start) >= FRAME_BUDGET_DEFER_REMAINING_MS
     var beacon_start := Time.get_ticks_usec()
-    update_beacon_charge(delta)
-    perf_beacon_ms = profiled_ms(beacon_start)
+    if defer_remaining_frame_work:
+        perf_beacon_ms = 0.0
+        if runtime_perf_monitor != null:
+            runtime_perf_monitor.increment_counter("frame_budget_beacon_deferred")
+    else:
+        update_beacon_charge(delta)
+        perf_beacon_ms = profiled_ms(beacon_start)
     if runtime_perf_monitor != null:
         runtime_perf_monitor.observe_duration("beacon", perf_beacon_ms)
-    process_autosave(delta)
+    if defer_remaining_frame_work:
+        perf_autosave_ms = 0.0
+        if runtime_perf_monitor != null:
+            runtime_perf_monitor.increment_counter("frame_budget_autosave_deferred")
+    else:
+        process_autosave(delta)
     var break_start := Time.get_ticks_usec()
-    update_break_reset(delta)
-    perf_break_ms = profiled_ms(break_start)
+    if defer_remaining_frame_work:
+        perf_break_ms = 0.0
+        if runtime_perf_monitor != null:
+            runtime_perf_monitor.increment_counter("frame_budget_break_deferred")
+    else:
+        update_break_reset(delta)
+        perf_break_ms = profiled_ms(break_start)
     if runtime_perf_monitor != null:
         runtime_perf_monitor.observe_duration("break", perf_break_ms)
     var hud_start := Time.get_ticks_usec()
-    update_hud_frame(delta)
-    perf_hud_ms = profiled_ms(hud_start)
+    if defer_remaining_frame_work:
+        perf_hud_ms = 0.0
+        if runtime_perf_monitor != null:
+            runtime_perf_monitor.increment_counter("frame_budget_hud_deferred")
+    else:
+        update_hud_frame(delta)
+        perf_hud_ms = profiled_ms(hud_start)
     if runtime_perf_monitor != null:
         runtime_perf_monitor.observe_duration("hud", perf_hud_ms)
     update_performance_overlay(delta)
@@ -548,3 +680,11 @@ func _process(delta: float) -> void:
 
 func profiled_ms(start_usec: int) -> float:
     return float(Time.get_ticks_usec() - start_usec) / 1000.0
+
+func should_defer_frame_work(frame_start_usec: int, streaming_deferred: bool, budget_ms: float) -> bool:
+    return streaming_deferred or profiled_ms(frame_start_usec) >= budget_ms
+
+func increment_defer_counter(streaming_counter: String, budget_counter: String, streaming_deferred: bool) -> void:
+    if runtime_perf_monitor == null:
+        return
+    runtime_perf_monitor.increment_counter(streaming_counter if streaming_deferred else budget_counter)
