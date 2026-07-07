@@ -459,23 +459,25 @@ func test_route_navmesh_adapter_no_legacy_fallback(_mode: String) -> Dictionary:
 	var service_text = read_text("res://scripts/npc_ai/navigation/NavmeshWorldService.gd")
 	var passed = adapter_text.find("NavmeshRoutePlannerScript") >= 0 \
 		and adapter_text.find("navmesh_planner.plan_runtime_route") >= 0 \
-		and adapter_text.find("generated_corridor_planner.plan_runtime_route") >= 0 \
-		and adapter_text.find("path_crosses_static_collision") >= 0 \
+		and adapter_text.find("generated_corridor_planner") < 0 \
+		and adapter_text.find("HierarchicalRoutePlannerScript") < 0 \
 		and adapter_text.find("route_from_cells") < 0 \
 		and adapter_text.find("MAX_ITERATIONS") < 0 \
+		and planner_text.find("path_crosses_static_collision") >= 0 \
 		and planner_text.find("validate_waypoint_route") >= 0 \
 		and planner_text.find("legacyFallbackUsed") >= 0 \
 		and service_text.find("query_path") >= 0
-	return outcome(passed, "adapterNavmesh=%d fallback=%d validation=%d queryPath=%d" % [adapter_text.find("NavmeshRoutePlannerScript"), adapter_text.find("generated_corridor_planner.plan_runtime_route"), planner_text.find("validate_waypoint_route"), service_text.find("query_path")], ["adapter_uses_navmesh_authority", "navmesh_routes_are_collision_validated_before_acceptance", "generated_corridor_fallback_handles_rejected_navmesh_paths"], {})
+	return outcome(passed, "adapterNavmesh=%d generatedFallback=%d validation=%d queryPath=%d" % [adapter_text.find("NavmeshRoutePlannerScript"), adapter_text.find("generated_corridor_planner"), planner_text.find("validate_waypoint_route"), service_text.find("query_path")], ["adapter_uses_navmesh_authority", "navmesh_routes_are_collision_validated_before_acceptance", "live_adapter_has_no_generated_corridor_fallback"], {})
 
 func test_route_runtime_goal_adapter_uses_new_corridor(_mode: String) -> Dictionary:
 	var adapter_text = read_text("res://scripts/npc_ai/routing/NpcRouteCoordinatorAdapter.gd")
 	var passed = adapter_text.find("MAX_ITERATIONS") < 0 \
 		and adapter_text.find("navmesh_planner.plan_runtime_route") >= 0 \
-		and adapter_text.find("generated_corridor_planner.plan_runtime_route") >= 0 \
+		and adapter_text.find("generated_corridor_planner") < 0 \
+		and adapter_text.find("HierarchicalRoutePlannerScript") < 0 \
 		and adapter_text.find("coordinator.plan_runtime_route") < 0 \
 		and adapter_text.find("route_from_cells") < 0
-	return outcome(passed, "maxIterations=%d navmeshCall=%d generatedFallback=%d" % [adapter_text.find("MAX_ITERATIONS"), adapter_text.find("navmesh_planner.plan_runtime_route"), adapter_text.find("generated_corridor_planner.plan_runtime_route")], ["runtime_adapter_delegates_navmesh_authority", "old_iteration_cap_removed", "generated_corridor_fallback_is_explicit"], {})
+	return outcome(passed, "maxIterations=%d navmeshCall=%d generatedFallback=%d" % [adapter_text.find("MAX_ITERATIONS"), adapter_text.find("navmesh_planner.plan_runtime_route"), adapter_text.find("generated_corridor_planner")], ["runtime_adapter_delegates_navmesh_authority", "old_iteration_cap_removed", "generated_corridor_fallback_removed_from_live_adapter"], {})
 
 func test_route_runtime_door_uses_group_portal_id(_mode: String) -> Dictionary:
 	var planner = HierarchicalRoutePlannerScript.new()

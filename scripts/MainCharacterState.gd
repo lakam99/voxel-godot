@@ -275,7 +275,8 @@ func victory_stats() -> Array:
     var hostile_state: Dictionary = state.get("hostiles", {})
     var defeated_variants: Dictionary = hostile_state.get("defeatedVariants", {})
     var totals: Dictionary = state.get("totals", {})
-    var world_edits: int = volume_edit_markers.size() + removed_props.size() + blocks.size()
+    var terrain_volume_edits := int(world_generation_system.call("terrain_volume_edit_count", true)) if world_generation_system != null and world_generation_system.has_method("terrain_volume_edit_count") else volume_edit_markers.size()
+    var world_edits: int = terrain_volume_edits + removed_props.size() + blocks.size()
     var time_text := clock_time_text()
     return [
         { "label": "Seed", "value": seed_text },

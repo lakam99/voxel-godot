@@ -21,6 +21,28 @@ var route_repair
 func setup(system_node, main_node) -> void:
     system = system_node
     main = main_node
+    ensure_ready()
+
+func ensure_ready() -> void:
+    if system == null or main == null:
+        return
+    if navigation_world == null:
+        navigation_world = GeneratedWorldNavigationAdapterScript.new()
+        navigation_world.setup(system, main)
+    if route_planner == null:
+        route_planner = NpcRouteCoordinatorAdapterScript.new()
+        route_planner.setup(system, main, navigation_world)
+        route_repair = route_planner.get("repair_service")
+    elif route_repair == null:
+        route_repair = route_planner.get("repair_service")
+    if locomotion == null:
+        locomotion = NpcRouteMovementControllerScript.new()
+        locomotion.setup(system, main)
+    if goal_planner == null:
+        goal_planner = NpcSemanticGoalPlannerScript.new()
+        goal_planner.setup(system, main, navigation_world, route_planner)
+
+func rebuild() -> void:
     navigation_world = GeneratedWorldNavigationAdapterScript.new()
     navigation_world.setup(system, main)
     route_planner = NpcRouteCoordinatorAdapterScript.new()
@@ -32,18 +54,21 @@ func setup(system_node, main_node) -> void:
     goal_planner.setup(system, main, navigation_world, route_planner)
 
 func begin_frame() -> void:
+    ensure_ready()
     if route_planner != null and route_planner.has_method("begin_frame"):
         route_planner.begin_frame()
     if locomotion != null:
         locomotion.begin_frame()
 
 func invalidate() -> void:
+    ensure_ready()
     if navigation_world != null:
         navigation_world.invalidate()
     if route_planner != null and route_planner.has_method("invalidate"):
         route_planner.invalidate()
 
 func process_navigation_events(events: Array, max_expansions := 128) -> Array[Dictionary]:
+    ensure_ready()
     if navigation_world != null and navigation_world.has_method("apply_navigation_events"):
         navigation_world.apply_navigation_events(events)
     if route_planner == null or not route_planner.has_method("process_navigation_events"):
@@ -51,16 +76,19 @@ func process_navigation_events(events: Array, max_expansions := 128) -> Array[Di
     return route_planner.process_navigation_events(events, max_expansions)
 
 func cleanup_actor_state(actor_id: String) -> Dictionary:
+    ensure_ready()
     if locomotion == null or not locomotion.has_method("cleanup_actor_state"):
         return { "avoidance": 0, "reason": "missing_locomotion" }
     return locomotion.cleanup_actor_state(actor_id)
 
 func cleanup_all() -> Dictionary:
+    ensure_ready()
     if locomotion == null or not locomotion.has_method("cleanup_all"):
         return { "avoidance": 0, "reason": "missing_locomotion" }
     return locomotion.cleanup_all()
 
 func classify_navigation_event(event: Dictionary) -> Dictionary:
+    ensure_ready()
     var result := {}
     if route_repair == null:
         return result
@@ -69,6 +97,7 @@ func classify_navigation_event(event: Dictionary) -> Dictionary:
     return result
 
 func move_npc(entry: Dictionary, target: Vector3, max_distance: float, moving_home := false, allow_outside := false, physics_delta := 0.0166667) -> float:
+    ensure_ready()
     var body := entry.get("body") as CharacterBody3D
     if body == null or max_distance <= 0.0 or goal_planner == null or locomotion == null:
         return 0.0

@@ -22,7 +22,7 @@ func apply_route_motion(entry: Dictionary, previous: Vector3, candidate: Vector3
 	if body == null or physics_delta <= 0.0:
 		return { "moved": 0.0, "reason": "missing_character_body" }
 	var monitor = performance_monitor()
-	var motor_delta := maxf(0.0001, physics_delta)
+	var motor_delta := slide_delta()
 	var displacement := candidate - previous
 	displacement.y = 0.0
 	var desired_velocity := displacement / motor_delta
@@ -86,7 +86,11 @@ func apply_route_motion(entry: Dictionary, previous: Vector3, candidate: Vector3
 		"moved": Vector2(facing_step.x, facing_step.z).length(),
 		"position": body.global_position,
 		"blocked": bool(state.get("blocked")),
-		"reason": String(state.get("blocked_contact_category"))
+		"reason": String(state.get("blocked_contact_category")),
+		"blockedContactName": String(state.get("blocked_contact_name")),
+		"blockedContactKind": String(state.get("blocked_contact_kind")),
+		"blockedContactType": String(state.get("blocked_contact_type")),
+		"slideCollisionCount": int(state.get("slide_collision_count"))
 	}
 
 func route_terrain_axis_fallback_needed(state, displacement: Vector3) -> bool:

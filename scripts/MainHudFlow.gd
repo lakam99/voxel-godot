@@ -46,6 +46,7 @@ func navigation_map_state() -> Dictionary:
         add_map_point(points, "town", "Town", Vector2(float(town.get("centerX", 0)) * CELL - player.global_position.x, float(town.get("centerZ", 0)) * CELL - player.global_position.z), 4.8, radius)
     var marker_scan_start := Time.get_ticks_usec()
     append_navigation_marker_points(points, radius)
+    append_nearby_navigation_marker_points(points, radius)
     if runtime_perf_monitor != null:
         runtime_perf_monitor.observe_duration("hud_navigation_marker_scan", profiled_ms(marker_scan_start))
     if hostile_system:
@@ -265,6 +266,12 @@ func append_navigation_marker_points(points: Array, radius: float) -> void:
 
 func append_nearby_navigation_marker_points(points: Array, radius: float) -> Dictionary:
     var added := {}
+    for point_value in points:
+        if not (point_value is Dictionary):
+            continue
+        var key := String((point_value as Dictionary).get("key", ""))
+        if key != "":
+            added[key] = true
     if player == null or blocks.is_empty():
         return added
     var center := Vector2i(world_to_cell(player.global_position.x), world_to_cell(player.global_position.z))
@@ -550,6 +557,7 @@ func award_break_xp(material_id: String) -> void:
         "copperVein": 9,
         "ironVein": 11,
         "stone": 5,
+        "deepStone": 7,
         "woodBlock": 2,
         "dirtBlock": 1,
         "stoneBlock": 4,

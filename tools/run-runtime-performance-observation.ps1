@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("All", "DayWork", "DuskReturnHome", "MidnightTown", "CrowdedDoorTraffic", "SprintTraversal", "UndergroundTraversal", "AutosaveEnabled", "AutosaveDisabled")]
+    [ValidateSet("All", "DayWork", "DuskReturnHome", "MidnightTown", "CrowdedDoorTraffic", "SprintTraversal", "UndergroundTraversal", "TerrainMeshingWarmup", "AutosaveEnabled", "AutosaveDisabled")]
     [string]$Scenario = "All",
     [string]$Seed = "atlas-1492",
     [int]$DurationSeconds = 60,
@@ -8,6 +8,7 @@ param(
     [string]$ProgressPath = "",
     [string]$LogPath = "",
     [int]$WatchdogSeconds = 0,
+    [int]$WarmupFrames = -1,
     [switch]$Visible
 )
 
@@ -48,6 +49,11 @@ $env:VOXEL_RUNTIME_PERF_PROGRESS = $ProgressPath
 $env:VOXEL_RUNTIME_PERF_RUN_TOKEN = $runToken
 $env:VOXEL_RUNTIME_PERF_DURATION_SECONDS = [string]$DurationSeconds
 $env:VOXEL_RUNTIME_PERF_WATCHDOG_SECONDS = [string]$WatchdogSeconds
+if ($WarmupFrames -ge 0) {
+    $env:VOXEL_RUNTIME_PERF_WARMUP_FRAMES = [string]$WarmupFrames
+} else {
+    Remove-Item Env:VOXEL_RUNTIME_PERF_WARMUP_FRAMES -ErrorAction SilentlyContinue
+}
 
 $args = @("--fixed-fps", "60", "--log-file", $LogPath, "--path", $projectPath, "--scene", "res://scenes/testing/RuntimePerformanceObservation.tscn")
 if (-not $Visible) {

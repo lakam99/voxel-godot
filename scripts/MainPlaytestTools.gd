@@ -27,14 +27,59 @@ const VOLUME_TETRAHEDRON_EDGES := [
     [2, 3]
 ]
 const UNDERGROUND_VOLUME_MESH_STEP_CELLS := 16
-const UNDERGROUND_VOLUME_COARSE_STEP_CELLS := 8
-const UNDERGROUND_VOLUME_EXTERIOR_LOD_STEP_CELLS := 4
-const UNDERGROUND_VOLUME_FOCUS_STEP_CELLS := 2
+const UNDERGROUND_VOLUME_COARSE_STEP_CELLS := 16
+const UNDERGROUND_VOLUME_EXTERIOR_LOD_STEP_CELLS := 8
+const UNDERGROUND_VOLUME_FINE_FOCUS_STEP_CELLS := 2
+const UNDERGROUND_VOLUME_FOCUS_STEP_CELLS := 12
+const UNDERGROUND_VOLUME_DEBUG_STEP_CELLS := 16
 const UNDERGROUND_VOLUME_FOCUS_RADIUS_CELLS := 9
+const UNDERGROUND_VOLUME_DEBUG_RADIUS_CELLS := 84
+const UNDERGROUND_VOLUME_SURFACE_EXPOSURE_DEPTH_CELLS := 6
+const UNDERGROUND_VOLUME_SURFACE_EXPOSURE_VERTICAL_STEP_CELLS := 2
 const UNDERGROUND_VOLUME_Y_PADDING := CELL * 0.85
-const UNDERGROUND_GENERATED_DEPTH_CELLS := 32
 
 var full_exterior_indices_cache := PackedInt32Array()
+var underground_focus_cache_cell := Vector3i(999999, 999999, 999999)
+var underground_focus_cache_revision := -1
+var underground_focus_cache_seed := ""
+var underground_focus_cache_debug := false
+var underground_focus_cache_result := false
+var underground_chunk_exposure_cache := {}
+
+func generated_volume_exposure_cache_metadata(start_x: int, start_z: int) -> Dictionary:
+    var chunk_key := Vector2i(floori(float(start_x) / float(CHUNK_SIZE)), floori(float(start_z) / float(CHUNK_SIZE)))
+    var revision := int(world_generation_system.call("terrain_volume_revision")) if world_generation_system != null and world_generation_system.has_method("terrain_volume_revision") else 0
+    return {
+        "chunk": chunk_key,
+        "revision": revision,
+        "seed": seed_text
+    }
+
+func cached_generated_surface_volume_exposure(start_x: int, start_z: int) -> Dictionary:
+    var metadata := generated_volume_exposure_cache_metadata(start_x, start_z)
+    var chunk_key: Vector2i = metadata.get("chunk", Vector2i.ZERO)
+    if underground_chunk_exposure_cache.has(chunk_key):
+        var cached_value = underground_chunk_exposure_cache[chunk_key]
+        if cached_value is Dictionary:
+            var cached: Dictionary = cached_value
+            if int(cached.get("revision", -1)) == int(metadata.get("revision", -1)) and String(cached.get("seed", "")) == String(metadata.get("seed", "")):
+                return {
+                    "known": true,
+                    "result": bool(cached.get("result", false))
+                }
+    return {
+        "known": false,
+        "result": false
+    }
+
+func cache_generated_surface_volume_exposure(start_x: int, start_z: int, result: bool) -> void:
+    var metadata := generated_volume_exposure_cache_metadata(start_x, start_z)
+    var chunk_key: Vector2i = metadata.get("chunk", Vector2i.ZERO)
+    underground_chunk_exposure_cache[chunk_key] = {
+        "revision": int(metadata.get("revision", 0)),
+        "seed": String(metadata.get("seed", "")),
+        "result": result
+    }
 
 func build_chunk_mesh(cx: int, cz: int) -> Mesh:
     var start_x: int = cx * CHUNK_SIZE
@@ -42,28 +87,31 @@ func build_chunk_mesh(cx: int, cz: int) -> Mesh:
     var monitor = runtime_perf_monitor
     var volume_scan_start: int = monitor.begin_section("chunk_volume_boundary_scan") if monitor != null else Time.get_ticks_usec()
     var has_excavation := chunk_has_excavation_overlap(start_x, start_z)
+    var has_volume_edits := chunk_has_terrain_volume_edits(start_x, start_z)
     var generated_volume_required := chunk_needs_generated_underground_volume_mesh(start_x, start_z)
-    var volume_required := has_excavation or generated_volume_required
+    var full_generated_volume_required := generated_volume_required and not has_volume_edits
+    var local_volume_required := has_excavation or has_volume_edits
+    var volume_required := local_volume_required or full_generated_volume_required
     if monitor != null:
         monitor.end_section("chunk_volume_boundary_scan", volume_scan_start)
     if not volume_required:
         var exterior_start_fast: int = monitor.begin_section("chunk_exterior_surface_mesh") if monitor != null else Time.get_ticks_usec()
-        var exterior_mesh := build_natural_exterior_array_mesh(start_x, start_z)
+        var exterior_mesh := build_two_sided_exterior_array_mesh(start_x, start_z)
         if monitor != null:
             monitor.end_section("chunk_exterior_surface_mesh", exterior_start_fast)
         return exterior_mesh
     var mesh := ArrayMesh.new()
     var exterior_start: int = monitor.begin_section("chunk_exterior_surface_mesh") if monitor != null else Time.get_ticks_usec()
     var volume_context := {}
-    var exterior_arrays := build_natural_exterior_arrays_lod(start_x, start_z, UNDERGROUND_VOLUME_EXTERIOR_LOD_STEP_CELLS) if generated_volume_required and not has_excavation else build_natural_exterior_arrays(start_x, start_z)
+    var exterior_arrays := empty_terrain_surface_arrays() if (full_generated_volume_required and not local_volume_required) or has_volume_edits else build_natural_exterior_arrays(start_x, start_z)
     if monitor != null:
         monitor.end_section("chunk_exterior_surface_mesh", exterior_start)
-    var bounds := chunk_volume_y_bounds(start_x, start_z) if generated_volume_required else excavation_volume_y_bounds_for_chunk(start_x, start_z)
+    var bounds := chunk_volume_y_bounds(start_x, start_z) if full_generated_volume_required or has_volume_edits else excavation_volume_y_bounds_for_chunk(start_x, start_z)
     var min_y := int(bounds.get("minY", floori((MIN_HEIGHT - CELL * 4.0) / CELL))) - 1
     var max_y := int(bounds.get("maxY", ceili((MAX_HEIGHT + CELL * 2.0) / CELL))) + 1
     var volume_arrays := {}
     var volume_start: int = monitor.begin_section("chunk_volume_mesh") if monitor != null else Time.get_ticks_usec()
-    if generated_volume_required:
+    if full_generated_volume_required or has_volume_edits:
         volume_arrays = build_volume_iso_arrays(start_x, start_z, min_y, max_y, volume_context)
     else:
         volume_arrays = build_excavation_volume_iso_arrays(start_x, start_z, min_y, max_y, volume_context)
@@ -72,11 +120,148 @@ func build_chunk_mesh(cx: int, cz: int) -> Mesh:
         monitor.increment_counter("chunk_volume_cubes", int(volume_arrays.get("cubes", 0)))
         monitor.increment_counter("chunk_volume_faces", int(volume_arrays.get("faces", 0)))
         monitor.end_section("chunk_volume_mesh", volume_start)
-    var combined_arrays := combine_terrain_surface_arrays(exterior_arrays, volume_arrays)
+    var combine_start: int = monitor.begin_section("chunk_combine_surface_arrays") if monitor != null else Time.get_ticks_usec()
+    var exterior_vertices: PackedVector3Array = exterior_arrays.get("vertices", PackedVector3Array())
+    var combined_arrays := volume_arrays if exterior_vertices.is_empty() else combine_terrain_surface_arrays(exterior_arrays, volume_arrays)
+    if monitor != null:
+        monitor.end_section("chunk_combine_surface_arrays", combine_start)
     add_terrain_array_surface(mesh, combined_arrays, terrain_material)
     mesh.set_meta("chunk_volume_faces", int(volume_arrays.get("faces", 0)))
     mesh.set_meta("chunk_volume_vertices", (volume_arrays.get("vertices", PackedVector3Array()) as PackedVector3Array).size())
     return mesh
+
+func build_chunk_fluid_mesh(cx: int, cz: int) -> Mesh:
+    var mesh := ArrayMesh.new()
+    if world_generation_system == null or not world_generation_system.has_method("sample_world"):
+        return mesh
+    var start_x: int = cx * CHUNK_SIZE
+    var start_z: int = cz * CHUNK_SIZE
+    var has_excavation := chunk_has_excavation_overlap(start_x, start_z)
+    var has_volume_edits := chunk_has_terrain_volume_edits(start_x, start_z)
+    var generated_volume_required := chunk_needs_generated_underground_volume_mesh(start_x, start_z)
+    var full_generated_volume_required := generated_volume_required and not has_volume_edits
+    if not has_excavation and not full_generated_volume_required:
+        return mesh
+    var bounds := chunk_volume_y_bounds(start_x, start_z) if full_generated_volume_required else excavation_volume_y_bounds_for_chunk(start_x, start_z)
+    var min_y := int(bounds.get("minY", floori((MIN_HEIGHT - CELL * 4.0) / CELL))) - 1
+    var max_y := int(bounds.get("maxY", ceili((MAX_HEIGHT + CELL * 2.0) / CELL))) + 1
+    var sample_cache := {}
+    var volume_context := {}
+    var step_cells := 1 if bool(get("force_underground_volume_fine_focus")) else maxi(2, mini(4, underground_volume_mesh_step_for_chunk(start_x, start_z)))
+    var water_arrays := empty_terrain_surface_arrays()
+    var lava_arrays := empty_terrain_surface_arrays()
+    var water_faces := 0
+    var lava_faces := 0
+    for z in range(start_z, start_z + CHUNK_SIZE, step_cells):
+        for x in range(start_x, start_x + CHUNK_SIZE, step_cells):
+            for y in range(min_y, max_y + 1, step_cells):
+                var cell := Vector3i(x, y, z)
+                var sample := volume_cell_center_sample(cell, sample_cache, volume_context)
+                var fluid_id := String(sample.get("fluid", ""))
+                if fluid_id == "" or bool(sample.get("solid", false)):
+                    continue
+                if fluid_id == "lava":
+                    lava_faces += append_fluid_cell_faces(lava_arrays, cell, step_cells, start_x, start_z, sample_cache, volume_context, fluid_id)
+                else:
+                    water_faces += append_fluid_cell_faces(water_arrays, cell, step_cells, start_x, start_z, sample_cache, volume_context, fluid_id)
+    add_terrain_array_surface(mesh, water_arrays, materials.get("water", terrain_material) as Material)
+    add_terrain_array_surface(mesh, lava_arrays, materials.get("lava", terrain_material) as Material)
+    mesh.set_meta("chunk_fluid_faces", water_faces + lava_faces)
+    mesh.set_meta("chunk_water_faces", water_faces)
+    mesh.set_meta("chunk_lava_faces", lava_faces)
+    var monitor = runtime_perf_monitor
+    if monitor != null:
+        monitor.increment_counter("chunk_fluid_faces", water_faces + lava_faces)
+        monitor.increment_counter("chunk_water_faces", water_faces)
+        monitor.increment_counter("chunk_lava_faces", lava_faces)
+    return mesh
+
+func append_fluid_cell_faces(
+    arrays: Dictionary,
+    cell: Vector3i,
+    step_cells: int,
+    origin_x: int,
+    origin_z: int,
+    sample_cache: Dictionary,
+    volume_context: Dictionary,
+    fluid_id: String
+) -> int:
+    var directions := [
+        Vector3i(1, 0, 0),
+        Vector3i(-1, 0, 0),
+        Vector3i(0, 1, 0),
+        Vector3i(0, -1, 0),
+        Vector3i(0, 0, 1),
+        Vector3i(0, 0, -1)
+    ]
+    var face_count := 0
+    for direction: Vector3i in directions:
+        var neighbor_cell := cell + direction * step_cells
+        var neighbor_sample := volume_cell_center_sample(neighbor_cell, sample_cache, volume_context)
+        if String(neighbor_sample.get("fluid", "")) == fluid_id and not bool(neighbor_sample.get("solid", false)):
+            continue
+        append_fluid_boundary_face(arrays, cell, direction, step_cells, origin_x, origin_z, fluid_id)
+        face_count += 1
+    return face_count
+
+func append_fluid_boundary_face(
+    arrays: Dictionary,
+    cell: Vector3i,
+    direction: Vector3i,
+    step_cells: int,
+    origin_x: int,
+    origin_z: int,
+    fluid_id: String
+) -> void:
+    var corners := fluid_boundary_face_corners(cell, direction, step_cells)
+    var normal := Vector3(float(direction.x), float(direction.y), float(direction.z)).normalized()
+    var color := fluid_vertex_color(fluid_id, corners[0], normal)
+    var vertices: PackedVector3Array = arrays.get("vertices", PackedVector3Array())
+    var normals: PackedVector3Array = arrays.get("normals", PackedVector3Array())
+    var colors: PackedColorArray = arrays.get("colors", PackedColorArray())
+    append_density_boundary_triangle(vertices, normals, colors, corners[0], corners[1], corners[2], normal, color, origin_x, origin_z)
+    append_density_boundary_triangle(vertices, normals, colors, corners[0], corners[2], corners[3], normal, color, origin_x, origin_z)
+    arrays["vertices"] = vertices
+    arrays["normals"] = normals
+    arrays["colors"] = colors
+
+func fluid_boundary_face_corners(cell: Vector3i, direction: Vector3i, step_cells: int) -> Array[Vector3]:
+    var step := maxi(1, step_cells)
+    var x0 := float(cell.x) * CELL
+    var x1 := float(cell.x + step) * CELL
+    var y0 := float(cell.y) * CELL
+    var y1 := float(cell.y + step) * CELL
+    var z0 := float(cell.z) * CELL
+    var z1 := float(cell.z + step) * CELL
+    if direction == Vector3i(1, 0, 0):
+        return [Vector3(x1, y0, z0), Vector3(x1, y0, z1), Vector3(x1, y1, z1), Vector3(x1, y1, z0)]
+    if direction == Vector3i(-1, 0, 0):
+        return [Vector3(x0, y0, z1), Vector3(x0, y0, z0), Vector3(x0, y1, z0), Vector3(x0, y1, z1)]
+    if direction == Vector3i(0, 1, 0):
+        return [Vector3(x0, y1, z1), Vector3(x0, y1, z0), Vector3(x1, y1, z0), Vector3(x1, y1, z1)]
+    if direction == Vector3i(0, -1, 0):
+        return [Vector3(x0, y0, z0), Vector3(x0, y0, z1), Vector3(x1, y0, z1), Vector3(x1, y0, z0)]
+    if direction == Vector3i(0, 0, 1):
+        return [Vector3(x1, y0, z1), Vector3(x1, y1, z1), Vector3(x0, y1, z1), Vector3(x0, y0, z1)]
+    return [Vector3(x0, y0, z0), Vector3(x0, y1, z0), Vector3(x1, y1, z0), Vector3(x1, y0, z0)]
+
+func fluid_vertex_color(fluid_id: String, world: Vector3, normal: Vector3) -> Color:
+    var shade := 0.88 + noise01(ridge_noise, world_to_cell(world.x) + 917, world_to_cell(world.z) - 613) * 0.10
+    if normal.y < -0.35:
+        shade *= 0.72
+    elif absf(normal.y) < 0.35:
+        shade *= 0.84
+    if fluid_id == "lava":
+        return Color(1.0, 0.34, 0.08, 0.92) * shade
+    return Color(0.22, 0.58, 0.68, 0.62) * shade
+
+func empty_terrain_surface_arrays() -> Dictionary:
+    return {
+        "vertices": PackedVector3Array(),
+        "normals": PackedVector3Array(),
+        "colors": PackedColorArray(),
+        "indices": PackedInt32Array()
+    }
 
 func align_down_to_step(value: int, step: int) -> int:
     if step <= 1:
@@ -88,8 +273,33 @@ func align_up_to_step(value: int, step: int) -> int:
         return value
     return ceili(float(value) / float(step)) * step
 
+func chunk_compatible_volume_step(preferred_step: int) -> int:
+    var preferred := maxi(1, preferred_step)
+    for candidate in [preferred, 14, 7, 4, 2, 1]:
+        var step := int(candidate)
+        if step > 0 and step <= CHUNK_SIZE and CHUNK_SIZE % step == 0:
+            return step
+    return 1
+
 func underground_volume_mesh_step_for_chunk(_start_x: int, _start_z: int) -> int:
-    return UNDERGROUND_VOLUME_MESH_STEP_CELLS
+    if chunk_has_terrain_volume_edits(_start_x, _start_z):
+        return 1
+    var preferred_step := 8
+    if chunk_has_underground_focus_overlap(_start_x, _start_z):
+        if bool(get("force_underground_volume_fine_focus")):
+            preferred_step = UNDERGROUND_VOLUME_FINE_FOCUS_STEP_CELLS
+        elif force_underground_volume_debug:
+            preferred_step = UNDERGROUND_VOLUME_DEBUG_STEP_CELLS
+        else:
+            preferred_step = UNDERGROUND_VOLUME_FOCUS_STEP_CELLS
+    return chunk_compatible_volume_step(preferred_step)
+
+func underground_volume_focus_radius_cells() -> int:
+    if bool(get("force_underground_volume_fine_focus")):
+        return CHUNK_SIZE * 3
+    if force_underground_volume_debug:
+        return UNDERGROUND_VOLUME_DEBUG_RADIUS_CELLS
+    return UNDERGROUND_VOLUME_FOCUS_RADIUS_CELLS
 
 func build_natural_exterior_array_mesh(start_x: int, start_z: int) -> Mesh:
     var monitor = runtime_perf_monitor
@@ -97,11 +307,22 @@ func build_natural_exterior_array_mesh(start_x: int, start_z: int) -> Mesh:
     var surface_cache := PackedFloat32Array()
     surface_cache.resize(border_size * border_size)
     var surface_context := exterior_surface_chunk_context(start_x, start_z)
+    var plain_context := exterior_surface_context_is_plain(surface_context)
+    var use_volume_surface_fast_path: bool = (
+        plain_context
+        and world_generation_system != null
+        and world_generation_system.has_method("surface_y_for_cell")
+    )
     var height_start: int = monitor.begin_section("chunk_exterior_height_grid") if monitor != null else Time.get_ticks_usec()
     for vz in range(-1, CHUNK_SIZE + 2):
         var row_index := (vz + 1) * border_size
         for vx in range(-1, CHUNK_SIZE + 2):
-            surface_cache[row_index + vx + 1] = exterior_surface_y_cell_from_context(start_x + vx, start_z + vz, surface_context)
+            var cell_x := start_x + vx
+            var cell_z := start_z + vz
+            if use_volume_surface_fast_path:
+                surface_cache[row_index + vx + 1] = float(world_generation_system.call("surface_y_for_cell", Vector3i(cell_x, 0, cell_z)))
+            else:
+                surface_cache[row_index + vx + 1] = natural_exterior_surface_y_cell(cell_x, cell_z) if plain_context else exterior_surface_y_cell_from_context(cell_x, cell_z, surface_context)
     if monitor != null:
         monitor.end_section("chunk_exterior_height_grid", height_start)
 
@@ -124,7 +345,7 @@ func build_natural_exterior_array_mesh(start_x: int, start_z: int) -> Mesh:
             var cell_z := start_z + vz
             vertices[vertex_index] = Vector3(float(vx) * CELL, float(surface_cache[border_index]), float(vz) * CELL)
             normals[vertex_index] = exterior_surface_normal_grid(surface_cache, border_index, border_size)
-            var color: Color = exterior_surface_color_for_cell_from_context(cell_x, cell_z, float(surface_cache[border_index]), surface_context)
+            var color: Color = natural_exterior_surface_color_for_cell(cell_x, cell_z, float(surface_cache[border_index])) if plain_context else exterior_surface_color_for_cell_from_context(cell_x, cell_z, float(surface_cache[border_index]), surface_context)
             var shade := 0.88 + noise01(ridge_noise, cell_x + 400, cell_z - 200) * 0.18
             colors[vertex_index] = color * shade
     if monitor != null:
@@ -149,17 +370,45 @@ func build_natural_exterior_array_mesh(start_x: int, start_z: int) -> Mesh:
         monitor.end_section("chunk_mesh_commit", commit_start)
     return mesh
 
+func build_two_sided_exterior_array_mesh(start_x: int, start_z: int) -> Mesh:
+    var arrays := build_natural_exterior_arrays(start_x, start_z)
+    var vertices: PackedVector3Array = arrays.get("vertices", PackedVector3Array())
+    var normals: PackedVector3Array = arrays.get("normals", PackedVector3Array())
+    var colors: PackedColorArray = arrays.get("colors", PackedColorArray())
+    var indices: PackedInt32Array = arrays.get("indices", PackedInt32Array())
+    streaming_append_reversed_indexed_surface(vertices, normals, colors, indices)
+    arrays["vertices"] = vertices
+    arrays["normals"] = normals
+    arrays["colors"] = colors
+    arrays["indices"] = indices
+    var mesh := ArrayMesh.new()
+    add_terrain_array_surface(mesh, arrays, terrain_material)
+    mesh.set_meta("terrainMeshingBackend", "two_sided_exterior")
+    mesh.set_meta("terrainVisualUndersideClosed", true)
+    return mesh
+
 func build_natural_exterior_arrays(start_x: int, start_z: int) -> Dictionary:
     var monitor = runtime_perf_monitor
     var border_size := CHUNK_SIZE + 3
     var surface_cache := PackedFloat32Array()
     surface_cache.resize(border_size * border_size)
     var surface_context := exterior_surface_chunk_context(start_x, start_z)
+    var plain_context := exterior_surface_context_is_plain(surface_context)
+    var use_volume_surface_fast_path: bool = (
+        plain_context
+        and world_generation_system != null
+        and world_generation_system.has_method("surface_y_for_cell")
+    )
     var height_start: int = monitor.begin_section("chunk_exterior_height_grid") if monitor != null else Time.get_ticks_usec()
     for vz in range(-1, CHUNK_SIZE + 2):
         var row_index := (vz + 1) * border_size
         for vx in range(-1, CHUNK_SIZE + 2):
-            surface_cache[row_index + vx + 1] = exterior_surface_y_cell_from_context(start_x + vx, start_z + vz, surface_context)
+            var cell_x := start_x + vx
+            var cell_z := start_z + vz
+            if use_volume_surface_fast_path:
+                surface_cache[row_index + vx + 1] = float(world_generation_system.call("surface_y_for_cell", Vector3i(cell_x, 0, cell_z)))
+            else:
+                surface_cache[row_index + vx + 1] = natural_exterior_surface_y_cell(cell_x, cell_z) if plain_context else exterior_surface_y_cell_from_context(cell_x, cell_z, surface_context)
     if monitor != null:
         monitor.end_section("chunk_exterior_height_grid", height_start)
 
@@ -182,7 +431,7 @@ func build_natural_exterior_arrays(start_x: int, start_z: int) -> Dictionary:
             var cell_z := start_z + vz
             vertices[vertex_index] = Vector3(float(vx) * CELL, float(surface_cache[border_index]), float(vz) * CELL)
             normals[vertex_index] = exterior_surface_normal_grid(surface_cache, border_index, border_size)
-            var color: Color = exterior_surface_color_for_cell_from_context(cell_x, cell_z, float(surface_cache[border_index]), surface_context)
+            var color: Color = natural_exterior_surface_color_for_cell(cell_x, cell_z, float(surface_cache[border_index])) if plain_context else exterior_surface_color_for_cell_from_context(cell_x, cell_z, float(surface_cache[border_index]), surface_context)
             var shade := 0.88 + noise01(ridge_noise, cell_x + 400, cell_z - 200) * 0.18
             colors[vertex_index] = color * shade
     if monitor != null:
@@ -190,7 +439,14 @@ func build_natural_exterior_arrays(start_x: int, start_z: int) -> Dictionary:
 
     var indices := PackedInt32Array()
     var index_start: int = monitor.begin_section("chunk_exterior_index_grid") if monitor != null else Time.get_ticks_usec()
-    indices = exterior_indices_for_surface(start_x, start_z, surface_cache, border_size, active_volume_excavation_brushes())
+    indices = exterior_indices_for_surface(
+        start_x,
+        start_z,
+        surface_cache,
+        border_size,
+        active_volume_excavation_brushes(),
+        edited_volume_boundary_cells_for_chunk(start_x, start_z, -999999, 999999)
+    )
     if monitor != null:
         monitor.end_section("chunk_exterior_index_grid", index_start)
     return {
@@ -299,8 +555,6 @@ func build_volume_iso_arrays(start_x: int, start_z: int, min_y: int, max_y: int,
             iso_triangles += int(fine_result.get("faces", 0))
     var boundary_faces := append_excavation_boundary_arrays(vertices, normals, colors, start_x, start_z, min_y, max_y, volume_context)
     iso_triangles += boundary_faces
-    var focus_faces := append_underground_focus_boundary_arrays(vertices, normals, colors, start_x, start_z, min_y, max_y, volume_context)
-    iso_triangles += focus_faces
     return {
         "vertices": vertices,
         "normals": normals,
@@ -324,62 +578,6 @@ func build_excavation_volume_iso_arrays(start_x: int, start_z: int, min_y: int, 
         "faces": boundary_faces
     }
 
-func append_underground_focus_boundary_arrays(
-    vertices: PackedVector3Array,
-    normals: PackedVector3Array,
-    colors: PackedColorArray,
-    start_x: int,
-    start_z: int,
-    min_y: int,
-    max_y: int,
-    volume_context: Dictionary
-) -> int:
-    if not force_underground_volume_debug or player == null:
-        return 0
-    var focus := player.global_position
-    if world_generation_system != null and world_generation_system.has_method("sample_world"):
-        var focus_sample: Dictionary = world_generation_system.call("sample_world", focus)
-        if String(focus_sample.get("biome", "")) != "underground_air" and bool(focus_sample.get("solid", false)):
-            return 0
-    var step := maxi(1, UNDERGROUND_VOLUME_FOCUS_STEP_CELLS)
-    var radius_cells := maxi(step, UNDERGROUND_VOLUME_FOCUS_RADIUS_CELLS)
-    var center_cell := Vector3i(world_to_cell(focus.x), world_to_cell(focus.y), world_to_cell(focus.z))
-    var chunk_min_x := start_x - step
-    var chunk_max_x := start_x + CHUNK_SIZE + step
-    var chunk_min_z := start_z - step
-    var chunk_max_z := start_z + CHUNK_SIZE + step
-    if center_cell.x + radius_cells < chunk_min_x or center_cell.x - radius_cells > chunk_max_x:
-        return 0
-    if center_cell.z + radius_cells < chunk_min_z or center_cell.z - radius_cells > chunk_max_z:
-        return 0
-    var iso_triangles := 0
-    var sample_cache := {}
-    var radius_world := float(radius_cells) * CELL
-    for z in range(center_cell.z - radius_cells, center_cell.z + radius_cells + 1, step):
-        if z < chunk_min_z or z > chunk_max_z:
-            continue
-        for x in range(center_cell.x - radius_cells, center_cell.x + radius_cells + 1, step):
-            if x < chunk_min_x or x > chunk_max_x:
-                continue
-            for y in range(maxi(min_y, center_cell.y - radius_cells), mini(max_y, center_cell.y + radius_cells) + 1, step):
-                var cube_center := Vector3((float(x) + float(step) * 0.5) * CELL, (float(y) + float(step) * 0.5) * CELL, (float(z) + float(step) * 0.5) * CELL)
-                if focus.distance_to(cube_center) > radius_world + float(step) * CELL:
-                    continue
-                var before_vertices := vertices.size()
-                extract_volume_iso_cube_arrays(
-                    vertices,
-                    normals,
-                    colors,
-                    Vector3i(x, y, z),
-                    start_x,
-                    start_z,
-                    sample_cache,
-                    volume_context,
-                    step
-                )
-                iso_triangles += int((vertices.size() - before_vertices) / 3)
-    return iso_triangles
-
 func append_excavation_boundary_arrays(
     vertices: PackedVector3Array,
     normals: PackedVector3Array,
@@ -391,8 +589,6 @@ func append_excavation_boundary_arrays(
     volume_context: Dictionary
 ) -> int:
     var brushes := active_volume_excavation_brushes()
-    if brushes.is_empty():
-        return 0
     var iso_triangles := 0
     var iso_sample_cache := {}
     var chunk_min_x := start_x - 1
@@ -437,6 +633,33 @@ func append_excavation_boundary_arrays(
                         1
                     )
                     iso_triangles += int((vertices.size() - before_vertices) / 3)
+    for edited_cell in edited_volume_boundary_cells_for_chunk(start_x, start_z, min_y, max_y):
+        for dz in range(-1, 2):
+            for dy in range(-1, 2):
+                for dx in range(-1, 2):
+                    var edited_cube_cell := edited_cell + Vector3i(dx, dy, dz)
+                    if edited_cube_cell.x < chunk_min_x or edited_cube_cell.x > chunk_max_x:
+                        continue
+                    if edited_cube_cell.z < chunk_min_z or edited_cube_cell.z > chunk_max_z:
+                        continue
+                    if edited_cube_cell.y < min_y or edited_cube_cell.y > max_y:
+                        continue
+                    if visited.has(edited_cube_cell):
+                        continue
+                    visited[edited_cube_cell] = true
+                    var edited_before_vertices := vertices.size()
+                    extract_volume_iso_cube_arrays(
+                        vertices,
+                        normals,
+                        colors,
+                        edited_cube_cell,
+                        start_x,
+                        start_z,
+                        iso_sample_cache,
+                        volume_context,
+                        1
+                    )
+                    iso_triangles += int((vertices.size() - edited_before_vertices) / 3)
     return iso_triangles
 
 func append_volume_iso_block_arrays(
@@ -574,7 +797,7 @@ func combine_terrain_surface_arrays(exterior_arrays: Dictionary, volume_arrays: 
 
 func full_exterior_indices() -> PackedInt32Array:
     if not full_exterior_indices_cache.is_empty():
-        return full_exterior_indices_cache
+        return PackedInt32Array(full_exterior_indices_cache)
     var grid_size := CHUNK_SIZE + 1
     full_exterior_indices_cache.resize(CHUNK_SIZE * CHUNK_SIZE * 6)
     var write_index := 0
@@ -593,10 +816,10 @@ func full_exterior_indices() -> PackedInt32Array:
             full_exterior_indices_cache[write_index + 4] = i01
             full_exterior_indices_cache[write_index + 5] = i11
             write_index += 6
-    return full_exterior_indices_cache
+    return PackedInt32Array(full_exterior_indices_cache)
 
-func exterior_indices_for_surface(start_x: int, start_z: int, surface_cache: PackedFloat32Array, border_size: int, brushes: Array) -> PackedInt32Array:
-    if brushes.is_empty():
+func exterior_indices_for_surface(start_x: int, start_z: int, surface_cache: PackedFloat32Array, border_size: int, brushes: Array, edited_cells: Array[Vector3i] = []) -> PackedInt32Array:
+    if brushes.is_empty() and edited_cells.is_empty():
         return full_exterior_indices()
     var grid_size := CHUNK_SIZE + 1
     var indices := PackedInt32Array()
@@ -604,7 +827,7 @@ func exterior_indices_for_surface(start_x: int, start_z: int, surface_cache: Pac
         var row := z * grid_size
         var next_row := (z + 1) * grid_size
         for x in range(CHUNK_SIZE):
-            if exterior_surface_quad_cut_by_excavation(start_x, start_z, x, z, surface_cache, border_size, brushes):
+            if exterior_surface_quad_cut_by_excavation(start_x, start_z, x, z, surface_cache, border_size, brushes, edited_cells):
                 continue
             var i00 := row + x
             var i10 := i00 + 1
@@ -618,7 +841,7 @@ func exterior_indices_for_surface(start_x: int, start_z: int, surface_cache: Pac
             indices.append(i11)
     return indices
 
-func exterior_surface_quad_cut_by_excavation(start_x: int, start_z: int, local_x: int, local_z: int, surface_cache: PackedFloat32Array, border_size: int, brushes: Array) -> bool:
+func exterior_surface_quad_cut_by_excavation(start_x: int, start_z: int, local_x: int, local_z: int, surface_cache: PackedFloat32Array, border_size: int, brushes: Array, edited_cells: Array[Vector3i] = []) -> bool:
     var cell_x := start_x + local_x
     var cell_z := start_z + local_z
     var center_x := (float(cell_x) + 0.5) * CELL
@@ -636,6 +859,52 @@ func exterior_surface_quad_cut_by_excavation(start_x: int, start_z: int, local_x
         if horizontal_distance > brush_radius + CELL * 0.35:
             continue
         if absf(brush_center.y - surface_y) > brush_radius + CELL * 0.95:
+            continue
+        return true
+    if exterior_surface_quad_has_surface_deformation(center_x, center_z, surface_y):
+        return false
+    if exterior_surface_quad_has_volume_surface_projection_edit(start_x, start_z, local_x, local_z):
+        return false
+    for edited_cell in edited_cells:
+        var edit_center_x := (float(edited_cell.x) + 0.5) * CELL
+        var edit_center_z := (float(edited_cell.z) + 0.5) * CELL
+        if Vector2(edit_center_x - center_x, edit_center_z - center_z).length() > CELL * 1.85:
+            continue
+        var edit_center_y := (float(edited_cell.y) + 0.5) * CELL
+        if absf(edit_center_y - surface_y) > CELL * 2.75:
+            continue
+        return true
+    return false
+
+func exterior_surface_quad_has_volume_surface_projection_edit(start_x: int, start_z: int, local_x: int, local_z: int) -> bool:
+    if world_generation_system == null or not world_generation_system.has_method("terrain_volume_column_has_surface_projection_affecting_edits"):
+        return false
+    for dz in range(2):
+        for dx in range(2):
+            var column_cell := Vector3i(start_x + local_x + dx, 0, start_z + local_z + dz)
+            if bool(world_generation_system.call("terrain_volume_column_has_surface_projection_affecting_edits", column_cell)):
+                return true
+    return false
+
+func exterior_surface_quad_has_surface_deformation(center_x: float, center_z: float, surface_y: float) -> bool:
+    if world_generation_system == null:
+        return false
+    var brush_values = world_generation_system.get("excavation_brushes")
+    if not (brush_values is Array):
+        return false
+    for brush_value in brush_values:
+        if not (brush_value is Dictionary):
+            continue
+        var brush: Dictionary = brush_value
+        if not excavation_brush_is_surface_deformation(brush):
+            continue
+        var brush_center: Vector3 = brush.get("center", Vector3.ZERO)
+        var radius := float(brush.get("deformRadius", brush.get("radius", 0.0)))
+        if radius <= 0.0:
+            continue
+        if Vector2(brush_center.x - center_x, brush_center.z - center_z).length() > radius + CELL * 0.35:
+            continue
+        if absf(float(brush.get("surfaceY", brush_center.y)) - surface_y) > radius + CELL:
             continue
         return true
     return false
@@ -768,16 +1037,35 @@ func volume_boundary_face_color(world: Vector3, air_sample: Dictionary, solid_sa
     var shade := volume_iso_shade(world)
     if String(air_sample.get("biome", "")) == "underground_air":
         shade *= underground_wall_visual_shade(world)
-        if normal.y < -0.35:
-            return Color(0.055, 0.060, 0.060) * shade
-        if normal.y > 0.35:
-            return Color(0.150, 0.158, 0.142) * shade
-        return Color(0.170, 0.182, 0.170) * shade
+        var underground_material := String(solid_sample.get("material", "stone"))
+        var underground_biome := String(solid_sample.get("biome", "underground"))
+        return volume_material_surface_color(underground_material, underground_biome, normal, shade, true)
     var solid_cell: Vector3i = solid_sample.get("cell", Vector3i(world_to_cell(world.x), world_to_cell(world.y), world_to_cell(world.z)))
     var surface_y := float(solid_sample.get("surfaceY", volume_context_surface_y_at_cell(solid_cell.x, solid_cell.z, volume_context) if not volume_context.is_empty() else chunk_bound_surface_y_at_cell(Vector3i(solid_cell.x, 0, solid_cell.z))))
     var density := float(solid_sample.get("density", surface_y - world.y))
     var biome := volume_context_surface_biome_at_cell(solid_cell.x, solid_cell.z, volume_context) if not volume_context.is_empty() else surface_biome_at_cell(Vector3i(solid_cell.x, 0, solid_cell.z))
     var material_id := volume_material_from_components(world, solid_cell, density, surface_y, biome)
+    return volume_material_surface_color(material_id, biome, normal, shade, false)
+
+func volume_material_surface_color(material_id: String, biome: String, normal: Vector3, shade: float, underground: bool) -> Color:
+    if underground:
+        if normal.y < -0.35:
+            return Color(0.045, 0.047, 0.045) * shade
+        if normal.y > 0.35:
+            return Color(0.120, 0.125, 0.112) * shade
+        if material_id == "copperOre":
+            return Color(0.34, 0.20, 0.13) * shade
+        if material_id == "ironOre":
+            return Color(0.30, 0.30, 0.27) * shade
+        if material_id == "bedrock":
+            return Color(0.070, 0.075, 0.075) * shade
+        if material_id == "deepStone":
+            return Color(0.130, 0.145, 0.140) * shade
+        if material_id == "sand":
+            return Color(0.135, 0.120, 0.085) * shade
+        if material_id == "dirt":
+            return Color(0.100, 0.080, 0.060) * shade
+        return Color(0.125, 0.135, 0.125) * shade
     if normal.y > 0.42 and material_id in ["grass", "mud", "snow"]:
         return BIOME_COLORS.get(biome, BIOME_COLORS["plains"]) * shade
     match material_id:
@@ -789,6 +1077,10 @@ func volume_boundary_face_color(world: Vector3, air_sample: Dictionary, solid_sa
             return Color(0.77, 0.82, 0.82) * shade
         "dirt":
             return Color(0.32, 0.27, 0.18) * shade
+        "bedrock":
+            return Color(0.10, 0.11, 0.11) * shade
+        "deepStone":
+            return Color(0.24, 0.26, 0.25) * shade
         "copperOre":
             return Color(0.48, 0.30, 0.20) * shade
         "ironOre":
@@ -800,6 +1092,8 @@ func add_terrain_array_surface(mesh: ArrayMesh, surface_data: Dictionary, materi
     var vertices: PackedVector3Array = surface_data.get("vertices", PackedVector3Array())
     if vertices.is_empty():
         return
+    var monitor = runtime_perf_monitor
+    var pack_start: int = monitor.begin_section("chunk_surface_array_pack") if monitor != null else Time.get_ticks_usec()
     var arrays := []
     arrays.resize(Mesh.ARRAY_MAX)
     arrays[Mesh.ARRAY_VERTEX] = vertices
@@ -808,8 +1102,13 @@ func add_terrain_array_surface(mesh: ArrayMesh, surface_data: Dictionary, materi
     var indices: PackedInt32Array = surface_data.get("indices", PackedInt32Array())
     if not indices.is_empty():
         arrays[Mesh.ARRAY_INDEX] = indices
+    if monitor != null:
+        monitor.end_section("chunk_surface_array_pack", pack_start)
+    var commit_start: int = monitor.begin_section("chunk_mesh_commit") if monitor != null else Time.get_ticks_usec()
     mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
     mesh.surface_set_material(mesh.get_surface_count() - 1, material if material != null else terrain_material)
+    if monitor != null:
+        monitor.end_section("chunk_mesh_commit", commit_start)
 
 func add_natural_exterior_surface(st: SurfaceTool, start_x: int, start_z: int) -> void:
     var grid_size := CHUNK_SIZE + 3
@@ -914,7 +1213,7 @@ func exterior_surface_y_cell(cell_x: int, cell_z: int) -> float:
     if volume_edit_markers.has(edit_key):
         return float(volume_edit_markers[edit_key])
     if world_generation_system != null:
-        return world_generation_system.surface_y_for_cell(Vector3i(cell_x, 0, cell_z))
+        return float(world_generation_system.surface_y_for_cell(Vector3i(cell_x, 0, cell_z)))
     return 0.0
 
 func exterior_surface_chunk_context(start_x: int, start_z: int) -> Dictionary:
@@ -958,12 +1257,20 @@ func exterior_surface_chunk_context(start_x: int, start_z: int) -> Dictionary:
     context["towns"] = towns
     return context
 
+func exterior_surface_context_is_plain(context: Dictionary) -> bool:
+    if not volume_edit_markers.is_empty():
+        return false
+    if bool(context.get("hasSurfaceDeformation", false)):
+        return false
+    var towns_value = context.get("towns", [])
+    return (towns_value is Array and (towns_value as Array).is_empty()) or not (towns_value is Array)
+
 func exterior_surface_y_cell_from_context(cell_x: int, cell_z: int, context: Dictionary) -> float:
     var edit_key := Vector2i(cell_x, cell_z)
     if volume_edit_markers.has(edit_key):
         return float(volume_edit_markers[edit_key])
     if bool(context.get("hasSurfaceDeformation", false)) and world_generation_system != null and world_generation_system.has_method("surface_y_for_cell"):
-        return float(world_generation_system.call("surface_y_for_cell", Vector3i(cell_x, 0, cell_z)))
+        return float(world_generation_system.surface_y_for_cell(Vector3i(cell_x, 0, cell_z)))
     var towns_value = context.get("towns", [])
     var towns: Array = towns_value if towns_value is Array else []
     var best_town := {}
@@ -985,17 +1292,23 @@ func exterior_surface_y_cell_from_context(cell_x: int, cell_z: int, context: Dic
     var level := float(best_town.get("level", float(WATER_LEVEL) + 3.0))
     if best_distance <= radius:
         return level
-    var natural := natural_exterior_surface_y_cell(cell_x, cell_z)
     var apron := float(best_town.get("apron", 18.0))
+    var delta := Vector2(float(cell_x) - float(best_town.get("centerX", 0.0)), float(cell_z) - float(best_town.get("centerZ", 0.0)))
+    var natural := natural_exterior_surface_y_cell(cell_x, cell_z)
+    if delta.length() > 0.001:
+        var direction := delta.normalized()
+        var sample_distance := radius + apron
+        var sample_x := int(round(float(best_town.get("centerX", 0.0)) + direction.x * sample_distance))
+        var sample_z := int(round(float(best_town.get("centerZ", 0.0)) + direction.y * sample_distance))
+        natural = natural_exterior_surface_y_cell(sample_x, sample_z)
     var blend := clampf((best_distance - radius) / maxf(1.0, apron), 0.0, 1.0)
     var eased := blend * blend * (3.0 - 2.0 * blend)
     return lerp(level, natural, eased)
 
 func natural_exterior_surface_y_cell(cell_x: int, cell_z: int) -> float:
-    if world_generation_system != null and world_generation_system.has_method("natural_surface_y_for_cell"):
-        return float(world_generation_system.call("natural_surface_y_for_cell", Vector3i(cell_x, 0, cell_z)))
     if world_generation_system != null:
-        return world_generation_system.surface_y_for_cell(Vector3i(cell_x, 0, cell_z))
+        if world_generation_system.has_method("surface_y_for_cell"):
+            return float(world_generation_system.surface_y_for_cell(Vector3i(cell_x, 0, cell_z)))
     return 0.0
 
 func exterior_surface_color_for_cell(cell_x: int, cell_z: int) -> Color:
@@ -1006,6 +1319,9 @@ func exterior_surface_color_for_cell(cell_x: int, cell_z: int) -> Color:
 func exterior_surface_color_for_cell_from_context(cell_x: int, cell_z: int, surface_y: float, context: Dictionary) -> Color:
     if exterior_surface_context_contains_town_cell(cell_x, cell_z, context):
         return Color(0.37, 0.47, 0.34)
+    return natural_exterior_surface_color_for_cell(cell_x, cell_z, surface_y)
+
+func natural_exterior_surface_color_for_cell(cell_x: int, cell_z: int, surface_y: float) -> Color:
     var moisture: float = noise01(moisture_noise, cell_x - 1200, cell_z + 800)
     var temp: float = clampf(0.42 + noise01(temp_noise, cell_x + 1500, cell_z - 900) * 0.46 - abs(cell_z) / 1300.0 - maxf(0.0, surface_y - 38.0) / 180.0, 0.0, 1.0)
     if surface_y < float(WATER_LEVEL) + 1.7:
@@ -1043,44 +1359,253 @@ func exterior_surface_normal_cached(surface_cache: Dictionary, cell_x: int, cell
     var forward := exterior_surface_y_from_cache(surface_cache, cell_x, cell_z + 1)
     return Vector3(left - right, CELL * 2.0, back - forward).normalized()
 
+func exterior_surface_normal_for_cell(cell_x: int, cell_z: int) -> Vector3:
+    var left := natural_exterior_surface_y_cell(cell_x - 1, cell_z)
+    var right := natural_exterior_surface_y_cell(cell_x + 1, cell_z)
+    var back := natural_exterior_surface_y_cell(cell_x, cell_z - 1)
+    var forward := natural_exterior_surface_y_cell(cell_x, cell_z + 1)
+    return Vector3(left - right, CELL * 2.0, back - forward).normalized()
+
+func project_chunk_surface_normals(mesh: Mesh, cx: int, cz: int) -> Mesh:
+    if mesh == null or not (mesh is ArrayMesh):
+        return mesh
+    var array_mesh := mesh as ArrayMesh
+    if array_mesh.get_surface_count() <= 0:
+        return mesh
+    var start_x := cx * CHUNK_SIZE
+    var start_z := cz * CHUNK_SIZE
+    var projected_surfaces: Array = []
+    var surface_materials: Array = []
+    var changed_any := false
+    for surface_index in range(array_mesh.get_surface_count()):
+        var arrays := array_mesh.surface_get_arrays(surface_index)
+        var vertices: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
+        var normals: PackedVector3Array = arrays[Mesh.ARRAY_NORMAL]
+        var changed_surface := false
+        if not vertices.is_empty() and normals.size() == vertices.size():
+            for vertex_index in range(vertices.size()):
+                var normal := normals[vertex_index]
+                if normal.y <= 0.20:
+                    continue
+                var vertex := vertices[vertex_index]
+                var cell_x := roundi((float(start_x) * CELL + vertex.x) / CELL)
+                var cell_z := roundi((float(start_z) * CELL + vertex.z) / CELL)
+                var surface_y := natural_exterior_surface_y_cell(cell_x, cell_z)
+                if absf(vertex.y - surface_y) > CELL * 2.25:
+                    continue
+                var projected_normal := exterior_surface_normal_for_cell(cell_x, cell_z)
+                if projected_normal.length_squared() <= 0.0001:
+                    continue
+                normals[vertex_index] = projected_normal
+                changed_surface = true
+            if changed_surface:
+                arrays[Mesh.ARRAY_NORMAL] = normals
+                changed_any = true
+        projected_surfaces.append(arrays)
+        surface_materials.append(array_mesh.surface_get_material(surface_index))
+    if not changed_any:
+        return mesh
+    var projected_mesh := ArrayMesh.new()
+    for surface_index in range(projected_surfaces.size()):
+        projected_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, projected_surfaces[surface_index])
+        var material = surface_materials[surface_index]
+        if material is Material:
+            projected_mesh.surface_set_material(surface_index, material as Material)
+    for meta_name in mesh.get_meta_list():
+        projected_mesh.set_meta(String(meta_name), mesh.get_meta(String(meta_name)))
+    projected_mesh.set_meta("terrainSurfaceNormalsProjected", true)
+    return projected_mesh
+
 func exterior_surface_y_from_cache(surface_cache: Dictionary, cell_x: int, cell_z: int) -> float:
     var key := Vector2i(cell_x, cell_z)
     return float(surface_cache[key]) if surface_cache.has(key) else exterior_surface_y_cell(cell_x, cell_z)
 
 func chunk_needs_generated_underground_volume_mesh(start_x: int, start_z: int) -> bool:
-    if not force_underground_volume_debug:
-        return false
     if world_generation_system == null or not world_generation_system.has_method("sample_world"):
         return false
-    if chunk_has_underground_focus_overlap(start_x, start_z):
+    if chunk_has_terrain_volume_edits(start_x, start_z):
         return true
-    var step := maxi(1, UNDERGROUND_VOLUME_COARSE_STEP_CELLS)
+    var focus_is_underground := player != null and position_is_near_underground_air_focus(player.global_position)
+    if focus_is_underground and chunk_has_underground_focus_overlap(start_x, start_z):
+        return true
+    if has_method("should_use_cached_generated_volume_exposure_only") and bool(call("should_use_cached_generated_volume_exposure_only")):
+        var cached_value = cached_generated_surface_volume_exposure(start_x, start_z)
+        if cached_value is Dictionary:
+            var cached: Dictionary = cached_value
+            if bool(cached.get("known", false)):
+                return bool(cached.get("result", false))
+        if has_method("queue_generated_volume_exposure_scan_for_region"):
+            call("queue_generated_volume_exposure_scan_for_region", start_x, start_z)
+        return false
+    if has_method("should_defer_generated_volume_exposure_scan") and bool(call("should_defer_generated_volume_exposure_scan")):
+        if has_method("note_deferred_generated_volume_exposure_scan"):
+            call("note_deferred_generated_volume_exposure_scan")
+        return false
+    if chunk_has_generated_surface_volume_exposure(start_x, start_z):
+        return true
+    if adjacent_chunk_requires_generated_underground_volume_mesh(start_x, start_z, focus_is_underground):
+        return true
+    return false
+
+func adjacent_chunk_requires_generated_underground_volume_mesh(start_x: int, start_z: int, focus_is_underground: bool) -> bool:
+    var offsets: Array[Vector2i] = [
+        Vector2i(1, 0),
+        Vector2i(-1, 0),
+        Vector2i(0, 1),
+        Vector2i(0, -1)
+    ]
+    for offset: Vector2i in offsets:
+        var neighbor_start_x: int = start_x + offset.x * CHUNK_SIZE
+        var neighbor_start_z: int = start_z + offset.y * CHUNK_SIZE
+        if chunk_has_terrain_volume_edits(neighbor_start_x, neighbor_start_z):
+            return true
+        if focus_is_underground and chunk_has_underground_focus_overlap(neighbor_start_x, neighbor_start_z):
+            return true
+        if chunk_has_generated_surface_volume_exposure(neighbor_start_x, neighbor_start_z):
+            return true
+    return false
+
+func chunk_has_terrain_volume_edits(start_x: int, start_z: int) -> bool:
+    if world_generation_system == null or not world_generation_system.has_method("terrain_volume_chunk_has_edits"):
+        return false
+    var chunk_key := Vector2i(floori(float(start_x) / float(CHUNK_SIZE)), floori(float(start_z) / float(CHUNK_SIZE)))
+    return bool(world_generation_system.call("terrain_volume_chunk_has_edits", chunk_key, CHUNK_SIZE))
+
+func edited_volume_boundary_cells_for_chunk(start_x: int, start_z: int, min_y: int, max_y: int) -> Array[Vector3i]:
+    if world_generation_system == null or not world_generation_system.has_method("terrain_volume_edited_mesh_cells_for_chunk"):
+        return []
+    var chunk_key := Vector2i(floori(float(start_x) / float(CHUNK_SIZE)), floori(float(start_z) / float(CHUNK_SIZE)))
+    var cells_value = world_generation_system.call("terrain_volume_edited_mesh_cells_for_chunk", chunk_key, CHUNK_SIZE)
+    if not (cells_value is Array):
+        return []
+    var cells: Array[Vector3i] = []
+    for value in cells_value:
+        if not (value is Vector3i):
+            continue
+        var cell: Vector3i = value
+        if cell.y < min_y - 2 or cell.y > max_y + 2:
+            continue
+        cells.append(cell)
+    return cells
+
+func underground_air_column_reaches_open_surface(cell_x: int, air_y: int, cell_z: int, surface_cell_y: int) -> bool:
+    if world_generation_system == null or not world_generation_system.has_method("sample_world"):
+        return false
+    for y in range(air_y + 1, surface_cell_y + 2):
+        var sample_position := Vector3(float(cell_x) * CELL, float(y) * CELL, float(cell_z) * CELL)
+        var sample: Dictionary = world_generation_system.call("sample_world", sample_position)
+        if bool(sample.get("solid", false)):
+            return false
+    return true
+
+func chunk_has_generated_surface_volume_exposure(start_x: int, start_z: int) -> bool:
+    if world_generation_system == null or not world_generation_system.has_method("sample_world"):
+        return false
+    var cached_value = cached_generated_surface_volume_exposure(start_x, start_z)
+    if cached_value is Dictionary:
+        var cached: Dictionary = cached_value
+        if bool(cached.get("known", false)):
+            return bool(cached.get("result", false))
+    var step := maxi(4, int(UNDERGROUND_VOLUME_EXTERIOR_LOD_STEP_CELLS))
+    var vertical_step := maxi(1, int(UNDERGROUND_VOLUME_SURFACE_EXPOSURE_VERTICAL_STEP_CELLS))
+    var max_depth_cells := mini(
+        generated_volume_scan_depth_for_chunk(start_x, start_z, step),
+        int(UNDERGROUND_VOLUME_SURFACE_EXPOSURE_DEPTH_CELLS)
+    )
+    var result := false
+    var sample_cache := {}
     for z in range(start_z - step, start_z + CHUNK_SIZE + step + 1, step):
         for x in range(start_x - step, start_x + CHUNK_SIZE + step + 1, step):
-            var surface_y := chunk_bound_surface_y_at_cell(Vector3i(x, 0, z))
+            var surface_y := chunk_reference_surface_y_for_volume_scan(x, z)
             var surface_cell_y := floori(surface_y / CELL)
-            var min_cell_y := surface_cell_y - UNDERGROUND_GENERATED_DEPTH_CELLS
-            for y in range(surface_cell_y - step, min_cell_y - 1, -step):
-                var position := Vector3(float(x) * CELL, float(y) * CELL, float(z) * CELL)
-                var sample: Dictionary = world_generation_system.call("sample_world", position)
-                if String(sample.get("biome", "")) == "underground_air" and not bool(sample.get("solid", true)):
-                    return true
-    return false
+            for depth in range(1, max_depth_cells + 1, vertical_step):
+                var y := surface_cell_y - depth
+                var numeric_sample := volume_grid_sample_numeric(Vector3i(x, y, z), sample_cache)
+                if numeric_sample.x < 0.0 and numeric_sample.y <= 0.0:
+                    if underground_air_column_reaches_open_surface(x, y, z, surface_cell_y):
+                        result = true
+                        break
+            if result:
+                break
+        if result:
+            break
+    cache_generated_surface_volume_exposure(start_x, start_z, result)
+    return result
+
+func generated_volume_scan_depth_for_chunk(start_x: int, start_z: int, step_cells: int) -> int:
+    var bottom_y := int(world_generation_system.call("world_bottom_cell_y")) if world_generation_system != null and world_generation_system.has_method("world_bottom_cell_y") else floori((MIN_HEIGHT - CELL * 64.0) / CELL)
+    var max_surface_cell_y := floori(MAX_HEIGHT / CELL)
+    var step := maxi(1, int(step_cells))
+    for z in range(start_z - step, start_z + CHUNK_SIZE + step + 1, step):
+        for x in range(start_x - step, start_x + CHUNK_SIZE + step + 1, step):
+            var surface_cell_y := floori(chunk_reference_surface_y_for_volume_scan(x, z) / CELL)
+            max_surface_cell_y = maxi(max_surface_cell_y, surface_cell_y)
+    return maxi(1, max_surface_cell_y - bottom_y - 1)
+
+func chunk_reference_surface_y_for_volume_scan(cell_x: int, cell_z: int) -> float:
+    if world_generation_system != null and world_generation_system.has_method("surface_y_for_cell"):
+        return float(world_generation_system.call("surface_y_for_cell", Vector3i(cell_x, 0, cell_z)))
+    return chunk_bound_surface_y_at_cell(Vector3i(cell_x, 0, cell_z))
 
 func chunk_has_underground_focus_overlap(start_x: int, start_z: int) -> bool:
     if player == null:
         return false
     var focus := player.global_position
-    if world_generation_system != null and world_generation_system.has_method("sample_world"):
-        var focus_sample: Dictionary = world_generation_system.call("sample_world", focus)
-        if String(focus_sample.get("biome", "")) != "underground_air" and bool(focus_sample.get("solid", false)):
-            return false
-    var radius := float(maxi(UNDERGROUND_VOLUME_FOCUS_RADIUS_CELLS, UNDERGROUND_VOLUME_FOCUS_STEP_CELLS)) * CELL
+    if not position_is_near_underground_air_focus(focus):
+        return false
+    var radius := float(maxi(underground_volume_focus_radius_cells(), UNDERGROUND_VOLUME_FOCUS_STEP_CELLS)) * CELL
     var min_x := float(start_x) * CELL - radius
     var max_x := float(start_x + CHUNK_SIZE) * CELL + radius
     var min_z := float(start_z) * CELL - radius
     var max_z := float(start_z + CHUNK_SIZE) * CELL + radius
     return focus.x >= min_x and focus.x <= max_x and focus.z >= min_z and focus.z <= max_z
+
+func position_is_near_underground_air_focus(position: Vector3) -> bool:
+    if world_generation_system == null or not world_generation_system.has_method("sample_world"):
+        return force_underground_volume_debug
+    var focus_cell := Vector3i(world_to_cell(position.x), world_to_cell(position.y), world_to_cell(position.z))
+    var revision := int(world_generation_system.call("terrain_volume_revision")) if world_generation_system.has_method("terrain_volume_revision") else 0
+    var seed_key := seed_text
+    var cache_matches := focus_cell == underground_focus_cache_cell
+    cache_matches = cache_matches and revision == underground_focus_cache_revision
+    cache_matches = cache_matches and seed_key == underground_focus_cache_seed
+    cache_matches = cache_matches and force_underground_volume_debug == underground_focus_cache_debug
+    if cache_matches:
+        return underground_focus_cache_result
+    if force_underground_volume_debug:
+        return remember_underground_focus_result(focus_cell, revision, seed_key, true)
+    var surface_y := chunk_bound_surface_y_at_cell(Vector3i(focus_cell.x, 0, focus_cell.z))
+    if position.y >= surface_y - CELL * 0.35:
+        return remember_underground_focus_result(focus_cell, revision, seed_key, false)
+    var offsets: Array[Vector3i] = [
+        Vector3i.ZERO,
+        Vector3i(0, -1, 0),
+        Vector3i(0, 1, 0),
+        Vector3i(1, 0, 0),
+        Vector3i(-1, 0, 0),
+        Vector3i(0, 0, 1),
+        Vector3i(0, 0, -1)
+    ]
+    for offset: Vector3i in offsets:
+        var sample_cell: Vector3i = focus_cell + offset
+        if world_generation_system.has_method("volume_numeric_sample_at_grid_cell"):
+            var numeric_sample: Vector3 = world_generation_system.call("volume_numeric_sample_at_grid_cell", sample_cell)
+            if numeric_sample.x < 0.0 and numeric_sample.y <= 0.0:
+                return remember_underground_focus_result(focus_cell, revision, seed_key, true)
+            continue
+        var sample_position := Vector3(float(sample_cell.x) * CELL, float(sample_cell.y) * CELL, float(sample_cell.z) * CELL)
+        var sample: Dictionary = world_generation_system.call("sample_world", sample_position)
+        if String(sample.get("biome", "")) == "underground_air" and not bool(sample.get("solid", false)):
+            return remember_underground_focus_result(focus_cell, revision, seed_key, true)
+    return remember_underground_focus_result(focus_cell, revision, seed_key, false)
+
+func remember_underground_focus_result(cell: Vector3i, revision: int, seed_key: String, result: bool) -> bool:
+    underground_focus_cache_cell = cell
+    underground_focus_cache_revision = revision
+    underground_focus_cache_seed = seed_key
+    underground_focus_cache_debug = force_underground_volume_debug
+    underground_focus_cache_result = result
+    return result
 
 func chunk_has_excavation_overlap(start_x: int, start_z: int) -> bool:
     var brushes := active_volume_excavation_brushes()
@@ -1141,6 +1666,16 @@ func excavation_volume_y_bounds_for_chunk(start_x: int, start_z: int) -> Diction
     }
 
 func chunk_volume_y_bounds(start_x: int, start_z: int) -> Dictionary:
+    if player != null and chunk_has_underground_focus_overlap(start_x, start_z):
+        var radius_world := float(underground_volume_focus_radius_cells() + 3) * CELL
+        return {
+            "minY": floori((player.global_position.y - radius_world) / CELL),
+            "maxY": ceili((player.global_position.y + radius_world) / CELL)
+        }
+    var chunk_key := Vector2i(floori(float(start_x) / float(CHUNK_SIZE)), floori(float(start_z) / float(CHUNK_SIZE)))
+    var edited_bounds := {}
+    if world_generation_system != null and world_generation_system.has_method("terrain_volume_chunk_edited_y_bounds"):
+        edited_bounds = world_generation_system.call("terrain_volume_chunk_edited_y_bounds", chunk_key, CHUNK_SIZE)
     var min_height := INF
     var max_height := -INF
     for z in range(start_z - 2, start_z + CHUNK_SIZE + 3):
@@ -1151,8 +1686,14 @@ func chunk_volume_y_bounds(start_x: int, start_z: int) -> Dictionary:
     if min_height == INF:
         min_height = MIN_HEIGHT
         max_height = MAX_HEIGHT
-    var min_bound: float = min_height - float(UNDERGROUND_GENERATED_DEPTH_CELLS) * CELL - UNDERGROUND_VOLUME_Y_PADDING
+    var fallback_depth_cells := 64
+    var bottom_world := float(world_generation_system.call("world_bottom_cell_y")) * CELL if world_generation_system != null and world_generation_system.has_method("world_bottom_cell_y") else min_height - float(fallback_depth_cells) * CELL
+    var shallow_surface_depth := float(UNDERGROUND_VOLUME_SURFACE_EXPOSURE_DEPTH_CELLS + 4) * CELL
+    var min_bound: float = maxf(bottom_world, min_height - shallow_surface_depth)
     var max_bound: float = max_height + CELL * 2.0
+    if bool(edited_bounds.get("found", false)):
+        min_bound = maxf(bottom_world, float(int(edited_bounds.get("minY", floori(bottom_world / CELL))) - 3) * CELL)
+        max_bound = maxf(max_bound, float(int(edited_bounds.get("maxY", ceili(max_height / CELL))) + 3) * CELL)
     return {
         "minY": floori(min_bound / CELL),
         "maxY": ceili(max_bound / CELL)
@@ -1160,7 +1701,7 @@ func chunk_volume_y_bounds(start_x: int, start_z: int) -> Dictionary:
 
 func column_volume_y_bounds(cell_x: int, cell_z: int, chunk_min_y: int, chunk_max_y: int) -> Dictionary:
     var surface := chunk_bound_surface_y_at_cell(Vector3i(cell_x, 0, cell_z))
-    var min_bound := surface - float(UNDERGROUND_GENERATED_DEPTH_CELLS) * CELL - UNDERGROUND_VOLUME_Y_PADDING
+    var min_bound := float(chunk_min_y) * CELL
     var max_bound := surface + CELL * 2.0
     return {
         "minY": clampi(floori(min_bound / CELL), chunk_min_y, chunk_max_y),
@@ -1228,6 +1769,10 @@ func volume_grid_sample_numeric(grid_cell: Vector3i, sample_cache: Dictionary, v
         var cached = sample_cache[grid_cell]
         if cached is Vector3:
             return cached
+    if world_generation_system != null and world_generation_system.has_method("volume_numeric_sample_at_grid_cell"):
+        var fast_result: Vector3 = world_generation_system.call("volume_numeric_sample_at_grid_cell", grid_cell)
+        sample_cache[grid_cell] = fast_result
+        return fast_result
     var position := Vector3(float(grid_cell.x) * CELL, float(grid_cell.y) * CELL, float(grid_cell.z) * CELL)
     var surface_y := 0.0
     var generated_air_value := INF
@@ -1243,6 +1788,11 @@ func volume_grid_sample_numeric(grid_cell: Vector3i, sample_cache: Dictionary, v
     var result := Vector3(density, generated_air_value, surface_y)
     sample_cache[grid_cell] = result
     return result
+
+func native_terrain_numeric_sample_at_grid_cell(grid_cell: Vector3i) -> Vector3:
+    if world_generation_system != null and world_generation_system.has_method("volume_numeric_sample_at_grid_cell"):
+        return world_generation_system.call("volume_numeric_sample_at_grid_cell", grid_cell)
+    return volume_grid_sample_numeric(grid_cell, {})
 
 func extract_volume_iso_cube_arrays(
     vertices: PackedVector3Array,
@@ -2203,6 +2753,8 @@ func add_volume_iso_vertex(st: SurfaceTool, point: Dictionary, normal: Vector3) 
 func active_volume_excavation_brushes() -> Array:
     if world_generation_system == null:
         return []
+    if world_generation_system.get("terrain_volume_service") != null:
+        return []
     var brush_values = world_generation_system.get("excavation_brushes")
     if not (brush_values is Array):
         return []
@@ -2356,28 +2908,8 @@ func volume_iso_vertex_color(point: Dictionary, normal: Vector3) -> Color:
     var shade := volume_iso_shade(world)
     if air_biome == "underground_air":
         shade *= underground_wall_visual_shade(world)
-        if normal.y < -0.35:
-            return Color(0.055, 0.060, 0.060) * shade
-        if normal.y > 0.35:
-            return Color(0.150, 0.158, 0.142) * shade
-        return Color(0.170, 0.182, 0.170) * shade
-    if normal.y > 0.42 and material_id in ["grass", "mud", "snow"]:
-        return BIOME_COLORS.get(biome, BIOME_COLORS["plains"]) * shade
-    match material_id:
-        "sand":
-            return Color(0.62, 0.57, 0.42) * shade
-        "mud":
-            return Color(0.30, 0.35, 0.25) * shade
-        "snow":
-            return Color(0.77, 0.82, 0.82) * shade
-        "dirt":
-            return Color(0.32, 0.27, 0.18) * shade
-        "copperOre":
-            return Color(0.48, 0.30, 0.20) * shade
-        "ironOre":
-            return Color(0.40, 0.39, 0.36) * shade
-        _:
-            return Color(0.36, 0.38, 0.35) * shade
+        return volume_material_surface_color(material_id, biome, normal, shade, true)
+    return volume_material_surface_color(material_id, biome, normal, shade, false)
 
 func spawn_chunk_props(chunk: Node3D, cx: int, cz: int) -> void:
     var state := begin_chunk_prop_spawn_state(chunk, cx, cz)
@@ -2387,6 +2919,8 @@ func spawn_chunk_props(chunk: Node3D, cx: int, cz: int) -> void:
 func begin_chunk_prop_spawn_state(chunk: Node3D, cx: int, cz: int) -> Dictionary:
     var rng := RandomNumberGenerator.new()
     rng.seed = hash_string("%s:props:%d,%d" % [seed_text, cx, cz])
+    var underground_rng := RandomNumberGenerator.new()
+    underground_rng.seed = hash_string("%s:underground-props:%d,%d" % [seed_text, cx, cz])
     var detail_rng := RandomNumberGenerator.new()
     detail_rng.seed = hash_string("%s:details:%d,%d" % [seed_text, cx, cz])
     return {
@@ -2396,7 +2930,14 @@ func begin_chunk_prop_spawn_state(chunk: Node3D, cx: int, cz: int) -> Dictionary
         "startX": cx * CHUNK_SIZE,
         "startZ": cz * CHUNK_SIZE,
         "rng": rng,
+        "undergroundRng": underground_rng,
         "propIndex": 0,
+        "undergroundIndex": 0,
+        "undergroundCandidates": [],
+        "undergroundScanColumn": 0,
+        "undergroundScanY": 0,
+        "undergroundScanColumnStarted": false,
+        "undergroundScanComplete": false,
         "phase": "props",
         "detailRng": detail_rng,
         "detailIndex": 0,
@@ -2414,7 +2955,7 @@ func process_chunk_prop_spawn_state(
     time_budget_ms := -1.0,
     budget_start_usec := 0
 ) -> bool:
-    var chunk := state.get("chunk") as Node3D
+    var chunk := valid_node3d_from_variant(state.get("chunk"))
     if chunk == null or not is_instance_valid(chunk):
         return true
     var start_usec := budget_start_usec if budget_start_usec > 0 else Time.get_ticks_usec()
@@ -2428,7 +2969,10 @@ func process_chunk_prop_spawn_state(
         while prop_index < 28 and processed < maxi(1, prop_attempt_budget):
             if processed > 0 and chunk_prop_spawn_budget_elapsed(start_usec, time_budget_ms):
                 break
+            var prop_attempt_start: int = runtime_perf_monitor.begin_section("chunk_surface_prop_attempt") if runtime_perf_monitor != null else Time.get_ticks_usec()
             spawn_chunk_prop_attempt(state, prop_index, rng)
+            if runtime_perf_monitor != null:
+                runtime_perf_monitor.end_section("chunk_surface_prop_attempt", prop_attempt_start)
             prop_index += 1
             processed += 1
         state["propIndex"] = prop_index
@@ -2438,9 +2982,22 @@ func process_chunk_prop_spawn_state(
             return false
         state["phase"] = "details"
     if String(state.get("phase", "")) == "details":
-        return process_chunk_detail_spawn_state(state, detail_attempt_budget, time_budget_ms, start_usec)
+        if not process_chunk_detail_spawn_state(state, detail_attempt_budget, time_budget_ms, start_usec):
+            return false
+        if chunk_prop_spawn_budget_elapsed(start_usec, time_budget_ms):
+            return false
+        state["phase"] = "underground_props"
     if String(state.get("phase", "")) == "detail_batches":
-        return process_chunk_detail_batch_spawn_state(state, time_budget_ms, start_usec)
+        if not process_chunk_detail_batch_spawn_state(state, time_budget_ms, start_usec):
+            return false
+        if chunk_prop_spawn_budget_elapsed(start_usec, time_budget_ms):
+            return false
+        state["phase"] = "underground_props"
+    if String(state.get("phase", "")) == "underground_props":
+        if not process_underground_chunk_prop_spawn_state(state, prop_attempt_budget, time_budget_ms, start_usec):
+            return false
+        if chunk_prop_spawn_budget_elapsed(start_usec, time_budget_ms):
+            return false
     return true
 
 func chunk_prop_spawn_budget_elapsed(start_usec: int, time_budget_ms: float) -> bool:
@@ -2449,7 +3006,7 @@ func chunk_prop_spawn_budget_elapsed(start_usec: int, time_budget_ms: float) -> 
     return float(Time.get_ticks_usec() - start_usec) / 1000.0 >= time_budget_ms
 
 func spawn_chunk_prop_attempt(state: Dictionary, i: int, rng: RandomNumberGenerator) -> void:
-    var chunk := state.get("chunk") as Node3D
+    var chunk := valid_node3d_from_variant(state.get("chunk"))
     if chunk == null or not is_instance_valid(chunk):
         return
     var start_x := int(state.get("startX", int(state.get("cx", 0)) * CHUNK_SIZE))
@@ -2459,12 +3016,23 @@ func spawn_chunk_prop_attempt(state: Dictionary, i: int, rng: RandomNumberGenera
     var prop_id := "%s:%d,%d:%d" % [seed_text, x, z, i]
     if removed_props.has(prop_id):
         return
+    var block_check_start: int = runtime_perf_monitor.begin_section("chunk_surface_prop_block_check") if runtime_perf_monitor != null else Time.get_ticks_usec()
     if natural_props_blocked_at_cell(x, z):
+        if runtime_perf_monitor != null:
+            runtime_perf_monitor.end_section("chunk_surface_prop_block_check", block_check_start)
         return
-    var h := surface_y_at_cell(Vector3i(x, 0, z))
+    if runtime_perf_monitor != null:
+        runtime_perf_monitor.end_section("chunk_surface_prop_block_check", block_check_start)
+    var sample_start: int = runtime_perf_monitor.begin_section("chunk_surface_prop_sample") if runtime_perf_monitor != null else Time.get_ticks_usec()
+    var surface_sample := surface_volume_spawn_sample_at_cell(x, z)
+    if runtime_perf_monitor != null:
+        runtime_perf_monitor.end_section("chunk_surface_prop_sample", sample_start)
+    if surface_sample.is_empty() or not bool(surface_sample.get("found", false)):
+        return
+    var h := float(surface_sample.get("height", 0.0))
     if h < WATER_LEVEL + 1.0 or h > 92.0:
         return
-    var biome := surface_biome_at_cell(Vector3i(x, 0, z))
+    var biome := String(surface_sample.get("biome", "plains"))
     if biome == "town":
         return
     var rock_roll := rock_chance(biome, h)
@@ -2475,16 +3043,276 @@ func spawn_chunk_prop_attempt(state: Dictionary, i: int, rng: RandomNumberGenera
     var local_position := Vector3((x - start_x) * CELL, h, (z - start_z) * CELL)
     if prop_roll < rock_roll:
         var ore := ore_for_cell(biome, h, rng)
+        var rock_start: int = runtime_perf_monitor.begin_section("chunk_surface_prop_make_rock") if runtime_perf_monitor != null else Time.get_ticks_usec()
         if ore != "":
             make_ore_cluster(chunk, prop_id, local_position, ore, rng, 2)
         else:
             make_rock(chunk, prop_id, local_position, rng)
+        if runtime_perf_monitor != null:
+            runtime_perf_monitor.end_section("chunk_surface_prop_make_rock", rock_start)
     elif prop_roll < rock_roll + tree_roll:
+        var tree_start: int = runtime_perf_monitor.begin_section("chunk_surface_prop_make_tree") if runtime_perf_monitor != null else Time.get_ticks_usec()
         make_tree(chunk, prop_id, local_position, biome, rng)
+        if runtime_perf_monitor != null:
+            runtime_perf_monitor.end_section("chunk_surface_prop_make_tree", tree_start)
     elif prop_roll < rock_roll + tree_roll + forage_roll:
+        var forage_start: int = runtime_perf_monitor.begin_section("chunk_surface_prop_make_forage") if runtime_perf_monitor != null else Time.get_ticks_usec()
         make_forage(chunk, prop_id, local_position, biome, rng)
+        if runtime_perf_monitor != null:
+            runtime_perf_monitor.end_section("chunk_surface_prop_make_forage", forage_start)
     elif prop_roll < rock_roll + tree_roll + forage_roll + wildlife_roll:
+        var wildlife_start: int = runtime_perf_monitor.begin_section("chunk_surface_prop_make_wildlife") if runtime_perf_monitor != null else Time.get_ticks_usec()
         make_wildlife(chunk, prop_id, local_position, biome, rng)
+        if runtime_perf_monitor != null:
+            runtime_perf_monitor.end_section("chunk_surface_prop_make_wildlife", wildlife_start)
+
+func process_underground_chunk_prop_spawn_state(
+    state: Dictionary,
+    attempt_budget: int,
+    time_budget_ms := -1.0,
+    budget_start_usec := 0
+) -> bool:
+    var chunk := valid_node3d_from_variant(state.get("chunk"))
+    if chunk == null or not is_instance_valid(chunk):
+        return true
+    if state.get("undergroundCandidates", null) == null:
+        state["undergroundCandidates"] = []
+    var start_usec := budget_start_usec if budget_start_usec > 0 else Time.get_ticks_usec()
+    if not bool(state.get("undergroundScanComplete", false)):
+        var scan_budget := maxi(8, maxi(1, attempt_budget) * 8)
+        var scan_start: int = runtime_perf_monitor.begin_section("chunk_underground_prop_scan") if runtime_perf_monitor != null else Time.get_ticks_usec()
+        if not scan_underground_prop_candidates(state, scan_budget, time_budget_ms, start_usec):
+            if runtime_perf_monitor != null:
+                runtime_perf_monitor.end_section("chunk_underground_prop_scan", scan_start)
+            return false
+        if runtime_perf_monitor != null:
+            runtime_perf_monitor.end_section("chunk_underground_prop_scan", scan_start)
+        if chunk_prop_spawn_budget_elapsed(start_usec, time_budget_ms):
+            return false
+    var candidates: Array = state.get("undergroundCandidates", []) if state.get("undergroundCandidates", []) is Array else []
+    if candidates.is_empty():
+        return true
+    var rng := state.get("undergroundRng") as RandomNumberGenerator
+    if rng == null:
+        return true
+    var processed := 0
+    var index := int(state.get("undergroundIndex", 0))
+    while index < candidates.size() and processed < maxi(1, attempt_budget):
+        if processed > 0 and chunk_prop_spawn_budget_elapsed(start_usec, time_budget_ms):
+            break
+        var cell_value = candidates[index]
+        if cell_value is Vector3i:
+            var underground_attempt_start: int = runtime_perf_monitor.begin_section("chunk_underground_prop_attempt") if runtime_perf_monitor != null else Time.get_ticks_usec()
+            spawn_underground_prop_attempt(state, cell_value, rng)
+            if runtime_perf_monitor != null:
+                runtime_perf_monitor.end_section("chunk_underground_prop_attempt", underground_attempt_start)
+        index += 1
+        processed += 1
+    state["undergroundIndex"] = index
+    return index >= candidates.size()
+
+func underground_prop_candidate_cells(cx: int, cz: int) -> Array[Vector3i]:
+    var scan_state := {
+        "cx": cx,
+        "cz": cz,
+        "startX": cx * CHUNK_SIZE,
+        "startZ": cz * CHUNK_SIZE,
+        "undergroundCandidates": [],
+        "undergroundScanColumn": 0,
+        "undergroundScanY": 0,
+        "undergroundScanColumnStarted": false,
+        "undergroundScanComplete": false
+    }
+    while not scan_underground_prop_candidates(scan_state, CHUNK_SIZE * CHUNK_SIZE * 96, -1.0, 0):
+        pass
+    var candidates: Array = scan_state.get("undergroundCandidates", []) if scan_state.get("undergroundCandidates", []) is Array else []
+    var result: Array[Vector3i] = []
+    for cell_value in candidates:
+        if cell_value is Vector3i:
+            result.append(cell_value)
+    return result
+
+func scan_underground_prop_candidates(
+    state: Dictionary,
+    sample_budget: int,
+    time_budget_ms := -1.0,
+    budget_start_usec := 0
+) -> bool:
+    if world_generation_system != null and world_generation_system.has_method("advance_exposed_underground_floor_scan"):
+        return scan_underground_prop_candidates_from_volume_service(state, sample_budget, time_budget_ms, budget_start_usec)
+    if world_generation_system == null or not world_generation_system.has_method("sample_cell"):
+        state["undergroundScanComplete"] = true
+        return true
+    var candidates: Array = state.get("undergroundCandidates", []) if state.get("undergroundCandidates", []) is Array else []
+    var max_candidates := 36
+    if candidates.size() >= max_candidates:
+        state["undergroundScanComplete"] = true
+        state["undergroundCandidates"] = candidates
+        return true
+    var start_x := int(state.get("startX", int(state.get("cx", 0)) * CHUNK_SIZE))
+    var start_z := int(state.get("startZ", int(state.get("cz", 0)) * CHUNK_SIZE))
+    var start_usec := budget_start_usec if budget_start_usec > 0 else Time.get_ticks_usec()
+    var total_columns := CHUNK_SIZE * CHUNK_SIZE
+    var column_index := int(state.get("undergroundScanColumn", 0))
+    var y := int(state.get("undergroundScanY", 0))
+    var column_started := bool(state.get("undergroundScanColumnStarted", false))
+    var bottom_y := int(world_generation_system.call("world_bottom_cell_y")) if world_generation_system.has_method("world_bottom_cell_y") else floori((MIN_HEIGHT - CELL * 4.0) / CELL)
+    var processed := 0
+    var found_count_before := candidates.size()
+    while column_index < total_columns and candidates.size() < max_candidates and processed < maxi(1, sample_budget):
+        if processed > 0 and chunk_prop_spawn_budget_elapsed(start_usec, time_budget_ms):
+            break
+        var lx := column_index % CHUNK_SIZE
+        var lz := floori(float(column_index) / float(CHUNK_SIZE))
+        var cell_x := start_x + lx
+        var cell_z := start_z + lz
+        if not column_started:
+            var surface_y := chunk_reference_surface_y_for_volume_scan(cell_x, cell_z)
+            y = floori(surface_y / CELL) + 1
+            column_started = true
+        var finished_column := false
+        while y > bottom_y and processed < maxi(1, sample_budget):
+            if processed > 0 and chunk_prop_spawn_budget_elapsed(start_usec, time_budget_ms):
+                break
+            var air_cell := Vector3i(cell_x, y, cell_z)
+            processed += 1
+            if underground_air_floor_cell_is_valid(air_cell):
+                var floor_cell := air_cell + Vector3i(0, -1, 0)
+                var roll := hash01("underground-prop-candidate:%d,%d,%d" % [floor_cell.x, floor_cell.y, floor_cell.z])
+                if roll <= 0.18:
+                    candidates.append(floor_cell)
+                finished_column = true
+                break
+            y -= 1
+        if finished_column or y <= bottom_y:
+            column_index += 1
+            y = 0
+            column_started = false
+        else:
+            break
+    state["undergroundCandidates"] = candidates
+    state["undergroundScanColumn"] = column_index
+    state["undergroundScanY"] = y
+    state["undergroundScanColumnStarted"] = column_started
+    if column_index >= total_columns or candidates.size() >= max_candidates:
+        state["undergroundScanComplete"] = true
+    if runtime_perf_monitor != null and processed > 0:
+        runtime_perf_monitor.increment_counter("underground_prop_cells_scanned", processed)
+        var found_delta := candidates.size() - found_count_before
+        if found_delta > 0:
+            runtime_perf_monitor.increment_counter("underground_prop_candidates_found", found_delta)
+    return bool(state.get("undergroundScanComplete", false))
+
+func scan_underground_prop_candidates_from_volume_service(
+    state: Dictionary,
+    sample_budget: int,
+    time_budget_ms := -1.0,
+    budget_start_usec := 0
+) -> bool:
+    var candidates: Array = state.get("undergroundCandidates", []) if state.get("undergroundCandidates", []) is Array else []
+    var max_candidates := 36
+    if candidates.size() >= max_candidates:
+        state["undergroundScanComplete"] = true
+        state["undergroundCandidates"] = candidates
+        return true
+    var scan_state: Dictionary = state.get("undergroundVolumeFloorScan", {}) if state.get("undergroundVolumeFloorScan", {}) is Dictionary else {}
+    if scan_state.is_empty():
+        var chunk_key := Vector2i(int(state.get("cx", 0)), int(state.get("cz", 0)))
+        if world_generation_system.has_method("begin_exposed_underground_floor_scan"):
+            scan_state = world_generation_system.call("begin_exposed_underground_floor_scan", chunk_key, CHUNK_SIZE)
+        else:
+            state["undergroundScanComplete"] = true
+            state["undergroundCandidates"] = candidates
+            return true
+    var found_count_before := candidates.size()
+    var result: Dictionary = world_generation_system.call(
+        "advance_exposed_underground_floor_scan",
+        scan_state,
+        maxi(1, int(sample_budget)),
+        time_budget_ms,
+        budget_start_usec
+    )
+    scan_state = result.get("state", scan_state) if result.get("state", scan_state) is Dictionary else scan_state
+    state["undergroundVolumeFloorScan"] = scan_state
+    var new_candidates: Array = result.get("newCandidates", []) if result.get("newCandidates", []) is Array else []
+    for cell_value in new_candidates:
+        if candidates.size() >= max_candidates:
+            break
+        if not (cell_value is Vector3i):
+            continue
+        var floor_cell: Vector3i = cell_value
+        var roll := hash01("underground-prop-candidate:%d,%d,%d" % [floor_cell.x, floor_cell.y, floor_cell.z])
+        if roll <= 0.18:
+            candidates.append(floor_cell)
+    state["undergroundCandidates"] = candidates
+    if bool(result.get("complete", false)) or candidates.size() >= max_candidates:
+        state["undergroundScanComplete"] = true
+    if runtime_perf_monitor != null:
+        var processed := int(result.get("processed", 0))
+        if processed > 0:
+            runtime_perf_monitor.increment_counter("underground_prop_cells_scanned", processed)
+            runtime_perf_monitor.increment_counter("underground_prop_volume_service_scans")
+            var found_delta := candidates.size() - found_count_before
+            if found_delta > 0:
+                runtime_perf_monitor.increment_counter("underground_prop_candidates_found", found_delta)
+    return bool(state.get("undergroundScanComplete", false))
+
+func underground_air_floor_cell_is_valid(air_cell: Vector3i) -> bool:
+    if world_generation_system == null or not world_generation_system.has_method("sample_cell"):
+        return false
+    var air_sample: Dictionary = world_generation_system.call("sample_cell", air_cell)
+    if bool(air_sample.get("solid", true)):
+        return false
+    if String(air_sample.get("biome", "")) != "underground_air":
+        return false
+    if String(air_sample.get("fluid", "")) != "":
+        return false
+    var head_sample: Dictionary = world_generation_system.call("sample_cell", air_cell + Vector3i(0, 1, 0))
+    if bool(head_sample.get("solid", false)):
+        return false
+    return underground_prop_cell_is_valid(air_cell + Vector3i(0, -1, 0))
+
+func underground_prop_cell_is_valid(solid_cell: Vector3i) -> bool:
+    if world_generation_system == null or not world_generation_system.has_method("sample_cell"):
+        return false
+    var air_cell := solid_cell + Vector3i(0, 1, 0)
+    var air_sample: Dictionary = world_generation_system.call("sample_cell", air_cell)
+    if bool(air_sample.get("solid", true)):
+        return false
+    if String(air_sample.get("biome", "")) != "underground_air":
+        return false
+    if String(air_sample.get("fluid", "")) != "":
+        return false
+    var solid_sample: Dictionary = world_generation_system.call("sample_cell", solid_cell)
+    var material := String(solid_sample.get("material", ""))
+    if material == "" or material == "air" or material == "water" or material == "lava":
+        return false
+    return true
+
+func spawn_underground_prop_attempt(state: Dictionary, solid_cell: Vector3i, rng: RandomNumberGenerator) -> void:
+    var chunk := valid_node3d_from_variant(state.get("chunk"))
+    if chunk == null or not is_instance_valid(chunk):
+        return
+    var start_x := int(state.get("startX", int(state.get("cx", 0)) * CHUNK_SIZE))
+    var start_z := int(state.get("startZ", int(state.get("cz", 0)) * CHUNK_SIZE))
+    var prop_id := "%s:underground:%d,%d,%d" % [seed_text, solid_cell.x, solid_cell.y, solid_cell.z]
+    if removed_props.has(prop_id):
+        return
+    var solid_sample: Dictionary = world_generation_system.call("sample_cell", solid_cell) if world_generation_system != null and world_generation_system.has_method("sample_cell") else {}
+    var material := String(solid_sample.get("material", "stone"))
+    var air_cell := solid_cell + Vector3i(0, 1, 0)
+    var local_position := Vector3((float(solid_cell.x - start_x) + 0.5) * CELL, float(air_cell.y) * CELL + CELL * 0.04, (float(solid_cell.z - start_z) + 0.5) * CELL)
+    var roll := rng.randf()
+    if material in ["copperOre", "ironOre"]:
+        make_ore_cluster(chunk, prop_id, local_position, material, rng, 1)
+        return
+    if roll < 0.12 and material in ["stone", "deepStone", "bedrock"]:
+        var ore := "ironOre" if solid_cell.y < -22 and rng.randf() < 0.38 else "copperOre"
+        make_ore_cluster(chunk, prop_id, local_position, ore, rng, 1)
+    elif roll < 0.36:
+        make_rock(chunk, prop_id, local_position, rng)
+    elif roll < 0.48:
+        make_forage(chunk, prop_id, local_position, "swamp", rng)
 
 func process_chunk_detail_spawn_state(
     state: Dictionary,
@@ -2492,7 +3320,7 @@ func process_chunk_detail_spawn_state(
     time_budget_ms := -1.0,
     budget_start_usec := 0
 ) -> bool:
-    var chunk := state.get("chunk") as Node3D
+    var chunk := valid_node3d_from_variant(state.get("chunk"))
     if chunk == null or not is_instance_valid(chunk):
         return true
     var density: float = clampf(float(visual_quality.get("decorativeDensity", 0.74)), 0.0, 1.0)
@@ -2511,7 +3339,10 @@ func process_chunk_detail_spawn_state(
     while detail_index < attempts and processed < maxi(1, detail_attempt_budget):
         if processed > 0 and chunk_prop_spawn_budget_elapsed(start_usec, time_budget_ms):
             break
+        var detail_attempt_start: int = runtime_perf_monitor.begin_section("chunk_detail_prop_attempt") if runtime_perf_monitor != null else Time.get_ticks_usec()
         spawn_chunk_detail_attempt(state, detail_index, rng, batches)
+        if runtime_perf_monitor != null:
+            runtime_perf_monitor.end_section("chunk_detail_prop_attempt", detail_attempt_start)
         detail_index += 1
         processed += 1
     state["detailIndex"] = detail_index
@@ -2526,7 +3357,7 @@ func process_chunk_detail_spawn_state(
     return process_chunk_detail_batch_spawn_state(state, time_budget_ms, start_usec)
 
 func process_chunk_detail_batch_spawn_state(state: Dictionary, time_budget_ms := -1.0, budget_start_usec := 0) -> bool:
-    var chunk := state.get("chunk") as Node3D
+    var chunk := valid_node3d_from_variant(state.get("chunk"))
     if chunk == null or not is_instance_valid(chunk):
         return true
     var batches: Dictionary = state.get("detailBatches", {}) if state.get("detailBatches", {}) is Dictionary else {}
@@ -2536,7 +3367,7 @@ func process_chunk_detail_batch_spawn_state(state: Dictionary, time_budget_ms :=
     if keys.is_empty():
         keys = batches.keys()
         state["detailBatchKeys"] = keys
-    var root := state.get("detailBatchRoot") as Node3D
+    var root := valid_node3d_from_variant(state.get("detailBatchRoot"))
     if root == null or not is_instance_valid(root):
         root = Node3D.new()
         root.name = "DecorBatches"
@@ -2553,7 +3384,10 @@ func process_chunk_detail_batch_spawn_state(state: Dictionary, time_budget_ms :=
         var detail_type_variant = keys[batch_index]
         var transforms: Array = batches.get(detail_type_variant, [])
         if not transforms.is_empty():
+            var batch_start: int = runtime_perf_monitor.begin_section("chunk_detail_batch_spawn") if runtime_perf_monitor != null else Time.get_ticks_usec()
             spawn_detail_batch(root, String(detail_type_variant), transforms)
+            if runtime_perf_monitor != null:
+                runtime_perf_monitor.end_section("chunk_detail_batch_spawn", batch_start)
         batch_index += 1
         processed += 1
     state["detailBatchIndex"] = batch_index
@@ -2566,10 +3400,13 @@ func spawn_chunk_detail_attempt(state: Dictionary, _index: int, rng: RandomNumbe
     var z := start_z + 1 + rng.randi_range(0, CHUNK_SIZE - 2)
     if natural_props_blocked_at_cell(x, z):
         return
-    var h := surface_y_at_cell(Vector3i(x, 0, z))
+    var surface_sample := surface_volume_spawn_sample_at_cell(x, z)
+    if surface_sample.is_empty() or not bool(surface_sample.get("found", false)):
+        return
+    var h := float(surface_sample.get("height", 0.0))
     if h < WATER_LEVEL - 0.1 or h > 104.0:
         return
-    var biome := surface_biome_at_cell(Vector3i(x, 0, z))
+    var biome := String(surface_sample.get("biome", "plains"))
     if biome == "town":
         return
     var variation := height_variation_cell(x, z, 1)
@@ -2607,10 +3444,13 @@ func spawn_chunk_detail_batches(chunk: Node3D, cx: int, cz: int) -> void:
         var z := start_z + 1 + rng.randi_range(0, CHUNK_SIZE - 2)
         if natural_props_blocked_at_cell(x, z):
             continue
-        var h := surface_y_at_cell(Vector3i(x, 0, z))
+        var surface_sample := surface_volume_spawn_sample_at_cell(x, z)
+        if surface_sample.is_empty() or not bool(surface_sample.get("found", false)):
+            continue
+        var h := float(surface_sample.get("height", 0.0))
         if h < WATER_LEVEL - 0.1 or h > 104.0:
             continue
-        var biome := surface_biome_at_cell(Vector3i(x, 0, z))
+        var biome := String(surface_sample.get("biome", "plains"))
         if biome == "town":
             continue
         var variation := height_variation_cell(x, z, 1)
@@ -2624,6 +3464,76 @@ func natural_props_blocked_at_cell(x: int, z: int) -> bool:
     if structure_system != null and structure_system.has_method("blocks_natural_prop_at_cell"):
         return bool(structure_system.call("blocks_natural_prop_at_cell", x, z))
     return false
+
+func surface_volume_spawn_sample_at_cell(cell_x: int, cell_z: int) -> Dictionary:
+    var column_cell := Vector3i(cell_x, 0, cell_z)
+    var fallback_height := surface_y_at_cell(column_cell)
+    var fallback_biome := surface_biome_at_cell(column_cell)
+    if world_generation_system == null or not world_generation_system.has_method("surface_projection_for_cell"):
+        return {
+            "found": true,
+            "height": fallback_height,
+            "biome": fallback_biome,
+            "material": world_material_at_cell(Vector3i(cell_x, floori(fallback_height / CELL), cell_z)) if has_method("world_material_at_cell") else "",
+            "authority": "height_compat"
+        }
+    if world_generation_system.has_method("terrain_volume_column_has_surface_projection_affecting_edits") \
+        and not bool(world_generation_system.call("terrain_volume_column_has_surface_projection_affecting_edits", column_cell)):
+        if runtime_perf_monitor != null:
+            runtime_perf_monitor.increment_counter("surface_prop_generated_surface_fast_queries")
+        return {
+            "found": true,
+            "height": fallback_height,
+            "biome": fallback_biome,
+            "material": surface_material_at_cell(column_cell) if has_method("surface_material_at_cell") else "",
+            "solidCell": Vector3i(cell_x, floori(fallback_height / CELL), cell_z),
+            "airCell": Vector3i(cell_x, floori(fallback_height / CELL) + 1, cell_z),
+            "authority": "generated_surface_fast"
+        }
+    var start_cell := Vector3i(cell_x, floori(fallback_height / CELL), cell_z)
+    var projection_start: int = runtime_perf_monitor.begin_section("surface_prop_volume_projection") if runtime_perf_monitor != null else Time.get_ticks_usec()
+    var projection: Dictionary = world_generation_system.call("surface_projection_for_cell", start_cell, 24, 96)
+    if runtime_perf_monitor != null:
+        runtime_perf_monitor.end_section("surface_prop_volume_projection", projection_start)
+    if projection.is_empty() or not bool(projection.get("found", false)):
+        return {
+            "found": false,
+            "height": fallback_height,
+            "biome": fallback_biome,
+            "authority": "terrain_volume_projection"
+        }
+    var solid_state: Dictionary = projection.get("solidState", {}) if projection.get("solidState", {}) is Dictionary else {}
+    var air_state: Dictionary = projection.get("airState", {}) if projection.get("airState", {}) is Dictionary else {}
+    var material := String(solid_state.get("material", ""))
+    if material == "" or material == "air" or material == "water" or material == "lava":
+        return {
+            "found": false,
+            "height": fallback_height,
+            "biome": fallback_biome,
+            "authority": "terrain_volume_projection"
+        }
+    if String(air_state.get("fluid", "")) != "":
+        return {
+            "found": false,
+            "height": fallback_height,
+            "biome": fallback_biome,
+            "authority": "terrain_volume_projection"
+        }
+    var air_cell: Vector3i = projection.get("airCell", start_cell + Vector3i(0, 1, 0))
+    var biome := String(solid_state.get("biome", fallback_biome))
+    if biome == "" or biome == "underground" or biome == "deep_underground":
+        biome = fallback_biome
+    if runtime_perf_monitor != null:
+        runtime_perf_monitor.increment_counter("surface_prop_volume_projection_queries")
+    return {
+        "found": true,
+        "height": float(air_cell.y) * CELL,
+        "biome": biome,
+        "material": material,
+        "solidCell": projection.get("solidCell", start_cell),
+        "airCell": air_cell,
+        "authority": "terrain_volume_projection"
+    }
 
 func add_detail_for_biome(batches: Dictionary, local_position: Vector3, biome: String, height: float, rng: RandomNumberGenerator) -> void:
     var roll := rng.randf()

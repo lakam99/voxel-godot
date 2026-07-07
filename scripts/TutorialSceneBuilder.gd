@@ -66,6 +66,7 @@ func ensure_starter_shelter() -> void:
     var center_x := int(system.town.get("centerX", 0))
     var center_z := int(system.town.get("centerZ", 0))
     var level := float(system.town.get("level", 16.0))
+    reserve_starter_shelter_volume(center_x, center_z, level)
     var roof_center := Vector2i(center_x - 13, center_z - 10)
     for dz in range(-1, 2):
         for dx in range(-1, 2):
@@ -74,6 +75,40 @@ func ensure_starter_shelter() -> void:
                 "generatedTier": "town",
                 "cacheKey": "%s:tutorial-starter-roof:%d,%d" % [main.seed_text, cell.x, cell.y]
             })
+
+func reserve_starter_shelter_volume(center_x: int, center_z: int, level: float) -> void:
+    if main == null or main.structure_system == null:
+        return
+    if not main.structure_system.has_method("reserve_structure_terrain_footprint"):
+        return
+    var base_x := center_x - 16
+    var base_z := center_z - 14
+    var width := 7
+    var depth := 8
+    main.structure_system.reserve_structure_terrain_footprint(
+        base_x,
+        base_z,
+        level,
+        width,
+        depth,
+        4,
+        "tutorial_starter_shelter",
+        "stone"
+    )
+    refresh_starter_shelter_terrain(base_x, base_z, width, depth)
+
+func refresh_starter_shelter_terrain(base_x: int, base_z: int, width: int, depth: int) -> void:
+    if main == null or not main.has_method("rebuild_chunks_for_cells"):
+        return
+    if main.has_method("queue_dirty_terrain_volume_chunk_refreshes"):
+        main.queue_dirty_terrain_volume_chunk_refreshes()
+    main.rebuild_chunks_for_cells([
+        Vector2i(base_x, base_z),
+        Vector2i(base_x + width, base_z),
+        Vector2i(base_x, base_z + depth),
+        Vector2i(base_x + width, base_z + depth),
+        Vector2i(base_x + int(width / 2), base_z + int(depth / 2))
+    ], 0, true)
 
 func ensure_village_perimeter() -> void:
     if main == null or system.town.is_empty() or main.structure_system == null:

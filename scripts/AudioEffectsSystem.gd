@@ -48,6 +48,7 @@ var streams := {}
 var daytime_music_tracks := []
 var last_played := ""
 var play_count := 0
+var play_counts_by_name := {}
 var visual_effects: Array = []
 var visual_effect_pool: Array[MeshInstance3D] = []
 var material_cache := {}
@@ -83,8 +84,7 @@ func _ready() -> void:
     night_player.volume_db = night_volume_db
     add_child(night_player)
     build_streams()
-    if streams.has("rainLoop"):
-        rain_player.stream = streams["rainLoop"]
+    prime_ambient_loop_players()
     if streams.has("knock"):
         knock_player.stream = streams["knock"]
     setup_effect_mesh()
@@ -108,6 +108,9 @@ func shutdown_audio() -> void:
     daytime_music_tracks.clear()
     current_music = ""
     current_music_source = ""
+    last_played = ""
+    play_count = 0
+    play_counts_by_name.clear()
     visual_effects.clear()
     visual_effect_pool.clear()
     material_cache.clear()
@@ -154,6 +157,26 @@ func build_streams() -> void:
     streams["defeat"] = make_tone_stream([180.0, 260.0, 420.0, 620.0], 0.075, "triangle")
     streams["level"] = make_tone_stream([330.0, 440.0, 660.0, 880.0], 0.09, "triangle")
 
+func prime_ambient_loop_players() -> void:
+    if streams.has("rainLoop"):
+        prime_loop_player(rain_player, streams["rainLoop"], rain_volume_db)
+    if streams.has("natureDay"):
+        prime_loop_player(nature_player, streams["natureDay"], nature_volume_db)
+    if streams.has("nightWind"):
+        prime_loop_player(night_player, streams["nightWind"], night_volume_db)
+    if streams.has("daytime") and music_player != null:
+        current_music = "daytime"
+        current_music_source = String(daytime_music_tracks[0]) if not daytime_music_tracks.is_empty() else "daytime"
+        prime_loop_player(music_player, streams[current_music_source] if streams.has(current_music_source) else streams["daytime"], music_volume_db)
+
+func prime_loop_player(audio_player: AudioStreamPlayer, stream: AudioStream, volume_db: float) -> void:
+    if audio_player == null or stream == null:
+        return
+    audio_player.stream = stream
+    audio_player.volume_db = volume_db
+    if not audio_player.playing:
+        audio_player.play()
+
 func setup_effect_mesh() -> void:
     effect_mesh = SphereMesh.new()
     effect_mesh.radius = 0.065
@@ -164,8 +187,7 @@ func setup_effect_mesh() -> void:
 func play(name: String) -> void:
     if not enabled or streams.is_empty() or not streams.has(name):
         return
-    last_played = name
-    play_count += 1
+    note_played(name)
     var sfx_player := acquire_sfx_player()
     if sfx_player == null:
         return
@@ -242,10 +264,13 @@ func update_music(state: Dictionary) -> void:
         current_music = requested
         current_music_source = ""
         if current_music != "":
-            music_player.stream = stream_for_music(current_music)
+            var next_stream := stream_for_music(current_music)
+            var stream_changed := music_player.stream != next_stream
+            music_player.stream = next_stream
             music_volume_db = -60.0
             music_player.volume_db = music_volume_db
-            music_player.play()
+            if stream_changed or not music_player.playing:
+                music_player.play()
     if current_music == "":
         music_target_volume_db = -60.0
     else:
@@ -270,12 +295,16 @@ func stop_knock_loop() -> void:
 func play_knock_bang() -> void:
     if knock_player == null or not streams.has("knock"):
         return
-    last_played = "knock"
-    play_count += 1
+    note_played("knock")
     knock_player.stream = streams["knock"]
     knock_player.pitch_scale = randf_range(0.96, 1.04)
     knock_player.play()
     knock_repeat_timer = randf_range(0.32, 0.70)
+
+func note_played(name: String) -> void:
+    last_played = name
+    play_count += 1
+    play_counts_by_name[name] = int(play_counts_by_name.get(name, 0)) + 1
 
 func burst(position: Vector3, color: Color, count := 8) -> void:
     for i in range(count):
@@ -343,23 +372,15 @@ func update_ambient_players(delta: float) -> void:
     if rain_player != null:
         rain_volume_db = lerpf(rain_volume_db, rain_target_volume_db, clampf(delta * 3.5, 0.0, 1.0))
         rain_player.volume_db = rain_volume_db
-        if rain_target_volume_db <= -59.0 and rain_volume_db <= -58.5 and rain_player.playing:
-            rain_player.stop()
     if music_player != null:
         music_volume_db = lerpf(music_volume_db, music_target_volume_db, clampf(delta * 1.4, 0.0, 1.0))
         music_player.volume_db = music_volume_db
-        if music_target_volume_db <= -59.0 and music_volume_db <= -58.5 and music_player.playing:
-            music_player.stop()
     if nature_player != null:
         nature_volume_db = lerpf(nature_volume_db, nature_target_volume_db, clampf(delta * 2.0, 0.0, 1.0))
         nature_player.volume_db = nature_volume_db
-        if nature_target_volume_db <= -59.0 and nature_volume_db <= -58.5 and nature_player.playing:
-            nature_player.stop()
     if night_player != null:
         night_volume_db = lerpf(night_volume_db, night_target_volume_db, clampf(delta * 2.0, 0.0, 1.0))
         night_player.volume_db = night_volume_db
-        if night_target_volume_db <= -59.0 and night_volume_db <= -58.5 and night_player.playing:
-            night_player.stop()
 
 func update_knock_loop(delta: float) -> void:
     if not knock_looping or knock_player == null:
@@ -374,6 +395,7 @@ func stats() -> Dictionary:
     return {
         "lastPlayed": last_played,
         "playCount": play_count,
+        "playCountsByName": play_counts_by_name.duplicate(),
         "rainAmount": ambient_rain_amount,
         "rainVolumeDb": rain_volume_db,
         "natureAmount": ambient_nature_amount,

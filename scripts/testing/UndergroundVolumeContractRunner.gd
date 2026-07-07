@@ -78,7 +78,7 @@ func run() -> void:
 	test_underground_air_exists()
 	test_underground_air_has_connected_volume()
 	test_sample_contract()
-	test_depth_cap_is_solid()
+	test_world_bottom_is_solid()
 	test_air_has_generated_solid_boundaries()
 	test_removed_production_api_absent()
 	save_report()
@@ -144,21 +144,26 @@ func test_sample_contract() -> void:
 		and material == "air" \
 		and not solid \
 		and sample.has("surfaceY") \
-		and int(sample.get("generatedDepthCells", 0)) == 32
+		and int(sample.get("generatedDepthCells", 0)) > 32
 	add_result("underground_sample_contract", passed, JSON.stringify(sample_signature(sample)))
 
-func test_depth_cap_is_solid() -> void:
+func test_world_bottom_is_solid() -> void:
 	var columns: Array[Vector2i] = [Vector2i(0, 0), Vector2i(20, 20), Vector2i(-35, 42), Vector2i(96, 96)]
 	var passed := true
 	var summaries := []
+	var bottom_y := int(world_generation.call("world_bottom_cell_y")) if world_generation.has_method("world_bottom_cell_y") else -64
 	for column in columns:
-		var surface_y := float(world_generation.call("surface_y_for_cell", Vector3i(column.x, 0, column.y)))
-		var position := Vector3(float(column.x) * main.CELL, surface_y - main.CELL * 34.0, float(column.y) * main.CELL)
-		var sample: Dictionary = world_generation.call("sample_world", position)
-		var ok := bool(sample.get("solid", false)) and String(sample.get("material", "")) != "air"
+		var bedrock_cell := Vector3i(column.x, bottom_y, column.y)
+		var above_cell := Vector3i(column.x, bottom_y + 6, column.y)
+		var bedrock_sample: Dictionary = world_generation.call("sample_cell", bedrock_cell)
+		var above_sample: Dictionary = world_generation.call("sample_cell", above_cell)
+		var ok := bool(bedrock_sample.get("solid", false)) \
+			and String(bedrock_sample.get("material", "")) == "bedrock" \
+			and bool(above_sample.get("solid", false)) \
+			and String(above_sample.get("material", "")) != "air"
 		passed = passed and ok
-		summaries.append({ "column": sanitize(column), "position": sanitize(position), "sample": sample_signature(sample), "passed": ok })
-	add_result("underground_depth_cap_32_cells_solid", passed, JSON.stringify(summaries))
+		summaries.append({ "column": sanitize(column), "bottomCellY": bottom_y, "bedrock": sample_signature(bedrock_sample), "above": sample_signature(above_sample), "passed": ok })
+	add_result("underground_world_bottom_solid", passed, JSON.stringify(summaries))
 
 func test_air_has_generated_solid_boundaries() -> void:
 	var found: Dictionary = world_generation.call("find_underground_air_sample", SEARCH_RADIUS, 4, 30)

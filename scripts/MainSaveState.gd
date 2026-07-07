@@ -2,13 +2,15 @@
 
 const FIRST_STORY_QUEST_ID := "story.gloam_hart.storm"
 
-func reset_runtime_world_state() -> void:
+func reset_runtime_world_state(reload_world := true) -> void:
+    playtest_progress("reset_runtime_start")
     world_elapsed = 0.0
     autosave_elapsed = 0.0
     time_of_day = 0.32
     next_fishing_ready_at = 0.0
     volume_edit_markers.clear()
     if world_generation_system and world_generation_system.has_method("reset"):
+        playtest_progress("reset_runtime_world_generation")
         world_generation_system.reset()
     if subsurface_system and subsurface_system.has_method("reset"):
         subsurface_system.reset()
@@ -19,9 +21,11 @@ func reset_runtime_world_state() -> void:
     if hostile_system:
         hostile_system.clear()
     if npc_system:
+        playtest_progress("reset_runtime_npcs")
         npc_system.clear()
     if utility_system:
         utility_system.close()
+    playtest_progress("reset_runtime_clear_blocks")
     clear_all_blocks()
     if structure_system and structure_system.has_method("reset"):
         structure_system.reset()
@@ -86,7 +90,10 @@ func reset_runtime_world_state() -> void:
     reset_break_progress()
     if held_item:
         held_item.refresh_active()
-    reload_chunks()
+    if reload_world:
+        playtest_progress("reset_runtime_reload_chunks")
+        reload_chunks()
+    playtest_progress("reset_runtime_done")
 
 func create_save_snapshot() -> Dictionary:
     var player_state := {}
@@ -109,6 +116,7 @@ func create_save_snapshot() -> Dictionary:
         },
         "crafting": crafting_system.snapshot() if crafting_system and crafting_system.has_method("snapshot") else {},
         "terrain": snapshot_volume_edits(),
+        "terrainVolume": snapshot_terrain_volume(),
         "subsurface": snapshot_subsurface(),
         "removedProps": removed_props.keys(),
         "survival": survival_system.snapshot() if survival_system else {},
@@ -148,8 +156,11 @@ func apply_save_snapshot(snapshot: Dictionary) -> bool:
     restore_exploration(snapshot.get("exploration", {}))
     if survival_system and snapshot.has("survival"):
         survival_system.restore(snapshot["survival"])
-    restore_volume_edits(snapshot.get("terrain", []))
     restore_subsurface(snapshot.get("subsurface", {}))
+    restore_volume_edits(snapshot.get("terrain", []))
+    var terrain_volume_snapshot: Dictionary = snapshot.get("terrainVolume", {}) if snapshot.get("terrainVolume", {}) is Dictionary else {}
+    if not terrain_volume_snapshot.is_empty():
+        restore_terrain_volume(terrain_volume_snapshot)
     restore_removed_props(snapshot.get("removedProps", []))
     if npc_system and npc_system.has_method("restore_job_facts"):
         npc_system.restore_job_facts(snapshot.get("npcJobFacts", []))
@@ -265,16 +276,7 @@ func restore_exploration(snapshot_value) -> void:
             discovered_camp_keys[camp_key_string] = true
 
 func snapshot_volume_edits() -> Array:
-    var result := []
-    for key in volume_edit_markers.keys():
-        if not (key is Vector2i):
-            continue
-        result.append({
-            "x": key.x,
-            "z": key.y,
-            "surfaceY": float(volume_edit_markers[key])
-        })
-    return result
+    return []
 
 func restore_volume_edits(entries) -> void:
     volume_edit_markers.clear()
@@ -289,9 +291,48 @@ func restore_volume_edits(entries) -> void:
         if world_generation_system != null and world_generation_system.has_method("surface_y_for_cell"):
             old_surface_y = float(world_generation_system.call("surface_y_for_cell", Vector3i(key.x, 0, key.y)))
         var new_surface_y := float(entry.get("surfaceY", entry.get("height", old_surface_y)))
-        volume_edit_markers[key] = new_surface_y
+        convert_legacy_volume_edit_to_terrain_volume(key, old_surface_y, new_surface_y)
         if npc_system and npc_system.has_method("notify_navigation_terrain_edited"):
             npc_system.notify_navigation_terrain_edited(key, old_surface_y, new_surface_y)
+
+func convert_legacy_volume_edit_to_terrain_volume(column: Vector2i, old_surface_y: float, new_surface_y: float) -> void:
+    if world_generation_system == null or not world_generation_system.has_method("apply_box_edit"):
+        volume_edit_markers[column] = new_surface_y
+        return
+    if new_surface_y >= old_surface_y - CELL * 0.10:
+        return
+    var old_cell_y := ceili(old_surface_y / CELL)
+    var new_cell_y := floori(new_surface_y / CELL)
+    if old_cell_y < new_cell_y:
+        return
+    world_generation_system.call("apply_box_edit", Vector3i(column.x, new_cell_y, column.y), Vector3i(column.x, old_cell_y, column.y), {
+        "material": "air",
+        "biome": "underground_air",
+        "solid": false,
+        "density": -CELL,
+        "fluid": "",
+        "light": { "sky": 0, "block": 0 },
+        "metadata": {
+            "source": "legacy_volume_edit",
+            "terrainMeshAffects": true,
+            "saveDelta": true
+        }
+    }, "legacy_volume_edit_restore")
+
+func snapshot_terrain_volume() -> Dictionary:
+    if world_generation_system != null and world_generation_system.has_method("save_terrain_volume_deltas"):
+        return world_generation_system.call("save_terrain_volume_deltas")
+    return {}
+
+func restore_terrain_volume(snapshot_value) -> void:
+    var snapshot: Dictionary = snapshot_value if snapshot_value is Dictionary else {}
+    if snapshot.is_empty():
+        return
+    if world_generation_system != null and world_generation_system.has_method("reset_terrain_volume_authority"):
+        world_generation_system.call("reset_terrain_volume_authority")
+    if world_generation_system != null and world_generation_system.has_method("load_terrain_volume_deltas"):
+        world_generation_system.call("load_terrain_volume_deltas", snapshot)
+    clear_chunk_asset_cache()
 
 func snapshot_subsurface() -> Dictionary:
     if subsurface_system and subsurface_system.has_method("snapshot"):
@@ -391,6 +432,8 @@ func clear_player_blocks() -> void:
         if body != null and bool(body.get_meta("player_placed", false)):
             if npc_system and npc_system.has_method("notify_navigation_block_removed") and body.has_meta("cell"):
                 npc_system.notify_navigation_block_removed(body.get_meta("cell"), String(body.get_meta("block_type", "")), body)
+            if body.has_meta("cell") and body.has_meta("block_type"):
+                clear_block_light_from_terrain(body.get_meta("cell"), String(body.get_meta("block_type", "")), "clear_player_blocks")
             body.queue_free()
             blocks.erase(key)
             removed_any = true
@@ -399,16 +442,24 @@ func clear_player_blocks() -> void:
 
 func clear_all_blocks() -> void:
     var removed_any := false
+    var removed_count := 0
+    playtest_progress("clear_all_blocks_start_%d" % blocks.size())
     for key in blocks.keys():
         var body := blocks[key] as Node
         if body != null:
             if npc_system and npc_system.has_method("notify_navigation_block_removed") and body.has_meta("cell"):
                 npc_system.notify_navigation_block_removed(body.get_meta("cell"), String(body.get_meta("block_type", "")), body)
+            if body.has_meta("cell") and body.has_meta("block_type"):
+                clear_block_light_from_terrain(body.get_meta("cell"), String(body.get_meta("block_type", "")), "clear_all_blocks")
             body.queue_free()
         blocks.erase(key)
         removed_any = true
+        removed_count += 1
+        if removed_count % 200 == 0:
+            playtest_progress("clear_all_blocks_%d" % removed_count)
     if removed_any:
         invalidate_navigation_marker_cache()
+    playtest_progress("clear_all_blocks_done_%d" % removed_count)
 
 func serialize_slots(slots_value) -> Array:
     var result := []
@@ -479,15 +530,22 @@ func restore_single_slot(slot_value) -> Dictionary:
         return { "item": "", "count": 0 }
     return { "item": item_id, "count": clampi(count_value, 1, ItemCatalogScript.stack_max(item_id)) }
 
-func reload_chunks() -> void:
+func reload_chunks(defer_rebuild := false) -> void:
+    playtest_progress("reload_chunks_start")
     for chunk in chunks.values():
         var node := chunk as Node
         if node:
             node.queue_free()
     chunks.clear()
+    pending_chunk_loads.clear()
+    pending_chunk_prop_spawns.clear()
+    pending_chunk_terrain_refreshes.clear()
+    pending_chunk_collision_refreshes.clear()
     last_center_chunk = Vector2i(999999, 999999)
     if player:
-        update_chunks(true)
+        playtest_progress("reload_chunks_update")
+        update_chunks(not defer_rebuild)
+    playtest_progress("reload_chunks_done")
 
 func vector3_to_array(value: Vector3) -> Array:
     return [value.x, value.y, value.z]

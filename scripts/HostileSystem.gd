@@ -90,7 +90,10 @@ func update_hostiles(delta: float, day_factor: float, biome: String, sanctuary_e
         else:
             spawn_cooldown = 3.0 + randf() * 2.0
     elif night_factor > 0.34 and player_safety < 0.82 and spawn_cooldown <= 0.0 and enemies.size() < enemy_capacity:
-        spawn_near_player(biome)
+        if player_is_in_underground_air():
+            spawn_underground_near_player()
+        else:
+            spawn_near_player(biome)
         spawn_cooldown = 16.0 + randf() * 12.0
     update_enemy_budgeted(delta, night_factor)
 
@@ -272,6 +275,8 @@ func scripted_origin_near_anchor(enemy: Dictionary, origin: Vector3) -> bool:
     var anchor: Vector3 = enemy.get("circleAnchor", enemy.get("spawnOrigin", origin))
     var radius := maxf(CELL * 2.2, float(enemy.get("circleRadius", CELL * 3.8)))
     var threshold := maxf(CELL * 8.5, radius + CELL * 3.0)
+    if String(enemy.get("scriptedEncounter", "")) == "tutorial_final_rescue":
+        threshold = maxf(threshold, CELL * 26.0)
     return flat_distance_squared(origin, anchor) <= threshold * threshold
 
 func hostile_available_for_npc_combat(body: Node, origin: Vector3) -> bool:
@@ -353,12 +358,104 @@ func spawn_near_player(biome: String) -> StaticBody3D:
             variant = "seer"
         elif biome in ["snow", "tundra", "alpine", "taiga"]:
             variant = "frost"
+        var roam_direction := hostile_spawn_roam_direction(position, variant)
+        if roam_direction.length_squared() <= 0.001:
+            continue
         var body := spawn_enemy(position, variant)
         var enemy := enemy_for_body(body)
         if not enemy.is_empty():
             enemy["aware"] = false
             enemy["awarenessDelay"] = 1.2 + randf() * 2.2
             enemy["naturalSpawn"] = true
+            enemy["roamDirection"] = roam_direction
+            enemy["roamTimer"] = maxf(float(enemy.get("roamTimer", 0.0)), 1.0)
+        return body
+    return null
+
+func hostile_spawn_roam_direction(position: Vector3, variant: String) -> Vector3:
+    var directions: Array[Vector3] = [
+        Vector3(1.0, 0.0, 0.0),
+        Vector3(-1.0, 0.0, 0.0),
+        Vector3(0.0, 0.0, 1.0),
+        Vector3(0.0, 0.0, -1.0),
+        Vector3(1.0, 0.0, 1.0).normalized(),
+        Vector3(-1.0, 0.0, 1.0).normalized(),
+        Vector3(1.0, 0.0, -1.0).normalized(),
+        Vector3(-1.0, 0.0, -1.0).normalized()
+    ]
+    var start_index := 0
+    if main != null and main.has_method("hash_string"):
+        start_index = abs(int(main.call("hash_string", "%d:%d:%s" % [roundi(position.x * 10.0), roundi(position.z * 10.0), variant]))) % directions.size()
+    for offset in range(directions.size()):
+        var direction: Vector3 = directions[(start_index + offset) % directions.size()]
+        if hostile_spawn_can_roam(position, direction, variant):
+            return direction
+    return Vector3.ZERO
+
+func hostile_spawn_can_roam(position: Vector3, direction: Vector3, variant: String) -> bool:
+    if main == null or direction.length_squared() <= 0.001:
+        return false
+    var candidate := position + direction.normalized() * CELL * 1.15
+    var previous_ground: float = ground_y_near_position(position)
+    var next_ground: float = ground_y_near_position(candidate)
+    if next_ground < main.WATER_LEVEL + 0.35:
+        return false
+    var max_step := CELL * (1.38 if variant == "rift" else 0.92)
+    if absf(next_ground - previous_ground) > max_step:
+        return false
+    if hostile_obstacle_between(null, position, candidate, variant):
+        return false
+    if hostile_body_overlaps_block(candidate, variant):
+        return false
+    return true
+
+func player_is_in_underground_air() -> bool:
+    if player == null:
+        return false
+    return position_is_underground_air(player.global_position)
+
+func position_is_underground_air(position: Vector3) -> bool:
+    if main == null:
+        return false
+    var world_generation = main.get("world_generation_system")
+    if world_generation == null or not world_generation.has_method("sample_world"):
+        return false
+    var sample: Dictionary = world_generation.call("sample_world", position)
+    return String(sample.get("biome", "")) == "underground_air" and not bool(sample.get("solid", true)) and String(sample.get("fluid", "")) == ""
+
+func spawn_underground_near_player() -> StaticBody3D:
+    if main == null or player == null:
+        return null
+    var world_generation = main.get("world_generation_system")
+    if world_generation == null or not world_generation.has_method("walkable_surface_cell_near"):
+        return null
+    var player_cell := Vector3i(main.world_to_cell(player.global_position.x), main.world_to_cell(player.global_position.y), main.world_to_cell(player.global_position.z))
+    for attempt in range(24):
+        var angle := randf() * TAU
+        var distance_cells := randi_range(8, 22)
+        var probe := player_cell + Vector3i(roundi(cos(angle) * float(distance_cells)), randi_range(-4, 5), roundi(sin(angle) * float(distance_cells)))
+        var projection: Dictionary = world_generation.call("walkable_surface_cell_near", probe, 8, 16)
+        if projection.is_empty() or not bool(projection.get("found", false)) or not bool(projection.get("walkable", false)):
+            continue
+        var occupancy: Dictionary = projection.get("occupancy", {}) if projection.get("occupancy", {}) is Dictionary else {}
+        if String(occupancy.get("biome", "")) != "underground_air":
+            continue
+        if String(occupancy.get("fluid", "")) != "":
+            continue
+        var position: Vector3 = projection.get("position", player.global_position)
+        position.y += 0.72
+        if position.distance_to(player.global_position) < CELL * 7.0:
+            continue
+        if main.light_safety_at(position, false) > 0.18:
+            continue
+        var variant := "skitter" if randf() > 0.54 else ("seer" if randf() > 0.88 else "shadow")
+        var body := spawn_enemy(position, variant)
+        var enemy := enemy_for_body(body)
+        if not enemy.is_empty():
+            enemy["aware"] = false
+            enemy["awarenessDelay"] = 1.2 + randf() * 2.0
+            enemy["naturalSpawn"] = true
+            enemy["undergroundSpawn"] = true
         return body
     return null
 
@@ -523,7 +620,8 @@ func horizontal_move(body: Node3D, displacement: Vector3, variant: String, ignor
     var previous_ground: float = ground_y_near_position(previous)
     var candidate := previous + displacement
     var next_ground: float = ground_y_near_position(candidate)
-    if next_ground < main.WATER_LEVEL + 0.35:
+    var underground_move := position_is_underground_air(previous) or position_is_underground_air(candidate)
+    if not underground_move and next_ground < main.WATER_LEVEL + 0.35:
         return 0.0
     var max_step := CELL * (1.38 if variant == "rift" else 0.92)
     if absf(next_ground - previous_ground) > max_step:
@@ -572,7 +670,8 @@ func hostile_obstacle_between(body: Node3D, previous: Vector3, candidate: Vector
         var start: Vector3 = previous + offset + Vector3(0.0, height, 0.0)
         var end: Vector3 = candidate + offset + Vector3(0.0, height, 0.0)
         var query := PhysicsRayQueryParameters3D.create(start, end)
-        query.exclude = [body]
+        if body != null:
+            query.exclude = [body]
         query.collision_mask = 1 | 4
         query.collide_with_bodies = true
         query.collide_with_areas = false

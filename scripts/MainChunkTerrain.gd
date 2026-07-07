@@ -112,6 +112,102 @@ func add_world_light_rig(parent: Node3D, profile_id: String) -> Dictionary:
         "shadows": shadows_enabled
     })
 
+func terrain_block_light_level(block_type: String) -> int:
+    match block_type:
+        "campfire":
+            return 15
+        "sanctuaryBeacon":
+            return 15
+        "riftAnchor":
+            return 14
+        "wardLantern":
+            return 13
+        "torch":
+            return 12
+        _:
+            return 0
+
+func sync_block_light_to_terrain(cell: Vector3i, block_type: String) -> void:
+    var level := terrain_block_light_level(block_type)
+    if level <= 0:
+        return
+    if world_generation_system != null and world_generation_system.has_method("set_cell_light"):
+        world_generation_system.call("set_cell_light", cell, { "sky": 0, "block": level }, "block_light:%s" % block_type)
+
+func clear_block_light_from_terrain(cell: Vector3i, block_type: String, reason := "block_removed") -> void:
+    if terrain_block_light_level(block_type) <= 0:
+        return
+    if world_generation_system != null and world_generation_system.has_method("set_cell_light"):
+        world_generation_system.call("set_cell_light", cell, { "sky": 0, "block": 0 }, "%s:%s" % [reason, block_type])
+
+func block_solid_for_terrain_state(block_type: String) -> bool:
+    return not (block_type in ["cobblestonePath", "torch", "campfire"])
+
+func sync_block_state_to_terrain(cell: Vector3i, block_type: String, options: Dictionary = {}) -> void:
+    if world_generation_system == null or not world_generation_system.has_method("set_cell_state"):
+        return
+    var solid := block_solid_for_terrain_state(block_type)
+    var metadata := {
+        "source": "scene_block",
+        "blockType": block_type,
+        "renderedBySceneBlock": true,
+        "terrainMeshAffects": false,
+        "saveDelta": bool(options.get("player_placed", false)),
+        "generated": bool(options.get("generated", false)),
+        "playerPlaced": bool(options.get("player_placed", false))
+    }
+    var inherited_biome := surface_biome_at_cell(Vector3i(cell.x, 0, cell.z))
+    var inherited_light := { "sky": 0 if solid else 15, "block": terrain_block_light_level(block_type) }
+    if world_generation_system.has_method("get_cell_state"):
+        var previous: Dictionary = world_generation_system.call("get_cell_state", cell)
+        var previous_metadata: Dictionary = previous.get("metadata", {}) if previous.get("metadata", {}) is Dictionary else {}
+        inherited_biome = String(previous.get("biome", inherited_biome))
+        var previous_light: Dictionary = previous.get("light", {}) if previous.get("light", {}) is Dictionary else {}
+        inherited_light = {
+            "sky": int(previous_light.get("sky", inherited_light.get("sky", 0))),
+            "block": terrain_block_light_level(block_type)
+        }
+        if bool(previous.get("edited", false)) and String(previous_metadata.get("source", "")) != "scene_block":
+            metadata["replacedState"] = previous.duplicate(true)
+    world_generation_system.call("set_cell_state", cell, {
+        "blockId": block_type,
+        "material": block_type,
+        "biome": inherited_biome,
+        "solid": solid,
+        "density": CELL if solid else -CELL,
+        "fluid": "",
+        "light": inherited_light,
+        "metadata": metadata
+    }, "scene_block_created:%s" % block_type)
+
+func clear_block_state_from_terrain(cell: Vector3i, block_type: String, reason := "block_removed") -> void:
+    if world_generation_system == null:
+        return
+    if not world_generation_system.has_method("get_cell_state"):
+        return
+    var state: Dictionary = world_generation_system.call("get_cell_state", cell)
+    var metadata: Dictionary = state.get("metadata", {}) if state.get("metadata", {}) is Dictionary else {}
+    if String(metadata.get("source", "")) != "scene_block":
+        return
+    var replaced_value = metadata.get("replacedState", {})
+    var replaced_state: Dictionary = replaced_value if replaced_value is Dictionary else {}
+    if not replaced_state.is_empty() and world_generation_system.has_method("set_cell_state"):
+        world_generation_system.call("set_cell_state", cell, replaced_state, "%s_restore:%s" % [reason, block_type])
+        return
+    if world_generation_system.has_method("clear_cell_state"):
+        world_generation_system.call("clear_cell_state", cell, "%s:%s" % [reason, block_type])
+        return
+    if world_generation_system.has_method("set_cell_state"):
+        world_generation_system.call("set_cell_state", cell, {
+            "material": "air",
+            "biome": "underground_air",
+            "solid": false,
+            "density": -CELL,
+            "fluid": "",
+            "light": { "sky": 15, "block": 0 },
+            "metadata": { "source": "scene_block_removed", "terrainMeshAffects": false }
+        }, "%s:%s" % [reason, block_type])
+
 func apply_local_light_shadows(root: Node = null) -> void:
     if root != null:
         apply_local_light_shadows_recursive(root)
@@ -672,6 +768,8 @@ func create_block(cell: Vector3i, block_type: String, options: Dictionary = {}) 
 
     block_root.add_child(body)
     blocks[cell] = body
+    sync_block_state_to_terrain(cell, block_type, options)
+    sync_block_light_to_terrain(cell, block_type)
     invalidate_navigation_marker_cache()
     if bool(options.get("player_placed", false)):
         mark_world_dirty("block_created")
@@ -801,6 +899,9 @@ func collapse_structure_component(component: Array) -> int:
         var block_cell: Vector3i = block.get_meta("cell")
         if npc_system and npc_system.has_method("notify_navigation_block_removed"):
             npc_system.notify_navigation_block_removed(block_cell, block_type, block)
+        if world_generation_system != null and world_generation_system.has_method("set_cell_light"):
+            world_generation_system.call("set_cell_light", block_cell, { "sky": 0, "block": 0 }, "block_collapsed:%s" % block_type)
+        clear_block_state_from_terrain(block_cell, block_type, "block_collapsed")
         blocks.erase(block_cell)
         block.queue_free()
         collapsed += 1

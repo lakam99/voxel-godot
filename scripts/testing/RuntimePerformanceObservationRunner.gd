@@ -4,9 +4,11 @@ const MAIN_SCENE := preload("res://scenes/Main.tscn")
 const DEFAULT_SCENARIOS := ["DayWork", "DuskReturnHome", "MidnightTown", "CrowdedDoorTraffic", "SprintTraversal", "UndergroundTraversal", "AutosaveEnabled", "AutosaveDisabled"]
 const TARGET_NPC_COUNT := 32
 const SAMPLE_EVERY_FRAMES := 6
-const UNDERGROUND_SEARCH_RADIUS := 16
+const UNDERGROUND_SEARCH_RADIUS := 96
 const SPRINT_TRAVERSAL_DIRECTION := Vector3(1.0, 0.0, 0.0)
 const SPRINT_TRAVERSAL_CELL_DIRECTION := Vector2i(1, 0)
+const SPRINT_TRAVERSAL_SPEED_MPS := 15.5
+const SPRINT_TRAVERSAL_MIN_MEASURED_DISTANCE := 80.0
 
 var scenario := "All"
 var seed := "atlas-1492"
@@ -15,6 +17,7 @@ var progress_path := ""
 var run_token := ""
 var duration_seconds := 60.0
 var watchdog_seconds := 300.0
+var warmup_frames_override := -1
 var elapsed := 0.0
 var finished := false
 var main: Node = null
@@ -22,6 +25,7 @@ var measured_player_start := Vector3.INF
 var measured_player_end := Vector3.INF
 var traversal_direction := SPRINT_TRAVERSAL_DIRECTION
 var traversal_cell_direction := SPRINT_TRAVERSAL_CELL_DIRECTION
+var sprint_traversal_start_world := Vector3.INF
 var underground_traversal_id := ""
 var underground_traversal_cell := Vector3i.ZERO
 var underground_traversal_start_world := Vector3.INF
@@ -40,6 +44,7 @@ func _process(delta: float) -> void:
         finish(1)
 
 func configure_from_environment() -> void:
+    OS.set_environment("VOXEL_RUNTIME_PERF_FAST_BOOT", "1")
     scenario = OS.get_environment("VOXEL_RUNTIME_PERF_SCENARIO")
     if scenario == "":
         scenario = "All"
@@ -54,6 +59,9 @@ func configure_from_environment() -> void:
     var duration_value := OS.get_environment("VOXEL_RUNTIME_PERF_DURATION_SECONDS")
     if duration_value != "":
         duration_seconds = maxf(1.0, float(duration_value))
+    var warmup_value := OS.get_environment("VOXEL_RUNTIME_PERF_WARMUP_FRAMES").strip_edges()
+    if warmup_value != "":
+        warmup_frames_override = max(0, int(warmup_value))
     var watchdog_value := OS.get_environment("VOXEL_RUNTIME_PERF_WATCHDOG_SECONDS")
     var requested_watchdog := watchdog_seconds
     if watchdog_value != "":
@@ -100,31 +108,52 @@ func scenarios_to_run() -> Array:
     return [scenario]
 
 func run_scenario(scenario_name: String) -> Dictionary:
+    write_progress("scenario:%s:instantiate" % scenario_name)
     main = MAIN_SCENE.instantiate()
+    write_progress("scenario:%s:add_child" % scenario_name)
     add_child(main)
+    write_progress("scenario:%s:first_process_frame" % scenario_name)
     await get_tree().process_frame
+    write_progress("scenario:%s:first_physics_frame" % scenario_name)
     await get_tree().physics_frame
+    write_progress("scenario:%s:configure" % scenario_name)
     configure_main_for_scenario(scenario_name)
     var warmup_count := 90
     if scenario_name == "CrowdedDoorTraffic":
         warmup_count = 240
     elif scenario_name == "SprintTraversal":
         warmup_count = 120
+    elif scenario_name == "TerrainMeshingWarmup":
+        warmup_count = 30
+    if warmup_frames_override >= 0:
+        warmup_count = warmup_frames_override
+    write_progress("scenario:%s:warmup:%d" % [scenario_name, warmup_count])
     await warmup_frames(warmup_count)
+    write_progress("scenario:%s:prime_navigation" % scenario_name)
     prime_navigation_snapshot()
+    write_progress("scenario:%s:measure" % scenario_name)
     reset_performance_monitor()
+    begin_measurement_for_scenario(scenario_name)
     measured_player_start = measured_player_position()
     var samples := []
     var frame_count := maxi(1, roundi(duration_seconds * 60.0))
     for frame in range(frame_count):
+        if frame < 8 or frame % 30 == 0:
+            write_progress("scenario:%s:measure_frame:%d:update" % [scenario_name, frame])
         update_scenario_frame(scenario_name, frame)
+        if frame < 8 or frame % 30 == 0:
+            write_progress("scenario:%s:measure_frame:%d:await" % [scenario_name, frame])
         await get_tree().process_frame
+        if frame < 8 or frame % 30 == 0:
+            write_progress("scenario:%s:measure_frame:%d:sample" % [scenario_name, frame])
         if frame % SAMPLE_EVERY_FRAMES == 0 and main != null and main.has_method("debug_performance_state"):
             samples.append(main.debug_performance_state())
     measured_player_end = measured_player_position()
     var metrics := summarize_samples(samples)
     append_scenario_metrics(metrics, scenario_name)
     var failures: Array[String] = performance_failures(metrics)
+    if scenario_name == "SprintTraversal" and float(metrics.get("playerTravelDistance", 0.0)) < SPRINT_TRAVERSAL_MIN_MEASURED_DISTANCE:
+        failures.append("sprint traversal did not move far enough to exercise streaming")
     var passed := not samples.is_empty() and failures.is_empty()
     var details := "samples=%d p99=%.2f max=%.2f chunkMax=%.2f npcMax=%.2f routeMax=%.2f navMax=%.2f jobMax=%.2f saveMax=%.2f navmeshInstallP95=%dus navmeshQueryP95=%dus" % [
         samples.size(),
@@ -181,6 +210,7 @@ func configure_main_for_scenario(scenario_name: String) -> void:
         main.get("player").set("automated_move", Vector3.ZERO)
     traversal_direction = SPRINT_TRAVERSAL_DIRECTION
     traversal_cell_direction = SPRINT_TRAVERSAL_CELL_DIRECTION
+    sprint_traversal_start_world = Vector3.INF
     underground_traversal_id = ""
     underground_traversal_cell = Vector3i.ZERO
     underground_traversal_start_world = Vector3.INF
@@ -191,6 +221,8 @@ func configure_main_for_scenario(scenario_name: String) -> void:
         setup_sprint_traversal()
     elif scenario_name == "UndergroundTraversal":
         setup_underground_traversal()
+    elif scenario_name == "TerrainMeshingWarmup":
+        setup_terrain_meshing_warmup()
 
 func setup_sprint_traversal() -> void:
     if main == null:
@@ -200,13 +232,14 @@ func setup_sprint_traversal() -> void:
         return
     var start_cell := sprint_traversal_start_cell()
     var start_y := float(main.call("surface_y_at_cell", Vector3i(start_cell.x, 0, start_cell.y))) + 0.08
-    player_body.global_position = Vector3(float(start_cell.x) * 1.35, start_y, float(start_cell.y) * 1.35)
+    sprint_traversal_start_world = Vector3(float(start_cell.x) * 1.35, start_y, float(start_cell.y) * 1.35)
+    player_body.global_position = sprint_traversal_start_world
     player_body.velocity = Vector3.ZERO
     player_body.set("automated_input", true)
     player_body.set("automated_sprint", true)
     player_body.set("automated_move", traversal_direction)
     if main.has_method("update_chunks"):
-        main.call("update_chunks", true)
+        main.call("update_chunks", false)
 
 func setup_underground_traversal() -> void:
     if main == null:
@@ -216,7 +249,8 @@ func setup_underground_traversal() -> void:
     if player_body == null or world_generation == null or not world_generation.has_method("find_underground_air_sample"):
         setup_sprint_traversal()
         return
-    main.set("force_underground_volume_debug", true)
+    main.set("force_underground_volume_debug", false)
+    main.set("force_underground_volume_fine_focus", false)
     var found: Dictionary = world_generation.call("find_underground_air_sample", UNDERGROUND_SEARCH_RADIUS, 4, 30)
     if found.is_empty():
         setup_sprint_traversal()
@@ -232,10 +266,61 @@ func setup_underground_traversal() -> void:
     player_body.set("automated_input", true)
     player_body.set("automated_sprint", true)
     player_body.set("automated_move", traversal_direction)
-    if main.has_method("rebuild_chunks_around_cell"):
-        main.call("rebuild_chunks_around_cell", Vector2i(underground_traversal_cell.x, underground_traversal_cell.z))
     if main.has_method("update_chunks"):
-        main.call("update_chunks", true)
+        main.call("update_chunks", false)
+
+func setup_terrain_meshing_warmup() -> void:
+    if main == null:
+        return
+    var player_body := main.get("player") as CharacterBody3D
+    var world_generation = main.get("world_generation_system")
+    if player_body == null or world_generation == null or not world_generation.has_method("find_underground_air_sample"):
+        return
+    main.set("force_underground_volume_debug", false)
+    main.set("force_underground_volume_fine_focus", false)
+    var found: Dictionary = world_generation.call("find_underground_air_sample", UNDERGROUND_SEARCH_RADIUS, 4, 30)
+    if found.is_empty():
+        return
+    underground_traversal_id = String(found.get("id", ""))
+    underground_traversal_cell = found.get("cell", Vector3i.ZERO)
+    var sample_position: Vector3 = found.get("position", Vector3.ZERO)
+    underground_traversal_start_world = sample_position + Vector3(0.0, 1.35 * 0.65, 0.0)
+    player_body.global_position = underground_traversal_start_world
+    player_body.velocity = Vector3.ZERO
+    player_body.set("automated_input", true)
+    player_body.set("automated_sprint", false)
+    player_body.set("automated_move", Vector3.ZERO)
+    if main.has_method("update_chunks"):
+        main.call("update_chunks", false)
+
+func begin_measurement_for_scenario(scenario_name: String) -> void:
+    if scenario_name == "TerrainMeshingWarmup":
+        queue_terrain_meshing_warmup_jobs()
+
+func queue_terrain_meshing_warmup_jobs() -> int:
+    if main == null or not main.has_method("world_to_chunk") or not main.has_method("request_chunk_terrain_mesh_assets"):
+        return 0
+    var player_body := main.get("player") as Node3D
+    if player_body == null:
+        return 0
+    var chunks_value = main.get("chunks")
+    if not (chunks_value is Dictionary):
+        return 0
+    var chunks: Dictionary = chunks_value
+    var center: Vector2i = main.call("world_to_chunk", player_body.global_position.x, player_body.global_position.z)
+    var queued := 0
+    for dz in range(-1, 2):
+        for dx in range(-1, 2):
+            var key := center + Vector2i(dx, dz)
+            if not chunks.has(key):
+                continue
+            if main.has_method("chunk_should_queue_terrain_meshing") and not bool(main.call("chunk_should_queue_terrain_meshing", key.x, key.y)):
+                continue
+            if main.has_method("invalidate_chunk_asset_cache"):
+                main.call("invalidate_chunk_asset_cache", key)
+            if bool(main.call("request_chunk_terrain_mesh_assets", key, true, 20)):
+                queued += 1
+    return queued
 
 func sprint_traversal_start_cell() -> Vector2i:
     var player_body := main.get("player") as Node3D
@@ -271,13 +356,28 @@ func sprint_traversal_lane_ok(start_cell: Vector2i) -> bool:
     return true
 
 func update_scenario_frame(scenario_name: String, frame: int) -> void:
-    if not (scenario_name in ["SprintTraversal", "UndergroundTraversal"]) or main == null:
+    if not (scenario_name in ["SprintTraversal", "UndergroundTraversal", "TerrainMeshingWarmup"]) or main == null:
         return
     var player_body := main.get("player") as CharacterBody3D
     if player_body == null:
         return
+    if scenario_name == "TerrainMeshingWarmup":
+        player_body.velocity = Vector3.ZERO
+        player_body.set("automated_input", true)
+        player_body.set("automated_sprint", false)
+        player_body.set("automated_move", Vector3.ZERO)
+        return
+    if scenario_name == "SprintTraversal" and sprint_traversal_start_world != Vector3.INF:
+        var sprint_distance := SPRINT_TRAVERSAL_SPEED_MPS * float(frame) / 60.0
+        var sprint_position := sprint_traversal_start_world + traversal_direction * sprint_distance
+        var sprint_cell_x := int(main.call("world_to_cell", sprint_position.x))
+        var sprint_cell_z := int(main.call("world_to_cell", sprint_position.z))
+        sprint_position.y = float(main.call("surface_y_at_cell", Vector3i(sprint_cell_x, 0, sprint_cell_z))) + 0.08
+        player_body.global_position = sprint_position
+        player_body.velocity = traversal_direction * SPRINT_TRAVERSAL_SPEED_MPS
+        player_body.set("terrain_grounded", true)
     if scenario_name == "UndergroundTraversal" and underground_traversal_start_world != Vector3.INF:
-        var distance := 15.5 * float(frame) / 60.0
+        var distance := SPRINT_TRAVERSAL_SPEED_MPS * float(frame) / 60.0
         var position := underground_traversal_start_world + traversal_direction * distance
         player_body.global_position = position
         player_body.velocity = Vector3.ZERO
@@ -295,7 +395,7 @@ func measured_player_position() -> Vector3:
     return player_body.global_position
 
 func append_scenario_metrics(metrics: Dictionary, scenario_name: String) -> void:
-    if not (scenario_name in ["SprintTraversal", "UndergroundTraversal"]):
+    if not (scenario_name in ["SprintTraversal", "UndergroundTraversal", "TerrainMeshingWarmup"]):
         return
     if measured_player_start == Vector3.INF or measured_player_end == Vector3.INF:
         metrics["playerTravelDistance"] = 0.0
@@ -306,6 +406,9 @@ func append_scenario_metrics(metrics: Dictionary, scenario_name: String) -> void
     metrics["playerStart"] = [measured_player_start.x, measured_player_start.y, measured_player_start.z]
     metrics["playerEnd"] = [measured_player_end.x, measured_player_end.y, measured_player_end.z]
     if scenario_name == "UndergroundTraversal":
+        metrics["undergroundSampleId"] = underground_traversal_id
+        metrics["undergroundCell"] = [underground_traversal_cell.x, underground_traversal_cell.y, underground_traversal_cell.z]
+    elif scenario_name == "TerrainMeshingWarmup":
         metrics["undergroundSampleId"] = underground_traversal_id
         metrics["undergroundCell"] = [underground_traversal_cell.x, underground_traversal_cell.y, underground_traversal_cell.z]
 
@@ -424,6 +527,29 @@ func summarize_samples(samples: Array) -> Dictionary:
     var chunk_asset_cache_misses := 0
     var chunk_volume_columns := 0
     var chunk_volume_cubes := 0
+    var chunk_volume_faces := 0
+    var chunk_fluid_faces := 0
+    var chunk_fluid_mesh_deferred_during_collision_refresh := 0
+    var terrain_meshing_fallback_chunks := 0
+    var terrain_meshing_native_chunks := 0
+    var terrain_meshing_direct_build_deferred_without_native := 0
+    var terrain_fluid_direct_build_deferred_without_native := 0
+    var terrain_meshing_jobs_queued := 0
+    var terrain_meshing_jobs_processed := 0
+    var terrain_meshing_jobs_deferred_without_native := 0
+    var terrain_meshing_completed_applied := 0
+    var terrain_meshing_provisional_chunks := 0
+    var terrain_meshing_job_queue_depth := 0
+    var terrain_meshing_completed_queue_depth := 0
+    var terrain_meshing_payload_cells_prepared := 0
+    var terrain_volume_sections_prepared_for_mesh := 0
+    var terrain_volume_exposure_scan_deferred_without_native := 0
+    var surface_prop_volume_projection_queries := 0
+    var underground_prop_cells_scanned := 0
+    var underground_prop_candidates_found := 0
+    var underground_prop_volume_service_scans := 0
+    var max_terrain_meshing_payload_prep := 0.0
+    var max_terrain_meshing_job_elapsed := 0.0
     var max_runtime_graph := 0.0
     var max_runtime_graph_snapshot := 0.0
     var max_runtime_graph_targets := 0.0
@@ -496,6 +622,29 @@ func summarize_samples(samples: Array) -> Dictionary:
         chunk_asset_cache_misses = max(chunk_asset_cache_misses, int(counters.get("chunk_asset_cache_misses", chunk_asset_cache_misses)))
         chunk_volume_columns = max(chunk_volume_columns, int(counters.get("chunk_volume_columns", chunk_volume_columns)))
         chunk_volume_cubes = max(chunk_volume_cubes, int(counters.get("chunk_volume_cubes", chunk_volume_cubes)))
+        chunk_volume_faces = max(chunk_volume_faces, int(counters.get("chunk_volume_faces", chunk_volume_faces)))
+        chunk_fluid_faces = max(chunk_fluid_faces, int(counters.get("chunk_fluid_faces", chunk_fluid_faces)))
+        chunk_fluid_mesh_deferred_during_collision_refresh = max(chunk_fluid_mesh_deferred_during_collision_refresh, int(counters.get("chunk_fluid_mesh_deferred_during_collision_refresh", chunk_fluid_mesh_deferred_during_collision_refresh)))
+        terrain_meshing_fallback_chunks = max(terrain_meshing_fallback_chunks, int(counters.get("terrain_meshing_gdscript_fallback_chunks", terrain_meshing_fallback_chunks)))
+        terrain_meshing_native_chunks = max(terrain_meshing_native_chunks, int(counters.get("terrain_meshing_native_chunks", terrain_meshing_native_chunks)))
+        terrain_meshing_direct_build_deferred_without_native = max(terrain_meshing_direct_build_deferred_without_native, int(counters.get("terrain_meshing_direct_build_deferred_without_native", terrain_meshing_direct_build_deferred_without_native)))
+        terrain_fluid_direct_build_deferred_without_native = max(terrain_fluid_direct_build_deferred_without_native, int(counters.get("terrain_fluid_direct_build_deferred_without_native", terrain_fluid_direct_build_deferred_without_native)))
+        terrain_meshing_jobs_queued = max(terrain_meshing_jobs_queued, int(counters.get("terrain_meshing_jobs_queued", terrain_meshing_jobs_queued)))
+        terrain_meshing_jobs_processed = max(terrain_meshing_jobs_processed, int(counters.get("terrain_meshing_jobs_processed", terrain_meshing_jobs_processed)))
+        terrain_meshing_jobs_deferred_without_native = max(terrain_meshing_jobs_deferred_without_native, int(counters.get("terrain_meshing_jobs_deferred_without_native", terrain_meshing_jobs_deferred_without_native)))
+        terrain_meshing_completed_applied = max(terrain_meshing_completed_applied, int(counters.get("terrain_meshing_completed_applied", terrain_meshing_completed_applied)))
+        terrain_meshing_provisional_chunks = max(terrain_meshing_provisional_chunks, int(counters.get("terrain_meshing_provisional_chunks", terrain_meshing_provisional_chunks)))
+        terrain_meshing_job_queue_depth = max(terrain_meshing_job_queue_depth, int(counters.get("terrain_meshing_job_queue_depth", terrain_meshing_job_queue_depth)))
+        terrain_meshing_completed_queue_depth = max(terrain_meshing_completed_queue_depth, int(counters.get("terrain_meshing_completed_queue_depth", terrain_meshing_completed_queue_depth)))
+        terrain_meshing_payload_cells_prepared = max(terrain_meshing_payload_cells_prepared, int(counters.get("terrain_meshing_payload_cells_prepared", terrain_meshing_payload_cells_prepared)))
+        terrain_volume_sections_prepared_for_mesh = max(terrain_volume_sections_prepared_for_mesh, int(counters.get("terrain_volume_sections_prepared_for_mesh", terrain_volume_sections_prepared_for_mesh)))
+        terrain_volume_exposure_scan_deferred_without_native = max(terrain_volume_exposure_scan_deferred_without_native, int(counters.get("terrain_volume_exposure_scan_deferred_without_native", terrain_volume_exposure_scan_deferred_without_native)))
+        surface_prop_volume_projection_queries = max(surface_prop_volume_projection_queries, int(counters.get("surface_prop_volume_projection_queries", surface_prop_volume_projection_queries)))
+        underground_prop_cells_scanned = max(underground_prop_cells_scanned, int(counters.get("underground_prop_cells_scanned", underground_prop_cells_scanned)))
+        underground_prop_candidates_found = max(underground_prop_candidates_found, int(counters.get("underground_prop_candidates_found", underground_prop_candidates_found)))
+        underground_prop_volume_service_scans = max(underground_prop_volume_service_scans, int(counters.get("underground_prop_volume_service_scans", underground_prop_volume_service_scans)))
+        max_terrain_meshing_payload_prep = maxf(max_terrain_meshing_payload_prep, float(section_max.get("terrain_meshing_payload_prep", 0.0)))
+        max_terrain_meshing_job_elapsed = maxf(max_terrain_meshing_job_elapsed, float(section_max.get("terrain_meshing_job_elapsed", 0.0)))
         route_jobs_completed = max(route_jobs_completed, int(counters.get("route_jobs_completed", route_jobs_completed)))
         route_jobs_pending = max(route_jobs_pending, int(counters.get("route_jobs_pending", route_jobs_pending)))
         job_scan_nodes = max(job_scan_nodes, int(counters.get("job_scan_nodes", job_scan_nodes)))
@@ -537,6 +686,29 @@ func summarize_samples(samples: Array) -> Dictionary:
         "chunkAssetCacheMisses": chunk_asset_cache_misses,
         "chunkVolumeColumns": chunk_volume_columns,
         "chunkVolumeCubes": chunk_volume_cubes,
+        "chunkVolumeFaces": chunk_volume_faces,
+        "chunkFluidFaces": chunk_fluid_faces,
+        "chunkFluidMeshDeferredDuringCollisionRefresh": chunk_fluid_mesh_deferred_during_collision_refresh,
+        "terrainMeshingFallbackChunks": terrain_meshing_fallback_chunks,
+        "terrainMeshingNativeChunks": terrain_meshing_native_chunks,
+        "terrainMeshingDirectBuildDeferredWithoutNative": terrain_meshing_direct_build_deferred_without_native,
+        "terrainFluidDirectBuildDeferredWithoutNative": terrain_fluid_direct_build_deferred_without_native,
+        "terrainMeshingJobsQueued": terrain_meshing_jobs_queued,
+        "terrainMeshingJobsProcessed": terrain_meshing_jobs_processed,
+        "terrainMeshingJobsDeferredWithoutNative": terrain_meshing_jobs_deferred_without_native,
+        "terrainMeshingCompletedApplied": terrain_meshing_completed_applied,
+        "terrainMeshingProvisionalChunks": terrain_meshing_provisional_chunks,
+        "terrainMeshingJobQueueDepth": terrain_meshing_job_queue_depth,
+        "terrainMeshingCompletedQueueDepth": terrain_meshing_completed_queue_depth,
+        "terrainMeshingPayloadCellsPrepared": terrain_meshing_payload_cells_prepared,
+        "terrainVolumeSectionsPreparedForMesh": terrain_volume_sections_prepared_for_mesh,
+        "terrainVolumeExposureScanDeferredWithoutNative": terrain_volume_exposure_scan_deferred_without_native,
+        "surfacePropVolumeProjectionQueries": surface_prop_volume_projection_queries,
+        "undergroundPropCellsScanned": underground_prop_cells_scanned,
+        "undergroundPropCandidatesFound": underground_prop_candidates_found,
+        "undergroundPropVolumeServiceScans": underground_prop_volume_service_scans,
+        "maxTerrainMeshingPayloadPrepMs": max_terrain_meshing_payload_prep,
+        "maxTerrainMeshingJobElapsedMs": max_terrain_meshing_job_elapsed,
         "maxRuntimeGraphBuildMs": max_runtime_graph,
         "maxRuntimeGraphSnapshotMs": max_runtime_graph_snapshot,
         "maxRuntimeGraphTargetsMs": max_runtime_graph_targets,

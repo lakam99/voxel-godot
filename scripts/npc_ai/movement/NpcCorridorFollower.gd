@@ -226,12 +226,31 @@ func speed_scale_for_corridor(previous: Vector3, path_waypoints: Array, entry: D
 				var angle := rad_to_deg(acos(clampf(a.normalized().dot(b.normalized()), -1.0, 1.0)))
 				if angle >= NpcConstantsScript.CORRIDOR_TURN_SLOW_ANGLE_DEGREES:
 					scale = minf(scale, NpcConstantsScript.CORRIDOR_TURN_SLOW_FACTOR)
-	var actions: Dictionary = entry.get("routeActions", {})
-	if not actions.is_empty() and not path_waypoints.is_empty():
-		var first_distance := flat_distance(previous, path_waypoints[0])
-		if first_distance <= NpcConstantsScript.CORRIDOR_ACTION_SLOW_DISTANCE:
-			scale = minf(scale, 0.64)
+	if near_upcoming_route_action(entry, previous):
+		scale = minf(scale, 0.64)
 	return scale
+
+func near_upcoming_route_action(entry: Dictionary, previous: Vector3) -> bool:
+	var actions: Dictionary = entry.get("routeActions", {})
+	if actions.is_empty():
+		return false
+	var route_cells: Array = entry.get("routeCells", [])
+	for action_value in actions.values():
+		if not (action_value is Dictionary):
+			continue
+		var action: Dictionary = action_value
+		if String(action.get("kind", "")) != "door":
+			continue
+		var action_cell = action.get("cell")
+		if action_cell is Vector2i:
+			var action_index := route_cells.find(action_cell)
+			if action_index >= 0 and action_index <= 1:
+				return true
+		for position_key in ["entryPosition", "exitPosition"]:
+			var position_value = action.get(position_key)
+			if position_value is Vector3 and flat_distance(previous, position_value) <= NpcConstantsScript.CORRIDOR_ACTION_SLOW_DISTANCE:
+				return true
+	return false
 
 func clamp_candidate_to_corridor(previous: Vector3, candidate: Vector3, lookahead: Vector3, portal_mode := false) -> Vector3:
 	var axis := lookahead - previous

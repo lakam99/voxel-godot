@@ -69,7 +69,8 @@ func request_portal_crossing(portal, actor_id: String, direction: String, reques
 	var current_position: Vector3 = request.get("currentPosition", Vector3.ZERO)
 	var data := request.duplicate(true) if request is Dictionary else {}
 	data["ownerId"] = actor_id
-	data["groupId"] = "portal:%s:%s:%d:%d" % [portal_id, actor_id, int(data.get("ownerGeneration", 0)), int(data.get("actionGeneration", 0))]
+	var requested_group_id := String(data.get("groupId", ""))
+	data["groupId"] = requested_group_id if requested_group_id != "" else "portal:%s:%s:%d:%d" % [portal_id, actor_id, int(data.get("ownerGeneration", 0)), int(data.get("actionGeneration", 0))]
 	data["kind"] = "portal"
 	data["duration"] = float(data.get("duration", NpcConstantsScript.TRAFFIC_PORTAL_CROSSING_SECONDS))
 	data["priorityClass"] = String(data.get("priorityClass", "idle"))
@@ -281,6 +282,27 @@ func queued_owners_for_resource_prefix(prefix: String) -> Array:
 	for resource_id in queues_by_resource.keys():
 		if not String(resource_id).begins_with(prefix):
 			continue
+		var queue: Dictionary = queues_by_resource.get(resource_id, {})
+		for owner_id in queue.keys():
+			var id := String(owner_id)
+			if id != "" and not owners.has(id):
+				owners.append(id)
+	owners.sort()
+	return owners
+
+func queued_owners_for_portal(portal_id: String) -> Array:
+	if portal_id == "":
+		return []
+	var base := "portal:%s" % portal_id
+	var owners := []
+	var resource_ids := [
+		"%s:threshold" % base,
+		"%s:edge:x+" % base,
+		"%s:edge:x-" % base,
+		"%s:edge:z+" % base,
+		"%s:edge:z-" % base
+	]
+	for resource_id in resource_ids:
 		var queue: Dictionary = queues_by_resource.get(resource_id, {})
 		for owner_id in queue.keys():
 			var id := String(owner_id)

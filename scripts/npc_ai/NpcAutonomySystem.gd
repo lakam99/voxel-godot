@@ -30,6 +30,9 @@ const NpcRecoveryPolicyScript := preload("res://scripts/npc_ai/behavior/NpcRecov
 const NpcPlanExecutorScript := preload("res://scripts/npc_ai/behavior/NpcPlanExecutor.gd")
 const NpcSimulationLodServiceScript := preload("res://scripts/npc_ai/lifecycle/NpcSimulationLodService.gd")
 
+const NAV_CHANGE_EVENTS_PER_PHYSICS_TICK := 1
+const NAV_CHANGE_OBJECT_IDS_PER_PHYSICS_TICK := 2
+
 var npc_system: Node
 var main: Node
 var architecture_version := NpcConstantsScript.ARCHITECTURE_VERSION
@@ -111,7 +114,7 @@ func setup(system_node: Node, main_node: Node) -> void:
 	})
 
 func _physics_process(_delta: float) -> void:
-	process_navigation_changes()
+	process_navigation_changes(NAV_CHANGE_EVENTS_PER_PHYSICS_TICK, NAV_CHANGE_OBJECT_IDS_PER_PHYSICS_TICK)
 	build_navigation_tiles(NpcConstantsScript.NAV_BUILD_MAX_JOBS_PER_TICK)
 	process_navmesh_dirty_regions(1)
 
@@ -435,6 +438,31 @@ func notify_terrain_edited(cell: Vector2i, old_height: float, new_height: float)
 	change_bus.emit_change(NpcEnumsScript.CHANGE_KIND_TERRAIN_EDIT, object_id, bounds, NavigationChangeBusScript.tile_keys_for_bounds(bounds))
 	telemetry.increment(&"change_terrain_edit")
 
+func notify_terrain_cells_edited(cells: Array) -> int:
+	var bounds_by_tile := {}
+	var cell_size := NpcConstantsScript.CELL_SIZE
+	for value in cells:
+		if not (value is Vector2i):
+			continue
+		var cell: Vector2i = value
+		var tile_key := NavigationChangeBusScript.tile_key_for_cell(cell)
+		var origin := Vector3(float(cell.x) * cell_size - cell_size * 0.5, -128.0, float(cell.y) * cell_size - cell_size * 0.5)
+		var bounds := AABB(origin, Vector3(cell_size, 256.0, cell_size))
+		if bounds_by_tile.has(tile_key) and bounds_by_tile[tile_key] is AABB:
+			bounds_by_tile[tile_key] = (bounds_by_tile[tile_key] as AABB).merge(bounds)
+		else:
+			bounds_by_tile[tile_key] = bounds
+	for tile_key_value in bounds_by_tile.keys():
+		var tile_key := String(tile_key_value)
+		change_bus.emit_change(
+			NpcEnumsScript.CHANGE_KIND_TERRAIN_EDIT,
+			"terrain_tile:%s" % tile_key,
+			bounds_by_tile[tile_key],
+			[tile_key]
+		)
+		telemetry.increment(&"change_terrain_edit")
+	return bounds_by_tile.size()
+
 func notify_prop_created(prop_id: String, prop: Node = null) -> void:
 	if smart_objects != null and prop != null:
 		smart_objects.register_resource(prop, { "propId": prop_id })
@@ -610,6 +638,13 @@ func request_npc_traffic_step(entry: Dictionary, previous: Vector3, candidate: V
 	var to_cell: Vector2i = world.world_cell(candidate)
 	if from_cell == to_cell:
 		return { "ok": true, "status": "granted", "reason": "same_cell" }
+	if not movement_step_requires_traffic_reservation(entry, from_cell, to_cell, world, intent):
+		var active_group := String(entry.get("activeTrafficStepGroup", ""))
+		if active_group != "" and traffic_reservations.has_method("release_group"):
+			traffic_reservations.release_group(active_group, "open_space_step")
+		entry.erase("activeTrafficStepGroup")
+		entry.erase("trafficWaitReason")
+		return { "ok": true, "status": "granted", "reason": "open_space_step" }
 	var generation := int(entry.get("trafficOwnerGeneration", 0))
 	if generation <= 0:
 		generation = int(entry.get("routeGeneration", entry.get("cancellation_generation", 1)))
@@ -635,6 +670,25 @@ func request_npc_traffic_step(entry: Dictionary, previous: Vector3, candidate: V
 			telemetry.increment(&"reservation_denials")
 	telemetry.observe_traffic_stats(traffic_reservations.stats())
 	return result
+
+func movement_step_requires_traffic_reservation(entry: Dictionary, from_cell: Vector2i, to_cell: Vector2i, world, intent := {}) -> bool:
+	if bool(intent.get("requiresTrafficReservation", false)):
+		return true
+	if String(entry.get("activeDoorPortalId", "")) != "" or String(entry.get("activeDoorTrafficGroupId", "")) != "":
+		return true
+	var route_kind := String(intent.get("kind", ""))
+	if route_kind in ["door", "portal"]:
+		return true
+	if world == null or not world.has_method("door_at"):
+		return false
+	var snapshot: Dictionary = {}
+	if world.has_method("cached_validation_snapshot"):
+		snapshot = world.cached_validation_snapshot(entry, bool(intent.get("allowOutside", false)), bool(intent.get("movingHome", false)))
+	elif world.has_method("build_snapshot"):
+		snapshot = world.build_snapshot(entry, bool(intent.get("allowOutside", false)), bool(intent.get("movingHome", false)))
+	if snapshot.is_empty():
+		return false
+	return world.door_at(snapshot, from_cell) != null or world.door_at(snapshot, to_cell) != null
 
 func release_npc_traffic_reservations(entry_or_id, reason := "released") -> int:
 	if traffic_reservations == null:
@@ -704,13 +758,34 @@ func register_semantic_region(kind: StringName, region_id: String, bounds: AABB,
 	})
 	return revision
 
-func process_navigation_changes() -> Array:
-	var events: Array = navigation_world.process_change_bus() if navigation_world != null else []
+func process_navigation_changes(max_events := -1, max_object_ids := -1) -> Array:
+	var monitor = main.get("runtime_perf_monitor") if main != null else null
+	var bus_start: int = monitor.begin_section("nav_change_bus_process") if monitor != null else Time.get_ticks_usec()
+	var events: Array = navigation_world.process_change_bus(max_events, max_object_ids) if navigation_world != null else []
+	if monitor != null:
+		var object_id_count := 0
+		for event_value in events:
+			if event_value is Dictionary and (event_value as Dictionary).get("objectIds", []) is Array:
+				object_id_count += ((event_value as Dictionary).get("objectIds", []) as Array).size()
+		monitor.increment_counter("nav_change_events_processed", events.size())
+		monitor.increment_counter("nav_change_object_ids_processed", object_id_count)
+		monitor.end_section("nav_change_bus_process", bus_start)
 	if navmesh_world != null and navigation_backend_config != null and navigation_backend_config.use_navmesh() and not events.is_empty():
+		var navmesh_start: int = monitor.begin_section("navmesh_event_apply") if monitor != null else Time.get_ticks_usec()
 		navmesh_world.apply_navigation_events(events)
+		if monitor != null:
+			monitor.end_section("navmesh_event_apply", navmesh_start)
 	if npc_system != null and npc_system.has_method("process_navigation_route_changes") and not events.is_empty():
+		var route_start: int = monitor.begin_section("route_event_apply") if monitor != null else Time.get_ticks_usec()
 		npc_system.call("process_navigation_route_changes", events)
+		if monitor != null:
+			monitor.end_section("route_event_apply", route_start)
 	return events
+
+func pending_navigation_change_count() -> int:
+	if change_bus == null or not change_bus.has_method("pending_count"):
+		return 0
+	return int(change_bus.pending_count())
 
 func process_navmesh_dirty_regions(max_jobs := 1) -> Array:
 	if not _navmesh_backend_active():

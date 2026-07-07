@@ -121,7 +121,7 @@ $evidenceScript = Join-Path $projectPath "tools\assert-test-evidence-report.ps1"
     -ReportPath $ReportPath `
     -RunnerId "light_shadow_visual_playtest" `
     -EvidenceLevel "acceptance_visual" `
-    -AcceptanceClaims @("shadow_authoritative_daylight_blocks_deep_underground") `
+    -AcceptanceClaims @("shadow_authoritative_daylight_blocks_deep_underground", "torch_light_brightens_underground_terrain") `
     -RequiredScreenshots $requiredScreenshots `
     -ScreenshotDir $ScreenshotDir `
     -RegistryPath (Join-Path $projectPath "tools\test-runner-registry.json") `

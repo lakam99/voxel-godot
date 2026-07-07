@@ -142,7 +142,9 @@ func process(delta: float, actors: Array = []) -> Dictionary:
 		if portal != null:
 			portal.advance(delta)
 			if owner != null and owner.get("traffic_reservations") != null and owner.get("traffic_reservations").has_method("queued_owners_for_resource_prefix"):
-				for actor_id in owner.get("traffic_reservations").queued_owners_for_resource_prefix("portal:%s" % portal_id):
+				var traffic = owner.get("traffic_reservations")
+				var queued_owners: Array = traffic.queued_owners_for_portal(portal_id) if traffic.has_method("queued_owners_for_portal") else traffic.queued_owners_for_resource_prefix("portal:%s" % portal_id)
+				for actor_id in queued_owners:
 					portal.queue(String(actor_id), "traffic")
 	for portal_id in scheduled_closes.keys().duplicate():
 		var remaining := float(scheduled_closes.get(portal_id, 0.0)) - delta

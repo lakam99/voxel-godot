@@ -5,7 +5,7 @@ const CELL := 1.35
 const MAX_ROUTE_SCORED_CANDIDATES := 16
 const MAX_HOME_INTERIOR_GOAL_CELLS := 64
 const RESOURCE_SCAN_NODE_LIMIT := 1200
-const RESOURCE_SCAN_CANDIDATE_LIMIT := 48
+const RESOURCE_SCAN_CANDIDATE_LIMIT := 16
 
 var system
 var main
@@ -49,12 +49,32 @@ func make_intent(entry: Dictionary, target: Vector3, max_distance: float, moving
     var arrival_radius := CELL * 0.72
     var strict_home_route := moving_home
     var strict_scripted_route := false
+    var allow_home_partial := false
     if moving_home:
         arrival_radius = CELL * 0.35 if strict_home_route else CELL * 0.82
-        fallback_cells = home_interior_goal_cells(entry)
+        if body != null and actor_inside_home(entry, body.global_position):
+            fallback_cells = home_interior_goal_cells(entry)
+        if body != null:
+            var home_cell: Vector2i = entry.get("homeCell", target_cell)
+            var porch_cell: Vector2i = entry.get("porchCell", home_cell)
+            var current_cell: Vector2i = world.world_cell(body.global_position) if world != null else Vector2i(roundi(body.global_position.x / CELL), roundi(body.global_position.z / CELL))
+            var near_home_edge: bool = current_cell == porch_cell \
+                or current_cell == home_cell \
+                or actor_inside_home(entry, body.global_position) \
+                or body.global_position.distance_to(entry.get("porchPosition", target)) <= CELL * 2.0
+            allow_home_partial = not near_home_edge and body.global_position.distance_to(target) > CELL * 4.0
     elif kind == "scripted":
         arrival_radius = float(body.get_meta("npc_scripted_arrival_radius", CELL * 0.45)) if body != null else CELL * 0.45
         strict_scripted_route = arrival_radius < CELL * 0.95
+    var priority := int(entry.get("routePriority", 0))
+    if moving_home:
+        priority = maxi(priority, 100)
+    elif kind == "scripted":
+        priority = maxi(priority, 180)
+    elif kind == "guard":
+        priority = maxi(priority, 130)
+    elif priority <= 0:
+        priority = 50
     return {
         "kind": kind,
         "target": target,
@@ -62,11 +82,11 @@ func make_intent(entry: Dictionary, target: Vector3, max_distance: float, moving
         "allowOutside": allow_outside,
         "movingHome": moving_home,
         "arrivalRadius": arrival_radius,
-        "priority": 100 if moving_home else 50,
+        "priority": priority,
         "action": "",
         "interruptible": not moving_home,
-        "allowPartial": moving_home,
-        "strictArrival": strict_home_route or strict_scripted_route or kind in ["job", "work", "forage", "guard"],
+        "allowPartial": allow_home_partial or kind == "guard",
+        "strictArrival": strict_home_route or strict_scripted_route or kind in ["job", "work", "forage"],
         "fallbackCells": fallback_cells
     }
 
@@ -95,6 +115,16 @@ func home_interior_goal_cells(entry: Dictionary) -> Array[Vector2i]:
         result.resize(MAX_HOME_INTERIOR_GOAL_CELLS)
     return result
 
+func actor_inside_home(entry: Dictionary, position: Vector3) -> bool:
+    var cell := Vector2i(roundi(position.x / CELL), roundi(position.z / CELL))
+    var home_cell: Vector2i = entry.get("homeCell", cell)
+    var interior_min: Vector2i = entry.get("interiorMinCell", home_cell)
+    var interior_max: Vector2i = entry.get("interiorMaxCell", home_cell)
+    return cell.x >= mini(interior_min.x, interior_max.x) \
+        and cell.x <= maxi(interior_min.x, interior_max.x) \
+        and cell.y >= mini(interior_min.y, interior_max.y) \
+        and cell.y <= maxi(interior_min.y, interior_max.y)
+
 func choose_day_target(entry: Dictionary) -> Vector3:
     if world == null or planner == null:
         return entry.get("porchPosition", Vector3.ZERO)
@@ -110,7 +140,7 @@ func choose_job_target(entry: Dictionary) -> Vector3:
     if world == null or planner == null:
         return entry.get("porchPosition", Vector3.ZERO)
     var job := String(entry.get("job", ""))
-    var outside_town_job := job == "forage"
+    var outside_town_job := resource_job_uses_outside_work_area(job)
     var resource_candidates: Array[Vector3] = []
     add_resource_prop_candidates(resource_candidates, entry, job)
     var resource_reachable := choose_best_reachable_position(entry, resource_candidates, outside_town_job, false, CELL * 0.85, MAX_ROUTE_SCORED_CANDIDATES)
@@ -328,19 +358,25 @@ func add_resource_prop_candidates(candidates: Array[Vector3], entry: Dictionary,
         return
     var body := entry.get("body") as Node3D
     var origin: Vector3 = body.global_position if body != null else entry.get("porchPosition", Vector3.ZERO)
-    var outside_town_job := job == "forage"
+    var outside_town_job := resource_job_uses_outside_work_area(job)
     var props: Array[Node3D] = indexed_resource_props(entry, job)
+    var indexed_count := props.size()
     props = filter_job_props(entry, job, props)
+    var filtered_indexed_count := props.size()
+    var scanned_nodes := 0
+    var scanned_props_before := props.size()
     if props.is_empty() and allow_resource_scan_fallback():
         var remaining_scan_nodes := RESOURCE_SCAN_NODE_LIMIT
         for root_value in [main.get("prop_root"), main.get("chunk_root")]:
             remaining_scan_nodes = collect_job_props(root_value as Node, entry, job, props, remaining_scan_nodes, RESOURCE_SCAN_CANDIDATE_LIMIT)
             if remaining_scan_nodes <= 0 or props.size() >= RESOURCE_SCAN_CANDIDATE_LIMIT:
                 break
+        scanned_nodes = RESOURCE_SCAN_NODE_LIMIT - remaining_scan_nodes
     props.sort_custom(func(a: Node3D, b: Node3D) -> bool:
         return a.global_position.distance_squared_to(origin) < b.global_position.distance_squared_to(origin)
     )
     var checked := 0
+    var approach_hits := 0
     for prop in props:
         checked += 1
         if checked > 10:
@@ -352,9 +388,21 @@ func add_resource_prop_candidates(candidates: Array[Vector3], entry: Dictionary,
             if job_position_allowed(entry, pos, outside_town_job):
                 candidates.append(pos)
                 added_for_prop = true
+                approach_hits += 1
                 break
         if not added_for_prop:
             continue
+    entry["lastResourceCandidateDebug"] = {
+        "job": job,
+        "outsideTown": outside_town_job,
+        "indexed": indexed_count,
+        "filteredIndexed": filtered_indexed_count,
+        "scannedNodes": scanned_nodes,
+        "scanAdded": props.size() - scanned_props_before,
+        "checked": checked,
+        "approachHits": approach_hits,
+        "positions": candidates.size()
+    }
 
 func indexed_resource_props(entry: Dictionary, job: String) -> Array[Node3D]:
     var service = smart_object_service()
@@ -362,12 +410,17 @@ func indexed_resource_props(entry: Dictionary, job: String) -> Array[Node3D]:
         return []
     var options := {
         "limit": RESOURCE_SCAN_CANDIDATE_LIMIT,
-        "outsideTown": job == "forage",
-        "workAreaOnly": true
+        "outsideTown": resource_job_uses_outside_work_area(job),
+        "workAreaOnly": true,
+        "chunkRadius": 2,
+        "cacheFrames": 30
     }
     if job == "forage":
         options["drops"] = ["berries"]
     return service.query_resource_nodes(entry, resource_kinds_for_job(job), options)
+
+func resource_job_uses_outside_work_area(job: String) -> bool:
+    return job == "forage"
 
 func filter_job_props(entry: Dictionary, job: String, props: Array[Node3D]) -> Array[Node3D]:
     var filtered: Array[Node3D] = []
@@ -414,7 +467,7 @@ func prop_matches_job(prop: Node3D, entry: Dictionary, job: String) -> bool:
         return false
     if String(prop.get_meta("kind", "")) != "prop":
         return false
-    if not job_position_allowed(entry, prop.global_position, job == "forage"):
+    if not world.point_inside_work_area(entry, prop.global_position):
         return false
     if surface_y_at_position(prop.global_position) < main.WATER_LEVEL + 0.45:
         return false

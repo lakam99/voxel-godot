@@ -10,3 +10,11 @@ npc-navigation-progress.txt
 direct-npc-navigation-report.json
 direct-npc-navigation-progress.txt
 artifacts/**
+native/terrain_meshing/godot-cpp/
+native/terrain_meshing/.sconsign.dblite
+native/terrain_meshing/bin/
+native/terrain_meshing/**/*.obj
+native/terrain_meshing/**/__pycache__/
+addons/terrain_meshing_backend/bin/
+compile-smoke-debug.txt
+npc-navigation-direct-log-progress.txt

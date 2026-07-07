@@ -243,6 +243,8 @@ const MATERIALS := {
     "mud": { "label": "Mud", "hardness": 4, "drop": "mud" },
     "snow": { "label": "Snow", "hardness": 3, "drop": "snow" },
     "stone": { "label": "Stone", "hardness": 10, "drop": "stones", "requiredTool": "pickaxe", "requiredTier": 2 },
+    "deepStone": { "label": "Deep Stone", "hardness": 14, "drop": "stones", "requiredTool": "pickaxe", "requiredTier": 3 },
+    "bedrock": { "label": "Bedrock", "hardness": 9999, "drop": "", "requiredTool": "pickaxe", "requiredTier": 99 },
     "copperOre": { "label": "Copper Ore", "hardness": 7, "drop": "copperOre", "requiredTool": "pickaxe", "requiredTier": 3 },
     "ironOre": { "label": "Iron Ore", "hardness": 10, "drop": "ironOre", "requiredTool": "pickaxe", "requiredTier": 4 },
     "copperVein": { "label": "Copper Vein", "hardness": 8, "drop": "copperOre", "requiredTool": "pickaxe", "requiredTier": 3 },

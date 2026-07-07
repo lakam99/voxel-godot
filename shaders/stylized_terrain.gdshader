@@ -1,5 +1,5 @@
 shader_type spatial;
-render_mode cull_disabled, diffuse_burley, specular_schlick_ggx;
+render_mode diffuse_burley, specular_schlick_ggx, cull_disabled;
 
 uniform float macro_scale = 0.030;
 uniform float macro_strength = 0.075;
@@ -10,6 +10,8 @@ uniform float snow_end = 86.0;
 uniform float snow_strength = 0.32;
 uniform float albedo_boost = 1.24;
 uniform float shadow_fill = 0.0;
+uniform float underground_view_darkening = 0.0;
+uniform float underground_view_min_light = 0.12;
 uniform int terrain_local_light_count = 0;
 uniform vec4 terrain_local_light_positions[12];
 uniform vec4 terrain_local_light_colors[12];
@@ -42,7 +44,7 @@ float value_noise(vec2 p) {
 
 vec3 terrain_local_light(vec3 world_pos, vec3 normal_world) {
     vec3 total = vec3(0.0);
-    float upness = smoothstep(0.06, 0.46, normal_world.y);
+    float face_weight = mix(0.68, 1.0, smoothstep(0.06, 0.46, normal_world.y));
     for (int i = 0; i < 12; i++) {
         if (i >= terrain_local_light_count) {
             break;
@@ -56,7 +58,7 @@ vec3 terrain_local_light(vec3 world_pos, vec3 normal_world) {
         distance_falloff *= distance_falloff;
         vec3 light_dir = to_light / max(dist, 0.001);
         float wrapped = clamp((dot(normal_world, light_dir) + 0.35) / 1.35, 0.0, 1.0);
-        total += light_color_energy.rgb * light_color_energy.a * distance_falloff * wrapped * upness;
+        total += light_color_energy.rgb * light_color_energy.a * distance_falloff * wrapped * face_weight;
     }
     return min(total * terrain_local_light_strength, vec3(terrain_local_light_max));
 }
@@ -83,6 +85,7 @@ void fragment() {
 
     float side_value = mix(1.0 - side_value_strength, 1.0, upness);
     vec3 final_color = clamp(color * macro_value * side_value * albedo_boost, vec3(0.0), vec3(1.0));
+    final_color *= mix(1.0, underground_view_min_light, clamp(underground_view_darkening, 0.0, 1.0));
     ALBEDO = final_color;
     EMISSION = final_color * shadow_fill + final_color * terrain_local_light(v_world_pos, normal_world);
     ROUGHNESS = roughness_value;

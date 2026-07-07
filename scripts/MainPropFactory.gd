@@ -117,11 +117,17 @@ func break_target_for_hit(hit: Dictionary, collider: Node, kind: String) -> Dict
     return {}
 
 func complete_destroy_target(hit: Dictionary, collider: Node, kind: String, material_id: String) -> void:
+    var monitor = runtime_perf_monitor
+    var destroy_start: int = monitor.begin_section("destroy_target_complete") if monitor != null else Time.get_ticks_usec()
     play_feedback("break", hit["position"], feedback_color_for_material(material_id), 12)
     if (kind == "terrain" or kind == "subsurface") and subsurface_system != null and subsurface_system.has_method("excavate_from_hit"):
+        var excavate_start: int = monitor.begin_section("destroy_target_subsurface_excavate") if monitor != null else Time.get_ticks_usec()
         var excavation: Dictionary = subsurface_system.excavate_from_hit(hit, collider)
+        if monitor != null:
+            monitor.end_section("destroy_target_subsurface_excavate", excavate_start)
         mark_world_dirty("subsurface_excavated")
         var affected_cells: Array = excavation.get("affectedCells", [])
+        var nav_start: int = monitor.begin_section("destroy_target_nav_notify") if monitor != null else Time.get_ticks_usec()
         if npc_system and npc_system.has_method("notify_navigation_terrain_cells_edited"):
             npc_system.notify_navigation_terrain_cells_edited(affected_cells)
         else:
@@ -129,10 +135,17 @@ func complete_destroy_target(hit: Dictionary, collider: Node, kind: String, mate
                 if affected_cell is Vector2i and npc_system and npc_system.has_method("notify_navigation_terrain_edited"):
                     var old_height := surface_y_at_cell(Vector3i(affected_cell.x, 0, affected_cell.y))
                     npc_system.notify_navigation_terrain_edited(affected_cell, old_height, old_height)
-        inventory_system.add_item(ItemCatalogScript.material_drop(material_id), 1)
-        award_break_xp(material_id)
-        complete_break_objectives(material_id)
-        update_hud("Dug %s" % ItemCatalogScript.material_label(material_id))
+        if monitor != null:
+            monitor.end_section("destroy_target_nav_notify", nav_start)
+        var removed_material := String(excavation.get("primaryMaterial", material_id))
+        if removed_material == "" or removed_material == "air":
+            removed_material = material_id
+        var terrain_drop := ItemCatalogScript.material_drop(removed_material)
+        if terrain_drop != "":
+            inventory_system.add_item(terrain_drop, 1)
+        award_break_xp(removed_material)
+        complete_break_objectives(removed_material)
+        update_hud("Dug %s" % ItemCatalogScript.material_label(removed_material))
     elif kind == "terrain":
         update_hud("Cannot dig terrain until the volume sampler is ready")
     elif kind == "block":
@@ -140,6 +153,9 @@ func complete_destroy_target(hit: Dictionary, collider: Node, kind: String, mate
         var block_type: String = collider.get_meta("block_type")
         if npc_system and npc_system.has_method("notify_navigation_block_removed"):
             npc_system.notify_navigation_block_removed(block_cell, block_type, collider)
+        if world_generation_system != null and world_generation_system.has_method("set_cell_light"):
+            world_generation_system.call("set_cell_light", block_cell, { "sky": 0, "block": 0 }, "block_removed:%s" % block_type)
+        clear_block_state_from_terrain(block_cell, block_type, "block_removed")
         blocks.erase(block_cell)
         invalidate_navigation_marker_cache()
         mark_world_dirty("block_removed")
@@ -147,7 +163,7 @@ func complete_destroy_target(hit: Dictionary, collider: Node, kind: String, mate
         inventory_system.add_item(ItemCatalogScript.material_drop(material_id), 1)
         award_break_xp(material_id)
         complete_break_objectives(material_id)
-        var collapsed_blocks := collapse_unsupported_structures()
+        var collapsed_blocks := collapse_unsupported_structures() if is_structural_block_type(block_type) else 0
         var block_message := "Recovered %s" % ItemCatalogScript.label(block_type)
         if collapsed_blocks > 0:
             block_message = "Structure collapsed: %d blocks" % collapsed_blocks
@@ -196,6 +212,8 @@ func complete_destroy_target(hit: Dictionary, collider: Node, kind: String, mate
             complete_break_objectives(material_id)
             update_hud("%s dropped" % ItemCatalogScript.label(drop))
         collider.queue_free()
+    if monitor != null:
+        monitor.end_section("destroy_target_complete", destroy_start)
 
 func complete_break_objectives(material_id: String) -> void:
     if objective_system == null:
@@ -308,7 +326,7 @@ func tool_power_for_material(material_id: String) -> float:
 
     var forage := ["berryBush", "aloePatch", "mushroomCluster", "frostHerbPatch"]
     var soil := ["grass", "dirt", "sand", "mud", "snow", "dirtBlock"]
-    var stone := ["stone", "rock", "stoneBlock", "cobblestonePath", "glass", "anvil", "furnace", "wardLantern", "sanctuaryBeacon", "riftAnchor"]
+    var stone := ["stone", "deepStone", "rock", "stoneBlock", "cobblestonePath", "glass", "anvil", "furnace", "wardLantern", "sanctuaryBeacon", "riftAnchor"]
     var wood := ["tree", "woodBlock", "workbench", "door", "bed", "chest", "traderStall", "campfire", "torch", "spikeTrap"]
     if material_id == "hostile":
         if item_id.ends_with("Sword") or item_id == "nightBlade":
@@ -442,6 +460,39 @@ func ground_y_near_position(position: Vector3) -> float:
         if not is_nan(subsurface_y):
             return subsurface_y
     return exterior_y
+
+func terrain_occupancy_at_cell(cell: Vector3i) -> Dictionary:
+    if world_generation_system != null and world_generation_system.has_method("terrain_occupancy_at_cell"):
+        return world_generation_system.call("terrain_occupancy_at_cell", cell)
+    var material_id := world_material_at_cell(cell)
+    var solid := material_id != "" and material_id != "air"
+    return {
+        "cell": cell,
+        "solid": solid,
+        "air": not solid,
+        "material": material_id,
+        "biome": biome_at_volume_cell(cell),
+        "fluid": ""
+    }
+
+func surface_projection_for_cell(cell: Vector3i, max_up_cells := 32, max_down_cells := 96) -> Dictionary:
+    if world_generation_system != null and world_generation_system.has_method("surface_projection_for_cell"):
+        return world_generation_system.call("surface_projection_for_cell", cell, max_up_cells, max_down_cells)
+    return {
+        "found": true,
+        "solidCell": cell,
+        "airCell": cell + Vector3i(0, 1, 0),
+        "position": Vector3(float(cell.x) * CELL, surface_y_at_cell(cell), float(cell.z) * CELL),
+        "solidState": terrain_occupancy_at_cell(cell)
+    }
+
+func walkable_surface_cell_near(cell: Vector3i, max_up_cells := 16, max_down_cells := 32) -> Dictionary:
+    if world_generation_system != null and world_generation_system.has_method("walkable_surface_cell_near"):
+        return world_generation_system.call("walkable_surface_cell_near", cell, max_up_cells, max_down_cells)
+    var projection := surface_projection_for_cell(cell, max_up_cells, max_down_cells)
+    projection["walkable"] = true
+    projection["occupancy"] = terrain_occupancy_at_cell(projection.get("airCell", cell + Vector3i(0, 1, 0)))
+    return projection
 
 func surface_y_at_cell(cell: Vector3i) -> float:
     var edit_key := Vector2i(cell.x, cell.z)

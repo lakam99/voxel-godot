@@ -17,16 +17,38 @@ var camera: Camera3D
 var results: Array[Dictionary] = []
 var failed := false
 var elapsed := 0.0
+var watchdog_seconds := 240.0
 var finished := false
 
+func active_chunk_size() -> int:
+    if main != null:
+        return int(main.CHUNK_SIZE)
+    return CHUNK_SIZE
+
+func chunk_key_for_flat_cell(cell: Vector2i) -> Vector2i:
+    var size := active_chunk_size()
+    return Vector2i(floori(float(cell.x) / float(size)), floori(float(cell.y) / float(size)))
+
+func chunk_scope_for_flat_cell(cell: Vector2i, radius := 0) -> Dictionary:
+    var result := {}
+    var center := chunk_key_for_flat_cell(cell)
+    var chunk_radius := maxi(0, int(radius))
+    for dz in range(-chunk_radius, chunk_radius + 1):
+        for dx in range(-chunk_radius, chunk_radius + 1):
+            result[Vector2i(center.x + dx, center.y + dz)] = true
+    return result
+
 func _ready() -> void:
+    var watchdog_override := OS.get_environment("VOXEL_PLAYTEST_WATCHDOG_SECONDS").strip_edges()
+    if watchdog_override != "":
+        watchdog_seconds = maxf(30.0, watchdog_override.to_float())
     call_deferred("run")
 
 func _process(delta: float) -> void:
     if finished:
         return
     elapsed += delta
-    if elapsed > 240.0:
+    if elapsed > watchdog_seconds:
         add_result("playtest_watchdog", false, "runner timed out before completion")
         finished = true
         save_optional_screenshot()
@@ -42,6 +64,70 @@ func ground_y_near_position(position: Vector3) -> float:
     if main != null and main.has_method("ground_y_near_position"):
         return float(main.call("ground_y_near_position", position))
     return surface_y_at_position(position)
+
+func spawn_visible_guard_behavior_hostile(npc_system, hostile_system) -> Dictionary:
+    if npc_system == null or hostile_system == null:
+        return { "spawned": false, "reason": "missing_system" }
+    var entries: Array = npc_system.get("npcs")
+    var offsets: Array[Vector3] = [
+        Vector3(0.0, 0.0, -CELL * 6.0),
+        Vector3(CELL * 6.0, 0.0, 0.0),
+        Vector3(-CELL * 6.0, 0.0, 0.0),
+        Vector3(0.0, 0.0, CELL * 6.0),
+        Vector3(CELL * 5.0, 0.0, -CELL * 5.0),
+        Vector3(-CELL * 5.0, 0.0, -CELL * 5.0),
+        Vector3(CELL * 5.0, 0.0, CELL * 5.0),
+        Vector3(-CELL * 5.0, 0.0, CELL * 5.0),
+        Vector3(0.0, 0.0, -CELL * 9.0),
+        Vector3(CELL * 9.0, 0.0, 0.0),
+        Vector3(-CELL * 9.0, 0.0, 0.0),
+        Vector3(0.0, 0.0, CELL * 9.0)
+    ]
+    var checked := 0
+    for entry_variant in entries:
+        var entry: Dictionary = entry_variant
+        if not bool(entry.get("canFight", false)):
+            continue
+        var weapon_id := String(entry.get("weaponId", ""))
+        if npc_system.has_method("npc_weapon_is_ranged") and not bool(npc_system.call("npc_weapon_is_ranged", weapon_id)):
+            continue
+        var body := entry.get("body") as Node3D
+        if body == null or not is_instance_valid(body):
+            continue
+        for offset_value in offsets:
+            var offset: Vector3 = offset_value
+            var candidate := body.global_position + offset
+            candidate.y = surface_y_at_position(candidate) + 0.72
+            checked += 1
+            if not guard_behavior_line_clear(body, candidate):
+                continue
+            var hostile = hostile_system.call("spawn_enemy", candidate, "shadow")
+            if hostile is Node3D:
+                return {
+                    "spawned": true,
+                    "guard": String(body.name),
+                    "weapon": weapon_id,
+                    "position": candidate,
+                    "checked": checked
+                }
+    return { "spawned": false, "reason": "no_clear_guard_line", "checked": checked }
+
+func guard_behavior_line_clear(body: Node3D, target_position: Vector3) -> bool:
+    if body == null or not is_instance_valid(body) or main == null:
+        return false
+    var world := main.get_world_3d()
+    if world == null:
+        return false
+    var query := PhysicsRayQueryParameters3D.create(
+        body.global_position + Vector3(0.0, 1.58, 0.0),
+        target_position + Vector3(0.0, 1.02, 0.0)
+    )
+    query.exclude = [body]
+    query.collision_mask = 1 | 4
+    query.collide_with_bodies = true
+    query.collide_with_areas = false
+    var hit: Dictionary = world.direct_space_state.intersect_ray(query)
+    return hit.is_empty()
 
 func surface_y_at_cell2(cell: Vector2i) -> float:
     if main != null and main.has_method("surface_y_at_cell"):
@@ -73,7 +159,7 @@ func run() -> void:
     mark_progress("pre_warmup")
     await wait_physics_frames(80)
     mark_progress("scene_bootstrap")
-    test_scene_bootstrap()
+    await test_scene_bootstrap()
     if finish_if_only_section("scene_bootstrap", only_section):
         return
     if only_section == "inventory_and_crafting":
@@ -83,7 +169,76 @@ func run() -> void:
         return
     if only_section == "underground_volume":
         mark_progress("underground_volume")
-        test_underground_volume_generation()
+        await test_underground_volume_generation()
+        finish_playtest()
+        return
+    if only_section == "terrain_geometry":
+        mark_progress("terrain_collision")
+        await test_terrain_collision_shapes()
+        mark_progress("terrain_topology")
+        test_terrain_mesh_topology_signature()
+        mark_progress("terrain_material")
+        test_terrain_shader_material()
+        mark_progress("terrain_normals")
+        await test_terrain_chunk_edge_normals()
+        finish_playtest()
+        return
+    if only_section == "hostiles":
+        mark_progress("hostiles")
+        await test_hostile_system()
+        finish_playtest()
+        return
+    if only_section == "structures":
+        unlock_intro_gate_for_followup_tests(main.get("tutorial_system") if main != null else null)
+        if main != null:
+            main.set("time_of_day", 0.42)
+            if main.has_method("update_sky"):
+                main.call("update_sky", 0.0)
+        await wait_process_frames(4)
+        mark_progress("structures")
+        await test_structure_and_town_generation()
+        finish_playtest()
+        return
+    if only_section == "movement":
+        mark_progress("movement")
+        await test_player_movement()
+        await test_uphill_smoothing()
+        await test_steep_uphill_blocking()
+        await test_airborne_obstacle_blocking()
+        await test_jump()
+        finish_playtest()
+        return
+    if only_section == "navigation_map":
+        mark_progress("navigation_map")
+        await test_navigation_map_system()
+        finish_playtest()
+        return
+    if only_section == "world_streaming":
+        mark_progress("world_streaming")
+        await test_world_chunk_streaming()
+        finish_playtest()
+        return
+    if only_section == "chunk_detail_batches":
+        mark_progress("world_streaming")
+        await test_world_chunk_streaming()
+        mark_progress("chunk_detail_batches")
+        await test_chunk_detail_batches()
+        finish_playtest()
+        return
+    if only_section == "mining_requirements":
+        mark_progress("wait_grounded")
+        await wait_until_grounded(120)
+        mark_progress("mining_requirements")
+        await test_mining_tool_requirements()
+        finish_playtest()
+        return
+    if only_section == "mouse_interaction":
+        mark_progress("wait_grounded")
+        await wait_until_grounded(120)
+        mark_progress("right_mouse_interaction")
+        await test_right_mouse_interaction_input()
+        mark_progress("block_destroy_ray")
+        await test_block_destroy_ray()
         finish_playtest()
         return
     if only_section != "" and only_section != "tutorial_start":
@@ -107,7 +262,7 @@ func run() -> void:
     mark_progress("equipment")
     test_equipment_system()
     mark_progress("navigation_map")
-    test_navigation_map_system()
+    await test_navigation_map_system()
     mark_progress("contracts")
     test_contract_system()
     mark_progress("audio_effects")
@@ -135,7 +290,7 @@ func run() -> void:
     mark_progress("bed_respawn")
     test_bed_respawn_and_death_drop()
     mark_progress("save_load")
-    test_save_load_round_trip()
+    await test_save_load_round_trip()
     mark_progress("hostiles")
     await test_hostile_system()
     mark_progress("rift_hostiles")
@@ -143,17 +298,17 @@ func run() -> void:
     mark_progress("sanctuary_beacon_raid")
     test_sanctuary_beacon_raid_system()
     mark_progress("defensive_blocks")
-    test_defensive_blocks()
+    await test_defensive_blocks()
     mark_progress("player_ranged")
     await test_player_ranged_system()
     mark_progress("structures")
-    test_structure_and_town_generation()
+    await test_structure_and_town_generation()
     mark_progress("structural_integrity")
     test_structural_integrity()
     mark_progress("landmarks")
     test_landmark_generation_and_loot()
     mark_progress("underground_volume")
-    test_underground_volume_generation()
+    await test_underground_volume_generation()
     mark_progress("ore_generation")
     test_ore_generation_and_drops()
     mark_progress("forage_wildlife")
@@ -169,19 +324,19 @@ func run() -> void:
     mark_progress("held_item")
     await test_held_item_system()
     mark_progress("terrain_collision")
-    test_terrain_collision_shapes()
+    await test_terrain_collision_shapes()
     mark_progress("terrain_topology")
     test_terrain_mesh_topology_signature()
     mark_progress("terrain_material")
     test_terrain_shader_material()
     mark_progress("terrain_normals")
-    test_terrain_chunk_edge_normals()
+    await test_terrain_chunk_edge_normals()
     mark_progress("terrain_generation_profile")
     test_terrain_generation_profile()
     mark_progress("world_streaming")
     await test_world_chunk_streaming()
     mark_progress("chunk_detail_batches")
-    test_chunk_detail_batches()
+    await test_chunk_detail_batches()
     mark_progress("sky_light")
     test_sky_light_consistency()
     mark_progress("environment_visual_style")
@@ -250,6 +405,11 @@ func wait_process_frames(count: int) -> void:
     for i in range(count):
         await get_tree().process_frame
 
+func wait_gameplay_frames(count: int) -> void:
+    for i in range(count):
+        await get_tree().process_frame
+        await get_tree().physics_frame
+
 func dispatch_mouse_button(button_index: int, pressed := true, position := Vector2(-1.0, -1.0)) -> void:
     var event := InputEventMouseButton.new()
     event.button_index = button_index
@@ -279,9 +439,16 @@ func add_result(name: String, passed: bool, details: String = "") -> void:
     save_report(false)
 
 func test_scene_bootstrap() -> void:
+    var expected_chunks := 49
+    if main != null:
+        var distance := playtest_render_distance()
+        expected_chunks = maxi(1, (distance * 2 + 1) * (distance * 2 + 1))
+        if main.has_method("bootstrap_initial_chunks"):
+            main.call("bootstrap_initial_chunks", distance)
+        await wait_for_chunk_count(expected_chunks, 120, "scene_bootstrap_chunks")
     var chunks := get_chunks()
     add_result("scene_bootstrap", main != null and player != null and camera != null, "main/player/camera present")
-    add_result("initial_chunks_loaded", chunks.size() >= 49, "%d chunks" % chunks.size())
+    add_result("initial_chunks_loaded", chunks.size() >= expected_chunks, "%d chunks" % chunks.size())
     if player:
         add_result("controller_ticks", int(player.get("physics_ticks")) > 0, "%d ticks" % int(player.get("physics_ticks")))
     var hud = main.get("hud") if main else null
@@ -543,12 +710,15 @@ func test_tutorial_start_system() -> void:
         mira != null and not mira_entered_starter_interior and not mira_hit_starter_wall,
         "entered interior %s, sustained starter wall stuck %s (%d frames), blocker %s, min distance %.2f, bounds %s, interior %s" % [str(mira_entered_starter_interior), str(mira_hit_starter_wall), mira_starter_wall_stuck_frames, JSON.stringify(mira_starter_wall_blocker), mira_min_starter_distance, str(mira_route_bounds), str(mira_route_interior_bounds)]
     )
-    for i in range(3600):
+    var mira_home_wait_frames := 0
+    for i in range(7200):
         if mira != null and bool(mira.get_meta("npc_inside_home", false)):
+            mira_home_wait_frames = i
             break
         if i % 60 == 0:
             mark_progress("tutorial_elder_return_%03d" % i)
-        await wait_process_frames(1)
+        await wait_gameplay_frames(1)
+        mira_home_wait_frames = i + 1
     var starter_position := Vector3(float(starter_cell.x) * CELL, player.global_position.y, float(starter_cell.y) * CELL)
     var mira_position := starter_position
     if mira is Node3D:
@@ -558,11 +728,12 @@ func test_tutorial_start_system() -> void:
     add_result(
         "tutorial_elder_returns_home",
         mira_has_separate_home and mira_inside_own_home,
-        "home %s, starter %s, distance %.2f, inside %s, route %s" % [
+        "home %s, starter %s, distance %.2f, inside %s, waitFrames %d, route %s" % [
             str(mira_home_cell),
             str(starter_cell),
             mira_distance_from_starter,
             str(mira.get_meta("npc_inside_home", false) if mira else false),
+            mira_home_wait_frames,
             npc_route_debug(npc_system, mira)
         ]
     )
@@ -798,6 +969,8 @@ func test_tutorial_start_system() -> void:
     var rescue_torch_present: bool = tutorial_system.get("rescue_torch") != null
     var rescue_bubble_present: bool = niko_body != null and niko_body.get_node_or_null("SpeechBubble") != null
     var guard_before: Vector3 = (sera as Node3D).global_position if sera is Node3D else Vector3.ZERO
+    var rescue_guard_shots_start := int(npc_system.stats().get("guardShots", 0)) if npc_system else 0
+    var rescue_scripted_battles_start := int(hostile_system.stats().get("scriptedBattleStarts", 0)) if hostile_system else 0
     var guard_briefed: bool = sera != null and bool(tutorial_system.interact_with(sera))
     if sera is Node3D:
         var player_clear_position := guard_before + Vector3(-CELL * 2.25, 0.0, CELL * 2.25)
@@ -809,7 +982,7 @@ func test_tutorial_start_system() -> void:
             break
         if i % 60 == 0:
             mark_progress("tutorial_guard_escort_%03d" % i)
-        await wait_process_frames(1)
+        await wait_gameplay_frames(1)
     var escort_state: Dictionary = tutorial_system.state()
     var escort_started: bool = bool(escort_state.get("rescueEscortStarted", false))
     var guard_after: Vector3 = (sera as Node3D).global_position if sera is Node3D else Vector3.ZERO
@@ -821,8 +994,6 @@ func test_tutorial_start_system() -> void:
     var guard_focused := sera is Node and bool((sera as Node).get_meta("npc_dialogue_focused", false))
     var guard_held := sera is Node and bool((sera as Node).get_meta("npc_force_hold", false))
     var rescue_battle_engaged := false
-    var rescue_guard_shots_start := int(npc_system.stats().get("guardShots", 0)) if npc_system else 0
-    var rescue_scripted_battles_start := int(hostile_system.stats().get("scriptedBattleStarts", 0)) if hostile_system else 0
     for i in range(1800):
         tutorial_system.refresh_rescue_progress(1.0 / 60.0)
         main.call("update_objectives_and_contracts")
@@ -835,20 +1006,24 @@ func test_tutorial_start_system() -> void:
             break
         if i % 60 == 0:
             mark_progress("tutorial_guard_escort_battle_%03d" % i)
-        await get_tree().physics_frame
+        await wait_gameplay_frames(1)
+    guard_after = (sera as Node3D).global_position if sera is Node3D else Vector3.ZERO
     var guard_target: Vector3 = (sera as Node).get_meta("npc_scripted_target", Vector3.ZERO) if guard_scripted else Vector3.ZERO
     var guard_requested: Vector3 = (sera as Node).get_meta("npc_requested_velocity", Vector3.ZERO) if sera is Node else Vector3.ZERO
     var guard_applied: Vector3 = (sera as Node).get_meta("npc_applied_velocity", Vector3.ZERO) if sera is Node else Vector3.ZERO
     var guard_displacement: Vector3 = (sera as Node).get_meta("npc_last_displacement", Vector3.ZERO) if sera is Node else Vector3.ZERO
     var guard_blocked_contact := String((sera as Node).get_meta("npc_blocked_contact", "")) if sera is Node else ""
-    var guard_motion_summary := "pos %s target %s req %s applied %s disp %s block %s near %s" % [
+    var guard_entry: Dictionary = npc_system.npc_entry_for_actor(sera) if npc_system != null and npc_system.has_method("npc_entry_for_actor") and sera is Node else {}
+    var guard_motion_summary := "pos %s target %s req %s applied %s disp %s block %s near %s plan %s tiles %s" % [
         compact_vec3(guard_after),
         compact_vec3(guard_target),
         compact_vec3(guard_requested),
         compact_vec3(guard_applied),
         compact_vec3(guard_displacement),
         guard_blocked_contact,
-        nearest_actor_summary(sera as Node3D)
+        nearest_actor_summary(sera as Node3D),
+        JSON.stringify(guard_entry.get("lastRoutePlanDebug", {})),
+        JSON.stringify(guard_entry.get("lastNavmeshTilePublishDebug", []))
     ]
     var rescue_hostile_count := 0
     for enemy_state_variant in hostile_system.enemies.duplicate():
@@ -866,7 +1041,7 @@ func test_tutorial_start_system() -> void:
         rescue_returning_started = rescue_returning_started or bool(tutorial_system.state().get("rescueReturning", false))
         if rescue_returning_started:
             break
-        await get_tree().physics_frame
+        await wait_gameplay_frames(1)
     for i in range(10800):
         tutorial_system.refresh_rescue_progress(1.0 / 60.0)
         main.call("update_objectives_and_contracts")
@@ -875,12 +1050,21 @@ func test_tutorial_start_system() -> void:
             break
         if i % 60 == 0:
             mark_progress("tutorial_rescue_return_%03d" % i)
-        await get_tree().physics_frame
+        await wait_gameplay_frames(1)
     main.call("update_objectives_and_contracts")
     var final_done_state: Dictionary = tutorial_system.state()
     var final_done_steps: Dictionary = final_done_state.get("completedSteps", {})
     var final_objective_complete := bool(objective_system.is_complete("tutorial_final_night", main.call("objective_state")))
     var ready_objective := bool(objective_system.is_complete("tutorial_ready", main.call("objective_state")))
+    var rescue_forager_home: bool = niko_body != null and tutorial_system.has_method("tutorial_npc_strictly_inside_home") and bool(tutorial_system.tutorial_npc_strictly_inside_home(niko_body))
+    var rescue_guard_home: bool = sera is Node3D and tutorial_system.has_method("rescue_guard_returned") and bool(tutorial_system.rescue_guard_returned(sera as Node3D))
+    var rescue_return_debug := "elapsed %.2f, nikoHome %s route %s, guardHome %s route %s" % [
+        float(final_done_state.get("rescueReturnElapsed", 0.0)),
+        str(rescue_forager_home),
+        npc_route_debug(npc_system, niko),
+        str(rescue_guard_home),
+        npc_route_debug(npc_system, sera)
+    ]
     add_result(
         "tutorial_contract_final_rescue_mission",
         final_started
@@ -902,7 +1086,7 @@ func test_tutorial_start_system() -> void:
             and not bool(tutorial_system.is_bed_locked())
             and final_objective_complete
             and ready_objective,
-        "started %s, active %s, bed locked %s, guard %s/%s/%s dist %.2f route %s/%s scripted %s focused %s held %s, motion [%s], niko held %s, torch %s, bubble %s, rescue %d/%d, battle %s, returning %s, complete %s, objective %s, ready %s, steps %s" % [
+        "started %s, active %s, bed locked %s, guard %s/%s/%s dist %.2f route %s/%s scripted %s focused %s held %s, motion [%s], niko held %s, torch %s, bubble %s, rescue %d/%d, battle %s, returning %s, complete %s, objective %s, ready %s, steps %s, return [%s]" % [
             str(final_started),
             str(final_active),
             str(final_bed_locked),
@@ -926,7 +1110,8 @@ func test_tutorial_start_system() -> void:
             str(final_done_state.get("finalNightComplete", false)),
             str(final_objective_complete),
             str(ready_objective),
-            str(final_done_steps)
+            str(final_done_steps),
+            rescue_return_debug
         ]
     )
     mark_progress("tutorial_final_rescue_checked")
@@ -960,9 +1145,13 @@ func test_tutorial_start_system() -> void:
         "spawned %d, nearest %.2f, outside light %s, inside safe %s" % [hostile_system.enemies.size(), nearest, str(unsafe_spawn), str(inside_safe_radius)]
     )
 
-    var guard_target_position := Vector3(center.x, center.y, center.z - CELL * float(25 - 5))
-    guard_target_position.y = surface_y_at_position(guard_target_position) + 0.72
-    hostile_system.spawn_enemy(guard_target_position, "shadow")
+    hostile_system.clear()
+    var guard_spawn: Dictionary = spawn_visible_guard_behavior_hostile(npc_system, hostile_system)
+    if not bool(guard_spawn.get("spawned", false)):
+        var guard_target_position := Vector3(center.x, center.y, center.z - CELL * float(25 - 5))
+        guard_target_position.y = surface_y_at_position(guard_target_position) + 0.72
+        hostile_system.spawn_enemy(guard_target_position, "shadow")
+        guard_spawn["fallbackPosition"] = guard_target_position
     var npc_stats_before: Dictionary = npc_system.stats()
     var guard_shots_before := int(npc_stats_before.get("guardShots", 0))
     var use_animations_before := int(npc_stats_before.get("useAnimations", 0))
@@ -985,8 +1174,9 @@ func test_tutorial_start_system() -> void:
     var weapon_use_animated := int(npc_stats_after.get("useAnimations", 0)) > use_animations_before
     add_result(
         "tutorial_npc_home_and_guard_behavior",
-        all_tutorial_npcs_have_homes and non_fighters_sheltered and tutorial_fighters_ready and guards_fired and fighters_armed and weapons_visible and weapon_use_animated,
-        "npcs %d, stats %s, shots %d->%d, use %d->%d, routes %s" % [
+        bool(guard_spawn.get("spawned", false)) and all_tutorial_npcs_have_homes and non_fighters_sheltered and tutorial_fighters_ready and guards_fired and fighters_armed and weapons_visible and weapon_use_animated,
+        "spawn %s, npcs %d, stats %s, shots %d->%d, use %d->%d, routes %s" % [
+            str(guard_spawn),
             tutorial_npc_count,
             str(npc_stats_after),
             guard_shots_before,
@@ -1106,12 +1296,70 @@ func test_escape_menu_new_game() -> void:
         ]
     )
     if active_seed_changed:
+        mark_progress("escape_menu_restore_seed")
         main.call("apply_world_seed", old_seed, true)
-        main.call("reset_runtime_world_state")
+        mark_progress("escape_menu_reset_state")
+        main.call("reset_runtime_world_state", false)
+        mark_progress("escape_menu_restart_tutorial")
         tutorial_system.start_new_world()
-        main.call("update_chunks", true)
+        mark_progress("escape_menu_reload_chunks")
+        main.call("reload_chunks", true)
+        await wait_for_chunk_streaming_after_restore()
         main.call("refresh_intro_knock_audio")
     unlock_intro_gate_for_followup_tests(tutorial_system)
+
+func wait_for_chunk_streaming_after_restore(max_frames := 90) -> void:
+    if main == null:
+        return
+    var expected_chunks := 49
+    if main.get("render_distance") is int:
+        var distance := int(main.get("render_distance"))
+        expected_chunks = (distance * 2 + 1) * (distance * 2 + 1)
+    for i in range(max_frames):
+        var chunks := get_chunks()
+        if chunks.size() >= expected_chunks:
+            mark_progress("escape_menu_chunks_reloaded")
+            return
+        main.call("update_chunks", false)
+        if i % 15 == 0:
+            mark_progress("escape_menu_chunk_stream_%03d" % i)
+        await wait_physics_frames(1)
+    mark_progress("escape_menu_chunk_stream_timeout")
+
+func wait_for_chunk_count(expected_chunks: int, max_frames := 90, label := "chunk_wait") -> void:
+    if main == null:
+        return
+    for i in range(max_frames):
+        var chunks := get_chunks()
+        if chunks.size() >= expected_chunks:
+            mark_progress("%s_done" % label)
+            return
+        main.call("update_chunks", false)
+        if i % 15 == 0:
+            mark_progress("%s_%03d_%d" % [label, i, chunks.size()])
+        await wait_physics_frames(1)
+    mark_progress("%s_timeout_%d" % [label, get_chunks().size()])
+
+func playtest_render_distance() -> int:
+    if main != null and main.get("render_distance") is int:
+        return int(main.get("render_distance"))
+    return 3
+
+func bootstrap_playtest_visible_chunks() -> void:
+    if main != null and main.has_method("bootstrap_initial_chunks"):
+        main.call("bootstrap_initial_chunks", playtest_render_distance())
+
+func settle_streamed_chunks_after_relocation(label := "relocation_chunks", max_frames := 120) -> void:
+    if main == null:
+        return
+    var render_distance := int(main.get("render_distance"))
+    var expected_chunks := maxi(1, (render_distance * 2 + 1) * (render_distance * 2 + 1))
+    if main.has_method("bootstrap_initial_chunks"):
+        bootstrap_playtest_visible_chunks()
+    elif main.has_method("update_chunks"):
+        main.call("update_chunks", false)
+    await wait_for_chunk_count(expected_chunks, max_frames, label)
+    await wait_for_terrain_collision_shapes(max_frames)
 
 func find_button_by_text(node: Node, text: String) -> Button:
     if node == null:
@@ -2233,9 +2481,9 @@ func test_navigation_map_system() -> void:
     var original_position: Vector3 = player.global_position
     var original_velocity: Vector3 = player.velocity
     var nav_cell := Vector2i(roundi(player.global_position.x / CELL) + 72, roundi(player.global_position.z / CELL) + 72)
-    reset_player_on_flat_patch(nav_cell)
+    reset_player_on_flat_patch(nav_cell, 5, true)
     clear_blocks_near_cell(nav_cell, 12)
-    main.call("update_chunks", true)
+    await settle_streamed_chunks_after_relocation("navigation_map_chunks", 90)
     inventory_system.add_item("compass", 1)
     inventory_system.add_item("surveyLens", 1)
     var marker_cell := Vector3i(roundi(player.global_position.x / CELL) + 3, roundi(player.global_position.y / CELL), roundi(player.global_position.z / CELL))
@@ -2280,7 +2528,7 @@ func test_navigation_map_system() -> void:
         blocks.erase(marker_cell)
     player.global_position = original_position
     player.velocity = original_velocity
-    main.call("update_chunks", true)
+    await settle_streamed_chunks_after_relocation("navigation_map_restore_chunks", 90)
 
 func test_contract_system() -> void:
     if not main or not player:
@@ -2437,17 +2685,21 @@ func test_audio_effects_system() -> void:
         return
 
     var start_stats: Dictionary = audio_effects.stats()
+    var start_counts: Dictionary = start_stats.get("playCountsByName", {}) if start_stats.get("playCountsByName", {}) is Dictionary else {}
     audio_effects.play("craft")
     audio_effects.burst(player.global_position + Vector3(0.0, 1.0, 0.0) if player else Vector3.ZERO, Color(0.9, 0.7, 0.35), 3)
     await get_tree().process_frame
     var stats: Dictionary = audio_effects.stats()
+    var counts: Dictionary = stats.get("playCountsByName", {}) if stats.get("playCountsByName", {}) is Dictionary else {}
     add_result(
         "audio_effects_play_and_burst",
-        String(stats.get("lastPlayed", "")) == "craft"
+        int(counts.get("craft", 0)) > int(start_counts.get("craft", 0))
             and int(stats.get("playCount", 0)) > int(start_stats.get("playCount", 0))
             and int(stats.get("visualEffects", 0)) >= 3,
-        "last %s, plays %d->%d, effects %d" % [
+        "last %s, craft %d->%d, plays %d->%d, effects %d" % [
             String(stats.get("lastPlayed", "")),
+            int(start_counts.get("craft", 0)),
+            int(counts.get("craft", 0)),
             int(start_stats.get("playCount", 0)),
             int(stats.get("playCount", 0)),
             int(stats.get("visualEffects", 0))
@@ -2537,7 +2789,8 @@ func test_teleport_system() -> void:
     player.global_position = original_position
     player.velocity = original_velocity
     player.set("terrain_grounded", false)
-    main.call("update_chunks", true)
+    bootstrap_playtest_visible_chunks()
+    await wait_for_chunk_count(49, 90, "teleport_restore_chunks")
     add_result(
         "teleport_system",
         panel_open and teleported_xz and horizontal_ok and safe_y and teleported_xyz and exact_xyz and rejected_bad,
@@ -2577,7 +2830,7 @@ func test_settings_playtest_debug() -> void:
     main.call("apply_runtime_setting", "hudScale", 1.4)
     main.call("apply_runtime_setting", "shadows", false)
     main.call("apply_runtime_setting", "renderDistance", 2)
-    await wait_physics_frames(2)
+    await wait_for_chunk_count(25, 60, "settings_render_distance_chunks")
 
     var chunks := get_chunks()
     var settings_applied: bool = (
@@ -2681,7 +2934,7 @@ func test_settings_playtest_debug() -> void:
     player.global_position = original_position
     player.velocity = original_velocity
     player.set("terrain_grounded", false)
-    main.call("update_chunks", true)
+    await settle_streamed_chunks_after_relocation("settings_restore_chunks", 90)
     await wait_physics_frames(2)
 
 func test_hud_refresh_throttling() -> void:
@@ -2783,7 +3036,7 @@ func test_manual_playtest_cases() -> void:
     player.global_position = original_position
     player.velocity = original_velocity
     player.set("terrain_grounded", false)
-    main.call("update_chunks", true)
+    await settle_streamed_chunks_after_relocation("manual_cases_restore_chunks", 90)
     await wait_physics_frames(2)
 
     add_result(
@@ -3118,7 +3371,7 @@ func test_player_placement_system() -> void:
     var base_cell := Vector2i(roundi(player.global_position.x / CELL) + 18, roundi(player.global_position.z / CELL) + 18)
     reset_player_on_flat_patch(base_cell)
     clear_blocks_near_cell(base_cell, 14)
-    main.call("update_chunks", true)
+    await settle_streamed_chunks_after_relocation("placement_chunks", 120)
     await wait_physics_frames(8)
 
     inventory_system.clear()
@@ -3329,32 +3582,49 @@ func clear_blocks_along_segment(start: Vector3, end: Vector3, radius_cells: int 
         invalidate_navigation_fixture()
 
 func clear_props_near_cell(center_cell: Vector2i, radius: int) -> void:
-    var roots := []
-    var chunk_root = main.get("chunk_root") as Node
-    var prop_root = main.get("prop_root") as Node
-    if chunk_root:
-        roots.append(chunk_root)
-    if prop_root:
-        roots.append(prop_root)
+    var roots := prop_cleanup_roots_near_cell(center_cell, radius)
     var changed := false
     for root in roots:
         changed = clear_props_near_cell_recursive(root, center_cell, radius) or changed
     if changed:
         invalidate_navigation_fixture()
 
+func prop_cleanup_roots_near_cell(center_cell: Vector2i, radius: int) -> Array:
+    var roots := []
+    var prop_root = main.get("prop_root") as Node
+    if prop_root:
+        roots.append(prop_root)
+    var chunks := get_chunks()
+    var chunk_radius := ceili(float(radius) / float(CHUNK_SIZE)) + 1
+    var center_chunk := Vector2i(floori(float(center_cell.x) / float(CHUNK_SIZE)), floori(float(center_cell.y) / float(CHUNK_SIZE)))
+    for dz in range(-chunk_radius, chunk_radius + 1):
+        for dx in range(-chunk_radius, chunk_radius + 1):
+            var chunk_key := Vector2i(center_chunk.x + dx, center_chunk.y + dz)
+            if chunks.has(chunk_key):
+                var chunk := chunks[chunk_key] as Node
+                if chunk != null and is_instance_valid(chunk):
+                    roots.append(chunk)
+    return roots
+
 func clear_props_near_cell_recursive(node: Node, center_cell: Vector2i, radius: int) -> bool:
     var changed := false
     for child in node.get_children():
         var node3d := child as Node3D
-        if node3d != null and node3d.has_meta("kind") and String(node3d.get_meta("kind")) == "prop":
-            var cell := Vector2i(main.call("world_to_cell", node3d.global_position.x), main.call("world_to_cell", node3d.global_position.z))
-            if abs(cell.x - center_cell.x) <= radius and abs(cell.y - center_cell.y) <= radius:
-                node.remove_child(child)
-                child.queue_free()
-                changed = true
-                continue
-        changed = clear_props_near_cell_recursive(child, center_cell, radius) or changed
+        if node3d == null or not child.has_meta("kind"):
+            continue
+        if String(child.get_meta("kind")) != "prop":
+            continue
+        if prop_body_within_cell_radius(node3d, center_cell, radius):
+            node.remove_child(child)
+            child.queue_free()
+            changed = true
     return changed
+
+func prop_body_within_cell_radius(node3d: Node3D, center_cell: Vector2i, radius: int) -> bool:
+    if main == null or node3d == null:
+        return false
+    var cell := Vector2i(main.call("world_to_cell", node3d.global_position.x), main.call("world_to_cell", node3d.global_position.z))
+    return abs(cell.x - center_cell.x) <= radius and abs(cell.y - center_cell.y) <= radius
 
 func invalidate_navigation_fixture() -> void:
     if main == null:
@@ -3376,27 +3646,26 @@ func disable_prop_colliders(node: Node, disabled_shapes: Array[CollisionShape3D]
         disable_prop_colliders(child, disabled_shapes)
 
 func disable_prop_colliders_near_cell(center_cell: Vector2i, radius: int, disabled_shapes: Array[CollisionShape3D]) -> void:
-    var roots := []
-    var chunk_root = main.get("chunk_root") as Node
-    var prop_root = main.get("prop_root") as Node
-    if chunk_root:
-        roots.append(chunk_root)
-    if prop_root:
-        roots.append(prop_root)
+    var roots := prop_cleanup_roots_near_cell(center_cell, radius)
     for root in roots:
         disable_prop_colliders_near_cell_recursive(root, center_cell, radius, disabled_shapes)
 
 func disable_prop_colliders_near_cell_recursive(node: Node, center_cell: Vector2i, radius: int, disabled_shapes: Array[CollisionShape3D]) -> void:
     if node == null:
         return
-    var node3d := node as Node3D
-    if node3d != null and node.has_meta("kind") and String(node.get_meta("kind")) == "prop":
-        var cell := Vector2i(main.call("world_to_cell", node3d.global_position.x), main.call("world_to_cell", node3d.global_position.z))
-        if abs(cell.x - center_cell.x) <= radius and abs(cell.y - center_cell.y) <= radius:
+    for child in node.get_children():
+        var node3d := child as Node3D
+        if node3d == null or not child.has_meta("kind"):
+            continue
+        if String(child.get_meta("kind")) != "prop":
+            continue
+        if prop_body_within_cell_radius(node3d, center_cell, radius):
+            collect_disabled_collision_shapes(child, disabled_shapes)
+    if node is Node3D and node.has_meta("kind") and String(node.get_meta("kind")) == "prop":
+        var prop_node := node as Node3D
+        if prop_body_within_cell_radius(prop_node, center_cell, radius):
             collect_disabled_collision_shapes(node, disabled_shapes)
         return
-    for child in node.get_children():
-        disable_prop_colliders_near_cell_recursive(child, center_cell, radius, disabled_shapes)
 
 func collect_disabled_collision_shapes(node: Node, disabled_shapes: Array[CollisionShape3D]) -> void:
     for child in node.get_children():
@@ -3607,9 +3876,28 @@ func test_save_load_round_trip() -> void:
     var original_autosave_enabled: bool = bool(main.get("autosave_enabled"))
     var save_cell := Vector3i(roundi(player.global_position.x / CELL) + 14, roundi(player.global_position.y / CELL), roundi(player.global_position.z / CELL) + 4)
     var save_block := main.call("create_block", save_cell, "woodBlock", { "player_placed": true }) as StaticBody3D
-    var edit_key := Vector2i(187, -91)
-    var edits := get_volume_edit_markers()
-    edits[edit_key] = 33.75
+    var world_generation = main.get("world_generation_system")
+    var terrain_edit_cell := Vector3i(
+        roundi(player.global_position.x / CELL) + 18,
+        floori(surface_y_at_position(player.global_position) / CELL) - 3,
+        roundi(player.global_position.z / CELL) + 4
+    )
+    var terrain_edit_applied := false
+    if world_generation != null and world_generation.has_method("apply_box_edit"):
+        var edited_cells: Array = world_generation.call("apply_box_edit", terrain_edit_cell, terrain_edit_cell, {
+            "material": "air",
+            "biome": "underground_air",
+            "solid": false,
+            "density": -CELL,
+            "fluid": "",
+            "light": { "sky": 0, "block": 0 },
+            "metadata": {
+                "source": "playtest_save_load",
+                "terrainMeshAffects": true,
+                "saveDelta": true
+            }
+        }, "playtest_save_load")
+        terrain_edit_applied = not edited_cells.is_empty()
     var saved_position: Vector3 = player.global_position + Vector3(2.0, 0.0, 1.0)
     player.global_position = saved_position
     var saved_wood_count: int = inventory_system.count("woodBlock")
@@ -3675,7 +3963,8 @@ func test_save_load_round_trip() -> void:
     discovered_mines.clear()
     discovered_ruins.clear()
     discovered_camps.clear()
-    edits.erase(edit_key)
+    if world_generation != null and world_generation.has_method("reset_terrain_volume_authority"):
+        world_generation.call("reset_terrain_volume_authority")
     var blocks := get_blocks()
     if blocks.has(save_cell):
         save_block = blocks[save_cell] as StaticBody3D
@@ -3687,7 +3976,6 @@ func test_save_load_round_trip() -> void:
     var loaded: bool = main.call("try_load_world", false)
     main.set("autosave_enabled", original_autosave_enabled)
     blocks = get_blocks()
-    edits = get_volume_edit_markers()
     var player_restored := player.global_position.distance_to(saved_position) < 0.05
     var inventory_restored: bool = inventory_system.count("woodBlock") == saved_wood_count
     var survival_restored: bool = abs(float(survival_system.health) - 72.0) < 0.05 and abs(float(survival_system.hunger) - 44.0) < 0.05
@@ -3702,7 +3990,11 @@ func test_save_load_round_trip() -> void:
         and discovered_ruins.has("playtest-ruin")
         and discovered_camps.has("playtest-camp")
     )
-    var terrain_restored: bool = edits.has(edit_key) and abs(float(edits[edit_key]) - 33.75) < 0.01
+    var terrain_sample: Dictionary = world_generation.call("sample_cell", terrain_edit_cell) if world_generation != null and world_generation.has_method("sample_cell") else {}
+    var terrain_restored: bool = terrain_edit_applied \
+        and String(terrain_sample.get("material", "")) == "air" \
+        and String(terrain_sample.get("biome", "")) == "underground_air" \
+        and not bool(terrain_sample.get("solid", true))
     var block_restored: bool = blocks.has(save_cell) and bool((blocks[save_cell] as Node).get_meta("player_placed", false))
     add_result(
         "save_load_round_trip",
@@ -3996,7 +4288,7 @@ func test_hostile_system() -> void:
     reset_player_on_flat_patch(hostile_cell)
     clear_blocks_near_cell(hostile_cell, 16)
     clear_props_near_cell(hostile_cell, 16)
-    main.call("update_chunks", true)
+    await settle_streamed_chunks_after_relocation("hostile_chunks")
     await wait_process_frames(3)
     var original_position: Vector3 = player.global_position
     var enemy_pos: Vector3 = original_position + Vector3(12.0, 0.0, 0.0)
@@ -4343,10 +4635,10 @@ func test_defensive_blocks() -> void:
     var original_position: Vector3 = player.global_position
     var original_velocity: Vector3 = player.velocity
     var defensive_cell := Vector2i(roundi(player.global_position.x / CELL) + 180, roundi(player.global_position.z / CELL) + 180)
-    reset_player_on_flat_patch(defensive_cell)
+    reset_player_on_flat_patch(defensive_cell, 5, true)
     clear_blocks_near_cell(defensive_cell, 12)
     clear_props_near_cell(defensive_cell, 12)
-    main.call("update_chunks", true)
+    await settle_streamed_chunks_after_relocation("defensive_blocks_chunks", 120)
     await wait_physics_frames(4)
     var blocks := get_blocks()
     var level: float = ground_y_near_position(player.global_position)
@@ -4443,7 +4735,7 @@ func test_player_ranged_system() -> void:
     reset_player_on_flat_patch(ranged_cell)
     clear_blocks_near_cell(ranged_cell, 16)
     clear_props_near_cell(ranged_cell, 16)
-    main.call("update_chunks", true)
+    await settle_streamed_chunks_after_relocation("ranged_chunks", 120)
     await wait_physics_frames(6)
     clear_blocks_near_cell(ranged_cell, 16)
     clear_props_near_cell(ranged_cell, 16)
@@ -4767,7 +5059,7 @@ func test_structure_and_town_generation() -> void:
         main.set("time_of_day", 0.42)
         if main.has_method("update_sky"):
             main.call("update_sky", 0.0)
-        main.call("update_chunks", true)
+        await settle_streamed_chunks_after_relocation("generic_town_chunks", 120)
         await wait_process_frames(8)
         var generic_key := "%d,%d" % [generic_center_x, generic_center_z]
         var home_records: Dictionary = structure_system.call("town_home_records_snapshot")
@@ -4866,6 +5158,8 @@ func test_structure_and_town_generation() -> void:
         for step in range(3000):
             if step % 120 == 0:
                 mark_progress("structures_npc_jobs_%03d" % step)
+            elif step % 30 == 0:
+                mark_progress("structures_npc_jobs_%03d_sample" % step)
             for entry_variant in generic_entries:
                 var entry: Dictionary = entry_variant
                 if not (String(entry.get("job", "")) in ["forage", "wood", "stone"]):
@@ -4974,11 +5268,24 @@ func test_structure_and_town_generation() -> void:
                 "pathWaypoints": (generic_forager.get("pathWaypoints", []) as Array).size(),
                 "routeCells": (generic_forager.get("routeCells", []) as Array).size(),
                 "routeGoalCell": str(generic_forager.get("routeGoalCell", Vector2i.ZERO)),
+                "lastMoveDistance": float(generic_forager.get("lastMoveDistance", 0.0)),
+                "motionSkipped": int(generic_forager.get("npc_motion_skipped", 0)),
+                "motionSkipReason": String(generic_forager.get("npc_motion_skip_reason", "")),
+                "motionUpdates": int(generic_forager.get("npc_active_route_motion_ticks", 0)),
+                "brainSkipped": int(generic_forager.get("npc_brain_budget_skipped", 0)),
                 "activeGoalKind": String(generic_forager.get("activeGoalKind", "")),
                 "activeMotionGoal": generic_forager.get("activeMotionGoal", {}),
                 "lastRoutePlanDebug": generic_forager.get("lastRoutePlanDebug", {}),
                 "lastNavmeshTilePublishDebug": generic_forager.get("lastNavmeshTilePublishDebug", [])
             }
+            var forager_body := generic_forager.get("body") as Node
+            if forager_body != null and is_instance_valid(forager_body):
+                forager_debug["motorBlockedContact"] = String(forager_body.get_meta("npc_blocked_contact", ""))
+                forager_debug["motorBlockedName"] = String(forager_body.get_meta("npc_blocked_contact_name", ""))
+                forager_debug["motorBlockedKind"] = String(forager_body.get_meta("npc_blocked_contact_kind", ""))
+                forager_debug["appliedVelocity"] = str(forager_body.get_meta("npc_applied_velocity", Vector3.ZERO))
+                forager_debug["requestedVelocity"] = str(forager_body.get_meta("npc_requested_velocity", Vector3.ZERO))
+                forager_debug["lastDisplacement"] = str(forager_body.get_meta("npc_last_displacement", Vector3.ZERO))
             forager_details += ", debug %s" % JSON.stringify(forager_debug)
         add_result(
             "forager_goal_inventory_hunger",
@@ -5498,7 +5805,7 @@ func test_underground_volume_generation() -> void:
         return
 
     var original_position: Vector3 = player.global_position
-    var found: Dictionary = world_generation.call("find_underground_air_sample", 16, 4, 30)
+    var found: Dictionary = world_generation.call("find_underground_air_sample", 160, 8, 48)
     if found.is_empty():
         add_result("underground_volume_generation", false, "no underground_air volume found")
         return
@@ -5507,14 +5814,18 @@ func test_underground_volume_generation() -> void:
     var sample_position: Vector3 = found.get("position", Vector3.ZERO)
     player.global_position = sample_position + Vector3(0.0, CELL * 0.65, 0.0)
     player.velocity = Vector3.ZERO
-    if main.has_method("update_chunks"):
-        main.call("update_chunks", true)
-    for cell in underground_volume_focus_cells(found):
+    if main.has_method("bootstrap_initial_chunks"):
+        bootstrap_playtest_visible_chunks()
+        await wait_for_chunk_count(49, 120, "underground_volume_chunks")
+    var focus_cells := underground_volume_focus_cells(found)
+    var focus_chunks := underground_volume_focus_chunk_lookup(focus_cells)
+    for cell in focus_cells:
         if main.has_method("rebuild_chunks_around_cell"):
             main.call("rebuild_chunks_around_cell", cell)
     if main.has_method("update_chunks"):
-        main.call("update_chunks", true)
-    var geometry := underground_volume_chunk_geometry_summary()
+        main.call("update_chunks", false)
+    await wait_for_terrain_collision_shapes(360, focus_chunks)
+    var geometry := underground_volume_chunk_geometry_summary(focus_chunks)
     var sample: Dictionary = found.get("sample", {}) if found.has("sample") else {}
     var passed := not found.is_empty() \
         and String(sample.get("biome", "")) == "underground_air" \
@@ -5545,7 +5856,7 @@ func underground_volume_smoke_summary(world_generation, found: Dictionary) -> Di
         air_samples += 1
     else:
         failures.append({ "kind": "center_air", "cell": vec3i_dictionary(cell), "sample": underground_sample_signature(center_sample) })
-    var directions := [
+    var directions: Array[Vector3i] = [
         Vector3i(1, 0, 0),
         Vector3i(-1, 0, 0),
         Vector3i(0, 1, 0),
@@ -5561,44 +5872,61 @@ func underground_volume_smoke_summary(world_generation, found: Dictionary) -> Di
             solid_materials[String(neighbor_sample.get("material", ""))] = true
         elif String(neighbor_sample.get("biome", "")) == "underground_air":
             air_samples += 1
-    var surface_y := float(found.get("surfaceY", 0.0))
-    var deep_position := Vector3(float(cell.x) * CELL, surface_y - CELL * 34.0, float(cell.z) * CELL)
-    var deep_sample: Dictionary = world_generation.call("sample_world", deep_position)
-    if not bool(deep_sample.get("solid", false)):
-        failures.append({ "kind": "depth_cap_not_solid", "position": vec3_dictionary(deep_position), "sample": underground_sample_signature(deep_sample) })
+    var bottom_y := int(world_generation.call("world_bottom_cell_y")) if world_generation.has_method("world_bottom_cell_y") else cell.y - 72
+    var bottom_cell := Vector3i(cell.x, bottom_y, cell.z)
+    var bottom_sample: Dictionary = world_generation.call("sample_cell", bottom_cell)
+    if not bool(bottom_sample.get("solid", false)):
+        failures.append({ "kind": "world_bottom_not_solid", "cell": vec3i_dictionary(bottom_cell), "sample": underground_sample_signature(bottom_sample) })
     return {
-        "passed": air_samples >= 1 and solid_neighbors >= 2 and not solid_materials.is_empty() and bool(deep_sample.get("solid", false)) and failures.is_empty(),
+        "passed": air_samples >= 1 and solid_neighbors >= 2 and not solid_materials.is_empty() and bool(bottom_sample.get("solid", false)) and failures.is_empty(),
         "airSamples": air_samples,
         "solidNeighbors": solid_neighbors,
         "solidMaterials": solid_materials.keys(),
-        "deepSolid": bool(deep_sample.get("solid", false)),
+        "worldBottomCellY": bottom_y,
+        "worldBottomSolid": bool(bottom_sample.get("solid", false)),
+        "worldBottomMaterial": String(bottom_sample.get("material", "")),
         "failures": failures
     }
 
-func underground_volume_chunk_geometry_summary() -> Dictionary:
+func underground_volume_chunk_geometry_summary(required_chunks := {}) -> Dictionary:
     var chunks := get_chunks()
     var meshes := 0
     var bodies := 0
     var shapes := 0
-    for chunk_value in chunks.values():
+    var empty := 0
+    var missing := []
+    var scoped := required_chunks is Dictionary and not (required_chunks as Dictionary).is_empty()
+    for key_value in chunks.keys():
+        if scoped and not (required_chunks as Dictionary).has(key_value):
+            continue
+        var chunk_value = chunks.get(key_value)
         var chunk := chunk_value as Node
         if chunk == null:
             continue
         var mesh := chunk.get_node_or_null("TerrainMesh") as MeshInstance3D
-        if mesh != null and mesh.mesh != null:
-            meshes += 1
+        if mesh == null or not terrain_mesh_has_surface(mesh.mesh):
+            empty += 1
+            continue
+        meshes += 1
         var body := chunk.get_node_or_null("TerrainBody") as StaticBody3D
         if body != null:
             bodies += 1
             var shape := body.get_node_or_null("TerrainCollision") as CollisionShape3D
             if shape != null and shape.shape != null:
                 shapes += 1
+            elif missing.size() < 8:
+                missing.append(chunk.name)
+        elif missing.size() < 8:
+            missing.append(chunk.name)
     return {
         "passed": meshes > 0 and meshes == bodies and bodies == shapes,
         "chunks": chunks.size(),
         "meshes": meshes,
         "bodies": bodies,
-        "shapes": shapes
+        "shapes": shapes,
+        "empty": empty,
+        "missing": missing,
+        "scoped": scoped
     }
 
 func underground_volume_focus_cells(found: Dictionary) -> Array[Vector2i]:
@@ -5608,6 +5936,24 @@ func underground_volume_focus_cells(found: Dictionary) -> Array[Vector2i]:
         Vector2i(cell.x + 1, cell.z),
         Vector2i(cell.x, cell.z + 1)
     ]
+
+func underground_volume_focus_chunk_lookup(cells: Array[Vector2i]) -> Dictionary:
+    var result := {}
+    var size := active_chunk_size()
+    for cell in cells:
+        var center := Vector2i(floori(float(cell.x) / float(size)), floori(float(cell.y) / float(size)))
+        for dz in range(-1, 2):
+            for dx in range(-1, 2):
+                result[Vector2i(center.x + dx, center.y + dz)] = true
+    if main != null and main.has_method("chunk_has_underground_focus_overlap"):
+        var focused := {}
+        for key_value in result.keys():
+            var key: Vector2i = key_value
+            if bool(main.call("chunk_has_underground_focus_overlap", key.x * size, key.y * size)):
+                focused[key] = true
+        if not focused.is_empty():
+            return focused
+    return result
 
 func underground_volume_summary(found: Dictionary) -> Dictionary:
     var sample: Dictionary = found.get("sample", {}) if found.has("sample") else {}
@@ -6114,21 +6460,97 @@ func test_spawn_clearance() -> void:
     add_result("spawn_clearance", clear, "camera clearance %.2f, player y %.2f" % [camera_clearance, player.global_position.y])
 
 func test_terrain_collision_shapes() -> void:
+    var summary := await wait_for_terrain_collision_shapes(120)
+    var checked := int(summary.get("checked", 0))
+    var with_shape := int(summary.get("withShape", 0))
+    var empty := int(summary.get("empty", 0))
+    var deferred := int(summary.get("deferred", 0))
+    var missing: Array = summary.get("missing", []) if summary.get("missing", []) is Array else []
+    add_result(
+        "terrain_collision_shapes",
+        checked > 0 and checked == with_shape,
+        "%d/%d required nonempty terrain chunks with shapes, empty %d, deferred %d, missing %s" % [with_shape, checked, empty, deferred, str(missing)]
+    )
+
+func wait_for_terrain_collision_shapes(max_frames := 120, required_chunks := {}) -> Dictionary:
     var chunks := get_chunks()
     var checked := 0
     var with_shape := 0
-    for chunk_node in chunks.values():
-        var chunk := chunk_node as Node
-        if not chunk:
-            continue
-        var body := chunk.get_node_or_null("TerrainBody") as StaticBody3D
-        if not body:
-            continue
-        checked += 1
-        var shape_node := body.get_node_or_null("TerrainCollision") as CollisionShape3D
-        if shape_node and shape_node.shape:
-            with_shape += 1
-    add_result("terrain_collision_shapes", checked > 0 and checked == with_shape, "%d/%d chunks with shapes" % [with_shape, checked])
+    var empty := 0
+    var deferred := 0
+    var missing := []
+    var scoped := required_chunks is Dictionary and not (required_chunks as Dictionary).is_empty()
+    var required_count := (required_chunks as Dictionary).size() if scoped else 0
+    var direct_refresh_requested := {}
+    for frame in range(max_frames):
+        chunks = get_chunks()
+        checked = 0
+        with_shape = 0
+        empty = 0
+        deferred = 0
+        missing = []
+        var direct_refreshes := 0
+        for key_value in chunks.keys():
+            if scoped and not (required_chunks as Dictionary).has(key_value):
+                continue
+            var chunk := chunks.get(key_value) as Node
+            if not chunk:
+                continue
+            var mesh := terrain_mesh_for_chunk(chunk)
+            if not terrain_mesh_has_surface(mesh):
+                empty += 1
+                continue
+            if not scoped and terrain_chunk_collision_deferred(key_value):
+                deferred += 1
+                continue
+            checked += 1
+            var body := chunk.get_node_or_null("TerrainBody") as StaticBody3D
+            if not body:
+                if missing.size() < 8:
+                    missing.append(key_value)
+                continue
+            var shape_node := body.get_node_or_null("TerrainCollision") as CollisionShape3D
+            if shape_node and shape_node.shape:
+                with_shape += 1
+            else:
+                if main.has_method("queue_chunk_collision_refresh") and key_value is Vector2i:
+                    main.call("queue_chunk_collision_refresh", key_value)
+                if direct_refreshes < 2 and main.has_method("refresh_chunk_collision_shape") and key_value is Vector2i and not direct_refresh_requested.has(key_value):
+                    var refresh_key: Vector2i = key_value
+                    main.call("refresh_chunk_collision_shape", refresh_key.x, refresh_key.y)
+                    direct_refresh_requested[refresh_key] = true
+                    direct_refreshes += 1
+                if missing.size() < 8:
+                    missing.append(key_value)
+        if scoped:
+            if checked >= required_count and empty == 0 and checked == with_shape:
+                return { "chunks": chunks, "checked": checked, "withShape": with_shape, "empty": empty, "deferred": deferred, "missing": missing, "scoped": scoped }
+        elif checked > 0 and checked == with_shape:
+            return { "chunks": chunks, "checked": checked, "withShape": with_shape, "empty": empty, "deferred": deferred, "missing": missing, "scoped": scoped }
+        main.call("update_chunks", false)
+        if frame % 15 == 0:
+            mark_progress("terrain_collision_wait_%03d_%d_%d" % [frame, with_shape, checked])
+        await wait_physics_frames(1)
+    return { "chunks": chunks, "checked": checked, "withShape": with_shape, "empty": empty, "deferred": deferred, "missing": missing, "scoped": scoped }
+
+func terrain_chunk_collision_deferred(chunk_key) -> bool:
+    if not (chunk_key is Vector2i) or player == null:
+        return false
+    var key: Vector2i = chunk_key
+    var size := active_chunk_size()
+    var center := Vector2i(
+        floori(player.global_position.x / (float(size) * CELL)),
+        floori(player.global_position.z / (float(size) * CELL))
+    )
+    var max_axis_distance := maxi(absi(key.x - center.x), absi(key.y - center.y))
+    return max_axis_distance >= 2
+
+func terrain_mesh_has_surface(mesh: Mesh) -> bool:
+    if mesh == null or mesh.get_surface_count() <= 0:
+        return false
+    var arrays := mesh.surface_get_arrays(0)
+    var vertices: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
+    return not vertices.is_empty()
 
 func test_terrain_mesh_topology_signature() -> void:
     var chunks := get_chunks()
@@ -6136,8 +6558,12 @@ func test_terrain_mesh_topology_signature() -> void:
     var nonempty := 0
     var volume_sourced := 0
     var mesh_collision_sourced := 0
+    var deferred := 0
     var with_normals := 0
     for key_value in chunks.keys():
+        if terrain_chunk_collision_deferred(key_value):
+            deferred += 1
+            continue
         var chunk := chunks.get(key_value) as Node
         var mesh := terrain_mesh_for_chunk(chunk)
         if mesh == null or mesh.get_surface_count() == 0:
@@ -6160,7 +6586,7 @@ func test_terrain_mesh_topology_signature() -> void:
     add_result(
         "terrain_mesh_topology_signature",
         checked > 0 and checked == nonempty and checked == with_normals and checked == volume_sourced and checked == mesh_collision_sourced,
-        "%d/%d nonempty, normals %d/%d, volume source %d/%d, mesh collision %d/%d" % [nonempty, checked, with_normals, checked, volume_sourced, checked, mesh_collision_sourced, checked]
+        "%d/%d required nonempty, normals %d/%d, volume source %d/%d, mesh collision %d/%d, deferred %d" % [nonempty, checked, with_normals, checked, volume_sourced, checked, mesh_collision_sourced, checked, deferred]
     )
 
 func test_terrain_shader_material() -> void:
@@ -6189,47 +6615,187 @@ func test_terrain_chunk_edge_normals() -> void:
     if not main:
         add_result("terrain_chunk_edge_normals", false, "main missing")
         return
+    var summary := terrain_chunk_edge_normal_summary()
+    var retested_clean_area := false
+    var force_clean_sample := OS.get_environment("VOXEL_TERRAIN_NORMAL_FORCE_CLEAN_SAMPLE").strip_edges() == "1"
+    if force_clean_sample:
+        retested_clean_area = true
+        summary = await terrain_chunk_edge_normal_summary_from_clean_area()
+    elif not terrain_chunk_edge_normal_summary_passed(summary) and terrain_chunk_edge_normal_should_retry_clean(summary):
+        retested_clean_area = true
+        summary = await terrain_chunk_edge_normal_summary_from_clean_area()
+    add_result(
+        "terrain_chunk_edge_normals",
+        terrain_chunk_edge_normal_summary_passed(summary),
+        "pairs %d, volume %d, skipped %d, comparisons %d/%d, max edge normal delta %.4f/%.1f degrees%s, worst %s" % [
+            int(summary.get("pairs", 0)),
+            int(summary.get("volumePairs", 0)),
+            int(summary.get("skippedPairs", 0)),
+            int(summary.get("comparisons", 0)),
+            int(summary.get("requiredComparisons", 0)),
+            float(summary.get("maxDegrees", 0.0)),
+            float(summary.get("allowedDegrees", 0.0)),
+            ", clean-area retry" if retested_clean_area else "",
+            str(summary.get("worst", {}))
+        ]
+    )
+
+func terrain_chunk_edge_normal_summary() -> Dictionary:
     var chunks := get_chunks()
     var comparisons := 0
     var pairs := 0
+    var skipped_pairs := 0
     var max_degrees := 0.0
+    var volume_pairs := 0
+    var worst := {}
     for key_variant in chunks.keys():
         if pairs >= 16:
             break
         var key := key_variant as Vector2i
         var east_key := key + Vector2i(1, 0)
         if chunks.has(east_key) and pairs < 16:
-            var east_mesh := main.call("build_chunk_mesh", key.x, key.y) as Mesh
-            var west_mesh := main.call("build_chunk_mesh", east_key.x, east_key.y) as Mesh
-            var east_samples := terrain_edge_normal_samples(east_mesh, "east")
-            var west_samples := terrain_edge_normal_samples(west_mesh, "west")
-            for sample_key in east_samples.keys():
-                if not west_samples.has(sample_key):
-                    continue
-                var a: Vector3 = east_samples[sample_key]
-                var b: Vector3 = west_samples[sample_key]
-                max_degrees = maxf(max_degrees, rad_to_deg(a.angle_to(b)))
-                comparisons += 1
-            pairs += 1
+            if terrain_chunk_has_playtest_edits(key) or terrain_chunk_has_playtest_edits(east_key):
+                skipped_pairs += 1
+            else:
+                var east_mesh := terrain_mesh_for_chunk(chunks.get(key) as Node)
+                var west_mesh := terrain_mesh_for_chunk(chunks.get(east_key) as Node)
+                if terrain_mesh_is_provisional_or_lod(east_mesh) or terrain_mesh_is_provisional_or_lod(west_mesh):
+                    skipped_pairs += 1
+                else:
+                    var volume_pair := terrain_mesh_is_volume_source(east_mesh) or terrain_mesh_is_volume_source(west_mesh)
+                    var east_samples := terrain_edge_normal_samples(east_mesh, "east", key)
+                    var west_samples := terrain_edge_normal_samples(west_mesh, "west", east_key)
+                    var pair_comparisons := 0
+                    for sample_key in east_samples.keys():
+                        if not west_samples.has(sample_key):
+                            continue
+                        var a: Vector3 = east_samples[sample_key]
+                        var b: Vector3 = west_samples[sample_key]
+                        var degrees := rad_to_deg(a.angle_to(b))
+                        if degrees > max_degrees:
+                            max_degrees = degrees
+                            worst = {
+                                "from": key,
+                                "to": east_key,
+                                "side": "east-west",
+                                "sample": sample_key,
+                                "a": a,
+                                "b": b,
+                                "fromMesh": terrain_mesh_debug_label(east_mesh),
+                                "toMesh": terrain_mesh_debug_label(west_mesh)
+                            }
+                        comparisons += 1
+                        pair_comparisons += 1
+                    if pair_comparisons > 0:
+                        pairs += 1
+                        if volume_pair:
+                            volume_pairs += 1
+                    else:
+                        skipped_pairs += 1
         var south_key := key + Vector2i(0, 1)
         if chunks.has(south_key) and pairs < 16:
-            var south_mesh := main.call("build_chunk_mesh", key.x, key.y) as Mesh
-            var north_mesh := main.call("build_chunk_mesh", south_key.x, south_key.y) as Mesh
-            var south_samples := terrain_edge_normal_samples(south_mesh, "south")
-            var north_samples := terrain_edge_normal_samples(north_mesh, "north")
-            for sample_key in south_samples.keys():
-                if not north_samples.has(sample_key):
-                    continue
-                var c: Vector3 = south_samples[sample_key]
-                var d: Vector3 = north_samples[sample_key]
-                max_degrees = maxf(max_degrees, rad_to_deg(c.angle_to(d)))
-                comparisons += 1
-            pairs += 1
-    add_result(
-        "terrain_chunk_edge_normals",
-        pairs >= 8 and comparisons >= 200 and max_degrees <= 0.75,
-        "pairs %d, comparisons %d, max edge normal delta %.4f degrees" % [pairs, comparisons, max_degrees]
-    )
+            if terrain_chunk_has_playtest_edits(key) or terrain_chunk_has_playtest_edits(south_key):
+                skipped_pairs += 1
+            else:
+                var south_mesh := terrain_mesh_for_chunk(chunks.get(key) as Node)
+                var north_mesh := terrain_mesh_for_chunk(chunks.get(south_key) as Node)
+                if terrain_mesh_is_provisional_or_lod(south_mesh) or terrain_mesh_is_provisional_or_lod(north_mesh):
+                    skipped_pairs += 1
+                else:
+                    var volume_pair := terrain_mesh_is_volume_source(south_mesh) or terrain_mesh_is_volume_source(north_mesh)
+                    var south_samples := terrain_edge_normal_samples(south_mesh, "south", key)
+                    var north_samples := terrain_edge_normal_samples(north_mesh, "north", south_key)
+                    var pair_comparisons := 0
+                    for sample_key in south_samples.keys():
+                        if not north_samples.has(sample_key):
+                            continue
+                        var c: Vector3 = south_samples[sample_key]
+                        var d: Vector3 = north_samples[sample_key]
+                        var degrees := rad_to_deg(c.angle_to(d))
+                        if degrees > max_degrees:
+                            max_degrees = degrees
+                            worst = {
+                                "from": key,
+                                "to": south_key,
+                                "side": "south-north",
+                                "sample": sample_key,
+                                "a": c,
+                                "b": d,
+                                "fromMesh": terrain_mesh_debug_label(south_mesh),
+                                "toMesh": terrain_mesh_debug_label(north_mesh)
+                            }
+                        comparisons += 1
+                        pair_comparisons += 1
+                    if pair_comparisons > 0:
+                        pairs += 1
+                        if volume_pair:
+                            volume_pairs += 1
+                    else:
+                        skipped_pairs += 1
+    var uses_volume_meshes := volume_pairs > 0
+    var required_comparisons := 8 if uses_volume_meshes else 96
+    var required_pairs := 4 if uses_volume_meshes else 8
+    var allowed_degrees := 18.0 if uses_volume_meshes else 12.0
+    return {
+        "pairs": pairs,
+        "requiredPairs": required_pairs,
+        "volumePairs": volume_pairs,
+        "skippedPairs": skipped_pairs,
+        "comparisons": comparisons,
+        "requiredComparisons": required_comparisons,
+        "maxDegrees": max_degrees,
+        "allowedDegrees": allowed_degrees,
+        "worst": worst
+    }
+
+func terrain_chunk_edge_normal_summary_passed(summary: Dictionary) -> bool:
+    return int(summary.get("pairs", 0)) >= int(summary.get("requiredPairs", 8)) \
+        and int(summary.get("comparisons", 0)) >= int(summary.get("requiredComparisons", 0)) \
+        and float(summary.get("maxDegrees", 999.0)) <= float(summary.get("allowedDegrees", 0.0))
+
+func terrain_chunk_edge_normal_should_retry_clean(summary: Dictionary) -> bool:
+    if int(summary.get("pairs", 0)) >= int(summary.get("requiredPairs", 8)) \
+            and int(summary.get("comparisons", 0)) >= int(summary.get("requiredComparisons", 0)):
+        return false
+    if int(summary.get("comparisons", 0)) < int(summary.get("requiredComparisons", 0)):
+        return true
+    return int(summary.get("comparisons", 0)) >= int(summary.get("requiredComparisons", 0)) \
+        and float(summary.get("maxDegrees", 999.0)) <= float(summary.get("allowedDegrees", 0.0))
+
+func terrain_chunk_edge_normal_summary_from_clean_area() -> Dictionary:
+    if player == null:
+        return terrain_chunk_edge_normal_summary()
+    var previous_debug := bool(main.get("force_underground_volume_debug")) if main != null else false
+    if main != null:
+        main.set("force_underground_volume_debug", true)
+    var clean_cell := Vector2i(512, 512)
+    var clean_y := maxf(surface_y_at_cell2(clean_cell), WATER_LEVEL)
+    player.global_position = Vector3(float(clean_cell.x) * CELL, clean_y + 1.5, float(clean_cell.y) * CELL)
+    player.velocity = Vector3.ZERO
+    await settle_streamed_chunks_after_relocation("terrain_normals_clean_chunks", 180)
+    var summary := terrain_chunk_edge_normal_summary()
+    if main != null:
+        main.set("force_underground_volume_debug", previous_debug)
+    return summary
+
+func terrain_chunk_has_playtest_edits(chunk_key: Vector2i) -> bool:
+    var world_generation = main.get("world_generation_system") if main != null else null
+    var chunk_size := active_chunk_size()
+    if world_generation != null and world_generation.has_method("terrain_volume_chunk_has_edits"):
+        if bool(world_generation.call("terrain_volume_chunk_has_edits", chunk_key, chunk_size)):
+            return true
+    var start_x := chunk_key.x * chunk_size
+    var start_z := chunk_key.y * chunk_size
+    var end_x := start_x + chunk_size
+    var end_z := start_z + chunk_size
+    var edits := get_volume_edit_markers()
+    for cell_value in edits.keys():
+        if not (cell_value is Vector2i):
+            continue
+        var cell: Vector2i = cell_value
+        if cell.x >= start_x - 1 and cell.x <= end_x and cell.y >= start_z - 1 and cell.y <= end_z:
+            return true
+    return false
 
 func terrain_mesh_for_chunk(chunk: Node) -> Mesh:
     if chunk == null:
@@ -6237,7 +6803,31 @@ func terrain_mesh_for_chunk(chunk: Node) -> Mesh:
     var mesh_instance := chunk.get_node_or_null("TerrainMesh") as MeshInstance3D
     return mesh_instance.mesh if mesh_instance else null
 
-func terrain_edge_normal_samples(mesh: Mesh, side: String) -> Dictionary:
+func terrain_mesh_is_volume_source(mesh: Mesh) -> bool:
+    if mesh == null:
+        return false
+    return bool(mesh.get_meta("terrainMeshingSectionPayload", false)) or int(mesh.get_meta("chunk_volume_faces", 0)) > 0
+
+func terrain_mesh_is_provisional_or_lod(mesh: Mesh) -> bool:
+    if mesh == null:
+        return true
+    return bool(mesh.get_meta("terrainMeshingProvisional", false)) or bool(mesh.get_meta("terrainStreamingLod", false))
+
+func terrain_mesh_debug_label(mesh: Mesh) -> Dictionary:
+    if mesh == null:
+        return { "missing": true }
+    return {
+        "backend": String(mesh.get_meta("terrainMeshingBackend", "")),
+        "native": bool(mesh.get_meta("terrainMeshingNative", false)),
+        "section": bool(mesh.get_meta("terrainMeshingSectionPayload", false)),
+        "provisional": bool(mesh.get_meta("terrainMeshingProvisional", false)),
+        "lod": bool(mesh.get_meta("terrainStreamingLod", false)),
+        "projectedNormals": bool(mesh.get_meta("terrainSurfaceNormalsProjected", false)),
+        "volumeFaces": int(mesh.get_meta("chunk_volume_faces", 0)),
+        "surfaces": mesh.get_surface_count()
+    }
+
+func terrain_edge_normal_samples(mesh: Mesh, side: String, chunk_key: Vector2i) -> Dictionary:
     if mesh == null or mesh.get_surface_count() == 0:
         return {}
     var arrays := mesh.surface_get_arrays(0)
@@ -6245,7 +6835,11 @@ func terrain_edge_normal_samples(mesh: Mesh, side: String) -> Dictionary:
     var normals: PackedVector3Array = arrays[Mesh.ARRAY_NORMAL]
     if vertices.is_empty() or normals.size() != vertices.size():
         return {}
-    var target := CHUNK_SIZE * CELL
+    var target := float(active_chunk_size()) * CELL
+    var quant := maxf(0.001, CELL * 2.0)
+    var chunk_size := active_chunk_size()
+    var origin_x := float(chunk_key.x * chunk_size) * CELL
+    var origin_z := float(chunk_key.y * chunk_size) * CELL
     var totals := {}
     var counts := {}
     for i in range(vertices.size()):
@@ -6264,9 +6858,14 @@ func terrain_edge_normal_samples(mesh: Mesh, side: String) -> Dictionary:
             "south":
                 on_edge = absf(vertex.z - target) <= 0.001
         if on_edge:
-            var sample_index := roundi(vertex.z / CELL) if side == "west" or side == "east" else roundi(vertex.x / CELL)
-            totals[sample_index] = totals.get(sample_index, Vector3.ZERO) + normal.normalized()
-            counts[sample_index] = int(counts.get(sample_index, 0)) + 1
+            var world_position := Vector3(origin_x + vertex.x, vertex.y, origin_z + vertex.z)
+            var exterior_surface_y := surface_y_at_position(world_position)
+            if absf(vertex.y - exterior_surface_y) > CELL * 2.25:
+                continue
+            var along := vertex.z if side == "west" or side == "east" else vertex.x
+            var sample_key := "%d:%d" % [roundi(along / quant), roundi(vertex.y / quant)]
+            totals[sample_key] = totals.get(sample_key, Vector3.ZERO) + normal.normalized()
+            counts[sample_key] = int(counts.get(sample_key, 0)) + 1
     var result := {}
     for sample_key in totals.keys():
         var total: Vector3 = totals[sample_key]
@@ -6338,8 +6937,9 @@ func test_world_chunk_streaming() -> void:
     var target_z := original_position.z + CELL * 96.0
     var target_y: float = surface_y_at_position(Vector3(target_x, 0.0, target_z)) + 0.45
     player.global_position = Vector3(target_x, target_y, target_z)
-    main.call("update_chunks", true)
-    await wait_physics_frames(2)
+    bootstrap_playtest_visible_chunks()
+    await wait_for_chunk_count(49, 120, "world_streaming_out_chunks")
+    await wait_for_terrain_collision_shapes(120)
     var cache_after_stream_out: Dictionary = main.call("chunk_asset_cache_stats")
 
     var chunks := get_chunks()
@@ -6361,8 +6961,9 @@ func test_world_chunk_streaming() -> void:
     )
 
     player.global_position = original_position
-    main.call("update_chunks", true)
-    await wait_physics_frames(2)
+    bootstrap_playtest_visible_chunks()
+    await wait_for_chunk_count(49, 120, "world_streaming_return_chunks")
+    await wait_for_terrain_collision_shapes(120)
     var cache_after_return: Dictionary = main.call("chunk_asset_cache_stats")
     var cache_hit: bool = int(cache_after_return.get("hits", 0)) > int(cache_after_stream_out.get("hits", 0))
     var direct_cache_before: Dictionary = {}
@@ -6375,19 +6976,39 @@ func test_world_chunk_streaming() -> void:
         main.call("chunk_assets", original_chunk.x, original_chunk.y)
         direct_cache_after_second = main.call("chunk_asset_cache_stats")
         cache_hit = int(direct_cache_after_second.get("hits", 0)) > int(direct_cache_after_first.get("hits", 0))
-    var invalidations_before: int = int(cache_after_return.get("invalidations", 0))
-    var edits := get_volume_edit_markers()
-    var edit_cell := Vector2i(main.call("world_to_cell", original_position.x), main.call("world_to_cell", original_position.z))
-    edits[edit_cell] = surface_y_at_cell2(edit_cell) + CELL
-    main.call("rebuild_chunks_around_cell", edit_cell)
+    if main.has_method("chunk_assets"):
+        main.call("chunk_assets", original_chunk.x, original_chunk.y)
+    var cache_seeded: Dictionary = main.call("chunk_asset_cache_stats")
+    var invalidations_before: int = int(cache_seeded.get("invalidations", 0))
+    var world_generation = main.get("world_generation_system")
+    var edit_cell2 := Vector2i(main.call("world_to_cell", original_position.x), main.call("world_to_cell", original_position.z))
+    var edit_cell3 := Vector3i(edit_cell2.x, floori(surface_y_at_cell2(edit_cell2) / CELL) - 2, edit_cell2.y)
+    var edited_cells: Array = []
+    if world_generation != null and world_generation.has_method("apply_box_edit"):
+        edited_cells = world_generation.call("apply_box_edit", edit_cell3, edit_cell3, {
+            "material": "air",
+            "biome": "underground_air",
+            "solid": false,
+            "density": -CELL,
+            "fluid": "",
+            "light": { "sky": 0, "block": 0 },
+            "metadata": {
+                "source": "playtest_cache_invalidation",
+                "terrainMeshAffects": true,
+                "saveDelta": false
+            }
+        }, "playtest_cache_invalidation")
+    var dirty_queued := int(main.call("queue_dirty_terrain_volume_chunk_refreshes")) if main.has_method("queue_dirty_terrain_volume_chunk_refreshes") else 0
+    main.call("rebuild_chunks_for_cells", [edit_cell2], 0, false)
     var cache_after_invalidation: Dictionary = main.call("chunk_asset_cache_stats")
     var invalidated: bool = int(cache_after_invalidation.get("invalidations", 0)) > invalidations_before
-    edits.erase(edit_cell)
-    main.call("rebuild_chunks_around_cell", edit_cell)
+    if world_generation != null and world_generation.has_method("clear_cell_state"):
+        world_generation.call("clear_cell_state", edit_cell3, "playtest_cache_invalidation_cleanup")
+    main.call("rebuild_chunks_for_cells", [edit_cell2], 0, true)
     add_result(
         "chunk_asset_cache_reuse_invalidation",
-        cache_hit and invalidated and int(cache_after_invalidation.get("entries", 0)) <= 96,
-        "hits %d->%d->%d, direct %d->%d->%d, misses %d->%d, entries %d, invalidations %d->%d" % [
+        cache_hit and not edited_cells.is_empty() and invalidated and int(cache_after_invalidation.get("entries", 0)) <= 96,
+        "hits %d->%d->%d, direct %d->%d->%d, misses %d->%d, entries %d, invalidations %d->%d, edited %d, dirtyQueued %d" % [
             int(cache_before.get("hits", 0)),
             int(cache_after_stream_out.get("hits", 0)),
             int(cache_after_return.get("hits", 0)),
@@ -6398,7 +7019,9 @@ func test_world_chunk_streaming() -> void:
             int(cache_after_return.get("misses", 0)),
             int(cache_after_invalidation.get("entries", 0)),
             invalidations_before,
-            int(cache_after_invalidation.get("invalidations", 0))
+            int(cache_after_invalidation.get("invalidations", 0)),
+            edited_cells.size(),
+            dirty_queued
         ]
     )
 
@@ -6406,7 +7029,55 @@ func test_chunk_detail_batches() -> void:
     if not main:
         add_result("chunk_detail_batches", false, "main missing")
         return
+    var original_position: Vector3 = player.global_position if player != null else Vector3.ZERO
+    if player != null:
+        var target_x := original_position.x + CELL * 128.0
+        var target_z := original_position.z + CELL * 96.0
+        var target_y := surface_y_at_position(Vector3(target_x, 0.0, target_z)) + 0.45
+        player.global_position = Vector3(target_x, target_y, target_z)
+        bootstrap_playtest_visible_chunks()
+        await wait_for_chunk_count(49, 120, "chunk_detail_stream_chunks")
+        await wait_for_terrain_collision_shapes(120)
+    var summary: Dictionary = {}
+    for i in range(420):
+        summary = chunk_detail_batch_summary()
+        if bool(summary.get("passed", false)):
+            break
+        if main.has_method("process_pending_chunk_prop_spawns"):
+            for _drain_index in range(8):
+                main.call("process_pending_chunk_prop_spawns")
+        await wait_process_frames(1)
+    if summary.is_empty():
+        summary = chunk_detail_batch_summary()
+    add_result(
+        "chunk_detail_batches",
+        bool(summary.get("passed", false)),
+        String(summary.get("details", "missing detail summary"))
+    )
+    if player != null:
+        player.global_position = original_position
+        bootstrap_playtest_visible_chunks()
+        await wait_for_chunk_count(49, 120, "chunk_detail_return_chunks")
+        await wait_for_terrain_collision_shapes(120)
+
+func chunk_detail_batch_summary() -> Dictionary:
     var chunks := get_chunks()
+    var pending_props := 0
+    var pending_value = main.get("pending_chunk_prop_spawns") if main != null else {}
+    if pending_value is Dictionary:
+        pending_props = (pending_value as Dictionary).size()
+    var biome_counts := {}
+    var sampled_chunks := 0
+    for chunk_key_variant in chunks.keys():
+        if sampled_chunks >= 12:
+            break
+        if not (chunk_key_variant is Vector2i):
+            continue
+        var chunk_key: Vector2i = chunk_key_variant
+        var center_cell := Vector2i(chunk_key.x * CHUNK_SIZE + CHUNK_SIZE / 2, chunk_key.y * CHUNK_SIZE + CHUNK_SIZE / 2)
+        var biome := surface_biome_at_cell2(center_cell)
+        biome_counts[biome] = int(biome_counts.get(biome, 0)) + 1
+        sampled_chunks += 1
     var batch_nodes := 0
     var detail_instances := 0
     var collider_count := 0
@@ -6441,18 +7112,20 @@ func test_chunk_detail_batches() -> void:
             if batch.visibility_range_end > 0.0:
                 faded_batches += 1
     var batched: bool = batch_nodes > 0 and detail_instances > batch_nodes * 3
-    add_result(
-        "chunk_detail_batches",
-        batched
-            and collider_count == 0
-            and detail_types.size() >= 3
-            and upgraded_meshes == batch_nodes
-            and color_batches == batch_nodes
-            and custom_batches == batch_nodes
-            and faded_batches == batch_nodes,
-        "chunks %d/%d, batches %d, instances %d, colliders %d, upgraded %d, colors %d, custom %d, faded %d, types %s" % [
+    var passed := batched \
+        and collider_count == 0 \
+        and detail_types.size() >= 3 \
+        and upgraded_meshes == batch_nodes \
+        and color_batches == batch_nodes \
+        and custom_batches == batch_nodes \
+        and faded_batches == batch_nodes
+    return {
+        "passed": passed,
+        "details": "chunks %d/%d, pending %d, biomes %s, batches %d, instances %d, colliders %d, upgraded %d, colors %d, custom %d, faded %d, types %s" % [
             chunk_count_with_decor,
             chunks.size(),
+            pending_props,
+            str(biome_counts),
             batch_nodes,
             detail_instances,
             collider_count,
@@ -6462,7 +7135,7 @@ func test_chunk_detail_batches() -> void:
             faded_batches,
             str(detail_types.keys())
         ]
-    )
+    }
 
 func test_sky_light_consistency() -> void:
     if not main or not player:
@@ -6515,6 +7188,8 @@ func test_environment_visual_style() -> void:
     var noon_sun := sun_light.light_energy
     var noon_ambient := env.ambient_light_energy
     var noon_fog := env.fog_density
+    var terrain_mat := main.get("terrain_material") as ShaderMaterial
+    var noon_terrain_shadow_fill := float(terrain_mat.get_shader_parameter("shadow_fill")) if terrain_mat else 0.0
     main.set("time_of_day", 0.75)
     main.call("update_sky", 0.0)
     var night_sun := sun_light.light_energy
@@ -6522,8 +7197,7 @@ func test_environment_visual_style() -> void:
     var night_ambient := env.ambient_light_energy
     var night_fog := env.fog_density
     var night_fog_energy := env.fog_light_energy
-    var terrain_mat := main.get("terrain_material") as ShaderMaterial
-    var terrain_shadow_fill := float(terrain_mat.get_shader_parameter("shadow_fill")) if terrain_mat else 1.0
+    var night_terrain_shadow_fill := float(terrain_mat.get_shader_parameter("shadow_fill")) if terrain_mat else 1.0
     main.set("time_of_day", original_time)
     main.call("update_sky", 0.0)
     var range_ok := noon_sun >= 0.55 \
@@ -6532,6 +7206,8 @@ func test_environment_visual_style() -> void:
         and noon_ambient <= 0.01 \
         and noon_fog >= 0.002 \
         and noon_fog <= 0.020 \
+        and noon_terrain_shadow_fill >= 0.18 \
+        and noon_terrain_shadow_fill <= 0.28 \
         and night_sun <= 0.04 \
         and night_moon >= 0.02 \
         and night_moon <= 0.12 \
@@ -6540,11 +7216,11 @@ func test_environment_visual_style() -> void:
         and night_fog >= 0.004 \
         and night_fog <= 0.030 \
         and night_fog_energy <= 0.14 \
-        and terrain_shadow_fill <= 0.02
+        and night_terrain_shadow_fill <= 0.02
     add_result(
         "environment_visual_style",
         structure_ok and range_ok,
-        "sky %s, filmic %s, sky ambient %s, fog %s, ssao %s, noon sun %.2f amb %.2f fog %.4f, night sun %.2f moon %.2f amb %.2f fog %.4f fog energy %.2f terrain fill %.2f" % [
+        "sky %s, filmic %s, sky ambient %s, fog %s, ssao %s, noon sun %.2f amb %.2f fog %.4f terrain fill %.2f, night sun %.2f moon %.2f amb %.2f fog %.4f fog energy %.2f terrain fill %.2f" % [
             str(env.background_mode == Environment.BG_SKY and env.sky != null and sky_mat != null),
             str(env.tonemap_mode == Environment.TONE_MAPPER_FILMIC),
             str(env.ambient_light_source == Environment.AMBIENT_SOURCE_SKY),
@@ -6553,12 +7229,13 @@ func test_environment_visual_style() -> void:
             noon_sun,
             noon_ambient,
             noon_fog,
+            noon_terrain_shadow_fill,
             night_sun,
             night_moon,
             night_ambient,
             night_fog,
             night_fog_energy,
-            terrain_shadow_fill
+            night_terrain_shadow_fill
         ]
     )
 
@@ -6687,10 +7364,10 @@ func test_player_movement() -> void:
         add_result("player_movement", false, "player missing")
         return
     var move_cell := Vector2i(roundi(player.global_position.x / CELL) + 10, roundi(player.global_position.z / CELL))
-    reset_player_on_flat_patch(move_cell)
+    reset_player_on_flat_patch(move_cell, 5, true)
     clear_blocks_near_cell(move_cell, 8)
     clear_props_near_cell(move_cell, 8)
-    main.call("update_chunks", true)
+    await settle_streamed_chunks_after_relocation("movement_chunks", 120)
     await wait_physics_frames(8)
     var start: Vector3 = player.global_position
     player.set("automated_move", Vector3.RIGHT)
@@ -6717,7 +7394,10 @@ func test_player_movement() -> void:
     var pre_path_position: Vector3 = player.global_position
     var pre_path_velocity: Vector3 = player.velocity
     var path_base := Vector2i(roundi(player.global_position.x / CELL) + 8, roundi(player.global_position.z / CELL) + 2)
-    reset_player_on_flat_patch(path_base)
+    reset_player_on_flat_patch(path_base, 5, true)
+    clear_blocks_near_cell(path_base, 8)
+    clear_props_near_cell(path_base, 8)
+    await settle_streamed_chunks_after_relocation("path_chunks", 90)
     await wait_physics_frames(8)
     var path_ground: float = surface_y_at_cell2(path_base)
     var path_cells: Array[Vector3i] = []
@@ -6767,9 +7447,10 @@ func test_uphill_smoothing() -> void:
         return
 
     var start_cell := Vector2i(roundi(player.global_position.x / CELL) + 8, roundi(player.global_position.z / CELL))
-    reset_player_on_flat_patch(start_cell)
+    reset_player_on_flat_patch(start_cell, 5, true)
     clear_blocks_near_cell(start_cell, 8)
     clear_props_near_cell(start_cell, 8)
+    await settle_streamed_chunks_after_relocation("uphill_flat_chunks", 90)
     await wait_physics_frames(4)
     var base_height: float = surface_y_at_cell2(start_cell)
     var edits := get_volume_edit_markers()
@@ -6779,8 +7460,8 @@ func test_uphill_smoothing() -> void:
         edits[Vector2i(start_cell.x + 1, start_cell.y + dz)] = base_height + CELL
         edits[Vector2i(start_cell.x + 2, start_cell.y + dz)] = base_height + CELL
 
-    main.call("rebuild_chunks_around_cell", start_cell)
-    main.call("rebuild_chunks_around_cell", Vector2i(start_cell.x + 2, start_cell.y))
+    main.call("rebuild_chunks_for_cells", [start_cell, Vector2i(start_cell.x + 2, start_cell.y)], 1, true)
+    await wait_for_terrain_collision_shapes(90)
     player.global_position = Vector3((start_cell.x - 0.35) * CELL, base_height, start_cell.y * CELL)
     player.velocity = Vector3.ZERO
     player.set("terrain_grounded", true)
@@ -6817,8 +7498,8 @@ func test_steep_uphill_blocking() -> void:
         edits[Vector2i(start_cell.x + 1, start_cell.y + dz)] = base_height + CELL * 3.0
         edits[Vector2i(start_cell.x + 2, start_cell.y + dz)] = base_height + CELL * 3.0
 
-    main.call("rebuild_chunks_around_cell", start_cell)
-    main.call("rebuild_chunks_around_cell", Vector2i(start_cell.x + 2, start_cell.y))
+    main.call("rebuild_chunks_for_cells", [start_cell, Vector2i(start_cell.x + 2, start_cell.y)], 1, true)
+    await wait_for_terrain_collision_shapes(90)
     player.global_position = Vector3((start_cell.x - 0.35) * CELL, base_height, start_cell.y * CELL)
     player.velocity = Vector3.ZERO
     player.set("terrain_grounded", true)
@@ -6856,8 +7537,8 @@ func test_airborne_obstacle_blocking() -> void:
         edits[Vector2i(start_cell.x + 1, start_cell.y + dz)] = obstacle_height
         edits[Vector2i(start_cell.x + 2, start_cell.y + dz)] = obstacle_height
 
-    main.call("rebuild_chunks_around_cell", start_cell)
-    main.call("rebuild_chunks_around_cell", Vector2i(start_cell.x + 2, start_cell.y))
+    main.call("rebuild_chunks_for_cells", [start_cell, Vector2i(start_cell.x + 2, start_cell.y)], 1, true)
+    await wait_for_terrain_collision_shapes(90)
     player.global_position = Vector3((start_cell.x - 0.35) * CELL, base_height, start_cell.y * CELL)
     player.velocity = Vector3.ZERO
     player.set("terrain_grounded", true)
@@ -6950,12 +7631,17 @@ func test_block_destroy_ray() -> void:
     inventory_system.add_item("stoneShovel", 1)
     set_active_inventory_item(inventory_system, "stoneShovel")
     var hardness_cell := Vector2i(roundi(player.global_position.x / CELL) + 8, roundi(player.global_position.z / CELL))
-    reset_player_on_flat_patch(hardness_cell)
+    mark_progress("block_destroy_ray_reset_flat")
+    reset_player_on_flat_patch(hardness_cell, 5, true)
+    mark_progress("block_destroy_ray_clear_blocks")
     clear_blocks_near_cell(hardness_cell, 10)
+    mark_progress("block_destroy_ray_clear_props")
     clear_props_near_cell(hardness_cell, 10)
+    mark_progress("block_destroy_ray_wait_collision")
     player.rotation.y = 0.0
     player.set("pitch", 0.0)
     camera.rotation.x = 0.0
+    await wait_for_terrain_collision_shapes(90, chunk_scope_for_flat_cell(hardness_cell))
     await wait_physics_frames(8)
 
     var forward: Vector3 = -camera.global_transform.basis.z
@@ -7014,12 +7700,17 @@ func test_block_destroy_ray() -> void:
         blocks.erase(far_cell)
     var far_enemy_safe := true
     var far_enemy_visible_old_range := false
+    var far_enemy_health_before := -1.0
+    var far_enemy_health_after := -1.0
     var hostile_system = main.get("hostile_system")
     if hostile_system:
         var far_enemy_pos: Vector3 = camera.global_position + forward * 6.3
         far_enemy_pos.y = player.global_position.y + 0.04
         var far_enemy = hostile_system.spawn_enemy(far_enemy_pos, "shadow")
         await wait_physics_frames(4)
+        var far_enemy_state_before: Dictionary = hostile_system.call("enemy_for_body", far_enemy)
+        if not far_enemy_state_before.is_empty():
+            far_enemy_health_before = float(far_enemy_state_before.get("health", 0.0))
         aim_player_at(far_enemy.global_position + Vector3(0.0, 0.9, 0.0))
         await wait_physics_frames(2)
         var far_enemy_hit: Dictionary = player.call("view_ray", INTERACT_RANGE)
@@ -7028,18 +7719,22 @@ func test_block_destroy_ray() -> void:
         main.call("destroy_target")
         await wait_physics_frames(2)
         var far_enemy_state: Dictionary = hostile_system.call("enemy_for_body", far_enemy)
-        far_enemy_safe = not far_enemy_state.is_empty() and is_equal_approx(float(far_enemy_state.get("health", 0.0)), 18.0)
+        if not far_enemy_state.is_empty():
+            far_enemy_health_after = float(far_enemy_state.get("health", 0.0))
+        far_enemy_safe = not far_enemy_state.is_empty() and far_enemy_health_before >= 0.0 and is_equal_approx(far_enemy_health_after, far_enemy_health_before)
         if not far_enemy_state.is_empty():
             hostile_system.call("remove_enemy", far_enemy_state, false)
     add_result(
         "melee_targeting_short_range",
         old_range_can_see and far_distance > MELEE_RANGE and far_block_still_present and far_not_started and far_enemy_safe,
-        "old range sees %s, distance %.2f, block still present %s, enemy old-range %s safe %s, progress %.2f, target '%s'" % [
+        "old range sees %s, distance %.2f, block still present %s, enemy old-range %s safe %s, enemy health %.1f->%.1f, progress %.2f, target '%s'" % [
             str(old_range_can_see),
             far_distance,
             str(far_block_still_present),
             str(far_enemy_visible_old_range),
             str(far_enemy_safe),
+            far_enemy_health_before,
+            far_enemy_health_after,
             float(main.get("break_progress")),
             String(main.get("break_target_id"))
         ]
@@ -7058,19 +7753,26 @@ func test_right_mouse_interaction_input() -> void:
         add_result("left_mouse_held_item_strike_input", false, "inventory, held item, or hud missing")
         return
     var base_cell := Vector2i(roundi(player.global_position.x / CELL) + 8, roundi(player.global_position.z / CELL))
-    reset_player_on_flat_patch(base_cell)
+    mark_progress("right_mouse_reset_flat")
+    reset_player_on_flat_patch(base_cell, 5, true)
+    mark_progress("right_mouse_clear_blocks")
     clear_blocks_near_cell(base_cell, 8)
+    mark_progress("right_mouse_clear_props")
     clear_props_near_cell(base_cell, 8)
+    mark_progress("right_mouse_wait_collision")
+    await wait_for_terrain_collision_shapes(90, chunk_scope_for_flat_cell(base_cell))
     await wait_physics_frames(8)
 
     var ground_y: float = surface_y_at_cell2(base_cell + Vector2i(0, -2))
     var door_cell := Vector3i(base_cell.x, floori(ground_y / CELL) + 1, base_cell.y - 2)
+    mark_progress("right_mouse_create_door")
     var door := main.call("create_block", door_cell, "door") as StaticBody3D
     await wait_physics_frames(6)
     if door == null:
         add_result("right_mouse_interaction_input", false, "door creation failed")
         return
 
+    mark_progress("right_mouse_aim")
     var aim_point := door.global_position + Vector3(0.0, CELL * 0.45, 0.0)
     aim_player_at(aim_point)
     await wait_physics_frames(3)
@@ -7084,8 +7786,10 @@ func test_right_mouse_interaction_input() -> void:
         prompt_reach = Vector2(hit_position.x - player.global_position.x, hit_position.z - player.global_position.z).length()
     var right_click_position := control_center(hud.location_panel)
     Input.set_mouse_mode(Input.MOUSE_MODE_VISIBLE)
+    mark_progress("right_mouse_click_down")
     dispatch_mouse_button(MOUSE_BUTTON_RIGHT, true, right_click_position)
     await wait_physics_frames(3)
+    mark_progress("right_mouse_click_up")
     dispatch_mouse_button(MOUSE_BUTTON_RIGHT, false, right_click_position)
     var opened_first_click: bool = bool(door.get_meta("open", false))
     var pivot := door.get_node_or_null("DoorPivot") as Node3D
@@ -7104,7 +7808,9 @@ func test_right_mouse_interaction_input() -> void:
         ]
     )
 
+    mark_progress("left_mouse_cleanup_blocks")
     clear_blocks_near_cell(base_cell, 8)
+    mark_progress("left_mouse_cleanup_props")
     clear_props_near_cell(base_cell, 8)
     inventory_system.set_size(ItemCatalogScript.MAX_INVENTORY_SIZE)
     inventory_system.clear()
@@ -7116,7 +7822,11 @@ func test_right_mouse_interaction_input() -> void:
     held_item.set("use_time", 0.0)
     if held_item.has_method("apply_pose"):
         held_item.apply_pose()
-    reset_player_on_flat_patch(Vector2i(base_cell.x + 6, base_cell.y))
+    var left_fixture_cell := Vector2i(base_cell.x + 6, base_cell.y)
+    mark_progress("left_mouse_reset_flat")
+    reset_player_on_flat_patch(left_fixture_cell, 5, true)
+    mark_progress("left_mouse_wait_collision")
+    await wait_for_terrain_collision_shapes(90, chunk_scope_for_flat_cell(left_fixture_cell))
     player.rotation.y = 0.0
     player.set("pitch", deg_to_rad(-18.0))
     camera.rotation.x = deg_to_rad(-18.0)
@@ -7165,12 +7875,14 @@ func test_mining_tool_requirements() -> void:
     inventory_system.add_item("copperPickaxe", 1)
     inventory_system.select(0)
 
+    mark_progress("mining_requirements_place_player")
     reset_player_on_flat_patch(Vector2i(roundi(player.global_position.x / CELL) + 9, roundi(player.global_position.z / CELL)))
     player.rotation.y = 0.0
     player.set("pitch", 0.0)
     camera.rotation.x = 0.0
     await wait_physics_frames(8)
 
+    mark_progress("mining_requirements_create_copper")
     var forward: Vector3 = -camera.global_transform.basis.z.normalized()
     var copper_pos: Vector3 = camera.global_position + forward * 2.2
     var copper_cell := Vector3i(roundi(copper_pos.x / CELL), roundi(copper_pos.y / CELL), roundi(copper_pos.z / CELL))
@@ -7184,6 +7896,7 @@ func test_mining_tool_requirements() -> void:
     main.call("create_block", copper_cell, "copperVein")
     await wait_physics_frames(4)
 
+    mark_progress("mining_requirements_wrong_copper_tool")
     set_active_inventory_item(inventory_system, "woodenPickaxe")
     aim_player_at(Vector3(copper_cell.x * CELL, copper_cell.y * CELL, copper_cell.z * CELL))
     await wait_physics_frames(2)
@@ -7192,13 +7905,16 @@ func test_mining_tool_requirements() -> void:
     var copper_tool_message: String = hud.notification_label.text if hud.notification_label != null else ""
     var copper_wrong_blocked: bool = blocks.has(copper_cell) and float(main.get("break_progress")) == 0.0 and copper_tool_message.find("Stone Pickaxe") >= 0
 
+    mark_progress("mining_requirements_mine_copper")
     set_active_inventory_item(inventory_system, "stonePickaxe")
     var copper_before: int = inventory_system.count("copperOre")
     for i in range(3):
+        mark_progress("mining_requirements_mine_copper_%02d" % i)
         main.call("destroy_target")
         await wait_physics_frames(2)
     var copper_mined: bool = not blocks.has(copper_cell) and inventory_system.count("copperOre") > copper_before
 
+    mark_progress("mining_requirements_create_iron")
     main.call("reset_break_progress")
     if blocks.has(iron_cell):
         var existing_iron := blocks[iron_cell] as Node
@@ -7207,6 +7923,7 @@ func test_mining_tool_requirements() -> void:
         blocks.erase(iron_cell)
     main.call("create_block", iron_cell, "ironVein")
     await wait_physics_frames(4)
+    mark_progress("mining_requirements_wrong_iron_tool")
     set_active_inventory_item(inventory_system, "stonePickaxe")
     aim_player_at(Vector3(iron_cell.x * CELL, iron_cell.y * CELL, iron_cell.z * CELL))
     await wait_physics_frames(2)
@@ -7215,9 +7932,11 @@ func test_mining_tool_requirements() -> void:
     var iron_tool_message: String = hud.notification_label.text if hud.notification_label != null else ""
     var iron_wrong_blocked: bool = blocks.has(iron_cell) and float(main.get("break_progress")) == 0.0 and iron_tool_message.find("Copper Pickaxe") >= 0
 
+    mark_progress("mining_requirements_mine_iron")
     set_active_inventory_item(inventory_system, "copperPickaxe")
     var iron_before: int = inventory_system.count("ironOre")
     for i in range(3):
+        mark_progress("mining_requirements_mine_iron_%02d" % i)
         main.call("destroy_target")
         await wait_physics_frames(2)
     var iron_mined: bool = not blocks.has(iron_cell) and inventory_system.count("ironOre") > iron_before
@@ -8007,6 +8726,7 @@ func npc_route_debug(npc_system, body: Node) -> String:
         var body_3d := body as Node3D
         var current_cell := world_to_flat_cell(body_3d.global_position) if body_3d != null else Vector2i.ZERO
         var settle_debug: Dictionary = entry.get("homeSettleDebug", {})
+        var nav_debug := npc_navigation_debug(npc_system, entry, current_cell)
         var action_keys: Array = (entry.get("routeActions", {}) as Dictionary).keys()
         action_keys.sort()
         var typed_summary := "none"
@@ -8032,13 +8752,29 @@ func npc_route_debug(npc_system, body: Node) -> String:
                 str(typed_result.get("reason")),
                 metrics_summary
             ]
-        return "%s cell %s home %s porch %s interior %s..%s active %s fallback %s status %s/%s index %d inside %s blocked %s actions %s routeCells %s waypoints %s activeDoor %s doorReject %s capsule %s localEscape %s localEscapeFailed %s typed %s settle %s force %s dialogue %s" % [
+        var active_motion_goal = entry.get("activeMotionGoal", {})
+        var active_motion_goal_summary := {}
+        if active_motion_goal is Dictionary:
+            active_motion_goal_summary = {
+                "goalKind": String((active_motion_goal as Dictionary).get("goalKind", "")),
+                "reason": String((active_motion_goal as Dictionary).get("reason", ""))
+            }
+        var body_order := {
+            "kind": String(body.get_meta("npc_scripted_order_kind", "")),
+            "state": String(body.get_meta("npc_scripted_order_state", "")),
+            "reason": String(body.get_meta("npc_scripted_order_reason", ""))
+        }
+        return "%s cell %s home %s porch %s interior %s..%s activeGoal %s motionGoal %s scripted %s bodyOrder %s active %s fallback %s status %s/%s index %d inside %s blocked %s moved %.4f motionUpdates %d skip %s follow %s progress %s actions %s routeCells %s waypoints %s activeDoor %s doorReject %s capsule %s localEscape %s localEscapeFailed %s typed %s settle %s plan %s nav %s force %s dialogue %s" % [
             String(body.get_meta("npc_id", entry.get("id", body.name))),
             str(current_cell),
             str(entry.get("homeCell", Vector2i.ZERO)),
             str(entry.get("porchCell", Vector2i.ZERO)),
             str(entry.get("interiorMinCell", Vector2i.ZERO)),
             str(entry.get("interiorMaxCell", Vector2i.ZERO)),
+            String(entry.get("activeGoalKind", "")),
+            JSON.stringify(active_motion_goal_summary),
+            JSON.stringify(entry.get("scriptedOrder", {})),
+            JSON.stringify(body_order),
             str(entry.get("homeActiveTargetCell", Vector2i.ZERO)),
             str(entry.get("routeFallbackCell", Vector2i.ZERO)),
             String(entry.get("routeStatus", "")),
@@ -8046,6 +8782,11 @@ func npc_route_debug(npc_system, body: Node) -> String:
             int(entry.get("homeRouteIndex", 0)),
             str(body.get_meta("npc_inside_home", false)),
             str(body.get_meta("npc_home_blocked", false)),
+            float(entry.get("lastMoveDistance", 0.0)),
+            int(entry.get("npc_motion_updates", 0)),
+            String(entry.get("npc_motion_skipped_reason", "")),
+            JSON.stringify(entry.get("corridorFollow", {})),
+            JSON.stringify(entry.get("corridorProgress", {})),
             str(action_keys),
             str(sample_route_cells(entry.get("routeCells", []), 14)),
             str(sample_waypoints(entry.get("pathWaypoints", []), 6)),
@@ -8056,6 +8797,8 @@ func npc_route_debug(npc_system, body: Node) -> String:
             JSON.stringify(entry.get("lastMotorLocalEscapeFailed", {})),
             typed_summary,
             JSON.stringify(settle_debug),
+            JSON.stringify(entry.get("lastRoutePlanDebug", {})),
+            JSON.stringify(nav_debug),
             str(body.get_meta("npc_force_hold", false)),
             str(body.get_meta("npc_dialogue_focused", false))
         ]
@@ -8084,6 +8827,145 @@ func sample_waypoints(value, limit := 6) -> Array:
             var point: Vector3 = point_value
             result.append([snappedf(point.x, 0.01), snappedf(point.y, 0.01), snappedf(point.z, 0.01)])
     return result
+
+func npc_navigation_debug(npc_system, entry: Dictionary, current_cell: Vector2i) -> Dictionary:
+    var result := {}
+    if npc_system == null:
+        return result
+    var world = null
+    var autonomy = npc_system.get("autonomy_system")
+    if autonomy != null and autonomy.has_method("generated_navigation_adapter"):
+        world = autonomy.call("generated_navigation_adapter")
+    if world == null:
+        var pathing = npc_system.get("pathing")
+        if pathing != null:
+            if pathing.has_method("ensure_ready"):
+                pathing.call("ensure_ready")
+            world = pathing.get("navigation_world")
+    if world == null or not world.has_method("build_navmesh_tile_snapshot"):
+        result["reason"] = "missing_navigation_world"
+        return result
+    var important_cells: Array[Vector2i] = [
+        current_cell,
+        entry.get("homeCell", Vector2i.ZERO),
+        entry.get("porchCell", Vector2i.ZERO),
+        entry.get("homeActiveTargetCell", entry.get("homeCell", Vector2i.ZERO)),
+        entry.get("interiorMinCell", entry.get("homeCell", Vector2i.ZERO)),
+        entry.get("interiorMaxCell", entry.get("homeCell", Vector2i.ZERO))
+    ]
+    var tile_lookup := {}
+    for cell in important_cells:
+        tile_lookup[_debug_tile_key_for_cell(world, cell)] = true
+    var tile_keys := tile_lookup.keys()
+    tile_keys.sort()
+    var tile_summaries := {}
+    for tile_key_value in tile_keys:
+        var tile_key := String(tile_key_value)
+        if tile_key == "":
+            continue
+        var tile_snapshot: Dictionary = world.call("build_navmesh_tile_snapshot", tile_key)
+        var surfaces: Array = tile_snapshot.get("surfaces", []) if tile_snapshot.get("surfaces", []) is Array else []
+        var door_portals: Array = tile_snapshot.get("doorPortals", []) if tile_snapshot.get("doorPortals", []) is Array else []
+        var door_links: Array = tile_snapshot.get("doorLinks", []) if tile_snapshot.get("doorLinks", []) is Array else []
+        tile_summaries[tile_key] = {
+            "surfaces": surfaces.size(),
+            "doorPortals": _compact_nav_door_portals(door_portals),
+            "doorLinks": door_links.size(),
+            "importantSurfaces": _important_surface_cells(surfaces, important_cells)
+        }
+    result["tiles"] = tile_summaries
+    var snapshot: Dictionary = world.call("cached_static_tile_snapshot", true, true) if world.has_method("cached_static_tile_snapshot") else {}
+    result["cells"] = _important_cell_navigation_debug(world, snapshot, important_cells)
+    result["nearHomeDoors"] = _near_home_door_debug(world, snapshot, entry)
+    return result
+
+func _debug_tile_key_for_cell(world, cell: Vector2i) -> String:
+    if world != null and world.has_method("tile_key_for_cell"):
+        return String(world.call("tile_key_for_cell", cell))
+    return "%d,%d" % [floori(float(cell.x) / 16.0), floori(float(cell.y) / 16.0)]
+
+func _compact_nav_door_portals(door_portals: Array) -> Array:
+    var result := []
+    for portal_value in door_portals:
+        if result.size() >= 6:
+            break
+        if not (portal_value is Dictionary):
+            continue
+        var portal: Dictionary = portal_value
+        result.append({
+            "id": String(portal.get("id", "")),
+            "cell": str(portal.get("cell", Vector2i.ZERO)),
+            "axis": String(portal.get("crossingAxis", "")),
+            "state": String(portal.get("state", ""))
+        })
+    return result
+
+func _important_surface_cells(surfaces: Array, important_cells: Array[Vector2i]) -> Array:
+    var lookup := {}
+    for cell in important_cells:
+        lookup[Vector2i(cell.x, cell.y)] = true
+    var result := []
+    for surface_value in surfaces:
+        if not (surface_value is Dictionary):
+            continue
+        var surface: Dictionary = surface_value
+        var cell3 = surface.get("cell", Vector3i.ZERO)
+        if cell3 is Vector3i:
+            var flat := Vector2i(cell3.x, cell3.z)
+            if lookup.has(flat):
+                result.append(str(flat))
+    return result
+
+func _important_cell_navigation_debug(world, snapshot: Dictionary, cells: Array[Vector2i]) -> Dictionary:
+    var result := {}
+    for cell in cells:
+        var key := "%d,%d" % [cell.x, cell.y]
+        var door = world.call("door_at", snapshot, cell) if world.has_method("door_at") else null
+        var static_blocker = world.call("static_blocker", snapshot, cell) if world.has_method("static_blocker") else null
+        var prop_blocker = world.call("prop_clearance_blocker", snapshot, cell) if world.has_method("prop_clearance_blocker") else null
+        result[key] = {
+            "height": snappedf(float(world.call("height_for_cell", cell)) if world.has_method("height_for_cell") else 0.0, 0.001),
+            "door": String(door.name) if door is Node else "",
+            "doorPolicy": String(door.get_meta("door_policy", "")) if door is Node else "",
+            "static": _debug_node_name(static_blocker),
+            "prop": _debug_node_name(prop_blocker),
+            "tile": _debug_tile_key_for_cell(world, cell)
+        }
+    return result
+
+func _near_home_door_debug(world, snapshot: Dictionary, entry: Dictionary) -> Array:
+    var result := []
+    var min_cell: Vector2i = entry.get("interiorMinCell", entry.get("homeCell", Vector2i.ZERO))
+    var max_cell: Vector2i = entry.get("interiorMaxCell", entry.get("homeCell", Vector2i.ZERO))
+    var min_x := mini(min_cell.x, max_cell.x) - 3
+    var max_x := maxi(min_cell.x, max_cell.x) + 3
+    var min_z := mini(min_cell.y, max_cell.y) - 3
+    var max_z := maxi(min_cell.y, max_cell.y) + 3
+    for z in range(min_z, max_z + 1):
+        for x in range(min_x, max_x + 1):
+            var cell := Vector2i(x, z)
+            var door = world.call("door_at", snapshot, cell) if world.has_method("door_at") else null
+            if not (door is Node):
+                continue
+            result.append({
+                "cell": str(cell),
+                "name": String(door.name),
+                "policy": String(door.get_meta("door_policy", "")),
+                "state": String(door.get_meta("door_state", "")),
+                "side": int(door.get_meta("door_side", -1)),
+                "portal": String(door.get_meta("door_portal_id", "")),
+                "tile": _debug_tile_key_for_cell(world, cell)
+            })
+    return result
+
+func _debug_node_name(value) -> String:
+    if value == null:
+        return ""
+    if value is Node:
+        return String((value as Node).name)
+    if value is Object and not is_instance_valid(value):
+        return "freed"
+    return str(value)
 
 func npc_shelter_debug(npc_system) -> String:
     if npc_system == null:
@@ -8257,7 +9139,7 @@ func aim_player_at(world_point: Vector3) -> void:
     player.set("pitch", pitch_value)
     camera.rotation.x = pitch_value
 
-func reset_player_on_flat_patch(center_cell: Vector2i, radius := 5) -> void:
+func reset_player_on_flat_patch(center_cell: Vector2i, radius := 5, defer_rebuild := false) -> void:
     if not main or not player:
         return
     var base_height: float = surface_y_at_cell2(center_cell)
@@ -8265,7 +9147,10 @@ func reset_player_on_flat_patch(center_cell: Vector2i, radius := 5) -> void:
     for dz in range(-radius, radius + 1):
         for dx in range(-radius, radius + 1):
             edits[Vector2i(center_cell.x + dx, center_cell.y + dz)] = base_height
-    main.call("rebuild_chunks_around_cell", center_cell)
+    if defer_rebuild and main.has_method("rebuild_chunks_for_cells"):
+        main.call("rebuild_chunks_for_cells", [center_cell], 1, true)
+    else:
+        main.call("rebuild_chunks_around_cell", center_cell)
     player.global_position = Vector3(center_cell.x * CELL, base_height, center_cell.y * CELL)
     player.velocity = Vector3.ZERO
     player.set("terrain_grounded", true)

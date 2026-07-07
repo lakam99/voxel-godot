@@ -37,10 +37,10 @@ func clear() -> void:
 	build_queue.clear()
 	semantic_service.clear()
 
-func process_change_bus() -> Array:
+func process_change_bus(max_events := -1, max_object_ids := -1) -> Array:
 	if change_bus == null:
 		return []
-	var events: Array = change_bus.flush_frame()
+	var events: Array = change_bus.flush_frame(max_events, max_object_ids)
 	apply_events(events)
 	return events
 
@@ -143,11 +143,20 @@ func stats() -> Dictionary:
 func _mark_dirty(tile_key: String, event: Dictionary) -> void:
 	if tile_key == "":
 		return
-	dirty_tiles[tile_key] = event.duplicate(true)
+	dirty_tiles[tile_key] = _dirty_event_summary(event)
 	if tiles_by_key.has(tile_key):
 		tiles_by_key[tile_key].mark_stale()
 	if String(tile_states.get(tile_key, "")) != "unloaded":
 		tile_states[tile_key] = "dirty"
+
+func _dirty_event_summary(event: Dictionary) -> Dictionary:
+	return {
+		"tileKey": String(event.get("tileKey", "")),
+		"revision": int(event.get("revision", 0)),
+		"changeKinds": (event.get("changeKinds", []) as Array).duplicate(),
+		"coalescedCount": int(event.get("coalescedCount", 0)),
+		"bounds": event.get("bounds", AABB())
+	}
 
 func _mark_unloaded(tile_key: String) -> void:
 	tile_states[tile_key] = "unloaded"

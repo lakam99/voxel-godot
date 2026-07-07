@@ -75,16 +75,36 @@ func emit_change(kind: StringName, object_id: String, bounds: AABB, tile_keys: A
 		pending_by_tile[tile_key] = event
 	return monotonic_revision
 
-func flush_frame() -> Array[Dictionary]:
+func flush_frame(max_events := -1, max_object_ids := -1) -> Array[Dictionary]:
 	var keys := pending_by_tile.keys()
 	keys.sort()
 	var events: Array[Dictionary] = []
-	for key in keys:
+	var limit := keys.size()
+	if max_events > 0:
+		limit = mini(limit, max_events)
+	for index in range(limit):
+		var key = keys[index]
 		var event: Dictionary = pending_by_tile[key]
+		if max_object_ids > 0 and event.get("objectIds", []) is Array and (event.get("objectIds", []) as Array).size() > max_object_ids:
+			var object_ids: Array = event.get("objectIds", [])
+			var batch_ids := []
+			var remaining_ids := []
+			for object_index in range(object_ids.size()):
+				if object_index < max_object_ids:
+					batch_ids.append(object_ids[object_index])
+				else:
+					remaining_ids.append(object_ids[object_index])
+			event["objectIds"] = remaining_ids
+			event["coalescedCount"] = remaining_ids.size()
+			pending_by_tile[key] = event
+			event = event.duplicate(false)
+			event["objectIds"] = batch_ids
+			event["coalescedCount"] = batch_ids.size()
+		else:
+			pending_by_tile.erase(key)
 		(event["changeKinds"] as Array).sort()
 		(event["objectIds"] as Array).sort()
 		events.append(event)
-	pending_by_tile.clear()
 	return events
 
 func pending_count() -> int:

@@ -1,9 +1,22 @@
 extends "res://scripts/MainDiscoveryFlow.gd"
 
 const STREAMING_CHUNK_CREATES_PER_FRAME := 1
-const STREAMING_CHUNK_PROP_ATTEMPTS_PER_FRAME := 2
-const STREAMING_CHUNK_DETAIL_ATTEMPTS_PER_FRAME := 6
-const STREAMING_CHUNK_PROP_FRAME_BUDGET_MS := 2.75
+const STREAMING_CHUNK_PROP_ATTEMPTS_PER_FRAME := 1
+const STREAMING_CHUNK_DETAIL_ATTEMPTS_PER_FRAME := 3
+const STREAMING_CHUNK_PROP_FRAME_BUDGET_MS := 1.35
+const STREAMING_COLLISION_DEFER_MIN_CHUNK_DISTANCE := 2
+const STREAMING_TERRAIN_MESH_JOBS_PER_FRAME := 1
+const STREAMING_TERRAIN_MESH_FRAME_BUDGET_MS := 3.25
+const STREAMING_EXTERIOR_LOD_MIN_CHUNK_DISTANCE := 0
+const STREAMING_EXTERIOR_LOD_STEP_CELLS := 14
+const STREAMING_SOLID_PLACEHOLDER_STEP_CELLS := 4
+const STREAMING_EXTERIOR_REFRESH_STEP_CELLS := 4
+const STREAMING_DETAIL_REFRESH_MAX_PLAYER_SPEED := 4.0
+const STREAMING_EXTERIOR_FULL_REFRESH_FRAME_INTERVAL := 30
+const STREAMING_EXTERIOR_FULL_REFRESH_MAX_CHUNK_DISTANCE := 0
+const STREAMING_SOLID_PLACEHOLDER_DEPTH_CELLS := 80
+
+var last_streaming_exterior_full_refresh_frame := -1000000
 
 func setup_playtest_camp_case(cell: Vector2i) -> void:
     if inventory_system:
@@ -316,18 +329,43 @@ func request_door_state(door: Node, desired_open: bool, actor: Node = null, acto
         return npc_system.request_door_state(door, desired_open, actor, actor_kind, metadata)
     return null
 
+func process_pending_terrain_volume_light_updates(max_columns := 2) -> int:
+    if world_generation_system == null or not world_generation_system.has_method("process_pending_sky_light_columns"):
+        return 0
+    var monitor = runtime_perf_monitor
+    var light_start: int = monitor.begin_section("terrain_volume_light_update") if monitor != null else Time.get_ticks_usec()
+    var processed := int(world_generation_system.call("process_pending_sky_light_columns", max_columns))
+    if monitor != null:
+        var pending := int(world_generation_system.call("pending_sky_light_column_count")) if world_generation_system.has_method("pending_sky_light_column_count") else 0
+        monitor.increment_counter("terrain_volume_light_columns_processed", processed)
+        monitor.increment_counter("terrain_volume_light_columns_pending", pending)
+        monitor.end_section("terrain_volume_light_update", light_start)
+    return processed
+
 func update_chunks(force: bool = false) -> void:
     var monitor = runtime_perf_monitor
     var center := world_to_chunk(player.position.x, player.position.z)
-    if not force and center == last_center_chunk:
-        var loaded_count := process_pending_chunk_loads(center)
-        var collision_count := process_pending_chunk_collision_refreshes(center)
-        var refreshed_count := process_pending_chunk_terrain_refreshes(center) if collision_count <= 0 else 0
+    process_pending_terrain_volume_light_updates()
+    var expected_chunk_count := maxi(1, (render_distance * 2 + 1) * (render_distance * 2 + 1))
+    if not force and center == last_center_chunk and chunks.size() >= expected_chunk_count:
+        if pending_streaming_structure_work_count() > 0 and pending_chunk_loads.is_empty():
+            var early_structure_count := process_streaming_structure_work()
+            if early_structure_count > 0:
+                return
+        queue_dirty_terrain_volume_chunk_refreshes()
+        queue_nearby_streaming_lod_refreshes(center)
+        var mesh_applied_count := apply_completed_terrain_meshing_jobs(center)
+        var mesh_job_count := process_pending_terrain_meshing_jobs(center) if mesh_applied_count <= 0 else 0
+        var exposure_scan_count := process_pending_generated_volume_exposure_scans(center) if mesh_applied_count <= 0 and mesh_job_count <= 0 else 0
+        var refreshed_count := process_pending_chunk_terrain_refreshes(center) if mesh_applied_count <= 0 and mesh_job_count <= 0 and exposure_scan_count <= 0 else 0
+        var loaded_count := process_pending_chunk_loads(center) if mesh_applied_count <= 0 and mesh_job_count <= 0 and exposure_scan_count <= 0 and refreshed_count <= 0 else 0
+        var collision_count := process_pending_chunk_collision_refreshes(center) if loaded_count <= 0 and mesh_applied_count <= 0 and mesh_job_count <= 0 and exposure_scan_count <= 0 and refreshed_count <= 0 else 0
+        var structure_count := 0
         var spawned_count := 0
-        if loaded_count <= 0 and collision_count <= 0 and refreshed_count <= 0:
+        if loaded_count <= 0 and mesh_applied_count <= 0 and mesh_job_count <= 0 and collision_count <= 0 and exposure_scan_count <= 0 and refreshed_count <= 0:
+            structure_count = process_streaming_structure_work()
+        if loaded_count <= 0 and mesh_applied_count <= 0 and mesh_job_count <= 0 and collision_count <= 0 and exposure_scan_count <= 0 and refreshed_count <= 0 and structure_count <= 0:
             spawned_count = process_pending_chunk_prop_spawns()
-        if loaded_count <= 0 and collision_count <= 0 and refreshed_count <= 0 and spawned_count <= 0:
-            process_streaming_structure_work()
         return
     last_center_chunk = center
 
@@ -347,16 +385,33 @@ func update_chunks(force: bool = false) -> void:
             create_chunk(chunk_key.x, chunk_key.y)
         else:
             queue_chunk_load(chunk_key)
+    if not force:
+        queue_dirty_terrain_volume_chunk_refreshes()
+        queue_nearby_streaming_lod_refreshes(center)
     var loaded_count := 0
+    var mesh_applied_count := 0
+    var mesh_job_count := 0
     var collision_count := 0
     var refreshed_count := 0
+    var exposure_scan_count := 0
+    var structure_count := 0
     var spawned_count := 0
     if not force:
-        loaded_count = process_pending_chunk_loads(center)
-        collision_count = process_pending_chunk_collision_refreshes(center)
-        if collision_count <= 0:
+        var chunk_coverage_incomplete := chunks.size() < expected_chunk_count or not missing_chunks.is_empty()
+        if chunk_coverage_incomplete:
+            loaded_count = process_pending_chunk_loads(center)
+        mesh_applied_count = apply_completed_terrain_meshing_jobs(center) if loaded_count <= 0 else 0
+        mesh_job_count = process_pending_terrain_meshing_jobs(center) if loaded_count <= 0 and mesh_applied_count <= 0 else 0
+        if loaded_count <= 0 and mesh_applied_count <= 0 and mesh_job_count <= 0:
+            exposure_scan_count = process_pending_generated_volume_exposure_scans(center)
+        if loaded_count <= 0 and mesh_applied_count <= 0 and mesh_job_count <= 0 and exposure_scan_count <= 0:
             refreshed_count = process_pending_chunk_terrain_refreshes(center)
-        if loaded_count <= 0 and collision_count <= 0 and refreshed_count <= 0:
+        if not chunk_coverage_incomplete:
+            loaded_count = process_pending_chunk_loads(center) if mesh_applied_count <= 0 and mesh_job_count <= 0 and exposure_scan_count <= 0 and refreshed_count <= 0 else 0
+        collision_count = process_pending_chunk_collision_refreshes(center) if loaded_count <= 0 and mesh_applied_count <= 0 and mesh_job_count <= 0 and exposure_scan_count <= 0 and refreshed_count <= 0 else 0
+        if loaded_count <= 0 and mesh_applied_count <= 0 and mesh_job_count <= 0 and collision_count <= 0 and exposure_scan_count <= 0 and refreshed_count <= 0:
+            structure_count = process_streaming_structure_work()
+        if loaded_count <= 0 and mesh_applied_count <= 0 and mesh_job_count <= 0 and collision_count <= 0 and exposure_scan_count <= 0 and refreshed_count <= 0 and structure_count <= 0:
             spawned_count = process_pending_chunk_prop_spawns()
 
     var unload_start: int = monitor.begin_section("chunk_unload") if monitor != null else Time.get_ticks_usec()
@@ -371,6 +426,7 @@ func update_chunks(force: bool = false) -> void:
     prune_stale_pending_chunk_loads(needed)
     prune_stale_pending_chunk_collision_refreshes(needed)
     prune_stale_pending_chunk_terrain_refreshes(needed)
+    prune_stale_pending_generated_volume_exposure_scans(needed)
     prune_stale_pending_chunk_prop_spawns(needed)
     if monitor != null:
         monitor.end_section("chunk_unload", unload_start)
@@ -379,13 +435,16 @@ func update_chunks(force: bool = false) -> void:
         var center_cell := Vector2i(world_to_cell(player.position.x), world_to_cell(player.position.z))
         if force:
             structure_system.update_around(center_cell)
-        elif loaded_count <= 0 and collision_count <= 0 and refreshed_count <= 0 and spawned_count <= 0:
-            structure_system.update_around_budgeted(center_cell, true)
         if monitor != null:
             monitor.end_section("structure_update_around", structure_start)
 
 func process_streaming_structure_work() -> int:
     if structure_system == null:
+        return 0
+    if should_defer_chunk_terrain_refresh_work():
+        if runtime_perf_monitor != null:
+            runtime_perf_monitor.increment_counter("structure_op_queue_deferred_motion")
+            runtime_perf_monitor.increment_counter("structure_op_queue_depth", pending_streaming_structure_work_count())
         return 0
     var monitor = runtime_perf_monitor
     var structure_start: int = monitor.begin_section("structure_update_around") if monitor != null else Time.get_ticks_usec()
@@ -398,6 +457,11 @@ func process_streaming_structure_work() -> int:
     if monitor != null:
         monitor.end_section("structure_update_around", structure_start)
     return processed
+
+func pending_streaming_structure_work_count() -> int:
+    if structure_system == null or not structure_system.has_method("pending_structure_op_count"):
+        return 0
+    return int(structure_system.pending_structure_op_count())
 
 func queue_chunk_load(chunk_key: Vector2i) -> void:
     if chunks.has(chunk_key) or pending_chunk_loads.has(chunk_key):
@@ -417,7 +481,7 @@ func process_pending_chunk_loads(center: Vector2i) -> int:
         pending_chunk_loads.erase(chunk_key)
         if chunks.has(chunk_key):
             continue
-        create_chunk(chunk_key.x, chunk_key.y, true)
+        create_chunk(chunk_key.x, chunk_key.y, true, should_defer_streaming_chunk_collision(chunk_key, center))
         created += 1
     if monitor != null:
         monitor.increment_counter("chunk_load_queue_depth", pending_chunk_loads.size())
@@ -437,6 +501,10 @@ func nearest_pending_chunk_load(center: Vector2i) -> Vector2i:
             if key.x < best.x or (key.x == best.x and key.y < best.y):
                 best = key
     return best
+
+func should_defer_streaming_chunk_collision(chunk_key: Vector2i, center: Vector2i) -> bool:
+    var max_axis_distance := maxi(absi(chunk_key.x - center.x), absi(chunk_key.y - center.y))
+    return max_axis_distance >= STREAMING_COLLISION_DEFER_MIN_CHUNK_DISTANCE
 
 func prune_stale_pending_chunk_loads(needed: Dictionary) -> void:
     if pending_chunk_loads.is_empty():
@@ -476,20 +544,143 @@ func queue_chunk_terrain_refresh(chunk_key: Vector2i) -> void:
         return
     pending_chunk_terrain_refreshes[chunk_key] = true
 
+func should_use_cached_generated_volume_exposure_only() -> bool:
+    return not bool(get("visual_capture_active")) \
+        and not bool(get("force_underground_volume_debug")) \
+        and not bool(get("force_underground_volume_fine_focus"))
+
+func queue_generated_volume_exposure_scan(chunk_key: Vector2i) -> void:
+    pending_generated_volume_exposure_scans[chunk_key] = true
+    if runtime_perf_monitor != null:
+        runtime_perf_monitor.increment_counter("terrain_volume_exposure_scan_queued")
+
+func queue_generated_volume_exposure_scan_for_region(start_x: int, start_z: int) -> void:
+    var chunk_key := Vector2i(floori(float(start_x) / float(CHUNK_SIZE)), floori(float(start_z) / float(CHUNK_SIZE)))
+    queue_generated_volume_exposure_scan(chunk_key)
+
+func process_pending_generated_volume_exposure_scans(center: Vector2i) -> int:
+    if pending_generated_volume_exposure_scans.is_empty():
+        return 0
+    if should_defer_chunk_terrain_refresh_work():
+        if runtime_perf_monitor != null:
+            runtime_perf_monitor.increment_counter("terrain_volume_exposure_scan_deferred_motion")
+            runtime_perf_monitor.increment_counter("terrain_volume_exposure_scan_queue_depth", pending_generated_volume_exposure_scans.size())
+        return 0
+    var monitor = runtime_perf_monitor
+    var queue_start: int = monitor.begin_section("terrain_volume_exposure_scan_queue") if monitor != null else Time.get_ticks_usec()
+    var chunk_key := nearest_chunk_key_from_lookup(pending_generated_volume_exposure_scans, center)
+    if chunk_key == Vector2i(999999, 999999):
+        if monitor != null:
+            monitor.end_section("terrain_volume_exposure_scan_queue", queue_start)
+        return 0
+    pending_generated_volume_exposure_scans.erase(chunk_key)
+    var start_x := chunk_key.x * CHUNK_SIZE
+    var start_z := chunk_key.y * CHUNK_SIZE
+    var has_exposure := false
+    if has_method("chunk_has_generated_surface_volume_exposure"):
+        has_exposure = bool(call("chunk_has_generated_surface_volume_exposure", start_x, start_z))
+    if has_exposure and chunks.has(chunk_key):
+        invalidate_chunk_asset_cache(chunk_key)
+        queue_chunk_terrain_refresh(chunk_key)
+    if monitor != null:
+        monitor.increment_counter("terrain_volume_exposure_scans_processed")
+        if has_exposure:
+            monitor.increment_counter("terrain_volume_exposure_scans_found")
+        monitor.increment_counter("terrain_volume_exposure_scan_queue_depth", pending_generated_volume_exposure_scans.size())
+        monitor.end_section("terrain_volume_exposure_scan_queue", queue_start)
+    return 1
+
+func prune_stale_pending_generated_volume_exposure_scans(needed: Dictionary) -> void:
+    if pending_generated_volume_exposure_scans.is_empty():
+        return
+    for key in pending_generated_volume_exposure_scans.keys():
+        if not needed.has(key):
+            pending_generated_volume_exposure_scans.erase(key)
+
+func queue_dirty_terrain_volume_chunk_refreshes() -> int:
+    if world_generation_system == null or not world_generation_system.has_method("consume_terrain_volume_dirty_chunk_keys"):
+        return 0
+    var dirty_value = world_generation_system.call("consume_terrain_volume_dirty_chunk_keys", CHUNK_SIZE)
+    if not (dirty_value is Array):
+        return 0
+    var queued := 0
+    for key_value in dirty_value:
+        if not (key_value is Vector2i):
+            continue
+        var chunk_key: Vector2i = key_value
+        if not chunks.has(chunk_key):
+            continue
+        queue_chunk_terrain_refresh(chunk_key)
+        queued += 1
+    if queued > 0 and runtime_perf_monitor != null:
+        runtime_perf_monitor.increment_counter("terrain_volume_dirty_chunks_queued", queued)
+    return queued
+
 func process_pending_chunk_terrain_refreshes(center: Vector2i) -> int:
     if pending_chunk_terrain_refreshes.is_empty():
+        return 0
+    if should_defer_chunk_terrain_refresh_work():
+        if runtime_perf_monitor != null:
+            runtime_perf_monitor.increment_counter("chunk_terrain_refresh_deferred_motion")
+            runtime_perf_monitor.increment_counter("chunk_terrain_refresh_queue_depth", pending_chunk_terrain_refreshes.size())
         return 0
     var monitor = runtime_perf_monitor
     var queue_start: int = monitor.begin_section("chunk_terrain_refresh_queue") if monitor != null else Time.get_ticks_usec()
     var chunk_key := nearest_pending_chunk_terrain_refresh(center)
     if chunk_key != Vector2i(999999, 999999):
+        if should_throttle_streaming_exterior_full_refresh(chunk_key):
+            if monitor != null:
+                monitor.increment_counter("chunk_terrain_refresh_throttled_streaming_lod")
+                monitor.increment_counter("chunk_terrain_refresh_queue_depth", pending_chunk_terrain_refreshes.size())
+                monitor.end_section("chunk_terrain_refresh_queue", queue_start)
+            return 0
         pending_chunk_terrain_refreshes.erase(chunk_key)
         if chunks.has(chunk_key):
             refresh_chunk_terrain_assets(chunk_key.x, chunk_key.y, true, true)
+            if streaming_exterior_full_refresh_is_noncritical(chunk_key):
+                last_streaming_exterior_full_refresh_frame = Engine.get_process_frames()
     if monitor != null:
         monitor.increment_counter("chunk_terrain_refresh_queue_depth", pending_chunk_terrain_refreshes.size())
         monitor.end_section("chunk_terrain_refresh_queue", queue_start)
     return 1
+
+func should_throttle_streaming_exterior_full_refresh(chunk_key: Vector2i) -> bool:
+    if bool(get("visual_capture_active")) or bool(get("force_underground_volume_debug")) or bool(get("force_underground_volume_fine_focus")):
+        return false
+    if not streaming_exterior_full_refresh_is_noncritical(chunk_key):
+        return false
+    return Engine.get_process_frames() - last_streaming_exterior_full_refresh_frame < STREAMING_EXTERIOR_FULL_REFRESH_FRAME_INTERVAL
+
+func streaming_exterior_full_refresh_is_noncritical(chunk_key: Vector2i) -> bool:
+    if not chunks.has(chunk_key):
+        return false
+    var chunk := chunks[chunk_key] as Node3D
+    if chunk == null or not is_instance_valid(chunk):
+        return false
+    var mesh_instance := chunk.get_node_or_null("TerrainMesh") as MeshInstance3D
+    var mesh := mesh_instance.mesh if mesh_instance != null else null
+    if mesh == null or not bool(mesh.get_meta("terrainStreamingLod", false)):
+        return false
+    var start_x := chunk_key.x * CHUNK_SIZE
+    var start_z := chunk_key.y * CHUNK_SIZE
+    if has_method("chunk_has_terrain_volume_edits") and bool(call("chunk_has_terrain_volume_edits", start_x, start_z)):
+        return false
+    if has_method("chunk_has_excavation_overlap") and bool(call("chunk_has_excavation_overlap", start_x, start_z)):
+        return false
+    if has_method("chunk_needs_generated_underground_volume_mesh") and bool(call("chunk_needs_generated_underground_volume_mesh", start_x, start_z)):
+        return false
+    return true
+
+func should_defer_chunk_terrain_refresh_work() -> bool:
+    if player == null:
+        return false
+    if bool(player.get("automated_sprint")) or bool(player.get("is_sprinting")):
+        return true
+    if player is CharacterBody3D:
+        var velocity: Vector3 = (player as CharacterBody3D).velocity
+        var horizontal_speed := Vector2(velocity.x, velocity.z).length()
+        return horizontal_speed >= STREAMING_DETAIL_REFRESH_MAX_PLAYER_SPEED
+    return false
 
 func nearest_pending_chunk_terrain_refresh(center: Vector2i) -> Vector2i:
     var best := Vector2i(999999, 999999)
@@ -512,6 +703,499 @@ func prune_stale_pending_chunk_terrain_refreshes(needed: Dictionary) -> void:
         if not needed.has(key):
             pending_chunk_terrain_refreshes.erase(key)
 
+func chunk_should_queue_terrain_meshing(cx: int, cz: int) -> bool:
+    if terrain_meshing_service == null:
+        return false
+    if bool(get("visual_capture_active")) or bool(get("force_underground_volume_debug")) or bool(get("force_underground_volume_fine_focus")):
+        return false
+    var start_x := cx * CHUNK_SIZE
+    var start_z := cz * CHUNK_SIZE
+    if has_method("chunk_has_terrain_volume_edits") and bool(call("chunk_has_terrain_volume_edits", start_x, start_z)):
+        return true
+    if has_method("chunk_has_excavation_overlap") and bool(call("chunk_has_excavation_overlap", start_x, start_z)):
+        return true
+    return chunk_generated_volume_required_for_streaming(start_x, start_z)
+
+func chunk_generated_volume_required_for_streaming(start_x: int, start_z: int) -> bool:
+    if player != null and has_method("chunk_has_underground_focus_overlap") and bool(call("chunk_has_underground_focus_overlap", start_x, start_z)):
+        return true
+    if has_method("cached_generated_surface_volume_exposure"):
+        var cached_value = call("cached_generated_surface_volume_exposure", start_x, start_z)
+        if cached_value is Dictionary:
+            var cached: Dictionary = cached_value
+            if bool(cached.get("known", false)):
+                return bool(cached.get("result", false))
+    if should_use_cached_generated_volume_exposure_only():
+        queue_generated_volume_exposure_scan_for_region(start_x, start_z)
+        return false
+    if has_method("chunk_needs_generated_underground_volume_mesh"):
+        return bool(call("chunk_needs_generated_underground_volume_mesh", start_x, start_z))
+    return false
+
+func should_defer_generated_volume_exposure_scan() -> bool:
+    if bool(get("visual_capture_active")) or bool(get("force_underground_volume_debug")) or bool(get("force_underground_volume_fine_focus")):
+        return false
+    if terrain_meshing_service == null or not terrain_meshing_service.has_method("backend_summary"):
+        return false
+    var summary: Dictionary = terrain_meshing_service.backend_summary()
+    return bool(summary.get("normalQueuedWorkDeferredWithoutNative", false))
+
+func note_deferred_generated_volume_exposure_scan() -> void:
+    if runtime_perf_monitor != null:
+        runtime_perf_monitor.increment_counter("terrain_volume_exposure_scan_deferred_without_native")
+
+func request_chunk_terrain_mesh_assets(chunk_key: Vector2i, include_collision := true, priority := 0) -> bool:
+    if terrain_meshing_service == null or not terrain_meshing_service.has_method("request_chunk_assets"):
+        return false
+    var signature := chunk_asset_signature(chunk_key)
+    var result: Dictionary = terrain_meshing_service.request_chunk_assets(chunk_key.x, chunk_key.y, signature, include_collision, priority)
+    var status := String(result.get("status", ""))
+    if runtime_perf_monitor != null:
+        if status == "queued":
+            runtime_perf_monitor.increment_counter("terrain_meshing_jobs_queued")
+        elif status == "pending":
+            runtime_perf_monitor.increment_counter("terrain_meshing_jobs_already_pending")
+        elif status == "ready":
+            runtime_perf_monitor.increment_counter("terrain_meshing_jobs_already_ready")
+    return status != ""
+
+func process_pending_terrain_meshing_jobs(center: Vector2i) -> int:
+    if terrain_meshing_service == null or not terrain_meshing_service.has_method("process_jobs"):
+        return 0
+    var monitor = runtime_perf_monitor
+    if not terrain_meshing_runtime_work_allowed(center):
+        if monitor != null:
+            monitor.increment_counter("terrain_meshing_jobs_deferred_surface_idle")
+            if terrain_meshing_service.has_method("pending_job_count"):
+                monitor.increment_counter("terrain_meshing_job_queue_depth", int(terrain_meshing_service.pending_job_count()))
+            if terrain_meshing_service.has_method("completed_job_count"):
+                monitor.increment_counter("terrain_meshing_completed_queue_depth", int(terrain_meshing_service.completed_job_count()))
+        return 0
+    if should_defer_chunk_terrain_refresh_work():
+        if monitor != null:
+            monitor.increment_counter("terrain_meshing_jobs_deferred_motion")
+            if terrain_meshing_service.has_method("pending_job_count"):
+                monitor.increment_counter("terrain_meshing_job_queue_depth", int(terrain_meshing_service.pending_job_count()))
+            if terrain_meshing_service.has_method("completed_job_count"):
+                monitor.increment_counter("terrain_meshing_completed_queue_depth", int(terrain_meshing_service.completed_job_count()))
+        return 0
+    if should_defer_blocking_native_terrain_meshing_jobs():
+        if monitor != null:
+            monitor.increment_counter("terrain_meshing_jobs_deferred_blocking_native")
+            if terrain_meshing_service.has_method("pending_job_count"):
+                monitor.increment_counter("terrain_meshing_job_queue_depth", int(terrain_meshing_service.pending_job_count()))
+            if terrain_meshing_service.has_method("completed_job_count"):
+                monitor.increment_counter("terrain_meshing_completed_queue_depth", int(terrain_meshing_service.completed_job_count()))
+        return 0
+    var queue_start: int = monitor.begin_section("terrain_meshing_job_queue") if monitor != null else Time.get_ticks_usec()
+    var result: Dictionary = terrain_meshing_service.process_jobs(
+        STREAMING_TERRAIN_MESH_JOBS_PER_FRAME,
+        STREAMING_TERRAIN_MESH_FRAME_BUDGET_MS,
+        center
+    )
+    var processed := int(result.get("processed", 0))
+    var work_count := processed
+    if work_count <= 0 and int(result.get("payloadCells", 0)) > 0:
+        work_count = 1
+    if work_count <= 0 and int(result.get("preparedSections", 0)) > 0:
+        work_count = 1
+    if work_count <= 0 and int(result.get("dropped", 0)) > 0:
+        work_count = 1
+    if monitor != null:
+        monitor.increment_counter("terrain_meshing_jobs_processed", processed)
+        monitor.increment_counter("terrain_meshing_jobs_dropped", int(result.get("dropped", 0)))
+        monitor.increment_counter("terrain_meshing_jobs_deferred_without_native", int(result.get("deferredWithoutNative", 0)))
+        monitor.increment_counter("terrain_volume_sections_prepared_for_mesh", int(result.get("preparedSections", 0)))
+        monitor.increment_counter("terrain_meshing_payload_cells_prepared", int(result.get("payloadCells", 0)))
+        monitor.increment_counter("terrain_meshing_job_queue_depth", int(result.get("pendingJobs", 0)))
+        monitor.increment_counter("terrain_meshing_completed_queue_depth", int(result.get("completedJobs", 0)))
+        monitor.observe_external_duration("terrain_meshing_payload_prep", float(result.get("payloadPrepMs", 0.0)))
+        monitor.observe_external_duration("terrain_meshing_collect", float(result.get("collectMs", 0.0)))
+        monitor.observe_external_duration("terrain_meshing_worker_join", float(result.get("workerJoinMs", 0.0)))
+        monitor.observe_external_duration("terrain_meshing_worker_start", float(result.get("workerStartMs", 0.0)))
+        monitor.observe_external_duration("terrain_meshing_asset_finalize", float(result.get("assetFinalizeMs", 0.0)))
+        monitor.observe_external_duration("terrain_meshing_native_mesh_build", float(result.get("terrainMeshBuildMs", 0.0)))
+        monitor.observe_external_duration("terrain_meshing_native_fluid_build", float(result.get("fluidMeshBuildMs", 0.0)))
+        monitor.observe_external_duration("terrain_meshing_native_collision_build", float(result.get("collisionBuildMs", 0.0)))
+        monitor.observe_external_duration("terrain_meshing_job_elapsed", float(result.get("elapsedMs", 0.0)))
+        monitor.end_section("terrain_meshing_job_queue", queue_start)
+    return work_count
+
+func terrain_meshing_runtime_work_allowed(_center: Vector2i) -> bool:
+    if bool(get("visual_capture_active")) or bool(get("force_underground_volume_debug")) or bool(get("force_underground_volume_fine_focus")):
+        return true
+    if player != null and has_method("position_is_near_underground_air_focus") and bool(call("position_is_near_underground_air_focus", player.global_position)):
+        return true
+    if world_generation_system != null and world_generation_system.has_method("terrain_volume_edit_count"):
+        if int(world_generation_system.call("terrain_volume_edit_count", false)) > 0:
+            return true
+    if has_method("active_volume_excavation_brushes"):
+        var brushes: Array = call("active_volume_excavation_brushes")
+        if not brushes.is_empty():
+            return true
+    return false
+
+func should_defer_blocking_native_terrain_meshing_jobs() -> bool:
+    if terrain_meshing_service == null or not terrain_meshing_service.has_method("backend_summary"):
+        return false
+    var summary: Dictionary = terrain_meshing_service.backend_summary()
+    if not bool(summary.get("native", false)):
+        return false
+    if bool(summary.get("async", false)):
+        return false
+    if OS.get_environment("VOXEL_ALLOW_BLOCKING_NATIVE_TERRAIN_MESHING").strip_edges() == "1":
+        return false
+    if bool(get("force_underground_volume_debug")) or bool(get("force_underground_volume_fine_focus")):
+        return false
+    return true
+
+func apply_completed_terrain_meshing_jobs(center: Vector2i) -> int:
+    if terrain_meshing_service == null or not terrain_meshing_service.has_method("completed_chunk_keys"):
+        return 0
+    var keys: Array = terrain_meshing_service.completed_chunk_keys()
+    if keys.is_empty():
+        return 0
+    var attempts := keys.size()
+    while attempts > 0:
+        attempts -= 1
+        var lookup := {}
+        for key_value in keys:
+            if key_value is Vector2i:
+                lookup[key_value] = true
+        if lookup.is_empty():
+            return 0
+        var chunk_key := nearest_chunk_key_from_lookup(lookup, center)
+        if chunk_key == Vector2i(999999, 999999):
+            return 0
+        var assets := take_completed_terrain_mesh_assets(chunk_key)
+        if assets.is_empty():
+            keys = terrain_meshing_service.completed_chunk_keys()
+            continue
+        store_chunk_assets(chunk_key, assets)
+        apply_terrain_mesh_assets_to_chunk(chunk_key, assets, true)
+        if runtime_perf_monitor != null:
+            runtime_perf_monitor.increment_counter("terrain_meshing_completed_applied")
+        observe_terrain_mesh_asset_backend(assets)
+        return 1
+    return 0
+
+func take_completed_terrain_mesh_assets(chunk_key: Vector2i) -> Dictionary:
+    if terrain_meshing_service == null or not terrain_meshing_service.has_method("take_completed_chunk_assets"):
+        return {}
+    return terrain_meshing_service.take_completed_chunk_assets(chunk_key.x, chunk_key.y, chunk_asset_signature(chunk_key))
+
+func provisional_chunk_assets(cx: int, cz: int, defer_collision_shape := false) -> Dictionary:
+    var mesh: Mesh = streaming_provisional_exterior_surface_mesh(cx, cz)
+    mesh.set_meta("terrainMeshingProvisional", true)
+    mesh.set_meta("terrainMeshingNative", false)
+    mesh.set_meta("terrainMeshingBackend", "provisional_exterior_surface")
+    var shape: Shape3D = null
+    if not defer_collision_shape:
+        shape = chunk_collision_shape_for_mesh(mesh)
+    return {
+        "mesh": mesh,
+        "shape": shape,
+        "fluidMesh": ArrayMesh.new(),
+        "terrainSignature": chunk_asset_signature(Vector2i(cx, cz)),
+        "terrainMeshingProvisional": true
+    }
+
+func streaming_provisional_exterior_surface_mesh(cx: int, cz: int) -> ArrayMesh:
+    var mesh := streaming_lod_exterior_mesh(cx, cz, STREAMING_EXTERIOR_REFRESH_STEP_CELLS)
+    if mesh.get_surface_count() <= 0:
+        mesh = streaming_lod_exterior_mesh(cx, cz, 1)
+    return mesh
+
+func streaming_provisional_solid_slab_mesh(cx: int, cz: int) -> ArrayMesh:
+    var start_x := cx * CHUNK_SIZE
+    var start_z := cz * CHUNK_SIZE
+    var mesh := ArrayMesh.new()
+    var vertices := PackedVector3Array()
+    var normals := PackedVector3Array()
+    var colors := PackedColorArray()
+    var indices := PackedInt32Array()
+    var top_nw := streaming_placeholder_surface_y(start_x, start_z)
+    var top_ne := streaming_placeholder_surface_y(start_x + CHUNK_SIZE, start_z)
+    var top_se := streaming_placeholder_surface_y(start_x + CHUNK_SIZE, start_z + CHUNK_SIZE)
+    var top_sw := streaming_placeholder_surface_y(start_x, start_z + CHUNK_SIZE)
+    var bottom_y := streaming_placeholder_bottom_y(start_x, start_z, PackedVector3Array([
+        Vector3(0.0, top_nw, 0.0),
+        Vector3(float(CHUNK_SIZE) * CELL, top_ne, 0.0),
+        Vector3(float(CHUNK_SIZE) * CELL, top_se, float(CHUNK_SIZE) * CELL),
+        Vector3(0.0, top_sw, float(CHUNK_SIZE) * CELL)
+    ]))
+    streaming_append_placeholder_quad(
+        vertices,
+        normals,
+        colors,
+        indices,
+        Vector3(0.0, top_nw, 0.0),
+        Vector3(float(CHUNK_SIZE) * CELL, top_ne, 0.0),
+        Vector3(float(CHUNK_SIZE) * CELL, top_se, float(CHUNK_SIZE) * CELL),
+        Vector3(0.0, top_sw, float(CHUNK_SIZE) * CELL),
+        Vector3.UP,
+        streaming_placeholder_color(Vector3.UP)
+    )
+    streaming_append_placeholder_sides(vertices, normals, colors, indices, start_x, start_z, bottom_y, CHUNK_SIZE)
+    streaming_append_placeholder_bottom(vertices, normals, colors, indices, bottom_y)
+    if has_method("add_terrain_array_surface"):
+        call("add_terrain_array_surface", mesh, {
+            "vertices": vertices,
+            "normals": normals,
+            "colors": colors,
+            "indices": indices
+        }, terrain_material)
+    return mesh
+
+func streaming_lod_exterior_mesh(cx: int, cz: int, step_cells := STREAMING_EXTERIOR_LOD_STEP_CELLS) -> ArrayMesh:
+    var start_x := cx * CHUNK_SIZE
+    var start_z := cz * CHUNK_SIZE
+    var mesh := ArrayMesh.new()
+    if has_method("build_natural_exterior_arrays_lod") and has_method("add_terrain_array_surface"):
+        var arrays: Dictionary = call("build_natural_exterior_arrays_lod", start_x, start_z, maxi(1, int(step_cells)))
+        call("add_terrain_array_surface", mesh, arrays, terrain_material)
+    elif has_method("build_natural_exterior_array_mesh"):
+        var fallback_mesh = call("build_natural_exterior_array_mesh", start_x, start_z)
+        if fallback_mesh is ArrayMesh:
+            mesh = fallback_mesh as ArrayMesh
+    return mesh
+
+func streaming_lod_chunk_assets(cx: int, cz: int, defer_collision_shape := true, step_cells := STREAMING_SOLID_PLACEHOLDER_STEP_CELLS) -> Dictionary:
+    var mesh := streaming_lod_exterior_mesh(cx, cz, step_cells)
+    mesh.set_meta("terrainStreamingLod", true)
+    mesh.set_meta("terrainStreamingLodStepCells", maxi(1, int(step_cells)))
+    mesh.set_meta("terrainMeshingNative", false)
+    mesh.set_meta("terrainMeshingBackend", "streaming_lod_exterior_surface")
+    var shape: Shape3D = null
+    if not defer_collision_shape:
+        shape = chunk_collision_shape_for_mesh(mesh)
+    return {
+        "mesh": mesh,
+        "shape": shape,
+        "fluidMesh": ArrayMesh.new(),
+        "terrainSignature": chunk_asset_signature(Vector2i(cx, cz)),
+        "terrainStreamingLod": true
+    }
+
+func player_is_in_underground_volume_context() -> bool:
+    if player == null:
+        return false
+    if has_method("position_is_near_underground_air_focus") and bool(call("position_is_near_underground_air_focus", player.global_position)):
+        return true
+    if has_method("chunk_bound_surface_y_at_cell"):
+        var cell := Vector3i(world_to_cell(player.global_position.x), 0, world_to_cell(player.global_position.z))
+        var surface_y := float(call("chunk_bound_surface_y_at_cell", cell))
+        return player.global_position.y < surface_y - CELL * 0.35
+    return false
+
+func streaming_solid_volume_placeholder_mesh(cx: int, cz: int, step_cells := STREAMING_SOLID_PLACEHOLDER_STEP_CELLS) -> ArrayMesh:
+    var start_x := cx * CHUNK_SIZE
+    var start_z := cz * CHUNK_SIZE
+    var arrays := streaming_solid_volume_placeholder_arrays(start_x, start_z, step_cells)
+    var mesh := ArrayMesh.new()
+    if has_method("add_terrain_array_surface"):
+        call("add_terrain_array_surface", mesh, arrays, terrain_material)
+    return mesh
+
+func streaming_solid_volume_placeholder_arrays(start_x: int, start_z: int, step_cells: int) -> Dictionary:
+    var arrays: Dictionary = {}
+    if has_method("build_natural_exterior_arrays_lod"):
+        arrays = call("build_natural_exterior_arrays_lod", start_x, start_z, maxi(1, int(step_cells)))
+    if arrays.is_empty():
+        arrays = {
+            "vertices": PackedVector3Array(),
+            "normals": PackedVector3Array(),
+            "colors": PackedColorArray(),
+            "indices": PackedInt32Array()
+        }
+    var vertices: PackedVector3Array = arrays.get("vertices", PackedVector3Array())
+    var normals: PackedVector3Array = arrays.get("normals", PackedVector3Array())
+    var colors: PackedColorArray = arrays.get("colors", PackedColorArray())
+    var indices: PackedInt32Array = arrays.get("indices", PackedInt32Array())
+    if vertices.is_empty():
+        arrays["vertices"] = vertices
+        arrays["normals"] = normals
+        arrays["colors"] = colors
+        arrays["indices"] = indices
+        return arrays
+    streaming_append_reversed_indexed_surface(vertices, normals, colors, indices)
+    var bottom_y := streaming_placeholder_bottom_y(start_x, start_z, vertices)
+    streaming_append_placeholder_sides(vertices, normals, colors, indices, start_x, start_z, bottom_y, step_cells)
+    streaming_append_placeholder_bottom(vertices, normals, colors, indices, bottom_y)
+    arrays["vertices"] = vertices
+    arrays["normals"] = normals
+    arrays["colors"] = colors
+    arrays["indices"] = indices
+    return arrays
+
+func streaming_placeholder_bottom_y(start_x: int, start_z: int, vertices: PackedVector3Array) -> float:
+    var lowest_surface_y := INF
+    for vertex in vertices:
+        lowest_surface_y = minf(lowest_surface_y, vertex.y)
+    if lowest_surface_y == INF:
+        lowest_surface_y = 0.0
+    var fallback := lowest_surface_y - CELL * float(STREAMING_SOLID_PLACEHOLDER_DEPTH_CELLS)
+    if world_generation_system != null and world_generation_system.has_method("world_bottom_cell_y"):
+        return minf(fallback, float(int(world_generation_system.call("world_bottom_cell_y"))) * CELL)
+    return fallback
+
+func streaming_append_reversed_indexed_surface(
+    vertices: PackedVector3Array,
+    normals: PackedVector3Array,
+    colors: PackedColorArray,
+    indices: PackedInt32Array
+) -> void:
+    var original_vertex_count := vertices.size()
+    if original_vertex_count <= 0:
+        return
+    var original_index_count := indices.size()
+    if original_index_count <= 0:
+        for i in range(original_vertex_count):
+            indices.append(i)
+        original_index_count = indices.size()
+    var duplicate_offset := vertices.size()
+    for i in range(original_vertex_count):
+        vertices.append(vertices[i])
+        var normal := normals[i] if i < normals.size() else Vector3.UP
+        normals.append(-normal)
+        colors.append(colors[i] if i < colors.size() else Color(0.12, 0.13, 0.12))
+    var index_count := original_index_count - (original_index_count % 3)
+    for i in range(0, index_count, 3):
+        indices.append(duplicate_offset + int(indices[i]))
+        indices.append(duplicate_offset + int(indices[i + 2]))
+        indices.append(duplicate_offset + int(indices[i + 1]))
+
+func streaming_append_placeholder_sides(
+    vertices: PackedVector3Array,
+    normals: PackedVector3Array,
+    colors: PackedColorArray,
+    indices: PackedInt32Array,
+    start_x: int,
+    start_z: int,
+    bottom_y: float,
+    step_cells: int
+) -> void:
+    var step := maxi(1, int(step_cells))
+    var stops: Array[int] = []
+    var local := 0
+    while local < CHUNK_SIZE:
+        stops.append(local)
+        local += step
+    if stops.is_empty() or stops[stops.size() - 1] != CHUNK_SIZE:
+        stops.append(CHUNK_SIZE)
+    for index in range(stops.size() - 1):
+        var a: int = stops[index]
+        var b: int = stops[index + 1]
+        streaming_append_placeholder_wall(vertices, normals, colors, indices, Vector3(0.0, streaming_placeholder_surface_y(start_x, start_z + a), float(a) * CELL), Vector3(0.0, streaming_placeholder_surface_y(start_x, start_z + b), float(b) * CELL), Vector3(0.0, bottom_y, float(b) * CELL), Vector3(0.0, bottom_y, float(a) * CELL), Vector3.LEFT)
+        streaming_append_placeholder_wall(vertices, normals, colors, indices, Vector3(float(CHUNK_SIZE) * CELL, streaming_placeholder_surface_y(start_x + CHUNK_SIZE, start_z + b), float(b) * CELL), Vector3(float(CHUNK_SIZE) * CELL, streaming_placeholder_surface_y(start_x + CHUNK_SIZE, start_z + a), float(a) * CELL), Vector3(float(CHUNK_SIZE) * CELL, bottom_y, float(a) * CELL), Vector3(float(CHUNK_SIZE) * CELL, bottom_y, float(b) * CELL), Vector3.RIGHT)
+        streaming_append_placeholder_wall(vertices, normals, colors, indices, Vector3(float(b) * CELL, streaming_placeholder_surface_y(start_x + b, start_z), 0.0), Vector3(float(a) * CELL, streaming_placeholder_surface_y(start_x + a, start_z), 0.0), Vector3(float(a) * CELL, bottom_y, 0.0), Vector3(float(b) * CELL, bottom_y, 0.0), Vector3.BACK)
+        streaming_append_placeholder_wall(vertices, normals, colors, indices, Vector3(float(a) * CELL, streaming_placeholder_surface_y(start_x + a, start_z + CHUNK_SIZE), float(CHUNK_SIZE) * CELL), Vector3(float(b) * CELL, streaming_placeholder_surface_y(start_x + b, start_z + CHUNK_SIZE), float(CHUNK_SIZE) * CELL), Vector3(float(b) * CELL, bottom_y, float(CHUNK_SIZE) * CELL), Vector3(float(a) * CELL, bottom_y, float(CHUNK_SIZE) * CELL), Vector3.FORWARD)
+
+func streaming_placeholder_surface_y(cell_x: int, cell_z: int) -> float:
+    if has_method("chunk_bound_surface_y_at_cell"):
+        return float(call("chunk_bound_surface_y_at_cell", Vector3i(cell_x, 0, cell_z)))
+    if world_generation_system != null and world_generation_system.has_method("surface_y_for_cell"):
+        return float(world_generation_system.call("surface_y_for_cell", Vector3i(cell_x, 0, cell_z)))
+    return 0.0
+
+func streaming_append_placeholder_wall(
+    vertices: PackedVector3Array,
+    normals: PackedVector3Array,
+    colors: PackedColorArray,
+    indices: PackedInt32Array,
+    a: Vector3,
+    b: Vector3,
+    c: Vector3,
+    d: Vector3,
+    normal: Vector3
+) -> void:
+    var color := streaming_placeholder_color(normal)
+    streaming_append_placeholder_quad(vertices, normals, colors, indices, a, b, c, d, normal, color)
+    streaming_append_placeholder_quad(vertices, normals, colors, indices, a, d, c, b, -normal, color)
+
+func streaming_append_placeholder_bottom(
+    vertices: PackedVector3Array,
+    normals: PackedVector3Array,
+    colors: PackedColorArray,
+    indices: PackedInt32Array,
+    bottom_y: float
+) -> void:
+    var a := Vector3(0.0, bottom_y, 0.0)
+    var b := Vector3(float(CHUNK_SIZE) * CELL, bottom_y, 0.0)
+    var c := Vector3(float(CHUNK_SIZE) * CELL, bottom_y, float(CHUNK_SIZE) * CELL)
+    var d := Vector3(0.0, bottom_y, float(CHUNK_SIZE) * CELL)
+    var color := streaming_placeholder_color(Vector3.DOWN)
+    streaming_append_placeholder_quad(vertices, normals, colors, indices, a, b, c, d, Vector3.DOWN, color)
+    streaming_append_placeholder_quad(vertices, normals, colors, indices, a, d, c, b, Vector3.UP, color)
+
+func streaming_append_placeholder_quad(
+    vertices: PackedVector3Array,
+    normals: PackedVector3Array,
+    colors: PackedColorArray,
+    indices: PackedInt32Array,
+    a: Vector3,
+    b: Vector3,
+    c: Vector3,
+    d: Vector3,
+    normal: Vector3,
+    color: Color
+) -> void:
+    var offset := vertices.size()
+    vertices.append(a)
+    vertices.append(b)
+    vertices.append(c)
+    vertices.append(d)
+    for i in range(4):
+        normals.append(normal)
+        colors.append(color)
+    indices.append(offset)
+    indices.append(offset + 1)
+    indices.append(offset + 2)
+    indices.append(offset)
+    indices.append(offset + 2)
+    indices.append(offset + 3)
+
+func streaming_placeholder_color(normal: Vector3) -> Color:
+    if has_method("volume_material_surface_color"):
+        return call("volume_material_surface_color", "dirt", "underground", normal, 0.96, true)
+    if normal.y < -0.35:
+        return Color(0.045, 0.047, 0.045)
+    if normal.y > 0.35:
+        return Color(0.120, 0.125, 0.112)
+    return Color(0.100, 0.080, 0.060)
+
+func apply_terrain_mesh_assets_to_chunk(chunk_key: Vector2i, assets: Dictionary, notify_navigation := true) -> bool:
+    if not chunks.has(chunk_key):
+        return false
+    var chunk := chunks[chunk_key] as Node3D
+    if chunk == null or not is_instance_valid(chunk):
+        chunks.erase(chunk_key)
+        return false
+    var mesh_instance := chunk.get_node_or_null("TerrainMesh") as MeshInstance3D
+    var body := chunk.get_node_or_null("TerrainBody") as StaticBody3D
+    var collision := body.get_node_or_null("TerrainCollision") as CollisionShape3D if body != null else null
+    var mesh := assets.get("mesh") as Mesh
+    if mesh_instance != null and mesh != null:
+        mesh_instance.mesh = mesh
+    if collision != null:
+        if assets.get("shape") is Shape3D:
+            collision.shape = assets.get("shape") as Shape3D
+        elif mesh != null:
+            queue_chunk_collision_refresh(chunk_key)
+    apply_chunk_fluid_mesh(chunk, assets.get("fluidMesh") as Mesh, chunk_key)
+    if notify_navigation and npc_system and npc_system.has_method("notify_navigation_chunk_loaded"):
+        var monitor = runtime_perf_monitor
+        var nav_start: int = monitor.begin_section("chunk_nav_loaded_notify") if monitor != null else Time.get_ticks_usec()
+        npc_system.notify_navigation_chunk_loaded(chunk_key)
+        if monitor != null:
+            monitor.end_section("chunk_nav_loaded_notify", nav_start)
+    return true
+
+func valid_node3d_from_variant(value) -> Node3D:
+    if value == null or not is_instance_valid(value):
+        return null
+    return value as Node3D
+
 func queue_chunk_prop_spawn(chunk_key: Vector2i, chunk: Node3D) -> void:
     if chunk == null or not is_instance_valid(chunk):
         return
@@ -529,7 +1213,7 @@ func process_pending_chunk_prop_spawns() -> int:
             pending_chunk_prop_spawns.erase(key)
             continue
         var state: Dictionary = state_value
-        var chunk := state.get("chunk") as Node3D
+        var chunk := valid_node3d_from_variant(state.get("chunk"))
         if chunk == null or not is_instance_valid(chunk) or not chunk.is_inside_tree():
             pending_chunk_prop_spawns.erase(key)
             continue
@@ -548,6 +1232,7 @@ func process_pending_chunk_prop_spawns() -> int:
             if monitor != null:
                 monitor.increment_counter("chunk_prop_spawns_completed")
         else:
+            pending_chunk_prop_spawns.erase(key)
             pending_chunk_prop_spawns[key] = state
         processed += 1
         if monitor != null:
@@ -565,16 +1250,45 @@ func prune_stale_pending_chunk_prop_spawns(needed: Dictionary) -> void:
         if not needed.has(key):
             pending_chunk_prop_spawns.erase(key)
 
-func create_chunk(cx: int, cz: int, defer_props := false) -> void:
+func create_chunk(cx: int, cz: int, defer_props := false, defer_streaming_collision := false) -> void:
     var monitor = runtime_perf_monitor
     var create_start: int = monitor.begin_section("chunk_create") if monitor != null else Time.get_ticks_usec()
+    var chunk_key := Vector2i(cx, cz)
     var chunk := Node3D.new()
     chunk.name = "Chunk_%d_%d" % [cx, cz]
     chunk.position = Vector3(cx * CHUNK_SIZE * CELL, 0.0, cz * CHUNK_SIZE * CELL)
     chunk_root.add_child(chunk)
 
     var assets_start: int = monitor.begin_section("chunk_assets") if monitor != null else Time.get_ticks_usec()
-    var assets := chunk_assets(cx, cz)
+    var has_valid_cached_assets := chunk_asset_cache.has(chunk_key) and chunk_asset_cache_entry_valid(chunk_key, chunk_asset_cache[chunk_key])
+    var defer_collision_shape := defer_props and defer_streaming_collision and not has_valid_cached_assets
+    var queue_terrain_meshing := defer_props and not has_valid_cached_assets and chunk_should_queue_terrain_meshing(cx, cz)
+    var center_chunk := world_to_chunk(player.position.x, player.position.z) if player != null else chunk_key
+    var stream_distance = maxi(absi(chunk_key.x - center_chunk.x), absi(chunk_key.y - center_chunk.y))
+    var force_volume_geometry := bool(get("visual_capture_active")) or bool(get("force_underground_volume_debug")) or bool(get("force_underground_volume_fine_focus"))
+    var use_streaming_lod := defer_props and not has_valid_cached_assets and not queue_terrain_meshing and not force_volume_geometry and stream_distance >= STREAMING_EXTERIOR_LOD_MIN_CHUNK_DISTANCE
+    var assets := {}
+    if queue_terrain_meshing:
+        assets = provisional_chunk_assets(cx, cz, defer_collision_shape)
+        request_chunk_terrain_mesh_assets(chunk_key, true, 0)
+        if monitor != null:
+            monitor.increment_counter("terrain_meshing_provisional_chunks")
+            if defer_collision_shape:
+                monitor.increment_counter("terrain_meshing_provisional_collision_deferred")
+    elif use_streaming_lod:
+        assets = streaming_lod_chunk_assets(cx, cz, defer_collision_shape)
+        if monitor != null:
+            monitor.increment_counter("streaming_lod_chunks")
+    elif defer_collision_shape:
+        assets = {
+            "mesh": chunk_mesh_asset(cx, cz),
+            "shape": null,
+            "fluidMesh": chunk_fluid_mesh_asset(cx, cz)
+        }
+        if monitor != null:
+            monitor.increment_counter("chunk_collision_shape_deferred")
+    else:
+        assets = chunk_assets(cx, cz)
     if monitor != null:
         monitor.end_section("chunk_assets", assets_start)
     var mesh := assets.get("mesh") as Mesh
@@ -584,6 +1298,7 @@ func create_chunk(cx: int, cz: int, defer_props := false) -> void:
     mesh_instance.set_meta("geometry_source", "volume_sample_extraction")
     mesh_instance.set_meta("chunk", Vector2i(cx, cz))
     chunk.add_child(mesh_instance)
+    apply_chunk_fluid_mesh(chunk, assets.get("fluidMesh") as Mesh, chunk_key)
 
     var body := StaticBody3D.new()
     body.name = "TerrainBody"
@@ -595,14 +1310,19 @@ func create_chunk(cx: int, cz: int, defer_props := false) -> void:
     body.set_meta("collision_source", "terrain_mesh_create_trimesh_shape")
     var collision := CollisionShape3D.new()
     collision.name = "TerrainCollision"
-    collision.shape = assets.get("shape") as Shape3D
+    if assets.get("shape") is Shape3D:
+        collision.shape = assets.get("shape") as Shape3D
     collision.set_meta("geometry_source", "volume_sample_extraction")
     collision.set_meta("collision_source", "terrain_mesh_create_trimesh_shape")
     body.add_child(collision)
     chunk.add_child(body)
 
-    var chunk_key := Vector2i(cx, cz)
     chunks[chunk_key] = chunk
+    if bool(assets.get("terrainStreamingLod", false)) and should_queue_streaming_lod_full_refresh(chunk_key):
+        queue_chunk_terrain_refresh(chunk_key)
+    var temporary_terrain_asset := bool(assets.get("terrainStreamingLod", false)) or bool(assets.get("terrainMeshingProvisional", false))
+    if defer_collision_shape and not temporary_terrain_asset:
+        queue_chunk_collision_refresh(chunk_key)
     if defer_props:
         queue_chunk_prop_spawn(chunk_key, chunk)
     else:
@@ -623,19 +1343,44 @@ func chunk_assets(cx: int, cz: int) -> Dictionary:
     var monitor = runtime_perf_monitor
     var key := Vector2i(cx, cz)
     if chunk_asset_cache.has(key):
-        chunk_asset_cache_hits += 1
+        var cached_assets: Dictionary = chunk_asset_cache[key]
+        if chunk_asset_cache_entry_valid(key, cached_assets):
+            chunk_asset_cache_hits += 1
+            if monitor != null:
+                monitor.increment_counter("chunk_asset_cache_hits")
+            touch_chunk_asset_cache_key(key)
+            if not cached_assets.has("fluidMesh"):
+                cached_assets["fluidMesh"] = chunk_fluid_mesh_asset(cx, cz)
+                cached_assets["terrainSignature"] = chunk_asset_signature(key)
+                chunk_asset_cache[key] = cached_assets
+            return cached_assets
+        var completed_assets := take_completed_terrain_mesh_assets(key)
+        if not completed_assets.is_empty():
+            store_chunk_assets(key, completed_assets)
+            if monitor != null:
+                monitor.increment_counter("terrain_meshing_completed_cache_replacement")
+            observe_terrain_mesh_asset_backend(completed_assets)
+            return completed_assets
+        invalidate_chunk_asset_cache(key)
         if monitor != null:
-            monitor.increment_counter("chunk_asset_cache_hits")
-        touch_chunk_asset_cache_key(key)
-        return chunk_asset_cache[key]
+            monitor.increment_counter("chunk_asset_cache_stale")
+    var completed_uncached_assets := take_completed_terrain_mesh_assets(key)
+    if not completed_uncached_assets.is_empty():
+        store_chunk_assets(key, completed_uncached_assets)
+        if monitor != null:
+            monitor.increment_counter("terrain_meshing_completed_cache_fill")
+        observe_terrain_mesh_asset_backend(completed_uncached_assets)
+        return completed_uncached_assets
     chunk_asset_cache_misses += 1
     if monitor != null:
         monitor.increment_counter("chunk_asset_cache_misses")
     var mesh := chunk_mesh_asset(cx, cz)
     var shape := chunk_collision_shape_for_mesh(mesh)
+    var fluid_mesh := chunk_fluid_mesh_asset(cx, cz)
     var assets := {
         "mesh": mesh,
-        "shape": shape
+        "shape": shape,
+        "fluidMesh": fluid_mesh
     }
     store_chunk_assets(key, assets)
     return assets
@@ -643,15 +1388,63 @@ func chunk_assets(cx: int, cz: int) -> Dictionary:
 func chunk_mesh_asset(cx: int, cz: int) -> Mesh:
     var monitor = runtime_perf_monitor
     var mesh_start: int = monitor.begin_section("chunk_build_mesh") if monitor != null else Time.get_ticks_usec()
-    var mesh := build_chunk_mesh(cx, cz)
+    var mesh: Mesh = null
+    if terrain_meshing_service != null and terrain_meshing_service.has_method("build_chunk_mesh"):
+        mesh = terrain_meshing_service.build_chunk_mesh(cx, cz)
+    else:
+        mesh = build_chunk_mesh(cx, cz)
     if monitor != null:
+        if mesh != null and bool(mesh.get_meta("terrainMeshingNative", false)):
+            monitor.increment_counter("terrain_meshing_native_chunks")
+        elif mesh != null and bool(mesh.get_meta("terrainMeshingDeferredWithoutNative", false)):
+            monitor.increment_counter("terrain_meshing_direct_build_deferred_without_native")
+        else:
+            monitor.increment_counter("terrain_meshing_gdscript_fallback_chunks")
         monitor.end_section("chunk_build_mesh", mesh_start)
     return mesh
+
+func chunk_fluid_mesh_asset(cx: int, cz: int) -> Mesh:
+    var monitor = runtime_perf_monitor
+    var mesh_start: int = monitor.begin_section("chunk_build_fluid_mesh") if monitor != null else Time.get_ticks_usec()
+    var mesh: Mesh = null
+    if terrain_meshing_service != null and terrain_meshing_service.has_method("build_chunk_fluid_mesh"):
+        mesh = terrain_meshing_service.build_chunk_fluid_mesh(cx, cz)
+    else:
+        mesh = build_chunk_fluid_mesh(cx, cz)
+    if monitor != null:
+        if mesh != null and bool(mesh.get_meta("terrainFluidDeferredWithoutNative", false)):
+            monitor.increment_counter("terrain_fluid_direct_build_deferred_without_native")
+        monitor.end_section("chunk_build_fluid_mesh", mesh_start)
+    return mesh
+
+func apply_chunk_fluid_mesh(chunk: Node3D, fluid_mesh: Mesh, key: Vector2i) -> void:
+    var existing := chunk.get_node_or_null("TerrainFluidMesh") as MeshInstance3D
+    var has_surface := fluid_mesh != null and fluid_mesh.get_surface_count() > 0
+    if not has_surface:
+        if existing != null:
+            existing.queue_free()
+        return
+    var fluid_instance := existing
+    if fluid_instance == null:
+        fluid_instance = MeshInstance3D.new()
+        fluid_instance.name = "TerrainFluidMesh"
+        fluid_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+        fluid_instance.set_meta("geometry_source", "volume_fluid_state")
+        chunk.add_child(fluid_instance)
+    fluid_instance.mesh = fluid_mesh
+    fluid_instance.set_meta("chunk", key)
+    fluid_instance.set_meta("collision_source", "none")
 
 func chunk_collision_shape_for_mesh(mesh: Mesh) -> Shape3D:
     var monitor = runtime_perf_monitor
     var shape_start: int = monitor.begin_section("chunk_create_trimesh_shape") if monitor != null else Time.get_ticks_usec()
-    var shape := mesh.create_trimesh_shape()
+    var shape: Shape3D = null
+    if terrain_meshing_service != null and terrain_meshing_service.has_method("collision_shape_for_mesh"):
+        var service_shape = terrain_meshing_service.collision_shape_for_mesh(mesh)
+        if service_shape is Shape3D:
+            shape = service_shape as Shape3D
+    elif mesh != null:
+        shape = mesh.create_trimesh_shape()
     if shape is ConcavePolygonShape3D:
         (shape as ConcavePolygonShape3D).backface_collision = true
     if monitor != null:
@@ -659,11 +1452,27 @@ func chunk_collision_shape_for_mesh(mesh: Mesh) -> Shape3D:
     return shape
 
 func store_chunk_assets(key: Vector2i, assets: Dictionary) -> void:
+    assets["terrainSignature"] = chunk_asset_signature(key)
     if not chunk_asset_cache.has(key):
         chunk_asset_cache_order.append(key)
     chunk_asset_cache[key] = assets
     touch_chunk_asset_cache_key(key)
     prune_chunk_asset_cache()
+
+func observe_terrain_mesh_asset_backend(assets: Dictionary) -> void:
+    if runtime_perf_monitor == null:
+        return
+    var mesh = assets.get("mesh") as Mesh
+    var is_native_mesh := bool(assets.get("terrainMeshingNative", false)) or (mesh != null and bool(mesh.get_meta("terrainMeshingNative", false)))
+    var deferred_without_native := mesh != null and bool(mesh.get_meta("terrainMeshingDeferredWithoutNative", false))
+    if is_native_mesh:
+        runtime_perf_monitor.increment_counter("terrain_meshing_native_chunks")
+        if mesh != null and bool(mesh.get_meta("terrainMeshingQueued", false)):
+            runtime_perf_monitor.increment_counter("terrain_meshing_completed_native_chunks")
+    elif deferred_without_native:
+        runtime_perf_monitor.increment_counter("terrain_meshing_direct_build_deferred_without_native")
+    else:
+        runtime_perf_monitor.increment_counter("terrain_meshing_gdscript_fallback_chunks")
 
 func touch_chunk_asset_cache_key(key: Vector2i) -> void:
     var index := chunk_asset_cache_order.find(key)
@@ -684,10 +1493,18 @@ func invalidate_chunk_asset_cache(key: Vector2i) -> void:
     var index := chunk_asset_cache_order.find(key)
     if index >= 0:
         chunk_asset_cache_order.remove_at(index)
+    if terrain_meshing_service != null and terrain_meshing_service.has_method("invalidate_chunk"):
+        terrain_meshing_service.invalidate_chunk(key.x, key.y)
 
 func clear_chunk_asset_cache() -> void:
     chunk_asset_cache.clear()
     chunk_asset_cache_order.clear()
+    if terrain_meshing_service != null and terrain_meshing_service.has_method("clear_jobs"):
+        terrain_meshing_service.clear_jobs(false)
+
+func _exit_tree() -> void:
+    if terrain_meshing_service != null and terrain_meshing_service.has_method("clear_jobs"):
+        terrain_meshing_service.clear_jobs(true)
 
 func chunk_asset_cache_stats() -> Dictionary:
     return {
@@ -696,6 +1513,60 @@ func chunk_asset_cache_stats() -> Dictionary:
         "misses": chunk_asset_cache_misses,
         "invalidations": chunk_asset_cache_invalidations
     }
+
+func chunk_asset_cache_entry_valid(key: Vector2i, assets: Dictionary) -> bool:
+    if not assets.has("terrainSignature"):
+        return false
+    return String(assets.get("terrainSignature", "")) == chunk_asset_signature(key)
+
+func chunk_asset_signature(key: Vector2i) -> String:
+    var chunk_revision := 0
+    if world_generation_system != null:
+        if world_generation_system.has_method("terrain_volume_chunk_revision"):
+            chunk_revision = int(world_generation_system.call("terrain_volume_chunk_revision", key, CHUNK_SIZE))
+    var backend_id := "none"
+    var backend_native := false
+    if terrain_meshing_service != null and terrain_meshing_service.has_method("backend_summary"):
+        var backend_summary: Dictionary = terrain_meshing_service.backend_summary()
+        backend_id = String(backend_summary.get("id", "unknown"))
+        backend_native = bool(backend_summary.get("native", false))
+    var volume_required := false
+    var mesh_step := 0
+    var lod_radius := 0
+    var start_x := key.x * CHUNK_SIZE
+    var start_z := key.y * CHUNK_SIZE
+    if has_method("chunk_has_terrain_volume_edits") and bool(call("chunk_has_terrain_volume_edits", start_x, start_z)):
+        volume_required = true
+    elif has_method("chunk_has_excavation_overlap") and bool(call("chunk_has_excavation_overlap", start_x, start_z)):
+        volume_required = true
+    else:
+        volume_required = chunk_generated_volume_required_for_streaming(start_x, start_z)
+    if volume_required and has_method("underground_volume_mesh_step_for_chunk"):
+        mesh_step = int(call("underground_volume_mesh_step_for_chunk", start_x, start_z))
+    if volume_required and has_method("underground_volume_focus_radius_cells"):
+        lod_radius = int(call("underground_volume_focus_radius_cells"))
+    var focus_key := "none"
+    if player != null and has_method("position_is_near_underground_air_focus") and has_method("chunk_has_underground_focus_overlap"):
+        var focus_active := bool(call("position_is_near_underground_air_focus", player.global_position))
+        var focus_overlap := bool(call("chunk_has_underground_focus_overlap", start_x, start_z)) if focus_active else false
+        if focus_overlap:
+            focus_key = "%d,%d,%d" % [
+                world_to_cell(player.global_position.x),
+                world_to_cell(player.global_position.y),
+                world_to_cell(player.global_position.z)
+            ]
+    return "seed=%s|chunk=%d,%d|chunkRev=%d|backend=%s|native=%s|volume=%s|step=%d|radius=%d|focus=%s" % [
+        seed_text,
+        key.x,
+        key.y,
+        chunk_revision,
+        backend_id,
+        str(backend_native),
+        str(volume_required),
+        mesh_step,
+        lod_radius,
+        focus_key
+    ]
 
 func refresh_chunk_terrain_assets(cx: int, cz: int, notify_navigation := true, defer_collision_shape := false) -> bool:
     var key := Vector2i(cx, cz)
@@ -711,13 +1582,33 @@ func refresh_chunk_terrain_assets(cx: int, cz: int, notify_navigation := true, d
     if mesh_instance == null or body == null or collision == null:
         return false
     invalidate_chunk_asset_cache(key)
-    if defer_collision_shape:
+    var start_x := cx * CHUNK_SIZE
+    var start_z := cz * CHUNK_SIZE
+    var has_volume_edits := false
+    if has_method("chunk_has_terrain_volume_edits"):
+        has_volume_edits = bool(call("chunk_has_terrain_volume_edits", start_x, start_z))
+    var generated_volume_required := false
+    if has_method("chunk_needs_generated_underground_volume_mesh"):
+        generated_volume_required = bool(call("chunk_needs_generated_underground_volume_mesh", start_x, start_z))
+    var has_excavation := false
+    if has_method("chunk_has_excavation_overlap"):
+        has_excavation = bool(call("chunk_has_excavation_overlap", start_x, start_z))
+    var volume_mesh_required := has_volume_edits or generated_volume_required or has_excavation
+    if chunk_should_queue_terrain_meshing(cx, cz):
+        var include_collision := volume_mesh_required and not defer_collision_shape
+        request_chunk_terrain_mesh_assets(key, include_collision, 10)
+        if runtime_perf_monitor != null:
+            runtime_perf_monitor.increment_counter("terrain_meshing_refresh_deferred")
+        return true
+    if defer_collision_shape and not volume_mesh_required:
         mesh_instance.mesh = chunk_mesh_asset(cx, cz)
+        apply_chunk_fluid_mesh(chunk, chunk_fluid_mesh_asset(cx, cz), key)
         queue_chunk_collision_refresh(key)
         return true
     var assets := chunk_assets(cx, cz)
     mesh_instance.mesh = assets.get("mesh") as Mesh
     collision.shape = assets.get("shape") as Shape3D
+    apply_chunk_fluid_mesh(chunk, assets.get("fluidMesh") as Mesh, key)
     if notify_navigation and npc_system and npc_system.has_method("notify_navigation_chunk_loaded"):
         var monitor = runtime_perf_monitor
         var nav_start: int = monitor.begin_section("chunk_nav_loaded_notify") if monitor != null else Time.get_ticks_usec()
@@ -725,6 +1616,32 @@ func refresh_chunk_terrain_assets(cx: int, cz: int, notify_navigation := true, d
         if monitor != null:
             monitor.end_section("chunk_nav_loaded_notify", nav_start)
     return true
+
+func queue_nearby_streaming_lod_refreshes(center: Vector2i) -> void:
+    if chunks.is_empty():
+        return
+    for key_value in chunks.keys():
+        var chunk_key: Vector2i = key_value
+        if pending_chunk_terrain_refreshes.has(chunk_key):
+            continue
+        if not should_queue_streaming_lod_full_refresh(chunk_key, center):
+            continue
+        var chunk := chunks.get(chunk_key) as Node3D
+        if chunk == null or not is_instance_valid(chunk):
+            continue
+        var mesh_instance := chunk.get_node_or_null("TerrainMesh") as MeshInstance3D
+        var mesh := mesh_instance.mesh if mesh_instance != null else null
+        if mesh != null and bool(mesh.get_meta("terrainStreamingLod", false)):
+            queue_chunk_terrain_refresh(chunk_key)
+
+func should_queue_streaming_lod_full_refresh(chunk_key: Vector2i, center := Vector2i(999999, 999999)) -> bool:
+    if player == null:
+        return true
+    var reference_center := center
+    if reference_center == Vector2i(999999, 999999):
+        reference_center = world_to_chunk(player.position.x, player.position.z)
+    var max_axis_distance := maxi(absi(chunk_key.x - reference_center.x), absi(chunk_key.y - reference_center.y))
+    return max_axis_distance <= STREAMING_EXTERIOR_FULL_REFRESH_MAX_CHUNK_DISTANCE
 
 func refresh_chunk_collision_shape(cx: int, cz: int) -> bool:
     var key := Vector2i(cx, cz)
@@ -740,11 +1657,20 @@ func refresh_chunk_collision_shape(cx: int, cz: int) -> bool:
     if mesh_instance == null or mesh_instance.mesh == null or collision == null:
         return false
     var mesh := mesh_instance.mesh
+    if bool(mesh.get_meta("terrainStreamingLod", false)) or bool(mesh.get_meta("terrainMeshingProvisional", false)):
+        queue_chunk_terrain_refresh(key)
+        return true
     var shape := chunk_collision_shape_for_mesh(mesh)
     collision.shape = shape
+    var fluid_instance := chunk.get_node_or_null("TerrainFluidMesh") as MeshInstance3D
+    var fluid_mesh: Mesh = fluid_instance.mesh if fluid_instance != null else ArrayMesh.new()
+    if fluid_instance == null and runtime_perf_monitor != null:
+        runtime_perf_monitor.increment_counter("chunk_fluid_mesh_deferred_during_collision_refresh")
     store_chunk_assets(key, {
         "mesh": mesh,
-        "shape": shape
+        "shape": shape,
+        "fluidMesh": fluid_mesh,
+        "terrainFluidDeferred": fluid_instance == null
     })
     if npc_system and npc_system.has_method("notify_navigation_chunk_loaded"):
         var monitor = runtime_perf_monitor
@@ -779,7 +1705,7 @@ func rebuild_chunks_for_cells(cells: Array, neighbor_radius := 0, defer_props :=
                 var key := Vector2i(center.x + dx, center.y + dz)
                 if chunks.has(key):
                     chunk_keys[key] = true
-    if defer_props and is_processing():
+    if defer_props:
         for key_value in chunk_keys.keys():
             var queued_key: Vector2i = key_value
             queue_chunk_terrain_refresh(queued_key)
@@ -803,4 +1729,4 @@ func nearest_chunk_key_from_lookup(chunk_keys: Dictionary, center: Vector2i) -> 
     return best
 
 func rebuild_chunks_around_cell(cell: Vector2i) -> void:
-    rebuild_chunks_for_cells([cell], 1, false)
+    rebuild_chunks_for_cells([cell], 1, true)

@@ -162,9 +162,11 @@ func _request_traffic(portal, actor: Node, actor_id: String, direction: String, 
 	if owner_generation <= 0:
 		owner_generation = 1
 		entry["trafficOwnerGeneration"] = owner_generation
+	var group_id := String(active.get("groupId", ""))
 	return traffic_reservations.request_portal_crossing(portal, actor_id, direction, {
 		"ownerGeneration": owner_generation,
 		"actionGeneration": int(entry.get("trafficActionGeneration", entry.get("actionGeneration", 0))),
+		"groupId": group_id,
 		"priority": int(entry.get("routePriority", action.get("priority", 0))),
 		"priorityClass": priority_class,
 		"currentPosition": current_position,

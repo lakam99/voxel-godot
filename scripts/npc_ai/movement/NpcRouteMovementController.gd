@@ -19,6 +19,8 @@ const PORTAL_RECENTER_FORWARD_STEP_TICKS := 12
 const PORTAL_RECENTER_REPLAN_TICKS := 30
 const DYNAMIC_DETOUR_WAIT_TICKS := 24
 const DYNAMIC_ROUTE_AVOID_WAIT_TICKS := 12
+const DYNAMIC_ROUTE_AVOID_RECENT_YIELD_LIMIT := 6
+const DYNAMIC_YIELD_STREAK_WINDOW_FRAMES := 90
 const DYNAMIC_ROUTE_AVOID_TTL_FRAMES := 180
 const DYNAMIC_ROUTE_AVOID_MAX_CELLS := 8
 const STATIC_FOOTPRINT_VALIDATION_RADIUS := CAPSULE_RADIUS * 0.52
@@ -37,6 +39,7 @@ var main
 var capsule_shape: CapsuleShape3D
 var corridor_follower
 var avoidance_adapter
+var frame_claimed_cells := {}
 
 func setup(system_node, main_node) -> void:
     system = system_node
@@ -49,6 +52,7 @@ func setup(system_node, main_node) -> void:
     avoidance_adapter.setup(system, main)
 
 func begin_frame() -> void:
+    frame_claimed_cells.clear()
     if avoidance_adapter != null:
         avoidance_adapter.begin_frame()
 
@@ -307,6 +311,7 @@ func move(entry: Dictionary, intent: Dictionary, max_distance: float, planner, w
     entry["routeYieldTicks"] = 0
     entry.erase("portalRecenterTicks")
     clear_dynamic_yield_retreat(entry)
+    claim_frame_occupancy(entry, previous, actual_position, world)
     set_route_status(entry, "moving", "")
     trim_reached_route_cells(entry, world)
     increment_validated_move(entry)
@@ -361,7 +366,13 @@ func try_dynamic_yield_retreat(entry: Dictionary, previous: Vector3, follow: Dic
         blocker = nearest_dynamic_blocker(previous, entry, actors)
     if blocker == null or not is_instance_valid(blocker):
         return {}
-    if int(entry.get("routeWaitTicks", 0)) >= DYNAMIC_ROUTE_AVOID_WAIT_TICKS and mark_dynamic_route_avoidance_for_yield(entry, blocker, previous, follow, intent, world):
+    var recent_yield_count := record_dynamic_yield_streak(entry)
+    var should_replan_for_yield := int(entry.get("routeWaitTicks", 0)) >= DYNAMIC_ROUTE_AVOID_WAIT_TICKS
+    should_replan_for_yield = should_replan_for_yield or recent_yield_count >= DYNAMIC_ROUTE_AVOID_RECENT_YIELD_LIMIT
+    if should_replan_for_yield and mark_dynamic_route_avoidance_for_yield(entry, blocker, previous, follow, intent, world):
+        clear_dynamic_yield_retreat(entry)
+        entry.erase("_yieldRetreatRecentCount")
+        entry.erase("_yieldRetreatLastFrame")
         set_route_status(entry, "waiting", "dynamic_avoid_replan")
         return { "moved": 0.0, "status": "waiting", "reason": "dynamic_avoid_replan", "classification": "traffic_reservation" }
     var detour_result := try_dynamic_detour_around_blocker(entry, previous, follow, intent, max_distance, world, blocker, priority)
@@ -428,6 +439,7 @@ func apply_dynamic_yield_retreat(entry: Dictionary, previous: Vector3, follow: D
         return {}
     if corridor_follower != null and corridor_follower.has_method("record_motion"):
         entry["corridorProgress"] = corridor_follower.record_motion(entry, previous, actual_position, entry.get("pathWaypoints", []), "yielding_retreat")
+    claim_frame_occupancy(entry, previous, actual_position, world)
     increment_reservation_wait(entry)
     entry["_yieldRetreatTicks"] = max(YIELD_RETREAT_HOLD_TICKS, int(entry.get("_yieldRetreatTicks", 0)))
     entry["_yieldRetreatDirection"] = retreat_direction
@@ -485,6 +497,7 @@ func try_dynamic_detour_around_blocker(entry: Dictionary, previous: Vector3, fol
             continue
         if corridor_follower != null and corridor_follower.has_method("record_motion"):
             entry["corridorProgress"] = corridor_follower.record_motion(entry, previous, actual_position, entry.get("pathWaypoints", []), "dynamic_detour")
+        claim_frame_occupancy(entry, previous, actual_position, world)
         entry["blockedMoveTime"] = 0.0
         entry["routeWaitTicks"] = 0
         entry["routeYieldTicks"] = 0
@@ -501,6 +514,10 @@ func try_static_collision_escape(entry: Dictionary, previous: Vector3, follow: D
     var blocked_time := float(entry.get("blockedMoveTime", 0.0)) + max_distance
     if blocked_time < CELL * 0.18 and int(entry.get("corridorNoProgressTicks", 0)) < 6:
         return {}
+    if mark_static_route_avoidance_for_blocker(entry, follow, previous, intent, world):
+        invalidate_active_route_for_replan(entry, "static_avoid_replan")
+        set_route_status(entry, "waiting", "static_avoid_replan")
+        return { "moved": 0.0, "status": "waiting", "reason": "static_avoid_replan", "classification": "static_collision" }
     var axis: Vector3 = follow.get("safeVelocity", Vector3.ZERO)
     axis.y = 0.0
     if axis.length_squared() <= 0.0001:
@@ -553,6 +570,7 @@ func try_static_collision_escape(entry: Dictionary, previous: Vector3, follow: D
             continue
         if corridor_follower != null and corridor_follower.has_method("record_motion"):
             entry["corridorProgress"] = corridor_follower.record_motion(entry, previous, actual_position, entry.get("pathWaypoints", []), "static_detour")
+        claim_frame_occupancy(entry, previous, actual_position, world)
         entry["blockedMoveTime"] = 0.0
         entry["routeWaitTicks"] = 0
         entry["routeYieldTicks"] = 0
@@ -561,6 +579,29 @@ func try_static_collision_escape(entry: Dictionary, previous: Vector3, follow: D
         set_route_status(entry, "moving", "static_detour")
         return { "moved": moved, "status": "moving", "reason": "static_detour", "classification": "static_collision" }
     return {}
+
+func mark_static_route_avoidance_for_blocker(entry: Dictionary, follow: Dictionary, previous: Vector3, intent: Dictionary, world) -> bool:
+    if world == null:
+        return false
+    var blocker_value = follow.get("blocker", {})
+    if not (blocker_value is Dictionary):
+        return false
+    var blocker: Dictionary = blocker_value
+    var blocker_cell := Vector2i(999999, 999999)
+    for key in ["cell", "sampleCell", "candidateCell"]:
+        var cell_value = blocker.get(key)
+        if cell_value is Vector2i:
+            blocker_cell = cell_value
+            break
+        if cell_value is Array and (cell_value as Array).size() >= 2:
+            blocker_cell = Vector2i(int((cell_value as Array)[0]), int((cell_value as Array)[1]))
+            break
+    if blocker_cell == Vector2i(999999, 999999):
+        return false
+    var marked := mark_dynamic_route_avoidance_cell_value(entry, blocker_cell, previous, intent, world)
+    if marked:
+        entry["lastStaticRouteAvoidCell"] = blocker_cell
+    return marked
 
 func try_motor_blocked_local_escape(entry: Dictionary, previous: Vector3, follow: Dictionary, intent: Dictionary, max_distance: float, world, priority: int, motor_reason: String) -> Dictionary:
     if not (motor_reason in ["blocked_static", "blocked_capsule", "static_or_dynamic_collision", "terrain_step_rejected"]):
@@ -582,6 +623,8 @@ func try_motor_blocked_local_escape(entry: Dictionary, previous: Vector3, follow
     var side := Vector3(-axis.z, 0.0, axis.x)
     var escape_distance := clampf(maxf(max_distance * 2.5, MOTOR_LOCAL_ESCAPE_MIN_DISTANCE), MOTOR_LOCAL_ESCAPE_MIN_DISTANCE, MOTOR_LOCAL_ESCAPE_MAX_DISTANCE)
     var target: Vector3 = intent.get("target", previous)
+    var centerline_candidates: Array[Vector3] = centerline_recovery_candidates(previous, target, escape_distance)
+    var candidates: Array[Vector3] = []
     var directions: Array[Vector3] = [
         side,
         -side,
@@ -592,7 +635,6 @@ func try_motor_blocked_local_escape(entry: Dictionary, previous: Vector3, follow
         axis,
         -axis
     ]
-    var candidates: Array[Vector3] = []
     for direction in directions:
         if direction.length_squared() <= 0.0001:
             continue
@@ -600,10 +642,19 @@ func try_motor_blocked_local_escape(entry: Dictionary, previous: Vector3, follow
     candidates.sort_custom(func(a: Vector3, b: Vector3) -> bool:
         return flat_distance(a, target) < flat_distance(b, target)
     )
+    candidates = centerline_candidates + candidates
+    var rejected_candidates: Array = []
     for candidate in candidates:
         candidate.y = previous.y
         var validation: Dictionary = validate_candidate(entry, previous, candidate, bool(intent.get("movingHome", false)), bool(intent.get("allowOutside", false)), world, priority)
         if not bool(validation.get("ok", false)):
+            if rejected_candidates.size() < 8:
+                rejected_candidates.append({
+                    "candidate": candidate,
+                    "reason": String(validation.get("reason", "")),
+                    "ownerId": String(validation.get("ownerId", "")),
+                    "cell": validation.get("cell", Vector2i(999999, 999999))
+                })
             continue
         var physics_delta := maxf(0.0001, float(intent.get("physicsDelta", 0.0166667)))
         var motor_result: Dictionary = {}
@@ -614,9 +665,20 @@ func try_motor_blocked_local_escape(entry: Dictionary, previous: Vector3, follow
         var actual_position: Vector3 = motor_result.get("position", previous)
         var moved := float(motor_result.get("moved", flat_distance(previous, actual_position)))
         if moved <= 0.001:
+            if rejected_candidates.size() < 8:
+                rejected_candidates.append({
+                    "candidate": validation.get("candidate", candidate),
+                    "reason": String(motor_result.get("reason", "motor_blocked")),
+                    "moved": moved,
+                    "contactName": String(motor_result.get("blockedContactName", "")),
+                    "contactKind": String(motor_result.get("blockedContactKind", "")),
+                    "contactType": String(motor_result.get("blockedContactType", "")),
+                    "slideCollisionCount": int(motor_result.get("slideCollisionCount", 0))
+                })
             continue
         if corridor_follower != null and corridor_follower.has_method("record_motion"):
             entry["corridorProgress"] = corridor_follower.record_motion(entry, previous, actual_position, entry.get("pathWaypoints", []), "motor_local_escape")
+        claim_frame_occupancy(entry, previous, actual_position, world)
         entry["blockedMoveTime"] = 0.0
         entry["routeWaitTicks"] = 0
         entry["routeYieldTicks"] = 0
@@ -625,7 +687,12 @@ func try_motor_blocked_local_escape(entry: Dictionary, previous: Vector3, follow
             "from": previous,
             "to": actual_position,
             "requested": validation.get("candidate", candidate),
-            "motorReason": motor_reason
+            "motorReason": motor_reason,
+            "contactName": String(motor_result.get("blockedContactName", "")),
+            "contactKind": String(motor_result.get("blockedContactKind", "")),
+            "contactType": String(motor_result.get("blockedContactType", "")),
+            "slideCollisionCount": int(motor_result.get("slideCollisionCount", 0)),
+            "rejected": rejected_candidates
         }
         clear_dynamic_yield_retreat(entry)
         set_route_status(entry, "moving", "motor_local_escape")
@@ -633,9 +700,29 @@ func try_motor_blocked_local_escape(entry: Dictionary, previous: Vector3, follow
     entry["lastMotorLocalEscapeFailed"] = {
         "position": previous,
         "motorReason": motor_reason,
-        "candidateCount": candidates.size()
+        "candidateCount": candidates.size(),
+        "rejected": rejected_candidates
     }
     return {}
+
+func centerline_recovery_candidates(previous: Vector3, target: Vector3, escape_distance: float) -> Array[Vector3]:
+    var candidates: Array[Vector3] = []
+    var delta := target - previous
+    delta.y = 0.0
+    if delta.length_squared() <= 0.0001:
+        return candidates
+    var candidate := previous
+    if absf(delta.x) >= absf(delta.z):
+        var step := minf(absf(delta.z), escape_distance)
+        if step > 0.035:
+            candidate.z += (1.0 if delta.z > 0.0 else -1.0) * step
+            candidates.append(candidate)
+    else:
+        var step := minf(absf(delta.x), escape_distance)
+        if step > 0.035:
+            candidate.x += (1.0 if delta.x > 0.0 else -1.0) * step
+            candidates.append(candidate)
+    return candidates
 
 func yield_retreat_blocker(entry: Dictionary, actors: Array) -> Node3D:
     var blocker_id := int(entry.get("_yieldRetreatBlockerId", 0))
@@ -705,6 +792,7 @@ func try_portal_clearance_recenter(entry: Dictionary, previous: Vector3, follow:
         return try_portal_axis_retreat(entry, previous, intent, max_distance, world, priority, axis)
     if corridor_follower != null and corridor_follower.has_method("record_motion"):
         entry["corridorProgress"] = corridor_follower.record_motion(entry, previous, actual_position, entry.get("pathWaypoints", []), "portal_recentering")
+    claim_frame_occupancy(entry, previous, actual_position, world)
     increment_validated_move(entry)
     set_route_status(entry, "waiting", "portal_recentering")
     return { "moved": moved, "status": "waiting", "reason": "portal_recentering", "classification": "door_state" }
@@ -734,6 +822,7 @@ func try_portal_axis_retreat(entry: Dictionary, previous: Vector3, intent: Dicti
         return {}
     if corridor_follower != null and corridor_follower.has_method("record_motion"):
         entry["corridorProgress"] = corridor_follower.record_motion(entry, previous, actual_position, entry.get("pathWaypoints", []), "portal_retreat")
+    claim_frame_occupancy(entry, previous, actual_position, world)
     increment_reservation_wait(entry)
     set_route_status(entry, "waiting", "portal_retreat")
     return { "moved": moved, "status": "waiting", "reason": "portal_retreat", "classification": "door_state" }
@@ -783,6 +872,17 @@ func nearest_dynamic_blocker(position: Vector3, entry: Dictionary, actors: Array
             best = other
     return best
 
+func record_dynamic_yield_streak(entry: Dictionary) -> int:
+    var current_frame := Engine.get_physics_frames()
+    var last_frame := int(entry.get("_yieldRetreatLastFrame", -999999))
+    var count := int(entry.get("_yieldRetreatRecentCount", 0))
+    if current_frame - last_frame > DYNAMIC_YIELD_STREAK_WINDOW_FRAMES:
+        count = 0
+    count += 1
+    entry["_yieldRetreatRecentCount"] = count
+    entry["_yieldRetreatLastFrame"] = current_frame
+    return count
+
 func mark_dynamic_route_avoidance_cell(entry: Dictionary, blocker: Node3D, previous: Vector3, intent: Dictionary, world) -> bool:
     if blocker == null or world == null:
         return false
@@ -810,10 +910,15 @@ func mark_dynamic_route_avoidance_cell_value(entry: Dictionary, blocker_cell: Ve
         return false
     prune_dynamic_route_avoidance(entry)
     var cells: Array = entry.get("routeDynamicAvoidCells", [])
+    var added := false
     if not cells.has(blocker_cell):
         cells.append(blocker_cell)
+        added = true
     while cells.size() > DYNAMIC_ROUTE_AVOID_MAX_CELLS:
         cells.remove_at(0)
+        added = true
+    if not added and int(entry.get("routeDynamicAvoidUntilFrame", -1)) >= Engine.get_physics_frames():
+        return false
     entry["routeDynamicAvoidCells"] = cells
     entry["routeDynamicAvoidUntilFrame"] = Engine.get_physics_frames() + DYNAMIC_ROUTE_AVOID_TTL_FRAMES
     entry["routeForceReplan"] = true
@@ -837,6 +942,8 @@ func route_reuse_revision(world) -> String:
 
 func ensure_route(entry: Dictionary, intent: Dictionary, planner, world) -> Dictionary:
     prune_dynamic_route_avoidance(entry)
+    var monitor = performance_monitor()
+    var route_key_start: int = monitor.begin_section("npc_route_key_eval") if monitor != null else Time.get_ticks_usec()
     var target_cell: Vector2i = intent.get("targetCell", world.world_cell(intent.get("target", Vector3.ZERO)))
     var route_key: String = "%s:%d,%d:%s:%s:%s:%s:%.3f" % [
         String(intent.get("kind", "move")),
@@ -848,7 +955,12 @@ func ensure_route(entry: Dictionary, intent: Dictionary, planner, world) -> Dict
         str(bool(intent.get("strictArrival", false))),
         float(intent.get("arrivalRadius", CELL * 0.75))
     ]
+    if monitor != null:
+        monitor.end_section("npc_route_key_eval", route_key_start)
+    var revision_start: int = monitor.begin_section("npc_route_reuse_revision") if monitor != null else Time.get_ticks_usec()
     var snapshot_revision: String = route_reuse_revision(world)
+    if monitor != null:
+        monitor.end_section("npc_route_reuse_revision", revision_start)
     var stored_route_key := String(entry.get("routeKey", ""))
     var pending_route_key := String(entry.get("routePendingKey", ""))
     var comparison_route_key := stored_route_key if stored_route_key != "" else pending_route_key
@@ -877,11 +989,18 @@ func ensure_route(entry: Dictionary, intent: Dictionary, planner, world) -> Dict
         "path_endpoint_mismatch"
     ]
     needs_route = needs_route or (current_waypoints.is_empty() and (not route_known or not empty_route_waiting_for_reason or transient_empty_route))
+    var changed_route_should_stop := route_key_changed \
+        and String(entry.get("activeDoorPortalId", "")) == "" \
+        and (bool(intent.get("movingHome", false)) or String(intent.get("kind", "")) in ["home", "scripted"])
+    if changed_route_should_stop:
+        entry["pathWaypoints"] = []
+        entry["routeCells"] = []
+        entry["routeActions"] = {}
+        current_waypoints = []
     if needs_route and current_waypoints.is_empty() and cached_status == "pending" and not route_key_changed and not snapshot_revision_changed:
         var retry_frame := int(entry.get("routePendingRetryFrame", -1))
         var current_frame := Engine.get_physics_frames()
         if retry_frame > current_frame:
-            var monitor = performance_monitor()
             if monitor != null:
                 monitor.increment_counter("route_pending_backoff")
             return {
@@ -928,14 +1047,17 @@ func ensure_route(entry: Dictionary, intent: Dictionary, planner, world) -> Dict
         }
 
     bump_traffic_generation(entry, "route_replacement")
+    var planner_start: int = monitor.begin_section("npc_route_planner_call") if monitor != null else Time.get_ticks_usec()
     var route: Dictionary = planner.plan_route(entry, intent)
+    if monitor != null:
+        monitor.end_section("npc_route_planner_call", planner_start)
     entry["lastRoutePlanDebug"] = compact_route_plan_debug(route)
     if String(route.get("status", "")) == "pending":
         entry["routeForceReplan"] = true
         entry["routePendingKey"] = route_key
         entry["routePendingSnapshotRevision"] = snapshot_revision
         entry["routePendingRetryFrame"] = Engine.get_physics_frames() + pending_route_retry_frames(entry, intent, String(route.get("reason", "route_pending")))
-        if not current_waypoints.is_empty():
+        if not changed_route_should_stop and not current_waypoints.is_empty():
             set_route_status(entry, "moving", "route_pending")
             return {
                 "ok": true,
@@ -1024,6 +1146,12 @@ func compact_route_plan_debug(route: Dictionary) -> Dictionary:
     var navmesh_route: Dictionary = route.get("navmeshRoute", {}) if route.get("navmeshRoute", {}) is Dictionary else {}
     var navmesh_details: Dictionary = navmesh_route.get("details", {}) if navmesh_route.get("details", {}) is Dictionary else {}
     var actions: Dictionary = route.get("actions", {}) if route.get("actions", {}) is Dictionary else {}
+    var generated_bridge_value = route.get("generatedCellBridge", false)
+    var generated_bridge_used := false
+    if generated_bridge_value is bool:
+        generated_bridge_used = generated_bridge_value
+    elif generated_bridge_value is Dictionary:
+        generated_bridge_used = bool(generated_bridge_value.get("ok", false))
     var path_value = navmesh_route.get("path", [])
     var path_count := 0
     if path_value is PackedVector3Array or path_value is Array:
@@ -1032,9 +1160,14 @@ func compact_route_plan_debug(route: Dictionary) -> Dictionary:
         "ok": bool(route.get("ok", false)),
         "source": String(route.get("source", "")),
         "navmeshFallbackReason": String(route.get("navmeshFallbackReason", "")),
-        "status": String(route.get("status", "")),
-        "reason": String(route.get("reason", "")),
-        "cells": (route.get("cells", []) as Array).size(),
+		"status": String(route.get("status", "")),
+		"reason": String(route.get("reason", "")),
+		"intentKind": String(route.get("intentKind", "")),
+		"intentPriority": int(route.get("intentPriority", 0)),
+		"routeBudgetWaitFrames": int(route.get("routeBudgetWaitFrames", 0)),
+		"targetCell": _compact_vector2i_debug(route.get("targetCell", Vector2i(999999, 999999))),
+		"fallbackCell": _compact_vector2i_debug(route.get("fallbackCell", Vector2i(999999, 999999))),
+		"cells": (route.get("cells", []) as Array).size(),
         "waypoints": (route.get("waypoints", []) as Array).size(),
         "actions": actions.size(),
         "doorLinks": navmesh_route.get("doorLinks", []),
@@ -1048,9 +1181,58 @@ func compact_route_plan_debug(route: Dictionary) -> Dictionary:
         "targetWalkable": _compact_walkable_debug(navmesh_route.get("targetWalkable", navmesh_details.get("targetWalkable", {}))),
         "descriptorStartWalkable": _compact_walkable_debug(navmesh_details.get("descriptorStartWalkable", {})),
         "descriptorTargetWalkable": _compact_walkable_debug(navmesh_details.get("descriptorTargetWalkable", {})),
+        "endpoint": _compact_endpoint_debug(navmesh_details.get("endpoint", {})),
+        "endpointRetry": _compact_endpoint_debug(navmesh_details.get("endpointRetry", {})),
+        "pathPointCount": int(navmesh_details.get("pathPointCount", -1)),
+        "validation": _compact_validation_debug(navmesh_route.get("validation", {})),
+        "generatedCellBridgeUsed": generated_bridge_used,
+        "generatedCellBridge": _compact_generated_cell_bridge_debug(navmesh_route.get("generatedCellBridge", {})),
+        "fallbackAttempts": navmesh_route.get("fallbackAttempts", []),
         "generatedFallback": compact_generated_fallback_debug(route.get("generatedFallbackRoute", {})),
         "typed": compact_typed_route_debug(route.get("typedResult")),
         "durationUsec": int(navmesh_route.get("durationUsec", 0))
+    }
+
+func _compact_validation_debug(validation_value) -> Dictionary:
+    if not (validation_value is Dictionary):
+        return {}
+    var validation: Dictionary = validation_value
+    return {
+        "ok": bool(validation.get("ok", false)),
+        "reason": String(validation.get("reason", "")),
+        "transitionReason": String(validation.get("transitionReason", "")),
+        "fromCell": _compact_vector2i_debug(validation.get("fromCell", Vector2i(999999, 999999))),
+        "toCell": _compact_vector2i_debug(validation.get("toCell", Vector2i(999999, 999999))),
+        "blockerCell": _compact_vector2i_debug(validation.get("blockerCell", Vector2i(999999, 999999))),
+        "blockType": String(validation.get("blockType", "")),
+        "segmentIndex": int(validation.get("segmentIndex", -1))
+    }
+
+func _compact_generated_cell_bridge_debug(bridge_value) -> Dictionary:
+    if not (bridge_value is Dictionary):
+        return {}
+    var bridge: Dictionary = bridge_value
+    return {
+        "ok": bool(bridge.get("ok", false)),
+        "reason": String(bridge.get("reason", "")),
+        "goals": int(bridge.get("goals", 0)),
+        "visited": int(bridge.get("visited", 0)),
+        "blockedReasons": (bridge.get("blockedReasons", {}) as Dictionary).duplicate() if bridge.get("blockedReasons", {}) is Dictionary else {}
+    }
+
+func _compact_endpoint_debug(endpoint_value) -> Dictionary:
+    if not (endpoint_value is Dictionary):
+        return {}
+    var endpoint: Dictionary = endpoint_value
+    return {
+        "ok": bool(endpoint.get("ok", false)),
+        "reason": String(endpoint.get("reason", "")),
+        "flatDistance": snappedf(float(endpoint.get("flatDistance", -1.0)), 0.001),
+        "flatLimit": snappedf(float(endpoint.get("flatLimit", -1.0)), 0.001),
+        "verticalDistance": snappedf(float(endpoint.get("verticalDistance", -1.0)), 0.001),
+        "verticalLimit": snappedf(float(endpoint.get("verticalLimit", -1.0)), 0.001),
+        "endpoint": _compact_vector3_debug(endpoint.get("endpoint", Vector3.ZERO)),
+        "target": _compact_vector3_debug(endpoint.get("target", Vector3.ZERO))
     }
 
 func compact_generated_fallback_debug(fallback_value) -> Dictionary:
@@ -1148,6 +1330,16 @@ func clear_route(entry: Dictionary) -> void:
     entry.erase("routeDynamicAvoidUntilFrame")
     entry.erase("_activeDoorForwardStep")
     entry.erase("portalRecenterTicks")
+
+func invalidate_active_route_for_replan(entry: Dictionary, reason: String) -> void:
+    if system != null and system.has_method("release_npc_traffic_reservations"):
+        system.release_npc_traffic_reservations(entry, reason)
+    entry["pathWaypoints"] = []
+    entry["routeCells"] = []
+    entry["routeActions"] = {}
+    entry["routeForceReplan"] = true
+    entry.erase("routePendingRetryFrame")
+    entry.erase("routeFailureRetryFrame")
 
 func seed_strict_final_waypoint(entry: Dictionary, target: Vector3, world) -> void:
     var target_cell: Vector2i = world.world_cell(target)
@@ -1428,6 +1620,8 @@ func handle_upcoming_door_action(entry: Dictionary, next_cell: Vector2i, world, 
             var stage_position: Vector3 = traversal.get("stagePosition", body.global_position)
             if apply_door_stage(entry, body, stage_position, world, String(traversal.get("portalId", ""))):
                 return ""
+            if String(traversal.get("reason", "")) == "door_stage_required":
+                continue
         return String(traversal.get("reason", "door_waiting"))
     return ""
 
@@ -1437,6 +1631,10 @@ func apply_door_stage(entry: Dictionary, body: Node3D, stage_position: Vector3, 
     if door_stage_position_occupied(entry, body, stage_position):
         return false
     if flat_distance(body.global_position, stage_position) <= CELL * 0.24:
+        return false
+    var current_cell: Vector2i = world.world_cell(body.global_position) if world.has_method("world_cell") else body_route_cell(body, world)
+    var stage_cell: Vector2i = world.world_cell(stage_position) if world.has_method("world_cell") else Vector2i(roundi(stage_position.x / CELL), roundi(stage_position.z / CELL))
+    if not door_stage_transition_is_clear(entry, current_cell, stage_cell, stage_cell, world):
         return false
     entry["doorStageActive"] = true
     entry["doorStagePortalId"] = portal_id
@@ -1566,6 +1764,72 @@ func bump_traffic_generation(entry: Dictionary, reason: String) -> void:
     entry.erase("activeTrafficStepGroup")
     entry.erase("trafficWaitReason")
 
+func claim_frame_occupancy(entry: Dictionary, previous: Vector3, actual_position: Vector3, world) -> void:
+    if world == null or not world.has_method("world_cell"):
+        return
+    var actor_id := claim_actor_id(entry)
+    if actor_id == "":
+        return
+    var body := entry.get("body") as Node3D
+    _claim_frame_cell(world.world_cell(previous), actor_id, body)
+    _claim_frame_cell(world.world_cell(actual_position), actor_id, body)
+
+func _claim_frame_cell(cell: Vector2i, actor_id: String, body: Node3D) -> void:
+    if actor_id == "":
+        return
+    var existing = frame_claimed_cells.get(cell, null)
+    if existing is Dictionary:
+        var existing_id := String((existing as Dictionary).get("ownerId", ""))
+        if existing_id != "" and existing_id != actor_id:
+            return
+    frame_claimed_cells[cell] = {
+        "ownerId": actor_id,
+        "body": body
+    }
+
+func frame_cell_claim_conflict(entry: Dictionary, previous_cell: Vector2i, candidate_cell: Vector2i, previous: Vector3, candidate: Vector3, priority: int) -> Dictionary:
+    var claim = frame_claimed_cells.get(candidate_cell, null)
+    if not (claim is Dictionary):
+        return {}
+    var actor_id := claim_actor_id(entry)
+    var claimed_id := String((claim as Dictionary).get("ownerId", ""))
+    if claimed_id == "" or claimed_id == actor_id:
+        return {}
+    var blocker := (claim as Dictionary).get("body") as Node3D
+    if previous_cell == candidate_cell and blocker != null and is_instance_valid(blocker) and dynamic_candidate_moves_away(previous, candidate, blocker):
+        return {}
+    return {
+        "ok": false,
+        "reason": "cell_reserved",
+        "blocker": blocker,
+        "ownerId": claimed_id,
+        "cell": candidate_cell
+    }
+
+func center_dynamic_conflict(entry: Dictionary, snapshot: Dictionary, previous_cell: Vector2i, candidate_cell: Vector2i, previous: Vector3, candidate: Vector3, world, priority: int) -> Dictionary:
+    if world == null or not world.has_method("dynamic_blocker"):
+        return {}
+    var dynamic = world.dynamic_blocker(snapshot, candidate_cell)
+    if dynamic == null:
+        return {}
+    if previous_cell == candidate_cell and dynamic_candidate_moves_away(previous, candidate, dynamic):
+        return {}
+    if entry_loses_to_dynamic(entry, dynamic, priority):
+        return { "ok": false, "reason": "yielding", "blocker": dynamic }
+    return { "ok": false, "reason": "blocked_dynamic", "blocker": dynamic }
+
+func claim_actor_id(entry: Dictionary) -> String:
+    var actor_id := String(entry.get("id", ""))
+    if actor_id != "":
+        return actor_id
+    var body := entry.get("body") as Node
+    if body != null:
+        if body.has_meta("npc_stable_id"):
+            return String(body.get_meta("npc_stable_id"))
+        if body.name != "":
+            return String(body.name)
+    return ""
+
 func validate_candidate(entry: Dictionary, previous: Vector3, candidate: Vector3, moving_home := false, allow_outside := false, world = null, priority := 0) -> Dictionary:
     if world == null or main == null:
         return { "ok": false, "reason": "missing_world" }
@@ -1592,6 +1856,12 @@ func validate_candidate(entry: Dictionary, previous: Vector3, candidate: Vector3
     var snapshot: Dictionary = world.cached_validation_snapshot(entry, allow_outside, moving_home) if world.has_method("cached_validation_snapshot") else world.build_snapshot(entry, allow_outside, moving_home)
     if monitor != null:
         monitor.end_section("npc_validate_snapshot", section_start)
+    var claim_conflict := frame_cell_claim_conflict(entry, previous_cell, candidate_cell, previous, candidate, priority)
+    if not claim_conflict.is_empty():
+        return claim_conflict
+    var center_conflict := center_dynamic_conflict(entry, snapshot, previous_cell, candidate_cell, previous, candidate, world, priority)
+    if not center_conflict.is_empty():
+        return center_conflict
     section_start = monitor.begin_section("npc_validate_center_sweep") if monitor != null else Time.get_ticks_usec()
     var center_sweep: Dictionary = center_sweep_blocker(snapshot, previous, candidate, world, previous_cell)
     if not bool(center_sweep.get("ok", false)):
@@ -1613,7 +1883,9 @@ func validate_candidate(entry: Dictionary, previous: Vector3, candidate: Vector3
                     monitor.end_section("npc_validate_footprint", section_start)
                 return { "ok": false, "reason": "blocked_static" }
         var dynamic = world.dynamic_blocker(snapshot, footprint_cell)
-        if dynamic != null and footprint_cell != previous_cell:
+        if dynamic != null and previous_footprint.has(footprint_cell) and dynamic_candidate_moves_away(previous, candidate, dynamic):
+            continue
+        if dynamic != null:
             if entry_loses_to_dynamic(entry, dynamic, priority):
                 if monitor != null:
                     monitor.end_section("npc_validate_footprint", section_start)
@@ -1632,6 +1904,12 @@ func validate_candidate(entry: Dictionary, previous: Vector3, candidate: Vector3
     if monitor != null:
         monitor.end_section("npc_validate_capsule_sweep", section_start)
     return { "ok": true, "candidate": candidate }
+
+func dynamic_candidate_moves_away(previous: Vector3, candidate: Vector3, dynamic) -> bool:
+    var other := dynamic as Node3D
+    if other == null or not is_instance_valid(other):
+        return false
+    return flat_distance(candidate, other.global_position) + 0.02 >= flat_distance(previous, other.global_position)
 
 func center_sweep_blocker(snapshot: Dictionary, previous: Vector3, candidate: Vector3, world, previous_cell: Vector2i) -> Dictionary:
     var flat_delta := Vector2(candidate.x - previous.x, candidate.z - previous.z)
@@ -1732,10 +2010,18 @@ func capsule_hits_obstacle(entry: Dictionary, body: CharacterBody3D, previous: V
     return false
 
 func collider_allows_overlap_escape(collider: Node, previous: Vector3, candidate: Vector3) -> bool:
-    if collider == null or String(collider.get_meta("kind", "")) != "prop":
+    if collider == null:
         return false
     var collider_body := collider as Node3D
     if collider_body == null:
+        return false
+    var kind := String(collider.get_meta("kind", ""))
+    if kind == "block":
+        var block_type := String(collider.get_meta("block_type", ""))
+        if block_type in ["door", "cobblestonePath", "torch"]:
+            return false
+        return flat_distance(candidate, collider_body.global_position) + 0.02 >= flat_distance(previous, collider_body.global_position)
+    if kind != "prop":
         return false
     var previous_cell := Vector2i(roundi(previous.x / CELL), roundi(previous.z / CELL))
     var collider_cell := Vector2i(roundi(collider_body.global_position.x / CELL), roundi(collider_body.global_position.z / CELL))
@@ -1835,6 +2121,9 @@ func door_action_request_is_local(entry: Dictionary, action: Dictionary, door: N
     var local_by_distance := door_distance <= max_distance
     var next_is_action := next_steps <= 1
     if (local_by_cell or local_by_distance) and (route_supports_action or next_is_action or source == "direct"):
+        if source == "lookahead" and not door_stage_transition_is_clear(entry, current_cell, next_cell, action_cell, world):
+            record_door_action_reject(entry, body, source, "door_stage_path_blocked", current_cell, action_cell, next_cell, action_index, door_distance)
+            return false
         clear_door_action_reject(entry, body)
         return true
     var reason := "door_action_not_local"
@@ -1844,6 +2133,24 @@ func door_action_request_is_local(entry: Dictionary, action: Dictionary, door: N
         reason = "door_action_actor_too_far"
     record_door_action_reject(entry, body, source, reason, current_cell, action_cell, next_cell, action_index, door_distance)
     return false
+
+func door_stage_transition_is_clear(entry: Dictionary, current_cell: Vector2i, next_cell: Vector2i, action_cell: Vector2i, world) -> bool:
+    if world == null or next_cell == Vector2i(999999, 999999) or next_cell == current_cell:
+        return true
+    if not world.has_method("cell_transition_pathable"):
+        return true
+    var moving_home := String(entry.get("activeGoalKind", "")) == "home"
+    var snapshot: Dictionary = {}
+    if world.has_method("cached_static_tile_snapshot"):
+        snapshot = world.cached_static_tile_snapshot(false, moving_home)
+    elif world.has_method("build_snapshot"):
+        snapshot = world.build_snapshot(entry, false, moving_home)
+    var target_lookup: Dictionary = {}
+    target_lookup[next_cell] = true
+    if action_cell != Vector2i(999999, 999999):
+        target_lookup[action_cell] = true
+    var transition: Dictionary = world.cell_transition_pathable(entry, snapshot, current_cell, next_cell, target_lookup, true)
+    return bool(transition.get("ok", false))
 
 func door_action_cell(action: Dictionary, door: Node, body: Node3D, world) -> Vector2i:
     var cell_value = action.get("cell")

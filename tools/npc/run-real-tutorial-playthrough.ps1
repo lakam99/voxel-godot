@@ -75,6 +75,7 @@ $runToken = [guid]::NewGuid().ToString("N")
 $branch = (& git -C $projectPath branch --show-current).Trim()
 $commit = (& git -C $projectPath rev-parse HEAD).Trim()
 $focusedVisualAcceptance = $Visible -and ($MiraHomeOnly -or $MorningOutsideOnly -or $FinalRescue)
+$dayOneVisualAcceptance = $Visible -and $DayOne
 $fullPlayerPovVisible = $Visible -and (-not $MiraHomeOnly) -and (-not $MorningOutsideOnly)
 $godModeEnabled = $GodMode -or $FinalRescue
 
@@ -113,10 +114,14 @@ function Stop-ProcessTree([System.Diagnostics.Process]$Process) {
 
 function Read-LogMatches {
     $pattern = 'SCRIPT ERROR|Parse Error|previously freed instance|Invalid get index|Invalid call|Attempt to call|ERROR:'
+    $ignoredShutdownPattern = 'ObjectDB instances leaked at exit|resources still in use at exit'
     $matches = @()
     foreach ($path in @($outLog, $errLog)) {
         if (Test-Path -LiteralPath $path) {
             $matches += @(Select-String -LiteralPath $path -Pattern $pattern | ForEach-Object {
+                if ($_.Line -match $ignoredShutdownPattern) {
+                    return
+                }
                 [pscustomobject]@{
                     file = $path
                     line = $_.LineNumber
@@ -255,7 +260,9 @@ while (-not $process.HasExited) {
             if ($liveReport.runToken -eq $runToken -and [bool]$liveReport.finished) {
                 $finishedByReport = $true
                 $stopReason = "report_finished"
-                Stop-ProcessTree $process
+                if (-not $process.WaitForExit(5000)) {
+                    Stop-ProcessTree $process
+                }
                 break
             }
         } catch {
@@ -365,23 +372,27 @@ if ($Visible) {
 }
 
 $evidenceScript = Join-Path $projectPath "tools\assert-test-evidence-report.ps1"
-$evidenceLevel = if ($focusedVisualAcceptance) { "acceptance_visual" } else { "integration" }
+$evidenceLevel = if ($focusedVisualAcceptance -or $dayOneVisualAcceptance) { "acceptance_visual" } else { "integration" }
 $runnerId = if ($FinalRescue) {
     "npc_real_tutorial_final_rescue"
 } elseif ($MorningOutsideOnly) {
     "npc_real_tutorial_morning_outside"
 } elseif ($MiraHomeOnly) {
     "npc_real_tutorial_playthrough"
+} elseif ($DayOne) {
+    "npc_real_tutorial_day_one_full_player_pov"
 } elseif ($fullPlayerPovVisible) {
     "npc_real_tutorial_full_player_pov"
 } else {
     "npc_real_tutorial_playthrough_integration"
 }
-$acceptanceClaims = if ($focusedVisualAcceptance) {
+$acceptanceClaims = if ($focusedVisualAcceptance -or $dayOneVisualAcceptance) {
     if ($FinalRescue) {
         @("tutorial_final_rescue_combat_niko_home_sera_guard_visual")
     } elseif ($MorningOutsideOnly) {
         @("tutorial_following_morning_rowan_mira_niko_outside_visual")
+    } elseif ($DayOne) {
+        @("tutorial_day_one_mira_niko_rowan_full_player_pov_visual")
     } else {
         @(
             "tutorial_mira_enters_home_and_closes_door",

@@ -16,7 +16,9 @@ const REQUIRED_CAPTURE_STAGES := [
 	"digging_material_drop_inventory"
 ]
 const SOIL_MATERIALS := ["grass", "dirt", "sand", "mud", "snow", "dirtBlock"]
-const SOLID_MATERIALS := ["grass", "dirt", "sand", "mud", "snow", "stone", "copperOre", "ironOre"]
+const SOLID_MATERIALS := ["grass", "dirt", "sand", "mud", "snow", "stone", "deepStone", "copperOre", "ironOre"]
+const DIG_VISUAL_PATCH_RADIUS := 4
+const DIG_VISUAL_MIN_DRY_HEIGHT := 4.0
 
 var main: Node3D
 var player: CharacterBody3D
@@ -46,6 +48,9 @@ var surface_position := Vector3.ZERO
 var planned_materials: Array[Dictionary] = []
 var dig_focus_points: Array[Vector3] = []
 var last_camera_target := Vector3.ZERO
+var surface_collision_position := Vector3.ZERO
+var surface_collision_normal := Vector3.UP
+var has_surface_collision := false
 
 func _ready() -> void:
 	configure_from_environment()
@@ -91,6 +96,7 @@ func apply_resolution() -> void:
 
 func run() -> void:
 	OS.set_environment("VOXEL_TEST_SEED", seed)
+	OS.set_environment("VOXEL_DIGGING_VISUAL_FAST_BOOT", "1")
 	main = MAIN_SCENE.instantiate()
 	main.set("render_distance", 1)
 	main.set("visual_quality", {
@@ -100,6 +106,7 @@ func run() -> void:
 		"particleDensity": 0.0
 	})
 	add_child(main)
+	write_progress("main_instantiated")
 	if not live_process:
 		main.set_process(false)
 		main.set_physics_process(false)
@@ -118,19 +125,23 @@ func run() -> void:
 	setup_inventory()
 	await wait_process_frames(4)
 	await wait_physics_frames(4)
+	calibrate_surface_collision()
 	position_player_for_depth(0)
 	await wait_process_frames(3)
 	await wait_physics_frames(2)
+	await flush_terrain_work_after_dig()
 
 	add_result("digging_visual_scene_ready", true, "main scene ready with real player camera and terrain collision")
 	add_result("digging_visual_headed_mode", DisplayServer.get_name().to_lower() != "headless", "display=%s" % DisplayServer.get_name())
 	add_result("digging_visual_column_selected", true, JSON.stringify(column_summary()))
+	add_result("digging_visual_surface_collision_calibrated", has_surface_collision, JSON.stringify(surface_collision_summary()))
 	add_result("digging_visual_planned_cells_solid", planned_materials.size() >= 4, JSON.stringify(planned_materials))
 	await capture_stage("digging_before_surface", "before digging", {})
 
 	for dig_index in range(2):
 		var outcome: Dictionary = await perform_dig(dig_index)
 		dig_outcomes.append(outcome)
+		await flush_terrain_work_after_dig()
 		var vertical_probe := vertical_excavation_probe(outcome)
 		outcome["verticalProbe"] = vertical_probe
 		if bool(vertical_probe.get("passed", false)):
@@ -140,7 +151,7 @@ func run() -> void:
 		position_player_for_depth(dig_index + 1)
 		await wait_process_frames(5)
 		await wait_physics_frames(2)
-		var post_target := current_target_info()
+		var post_target := revealed_material_target_info(outcome)
 		outcome["postTarget"] = post_target
 		var smooth_profile := smooth_surface_profile_probe(outcome, post_target, vertical_probe)
 		outcome["smoothSurfaceProfile"] = smooth_profile
@@ -167,9 +178,39 @@ func run() -> void:
 		await capture_stage(REQUIRED_CAPTURE_STAGES[dig_index + 1], "after dig %d" % [dig_index + 1], outcome)
 
 	add_result("digging_visual_expected_drops_recorded", expected_drops_recorded(), JSON.stringify(dig_outcomes))
+	add_result("digging_visual_subsurface_material_drop_recorded", subsurface_material_drop_recorded(), JSON.stringify(dig_outcomes))
 	await capture_stage("digging_material_drop_inventory", "material drops recorded", { "digOutcomes": dig_outcomes, "inventory": inventory_totals() })
 	add_result("digging_visual_required_screenshots_saved", required_captures_saved(), JSON.stringify(capture_names()))
 	finish(1 if failure_count() > 0 else 0)
+
+func flush_terrain_work_after_dig() -> void:
+	if main == null:
+		return
+	for _i in range(90):
+		if main.has_method("update_chunks"):
+			main.call("update_chunks", false)
+		await wait_process_frames(1)
+		if terrain_flush_looks_idle():
+			break
+
+func terrain_flush_looks_idle() -> bool:
+	var terrain_refreshes = main.get("pending_chunk_terrain_refreshes") if main != null else null
+	if terrain_refreshes is Dictionary and not (terrain_refreshes as Dictionary).is_empty():
+		return false
+	var collision_refreshes = main.get("pending_chunk_collision_refreshes") if main != null else null
+	if collision_refreshes is Dictionary and not (collision_refreshes as Dictionary).is_empty():
+		return false
+	var meshing_service = main.get("terrain_meshing_service") if main != null else null
+	if meshing_service != null:
+		if meshing_service.has_method("pending_job_count") and int(meshing_service.call("pending_job_count")) > 0:
+			return false
+		if meshing_service.has_method("completed_job_count") and int(meshing_service.call("completed_job_count")) > 0:
+			return false
+	var world_gen = main.get("world_generation_system") if main != null else null
+	if world_gen != null and world_gen.has_method("pending_sky_light_column_count"):
+		if int(world_gen.call("pending_sky_light_column_count")) > 0:
+			return false
+	return true
 
 func bind_scene_nodes() -> void:
 	player = main.get("player") as CharacterBody3D
@@ -189,7 +230,7 @@ func configure_scene() -> void:
 		weather_system.force_weather("clear", 0.0, 0.12, Vector3.ZERO)
 	if main.has_method("update_sky"):
 		main.call("update_sky", 0.0)
-	if player != null and not live_process:
+	if player != null:
 		player.set_process(false)
 		player.set_physics_process(false)
 	if gameplay_camera != null:
@@ -230,12 +271,22 @@ func select_dig_column() -> bool:
 		var material := String(surface.get("material", ""))
 		if material == "" or material == "air":
 			continue
+		if cell_center(cell).y <= water_level() + DIG_VISUAL_MIN_DRY_HEIGHT:
+			continue
+		var surface_sample: Dictionary = surface.get("sample", {}) if surface.get("sample", {}) is Dictionary else {}
+		var top_biome := String(surface_sample.get("biome", ""))
+		if top_biome in ["ocean", "beach", "underground", "underground_air"]:
+			continue
 		if preferred_material != "" and material != preferred_material:
 			continue
 		if preferred_material != "" and not column_material_patch_matches(cell, preferred_material):
 			continue
 		var planned := planned_solid_cells(cell, 6)
 		if planned.size() < 4:
+			continue
+		if not planned_sequence_has_subsurface_transition(planned):
+			continue
+		if not column_has_stable_surface_patch(cell):
 			continue
 		var usable := true
 		for entry in planned.slice(0, 4):
@@ -251,6 +302,27 @@ func select_dig_column() -> bool:
 		planned_materials = planned
 		return true
 	return false
+
+func column_has_stable_surface_patch(center_cell: Vector3i) -> bool:
+	var center_y := cell_center(center_cell).y
+	if center_y <= water_level() + DIG_VISUAL_MIN_DRY_HEIGHT:
+		return false
+	for dz in range(-DIG_VISUAL_PATCH_RADIUS, DIG_VISUAL_PATCH_RADIUS + 1):
+		for dx in range(-DIG_VISUAL_PATCH_RADIUS, DIG_VISUAL_PATCH_RADIUS + 1):
+			var surface := top_solid_for_column(Vector2i(center_cell.x + dx, center_cell.z + dz))
+			if surface.is_empty():
+				return false
+			var neighbor_cell: Vector3i = surface.get("cell", Vector3i.ZERO)
+			if absi(neighbor_cell.y - center_cell.y) > 1:
+				return false
+			var material := String(surface.get("material", ""))
+			if material == "" or material == "air":
+				return false
+			var sample: Dictionary = surface.get("sample", {}) if surface.get("sample", {}) is Dictionary else {}
+			var biome := String(sample.get("biome", ""))
+			if biome in ["ocean", "beach", "underground", "underground_air"]:
+				return false
+	return true
 
 func candidate_columns() -> Array[Vector2i]:
 	var columns: Array[Vector2i] = []
@@ -282,6 +354,16 @@ func column_material_patch_matches(center_cell: Vector3i, material_id: String) -
 			if String(surface.get("material", "")) != material_id:
 				return false
 	return true
+
+func planned_sequence_has_subsurface_transition(planned: Array[Dictionary]) -> bool:
+	if planned.size() < 2:
+		return false
+	var top_material := String(planned[0].get("material", ""))
+	for index in range(1, planned.size()):
+		var material_id := String(planned[index].get("material", ""))
+		if material_id != "" and material_id != "air" and material_id != top_material:
+			return true
+	return false
 
 func column_in_town(column: Vector2i) -> bool:
 	if main == null or not main.has_method("town_region_at_cell"):
@@ -351,7 +433,7 @@ func load_chunk_key(chunk_key: Vector2i) -> void:
 	var chunks: Dictionary = chunks_value if chunks_value is Dictionary else {}
 	if chunks.has(chunk_key):
 		return
-	main.call("create_chunk", chunk_key.x, chunk_key.y, true)
+	main.call("create_chunk", chunk_key.x, chunk_key.y, false)
 
 func setup_inventory() -> void:
 	if inventory_system == null:
@@ -365,11 +447,55 @@ func setup_inventory() -> void:
 	if main.has_method("update_hud"):
 		main.call("update_hud", "Digging visual playtest: pickaxe")
 
+func calibrate_surface_collision() -> void:
+	has_surface_collision = false
+	surface_collision_position = surface_position
+	surface_collision_normal = Vector3.UP
+	var world := player.get_world_3d() if player != null else null
+	if world == null:
+		return
+	var offsets: Array[Vector3] = [Vector3.ZERO]
+	for dz in range(-2, 3):
+		for dx in range(-2, 3):
+			if dx == 0 and dz == 0:
+				continue
+			offsets.append(Vector3(float(dx) * CELL * 0.28, 0.0, float(dz) * CELL * 0.28))
+	var best_hit := {}
+	var best_y := -INF
+	for offset in offsets:
+		var ray_from: Vector3 = surface_position + offset + Vector3(0.0, CELL * 6.0, 0.0)
+		var ray_to: Vector3 = surface_position + offset - Vector3(0.0, CELL * 6.0, 0.0)
+		var query := PhysicsRayQueryParameters3D.create(ray_from, ray_to)
+		query.exclude = [player] if player != null else []
+		query.collide_with_areas = false
+		query.collide_with_bodies = true
+		var hit := world.direct_space_state.intersect_ray(query)
+		if hit.is_empty():
+			continue
+		var collider := hit.get("collider") as Node
+		var kind := String(collider.get_meta("kind", "")) if collider != null and collider.has_meta("kind") else ""
+		if kind != "terrain" and kind != "subsurface":
+			continue
+		var hit_position: Vector3 = hit.get("position", surface_position)
+		if hit_position.y > best_y:
+			best_y = hit_position.y
+			best_hit = hit
+	if best_hit.is_empty():
+		return
+	surface_collision_position = best_hit.get("position", surface_position)
+	surface_collision_normal = best_hit.get("normal", Vector3.UP)
+	if surface_collision_normal.length_squared() < 0.001:
+		surface_collision_normal = Vector3.UP
+	else:
+		surface_collision_normal = surface_collision_normal.normalized()
+	has_surface_collision = true
+
 func perform_dig(dig_index: int) -> Dictionary:
 	position_player_for_depth(dig_index)
 	await wait_process_frames(2)
 	await wait_physics_frames(1)
 	var first_target := current_target_info()
+	var first_solid_target := first_target.duplicate(true) if bool(first_target.get("hit", false)) else {}
 	var material_id := String(first_target.get("material", planned_material_for_depth(dig_index)))
 	if material_id == "" or material_id == "air":
 		return {
@@ -406,6 +532,8 @@ func perform_dig(dig_index: int) -> Dictionary:
 		if not bool(target.get("hit", false)):
 			await wait_process_frames(1)
 			continue
+		if first_solid_target.is_empty():
+			first_solid_target = target.duplicate(true)
 		var target_material := String(target.get("material", material_id))
 		if target_material != "" and target_material != "air" and target_material != material_id:
 			material_id = target_material
@@ -437,7 +565,7 @@ func perform_dig(dig_index: int) -> Dictionary:
 				"destroyTargetFinalMs": final_destroy_ms,
 				"destroyTargetTimingsMs": destroy_timings_ms,
 				"performanceAfterDestroy": final_performance_summary,
-				"targetBefore": first_target,
+				"targetBefore": first_solid_target if not first_solid_target.is_empty() else first_target,
 				"targetSnapshots": target_snapshots,
 				"inventoryAfter": inventory_totals()
 			}
@@ -453,7 +581,7 @@ func perform_dig(dig_index: int) -> Dictionary:
 		"destroyTargetFinalMs": final_destroy_ms,
 		"destroyTargetTimingsMs": destroy_timings_ms,
 		"performanceAfterDestroy": final_performance_summary,
-		"targetBefore": first_target,
+		"targetBefore": first_solid_target if not first_solid_target.is_empty() else first_target,
 		"targetSnapshots": target_snapshots,
 		"inventoryAfter": inventory_totals()
 	}
@@ -514,6 +642,53 @@ func current_target_info() -> Dictionary:
 		"target": vec3(last_camera_target)
 	}
 
+func revealed_material_target_info(outcome: Dictionary) -> Dictionary:
+	var primary := current_target_info()
+	if target_info_has_solid_material(primary):
+		return primary
+	if gameplay_camera == null:
+		return primary
+	var original_target := last_camera_target
+	var anchor := target_anchor_for_outcome(outcome)
+	var position_value = anchor.get("position", {})
+	var focus := target_point_for_depth(int(outcome.get("digIndex", 0)))
+	if position_value is Dictionary:
+		focus = dict_to_vec3(position_value, focus)
+	var vertical_probe: Dictionary = outcome.get("verticalProbe", {}) if outcome.get("verticalProbe", {}) is Dictionary else {}
+	var probe_hit = vertical_probe.get("hit", {})
+	if probe_hit is Dictionary:
+		focus = dict_to_vec3(probe_hit, focus)
+	var probe_offsets: Array[Vector3] = [
+		Vector3.ZERO,
+		Vector3(0.0, CELL * 0.35, 0.0),
+		Vector3(0.0, -CELL * 0.10, 0.0),
+		Vector3(CELL * 0.70, 0.0, 0.0),
+		Vector3(-CELL * 0.70, 0.0, 0.0),
+		Vector3(0.0, 0.0, CELL * 0.70),
+		Vector3(0.0, 0.0, -CELL * 0.70),
+		Vector3(CELL * 0.55, -CELL * 0.15, CELL * 0.55),
+		Vector3(-CELL * 0.55, -CELL * 0.15, CELL * 0.55),
+		Vector3(CELL * 0.55, -CELL * 0.15, -CELL * 0.55),
+		Vector3(-CELL * 0.55, -CELL * 0.15, -CELL * 0.55)
+	]
+	for offset in probe_offsets:
+		last_camera_target = focus + offset
+		gameplay_camera.look_at(last_camera_target, Vector3.UP)
+		var candidate := current_target_info()
+		candidate["revealedProbeOffset"] = vec3(offset)
+		if target_info_has_solid_material(candidate):
+			return candidate
+	last_camera_target = original_target
+	gameplay_camera.look_at(last_camera_target, Vector3.UP)
+	primary["revealedProbeTried"] = probe_offsets.size()
+	return primary
+
+func target_info_has_solid_material(target_info: Dictionary) -> bool:
+	if not bool(target_info.get("hit", false)):
+		return false
+	var material_id := String(target_info.get("material", "air"))
+	return material_id != "" and material_id != "air"
+
 func position_player_for_depth(depth_index: int) -> void:
 	if player == null or gameplay_camera == null:
 		return
@@ -522,36 +697,47 @@ func position_player_for_depth(depth_index: int) -> void:
 		return
 	var target := target_point_for_depth(depth_index)
 	var surface_target := target_point_for_depth(0)
+	if depth_index == 0 and has_surface_collision:
+		target = surface_collision_position
+		surface_target = surface_collision_position
 	var eye_offset := Vector3(CELL * 0.28, CELL * 2.05, CELL * 0.28) if preferred_material != "" else Vector3(CELL * 0.86, CELL * 1.45, CELL * 0.86)
 	player.global_position = surface_target + eye_offset - Vector3(0.0, 1.65, 0.0)
 	player.velocity = Vector3.ZERO
 	gameplay_camera.rotation = Vector3.ZERO
 	gameplay_camera.global_position = surface_target + eye_offset
-	last_camera_target = target - Vector3(0.0, CELL * 0.32, 0.0)
+	last_camera_target = target
 	gameplay_camera.look_at(last_camera_target, Vector3.UP)
 	gameplay_camera.current = true
 
 func position_player_for_excavated_focus(focus: Vector3) -> void:
-	var eye_offset := Vector3(CELL * 0.24, CELL * 1.72, CELL * 0.24) if preferred_material != "" else Vector3(CELL * 0.55, CELL * 1.20, CELL * 0.55)
+	var eye_offset := Vector3(CELL * 0.45, CELL * 1.85, CELL * 0.45) if preferred_material != "" else Vector3(CELL * 0.62, CELL * 1.65, CELL * 0.62)
 	player.global_position = focus + eye_offset - Vector3(0.0, 1.65, 0.0)
 	player.velocity = Vector3.ZERO
 	gameplay_camera.rotation = Vector3.ZERO
 	gameplay_camera.global_position = focus + eye_offset
-	last_camera_target = focus - Vector3(0.0, CELL * 0.18, 0.0)
+	last_camera_target = focus - Vector3(0.0, CELL * 0.55, 0.0)
 	gameplay_camera.look_at(last_camera_target, Vector3.UP)
 	gameplay_camera.current = true
 
 func position_observer_camera(stage: String) -> void:
 	if observer_camera == null:
 		return
-	var focus := focus_position_for_stage(stage)
-	var view_target := focus - Vector3(0.0, CELL * 0.72, 0.0)
-	var offset := Vector3(CELL * 1.55, CELL * 2.18, CELL * 1.40)
-	observer_camera.global_position = focus + offset
+	var surface_focus := surface_collision_position if has_surface_collision else surface_position
+	if surface_focus == Vector3.ZERO:
+		surface_focus = target_point_for_depth(0)
+	var depth_index := 0
+	if stage == "digging_after_first_dig":
+		depth_index = 1
+	elif stage == "digging_after_second_dig" or stage == "digging_material_drop_inventory":
+		depth_index = 2
+	var view_target := surface_focus - Vector3(0.0, CELL * (0.22 + float(depth_index) * 0.50), 0.0)
+	observer_camera.projection = Camera3D.PROJECTION_PERSPECTIVE
+	observer_camera.fov = 46.0
+	observer_camera.global_position = surface_focus + Vector3(CELL * 3.0, CELL * 7.0, CELL * 3.0)
 	observer_camera.look_at(view_target, Vector3.UP)
 	observer_camera.current = true
 	if observer_light != null:
-		observer_light.global_position = focus + Vector3(CELL * 0.20, CELL * 0.95, CELL * 0.12)
+		observer_light.global_position = surface_focus + Vector3(CELL * 0.25, CELL * 4.8, CELL * 0.25)
 
 func focus_position_for_stage(stage: String) -> Vector3:
 	var outcome_index := -1
@@ -561,8 +747,8 @@ func focus_position_for_stage(stage: String) -> Vector3:
 		outcome_index = 1
 	if outcome_index >= 0 and outcome_index < dig_outcomes.size():
 		var outcome: Dictionary = dig_outcomes[outcome_index]
-		var target_before: Dictionary = outcome.get("targetBefore", {})
-		var position_value = target_before.get("position", {})
+		var anchor := target_anchor_for_outcome(outcome)
+		var position_value = anchor.get("position", {})
 		if position_value is Dictionary:
 			return dict_to_vec3(position_value, target_point_for_depth(outcome_index))
 	var target := current_target_info()
@@ -582,10 +768,14 @@ func planned_material_for_depth(depth_index: int) -> String:
 
 func capture_stage(stage: String, label: String, outcome: Dictionary) -> void:
 	position_observer_camera(stage)
+	hide_hud_for_capture()
+	hide_non_terrain_visuals_for_capture()
 	hide_objective_toast()
 	hide_held_item_for_capture()
 	await wait_process_frames(2)
 	await wait_physics_frames(1)
+	hide_hud_for_capture()
+	hide_non_terrain_visuals_for_capture()
 	hide_objective_toast()
 	hide_held_item_for_capture()
 	await wait_process_frames(2)
@@ -593,6 +783,7 @@ func capture_stage(stage: String, label: String, outcome: Dictionary) -> void:
 	var path := screenshot_dir.path_join("%s.png" % stage)
 	var err := image.save_png(path)
 	var target := current_target_info()
+	var sky_summary := image_sky_pixel_summary(image)
 	var capture := {
 		"stage": stage,
 		"label": label,
@@ -605,7 +796,8 @@ func capture_stage(stage: String, label: String, outcome: Dictionary) -> void:
 		"inventory": inventory_totals(),
 		"digOutcome": outcome,
 		"column": column_summary(),
-		"luminance": image_luminance_summary(image)
+		"luminance": image_luminance_summary(image),
+		"skyLeak": sky_summary
 	}
 	captures.append(capture)
 	timeline.append({
@@ -617,6 +809,7 @@ func capture_stage(stage: String, label: String, outcome: Dictionary) -> void:
 		"target": target
 	})
 	add_result("capture_%s_saved" % stage, err == OK and FileAccess.file_exists(path), path)
+	add_result("capture_%s_no_visible_sky" % stage, bool(sky_summary.get("passed", false)), JSON.stringify(sky_summary))
 	write_progress(stage)
 
 func hide_held_item_for_capture() -> void:
@@ -624,6 +817,34 @@ func hide_held_item_for_capture() -> void:
 		(held_item as Node3D).visible = false
 	elif held_item is CanvasItem:
 		(held_item as CanvasItem).visible = false
+
+func hide_hud_for_capture() -> void:
+	var hud = main.get("hud") if main != null else null
+	if hud is CanvasLayer:
+		(hud as CanvasLayer).visible = false
+	elif hud is Node:
+		var hud_root = hud.get("hud_root")
+		if hud_root is CanvasItem:
+			(hud_root as CanvasItem).visible = false
+
+func hide_non_terrain_visuals_for_capture() -> void:
+	if main == null:
+		return
+	var chunk_root = main.get("chunk_root")
+	if chunk_root is Node:
+		for chunk_value in (chunk_root as Node).get_children():
+			var chunk := chunk_value as Node
+			if chunk == null:
+				continue
+			for child_value in chunk.get_children():
+				var child := child_value as Node
+				if child == null or child.name in ["TerrainMesh", "TerrainFluidMesh", "TerrainBody"]:
+					continue
+				if child is Node3D:
+					(child as Node3D).visible = false
+	var prop_root = main.get("prop_root")
+	if prop_root is Node3D:
+		(prop_root as Node3D).visible = false
 
 func hide_objective_toast() -> void:
 	var hud = main.get("hud") if main != null else null
@@ -646,14 +867,26 @@ func expected_drops_recorded() -> bool:
 			return false
 	return dig_outcomes.size() >= 2
 
+func subsurface_material_drop_recorded() -> bool:
+	if planned_materials.is_empty():
+		return false
+	var top_material := String(planned_materials[0].get("material", ""))
+	for outcome in dig_outcomes:
+		if not bool(outcome.get("dropAdded", false)):
+			continue
+		var material_id := String(outcome.get("material", ""))
+		if material_id != "" and material_id != "air" and material_id != top_material:
+			return true
+	return false
+
 func active_capture_camera_position() -> Vector3:
 	if observer_camera != null and observer_camera.current:
 		return observer_camera.global_position
 	return gameplay_camera.global_position if gameplay_camera != null else Vector3.ZERO
 
 func vertical_excavation_probe(outcome: Dictionary) -> Dictionary:
-	var target_before: Dictionary = outcome.get("targetBefore", {})
-	var position_value = target_before.get("position", {})
+	var anchor := target_anchor_for_outcome(outcome)
+	var position_value = anchor.get("position", {})
 	if not (position_value is Dictionary):
 		return { "passed": false, "reason": "missing_target_position" }
 	var focus := dict_to_vec3(position_value, target_point_for_depth(int(outcome.get("digIndex", 0))))
@@ -688,8 +921,8 @@ func vertical_excavation_probe(outcome: Dictionary) -> Dictionary:
 func smooth_surface_profile_probe(outcome: Dictionary, post_target: Dictionary, vertical_probe: Dictionary) -> Dictionary:
 	if world_generation == null or not world_generation.has_method("surface_y_at"):
 		return { "passed": false, "reason": "world_generation_surface_y_missing" }
-	var target_before: Dictionary = outcome.get("targetBefore", {})
-	var position_value = target_before.get("position", {})
+	var anchor := target_anchor_for_outcome(outcome)
+	var position_value = anchor.get("position", {})
 	if not (position_value is Dictionary):
 		return { "passed": false, "reason": "missing_target_position" }
 	var focus := dict_to_vec3(position_value, target_point_for_depth(int(outcome.get("digIndex", 0))))
@@ -723,7 +956,9 @@ func smooth_surface_profile_probe(outcome: Dictionary, post_target: Dictionary, 
 		normal = dict_to_vec3(normal_value, Vector3.UP)
 	var drop_y := float(vertical_probe.get("dropY", 0.0))
 	var rim_delta := ring_average - center_y
-	var passed := drop_y >= CELL * 0.25 and rim_delta >= CELL * 0.14 and normal.y >= 0.55
+	var upward_surface_hit := normal.y >= 0.55
+	var strong_concavity := drop_y >= CELL * 0.75 and rim_delta >= CELL * 0.35
+	var passed := drop_y >= CELL * 0.25 and rim_delta >= CELL * 0.14 and (upward_surface_hit or strong_concavity)
 	return {
 		"passed": passed,
 		"centerY": rounded(center_y),
@@ -733,8 +968,26 @@ func smooth_surface_profile_probe(outcome: Dictionary, post_target: Dictionary, 
 		"ringValuesY": ring_values,
 		"rimDeltaY": rounded(rim_delta),
 		"dropY": rounded(drop_y),
-		"normal": vec3(normal)
+		"normal": vec3(normal),
+		"upwardSurfaceHit": upward_surface_hit,
+		"strongConcavity": strong_concavity
 	}
+
+func target_anchor_for_outcome(outcome: Dictionary) -> Dictionary:
+	var target_before: Dictionary = outcome.get("targetBefore", {}) if outcome.get("targetBefore", {}) is Dictionary else {}
+	if bool(target_before.get("hit", false)) and target_before.has("position"):
+		return target_before
+	var snapshots: Array = outcome.get("targetSnapshots", []) if outcome.get("targetSnapshots", []) is Array else []
+	for snapshot_value in snapshots:
+		if not (snapshot_value is Dictionary):
+			continue
+		var snapshot: Dictionary = snapshot_value
+		if bool(snapshot.get("hit", false)) and snapshot.has("position"):
+			return snapshot
+	var post_target: Dictionary = outcome.get("postTarget", {}) if outcome.get("postTarget", {}) is Dictionary else {}
+	if bool(post_target.get("hit", false)) and post_target.has("position"):
+		return post_target
+	return target_before
 
 func inventory_count(item_id: String) -> int:
 	if inventory_system == null or not inventory_system.has_method("count"):
@@ -757,7 +1010,15 @@ func column_summary() -> Dictionary:
 		"preferredMaterial": preferred_material,
 		"topCell": vec3i(top_cell),
 		"surfacePosition": vec3(surface_position),
+		"surfaceCollision": surface_collision_summary(),
 		"plannedMaterials": planned_materials
+	}
+
+func surface_collision_summary() -> Dictionary:
+	return {
+		"found": has_surface_collision,
+		"position": vec3(surface_collision_position),
+		"normal": vec3(surface_collision_normal)
 	}
 
 func sample_signature(sample: Dictionary) -> Dictionary:
@@ -801,6 +1062,32 @@ func image_luminance_summary(image: Image) -> Dictionary:
 		"average": rounded(total / maxf(1.0, float(count))),
 		"max": rounded(max_luma),
 		"samples": count
+	}
+
+func image_sky_pixel_summary(image: Image) -> Dictionary:
+	var width := image.get_width()
+	var height := image.get_height()
+	var step_x := maxi(1, width / 96)
+	var step_y := maxi(1, height / 54)
+	var sky_count := 0
+	var count := 0
+	var max_sky_score := 0.0
+	for y in range(0, height, step_y):
+		for x in range(0, width, step_x):
+			var color := image.get_pixel(x, y)
+			var luma := color.r * 0.2126 + color.g * 0.7152 + color.b * 0.0722
+			var sky_score := minf(color.b - color.r, color.g - color.r)
+			max_sky_score = maxf(max_sky_score, sky_score)
+			if luma > 0.52 and color.b > 0.58 and color.g > 0.52 and sky_score > 0.055:
+				sky_count += 1
+			count += 1
+	var ratio := float(sky_count) / maxf(1.0, float(count))
+	return {
+		"passed": ratio <= 0.003,
+		"skyPixels": sky_count,
+		"samples": count,
+		"ratio": rounded(ratio),
+		"maxSkyScore": rounded(max_sky_score)
 	}
 
 func add_result(name: String, passed: bool, details := "") -> void:
@@ -896,6 +1183,9 @@ func wait_physics_frames(count: int) -> void:
 
 func cell_center(cell: Vector3i) -> Vector3:
 	return Vector3((float(cell.x) + 0.5) * CELL, (float(cell.y) + 0.5) * CELL, (float(cell.z) + 0.5) * CELL)
+
+func water_level() -> float:
+	return float(main.WATER_LEVEL) if main != null else 11.1
 
 func rounded(value: float) -> float:
 	return snappedf(value, 0.001)

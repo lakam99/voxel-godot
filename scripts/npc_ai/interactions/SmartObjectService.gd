@@ -57,6 +57,11 @@ func clear() -> void:
 	if door_portals != null:
 		door_portals.clear()
 
+func has_live_registration(object_id: String) -> bool:
+	if object_id == "" or not registrations.has(object_id):
+		return false
+	return registration_is_live(registrations[object_id])
+
 func register_door(door: Node, metadata := {}) -> String:
 	if door_portals == null:
 		return ""
@@ -363,13 +368,11 @@ func query_resource_nodes(entry: Dictionary, kinds: Array, options := {}) -> Arr
 		var cached_nodes: Array[Node3D] = []
 		for object_id_value in cached.get("objectIds", []):
 			var registration = registrations.get(String(object_id_value))
-			if registration != null and registration_matches_query(registration, entry, option_map):
-				var node := live_registration_node_3d(registration)
-				if node != null:
-					cached_nodes.append(node)
-		if not cached_nodes.is_empty():
-			_count("indexed_query_cache_hits")
-			return cached_nodes
+			var node := cached_resource_node_for_query(registration, entry, option_map)
+			if node != null:
+				cached_nodes.append(node)
+		_count("indexed_query_cache_hits")
+		return cached_nodes
 	var body: Node3D = null
 	var body_value = entry.get("body")
 	if body_value != null and is_instance_valid(body_value) and body_value is Node3D:
@@ -458,6 +461,8 @@ func candidate_object_ids_for_query(entry: Dictionary, kinds: Array, options: Di
 	return result
 
 func resource_query_chunk_radius(entry: Dictionary, options: Dictionary) -> int:
+	if options.has("chunkRadius"):
+		return maxi(1, int(options.get("chunkRadius", RESOURCE_QUERY_DEFAULT_CHUNK_RADIUS)))
 	if bool(options.get("workAreaOnly", true)):
 		var town_radius := float(entry.get("townRadius", 18))
 		var farthest_work_cell_radius := town_radius + town_radius + 24.0
@@ -466,7 +471,7 @@ func resource_query_chunk_radius(entry: Dictionary, options: Dictionary) -> int:
 
 func resource_query_collection_limit(options: Dictionary) -> int:
 	var limit := maxi(1, int(options.get("limit", 48)))
-	return maxi(12, limit)
+	return maxi(6, limit)
 
 func collect_candidate_object_ids(result: Dictionary, bucket: Dictionary, kind_lookup: Dictionary, entry: Dictionary, options: Dictionary, collection_limit := 0) -> void:
 	for object_id_value in bucket.keys():
@@ -548,6 +553,27 @@ func registration_matches_query(registration, entry: Dictionary, options: Dictio
 	var actor_id := String(entry.get("id", ""))
 	var availability: Dictionary = object_available(registration.object_id, actor_id)
 	return bool(availability.get("ok", false))
+
+func cached_resource_node_for_query(registration, entry: Dictionary, options: Dictionary) -> Node3D:
+	if registration == null:
+		return null
+	if registration_node_is_stale(registration):
+		mark_registration_stale(registration)
+		return null
+	if registration.depleted:
+		return null
+	var node := live_registration_node_3d(registration)
+	if node == null:
+		return null
+	if bool(node.get_meta("npc_harvested", false)) or bool(node.get_meta("smart_object_depleted", false)):
+		return null
+	var unreachable_key := String(options.get("unreachableMetaKey", ""))
+	if unreachable_key != "" and bool(node.get_meta(unreachable_key, false)):
+		return null
+	var required_layer := int(options.get("verticalLayer", -999999))
+	if required_layer != -999999 and vertical_layer_for_position(node.global_position) != required_layer:
+		return null
+	return node
 
 func score_candidates(entry: Dictionary, action_kind: String, candidates: Array) -> Array[Dictionary]:
 	var scored: Array[Dictionary] = []
@@ -722,10 +748,21 @@ func validate_approach(registration, request, reservation: Dictionary) -> Dictio
 		return { "ok": false, "reason": "wrong_vertical_layer", "verticalDelta": vertical_delta, "tolerance": vertical_tolerance, "slot": _vector_summary(slot_position), "actor": _vector_summary(actor_position) }
 	if flat_distance > reach:
 		return { "ok": false, "reason": "outside_action_reach", "distance": flat_distance, "reach": reach, "slot": _vector_summary(slot_position), "actor": _vector_summary(actor_position) }
-	var line_reason := line_of_sight_block_reason(actor_position, object_position(registration), registration)
-	if line_reason != "":
-		return { "ok": false, "reason": line_reason, "slot": _vector_summary(slot_position), "actor": _vector_summary(actor_position) }
+	var action_kind := String(metadata.get("action", registration.metadata.get("action", String(request_value(request, "command", "")))))
+	if approach_line_of_sight_required(registration, metadata, reservation, action_kind):
+		var line_reason := line_of_sight_block_reason(actor_position, object_position(registration), registration)
+		if line_reason != "":
+			return { "ok": false, "reason": line_reason, "slot": _vector_summary(slot_position), "actor": _vector_summary(actor_position) }
 	return { "ok": true, "reason": "valid_approach", "distance": flat_distance, "slotId": String(slot.get("slotId", "")), "slot": _vector_summary(slot_position) }
+
+func approach_line_of_sight_required(registration, metadata: Dictionary, reservation: Dictionary, action_kind: String) -> bool:
+	if metadata.has("requiresLineOfSight"):
+		return bool(metadata.get("requiresLineOfSight", true))
+	if registration.metadata.has("requiresLineOfSight"):
+		return bool(registration.metadata.get("requiresLineOfSight", true))
+	if registration.kind == "forage_source" and action_kind == "harvest_resource" and not reservation.is_empty():
+		return false
+	return true
 
 func validate_access_policy(registration, request) -> Dictionary:
 	var metadata := request_metadata(request)
@@ -1093,7 +1130,7 @@ func query_cache_key(entry: Dictionary, kinds: Array, options: Dictionary) -> St
 		str(bool(options.get("workAreaOnly", true))),
 		str(bool(options.get("outsideTown", true))),
 		String(options.get("unreachableMetaKey", "")),
-		String(options.get("verticalLayer", "")) + "|" + JSON.stringify(options.get("drops", [])) + "|" + JSON.stringify(options.get("materials", []))
+		String(options.get("verticalLayer", "")) + "|" + str(int(options.get("limit", 48))) + "|" + JSON.stringify(options.get("drops", [])) + "|" + JSON.stringify(options.get("materials", []))
 	]
 
 func reservation_owners(registration) -> Array:

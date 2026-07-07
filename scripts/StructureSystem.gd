@@ -26,6 +26,7 @@ var pending_structure_ops: Array = []
 var pending_structure_op_index := 0
 var defer_structure_ops := false
 var deferred_town_home_records := {}
+var terrain_surface_sample_cache := {}
 
 func setup(main_node) -> void:
     main = main_node
@@ -48,23 +49,26 @@ func reset() -> void:
     pending_structure_op_index = 0
     defer_structure_ops = false
     deferred_town_home_records.clear()
+    terrain_surface_sample_cache.clear()
 
 func update_around(center_cell: Vector2i) -> void:
     if main == null:
         return
+    terrain_surface_sample_cache.clear()
     update_towns(center_cell)
     update_standalone_structures(center_cell)
 
 func update_around_budgeted(center_cell: Vector2i, allow_builds := true) -> int:
     if main == null:
         return 0
+    terrain_surface_sample_cache.clear()
     var monitor = performance_monitor()
     var towns_start: int = monitor.begin_section("structure_scan_towns") if monitor != null else Time.get_ticks_usec()
     update_towns(center_cell, true)
     if monitor != null:
         monitor.end_section("structure_scan_towns", towns_start)
     var standalone_start: int = monitor.begin_section("structure_scan_standalone") if monitor != null else Time.get_ticks_usec()
-    update_standalone_structures(center_cell, true)
+    update_standalone_structures(center_cell, true, 1)
     if monitor != null:
         monitor.end_section("structure_scan_standalone", standalone_start)
     if not allow_builds:
@@ -97,16 +101,20 @@ func update_towns(center_cell: Vector2i, defer_builds := false) -> void:
             else:
                 build_town(town)
 
-func update_standalone_structures(center_cell: Vector2i, defer_builds := false) -> void:
+func update_standalone_structures(center_cell: Vector2i, defer_builds := false, max_new_regions := 9) -> int:
     var center_region := Vector2i(floori(float(center_cell.x) / float(main.STRUCTURE_REGION_CELLS)), floori(float(center_cell.y) / float(main.STRUCTURE_REGION_CELLS)))
+    var new_regions := 0
     for rz in range(center_region.y - 1, center_region.y + 2):
         for rx in range(center_region.x - 1, center_region.x + 2):
             var key := Vector2i(rx, rz)
             if generated_structures.has(key):
                 continue
+            new_regions += 1
             var roll: float = main.hash01("structure:%d,%d" % [rx, rz])
             if roll > main.STRUCTURE_SPAWN_CHANCE:
                 generated_structures[key] = false
+                if max_new_regions > 0 and new_regions >= max_new_regions:
+                    return new_regions
                 continue
             var rng := RandomNumberGenerator.new()
             rng.seed = main.hash_string("%s:structure:%d,%d" % [main.seed_text, rx, rz])
@@ -117,10 +125,14 @@ func update_standalone_structures(center_cell: Vector2i, defer_builds := false) 
             var level := flat_level_for_footprint(base_x, base_z, dimensions.x, dimensions.y)
             if is_nan(level):
                 generated_structures[key] = false
+                if max_new_regions > 0 and new_regions >= max_new_regions:
+                    return new_regions
                 continue
             generated_structures[key] = true
             if defer_builds:
                 enqueue_standalone_structure_build(structure_type, base_x, base_z, level, dimensions, rng)
+                if max_new_regions > 0 and new_regions >= max_new_regions:
+                    return new_regions
                 continue
             if structure_type == "mine":
                 build_mine(base_x, base_z, level, dimensions.x, dimensions.y, rng)
@@ -134,6 +146,9 @@ func update_standalone_structures(center_cell: Vector2i, defer_builds := false) 
                 var wall_type := "woodBlock" if rng.randf() < 0.5 else "stoneBlock"
                 var roof_type := "stoneBlock" if wall_type == "woodBlock" else "woodBlock"
                 build_building(base_x, base_z, level, dimensions.x, dimensions.y, rng.randi_range(4, 5), wall_type, roof_type, rng.randi_range(0, 3), rng, false)
+            if max_new_regions > 0 and new_regions >= max_new_regions:
+                return new_regions
+    return new_regions
 
 func enqueue_standalone_structure_build(structure_type: String, base_x: int, base_z: int, level: float, dimensions: Vector2i, rng: RandomNumberGenerator) -> void:
     if structure_type == "mine":
@@ -324,6 +339,17 @@ func execute_structure_op(op: Dictionary) -> void:
         place_utility(int(op.get("cellX", 0)), int(op.get("cellZ", 0)), float(op.get("level", 0.0)), String(op.get("blockType", "")), op.get("options", {}))
     elif op_type == "door":
         place_door(int(op.get("cellX", 0)), int(op.get("cellZ", 0)), float(op.get("level", 0.0)), int(op.get("side", 0)), bool(op.get("secondary", false)), String(op.get("doorPolicy", "private_home")))
+    elif op_type == "terrain_footprint":
+        reserve_structure_terrain_footprint(
+            int(op.get("baseX", 0)),
+            int(op.get("baseZ", 0)),
+            float(op.get("level", 0.0)),
+            int(op.get("width", 0)),
+            int(op.get("depth", 0)),
+            int(op.get("clearanceCells", 0)),
+            String(op.get("source", "structure")),
+            String(op.get("foundationMaterial", "stone"))
+        )
     elif op_type == "publish_town_home_records":
         publish_deferred_town_home_records(String(op.get("townKey", "")))
     elif op_type == "town_build_phase":
@@ -357,6 +383,175 @@ func structure_dimensions_for_type(structure_type: String, rng: RandomNumberGene
     if structure_type == "camp":
         return Vector2i(rng.randi_range(11, 13), rng.randi_range(10, 12))
     return Vector2i(rng.randi_range(7, 10), rng.randi_range(7, 10))
+
+func remember_terrain_surface_sample(cache_key: Vector2i, sample: Dictionary) -> Dictionary:
+    terrain_surface_sample_cache[cache_key] = sample.duplicate(true)
+    return sample
+
+func terrain_surface_sample_at_cell(cell_x: int, cell_z: int) -> Dictionary:
+    var cache_key := Vector2i(cell_x, cell_z)
+    if terrain_surface_sample_cache.has(cache_key):
+        var cached: Dictionary = terrain_surface_sample_cache[cache_key]
+        return cached.duplicate(true)
+    var column_cell := Vector3i(cell_x, 0, cell_z)
+    var fallback_height := float(main.surface_y_at_cell(column_cell)) if main != null and main.has_method("surface_y_at_cell") else 0.0
+    var fallback_biome := String(main.surface_biome_at_cell(column_cell)) if main != null and main.has_method("surface_biome_at_cell") else "plains"
+    var fallback_material := ""
+    var fallback := {
+        "found": true,
+        "height": fallback_height,
+        "biome": fallback_biome,
+        "material": fallback_material,
+        "authority": "height_compat"
+    }
+    if main == null or main.world_generation_system == null:
+        return remember_terrain_surface_sample(cache_key, fallback)
+    var world_generation = main.world_generation_system
+    if world_generation.has_method("terrain_volume_column_has_surface_projection_affecting_edits"):
+        var has_surface_edits := bool(world_generation.call("terrain_volume_column_has_surface_projection_affecting_edits", column_cell))
+        if not has_surface_edits:
+            return remember_terrain_surface_sample(cache_key, fallback)
+    if not world_generation.has_method("surface_projection_for_cell"):
+        return remember_terrain_surface_sample(cache_key, fallback)
+    var start_cell := Vector3i(cell_x, floori(fallback_height / main.CELL), cell_z)
+    var projection: Dictionary = world_generation.call("surface_projection_for_cell", start_cell, 8, 32)
+    if projection.is_empty() or not bool(projection.get("found", false)):
+        fallback["found"] = false
+        fallback["authority"] = "terrain_volume_projection"
+        return remember_terrain_surface_sample(cache_key, fallback)
+    var solid_state: Dictionary = projection.get("solidState", {}) if projection.get("solidState", {}) is Dictionary else {}
+    var air_state: Dictionary = projection.get("airState", {}) if projection.get("airState", {}) is Dictionary else {}
+    var material := String(solid_state.get("material", ""))
+    if material == "" or material == "air" or material == "water" or material == "lava":
+        fallback["found"] = false
+        fallback["authority"] = "terrain_volume_projection"
+        fallback["material"] = material
+        return remember_terrain_surface_sample(cache_key, fallback)
+    if String(air_state.get("fluid", "")) != "":
+        fallback["found"] = false
+        fallback["authority"] = "terrain_volume_projection"
+        fallback["material"] = material
+        return remember_terrain_surface_sample(cache_key, fallback)
+    var air_cell: Vector3i = projection.get("airCell", start_cell + Vector3i(0, 1, 0))
+    var biome := String(solid_state.get("biome", fallback_biome))
+    if biome == "" or biome == "underground" or biome == "deep_underground" or biome == "underground_air":
+        biome = fallback_biome
+    return remember_terrain_surface_sample(cache_key, {
+        "found": true,
+        "height": float(air_cell.y) * main.CELL,
+        "biome": biome,
+        "material": material,
+        "solidCell": projection.get("solidCell", start_cell),
+        "airCell": air_cell,
+        "authority": "terrain_volume_projection"
+    })
+
+func structure_surface_level_for_cell(cell_x: int, cell_z: int, fallback_level: float) -> float:
+    var sample := terrain_surface_sample_at_cell(cell_x, cell_z)
+    if bool(sample.get("found", false)):
+        var level := float(sample.get("height", fallback_level))
+        if not is_nan(level):
+            return level
+    return fallback_level
+
+func structure_surface_level_for_gate_pair(first_cell: Vector2i, second_cell: Vector2i, fallback_level: float) -> float:
+    var first_sample := terrain_surface_sample_at_cell(first_cell.x, first_cell.y)
+    var second_sample := terrain_surface_sample_at_cell(second_cell.x, second_cell.y)
+    var levels: Array[float] = []
+    if bool(first_sample.get("found", false)):
+        var first_level := float(first_sample.get("height", fallback_level))
+        if not is_nan(first_level):
+            levels.append(first_level)
+    if bool(second_sample.get("found", false)):
+        var second_level := float(second_sample.get("height", fallback_level))
+        if not is_nan(second_level):
+            levels.append(second_level)
+    if levels.size() == 2:
+        return (levels[0] + levels[1]) * 0.5
+    if levels.size() == 1:
+        return levels[0]
+    return fallback_level
+
+func reserve_structure_terrain_footprint(base_x: int, base_z: int, level: float, width: int, depth: int, clearance_cells: int, source: String, foundation_material := "stone") -> void:
+    if defer_structure_ops:
+        enqueue_structure_op({
+            "type": "terrain_footprint",
+            "baseX": base_x,
+            "baseZ": base_z,
+            "level": level,
+            "width": width,
+            "depth": depth,
+            "clearanceCells": clearance_cells,
+            "source": source,
+            "foundationMaterial": foundation_material
+        })
+        return
+    if main == null or main.world_generation_system == null:
+        return
+    var world_generation = main.world_generation_system
+    if not world_generation.has_method("apply_box_edit"):
+        return
+    var floor_y := floori(level / main.CELL)
+    var center_sample := terrain_surface_sample_at_cell(base_x + int(width / 2), base_z + int(depth / 2))
+    var biome := String(center_sample.get("biome", "plains"))
+    var foundation_state := {
+        "material": foundation_material,
+        "biome": biome,
+        "solid": true,
+        "density": main.CELL * 1.65,
+        "fluid": "",
+        "light": { "sky": 0, "block": 0 },
+        "metadata": {
+            "source": "structure_foundation",
+            "structureSource": source,
+            "terrainMeshAffects": true,
+            "saveDelta": false
+        }
+    }
+    var floor_cap_state := foundation_state.duplicate(true)
+    floor_cap_state["density"] = main.CELL * 0.08
+    var floor_cap_metadata: Dictionary = floor_cap_state.get("metadata", {}) if floor_cap_state.get("metadata", {}) is Dictionary else {}
+    floor_cap_metadata = floor_cap_metadata.duplicate(true)
+    floor_cap_metadata["source"] = "structure_floor_cap"
+    floor_cap_metadata["structureSource"] = source
+    floor_cap_state["metadata"] = floor_cap_metadata
+    world_generation.call(
+        "apply_box_edit",
+        Vector3i(base_x - 1, floor_y - 3, base_z - 1),
+        Vector3i(base_x + width, floor_y - 1, base_z + depth),
+        foundation_state,
+        "structure_foundation:%s" % source
+    )
+    world_generation.call(
+        "apply_box_edit",
+        Vector3i(base_x - 1, floor_y, base_z - 1),
+        Vector3i(base_x + width, floor_y, base_z + depth),
+        floor_cap_state,
+        "structure_floor_cap:%s" % source
+    )
+    if width <= 2 or depth <= 2 or clearance_cells <= 0:
+        return
+    var interior_air_state := {
+        "material": "air",
+        "biome": biome,
+        "solid": false,
+        "density": -main.CELL,
+        "fluid": "",
+        "light": { "sky": 15, "block": 0 },
+        "metadata": {
+            "source": "structure_reserved_air",
+            "structureSource": source,
+            "terrainMeshAffects": true,
+            "saveDelta": false
+        }
+    }
+    world_generation.call(
+        "apply_box_edit",
+        Vector3i(base_x + 1, floor_y + 1, base_z + 1),
+        Vector3i(base_x + width - 2, floor_y + clearance_cells, base_z + depth - 2),
+        interior_air_state,
+        "structure_air:%s" % source
+    )
 
 func build_town(town: Dictionary) -> void:
     var rng := RandomNumberGenerator.new()
@@ -413,11 +608,14 @@ func build_town(town: Dictionary) -> void:
 func build_town_paths(center_x: int, center_z: int, radius: int, level: float) -> void:
     var path_span: int = max(10, radius - 2)
     for offset in range(-path_span, path_span + 1):
-        place_path(center_x + offset, center_z, level)
-        place_path(center_x, center_z + offset, level)
+        place_town_path_cell(center_x + offset, center_z, level)
+        place_town_path_cell(center_x, center_z + offset, level)
         if offset % 4 == 0:
-            place_path(center_x + offset, center_z + 1, level)
-            place_path(center_x + 1, center_z + offset, level)
+            place_town_path_cell(center_x + offset, center_z + 1, level)
+            place_town_path_cell(center_x + 1, center_z + offset, level)
+
+func place_town_path_cell(cell_x: int, cell_z: int, fallback_level: float, extra_options: Dictionary = {}) -> void:
+    place_path(cell_x, cell_z, structure_surface_level_for_cell(cell_x, cell_z, fallback_level), extra_options)
 
 func town_home_count(town: Dictionary) -> int:
     var radius := int(town.get("radius", main.TOWN_RADIUS_CELLS))
@@ -510,11 +708,15 @@ func ranges_intersect(a_min: int, a_max: int, b_min: int, b_max: int) -> bool:
 
 func build_town_perimeter(center_x: int, center_z: int, radius: int, level: float, town_key: String) -> void:
     var gate_cells := {}
+    var north_level := structure_surface_level_for_gate_pair(Vector2i(center_x, center_z - radius), Vector2i(center_x + 1, center_z - radius), level)
+    var south_level := structure_surface_level_for_gate_pair(Vector2i(center_x, center_z + radius), Vector2i(center_x + 1, center_z + radius), level)
+    var west_level := structure_surface_level_for_gate_pair(Vector2i(center_x - radius, center_z), Vector2i(center_x - radius, center_z + 1), level)
+    var east_level := structure_surface_level_for_gate_pair(Vector2i(center_x + radius, center_z), Vector2i(center_x + radius, center_z + 1), level)
     for offset in [0, 1]:
-        gate_cells[Vector2i(center_x + offset, center_z - radius)] = { "side": 2, "secondary": offset == 1, "axis": "x" }
-        gate_cells[Vector2i(center_x + offset, center_z + radius)] = { "side": 0, "secondary": offset == 1, "axis": "x" }
-        gate_cells[Vector2i(center_x - radius, center_z + offset)] = { "side": 3, "secondary": offset == 1, "axis": "z" }
-        gate_cells[Vector2i(center_x + radius, center_z + offset)] = { "side": 1, "secondary": offset == 1, "axis": "z" }
+        gate_cells[Vector2i(center_x + offset, center_z - radius)] = { "side": 2, "secondary": offset == 1, "axis": "x", "level": north_level }
+        gate_cells[Vector2i(center_x + offset, center_z + radius)] = { "side": 0, "secondary": offset == 1, "axis": "x", "level": south_level }
+        gate_cells[Vector2i(center_x - radius, center_z + offset)] = { "side": 3, "secondary": offset == 1, "axis": "z", "level": west_level }
+        gate_cells[Vector2i(center_x + radius, center_z + offset)] = { "side": 1, "secondary": offset == 1, "axis": "z", "level": east_level }
     for offset in range(-radius, radius + 1):
         place_town_perimeter_cell(center_x + offset, center_z - radius, level, gate_cells, "x", town_key)
         place_town_perimeter_cell(center_x + offset, center_z + radius, level, gate_cells, "x", town_key)
@@ -525,10 +727,12 @@ func place_town_perimeter_cell(cell_x: int, cell_z: int, level: float, gate_cell
     var cell := Vector2i(cell_x, cell_z)
     if gate_cells.has(cell):
         var gate: Dictionary = gate_cells[cell]
-        place_path(cell_x, cell_z, level, { "generatedTier": "town", "cacheKey": "%s:town-gate-path:%s:%d,%d" % [main.seed_text, town_key, cell_x, cell_z] })
-        place_door(cell_x, cell_z, level, int(gate.get("side", 0)), bool(gate.get("secondary", false)), "public_gate")
+        var gate_level := float(gate.get("level", structure_surface_level_for_cell(cell_x, cell_z, level)))
+        place_path(cell_x, cell_z, gate_level, { "generatedTier": "town", "cacheKey": "%s:town-gate-path:%s:%d,%d" % [main.seed_text, town_key, cell_x, cell_z] })
+        place_door(cell_x, cell_z, gate_level, int(gate.get("side", 0)), bool(gate.get("secondary", false)), "public_gate")
         return
-    place_structure_block(cell_x, cell_z, level, 0, "woodBlock", {
+    var fence_level := structure_surface_level_for_cell(cell_x, cell_z, level)
+    place_structure_block(cell_x, cell_z, fence_level, 0, "woodBlock", {
         "generatedTier": "town",
         "accentRole": "fencePost",
         "fenceAxis": axis,
@@ -623,6 +827,7 @@ func town_home_records_snapshot() -> Dictionary:
 
 func build_building(base_x: int, base_z: int, level: float, width: int, depth: int, wall_height: int, wall_type: String, roof_type: String, door_side: int, rng: RandomNumberGenerator, town_building: bool) -> void:
     generated_building_count += 1
+    reserve_structure_terrain_footprint(base_x, base_z, level, width, depth, wall_height, "town_home" if town_building else "cabin", "stone")
     var doors := StructureDoorRulesScript.door_cells(width, depth, door_side)
     for dy in range(wall_height):
         for x in range(width):
@@ -724,6 +929,7 @@ func build_ruin(base_x: int, base_z: int, level: float, width: int, depth: int, 
     var cache_key := "%s:ruin:%d,%d" % [main.seed_text, base_x, base_z]
     var tier_options := { "generatedTier": "ruin", "cacheKey": cache_key }
     var wall_height := rng.randi_range(2, 5)
+    reserve_structure_terrain_footprint(base_x, base_z, level, width, depth, maxi(2, wall_height - 1), "ruin", "stone")
     for x in range(width):
         for z in range(depth):
             var edge := x == 0 or z == 0 or x == width - 1 or z == depth - 1
@@ -747,6 +953,7 @@ func build_camp(base_x: int, base_z: int, level: float, width: int, depth: int, 
     var tier_options := { "generatedTier": "camp", "cacheKey": cache_key }
     var center_x := int(width / 2)
     var center_z := int(depth / 2)
+    reserve_structure_terrain_footprint(base_x, base_z, level, width, depth, 2, "camp", "dirt")
     for x in range(width):
         for z in range(depth):
             var offset := Vector2(float(x - center_x), float(z - center_z))
@@ -791,6 +998,7 @@ func build_mine(base_x: int, base_z: int, level: float, width: int, depth: int, 
     var cache_key := "%s:mine:%d,%d" % [main.seed_text, base_x, base_z]
     var tier_options := { "generatedTier": "mine", "cacheKey": cache_key }
     var center_x := int(width / 2)
+    reserve_structure_terrain_footprint(base_x, base_z, level, width, depth, 4, "mine", "stone")
     for z in range(depth):
         for x in range(1, width - 1):
             if x == 1 or x == width - 2 or z % 2 == 0:
@@ -834,6 +1042,7 @@ func build_shrine(base_x: int, base_z: int, level: float, width: int, depth: int
     var tier_options := { "generatedTier": "shrine", "cacheKey": cache_key }
     var center_x := int(width / 2)
     var center_z := int(depth / 2)
+    reserve_structure_terrain_footprint(base_x, base_z, level, width, depth, 5, "shrine", "stone")
     for x in range(width):
         for z in range(depth):
             place_path(base_x + x, base_z + z, level, tier_options)
@@ -894,11 +1103,19 @@ func loot_chest_cell(width: int, depth: int, door_side: int, rng: RandomNumberGe
 func flat_level_for_footprint(base_x: int, base_z: int, width: int, depth: int) -> float:
     var samples := []
     for x in range(base_x, base_x + width):
-        samples.append(main.surface_y_at_cell(Vector3i(x, 0, base_z)))
-        samples.append(main.surface_y_at_cell(Vector3i(x, 0, base_z + depth - 1)))
+        var near_sample := terrain_surface_sample_at_cell(x, base_z)
+        var far_sample := terrain_surface_sample_at_cell(x, base_z + depth - 1)
+        if not bool(near_sample.get("found", false)) or not bool(far_sample.get("found", false)):
+            return NAN
+        samples.append(float(near_sample.get("height", 0.0)))
+        samples.append(float(far_sample.get("height", 0.0)))
     for z in range(base_z, base_z + depth):
-        samples.append(main.surface_y_at_cell(Vector3i(base_x, 0, z)))
-        samples.append(main.surface_y_at_cell(Vector3i(base_x + width - 1, 0, z)))
+        var left_sample := terrain_surface_sample_at_cell(base_x, z)
+        var right_sample := terrain_surface_sample_at_cell(base_x + width - 1, z)
+        if not bool(left_sample.get("found", false)) or not bool(right_sample.get("found", false)):
+            return NAN
+        samples.append(float(left_sample.get("height", 0.0)))
+        samples.append(float(right_sample.get("height", 0.0)))
     var min_h := 999999.0
     var max_h := -999999.0
     for h in samples:

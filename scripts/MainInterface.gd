@@ -14,6 +14,7 @@ const AnimatedAssetRegistryScript := preload("res://scripts/visual/AnimatedAsset
 const ObjectiveSystemScript := preload("res://scripts/ObjectiveSystem.gd")
 const StructureSystemScript := preload("res://scripts/StructureSystem.gd")
 const WorldGenerationSystemScript := preload("res://scripts/WorldGenerationSystem.gd")
+const TerrainMeshingServiceScript := preload("res://scripts/TerrainMeshingService.gd")
 const SubsurfaceSystemScript := preload("res://scripts/SubsurfaceSystem.gd")
 const UtilityBlockSystemScript := preload("res://scripts/UtilityBlockSystem.gd")
 const SaveSystemScript := preload("res://scripts/SaveSystem.gd")
@@ -95,7 +96,9 @@ const NON_STRUCTURAL_BLOCK_TYPES := {
     "spikeTrap": true,
     "wardLantern": true,
     "sanctuaryBeacon": true,
-    "riftAnchor": true
+    "riftAnchor": true,
+    "copperVein": true,
+    "ironVein": true
 }
 
 const BIOME_COLORS := {
@@ -145,7 +148,7 @@ func _sync_inventory_totals() -> void: pass
 func save_world(show_message := true) -> bool: return false
 func try_load_world(show_message := false) -> bool: return false
 func start_new_game(show_message := true) -> bool: return false
-func reset_runtime_world_state() -> void: pass
+func reset_runtime_world_state(reload_world := true) -> void: pass
 func create_save_snapshot() -> Dictionary: return {}
 func apply_save_snapshot(snapshot: Dictionary) -> bool: return false
 func snapshot_exploration() -> Dictionary: return {}
@@ -164,7 +167,7 @@ func serialize_furnace_state(state_value) -> Dictionary: return {}
 func restore_furnace_state(state_value) -> Dictionary: return {}
 func serialize_single_slot(slot_value) -> Dictionary: return {}
 func restore_single_slot(slot_value) -> Dictionary: return {}
-func reload_chunks() -> void: pass
+func reload_chunks(defer_rebuild := false) -> void: pass
 func vector3_to_array(value: Vector3) -> Array: return []
 func array_to_vector3(value, fallback: Vector3) -> Vector3: return Vector3.ZERO
 func optional_vector3(value): return null
@@ -369,6 +372,7 @@ func rebuild_chunk(cx: int, cz: int, defer_props := false) -> void: pass
 func rebuild_chunks_for_cells(cells: Array, neighbor_radius := 0, defer_props := false) -> void: pass
 func rebuild_chunks_around_cell(cell: Vector2i) -> void: pass
 func build_chunk_mesh(cx: int, cz: int) -> Mesh: return null
+func build_chunk_fluid_mesh(cx: int, cz: int) -> Mesh: return ArrayMesh.new()
 func terrain_vertex_local_cached(height_cache: Dictionary, cell_x: int, cell_z: int, origin_cell_x: int, origin_cell_z: int) -> Vector3: return Vector3.ZERO
 func add_cached_vertex(st: SurfaceTool, point: Vector3, color_cache: Dictionary, normal_cache: Dictionary, cell_x: int, cell_z: int) -> void: pass
 func add_vertex(st: SurfaceTool, point: Vector3, cell_x: int, cell_z: int) -> void: pass
@@ -422,6 +426,10 @@ func interaction_block_from_collider(collider: Node) -> Node: return null
 func add_ore_block_visual(parent: Node3D, block_type: String, size: Vector3, offset: Vector3) -> void: pass
 func add_trader_stall_visual(parent: Node3D) -> void: pass
 func create_block(cell: Vector3i, block_type: String, options: Dictionary = {}) -> StaticBody3D: return null
+func clear_block_light_from_terrain(cell: Vector3i, block_type: String, reason := "block_removed") -> void: pass
+func block_solid_for_terrain_state(block_type: String) -> bool: return false
+func sync_block_state_to_terrain(cell: Vector3i, block_type: String, options: Dictionary = {}) -> void: pass
+func clear_block_state_from_terrain(cell: Vector3i, block_type: String, reason := "block_removed") -> void: pass
 func is_structural_block_type(block_type: String) -> bool: return false
 func block_bottom_y(block: Node3D) -> float: return 0.0
 func block_touches_terrain(block: Node3D) -> bool: return false
@@ -454,6 +462,9 @@ func show_break_overlay(hit_position: Vector3, normal: Vector3, ratio: float) ->
 func add_crack_line(mesh: ImmediateMesh, a: Vector3, b: Vector3) -> void: pass
 func surface_y_at_position(position: Vector3) -> float: return 0.0
 func ground_y_near_position(position: Vector3) -> float: return surface_y_at_position(position)
+func terrain_occupancy_at_cell(cell: Vector3i) -> Dictionary: return {}
+func surface_projection_for_cell(cell: Vector3i, max_up_cells := 32, max_down_cells := 96) -> Dictionary: return {}
+func walkable_surface_cell_near(cell: Vector3i, max_up_cells := 16, max_down_cells := 32) -> Dictionary: return {}
 func surface_y_at_cell(cell: Vector3i) -> float: return 0.0
 func base_surface_y_at_cell(cell: Vector3i) -> float: return 0.0
 func natural_surface_y_at_cell(cell: Vector3i) -> float: return 0.0

@@ -15,7 +15,10 @@ func snapshot(entry: Dictionary, schedule: Dictionary) -> Dictionary:
 	var position: Vector3 = body.global_position if body != null else entry.get("homePosition", Vector3.ZERO)
 	var active_threat = null
 	if body != null and npc_system != null and npc_system.has_method("nearest_hostile") and bool(entry.get("canFight", false)):
-		active_threat = npc_system.call("nearest_hostile", position, 42.0)
+		var prefer_clear_shot := false
+		if npc_system.has_method("npc_weapon_is_ranged"):
+			prefer_clear_shot = bool(npc_system.call("npc_weapon_is_ranged", String(entry.get("weaponId", ""))))
+		active_threat = npc_system.call("nearest_hostile", position, 42.0, body, prefer_clear_shot)
 	var porch_cell: Vector2i = entry.get("porchCell", entry.get("homeCell", Vector2i.ZERO))
 	var current_cell := Vector2i(roundi(position.x / NpcConstantsScript.CELL_SIZE), roundi(position.z / NpcConstantsScript.CELL_SIZE))
 	var inside_home := is_inside_home_interior(entry, position)
@@ -25,7 +28,17 @@ func snapshot(entry: Dictionary, schedule: Dictionary) -> Dictionary:
 	var route_reason := String(entry.get("routeReason", ""))
 	var scripted_order_kind := String(body.get_meta("npc_scripted_order_kind", "")) if body != null else ""
 	var scripted_order_state := String(body.get_meta("npc_scripted_order_state", "")) if body != null else ""
-	var held_arrived_go_home := body != null and scripted_order_kind == "go_home" and scripted_order_state == "ARRIVED" and bool(body.get_meta("npc_scripted_hold_on_arrival", false))
+	var scripted_order_hold := bool(body.get_meta("npc_scripted_hold_on_arrival", false)) if body != null else false
+	if scripted_order_kind == "" or not (scripted_order_state in ["PENDING", "ACTIVE", "ARRIVED"]):
+		var entry_order_value = entry.get("scriptedOrder", {})
+		if entry_order_value is Dictionary:
+			var entry_order: Dictionary = entry_order_value
+			var entry_order_state := String(entry_order.get("state", ""))
+			if entry_order_state in ["PENDING", "ACTIVE", "ARRIVED"]:
+				scripted_order_kind = String(entry_order.get("kind", scripted_order_kind))
+				scripted_order_state = entry_order_state
+				scripted_order_hold = bool(entry_order.get("holdOnArrival", scripted_order_hold))
+	var held_arrived_go_home := scripted_order_kind == "go_home" and scripted_order_state == "ARRIVED" and scripted_order_hold
 	var active_scripted_order := body != null and (
 		body.has_meta("npc_scripted_target")
 		or scripted_order_state in ["PENDING", "ACTIVE"]

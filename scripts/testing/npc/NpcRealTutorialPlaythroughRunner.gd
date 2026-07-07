@@ -142,10 +142,16 @@ func run() -> void:
     main = MAIN_SCENE.instantiate()
     add_child(main)
     mark_progress("main_instantiated")
+    mark_progress("waiting_initial_physics")
     await wait_physics_frames(30)
+    mark_progress("initial_physics_ready")
     bind_scene_nodes()
+    mark_progress("preparing_tutorial_world")
     await prepare_tutorial_world()
+    mark_progress("tutorial_world_prepared")
+    mark_progress("waiting_startup_frames")
     await wait_physics_frames(STARTUP_FRAMES)
+    mark_progress("startup_frames_ready")
     bind_scene_nodes()
 
     if main == null or player == null or camera == null:
@@ -4704,11 +4710,31 @@ func npc_summary(entry: Dictionary) -> Dictionary:
         "firstPathWaypointValid": first_waypoint_valid,
         "firstPathWaypoint": vec3(first_waypoint),
         "lastRoutePlanDebug": entry.get("lastRoutePlanDebug", {}),
+        "lastNavmeshTilePublishDebug": entry.get("lastNavmeshTilePublishDebug", []),
+        "routePlannerStats": route_planner_stats(),
         "corridorFollow": entry.get("corridorFollow", {}),
         "corridorProgress": entry.get("corridorProgress", {}),
         "lastMotorLocalEscape": entry.get("lastMotorLocalEscape", {}),
         "lastMotorLocalEscapeFailed": entry.get("lastMotorLocalEscapeFailed", {})
     }
+
+func route_planner_stats() -> Dictionary:
+    var npc_system = main.get("npc_system") if main != null else null
+    if npc_system == null:
+        return {}
+    var pathing = npc_system.get("pathing")
+    if pathing == null:
+        return {}
+    var coordinator = pathing.get("coordinator")
+    if coordinator == null:
+        return {}
+    var route_planner = coordinator.get("route_planner")
+    if route_planner == null or not route_planner.has_method("stats"):
+        return {}
+    var stats: Dictionary = route_planner.stats()
+    if stats.has("queuedNavmeshTileKeys") and stats["queuedNavmeshTileKeys"] is Array:
+        stats["queuedNavmeshTileKeys"] = (stats["queuedNavmeshTileKeys"] as Array).slice(0, 12)
+    return stats
 
 func strict_home_status(entry: Dictionary) -> Dictionary:
     if entry.is_empty():

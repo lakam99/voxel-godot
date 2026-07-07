@@ -9,9 +9,11 @@ const NpcEnumsScript := preload("res://scripts/npc_ai/NpcEnums.gd")
 const CELL := NpcConstantsScript.CELL_SIZE
 const NAV_TILE_CELL_SIZE := NpcConstantsScript.NAV_TILE_CELL_SIZE
 const MAX_TIMING_SAMPLES := 512
+const ENDPOINT_QUERY_CACHE_LIMIT := 256
 const SERVER_CLOSEST_RETRIES := 8
 const SERVER_PATH_QUERY_ATTEMPTS := 1
 const PATH_ENDPOINT_EPSILON := CELL * 0.12
+const EDGE_CONNECTION_MARGIN := CELL * 0.18
 
 var backend_config = NavigationBackendConfigScript.default_config()
 var navigation_map := RID()
@@ -50,6 +52,8 @@ var actor_path_records := {}
 var navigation_map_dirty_serial := 0
 var navigation_map_synced_serial := 0
 var reusable_path_query_parameters := NavigationPathQueryParameters3D.new()
+var endpoint_query_cache := {}
+var endpoint_query_cache_order: Array[String] = []
 
 func setup(config = null) -> void:
 	backend_config = config if config != null else NavigationBackendConfigScript.from_environment()
@@ -68,6 +72,8 @@ func clear() -> void:
 	door_link_records_by_portal.clear()
 	door_portal_states.clear()
 	actor_path_records.clear()
+	endpoint_query_cache.clear()
+	endpoint_query_cache_order.clear()
 	topology_revision = 0
 	dynamic_revision = 0
 	registered_region_count = 0
@@ -101,6 +107,23 @@ func register_chunk_descriptor(descriptor) -> Dictionary:
 	var region_id := String(descriptor.get("region_id"))
 	if region_id == "":
 		return { "status": "rejected", "reason": "missing_region_id" }
+	var signature: String = String(descriptor.stable_signature()) if descriptor.has_method("stable_signature") else ""
+	var existing_metrics: Dictionary = region_metrics_by_region.get(region_id, {})
+	if signature != "" \
+		and descriptors_by_region.has(region_id) \
+		and region_rids_by_region.has(region_id) \
+		and not dirty_regions_by_region.has(region_id) \
+		and String(existing_metrics.get("signature", "")) == signature:
+		return {
+			"status": String(region_states.get(region_id, "installed")),
+			"regionId": region_id,
+			"tileKey": String(descriptor.get("tile_key")),
+			"topologyRevision": topology_revision,
+			"installed": true,
+			"cached": true,
+			"install": existing_metrics.duplicate(true),
+			"signature": signature
+		}
 	_ensure_navigation_map()
 	if region_rids_by_region.has(region_id):
 		_release_region(region_id)
@@ -108,12 +131,14 @@ func register_chunk_descriptor(descriptor) -> Dictionary:
 	_clear_dirty_region(region_id)
 	var loaded := bool(descriptor.get("loaded"))
 	var install_result := _install_region(region_id, descriptor) if loaded else { "status": "unloaded", "regionId": region_id }
+	if signature != "":
+		install_result["signature"] = signature
+		var metrics: Dictionary = region_metrics_by_region.get(region_id, {})
+		metrics["signature"] = signature
+		region_metrics_by_region[region_id] = metrics
 	region_states[region_id] = "installed" if String(install_result.get("status", "")) == "installed" else String(install_result.get("status", "unloaded"))
 	topology_revision += 1
 	registered_region_count += 1
-	var signature := ""
-	if OS.get_environment("VOXEL_NAVMESH_SIGNATURE_ON_REGISTER") == "1" and descriptor.has_method("stable_signature"):
-		signature = descriptor.stable_signature()
 	return {
 		"status": region_states[region_id],
 		"regionId": region_id,
@@ -399,12 +424,55 @@ func query_route(start: Vector3, target: Vector3, options := {}) -> Dictionary:
 			}), options)
 	var endpoint_check := _path_endpoint_check(path, query_target, options)
 	if not bool(endpoint_check.get("ok", false)):
-		return _finish_route_query(started, _route_query_failure("blocked", "path_endpoint_mismatch", start, target, options, {
-			"startWalkable": start_walkable,
-			"targetWalkable": target_walkable,
-			"endpoint": endpoint_check,
-			"pathPointCount": path.size()
-		}), options)
+		var fallback_endpoint_check := {}
+		if query_api_used == "query_path" and NavigationServer3D.has_method("map_get_path"):
+			var fallback_options := options.duplicate(true)
+			fallback_options["queryApi"] = "map_get_path"
+			var fallback_path: Array[Vector3] = _query_path_points(query_start, query_target, fallback_options)
+			fallback_endpoint_check = _path_endpoint_check(fallback_path, query_target, options)
+			if bool(fallback_endpoint_check.get("ok", false)):
+				path = fallback_path
+				endpoint_check = fallback_endpoint_check
+				query_api_used = "map_get_path_endpoint_retry"
+		if bool(endpoint_check.get("ok", false)):
+			pass
+		else:
+			var partial_endpoint: Vector3 = endpoint_check.get("endpoint", path[path.size() - 1] if not path.is_empty() else query_start)
+			var start_flat_distance := Vector2(query_start.x - query_target.x, query_start.z - query_target.z).length()
+			var endpoint_flat_distance := float(endpoint_check.get("flatDistance", INF))
+			var route_kind := String(options.get("kind", ""))
+			var home_or_scripted := route_kind == "scripted" or route_kind == "home" or bool(options.get("movingHome", false))
+			if home_or_scripted and path.size() >= 2 and endpoint_flat_distance + CELL * 0.5 < start_flat_distance:
+				return _finish_route_query(started, {
+					"ok": true,
+					"status": "partial",
+					"reason": "path_endpoint_partial",
+					"source": "navmesh",
+					"queryApi": query_api_used,
+					"start": start,
+					"target": target,
+					"startPosition": query_start,
+					"targetPosition": partial_endpoint,
+					"fallbackCell": _cell_for_position(partial_endpoint),
+					"path": path,
+					"actions": {},
+					"doorLinks": [],
+					"distance": _path_distance(path),
+					"pointCount": path.size(),
+					"snapshotRevision": revision(),
+					"options": _route_options_summary(options),
+					"startWalkable": start_walkable,
+					"targetWalkable": target_walkable,
+					"endpoint": endpoint_check,
+					"endpointRetry": fallback_endpoint_check
+				}, options)
+			return _finish_route_query(started, _route_query_failure("blocked", "path_endpoint_mismatch", start, target, options, {
+				"startWalkable": start_walkable,
+				"targetWalkable": target_walkable,
+				"endpoint": endpoint_check,
+				"endpointRetry": fallback_endpoint_check,
+				"pathPointCount": path.size()
+			}), options)
 	var forbidden_door_links := _forbidden_door_links_for_path(path, options)
 	if not forbidden_door_links.is_empty():
 		return _finish_route_query(started, _route_query_failure("blocked", "forbidden_private_door_link", start, target, options, {
@@ -641,6 +709,8 @@ func _ensure_navigation_map() -> void:
 	navigation_map = NavigationServer3D.map_create()
 	if NavigationServer3D.has_method("map_set_active"):
 		NavigationServer3D.call("map_set_active", navigation_map, true)
+	if NavigationServer3D.has_method("map_set_edge_connection_margin"):
+		NavigationServer3D.call("map_set_edge_connection_margin", navigation_map, EDGE_CONNECTION_MARGIN)
 	owns_navigation_map = true
 
 func _install_region(region_id: String, descriptor) -> Dictionary:
@@ -654,6 +724,8 @@ func _install_region(region_id: String, descriptor) -> Dictionary:
 	var region_rid := NavigationServer3D.region_create()
 	NavigationServer3D.region_set_map(region_rid, navigation_map)
 	NavigationServer3D.region_set_navigation_mesh(region_rid, navigation_mesh)
+	if NavigationServer3D.has_method("region_set_use_edge_connections"):
+		NavigationServer3D.call("region_set_use_edge_connections", region_rid, true)
 	if NavigationServer3D.has_method("region_set_enabled"):
 		NavigationServer3D.call("region_set_enabled", region_rid, true)
 	_mark_navigation_map_dirty()
@@ -677,6 +749,7 @@ func _install_region(region_id: String, descriptor) -> Dictionary:
 func _build_navigation_mesh(descriptor):
 	var navigation_mesh := NavigationMesh.new()
 	var vertices := PackedVector3Array()
+	var vertex_indices := {}
 	var polygons: Array[PackedInt32Array] = []
 	var surfaces: Array = descriptor.get("walkable_surfaces")
 	var sorted_surfaces: Array = surfaces.duplicate()
@@ -686,13 +759,25 @@ func _build_navigation_mesh(descriptor):
 			continue
 		var indices := PackedInt32Array()
 		for point in polygon_points:
-			indices.append(vertices.size())
-			vertices.append(point)
+			var vertex_key := _navigation_mesh_vertex_key(point)
+			if vertex_indices.has(vertex_key):
+				indices.append(int(vertex_indices[vertex_key]))
+			else:
+				vertex_indices[vertex_key] = vertices.size()
+				indices.append(vertices.size())
+				vertices.append(point)
 		polygons.append(indices)
 	navigation_mesh.set_vertices(vertices)
 	for polygon in polygons:
 		navigation_mesh.add_polygon(polygon)
 	return navigation_mesh
+
+func _navigation_mesh_vertex_key(point: Vector3) -> String:
+	return "%d:%d:%d" % [
+		roundi(point.x * 1000.0),
+		roundi(point.y * 1000.0),
+		roundi(point.z * 1000.0)
+	]
 
 func _navigation_mesh_polygons_for_surfaces(sorted_surfaces: Array) -> Array:
 	var result := []
@@ -826,13 +911,50 @@ func _closest_walkable_from_server(position: Vector3, max_distance := INF) -> Di
 	return direct_result
 
 func _closest_walkable_for_query_endpoint(position: Vector3, max_distance: float, query_api_used: String, prefer_descriptor_endpoint: bool) -> Dictionary:
+	var cache_key := _endpoint_query_cache_key(position, max_distance, query_api_used, prefer_descriptor_endpoint)
+	if endpoint_query_cache.has(cache_key):
+		return (endpoint_query_cache[cache_key] as Dictionary).duplicate(true)
+	var result := {}
 	if query_api_used == "map_get_path":
-		return _closest_walkable_for_direct_route_endpoint(position, max_distance)
-	if prefer_descriptor_endpoint:
+		result = _closest_walkable_for_direct_route_endpoint(position, max_distance)
+	elif prefer_descriptor_endpoint:
+		var server_endpoint := _closest_walkable_from_server(position, max_distance)
 		var descriptor_endpoint := _closest_installed_descriptor_route_endpoint(position, max_distance)
-		if bool(descriptor_endpoint.get("found", false)):
-			return descriptor_endpoint
-	return _closest_walkable_for_route_endpoint(position, max_distance)
+		if bool(server_endpoint.get("found", false)) and _route_endpoint_owned_by_server(server_endpoint):
+			result = server_endpoint
+		elif bool(descriptor_endpoint.get("found", false)):
+			if bool(server_endpoint.get("found", false)):
+				descriptor_endpoint["serverFallbackReason"] = "server_endpoint_missing_region"
+			result = descriptor_endpoint
+		else:
+			result = server_endpoint if not server_endpoint.is_empty() else descriptor_endpoint
+	else:
+		result = _closest_walkable_for_route_endpoint(position, max_distance)
+	_store_endpoint_query_cache(cache_key, result)
+	return result.duplicate(true)
+
+func _endpoint_query_cache_key(position: Vector3, max_distance: float, query_api_used: String, prefer_descriptor_endpoint: bool) -> String:
+	var quantized := Vector3i(roundi(position.x * 10.0), roundi(position.y * 10.0), roundi(position.z * 10.0))
+	var max_key := "inf" if max_distance >= INF * 0.5 else str(roundi(max_distance * 100.0))
+	return "%d|%s|%s|%s|%d,%d,%d" % [
+		topology_revision,
+		query_api_used,
+		str(prefer_descriptor_endpoint),
+		max_key,
+		quantized.x,
+		quantized.y,
+		quantized.z
+	]
+
+func _store_endpoint_query_cache(cache_key: String, result: Dictionary) -> void:
+	if cache_key == "" or result.is_empty():
+		return
+	if not endpoint_query_cache.has(cache_key):
+		endpoint_query_cache_order.append(cache_key)
+	endpoint_query_cache[cache_key] = result.duplicate(true)
+	while endpoint_query_cache_order.size() > ENDPOINT_QUERY_CACHE_LIMIT:
+		var evicted: String = endpoint_query_cache_order.pop_front()
+		endpoint_query_cache.erase(evicted)
 
 func _closest_installed_descriptor_route_endpoint(position: Vector3, max_distance := INF) -> Dictionary:
 	var descriptor_result := _closest_walkable_from_descriptors(position, max_distance)
@@ -1022,6 +1144,8 @@ func _descriptor_direct_endpoint_route_allowed(start_walkable: Dictionary, targe
 	var target_surface := String(target_walkable.get("surfaceId", ""))
 	if start_surface != "" and start_surface == target_surface:
 		return true
+	if kind in ["forage", "work", "job", "guard", "idle", "move"]:
+		return start.distance_to(target) <= CELL * 4.0
 	if not moving_home and kind != "scripted":
 		return false
 	return start.distance_to(target) <= CELL * 6.0

@@ -6,12 +6,20 @@ const STREAMING_FRAME_DEFER_NONCRITICAL_MS := 8.0
 const FRAME_BUDGET_DEFER_OPTIONAL_MS := 11.0
 const FRAME_BUDGET_DEFER_SIMULATION_MS := 14.0
 const FRAME_BUDGET_DEFER_REMAINING_MS := 20.0
+const DEFERRED_NPC_SIMULATION_DELTA_CAP := 1.0
+const DEFERRED_NPC_FORCE_UPDATE_INTERVAL := 0.10
+const NPC_SIMULATION_MAX_STEP_DELTA := 1.0 / 30.0
+const DEFERRED_HOSTILE_SIMULATION_DELTA_CAP := 0.50
+const DEFERRED_HOSTILE_FORCE_UPDATE_INTERVAL := 0.10
+const HOSTILE_SIMULATION_MAX_STEP_DELTA := 1.0 / 30.0
 const WATER_MESH_RADIUS_CELLS := 160
 const WATER_MESH_STEP_CELLS := 4
 const WATER_MESH_REBUILD_STEP_CELLS := 16
 
 var last_requested_mouse_mode: int = Input.MOUSE_MODE_VISIBLE
 var water_mesh_key := Vector2i(999999, 999999)
+var deferred_npc_simulation_delta := 0.0
+var deferred_hostile_simulation_delta := 0.0
 
 func set_game_mouse_mode(mode: int) -> void:
     last_requested_mouse_mode = mode
@@ -88,7 +96,12 @@ func setup_materials() -> void:
     var water_material := load("res://resources/visual/water_material.tres") as Material
     if water_material == null:
         water_material = make_material(Color(0.30, 0.70, 0.78, 0.46), 0.20, true)
+    if water_material is BaseMaterial3D:
+        (water_material as BaseMaterial3D).cull_mode = BaseMaterial3D.CULL_DISABLED
     materials["water"] = water_material
+    var lava_material := make_emissive_material(Color(1.0, 0.34, 0.08, 0.92), 0.95)
+    lava_material.cull_mode = BaseMaterial3D.CULL_DISABLED
+    materials["lava"] = lava_material
     materials["sunDisc"] = make_unshaded_material(Color(1.0, 0.82, 0.38))
     materials["moonDisc"] = make_unshaded_material(Color(0.72, 0.78, 0.94))
 
@@ -548,6 +561,14 @@ func water_surface_cell_has_natural_water(cell_x: int, cell_z: int) -> bool:
         surface_y = natural_surface_y_at_cell(Vector3i(cell_x, 0, cell_z))
     return surface_y <= float(WATER_LEVEL) + 0.30
 
+func advance_world_clock(delta: float) -> bool:
+    var freeze_intro_night: bool = tutorial_system != null and tutorial_system.has_method("should_freeze_intro_night") and bool(tutorial_system.should_freeze_intro_night())
+    if freeze_intro_night:
+        time_of_day = 0.86
+    else:
+        time_of_day = fposmod(time_of_day + delta / DAY_LENGTH, 1.0)
+    return freeze_intro_night
+
 func _process(delta: float) -> void:
     var frame_start := Time.get_ticks_usec()
     if runtime_perf_monitor != null:
@@ -561,15 +582,11 @@ func _process(delta: float) -> void:
             runtime_perf_monitor.observe_duration("chunk", perf_chunk_ms)
         update_water_surface_mesh()
     var defer_noncritical_frame_work := perf_chunk_ms >= STREAMING_FRAME_DEFER_NONCRITICAL_MS
+    var tutorial_realtime_simulation := tutorial_realtime_simulation_required()
     var sky_start := Time.get_ticks_usec()
-    var defer_sky := should_defer_frame_work(frame_start, defer_noncritical_frame_work, FRAME_BUDGET_DEFER_OPTIONAL_MS)
-    if defer_sky:
-        perf_sky_ms = 0.0
-        increment_defer_counter("streaming_frame_sky_deferred", "frame_budget_sky_deferred", defer_noncritical_frame_work)
-    else:
-        update_sky(delta)
-        update_local_light_rig_lod(delta)
-        perf_sky_ms = profiled_ms(sky_start)
+    update_sky(delta)
+    update_local_light_rig_lod(delta)
+    perf_sky_ms = profiled_ms(sky_start)
     if runtime_perf_monitor != null:
         runtime_perf_monitor.observe_duration("sky", perf_sky_ms)
     update_sleep_transition(delta)
@@ -611,22 +628,40 @@ func _process(delta: float) -> void:
     if runtime_perf_monitor != null:
         runtime_perf_monitor.observe_duration("survival", perf_survival_ms)
     var hostiles_start := Time.get_ticks_usec()
-    var defer_hostiles := should_defer_frame_work(frame_start, defer_noncritical_frame_work, FRAME_BUDGET_DEFER_SIMULATION_MS)
+    var hostile_defer_requested := not tutorial_realtime_simulation and should_defer_frame_work(frame_start, defer_noncritical_frame_work, FRAME_BUDGET_DEFER_SIMULATION_MS)
+    var hostile_deferred_total := minf(deferred_hostile_simulation_delta + delta, DEFERRED_HOSTILE_SIMULATION_DELTA_CAP)
+    var defer_hostiles := hostile_defer_requested and hostile_deferred_total < DEFERRED_HOSTILE_FORCE_UPDATE_INTERVAL
     if defer_hostiles:
         perf_hostiles_ms = 0.0
+        deferred_hostile_simulation_delta = hostile_deferred_total
         increment_defer_counter("streaming_frame_hostiles_deferred", "frame_budget_hostiles_deferred", defer_noncritical_frame_work)
     else:
-        update_hostiles(delta)
+        var hostile_delta := minf(hostile_deferred_total, HOSTILE_SIMULATION_MAX_STEP_DELTA)
+        deferred_hostile_simulation_delta = maxf(0.0, hostile_deferred_total - hostile_delta)
+        if hostile_defer_requested and runtime_perf_monitor != null:
+            runtime_perf_monitor.increment_counter("frame_budget_hostiles_forced_after_defer")
+        if deferred_hostile_simulation_delta > 0.0001 and runtime_perf_monitor != null:
+            runtime_perf_monitor.increment_counter("frame_budget_hostiles_delta_carried")
+        update_hostiles(hostile_delta)
         perf_hostiles_ms = profiled_ms(hostiles_start)
     if runtime_perf_monitor != null:
         runtime_perf_monitor.observe_duration("hostiles", perf_hostiles_ms)
     var npc_start := Time.get_ticks_usec()
-    var defer_npc := should_defer_frame_work(frame_start, defer_noncritical_frame_work, FRAME_BUDGET_DEFER_SIMULATION_MS)
+    var npc_defer_requested := not tutorial_realtime_simulation and should_defer_frame_work(frame_start, defer_noncritical_frame_work, FRAME_BUDGET_DEFER_SIMULATION_MS)
+    var npc_deferred_total := minf(deferred_npc_simulation_delta + delta, DEFERRED_NPC_SIMULATION_DELTA_CAP)
+    var defer_npc := npc_defer_requested and npc_deferred_total < DEFERRED_NPC_FORCE_UPDATE_INTERVAL
     if defer_npc:
         perf_npc_ms = 0.0
+        deferred_npc_simulation_delta = npc_deferred_total
         increment_defer_counter("streaming_frame_npc_deferred", "frame_budget_npc_deferred", defer_noncritical_frame_work)
     else:
-        update_npcs(delta)
+        var npc_delta := minf(npc_deferred_total, NPC_SIMULATION_MAX_STEP_DELTA)
+        deferred_npc_simulation_delta = maxf(0.0, npc_deferred_total - npc_delta)
+        if npc_defer_requested and runtime_perf_monitor != null:
+            runtime_perf_monitor.increment_counter("frame_budget_npc_forced_after_defer")
+        if deferred_npc_simulation_delta > 0.0001 and runtime_perf_monitor != null:
+            runtime_perf_monitor.increment_counter("frame_budget_npc_delta_carried")
+        update_npcs(npc_delta)
         perf_npc_ms = profiled_ms(npc_start)
     if runtime_perf_monitor != null:
         runtime_perf_monitor.observe_duration("update_npcs", perf_npc_ms)
@@ -651,13 +686,8 @@ func _process(delta: float) -> void:
     else:
         process_autosave(delta)
     var break_start := Time.get_ticks_usec()
-    if defer_remaining_frame_work:
-        perf_break_ms = 0.0
-        if runtime_perf_monitor != null:
-            runtime_perf_monitor.increment_counter("frame_budget_break_deferred")
-    else:
-        update_break_reset(delta)
-        perf_break_ms = profiled_ms(break_start)
+    update_break_reset(delta)
+    perf_break_ms = profiled_ms(break_start)
     if runtime_perf_monitor != null:
         runtime_perf_monitor.observe_duration("break", perf_break_ms)
     var hud_start := Time.get_ticks_usec()
@@ -680,6 +710,14 @@ func _process(delta: float) -> void:
 
 func profiled_ms(start_usec: int) -> float:
     return float(Time.get_ticks_usec() - start_usec) / 1000.0
+
+func tutorial_realtime_simulation_required() -> bool:
+    if tutorial_system == null:
+        return false
+    if tutorial_system.has_method("state"):
+        var state: Dictionary = tutorial_system.call("state")
+        return bool(state.get("started", false)) and not bool(state.get("finalNightComplete", false))
+    return bool(tutorial_system.get("started")) and not bool(tutorial_system.get("final_night_complete"))
 
 func should_defer_frame_work(frame_start_usec: int, streaming_deferred: bool, budget_ms: float) -> bool:
     return streaming_deferred or profiled_ms(frame_start_usec) >= budget_ms

@@ -25,6 +25,7 @@ const MAX_NIGHT_DOOR_TRANSITION_VISUALS := 10
 const NIGHT_DIAGNOSTIC_SEQUENCE_FRAMES := 30
 const NIGHT_LOOP_SEQUENCE_FRAMES := 10
 const DOOR_LOOP_TRANSITION_MIN_DELTA := 3
+const TOWN_STREAMING_MAX_FRAMES := 1500
 
 const REQUIRED_ROLE_LABELS := ["Guard", "Forager", "Farmer", "Carpenter", "Mason", "Trader"]
 const REQUIRED_JOB_TYPES := ["guard", "forage", "wood", "stone", "trade"]
@@ -74,6 +75,7 @@ var night_loop_diagnostics := {}
 var night_door_transition_visuals: Array[Dictionary] = []
 var night_transition_last_counts := {}
 var last_observer_camera_target := Vector3.ZERO
+var last_town_streaming_summary := {}
 var precondition_blocked := false
 var stopped_phase := ""
 
@@ -123,7 +125,7 @@ func run() -> void:
     main = MAIN_SCENE.instantiate()
     add_child(main)
     write_progress("main_instantiated")
-    await wait_physics_frames(STARTUP_FRAMES)
+    await wait_process_frames(2)
     bind_scene_nodes()
     if main == null or player == null or npc_system == null:
         add_result("scene_bootstrap", false, "main/player/npc_system missing")
@@ -131,6 +133,10 @@ func run() -> void:
         return
 
     configure_observer_scene()
+    if not await wait_startup_physics_frames(STARTUP_FRAMES, "startup"):
+        add_result("startup_physics_frames_advanced", false, "physics frames did not advance during startup")
+        finish(1)
+        return
     await load_natural_generated_town()
     set_display_hour(10.0)
     write_progress("initial_day_staged")
@@ -222,20 +228,139 @@ func neutralize_intro_clock_freeze() -> void:
     tutorial.set("final_night_complete", true)
 
 func load_natural_generated_town() -> void:
+    write_progress("load_town_find_start")
     town = find_non_tutorial_town()
     if town.is_empty():
         add_result("natural_town_found", false, "no non-tutorial generated town found for seed %s" % seed)
         return
+    write_progress("load_town_found")
     town_center = Vector2i(int(town.get("centerX", 0)), int(town.get("centerZ", 0)))
     town_level = float(town.get("level", 16.0))
     town_key = "%d,%d" % [town_center.x, town_center.y]
+    write_progress("load_town_move_player")
     move_player_for_lod(town_center, town_level)
     if main.has_method("update_chunks"):
-        main.call("update_chunks", true)
-    var structure_system = main.get("structure_system")
-    if structure_system != null and structure_system.has_method("update_around"):
-        structure_system.call("update_around", town_center)
+        write_progress("load_town_budgeted_stream_start")
+        if not await stream_town_chunks_budgeted():
+            add_result("natural_town_budgeted_streaming_ready", false, JSON.stringify(last_town_streaming_summary))
+            return
+        write_progress("load_town_budgeted_stream_done")
+    write_progress("load_town_settle_start")
     await wait_physics_frames(LOAD_SETTLE_FRAMES)
+    write_progress("load_town_settle_done")
+
+func stream_town_chunks_budgeted() -> bool:
+    var stable_frames := 0
+    for frame in range(TOWN_STREAMING_MAX_FRAMES):
+        main.call("update_chunks", false)
+        last_town_streaming_summary = town_streaming_summary()
+        if frame % SAMPLE_EVERY_FRAMES == 0:
+            write_progress("load_town_stream_%04d_l%d_t%d_q%d_r%d_c%d_p%d_s%d_h%d_m%d" % [
+                frame,
+                int(last_town_streaming_summary.get("loadedVisibleChunks", 0)),
+                int(last_town_streaming_summary.get("temporaryVisibleChunks", 0)),
+                int(last_town_streaming_summary.get("pendingChunkLoads", 0)),
+                int(last_town_streaming_summary.get("pendingTerrainRefreshes", 0)),
+                int(last_town_streaming_summary.get("pendingCollisionRefreshes", 0)),
+                int(last_town_streaming_summary.get("pendingPropSpawns", 0)),
+                int(last_town_streaming_summary.get("pendingStructureOps", 0)),
+                int(last_town_streaming_summary.get("homeRecords", 0)),
+                int(last_town_streaming_summary.get("terrainMeshingPendingJobs", 0))
+            ])
+        if town_streaming_ready(last_town_streaming_summary):
+            stable_frames += 1
+            if stable_frames >= SETTLED_FRAMES_REQUIRED:
+                return true
+        else:
+            stable_frames = 0
+        await get_tree().process_frame
+    return false
+
+func town_streaming_ready(summary: Dictionary) -> bool:
+    return int(summary.get("loadedVisibleChunks", 0)) >= int(summary.get("expectedVisibleChunks", 0)) \
+        and int(summary.get("pendingChunkLoads", 0)) == 0 \
+        and int(summary.get("pendingTerrainRefreshes", 0)) == 0 \
+        and int(summary.get("pendingCollisionRefreshes", 0)) == 0 \
+        and int(summary.get("pendingStructureOps", 0)) == 0 \
+        and int(summary.get("homeRecords", 0)) > 0
+
+func town_streaming_summary() -> Dictionary:
+    var chunk_size := int(main.CHUNK_SIZE) if main != null else 28
+    var render_distance := int(main.get("render_distance")) if main != null else 3
+    if render_distance <= 0 and main != null:
+        render_distance = int(main.RENDER_DISTANCE)
+    var center := Vector2i.ZERO
+    if player != null:
+        var chunk_world_size := float(chunk_size) * CELL
+        center = Vector2i(floori(player.global_position.x / chunk_world_size), floori(player.global_position.z / chunk_world_size))
+    var expected := (render_distance * 2 + 1) * (render_distance * 2 + 1)
+    var loaded := 0
+    var temporary := 0
+    var chunk_value = main.get("chunks") if main != null else null
+    var chunks_dict: Dictionary = chunk_value if chunk_value is Dictionary else {}
+    for dz in range(-render_distance, render_distance + 1):
+        for dx in range(-render_distance, render_distance + 1):
+            var key := Vector2i(center.x + dx, center.y + dz)
+            if not chunks_dict.has(key):
+                continue
+            loaded += 1
+            if chunk_has_temporary_terrain(chunks_dict[key]):
+                temporary += 1
+    return {
+        "centerChunk": center,
+        "expectedVisibleChunks": expected,
+        "loadedVisibleChunks": loaded,
+        "temporaryVisibleChunks": temporary,
+        "pendingChunkLoads": main_dictionary_size("pending_chunk_loads"),
+        "pendingTerrainRefreshes": main_dictionary_size("pending_chunk_terrain_refreshes"),
+        "pendingCollisionRefreshes": main_dictionary_size("pending_chunk_collision_refreshes"),
+        "pendingPropSpawns": main_dictionary_size("pending_chunk_prop_spawns"),
+        "pendingGeneratedVolumeExposureScans": main_dictionary_size("pending_generated_volume_exposure_scans"),
+        "pendingStructureOps": pending_structure_op_count(),
+        "homeRecords": town_records().size(),
+        "terrainMeshingPendingJobs": terrain_meshing_pending_job_count(),
+        "terrainMeshingCompletedJobs": terrain_meshing_completed_job_count()
+    }
+
+func chunk_has_temporary_terrain(chunk_value) -> bool:
+    var chunk := chunk_value as Node
+    if chunk == null or not is_instance_valid(chunk):
+        return true
+    var mesh_instance := chunk.get_node_or_null("TerrainMesh") as MeshInstance3D
+    if mesh_instance == null or mesh_instance.mesh == null:
+        return true
+    var mesh := mesh_instance.mesh
+    return bool(mesh.get_meta("terrainStreamingLod", false)) or bool(mesh.get_meta("terrainMeshingProvisional", false))
+
+func main_dictionary_size(property_name: String) -> int:
+    if main == null:
+        return 0
+    var value = main.get(property_name)
+    return (value as Dictionary).size() if value is Dictionary else 0
+
+func pending_structure_op_count() -> int:
+    if main == null:
+        return 0
+    var structure_system = main.get("structure_system")
+    if structure_system != null and structure_system.has_method("pending_structure_op_count"):
+        return int(structure_system.call("pending_structure_op_count"))
+    return 0
+
+func terrain_meshing_pending_job_count() -> int:
+    if main == null:
+        return 0
+    var service = main.get("terrain_meshing_service")
+    if service != null and service.has_method("pending_job_count"):
+        return int(service.call("pending_job_count"))
+    return 0
+
+func terrain_meshing_completed_job_count() -> int:
+    if main == null:
+        return 0
+    var service = main.get("terrain_meshing_service")
+    if service != null and service.has_method("completed_job_count"):
+        return int(service.call("completed_job_count"))
+    return 0
 
 func find_non_tutorial_town() -> Dictionary:
     var candidates: Array[Vector2i] = []
@@ -1727,6 +1852,21 @@ func is_tutorial_id(id: String) -> bool:
 func wait_physics_frames(count: int) -> void:
     for _i in range(count):
         await get_tree().physics_frame
+
+func wait_startup_physics_frames(count: int, label: String) -> bool:
+    Engine.time_scale = 1.0
+    get_tree().paused = false
+    var start_frame := int(Engine.get_physics_frames())
+    var process_frames := 0
+    var max_process_frames := maxi(count * 8, 180)
+    while int(Engine.get_physics_frames()) - start_frame < count and process_frames < max_process_frames:
+        await get_tree().process_frame
+        process_frames += 1
+        if process_frames % 30 == 0:
+            write_progress("%s_physics_%d_%d" % [label, int(Engine.get_physics_frames()) - start_frame, count])
+    var advanced := int(Engine.get_physics_frames()) - start_frame
+    write_progress("%s_physics_ready_%d_%d" % [label, advanced, count])
+    return advanced >= count
 
 func wait_process_frames(count: int) -> void:
     for _i in range(count):

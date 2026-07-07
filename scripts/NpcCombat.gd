@@ -9,6 +9,7 @@ var arrow_material: StandardMaterial3D
 var tracer_pool: Array[MeshInstance3D] = []
 var tracers: Array[Dictionary] = []
 var tracer_nodes_created := 0
+var last_shot_debug := {}
 
 func setup(system_node, hostile_system_node, tracer_material: StandardMaterial3D) -> void:
     system = system_node
@@ -20,11 +21,14 @@ func clear() -> void:
         recycle_tracer(tracer_state)
     tracers.clear()
 
-func nearest_hostile(origin: Vector3, radius: float) -> Node3D:
+func nearest_hostile(origin: Vector3, radius: float, owner: Node = null, prefer_clear_shot := false) -> Node3D:
     if hostile_system == null:
         return null
     var best: Node3D = null
     var best_dist := radius
+    var best_clear: Node3D = null
+    var best_clear_dist := radius
+    var can_check_clear_shot := prefer_clear_shot and owner != null and is_instance_valid(owner) and system != null
     for enemy in hostile_system.enemies:
         var body := enemy.get("body") as Node3D
         if body == null or not is_instance_valid(body):
@@ -35,18 +39,34 @@ func nearest_hostile(origin: Vector3, radius: float) -> Node3D:
         if distance < best_dist:
             best_dist = distance
             best = body
-    return best
+        if can_check_clear_shot and distance < best_clear_dist:
+            var start := origin + Vector3(0.0, 1.58, 0.0)
+            var end := body.global_position + Vector3(0.0, 1.02, 0.0)
+            if bool(shot_visibility(owner, body, start, end).get("clear", false)):
+                best_clear_dist = distance
+                best_clear = body
+    return best_clear if best_clear != null else best
 
 func fire_at_hostile(entry: Dictionary, target: Node3D) -> void:
     if target == null or hostile_system == null or float(entry.get("cooldown", 0.0)) > 0.0:
+        if float(entry.get("cooldown", 0.0)) > 0.0:
+            record_shot_debug(entry, "cooldown", target)
         return
     var body := entry.get("body") as Node3D
     if body == null:
+        record_shot_debug(entry, "missing_body", target)
         return
     var start := body.global_position + Vector3(0.0, 1.58, 0.0)
     var end := target.global_position + Vector3(0.0, 1.02, 0.0)
-    if start.distance_to(end) > 42.0 or not has_clear_shot(body, target, start, end):
+    var distance := start.distance_to(end)
+    if distance > 42.0:
+        record_shot_debug(entry, "out_of_range", target, { "distance": distance })
         return
+    var visibility: Dictionary = shot_visibility(body, target, start, end)
+    if not bool(visibility.get("clear", false)):
+        record_shot_debug(entry, "line_blocked", target, visibility)
+        return
+    record_shot_debug(entry, "fired", target, { "distance": distance })
     system.face_position(body, target.global_position)
     system.play_npc_use(entry, "shoot")
     spawn_tracer(start, end)
@@ -83,6 +103,9 @@ func strike_hostile(entry: Dictionary, target: Node3D) -> void:
     system.last_message = "%s struck a hostile" % String(entry.get("name", "Guard"))
 
 func has_clear_shot(owner: Node, target: Node, start: Vector3, end: Vector3) -> bool:
+    return bool(shot_visibility(owner, target, start, end).get("clear", false))
+
+func shot_visibility(owner: Node, target: Node, start: Vector3, end: Vector3) -> Dictionary:
     var query := PhysicsRayQueryParameters3D.create(start, end)
     query.exclude = [owner]
     query.collision_mask = 1 | 4
@@ -90,8 +113,45 @@ func has_clear_shot(owner: Node, target: Node, start: Vector3, end: Vector3) -> 
     query.collide_with_areas = false
     var hit: Dictionary = system.get_world_3d().direct_space_state.intersect_ray(query)
     if hit.is_empty():
-        return true
-    return hit.get("collider") == target
+        return { "clear": true, "distance": start.distance_to(end), "hit": "" }
+    var collider: Object = hit.get("collider") as Object
+    var clear: bool = collider == target
+    var hit_position: Vector3 = hit.get("position", start)
+    return {
+        "clear": clear,
+        "distance": start.distance_to(end),
+        "hit": "target" if clear else _node_debug_name(collider),
+        "hitPosition": hit_position,
+        "hitDistance": start.distance_to(hit_position),
+        "targetDistance": start.distance_to(end)
+    }
+
+func record_shot_debug(entry: Dictionary, reason: String, target: Node3D, extra := {}) -> void:
+    var body := entry.get("body") as Node3D
+    var target_position := target.global_position if target != null and is_instance_valid(target) else Vector3.ZERO
+    var debug: Dictionary = {
+        "npc": String(entry.get("name", entry.get("id", ""))),
+        "reason": reason,
+        "body": _node_debug_name(body),
+        "bodyPosition": body.global_position if body != null and is_instance_valid(body) else Vector3.ZERO,
+        "target": _node_debug_name(target),
+        "targetPosition": target_position
+    }
+    for key in extra.keys():
+        debug[key] = extra[key]
+    entry["lastShotDebug"] = debug
+    last_shot_debug = debug
+
+func debug_summary() -> Dictionary:
+    return last_shot_debug.duplicate(true)
+
+func _node_debug_name(value) -> String:
+    var node := value as Node
+    if node == null or not is_instance_valid(node):
+        return ""
+    var parent: Node = node.get_parent()
+    var parent_name := String(parent.name) if parent != null else ""
+    return "%s:%s" % [node.name, parent_name]
 
 func spawn_tracer(start: Vector3, end: Vector3) -> void:
     var length := start.distance_to(end)

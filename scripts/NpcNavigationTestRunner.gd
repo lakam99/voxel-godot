@@ -77,12 +77,27 @@ func snapshot_height_fixture() -> Array:
 func restore_height_fixture(snapshot: Array, centers: Array) -> void:
     if main == null:
         return
-    if main.has_method("restore_volume_edits"):
+    mark_progress("npc_nav_restore_height_start")
+    if snapshot.is_empty():
+        var markers = main.get("volume_edit_markers")
+        mark_progress("npc_nav_restore_height_clear_markers")
+        if markers is Dictionary:
+            (markers as Dictionary).clear()
+        mark_progress("npc_nav_restore_height_markers_cleared")
+        invalidate_navigation_fixture()
+        mark_progress("npc_nav_restore_height_done")
+        return
+    elif main.has_method("restore_volume_edits"):
+        mark_progress("npc_nav_restore_height_restore_volume")
         main.call("restore_volume_edits", snapshot)
+        mark_progress("npc_nav_restore_height_volume_restored")
     for center_value in centers:
         if center_value is Vector2i and main.has_method("rebuild_chunks_around_cell"):
+            mark_progress("npc_nav_restore_height_rebuild_%s" % str(center_value))
             main.call("rebuild_chunks_around_cell", center_value)
+            mark_progress("npc_nav_restore_height_rebuilt_%s" % str(center_value))
     invalidate_navigation_fixture()
+    mark_progress("npc_nav_restore_height_done")
 
 func move_player_to_fixture_cell(cell: Vector2i) -> void:
     if main == null or player == null:
@@ -92,7 +107,7 @@ func move_player_to_fixture_cell(cell: Vector2i) -> void:
     player.velocity = Vector3.ZERO
     player.set("terrain_grounded", true)
     if main.has_method("update_chunks"):
-        main.call("update_chunks", true)
+        main.call("update_chunks", false)
 
 func test_generic_town_npc_navigation() -> void:
     if not main:
@@ -118,11 +133,17 @@ func test_generic_town_npc_navigation() -> void:
         "radius": 32,
         "level": level
     }
+    mark_progress("npc_nav_generic_move_fixture")
     move_player_to_fixture_cell(Vector2i(generic_center_x, generic_center_z))
-    await wait_physics_frames(5)
+    mark_progress("npc_nav_generic_wait_chunks")
+    await settle_streamed_chunks_after_relocation("npc_nav_generic_chunks", 180)
+    mark_progress("npc_nav_generic_build_town")
     structure_system.call("build_town", generic_town)
+    mark_progress("npc_nav_generic_spawn_npcs")
     npc_system.spawn_generic_town_npcs()
+    mark_progress("npc_nav_generic_initial_update")
     npc_system.update_npcs(0.1, 1.0)
+    mark_progress("npc_nav_generic_collect_homes")
 
     var generic_key := "%d,%d" % [generic_center_x, generic_center_z]
     var home_records: Dictionary = structure_system.call("town_home_records_snapshot")
@@ -159,6 +180,7 @@ func test_generic_town_npc_navigation() -> void:
     var forage_node: Node3D = null
     var targeted_forage_selected := false
     if not generic_forager.is_empty():
+        mark_progress("npc_nav_generic_setup_forager")
         generic_forager["hunger"] = 38.0
         var prop_root := main.get("prop_root") as Node
         var porch_cell: Vector2i = generic_forager.get("porchCell", Vector2i(generic_center_x + 1, generic_center_z))
@@ -185,6 +207,7 @@ func test_generic_town_npc_navigation() -> void:
                     break
         clear_props_near_cell(forage_cell, 5)
         clear_blocks_near_cell(forage_cell, 3)
+        mark_progress("npc_nav_generic_spawn_forage")
         forage_ground = surface_y_at_cell2(forage_cell)
         var rng := RandomNumberGenerator.new()
         rng.seed = 77031
@@ -275,6 +298,8 @@ func test_generic_town_npc_navigation() -> void:
                 "motionSkipped": String(generic_forager.get("npc_motion_skipped_reason", "")),
 				"jobObjectId": String(generic_forager.get("jobObjectId", "")),
 				"lastRoutePlanDebug": generic_forager.get("lastRoutePlanDebug", {}),
+				"routePlannerStats": route_planner_stats(npc_system),
+				"tilePublish": generic_forager.get("lastNavmeshTilePublishDebug", []),
 				"routeFallbackCell": generic_forager.get("routeFallbackCell", Vector2i.ZERO),
 				"blockedContact": String(forager_body.get_meta("npc_blocked_contact", "")),
                 "blockedName": String(forager_body.get_meta("npc_blocked_contact_name", "")),
@@ -330,6 +355,19 @@ func test_generic_town_npc_navigation() -> void:
         ]
     )
     cleanup_generated_blocks()
+
+func route_planner_stats(npc_system) -> Dictionary:
+    if npc_system == null:
+        return {}
+    var pathing = npc_system.get("pathing")
+    if pathing == null:
+        return {}
+    if pathing.has_method("stats"):
+        return pathing.stats()
+    var route_planner = pathing.get("route_planner") if pathing is Object else null
+    if route_planner != null and route_planner.has_method("stats"):
+        return route_planner.stats()
+    return {}
 
 func test_npc_capsule_collision_gate() -> void:
     if not main or not player:
@@ -578,8 +616,11 @@ func test_two_npcs_cross_narrow_door() -> void:
     var left_entry_body := left_entry.get("body") as Node3D
     var right_entry_body := right_entry.get("body") as Node3D
     var traffic_state := {}
+    var door_portal_summary := {}
     if npc_system.get("autonomy_system") != null and npc_system.get("autonomy_system").has_method("stats"):
-        traffic_state = (npc_system.get("autonomy_system").stats() as Dictionary).get("traffic", {})
+        var autonomy_stats: Dictionary = npc_system.get("autonomy_system").stats()
+        traffic_state = autonomy_stats.get("traffic", {})
+        door_portal_summary = autonomy_stats.get("doorPortals", {})
     add_result(
         "npc_nav_two_npc_door_crossing",
         both_crossed
@@ -589,7 +630,7 @@ func test_two_npcs_cross_narrow_door() -> void:
             and int(stats_after.get("doorOpens", 0)) > door_opens_before
             and int(stats_after.get("doorCloses", 0)) > door_closes_before
             and door_closed,
-        "crossed %s, shared %s, minSep %.2f, left %.2f cell %s wants %s dist %.2f goal %s body %s actionCount %d activeDoor %s, right %.2f cell %s wants %s dist %.2f goal %s body %s actionCount %d activeDoor %s, doorX %.2f, waits %d->%d, door %d/%d -> %d/%d, closed %s, routes %s/%s %s/%s, leftDebug %s, rightDebug %s, leftTiles %s, rightTiles %s, traffic active=%s waiting=%s granted=%s denied=%s released=%s" % [
+        "crossed %s, shared %s, minSep %.2f, left %.2f cell %s wants %s dist %.2f goal %s body %s actionCount %d activeDoor %s, right %.2f cell %s wants %s dist %.2f goal %s body %s actionCount %d activeDoor %s, doorX %.2f, waits %d->%d, door %d/%d -> %d/%d, closed %s, routes %s/%s %s/%s, leftDebug %s, rightDebug %s, leftTiles %s, rightTiles %s, rightEscape %s failedEscape %s capsule %s portalSummary %s, traffic active=%s waiting=%s granted=%s denied=%s released=%s" % [
             str(both_crossed),
             str(shared_cell),
             min_separation,
@@ -625,6 +666,10 @@ func test_two_npcs_cross_narrow_door() -> void:
             JSON.stringify(right_entry.get("lastRoutePlanDebug", {})),
             JSON.stringify(left_entry.get("lastNavmeshTilePublishDebug", [])),
             JSON.stringify(right_entry.get("lastNavmeshTilePublishDebug", [])),
+            JSON.stringify(right_entry.get("lastMotorLocalEscape", {})),
+            JSON.stringify(right_entry.get("lastMotorLocalEscapeFailed", {})),
+            JSON.stringify(right_entry.get("capsuleBlocker", right_npc.get_meta("npc_capsule_blocker", {}) if right_npc.has_meta("npc_capsule_blocker") else {})),
+            JSON.stringify(door_portal_summary),
             str(traffic_state.get("activeReservations", "")),
             str(traffic_state.get("waiting", "")),
             str(traffic_state.get("granted", "")),
@@ -852,7 +897,7 @@ func test_reachability_aware_goal_selection() -> void:
             and guard_cost < INF
             and wander_cost < INF
             and no_fallback_reasons,
-        "wood %.1f nearTree %s nearResource %s cost %.1f resources %d first %.1f/%.1f, stone %.1f near %s cost %.1f, guard offset %.1f work %s cost %.1f, wander town %s cost %.1f, reasons %s/%s/%s" % [
+        "wood %.1f nearTree %s nearResource %s cost %.1f resources %d first %.1f/%.1f debug %s, stone %.1f near %s cost %.1f debug %s, guard offset %.1f work %s cost %.1f, wander town %s cost %.1f, reasons %s/%s/%s" % [
             Vector2(wood_target.x - tree_pos.x, wood_target.z - tree_pos.z).length(),
             str(wood_near_tree),
             str(wood_near_resource),
@@ -860,9 +905,11 @@ func test_reachability_aware_goal_selection() -> void:
             wood_resource_candidates.size(),
             first_wood_resource_distance,
             first_wood_resource_cost,
+            JSON.stringify(wood_entry.get("lastResourceCandidateDebug", {})),
             Vector2(stone_target.x - rock_pos.x, stone_target.z - rock_pos.z).length(),
             str(stone_near_rock),
             stone_cost,
+            JSON.stringify(stone_entry.get("lastResourceCandidateDebug", {})),
             Vector2(guard_target.x - hostile.global_position.x, guard_target.z - hostile.global_position.z).length(),
             str(guard_in_work_area),
             guard_cost,
@@ -887,10 +934,13 @@ func test_reachability_aware_goal_selection() -> void:
         rock.queue_free()
     if is_instance_valid(hostile):
         hostile.queue_free()
+    mark_progress("npc_nav_reachable_goals_cleanup_restore")
     restore_height_fixture(height_snapshot, [start_cell])
+    mark_progress("npc_nav_reachable_goals_cleanup_wait")
     invalidate_navigation_fixture()
     await wait_physics_frames(3)
     invalidate_navigation_fixture()
+    mark_progress("npc_nav_reachable_goals_cleanup_done")
 
 func make_nav_test_npc(npc_system, npc_id: String, npc_name: String, job: String, town_center: Vector2i, town_radius: int, level: float, cell: Vector2i, can_fight := false) -> Dictionary:
     var body := npc_system.create_npc_body(npc_name, "npc") as CharacterBody3D

@@ -26,6 +26,7 @@ var sky_material: ProceduralSkyMaterial
 var visual_capture_active := false
 var visual_debug_enabled := false
 var force_underground_volume_debug := false
+var force_underground_volume_fine_focus := false
 
 var terrain_material: Material
 var materials := {}
@@ -39,6 +40,7 @@ var pending_chunk_loads := {}
 var pending_chunk_prop_spawns := {}
 var pending_chunk_terrain_refreshes := {}
 var pending_chunk_collision_refreshes := {}
+var pending_generated_volume_exposure_scans := {}
 var volume_edit_markers := {}
 var town_region_cache := {}
 var town_slope_apron_cache := {}
@@ -49,6 +51,7 @@ var inventory_system
 var crafting_system
 var objective_system
 var world_generation_system
+var terrain_meshing_service
 var structure_system
 var subsurface_system
 var utility_system
@@ -106,6 +109,7 @@ var autosave_jobs_failed := 0
 var autosave_last_player_position := Vector3.INF
 var autosave_last_player_rotation_y := INF
 var autosave_last_time_bucket := -1
+var autosave_activity_defer_elapsed := 0.0
 var discovered_biomes := {}
 var discovered_town_keys := {}
 var discovered_shrine_keys := {}
@@ -204,6 +208,8 @@ var perf_nav_snapshot_ms := 0.0
 var perf_job_scan_ms := 0.0
 var perf_break_ms := 0.0
 var perf_hud_ms := 0.0
+var fire_light_day_factor_elapsed := 999.0
+var sky_audio_update_elapsed := 999.0
 var local_light_lod_elapsed := 0.0
 var hud_refresh_interval := 0.16
 var hud_refresh_elapsed := 0.16
@@ -219,6 +225,9 @@ var block_meshes := {}
 func _ready() -> void:
     playtest_progress("main_ready_start")
     var underground_visual_fast_boot := OS.get_environment("VOXEL_UNDERGROUND_VISUAL_FAST_BOOT").strip_edges() == "1"
+    var digging_visual_fast_boot := OS.get_environment("VOXEL_DIGGING_VISUAL_FAST_BOOT").strip_edges() == "1"
+    var runtime_perf_fast_boot := OS.get_environment("VOXEL_RUNTIME_PERF_FAST_BOOT").strip_edges() == "1"
+    var skip_synchronous_world_boot := underground_visual_fast_boot or digging_visual_fast_boot or runtime_perf_fast_boot
     setup_save_system()
     var active_seed := ""
     if autosave_enabled and save_system and save_system.has_method("active_seed"):
@@ -258,25 +267,25 @@ func _ready() -> void:
     var loaded := try_load_world()
     var started_intro_tutorial := false
     playtest_progress("main_load_done")
-    if not loaded and tutorial_system and not underground_visual_fast_boot:
+    if not loaded and tutorial_system and not skip_synchronous_world_boot:
         if autosave_enabled:
             apply_world_seed(random_world_seed(seed_text), true)
         started_intro_tutorial = tutorial_system.start_new_world()
         playtest_progress("main_tutorial_start_done")
-    if not underground_visual_fast_boot:
-        update_chunks(true)
-        playtest_progress("main_initial_chunks_done")
-    var interactive_underground_message := "" if underground_visual_fast_boot else apply_interactive_underground_launch_if_requested()
-    if not underground_visual_fast_boot:
+    if not skip_synchronous_world_boot:
+        bootstrap_initial_chunks()
+        playtest_progress("main_initial_chunks_queued")
+    var interactive_underground_message := "" if skip_synchronous_world_boot else apply_interactive_underground_launch_if_requested()
+    if not skip_synchronous_world_boot:
         refresh_intro_knock_audio()
     var ready_message := "Loaded saved world" if loaded else "Godot slice ready"
     if not loaded and tutorial_system and tutorial_system.last_message != "":
         ready_message = tutorial_system.last_message
     if interactive_underground_message != "":
         ready_message = interactive_underground_message
-    if not underground_visual_fast_boot:
+    if not skip_synchronous_world_boot:
         update_hud(ready_message)
-    reset_autosave_dirty_tracking(not loaded and not underground_visual_fast_boot, "new_world")
+    reset_autosave_dirty_tracking(not loaded and not skip_synchronous_world_boot, "new_world")
 
 func playtest_progress(label: String) -> void:
     var path: String = OS.get_environment("VOXEL_PLAYTEST_PROGRESS")
@@ -288,9 +297,24 @@ func playtest_progress(label: String) -> void:
     file.store_string("%s\n" % label)
     file.close()
 
+func bootstrap_initial_chunks(urgent_radius := 1) -> void:
+    if player == null:
+        return
+    var center := world_to_chunk(player.position.x, player.position.z)
+    for dz in range(-urgent_radius, urgent_radius + 1):
+        for dx in range(-urgent_radius, urgent_radius + 1):
+            var key := Vector2i(center.x + dx, center.y + dz)
+            if not chunks.has(key):
+                create_chunk(key.x, key.y, true)
+    last_center_chunk = Vector2i(999999, 999999)
+    update_chunks(false)
+
 func setup_save_system() -> void:
     autosave_enabled = OS.get_environment("VOXEL_PLAYTEST") == ""
     var save_path := "user://voxel_biome_world_saves.json" if autosave_enabled else "user://voxel_biome_world_playtest_saves.json"
+    var save_path_override := OS.get_environment("VOXEL_SAVE_PATH_OVERRIDE").strip_edges()
+    if save_path_override != "":
+        save_path = save_path_override
     save_system = SaveSystemScript.new(save_path)
     autosave_interval_seconds = 60.0
 
@@ -301,6 +325,7 @@ func mark_world_dirty(reason := "world") -> void:
 func reset_autosave_dirty_tracking(mark_dirty := false, reason := "reset") -> void:
     autosave_dirty = mark_dirty
     autosave_dirty_reasons.clear()
+    autosave_activity_defer_elapsed = 0.0
     if mark_dirty:
         autosave_dirty_reasons[String(reason)] = true
     if player:
@@ -344,14 +369,20 @@ func process_autosave(delta: float) -> void:
     update_autosave_dirty_state()
     autosave_elapsed += delta
     if autosave_elapsed >= autosave_interval_seconds:
-        autosave_elapsed = 0.0
         if autosave_dirty:
             var pending := bool(save_system.call("has_async_save_pending")) if save_system.has_method("has_async_save_pending") else false
             if pending:
+                autosave_elapsed = 0.0
                 mark_world_dirty("autosave_pending")
                 if runtime_perf_monitor != null:
                     runtime_perf_monitor.increment_counter("autosave_pending")
+            elif should_defer_autosave_snapshot_for_activity(delta):
+                autosave_elapsed = autosave_interval_seconds
+                if runtime_perf_monitor != null:
+                    runtime_perf_monitor.increment_counter("autosave_activity_deferred")
             else:
+                autosave_elapsed = 0.0
+                autosave_activity_defer_elapsed = 0.0
                 var snapshot_start: int = runtime_perf_monitor.begin_section("autosave_snapshot") if runtime_perf_monitor != null else Time.get_ticks_usec()
                 var snapshot: Dictionary = create_save_snapshot()
                 if runtime_perf_monitor != null:
@@ -370,7 +401,22 @@ func process_autosave(delta: float) -> void:
                     mark_world_dirty("autosave_start_failed")
                     if runtime_perf_monitor != null:
                         runtime_perf_monitor.increment_counter("autosave_start_failed")
+        else:
+            autosave_elapsed = 0.0
+            autosave_activity_defer_elapsed = 0.0
     perf_autosave_ms = runtime_perf_monitor.end_section("autosave", section_start) if runtime_perf_monitor != null else float(Time.get_ticks_usec() - section_start) / 1000.0
+
+func should_defer_autosave_snapshot_for_activity(delta: float) -> bool:
+    if autosave_activity_defer_elapsed >= 10.0:
+        return false
+    if player == null:
+        return false
+    var horizontal_speed := Vector2(player.velocity.x, player.velocity.z).length()
+    var sprinting := bool(player.get("automated_sprint")) if player.has_method("get") else false
+    if horizontal_speed < CELL * 4.0 and not sprinting:
+        return false
+    autosave_activity_defer_elapsed += maxf(0.0, delta)
+    return true
 
 func apply_world_seed(new_seed: String, remember := false) -> void:
     seed_text = new_seed.strip_edges()
@@ -382,15 +428,21 @@ func apply_world_seed(new_seed: String, remember := false) -> void:
     town_region_cache.clear()
     town_slope_apron_cache.clear()
     fishing_rng.seed = hash_string("%s:fishing" % seed_text)
+    playtest_progress("apply_seed_setup_noise")
     setup_noise()
+    playtest_progress("apply_seed_setup_world_generation")
     setup_world_generation_system()
     if world_generation_system and world_generation_system.has_method("reset_for_seed"):
+        playtest_progress("apply_seed_world_generation_reset")
         world_generation_system.reset_for_seed()
     if weather_system and weather_system.has_method("reset_for_seed"):
+        playtest_progress("apply_seed_weather_reset")
         weather_system.reset_for_seed(seed_hash)
     if region_story_generator and region_story_generator.has_method("setup"):
+        playtest_progress("apply_seed_region_story")
         region_story_generator.setup(seed_text, seed_hash, TOWN_REGION_CELLS)
     if story_director and story_director.has_method("reset"):
+        playtest_progress("apply_seed_story_director")
         story_director.reset()
     if story_world_overlay_system and story_world_overlay_system.has_method("reset"):
         story_world_overlay_system.reset()
@@ -404,7 +456,9 @@ func apply_world_seed(new_seed: String, remember := false) -> void:
         region_aftermath_system.reset()
     last_story_region_id = ""
     if save_system and remember and save_system.has_method("set_active_seed"):
+        playtest_progress("apply_seed_remember")
         save_system.set_active_seed(seed_text)
+    playtest_progress("apply_seed_done")
 
 func random_world_seed(exclude_seed := "") -> String:
     var forced_test_seed := test_seed_text()
@@ -436,11 +490,11 @@ func apply_interactive_underground_launch_if_requested() -> String:
         return "Interactive underground launch failed: player or world generation missing"
     neutralize_interactive_underground_tutorial()
     var radius_text := OS.get_environment("VOXEL_UNDERGROUND_INTERACTIVE_SEARCH_RADIUS").strip_edges()
-    var search_radius := clampi(int(radius_text) if radius_text != "" else 12, 1, 32)
+    var search_radius := clampi(int(radius_text) if radius_text != "" else 12, 1, 64)
     var min_depth_text := OS.get_environment("VOXEL_UNDERGROUND_INTERACTIVE_MIN_DEPTH").strip_edges()
     var max_depth_text := OS.get_environment("VOXEL_UNDERGROUND_INTERACTIVE_MAX_DEPTH").strip_edges()
-    var min_depth := clampi(int(min_depth_text) if min_depth_text != "" else 4, 1, 32)
-    var max_depth := clampi(int(max_depth_text) if max_depth_text != "" else 30, min_depth, 32)
+    var min_depth := clampi(int(min_depth_text) if min_depth_text != "" else 4, 1, 72)
+    var max_depth := clampi(int(max_depth_text) if max_depth_text != "" else 30, min_depth, 72)
     if not world_generation_system.has_method("find_underground_air_sample"):
         return "Interactive underground launch failed: underground sampler missing"
     var underground_record: Dictionary = world_generation_system.call("find_underground_air_sample", search_radius, min_depth, max_depth)
@@ -457,8 +511,7 @@ func apply_interactive_underground_launch_if_requested() -> String:
     if OS.get_environment("VOXEL_UNDERGROUND_INTERACTIVE_GOD_MODE").strip_edges() == "1" and survival_system != null and survival_system.has_method("set_test_god_mode"):
         survival_system.call("set_test_god_mode", true, "interactive_underground_playtest")
     rebuild_chunks_around_cell(Vector2i(sample_cell.x, sample_cell.z))
-    last_center_chunk = Vector2i(999999, 999999)
-    update_chunks(true)
+    bootstrap_initial_chunks()
     if hud != null:
         if hud.has_method("hide_dialogue"):
             hud.hide_dialogue(false)
@@ -603,6 +656,9 @@ func setup_world_generation_system() -> void:
     if world_generation_system == null:
         world_generation_system = WorldGenerationSystemScript.new()
     world_generation_system.setup(self)
+    if terrain_meshing_service == null:
+        terrain_meshing_service = TerrainMeshingServiceScript.new()
+    terrain_meshing_service.setup(self)
 
 func setup_story_systems() -> void:
     if region_story_generator == null:
@@ -961,18 +1017,25 @@ func try_load_world(show_message := false) -> bool:
     return loaded
 
 func start_new_game(show_message := true) -> bool:
+    playtest_progress("new_game_start")
     var previous_seed := seed_text
     if save_system:
+        playtest_progress("new_game_delete_save")
         save_system.delete(previous_seed)
+    playtest_progress("new_game_apply_seed")
     apply_world_seed(random_world_seed(previous_seed), true)
+    playtest_progress("new_game_reset_runtime")
     reset_runtime_world_state()
     var started := false
     if tutorial_system:
+        playtest_progress("new_game_start_tutorial")
         started = tutorial_system.start_new_world()
-    last_center_chunk = Vector2i(999999, 999999)
-    update_chunks(true)
+    playtest_progress("new_game_bootstrap_chunks")
+    bootstrap_initial_chunks()
     if tutorial_system:
+        playtest_progress("new_game_starting_inventory")
         tutorial_system.configure_starting_inventory()
+    playtest_progress("new_game_objectives")
     update_objectives_and_contracts()
     refresh_intro_knock_audio()
     if hud:
@@ -986,4 +1049,5 @@ func start_new_game(show_message := true) -> bool:
     if show_message:
         update_hud("New game started" if started else "New game reset")
     reset_autosave_dirty_tracking(true, "new_game")
+    playtest_progress("new_game_done")
     return started

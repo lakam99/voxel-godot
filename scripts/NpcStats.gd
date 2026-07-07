@@ -53,6 +53,7 @@ static func build(system) -> Dictionary:
     var traffic_stats: Dictionary = traffic_reservations.stats() if traffic_reservations else {}
     var pathing = system.get("pathing")
     var combat = system.get("combat")
+    var combat_debug: Dictionary = combat.debug_summary() if combat != null and combat.has_method("debug_summary") else {}
     var coordinator = pathing.get("coordinator") if pathing else null
     var locomotion = coordinator.get("locomotion") if coordinator else null
     var spawned_town_keys: Dictionary = system.get("spawned_town_keys")
@@ -76,6 +77,7 @@ static func build(system) -> Dictionary:
         "towns": spawned_town_keys.size(),
         "guardShots": int(system.get("guard_shots")),
         "guardMeleeStrikes": int(system.get("guard_melee_strikes")),
+        "combatDebug": combat_debug,
         "useAnimations": int(system.get("npc_use_animations")),
         "pathDetours": int(system.get("npc_path_detours")),
         "blockedMoves": int(system.get("npc_blocked_moves")),

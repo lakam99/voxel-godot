@@ -35,8 +35,7 @@ func apply_runtime_setting(setting: String, value, sync_hud: bool = true) -> voi
     elif setting == "renderDistance":
         render_distance = int(value)
         if player and chunk_root != null and previous_value != value:
-            last_center_chunk = Vector2i(999999, 999999)
-            update_chunks(true)
+            bootstrap_initial_chunks()
     elif setting == "shadows":
         shadows_enabled = bool(value)
         apply_local_light_shadows()
@@ -75,27 +74,39 @@ func update_performance_overlay(delta: float) -> void:
     hud.set_performance(debug_performance_state())
 
 func debug_performance_state() -> Dictionary:
+    debug_performance_state_trace("start")
     var hostile_stats: Dictionary = hostile_system.stats() if hostile_system else {}
+    debug_performance_state_trace("hostile_stats")
     var prop_count := count_nodes_with_meta(chunk_root, "kind", "prop") + count_nodes_with_meta(prop_root, "kind", "prop")
+    debug_performance_state_trace("prop_count")
     var visual_count := count_visual_nodes(chunk_root) + count_visual_nodes(prop_root) + count_visual_nodes(block_root)
+    debug_performance_state_trace("visual_count")
     if weather_system:
         visual_count += count_visual_nodes(weather_system)
+    debug_performance_state_trace("weather_visual_count")
     var story_perf := {
         "overlay": story_world_overlay_system.performance_state() if story_world_overlay_system != null and story_world_overlay_system.has_method("performance_state") else {},
         "encounter": worldmark_encounter_controller.performance_state() if worldmark_encounter_controller != null and worldmark_encounter_controller.has_method("performance_state") else {}
     }
+    debug_performance_state_trace("story_perf")
     var perf_summary: Dictionary = runtime_perf_monitor.summary() if runtime_perf_monitor != null else {}
+    debug_performance_state_trace("perf_summary")
     var save_stats: Dictionary = save_system.stats() if save_system != null and save_system.has_method("stats") else {}
+    debug_performance_state_trace("save_stats")
     var navigation_backend := {}
     var navmesh_world_stats := {}
     if npc_system != null:
+        debug_performance_state_trace("npc_system_start")
         var autonomy = npc_system.get("autonomy_system")
         if autonomy != null:
             if autonomy.has_method("navigation_backend_summary"):
                 navigation_backend = autonomy.navigation_backend_summary()
+                debug_performance_state_trace("navigation_backend")
             if autonomy.has_method("stats"):
                 var autonomy_stats: Dictionary = autonomy.stats()
                 navmesh_world_stats = autonomy_stats.get("navmeshWorld", {}) if autonomy_stats.get("navmeshWorld", {}) is Dictionary else {}
+                debug_performance_state_trace("autonomy_stats")
+    debug_performance_state_trace("return")
     return {
         "fps": Engine.get_frames_per_second(),
         "chunks": chunks.size(),
@@ -144,6 +155,14 @@ func debug_performance_state() -> Dictionary:
         "navmeshWorld": navmesh_world_stats,
         "story": story_perf
     }
+
+func debug_performance_state_trace(label: String) -> void:
+    var path := OS.get_environment("VOXEL_DEBUG_PERFORMANCE_STATE_TRACE").strip_edges()
+    if path == "":
+        return
+    var file := FileAccess.open(path, FileAccess.WRITE)
+    if file != null:
+        file.store_string(label)
 
 func npc_debug_overlay_state() -> Dictionary:
     if npc_system == null or not npc_system.has_method("stats"):
@@ -259,7 +278,7 @@ func teleport_to(value: String) -> bool:
     player.global_position = Vector3(x, y, z)
     player.velocity = Vector3.ZERO
     player.set("terrain_grounded", false)
-    update_chunks(true)
+    bootstrap_initial_chunks()
     var message := "Teleported: %.0f, %.0f, %.0f" % [x, y, z] if coords.has("y") else "Teleported: %.0f, %.0f" % [x, z]
     if hud:
         hud.set_teleport_status(message)
@@ -275,8 +294,7 @@ func teleport_to_cell(cell: Vector2i, message: String = "") -> bool:
     player.global_position = Vector3(x, y, z)
     player.velocity = Vector3.ZERO
     player.set("terrain_grounded", false)
-    last_center_chunk = Vector2i(999999, 999999)
-    update_chunks(true)
+    bootstrap_initial_chunks()
     update_hud(message if message != "" else "Teleported to playtest case")
     return true
 

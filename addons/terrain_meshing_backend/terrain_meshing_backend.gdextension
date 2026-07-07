@@ -1,0 +1,12 @@
+[configuration]
+entry_symbol = "terrain_meshing_library_init"
+compatibility_minimum = "4.3"
+reloadable = true
+
+[libraries]
+windows.debug.x86_64 = "res://addons/terrain_meshing_backend/bin/terrain_meshing_backend.windows.template_debug.x86_64.dll"
+windows.release.x86_64 = "res://addons/terrain_meshing_backend/bin/terrain_meshing_backend.windows.template_release.x86_64.dll"
+linux.debug.x86_64 = "res://addons/terrain_meshing_backend/bin/libterrain_meshing_backend.linux.template_debug.x86_64.so"
+linux.release.x86_64 = "res://addons/terrain_meshing_backend/bin/libterrain_meshing_backend.linux.template_release.x86_64.so"
+macos.debug = "res://addons/terrain_meshing_backend/bin/libterrain_meshing_backend.macos.template_debug.framework"
+macos.release = "res://addons/terrain_meshing_backend/bin/libterrain_meshing_backend.macos.template_release.framework"

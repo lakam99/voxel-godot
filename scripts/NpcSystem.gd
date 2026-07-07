@@ -18,7 +18,9 @@ const CharacterMotorProfileScript := preload("res://scripts/npc_ai/contracts/Cha
 const CELL := 1.35
 const DOOR_TRAFFIC_RELEASE_RADIUS := CELL * 0.72
 const FORAGE_SCAN_NODE_LIMIT := 1200
-const FORAGE_SCAN_CANDIDATE_LIMIT := 16
+const FORAGE_SCAN_CANDIDATE_LIMIT := 8
+const FORAGE_HOME_RETURN_MAX_DISTANCE := CELL * 36.0
+const RESOURCE_TARGET_CACHE_FRAMES := 240
 const NO_DETOUR := Vector3(9999999.0, 9999999.0, 9999999.0)
 const NPC_SPEED_MODE_WALKING := "walking"
 const NPC_SPEED_MODE_SPRINTING := "sprinting"
@@ -31,6 +33,11 @@ const NPC_MOTION_BUDGET_VERY_CROWDED := 3
 const NPC_MOTION_ACCUMULATED_DELTA_CAP := 4.0
 const NPC_BRAIN_FRAME_BUDGET_MS := 4.0
 const NPC_MOTION_FRAME_BUDGET_MS := 8.0
+const NPC_CLOCK_DISPLAY_OFFSET := 0.25
+const NPC_DUSK_START_CLOCK := 18.25 / 24.0
+const NPC_DAWN_START_CLOCK := 5.25 / 24.0
+const NAVIGATION_PROP_CHANGE_EVENTS_PER_FRAME := 1
+const NAVIGATION_PROP_CHANGE_OBJECT_IDS_PER_FRAME := 2
 
 var main
 var hostile_system
@@ -75,6 +82,7 @@ var npc_update_active := false
 var external_move_budget_physics_frame := -1
 var published_navigation_semantics := {}
 var metadata_key_sanitizer: RegEx = null
+var navigation_change_flush_pending := false
 
 func performance_monitor():
     return main.get("runtime_perf_monitor") if main != null else null
@@ -427,6 +435,22 @@ func register_npc(body: Node3D, profile: Dictionary) -> Dictionary:
     var porch_cell: Vector2i = profile.get("porchCell", home_cell)
     var guard_cell: Vector2i = profile.get("guardCell", porch_cell)
     var level := float(profile.get("level", body_position.y))
+    var home_position := cell_to_position(home_cell, level)
+    var porch_position := cell_to_position(porch_cell, level)
+    var profile_home_route_positions: Array = profile.get("homeRoutePositions", []) if profile.get("homeRoutePositions", []) is Array else []
+    var home_route_positions: Array = profile_home_route_positions.duplicate()
+    if home_route_positions.is_empty():
+        if porch_cell != home_cell:
+            home_route_positions.append(porch_position)
+        home_route_positions.append(home_position)
+    else:
+        var route_ends_at_home := false
+        for route_target in home_route_positions:
+            if route_target is Vector3 and flat_cell_for_position(route_target) == home_cell:
+                route_ends_at_home = true
+                break
+        if not route_ends_at_home:
+            home_route_positions.append(home_position)
     var role := String(profile.get("role", "Villager"))
     var can_fight := bool(profile.get("canFight", false))
     var job := String(profile.get("job", ""))
@@ -444,8 +468,9 @@ func register_npc(body: Node3D, profile: Dictionary) -> Dictionary:
         "homeCell": home_cell,
         "porchCell": porch_cell,
         "guardCell": guard_cell,
-        "homePosition": cell_to_position(home_cell, level),
-        "porchPosition": cell_to_position(porch_cell, level),
+        "homePosition": home_position,
+        "porchPosition": porch_position,
+        "homeRoutePositions": home_route_positions,
         "interiorMinCell": profile.get("interiorMinCell", home_cell),
         "interiorMaxCell": profile.get("interiorMaxCell", home_cell),
         "guardPosition": cell_to_position(guard_cell, level),
@@ -759,10 +784,15 @@ func spawn_generic_town_npcs() -> void:
         var town_key := String(town_key_variant)
         if town_key == "" or spawned_town_keys.has(town_key):
             continue
+        var records_value = records_by_town[town_key]
+        if not (records_value is Array):
+            continue
+        var records: Array = records_value
+        if records.is_empty():
+            continue
         if tutorial_key != "" and town_key == tutorial_key:
             spawned_town_keys[town_key] = true
             continue
-        var records: Array = records_by_town[town_key]
         for i in range(records.size()):
             spawn_town_npc(records[i], i)
         spawned_town_keys[town_key] = true
@@ -815,17 +845,23 @@ func generated_town_guard_cell(record: Dictionary, guard_slot: int, fallback: Ve
     var radius := int(record.get("townRadius", 0))
     if radius < 12:
         return fallback
-    var inset := clampi(3, 2, radius - 2)
-    var candidates: Array[Vector2i] = [
-        Vector2i(center.x, center.y - radius + inset),
-        Vector2i(center.x + 1, center.y + radius - inset),
-        Vector2i(center.x - radius + inset, center.y + 2),
-        Vector2i(center.x + radius - inset, center.y - 2)
-    ]
-    var slot := guard_slot % candidates.size()
-    if slot < 0:
-        slot += candidates.size()
-    return candidates[slot]
+    var perimeter := maxi(1, radius - 3)
+    var offset := fallback - center
+    if offset == Vector2i.ZERO:
+        var side := posmod(guard_slot, 4)
+        if side == 0:
+            offset = Vector2i(0, -1)
+        elif side == 1:
+            offset = Vector2i(1, 0)
+        elif side == 2:
+            offset = Vector2i(0, 1)
+        else:
+            offset = Vector2i(-1, 0)
+    if absi(offset.x) >= absi(offset.y):
+        var sx := 1 if offset.x >= 0 else -1
+        return Vector2i(center.x + sx * perimeter, clampi(center.y + offset.y, center.y - perimeter, center.y + perimeter))
+    var sz := 1 if offset.y >= 0 else -1
+    return Vector2i(clampi(center.x + offset.x, center.x - perimeter, center.x + perimeter), center.y + sz * perimeter)
 
 func update_npcs(delta: float, day_factor: float) -> void:
     if main == null:
@@ -885,11 +921,32 @@ func update_npcs(delta: float, day_factor: float) -> void:
     var scanned := 0
     var processed := 0
     var brain_processed_entries: Array = []
+    var immediate_brain_entries: Array = []
+    for entry in active_entries:
+        if npc_brain_requires_immediate_update(entry, night_factor):
+            immediate_brain_entries.append(entry)
+    if not immediate_brain_entries.is_empty():
+        budget = maxi(budget, mini(immediate_brain_entries.size(), 12))
+    for entry in immediate_brain_entries:
+        if processed >= budget:
+            break
+        var body := entry.get("body") as Node3D
+        if body == null or not is_instance_valid(body):
+            npcs.erase(entry)
+            continue
+        entry["npc_lod_brain_due"] = true
+        entry["_lodGateApplied"] = true
+        update_npc(entry, delta, night_factor)
+        entry.erase("_lodGateApplied")
+        brain_processed_entries.append(entry)
+        processed += 1
     while scanned < update_count and processed < budget:
         if processed > 0 and npc_elapsed_ms(npc_frame_start) >= NPC_BRAIN_FRAME_BUDGET_MS:
             break
         var entry: Dictionary = active_entries[(npc_update_cursor + scanned) % update_count]
         scanned += 1
+        if brain_processed_entries.has(entry):
+            continue
         var body := entry.get("body") as Node3D
         if body == null or not is_instance_valid(body):
             npcs.erase(entry)
@@ -967,7 +1024,66 @@ func npc_motion_budget(active_count: int) -> int:
         return NPC_MOTION_BUDGET_ACTIVE
     return active_count
 
+func npc_brain_requires_immediate_update(entry: Dictionary, night_factor: float) -> bool:
+    var scripted_order_value = entry.get("scriptedOrder", {})
+    if scripted_order_value is Dictionary:
+        var scripted_order: Dictionary = scripted_order_value
+        var order_state := String(scripted_order.get("state", ""))
+        if bool(scripted_order.get("usesRouteStack", false)) and order_state in ["PENDING", "ACTIVE"]:
+            return true
+    if npc_day_worker_departure_required(entry, night_factor):
+        return true
+    if not npc_home_return_window_active(night_factor):
+        return false
+    if bool(entry.get("nightGuard", false)):
+        return false
+    if bool(entry.get("insideHome", false)):
+        return false
+    return true
+
+func npc_day_worker_departure_required(entry: Dictionary, night_factor := 0.0) -> bool:
+    if npc_home_return_window_active(night_factor):
+        return false
+    if bool(entry.get("nightGuard", false)):
+        return false
+    if not bool(entry.get("insideHome", false)):
+        return false
+    var job := String(entry.get("job", ""))
+    if not (job in ["wood", "stone", "trade", "forage"]):
+        return false
+    var phase := String(entry.get("jobPhase", "idle"))
+    return phase in ["idle", "searching", "outbound", "returning"]
+
+func npc_home_return_window_active(night_factor: float) -> bool:
+    if night_factor > 0.05:
+        return true
+    if main == null:
+        return false
+    var time_value = main.get("time_of_day")
+    if not (typeof(time_value) == TYPE_FLOAT or typeof(time_value) == TYPE_INT):
+        return false
+    var clock_phase := fposmod(float(time_value) + NPC_CLOCK_DISPLAY_OFFSET, 1.0)
+    return clock_phase >= NPC_DUSK_START_CLOCK or clock_phase < NPC_DAWN_START_CLOCK
+
 func npc_motion_requires_immediate_update(entry: Dictionary) -> bool:
+    if npc_day_worker_departure_required(entry):
+        return true
+    if npc_guard_motion_required(entry):
+        return true
+    var scripted_order_value = entry.get("scriptedOrder", {})
+    if scripted_order_value is Dictionary:
+        var scripted_order: Dictionary = scripted_order_value
+        var order_state := String(scripted_order.get("state", ""))
+        if bool(scripted_order.get("usesRouteStack", false)) and order_state in ["PENDING", "ACTIVE"]:
+            return true
+    if not bool(entry.get("insideHome", false)):
+        if String(entry.get("activeGoalKind", "")) == String(NpcEnumsScript.GOAL_KIND_HOME):
+            return true
+        var active_goal_value = entry.get("activeMotionGoal", {})
+        if active_goal_value is Dictionary and String((active_goal_value as Dictionary).get("goalKind", "")) == String(NpcEnumsScript.GOAL_KIND_HOME):
+            return true
+        if bool(entry.get("routeMovingHome", false)) and String(entry.get("routeStatus", "")) in ["moving", "pending", "waiting"]:
+            return true
     if String(entry.get("activeDoorPortalId", "")) != "":
         return true
     if bool(entry.get("holdDoorOrder", false)):
@@ -975,6 +1091,16 @@ func npc_motion_requires_immediate_update(entry: Dictionary) -> bool:
     if String(entry.get("routeReason", "")) in ["active_door_forward_clearance", "portal_retreat", "yielding_retreat"]:
         return true
     return false
+
+func npc_guard_motion_required(entry: Dictionary) -> bool:
+    var active_goal := String(entry.get("activeGoalKind", entry.get("goal", "")))
+    var motion_goal := ""
+    var active_goal_value = entry.get("activeMotionGoal", {})
+    if active_goal_value is Dictionary:
+        motion_goal = String((active_goal_value as Dictionary).get("goalKind", ""))
+    if not (bool(entry.get("nightGuard", false)) or active_goal == String(NpcEnumsScript.GOAL_KIND_GUARD) or motion_goal == String(NpcEnumsScript.GOAL_KIND_GUARD)):
+        return false
+    return String(entry.get("routeStatus", "")) in ["moving", "pending", "waiting"]
 
 func update_npc(entry: Dictionary, delta: float, night_factor: float) -> void:
     var standalone_update := not npc_update_active
@@ -1214,6 +1340,9 @@ func find_forage_target(entry: Dictionary) -> Node3D:
     var body := entry.get("body") as Node3D
     if body == null:
         return null
+    var cached_target := cached_resource_target_for_entry(entry, "forage")
+    if cached_target != null:
+        return cached_target
     var monitor = performance_monitor()
     var scan_start: int = monitor.begin_section("job_forage_scan") if monitor != null else Time.get_ticks_usec()
     var candidates: Array[Node3D] = indexed_resource_candidates(entry, ["forage_source"], {
@@ -1221,9 +1350,10 @@ func find_forage_target(entry: Dictionary) -> Node3D:
         "unreachableMetaKey": forager_unreachable_meta_key(entry),
         "drops": ["berries"],
         "outsideTown": true,
-        "workAreaOnly": true
+        "workAreaOnly": true,
+        "chunkRadius": 2,
+        "cacheFrames": 30
     })
-    candidates = filter_forage_candidates(entry, candidates)
     var scanned_nodes := 0
     if candidates.is_empty() and allow_resource_scan_fallback():
         var remaining_scan_nodes := FORAGE_SCAN_NODE_LIMIT
@@ -1235,9 +1365,13 @@ func find_forage_target(entry: Dictionary) -> Node3D:
     if monitor != null:
         monitor.increment_counter("forage_scan_nodes", scanned_nodes)
         monitor.end_section("job_forage_scan", scan_start)
+    var chosen: Node3D = null
     if pathing != null and pathing.has_method("choose_forage_target"):
-        return pathing.choose_forage_target(entry, candidates)
-    return candidates[0] if not candidates.is_empty() else null
+        chosen = pathing.choose_forage_target(entry, candidates)
+    else:
+        chosen = candidates[0] if not candidates.is_empty() else null
+    remember_cached_resource_target(entry, "forage", chosen)
+    return chosen
 
 func filter_forage_candidates(entry: Dictionary, candidates: Array[Node3D]) -> Array[Node3D]:
     var filtered: Array[Node3D] = []
@@ -1275,10 +1409,19 @@ func is_valid_forage_node(node: Node3D, entry: Dictionary) -> bool:
         return false
     if point_inside_town_footprint(entry, node.global_position):
         return false
+    if not forage_node_within_home_return_radius(entry, node.global_position):
+        return false
     if not smart_object_available(smart_object_id_for_node(node), String(entry.get("id", ""))):
         return false
     var h: float = main.surface_y_at_position(node.global_position)
     return h >= main.WATER_LEVEL + 0.45
+
+func forage_node_within_home_return_radius(entry: Dictionary, position: Vector3) -> bool:
+    var home_position: Vector3 = entry.get("homePosition", entry.get("porchPosition", position))
+    var flat_home_delta := Vector2(position.x - home_position.x, position.z - home_position.z)
+    var leash_radius := float(entry.get("roleLeashRadius", FORAGE_HOME_RETURN_MAX_DISTANCE))
+    var max_return_distance := minf(FORAGE_HOME_RETURN_MAX_DISTANCE, maxf(CELL * 18.0, leash_radius * 0.62))
+    return flat_home_delta.length() <= max_return_distance
 
 func current_route_failure_blocks_forager(entry: Dictionary) -> bool:
     if String(entry.get("routeStatus", "")) != "blocked":
@@ -1326,11 +1469,14 @@ func find_job_resource_target(entry: Dictionary, job: String) -> Node3D:
     var body := entry.get("body") as Node3D
     if body == null:
         return null
+    var cached_target := cached_resource_target_for_entry(entry, job)
+    if cached_target != null:
+        return cached_target
     var monitor = performance_monitor()
     var scan_start: int = monitor.begin_section("job_forage_scan") if monitor != null else Time.get_ticks_usec()
     var query_options := resource_query_options_for_job(entry, job)
     var candidates: Array[Node3D] = indexed_resource_candidates(entry, resource_kinds_for_job(job), query_options)
-    candidates = filter_job_resource_candidates(entry, job, candidates)
+    var indexed_candidates := not candidates.is_empty()
     var scanned_nodes := 0
     if candidates.is_empty() and allow_resource_scan_fallback():
         var remaining_scan_nodes := FORAGE_SCAN_NODE_LIMIT
@@ -1345,31 +1491,84 @@ func find_job_resource_target(entry: Dictionary, job: String) -> Node3D:
     if candidates.is_empty():
         return null
     if autonomy_system != null and autonomy_system.get("smart_objects") != null:
+        var candidate_lookup := {}
+        for candidate in candidates:
+            candidate_lookup[smart_object_id_for_node(candidate)] = candidate
         var scored: Array = autonomy_system.get("smart_objects").score_candidates(entry, "harvest_resource", candidates)
         for score in scored:
             var object_id: String = String(score.get("objectId", ""))
-            var candidate := candidate_by_object_id(candidates, object_id)
-            if candidate != null and smart_object_available(object_id, String(entry.get("id", ""))):
+            var candidate := candidate_lookup.get(object_id, null) as Node3D
+            if candidate != null and (indexed_candidates or smart_object_available(object_id, String(entry.get("id", "")))):
+                remember_cached_resource_target(entry, job, candidate)
                 return candidate
     candidates.sort_custom(func(a: Node3D, b: Node3D) -> bool:
         return a.global_position.distance_squared_to(body.global_position) < b.global_position.distance_squared_to(body.global_position)
     )
     for candidate in candidates:
         var object_id: String = smart_object_id_for_node(candidate)
-        if smart_object_available(object_id, String(entry.get("id", ""))):
+        if indexed_candidates or smart_object_available(object_id, String(entry.get("id", ""))):
+            remember_cached_resource_target(entry, job, candidate)
             return candidate
     return null
 
 func resource_query_options_for_job(entry: Dictionary, job: String) -> Dictionary:
     var options := {
         "limit": FORAGE_SCAN_CANDIDATE_LIMIT,
-        "outsideTown": job == "forage",
-        "workAreaOnly": true
+        "outsideTown": resource_job_uses_outside_work_area(job),
+        "workAreaOnly": true,
+        "chunkRadius": 2,
+        "cacheFrames": 30
     }
     if job == "forage":
         options["drops"] = ["berries"]
         options["unreachableMetaKey"] = forager_unreachable_meta_key(entry)
     return options
+
+func cached_resource_target_for_entry(entry: Dictionary, job: String) -> Node3D:
+    if String(entry.get("cachedResourceJob", "")) != job:
+        return null
+    var object_id := String(entry.get("cachedResourceObjectId", ""))
+    if object_id == "":
+        clear_cached_resource_target(entry)
+        return null
+    var cached_frame := int(entry.get("cachedResourceFrame", -1000000))
+    if cached_frame + RESOURCE_TARGET_CACHE_FRAMES < Engine.get_process_frames():
+        clear_cached_resource_target(entry)
+        return null
+    var node := smart_object_node_for_id(object_id)
+    if node == null:
+        clear_cached_resource_target(entry)
+        return null
+    if smart_object_id_for_node(node) != object_id:
+        clear_cached_resource_target(entry)
+        return null
+    var valid := is_valid_forage_node(node, entry) if job == "forage" else is_valid_job_resource_node(node, entry, job)
+    if not valid:
+        clear_cached_resource_target(entry)
+        return null
+    if job != "forage" and not smart_object_available(object_id, String(entry.get("id", ""))):
+        clear_cached_resource_target(entry)
+        return null
+    return node
+
+func remember_cached_resource_target(entry: Dictionary, job: String, node: Node3D) -> void:
+    if node == null or not is_instance_valid(node):
+        return
+    var object_id := smart_object_id_for_node(node)
+    if object_id == "":
+        return
+    entry["cachedResourceJob"] = job
+    entry["cachedResourceObjectId"] = object_id
+    entry["cachedResourceFrame"] = Engine.get_process_frames()
+
+func clear_cached_resource_target(entry: Dictionary, node: Node = null) -> void:
+    if node != null:
+        var cached_object_id := String(entry.get("cachedResourceObjectId", ""))
+        if cached_object_id != "" and smart_object_id_for_node(node) != cached_object_id:
+            return
+    entry.erase("cachedResourceJob")
+    entry.erase("cachedResourceObjectId")
+    entry.erase("cachedResourceFrame")
 
 func filter_job_resource_candidates(entry: Dictionary, job: String, candidates: Array[Node3D]) -> Array[Node3D]:
     var filtered: Array[Node3D] = []
@@ -1424,7 +1623,7 @@ func is_valid_job_resource_node(node: Node3D, entry: Dictionary, job: String) ->
         return false
     if not point_inside_work_area(entry, node.global_position):
         return false
-    if job == "forage":
+    if resource_job_uses_outside_work_area(job):
         if point_inside_town_footprint(entry, node.global_position):
             return false
     elif not point_inside_town_footprint(entry, node.global_position):
@@ -1441,8 +1640,13 @@ func is_valid_job_resource_node(node: Node3D, entry: Dictionary, job: String) ->
     if job == "forage":
         if bool(node.get_meta(forager_unreachable_meta_key(entry), false)):
             return false
+        if not forage_node_within_home_return_radius(entry, node.global_position):
+            return false
         return material == "berryBush" or drop == "berries"
     return false
+
+func resource_job_uses_outside_work_area(job: String) -> bool:
+    return job == "forage"
 
 func candidate_by_object_id(candidates: Array[Node3D], object_id: String) -> Node3D:
     for candidate in candidates:
@@ -1462,12 +1666,36 @@ func smart_object_id_for_node(node: Node) -> String:
             return "block:%d,%d,%d:%s" % [cell.x, cell.y, cell.z, block_type]
     return ""
 
+func smart_object_node_for_id(object_id: String) -> Node3D:
+    var service = smart_object_service()
+    if service == null or object_id == "":
+        return null
+    var registrations = service.get("registrations")
+    if not (registrations is Dictionary):
+        return null
+    var registration = (registrations as Dictionary).get(object_id)
+    if registration == null:
+        return null
+    var node = registration.node
+    if node == null or not is_instance_valid(node) or not (node is Node3D):
+        return null
+    return node as Node3D
+
 func smart_object_available(object_id: String, actor_id: String) -> bool:
     if autonomy_system == null or autonomy_system.get("smart_objects") == null:
         return true
     var service = autonomy_system.get("smart_objects")
     var available: Dictionary = service.object_available(object_id, actor_id)
     return bool(available.get("ok", false))
+
+func smart_object_has_live_registration(object_id: String) -> bool:
+    if object_id == "" or autonomy_system == null or autonomy_system.get("smart_objects") == null:
+        return false
+    var service = autonomy_system.get("smart_objects")
+    if service.has_method("has_live_registration"):
+        return bool(service.call("has_live_registration", object_id))
+    var registrations = service.get("registrations")
+    return registrations is Dictionary and (registrations as Dictionary).has(object_id)
 
 func resource_approach_slots_for_entry(entry: Dictionary, target_node: Node3D) -> Dictionary:
     if target_node == null or not is_instance_valid(target_node) or pathing == null:
@@ -1531,10 +1759,18 @@ func reserve_job_target(entry: Dictionary, target_node: Node3D, action: String) 
         return false
     var body := entry.get("body") as Node
     var resource_metadata := { "action": action }
+    var object_id := smart_object_id_for_node(target_node)
     var approach_slots := resource_approach_slots_for_entry(entry, target_node)
     if not approach_slots.is_empty():
         resource_metadata["slots"] = approach_slots
-    var object_id: String = autonomy_system.register_smart_resource(target_node, resource_metadata)
+    if object_id == "" or not smart_object_has_live_registration(object_id):
+        object_id = autonomy_system.register_smart_resource(target_node, resource_metadata)
+    elif not approach_slots.is_empty():
+        object_id = autonomy_system.register_smart_resource(target_node, resource_metadata)
+    else:
+        var monitor = performance_monitor()
+        if monitor != null:
+            monitor.increment_counter("npc_smart_resource_registration_reused")
     var result = autonomy_system.reserve_smart_object(object_id, target_node, body, String(entry.get("id", "")), action, {
         "actorKind": "npc",
         "requiresApproach": true
@@ -1544,6 +1780,7 @@ func reserve_job_target(entry: Dictionary, target_node: Node3D, action: String) 
         entry["jobObjectId"] = ""
         entry["jobReservationId"] = ""
         entry["jobApproachSlotId"] = ""
+        clear_cached_resource_target(entry, target_node)
         return false
     var metrics: Dictionary = result.get("metrics")
     entry["jobTargetNode"] = target_node
@@ -1753,7 +1990,53 @@ func home_route_target(entry: Dictionary) -> Vector3:
     var body := entry.get("body") as Node3D
     if body == null:
         return entry.get("homePosition", Vector3.ZERO)
+    var route_positions: Array = entry.get("homeRoutePositions", []) if entry.get("homeRoutePositions", []) is Array else []
+    if not route_positions.is_empty():
+        var route_index := clampi(int(entry.get("homeRouteIndex", 0)), 0, route_positions.size())
+        if route_index < route_positions.size():
+            var current_target = route_positions[route_index]
+            if current_target is Vector3:
+                var current_target_position: Vector3 = current_target
+                var current_target_cell := flat_cell_for_position(current_target_position)
+                if entry.has("homeActiveTargetCell") \
+                    and entry.get("homeActiveTargetCell") == current_target_cell \
+                    and home_route_step_reached(entry, current_target_position):
+                    route_index += 1
+                    entry["homeRouteIndex"] = route_index
+                    if route_index < route_positions.size() and route_positions[route_index] is Vector3:
+                        var next_target_position: Vector3 = route_positions[route_index]
+                        entry["homeActiveTargetCell"] = flat_cell_for_position(next_target_position)
+                        return next_target_position
+                    entry["homeActiveTargetCell"] = entry.get("homeCell", flat_cell_for_position(entry.get("homePosition", body.global_position)))
+                    return entry.get("homePosition", body.global_position)
+                entry["homeActiveTargetCell"] = current_target_cell
+                return current_target_position
+        entry["homeRouteIndex"] = route_positions.size()
+        if not home_route_actor_inside(entry, body):
+            var restart_index := 0
+            if route_positions.size() > 1 and route_positions[0] is Vector3:
+                var porch_target: Vector3 = route_positions[0]
+                if body.global_position.distance_to(porch_target) <= CELL * 1.35:
+                    restart_index = 1
+            restart_index = clampi(restart_index, 0, route_positions.size() - 1)
+            entry["homeRouteIndex"] = restart_index
+            var restart_target = route_positions[restart_index]
+            if restart_target is Vector3:
+                var restart_position: Vector3 = restart_target
+                entry["homeActiveTargetCell"] = flat_cell_for_position(restart_position)
+                return restart_position
+    if not home_route_actor_inside(entry, body):
+        var porch: Vector3 = entry.get("porchPosition", entry.get("homePosition", body.global_position))
+        if body.global_position.distance_to(porch) > CELL * 1.35:
+            return porch
     return entry.get("homePosition", body.global_position)
+
+func home_route_actor_inside(entry: Dictionary, body: Node3D) -> bool:
+    if body == null:
+        return false
+    if autonomy_system != null and autonomy_system.has_method("is_inside_home_interior"):
+        return bool(autonomy_system.call("is_inside_home_interior", entry, body.global_position))
+    return bool(entry.get("insideHome", false))
 
 func home_route_step_reached(entry: Dictionary, route_target: Vector3) -> bool:
     var body := entry.get("body") as Node3D
@@ -1774,7 +2057,7 @@ func home_route_step_reached(entry: Dictionary, route_target: Vector3) -> bool:
     var distance_to_target := body.global_position.distance_to(route_target)
     if route_arrived_at_target and target_cell != home_cell:
         if exact_door_threshold_step:
-            return distance_to_target <= CELL * 0.35
+            return current_cell == target_cell or distance_to_target <= CELL * 0.35
         if exact_ordered_home_step:
             return current_cell == target_cell or distance_to_target <= CELL * 0.35
         if target_cell == porch_cell and route_requires_exact_porch_arrival(entry):
@@ -1783,7 +2066,7 @@ func home_route_step_reached(entry: Dictionary, route_target: Vector3) -> bool:
             return current_cell == target_cell or distance_to_target <= CELL * 0.35
         return current_cell == target_cell or distance_to_target <= CELL * 0.82
     if exact_door_threshold_step:
-        return distance_to_target <= CELL * 0.35
+        return current_cell == target_cell or distance_to_target <= CELL * 0.35
     if exact_ordered_home_step:
         return current_cell == target_cell or distance_to_target <= CELL * 0.35
     if target_cell != porch_cell and abs(target_cell.x - porch_cell.x) + abs(target_cell.y - porch_cell.y) == 1:
@@ -1814,6 +2097,8 @@ func settle_home_if_reached(entry: Dictionary) -> void:
         inside_semantic = bool(autonomy_system.is_inside_home_interior(entry, body.global_position))
     if inside_semantic:
         if body_occupies_open_door_clearance(entry):
+            entry["insideHome"] = false
+            body.set_meta("npc_inside_home", false)
             entry["homeSettleDebug"] = {
                 "insideSemantic": true,
                 "doorClearanceOccupied": true,
@@ -1879,8 +2164,6 @@ func body_occupies_open_door_clearance(entry: Dictionary) -> bool:
     var portals: Dictionary = autonomy_system.door_portals.portals
     for portal_value in portals.values():
         if portal_value == null:
-            continue
-        if portal_value.state != NpcEnumsScript.DOOR_STATE_OPEN:
             continue
         if not portal_value.occupied_actors([body], "clearance").is_empty():
             return true
@@ -2082,12 +2365,28 @@ func update_door_policies(delta: float) -> void:
             if monitor != null:
                 monitor.end_section("traffic_update", traffic_start)
     if autonomy_system != null and autonomy_system.has_method("process_navigation_changes"):
-        autonomy_system.process_navigation_changes()
+        var pending_count := int(autonomy_system.pending_navigation_change_count()) if autonomy_system.has_method("pending_navigation_change_count") else 0
+        if navigation_change_flush_pending or pending_count > 0:
+            var nav_change_start: int = monitor.begin_section("navigation_change_process") if monitor != null else Time.get_ticks_usec()
+            autonomy_system.process_navigation_changes(NAVIGATION_PROP_CHANGE_EVENTS_PER_FRAME, NAVIGATION_PROP_CHANGE_OBJECT_IDS_PER_FRAME)
+            if monitor != null:
+                monitor.end_section("navigation_change_process", nav_change_start)
+            pending_count = int(autonomy_system.pending_navigation_change_count()) if autonomy_system.has_method("pending_navigation_change_count") else 0
+            navigation_change_flush_pending = pending_count > 0
+    var release_start: int = monitor.begin_section("door_hold_release") if monitor != null else Time.get_ticks_usec()
     release_completed_door_holds()
+    if monitor != null:
+        monitor.end_section("door_hold_release", release_start)
     if autonomy_system == null:
         return
+    var actors_start: int = monitor.begin_section("door_actor_collect") if monitor != null else Time.get_ticks_usec()
     var actors := current_door_actors()
+    if monitor != null:
+        monitor.end_section("door_actor_collect", actors_start)
+    var policy_start: int = monitor.begin_section("door_policy_process") if monitor != null else Time.get_ticks_usec()
     var result: Dictionary = autonomy_system.process_door_policies(delta, actors)
+    if monitor != null:
+        monitor.end_section("door_policy_process", policy_start)
     var closed := int(result.get("closed", 0))
     if closed > 0:
         door_closes += closed
@@ -2191,7 +2490,9 @@ func active_door_crossing_still_needs_hold(entry: Dictionary, portal_id: String)
     var body := entry.get("body") as Node3D
     if body == null or not is_instance_valid(body):
         return false
-    if not portal.occupied_actors([body], "threshold").is_empty() or not portal.occupied_actors([body], "sweep").is_empty():
+    if not portal.occupied_actors([body], "threshold").is_empty() \
+            or not portal.occupied_actors([body], "sweep").is_empty() \
+            or not portal.occupied_actors([body], "clearance").is_empty():
         return true
     var direction := String(entry.get("activeDoorDirection", ""))
     if direction == "":
@@ -2398,10 +2699,10 @@ func point_inside_work_area(entry: Dictionary, position: Vector3) -> bool:
         return flat.length() <= radius
     return pathing.point_inside_work_area(entry, position)
 
-func nearest_hostile(origin: Vector3, radius: float) -> Node3D:
+func nearest_hostile(origin: Vector3, radius: float, owner: Node = null, prefer_clear_shot := false) -> Node3D:
     if combat == null:
         return null
-    return combat.nearest_hostile(origin, radius)
+    return combat.nearest_hostile(origin, radius, owner, prefer_clear_shot)
 
 func scripted_combat_target(entry: Dictionary, body: Node3D, radius := 42.0) -> Node3D:
     if hostile_system == null or body == null or not is_instance_valid(body):
@@ -2455,28 +2756,46 @@ func notify_navigation_terrain_edited(cell: Vector2i, old_height: float, new_hei
 func notify_navigation_terrain_cells_edited(cells: Array) -> void:
     if autonomy_system == null:
         return
+    if autonomy_system.has_method("notify_terrain_cells_edited"):
+        var emitted_tiles := int(autonomy_system.notify_terrain_cells_edited(cells))
+        if emitted_tiles > 0:
+            navigation_change_flush_pending = true
+        return
     var emitted := 0
     for value in cells:
         if not (value is Vector2i):
             continue
         var cell: Vector2i = value
-        var height := 0.0
-        if main != null and main.has_method("surface_y_at_cell"):
-            height = float(main.call("surface_y_at_cell", Vector3i(cell.x, 0, cell.y)))
+        var height := navigation_height_for_cell(cell)
         autonomy_system.notify_terrain_edited(cell, height, height)
         emitted += 1
     if emitted > 0:
-        flush_navigation_change_bus()
+        navigation_change_flush_pending = true
+
+func navigation_height_for_cell(cell: Vector2i) -> float:
+    if main == null:
+        return 0.0
+    var fallback := 0.0
+    if main.has_method("surface_y_at_cell"):
+        fallback = float(main.call("surface_y_at_cell", Vector3i(cell.x, 0, cell.y)))
+    var world_generation = main.get("world_generation_system")
+    if world_generation != null and world_generation.has_method("surface_projection_for_cell"):
+        var start_cell := Vector3i(cell.x, floori(fallback / main.CELL), cell.y)
+        var projection: Dictionary = world_generation.call("surface_projection_for_cell", start_cell, 24, 96)
+        if not projection.is_empty() and bool(projection.get("found", false)):
+            var air_cell: Vector3i = projection.get("airCell", start_cell + Vector3i(0, 1, 0))
+            return float(air_cell.y) * main.CELL
+    return fallback
 
 func notify_navigation_prop_created(prop_id: String, prop: Node = null) -> void:
     if autonomy_system:
         autonomy_system.notify_prop_created(prop_id, prop)
-        flush_navigation_change_bus()
+        navigation_change_flush_pending = true
 
 func notify_navigation_prop_removed(prop_id: String, prop: Node = null) -> void:
     if autonomy_system:
         autonomy_system.notify_prop_removed(prop_id, prop)
-        flush_navigation_change_bus()
+        navigation_change_flush_pending = true
 
 func notify_navigation_chunk_loaded(chunk_key: Vector2i) -> void:
     if autonomy_system:
@@ -2516,6 +2835,7 @@ func notify_navigation_semantic_changed(semantic_id: String, bounds: AABB, metad
 func flush_navigation_change_bus() -> void:
     if autonomy_system != null and autonomy_system.has_method("process_navigation_changes"):
         autonomy_system.process_navigation_changes()
+        navigation_change_flush_pending = false
 
 func cell_to_position(cell: Vector2i, level: float) -> Vector3:
     return Vector3(float(cell.x) * CELL, level + 0.04, float(cell.y) * CELL)

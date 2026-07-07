@@ -271,13 +271,17 @@ func update_stars(observer: Vector3, day_factor: float) -> void:
 func update_precipitation(delta: float, observer: Vector3) -> void:
     var rain_amount := intensity if kind == "rain" else 0.0
     var snow_amount := intensity if kind == "snow" else 0.0
+    var rain_was_visible := rain.visible
+    var snow_was_visible := snow.visible
     rain.visible = rain_amount > 0.035 and particle_quality > 0.01
     snow.visible = snow_amount > 0.035 and particle_quality > 0.01
-    update_rain(delta, observer, rain_amount)
-    update_snow(delta, observer, snow_amount)
+    update_rain(delta, observer, rain_amount, rain_was_visible)
+    update_snow(delta, observer, snow_amount, snow_was_visible)
 
-func update_rain(delta: float, observer: Vector3, amount: float) -> void:
+func update_rain(delta: float, observer: Vector3, amount: float, was_visible := false) -> void:
     var active := int(PRECIP_COUNT * clampf(amount, 0.0, 1.0) * particle_quality)
+    if active <= 0 and not was_visible:
+        return
     rain_material.albedo_color.a = lerpf(0.20, 0.56, amount)
     for i in range(PRECIP_COUNT):
         var pos := rain_positions[i]
@@ -291,8 +295,10 @@ func update_rain(delta: float, observer: Vector3, amount: float) -> void:
         else:
             rain.multimesh.set_instance_transform(i, Transform3D(Basis().scaled(Vector3.ZERO), Vector3.ZERO))
 
-func update_snow(delta: float, observer: Vector3, amount: float) -> void:
+func update_snow(delta: float, observer: Vector3, amount: float, was_visible := false) -> void:
     var active := int(PRECIP_COUNT * clampf(amount, 0.0, 1.0) * particle_quality)
+    if active <= 0 and not was_visible:
+        return
     snow_material.albedo_color.a = lerpf(0.30, 0.86, amount)
     for i in range(PRECIP_COUNT):
         var pos := snow_positions[i]

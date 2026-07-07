@@ -1,15 +1,19 @@
 extends "res://scripts/MainSetupScene.gd"
 
 func update_sky(delta: float) -> void:
-    var freeze_intro_night: bool = tutorial_system != null and tutorial_system.has_method("should_freeze_intro_night") and bool(tutorial_system.should_freeze_intro_night())
-    if freeze_intro_night:
-        time_of_day = 0.86
-    else:
-        time_of_day = fposmod(time_of_day + delta / DAY_LENGTH, 1.0)
+    var monitor = runtime_perf_monitor
+    var freeze_intro_night := advance_world_clock(delta)
+    var sky_core_start: int = monitor.begin_section("sky_core") if monitor != null else Time.get_ticks_usec()
     var phase := clock_phase()
     var day := clock_day_factor()
     var night := clock_night_factor()
-    update_fire_light_day_factor(day)
+    fire_light_day_factor_elapsed += delta
+    if fire_light_day_factor_elapsed >= 0.20 or delta <= 0.0:
+        var fire_start: int = monitor.begin_section("sky_fire_light_day_factor") if monitor != null else Time.get_ticks_usec()
+        fire_light_day_factor_elapsed = 0.0
+        update_fire_light_day_factor(day)
+        if monitor != null:
+            monitor.end_section("sky_fire_light_day_factor", fire_start)
     var sun_progress := daylight_progress(phase)
     var moon_progress := wrapped_clock_progress(MOONRISE_CLOCK, MOONSET_CLOCK, phase)
     if visual_style == null:
@@ -20,9 +24,8 @@ func update_sky(delta: float) -> void:
     orient_directional_light(sun, sun_dir)
     orient_directional_light(moon, moon_dir)
 
-    var observer := Vector3.ZERO
-    if player:
-        observer = player.global_position
+    var observer := active_view_observer_position()
+    var underground_environment := underground_environment_factor(observer)
     sun_visual.global_position = observer + sun_dir * SKY_RADIUS
     moon_visual.global_position = observer + moon_dir * SKY_RADIUS
     sun_visual.visible = day > 0.025
@@ -34,9 +37,11 @@ func update_sky(delta: float) -> void:
     moon.light_color = visual_style.moon_color
     moon.light_energy = lerpf(visual_style.moon_max_energy, visual_style.moon_min_energy, day)
     moon.shadow_enabled = shadows_enabled and night > 0.45 and moon_visual.visible
+    if monitor != null:
+        monitor.end_section("sky_core", sky_core_start)
 
-    apply_environment_style(day, warmth, 0.0)
     if weather_system:
+        var weather_start: int = monitor.begin_section("sky_weather") if monitor != null else Time.get_ticks_usec()
         var biome := biome_at_world(observer)
         var weather_state: Dictionary
         if freeze_intro_night:
@@ -44,12 +49,62 @@ func update_sky(delta: float) -> void:
             weather_state = weather_system.snapshot()
         else:
             weather_state = weather_system.update_weather(delta, observer, biome, day, time_of_day)
-        apply_weather_lighting(weather_state, day)
-        if audio_effects and audio_effects.has_method("update_weather_ambience"):
-            audio_effects.update_weather_ambience(weather_state)
-    elif audio_effects and audio_effects.has_method("update_weather_ambience"):
-        audio_effects.update_weather_ambience({ "kind": "clear", "intensity": 0.0 })
-    update_music_state(observer, day)
+        if monitor != null:
+            monitor.end_section("sky_weather", weather_start)
+        var weather_environment_start: int = monitor.begin_section("sky_environment") if monitor != null else Time.get_ticks_usec()
+        apply_weather_lighting(weather_state, day, underground_environment)
+        if monitor != null:
+            monitor.end_section("sky_environment", weather_environment_start)
+        sky_audio_update_elapsed += delta
+        if sky_audio_update_elapsed >= 0.25 or delta <= 0.0:
+            var weather_audio_start: int = monitor.begin_section("sky_audio") if monitor != null else Time.get_ticks_usec()
+            sky_audio_update_elapsed = 0.0
+            if audio_effects and audio_effects.has_method("update_weather_ambience"):
+                audio_effects.update_weather_ambience(weather_state)
+            update_music_state(observer, day, biome)
+            if monitor != null:
+                monitor.end_section("sky_audio", weather_audio_start)
+    else:
+        var clear_environment_start: int = monitor.begin_section("sky_environment") if monitor != null else Time.get_ticks_usec()
+        apply_environment_style(day, warmth, 0.0, underground_environment)
+        if monitor != null:
+            monitor.end_section("sky_environment", clear_environment_start)
+        sky_audio_update_elapsed += delta
+        if sky_audio_update_elapsed >= 0.25 or delta <= 0.0:
+            var clear_audio_start: int = monitor.begin_section("sky_audio") if monitor != null else Time.get_ticks_usec()
+            sky_audio_update_elapsed = 0.0
+            if audio_effects and audio_effects.has_method("update_weather_ambience"):
+                audio_effects.update_weather_ambience({ "kind": "clear", "intensity": 0.0 })
+            update_music_state(observer, day)
+            if monitor != null:
+                monitor.end_section("sky_audio", clear_audio_start)
+    apply_underground_directional_light_suppression(underground_environment)
+
+func active_view_observer_position() -> Vector3:
+    var viewport := get_viewport()
+    if viewport != null:
+        var camera := viewport.get_camera_3d()
+        if camera != null and is_instance_valid(camera):
+            return camera.global_position
+    if player != null:
+        return player.global_position
+    return Vector3.ZERO
+
+func underground_environment_factor(observer: Vector3) -> float:
+    if world_generation_system == null or not world_generation_system.has_method("sample_world"):
+        return 0.0
+    var sample: Dictionary = world_generation_system.call("sample_world", observer)
+    if bool(sample.get("solid", false)):
+        return 0.0
+    if String(sample.get("biome", "")) != "underground_air":
+        return 0.0
+    if String(sample.get("fluid", "")) != "":
+        return 0.0
+    var light: Dictionary = sample.get("light", {}) if sample.get("light", {}) is Dictionary else {}
+    if int(light.get("sky", 0)) > 0:
+        return 0.0
+    var depth_cells := float(sample.get("depthCells", 0.0))
+    return smoothstep(1.5, 6.0, depth_cells)
 
 func update_fire_light_day_factor(day: float) -> void:
     for light in get_tree().get_nodes_in_group("fire_lights"):
@@ -106,7 +161,13 @@ func update_terrain_local_light_uniforms() -> void:
         if role != "terrain_wash" and role != "bounce_fill":
             continue
         var omni := light as OmniLight3D
-        var base_range := float(light.get("base_range"))
+        var base_range_value = light.get("base_range")
+        var base_range := 0.0
+        var base_range_type := typeof(base_range_value)
+        if base_range_type == TYPE_FLOAT or base_range_type == TYPE_INT:
+            base_range = float(base_range_value)
+        elif omni != null:
+            base_range = omni.omni_range
         var range := maxf(omni.omni_range if omni != null else base_range, 0.0)
         if range <= 0.01:
             continue
@@ -136,10 +197,17 @@ func update_terrain_local_light_uniforms() -> void:
     shader_material.set_shader_parameter("terrain_local_light_positions", positions)
     shader_material.set_shader_parameter("terrain_local_light_colors", colors)
 
-func apply_environment_style(day: float, warmth: float, weather_tint: float) -> void:
+func apply_environment_style(day: float, warmth: float, weather_tint: float, underground_factor := 0.0) -> void:
     if visual_style == null:
         setup_visual_style()
     var tint := clampf(weather_tint, 0.0, visual_style.max_weather_tint)
+    var underground := clampf(float(underground_factor), 0.0, 1.0)
+    var shader_material := terrain_material as ShaderMaterial
+    if shader_material != null:
+        var terrain_shadow_fill := day * 0.24 * lerpf(1.0, 0.08, underground)
+        shader_material.set_shader_parameter("shadow_fill", terrain_shadow_fill)
+        shader_material.set_shader_parameter("underground_view_darkening", underground)
+        shader_material.set_shader_parameter("underground_view_min_light", 0.12)
     if sky_material:
         sky_material.set("sky_top_color", visual_style.sky_top_color(day, warmth, tint))
         sky_material.set("sky_horizon_color", visual_style.sky_horizon_color(day, warmth, tint))
@@ -158,11 +226,35 @@ func apply_environment_style(day: float, warmth: float, weather_tint: float) -> 
         env.fog_density = lerpf(visual_style.fog_density_night, visual_style.fog_density_day, day)
         env.fog_sky_affect = visual_style.fog_sky_affect
         env.fog_sun_scatter = visual_style.fog_sun_scatter
+        apply_underground_environment_suppression(env, underground_factor)
 
-func update_music_state(observer: Vector3, day: float) -> void:
+func apply_underground_environment_suppression(env: Environment, underground_factor: float) -> void:
+    if env == null:
+        return
+    var factor := clampf(float(underground_factor), 0.0, 1.0)
+    if factor <= 0.001:
+        return
+    env.fog_light_energy = lerpf(env.fog_light_energy, 0.0, factor)
+    env.fog_density = lerpf(env.fog_density, 0.0, factor)
+    env.fog_sky_affect = lerpf(env.fog_sky_affect, 0.0, factor)
+    env.fog_sun_scatter = lerpf(env.fog_sun_scatter, 0.0, factor)
+    env.background_color = env.background_color.lerp(Color(0.015, 0.018, 0.017), factor * 0.82)
+
+func apply_underground_directional_light_suppression(underground_factor: float) -> void:
+    var factor := clampf(float(underground_factor), 0.0, 1.0)
+    if factor <= 0.001:
+        return
+    var scale := lerpf(1.0, 0.02, factor)
+    if sun != null:
+        sun.light_energy *= scale
+    if moon != null:
+        moon.light_energy *= scale
+
+func update_music_state(observer: Vector3, day: float, biome: String = "") -> void:
     if audio_effects == null:
         return
-    var biome := biome_at_world(observer)
+    if biome == "":
+        biome = biome_at_world(observer)
     var track := ""
     var music_fade := smoothstep(0.10, 0.46, day)
     if music_fade > 0.01:
@@ -186,7 +278,7 @@ func update_music_state(observer: Vector3, day: float) -> void:
             "volumeDb": -28.0
         })
 
-func apply_weather_lighting(weather: Dictionary, day: float) -> void:
+func apply_weather_lighting(weather: Dictionary, day: float, underground_factor := 0.0) -> void:
     if visual_style == null:
         setup_visual_style()
     var cloud_cover := float(weather.get("cloudCover", 0.0))
@@ -195,7 +287,7 @@ func apply_weather_lighting(weather: Dictionary, day: float) -> void:
     var sun_progress := daylight_progress(phase)
     var warmth: float = float(visual_style.sunset_amount(sun_progress, day))
     var tint_strength: float = float(visual_style.weather_tint_amount(cloud_cover, weather_intensity))
-    apply_environment_style(day, warmth, tint_strength)
+    apply_environment_style(day, warmth, tint_strength, underground_factor)
     var shade := clampf(1.0 - cloud_cover * visual_style.cloud_sun_shade - weather_intensity * visual_style.rain_sun_shade, 0.48, 1.0)
     sun.light_energy *= shade
     moon.light_energy *= clampf(1.0 - cloud_cover * visual_style.cloud_moon_shade - weather_intensity * visual_style.rain_moon_shade, 0.50, 1.0)
@@ -210,6 +302,7 @@ func apply_weather_lighting(weather: Dictionary, day: float) -> void:
             )
         )
         env.fog_density = lerpf(env.fog_density, visual_style.fog_density_weather, tint_strength)
+        apply_underground_environment_suppression(env, underground_factor)
     var water_material := materials.get("water") as ShaderMaterial
     if water_material:
         water_material.set_shader_parameter("cloud_cover", cloud_cover)
@@ -260,7 +353,7 @@ func respawn_player() -> void:
     player.global_position = respawn_position()
     player.velocity = Vector3.ZERO
     player.set("terrain_grounded", false)
-    update_chunks(true)
+    bootstrap_initial_chunks()
     var wake_location := "at your bed" if respawn_point is Vector3 else "near spawn"
     var message := "You collapsed and woke %s" % wake_location
     if dropped_items > 0:

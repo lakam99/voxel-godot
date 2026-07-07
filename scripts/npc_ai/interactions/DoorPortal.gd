@@ -74,19 +74,21 @@ func rebuild_geometry() -> void:
 	var max_x := -INF
 	var max_y := -INF
 	var max_z := -INF
-	for door_value in leaf_nodes.duplicate():
+	var valid_leaf_nodes: Array[Node] = []
+	for door_value in leaf_nodes:
 		if door_value == null or not is_instance_valid(door_value):
-			leaf_nodes.erase(door_value)
 			continue
 		var door := door_value as Node3D
 		if door == null:
 			continue
+		valid_leaf_nodes.append(door)
 		min_x = minf(min_x, door.global_position.x)
 		min_y = minf(min_y, door.global_position.y)
 		min_z = minf(min_z, door.global_position.z)
 		max_x = maxf(max_x, door.global_position.x)
 		max_y = maxf(max_y, door.global_position.y)
 		max_z = maxf(max_z, door.global_position.z)
+	leaf_nodes = valid_leaf_nodes
 	if min_x == INF:
 		return
 	var cell := NpcConstantsScript.CELL_SIZE

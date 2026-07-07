@@ -1,0 +1,1049 @@
+extends RefCounted
+class_name TerrainMeshingService
+
+const FALLBACK_BACKEND_ID := "gdscript_volume_mesher"
+const NATIVE_BACKEND_ID := "native_volume_mesher"
+const NATIVE_EXTENSION_PATH := "res://addons/terrain_meshing_backend/terrain_meshing_backend.gdextension"
+const EXTENSION_LOAD_STATUS_OK := 0
+const EXTENSION_LOAD_STATUS_ALREADY_LOADED := 2
+const ASYNC_PAYLOAD_PREP_MAX_CELLS_PER_FRAME := 192
+const ASYNC_WORKER_MIN_COLLECT_DELAY_MS := 36.0
+
+var main
+var backend
+var backend_id := FALLBACK_BACKEND_ID
+var native_backend_available := false
+var allow_blocking_gdscript_fallback := false
+var pending_jobs := {}
+var completed_jobs := {}
+var job_sequence := 0
+var async_worker_thread: Thread = null
+var async_worker_active := false
+var async_worker_key := Vector2i(999999, 999999)
+var async_worker_signature := ""
+var async_worker_cancelled := false
+var async_worker_done := false
+var async_worker_started_usec := 0
+var async_worker_payload := {}
+var async_payload_job := {}
+var retired_worker_threads := []
+var setup_initialized := false
+
+func setup(main_node) -> void:
+	main = main_node
+	allow_blocking_gdscript_fallback = OS.get_environment("VOXEL_ALLOW_BLOCKING_GDSCRIPT_TERRAIN_MESHING").strip_edges() == "1"
+	collect_retired_worker_threads(false)
+	if setup_initialized:
+		return
+	backend = discover_native_backend()
+	native_backend_available = backend != null
+	backend_id = NATIVE_BACKEND_ID if native_backend_available else FALLBACK_BACKEND_ID
+	setup_initialized = true
+
+func discover_native_backend():
+	# GDExtension/native backends can expose a TerrainMeshingBackend autoload later.
+	if Engine.has_singleton("TerrainMeshingBackend"):
+		return native_backend_if_ready(Engine.get_singleton("TerrainMeshingBackend"))
+	ensure_native_extension_loaded()
+	if ClassDB.class_exists("TerrainMeshingBackend"):
+		var instance = ClassDB.instantiate("TerrainMeshingBackend")
+		if instance != null:
+			return native_backend_if_ready(instance)
+	return null
+
+func ensure_native_extension_loaded() -> void:
+	if ClassDB.class_exists("TerrainMeshingBackend"):
+		return
+	if not ResourceLoader.exists(NATIVE_EXTENSION_PATH):
+		return
+	if not Engine.has_singleton("GDExtensionManager"):
+		return
+	var manager = Engine.get_singleton("GDExtensionManager")
+	if manager == null:
+		return
+	if manager.has_method("is_extension_loaded") and bool(manager.call("is_extension_loaded", NATIVE_EXTENSION_PATH)):
+		return
+	if not manager.has_method("load_extension"):
+		return
+	var status := int(manager.call("load_extension", NATIVE_EXTENSION_PATH))
+	if status != EXTENSION_LOAD_STATUS_OK and status != EXTENSION_LOAD_STATUS_ALREADY_LOADED:
+		push_warning("Terrain meshing native extension failed to load: %s status %d" % [NATIVE_EXTENSION_PATH, status])
+
+func native_backend_if_ready(candidate):
+	if candidate == null:
+		return null
+	if candidate.has_method("backend_summary"):
+		var summary_value = candidate.call("backend_summary")
+		if summary_value is Dictionary:
+			var summary: Dictionary = summary_value
+			if summary.has("ready") and not bool(summary.get("ready", false)):
+				return null
+	return candidate
+
+func backend_summary() -> Dictionary:
+	var backend_details := {}
+	if backend != null and backend.has_method("backend_summary"):
+		var value = backend.call("backend_summary")
+		if value is Dictionary:
+			backend_details = value
+	var service_async := can_process_native_section_jobs_async()
+	return {
+		"id": backend_id,
+		"native": native_backend_available,
+		"async": service_async,
+		"serviceAsync": service_async,
+		"backendAsync": native_backend_available and backend != null and backend.has_method("request_chunk_assets"),
+		"blockingGdscriptFallback": allow_blocking_gdscript_fallback,
+		"normalQueuedWorkDeferredWithoutNative": not native_backend_available and not allow_blocking_gdscript_fallback,
+		"pendingJobs": pending_job_count(),
+		"completedJobs": completed_jobs.size(),
+		"workerActive": async_worker_active,
+		"payloadActive": not async_payload_job.is_empty(),
+		"backendDetails": backend_details
+	}
+
+func can_process_native_section_jobs_async() -> bool:
+	return native_backend_available \
+		and backend != null \
+		and backend.has_method("build_chunk_mesh_from_sections") \
+		and backend.has_method("build_chunk_fluid_mesh_from_sections") \
+		and backend.has_method("collision_shape_for_mesh")
+
+func request_chunk_assets(cx: int, cz: int, signature := "", include_collision := true, priority := 0) -> Dictionary:
+	var key := Vector2i(cx, cz)
+	var signature_text := String(signature)
+	if completed_jobs.has(key):
+		var completed: Dictionary = completed_jobs[key]
+		if signature_text == "" or String(completed.get("terrainSignature", "")) == signature_text:
+			if include_collision and not (completed.get("shape") is Shape3D):
+				completed_jobs.erase(key)
+			else:
+				return {
+					"status": "ready",
+					"key": key,
+					"signature": completed.get("terrainSignature", "")
+				}
+		else:
+			completed_jobs.erase(key)
+	if pending_jobs.has(key):
+		var existing: Dictionary = pending_jobs[key]
+		if signature_text == "" or String(existing.get("terrainSignature", "")) == signature_text:
+			if include_collision and not bool(existing.get("includeCollision", true)):
+				existing["includeCollision"] = true
+				existing["priority"] = maxi(int(existing.get("priority", 0)), int(priority))
+				pending_jobs[key] = existing
+			return {
+				"status": "pending",
+				"key": key,
+				"signature": existing.get("terrainSignature", "")
+			}
+	job_sequence += 1
+	pending_jobs[key] = {
+		"key": key,
+		"terrainSignature": signature_text,
+		"includeCollision": include_collision,
+		"priority": int(priority),
+		"sequence": job_sequence
+	}
+	return {
+		"status": "queued",
+		"key": key,
+		"signature": signature_text
+	}
+
+func invalidate_chunk(cx: int, cz: int) -> void:
+	var key := Vector2i(cx, cz)
+	pending_jobs.erase(key)
+	completed_jobs.erase(key)
+	if async_worker_active and async_worker_key == key:
+		async_worker_cancelled = true
+	if not async_payload_job.is_empty() and async_payload_job.get("key", Vector2i(999999, 999999)) == key:
+		async_payload_job = {}
+
+func clear_jobs(blocking := true) -> void:
+	if async_worker_active and async_worker_thread != null:
+		async_worker_cancelled = true
+		if blocking:
+			if async_worker_thread.is_started():
+				async_worker_thread.wait_to_finish()
+		else:
+			retired_worker_threads.append(async_worker_thread)
+	async_worker_thread = null
+	async_worker_active = false
+	async_worker_key = Vector2i(999999, 999999)
+	async_worker_signature = ""
+	async_worker_cancelled = false
+	async_worker_done = false
+	async_worker_started_usec = 0
+	async_worker_payload = {}
+	async_payload_job = {}
+	pending_jobs.clear()
+	completed_jobs.clear()
+	job_sequence = 0
+	collect_retired_worker_threads(blocking)
+
+func collect_retired_worker_threads(blocking := false) -> int:
+	var collected := 0
+	for index in range(retired_worker_threads.size() - 1, -1, -1):
+		var thread = retired_worker_threads[index] as Thread
+		if thread == null:
+			retired_worker_threads.remove_at(index)
+			continue
+		if not blocking and not worker_thread_finished(thread):
+			continue
+		if thread.is_started():
+			thread.wait_to_finish()
+		retired_worker_threads.remove_at(index)
+		collected += 1
+	return collected
+
+func worker_thread_finished(thread: Thread) -> bool:
+	if thread == null:
+		return true
+	if thread.has_method("is_alive"):
+		return not bool(thread.call("is_alive"))
+	return not thread.is_started()
+
+func completed_chunk_keys() -> Array[Vector2i]:
+	var keys: Array[Vector2i] = []
+	for key_value in completed_jobs.keys():
+		keys.append(key_value)
+	return keys
+
+func take_completed_chunk_assets(cx: int, cz: int, signature := "") -> Dictionary:
+	var key := Vector2i(cx, cz)
+	if not completed_jobs.has(key):
+		return {}
+	var assets: Dictionary = completed_jobs[key]
+	var signature_text := String(signature)
+	if signature_text != "" and String(assets.get("terrainSignature", "")) != signature_text:
+		completed_jobs.erase(key)
+		return {}
+	completed_jobs.erase(key)
+	return assets
+
+func pending_job_count() -> int:
+	var active_count := 0
+	if async_worker_active:
+		active_count += 1
+	if not async_payload_job.is_empty():
+		active_count += 1
+	return pending_jobs.size() + active_count
+
+func completed_job_count() -> int:
+	return completed_jobs.size()
+
+func process_jobs(max_jobs := 1, budget_ms := 3.0, center := Vector2i(999999, 999999)) -> Dictionary:
+	var collect_started_usec := Time.get_ticks_usec()
+	collect_retired_worker_threads(false)
+	var completed_summary := collect_async_worker_result()
+	var collect_ms := elapsed_ms(collect_started_usec)
+	var processed := int(completed_summary.get("processed", 0))
+	var dropped := int(completed_summary.get("dropped", 0))
+	var deferred_without_native := 0
+	var prepared_sections := int(completed_summary.get("preparedSections", 0))
+	var started_usec := Time.get_ticks_usec()
+	if not native_backend_available and not allow_blocking_gdscript_fallback:
+		return {
+			"processed": 0,
+			"dropped": 0,
+			"deferredWithoutNative": pending_jobs.size(),
+			"preparedSections": 0,
+			"pendingJobs": pending_job_count(),
+			"completedJobs": completed_jobs.size(),
+			"collectMs": collect_ms,
+			"workerJoinMs": float(completed_summary.get("workerJoinMs", 0.0)),
+			"workerStartMs": 0.0,
+			"assetFinalizeMs": float(completed_summary.get("assetFinalizeMs", 0.0)),
+			"terrainMeshBuildMs": float(completed_summary.get("terrainMeshBuildMs", 0.0)),
+			"fluidMeshBuildMs": float(completed_summary.get("fluidMeshBuildMs", 0.0)),
+			"collisionBuildMs": float(completed_summary.get("collisionBuildMs", 0.0)),
+			"elapsedMs": elapsed_ms(started_usec)
+		}
+	if processed > 0 or dropped > 0:
+		return {
+			"processed": processed,
+			"dropped": dropped,
+			"deferredWithoutNative": deferred_without_native,
+			"preparedSections": prepared_sections,
+			"pendingJobs": pending_job_count(),
+			"completedJobs": completed_jobs.size(),
+			"collectMs": collect_ms,
+			"workerJoinMs": float(completed_summary.get("workerJoinMs", 0.0)),
+			"workerStartMs": 0.0,
+			"assetFinalizeMs": float(completed_summary.get("assetFinalizeMs", 0.0)),
+			"terrainMeshBuildMs": float(completed_summary.get("terrainMeshBuildMs", 0.0)),
+			"fluidMeshBuildMs": float(completed_summary.get("fluidMeshBuildMs", 0.0)),
+			"collisionBuildMs": float(completed_summary.get("collisionBuildMs", 0.0)),
+			"elapsedMs": float(completed_summary.get("elapsedMs", elapsed_ms(started_usec)))
+		}
+	if async_worker_active:
+		return {
+			"processed": 0,
+			"dropped": 0,
+			"deferredWithoutNative": deferred_without_native,
+			"preparedSections": 0,
+			"pendingJobs": pending_job_count(),
+			"completedJobs": completed_jobs.size(),
+			"collectMs": collect_ms,
+			"workerJoinMs": 0.0,
+			"workerStartMs": 0.0,
+			"assetFinalizeMs": 0.0,
+			"terrainMeshBuildMs": 0.0,
+			"fluidMeshBuildMs": 0.0,
+			"collisionBuildMs": 0.0,
+			"elapsedMs": elapsed_ms(started_usec)
+		}
+	if can_process_native_section_jobs_async():
+		var started := start_next_async_native_job(center, budget_ms)
+		return {
+			"processed": 0,
+			"dropped": int(started.get("dropped", 0)),
+			"deferredWithoutNative": deferred_without_native,
+			"preparedSections": int(started.get("preparedSections", 0)),
+			"payloadCells": int(started.get("payloadCells", 0)),
+			"pendingJobs": pending_job_count(),
+			"completedJobs": completed_jobs.size(),
+			"payloadPrepMs": float(started.get("payloadPrepMs", 0.0)),
+			"collectMs": collect_ms,
+			"workerJoinMs": 0.0,
+			"workerStartMs": float(started.get("workerStartMs", 0.0)),
+			"assetFinalizeMs": 0.0,
+			"terrainMeshBuildMs": 0.0,
+			"fluidMeshBuildMs": 0.0,
+			"collisionBuildMs": 0.0,
+			"elapsedMs": elapsed_ms(started_usec)
+		}
+	while processed < maxi(1, int(max_jobs)) and not pending_jobs.is_empty():
+		if processed > 0 and elapsed_ms(started_usec) >= float(budget_ms):
+			break
+		var key := nearest_pending_job_key(center)
+		if key == Vector2i(999999, 999999):
+			break
+		var job: Dictionary = pending_jobs[key]
+		pending_jobs.erase(key)
+		var requested_signature := String(job.get("terrainSignature", ""))
+		var current_signature := current_signature_for_chunk(key)
+		if requested_signature != "" and current_signature != "" and requested_signature != current_signature:
+			dropped += 1
+			continue
+		trace("process_job:%d,%d:start" % [key.x, key.y])
+		var assets := build_chunk_asset_bundle(key.x, key.y, requested_signature, bool(job.get("includeCollision", true)))
+		trace("process_job:%d,%d:done" % [key.x, key.y])
+		prepared_sections += int(assets.get("terrainPreparedSections", 0))
+		completed_jobs[key] = assets
+		processed += 1
+	return {
+		"processed": processed,
+		"dropped": dropped,
+		"deferredWithoutNative": deferred_without_native,
+		"preparedSections": prepared_sections,
+		"pendingJobs": pending_job_count(),
+		"completedJobs": completed_jobs.size(),
+		"collectMs": collect_ms,
+		"workerJoinMs": float(completed_summary.get("workerJoinMs", 0.0)),
+		"workerStartMs": 0.0,
+		"assetFinalizeMs": float(completed_summary.get("assetFinalizeMs", 0.0)),
+		"terrainMeshBuildMs": float(completed_summary.get("terrainMeshBuildMs", 0.0)),
+		"fluidMeshBuildMs": float(completed_summary.get("fluidMeshBuildMs", 0.0)),
+		"collisionBuildMs": float(completed_summary.get("collisionBuildMs", 0.0)),
+		"elapsedMs": elapsed_ms(started_usec)
+	}
+
+func start_next_async_native_job(center: Vector2i, budget_ms := 2.0) -> Dictionary:
+	var result := {
+		"started": false,
+		"dropped": 0,
+		"preparedSections": 0,
+		"payloadPrepMs": 0.0,
+		"payloadCells": 0,
+		"workerStartMs": 0.0
+	}
+	collect_retired_worker_threads(false)
+	if not retired_worker_threads.is_empty():
+		return result
+	if async_payload_job.is_empty():
+		var began := begin_next_async_payload_job(center)
+		result["dropped"] = int(began.get("dropped", 0))
+		if result["dropped"] > 0 or async_payload_job.is_empty():
+			return result
+	var key: Vector2i = async_payload_job.get("key", Vector2i(999999, 999999))
+	var requested_signature := String(async_payload_job.get("terrainSignature", ""))
+	var current_signature := current_signature_for_chunk(key)
+	if requested_signature != "" and current_signature != "" and requested_signature != current_signature:
+		async_payload_job = {}
+		result["dropped"] = 1
+		return result
+	var world_generation = main.get("world_generation_system") if main != null else null
+	if world_generation == null or not world_generation.has_method("advance_section_payload_state"):
+		async_payload_job = {}
+		result["dropped"] = 1
+		return result
+	var state: Dictionary = async_payload_job.get("state", {}) if async_payload_job.get("state", {}) is Dictionary else {}
+	var advanced_value = world_generation.call(
+		"advance_section_payload_state",
+		state,
+		maxf(0.1, float(budget_ms)),
+		ASYNC_PAYLOAD_PREP_MAX_CELLS_PER_FRAME
+	)
+	var advanced: Dictionary = advanced_value if advanced_value is Dictionary else {}
+	async_payload_job["state"] = advanced.get("state", state)
+	result["payloadPrepMs"] = float(advanced.get("elapsedMs", 0.0))
+	result["payloadCells"] = int(advanced.get("cellsProcessed", 0))
+	result["preparedSections"] = int(advanced.get("preparedSections", 0))
+	if not bool(advanced.get("complete", false)):
+		return result
+	var payload: Dictionary = advanced.get("payload", {}) if advanced.get("payload", {}) is Dictionary else {}
+	var include_collision := bool(async_payload_job.get("includeCollision", true))
+	async_payload_job = {}
+	if payload.is_empty():
+		result["dropped"] = 1
+		return result
+	result = start_async_worker_from_payload(key, requested_signature, payload, include_collision, result)
+	return result
+
+func begin_next_async_payload_job(center: Vector2i) -> Dictionary:
+	var result := {
+		"began": false,
+		"dropped": 0
+	}
+	if pending_jobs.is_empty():
+		return result
+	var key := nearest_pending_job_key(center)
+	if key == Vector2i(999999, 999999):
+		return result
+	var job: Dictionary = pending_jobs[key]
+	pending_jobs.erase(key)
+	var requested_signature := String(job.get("terrainSignature", ""))
+	var current_signature := current_signature_for_chunk(key)
+	if requested_signature != "" and current_signature != "" and requested_signature != current_signature:
+		result["dropped"] = 1
+		return result
+	var payload_state := begin_section_payload_for_chunk(key.x, key.y)
+	if payload_state.is_empty():
+		result["dropped"] = 1
+		return result
+	async_payload_job = {
+		"key": key,
+		"terrainSignature": requested_signature,
+		"includeCollision": bool(job.get("includeCollision", true)),
+		"state": payload_state
+	}
+	result["began"] = true
+	return result
+
+func begin_section_payload_for_chunk(cx: int, cz: int) -> Dictionary:
+	if main == null or main.get("world_generation_system") == null:
+		return {}
+	var world_generation = main.get("world_generation_system")
+	if not world_generation.has_method("begin_section_payload_for_meshing_chunk"):
+		return {}
+	var size := chunk_size()
+	var start_x := cx * size
+	var start_z := cz * size
+	var min_y := 0
+	var max_y := 0
+	if main.has_method("chunk_volume_y_bounds"):
+		var bounds: Dictionary = main.call("chunk_volume_y_bounds", start_x, start_z)
+		min_y = int(bounds.get("minY", min_y))
+		max_y = int(bounds.get("maxY", max_y))
+	else:
+		min_y = int(world_generation.call("world_bottom_cell_y")) if world_generation.has_method("world_bottom_cell_y") else -64
+		max_y = int(world_generation.call("world_top_cell_y")) if world_generation.has_method("world_top_cell_y") else 96
+	if max_y <= min_y:
+		return {}
+	var step := 1
+	if main.has_method("underground_volume_mesh_step_for_chunk"):
+		step = maxi(1, int(main.call("underground_volume_mesh_step_for_chunk", start_x, start_z)))
+	return world_generation.call("begin_section_payload_for_meshing_chunk", start_x, start_z, size, min_y, max_y, step)
+
+func start_async_worker_from_payload(key: Vector2i, requested_signature: String, payload: Dictionary, include_collision: bool, result: Dictionary) -> Dictionary:
+	async_worker_key = key
+	async_worker_signature = requested_signature
+	async_worker_cancelled = false
+	async_worker_done = false
+	async_worker_active = true
+	async_worker_started_usec = Time.get_ticks_usec()
+	async_worker_payload = payload
+	async_worker_thread = Thread.new()
+	var start_started_usec := Time.get_ticks_usec()
+	var err := async_worker_thread.start(Callable(self, "_thread_build_native_chunk_assets").bind(
+		key,
+		requested_signature,
+		include_collision,
+		payload,
+		backend
+	))
+	result["workerStartMs"] = elapsed_ms(start_started_usec)
+	if err != OK:
+		async_worker_thread = null
+		async_worker_active = false
+		async_worker_key = Vector2i(999999, 999999)
+		async_worker_signature = ""
+		async_worker_done = false
+		async_worker_started_usec = 0
+		async_worker_payload = {}
+		result["dropped"] = int(result.get("dropped", 0)) + 1
+		return result
+	result["started"] = true
+	result["preparedSections"] = int((payload.get("sections", []) as Array).size()) if payload.get("sections", []) is Array else 0
+	return result
+
+func collect_async_worker_result() -> Dictionary:
+	var summary := {
+		"processed": 0,
+		"dropped": 0,
+		"preparedSections": 0,
+		"workerJoinMs": 0.0,
+		"assetFinalizeMs": 0.0,
+		"terrainMeshBuildMs": 0.0,
+		"fluidMeshBuildMs": 0.0,
+		"collisionBuildMs": 0.0,
+		"elapsedMs": 0.0
+	}
+	if not async_worker_active or async_worker_thread == null:
+		return summary
+	if async_worker_started_usec > 0 and elapsed_ms(async_worker_started_usec) < ASYNC_WORKER_MIN_COLLECT_DELAY_MS:
+		return summary
+	if not worker_thread_finished(async_worker_thread):
+		return summary
+	var key := async_worker_key
+	var signature := async_worker_signature
+	var cancelled := async_worker_cancelled
+	var join_started_usec := Time.get_ticks_usec()
+	var value = async_worker_thread.wait_to_finish()
+	summary["workerJoinMs"] = elapsed_ms(join_started_usec)
+	async_worker_thread = null
+	async_worker_active = false
+	async_worker_key = Vector2i(999999, 999999)
+	async_worker_signature = ""
+	async_worker_cancelled = false
+	async_worker_done = false
+	async_worker_started_usec = 0
+	async_worker_payload = {}
+	if cancelled:
+		summary["dropped"] = 1
+		return summary
+	if not (value is Dictionary):
+		summary["dropped"] = 1
+		return summary
+	var result: Dictionary = value
+	summary["elapsedMs"] = float(result.get("elapsedMs", 0.0))
+	summary["preparedSections"] = int(result.get("preparedSections", 0))
+	summary["terrainMeshBuildMs"] = float(result.get("terrainMeshBuildMs", 0.0))
+	summary["fluidMeshBuildMs"] = float(result.get("fluidMeshBuildMs", 0.0))
+	summary["collisionBuildMs"] = float(result.get("collisionBuildMs", 0.0))
+	var current_signature := current_signature_for_chunk(key)
+	if signature != "" and current_signature != "" and signature != current_signature:
+		summary["dropped"] = 1
+		return summary
+	var mesh: Mesh = result.get("mesh") as Mesh
+	if mesh == null:
+		summary["dropped"] = 1
+		return summary
+	var fluid_mesh: Mesh = result.get("fluidMesh") as Mesh
+	if fluid_mesh == null:
+		fluid_mesh = ArrayMesh.new()
+	mesh.set_meta("terrainMeshingQueued", true)
+	mesh.set_meta("terrainMeshingBackend", backend_id)
+	mesh.set_meta("terrainMeshingNative", true)
+	mesh.set_meta("terrainMeshingSectionPayload", true)
+	mesh = project_chunk_surface_normals(mesh, key.x, key.y)
+	var finalize_started_usec := Time.get_ticks_usec()
+	apply_terrain_material(mesh)
+	fluid_mesh.set_meta("terrainMeshingQueued", true)
+	fluid_mesh.set_meta("terrainMeshingBackend", backend_id)
+	fluid_mesh.set_meta("terrainMeshingNative", true)
+	fluid_mesh.set_meta("terrainFluidSectionPayload", true)
+	apply_fluid_materials(fluid_mesh)
+	var assets := {
+		"mesh": mesh,
+		"shape": result.get("shape"),
+		"fluidMesh": fluid_mesh,
+		"terrainSignature": signature,
+		"terrainMeshingBackend": backend_id,
+		"terrainMeshingNative": true,
+		"terrainPreparedSections": int(result.get("preparedSections", 0))
+	}
+	if String(assets.get("terrainSignature", "")) == "":
+		assets["terrainSignature"] = current_signature
+	completed_jobs[key] = assets
+	summary["assetFinalizeMs"] = elapsed_ms(finalize_started_usec)
+	summary["processed"] = 1
+	return summary
+
+func _thread_build_native_chunk_assets(key: Vector2i, signature: String, include_collision: bool, payload: Dictionary, worker_backend) -> Dictionary:
+	var started_usec := Time.get_ticks_usec()
+	var terrain_started_usec := Time.get_ticks_usec()
+	var mesh = worker_backend.call("build_chunk_mesh_from_sections", payload) if worker_backend != null and worker_backend.has_method("build_chunk_mesh_from_sections") else null
+	var terrain_mesh_build_ms := elapsed_ms(terrain_started_usec)
+	var fluid_started_usec := Time.get_ticks_usec()
+	var fluid_mesh = ArrayMesh.new()
+	if bool(payload.get("hasFluid", true)) and worker_backend != null and worker_backend.has_method("build_chunk_fluid_mesh_from_sections"):
+		fluid_mesh = worker_backend.call("build_chunk_fluid_mesh_from_sections", payload)
+	var fluid_mesh_build_ms := elapsed_ms(fluid_started_usec)
+	var collision_started_usec := Time.get_ticks_usec()
+	var shape = null
+	if include_collision and mesh is Mesh and worker_backend != null and worker_backend.has_method("collision_shape_for_mesh"):
+		shape = worker_backend.call("collision_shape_for_mesh", mesh)
+	var collision_build_ms := elapsed_ms(collision_started_usec)
+	var result := {
+		"key": key,
+		"terrainSignature": signature,
+		"mesh": mesh,
+		"fluidMesh": fluid_mesh,
+		"shape": shape,
+		"preparedSections": int((payload.get("sections", []) as Array).size()) if payload.get("sections", []) is Array else 0,
+		"terrainMeshBuildMs": terrain_mesh_build_ms,
+		"fluidMeshBuildMs": fluid_mesh_build_ms,
+		"collisionBuildMs": collision_build_ms,
+		"elapsedMs": elapsed_ms(started_usec)
+	}
+	return result
+
+func nearest_pending_job_key(center: Vector2i) -> Vector2i:
+	var best := Vector2i(999999, 999999)
+	var best_distance := 2147483647
+	var best_priority := -2147483648
+	var best_sequence := 2147483647
+	for key_value in pending_jobs.keys():
+		var key: Vector2i = key_value
+		var job: Dictionary = pending_jobs[key]
+		var priority := int(job.get("priority", 0))
+		var sequence := int(job.get("sequence", 0))
+		var distance := absi(key.x - center.x) + absi(key.y - center.y)
+		if priority > best_priority:
+			best = key
+			best_priority = priority
+			best_distance = distance
+			best_sequence = sequence
+		elif priority == best_priority:
+			if distance < best_distance or (distance == best_distance and sequence < best_sequence):
+				best = key
+				best_distance = distance
+				best_sequence = sequence
+	return best
+
+func build_chunk_asset_bundle(cx: int, cz: int, signature := "", include_collision := true) -> Dictionary:
+	trace("asset_bundle:%d,%d:prepare_start" % [cx, cz])
+	var prepared_sections := 0 if native_backend_available else prepare_chunk_sections(cx, cz)
+	trace("asset_bundle:%d,%d:mesh_start:sections=%d" % [cx, cz, prepared_sections])
+	var mesh := build_chunk_mesh(cx, cz)
+	trace("asset_bundle:%d,%d:material_start" % [cx, cz])
+	apply_terrain_material(mesh)
+	trace("asset_bundle:%d,%d:fluid_start" % [cx, cz])
+	var fluid_mesh := build_chunk_fluid_mesh(cx, cz)
+	trace("asset_bundle:%d,%d:collision_start" % [cx, cz])
+	var shape = collision_shape_for_mesh(mesh) if include_collision else null
+	trace("asset_bundle:%d,%d:finish" % [cx, cz])
+	var signature_text := String(signature)
+	if signature_text == "":
+		signature_text = current_signature_for_chunk(Vector2i(cx, cz))
+	if mesh != null:
+		mesh.set_meta("terrainMeshingQueued", true)
+	if fluid_mesh != null:
+		fluid_mesh.set_meta("terrainMeshingQueued", true)
+	return {
+		"mesh": mesh,
+		"shape": shape,
+		"fluidMesh": fluid_mesh,
+		"terrainSignature": signature_text,
+		"terrainMeshingBackend": backend_id,
+		"terrainMeshingNative": native_backend_available,
+		"terrainPreparedSections": prepared_sections
+	}
+
+func current_signature_for_chunk(key: Vector2i) -> String:
+	if main != null and main.has_method("chunk_asset_signature"):
+		return String(main.call("chunk_asset_signature", key))
+	return ""
+
+func prepare_chunk_sections(cx: int, cz: int) -> int:
+	if main == null or main.get("world_generation_system") == null:
+		return 0
+	var world_generation = main.get("world_generation_system")
+	if not world_generation.has_method("request_sections_for_bounds"):
+		return 0
+	var chunk_size := 28
+	if main != null:
+		chunk_size = int(main.CHUNK_SIZE)
+	if chunk_size <= 0:
+		chunk_size = 28
+	var start_x := cx * chunk_size
+	var start_z := cz * chunk_size
+	var min_y := 0
+	var max_y := 0
+	if main.has_method("chunk_volume_y_bounds"):
+		var bounds: Dictionary = main.call("chunk_volume_y_bounds", start_x, start_z)
+		min_y = int(bounds.get("minY", min_y))
+		max_y = int(bounds.get("maxY", max_y))
+	else:
+		min_y = int(world_generation.call("world_bottom_cell_y")) if world_generation.has_method("world_bottom_cell_y") else -64
+		max_y = int(world_generation.call("world_top_cell_y")) if world_generation.has_method("world_top_cell_y") else 96
+	var min_cell := Vector3i(start_x - 1, min_y - 1, start_z - 1)
+	var max_cell := Vector3i(start_x + chunk_size + 1, max_y + 1, start_z + chunk_size + 1)
+	var requested_value = world_generation.call("request_sections_for_bounds", min_cell, max_cell)
+	return (requested_value as Array).size() if requested_value is Array else 0
+
+func elapsed_ms(started_usec: int) -> float:
+	return float(Time.get_ticks_usec() - started_usec) / 1000.0
+
+func trace(label: String) -> void:
+	var path := OS.get_environment("VOXEL_TERRAIN_MESHING_TRACE").strip_edges()
+	if path == "":
+		return
+	var file := FileAccess.open(path, FileAccess.WRITE)
+	if file != null:
+		file.store_string(label)
+
+func build_chunk_mesh(cx: int, cz: int) -> Mesh:
+	trace("build_mesh:%d,%d:start" % [cx, cz])
+	if not chunk_requires_volume_mesh(cx, cz):
+		trace("build_mesh:%d,%d:heightfield_start" % [cx, cz])
+		var exterior_mesh := build_main_chunk_mesh(cx, cz)
+		trace("build_mesh:%d,%d:heightfield_done" % [cx, cz])
+		return exterior_mesh
+	if backend != null and backend.has_method("build_chunk_mesh_from_sections"):
+		trace("build_mesh:%d,%d:payload_start" % [cx, cz])
+		var payload := section_payload_for_chunk(cx, cz)
+		trace("build_mesh:%d,%d:payload_done:%s" % [cx, cz, str(not payload.is_empty())])
+		if not payload.is_empty():
+			trace("build_mesh:%d,%d:native_sections_start" % [cx, cz])
+			var native_section_mesh = backend.call("build_chunk_mesh_from_sections", payload)
+			trace("build_mesh:%d,%d:native_sections_done" % [cx, cz])
+			if native_section_mesh is Mesh:
+				var mesh := native_section_mesh as Mesh
+				mesh.set_meta("terrainMeshingBackend", backend_id)
+				mesh.set_meta("terrainMeshingNative", true)
+				mesh.set_meta("terrainMeshingSectionPayload", true)
+				mesh = project_chunk_surface_normals(mesh, cx, cz)
+				apply_terrain_material(mesh)
+				return mesh
+	if chunk_has_terrain_volume_edits(cx, cz):
+		trace("build_mesh:%d,%d:edited_local_start" % [cx, cz])
+		var edited_mesh := build_main_chunk_mesh(cx, cz)
+		trace("build_mesh:%d,%d:edited_local_done" % [cx, cz])
+		return edited_mesh
+	if backend != null and backend.has_method("build_chunk_mesh"):
+		trace("build_mesh:%d,%d:native_main_start" % [cx, cz])
+		var native_mesh = backend.call("build_chunk_mesh", main, cx, cz)
+		trace("build_mesh:%d,%d:native_main_done" % [cx, cz])
+		if native_mesh is Mesh:
+			var mesh := native_mesh as Mesh
+			mesh.set_meta("terrainMeshingBackend", backend_id)
+			mesh.set_meta("terrainMeshingNative", true)
+			mesh = project_chunk_surface_normals(mesh, cx, cz)
+			apply_terrain_material(mesh)
+			return mesh
+	if should_defer_blocking_gdscript_volume_mesh(cx, cz):
+		trace("build_mesh:%d,%d:provisional" % [cx, cz])
+		return provisional_exterior_mesh(cx, cz)
+	var mesh: Mesh = null
+	trace("build_mesh:%d,%d:fallback_start" % [cx, cz])
+	mesh = build_main_chunk_mesh(cx, cz)
+	trace("build_mesh:%d,%d:fallback_done" % [cx, cz])
+	if mesh == null:
+		mesh = ArrayMesh.new()
+	mesh.set_meta("terrainMeshingBackend", backend_id)
+	mesh.set_meta("terrainMeshingNative", false)
+	mesh.set_meta("terrainMeshingQueued", false)
+	trace("build_mesh:%d,%d:done" % [cx, cz])
+	return mesh
+
+func build_main_chunk_mesh(cx: int, cz: int) -> Mesh:
+	var mesh: Mesh = null
+	if main != null and main.has_method("build_chunk_mesh"):
+		var fallback_mesh = main.call("build_chunk_mesh", cx, cz)
+		if fallback_mesh is Mesh:
+			mesh = fallback_mesh as Mesh
+	if mesh == null:
+		mesh = ArrayMesh.new()
+	mesh.set_meta("terrainMeshingBackend", "heightfield_or_gdscript_volume")
+	mesh.set_meta("terrainMeshingNative", false)
+	mesh.set_meta("terrainMeshingQueued", false)
+	return mesh
+
+func project_chunk_surface_normals(mesh: Mesh, cx: int, cz: int) -> Mesh:
+	if mesh == null or main == null or not main.has_method("project_chunk_surface_normals"):
+		return mesh
+	var projected = main.call("project_chunk_surface_normals", mesh, cx, cz)
+	return projected as Mesh if projected is Mesh else mesh
+
+func should_defer_blocking_gdscript_volume_mesh(cx: int, cz: int) -> bool:
+	return not native_backend_available and not allow_blocking_gdscript_fallback and chunk_requires_volume_mesh(cx, cz)
+
+func chunk_requires_volume_mesh(cx: int, cz: int) -> bool:
+	if main == null:
+		return false
+	var size := chunk_size()
+	var start_x := cx * size
+	var start_z := cz * size
+	if chunk_has_terrain_volume_edits(cx, cz):
+		return true
+	if main.has_method("chunk_has_excavation_overlap") and bool(main.call("chunk_has_excavation_overlap", start_x, start_z)):
+		return true
+	if main.has_method("chunk_needs_generated_underground_volume_mesh") and bool(main.call("chunk_needs_generated_underground_volume_mesh", start_x, start_z)):
+		return true
+	return false
+
+func chunk_has_terrain_volume_edits(cx: int, cz: int) -> bool:
+	if main == null or not main.has_method("chunk_has_terrain_volume_edits"):
+		return false
+	var size := chunk_size()
+	return bool(main.call("chunk_has_terrain_volume_edits", cx * size, cz * size))
+
+func provisional_exterior_mesh(cx: int, cz: int) -> Mesh:
+	var mesh: Mesh = null
+	if main != null and main.has_method("streaming_provisional_exterior_surface_mesh"):
+		var placeholder_mesh = main.call("streaming_provisional_exterior_surface_mesh", cx, cz)
+		if placeholder_mesh is Mesh:
+			mesh = placeholder_mesh as Mesh
+	elif main != null and main.has_method("build_natural_exterior_array_mesh"):
+		var size := chunk_size()
+		var exterior_mesh = main.call("build_natural_exterior_array_mesh", cx * size, cz * size)
+		if exterior_mesh is Mesh:
+			mesh = exterior_mesh as Mesh
+	if mesh == null:
+		mesh = ArrayMesh.new()
+	apply_terrain_material(mesh)
+	mesh.set_meta("terrainMeshingBackend", "provisional_exterior_surface")
+	mesh.set_meta("terrainMeshingNative", false)
+	mesh.set_meta("terrainMeshingQueued", false)
+	mesh.set_meta("terrainMeshingProvisional", true)
+	mesh.set_meta("terrainMeshingDeferredWithoutNative", true)
+	return mesh
+
+func apply_terrain_material(mesh: Mesh) -> void:
+	if mesh == null or not (mesh is ArrayMesh):
+		return
+	var array_mesh := mesh as ArrayMesh
+	if array_mesh.get_surface_count() <= 0:
+		return
+	var material = null
+	if main != null:
+		material = main.get("terrain_material")
+	if material is Material:
+		array_mesh.surface_set_material(0, material as Material)
+
+func section_payload_for_chunk(cx: int, cz: int) -> Dictionary:
+	trace("section_payload:%d,%d:start" % [cx, cz])
+	if main == null or main.get("world_generation_system") == null:
+		return {}
+	var world_generation = main.get("world_generation_system")
+	if not world_generation.has_method("section_payload_for_bounds"):
+		return {}
+	var size := chunk_size()
+	var start_x := cx * size
+	var start_z := cz * size
+	var min_y := 0
+	var max_y := 0
+	if main.has_method("chunk_volume_y_bounds"):
+		var bounds: Dictionary = main.call("chunk_volume_y_bounds", start_x, start_z)
+		min_y = int(bounds.get("minY", min_y))
+		max_y = int(bounds.get("maxY", max_y))
+	else:
+		min_y = int(world_generation.call("world_bottom_cell_y")) if world_generation.has_method("world_bottom_cell_y") else -64
+		max_y = int(world_generation.call("world_top_cell_y")) if world_generation.has_method("world_top_cell_y") else 96
+	if max_y <= min_y:
+		return {}
+	var min_cell := Vector3i(start_x - 1, min_y - 1, start_z - 1)
+	var max_cell := Vector3i(start_x + size + 1, max_y + 1, start_z + size + 1)
+	var step := 1
+	if main.has_method("underground_volume_mesh_step_for_chunk"):
+		step = maxi(1, int(main.call("underground_volume_mesh_step_for_chunk", start_x, start_z)))
+	trace("section_payload:%d,%d:request:%d:%d:step=%d" % [cx, cz, min_y, max_y, step])
+	var payload_value = {}
+	if native_backend_available and world_generation.has_method("section_payload_for_meshing_chunk"):
+		payload_value = world_generation.call("section_payload_for_meshing_chunk", start_x, start_z, size, min_y, max_y, step)
+	else:
+		payload_value = world_generation.call("section_payload_for_bounds", min_cell, max_cell)
+	trace("section_payload:%d,%d:returned" % [cx, cz])
+	var payload: Dictionary = payload_value if payload_value is Dictionary else {}
+	if payload.is_empty():
+		return {}
+	payload["chunkX"] = cx
+	payload["chunkZ"] = cz
+	payload["chunkSize"] = size
+	payload["startX"] = start_x
+	payload["startZ"] = start_z
+	payload["minY"] = min_y
+	payload["maxY"] = max_y
+	payload["stepCells"] = step
+	trace("section_payload:%d,%d:done" % [cx, cz])
+	return payload
+
+func build_chunk_fluid_mesh(cx: int, cz: int) -> Mesh:
+	trace("build_fluid:%d,%d:start" % [cx, cz])
+	if not chunk_requires_volume_mesh(cx, cz):
+		var empty_mesh := ArrayMesh.new()
+		empty_mesh.set_meta("terrainMeshingBackend", "heightfield_exterior")
+		empty_mesh.set_meta("terrainMeshingNative", false)
+		empty_mesh.set_meta("terrainMeshingQueued", false)
+		trace("build_fluid:%d,%d:heightfield_empty" % [cx, cz])
+		return empty_mesh
+	if chunk_has_terrain_volume_edits(cx, cz):
+		var edited_empty_mesh := ArrayMesh.new()
+		edited_empty_mesh.set_meta("terrainMeshingBackend", "edited_volume_local")
+		edited_empty_mesh.set_meta("terrainMeshingNative", false)
+		edited_empty_mesh.set_meta("terrainMeshingQueued", false)
+		trace("build_fluid:%d,%d:edited_empty" % [cx, cz])
+		return edited_empty_mesh
+	if backend != null and backend.has_method("build_chunk_fluid_mesh_from_sections"):
+		trace("build_fluid:%d,%d:payload_start" % [cx, cz])
+		var payload := section_payload_for_chunk(cx, cz)
+		trace("build_fluid:%d,%d:payload_done:%s" % [cx, cz, str(not payload.is_empty())])
+		if not payload.is_empty():
+			trace("build_fluid:%d,%d:native_sections_start" % [cx, cz])
+			var native_section_mesh = backend.call("build_chunk_fluid_mesh_from_sections", payload)
+			trace("build_fluid:%d,%d:native_sections_done" % [cx, cz])
+			if native_section_mesh is Mesh:
+				(native_section_mesh as Mesh).set_meta("terrainMeshingBackend", backend_id)
+				(native_section_mesh as Mesh).set_meta("terrainMeshingNative", true)
+				(native_section_mesh as Mesh).set_meta("terrainFluidSectionPayload", true)
+				apply_fluid_materials(native_section_mesh as Mesh)
+				return native_section_mesh as Mesh
+	if backend != null and backend.has_method("build_chunk_fluid_mesh"):
+		trace("build_fluid:%d,%d:native_main_start" % [cx, cz])
+		var native_mesh = backend.call("build_chunk_fluid_mesh", main, cx, cz)
+		trace("build_fluid:%d,%d:native_main_done" % [cx, cz])
+		if native_mesh is Mesh:
+			if not bool((native_mesh as Mesh).get_meta("terrainFluidNativeDeferred", false)):
+				(native_mesh as Mesh).set_meta("terrainMeshingBackend", backend_id)
+				(native_mesh as Mesh).set_meta("terrainMeshingNative", true)
+				apply_fluid_materials(native_mesh as Mesh)
+				return native_mesh as Mesh
+	if should_defer_blocking_gdscript_volume_mesh(cx, cz):
+		trace("build_fluid:%d,%d:deferred_without_native" % [cx, cz])
+		var deferred_mesh := ArrayMesh.new()
+		deferred_mesh.set_meta("terrainMeshingBackend", backend_id)
+		deferred_mesh.set_meta("terrainMeshingNative", false)
+		deferred_mesh.set_meta("terrainMeshingQueued", false)
+		deferred_mesh.set_meta("terrainFluidDeferredWithoutNative", true)
+		return deferred_mesh
+	var mesh: Mesh = null
+	if main != null and main.has_method("build_chunk_fluid_mesh"):
+		trace("build_fluid:%d,%d:fallback_start" % [cx, cz])
+		var fallback_mesh = main.call("build_chunk_fluid_mesh", cx, cz)
+		trace("build_fluid:%d,%d:fallback_done" % [cx, cz])
+		if fallback_mesh is Mesh:
+			mesh = fallback_mesh as Mesh
+	if mesh == null:
+		mesh = ArrayMesh.new()
+	mesh.set_meta("terrainMeshingBackend", backend_id)
+	mesh.set_meta("terrainMeshingNative", false)
+	mesh.set_meta("terrainMeshingQueued", false)
+	trace("build_fluid:%d,%d:done" % [cx, cz])
+	return mesh
+
+func apply_fluid_materials(mesh: Mesh) -> void:
+	if mesh == null or not (mesh is ArrayMesh):
+		return
+	var array_mesh := mesh as ArrayMesh
+	if array_mesh.get_surface_count() <= 0:
+		return
+	var order_value = array_mesh.get_meta("terrainFluidSurfaceOrder", PackedStringArray())
+	var order: PackedStringArray = order_value if order_value is PackedStringArray else PackedStringArray()
+	var water_material: Material = null
+	var lava_material: Material = null
+	if main != null:
+		var materials_value = main.get("materials")
+		if materials_value is Dictionary:
+			var materials: Dictionary = materials_value
+			if materials.get("water", null) is Material:
+				water_material = materials.get("water", null) as Material
+			if materials.get("lava", null) is Material:
+				lava_material = materials.get("lava", null) as Material
+	if water_material == null and main != null and main.get("terrain_material") is Material:
+		water_material = main.get("terrain_material") as Material
+	if lava_material == null and main != null and main.get("terrain_material") is Material:
+		lava_material = main.get("terrain_material") as Material
+	for surface_index in range(array_mesh.get_surface_count()):
+		var fluid_id := "water"
+		if surface_index < order.size():
+			fluid_id = String(order[surface_index])
+		var material := lava_material if fluid_id == "lava" else water_material
+		if material != null:
+			array_mesh.surface_set_material(surface_index, material)
+
+func collision_shape_for_mesh(mesh: Mesh):
+	if mesh == null:
+		return null
+	if mesh is ArrayMesh and not array_mesh_indices_are_valid(mesh as ArrayMesh):
+		return collision_shape_from_valid_triangles(mesh as ArrayMesh)
+	if backend != null and backend.has_method("collision_shape_for_mesh"):
+		trace("collision_shape:native_start")
+		var native_shape = backend.call("collision_shape_for_mesh", mesh)
+		trace("collision_shape:native_done")
+		if native_shape is Shape3D:
+			return native_shape as Shape3D
+	if mesh is ArrayMesh:
+		var safe_shape = collision_shape_from_valid_triangles(mesh as ArrayMesh)
+		if safe_shape is Shape3D:
+			return safe_shape
+	trace("collision_shape:trimesh_start")
+	var shape := mesh.create_trimesh_shape()
+	trace("collision_shape:trimesh_done")
+	if shape is ConcavePolygonShape3D:
+		(shape as ConcavePolygonShape3D).backface_collision = true
+	return shape
+
+func array_mesh_indices_are_valid(array_mesh: ArrayMesh) -> bool:
+	if array_mesh == null:
+		return false
+	for surface_index in range(array_mesh.get_surface_count()):
+		var arrays := array_mesh.surface_get_arrays(surface_index)
+		if arrays.size() <= Mesh.ARRAY_VERTEX:
+			return false
+		var vertices: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
+		var indices: PackedInt32Array = arrays[Mesh.ARRAY_INDEX] if arrays.size() > Mesh.ARRAY_INDEX and arrays[Mesh.ARRAY_INDEX] is PackedInt32Array else PackedInt32Array()
+		var vertex_count := vertices.size()
+		if indices.is_empty():
+			if vertex_count % 3 != 0:
+				return false
+			continue
+		for index_value in indices:
+			if int(index_value) < 0 or int(index_value) >= vertex_count:
+				return false
+	return true
+
+func collision_shape_from_valid_triangles(array_mesh: ArrayMesh):
+	if array_mesh == null:
+		return null
+	var faces := PackedVector3Array()
+	for surface_index in range(array_mesh.get_surface_count()):
+		var arrays := array_mesh.surface_get_arrays(surface_index)
+		if arrays.size() <= Mesh.ARRAY_VERTEX:
+			continue
+		var vertices: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
+		if vertices.size() < 3:
+			continue
+		var indices: PackedInt32Array = arrays[Mesh.ARRAY_INDEX] if arrays.size() > Mesh.ARRAY_INDEX and arrays[Mesh.ARRAY_INDEX] is PackedInt32Array else PackedInt32Array()
+		if indices.is_empty():
+			for i in range(0, vertices.size() - 2, 3):
+				faces.append(vertices[i])
+				faces.append(vertices[i + 1])
+				faces.append(vertices[i + 2])
+			continue
+		var triangle_count := indices.size() - (indices.size() % 3)
+		for i in range(0, triangle_count, 3):
+			var a := int(indices[i])
+			var b := int(indices[i + 1])
+			var c := int(indices[i + 2])
+			if a < 0 or b < 0 or c < 0 or a >= vertices.size() or b >= vertices.size() or c >= vertices.size():
+				continue
+			faces.append(vertices[a])
+			faces.append(vertices[b])
+			faces.append(vertices[c])
+	if faces.size() < 3:
+		return null
+	var shape := ConcavePolygonShape3D.new()
+	shape.set_faces(faces)
+	shape.backface_collision = true
+	return shape
+
+func chunk_size() -> int:
+	if main != null:
+		var value := int(main.CHUNK_SIZE)
+		if value > 0:
+			return value
+	return 28

@@ -5,6 +5,13 @@ const TEST_ID := "light_shadow_visual_playtest"
 const CELL := 1.35
 const CAPTURE_WIDTH := 1280
 const CAPTURE_HEIGHT := 720
+const LIGHT_SAMPLE_SEARCH_RADIUS_CELLS := 224
+const LIGHT_SAMPLE_MIN_DEPTH_CELLS := 12
+const LIGHT_SAMPLE_MAX_DEPTH_CELLS := 36
+const LIGHT_SAMPLE_MIN_CONNECTED_CELLS := 32
+const LIGHT_SAMPLE_MIN_SOLID_NEIGHBORS := 2
+const LIGHT_SAMPLE_SURFACE_EXPOSURE_MAX_CELLS := 4096
+const LIGHT_SAMPLE_SURFACE_EXPOSURE_RADIUS_CELLS := 48
 const REQUIRED_CAPTURE_STAGES := [
 	"outdoor_noon_reference",
 	"underground_noon_dark",
@@ -12,7 +19,8 @@ const REQUIRED_CAPTURE_STAGES := [
 	"underground_torch_closeup"
 ]
 const ACCEPTANCE_CLAIMS := [
-	"shadow_authoritative_daylight_blocks_deep_underground"
+	"shadow_authoritative_daylight_blocks_deep_underground",
+	"torch_light_brightens_underground_terrain"
 ]
 
 var main: Node3D
@@ -81,9 +89,11 @@ func apply_resolution() -> void:
 
 func run() -> void:
 	OS.set_environment("VOXEL_TEST_SEED", seed)
+	OS.set_environment("VOXEL_UNDERGROUND_VISUAL_FAST_BOOT", "1")
 	main = MAIN_SCENE.instantiate()
 	main.set("render_distance", 1)
 	main.set("force_underground_volume_debug", true)
+	main.set("force_underground_volume_fine_focus", true)
 	main.set("visual_quality", {
 		"decorativeDensity": 0.03,
 		"decorativeDetailCap": 4,
@@ -113,6 +123,7 @@ func run() -> void:
 	add_result("light_shadow_headed_mode", DisplayServer.get_name().to_lower() != "headless", "display=%s" % DisplayServer.get_name())
 	add_result("light_shadow_underground_volume_selected", true, JSON.stringify(underground_summary()))
 	add_result("light_shadow_global_ambient_low", global_ambient_low(), JSON.stringify(environment_summary()))
+	add_result("light_shadow_terrain_meshing_backend", true, JSON.stringify(terrain_meshing_summary()))
 
 	await capture_stage("outdoor_noon_reference", false)
 	await capture_stage("underground_noon_dark", false)
@@ -160,32 +171,174 @@ func neutralize_intro_clock_freeze() -> void:
 		tutorial.call("clear_dialogue_focus")
 
 func select_underground_sample() -> bool:
-	if world_generation == null or not world_generation.has_method("find_underground_air_sample"):
+	if world_generation == null or not world_generation.has_method("sample_cell"):
 		return false
-	for radius in [16, 24, 32, 48, 64]:
-		var found: Dictionary = world_generation.call("find_underground_air_sample", radius, 6, 30)
-		if found.is_empty():
-			continue
-		var sample: Dictionary = found.get("sample", {}) if found.has("sample") else {}
-		if String(sample.get("biome", "")) != "underground_air" or bool(sample.get("solid", true)):
-			continue
-		sample_record = found
-		sample_cell = found.get("cell", Vector3i.ZERO)
-		sample_position = found.get("position", cell_center(sample_cell))
-		boundary_direction = first_boundary_direction()
+	if world_generation.has_method("find_underground_air_sample"):
+		for radius in [64, 96, 128, 160, 192, LIGHT_SAMPLE_SEARCH_RADIUS_CELLS]:
+			var found: Dictionary = world_generation.call(
+				"find_underground_air_sample",
+				radius,
+				LIGHT_SAMPLE_MIN_DEPTH_CELLS,
+				LIGHT_SAMPLE_MAX_DEPTH_CELLS
+			)
+			if apply_underground_sample_record(found):
+				return true
+	if select_underground_sample_by_local_scan(
+		LIGHT_SAMPLE_SEARCH_RADIUS_CELLS,
+		LIGHT_SAMPLE_MIN_DEPTH_CELLS,
+		LIGHT_SAMPLE_MAX_DEPTH_CELLS
+	):
 		return true
 	return false
 
-func first_boundary_direction() -> Vector3i:
+func apply_underground_sample_record(record: Dictionary) -> bool:
+	if record.is_empty():
+		return false
+	var cell: Vector3i = record.get("cell", Vector3i.ZERO)
+	var sample: Dictionary = world_generation.call("sample_cell", cell)
+	if not underground_air_sample_acceptable(cell, sample):
+		return false
+	sample_record = record.duplicate(true)
+	sample_record["sample"] = sample
+	sample_cell = cell
+	sample_position = cell_center(sample_cell)
+	sample_record["position"] = sample_position
+	boundary_direction = first_boundary_direction()
+	return true
+
+func select_underground_sample_by_local_scan(search_radius: int, min_depth_cells: int, max_depth_cells: int) -> bool:
+	var step := 8
+	var min_depth := maxi(1, min_depth_cells)
+	var max_depth := maxi(min_depth, max_depth_cells)
+	var depth_step := 4
+	var best_record := {}
+	var best_cell := Vector3i.ZERO
+	var best_position := Vector3.ZERO
+	var best_boundary_direction := Vector3i(1, 0, 0)
+	var best_score := -INF
+	for radius in range(0, search_radius + 1, step):
+		for z in range(-radius, radius + 1, step):
+			for x in range(-radius, radius + 1, step):
+				if radius > 0 and absi(x) != radius and absi(z) != radius:
+					continue
+				var surface_y := surface_y_for_light_cell(Vector3i(x, 0, z))
+				var surface_cell_y := floori(surface_y / CELL)
+				for depth in range(min_depth, max_depth + 1, depth_step):
+					var cell := Vector3i(x, surface_cell_y - depth, z)
+					var sample: Dictionary = world_generation.call("sample_cell", cell)
+					if not underground_air_sample_basic(sample):
+						continue
+					var boundary := boundary_counts_for_cell(cell)
+					if int(boundary.get("solidNeighbors", 0)) < LIGHT_SAMPLE_MIN_SOLID_NEIGHBORS or int(boundary.get("airNeighbors", 0)) < 2:
+						continue
+					var connected_region := connected_region_summary_for_cell(cell)
+					if int(connected_region.get("airCells", 0)) < LIGHT_SAMPLE_MIN_CONNECTED_CELLS:
+						continue
+					var score := float(depth) * 5.0
+					score += float(int(connected_region.get("airCells", 0))) * 0.25
+					score += float(int(boundary.get("solidNeighbors", 0))) * 8.0
+					score -= float(radius) * 0.02
+					if score <= best_score:
+						continue
+					if underground_air_cell_has_surface_exposure(cell):
+						continue
+					best_score = score
+					best_cell = cell
+					best_position = cell_center(cell)
+					best_boundary_direction = first_boundary_direction_for_cell(cell)
+					best_record = {
+						"id": "underground-air-light:%d,%d,%d" % [cell.x, cell.y, cell.z],
+						"sampleId": "underground-air-light:%d,%d,%d" % [cell.x, cell.y, cell.z],
+						"cell": cell,
+						"surfaceCell": Vector2i(x, z),
+						"position": best_position,
+						"surfaceY": surface_y,
+						"depthCells": depth,
+						"sample": sample,
+						"connectedRegion": connected_region
+					}
+	if best_record.is_empty():
+		return false
+	sample_record = best_record
+	sample_cell = best_cell
+	sample_position = best_position
+	boundary_direction = best_boundary_direction
+	return true
+
+func underground_air_sample_acceptable(cell: Vector3i, sample: Dictionary) -> bool:
+	if not underground_air_sample_basic(sample):
+		return false
+	if underground_air_cell_has_surface_exposure(cell):
+		return false
+	var boundary := boundary_counts_for_cell(cell)
+	if int(boundary.get("solidNeighbors", 0)) < LIGHT_SAMPLE_MIN_SOLID_NEIGHBORS or int(boundary.get("airNeighbors", 0)) < 2:
+		return false
+	var connected_region := connected_region_summary_for_cell(cell)
+	return int(connected_region.get("airCells", 0)) >= LIGHT_SAMPLE_MIN_CONNECTED_CELLS
+
+func underground_air_sample_basic(sample: Dictionary) -> bool:
+	if String(sample.get("biome", "")) != "underground_air" or bool(sample.get("solid", true)):
+		return false
+	if String(sample.get("fluid", "")) != "":
+		return false
+	return float(sample.get("density", 0.0)) <= -CELL * 0.18
+
+func underground_air_cell_has_surface_exposure(cell: Vector3i) -> bool:
+	if world_generation == null or not world_generation.has_method("underground_air_sample_has_surface_exposure"):
+		return false
+	return bool(world_generation.call(
+		"underground_air_sample_has_surface_exposure",
+		cell,
+		LIGHT_SAMPLE_SURFACE_EXPOSURE_MAX_CELLS,
+		LIGHT_SAMPLE_SURFACE_EXPOSURE_RADIUS_CELLS
+	))
+
+func connected_region_summary_for_cell(cell: Vector3i) -> Dictionary:
+	if world_generation != null and world_generation.has_method("underground_air_connected_region_summary"):
+		return world_generation.call("underground_air_connected_region_summary", cell, LIGHT_SAMPLE_MIN_CONNECTED_CELLS * 4, 8)
+	return { "airCells": LIGHT_SAMPLE_MIN_CONNECTED_CELLS }
+
+func boundary_counts_for_cell(cell: Vector3i) -> Dictionary:
+	var solid_neighbors := 0
+	var air_neighbors := 0
 	for direction in [
 		Vector3i(1, 0, 0),
 		Vector3i(-1, 0, 0),
-		Vector3i(0, 0, 1),
-		Vector3i(0, 0, -1),
+		Vector3i(0, 1, 0),
 		Vector3i(0, -1, 0),
-		Vector3i(0, 1, 0)
+		Vector3i(0, 0, 1),
+		Vector3i(0, 0, -1)
 	]:
-		var sample: Dictionary = world_generation.call("sample_cell", sample_cell + direction)
+		var sample: Dictionary = world_generation.call("sample_cell", cell + direction)
+		if bool(sample.get("solid", false)):
+			solid_neighbors += 1
+		elif String(sample.get("biome", "")) == "underground_air" and String(sample.get("fluid", "")) == "":
+			air_neighbors += 1
+	return {
+		"solidNeighbors": solid_neighbors,
+		"airNeighbors": air_neighbors
+	}
+
+func surface_y_for_light_cell(cell: Vector3i) -> float:
+	if world_generation != null and world_generation.has_method("surface_y_for_cell"):
+		return float(world_generation.call("surface_y_for_cell", cell))
+	if world_generation != null and world_generation.has_method("terrain_reference_surface_y_for_cell"):
+		return float(world_generation.call("terrain_reference_surface_y_for_cell", cell))
+	return float(cell.y) * CELL
+
+func first_boundary_direction() -> Vector3i:
+	return first_boundary_direction_for_cell(sample_cell)
+
+func first_boundary_direction_for_cell(cell: Vector3i) -> Vector3i:
+	for direction in [
+		Vector3i(0, -1, 0),
+		Vector3i(0, 1, 0),
+		Vector3i(1, 0, 0),
+		Vector3i(-1, 0, 0),
+		Vector3i(0, 0, 1),
+		Vector3i(0, 0, -1)
+	]:
+		var sample: Dictionary = world_generation.call("sample_cell", cell + direction)
 		if bool(sample.get("solid", false)):
 			return direction
 	return Vector3i(1, 0, 0)
@@ -199,6 +352,7 @@ func load_underground_chunks() -> void:
 	for dz in range(-1, 2):
 		for dx in range(-1, 2):
 			load_chunk_key(Vector2i(center_key.x + dx, center_key.y + dz))
+	clear_non_terrain_chunk_nodes()
 
 func clear_loaded_chunks() -> void:
 	var chunks_value = main.get("chunks") if main != null else {}
@@ -220,27 +374,54 @@ func load_chunk_key(chunk_key: Vector2i) -> void:
 	var chunks: Dictionary = chunks_value if chunks_value is Dictionary else {}
 	if chunks.has(chunk_key):
 		return
-	main.call("create_chunk", chunk_key.x, chunk_key.y, true)
+	main.call("create_chunk", chunk_key.x, chunk_key.y, false)
+
+func clear_non_terrain_chunk_nodes() -> void:
+	if main == null:
+		return
+	var chunks_value = main.get("chunks")
+	if not (chunks_value is Dictionary):
+		return
+	var chunks: Dictionary = chunks_value
+	for key_value in chunks.keys():
+		var chunk := chunks[key_value] as Node
+		if chunk == null:
+			continue
+		for child in chunk.get_children():
+			if child.name in ["TerrainMesh", "TerrainFluidMesh", "TerrainBody"]:
+				continue
+			if child is Node3D:
+				(child as Node3D).visible = false
 
 func configure_camera_and_light() -> void:
 	if gameplay_camera != null:
 		gameplay_camera.current = false
 	camera = Camera3D.new()
 	camera.name = "LightShadowUndergroundCamera"
-	camera.fov = 72.0
+	camera.fov = 22.0
 	add_child(camera)
 	torch_light = OmniLight3D.new()
 	torch_light.name = "LightShadowUndergroundTorch"
 	torch_light.light_energy = 0.0
 	torch_light.omni_range = CELL * 12.0
-	torch_light.light_cull_mask = 3
+	torch_light.light_cull_mask = 0xFFFFFFFF
+	torch_light.set_meta("light_role", "terrain_wash")
+	torch_light.add_to_group("local_light_rig_fill")
 	main.add_child(torch_light)
 
 func capture_stage(stage: String, torch_enabled: bool, closeup := false) -> void:
 	position_camera(stage, closeup)
+	if player != null:
+		player.global_position = camera.global_position
+		player.velocity = Vector3.ZERO
+	if main != null and main.has_method("update_sky"):
+		main.call("update_sky", 0.0)
 	if torch_light != null:
 		torch_light.light_energy = 12.0 if torch_enabled else 0.0
-		torch_light.global_position = camera.global_position + (last_camera_target - camera.global_position).normalized() * CELL * 0.55 + Vector3(0.0, CELL * 0.15, 0.0)
+		var boundary_normal := vector3i_to_vector3(boundary_direction).normalized()
+		torch_light.global_position = sample_position - boundary_normal * CELL * 0.32
+	if main != null and main.has_method("update_terrain_local_light_uniforms"):
+		main.call("update_terrain_local_light_uniforms")
 	await wait_process_frames(3)
 	await wait_physics_frames(1)
 	await wait_process_frames(3)
@@ -257,6 +438,7 @@ func capture_stage(stage: String, torch_enabled: bool, closeup := false) -> void
 		"torchEnabled": torch_enabled,
 		"torch": vec3(torch_light.global_position if torch_light != null else Vector3.ZERO),
 		"luminance": luminance,
+		"environment": environment_summary(),
 		"underground": underground_summary()
 	}
 	captures.append(capture)
@@ -271,26 +453,41 @@ func position_camera(stage: String, closeup := false) -> void:
 		last_camera_target = Vector3(sample_position.x, surface_y, sample_position.z)
 	else:
 		var dir := vector3i_to_vector3(boundary_direction).normalized()
-		var pullback := CELL * (0.45 if closeup else 0.85)
-		camera.global_position = sample_position - dir * pullback + Vector3(0.0, CELL * 0.10, 0.0)
-		last_camera_target = sample_position + dir * CELL * (1.05 if closeup else 1.85)
-	camera.look_at(last_camera_target, Vector3.UP)
+		var wall_side_offset := CELL * (0.26 if closeup else 0.18)
+		camera.global_position = sample_position - dir * wall_side_offset + Vector3(0.0, CELL * 0.035, 0.0)
+		last_camera_target = sample_position + dir * CELL * (0.62 if closeup else 0.78)
+	var up_axis := Vector3.UP
+	if stage != "outdoor_noon_reference" and absf(vector3i_to_vector3(boundary_direction).normalized().y) > 0.82:
+		up_axis = Vector3.FORWARD
+	camera.look_at(last_camera_target, up_axis)
 	camera.current = true
 
 func add_luminance_assertions() -> void:
 	var outdoor_avg := luminance_average("outdoor_noon_reference")
 	var dark_avg := luminance_average("underground_noon_dark")
 	var torch_avg := luminance_average("underground_torch_lit")
+	var dark_center := luminance_center_average("underground_noon_dark")
+	var torch_center := luminance_center_average("underground_torch_lit")
+	var torch_close_center := luminance_center_average("underground_torch_closeup")
 	add_result(
 		"light_shadow_deep_underground_darker_than_outdoor_noon",
 		dark_avg < outdoor_avg * 0.72,
 		"outdoor=%.3f underground=%.3f" % [outdoor_avg, dark_avg]
 	)
 	add_result("light_shadow_torch_visual_captures_recorded", torch_avg >= 0.0, "torch=%.3f underground=%.3f" % [torch_avg, dark_avg])
+	add_result(
+		"light_shadow_torch_brightens_underground_terrain",
+		torch_center > dark_center * 1.18 or torch_close_center > dark_center * 1.28,
+		"darkCenter=%.3f torchCenter=%.3f closeCenter=%.3f" % [dark_center, torch_center, torch_close_center]
+	)
 
 func luminance_average(stage: String) -> float:
 	var summary: Dictionary = stage_luminance.get(stage, {})
 	return float(summary.get("average", 0.0))
+
+func luminance_center_average(stage: String) -> float:
+	var summary: Dictionary = stage_luminance.get(stage, {})
+	return float(summary.get("centerAverage", 0.0))
 
 func global_ambient_low() -> bool:
 	var world := get_viewport().world_3d
@@ -302,9 +499,62 @@ func environment_summary() -> Dictionary:
 	var world := get_viewport().world_3d
 	if world == null or world.environment == null:
 		return { "environment": "missing" }
+	var factor := 0.0
+	if main != null and main.has_method("underground_environment_factor") and camera != null:
+		factor = float(main.call("underground_environment_factor", camera.global_position))
+	var shader_darkening := 0.0
+	var shader_min_light := 1.0
+	var shader_shadow_fill := 0.0
+	if main != null and main.get("terrain_material") is ShaderMaterial:
+		var terrain_mat := main.get("terrain_material") as ShaderMaterial
+		shader_darkening = float(terrain_mat.get_shader_parameter("underground_view_darkening"))
+		shader_min_light = float(terrain_mat.get_shader_parameter("underground_view_min_light"))
+		shader_shadow_fill = float(terrain_mat.get_shader_parameter("shadow_fill"))
 	return {
 		"ambientLightEnergy": rounded(world.environment.ambient_light_energy),
-		"ambientLightSource": int(world.environment.ambient_light_source)
+		"ambientLightSource": int(world.environment.ambient_light_source),
+		"fogDensity": rounded(world.environment.fog_density),
+		"fogLightEnergy": rounded(world.environment.fog_light_energy),
+		"undergroundEnvironmentFactor": rounded(factor),
+		"shaderUndergroundDarkening": rounded(shader_darkening),
+		"shaderUndergroundMinLight": rounded(shader_min_light),
+		"shaderShadowFill": rounded(shader_shadow_fill)
+	}
+
+func terrain_meshing_summary() -> Dictionary:
+	var summary := {}
+	if main != null:
+		var service = main.get("terrain_meshing_service")
+		if service != null and service.has_method("backend_summary"):
+			var value = service.call("backend_summary")
+			if value is Dictionary:
+				summary = value
+	var chunk_summaries: Array[Dictionary] = []
+	if main != null:
+		var chunks_value = main.get("chunks")
+		if chunks_value is Dictionary:
+			var chunks: Dictionary = chunks_value
+			for key_value in chunks.keys():
+				var chunk = chunks[key_value] as Node
+				if chunk == null:
+					continue
+				var mesh_instance := chunk.get_node_or_null("TerrainMesh") as MeshInstance3D
+				var mesh := mesh_instance.mesh if mesh_instance != null else null
+				if mesh == null:
+					continue
+				chunk_summaries.append({
+					"key": str(key_value),
+					"backend": String(mesh.get_meta("terrainMeshingBackend", "")),
+					"native": bool(mesh.get_meta("terrainMeshingNative", false)),
+					"sectionPayload": bool(mesh.get_meta("terrainMeshingSectionPayload", false)),
+					"provisional": bool(mesh.get_meta("terrainMeshingProvisional", false)),
+					"surfaceCount": mesh.get_surface_count()
+				})
+				if chunk_summaries.size() >= 12:
+					break
+	return {
+		"service": summary,
+		"chunks": chunk_summaries
 	}
 
 func underground_summary() -> Dictionary:
@@ -348,8 +598,14 @@ func image_luminance_summary(image: Image) -> Dictionary:
 	var step_x := maxi(1, width / 64)
 	var step_y := maxi(1, height / 36)
 	var total := 0.0
+	var center_total := 0.0
 	var max_luma := 0.0
 	var count := 0
+	var center_count := 0
+	var center_min_x := int(float(width) * 0.35)
+	var center_max_x := int(float(width) * 0.65)
+	var center_min_y := int(float(height) * 0.32)
+	var center_max_y := int(float(height) * 0.68)
 	for y in range(0, height, step_y):
 		for x in range(0, width, step_x):
 			var color := image.get_pixel(x, y)
@@ -357,8 +613,12 @@ func image_luminance_summary(image: Image) -> Dictionary:
 			total += luma
 			max_luma = maxf(max_luma, luma)
 			count += 1
+			if x >= center_min_x and x <= center_max_x and y >= center_min_y and y <= center_max_y:
+				center_total += luma
+				center_count += 1
 	return {
 		"average": rounded(total / maxf(1.0, float(count))),
+		"centerAverage": rounded(center_total / maxf(1.0, float(center_count))),
 		"max": rounded(max_luma),
 		"samples": count
 	}

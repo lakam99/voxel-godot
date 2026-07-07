@@ -338,6 +338,15 @@
       "required": true
     },
     {
+      "id": "underground_fluid_render_contract",
+      "description": "Real Main scene chunk creation check that generated terrain fluid states create a non-collision TerrainFluidMesh",
+      "command": ".\\tools\\run-underground-fluid-render-tests.ps1",
+      "args": ["-Seed", "atlas-1492", "-ReportPath", "artifacts\\test-runners\\underground-fluid-render-contract.json"],
+      "reportPath": "artifacts\\test-runners\\underground-fluid-render-contract.json",
+      "evidenceLevel": "integration",
+      "required": true
+    },
+    {
       "id": "underground_visual_playtest",
       "description": "Headed player-POV visual proof for generated underground air, solid material boundaries, mesh, and collision",
       "command": ".\\tools\\run-underground-visual-playtest.ps1",
@@ -385,7 +394,7 @@
       "reportPath": "artifacts\\test-runners\\light-shadow-visual-playtest.json",
       "screenshotDir": "artifacts\\test-runners\\screenshots\\light-shadow-visual-playtest",
       "evidenceLevel": "acceptance_visual",
-      "acceptanceClaims": ["shadow_authoritative_daylight_blocks_deep_underground"],
+      "acceptanceClaims": ["shadow_authoritative_daylight_blocks_deep_underground", "torch_light_brightens_underground_terrain"],
       "requiredScreenshots": [
         "outdoor_noon_reference.png",
         "underground_noon_dark.png",
