@@ -4,6 +4,7 @@ const DEFAULT_VISUAL_STYLE := preload("res://resources/visual/gamecube_style.tre
 
 var seed_text := "atlas-1492"
 var seed_hash := 1
+var startup_mode := "auto"
 var height_noise: FastNoiseLite
 var ridge_noise: FastNoiseLite
 var flat_noise: FastNoiseLite
@@ -224,6 +225,9 @@ var block_meshes := {}
 
 func _ready() -> void:
     playtest_progress("main_ready_start")
+    var requested_startup_mode := startup_mode.strip_edges()
+    if requested_startup_mode == "":
+        requested_startup_mode = "auto"
     var underground_visual_fast_boot := OS.get_environment("VOXEL_UNDERGROUND_VISUAL_FAST_BOOT").strip_edges() == "1"
     var digging_visual_fast_boot := OS.get_environment("VOXEL_DIGGING_VISUAL_FAST_BOOT").strip_edges() == "1"
     var runtime_perf_fast_boot := OS.get_environment("VOXEL_RUNTIME_PERF_FAST_BOOT").strip_edges() == "1"
@@ -235,9 +239,11 @@ func _ready() -> void:
     var forced_test_seed := test_seed_text()
     if forced_test_seed != "":
         seed_text = forced_test_seed
+    elif requested_startup_mode == "new_game":
+        seed_text = random_world_seed(active_seed)
     elif active_seed != "":
         seed_text = active_seed
-    apply_world_seed(seed_text, false)
+    apply_world_seed(seed_text, requested_startup_mode == "new_game")
     playtest_progress("main_noise_done")
     setup_materials()
     setup_environment()
@@ -264,7 +270,9 @@ func _ready() -> void:
     setup_held_item()
     setup_hud()
     playtest_progress("main_scene_nodes_done")
-    var loaded := try_load_world()
+    var loaded := false
+    if requested_startup_mode != "new_game":
+        loaded = try_load_world()
     var started_intro_tutorial := false
     playtest_progress("main_load_done")
     if not loaded and tutorial_system and not skip_synchronous_world_boot:

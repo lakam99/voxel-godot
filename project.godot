@@ -11,7 +11,7 @@ config_version=5
 [application]
 
 config/name="Voxel Biome World Godot"
-run/main_scene="res://scenes/Main.tscn"
+run/main_scene="res://scenes/MainMenu.tscn"
 config/features=PackedStringArray("4.6", "Forward Plus")
 
 [native_extensions]
