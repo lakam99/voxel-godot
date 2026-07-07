@@ -1,10 +1,21 @@
 ﻿extends "res://scripts/MainInterface.gd"
 
+signal startup_loading_step(message)
+signal startup_loading_completed
+signal startup_loading_failed(message)
+
 const DEFAULT_VISUAL_STYLE := preload("res://resources/visual/gamecube_style.tres")
+const INITIAL_NAVMESH_PRIME_TILE_LIMIT := 32
+const INITIAL_NAV_CHANGE_DRAIN_EVENT_LIMIT := 64
+const INITIAL_NAV_CHANGE_DRAIN_ITERATION_LIMIT := 16
+const AUTOSAVE_ACTIVITY_MAX_DEFER_SECONDS := 30.0
 
 var seed_text := "atlas-1492"
 var seed_hash := 1
 var startup_mode := "auto"
+var deferred_startup_boot := false
+var startup_loading_active := false
+var runtime_loading_active := false
 var height_noise: FastNoiseLite
 var ridge_noise: FastNoiseLite
 var flat_noise: FastNoiseLite
@@ -111,6 +122,7 @@ var autosave_last_player_position := Vector3.INF
 var autosave_last_player_rotation_y := INF
 var autosave_last_time_bucket := -1
 var autosave_activity_defer_elapsed := 0.0
+var autosave_recent_activity_grace := 0.0
 var discovered_biomes := {}
 var discovered_town_keys := {}
 var discovered_shrine_keys := {}
@@ -224,6 +236,15 @@ var detail_meshes := {}
 var block_meshes := {}
 
 func _ready() -> void:
+    if get_tree() != null:
+        get_tree().auto_accept_quit = false
+    if deferred_startup_boot:
+        startup_loading_active = true
+        set_process(false)
+        set_process_unhandled_input(false)
+        set_physics_process(false)
+        call_deferred("_run_deferred_startup_boot")
+        return
     playtest_progress("main_ready_start")
     var requested_startup_mode := startup_mode.strip_edges()
     if requested_startup_mode == "":
@@ -282,6 +303,8 @@ func _ready() -> void:
         playtest_progress("main_tutorial_start_done")
     if not skip_synchronous_world_boot:
         bootstrap_initial_chunks()
+        drain_initial_navigation_changes()
+        prime_initial_navigation_snapshot()
         playtest_progress("main_initial_chunks_queued")
     var interactive_underground_message := "" if skip_synchronous_world_boot else apply_interactive_underground_launch_if_requested()
     if not skip_synchronous_world_boot:
@@ -294,6 +317,208 @@ func _ready() -> void:
     if not skip_synchronous_world_boot:
         update_hud(ready_message)
     reset_autosave_dirty_tracking(not loaded and not skip_synchronous_world_boot, "new_world")
+
+func _run_deferred_startup_boot() -> void:
+    await startup_loading_yield("Preparing world")
+    playtest_progress("main_ready_start")
+    var requested_startup_mode := startup_mode.strip_edges()
+    if requested_startup_mode == "":
+        requested_startup_mode = "auto"
+    var underground_visual_fast_boot := OS.get_environment("VOXEL_UNDERGROUND_VISUAL_FAST_BOOT").strip_edges() == "1"
+    var digging_visual_fast_boot := OS.get_environment("VOXEL_DIGGING_VISUAL_FAST_BOOT").strip_edges() == "1"
+    var runtime_perf_fast_boot := OS.get_environment("VOXEL_RUNTIME_PERF_FAST_BOOT").strip_edges() == "1"
+    var skip_synchronous_world_boot := underground_visual_fast_boot or digging_visual_fast_boot or runtime_perf_fast_boot
+    setup_save_system()
+    await startup_loading_yield("Selecting world")
+    var active_seed := ""
+    if autosave_enabled and save_system and save_system.has_method("active_seed"):
+        active_seed = save_system.active_seed("")
+    var forced_test_seed := test_seed_text()
+    if forced_test_seed != "":
+        seed_text = forced_test_seed
+    elif requested_startup_mode == "new_game":
+        seed_text = random_world_seed(active_seed)
+    elif active_seed != "":
+        seed_text = active_seed
+    apply_world_seed(seed_text, requested_startup_mode == "new_game")
+    playtest_progress("main_noise_done")
+    await startup_loading_yield("Preparing terrain systems")
+    setup_materials()
+    setup_environment()
+    setup_game_systems()
+    playtest_progress("main_systems_done")
+
+    chunk_root = Node3D.new()
+    chunk_root.name = "Chunks"
+    add_child(chunk_root)
+    prop_root = Node3D.new()
+    prop_root.name = "Props"
+    add_child(prop_root)
+    block_root = Node3D.new()
+    block_root.name = "Blocks"
+    add_child(block_root)
+    await startup_loading_yield("Preparing scene")
+    setup_audio_effects()
+    setup_break_overlay()
+    setup_tutorial_system()
+
+    setup_player()
+    setup_hostiles()
+    setup_npc_system()
+    setup_player_projectiles()
+    setup_held_item()
+    setup_hud()
+    playtest_progress("main_scene_nodes_done")
+    await startup_loading_yield("Loading save")
+    var loaded := false
+    if requested_startup_mode != "new_game":
+        loaded = try_load_world()
+    var started_intro_tutorial := false
+    playtest_progress("main_load_done")
+    if not loaded and tutorial_system and not skip_synchronous_world_boot:
+        if autosave_enabled:
+            apply_world_seed(random_world_seed(seed_text), true)
+        if tutorial_system.has_method("start_new_world_staged"):
+            started_intro_tutorial = bool(await tutorial_system.call("start_new_world_staged"))
+        else:
+            started_intro_tutorial = tutorial_system.start_new_world()
+        playtest_progress("main_tutorial_start_done")
+    if not skip_synchronous_world_boot:
+        await bootstrap_initial_chunks_staged()
+        await drain_initial_navigation_changes_staged()
+        await prime_initial_navigation_snapshot_staged()
+        playtest_progress("main_initial_chunks_queued")
+    var interactive_underground_message := "" if skip_synchronous_world_boot else apply_interactive_underground_launch_if_requested()
+    if not skip_synchronous_world_boot:
+        refresh_intro_knock_audio()
+    var ready_message := "Loaded saved world" if loaded else "Godot slice ready"
+    if not loaded and tutorial_system and tutorial_system.last_message != "":
+        ready_message = tutorial_system.last_message
+    if interactive_underground_message != "":
+        ready_message = interactive_underground_message
+    if not skip_synchronous_world_boot:
+        update_hud(ready_message)
+    reset_autosave_dirty_tracking(not loaded and not skip_synchronous_world_boot, "new_world")
+    startup_loading_active = false
+    set_process(true)
+    set_process_unhandled_input(true)
+    set_physics_process(true)
+    if player != null:
+        player.set_physics_process(true)
+    startup_loading_completed.emit()
+
+func startup_loading_yield(message: String) -> void:
+    startup_loading_step.emit(message)
+    if hud != null and hud.has_method("set_loading_message"):
+        hud.set_loading_message(message)
+    await get_tree().process_frame
+
+func bootstrap_initial_chunks_staged(urgent_radius := 1) -> void:
+    if player == null:
+        return
+    var center := world_to_chunk(player.position.x, player.position.z)
+    var urgent_keys: Array[Vector2i] = []
+    for dz in range(-urgent_radius, urgent_radius + 1):
+        for dx in range(-urgent_radius, urgent_radius + 1):
+            var key := Vector2i(center.x + dx, center.y + dz)
+            urgent_keys.append(key)
+            if not chunks.has(key):
+                queue_chunk_load(key)
+    last_center_chunk = center
+    var total := urgent_keys.size()
+    var guard := 0
+    while guard < total + 12 and count_loaded_chunks(urgent_keys) < total:
+        var loaded := count_loaded_chunks(urgent_keys)
+        await startup_loading_yield("Loading terrain %d/%d" % [loaded, total])
+        process_pending_chunk_loads(center)
+        guard += 1
+    process_pending_chunk_prop_spawns()
+    last_center_chunk = Vector2i(999999, 999999)
+    await startup_loading_yield("Terrain ready")
+
+func count_loaded_chunks(keys: Array[Vector2i]) -> int:
+    var count := 0
+    for key in keys:
+        if chunks.has(key):
+            count += 1
+    return count
+
+func drain_initial_navigation_changes_staged() -> void:
+    if npc_system == null:
+        return
+    var autonomy = npc_system.get("autonomy_system")
+    if autonomy == null or not autonomy.has_method("process_navigation_changes"):
+        return
+    if not autonomy.has_method("pending_navigation_change_count"):
+        return
+    var iterations := 0
+    while iterations < INITIAL_NAV_CHANGE_DRAIN_ITERATION_LIMIT:
+        var pending := int(autonomy.call("pending_navigation_change_count"))
+        if pending <= 0:
+            break
+        await startup_loading_yield("Preparing navigation %d" % pending)
+        autonomy.call("process_navigation_changes", INITIAL_NAV_CHANGE_DRAIN_EVENT_LIMIT, -1)
+        iterations += 1
+
+func prime_initial_navigation_snapshot_staged() -> void:
+    if npc_system == null:
+        return
+    var pathing = npc_system.get("pathing")
+    var navigation_world = pathing.get("navigation_world") if pathing != null else null
+    if navigation_world == null or not navigation_world.has_method("build_snapshot"):
+        return
+    var entries: Array = []
+    var entry := {}
+    var entries_value = npc_system.get("npcs")
+    if entries_value is Array:
+        entries = entries_value
+    if not entries.is_empty() and entries[0] is Dictionary:
+        entry = entries[0]
+    await startup_loading_yield("Preparing NPC routes")
+    navigation_world.call("build_snapshot", entry, true, false)
+    await prime_initial_navigation_tiles_staged(navigation_world, entries)
+
+func prime_initial_navigation_tiles_staged(navigation_world, entries: Array) -> void:
+    if npc_system == null or navigation_world == null:
+        return
+    if not navigation_world.has_method("build_navmesh_tile_snapshot"):
+        return
+    var autonomy = npc_system.get("autonomy_system")
+    var navmesh_world = autonomy.get("navmesh_world") if autonomy != null else null
+    if navmesh_world == null or not navmesh_world.has_method("register_tile_snapshot"):
+        return
+    var tile_keys := {}
+    for entry_value in entries:
+        if tile_keys.size() >= INITIAL_NAVMESH_PRIME_TILE_LIMIT:
+            break
+        if not (entry_value is Dictionary):
+            continue
+        var npc_entry: Dictionary = entry_value
+        prime_navigation_tiles_for_entry(navigation_world, npc_entry, tile_keys)
+    var keys := tile_keys.keys()
+    keys.sort()
+    var published := 0
+    for key_value in keys:
+        if published >= INITIAL_NAVMESH_PRIME_TILE_LIMIT:
+            break
+        var tile_key := String(key_value)
+        if tile_key == "":
+            continue
+        if navmesh_world.has_method("tile_region_status"):
+            var status_value = navmesh_world.call("tile_region_status", tile_key)
+            if status_value is Dictionary:
+                var status: Dictionary = status_value
+                if bool(status.get("installed", false)) and not bool(status.get("dirty", false)) and int(status.get("surfaceCount", 0)) > 0:
+                    continue
+        await startup_loading_yield("Preparing navigation tile %d/%d" % [published + 1, mini(keys.size(), INITIAL_NAVMESH_PRIME_TILE_LIMIT)])
+        var snapshot_value = navigation_world.call("build_navmesh_tile_snapshot", tile_key)
+        if not (snapshot_value is Dictionary):
+            continue
+        var snapshot: Dictionary = snapshot_value
+        if snapshot.is_empty():
+            continue
+        navmesh_world.call("register_tile_snapshot", snapshot)
+        published += 1
 
 func playtest_progress(label: String) -> void:
     var path: String = OS.get_environment("VOXEL_PLAYTEST_PROGRESS")
@@ -317,6 +542,119 @@ func bootstrap_initial_chunks(urgent_radius := 1) -> void:
     last_center_chunk = Vector2i(999999, 999999)
     update_chunks(false)
 
+func prime_initial_navigation_snapshot() -> void:
+    if npc_system == null:
+        return
+    var pathing = npc_system.get("pathing")
+    var navigation_world = pathing.get("navigation_world") if pathing != null else null
+    if navigation_world == null or not navigation_world.has_method("build_snapshot"):
+        return
+    var entries: Array = []
+    var entry := {}
+    var entries_value = npc_system.get("npcs")
+    if entries_value is Array:
+        entries = entries_value
+    if not entries.is_empty() and entries[0] is Dictionary:
+        entry = entries[0]
+    navigation_world.call("build_snapshot", entry, true, false)
+    prime_initial_navigation_tiles(navigation_world, entries)
+
+func drain_initial_navigation_changes() -> void:
+    if npc_system == null:
+        return
+    var autonomy = npc_system.get("autonomy_system")
+    if autonomy == null or not autonomy.has_method("process_navigation_changes"):
+        return
+    if not autonomy.has_method("pending_navigation_change_count"):
+        return
+    var iterations := 0
+    while iterations < INITIAL_NAV_CHANGE_DRAIN_ITERATION_LIMIT:
+        var pending := int(autonomy.call("pending_navigation_change_count"))
+        if pending <= 0:
+            break
+        autonomy.call("process_navigation_changes", INITIAL_NAV_CHANGE_DRAIN_EVENT_LIMIT, -1)
+        iterations += 1
+
+func prime_initial_navigation_tiles(navigation_world, entries: Array) -> void:
+    if npc_system == null or navigation_world == null:
+        return
+    if not navigation_world.has_method("build_navmesh_tile_snapshot"):
+        return
+    var autonomy = npc_system.get("autonomy_system")
+    var navmesh_world = autonomy.get("navmesh_world") if autonomy != null else null
+    if navmesh_world == null or not navmesh_world.has_method("register_tile_snapshot"):
+        return
+    var tile_keys := {}
+    for entry_value in entries:
+        if tile_keys.size() >= INITIAL_NAVMESH_PRIME_TILE_LIMIT:
+            break
+        if not (entry_value is Dictionary):
+            continue
+        var npc_entry: Dictionary = entry_value
+        prime_navigation_tiles_for_entry(navigation_world, npc_entry, tile_keys)
+    var keys := tile_keys.keys()
+    keys.sort()
+    var published := 0
+    for key_value in keys:
+        if published >= INITIAL_NAVMESH_PRIME_TILE_LIMIT:
+            break
+        var tile_key := String(key_value)
+        if tile_key == "":
+            continue
+        if navmesh_world.has_method("tile_region_status"):
+            var status_value = navmesh_world.call("tile_region_status", tile_key)
+            if status_value is Dictionary:
+                var status: Dictionary = status_value
+                if bool(status.get("installed", false)) and not bool(status.get("dirty", false)) and int(status.get("surfaceCount", 0)) > 0:
+                    continue
+        var snapshot_value = navigation_world.call("build_navmesh_tile_snapshot", tile_key)
+        if not (snapshot_value is Dictionary):
+            continue
+        var snapshot: Dictionary = snapshot_value
+        if snapshot.is_empty():
+            continue
+        navmesh_world.call("register_tile_snapshot", snapshot)
+        published += 1
+
+func prime_navigation_tiles_for_entry(navigation_world, npc_entry: Dictionary, tile_keys: Dictionary) -> void:
+    var body := npc_entry.get("body") as Node3D
+    var start := Vector3.ZERO
+    if body != null and is_instance_valid(body):
+        start = body.global_position
+    elif npc_entry.get("porchPosition", null) is Vector3:
+        start = npc_entry.get("porchPosition")
+    var target_fields := ["homePosition", "porchPosition", "guardPosition"]
+    for field in target_fields:
+        if tile_keys.size() >= INITIAL_NAVMESH_PRIME_TILE_LIMIT:
+            return
+        var target_value = npc_entry.get(field, null)
+        if not (target_value is Vector3):
+            continue
+        var target: Vector3 = target_value
+        if not is_finite(target.x) or not is_finite(target.z):
+            continue
+        if navigation_world.has_method("route_navmesh_tile_keys"):
+            var route_keys = navigation_world.call("route_navmesh_tile_keys", npc_entry, start, target, true, true, 6)
+            if route_keys is Array:
+                for route_key in route_keys:
+                    if tile_keys.size() >= INITIAL_NAVMESH_PRIME_TILE_LIMIT:
+                        return
+                    var key := String(route_key)
+                    if key != "":
+                        tile_keys[key] = true
+    if not navigation_world.has_method("tile_key_for_cell"):
+        return
+    var cell_fields := ["homeCell", "porchCell", "guardCell", "townCenter"]
+    for field in cell_fields:
+        if tile_keys.size() >= INITIAL_NAVMESH_PRIME_TILE_LIMIT:
+            return
+        var cell_value = npc_entry.get(field, null)
+        if not (cell_value is Vector2i):
+            continue
+        var tile_key := String(navigation_world.call("tile_key_for_cell", cell_value))
+        if tile_key != "":
+            tile_keys[tile_key] = true
+
 func setup_save_system() -> void:
     autosave_enabled = OS.get_environment("VOXEL_PLAYTEST") == ""
     var save_path := "user://voxel_biome_world_saves.json" if autosave_enabled else "user://voxel_biome_world_playtest_saves.json"
@@ -334,6 +672,7 @@ func reset_autosave_dirty_tracking(mark_dirty := false, reason := "reset") -> vo
     autosave_dirty = mark_dirty
     autosave_dirty_reasons.clear()
     autosave_activity_defer_elapsed = 0.0
+    autosave_recent_activity_grace = 0.0
     if mark_dirty:
         autosave_dirty_reasons[String(reason)] = true
     if player:
@@ -415,13 +754,19 @@ func process_autosave(delta: float) -> void:
     perf_autosave_ms = runtime_perf_monitor.end_section("autosave", section_start) if runtime_perf_monitor != null else float(Time.get_ticks_usec() - section_start) / 1000.0
 
 func should_defer_autosave_snapshot_for_activity(delta: float) -> bool:
-    if autosave_activity_defer_elapsed >= 10.0:
+    if autosave_activity_defer_elapsed >= AUTOSAVE_ACTIVITY_MAX_DEFER_SECONDS:
         return false
     if player == null:
         return false
     var horizontal_speed := Vector2(player.velocity.x, player.velocity.z).length()
     var sprinting := bool(player.get("automated_sprint")) if player.has_method("get") else false
-    if horizontal_speed < CELL * 4.0 and not sprinting:
+    var high_activity := horizontal_speed >= CELL * 4.0 or sprinting
+    if high_activity:
+        autosave_recent_activity_grace = 3.0
+    elif autosave_recent_activity_grace > 0.0:
+        autosave_recent_activity_grace = maxf(0.0, autosave_recent_activity_grace - maxf(0.0, delta))
+        high_activity = true
+    if not high_activity:
         return false
     autosave_activity_defer_elapsed += maxf(0.0, delta)
     return true
@@ -1059,3 +1404,125 @@ func start_new_game(show_message := true) -> bool:
     reset_autosave_dirty_tracking(true, "new_game")
     playtest_progress("new_game_done")
     return started
+
+func start_new_game_staged(show_message := true) -> bool:
+    if runtime_loading_active:
+        return false
+    runtime_loading_active = true
+    playtest_progress("new_game_staged_start")
+    if hud != null and hud.has_method("show_loading_overlay"):
+        hud.show_loading_overlay("Starting new game")
+    set_process(false)
+    set_process_unhandled_input(false)
+    if player != null:
+        player.set_physics_process(false)
+        player.velocity = Vector3.ZERO
+    await startup_loading_yield("Starting new game")
+    var previous_seed := seed_text
+    if save_system:
+        playtest_progress("new_game_staged_delete_save")
+        save_system.delete(previous_seed)
+    await startup_loading_yield("Choosing new world")
+    apply_world_seed(random_world_seed(previous_seed), true)
+    await startup_loading_yield("Resetting world")
+    reset_runtime_world_state(false)
+    var started := false
+    if tutorial_system:
+        playtest_progress("new_game_staged_start_tutorial")
+        if tutorial_system.has_method("start_new_world_staged"):
+            started = bool(await tutorial_system.call("start_new_world_staged"))
+        else:
+            started = tutorial_system.start_new_world()
+    await startup_loading_yield("Reloading terrain")
+    reload_chunks(true)
+    await bootstrap_initial_chunks_staged()
+    await drain_initial_navigation_changes_staged()
+    await prime_initial_navigation_snapshot_staged()
+    if tutorial_system:
+        tutorial_system.configure_starting_inventory()
+    update_objectives_and_contracts()
+    refresh_intro_knock_audio()
+    if hud:
+        hud.set_game_menu_open(false)
+        hud.set_inventory_open(false)
+        hud.set_teleport_open(false)
+        hud.set_settings_open(false)
+        hud.set_playtest_open(false)
+        hud.hide_victory()
+    Input.set_mouse_mode(Input.MOUSE_MODE_CAPTURED)
+    if show_message:
+        update_hud("New game started" if started else "New game reset")
+    reset_autosave_dirty_tracking(true, "new_game")
+    if hud != null and hud.has_method("hide_loading_overlay"):
+        hud.hide_loading_overlay()
+    runtime_loading_active = false
+    set_process(true)
+    set_process_unhandled_input(true)
+    if player != null:
+        player.set_physics_process(true)
+    playtest_progress("new_game_staged_done")
+    return started
+
+func request_graceful_quit(exit_code := 0) -> void:
+    if runtime_loading_active:
+        return
+    runtime_loading_active = true
+    if hud != null and hud.has_method("show_loading_overlay"):
+        hud.show_loading_overlay("Saving and exiting")
+    set_process(false)
+    set_process_unhandled_input(false)
+    if player != null:
+        player.velocity = Vector3.ZERO
+        player.set_physics_process(false)
+    call_deferred("_graceful_quit_deferred", exit_code)
+
+func _graceful_quit_deferred(exit_code: int) -> void:
+    await startup_loading_yield("Saving and exiting")
+    if save_system != null and save_system.has_method("has_async_save_pending"):
+        await wait_for_async_save_before_quit()
+    if autosave_enabled and save_system != null and autosave_dirty:
+        await startup_loading_yield("Saving world")
+        var snapshot: Dictionary = create_save_snapshot()
+        var started := false
+        if save_system.has_method("save_async"):
+            started = bool(save_system.save_async(seed_text, snapshot))
+        if started:
+            await wait_for_async_save_before_quit()
+        else:
+            save_system.save(seed_text, snapshot)
+    await wait_for_terrain_workers_before_quit()
+    get_tree().quit(exit_code)
+
+func wait_for_async_save_before_quit() -> void:
+    if save_system == null or not save_system.has_method("has_async_save_pending"):
+        return
+    var guard := 0
+    while bool(save_system.call("has_async_save_pending")) and guard < 600:
+        await startup_loading_yield("Saving world")
+        if save_system.has_method("poll_async_save"):
+            save_system.call("poll_async_save", false)
+        guard += 1
+    if save_system.has_method("poll_async_save"):
+        save_system.call("poll_async_save", true)
+
+func wait_for_terrain_workers_before_quit() -> void:
+    if terrain_meshing_service == null or not terrain_meshing_service.has_method("clear_jobs"):
+        return
+    await startup_loading_yield("Stopping terrain jobs")
+    terrain_meshing_service.call("clear_jobs", false)
+    var guard := 0
+    while guard < 600:
+        if terrain_meshing_service.has_method("collect_retired_worker_threads"):
+            terrain_meshing_service.call("collect_retired_worker_threads", false)
+        var retired_value = terrain_meshing_service.get("retired_worker_threads")
+        var retired_count := (retired_value as Array).size() if retired_value is Array else 0
+        if retired_count <= 0:
+            break
+        await startup_loading_yield("Stopping terrain jobs")
+        guard += 1
+    if terrain_meshing_service.has_method("collect_retired_worker_threads"):
+        terrain_meshing_service.call("collect_retired_worker_threads", true)
+
+func _notification(what: int) -> void:
+    if what == NOTIFICATION_WM_CLOSE_REQUEST:
+        request_graceful_quit()

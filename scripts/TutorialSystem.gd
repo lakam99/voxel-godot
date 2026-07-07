@@ -120,6 +120,67 @@ func start_new_world() -> bool:
     last_dialogue_node = null
     return true
 
+func start_new_world_staged() -> bool:
+    if main == null:
+        return false
+    clear_scene()
+    town = main.town_region(TUTORIAL_TOWN_REGION.x, TUTORIAL_TOWN_REGION.y)
+    if town.is_empty():
+        return false
+    reserve_tutorial_town_layout()
+    started = true
+    interacted.clear()
+    completed_steps.clear()
+    configure_starting_inventory()
+    await loading_yield("Building tutorial town")
+    await ensure_town_generated_staged()
+    await loading_yield("Preparing village perimeter")
+    ensure_village_perimeter()
+    await loading_yield("Preparing village lights")
+    ensure_village_lights()
+    await loading_yield("Preparing starter shelter")
+    ensure_starter_shelter()
+    ensure_starter_bed()
+    setup_intro_repair_quest()
+    place_player_in_starter_house()
+    await loading_yield("Preparing villagers")
+    spawn_tutorial_npcs()
+    force_stormy_night()
+    last_message = "Knock, knock. Someone is at the door."
+    last_dialogue.clear()
+    last_dialogue_node = null
+    return true
+
+func ensure_town_generated_staged() -> void:
+    if main == null or town.is_empty() or main.structure_system == null:
+        return
+    var center := Vector2i(int(town.get("centerX", 0)), int(town.get("centerZ", 0)))
+    var town_key := tutorial_town_key()
+    var max_frames := 360
+    for frame in range(max_frames):
+        if main.structure_system.has_method("update_around_budgeted"):
+            main.structure_system.update_around_budgeted(center, true)
+        else:
+            main.structure_system.update_around(center)
+            return
+        var pending := 0
+        if main.structure_system.has_method("pending_structure_op_count"):
+            pending = int(main.structure_system.pending_structure_op_count())
+        var records_ready := false
+        if main.structure_system.has_method("town_home_records_snapshot"):
+            var records_by_town: Dictionary = main.structure_system.town_home_records_snapshot()
+            var records: Array = records_by_town.get(town_key, []) if records_by_town.get(town_key, []) is Array else []
+            records_ready = not records.is_empty()
+        if records_ready and pending <= 0:
+            return
+        await loading_yield("Building tutorial town %d" % pending)
+
+func loading_yield(message: String) -> void:
+    if main != null and main.has_method("startup_loading_yield"):
+        await main.call("startup_loading_yield", message)
+    elif get_tree() != null:
+        await get_tree().process_frame
+
 func restore(snapshot_value = {}) -> void:
     clear_scene()
     var state: Dictionary = snapshot_value if snapshot_value is Dictionary else {}

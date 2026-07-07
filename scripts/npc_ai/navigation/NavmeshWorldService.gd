@@ -1144,6 +1144,8 @@ func _descriptor_direct_endpoint_route_allowed(start_walkable: Dictionary, targe
 	var target_surface := String(target_walkable.get("surfaceId", ""))
 	if start_surface != "" and start_surface == target_surface:
 		return true
+	if moving_home or kind == "scripted":
+		return false
 	if kind in ["forage", "work", "job", "guard", "idle", "move"]:
 		return start.distance_to(target) <= CELL * 4.0
 	if not moving_home and kind != "scripted":

@@ -11,13 +11,24 @@ var new_game_button: Button
 var quit_button: Button
 var status_label: Label
 var loading_overlay: Control
+var loading_label: Label
 var launching := false
 var saved_seed := ""
+var loading_elapsed := 0.0
+var active_main: Node = null
 
 func _ready() -> void:
     Input.set_mouse_mode(Input.MOUSE_MODE_VISIBLE)
     build_menu()
     refresh_save_state()
+
+func _process(delta: float) -> void:
+    if not launching or loading_label == null or not is_instance_valid(loading_label):
+        return
+    loading_elapsed += maxf(delta, 0.0)
+    var dots := int(floor(loading_elapsed * 2.0)) % 4
+    var base_text := status_label.text if status_label != null and is_instance_valid(status_label) and status_label.text != "" else "Loading"
+    loading_label.text = "%s%s" % [base_text, ".".repeat(dots)]
 
 func build_menu() -> void:
     ui_layer = CanvasLayer.new()
@@ -117,7 +128,7 @@ func build_menu() -> void:
     loading_dim.set_anchors_preset(Control.PRESET_FULL_RECT)
     loading_overlay.add_child(loading_dim)
 
-    var loading_label := Label.new()
+    loading_label = Label.new()
     loading_label.text = "Loading"
     loading_label.theme_type_variation = &"ToastLabel"
     loading_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -162,16 +173,30 @@ func _on_continue_pressed() -> void:
     launch_game("continue")
 
 func _on_quit_pressed() -> void:
+    if launching:
+        return
+    launching = true
+    loading_elapsed = 0.0
+    new_game_button.disabled = true
+    continue_button.disabled = true
+    quit_button.disabled = true
+    status_label.text = "Exiting"
+    loading_overlay.visible = true
+    call_deferred("_deferred_quit")
+
+func _deferred_quit() -> void:
+    await get_tree().process_frame
     get_tree().quit(0)
 
 func launch_game(mode: String) -> void:
     if launching:
         return
     launching = true
+    loading_elapsed = 0.0
     new_game_button.disabled = true
     continue_button.disabled = true
     quit_button.disabled = true
-    status_label.text = "Loading"
+    status_label.text = "Preparing world"
     loading_overlay.visible = true
     call_deferred("_deferred_launch_game", mode)
 
@@ -184,8 +209,50 @@ func _deferred_launch_game(mode: String) -> void:
         launching = false
         refresh_save_state()
         return
+    main.set("deferred_startup_boot", true)
     main.set("startup_mode", mode)
+    active_main = main
+    if main.has_signal("startup_loading_step"):
+        main.connect("startup_loading_step", Callable(self, "_on_game_loading_step"))
+    if main.has_signal("startup_loading_completed"):
+        main.connect("startup_loading_completed", Callable(self, "_on_game_loading_completed"))
+    if main.has_signal("startup_loading_failed"):
+        main.connect("startup_loading_failed", Callable(self, "_on_game_loading_failed"))
     add_child(main)
+
+func _on_game_loading_step(message: String) -> void:
+    if status_label == null or not is_instance_valid(status_label):
+        return
+    status_label.text = message if message != "" else "Loading"
+    loading_elapsed = 0.0
+
+func _on_game_loading_completed() -> void:
+    launching = false
+    disconnect_game_loading_signals()
     if ui_layer != null:
         ui_layer.queue_free()
         ui_layer = null
+
+func _on_game_loading_failed(message: String) -> void:
+    launching = false
+    disconnect_game_loading_signals()
+    status_label.text = message if message != "" else "Load failed"
+    loading_overlay.visible = false
+    new_game_button.disabled = false
+    quit_button.disabled = false
+    refresh_save_state()
+
+func disconnect_game_loading_signals() -> void:
+    if active_main == null or not is_instance_valid(active_main):
+        active_main = null
+        return
+    var step_callable := Callable(self, "_on_game_loading_step")
+    var completed_callable := Callable(self, "_on_game_loading_completed")
+    var failed_callable := Callable(self, "_on_game_loading_failed")
+    if active_main.has_signal("startup_loading_step") and active_main.is_connected("startup_loading_step", step_callable):
+        active_main.disconnect("startup_loading_step", step_callable)
+    if active_main.has_signal("startup_loading_completed") and active_main.is_connected("startup_loading_completed", completed_callable):
+        active_main.disconnect("startup_loading_completed", completed_callable)
+    if active_main.has_signal("startup_loading_failed") and active_main.is_connected("startup_loading_failed", failed_callable):
+        active_main.disconnect("startup_loading_failed", failed_callable)
+    active_main = null

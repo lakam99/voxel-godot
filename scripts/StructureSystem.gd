@@ -27,6 +27,7 @@ var pending_structure_op_index := 0
 var defer_structure_ops := false
 var deferred_town_home_records := {}
 var terrain_surface_sample_cache := {}
+var terrain_footprint_records := {}
 
 func setup(main_node) -> void:
     main = main_node
@@ -50,6 +51,7 @@ func reset() -> void:
     defer_structure_ops = false
     deferred_town_home_records.clear()
     terrain_surface_sample_cache.clear()
+    terrain_footprint_records.clear()
 
 func update_around(center_cell: Vector2i) -> void:
     if main == null:
@@ -492,6 +494,7 @@ func reserve_structure_terrain_footprint(base_x: int, base_z: int, level: float,
     if not world_generation.has_method("apply_box_edit"):
         return
     var floor_y := floori(level / main.CELL)
+    record_structure_terrain_footprint(base_x, base_z, level, width, depth, clearance_cells, source, foundation_material, floor_y)
     var center_sample := terrain_surface_sample_at_cell(base_x + int(width / 2), base_z + int(depth / 2))
     var biome := String(center_sample.get("biome", "plains"))
     var foundation_state := {
@@ -552,6 +555,54 @@ func reserve_structure_terrain_footprint(base_x: int, base_z: int, level: float,
         interior_air_state,
         "structure_air:%s" % source
     )
+
+func record_structure_terrain_footprint(base_x: int, base_z: int, level: float, width: int, depth: int, clearance_cells: int, source: String, foundation_material: String, floor_y: int) -> void:
+    if width <= 0 or depth <= 0:
+        return
+    var min_cell := Vector3i(base_x - 1, floor_y - 3, base_z - 1)
+    var max_cell := Vector3i(base_x + width, floor_y, base_z + depth)
+    var record_id := "%s:%d,%d:%dx%d:%d" % [source, base_x, base_z, width, depth, floor_y]
+    terrain_footprint_records[record_id] = {
+        "id": record_id,
+        "source": source,
+        "material": foundation_material,
+        "baseX": base_x,
+        "baseZ": base_z,
+        "width": width,
+        "depth": depth,
+        "level": level,
+        "floorY": floor_y,
+        "clearanceCells": clearance_cells,
+        "minCell": min_cell,
+        "maxCell": max_cell
+    }
+
+func structure_terrain_footprints_for_chunk(chunk_key: Vector2i, chunk_size: int) -> Array:
+    var result := []
+    var size := maxi(1, int(chunk_size))
+    var start_x := chunk_key.x * size
+    var start_z := chunk_key.y * size
+    var end_x := start_x + size
+    var end_z := start_z + size
+    for record_value in terrain_footprint_records.values():
+        if not (record_value is Dictionary):
+            continue
+        var record: Dictionary = record_value
+        var min_cell: Vector3i = record.get("minCell", Vector3i.ZERO)
+        var max_cell: Vector3i = record.get("maxCell", Vector3i.ZERO)
+        if max_cell.x < start_x or min_cell.x >= end_x:
+            continue
+        if max_cell.z < start_z or min_cell.z >= end_z:
+            continue
+        result.append(record.duplicate(true))
+    return result
+
+func structure_terrain_footprints_snapshot() -> Array:
+    var result := []
+    for record_value in terrain_footprint_records.values():
+        if record_value is Dictionary:
+            result.append((record_value as Dictionary).duplicate(true))
+    return result
 
 func build_town(town: Dictionary) -> void:
     var rng := RandomNumberGenerator.new()

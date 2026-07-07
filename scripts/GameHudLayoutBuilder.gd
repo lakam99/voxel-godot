@@ -230,6 +230,7 @@ static func build_ui(hud) -> void:
     GameHudPanelBuilderScript.build_settings_panel(hud, root)
     GameHudPanelBuilderScript.build_playtest_panel(hud, root)
     GameHudPanelBuilderScript.build_sleep_fade_overlay(hud, root)
+    GameHudPanelBuilderScript.build_loading_overlay(hud, root)
     set_passive_hud_mouse_filters(hud)
 
 static func build_victory_panel(hud, root: Control) -> void:

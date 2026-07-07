@@ -6,9 +6,11 @@ const RuntimePerformanceObservationRunnerScript := preload("res://scripts/testin
 const SAMPLE_EVERY_FRAMES := 6
 const DEFAULT_DURATION_SECONDS := 75.0
 const DEFAULT_WARMUP_FRAMES := 120
-const SPRINT_DIRECTION := Vector3(1.0, 0.0, 0.0)
-const SPRINT_CELL_DIRECTION := Vector2i(1, 0)
-const MIN_SPRINT_TRAVEL_DISTANCE := 45.0
+const SEGMENT_SECONDS := 8.0
+const SEGMENT_PAUSE_SECONDS := 0.65
+const SEGMENT_LANE_CHECK_CELLS := 48
+const JUMP_INTERVAL_FRAMES := 150
+const MIN_RUNTIME_TRAVEL_DISTANCE := 45.0
 
 var report_path := ""
 var progress_path := ""
@@ -25,6 +27,14 @@ var boot_add_child_ms := 0.0
 var boot_first_frames_ms := 0.0
 var measurement_start := Vector3.INF
 var measurement_end := Vector3.INF
+var last_travel_position := Vector3.INF
+var accumulated_travel_distance := 0.0
+var direction_change_count := 0
+var pause_frame_count := 0
+var jump_request_count := 0
+var jump_observed_count := 0
+var last_segment_index := -1
+var segment_visit_counts := {}
 var samples := []
 var metrics_helper = RuntimePerformanceObservationRunnerScript.new()
 
@@ -109,18 +119,28 @@ func run_normal_runtime_scenario() -> Dictionary:
     await get_tree().physics_frame
     boot_first_frames_ms = elapsed_ms(first_frames_started)
     write_progress("main_first_frames")
-    if not configure_player_for_sprint():
-        return failed_result("player could not be configured for normal runtime sprint traversal")
+    if not configure_player_for_runtime_traversal():
+        return failed_result("player could not be configured for normal runtime traversal")
     await warmup()
     reset_runtime_performance_monitor()
     measurement_start = player_position()
+    last_travel_position = measurement_start
+    accumulated_travel_distance = 0.0
+    direction_change_count = 0
+    pause_frame_count = 0
+    jump_request_count = 0
+    jump_observed_count = 0
+    last_segment_index = -1
+    segment_visit_counts.clear()
     samples.clear()
     write_progress("measure_start")
     var started_msec := Time.get_ticks_msec()
     var frame := 0
     while float(Time.get_ticks_msec() - started_msec) / 1000.0 < duration_seconds:
-        update_live_sprint()
+        var elapsed_seconds := float(Time.get_ticks_msec() - started_msec) / 1000.0
+        update_normal_runtime_automation(frame, elapsed_seconds)
         await get_tree().process_frame
+        observe_player_travel()
         if frame % SAMPLE_EVERY_FRAMES == 0 and main != null and main.has_method("debug_performance_state"):
             samples.append(main.call("debug_performance_state"))
         if frame % 120 == 0:
@@ -137,12 +157,14 @@ func run_normal_runtime_scenario() -> Dictionary:
     var failures: Array = metrics_helper.call("performance_failures", metrics)
     if samples.is_empty():
         failures.append("no performance samples captured")
-    if float(metrics.get("playerTravelDistance", 0.0)) < MIN_SPRINT_TRAVEL_DISTANCE:
-        failures.append("normal runtime sprint traversal did not move far enough to exercise streaming")
+    if float(metrics.get("playerTravelDistance", 0.0)) < MIN_RUNTIME_TRAVEL_DISTANCE:
+        failures.append("normal runtime traversal did not move far enough to exercise streaming")
+    if int(metrics.get("directionChanges", 0)) < 3:
+        failures.append("normal runtime traversal did not change directions enough")
     var passed := failures.is_empty()
     flush_async_save()
     return {
-        "id": "normal_runtime_sprint_traversal",
+        "id": "normal_runtime_mixed_traversal",
         "scenario": scenario,
         "passed": passed,
         "details": result_details(metrics, failures),
@@ -151,13 +173,13 @@ func run_normal_runtime_scenario() -> Dictionary:
         "metrics": metrics
     }
 
-func configure_player_for_sprint() -> bool:
+func configure_player_for_runtime_traversal() -> bool:
     if main == null:
         return false
     var player_body := main.get("player") as CharacterBody3D
     if player_body == null:
         return false
-    var start_cell := find_sprint_start_cell()
+    var start_cell := find_runtime_start_cell()
     var start_y := float(main.call("surface_y_at_cell", Vector3i(start_cell.x, 0, start_cell.y))) + 0.10
     player_body.global_position = Vector3(float(start_cell.x) * 1.35, start_y, float(start_cell.y) * 1.35)
     player_body.velocity = Vector3.ZERO
@@ -165,12 +187,13 @@ func configure_player_for_sprint() -> bool:
     player_body.set("terrain_grounded", true)
     player_body.set("automated_input", true)
     player_body.set("automated_sprint", true)
-    player_body.set("automated_move", SPRINT_DIRECTION)
+    player_body.set("automated_move", runtime_movement_segments()[0].get("direction", Vector3.RIGHT))
+    player_body.set("automated_jump", false)
     if main.has_method("update_chunks"):
         main.call("update_chunks", false)
     return true
 
-func find_sprint_start_cell() -> Vector2i:
+func find_runtime_start_cell() -> Vector2i:
     var player_body := main.get("player") as Node3D
     var origin := player_body.global_position if player_body != null else Vector3.ZERO
     var origin_cell := Vector2i(int(main.call("world_to_cell", origin.x)), int(main.call("world_to_cell", origin.z)))
@@ -184,14 +207,25 @@ func find_sprint_start_cell() -> Vector2i:
     ]
     for offset in offsets:
         var candidate := origin_cell + offset
-        if sprint_lane_ok(candidate):
+        if runtime_route_pattern_ok(candidate):
             return candidate
     return origin_cell + offsets[0]
 
-func sprint_lane_ok(start_cell: Vector2i) -> bool:
+func runtime_route_pattern_ok(start_cell: Vector2i) -> bool:
+    var cursor := start_cell
+    for segment in runtime_movement_segments():
+        var cell_direction: Vector2i = segment.get("cellDirection", Vector2i.ZERO)
+        if cell_direction == Vector2i.ZERO:
+            continue
+        if not runtime_lane_ok(cursor, cell_direction):
+            return false
+        cursor += cell_direction * SEGMENT_LANE_CHECK_CELLS
+    return true
+
+func runtime_lane_ok(start_cell: Vector2i, cell_direction: Vector2i) -> bool:
     var previous_height := INF
-    for step in range(56):
-        var cell := start_cell + SPRINT_CELL_DIRECTION * step
+    for step in range(SEGMENT_LANE_CHECK_CELLS):
+        var cell := start_cell + cell_direction * step
         var height := float(main.call("surface_y_at_cell", Vector3i(cell.x, 0, cell.y)))
         if height < 1.35 * 3.0 or height > 96.0:
             return false
@@ -206,16 +240,69 @@ func sprint_lane_ok(start_cell: Vector2i) -> bool:
 func warmup() -> void:
     write_progress("warmup:%d" % warmup_frames)
     for _i in range(warmup_frames):
-        update_live_sprint()
+        update_normal_runtime_automation(_i, float(_i) / 60.0)
         await get_tree().process_frame
 
-func update_live_sprint() -> void:
+func update_normal_runtime_automation(frame: int, elapsed_seconds: float) -> void:
     var player_body := main.get("player") as CharacterBody3D if main != null else null
     if player_body == null:
         return
+    var segment_state := runtime_segment_for_elapsed(elapsed_seconds)
+    var segment_index := int(segment_state.get("index", 0))
+    var move_direction: Vector3 = segment_state.get("direction", Vector3.ZERO)
+    var paused := bool(segment_state.get("paused", false))
+    if segment_index != last_segment_index:
+        if last_segment_index >= 0:
+            direction_change_count += 1
+        last_segment_index = segment_index
+    var segment_key := String(segment_state.get("label", "segment_%d" % segment_index))
+    segment_visit_counts[segment_key] = int(segment_visit_counts.get(segment_key, 0)) + 1
+    if paused:
+        pause_frame_count += 1
     player_body.set("automated_input", true)
-    player_body.set("automated_sprint", true)
-    player_body.set("automated_move", SPRINT_DIRECTION)
+    player_body.set("automated_sprint", not paused)
+    player_body.set("automated_move", Vector3.ZERO if paused else move_direction)
+    if not paused and frame > 0 and frame % JUMP_INTERVAL_FRAMES == 0:
+        player_body.set("automated_jump", true)
+        jump_request_count += 1
+    if not paused and move_direction.length_squared() > 0.001:
+        player_body.rotation.y = atan2(-move_direction.x, -move_direction.z)
+
+func runtime_segment_for_elapsed(elapsed_seconds: float) -> Dictionary:
+    var segments := runtime_movement_segments()
+    var segment_window := SEGMENT_SECONDS + SEGMENT_PAUSE_SECONDS
+    var index := int(floor(elapsed_seconds / segment_window)) % segments.size()
+    var phase := fmod(elapsed_seconds, segment_window)
+    var segment: Dictionary = segments[index]
+    return {
+        "index": index,
+        "label": String(segment.get("label", "segment_%d" % index)),
+        "direction": segment.get("direction", Vector3.ZERO),
+        "paused": phase >= SEGMENT_SECONDS
+    }
+
+func runtime_movement_segments() -> Array[Dictionary]:
+    return [
+        { "label": "east_sprint", "direction": Vector3(1.0, 0.0, 0.0), "cellDirection": Vector2i(1, 0) },
+        { "label": "south_sprint", "direction": Vector3(0.0, 0.0, 1.0), "cellDirection": Vector2i(0, 1) },
+        { "label": "west_sprint", "direction": Vector3(-1.0, 0.0, 0.0), "cellDirection": Vector2i(-1, 0) },
+        { "label": "north_sprint", "direction": Vector3(0.0, 0.0, -1.0), "cellDirection": Vector2i(0, -1) },
+        { "label": "southeast_sprint", "direction": Vector3(1.0, 0.0, 1.0).normalized(), "cellDirection": Vector2i(1, 1) },
+        { "label": "northwest_sprint", "direction": Vector3(-1.0, 0.0, -1.0).normalized(), "cellDirection": Vector2i(-1, -1) }
+    ]
+
+func observe_player_travel() -> void:
+    var current := player_position()
+    if current == Vector3.INF:
+        return
+    if last_travel_position != Vector3.INF:
+        var delta := current - last_travel_position
+        delta.y = 0.0
+        accumulated_travel_distance += delta.length()
+    last_travel_position = current
+    var player_body := main.get("player") as CharacterBody3D if main != null else null
+    if player_body != null and bool(player_body.get("jumped_this_frame")):
+        jump_observed_count += 1
 
 func stop_player_automation() -> void:
     var player_body := main.get("player") as CharacterBody3D if main != null else null
@@ -223,6 +310,7 @@ func stop_player_automation() -> void:
         return
     player_body.set("automated_move", Vector3.ZERO)
     player_body.set("automated_sprint", false)
+    player_body.set("automated_jump", false)
     player_body.velocity = Vector3.ZERO
 
 func reset_runtime_performance_monitor() -> void:
@@ -252,17 +340,23 @@ func append_normal_metrics(metrics: Dictionary, frame_count: int) -> void:
     metrics["savePathOverridden"] = OS.get_environment("VOXEL_SAVE_PATH_OVERRIDE").strip_edges() != ""
     metrics["voxelPlaytest"] = OS.get_environment("VOXEL_PLAYTEST").strip_edges()
     metrics["fastBoot"] = OS.get_environment("VOXEL_RUNTIME_PERF_FAST_BOOT").strip_edges()
+    metrics["directionChanges"] = direction_change_count
+    metrics["pauseFrames"] = pause_frame_count
+    metrics["jumpRequests"] = jump_request_count
+    metrics["jumpObserved"] = jump_observed_count
+    metrics["segmentVisitCounts"] = segment_visit_counts.duplicate(true)
     if measurement_start == Vector3.INF or measurement_end == Vector3.INF:
         metrics["playerTravelDistance"] = 0.0
         return
     var delta := measurement_end - measurement_start
     delta.y = 0.0
-    metrics["playerTravelDistance"] = delta.length()
+    metrics["playerTravelDistance"] = accumulated_travel_distance
+    metrics["playerDisplacementDistance"] = delta.length()
     metrics["playerStart"] = vec3(measurement_start)
     metrics["playerEnd"] = vec3(measurement_end)
 
 func result_details(metrics: Dictionary, failures: Array) -> String:
-    return "samples=%d p99=%.2f max=%.2f chunkMax=%.2f npcMax=%.2f saveMax=%.2f travel=%.2f bootAddChild=%.2f failures=%d" % [
+    return "samples=%d p99=%.2f max=%.2f chunkMax=%.2f npcMax=%.2f saveMax=%.2f travel=%.2f turns=%d jumps=%d/%d bootAddChild=%.2f failures=%d" % [
         samples.size(),
         float(metrics.get("frameP99Ms", 0.0)),
         float(metrics.get("frameMaxMs", 0.0)),
@@ -270,6 +364,9 @@ func result_details(metrics: Dictionary, failures: Array) -> String:
         float(metrics.get("maxNpcMs", 0.0)),
         float(metrics.get("maxAutosaveMs", 0.0)),
         float(metrics.get("playerTravelDistance", 0.0)),
+        int(metrics.get("directionChanges", 0)),
+        int(metrics.get("jumpObserved", 0)),
+        int(metrics.get("jumpRequests", 0)),
         float(metrics.get("bootAddChildMs", 0.0)),
         failures.size()
     ]
@@ -281,8 +378,17 @@ func normal_runtime_controls() -> Dictionary:
         "fixedFps": false,
         "autosaveExpectedEnabled": true,
         "savePathOverride": OS.get_environment("VOXEL_SAVE_PATH_OVERRIDE").strip_edges(),
-        "testSeed": OS.get_environment("VOXEL_TEST_SEED").strip_edges()
+        "testSeed": OS.get_environment("VOXEL_TEST_SEED").strip_edges(),
+        "movementSegments": runtime_movement_segment_labels(),
+        "segmentSeconds": SEGMENT_SECONDS,
+        "segmentPauseSeconds": SEGMENT_PAUSE_SECONDS
     }
+
+func runtime_movement_segment_labels() -> Array[String]:
+    var labels: Array[String] = []
+    for segment in runtime_movement_segments():
+        labels.append(String(segment.get("label", "")))
+    return labels
 
 func capture_screenshot() -> void:
     if DisplayServer.get_name() == "headless":
@@ -298,7 +404,7 @@ func player_position() -> Vector3:
 
 func failed_result(reason: String) -> Dictionary:
     return {
-        "id": "normal_runtime_sprint_traversal",
+        "id": "normal_runtime_mixed_traversal",
         "scenario": scenario,
         "passed": false,
         "details": reason,
@@ -345,6 +451,11 @@ func write_report(report: Dictionary) -> void:
 
 func finish(code: int) -> void:
     finished = true
+    if main != null and is_instance_valid(main):
+        main.queue_free()
+    call_deferred("_quit_deferred", code)
+
+func _quit_deferred(code: int) -> void:
     get_tree().quit(code)
 
 func elapsed_ms(start_usec: int) -> float:

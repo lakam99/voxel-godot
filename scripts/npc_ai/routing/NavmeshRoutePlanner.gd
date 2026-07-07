@@ -7,13 +7,17 @@ const CELL := NpcConstantsScript.CELL_SIZE
 const INVALID_CELL := Vector2i(999999, 999999)
 const INITIAL_HAIRPIN_MAX_DISTANCE := CELL * 1.25
 const INITIAL_HAIRPIN_TARGET_MARGIN := CELL * 0.12
-const GENERATED_CELL_BRIDGE_MAX_VISITS := 4096
-const GENERATED_CELL_BRIDGE_ACTIVE_JOB_MAX_VISITS := 64
-const GENERATED_CELL_BRIDGE_ROUTINE_MAX_VISITS := 48
+const GENERATED_CELL_BRIDGE_MAX_VISITS := 1536
+const GENERATED_CELL_BRIDGE_ACTIVE_JOB_MAX_VISITS := 192
+const GENERATED_CELL_BRIDGE_ROUTINE_MAX_VISITS := 32
 const GENERATED_CELL_BRIDGE_MARGIN_CELLS := 8
-const GENERATED_CELL_BRIDGE_MAX_USEC := 18000
-const GENERATED_CELL_BRIDGE_ACTIVE_JOB_MAX_USEC := 1000
-const GENERATED_CELL_BRIDGE_ROUTINE_MAX_USEC := 400
+const GENERATED_CELL_BRIDGE_MAX_USEC := 5500
+const GENERATED_CELL_BRIDGE_ACTIVE_JOB_MAX_USEC := 1500
+const GENERATED_CELL_BRIDGE_ROUTINE_MAX_USEC := 250
+const GENERATED_CELL_BRIDGE_FRAME_MAX_USEC := 7000
+const GENERATED_CELL_BRIDGE_MAX_VALIDATION_STEPS := 160
+const GENERATED_CELL_BRIDGE_ACTIVE_JOB_MAX_VALIDATION_STEPS := 80
+const GENERATED_CELL_BRIDGE_ROUTINE_MAX_VALIDATION_STEPS := 24
 
 var navmesh_world = null
 var system = null
@@ -24,6 +28,8 @@ var _generated_bridge_came_from := {}
 var _generated_bridge_block_reasons := {}
 var _generated_bridge_last_visited := 0
 var _generated_bridge_last_reason := ""
+var _generated_bridge_budget_frame := -1
+var _generated_bridge_budget_used_usec := 0
 
 func setup(navmesh_service = null, system_node = null, main_node = null, generated_world_adapter = null) -> void:
 	navmesh_world = navmesh_service
@@ -91,11 +97,13 @@ func plan_runtime_route(entry: Dictionary, intent: Dictionary, generated_world =
 				monitor.end_section("navmesh_route_generated_bridge", bridge_start)
 			if not cell_bridge_route.is_empty():
 				return cell_bridge_route
-		elif route is Dictionary:
+		elif not bridge_allowed and route is Dictionary:
 			route["generatedCellBridge"] = {
 				"ok": false,
 				"reason": "skipped_routine_endpoint_mismatch"
 			}
+			return _route_failure(String(route.get("status", "blocked")), String(route.get("reason", "no_route")), target_cell, route)
+		if route is Dictionary:
 			return _route_failure(String(route.get("status", "blocked")), String(route.get("reason", "no_route")), target_cell, route)
 	var fallback_cell: Vector2i = route.get("fallbackCell", target_cell) if route.get("fallbackCell", target_cell) is Vector2i else target_cell
 	var validate_build_start: int = monitor.begin_section("navmesh_route_validate_build") if monitor != null else Time.get_ticks_usec()
@@ -275,8 +283,27 @@ func _plan_generated_cell_bridge_route(entry: Dictionary, intent: Dictionary, ge
 		target_lookup[goal] = true
 	var bounds := _generated_bridge_bounds(start_cell, goal_cells)
 	var visit_budget := _generated_bridge_visit_budget(entry, intent)
-	var usec_budget := _generated_bridge_usec_budget(entry, intent)
+	var requested_usec_budget := _generated_bridge_usec_budget(entry, intent)
+	var frame_usec_budget := _generated_bridge_frame_budget_remaining_usec()
+	if frame_usec_budget <= 0:
+		if failed_route is Dictionary:
+			failed_route["generatedCellBridge"] = {
+				"ok": false,
+				"reason": "generated_cell_bridge_frame_budget",
+				"goals": goal_cells.size(),
+				"visited": 0,
+				"maxVisits": visit_budget,
+				"maxUsec": 0,
+				"blockedReasons": {}
+			}
+		var frame_budget_monitor = main.get("runtime_perf_monitor") if main != null else null
+		if frame_budget_monitor != null:
+			frame_budget_monitor.increment_counter("generated_cell_bridge_frame_budget_yields")
+		return {}
+	var usec_budget := mini(requested_usec_budget, frame_usec_budget)
+	var bridge_search_start_usec := Time.get_ticks_usec()
 	var found_cell := _generated_bridge_search(entry, source, snapshot, start_cell, target_lookup, bounds, visit_budget, usec_budget, bool(intent.get("allowPartial", false)))
+	_consume_generated_bridge_frame_budget(bridge_search_start_usec)
 	if found_cell == INVALID_CELL:
 		if failed_route is Dictionary:
 			failed_route["generatedCellBridge"] = {
@@ -290,7 +317,40 @@ func _plan_generated_cell_bridge_route(entry: Dictionary, intent: Dictionary, ge
 			}
 		return {}
 	var cells := _generated_bridge_reconstruct_path(found_cell)
-	var validation := _generated_bridge_validate_path(entry, source, snapshot, cells, target_lookup)
+	var validation_step_budget := _generated_bridge_validation_step_budget(entry, intent)
+	if validation_step_budget > 0 and cells.size() - 1 > validation_step_budget:
+		if failed_route is Dictionary:
+			failed_route["generatedCellBridge"] = {
+				"ok": false,
+				"reason": "generated_cell_bridge_validation_step_budget",
+				"goals": goal_cells.size(),
+				"visited": _generated_bridge_last_visited,
+				"maxVisits": visit_budget,
+				"maxUsec": usec_budget,
+				"maxValidationSteps": validation_step_budget,
+				"blockedReasons": _generated_bridge_block_reasons.duplicate()
+			}
+		return {}
+	var validation_usec_budget := 0 if _generated_bridge_critical(intent) else _generated_bridge_frame_budget_remaining_usec()
+	if validation_usec_budget <= 0 and not _generated_bridge_critical(intent):
+		if failed_route is Dictionary:
+			failed_route["generatedCellBridge"] = {
+				"ok": false,
+				"reason": "generated_cell_bridge_validation_frame_budget",
+				"goals": goal_cells.size(),
+				"visited": _generated_bridge_last_visited,
+				"maxVisits": visit_budget,
+				"maxUsec": usec_budget,
+				"maxValidationSteps": validation_step_budget,
+				"blockedReasons": _generated_bridge_block_reasons.duplicate()
+			}
+		var validation_budget_monitor = main.get("runtime_perf_monitor") if main != null else null
+		if validation_budget_monitor != null:
+			validation_budget_monitor.increment_counter("generated_cell_bridge_validation_frame_budget_yields")
+		return {}
+	var validation_start_usec := Time.get_ticks_usec()
+	var validation := _generated_bridge_validate_path(entry, source, snapshot, cells, target_lookup, validation_usec_budget)
+	_consume_generated_bridge_frame_budget(validation_start_usec)
 	if not bool(validation.get("ok", false)):
 		if failed_route is Dictionary:
 			failed_route["generatedCellBridge"] = {
@@ -300,6 +360,7 @@ func _plan_generated_cell_bridge_route(entry: Dictionary, intent: Dictionary, ge
 				"visited": _generated_bridge_last_visited,
 				"maxVisits": visit_budget,
 				"maxUsec": usec_budget,
+				"maxValidationSteps": validation_step_budget,
 				"blockedReasons": _generated_bridge_block_reasons.duplicate(),
 				"validation": validation
 			}
@@ -383,36 +444,68 @@ func _generated_bridge_bounds(start_cell: Vector2i, goals: Array[Vector2i]) -> D
 	}
 
 func _generated_bridge_visit_budget(entry: Dictionary, intent: Dictionary) -> int:
+	var override := int(intent.get("generatedBridgeMaxVisits", 0))
+	if override > 0:
+		return override
 	var route_kind := String(intent.get("kind", "move"))
-	if entry.has("_externalDirectMoveFrame") or entry.has("_standaloneNpcUpdateFrame"):
+	var critical_bridge := _generated_bridge_critical(intent)
+	if (entry.has("_externalDirectMoveFrame") or entry.has("_standaloneNpcUpdateFrame")) and critical_bridge:
 		return GENERATED_CELL_BRIDGE_MAX_VISITS
 	if route_kind in ["guard", "work", "forage", "job"]:
 		return GENERATED_CELL_BRIDGE_ACTIVE_JOB_MAX_VISITS
 	if _routine_route_kind(route_kind):
 		return GENERATED_CELL_BRIDGE_ROUTINE_MAX_VISITS
-	if bool(intent.get("movingHome", false)) or bool(intent.get("strictArrival", false)):
-		return GENERATED_CELL_BRIDGE_MAX_VISITS
-	if route_kind in ["home", "scripted"]:
-		return GENERATED_CELL_BRIDGE_MAX_VISITS
-	if int(intent.get("priority", 0)) >= 180 and route_kind not in ["guard", "work", "forage", "job", "idle", "move"]:
+	if critical_bridge:
 		return GENERATED_CELL_BRIDGE_MAX_VISITS
 	return GENERATED_CELL_BRIDGE_ROUTINE_MAX_VISITS
 
 func _generated_bridge_usec_budget(entry: Dictionary, intent: Dictionary) -> int:
+	var override := int(intent.get("generatedBridgeUsecBudget", 0))
+	if override > 0:
+		return override
 	var route_kind := String(intent.get("kind", "move"))
-	if entry.has("_externalDirectMoveFrame") or entry.has("_standaloneNpcUpdateFrame"):
+	var critical_bridge := _generated_bridge_critical(intent)
+	if (entry.has("_externalDirectMoveFrame") or entry.has("_standaloneNpcUpdateFrame")) and critical_bridge:
 		return GENERATED_CELL_BRIDGE_MAX_USEC
 	if route_kind in ["guard", "work", "forage", "job"]:
 		return GENERATED_CELL_BRIDGE_ACTIVE_JOB_MAX_USEC
 	if _routine_route_kind(route_kind):
 		return GENERATED_CELL_BRIDGE_ROUTINE_MAX_USEC
-	if bool(intent.get("movingHome", false)) or bool(intent.get("strictArrival", false)):
-		return GENERATED_CELL_BRIDGE_MAX_USEC
-	if route_kind in ["home", "scripted"]:
-		return GENERATED_CELL_BRIDGE_MAX_USEC
-	if int(intent.get("priority", 0)) >= 180 and route_kind not in ["guard", "work", "forage", "job", "idle", "move"]:
+	if critical_bridge:
 		return GENERATED_CELL_BRIDGE_MAX_USEC
 	return GENERATED_CELL_BRIDGE_ROUTINE_MAX_USEC
+
+func _generated_bridge_validation_step_budget(entry: Dictionary, intent: Dictionary) -> int:
+	var route_kind := String(intent.get("kind", "move"))
+	if _generated_bridge_critical(intent):
+		return GENERATED_CELL_BRIDGE_MAX_VALIDATION_STEPS
+	if route_kind in ["guard", "work", "forage", "job"]:
+		return GENERATED_CELL_BRIDGE_ACTIVE_JOB_MAX_VALIDATION_STEPS
+	if _routine_route_kind(route_kind):
+		return GENERATED_CELL_BRIDGE_ROUTINE_MAX_VALIDATION_STEPS
+	return GENERATED_CELL_BRIDGE_ROUTINE_MAX_VALIDATION_STEPS
+
+func _generated_bridge_critical(intent: Dictionary) -> bool:
+	var route_kind := String(intent.get("kind", "move"))
+	return bool(intent.get("movingHome", false)) \
+		or bool(intent.get("strictArrival", false)) \
+		or route_kind in ["home", "scripted"] \
+		or int(intent.get("priority", 0)) >= 180
+
+func _begin_generated_bridge_budget_frame() -> void:
+	var engine_frame := Engine.get_process_frames()
+	if _generated_bridge_budget_frame == engine_frame:
+		return
+	_generated_bridge_budget_frame = engine_frame
+	_generated_bridge_budget_used_usec = 0
+
+func _generated_bridge_frame_budget_remaining_usec() -> int:
+	_begin_generated_bridge_budget_frame()
+	return maxi(0, GENERATED_CELL_BRIDGE_FRAME_MAX_USEC - _generated_bridge_budget_used_usec)
+
+func _consume_generated_bridge_frame_budget(start_usec: int) -> void:
+	_begin_generated_bridge_budget_frame()
+	_generated_bridge_budget_used_usec += maxi(0, Time.get_ticks_usec() - start_usec)
 
 func _routine_route_kind(route_kind: String) -> bool:
 	return route_kind in ["guard", "work", "forage", "job", "idle", "move"]
@@ -456,10 +549,10 @@ func _generated_bridge_search(entry: Dictionary, source, snapshot: Dictionary, s
 				_generated_bridge_block_reasons["route_avoid_cell"] = int(_generated_bridge_block_reasons.get("route_avoid_cell", 0)) + 1
 				continue
 			var transition: Dictionary = {}
-			if source.has_method("cell_transition_pathable"):
-				transition = source.cell_transition_pathable(entry, snapshot, cell, next, target_lookup, true)
-			elif source.has_method("cell_bridge_search_pathable"):
+			if source.has_method("cell_bridge_search_pathable"):
 				transition = source.cell_bridge_search_pathable(entry, snapshot, cell, next, target_lookup, true)
+			elif source.has_method("cell_transition_pathable"):
+				transition = source.cell_transition_pathable(entry, snapshot, cell, next, target_lookup, true)
 			elif source.has_method("cell_pathable"):
 				transition = source.cell_pathable(entry, snapshot, cell, next, target_lookup, true)
 			else:
@@ -554,10 +647,18 @@ func _generated_bridge_reconstruct_path(found_cell: Vector2i) -> Array[Vector2i]
 		cells.push_front(cursor)
 	return cells
 
-func _generated_bridge_validate_path(entry: Dictionary, source, snapshot: Dictionary, cells: Array[Vector2i], target_lookup: Dictionary) -> Dictionary:
+func _generated_bridge_validate_path(entry: Dictionary, source, snapshot: Dictionary, cells: Array[Vector2i], target_lookup: Dictionary, max_usec := 0) -> Dictionary:
 	if cells.size() <= 1 or not source.has_method("cell_transition_pathable"):
 		return { "ok": true, "reason": "" }
+	var validation_start_usec := Time.get_ticks_usec()
+	var usec_limit := maxi(0, max_usec)
 	for index in range(1, cells.size()):
+		if usec_limit > 0 and index > 1 and Time.get_ticks_usec() - validation_start_usec >= usec_limit:
+			return {
+				"ok": false,
+				"reason": "generated_cell_bridge_validation_time_budget",
+				"pathIndex": index
+			}
 		var from_cell: Vector2i = cells[index - 1]
 		var to_cell: Vector2i = cells[index]
 		var transition: Dictionary = source.cell_transition_pathable(entry, snapshot, from_cell, to_cell, target_lookup, true)

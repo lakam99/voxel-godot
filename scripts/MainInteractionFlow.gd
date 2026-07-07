@@ -1,5 +1,27 @@
 extends "res://scripts/MainPlaytestTools.gd"
 
+var forage_mesh_cache := {}
+
+func forage_sphere_mesh(key: String, radius: float, height: float) -> SphereMesh:
+    if forage_mesh_cache.has(key):
+        return forage_mesh_cache[key] as SphereMesh
+    var mesh := SphereMesh.new()
+    mesh.radius = radius
+    mesh.height = height
+    forage_mesh_cache[key] = mesh
+    return mesh
+
+func forage_cylinder_mesh(key: String, bottom_radius: float, top_radius: float, height: float, radial_segments: int) -> CylinderMesh:
+    if forage_mesh_cache.has(key):
+        return forage_mesh_cache[key] as CylinderMesh
+    var mesh := CylinderMesh.new()
+    mesh.bottom_radius = bottom_radius
+    mesh.top_radius = top_radius
+    mesh.height = height
+    mesh.radial_segments = radial_segments
+    forage_mesh_cache[key] = mesh
+    return mesh
+
 func make_ore(parent: Node, prop_id: String, position: Vector3, ore_type: String, rng: RandomNumberGenerator):
     if ore_type == "":
         ore_type = "copperOre"
@@ -84,65 +106,51 @@ func make_forage(parent: Node, prop_id: String, position: Vector3, biome: String
 
     match material_id:
         "aloePatch":
+            var leaf_mesh := forage_cylinder_mesh("aloe_leaf", 0.14, 0.0, 0.68, 5)
             for i in range(6):
-                var leaf_mesh := CylinderMesh.new()
-                leaf_mesh.bottom_radius = 0.12 + rng.randf() * 0.04
-                leaf_mesh.top_radius = 0.0
-                leaf_mesh.height = 0.55 + rng.randf() * 0.28
-                leaf_mesh.radial_segments = 5
                 var leaf := MeshInstance3D.new()
                 leaf.mesh = leaf_mesh
                 leaf.material_override = materials["aloePatch"]
                 leaf.position = Vector3((rng.randf() - 0.5) * 0.38, 0.24, (rng.randf() - 0.5) * 0.38)
                 leaf.rotation = Vector3(0.35 + rng.randf() * 0.35, rng.randf() * TAU, 0.0)
+                leaf.scale = Vector3(0.86 + rng.randf() * 0.28, 0.82 + rng.randf() * 0.35, 0.86 + rng.randf() * 0.28)
                 body.add_child(leaf)
         "mushroomCluster":
+            var stem_mesh := forage_cylinder_mesh("mushroom_stem", 0.055, 0.04, 0.36, 5)
+            var cap_mesh := forage_sphere_mesh("mushroom_cap", 0.16, 0.13)
             for i in range(4):
-                var stem_mesh := CylinderMesh.new()
-                stem_mesh.top_radius = 0.04
-                stem_mesh.bottom_radius = 0.055
-                stem_mesh.height = 0.26 + rng.randf() * 0.20
-                stem_mesh.radial_segments = 5
                 var stem := MeshInstance3D.new()
                 stem.mesh = stem_mesh
                 stem.material_override = materials["mushroomCluster"]
-                stem.position = Vector3((rng.randf() - 0.5) * 0.52, stem_mesh.height * 0.5, (rng.randf() - 0.5) * 0.52)
+                var stem_height_scale := 0.72 + rng.randf() * 0.55
+                stem.position = Vector3((rng.randf() - 0.5) * 0.52, 0.18 * stem_height_scale, (rng.randf() - 0.5) * 0.52)
+                stem.scale = Vector3(1.0, stem_height_scale, 1.0)
                 body.add_child(stem)
-                var cap_mesh := SphereMesh.new()
-                cap_mesh.radius = 0.13 + rng.randf() * 0.05
-                cap_mesh.height = cap_mesh.radius * 0.8
                 var cap := MeshInstance3D.new()
                 cap.mesh = cap_mesh
                 cap.material_override = materials["mushroomCap"]
-                cap.position = stem.position + Vector3(0.0, stem_mesh.height * 0.58, 0.0)
-                cap.scale = Vector3(1.15, 0.52, 1.15)
+                cap.position = stem.position + Vector3(0.0, 0.21 * stem_height_scale, 0.0)
+                cap.scale = Vector3(1.0 + rng.randf() * 0.34, 0.48 + rng.randf() * 0.16, 1.0 + rng.randf() * 0.34)
                 body.add_child(cap)
         "frostHerbPatch":
+            var blade_mesh := forage_cylinder_mesh("frost_blade", 0.055, 0.0, 0.52, 4)
             for i in range(5):
-                var blade_mesh := CylinderMesh.new()
-                blade_mesh.bottom_radius = 0.055
-                blade_mesh.top_radius = 0.0
-                blade_mesh.height = 0.42 + rng.randf() * 0.22
-                blade_mesh.radial_segments = 4
                 var blade := MeshInstance3D.new()
                 blade.mesh = blade_mesh
                 blade.material_override = materials["frostHerbPatch"]
                 blade.position = Vector3((rng.randf() - 0.5) * 0.44, 0.22, (rng.randf() - 0.5) * 0.44)
                 blade.rotation = Vector3(0.18 + rng.randf() * 0.28, rng.randf() * TAU, 0.0)
+                blade.scale = Vector3(0.9 + rng.randf() * 0.22, 0.82 + rng.randf() * 0.42, 0.9 + rng.randf() * 0.22)
                 body.add_child(blade)
         _:
-            var bush_mesh := SphereMesh.new()
-            bush_mesh.radius = 0.42 + rng.randf() * 0.10
-            bush_mesh.height = bush_mesh.radius * 1.05
+            var bush_mesh := forage_sphere_mesh("berry_bush", 0.48, 0.50)
             var bush := MeshInstance3D.new()
             bush.mesh = bush_mesh
             bush.material_override = materials["berryBush"]
             bush.position.y = 0.38
-            bush.scale = Vector3(1.18, 0.72, 1.05)
+            bush.scale = Vector3(1.02 + rng.randf() * 0.28, 0.62 + rng.randf() * 0.18, 0.96 + rng.randf() * 0.22)
             body.add_child(bush)
-            var berry_mesh := SphereMesh.new()
-            berry_mesh.radius = 0.055
-            berry_mesh.height = 0.11
+            var berry_mesh := forage_sphere_mesh("berry_fruit", 0.055, 0.11)
             for i in range(7):
                 var berry := MeshInstance3D.new()
                 berry.mesh = berry_mesh

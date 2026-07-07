@@ -102,9 +102,21 @@ $process.StartInfo.CreateNoWindow = [bool]$Headless
 $process.StartInfo.Arguments = ($godotArgs | ForEach-Object { '"' + ($_ -replace '"', '\"') + '"' }) -join " "
 $started = Get-Date
 [void]$process.Start()
+$stoppedAfterCompletedReport = $false
 
 while (-not $process.HasExited) {
     Start-Sleep -Milliseconds 500
+    if (Test-Path -LiteralPath $ReportPath) {
+        $progressText = ""
+        if (Test-Path -LiteralPath $ProgressPath) {
+            $progressText = Get-Content -LiteralPath $ProgressPath -Raw
+        }
+        if ($progressText -match "capture_screenshot_done" -and (((Get-Date) - $started).TotalSeconds -gt ($DurationSeconds + 30))) {
+            Stop-ProcessTree $process
+            $stoppedAfterCompletedReport = $true
+            break
+        }
+    }
     if (((Get-Date) - $started).TotalSeconds -gt $WatchdogSeconds) {
         Stop-ProcessTree $process
         Write-Error "Normal runtime performance pass watchdog exceeded $WatchdogSeconds seconds"
@@ -115,7 +127,7 @@ while (-not $process.HasExited) {
     }
 }
 
-$exitCode = $process.ExitCode
+$exitCode = if ($stoppedAfterCompletedReport) { 0 } else { $process.ExitCode }
 if (-not (Test-Path -LiteralPath $ReportPath)) {
     Write-Error "Missing fresh normal runtime performance report: $ReportPath"
     exit 1

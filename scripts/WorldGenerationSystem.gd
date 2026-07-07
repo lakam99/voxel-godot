@@ -1126,17 +1126,23 @@ func underground_fluid_for_cell(cell: Vector3i, position: Vector3, _depth: float
 
 func surface_color_for_cell3(cell: Vector3i) -> Color:
 	var biome := surface_biome_for_cell3(cell)
+	if biome == "town":
+		return Color(0.43, 0.53, 0.32)
 	if biome == "beach" or biome == "desert":
-		return Color(0.62, 0.57, 0.42)
+		return Color(0.76, 0.67, 0.42)
 	if biome == "swamp":
-		return Color(0.30, 0.38, 0.29)
+		return Color(0.28, 0.39, 0.22)
 	if biome == "snow":
 		return Color(0.77, 0.82, 0.82)
 	if biome == "alpine" or biome == "tundra":
-		return Color(0.38, 0.41, 0.39)
+		return Color(0.34, 0.35, 0.31)
 	if biome == UNDERGROUND_AIR_BIOME or biome == "underground":
-		return Color(0.20, 0.22, 0.21)
-	return Color(0.37, 0.47, 0.34)
+		return Color(0.18, 0.17, 0.14)
+	if biome == "savanna":
+		return Color(0.55, 0.58, 0.29)
+	if biome == "forest" or biome == "taiga":
+		return Color(0.34, 0.53, 0.29)
+	return Color(0.43, 0.62, 0.32)
 
 func world_to_cell3(position: Vector3) -> Vector3i:
 	var s := cell_size()

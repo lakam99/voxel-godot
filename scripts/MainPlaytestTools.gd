@@ -284,6 +284,8 @@ func chunk_compatible_volume_step(preferred_step: int) -> int:
 func underground_volume_mesh_step_for_chunk(_start_x: int, _start_z: int) -> int:
     if chunk_has_terrain_volume_edits(_start_x, _start_z):
         return 1
+    if chunk_has_town_surface_volume_edge(_start_x, _start_z):
+        return chunk_compatible_volume_step(4)
     var preferred_step := 8
     if chunk_has_underground_focus_overlap(_start_x, _start_z):
         if bool(get("force_underground_volume_fine_focus")):
@@ -1070,23 +1072,23 @@ func volume_material_surface_color(material_id: String, biome: String, normal: V
         return BIOME_COLORS.get(biome, BIOME_COLORS["plains"]) * shade
     match material_id:
         "sand":
-            return Color(0.62, 0.57, 0.42) * shade
+            return Color(0.76, 0.67, 0.42) * shade
         "mud":
-            return Color(0.30, 0.35, 0.25) * shade
+            return Color(0.28, 0.39, 0.22) * shade
         "snow":
             return Color(0.77, 0.82, 0.82) * shade
         "dirt":
-            return Color(0.32, 0.27, 0.18) * shade
+            return Color(0.43, 0.27, 0.15) * shade
         "bedrock":
             return Color(0.10, 0.11, 0.11) * shade
         "deepStone":
-            return Color(0.24, 0.26, 0.25) * shade
+            return Color(0.22, 0.23, 0.21) * shade
         "copperOre":
             return Color(0.48, 0.30, 0.20) * shade
         "ironOre":
-            return Color(0.40, 0.39, 0.36) * shade
+            return Color(0.38, 0.35, 0.31) * shade
         _:
-            return Color(0.36, 0.38, 0.35) * shade
+            return Color(0.34, 0.35, 0.31) * shade
 
 func add_terrain_array_surface(mesh: ArrayMesh, surface_data: Dictionary, material: Material = null) -> void:
     var vertices: PackedVector3Array = surface_data.get("vertices", PackedVector3Array())
@@ -1318,25 +1320,29 @@ func exterior_surface_color_for_cell(cell_x: int, cell_z: int) -> Color:
 
 func exterior_surface_color_for_cell_from_context(cell_x: int, cell_z: int, surface_y: float, context: Dictionary) -> Color:
     if exterior_surface_context_contains_town_cell(cell_x, cell_z, context):
-        return Color(0.37, 0.47, 0.34)
+        return Color(0.43, 0.53, 0.32)
     return natural_exterior_surface_color_for_cell(cell_x, cell_z, surface_y)
 
 func natural_exterior_surface_color_for_cell(cell_x: int, cell_z: int, surface_y: float) -> Color:
     var moisture: float = noise01(moisture_noise, cell_x - 1200, cell_z + 800)
     var temp: float = clampf(0.42 + noise01(temp_noise, cell_x + 1500, cell_z - 900) * 0.46 - abs(cell_z) / 1300.0 - maxf(0.0, surface_y - 38.0) / 180.0, 0.0, 1.0)
     if surface_y < float(WATER_LEVEL) + 1.7:
-        return Color(0.62, 0.57, 0.42)
+        return Color(0.76, 0.67, 0.42)
     if surface_y > 78.0:
         return Color(0.77, 0.82, 0.82)
     if surface_y > 56.0:
-        return Color(0.38, 0.41, 0.39)
+        return Color(0.34, 0.35, 0.31)
     if surface_y > 42.0 and moisture < 0.5:
-        return Color(0.38, 0.41, 0.39)
+        return Color(0.34, 0.35, 0.31)
     if moisture > 0.78 and surface_y < float(WATER_LEVEL) + 6.0:
-        return Color(0.30, 0.38, 0.29)
+        return Color(0.28, 0.39, 0.22)
     if temp > 0.68 and moisture < 0.32:
-        return Color(0.62, 0.57, 0.42)
-    return Color(0.37, 0.47, 0.34)
+        return Color(0.76, 0.67, 0.42)
+    if temp > 0.61 and moisture < 0.48:
+        return Color(0.55, 0.58, 0.29)
+    if moisture > 0.64:
+        return Color(0.34, 0.53, 0.29)
+    return Color(0.43, 0.62, 0.32)
 
 func exterior_surface_context_contains_town_cell(cell_x: int, cell_z: int, context: Dictionary) -> bool:
     var towns_value = context.get("towns", [])
@@ -1365,6 +1371,33 @@ func exterior_surface_normal_for_cell(cell_x: int, cell_z: int) -> Vector3:
     var back := natural_exterior_surface_y_cell(cell_x, cell_z - 1)
     var forward := natural_exterior_surface_y_cell(cell_x, cell_z + 1)
     return Vector3(left - right, CELL * 2.0, back - forward).normalized()
+
+func chunk_has_town_surface_volume_edge(start_x: int, start_z: int) -> bool:
+    var context := exterior_surface_chunk_context(start_x, start_z)
+    var towns_value = context.get("towns", [])
+    if not (towns_value is Array) or (towns_value as Array).is_empty():
+        return false
+    var step := 4
+    var edge_threshold := CELL * 0.65
+    var slope_threshold := CELL * 1.25
+    var offsets: Array[Vector2i] = [Vector2i(step, 0), Vector2i(0, step)]
+    for local_z in range(-step, CHUNK_SIZE + step + 1, step):
+        for local_x in range(-step, CHUNK_SIZE + step + 1, step):
+            var cell_x := start_x + local_x
+            var cell_z := start_z + local_z
+            var in_town := exterior_surface_context_contains_town_cell(cell_x, cell_z, context)
+            var surface_y := exterior_surface_y_cell_from_context(cell_x, cell_z, context)
+            for offset in offsets:
+                var neighbor_x := cell_x + offset.x
+                var neighbor_z := cell_z + offset.y
+                var neighbor_in_town := exterior_surface_context_contains_town_cell(neighbor_x, neighbor_z, context)
+                var neighbor_y := exterior_surface_y_cell_from_context(neighbor_x, neighbor_z, context)
+                var delta_y := absf(surface_y - neighbor_y)
+                if in_town != neighbor_in_town and delta_y >= edge_threshold:
+                    return true
+                if (in_town or neighbor_in_town) and delta_y >= slope_threshold:
+                    return true
+    return false
 
 func project_chunk_surface_normals(mesh: Mesh, cx: int, cz: int) -> Mesh:
     if mesh == null or not (mesh is ArrayMesh):
@@ -1428,6 +1461,8 @@ func chunk_needs_generated_underground_volume_mesh(start_x: int, start_z: int) -
     var focus_is_underground := player != null and position_is_near_underground_air_focus(player.global_position)
     if focus_is_underground and chunk_has_underground_focus_overlap(start_x, start_z):
         return true
+    if chunk_has_town_surface_volume_edge(start_x, start_z):
+        return true
     if has_method("should_use_cached_generated_volume_exposure_only") and bool(call("should_use_cached_generated_volume_exposure_only")):
         var cached_value = cached_generated_surface_volume_exposure(start_x, start_z)
         if cached_value is Dictionary:
@@ -1460,6 +1495,8 @@ func adjacent_chunk_requires_generated_underground_volume_mesh(start_x: int, sta
         if chunk_has_terrain_volume_edits(neighbor_start_x, neighbor_start_z):
             return true
         if focus_is_underground and chunk_has_underground_focus_overlap(neighbor_start_x, neighbor_start_z):
+            return true
+        if chunk_has_town_surface_volume_edge(neighbor_start_x, neighbor_start_z):
             return true
         if chunk_has_generated_surface_volume_exposure(neighbor_start_x, neighbor_start_z):
             return true

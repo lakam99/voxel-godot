@@ -407,12 +407,19 @@ func _on_resume_requested() -> void:
     update_hud("Resumed")
 
 func _on_new_game_requested() -> void:
-    start_new_game(true)
+    if has_method("start_new_game_staged"):
+        await call("start_new_game_staged", true)
+    else:
+        start_new_game(true)
     if inventory_system:
         inventory_system.clear()
         _sync_inventory_totals()
     if held_item:
         held_item.refresh_active()
+
+func _on_quit_requested() -> void:
+    if has_method("request_graceful_quit"):
+        call("request_graceful_quit")
 
 func _on_recipe_crafted(recipe_id: String, output: String, amount: int) -> void:
     mark_world_dirty("recipe_crafted")

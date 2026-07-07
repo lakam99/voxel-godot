@@ -22,6 +22,7 @@ signal playtest_requested(case_id)
 signal playtest_cleanup_requested
 signal resume_requested
 signal new_game_requested
+signal quit_requested
 signal dialogue_closed(context)
 
 var inventory
@@ -112,6 +113,8 @@ var last_selected_slot_seen := -999
 var last_progression_recent := ""
 var sleep_fade_overlay: ColorRect
 var sleep_fade_tween: Tween
+var loading_overlay: Control
+var loading_label: Label
 var icon_cache := {}
 var icon_factory
 var hotbar_slot_buttons: Array[Button] = []
@@ -155,6 +158,20 @@ func play_sleep_fade(fade_out := 0.55, hold := 0.45, fade_in := 0.70) -> void:
 
 func is_sleep_fading() -> bool:
     return sleep_fade_overlay != null and sleep_fade_overlay.visible
+
+func show_loading_overlay(message := "Loading") -> void:
+    if loading_overlay == null or loading_label == null:
+        return
+    loading_label.text = message
+    loading_overlay.visible = true
+
+func hide_loading_overlay() -> void:
+    if loading_overlay != null:
+        loading_overlay.visible = false
+
+func set_loading_message(message: String) -> void:
+    if loading_label != null:
+        loading_label.text = message
 
 func set_status(seed_text: String, biome: String, chunk_count: int, coords: Vector2, time_text: String, weather_state := {}) -> void:
     GameHudRendererScript.set_status(self, seed_text, biome, chunk_count, coords, time_text, weather_state)
@@ -695,6 +712,9 @@ func _on_resume_pressed() -> void:
 
 func _on_new_game_pressed() -> void:
     new_game_requested.emit()
+
+func _on_quit_pressed() -> void:
+    quit_requested.emit()
 
 func _on_menu_settings_pressed() -> void:
     set_game_menu_open(false)

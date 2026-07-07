@@ -900,7 +900,9 @@ func update_npcs(delta: float, day_factor: float) -> void:
             var observer_position := Vector3.INF
             if main != null and main.get("player") is Node3D:
                 observer_position = (main.get("player") as Node3D).global_position
-            var lod_result: Dictionary = autonomy_system.update_simulation_lod(entry, delta, observer_position)
+            var lod_result: Dictionary = autonomy_system.update_simulation_lod(entry, delta, observer_position, {
+                "allowStationaryAbstract": true
+            })
             lod_state = String(lod_result.get("state", "active"))
             if autonomy_system.has_method("prefetch_for_entry"):
                 autonomy_system.prefetch_for_entry(entry)
@@ -1154,8 +1156,10 @@ func update_scripted_npc(entry: Dictionary, body: Node3D, delta: float) -> void:
     var arrival_radius := float(body.get_meta("npc_scripted_arrival_radius", CELL * 0.45))
     var speed_mode := set_npc_speed_mode(entry, body.get_meta("npc_scripted_speed_mode", entry.get("npcSpeedMode", NPC_SPEED_MODE_WALKING)), "scripted_go_to")
     var movement_speed := npc_speed_for_mode(entry, speed_mode)
-    scripted_order_result(entry, "ACTIVE", "go_to", "")
-    entry["lastMoveDistance"] = move_npc(entry, scripted_target, movement_speed * delta, false, allow_outside, delta)
+    var scripted_kind := String(body.get_meta("npc_scripted_order_kind", ""))
+    var moving_home := scripted_kind == "go_home" or String(entry.get("activeGoalKind", "")) == "home"
+    scripted_order_result(entry, "ACTIVE", scripted_kind if scripted_kind != "" else "go_to", "")
+    entry["lastMoveDistance"] = move_npc(entry, scripted_target, movement_speed * delta, moving_home, allow_outside, delta)
     if float(entry.get("lastMoveDistance", 0.0)) > 0.001:
         entry.erase("scriptedRouteBlockedTime")
     if body.global_position.distance_to(scripted_target) <= arrival_radius:
@@ -1993,6 +1997,11 @@ func home_route_target(entry: Dictionary) -> Vector3:
     var route_positions: Array = entry.get("homeRoutePositions", []) if entry.get("homeRoutePositions", []) is Array else []
     if not route_positions.is_empty():
         var route_index := clampi(int(entry.get("homeRouteIndex", 0)), 0, route_positions.size())
+        if route_index > 0 and not home_route_actor_inside(entry, body) and route_positions[0] is Vector3:
+            var porch_target: Vector3 = route_positions[0]
+            if body.global_position.distance_to(porch_target) > CELL * 2.0:
+                route_index = 0
+                entry["homeRouteIndex"] = route_index
         if route_index < route_positions.size():
             var current_target = route_positions[route_index]
             if current_target is Vector3:

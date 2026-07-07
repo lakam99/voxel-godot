@@ -292,19 +292,31 @@ func rescue_guard_target(guard: Node3D) -> Vector3:
         candidates.append(system.rescue_site + ring_direction * CELL * 7.0)
     var first_clear_candidate := Vector3.INF
     var first_visible_candidate := Vector3.INF
+    var first_reachable_candidate := Vector3.INF
+    var first_pending_candidate := Vector3.INF
     for candidate in candidates:
         candidate.y = surface_y_at_position(candidate) + 0.04
         if not rescue_guard_target_clear(candidate):
             continue
         if not first_clear_candidate.is_finite():
             first_clear_candidate = candidate
-        if rescue_guard_target_has_line_of_sight(candidate):
+        var reachability := rescue_guard_target_reachability(guard, candidate)
+        if bool(reachability.get("reachable", false)) and not first_reachable_candidate.is_finite():
+            first_reachable_candidate = candidate
+        elif bool(reachability.get("pending", false)) and not first_pending_candidate.is_finite():
+            first_pending_candidate = candidate
+        var visible := rescue_guard_target_has_line_of_sight(candidate)
+        if visible and (bool(reachability.get("reachable", false)) or bool(reachability.get("pending", false))):
             if not first_visible_candidate.is_finite():
                 first_visible_candidate = candidate
-        else:
+        elif not visible:
             continue
-        if rescue_guard_target_reachable(guard, candidate):
+        if bool(reachability.get("reachable", false)):
             return candidate
+    if first_reachable_candidate.is_finite():
+        return first_reachable_candidate
+    if first_pending_candidate.is_finite():
+        return first_pending_candidate
     if first_visible_candidate.is_finite():
         return first_visible_candidate
     if first_clear_candidate.is_finite():
@@ -313,31 +325,45 @@ func rescue_guard_target(guard: Node3D) -> Vector3:
     return fallback
 
 func rescue_guard_target_reachable(guard: Node3D, position: Vector3) -> bool:
+    return bool(rescue_guard_target_reachability(guard, position).get("reachable", false))
+
+func rescue_guard_target_reachability(guard: Node3D, position: Vector3) -> Dictionary:
     if guard == null or main == null or main.npc_system == null:
-        return true
+        return { "reachable": true, "pending": false }
     if not main.npc_system.has_method("npc_entry_for_actor"):
-        return true
+        return { "reachable": true, "pending": false }
     var entry: Dictionary = main.npc_system.npc_entry_for_actor(guard)
     if entry.is_empty():
-        return true
+        return { "reachable": true, "pending": false }
     var pathing = main.npc_system.get("pathing")
     if pathing == null:
-        return true
+        return { "reachable": true, "pending": false }
     if pathing.has_method("ensure_ready"):
         pathing.ensure_ready()
     var goal_planner = pathing.get("goal_planner")
     var route_planner = pathing.get("route_planner")
     if goal_planner == null or route_planner == null or not goal_planner.has_method("make_intent") or not route_planner.has_method("plan_route"):
-        return true
-    var intent: Dictionary = goal_planner.make_intent(entry, position, CELL * 1.2, false, true)
+        return { "reachable": true, "pending": false }
+    var probe_entry := entry.duplicate(true)
+    probe_entry["body"] = entry.get("body")
+    probe_entry["routeForceReplan"] = true
+    var intent: Dictionary = goal_planner.make_intent(probe_entry, position, CELL * 1.2, false, true)
     intent["kind"] = "scripted"
     intent["priority"] = maxi(int(intent.get("priority", 0)), 220)
-    var route: Dictionary = route_planner.plan_route(entry, intent)
+    intent["arrivalRadius"] = CELL * 1.2
+    intent["strictArrival"] = false
+    intent["allowPartial"] = false
+    intent["fallbackCells"] = []
+    var route: Dictionary = route_planner.plan_route(probe_entry, intent)
     if String(route.get("status", "")) == "pending":
-        return false
+        return { "reachable": false, "pending": true, "reason": String(route.get("reason", "")) }
     if String(route.get("status", "")) == "partial":
-        return false
-    return bool(route.get("ok", false))
+        return { "reachable": false, "pending": false, "reason": String(route.get("reason", "partial")) }
+    return {
+        "reachable": bool(route.get("ok", false)),
+        "pending": false,
+        "reason": String(route.get("reason", ""))
+    }
 
 func rescue_guard_target_has_line_of_sight(position: Vector3) -> bool:
     if main == null:
@@ -356,11 +382,40 @@ func rescue_guard_target_clear(position: Vector3) -> bool:
         return true
     if surface_y_at_position(position) < main.WATER_LEVEL + 0.8:
         return false
+    if rescue_guard_target_navigation_blocked(position):
+        return false
     var radius_sq := CELL * CELL * 1.6
     for root in [main.get("prop_root"), main.get("chunk_root")]:
         if rescue_root_has_near_prop(root as Node, position, radius_sq):
             return false
     return true
+
+func rescue_guard_target_navigation_blocked(position: Vector3) -> bool:
+    if main == null or main.npc_system == null:
+        return false
+    var pathing = main.npc_system.get("pathing")
+    if pathing == null:
+        return false
+    if pathing.has_method("ensure_ready"):
+        pathing.ensure_ready()
+    var world = pathing.get("navigation_world")
+    if world == null or not world.has_method("world_cell"):
+        return false
+    var cell: Vector2i = world.world_cell(position)
+    if world.has_method("live_static_blocker_for_cell") and world.live_static_blocker_for_cell(cell) != null:
+        return true
+    var snapshot: Dictionary = {}
+    if world.has_method("cached_static_tile_snapshot"):
+        snapshot = world.cached_static_tile_snapshot(true, false)
+    elif world.has_method("build_snapshot"):
+        snapshot = world.build_snapshot({}, true, false)
+    if snapshot.is_empty():
+        return false
+    if world.has_method("static_blocker") and world.static_blocker(snapshot, cell) != null:
+        return true
+    if world.has_method("prop_clearance_blocker") and world.prop_clearance_blocker(snapshot, cell) != null:
+        return true
+    return false
 
 func rescue_root_has_near_prop(root: Node, position: Vector3, radius_sq: float) -> bool:
     if root == null:

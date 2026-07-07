@@ -103,18 +103,18 @@ const NON_STRUCTURAL_BLOCK_TYPES := {
 
 const BIOME_COLORS := {
     "ocean": Color(0.24, 0.58, 0.68),
-    "beach": Color(0.82, 0.72, 0.46),
-    "plains": Color(0.48, 0.76, 0.34),
-    "forest": Color(0.31, 0.60, 0.31),
-    "taiga": Color(0.28, 0.52, 0.43),
-    "swamp": Color(0.34, 0.43, 0.25),
-    "desert": Color(0.82, 0.66, 0.36),
-    "savanna": Color(0.66, 0.67, 0.34),
-    "town": Color(0.43, 0.67, 0.38),
-    "alpine": Color(0.50, 0.55, 0.53),
-    "tundra": Color(0.58, 0.66, 0.58),
+    "beach": Color(0.76, 0.67, 0.42),
+    "plains": Color(0.43, 0.62, 0.32),
+    "forest": Color(0.34, 0.53, 0.29),
+    "taiga": Color(0.34, 0.53, 0.29),
+    "swamp": Color(0.28, 0.39, 0.22),
+    "desert": Color(0.76, 0.67, 0.42),
+    "savanna": Color(0.55, 0.58, 0.29),
+    "town": Color(0.43, 0.53, 0.32),
+    "alpine": Color(0.34, 0.35, 0.31),
+    "tundra": Color(0.34, 0.35, 0.31),
     "snow": Color(0.86, 0.91, 0.90),
-    "underground_air": Color(0.20, 0.22, 0.21)
+    "underground_air": Color(0.18, 0.17, 0.14)
 }
 
 
@@ -168,6 +168,9 @@ func restore_furnace_state(state_value) -> Dictionary: return {}
 func serialize_single_slot(slot_value) -> Dictionary: return {}
 func restore_single_slot(slot_value) -> Dictionary: return {}
 func reload_chunks(defer_rebuild := false) -> void: pass
+func queue_chunk_load(chunk_key: Vector2i) -> void: pass
+func process_pending_chunk_loads(center: Vector2i) -> int: return 0
+func process_pending_chunk_prop_spawns() -> int: return 0
 func vector3_to_array(value: Vector3) -> Array: return []
 func array_to_vector3(value, fallback: Vector3) -> Vector3: return Vector3.ZERO
 func optional_vector3(value): return null
@@ -293,6 +296,7 @@ func _on_utility_action_requested(action: String, payload) -> void: pass
 func _on_dialogue_closed(context) -> void: pass
 func _on_resume_requested() -> void: pass
 func _on_new_game_requested() -> void: pass
+func _on_quit_requested() -> void: pass
 func _on_recipe_crafted(recipe_id: String, output: String, amount: int) -> void: pass
 func _on_objective_completed(objective: Dictionary) -> void: pass
 func _on_utility_changed() -> void: pass

@@ -1,5 +1,5 @@
 shader_type spatial;
-render_mode diffuse_burley, specular_schlick_ggx, cull_disabled;
+render_mode diffuse_burley, specular_disabled, cull_disabled;
 
 uniform float macro_scale = 0.030;
 uniform float macro_strength = 0.075;
@@ -17,10 +17,10 @@ uniform vec4 terrain_local_light_positions[12];
 uniform vec4 terrain_local_light_colors[12];
 uniform float terrain_local_light_strength = 0.11;
 uniform float terrain_local_light_max = 0.18;
-uniform vec3 rock_tint : source_color = vec3(0.44, 0.47, 0.43);
+uniform vec3 rock_tint : source_color = vec3(0.36, 0.36, 0.32);
 uniform vec3 snow_tint : source_color = vec3(0.86, 0.90, 0.86);
-uniform float roughness_value = 0.90;
-uniform float specular_value = 0.14;
+uniform float roughness_value = 0.98;
+uniform float specular_value = 0.02;
 
 varying vec3 v_world_pos;
 varying vec3 v_world_normal;

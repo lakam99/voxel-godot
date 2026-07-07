@@ -4,10 +4,11 @@ const DEFAULT_VISUAL_LIGHT_LAYER := 1
 const SHADOW_AUTHORITATIVE_LIGHT_MASK := DEFAULT_VISUAL_LIGHT_LAYER
 const STREAMING_FRAME_DEFER_NONCRITICAL_MS := 8.0
 const FRAME_BUDGET_DEFER_OPTIONAL_MS := 11.0
-const FRAME_BUDGET_DEFER_SIMULATION_MS := 14.0
+const FRAME_BUDGET_DEFER_SIMULATION_MS := 11.5
 const FRAME_BUDGET_DEFER_REMAINING_MS := 20.0
 const DEFERRED_NPC_SIMULATION_DELTA_CAP := 1.0
 const DEFERRED_NPC_FORCE_UPDATE_INTERVAL := 0.10
+const DEFERRED_NPC_HEAVY_FRAME_FORCE_UPDATE_INTERVAL := 0.30
 const NPC_SIMULATION_MAX_STEP_DELTA := 1.0 / 30.0
 const DEFERRED_HOSTILE_SIMULATION_DELTA_CAP := 0.50
 const DEFERRED_HOSTILE_FORCE_UPDATE_INTERVAL := 0.10
@@ -356,6 +357,7 @@ func setup_hud() -> void:
     hud.playtest_cleanup_requested.connect(_on_playtest_cleanup_requested)
     hud.resume_requested.connect(_on_resume_requested)
     hud.new_game_requested.connect(_on_new_game_requested)
+    hud.quit_requested.connect(_on_quit_requested)
     hud.dialogue_closed.connect(_on_dialogue_closed)
     hud.set_settings_state(runtime_settings)
     hud.set_playtest_cases(playtest_case_specs())
@@ -647,9 +649,11 @@ func _process(delta: float) -> void:
     if runtime_perf_monitor != null:
         runtime_perf_monitor.observe_duration("hostiles", perf_hostiles_ms)
     var npc_start := Time.get_ticks_usec()
-    var npc_defer_requested := not tutorial_realtime_simulation and should_defer_frame_work(frame_start, defer_noncritical_frame_work, FRAME_BUDGET_DEFER_SIMULATION_MS)
+    var heavy_after_hostiles := not tutorial_realtime_simulation and profiled_ms(frame_start) >= FRAME_BUDGET_DEFER_SIMULATION_MS
+    var npc_defer_requested := not tutorial_realtime_simulation and (should_defer_frame_work(frame_start, defer_noncritical_frame_work, FRAME_BUDGET_DEFER_SIMULATION_MS) or heavy_after_hostiles)
     var npc_deferred_total := minf(deferred_npc_simulation_delta + delta, DEFERRED_NPC_SIMULATION_DELTA_CAP)
-    var defer_npc := npc_defer_requested and npc_deferred_total < DEFERRED_NPC_FORCE_UPDATE_INTERVAL
+    var npc_force_interval := DEFERRED_NPC_HEAVY_FRAME_FORCE_UPDATE_INTERVAL if heavy_after_hostiles else DEFERRED_NPC_FORCE_UPDATE_INTERVAL
+    var defer_npc := npc_defer_requested and npc_deferred_total < npc_force_interval
     if defer_npc:
         perf_npc_ms = 0.0
         deferred_npc_simulation_delta = npc_deferred_total

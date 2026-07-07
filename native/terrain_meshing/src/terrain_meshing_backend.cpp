@@ -372,12 +372,12 @@ Vector3 interpolate_zero_crossing_normal(
 Color color_for_surface(double p_world_y, double p_surface_y, double p_cell_size) {
 	double depth_cells = (p_surface_y - p_world_y) / MAX(0.001, p_cell_size);
 	if (depth_cells > 20.0) {
-		return Color(0.34, 0.37, 0.36, 1.0);
+		return Color(0.24, 0.25, 0.23, 1.0);
 	}
 	if (depth_cells > 6.0) {
-		return Color(0.43, 0.40, 0.31, 1.0);
+		return Color(0.42, 0.29, 0.18, 1.0);
 	}
-	return Color(0.46, 0.54, 0.34, 1.0);
+	return Color(0.43, 0.62, 0.32, 1.0);
 }
 
 Color material_color(const String &p_material, double p_world_y, double p_surface_y, double p_cell_size) {
@@ -385,31 +385,31 @@ Color material_color(const String &p_material, double p_world_y, double p_surfac
 		return Color(0.68, 0.43, 0.28, 1.0);
 	}
 	if (p_material == "ironOre") {
-		return Color(0.55, 0.47, 0.40, 1.0);
+		return Color(0.48, 0.42, 0.34, 1.0);
 	}
 	if (p_material == "bedrock") {
 		return Color(0.19, 0.21, 0.21, 1.0);
 	}
 	if (p_material == "deepStone") {
-		return Color(0.28, 0.31, 0.31, 1.0);
+		return Color(0.24, 0.25, 0.23, 1.0);
 	}
 	if (p_material == "stone") {
-		return Color(0.38, 0.41, 0.39, 1.0);
+		return Color(0.34, 0.35, 0.31, 1.0);
 	}
 	if (p_material == "sand") {
-		return Color(0.76, 0.68, 0.44, 1.0);
+		return Color(0.76, 0.67, 0.42, 1.0);
 	}
 	if (p_material == "snow") {
 		return Color(0.82, 0.84, 0.77, 1.0);
 	}
 	if (p_material == "mud") {
-		return Color(0.31, 0.30, 0.22, 1.0);
+		return Color(0.28, 0.39, 0.22, 1.0);
 	}
 	if (p_material == "dirt") {
-		return Color(0.34, 0.29, 0.20, 1.0);
+		return Color(0.43, 0.27, 0.15, 1.0);
 	}
 	if (p_material == "grass") {
-		return Color(0.46, 0.54, 0.34, 1.0);
+		return Color(0.43, 0.62, 0.32, 1.0);
 	}
 	return color_for_surface(p_world_y, p_surface_y, p_cell_size);
 }

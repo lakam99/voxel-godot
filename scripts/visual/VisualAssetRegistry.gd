@@ -95,6 +95,8 @@ func cache_asset_scenes() -> bool:
             ok = false
             continue
         root.name = asset_id
+        apply_render_policy(root, asset_id)
+        root.set_meta("render_policy_preapplied", true)
         var packed := PackedScene.new()
         var pack_error := packed.pack(root)
         root.free()
@@ -191,7 +193,8 @@ func instantiate_asset(asset_id: String) -> Node3D:
         return null
     node.set_meta("visual_source", "generated_asset")
     node.set_meta("visual_asset_id", asset_id)
-    apply_render_policy(node, asset_id)
+    if not bool(node.get_meta("render_policy_preapplied", false)):
+        apply_render_policy(node, asset_id)
     return node
 
 func apply_render_policy(node: Node3D, asset_id: String) -> void:

@@ -824,6 +824,8 @@ func process_pending_terrain_meshing_jobs(center: Vector2i) -> int:
 func terrain_meshing_runtime_work_allowed(_center: Vector2i) -> bool:
     if bool(get("visual_capture_active")) or bool(get("force_underground_volume_debug")) or bool(get("force_underground_volume_fine_focus")):
         return true
+    if loaded_provisional_volume_mesh_work_pending():
+        return true
     if player != null and has_method("position_is_near_underground_air_focus") and bool(call("position_is_near_underground_air_focus", player.global_position)):
         return true
     if world_generation_system != null and world_generation_system.has_method("terrain_volume_edit_count"):
@@ -832,6 +834,32 @@ func terrain_meshing_runtime_work_allowed(_center: Vector2i) -> bool:
     if has_method("active_volume_excavation_brushes"):
         var brushes: Array = call("active_volume_excavation_brushes")
         if not brushes.is_empty():
+            return true
+    return false
+
+func loaded_provisional_volume_mesh_work_pending() -> bool:
+    if terrain_meshing_service == null or not terrain_meshing_service.has_method("pending_job_count"):
+        return false
+    if int(terrain_meshing_service.pending_job_count()) <= 0:
+        return false
+    for key_value in chunks.keys():
+        if not (key_value is Vector2i):
+            continue
+        var key: Vector2i = key_value
+        var chunk := chunks.get(key) as Node3D
+        if chunk == null or not is_instance_valid(chunk):
+            continue
+        var mesh_instance := chunk.get_node_or_null("TerrainMesh") as MeshInstance3D
+        var mesh := mesh_instance.mesh if mesh_instance != null else null
+        if mesh == null or not bool(mesh.get_meta("terrainMeshingProvisional", false)):
+            continue
+        var start_x := key.x * CHUNK_SIZE
+        var start_z := key.y * CHUNK_SIZE
+        if has_method("chunk_has_terrain_volume_edits") and bool(call("chunk_has_terrain_volume_edits", start_x, start_z)):
+            return true
+        if has_method("chunk_has_excavation_overlap") and bool(call("chunk_has_excavation_overlap", start_x, start_z)):
+            return true
+        if has_method("chunk_needs_generated_underground_volume_mesh") and bool(call("chunk_needs_generated_underground_volume_mesh", start_x, start_z)):
             return true
     return false
 
@@ -901,10 +929,29 @@ func provisional_chunk_assets(cx: int, cz: int, defer_collision_shape := false) 
     }
 
 func streaming_provisional_exterior_surface_mesh(cx: int, cz: int) -> ArrayMesh:
+    var start_x := cx * CHUNK_SIZE
+    var start_z := cz * CHUNK_SIZE
+    var town_context := streaming_chunk_has_town_surface_context(start_x, start_z)
+    var town_edge := has_method("chunk_has_town_surface_volume_edge") and bool(call("chunk_has_town_surface_volume_edge", start_x, start_z))
+    if town_context or town_edge:
+        var solid_mesh := streaming_solid_volume_placeholder_mesh(cx, cz, STREAMING_SOLID_PLACEHOLDER_STEP_CELLS)
+        if solid_mesh.get_surface_count() > 0:
+            solid_mesh.set_meta("terrainVisualUndersideClosed", true)
+            solid_mesh.set_meta("terrainProvisionalSolidPlaceholder", true)
+            return solid_mesh
     var mesh := streaming_lod_exterior_mesh(cx, cz, STREAMING_EXTERIOR_REFRESH_STEP_CELLS)
     if mesh.get_surface_count() <= 0:
         mesh = streaming_lod_exterior_mesh(cx, cz, 1)
     return mesh
+
+func streaming_chunk_has_town_surface_context(start_x: int, start_z: int) -> bool:
+    if not has_method("exterior_surface_chunk_context"):
+        return false
+    var context_value = call("exterior_surface_chunk_context", start_x, start_z)
+    if not (context_value is Dictionary):
+        return false
+    var towns_value = (context_value as Dictionary).get("towns", [])
+    return towns_value is Array and not (towns_value as Array).is_empty()
 
 func streaming_provisional_solid_slab_mesh(cx: int, cz: int) -> ArrayMesh:
     var start_x := cx * CHUNK_SIZE
@@ -995,6 +1042,10 @@ func streaming_solid_volume_placeholder_mesh(cx: int, cz: int, step_cells := STR
     var mesh := ArrayMesh.new()
     if has_method("add_terrain_array_surface"):
         call("add_terrain_array_surface", mesh, arrays, terrain_material)
+    var foundation_vertices := int(arrays.get("structureFoundationPlaceholderVertices", 0))
+    if foundation_vertices > 0:
+        mesh.set_meta("terrainProvisionalStructureFoundation", true)
+        mesh.set_meta("terrainProvisionalStructureFoundationVertices", foundation_vertices)
     return mesh
 
 func streaming_solid_volume_placeholder_arrays(start_x: int, start_z: int, step_cells: int) -> Dictionary:
@@ -1022,6 +1073,9 @@ func streaming_solid_volume_placeholder_arrays(start_x: int, start_z: int, step_
     var bottom_y := streaming_placeholder_bottom_y(start_x, start_z, vertices)
     streaming_append_placeholder_sides(vertices, normals, colors, indices, start_x, start_z, bottom_y, step_cells)
     streaming_append_placeholder_bottom(vertices, normals, colors, indices, bottom_y)
+    var foundation_vertex_start := vertices.size()
+    streaming_append_structure_foundation_placeholders(vertices, normals, colors, indices, start_x, start_z)
+    arrays["structureFoundationPlaceholderVertices"] = vertices.size() - foundation_vertex_start
     arrays["vertices"] = vertices
     arrays["normals"] = normals
     arrays["colors"] = colors
@@ -1127,6 +1181,98 @@ func streaming_append_placeholder_bottom(
     var color := streaming_placeholder_color(Vector3.DOWN)
     streaming_append_placeholder_quad(vertices, normals, colors, indices, a, b, c, d, Vector3.DOWN, color)
     streaming_append_placeholder_quad(vertices, normals, colors, indices, a, d, c, b, Vector3.UP, color)
+
+func streaming_append_structure_foundation_placeholders(
+    vertices: PackedVector3Array,
+    normals: PackedVector3Array,
+    colors: PackedColorArray,
+    indices: PackedInt32Array,
+    start_x: int,
+    start_z: int
+) -> void:
+    if structure_system == null or not structure_system.has_method("structure_terrain_footprints_for_chunk"):
+        return
+    var chunk_key := Vector2i(floori(float(start_x) / float(CHUNK_SIZE)), floori(float(start_z) / float(CHUNK_SIZE)))
+    var footprints_value = structure_system.call("structure_terrain_footprints_for_chunk", chunk_key, CHUNK_SIZE)
+    if not (footprints_value is Array):
+        return
+    for footprint_value in footprints_value:
+        if footprint_value is Dictionary:
+            streaming_append_structure_foundation_placeholder(vertices, normals, colors, indices, start_x, start_z, footprint_value)
+
+func streaming_append_structure_foundation_placeholder(
+    vertices: PackedVector3Array,
+    normals: PackedVector3Array,
+    colors: PackedColorArray,
+    indices: PackedInt32Array,
+    start_x: int,
+    start_z: int,
+    footprint: Dictionary
+) -> void:
+    var min_value = footprint.get("minCell", null)
+    var max_value = footprint.get("maxCell", null)
+    if not (min_value is Vector3i) or not (max_value is Vector3i):
+        return
+    var min_cell: Vector3i = min_value
+    var max_cell: Vector3i = max_value
+    var chunk_end_x := start_x + CHUNK_SIZE
+    var chunk_end_z := start_z + CHUNK_SIZE
+    var x0_cell := clampi(min_cell.x, start_x, chunk_end_x)
+    var x1_cell := clampi(max_cell.x + 1, start_x, chunk_end_x)
+    var z0_cell := clampi(min_cell.z, start_z, chunk_end_z)
+    var z1_cell := clampi(max_cell.z + 1, start_z, chunk_end_z)
+    if x1_cell <= x0_cell or z1_cell <= z0_cell:
+        return
+    var level := float(footprint.get("level", float(max_cell.y) * CELL))
+    var top_y := level - CELL * 0.015
+    var bottom_y := float(min_cell.y) * CELL
+    if top_y <= bottom_y:
+        return
+    var x0 := float(x0_cell - start_x) * CELL
+    var x1 := float(x1_cell - start_x) * CELL
+    var z0 := float(z0_cell - start_z) * CELL
+    var z1 := float(z1_cell - start_z) * CELL
+    var material_id := String(footprint.get("material", "stone"))
+    streaming_append_structure_placeholder_wall(vertices, normals, colors, indices, Vector3(x0, top_y, z0), Vector3(x1, top_y, z0), Vector3(x1, bottom_y, z0), Vector3(x0, bottom_y, z0), Vector3.BACK, material_id)
+    streaming_append_structure_placeholder_wall(vertices, normals, colors, indices, Vector3(x1, top_y, z0), Vector3(x1, top_y, z1), Vector3(x1, bottom_y, z1), Vector3(x1, bottom_y, z0), Vector3.RIGHT, material_id)
+    streaming_append_structure_placeholder_wall(vertices, normals, colors, indices, Vector3(x1, top_y, z1), Vector3(x0, top_y, z1), Vector3(x0, bottom_y, z1), Vector3(x1, bottom_y, z1), Vector3.FORWARD, material_id)
+    streaming_append_structure_placeholder_wall(vertices, normals, colors, indices, Vector3(x0, top_y, z1), Vector3(x0, top_y, z0), Vector3(x0, bottom_y, z0), Vector3(x0, bottom_y, z1), Vector3.LEFT, material_id)
+    var top_color := streaming_structure_placeholder_color(material_id, Vector3.UP)
+    streaming_append_placeholder_quad(vertices, normals, colors, indices, Vector3(x0, top_y, z1), Vector3(x1, top_y, z1), Vector3(x1, top_y, z0), Vector3(x0, top_y, z0), Vector3.UP, top_color)
+
+func streaming_append_structure_placeholder_wall(
+    vertices: PackedVector3Array,
+    normals: PackedVector3Array,
+    colors: PackedColorArray,
+    indices: PackedInt32Array,
+    a: Vector3,
+    b: Vector3,
+    c: Vector3,
+    d: Vector3,
+    normal: Vector3,
+    material_id: String
+) -> void:
+    var color := streaming_structure_placeholder_color(material_id, normal)
+    streaming_append_placeholder_quad(vertices, normals, colors, indices, a, b, c, d, normal, color)
+    streaming_append_placeholder_quad(vertices, normals, colors, indices, a, d, c, b, -normal, color)
+
+func streaming_structure_placeholder_color(material_id: String, normal: Vector3) -> Color:
+    var shade := 0.95
+    if normal.y < -0.35:
+        shade = 0.62
+    elif normal.y > 0.35:
+        shade = 0.98
+    elif absf(normal.x) > 0.5:
+        shade = 0.74
+    else:
+        shade = 0.80
+    if has_method("volume_material_surface_color"):
+        return call("volume_material_surface_color", material_id, "town", normal, shade, false)
+    if material_id == "dirt":
+        return Color(0.36, 0.25, 0.16) * shade
+    if material_id == "sand":
+        return Color(0.62, 0.57, 0.42) * shade
+    return Color(0.34, 0.35, 0.31) * shade
 
 func streaming_append_placeholder_quad(
     vertices: PackedVector3Array,

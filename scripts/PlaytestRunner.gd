@@ -8764,7 +8764,7 @@ func npc_route_debug(npc_system, body: Node) -> String:
             "state": String(body.get_meta("npc_scripted_order_state", "")),
             "reason": String(body.get_meta("npc_scripted_order_reason", ""))
         }
-        return "%s cell %s home %s porch %s interior %s..%s activeGoal %s motionGoal %s scripted %s bodyOrder %s active %s fallback %s status %s/%s index %d inside %s blocked %s moved %.4f motionUpdates %d skip %s follow %s progress %s actions %s routeCells %s waypoints %s activeDoor %s doorReject %s capsule %s localEscape %s localEscapeFailed %s typed %s settle %s plan %s nav %s force %s dialogue %s" % [
+        return "%s cell %s home %s porch %s interior %s..%s activeGoal %s motionGoal %s scripted %s bodyOrder %s active %s fallback %s status %s/%s index %d inside %s blocked %s moved %.4f motionUpdates %d skip %s follow %s progress %s actions %s routeCells %s waypoints %s activeDoor %s doorReject %s capsule %s localEscape %s localEscapeFailed %s typed %s settle %s plan %s tileWait %d tilePublish %s nav %s force %s dialogue %s" % [
             String(body.get_meta("npc_id", entry.get("id", body.name))),
             str(current_cell),
             str(entry.get("homeCell", Vector2i.ZERO)),
@@ -8798,6 +8798,8 @@ func npc_route_debug(npc_system, body: Node) -> String:
             typed_summary,
             JSON.stringify(settle_debug),
             JSON.stringify(entry.get("lastRoutePlanDebug", {})),
+            int(entry.get("navmeshTileBudgetWaitFrames", 0)),
+            JSON.stringify(entry.get("lastNavmeshTilePublishDebug", [])),
             JSON.stringify(nav_debug),
             str(body.get_meta("npc_force_hold", false)),
             str(body.get_meta("npc_dialogue_focused", false))

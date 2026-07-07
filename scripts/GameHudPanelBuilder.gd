@@ -10,8 +10,8 @@ static func build_game_menu_panel(hud, root: Control) -> void:
     hud.game_menu_panel.anchor_bottom = 0.5
     hud.game_menu_panel.offset_left = -190
     hud.game_menu_panel.offset_right = 190
-    hud.game_menu_panel.offset_top = -150
-    hud.game_menu_panel.offset_bottom = 150
+    hud.game_menu_panel.offset_top = -175
+    hud.game_menu_panel.offset_bottom = 175
     root.add_child(hud.game_menu_panel)
 
     var box := VBoxContainer.new()
@@ -38,6 +38,11 @@ static func build_game_menu_panel(hud, root: Control) -> void:
     settings.custom_minimum_size = Vector2(320, 42)
     settings.pressed.connect(Callable(hud, "_on_menu_settings_pressed"))
     box.add_child(settings)
+    var quit := Button.new()
+    quit.text = "Quit"
+    quit.custom_minimum_size = Vector2(320, 42)
+    quit.pressed.connect(Callable(hud, "_on_quit_pressed"))
+    box.add_child(quit)
     var close := Button.new()
     close.text = "Close"
     close.custom_minimum_size = Vector2(320, 42)
@@ -184,3 +189,27 @@ static func build_sleep_fade_overlay(hud, root: Control) -> void:
     hud.sleep_fade_overlay.mouse_filter = Control.MOUSE_FILTER_STOP
     hud.sleep_fade_overlay.color = Color(0.0, 0.0, 0.0, 0.0)
     root.add_child(hud.sleep_fade_overlay)
+
+static func build_loading_overlay(hud, root: Control) -> void:
+    hud.loading_overlay = Control.new()
+    hud.loading_overlay.name = "LoadingOverlay"
+    hud.loading_overlay.visible = false
+    hud.loading_overlay.set_anchors_preset(Control.PRESET_FULL_RECT)
+    hud.loading_overlay.mouse_filter = Control.MOUSE_FILTER_STOP
+    root.add_child(hud.loading_overlay)
+
+    var dim := ColorRect.new()
+    dim.color = Color(0.02, 0.025, 0.022, 0.84)
+    dim.set_anchors_preset(Control.PRESET_FULL_RECT)
+    dim.mouse_filter = Control.MOUSE_FILTER_STOP
+    hud.loading_overlay.add_child(dim)
+
+    var label := Label.new()
+    label.text = "Loading"
+    label.theme_type_variation = &"ToastLabel"
+    label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+    label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+    label.set_anchors_preset(Control.PRESET_FULL_RECT)
+    label.add_theme_font_size_override("font_size", 24)
+    hud.loading_overlay.add_child(label)
+    hud.loading_label = label

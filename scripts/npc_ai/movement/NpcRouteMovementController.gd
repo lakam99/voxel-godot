@@ -95,6 +95,9 @@ func move(entry: Dictionary, intent: Dictionary, max_distance: float, planner, w
             }
         else:
             var route_failure_reason := String(route.get("reason", "blocked"))
+            if skip_optional_home_waypoint_if_static_blocked(entry, route_failure_reason):
+                set_route_status(entry, "waiting", "home_optional_waypoint_skip")
+                return { "moved": 0.0, "status": "waiting", "reason": "home_optional_waypoint_skip", "classification": "home_route" }
             if skip_optional_home_waypoint_if_endpoint_unsnappable(entry, route_failure_reason):
                 set_route_status(entry, "waiting", "home_optional_endpoint_skip")
                 return { "moved": 0.0, "status": "waiting", "reason": "home_optional_endpoint_skip", "classification": "home_route" }
@@ -1186,7 +1189,7 @@ func compact_route_plan_debug(route: Dictionary) -> Dictionary:
         "pathPointCount": int(navmesh_details.get("pathPointCount", -1)),
         "validation": _compact_validation_debug(navmesh_route.get("validation", {})),
         "generatedCellBridgeUsed": generated_bridge_used,
-        "generatedCellBridge": _compact_generated_cell_bridge_debug(navmesh_route.get("generatedCellBridge", {})),
+        "generatedCellBridge": _compact_generated_cell_bridge_debug(navmesh_route.get("generatedCellBridge", route.get("generatedCellBridge", {}))),
         "fallbackAttempts": navmesh_route.get("fallbackAttempts", []),
         "generatedFallback": compact_generated_fallback_debug(route.get("generatedFallbackRoute", {})),
         "typed": compact_typed_route_debug(route.get("typedResult")),
@@ -1517,10 +1520,46 @@ func skip_optional_home_approach_if_oscillating(entry: Dictionary) -> bool:
     return false
 
 func skip_optional_home_waypoint_if_static_blocked(entry: Dictionary, reason: String) -> bool:
-    return false
+    if reason not in ["path_crosses_static_collision", "blocked_static_collision", "blocked_static_transition", "static_or_dynamic_collision"]:
+        return false
+    return skip_optional_home_waypoint_to_interior(entry, "static_blocked")
 
 func skip_optional_home_waypoint_if_endpoint_unsnappable(entry: Dictionary, reason: String) -> bool:
-    return false
+    if reason not in ["endpoint_not_server_walkable", "no_target_server_walkable", "path_endpoint_mismatch", "target_blocked"]:
+        return false
+    return skip_optional_home_waypoint_to_interior(entry, "endpoint_unsnappable")
+
+func skip_optional_home_waypoint_to_interior(entry: Dictionary, reason: String) -> bool:
+    if String(entry.get("activeGoalKind", "")) != "home" and not bool(entry.get("routeMovingHome", false)):
+        return false
+    var body := entry.get("body") as Node3D
+    if body != null and is_instance_valid(body):
+        var porch: Vector3 = entry.get("porchPosition", body.global_position)
+        var porch_cell: Vector2i = entry.get("porchCell", Vector2i(roundi(porch.x / CELL), roundi(porch.z / CELL)))
+        var current_cell := Vector2i(roundi(body.global_position.x / CELL), roundi(body.global_position.z / CELL))
+        if current_cell != porch_cell and body.global_position.distance_to(porch) > CELL * 2.0:
+            return false
+    var route_positions: Array = entry.get("homeRoutePositions", []) if entry.get("homeRoutePositions", []) is Array else []
+    if route_positions.size() < 2:
+        return false
+    var route_index := clampi(int(entry.get("homeRouteIndex", 0)), 0, route_positions.size() - 1)
+    var home_cell: Vector2i = entry.get("homeCell", Vector2i.ZERO)
+    var next_index := next_home_route_interior_index(entry, route_positions, route_index, home_cell)
+    if next_index < 0:
+        return false
+    var next_position = route_positions[next_index]
+    if not (next_position is Vector3):
+        return false
+    entry["homeRouteIndex"] = next_index
+    entry["homeActiveTargetCell"] = Vector2i(roundi((next_position as Vector3).x / CELL), roundi((next_position as Vector3).z / CELL))
+    entry["homeOptionalWaypointSkip"] = {
+        "reason": reason,
+        "fromIndex": route_index,
+        "toIndex": next_index
+    }
+    clear_route(entry)
+    entry["routeForceReplan"] = true
+    return true
 
 func next_home_route_interior_index(entry: Dictionary, route_positions: Array, route_index: int, home_cell: Vector2i) -> int:
     if route_index < 0 or route_index >= route_positions.size() - 1:
