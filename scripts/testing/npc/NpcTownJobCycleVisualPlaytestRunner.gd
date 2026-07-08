@@ -3,6 +3,7 @@ extends Node
 const MAIN_SCENE: PackedScene = preload("res://scenes/Main.tscn")
 const NpcFocusCameraObserverScript := preload("res://scripts/testing/npc/NpcFocusCameraObserver.gd")
 const NpcConstantsScript := preload("res://scripts/npc_ai/NpcConstants.gd")
+const HomeInteriorServiceScript := preload("res://scripts/npc_ai/behavior/HomeInteriorService.gd")
 
 const TEST_ID := "npc_generated_town_job_cycle_visual"
 const CELL := 1.35
@@ -1550,39 +1551,7 @@ func strict_home_status(entry: Dictionary) -> Dictionary:
     var body := entry.get("body") as Node3D
     if body == null or not is_instance_valid(body):
         return { "strictInside": false, "reason": "body_missing" }
-    var cell := flat_cell(body.global_position)
-    var min_cell: Vector2i = entry.get("interiorMinCell", Vector2i.ZERO)
-    var max_cell: Vector2i = entry.get("interiorMaxCell", Vector2i.ZERO)
-    var porch: Vector2i = entry.get("porchCell", Vector2i.ZERO)
-    var inside_bounds := (
-        cell.x >= mini(min_cell.x, max_cell.x)
-        and cell.x <= maxi(min_cell.x, max_cell.x)
-        and cell.y >= mini(min_cell.y, max_cell.y)
-        and cell.y <= maxi(min_cell.y, max_cell.y)
-    )
-    var threshold_occupied := home_door_volume_occupied(entry, body.global_position, "threshold")
-    var sweep_occupied := home_door_volume_occupied(entry, body.global_position, "sweep")
-    var clearance_occupied := home_door_volume_occupied(entry, body.global_position, "clearance")
-    var clear_of_door := not threshold_occupied and not sweep_occupied and not clearance_occupied
-    var strict_inside := inside_bounds and cell != porch and clear_of_door
-    var reason := "interior_bounds" if strict_inside else "not_inside_interior"
-    if inside_bounds and cell == porch:
-        reason = "porch_not_inside"
-    elif inside_bounds and not clear_of_door:
-        reason = "door_clearance_not_inside"
-    return {
-        "strictInside": strict_inside,
-        "cell": vec2i(cell),
-        "porchCell": vec2i(porch),
-        "interiorMinCell": vec2i(min_cell),
-        "interiorMaxCell": vec2i(max_cell),
-        "insideBounds": inside_bounds,
-        "doorThresholdOccupied": threshold_occupied,
-        "doorSweepOccupied": sweep_occupied,
-        "doorClearanceOccupied": clearance_occupied,
-        "clearOfDoor": clear_of_door,
-        "reason": reason
-    }
+    return HomeInteriorServiceScript.status(entry, body.global_position, home_door_portal(entry))
 
 func home_route_summary(entry: Dictionary, position: Vector3) -> Dictionary:
     var route_positions: Array = entry.get("homeRoutePositions", []) if entry.get("homeRoutePositions", []) is Array else []

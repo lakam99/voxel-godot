@@ -19,6 +19,7 @@ const InteractionResultScript := preload("res://scripts/npc_ai/contracts/Interac
 const NpcTelemetryServiceScript := preload("res://scripts/npc_ai/debug/NpcTelemetryService.gd")
 const NavigationChangeBusScript := preload("res://scripts/npc_ai/navigation/NavigationChangeBus.gd")
 const NavigationWorldServiceScript := preload("res://scripts/npc_ai/navigation/NavigationWorldService.gd")
+const GeneratedWorldNavigationAdapterScript := preload("res://scripts/npc_ai/navigation/GeneratedWorldNavigationAdapter.gd")
 const NavigationBackendConfigScript := preload("res://scripts/npc_ai/navigation/NavigationBackendConfig.gd")
 const NavmeshWorldServiceScript := preload("res://scripts/npc_ai/navigation/NavmeshWorldService.gd")
 const NavigationSemanticServiceScript := preload("res://scripts/npc_ai/navigation/NavigationSemanticService.gd")
@@ -366,6 +367,7 @@ func nav_world_cases() -> Array[Dictionary]:
 		["npc_navworld_event_prop_remove_dirty_exact_tiles", "test_navworld_event_prop_remove_dirty_exact_tiles"],
 		["npc_navworld_event_terrain_edit_dirty_exact_tiles", "test_navworld_event_terrain_edit_dirty_exact_tiles"],
 		["npc_navworld_event_chunk_load_unload", "test_navworld_event_chunk_load_unload"],
+		["npc_navworld_tile_source_key_is_tile_stable", "test_navworld_tile_source_key_is_tile_stable"],
 		["npc_navworld_no_scene_scan_revision", "test_navworld_no_scene_scan_revision"],
 		["npc_navworld_multisurface_bridge", "test_navworld_multisurface_bridge"],
 		["npc_navworld_tunnel_headroom", "test_navworld_tunnel_headroom"],
@@ -1516,6 +1518,35 @@ func test_navworld_event_chunk_load_unload(_mode: String) -> Dictionary:
 	var states: Dictionary = service.get("tile_states")
 	var passed: bool = int(after_load.get("dirtyTileCount", 0)) == 1 and String(states.get(tile_key, "")) == "unloaded" and not service.is_tile_traversable(tile_key)
 	return outcome(passed, "load=%s states=%s" % [JSON.stringify(after_load), JSON.stringify(states)], ["chunk_load_dirty", "chunk_unload_explicit_state", "unloaded_not_traversable"], { "afterLoad": after_load, "tileStates": states })
+
+func test_navworld_tile_source_key_is_tile_stable(_mode: String) -> Dictionary:
+	var adapter := GeneratedWorldNavigationAdapterScript.new()
+	var tile_key := "4,4"
+	var unrelated_tile_key := "9,9"
+	var initial_key := adapter.navmesh_tile_source_key_for_tile(tile_key)
+	adapter.apply_navigation_events([{
+		"tileKey": unrelated_tile_key,
+		"changeKinds": [String(NpcEnumsScript.CHANGE_KIND_BLOCK_CREATED)],
+		"revision": 8
+	}])
+	var after_unrelated_key := adapter.navmesh_tile_source_key_for_tile(tile_key)
+	adapter.apply_navigation_events([{
+		"tileKey": tile_key,
+		"changeKinds": [String(NpcEnumsScript.CHANGE_KIND_TERRAIN_EDIT)],
+		"revision": 11
+	}])
+	var after_related_key := adapter.navmesh_tile_source_key_for_tile(tile_key)
+	var passed := initial_key == after_unrelated_key and after_related_key != initial_key
+	return outcome(
+		passed,
+		"initial=%s unrelated=%s related=%s" % [initial_key, after_unrelated_key, after_related_key],
+		["navmesh_tile_source_key_ignores_unrelated_static_revision", "navmesh_tile_source_key_updates_for_own_tile"],
+		{
+			"initialKey": initial_key,
+			"afterUnrelatedKey": after_unrelated_key,
+			"afterRelatedKey": after_related_key
+		}
+	)
 
 func test_navworld_no_scene_scan_revision(_mode: String) -> Dictionary:
 	var service_text := read_text("res://scripts/npc_ai/navigation/NavigationWorldService.gd")

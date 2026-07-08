@@ -1,6 +1,8 @@
 extends RefCounted
 class_name NpcSemanticGoalPlanner
 
+const HomeInteriorServiceScript := preload("res://scripts/npc_ai/behavior/HomeInteriorService.gd")
+
 const CELL := 1.35
 const MAX_ROUTE_SCORED_CANDIDATES := 16
 const MAX_HOME_INTERIOR_GOAL_CELLS := 64
@@ -116,14 +118,12 @@ func home_interior_goal_cells(entry: Dictionary) -> Array[Vector2i]:
     return result
 
 func actor_inside_home(entry: Dictionary, position: Vector3) -> bool:
-    var cell := Vector2i(roundi(position.x / CELL), roundi(position.z / CELL))
-    var home_cell: Vector2i = entry.get("homeCell", cell)
-    var interior_min: Vector2i = entry.get("interiorMinCell", home_cell)
-    var interior_max: Vector2i = entry.get("interiorMaxCell", home_cell)
-    return cell.x >= mini(interior_min.x, interior_max.x) \
-        and cell.x <= maxi(interior_min.x, interior_max.x) \
-        and cell.y >= mini(interior_min.y, interior_max.y) \
-        and cell.y <= maxi(interior_min.y, interior_max.y)
+    var portal = null
+    if system != null and system.get("autonomy_system") != null:
+        var autonomy = system.get("autonomy_system")
+        if autonomy.get("door_portals") != null:
+            portal = HomeInteriorServiceScript.portal_for_entry(entry, autonomy.get("door_portals"))
+    return bool(HomeInteriorServiceScript.status(entry, position, portal).get("strictInside", false))
 
 func choose_day_target(entry: Dictionary) -> Vector3:
     if world == null or planner == null:

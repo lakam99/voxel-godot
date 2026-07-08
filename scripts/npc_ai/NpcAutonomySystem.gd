@@ -290,6 +290,7 @@ func record_motion_update(entry: Dictionary, result := {}) -> Dictionary:
 	entry["npc_motion_updates"] = int(entry.get("npc_motion_updates", 0)) + 1
 	entry["npc_last_motion_tick"] = tick
 	entry["npc_motion_skipped_reason"] = ""
+	entry["npc_motion_budget_skipped"] = 0
 	var intent_kind := String(result.get("intentKind", ""))
 	if intent_kind == "" and String(entry.get("routeStatus", "")) in ["moving", "waiting", "pending"]:
 		intent_kind = "route"
@@ -304,6 +305,7 @@ func record_motion_update(entry: Dictionary, result := {}) -> Dictionary:
 		body.set_meta("npc_motion_updates", int(entry.get("npc_motion_updates", 0)))
 		body.set_meta("npc_last_motion_tick", tick)
 		body.set_meta("npc_motion_skipped_reason", "")
+		body.set_meta("npc_motion_budget_skipped", 0)
 		body.set_meta("npc_active_route_motion_ticks", int(entry.get("npc_active_route_motion_ticks", 0)))
 		body.set_meta("npc_scripted_order_motion_ticks", int(entry.get("npc_scripted_order_motion_ticks", 0)))
 		body.set_meta("npc_door_action_motion_ticks", int(entry.get("npc_door_action_motion_ticks", 0)))
@@ -318,9 +320,12 @@ func record_motion_update(entry: Dictionary, result := {}) -> Dictionary:
 
 func record_motion_skipped(entry: Dictionary, reason := "no_motion_intent") -> Dictionary:
 	entry["npc_motion_skipped_reason"] = reason
+	var count := int(entry.get("npc_motion_budget_skipped", 0)) + 1
+	entry["npc_motion_budget_skipped"] = count
 	var body := entry.get("body") as Node
 	if body != null and is_instance_valid(body):
 		body.set_meta("npc_motion_skipped_reason", reason)
+		body.set_meta("npc_motion_budget_skipped", count)
 	return { "advanced": false, "reason": reason }
 
 func update_simulation_lod(entry: Dictionary, delta: float, observer_position := Vector3.INF, context := {}) -> Dictionary:
@@ -349,6 +354,11 @@ func is_inside_home_interior(entry: Dictionary, position: Vector3) -> bool:
 	if perception_service == null:
 		return false
 	return perception_service.is_inside_home_interior(entry, position)
+
+func home_interior_status(entry: Dictionary, position: Vector3) -> Dictionary:
+	if perception_service == null:
+		return { "strictInside": false, "reason": "missing_perception_service" }
+	return perception_service.home_interior_status(entry, position)
 
 func release_action_owned_state(entry: Dictionary, reason := "released") -> void:
 	release_npc_traffic_reservations(entry, reason)

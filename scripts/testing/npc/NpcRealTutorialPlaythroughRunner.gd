@@ -1,6 +1,7 @@
 extends Node
 
-const MAIN_SCENE: PackedScene = preload("res://scenes/Main.tscn")
+const MENU_SCENE: PackedScene = preload("res://scenes/MainMenu.tscn")
+const HomeInteriorServiceScript := preload("res://scripts/npc_ai/behavior/HomeInteriorService.gd")
 const TEST_ID := "npc_tutorial_real_knock_repair_sleep_morning_foragers"
 const CELL := 1.35
 const STARTUP_FRAMES := 80
@@ -55,6 +56,7 @@ var morning_departure_matrix: Array[Dictionary] = []
 var niko_timeline: Array[Dictionary] = []
 var visual_captures: Array[Dictionary] = []
 var niko_proof := {}
+var startup_loading_steps: Array[Dictionary] = []
 var max_mira_flat_speed := 0.0
 var mira_total_flat_distance := 0.0
 var previous_mira_position := Vector3.ZERO
@@ -79,6 +81,9 @@ var mira_route_start_position := Vector3.ZERO
 var mira_route_start_valid := false
 var mira_starter_route_regression := {}
 var last_observer_camera_target := Vector3.ZERO
+var menu: Node = null
+var launched_through_menu := false
+var startup_loading_connected := false
 
 func _ready() -> void:
     physics_dt = 1.0 / float(Engine.physics_ticks_per_second)
@@ -139,12 +144,9 @@ func run() -> void:
         "forbiddenCallSelfScan": { "status": "passed-by-wrapper-before-launch" }
     }
 
-    main = MAIN_SCENE.instantiate()
-    add_child(main)
-    mark_progress("main_instantiated")
-    mark_progress("waiting_initial_physics")
-    await wait_physics_frames(30)
-    mark_progress("initial_physics_ready")
+    if not await launch_main_via_menu():
+        finish()
+        return
     bind_scene_nodes()
     mark_progress("preparing_tutorial_world")
     await prepare_tutorial_world()
@@ -156,6 +158,10 @@ func run() -> void:
 
     if main == null or player == null or camera == null:
         add_failure("scene_bootstrap_failed", "main/player/camera missing")
+        finish()
+        return
+    mark_progress("waiting_tutorial_town_ready")
+    if not await wait_for_tutorial_town_ready(180.0):
         finish()
         return
     if not await apply_playtest_damage_policy():
@@ -178,9 +184,107 @@ func run() -> void:
         await run_real_knock_to_morning_foragers()
     finish()
 
+func launch_main_via_menu() -> bool:
+    menu = MENU_SCENE.instantiate()
+    if menu == null:
+        add_failure("main_menu_bootstrap_failed", "MainMenu.tscn could not be instantiated")
+        return false
+    add_child(menu)
+    launched_through_menu = true
+    report_data["launchPath"] = "MainMenu.tscn:NewGame"
+    mark_progress("main_menu_instantiated")
+    await wait_physics_frames(2)
+    if not menu.has_method("launch_game"):
+        add_failure("main_menu_launch_failed", "Title menu script does not expose launch_game")
+        return false
+    menu.call("launch_game", "new_game")
+    mark_progress("main_menu_new_game_clicked")
+    var max_frames := ceili(120.0 * float(Engine.physics_ticks_per_second))
+    var observed_main := false
+    for frame in range(max_frames):
+        await get_tree().process_frame
+        var active_value = menu.get("active_main") if menu != null else null
+        if active_value is Node3D:
+            main = active_value
+            if not observed_main:
+                observed_main = true
+                connect_main_loading_diagnostics()
+                mark_progress("main_menu_active_main_observed")
+        if main != null and is_instance_valid(main):
+            var loading_active := bool(main.get("startup_loading_active"))
+            if frame % 60 == 0:
+                mark_progress("main_menu_waiting_for_main_load active=%s loading=%s" % [str(main != null), str(loading_active)])
+            if not loading_active:
+                mark_progress("main_menu_new_game_loaded")
+                return true
+    add_failure("main_menu_launch_timeout", "New Game did not produce a loaded Main scene")
+    return false
+
+func main_scene_ready_for_test() -> bool:
+    if main == null:
+        return false
+    return main.get("player") != null and main.get("npc_system") != null and main.get("tutorial_system") != null
+
+func connect_main_loading_diagnostics() -> void:
+    if startup_loading_connected or main == null or not main.has_signal("startup_loading_step"):
+        return
+    var callback := Callable(self, "_on_main_startup_loading_step")
+    if not main.is_connected("startup_loading_step", callback):
+        main.connect("startup_loading_step", callback)
+    startup_loading_connected = true
+
+func _on_main_startup_loading_step(message: String) -> void:
+    var entry := {
+        "time": rounded(elapsed),
+        "message": message
+    }
+    startup_loading_steps.append(entry)
+    report_data["startupLoadingSteps"] = startup_loading_steps
+    mark_progress("main_loading_step:%s" % message)
+
+func wait_for_tutorial_town_ready(max_seconds: float) -> bool:
+    var max_frames := ceili(max_seconds * float(Engine.physics_ticks_per_second))
+    for frame in range(max_frames):
+        bind_scene_nodes()
+        if main != null and player != null and camera != null:
+            var tutorial = main.get("tutorial_system")
+            var state := tutorial_state_summary(tutorial)
+            var start_cell := intro_state_cell(tutorial, "startCell", Vector2i.ZERO)
+            var player_cell := flat_cell(player.global_position)
+            var starter_door_cell := Vector2i(start_cell.x, start_cell.y - 3)
+            var starter_door_position := world_position_for_flat_cell(starter_door_cell)
+            var starter_door := nearest_block("door", starter_door_position)
+            var tutorial_ready: bool = bool(state.get("started", false)) and bool(state.get("repairActive", false))
+            var start_ready: bool = start_cell != Vector2i.ZERO and abs(player_cell.x - start_cell.x) <= 4 and abs(player_cell.y - start_cell.y) <= 4
+            var door_ready: bool = starter_door != null and flat_distance(starter_door.global_position, starter_door_position) <= CELL * 2.0
+            if tutorial_ready and start_ready and door_ready:
+                report_data["tutorialTownReady"] = {
+                    "frame": frame,
+                    "door": block_summary(starter_door),
+                    "doorCell": vec2i(starter_door_cell),
+                    "player": vec3(player.global_position),
+                    "playerCell": vec2i(player_cell),
+                    "startCell": vec2i(start_cell),
+                    "tutorialState": state,
+                    "blocks": block_count()
+                }
+                mark_progress("tutorial_town_ready")
+                return true
+        if frame % 60 == 0:
+            mark_progress("waiting_tutorial_town_ready frame=%d blocks=%d" % [frame, block_count()])
+        await get_tree().physics_frame
+    add_failure("starter_door_missing", "no generated starter door became available near tutorial start after %.1fs" % max_seconds)
+    return false
+
 func prepare_tutorial_world() -> void:
     var tutorial = main.get("tutorial_system") if main != null else null
-    if tutorial != null and tutorial.has_method("start_new_world"):
+    if launched_through_menu:
+        report_data["deterministicSetup"] = {
+            "usedTutorialWorldResetBeforeInput": false,
+            "started": true,
+            "reason": "menu_new_game_startup_path"
+        }
+    elif tutorial != null and tutorial.has_method("start_new_world"):
         var started := bool(tutorial.call("start_new_world"))
         report_data["deterministicSetup"] = {
             "usedTutorialWorldResetBeforeInput": true,
@@ -191,7 +295,9 @@ func prepare_tutorial_world() -> void:
             "usedTutorialWorldResetBeforeInput": false,
             "started": false
         }
-    if main != null and main.has_method("update_chunks"):
+    if launched_through_menu:
+        report_data["postMenuForcedChunkRefresh"] = false
+    elif main != null and main.has_method("update_chunks"):
         main.call("update_chunks", true)
     if main != null and main.has_method("refresh_intro_knock_audio"):
         main.call("refresh_intro_knock_audio")
@@ -491,9 +597,11 @@ func run_real_knock_to_morning_foragers() -> void:
     if not single_perimeter_radius:
         add_failure("tutorial_double_perimeter_radius_mismatch", JSON.stringify(layout_proof))
         return
-    var starter_door := nearest_block("door", player.global_position)
+    var start_cell := intro_state_cell(tutorial, "startCell", flat_cell(player.global_position))
+    var starter_door_cell := Vector2i(start_cell.x, start_cell.y - 3)
+    var starter_door := nearest_block("door", world_position_for_flat_cell(starter_door_cell))
     if starter_door == null:
-        add_failure("starter_door_missing", "no door block found near tutorial start")
+        add_failure("starter_door_missing", "no door block found at generated tutorial start door cell %s" % JSON.stringify(vec2i(starter_door_cell)))
         return
     sample_door("initial", starter_door)
 
@@ -1276,6 +1384,19 @@ func npc_home_door(entry: Dictionary) -> Node3D:
     var blocks_value = main.get("blocks")
     if not (blocks_value is Dictionary):
         return null
+    var door_cell := HomeInteriorServiceScript.door_cell_for_entry(entry)
+    if door_cell != Vector2i(999999, 999999):
+        for block_value in (blocks_value as Dictionary).values():
+            var exact_block := block_value as Node3D
+            if exact_block == null or not is_instance_valid(exact_block):
+                continue
+            if String(exact_block.get_meta("block_type", "")) != "door":
+                continue
+            var cell_value = exact_block.get_meta("cell", Vector3i(999999, 0, 999999))
+            if cell_value is Vector3i:
+                var cell3: Vector3i = cell_value
+                if cell3.x == door_cell.x and cell3.z == door_cell.y:
+                    return exact_block
     var porch_position := entry_position(entry, "porchPosition", entry_position(entry, "homePosition", Vector3.ZERO))
     var home_position := entry_position(entry, "homePosition", porch_position)
     var best: Node3D = null
@@ -1291,6 +1412,15 @@ func npc_home_door(entry: Dictionary) -> Node3D:
             best_distance = distance
             best = block
     return best
+
+func home_door_portal(entry: Dictionary):
+    var npc_system = main.get("npc_system") if main != null else null
+    if npc_system == null:
+        return null
+    var autonomy = npc_system.get("autonomy_system")
+    if autonomy == null or autonomy.get("door_portals") == null:
+        return null
+    return HomeInteriorServiceScript.portal_for_entry(entry, autonomy.get("door_portals"))
 
 func safe_capture_id(value: String) -> String:
     var result := value.to_lower()
@@ -4324,6 +4454,14 @@ func nearest_block(block_type: String, origin: Vector3) -> Node3D:
             best = body
     return best
 
+func block_count() -> int:
+    if main == null:
+        return 0
+    var blocks_value = main.get("blocks")
+    if not (blocks_value is Dictionary):
+        return 0
+    return (blocks_value as Dictionary).size()
+
 func find_intro_repair_chest() -> Node3D:
     if main == null:
         return null
@@ -4452,7 +4590,8 @@ func tutorial_state_summary(tutorial) -> Dictionary:
         "lampsRequired": int(state.get("introLampsRequired", 0)),
         "townCenter": vec2i(state.get("townCenter", Vector2i.ZERO)),
         "startCell": vec2i(state.get("startCell", Vector2i.ZERO)),
-        "chestCell": vec2i(state.get("introRepairChestCell", Vector2i.ZERO))
+        "chestCell": vec2i(state.get("introRepairChestCell", Vector2i.ZERO)),
+        "homeRefresh": state.get("homeRefresh", {})
     }
 
 func repair_target_proof(tutorial) -> Dictionary:
@@ -4648,6 +4787,7 @@ func npc_summary(entry: Dictionary) -> Dictionary:
         "cell": vec2i(flat_cell(position)),
         "homeCell": vec2i(entry.get("homeCell", Vector2i.ZERO)),
         "porchCell": vec2i(entry.get("porchCell", Vector2i.ZERO)),
+        "doorCell": vec2i(entry.get("doorCell", Vector2i.ZERO)),
         "guardCell": vec2i(entry.get("guardCell", Vector2i.ZERO)),
         "interiorMinCell": vec2i(entry.get("interiorMinCell", Vector2i.ZERO)),
         "interiorMaxCell": vec2i(entry.get("interiorMaxCell", Vector2i.ZERO)),
@@ -4742,26 +4882,7 @@ func strict_home_status(entry: Dictionary) -> Dictionary:
     var body := entry.get("body") as Node3D
     if body == null or not is_instance_valid(body):
         return { "strictInside": false, "reason": "body_missing" }
-    var cell := flat_cell(body.global_position)
-    var min_cell: Vector2i = entry.get("interiorMinCell", Vector2i.ZERO)
-    var max_cell: Vector2i = entry.get("interiorMaxCell", Vector2i.ZERO)
-    var porch: Vector2i = entry.get("porchCell", Vector2i.ZERO)
-    var inside_bounds := (
-        cell.x >= mini(min_cell.x, max_cell.x)
-        and cell.x <= maxi(min_cell.x, max_cell.x)
-        and cell.y >= mini(min_cell.y, max_cell.y)
-        and cell.y <= maxi(min_cell.y, max_cell.y)
-    )
-    var strict_inside := inside_bounds and cell != porch
-    return {
-        "strictInside": strict_inside,
-        "cell": vec2i(cell),
-        "porchCell": vec2i(porch),
-        "interiorMinCell": vec2i(min_cell),
-        "interiorMaxCell": vec2i(max_cell),
-        "insideBounds": inside_bounds,
-        "reason": "interior_bounds" if strict_inside else "not_inside_interior"
-    }
+    return HomeInteriorServiceScript.status(entry, body.global_position, home_door_portal(entry))
 
 func forager_state_summary() -> Array[Dictionary]:
     var rows: Array[Dictionary] = []

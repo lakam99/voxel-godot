@@ -2,6 +2,7 @@ extends Node
 
 const MAIN_SCENE: PackedScene = preload("res://scenes/Main.tscn")
 const StructureDoorRulesScript := preload("res://scripts/StructureDoorRules.gd")
+const HomeInteriorServiceScript := preload("res://scripts/npc_ai/behavior/HomeInteriorService.gd")
 
 const TEST_ID := "npc_go_home_visual_door_traversal"
 const CELL := 1.35
@@ -210,6 +211,7 @@ func setup_one_house_one_npc_fixture() -> void:
 	var primary_door_entry: Dictionary = door_cells[0]
 	var door_cell := Vector2i(base_x + int(primary_door_entry.get("x", 0)), base_z + int(primary_door_entry.get("z", 0)))
 	var porch_cell := Vector2i(door_cell.x, door_cell.y + 1)
+	var interior_landing_cell := Vector2i(door_cell.x, door_cell.y - 1)
 	var home_cell := Vector2i(base_x + int(width / 2), base_z + int(depth / 2))
 	var spawn_cell := Vector2i(home_cell.x, base_z - 9)
 	var spawn_position := Vector3(float(spawn_cell.x) * CELL, level + 0.04, float(spawn_cell.y) * CELL)
@@ -228,6 +230,8 @@ func setup_one_house_one_npc_fixture() -> void:
 		"level": level,
 		"homeCell": home_cell,
 		"porchCell": porch_cell,
+		"doorCell": door_cell,
+		"interiorLandingCell": interior_landing_cell,
 		"interiorMinCell": Vector2i(base_x + 1, base_z + 1),
 		"interiorMaxCell": Vector2i(base_x + width - 2, base_z + depth - 2),
 		"guardCell": porch_cell,
@@ -247,10 +251,11 @@ func setup_one_house_one_npc_fixture() -> void:
 		"centerCell": cell_dict(center),
 		"baseCell": cell_dict(Vector2i(base_x, base_z)),
 		"homeCell": cell_dict(home_cell),
+		"doorCell": cell_dict(door_cell),
+		"interiorLandingCell": cell_dict(interior_landing_cell),
 		"interiorMinCell": cell_dict(Vector2i(base_x + 1, base_z + 1)),
 		"interiorMaxCell": cell_dict(Vector2i(base_x + width - 2, base_z + depth - 2)),
 		"porchCell": cell_dict(porch_cell),
-		"doorCell": cell_dict(door_cell),
 		"spawnCell": cell_dict(spawn_cell),
 		"spawnDistanceMeters": snapped_float(spawn_distance),
 		"spawnBehindHome": spawn_cell.y < base_z,
@@ -319,7 +324,8 @@ func observe_go_home() -> void:
 	final_stats = sanitize_value(npc_system.stats())
 	add_result("npc_walked_to_home_door", saw_at_door, "min observed door distance %.2fm" % min_timeline_distance("distanceToDoor"))
 	add_result("npc_opened_home_door", saw_door_open and int(final_stats.get("doorOpens", 0)) > door_opens_before, "door opens %d -> %d" % [door_opens_before, int(final_stats.get("doorOpens", 0))])
-	add_result("npc_entered_home_interior", saw_inside and bool(npc_body.get_meta("npc_inside_home", false)), "inside meta %s" % str(npc_body.get_meta("npc_inside_home", false)))
+	var final_strict := strict_home_status()
+	add_result("npc_entered_home_interior", saw_inside and bool(final_strict.get("strictInside", false)), "strict %s, meta %s" % [JSON.stringify(final_strict), str(npc_body.get_meta("npc_inside_home", false))])
 	add_result("npc_closed_home_door_after_entry", saw_inside_closed and int(final_stats.get("doorCloses", 0)) > door_closes_before and not any_home_door_open(), "door closes %d -> %d, open=%s" % [door_closes_before, int(final_stats.get("doorCloses", 0)), str(any_home_door_open())])
 	add_result("visual_screenshots_saved", required_captures_saved(), "captures %s" % JSON.stringify(capture_names()))
 	if not saw_inside_closed:
@@ -328,6 +334,7 @@ func observe_go_home() -> void:
 func make_sample(frame: int) -> Dictionary:
 	var npc_position := npc_body.global_position if npc_body != null and is_instance_valid(npc_body) else Vector3.ZERO
 	var door_position := average_door_position()
+	var strict := strict_home_status()
 	var stats_now: Dictionary = npc_system.stats() if npc_system != null else {}
 	var sample := {
 		"frame": frame,
@@ -337,7 +344,9 @@ func make_sample(frame: int) -> Dictionary:
 		"distanceToDoor": snapped_float(flat_distance(npc_position, door_position)),
 		"distanceToHome": snapped_float(flat_distance(npc_position, home_position())),
 		"doorOpen": any_home_door_open(),
-		"insideHome": bool(npc_body.get_meta("npc_inside_home", false)) if npc_body != null and is_instance_valid(npc_body) else false,
+		"insideHome": bool(strict.get("strictInside", false)),
+		"insideHomeMeta": bool(npc_body.get_meta("npc_inside_home", false)) if npc_body != null and is_instance_valid(npc_body) else false,
+		"strictHome": strict,
 		"routeStatus": String(npc_entry.get("routeStatus", "")),
 		"routeReason": String(npc_entry.get("routeReason", "")),
 		"routeActionsCount": (npc_entry.get("routeActions", {}) as Dictionary).size() if npc_entry.get("routeActions", {}) is Dictionary else 0,
@@ -499,6 +508,21 @@ func any_home_door_open() -> bool:
 		if door != null and is_instance_valid(door) and bool(door.get_meta("open", false)):
 			return true
 	return false
+
+func strict_home_status() -> Dictionary:
+	if npc_entry.is_empty():
+		return { "strictInside": false, "reason": "entry_missing" }
+	if npc_body == null or not is_instance_valid(npc_body):
+		return { "strictInside": false, "reason": "body_missing" }
+	return HomeInteriorServiceScript.status(npc_entry, npc_body.global_position, home_door_portal())
+
+func home_door_portal():
+	if npc_system == null:
+		return null
+	var autonomy = npc_system.get("autonomy_system")
+	if autonomy == null or autonomy.get("door_portals") == null:
+		return null
+	return HomeInteriorServiceScript.portal_for_entry(npc_entry, autonomy.get("door_portals"))
 
 func average_door_position() -> Vector3:
 	if home_doors.is_empty():

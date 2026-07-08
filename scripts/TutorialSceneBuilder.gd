@@ -212,8 +212,8 @@ func spawn_tutorial_npcs() -> void:
 func tutorial_npc_specs(cx: int, cz: int, north_home: Dictionary, west_home: Dictionary, elder_home: Dictionary) -> Array:
     return [
         npc_spec("mira", "Mira", "Elder", Vector2i(cx - 13, cz - 15), elder_home, Color(0.70, 0.46, 0.34), Color(0.92, 0.76, 0.42), ["Storms bring the dark close. Start by meeting Rowan near the workbench.", "The lights mark the safe ground. Beyond them, shadows notice you."], { "holdIntroDoor": true }),
-        npc_spec("rowan", "Rowan", "Carpenter", Vector2i(cx, cz - 6), north_home, Color(0.48, 0.32, 0.18), Color(0.73, 0.52, 0.28), ["Workbench first. Logs become blocks, blocks become shelter.", "Bring me wood when you're ready and we'll turn it into something sturdy."], { "job": "wood" }),
-        npc_spec("niko", "Niko", "Forager", Vector2i(cx - 5, cz + 5), west_home, Color(0.31, 0.50, 0.28), Color(0.82, 0.42, 0.35), ["Food keeps your hands steady. Berries, fish, and cooked meat all matter.", "Stay near the path while the rain is heavy."], { "job": "forage" }),
+        npc_spec("rowan", "Rowan", "Carpenter", north_home.get("homeCell", Vector2i(cx, cz - 6)), north_home, Color(0.48, 0.32, 0.18), Color(0.73, 0.52, 0.28), ["Workbench first. Logs become blocks, blocks become shelter.", "Bring me wood when you're ready and we'll turn it into something sturdy."], { "job": "wood", "startInsideHome": true }),
+        npc_spec("niko", "Niko", "Forager", west_home.get("homeCell", Vector2i(cx - 5, cz + 5)), west_home, Color(0.31, 0.50, 0.28), Color(0.82, 0.42, 0.35), ["Food keeps your hands steady. Berries, fish, and cooked meat all matter.", "Stay near the path while the rain is heavy."], { "job": "forage", "startInsideHome": true }),
         npc_spec("sera", "Sera", "Watch", Vector2i(cx + 7, cz), north_home, Color(0.30, 0.34, 0.42), Color(0.66, 0.72, 0.86), ["Do not cross the last lantern unarmed. Hostiles gather outside the village lights.", "Craft a blade or bow before you brave the wilds."], { "job": "guard", "guardCell": Vector2i(cx + FENCE_RADIUS_CELLS - 3, cz), "canFight": true, "nightGuard": true, "weapon": "hunterBow" }),
         npc_spec("toma", "Toma", "Gate Watch", Vector2i(cx, cz - FENCE_RADIUS_CELLS + 4), north_home, Color(0.34, 0.34, 0.30), Color(0.78, 0.66, 0.38), ["The fence slows them. Arrows finish the rest.", "Stay behind the lantern line when the gate splinters."], { "job": "guard", "guardCell": Vector2i(cx, cz - FENCE_RADIUS_CELLS + 2), "canFight": true, "nightGuard": true, "weapon": "hunterBow" }),
         npc_spec("lyra", "Lyra", "Lantern Archer", Vector2i(cx - FENCE_RADIUS_CELLS + 4, cz), west_home, Color(0.28, 0.38, 0.44), Color(0.68, 0.78, 0.88), ["If a rail breaks, we hold the gap.", "Watch their movement. They hate the light."], { "job": "guard", "guardCell": Vector2i(cx - FENCE_RADIUS_CELLS + 2, cz), "canFight": true, "nightGuard": true, "weapon": "hunterBow" })
@@ -228,6 +228,9 @@ func npc_spec(id: String, npc_name: String, role: String, cell: Vector2i, home: 
         "cell": cell,
         "homeCell": home.get("homeCell", cell),
         "porchCell": home.get("porchCell", cell),
+        "doorCell": home.get("doorCell", home.get("porchCell", cell)),
+        "interiorLandingCell": home.get("interiorLandingCell", home.get("homeCell", cell)),
+        "homeRouteCells": home.get("homeRouteCells", [home.get("porchCell", cell), home.get("homeCell", cell)]),
         "interiorMinCell": home.get("interiorMinCell", home.get("homeCell", cell)),
         "interiorMaxCell": home.get("interiorMaxCell", home.get("homeCell", cell)),
         "color": color,
@@ -251,11 +254,49 @@ func spawn_npc(spec: Dictionary, level: float, look_target: Vector3) -> Characte
     add_npc_visual(body, spec.get("color", Color(0.55, 0.42, 0.31)), spec.get("accent", Color(0.80, 0.66, 0.42)), String(spec.get("name", "Villager")), String(spec.get("role", "")))
     add_npc_collider(body)
     system.npc_root.add_child(body)
-    main.npc_system.safe_place_npc(body, Vector3(float(cell.x) * CELL, level + 0.02, float(cell.y) * CELL), null, "tutorial_spawn")
+    place_tutorial_npc(body, cell, level, String(spec.get("id", "")))
     register_with_npc_system(body, spec, level, cell)
     if body.global_position.distance_to(look_target) > 0.2:
         body.look_at(look_target, Vector3.UP)
     return body
+
+func place_tutorial_npc(body: CharacterBody3D, requested_cell: Vector2i, level: float, npc_id: String) -> Dictionary:
+    if body == null or main == null or main.npc_system == null or not main.npc_system.has_method("safe_place_npc"):
+        return { "ok": false, "reason": "missing_safe_placement" }
+    body.set_meta("npc_spawn_requested_cell", requested_cell)
+    var requested_position := Vector3(float(requested_cell.x) * CELL, level + 0.02, float(requested_cell.y) * CELL)
+    var initial: Dictionary = main.npc_system.safe_place_npc(body, requested_position, null, "tutorial_spawn")
+    if bool(initial.get("ok", false)):
+        body.set_meta("npc_spawn_fallback_used", false)
+        body.set_meta("npc_spawn_placement", initial)
+        return initial
+    var max_radius := 10
+    for radius in range(1, max_radius + 1):
+        for dx in range(-radius, radius + 1):
+            for dz in range(-radius, radius + 1):
+                if maxi(absi(dx), absi(dz)) != radius:
+                    continue
+                var candidate_cell := requested_cell + Vector2i(dx, dz)
+                var candidate_position := Vector3(float(candidate_cell.x) * CELL, level + 0.02, float(candidate_cell.y) * CELL)
+                var placement: Dictionary = main.npc_system.safe_place_npc(body, candidate_position, null, "tutorial_spawn_fallback")
+                if not bool(placement.get("ok", false)):
+                    continue
+                placement["fallbackCell"] = candidate_cell
+                placement["requestedCell"] = requested_cell
+                placement["fallbackRadius"] = radius
+                body.set_meta("npc_spawn_fallback_used", true)
+                body.set_meta("npc_spawn_placement", placement)
+                return placement
+    var failed := {
+        "ok": false,
+        "position": requested_position,
+        "reason": String(initial.get("reason", "placement_failed")),
+        "requestedCell": requested_cell,
+        "npcId": npc_id
+    }
+    body.set_meta("npc_spawn_fallback_used", false)
+    body.set_meta("npc_spawn_placement", failed)
+    return failed
 
 func register_with_npc_system(body: Node3D, spec: Dictionary, level: float, cell: Vector2i) -> void:
     if main == null or main.npc_system == null or not main.npc_system.has_method("register_npc"):
@@ -271,6 +312,9 @@ func register_with_npc_system(body: Node3D, spec: Dictionary, level: float, cell
         "cell": cell,
         "homeCell": spec.get("homeCell", cell),
         "porchCell": spec.get("porchCell", cell),
+        "doorCell": spec.get("doorCell", spec.get("porchCell", cell)),
+        "interiorLandingCell": spec.get("interiorLandingCell", spec.get("homeCell", cell)),
+        "homeRouteCells": spec.get("homeRouteCells", [spec.get("porchCell", cell), spec.get("homeCell", cell)]),
         "interiorMinCell": spec.get("interiorMinCell", spec.get("homeCell", cell)),
         "interiorMaxCell": spec.get("interiorMaxCell", spec.get("homeCell", cell)),
         "guardCell": spec.get("guardCell", spec.get("porchCell", cell)),
@@ -279,7 +323,8 @@ func register_with_npc_system(body: Node3D, spec: Dictionary, level: float, cell
         "weapon": String(spec.get("weapon", "")),
         "job": String(spec.get("job", "")),
         "holdIntroDoor": bool(spec.get("holdIntroDoor", false)),
-        "tutorial": true
+        "tutorial": true,
+        "requiredVisibleScripted": true
     })
 
 func add_npc_collider(body: Node3D) -> void:

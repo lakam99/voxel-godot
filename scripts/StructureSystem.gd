@@ -28,6 +28,7 @@ var defer_structure_ops := false
 var deferred_town_home_records := {}
 var terrain_surface_sample_cache := {}
 var terrain_footprint_records := {}
+var natural_prop_exclusion_records := {}
 
 func setup(main_node) -> void:
     main = main_node
@@ -52,6 +53,7 @@ func reset() -> void:
     deferred_town_home_records.clear()
     terrain_surface_sample_cache.clear()
     terrain_footprint_records.clear()
+    natural_prop_exclusion_records.clear()
 
 func update_around(center_cell: Vector2i) -> void:
     if main == null:
@@ -362,6 +364,11 @@ func publish_deferred_town_home_records(town_key: String) -> void:
     if town_key == "":
         return
     var records: Array = deferred_town_home_records.get(town_key, [])
+    var existing_value = town_home_records.get(town_key, [])
+    var existing_records: Array = existing_value if existing_value is Array else []
+    if existing_records.size() > records.size():
+        deferred_town_home_records.erase(town_key)
+        return
     town_home_records[town_key] = records.duplicate(true)
     deferred_town_home_records.erase(town_key)
 
@@ -604,6 +611,39 @@ func structure_terrain_footprints_snapshot() -> Array:
             result.append((record_value as Dictionary).duplicate(true))
     return result
 
+func reserve_natural_prop_exclusion(base_x: int, base_z: int, width: int, depth: int, source: String) -> void:
+    if width <= 0 or depth <= 0:
+        return
+    var record_id := "%s:%d,%d:%dx%d" % [source, base_x, base_z, width, depth]
+    natural_prop_exclusion_records[record_id] = {
+        "id": record_id,
+        "source": source,
+        "minX": base_x,
+        "maxX": base_x + width - 1,
+        "minZ": base_z,
+        "maxZ": base_z + depth - 1
+    }
+
+func blocks_natural_prop_at_cell(x: int, z: int) -> bool:
+    for record_value in natural_prop_exclusion_records.values():
+        if not (record_value is Dictionary):
+            continue
+        var record: Dictionary = record_value
+        if x >= int(record.get("minX", x)) \
+            and x <= int(record.get("maxX", x)) \
+            and z >= int(record.get("minZ", z)) \
+            and z <= int(record.get("maxZ", z)):
+            return true
+    for record_value in terrain_footprint_records.values():
+        if not (record_value is Dictionary):
+            continue
+        var record: Dictionary = record_value
+        var min_cell: Vector3i = record.get("minCell", Vector3i.ZERO)
+        var max_cell: Vector3i = record.get("maxCell", Vector3i.ZERO)
+        if x >= min_cell.x and x <= max_cell.x and z >= min_cell.z and z <= max_cell.z:
+            return true
+    return false
+
 func build_town(town: Dictionary) -> void:
     var rng := RandomNumberGenerator.new()
     rng.seed = main.hash_string("%s:town-build:%d,%d" % [main.seed_text, int(town["regionX"]), int(town["regionZ"])])
@@ -819,10 +859,12 @@ func record_town_home(town_key: String, town: Dictionary, base_x: int, base_z: i
     var guard_cell := home_cell
     var interior_min_cell := Vector2i(base_x + 1, base_z + 1)
     var interior_max_cell := Vector2i(base_x + width - 2, base_z + depth - 2)
+    var door_cell := porch_cell
+    var interior_landing_cell := home_cell
     var door_entries := StructureDoorRulesScript.door_cells(width, depth, door_side)
     if not door_entries.is_empty():
         var entry: Dictionary = door_entries[0]
-        var door_cell := Vector2i(base_x + int(entry.get("x", 0)), base_z + int(entry.get("z", 0)))
+        door_cell = Vector2i(base_x + int(entry.get("x", 0)), base_z + int(entry.get("z", 0)))
         var interior_landing := door_cell
         var inward := Vector2i.ZERO
         porch_cell = door_cell
@@ -851,8 +893,17 @@ func record_town_home(town_key: String, town: Dictionary, base_x: int, base_z: i
             home_cell += lateral * lateral_sign * 2
         interior_landing.x = clampi(interior_landing.x, interior_min_cell.x, interior_max_cell.x)
         interior_landing.y = clampi(interior_landing.y, interior_min_cell.y, interior_max_cell.y)
+        interior_landing_cell = interior_landing
         home_cell.x = clampi(home_cell.x, interior_min_cell.x, interior_max_cell.x)
         home_cell.y = clampi(home_cell.y, interior_min_cell.y, interior_max_cell.y)
+    var route_candidates := [porch_cell, door_cell, interior_landing_cell, home_cell]
+    var home_route_cells: Array = []
+    for route_cell_variant in route_candidates:
+        if not (route_cell_variant is Vector2i):
+            continue
+        var route_cell: Vector2i = route_cell_variant
+        if home_route_cells.is_empty() or home_route_cells[home_route_cells.size() - 1] != route_cell:
+            home_route_cells.append(route_cell)
     var record := {
         "id": "%s:home:%d" % [town_key, index],
         "townKey": town_key,
@@ -861,6 +912,9 @@ func record_town_home(town_key: String, town: Dictionary, base_x: int, base_z: i
         "level": float(town.get("level", 16.0)),
         "homeCell": home_cell,
         "porchCell": porch_cell,
+        "doorCell": door_cell,
+        "interiorLandingCell": interior_landing_cell,
+        "homeRouteCells": home_route_cells,
         "guardCell": guard_cell,
         "interiorMinCell": interior_min_cell,
         "interiorMaxCell": interior_max_cell,
@@ -875,6 +929,67 @@ func record_town_home(town_key: String, town: Dictionary, base_x: int, base_z: i
 
 func town_home_records_snapshot() -> Dictionary:
     return town_home_records.duplicate(true)
+
+func ensure_town_home_records(town: Dictionary, minimum_count := 4) -> Array:
+    if town.is_empty():
+        return []
+    var town_key := town_key_for(town)
+    if town_key == "":
+        return []
+    var existing_value = town_home_records.get(town_key, [])
+    var existing: Array = existing_value if existing_value is Array else []
+    if existing.size() >= minimum_count:
+        return existing.duplicate(true)
+    var deferred_value = deferred_town_home_records.get(town_key, [])
+    var deferred_records: Array = deferred_value if deferred_value is Array else []
+    if deferred_records.size() >= minimum_count:
+        town_home_records[town_key] = deferred_records.duplicate(true)
+        deferred_town_home_records.erase(town_key)
+        return (town_home_records[town_key] as Array).duplicate(true)
+    build_town_homes_now(town, town_key)
+    existing_value = town_home_records.get(town_key, [])
+    existing = existing_value if existing_value is Array else []
+    return existing.duplicate(true)
+
+func build_town_homes_now(town: Dictionary, town_key: String) -> void:
+    if main == null or town_key == "":
+        return
+    var rng := RandomNumberGenerator.new()
+    rng.seed = main.hash_string("%s:town-build:%d,%d" % [main.seed_text, int(town["regionX"]), int(town["regionZ"])])
+    var center_x := int(town["centerX"])
+    var center_z := int(town["centerZ"])
+    var level := float(town["level"])
+    var desired_home_count := town_home_count(town)
+    var sites := town_home_sites(town, rng)
+    town_home_records[town_key] = []
+    deferred_town_home_records.erase(town_key)
+    var previous := defer_structure_ops
+    defer_structure_ops = false
+    var built_home_count := 0
+    for i in range(sites.size()):
+        if built_home_count >= desired_home_count:
+            break
+        var site: Dictionary = sites[i] if sites[i] is Dictionary else {}
+        if site.is_empty():
+            continue
+        var base_x := center_x + int(site["dx"])
+        var base_z := center_z + int(site["dz"])
+        var side := int(site["side"])
+        if town_home_site_excluded(town, base_x, base_z, 10, 10, side):
+            continue
+        var width := rng.randi_range(7, 9)
+        var depth := rng.randi_range(7, 9)
+        var wall_height := rng.randi_range(4, 5)
+        var wall_type := "woodBlock" if i % 2 == 0 else "stoneBlock"
+        if rng.randf() < 0.35:
+            wall_type = "stoneBlock" if wall_type == "woodBlock" else "woodBlock"
+        var roof_type := "stoneBlock" if wall_type == "woodBlock" else "woodBlock"
+        if town_home_site_excluded(town, base_x, base_z, width, depth, side):
+            continue
+        build_building(base_x, base_z, level, width, depth, wall_height, wall_type, roof_type, side, rng, true)
+        record_town_home(town_key, town, base_x, base_z, width, depth, side, built_home_count)
+        built_home_count += 1
+    defer_structure_ops = previous
 
 func build_building(base_x: int, base_z: int, level: float, width: int, depth: int, wall_height: int, wall_type: String, roof_type: String, door_side: int, rng: RandomNumberGenerator, town_building: bool) -> void:
     generated_building_count += 1

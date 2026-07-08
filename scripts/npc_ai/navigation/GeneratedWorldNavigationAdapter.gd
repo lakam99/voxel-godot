@@ -3,6 +3,7 @@ class_name GeneratedWorldNavigationAdapter
 
 const NpcConstantsScript := preload("res://scripts/npc_ai/NpcConstants.gd")
 const NpcEnumsScript := preload("res://scripts/npc_ai/NpcEnums.gd")
+const HomeInteriorServiceScript := preload("res://scripts/npc_ai/behavior/HomeInteriorService.gd")
 
 const CELL := NpcConstantsScript.CELL_SIZE
 const NAV_TILE_CELL_SIZE := NpcConstantsScript.NAV_TILE_CELL_SIZE
@@ -170,6 +171,10 @@ func navmesh_tile_source_key() -> String:
     return "%d:%d" % [static_snapshot_revision, semantic_revision]
 
 func navmesh_tile_source_key_for_tile(tile_key: String) -> String:
+    if tile_key == "":
+        return navmesh_tile_source_key()
+    if not navmesh_tile_revision_by_key.has(tile_key):
+        navmesh_tile_revision_by_key[tile_key] = static_snapshot_revision
     var tile_revision := int(navmesh_tile_revision_by_key.get(tile_key, static_snapshot_revision))
     return "%d:%d" % [tile_revision, semantic_revision]
 
@@ -1455,15 +1460,16 @@ func entry_body_inside_home(entry: Dictionary) -> bool:
     var body := entry.get("body") as Node3D
     if body == null or not is_instance_valid(body):
         return false
-    return cell_inside_entry_home(entry, world_cell(body.global_position))
+    var portal = null
+    if main != null and main.get("npc_system") != null:
+        var npc_system = main.get("npc_system")
+        var autonomy = npc_system.get("autonomy_system") if npc_system != null else null
+        if autonomy != null and autonomy.get("door_portals") != null:
+            portal = HomeInteriorServiceScript.portal_for_entry(entry, autonomy.get("door_portals"))
+    return bool(HomeInteriorServiceScript.status(entry, body.global_position, portal).get("strictInside", false))
 
 func cell_inside_entry_home(entry: Dictionary, cell: Vector2i) -> bool:
-    var interior_min: Vector2i = entry.get("interiorMinCell", entry.get("homeCell", Vector2i.ZERO))
-    var interior_max: Vector2i = entry.get("interiorMaxCell", entry.get("homeCell", Vector2i.ZERO))
-    return cell.x >= mini(interior_min.x, interior_max.x) \
-        and cell.x <= maxi(interior_min.x, interior_max.x) \
-        and cell.y >= mini(interior_min.y, interior_max.y) \
-        and cell.y <= maxi(interior_min.y, interior_max.y)
+    return HomeInteriorServiceScript.cell_inside_home_bounds(entry, cell, true)
 
 func private_interior_blocks_entry(entry: Dictionary, cell: Vector2i) -> bool:
     if entry.is_empty() or main == null or main.get("structure_system") == null:
@@ -1515,9 +1521,7 @@ func tutorial_starter_interior_blocks_cell(cell: Vector2i) -> bool:
         return false
     var state: Dictionary = tutorial.call("state")
     var start_value = state.get("startCell", INVALID_CELL)
-    if not (start_value is Vector2i):
-        return false
-    var start_cell: Vector2i = start_value
+    var start_cell: Vector2i = HomeInteriorServiceScript.cell_value(start_value, INVALID_CELL)
     if start_cell == INVALID_CELL:
         return false
     var bounds := tutorial_starter_structure_bounds(start_cell)
@@ -1744,9 +1748,31 @@ func approach_cells_for_target(entry: Dictionary, target_position: Vector3, allo
                 if max(abs(dx), abs(dz)) != radius:
                     continue
                 var cell := target_cell + Vector2i(dx, dz)
-                if cell_allowed_area(entry, cell, allow_outside, false):
+                if cell_is_standable_goal(entry, cell, allow_outside, false):
                     result.append(cell)
     result.sort_custom(func(a: Vector2i, b: Vector2i) -> bool:
         return cell_distance(a, target_cell) < cell_distance(b, target_cell)
     )
     return result
+
+func cell_is_standable_goal(entry: Dictionary, cell: Vector2i, allow_outside := false, moving_home := false) -> bool:
+    if not cell_allowed_area(entry, cell, allow_outside, moving_home):
+        return false
+    if private_interior_blocks_entry(entry, cell):
+        return false
+    var terrain := terrain_allows_step(cell, cell, moving_home)
+    if not bool(terrain.get("ok", false)):
+        return false
+    var snapshot := cached_validation_snapshot(entry, allow_outside, moving_home)
+    var door := door_at(snapshot, cell)
+    if door != null and not door_allows_route_for_entry(entry, door, cell, moving_home):
+        return false
+    if door == null and not static_collision_blocker(snapshot, cell).is_empty():
+        return false
+    if static_blocker(snapshot, cell) != null:
+        return false
+    if prop_clearance_blocker(snapshot, cell) != null:
+        return false
+    if dynamic_blocker(snapshot, cell) != null:
+        return false
+    return true

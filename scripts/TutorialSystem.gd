@@ -59,6 +59,7 @@ var scene_builder
 var repair_quest
 var rescue_system
 var dialogue_system
+var last_home_refresh_debug := {}
 
 func setup(main_node) -> void:
     main = main_node
@@ -114,6 +115,7 @@ func start_new_world() -> bool:
     setup_intro_repair_quest()
     place_player_in_starter_house()
     spawn_tutorial_npcs()
+    refresh_tutorial_npc_home_records()
     force_stormy_night()
     last_message = "Knock, knock. Someone is at the door."
     last_dialogue.clear()
@@ -145,6 +147,7 @@ func start_new_world_staged() -> bool:
     place_player_in_starter_house()
     await loading_yield("Preparing villagers")
     spawn_tutorial_npcs()
+    refresh_tutorial_npc_home_records()
     force_stormy_night()
     last_message = "Knock, knock. Someone is at the door."
     last_dialogue.clear()
@@ -170,10 +173,11 @@ func ensure_town_generated_staged() -> void:
         if main.structure_system.has_method("town_home_records_snapshot"):
             var records_by_town: Dictionary = main.structure_system.town_home_records_snapshot()
             var records: Array = records_by_town.get(town_key, []) if records_by_town.get(town_key, []) is Array else []
-            records_ready = not records.is_empty()
+            records_ready = records.size() >= 4
         if records_ready and pending <= 0:
             return
         await loading_yield("Building tutorial town %d" % pending)
+    ensure_tutorial_town_home_records(4)
 
 func loading_yield(message: String) -> void:
     if main != null and main.has_method("startup_loading_yield"):
@@ -273,6 +277,7 @@ func state() -> Dictionary:
         "rescueRemaining": rescue_remaining_hostiles(),
         "rescueRequired": RESCUE_MONSTER_COUNT,
         "rescueSite": rescue_site,
+        "homeRefresh": last_home_refresh_debug.duplicate(true),
         "introRepairTargets": {
             "fence": repair_fence_cells.duplicate(),
             "lamps": repair_lamp_cells.duplicate()
@@ -287,29 +292,113 @@ func tutorial_town_key() -> String:
 func tutorial_home_record(index: int, fallback_home: Vector2i, fallback_porch: Vector2i, fallback_guard: Vector2i = Vector2i.ZERO) -> Dictionary:
     if fallback_guard == Vector2i.ZERO:
         fallback_guard = fallback_porch
-    if main != null and main.structure_system != null and main.structure_system.has_method("town_home_records_snapshot"):
-        var records_by_town: Dictionary = main.structure_system.town_home_records_snapshot()
-        var records: Array = records_by_town.get(tutorial_town_key(), [])
-        for record_value in records:
+    var generated_record := tutorial_home_record_from_records(index, fallback_home, fallback_porch, fallback_guard)
+    if not generated_record.is_empty():
+        return generated_record
+    return normalized_tutorial_home_record({
+        "homeCell": fallback_home,
+        "porchCell": fallback_porch,
+        "guardCell": fallback_guard
+    }, fallback_home, fallback_porch, fallback_guard)
+
+func tutorial_home_records_for_current_town() -> Array:
+    var records: Array = []
+    if main == null or main.structure_system == null or not main.structure_system.has_method("town_home_records_snapshot"):
+        return records
+    var records_by_town: Dictionary = main.structure_system.town_home_records_snapshot()
+    var exact_value = records_by_town.get(tutorial_town_key(), [])
+    if exact_value is Array:
+        records.append_array(exact_value)
+    if not records.is_empty() or town.is_empty():
+        return records
+    var center := Vector2i(int(town.get("centerX", 0)), int(town.get("centerZ", 0)))
+    for town_key_value in records_by_town.keys():
+        var town_records_value = records_by_town.get(town_key_value, [])
+        if not (town_records_value is Array):
+            continue
+        for record_value in town_records_value:
             if not (record_value is Dictionary):
                 continue
             var record: Dictionary = record_value
-            if int(record.get("buildingIndex", -1)) != index:
-                continue
-            return {
-                "homeCell": record.get("homeCell", fallback_home),
-                "porchCell": record.get("porchCell", fallback_porch),
-                "guardCell": record.get("guardCell", fallback_guard),
-                "interiorMinCell": record.get("interiorMinCell", fallback_home),
-                "interiorMaxCell": record.get("interiorMaxCell", fallback_home)
-            }
+            var record_center: Vector2i = record.get("townCenter", Vector2i.ZERO)
+            if record_center == center:
+                records.append(record)
+    return records
+
+func ensure_tutorial_town_home_records(minimum_count := 4) -> bool:
+    if main == null or main.structure_system == null or town.is_empty():
+        return false
+    if not main.structure_system.has_method("ensure_town_home_records"):
+        return not tutorial_home_records_for_current_town().is_empty()
+    var ensured_value = main.structure_system.call("ensure_town_home_records", town, minimum_count)
+    if ensured_value is Array and not (ensured_value as Array).is_empty():
+        return true
+    return not tutorial_home_records_for_current_town().is_empty()
+
+func tutorial_home_record_from_records(index: int, fallback_home: Vector2i, fallback_porch: Vector2i, fallback_guard: Vector2i = Vector2i.ZERO) -> Dictionary:
+    if fallback_guard == Vector2i.ZERO:
+        fallback_guard = fallback_porch
+    var records := tutorial_home_records_for_current_town()
+    for record_value in records:
+        if not (record_value is Dictionary):
+            continue
+        var indexed_record: Dictionary = record_value
+        if int(indexed_record.get("buildingIndex", -1)) == index:
+            return normalized_tutorial_home_record(indexed_record, fallback_home, fallback_porch, fallback_guard)
+    var nearest_record: Dictionary = {}
+    var nearest_score := INF
+    for record_value in records:
+        if not (record_value is Dictionary):
+            continue
+        var record: Dictionary = record_value
+        var record_home: Vector2i = record.get("homeCell", fallback_home)
+        var record_porch: Vector2i = record.get("porchCell", record_home)
+        var home_delta := record_home - fallback_home
+        var porch_delta := record_porch - fallback_porch
+        var score := float(home_delta.length_squared()) + float(porch_delta.length_squared()) * 0.35
+        if int(record.get("buildingIndex", -1)) == index:
+            score -= 0.01
+        if score < nearest_score:
+            nearest_score = score
+            nearest_record = record
+    if nearest_record.is_empty():
+        return {}
+    return normalized_tutorial_home_record(nearest_record, fallback_home, fallback_porch, fallback_guard)
+
+func normalized_tutorial_home_record(source: Dictionary, fallback_home: Vector2i, fallback_porch: Vector2i, fallback_guard: Vector2i) -> Dictionary:
+    var home_cell: Vector2i = source.get("homeCell", fallback_home)
+    var porch_cell: Vector2i = source.get("porchCell", fallback_porch)
+    var inward := cardinal_home_direction(home_cell - porch_cell)
+    var door_cell: Vector2i = source.get("doorCell", porch_cell + inward if inward != Vector2i.ZERO else porch_cell)
+    var interior_landing_cell: Vector2i = source.get("interiorLandingCell", door_cell + inward if inward != Vector2i.ZERO else home_cell)
+    var route_cells: Array = source.get("homeRouteCells", []) if source.get("homeRouteCells", []) is Array else []
+    if route_cells.size() < 3:
+        route_cells = []
+        for candidate in [porch_cell, door_cell, interior_landing_cell, home_cell]:
+            if route_cells.is_empty() or route_cells[route_cells.size() - 1] != candidate:
+                route_cells.append(candidate)
+    var interior_min: Vector2i = source.get("interiorMinCell", home_cell)
+    var interior_max: Vector2i = source.get("interiorMaxCell", home_cell)
+    for interior_cell in [interior_landing_cell, home_cell]:
+        interior_min = Vector2i(mini(interior_min.x, interior_cell.x), mini(interior_min.y, interior_cell.y))
+        interior_max = Vector2i(maxi(interior_max.x, interior_cell.x), maxi(interior_max.y, interior_cell.y))
     return {
-        "homeCell": fallback_home,
-        "porchCell": fallback_porch,
-        "guardCell": fallback_guard,
-        "interiorMinCell": fallback_home,
-        "interiorMaxCell": fallback_home
+        "homeCell": home_cell,
+        "porchCell": porch_cell,
+        "doorCell": door_cell,
+        "interiorLandingCell": interior_landing_cell,
+        "homeRouteCells": route_cells,
+        "guardCell": source.get("guardCell", fallback_guard),
+        "interiorMinCell": interior_min,
+        "interiorMaxCell": interior_max
     }
+
+func cardinal_home_direction(delta: Vector2i) -> Vector2i:
+    if delta == Vector2i.ZERO:
+        return Vector2i.ZERO
+    if absi(delta.x) >= absi(delta.y):
+        return Vector2i(1 if delta.x > 0 else -1, 0)
+    return Vector2i(0, 1 if delta.y > 0 else -1)
 
 func configure_starting_inventory() -> void:
     if main == null or main.inventory_system == null:
@@ -493,7 +582,12 @@ func is_intro_elder_waiting_for_ack() -> bool:
 
 func acknowledge_dialogue(context := {}) -> void:
     var state: Dictionary = context if context is Dictionary else {}
-    var intro_ack := bool(state.get("introElder", false)) or (String(state.get("npcId", "")) == "mira" and is_intro_elder_waiting_for_ack())
+    var intro_ack := bool(state.get("introElder", false)) \
+        or (
+            String(state.get("npcId", "")) == "mira"
+            and intro_door_opened
+            and not intro_elder_dialogue_acknowledged
+        )
     if intro_ack:
         intro_elder_dialogue_acknowledged = true
         release_intro_elder_home_order()
@@ -505,8 +599,82 @@ func dialogue_payload() -> Dictionary:
 func release_intro_elder_home_order() -> void:
     if main == null or main.npc_system == null or not main.npc_system.has_method("order_go_home"):
         return
+    if not refresh_tutorial_npc_home_records(true):
+        last_message = "Mira waits while the village paths settle."
+        return
     var actor = last_dialogue_node if last_dialogue_node != null and is_instance_valid(last_dialogue_node) else "mira"
+    if main.npc_system.has_method("release_intro_hold_and_order_home"):
+        var release_result: Dictionary = main.npc_system.release_intro_hold_and_order_home(actor, "intro_acknowledged_return_home")
+        if String(release_result.get("state", "")) != "FAILED_TARGET_GONE":
+            return
+    var entry: Dictionary = main.npc_system.npc_entry_for_actor(actor) if main.npc_system.has_method("npc_entry_for_actor") else {}
+    if entry.is_empty() and actor != "mira" and main.npc_system.has_method("npc_entry_for_actor"):
+        entry = main.npc_system.npc_entry_for_actor("mira")
+        actor = "mira"
+    if not entry.is_empty():
+        if main.npc_system.has_method("clear_intro_hold_for_entry"):
+            main.npc_system.clear_intro_hold_for_entry(entry)
+        else:
+            entry["holdIntroDoor"] = false
+        var body := entry.get("body") as Node
+        if body != null and is_instance_valid(body):
+            body.set_meta("npc_hold_intro_door", false)
     main.npc_system.order_go_home(actor, "intro_acknowledged_return_home")
+
+func refresh_tutorial_npc_home_records(require_generated := false) -> bool:
+    if main == null or main.npc_system == null or not main.npc_system.has_method("update_npc_home_record"):
+        last_home_refresh_debug = { "ok": false, "reason": "missing_npc_system" }
+        return false
+    if town.is_empty():
+        last_home_refresh_debug = { "ok": false, "reason": "missing_town" }
+        return false
+    var cx := int(town.get("centerX", 0))
+    var cz := int(town.get("centerZ", 0))
+    var records := tutorial_home_records_for_current_town()
+    if records.size() < 4:
+        ensure_tutorial_town_home_records(4)
+        records = tutorial_home_records_for_current_town()
+    if require_generated and records.size() < 4:
+        last_home_refresh_debug = {
+            "ok": false,
+            "reason": "generated_records_missing" if records.is_empty() else "generated_records_incomplete",
+            "generatedRecordCount": records.size(),
+            "requiredGenerated": true,
+            "townKey": tutorial_town_key(),
+            "townCenter": [cx, cz]
+        }
+        return false
+    var north_home: Dictionary = tutorial_home_record_from_records(1, Vector2i(cx + 12, cz - 10), Vector2i(cx + 12, cz - 15))
+    var west_home: Dictionary = tutorial_home_record_from_records(2, Vector2i(cx - 13, cz + 12), Vector2i(cx - 13, cz + 17))
+    var elder_home: Dictionary = tutorial_home_record_from_records(3, Vector2i(cx + 13, cz + 12), Vector2i(cx + 13, cz + 17))
+    if north_home.is_empty():
+        north_home = tutorial_home_record(1, Vector2i(cx + 12, cz - 10), Vector2i(cx + 12, cz - 15))
+    if west_home.is_empty():
+        west_home = tutorial_home_record(2, Vector2i(cx - 13, cz + 12), Vector2i(cx - 13, cz + 17))
+    if elder_home.is_empty():
+        elder_home = tutorial_home_record(3, Vector2i(cx + 13, cz + 12), Vector2i(cx + 13, cz + 17))
+    var assignments := {
+        "rowan": north_home,
+        "sera": north_home,
+        "toma": north_home,
+        "niko": west_home,
+        "lyra": west_home,
+        "mira": elder_home
+    }
+    var updated := 0
+    for actor_id in assignments.keys():
+        if main.npc_system.update_npc_home_record(String(actor_id), assignments[actor_id]):
+            updated += 1
+    last_home_refresh_debug = {
+        "ok": updated == assignments.size() and (not require_generated or not records.is_empty()),
+        "reason": "refreshed" if updated == assignments.size() else "missing_npc_entry",
+        "generatedRecordCount": records.size(),
+        "updated": updated,
+        "requiredGenerated": require_generated,
+        "townKey": tutorial_town_key(),
+        "miraHome": elder_home.duplicate(true)
+    }
+    return bool(last_home_refresh_debug.get("ok", false))
 
 func resume_intro_elder_schedule() -> void:
     if main == null or main.npc_system == null or not main.npc_system.has_method("order_resume_schedule"):
@@ -746,6 +914,7 @@ func danger_profile(position: Vector3) -> Dictionary:
 
 func ensure_town_generated() -> void:
     scene_builder.ensure_town_generated()
+    ensure_tutorial_town_home_records(4)
 
 func ensure_starter_bed() -> void:
     scene_builder.ensure_starter_bed()
@@ -772,6 +941,7 @@ func force_stormy_night() -> void:
     scene_builder.force_stormy_night()
 
 func spawn_tutorial_npcs() -> void:
+    ensure_tutorial_town_home_records(4)
     scene_builder.spawn_tutorial_npcs()
 
 func spawn_npc(spec: Dictionary, level: float, look_target: Vector3) -> Node3D:

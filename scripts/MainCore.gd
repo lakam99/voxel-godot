@@ -16,6 +16,7 @@ var startup_mode := "auto"
 var deferred_startup_boot := false
 var startup_loading_active := false
 var runtime_loading_active := false
+var post_startup_trace_frames := 0
 var height_noise: FastNoiseLite
 var ridge_noise: FastNoiseLite
 var flat_noise: FastNoiseLite
@@ -387,10 +388,13 @@ func _run_deferred_startup_boot() -> void:
         await bootstrap_initial_chunks_staged()
         await drain_initial_navigation_changes_staged()
         await prime_initial_navigation_snapshot_staged()
+        await startup_loading_yield("Finalizing startup")
         playtest_progress("main_initial_chunks_queued")
     var interactive_underground_message := "" if skip_synchronous_world_boot else apply_interactive_underground_launch_if_requested()
     if not skip_synchronous_world_boot:
+        await startup_loading_yield("Preparing intro audio")
         refresh_intro_knock_audio()
+        await startup_loading_yield("Preparing HUD")
     var ready_message := "Loaded saved world" if loaded else "Godot slice ready"
     if not loaded and tutorial_system and tutorial_system.last_message != "":
         ready_message = tutorial_system.last_message
@@ -398,13 +402,17 @@ func _run_deferred_startup_boot() -> void:
         ready_message = interactive_underground_message
     if not skip_synchronous_world_boot:
         update_hud(ready_message)
+    await startup_loading_yield("Resetting save tracking")
     reset_autosave_dirty_tracking(not loaded and not skip_synchronous_world_boot, "new_world")
+    await startup_loading_yield("Enabling gameplay")
     startup_loading_active = false
+    post_startup_trace_frames = 3
     set_process(true)
     set_process_unhandled_input(true)
     set_physics_process(true)
     if player != null:
         player.set_physics_process(true)
+    startup_loading_step.emit("Startup complete")
     startup_loading_completed.emit()
 
 func startup_loading_yield(message: String) -> void:
@@ -479,46 +487,10 @@ func prime_initial_navigation_snapshot_staged() -> void:
     await prime_initial_navigation_tiles_staged(navigation_world, entries)
 
 func prime_initial_navigation_tiles_staged(navigation_world, entries: Array) -> void:
-    if npc_system == null or navigation_world == null:
-        return
-    if not navigation_world.has_method("build_navmesh_tile_snapshot"):
-        return
-    var autonomy = npc_system.get("autonomy_system")
-    var navmesh_world = autonomy.get("navmesh_world") if autonomy != null else null
-    if navmesh_world == null or not navmesh_world.has_method("register_tile_snapshot"):
-        return
-    var tile_keys := {}
-    for entry_value in entries:
-        if tile_keys.size() >= INITIAL_NAVMESH_PRIME_TILE_LIMIT:
-            break
-        if not (entry_value is Dictionary):
-            continue
-        var npc_entry: Dictionary = entry_value
-        prime_navigation_tiles_for_entry(navigation_world, npc_entry, tile_keys)
-    var keys := tile_keys.keys()
-    keys.sort()
-    var published := 0
-    for key_value in keys:
-        if published >= INITIAL_NAVMESH_PRIME_TILE_LIMIT:
-            break
-        var tile_key := String(key_value)
-        if tile_key == "":
-            continue
-        if navmesh_world.has_method("tile_region_status"):
-            var status_value = navmesh_world.call("tile_region_status", tile_key)
-            if status_value is Dictionary:
-                var status: Dictionary = status_value
-                if bool(status.get("installed", false)) and not bool(status.get("dirty", false)) and int(status.get("surfaceCount", 0)) > 0:
-                    continue
-        await startup_loading_yield("Preparing navigation tile %d/%d" % [published + 1, mini(keys.size(), INITIAL_NAVMESH_PRIME_TILE_LIMIT)])
-        var snapshot_value = navigation_world.call("build_navmesh_tile_snapshot", tile_key)
-        if not (snapshot_value is Dictionary):
-            continue
-        var snapshot: Dictionary = snapshot_value
-        if snapshot.is_empty():
-            continue
-        navmesh_world.call("register_tile_snapshot", snapshot)
-        published += 1
+    # Route requests publish the exact navmesh tiles they need through the
+    # frame-budgeted route coordinator. Startup must not enqueue broad tile work
+    # that can immediately stall the first gameplay frame.
+    return
 
 func playtest_progress(label: String) -> void:
     var path: String = OS.get_environment("VOXEL_PLAYTEST_PROGRESS")
@@ -576,45 +548,9 @@ func drain_initial_navigation_changes() -> void:
         iterations += 1
 
 func prime_initial_navigation_tiles(navigation_world, entries: Array) -> void:
-    if npc_system == null or navigation_world == null:
-        return
-    if not navigation_world.has_method("build_navmesh_tile_snapshot"):
-        return
-    var autonomy = npc_system.get("autonomy_system")
-    var navmesh_world = autonomy.get("navmesh_world") if autonomy != null else null
-    if navmesh_world == null or not navmesh_world.has_method("register_tile_snapshot"):
-        return
-    var tile_keys := {}
-    for entry_value in entries:
-        if tile_keys.size() >= INITIAL_NAVMESH_PRIME_TILE_LIMIT:
-            break
-        if not (entry_value is Dictionary):
-            continue
-        var npc_entry: Dictionary = entry_value
-        prime_navigation_tiles_for_entry(navigation_world, npc_entry, tile_keys)
-    var keys := tile_keys.keys()
-    keys.sort()
-    var published := 0
-    for key_value in keys:
-        if published >= INITIAL_NAVMESH_PRIME_TILE_LIMIT:
-            break
-        var tile_key := String(key_value)
-        if tile_key == "":
-            continue
-        if navmesh_world.has_method("tile_region_status"):
-            var status_value = navmesh_world.call("tile_region_status", tile_key)
-            if status_value is Dictionary:
-                var status: Dictionary = status_value
-                if bool(status.get("installed", false)) and not bool(status.get("dirty", false)) and int(status.get("surfaceCount", 0)) > 0:
-                    continue
-        var snapshot_value = navigation_world.call("build_navmesh_tile_snapshot", tile_key)
-        if not (snapshot_value is Dictionary):
-            continue
-        var snapshot: Dictionary = snapshot_value
-        if snapshot.is_empty():
-            continue
-        navmesh_world.call("register_tile_snapshot", snapshot)
-        published += 1
+    # See staged variant above. Initial static snapshot warming is enough for
+    # boot; tile publication is handled by live route demand.
+    return
 
 func prime_navigation_tiles_for_entry(navigation_world, npc_entry: Dictionary, tile_keys: Dictionary) -> void:
     var body := npc_entry.get("body") as Node3D

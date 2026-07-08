@@ -2,6 +2,7 @@ extends RefCounted
 class_name NpcPerceptionService
 
 const NpcConstantsScript := preload("res://scripts/npc_ai/NpcConstants.gd")
+const HomeInteriorServiceScript := preload("res://scripts/npc_ai/behavior/HomeInteriorService.gd")
 
 var autonomy_system = null
 var npc_system = null
@@ -21,9 +22,10 @@ func snapshot(entry: Dictionary, schedule: Dictionary) -> Dictionary:
 		active_threat = npc_system.call("nearest_hostile", position, 42.0, body, prefer_clear_shot)
 	var porch_cell: Vector2i = entry.get("porchCell", entry.get("homeCell", Vector2i.ZERO))
 	var current_cell := Vector2i(roundi(position.x / NpcConstantsScript.CELL_SIZE), roundi(position.z / NpcConstantsScript.CELL_SIZE))
-	var inside_home := is_inside_home_interior(entry, position)
-	var on_porch := current_cell == porch_cell or position.distance_to(entry.get("porchPosition", position)) <= NpcConstantsScript.CELL_SIZE * 0.78
-	var threshold := on_porch and not inside_home
+	var home_status := home_interior_status(entry, position)
+	var inside_home := bool(home_status.get("strictInside", false))
+	var on_porch := bool(home_status.get("onPorch", false)) or current_cell == porch_cell or position.distance_to(entry.get("porchPosition", position)) <= NpcConstantsScript.CELL_SIZE * 0.78
+	var threshold := (on_porch or bool(home_status.get("onDoorCell", false)) or bool(home_status.get("doorThresholdOccupied", false))) and not inside_home
 	var route_status := String(entry.get("routeStatus", ""))
 	var route_reason := String(entry.get("routeReason", ""))
 	var scripted_order_kind := String(body.get_meta("npc_scripted_order_kind", "")) if body != null else ""
@@ -54,6 +56,7 @@ func snapshot(entry: Dictionary, schedule: Dictionary) -> Dictionary:
 		"scriptedOrderKind": scripted_order_kind,
 		"scriptedOrderState": scripted_order_state,
 		"scriptedAllowOutside": body != null and bool(body.get_meta("npc_scripted_allow_outside", true)),
+		"homeInteriorStatus": home_status,
 		"heldByScript": _held_by_script(entry, body),
 		"activeThreat": active_threat != null and is_instance_valid(active_threat),
 		"threat": active_threat,
@@ -64,21 +67,27 @@ func snapshot(entry: Dictionary, schedule: Dictionary) -> Dictionary:
 	}
 
 func is_inside_home_interior(entry: Dictionary, position: Vector3) -> bool:
-	var strict_cell_inside := _strict_cell_inside_home(entry, position)
-	if not strict_cell_inside:
+	var status := home_interior_status(entry, position)
+	if not bool(status.get("strictInside", false)):
 		return false
 	if autonomy_system == null or autonomy_system.get("navigation_world") == null:
-		return strict_cell_inside
+		return true
 	var world = autonomy_system.get("navigation_world")
 	if world.get("semantic_service") == null:
-		return strict_cell_inside
+		return true
 	var regions: Array = world.get("semantic_service").regions_at_position(position, &"home_interior")
 	var npc_id := String(entry.get("id", ""))
 	for region in regions:
 		var metadata: Dictionary = region.get("metadata", {})
 		if String(metadata.get("npcId", "")) == npc_id or String(metadata.get("npcId", "")) == "":
 			return bool(metadata.get("inside", true))
-	return strict_cell_inside
+	return true
+
+func home_interior_status(entry: Dictionary, position: Vector3) -> Dictionary:
+	var portal = null
+	if autonomy_system != null and autonomy_system.get("door_portals") != null:
+		portal = HomeInteriorServiceScript.portal_for_entry(entry, autonomy_system.get("door_portals"))
+	return HomeInteriorServiceScript.status(entry, position, portal)
 
 func compliance(entry: Dictionary, perception: Dictionary, schedule: Dictionary) -> Dictionary:
 	var state := String(schedule.get("scheduleState", "day"))
@@ -112,15 +121,3 @@ func _fallback_inside_home(entry: Dictionary, position: Vector3) -> bool:
 	var current_cell := Vector2i(roundi(position.x / NpcConstantsScript.CELL_SIZE), roundi(position.z / NpcConstantsScript.CELL_SIZE))
 	return current_cell == home_cell and position.distance_to(entry.get("homePosition", position)) <= NpcConstantsScript.CELL_SIZE * 0.82
 
-func _strict_cell_inside_home(entry: Dictionary, position: Vector3) -> bool:
-	var home_cell: Vector2i = entry.get("homeCell", Vector2i.ZERO)
-	var porch_cell: Vector2i = entry.get("porchCell", home_cell)
-	var min_cell: Vector2i = entry.get("interiorMinCell", home_cell)
-	var max_cell: Vector2i = entry.get("interiorMaxCell", home_cell)
-	var current_cell := Vector2i(roundi(position.x / NpcConstantsScript.CELL_SIZE), roundi(position.z / NpcConstantsScript.CELL_SIZE))
-	if current_cell == porch_cell:
-		return false
-	return current_cell.x >= mini(min_cell.x, max_cell.x) \
-		and current_cell.x <= maxi(min_cell.x, max_cell.x) \
-		and current_cell.y >= mini(min_cell.y, max_cell.y) \
-		and current_cell.y <= maxi(min_cell.y, max_cell.y)

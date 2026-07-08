@@ -13,6 +13,7 @@ const NpcAgentScript := preload("res://scripts/npc_ai/NpcAgent.gd")
 const NpcConstantsScript := preload("res://scripts/npc_ai/NpcConstants.gd")
 const NpcMotionControllerScript := preload("res://scripts/npc_ai/NpcMotionController.gd")
 const NpcSafePlacementServiceScript := preload("res://scripts/npc_ai/NpcSafePlacementService.gd")
+const HomeInteriorServiceScript := preload("res://scripts/npc_ai/behavior/HomeInteriorService.gd")
 const CharacterMotorProfileScript := preload("res://scripts/npc_ai/contracts/CharacterMotorProfile.gd")
 
 const CELL := 1.35
@@ -31,6 +32,7 @@ const NPC_MOTION_BUDGET_ACTIVE := 10
 const NPC_MOTION_BUDGET_CROWDED := 4
 const NPC_MOTION_BUDGET_VERY_CROWDED := 3
 const NPC_MOTION_ACCUMULATED_DELTA_CAP := 4.0
+const NPC_MOTION_SKIPPED_STREAK_URGENT := 12
 const NPC_BRAIN_FRAME_BUDGET_MS := 4.0
 const NPC_MOTION_FRAME_BUDGET_MS := 8.0
 const NPC_CLOCK_DISPLAY_OFFSET := 0.25
@@ -207,6 +209,15 @@ func order_go_home(actor_id, reason := "scripted_go_home", speed_mode := NPC_SPE
         return scripted_order_result(null, "FAILED_TARGET_GONE", reason, "missing_actor")
     return apply_scripted_order(entry, "go_home", reason, entry.get("homePosition", Vector3.INF), CELL * 0.82, false, true, speed_mode)
 
+func release_intro_hold_and_order_home(actor_id, reason := "intro_acknowledged_return_home", speed_mode := NPC_SPEED_MODE_WALKING) -> Dictionary:
+    var entry := npc_entry_for_actor(actor_id)
+    if entry.is_empty() and String(actor_id) != "mira":
+        entry = npc_entry_for_actor("mira")
+    if entry.is_empty():
+        return scripted_order_result(null, "FAILED_TARGET_GONE", reason, "missing_actor")
+    clear_intro_hold_for_entry(entry)
+    return apply_scripted_order(entry, "go_home", reason, entry.get("homePosition", Vector3.INF), CELL * 0.82, false, true, speed_mode)
+
 func order_face_player(actor_id, reason := "scripted_face_player") -> Dictionary:
     var entry := npc_entry_for_actor(actor_id)
     if entry.is_empty():
@@ -324,6 +335,21 @@ func apply_scripted_order(entry: Dictionary, kind: String, reason: String, targe
     entry["scriptedOrder"] = result
     entry["activeGoalKind"] = "home" if kind == "go_home" else "scripted"
     entry["routePriority"] = 210 if normalized_speed_mode == NPC_SPEED_MODE_SPRINTING else (190 if kind == "go_home" else 180)
+    if kind in ["go_to", "go_home"]:
+        entry["pathWaypoints"] = []
+        entry["routeCells"] = []
+        entry["routeActions"] = {}
+        entry["routeForceReplan"] = true
+        entry.erase("routeKey")
+        entry.erase("routePendingKey")
+        entry.erase("routePendingRetryFrame")
+        entry.erase("routePendingSnapshotRevision")
+        entry.erase("routeFailureRetryFrame")
+        entry.erase("routeDynamicAvoidCells")
+        entry.erase("routeDynamicAvoidUntilFrame")
+    if kind == "go_home":
+        entry["homeRouteIndex"] = 0
+        entry.erase("homeActiveTargetCell")
     body.set_meta("npc_scripted_order_id", order_id)
     body.set_meta("npc_scripted_order_kind", kind)
     body.set_meta("npc_scripted_order_state", "PENDING")
@@ -433,12 +459,23 @@ func register_npc(body: Node3D, profile: Dictionary) -> Dictionary:
     var body_position: Vector3 = body.global_position if body.is_inside_tree() else body.position
     var home_cell: Vector2i = profile.get("homeCell", profile.get("cell", Vector2i.ZERO))
     var porch_cell: Vector2i = profile.get("porchCell", home_cell)
+    var door_cell: Vector2i = profile.get("doorCell", porch_cell)
+    var interior_landing_cell: Vector2i = profile.get("interiorLandingCell", home_cell)
     var guard_cell: Vector2i = profile.get("guardCell", porch_cell)
     var level := float(profile.get("level", body_position.y))
     var home_position := cell_to_position(home_cell, level)
     var porch_position := cell_to_position(porch_cell, level)
+    var profile_home_route_cells: Array = profile.get("homeRouteCells", []) if profile.get("homeRouteCells", []) is Array else []
     var profile_home_route_positions: Array = profile.get("homeRoutePositions", []) if profile.get("homeRoutePositions", []) is Array else []
     var home_route_positions: Array = profile_home_route_positions.duplicate()
+    if home_route_positions.is_empty() and not profile_home_route_cells.is_empty():
+        for route_cell_variant in profile_home_route_cells:
+            if not (route_cell_variant is Vector2i):
+                continue
+            var route_cell: Vector2i = route_cell_variant
+            var route_position := cell_to_position(route_cell, level)
+            if home_route_positions.is_empty() or flat_cell_for_position(home_route_positions[home_route_positions.size() - 1]) != route_cell:
+                home_route_positions.append(route_position)
     if home_route_positions.is_empty():
         if porch_cell != home_cell:
             home_route_positions.append(porch_position)
@@ -467,9 +504,12 @@ func register_npc(body: Node3D, profile: Dictionary) -> Dictionary:
         "level": level,
         "homeCell": home_cell,
         "porchCell": porch_cell,
+        "doorCell": door_cell,
+        "interiorLandingCell": interior_landing_cell,
         "guardCell": guard_cell,
         "homePosition": home_position,
         "porchPosition": porch_position,
+        "homeRouteCells": profile_home_route_cells,
         "homeRoutePositions": home_route_positions,
         "interiorMinCell": profile.get("interiorMinCell", home_cell),
         "interiorMaxCell": profile.get("interiorMaxCell", home_cell),
@@ -501,6 +541,7 @@ func register_npc(body: Node3D, profile: Dictionary) -> Dictionary:
         "jobRuns": 0,
         "holdIntroDoor": bool(profile.get("holdIntroDoor", false)),
         "tutorial": bool(profile.get("tutorial", false)),
+        "requiredVisibleScripted": bool(profile.get("requiredVisibleScripted", profile.get("tutorial", false))),
         "cooldown": deterministic_profile_float(profile, body, "cooldown", 0.2, 1.2),
         "homeReturnTime": 0.0,
         "dayTarget": body_position,
@@ -540,6 +581,17 @@ func register_npc(body: Node3D, profile: Dictionary) -> Dictionary:
     }
     apply_saved_npc_facts(entry)
     apply_npc_metadata(body, entry, home_cell, porch_cell, guard_cell, String(entry.get("job", job)))
+    if bool(profile.get("startInsideHome", false)):
+        var spawn_cell := flat_cell_for_position(body_position)
+        var interior_min: Vector2i = entry.get("interiorMinCell", home_cell)
+        var interior_max: Vector2i = entry.get("interiorMaxCell", home_cell)
+        var spawn_inside := spawn_cell.x >= interior_min.x and spawn_cell.x <= interior_max.x and spawn_cell.y >= interior_min.y and spawn_cell.y <= interior_max.y
+        if spawn_inside:
+            mark_npc_inside_home(entry)
+            entry["routeStatus"] = "arrived"
+            entry["routeReason"] = ""
+            body.set_meta("npc_route_status", "arrived")
+            body.set_meta("npc_route_reason", "")
     ensure_autonomy_system()
     var context = autonomy_system.register_npc(body, profile, entry)
     if context != null:
@@ -625,6 +677,8 @@ func apply_npc_metadata(body: Node, entry: Dictionary, home_cell: Vector2i, porc
     body.set_meta("npc_route_status", String(entry.get("routeStatus", "idle")))
     body.set_meta("npc_route_reason", String(entry.get("routeReason", "")))
     body.set_meta("npc_simulation_lod", String(entry.get("simulationLod", "active")))
+    body.set_meta("npc_tutorial", bool(entry.get("tutorial", false)))
+    body.set_meta("npc_required_visible_sequence", bool(entry.get("requiredVisibleScripted", false)))
     body.set_meta("npc_speed_mode", normalize_npc_speed_mode(entry.get("npcSpeedMode", NPC_SPEED_MODE_WALKING)))
     body.set_meta("npc_rushing", false)
 
@@ -832,6 +886,9 @@ func spawn_town_npc(record: Dictionary, index: int) -> CharacterBody3D:
         "level": level,
         "homeCell": record.get("homeCell", Vector2i.ZERO),
         "porchCell": porch_cell,
+        "doorCell": record.get("doorCell", porch_cell),
+        "interiorLandingCell": record.get("interiorLandingCell", record.get("homeCell", Vector2i.ZERO)),
+        "homeRouteCells": record.get("homeRouteCells", []),
         "interiorMinCell": record.get("interiorMinCell", record.get("homeCell", Vector2i.ZERO)),
         "interiorMaxCell": record.get("interiorMaxCell", record.get("homeCell", Vector2i.ZERO)),
         "guardCell": guard_cell,
@@ -839,6 +896,59 @@ func spawn_town_npc(record: Dictionary, index: int) -> CharacterBody3D:
         "nightGuard": role.to_lower().find("guard") >= 0
     })
     return body
+
+func update_npc_home_record(actor_id, record: Dictionary) -> bool:
+    if record.is_empty():
+        return false
+    var entry := npc_entry_for_actor(actor_id)
+    if entry.is_empty():
+        return false
+    var body := entry.get("body") as Node3D
+    var level := float(record.get("level", entry.get("level", body.global_position.y if body != null else 16.0)))
+    var home_cell: Vector2i = record.get("homeCell", entry.get("homeCell", Vector2i.ZERO))
+    var porch_cell: Vector2i = record.get("porchCell", entry.get("porchCell", home_cell))
+    var door_cell: Vector2i = record.get("doorCell", entry.get("doorCell", porch_cell))
+    var interior_landing_cell: Vector2i = record.get("interiorLandingCell", record.get("homeCell", home_cell))
+    var route_cells: Array = record.get("homeRouteCells", []) if record.get("homeRouteCells", []) is Array else []
+    var route_positions: Array = []
+    if route_cells.is_empty():
+        route_cells = [porch_cell, door_cell, interior_landing_cell, home_cell]
+    for route_cell_value in route_cells:
+        if not (route_cell_value is Vector2i):
+            continue
+        var route_cell: Vector2i = route_cell_value
+        if not route_positions.is_empty() and flat_cell_for_position(route_positions[route_positions.size() - 1]) == route_cell:
+            continue
+        route_positions.append(cell_to_position(route_cell, level))
+    if route_positions.is_empty():
+        route_positions = [cell_to_position(porch_cell, level), cell_to_position(home_cell, level)]
+    entry["level"] = level
+    entry["homeCell"] = home_cell
+    entry["porchCell"] = porch_cell
+    entry["doorCell"] = door_cell
+    entry["interiorLandingCell"] = interior_landing_cell
+    entry["homePosition"] = cell_to_position(home_cell, level)
+    entry["porchPosition"] = cell_to_position(porch_cell, level)
+    entry["homeRouteCells"] = route_cells
+    entry["homeRoutePositions"] = route_positions
+    entry["interiorMinCell"] = record.get("interiorMinCell", entry.get("interiorMinCell", home_cell))
+    entry["interiorMaxCell"] = record.get("interiorMaxCell", entry.get("interiorMaxCell", home_cell))
+    if record.has("guardCell") and not bool(entry.get("nightGuard", false)):
+        entry["guardCell"] = record.get("guardCell", entry.get("guardCell", porch_cell))
+        entry["guardPosition"] = cell_to_position(entry.get("guardCell", porch_cell), level)
+    if body != null and is_instance_valid(body):
+        apply_npc_metadata(body, entry, home_cell, porch_cell, entry.get("guardCell", porch_cell), String(entry.get("job", "")))
+    entry["homeRouteIndex"] = 0
+    entry.erase("homeActiveTargetCell")
+    entry["pathWaypoints"] = []
+    entry["routeCells"] = []
+    entry["routeActions"] = {}
+    entry["routeForceReplan"] = true
+    entry.erase("routeKey")
+    entry.erase("routePendingKey")
+    entry.erase("routePendingRetryFrame")
+    entry.erase("routePendingSnapshotRevision")
+    return true
 
 func generated_town_guard_cell(record: Dictionary, guard_slot: int, fallback: Vector2i) -> Vector2i:
     var center: Vector2i = record.get("townCenter", fallback)
@@ -1068,7 +1178,12 @@ func npc_home_return_window_active(night_factor: float) -> bool:
     return clock_phase >= NPC_DUSK_START_CLOCK or clock_phase < NPC_DAWN_START_CLOCK
 
 func npc_motion_requires_immediate_update(entry: Dictionary) -> bool:
+    if int(entry.get("npc_motion_budget_skipped", 0)) >= NPC_MOTION_SKIPPED_STREAK_URGENT \
+        and String(entry.get("routeStatus", "")) in ["moving", "pending", "waiting"]:
+        return true
     if npc_day_worker_departure_required(entry):
+        return true
+    if npc_job_route_motion_required(entry):
         return true
     if npc_guard_motion_required(entry):
         return true
@@ -1092,6 +1207,23 @@ func npc_motion_requires_immediate_update(entry: Dictionary) -> bool:
         return true
     if String(entry.get("routeReason", "")) in ["active_door_forward_clearance", "portal_retreat", "yielding_retreat"]:
         return true
+    return false
+
+func npc_job_route_motion_required(entry: Dictionary) -> bool:
+    var route_status := String(entry.get("routeStatus", ""))
+    if not (route_status in ["moving", "pending", "waiting"]):
+        return false
+    var phase := String(entry.get("jobPhase", ""))
+    if phase in ["outbound", "searching", "gathering", "returning", "stall"]:
+        return true
+    var active_goal := String(entry.get("activeGoalKind", entry.get("goal", "")))
+    if active_goal in [String(NpcEnumsScript.GOAL_KIND_FORAGE), String(NpcEnumsScript.GOAL_KIND_WORK)]:
+        return true
+    var active_goal_value = entry.get("activeMotionGoal", {})
+    if active_goal_value is Dictionary:
+        var motion_goal := String((active_goal_value as Dictionary).get("goalKind", ""))
+        if motion_goal in [String(NpcEnumsScript.GOAL_KIND_FORAGE), String(NpcEnumsScript.GOAL_KIND_WORK)]:
+            return true
     return false
 
 func npc_guard_motion_required(entry: Dictionary) -> bool:
@@ -1139,6 +1271,7 @@ func npc_is_held_by_intro_or_dialogue(entry: Dictionary, body: Node3D) -> bool:
             if main.player:
                 face_position(body, main.player.global_position)
             return true
+        clear_intro_hold_for_entry(entry)
     if bool(body.get_meta("npc_dialogue_focused", false)):
         face_position(body, body.get_meta("npc_dialogue_face_position", body.global_position))
         entry["lastMoveDistance"] = 0.0
@@ -1438,7 +1571,16 @@ func current_route_failure_blocks_forager(entry: Dictionary) -> bool:
         var porch_cell: Vector2i = entry.get("porchCell", current_cell)
         if abs(current_cell.x - porch_cell.x) <= 1 and abs(current_cell.y - porch_cell.y) <= 1:
             return false
-    return String(entry.get("routeReason", "")) in ["no_route", "no_goal_span", "empty_route", "target_blocked"]
+    return String(entry.get("routeReason", "")) in [
+        "no_route",
+        "no_goal_span",
+        "empty_route",
+        "target_blocked",
+        "endpoint_not_server_walkable",
+        "no_start_server_walkable",
+        "no_target_server_walkable",
+        "path_endpoint_mismatch"
+    ]
 
 func mark_forager_target_unreachable(entry: Dictionary, node: Node3D) -> void:
     if node == null or not is_instance_valid(node):
@@ -1648,6 +1790,36 @@ func is_valid_job_resource_node(node: Node3D, entry: Dictionary, job: String) ->
             return false
         return material == "berryBush" or drop == "berries"
     return false
+
+func clear_intro_hold_for_entry(entry: Dictionary) -> void:
+    entry["holdIntroDoor"] = false
+    entry["npc_lod_brain_due"] = true
+    var body := entry.get("body") as Node
+    if String(entry.get("activeDoorPortalId", "")) != "":
+        var actor_id := String(entry.get("id", ""))
+        release_npc_door_hold(actor_id if actor_id != "" else body, true)
+        release_npc_traffic_reservations(entry, "intro_hold_released")
+        for key in [
+            "activeDoorPortalId",
+            "activeDoorActorId",
+            "activeDoorDirection",
+            "activeDoorTrafficGroupId",
+            "_activeDoorForwardStep",
+            "doorStageActive",
+            "doorStagePortalId",
+            "doorStagePosition"
+        ]:
+            entry.erase(key)
+    var active_goal_value = entry.get("activeMotionGoal", {})
+    if active_goal_value is Dictionary and String((active_goal_value as Dictionary).get("reason", "")) == "held_by_script":
+        entry.erase("activeMotionGoal")
+        entry.erase("activeMotionPlan")
+        entry.erase("activeMotionSchedule")
+        entry.erase("activeMotionPerception")
+    if String(entry.get("npcMotionSkippedReason", "")) == "held_by_script":
+        entry.erase("npcMotionSkippedReason")
+    if body != null and is_instance_valid(body):
+        body.set_meta("npc_hold_intro_door", false)
 
 func resource_job_uses_outside_work_area(job: String) -> bool:
     return job == "forage"
@@ -2092,7 +2264,7 @@ func home_route_step_reached(entry: Dictionary, route_target: Vector3) -> bool:
         return false
     if target_cell != home_cell:
         return current_cell == target_cell or distance_to_target <= CELL * 0.35
-    return abs(current_cell.x - target_cell.x) <= 1 and abs(current_cell.y - target_cell.y) <= 1
+    return current_cell == target_cell or (HomeInteriorServiceScript.cell_inside_home_bounds(entry, current_cell, true) and distance_to_target <= CELL * 0.72)
 
 func route_requires_exact_porch_arrival(entry: Dictionary) -> bool:
     return bool(entry.get("holdDoorOrder", false)) or bool(entry.get("holdIntroDoor", false))
@@ -2104,6 +2276,9 @@ func settle_home_if_reached(entry: Dictionary) -> void:
     var inside_semantic: bool = false
     if autonomy_system != null and autonomy_system.has_method("is_inside_home_interior"):
         inside_semantic = bool(autonomy_system.is_inside_home_interior(entry, body.global_position))
+    else:
+        var fallback_status := HomeInteriorServiceScript.status(entry, body.global_position, null)
+        inside_semantic = bool(fallback_status.get("strictInside", false))
     if inside_semantic:
         if body_occupies_open_door_clearance(entry):
             entry["insideHome"] = false
@@ -2136,9 +2311,6 @@ func settle_home_if_reached(entry: Dictionary) -> void:
     var target_is_home := active_target_cell == home_cell
     var target_is_home_edge := target_is_home or active_target_cell == porch_cell
     var route_arrived_at_porch_fallback := route_arrived and target_is_home and fallback_cell == porch_cell and current_cell == porch_cell
-    if autonomy_system == null and (near_home or (route_arrived and not route_arrived_at_porch_fallback and body.global_position.distance_to(home) <= CELL * 1.45)):
-        mark_npc_inside_home(entry)
-        return
 
     var route_terminal := route_status in ["arrived", "partial", "blocked"]
     var fallback_is_safe_home_edge := fallback_cell == porch_cell or fallback_cell == home_cell

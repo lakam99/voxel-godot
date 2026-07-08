@@ -182,10 +182,18 @@ func update_hud(message: String = "", throttled: bool = false) -> void:
         last_hud_refresh_message = message
         if not throttled:
             hud_refresh_elapsed = 0.0
+    if startup_loading_active:
+        startup_loading_step.emit("HUD refresh: cell")
     var cell := Vector2i(world_to_cell(player.position.x), world_to_cell(player.position.z))
     var biome := surface_biome_at_cell(Vector3i(cell.x, 0, cell.y))
+    if startup_loading_active:
+        startup_loading_step.emit("HUD refresh: exploration")
     update_exploration_state(cell, biome)
+    if startup_loading_active:
+        startup_loading_step.emit("HUD refresh: objectives")
     update_objectives_and_contracts()
+    if startup_loading_active:
+        startup_loading_step.emit("HUD refresh: status")
     var time_text := "Day %d %s" % [max(1, int(floor(world_elapsed / DAY_LENGTH)) + 1), clock_time_text()]
     var weather_state: Dictionary = weather_system.snapshot() if weather_system else { "kind": "clear", "intensity": 0.0 }
     hud.set_status(
@@ -206,10 +214,14 @@ func update_hud(message: String = "", throttled: bool = false) -> void:
         hud.set_contracts(contract_system.state())
     if story_journal_model and hud.has_method("set_story_journal_state"):
         hud.set_story_journal_state(story_journal_model.state())
+    if startup_loading_active:
+        startup_loading_step.emit("HUD refresh: navigation state")
     var nav_state_start := Time.get_ticks_usec()
     var map_state := navigation_map_state()
     if runtime_perf_monitor != null:
         runtime_perf_monitor.observe_duration("hud_navigation_state", profiled_ms(nav_state_start))
+    if startup_loading_active:
+        startup_loading_step.emit("HUD refresh: navigation apply")
     var nav_apply_start := Time.get_ticks_usec()
     hud.set_navigation(
         has_compass(),
@@ -223,6 +235,8 @@ func update_hud(message: String = "", throttled: bool = false) -> void:
         hud.set_interaction_prompt(focused_interaction_prompt())
     if message != "":
         hud.show_notification(message) if hud.has_method("show_notification") else hud.set_target_message(message)
+    if startup_loading_active:
+        startup_loading_step.emit("HUD refresh: done")
 
 func hud_refresh_stats() -> Dictionary:
     return {

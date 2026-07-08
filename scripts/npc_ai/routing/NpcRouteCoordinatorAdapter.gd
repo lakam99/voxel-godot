@@ -13,6 +13,8 @@ const URGENT_ROUTE_EXTRA_JOBS_PER_FRAME := 1
 const SCRIPTED_ROUTE_EXTRA_JOBS_PER_FRAME := 1
 const ACTIVE_JOB_ROUTE_EXTRA_JOBS_PER_FRAME := 1
 const ACTIVE_JOB_ROUTE_STARVED_FRAMES := 4
+const ACTIVE_JOB_NAVMESH_TILE_STARVED_FRAMES := 8
+const ACTIVE_JOB_NAVMESH_TILE_FORCE_FRAMES := 48
 const STARVED_ROUTE_BUDGET_FRAMES := 12
 const STARVED_ROUTE_EXTRA_JOBS_PER_FRAME := 2
 const STARVED_HOME_NAVMESH_TILE_FRAMES := 12
@@ -224,15 +226,10 @@ func _should_try_generated_cell_home_route(entry: Dictionary, intent: Dictionary
 	var moving_home := bool(intent.get("movingHome", false))
 	if not moving_home and route_kind not in ["home", "scripted"]:
 		return false
-	if String(entry.get("activeDoorPortalId", "")) != "":
-		return false
-	if entry.has("_externalDirectMoveFrame") or entry.has("_standaloneNpcUpdateFrame"):
-		return false
-	var tile_wait_frames := int(entry.get("navmeshTileBudgetWaitFrames", 0))
-	var route_reason := String(entry.get("routeReason", ""))
-	var route_status := String(entry.get("routeStatus", ""))
-	return tile_wait_frames >= STARVED_HOME_NAVMESH_TILE_FRAMES \
-		or (route_status == "pending" and route_reason == "navmesh_tile_budget" and tile_wait_frames >= 4)
+	# Returning home is a door/structure route. The generated cell bridge can cut
+	# smoothed movement corners through wall blocks even when the discrete cells
+	# look pathable, so home routes must wait for prioritized navmesh tiles.
+	return false
 
 func _should_try_generated_cell_job_route(entry: Dictionary, intent: Dictionary) -> bool:
 	if world == null or navmesh_planner == null:
@@ -424,6 +421,22 @@ func _ensure_navmesh_route_tiles(entry: Dictionary, intent: Dictionary) -> bool:
 			var endpoint_published_key := "%s|%s" % [endpoint_tile_key, endpoint_source_key]
 			if not _navmesh_tile_ready_for_route(endpoint_tile_key, endpoint_published_key):
 				missing_endpoint_tile_keys[endpoint_tile_key] = true
+	if critical_route_needs_tiles and not inline_publish_route and not missing_endpoint_tile_keys.is_empty():
+		var endpoint_publish_count := 0
+		for endpoint_tile_key_value in endpoint_tile_keys.keys():
+			if endpoint_publish_count >= 2:
+				break
+			var endpoint_tile_key := String(endpoint_tile_key_value)
+			if not missing_endpoint_tile_keys.has(endpoint_tile_key):
+				continue
+			var endpoint_source_key := _navmesh_tile_source_key(endpoint_tile_key)
+			var endpoint_inline_result := _publish_navmesh_tile_inline(endpoint_tile_key, endpoint_source_key, 1)
+			publish_debug.append(endpoint_inline_result)
+			if not bool(endpoint_inline_result.get("published", false)):
+				break
+			missing_endpoint_tile_keys.erase(endpoint_tile_key)
+			published_tile_this_call = true
+			endpoint_publish_count += 1
 	for tile_key_value in tile_keys:
 		var tile_key := String(tile_key_value)
 		if tile_key == "":
@@ -433,6 +446,7 @@ func _ensure_navmesh_route_tiles(entry: Dictionary, intent: Dictionary) -> bool:
 		if String(empty_navmesh_tile_keys.get(tile_key, "")) == published_key:
 			publish_debug.append({ "tile": tile_key, "status": "cached_empty" })
 			continue
+		var endpoint_tile := endpoint_tile_keys.has(tile_key)
 		var status_start: int = monitor.begin_section("navmesh_tile_status") if monitor != null else Time.get_ticks_usec()
 		var tile_status := _navmesh_tile_region_status(tile_key)
 		if monitor != null:
@@ -443,16 +457,30 @@ func _ensure_navmesh_route_tiles(entry: Dictionary, intent: Dictionary) -> bool:
 			continue
 		if not inline_publish_route:
 			if not cost_route:
-				var endpoint_tile := endpoint_tile_keys.has(tile_key)
 				if not endpoint_tile and not missing_endpoint_tile_keys.is_empty():
 					publish_debug.append({ "tile": tile_key, "status": "skipped_until_endpoint_tiles" })
 					continue
+				var critical_endpoint_force_publish := critical_route_needs_tiles \
+					and endpoint_tile \
+					and not published_tile_this_call
+				if critical_endpoint_force_publish:
+					var endpoint_inline_result := _publish_navmesh_tile_inline(tile_key, source_key, 1)
+					publish_debug.append(endpoint_inline_result)
+					if bool(endpoint_inline_result.get("published", false)):
+						missing_endpoint_tile_keys.erase(tile_key)
+						published_tile_this_call = true
+						continue
 				var critical_route_tile_starved := critical_route_needs_tiles \
 					and tile_budget_wait_frames >= 12 \
 					and not published_tile_this_call \
 					and not navmesh_tile_publish_work_this_frame
 				var critical_route_force_publish := critical_route_tile_starved and tile_budget_wait_frames >= 90
-				if critical_route_tile_starved and (critical_route_force_publish or not _background_navmesh_tile_publish_should_wait()):
+				var active_job_route_tile_starved := active_job_route_needs_tiles \
+					and tile_budget_wait_frames >= ACTIVE_JOB_NAVMESH_TILE_STARVED_FRAMES \
+					and not published_tile_this_call
+				var active_job_route_force_publish := active_job_route_tile_starved and tile_budget_wait_frames >= ACTIVE_JOB_NAVMESH_TILE_FORCE_FRAMES
+				var can_publish_starved_route_tile := not navmesh_tile_publish_work_this_frame or critical_route_force_publish or active_job_route_force_publish
+				if (critical_route_tile_starved or active_job_route_tile_starved) and can_publish_starved_route_tile and (critical_route_force_publish or active_job_route_force_publish or not _background_navmesh_tile_publish_should_wait()):
 					var inline_budget := 1 if endpoint_tile or tile_budget_wait_frames >= 24 else 0
 					var inline_result := _publish_navmesh_tile_inline(tile_key, source_key, inline_budget)
 					publish_debug.append(inline_result)
@@ -505,6 +533,8 @@ func _ensure_navmesh_route_tiles(entry: Dictionary, intent: Dictionary) -> bool:
 			monitor.increment_counter("navmesh_route_tiles_published")
 		_mark_navmesh_tile_publish_work()
 		published_navmesh_tile_keys[tile_key] = published_key
+		if endpoint_tile:
+			missing_endpoint_tile_keys.erase(tile_key)
 		published_tile_this_call = true
 		publish_debug.append({
 			"tile": tile_key,
@@ -520,6 +550,9 @@ func _ensure_navmesh_route_tiles(entry: Dictionary, intent: Dictionary) -> bool:
 		entry["navmeshTileBudgetWaitFrames"] = tile_budget_wait_frames + 1
 		if critical_route_needs_tiles and missing_endpoint_tile_keys.is_empty():
 			return true
+		if active_job_route_starved_for_tiles and missing_endpoint_tile_keys.is_empty():
+			entry["navmeshTileBudgetWaitFrames"] = 0
+			return true
 		if active_job_route:
 			return false
 		if routine_route:
@@ -530,6 +563,10 @@ func _ensure_navmesh_route_tiles(entry: Dictionary, intent: Dictionary) -> bool:
 			monitor.increment_counter("navmesh_tile_publish_deferred_queries")
 		if critical_route_needs_tiles and missing_endpoint_tile_keys.is_empty() and not queued_tile_this_call:
 			return true
+		if active_job_route_starved_for_tiles and missing_endpoint_tile_keys.is_empty():
+			entry["navmeshTileBudgetWaitFrames"] = 0
+			return true
+		entry["navmeshTileBudgetWaitFrames"] = tile_budget_wait_frames + 1
 		return false
 	if published_tile_this_call and inline_publish_route and monitor != null:
 		monitor.increment_counter("navmesh_tile_publish_inline_ordered_queries")
@@ -660,6 +697,26 @@ func _navmesh_tile_source_key(tile_key: String) -> String:
 	if world != null and world.has_method("navmesh_tile_source_key"):
 		return String(world.navmesh_tile_source_key())
 	return String(world.revision()) if world != null and world.has_method("revision") else ""
+
+func queue_navmesh_tile_publish(tile_key: String, priority := false) -> bool:
+	if tile_key == "" or world == null or navmesh_world == null:
+		return false
+	var source_key := _navmesh_tile_source_key(tile_key)
+	if source_key == "":
+		return false
+	var published_key := "%s|%s" % [tile_key, source_key]
+	if String(empty_navmesh_tile_keys.get(tile_key, "")) == published_key:
+		return false
+	if String(published_navmesh_tile_keys.get(tile_key, "")) == published_key:
+		var tile_status := _navmesh_tile_region_status(tile_key)
+		if bool(tile_status.get("installed", false)) and not bool(tile_status.get("dirty", false)) and int(tile_status.get("surfaceCount", 0)) > 0:
+			return false
+	_enqueue_navmesh_tile_publish(tile_key, source_key, priority)
+	var monitor = performance_monitor()
+	if monitor != null:
+		monitor.increment_counter("navmesh_tile_publish_startup_queued")
+		monitor.increment_counter("queued_navmesh_tile_depth", queued_navmesh_tile_keys.size())
+	return true
 
 func _publish_navmesh_tile_inline(tile_key: String, source_key: String, extra_budget: int) -> Dictionary:
 	var result := { "tile": tile_key, "status": "pending_budget", "published": false }

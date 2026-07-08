@@ -1,7 +1,7 @@
 ﻿param(
     [ValidateSet("Day", "Night", "Both", "Transition", "day", "night", "both", "transition")]
     [string]$TimeMode = "Both",
-    [string]$Seed = "atlas-1492",
+    [string]$Seed = "",
     [string]$GodotExe = "C:\Users\arkam\Downloads\Godot_v4.6.1-stable_win64.exe\Godot_v4.6.1-stable_win64_console.exe",
     [string]$ReportPath = "",
     [string]$ProgressPath = "",
@@ -17,6 +17,9 @@
 )
 
 $ErrorActionPreference = "Stop"
+if ([string]::IsNullOrWhiteSpace($Seed)) {
+    $Seed = "tutorial-$((Get-Date).ToUniversalTime().ToString('yyyyMMddHHmmss'))-$(([guid]::NewGuid()).ToString('N').Substring(0, 8))"
+}
 if ($MiraHomeOnly -and $MorningOutsideOnly) {
     Write-Error "Use either -MiraHomeOnly or -MorningOutsideOnly, not both."
     exit 1

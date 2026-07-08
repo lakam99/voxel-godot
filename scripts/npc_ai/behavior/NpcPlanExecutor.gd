@@ -3,6 +3,7 @@ class_name NpcPlanExecutor
 
 const NpcConstantsScript := preload("res://scripts/npc_ai/NpcConstants.gd")
 const NpcEnumsScript := preload("res://scripts/npc_ai/NpcEnums.gd")
+const HomeInteriorServiceScript := preload("res://scripts/npc_ai/behavior/HomeInteriorService.gd")
 
 var autonomy_system = null
 var npc_system = null
@@ -768,17 +769,10 @@ func _clear_inside_home_if_not_semantic(entry: Dictionary, body: Node3D) -> void
 		body.set_meta("npc_inside_home", false)
 
 func _inside_home_bounds_now(entry: Dictionary, position: Vector3) -> bool:
-	var home_cell: Vector2i = entry.get("homeCell", Vector2i.ZERO)
-	var porch_cell: Vector2i = entry.get("porchCell", home_cell)
-	var min_cell: Vector2i = entry.get("interiorMinCell", home_cell)
-	var max_cell: Vector2i = entry.get("interiorMaxCell", home_cell)
-	var current_cell := _flat_cell_for_position(position)
-	if current_cell == porch_cell:
-		return false
-	return current_cell.x >= mini(min_cell.x, max_cell.x) \
-		and current_cell.x <= maxi(min_cell.x, max_cell.x) \
-		and current_cell.y >= mini(min_cell.y, max_cell.y) \
-		and current_cell.y <= maxi(min_cell.y, max_cell.y)
+	var portal = null
+	if autonomy_system != null and autonomy_system.get("door_portals") != null:
+		portal = HomeInteriorServiceScript.portal_for_entry(entry, autonomy_system.get("door_portals"))
+	return bool(HomeInteriorServiceScript.status(entry, position, portal).get("strictInside", false))
 
 func _home_exit_clearance_cell(entry: Dictionary) -> Vector2i:
 	var home_cell: Vector2i = entry.get("homeCell", Vector2i.ZERO)

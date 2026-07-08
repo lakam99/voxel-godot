@@ -573,24 +573,35 @@ func advance_world_clock(delta: float) -> bool:
 
 func _process(delta: float) -> void:
     var frame_start := Time.get_ticks_usec()
+    var trace_post_startup := post_startup_trace_frames > 0
+    if trace_post_startup:
+        startup_loading_step.emit("Runtime frame: start")
     if runtime_perf_monitor != null:
         runtime_perf_monitor.begin_frame(delta)
     world_elapsed += delta
     if player:
+        if trace_post_startup:
+            startup_loading_step.emit("Runtime frame: chunks")
         var chunk_start := Time.get_ticks_usec()
         update_chunks(false)
         perf_chunk_ms = profiled_ms(chunk_start)
         if runtime_perf_monitor != null:
             runtime_perf_monitor.observe_duration("chunk", perf_chunk_ms)
+        if trace_post_startup:
+            startup_loading_step.emit("Runtime frame: chunks done %.2fms" % perf_chunk_ms)
         update_water_surface_mesh()
     var defer_noncritical_frame_work := perf_chunk_ms >= STREAMING_FRAME_DEFER_NONCRITICAL_MS
     var tutorial_realtime_simulation := tutorial_realtime_simulation_required()
+    if trace_post_startup:
+        startup_loading_step.emit("Runtime frame: sky")
     var sky_start := Time.get_ticks_usec()
     update_sky(delta)
     update_local_light_rig_lod(delta)
     perf_sky_ms = profiled_ms(sky_start)
     if runtime_perf_monitor != null:
         runtime_perf_monitor.observe_duration("sky", perf_sky_ms)
+    if trace_post_startup:
+        startup_loading_step.emit("Runtime frame: sky done %.2fms" % perf_sky_ms)
     update_sleep_transition(delta)
     var utility_start := Time.get_ticks_usec()
     var defer_utility := should_defer_frame_work(frame_start, defer_noncritical_frame_work, FRAME_BUDGET_DEFER_OPTIONAL_MS)
@@ -648,6 +659,8 @@ func _process(delta: float) -> void:
         perf_hostiles_ms = profiled_ms(hostiles_start)
     if runtime_perf_monitor != null:
         runtime_perf_monitor.observe_duration("hostiles", perf_hostiles_ms)
+    if trace_post_startup:
+        startup_loading_step.emit("Runtime frame: npcs")
     var npc_start := Time.get_ticks_usec()
     var heavy_after_hostiles := not tutorial_realtime_simulation and profiled_ms(frame_start) >= FRAME_BUDGET_DEFER_SIMULATION_MS
     var npc_defer_requested := not tutorial_realtime_simulation and (should_defer_frame_work(frame_start, defer_noncritical_frame_work, FRAME_BUDGET_DEFER_SIMULATION_MS) or heavy_after_hostiles)
@@ -669,6 +682,8 @@ func _process(delta: float) -> void:
         perf_npc_ms = profiled_ms(npc_start)
     if runtime_perf_monitor != null:
         runtime_perf_monitor.observe_duration("update_npcs", perf_npc_ms)
+    if trace_post_startup:
+        startup_loading_step.emit("Runtime frame: npcs done %.2fms" % perf_npc_ms)
     if region_aftermath_system:
         region_aftermath_system.update(delta)
     handle_collapse_if_needed()
@@ -711,6 +726,9 @@ func _process(delta: float) -> void:
         perf_route_plan_ms = runtime_perf_monitor.section_ms("route_planning")
         perf_nav_snapshot_ms = runtime_perf_monitor.section_ms("navigation_snapshot_rebuild")
         perf_job_scan_ms = runtime_perf_monitor.section_ms("job_forage_scan")
+    if trace_post_startup:
+        startup_loading_step.emit("Runtime frame: done %.2fms" % perf_frame_ms)
+        post_startup_trace_frames -= 1
 
 func profiled_ms(start_usec: int) -> float:
     return float(Time.get_ticks_usec() - start_usec) / 1000.0

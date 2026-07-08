@@ -119,7 +119,7 @@ func plan_runtime_route(entry: Dictionary, intent: Dictionary, generated_world =
 	var bridge_first_after_validation := _prefer_generated_bridge_before_navmesh_fallback(intent)
 	if bridge_first_after_validation:
 		var bridge_after_start: int = monitor.begin_section("navmesh_route_post_validation_bridge") if monitor != null else Time.get_ticks_usec()
-		var bridge_after_validation := _plan_generated_cell_bridge_route(entry, intent, generated_world, start_cell, target_cell, repair_route)
+		var bridge_after_validation := _plan_generated_cell_bridge_route(entry, _cell_bridge_repair_intent(intent), generated_world, start_cell, target_cell, repair_route)
 		if monitor != null:
 			monitor.end_section("navmesh_route_post_validation_bridge", bridge_after_start)
 		if not bridge_after_validation.is_empty():
@@ -132,7 +132,7 @@ func plan_runtime_route(entry: Dictionary, intent: Dictionary, generated_world =
 		return fallback_after_validation
 	if not bridge_first_after_validation:
 		var bridge_after_start: int = monitor.begin_section("navmesh_route_post_validation_bridge") if monitor != null else Time.get_ticks_usec()
-		var bridge_after_validation := _plan_generated_cell_bridge_route(entry, intent, generated_world, start_cell, target_cell, repair_route)
+		var bridge_after_validation := _plan_generated_cell_bridge_route(entry, _cell_bridge_repair_intent(intent), generated_world, start_cell, target_cell, repair_route)
 		if monitor != null:
 			monitor.end_section("navmesh_route_post_validation_bridge", bridge_after_start)
 		if not bridge_after_validation.is_empty():
@@ -140,6 +140,8 @@ func plan_runtime_route(entry: Dictionary, intent: Dictionary, generated_world =
 	return runtime_route
 
 func plan_generated_cell_route(entry: Dictionary, intent: Dictionary, generated_world = null) -> Dictionary:
+	if _home_route_requires_complete_navmesh(intent):
+		return {}
 	var source = generated_world if generated_world != null else world_adapter
 	if source == null:
 		return {}
@@ -163,8 +165,19 @@ func plan_generated_cell_route(entry: Dictionary, intent: Dictionary, generated_
 	return route
 
 func _post_validation_cell_repair_allowed(route: Dictionary, intent: Dictionary) -> bool:
+	var route_kind := String(intent.get("kind", "move"))
 	var status := String(route.get("status", ""))
 	var reason := String(route.get("reason", ""))
+	if bool(intent.get("movingHome", false)) or route_kind == "home":
+		if reason == "path_endpoint_partial" and status in ["pending", "partial"]:
+			return true
+		if status != "blocked":
+			return false
+		return reason in [
+			"path_crosses_static_collision",
+			"blocked_static_collision",
+			"blocked_static_transition"
+		]
 	if status == "partial" and reason == "path_endpoint_partial":
 		return true
 	if bool(intent.get("movingHome", false)) and status == "blocked":
@@ -173,7 +186,6 @@ func _post_validation_cell_repair_allowed(route: Dictionary, intent: Dictionary)
 			"blocked_static_collision",
 			"blocked_static_transition"
 		]
-	var route_kind := String(intent.get("kind", "move"))
 	if route_kind in ["idle", "move", "forage", "work", "job", "guard"] and status == "blocked":
 		return reason in [
 			"path_crosses_static_collision",
@@ -184,6 +196,8 @@ func _post_validation_cell_repair_allowed(route: Dictionary, intent: Dictionary)
 
 func _prefer_generated_bridge_before_navmesh_fallback(intent: Dictionary) -> bool:
 	var route_kind := String(intent.get("kind", "move"))
+	if _home_route_requires_complete_navmesh(intent):
+		return false
 	if _routine_route_kind(route_kind):
 		return false
 	return bool(intent.get("movingHome", false)) \
@@ -194,6 +208,8 @@ func _prefer_generated_bridge_before_navmesh_fallback(intent: Dictionary) -> boo
 func _initial_failure_cell_bridge_allowed(entry: Dictionary, intent: Dictionary, route: Dictionary) -> bool:
 	var reason := String(route.get("reason", ""))
 	var route_kind := String(intent.get("kind", "move"))
+	if _home_route_requires_complete_navmesh(intent):
+		return false
 	if bool(intent.get("movingHome", false)) or (bool(intent.get("strictArrival", false)) and not _routine_route_kind(route_kind)):
 		return true
 	if route_kind in ["home", "scripted"]:
@@ -266,6 +282,13 @@ func _plan_fallback_cell_route(entry: Dictionary, intent: Dictionary, generated_
 	return {}
 
 func _plan_generated_cell_bridge_route(entry: Dictionary, intent: Dictionary, generated_world, start_cell: Vector2i, target_cell: Vector2i, failed_route: Dictionary) -> Dictionary:
+	if _home_route_requires_complete_navmesh(intent):
+		if failed_route is Dictionary:
+			failed_route["generatedCellBridge"] = {
+				"ok": false,
+				"reason": "home_route_requires_complete_navmesh"
+			}
+		return {}
 	var source = generated_world if generated_world != null else world_adapter
 	if source == null \
 		or not source.has_method("cached_static_tile_snapshot") \
@@ -491,6 +514,17 @@ func _generated_bridge_critical(intent: Dictionary) -> bool:
 		or bool(intent.get("strictArrival", false)) \
 		or route_kind in ["home", "scripted"] \
 		or int(intent.get("priority", 0)) >= 180
+
+func _home_route_requires_complete_navmesh(intent: Dictionary) -> bool:
+	var route_kind := String(intent.get("kind", "move"))
+	return (bool(intent.get("movingHome", false)) or route_kind == "home") and not bool(intent.get("allowHomeCellBridgeRepair", false))
+
+func _cell_bridge_repair_intent(intent: Dictionary) -> Dictionary:
+	if not bool(intent.get("movingHome", false)) and String(intent.get("kind", "move")) != "home":
+		return intent
+	var repair_intent := intent.duplicate(true)
+	repair_intent["allowHomeCellBridgeRepair"] = true
+	return repair_intent
 
 func _begin_generated_bridge_budget_frame() -> void:
 	var engine_frame := Engine.get_process_frames()
@@ -756,6 +790,12 @@ func _build_runtime_route_from_navmesh(entry: Dictionary, intent: Dictionary, ge
 	var actions := _route_actions_with_detected_doors(entry, intent, generated_world, sampled_cells, route.get("actions", {}))
 	cells = _preserve_route_action_cells(cells, actions)
 	var using_fallback := fallback_cell != target_cell
+	if using_fallback and (bool(intent.get("movingHome", false)) or String(intent.get("kind", "move")) == "home"):
+		var partial_route := route.duplicate(true)
+		partial_route["fallbackCell"] = fallback_cell
+		partial_route["targetCell"] = target_cell
+		partial_route["cells"] = cells
+		return _route_failure("pending", "path_endpoint_partial", target_cell, partial_route)
 	var status := "arrived" if waypoints.is_empty() and not using_fallback else "partial" if using_fallback else "routed"
 	var reason := "fallback_cell_route" if using_fallback else ""
 	return {
@@ -1056,6 +1096,8 @@ func _target_cell_blocked(entry: Dictionary, target_cell: Vector2i, generated_wo
 		return false
 	if moving_home and source.has_method("cell_inside_entry_home") and source.cell_inside_entry_home(entry, target_cell):
 		return false
+	if source.has_method("private_interior_blocks_entry") and source.private_interior_blocks_entry(entry, target_cell):
+		return true
 	if source.has_method("live_static_blocker_for_cell") and source.live_static_blocker_for_cell(target_cell) != null:
 		return true
 	var snapshot: Dictionary = source.cached_static_tile_snapshot(allow_outside, moving_home) if source.has_method("cached_static_tile_snapshot") else source.build_snapshot(entry, allow_outside, moving_home)

@@ -3,6 +3,7 @@ class_name NpcRouteMovementController
 
 const CELL := 1.35
 const NpcConstantsScript := preload("res://scripts/npc_ai/NpcConstants.gd")
+const HomeInteriorServiceScript := preload("res://scripts/npc_ai/behavior/HomeInteriorService.gd")
 const NpcCorridorFollowerScript := preload("res://scripts/npc_ai/movement/NpcCorridorFollower.gd")
 const ReciprocalAvoidanceAdapterScript := preload("res://scripts/npc_ai/movement/ReciprocalAvoidanceAdapter.gd")
 const CAPSULE_RADIUS := 0.34
@@ -1060,7 +1061,10 @@ func ensure_route(entry: Dictionary, intent: Dictionary, planner, world) -> Dict
         entry["routePendingKey"] = route_key
         entry["routePendingSnapshotRevision"] = snapshot_revision
         entry["routePendingRetryFrame"] = Engine.get_physics_frames() + pending_route_retry_frames(entry, intent, String(route.get("reason", "route_pending")))
-        if not changed_route_should_stop and not current_waypoints.is_empty():
+        var critical_pending_route := bool(intent.get("movingHome", false)) or String(intent.get("kind", "")) in ["home", "scripted"]
+        var cached_fallback_cell: Vector2i = entry.get("routeFallbackCell", target_cell)
+        var cached_partial_for_target := cached_fallback_cell != target_cell
+        if not changed_route_should_stop and not current_waypoints.is_empty() and not (critical_pending_route and cached_partial_for_target):
             set_route_status(entry, "moving", "route_pending")
             return {
                 "ok": true,
@@ -1073,6 +1077,9 @@ func ensure_route(entry: Dictionary, intent: Dictionary, planner, world) -> Dict
                 "fallbackCell": entry.get("routeFallbackCell", target_cell),
                 "snapshotRevision": String(entry.get("routeSnapshotRevision", snapshot_revision))
             }
+        entry["pathWaypoints"] = []
+        entry["routeCells"] = []
+        entry["routeActions"] = {}
         set_route_status(entry, "pending", String(route.get("reason", "route_pending")))
         return route
     if not route_key_changed and failed_replan_preserves_active_route(route, current_waypoints):
@@ -1564,18 +1571,13 @@ func skip_optional_home_waypoint_to_interior(entry: Dictionary, reason: String) 
 func next_home_route_interior_index(entry: Dictionary, route_positions: Array, route_index: int, home_cell: Vector2i) -> int:
     if route_index < 0 or route_index >= route_positions.size() - 1:
         return -1
-    var interior_min: Vector2i = entry.get("interiorMinCell", home_cell)
-    var interior_max: Vector2i = entry.get("interiorMaxCell", home_cell)
     for index in range(route_index + 1, route_positions.size()):
         var next_position_value = route_positions[index]
         if not (next_position_value is Vector3):
             continue
         var next_position: Vector3 = next_position_value
         var next_cell := Vector2i(roundi(next_position.x / CELL), roundi(next_position.z / CELL))
-        if next_cell.x >= mini(interior_min.x, interior_max.x) \
-            and next_cell.x <= maxi(interior_min.x, interior_max.x) \
-            and next_cell.y >= mini(interior_min.y, interior_max.y) \
-            and next_cell.y <= maxi(interior_min.y, interior_max.y):
+        if HomeInteriorServiceScript.cell_inside_home_bounds(entry, next_cell, true):
             return index
     return -1
 

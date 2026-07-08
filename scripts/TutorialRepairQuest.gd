@@ -7,6 +7,7 @@ const INTRO_REQUIRED_FENCE := 8
 const INTRO_REQUIRED_LAMPS := 4
 const REPAIR_FENCE_TOLERANCE_CELLS := 1
 const REPAIR_LAMP_TOLERANCE_CELLS := 3
+const REPAIR_PROP_CLEARANCE_CELLS := 3
 const INVALID_REPAIR_CELL := Vector2i(2147483647, 2147483647)
 
 var system
@@ -49,6 +50,8 @@ func setup_intro_repair_quest(reset_state := true) -> void:
     ]:
         system.repair_lamp_cells.append(cell)
     system.repair_chest_cell = Vector2i(center_x - 2, center_z + 1)
+    reserve_repair_prop_clearance()
+    clear_repair_target_props()
     if reset_state:
         reset_intro_state()
     damage_intro_perimeter()
@@ -74,6 +77,89 @@ func reset_intro_state() -> void:
     system.clear_rescue_torch()
     system.repaired_fence.clear()
     system.repaired_lamps.clear()
+
+func reserve_repair_prop_clearance() -> void:
+    if main == null or main.structure_system == null:
+        return
+    if not main.structure_system.has_method("reserve_natural_prop_exclusion"):
+        return
+    var all_targets := repair_target_cells()
+    for cell in all_targets:
+        main.structure_system.reserve_natural_prop_exclusion(
+            cell.x - REPAIR_PROP_CLEARANCE_CELLS,
+            cell.y - REPAIR_PROP_CLEARANCE_CELLS,
+            REPAIR_PROP_CLEARANCE_CELLS * 2 + 1,
+            REPAIR_PROP_CLEARANCE_CELLS * 2 + 1,
+            "tutorial_repair:%d,%d" % [cell.x, cell.y]
+        )
+
+func repair_target_cells() -> Array[Vector2i]:
+    var result: Array[Vector2i] = []
+    for cell in system.repair_fence_cells:
+        if cell is Vector2i:
+            result.append(cell)
+    for cell in system.repair_lamp_cells:
+        if cell is Vector2i:
+            result.append(cell)
+    return result
+
+func clear_repair_target_props() -> int:
+    if main == null:
+        return 0
+    var targets := repair_target_cells()
+    if targets.is_empty():
+        return 0
+    var roots: Array[Node] = []
+    for root_name in ["prop_root", "chunk_root"]:
+        var root = main.get(root_name) as Node
+        if root != null and is_instance_valid(root) and not roots.has(root):
+            roots.append(root)
+    var removed := 0
+    for root in roots:
+        removed += clear_repair_target_props_under(root, targets)
+    return removed
+
+func clear_repair_target_props_under(root: Node, targets: Array[Vector2i]) -> int:
+    var removed := 0
+    var stack: Array[Node] = [root]
+    var seen := {}
+    while not stack.is_empty():
+        var node := stack.pop_back() as Node
+        if node == null or not is_instance_valid(node):
+            continue
+        var instance_id := node.get_instance_id()
+        if seen.has(instance_id):
+            continue
+        seen[instance_id] = true
+        if node is Node3D and String(node.get_meta("kind", "")) == "prop":
+            var prop := node as Node3D
+            if repair_prop_blocks_target(prop, targets):
+                remove_repair_target_prop(prop)
+                removed += 1
+                continue
+        for child in node.get_children():
+            stack.append(child)
+    return removed
+
+func repair_prop_blocks_target(prop: Node3D, targets: Array[Vector2i]) -> bool:
+    if prop == null:
+        return false
+    var cell := Vector2i(roundi(prop.global_position.x / CELL), roundi(prop.global_position.z / CELL))
+    for target in targets:
+        if maxi(absi(cell.x - target.x), absi(cell.y - target.y)) <= REPAIR_PROP_CLEARANCE_CELLS:
+            return true
+    return false
+
+func remove_repair_target_prop(prop: Node3D) -> void:
+    if prop == null or not is_instance_valid(prop):
+        return
+    var prop_id := String(prop.get_meta("prop_id", ""))
+    if prop_id != "":
+        var removed_props: Dictionary = main.get("removed_props")
+        removed_props[prop_id] = true
+        if main.npc_system and main.npc_system.has_method("notify_navigation_prop_removed"):
+            main.npc_system.notify_navigation_prop_removed(prop_id, prop)
+    prop.queue_free()
 
 func damage_intro_perimeter() -> void:
     for cell in system.repair_fence_cells:
