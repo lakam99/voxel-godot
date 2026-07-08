@@ -60,6 +60,17 @@ func begin_frame() -> void:
     if locomotion != null:
         locomotion.begin_frame()
 
+func stats() -> Dictionary:
+    ensure_ready()
+    var result := {}
+    if route_planner != null and route_planner.has_method("stats"):
+        var route_stats = route_planner.stats()
+        result["routePlanner"] = route_stats if route_stats is Dictionary else {}
+    if navigation_world != null and navigation_world.has_method("stats"):
+        var world_stats = navigation_world.stats()
+        result["navigationWorld"] = world_stats if world_stats is Dictionary else {}
+    return result
+
 func invalidate() -> void:
     ensure_ready()
     if navigation_world != null:

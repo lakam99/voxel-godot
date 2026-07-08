@@ -20,6 +20,7 @@ func cases() -> Array[Dictionary]:
 	var ids = [
 		["npc_repair_unrelated_change_no_replan", "test_repair_unrelated_change_no_replan"],
 		["npc_repair_block_added_on_corridor", "test_repair_block_added_on_corridor"],
+		["npc_repair_block_event_height_normalizes_to_route_span", "test_repair_block_event_height_normalizes_to_route_span"],
 		["npc_repair_block_removed_shortens_route", "test_repair_block_removed_shortens_route"],
 		["npc_repair_terrain_edit_on_corridor", "test_repair_terrain_edit_on_corridor"],
 		["npc_repair_door_locked_alternate", "test_repair_door_locked_alternate"],
@@ -59,6 +60,14 @@ func test_repair_block_added_on_corridor(_mode: String) -> Dictionary:
 	var path: Array = repaired_path(response)
 	var passed: bool = response.get("status") == NpcEnumsScript.REPAIR_STATUS_REPAIRED and not path.has(setup.midKey) and bool(response.get("metrics", {}).get("safeStopRequired", false))
 	return outcome(passed, "path=%s response=%s" % [JSON.stringify(path), JSON.stringify(response_summary(response))], ["block_on_corridor_repairs", "blocked_mid_avoided", "safe_stop_required"], { "path": path, "response": response_summary(response) })
+
+func test_repair_block_event_height_normalizes_to_route_span(_mode: String) -> Dictionary:
+	var setup := repair_setup()
+	var event := event_for(Vector3i(1, 18, 0), [NpcEnumsScript.CHANGE_KIND_BLOCK_CREATED], ["block:1,18,0:woodBlock"])
+	var response: Dictionary = setup.repair.repair_after_event(ROUTE_ID, event, { "generation": int(setup.request.get("cancellation_generation")) })
+	var path: Array = repaired_path(response)
+	var passed: bool = response.get("status") == NpcEnumsScript.REPAIR_STATUS_REPAIRED and not path.has(setup.midKey) and bool(response.get("metrics", {}).get("safeStopRequired", false))
+	return outcome(passed, "path=%s response=%s" % [JSON.stringify(path), JSON.stringify(response_summary(response))], ["block_event_y_normalized_to_runtime_span", "authored_height_block_invalidates_flat_route_node"], { "path": path, "response": response_summary(response) })
 
 func test_repair_block_removed_shortens_route(_mode: String) -> Dictionary:
 	var setup := repair_setup()

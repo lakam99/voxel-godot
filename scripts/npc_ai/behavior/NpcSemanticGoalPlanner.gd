@@ -68,6 +68,8 @@ func make_intent(entry: Dictionary, target: Vector3, max_distance: float, moving
     elif kind == "scripted":
         arrival_radius = float(body.get_meta("npc_scripted_arrival_radius", CELL * 0.45)) if body != null else CELL * 0.45
         strict_scripted_route = arrival_radius < CELL * 0.95
+    elif kind in ["work", "forage", "guard", "job", "idle", "move"]:
+        fallback_cells = routine_goal_fallback_cells(entry, target, allow_outside, moving_home)
     var priority := int(entry.get("routePriority", 0))
     if moving_home:
         priority = maxi(priority, 100)
@@ -92,6 +94,23 @@ func make_intent(entry: Dictionary, target: Vector3, max_distance: float, moving
         "strictArrival": strict_home_route or strict_scripted_route or kind in ["job", "work", "forage"],
         "fallbackCells": fallback_cells
     }
+
+func routine_goal_fallback_cells(entry: Dictionary, target: Vector3, allow_outside := false, moving_home := false) -> Array[Vector2i]:
+    var result: Array[Vector2i] = []
+    if world == null or not world.has_method("approach_cells_for_target"):
+        return result
+    var target_cell: Vector2i = world.world_cell(target) if world.has_method("world_cell") else Vector2i(roundi(target.x / CELL), roundi(target.z / CELL))
+    for cell in world.approach_cells_for_target(entry, target, allow_outside):
+        if not (cell is Vector2i):
+            continue
+        if cell == target_cell or result.has(cell):
+            continue
+        if world.has_method("cell_is_standable_goal") and not bool(world.cell_is_standable_goal(entry, cell, allow_outside, moving_home)):
+            continue
+        result.append(cell)
+        if result.size() >= 12:
+            break
+    return result
 
 func home_interior_goal_cells(entry: Dictionary) -> Array[Vector2i]:
     var result: Array[Vector2i] = []

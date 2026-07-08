@@ -43,6 +43,13 @@ func begin_frame() -> void:
     if coordinator != null:
         coordinator.begin_frame()
 
+func stats() -> Dictionary:
+    ensure_ready()
+    if coordinator != null and coordinator.has_method("stats"):
+        var stats_value = coordinator.stats()
+        return stats_value if stats_value is Dictionary else {}
+    return {}
+
 func invalidate() -> void:
     ensure_ready()
     if coordinator != null:

@@ -75,7 +75,7 @@ func plan_runtime_route(entry: Dictionary, intent: Dictionary, generated_world =
 	last_stats["lastRouteSource"] = String(route.get("source", "navmesh"))
 	last_stats["legacyFallbackUsed"] = false
 	if not bool(route.get("ok", false)):
-		var bridge_allowed := _initial_failure_cell_bridge_allowed(entry, intent, route)
+		var bridge_allowed := _generated_cell_bridge_allowed_for_intent(intent) and _initial_failure_cell_bridge_allowed(entry, intent, route)
 		var bridge_first := bridge_allowed and _prefer_generated_bridge_before_navmesh_fallback(intent)
 		var bridge_intent := _cell_bridge_repair_intent(intent) if bridge_allowed else intent
 		if bridge_first:
@@ -117,7 +117,8 @@ func plan_runtime_route(entry: Dictionary, intent: Dictionary, generated_world =
 	var repair_route: Dictionary = runtime_route
 	if not _post_validation_cell_repair_allowed(runtime_route, intent) and not _post_validation_cell_repair_allowed(rejected_navmesh_route, intent):
 		return runtime_route
-	var bridge_first_after_validation := _prefer_generated_bridge_before_navmesh_fallback(intent)
+	var bridge_after_validation_allowed := _generated_cell_bridge_allowed_for_intent(intent)
+	var bridge_first_after_validation := bridge_after_validation_allowed and _prefer_generated_bridge_before_navmesh_fallback(intent)
 	if bridge_first_after_validation:
 		var bridge_after_start: int = monitor.begin_section("navmesh_route_post_validation_bridge") if monitor != null else Time.get_ticks_usec()
 		var bridge_after_validation := _plan_generated_cell_bridge_route(entry, _cell_bridge_repair_intent(intent), generated_world, start_cell, target_cell, repair_route)
@@ -131,7 +132,7 @@ func plan_runtime_route(entry: Dictionary, intent: Dictionary, generated_world =
 		monitor.end_section("navmesh_route_post_validation_fallback_cells", fallback_after_start)
 	if not fallback_after_validation.is_empty():
 		return fallback_after_validation
-	if not bridge_first_after_validation:
+	if bridge_after_validation_allowed and not bridge_first_after_validation:
 		var bridge_after_start: int = monitor.begin_section("navmesh_route_post_validation_bridge") if monitor != null else Time.get_ticks_usec()
 		var bridge_after_validation := _plan_generated_cell_bridge_route(entry, _cell_bridge_repair_intent(intent), generated_world, start_cell, target_cell, repair_route)
 		if monitor != null:
@@ -141,6 +142,8 @@ func plan_runtime_route(entry: Dictionary, intent: Dictionary, generated_world =
 	return runtime_route
 
 func plan_generated_cell_route(entry: Dictionary, intent: Dictionary, generated_world = null) -> Dictionary:
+	if not _generated_cell_bridge_allowed_for_intent(intent):
+		return {}
 	if _home_route_requires_complete_navmesh(intent):
 		return {}
 	var source = generated_world if generated_world != null else world_adapter
@@ -197,6 +200,8 @@ func _post_validation_cell_repair_allowed(route: Dictionary, intent: Dictionary)
 	return false
 
 func _prefer_generated_bridge_before_navmesh_fallback(intent: Dictionary) -> bool:
+	if not _generated_cell_bridge_allowed_for_intent(intent):
+		return false
 	var route_kind := String(intent.get("kind", "move"))
 	if _home_route_requires_complete_navmesh(intent):
 		return false
@@ -208,6 +213,8 @@ func _prefer_generated_bridge_before_navmesh_fallback(intent: Dictionary) -> boo
 		or int(intent.get("priority", 0)) >= 180
 
 func _initial_failure_cell_bridge_allowed(entry: Dictionary, intent: Dictionary, route: Dictionary) -> bool:
+	if not _generated_cell_bridge_allowed_for_intent(intent):
+		return false
 	var reason := String(route.get("reason", ""))
 	var route_kind := String(intent.get("kind", "move"))
 	if _home_route_requires_complete_navmesh(intent):
@@ -229,6 +236,13 @@ func _initial_failure_cell_bridge_allowed(entry: Dictionary, intent: Dictionary,
 		]
 	if reason != "path_endpoint_mismatch":
 		return true
+	return false
+
+func _generated_cell_bridge_allowed_for_intent(_intent: Dictionary) -> bool:
+	# NPC routes must be backed by collision-aware NavigationServer/navmesh data.
+	# The generated cell bridge remains in the file for historical diagnostics, but
+	# it is not accepted as a production route source because smoothed actor motion
+	# can cut through walls even when the discrete cell path looks valid.
 	return false
 
 func _plan_fallback_cell_route(entry: Dictionary, intent: Dictionary, generated_world, start: Vector3, start_cell: Vector2i, target_cell: Vector2i, failed_route: Dictionary, forbidden_private_door_ids: Array[String]) -> Dictionary:
@@ -846,20 +860,6 @@ func route_cost_for_runtime(entry: Dictionary, target: Vector3, allow_outside :=
 		"forbiddenDoorPortalIds": forbidden_private_door_ids
 	})
 	if not bool(route.get("ok", false)):
-		var intent := {
-			"kind": "cost",
-			"target": target,
-			"targetCell": target_cell,
-			"allowOutside": allow_outside,
-			"movingHome": moving_home,
-			"arrivalRadius": arrival_radius,
-			"priority": 180,
-			"strictArrival": false,
-			"fallbackCells": []
-		}
-		var generated_route := _plan_generated_cell_bridge_route(entry, intent, generated_world, start_cell, target_cell, route)
-		if bool(generated_route.get("ok", false)):
-			return _route_flat_distance(start, generated_route)
 		return INF
 	return float(route.get("distance", INF))
 
@@ -882,7 +882,7 @@ func stats() -> Dictionary:
 
 func _runtime_query_api(intent: Dictionary) -> String:
 	if _routine_route_kind(String(intent.get("kind", "move"))):
-		return "map_get_path"
+		return "query_path"
 	return "query_path"
 
 func _forbidden_private_door_portal_ids(entry: Dictionary, generated_world = null) -> Array[String]:

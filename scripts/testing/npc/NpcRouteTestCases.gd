@@ -12,6 +12,7 @@ const NavmeshWorldServiceScript := preload("res://scripts/npc_ai/navigation/Navm
 const GeneratedWorldNavigationAdapterScript := preload("res://scripts/npc_ai/navigation/GeneratedWorldNavigationAdapter.gd")
 const HierarchicalRoutePlannerScript := preload("res://scripts/npc_ai/routing/HierarchicalRoutePlanner.gd")
 const NavmeshRoutePlannerScript := preload("res://scripts/npc_ai/routing/NavmeshRoutePlanner.gd")
+const NpcRouteCoordinatorAdapterScript := preload("res://scripts/npc_ai/routing/NpcRouteCoordinatorAdapter.gd")
 const CELL := NpcConstantsScript.CELL_SIZE
 
 var runner = null
@@ -81,6 +82,8 @@ func cases() -> Array[Dictionary]:
 		["npc_route_navmesh_preserves_door_action_cells", "test_route_navmesh_preserves_door_action_cells"],
 		["npc_route_navmesh_planner_goal_kinds", "test_route_navmesh_planner_goal_kinds"],
 		["npc_route_navmesh_adapter_no_legacy_fallback", "test_route_navmesh_adapter_no_legacy_fallback"],
+		["npc_route_routine_jobs_do_not_use_generated_cell_bridge", "test_route_routine_jobs_do_not_use_generated_cell_bridge"],
+		["npc_route_runtime_planner_rejects_generated_cell_bridge", "test_route_runtime_planner_rejects_generated_cell_bridge"],
 		["npc_route_runtime_door_uses_group_portal_id", "test_route_runtime_door_uses_group_portal_id"],
 		["npc_route_collision_boundary_blocks_open_destination", "test_route_collision_boundary_blocks_open_destination"],
 		["npc_route_collision_occupied_cell_blocks_node", "test_route_collision_occupied_cell_blocks_node"],
@@ -468,6 +471,55 @@ func test_route_navmesh_adapter_no_legacy_fallback(_mode: String) -> Dictionary:
 		and planner_text.find("legacyFallbackUsed") >= 0 \
 		and service_text.find("query_path") >= 0
 	return outcome(passed, "adapterNavmesh=%d generatedFallback=%d validation=%d queryPath=%d" % [adapter_text.find("NavmeshRoutePlannerScript"), adapter_text.find("generated_corridor_planner"), planner_text.find("validate_waypoint_route"), service_text.find("query_path")], ["adapter_uses_navmesh_authority", "navmesh_routes_are_collision_validated_before_acceptance", "live_adapter_has_no_generated_corridor_fallback"], {})
+
+func test_route_routine_jobs_do_not_use_generated_cell_bridge(_mode: String) -> Dictionary:
+	var adapter = NpcRouteCoordinatorAdapterScript.new()
+	adapter.world = RefCounted.new()
+	adapter.navmesh_planner = RefCounted.new()
+	var entry := {
+		"id": "test-worker",
+		"job": "forage",
+		"jobPhase": "searching",
+		"routePriority": 90
+	}
+	var results := {}
+	var passed := true
+	for kind in ["guard", "work", "forage", "job"]:
+		var intent := {
+			"kind": kind,
+			"movingHome": false,
+			"priority": 90,
+			"target": Vector3(CELL * 4.0, 0.0, 0.0),
+			"targetCell": Vector2i(4, 0)
+		}
+		var allowed := bool(adapter._should_try_generated_cell_job_route(entry, intent))
+		results[kind] = allowed
+		passed = passed and not allowed
+	var forage_departure := bool(adapter._should_try_prebudget_forage_departure_route(entry, {
+		"kind": "forage",
+		"target": Vector3(CELL * 6.0, 0.0, 0.0),
+		"targetCell": Vector2i(6, 0)
+	}))
+	results["prebudgetForageDeparture"] = forage_departure
+	passed = passed and not forage_departure
+	return outcome(passed, "generatedBridgeEligibility=%s" % JSON.stringify(results), ["routine_jobs_wait_for_collision_navmesh", "forage_departure_no_cell_bridge"], { "results": results })
+
+func test_route_runtime_planner_rejects_generated_cell_bridge(_mode: String) -> Dictionary:
+	var planner = NavmeshRoutePlannerScript.new()
+	var results := {}
+	var passed := true
+	for kind in ["guard", "work", "forage", "job", "home", "scripted", "idle", "move"]:
+		var intent := { "kind": kind, "movingHome": kind == "home" }
+		var allowed := bool(planner._generated_cell_bridge_allowed_for_intent(intent))
+		var initial_allowed := bool(planner._initial_failure_cell_bridge_allowed({}, intent, { "reason": "navmesh_tile_budget" }))
+		var generated_route: Dictionary = planner.plan_generated_cell_route({}, intent, null)
+		results[kind] = {
+			"allowed": allowed,
+			"initialAllowed": initial_allowed,
+			"directRouteEmpty": generated_route.is_empty()
+		}
+		passed = passed and not allowed and not initial_allowed and generated_route.is_empty()
+	return outcome(passed, "runtimeBridge=%s" % JSON.stringify(results), ["runtime_planner_rejects_cell_bridge", "npc_routes_require_collision_navmesh"], { "results": results })
 
 func test_route_runtime_goal_adapter_uses_new_corridor(_mode: String) -> Dictionary:
 	var adapter_text = read_text("res://scripts/npc_ai/routing/NpcRouteCoordinatorAdapter.gd")

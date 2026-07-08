@@ -916,7 +916,9 @@ func _closest_walkable_for_query_endpoint(position: Vector3, max_distance: float
 		return (endpoint_query_cache[cache_key] as Dictionary).duplicate(true)
 	var result := {}
 	if query_api_used == "map_get_path":
-		result = _closest_walkable_for_direct_route_endpoint(position, max_distance)
+		result = _closest_walkable_from_server(position, max_distance)
+		if not bool(result.get("found", false)):
+			result = _closest_walkable_for_direct_route_endpoint(position, max_distance)
 	elif prefer_descriptor_endpoint:
 		var server_endpoint := _closest_walkable_from_server(position, max_distance)
 		var descriptor_endpoint := _closest_installed_descriptor_route_endpoint(position, max_distance)

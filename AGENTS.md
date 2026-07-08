@@ -36,6 +36,14 @@ Main.gd
 
 Prefer composed systems under `scripts/` or `scripts/story/` over expanding that chain.
 
+## Project North Stars
+
+- This is a survival game, not a tech demo. Terrain, structures, NPCs, weather, lighting, inventory, crafting, combat, story, saves, and performance must continue to work together in normal gameplay.
+- Preserve the cozy voxel look while keeping the world physically coherent. Smooth visuals are welcome, but terrain must still have real collision, depth, density, and material identity.
+- The real game flow matters: launch to main menu, choose `New Game` or `Continue`, load the world with visible feedback, play through tutorial town, save/load, and exit without long unresponsive freezes.
+- Live gameplay is the source of truth for user-facing behavior. Unit, contract, and service tests are necessary but cannot overrule a headed playtest or screenshot showing broken gameplay.
+- Avoid narrow patches that only fix the latest screenshot. Most recent regressions came from band-aids around terrain holes, NPC doors, route budgets, or test metadata instead of repairing the underlying system contract.
+
 ## Development Rules
 
 - Preserve user work. Check `git status --short` before editing.
@@ -62,6 +70,9 @@ Prefer composed systems under `scripts/` or `scripts/story/` over expanding that
 ## Important Plans And Docs
 
 - `CODEX_NPC_PATHFINDING_FINAL_IMPLEMENTATION_PLAN.md`: controlling mandatory specification for the NPC autonomy/pathfinding replacement. When executing this work, reread the current phase, global invariants, test protocol, and prohibited-shortcuts section before editing. Follow one phase branch/report/merge cycle at a time.
+- `CODEX_MATURE_NAV_PLAN.md` and `NPC_PATHFINDING_REGRESSION_HANDOFF.md`: current context for the systemic NPC pathfinding regression. Use these before changing NPC routing, route readiness, collision, door traversal, forager behavior, or live NPC playtests.
+- `Minecraft-Equivalent Terrain Migr.md`: terrain architecture migration context. The target is Minecraft-like terrain authority with smooth/non-blocky rendering, not a heightfield plus cave band-aids.
+- `CODEX_PERFORMANCE_PLAN.md`: performance roadmap and prior performance constraints. Recheck when touching terrain, chunk streaming, structures, NPC/nav, autosave, or main menu/runtime loading.
 - `CODEX_VISUAL_UPGRADE_PLAN.md`: visual polish roadmap.
 - `CODEX_STORY_IMPLEMENTATION_PLAN.md`: story/worldmark roadmap. Follow one phase at a time.
 - `docs/ANIMATED_ASSET_PIPELINE.md`: generated animated asset workflow.
@@ -109,6 +120,26 @@ Phase 13 focused NPC release checks:
 .\tools\run-npc-navigation-tests.ps1
 ```
 
+Live NPC and runtime regression runners:
+
+```powershell
+.\tools\npc\run-real-tutorial-playthrough.ps1
+.\tools\npc\run-npc-town-job-cycle-visual-playtest.ps1
+.\tools\npc\run-npc-go-home-visual-playtest.ps1
+.\tools\run-normal-runtime-performance-pass.ps1
+.\tools\run-runtime-performance-observation.ps1
+```
+
+Terrain, underground, and digging visual runners:
+
+```powershell
+.\tools\run-underground-visual-playtest.ps1
+.\tools\run-underground-interactive-playtest.ps1
+.\tools\run-digging-visual-playtest.ps1
+.\tools\run-town-ground-visual-playtest.ps1
+.\tools\run-light-shadow-visual-playtest.ps1
+```
+
 Visual captures:
 
 ```powershell
@@ -132,6 +163,26 @@ Useful generated asset commands:
 
 If a playtest times out, inspect `playtest-progress.txt` and `playtest-report.json` before changing code.
 
+Use random seeds for broad tutorial or generated-town playtests unless replaying a known failing seed for root-cause work. When replaying a failing seed, report that seed explicitly.
+
+## Terrain And World Generation Rules
+
+- Treat terrain volume as authoritative. Below the surface is solid material unless the generated volume, fluid, or a saved edit explicitly says otherwise.
+- Do not fix terrain leaks with mouth/back shell patches, one-off cave wrappers, or visual-only skirts. If a hole exposes sky or the far side of a hill, the volume/cell/material authority is wrong.
+- Terrain visuals, collision, digging drops, lighting, underground air, fluids, spawning, nav occupancy, and saves should derive from the same generated/edited volume data.
+- `underground_air` is a generated world state/biome, not a hand-authored cave exception. Underground should be procedurally generated like the surface, with solid cells, air cells, material strata, and exposed surfaces.
+- Digging should remove real terrain cells/material and reveal what the volume says is underneath. Drops must come from the removed material, not from a surface guess.
+- Smooth terrain rendering must not erase physical density. Block/cell authority is acceptable and often preferred for correctness; smooth the mesh over it rather than replacing volume with thin sheets.
+- Lighting regressions are gameplay-visible. Daylight, skylight, torch/block light, shadows, underground darkness, and translucent/metallic-looking terrain need visual verification when terrain or materials change.
+- When changing terrain generation, chunk meshing, digging, collision, lighting, or underground rules, run relevant visual playtests and inspect screenshots. Metadata-only checks are not enough for leaks, transparency, or material/lighting bugs.
+
+## Runtime And Loading Rules
+
+- The main menu should defer expensive world loading until `New Game` or `Continue` is selected.
+- If loading or exiting takes noticeable time, show a loading/progress state and yield work across frames where possible. A frozen window is a bug even if the eventual result is correct.
+- Tutorial playtests can be smoother than normal gameplay because they may stage or constrain the world differently. Use normal runtime performance passes when diagnosing player-reported gameplay hitches.
+- Treat sprinting/running traversal as a streaming stress test. It is the common path that exposes chunk, terrain, prop, NPC, and autosave spikes.
+
 ## Performance Standards
 
 - Treat visible hitches and whole-game freezes as correctness bugs, especially during sprinting, chunk streaming, generated town/structure activation, NPC updates, autosave, and tutorial-town play.
@@ -142,6 +193,7 @@ If a playtest times out, inspect `playtest-progress.txt` and `playtest-report.js
 - Preserve deterministic world generation while optimizing. Caches, queues, and budgets must not reorder terrain/town/prop RNG or change generated-world results unless that behavior change is intentional and tested.
 - If performance changes touch visual or gameplay systems, run relevant playtests in addition to benchmarks. For tutorial-town, NPC, or navigation-affecting changes, use real visual/playtest runners and inspect screenshots/trace evidence rather than relying only on metadata.
 - Keep performance instrumentation useful and bounded. Add timers/counters for diagnosis, but remove or reduce noisy temporary probes once the spike source is understood.
+- Loading screens, async queues, and budgets must preserve deterministic generation. Do not fix freezes by reordering terrain/town/prop RNG unless the behavior change is intentional and verified.
 
 ## Key Systems
 
@@ -186,6 +238,8 @@ Avoid:
 
 For the NPC autonomy/pathfinding replacement, `CODEX_NPC_PATHFINDING_FINAL_IMPLEMENTATION_PLAN.md` supersedes older NPC pathing plans. Phase work must keep the phase branch and merged `master` green and must tie every acceptance claim to a command, report, trace, capture, static audit, or commit.
 
+Recent context: NPC failures are systemic pathfinding failures unless proven otherwise. Do not patch Niko, Mira, Rowan, or any named NPC in isolation when the symptom is an actor stopping outside a door, on a porch, at a wall, or beside a fence. Fix the shared route contract.
+
 Current ownership:
 
 - `scripts/NpcSystem.gd` is the gameplay integration, spawn/registry, save-facing, and public stats adapter. Do not move new route search, direct movement loops, or door authority back into it.
@@ -202,13 +256,25 @@ NPCs should move with purpose:
 - Every town NPC should have a home.
 - Noncombatants should return indoors at night.
 - Fighters may guard or engage threats.
-- Foragers should use hunger, personal inventory, and berry gathering as a first goal loop.
+- Foragers should use hunger, personal inventory, and berry gathering as a first goal loop. If no specific forage target is currently reachable, they should use collision-aware roaming outside town until a forage target is in range.
 - NPCs should not wander aimlessly into walls.
 - Pathing should account for terrain, obstacles, doors, town limits, and reachable work areas.
+- Metadata may define goals, homes, jobs, doors, and work areas, but routing must prove physical reachability through collision-aware navigation before an NPC commits to movement.
+- A route may be pending because nav data, tile publication, door links, traffic, or budgets are not ready. Pending nav data is not the same as an unreachable target and must not poison targets as permanently unreachable.
+- Production NPC movement must not rely on generated-cell bridges, doctored vectors, teleporting, hand-authored offsets, or direct movement loops that bypass collision. Such paths may remain only in clearly labeled diagnostics or synthetic tests.
 - Door behavior should open before crossing, clear collision while open, and close after NPC/player clearance.
 - Door crossings should keep per-actor active ownership until the actor clears or is cancelled; route replacement must not silently drop an active portal reservation.
 - `canFight` is combat capability only. Explicit guard-duty assignment decides who may stay outside at night.
 - Porch, threshold, exterior wall edge, or roof locations do not count as inside.
+
+Route readiness should distinguish:
+
+- `ready`: executable collision-backed route.
+- `pending_nav_data`: required navmesh tiles, links, or topology are still loading/publishing.
+- `pending_budget`: route or movement work was deferred by frame budgets.
+- `blocked_dynamic`: actor, door, reservation, or local obstruction is temporarily blocking movement.
+- `unreachable_static`: all relevant nav data is ready and no legal route exists.
+- `invalid_goal`: the semantic target is not a valid standable/reachable goal.
 
 When changing NPC pathing, add or update playtest coverage around:
 
@@ -218,6 +284,8 @@ When changing NPC pathing, add or update playtest coverage around:
 - returning home without teleporting through walls;
 - forager target selection and inventory;
 - hostile collision with buildings and fences.
+
+For NPC regression fixes, acceptance should include at least one known failing seed, multiple fresh random generated-town runs when practical, and the full live tutorial playthrough from main menu/New Game when tutorial behavior is affected. Inspect screenshots and traces; do not rely only on result booleans.
 
 ## Story Rules
 

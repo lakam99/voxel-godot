@@ -386,7 +386,10 @@ func _node_key_for_block_event(event: Dictionary) -> String:
 		var tile_key: String = String(event.get("tileKey", ""))
 		if tile_key == "":
 			tile_key = _tile_key_for_cell(cell)
-		return "%s:%d,%d,%d:0" % [tile_key, cell.x, cell.y, cell.z]
+		# Runtime route graph nodes are flattened to the walkable XZ span at y=0.
+		# Block events carry their authored block height, so using cell.y here
+		# misses the node actually indexed by HierarchicalRoutePlanner.
+		return "%s:%d,%d,%d:0" % [tile_key, cell.x, 0, cell.z]
 	return ""
 
 func _portal_changes_from_event(route_id: String, event: Dictionary, blocked: bool) -> Array:

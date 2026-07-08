@@ -747,6 +747,8 @@ func npc_summary(entry: Dictionary, phase: String) -> Dictionary:
         "routeCellSample": sanitize_value((entry.get("routeCells", []) as Array).slice(0, 8)),
         "pathWaypointSample": sanitize_value((entry.get("pathWaypoints", []) as Array).slice(0, 5)),
         "lastRoutePlanDebug": sanitize_value(entry.get("lastRoutePlanDebug", {})),
+        "lastNavmeshTilePublishDebug": sanitize_value(entry.get("lastNavmeshTilePublishDebug", [])),
+        "routePlannerStats": sanitize_value(npc_route_planner_stats()),
         "corridorFollow": sanitize_value(entry.get("corridorFollow", {})),
         "corridorProgress": sanitize_value(entry.get("corridorProgress", {})),
         "homeSettleDebug": sanitize_value(entry.get("homeSettleDebug", {})),
@@ -772,6 +774,15 @@ func npc_summary(entry: Dictionary, phase: String) -> Dictionary:
         "canFight": bool(entry.get("canFight", false)),
         "nightGuard": bool(entry.get("nightGuard", false))
     }
+
+func npc_route_planner_stats() -> Dictionary:
+    if npc_system == null:
+        return {}
+    var pathing = npc_system.get("pathing")
+    if pathing == null or not pathing.has_method("stats"):
+        return {}
+    var stats_value = pathing.call("stats")
+    return stats_value if stats_value is Dictionary else {}
 
 func phase_sample(label: String, matrix: Array[Dictionary]) -> Dictionary:
     return {

@@ -126,6 +126,9 @@ func move(entry: Dictionary, intent: Dictionary, max_distance: float, planner, w
         if monitor != null:
             monitor.end_section("npc_motion_ensure_route", route_start)
         if not bool(route.get("ok", false)):
+            if String(route.get("status", "")) == "pending":
+                set_route_status(entry, "pending", String(route.get("reason", "route_pending")))
+                return { "moved": 0.0, "status": "pending", "reason": String(route.get("reason", "route_pending")) }
             set_route_status(entry, String(route.get("status", "blocked")), String(route.get("reason", "blocked")))
             count_unreachable_once(entry, intent, String(route.get("reason", "blocked")))
             return { "moved": 0.0, "status": String(route.get("status", "blocked")), "reason": String(route.get("reason", "blocked")) }
@@ -166,6 +169,9 @@ func move(entry: Dictionary, intent: Dictionary, max_distance: float, planner, w
                     set_route_status(entry, "waiting", "active_door_replan")
                     return { "moved": 0.0, "status": "waiting", "reason": "active_door_replan" }
         if path_waypoints.is_empty():
+            if String(route.get("status", "")) == "pending":
+                set_route_status(entry, "pending", String(route.get("reason", "route_pending")))
+                return { "moved": 0.0, "status": "pending", "reason": String(route.get("reason", "route_pending")) }
             set_route_status(entry, "blocked", "empty_route")
             count_unreachable_once(entry, intent, "empty_route")
             return { "moved": 0.0, "status": "blocked", "reason": "empty_route" }
@@ -1064,7 +1070,7 @@ func ensure_route(entry: Dictionary, intent: Dictionary, planner, world) -> Dict
         var critical_pending_route := bool(intent.get("movingHome", false)) or String(intent.get("kind", "")) in ["home", "scripted"]
         var cached_fallback_cell: Vector2i = entry.get("routeFallbackCell", target_cell)
         var cached_partial_for_target := cached_fallback_cell != target_cell
-        if not changed_route_should_stop and not current_waypoints.is_empty() and not (critical_pending_route and cached_partial_for_target):
+        if not snapshot_revision_changed and not changed_route_should_stop and not current_waypoints.is_empty() and not (critical_pending_route and cached_partial_for_target):
             set_route_status(entry, "moving", "route_pending")
             return {
                 "ok": true,
@@ -1082,7 +1088,7 @@ func ensure_route(entry: Dictionary, intent: Dictionary, planner, world) -> Dict
         entry["routeActions"] = {}
         set_route_status(entry, "pending", String(route.get("reason", "route_pending")))
         return route
-    if not route_key_changed and failed_replan_preserves_active_route(route, current_waypoints):
+    if not snapshot_revision_changed and not route_key_changed and failed_replan_preserves_active_route(route, current_waypoints):
         entry["routeForceReplan"] = true
         var failed_reason := String(route.get("reason", "route_replan_failed"))
         set_route_status(entry, "moving", failed_reason)
