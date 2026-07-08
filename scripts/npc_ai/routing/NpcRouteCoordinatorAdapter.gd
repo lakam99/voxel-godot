@@ -127,15 +127,25 @@ func plan_route(entry: Dictionary, intent: Dictionary) -> Dictionary:
 	var prebudget_home_exit_route := generated_section == "generated_cell_job_route" \
 		and bool(entry.get("insideHome", false)) \
 		and intent_kind in ["work", "forage", "job"]
-	if prebudget_home_exit_route:
+	var prebudget_forage_departure_route := _should_try_prebudget_forage_departure_route(entry, intent)
+	if prebudget_forage_departure_route and generated_section == "":
+		generated_section = "generated_cell_job_route"
+	if prebudget_home_exit_route or prebudget_forage_departure_route:
 		var prebudget_generated_start: int = monitor.begin_section(generated_section) if monitor != null else Time.get_ticks_usec()
-		var prebudget_generated_route: Dictionary = navmesh_planner.plan_generated_cell_route(entry, intent, world) if navmesh_planner != null and navmesh_planner.has_method("plan_generated_cell_route") else {}
+		var prebudget_generated_intent := intent.duplicate(true) if prebudget_forage_departure_route else intent
+		if prebudget_forage_departure_route:
+			prebudget_generated_intent["generatedBridgeReason"] = "forage_departure_navmesh_budget_fallback"
+			prebudget_generated_intent["allowPartial"] = true
+			prebudget_generated_intent["generatedBridgeCritical"] = true
+		var prebudget_generated_route: Dictionary = navmesh_planner.plan_generated_cell_route(entry, prebudget_generated_intent, world) if navmesh_planner != null and navmesh_planner.has_method("plan_generated_cell_route") else {}
 		if monitor != null:
 			monitor.end_section(generated_section, prebudget_generated_start)
 		if not prebudget_generated_route.is_empty() and bool(prebudget_generated_route.get("ok", false)):
 			_annotate_route_intent(prebudget_generated_route, intent)
+			if prebudget_forage_departure_route:
+				prebudget_generated_route["navmeshFallbackReason"] = "forage_departure_navmesh_budget_fallback"
 			if monitor != null:
-				monitor.increment_counter("generated_cell_home_exit_job_routes")
+				monitor.increment_counter("generated_cell_forage_departure_routes" if prebudget_forage_departure_route else "generated_cell_home_exit_job_routes")
 				monitor.increment_counter("route_jobs_completed")
 			_store_route_cache(cache_key, prebudget_generated_route)
 			return prebudget_generated_route
@@ -167,6 +177,11 @@ func plan_route(entry: Dictionary, intent: Dictionary) -> Dictionary:
 			generated_intent["generatedBridgeUsecBudget"] = STARVED_HOME_GENERATED_BRIDGE_USEC
 			generated_intent["generatedBridgeMaxVisits"] = STARVED_HOME_GENERATED_BRIDGE_VISITS
 			generated_intent["generatedBridgeReason"] = "starved_home_navmesh_tile_fallback"
+		elif prebudget_forage_departure_route:
+			generated_intent = intent.duplicate(true)
+			generated_intent["generatedBridgeReason"] = "forage_departure_navmesh_budget_fallback"
+			generated_intent["allowPartial"] = true
+			generated_intent["generatedBridgeCritical"] = true
 		var generated_route: Dictionary = navmesh_planner.plan_generated_cell_route(entry, generated_intent, world) if navmesh_planner != null and navmesh_planner.has_method("plan_generated_cell_route") else {}
 		if monitor != null:
 			monitor.end_section(generated_section, generated_start)
@@ -247,7 +262,38 @@ func _should_try_generated_cell_job_route(entry: Dictionary, intent: Dictionary)
 		return false
 	return true
 
-func route_cost(entry: Dictionary, target: Vector3, allow_outside := false, moving_home := false, arrival_radius := CELL * 0.85, approach_cells: Array = []) -> float:
+func _should_try_prebudget_forage_departure_route(entry: Dictionary, intent: Dictionary) -> bool:
+	if world == null or navmesh_planner == null:
+		return false
+	if String(intent.get("kind", "move")) != "forage":
+		return false
+	if String(entry.get("job", "")) != "forage":
+		return false
+	if String(entry.get("jobObjectId", "")) != "":
+		return false
+	if String(entry.get("jobPhase", "")) != "searching":
+		return false
+	if String(entry.get("activeDoorPortalId", "")) != "":
+		return false
+	if bool(entry.get("insideHome", false)):
+		return false
+	if entry.has("_externalDirectMoveFrame") or entry.has("_standaloneNpcUpdateFrame"):
+		return false
+	var current_waypoints: Array = entry.get("pathWaypoints", []) if entry.get("pathWaypoints", []) is Array else []
+	if not current_waypoints.is_empty():
+		return false
+	var body := entry.get("body") as Node3D
+	if body == null or not is_instance_valid(body):
+		return false
+	var target: Vector3 = intent.get("target", body.global_position)
+	if world.has_method("point_inside_town"):
+		if not bool(world.point_inside_town(entry, body.global_position)):
+			return false
+		if bool(world.point_inside_town(entry, target)):
+			return false
+	return true
+
+func route_cost(entry: Dictionary, target: Vector3, allow_outside := false, moving_home := false, arrival_radius := CELL * 0.85, approach_cells: Array = [], require_ready := false) -> float:
 	if world == null:
 		return INF
 	if navmesh_planner == null:
@@ -257,15 +303,18 @@ func route_cost(entry: Dictionary, target: Vector3, allow_outside := false, movi
 	elif navmesh_world == null:
 		navmesh_world = _navmesh_world_from_system()
 		navmesh_planner.setup(navmesh_world, system, main, world)
+	var cost_kind := "forage" if require_ready and String(entry.get("job", "")) == "forage" else "job" if require_ready else "cost"
+	var cost_priority := maxi(int(entry.get("routePriority", 0)), 90) if require_ready else int(entry.get("routePriority", 0))
 	if not _ensure_navmesh_route_tiles(entry, {
-		"kind": "cost",
+		"kind": cost_kind,
 		"target": target,
 		"targetCell": world.world_cell(target),
 		"allowOutside": allow_outside,
 		"movingHome": moving_home,
-		"arrivalRadius": arrival_radius
+		"arrivalRadius": arrival_radius,
+		"priority": cost_priority
 	}):
-		return _estimated_route_cost(entry, target)
+		return INF if require_ready else _estimated_route_cost(entry, target)
 	return navmesh_planner.route_cost_for_runtime(entry, target, allow_outside, moving_home, arrival_radius, approach_cells, world)
 
 func route_failure(status: String, reason: String, target_cell := Vector2i(999999, 999999)) -> Dictionary:

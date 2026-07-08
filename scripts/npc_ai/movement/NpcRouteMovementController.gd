@@ -235,7 +235,7 @@ func move(entry: Dictionary, intent: Dictionary, max_distance: float, planner, w
         var classification := String(follow.get("classification", "blocked"))
         if classification == "traffic_reservation":
             increment_reservation_wait(entry)
-        if follow_reason == "yielding" and String(entry.get("activeDoorPortalId", "")) != "" and not bool(entry.get("holdDoorOrder", false)) and int(entry.get("routeWaitTicks", 0)) > 30:
+        if follow_reason in ["yielding", "blocked_dynamic", "portal_reservation_authority"] and String(entry.get("activeDoorPortalId", "")) != "" and not bool(entry.get("holdDoorOrder", false)) and int(entry.get("routeWaitTicks", 0)) > 30:
             release_stale_active_door_route(entry)
             set_route_status(entry, "waiting", "active_door_replan")
             return { "moved": 0.0, "status": "waiting", "reason": "active_door_replan", "classification": "door_state" }
@@ -259,7 +259,7 @@ func move(entry: Dictionary, intent: Dictionary, max_distance: float, planner, w
             var traffic_retreat_result := try_dynamic_yield_retreat(entry, previous, traffic_retreat_follow, intent, max_distance, world, actors, priority)
             if not traffic_retreat_result.is_empty():
                 return traffic_retreat_result
-        if final_reason == "yielding" and String(entry.get("activeDoorPortalId", "")) != "" and not bool(entry.get("holdDoorOrder", false)) and int(entry.get("routeWaitTicks", 0)) > 30:
+        if final_reason in ["yielding", "blocked_dynamic", "portal_reservation_authority"] and String(entry.get("activeDoorPortalId", "")) != "" and not bool(entry.get("holdDoorOrder", false)) and int(entry.get("routeWaitTicks", 0)) > 30:
             release_stale_active_door_route(entry)
             set_route_status(entry, "waiting", "active_door_replan")
             return { "moved": 0.0, "status": "waiting", "reason": "active_door_replan", "classification": "door_state" }
@@ -743,7 +743,7 @@ func clear_dynamic_yield_retreat(entry: Dictionary) -> void:
     entry.erase("_yieldRetreatBlockerId")
 
 func try_portal_clearance_recenter(entry: Dictionary, previous: Vector3, follow: Dictionary, intent: Dictionary, max_distance: float, world, priority: int, motor_reason: String) -> Dictionary:
-    if not bool(follow.get("portalMode", false)) or not (motor_reason in ["static_or_dynamic_collision", "blocked_static", "blocked_capsule"]):
+    if not bool(follow.get("portalMode", false)) or not (motor_reason in ["static_or_dynamic_collision", "blocked_static", "blocked_capsule", "blocked_dynamic", "portal_reservation_authority"]):
         return {}
     var recenter_ticks := int(entry.get("portalRecenterTicks", 0)) + 1
     entry["portalRecenterTicks"] = recenter_ticks

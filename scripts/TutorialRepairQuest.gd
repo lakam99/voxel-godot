@@ -173,17 +173,39 @@ func remove_repair_block(cell: Vector2i, block_type: String) -> void:
     if main == null:
         return
     var blocks: Dictionary = main.get("blocks")
+    var removed_keys := []
     for key_variant in blocks.keys():
         var body := blocks[key_variant] as Node
         if body == null or not is_instance_valid(body):
             continue
-        if String(body.get_meta("block_type", "")) != block_type:
+        var candidate_type := String(body.get_meta("block_type", ""))
+        if not repair_block_type_matches(candidate_type, block_type):
             continue
         var block_cell: Vector3i = body.get_meta("cell", Vector3i.ZERO)
         if block_cell.x == cell.x and block_cell.z == cell.y:
+            removed_keys.append(key_variant)
+    for key_variant in removed_keys:
+        var body := blocks.get(key_variant) as Node
+        if body == null or not is_instance_valid(body):
             blocks.erase(key_variant)
-            body.queue_free()
-            return
+            continue
+        var block_cell: Vector3i = body.get_meta("cell", Vector3i.ZERO)
+        var candidate_type := String(body.get_meta("block_type", block_type))
+        if main.npc_system and main.npc_system.has_method("notify_navigation_block_removed"):
+            main.npc_system.notify_navigation_block_removed(block_cell, candidate_type, body)
+        if main.has_method("clear_block_light_from_terrain"):
+            main.clear_block_light_from_terrain(block_cell, candidate_type, "tutorial_repair_damage")
+        if main.has_method("clear_block_state_from_terrain"):
+            main.clear_block_state_from_terrain(block_cell, candidate_type, "tutorial_repair_damage")
+        blocks.erase(key_variant)
+        body.queue_free()
+    if not removed_keys.is_empty() and main.has_method("invalidate_navigation_marker_cache"):
+        main.invalidate_navigation_marker_cache()
+
+func repair_block_type_matches(candidate_type: String, target_type: String) -> bool:
+    if candidate_type == target_type:
+        return true
+    return target_type == "torch" and repair_lamp_type(candidate_type)
 
 func place_intro_repair_chest() -> void:
     if main == null or main.structure_system == null or system.town.is_empty():
@@ -292,8 +314,21 @@ func add_repair_marker(cell: Vector2i, block_type: String) -> void:
         add_marker_box(marker, Vector3(CELL * 0.44, CELL * 0.06, CELL * 0.44), Vector3(0.0, CELL * 0.60, 0.0), lamp_material)
         add_marker_box(marker, Vector3(CELL * 0.20, CELL * 0.26, CELL * 0.20), Vector3(0.0, CELL * 0.42, 0.0), flame_material, Vector3(0.0, -0.78, 0.0))
     else:
-        add_marker_box(marker, Vector3(CELL * 0.96, CELL * 0.96, CELL * 0.96), Vector3.ZERO, wood_material)
+        add_marker_frame(marker, Vector3(CELL * 0.98, CELL * 0.98, CELL * 0.98), wood_material)
     system.repair_marker_root.add_child(marker)
+
+func add_marker_frame(parent: Node3D, size: Vector3, material: Material) -> void:
+    var thickness := CELL * 0.08
+    var half := size * 0.5
+    for x in [-1.0, 1.0]:
+        for z in [-1.0, 1.0]:
+            add_marker_box(parent, Vector3(thickness, size.y, thickness), Vector3(x * half.x, 0.0, z * half.z), material)
+    for y in [-1.0, 1.0]:
+        for z in [-1.0, 1.0]:
+            add_marker_box(parent, Vector3(size.x, thickness, thickness), Vector3(0.0, y * half.y, z * half.z), material)
+    for y in [-1.0, 1.0]:
+        for x in [-1.0, 1.0]:
+            add_marker_box(parent, Vector3(thickness, thickness, size.z), Vector3(x * half.x, y * half.y, 0.0), material)
 
 func add_marker_box(parent: Node3D, size: Vector3, offset: Vector3, material: Material, rotation := Vector3.ZERO) -> void:
     var mesh := BoxMesh.new()

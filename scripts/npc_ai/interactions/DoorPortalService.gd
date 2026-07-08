@@ -250,11 +250,11 @@ func _actors_for_request(explicit_actors: Array, request) -> Array:
 func _current_actors(extra: Array = []) -> Array:
 	var result: Array = []
 	for actor in extra:
-		if actor is Node3D and is_instance_valid(actor):
+		if actor is Node3D and is_instance_valid(actor) and _actor_participates_in_door_policy(actor):
 			result.append(actor)
 	if main != null:
 		var player = main.get("player")
-		if player is Node3D and is_instance_valid(player) and not result.has(player):
+		if player is Node3D and is_instance_valid(player) and _actor_participates_in_door_policy(player) and not result.has(player):
 			result.append(player)
 		var npc_system = main.get("npc_system")
 		if npc_system != null:
@@ -263,9 +263,19 @@ func _current_actors(extra: Array = []) -> Array:
 				for entry in npcs_value:
 					if entry is Dictionary:
 						var body := (entry as Dictionary).get("body") as Node3D
-						if body != null and is_instance_valid(body) and not result.has(body):
+						if body != null and is_instance_valid(body) and _actor_participates_in_door_policy(body) and not result.has(body):
 							result.append(body)
 	return result
+
+func _actor_participates_in_door_policy(actor) -> bool:
+	var node := actor as Node3D
+	if node == null or not is_instance_valid(node):
+		return false
+	if node is CollisionObject3D:
+		var collider := node as CollisionObject3D
+		if int(collider.collision_layer) == 0 and int(collider.collision_mask) == 0:
+			return false
+	return true
 
 func _interaction_block_from_collider(collider: Node) -> Node:
 	if collider == null:

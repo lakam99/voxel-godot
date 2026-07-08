@@ -77,9 +77,10 @@ func plan_runtime_route(entry: Dictionary, intent: Dictionary, generated_world =
 	if not bool(route.get("ok", false)):
 		var bridge_allowed := _initial_failure_cell_bridge_allowed(entry, intent, route)
 		var bridge_first := bridge_allowed and _prefer_generated_bridge_before_navmesh_fallback(intent)
+		var bridge_intent := _cell_bridge_repair_intent(intent) if bridge_allowed else intent
 		if bridge_first:
 			var bridge_start: int = monitor.begin_section("navmesh_route_generated_bridge") if monitor != null else Time.get_ticks_usec()
-			var cell_bridge_route := _plan_generated_cell_bridge_route(entry, intent, generated_world, start_cell, target_cell, route)
+			var cell_bridge_route := _plan_generated_cell_bridge_route(entry, bridge_intent, generated_world, start_cell, target_cell, route)
 			if monitor != null:
 				monitor.end_section("navmesh_route_generated_bridge", bridge_start)
 			if not cell_bridge_route.is_empty():
@@ -92,7 +93,7 @@ func plan_runtime_route(entry: Dictionary, intent: Dictionary, generated_world =
 			return fallback_route
 		if bridge_allowed and not bridge_first:
 			var bridge_start: int = monitor.begin_section("navmesh_route_generated_bridge") if monitor != null else Time.get_ticks_usec()
-			var cell_bridge_route := _plan_generated_cell_bridge_route(entry, intent, generated_world, start_cell, target_cell, route)
+			var cell_bridge_route := _plan_generated_cell_bridge_route(entry, bridge_intent, generated_world, start_cell, target_cell, route)
 			if monitor != null:
 				monitor.end_section("navmesh_route_generated_bridge", bridge_start)
 			if not cell_bridge_route.is_empty():
@@ -174,6 +175,7 @@ func _post_validation_cell_repair_allowed(route: Dictionary, intent: Dictionary)
 		if status != "blocked":
 			return false
 		return reason in [
+			"path_endpoint_mismatch",
 			"path_crosses_static_collision",
 			"blocked_static_collision",
 			"blocked_static_transition"
@@ -209,13 +211,16 @@ func _initial_failure_cell_bridge_allowed(entry: Dictionary, intent: Dictionary,
 	var reason := String(route.get("reason", ""))
 	var route_kind := String(intent.get("kind", "move"))
 	if _home_route_requires_complete_navmesh(intent):
-		return false
+		return reason == "path_endpoint_mismatch"
 	if bool(intent.get("movingHome", false)) or (bool(intent.get("strictArrival", false)) and not _routine_route_kind(route_kind)):
 		return true
 	if route_kind in ["home", "scripted"]:
 		return true
 	if _routine_route_kind(route_kind):
 		return reason in [
+			"navmesh_tile_budget",
+			"navmesh_tile_publish_frame_budget",
+			"route_budget",
 			"endpoint_not_server_walkable",
 			"path_endpoint_mismatch",
 			"path_crosses_static_collision",
@@ -304,6 +309,8 @@ func _plan_generated_cell_bridge_route(entry: Dictionary, intent: Dictionary, ge
 	var target_lookup := {}
 	for goal in goal_cells:
 		target_lookup[goal] = true
+	if bool(intent.get("strictArrival", false)) or bool(intent.get("movingHome", false)):
+		target_lookup["_strictTargetCollision"] = true
 	var bounds := _generated_bridge_bounds(start_cell, goal_cells)
 	var visit_budget := _generated_bridge_visit_budget(entry, intent)
 	var requested_usec_budget := _generated_bridge_usec_budget(entry, intent)
@@ -509,6 +516,8 @@ func _generated_bridge_validation_step_budget(entry: Dictionary, intent: Diction
 	return GENERATED_CELL_BRIDGE_ROUTINE_MAX_VALIDATION_STEPS
 
 func _generated_bridge_critical(intent: Dictionary) -> bool:
+	if bool(intent.get("generatedBridgeCritical", false)):
+		return true
 	var route_kind := String(intent.get("kind", "move"))
 	return bool(intent.get("movingHome", false)) \
 		or bool(intent.get("strictArrival", false)) \
@@ -905,6 +914,8 @@ func _validate_generated_world_route(entry: Dictionary, intent: Dictionary, gene
 	var moving_home := bool(intent.get("movingHome", false))
 	var snapshot: Dictionary = source.cached_static_tile_snapshot(allow_outside, moving_home) if source.has_method("cached_static_tile_snapshot") else source.build_snapshot(entry, allow_outside, moving_home)
 	var target_lookup := { target_cell: true }
+	if bool(intent.get("strictArrival", false)) or moving_home:
+		target_lookup["_strictTargetCollision"] = true
 	var actions: Dictionary = route.get("actions", {}) if route.get("actions", {}) is Dictionary else {}
 	for action_value in actions.values():
 		if not (action_value is Dictionary):
@@ -1094,8 +1105,8 @@ func _target_cell_blocked(entry: Dictionary, target_cell: Vector2i, generated_wo
 	var source = generated_world if generated_world != null else world_adapter
 	if source == null or not source.has_method("build_snapshot"):
 		return false
-	if moving_home and source.has_method("cell_inside_entry_home") and source.cell_inside_entry_home(entry, target_cell):
-		return false
+	if source.has_method("cell_is_standable_goal"):
+		return not bool(source.cell_is_standable_goal(entry, target_cell, allow_outside, moving_home))
 	if source.has_method("private_interior_blocks_entry") and source.private_interior_blocks_entry(entry, target_cell):
 		return true
 	if source.has_method("live_static_blocker_for_cell") and source.live_static_blocker_for_cell(target_cell) != null:

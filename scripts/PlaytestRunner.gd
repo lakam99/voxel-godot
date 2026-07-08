@@ -793,6 +793,7 @@ func test_tutorial_start_system() -> void:
     var repair_marker_root := tutorial_system.get("repair_marker_root") as Node
     var marker_count_before := repair_marker_root.get_child_count() if repair_marker_root else 0
     var expected_marker_count := int(repair_targets.get("fence", []).size()) + int(repair_targets.get("lamps", []).size())
+    var occupied_repair_targets := repair_target_occupancy(repair_targets)
     var level_for_repairs := float(tutorial_system.get("town").get("level", player.global_position.y))
     var repaired_all := true
     for cell_variant in repair_targets.get("fence", []):
@@ -821,9 +822,10 @@ func test_tutorial_start_system() -> void:
     var sleep_objective := bool(objective_system.is_complete("tutorial_sleep_after_repair", main.call("objective_state")))
     add_result(
         "tutorial_contract_repair_and_sleep_gate",
-        blocked_sleep and marker_count_before >= expected_marker_count and marker_count_after == 0 and repaired_all and repair_complete and repair_objective and slept_after_repair and sleep_objective and float(main.get("time_of_day")) < 0.36,
-        "blocked %s, markers %d/%d->%d, repaired %s, complete %s, repair objective %s, slept %s, sleep objective %s, time %.2f, state %s" % [
+        blocked_sleep and occupied_repair_targets.is_empty() and marker_count_before >= expected_marker_count and marker_count_after == 0 and repaired_all and repair_complete and repair_objective and slept_after_repair and sleep_objective and float(main.get("time_of_day")) < 0.36,
+        "blocked %s, occupiedTargets %s, markers %d/%d->%d, repaired %s, complete %s, repair objective %s, slept %s, sleep objective %s, time %.2f, state %s" % [
             str(blocked_sleep),
+            JSON.stringify(occupied_repair_targets),
             marker_count_before,
             expected_marker_count,
             marker_count_after,
@@ -5983,6 +5985,56 @@ func vec2i_dictionary(value) -> Dictionary:
 func vec3i_dictionary(value) -> Dictionary:
     var vector: Vector3i = value if value is Vector3i else Vector3i.ZERO
     return { "x": vector.x, "y": vector.y, "z": vector.z }
+
+func repair_target_occupancy(targets: Dictionary) -> Array[Dictionary]:
+    var lookup := {}
+    for cell_value in targets.get("fence", []):
+        if cell_value is Vector2i:
+            var cell: Vector2i = cell_value
+            lookup[repair_cell_key(cell)] = {
+                "kind": "fence",
+                "expectedType": "woodBlock",
+                "cell": cell
+            }
+    for cell_value in targets.get("lamps", []):
+        if cell_value is Vector2i:
+            var cell: Vector2i = cell_value
+            lookup[repair_cell_key(cell)] = {
+                "kind": "lamp",
+                "expectedType": "torch",
+                "cell": cell
+            }
+    var occupied: Array[Dictionary] = []
+    if lookup.is_empty():
+        return occupied
+    var blocks := get_blocks()
+    for block_value in blocks.values():
+        var body := block_value as Node
+        if body == null or not is_instance_valid(body):
+            continue
+        var block_cell: Vector3i = body.get_meta("cell", Vector3i.ZERO)
+        var flat := Vector2i(block_cell.x, block_cell.z)
+        var key := repair_cell_key(flat)
+        if not lookup.has(key):
+            continue
+        var target: Dictionary = lookup[key]
+        var block_type := String(body.get_meta("block_type", ""))
+        var expected_type := String(target.get("expectedType", ""))
+        if block_type == expected_type or (expected_type == "torch" and repair_lamp_type(block_type)):
+            occupied.append({
+                "kind": String(target.get("kind", "")),
+                "cell": vec2i_dictionary(flat),
+                "blockCell": vec3i_dictionary(block_cell),
+                "blockType": block_type,
+                "name": body.name
+            })
+    return occupied
+
+func repair_cell_key(cell: Vector2i) -> String:
+    return "%d,%d" % [cell.x, cell.y]
+
+func repair_lamp_type(block_type: String) -> bool:
+    return block_type == "torch" or block_type == "wardLantern"
 
 func vec3_dictionary(value) -> Dictionary:
     var vector: Vector3 = value if value is Vector3 else Vector3.ZERO

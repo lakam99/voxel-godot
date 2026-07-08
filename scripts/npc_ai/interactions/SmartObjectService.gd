@@ -760,8 +760,6 @@ func approach_line_of_sight_required(registration, metadata: Dictionary, reserva
 		return bool(metadata.get("requiresLineOfSight", true))
 	if registration.metadata.has("requiresLineOfSight"):
 		return bool(registration.metadata.get("requiresLineOfSight", true))
-	if registration.kind == "forage_source" and action_kind == "harvest_resource" and not reservation.is_empty():
-		return false
 	return true
 
 func validate_access_policy(registration, request) -> Dictionary:

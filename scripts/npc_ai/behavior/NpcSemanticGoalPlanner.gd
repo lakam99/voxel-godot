@@ -88,6 +88,7 @@ func make_intent(entry: Dictionary, target: Vector3, max_distance: float, moving
         "action": "",
         "interruptible": not moving_home,
         "allowPartial": allow_home_partial or kind == "guard",
+        "generatedBridgeCritical": kind == "guard" and bool(entry.get("guardRouteCritical", false)),
         "strictArrival": strict_home_route or strict_scripted_route or kind in ["job", "work", "forage"],
         "fallbackCells": fallback_cells
     }
@@ -103,7 +104,10 @@ func home_interior_goal_cells(entry: Dictionary) -> Array[Vector2i]:
     var max_z := maxi(interior_min.y, interior_max.y)
     for z in range(min_z, max_z + 1):
         for x in range(min_x, max_x + 1):
-            result.append(Vector2i(x, z))
+            var cell := Vector2i(x, z)
+            if world != null and world.has_method("cell_is_standable_goal") and not bool(world.cell_is_standable_goal(entry, cell, false, true)):
+                continue
+            result.append(cell)
     result.sort_custom(func(a: Vector2i, b: Vector2i) -> bool:
         var a_home := Vector2(float(a.x - home_cell.x), float(a.y - home_cell.y)).length_squared()
         var b_home := Vector2(float(b.x - home_cell.x), float(b.y - home_cell.y)).length_squared()
@@ -141,12 +145,22 @@ func choose_job_target(entry: Dictionary) -> Vector3:
         return entry.get("porchPosition", Vector3.ZERO)
     var job := String(entry.get("job", ""))
     var outside_town_job := resource_job_uses_outside_work_area(job)
+    if job == "forage" and forager_prefers_search_anchor(entry):
+        var early_search := choose_forage_search_target(entry)
+        if early_search != Vector3.INF:
+            clear_goal_fallback(entry)
+            return early_search
     var resource_candidates: Array[Vector3] = []
     add_resource_prop_candidates(resource_candidates, entry, job)
     var resource_reachable := choose_best_reachable_position(entry, resource_candidates, outside_town_job, false, CELL * 0.85, MAX_ROUTE_SCORED_CANDIDATES)
     if resource_reachable != Vector3.INF and job_position_allowed(entry, resource_reachable, outside_town_job):
         clear_goal_fallback(entry)
         return resource_reachable
+    if job == "forage":
+        var forage_search := choose_forage_search_target(entry)
+        if forage_search != Vector3.INF:
+            clear_goal_fallback(entry)
+            return forage_search
     var candidates: Array[Vector3] = job_anchor_candidates(entry, outside_town_job)
     var reachable := choose_best_reachable_position(entry, candidates, outside_town_job, false, CELL * 0.85, MAX_ROUTE_SCORED_CANDIDATES)
     if reachable != Vector3.INF and job_position_allowed(entry, reachable, outside_town_job):
@@ -160,6 +174,19 @@ func choose_job_target(entry: Dictionary) -> Vector3:
     var fallback := choose_best_reachable_position(entry, fallback_candidates, false, false, CELL * 0.85, 4)
     return fallback if fallback != Vector3.INF else entry.get("porchPosition", Vector3.ZERO)
 
+func forager_prefers_search_anchor(entry: Dictionary) -> bool:
+    if String(entry.get("job", "")) != "forage":
+        return false
+    if String(entry.get("jobObjectId", "")) != "":
+        return false
+    var phase := String(entry.get("jobPhase", ""))
+    if phase == "searching":
+        return true
+    var body := entry.get("body") as Node3D
+    if body == null or not is_instance_valid(body) or world == null:
+        return false
+    return world.point_inside_town(entry, body.global_position)
+
 func choose_guard_target(entry: Dictionary, target_hostile: Node3D = null, melee := false) -> Vector3:
     if world == null or planner == null:
         return entry.get("guardPosition", entry.get("porchPosition", Vector3.ZERO))
@@ -170,6 +197,10 @@ func choose_guard_target(entry: Dictionary, target_hostile: Node3D = null, melee
         if intercept != Vector3.INF:
             clear_goal_fallback(entry)
             return intercept
+    var assigned_guard_post: Vector3 = entry.get("guardPosition", entry.get("porchPosition", Vector3.ZERO))
+    if position_can_be_goal(entry, assigned_guard_post, false, false):
+        clear_goal_fallback(entry)
+        return assigned_guard_post
     candidates = guard_post_candidates(entry)
     var guard_target := choose_best_reachable_position(entry, candidates, false, false, CELL * 0.85, 10)
     if guard_target != Vector3.INF:
@@ -196,7 +227,11 @@ func choose_best_forage(entry: Dictionary, candidates: Array[Node3D]) -> Node3D:
         if node == null or not is_instance_valid(node):
             continue
         var approach_cells: Array[Vector2i] = world.approach_cells_for_target(entry, node.global_position, true)
-        if not approach_cells.is_empty():
+        var approach_positions: Array[Vector3] = []
+        for cell in approach_cells:
+            approach_positions.append(world.cell_position(cell))
+        var reachable := choose_best_reachable_position(entry, approach_positions, true, false, CELL * 0.85, mini(approach_positions.size(), 6), true)
+        if reachable != Vector3.INF:
             return node
     return null
 
@@ -207,8 +242,64 @@ func forage_target_position(entry: Dictionary, node: Node3D) -> Vector3:
     var approach_positions: Array[Vector3] = []
     for cell in approach_cells:
         approach_positions.append(world.cell_position(cell))
-    var reachable := choose_best_reachable_position(entry, approach_positions, true, false, CELL * 0.85, approach_positions.size())
+    var reachable := choose_best_reachable_position(entry, approach_positions, true, false, CELL * 0.85, approach_positions.size(), true)
     return reachable if reachable != Vector3.INF else node.global_position
+
+func choose_forage_search_target(entry: Dictionary) -> Vector3:
+    if world == null:
+        return Vector3.INF
+    var candidates: Array[Vector3] = []
+    add_nearest_forage_exit_candidates(candidates, entry)
+    add_path_candidates(candidates, entry, true)
+    var outward := outward_work_anchor(entry)
+    if outward != Vector3.INF:
+        candidates.append(outward)
+    add_forage_search_sweep_candidates(candidates, entry)
+    add_deterministic_ring_candidates(candidates, entry, true)
+    var reachable := choose_best_reachable_position(entry, candidates, true, false, CELL * 0.85, MAX_ROUTE_SCORED_CANDIDATES, true)
+    if reachable != Vector3.INF and job_position_allowed(entry, reachable, true):
+        return reachable
+    for candidate in unique_positions(candidates):
+        if candidate == Vector3.INF:
+            continue
+        if not job_position_allowed(entry, candidate, true):
+            continue
+        if surface_y_at_position(candidate) < main.WATER_LEVEL + 0.45:
+            continue
+        return candidate
+    return Vector3.INF
+
+func add_nearest_forage_exit_candidates(candidates: Array[Vector3], entry: Dictionary) -> void:
+    if world == null or main == null:
+        return
+    var center_cell: Vector2i = entry.get("townCenter", Vector2i.ZERO)
+    var center := Vector3(float(center_cell.x) * CELL, 0.0, float(center_cell.y) * CELL)
+    var origins: Array[Vector3] = []
+    var body := entry.get("body") as Node3D
+    if body != null and is_instance_valid(body):
+        origins.append(body.global_position)
+    origins.append(entry.get("porchPosition", entry.get("homePosition", center)))
+    origins.append(entry.get("homePosition", entry.get("porchPosition", center)))
+    var base_radius := maxf(float(entry.get("townRadius", 18)) + 4.0, 22.0)
+    var seen := {}
+    for origin in origins:
+        var direction := origin - center
+        direction.y = 0.0
+        if direction.length_squared() < 0.001:
+            continue
+        direction = direction.normalized()
+        for extra in [0.0, 4.0, 8.0]:
+            var position := center + direction * (base_radius + float(extra)) * CELL
+            var key := position_key(position)
+            if seen.has(key):
+                continue
+            seen[key] = true
+            var ground_y := surface_y_at_position(position)
+            if ground_y < main.WATER_LEVEL + 0.5:
+                continue
+            position.y = ground_y + 0.04
+            if world.point_inside_work_area(entry, position) and not world.point_inside_town(entry, position):
+                candidates.append(position)
 
 func stable_node_id(node: Node) -> String:
     if node == null:
@@ -219,7 +310,7 @@ func stable_node_id(node: Node) -> String:
         return String(node.get_meta("smart_object_id"))
     return String(node.name)
 
-func choose_best_reachable_position(entry: Dictionary, candidates: Array[Vector3], allow_outside := false, moving_home := false, _arrival_radius := CELL * 0.85, max_checked := 8) -> Vector3:
+func choose_best_reachable_position(entry: Dictionary, candidates: Array[Vector3], allow_outside := false, moving_home := false, _arrival_radius := CELL * 0.85, max_checked := 8, force_route_cost := false) -> Vector3:
     var body := entry.get("body") as Node3D
     var origin: Vector3 = body.global_position if body != null else entry.get("porchPosition", Vector3.ZERO)
     var unique_candidates := unique_positions(candidates)
@@ -230,7 +321,7 @@ func choose_best_reachable_position(entry: Dictionary, candidates: Array[Vector3
             return position_key(a) < position_key(b)
         return a_distance < b_distance
     )
-    var score_with_route_cost := moving_home or OS.get_environment("VOXEL_NPC_ROUTE_SCORE_TARGETS") == "1"
+    var score_with_route_cost := force_route_cost or moving_home or OS.get_environment("VOXEL_NPC_ROUTE_SCORE_TARGETS") == "1"
     var checked: int = 0
     for candidate in unique_candidates:
         if not position_can_be_goal(entry, candidate, allow_outside, moving_home):
@@ -242,7 +333,7 @@ func choose_best_reachable_position(entry: Dictionary, candidates: Array[Vector3
             return candidate
         var cost: float = INF
         if planner != null and planner.has_method("route_cost"):
-            cost = float(planner.route_cost(entry, candidate, allow_outside, moving_home, _arrival_radius))
+            cost = float(planner.route_cost(entry, candidate, allow_outside, moving_home, _arrival_radius, [], force_route_cost))
         if cost < INF:
             return candidate
     return Vector3.INF
@@ -549,6 +640,10 @@ func position_can_be_goal(entry: Dictionary, position: Vector3, allow_outside :=
         return false
     if not world.point_allowed(entry, position, allow_outside, moving_home):
         return false
+    if world.has_method("cell_is_standable_goal"):
+        var cell: Vector2i = world.world_cell(position) if world.has_method("world_cell") else Vector2i(roundi(position.x / CELL), roundi(position.z / CELL))
+        if not bool(world.cell_is_standable_goal(entry, cell, allow_outside, moving_home)):
+            return false
     return surface_y_at_position(position) >= main.WATER_LEVEL + 0.45
 
 func unique_positions(candidates: Array[Vector3]) -> Array[Vector3]:
@@ -603,6 +698,41 @@ func add_deterministic_ring_candidates(candidates: Array[Vector3], entry: Dictio
         elif world.point_inside_town(entry, position):
             candidates.append(position)
 
+func add_forage_search_sweep_candidates(candidates: Array[Vector3], entry: Dictionary) -> void:
+    if world == null or main == null:
+        return
+    var center: Vector2i = entry.get("townCenter", Vector2i.ZERO)
+    var center_position := Vector3(float(center.x) * CELL, 0.0, float(center.y) * CELL)
+    var home: Vector3 = entry.get("homePosition", entry.get("porchPosition", center_position))
+    var search_serial := int(entry.get("forageSearchSerial", 0))
+    var direction := home - center_position
+    direction.y = 0.0
+    if direction.length_squared() < 0.001:
+        var fallback_rng := deterministic_rng(entry, "forage_search_direction")
+        var fallback_angle := fallback_rng.randf() * TAU
+        direction = Vector3(cos(fallback_angle), 0.0, sin(fallback_angle))
+    direction = direction.normalized()
+    var base_radius := maxf(float(entry.get("townRadius", 18)) + 7.0, 24.0)
+    var angles := [
+        0.0,
+        0.58,
+        -0.58,
+        1.15,
+        -1.15,
+        PI
+    ]
+    for index in range(angles.size()):
+        var serial_turn := float((search_serial + index) % angles.size()) * 0.41
+        var angle := atan2(direction.z, direction.x) + float(angles[index]) + serial_turn
+        var radius_cells := base_radius + float((search_serial + index * 3) % 10)
+        var position := Vector3(float(center.x) * CELL + cos(angle) * radius_cells * CELL, 0.0, float(center.y) * CELL + sin(angle) * radius_cells * CELL)
+        var ground_y := surface_y_at_position(position)
+        if ground_y < main.WATER_LEVEL + 0.5:
+            continue
+        position.y = ground_y + 0.04
+        if world.point_inside_work_area(entry, position) and not world.point_inside_town(entry, position):
+            candidates.append(position)
+
 func deterministic_rng(entry: Dictionary, goal_kind: String) -> RandomNumberGenerator:
     var rng := RandomNumberGenerator.new()
     var seed_text: String = ""
@@ -610,12 +740,13 @@ func deterministic_rng(entry: Dictionary, goal_kind: String) -> RandomNumberGene
         seed_text = String(main.get("seed_text"))
         if seed_text == "":
             seed_text = String(main.get("world_seed"))
+    var search_serial := int(entry.get("forageSearchSerial", 0)) if String(entry.get("job", "")) == "forage" else 0
     var key: String = "%s:%s:%s:%s:%d" % [
         seed_text,
         String(entry.get("id", "npc")),
         goal_kind,
         String(entry.get("jobPhase", "")),
-        int(entry.get("jobRuns", 0))
+        int(entry.get("jobRuns", 0)) + search_serial
     ]
     rng.seed = hash(key)
     return rng

@@ -102,11 +102,11 @@ func forage_target_position(entry: Dictionary, target_node: Node3D) -> Vector3:
         return target_node.global_position if target_node != null else Vector3.ZERO
     return coordinator.forage_target_position(entry, target_node)
 
-func route_cost(entry: Dictionary, target: Vector3, allow_outside := false, moving_home := false, arrival_radius := CELL * 0.85, approach_cells: Array = []) -> float:
+func route_cost(entry: Dictionary, target: Vector3, allow_outside := false, moving_home := false, arrival_radius := CELL * 0.85, approach_cells: Array = [], require_ready := false) -> float:
     ensure_ready()
     if coordinator == null:
         return INF
-    return coordinator.route_cost(entry, target, allow_outside, moving_home, arrival_radius, approach_cells)
+    return coordinator.route_cost(entry, target, allow_outside, moving_home, arrival_radius, approach_cells, require_ready)
 
 func point_inside_town(entry: Dictionary, position: Vector3) -> bool:
     ensure_ready()

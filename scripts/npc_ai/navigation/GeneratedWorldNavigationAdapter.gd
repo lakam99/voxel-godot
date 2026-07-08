@@ -880,6 +880,8 @@ func live_occupant_cells(entry: Dictionary) -> Dictionary:
             var other_body := other_entry.get("body") as Node3D
             if other_body == null or not is_instance_valid(other_body) or other_body == self_body:
                 continue
+            if not dynamic_actor_blocks_navigation(other_body):
+                continue
             dynamic[world_cell(other_body.global_position)] = other_body
     if system != null and system.get("hostile_system") != null:
         var hostile_system = system.get("hostile_system")
@@ -893,11 +895,23 @@ func live_occupant_cells(entry: Dictionary) -> Dictionary:
                     enemy_body = (enemy as Dictionary).get("body") as Node3D
                 if enemy_body == null or not is_instance_valid(enemy_body):
                     continue
+                if not dynamic_actor_blocks_navigation(enemy_body):
+                    continue
                 dynamic[world_cell(enemy_body.global_position)] = enemy_body
     if main != null and main.get("player") is Node3D:
         var player := main.get("player") as Node3D
-        dynamic[world_cell(player.global_position)] = player
+        if dynamic_actor_blocks_navigation(player):
+            dynamic[world_cell(player.global_position)] = player
     return dynamic
+
+func dynamic_actor_blocks_navigation(actor: Node3D) -> bool:
+    if actor == null or not is_instance_valid(actor):
+        return false
+    if actor is CollisionObject3D:
+        var collider := actor as CollisionObject3D
+        if int(collider.collision_layer) == 0 and int(collider.collision_mask) == 0:
+            return false
+    return true
 
 func world_cell(position: Vector3) -> Vector2i:
     return Vector2i(roundi(position.x / CELL), roundi(position.z / CELL))
@@ -1136,6 +1150,7 @@ func is_path_cell(snapshot: Dictionary, cell: Vector2i) -> bool:
 func cell_pathable(entry: Dictionary, snapshot: Dictionary, from_cell: Vector2i, to_cell: Vector2i, target_cells: Dictionary, ignore_dynamic := false) -> Dictionary:
     var allow_outside := bool(snapshot.get("allowOutside", false))
     var moving_home := bool(snapshot.get("movingHome", false))
+    var relax_target_blockers := target_cells.has(to_cell) and not bool(target_cells.get("_strictTargetCollision", false))
     if not cell_allowed_area(entry, to_cell, allow_outside, moving_home):
         return { "ok": false, "reason": "outside_area" }
     if private_interior_blocks_entry(entry, to_cell):
@@ -1146,7 +1161,7 @@ func cell_pathable(entry: Dictionary, snapshot: Dictionary, from_cell: Vector2i,
     var door := door_at(snapshot, to_cell)
     if door != null and not door_allows_route_for_entry(entry, door, from_cell, moving_home):
         return { "ok": false, "reason": "private_door_not_routeable" }
-    if static_blocker(snapshot, to_cell) != null and not target_cells.has(to_cell):
+    if static_blocker(snapshot, to_cell) != null and not relax_target_blockers:
         return { "ok": false, "reason": "blocked_static" }
     if door == null:
         var collision_blocker := static_collision_blocker(snapshot, to_cell)
@@ -1158,15 +1173,16 @@ func cell_pathable(entry: Dictionary, snapshot: Dictionary, from_cell: Vector2i,
                 "blockerCell": collision_blocker.get("cell", INVALID_CELL),
                 "blockType": collision_blocker.get("blockType", "")
             }
-    if to_cell != from_cell and prop_clearance_blocker(snapshot, to_cell) != null and not target_cells.has(to_cell):
+    if to_cell != from_cell and prop_clearance_blocker(snapshot, to_cell) != null and not relax_target_blockers:
         return { "ok": false, "reason": "blocked_prop_clearance" }
-    if not ignore_dynamic and dynamic_blocker(snapshot, to_cell) != null and not target_cells.has(to_cell):
+    if not ignore_dynamic and dynamic_blocker(snapshot, to_cell) != null and not relax_target_blockers:
         return { "ok": false, "reason": "blocked_dynamic" }
     return { "ok": true, "reason": "" }
 
 func cell_bridge_search_pathable(entry: Dictionary, snapshot: Dictionary, from_cell: Vector2i, to_cell: Vector2i, target_cells: Dictionary, ignore_dynamic := false) -> Dictionary:
     var allow_outside := bool(snapshot.get("allowOutside", false))
     var moving_home := bool(snapshot.get("movingHome", false))
+    var relax_target_blockers := target_cells.has(to_cell) and not bool(target_cells.get("_strictTargetCollision", false))
     if not cell_allowed_area(entry, to_cell, allow_outside, moving_home):
         return { "ok": false, "reason": "outside_area" }
     if private_interior_blocks_entry(entry, to_cell):
@@ -1177,11 +1193,21 @@ func cell_bridge_search_pathable(entry: Dictionary, snapshot: Dictionary, from_c
     var door := door_at(snapshot, to_cell)
     if door != null and not door_allows_route_for_entry(entry, door, from_cell, moving_home):
         return { "ok": false, "reason": "private_door_not_routeable" }
-    if static_blocker(snapshot, to_cell) != null and not target_cells.has(to_cell):
+    if static_blocker(snapshot, to_cell) != null and not relax_target_blockers:
         return { "ok": false, "reason": "blocked_static" }
-    if to_cell != from_cell and prop_clearance_blocker(snapshot, to_cell) != null and not target_cells.has(to_cell):
+    if door == null:
+        var collision_blocker := static_collision_blocker(snapshot, to_cell)
+        if not collision_blocker.is_empty():
+            return {
+                "ok": false,
+                "reason": "blocked_static_collision",
+                "transitionReason": "blocked_static_collision",
+                "blockerCell": collision_blocker.get("cell", INVALID_CELL),
+                "blockType": collision_blocker.get("blockType", "")
+            }
+    if to_cell != from_cell and prop_clearance_blocker(snapshot, to_cell) != null and not relax_target_blockers:
         return { "ok": false, "reason": "blocked_prop_clearance" }
-    if not ignore_dynamic and dynamic_blocker(snapshot, to_cell) != null and not target_cells.has(to_cell):
+    if not ignore_dynamic and dynamic_blocker(snapshot, to_cell) != null and not relax_target_blockers:
         return { "ok": false, "reason": "blocked_dynamic" }
     return { "ok": true, "reason": "" }
 

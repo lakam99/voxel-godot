@@ -254,6 +254,7 @@ func stream_town_chunks_budgeted() -> bool:
     var stable_frames := 0
     for frame in range(TOWN_STREAMING_MAX_FRAMES):
         main.call("update_chunks", false)
+        pump_runtime_structure_streaming()
         last_town_streaming_summary = town_streaming_summary()
         if frame % SAMPLE_EVERY_FRAMES == 0:
             write_progress("load_town_stream_%04d_l%d_t%d_q%d_r%d_c%d_p%d_s%d_h%d_m%d" % [
@@ -277,10 +278,23 @@ func stream_town_chunks_budgeted() -> bool:
         await get_tree().process_frame
     return false
 
+func pump_runtime_structure_streaming() -> void:
+    if main == null:
+        return
+    if main.has_method("process_streaming_structure_work"):
+        main.call("process_streaming_structure_work")
+    else:
+        var structure_system = main.get("structure_system")
+        if structure_system != null and structure_system.has_method("update_around_budgeted"):
+            structure_system.call("update_around_budgeted", town_center, true)
+    if main.has_method("process_pending_chunk_prop_spawns"):
+        for _drain_index in range(8):
+            if int(main.call("process_pending_chunk_prop_spawns")) <= 0:
+                break
+
 func town_streaming_ready(summary: Dictionary) -> bool:
     return int(summary.get("loadedVisibleChunks", 0)) >= int(summary.get("expectedVisibleChunks", 0)) \
         and int(summary.get("pendingChunkLoads", 0)) == 0 \
-        and int(summary.get("pendingTerrainRefreshes", 0)) == 0 \
         and int(summary.get("pendingCollisionRefreshes", 0)) == 0 \
         and int(summary.get("pendingStructureOps", 0)) == 0 \
         and int(summary.get("homeRecords", 0)) > 0
@@ -783,8 +797,10 @@ func matrix_has_forager_work(matrix: Array[Dictionary]) -> bool:
         var strict_home_value = row.get("strictHome", {})
         var strict_home: Dictionary = strict_home_value if strict_home_value is Dictionary else {}
         var outside_home := not bool(strict_home.get("strictInside", false))
-        var has_work_state := phase in ["outbound", "gathering", "returning"] or int(row.get("jobRuns", 0)) > 0 or String(row.get("jobObjectId", "")) != ""
-        var has_motion_or_target := int(row.get("pathWaypointCount", 0)) > 0 or String(row.get("routeStatus", "")) == "moving" or String(row.get("jobObjectId", "")) != "" or float(row.get("distanceFromInitial", 0.0)) >= CELL * 0.65
+        var visible_search := phase == "searching" and String(row.get("activeGoalKind", "")) == "forage" and (not bool(row.get("insideTown", false)) or float(row.get("distanceFromInitial", 0.0)) >= CELL * 4.0)
+        var has_work_state := visible_search or phase in ["outbound", "gathering", "returning"] or int(row.get("jobRuns", 0)) > 0 or String(row.get("jobObjectId", "")) != ""
+        var route_status := String(row.get("routeStatus", ""))
+        var has_motion_or_target := int(row.get("pathWaypointCount", 0)) > 0 or route_status in ["moving", "pending", "waiting"] or String(row.get("jobObjectId", "")) != "" or float(row.get("distanceFromInitial", 0.0)) >= CELL * 0.65
         if outside_home and has_work_state and has_motion_or_target:
             return true
     return false
@@ -1101,6 +1117,7 @@ func position_observer_camera(mode: String) -> void:
         observer_camera.global_position = center + Vector3(CELL * 35.0, CELL * 22.0, CELL * 35.0)
         observer_camera.look_at(target, Vector3.UP)
         last_observer_camera_target = target
+        update_lod_observer_anchor(target)
         observer_camera.make_current()
         return
     if mode == "overview":
@@ -1124,6 +1141,13 @@ func position_observer_camera(mode: String) -> void:
         float(target_summary.get("y", center.y)),
         float(target_summary.get("z", center.z))
     )
+    update_lod_observer_anchor(last_observer_camera_target)
+
+func update_lod_observer_anchor(target: Vector3) -> void:
+    if player == null:
+        return
+    player.global_position = Vector3(target.x, town_level + 0.15, target.z) # town_job_cycle_fixture_camera_load
+    player.velocity = Vector3.ZERO
 
 func observer_context() -> Dictionary:
     return {

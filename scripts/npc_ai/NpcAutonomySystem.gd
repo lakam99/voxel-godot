@@ -269,19 +269,24 @@ func record_brain_update(entry: Dictionary) -> void:
 	entry["npc_brain_updates"] = int(entry.get("npc_brain_updates", 0)) + 1
 	entry["npc_last_brain_tick"] = tick
 	entry["npc_brain_budget_skipped"] = int(entry.get("npc_brain_budget_skipped", 0))
+	entry["npc_brain_budget_skip_streak"] = 0
 	var body := entry.get("body") as Node
 	if body != null and is_instance_valid(body):
 		body.set_meta("npc_brain_updates", int(entry.get("npc_brain_updates", 0)))
 		body.set_meta("npc_last_brain_tick", tick)
+		body.set_meta("npc_brain_budget_skip_streak", 0)
 	telemetry.increment(&"npc_brain_updates")
 
 func record_brain_budget_skipped(entry: Dictionary, reason := "budget") -> void:
 	var count := int(entry.get("npc_brain_budget_skipped", 0)) + 1
 	entry["npc_brain_budget_skipped"] = count
+	var streak := int(entry.get("npc_brain_budget_skip_streak", 0)) + 1
+	entry["npc_brain_budget_skip_streak"] = streak
 	entry["npc_brain_skipped_reason"] = reason
 	var body := entry.get("body") as Node
 	if body != null and is_instance_valid(body):
 		body.set_meta("npc_brain_budget_skipped", count)
+		body.set_meta("npc_brain_budget_skip_streak", streak)
 		body.set_meta("npc_brain_skipped_reason", reason)
 	telemetry.increment(&"npc_brain_budget_skipped")
 

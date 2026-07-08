@@ -34,6 +34,7 @@ const NPC_MOTION_BUDGET_VERY_CROWDED := 3
 const NPC_MOTION_ACCUMULATED_DELTA_CAP := 4.0
 const NPC_MOTION_SKIPPED_STREAK_URGENT := 12
 const NPC_BRAIN_FRAME_BUDGET_MS := 4.0
+const NPC_BRAIN_BUDGET_SKIP_STREAK_URGENT := 12
 const NPC_MOTION_FRAME_BUDGET_MS := 8.0
 const NPC_CLOCK_DISPLAY_OFFSET := 0.25
 const NPC_DUSK_START_CLOCK := 18.25 / 24.0
@@ -1143,6 +1144,8 @@ func npc_brain_requires_immediate_update(entry: Dictionary, night_factor: float)
         var order_state := String(scripted_order.get("state", ""))
         if bool(scripted_order.get("usesRouteStack", false)) and order_state in ["PENDING", "ACTIVE"]:
             return true
+    if npc_brain_starvation_recovery_required(entry):
+        return true
     if npc_day_worker_departure_required(entry, night_factor):
         return true
     if not npc_home_return_window_active(night_factor):
@@ -1150,6 +1153,16 @@ func npc_brain_requires_immediate_update(entry: Dictionary, night_factor: float)
     if bool(entry.get("nightGuard", false)):
         return false
     if bool(entry.get("insideHome", false)):
+        return false
+    return true
+
+func npc_brain_starvation_recovery_required(entry: Dictionary) -> bool:
+    if int(entry.get("npc_brain_budget_skip_streak", 0)) < NPC_BRAIN_BUDGET_SKIP_STREAK_URGENT:
+        return false
+    var job := String(entry.get("job", ""))
+    if not (job in ["guard", "forage", "wood", "stone", "trade"]):
+        return false
+    if String(entry.get("simulationLod", "active")) == "abstract":
         return false
     return true
 
@@ -1544,7 +1557,7 @@ func is_valid_forage_node(node: Node3D, entry: Dictionary) -> bool:
         return false
     if not point_inside_work_area(entry, node.global_position):
         return false
-    if point_inside_town_footprint(entry, node.global_position):
+    if point_inside_town_footprint(entry, node.global_position, 3):
         return false
     if not forage_node_within_home_return_radius(entry, node.global_position):
         return false
@@ -1565,22 +1578,41 @@ func current_route_failure_blocks_forager(entry: Dictionary) -> bool:
         return false
     if String(entry.get("activeDoorPortalId", "")) != "":
         return false
+    var reason := String(entry.get("routeReason", ""))
+    if reason in ["endpoint_not_server_walkable", "no_start_server_walkable", "no_target_server_walkable", "path_endpoint_mismatch"] and _route_still_waiting_for_navmesh_tiles(entry):
+        return false
     var body := entry.get("body") as Node3D
     if body != null and is_instance_valid(body):
         var current_cell := flat_cell_for_position(body.global_position)
         var porch_cell: Vector2i = entry.get("porchCell", current_cell)
         if abs(current_cell.x - porch_cell.x) <= 1 and abs(current_cell.y - porch_cell.y) <= 1:
             return false
-    return String(entry.get("routeReason", "")) in [
+    return reason in [
         "no_route",
         "no_goal_span",
         "empty_route",
         "target_blocked",
+        "path_crosses_static_collision",
+        "blocked_static_collision",
         "endpoint_not_server_walkable",
         "no_start_server_walkable",
         "no_target_server_walkable",
         "path_endpoint_mismatch"
     ]
+
+func _route_still_waiting_for_navmesh_tiles(entry: Dictionary) -> bool:
+    if int(entry.get("navmeshTileBudgetWaitFrames", 0)) > 0:
+        return true
+    var debug_value = entry.get("lastNavmeshTilePublishDebug", [])
+    if not (debug_value is Array):
+        return false
+    for item in debug_value:
+        if not (item is Dictionary):
+            continue
+        var status := String((item as Dictionary).get("status", ""))
+        if status in ["pending_budget", "queued_priority", "queued_budgeted", "queued_after_inline_publish", "skipped_until_endpoint_tiles"]:
+            return true
+    return false
 
 func mark_forager_target_unreachable(entry: Dictionary, node: Node3D) -> void:
     if node == null or not is_instance_valid(node):

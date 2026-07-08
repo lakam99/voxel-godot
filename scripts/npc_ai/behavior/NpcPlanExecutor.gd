@@ -23,6 +23,9 @@ var update_frame_serial := 0
 
 const JOB_SELECTIONS_PER_FRAME := 1
 const GUARD_TARGET_REFRESHES_PER_FRAME := 1
+const FORAGE_PENDING_ROUTE_TIMEOUT_SECONDS := 4.0
+const FORAGE_PENDING_ROUTE_FAILURE_LIMIT := 2
+const FORAGE_BLOCKED_ROUTE_FAILURE_LIMIT := 3
 
 func setup(autonomy, system_node, main_node, services: Dictionary) -> void:
 	autonomy_system = autonomy
@@ -236,7 +239,7 @@ func _advance_guard_motion(entry: Dictionary, body: Node3D, perception: Dictiona
 	target = _staged_departure_motion_target(entry, body, target)
 	var move_start: int = performance_monitor().begin_section("npc_guard_move") if performance_monitor() != null else Time.get_ticks_usec()
 	entry["routeIntentKind"] = "guard"
-	entry["guardRouteCritical"] = target_hostile != null
+	entry["guardRouteCritical"] = true
 	var speed := _set_motion_speed_mode(entry, "walking", "guard_route")
 	var moved := float(npc_system.call("move_npc", entry, target, speed * delta, false, true, delta)) if npc_system.has_method("move_npc") else 0.0
 	entry.erase("routeIntentKind")
@@ -269,7 +272,10 @@ func _advance_job_motion(entry: Dictionary, body: Node3D, delta: float) -> Dicti
 			monitor.end_section("npc_update_day_job", state_start)
 	var phase := String(entry.get("jobPhase", "idle"))
 	if not (phase in ["outbound", "searching", "returning"]):
-		if _inside_home_now(entry, body) or _inside_home_bounds_now(entry, body.global_position):
+		if _inside_home_now(entry, body) \
+			or _inside_home_bounds_now(entry, body.global_position) \
+			or _near_home_exit_needs_clearance(entry, body) \
+			or String(entry.get("activeDoorPortalId", "")) != "":
 			return _advance_job_home_exit(entry, body, delta, "job_idle_home_exit")
 		entry["lastMoveDistance"] = 0.0
 		return { "advanced": false, "reason": "job_phase_not_moving", "intentKind": "job" }
@@ -524,7 +530,7 @@ func _execute_guard(entry: Dictionary, body: Node3D, perception: Dictionary, sch
 	if monitor != null:
 		monitor.end_section("npc_guard_target", target_start)
 	var move_start: int = monitor.begin_section("npc_guard_move") if monitor != null else Time.get_ticks_usec()
-	entry["guardRouteCritical"] = target_hostile != null
+	entry["guardRouteCritical"] = true
 	var speed := _set_motion_speed_mode(entry, "walking", "guard_route")
 	var moved := float(npc_system.call("move_npc", entry, target, speed * delta, false, true, delta)) if npc_system.has_method("move_npc") else 0.0
 	entry.erase("guardRouteCritical")
@@ -1004,40 +1010,58 @@ func _update_forager_goal(entry: Dictionary, body: Node3D, delta: float) -> bool
 			_set_npc_goal(entry, "rest")
 			body.set_meta("npc_job_phase", "idle")
 			return false
+		if _point_inside_town(entry, body.global_position):
+			entry["jobPhase"] = "searching"
+			_advance_forage_search_serial(entry)
+			entry["jobTimer"] = _deterministic_seconds(entry, "forage_depart_town_search", 3.0, 7.0)
+			entry["jobTarget"] = _choose_job_target(entry)
+			entry["routeForceReplan"] = true
+			_clear_home_route_terminal(entry)
+			_set_npc_goal(entry, "search for berries")
+			body.set_meta("npc_job_phase", "searching")
+			return true
 		var forage := _find_forage_target(entry)
 		if forage == null:
 			entry["jobPhase"] = "searching"
+			_advance_forage_search_serial(entry)
 			entry["jobTimer"] = _deterministic_seconds(entry, "forage_search_retry", 3.0, 7.0)
 			entry["jobTarget"] = _choose_job_target(entry)
+			entry["routeForceReplan"] = true
 			_set_npc_goal(entry, "search for berries")
 			body.set_meta("npc_job_phase", "searching")
 			return true
 		if not _reserve_job_target(entry, forage, "harvest_resource"):
 			entry["jobPhase"] = "searching"
+			_advance_forage_search_serial(entry)
 			entry["jobTimer"] = _deterministic_seconds(entry, "forage_reserve_retry", 2.0, 4.5)
 			entry["jobTarget"] = _choose_job_target(entry)
+			entry["routeForceReplan"] = true
 			_set_npc_goal(entry, "search for berries")
 			body.set_meta("npc_job_phase", "searching")
 			return true
 		entry["jobPhase"] = "outbound"
 		entry["jobTimer"] = _deterministic_seconds(entry, "forage_outbound_timeout", 12.0, 22.0)
+		entry["foragePendingRouteRetries"] = 0
 		_clear_home_route_terminal(entry)
 		_set_npc_goal(entry, "forage berries")
 		body.set_meta("npc_job_phase", "outbound")
 		return true
 	if phase == "outbound" or phase == "searching":
 		var target_node := _job_target_node(entry)
+		var inside_town := _point_inside_town(entry, body.global_position)
 		if phase == "searching" and target_node == null and timer <= 0.0:
-			var forage_retry := _find_forage_target(entry)
+			var forage_retry := _find_forage_target(entry) if not inside_town else null
 			if forage_retry != null and _reserve_job_target(entry, forage_retry, "harvest_resource"):
 				entry["jobPhase"] = "outbound"
 				entry["jobTimer"] = _deterministic_seconds(entry, "forage_outbound_timeout", 12.0, 22.0)
 				entry["forageRouteFailures"] = 0
+				entry["foragePendingRouteRetries"] = 0
 				entry["routeForceReplan"] = true
 				_clear_home_route_terminal(entry)
 				_set_npc_goal(entry, "forage berries")
 				body.set_meta("npc_job_phase", "outbound")
 				return true
+			_advance_forage_search_serial(entry)
 			entry["jobTarget"] = _choose_job_target(entry)
 			entry["jobTimer"] = _deterministic_seconds(entry, "forage_search_retry", 3.0, 7.0)
 			entry["routeForceReplan"] = true
@@ -1052,53 +1076,88 @@ func _update_forager_goal(entry: Dictionary, body: Node3D, delta: float) -> bool
 		if target_node == null and phase == "outbound":
 			entry["jobTargetNode"] = null
 			_release_job_reservation(entry, "target_gone")
-			entry["jobPhase"] = "idle"
-			entry["jobTimer"] = 0.0
+			entry["jobPhase"] = "searching"
+			_advance_forage_search_serial(entry)
+			entry["jobTarget"] = _choose_job_target(entry)
+			entry["jobTimer"] = _deterministic_seconds(entry, "forage_target_gone_search", 2.0, 5.0)
+			entry["routeForceReplan"] = true
+			_set_npc_goal(entry, "search for berries")
+			body.set_meta("npc_job_phase", "searching")
 			return true
 		if target_node != null and String(entry.get("jobObjectId", "")) == "":
 			_reserve_job_target(entry, target_node, "harvest_resource")
 		var target: Vector3 = entry.get("jobTarget", body.global_position)
-		var outside_town := not _point_inside_town(entry, body.global_position)
 		var forage_action_reach := NpcConstantsScript.CELL_SIZE * 3.0
 		var vertical_ok := target_node == null or absf(body.global_position.y - target_node.global_position.y) <= NpcConstantsScript.CELL_SIZE * 2.0
 		var reached_target := body.global_position.distance_to(target) <= forage_action_reach
 		if target_node != null and vertical_ok and reached_target:
 			entry["jobPhase"] = "gathering"
 			entry["jobTimer"] = _deterministic_seconds(entry, "forage_gather_duration", 0.4, 0.8)
+			entry["foragePendingRouteTime"] = 0.0
+			entry["foragePendingRouteRetries"] = 0
 			_clear_route_for_action(entry, "forage_gathering")
 			_set_npc_goal(entry, "pick berries")
 			_play_npc_use(entry, "gather")
 			body.set_meta("npc_job_phase", "gathering")
 			return false
-		if target_node != null and _current_route_failure_blocks_forager(entry):
-			_release_job_reservation(entry, "route_blocked")
-			var failures := int(entry.get("forageRouteFailures", 0)) + 1
-			entry["forageRouteFailures"] = failures
+		var pending_route_timeout := target_node != null and _forager_pending_route_timed_out(entry, delta)
+		var route_blocked := target_node != null and _current_route_failure_blocks_forager(entry)
+		if target_node != null and (route_blocked or pending_route_timeout):
+			if route_blocked:
+				_release_job_reservation(entry, "route_blocked")
+			var failures := 0
+			if pending_route_timeout:
+				failures = int(entry.get("foragePendingRouteRetries", 0)) + 1
+				entry["foragePendingRouteRetries"] = failures
+			else:
+				failures = int(entry.get("forageRouteFailures", 0)) + 1
+				entry["forageRouteFailures"] = failures
 			entry["routeForceReplan"] = true
-			var forage_failure_limit := maxi(NpcConstantsScript.ROUTE_REPAIR_FAILURE_LIMIT, 8)
+			var forage_failure_limit := FORAGE_PENDING_ROUTE_FAILURE_LIMIT if pending_route_timeout else FORAGE_BLOCKED_ROUTE_FAILURE_LIMIT
 			if failures >= forage_failure_limit:
-				_mark_forager_target_unreachable(entry, target_node)
+				if route_blocked:
+					_mark_forager_target_unreachable(entry, target_node)
+				else:
+					_release_job_reservation(entry, "pending_route_timeout")
 				entry["jobTargetNode"] = null
 				entry["jobPhase"] = "searching"
+				_advance_forage_search_serial(entry)
 				entry["jobTarget"] = _choose_job_target(entry)
 				entry["jobTimer"] = _deterministic_seconds(entry, "forage_blocked_search", 3.0, 7.0)
+				entry["foragePendingRouteTime"] = 0.0
 				_set_npc_goal(entry, "search for berries")
 				body.set_meta("npc_job_phase", "searching")
 				return true
 			entry["jobTargetNode"] = target_node
 			entry["jobPhase"] = "outbound"
 			entry["jobTimer"] = _deterministic_seconds(entry, "forage_route_retry", 3.0, 7.0)
+			entry["foragePendingRouteTime"] = 0.0
 			entry["routeStatus"] = "waiting"
-			entry["routeReason"] = "retry_forage_route"
+			entry["routeReason"] = "retry_forage_pending_route" if pending_route_timeout else "retry_forage_route"
 			_set_npc_goal(entry, "forage berries")
 			body.set_meta("npc_job_phase", "outbound")
 			return true
-		if phase == "searching" and outside_town and target_node == null:
-			entry["jobPhase"] = "idle"
-			entry["jobTimer"] = 0.0
+		var search_anchor_arrived := phase == "searching" and target_node == null and (String(entry.get("routeStatus", "")) == "arrived" or body.global_position.distance_to(target) <= NpcConstantsScript.CELL_SIZE * 1.2)
+		var search_route_blocked := phase == "searching" and target_node == null and String(entry.get("routeStatus", "")) == "blocked"
+		if search_anchor_arrived or search_route_blocked:
+			var nearby_forage := _find_forage_target(entry) if not _point_inside_town(entry, body.global_position) else null
+			if nearby_forage != null and _reserve_job_target(entry, nearby_forage, "harvest_resource"):
+				entry["jobPhase"] = "outbound"
+				entry["jobTimer"] = _deterministic_seconds(entry, "forage_outbound_timeout", 12.0, 22.0)
+				entry["forageRouteFailures"] = 0
+				entry["foragePendingRouteRetries"] = 0
+				entry["routeForceReplan"] = true
+				_clear_home_route_terminal(entry)
+				_set_npc_goal(entry, "forage berries")
+				body.set_meta("npc_job_phase", "outbound")
+				return true
+			_advance_forage_search_serial(entry)
+			entry["jobTarget"] = _choose_job_target(entry)
+			entry["jobTimer"] = _deterministic_seconds(entry, "forage_search_roam", 2.0, 5.0)
 			entry["routeForceReplan"] = true
+			entry["routeReason"] = "forage_search_roam"
 			_set_npc_goal(entry, "search for berries")
-			body.set_meta("npc_job_phase", "idle")
+			body.set_meta("npc_job_phase", "searching")
 		else:
 			_set_npc_goal(entry, "forage berries" if phase == "outbound" else "search for berries")
 			if timer <= 0.0:
@@ -1109,6 +1168,7 @@ func _update_forager_goal(entry: Dictionary, body: Node3D, delta: float) -> bool
 				if target_node != null:
 					entry["jobTarget"] = _smart_object_approach_position(entry, target_node)
 				else:
+					_advance_forage_search_serial(entry)
 					entry["jobTarget"] = _choose_job_target(entry)
 				_clear_home_route_terminal(entry)
 				entry["routeForceReplan"] = true
@@ -1164,6 +1224,13 @@ func _update_forager_goal(entry: Dictionary, body: Node3D, delta: float) -> bool
 	entry["jobPhase"] = "idle"
 	entry["jobTimer"] = _deterministic_seconds(entry, "forage_idle_reset", 3.0, 7.0)
 	return false
+
+func _advance_forage_search_serial(entry: Dictionary) -> void:
+	var serial := int(entry.get("forageSearchSerial", 0)) + 1
+	entry["forageSearchSerial"] = serial
+	var body := entry.get("body") as Node
+	if body != null and is_instance_valid(body):
+		body.set_meta("npc_forage_search_serial", serial)
 
 func _execute_idle(entry: Dictionary, body: Node3D, delta: float) -> void:
 	entry["homeReturnTime"] = 0.0
@@ -1303,6 +1370,44 @@ func _release_job_reservation(entry: Dictionary, reason := "released") -> void:
 
 func _current_route_failure_blocks_forager(entry: Dictionary) -> bool:
 	return bool(npc_system.call("current_route_failure_blocks_forager", entry)) if npc_system != null and npc_system.has_method("current_route_failure_blocks_forager") else false
+
+func _forager_pending_route_timed_out(entry: Dictionary, delta: float) -> bool:
+	var status := String(entry.get("routeStatus", ""))
+	var reason := String(entry.get("routeReason", ""))
+	var pending_reason := reason in [
+		"navmesh_tile_budget",
+		"navmesh_tile_publish_frame_budget",
+		"route_budget"
+	]
+	var endpoint_readiness_reason := reason in [
+		"endpoint_not_server_walkable",
+		"no_start_server_walkable",
+		"no_target_server_walkable",
+		"path_endpoint_mismatch"
+	]
+	var waiting_for_route_readiness := (status == "pending" and pending_reason) or (status == "blocked" and endpoint_readiness_reason)
+	if not waiting_for_route_readiness:
+		entry["foragePendingRouteTime"] = 0.0
+		entry.erase("foragePendingRouteFrame")
+		entry.erase("foragePendingRouteKey")
+		return false
+	var target: Vector3 = entry.get("jobTarget", Vector3.ZERO)
+	var pending_key := "%s|%s|%d,%d" % [
+		String(entry.get("jobObjectId", "")),
+		"route_readiness_wait",
+		roundi(target.x / NpcConstantsScript.CELL_SIZE),
+		roundi(target.z / NpcConstantsScript.CELL_SIZE)
+	]
+	var current_frame := Engine.get_physics_frames()
+	if String(entry.get("foragePendingRouteKey", "")) != pending_key:
+		entry["foragePendingRouteKey"] = pending_key
+		entry["foragePendingRouteFrame"] = current_frame
+		entry["foragePendingRouteTime"] = 0.0
+		return false
+	var start_frame := int(entry.get("foragePendingRouteFrame", current_frame))
+	var pending_time := maxf(float(current_frame - start_frame) / maxf(float(Engine.physics_ticks_per_second), 1.0), float(entry.get("foragePendingRouteTime", 0.0)) + maxf(delta, 0.0))
+	entry["foragePendingRouteTime"] = pending_time
+	return pending_time >= FORAGE_PENDING_ROUTE_TIMEOUT_SECONDS
 
 func forager_route_is_progressing(entry: Dictionary) -> bool:
 	if String(entry.get("routeStatus", "")) != "moving":
