@@ -49,13 +49,16 @@ func plan_route(entry: Dictionary, intent: Dictionary) -> Dictionary:
 	var goal_key := String(key_info.get("goalKey", ""))
 	var ticket = tickets_by_actor.get(actor_id, null)
 	var current_waypoints: Array = entry.get("pathWaypoints", []) if entry.get("pathWaypoints", []) is Array else []
+	var following_ticket_replan: bool = ticket != null \
+		and ticket.state == RouteTicketScript.State.FOLLOWING \
+		and bool(entry.get("routeForceReplan", false))
 	var fresh_start_replan: bool = ticket != null \
 		and ticket.key != key \
 		and ticket.is_ready() \
 		and current_waypoints.is_empty() \
 		and bool(entry.get("routeForceReplan", false))
 
-	if ticket == null or ticket.goal_key != goal_key or fresh_start_replan:
+	if ticket == null or ticket.goal_key != goal_key or fresh_start_replan or following_ticket_replan:
 		ticket = _submit_ticket(entry, actor_id, key_info, intent)
 		tickets_by_actor[actor_id] = ticket
 		ticket_order.erase(actor_id)

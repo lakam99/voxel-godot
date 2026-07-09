@@ -1156,7 +1156,13 @@ func ensure_route(entry: Dictionary, intent: Dictionary, planner, world) -> Dict
         var critical_pending_route := bool(intent.get("movingHome", false)) or String(intent.get("kind", "")) in ["home", "scripted"]
         var cached_fallback_cell: Vector2i = entry.get("routeFallbackCell", target_cell)
         var cached_partial_for_target := cached_fallback_cell != target_cell
-        if not snapshot_revision_changed and not changed_route_should_stop and not current_waypoints.is_empty() and not (critical_pending_route and cached_partial_for_target):
+        var can_keep_active_route_while_pending := not current_waypoints.is_empty() \
+            and not cached_lease.is_empty() \
+            and not goal_key_changed \
+            and not active_route_drifted \
+            and not changed_route_should_stop \
+            and not (critical_pending_route and cached_partial_for_target)
+        if can_keep_active_route_while_pending:
             set_route_status(entry, "moving", "route_pending")
             return {
                 "ok": true,
@@ -1206,6 +1212,13 @@ func ensure_route(entry: Dictionary, intent: Dictionary, planner, world) -> Dict
     entry["routeCells"] = (route.get("cells", []) as Array).duplicate()
     entry["pathWaypoints"] = (route.get("waypoints", []) as Array).duplicate()
     entry["routeActions"] = (route.get("actions", {}) as Dictionary).duplicate()
+    entry.erase("routeTrimmedPrefixCells")
+    trim_installed_route_prefix_to_current_cell(entry, start_cell)
+    if entry.has("routeTrimmedPrefixCells"):
+        route["cells"] = (entry.get("routeCells", []) as Array).duplicate()
+        route["waypoints"] = (entry.get("pathWaypoints", []) as Array).duplicate()
+        route["actions"] = (entry.get("routeActions", {}) as Dictionary).duplicate()
+        route["routeTrimmedPrefixCells"] = int(entry.get("routeTrimmedPrefixCells", 0))
     if route.get("routeLease", {}) is Dictionary and not (route.get("routeLease", {}) as Dictionary).is_empty():
         entry["routeLease"] = (route.get("routeLease", {}) as Dictionary).duplicate(true)
         entry["routeLeaseId"] = String(route.get("routeLeaseId", ""))
@@ -1672,6 +1685,33 @@ func trim_reached_route_cells(entry: Dictionary, world) -> void:
     while not cells.is_empty() and cells[0] == current_cell:
         cells.remove_at(0)
     entry["routeCells"] = cells
+
+func trim_installed_route_prefix_to_current_cell(entry: Dictionary, current_cell: Vector2i) -> void:
+    var cells: Array = entry.get("routeCells", []) if entry.get("routeCells", []) is Array else []
+    var waypoints: Array = entry.get("pathWaypoints", []) if entry.get("pathWaypoints", []) is Array else []
+    var trim_count := 0
+    for index in range(cells.size()):
+        var cell_value = cells[index]
+        if cell_value is Vector2i and cell_value == current_cell:
+            trim_count = index + 1
+            break
+    if trim_count <= 0:
+        return
+    var removed_cells: Array = cells.slice(0, trim_count)
+    for _index in range(trim_count):
+        if not cells.is_empty():
+            cells.remove_at(0)
+        if not waypoints.is_empty():
+            waypoints.remove_at(0)
+    var actions: Dictionary = entry.get("routeActions", {}) if entry.get("routeActions", {}) is Dictionary else {}
+    for removed_cell_value in removed_cells:
+        if removed_cell_value is Vector2i:
+            var removed_cell: Vector2i = removed_cell_value
+            actions.erase("%d,%d" % [removed_cell.x, removed_cell.y])
+    entry["routeCells"] = cells
+    entry["pathWaypoints"] = waypoints
+    entry["routeActions"] = actions
+    entry["routeTrimmedPrefixCells"] = trim_count
 
 func skip_optional_home_approach_if_oscillating(entry: Dictionary) -> bool:
     return false

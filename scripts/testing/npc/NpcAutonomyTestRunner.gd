@@ -480,6 +480,7 @@ func motor_cases() -> Array[Dictionary]:
 	var ids := [
 		["npc_motor_substep_uses_step_delta", "test_npc_motor_substep_uses_step_delta"],
 		["npc_motor_route_replans_after_actor_displacement", "test_npc_motor_route_replans_after_actor_displacement"],
+		["npc_motor_trims_reinstalled_route_prefix_to_current_cell", "test_npc_motor_trims_reinstalled_route_prefix_to_current_cell"],
 		["npc_motor_player_characterization_flat", "test_motor_player_characterization_flat"],
 		["npc_motor_player_characterization_slope", "test_motor_player_characterization_slope"],
 		["npc_motor_player_characterization_jump", "test_motor_player_characterization_jump"],
@@ -742,6 +743,100 @@ func test_npc_motor_route_replans_after_actor_displacement(_mode: String) -> Dic
 		"plannerCalls=%d route=%s entryKey=%s lease=%s" % [planner.calls, JSON.stringify(route), String(entry.get("routeKey", "")), String(entry.get("routeLeaseId", ""))],
 		["displaced_actor_forces_replan", "new_lease_installed"],
 		{ "plannerCalls": planner.calls, "route": route, "entryRouteKey": String(entry.get("routeKey", "")), "entryRouteLeaseId": String(entry.get("routeLeaseId", "")) }
+	)
+
+func test_npc_motor_trims_reinstalled_route_prefix_to_current_cell(_mode: String) -> Dictionary:
+	var controller = NpcRouteMovementControllerScript.new()
+	controller.setup(self, self)
+
+	var body := CharacterBody3D.new()
+	add_child(body)
+	body.global_position = Vector3(3.0, 0.0, 0.0)
+
+	var target_cell := Vector2i(6, 0)
+	var arrival_radius := NpcConstantsScript.CELL_SIZE * 0.75
+	var entry := {
+		"id": "npc:test:route-prefix-trim",
+		"body": body,
+		"routeStatus": "moving",
+		"routeForceReplan": true,
+		"routeSnapshotRevision": "rev-a",
+		"pathWaypoints": [Vector3(3.0, 0.0, 0.0)],
+		"routeCells": [Vector2i(3, 0)],
+		"routeActions": {},
+		"routeLease": { "leaseId": "lease:old" },
+		"routeLeaseId": "lease:old"
+	}
+	var stale_prefix_cells := [Vector2i(1, 0), Vector2i(2, 0), Vector2i(3, 0), Vector2i(4, 0), Vector2i(5, 0), Vector2i(6, 0)]
+	var stale_prefix_waypoints := [
+		Vector3(1.0, 0.0, 0.0),
+		Vector3(2.0, 0.0, 0.0),
+		Vector3(3.0, 0.0, 0.0),
+		Vector3(4.0, 0.0, 0.0),
+		Vector3(5.0, 0.0, 0.0),
+		Vector3(6.0, 0.0, 0.0)
+	]
+	var planner = FakeRoutePlanner.new({
+		"ok": true,
+		"status": "routed",
+		"reason": "exact_collision_lattice_home",
+		"cells": stale_prefix_cells,
+		"waypoints": stale_prefix_waypoints,
+		"actions": { "2,0": { "kind": "door" }, "4,0": { "kind": "door" } },
+		"targetCell": target_cell,
+		"fallbackCell": target_cell,
+		"snapshotRevision": "rev-a",
+		"routeAuthorityReady": true,
+		"routeAuthorityState": String(NpcEnumsScript.ROUTE_AUTHORITY_READY),
+		"routeLease": { "leaseId": "lease:new" },
+		"routeLeaseId": "lease:new"
+	})
+	var world = FakeRouteWorld.new()
+	world.revision_value = "rev-a"
+	var intent := {
+		"kind": "home",
+		"target": Vector3(6.0, 0.0, 0.0),
+		"targetCell": target_cell,
+		"allowOutside": false,
+		"movingHome": true,
+		"arrivalRadius": arrival_radius
+	}
+	var route: Dictionary = controller.ensure_route(entry, intent, planner, world)
+	var remaining_cells: Array = entry.get("routeCells", []) if entry.get("routeCells", []) is Array else []
+	var remaining_waypoints: Array = entry.get("pathWaypoints", []) if entry.get("pathWaypoints", []) is Array else []
+	var actions: Dictionary = entry.get("routeActions", {}) if entry.get("routeActions", {}) is Dictionary else {}
+	body.queue_free()
+
+	var first_cell: Vector2i = remaining_cells[0] if not remaining_cells.is_empty() and remaining_cells[0] is Vector2i else Vector2i(999999, 999999)
+	var first_waypoint: Vector3 = remaining_waypoints[0] if not remaining_waypoints.is_empty() and remaining_waypoints[0] is Vector3 else Vector3.INF
+	var remaining_cell_summary := []
+	for cell_value in remaining_cells:
+		if cell_value is Vector2i:
+			var cell: Vector2i = cell_value
+			remaining_cell_summary.append([cell.x, cell.y])
+	var remaining_waypoint_summary := []
+	for waypoint_value in remaining_waypoints:
+		if waypoint_value is Vector3:
+			var waypoint: Vector3 = waypoint_value
+			remaining_waypoint_summary.append([waypoint.x, waypoint.y, waypoint.z])
+	var passed := bool(route.get("ok", false)) \
+		and String(entry.get("routeLeaseId", "")) == "lease:new" \
+		and int(entry.get("routeTrimmedPrefixCells", 0)) == 3 \
+		and first_cell == Vector2i(4, 0) \
+		and first_waypoint == Vector3(4.0, 0.0, 0.0) \
+		and not actions.has("2,0") \
+		and actions.has("4,0")
+	return outcome(
+		passed,
+		"trimmed=%d cells=%s waypoints=%s actions=%s route=%s" % [
+			int(entry.get("routeTrimmedPrefixCells", 0)),
+			JSON.stringify(remaining_cell_summary),
+			JSON.stringify(remaining_waypoint_summary),
+			JSON.stringify(actions.keys()),
+			JSON.stringify(route)
+		],
+		["reinstalled_route_prefix_trimmed", "current_cell_not_replayed", "future_actions_preserved"],
+		{ "route": route, "remainingCells": remaining_cell_summary, "remainingWaypoints": remaining_waypoint_summary, "actions": actions.keys() }
 	)
 
 func test_npc_navworld_live_tile_snapshot_includes_collision_records(_mode: String) -> Dictionary:
