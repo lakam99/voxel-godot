@@ -18,6 +18,8 @@ const GENERATED_CELL_BRIDGE_FRAME_MAX_USEC := 7000
 const GENERATED_CELL_BRIDGE_MAX_VALIDATION_STEPS := 160
 const GENERATED_CELL_BRIDGE_ACTIVE_JOB_MAX_VALIDATION_STEPS := 80
 const GENERATED_CELL_BRIDGE_ROUTINE_MAX_VALIDATION_STEPS := 24
+const ROUTINE_TARGET_SNAP_DISTANCE := CELL * 1.65
+const ROUTINE_START_SNAP_DISTANCE := CELL * 3.1
 
 var navmesh_world = null
 var system = null
@@ -29,6 +31,7 @@ var _generated_bridge_block_reasons := {}
 var _generated_bridge_last_visited := 0
 var _generated_bridge_last_reason := ""
 var _generated_bridge_budget_frame := -1
+var _generated_bridge_budget_physics_frame := -1
 var _generated_bridge_budget_used_usec := 0
 
 func setup(navmesh_service = null, system_node = null, main_node = null, generated_world_adapter = null) -> void:
@@ -56,15 +59,19 @@ func plan_runtime_route(entry: Dictionary, intent: Dictionary, generated_world =
 		return _route_failure("blocked", "target_blocked", target_cell, { "targetCell": target_cell })
 	var query_api := _runtime_query_api(intent)
 	var forbidden_private_door_ids := _forbidden_private_door_portal_ids(entry, generated_world)
+	var route_kind := String(intent.get("kind", "move"))
+	var snap_distances := _snap_distances_for_route_kind(route_kind, float(intent.get("arrivalRadius", CELL * 0.75)), true)
 	var primary_query_start: int = monitor.begin_section("navmesh_route_primary_query") if monitor != null else Time.get_ticks_usec()
 	var route: Dictionary = navmesh_world.query_route(query_start_position, query_target, {
 		"actorId": String(entry.get("id", "")),
-		"kind": String(intent.get("kind", "move")),
+		"kind": route_kind,
 		"allowOutside": bool(intent.get("allowOutside", false)),
 		"movingHome": bool(intent.get("movingHome", false)),
 		"arrivalRadius": float(intent.get("arrivalRadius", CELL * 0.75)),
 		"targetCell": target_cell,
-		"maxSnapDistance": maxf(float(intent.get("arrivalRadius", CELL * 0.75)), CELL * 0.95),
+		"maxSnapDistance": float(snap_distances.get("target", CELL * 0.95)),
+		"startMaxSnapDistance": float(snap_distances.get("start", CELL * 0.95)),
+		"targetMaxSnapDistance": float(snap_distances.get("target", CELL * 0.95)),
 		"queryApi": query_api,
 		"preferDescriptorEndpoint": true,
 		"forbiddenDoorPortalIds": forbidden_private_door_ids
@@ -238,12 +245,19 @@ func _initial_failure_cell_bridge_allowed(entry: Dictionary, intent: Dictionary,
 		return true
 	return false
 
-func _generated_cell_bridge_allowed_for_intent(_intent: Dictionary) -> bool:
-	# NPC routes must be backed by collision-aware NavigationServer/navmesh data.
-	# The generated cell bridge remains in the file for historical diagnostics, but
-	# it is not accepted as a production route source because smoothed actor motion
-	# can cut through walls even when the discrete cell path looks valid.
-	return false
+func _generated_cell_bridge_allowed_for_intent(intent: Dictionary) -> bool:
+	if not NpcConstantsScript.NPC_NAV_ENABLE_SAFE_GENERATED_OPEN_TERRAIN_FALLBACK:
+		return false
+	if not bool(intent.get("safeOpenTerrainGeneratedFallback", false)):
+		return false
+	if bool(intent.get("movingHome", false)):
+		return false
+	if String(intent.get("action", "")) != "":
+		return false
+	var route_kind := String(intent.get("kind", "move"))
+	if route_kind not in ["forage", "guard", "work", "job", "move", "idle", "wander"]:
+		return false
+	return true
 
 func _plan_fallback_cell_route(entry: Dictionary, intent: Dictionary, generated_world, start: Vector3, start_cell: Vector2i, target_cell: Vector2i, failed_route: Dictionary, forbidden_private_door_ids: Array[String]) -> Dictionary:
 	var fallback_cells_value = intent.get("fallbackCells", [])
@@ -270,14 +284,18 @@ func _plan_fallback_cell_route(entry: Dictionary, intent: Dictionary, generated_
 			continue
 		var fallback_position: Vector3 = source.cell_position(fallback_cell)
 		var query_target := _nav_query_position(fallback_position, fallback_cell, generated_world)
+		var fallback_route_kind := String(intent.get("kind", "move"))
+		var fallback_snap_distances := _snap_distances_for_route_kind(fallback_route_kind, maxf(arrival_radius, CELL * 0.55), true)
 		var route: Dictionary = navmesh_world.query_route(query_start_position, query_target, {
 			"actorId": String(entry.get("id", "")),
-			"kind": String(intent.get("kind", "move")),
+			"kind": fallback_route_kind,
 			"allowOutside": allow_outside,
 			"movingHome": moving_home,
 			"arrivalRadius": maxf(arrival_radius, CELL * 0.55),
 			"targetCell": fallback_cell,
-			"maxSnapDistance": maxf(arrival_radius, CELL * 0.95),
+			"maxSnapDistance": float(fallback_snap_distances.get("target", CELL * 0.95)),
+			"startMaxSnapDistance": float(fallback_snap_distances.get("start", CELL * 0.95)),
+			"targetMaxSnapDistance": float(fallback_snap_distances.get("target", CELL * 0.95)),
 			"queryApi": _runtime_query_api(intent),
 			"preferDescriptorEndpoint": true,
 			"forbiddenDoorPortalIds": forbidden_private_door_ids
@@ -346,7 +364,8 @@ func _plan_generated_cell_bridge_route(entry: Dictionary, intent: Dictionary, ge
 		return {}
 	var usec_budget := mini(requested_usec_budget, frame_usec_budget)
 	var bridge_search_start_usec := Time.get_ticks_usec()
-	var found_cell := _generated_bridge_search(entry, source, snapshot, start_cell, target_lookup, bounds, visit_budget, usec_budget, bool(intent.get("allowPartial", false)))
+	var forbidden_cells := _generated_bridge_forbidden_cells(intent)
+	var found_cell := _generated_bridge_search(entry, source, snapshot, start_cell, target_lookup, bounds, visit_budget, usec_budget, bool(intent.get("allowPartial", false)), forbidden_cells)
 	_consume_generated_bridge_frame_budget(bridge_search_start_usec)
 	if found_cell == INVALID_CELL:
 		if failed_route is Dictionary:
@@ -410,6 +429,21 @@ func _plan_generated_cell_bridge_route(entry: Dictionary, intent: Dictionary, ge
 			}
 		return {}
 	if cells.size() <= 1:
+		var true_arrival := found_cell == target_cell and start_cell == target_cell
+		if not true_arrival:
+			if failed_route is Dictionary:
+				failed_route["generatedCellBridge"] = {
+					"ok": false,
+					"reason": "generated_cell_bridge_no_progress",
+					"goals": goal_cells.size(),
+					"visited": _generated_bridge_last_visited,
+					"maxVisits": visit_budget,
+					"maxUsec": usec_budget,
+					"fallbackCell": found_cell,
+					"targetCell": target_cell,
+					"blockedReasons": _generated_bridge_block_reasons.duplicate()
+				}
+			return {}
 		return {
 			"ok": true,
 			"status": "arrived",
@@ -449,7 +483,9 @@ func _plan_generated_cell_bridge_route(entry: Dictionary, intent: Dictionary, ge
 
 func _generated_bridge_goal_cells(intent: Dictionary, target_cell: Vector2i) -> Array[Vector2i]:
 	var result: Array[Vector2i] = []
-	result.append(target_cell)
+	var fallback_only := bool(intent.get("generatedBridgeFallbackOnly", false))
+	if not fallback_only:
+		result.append(target_cell)
 	if not bool(intent.get("strictArrival", false)):
 		var arrival_radius := float(intent.get("arrivalRadius", CELL * 0.75))
 		var radius_cells := maxi(0, floori((arrival_radius + CELL * 0.05) / CELL))
@@ -466,7 +502,7 @@ func _generated_bridge_goal_cells(intent: Dictionary, target_cell: Vector2i) -> 
 	var fallback_cells = intent.get("fallbackCells", [])
 	if fallback_cells is Array:
 		for value in fallback_cells:
-			if value is Vector2i and not result.has(value):
+			if value is Vector2i and not result.has(value) and (not fallback_only or value != target_cell):
 				result.append(value)
 	return result
 
@@ -551,9 +587,11 @@ func _cell_bridge_repair_intent(intent: Dictionary) -> Dictionary:
 
 func _begin_generated_bridge_budget_frame() -> void:
 	var engine_frame := Engine.get_process_frames()
-	if _generated_bridge_budget_frame == engine_frame:
+	var physics_frame := Engine.get_physics_frames()
+	if _generated_bridge_budget_frame == engine_frame and _generated_bridge_budget_physics_frame == physics_frame:
 		return
 	_generated_bridge_budget_frame = engine_frame
+	_generated_bridge_budget_physics_frame = physics_frame
 	_generated_bridge_budget_used_usec = 0
 
 func _generated_bridge_frame_budget_remaining_usec() -> int:
@@ -567,7 +605,18 @@ func _consume_generated_bridge_frame_budget(start_usec: int) -> void:
 func _routine_route_kind(route_kind: String) -> bool:
 	return route_kind in ["guard", "work", "forage", "job", "idle", "move"]
 
-func _generated_bridge_search(entry: Dictionary, source, snapshot: Dictionary, start_cell: Vector2i, target_lookup: Dictionary, bounds: Dictionary, max_visits: int, max_usec: int, allow_partial := false) -> Vector2i:
+func _snap_distances_for_route_kind(route_kind: String, arrival_radius: float, routine_snap_enabled := true) -> Dictionary:
+	var target_snap := maxf(arrival_radius, CELL * 0.95)
+	var start_snap := target_snap
+	if routine_snap_enabled and _routine_route_kind(route_kind):
+		target_snap = maxf(target_snap, ROUTINE_TARGET_SNAP_DISTANCE)
+		start_snap = maxf(start_snap, ROUTINE_START_SNAP_DISTANCE)
+	return {
+		"start": start_snap,
+		"target": target_snap
+	}
+
+func _generated_bridge_search(entry: Dictionary, source, snapshot: Dictionary, start_cell: Vector2i, target_lookup: Dictionary, bounds: Dictionary, max_visits: int, max_usec: int, allow_partial := false, forbidden_cells := {}) -> Vector2i:
 	_generated_bridge_came_from = {}
 	_generated_bridge_block_reasons = {}
 	_generated_bridge_last_visited = 0
@@ -602,6 +651,9 @@ func _generated_bridge_search(entry: Dictionary, source, snapshot: Dictionary, s
 			var next := cell + direction
 			if closed.has(next) or not _generated_bridge_cell_in_bounds(next, bounds):
 				continue
+			if forbidden_cells is Dictionary and (forbidden_cells as Dictionary).has(next) and not _generated_bridge_forbidden_escape_allows(cell, next, forbidden_cells):
+				_generated_bridge_block_reasons["probe_forbidden_cell"] = int(_generated_bridge_block_reasons.get("probe_forbidden_cell", 0)) + 1
+				continue
 			if avoid_lookup.has(next):
 				_generated_bridge_block_reasons["route_avoid_cell"] = int(_generated_bridge_block_reasons.get("route_avoid_cell", 0)) + 1
 				continue
@@ -633,6 +685,35 @@ func _generated_bridge_search(entry: Dictionary, source, snapshot: Dictionary, s
 			_generated_bridge_last_reason = "generated_cell_bridge_visit_budget_partial"
 			return partial_cell
 	return INVALID_CELL
+
+func _generated_bridge_forbidden_cells(intent: Dictionary) -> Dictionary:
+	var lookup := {}
+	var blocked_cell = intent.get("probeBlockedCell", Vector2i(999999, 999999))
+	if blocked_cell is Vector2i and blocked_cell != INVALID_CELL:
+		lookup[blocked_cell] = true
+		lookup["_probeBlockedCell"] = blocked_cell
+	var values = intent.get("blockedRepairCells", [])
+	if values is Array:
+		for value in values:
+			if value is Vector2i and value != INVALID_CELL:
+				lookup[value] = true
+	return lookup
+
+func _generated_bridge_forbidden_escape_allows(current_cell: Vector2i, next_cell: Vector2i, forbidden_cells) -> bool:
+	if not (forbidden_cells is Dictionary):
+		return false
+	var forbidden: Dictionary = forbidden_cells
+	if not forbidden.has(current_cell):
+		return false
+	var center_value = forbidden.get("_probeBlockedCell", INVALID_CELL)
+	if not (center_value is Vector2i):
+		return false
+	var center: Vector2i = center_value
+	if center == INVALID_CELL:
+		return false
+	var current_distance := absi(current_cell.x - center.x) + absi(current_cell.y - center.y)
+	var next_distance := absi(next_cell.x - center.x) + absi(next_cell.y - center.y)
+	return next_distance > current_distance
 
 func _generated_bridge_avoid_lookup(entry: Dictionary, target_lookup: Dictionary) -> Dictionary:
 	var lookup := {}
@@ -813,14 +894,16 @@ func _build_runtime_route_from_navmesh(entry: Dictionary, intent: Dictionary, ge
 	var actions := _route_actions_with_detected_doors(entry, intent, generated_world, sampled_cells, route.get("actions", {}))
 	cells = _preserve_route_action_cells(cells, actions)
 	var using_fallback := fallback_cell != target_cell
-	if using_fallback and (bool(intent.get("movingHome", false)) or String(intent.get("kind", "move")) == "home"):
+	var route_reason := String(route.get("reason", ""))
+	var progress_partial := String(route.get("status", "")) == "partial" and route_reason == "path_endpoint_partial" and not waypoints.is_empty()
+	if using_fallback and (bool(intent.get("movingHome", false)) or String(intent.get("kind", "move")) == "home") and not bool(intent.get("probeRepair", false)) and not progress_partial:
 		var partial_route := route.duplicate(true)
 		partial_route["fallbackCell"] = fallback_cell
 		partial_route["targetCell"] = target_cell
 		partial_route["cells"] = cells
 		return _route_failure("pending", "path_endpoint_partial", target_cell, partial_route)
 	var status := "arrived" if waypoints.is_empty() and not using_fallback else "partial" if using_fallback else "routed"
-	var reason := "fallback_cell_route" if using_fallback else ""
+	var reason := route_reason if using_fallback and route_reason != "" else "fallback_cell_route" if using_fallback else ""
 	return {
 		"ok": true,
 		"status": status,
@@ -845,15 +928,19 @@ func route_cost_for_runtime(entry: Dictionary, target: Vector3, allow_outside :=
 	var start_cell := _world_cell(start, generated_world)
 	if _target_cell_blocked(entry, target_cell, generated_world, allow_outside, moving_home):
 		return INF
+	var cost_kind := "forage" if String(entry.get("job", "")) == "forage" else "job"
+	var snap_distances := _snap_distances_for_route_kind(cost_kind, arrival_radius, not moving_home)
 	var forbidden_private_door_ids := _forbidden_private_door_portal_ids(entry, generated_world)
 	var route: Dictionary = navmesh_world.query_route(_nav_query_position(start, start_cell, generated_world), _nav_query_position(target, target_cell, generated_world), {
 		"actorId": String(entry.get("id", "")),
-		"kind": "cost",
+		"kind": cost_kind,
 		"allowOutside": allow_outside,
 		"movingHome": moving_home,
 		"arrivalRadius": arrival_radius,
 		"targetCell": target_cell,
-		"maxSnapDistance": maxf(arrival_radius, CELL * 0.95),
+		"maxSnapDistance": float(snap_distances.get("target", CELL * 0.95)),
+		"startMaxSnapDistance": float(snap_distances.get("start", CELL * 0.95)),
+		"targetMaxSnapDistance": float(snap_distances.get("target", CELL * 0.95)),
 		"costOnly": true,
 		"queryApi": "map_get_path",
 		"optimizePath": false,
@@ -1105,6 +1192,8 @@ func _target_cell_blocked(entry: Dictionary, target_cell: Vector2i, generated_wo
 	var source = generated_world if generated_world != null else world_adapter
 	if source == null or not source.has_method("build_snapshot"):
 		return false
+	if source.has_method("cell_is_static_standable_goal"):
+		return not bool(source.cell_is_static_standable_goal(entry, target_cell, allow_outside, moving_home))
 	if source.has_method("cell_is_standable_goal"):
 		return not bool(source.cell_is_standable_goal(entry, target_cell, allow_outside, moving_home))
 	if source.has_method("private_interior_blocks_entry") and source.private_interior_blocks_entry(entry, target_cell):

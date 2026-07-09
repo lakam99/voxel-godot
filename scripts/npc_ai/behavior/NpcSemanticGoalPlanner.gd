@@ -8,6 +8,8 @@ const MAX_ROUTE_SCORED_CANDIDATES := 16
 const MAX_HOME_INTERIOR_GOAL_CELLS := 64
 const RESOURCE_SCAN_NODE_LIMIT := 1200
 const RESOURCE_SCAN_CANDIDATE_LIMIT := 16
+const BLOCKED_ENDPOINT_MEMORY_FRAMES := 360
+const INVALID_CELL := Vector2i(999999, 999999)
 
 var system
 var main
@@ -171,7 +173,7 @@ func choose_job_target(entry: Dictionary) -> Vector3:
             return early_search
     var resource_candidates: Array[Vector3] = []
     add_resource_prop_candidates(resource_candidates, entry, job)
-    var resource_reachable := choose_best_reachable_position(entry, resource_candidates, outside_town_job, false, CELL * 0.85, MAX_ROUTE_SCORED_CANDIDATES)
+    var resource_reachable := choose_best_reachable_position(entry, resource_candidates, outside_town_job, false, CELL * 0.85, MAX_ROUTE_SCORED_CANDIDATES, true)
     if resource_reachable != Vector3.INF and job_position_allowed(entry, resource_reachable, outside_town_job):
         clear_goal_fallback(entry)
         return resource_reachable
@@ -181,7 +183,7 @@ func choose_job_target(entry: Dictionary) -> Vector3:
             clear_goal_fallback(entry)
             return forage_search
     var candidates: Array[Vector3] = job_anchor_candidates(entry, outside_town_job)
-    var reachable := choose_best_reachable_position(entry, candidates, outside_town_job, false, CELL * 0.85, MAX_ROUTE_SCORED_CANDIDATES)
+    var reachable := choose_best_reachable_position(entry, candidates, outside_town_job, false, CELL * 0.85, MAX_ROUTE_SCORED_CANDIDATES, true)
     if reachable != Vector3.INF and job_position_allowed(entry, reachable, outside_town_job):
         clear_goal_fallback(entry)
         return reachable
@@ -190,7 +192,7 @@ func choose_job_target(entry: Dictionary) -> Vector3:
         entry.get("porchPosition", Vector3.ZERO),
         entry.get("guardPosition", entry.get("porchPosition", Vector3.ZERO))
     ]
-    var fallback := choose_best_reachable_position(entry, fallback_candidates, false, false, CELL * 0.85, 4)
+    var fallback := choose_best_reachable_position(entry, fallback_candidates, false, false, CELL * 0.85, 4, true)
     return fallback if fallback != Vector3.INF else entry.get("porchPosition", Vector3.ZERO)
 
 func forager_prefers_search_anchor(entry: Dictionary) -> bool:
@@ -217,16 +219,16 @@ func choose_guard_target(entry: Dictionary, target_hostile: Node3D = null, melee
             clear_goal_fallback(entry)
             return intercept
     var assigned_guard_post: Vector3 = entry.get("guardPosition", entry.get("porchPosition", Vector3.ZERO))
-    if position_can_be_goal(entry, assigned_guard_post, false, false):
+    if resolve_reachable_endpoint(entry, assigned_guard_post, false, false, CELL * 0.85, true) != Vector3.INF:
         clear_goal_fallback(entry)
-        return assigned_guard_post
+        return resolved_endpoint_position(entry)
     candidates = guard_post_candidates(entry)
-    var guard_target := choose_best_reachable_position(entry, candidates, false, false, CELL * 0.85, 10)
+    var guard_target := choose_best_reachable_position(entry, candidates, false, false, CELL * 0.85, 10, true)
     if guard_target != Vector3.INF:
         clear_goal_fallback(entry)
         return guard_target
     set_goal_fallback(entry, "blocked", "no_reachable_guard_anchor")
-    return entry.get("porchPosition", Vector3.ZERO)
+    return assigned_guard_post
 
 func choose_best_forage(entry: Dictionary, candidates: Array[Node3D]) -> Node3D:
     if world == null:
@@ -242,6 +244,7 @@ func choose_best_forage(entry: Dictionary, candidates: Array[Node3D]) -> Node3D:
             return stable_node_id(a) < stable_node_id(b)
         return a_distance < b_distance
     )
+    var pending_candidate: Node3D = null
     for node in candidates:
         if node == null or not is_instance_valid(node):
             continue
@@ -252,6 +255,12 @@ func choose_best_forage(entry: Dictionary, candidates: Array[Node3D]) -> Node3D:
         var reachable := choose_best_reachable_position(entry, approach_positions, true, false, CELL * 0.85, mini(approach_positions.size(), 6), true)
         if reachable != Vector3.INF:
             return node
+        if pending_candidate == null:
+            var standable := choose_best_reachable_position(entry, approach_positions, true, false, CELL * 0.85, mini(approach_positions.size(), 6), false)
+            if standable != Vector3.INF:
+                pending_candidate = node
+    if pending_candidate != null:
+        return pending_candidate
     return null
 
 func forage_target_position(entry: Dictionary, node: Node3D) -> Vector3:
@@ -262,7 +271,10 @@ func forage_target_position(entry: Dictionary, node: Node3D) -> Vector3:
     for cell in approach_cells:
         approach_positions.append(world.cell_position(cell))
     var reachable := choose_best_reachable_position(entry, approach_positions, true, false, CELL * 0.85, approach_positions.size(), true)
-    return reachable if reachable != Vector3.INF else node.global_position
+    if reachable != Vector3.INF:
+        return reachable
+    var standable := choose_best_reachable_position(entry, approach_positions, true, false, CELL * 0.85, approach_positions.size(), false)
+    return standable if standable != Vector3.INF else node.global_position
 
 func choose_forage_search_target(entry: Dictionary) -> Vector3:
     if world == null:
@@ -278,14 +290,6 @@ func choose_forage_search_target(entry: Dictionary) -> Vector3:
     var reachable := choose_best_reachable_position(entry, candidates, true, false, CELL * 0.85, MAX_ROUTE_SCORED_CANDIDATES, true)
     if reachable != Vector3.INF and job_position_allowed(entry, reachable, true):
         return reachable
-    for candidate in unique_positions(candidates):
-        if candidate == Vector3.INF:
-            continue
-        if not job_position_allowed(entry, candidate, true):
-            continue
-        if surface_y_at_position(candidate) < main.WATER_LEVEL + 0.45:
-            continue
-        return candidate
     return Vector3.INF
 
 func add_nearest_forage_exit_candidates(candidates: Array[Vector3], entry: Dictionary) -> void:
@@ -332,6 +336,7 @@ func stable_node_id(node: Node) -> String:
 func choose_best_reachable_position(entry: Dictionary, candidates: Array[Vector3], allow_outside := false, moving_home := false, _arrival_radius := CELL * 0.85, max_checked := 8, force_route_cost := false) -> Vector3:
     var body := entry.get("body") as Node3D
     var origin: Vector3 = body.global_position if body != null else entry.get("porchPosition", Vector3.ZERO)
+    refresh_blocked_endpoint_memory(entry)
     var unique_candidates := unique_positions(candidates)
     unique_candidates.sort_custom(func(a: Vector3, b: Vector3) -> bool:
         var a_distance := a.distance_squared_to(origin)
@@ -343,19 +348,198 @@ func choose_best_reachable_position(entry: Dictionary, candidates: Array[Vector3
     var score_with_route_cost := force_route_cost or moving_home or OS.get_environment("VOXEL_NPC_ROUTE_SCORE_TARGETS") == "1"
     var checked: int = 0
     for candidate in unique_candidates:
-        if not position_can_be_goal(entry, candidate, allow_outside, moving_home):
-            continue
         checked += 1
         if checked > max_checked:
             break
+        if endpoint_temporarily_blocked(entry, candidate):
+            continue
+        if score_with_route_cost:
+            var resolved := resolve_reachable_endpoint(entry, candidate, allow_outside, moving_home, _arrival_radius, force_route_cost)
+            if resolved != Vector3.INF:
+                return resolved
+            continue
+        if not position_can_be_goal(entry, candidate, allow_outside, moving_home):
+            continue
         if not score_with_route_cost:
-            return candidate
-        var cost: float = INF
-        if planner != null and planner.has_method("route_cost"):
-            cost = float(planner.route_cost(entry, candidate, allow_outside, moving_home, _arrival_radius, [], force_route_cost))
-        if cost < INF:
+            store_resolved_endpoint_debug(entry, candidate, candidate, allow_outside, moving_home, _arrival_radius, "standable_without_route_cost", 0.0)
             return candidate
     return Vector3.INF
+
+func resolve_reachable_endpoint(entry: Dictionary, requested: Vector3, allow_outside := false, moving_home := false, arrival_radius := CELL * 0.85, require_ready := true) -> Vector3:
+    if requested == Vector3.INF or world == null:
+        return Vector3.INF
+    var cache_key := resolved_endpoint_cache_key(entry, requested, allow_outside, moving_home, arrival_radius, require_ready)
+    var cache: Dictionary = entry.get("resolvedEndpointCache", {}) if entry.get("resolvedEndpointCache", {}) is Dictionary else {}
+    var cached_value = cache.get(cache_key, {})
+    if cached_value is Dictionary:
+        var cached: Dictionary = cached_value
+        var age := Engine.get_process_frames() - int(cached.get("frame", -999999))
+        if age >= 0 and age <= 30:
+            var cached_resolved = cached.get("resolved", Vector3.INF)
+            store_resolved_endpoint_debug(entry, requested, cached_resolved if cached_resolved is Vector3 else Vector3.INF, allow_outside, moving_home, arrival_radius, String(cached.get("reason", "cached")), float(cached.get("cost", -1.0)))
+            return cached_resolved if cached_resolved is Vector3 else Vector3.INF
+    var candidates: Array[Vector3] = [requested]
+    var requested_cell: Vector2i = world.world_cell(requested) if world.has_method("world_cell") else Vector2i(roundi(requested.x / CELL), roundi(requested.z / CELL))
+    if world.has_method("approach_cells_for_target"):
+        for cell in world.approach_cells_for_target(entry, requested, allow_outside):
+            if not (cell is Vector2i):
+                continue
+            var pos: Vector3 = world.cell_position(cell)
+            if not candidates.has(pos):
+                candidates.append(pos)
+    for radius in range(1, 3):
+        for dz in range(-radius, radius + 1):
+            for dx in range(-radius, radius + 1):
+                if max(absi(dx), absi(dz)) != radius:
+                    continue
+                var cell := requested_cell + Vector2i(dx, dz)
+                var pos: Vector3 = world.cell_position(cell)
+                if not candidates.has(pos):
+                    candidates.append(pos)
+    var best := Vector3.INF
+    var best_cost := INF
+    var pending_nav_candidate := Vector3.INF
+    for candidate in unique_positions(candidates):
+        if endpoint_temporarily_blocked(entry, candidate):
+            continue
+        if not position_can_be_goal(entry, candidate, allow_outside, moving_home):
+            continue
+        var cost := INF
+        if planner != null and planner.has_method("route_cost"):
+            cost = float(planner.route_cost(entry, candidate, allow_outside, moving_home, arrival_radius, [], require_ready))
+        if cost < best_cost:
+            best = candidate
+            best_cost = cost
+        elif cost >= INF and pending_nav_candidate == Vector3.INF and endpoint_resolution_waiting_on_nav_data(entry):
+            pending_nav_candidate = candidate
+    if best != Vector3.INF:
+        store_resolved_endpoint_debug(entry, requested, best, allow_outside, moving_home, arrival_radius, "route_cost", best_cost)
+    elif pending_nav_candidate != Vector3.INF:
+        best = pending_nav_candidate
+        store_resolved_endpoint_debug(entry, requested, best, allow_outside, moving_home, arrival_radius, "pending_nav_data_endpoint", -1.0)
+    else:
+        store_resolved_endpoint_debug(entry, requested, Vector3.INF, allow_outside, moving_home, arrival_radius, "no_route_cost_endpoint", -1.0)
+    cache[cache_key] = {
+        "frame": Engine.get_process_frames(),
+        "resolved": best,
+        "reason": String((entry.get("lastResolvedEndpointDebug", {}) as Dictionary).get("reason", "")) if entry.get("lastResolvedEndpointDebug", {}) is Dictionary else "",
+        "cost": best_cost if best != Vector3.INF else -1.0
+    }
+    entry["resolvedEndpointCache"] = cache
+    return best
+
+func endpoint_resolution_waiting_on_nav_data(entry: Dictionary) -> bool:
+    if bool(entry.get("navmeshEndpointTilesStillLoading", false)):
+        return true
+    var missing_tiles = entry.get("navmeshMissingEndpointTiles", [])
+    if missing_tiles is Array and not (missing_tiles as Array).is_empty():
+        return true
+    var publish_debug = entry.get("lastNavmeshTilePublishDebug", [])
+    if not (publish_debug is Array):
+        return false
+    for record_value in publish_debug:
+        if not (record_value is Dictionary):
+            continue
+        var status := String((record_value as Dictionary).get("status", ""))
+        if status in ["probe_missing_ready_tile", "pending_budget", "queued_priority", "queued_budgeted", "skipped_until_endpoint_tiles"]:
+            return true
+    return false
+
+func refresh_blocked_endpoint_memory(entry: Dictionary) -> void:
+    var debug_value = entry.get("lastRoutePlanDebug", {})
+    if not (debug_value is Dictionary):
+        prune_blocked_endpoint_memory(entry)
+        return
+    var debug: Dictionary = debug_value
+    var reason := String(debug.get("reason", ""))
+    var authority := String(debug.get("routeAuthorityState", ""))
+    var collision_endpoint_failure := reason in ["blocked_capsule_probe", "path_crosses_static_collision", "blocked_static_collision", "blocked_static_transition"]
+    var terminal_endpoint_failure := authority == "unreachable_static" and reason in ["blocked_capsule_probe", "path_endpoint_mismatch", "target_blocked", "endpoint_not_server_walkable", "no_target_server_walkable"]
+    if not (collision_endpoint_failure or terminal_endpoint_failure):
+        prune_blocked_endpoint_memory(entry)
+        return
+    if terminal_endpoint_failure and endpoint_resolution_waiting_on_nav_data(entry):
+        prune_blocked_endpoint_memory(entry)
+        return
+    var target_cell := cell_from_value(debug.get("targetCell", INVALID_CELL))
+    if target_cell == INVALID_CELL:
+        prune_blocked_endpoint_memory(entry)
+        return
+    var memory: Dictionary = entry.get("blockedEndpointCells", {}) if entry.get("blockedEndpointCells", {}) is Dictionary else {}
+    memory[cell_key(target_cell)] = {
+        "frame": Engine.get_process_frames(),
+        "reason": reason
+    }
+    entry["blockedEndpointCells"] = memory
+    prune_blocked_endpoint_memory(entry)
+
+func prune_blocked_endpoint_memory(entry: Dictionary) -> void:
+    var memory: Dictionary = entry.get("blockedEndpointCells", {}) if entry.get("blockedEndpointCells", {}) is Dictionary else {}
+    if memory.is_empty():
+        return
+    var now := Engine.get_process_frames()
+    for key in memory.keys():
+        var record: Dictionary = memory.get(key, {}) if memory.get(key, {}) is Dictionary else {}
+        if now - int(record.get("frame", now)) > BLOCKED_ENDPOINT_MEMORY_FRAMES:
+            memory.erase(key)
+    entry["blockedEndpointCells"] = memory
+
+func endpoint_temporarily_blocked(entry: Dictionary, position: Vector3) -> bool:
+    if position == Vector3.INF or world == null or not world.has_method("world_cell"):
+        return false
+    var memory: Dictionary = entry.get("blockedEndpointCells", {}) if entry.get("blockedEndpointCells", {}) is Dictionary else {}
+    if memory.is_empty():
+        return false
+    return memory.has(cell_key(world.world_cell(position)))
+
+func cell_from_value(value) -> Vector2i:
+    if value is Vector2i:
+        return value
+    if value is Dictionary:
+        var dict: Dictionary = value
+        return Vector2i(int(dict.get("x", 999999)), int(dict.get("z", dict.get("y", 999999))))
+    if value is Array and (value as Array).size() >= 2:
+        var array_value: Array = value
+        return Vector2i(int(array_value[0]), int(array_value[1]))
+    return INVALID_CELL
+
+func cell_key(cell: Vector2i) -> String:
+    return "%d,%d" % [cell.x, cell.y]
+
+func resolved_endpoint_cache_key(entry: Dictionary, requested: Vector3, allow_outside: bool, moving_home: bool, arrival_radius: float, require_ready: bool) -> String:
+    var cell: Vector2i = world.world_cell(requested) if world != null and world.has_method("world_cell") else Vector2i(roundi(requested.x / CELL), roundi(requested.z / CELL))
+    return "%s|%s|%s|%s|%s|%d,%d|%d|%d" % [
+        String(entry.get("id", "")),
+        String(entry.get("job", "")),
+        String(entry.get("jobPhase", "")),
+        str(allow_outside),
+        str(moving_home),
+        cell.x,
+        cell.y,
+        roundi(arrival_radius * 100.0),
+        1 if require_ready else 0
+    ]
+
+func resolved_endpoint_position(entry: Dictionary) -> Vector3:
+    var debug_value = entry.get("lastResolvedEndpointDebug", {})
+    if debug_value is Dictionary:
+        var resolved = (debug_value as Dictionary).get("resolved", Vector3.INF)
+        if resolved is Vector3:
+            return resolved
+    return Vector3.INF
+
+func store_resolved_endpoint_debug(entry: Dictionary, requested: Vector3, resolved: Vector3, allow_outside: bool, moving_home: bool, arrival_radius: float, reason: String, cost: float) -> void:
+    entry["lastResolvedEndpointDebug"] = {
+        "requested": requested,
+        "resolved": resolved,
+        "requestedCell": world.world_cell(requested) if world != null and world.has_method("world_cell") and requested != Vector3.INF else Vector2i(999999, 999999),
+        "resolvedCell": world.world_cell(resolved) if world != null and world.has_method("world_cell") and resolved != Vector3.INF else Vector2i(999999, 999999),
+        "allowOutside": allow_outside,
+        "movingHome": moving_home,
+        "arrivalRadius": arrival_radius,
+        "reason": reason,
+        "cost": cost
+    }
 
 func town_anchor_candidates(entry: Dictionary) -> Array[Vector3]:
     var candidates: Array[Vector3] = []
@@ -600,10 +784,9 @@ func job_position_allowed(entry: Dictionary, position: Vector3, outside_town_job
 
 func guard_post_candidates(entry: Dictionary) -> Array[Vector3]:
     var assigned_guard_post: Vector3 = entry.get("guardPosition", entry.get("porchPosition", Vector3.ZERO))
-    var candidates: Array[Vector3] = [
-        assigned_guard_post,
-        entry.get("porchPosition", Vector3.ZERO)
-    ]
+    var candidates: Array[Vector3] = [assigned_guard_post]
+    if assigned_guard_post == Vector3.INF:
+        return [entry.get("porchPosition", Vector3.ZERO)]
     if world != null and assigned_guard_post != Vector3.INF:
         var guard_cell: Vector2i = world.world_cell(assigned_guard_post)
         for radius in range(1, 3):
@@ -612,8 +795,6 @@ func guard_post_candidates(entry: Dictionary) -> Array[Vector3]:
                     if max(absi(dx), absi(dz)) != radius:
                         continue
                     candidates.append(world.cell_position(guard_cell + Vector2i(dx, dz)))
-    add_path_candidates(candidates, entry, false)
-    add_utility_anchor_candidates(candidates, entry)
     return candidates
 
 func hostile_intercept_candidates(entry: Dictionary, hostile: Node3D, melee := false) -> Array[Vector3]:

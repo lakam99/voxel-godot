@@ -181,6 +181,12 @@ func closest_walkable(position: Vector3, max_distance := INF) -> Dictionary:
 		return navmesh_world.closest_walkable(position, max_distance)
 	return { "found": false, "reason": "missing_navmesh_world", "position": position, "maxDistance": max_distance }
 
+func world_cell(position: Vector3) -> Vector2i:
+	var generated_world = generated_navigation_adapter()
+	if generated_world != null and generated_world.has_method("world_cell"):
+		return generated_world.world_cell(position)
+	return Vector2i(roundi(position.x / NpcConstantsScript.CELL_SIZE), roundi(position.z / NpcConstantsScript.CELL_SIZE))
+
 func approach_cells_for_target(entry: Dictionary, target_position: Vector3, allow_outside := true) -> Array[Vector2i]:
 	var generated_world = generated_navigation_adapter()
 	if generated_world != null and generated_world.has_method("approach_cells_for_target"):
@@ -195,6 +201,18 @@ func cell_position(cell: Vector2i) -> Vector3:
 	if main != null and main.has_method("surface_y_at_cell"):
 		y = float(main.call("surface_y_at_cell", Vector3i(cell.x, 0, cell.y))) + 0.04
 	return Vector3(float(cell.x) * NpcConstantsScript.CELL_SIZE, y, float(cell.y) * NpcConstantsScript.CELL_SIZE)
+
+func cell_is_standable_goal(entry: Dictionary, cell: Vector2i, allow_outside := false, moving_home := false) -> bool:
+	var generated_world = generated_navigation_adapter()
+	if generated_world != null and generated_world.has_method("cell_is_standable_goal"):
+		return bool(generated_world.cell_is_standable_goal(entry, cell, allow_outside, moving_home))
+	return false
+
+func forbidden_private_door_portal_ids_for_entry(entry: Dictionary) -> Array[String]:
+	var generated_world = generated_navigation_adapter()
+	if generated_world != null and generated_world.has_method("forbidden_private_door_portal_ids_for_entry"):
+		return generated_world.forbidden_private_door_portal_ids_for_entry(entry)
+	return []
 
 func generated_navigation_adapter():
 	if npc_system == null:

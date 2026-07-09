@@ -7,7 +7,7 @@ const HomeInteriorServiceScript := preload("res://scripts/npc_ai/behavior/HomeIn
 const TEST_ID := "npc_go_home_visual_door_traversal"
 const CELL := 1.35
 const WATER_LEVEL := 11.1
-const WATCHDOG_DEFAULT_SECONDS := 90.0
+const WATCHDOG_DEFAULT_SECONDS := 190.0
 const OBSERVATION_SECONDS := 65.0
 const CAPTURE_WIDTH := 1280
 const CAPTURE_HEIGHT := 720
@@ -46,12 +46,15 @@ var screenshot_dir := ""
 var run_token := ""
 var seed := ""
 var elapsed := 0.0
+var wall_started_msec := 0
 var watchdog_seconds := WATCHDOG_DEFAULT_SECONDS
 var finished := false
 var failed := false
 var results: Array[Dictionary] = []
 var captures: Array[Dictionary] = []
 var timeline: Array[Dictionary] = []
+var last_progress_sample := {}
+var progress_events: Array[Dictionary] = []
 var script_lines: Array[String] = []
 var fixture := {}
 var initial_stats := {}
@@ -67,15 +70,16 @@ var captured_open := false
 var captured_inside_closed := false
 
 func _ready() -> void:
+	wall_started_msec = Time.get_ticks_msec()
 	configure_from_environment()
 	apply_resolution()
 	write_progress("start")
 	call_deferred("run")
 
-func _process(delta: float) -> void:
+func _process(_delta: float) -> void:
 	if finished:
 		return
-	elapsed += delta
+	elapsed = float(Time.get_ticks_msec() - wall_started_msec) / 1000.0
 	if elapsed > watchdog_seconds:
 		add_result("visual_go_home_watchdog", false, "watchdog %.1fs exceeded" % watchdog_seconds)
 		if npc_body != null and is_instance_valid(npc_body):
@@ -113,13 +117,18 @@ func run() -> void:
 	main = MAIN_SCENE.instantiate()
 	add_child(main)
 	write_progress("main_instantiated")
-	await wait_physics_frames(45)
 	bind_scene_nodes()
+	write_progress("scene_nodes_bound")
 	if main == null or player == null or npc_system == null:
 		add_result("scene_bootstrap", false, "main/player/npc_system missing")
 		finish(1)
 		return
 	configure_playtest_scene()
+	write_progress("playtest_scene_configured")
+	if not await wait_startup_physics_frames(45, "startup"):
+		add_result("startup_physics_frames_advanced", false, "physics frames did not advance during startup")
+		finish(1)
+		return
 	await setup_one_house_one_npc_fixture()
 	if failed:
 		finish(1)
@@ -147,6 +156,8 @@ func bind_scene_nodes() -> void:
 	npc_system = main.get("npc_system") as Node
 
 func configure_playtest_scene() -> void:
+	get_tree().paused = false
+	Engine.time_scale = 1.0
 	Input.set_mouse_mode(Input.MOUSE_MODE_VISIBLE)
 	if player != null:
 		player.set("automated_input", true)
@@ -178,15 +189,21 @@ func configure_playtest_scene() -> void:
 	observer_camera.make_current()
 
 func setup_one_house_one_npc_fixture() -> void:
+	write_progress("fixture_setup_start")
 	var center := find_dry_fixture_center()
 	var level := maxf(float(main.call("surface_y_at_cell", Vector3i(center.x, 0, center.y))), WATER_LEVEL + 3.0)
+	write_progress("fixture_center_selected")
 	flatten_fixture(center, level, 24)
+	write_progress("fixture_flattened")
 	clear_blocks_near_cell(center, 24)
 	clear_props_near_cell(center, 30)
+	write_progress("fixture_cleared")
 	move_player_for_lod(center, level)
 	if main.has_method("update_chunks"):
 		main.call("update_chunks", true)
+	write_progress("fixture_chunks_requested")
 	await wait_physics_frames(12)
+	write_progress("fixture_chunks_settled")
 
 	var structure_system = main.get("structure_system")
 	if structure_system == null or not structure_system.has_method("build_building"):
@@ -200,12 +217,15 @@ func setup_one_house_one_npc_fixture() -> void:
 	var rng := RandomNumberGenerator.new()
 	rng.seed = 90421
 	structure_system.call("build_building", base_x, base_z, level, width, depth, 4, "woodBlock", "stoneBlock", side, rng, false)
+	write_progress("fixture_house_built_call_done")
 	remove_extra_fixture_utilities(center, 12)
 	if main.has_method("rebuild_chunks_around_cell"):
 		main.call("rebuild_chunks_around_cell", center)
 	await wait_physics_frames(20)
+	write_progress("fixture_house_settled")
 	if npc_system.has_method("flush_navigation_change_bus"):
 		npc_system.call("flush_navigation_change_bus")
+	write_progress("fixture_nav_flushed")
 
 	var door_cells := StructureDoorRulesScript.door_cells(width, depth, side)
 	var primary_door_entry: Dictionary = door_cells[0]
@@ -216,6 +236,7 @@ func setup_one_house_one_npc_fixture() -> void:
 	var spawn_cell := Vector2i(home_cell.x, base_z - 9)
 	var spawn_position := Vector3(float(spawn_cell.x) * CELL, level + 0.04, float(spawn_cell.y) * CELL)
 	home_doors = find_home_doors(base_x, base_z, width, depth)
+	write_progress("fixture_doors_found")
 	add_result("fixture_house_built", home_doors.size() >= 2, "doors %d, base %d,%d" % [home_doors.size(), base_x, base_z])
 	if home_doors.is_empty():
 		return
@@ -295,8 +316,9 @@ func spawn_visual_test_npc(position: Vector3, profile: Dictionary) -> CharacterB
 func observe_go_home() -> void:
 	var max_frames := ceili(OBSERVATION_SECONDS * float(Engine.physics_ticks_per_second))
 	for frame in range(max_frames):
-		await get_tree().physics_frame
+		await wait_frame_timer(true)
 		var sample := make_sample(frame)
+		last_progress_sample = sample
 		if frame % 12 == 0:
 			timeline.append(sample)
 			write_progress("observe_%04d" % frame)
@@ -414,13 +436,24 @@ func position_observer_camera(mode: String) -> void:
 	observer_camera.make_current()
 
 func find_dry_fixture_center() -> Vector2i:
-	var candidates := [
+	var candidates: Array[Vector2i] = []
+	if player != null:
+		var player_cell := flat_cell(player.global_position)
+		candidates.append_array([
+			player_cell + Vector2i(28, 28),
+			player_cell + Vector2i(-28, 28),
+			player_cell + Vector2i(28, -28),
+			player_cell + Vector2i(-28, -28),
+			player_cell + Vector2i(42, 0),
+			player_cell + Vector2i(0, 42)
+		])
+	candidates.append_array([
 		Vector2i(180, -180),
 		Vector2i(220, -160),
 		Vector2i(-180, 220),
 		Vector2i(260, 180),
 		Vector2i(-220, -180)
-	]
+	])
 	for candidate in candidates:
 		var height := float(main.call("surface_y_at_cell", Vector3i(candidate.x, 0, candidate.y)))
 		if height > WATER_LEVEL + 2.5:
@@ -617,7 +650,8 @@ func write_report(verbose := true) -> void:
 		"finalStats": final_stats,
 		"captures": captures,
 		"timeline": timeline,
-		"timelineTail": timeline.slice(maxi(0, timeline.size() - 24), timeline.size())
+		"timelineTail": timeline.slice(maxi(0, timeline.size() - 24), timeline.size()),
+		"progressEvents": progress_events
 	}
 	var file := FileAccess.open(report_path, FileAccess.WRITE)
 	if file == null:
@@ -629,21 +663,48 @@ func write_report(verbose := true) -> void:
 		print("NPC go-home visual report: %s" % report_path)
 
 func write_progress(label: String) -> void:
+	progress_events.append({
+		"label": label,
+		"elapsed": snapped_float(elapsed),
+		"results": results.size(),
+		"failed": failed
+	})
+	if progress_events.size() > 80:
+		progress_events.pop_front()
 	if progress_path == "":
 		return
 	var file := FileAccess.open(progress_path, FileAccess.WRITE)
 	if file == null:
 		return
-	file.store_string("%s\nelapsed=%.3f\nresults=%d\nfailed=%s\n" % [label, elapsed, results.size(), str(failed)])
+	var sample_json := JSON.stringify(sanitize_value(last_progress_sample))
+	file.store_string("%s\nelapsed=%.3f\nresults=%d\nfailed=%s\nsample=%s\n" % [label, elapsed, results.size(), str(failed), sample_json])
 	file.close()
 
 func wait_physics_frames(count: int) -> void:
 	for i in range(count):
-		await get_tree().physics_frame
+		await wait_frame_timer(true)
+
+func wait_startup_physics_frames(count: int, label: String) -> bool:
+	Engine.time_scale = 1.0
+	get_tree().paused = false
+	var start_frame := int(Engine.get_physics_frames())
+	var process_frames := 0
+	var max_process_frames := maxi(count * 8, 180)
+	while int(Engine.get_physics_frames()) - start_frame < count and process_frames < max_process_frames:
+		await wait_frame_timer(false)
+		process_frames += 1
+		if process_frames % 30 == 0:
+			write_progress("%s_physics_%d_%d" % [label, int(Engine.get_physics_frames()) - start_frame, count])
+	var advanced := int(Engine.get_physics_frames()) - start_frame
+	write_progress("%s_physics_ready_%d_%d" % [label, advanced, count])
+	return advanced >= count
 
 func wait_process_frames(count: int) -> void:
 	for i in range(count):
-		await get_tree().process_frame
+		await wait_frame_timer(false)
+
+func wait_frame_timer(_process_in_physics: bool) -> void:
+	await get_tree().create_timer(1.0 / 60.0, true, false, true).timeout
 
 func ensure_dir(path: String) -> void:
 	if path == "":

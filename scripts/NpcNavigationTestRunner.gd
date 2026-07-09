@@ -283,25 +283,41 @@ func test_generic_town_npc_navigation() -> void:
             if forager_node != null and is_instance_valid(forager_node):
                 forager_node_distance = forager_body.global_position.distance_to(forager_node.global_position)
             forager_debug = {
+                "actorPosition": forager_body.global_position,
                 "cell": world_to_flat_cell(forager_body.global_position),
+                "target": forager_target,
                 "targetCell": world_to_flat_cell(forager_target),
+                "targetPosition": forager_target,
+                "targetNodePosition": forager_node.global_position if forager_node != null and is_instance_valid(forager_node) else Vector3.INF,
                 "lastMove": float(generic_forager.get("lastMoveDistance", 0.0)),
                 "routeWaitTicks": int(generic_forager.get("routeWaitTicks", 0)),
                 "routeReplans": int(generic_forager.get("routeReplans", 0)),
                 "waypoints": (generic_forager.get("pathWaypoints", []) as Array).size(),
                 "routeCells": (generic_forager.get("routeCells", []) as Array).size(),
                 "job": String(generic_forager.get("job", "")),
+                "jobPhase": String(generic_forager.get("jobPhase", "")),
+                "jobTimer": float(generic_forager.get("jobTimer", 0.0)),
+                "jobFailureReason": String(generic_forager.get("jobFailureReason", "")),
+                "jobReservationId": String(generic_forager.get("jobReservationId", "")),
+                "jobApproachSlotId": String(generic_forager.get("jobApproachSlotId", "")),
                 "forceHold": bool(forager_body.get_meta("npc_force_hold", false)),
                 "lod": String(generic_forager.get("simulationLod", "")),
                 "brainDue": bool(generic_forager.get("npc_lod_brain_due", false)),
+                "brainUpdates": int(generic_forager.get("npc_brain_updates", 0)),
+                "brainSkipped": int(generic_forager.get("npc_brain_budget_skipped", 0)),
                 "motionUpdates": int(generic_forager.get("npc_motion_updates", 0)),
+                "motionBudgetSkipped": int(generic_forager.get("npc_motion_budget_skipped", 0)),
                 "motionSkipped": String(generic_forager.get("npc_motion_skipped_reason", "")),
-				"jobObjectId": String(generic_forager.get("jobObjectId", "")),
-				"lastRoutePlanDebug": generic_forager.get("lastRoutePlanDebug", {}),
-				"routePlannerStats": route_planner_stats(npc_system),
-				"tilePublish": generic_forager.get("lastNavmeshTilePublishDebug", []),
-				"routeFallbackCell": generic_forager.get("routeFallbackCell", Vector2i.ZERO),
-				"blockedContact": String(forager_body.get_meta("npc_blocked_contact", "")),
+                "routeTicketState": String(generic_forager.get("routeTicketState", "")),
+                "routeTicketReason": String(generic_forager.get("routeTicketReason", "")),
+                "routeTicketAttempts": int(generic_forager.get("routeTicketAttempts", 0)),
+                "jobObjectId": String(generic_forager.get("jobObjectId", "")),
+                "lastResolvedEndpointDebug": generic_forager.get("lastResolvedEndpointDebug", {}),
+                "lastRoutePlanDebug": generic_forager.get("lastRoutePlanDebug", {}),
+                "routePlannerStats": route_planner_stats(npc_system),
+                "tilePublish": generic_forager.get("lastNavmeshTilePublishDebug", []),
+                "routeFallbackCell": generic_forager.get("routeFallbackCell", Vector2i.ZERO),
+                "blockedContact": String(forager_body.get_meta("npc_blocked_contact", "")),
                 "blockedName": String(forager_body.get_meta("npc_blocked_contact_name", "")),
                 "blockedKind": String(forager_body.get_meta("npc_blocked_contact_kind", "")),
                 "blockedType": String(forager_body.get_meta("npc_blocked_contact_type", "")),
@@ -825,8 +841,8 @@ func test_reachability_aware_goal_selection() -> void:
 
     var base_height: float = surface_y_at_cell2(start_cell)
     var town_radius := 12
-    var tree_cell := dry_work_cell(start_cell, town_radius + 8, town_radius + 22)
-    var rock_cell := dry_work_cell(Vector2i(start_cell.x, start_cell.y + 2), town_radius + 8, town_radius + 24)
+    var tree_cell := dry_work_cell(start_cell, 3, town_radius - 3)
+    var rock_cell := dry_work_cell(Vector2i(start_cell.x, start_cell.y + 2), 4, town_radius - 2)
     var hostile_cell := dry_work_cell(Vector2i(start_cell.x + 2, start_cell.y), town_radius + 5, town_radius + 18)
     var prop_root := main.get("prop_root") as Node
     var rng := RandomNumberGenerator.new()
@@ -868,18 +884,20 @@ func test_reachability_aware_goal_selection() -> void:
     var first_wood_resource_cost := INF
     if not wood_resource_candidates.is_empty():
         first_wood_resource_distance = Vector2(wood_resource_candidates[0].x - tree_pos.x, wood_resource_candidates[0].z - tree_pos.z).length()
-        first_wood_resource_cost = pathing.route_cost(wood_entry, wood_resource_candidates[0], true, false, CELL * 0.85)
+        first_wood_resource_cost = pathing.route_cost(wood_entry, wood_resource_candidates[0], false, false, CELL * 0.85)
     var wood_near_resource := false
     for candidate in wood_resource_candidates:
         if Vector2(wood_target.x - candidate.x, wood_target.z - candidate.z).length() <= CELL * 1.15:
             wood_near_resource = true
             break
-    var wood_cost: float = pathing.route_cost(wood_entry, wood_target, true, false, CELL * 0.85)
-    var stone_cost: float = pathing.route_cost(stone_entry, stone_target, true, false, CELL * 0.85)
+    var wood_cost: float = pathing.route_cost(wood_entry, wood_target, false, false, CELL * 0.85)
+    var stone_cost: float = pathing.route_cost(stone_entry, stone_target, false, false, CELL * 0.85)
     var guard_cost: float = pathing.route_cost(guard_entry, guard_target, true, false, CELL * 0.72)
     var wander_cost: float = pathing.route_cost(guard_entry, wander_target, false, false, CELL * 0.85)
     var wood_near_tree := tree != null and Vector2(wood_target.x - tree.global_position.x, wood_target.z - tree.global_position.z).length() <= CELL * 3.2
     var stone_near_rock := rock != null and Vector2(stone_target.x - rock.global_position.x, stone_target.z - rock.global_position.z).length() <= CELL * 3.2
+    var wood_target_in_town: bool = pathing.point_inside_town(wood_entry, wood_target)
+    var stone_target_in_town: bool = pathing.point_inside_town(stone_entry, stone_target)
     var guard_not_center := Vector2(guard_target.x - hostile.global_position.x, guard_target.z - hostile.global_position.z).length() >= CELL * 2.0
     var guard_in_work_area: bool = pathing.point_inside_work_area(guard_entry, guard_target)
     var wander_in_town: bool = pathing.point_inside_town(guard_entry, wander_target)
@@ -889,6 +907,8 @@ func test_reachability_aware_goal_selection() -> void:
         "npc_nav_reachability_goal_selection",
         wood_near_resource
             and stone_near_rock
+            and wood_target_in_town
+            and stone_target_in_town
             and guard_not_center
             and guard_in_work_area
             and wander_in_town
@@ -897,10 +917,11 @@ func test_reachability_aware_goal_selection() -> void:
             and guard_cost < INF
             and wander_cost < INF
             and no_fallback_reasons,
-        "wood %.1f nearTree %s nearResource %s cost %.1f resources %d first %.1f/%.1f debug %s, stone %.1f near %s cost %.1f debug %s, guard offset %.1f work %s cost %.1f, wander town %s cost %.1f, reasons %s/%s/%s" % [
+        "wood %.1f nearTree %s nearResource %s inTown %s cost %.1f resources %d first %.1f/%.1f debug %s, stone %.1f near %s inTown %s cost %.1f debug %s, guard offset %.1f work %s cost %.1f, wander town %s cost %.1f, reasons %s/%s/%s" % [
             Vector2(wood_target.x - tree_pos.x, wood_target.z - tree_pos.z).length(),
             str(wood_near_tree),
             str(wood_near_resource),
+            str(wood_target_in_town),
             wood_cost,
             wood_resource_candidates.size(),
             first_wood_resource_distance,
@@ -908,6 +929,7 @@ func test_reachability_aware_goal_selection() -> void:
             JSON.stringify(wood_entry.get("lastResourceCandidateDebug", {})),
             Vector2(stone_target.x - rock_pos.x, stone_target.z - rock_pos.z).length(),
             str(stone_near_rock),
+            str(stone_target_in_town),
             stone_cost,
             JSON.stringify(stone_entry.get("lastResourceCandidateDebug", {})),
             Vector2(guard_target.x - hostile.global_position.x, guard_target.z - hostile.global_position.z).length(),

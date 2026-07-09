@@ -3,8 +3,11 @@ class_name NpcNavigationCoordinator
 
 const GeneratedWorldNavigationAdapterScript := preload("res://scripts/npc_ai/navigation/GeneratedWorldNavigationAdapter.gd")
 const NpcRouteCoordinatorAdapterScript := preload("res://scripts/npc_ai/routing/NpcRouteCoordinatorAdapter.gd")
+const NpcRouteAuthorityScript := preload("res://scripts/npc_ai/routing/NpcRouteAuthority.gd")
+const NpcRouteTicketBrokerScript := preload("res://scripts/npc_ai/routing/NpcRouteTicketBroker.gd")
 const NpcRouteMovementControllerScript := preload("res://scripts/npc_ai/movement/NpcRouteMovementController.gd")
 const NpcSemanticGoalPlannerScript := preload("res://scripts/npc_ai/behavior/NpcSemanticGoalPlanner.gd")
+const NpcConstantsScript := preload("res://scripts/npc_ai/NpcConstants.gd")
 
 const CELL := 1.35
 const ROUTE_MOTION_MAX_SUBSTEP_DISTANCE := CELL * 0.55
@@ -13,7 +16,9 @@ const ROUTE_MOTION_MAX_SUBSTEPS := 48
 var system
 var main
 var navigation_world
+var route_delegate
 var route_planner
+var route_ticket_broker
 var locomotion
 var goal_planner
 var route_repair
@@ -30,11 +35,19 @@ func ensure_ready() -> void:
         navigation_world = GeneratedWorldNavigationAdapterScript.new()
         navigation_world.setup(system, main)
     if route_planner == null:
-        route_planner = NpcRouteCoordinatorAdapterScript.new()
-        route_planner.setup(system, main, navigation_world)
+        route_delegate = NpcRouteCoordinatorAdapterScript.new()
+        route_delegate.setup(system, main, navigation_world)
+        route_planner = NpcRouteAuthorityScript.new()
+        route_planner.setup(system, main, navigation_world, route_delegate)
         route_repair = route_planner.get("repair_service")
+        if route_ticket_broker == null:
+            route_ticket_broker = NpcRouteTicketBrokerScript.new()
+            route_ticket_broker.setup(system, main, navigation_world, route_planner)
     elif route_repair == null:
         route_repair = route_planner.get("repair_service")
+    if route_ticket_broker == null:
+        route_ticket_broker = NpcRouteTicketBrokerScript.new()
+        route_ticket_broker.setup(system, main, navigation_world, route_planner)
     if locomotion == null:
         locomotion = NpcRouteMovementControllerScript.new()
         locomotion.setup(system, main)
@@ -45,18 +58,30 @@ func ensure_ready() -> void:
 func rebuild() -> void:
     navigation_world = GeneratedWorldNavigationAdapterScript.new()
     navigation_world.setup(system, main)
-    route_planner = NpcRouteCoordinatorAdapterScript.new()
-    route_planner.setup(system, main, navigation_world)
+    route_delegate = NpcRouteCoordinatorAdapterScript.new()
+    route_delegate.setup(system, main, navigation_world)
+    route_planner = NpcRouteAuthorityScript.new()
+    route_planner.setup(system, main, navigation_world, route_delegate)
     route_repair = route_planner.get("repair_service")
+    route_ticket_broker = NpcRouteTicketBrokerScript.new()
+    route_ticket_broker.setup(system, main, navigation_world, route_planner)
     locomotion = NpcRouteMovementControllerScript.new()
     locomotion.setup(system, main)
     goal_planner = NpcSemanticGoalPlannerScript.new()
     goal_planner.setup(system, main, navigation_world, route_planner)
 
+func prebake_town(center_cell: Vector2i, radius_cells: int) -> Dictionary:
+    ensure_ready()
+    if route_planner != null and route_planner.has_method("prebake_area_tiles"):
+        return route_planner.prebake_area_tiles(center_cell, radius_cells)
+    return { "ok": false, "reason": "missing_route_planner" }
+
 func begin_frame() -> void:
     ensure_ready()
     if route_planner != null and route_planner.has_method("begin_frame"):
         route_planner.begin_frame()
+    if route_ticket_broker != null and route_ticket_broker.has_method("begin_frame"):
+        route_ticket_broker.begin_frame()
     if locomotion != null:
         locomotion.begin_frame()
 
@@ -66,6 +91,9 @@ func stats() -> Dictionary:
     if route_planner != null and route_planner.has_method("stats"):
         var route_stats = route_planner.stats()
         result["routePlanner"] = route_stats if route_stats is Dictionary else {}
+    if route_ticket_broker != null and route_ticket_broker.has_method("stats"):
+        var ticket_stats = route_ticket_broker.stats()
+        result["routeTickets"] = ticket_stats if ticket_stats is Dictionary else {}
     if navigation_world != null and navigation_world.has_method("stats"):
         var world_stats = navigation_world.stats()
         result["navigationWorld"] = world_stats if world_stats is Dictionary else {}
@@ -77,6 +105,8 @@ func invalidate() -> void:
         navigation_world.invalidate()
     if route_planner != null and route_planner.has_method("invalidate"):
         route_planner.invalidate()
+    if route_ticket_broker != null and route_ticket_broker.has_method("invalidate"):
+        route_ticket_broker.invalidate()
 
 func process_navigation_events(events: Array, max_expansions := 128) -> Array[Dictionary]:
     ensure_ready()
@@ -124,7 +154,7 @@ func move_npc(entry: Dictionary, target: Vector3, max_distance: float, moving_ho
         var steps_left := maxi(1, substeps - step_index)
         var step_distance := minf(ROUTE_MOTION_MAX_SUBSTEP_DISTANCE, remaining_distance)
         var step_delta := remaining_delta / float(steps_left)
-        var moved := _move_npc_step(entry, target, step_distance, moving_home, allow_outside, physics_delta)
+        var moved := _move_npc_step(entry, target, step_distance, moving_home, allow_outside, step_delta)
         total_moved += moved
         remaining_distance -= step_distance
         remaining_delta = maxf(0.0001, remaining_delta - step_delta)
@@ -138,7 +168,8 @@ func _move_npc_step(entry: Dictionary, target: Vector3, max_distance: float, mov
         return 0.0
     var intent: Dictionary = goal_planner.make_intent(entry, target, max_distance, moving_home, allow_outside)
     intent["physicsDelta"] = physics_delta
-    var result: Dictionary = locomotion.move(entry, intent, max_distance, route_planner, navigation_world)
+    var planner_for_movement = route_ticket_broker if NpcConstantsScript.NPC_NAV_ENABLE_ROUTE_TICKET_PIPELINE and route_ticket_broker != null else route_planner
+    var result: Dictionary = locomotion.move(entry, intent, max_distance, planner_for_movement, navigation_world)
     return float(result.get("moved", 0.0))
 
 func choose_day_target(entry: Dictionary) -> Vector3:

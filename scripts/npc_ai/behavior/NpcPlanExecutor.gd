@@ -22,6 +22,7 @@ var guard_target_refreshes_this_frame := 0
 var update_frame_serial := 0
 
 const JOB_SELECTIONS_PER_FRAME := 1
+const JOB_SELECTION_DEFERRED_FRAME_LIMIT := 12
 const GUARD_TARGET_REFRESHES_PER_FRAME := 1
 const FORAGE_PENDING_ROUTE_TIMEOUT_SECONDS := 4.0
 const FORAGE_PENDING_ROUTE_FAILURE_LIMIT := 2
@@ -278,6 +279,8 @@ func _advance_job_motion(entry: Dictionary, body: Node3D, delta: float) -> Dicti
 			or String(entry.get("activeDoorPortalId", "")) != "":
 			return _advance_job_home_exit(entry, body, delta, "job_idle_home_exit")
 		entry["lastMoveDistance"] = 0.0
+		if phase in ["gathering", "stall"]:
+			return { "advanced": true, "reason": "job_action_phase", "intentKind": "job" }
 		return { "advanced": false, "reason": "job_phase_not_moving", "intentKind": "job" }
 	var target: Vector3 = entry.get("jobTarget", body.global_position)
 	target = _staged_departure_motion_target(entry, body, target)
@@ -295,7 +298,7 @@ func _advance_job_motion(entry: Dictionary, body: Node3D, delta: float) -> Dicti
 	return _motion_result(entry, "job", "job_route")
 
 func _advance_job_home_exit(entry: Dictionary, body: Node3D, delta: float, reason: String) -> Dictionary:
-	var target := _home_exit_clearance_target(entry, body.global_position.y)
+	var target := _home_exit_stage_target(entry, body)
 	entry["routePriority"] = maxi(int(entry.get("routePriority", 0)), 95)
 	entry["routeIntentKind"] = "forage" if String(entry.get("job", "")) == "forage" else "work"
 	var speed := _set_motion_speed_mode(entry, "walking", "job_home_exit")
@@ -573,7 +576,7 @@ func _execute_job(entry: Dictionary, body: Node3D, delta: float) -> void:
 			entry["routeStatus"] = "idle"
 
 func _job_allows_outside_movement(entry: Dictionary) -> bool:
-	return String(entry.get("job", "")) == "forage"
+	return _resource_job_uses_outside_work_area(String(entry.get("job", "")))
 
 func _job_route_allows_outside(entry: Dictionary, body: Node3D) -> bool:
 	if _job_allows_outside_movement(entry):
@@ -667,10 +670,16 @@ func _job_selection_budget_available(entry: Dictionary, delta: float) -> bool:
 	if frame != job_selection_frame:
 		job_selection_frame = frame
 		job_selections_this_frame = 0
+	var deferred_frames := int(entry.get("jobSelectionDeferredFrames", 0))
 	if job_selections_this_frame >= JOB_SELECTIONS_PER_FRAME:
-		entry["jobTimer"] = minf(float(entry.get("jobTimer", 0.0)), 0.05)
-		return false
+		if deferred_frames < JOB_SELECTION_DEFERRED_FRAME_LIMIT:
+			entry["jobTimer"] = minf(float(entry.get("jobTimer", 0.0)), 0.05)
+			entry["jobSelectionDeferredFrames"] = deferred_frames + 1
+			entry["jobSelectionDeferredFrame"] = frame
+			return false
 	job_selections_this_frame += 1
+	entry["jobSelectionDeferredFrames"] = 0
+	entry.erase("jobSelectionDeferredFrame")
 	return true
 
 func _guard_target_refresh_budget_available(entry: Dictionary) -> bool:
@@ -715,14 +724,19 @@ func _update_day_job(entry: Dictionary, delta: float) -> bool:
 		if resource_target == null:
 			entry["jobPhase"] = "searching"
 			entry["jobTarget"] = _choose_job_target(entry)
+			entry["routeForceReplan"] = true
 			entry["jobTimer"] = _deterministic_seconds(entry, "resource_search_retry", 3.0, 7.0)
 			_set_npc_goal(entry, "search for %s" % String(entry.get("jobResource", "resource")))
 			body.set_meta("npc_job_phase", "searching")
 			return true
 		if not _reserve_job_target(entry, resource_target, "harvest_resource"):
-			entry["jobTimer"] = _deterministic_seconds(entry, "resource_reserve_retry", 1.4, 3.0)
-			body.set_meta("npc_job_phase", "idle")
-			return false
+			entry["jobPhase"] = "searching"
+			entry["jobTarget"] = _choose_job_target(entry)
+			entry["routeForceReplan"] = true
+			entry["jobTimer"] = _deterministic_seconds(entry, "resource_reserve_search", 2.0, 4.5)
+			_set_npc_goal(entry, "search for %s" % String(entry.get("jobResource", "resource")))
+			body.set_meta("npc_job_phase", "searching")
+			return true
 		entry["jobPhase"] = "outbound"
 		_clear_home_route_terminal(entry)
 		_set_npc_goal(entry, "gather %s" % String(entry.get("jobResource", "resource")))
@@ -731,6 +745,8 @@ func _update_day_job(entry: Dictionary, delta: float) -> bool:
 		return true
 	if phase == "outbound":
 		return _update_outbound_job(entry, body, timer)
+	if phase == "searching":
+		return _update_searching_resource_job(entry, body, timer)
 	if phase == "gathering":
 		return _update_gathering_job(entry, body, timer)
 	if phase == "returning":
@@ -744,16 +760,34 @@ func _update_day_job(entry: Dictionary, delta: float) -> bool:
 func _staged_departure_motion_target(entry: Dictionary, body: Node3D, target: Vector3) -> Vector3:
 	if body == null:
 		return target
+	var inside_home := _inside_home_now(entry, body) or _inside_home_bounds_now(entry, body.global_position)
+	if inside_home and not _inside_home_bounds_now(entry, target):
+		return _home_door_exit_target(entry, body.global_position.y)
 	var leaving_town := _point_inside_town(entry, body.global_position) and not _point_inside_town(entry, target)
-	if _inside_home_now(entry, body) or _inside_home_bounds_now(entry, body.global_position) or (leaving_town and _near_home_exit_needs_clearance(entry, body)):
+	if leaving_town and _near_home_exit_needs_clearance(entry, body):
 		return _home_exit_clearance_target(entry, body.global_position.y)
 	return target
+
+func _home_exit_stage_target(entry: Dictionary, body: Node3D) -> Vector3:
+	if body == null:
+		return _home_exit_clearance_target(entry, 0.0)
+	if _inside_home_now(entry, body) or _inside_home_bounds_now(entry, body.global_position):
+		return _home_door_exit_target(entry, body.global_position.y)
+	return _home_exit_clearance_target(entry, body.global_position.y)
 
 func _near_home_exit_needs_clearance(entry: Dictionary, body: Node3D) -> bool:
 	if body == null:
 		return false
 	var porch_cell: Vector2i = entry.get("porchCell", entry.get("homeCell", Vector2i.ZERO))
 	var current_cell := _flat_cell_for_position(body.global_position)
+	var status := _home_interior_status(entry, body.global_position)
+	if bool(status.get("doorThresholdOccupied", false)) \
+		or bool(status.get("doorSweepOccupied", false)) \
+		or bool(status.get("doorClearanceOccupied", false)):
+		return true
+	var status_reason := String(status.get("reason", ""))
+	if status_reason in ["door_cell_not_inside", "door_clearance_not_inside", "not_past_door_plane"]:
+		return true
 	if abs(current_cell.x - porch_cell.x) > 1 or abs(current_cell.y - porch_cell.y) > 1:
 		return false
 	return current_cell != _home_exit_clearance_cell(entry)
@@ -775,10 +809,13 @@ func _clear_inside_home_if_not_semantic(entry: Dictionary, body: Node3D) -> void
 		body.set_meta("npc_inside_home", false)
 
 func _inside_home_bounds_now(entry: Dictionary, position: Vector3) -> bool:
+	return bool(_home_interior_status(entry, position).get("strictInside", false))
+
+func _home_interior_status(entry: Dictionary, position: Vector3) -> Dictionary:
 	var portal = null
 	if autonomy_system != null and autonomy_system.get("door_portals") != null:
 		portal = HomeInteriorServiceScript.portal_for_entry(entry, autonomy_system.get("door_portals"))
-	return bool(HomeInteriorServiceScript.status(entry, position, portal).get("strictInside", false))
+	return HomeInteriorServiceScript.status(entry, position, portal)
 
 func _home_exit_clearance_cell(entry: Dictionary) -> Vector2i:
 	var home_cell: Vector2i = entry.get("homeCell", Vector2i.ZERO)
@@ -804,11 +841,21 @@ func _home_exit_clearance_cell(entry: Dictionary) -> Vector2i:
 		return porch_cell
 	return porch_cell + Vector2i(step.x * 3, step.y * 3)
 
+func _home_door_exit_target(entry: Dictionary, fallback_y: float) -> Vector3:
+	var porch_cell: Vector2i = entry.get("porchCell", entry.get("homeCell", Vector2i.ZERO))
+	var position: Vector3 = entry.get("porchPosition", Vector3(float(porch_cell.x) * NpcConstantsScript.CELL_SIZE, fallback_y, float(porch_cell.y) * NpcConstantsScript.CELL_SIZE))
+	if position == Vector3.INF:
+		position = Vector3(float(porch_cell.x) * NpcConstantsScript.CELL_SIZE, fallback_y, float(porch_cell.y) * NpcConstantsScript.CELL_SIZE)
+	var main_node = npc_system.get("main") if npc_system != null else null
+	if main_node != null and main_node.has_method("surface_y_at_position"):
+		position.y = float(main_node.call("surface_y_at_position", position)) + 0.04
+	return position
+
 func _home_exit_clearance_target(entry: Dictionary, fallback_y: float) -> Vector3:
 	var porch_cell: Vector2i = entry.get("porchCell", entry.get("homeCell", Vector2i.ZERO))
 	var exit_cell := _home_exit_clearance_cell(entry)
 	if exit_cell == porch_cell:
-		return entry.get("porchPosition", Vector3(float(porch_cell.x) * NpcConstantsScript.CELL_SIZE, fallback_y, float(porch_cell.y) * NpcConstantsScript.CELL_SIZE))
+		return _home_door_exit_target(entry, fallback_y)
 	var position := Vector3(float(exit_cell.x) * NpcConstantsScript.CELL_SIZE, fallback_y, float(exit_cell.y) * NpcConstantsScript.CELL_SIZE)
 	var main = npc_system.get("main") if npc_system != null else null
 	if main != null and main.has_method("surface_y_at_position"):
@@ -855,16 +902,25 @@ func _update_outbound_job(entry: Dictionary, body: Node3D, timer: float) -> bool
 	if String(entry.get("jobObjectId", "")) == "":
 		_reserve_job_target(entry, target_node, "harvest_resource")
 	if _current_route_failure_blocks_forager(entry):
+		var blocked_job := String(entry.get("job", ""))
+		_mark_job_resource_target_unreachable(entry, target_node, blocked_job)
 		_release_job_reservation(entry, "route_blocked")
-		entry["jobPhase"] = "idle"
-		entry["jobTimer"] = 0.0
-		body.set_meta("npc_job_phase", "idle")
+		entry["jobTargetNode"] = null
+		entry["jobPhase"] = "searching"
+		entry["jobTarget"] = _choose_job_target(entry)
+		entry["jobTimer"] = _deterministic_seconds(entry, "resource_blocked_search", 2.0, 5.0)
+		entry["routeForceReplan"] = true
+		_set_npc_goal(entry, "search for %s" % String(entry.get("jobResource", "resource")))
+		body.set_meta("npc_job_phase", "searching")
 		return true
-	var target: Vector3 = entry.get("jobTarget", body.global_position)
-	var target_outside := not _point_inside_town(entry, target)
 	var job := String(entry.get("job", ""))
-	if job in ["wood", "stone"] and target_outside:
-		_release_job_reservation(entry, "outside_town_worker_target")
+	var target: Vector3 = entry.get("jobTarget", body.global_position)
+	var target_inside_town := _point_inside_town(entry, target)
+	var target_in_work_area := _point_inside_work_area(entry, target)
+	var outside_work_area_job := _resource_job_uses_outside_work_area(job)
+	if outside_work_area_job and (target_inside_town or not target_in_work_area):
+		var invalid_target_reason := "resource_target_inside_town" if target_inside_town else "resource_target_outside_work_area"
+		_release_job_reservation(entry, invalid_target_reason)
 		entry["jobTargetNode"] = null
 		entry["jobPhase"] = "idle"
 		entry["jobTimer"] = 0.0
@@ -872,7 +928,7 @@ func _update_outbound_job(entry: Dictionary, body: Node3D, timer: float) -> bool
 		body.set_meta("npc_job_phase", "idle")
 		return true
 	var route_arrived := String(entry.get("routeStatus", "")) == "arrived"
-	var can_gather_at_target := target_outside if job == "forage" else not target_outside
+	var can_gather_at_target := (target_in_work_area and not target_inside_town) if outside_work_area_job else target_inside_town
 	if can_gather_at_target and (route_arrived or body.global_position.distance_to(target) <= NpcConstantsScript.CELL_SIZE * 1.1):
 		entry["jobPhase"] = "gathering"
 		entry["jobTimer"] = _deterministic_seconds(entry, "resource_gather_duration", 1.8, 3.5)
@@ -888,6 +944,30 @@ func _update_outbound_job(entry: Dictionary, body: Node3D, timer: float) -> bool
 		entry["jobTimer"] = timer
 	return true
 
+func _update_searching_resource_job(entry: Dictionary, body: Node3D, timer: float) -> bool:
+	var job := String(entry.get("job", ""))
+	var route_blocked := String(entry.get("routeStatus", "")) == "blocked"
+	var search_arrived := String(entry.get("routeStatus", "")) == "arrived" or body.global_position.distance_to(entry.get("jobTarget", body.global_position)) <= NpcConstantsScript.CELL_SIZE * 1.2
+	if timer <= 0.0 or route_blocked or search_arrived:
+		var resource_target := _find_job_resource_target(entry, job)
+		if resource_target != null and _reserve_job_target(entry, resource_target, "harvest_resource"):
+			entry["jobPhase"] = "outbound"
+			entry["jobTimer"] = _deterministic_seconds(entry, "resource_outbound_timeout", 6.0, 12.0)
+			entry["routeForceReplan"] = true
+			_clear_home_route_terminal(entry)
+			_set_npc_goal(entry, "gather %s" % String(entry.get("jobResource", "resource")))
+			body.set_meta("npc_job_phase", "outbound")
+			return true
+		entry["jobTarget"] = _choose_job_target(entry)
+		entry["jobTimer"] = _deterministic_seconds(entry, "resource_search_roam", 2.0, 5.0)
+		entry["routeForceReplan"] = true
+		_clear_home_route_terminal(entry)
+		_set_npc_goal(entry, "search for %s" % String(entry.get("jobResource", "resource")))
+	else:
+		entry["jobTimer"] = timer
+	body.set_meta("npc_job_phase", "searching")
+	return true
+
 func _update_gathering_job(entry: Dictionary, body: Node3D, timer: float) -> bool:
 	if timer > 0.0:
 		entry["jobTimer"] = timer
@@ -895,8 +975,11 @@ func _update_gathering_job(entry: Dictionary, body: Node3D, timer: float) -> boo
 		return false
 	var job := String(entry.get("job", ""))
 	var inside_town := _point_inside_town(entry, body.global_position)
-	if (job == "forage" and inside_town) or (job in ["wood", "stone"] and not inside_town):
-		var invalid_reason := "inside_town_invalid_gather" if job == "forage" else "outside_town_worker_gather"
+	var inside_work_area := _point_inside_work_area(entry, body.global_position)
+	var outside_work_area_job := _resource_job_uses_outside_work_area(job)
+	var invalid_resource_gather := (outside_work_area_job and (inside_town or not inside_work_area)) or (not outside_work_area_job and not inside_town)
+	if invalid_resource_gather:
+		var invalid_reason := "inside_town_invalid_gather" if inside_town else "outside_work_area_invalid_gather"
 		_release_job_reservation(entry, invalid_reason)
 		entry["jobPhase"] = "outbound"
 		var replacement := _find_job_resource_target(entry, String(entry.get("job", "")))
@@ -1087,9 +1170,9 @@ func _update_forager_goal(entry: Dictionary, body: Node3D, delta: float) -> bool
 		if target_node != null and String(entry.get("jobObjectId", "")) == "":
 			_reserve_job_target(entry, target_node, "harvest_resource")
 		var target: Vector3 = entry.get("jobTarget", body.global_position)
-		var forage_action_reach := NpcConstantsScript.CELL_SIZE * 3.0
-		var vertical_ok := target_node == null or absf(body.global_position.y - target_node.global_position.y) <= NpcConstantsScript.CELL_SIZE * 2.0
-		var reached_target := body.global_position.distance_to(target) <= forage_action_reach
+		var forage_action_reach := _smart_object_action_reach(entry, NpcConstantsScript.CELL_SIZE * 2.50)
+		var vertical_ok := target_node == null or absf(body.global_position.y - target.y) <= NpcConstantsScript.CELL_SIZE * 2.0
+		var reached_target := _flat_distance(body.global_position, target) <= forage_action_reach
 		if target_node != null and vertical_ok and reached_target:
 			entry["jobPhase"] = "gathering"
 			entry["jobTimer"] = _deterministic_seconds(entry, "forage_gather_duration", 0.4, 0.8)
@@ -1331,6 +1414,19 @@ func _point_inside_town(entry: Dictionary, position: Vector3) -> bool:
 	var flat := Vector2(position.x - float(center.x) * NpcConstantsScript.CELL_SIZE, position.z - float(center.y) * NpcConstantsScript.CELL_SIZE)
 	return flat.length() <= radius
 
+func _point_inside_work_area(entry: Dictionary, position: Vector3) -> bool:
+	if npc_system != null and npc_system.has_method("point_inside_work_area"):
+		return bool(npc_system.call("point_inside_work_area", entry, position))
+	var center: Vector2i = entry.get("townCenter", Vector2i.ZERO)
+	var radius := (float(entry.get("townRadius", 18)) + 24.0) * NpcConstantsScript.CELL_SIZE
+	var flat := Vector2(position.x - float(center.x) * NpcConstantsScript.CELL_SIZE, position.z - float(center.y) * NpcConstantsScript.CELL_SIZE)
+	return flat.length() <= radius
+
+func _resource_job_uses_outside_work_area(job: String) -> bool:
+	if npc_system != null and npc_system.has_method("resource_job_uses_outside_work_area"):
+		return bool(npc_system.call("resource_job_uses_outside_work_area", job))
+	return job == "forage"
+
 func _find_job_resource_target(entry: Dictionary, job: String) -> Node3D:
 	var monitor = performance_monitor()
 	var start: int = monitor.begin_section("npc_find_job_resource_target") if monitor != null else Time.get_ticks_usec()
@@ -1422,6 +1518,10 @@ func _mark_forager_target_unreachable(entry: Dictionary, node: Node3D) -> void:
 	if npc_system != null and npc_system.has_method("mark_forager_target_unreachable"):
 		npc_system.call("mark_forager_target_unreachable", entry, node)
 
+func _mark_job_resource_target_unreachable(entry: Dictionary, node: Node3D, job: String) -> void:
+	if npc_system != null and npc_system.has_method("mark_job_resource_target_unreachable"):
+		npc_system.call("mark_job_resource_target_unreachable", entry, node, job)
+
 func _smart_object_approach_position(entry: Dictionary, target_node: Node3D) -> Vector3:
 	return npc_system.call("smart_object_approach_position", entry, target_node) if npc_system != null and npc_system.has_method("smart_object_approach_position") else entry.get("jobTarget", target_node.global_position if target_node != null else Vector3.ZERO)
 
@@ -1430,6 +1530,14 @@ func _complete_worker_resource_target(entry: Dictionary) -> bool:
 
 func _harvest_forager_target(entry: Dictionary) -> bool:
 	return bool(npc_system.call("harvest_forager_target", entry)) if npc_system != null and npc_system.has_method("harvest_forager_target") else _complete_worker_resource_target(entry)
+
+func _smart_object_action_reach(entry: Dictionary, fallback: float) -> float:
+	if npc_system == null or not npc_system.has_method("smart_object_action_reach"):
+		return fallback
+	return float(npc_system.call("smart_object_action_reach", String(entry.get("jobObjectId", "")), fallback))
+
+func _flat_distance(a: Vector3, b: Vector3) -> float:
+	return Vector2(a.x - b.x, a.z - b.z).length()
 
 func _complete_deposit_interaction(entry: Dictionary) -> bool:
 	return bool(npc_system.call("complete_deposit_interaction", entry)) if npc_system != null and npc_system.has_method("complete_deposit_interaction") else false

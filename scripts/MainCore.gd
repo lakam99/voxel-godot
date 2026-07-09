@@ -5,6 +5,7 @@ signal startup_loading_completed
 signal startup_loading_failed(message)
 
 const DEFAULT_VISUAL_STYLE := preload("res://resources/visual/gamecube_style.tres")
+const NpcConstantsScript := preload("res://scripts/npc_ai/NpcConstants.gd")
 const INITIAL_NAVMESH_PRIME_TILE_LIMIT := 32
 const INITIAL_NAV_CHANGE_DRAIN_EVENT_LIMIT := 64
 const INITIAL_NAV_CHANGE_DRAIN_ITERATION_LIMIT := 16
@@ -486,11 +487,60 @@ func prime_initial_navigation_snapshot_staged() -> void:
     navigation_world.call("build_snapshot", entry, true, false)
     await prime_initial_navigation_tiles_staged(navigation_world, entries)
 
+func initial_navigation_route_delegate():
+    if npc_system == null:
+        return null
+    var pathing = npc_system.get("pathing")
+    if pathing == null:
+        return null
+    var coordinator = pathing.get("coordinator")
+    if coordinator == null:
+        return null
+    return coordinator.get("route_delegate")
+
+func publish_startup_navmesh_tile(navigation_world, route_delegate, tile_key: String) -> bool:
+    if navigation_world == null or route_delegate == null or tile_key == "":
+        return false
+    if not navigation_world.has_method("build_navmesh_tile_snapshot"):
+        return false
+    var navmesh_world = route_delegate.get("navmesh_world")
+    if navmesh_world == null or not navmesh_world.has_method("register_tile_snapshot"):
+        return false
+    var snapshot: Dictionary = navigation_world.call("build_navmesh_tile_snapshot", tile_key)
+    if snapshot.is_empty():
+        return false
+    var result: Dictionary = navmesh_world.call("register_tile_snapshot", snapshot)
+    if navmesh_world.has_method("sync_navigation_map_if_dirty"):
+        navmesh_world.call("sync_navigation_map_if_dirty")
+    var status := String(result.get("status", ""))
+    return bool(result.get("installed", false)) or status in ["installed", "updated", "registered"]
+
 func prime_initial_navigation_tiles_staged(navigation_world, entries: Array) -> void:
-    # Route requests publish the exact navmesh tiles they need through the
-    # frame-budgeted route coordinator. Startup must not enqueue broad tile work
-    # that can immediately stall the first gameplay frame.
-    return
+    if not NpcConstantsScript.NPC_NAV_ENABLE_STARTUP_TILE_PRIMING:
+        return
+    if navigation_world == null:
+        return
+
+    var route_delegate = initial_navigation_route_delegate()
+    if route_delegate == null:
+        return
+
+    var tile_keys := {}
+    for entry_value in entries:
+        if tile_keys.size() >= INITIAL_NAVMESH_PRIME_TILE_LIMIT:
+            break
+        if entry_value is Dictionary:
+            prime_navigation_tiles_for_entry(navigation_world, entry_value, tile_keys)
+
+    var total := mini(tile_keys.size(), INITIAL_NAVMESH_PRIME_TILE_LIMIT)
+    var published := 0
+    for tile_key_value in tile_keys.keys():
+        if published >= INITIAL_NAVMESH_PRIME_TILE_LIMIT:
+            break
+        var tile_key := String(tile_key_value)
+        await startup_loading_yield("Preparing NPC route tiles %d/%d" % [published, total])
+        if publish_startup_navmesh_tile(navigation_world, route_delegate, tile_key):
+            published += 1
 
 func playtest_progress(label: String) -> void:
     var path: String = OS.get_environment("VOXEL_PLAYTEST_PROGRESS")
@@ -548,9 +598,28 @@ func drain_initial_navigation_changes() -> void:
         iterations += 1
 
 func prime_initial_navigation_tiles(navigation_world, entries: Array) -> void:
-    # See staged variant above. Initial static snapshot warming is enough for
-    # boot; tile publication is handled by live route demand.
-    return
+    if not NpcConstantsScript.NPC_NAV_ENABLE_STARTUP_TILE_PRIMING:
+        return
+    if navigation_world == null:
+        return
+
+    var route_delegate = initial_navigation_route_delegate()
+    if route_delegate == null:
+        return
+
+    var tile_keys := {}
+    for entry_value in entries:
+        if tile_keys.size() >= INITIAL_NAVMESH_PRIME_TILE_LIMIT:
+            break
+        if entry_value is Dictionary:
+            prime_navigation_tiles_for_entry(navigation_world, entry_value, tile_keys)
+
+    var published := 0
+    for tile_key_value in tile_keys.keys():
+        if published >= INITIAL_NAVMESH_PRIME_TILE_LIMIT:
+            break
+        if publish_startup_navmesh_tile(navigation_world, route_delegate, String(tile_key_value)):
+            published += 1
 
 func prime_navigation_tiles_for_entry(navigation_world, npc_entry: Dictionary, tile_keys: Dictionary) -> void:
     var body := npc_entry.get("body") as Node3D

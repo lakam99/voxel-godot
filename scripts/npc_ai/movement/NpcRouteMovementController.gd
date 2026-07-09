@@ -106,6 +106,8 @@ func move(entry: Dictionary, intent: Dictionary, max_distance: float, planner, w
                 release_stale_active_door_route(entry)
                 set_route_status(entry, "waiting", "active_door_replan")
                 return { "moved": 0.0, "status": "waiting", "reason": "active_door_replan" }
+            if String(route.get("status", "")) != "pending":
+                record_blocked_endpoint_cell(entry, route)
             set_route_status(entry, String(route.get("status", "blocked")), route_failure_reason)
             if String(route.get("status", "")) != "pending":
                 count_unreachable_once(entry, intent, route_failure_reason)
@@ -944,18 +946,53 @@ func prune_dynamic_route_avoidance(entry: Dictionary) -> void:
     entry.erase("routeDynamicAvoidUntilFrame")
 
 func route_reuse_revision(world) -> String:
-    if world != null and world.has_method("navmesh_tile_source_key"):
-        return String(world.navmesh_tile_source_key())
     if world != null and world.has_method("revision"):
         return String(world.revision())
+    if world != null and world.has_method("navmesh_tile_source_key"):
+        return String(world.navmesh_tile_source_key())
     return ""
+
+func active_route_drifted_from_position(entry: Dictionary, current_waypoints: Array, start_position: Vector3, world) -> bool:
+    if current_waypoints.is_empty():
+        return false
+    if world == null or not world.has_method("world_cell"):
+        return false
+
+    var current_cell: Vector2i = world.world_cell(start_position)
+    var stored_current_cell_value = entry.get("routeLastKnownCell", current_cell)
+    var stored_current_cell: Vector2i = stored_current_cell_value if stored_current_cell_value is Vector2i else current_cell
+    entry["routeLastKnownCell"] = current_cell
+
+    # Normal movement changes cells. Drift means the actor is no longer near
+    # the next remaining waypoint.
+    var first_waypoint_value = current_waypoints[0]
+    if not (first_waypoint_value is Vector3):
+        return true
+
+    var first_waypoint: Vector3 = first_waypoint_value
+    var distance_to_first := start_position.distance_to(first_waypoint)
+    if distance_to_first > CELL * 4.0:
+        var last_cell_distance := absi(current_cell.x - stored_current_cell.x) + absi(current_cell.y - stored_current_cell.y)
+        if last_cell_distance > 2:
+            return true
+
+    return false
 
 func ensure_route(entry: Dictionary, intent: Dictionary, planner, world) -> Dictionary:
     prune_dynamic_route_avoidance(entry)
     var monitor = performance_monitor()
     var route_key_start: int = monitor.begin_section("npc_route_key_eval") if monitor != null else Time.get_ticks_usec()
     var target_cell: Vector2i = intent.get("targetCell", world.world_cell(intent.get("target", Vector3.ZERO)))
-    var route_key: String = "%s:%d,%d:%s:%s:%s:%s:%.3f" % [
+    var body := entry.get("body") as Node3D
+    var start_position: Vector3 = body.global_position if body != null and is_instance_valid(body) else entry.get("position", entry.get("porchPosition", intent.get("target", Vector3.ZERO)))
+    var start_cell: Vector2i = world.world_cell(start_position)
+    var current_waypoints: Array = entry.get("pathWaypoints", []) if entry.get("pathWaypoints", []) is Array else []
+    var has_active_route := not current_waypoints.is_empty()
+    var route_key_start_cell: Vector2i = start_cell
+    if has_active_route and entry.get("routeStartCell", null) is Vector2i:
+        route_key_start_cell = entry.get("routeStartCell", start_cell)
+
+    var goal_key: String = "%s:%d,%d:%s:%s:%s:%s:%.3f" % [
         String(intent.get("kind", "move")),
         target_cell.x,
         target_cell.y,
@@ -965,6 +1002,11 @@ func ensure_route(entry: Dictionary, intent: Dictionary, planner, world) -> Dict
         str(bool(intent.get("strictArrival", false))),
         float(intent.get("arrivalRadius", CELL * 0.75))
     ]
+    var route_key: String = "%d,%d->%s" % [
+        route_key_start_cell.x,
+        route_key_start_cell.y,
+        goal_key
+    ]
     if monitor != null:
         monitor.end_section("npc_route_key_eval", route_key_start)
     var revision_start: int = monitor.begin_section("npc_route_reuse_revision") if monitor != null else Time.get_ticks_usec()
@@ -973,19 +1015,29 @@ func ensure_route(entry: Dictionary, intent: Dictionary, planner, world) -> Dict
         monitor.end_section("npc_route_reuse_revision", revision_start)
     var stored_route_key := String(entry.get("routeKey", ""))
     var pending_route_key := String(entry.get("routePendingKey", ""))
+    var stored_goal_key := String(entry.get("routeGoalKey", ""))
+    var pending_goal_key := String(entry.get("routePendingGoalKey", ""))
     var comparison_route_key := stored_route_key if stored_route_key != "" else pending_route_key
+    var comparison_goal_key := stored_goal_key if stored_goal_key != "" else pending_goal_key
+    if comparison_goal_key == "" and comparison_route_key != "":
+        var route_goal_separator := comparison_route_key.find("->")
+        comparison_goal_key = comparison_route_key.substr(route_goal_separator + 2) if route_goal_separator >= 0 else comparison_route_key
     var comparison_snapshot_revision := String(entry.get("routeSnapshotRevision", ""))
     if comparison_snapshot_revision == "" and pending_route_key != "":
         comparison_snapshot_revision = String(entry.get("routePendingSnapshotRevision", ""))
     var route_known := comparison_route_key != ""
-    var current_waypoints: Array = entry.get("pathWaypoints", [])
+    var cached_lease: Dictionary = entry.get("routeLease", {}) if entry.get("routeLease", {}) is Dictionary else {}
+    var cached_route_missing_lease := not current_waypoints.is_empty() and cached_lease.is_empty()
     var cached_status := String(entry.get("routeStatus", "idle"))
     var empty_route_waiting_for_reason := current_waypoints.is_empty() and cached_status in ["blocked", "waiting"]
-    var route_key_changed := comparison_route_key != route_key
+    var goal_key_changed := comparison_goal_key != goal_key
+    var active_route_drifted := active_route_drifted_from_position(entry, current_waypoints, start_position, world)
+    var route_key_changed := goal_key_changed or active_route_drifted or (current_waypoints.is_empty() and comparison_route_key != route_key)
     var snapshot_revision_changed := comparison_snapshot_revision != snapshot_revision
     var needs_route: bool = bool(entry.get("routeForceReplan", false))
     needs_route = needs_route or route_key_changed
     needs_route = needs_route or snapshot_revision_changed
+    needs_route = needs_route or cached_route_missing_lease
     var cached_reason := String(entry.get("routeReason", ""))
     var transient_empty_route := cached_reason in [
         "empty_route",
@@ -1007,10 +1059,27 @@ func ensure_route(entry: Dictionary, intent: Dictionary, planner, world) -> Dict
         entry["routeCells"] = []
         entry["routeActions"] = {}
         current_waypoints = []
+    if cached_route_missing_lease:
+        entry["pathWaypoints"] = []
+        entry["routeCells"] = []
+        entry["routeActions"] = {}
+        entry.erase("routeLease")
+        entry.erase("routeLeaseId")
+        current_waypoints = []
     if needs_route and current_waypoints.is_empty() and cached_status == "pending" and not route_key_changed and not snapshot_revision_changed:
         var retry_frame := int(entry.get("routePendingRetryFrame", -1))
         var current_frame := Engine.get_physics_frames()
-        if retry_frame > current_frame:
+        var ticket_state := String(entry.get("routeTicketState", ""))
+        var ticket_resolved := NpcConstantsScript.NPC_NAV_ENABLE_ROUTE_TICKET_PIPELINE and ticket_state in [
+            "ready",
+            "following",
+            "failed_invalid_goal",
+            "failed_unreachable",
+            "cancelled",
+            "invalidated",
+            "failed_internal"
+        ]
+        if retry_frame > current_frame and not ticket_resolved:
             if monitor != null:
                 monitor.increment_counter("route_pending_backoff")
             return {
@@ -1062,10 +1131,27 @@ func ensure_route(entry: Dictionary, intent: Dictionary, planner, world) -> Dict
     if monitor != null:
         monitor.end_section("npc_route_planner_call", planner_start)
     entry["lastRoutePlanDebug"] = compact_route_plan_debug(route)
+    var route_has_authority := route.has("routeAuthorityState")
+    if route_has_authority and bool(route.get("routeAuthorityReady", false)):
+        var route_lease: Dictionary = route.get("routeLease", {}) if route.get("routeLease", {}) is Dictionary else {}
+        if route_lease.is_empty():
+            route["ok"] = false
+            route["status"] = "pending"
+            route["reason"] = "missing_route_lease"
+            route["routeAuthorityState"] = "pending_probe"
+            route["routeAuthorityReady"] = false
+    if route_has_authority and not bool(route.get("routeAuthorityReady", false)):
+        var authority_state := String(route.get("routeAuthorityState", ""))
+        if authority_state in ["pending_nav_data", "pending_budget", "pending_probe"]:
+            route["status"] = "pending"
+        elif String(route.get("status", "")) not in ["pending", "blocked"]:
+            route["status"] = "blocked"
     if String(route.get("status", "")) == "pending":
         entry["routeForceReplan"] = true
         entry["routePendingKey"] = route_key
         entry["routePendingSnapshotRevision"] = snapshot_revision
+        entry["routePendingGoalKey"] = goal_key
+        entry["routePendingStartCell"] = start_cell
         entry["routePendingRetryFrame"] = Engine.get_physics_frames() + pending_route_retry_frames(entry, intent, String(route.get("reason", "route_pending")))
         var critical_pending_route := bool(intent.get("movingHome", false)) or String(intent.get("kind", "")) in ["home", "scripted"]
         var cached_fallback_cell: Vector2i = entry.get("routeFallbackCell", target_cell)
@@ -1107,14 +1193,25 @@ func ensure_route(entry: Dictionary, intent: Dictionary, planner, world) -> Dict
     entry.erase("routePendingRetryFrame")
     entry.erase("routePendingKey")
     entry.erase("routePendingSnapshotRevision")
+    entry.erase("routePendingGoalKey")
+    entry.erase("routePendingStartCell")
     entry["routeKey"] = route_key
     entry["routeGoalCell"] = target_cell
+    entry["routeGoalKey"] = goal_key
+    entry["routeStartCell"] = start_cell
+    entry["routeLastKnownCell"] = start_cell
     entry["routeAllowOutside"] = bool(intent.get("allowOutside", false))
     entry["routeMovingHome"] = bool(intent.get("movingHome", false))
     entry["routeSnapshotRevision"] = snapshot_revision
     entry["routeCells"] = (route.get("cells", []) as Array).duplicate()
     entry["pathWaypoints"] = (route.get("waypoints", []) as Array).duplicate()
     entry["routeActions"] = (route.get("actions", {}) as Dictionary).duplicate()
+    if route.get("routeLease", {}) is Dictionary and not (route.get("routeLease", {}) as Dictionary).is_empty():
+        entry["routeLease"] = (route.get("routeLease", {}) as Dictionary).duplicate(true)
+        entry["routeLeaseId"] = String(route.get("routeLeaseId", ""))
+    else:
+        entry.erase("routeLease")
+        entry.erase("routeLeaseId")
     entry["routeFallbackCell"] = route.get("fallbackCell", target_cell)
     if bool(route.get("ok", false)) and not (route.get("waypoints", []) as Array).is_empty():
         entry["routeRetryTicks"] = 0
@@ -1127,6 +1224,7 @@ func ensure_route(entry: Dictionary, intent: Dictionary, planner, world) -> Dict
             entry.erase("routeFailureRetryFrame")
     if bool(route.get("ok", false)) and not (route.get("waypoints", []) as Array).is_empty():
         increment_route_replan(entry)
+    record_blocked_endpoint_cell(entry, route)
     set_route_status(entry, String(route.get("status", "blocked")), String(route.get("reason", "")))
     if String(route.get("status", "")) == "partial":
         count_unreachable_once(entry, intent, String(route.get("reason", "partial_route")))
@@ -1178,8 +1276,14 @@ func compact_route_plan_debug(route: Dictionary) -> Dictionary:
         "navmeshFallbackReason": String(route.get("navmeshFallbackReason", "")),
 		"status": String(route.get("status", "")),
 		"reason": String(route.get("reason", "")),
-		"intentKind": String(route.get("intentKind", "")),
+        "intentKind": String(route.get("intentKind", "")),
 		"intentPriority": int(route.get("intentPriority", 0)),
+		"routeAuthorityState": String(route.get("routeAuthorityState", "")),
+		"routeAuthorityReason": String(route.get("routeAuthorityReason", "")),
+		"routeAuthorityReady": bool(route.get("routeAuthorityReady", false)),
+		"routeLeaseId": String(route.get("routeLeaseId", "")),
+		"probeCertificate": route.get("probeCertificate", {}),
+		"probeRepair": route.get("probeRepair", navmesh_route.get("probeRepair", {})),
 		"routeBudgetWaitFrames": int(route.get("routeBudgetWaitFrames", 0)),
 		"targetCell": _compact_vector2i_debug(route.get("targetCell", Vector2i(999999, 999999))),
 		"fallbackCell": _compact_vector2i_debug(route.get("fallbackCell", Vector2i(999999, 999999))),
@@ -1203,7 +1307,8 @@ func compact_route_plan_debug(route: Dictionary) -> Dictionary:
         "validation": _compact_validation_debug(navmesh_route.get("validation", {})),
         "generatedCellBridgeUsed": generated_bridge_used,
         "generatedCellBridge": _compact_generated_cell_bridge_debug(navmesh_route.get("generatedCellBridge", route.get("generatedCellBridge", {}))),
-        "fallbackAttempts": navmesh_route.get("fallbackAttempts", []),
+        "exactCollisionLatticeRoute": _compact_exact_collision_lattice_debug(route.get("exactCollisionLatticeRoute", navmesh_route.get("exactCollisionLatticeRoute", {}))),
+        "fallbackAttempts": navmesh_route.get("fallbackAttempts", route.get("fallbackAttempts", [])),
         "generatedFallback": compact_generated_fallback_debug(route.get("generatedFallbackRoute", {})),
         "typed": compact_typed_route_debug(route.get("typedResult")),
         "durationUsec": int(navmesh_route.get("durationUsec", 0))
@@ -1234,6 +1339,25 @@ func _compact_generated_cell_bridge_debug(bridge_value) -> Dictionary:
         "goals": int(bridge.get("goals", 0)),
         "visited": int(bridge.get("visited", 0)),
         "blockedReasons": (bridge.get("blockedReasons", {}) as Dictionary).duplicate() if bridge.get("blockedReasons", {}) is Dictionary else {}
+    }
+
+func _compact_exact_collision_lattice_debug(lattice_value) -> Dictionary:
+    if not (lattice_value is Dictionary):
+        return {}
+    var lattice: Dictionary = lattice_value
+    var cells: Array = lattice.get("cells", []) if lattice.get("cells", []) is Array else []
+    var cell_sample := []
+    for index in range(mini(cells.size(), 12)):
+        cell_sample.append(_compact_vector2i_debug(cells[index]))
+    return {
+        "ok": bool(lattice.get("ok", false)),
+        "reason": String(lattice.get("reason", "")),
+        "visited": int(lattice.get("visited", 0)),
+        "cells": cells.size(),
+        "cellSample": cell_sample,
+        "blockedReasons": (lattice.get("blockedReasons", {}) as Dictionary).duplicate() if lattice.get("blockedReasons", {}) is Dictionary else {},
+        "exactTarget": bool(lattice.get("exactTarget", false)),
+        "validation": _compact_validation_debug(lattice.get("validation", {}))
     }
 
 func _compact_endpoint_debug(endpoint_value) -> Dictionary:
@@ -1424,6 +1548,18 @@ func route_cell_behind_active_door(cell: Vector2i, current_cell: Vector2i, direc
     return false
 
 func release_stale_active_door_route(entry: Dictionary) -> void:
+    if active_door_hold_must_continue(entry):
+        entry["lastActiveDoorReleaseSuppressed"] = {
+            "reason": "actor_still_in_portal",
+            "portalId": String(entry.get("activeDoorPortalId", "")),
+            "frame": Engine.get_physics_frames()
+        }
+        entry["pathWaypoints"] = []
+        entry["routeCells"] = []
+        entry["routeActions"] = {}
+        entry["routeForceReplan"] = false
+        entry.erase("portalRecenterTicks")
+        return
     var actor_id := String(entry.get("activeDoorActorId", entry.get("id", "")))
     if system != null and system.has_method("release_npc_door_hold") and actor_id != "":
         system.release_npc_door_hold(actor_id, true)
@@ -1437,6 +1573,14 @@ func release_stale_active_door_route(entry: Dictionary) -> void:
     entry["routeForceReplan"] = true
     entry.erase("_activeDoorForwardStep")
     entry.erase("portalRecenterTicks")
+
+func active_door_hold_must_continue(entry: Dictionary) -> bool:
+    var portal_id := String(entry.get("activeDoorPortalId", ""))
+    if portal_id == "":
+        return false
+    if system != null and system.has_method("route_still_needs_active_door"):
+        return bool(system.call("route_still_needs_active_door", entry, portal_id))
+    return false
 
 func seed_active_door_forward_step(entry: Dictionary, world) -> bool:
     var direction := String(entry.get("activeDoorDirection", ""))
@@ -2325,6 +2469,40 @@ func count_unreachable_once(entry: Dictionary, intent: Dictionary, reason: Strin
     entry["unreachableGoals"] = int(entry.get("unreachableGoals", 0)) + 1
     if system != null:
         system.npc_unreachable_goals += 1
+
+func record_blocked_endpoint_cell(entry: Dictionary, route: Dictionary) -> void:
+    var reason := String(route.get("reason", ""))
+    var authority := String(route.get("routeAuthorityState", ""))
+    var collision_failure := reason in ["blocked_capsule_probe", "path_crosses_static_collision", "blocked_static_collision", "blocked_static_transition"]
+    var terminal_endpoint_failure := authority in ["unreachable_static", "invalid_goal"] and reason in [
+        "blocked_capsule_probe",
+        "path_endpoint_mismatch",
+        "target_blocked",
+        "endpoint_not_server_walkable",
+        "no_target_server_walkable"
+    ]
+    if not (collision_failure or terminal_endpoint_failure):
+        return
+    var target_cell := route_cell_from_value(route.get("targetCell", Vector2i(999999, 999999)))
+    if target_cell == Vector2i(999999, 999999):
+        return
+    var memory: Dictionary = entry.get("blockedEndpointCells", {}) if entry.get("blockedEndpointCells", {}) is Dictionary else {}
+    memory["%d,%d" % [target_cell.x, target_cell.y]] = {
+        "frame": Engine.get_process_frames(),
+        "reason": reason
+    }
+    entry["blockedEndpointCells"] = memory
+
+func route_cell_from_value(value) -> Vector2i:
+    if value is Vector2i:
+        return value
+    if value is Dictionary:
+        var dict: Dictionary = value
+        return Vector2i(int(dict.get("x", 999999)), int(dict.get("z", dict.get("y", 999999))))
+    if value is Array and (value as Array).size() >= 2:
+        var array_value: Array = value
+        return Vector2i(int(array_value[0]), int(array_value[1]))
+    return Vector2i(999999, 999999)
 
 func flat_distance(a: Vector3, b: Vector3) -> float:
     return Vector2(a.x - b.x, a.z - b.z).length()

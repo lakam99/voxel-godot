@@ -13,6 +13,7 @@ const GeneratedWorldNavigationAdapterScript := preload("res://scripts/npc_ai/nav
 const HierarchicalRoutePlannerScript := preload("res://scripts/npc_ai/routing/HierarchicalRoutePlanner.gd")
 const NavmeshRoutePlannerScript := preload("res://scripts/npc_ai/routing/NavmeshRoutePlanner.gd")
 const NpcRouteCoordinatorAdapterScript := preload("res://scripts/npc_ai/routing/NpcRouteCoordinatorAdapter.gd")
+const CollisionProbeServiceScript := preload("res://scripts/npc_ai/routing/CollisionProbeService.gd")
 const CELL := NpcConstantsScript.CELL_SIZE
 
 var runner = null
@@ -55,6 +56,12 @@ class FakeNavmeshRouteService:
 	func stats() -> Dictionary:
 		return { "pathQueryCount": query_count }
 
+class GeneratedFallbackWorld:
+	extends RefCounted
+
+	func world_cell(position: Vector3) -> Vector2i:
+		return Vector2i(roundi(position.x / 1.35), roundi(position.z / 1.35))
+
 func setup(owner) -> void:
 	runner = owner
 
@@ -84,9 +91,17 @@ func cases() -> Array[Dictionary]:
 		["npc_route_navmesh_adapter_no_legacy_fallback", "test_route_navmesh_adapter_no_legacy_fallback"],
 		["npc_route_routine_jobs_do_not_use_generated_cell_bridge", "test_route_routine_jobs_do_not_use_generated_cell_bridge"],
 		["npc_route_runtime_planner_rejects_generated_cell_bridge", "test_route_runtime_planner_rejects_generated_cell_bridge"],
+		["npc_route_generated_fallback_open_terrain_only", "test_route_generated_fallback_open_terrain_only"],
+		["npc_route_generated_fallback_rejects_no_progress_partial", "test_route_generated_fallback_rejects_no_progress_partial"],
+		["npc_route_probe_start_overlap_escape_outward_only", "test_route_probe_start_overlap_escape_outward_only"],
+		["npc_route_probe_repair_cell_bridge_uses_fallback_goal", "test_route_probe_repair_cell_bridge_uses_fallback_goal"],
 		["npc_route_runtime_door_uses_group_portal_id", "test_route_runtime_door_uses_group_portal_id"],
 		["npc_route_collision_boundary_blocks_open_destination", "test_route_collision_boundary_blocks_open_destination"],
 		["npc_route_collision_occupied_cell_blocks_node", "test_route_collision_occupied_cell_blocks_node"],
+		["npc_route_navmesh_surfaces_exclude_collision_occupied_cells", "test_route_navmesh_surfaces_exclude_collision_occupied_cells"],
+		["npc_route_home_collision_lattice_exact_detour", "test_route_home_collision_lattice_exact_detour"],
+		["npc_route_home_collision_lattice_recenters_off_cell_start", "test_route_home_collision_lattice_recenters_off_cell_start"],
+		["npc_route_home_egress_uses_exact_collision_lattice", "test_route_home_egress_uses_exact_collision_lattice"],
 		["npc_route_collision_door_requires_portal_axis", "test_route_collision_door_requires_portal_axis"],
 		["npc_route_collision_rejects_diagonal_corner_cut", "test_route_collision_rejects_diagonal_corner_cut"],
 		["npc_route_navmesh_post_validation_rejects_wall_cross", "test_route_navmesh_post_validation_rejects_wall_cross"],
@@ -521,6 +536,196 @@ func test_route_runtime_planner_rejects_generated_cell_bridge(_mode: String) -> 
 		passed = passed and not allowed and not initial_allowed and generated_route.is_empty()
 	return outcome(passed, "runtimeBridge=%s" % JSON.stringify(results), ["runtime_planner_rejects_cell_bridge", "npc_routes_require_collision_navmesh"], { "results": results })
 
+func test_route_generated_fallback_open_terrain_only(_mode: String) -> Dictionary:
+	var adapter = NpcRouteCoordinatorAdapterScript.new()
+	adapter.world = GeneratedFallbackWorld.new()
+	adapter.navmesh_planner = RefCounted.new()
+	var body := Node3D.new()
+	body.global_position = Vector3.ZERO
+	var entry := {
+		"id": "test-open-forager",
+		"body": body,
+		"insideHome": false,
+		"activeDoorPortalId": "",
+		"doorCell": Vector2i(100, 100),
+		"porchCell": Vector2i(100, 101),
+		"homeCell": Vector2i(101, 100)
+	}
+	var open_intent := {
+		"kind": "forage",
+		"target": Vector3(CELL * 6.0, 0.0, 0.0),
+		"targetCell": Vector2i(6, 0),
+		"movingHome": false,
+		"allowOutside": true
+	}
+	var home_intent := open_intent.duplicate(true)
+	home_intent["kind"] = "home"
+	home_intent["movingHome"] = true
+	var inside_entry := entry.duplicate(true)
+	inside_entry["insideHome"] = true
+	var door_adjacent_entry := entry.duplicate(true)
+	door_adjacent_entry["doorCell"] = Vector2i(1, 0)
+	var long_intent := open_intent.duplicate(true)
+	long_intent["target"] = Vector3(CELL * 40.0, 0.0, 0.0)
+	long_intent["targetCell"] = Vector2i(40, 0)
+	var action_intent := open_intent.duplicate(true)
+	action_intent["action"] = "open_door"
+
+	var planner = NavmeshRoutePlannerScript.new()
+	var flagged_open_intent := open_intent.duplicate(true)
+	flagged_open_intent["safeOpenTerrainGeneratedFallback"] = true
+	var flagged_home_intent := home_intent.duplicate(true)
+	flagged_home_intent["safeOpenTerrainGeneratedFallback"] = true
+	var results := {
+		"home": bool(adapter._should_try_generated_cell_home_route(entry, home_intent)),
+		"insideHome": bool(adapter._should_try_generated_cell_job_route(inside_entry, open_intent)),
+		"doorAdjacent": bool(adapter._should_try_generated_cell_job_route(door_adjacent_entry, open_intent)),
+		"longRoute": bool(adapter._should_try_generated_cell_job_route(entry, long_intent)),
+		"explicitAction": bool(adapter._should_try_generated_cell_job_route(entry, action_intent)),
+		"openForage": bool(adapter._should_try_generated_cell_job_route(entry, open_intent)),
+		"openForagePrebudget": bool(adapter._should_try_prebudget_forage_departure_route(entry, open_intent)),
+		"plannerUnflagged": bool(planner._generated_cell_bridge_allowed_for_intent(open_intent)),
+		"plannerFlaggedOpen": bool(planner._generated_cell_bridge_allowed_for_intent(flagged_open_intent)),
+		"plannerFlaggedHome": bool(planner._generated_cell_bridge_allowed_for_intent(flagged_home_intent))
+	}
+	body.free()
+	var passed := not bool(results["home"]) \
+		and not bool(results["insideHome"]) \
+		and not bool(results["doorAdjacent"]) \
+		and not bool(results["longRoute"]) \
+		and not bool(results["explicitAction"]) \
+		and bool(results["openForage"]) \
+		and bool(results["openForagePrebudget"]) \
+		and not bool(results["plannerUnflagged"]) \
+		and bool(results["plannerFlaggedOpen"]) \
+		and not bool(results["plannerFlaggedHome"])
+	return outcome(
+		passed,
+		"generatedFallbackGuard=%s" % JSON.stringify(results),
+		["home_route_fallback_disabled", "inside_home_fallback_disabled", "door_adjacent_fallback_disabled", "open_terrain_forage_fallback_enabled"],
+		{ "results": results }
+	)
+
+func test_route_generated_fallback_rejects_no_progress_partial(_mode: String) -> Dictionary:
+	var setup := collision_adapter_with_blocks([])
+	var adapter = setup.get("adapter")
+	var body := setup.get("body") as Node3D
+	var start_cell := Vector2i.ZERO
+	var target_cell := Vector2i(4, 0)
+	body.position = adapter.cell_position(start_cell)
+	body.global_position = body.position
+	var entry := {
+		"id": "generated-no-progress-guard",
+		"body": body,
+		"insideHome": false,
+		"townCenter": Vector2i.ZERO,
+		"townRadius": 128,
+		"porchPosition": adapter.cell_position(start_cell)
+	}
+	var intent := {
+		"kind": "guard",
+		"target": adapter.cell_position(target_cell),
+		"targetCell": target_cell,
+		"allowOutside": true,
+		"movingHome": false,
+		"arrivalRadius": CELL * 0.72,
+		"allowPartial": true,
+		"safeOpenTerrainGeneratedFallback": true,
+		"fallbackCells": [start_cell],
+		"priority": 170
+	}
+	var failed_route := {
+		"ok": false,
+		"status": "blocked",
+		"reason": "navmesh_tile_budget",
+		"source": "navmesh",
+		"targetCell": target_cell
+	}
+	var planner = NavmeshRoutePlannerScript.new()
+	planner.setup(null, null, null, adapter)
+	var route: Dictionary = planner.plan_generated_cell_route(entry, intent, adapter)
+	var bridge_debug: Dictionary = failed_route.get("generatedCellBridge", {}) if failed_route.get("generatedCellBridge", {}) is Dictionary else {}
+	var direct_failed_route := failed_route.duplicate(true)
+	var direct_route: Dictionary = planner._plan_generated_cell_bridge_route(entry, intent, adapter, start_cell, target_cell, direct_failed_route)
+	var direct_debug: Dictionary = direct_failed_route.get("generatedCellBridge", {}) if direct_failed_route.get("generatedCellBridge", {}) is Dictionary else {}
+	var passed: bool = route.is_empty() \
+		and direct_route.is_empty() \
+		and String(direct_debug.get("reason", "")) == "generated_cell_bridge_no_progress" \
+		and direct_debug.get("fallbackCell", Vector2i(999999, 999999)) == start_cell
+	free_collision_setup(setup)
+	return outcome(
+		passed,
+		"route=%s bridge=%s direct=%s directBridge=%s" % [JSON.stringify(route), JSON.stringify(bridge_debug), JSON.stringify(direct_route), JSON.stringify(direct_debug)],
+		["generated_fallback_partial_requires_forward_progress", "no_progress_partial_not_authority_candidate"],
+		{ "route": navmesh_route_dictionary_summary(route), "directRoute": navmesh_route_dictionary_summary(direct_route), "directBridge": direct_debug }
+	)
+
+func test_route_probe_start_overlap_escape_outward_only(_mode: String) -> Dictionary:
+	var service = CollisionProbeServiceScript.new()
+	var body := CharacterBody3D.new()
+	var current_sample := Vector3(CELL * 0.34, 0.0, 0.0)
+	body.position = current_sample
+	body.global_position = current_sample
+	var block := collision_block(Vector2i.ZERO, "stoneBlock")
+	block.position = Vector3.ZERO
+	block.global_position = Vector3.ZERO
+	var door := collision_door(Vector2i.ZERO)
+	door.position = Vector3.ZERO
+	door.global_position = Vector3.ZERO
+	var outward_sample := Vector3(CELL * 0.90, 0.0, 0.0)
+	var inward_sample := Vector3(CELL * 0.12, 0.0, 0.0)
+	var lateral_sample := Vector3(CELL * 0.34, 0.0, CELL * 0.90)
+	var supports_block_escape: bool = service._collider_type_supports_start_overlap_escape(block)
+	var supports_door_escape: bool = service._collider_type_supports_start_overlap_escape(door)
+	var outward_allowed: bool = service._sample_moves_away_from_collider(block, current_sample, outward_sample)
+	var inward_allowed: bool = service._sample_moves_away_from_collider(block, current_sample, inward_sample)
+	var lateral_allowed: bool = service._sample_moves_away_from_collider(block, current_sample, lateral_sample)
+	var current_distance: float = service._flat_distance_to_collider(block, current_sample)
+	var outward_distance: float = service._flat_distance_to_collider(block, outward_sample)
+	var inward_distance: float = service._flat_distance_to_collider(block, inward_sample)
+	var lateral_distance: float = service._flat_distance_to_collider(block, lateral_sample)
+	var passed := supports_block_escape \
+		and not supports_door_escape \
+		and outward_allowed \
+		and not inward_allowed \
+		and not lateral_allowed
+	body.free()
+	block.free()
+	door.free()
+	return outcome(
+		passed,
+		"blockEscape=%s doorEscape=%s outward=%s inward=%s lateral=%s distances=%.3f/%.3f/%.3f/%.3f" % [str(supports_block_escape), str(supports_door_escape), str(outward_allowed), str(inward_allowed), str(lateral_allowed), current_distance, outward_distance, inward_distance, lateral_distance],
+		["probe_escape_only_for_static_start_overlap", "probe_escape_requires_outward_motion", "door_overlap_not_silently_escaped"],
+		{
+			"supportsBlockEscape": supports_block_escape,
+			"supportsDoorEscape": supports_door_escape,
+			"outwardAllowed": outward_allowed,
+			"inwardAllowed": inward_allowed,
+			"lateralAllowed": lateral_allowed,
+			"currentDistance": current_distance,
+			"outwardDistance": outward_distance,
+			"inwardDistance": inward_distance,
+			"lateralDistance": lateral_distance
+		}
+	)
+
+func test_route_probe_repair_cell_bridge_uses_fallback_goal(_mode: String) -> Dictionary:
+	var planner = NavmeshRoutePlannerScript.new()
+	var target_cell := Vector2i(10, 0)
+	var fallback_cell := Vector2i(8, 0)
+	var goals: Array[Vector2i] = planner._generated_bridge_goal_cells({
+		"generatedBridgeFallbackOnly": true,
+		"strictArrival": true,
+		"fallbackCells": [fallback_cell, target_cell]
+	}, target_cell)
+	var passed := goals.has(fallback_cell) and not goals.has(target_cell) and goals.size() == 1
+	return outcome(
+		passed,
+		"goals=%s" % JSON.stringify(vec2i_array_summary(goals)),
+		["probe_repair_lattice_does_not_retry_blocked_target", "probe_repair_lattice_moves_to_fallback_first"],
+		{ "goals": vec2i_array_summary(goals) }
+	)
+
 func test_route_runtime_goal_adapter_uses_new_corridor(_mode: String) -> Dictionary:
 	var adapter_text = read_text("res://scripts/npc_ai/routing/NpcRouteCoordinatorAdapter.gd")
 	var passed = adapter_text.find("MAX_ITERATIONS") < 0 \
@@ -572,6 +777,259 @@ func test_route_collision_occupied_cell_blocks_node(_mode: String) -> Dictionary
 	var passed := metadata_open and not collision_blocker.is_empty() and not bool(result.get("ok", true)) and String(result.get("reason", "")) == "blocked_static_collision"
 	free_collision_setup(setup)
 	return outcome(passed, "metadataOpen=%s collision=%s result=%s" % [str(metadata_open), JSON.stringify(collision_blocker), JSON.stringify(result)], ["collision_footprint_blocks_standing_cell", "route_nodes_use_physics_occupancy_not_metadata_only"], { "result": result, "collision": collision_blocker })
+
+func test_route_navmesh_surfaces_exclude_collision_occupied_cells(_mode: String) -> Dictionary:
+	var wall := collision_block(Vector2i(1, 0), "woodBlock", Vector3(CELL, 0.0, 0.0), Vector3(CELL * 0.18, CELL * 1.8, CELL * 0.96))
+	var setup := collision_adapter_with_blocks([wall])
+	var adapter = setup.get("adapter")
+	var validation_snapshot: Dictionary = setup.get("snapshot", {})
+	var navmesh_snapshot: Dictionary = adapter.build_navmesh_tile_snapshot("0,0")
+	var surfaces: Array = navmesh_snapshot.get("surfaces", []) if navmesh_snapshot.get("surfaces", []) is Array else []
+	var collision_blocker: Dictionary = adapter.static_collision_blocker(validation_snapshot, Vector2i(1, 0))
+	var blocked_cell_surface := false
+	var open_cell_surface := false
+	for surface_value in surfaces:
+		if not (surface_value is Dictionary):
+			continue
+		var surface: Dictionary = surface_value
+		var cell: Vector3i = surface.get("cell", Vector3i.ZERO)
+		if cell.x == 1 and cell.z == 0:
+			blocked_cell_surface = true
+		if cell.x == 0 and cell.z == 0:
+			open_cell_surface = true
+	var passed := not collision_blocker.is_empty() and not blocked_cell_surface and open_cell_surface
+	free_collision_setup(setup)
+	return outcome(
+		passed,
+		"collision=%s blockedSurface=%s openSurface=%s surfaceCount=%d" % [JSON.stringify(collision_blocker), str(blocked_cell_surface), str(open_cell_surface), surfaces.size()],
+		["navmesh_surface_uses_collision_records", "collision_occupied_cell_not_published_as_walkable"],
+		{ "collision": collision_blocker, "blockedCellSurface": blocked_cell_surface, "openCellSurface": open_cell_surface, "surfaceCount": surfaces.size() }
+	)
+
+func test_route_home_collision_lattice_exact_detour(_mode: String) -> Dictionary:
+	var blocks := []
+	var blocked_lookup := {}
+	var setup := collision_adapter_with_blocks([])
+	var main := setup.get("main") as Node
+	for z in range(1, 5):
+		var cell := Vector2i(0, z)
+		var block := collision_block(cell)
+		blocks.append(block)
+		blocked_lookup[cell] = true
+		if main != null:
+			main.add_child(block)
+			var live_blocks: Dictionary = main.get("blocks")
+			live_blocks[Vector3i(cell.x, 0, cell.y)] = block
+	setup["blocks"] = blocks
+	var adapter = setup.get("adapter")
+	var body := setup.get("body") as Node3D
+	body.position = Vector3.ZERO
+	body.global_position = Vector3.ZERO
+	var target_cell := Vector2i(0, 5)
+	var target_position: Vector3 = adapter.cell_position(target_cell)
+	var entry := {
+		"id": "home-lattice-detour",
+		"body": body,
+		"townCenter": Vector2i.ZERO,
+		"townRadius": 128,
+		"porchPosition": target_position,
+		"porchCell": target_cell,
+		"homeCell": target_cell + Vector2i(0, 1),
+		"doorCell": target_cell + Vector2i(0, -1),
+		"interiorMinCell": target_cell,
+		"interiorMaxCell": target_cell + Vector2i(1, 1)
+	}
+	var coordinator = NpcRouteCoordinatorAdapterScript.new()
+	coordinator.world = adapter
+	var failed_route := {
+		"ok": false,
+		"status": "blocked",
+		"reason": "no_route",
+		"source": "navmesh",
+		"cells": [],
+		"waypoints": [],
+		"actions": {},
+		"targetCell": target_cell,
+		"fallbackCell": Vector2i(999999, 999999)
+	}
+	var route: Dictionary = coordinator._plan_exact_home_collision_lattice_route(entry, {
+		"kind": "home",
+		"movingHome": true,
+		"allowOutside": true,
+		"strictArrival": true,
+		"target": target_position,
+		"targetCell": target_cell,
+		"arrivalRadius": CELL * 0.5,
+		"priority": 140
+	}, failed_route)
+	var cells: Array = route.get("cells", []) if route.get("cells", []) is Array else []
+	var waypoints: Array = route.get("waypoints", []) if route.get("waypoints", []) is Array else []
+	var crosses_blocked := false
+	for cell_value in cells:
+		if cell_value is Vector2i and blocked_lookup.has(cell_value):
+			crosses_blocked = true
+	var exact_target: bool = route.get("fallbackCell", Vector2i(999999, 999999)) == target_cell
+	var passed: bool = bool(route.get("ok", false)) \
+		and String(route.get("status", "")) == "routed" \
+		and String(route.get("source", "")) == "collision_lattice" \
+		and exact_target \
+		and cells.has(target_cell) \
+		and not waypoints.is_empty() \
+		and not crosses_blocked \
+		and not bool(route.get("generatedCellBridge", false))
+	free_collision_setup(setup)
+	return outcome(
+		passed,
+		"route=%s failedRoute=%s crossesBlocked=%s" % [JSON.stringify(navmesh_route_dictionary_summary(route)), JSON.stringify(failed_route), str(crosses_blocked)],
+		["home_collision_lattice_exact_target", "home_collision_lattice_detours_static_collision", "home_collision_lattice_not_generated_bridge"],
+		{ "route": navmesh_route_dictionary_summary(route), "failedRoute": failed_route, "cells": vec2i_array_summary(cells), "crossesBlocked": crosses_blocked }
+	)
+
+func test_route_home_collision_lattice_recenters_off_cell_start(_mode: String) -> Dictionary:
+	var side_block := collision_block(Vector2i(-1, 0), "stoneBlock")
+	var setup := collision_adapter_with_blocks([side_block])
+	var adapter = setup.get("adapter")
+	var body := setup.get("body") as Node3D
+	body.position = Vector3(CELL * -0.42, 0.0, CELL * 0.42)
+	body.global_position = body.position
+	var start_cell := Vector2i.ZERO
+	var target_cell := Vector2i(0, 3)
+	var target_position: Vector3 = adapter.cell_position(target_cell)
+	var entry := {
+		"id": "home-lattice-start-clearance",
+		"body": body,
+		"townCenter": Vector2i.ZERO,
+		"townRadius": 128,
+		"porchPosition": target_position,
+		"porchCell": target_cell,
+		"homeCell": target_cell + Vector2i(0, 1),
+		"doorCell": target_cell + Vector2i(0, -1),
+		"interiorMinCell": target_cell,
+		"interiorMaxCell": target_cell + Vector2i(1, 1)
+	}
+	var coordinator = NpcRouteCoordinatorAdapterScript.new()
+	coordinator.world = adapter
+	var failed_route := {
+		"ok": false,
+		"status": "blocked",
+		"reason": "no_route",
+		"source": "navmesh",
+		"cells": [],
+		"waypoints": [],
+		"actions": {},
+		"targetCell": target_cell,
+		"fallbackCell": Vector2i(999999, 999999)
+	}
+	var route: Dictionary = coordinator._plan_exact_home_collision_lattice_route(entry, {
+		"kind": "home",
+		"movingHome": true,
+		"allowOutside": true,
+		"strictArrival": true,
+		"target": target_position,
+		"targetCell": target_cell,
+		"arrivalRadius": CELL * 0.5,
+		"priority": 140
+	}, failed_route)
+	var cells: Array = route.get("cells", []) if route.get("cells", []) is Array else []
+	var waypoints: Array = route.get("waypoints", []) if route.get("waypoints", []) is Array else []
+	var debug: Dictionary = route.get("exactCollisionLatticeRoute", {}) if route.get("exactCollisionLatticeRoute", {}) is Dictionary else {}
+	var start_center: Vector3 = adapter.cell_position(start_cell)
+	var first_waypoint: Vector3 = waypoints[0] if not waypoints.is_empty() and waypoints[0] is Vector3 else Vector3(INF, INF, INF)
+	var starts_with_center := first_waypoint.distance_to(start_center) <= 0.01
+	var passed := bool(route.get("ok", false)) \
+		and String(route.get("status", "")) == "routed" \
+		and String(route.get("source", "")) == "collision_lattice" \
+		and starts_with_center \
+		and bool(debug.get("startClearanceWaypoint", false)) \
+		and cells.has(target_cell) \
+		and not cells.has(start_cell) \
+		and not bool(route.get("generatedCellBridge", false))
+	free_collision_setup(setup)
+	return outcome(
+		passed,
+		"route=%s startsWithCenter=%s debug=%s" % [JSON.stringify(navmesh_route_dictionary_summary(route)), str(starts_with_center), JSON.stringify(debug)],
+		["home_collision_lattice_recenters_off_cell_start", "home_start_clearance_keeps_action_cells_stable", "home_start_clearance_not_generated_bridge"],
+		{ "route": navmesh_route_dictionary_summary(route), "cells": vec2i_array_summary(cells), "startsWithCenter": starts_with_center, "debug": debug }
+	)
+
+func test_route_home_egress_uses_exact_collision_lattice(_mode: String) -> Dictionary:
+	var blocks := [
+		collision_block(Vector2i(-1, 0), "woodBlock"),
+		collision_door(Vector2i(0, 0), 0, "home"),
+		collision_block(Vector2i(1, 0), "woodBlock")
+	]
+	var setup := collision_adapter_with_blocks(blocks)
+	var adapter = setup.get("adapter")
+	var body := setup.get("body") as Node3D
+	var start_cell := Vector2i(0, 1)
+	var door_cell := Vector2i(0, 0)
+	var porch_cell := Vector2i(0, -1)
+	body.position = adapter.cell_position(start_cell)
+	body.global_position = body.position
+	var entry := {
+		"id": "home-egress-worker",
+		"body": body,
+		"job": "trade",
+		"insideHome": false,
+		"townCenter": Vector2i.ZERO,
+		"townRadius": 128,
+		"homeCell": start_cell,
+		"homePosition": adapter.cell_position(start_cell),
+		"doorCell": door_cell,
+		"porchCell": porch_cell,
+		"porchPosition": adapter.cell_position(porch_cell),
+		"interiorMinCell": Vector2i(-1, 1),
+		"interiorMaxCell": Vector2i(1, 3)
+	}
+	var intent := {
+		"kind": "work",
+		"movingHome": false,
+		"allowOutside": true,
+		"strictArrival": true,
+		"target": adapter.cell_position(porch_cell),
+		"targetCell": porch_cell,
+		"arrivalRadius": CELL * 0.5,
+		"priority": 90
+	}
+	var failed_route := {
+		"ok": false,
+		"status": "blocked",
+		"reason": "path_crosses_static_collision",
+		"source": "navmesh",
+		"cells": [],
+		"waypoints": [],
+		"actions": {},
+		"targetCell": porch_cell,
+		"fallbackCell": Vector2i(999999, 999999)
+	}
+	var coordinator = NpcRouteCoordinatorAdapterScript.new()
+	coordinator.world = adapter
+	var should_exact := coordinator._should_try_exact_home_collision_lattice_route(entry, failed_route, intent)
+	var open_fallback_allowed := coordinator._should_try_generated_cell_job_route(entry, intent)
+	var route: Dictionary = coordinator._plan_exact_home_collision_lattice_route(entry, intent, failed_route)
+	var cells: Array = route.get("cells", []) if route.get("cells", []) is Array else []
+	var actions: Dictionary = route.get("actions", {}) if route.get("actions", {}) is Dictionary else {}
+	var debug: Dictionary = route.get("exactCollisionLatticeRoute", {}) if route.get("exactCollisionLatticeRoute", {}) is Dictionary else {}
+	var has_door_action := false
+	for action_value in actions.values():
+		if action_value is Dictionary and String((action_value as Dictionary).get("kind", "")) == "door":
+			has_door_action = true
+	var passed := should_exact \
+		and not open_fallback_allowed \
+		and bool(route.get("ok", false)) \
+		and String(route.get("source", "")) == "collision_lattice" \
+		and cells.has(door_cell) \
+		and cells.has(porch_cell) \
+		and has_door_action \
+		and bool(debug.get("physicalHomeEgress", false)) \
+		and not bool(route.get("generatedCellBridge", false))
+	free_collision_setup(setup)
+	return outcome(
+		passed,
+		"shouldExact=%s openFallback=%s route=%s actions=%s debug=%s" % [str(should_exact), str(open_fallback_allowed), JSON.stringify(navmesh_route_dictionary_summary(route)), JSON.stringify(actions), JSON.stringify(debug)],
+		["home_egress_classified_as_structure_route", "home_egress_uses_door_action", "home_egress_not_generated_bridge"],
+		{ "route": navmesh_route_dictionary_summary(route), "cells": vec2i_array_summary(cells), "actions": actions, "debug": debug }
+	)
 
 func test_route_collision_door_requires_portal_axis(_mode: String) -> Dictionary:
 	var door := collision_door(Vector2i(0, 0), 0, "public_gate")

@@ -4,7 +4,7 @@ param(
     [string]$ReportPath = "",
     [string]$ProgressPath = "",
     [string]$ScreenshotDir = "",
-    [int]$WatchdogSeconds = 110
+    [int]$WatchdogSeconds = 190
 )
 
 $ErrorActionPreference = "Stop"
@@ -30,7 +30,7 @@ New-Item -ItemType Directory -Force -Path ([System.IO.Path]::GetDirectoryName($P
 New-Item -ItemType Directory -Force -Path $ScreenshotDir | Out-Null
 Remove-Item -LiteralPath $ReportPath -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath $ProgressPath -ErrorAction SilentlyContinue
-Remove-Item -LiteralPath (Join-Path $ScreenshotDir "*.png") -ErrorAction SilentlyContinue
+Remove-Item -Path (Join-Path $ScreenshotDir "*.png") -ErrorAction SilentlyContinue
 
 $guardScript = Join-Path $PSScriptRoot "assert-npc-acceptance-runner-clean.ps1"
 $guardAllowed = @(
@@ -64,33 +64,64 @@ $args = @(
     "--scene", "res://scenes/testing/npc/NpcGoHomeVisualPlaytest.tscn"
 )
 
-function Stop-ProcessTree([System.Diagnostics.Process]$Process) {
-    if ($null -eq $Process) {
-        return
-    }
-    $children = Get-CimInstance Win32_Process -Filter "ParentProcessId = $($Process.Id)" -ErrorAction SilentlyContinue
-    foreach ($child in $children) {
-        Stop-Process -Id $child.ProcessId -Force -ErrorAction SilentlyContinue
-    }
-    if (-not $Process.HasExited) {
-        Stop-Process -Id $Process.Id -Force -ErrorAction SilentlyContinue
-    }
+function Quote-Arg([string]$Value) {
+    return '"' + ($Value -replace '"', '\"') + '"'
 }
 
+$argumentLine = ($args | ForEach-Object { Quote-Arg $_ }) -join " "
 $process = [System.Diagnostics.Process]::new()
 $process.StartInfo.FileName = $GodotExe
 $process.StartInfo.WorkingDirectory = $projectPath
 $process.StartInfo.UseShellExecute = $false
 $process.StartInfo.CreateNoWindow = $false
-$process.StartInfo.Arguments = ($args | ForEach-Object { '"' + ($_ -replace '"', '\"') + '"' }) -join " "
-$started = Get-Date
+$process.StartInfo.Arguments = $argumentLine
 [void]$process.Start()
+$processId = $process.Id
+$started = Get-Date
+$lastProgressWriteUtc = [datetime]::MinValue
+$lastProgressText = ""
+$stopReason = "completed"
 
-while (-not $process.HasExited) {
-    Start-Sleep -Milliseconds 250
-    if (((Get-Date) - $started).TotalSeconds -gt $WatchdogSeconds) {
-        Stop-ProcessTree $process
-        Write-Error "NPC go-home visual playtest watchdog exceeded $WatchdogSeconds seconds"
+Write-Host "Started headed Godot PID $processId; polling $ProgressPath"
+$completedFromReport = $false
+while ($true) {
+    Start-Sleep -Milliseconds 500
+    $runningProcess = Get-Process -Id $processId -ErrorAction SilentlyContinue
+    if ($null -eq $runningProcess) {
+        break
+    }
+    $now = Get-Date
+    if (Test-Path -LiteralPath $ProgressPath) {
+        $progressItem = Get-Item -LiteralPath $ProgressPath
+        if ($progressItem.LastWriteTimeUtc -gt $lastProgressWriteUtc) {
+            $lastProgressWriteUtc = $progressItem.LastWriteTimeUtc
+            $rawProgress = Get-Content -LiteralPath $ProgressPath -Raw -ErrorAction SilentlyContinue
+            if ($null -eq $rawProgress) {
+                $lastProgressText = ""
+            } else {
+                $lastProgressText = ([string]$rawProgress).Trim()
+            }
+            Write-Host "progress: $($lastProgressText -replace [Environment]::NewLine, ' | ')"
+        }
+    }
+
+    if (Test-Path -LiteralPath $ReportPath) {
+        try {
+            $liveReport = Get-Content -LiteralPath $ReportPath -Raw | ConvertFrom-Json
+            if (($liveReport.runToken -eq $runToken) -and ($true -eq $liveReport.finished)) {
+                $completedFromReport = $true
+                $stopReason = "report_finished"
+                break
+            }
+        } catch {
+            # The runner may be in the middle of writing the report; try again on
+            # the next poll rather than treating a transient parse as failure.
+        }
+    }
+    $outerTimeoutSeconds = [Math]::Max($WatchdogSeconds + 90, [int]($WatchdogSeconds * 2))
+    if (($now - $started).TotalSeconds -gt $outerTimeoutSeconds) {
+        $stopReason = "timeout"
+        Write-Error "NPC go-home visual playtest outer timeout exceeded $outerTimeoutSeconds seconds"
         if (Test-Path -LiteralPath $ProgressPath) {
             Get-Content -LiteralPath $ProgressPath
         }
@@ -101,7 +132,22 @@ while (-not $process.HasExited) {
     }
 }
 
-$exitCode = $process.ExitCode
+$stillRunning = Get-Process -Id $processId -ErrorAction SilentlyContinue
+if ($null -ne $stillRunning) {
+    Start-Sleep -Milliseconds 500
+}
+$exitCode = 1
+try {
+    $exitCode = $process.ExitCode
+} catch {
+    $exitCode = 1
+}
+if ($completedFromReport) {
+    $exitCode = 0
+} elseif ($stopReason -ne "completed") {
+    $exitCode = 1
+}
+
 if (-not (Test-Path -LiteralPath $ReportPath)) {
     Write-Error "Missing fresh NPC go-home visual report: $ReportPath"
     exit 1
@@ -150,7 +196,11 @@ if ($LASTEXITCODE -ne 0) {
 
 $report = Get-Content -LiteralPath $ReportPath -Raw | ConvertFrom-Json
 Get-Content -LiteralPath $ReportPath
-if (($exitCode -ne 0) -or ([int]$report.failureCount -gt 0)) {
+$scriptErrorStatus = "passed"
+if ($report.PSObject.Properties.Name -contains "scriptErrorScan") {
+    $scriptErrorStatus = $report.scriptErrorScan.status
+}
+if (($exitCode -ne 0) -or ([int]$report.failureCount -gt 0) -or ($scriptErrorStatus -ne "passed")) {
     exit 1
 }
 

@@ -78,6 +78,7 @@ var motion_controller
 var safe_placement_service
 var components_initialized := false
 var component_init_attempted := false
+var component_init_in_progress := false
 var last_spawn_scan_frame := -1
 var npc_update_cursor := 0
 var npc_motion_cursor := 0
@@ -108,25 +109,39 @@ func ensure_autonomy_system() -> void:
     autonomy_system.setup(self, main)
 
 func ensure_components() -> void:
-    if components_initialized or component_init_attempted:
+    if components_initialized or component_init_in_progress:
         return
+
+    component_init_in_progress = true
     component_init_attempted = true
+
     if visual_factory == null:
         visual_factory = NpcVisualFactoryScript.new()
         visual_factory.setup(main)
+
     if pathing == null:
         pathing = NpcPathingScript.new()
         pathing.setup(self, main)
-    if combat == null:
+
+    if combat == null and visual_factory != null:
         combat = NpcCombatScript.new()
         combat.setup(self, hostile_system, visual_factory.arrow_material)
+
     if motion_controller == null:
         motion_controller = NpcMotionControllerScript.new()
         motion_controller.setup(self, main)
+
     if safe_placement_service == null:
         safe_placement_service = NpcSafePlacementServiceScript.new()
         safe_placement_service.setup(self, main)
-    components_initialized = visual_factory != null and pathing != null and combat != null and motion_controller != null and safe_placement_service != null
+
+    components_initialized = visual_factory != null \
+        and pathing != null \
+        and combat != null \
+        and motion_controller != null \
+        and safe_placement_service != null
+
+    component_init_in_progress = false
 
 func _exit_tree() -> void:
     cleanup_pathing_agents()
@@ -850,7 +865,26 @@ func spawn_generic_town_npcs() -> void:
             continue
         for i in range(records.size()):
             spawn_town_npc(records[i], i)
+        prebake_town_navmesh(records)
         spawned_town_keys[town_key] = true
+
+func prebake_town_navmesh(records: Array) -> void:
+    # Bake the static town (footprint + forager roam envelope) before the NPCs
+    # start scheduling so route planning finds ready nav data instead of
+    # spending the day window queued behind the per-frame tile publish budget.
+    if pathing == null or not pathing.has_method("prebake_town") or records.is_empty():
+        return
+    var first: Dictionary = records[0] if records[0] is Dictionary else {}
+    var center: Vector2i = first.get("townCenter", Vector2i.ZERO)
+    var town_radius := int(first.get("townRadius", 18))
+    # Forager roam envelope extends ~24 cells past the town; add margin so
+    # perimeter routes and departures are pre-baked too.
+    var prebake_radius := town_radius + 30
+    var summary: Dictionary = pathing.prebake_town(center, prebake_radius)
+    var monitor = main.get("runtime_perf_monitor") if main != null else null
+    if monitor != null and monitor.has_method("increment_counter"):
+        monitor.increment_counter("navmesh_town_prebake_published", int(summary.get("published", 0)))
+        monitor.increment_counter("navmesh_town_prebake_tiles", int(summary.get("tiles", 0)))
 
 func tutorial_town_key() -> String:
     if main == null or main.tutorial_system == null or not main.tutorial_system.has_method("tutorial_town_key"):
@@ -1075,6 +1109,7 @@ func update_npcs(delta: float, day_factor: float) -> void:
             if not brain_processed_entries.has(entry):
                 autonomy_system.record_brain_budget_skipped(entry, "budget_cursor")
     var motion_entries := select_motion_entries(active_entries, delta)
+    var motion_frame_start := Time.get_ticks_usec()
     var motion_processed := 0
     for entry in active_entries:
         if not motion_entries.has(entry):
@@ -1082,7 +1117,7 @@ func update_npcs(delta: float, day_factor: float) -> void:
                 autonomy_system.record_motion_skipped(entry, "motion_budget")
             update_npc_visual_state(entry, delta)
             continue
-        if motion_processed > 0 and not npc_motion_requires_immediate_update(entry) and npc_elapsed_ms(npc_frame_start) >= NPC_MOTION_FRAME_BUDGET_MS:
+        if motion_processed > 0 and not npc_motion_requires_immediate_update(entry) and npc_elapsed_ms(motion_frame_start) >= NPC_MOTION_FRAME_BUDGET_MS:
             if autonomy_system != null and autonomy_system.has_method("record_motion_skipped"):
                 autonomy_system.record_motion_skipped(entry, "frame_time_budget")
             update_npc_visual_state(entry, delta)
@@ -1191,6 +1226,12 @@ func npc_home_return_window_active(night_factor: float) -> bool:
     return clock_phase >= NPC_DUSK_START_CLOCK or clock_phase < NPC_DAWN_START_CLOCK
 
 func npc_motion_requires_immediate_update(entry: Dictionary) -> bool:
+    # A follower holding a ready collision-backed route lease with waypoints left
+    # should advance every physics frame. Integrating along a validated corridor
+    # is cheap; starving it behind the motion budget is what makes routing look
+    # like a pathfinding failure even when a valid route exists.
+    if npc_has_active_route_lease(entry):
+        return true
     if int(entry.get("npc_motion_budget_skipped", 0)) >= NPC_MOTION_SKIPPED_STREAK_URGENT \
         and String(entry.get("routeStatus", "")) in ["moving", "pending", "waiting"]:
         return true
@@ -1222,13 +1263,22 @@ func npc_motion_requires_immediate_update(entry: Dictionary) -> bool:
         return true
     return false
 
-func npc_job_route_motion_required(entry: Dictionary) -> bool:
-    var route_status := String(entry.get("routeStatus", ""))
-    if not (route_status in ["moving", "pending", "waiting"]):
+func npc_has_active_route_lease(entry: Dictionary) -> bool:
+    var lease_value = entry.get("routeLease", {})
+    if not (lease_value is Dictionary) or (lease_value as Dictionary).is_empty():
         return false
+    if String((lease_value as Dictionary).get("state", "ready")) != String(NpcEnumsScript.ROUTE_AUTHORITY_READY):
+        return false
+    var waypoints = entry.get("pathWaypoints", [])
+    return waypoints is Array and not (waypoints as Array).is_empty()
+
+func npc_job_route_motion_required(entry: Dictionary) -> bool:
     var phase := String(entry.get("jobPhase", ""))
     if phase in ["outbound", "searching", "gathering", "returning", "stall"]:
         return true
+    var route_status := String(entry.get("routeStatus", ""))
+    if not (route_status in ["moving", "pending", "waiting"]):
+        return false
     var active_goal := String(entry.get("activeGoalKind", entry.get("goal", "")))
     if active_goal in [String(NpcEnumsScript.GOAL_KIND_FORAGE), String(NpcEnumsScript.GOAL_KIND_WORK)]:
         return true
@@ -1247,7 +1297,17 @@ func npc_guard_motion_required(entry: Dictionary) -> bool:
         motion_goal = String((active_goal_value as Dictionary).get("goalKind", ""))
     if not (bool(entry.get("nightGuard", false)) or active_goal == String(NpcEnumsScript.GOAL_KIND_GUARD) or motion_goal == String(NpcEnumsScript.GOAL_KIND_GUARD)):
         return false
-    return String(entry.get("routeStatus", "")) in ["moving", "pending", "waiting"]
+    if String(entry.get("routeStatus", "")) in ["moving", "pending", "waiting"]:
+        return true
+    if not (active_goal == String(NpcEnumsScript.GOAL_KIND_GUARD) or motion_goal == String(NpcEnumsScript.GOAL_KIND_GUARD)):
+        return false
+    var body := entry.get("body") as Node3D
+    if body == null or not is_instance_valid(body):
+        return true
+    var target_value = entry.get("guardTargetCache", entry.get("guardPosition", body.global_position))
+    if target_value is Vector3:
+        return body.global_position.distance_to(target_value) > CELL * 1.15
+    return true
 
 func update_npc(entry: Dictionary, delta: float, night_factor: float) -> void:
     var standalone_update := not npc_update_active
@@ -1349,7 +1409,7 @@ func update_fighter_target(entry: Dictionary, body: Node3D, target_hostile, weap
     var melee := npc_weapon_is_melee(weapon_id)
     var hostile := valid_hostile_node(target_hostile)
     if hostile == null:
-        return entry.get("guardPosition", entry.get("porchPosition", body.global_position))
+        return choose_guard_target(entry, null, melee)
     var target: Vector3 = choose_guard_target(entry, hostile, melee)
     if melee:
         var flat_distance := Vector2(hostile.global_position.x - body.global_position.x, hostile.global_position.z - body.global_position.z).length()
@@ -1592,6 +1652,7 @@ func current_route_failure_blocks_forager(entry: Dictionary) -> bool:
         "no_goal_span",
         "empty_route",
         "target_blocked",
+        "blocked_capsule_probe",
         "path_crosses_static_collision",
         "blocked_static_collision",
         "endpoint_not_server_walkable",
@@ -1618,6 +1679,28 @@ func mark_forager_target_unreachable(entry: Dictionary, node: Node3D) -> void:
     if node == null or not is_instance_valid(node):
         return
     node.set_meta(forager_unreachable_meta_key(entry), true)
+
+func mark_job_resource_target_unreachable(entry: Dictionary, node: Node3D, job: String) -> void:
+    if node == null or not is_instance_valid(node):
+        return
+    node.set_meta(job_resource_unreachable_meta_key(entry, job), true)
+
+func job_resource_unreachable_meta_key(entry: Dictionary, job: String) -> String:
+    if job == "forage":
+        return forager_unreachable_meta_key(entry)
+    var cache_key := "jobResourceUnreachableMetaKeys"
+    var cached_keys: Dictionary = entry.get(cache_key, {}) if entry.get(cache_key, {}) is Dictionary else {}
+    if cached_keys.has(job):
+        return String(cached_keys.get(job, ""))
+    var raw_id := String(entry.get("id", "npc"))
+    var safe_id := metadata_identifier_suffix(raw_id)
+    var raw_hash := int(("%s:%s" % [raw_id, job]).hash())
+    if raw_hash < 0:
+        raw_hash = -raw_hash
+    var key := "npc_unreachable_resource_%s_%s_%d" % [job, safe_id, raw_hash]
+    cached_keys[job] = key
+    entry[cache_key] = cached_keys
+    return key
 
 func forager_unreachable_meta_key(entry: Dictionary) -> String:
     var cached := String(entry.get("foragerUnreachableMetaKey", ""))
@@ -1695,11 +1778,11 @@ func resource_query_options_for_job(entry: Dictionary, job: String) -> Dictionar
         "outsideTown": resource_job_uses_outside_work_area(job),
         "workAreaOnly": true,
         "chunkRadius": 2,
-        "cacheFrames": 30
+        "cacheFrames": 30,
+        "unreachableMetaKey": job_resource_unreachable_meta_key(entry, job)
     }
     if job == "forage":
         options["drops"] = ["berries"]
-        options["unreachableMetaKey"] = forager_unreachable_meta_key(entry)
     return options
 
 func cached_resource_target_for_entry(entry: Dictionary, job: String) -> Node3D:
@@ -1796,6 +1879,8 @@ func collect_job_resource_targets_in_tree(root: Node, entry: Dictionary, job: St
 
 func is_valid_job_resource_node(node: Node3D, entry: Dictionary, job: String) -> bool:
     if not is_instance_valid(node) or bool(node.get_meta("npc_harvested", false)) or bool(node.get_meta("smart_object_depleted", false)):
+        return false
+    if bool(node.get_meta(job_resource_unreachable_meta_key(entry, job), false)):
         return false
     if String(node.get_meta("kind", "")) != "prop":
         return false
@@ -1904,6 +1989,21 @@ func smart_object_has_live_registration(object_id: String) -> bool:
         return bool(service.call("has_live_registration", object_id))
     var registrations = service.get("registrations")
     return registrations is Dictionary and (registrations as Dictionary).has(object_id)
+
+func smart_object_action_reach(object_id: String, fallback: float) -> float:
+    var service = smart_object_service()
+    if service == null or object_id == "":
+        return fallback
+    var registrations = service.get("registrations")
+    if not (registrations is Dictionary):
+        return fallback
+    var registration = (registrations as Dictionary).get(object_id)
+    if registration == null:
+        return fallback
+    var metadata = registration.get("metadata") if registration is Object else {}
+    if metadata is Dictionary and (metadata as Dictionary).has("actionReach"):
+        return float((metadata as Dictionary).get("actionReach", fallback))
+    return fallback
 
 func resource_approach_slots_for_entry(entry: Dictionary, target_node: Node3D) -> Dictionary:
     if target_node == null or not is_instance_valid(target_node) or pathing == null:
@@ -2239,6 +2339,11 @@ func home_route_target(entry: Dictionary) -> Vector3:
                 entry["homeActiveTargetCell"] = flat_cell_for_position(restart_position)
                 return restart_position
     if not home_route_actor_inside(entry, body):
+        var home_cell: Vector2i = entry.get("homeCell", flat_cell_for_position(entry.get("homePosition", body.global_position)))
+        var porch_cell: Vector2i = entry.get("porchCell", home_cell)
+        if home_route_arrived_at_active_cell(entry, porch_cell):
+            entry["homeActiveTargetCell"] = home_cell
+            return entry.get("homePosition", body.global_position)
         var porch: Vector3 = entry.get("porchPosition", entry.get("homePosition", body.global_position))
         if body.global_position.distance_to(porch) > CELL * 1.35:
             return porch
@@ -2264,6 +2369,8 @@ func home_route_step_reached(entry: Dictionary, route_target: Vector3) -> bool:
     if route_status == "arrived" and entry.has("homeActiveTargetCell"):
         var active_cell: Vector2i = entry.get("homeActiveTargetCell", target_cell)
         route_arrived_at_target = active_cell == target_cell
+    if route_arrived_at_target and target_cell != home_cell and home_route_arrival_is_complete_step(entry, target_cell):
+        return true
     var exact_ordered_home_step: bool = route_requires_exact_porch_arrival(entry) and target_cell != home_cell
     var distance_from_porch: int = abs(target_cell.x - porch_cell.x) + abs(target_cell.y - porch_cell.y)
     var exact_door_threshold_step: bool = exact_ordered_home_step and distance_from_porch <= 1
@@ -2297,6 +2404,39 @@ func home_route_step_reached(entry: Dictionary, route_target: Vector3) -> bool:
     if target_cell != home_cell:
         return current_cell == target_cell or distance_to_target <= CELL * 0.35
     return current_cell == target_cell or (HomeInteriorServiceScript.cell_inside_home_bounds(entry, current_cell, true) and distance_to_target <= CELL * 0.72)
+
+func home_route_arrived_at_active_cell(entry: Dictionary, target_cell: Vector2i) -> bool:
+    if String(entry.get("routeStatus", "")) != "arrived":
+        return false
+    if not entry.has("homeActiveTargetCell"):
+        return false
+    var active_target_cell = entry.get("homeActiveTargetCell", Vector2i(999999, 999999))
+    return active_target_cell is Vector2i and active_target_cell == target_cell
+
+func home_route_arrival_is_complete_step(entry: Dictionary, target_cell: Vector2i) -> bool:
+    var debug_value = entry.get("lastRoutePlanDebug", {})
+    if not (debug_value is Dictionary):
+        return true
+    var debug: Dictionary = debug_value
+    if String(debug.get("status", "")) == "partial":
+        return false
+    if bool(debug.get("generatedCellBridgeUsed", false)):
+        return false
+    var fallback_cell := debug_cell_value(debug.get("fallbackCell", Vector2i(999999, 999999)), Vector2i(999999, 999999))
+    if fallback_cell != Vector2i(999999, 999999) and fallback_cell != target_cell:
+        return false
+    return true
+
+func debug_cell_value(value, fallback: Vector2i) -> Vector2i:
+    if value is Vector2i:
+        return value
+    if value is Array and (value as Array).size() >= 2:
+        var array_value: Array = value
+        return Vector2i(int(array_value[0]), int(array_value[1]))
+    if value is Dictionary:
+        var dict: Dictionary = value
+        return Vector2i(int(dict.get("x", fallback.x)), int(dict.get("z", dict.get("y", fallback.y))))
+    return fallback
 
 func route_requires_exact_porch_arrival(entry: Dictionary) -> bool:
     return bool(entry.get("holdDoorOrder", false)) or bool(entry.get("holdIntroDoor", false))
@@ -2630,17 +2770,20 @@ func release_completed_door_holds() -> void:
         entry.erase("activeDoorPortalId")
         entry.erase("activeDoorActorId")
         entry.erase("activeDoorDirection")
+        entry.erase("activeDoorTrafficGroupId")
+        entry.erase("_activeDoorForwardStep")
+        entry.erase("portalRecenterTicks")
 
 func route_still_needs_active_door(entry: Dictionary, portal_id: String) -> bool:
     if portal_id == "":
         return false
-    if String(entry.get("routeStatus", "")) in ["arrived", "partial"] and (entry.get("pathWaypoints", []) as Array).is_empty():
-        return false
-    if active_private_home_door_can_release(entry, portal_id):
-        return false
     if active_door_crossing_still_needs_hold(entry, portal_id):
         return true
     if active_door_crossing_has_cleared(entry, portal_id):
+        return false
+    if String(entry.get("routeStatus", "")) in ["arrived", "partial"] and (entry.get("pathWaypoints", []) as Array).is_empty():
+        return false
+    if active_private_home_door_can_release(entry, portal_id):
         return false
     var actions: Dictionary = entry.get("routeActions", {})
     for action_value in actions.values():
@@ -2704,8 +2847,7 @@ func active_door_crossing_still_needs_hold(entry: Dictionary, portal_id: String)
     if body == null or not is_instance_valid(body):
         return false
     if not portal.occupied_actors([body], "threshold").is_empty() \
-            or not portal.occupied_actors([body], "sweep").is_empty() \
-            or not portal.occupied_actors([body], "clearance").is_empty():
+            or not portal.occupied_actors([body], "sweep").is_empty():
         return true
     var direction := String(entry.get("activeDoorDirection", ""))
     if direction == "":

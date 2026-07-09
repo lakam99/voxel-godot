@@ -4,10 +4,14 @@ const NpcEnumsScript := preload("res://scripts/npc_ai/NpcEnums.gd")
 const DoorPortalServiceScript := preload("res://scripts/npc_ai/interactions/DoorPortalService.gd")
 const DoorTraversalExecutorScript := preload("res://scripts/npc_ai/interactions/DoorTraversalExecutor.gd")
 const InteractionRequestScript := preload("res://scripts/npc_ai/contracts/InteractionRequest.gd")
+const NpcSystemScript := preload("res://scripts/NpcSystem.gd")
 
 const CELL := 1.35
 
 var runner = null
+
+class FakeAutonomyForDoorHold:
+	var door_portals = null
 
 func setup(owner) -> void:
 	runner = owner
@@ -23,6 +27,8 @@ func cases() -> Array[Dictionary]:
 		["npc_door_threshold_occupied_no_close", "test_threshold_occupied_no_close"],
 		["npc_door_sweep_occupied_no_close", "test_sweep_occupied_no_close"],
 		["npc_door_clearance_volume_occupied_no_close", "test_clearance_volume_occupied_no_close"],
+		["npc_door_crossing_releases_after_sweep_clearance", "test_crossing_releases_after_sweep_clearance"],
+		["npc_door_arrived_route_still_holds_threshold_actor", "test_arrived_route_still_holds_threshold_actor"],
 		["npc_door_obstructed_closing_reopens", "test_obstructed_closing_reopens"],
 		["npc_door_queue_inherits_opening", "test_queue_inherits_opening"],
 		["npc_door_opposing_direction_ordered", "test_opposing_direction_ordered"],
@@ -132,6 +138,56 @@ func test_sweep_occupied_no_close(_mode: String) -> Dictionary:
 
 func test_clearance_volume_occupied_no_close(_mode: String) -> Dictionary:
 	return close_blocked_case("clearance", Vector3(0.0, 0.0, CELL * 1.35), "clearance_occupied")
+
+func test_crossing_releases_after_sweep_clearance(_mode: String) -> Dictionary:
+	var setup := door_setup()
+	var npc_system = NpcSystemScript.new()
+	var fake_autonomy := FakeAutonomyForDoorHold.new()
+	fake_autonomy.door_portals = setup.service
+	npc_system.set("autonomy_system", fake_autonomy)
+	var actor := make_actor("npc-cleared-sweep", Vector3(0.0, 0.0, CELL * 1.08))
+	var entry := {
+		"id": actor_id(actor),
+		"body": actor,
+		"activeDoorDirection": "z+"
+	}
+	var still_needs_hold := npc_system.active_door_crossing_still_needs_hold(entry, setup.portalId)
+	setup.service.request_door_state(setup.door, true, actor, "npc", { "actors": [actor] })
+	setup.service.schedule_close_for_portal(setup.portalId, 0.0)
+	var processed: Dictionary = setup.service.process(0.5, [actor])
+	var passed: bool = not still_needs_hold and int(processed.get("blocked", 0)) == 1 and bool(setup.door.get_meta("open", false))
+	npc_system.free()
+	return outcome(
+		passed,
+		"stillNeedsHold=%s processed=%s" % [str(still_needs_hold), JSON.stringify(processed)],
+		["traffic_hold_releases_after_sweep_clearance", "clearance_still_blocks_close"],
+		{ "stillNeedsHold": still_needs_hold, "processed": processed, "doorOpen": setup.door.get_meta("open") }
+	)
+
+func test_arrived_route_still_holds_threshold_actor(_mode: String) -> Dictionary:
+	var setup := door_setup()
+	var npc_system = NpcSystemScript.new()
+	var fake_autonomy := FakeAutonomyForDoorHold.new()
+	fake_autonomy.door_portals = setup.service
+	npc_system.set("autonomy_system", fake_autonomy)
+	var actor := make_actor("npc-threshold-arrived", Vector3.ZERO)
+	var entry := {
+		"id": actor_id(actor),
+		"body": actor,
+		"activeDoorDirection": "z+",
+		"activeDoorPortalId": setup.portalId,
+		"routeStatus": "arrived",
+		"pathWaypoints": [],
+		"routeActions": {}
+	}
+	var still_needs_hold := npc_system.route_still_needs_active_door(entry, setup.portalId)
+	npc_system.free()
+	return outcome(
+		still_needs_hold,
+		"stillNeedsHold=%s portal=%s" % [str(still_needs_hold), setup.portalId],
+		["arrived_route_does_not_release_threshold_actor", "portal_ownership_kept_until_clearance"],
+		{ "stillNeedsHold": still_needs_hold, "entry": entry }
+	)
 
 func test_obstructed_closing_reopens(_mode: String) -> Dictionary:
 	var setup := door_setup()

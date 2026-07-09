@@ -16,6 +16,12 @@ static func build(system) -> Dictionary:
     var waiting_routes := 0
     var blocked_routes := 0
     var partial_routes := 0
+    var route_reasons := {}
+    var route_authority_states := {}
+    var route_authority_reasons := {}
+    var max_route_budget_wait := 0
+    var max_navmesh_tile_budget_wait := 0
+    var pending_routes := 0
     for entry in npcs:
         var body := entry.get("body") as Node
         if body == null or not is_instance_valid(body):
@@ -48,6 +54,23 @@ static func build(system) -> Dictionary:
             blocked_routes += 1
         elif route_status == "partial":
             partial_routes += 1
+        elif route_status == "pending":
+            pending_routes += 1
+        var route_reason := String(entry.get("routeReason", "none"))
+        if route_reason == "":
+            route_reason = "none"
+        route_reasons[route_reason] = int(route_reasons.get(route_reason, 0)) + 1
+        var authority: Dictionary = entry.get("lastRouteAuthority", {}) if entry.get("lastRouteAuthority", {}) is Dictionary else {}
+        var authority_state := String(authority.get("state", "none"))
+        if authority_state == "":
+            authority_state = "none"
+        route_authority_states[authority_state] = int(route_authority_states.get(authority_state, 0)) + 1
+        var authority_reason := String(authority.get("reason", "none"))
+        if authority_reason == "":
+            authority_reason = "none"
+        route_authority_reasons[authority_reason] = int(route_authority_reasons.get(authority_reason, 0)) + 1
+        max_route_budget_wait = maxi(max_route_budget_wait, int(entry.get("routeBudgetWaitFrames", 0)))
+        max_navmesh_tile_budget_wait = maxi(max_navmesh_tile_budget_wait, int(entry.get("navmeshTileBudgetWaitFrames", 0)))
     var autonomy_system = system.get("autonomy_system")
     var traffic_reservations = autonomy_system.get("traffic_reservations") if autonomy_system else null
     var traffic_stats: Dictionary = traffic_reservations.stats() if traffic_reservations else {}
@@ -84,8 +107,16 @@ static func build(system) -> Dictionary:
         "routeStatus": {
             "routed": routed,
             "waiting": waiting_routes,
+            "pending": pending_routes,
             "blocked": blocked_routes,
             "partial": partial_routes
+        },
+        "routeReasons": route_reasons,
+        "routeAuthorityStates": route_authority_states,
+        "routeAuthorityReasons": route_authority_reasons,
+        "routeWaitFrames": {
+            "maxRouteBudget": max_route_budget_wait,
+            "maxNavmeshTileBudget": max_navmesh_tile_budget_wait
         },
         "routeReplans": int(system.get("npc_route_replans")),
         "stuckRecoveries": int(system.get("npc_stuck_recoveries")),

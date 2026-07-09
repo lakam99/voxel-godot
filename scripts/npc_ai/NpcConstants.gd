@@ -3,6 +3,11 @@ class_name NpcConstants
 
 const ARCHITECTURE_VERSION := "phase13_authoritative_stack"
 const NPC_MOVEMENT_STACK := "character_body_route_motor"
+const NPC_NAV_ENABLE_STARTUP_TILE_PRIMING := true
+const NPC_NAV_ENABLE_ADAPTIVE_ROUTE_BUDGET := true
+const NPC_NAV_ENABLE_SAFE_GENERATED_OPEN_TERRAIN_FALLBACK := true
+const NPC_NAV_ENABLE_ROUTE_TICKET_PIPELINE := true
+const NPC_NAV_DEBUG_ROUTE_REASONS := true
 
 const CELL_SIZE := 1.35
 const NAV_TILE_CELL_SIZE := 16

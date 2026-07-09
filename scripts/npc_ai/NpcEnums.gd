@@ -13,6 +13,17 @@ const ROUTE_STATUS_ARRIVED := ROUTE_STATUS_COMPLETE
 const ROUTE_STATUS_BLOCKED := ROUTE_STATUS_UNREACHABLE
 const ROUTE_STATUS_FAILED := ROUTE_STATUS_FAILED_INTERNAL
 
+const ROUTE_AUTHORITY_READY := &"ready"
+const ROUTE_AUTHORITY_PENDING_NAV_DATA := &"pending_nav_data"
+const ROUTE_AUTHORITY_PENDING_BUDGET := &"pending_budget"
+const ROUTE_AUTHORITY_PENDING_PROBE := &"pending_probe"
+const ROUTE_AUTHORITY_BLOCKED_DYNAMIC := &"blocked_dynamic"
+const ROUTE_AUTHORITY_UNREACHABLE_STATIC := &"unreachable_static"
+const ROUTE_AUTHORITY_INVALID_GOAL := &"invalid_goal"
+const ROUTE_AUTHORITY_CANCELLED := &"cancelled"
+const ROUTE_AUTHORITY_INVALIDATED := &"invalidated"
+const ROUTE_AUTHORITY_FAILED_INTERNAL := &"failed_internal"
+
 const ROUTE_REASON_NONE := &"none"
 const ROUTE_REASON_WAITING_FOR_TOPOLOGY := &"waiting_for_topology"
 const ROUTE_REASON_NO_ROUTE := &"no_route"
@@ -139,6 +150,25 @@ static func interaction_terminal_statuses() -> Array[StringName]:
 
 static func route_status_is_terminal(status) -> bool:
 	return route_terminal_statuses().has(normalize(status))
+
+static func route_authority_state_is_ready(state) -> bool:
+	return normalize(state) == ROUTE_AUTHORITY_READY
+
+static func route_authority_state_is_pending(state) -> bool:
+	return normalize(state) in [
+		ROUTE_AUTHORITY_PENDING_NAV_DATA,
+		ROUTE_AUTHORITY_PENDING_BUDGET,
+		ROUTE_AUTHORITY_PENDING_PROBE
+	]
+
+static func route_authority_state_is_terminal_failure(state) -> bool:
+	return normalize(state) in [
+		ROUTE_AUTHORITY_UNREACHABLE_STATIC,
+		ROUTE_AUTHORITY_INVALID_GOAL,
+		ROUTE_AUTHORITY_CANCELLED,
+		ROUTE_AUTHORITY_INVALIDATED,
+		ROUTE_AUTHORITY_FAILED_INTERNAL
+	]
 
 static func action_status_is_terminal(status) -> bool:
 	return action_terminal_statuses().has(normalize(status))

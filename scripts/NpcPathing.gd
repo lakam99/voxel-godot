@@ -38,6 +38,12 @@ func ensure_ready() -> void:
     goal_planner = coordinator.get("goal_planner")
     route_repair = coordinator.get("route_repair")
 
+func prebake_town(center_cell: Vector2i, radius_cells: int) -> Dictionary:
+    ensure_ready()
+    if coordinator == null or not coordinator.has_method("prebake_town"):
+        return { "ok": false, "reason": "missing_coordinator" }
+    return coordinator.prebake_town(center_cell, radius_cells)
+
 func begin_frame() -> void:
     ensure_ready()
     if coordinator != null:

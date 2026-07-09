@@ -42,6 +42,8 @@ var terrain_projection_cache := {}
 var navmesh_tile_snapshot_cache := {}
 var navmesh_tile_snapshot_cache_order: Array[String] = []
 var navmesh_tile_revision_by_key := {}
+var navmesh_tile_semantic_revision_by_key := {}
+var navmesh_tile_door_revision_by_key := {}
 var static_snapshot_revision := 1
 var topology_revision := 1
 var dynamic_revision := 0
@@ -66,6 +68,8 @@ func invalidate() -> void:
     terrain_projection_cache = {}
     _clear_navmesh_tile_snapshot_cache()
     navmesh_tile_revision_by_key.clear()
+    navmesh_tile_semantic_revision_by_key.clear()
+    navmesh_tile_door_revision_by_key.clear()
     cached_prop_cell_by_object_id = {}
     cached_prop_collision_records_by_object_id = {}
     cached_private_interior_records_revision = -1
@@ -79,8 +83,11 @@ func apply_navigation_events(events: Array) -> void:
     var static_changed := false
     var dynamic_changed := false
     var semantic_changed := false
+    var semantic_global_changed := false
     var door_state_changed := false
     var static_changed_tiles: Array[String] = []
+    var semantic_changed_tiles: Array[String] = []
+    var door_state_changed_tiles: Array[String] = []
     for event_value in events:
         if not (event_value is Dictionary):
             continue
@@ -100,8 +107,15 @@ func apply_navigation_events(events: Array) -> void:
                 monitor.end_section("generated_nav_prop_event_apply", prop_start)
         elif _event_changes_door_state(kinds):
             door_state_changed = true
+            if tile_key != "" and not door_state_changed_tiles.has(tile_key):
+                door_state_changed_tiles.append(tile_key)
         elif _event_changes_semantic_state(kinds):
             semantic_changed = true
+            if tile_key != "":
+                if not semantic_changed_tiles.has(tile_key):
+                    semantic_changed_tiles.append(tile_key)
+            else:
+                semantic_global_changed = true
         else:
             dynamic_changed = true
     if static_changed:
@@ -117,9 +131,22 @@ func apply_navigation_events(events: Array) -> void:
         dynamic_revision = maxi(dynamic_revision + 1, last_event_revision)
     if semantic_changed:
         semantic_revision = maxi(semantic_revision + 1, last_event_revision)
-        _clear_navmesh_tile_snapshot_cache()
+        if semantic_global_changed or semantic_changed_tiles.is_empty():
+            navmesh_tile_semantic_revision_by_key.clear()
+            _clear_navmesh_tile_snapshot_cache()
+        else:
+            for changed_tile_key in semantic_changed_tiles:
+                navmesh_tile_semantic_revision_by_key[changed_tile_key] = semantic_revision
+                _clear_navmesh_tile_snapshot_cache_for_tile(changed_tile_key)
     if door_state_changed:
         door_state_revision = maxi(door_state_revision + 1, last_event_revision)
+        if door_state_changed_tiles.is_empty():
+            navmesh_tile_door_revision_by_key.clear()
+            _clear_navmesh_tile_snapshot_cache()
+        else:
+            for changed_tile_key in door_state_changed_tiles:
+                navmesh_tile_door_revision_by_key[changed_tile_key] = door_state_revision
+                _clear_navmesh_tile_snapshot_cache_for_tile(changed_tile_key)
     if monitor != null:
         monitor.end_section("generated_nav_event_apply", apply_start)
 
@@ -168,7 +195,7 @@ func revision() -> String:
     return "%d:%d:%d:%d" % [static_snapshot_revision, dynamic_revision, semantic_revision, door_state_revision]
 
 func navmesh_tile_source_key() -> String:
-    return "%d:%d" % [static_snapshot_revision, semantic_revision]
+    return "%d:%d:%d" % [static_snapshot_revision, semantic_revision, door_state_revision]
 
 func navmesh_tile_source_key_for_tile(tile_key: String) -> String:
     if tile_key == "":
@@ -176,7 +203,13 @@ func navmesh_tile_source_key_for_tile(tile_key: String) -> String:
     if not navmesh_tile_revision_by_key.has(tile_key):
         navmesh_tile_revision_by_key[tile_key] = static_snapshot_revision
     var tile_revision := int(navmesh_tile_revision_by_key.get(tile_key, static_snapshot_revision))
-    return "%d:%d" % [tile_revision, semantic_revision]
+    if not navmesh_tile_semantic_revision_by_key.has(tile_key):
+        navmesh_tile_semantic_revision_by_key[tile_key] = semantic_revision
+    var tile_semantic_revision := int(navmesh_tile_semantic_revision_by_key.get(tile_key, semantic_revision))
+    if not navmesh_tile_door_revision_by_key.has(tile_key):
+        navmesh_tile_door_revision_by_key[tile_key] = door_state_revision
+    var tile_door_revision := int(navmesh_tile_door_revision_by_key.get(tile_key, door_state_revision))
+    return "%d:%d:%d" % [tile_revision, tile_semantic_revision, tile_door_revision]
 
 func route_navmesh_tile_keys(entry: Dictionary, start: Vector3, target: Vector3, allow_outside := false, moving_home := false, margin_cells := ROUTE_NAVMESH_MARGIN_CELLS) -> Array[String]:
     var start_cell := world_cell(start)
@@ -206,12 +239,16 @@ func route_navmesh_tile_keys(entry: Dictionary, start: Vector3, target: Vector3,
         return keys
     return _nearest_route_tiles(keys, start_cell, target_cell)
 
+# IMPORTANT: navmesh tile snapshots must be built from the same live collision
+# snapshot used by collision probing. Do not switch this back to the lighter
+# helper that only updates blocked/doors/paths; that reintroduces planner/probe
+# disagreement and makes NPCs accept routes into walls or reject valid routes.
 func build_navmesh_tile_snapshot(tile_key: String) -> Dictionary:
     var cache_key := "%s|%s" % [tile_key, navmesh_tile_source_key_for_tile(tile_key)]
     if navmesh_tile_snapshot_cache.has(cache_key):
         var cached_snapshot: Dictionary = navmesh_tile_snapshot_cache[cache_key]
         return cached_snapshot
-    var snapshot: Dictionary = _snapshot_with_live_tile_blocks_for_navmesh_tile(cached_static_tile_snapshot(true, true), tile_key)
+    var snapshot: Dictionary = _snapshot_with_live_tile_blocks(cached_static_tile_snapshot(true, true), tile_key)
     var tile := _parse_tile_key(tile_key)
     var min_x := tile.x * NAV_TILE_CELL_SIZE
     var min_z := tile.y * NAV_TILE_CELL_SIZE
@@ -231,6 +268,13 @@ func build_navmesh_tile_snapshot(tile_key: String) -> Dictionary:
         "topologyRevision": static_snapshot_revision,
         "dynamicRevision": dynamic_revision,
         "semanticRevision": semantic_revision,
+        "blocked": snapshot.get("blocked", {}),
+        "doors": snapshot.get("doors", {}),
+        "paths": snapshot.get("paths", {}),
+        "staticCollision": snapshot.get("staticCollision", []),
+        "staticCollisionByCell": snapshot.get("staticCollisionByCell", {}),
+        "doorCollision": snapshot.get("doorCollision", []),
+        "doorCollisionByCell": snapshot.get("doorCollisionByCell", {}),
         "surfaces": surfaces,
         "semanticRegions": semantic_regions,
         "doorPortals": door_summary.get("doorPortals", []),
@@ -238,6 +282,23 @@ func build_navmesh_tile_snapshot(tile_key: String) -> Dictionary:
     }
     _store_navmesh_tile_snapshot_cache(cache_key, result)
     return result
+
+func collision_snapshot_for_bounds(entry: Dictionary, bounds: Dictionary, allow_outside := false, moving_home := false) -> Dictionary:
+    var snapshot := cached_validation_snapshot(entry, allow_outside, moving_home)
+    if bounds.is_empty():
+        return snapshot
+    var min_x := int(bounds.get("minX", 0))
+    var max_x := int(bounds.get("maxX", min_x))
+    var min_z := int(bounds.get("minZ", 0))
+    var max_z := int(bounds.get("maxZ", min_z))
+    var min_tile_x := floori(float(mini(min_x, max_x)) / float(NAV_TILE_CELL_SIZE))
+    var max_tile_x := floori(float(maxi(min_x, max_x)) / float(NAV_TILE_CELL_SIZE))
+    var min_tile_z := floori(float(mini(min_z, max_z)) / float(NAV_TILE_CELL_SIZE))
+    var max_tile_z := floori(float(maxi(min_z, max_z)) / float(NAV_TILE_CELL_SIZE))
+    for tile_z in range(min_tile_z, max_tile_z + 1):
+        for tile_x in range(min_tile_x, max_tile_x + 1):
+            snapshot = _snapshot_with_live_tile_blocks(snapshot, "%d,%d" % [tile_x, tile_z])
+    return snapshot
 
 func _store_navmesh_tile_snapshot_cache(cache_key: String, snapshot: Dictionary) -> void:
     if cache_key == "" or snapshot.is_empty():
@@ -252,6 +313,19 @@ func _store_navmesh_tile_snapshot_cache(cache_key: String, snapshot: Dictionary)
 func _clear_navmesh_tile_snapshot_cache() -> void:
     navmesh_tile_snapshot_cache.clear()
     navmesh_tile_snapshot_cache_order.clear()
+
+func _clear_navmesh_tile_snapshot_cache_for_tile(tile_key: String) -> void:
+    if tile_key == "":
+        return
+    var prefix := "%s|" % tile_key
+    var evicted_keys: Array[String] = []
+    for cache_key_value in navmesh_tile_snapshot_cache.keys():
+        var cache_key := String(cache_key_value)
+        if cache_key.begins_with(prefix):
+            evicted_keys.append(cache_key)
+    for cache_key in evicted_keys:
+        navmesh_tile_snapshot_cache.erase(cache_key)
+        navmesh_tile_snapshot_cache_order.erase(cache_key)
 
 func _snapshot_with_live_tile_blocks_for_navmesh_tile(base_snapshot: Dictionary, tile_key: String) -> Dictionary:
     if main == null:
@@ -1027,7 +1101,7 @@ func role_leash_radius_cells(entry: Dictionary, allow_outside := false, moving_h
     var job := String(entry.get("job", ""))
     var role := String(entry.get("role", "")).to_lower()
     var leash_radius := base_radius
-    if job in ["forage", "wood", "stone"]:
+    if job == "forage":
         leash_radius = base_radius + 24.0
     elif job == "guard" or role.find("guard") >= 0:
         leash_radius = base_radius + 8.0
@@ -1633,6 +1707,8 @@ func _navmesh_surface_for_cell(snapshot: Dictionary, cell: Vector2i) -> Dictiona
             return {}
     if static_blocker(snapshot, cell) != null:
         return {}
+    if door == null and not static_collision_blocker(snapshot, cell).is_empty():
+        return {}
     if prop_clearance_blocker(snapshot, cell) != null:
         return {}
     var position := cell_position(cell)
@@ -1675,7 +1751,7 @@ func _navmesh_door_summary_for_tile(snapshot: Dictionary, tile_key: String) -> D
         var portal_id := _door_portal_id(door, cell)
         if portal_id == "":
             continue
-        var axis := _door_crossing_axis(door)
+        var axis := _door_crossing_axis(door, snapshot, cell)
         var step := Vector2i(1, 0) if axis == "x" else Vector2i(0, 1)
         var entrance_cell := cell - step
         var exit_cell := cell + step
@@ -1724,7 +1800,7 @@ func _door_portal_id(door: Node, cell: Vector2i) -> String:
             return "door:%d,%d,%d" % [door_cell.x, door_cell.y, door_cell.z]
     return "door:%d,0,%d" % [cell.x, cell.y]
 
-func _door_crossing_axis(door: Node) -> String:
+func _door_crossing_axis(door: Node, snapshot := {}, cell := INVALID_CELL) -> String:
     if door == null:
         return "z"
     var side := int(door.get_meta("door_side", -1))
@@ -1732,6 +1808,16 @@ func _door_crossing_axis(door: Node) -> String:
         return "x"
     if side == 0 or side == 2:
         return "z"
+    if snapshot is Dictionary and cell is Vector2i:
+        var door_cell: Vector2i = cell
+        var x_blocked := static_blocker(snapshot, door_cell + Vector2i(-1, 0)) != null \
+            or static_blocker(snapshot, door_cell + Vector2i(1, 0)) != null
+        var z_blocked := static_blocker(snapshot, door_cell + Vector2i(0, -1)) != null \
+            or static_blocker(snapshot, door_cell + Vector2i(0, 1)) != null
+        if z_blocked and not x_blocked:
+            return "x"
+        if x_blocked and not z_blocked:
+            return "z"
     var facing := float(door.get_meta("closed_rotation", (door as Node3D).rotation.y if door is Node3D else 0.0))
     return "x" if absf(sin(facing)) > absf(cos(facing)) else "z"
 
@@ -1800,5 +1886,25 @@ func cell_is_standable_goal(entry: Dictionary, cell: Vector2i, allow_outside := 
     if prop_clearance_blocker(snapshot, cell) != null:
         return false
     if dynamic_blocker(snapshot, cell) != null:
+        return false
+    return true
+
+func cell_is_static_standable_goal(entry: Dictionary, cell: Vector2i, allow_outside := false, moving_home := false) -> bool:
+    if not cell_allowed_area(entry, cell, allow_outside, moving_home):
+        return false
+    if private_interior_blocks_entry(entry, cell):
+        return false
+    var terrain := terrain_allows_step(cell, cell, moving_home)
+    if not bool(terrain.get("ok", false)):
+        return false
+    var snapshot := cached_validation_snapshot(entry, allow_outside, moving_home)
+    var door := door_at(snapshot, cell)
+    if door != null and not door_allows_route_for_entry(entry, door, cell, moving_home):
+        return false
+    if door == null and not static_collision_blocker(snapshot, cell).is_empty():
+        return false
+    if static_blocker(snapshot, cell) != null:
+        return false
+    if prop_clearance_blocker(snapshot, cell) != null:
         return false
     return true

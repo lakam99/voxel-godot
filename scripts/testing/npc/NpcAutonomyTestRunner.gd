@@ -27,10 +27,77 @@ const NavigationBakeDescriptorScript := preload("res://scripts/npc_ai/contracts/
 const CharacterMotor3DScript := preload("res://scripts/npc_ai/motor/CharacterMotor3D.gd")
 const CharacterMotorCommandScript := preload("res://scripts/npc_ai/contracts/CharacterMotorCommand.gd")
 const CharacterMotorProfileScript := preload("res://scripts/npc_ai/contracts/CharacterMotorProfile.gd")
+const RouteLeaseScript := preload("res://scripts/npc_ai/contracts/RouteLease.gd")
+const RouteTicketScript := preload("res://scripts/npc_ai/contracts/RouteTicket.gd")
+const NpcRouteAuthorityScript := preload("res://scripts/npc_ai/routing/NpcRouteAuthority.gd")
+const NavDataReadinessServiceScript := preload("res://scripts/npc_ai/routing/NavDataReadinessService.gd")
 const NpcMotionControllerScript := preload("res://scripts/npc_ai/NpcMotionController.gd")
 const NpcSafePlacementServiceScript := preload("res://scripts/npc_ai/NpcSafePlacementService.gd")
+const NpcNavigationCoordinatorScript := preload("res://scripts/npc_ai/routing/NpcNavigationCoordinator.gd")
 const NpcRouteMovementControllerScript := preload("res://scripts/npc_ai/movement/NpcRouteMovementController.gd")
 const NpcAgentScript := preload("res://scripts/npc_ai/NpcAgent.gd")
+
+class FakeAuthorityRouteDelegate:
+	extends RefCounted
+	var route := {}
+	var calls := 0
+
+	func plan_route(_entry: Dictionary, _intent: Dictionary) -> Dictionary:
+		calls += 1
+		return route.duplicate(true)
+
+	func stats() -> Dictionary:
+		return { "calls": calls }
+
+class FakeCursorCollisionProbe:
+	extends RefCounted
+	var calls: Array[Dictionary] = []
+
+	func probe_route(_entry: Dictionary, _route: Dictionary, _intent: Dictionary, options := {}) -> Dictionary:
+		var cursor: Dictionary = options.get("cursor", {}) if options.get("cursor", {}) is Dictionary else {}
+		calls.append({
+			"maxSamples": int(options.get("maxSamples", 0)),
+			"cursor": cursor.duplicate(true)
+		})
+		if cursor.is_empty():
+			return {
+				"ok": false,
+				"status": "pending_probe",
+				"reason": "collision_probe_budget",
+				"authoritative": true,
+				"sampleCount": 3,
+				"details": {
+					"segmentIndex": 2,
+					"sampleIndex": 4,
+					"completedSamples": 3,
+					"cursor": {
+						"segmentIndex": 2,
+						"sampleIndex": 4,
+						"completedSamples": 3
+					}
+				}
+			}
+		return {
+			"ok": true,
+			"status": "passed",
+			"reason": "",
+			"authoritative": true,
+			"sampleCount": 2,
+			"details": {
+				"completedSamples": int(cursor.get("completedSamples", 0)) + 2,
+				"resumedSegment": int(cursor.get("segmentIndex", -1)),
+				"resumedSample": int(cursor.get("sampleIndex", -1))
+			}
+		}
+
+class FakeNavDataReadinessOwner:
+	extends RefCounted
+	var mark_loading := false
+	var ready := true
+
+	func _ensure_navmesh_route_tiles(entry: Dictionary, _intent: Dictionary) -> bool:
+		entry["navmeshRouteTilesStillLoading"] = mark_loading
+		return ready
 
 var suite_filter := "contract"
 var case_filter := ""
@@ -85,6 +152,47 @@ class FakeRoutePlanner:
 	func plan_route(_entry: Dictionary, _intent: Dictionary) -> Dictionary:
 		calls += 1
 		return result.duplicate(true)
+
+	func begin_frame() -> void:
+		pass
+
+	func stats() -> Dictionary:
+		return {}
+
+class FakeCoordinatorWorld:
+	func world_cell(position: Vector3) -> Vector2i:
+		return Vector2i(roundi(position.x), roundi(position.z))
+
+	func revision() -> String:
+		return "fake-coordinator-rev"
+
+class FakeCoordinatorGoalPlanner:
+	func make_intent(_entry: Dictionary, target: Vector3, _max_distance: float, moving_home := false, allow_outside := false) -> Dictionary:
+		return {
+			"kind": "move",
+			"target": target,
+			"targetCell": Vector2i(roundi(target.x), roundi(target.z)),
+			"movingHome": moving_home,
+			"allowOutside": allow_outside
+		}
+
+class FakeCoordinatorLocomotion:
+	var deltas: Array = []
+
+	func begin_frame() -> void:
+		pass
+
+	func move(_entry: Dictionary, intent: Dictionary, max_distance: float, _planner, _world) -> Dictionary:
+		deltas.append(float(intent.get("physicsDelta", -1.0)))
+		return { "moved": max_distance, "status": "moving", "reason": "" }
+
+class FakeGeneratedWorldMain:
+	extends Node
+	var WATER_LEVEL := -1000.0
+	var blocks := {}
+
+	func surface_y_at_cell(_cell) -> float:
+		return 0.0
 
 func _ready() -> void:
 	configure_from_environment()
@@ -220,6 +328,48 @@ func contract_cases() -> Array[Dictionary]:
 			"callable": Callable(self, "test_partial_never_arrival")
 		},
 		{
+			"id": "npc_contract_route_authority_state_mapping",
+			"suite": "contract",
+			"timeModes": ["day", "night"],
+			"callable": Callable(self, "test_route_authority_state_mapping")
+		},
+		{
+			"id": "npc_contract_route_authority_attaches_probe_certificate",
+			"suite": "contract",
+			"timeModes": ["day", "night"],
+			"callable": Callable(self, "test_route_authority_attaches_probe_certificate")
+		},
+		{
+			"id": "npc_contract_route_authority_requires_authoritative_probe_for_ready",
+			"suite": "contract",
+			"timeModes": ["day", "night"],
+			"callable": Callable(self, "test_route_authority_requires_authoritative_probe_for_ready")
+		},
+		{
+			"id": "npc_contract_route_authority_resumes_collision_probe",
+			"suite": "contract",
+			"timeModes": ["day", "night"],
+			"callable": Callable(self, "test_route_authority_resumes_collision_probe")
+		},
+		{
+			"id": "npc_contract_route_ticket_diagnostic_state_names",
+			"suite": "contract",
+			"timeModes": ["day", "night"],
+			"callable": Callable(self, "test_route_ticket_diagnostic_state_names")
+		},
+		{
+			"id": "npc_contract_nav_data_readiness_missing_tiles_pending",
+			"suite": "contract",
+			"timeModes": ["day", "night"],
+			"callable": Callable(self, "test_nav_data_readiness_missing_tiles_pending")
+		},
+		{
+			"id": "npc_contract_navigation_map_sync_pending_is_nav_data",
+			"suite": "contract",
+			"timeModes": ["day", "night"],
+			"callable": Callable(self, "test_navigation_map_sync_pending_is_nav_data")
+		},
+		{
 			"id": "npc_contract_stable_tie_break",
 			"suite": "contract",
 			"timeModes": ["day", "night"],
@@ -328,6 +478,8 @@ func contract_cases() -> Array[Dictionary]:
 
 func motor_cases() -> Array[Dictionary]:
 	var ids := [
+		["npc_motor_substep_uses_step_delta", "test_npc_motor_substep_uses_step_delta"],
+		["npc_motor_route_replans_after_actor_displacement", "test_npc_motor_route_replans_after_actor_displacement"],
 		["npc_motor_player_characterization_flat", "test_motor_player_characterization_flat"],
 		["npc_motor_player_characterization_slope", "test_motor_player_characterization_slope"],
 		["npc_motor_player_characterization_jump", "test_motor_player_characterization_jump"],
@@ -362,6 +514,7 @@ func motor_cases() -> Array[Dictionary]:
 
 func nav_world_cases() -> Array[Dictionary]:
 	var ids := [
+		["npc_navworld_live_tile_snapshot_includes_collision_records", "test_npc_navworld_live_tile_snapshot_includes_collision_records"],
 		["npc_navworld_event_block_add_dirty_exact_tiles", "test_navworld_event_block_add_dirty_exact_tiles"],
 		["npc_navworld_event_block_remove_dirty_exact_tiles", "test_navworld_event_block_remove_dirty_exact_tiles"],
 		["npc_navworld_event_prop_remove_dirty_exact_tiles", "test_navworld_event_prop_remove_dirty_exact_tiles"],
@@ -376,6 +529,7 @@ func nav_world_cases() -> Array[Dictionary]:
 		["npc_navworld_slope_step_drop_edges", "test_navworld_slope_step_drop_edges"],
 		["npc_navworld_corner_cut_rejected", "test_navworld_corner_cut_rejected"],
 		["npc_navworld_door_portal_edge_registered", "test_navworld_door_portal_edge_registered"],
+		["npc_navworld_door_axis_uses_wall_blockers", "test_navworld_door_axis_uses_wall_blockers"],
 		["npc_navworld_semantic_home_interior", "test_navworld_semantic_home_interior"],
 		["npc_navworld_semantic_guard_post", "test_navworld_semantic_guard_post"],
 		["npc_navworld_semantic_road_and_work_anchor", "test_navworld_semantic_road_and_work_anchor"],
@@ -489,6 +643,157 @@ func selected_modes(test_case: Dictionary) -> Array[String]:
 	elif supported.has(time_mode):
 		modes.append(time_mode)
 	return modes
+
+func test_npc_motor_substep_uses_step_delta(_mode: String) -> Dictionary:
+	var coordinator = NpcNavigationCoordinatorScript.new()
+	var fake_locomotion = FakeCoordinatorLocomotion.new()
+	coordinator.set("system", self)
+	coordinator.set("main", self)
+	coordinator.set("navigation_world", FakeCoordinatorWorld.new())
+	coordinator.set("route_planner", FakeRoutePlanner.new({}))
+	coordinator.set("route_ticket_broker", FakeRoutePlanner.new({}))
+	coordinator.set("locomotion", fake_locomotion)
+	coordinator.set("goal_planner", FakeCoordinatorGoalPlanner.new())
+
+	var body := CharacterBody3D.new()
+	add_child(body)
+	body.global_position = Vector3.ZERO
+	var entry := { "id": "npc:test:substep", "body": body }
+	var moved := coordinator.move_npc(entry, Vector3(10.0, 0.0, 0.0), 4.0, false, true, 0.24)
+	body.queue_free()
+
+	var deltas: Array = fake_locomotion.deltas
+	var total_delta := 0.0
+	var passed := moved > 0.0 and deltas.size() > 1
+	for delta_value in deltas:
+		var delta := float(delta_value)
+		total_delta += delta
+		if delta <= 0.0 or delta >= 0.24:
+			passed = false
+	passed = passed and absf(total_delta - 0.24) <= 0.001
+	return outcome(
+		passed,
+		"moved=%.3f deltas=%s totalDelta=%.3f" % [moved, JSON.stringify(deltas), total_delta],
+		["substep_count_gt_one", "each_substep_uses_fractional_delta", "substeps_preserve_frame_delta"],
+		{ "moved": moved, "deltas": deltas, "totalDelta": total_delta }
+	)
+
+func test_npc_motor_route_replans_after_actor_displacement(_mode: String) -> Dictionary:
+	var controller = NpcRouteMovementControllerScript.new()
+	controller.setup(self, self)
+
+	var body := CharacterBody3D.new()
+	add_child(body)
+	body.global_position = Vector3.ZERO
+
+	var target_cell := Vector2i(10, 0)
+	var arrival_radius := NpcConstantsScript.CELL_SIZE * 0.75
+	var goal_key := "%s:%d,%d:%s:%s:%s:%s:%.3f" % ["move", target_cell.x, target_cell.y, str(true), str(false), "", str(false), arrival_radius]
+	var entry := {
+		"id": "npc:test:route-drift",
+		"body": body,
+		"routeStatus": "moving",
+		"routeGoalKey": goal_key,
+		"routeKey": "0,0->%s" % goal_key,
+		"routeSnapshotRevision": "rev-a",
+		"routeStartCell": Vector2i(0, 0),
+		"routeLastKnownCell": Vector2i(0, 0),
+		"pathWaypoints": [Vector3(1.0, 0.0, 0.0)],
+		"routeCells": [Vector2i(0, 0), Vector2i(1, 0)],
+		"routeActions": {},
+		"routeLease": { "leaseId": "lease:old" },
+		"routeLeaseId": "lease:old"
+	}
+	var world = FakeRouteWorld.new()
+	world.revision_value = "rev-a"
+	var planner = FakeRoutePlanner.new({
+		"ok": true,
+		"status": "routed",
+		"reason": "",
+		"cells": [Vector2i(20, 0), Vector2i(21, 0)],
+		"waypoints": [Vector3(20.0, 0.0, 0.0), Vector3(21.0, 0.0, 0.0)],
+		"actions": {},
+		"targetCell": target_cell,
+		"fallbackCell": target_cell,
+		"snapshotRevision": "rev-a",
+		"routeAuthorityReady": true,
+		"routeAuthorityState": String(NpcEnumsScript.ROUTE_AUTHORITY_READY),
+		"routeLease": { "leaseId": "lease:new" },
+		"routeLeaseId": "lease:new"
+	})
+	body.global_position = Vector3(20.0, 0.0, 0.0)
+	var intent := {
+		"kind": "move",
+		"target": Vector3(10.0, 0.0, 0.0),
+		"targetCell": target_cell,
+		"allowOutside": true,
+		"movingHome": false,
+		"arrivalRadius": arrival_radius
+	}
+	var route: Dictionary = controller.ensure_route(entry, intent, planner, world)
+	body.queue_free()
+
+	var passed: bool = planner.calls >= 1 \
+		and String(entry.get("routeLeaseId", "")) == "lease:new" \
+		and not (entry.get("pathWaypoints", []) as Array).is_empty() \
+		and entry.get("routeStartCell", Vector2i.ZERO) == Vector2i(20, 0)
+	return outcome(
+		passed,
+		"plannerCalls=%d route=%s entryKey=%s lease=%s" % [planner.calls, JSON.stringify(route), String(entry.get("routeKey", "")), String(entry.get("routeLeaseId", ""))],
+		["displaced_actor_forces_replan", "new_lease_installed"],
+		{ "plannerCalls": planner.calls, "route": route, "entryRouteKey": String(entry.get("routeKey", "")), "entryRouteLeaseId": String(entry.get("routeLeaseId", "")) }
+	)
+
+func test_npc_navworld_live_tile_snapshot_includes_collision_records(_mode: String) -> Dictionary:
+	var main := FakeGeneratedWorldMain.new()
+	var wall_cell := Vector2i(1, 0)
+	var door_cell := Vector2i(3, 0)
+	var wall := live_nav_block(wall_cell, "woodBlock")
+	var door := live_nav_block(door_cell, "door", Vector3(NpcConstantsScript.CELL_SIZE * 0.92, NpcConstantsScript.CELL_SIZE * 1.6, NpcConstantsScript.CELL_SIZE * 0.16))
+	door.set_meta("door_state", String(NpcEnumsScript.DOOR_STATE_CLOSED))
+	door.set_meta("door_portal_id", "door:test:live-snapshot")
+	door.set_meta("door_group_id", "door-group:test:live-snapshot")
+	main.add_child(wall)
+	main.add_child(door)
+	main.blocks[Vector3i(wall_cell.x, 0, wall_cell.y)] = wall
+	main.blocks[Vector3i(door_cell.x, 0, door_cell.y)] = door
+
+	var adapter := GeneratedWorldNavigationAdapterScript.new()
+	adapter.setup(null, main)
+	var snapshot: Dictionary = adapter.build_navmesh_tile_snapshot("0,0")
+	var blocked: Dictionary = snapshot.get("blocked", {}) if snapshot.get("blocked", {}) is Dictionary else {}
+	var doors: Dictionary = snapshot.get("doors", {}) if snapshot.get("doors", {}) is Dictionary else {}
+	var static_records: Array = snapshot.get("staticCollision", []) if snapshot.get("staticCollision", []) is Array else []
+	var static_by_cell: Dictionary = snapshot.get("staticCollisionByCell", {}) if snapshot.get("staticCollisionByCell", {}) is Dictionary else {}
+	var door_records: Array = snapshot.get("doorCollision", []) if snapshot.get("doorCollision", []) is Array else []
+	var door_by_cell: Dictionary = snapshot.get("doorCollisionByCell", {}) if snapshot.get("doorCollisionByCell", {}) is Dictionary else {}
+	var surfaces: Array = snapshot.get("surfaces", []) if snapshot.get("surfaces", []) is Array else []
+	var blocked_cell_published := false
+	var open_cell_published := false
+	for surface_value in surfaces:
+		if not (surface_value is Dictionary):
+			continue
+		var surface: Dictionary = surface_value
+		var cell: Vector3i = surface.get("cell", Vector3i.ZERO)
+		if cell.x == wall_cell.x and cell.z == wall_cell.y:
+			blocked_cell_published = true
+		if cell.x == 0 and cell.z == 0:
+			open_cell_published = true
+	var passed := blocked.has(wall_cell) \
+		and doors.has(door_cell) \
+		and not static_records.is_empty() \
+		and not door_records.is_empty() \
+		and static_by_cell.has(wall_cell) \
+		and door_by_cell.has(door_cell) \
+		and not blocked_cell_published \
+		and open_cell_published
+	main.free()
+	return outcome(
+		passed,
+		"blocked=%s doors=%s staticRecords=%d doorRecords=%d blockedSurface=%s openSurface=%s" % [JSON.stringify(blocked.keys()), JSON.stringify(doors.keys()), static_records.size(), door_records.size(), str(blocked_cell_published), str(open_cell_published)],
+		["live_static_block_updates_static_collision", "live_door_updates_door_collision", "collision_by_cell_matches_records"],
+		{ "blockedCells": blocked.keys(), "doorCells": doors.keys(), "staticRecordCount": static_records.size(), "doorRecordCount": door_records.size(), "blockedCellPublished": blocked_cell_published, "openCellPublished": open_cell_published }
+	)
 
 func test_clock_day_snapshot(_mode: String) -> Dictionary:
 	var clock = NpcTestClockScript.new()
@@ -743,6 +1048,302 @@ func test_partial_never_arrival(_mode: String) -> Dictionary:
 		"partial=%s complete=%s" % [JSON.stringify(partial.to_summary()), JSON.stringify(complete.to_summary())],
 		["partial_terminal", "partial_not_arrival", "arrival_contract_requires_complete"],
 		{ "partial": partial.to_summary(), "complete": complete.to_summary() }
+	)
+
+func test_route_authority_state_mapping(_mode: String) -> Dictionary:
+	var ready_route := {
+		"ok": true,
+		"status": "routed",
+		"reason": "",
+		"source": "navmesh",
+		"targetCell": Vector2i(1, 0),
+		"fallbackCell": Vector2i(1, 0),
+		"snapshotRevision": "contract",
+		"cells": [Vector2i(1, 0)],
+		"waypoints": [Vector3(NpcConstantsScript.CELL_SIZE, 0.0, 0.0)],
+		"actions": {}
+	}
+	var ready_state := NpcRouteAuthorityScript.canonical_state_for_route(ready_route, {})
+	var pending_nav_state := NpcRouteAuthorityScript.canonical_state_for_route({
+		"ok": false,
+		"status": "pending",
+		"reason": "navmesh_tile_budget",
+		"waypoints": []
+	}, {})
+	var pending_budget_state := NpcRouteAuthorityScript.canonical_state_for_route({
+		"ok": false,
+		"status": "pending",
+		"reason": "route_budget",
+		"waypoints": []
+	}, {})
+	var invalid_goal_state := NpcRouteAuthorityScript.canonical_state_for_route({
+		"ok": false,
+		"status": "blocked",
+		"reason": "target_blocked",
+		"waypoints": []
+	}, {})
+	var static_state := NpcRouteAuthorityScript.canonical_state_for_route({
+		"ok": false,
+		"status": "blocked",
+		"reason": "path_crosses_static_collision",
+		"waypoints": []
+	}, {})
+	var lease = RouteLeaseScript.from_route(ready_route, "contract-npc", 1, ready_state, NpcEnumsScript.ROUTE_REASON_NONE)
+	var passed: bool = ready_state == NpcEnumsScript.ROUTE_AUTHORITY_READY \
+		and pending_nav_state == NpcEnumsScript.ROUTE_AUTHORITY_PENDING_NAV_DATA \
+		and pending_budget_state == NpcEnumsScript.ROUTE_AUTHORITY_PENDING_BUDGET \
+		and invalid_goal_state == NpcEnumsScript.ROUTE_AUTHORITY_INVALID_GOAL \
+		and static_state == NpcEnumsScript.ROUTE_AUTHORITY_UNREACHABLE_STATIC \
+		and lease.is_ready() \
+		and lease.waypoints.size() == 1
+	return outcome(
+		passed,
+		"ready=%s nav=%s budget=%s invalid=%s static=%s lease=%s" % [String(ready_state), String(pending_nav_state), String(pending_budget_state), String(invalid_goal_state), String(static_state), JSON.stringify(lease.to_summary())],
+		["authority_ready_requires_route_lease", "pending_nav_data_distinct_from_budget", "invalid_goal_distinct_from_static_unreachable"],
+		{
+			"ready": String(ready_state),
+			"pendingNav": String(pending_nav_state),
+			"pendingBudget": String(pending_budget_state),
+			"invalidGoal": String(invalid_goal_state),
+			"unreachableStatic": String(static_state),
+			"lease": lease.to_summary()
+		}
+	)
+
+func test_route_authority_attaches_probe_certificate(_mode: String) -> Dictionary:
+	var delegate := FakeAuthorityRouteDelegate.new()
+	delegate.route = {
+		"ok": true,
+		"status": "routed",
+		"reason": "",
+		"source": "navmesh",
+		"targetCell": Vector2i(1, 0),
+		"fallbackCell": Vector2i(1, 0),
+		"snapshotRevision": "contract",
+		"cells": [Vector2i(1, 0)],
+		"waypoints": [Vector3(NpcConstantsScript.CELL_SIZE, 0.0, 0.0)],
+		"actions": {}
+	}
+	var authority := NpcRouteAuthorityScript.new()
+	authority.setup(null, null, null, delegate)
+	var body := CharacterBody3D.new()
+	add_child(body)
+	body.global_position = Vector3.ZERO
+	var entry := { "id": "contract-npc", "body": body }
+	var route: Dictionary = authority.plan_route(entry, { "kind": "move", "targetCell": Vector2i(1, 0) })
+	body.queue_free()
+	var certificate: Dictionary = route.get("probeCertificate", {}) if route.get("probeCertificate", {}) is Dictionary else {}
+	var lease: Dictionary = route.get("routeLease", {}) if route.get("routeLease", {}) is Dictionary else {}
+	var lease_probe: Dictionary = lease.get("probeCertificate", {}) if lease.get("probeCertificate", {}) is Dictionary else {}
+	var entry_authority: Dictionary = entry.get("lastRouteAuthority", {}) if entry.get("lastRouteAuthority", {}) is Dictionary else {}
+	var passed := bool(route.get("routeAuthorityReady", false)) \
+		and String(route.get("routeAuthorityState", "")) == String(NpcEnumsScript.ROUTE_AUTHORITY_READY) \
+		and String(certificate.get("status", "")) == "passed" \
+		and bool(certificate.get("authoritative", false)) \
+		and not lease.is_empty() \
+		and String(lease_probe.get("status", "")) == "passed" \
+		and bool(lease_probe.get("authoritative", false)) \
+		and String(entry_authority.get("state", "")) == String(NpcEnumsScript.ROUTE_AUTHORITY_READY)
+	return outcome(
+		passed,
+		"certificate=%s lease=%s" % [JSON.stringify(certificate), JSON.stringify(lease)],
+		["ready_routes_receive_probe_certificate", "audit_probe_skips_are_not_live_acceptance", "lease_carries_probe_certificate"],
+		{
+			"certificate": certificate,
+			"lease": lease,
+			"authorityStats": authority.stats(),
+			"entryAuthority": entry_authority
+		}
+	)
+
+func test_route_authority_requires_authoritative_probe_for_ready(_mode: String) -> Dictionary:
+	var delegate := FakeAuthorityRouteDelegate.new()
+	delegate.route = {
+		"ok": true,
+		"status": "routed",
+		"reason": "",
+		"source": "navmesh",
+		"targetCell": Vector2i(1, 0),
+		"fallbackCell": Vector2i(1, 0),
+		"snapshotRevision": "contract",
+		"cells": [Vector2i(1, 0)],
+		"waypoints": [Vector3(NpcConstantsScript.CELL_SIZE, 0.0, 0.0)],
+		"actions": {}
+	}
+	var authority := NpcRouteAuthorityScript.new()
+	authority.setup(null, null, null, delegate)
+	var entry := { "id": "contract-npc" }
+	var route: Dictionary = authority.plan_route(entry, { "kind": "move", "targetCell": Vector2i(1, 0) })
+	var certificate: Dictionary = route.get("probeCertificate", {}) if route.get("probeCertificate", {}) is Dictionary else {}
+	var passed := not bool(route.get("routeAuthorityReady", true)) \
+		and String(route.get("routeAuthorityState", "")) == String(NpcEnumsScript.ROUTE_AUTHORITY_PENDING_PROBE) \
+		and String(route.get("routeAuthorityReason", "")) == "missing_body" \
+		and String(certificate.get("status", "")) == "skipped" \
+		and not bool(certificate.get("authoritative", true)) \
+		and (route.get("routeLease", {}) as Dictionary).is_empty()
+	return outcome(
+		passed,
+		"state=%s reason=%s certificate=%s" % [String(route.get("routeAuthorityState", "")), String(route.get("routeAuthorityReason", "")), JSON.stringify(certificate)],
+		["ready_requires_authoritative_probe", "skipped_probe_is_pending_probe", "no_lease_without_probe_authority"],
+		{
+			"state": String(route.get("routeAuthorityState", "")),
+			"reason": String(route.get("routeAuthorityReason", "")),
+			"certificate": certificate,
+			"lease": route.get("routeLease", {})
+		}
+	)
+
+func test_route_authority_resumes_collision_probe(_mode: String) -> Dictionary:
+	var delegate := FakeAuthorityRouteDelegate.new()
+	delegate.route = {
+		"ok": true,
+		"status": "routed",
+		"reason": "",
+		"source": "collision_lattice",
+		"targetCell": Vector2i(0, 12),
+		"fallbackCell": Vector2i(0, 12),
+		"snapshotRevision": "cursor-contract",
+		"cells": [Vector2i(0, 6), Vector2i(0, 12)],
+		"waypoints": [Vector3(0.0, 0.0, 6.0), Vector3(0.0, 0.0, 12.0)],
+		"actions": {}
+	}
+	var authority := NpcRouteAuthorityScript.new()
+	authority.setup(null, null, null, delegate)
+	var fake_probe := FakeCursorCollisionProbe.new()
+	authority.collision_probe = fake_probe
+	authority.probe_sample_budget_per_frame = 3
+	var entry := { "id": "contract-cursor-npc" }
+	var intent := { "kind": "home", "targetCell": Vector2i(0, 12), "movingHome": true }
+	var first: Dictionary = authority.plan_route(entry, intent)
+	authority.begin_frame()
+	var second: Dictionary = authority.plan_route(entry, intent)
+	var second_call: Dictionary = fake_probe.calls[1] if fake_probe.calls.size() > 1 else {}
+	var resumed_cursor: Dictionary = second_call.get("cursor", {}) if second_call.get("cursor", {}) is Dictionary else {}
+	var first_certificate: Dictionary = first.get("probeCertificate", {}) if first.get("probeCertificate", {}) is Dictionary else {}
+	var first_details: Dictionary = first_certificate.get("details", {}) if first_certificate.get("details", {}) is Dictionary else {}
+	var second_certificate: Dictionary = second.get("probeCertificate", {}) if second.get("probeCertificate", {}) is Dictionary else {}
+	var passed := String(first.get("routeAuthorityState", "")) == String(NpcEnumsScript.ROUTE_AUTHORITY_PENDING_PROBE) \
+		and String(first.get("routeAuthorityReason", "")) == "collision_probe_budget" \
+		and (first.get("routeLease", {}) as Dictionary).is_empty() \
+		and fake_probe.calls.size() == 2 \
+		and int(resumed_cursor.get("segmentIndex", -1)) == 2 \
+		and int(resumed_cursor.get("sampleIndex", -1)) == 4 \
+		and bool(second.get("routeAuthorityReady", false)) \
+		and not (second.get("routeLease", {}) as Dictionary).is_empty() \
+		and int((second_certificate.get("details", {}) as Dictionary).get("resumedSegment", -1)) == 2
+	return outcome(
+		passed,
+		"first=%s firstDetails=%s second=%s calls=%s stats=%s" % [String(first.get("routeAuthorityState", "")), JSON.stringify(first_details), String(second.get("routeAuthorityState", "")), JSON.stringify(fake_probe.calls), JSON.stringify(authority.stats())],
+		["pending_probe_stores_cursor", "next_attempt_resumes_probe_cursor", "resumed_probe_can_lease_route"],
+		{
+			"first": {
+				"state": String(first.get("routeAuthorityState", "")),
+				"reason": String(first.get("routeAuthorityReason", "")),
+				"certificate": first_certificate
+			},
+			"second": {
+				"state": String(second.get("routeAuthorityState", "")),
+				"ready": bool(second.get("routeAuthorityReady", false)),
+				"certificate": second_certificate,
+				"lease": second.get("routeLease", {})
+			},
+			"probeCalls": fake_probe.calls,
+			"stats": authority.stats()
+		}
+	)
+
+func test_route_ticket_diagnostic_state_names(_mode: String) -> Dictionary:
+	var ticket := RouteTicketScript.new()
+	ticket.configure("ticket:test", "npc:test", "start->goal", "goal", Vector2i.ZERO, Vector2i(1, 0), { "kind": "move" }, 1)
+	var expected_states := [
+		{ "state": RouteTicketScript.State.QUEUED, "name": "queued", "pending": true },
+		{ "state": RouteTicketScript.State.WAITING_NAV_DATA, "name": "waiting_nav_data", "pending": true },
+		{ "state": RouteTicketScript.State.PLANNING, "name": "planning", "pending": true },
+		{ "state": RouteTicketScript.State.PROBING, "name": "probing", "pending": true },
+		{ "state": RouteTicketScript.State.READY, "name": "ready", "pending": false }
+	]
+	var names := {}
+	var pending_route_states := {}
+	var passed := true
+	for expected in expected_states:
+		ticket.state = int(expected.get("state", RouteTicketScript.State.QUEUED))
+		ticket.reason = String(expected.get("name", ""))
+		var state_name := ticket.state_name()
+		names[state_name] = true
+		if state_name != String(expected.get("name", "")):
+			passed = false
+		if bool(expected.get("pending", false)):
+			var pending_route: Dictionary = ticket.to_pending_route()
+			var pending_state := String(pending_route.get("routeTicketState", ""))
+			pending_route_states[pending_state] = String(pending_route.get("reason", ""))
+			if pending_state != state_name:
+				passed = false
+	for required in ["queued", "waiting_nav_data", "planning", "probing", "ready"]:
+		if not bool(names.get(required, false)):
+			passed = false
+	return outcome(
+		passed,
+		"states=%s pendingRoutes=%s" % [JSON.stringify(names), JSON.stringify(pending_route_states)],
+		["route_ticket_diagnostics_include_queued_waiting_planning_probing_ready", "pending_routes_emit_route_ticket_state"],
+		{
+			"states": names,
+			"pendingRouteStates": pending_route_states
+		}
+	)
+
+func test_nav_data_readiness_missing_tiles_pending(_mode: String) -> Dictionary:
+	var owner := FakeNavDataReadinessOwner.new()
+	var service := NavDataReadinessServiceScript.new()
+	service.setup(owner)
+	var ready_entry := {}
+	owner.mark_loading = false
+	var ready: Dictionary = service.ensure_ready_for_route(ready_entry, { "kind": "work" })
+	var loading_ready_entry := {}
+	owner.mark_loading = true
+	owner.ready = true
+	var loading_ready: Dictionary = service.ensure_ready_for_route(loading_ready_entry, { "kind": "work" })
+	var pending_entry := {}
+	owner.ready = false
+	var pending: Dictionary = service.ensure_ready_for_route(pending_entry, { "kind": "work" })
+	var passed := bool(ready.get("ready", false)) \
+		and String(ready.get("state", "")) == String(NpcEnumsScript.ROUTE_AUTHORITY_READY) \
+		and not bool(loading_ready.get("ready", true)) \
+		and String(loading_ready.get("state", "")) == String(NpcEnumsScript.ROUTE_AUTHORITY_PENDING_NAV_DATA) \
+		and String(loading_ready.get("detail", "")) == "route_tiles_still_loading" \
+		and not bool(pending.get("ready", true)) \
+		and String(pending.get("state", "")) == String(NpcEnumsScript.ROUTE_AUTHORITY_PENDING_NAV_DATA) \
+		and String(pending.get("reason", "")) == "navmesh_tile_budget"
+	return outcome(
+		passed,
+		"ready=%s loadingReady=%s pending=%s" % [JSON.stringify(ready), JSON.stringify(loading_ready), JSON.stringify(pending)],
+		["tile_readiness_is_explicit", "background_loading_is_pending_nav_data", "missing_tiles_are_pending_nav_data", "pending_nav_data_not_unreachable"],
+		{ "ready": ready, "loadingReady": loading_ready, "pending": pending, "stats": service.stats() }
+	)
+
+func test_navigation_map_sync_pending_is_nav_data(_mode: String) -> Dictionary:
+	var canonical := NpcRouteAuthorityScript.canonical_state_for_route({
+		"ok": false,
+		"status": "pending",
+		"reason": "navigation_map_sync_pending",
+		"waypoints": []
+	}, {})
+	var pending := NpcRouteAuthorityScript.pending_state_for_reason("navigation_map_sync_pending")
+	var service := NavmeshWorldServiceScript.new()
+	var readiness: Dictionary = service.navigation_map_readiness()
+	var passed := canonical == NpcEnumsScript.ROUTE_AUTHORITY_PENDING_NAV_DATA \
+		and pending == NpcEnumsScript.ROUTE_AUTHORITY_PENDING_NAV_DATA \
+		and readiness.has("ready") \
+		and readiness.has("reason") \
+		and readiness.has("iterationId")
+	return outcome(
+		passed,
+		"canonical=%s pending=%s readiness=%s" % [String(canonical), String(pending), JSON.stringify(readiness)],
+		["navigation_map_sync_pending_is_nav_data", "navigation_map_readiness_reports_iteration", "sync_pending_not_static_unreachable"],
+		{
+			"canonical": String(canonical),
+			"pending": String(pending),
+			"readiness": readiness
+		}
 	)
 
 func test_stable_tie_break(_mode: String) -> Dictionary:
@@ -1307,13 +1908,31 @@ func test_motor_preserves_active_route_on_transient_replan_failure(_mode: String
 	var entry := {
 		"id": "niko",
 		"routeKey": route_key,
-		"routeSnapshotRevision": "rev-a",
+		"routeSnapshotRevision": "rev-b",
 		"routeForceReplan": true,
 		"routeStatus": "moving",
 		"routeReason": "",
 		"pathWaypoints": old_waypoints.duplicate(),
 		"routeCells": old_cells.duplicate(),
 		"routeActions": {},
+		"routeLeaseId": "test-active-lease",
+		"routeLease": {
+			"leaseId": "test-active-lease",
+			"ownerNpcId": "niko",
+			"generation": 1,
+			"state": String(NpcEnumsScript.ROUTE_AUTHORITY_READY),
+			"reason": String(NpcEnumsScript.ROUTE_REASON_NONE),
+			"cells": old_cells.duplicate(),
+			"waypoints": old_waypoints.duplicate(),
+			"actions": {},
+			"probeCertificate": {
+				"ok": true,
+				"status": "passed",
+				"reason": "",
+				"authoritative": true,
+				"sampleCount": 2
+			}
+		},
 		"routeFallbackCell": old_cells[old_cells.size() - 1]
 	}
 	var intent := {
@@ -1536,15 +2155,35 @@ func test_navworld_tile_source_key_is_tile_stable(_mode: String) -> Dictionary:
 		"revision": 11
 	}])
 	var after_related_key := adapter.navmesh_tile_source_key_for_tile(tile_key)
-	var passed := initial_key == after_unrelated_key and after_related_key != initial_key
+	var door_adapter := GeneratedWorldNavigationAdapterScript.new()
+	var door_initial_key := door_adapter.navmesh_tile_source_key_for_tile(tile_key)
+	door_adapter.apply_navigation_events([{
+		"tileKey": unrelated_tile_key,
+		"changeKinds": [String(NpcEnumsScript.CHANGE_KIND_DOOR_STATE)],
+		"revision": 14
+	}])
+	var after_unrelated_door_key := door_adapter.navmesh_tile_source_key_for_tile(tile_key)
+	door_adapter.apply_navigation_events([{
+		"tileKey": tile_key,
+		"changeKinds": [String(NpcEnumsScript.CHANGE_KIND_DOOR_STATE)],
+		"revision": 17
+	}])
+	var after_related_door_key := door_adapter.navmesh_tile_source_key_for_tile(tile_key)
+	var passed := initial_key == after_unrelated_key \
+		and after_related_key != initial_key \
+		and door_initial_key == after_unrelated_door_key \
+		and after_related_door_key != door_initial_key
 	return outcome(
 		passed,
-		"initial=%s unrelated=%s related=%s" % [initial_key, after_unrelated_key, after_related_key],
-		["navmesh_tile_source_key_ignores_unrelated_static_revision", "navmesh_tile_source_key_updates_for_own_tile"],
+		"initial=%s unrelated=%s related=%s doorInitial=%s doorUnrelated=%s doorRelated=%s" % [initial_key, after_unrelated_key, after_related_key, door_initial_key, after_unrelated_door_key, after_related_door_key],
+		["navmesh_tile_source_key_ignores_unrelated_static_revision", "navmesh_tile_source_key_updates_for_own_tile", "navmesh_tile_source_key_ignores_unrelated_door_revision", "navmesh_tile_source_key_updates_for_own_door"],
 		{
 			"initialKey": initial_key,
 			"afterUnrelatedKey": after_unrelated_key,
-			"afterRelatedKey": after_related_key
+			"afterRelatedKey": after_related_key,
+			"doorInitialKey": door_initial_key,
+			"afterUnrelatedDoorKey": after_unrelated_door_key,
+			"afterRelatedDoorKey": after_related_door_key
 		}
 	)
 
@@ -1654,6 +2293,38 @@ func test_navworld_door_portal_edge_registered(_mode: String) -> Dictionary:
 	var edge = tile.edge_between(from_key, to_key)
 	var passed: bool = edge != null and edge.get("traversal_kind") == NpcEnumsScript.TRAVERSAL_KIND_DOOR and tile.door_portals.has("door:home-a")
 	return outcome(passed, "edge=%s portals=%s" % [JSON.stringify(edge.to_summary() if edge else {}), JSON.stringify(tile.door_portals.keys())], ["door_portal_registered", "door_edge_explicit"], { "edge": edge.to_summary() if edge else {}, "portals": tile.door_portals.keys() })
+
+func test_navworld_door_axis_uses_wall_blockers(_mode: String) -> Dictionary:
+	var adapter := GeneratedWorldNavigationAdapterScript.new()
+	var door := Node3D.new()
+	var z_wall_a := Node3D.new()
+	var z_wall_b := Node3D.new()
+	var x_wall_a := Node3D.new()
+	var x_wall_b := Node3D.new()
+	var door_cell := Vector2i(10, 10)
+	var z_wall_snapshot := {
+		"doors": { door_cell: door },
+		"blocked": {
+			door_cell + Vector2i(0, -1): z_wall_a,
+			door_cell + Vector2i(0, 1): z_wall_b
+		}
+	}
+	var x_wall_snapshot := {
+		"doors": { door_cell: door },
+		"blocked": {
+			door_cell + Vector2i(-1, 0): x_wall_a,
+			door_cell + Vector2i(1, 0): x_wall_b
+		}
+	}
+	var z_wall_axis := adapter._door_crossing_axis(door, z_wall_snapshot, door_cell)
+	var x_wall_axis := adapter._door_crossing_axis(door, x_wall_snapshot, door_cell)
+	door.free()
+	z_wall_a.free()
+	z_wall_b.free()
+	x_wall_a.free()
+	x_wall_b.free()
+	var passed := z_wall_axis == "x" and x_wall_axis == "z"
+	return outcome(passed, "zWall=%s xWall=%s" % [z_wall_axis, x_wall_axis], ["north_south_wall_crosses_x", "east_west_wall_crosses_z"], { "zWallAxis": z_wall_axis, "xWallAxis": x_wall_axis })
 
 func test_navworld_semantic_home_interior(_mode: String) -> Dictionary:
 	var service := NavigationWorldServiceScript.new()
@@ -2066,6 +2737,23 @@ func motor_door_leaf(node_name: String, portal_id: String, group_id: String) -> 
 	door.set_meta("door_group_id", group_id)
 	add_child(door)
 	return door
+
+func live_nav_block(cell: Vector2i, block_type := "woodBlock", size := Vector3.ZERO) -> StaticBody3D:
+	var body := StaticBody3D.new()
+	body.name = "LiveNavBlock_%s_%d_%d" % [block_type, cell.x, cell.y]
+	body.position = Vector3(float(cell.x) * NpcConstantsScript.CELL_SIZE, 0.0, float(cell.y) * NpcConstantsScript.CELL_SIZE)
+	body.set_meta("kind", "block")
+	body.set_meta("cell", Vector3i(cell.x, 0, cell.y))
+	body.set_meta("block_type", block_type)
+	if block_type == "door":
+		body.set_meta("door_policy", "public_gate")
+		body.set_meta("open", false)
+	var shape := BoxShape3D.new()
+	shape.size = size if size != Vector3.ZERO else Vector3(NpcConstantsScript.CELL_SIZE * 0.96, NpcConstantsScript.CELL_SIZE, NpcConstantsScript.CELL_SIZE * 0.96)
+	var collider := CollisionShape3D.new()
+	collider.shape = shape
+	body.add_child(collider)
+	return body
 
 func run_motor_once(profile, command, grounded := true) -> Dictionary:
 	var body := motor_body("MotorTestBody")

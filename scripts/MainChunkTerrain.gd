@@ -1,7 +1,6 @@
 extends "res://scripts/MainInteractionFlow.gd"
 
 const LocalLightRigScript := preload("res://scripts/LocalLightRig.gd")
-const NpcConstantsScript := preload("res://scripts/npc_ai/NpcConstants.gd")
 
 func add_block_mesh(parent: Node3D, size: Vector3, offset: Vector3, material_key: String, rotation := Vector3.ZERO) -> MeshInstance3D:
     var mesh_instance := MeshInstance3D.new()

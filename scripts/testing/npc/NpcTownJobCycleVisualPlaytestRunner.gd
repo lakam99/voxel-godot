@@ -746,6 +746,7 @@ func npc_summary(entry: Dictionary, phase: String) -> Dictionary:
         "pathWaypointCount": (entry.get("pathWaypoints", []) as Array).size(),
         "routeCellSample": sanitize_value((entry.get("routeCells", []) as Array).slice(0, 8)),
         "pathWaypointSample": sanitize_value((entry.get("pathWaypoints", []) as Array).slice(0, 5)),
+        "lastResolvedEndpointDebug": sanitize_value(entry.get("lastResolvedEndpointDebug", {})),
         "lastRoutePlanDebug": sanitize_value(entry.get("lastRoutePlanDebug", {})),
         "lastNavmeshTilePublishDebug": sanitize_value(entry.get("lastNavmeshTilePublishDebug", [])),
         "routePlannerStats": sanitize_value(npc_route_planner_stats()),
@@ -1877,6 +1878,8 @@ func wait_process_frames(count: int) -> void:
         await get_tree().process_frame
 
 func rounded(value: float) -> float:
+    if not is_finite(value):
+        return -1.0
     return snappedf(value, 0.001)
 
 func vec2i(value: Vector2i) -> Dictionary:
@@ -1889,6 +1892,8 @@ func vec3(value: Vector3) -> Dictionary:
     return { "x": rounded(value.x), "y": rounded(value.y), "z": rounded(value.z) }
 
 func sanitize_value(value):
+    if value is float:
+        return rounded(value)
     if value is Vector2i:
         return vec2i(value)
     if value is Vector3i:

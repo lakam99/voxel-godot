@@ -10,6 +10,7 @@ const NpcTaskPlannerScript := preload("res://scripts/npc_ai/behavior/NpcTaskPlan
 const NpcRecoveryPolicyScript := preload("res://scripts/npc_ai/behavior/NpcRecoveryPolicy.gd")
 const NpcPlanExecutorScript := preload("res://scripts/npc_ai/behavior/NpcPlanExecutor.gd")
 const NpcPerceptionServiceScript := preload("res://scripts/npc_ai/behavior/NpcPerceptionService.gd")
+const NpcSemanticGoalPlannerScript := preload("res://scripts/npc_ai/behavior/NpcSemanticGoalPlanner.gd")
 const NpcRouteMovementControllerScript := preload("res://scripts/npc_ai/movement/NpcRouteMovementController.gd")
 const CELL := 1.35
 
@@ -24,6 +25,7 @@ class FakeAutonomy:
 	extends Node
 	var traffic_releases := 0
 	var door_releases := 0
+	var door_portals = null
 
 	func release_npc_traffic_reservations(_entry, _reason := "released") -> int:
 		traffic_releases += 1
@@ -40,6 +42,10 @@ class FakeNavigationService:
 		if position.x >= unreachable_x_threshold:
 			return { "found": false, "reason": "test_unreachable", "position": position, "maxDistance": max_distance }
 		return { "found": true, "position": position, "distance": 0.0, "source": "test_navmesh" }
+
+class FakeDoorPortalService:
+	extends RefCounted
+	var portals := {}
 
 class FakeMain:
 	extends Node
@@ -82,6 +88,36 @@ class FakeRouteWorld:
 	func cell_key(cell: Vector2i) -> String:
 		return "%d,%d" % [cell.x, cell.y]
 
+class FakeGuardTargetWorld:
+	extends RefCounted
+
+	func world_cell(position: Vector3) -> Vector2i:
+		return Vector2i(roundi(position.x / CELL), roundi(position.z / CELL))
+
+	func cell_position(cell: Vector2i) -> Vector3:
+		return Vector3(float(cell.x) * CELL, 0.0, float(cell.y) * CELL)
+
+	func point_allowed(_entry: Dictionary, _position: Vector3, _allow_outside := false, _moving_home := false) -> bool:
+		return true
+
+	func point_inside_town(_entry: Dictionary, _position: Vector3) -> bool:
+		return true
+
+	func point_inside_work_area(_entry: Dictionary, _position: Vector3) -> bool:
+		return true
+
+	func approach_cells_for_target(_entry: Dictionary, _target_position: Vector3, _allow_outside := true) -> Array[Vector2i]:
+		return []
+
+	func cell_is_standable_goal(_entry: Dictionary, _cell: Vector2i, _allow_outside := false, _moving_home := false) -> bool:
+		return true
+
+class FakeUnreachableRoutePlanner:
+	extends RefCounted
+
+	func route_cost(_entry: Dictionary, _target: Vector3, _allow_outside := false, _moving_home := false, _arrival_radius := CELL * 0.85, _approach_cells := [], _require_ready := false) -> float:
+		return INF
+
 class FakeNpcSystem:
 	extends Node
 	var chosen_anchor := Vector3(2.7, 0.0, 0.0)
@@ -90,6 +126,8 @@ class FakeNpcSystem:
 	var route_motion_calls := 0
 	var motor_block_until_distance := -1.0
 	var max_requested_distance := 0.0
+	var allow_outside_calls := 0
+	var last_allow_outside := false
 	var moved_actor_ids := {}
 
 	func update_npc_needs(_entry: Dictionary, _delta: float, _night_factor: float) -> void:
@@ -106,6 +144,9 @@ class FakeNpcSystem:
 		if body == null:
 			return 0.0
 		move_calls += 1
+		last_allow_outside = _allow_outside
+		if _allow_outside:
+			allow_outside_calls += 1
 		if _moving_home:
 			moving_home_calls += 1
 		max_requested_distance = maxf(max_requested_distance, max_distance)
@@ -218,6 +259,7 @@ func cases() -> Array[Dictionary]:
 		case("npc_behavior_day_worker_reachable_job", "day", "test_day_worker_reachable_job"),
 		case("npc_behavior_day_forager_goal_plan_shape", "day", "test_day_forager_goal_plan_shape"),
 		case("npc_behavior_day_guard_patrol", "day", "test_day_guard_patrol"),
+		case("npc_behavior_guard_target_never_falls_back_to_porch", "day", "test_guard_target_never_falls_back_to_porch"),
 		case("npc_behavior_day_idle_semantic_anchor", "day", "test_day_idle_semantic_anchor"),
 		case("npc_behavior_dusk_civilian_returns_before_night", "transition", "test_dusk_civilian_returns_before_night"),
 		case("npc_behavior_dusk_guard_reports_to_duty", "transition", "test_dusk_guard_reports_to_duty"),
@@ -253,6 +295,10 @@ func cases() -> Array[Dictionary]:
 		case("npc_behavior_scripted_order_moves_while_brain_skipped", "day", "test_scripted_order_moves_while_brain_skipped"),
 		case("npc_behavior_mira_no_inching_after_dialogue", "day", "test_mira_no_inching_after_dialogue"),
 		case("npc_behavior_morning_departures_not_brain_starved", "day", "test_morning_departures_not_brain_starved"),
+		case("npc_behavior_idle_worker_exits_home_clearance", "day", "test_idle_worker_exits_home_clearance"),
+		case("npc_behavior_job_selection_budget_ages_deferred_workers", "day", "test_job_selection_budget_ages_deferred_workers"),
+		case("npc_behavior_resource_worker_outbound_stays_town_bound", "day", "test_resource_worker_outbound_stays_town_bound"),
+		case("npc_behavior_forager_outbound_allows_outside", "day", "test_forager_outbound_allows_outside"),
 		case("npc_traffic_door_crossing_continues_while_brain_skipped", "day", "test_door_crossing_continues_while_brain_skipped"),
 		case("npc_behavior_motor_blocked_local_escape_forces_replan", "day", "test_motor_blocked_local_escape_forces_replan"),
 		case("npc_behavior_unreachable_goal_terminal", "day", "test_unreachable_goal_terminal"),
@@ -335,6 +381,37 @@ func test_day_guard_patrol(_mode: String) -> Dictionary:
 	var actions: Array = result.plan.get("actionIds", [])
 	var passed: bool = result.goal.get("goalKind") == NpcEnumsScript.GOAL_KIND_GUARD and actions.has("patrol_guard_post")
 	return outcome(passed, "goal=%s actions=%s" % [String(result.goal.get("goalKind")), JSON.stringify(actions)], ["day_guard_goal", "patrol_action"], result)
+
+func test_guard_target_never_falls_back_to_porch(_mode: String) -> Dictionary:
+	var goal_planner = NpcSemanticGoalPlannerScript.new()
+	goal_planner.setup(null, FakeMain.new(), FakeGuardTargetWorld.new(), FakeUnreachableRoutePlanner.new())
+	var body := Node3D.new()
+	body.global_position = Vector3.ZERO
+	var porch := Vector3(CELL, 0.0, 0.0)
+	var guard_post := Vector3(CELL * 24.0, 0.0, 0.0)
+	var entry_data := {
+		"id": "guard-target-test",
+		"body": body,
+		"job": "guard",
+		"guardPosition": guard_post,
+		"porchPosition": porch,
+		"townCenter": Vector2i.ZERO,
+		"townRadius": 32
+	}
+	var target: Vector3 = goal_planner.choose_guard_target(entry_data, null, false)
+	var candidates: Array = goal_planner.guard_post_candidates(entry_data)
+	var porch_present := false
+	for candidate in candidates:
+		if candidate is Vector3 and (candidate as Vector3).distance_to(porch) <= 0.01:
+			porch_present = true
+	var passed := target.distance_to(guard_post) <= 0.01 and not porch_present and String(entry_data.get("routeReason", "")) == "no_reachable_guard_anchor"
+	body.free()
+	return outcome(
+		passed,
+		"target=%s guard=%s porchPresent=%s reason=%s" % [str(target), str(guard_post), str(porch_present), String(entry_data.get("routeReason", ""))],
+		["guard_target_preserves_assigned_post", "guard_candidates_exclude_home_porch", "guard_unreachable_remains_diagnostic"],
+		{ "target": target, "guardPost": guard_post, "porch": porch, "porchPresent": porch_present, "reason": String(entry_data.get("routeReason", "")) }
+	)
 
 func test_day_idle_semantic_anchor(_mode: String) -> Dictionary:
 	var source := read_text("res://scripts/npc_ai/behavior/NpcSemanticGoalPlanner.gd")
@@ -723,6 +800,136 @@ func test_morning_departures_not_brain_starved(_mode: String) -> Dictionary:
 	var passed: bool = fake_npc.move_calls == 10 and body.global_position.x > 0.42 and String(entry_data.get("routeStatus", "moving")) != "idle"
 	fake_npc.queue_free()
 	return outcome(passed, "moveCalls=%d x=%.3f route=%s" % [fake_npc.move_calls, body.global_position.x, String(entry_data.get("routeStatus", ""))], ["morning_job_motion_every_frame", "morning_departure_not_brain_starved"], { "moveCalls": fake_npc.move_calls, "position": body.global_position, "routeStatus": entry_data.get("routeStatus", "") })
+
+func test_idle_worker_exits_home_clearance(_mode: String) -> Dictionary:
+	var fake_npc := FakeNpcSystem.new()
+	var fake_autonomy := FakeAutonomy.new()
+	var portal_service := FakeDoorPortalService.new()
+	portal_service.portals["door:test"] = {
+		"leaf_cells": [Vector2i(0, 0), Vector2i(0, -1)],
+		"threshold_bounds": AABB(Vector3(-0.675, -1.0, -0.675), Vector3(1.35, 3.0, 1.35)),
+		"clearance_bounds": AABB(Vector3(-0.675, -1.0, 0.675), Vector3(1.35, 3.0, 1.35)),
+		"sweep_bounds": AABB()
+	}
+	fake_autonomy.door_portals = portal_service
+	fake_npc.add_child(fake_autonomy)
+	var executor: Variant = make_executor(fake_npc, fake_autonomy)
+	var entry_data := entry("Mason", {
+		"job": "stone",
+		"position": Vector3(0.0, 0.0, 1.35),
+		"homeCell": Vector2i(0, 2),
+		"porchCell": Vector2i(0, -1)
+	})
+	entry_data["doorCell"] = Vector2i(0, 0)
+	entry_data["interiorMinCell"] = Vector2i(-1, 1)
+	entry_data["interiorMaxCell"] = Vector2i(1, 3)
+	entry_data["interiorLandingCell"] = Vector2i(0, 1)
+	entry_data["jobPhase"] = "idle"
+	entry_data["jobTimer"] = 0.05
+	entry_data["jobTarget"] = Vector3(0.0, 0.0, -1.35)
+	entry_data["activeMotionGoal"] = { "goalKind": NpcEnumsScript.GOAL_KIND_WORK }
+	var body := entry_data.get("body") as Node3D
+	var before := body.global_position
+	var result: Dictionary = executor.advance_motion_npc(entry_data, 1.0 / 60.0, 0.0)
+	var after := body.global_position
+	var passed: bool = fake_npc.move_calls == 1 \
+		and bool(result.get("advanced", false)) \
+		and String(result.get("reason", "")) == "job_idle_home_exit" \
+		and String(result.get("intentKind", "")) == "job" \
+		and after.z < before.z \
+		and String(entry_data.get("jobPhase", "")) == "idle"
+	fake_npc.queue_free()
+	return outcome(
+		passed,
+		"result=%s moveCalls=%d before=%s after=%s" % [JSON.stringify(result), fake_npc.move_calls, str(before), str(after)],
+		["idle_worker_in_door_clearance_moves_outward", "job_idle_not_frozen_at_home_threshold"],
+		{ "result": result, "moveCalls": fake_npc.move_calls, "before": before, "after": after, "jobPhase": entry_data.get("jobPhase", "") }
+	)
+
+func test_job_selection_budget_ages_deferred_workers(_mode: String) -> Dictionary:
+	var fake_npc := FakeNpcSystem.new()
+	var executor: Variant = make_executor(fake_npc)
+	var blockers: Array[Dictionary] = []
+	for i in range(3):
+		var blocker := entry("Mason", {
+			"id": "blocker_%d" % i,
+			"job": "stone",
+			"position": Vector3(2.7 + float(i), 0.0, 0.0),
+			"homeCell": Vector2i(-10 - i, 0),
+			"porchCell": Vector2i(-9 - i, 0)
+		})
+		blocker["activeMotionGoal"] = { "goalKind": NpcEnumsScript.GOAL_KIND_WORK }
+		blockers.append(blocker)
+	var victim := entry("Carpenter", {
+		"id": "victim_worker",
+		"job": "wood",
+		"position": Vector3(10.8, 0.0, 0.0),
+		"homeCell": Vector2i(-20, 0),
+		"porchCell": Vector2i(-19, 0)
+	})
+	victim["activeMotionGoal"] = { "goalKind": NpcEnumsScript.GOAL_KIND_WORK }
+	var selected_frame := -1
+	for frame in range(24):
+		executor.begin_update_frame()
+		for blocker in blockers:
+			blocker["jobPhase"] = "idle"
+			blocker["jobTimer"] = 0.0
+			executor.advance_motion_npc(blocker, 1.0 / 60.0, 0.0)
+		if String(victim.get("jobPhase", "idle")) == "idle":
+			victim["jobTimer"] = minf(float(victim.get("jobTimer", 0.0)), 0.0)
+		executor.advance_motion_npc(victim, 1.0 / 60.0, 0.0)
+		if String(victim.get("jobPhase", "idle")) != "idle":
+			selected_frame = frame
+			break
+	var passed := selected_frame >= 0 and selected_frame <= 14 and String(victim.get("jobPhase", "")) == "searching"
+	fake_npc.queue_free()
+	return outcome(
+		passed,
+		"selectedFrame=%d phase=%s deferred=%d" % [selected_frame, String(victim.get("jobPhase", "")), int(victim.get("jobSelectionDeferredFrames", -1))],
+		["deferred_job_selection_ages", "late_worker_gets_job_turn"],
+		{ "selectedFrame": selected_frame, "phase": victim.get("jobPhase", ""), "deferredFrames": victim.get("jobSelectionDeferredFrames", -1) }
+	)
+
+func test_resource_worker_outbound_stays_town_bound(_mode: String) -> Dictionary:
+	var fake_npc := FakeNpcSystem.new()
+	var executor: Variant = make_executor(fake_npc)
+	var entry_data := entry("Mason", {
+		"job": "stone",
+		"position": Vector3(10.8, 0.0, 0.0),
+		"homeCell": Vector2i(-10, 0),
+		"porchCell": Vector2i(-9, 0)
+	})
+	entry_data["jobPhase"] = "outbound"
+	entry_data["jobTarget"] = Vector3(13.5, 0.0, 0.0)
+	entry_data["activeMotionGoal"] = { "goalKind": NpcEnumsScript.GOAL_KIND_WORK }
+	executor.advance_motion_npc(entry_data, 1.0 / 60.0, 0.0)
+	var body := entry_data.get("body") as Node3D
+	var passed: bool = fake_npc.move_calls == 1 and not fake_npc.last_allow_outside and fake_npc.allow_outside_calls == 0 and body.global_position.x > 0.0
+	fake_npc.queue_free()
+	return outcome(
+		passed,
+		"moveCalls=%d allowOutside=%s x=%.3f" % [fake_npc.move_calls, str(fake_npc.last_allow_outside), body.global_position.x],
+		["stone_worker_outbound_uses_town_route_permission", "resource_worker_route_stays_town_bound"],
+		{ "moveCalls": fake_npc.move_calls, "allowOutsideCalls": fake_npc.allow_outside_calls, "position": body.global_position }
+	)
+
+func test_forager_outbound_allows_outside(_mode: String) -> Dictionary:
+	var fake_npc := FakeNpcSystem.new()
+	var executor: Variant = make_executor(fake_npc)
+	var entry_data := entry("Forager", { "job": "forage", "position": Vector3.ZERO })
+	entry_data["jobPhase"] = "outbound"
+	entry_data["jobTarget"] = Vector3(42.0, 0.0, 0.0)
+	entry_data["activeMotionGoal"] = { "goalKind": NpcEnumsScript.GOAL_KIND_FORAGE }
+	executor.advance_motion_npc(entry_data, 1.0 / 60.0, 0.0)
+	var body := entry_data.get("body") as Node3D
+	var passed: bool = fake_npc.move_calls == 1 and fake_npc.last_allow_outside and fake_npc.allow_outside_calls == 1 and body.global_position.x > 0.0
+	fake_npc.queue_free()
+	return outcome(
+		passed,
+		"moveCalls=%d allowOutside=%s x=%.3f" % [fake_npc.move_calls, str(fake_npc.last_allow_outside), body.global_position.x],
+		["forager_outbound_uses_outside_route_permission", "forager_route_can_leave_town"],
+		{ "moveCalls": fake_npc.move_calls, "allowOutsideCalls": fake_npc.allow_outside_calls, "position": body.global_position }
+	)
 
 func test_door_crossing_continues_while_brain_skipped(_mode: String) -> Dictionary:
 	var fake_npc := FakeNpcSystem.new()

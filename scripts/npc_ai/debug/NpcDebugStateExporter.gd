@@ -53,18 +53,27 @@ func build_runtime_export(npc_stats: Dictionary, autonomy_stats: Dictionary = {}
 
 func overlay_lines(export: Dictionary) -> Array[String]:
 	var summary: Dictionary = export.get("summary", {}) if export.get("summary", {}) is Dictionary else {}
+	var route_state: Dictionary = export.get("routeState", {}) if export.get("routeState", {}) is Dictionary else {}
 	var door_state: Dictionary = export.get("doorState", {}) if export.get("doorState", {}) is Dictionary else {}
 	var task_state: Dictionary = export.get("taskState", {}) if export.get("taskState", {}) is Dictionary else {}
 	var slot_state: Dictionary = export.get("slotState", {}) if export.get("slotState", {}) is Dictionary else {}
-	return [
+	var route_reasons: Dictionary = route_state.get("routeReasons", {}) if route_state.get("routeReasons", {}) is Dictionary else {}
+	var route_waits: Dictionary = route_state.get("routeWaitFrames", {}) if route_state.get("routeWaitFrames", {}) is Dictionary else {}
+	var lines: Array[String] = [
 		"NPC Debug: %s %s" % [String(export.get("scenario", "")), String(export.get("timeMode", ""))],
 		"Routes %d  Tasks %d  Doors %d  Slots %d" % [int(summary.get("routes", 0)), int(summary.get("tasks", 0)), int(summary.get("doors", 0)), int(summary.get("slots", 0))],
 		"Door unsafe=%d activeCrossings=%d" % [int(door_state.get("unsafeClosedDoors", 0)), int(door_state.get("activeCrossings", 0))],
 		"Task failures=%d slotWaits=%d" % [int(task_state.get("failedTasks", 0)), int(slot_state.get("waiting", 0))]
 	]
+	lines.append("Route waits route=%d tile=%d reasons=%s" % [int(route_waits.get("maxRouteBudget", 0)), int(route_waits.get("maxNavmeshTileBudget", 0)), JSON.stringify(route_reasons)])
+	return lines
 
 func _runtime_route_state(npc_stats: Dictionary, npc_entries: Array) -> Dictionary:
 	var route_counts: Dictionary = npc_stats.get("routeStatus", {}) if npc_stats.get("routeStatus", {}) is Dictionary else {}
+	var route_reasons: Dictionary = npc_stats.get("routeReasons", {}) if npc_stats.get("routeReasons", {}) is Dictionary else {}
+	var route_authority_states: Dictionary = npc_stats.get("routeAuthorityStates", {}) if npc_stats.get("routeAuthorityStates", {}) is Dictionary else {}
+	var route_authority_reasons: Dictionary = npc_stats.get("routeAuthorityReasons", {}) if npc_stats.get("routeAuthorityReasons", {}) is Dictionary else {}
+	var route_waits: Dictionary = npc_stats.get("routeWaitFrames", {}) if npc_stats.get("routeWaitFrames", {}) is Dictionary else {}
 	var routes := []
 	for entry_value in npc_entries:
 		if not (entry_value is Dictionary):
@@ -84,12 +93,26 @@ func _runtime_route_state(npc_stats: Dictionary, npc_entries: Array) -> Dictiona
 			"waypoints": path_waypoints.size(),
 			"cells": route_cells.size(),
 			"actions": route_actions.size(),
-			"nextDoor": String(entry.get("activeDoorPortalId", ""))
+			"nextDoor": String(entry.get("activeDoorPortalId", "")),
+			"routeKey": String(entry.get("routeKey", "")),
+			"pendingKey": String(entry.get("routePendingKey", "")),
+			"snapshotRevision": String(entry.get("routeSnapshotRevision", "")),
+			"pendingSnapshotRevision": String(entry.get("routePendingSnapshotRevision", "")),
+			"routeBudgetWaitFrames": int(entry.get("routeBudgetWaitFrames", 0)),
+			"navmeshTileBudgetWaitFrames": int(entry.get("navmeshTileBudgetWaitFrames", 0)),
+			"lastRoutePlanDebug": entry.get("lastRoutePlanDebug", {}),
+			"lastRouteAuthority": entry.get("lastRouteAuthority", {}),
+			"lastRouteCollisionProbe": entry.get("lastRouteCollisionProbe", {}),
+			"lastNavmeshTilePublishDebug": entry.get("lastNavmeshTilePublishDebug", [])
 		})
 	return {
 		"count": int(npc_stats.get("npcs", routes.size())),
 		"routes": routes,
 		"routeStatus": route_counts.duplicate(true),
+		"routeReasons": route_reasons.duplicate(true),
+		"routeAuthorityStates": route_authority_states.duplicate(true),
+		"routeAuthorityReasons": route_authority_reasons.duplicate(true),
+		"routeWaitFrames": route_waits.duplicate(true),
 		"blockedMoves": int(npc_stats.get("blockedMoves", 0)),
 		"routeReplans": int(npc_stats.get("routeReplans", 0)),
 		"stuckRecoveries": int(npc_stats.get("stuckRecoveries", 0)),
