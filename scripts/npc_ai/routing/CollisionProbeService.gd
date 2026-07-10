@@ -9,6 +9,7 @@ const MAX_SAMPLE_SPACING := 0.42
 const DEFAULT_GROUND_OFFSET := 0.04
 const START_OVERLAP_ESCAPE_EPSILON := 0.02
 const START_OVERLAP_ESCAPE_MIN_DOT := 0.25
+const DUPLICATE_WAYPOINT_EPSILON := 0.02
 
 var system = null
 var main = null
@@ -36,9 +37,19 @@ func probe_route(entry: Dictionary, route: Dictionary, intent: Dictionary, optio
 	var points: Array[Vector3] = [body.global_position]
 	for waypoint in waypoints:
 		if waypoint is Vector3:
-			points.append(waypoint)
+			var point: Vector3 = waypoint
+			if _flat_points_close(points[points.size() - 1], point):
+				continue
+			points.append(point)
 	if points.size() < 2:
-		return _certificate(true, "skipped", "single_point_route", false, 0, {})
+		return _certificate(true, "passed", "", true, 0, {
+			"pointCount": points.size(),
+			"singlePointRoute": true,
+			"radius": shape.radius,
+			"height": shape.height,
+			"collisionMask": NpcConstantsScript.COLLISION_NPC_STATIC_QUERY_MASK,
+			"completedSamples": 0
+		})
 	var start_overlap_escape_colliders := _current_overlap_escape_colliders(entry, body, shape, route)
 	var sample_count := 0
 	var max_samples := int(options.get("maxSamples", MAX_ROUTE_PROBE_SAMPLES))
@@ -84,6 +95,9 @@ func probe_route(entry: Dictionary, route: Dictionary, intent: Dictionary, optio
 		"collisionMask": NpcConstantsScript.COLLISION_NPC_STATIC_QUERY_MASK,
 		"completedSamples": completed_before + sample_count
 	})
+
+func _flat_points_close(a: Vector3, b: Vector3) -> bool:
+	return Vector2(a.x - b.x, a.z - b.z).length() <= DUPLICATE_WAYPOINT_EPSILON
 
 func _grounded_sample(sample: Vector3) -> Vector3:
 	var result := sample

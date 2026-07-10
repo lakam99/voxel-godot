@@ -82,33 +82,16 @@ func plan_runtime_route(entry: Dictionary, intent: Dictionary, generated_world =
 	last_stats["lastRouteSource"] = String(route.get("source", "navmesh"))
 	last_stats["legacyFallbackUsed"] = false
 	if not bool(route.get("ok", false)):
-		var bridge_allowed := _generated_cell_bridge_allowed_for_intent(intent) and _initial_failure_cell_bridge_allowed(entry, intent, route)
-		var bridge_first := bridge_allowed and _prefer_generated_bridge_before_navmesh_fallback(intent)
-		var bridge_intent := _cell_bridge_repair_intent(intent) if bridge_allowed else intent
-		if bridge_first:
-			var bridge_start: int = monitor.begin_section("navmesh_route_generated_bridge") if monitor != null else Time.get_ticks_usec()
-			var cell_bridge_route := _plan_generated_cell_bridge_route(entry, bridge_intent, generated_world, start_cell, target_cell, route)
-			if monitor != null:
-				monitor.end_section("navmesh_route_generated_bridge", bridge_start)
-			if not cell_bridge_route.is_empty():
-				return cell_bridge_route
 		var fallback_start: int = monitor.begin_section("navmesh_route_fallback_cells") if monitor != null else Time.get_ticks_usec()
 		var fallback_route := _plan_fallback_cell_route(entry, intent, generated_world, start, start_cell, target_cell, route, forbidden_private_door_ids)
 		if monitor != null:
 			monitor.end_section("navmesh_route_fallback_cells", fallback_start)
 		if not fallback_route.is_empty():
 			return fallback_route
-		if bridge_allowed and not bridge_first:
-			var bridge_start: int = monitor.begin_section("navmesh_route_generated_bridge") if monitor != null else Time.get_ticks_usec()
-			var cell_bridge_route := _plan_generated_cell_bridge_route(entry, bridge_intent, generated_world, start_cell, target_cell, route)
-			if monitor != null:
-				monitor.end_section("navmesh_route_generated_bridge", bridge_start)
-			if not cell_bridge_route.is_empty():
-				return cell_bridge_route
-		elif not bridge_allowed and route is Dictionary:
+		if route is Dictionary:
 			route["generatedCellBridge"] = {
 				"ok": false,
-				"reason": "skipped_routine_endpoint_mismatch"
+				"reason": "production_generated_cell_bridge_disabled"
 			}
 			return _route_failure(String(route.get("status", "blocked")), String(route.get("reason", "no_route")), target_cell, route)
 		if route is Dictionary:
@@ -124,64 +107,22 @@ func plan_runtime_route(entry: Dictionary, intent: Dictionary, generated_world =
 	var repair_route: Dictionary = runtime_route
 	if not _post_validation_cell_repair_allowed(runtime_route, intent) and not _post_validation_cell_repair_allowed(rejected_navmesh_route, intent):
 		return runtime_route
-	var bridge_after_validation_allowed := _generated_cell_bridge_allowed_for_intent(intent)
-	var bridge_first_after_validation := bridge_after_validation_allowed and _prefer_generated_bridge_before_navmesh_fallback(intent)
-	if bridge_first_after_validation:
-		var bridge_after_start: int = monitor.begin_section("navmesh_route_post_validation_bridge") if monitor != null else Time.get_ticks_usec()
-		var bridge_after_validation := _plan_generated_cell_bridge_route(entry, _cell_bridge_repair_intent(intent), generated_world, start_cell, target_cell, repair_route)
-		if monitor != null:
-			monitor.end_section("navmesh_route_post_validation_bridge", bridge_after_start)
-		if not bridge_after_validation.is_empty():
-			return bridge_after_validation
 	var fallback_after_start: int = monitor.begin_section("navmesh_route_post_validation_fallback_cells") if monitor != null else Time.get_ticks_usec()
 	var fallback_after_validation := _plan_fallback_cell_route(entry, intent, generated_world, start, start_cell, target_cell, repair_route, forbidden_private_door_ids)
 	if monitor != null:
 		monitor.end_section("navmesh_route_post_validation_fallback_cells", fallback_after_start)
 	if not fallback_after_validation.is_empty():
 		return fallback_after_validation
-	if bridge_after_validation_allowed and not bridge_first_after_validation:
-		var bridge_after_start: int = monitor.begin_section("navmesh_route_post_validation_bridge") if monitor != null else Time.get_ticks_usec()
-		var bridge_after_validation := _plan_generated_cell_bridge_route(entry, _cell_bridge_repair_intent(intent), generated_world, start_cell, target_cell, repair_route)
-		if monitor != null:
-			monitor.end_section("navmesh_route_post_validation_bridge", bridge_after_start)
-		if not bridge_after_validation.is_empty():
-			return bridge_after_validation
 	return runtime_route
 
 func plan_generated_cell_route(entry: Dictionary, intent: Dictionary, generated_world = null) -> Dictionary:
-	if not _generated_cell_bridge_allowed_for_intent(intent):
-		return {}
-	if _home_route_requires_complete_navmesh(intent):
-		return {}
-	var source = generated_world if generated_world != null else world_adapter
-	if source == null:
-		return {}
-	var target: Vector3 = intent.get("target", Vector3.ZERO)
-	var target_cell := _world_cell(target, source)
-	var body := entry.get("body") as Node3D
-	var start: Vector3 = body.global_position if body != null else entry.get("position", entry.get("porchPosition", target))
-	var start_cell := _world_cell(start, source)
-	var failed_route := {
-		"ok": false,
-		"status": "blocked",
-		"reason": "generated_cell_primary",
-		"source": "generated_cell_bridge"
-	}
-	var route := _plan_generated_cell_bridge_route(entry, intent, source, start_cell, target_cell, failed_route)
-	if route.is_empty():
-		return {}
-	route["source"] = "generated_cell_bridge"
-	route["legacyFallbackUsed"] = false
-	route["navmeshRoute"] = failed_route
-	return route
+	return {}
 
 func _post_validation_cell_repair_allowed(route: Dictionary, intent: Dictionary) -> bool:
 	var route_kind := String(intent.get("kind", "move"))
 	var status := String(route.get("status", ""))
 	var reason := String(route.get("reason", ""))
 	if bool(intent.get("movingHome", false)) or route_kind == "home":
-		if reason == "path_endpoint_partial" and status in ["pending", "partial"]:
-			return true
 		if status != "blocked":
 			return false
 		return reason in [
@@ -190,8 +131,6 @@ func _post_validation_cell_repair_allowed(route: Dictionary, intent: Dictionary)
 			"blocked_static_collision",
 			"blocked_static_transition"
 		]
-	if status == "partial" and reason == "path_endpoint_partial":
-		return true
 	if bool(intent.get("movingHome", false)) and status == "blocked":
 		return reason in [
 			"path_crosses_static_collision",
@@ -246,18 +185,7 @@ func _initial_failure_cell_bridge_allowed(entry: Dictionary, intent: Dictionary,
 	return false
 
 func _generated_cell_bridge_allowed_for_intent(intent: Dictionary) -> bool:
-	if not NpcConstantsScript.NPC_NAV_ENABLE_SAFE_GENERATED_OPEN_TERRAIN_FALLBACK:
-		return false
-	if not bool(intent.get("safeOpenTerrainGeneratedFallback", false)):
-		return false
-	if bool(intent.get("movingHome", false)):
-		return false
-	if String(intent.get("action", "")) != "":
-		return false
-	var route_kind := String(intent.get("kind", "move"))
-	if route_kind not in ["forage", "guard", "work", "job", "move", "idle", "wander"]:
-		return false
-	return true
+	return false
 
 func _plan_fallback_cell_route(entry: Dictionary, intent: Dictionary, generated_world, start: Vector3, start_cell: Vector2i, target_cell: Vector2i, failed_route: Dictionary, forbidden_private_door_ids: Array[String]) -> Dictionary:
 	var fallback_cells_value = intent.get("fallbackCells", [])
@@ -464,10 +392,22 @@ func _plan_generated_cell_bridge_route(entry: Dictionary, intent: Dictionary, ge
 		waypoints.append(source.cell_position(cells[index]))
 	var actions := _generated_bridge_door_actions(entry, source, snapshot, cells)
 	var using_fallback := found_cell != target_cell
+	if using_fallback:
+		if failed_route is Dictionary:
+			failed_route["generatedCellBridge"] = {
+				"ok": false,
+				"reason": "partial_endpoint_rejected",
+				"goals": goal_cells.size(),
+				"visited": _generated_bridge_last_visited,
+				"fallbackCell": found_cell,
+				"targetCell": target_cell,
+				"blockedReasons": _generated_bridge_block_reasons.duplicate()
+			}
+		return {}
 	return {
 		"ok": true,
-		"status": "partial" if using_fallback else "routed",
-		"reason": "generated_cell_bridge" if using_fallback else "",
+		"status": "routed",
+		"reason": "",
 		"cells": cells.slice(1),
 		"waypoints": waypoints,
 		"actions": actions,
@@ -576,14 +516,10 @@ func _generated_bridge_critical(intent: Dictionary) -> bool:
 
 func _home_route_requires_complete_navmesh(intent: Dictionary) -> bool:
 	var route_kind := String(intent.get("kind", "move"))
-	return (bool(intent.get("movingHome", false)) or route_kind == "home") and not bool(intent.get("allowHomeCellBridgeRepair", false))
+	return bool(intent.get("movingHome", false)) or route_kind == "home"
 
 func _cell_bridge_repair_intent(intent: Dictionary) -> Dictionary:
-	if not bool(intent.get("movingHome", false)) and String(intent.get("kind", "move")) != "home":
-		return intent
-	var repair_intent := intent.duplicate(true)
-	repair_intent["allowHomeCellBridgeRepair"] = true
-	return repair_intent
+	return intent
 
 func _begin_generated_bridge_budget_frame() -> void:
 	var engine_frame := Engine.get_process_frames()
@@ -895,15 +831,14 @@ func _build_runtime_route_from_navmesh(entry: Dictionary, intent: Dictionary, ge
 	cells = _preserve_route_action_cells(cells, actions)
 	var using_fallback := fallback_cell != target_cell
 	var route_reason := String(route.get("reason", ""))
-	var progress_partial := String(route.get("status", "")) == "partial" and route_reason == "path_endpoint_partial" and not waypoints.is_empty()
-	if using_fallback and (bool(intent.get("movingHome", false)) or String(intent.get("kind", "move")) == "home") and not bool(intent.get("probeRepair", false)) and not progress_partial:
+	if using_fallback:
 		var partial_route := route.duplicate(true)
 		partial_route["fallbackCell"] = fallback_cell
 		partial_route["targetCell"] = target_cell
 		partial_route["cells"] = cells
-		return _route_failure("pending", "path_endpoint_partial", target_cell, partial_route)
-	var status := "arrived" if waypoints.is_empty() and not using_fallback else "partial" if using_fallback else "routed"
-	var reason := route_reason if using_fallback and route_reason != "" else "fallback_cell_route" if using_fallback else ""
+		return _route_failure("blocked", "partial_endpoint_rejected", target_cell, partial_route)
+	var status := "arrived" if waypoints.is_empty() else "routed"
+	var reason := route_reason
 	return {
 		"ok": true,
 		"status": status,

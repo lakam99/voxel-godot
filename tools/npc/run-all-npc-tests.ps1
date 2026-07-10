@@ -28,12 +28,16 @@ function Get-PropValue($Object, [string]$Name) {
     return $prop.Value
 }
 
-function To-StringArray($Value) {
+function To-StringArray {
+    param(
+        [AllowNull()]
+        [object]$Value
+    )
     $items = @()
     if ($null -eq $Value) {
         return $items
     }
-    if ($Value -is [System.Array]) {
+    if (($Value -is [System.Collections.IEnumerable]) -and -not ($Value -is [string])) {
         foreach ($item in $Value) {
             if ($null -ne $item) {
                 $items += [string]$item
@@ -53,8 +57,13 @@ function Bool-Prop($Object, [string]$Name, [bool]$DefaultValue) {
     return [bool]$value
 }
 
-function Set-NamedArg([string[]]$Args, [string]$Name, [string]$Value) {
-    $items = @($Args)
+function Set-NamedArg {
+    param(
+        [string[]]$ArgList,
+        [string]$Name,
+        [string]$Value
+    )
+    $items = @($ArgList)
     $index = [array]::IndexOf($items, $Name)
     if ($index -ge 0) {
         if ($index + 1 -lt $items.Count) {
@@ -121,18 +130,18 @@ try {
         if (Bool-Prop $suite "supportsScreenshotDir" $false) {
             $screenshotDir = Join-Path $projectPath "artifacts\npc\screenshots\$id-$($TimeMode.ToLowerInvariant())"
         }
-        $runnerArgs = @(To-StringArray $suite.defaultArgs)
+        $runnerArgs = @(To-StringArray -Value (Get-PropValue $suite "defaultArgs"))
         if (Bool-Prop $suite "supportsTimeMode" $true) {
-            $runnerArgs = @(Set-NamedArg $runnerArgs "-TimeMode" $TimeMode)
+            $runnerArgs = @(Set-NamedArg -ArgList $runnerArgs -Name "-TimeMode" -Value $TimeMode)
         }
         if (Bool-Prop $suite "supportsSeed" $true) {
-            $runnerArgs = @(Set-NamedArg $runnerArgs "-Seed" $Seed)
+            $runnerArgs = @(Set-NamedArg -ArgList $runnerArgs -Name "-Seed" -Value $Seed)
         }
         if (Bool-Prop $suite "supportsReportPath" $true) {
-            $runnerArgs = @(Set-NamedArg $runnerArgs "-ReportPath" $suiteReport)
+            $runnerArgs = @(Set-NamedArg -ArgList $runnerArgs -Name "-ReportPath" -Value $suiteReport)
         }
         if ($screenshotDir -ne "") {
-            $runnerArgs = @(Set-NamedArg $runnerArgs "-ScreenshotDir" $screenshotDir)
+            $runnerArgs = @(Set-NamedArg -ArgList $runnerArgs -Name "-ScreenshotDir" -Value $screenshotDir)
         }
 
         $suiteStarted = Get-Date

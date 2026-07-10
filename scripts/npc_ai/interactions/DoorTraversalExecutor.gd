@@ -46,6 +46,9 @@ func request_crossing(door: Node, actor: Node, entry: Dictionary = {}, action: D
 	if direction == "unknown" and portal != null:
 		direction = _direction_for_actor_goal(portal, actor, entry)
 	if portal != null:
+		var goal_direction := _direction_for_actor_goal(portal, actor, entry)
+		if _home_crossing_should_use_goal_direction(direction, goal_direction, entry, action):
+			direction = goal_direction
 		direction = _normalize_direction_for_portal(portal, direction, actor, entry)
 	var active_key := _active_key(portal_id, actor_id)
 	var active: Dictionary = active_crossings.get(active_key, {})
@@ -221,6 +224,18 @@ func _direction_for_actor_goal(portal, actor: Node, entry: Dictionary) -> String
 			return "x+" if position.x <= center.x else "x-"
 		return "z+" if position.z <= center.z else "z-"
 	return "unknown"
+
+func _home_crossing_should_use_goal_direction(direction: String, goal_direction: String, entry: Dictionary, action: Dictionary = {}) -> bool:
+	if goal_direction == "" or goal_direction == "unknown":
+		return false
+	var explicit_direction := String(action.get("direction", ""))
+	if explicit_direction in ["x+", "x-", "z+", "z-"]:
+		return false
+	if direction == "" or direction == "unknown" or direction == goal_direction:
+		return false
+	if bool(entry.get("routeMovingHome", false)) or bool(entry.get("movingHome", false)):
+		return true
+	return String(entry.get("activeGoalKind", "")) == "home"
 
 func _normalize_direction_for_portal(portal, direction: String, actor: Node, entry: Dictionary) -> String:
 	if portal == null:

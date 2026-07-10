@@ -322,20 +322,7 @@ func route_dictionary_from_result(result, intent: Dictionary, world_adapter) -> 
 			"corridor": corridor
 		}
 	if status == NpcEnumsScript.ROUTE_STATUS_PARTIAL:
-		var partial_corridor = result.get("corridor")
-		return {
-			"ok": partial_corridor != null and not partial_corridor.steps.is_empty(),
-			"status": "partial",
-			"reason": str(result.get("reason")),
-			"cells": partial_corridor.cells_2d() if partial_corridor != null else [],
-			"waypoints": partial_corridor.waypoints.duplicate() if partial_corridor != null else [],
-			"actions": partial_corridor.actions_by_cell() if partial_corridor != null else {},
-			"targetCell": target_cell,
-			"fallbackCell": _last_corridor_cell(partial_corridor, target_cell) if partial_corridor != null else target_cell,
-			"snapshotRevision": str(result.get("topology_revision")),
-			"typedResult": result,
-			"corridor": partial_corridor
-		}
+		return _route_failure("blocked", "partial_endpoint_rejected", target_cell, result)
 	return _route_failure("blocked", str(result.get("reason")), target_cell, result)
 
 func build_graph(profile = null) -> Dictionary:

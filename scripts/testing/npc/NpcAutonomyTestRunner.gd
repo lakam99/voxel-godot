@@ -30,11 +30,13 @@ const CharacterMotorProfileScript := preload("res://scripts/npc_ai/contracts/Cha
 const RouteLeaseScript := preload("res://scripts/npc_ai/contracts/RouteLease.gd")
 const RouteTicketScript := preload("res://scripts/npc_ai/contracts/RouteTicket.gd")
 const NpcRouteAuthorityScript := preload("res://scripts/npc_ai/routing/NpcRouteAuthority.gd")
+const NpcRouteAuthorityV2Script := preload("res://scripts/npc_ai/routing/NpcRouteAuthorityV2.gd")
 const NavDataReadinessServiceScript := preload("res://scripts/npc_ai/routing/NavDataReadinessService.gd")
 const NpcMotionControllerScript := preload("res://scripts/npc_ai/NpcMotionController.gd")
 const NpcSafePlacementServiceScript := preload("res://scripts/npc_ai/NpcSafePlacementService.gd")
 const NpcNavigationCoordinatorScript := preload("res://scripts/npc_ai/routing/NpcNavigationCoordinator.gd")
 const NpcRouteMovementControllerScript := preload("res://scripts/npc_ai/movement/NpcRouteMovementController.gd")
+const NpcRouteLeaseExecutorScript := preload("res://scripts/npc_ai/movement/NpcRouteLeaseExecutor.gd")
 const NpcAgentScript := preload("res://scripts/npc_ai/NpcAgent.gd")
 
 class FakeAuthorityRouteDelegate:
@@ -89,6 +91,52 @@ class FakeCursorCollisionProbe:
 				"resumedSample": int(cursor.get("sampleIndex", -1))
 			}
 		}
+
+class FakeRouteAuthorityV2Probe:
+	extends RefCounted
+	var response := {}
+	var calls: Array[Dictionary] = []
+
+	func probe_route(_entry: Dictionary, _route: Dictionary, _intent: Dictionary, options := {}) -> Dictionary:
+		var cursor: Dictionary = options.get("cursor", {}) if options.get("cursor", {}) is Dictionary else {}
+		calls.append({
+			"maxSamples": int(options.get("maxSamples", 0)),
+			"cursor": cursor.duplicate(true)
+		})
+		return response.duplicate(true)
+
+class FakeSequenceRouteAuthorityV2Probe:
+	extends RefCounted
+	var responses: Array[Dictionary] = []
+	var calls: Array[Dictionary] = []
+
+	func probe_route(_entry: Dictionary, route: Dictionary, _intent: Dictionary, options := {}) -> Dictionary:
+		var cursor: Dictionary = options.get("cursor", {}) if options.get("cursor", {}) is Dictionary else {}
+		calls.append({
+			"source": String(route.get("source", "")),
+			"targetCell": route.get("targetCell", Vector2i(999999, 999999)),
+			"maxSamples": int(options.get("maxSamples", 0)),
+			"cursor": cursor.duplicate(true)
+		})
+		var index := mini(calls.size() - 1, maxi(0, responses.size() - 1))
+		if responses.is_empty():
+			return {}
+		return responses[index].duplicate(true)
+
+class FakeProbeRepairSubstrate:
+	extends RefCounted
+	var repaired_route := {}
+	var calls: Array[Dictionary] = []
+
+	func repair_route_after_probe(_entry: Dictionary, start_cell: Vector2i, candidate_cells: Array, failed_route: Dictionary, probe_certificate: Dictionary, options := {}) -> Dictionary:
+		calls.append({
+			"startCell": start_cell,
+			"candidateCells": candidate_cells.duplicate(),
+			"failedSource": String(failed_route.get("source", "")),
+			"blockedReason": String(probe_certificate.get("reason", "")),
+			"avoidCells": (options.get("avoidCells", []) as Array).duplicate() if options.get("avoidCells", []) is Array else []
+		})
+		return repaired_route.duplicate(true)
 
 class FakeNavDataReadinessOwner:
 	extends RefCounted
@@ -350,6 +398,66 @@ func contract_cases() -> Array[Dictionary]:
 			"suite": "contract",
 			"timeModes": ["day", "night"],
 			"callable": Callable(self, "test_route_authority_resumes_collision_probe")
+		},
+		{
+			"id": "npc_contract_route_authority_v2_lifecycle",
+			"suite": "contract",
+			"timeModes": ["day", "night"],
+			"callable": Callable(self, "test_route_authority_v2_lifecycle")
+		},
+		{
+			"id": "npc_contract_route_authority_v2_cancellation",
+			"suite": "contract",
+			"timeModes": ["day", "night"],
+			"callable": Callable(self, "test_route_authority_v2_cancellation")
+		},
+		{
+			"id": "npc_contract_route_authority_v2_requires_probe_certificate",
+			"suite": "contract",
+			"timeModes": ["day", "night"],
+			"callable": Callable(self, "test_route_authority_v2_requires_probe_certificate")
+		},
+		{
+			"id": "npc_contract_route_authority_v2_probe_commit_ready",
+			"suite": "contract",
+			"timeModes": ["day", "night"],
+			"callable": Callable(self, "test_route_authority_v2_probe_commit_ready")
+		},
+		{
+			"id": "npc_contract_route_authority_v2_probe_blocked_before_movement",
+			"suite": "contract",
+			"timeModes": ["day", "night"],
+			"callable": Callable(self, "test_route_authority_v2_probe_blocked_before_movement")
+		},
+		{
+			"id": "npc_contract_route_authority_v2_repairs_static_probe_block",
+			"suite": "contract",
+			"timeModes": ["day", "night"],
+			"callable": Callable(self, "test_route_authority_v2_repairs_static_probe_block")
+		},
+		{
+			"id": "npc_contract_route_authority_v2_probe_pending_budget",
+			"suite": "contract",
+			"timeModes": ["day", "night"],
+			"callable": Callable(self, "test_route_authority_v2_probe_pending_budget")
+		},
+		{
+			"id": "npc_contract_route_lease_executor_follows_v2_lease",
+			"suite": "contract",
+			"timeModes": ["day", "night"],
+			"callable": Callable(self, "test_route_lease_executor_follows_v2_lease")
+		},
+		{
+			"id": "npc_contract_route_lease_executor_preserves_moving_home_semantics",
+			"suite": "contract",
+			"timeModes": ["day", "night"],
+			"callable": Callable(self, "test_route_lease_executor_preserves_moving_home_semantics")
+		},
+		{
+			"id": "npc_contract_route_lease_executor_rejects_unready_lease",
+			"suite": "contract",
+			"timeModes": ["day", "night"],
+			"callable": Callable(self, "test_route_lease_executor_rejects_unready_lease")
 		},
 		{
 			"id": "npc_contract_route_ticket_diagnostic_state_names",
@@ -1345,6 +1453,490 @@ func test_route_authority_resumes_collision_probe(_mode: String) -> Dictionary:
 			"probeCalls": fake_probe.calls,
 			"stats": authority.stats()
 		}
+	)
+
+func test_route_authority_v2_lifecycle(_mode: String) -> Dictionary:
+	var authority := NpcRouteAuthorityV2Script.new()
+	var entry := { "id": "v2-contract-npc" }
+	var registered: Dictionary = authority.register_actor(entry)
+	var request: Dictionary = authority.submit_request(entry, { "kind": "home", "targetCell": Vector2i(3, 4) }, { "priority": 140 })
+	var request_id := String(request.get("requestId", ""))
+	authority.begin_frame()
+	authority.begin_frame()
+	var budget: Dictionary = authority.mark_pending_budget(request_id, "route_budget")
+	authority.begin_frame()
+	var nav_data: Dictionary = authority.mark_pending_nav_data(request_id, "navmesh_tile_budget")
+	authority.begin_frame()
+	var probing: Dictionary = authority.mark_probing(request_id, "collision_probe")
+	authority.begin_frame()
+	var ready: Dictionary = authority.mark_ready(request_id, {
+		"ok": true,
+		"status": "routed",
+		"reason": "",
+		"source": "v2_contract",
+		"targetCell": Vector2i(3, 4),
+		"fallbackCell": Vector2i(3, 4),
+		"snapshotRevision": "v2-contract",
+		"cells": [Vector2i(1, 1), Vector2i(3, 4)],
+		"waypoints": [Vector3(1.0, 0.0, 1.0), Vector3(3.0, 0.0, 4.0)],
+		"actions": {}
+	}, {
+		"ok": true,
+		"authoritative": true,
+		"status": "passed",
+		"reason": ""
+	})
+	var moving: Dictionary = authority.begin_moving(request_id, "lease_following")
+	var arrived: Dictionary = authority.report_arrived(request_id, "strict_arrival")
+	var debug: Dictionary = authority.debug_for_entry(entry)
+	var passed := String(registered.get("state", "")) == "none" \
+		and String(request.get("state", "")) == "queued" \
+		and String(budget.get("state", "")) == "pending_budget" \
+		and String(nav_data.get("state", "")) == "pending_nav_data" \
+		and String(probing.get("state", "")) == "probing" \
+		and bool(ready.get("hasLease", false)) \
+		and String(moving.get("state", "")) == "moving" \
+		and String(arrived.get("state", "")) == "arrived" \
+		and String(debug.get("state", "")) == "arrived" \
+		and int(debug.get("queuedFrames", 0)) > 0 \
+		and int(debug.get("pendingBudgetFrames", 0)) > 0 \
+		and int(debug.get("pendingNavDataFrames", 0)) > 0 \
+		and int(debug.get("pendingProbeFrames", 0)) > 0 \
+		and String(debug.get("leaseId", "")) != ""
+	return outcome(
+		passed,
+		"request=%s ready=%s arrived=%s debug=%s" % [JSON.stringify(request), JSON.stringify(ready), JSON.stringify(arrived), JSON.stringify(debug)],
+		["v2_request_id_created", "v2_lifecycle_transitions", "v2_ready_issues_lease", "v2_starvation_counts_recorded", "v2_debug_export_per_actor"],
+		{
+			"request": request,
+			"ready": ready,
+			"arrived": arrived,
+			"debug": debug,
+			"stats": authority.stats()
+		}
+	)
+
+func test_route_authority_v2_cancellation(_mode: String) -> Dictionary:
+	var authority := NpcRouteAuthorityV2Script.new()
+	var entry := { "id": "v2-cancel-npc" }
+	var request: Dictionary = authority.submit_request(entry, { "kind": "forage", "targetCell": Vector2i(8, 9) }, { "priority": 80 })
+	var request_id := String(request.get("requestId", ""))
+	authority.begin_frame()
+	authority.mark_pending_budget(request_id, "route_budget")
+	authority.begin_frame()
+	var cancelled: Dictionary = authority.cancel_request(request_id, "superseded_intent")
+	var debug: Dictionary = authority.debug_for_entry(entry)
+	var stats: Dictionary = authority.stats()
+	var counters: Dictionary = stats.get("counters", {}) if stats.get("counters", {}) is Dictionary else {}
+	var passed := String(cancelled.get("state", "")) == "cancelled" \
+		and String(cancelled.get("reason", "")) == "superseded_intent" \
+		and not bool(cancelled.get("hasLease", true)) \
+		and String(debug.get("state", "")) == "cancelled" \
+		and int(debug.get("pendingBudgetFrames", 0)) > 0 \
+		and int(debug.get("lastServicedFrame", -1)) >= 0 \
+		and int(counters.get("cancelled", 0)) == 1
+	return outcome(
+		passed,
+		"cancelled=%s debug=%s stats=%s" % [JSON.stringify(cancelled), JSON.stringify(debug), JSON.stringify(stats)],
+		["v2_cancel_terminal_state", "v2_cancel_has_no_lease", "v2_cancel_preserves_starvation_accounting"],
+		{
+			"cancelled": cancelled,
+			"debug": debug,
+			"stats": stats
+		}
+	)
+
+func test_route_authority_v2_requires_probe_certificate(_mode: String) -> Dictionary:
+	var authority := NpcRouteAuthorityV2Script.new()
+	var entry := { "id": "v2-probe-required-npc" }
+	var request: Dictionary = authority.submit_request(entry, { "kind": "move", "targetCell": Vector2i(2, 0) }, { "priority": 90 })
+	var request_id := String(request.get("requestId", ""))
+	var route := v2_probe_contract_route()
+	var missing: Dictionary = authority.mark_ready(request_id, route, {})
+	var failed: Dictionary = authority.mark_ready(request_id, route, {
+		"ok": false,
+		"status": "blocked",
+		"reason": "blocked_capsule_probe",
+		"authoritative": true
+	})
+	var debug: Dictionary = authority.debug_for_entry(entry)
+	var passed := not bool(missing.get("ok", true)) \
+		and String(missing.get("reason", "")) == "missing_successful_probe_certificate" \
+		and not bool(failed.get("ok", true)) \
+		and not bool(debug.get("hasLease", true)) \
+		and String(debug.get("state", "")) == "queued"
+	return outcome(
+		passed,
+		"missing=%s failed=%s debug=%s" % [JSON.stringify(missing), JSON.stringify(failed), JSON.stringify(debug)],
+		["v2_ready_requires_probe_certificate", "v2_failed_probe_cannot_lease", "v2_request_remains_unleased"],
+		{ "missing": missing, "failed": failed, "debug": debug }
+	)
+
+func test_route_authority_v2_probe_commit_ready(_mode: String) -> Dictionary:
+	var probe := FakeRouteAuthorityV2Probe.new()
+	probe.response = {
+		"ok": true,
+		"status": "passed",
+		"reason": "",
+		"authoritative": true,
+		"sampleCount": 5,
+		"details": { "completedSamples": 5 }
+	}
+	var authority := NpcRouteAuthorityV2Script.new()
+	authority.setup(null, null, probe)
+	var entry := { "id": "v2-probe-ready-npc" }
+	var request: Dictionary = authority.submit_request(entry, { "kind": "home", "targetCell": Vector2i(2, 0) }, { "priority": 120 })
+	var request_id := String(request.get("requestId", ""))
+	var ready: Dictionary = authority.commit_route_after_probe(entry, request_id, v2_probe_contract_route(true), { "kind": "home", "targetCell": Vector2i(2, 0) })
+	var proof: Dictionary = ready.get("proof", {}) if ready.get("proof", {}) is Dictionary else {}
+	var certificate: Dictionary = proof.get("probeCertificate", {}) if proof.get("probeCertificate", {}) is Dictionary else {}
+	var door_edges: Array = proof.get("doorProbeEdges", []) if proof.get("doorProbeEdges", []) is Array else []
+	var lease: Dictionary = ready.get("routeLease", {}) if ready.get("routeLease", {}) is Dictionary else {}
+	var lease_certificate: Dictionary = lease.get("probeCertificate", {}) if lease.get("probeCertificate", {}) is Dictionary else {}
+	var passed := String(ready.get("state", "")) == "ready" \
+		and bool(ready.get("hasLease", false)) \
+		and String(certificate.get("status", "")) == "passed" \
+		and bool(certificate.get("authoritative", false)) \
+		and door_edges.size() >= 1 \
+		and String(lease_certificate.get("status", "")) == "passed" \
+		and probe.calls.size() == 1
+	return outcome(
+		passed,
+		"ready=%s proof=%s calls=%s" % [JSON.stringify(ready), JSON.stringify(proof), JSON.stringify(probe.calls)],
+		["v2_probe_pass_can_issue_lease", "v2_lease_carries_probe_certificate", "v2_door_edges_are_structured_probe_edges"],
+		{ "ready": ready, "proof": proof, "probeCalls": probe.calls }
+	)
+
+func test_route_authority_v2_probe_blocked_before_movement(_mode: String) -> Dictionary:
+	var probe := FakeRouteAuthorityV2Probe.new()
+	probe.response = {
+		"ok": false,
+		"status": "blocked",
+		"reason": "blocked_capsule_probe",
+		"authoritative": true,
+		"sampleCount": 2,
+		"details": {
+			"collider": "fixture-wall",
+			"class": "StaticBody3D",
+			"kind": "block",
+			"blockType": "generated_house_wall",
+			"cell": Vector2i(1, 0)
+		}
+	}
+	var authority := NpcRouteAuthorityV2Script.new()
+	authority.setup(null, null, probe)
+	var entry := { "id": "v2-probe-blocked-npc" }
+	var request: Dictionary = authority.submit_request(entry, { "kind": "move", "targetCell": Vector2i(2, 0) }, { "priority": 120 })
+	var request_id := String(request.get("requestId", ""))
+	var blocked: Dictionary = authority.commit_route_after_probe(entry, request_id, v2_probe_contract_route(), { "kind": "move", "targetCell": Vector2i(2, 0) })
+	var moving: Dictionary = authority.begin_moving(request_id, "should_not_move")
+	var proof: Dictionary = blocked.get("proof", {}) if blocked.get("proof", {}) is Dictionary else {}
+	var certificate: Dictionary = proof.get("probeCertificate", {}) if proof.get("probeCertificate", {}) is Dictionary else {}
+	var details: Dictionary = certificate.get("details", {}) if certificate.get("details", {}) is Dictionary else {}
+	var passed := String(blocked.get("state", "")) == "unreachable_static" \
+		and not bool(blocked.get("hasLease", true)) \
+		and not bool(moving.get("ok", true)) \
+		and String(moving.get("reason", "")) == "route_not_ready" \
+		and String(details.get("collider", "")) == "fixture-wall" \
+		and String(details.get("blockType", "")) == "generated_house_wall"
+	return outcome(
+		passed,
+		"blocked=%s moving=%s proof=%s" % [JSON.stringify(blocked), JSON.stringify(moving), JSON.stringify(proof)],
+		["v2_blocked_probe_is_terminal_before_movement", "v2_blocked_probe_has_blocker_identity", "v2_blocked_route_cannot_begin_moving"],
+		{ "blocked": blocked, "moving": moving, "proof": proof }
+	)
+
+func test_route_authority_v2_repairs_static_probe_block(_mode: String) -> Dictionary:
+	var probe := FakeSequenceRouteAuthorityV2Probe.new()
+	probe.responses = [
+		{
+			"ok": false,
+			"status": "blocked",
+			"reason": "blocked_capsule_probe",
+			"authoritative": true,
+			"sampleCount": 2,
+			"details": {
+				"collider": "fixture-rock",
+				"class": "StaticBody3D",
+				"kind": "prop",
+				"blockType": "prop",
+				"cell": Vector2i(1, 0)
+			}
+		},
+		{
+			"ok": true,
+			"status": "passed",
+			"reason": "",
+			"authoritative": true,
+			"sampleCount": 4,
+			"details": { "completedSamples": 4 }
+		}
+	]
+	var repair_substrate := FakeProbeRepairSubstrate.new()
+	var repaired_route := v2_probe_contract_route()
+	repaired_route["source"] = "fixture_probe_repair_route"
+	repaired_route["cells"] = [Vector2i(0, 0), Vector2i(0, 1), Vector2i(1, 1), Vector2i(2, 1), Vector2i(2, 0)]
+	repaired_route["waypoints"] = [
+		Vector3(0.0, 0.0, 0.0),
+		Vector3(0.0, 0.0, 1.35),
+		Vector3(1.35, 0.0, 1.35),
+		Vector3(2.7, 0.0, 1.35),
+		Vector3(2.7, 0.0, 0.0)
+	]
+	repaired_route["probeRepair"] = { "ok": true, "reason": "blocked_capsule_probe" }
+	repair_substrate.repaired_route = repaired_route
+	var authority := NpcRouteAuthorityV2Script.new()
+	authority.setup(null, null, probe)
+	var entry := { "id": "v2-probe-repair-npc" }
+	var request: Dictionary = authority.submit_request(entry, { "kind": "home", "targetCell": Vector2i(2, 0) }, { "priority": 140 })
+	var request_id := String(request.get("requestId", ""))
+	var ready: Dictionary = authority.commit_route_after_probe(entry, request_id, v2_probe_contract_route(), { "kind": "home", "targetCell": Vector2i(2, 0) }, {
+		"repairSubstrate": repair_substrate,
+		"repairStartCell": Vector2i(0, 0),
+		"repairCandidateCells": [Vector2i(2, 0)],
+		"repairPlanOptions": { "allowOutside": false, "movingHome": true }
+	})
+	var lease: Dictionary = ready.get("routeLease", {}) if ready.get("routeLease", {}) is Dictionary else {}
+	var route_summary: Dictionary = ready.get("route", {}) if ready.get("route", {}) is Dictionary else {}
+	var repair_summary: Dictionary = route_summary.get("probeRepair", {}) if route_summary.get("probeRepair", {}) is Dictionary else {}
+	var repair_call: Dictionary = repair_substrate.calls[0] if not repair_substrate.calls.is_empty() else {}
+	var avoid_cells: Array = repair_call.get("avoidCells", []) if repair_call.get("avoidCells", []) is Array else []
+	var passed := String(ready.get("state", "")) == "ready" \
+		and bool(ready.get("hasLease", false)) \
+		and String(lease.get("source", "")) == "fixture_probe_repair_route" \
+		and probe.calls.size() == 2 \
+		and repair_substrate.calls.size() == 1 \
+		and bool(repair_summary.get("ok", false)) \
+		and avoid_cells.has(Vector2i(1, 0))
+	return outcome(
+		passed,
+		"ready=%s probeCalls=%s repairCalls=%s" % [JSON.stringify(ready), JSON.stringify(probe.calls), JSON.stringify(repair_substrate.calls)],
+		["v2_static_probe_block_can_repair_before_lease", "v2_repairs_then_reprobes", "v2_repaired_lease_uses_repaired_route"],
+		{ "ready": ready, "probeCalls": probe.calls, "repairCalls": repair_substrate.calls }
+	)
+
+func test_route_authority_v2_probe_pending_budget(_mode: String) -> Dictionary:
+	var probe := FakeRouteAuthorityV2Probe.new()
+	probe.response = {
+		"ok": false,
+		"status": "pending_probe",
+		"reason": "collision_probe_budget",
+		"authoritative": true,
+		"sampleCount": 3,
+		"details": {
+			"cursor": {
+				"segmentIndex": 1,
+				"sampleIndex": 2,
+				"completedSamples": 3
+			}
+		}
+	}
+	var authority := NpcRouteAuthorityV2Script.new()
+	authority.setup(null, null, probe)
+	var entry := { "id": "v2-probe-budget-npc" }
+	var request: Dictionary = authority.submit_request(entry, { "kind": "home", "targetCell": Vector2i(2, 0) }, { "priority": 120 })
+	var request_id := String(request.get("requestId", ""))
+	var pending: Dictionary = authority.commit_route_after_probe(entry, request_id, v2_probe_contract_route(), { "kind": "home", "targetCell": Vector2i(2, 0) })
+	var stats: Dictionary = authority.stats()
+	var passed := String(pending.get("state", "")) == "probing" \
+		and String(pending.get("reason", "")) == "collision_probe_budget" \
+		and not bool(pending.get("hasLease", true)) \
+		and int(pending.get("pendingProbeFrames", 0)) > 0 \
+		and int(stats.get("probeCursors", 0)) == 1
+	return outcome(
+		passed,
+		"pending=%s stats=%s calls=%s" % [JSON.stringify(pending), JSON.stringify(stats), JSON.stringify(probe.calls)],
+		["v2_probe_budget_stays_pending", "v2_probe_budget_does_not_block_target", "v2_probe_cursor_retained"],
+		{ "pending": pending, "stats": stats, "probeCalls": probe.calls }
+	)
+
+func v2_probe_contract_route(with_door := false) -> Dictionary:
+	var route := {
+		"ok": true,
+		"status": "routed",
+		"reason": "",
+		"source": "v2_probe_contract",
+		"targetCell": Vector2i(2, 0),
+		"fallbackCell": Vector2i(2, 0),
+		"snapshotRevision": "v2-probe-contract",
+		"cells": [Vector2i(0, 0), Vector2i(1, 0), Vector2i(2, 0)],
+		"waypoints": [Vector3(0.0, 0.0, 0.0), Vector3(1.35, 0.0, 0.0), Vector3(2.7, 0.0, 0.0)],
+		"actions": {},
+		"proof": {}
+	}
+	if with_door:
+		route["actions"] = { "1,0": { "kind": "door", "portalId": "fixture:door" } }
+		route["proof"] = {
+			"doorEdges": [{
+				"fromCell": Vector2i(0, 0),
+				"toCell": Vector2i(1, 0),
+				"door": { "portalId": "fixture:door" }
+			}]
+		}
+	return route
+
+func test_route_lease_executor_follows_v2_lease(_mode: String) -> Dictionary:
+	var authority := NpcRouteAuthorityV2Script.new()
+	var body := CharacterBody3D.new()
+	add_child(body)
+	body.global_position = Vector3.ZERO
+	var entry := {
+		"id": "v2-executor-npc",
+		"body": body,
+		"motorProfile": CharacterMotorProfileScript.npc_default()
+	}
+	var request: Dictionary = authority.submit_request(entry, { "kind": "move", "targetCell": Vector2i(1, 0) }, { "priority": 100 })
+	var request_id := String(request.get("requestId", ""))
+	var route := v2_probe_contract_route()
+	route["targetCell"] = Vector2i(1, 0)
+	route["fallbackCell"] = Vector2i(1, 0)
+	route["cells"] = [Vector2i(0, 0), Vector2i(1, 0)]
+	route["waypoints"] = [Vector3.ZERO, Vector3(0.65, 0.0, 0.0)]
+	var ready: Dictionary = authority.mark_ready(request_id, route, {
+		"ok": true,
+		"status": "passed",
+		"reason": "",
+		"authoritative": true
+	})
+	var lease: Dictionary = ready.get("routeLease", {}) if ready.get("routeLease", {}) is Dictionary else {}
+	var executor = NpcRouteLeaseExecutorScript.new()
+	executor.setup(authority, self)
+	var last := {}
+	for _i in range(16):
+		authority.begin_frame()
+		last = executor.execute(entry, request_id, lease, 0.1, { "waypointRadius": 0.12 })
+		if String(last.get("status", "")) == "arrived":
+			break
+	var debug: Dictionary = authority.debug_for_entry(entry)
+	var events: Array = debug.get("recentEvents", []) if debug.get("recentEvents", []) is Array else []
+	var saw_started := false
+	var saw_completed := false
+	for event_value in events:
+		if not (event_value is Dictionary):
+			continue
+		var event: Dictionary = event_value
+		if String(event.get("state", "")) == "execution:segment_started":
+			saw_started = true
+		if String(event.get("state", "")) == "execution:segment_completed":
+			saw_completed = true
+	var final_distance := Vector2(body.global_position.x - 0.65, body.global_position.z).length()
+	body.queue_free()
+	var passed := String(last.get("status", "")) == "arrived" \
+		and String(debug.get("state", "")) == "arrived" \
+		and saw_started \
+		and saw_completed \
+		and final_distance <= 0.16 \
+		and String((lease.get("probeCertificate", {}) as Dictionary).get("status", "")) == "passed"
+	return outcome(
+		passed,
+		"last=%s debug=%s finalDistance=%.3f events=%s" % [JSON.stringify(last), JSON.stringify(debug), final_distance, JSON.stringify(events)],
+		["v2_executor_consumes_ready_lease", "v2_executor_uses_motor_to_arrive", "v2_executor_reports_segments_to_authority"],
+		{ "last": last, "debug": debug, "finalDistance": final_distance, "events": events }
+	)
+
+func test_route_lease_executor_preserves_moving_home_semantics(_mode: String) -> Dictionary:
+	var routine := _execute_single_v2_lease_for_semantic("forage", "work_area", false)
+	var home := _execute_single_v2_lease_for_semantic("home", "home_interior", true)
+	var passed := bool(routine.get("ok", false)) \
+		and bool(home.get("ok", false)) \
+		and not bool(routine.get("routeMovingHome", true)) \
+		and not bool(routine.get("movingHome", true)) \
+		and bool(home.get("routeMovingHome", false)) \
+		and bool(home.get("movingHome", false))
+	return outcome(
+		passed,
+		"routine=%s home=%s" % [JSON.stringify(routine), JSON.stringify(home)],
+		["routine_v2_leases_do_not_masquerade_as_home_routes", "home_v2_leases_keep_moving_home_semantics"],
+		{ "routine": routine, "home": home }
+	)
+
+func _execute_single_v2_lease_for_semantic(intent_kind: String, semantic_kind: String, moving_home: bool) -> Dictionary:
+	var authority := NpcRouteAuthorityV2Script.new()
+	var body := CharacterBody3D.new()
+	add_child(body)
+	body.global_position = Vector3.ZERO
+	var entry := {
+		"id": "v2-semantic-%s-%s" % [intent_kind, semantic_kind],
+		"body": body,
+		"motorProfile": CharacterMotorProfileScript.npc_default()
+	}
+	var request: Dictionary = authority.submit_request(entry, {
+		"kind": intent_kind,
+		"semanticKind": semantic_kind,
+		"targetCell": Vector2i(0, 0),
+		"movingHome": moving_home
+	}, { "priority": 100 })
+	var request_id := String(request.get("requestId", ""))
+	var route := v2_probe_contract_route()
+	route["targetCell"] = Vector2i(0, 0)
+	route["fallbackCell"] = Vector2i(0, 0)
+	route["cells"] = [Vector2i(0, 0)]
+	route["waypoints"] = [Vector3.ZERO]
+	var ready: Dictionary = authority.mark_ready(request_id, route, {
+		"ok": true,
+		"status": "passed",
+		"reason": "",
+		"authoritative": true
+	})
+	var lease: Dictionary = ready.get("routeLease", {}) if ready.get("routeLease", {}) is Dictionary else {}
+	var executor = NpcRouteLeaseExecutorScript.new()
+	executor.setup(authority, self)
+	authority.begin_frame()
+	var result: Dictionary = executor.execute(entry, request_id, lease, 0.1, {
+		"waypointRadius": 0.12,
+		"intentKind": intent_kind,
+		"semanticKind": semantic_kind,
+		"movingHome": moving_home
+	})
+	var summary := {
+		"ok": String(result.get("status", "")) == "arrived",
+		"result": result,
+		"routeMovingHome": bool(entry.get("routeMovingHome", false)),
+		"movingHome": bool(entry.get("movingHome", false))
+	}
+	body.queue_free()
+	return summary
+
+func test_route_lease_executor_rejects_unready_lease(_mode: String) -> Dictionary:
+	var authority := NpcRouteAuthorityV2Script.new()
+	var body := CharacterBody3D.new()
+	add_child(body)
+	body.global_position = Vector3.ZERO
+	var entry := { "id": "v2-executor-reject-npc", "body": body }
+	var request: Dictionary = authority.submit_request(entry, { "kind": "move", "targetCell": Vector2i(1, 0) }, { "priority": 100 })
+	var request_id := String(request.get("requestId", ""))
+	var executor = NpcRouteLeaseExecutorScript.new()
+	executor.setup(authority, self)
+	var unprobed := v2_probe_contract_route()
+	var unprobed_lease := {
+		"state": "ready",
+		"waypoints": unprobed.get("waypoints", []),
+		"probeCertificate": {}
+	}
+	var missing_probe: Dictionary = executor.execute(entry, request_id, unprobed_lease, 0.1)
+	var forged_lease := {
+		"state": "ready",
+		"waypoints": unprobed.get("waypoints", []),
+		"probeCertificate": {
+			"ok": true,
+			"status": "passed",
+			"authoritative": true
+		}
+	}
+	var unready: Dictionary = executor.execute(entry, request_id, forged_lease, 0.1)
+	var debug: Dictionary = authority.debug_for_entry(entry)
+	body.queue_free()
+	var passed := String(missing_probe.get("status", "")) == "rejected" \
+		and String(missing_probe.get("reason", "")) == "lease_missing_probe_certificate" \
+		and String(unready.get("status", "")) == "rejected" \
+		and String(unready.get("reason", "")) == "route_not_ready" \
+		and String(debug.get("state", "")) == "queued" \
+		and not bool(debug.get("hasLease", true))
+	return outcome(
+		passed,
+		"missingProbe=%s unready=%s debug=%s" % [JSON.stringify(missing_probe), JSON.stringify(unready), JSON.stringify(debug)],
+		["v2_executor_rejects_unprobed_lease", "v2_executor_rejects_non_ready_authority_request", "v2_executor_does_not_invent_route_truth"],
+		{ "missingProbe": missing_probe, "unready": unready, "debug": debug }
 	)
 
 func test_route_ticket_diagnostic_state_names(_mode: String) -> Dictionary:

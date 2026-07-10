@@ -29,6 +29,7 @@ const NpcTaskPlannerScript := preload("res://scripts/npc_ai/behavior/NpcTaskPlan
 const NpcRecoveryPolicyScript := preload("res://scripts/npc_ai/behavior/NpcRecoveryPolicy.gd")
 const NpcPlanExecutorScript := preload("res://scripts/npc_ai/behavior/NpcPlanExecutor.gd")
 const NpcSimulationLodServiceScript := preload("res://scripts/npc_ai/lifecycle/NpcSimulationLodService.gd")
+const NpcRouteAuthorityV2Script := preload("res://scripts/npc_ai/routing/NpcRouteAuthorityV2.gd")
 
 const NAV_CHANGE_EVENTS_PER_PHYSICS_TICK := 1
 const NAV_CHANGE_OBJECT_IDS_PER_PHYSICS_TICK := 2
@@ -64,6 +65,7 @@ var task_planner
 var recovery_policy
 var plan_executor
 var simulation_lod
+var route_authority_v2
 
 func _init() -> void:
 	scheduler = NpcBrainSchedulerScript.new()
@@ -85,6 +87,8 @@ func _init() -> void:
 	traffic_reservations.setup(bottleneck_classifier, safe_interval_planner, wait_for_graph, traffic_priority_policy)
 	simulation_lod = NpcSimulationLodServiceScript.new()
 	simulation_lod.setup(self, npc_system, main)
+	route_authority_v2 = NpcRouteAuthorityV2Script.new()
+	route_authority_v2.setup(npc_system, main)
 	setup_behavior_services()
 
 func setup(system_node: Node, main_node: Node) -> void:
@@ -106,6 +110,8 @@ func setup(system_node: Node, main_node: Node) -> void:
 	door_traversal.setup(door_portals, traffic_reservations, bottleneck_classifier, traffic_priority_policy, wait_for_graph)
 	simulation_lod = NpcSimulationLodServiceScript.new()
 	simulation_lod.setup(self, npc_system, main)
+	route_authority_v2 = NpcRouteAuthorityV2Script.new()
+	route_authority_v2.setup(npc_system, main)
 	setup_behavior_services()
 	telemetry.record_event("_system", &"architecture", "setup", &"none", {
 		"architectureVersion": architecture_version,
@@ -114,6 +120,8 @@ func setup(system_node: Node, main_node: Node) -> void:
 	})
 
 func _physics_process(_delta: float) -> void:
+	if route_authority_v2 != null:
+		route_authority_v2.begin_frame()
 	process_navigation_changes(NAV_CHANGE_EVENTS_PER_PHYSICS_TICK, NAV_CHANGE_OBJECT_IDS_PER_PHYSICS_TICK)
 	build_navigation_tiles(NpcConstantsScript.NAV_BUILD_MAX_JOBS_PER_TICK)
 	process_navmesh_dirty_regions(1)
@@ -149,6 +157,8 @@ func clear() -> void:
 	door_traversal.setup(door_portals, traffic_reservations, bottleneck_classifier, traffic_priority_policy, wait_for_graph)
 	simulation_lod = NpcSimulationLodServiceScript.new()
 	simulation_lod.setup(self, npc_system, main)
+	route_authority_v2 = NpcRouteAuthorityV2Script.new()
+	route_authority_v2.setup(npc_system, main)
 	setup_behavior_services()
 
 func _clear_navmesh_world() -> void:
@@ -245,6 +255,8 @@ func register_npc(body: Node, profile: Dictionary, entry: Dictionary):
 	body.set_meta("npc_guard_duty", String(context.guard_duty_kind))
 	if simulation_lod != null:
 		simulation_lod.register_actor(entry)
+	if route_authority_v2 != null:
+		route_authority_v2.register_actor(entry)
 	telemetry.record_event(context.stable_id, &"registration", "registered", &"none", {
 		"canFight": context.can_fight,
 		"guardDuty": String(context.guard_duty_kind)
@@ -899,9 +911,16 @@ func stats() -> Dictionary:
 		"doorTraversal": door_traversal.stats() if door_traversal != null else {},
 		"traffic": traffic_reservations.stats() if traffic_reservations != null else {},
 		"simulationLod": simulation_lod.stats() if simulation_lod != null else {},
+		"routeAuthorityV2": route_authority_v2.stats() if route_authority_v2 != null else {},
 		"guardRoster": guard_roster.summary() if guard_roster != null else {},
 		"behavior": plan_executor.stats() if plan_executor != null else {}
 	}
+
+func route_authority_v2_debug_for_entry(entry: Dictionary) -> Dictionary:
+	return route_authority_v2.debug_for_entry(entry) if route_authority_v2 != null else {}
+
+func route_authority_v2_debug_snapshot() -> Dictionary:
+	return route_authority_v2.debug_snapshot() if route_authority_v2 != null else {}
 
 func _bounds_for_cell(cell: Vector3i) -> AABB:
 	var size := Vector3.ONE * NpcConstantsScript.CELL_SIZE

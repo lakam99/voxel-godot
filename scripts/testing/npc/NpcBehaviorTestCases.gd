@@ -12,6 +12,7 @@ const NpcPlanExecutorScript := preload("res://scripts/npc_ai/behavior/NpcPlanExe
 const NpcPerceptionServiceScript := preload("res://scripts/npc_ai/behavior/NpcPerceptionService.gd")
 const NpcSemanticGoalPlannerScript := preload("res://scripts/npc_ai/behavior/NpcSemanticGoalPlanner.gd")
 const NpcRouteMovementControllerScript := preload("res://scripts/npc_ai/movement/NpcRouteMovementController.gd")
+const NpcRouteAuthorityV2Script := preload("res://scripts/npc_ai/routing/NpcRouteAuthorityV2.gd")
 const CELL := 1.35
 
 var runner = null
@@ -26,6 +27,8 @@ class FakeAutonomy:
 	var traffic_releases := 0
 	var door_releases := 0
 	var door_portals = null
+	var route_authority_v2 = null
+	var route_world = null
 
 	func release_npc_traffic_reservations(_entry, _reason := "released") -> int:
 		traffic_releases += 1
@@ -33,6 +36,19 @@ class FakeAutonomy:
 
 	func release_npc_door_hold(_actor_or_id, _schedule_close := true) -> void:
 		door_releases += 1
+
+	func generated_navigation_adapter():
+		return route_world
+
+	func is_inside_home_interior(entry: Dictionary, position: Vector3) -> bool:
+		var home_cell: Vector2i = entry.get("homeCell", Vector2i.ZERO)
+		var min_cell: Vector2i = entry.get("interiorMinCell", home_cell)
+		var max_cell: Vector2i = entry.get("interiorMaxCell", home_cell)
+		var cell := Vector2i(roundi(position.x / CELL), roundi(position.z / CELL))
+		return cell.x >= mini(min_cell.x, max_cell.x) \
+			and cell.x <= maxi(min_cell.x, max_cell.x) \
+			and cell.y >= mini(min_cell.y, max_cell.y) \
+			and cell.y <= maxi(min_cell.y, max_cell.y)
 
 class FakeNavigationService:
 	extends RefCounted
@@ -46,6 +62,26 @@ class FakeNavigationService:
 class FakeDoorPortalService:
 	extends RefCounted
 	var portals := {}
+
+class FakeCollisionProbe:
+	extends RefCounted
+
+	func setup(_system_node, _main_node) -> void:
+		pass
+
+	func probe_route(_entry: Dictionary, route: Dictionary, _intent: Dictionary, _options := {}) -> Dictionary:
+		var waypoints: Array = route.get("waypoints", []) if route.get("waypoints", []) is Array else []
+		return {
+			"ok": not waypoints.is_empty(),
+			"status": "passed" if not waypoints.is_empty() else "invalid_goal",
+			"reason": "" if not waypoints.is_empty() else "empty_waypoints",
+			"authoritative": true,
+			"sampleCount": maxi(1, waypoints.size()),
+			"details": {
+				"pointCount": waypoints.size(),
+				"testProbe": true
+			}
+		}
 
 class FakeMain:
 	extends Node
@@ -63,6 +99,36 @@ class FakeRouteWorld:
 	func world_cell(position: Vector3) -> Vector2i:
 		return Vector2i(roundi(position.x / CELL), roundi(position.z / CELL))
 
+	func cell_position(cell: Vector2i) -> Vector3:
+		return Vector3(float(cell.x) * CELL, 0.0, float(cell.y) * CELL)
+
+	func point_inside_town(entry: Dictionary, position: Vector3) -> bool:
+		var center: Vector2i = entry.get("townCenter", Vector2i.ZERO)
+		var radius := float(entry.get("townRadius", 18)) * CELL
+		var flat := Vector2(position.x - float(center.x) * CELL, position.z - float(center.y) * CELL)
+		return flat.length() <= radius
+
+	func point_inside_work_area(entry: Dictionary, position: Vector3) -> bool:
+		var center: Vector2i = entry.get("townCenter", Vector2i.ZERO)
+		var radius_cells := float(entry.get("townRadius", 18))
+		if String(entry.get("job", "")) == "forage":
+			radius_cells += 24.0
+		var flat := Vector2(position.x - float(center.x) * CELL, position.z - float(center.y) * CELL)
+		return flat.length() <= radius_cells * CELL
+
+	func approach_cells_for_target(_entry: Dictionary, target_position: Vector3, _allow_outside := true) -> Array[Vector2i]:
+		var center := world_cell(target_position)
+		return [
+			center,
+			center + Vector2i(1, 0),
+			center + Vector2i(-1, 0),
+			center + Vector2i(0, 1),
+			center + Vector2i(0, -1)
+		]
+
+	func cell_is_standable_goal(_entry: Dictionary, _cell: Vector2i, _allow_outside := false, _moving_home := false) -> bool:
+		return true
+
 	func terrain_allows_step(_from_cell: Vector2i, _to_cell: Vector2i, _moving_home := false) -> Dictionary:
 		return { "ok": true, "height": 0.0 }
 
@@ -70,17 +136,27 @@ class FakeRouteWorld:
 		return {
 			"allowOutside": allow_outside,
 			"movingHome": moving_home,
+			"revision": "fake-route-world",
 			"blocked": {},
 			"dynamic": {},
 			"doors": {},
 			"paths": {}
 		}
 
+	func cached_validation_snapshot(entry: Dictionary, allow_outside := false, moving_home := false) -> Dictionary:
+		return build_snapshot(entry, allow_outside, moving_home)
+
 	func static_blocker(_snapshot: Dictionary, _cell: Vector2i):
 		return null
 
 	func dynamic_blocker(_snapshot: Dictionary, _cell: Vector2i):
 		return null
+
+	func static_collision_blocker(_snapshot: Dictionary, _cell: Vector2i) -> Dictionary:
+		return {}
+
+	func cell_transition_pathable(_entry: Dictionary, _snapshot: Dictionary, _from_cell: Vector2i, _to_cell: Vector2i, _target_lookup := {}, _ignore_dynamic := false) -> Dictionary:
+		return { "ok": true, "reason": "" }
 
 	func revision() -> String:
 		return "fake-route-world"
@@ -259,6 +335,7 @@ func cases() -> Array[Dictionary]:
 		case("npc_behavior_day_worker_reachable_job", "day", "test_day_worker_reachable_job"),
 		case("npc_behavior_day_forager_goal_plan_shape", "day", "test_day_forager_goal_plan_shape"),
 		case("npc_behavior_day_guard_patrol", "day", "test_day_guard_patrol"),
+		case("npc_behavior_guard_departure_does_not_arrive_at_exit_as_post", "day", "test_guard_departure_does_not_arrive_at_exit_as_post"),
 		case("npc_behavior_guard_target_never_falls_back_to_porch", "day", "test_guard_target_never_falls_back_to_porch"),
 		case("npc_behavior_day_idle_semantic_anchor", "day", "test_day_idle_semantic_anchor"),
 		case("npc_behavior_dusk_civilian_returns_before_night", "transition", "test_dusk_civilian_returns_before_night"),
@@ -299,6 +376,7 @@ func cases() -> Array[Dictionary]:
 		case("npc_behavior_job_selection_budget_ages_deferred_workers", "day", "test_job_selection_budget_ages_deferred_workers"),
 		case("npc_behavior_resource_worker_outbound_stays_town_bound", "day", "test_resource_worker_outbound_stays_town_bound"),
 		case("npc_behavior_forager_outbound_allows_outside", "day", "test_forager_outbound_allows_outside"),
+		case("npc_behavior_forager_active_goal_enters_search_from_idle", "day", "test_forager_active_goal_enters_search_from_idle"),
 		case("npc_traffic_door_crossing_continues_while_brain_skipped", "day", "test_door_crossing_continues_while_brain_skipped"),
 		case("npc_behavior_motor_blocked_local_escape_forces_replan", "day", "test_motor_blocked_local_escape_forces_replan"),
 		case("npc_behavior_unreachable_goal_terminal", "day", "test_unreachable_goal_terminal"),
@@ -381,6 +459,51 @@ func test_day_guard_patrol(_mode: String) -> Dictionary:
 	var actions: Array = result.plan.get("actionIds", [])
 	var passed: bool = result.goal.get("goalKind") == NpcEnumsScript.GOAL_KIND_GUARD and actions.has("patrol_guard_post")
 	return outcome(passed, "goal=%s actions=%s" % [String(result.goal.get("goalKind")), JSON.stringify(actions)], ["day_guard_goal", "patrol_action"], result)
+
+func test_guard_departure_does_not_arrive_at_exit_as_post(_mode: String) -> Dictionary:
+	var fake_npc := FakeNpcSystem.new()
+	var executor: Variant = make_executor(fake_npc)
+	var guard_post := Vector3(CELL * 8.0, 0.0, 0.0)
+	var entry_data := entry("Guard", {
+		"job": "guard",
+		"canFight": true,
+		"nightGuard": true,
+		"position": Vector3.ZERO,
+		"homeCell": Vector2i(0, 0),
+		"porchCell": Vector2i(1, 0),
+		"guardCell": Vector2i(8, 0),
+		"guardPosition": guard_post,
+		"guardTargetCache": guard_post
+	})
+	entry_data["guardTargetRefreshTimer"] = 100.0
+	entry_data["activeMotionGoal"] = { "goalKind": NpcEnumsScript.GOAL_KIND_GUARD, "reason": "day_guard_patrol" }
+	entry_data["activeMotionSchedule"] = { "scheduleState": NpcEnumsScript.SCHEDULE_STATE_DAY, "activeGuardDuty": false }
+	entry_data["activeMotionPerception"] = { "insideHome": true, "activeThreat": false, "threat": null }
+	var saw_departure_stage := false
+	var guard_post_intent: Dictionary = {}
+	for _i in range(320):
+		var result: Dictionary = executor.advance_motion_npc(entry_data, 1.0 / 60.0, 0.0)
+		var routine_intent: Dictionary = entry_data.get("_routineRouteV2Intent", {}) if entry_data.get("_routineRouteV2Intent", {}) is Dictionary else {}
+		if String(routine_intent.get("semanticKind", "")) == "home_departure_clearance":
+			saw_departure_stage = true
+		if String(routine_intent.get("semanticKind", "")) == "guard_post":
+			guard_post_intent = routine_intent.duplicate(true)
+			break
+		if not bool(result.get("advanced", false)):
+			break
+	var target_cell: Vector2i = guard_post_intent.get("targetCell", Vector2i(999999, 999999)) if guard_post_intent.get("targetCell", Vector2i(999999, 999999)) is Vector2i else Vector2i(999999, 999999)
+	var passed := fake_npc.move_calls == 0 \
+		and saw_departure_stage \
+		and String(guard_post_intent.get("kind", "")) == "guard" \
+		and String(guard_post_intent.get("semanticKind", "")) == "guard_post" \
+		and target_cell == Vector2i(8, 0)
+	fake_npc.queue_free()
+	return outcome(
+		passed,
+		"departure=%s guardIntent=%s legacyMoveCalls=%d position=%s" % [str(saw_departure_stage), JSON.stringify(guard_post_intent), fake_npc.move_calls, str((entry_data.get("body") as Node3D).global_position)],
+		["guard_departure_uses_clearance_route", "guard_post_route_targets_assigned_post", "guard_route_does_not_use_legacy_move"],
+		{ "sawDepartureStage": saw_departure_stage, "guardPostIntent": guard_post_intent, "moveCalls": fake_npc.move_calls }
+	)
 
 func test_guard_target_never_falls_back_to_porch(_mode: String) -> Dictionary:
 	var goal_planner = NpcSemanticGoalPlannerScript.new()
@@ -513,7 +636,7 @@ func test_post_threat_schedule_restored(_mode: String) -> Dictionary:
 func test_night_job_phase_does_not_override_home_motion(_mode: String) -> Dictionary:
 	var fake_npc := FakeNpcSystem.new()
 	var executor: Variant = make_executor(fake_npc)
-	var entry_data := entry("Forager", { "job": "forage", "position": Vector3(2.7, 0.0, 0.0), "homeCell": Vector2i(0, 0), "porchCell": Vector2i(1, 0) })
+	var entry_data := entry("Forager", { "job": "forage", "position": Vector3(2.7, 0.0, 0.0), "homeCell": Vector2i(3, 0), "porchCell": Vector2i(1, 0) })
 	entry_data["jobPhase"] = "outbound"
 	entry_data["jobTarget"] = Vector3(10.0, 0.0, 0.0)
 	entry_data["activeMotionGoal"] = { "goalKind": NpcEnumsScript.GOAL_KIND_HOME, "reason": "schedule_requires_interior" }
@@ -524,14 +647,15 @@ func test_night_job_phase_does_not_override_home_motion(_mode: String) -> Dictio
 	var result: Dictionary = executor.advance_motion_npc(entry_data, 1.0 / 60.0, 1.0)
 	var after := body.global_position
 	var moved_toward_home := after.distance_to(entry_data.get("homePosition", Vector3.ZERO)) < before.distance_to(entry_data.get("homePosition", Vector3.ZERO))
-	var passed: bool = fake_npc.moving_home_calls == 1 and bool(result.get("advanced", false)) and String(result.get("intentKind", "")) == "home" and moved_toward_home
+	var home_intent: Dictionary = entry_data.get("_homeRouteV2Intent", {}) if entry_data.get("_homeRouteV2Intent", {}) is Dictionary else {}
+	var passed: bool = fake_npc.moving_home_calls == 0 and String(home_intent.get("kind", "")) == "home" and bool(home_intent.get("movingHome", false)) and bool(result.get("advanced", false)) and String(result.get("intentKind", "")) == "home" and moved_toward_home
 	fake_npc.queue_free()
-	return outcome(passed, "result=%s movingHome=%d before=%s after=%s" % [JSON.stringify(result), fake_npc.moving_home_calls, str(before), str(after)], ["night_home_goal_preempts_job_phase", "home_motion_moves_toward_interior"], { "result": result, "movingHomeCalls": fake_npc.moving_home_calls, "before": before, "after": after })
+	return outcome(passed, "result=%s v2=%s before=%s after=%s" % [JSON.stringify(result), JSON.stringify(home_intent), str(before), str(after)], ["night_home_goal_preempts_job_phase", "home_motion_uses_v2_authority", "home_motion_moves_toward_interior"], { "result": result, "homeIntent": home_intent, "before": before, "after": after })
 
 func test_day_job_phase_overrides_stale_home_motion(_mode: String) -> Dictionary:
 	var fake_npc := FakeNpcSystem.new()
 	var executor: Variant = make_executor(fake_npc)
-	var entry_data := entry("Forager", { "job": "forage", "position": Vector3(2.7, 0.0, 0.0), "homeCell": Vector2i(0, 0), "porchCell": Vector2i(1, 0) })
+	var entry_data := entry("Forager", { "job": "forage", "position": Vector3(5.4, 0.0, 0.0), "homeCell": Vector2i(4, 0), "porchCell": Vector2i(1, 0) })
 	entry_data["jobPhase"] = "outbound"
 	entry_data["jobTarget"] = Vector3(10.0, 0.0, 0.0)
 	entry_data["jobTimer"] = 4.0
@@ -542,10 +666,17 @@ func test_day_job_phase_overrides_stale_home_motion(_mode: String) -> Dictionary
 	var before := body.global_position
 	var result: Dictionary = executor.advance_motion_npc(entry_data, 1.0 / 60.0, 0.0)
 	var after := body.global_position
-	var moved_toward_job := after.distance_to(entry_data.get("jobTarget", Vector3.ZERO)) < before.distance_to(entry_data.get("jobTarget", Vector3.ZERO))
-	var passed: bool = fake_npc.moving_home_calls == 0 and bool(result.get("advanced", false)) and String(result.get("intentKind", "")) == "job" and moved_toward_job
+	var moved_toward_exit := after.distance_to(entry_data.get("porchPosition", Vector3.ZERO)) < before.distance_to(entry_data.get("porchPosition", Vector3.ZERO))
+	var routine_intent: Dictionary = entry_data.get("_routineRouteV2Intent", {}) if entry_data.get("_routineRouteV2Intent", {}) is Dictionary else {}
+	var passed: bool = fake_npc.moving_home_calls == 0 \
+		and String(routine_intent.get("kind", "")) == "forage" \
+		and String(routine_intent.get("semanticKind", "")) == "home_departure_clearance" \
+		and bool(result.get("advanced", false)) \
+		and String(result.get("intentKind", "")) == "job" \
+		and String(result.get("reason", "")) == "job_departure_home_exit" \
+		and moved_toward_exit
 	fake_npc.queue_free()
-	return outcome(passed, "result=%s movingHome=%d before=%s after=%s" % [JSON.stringify(result), fake_npc.moving_home_calls, str(before), str(after)], ["day_job_goal_preempts_stale_home", "job_motion_moves_toward_target"], { "result": result, "movingHomeCalls": fake_npc.moving_home_calls, "before": before, "after": after })
+	return outcome(passed, "result=%s v2=%s before=%s after=%s" % [JSON.stringify(result), JSON.stringify(routine_intent), str(before), str(after)], ["day_job_goal_preempts_stale_home", "job_motion_uses_v2_authority", "job_departure_routes_to_clearance_first"], { "result": result, "routineIntent": routine_intent, "before": before, "after": after })
 
 func test_home_motion_stops_once_inside(_mode: String) -> Dictionary:
 	var fake_npc := FakeNpcSystem.new()
@@ -603,15 +734,16 @@ func test_scripted_order_priority_and_cancel(_mode: String) -> Dictionary:
 func test_scripted_order_go_home_uses_route_stack(_mode: String) -> Dictionary:
 	var fake_npc := FakeNpcSystem.new()
 	var executor: Variant = make_executor(fake_npc)
-	var entry_data := entry("Villager", { "id": "mira", "position": Vector3.ZERO, "homeCell": Vector2i(1, 0), "homePosition": Vector3(0.22, 0.0, 0.0) })
+	var entry_data := entry("Villager", { "id": "mira", "position": Vector3.ZERO, "homeCell": Vector2i(3, 0), "porchCell": Vector2i(1, 0) })
 	var body := entry_data.get("body") as Node3D
 	set_scripted_order_meta(entry_data, body, "go_home", "intro_acknowledged_return_home")
 	for i in range(8):
 		executor.advance_motion_npc(entry_data, 1.0 / 60.0, 0.0)
 	var order: Dictionary = entry_data.get("scriptedOrder", {})
-	var passed: bool = fake_npc.move_calls > 0 and fake_npc.moving_home_calls == fake_npc.move_calls and not body.has_meta("npc_scripted_target") and String(order.get("state", "")) in ["ACTIVE", "ARRIVED"]
+	var home_intent: Dictionary = entry_data.get("_homeRouteV2Intent", {}) if entry_data.get("_homeRouteV2Intent", {}) is Dictionary else {}
+	var passed: bool = String(home_intent.get("kind", "")) == "home" and bool(home_intent.get("movingHome", false)) and not body.has_meta("npc_scripted_target") and String(order.get("state", "")) in ["ACTIVE", "ARRIVED"]
 	fake_npc.queue_free()
-	return outcome(passed, "moveCalls=%d homeCalls=%d targetMeta=%s order=%s" % [fake_npc.move_calls, fake_npc.moving_home_calls, str(body.has_meta("npc_scripted_target")), JSON.stringify(order)], ["go_home_uses_home_route", "go_home_no_scripted_target", "order_state_recorded"], { "order": order })
+	return outcome(passed, "v2=%s targetMeta=%s order=%s" % [JSON.stringify(home_intent), str(body.has_meta("npc_scripted_target")), JSON.stringify(order)], ["go_home_uses_v2_home_route", "go_home_no_scripted_target", "order_state_recorded"], { "order": order, "homeIntent": home_intent })
 
 func test_scripted_go_home_arrival_clears_cached_motion(_mode: String) -> Dictionary:
 	var fake_npc := FakeNpcSystem.new()
@@ -747,16 +879,20 @@ func test_every_active_actor_motion_tick_32_npcs(_mode: String) -> Dictionary:
 func test_brain_budget_does_not_skip_route_motion(_mode: String) -> Dictionary:
 	var fake_npc := FakeNpcSystem.new()
 	var executor: Variant = make_executor(fake_npc)
-	var entry_data := entry("Villager", { "position": Vector3.ZERO, "homeCell": Vector2i(4, 0), "homePosition": Vector3(5.4, 0.0, 0.0) })
+	var entry_data := entry("Villager", { "position": Vector3.ZERO, "homeCell": Vector2i(4, 0), "porchCell": Vector2i(1, 0), "homePosition": Vector3(5.4, 0.0, 0.0) })
 	entry_data["activeMotionGoal"] = { "goalKind": NpcEnumsScript.GOAL_KIND_HOME }
 	entry_data["activeMotionPerception"] = { "insideHome": false, "onPorch": false, "onThreshold": false }
 	for i in range(6):
 		executor.advance_motion_npc(entry_data, 1.0 / 60.0, 0.0)
 	var body := entry_data.get("body") as Node3D
 	var distance := body.global_position.length()
-	var passed: bool = fake_npc.move_calls == 6 and distance > 0.20
+	var home_intent: Dictionary = entry_data.get("_homeRouteV2Intent", {}) if entry_data.get("_homeRouteV2Intent", {}) is Dictionary else {}
+	var passed: bool = fake_npc.move_calls == 0 \
+		and distance > 0.20 \
+		and String(home_intent.get("kind", "")) == "home" \
+		and String(entry_data.get("routeStatus", "")) != "idle"
 	fake_npc.queue_free()
-	return outcome(passed, "moveCalls=%d distance=%.3f" % [fake_npc.move_calls, distance], ["brain_skip_route_motion_continues", "route_distance_accumulates"], { "moveCalls": fake_npc.move_calls, "distance": distance })
+	return outcome(passed, "legacyMoveCalls=%d routeMotionCalls=%d distance=%.3f v2=%s route=%s" % [fake_npc.move_calls, fake_npc.route_motion_calls, distance, JSON.stringify(home_intent), String(entry_data.get("routeStatus", ""))], ["brain_skip_route_motion_continues", "route_distance_accumulates", "home_motion_uses_v2_authority"], { "moveCalls": fake_npc.move_calls, "routeMotionCalls": fake_npc.route_motion_calls, "distance": distance, "homeIntent": home_intent, "routeStatus": entry_data.get("routeStatus", "") })
 
 func test_scripted_order_moves_while_brain_skipped(_mode: String) -> Dictionary:
 	var fake_npc := FakeNpcSystem.new()
@@ -790,16 +926,20 @@ func test_mira_no_inching_after_dialogue(_mode: String) -> Dictionary:
 func test_morning_departures_not_brain_starved(_mode: String) -> Dictionary:
 	var fake_npc := FakeNpcSystem.new()
 	var executor: Variant = make_executor(fake_npc)
-	var entry_data := entry("Carpenter", { "job": "wood", "position": Vector3.ZERO })
+	var entry_data := entry("Carpenter", { "job": "wood", "position": Vector3.ZERO, "homeCell": Vector2i(-10, 0), "porchCell": Vector2i(-9, 0) })
 	entry_data["jobPhase"] = "outbound"
 	entry_data["jobTarget"] = Vector3(4.0, 0.0, 0.0)
 	entry_data["activeMotionGoal"] = { "goalKind": NpcEnumsScript.GOAL_KIND_WORK }
 	for i in range(10):
 		executor.advance_motion_npc(entry_data, 1.0 / 60.0, 0.0)
 	var body := entry_data.get("body") as Node3D
-	var passed: bool = fake_npc.move_calls == 10 and body.global_position.x > 0.42 and String(entry_data.get("routeStatus", "moving")) != "idle"
+	var routine_intent: Dictionary = entry_data.get("_routineRouteV2Intent", {}) if entry_data.get("_routineRouteV2Intent", {}) is Dictionary else {}
+	var passed: bool = fake_npc.move_calls == 0 \
+		and body.global_position.x > 0.42 \
+		and String(routine_intent.get("kind", "")) == "work" \
+		and String(entry_data.get("routeStatus", "moving")) != "idle"
 	fake_npc.queue_free()
-	return outcome(passed, "moveCalls=%d x=%.3f route=%s" % [fake_npc.move_calls, body.global_position.x, String(entry_data.get("routeStatus", ""))], ["morning_job_motion_every_frame", "morning_departure_not_brain_starved"], { "moveCalls": fake_npc.move_calls, "position": body.global_position, "routeStatus": entry_data.get("routeStatus", "") })
+	return outcome(passed, "legacyMoveCalls=%d routeMotionCalls=%d x=%.3f route=%s v2=%s" % [fake_npc.move_calls, fake_npc.route_motion_calls, body.global_position.x, String(entry_data.get("routeStatus", "")), JSON.stringify(routine_intent)], ["morning_job_motion_every_frame", "morning_departure_not_brain_starved", "morning_departure_uses_v2_authority"], { "moveCalls": fake_npc.move_calls, "routeMotionCalls": fake_npc.route_motion_calls, "position": body.global_position, "routeStatus": entry_data.get("routeStatus", ""), "routineIntent": routine_intent })
 
 func test_idle_worker_exits_home_clearance(_mode: String) -> Dictionary:
 	var fake_npc := FakeNpcSystem.new()
@@ -832,18 +972,20 @@ func test_idle_worker_exits_home_clearance(_mode: String) -> Dictionary:
 	var before := body.global_position
 	var result: Dictionary = executor.advance_motion_npc(entry_data, 1.0 / 60.0, 0.0)
 	var after := body.global_position
-	var passed: bool = fake_npc.move_calls == 1 \
+	var routine_intent: Dictionary = entry_data.get("_routineRouteV2Intent", {}) if entry_data.get("_routineRouteV2Intent", {}) is Dictionary else {}
+	var passed: bool = fake_npc.move_calls == 0 \
 		and bool(result.get("advanced", false)) \
-		and String(result.get("reason", "")) == "job_idle_home_exit" \
+		and String(result.get("reason", "")) == "job_departure_home_exit" \
 		and String(result.get("intentKind", "")) == "job" \
 		and after.z < before.z \
-		and String(entry_data.get("jobPhase", "")) == "idle"
+		and String(routine_intent.get("kind", "")) == "work" \
+		and String(routine_intent.get("semanticKind", "")) == "home_departure_clearance"
 	fake_npc.queue_free()
 	return outcome(
 		passed,
-		"result=%s moveCalls=%d before=%s after=%s" % [JSON.stringify(result), fake_npc.move_calls, str(before), str(after)],
-		["idle_worker_in_door_clearance_moves_outward", "job_idle_not_frozen_at_home_threshold"],
-		{ "result": result, "moveCalls": fake_npc.move_calls, "before": before, "after": after, "jobPhase": entry_data.get("jobPhase", "") }
+		"result=%s legacyMoveCalls=%d routeMotionCalls=%d before=%s after=%s v2=%s" % [JSON.stringify(result), fake_npc.move_calls, fake_npc.route_motion_calls, str(before), str(after), JSON.stringify(routine_intent)],
+		["idle_worker_in_door_clearance_moves_outward", "job_idle_not_frozen_at_home_threshold", "job_home_exit_uses_v2_authority", "active_job_departure_uses_clearance_route"],
+		{ "result": result, "moveCalls": fake_npc.move_calls, "routeMotionCalls": fake_npc.route_motion_calls, "before": before, "after": after, "jobPhase": entry_data.get("jobPhase", ""), "routineIntent": routine_intent }
 	)
 
 func test_job_selection_budget_ages_deferred_workers(_mode: String) -> Dictionary:
@@ -902,47 +1044,94 @@ func test_resource_worker_outbound_stays_town_bound(_mode: String) -> Dictionary
 	entry_data["jobPhase"] = "outbound"
 	entry_data["jobTarget"] = Vector3(13.5, 0.0, 0.0)
 	entry_data["activeMotionGoal"] = { "goalKind": NpcEnumsScript.GOAL_KIND_WORK }
+	var before := (entry_data.get("body") as Node3D).global_position
 	executor.advance_motion_npc(entry_data, 1.0 / 60.0, 0.0)
 	var body := entry_data.get("body") as Node3D
-	var passed: bool = fake_npc.move_calls == 1 and not fake_npc.last_allow_outside and fake_npc.allow_outside_calls == 0 and body.global_position.x > 0.0
+	var routine_intent: Dictionary = entry_data.get("_routineRouteV2Intent", {}) if entry_data.get("_routineRouteV2Intent", {}) is Dictionary else {}
+	var passed: bool = fake_npc.move_calls == 0 \
+		and String(routine_intent.get("kind", "")) == "work" \
+		and not bool(routine_intent.get("allowOutside", true)) \
+		and body.global_position.x > before.x
 	fake_npc.queue_free()
 	return outcome(
 		passed,
-		"moveCalls=%d allowOutside=%s x=%.3f" % [fake_npc.move_calls, str(fake_npc.last_allow_outside), body.global_position.x],
-		["stone_worker_outbound_uses_town_route_permission", "resource_worker_route_stays_town_bound"],
-		{ "moveCalls": fake_npc.move_calls, "allowOutsideCalls": fake_npc.allow_outside_calls, "position": body.global_position }
+		"legacyMoveCalls=%d routeMotionCalls=%d allowOutside=%s before=%s after=%s v2=%s" % [fake_npc.move_calls, fake_npc.route_motion_calls, str(routine_intent.get("allowOutside", null)), str(before), str(body.global_position), JSON.stringify(routine_intent)],
+		["stone_worker_outbound_uses_town_route_permission", "resource_worker_route_stays_town_bound", "resource_worker_uses_v2_authority"],
+		{ "moveCalls": fake_npc.move_calls, "routeMotionCalls": fake_npc.route_motion_calls, "position": body.global_position, "routineIntent": routine_intent }
 	)
 
 func test_forager_outbound_allows_outside(_mode: String) -> Dictionary:
 	var fake_npc := FakeNpcSystem.new()
 	var executor: Variant = make_executor(fake_npc)
-	var entry_data := entry("Forager", { "job": "forage", "position": Vector3.ZERO })
+	var entry_data := entry("Forager", { "job": "forage", "position": Vector3.ZERO, "homeCell": Vector2i(-10, 0), "porchCell": Vector2i(-9, 0) })
 	entry_data["jobPhase"] = "outbound"
 	entry_data["jobTarget"] = Vector3(42.0, 0.0, 0.0)
 	entry_data["activeMotionGoal"] = { "goalKind": NpcEnumsScript.GOAL_KIND_FORAGE }
 	executor.advance_motion_npc(entry_data, 1.0 / 60.0, 0.0)
 	var body := entry_data.get("body") as Node3D
-	var passed: bool = fake_npc.move_calls == 1 and fake_npc.last_allow_outside and fake_npc.allow_outside_calls == 1 and body.global_position.x > 0.0
+	var routine_intent: Dictionary = entry_data.get("_routineRouteV2Intent", {}) if entry_data.get("_routineRouteV2Intent", {}) is Dictionary else {}
+	var passed: bool = fake_npc.move_calls == 0 \
+		and String(routine_intent.get("kind", "")) == "forage" \
+		and String(routine_intent.get("semanticKind", "")) == "forage_search_anchor" \
+		and bool(routine_intent.get("allowOutside", false)) \
+		and body.global_position.x > 0.0
 	fake_npc.queue_free()
 	return outcome(
 		passed,
-		"moveCalls=%d allowOutside=%s x=%.3f" % [fake_npc.move_calls, str(fake_npc.last_allow_outside), body.global_position.x],
-		["forager_outbound_uses_outside_route_permission", "forager_route_can_leave_town"],
-		{ "moveCalls": fake_npc.move_calls, "allowOutsideCalls": fake_npc.allow_outside_calls, "position": body.global_position }
+		"legacyMoveCalls=%d routeMotionCalls=%d allowOutside=%s x=%.3f v2=%s" % [fake_npc.move_calls, fake_npc.route_motion_calls, str(routine_intent.get("allowOutside", null)), body.global_position.x, JSON.stringify(routine_intent)],
+		["forager_outbound_uses_outside_route_permission", "forager_search_uses_exact_anchor_semantic", "forager_route_can_leave_town", "forager_uses_v2_authority"],
+		{ "moveCalls": fake_npc.move_calls, "routeMotionCalls": fake_npc.route_motion_calls, "position": body.global_position, "routineIntent": routine_intent }
+	)
+
+func test_forager_active_goal_enters_search_from_idle(_mode: String) -> Dictionary:
+	var fake_npc := FakeNpcSystem.new()
+	var executor: Variant = make_executor(fake_npc)
+	var entry_data := entry("Forager", {
+		"job": "forage",
+		"position": Vector3(CELL * 4.0, 0.0, 0.0),
+		"homeCell": Vector2i(-10, 0),
+		"porchCell": Vector2i(-9, 0)
+	})
+	entry_data["jobPhase"] = "idle"
+	entry_data["jobTimer"] = 8.0
+	entry_data["hunger"] = 100.0
+	entry_data["activeMotionGoal"] = { "goalKind": NpcEnumsScript.GOAL_KIND_FORAGE, "reason": "role_forager_food_loop" }
+	entry_data["activeGoalKind"] = NpcEnumsScript.GOAL_KIND_FORAGE
+	var result: Dictionary = executor.advance_motion_npc(entry_data, 1.0 / 60.0, 0.0)
+	var routine_intent: Dictionary = entry_data.get("_routineRouteV2Intent", {}) if entry_data.get("_routineRouteV2Intent", {}) is Dictionary else {}
+	var last_authority: Dictionary = entry_data.get("routineRouteV2LastAuthority", {}) if entry_data.get("routineRouteV2LastAuthority", {}) is Dictionary else {}
+	var passed := bool(result.get("advanced", false)) \
+		and String(entry_data.get("jobPhase", "")) == "searching" \
+		and String(entry_data.get("goal", "")) == "search for berries" \
+		and fake_npc.move_calls == 0 \
+		and String(entry_data.get("routeStatus", "")) != "idle" \
+		and String(entry_data.get("routineRouteV2RequestId", "")) != "" \
+		and not last_authority.is_empty()
+	fake_npc.queue_free()
+	return outcome(
+		passed,
+		"result=%s phase=%s legacyMoveCalls=%d routeStatus=%s v2=%s authority=%s" % [JSON.stringify(result), String(entry_data.get("jobPhase", "")), fake_npc.move_calls, String(entry_data.get("routeStatus", "")), JSON.stringify(routine_intent), JSON.stringify(last_authority)],
+		["forager_active_goal_promotes_idle_to_searching", "forager_idle_intent_uses_v2_authority", "forager_idle_intent_does_not_rest_outside"],
+		{ "result": result, "jobPhase": entry_data.get("jobPhase", ""), "moveCalls": fake_npc.move_calls, "routeStatus": entry_data.get("routeStatus", ""), "routineIntent": routine_intent, "lastAuthority": last_authority }
 	)
 
 func test_door_crossing_continues_while_brain_skipped(_mode: String) -> Dictionary:
 	var fake_npc := FakeNpcSystem.new()
 	var executor: Variant = make_executor(fake_npc)
-	var entry_data := entry("Villager", { "position": Vector3(-1.0, 0.0, 0.0), "homeCell": Vector2i(2, 0), "homePosition": Vector3(2.7, 0.0, 0.0) })
+	var entry_data := entry("Villager", { "position": Vector3(-1.0, 0.0, 0.0), "homeCell": Vector2i(3, 0), "porchCell": Vector2i(1, 0), "homePosition": Vector3(4.05, 0.0, 0.0) })
 	entry_data["activeMotionGoal"] = { "goalKind": NpcEnumsScript.GOAL_KIND_HOME }
 	entry_data["activeDoorPortalId"] = "door:test"
 	entry_data["activeTrafficStepGroup"] = "movement:test"
 	entry_data["activeDoorTrafficGroupId"] = "portal:test"
 	var result: Dictionary = executor.advance_motion_npc(entry_data, 1.0 / 60.0, 0.0)
-	var passed: bool = fake_npc.move_calls == 1 and bool(result.get("advanced", false)) and String(result.get("classification", "")) == "door_state" and float(entry_data.get("lastMoveDistance", 0.0)) > 0.001
+	var home_intent: Dictionary = entry_data.get("_homeRouteV2Intent", {}) if entry_data.get("_homeRouteV2Intent", {}) is Dictionary else {}
+	var passed: bool = fake_npc.move_calls == 0 \
+		and bool(result.get("advanced", false)) \
+		and String(result.get("classification", "")) == "door_state" \
+		and float(entry_data.get("lastMoveDistance", 0.0)) > 0.001 \
+		and String(home_intent.get("kind", "")) == "home"
 	fake_npc.queue_free()
-	return outcome(passed, "result=%s moveCalls=%d" % [JSON.stringify(result), fake_npc.move_calls], ["door_motion_tick_without_brain", "traffic_state_preserved_during_motion"], { "result": result, "entry": { "door": entry_data.get("activeDoorPortalId", ""), "traffic": entry_data.get("activeTrafficStepGroup", "") } })
+	return outcome(passed, "result=%s legacyMoveCalls=%d routeMotionCalls=%d v2=%s" % [JSON.stringify(result), fake_npc.move_calls, fake_npc.route_motion_calls, JSON.stringify(home_intent)], ["door_motion_tick_without_brain", "traffic_state_preserved_during_motion", "door_crossing_uses_v2_home_route"], { "result": result, "homeIntent": home_intent, "entry": { "door": entry_data.get("activeDoorPortalId", ""), "traffic": entry_data.get("activeTrafficStepGroup", "") } })
 
 func test_motor_blocked_local_escape_forces_replan(_mode: String) -> Dictionary:
 	var fake_npc := FakeNpcSystem.new()
@@ -1036,10 +1225,14 @@ func make_executor(fake_npc: FakeNpcSystem, fake_autonomy: Variant = null) -> Va
 	var autonomy = fake_autonomy if fake_autonomy != null else FakeAutonomy.new()
 	if fake_autonomy == null:
 		fake_npc.add_child(autonomy)
+	var fake_main := FakeMain.new()
+	autonomy.route_world = FakeRouteWorld.new()
+	autonomy.route_authority_v2 = NpcRouteAuthorityV2Script.new()
+	autonomy.route_authority_v2.setup(fake_npc, fake_main, FakeCollisionProbe.new())
 	var perception := NpcPerceptionServiceScript.new()
 	perception.setup(autonomy, fake_npc)
 	var executor := NpcPlanExecutorScript.new()
-	executor.setup(autonomy, fake_npc, null, {
+	executor.setup(autonomy, fake_npc, fake_main, {
 		"schedule": schedule,
 		"guardRoster": roster,
 		"perception": perception,
@@ -1101,7 +1294,7 @@ func entry(role: String, options := {}) -> Dictionary:
 		"guardCell": options.get("guardCell", Vector2i(2, 0)),
 		"homePosition": Vector3(float(home_cell.x) * 1.35, 0.0, float(home_cell.y) * 1.35),
 		"porchPosition": Vector3(float(porch_cell.x) * 1.35, 0.0, float(porch_cell.y) * 1.35),
-		"guardPosition": Vector3(2.7, 0.0, 0.0),
+		"guardPosition": options.get("guardPosition", Vector3(2.7, 0.0, 0.0)),
 		"insideHome": false,
 		"routeStatus": "idle",
 		"routeReason": "",

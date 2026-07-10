@@ -751,8 +751,7 @@ func test_home_return_fallback_semantics() -> void:
 
     entry["homeReturnTime"] = 8.0
     entry["homeActiveTargetCell"] = home_cell
-    entry["routeStatus"] = "moving"
-    entry["routeReason"] = ""
+    NpcRouteStateStoreScript.write_status(entry, "moving", "", "NpcNavigationTestRunner.home_fallback_fixture")
     entry["routeFallbackCell"] = start_cell
     var timed_position := body.global_position
     npc_system.settle_home_if_reached(entry)
@@ -765,7 +764,7 @@ func test_home_return_fallback_semantics() -> void:
         npc_system.cell_to_position(second_route_cell, level)
     ]
     entry["homeRouteIndex"] = 0
-    entry["routeStatus"] = "arrived"
+    NpcRouteStateStoreScript.write_status_preserving_reason(entry, "arrived", "NpcNavigationTestRunner.home_route_fixture")
     entry["homeActiveTargetCell"] = first_route_cell
     var next_home_target: Vector3 = npc_system.home_route_target(entry)
     var advanced_route_waypoint := int(entry.get("homeRouteIndex", 0)) == 1 and world_to_flat_cell(next_home_target) == second_route_cell
@@ -773,7 +772,7 @@ func test_home_return_fallback_semantics() -> void:
     npc_system.safe_place_npc(body, Vector3(float(porch_cell.x + 1) * CELL, level + 0.04, float(porch_cell.y + 1) * CELL), null, "test_home_setup")
     entry["homeRoutePositions"] = []
     entry["homeRouteIndex"] = 0
-    entry["routeStatus"] = "arrived"
+    NpcRouteStateStoreScript.write_status_preserving_reason(entry, "arrived", "NpcNavigationTestRunner.porch_route_fixture")
     entry["homeActiveTargetCell"] = porch_cell
     var final_home_target: Vector3 = npc_system.home_route_target(entry)
     var advanced_from_porch := world_to_flat_cell(final_home_target) == home_cell
@@ -785,8 +784,7 @@ func test_home_return_fallback_semantics() -> void:
     body.set_meta("npc_inside_home", false)
     entry["homeRoutePositions"] = []
     entry["homeRouteIndex"] = 0
-    entry["routeStatus"] = "blocked"
-    entry["routeReason"] = "no_candidate_goal"
+    NpcRouteStateStoreScript.write_status(entry, "blocked", "no_candidate_goal", "NpcNavigationTestRunner.blocked_home_fixture")
     entry["routeFallbackCell"] = porch_cell
     entry["homeActiveTargetCell"] = home_cell
     entry.erase("homeSettleDebug")

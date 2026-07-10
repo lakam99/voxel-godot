@@ -21,6 +21,36 @@ func _ready() -> void:
     Input.set_mouse_mode(Input.MOUSE_MODE_VISIBLE)
     build_menu()
     refresh_save_state()
+    maybe_start_real_boot_mira_runner()
+    maybe_start_real_boot_tutorial_runner()
+
+func maybe_start_real_boot_mira_runner() -> void:
+    if OS.get_environment("VOXEL_ACTUAL_GAMEPLAY_MIRA_REAL_BOOT").strip_edges() != "1":
+        return
+    var runner_script = load("res://scripts/testing/npc/NpcActualGameplayMiraPorchRegressionRunner.gd")
+    if runner_script == null:
+        push_error("Mira real-boot runner script could not be loaded")
+        return
+    var runner = runner_script.new()
+    if runner == null:
+        push_error("Mira real-boot runner could not be instantiated")
+        return
+    runner.name = "ActualGameplayMiraRealBootRunner"
+    add_child(runner)
+
+func maybe_start_real_boot_tutorial_runner() -> void:
+    if OS.get_environment("VOXEL_REAL_TUTORIAL_REAL_BOOT").strip_edges() != "1":
+        return
+    var runner_script = load("res://scripts/testing/npc/NpcRealTutorialPlaythroughRunner.gd")
+    if runner_script == null:
+        push_error("Real tutorial runner script could not be loaded")
+        return
+    var runner = runner_script.new()
+    if runner == null:
+        push_error("Real tutorial runner could not be instantiated")
+        return
+    runner.name = "RealTutorialRealBootRunner"
+    add_child(runner)
 
 func _process(delta: float) -> void:
     if not launching or loading_label == null or not is_instance_valid(loading_label):

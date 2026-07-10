@@ -290,39 +290,66 @@ func rescue_guard_target(guard: Node3D) -> Vector3:
         var ring_direction := Vector3(sin(angle), 0.0, cos(angle))
         candidates.append(system.rescue_site + ring_direction * CELL * 5.2)
         candidates.append(system.rescue_site + ring_direction * CELL * 7.0)
-    var first_clear_candidate := Vector3.INF
-    var first_visible_candidate := Vector3.INF
-    var first_reachable_candidate := Vector3.INF
-    var first_pending_candidate := Vector3.INF
+    var best_clear_candidate := Vector3.INF
+    var best_clear_distance := INF
+    var best_visible_clear_candidate := Vector3.INF
+    var best_visible_clear_distance := INF
+    var best_reachable_candidate := Vector3.INF
+    var best_reachable_distance := INF
+    var best_visible_reachable_candidate := Vector3.INF
+    var best_visible_reachable_distance := INF
+    var best_pending_candidate := Vector3.INF
+    var best_pending_distance := INF
+    var best_visible_pending_candidate := Vector3.INF
+    var best_visible_pending_distance := INF
     for candidate in candidates:
         candidate.y = surface_y_at_position(candidate) + 0.04
         if not rescue_guard_target_clear(candidate):
             continue
-        if not first_clear_candidate.is_finite():
-            first_clear_candidate = candidate
+        var distance_sq := rescue_target_distance_sq(candidate)
+        if distance_sq < best_clear_distance:
+            best_clear_distance = distance_sq
+            best_clear_candidate = candidate
         var reachability := rescue_guard_target_reachability(guard, candidate)
-        if bool(reachability.get("reachable", false)) and not first_reachable_candidate.is_finite():
-            first_reachable_candidate = candidate
-        elif bool(reachability.get("pending", false)) and not first_pending_candidate.is_finite():
-            first_pending_candidate = candidate
+        var reachable := bool(reachability.get("reachable", false))
+        var pending := bool(reachability.get("pending", false))
         var visible := rescue_guard_target_has_line_of_sight(candidate)
-        if visible and (bool(reachability.get("reachable", false)) or bool(reachability.get("pending", false))):
-            if not first_visible_candidate.is_finite():
-                first_visible_candidate = candidate
-        elif not visible:
-            continue
-        if bool(reachability.get("reachable", false)):
-            return candidate
-    if first_reachable_candidate.is_finite():
-        return first_reachable_candidate
-    if first_pending_candidate.is_finite():
-        return first_pending_candidate
-    if first_visible_candidate.is_finite():
-        return first_visible_candidate
-    if first_clear_candidate.is_finite():
-        return first_clear_candidate
+        if visible and distance_sq < best_visible_clear_distance:
+            best_visible_clear_distance = distance_sq
+            best_visible_clear_candidate = candidate
+        if reachable:
+            if distance_sq < best_reachable_distance:
+                best_reachable_distance = distance_sq
+                best_reachable_candidate = candidate
+            if visible and distance_sq < best_visible_reachable_distance:
+                best_visible_reachable_distance = distance_sq
+                best_visible_reachable_candidate = candidate
+        elif pending:
+            if distance_sq < best_pending_distance:
+                best_pending_distance = distance_sq
+                best_pending_candidate = candidate
+            if visible and distance_sq < best_visible_pending_distance:
+                best_visible_pending_distance = distance_sq
+                best_visible_pending_candidate = candidate
+    if best_visible_clear_candidate.is_finite():
+        return best_visible_clear_candidate
+    if best_clear_candidate.is_finite():
+        return best_clear_candidate
+    if best_visible_reachable_candidate.is_finite():
+        return best_visible_reachable_candidate
+    if best_reachable_candidate.is_finite():
+        return best_reachable_candidate
+    if best_visible_pending_candidate.is_finite():
+        return best_visible_pending_candidate
+    if best_pending_candidate.is_finite():
+        return best_pending_candidate
     fallback.y = surface_y_at_position(fallback) + 0.04
     return fallback
+
+func rescue_target_distance_sq(position: Vector3) -> float:
+    var dx: float = position.x - system.rescue_site.x
+    var dz: float = position.z - system.rescue_site.z
+    return dx * dx + dz * dz
 
 func rescue_guard_target_reachable(guard: Node3D, position: Vector3) -> bool:
     return bool(rescue_guard_target_reachability(guard, position).get("reachable", false))
@@ -529,9 +556,36 @@ func rescue_party_home() -> bool:
 func rescue_guard_returned(guard: Node3D) -> bool:
     if guard == null:
         return true
+    if rescue_guard_route_arrived(guard):
+        return true
     var target := rescue_guard_return_position()
     var flat := Vector2(guard.global_position.x - target.x, guard.global_position.z - target.z)
     return flat.length() <= CELL * 1.45
+
+func rescue_guard_route_arrived(guard: Node3D) -> bool:
+    if guard == null or main == null or main.npc_system == null:
+        return false
+    if not main.npc_system.has_method("npc_entry_for_actor"):
+        return false
+    var entry: Dictionary = main.npc_system.npc_entry_for_actor(guard)
+    if entry.is_empty():
+        return false
+    var scripted_order: Dictionary = entry.get("scriptedOrder", {}) if entry.get("scriptedOrder", {}) is Dictionary else {}
+    if String(scripted_order.get("kind", "")) != "go_to":
+        return false
+    if String(scripted_order.get("state", "")) != "ARRIVED":
+        return false
+    var ordered_target: Vector3 = scripted_order.get("target", Vector3.INF)
+    if not ordered_target.is_finite():
+        return false
+    var return_target := rescue_guard_return_position()
+    var ordered_flat := Vector2(ordered_target.x - return_target.x, ordered_target.z - return_target.z)
+    if ordered_flat.length() > CELL * 0.35:
+        return false
+    var authority: Dictionary = entry.get("routeAuthorityV2", {}) if entry.get("routeAuthorityV2", {}) is Dictionary else {}
+    var proof: Dictionary = authority.get("proof", {}) if authority.get("proof", {}) is Dictionary else {}
+    var authority_arrived := String(authority.get("state", "")) == "arrived" or String(entry.get("routeStatus", "")) == "arrived"
+    return authority_arrived and bool(proof.get("ok", false)) and bool(proof.get("collisionBacked", false))
 
 func tutorial_npc_strictly_inside_home(body: Node3D) -> bool:
     if body == null or main == null or main.npc_system == null:

@@ -3,6 +3,7 @@ extends Node
 const MAIN_SCENE: PackedScene = preload("res://scenes/Main.tscn")
 const ItemCatalogScript := preload("res://scripts/ItemCatalog.gd")
 const InventorySlotButtonScript := preload("res://scripts/InventorySlotButton.gd")
+const NpcRouteStateStoreScript := preload("res://scripts/npc_ai/routing/NpcRouteStateStore.gd")
 const CELL := 1.35
 const CHUNK_SIZE := 28
 const WATER_LEVEL := 11.1
@@ -5483,8 +5484,7 @@ func test_npc_equipment_and_pathing() -> void:
     entry["pathWaypoints"] = []
     entry["routeCells"] = []
     entry["routeForceReplan"] = true
-    entry["routeStatus"] = "idle"
-    entry["routeReason"] = ""
+    NpcRouteStateStoreScript.write_status(entry, "idle", "", "PlaytestRunner.npc_unreachable_goal_fixture")
     var unreachable_center := Vector2i(start_cell.x + 5, start_cell.y + 5)
     var unreachable_cells: Array[Vector3i] = []
     blocks = get_blocks()

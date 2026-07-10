@@ -236,7 +236,7 @@ Avoid:
 
 ## NPC And AI Expectations
 
-For the NPC autonomy/pathfinding replacement, `CODEX_NPC_PATHFINDING_FINAL_IMPLEMENTATION_PLAN.md` supersedes older NPC pathing plans. Phase work must keep the phase branch and merged `master` green and must tie every acceptance claim to a command, report, trace, capture, static audit, or commit.
+For the NPC autonomy/pathfinding replacement, `CODEX_NPC_PATHFINDING_REPLACEMENT_PHASE_PLAN.md` is the current sequential implementation plan. Phase work must keep the phase branch and merged `master` green and must tie every acceptance claim to a command, report, trace, capture, static audit, or commit.
 
 Recent context: NPC failures are systemic pathfinding failures unless proven otherwise. Do not patch Niko, Mira, Rowan, or any named NPC in isolation when the symptom is an actor stopping outside a door, on a porch, at a wall, or beside a fence. Fix the shared route contract.
 
@@ -245,6 +245,7 @@ Current ownership:
 - `scripts/NpcSystem.gd` is the gameplay integration, spawn/registry, save-facing, and public stats adapter. Do not move new route search, direct movement loops, or door authority back into it.
 - `scripts/NpcPathing.gd` is a thin facade over `scripts/npc_ai/routing/NpcNavigationCoordinator.gd` for existing callers.
 - `scripts/npc_ai/navigation/GeneratedWorldNavigationAdapter.gd` owns generated-world navigation topology snapshots and consumes navigation events.
+- `scripts/npc_ai/routing/NpcRouteAuthorityV2.gd` is the production NPC route authority for migrated behavior. `scripts/npc_ai/routing/CollisionBackedRouteSubstrate.gd` owns collision-backed route proof before commit, and `scripts/npc_ai/movement/NpcRouteLeaseExecutor.gd` owns lease-based execution through the shared motor.
 - `scripts/npc_ai/routing/NpcRouteCoordinatorAdapter.gd` and `HierarchicalRoutePlanner.gd` own deterministic route planning, route repair, and traversal actions.
 - `scripts/npc_ai/movement/NpcRouteMovementController.gd` owns route-following through the shared `CharacterBody3D` motor.
 - `scripts/npc_ai/interactions/DoorPortalService.gd`, `DoorController.gd`, and `DoorTraversalExecutor.gd` own shared player/NPC door authority.
@@ -261,7 +262,7 @@ NPCs should move with purpose:
 - Pathing should account for terrain, obstacles, doors, town limits, and reachable work areas.
 - Metadata may define goals, homes, jobs, doors, and work areas, but routing must prove physical reachability through collision-aware navigation before an NPC commits to movement.
 - A route may be pending because nav data, tile publication, door links, traffic, or budgets are not ready. Pending nav data is not the same as an unreachable target and must not poison targets as permanently unreachable.
-- Production NPC movement must not rely on generated-cell bridges, doctored vectors, teleporting, hand-authored offsets, or direct movement loops that bypass collision. Such paths may remain only in clearly labeled diagnostics or synthetic tests.
+- Production NPC movement must not rely on generated-cell bridges, exact-home collision lattice planners, composed door routes, partial endpoint success, doctored vectors, teleporting, hand-authored offsets, or direct movement loops that bypass collision. Such paths may remain only in clearly labeled diagnostics or synthetic tests, and diagnostics must not be cited as gameplay acceptance.
 - Door behavior should open before crossing, clear collision while open, and close after NPC/player clearance.
 - Door crossings should keep per-actor active ownership until the actor clears or is cancelled; route replacement must not silently drop an active portal reservation.
 - `canFight` is combat capability only. Explicit guard-duty assignment decides who may stay outside at night.

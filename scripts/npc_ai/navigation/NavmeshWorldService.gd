@@ -457,35 +457,6 @@ func query_route(start: Vector3, target: Vector3, options := {}) -> Dictionary:
 			endpoint_check["originalFlatDistance"] = original_endpoint_check.get("flatDistance", INF)
 			query_api_used = "%s_endpoint_completed" % query_api_used
 		else:
-			var partial_endpoint: Vector3 = endpoint_check.get("endpoint", path[path.size() - 1] if not path.is_empty() else query_start)
-			var start_flat_distance := Vector2(query_start.x - query_target.x, query_start.z - query_target.z).length()
-			var endpoint_flat_distance := float(endpoint_check.get("flatDistance", INF))
-			var route_kind := String(options.get("kind", ""))
-			var home_or_scripted := route_kind == "scripted" or route_kind == "home" or bool(options.get("movingHome", false))
-			if home_or_scripted and path.size() >= 2 and endpoint_flat_distance + CELL * 0.5 < start_flat_distance:
-				return _finish_route_query(started, {
-					"ok": true,
-					"status": "partial",
-					"reason": "path_endpoint_partial",
-					"source": "navmesh",
-					"queryApi": query_api_used,
-					"start": start,
-					"target": target,
-					"startPosition": query_start,
-					"targetPosition": partial_endpoint,
-					"fallbackCell": _cell_for_position(partial_endpoint),
-					"path": path,
-					"actions": {},
-					"doorLinks": [],
-					"distance": _path_distance(path),
-					"pointCount": path.size(),
-					"snapshotRevision": revision(),
-					"options": _route_options_summary(options),
-					"startWalkable": start_walkable,
-					"targetWalkable": target_walkable,
-					"endpoint": endpoint_check,
-					"endpointRetry": fallback_endpoint_check
-				}, options)
 			return _finish_route_query(started, _route_query_failure("blocked", "path_endpoint_mismatch", start, target, options, {
 				"startWalkable": start_walkable,
 				"targetWalkable": target_walkable,
@@ -494,6 +465,35 @@ func query_route(start: Vector3, target: Vector3, options := {}) -> Dictionary:
 				"pathPointCount": path.size()
 			}), options)
 	var forbidden_door_links := _forbidden_door_links_for_path(path, options)
+	if not forbidden_door_links.is_empty():
+		var forbidden_retry_path := _query_path_points_with_door_links_disabled(query_start, query_target, options, forbidden_door_links)
+		if not forbidden_retry_path.is_empty():
+			var forbidden_retry_endpoint := _path_endpoint_check(forbidden_retry_path, query_target, options)
+			var forbidden_retry_links := _forbidden_door_links_for_path(forbidden_retry_path, options)
+			if bool(forbidden_retry_endpoint.get("ok", false)) and forbidden_retry_links.is_empty():
+				path = forbidden_retry_path
+				endpoint_check = forbidden_retry_endpoint
+				query_api_used = "%s_forbidden_link_retry" % query_api_used
+				forbidden_door_links = []
+			elif not forbidden_retry_links.is_empty():
+				return _finish_route_query(started, _route_query_failure("blocked", "forbidden_private_door_link", start, target, options, {
+					"startWalkable": start_walkable,
+					"targetWalkable": target_walkable,
+					"forbiddenDoorLinks": forbidden_door_links,
+					"retryForbiddenDoorLinks": forbidden_retry_links,
+					"retryEndpoint": forbidden_retry_endpoint,
+					"pathPointCount": path.size(),
+					"retryPathPointCount": forbidden_retry_path.size()
+				}), options)
+			else:
+				return _finish_route_query(started, _route_query_failure("blocked", "path_endpoint_mismatch", start, target, options, {
+					"startWalkable": start_walkable,
+					"targetWalkable": target_walkable,
+					"forbiddenDoorLinks": forbidden_door_links,
+					"retryEndpoint": forbidden_retry_endpoint,
+					"pathPointCount": path.size(),
+					"retryPathPointCount": forbidden_retry_path.size()
+				}), options)
 	if not forbidden_door_links.is_empty():
 		return _finish_route_query(started, _route_query_failure("blocked", "forbidden_private_door_link", start, target, options, {
 			"startWalkable": start_walkable,
@@ -1165,6 +1165,46 @@ func _query_path_points(start: Vector3, target: Vector3, options := {}) -> Array
 		var map_path = NavigationServer3D.call("map_get_path", navigation_map, start, target, bool(options.get("optimizePath", true)))
 		points = _vector_path_to_array(map_path)
 	return points
+
+func _query_path_points_with_door_links_disabled(start: Vector3, target: Vector3, options := {}, portal_ids := []) -> Array[Vector3]:
+	var disabled_records := _temporarily_disable_door_links(portal_ids)
+	if disabled_records.is_empty():
+		return []
+	_mark_navigation_map_dirty()
+	_sync_navigation_map_if_dirty()
+	var points := _query_path_points(start, target, options)
+	_restore_temporarily_disabled_door_links(disabled_records)
+	_mark_navigation_map_dirty()
+	_sync_navigation_map_if_dirty()
+	return points
+
+func _temporarily_disable_door_links(portal_ids := []) -> Array[Dictionary]:
+	var disabled_records: Array[Dictionary] = []
+	for portal_value in portal_ids:
+		var portal_id := String(portal_value)
+		if portal_id == "" or not door_link_records_by_portal.has(portal_id):
+			continue
+		for record_value in door_link_records_by_portal.get(portal_id, []):
+			if not (record_value is Dictionary):
+				continue
+			var record: Dictionary = record_value
+			if not bool(record.get("enabled", false)):
+				continue
+			var link_rid: RID = record.get("rid", RID())
+			if not link_rid.is_valid():
+				continue
+			_set_link_enabled(link_rid, false)
+			disabled_records.append({
+				"rid": link_rid,
+				"enabled": true
+			})
+	return disabled_records
+
+func _restore_temporarily_disabled_door_links(disabled_records: Array[Dictionary]) -> void:
+	for record in disabled_records:
+		var link_rid: RID = record.get("rid", RID())
+		if link_rid.is_valid():
+			_set_link_enabled(link_rid, bool(record.get("enabled", true)))
 
 func _route_query_api(options := {}) -> String:
 	var requested := String(options.get("queryApi", "query_path"))

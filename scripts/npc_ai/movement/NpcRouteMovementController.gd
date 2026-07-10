@@ -6,6 +6,7 @@ const NpcConstantsScript := preload("res://scripts/npc_ai/NpcConstants.gd")
 const HomeInteriorServiceScript := preload("res://scripts/npc_ai/behavior/HomeInteriorService.gd")
 const NpcCorridorFollowerScript := preload("res://scripts/npc_ai/movement/NpcCorridorFollower.gd")
 const ReciprocalAvoidanceAdapterScript := preload("res://scripts/npc_ai/movement/ReciprocalAvoidanceAdapter.gd")
+const NpcRouteStateStoreScript := preload("res://scripts/npc_ai/routing/NpcRouteStateStore.gd")
 const CAPSULE_RADIUS := 0.34
 const CAPSULE_HEIGHT := 1.64
 const DOOR_ACTION_LOOKAHEAD_CELLS := 4
@@ -69,6 +70,7 @@ func move(entry: Dictionary, intent: Dictionary, max_distance: float, planner, w
     var arrival_radius: float = float(intent.get("arrivalRadius", CELL * 0.75))
     var moving_home := bool(intent.get("movingHome", false))
     var strict_arrival := bool(intent.get("strictArrival", false)) or moving_home
+    var priority := int(intent.get("priority", 0))
     if String(entry.get("activeDoorPortalId", "")) == "":
         entry.erase("_activeDoorForwardStep")
     if flat_distance(previous, target) <= arrival_radius:
@@ -96,6 +98,9 @@ func move(entry: Dictionary, intent: Dictionary, max_distance: float, planner, w
             }
         else:
             var route_failure_reason := String(route.get("reason", "blocked"))
+            var clearance_recovery := try_home_door_clearance_recovery(entry, previous, intent, max_distance, world, priority, route_failure_reason)
+            if not clearance_recovery.is_empty():
+                return clearance_recovery
             if skip_optional_home_waypoint_if_static_blocked(entry, route_failure_reason):
                 set_route_status(entry, "waiting", "home_optional_waypoint_skip")
                 return { "moved": 0.0, "status": "waiting", "reason": "home_optional_waypoint_skip", "classification": "home_route" }
@@ -147,8 +152,8 @@ func move(entry: Dictionary, intent: Dictionary, max_distance: float, planner, w
         seed_active_door_forward_step(entry, world)
     var path_waypoints: Array = entry.get("pathWaypoints", [])
     while not path_waypoints.is_empty() and flat_distance(previous, path_waypoints[0]) <= CELL * 0.36:
-        path_waypoints.remove_at(0)
-        entry["pathWaypoints"] = path_waypoints
+        trim_route_prefix(entry, 1)
+        path_waypoints = entry.get("pathWaypoints", [])
     if path_waypoints.is_empty():
         var final_arrival_radius := arrival_radius if strict_arrival else maxf(arrival_radius, CELL * 0.95)
         if flat_distance(previous, target) <= final_arrival_radius:
@@ -178,7 +183,6 @@ func move(entry: Dictionary, intent: Dictionary, max_distance: float, planner, w
             count_unreachable_once(entry, intent, "empty_route")
             return { "moved": 0.0, "status": "blocked", "reason": "empty_route" }
 
-    var priority := int(intent.get("priority", 0))
     entry["routePriority"] = priority
     var next_cell: Vector2i = next_route_cell(entry, world)
     var door_wait: String = handle_door_action(entry, next_cell, world, priority)
@@ -229,6 +233,9 @@ func move(entry: Dictionary, intent: Dictionary, max_distance: float, planner, w
         var static_escape_result := try_static_collision_escape(entry, previous, follow, intent, max_distance, world, priority)
         if not static_escape_result.is_empty():
             return static_escape_result
+        var clearance_recovery := try_home_door_clearance_recovery(entry, previous, intent, max_distance, world, priority, String(follow.get("reason", "")))
+        if not clearance_recovery.is_empty():
+            return clearance_recovery
         if skip_optional_home_waypoint_if_static_blocked(entry, String(follow.get("reason", ""))):
             set_route_status(entry, "waiting", "home_optional_waypoint_skip")
             return { "moved": 0.0, "status": "waiting", "reason": "home_optional_waypoint_skip", "classification": "static_collision" }
@@ -306,6 +313,9 @@ func move(entry: Dictionary, intent: Dictionary, max_distance: float, planner, w
         var motor_local_escape_result := try_motor_blocked_local_escape(entry, previous, follow, intent, max_distance, world, priority, motor_reason)
         if not motor_local_escape_result.is_empty():
             return motor_local_escape_result
+        var clearance_recovery := try_home_door_clearance_recovery(entry, previous, intent, max_distance, world, priority, motor_reason)
+        if not clearance_recovery.is_empty():
+            return clearance_recovery
         if skip_optional_home_waypoint_if_static_blocked(entry, motor_reason):
             set_route_status(entry, "waiting", "home_optional_waypoint_skip")
             return { "moved": 0.0, "status": "waiting", "reason": "home_optional_waypoint_skip", "classification": "static_collision" }
@@ -1063,8 +1073,7 @@ func ensure_route(entry: Dictionary, intent: Dictionary, planner, world) -> Dict
         entry["pathWaypoints"] = []
         entry["routeCells"] = []
         entry["routeActions"] = {}
-        entry.erase("routeLease")
-        entry.erase("routeLeaseId")
+        NpcRouteStateStoreScript.clear_route_lease(entry, "NpcRouteMovementController.cached_missing_lease")
         current_waypoints = []
     if needs_route and current_waypoints.is_empty() and cached_status == "pending" and not route_key_changed and not snapshot_revision_changed:
         var retry_frame := int(entry.get("routePendingRetryFrame", -1))
@@ -1135,11 +1144,7 @@ func ensure_route(entry: Dictionary, intent: Dictionary, planner, world) -> Dict
     if route_has_authority and bool(route.get("routeAuthorityReady", false)):
         var route_lease: Dictionary = route.get("routeLease", {}) if route.get("routeLease", {}) is Dictionary else {}
         if route_lease.is_empty():
-            route["ok"] = false
-            route["status"] = "pending"
-            route["reason"] = "missing_route_lease"
-            route["routeAuthorityState"] = "pending_probe"
-            route["routeAuthorityReady"] = false
+            NpcRouteStateStoreScript.mark_route_missing_lease(route)
     if route_has_authority and not bool(route.get("routeAuthorityReady", false)):
         var authority_state := String(route.get("routeAuthorityState", ""))
         if authority_state in ["pending_nav_data", "pending_budget", "pending_probe"]:
@@ -1220,11 +1225,9 @@ func ensure_route(entry: Dictionary, intent: Dictionary, planner, world) -> Dict
         route["actions"] = (entry.get("routeActions", {}) as Dictionary).duplicate()
         route["routeTrimmedPrefixCells"] = int(entry.get("routeTrimmedPrefixCells", 0))
     if route.get("routeLease", {}) is Dictionary and not (route.get("routeLease", {}) as Dictionary).is_empty():
-        entry["routeLease"] = (route.get("routeLease", {}) as Dictionary).duplicate(true)
-        entry["routeLeaseId"] = String(route.get("routeLeaseId", ""))
+        NpcRouteStateStoreScript.write_route_lease_from_route(entry, route, "NpcRouteMovementController.install_route")
     else:
-        entry.erase("routeLease")
-        entry.erase("routeLeaseId")
+        NpcRouteStateStoreScript.clear_route_lease(entry, "NpcRouteMovementController.install_route")
     entry["routeFallbackCell"] = route.get("fallbackCell", target_cell)
     if bool(route.get("ok", false)) and not (route.get("waypoints", []) as Array).is_empty():
         entry["routeRetryTicks"] = 0
@@ -1483,6 +1486,7 @@ func clear_route(entry: Dictionary) -> void:
     entry.erase("routeDynamicAvoidUntilFrame")
     entry.erase("_activeDoorForwardStep")
     entry.erase("portalRecenterTicks")
+    entry.erase("homeDoorClearanceRecoveryActive")
 
 func invalidate_active_route_for_replan(entry: Dictionary, reason: String) -> void:
     if system != null and system.has_method("release_npc_traffic_reservations"):
@@ -1493,6 +1497,7 @@ func invalidate_active_route_for_replan(entry: Dictionary, reason: String) -> vo
     entry["routeForceReplan"] = true
     entry.erase("routePendingRetryFrame")
     entry.erase("routeFailureRetryFrame")
+    entry.erase("homeDoorClearanceRecoveryActive")
 
 func seed_strict_final_waypoint(entry: Dictionary, target: Vector3, world) -> void:
     var target_cell: Vector2i = world.world_cell(target)
@@ -1682,9 +1687,46 @@ func trim_reached_route_cells(entry: Dictionary, world) -> void:
         return
     var current_cell: Vector2i = world.world_cell(body.global_position)
     var cells: Array = entry.get("routeCells", [])
+    var reached_count := 0
     while not cells.is_empty() and cells[0] == current_cell:
+        reached_count += 1
         cells.remove_at(0)
+    if reached_count > 0:
+        trim_route_prefix(entry, reached_count, true)
+
+func trim_route_prefix(entry: Dictionary, count: int, cells_already_trimmed := false) -> void:
+    if count <= 0:
+        return
+    var cells: Array = entry.get("routeCells", []) if entry.get("routeCells", []) is Array else []
+    var waypoints: Array = entry.get("pathWaypoints", []) if entry.get("pathWaypoints", []) is Array else []
+    var removed_cells: Array = []
+    if cells_already_trimmed:
+        var original_cells: Array = entry.get("routeCells", []) if entry.get("routeCells", []) is Array else []
+        var remove_count := mini(count, original_cells.size())
+        for index in range(remove_count):
+            var cell_value = original_cells[index]
+            if cell_value is Vector2i:
+                removed_cells.append(cell_value)
+        cells = original_cells.slice(remove_count)
+    else:
+        for _index in range(count):
+            if cells.is_empty():
+                break
+            var cell_value = cells.pop_front()
+            if cell_value is Vector2i:
+                removed_cells.append(cell_value)
+    for _index in range(count):
+        if waypoints.is_empty():
+            break
+        waypoints.remove_at(0)
+    var actions: Dictionary = entry.get("routeActions", {}) if entry.get("routeActions", {}) is Dictionary else {}
+    for cell_value in removed_cells:
+        if cell_value is Vector2i:
+            var cell: Vector2i = cell_value
+            actions.erase("%d,%d" % [cell.x, cell.y])
     entry["routeCells"] = cells
+    entry["pathWaypoints"] = waypoints
+    entry["routeActions"] = actions
 
 func trim_installed_route_prefix_to_current_cell(entry: Dictionary, current_cell: Vector2i) -> void:
     var cells: Array = entry.get("routeCells", []) if entry.get("routeCells", []) is Array else []
@@ -1715,6 +1757,159 @@ func trim_installed_route_prefix_to_current_cell(entry: Dictionary, current_cell
 
 func skip_optional_home_approach_if_oscillating(entry: Dictionary) -> bool:
     return false
+
+func try_home_door_clearance_recovery(entry: Dictionary, previous: Vector3, intent: Dictionary, _max_distance: float, world, _priority: int, reason: String) -> Dictionary:
+    if not home_door_clearance_recovery_allowed(entry, previous, intent, reason, world):
+        return {}
+    var clearance_route := plan_home_door_clearance_route(entry, previous, world)
+    if clearance_route.is_empty():
+        return {}
+    entry["routeCells"] = (clearance_route.get("cells", []) as Array).duplicate()
+    entry["pathWaypoints"] = (clearance_route.get("waypoints", []) as Array).duplicate()
+    entry["routeActions"] = {}
+    entry["routeFallbackCell"] = clearance_route.get("fallbackCell", entry.get("homeCell", Vector2i.ZERO))
+    entry["routeForceReplan"] = false
+    entry["homeDoorClearanceRecovery"] = {
+        "reason": reason,
+        "fromCell": clearance_route.get("fromCell", Vector2i.ZERO),
+        "targetCell": clearance_route.get("fallbackCell", Vector2i.ZERO),
+        "cellCount": (clearance_route.get("cells", []) as Array).size()
+    }
+    set_route_status(entry, "waiting", "home_door_clearance_recovery")
+    return { "moved": 0.0, "status": "waiting", "reason": "home_door_clearance_recovery", "classification": "home_route" }
+
+func home_door_clearance_recovery_allowed(entry: Dictionary, previous: Vector3, intent: Dictionary, reason: String, world) -> bool:
+    if world == null:
+        return false
+    if not (bool(intent.get("movingHome", false)) or bool(entry.get("routeMovingHome", false)) or String(entry.get("activeGoalKind", "")) == "home"):
+        return false
+    if reason not in [
+        "path_crosses_static_collision",
+        "blocked_static_collision",
+        "blocked_static_transition",
+        "static_or_dynamic_collision",
+        "blocked_capsule",
+        "blocked_capsule_probe",
+        "empty_route",
+        "active_door_replan"
+    ]:
+        return false
+    var portal = home_portal_for_entry(entry)
+    var status := HomeInteriorServiceScript.status(entry, previous, portal)
+    if bool(status.get("strictInside", false)):
+        return false
+    if not bool(status.get("insideBounds", false)):
+        return false
+    if not bool(status.get("pastDoorPlane", false)):
+        return false
+    return String(status.get("reason", "")) == "door_clearance_not_inside" or not bool(status.get("clearOfDoor", true))
+
+func plan_home_door_clearance_route(entry: Dictionary, previous: Vector3, world) -> Dictionary:
+    if world == null or not world.has_method("world_cell") or not world.has_method("cell_position"):
+        return {}
+    var current_cell: Vector2i = world.world_cell(previous)
+    var portal = home_portal_for_entry(entry)
+    var snapshot: Dictionary = {}
+    if world.has_method("cached_validation_snapshot"):
+        snapshot = world.cached_validation_snapshot(entry, false, true)
+    elif world.has_method("build_snapshot"):
+        snapshot = world.build_snapshot(entry, false, true)
+    var queue: Array[Vector2i] = [current_cell]
+    var visited := { home_clearance_cell_key(current_cell): true }
+    var came_from := {}
+    var target_cell := Vector2i(999999, 999999)
+    var max_visits := 32
+    var visits := 0
+    while not queue.is_empty() and visits < max_visits:
+        var cell: Vector2i = queue.pop_front()
+        visits += 1
+        if cell != current_cell and home_clearance_cell_is_strict_inside(entry, cell, world, portal):
+            target_cell = cell
+            break
+        for next_cell in home_clearance_neighbors_toward_home(cell, entry):
+            var key := home_clearance_cell_key(next_cell)
+            if visited.has(key):
+                continue
+            if not home_clearance_cell_candidate(entry, next_cell, world, portal):
+                continue
+            if not home_clearance_transition_clear(entry, cell, next_cell, snapshot, world):
+                continue
+            visited[key] = true
+            came_from[key] = cell
+            queue.append(next_cell)
+    if target_cell == Vector2i(999999, 999999):
+        return {}
+    var cells: Array[Vector2i] = []
+    var cursor := target_cell
+    while cursor != current_cell:
+        cells.push_front(cursor)
+        var cursor_key := home_clearance_cell_key(cursor)
+        if not came_from.has(cursor_key):
+            return {}
+        cursor = came_from[cursor_key]
+    var waypoints: Array[Vector3] = []
+    for cell in cells:
+        waypoints.append(world.cell_position(cell))
+    return {
+        "cells": cells,
+        "waypoints": waypoints,
+        "fallbackCell": target_cell,
+        "fromCell": current_cell
+    }
+
+func home_clearance_cell_candidate(entry: Dictionary, cell: Vector2i, world, _portal) -> bool:
+    if not HomeInteriorServiceScript.cell_inside_home_bounds(entry, cell, true):
+        return false
+    if world != null and world.has_method("cell_is_standable_goal") and not bool(world.cell_is_standable_goal(entry, cell, false, true)):
+        return false
+    return true
+
+func home_clearance_cell_is_strict_inside(entry: Dictionary, cell: Vector2i, world, portal) -> bool:
+    if not home_clearance_cell_candidate(entry, cell, world, portal):
+        return false
+    var position: Vector3 = world.cell_position(cell)
+    var status := HomeInteriorServiceScript.status(entry, position, portal)
+    return bool(status.get("strictInside", false))
+
+func home_clearance_transition_clear(entry: Dictionary, from_cell: Vector2i, to_cell: Vector2i, snapshot: Dictionary, world) -> bool:
+    if world == null or not world.has_method("cell_transition_pathable"):
+        return true
+    var target_lookup := { to_cell: true, "_strictTargetCollision": true }
+    var transition: Dictionary = world.cell_transition_pathable(entry, snapshot, from_cell, to_cell, target_lookup, true)
+    return bool(transition.get("ok", false))
+
+func home_clearance_neighbors_toward_home(cell: Vector2i, entry: Dictionary) -> Array[Vector2i]:
+    var home_cell: Vector2i = entry.get("homeCell", cell)
+    var neighbors: Array[Vector2i] = [
+        cell + Vector2i(1, 0),
+        cell + Vector2i(-1, 0),
+        cell + Vector2i(0, 1),
+        cell + Vector2i(0, -1)
+    ]
+    neighbors.sort_custom(func(a: Vector2i, b: Vector2i) -> bool:
+        var da := absi(a.x - home_cell.x) + absi(a.y - home_cell.y)
+        var db := absi(b.x - home_cell.x) + absi(b.y - home_cell.y)
+        if da != db:
+            return da < db
+        if a.x != b.x:
+            return a.x < b.x
+        return a.y < b.y
+    )
+    return neighbors
+
+func home_clearance_cell_key(cell: Vector2i) -> String:
+    return "%d,%d" % [cell.x, cell.y]
+
+func home_portal_for_entry(entry: Dictionary):
+    if system == null:
+        return null
+    var autonomy = system.get("autonomy_system")
+    if autonomy == null:
+        return null
+    var door_portals = autonomy.get("door_portals")
+    if door_portals == null:
+        return null
+    return HomeInteriorServiceScript.portal_for_entry(entry, door_portals)
 
 func skip_optional_home_waypoint_if_static_blocked(entry: Dictionary, reason: String) -> bool:
     if reason not in ["path_crosses_static_collision", "blocked_static_collision", "blocked_static_transition", "static_or_dynamic_collision"]:
@@ -2471,12 +2666,7 @@ func interaction_door_for_collider(collider: Node) -> Node:
     return collider
 
 func set_route_status(entry: Dictionary, status: String, reason: String) -> void:
-    entry["routeStatus"] = status
-    entry["routeReason"] = reason
-    var body := entry.get("body") as Node
-    if body:
-        body.set_meta("npc_route_status", status)
-        body.set_meta("npc_route_reason", reason)
+    NpcRouteStateStoreScript.write_status(entry, status, reason, "NpcRouteMovementController")
 
 func increment_route_replan(entry: Dictionary) -> void:
     entry["routeReplans"] = int(entry.get("routeReplans", 0)) + 1

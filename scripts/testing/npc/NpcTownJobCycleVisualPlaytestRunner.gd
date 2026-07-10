@@ -740,6 +740,9 @@ func npc_summary(entry: Dictionary, phase: String) -> Dictionary:
         "routeStatus": String(entry.get("routeStatus", "")),
         "routeReason": String(entry.get("routeReason", "")),
         "routePriority": int(entry.get("routePriority", 0)),
+        "routeAuthorityV2": v2_authority_summary(entry),
+        "homeRouteV2": home_route_v2_summary(entry),
+        "routineRouteV2": routine_route_v2_summary(entry),
         "routeGoalCell": vec2i(entry.get("routeGoalCell", Vector2i(999999, 999999)) if entry.get("routeGoalCell", Vector2i(999999, 999999)) is Vector2i else Vector2i(999999, 999999)),
         "routeFallbackCell": vec2i(entry.get("routeFallbackCell", Vector2i(999999, 999999)) if entry.get("routeFallbackCell", Vector2i(999999, 999999)) is Vector2i else Vector2i(999999, 999999)),
         "routeCellCount": (entry.get("routeCells", []) as Array).size(),
@@ -1359,6 +1362,9 @@ func night_door_row(entry: Dictionary) -> Dictionary:
         "activeDoorDirection": String(entry.get("activeDoorDirection", "")),
         "routeStatus": String(entry.get("routeStatus", "")),
         "routeReason": String(entry.get("routeReason", "")),
+        "routeAuthorityV2": v2_authority_summary(entry),
+        "homeRouteV2": home_route_v2_summary(entry),
+        "routineRouteV2": routine_route_v2_summary(entry),
         "routeCellCount": (entry.get("routeCells", []) as Array).size(),
         "pathWaypointCount": (entry.get("pathWaypoints", []) as Array).size(),
         "homeRoute": home_route,
@@ -1404,6 +1410,9 @@ func night_home_route_evidence_rows(matrix: Array[Dictionary]) -> Array[Dictiona
             "homeRoute": row.get("homeRoute", {}),
             "routeStatus": String(row.get("routeStatus", "")),
             "routeReason": String(row.get("routeReason", "")),
+            "routeAuthorityV2": row.get("routeAuthorityV2", {}),
+            "homeRouteV2": row.get("homeRouteV2", {}),
+            "routineRouteV2": row.get("routineRouteV2", {}),
             "lastRoutePlanDebug": row.get("lastRoutePlanDebug", {})
         })
     return rows
@@ -1631,6 +1640,76 @@ func home_route_summary(entry: Dictionary, position: Vector3) -> Dictionary:
         "distanceToCurrentTarget": rounded(distance_to_current),
         "nextTargets": next_targets
     }
+
+func v2_authority_summary(entry: Dictionary) -> Dictionary:
+    var authority_value = entry.get("routeAuthorityV2", {})
+    if not (authority_value is Dictionary):
+        return {}
+    var authority: Dictionary = authority_value
+    return sanitize_value({
+        "requestId": String(authority.get("requestId", "")),
+        "intentKind": String(authority.get("intentKind", "")),
+        "semanticKind": String(authority.get("semanticKind", "")),
+        "state": String(authority.get("state", "")),
+        "reason": String(authority.get("reason", "")),
+        "priority": int(authority.get("priority", 0)),
+        "planningWaitFrames": int(authority.get("planningWaitFrames", 0)),
+        "queuedFrames": int(authority.get("queuedFrames", 0)),
+        "pendingBudgetFrames": int(authority.get("pendingBudgetFrames", 0)),
+        "pendingNavDataFrames": int(authority.get("pendingNavDataFrames", 0)),
+        "pendingProbeFrames": int(authority.get("pendingProbeFrames", 0)),
+        "hasLease": bool(authority.get("hasLease", false)),
+        "leaseId": String(authority.get("leaseId", "")),
+        "proof": authority.get("proof", {}),
+        "routeLease": route_lease_summary(authority.get("routeLease", {})),
+        "recentEvents": authority.get("recentEvents", [])
+    })
+
+func route_lease_summary(lease_value) -> Dictionary:
+    if not (lease_value is Dictionary):
+        return {}
+    var lease: Dictionary = lease_value
+    return {
+        "leaseId": String(lease.get("leaseId", "")),
+        "requestId": String(lease.get("requestId", "")),
+        "generation": int(lease.get("generation", 0)),
+        "state": String(lease.get("state", "")),
+        "reason": String(lease.get("reason", "")),
+        "cellCount": (lease.get("cells", []) as Array).size() if lease.get("cells", []) is Array else 0,
+        "waypointCount": (lease.get("waypoints", []) as Array).size() if lease.get("waypoints", []) is Array else 0,
+        "actionCount": (lease.get("actions", {}) as Dictionary).size() if lease.get("actions", {}) is Dictionary else 0,
+        "targetCell": lease.get("targetCell", Vector2i(999999, 999999)),
+        "source": String(lease.get("source", "")),
+        "proof": lease.get("proof", {}),
+        "probeCertificate": lease.get("probeCertificate", {})
+    }
+
+func home_route_v2_summary(entry: Dictionary) -> Dictionary:
+    return sanitize_value({
+        "requestId": String(entry.get("homeRouteV2RequestId", "")),
+        "requestReason": String(entry.get("homeRouteV2RequestReason", "")),
+        "retryAfterFrame": int(entry.get("homeRouteV2RetryAfterFrame", 0)),
+        "recoveryMarkedRequestId": String(entry.get("homeRouteV2RecoveryMarkedRequestId", "")),
+        "lastPlan": entry.get("homeRouteV2LastPlan", {}),
+        "lastAuthority": entry.get("homeRouteV2LastAuthority", {}),
+        "lastExecution": entry.get("homeRouteV2LastExecution", {}),
+        "strictFailure": entry.get("homeRouteV2StrictFailure", {}),
+        "rejectedGoalCells": entry.get("homeRouteV2RejectedGoalCells", [])
+    })
+
+func routine_route_v2_summary(entry: Dictionary) -> Dictionary:
+    return sanitize_value({
+        "requestId": String(entry.get("routineRouteV2RequestId", "")),
+        "routeKey": String(entry.get("routineRouteV2Key", "")),
+        "requestReason": String(entry.get("routineRouteV2RequestReason", "")),
+        "retryAfterFrame": int(entry.get("routineRouteV2RetryAfterFrame", 0)),
+        "intentKind": String(entry.get("routineRouteV2IntentKind", "")),
+        "semanticKind": String(entry.get("routineRouteV2SemanticKind", "")),
+        "lastCandidates": entry.get("routineRouteV2LastCandidates", {}),
+        "lastPlan": entry.get("routineRouteV2LastPlan", {}),
+        "lastAuthority": entry.get("routineRouteV2LastAuthority", {}),
+        "lastExecution": entry.get("routineRouteV2LastExecution", {})
+    })
 
 func home_door_volume_occupied(entry: Dictionary, position: Vector3, volume: String) -> bool:
     var portal = home_door_portal(entry)

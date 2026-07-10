@@ -82,17 +82,7 @@ func step(job: Dictionary, max_expansions := 128, max_usec := 0) -> Dictionary:
 	}
 
 func _finish_without_open(job: Dictionary) -> Dictionary:
-	var request = job.get("request")
-	var allow_partial := bool(request.get("allow_partial")) if request != null else false
 	var best_key := String(job.get("bestKey", ""))
-	if allow_partial and best_key != "" and best_key != String(job.get("start", "")) and (job.get("cameFrom", {}) as Dictionary).has(best_key):
-		var result := _complete(job, best_key)
-		result["status"] = NpcEnumsScript.ROUTE_STATUS_PARTIAL
-		result["reason"] = NpcEnumsScript.ROUTE_REASON_PARTIAL_ONLY
-		result["closedCount"] = (job.get("closed", {}) as Dictionary).size()
-		result["bestKey"] = best_key
-		result["bestGoalDistance"] = _report_distance(float(job.get("bestGoalDistance", INF)))
-		return result
 	return {
 		"status": NpcEnumsScript.ROUTE_STATUS_UNREACHABLE,
 		"reason": NpcEnumsScript.ROUTE_REASON_NO_ROUTE,

@@ -582,9 +582,14 @@ func is_intro_elder_waiting_for_ack() -> bool:
 
 func acknowledge_dialogue(context := {}) -> void:
     var state: Dictionary = context if context is Dictionary else {}
+    var state_npc_id := String(state.get("npcId", ""))
+    var current_npc_id := String(last_dialogue.get("npcId", ""))
     var intro_ack := bool(state.get("introElder", false)) \
         or (
-            String(state.get("npcId", "")) == "mira"
+            state_npc_id != ""
+            and current_npc_id != ""
+            and state_npc_id == current_npc_id
+            and bool(last_dialogue.get("introElder", false))
             and intro_door_opened
             and not intro_elder_dialogue_acknowledged
         )
@@ -602,15 +607,15 @@ func release_intro_elder_home_order() -> void:
     if not refresh_tutorial_npc_home_records(true):
         last_message = "Mira waits while the village paths settle."
         return
-    var actor = last_dialogue_node if last_dialogue_node != null and is_instance_valid(last_dialogue_node) else "mira"
+    var actor = intro_elder_dialogue_actor()
+    if actor == null:
+        last_message = "The elder is no longer in reach."
+        return
     if main.npc_system.has_method("release_intro_hold_and_order_home"):
         var release_result: Dictionary = main.npc_system.release_intro_hold_and_order_home(actor, "intro_acknowledged_return_home")
         if String(release_result.get("state", "")) != "FAILED_TARGET_GONE":
             return
     var entry: Dictionary = main.npc_system.npc_entry_for_actor(actor) if main.npc_system.has_method("npc_entry_for_actor") else {}
-    if entry.is_empty() and actor != "mira" and main.npc_system.has_method("npc_entry_for_actor"):
-        entry = main.npc_system.npc_entry_for_actor("mira")
-        actor = "mira"
     if not entry.is_empty():
         if main.npc_system.has_method("clear_intro_hold_for_entry"):
             main.npc_system.clear_intro_hold_for_entry(entry)
@@ -620,6 +625,14 @@ func release_intro_elder_home_order() -> void:
         if body != null and is_instance_valid(body):
             body.set_meta("npc_hold_intro_door", false)
     main.npc_system.order_go_home(actor, "intro_acknowledged_return_home")
+
+func intro_elder_dialogue_actor():
+    if last_dialogue_node != null and is_instance_valid(last_dialogue_node):
+        return last_dialogue_node
+    var npc_id := String(last_dialogue.get("npcId", ""))
+    if npc_id != "":
+        return npc_id
+    return null
 
 func refresh_tutorial_npc_home_records(require_generated := false) -> bool:
     if main == null or main.npc_system == null or not main.npc_system.has_method("update_npc_home_record"):

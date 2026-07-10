@@ -3,6 +3,7 @@ class_name NpcSimulationLodService
 
 const NpcConstantsScript := preload("res://scripts/npc_ai/NpcConstants.gd")
 const AbstractNpcTransitScript := preload("res://scripts/npc_ai/lifecycle/AbstractNpcTransit.gd")
+const NpcRouteStateStoreScript := preload("res://scripts/npc_ai/routing/NpcRouteStateStore.gd")
 
 const STATE_ACTIVE := "active"
 const STATE_NEARBY := "nearby"
@@ -331,8 +332,7 @@ func clear_transient_entry_state(entry: Dictionary) -> void:
 		return
 	for key in TRANSIENT_SAVE_KEYS:
 		entry.erase(key)
-	entry["routeStatus"] = String(entry.get("routeStatus", "idle"))
-	entry["routeReason"] = String(entry.get("routeReason", ""))
+	NpcRouteStateStoreScript.write_status(entry, String(entry.get("routeStatus", "idle")), String(entry.get("routeReason", "")), "NpcSimulationLodService.clear_transient")
 
 func prefetch_for_entry(entry: Dictionary, margin_cells := NpcConstantsScript.LOD_PREFETCH_BOUNDARY_MARGIN_CELLS) -> Dictionary:
 	if autonomy_system == null or not autonomy_system.has_method("request_navigation_tile"):
@@ -365,8 +365,7 @@ func handle_tile_unloaded(tile_key: String, entries: Array) -> Dictionary:
 			continue
 		entry["movementHeldForTopology"] = true
 		entry["requestedTopologyTile"] = tile_key
-		entry["routeStatus"] = "PENDING"
-		entry["routeReason"] = "waiting_for_topology"
+		NpcRouteStateStoreScript.write_status(entry, "PENDING", "waiting_for_topology", "NpcSimulationLodService.tile_unloaded")
 		affected.append(actor_id_for(entry))
 		if autonomy_system != null and autonomy_system.has_method("request_navigation_tile"):
 			autonomy_system.request_navigation_tile({ "tileKey": tile_key }, 100, entry.get("motorProfile"))
@@ -401,8 +400,7 @@ func _clear_topology_hold(entry: Dictionary, reason: String) -> void:
 	entry.erase("requestedTopologyTile")
 	entry["routeForceReplan"] = true
 	if String(entry.get("routeStatus", "")) == "PENDING" and String(entry.get("routeReason", "")) == "waiting_for_topology":
-		entry["routeStatus"] = "waiting"
-		entry["routeReason"] = reason
+		NpcRouteStateStoreScript.write_status(entry, "waiting", reason, "NpcSimulationLodService.clear_topology_hold")
 	counters["tileUnloadReleases"] = int(counters.get("tileUnloadReleases", 0)) + 1
 
 func durable_snapshot(entry: Dictionary) -> Dictionary:

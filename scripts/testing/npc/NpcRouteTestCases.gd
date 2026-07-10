@@ -14,6 +14,9 @@ const HierarchicalRoutePlannerScript := preload("res://scripts/npc_ai/routing/Hi
 const NavmeshRoutePlannerScript := preload("res://scripts/npc_ai/routing/NavmeshRoutePlanner.gd")
 const NpcRouteCoordinatorAdapterScript := preload("res://scripts/npc_ai/routing/NpcRouteCoordinatorAdapter.gd")
 const CollisionProbeServiceScript := preload("res://scripts/npc_ai/routing/CollisionProbeService.gd")
+const CollisionBackedRouteSubstrateScript := preload("res://scripts/npc_ai/routing/CollisionBackedRouteSubstrate.gd")
+const NpcRouteAuthorityV2Script := preload("res://scripts/npc_ai/routing/NpcRouteAuthorityV2.gd")
+const NpcRouteLeaseExecutorScript := preload("res://scripts/npc_ai/movement/NpcRouteLeaseExecutor.gd")
 const CELL := NpcConstantsScript.CELL_SIZE
 
 var runner = null
@@ -56,11 +59,218 @@ class FakeNavmeshRouteService:
 	func stats() -> Dictionary:
 		return { "pathQueryCount": query_count }
 
+class BudgetedCollisionProbe:
+	extends RefCounted
+	var required_samples := 3
+
+	func setup(_system_node, _main_node) -> void:
+		pass
+
+	func probe_route(_entry: Dictionary, route: Dictionary, _intent: Dictionary, options := {}) -> Dictionary:
+		var waypoints: Array = route.get("waypoints", []) if route.get("waypoints", []) is Array else []
+		if waypoints.is_empty():
+			return {
+				"ok": false,
+				"status": "invalid_goal",
+				"reason": "empty_waypoints",
+				"authoritative": true,
+				"sampleCount": 0,
+				"details": {}
+			}
+		var cursor: Dictionary = options.get("cursor", {}) if options.get("cursor", {}) is Dictionary else {}
+		var completed := int(cursor.get("completedSamples", 0))
+		var remaining := maxi(0, required_samples - completed)
+		var max_samples := maxi(0, int(options.get("maxSamples", remaining)))
+		var sampled := mini(remaining, max_samples)
+		completed += sampled
+		if completed < required_samples:
+			return {
+				"ok": false,
+				"status": "pending_probe",
+				"reason": "collision_probe_budget",
+				"authoritative": true,
+				"sampleCount": sampled,
+				"details": {
+					"completedSamples": completed,
+					"cursor": { "completedSamples": completed }
+				}
+			}
+		return {
+			"ok": true,
+			"status": "passed",
+			"reason": "",
+			"authoritative": true,
+			"sampleCount": sampled,
+			"details": { "completedSamples": completed }
+		}
+
 class GeneratedFallbackWorld:
 	extends RefCounted
 
 	func world_cell(position: Vector3) -> Vector2i:
 		return Vector2i(roundi(position.x / 1.35), roundi(position.z / 1.35))
+
+class FakeLeaseAuthority:
+	extends RefCounted
+	var completed_segments := []
+	var started_segments := []
+	var door_waits := []
+	var stuck_reports := []
+
+	func begin_moving(_request_id: String, _reason := "") -> Dictionary:
+		return { "ok": true, "state": "moving" }
+
+	func report_segment_started(_request_id: String, index: int, _details := {}) -> void:
+		started_segments.append(index)
+
+	func report_segment_completed(_request_id: String, index: int, _details := {}) -> void:
+		completed_segments.append(index)
+
+	func report_arrived(_request_id: String, _reason := "") -> Dictionary:
+		return { "ok": true, "state": "arrived" }
+
+	func report_door_wait(_request_id: String, reason: String, details := {}) -> void:
+		door_waits.append({ "reason": reason, "details": details })
+
+	func report_unexpected_collision(_request_id: String, _reason := "", _details := {}) -> void:
+		pass
+
+	func report_stuck(_request_id: String, _reason := "", _details := {}) -> void:
+		stuck_reports.append({ "reason": _reason, "details": _details })
+
+class FakeNoProgressMotor:
+	extends RefCounted
+	var lateral_step := 0.08
+
+	func apply(body: CharacterBody3D, _command, _profile, _delta: float, _terrain_provider):
+		body.global_position += Vector3(0.0, 0.0, lateral_step)
+		return { "blocked": false }
+
+class GeneratedTownRouteSubstrateFixtureWorld:
+	extends RefCounted
+	var standable := {}
+	var blocked := {}
+	var static_collision := {}
+	var dynamic := {}
+	var doors := {}
+	var pending_nav_data := false
+	var revision := 0
+
+	func _init() -> void:
+		add_standable_rect(Vector2i(0, -2), Vector2i(5, 2))
+
+	func add_standable_rect(min_cell: Vector2i, max_cell: Vector2i) -> void:
+		for z in range(min_cell.y, max_cell.y + 1):
+			for x in range(min_cell.x, max_cell.x + 1):
+				standable[Vector2i(x, z)] = true
+
+	func generated_town_entry() -> Dictionary:
+		return {
+			"id": "substrate-fixture-npc",
+			"townCenter": Vector2i(2, 0),
+			"townRadius": 8,
+			"porchCell": Vector2i(1, 0),
+			"homeInteriorMinCell": Vector2i(4, -1),
+			"homeInteriorMaxCell": Vector2i(5, 1),
+			"guardCell": Vector2i(0, 1),
+			"workMinCell": Vector2i(3, -1),
+			"workMaxCell": Vector2i(5, 1)
+		}
+
+	func build_snapshot(_entry: Dictionary, allow_outside := false, moving_home := false) -> Dictionary:
+		if pending_nav_data:
+			return {
+				"status": "pending_nav_data",
+				"pendingNavData": true,
+				"reason": "fixture_nav_tiles_unpublished",
+				"revision": "fixture:pending"
+			}
+		return {
+			"revision": "fixture:%d" % revision,
+			"blocked": blocked,
+			"staticCollisionByCell": static_collision_index(),
+			"staticCollision": static_collision.values(),
+			"dynamic": dynamic,
+			"doors": doors,
+			"allowOutside": allow_outside,
+			"movingHome": moving_home
+		}
+
+	func static_collision_index() -> Dictionary:
+		var result := {}
+		for cell in static_collision.keys():
+			result[cell] = [static_collision[cell]]
+		return result
+
+	func world_cell(position: Vector3) -> Vector2i:
+		return Vector2i(roundi(position.x / CELL), roundi(position.z / CELL))
+
+	func cell_position(cell: Vector2i) -> Vector3:
+		return Vector3(float(cell.x) * CELL, 0.0, float(cell.y) * CELL)
+
+	func static_blocker(snapshot: Dictionary, cell: Vector2i):
+		if door_at(snapshot, cell) != null:
+			return null
+		var snapshot_blocked: Dictionary = snapshot.get("blocked", {})
+		return snapshot_blocked.get(cell, null)
+
+	func static_collision_blocker(snapshot: Dictionary, cell: Vector2i) -> Dictionary:
+		if door_at(snapshot, cell) != null:
+			return {}
+		var index: Dictionary = snapshot.get("staticCollisionByCell", {})
+		var records: Array = index.get(cell, [])
+		if records.is_empty():
+			return {}
+		var record = records[0]
+		return record if record is Dictionary else {}
+
+	func dynamic_blocker(snapshot: Dictionary, cell: Vector2i):
+		var snapshot_dynamic: Dictionary = snapshot.get("dynamic", {})
+		return snapshot_dynamic.get(cell, null)
+
+	func door_at(snapshot: Dictionary, cell: Vector2i):
+		var snapshot_doors: Dictionary = snapshot.get("doors", {})
+		return snapshot_doors.get(cell, null)
+
+	func cell_transition_pathable(_entry: Dictionary, snapshot: Dictionary, from_cell: Vector2i, to_cell: Vector2i, _target_cells: Dictionary, ignore_dynamic := false) -> Dictionary:
+		if not standable.has(to_cell):
+			return { "ok": false, "reason": "no_walkable_surface" }
+		if abs(to_cell.x - from_cell.x) + abs(to_cell.y - from_cell.y) != 1:
+			return { "ok": false, "reason": "non_cardinal_transition" }
+		if static_blocker(snapshot, to_cell) != null:
+			return { "ok": false, "reason": "blocked_static", "blockerCell": to_cell }
+		var collision := static_collision_blocker(snapshot, to_cell)
+		if not collision.is_empty():
+			return { "ok": false, "reason": "blocked_static_collision", "blockerCell": to_cell, "blockType": collision.get("blockType", "") }
+		if not ignore_dynamic and dynamic_blocker(snapshot, to_cell) != null:
+			return { "ok": false, "reason": "blocked_dynamic", "blockerCell": to_cell }
+		return { "ok": true, "reason": "" }
+
+	func cell_is_standable_goal(_entry: Dictionary, cell: Vector2i, _allow_outside := false, _moving_home := false) -> bool:
+		return standable.has(cell)
+
+	func point_inside_town(entry: Dictionary, position: Vector3) -> bool:
+		var center: Vector2i = entry.get("townCenter", Vector2i.ZERO)
+		var radius := float(entry.get("townRadius", 18)) * CELL
+		var flat := Vector2(position.x - float(center.x) * CELL, position.z - float(center.y) * CELL)
+		return flat.length() <= radius
+
+	func point_inside_work_area(entry: Dictionary, position: Vector3) -> bool:
+		var center: Vector2i = entry.get("townCenter", Vector2i.ZERO)
+		var radius_cells := float(entry.get("townRadius", 18))
+		if String(entry.get("job", "")) == "forage":
+			radius_cells += 24.0
+		var flat := Vector2(position.x - float(center.x) * CELL, position.z - float(center.y) * CELL)
+		return flat.length() <= radius_cells * CELL
+
+	func approach_cells_for_target(_entry: Dictionary, target_position: Vector3, _allow_outside := true) -> Array[Vector2i]:
+		var target := world_cell(target_position)
+		return [
+			target + Vector2i(1, 0),
+			target + Vector2i(-1, 0),
+			target + Vector2i(0, 1),
+			target + Vector2i(0, -1)
+		]
 
 func setup(owner) -> void:
 	runner = owner
@@ -82,6 +292,12 @@ func cases() -> Array[Dictionary]:
 		["npc_route_mandatory_action_not_smoothed_out", "test_route_mandatory_action_not_smoothed_out"],
 		["npc_route_no_iteration_cap_false_failure", "test_route_no_iteration_cap_false_failure"],
 		["npc_route_pending_budget_resumes", "test_route_pending_budget_resumes"],
+		["npc_route_authority_planning_budget_fairness", "test_route_authority_planning_budget_fairness"],
+		["npc_route_authority_probe_budget_starvation_recovery", "test_route_authority_probe_budget_starvation_recovery"],
+		["npc_route_authority_phase10_counters", "test_route_authority_phase10_counters"],
+		["npc_route_authority_stuck_revokes_moving_lease", "test_route_authority_stuck_revokes_moving_lease"],
+		["npc_route_lease_executor_skips_passed_non_door_waypoint", "test_route_lease_executor_skips_passed_non_door_waypoint"],
+		["npc_route_lease_executor_reports_no_target_progress", "test_route_lease_executor_reports_no_target_progress"],
 		["npc_route_partial_explicit_only", "test_route_partial_explicit_only"],
 		["npc_route_unreachable_terminal_reason", "test_route_unreachable_terminal_reason"],
 		["npc_route_deterministic_replay", "test_route_deterministic_replay"],
@@ -91,22 +307,30 @@ func cases() -> Array[Dictionary]:
 		["npc_route_navmesh_adapter_no_legacy_fallback", "test_route_navmesh_adapter_no_legacy_fallback"],
 		["npc_route_routine_jobs_do_not_use_generated_cell_bridge", "test_route_routine_jobs_do_not_use_generated_cell_bridge"],
 		["npc_route_runtime_planner_rejects_generated_cell_bridge", "test_route_runtime_planner_rejects_generated_cell_bridge"],
-		["npc_route_generated_fallback_open_terrain_only", "test_route_generated_fallback_open_terrain_only"],
-		["npc_route_generated_fallback_rejects_no_progress_partial", "test_route_generated_fallback_rejects_no_progress_partial"],
+		["npc_route_generated_fallback_disabled_in_production", "test_route_generated_fallback_open_terrain_only"],
+		["npc_route_diagnostic_generated_fallback_rejects_no_progress_partial", "test_route_generated_fallback_rejects_no_progress_partial"],
 		["npc_route_probe_start_overlap_escape_outward_only", "test_route_probe_start_overlap_escape_outward_only"],
 		["npc_route_probe_repair_cell_bridge_uses_fallback_goal", "test_route_probe_repair_cell_bridge_uses_fallback_goal"],
 		["npc_route_runtime_door_uses_group_portal_id", "test_route_runtime_door_uses_group_portal_id"],
 		["npc_route_collision_boundary_blocks_open_destination", "test_route_collision_boundary_blocks_open_destination"],
 		["npc_route_collision_occupied_cell_blocks_node", "test_route_collision_occupied_cell_blocks_node"],
 		["npc_route_navmesh_surfaces_exclude_collision_occupied_cells", "test_route_navmesh_surfaces_exclude_collision_occupied_cells"],
-		["npc_route_home_collision_lattice_exact_detour", "test_route_home_collision_lattice_exact_detour"],
-		["npc_route_home_collision_lattice_recenters_off_cell_start", "test_route_home_collision_lattice_recenters_off_cell_start"],
-		["npc_route_home_egress_uses_exact_collision_lattice", "test_route_home_egress_uses_exact_collision_lattice"],
+		["npc_route_diagnostic_home_collision_lattice_exact_detour", "test_route_home_collision_lattice_exact_detour"],
+		["npc_route_scripted_collision_lattice_exact_detour", "test_route_scripted_collision_lattice_exact_detour"],
+		["npc_route_diagnostic_home_collision_lattice_recenters_off_cell_start", "test_route_home_collision_lattice_recenters_off_cell_start"],
+		["npc_route_home_egress_rejects_exact_collision_lattice", "test_route_home_egress_uses_exact_collision_lattice"],
 		["npc_route_collision_door_requires_portal_axis", "test_route_collision_door_requires_portal_axis"],
 		["npc_route_collision_rejects_diagonal_corner_cut", "test_route_collision_rejects_diagonal_corner_cut"],
 		["npc_route_navmesh_post_validation_rejects_wall_cross", "test_route_navmesh_post_validation_rejects_wall_cross"],
 		["npc_route_scripted_target_expands_navmesh_tiles", "test_route_scripted_target_expands_navmesh_tiles"],
-		["npc_route_runtime_goal_adapter_uses_new_corridor", "test_route_runtime_goal_adapter_uses_new_corridor"]
+		["npc_route_runtime_goal_adapter_uses_new_corridor", "test_route_runtime_goal_adapter_uses_new_corridor"],
+		["npc_route_substrate_reachable_generated_town_fixture", "test_route_substrate_reachable_generated_town_fixture"],
+		["npc_route_substrate_uses_actual_start_waypoint", "test_route_substrate_uses_actual_start_waypoint"],
+		["npc_route_substrate_home_departure_clearance_exact_goal", "test_route_substrate_home_departure_clearance_exact_goal"],
+		["npc_route_substrate_forage_search_anchor_exact_outside_goal", "test_route_substrate_forage_search_anchor_exact_outside_goal"],
+		["npc_route_substrate_blocked_generated_town_fixture", "test_route_substrate_blocked_generated_town_fixture"],
+		["npc_route_substrate_invalid_goal_generated_town_fixture", "test_route_substrate_invalid_goal_generated_town_fixture"],
+		["npc_route_substrate_pending_generated_town_fixture", "test_route_substrate_pending_generated_town_fixture"]
 	]
 	var result: Array[Dictionary] = []
 	for spec in ids:
@@ -346,6 +570,253 @@ func test_route_pending_budget_resumes(_mode: String) -> Dictionary:
 	var passed = first.get("status") == NpcEnumsScript.ROUTE_STATUS_PENDING and final.get("status") == NpcEnumsScript.ROUTE_STATUS_COMPLETE
 	return outcome(passed, "first=%s final=%s" % [str(first.get("status")), JSON.stringify(route_summary(final))], ["pending_budget", "resumes_to_terminal"], { "first": route_summary(first), "final": route_summary(final) })
 
+func test_route_authority_planning_budget_fairness(_mode: String) -> Dictionary:
+	var authority = NpcRouteAuthorityV2Script.new()
+	authority.setup(null, null, BudgetedCollisionProbe.new())
+	authority.plan_attempt_budget_per_frame = 1
+	var first_entry := { "id": "budget-a" }
+	var second_entry := { "id": "budget-b" }
+	var first_request: Dictionary = authority.submit_request(first_entry, { "kind": "work", "priority": 10 }, { "priority": 10 })
+	var second_request: Dictionary = authority.submit_request(second_entry, { "kind": "work", "priority": 10 }, { "priority": 10 })
+	var first_claim: Dictionary = authority.claim_planning_budget(String(first_request.get("requestId", "")), "test_plan")
+	var deferred: Dictionary = authority.claim_planning_budget(String(second_request.get("requestId", "")), "test_plan")
+	for _frame in range(NpcRouteAuthorityV2Script.PLANNING_STARVATION_FRAME_LIMIT):
+		authority.begin_frame()
+	authority.claim_planning_budget(String(first_request.get("requestId", "")), "test_plan")
+	var recovered: Dictionary = authority.claim_planning_budget(String(second_request.get("requestId", "")), "test_plan")
+	var stats: Dictionary = authority.stats()
+	var counters: Dictionary = stats.get("counters", {})
+	var passed := bool(first_claim.get("granted", false)) \
+		and not bool(deferred.get("granted", true)) \
+		and String(deferred.get("state", "")) == "pending_budget" \
+		and bool(recovered.get("granted", false)) \
+		and bool(recovered.get("starvationOverride", false)) \
+		and int(counters.get("planningBudgetDeferrals", 0)) >= 1 \
+		and int(counters.get("planningStarvationOverrides", 0)) >= 1 \
+		and int(counters.get("maxPlanningWaitFrames", 0)) >= NpcRouteAuthorityV2Script.PLANNING_STARVATION_FRAME_LIMIT
+	return outcome(
+		passed,
+		"first=%s deferred=%s recovered=%s counters=%s" % [JSON.stringify(authority_summary(first_claim)), JSON.stringify(authority_summary(deferred)), JSON.stringify(authority_summary(recovered)), JSON.stringify(counters)],
+		["planning_budget_bounded", "planning_starvation_override", "queue_wait_counted"],
+		{ "first": authority_summary(first_claim), "deferred": authority_summary(deferred), "recovered": authority_summary(recovered), "counters": counters }
+	)
+
+func test_route_authority_probe_budget_starvation_recovery(_mode: String) -> Dictionary:
+	var authority = NpcRouteAuthorityV2Script.new()
+	var probe := BudgetedCollisionProbe.new()
+	probe.required_samples = 3
+	authority.setup(null, null, probe)
+	authority.probe_sample_budget_per_frame = 1
+	var entry := { "id": "probe-starved" }
+	var request: Dictionary = authority.submit_request(entry, { "kind": "work", "priority": 10 }, { "priority": 10 })
+	var request_id := String(request.get("requestId", ""))
+	var route := authority_test_route(3)
+	var intent := { "kind": "work", "targetCell": Vector2i(3, 0) }
+	var first: Dictionary = authority.commit_route_after_probe(entry, request_id, route, intent, {})
+	authority.probe_samples_used_this_frame = authority.probe_sample_budget_per_frame
+	var deferred: Dictionary = authority.commit_route_after_probe(entry, request_id, route, intent, {})
+	for _frame in range(NpcRouteAuthorityV2Script.PROBE_STARVATION_FRAME_LIMIT):
+		authority.begin_frame()
+	var final := deferred
+	for _attempt in range(4):
+		authority.probe_samples_used_this_frame = authority.probe_sample_budget_per_frame
+		final = authority.commit_route_after_probe(entry, request_id, route, intent, {})
+		if String(final.get("state", "")) == "ready":
+			break
+		authority.begin_frame()
+	var stats: Dictionary = authority.stats()
+	var counters: Dictionary = stats.get("counters", {})
+	var passed := String(first.get("state", "")) == "probing" \
+		and String(deferred.get("state", "")) == "probing" \
+		and String(final.get("state", "")) == "ready" \
+		and int(counters.get("probeBudgetDeferrals", 0)) >= 1 \
+		and int(counters.get("probeStarvationOverrides", 0)) >= 1 \
+		and int(counters.get("maxProbeWaitFrames", 0)) >= NpcRouteAuthorityV2Script.PROBE_STARVATION_FRAME_LIMIT
+	return outcome(
+		passed,
+		"first=%s deferred=%s final=%s counters=%s" % [JSON.stringify(authority_summary(first)), JSON.stringify(authority_summary(deferred)), JSON.stringify(authority_summary(final)), JSON.stringify(counters)],
+		["probe_budget_bounded", "probe_starvation_override", "probe_wait_counted"],
+		{ "first": authority_summary(first), "deferred": authority_summary(deferred), "final": authority_summary(final), "counters": counters }
+	)
+
+func test_route_authority_phase10_counters(_mode: String) -> Dictionary:
+	var authority = NpcRouteAuthorityV2Script.new()
+	authority.setup(null, null, BudgetedCollisionProbe.new())
+	var arrived_entry := { "id": "counter-arrived" }
+	var dynamic_entry := { "id": "counter-dynamic" }
+	var static_entry := { "id": "counter-static" }
+	var repair_entry := { "id": "counter-repair" }
+	var arrived_request: Dictionary = authority.submit_request(arrived_entry, { "kind": "work" }, {})
+	var dynamic_request: Dictionary = authority.submit_request(dynamic_entry, { "kind": "work" }, {})
+	var static_request: Dictionary = authority.submit_request(static_entry, { "kind": "work" }, {})
+	var repair_request: Dictionary = authority.submit_request(repair_entry, { "kind": "work" }, {})
+	authority.report_arrived(String(arrived_request.get("requestId", "")), "test_arrived")
+	authority.report_blocked_dynamic(String(dynamic_request.get("requestId", "")), "test_dynamic")
+	authority.report_unreachable_static(String(static_request.get("requestId", "")), "test_static")
+	authority.report_route_repair(String(repair_request.get("requestId", "")), "test_route_repair", {})
+	authority.report_stuck(String(repair_request.get("requestId", "")), "test_stuck", {})
+	var counters: Dictionary = authority.stats().get("counters", {})
+	var passed := int(counters.get("successfulArrivals", 0)) >= 1 \
+		and int(counters.get("dynamicBlocks", 0)) >= 1 \
+		and int(counters.get("staticUnreachable", 0)) >= 1 \
+		and int(counters.get("routeRepairs", 0)) >= 1 \
+		and int(counters.get("stuckRecovery", 0)) >= 1
+	return outcome(
+		passed,
+		"counters=%s" % JSON.stringify(counters),
+		["successful_arrivals_counted", "dynamic_blocks_counted", "static_unreachable_counted", "route_repairs_counted", "stuck_recovery_counted"],
+		{ "counters": counters }
+	)
+
+func test_route_authority_stuck_revokes_moving_lease(_mode: String) -> Dictionary:
+	var probe := BudgetedCollisionProbe.new()
+	probe.required_samples = 1
+	var authority = NpcRouteAuthorityV2Script.new()
+	authority.setup(null, null, probe)
+	var entry := { "id": "stuck-authority-npc" }
+	var request: Dictionary = authority.submit_request(entry, { "kind": "home", "targetCell": Vector2i(1, 0) }, { "priority": 120 })
+	var request_id := String(request.get("requestId", ""))
+	var route := {
+		"ok": true,
+		"status": "reachable",
+		"reason": "route_found",
+		"source": "test_collision_route",
+		"cells": [Vector2i(0, 0), Vector2i(1, 0)],
+		"waypoints": [Vector3.ZERO, Vector3(CELL, 0.0, 0.0)],
+		"actions": {},
+		"targetCell": Vector2i(1, 0)
+	}
+	var ready: Dictionary = authority.commit_route_after_probe(entry, request_id, route, { "kind": "home", "targetCell": Vector2i(1, 0) })
+	var moving: Dictionary = authority.begin_moving(request_id, "test_move")
+	var stuck: Dictionary = authority.report_stuck(request_id, "stuck", { "stuckKind": "no_target_progress" })
+	var debug: Dictionary = authority.debug_for_entry(entry)
+	var passed := String(ready.get("state", "")) == "ready" \
+		and String(moving.get("state", "")) == "moving" \
+		and String(stuck.get("state", "")) == "blocked_dynamic" \
+		and String(stuck.get("reason", "")) == "stuck" \
+		and not bool(stuck.get("hasLease", true)) \
+		and String(debug.get("state", "")) == "blocked_dynamic" \
+		and String(entry.get("routeStatus", "")) == "blocked" \
+		and String(entry.get("routeReason", "")) == "stuck" \
+		and not entry.has("routeLease")
+	return outcome(
+		passed,
+		"ready=%s moving=%s stuck=%s debug=%s entry=%s" % [JSON.stringify(authority_summary(ready)), JSON.stringify(authority_summary(moving)), JSON.stringify(authority_summary(stuck)), JSON.stringify(authority_summary(debug)), JSON.stringify(entry)],
+		["stuck_transitions_to_blocked_dynamic", "stuck_revokes_lease", "entry_publishes_blocked_status"],
+		{ "ready": authority_summary(ready), "moving": authority_summary(moving), "stuck": authority_summary(stuck), "debug": authority_summary(debug), "entry": entry }
+	)
+
+func test_route_lease_executor_skips_passed_non_door_waypoint(_mode: String) -> Dictionary:
+	var authority := FakeLeaseAuthority.new()
+	var executor = NpcRouteLeaseExecutorScript.new()
+	executor.setup(authority, null, null)
+	var body := CharacterBody3D.new()
+	if runner != null:
+		runner.add_child(body)
+	body.global_position = Vector3(0.0, 0.0, -0.30)
+	var entry := {
+		"id": "lease-skip-npc",
+		"body": body
+	}
+	var lease := {
+		"state": "ready",
+		"cells": [Vector2i(0, 0), Vector2i(0, -1)],
+		"waypoints": [Vector3(0.0, 0.0, 0.0), Vector3(0.0, 0.0, -CELL)],
+		"actions": {},
+		"probeCertificate": { "ok": true, "authoritative": true }
+	}
+	var result: Dictionary = executor.execute(entry, "lease-skip-request", lease, 1.0 / 60.0, {
+		"speed": 2.6,
+		"waypointRadius": 0.18
+	})
+	var skip_completed := authority.completed_segments.duplicate()
+	var skipped_non_door := authority.completed_segments.has(0) \
+		and int(entry.get("_v2LeaseExecutorWaypointIndex", 0)) >= 1 \
+		and body.global_position.z < -0.30
+	executor = NpcRouteLeaseExecutorScript.new()
+	authority = FakeLeaseAuthority.new()
+	executor.setup(authority, null, null)
+	var door := Node3D.new()
+	if runner != null:
+		runner.add_child(door)
+	door.global_position = Vector3.ZERO
+	body = CharacterBody3D.new()
+	if runner != null:
+		runner.add_child(body)
+	body.global_position = Vector3(0.0, 0.0, -0.30)
+	entry = {
+		"id": "lease-door-npc",
+		"body": body
+	}
+	var door_lease := {
+		"state": "ready",
+		"cells": [Vector2i(0, 0), Vector2i(0, -1)],
+		"waypoints": [Vector3(0.0, 0.0, 0.0), Vector3(0.0, 0.0, -CELL)],
+		"actions": {
+			"0,0": {
+				"kind": "door",
+				"enabled": true,
+				"door": door,
+				"entryPosition": Vector3.ZERO
+			}
+		},
+		"probeCertificate": { "ok": true, "authoritative": true }
+	}
+	var door_result: Dictionary = executor.execute(entry, "lease-door-request", door_lease, 1.0 / 60.0, {
+		"speed": 2.6,
+		"waypointRadius": 0.18
+	})
+	var preserved_door_action := authority.completed_segments.is_empty() \
+		and int(entry.get("_v2LeaseExecutorWaypointIndex", 0)) == 0 \
+		and String(door_result.get("reason", "")) == "missing_door_traversal_service"
+	var passed := skipped_non_door and preserved_door_action
+	return outcome(
+		passed,
+		"skip=%s result=%s completed=%s doorResult=%s doorCompleted=%s" % [str(skipped_non_door), JSON.stringify(result), JSON.stringify(skip_completed), JSON.stringify(door_result), JSON.stringify(authority.completed_segments)],
+		["lease_executor_skips_passed_non_door_waypoint", "lease_executor_preserves_door_action_waypoint"],
+		{ "skipResult": result, "doorResult": door_result, "passedNonDoor": skipped_non_door, "preservedDoor": preserved_door_action }
+	)
+
+func test_route_lease_executor_reports_no_target_progress(_mode: String) -> Dictionary:
+	var authority := FakeLeaseAuthority.new()
+	var executor = NpcRouteLeaseExecutorScript.new()
+	executor.setup(authority, null, null)
+	executor.motor = FakeNoProgressMotor.new()
+	var body := CharacterBody3D.new()
+	if runner != null:
+		runner.add_child(body)
+	body.global_position = Vector3.ZERO
+	var entry := {
+		"id": "lease-no-progress-npc",
+		"body": body
+	}
+	var lease := {
+		"state": "ready",
+		"cells": [Vector2i(0, 0), Vector2i(4, 0)],
+		"waypoints": [Vector3(CELL * 4.0, 0.0, 0.0)],
+		"actions": {},
+		"probeCertificate": { "ok": true, "authoritative": true }
+	}
+	var result := {}
+	for _i in range(12):
+		result = executor.execute(entry, "lease-no-progress-request", lease, 0.10, {
+			"speed": 2.6,
+			"waypointRadius": 0.18
+		})
+		if String(result.get("reason", "")) == "stuck":
+			break
+	var details: Dictionary = result.get("details", {}) if result.get("details", {}) is Dictionary else {}
+	var passed := String(result.get("reason", "")) == "stuck" \
+		and String(details.get("stuckKind", "")) == "no_target_progress" \
+		and not authority.stuck_reports.is_empty() \
+		and int(entry.get("_v2LeaseExecutorWaypointIndex", 0)) == 0
+	return outcome(
+		passed,
+		"result=%s stuckReports=%s position=%s" % [JSON.stringify(result), JSON.stringify(authority.stuck_reports), str(body.global_position)],
+		["lease_executor_reports_slide_without_target_progress", "authority_receives_repairable_stuck_event"],
+		{ "result": result, "stuckReports": authority.stuck_reports, "position": body.global_position }
+	)
+
 func test_route_partial_explicit_only(_mode: String) -> Dictionary:
 	var service = route_service_from_surfaces({
 		"0,0": [
@@ -356,8 +827,8 @@ func test_route_partial_explicit_only(_mode: String) -> Dictionary:
 	})
 	var blocked = route_plan(service, route_span_key(Vector3i(0, 0, 0)), { "kind": "exact_span", "spanKey": route_span_key(Vector3i(5, 0, 0)) }, false)
 	var partial = route_plan(service, route_span_key(Vector3i(0, 0, 0)), { "kind": "exact_span", "spanKey": route_span_key(Vector3i(5, 0, 0)) }, true)
-	var passed = blocked.get("status") == NpcEnumsScript.ROUTE_STATUS_UNREACHABLE and partial.get("status") == NpcEnumsScript.ROUTE_STATUS_PARTIAL
-	return outcome(passed, "blocked=%s partial=%s" % [JSON.stringify(route_summary(blocked)), JSON.stringify(route_summary(partial))], ["partial_requires_allow_partial", "partial_not_arrival"], { "blocked": route_summary(blocked), "partial": route_summary(partial) })
+	var passed = blocked.get("status") == NpcEnumsScript.ROUTE_STATUS_UNREACHABLE and partial.get("status") == NpcEnumsScript.ROUTE_STATUS_UNREACHABLE
+	return outcome(passed, "blocked=%s partial=%s" % [JSON.stringify(route_summary(blocked)), JSON.stringify(route_summary(partial))], ["partial_endpoint_rejected", "partial_not_arrival"], { "blocked": route_summary(blocked), "partial": route_summary(partial) })
 
 func test_route_unreachable_terminal_reason(_mode: String) -> Dictionary:
 	var service = route_service_from_surfaces({
@@ -594,15 +1065,15 @@ func test_route_generated_fallback_open_terrain_only(_mode: String) -> Dictionar
 		and not bool(results["doorAdjacent"]) \
 		and not bool(results["longRoute"]) \
 		and not bool(results["explicitAction"]) \
-		and bool(results["openForage"]) \
-		and bool(results["openForagePrebudget"]) \
+		and not bool(results["openForage"]) \
+		and not bool(results["openForagePrebudget"]) \
 		and not bool(results["plannerUnflagged"]) \
-		and bool(results["plannerFlaggedOpen"]) \
+		and not bool(results["plannerFlaggedOpen"]) \
 		and not bool(results["plannerFlaggedHome"])
 	return outcome(
 		passed,
 		"generatedFallbackGuard=%s" % JSON.stringify(results),
-		["home_route_fallback_disabled", "inside_home_fallback_disabled", "door_adjacent_fallback_disabled", "open_terrain_forage_fallback_enabled"],
+		["home_route_fallback_disabled", "inside_home_fallback_disabled", "door_adjacent_fallback_disabled", "open_terrain_forage_fallback_disabled"],
 		{ "results": results }
 	)
 
@@ -885,6 +1356,84 @@ func test_route_home_collision_lattice_exact_detour(_mode: String) -> Dictionary
 		{ "route": navmesh_route_dictionary_summary(route), "failedRoute": failed_route, "cells": vec2i_array_summary(cells), "crossesBlocked": crosses_blocked }
 	)
 
+func test_route_scripted_collision_lattice_exact_detour(_mode: String) -> Dictionary:
+	var blocks := []
+	var blocked_lookup := {}
+	var setup := collision_adapter_with_blocks([])
+	var main := setup.get("main") as Node
+	for z in range(1, 5):
+		var cell := Vector2i(0, z)
+		var block := collision_block(cell)
+		blocks.append(block)
+		blocked_lookup[cell] = true
+		if main != null:
+			main.add_child(block)
+			var live_blocks: Dictionary = main.get("blocks")
+			live_blocks[Vector3i(cell.x, 0, cell.y)] = block
+	setup["blocks"] = blocks
+	var adapter = setup.get("adapter")
+	adapter.rebuild_static_cells()
+	var body := setup.get("body") as Node3D
+	body.position = Vector3.ZERO
+	body.global_position = Vector3.ZERO
+	var target_cell := Vector2i(0, 5)
+	var target_position: Vector3 = adapter.cell_position(target_cell)
+	var entry: Dictionary = setup.get("entry", {})
+	entry["id"] = "scripted-lattice-detour"
+	entry["body"] = body
+	entry["townCenter"] = Vector2i.ZERO
+	entry["townRadius"] = 128
+	var failed_route := {
+		"ok": false,
+		"status": "blocked",
+		"reason": "path_crosses_static_collision",
+		"source": "navmesh",
+		"cells": [],
+		"waypoints": [],
+		"actions": {},
+		"targetCell": target_cell,
+		"fallbackCell": Vector2i(999999, 999999)
+	}
+	var intent := {
+		"kind": "scripted",
+		"movingHome": false,
+		"allowOutside": true,
+		"strictArrival": true,
+		"target": target_position,
+		"targetCell": target_cell,
+		"arrivalRadius": CELL * 0.5,
+		"priority": 220
+	}
+	var low_priority_intent := intent.duplicate(true)
+	low_priority_intent["priority"] = 90
+	var coordinator = NpcRouteCoordinatorAdapterScript.new()
+	coordinator.world = adapter
+	var should_scripted := coordinator._should_try_exact_collision_lattice_route(entry, failed_route, intent)
+	var should_low_priority := coordinator._should_try_exact_collision_lattice_route(entry, failed_route, low_priority_intent)
+	var route: Dictionary = coordinator._plan_exact_collision_lattice_route(entry, intent, failed_route, "exact_collision_lattice")
+	var cells: Array = route.get("cells", []) if route.get("cells", []) is Array else []
+	var crosses_blocked := false
+	for cell_value in cells:
+		if cell_value is Vector2i and blocked_lookup.has(cell_value):
+			crosses_blocked = true
+	var passed: bool = should_scripted \
+		and not should_low_priority \
+		and bool(route.get("ok", false)) \
+		and String(route.get("status", "")) == "routed" \
+		and String(route.get("source", "")) == "collision_lattice" \
+		and String(route.get("reason", "")) == "exact_collision_lattice" \
+		and route.get("fallbackCell", Vector2i(999999, 999999)) == target_cell \
+		and cells.has(target_cell) \
+		and not crosses_blocked \
+		and not bool(route.get("generatedCellBridge", false))
+	free_collision_setup(setup)
+	return outcome(
+		passed,
+		"shouldScripted=%s shouldLow=%s route=%s crossesBlocked=%s" % [str(should_scripted), str(should_low_priority), JSON.stringify(navmesh_route_dictionary_summary(route)), str(crosses_blocked)],
+		["scripted_collision_lattice_exact_target", "scripted_collision_lattice_detours_static_collision", "scripted_collision_lattice_not_generated_bridge", "scripted_collision_lattice_priority_gated"],
+		{ "route": navmesh_route_dictionary_summary(route), "cells": vec2i_array_summary(cells), "shouldScripted": should_scripted, "shouldLowPriority": should_low_priority, "crossesBlocked": crosses_blocked }
+	)
+
 func test_route_home_collision_lattice_recenters_off_cell_start(_mode: String) -> Dictionary:
 	var side_block := collision_block(Vector2i(-1, 0), "stoneBlock")
 	var setup := collision_adapter_with_blocks([side_block])
@@ -1006,29 +1555,13 @@ func test_route_home_egress_uses_exact_collision_lattice(_mode: String) -> Dicti
 	coordinator.world = adapter
 	var should_exact := coordinator._should_try_exact_home_collision_lattice_route(entry, failed_route, intent)
 	var open_fallback_allowed := coordinator._should_try_generated_cell_job_route(entry, intent)
-	var route: Dictionary = coordinator._plan_exact_home_collision_lattice_route(entry, intent, failed_route)
-	var cells: Array = route.get("cells", []) if route.get("cells", []) is Array else []
-	var actions: Dictionary = route.get("actions", {}) if route.get("actions", {}) is Dictionary else {}
-	var debug: Dictionary = route.get("exactCollisionLatticeRoute", {}) if route.get("exactCollisionLatticeRoute", {}) is Dictionary else {}
-	var has_door_action := false
-	for action_value in actions.values():
-		if action_value is Dictionary and String((action_value as Dictionary).get("kind", "")) == "door":
-			has_door_action = true
-	var passed := should_exact \
-		and not open_fallback_allowed \
-		and bool(route.get("ok", false)) \
-		and String(route.get("source", "")) == "collision_lattice" \
-		and cells.has(door_cell) \
-		and cells.has(porch_cell) \
-		and has_door_action \
-		and bool(debug.get("physicalHomeEgress", false)) \
-		and not bool(route.get("generatedCellBridge", false))
+	var passed := not should_exact and not open_fallback_allowed
 	free_collision_setup(setup)
 	return outcome(
 		passed,
-		"shouldExact=%s openFallback=%s route=%s actions=%s debug=%s" % [str(should_exact), str(open_fallback_allowed), JSON.stringify(navmesh_route_dictionary_summary(route)), JSON.stringify(actions), JSON.stringify(debug)],
-		["home_egress_classified_as_structure_route", "home_egress_uses_door_action", "home_egress_not_generated_bridge"],
-		{ "route": navmesh_route_dictionary_summary(route), "cells": vec2i_array_summary(cells), "actions": actions, "debug": debug }
+		"shouldExact=%s openFallback=%s" % [str(should_exact), str(open_fallback_allowed)],
+		["home_egress_rejects_exact_collision_lattice", "home_egress_not_generated_bridge"],
+		{ "shouldExact": should_exact, "openFallback": open_fallback_allowed }
 	)
 
 func test_route_collision_door_requires_portal_axis(_mode: String) -> Dictionary:
@@ -1116,6 +1649,231 @@ func test_route_scripted_target_expands_navmesh_tiles(_mode: String) -> Dictiona
 		"targetTile=%s startTile=%s keys=%s" % [target_tile, start_tile, JSON.stringify(keys)],
 		["scripted_target_leash_included_in_navmesh_publication", "start_and_target_tiles_published"],
 		{ "targetTile": target_tile, "startTile": start_tile, "keys": keys }
+	)
+
+func test_route_substrate_reachable_generated_town_fixture(_mode: String) -> Dictionary:
+	var fixture := GeneratedTownRouteSubstrateFixtureWorld.new()
+	fixture.doors[Vector2i(2, 0)] = { "portalId": "fixture:home-door", "doorId": "home-door" }
+	var substrate = CollisionBackedRouteSubstrateScript.new()
+	substrate.setup(fixture)
+	var entry := fixture.generated_town_entry()
+	var poses: Dictionary = substrate.candidate_poses_for_target(entry, {
+		"interiorMinCell": Vector2i(4, 0),
+		"interiorMaxCell": Vector2i(4, 0)
+	}, "home_interior", { "allowOutside": true })
+	var route: Dictionary = substrate.plan_route(entry, Vector2i(0, 0), [Vector2i(4, 0)], {
+		"allowOutside": true,
+		"maxExpansions": 64
+	})
+	var proof: Dictionary = route.get("proof", {})
+	var cells: Array = route.get("cells", [])
+	var passed := bool(route.get("ok", false)) \
+		and String(route.get("classification", "")) == "reachable" \
+		and cells.has(Vector2i(2, 0)) \
+		and bool(proof.get("collisionBacked", false)) \
+		and bool(proof.get("generatedWorldInformed", false)) \
+		and (proof.get("doorEdges", []) as Array).size() >= 1 \
+		and bool(poses.get("ok", false))
+	return outcome(
+		passed,
+		"route=%s poses=%s" % [JSON.stringify(substrate_route_summary(route)), JSON.stringify(substrate_pose_summary(poses))],
+		["collision_backed_route_found", "door_cell_preserved_as_route_evidence", "semantic_candidate_pose_validated"],
+		{ "route": substrate_route_summary(route), "poses": substrate_pose_summary(poses) }
+	)
+
+func test_route_substrate_uses_actual_start_waypoint(_mode: String) -> Dictionary:
+	var fixture := GeneratedTownRouteSubstrateFixtureWorld.new()
+	var substrate = CollisionBackedRouteSubstrateScript.new()
+	substrate.setup(fixture)
+	var entry := fixture.generated_town_entry()
+	var start_cell := Vector2i(0, 0)
+	var actual_start := fixture.cell_position(start_cell) + Vector3(0.33, 0.0, 0.18)
+	var route: Dictionary = substrate.plan_route(entry, start_cell, [Vector2i(4, 0)], {
+		"allowOutside": true,
+		"startPosition": actual_start,
+		"maxExpansions": 64
+	})
+	var waypoints: Array = route.get("waypoints", []) if route.get("waypoints", []) is Array else []
+	var first: Vector3 = waypoints[0] if waypoints.size() > 0 and waypoints[0] is Vector3 else Vector3(INF, INF, INF)
+	var second: Vector3 = waypoints[1] if waypoints.size() > 1 and waypoints[1] is Vector3 else Vector3(INF, INF, INF)
+	var passed := bool(route.get("ok", false)) \
+		and first.distance_to(actual_start) <= 0.001 \
+		and second.distance_to(fixture.cell_position(Vector2i(1, 0))) <= 0.001
+	return outcome(
+		passed,
+		"first=%s actual=%s second=%s route=%s" % [str(first), str(actual_start), str(second), JSON.stringify(substrate_route_summary(route))],
+		["substrate_route_starts_at_actor_pose", "substrate_second_waypoint_keeps_cell_route"],
+		{ "route": substrate_route_summary(route), "first": first, "actualStart": actual_start, "second": second }
+	)
+
+func test_route_substrate_home_departure_clearance_exact_goal(_mode: String) -> Dictionary:
+	var fixture := GeneratedTownRouteSubstrateFixtureWorld.new()
+	var substrate = CollisionBackedRouteSubstrateScript.new()
+	substrate.setup(fixture)
+	var entry := fixture.generated_town_entry()
+	var porch_cell: Vector2i = entry.get("porchCell", Vector2i(1, 0))
+	var clearance_cell := porch_cell + Vector2i(2, 0)
+	var poses: Dictionary = substrate.candidate_poses_for_target(entry, {
+		"cell": clearance_cell,
+		"position": fixture.cell_position(clearance_cell),
+		"porchCell": porch_cell
+	}, "home_departure_clearance", { "allowOutside": true })
+	var candidate_cells: Array = []
+	for candidate_value in poses.get("candidates", []):
+		if candidate_value is Dictionary:
+			candidate_cells.append((candidate_value as Dictionary).get("cell", Vector2i(999999, 999999)))
+	var route: Dictionary = substrate.plan_route(entry, porch_cell, candidate_cells, {
+		"allowOutside": true,
+		"semanticKind": "home_departure_clearance",
+		"maxExpansions": 64
+	})
+	var route_cells: Array = route.get("cells", []) if route.get("cells", []) is Array else []
+	var passed: bool = bool(poses.get("ok", false)) \
+		and candidate_cells.size() == 1 \
+		and candidate_cells[0] == clearance_cell \
+		and bool(route.get("ok", false)) \
+		and String(route.get("reason", "")) != "already_at_goal" \
+		and not route_cells.is_empty() \
+		and route_cells[route_cells.size() - 1] == clearance_cell
+	return outcome(
+		passed,
+		"clearance=%s poses=%s route=%s" % [str(clearance_cell), JSON.stringify(substrate_pose_summary(poses)), JSON.stringify(substrate_route_summary(route))],
+		["departure_clearance_requires_requested_cell", "porch_is_not_clearance_arrival", "clearance_route_collision_backed"],
+		{ "poses": substrate_pose_summary(poses), "route": substrate_route_summary(route), "candidateCells": vec2i_array_summary(candidate_cells) }
+	)
+
+func test_route_substrate_forage_search_anchor_exact_outside_goal(_mode: String) -> Dictionary:
+	var fixture := GeneratedTownRouteSubstrateFixtureWorld.new()
+	fixture.add_standable_rect(Vector2i(0, -1), Vector2i(9, 1))
+	var substrate = CollisionBackedRouteSubstrateScript.new()
+	substrate.setup(fixture)
+	var entry := fixture.generated_town_entry()
+	entry["job"] = "forage"
+	entry["townCenter"] = Vector2i(0, 0)
+	entry["townRadius"] = 2
+	var target_cell := Vector2i(7, 0)
+	var poses: Dictionary = substrate.candidate_poses_for_target(entry, {
+		"cell": target_cell,
+		"position": fixture.cell_position(target_cell),
+		"workMinCell": Vector2i(0, -1),
+		"workMaxCell": Vector2i(9, 1)
+	}, "forage_search_anchor", { "allowOutside": true })
+	var candidate_cells: Array = []
+	for candidate_value in poses.get("candidates", []):
+		if candidate_value is Dictionary:
+			candidate_cells.append((candidate_value as Dictionary).get("cell", Vector2i(999999, 999999)))
+	var route: Dictionary = substrate.plan_route(entry, Vector2i(1, 0), candidate_cells, {
+		"allowOutside": true,
+		"semanticKind": "forage_search_anchor",
+		"maxExpansions": 64
+	})
+	var town_route: Dictionary = substrate.plan_route(entry, Vector2i(1, 0), [Vector2i(1, 0)], {
+		"allowOutside": true,
+		"semanticKind": "forage_search_anchor",
+		"maxExpansions": 64
+	})
+	var route_cells: Array = route.get("cells", []) if route.get("cells", []) is Array else []
+	var rejected_goals: Array = town_route.get("proof", {}).get("rejectedGoals", []) if town_route.get("proof", {}) is Dictionary else []
+	var town_reject_reason := ""
+	if not rejected_goals.is_empty() and rejected_goals[0] is Dictionary:
+		town_reject_reason = String((rejected_goals[0] as Dictionary).get("reason", ""))
+	var passed: bool = bool(poses.get("ok", false)) \
+		and candidate_cells.size() == 1 \
+		and candidate_cells[0] == target_cell \
+		and bool(route.get("ok", false)) \
+		and not route_cells.is_empty() \
+		and route_cells[route_cells.size() - 1] == target_cell \
+		and not bool(town_route.get("ok", true)) \
+		and town_reject_reason == "forage_search_anchor_inside_town"
+	return outcome(
+		passed,
+		"target=%s poses=%s route=%s townRoute=%s" % [str(target_cell), JSON.stringify(substrate_pose_summary(poses)), JSON.stringify(substrate_route_summary(route)), JSON.stringify(substrate_route_summary(town_route))],
+		["forage_search_anchor_requires_exact_target_cell", "forage_search_anchor_rejects_inside_town_goal", "forage_search_route_collision_backed"],
+		{ "poses": substrate_pose_summary(poses), "route": substrate_route_summary(route), "townRoute": substrate_route_summary(town_route), "candidateCells": vec2i_array_summary(candidate_cells), "townRejectReason": town_reject_reason }
+	)
+
+func test_route_substrate_blocked_generated_town_fixture(_mode: String) -> Dictionary:
+	var fixture := GeneratedTownRouteSubstrateFixtureWorld.new()
+	for z in range(-2, 3):
+		fixture.static_collision[Vector2i(2, z)] = {
+			"id": "fixture-wall-%d" % z,
+			"cell": Vector2i(2, z),
+			"blockType": "generated_house_wall",
+			"minX": float(2) * CELL - 0.6,
+			"maxX": float(2) * CELL + 0.6,
+			"minZ": float(z) * CELL - 0.6,
+			"maxZ": float(z) * CELL + 0.6
+		}
+	var substrate = CollisionBackedRouteSubstrateScript.new()
+	substrate.setup(fixture)
+	var entry := fixture.generated_town_entry()
+	var route: Dictionary = substrate.plan_route(entry, Vector2i(0, 0), [Vector2i(4, 0)], {
+		"allowOutside": true,
+		"maxExpansions": 128
+	})
+	var proof: Dictionary = route.get("proof", {})
+	var blocked_records: Array = proof.get("blocked", [])
+	var saw_collision := false
+	for record in blocked_records:
+		if record is Dictionary and String((record as Dictionary).get("reason", "")) == "blocked_static_collision":
+			saw_collision = true
+			break
+	var passed := not bool(route.get("ok", true)) \
+		and String(route.get("classification", "")) == "unreachable_static" \
+		and saw_collision \
+		and (route.get("cells", []) as Array).is_empty()
+	return outcome(
+		passed,
+		"route=%s" % JSON.stringify(substrate_route_summary(route)),
+		["static_collision_blocks_route", "no_partial_endpoint_success", "terminal_unreachable_static"],
+		{ "route": substrate_route_summary(route), "blockedSample": blocked_records.slice(0, mini(4, blocked_records.size())) }
+	)
+
+func test_route_substrate_invalid_goal_generated_town_fixture(_mode: String) -> Dictionary:
+	var fixture := GeneratedTownRouteSubstrateFixtureWorld.new()
+	var substrate = CollisionBackedRouteSubstrateScript.new()
+	substrate.setup(fixture)
+	var entry := fixture.generated_town_entry()
+	var route: Dictionary = substrate.plan_route(entry, Vector2i(0, 0), [Vector2i(99, 99)], {
+		"allowOutside": true,
+		"maxExpansions": 64
+	})
+	var proof: Dictionary = route.get("proof", {})
+	var passed := not bool(route.get("ok", true)) \
+		and String(route.get("classification", "")) == "invalid_goal" \
+		and String(route.get("reason", "")) == "no_valid_goal_cell" \
+		and (proof.get("rejectedGoals", []) as Array).size() == 1
+	return outcome(
+		passed,
+		"route=%s" % JSON.stringify(substrate_route_summary(route)),
+		["invalid_goal_not_routed", "goal_must_be_standable", "no_partial_endpoint_success"],
+		{ "route": substrate_route_summary(route), "rejectedGoals": proof.get("rejectedGoals", []) }
+	)
+
+func test_route_substrate_pending_generated_town_fixture(_mode: String) -> Dictionary:
+	var fixture := GeneratedTownRouteSubstrateFixtureWorld.new()
+	fixture.pending_nav_data = true
+	var substrate = CollisionBackedRouteSubstrateScript.new()
+	substrate.setup(fixture)
+	var entry := fixture.generated_town_entry()
+	var pending_nav: Dictionary = substrate.plan_route(entry, Vector2i(0, 0), [Vector2i(4, 0)], {
+		"allowOutside": true,
+		"maxExpansions": 64
+	})
+	fixture.pending_nav_data = false
+	var pending_budget: Dictionary = substrate.plan_route(entry, Vector2i(0, 0), [Vector2i(4, 0)], {
+		"allowOutside": true,
+		"maxExpansions": 1
+	})
+	var passed := not bool(pending_nav.get("ok", true)) \
+		and String(pending_nav.get("classification", "")) == "pending_nav_data" \
+		and not bool(pending_budget.get("ok", true)) \
+		and String(pending_budget.get("classification", "")) == "pending_budget"
+	return outcome(
+		passed,
+		"pendingNav=%s pendingBudget=%s" % [JSON.stringify(substrate_route_summary(pending_nav)), JSON.stringify(substrate_route_summary(pending_budget))],
+		["pending_nav_data_not_unreachable", "pending_budget_not_unreachable", "target_not_poisoned_by_missing_budget"],
+		{ "pendingNav": substrate_route_summary(pending_nav), "pendingBudget": substrate_route_summary(pending_budget) }
 	)
 
 func collision_adapter_with_blocks(block_nodes: Array) -> Dictionary:
@@ -1229,6 +1987,66 @@ func navmesh_route_summary(route: Dictionary) -> Dictionary:
 		"pointCount": int(route.get("pointCount", 0)),
 		"distance": snappedf(float(route.get("distance", 0.0)), 0.001),
 		"snapshotRevision": String(route.get("snapshotRevision", ""))
+	}
+
+func substrate_route_summary(route: Dictionary) -> Dictionary:
+	var proof: Dictionary = route.get("proof", {})
+	return {
+		"ok": bool(route.get("ok", false)),
+		"status": String(route.get("status", "")),
+		"classification": String(route.get("classification", "")),
+		"reason": String(route.get("reason", "")),
+		"source": String(route.get("source", "")),
+		"cellCount": (route.get("cells", []) as Array).size(),
+		"visitedCount": (route.get("visited", []) as Array).size(),
+		"collisionBacked": bool(proof.get("collisionBacked", false)),
+		"generatedWorldInformed": bool(proof.get("generatedWorldInformed", false)),
+		"doorEdgeCount": (proof.get("doorEdges", []) as Array).size(),
+		"blockedCount": (proof.get("blocked", []) as Array).size(),
+		"expansions": int(proof.get("expansions", 0))
+	}
+
+func substrate_pose_summary(poses: Dictionary) -> Dictionary:
+	return {
+		"ok": bool(poses.get("ok", false)),
+		"classification": String(poses.get("classification", "")),
+		"reason": String(poses.get("reason", "")),
+		"candidateCount": (poses.get("candidates", []) as Array).size(),
+		"rejectedCount": (poses.get("rejected", []) as Array).size(),
+		"collisionBacked": bool(poses.get("collisionBacked", false)),
+		"generatedWorldInformed": bool(poses.get("generatedWorldInformed", false))
+	}
+
+func authority_test_route(point_count: int) -> Dictionary:
+	var waypoints: Array = []
+	var cells: Array = []
+	for index in range(maxi(1, point_count)):
+		waypoints.append(Vector3(float(index + 1) * CELL, 0.0, 0.0))
+		cells.append(Vector2i(index + 1, 0))
+	return {
+		"ok": true,
+		"status": "reachable",
+		"classification": "reachable",
+		"reason": "test_route",
+		"source": "test_authority_route",
+		"waypoints": waypoints,
+		"cells": cells,
+		"actions": {},
+		"targetCell": cells[cells.size() - 1],
+		"snapshotRevision": "test"
+	}
+
+func authority_summary(summary: Dictionary) -> Dictionary:
+	return {
+		"ok": bool(summary.get("ok", false)),
+		"granted": bool(summary.get("granted", false)),
+		"state": String(summary.get("state", "")),
+		"reason": String(summary.get("reason", "")),
+		"requestId": String(summary.get("requestId", "")),
+		"planningWaitFrames": int(summary.get("planningWaitFrames", 0)),
+		"pendingProbeFrames": int(summary.get("pendingProbeFrames", 0)),
+		"hasLease": bool(summary.get("hasLease", false)),
+		"starvationOverride": bool(summary.get("starvationOverride", false))
 	}
 
 func navmesh_route_dictionary_summary(route: Dictionary) -> Dictionary:

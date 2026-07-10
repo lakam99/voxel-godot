@@ -5,7 +5,9 @@ const ARCHITECTURE_VERSION := "phase13_authoritative_stack"
 const NPC_MOVEMENT_STACK := "character_body_route_motor"
 const NPC_NAV_ENABLE_STARTUP_TILE_PRIMING := true
 const NPC_NAV_ENABLE_ADAPTIVE_ROUTE_BUDGET := true
-const NPC_NAV_ENABLE_SAFE_GENERATED_OPEN_TERRAIN_FALLBACK := true
+# Phase 9: generated-cell bridge routes are diagnostic-only. Production routes
+# must come from the collision-backed authority, not a generated-cell fallback.
+const NPC_NAV_ENABLE_SAFE_GENERATED_OPEN_TERRAIN_FALLBACK := false
 const NPC_NAV_ENABLE_ROUTE_TICKET_PIPELINE := true
 const NPC_NAV_DEBUG_ROUTE_REASONS := true
 

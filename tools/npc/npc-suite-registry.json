@@ -62,7 +62,7 @@
       "description": "Phase 07 predictive local avoidance and stable corridor follower tests; not live gameplay acceptance",
       "command": ".\\tools\\npc\\run-npc-avoidance-tests.ps1",
       "defaultArgs": ["-TimeMode", "Both"],
-      "evidenceLevel": "synthetic",
+      "evidenceLevel": "contract",
       "notAcceptanceReason": "Uses focused avoidance scenarios outside the full gameplay loop."
     },
     {
@@ -86,7 +86,7 @@
       "description": "Phase 10 smart-object interaction, job, and guard service tests; not live gameplay acceptance",
       "command": ".\\tools\\npc\\run-npc-interaction-tests.ps1",
       "defaultArgs": ["-TimeMode", "Both"],
-      "evidenceLevel": "synthetic",
+      "evidenceLevel": "contract",
       "notAcceptanceReason": "Uses focused smart-object scenarios outside full generated-world gameplay."
     },
     {
@@ -94,7 +94,7 @@
       "description": "Phase 11 streaming, abstract simulation, save migration, and lifecycle service tests; not live gameplay acceptance",
       "command": ".\\tools\\npc\\run-npc-streaming-save-tests.ps1",
       "defaultArgs": ["-TimeMode", "Both"],
-      "evidenceLevel": "synthetic",
+      "evidenceLevel": "contract",
       "notAcceptanceReason": "Validates persistence and lifecycle contracts without proving live path traversal."
     },
     {

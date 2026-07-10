@@ -52,6 +52,8 @@ var door_state_revision := 0
 var last_event_revision := 0
 var nav_static_rebuild_count := 0
 var nav_dynamic_update_count := 0
+var dynamic_occupant_cache_frame_key := ""
+var dynamic_occupant_cache := {}
 
 func setup(system_node, main_node) -> void:
     system = system_node
@@ -73,6 +75,8 @@ func invalidate() -> void:
     cached_prop_cell_by_object_id = {}
     cached_prop_collision_records_by_object_id = {}
     cached_private_interior_records_revision = -1
+    dynamic_occupant_cache_frame_key = ""
+    dynamic_occupant_cache = {}
     cached_private_interior_records = []
     cached_tutorial_starter_bounds_key = ""
     cached_tutorial_starter_bounds = {}
@@ -947,12 +951,23 @@ func block_xz_blocks_npc(cell: Vector2i, body: Node) -> bool:
     return block_center_y <= clearance_center_y
 
 func live_occupant_cells(entry: Dictionary) -> Dictionary:
-    var dynamic := {}
+    var dynamic := _live_occupant_cells_for_frame().duplicate()
     var self_body := entry.get("body") as Node3D
+    if self_body != null and is_instance_valid(self_body):
+        var self_cell := world_cell(self_body.global_position)
+        if dynamic.get(self_cell) == self_body:
+            dynamic.erase(self_cell)
+    return dynamic
+
+func _live_occupant_cells_for_frame() -> Dictionary:
+    var frame_key := "%d:%d" % [Engine.get_process_frames(), Engine.get_physics_frames()]
+    if dynamic_occupant_cache_frame_key == frame_key:
+        return dynamic_occupant_cache
+    var dynamic := {}
     if system != null:
         for other_entry in system.npcs:
             var other_body := other_entry.get("body") as Node3D
-            if other_body == null or not is_instance_valid(other_body) or other_body == self_body:
+            if other_body == null or not is_instance_valid(other_body):
                 continue
             if not dynamic_actor_blocks_navigation(other_body):
                 continue
@@ -976,6 +991,8 @@ func live_occupant_cells(entry: Dictionary) -> Dictionary:
         var player := main.get("player") as Node3D
         if dynamic_actor_blocks_navigation(player):
             dynamic[world_cell(player.global_position)] = player
+    dynamic_occupant_cache_frame_key = frame_key
+    dynamic_occupant_cache = dynamic
     return dynamic
 
 func dynamic_actor_blocks_navigation(actor: Node3D) -> bool:

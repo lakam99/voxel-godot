@@ -2,6 +2,8 @@ extends Node
 
 const MENU_SCENE: PackedScene = preload("res://scenes/MainMenu.tscn")
 const HomeInteriorServiceScript := preload("res://scripts/npc_ai/behavior/HomeInteriorService.gd")
+const CharacterMotorProfileScript := preload("res://scripts/npc_ai/contracts/CharacterMotorProfile.gd")
+const LivePlaytestPlayerNavigatorScript := preload("res://scripts/testing/player/LivePlaytestPlayerNavigator.gd")
 const TEST_ID := "npc_tutorial_real_knock_repair_sleep_morning_foragers"
 const CELL := 1.35
 const STARTUP_FRAMES := 80
@@ -20,6 +22,10 @@ const TUTORIAL_REPAIR_RADIUS_CELLS := 25
 const FINAL_RESCUE_TIMEOUT_SECONDS := 190.0
 const FINAL_RESCUE_MONSTER_COUNT := 6
 const FINAL_RESCUE_RETURN_STALL_SAMPLES := 80
+const PLAYER_ROUTE_STUCK_FRAMES := 120
+const PLAYER_ROUTE_PROGRESS_EPSILON := 0.16
+const PLAYER_ROUTE_STUCK_SPEED := 0.35
+const PLAYER_ROUTE_AUTHORITY_PLAN_TIMEOUT := 12.0
 
 var main: Node3D
 var player: CharacterBody3D
@@ -49,6 +55,7 @@ var final_rescue_timeline: Array[Dictionary] = []
 var final_rescue_normal_behavior_timeline: Array[Dictionary] = []
 var final_rescue_speed_proofs: Array[Dictionary] = []
 var resource_gather_events: Array[Dictionary] = []
+var player_route_authority_events: Array[Dictionary] = []
 var final_rescue_combat_events: Array[Dictionary] = []
 var non_guard_home_visual_matrix: Array[Dictionary] = []
 var morning_outside_visual_matrix: Array[Dictionary] = []
@@ -84,6 +91,7 @@ var last_observer_camera_target := Vector3.ZERO
 var menu: Node = null
 var launched_through_menu := false
 var startup_loading_connected := false
+var live_player_navigator = null
 
 func _ready() -> void:
     physics_dt = 1.0 / float(Engine.physics_ticks_per_second)
@@ -135,10 +143,18 @@ func run() -> void:
         "visualCaptures": visual_captures,
         "timeline": morning_observation_timeline,
         "dayOneTimeline": day_one_timeline,
+        "playerRouteAuthorityEvents": player_route_authority_events,
         "finalRescueTimeline": final_rescue_timeline,
         "finalRescueNormalBehaviorTimeline": final_rescue_normal_behavior_timeline,
         "finalRescueCombatEvents": final_rescue_combat_events,
         "morningOutsideVisualMatrix": morning_outside_visual_matrix,
+        "actualGameplayDerived": true,
+        "realBootAttachedToMainMenu": false,
+        "launchPath": "",
+        "usesVoxelPlaytest": OS.get_environment("VOXEL_PLAYTEST").strip_edges() != "",
+        "voxelPlaytestEnv": OS.get_environment("VOXEL_PLAYTEST").strip_edges(),
+        "voxelTestSeedEnv": OS.get_environment("VOXEL_TEST_SEED").strip_edges(),
+        "savePathOverride": OS.get_environment("VOXEL_SAVE_PATH_OVERRIDE").strip_edges(),
         "deterministicSetup": {},
         "scriptErrorScan": { "status": "pending-wrapper-scan", "matches": [] },
         "forbiddenCallSelfScan": { "status": "passed-by-wrapper-before-launch" }
@@ -185,20 +201,31 @@ func run() -> void:
     finish()
 
 func launch_main_via_menu() -> bool:
-    menu = MENU_SCENE.instantiate()
-    if menu == null:
-        add_failure("main_menu_bootstrap_failed", "MainMenu.tscn could not be instantiated")
-        return false
-    add_child(menu)
+    Input.set_mouse_mode(Input.MOUSE_MODE_VISIBLE)
+    var existing_menu := existing_main_menu_parent()
+    if existing_menu != null:
+        menu = existing_menu
+        report_data["realBootAttachedToMainMenu"] = true
+        report_data["launchPath"] = "project main scene MainMenu.tscn New Game button input"
+        mark_progress("main_menu_real_boot_attached")
+    else:
+        menu = MENU_SCENE.instantiate()
+        if menu == null:
+            add_failure("main_menu_bootstrap_failed", "MainMenu.tscn could not be instantiated")
+            return false
+        add_child(menu)
+        report_data["realBootAttachedToMainMenu"] = false
+        report_data["launchPath"] = "testing scene instantiates MainMenu.tscn New Game button input"
+        mark_progress("main_menu_instantiated")
     launched_through_menu = true
-    report_data["launchPath"] = "MainMenu.tscn:NewGame"
-    mark_progress("main_menu_instantiated")
-    await wait_physics_frames(2)
-    if not menu.has_method("launch_game"):
-        add_failure("main_menu_launch_failed", "Title menu script does not expose launch_game")
+    await wait_process_frames(4)
+    var button := menu.get("new_game_button") as Button
+    if button == null or not is_instance_valid(button) or not button.visible or button.disabled:
+        add_failure("main_menu_new_game_button_missing", "Title menu did not expose a visible enabled New Game button")
         return false
-    menu.call("launch_game", "new_game")
-    mark_progress("main_menu_new_game_clicked")
+    dispatch_mouse_button_at(MOUSE_BUTTON_LEFT, true, button_center(button), "menu_new_game_press")
+    dispatch_mouse_button_at(MOUSE_BUTTON_LEFT, false, button_center(button), "menu_new_game_release")
+    mark_progress("main_menu_new_game_button_input")
     var max_frames := ceili(120.0 * float(Engine.physics_ticks_per_second))
     var observed_main := false
     for frame in range(max_frames):
@@ -220,6 +247,20 @@ func launch_main_via_menu() -> bool:
                 return true
     add_failure("main_menu_launch_timeout", "New Game did not produce a loaded Main scene")
     return false
+
+func existing_main_menu_parent() -> Node:
+    var parent := get_parent()
+    if parent == null:
+        return null
+    var button = parent.get("new_game_button")
+    if button is Button:
+        return parent
+    return null
+
+func button_center(button: Button) -> Vector2:
+    if button == null:
+        return get_viewport().get_visible_rect().size * 0.5
+    return button.get_global_rect().get_center()
 
 func main_scene_ready_for_test() -> bool:
     if main == null:
@@ -1654,7 +1695,8 @@ func run_repair_flow(tutorial) -> void:
     if workbench == null:
         add_failure("workbench_missing_for_repair_crafting", "could not find generated tutorial town workbench")
         return
-    await walk_near(workbench.global_position, CELL * 1.65, 14.0, "walking_to_workbench")
+    if not await reach_workbench_for_crafting(workbench, "repair_crafting", 18.0, "workbench_not_reached_for_repair_crafting"):
+        return
     aim_at(workbench.global_position + Vector3(0.0, CELL * 0.6, 0.0))
     dispatch_key(KEY_I, true)
     dispatch_key(KEY_I, false)
@@ -1687,20 +1729,18 @@ func run_repair_flow(tutorial) -> void:
             var bypass_reached := await walk_to_south_repair_bypass(town_center)
             if not bypass_reached:
                 return
-        for index in repair_target_indices(fence_targets.size(), north_side):
-            if fence_targets[index] is Vector2i:
-                var fence_cell: Vector2i = fence_targets[index]
-                if (fence_cell.y <= town_center.y) == north_side:
-                    await place_repair_item("woodBlock", fence_cell, "repair_fence_%02d" % index, tutorial)
-                    if failure_reasons.size() > failures_before_repair:
-                        return
-        for index in repair_target_indices(lamp_targets.size(), north_side):
-            if lamp_targets[index] is Vector2i:
-                var lamp_cell: Vector2i = lamp_targets[index]
-                if (lamp_cell.y <= town_center.y) == north_side:
-                    await place_repair_item("torch", lamp_cell, "repair_lamp_%02d" % index, tutorial)
-                    if failure_reasons.size() > failures_before_repair:
-                        return
+        while true:
+            var placed_fence_target := await place_next_unrepaired_target("woodBlock", fence_targets, north_side, town_center, "repair_fence", tutorial)
+            if not placed_fence_target:
+                break
+            if failure_reasons.size() > failures_before_repair:
+                return
+        while true:
+            var placed_lamp_target := await place_next_unrepaired_target("torch", lamp_targets, north_side, town_center, "repair_lamp", tutorial)
+            if not placed_lamp_target:
+                break
+            if failure_reasons.size() > failures_before_repair:
+                return
     var final_state := tutorial_state_summary(tutorial)
     if not bool(final_state.get("repairComplete", false)):
         add_failure("repair_not_completed_by_real_placements", JSON.stringify({
@@ -2340,7 +2380,7 @@ func wait_for_sera_rescue_attack(tutorial, timeout_seconds: float) -> bool:
         if int(Engine.get_physics_frames()) % SAMPLE_EVERY_FRAMES != 0:
             continue
         var entry := npc_entry("sera")
-        var row := final_rescue_snapshot(tutorial)
+        var row := compact_final_rescue_return_snapshot(final_rescue_snapshot(tutorial))
         var sera_summary := npc_summary(entry) if not entry.is_empty() else {}
         row["label"] = "final_rescue_sera_attack_%03d" % final_rescue_timeline.size()
         row["time"] = rounded(elapsed)
@@ -2595,7 +2635,7 @@ func wait_for_final_rescue_return(tutorial, timeout_seconds: float) -> void:
         if int(Engine.get_physics_frames()) % SAMPLE_EVERY_FRAMES != 0:
             continue
         var state := final_rescue_state_summary(tutorial)
-        var row := final_rescue_snapshot(tutorial)
+        var row := compact_final_rescue_return_snapshot(final_rescue_snapshot(tutorial))
         row["label"] = "final_rescue_return_%03d" % final_rescue_timeline.size()
         row["time"] = rounded(elapsed)
         final_rescue_timeline.append(row)
@@ -2609,10 +2649,14 @@ func wait_for_final_rescue_return(tutorial, timeout_seconds: float) -> void:
         if bool(state.get("rescueReturning", false)):
             saw_returning = true
             var speed_proof := final_rescue_speed_phase_snapshot("return_home")
-            final_rescue_speed_proofs.append(speed_proof)
-            report_data["finalRescueSpeedProofs"] = final_rescue_speed_proofs
-            niko_sprint_home_ok = niko_sprint_home_ok or bool((speed_proof.get("nikoSprintHome", {}) as Dictionary).get("ok", false))
-            sera_walk_home_ok = sera_walk_home_ok or bool((speed_proof.get("seraWalkHome", {}) as Dictionary).get("ok", false))
+            var niko_speed_ok := bool((speed_proof.get("nikoSprintHome", {}) as Dictionary).get("ok", false))
+            var sera_speed_ok := bool((speed_proof.get("seraWalkHome", {}) as Dictionary).get("ok", false))
+            var keep_speed_proof := final_rescue_speed_proofs.is_empty() or (niko_speed_ok and not niko_sprint_home_ok) or (sera_speed_ok and not sera_walk_home_ok) or final_rescue_timeline.size() % 24 == 0
+            if keep_speed_proof:
+                final_rescue_speed_proofs.append(speed_proof)
+                report_data["finalRescueSpeedProofs"] = final_rescue_speed_proofs
+            niko_sprint_home_ok = niko_sprint_home_ok or niko_speed_ok
+            sera_walk_home_ok = sera_walk_home_ok or sera_speed_ok
             if full_player_pov_visual_mode() and not captured_returning:
                 captured_returning = await capture_player_pov_stage("player_pov_final_rescue_niko_returning", npc_target_position("niko"), final_rescue_snapshot(tutorial))
         if bool(state.get("finalNightComplete", false)):
@@ -2688,8 +2732,8 @@ func final_rescue_speed_phase_snapshot(label: String) -> Dictionary:
         "seraSprintToNiko": sera_sprint,
         "nikoSprintHome": niko_sprint,
         "seraWalkHome": sera_walk,
-        "niko": npc_summary(npc_entry("niko")) if not npc_entry("niko").is_empty() else {},
-        "sera": npc_summary(npc_entry("sera")) if not npc_entry("sera").is_empty() else {}
+        "niko": compact_return_npc_summary(npc_summary(npc_entry("niko"))) if not npc_entry("niko").is_empty() else {},
+        "sera": compact_return_npc_summary(npc_summary(npc_entry("sera"))) if not npc_entry("sera").is_empty() else {}
     }
 
 func npc_speed_mode_assertion(npc_id: String, expected_mode: String) -> Dictionary:
@@ -2964,11 +3008,13 @@ func talk_to_tutorial_npc(npc_id: String, label: String, timeout_seconds: float)
         add_failure("day_one_npc_missing", "%s npc=%s" % [label, npc_id])
         return
     if bool(strict_home_status(entry).get("strictInside", false)):
-        var initial_access := await ensure_npc_home_access_for_talk(entry, label, 18.0)
+        var initial_access := await ensure_npc_home_access_for_talk(entry, label, 42.0)
         if failed or not initial_access:
             return
     var started_at := elapsed
     var reached := false
+    var talk_already_clicked := false
+    var navigator_talk_result := {}
     var talk_reach_distance := CELL * 1.35
     while elapsed - started_at < timeout_seconds:
         entry = npc_entry(npc_id)
@@ -3077,6 +3123,48 @@ func talk_to_tutorial_npc(npc_id: String, label: String, timeout_seconds: float)
                     await wait_physics_frames(POST_ACTION_FRAMES)
                     continue
         if day_one_tutorial:
+            ensure_live_player_navigator()
+            if live_player_navigator != null and live_player_navigator.has_method("talk_to") and player_route_authority_available():
+                navigator_talk_result = await live_player_navigator.call("talk_to", body, label, {
+                    "timeout": minf(24.0, remaining),
+                    "poseStopDistance": CELL * 0.82,
+                    "postActionFrames": POST_ACTION_FRAMES
+                })
+                interaction_timeline.append({
+                    "label": "navigator_%s_talk" % label,
+                    "npcId": npc_id,
+                    "player": vec3(player.global_position),
+                    "npc": vec3(body.global_position),
+                    "result": navigator_talk_result
+                })
+                sample_player("after_navigator_%s_talk" % label)
+                if bool(navigator_talk_result.get("ok", false)):
+                    reached = true
+                    talk_already_clicked = true
+                    break
+                if full_player_pov_visual_mode():
+                    await capture_player_pov_stage(
+                        "player_pov_failure_%s_navigator_talk" % safe_capture_id(label),
+                        body.global_position + Vector3(0.0, CELL * 0.8, 0.0),
+                        {
+                            "failureCandidate": "%s_navigator_talk_failed" % label,
+                            "npcId": npc_id,
+                            "player": vec3(player.global_position),
+                            "npc": vec3(body.global_position),
+                            "navigatorResult": navigator_talk_result
+                        }
+                    )
+                add_failure("day_one_npc_not_reached", JSON.stringify({
+                    "label": label,
+                    "npcId": npc_id,
+                    "player": vec3(player.global_position),
+                    "npc": vec3(body.global_position),
+                    "navigatorResult": navigator_talk_result,
+                    "strictHome": strict_home_status(entry),
+                    "homeDoor": block_summary(npc_home_door(entry)) if not entry.is_empty() else {}
+                }))
+                return
+        if day_one_tutorial:
             reached = await walk_tutorial_route_near(body.global_position, talk_reach_distance, minf(24.0, remaining), "walking_to_%s" % label)
         else:
             reached = await walk_near(body.global_position, talk_reach_distance, minf(4.5, remaining), "walking_to_%s" % label)
@@ -3097,14 +3185,19 @@ func talk_to_tutorial_npc(npc_id: String, label: String, timeout_seconds: float)
             "homeDoor": block_summary(npc_home_door(entry)) if not entry.is_empty() else {}
         }))
         return
-    var hit := await aim_until_npc_interaction_hit(body, label)
+    var hit := {}
+    if talk_already_clicked:
+        var navigator_proof: Dictionary = navigator_talk_result.get("proof", {}) if navigator_talk_result.get("proof", {}) is Dictionary else {}
+        hit = navigator_proof.get("hit", {}) if navigator_proof.get("hit", {}) is Dictionary else {}
+    else:
+        hit = await aim_until_npc_interaction_hit(body, label)
     interaction_timeline.append({
         "label": "before_%s_talk" % label,
         "npcId": npc_id,
         "player": vec3(player.global_position),
         "hit": hit
     })
-    if not npc_interaction_hit_matches(hit, body):
+    if not talk_already_clicked and not npc_interaction_hit_matches(hit, body):
         hit = await retry_npc_talk_after_obstructed_view(npc_id, label, hit, talk_reach_distance, maxf(4.0, timeout_seconds - (elapsed - started_at)))
         entry = npc_entry(npc_id)
         body = entry.get("body") as Node3D
@@ -3114,7 +3207,7 @@ func talk_to_tutorial_npc(npc_id: String, label: String, timeout_seconds: float)
             "player": vec3(player.global_position),
             "hit": hit
         })
-    if not npc_interaction_hit_matches(hit, body):
+    if not talk_already_clicked and not npc_interaction_hit_matches(hit, body):
         add_failure("day_one_npc_aim_miss", JSON.stringify({
             "label": label,
             "npcId": npc_id,
@@ -3123,9 +3216,10 @@ func talk_to_tutorial_npc(npc_id: String, label: String, timeout_seconds: float)
             "npc": vec3(body.global_position)
         }))
         return
-    dispatch_mouse_button(MOUSE_BUTTON_RIGHT, true)
-    dispatch_mouse_button(MOUSE_BUTTON_RIGHT, false)
-    await wait_physics_frames(POST_ACTION_FRAMES)
+    if not talk_already_clicked:
+        dispatch_mouse_button(MOUSE_BUTTON_RIGHT, true)
+        dispatch_mouse_button(MOUSE_BUTTON_RIGHT, false)
+        await wait_physics_frames(POST_ACTION_FRAMES)
     var dialogue_open := hud_dialogue_open()
     var tutorial = main.get("tutorial_system") if main != null else null
     var row := {
@@ -3167,10 +3261,11 @@ func ensure_npc_home_access_for_talk(entry: Dictionary, label: String, time_rema
     if day_one_tutorial and not player_inside_entry_home(entry):
         var porch_position := entry_position(entry, "porchPosition", door.global_position)
         if flat_distance(player.global_position, porch_position) > CELL * 0.95:
+            var porch_route_timeout := player_route_timeout_for_target(porch_position, maxf(time_remaining, 18.0), 42.0)
             var porch_reached := await walk_tutorial_route_near(
                 porch_position,
                 CELL * 0.85,
-                minf(maxf(time_remaining, 8.0), 18.0),
+                porch_route_timeout,
                 "walking_to_%s_home_porch_before_door" % label
             )
             interaction_timeline.append({
@@ -3212,6 +3307,21 @@ func home_inside_door_position(entry: Dictionary, fallback: Vector3) -> Vector3:
     var inside_cell := Vector2i(porch.x + step.x * 2, porch.y + step.y * 2)
     return world_position_for_flat_cell(inside_cell)
 
+func home_outside_clear_position(entry: Dictionary, fallback: Vector3) -> Vector3:
+    if entry.is_empty():
+        return fallback
+    var porch: Vector2i = entry.get("porchCell", entry.get("homeCell", flat_cell(fallback)))
+    var home: Vector2i = entry.get("homeCell", porch)
+    var delta := porch - home
+    var step := Vector2i.ZERO
+    if abs(delta.y) >= abs(delta.x):
+        step.y = signi(delta.y)
+    else:
+        step.x = signi(delta.x)
+    if step == Vector2i.ZERO:
+        return entry_position(entry, "porchPosition", fallback)
+    return world_position_for_flat_cell(Vector2i(porch.x + step.x, porch.y + step.y))
+
 func leave_npc_home_after_talk(entry: Dictionary, label: String) -> void:
     if entry.is_empty() or not player_inside_entry_home(entry):
         return
@@ -3221,16 +3331,109 @@ func leave_npc_home_after_talk(entry: Dictionary, label: String) -> void:
         if not opened:
             return
         await wait_physics_frames(POST_ACTION_FRAMES)
-    var porch := entry_position(entry, "porchPosition", player.global_position)
-    await walk_tutorial_route_near(porch, CELL * 0.75, 18.0, "walking_out_of_%s_home" % label)
+    var outside_clear := home_outside_clear_position(entry, player.global_position)
+    var reached := await walk_tutorial_route_near(outside_clear, CELL * 0.42, 20.0, "walking_out_of_%s_home" % label)
+    interaction_timeline.append({
+        "label": "leave_%s_home_after_talk" % label,
+        "player": vec3(player.global_position),
+        "outsideClear": vec3(outside_clear),
+        "reached": reached,
+        "home": npc_summary(entry)
+    })
 
 func player_inside_entry_home(entry: Dictionary) -> bool:
-    if player == null or entry.is_empty():
+    if player == null:
         return false
-    var cell: Vector2i = flat_cell(player.global_position)
+    return position_inside_entry_home(entry, player.global_position)
+
+func position_inside_entry_home(entry: Dictionary, position: Vector3) -> bool:
+    if entry.is_empty():
+        return false
+    var cell: Vector2i = flat_cell(position)
     var min_cell: Vector2i = entry.get("interiorMinCell", entry.get("homeCell", cell))
     var max_cell: Vector2i = entry.get("interiorMaxCell", entry.get("homeCell", cell))
     return cell.x >= min_cell.x and cell.x <= max_cell.x and cell.y >= min_cell.y and cell.y <= max_cell.y
+
+func player_current_home_entry() -> Dictionary:
+    var starter_entry := player_starter_shelter_entry()
+    if not starter_entry.is_empty() and position_inside_entry_home(starter_entry, player.global_position):
+        return starter_entry
+    var npc_system = main.get("npc_system") if main != null else null
+    if npc_system == null:
+        return {}
+    var entries: Array = npc_system.get("npcs")
+    for entry_value in entries:
+        var entry: Dictionary = entry_value
+        if position_inside_entry_home(entry, player.global_position):
+            return entry
+    return {}
+
+func player_starter_shelter_entry() -> Dictionary:
+    if main == null or player == null:
+        return {}
+    var tutorial = main.get("tutorial_system")
+    if tutorial == null or not tutorial.has_method("state"):
+        return {}
+    var start_cell := intro_state_cell(tutorial, "startCell", flat_cell(player.global_position))
+    var bounds := starter_house_bounds(start_cell)
+    var min_cell: Vector2i = bounds.get("min", start_cell)
+    var max_cell: Vector2i = bounds.get("max", start_cell)
+    var door_cell := Vector2i(start_cell.x, start_cell.y - 3)
+    var porch_cell := Vector2i(start_cell.x, start_cell.y - 4)
+    var interior_landing_cell := Vector2i(start_cell.x, start_cell.y - 1)
+    var door := nearest_block("door", world_position_for_flat_cell(door_cell))
+    return {
+        "id": "player_starter_shelter",
+        "name": "Player Starter Shelter",
+        "homeCell": start_cell,
+        "homePosition": world_position_for_flat_cell(start_cell),
+        "porchCell": porch_cell,
+        "porchPosition": world_position_for_flat_cell(porch_cell),
+        "doorCell": door_cell,
+        "interiorLandingCell": interior_landing_cell,
+        "interiorMinCell": min_cell,
+        "interiorMaxCell": max_cell,
+        "activeDoorPortalId": "",
+        "doorPath": String(door.get_path()) if door != null and is_instance_valid(door) else ""
+    }
+
+func leave_current_player_home_for_route(entry: Dictionary, label: String) -> bool:
+    if entry.is_empty() or not player_inside_entry_home(entry):
+        return true
+    var door := npc_home_door(entry)
+    if door == null or not is_instance_valid(door):
+        add_failure("day_one_route_current_home_door_missing", JSON.stringify({
+            "label": label,
+            "player": vec3(player.global_position),
+            "home": npc_summary(entry)
+        }))
+        return false
+    if not bool(door.get_meta("open", false)):
+        var opened := await use_block_with_real_action(door, "route_exit_current_home_door_%s" % safe_capture_id(label), CELL * 1.85, 14.0)
+        if not opened:
+            return false
+        await wait_physics_frames(POST_ACTION_FRAMES)
+    var outside_clear := home_outside_clear_position(entry, door.global_position)
+    var reached := await walk_near(outside_clear, CELL * 0.42, 16.0, "%s_exit_current_home" % label)
+    interaction_timeline.append({
+        "label": "leave_current_home_before_route",
+        "routeLabel": label,
+        "player": vec3(player.global_position),
+        "porch": vec3(entry_position(entry, "porchPosition", door.global_position)),
+        "outsideClear": vec3(outside_clear),
+        "door": block_summary(door),
+        "reached": reached,
+        "home": npc_summary(entry)
+    })
+    if not reached:
+        add_failure("day_one_route_current_home_exit_not_reached", JSON.stringify({
+            "label": label,
+            "player": vec3(player.global_position),
+            "outsideClear": vec3(outside_clear),
+            "door": block_summary(door),
+            "home": npc_summary(entry)
+        }))
+    return reached
 
 func aim_until_npc_interaction_hit(body: Node3D, label: String) -> Dictionary:
     var summary := {}
@@ -3296,6 +3499,61 @@ func npc_interaction_hit_matches(summary: Dictionary, body: Node3D) -> bool:
         return false
     return String(summary.get("colliderPath", "")) == String(body.get_path()) and bool(summary.get("withinReach", false))
 
+func reach_workbench_for_crafting(workbench: Node3D, label: String, timeout_seconds: float, failure_code: String) -> bool:
+    if workbench == null or not is_instance_valid(workbench):
+        add_failure(failure_code, JSON.stringify({
+            "label": label,
+            "player": vec3(player.global_position),
+            "workbench": {}
+        }))
+        return false
+    ensure_live_player_navigator()
+    var navigator_result := {}
+    if live_player_navigator != null and live_player_navigator.has_method("go_to_interaction_pose") and player_route_authority_available():
+        mark_progress("routing_to_%s_workbench_with_player_navigator" % safe_capture_id(label))
+        navigator_result = await live_player_navigator.call("go_to_interaction_pose", workbench, "workbench", {
+            "label": "%s_workbench" % label,
+            "timeout": maxf(timeout_seconds, 16.0),
+            "stopDistance": CELL * 0.55,
+            "currentPoseRadius": CELL * 3.5,
+            "closestWalkableRadius": CELL * 6.0
+        })
+        interaction_timeline.append({
+            "label": "navigator_workbench_%s" % label,
+            "player": vec3(player.global_position),
+            "workbench": block_summary(workbench),
+            "result": navigator_result
+        })
+        sample_player("after_navigator_%s_workbench" % safe_capture_id(label))
+        if bool(navigator_result.get("ok", false)):
+            return true
+        if full_player_pov_visual_mode():
+            await capture_player_pov_stage(
+                "%s_workbench_route_failed" % safe_capture_id(label),
+                workbench.global_position,
+                { "navigatorResult": navigator_result }
+            )
+        add_failure(failure_code, JSON.stringify({
+            "label": label,
+            "player": vec3(player.global_position),
+            "workbench": block_summary(workbench),
+            "navigatorResult": navigator_result
+        }))
+        return false
+    var reached := false
+    if day_one_tutorial:
+        reached = await walk_tutorial_route_near(workbench.global_position, CELL * 1.65, timeout_seconds, "walking_to_%s_workbench" % label)
+    else:
+        reached = await walk_near(workbench.global_position, CELL * 1.65, timeout_seconds, "walking_to_%s_workbench" % label)
+    if not reached:
+        add_failure(failure_code, JSON.stringify({
+            "label": label,
+            "player": vec3(player.global_position),
+            "workbench": block_summary(workbench),
+            "navigatorResult": navigator_result
+        }))
+    return reached
+
 func craft_recipe_at_workbench(recipe_id: String, label: String) -> void:
     mark_progress("craft_%s" % label)
     var workbench := nearest_block("workbench", player.global_position)
@@ -3311,17 +3569,8 @@ func craft_recipe_at_workbench(recipe_id: String, label: String) -> void:
                 "workbench": block_summary(workbench)
             }))
             return
-    var reached := false
-    if day_one_tutorial:
-        reached = await walk_tutorial_route_near(workbench.global_position, CELL * 1.65, 24.0, "walking_to_%s_workbench" % label)
-    else:
-        reached = await walk_near(workbench.global_position, CELL * 1.65, 16.0, "walking_to_%s_workbench" % label)
-    if not reached:
-        add_failure("day_one_workbench_not_reached", JSON.stringify({
-            "label": label,
-            "player": vec3(player.global_position),
-            "workbench": block_summary(workbench)
-        }))
+    var timeout_seconds := 24.0 if day_one_tutorial else 16.0
+    if not await reach_workbench_for_crafting(workbench, label, timeout_seconds, "day_one_workbench_not_reached"):
         return
     aim_at(workbench.global_position + Vector3(0.0, CELL * 0.6, 0.0))
     var hud = main.get("hud") if main != null else null
@@ -3416,29 +3665,97 @@ func harvest_prop_with_real_action(prop: Node3D, drop_id: String, tool_item: Str
             add_failure("day_one_tool_not_selectable", "%s tool=%s inventory=%s" % [label, tool_item, JSON.stringify(inventory_totals())])
             return false
     var before_count := int(inventory_totals().get(drop_id, 0))
-    var target := prop.global_position
-    var distance := Vector2(target.x - player.global_position.x, target.z - player.global_position.z).length()
-    var reached := await walk_near(target, CELL * 1.65, clampf(distance / (CELL * 2.8) + 5.0, 8.0, 36.0), "walking_to_%s" % label)
-    if not reached:
+    var last_hit := {}
+    ensure_live_player_navigator()
+    if live_player_navigator != null and live_player_navigator.has_method("harvest_prop") and player_route_authority_available():
+        var navigator_result: Dictionary = await live_player_navigator.call("harvest_prop", prop, label, {
+            "timeout": 22.0,
+            "poseStopDistance": CELL * 0.55
+        })
+        var navigator_proof: Dictionary = navigator_result.get("proof", {}) if navigator_result.get("proof", {}) is Dictionary else {}
+        last_hit = navigator_proof.get("hit", {}) if navigator_proof.get("hit", {}) is Dictionary else {}
+        resource_gather_events.append({
+            "label": "%s_navigator_pose" % label,
+            "drop": drop_id,
+            "tool": tool_item,
+            "prop": prop_summary(prop),
+            "player": vec3(player.global_position),
+            "result": navigator_result,
+            "hit": last_hit
+        })
+        if not bool(navigator_result.get("ok", false)):
+            return false
+    else:
+        var target := prop.global_position
+        var distance := Vector2(target.x - player.global_position.x, target.z - player.global_position.z).length()
+        var walk_timeout := clampf(distance / (CELL * 2.8) + 5.0, 8.0, 42.0)
+        var reached := false
+        if day_one_tutorial:
+            reached = await walk_tutorial_route_near(target, CELL * 1.65, walk_timeout, "walking_to_%s" % label)
+        else:
+            reached = await walk_near(target, CELL * 1.65, walk_timeout, "walking_to_%s" % label)
+        if not reached:
+            resource_gather_events.append({
+                "label": label,
+                "drop": drop_id,
+                "tool": tool_item,
+                "prop": prop_summary(prop),
+                "player": vec3(player.global_position),
+                "attempt": "unreachable"
+            })
+            return false
+        last_hit = await ensure_prop_live_interaction_position(prop, label)
+    if not prop_interaction_hit_matches(last_hit, prop):
         resource_gather_events.append({
             "label": label,
             "drop": drop_id,
             "tool": tool_item,
             "prop": prop_summary(prop),
             "player": vec3(player.global_position),
-            "attempt": "unreachable"
+            "attempt": "no_live_interaction_hit",
+            "lastHit": last_hit
         })
         return false
-    var last_hit := {}
-    for attempt in range(72):
+    var confirmed_hits := 0
+    var aim_misses := 0
+    var strike_events := []
+    for attempt in range(120):
         if prop == null or not is_instance_valid(prop):
             break
-        last_hit = await aim_until_prop_hit(prop, label)
+        if attempt > 0 or not prop_interaction_hit_matches(last_hit, prop):
+            last_hit = await aim_until_prop_hit(prop, label)
+        if not prop_interaction_hit_matches(last_hit, prop):
+            aim_misses += 1
+            if strike_events.size() < 24:
+                strike_events.append({
+                    "attempt": attempt,
+                    "action": "skip_aim_miss",
+                    "hit": last_hit,
+                    "player": vec3(player.global_position)
+                })
+            await wait_physics_frames(4)
+            continue
+        var progress_before := float(main.get("break_progress")) if main != null else 0.0
+        var target_before := String(main.get("break_target_id")) if main != null else ""
         dispatch_mouse_button(MOUSE_BUTTON_LEFT, true)
         await wait_physics_frames(2)
         dispatch_mouse_button(MOUSE_BUTTON_LEFT, false)
         await wait_physics_frames(8)
+        confirmed_hits += 1
         var current_count := int(inventory_totals().get(drop_id, 0))
+        var progress_after := float(main.get("break_progress")) if main != null else 0.0
+        var target_after := String(main.get("break_target_id")) if main != null else ""
+        if strike_events.size() < 24 or current_count > before_count:
+            strike_events.append({
+                "attempt": attempt,
+                "action": "strike",
+                "beforeProgress": rounded(progress_before),
+                "afterProgress": rounded(progress_after),
+                "beforeTarget": target_before,
+                "afterTarget": target_after,
+                "inventoryAfter": current_count,
+                "hit": last_hit
+            })
         if current_count > before_count:
             resource_gather_events.append({
                 "label": "%s_hit_%02d" % [label, attempt],
@@ -3448,7 +3765,10 @@ func harvest_prop_with_real_action(prop: Node3D, drop_id: String, tool_item: Str
                 "delta": current_count - before_count,
                 "tool": tool_item,
                 "prop": prop_summary(prop) if prop != null and is_instance_valid(prop) else {},
-                "lastHit": last_hit
+                "lastHit": last_hit,
+                "confirmedHits": confirmed_hits,
+                "aimMisses": aim_misses,
+                "strikeEvents": strike_events
             })
             return true
     var after_count := int(inventory_totals().get(drop_id, 0))
@@ -3461,13 +3781,16 @@ func harvest_prop_with_real_action(prop: Node3D, drop_id: String, tool_item: Str
         "lastHit": last_hit,
         "lastHudMessage": String(main.get("last_hud_refresh_message")) if main != null else "",
         "breakProgress": float(main.get("break_progress")) if main != null else 0.0,
-        "breakTarget": String(main.get("break_target_id")) if main != null else ""
+        "breakTarget": String(main.get("break_target_id")) if main != null else "",
+        "confirmedHits": confirmed_hits,
+        "aimMisses": aim_misses,
+        "strikeEvents": strike_events
     }))
     return false
 
 func aim_until_prop_hit(prop: Node3D, label: String) -> Dictionary:
     var summary := {}
-    for height_scale in [0.35, 0.70, 1.15, 1.70, 2.30]:
+    for height_scale in [0.12, 0.25, 0.35, 0.55, 0.80, 1.15, 1.70, 2.30]:
         if prop == null or not is_instance_valid(prop):
             break
         aim_at(prop.global_position + Vector3(0.0, CELL * float(height_scale), 0.0))
@@ -3482,6 +3805,64 @@ func aim_until_prop_hit(prop: Node3D, label: String) -> Dictionary:
         "hit": summary
     })
     return summary
+
+func ensure_prop_live_interaction_position(prop: Node3D, label: String) -> Dictionary:
+    var last_hit := await aim_until_prop_hit(prop, label)
+    if prop_interaction_hit_matches(last_hit, prop):
+        return last_hit
+    var stand_positions := prop_interaction_stand_positions(prop)
+    for index in range(stand_positions.size()):
+        if prop == null or not is_instance_valid(prop):
+            return last_hit
+        var stand_position: Vector3 = stand_positions[index]
+        var reached := false
+        if day_one_tutorial:
+            reached = await walk_tutorial_route_near(stand_position, CELL * 0.45, 8.0, "adjusting_%s_prop_stand_%02d" % [label, index])
+        elif player_route_authority_available():
+            reached = await walk_authority_route_near(stand_position, CELL * 0.45, 8.0, "adjusting_%s_prop_stand_%02d" % [label, index])
+        else:
+            reached = await walk_near(stand_position, CELL * 0.45, 5.0, "adjusting_%s_prop_stand_%02d" % [label, index])
+        await wait_physics_frames(POST_ACTION_FRAMES)
+        last_hit = await aim_until_prop_hit(prop, "%s_prop_stand_%02d" % [label, index])
+        resource_gather_events.append({
+            "label": "%s_prop_stand_%02d" % [label, index],
+            "prop": prop_summary(prop),
+            "stand": vec3(stand_position),
+            "reached": reached,
+            "player": vec3(player.global_position),
+            "hit": last_hit
+        })
+        if prop_interaction_hit_matches(last_hit, prop):
+            return last_hit
+    return last_hit
+
+func prop_interaction_stand_positions(prop: Node3D) -> Array[Vector3]:
+    var result: Array[Vector3] = []
+    if prop == null or not is_instance_valid(prop):
+        return result
+    var offsets := [
+        Vector3(0.0, 0.0, CELL * 1.45),
+        Vector3(0.0, 0.0, -CELL * 1.45),
+        Vector3(CELL * 1.45, 0.0, 0.0),
+        Vector3(-CELL * 1.45, 0.0, 0.0),
+        Vector3(CELL * 1.20, 0.0, CELL * 1.20),
+        Vector3(-CELL * 1.20, 0.0, CELL * 1.20),
+        Vector3(CELL * 1.20, 0.0, -CELL * 1.20),
+        Vector3(-CELL * 1.20, 0.0, -CELL * 1.20),
+        Vector3(0.0, 0.0, CELL * 2.15),
+        Vector3(0.0, 0.0, -CELL * 2.15),
+        Vector3(CELL * 2.15, 0.0, 0.0),
+        Vector3(-CELL * 2.15, 0.0, 0.0)
+    ]
+    for offset in offsets:
+        var position: Vector3 = prop.global_position + offset
+        if main != null and main.has_method("surface_y_at_position"):
+            position.y = float(main.call("surface_y_at_position", position)) + 0.08
+        result.append(position)
+    result.sort_custom(func(a: Vector3, b: Vector3):
+        return flat_distance(player.global_position, a) < flat_distance(player.global_position, b)
+    )
+    return result
 
 func prop_interaction_hit_matches(summary: Dictionary, prop: Node3D) -> bool:
     if prop == null or not bool(summary.get("hit", false)):
@@ -3600,11 +3981,43 @@ func track_mira_speed() -> void:
 func walk_near(target: Vector3, stop_distance: float, timeout_seconds: float, label := "walking") -> bool:
     var started_at := elapsed
     var reached := false
+    var best_distance := INF
+    var best_position := player.global_position if player != null else Vector3.ZERO
+    var stuck_frames := 0
     while elapsed - started_at < timeout_seconds:
         var offset := Vector3(target.x - player.global_position.x, 0.0, target.z - player.global_position.z)
-        if offset.length() <= stop_distance:
+        var distance := offset.length()
+        if distance <= stop_distance:
             reached = true
             break
+        var horizontal_speed := Vector2(player.velocity.x, player.velocity.z).length()
+        var improved := distance < best_distance - PLAYER_ROUTE_PROGRESS_EPSILON
+        if improved:
+            best_distance = distance
+            best_position = player.global_position
+            stuck_frames = 0
+        elif horizontal_speed <= PLAYER_ROUTE_STUCK_SPEED and flat_distance(player.global_position, best_position) <= PLAYER_ROUTE_PROGRESS_EPSILON:
+            stuck_frames += 1
+        else:
+            stuck_frames = maxi(0, stuck_frames - 1)
+        if stuck_frames >= PLAYER_ROUTE_STUCK_FRAMES:
+            player.set("automated_move", Vector3.ZERO)
+            if full_player_pov_visual_mode():
+                await capture_player_pov_stage(
+                    "player_pov_failure_%s_stuck" % safe_capture_id(label),
+                    target,
+                    {
+                        "failureCandidate": "player_route_stuck",
+                        "label": label,
+                        "target": vec3(target),
+                        "player": vec3(player.global_position),
+                        "bestDistance": rounded(best_distance),
+                        "currentDistance": rounded(distance),
+                        "velocity": vec3(player.velocity),
+                        "slideCollisionCount": player.get_slide_collision_count()
+                    }
+                )
+            return false
         player.set("automated_move", offset.normalized())
         player.set("automated_sprint", false)
         await get_tree().physics_frame
@@ -3618,6 +4031,18 @@ func walk_near(target: Vector3, stop_distance: float, timeout_seconds: float, la
     return reached
 
 func walk_tutorial_route_near(target: Vector3, stop_distance: float, timeout_seconds: float, label: String) -> bool:
+    var current_home := player_current_home_entry()
+    if not current_home.is_empty() and not position_inside_entry_home(current_home, target):
+        var left_home := await leave_current_player_home_for_route(current_home, label)
+        if not left_home:
+            return false
+    if player_route_authority_available():
+        return await walk_authority_route_near(target, stop_distance, timeout_seconds, label)
+    record_player_route_event(label, "authority_unavailable", {
+        "target": vec3(target),
+        "stopDistance": rounded(stop_distance),
+        "fallback": "direct_walk_without_route_authority"
+    })
     var tutorial = main.get("tutorial_system") if main != null else null
     if tutorial == null or not tutorial.has_method("state"):
         return await walk_near(target, stop_distance, timeout_seconds, label)
@@ -3625,6 +4050,7 @@ func walk_tutorial_route_near(target: Vector3, stop_distance: float, timeout_sec
     var town_center: Vector2i = state.get("townCenter", flat_cell(target))
     var start_cell: Vector2i = state.get("startCell", flat_cell(player.global_position))
     var target_cell := flat_cell(target)
+    var current_cell := flat_cell(player.global_position)
     var route_target_cell := target_cell
     if stop_distance >= CELL * 1.5:
         var target_y_direction := 0
@@ -3634,10 +4060,16 @@ func walk_tutorial_route_near(target: Vector3, stop_distance: float, timeout_sec
             target_y_direction = -1
         if target_y_direction != 0:
             route_target_cell = Vector2i(target_cell.x, target_cell.y + target_y_direction)
-    var route_cells: Array[Vector2i] = []
-    var current_cell := flat_cell(player.global_position)
     if flat_distance(player.global_position, target) <= CELL * 8.0:
         return await walk_near(target, stop_distance, timeout_seconds, label)
+    var perimeter_crossing := tutorial_perimeter_crossing(current_cell, route_target_cell, town_center)
+    var perimeter_tail_cells: Array = []
+    var perimeter_gate_cell := Vector2i(999999, 999999)
+    if bool(perimeter_crossing.get("active", false)):
+        route_target_cell = perimeter_crossing.get("approachCell", route_target_cell)
+        perimeter_tail_cells = perimeter_crossing.get("tailCells", [])
+        perimeter_gate_cell = perimeter_crossing.get("gateCell", perimeter_gate_cell)
+    var route_cells: Array[Vector2i] = []
     var side_direction := 1
     if target_cell.x < town_center.x:
         side_direction = -1
@@ -3676,27 +4108,678 @@ func walk_tutorial_route_near(target: Vector3, stop_distance: float, timeout_sec
         append_unique_route_cell(route_cells, town_center)
         append_unique_route_cell(route_cells, Vector2i(town_center.x, route_target_cell.y))
     append_unique_route_cell(route_cells, route_target_cell)
+    for tail_cell_value in perimeter_tail_cells:
+        if tail_cell_value is Vector2i:
+            append_unique_route_cell(route_cells, tail_cell_value)
     var started_at := elapsed
+    var route_gate_opened := false
     for index in range(route_cells.size()):
+        if flat_distance(player.global_position, target) <= stop_distance:
+            return true
         var remaining := timeout_seconds - (elapsed - started_at)
         if remaining <= 0.0:
             return false
         var waypoint: Vector2i = route_cells[index]
+        if waypoint == perimeter_gate_cell and not route_gate_opened:
+            route_gate_opened = await open_tutorial_route_gate(perimeter_gate_cell, label)
+            if not route_gate_opened:
+                return false
         var waypoint_position := world_position_for_flat_cell(waypoint)
         var waypoint_stop := stop_distance if index == route_cells.size() - 1 else CELL * 0.85
         var distance := Vector2(waypoint_position.x - player.global_position.x, waypoint_position.z - player.global_position.z).length()
         var step_timeout := minf(remaining, clampf(distance / (CELL * 2.15) + 3.0, 3.0, 12.0))
         var reached := await walk_near(waypoint_position, waypoint_stop, step_timeout, "%s_route_%02d_%d_%d" % [label, index, waypoint.x, waypoint.y])
         if not reached:
+            if flat_distance(player.global_position, target) <= stop_distance:
+                return true
             return false
     var remaining_final := timeout_seconds - (elapsed - started_at)
     if remaining_final <= 0.0:
         return flat_distance(player.global_position, target) <= stop_distance
     return await walk_near(target, stop_distance, remaining_final, "%s_final" % label)
 
+func player_route_authority_available() -> bool:
+    ensure_live_player_navigator()
+    if live_player_navigator != null and live_player_navigator.has_method("route_authority_available"):
+        return bool(live_player_navigator.call("route_authority_available"))
+    var planner = player_route_authority_planner()
+    return planner != null and planner.has_method("plan_route")
+
+func player_route_authority_planner():
+    var npc_system = main.get("npc_system") if main != null else null
+    if npc_system == null:
+        return null
+    var pathing = npc_system.get("pathing")
+    if pathing == null:
+        return null
+    var planner = pathing.get("route_planner")
+    if planner != null and planner.has_method("plan_route"):
+        return planner
+    var coordinator = pathing.get("coordinator")
+    if coordinator != null:
+        planner = coordinator.get("route_planner")
+        if planner != null and planner.has_method("plan_route"):
+            return planner
+    return null
+
+func player_route_navigation_world():
+    var npc_system = main.get("npc_system") if main != null else null
+    if npc_system == null:
+        return null
+    var pathing = npc_system.get("pathing")
+    if pathing == null:
+        return null
+    var navigation_world = pathing.get("navigation_world")
+    if navigation_world != null:
+        return navigation_world
+    var coordinator = pathing.get("coordinator")
+    if coordinator != null:
+        navigation_world = coordinator.get("navigation_world")
+    return navigation_world
+
+func walk_authority_route_near(target: Vector3, stop_distance: float, timeout_seconds: float, label: String) -> bool:
+    ensure_live_player_navigator()
+    if live_player_navigator != null and live_player_navigator.has_method("go_to_position"):
+        var navigator_result: Dictionary = await live_player_navigator.call("go_to_position", target, {
+            "label": label,
+            "stopDistance": stop_distance,
+            "timeout": timeout_seconds,
+            "planTimeout": player_route_plan_timeout_for_target(target, timeout_seconds)
+        })
+        if not bool(navigator_result.get("ok", false)) and full_player_pov_visual_mode():
+            await capture_player_pov_stage(
+                "player_pov_failure_%s_authority_route" % safe_capture_id(label),
+                target,
+                {
+                    "failureCandidate": "player_route_authority_not_ready",
+                    "label": label,
+                    "target": vec3(target),
+                    "player": vec3(player.global_position),
+                    "navigatorResult": navigator_result
+                }
+            )
+        return bool(navigator_result.get("ok", false))
+
+    var started_at := elapsed
+    var plan_timeout := player_route_plan_timeout_for_target(target, timeout_seconds)
+    var route_result := await plan_player_authority_route(target, stop_distance, plan_timeout, label)
+    if not bool(route_result.get("available", false)):
+        return await walk_near(target, stop_distance, timeout_seconds, label)
+    if not bool(route_result.get("ready", false)):
+        if full_player_pov_visual_mode():
+            await capture_player_pov_stage(
+                "player_pov_failure_%s_authority_route" % safe_capture_id(label),
+                target,
+                {
+                    "failureCandidate": "player_route_authority_not_ready",
+                    "label": label,
+                    "target": vec3(target),
+                    "player": vec3(player.global_position),
+                    "route": route_result.get("routeSummary", {})
+                }
+            )
+        return false
+
+    var route: Dictionary = route_result.get("route", {})
+    var waypoints := player_route_waypoints(route)
+    var actions: Dictionary = route.get("actions", {}) if route.get("actions", {}) is Dictionary else {}
+    var handled_action_keys := {}
+    record_player_route_event(label, "execute_ready_route", {
+        "target": vec3(target),
+        "stopDistance": rounded(stop_distance),
+        "route": player_route_summary(route)
+    })
+
+    if waypoints.is_empty():
+        return flat_distance(player.global_position, target) <= stop_distance
+
+    for index in range(waypoints.size()):
+        if flat_distance(player.global_position, target) <= stop_distance:
+            return true
+        var remaining := timeout_seconds - (elapsed - started_at)
+        if remaining <= 0.0:
+            return false
+        var waypoint: Vector3 = waypoints[index]
+        var action_info := player_route_action_for_waypoint(actions, waypoint, handled_action_keys)
+        if not action_info.is_empty():
+            var action: Dictionary = action_info.get("action", {})
+            var action_key := String(action_info.get("key", ""))
+            var opened := await execute_player_route_action(action, action_key, label, index)
+            handled_action_keys[action_key] = true
+            if not opened:
+                return false
+        var waypoint_stop := stop_distance if index == waypoints.size() - 1 else CELL * 0.75
+        var distance := flat_distance(player.global_position, waypoint)
+        var step_timeout := minf(remaining, clampf(distance / (CELL * 2.4) + 3.0, 3.0, 14.0))
+        var reached := await walk_near(waypoint, waypoint_stop, step_timeout, "%s_authority_%02d" % [label, index])
+        if not reached:
+            record_player_route_event(label, "waypoint_not_reached", {
+                "index": index,
+                "waypoint": vec3(waypoint),
+                "player": vec3(player.global_position),
+                "route": player_route_summary(route)
+            })
+            return false
+
+    var final_remaining := timeout_seconds - (elapsed - started_at)
+    if final_remaining <= 0.0:
+        return flat_distance(player.global_position, target) <= stop_distance
+    if flat_distance(player.global_position, target) <= stop_distance:
+        return true
+    return await walk_near(target, stop_distance, minf(final_remaining, 4.0), "%s_authority_final" % label)
+
+func player_route_timeout_for_target(target: Vector3, minimum_seconds: float, maximum_seconds: float) -> float:
+    var distance := flat_distance(player.global_position, target) if player != null else 0.0
+    var raw := distance / (CELL * 2.0) + 8.0
+    return clampf(raw, minimum_seconds, maximum_seconds)
+
+func player_route_plan_timeout_for_target(target: Vector3, route_timeout_seconds: float) -> float:
+    var distance := flat_distance(player.global_position, target) if player != null else 0.0
+    var raw := distance / (CELL * 3.0) + 6.0
+    var upper := maxf(2.0, minf(24.0, route_timeout_seconds - 3.0))
+    var lower := minf(8.0, upper)
+    return clampf(raw, lower, upper)
+
+func plan_player_authority_route(target: Vector3, stop_distance: float, timeout_seconds: float, label: String) -> Dictionary:
+    var planner = player_route_authority_planner()
+    if planner == null or not planner.has_method("plan_route"):
+        record_player_route_event(label, "planner_missing", {
+            "target": vec3(target),
+            "stopDistance": rounded(stop_distance)
+        })
+        return { "available": false, "ready": false }
+
+    var started_at := elapsed
+    var attempts := 0
+    var last_route := {}
+    while elapsed - started_at <= timeout_seconds:
+        attempts += 1
+        var entry := make_player_route_entry(target, stop_distance, label)
+        var intent := make_player_route_intent(target, stop_distance, label)
+        var route_value = planner.call("plan_route", entry, intent)
+        var route: Dictionary = route_value if route_value is Dictionary else {}
+        last_route = route
+        var ready := bool(route.get("routeAuthorityReady", false))
+        var pending := bool(route.get("routeAuthorityPending", false))
+        var state := String(route.get("routeAuthorityState", ""))
+        var reason := String(route.get("routeAuthorityReason", route.get("reason", "")))
+        if ready:
+            record_player_route_event(label, "plan_ready", {
+                "attempts": attempts,
+                "target": vec3(target),
+                "stopDistance": rounded(stop_distance),
+                "route": player_route_summary(route)
+            })
+            return {
+                "available": true,
+                "ready": true,
+                "route": route,
+                "routeSummary": player_route_summary(route),
+                "attempts": attempts
+            }
+        if bool(route.get("routeAuthorityTerminalFailure", false)) and not pending:
+            record_player_route_event(label, "plan_terminal", {
+                "attempts": attempts,
+                "state": state,
+                "reason": reason,
+                "target": vec3(target),
+                "stopDistance": rounded(stop_distance),
+                "route": player_route_summary(route)
+            })
+            return {
+                "available": true,
+                "ready": false,
+                "route": route,
+                "routeSummary": player_route_summary(route),
+                "attempts": attempts,
+                "state": state,
+                "reason": reason
+            }
+        if attempts == 1 or attempts % 12 == 0:
+            record_player_route_event(label, "plan_waiting", {
+                "attempts": attempts,
+                "state": state,
+                "reason": reason,
+                "target": vec3(target),
+                "route": player_route_summary(route)
+            })
+        await get_tree().physics_frame
+    record_player_route_event(label, "plan_timeout", {
+        "attempts": attempts,
+        "target": vec3(target),
+        "stopDistance": rounded(stop_distance),
+        "route": player_route_summary(last_route)
+    })
+    return {
+        "available": true,
+        "ready": false,
+        "route": last_route,
+        "routeSummary": player_route_summary(last_route),
+        "attempts": attempts,
+        "state": String(last_route.get("routeAuthorityState", "")),
+        "reason": String(last_route.get("routeAuthorityReason", last_route.get("reason", "")))
+    }
+
+func make_player_route_entry(target: Vector3, stop_distance: float, label: String) -> Dictionary:
+    var navigation_world = player_route_navigation_world()
+    var tutorial = main.get("tutorial_system") if main != null else null
+    var town_center := flat_cell(player.global_position)
+    if tutorial != null and tutorial.has_method("state"):
+        var state: Dictionary = tutorial.call("state")
+        var town_center_value = state.get("townCenter", town_center)
+        if town_center_value is Vector2i:
+            town_center = town_center_value
+    var current_home := player_current_home_entry()
+    var inside_current_home := not current_home.is_empty() and position_inside_entry_home(current_home, player.global_position)
+    var entry := {
+        "id": "live_playtest_player",
+        "name": "Live Playtest Player",
+        "body": player,
+        "position": player.global_position if player != null else Vector3.ZERO,
+        "motorProfile": CharacterMotorProfileScript.player_default(),
+        "agentContext": { "traversal_profile_id": "player" },
+        "routeIntentKind": "scripted",
+        "activeGoalKind": "scripted",
+        "goal": "live_playtest_player_route",
+        "job": "playtest",
+        "routePriority": 220,
+        "routeForceReplan": true,
+        "routeStatus": "",
+        "routeReason": "",
+        "routeActions": {},
+        "pathWaypoints": [],
+        "routeCells": [],
+        "routeDynamicAvoidCells": [],
+        "routeBudgetGrantedFrame": -999999,
+        "routeBudgetYieldedFrame": -999999,
+        "routeBudgetWaitFrames": 0,
+        "navmeshTileBudgetWaitFrames": 0,
+        "insideHome": inside_current_home,
+        "insideTown": tutorial_cell_inside_or_on_perimeter(flat_cell(player.global_position), town_center),
+        "townCenter": town_center,
+        "townRadius": TUTORIAL_REPAIR_RADIUS_CELLS,
+        "townKey": "live_tutorial_player",
+        "simulationLod": "active",
+        "debugRouteLabel": label,
+        "debugStopDistance": stop_distance,
+        "debugTarget": target
+    }
+    if navigation_world != null and navigation_world.has_method("world_cell"):
+        entry["routeStartCell"] = navigation_world.call("world_cell", player.global_position)
+    if not current_home.is_empty():
+        for key in ["homeCell", "doorCell", "porchCell", "interiorMinCell", "interiorMaxCell", "porchPosition", "doorPosition"]:
+            if current_home.has(key):
+                entry[key] = current_home.get(key)
+    return entry
+
+func make_player_route_intent(target: Vector3, stop_distance: float, label: String) -> Dictionary:
+    var navigation_world = player_route_navigation_world()
+    var target_cell := flat_cell(target)
+    if navigation_world != null and navigation_world.has_method("world_cell"):
+        var target_cell_value = navigation_world.call("world_cell", target)
+        if target_cell_value is Vector2i:
+            target_cell = target_cell_value
+    return {
+        "kind": "scripted",
+        "target": target,
+        "targetCell": target_cell,
+        "allowOutside": true,
+        "movingHome": false,
+        "arrivalRadius": stop_distance,
+        "priority": 220,
+        "action": "",
+        "interruptible": false,
+        "allowPartial": false,
+        "strictArrival": true,
+        "requiresAuthorityProbe": true,
+        "label": label
+    }
+
+func player_route_waypoints(route: Dictionary) -> Array[Vector3]:
+    var result: Array[Vector3] = []
+    var points: Array = route.get("waypoints", []) if route.get("waypoints", []) is Array else []
+    for point_value in points:
+        if point_value is Vector3:
+            result.append(point_value)
+    return result
+
+func player_route_action_for_waypoint(actions: Dictionary, waypoint: Vector3, handled_action_keys: Dictionary) -> Dictionary:
+    if actions.is_empty():
+        return {}
+    var waypoint_cell := flat_cell(waypoint)
+    var keys := actions.keys()
+    keys.sort()
+    for key_value in keys:
+        var key := String(key_value)
+        if handled_action_keys.has(key):
+            continue
+        var action_value = actions[key_value]
+        if not (action_value is Dictionary):
+            continue
+        var action: Dictionary = action_value
+        if String(action.get("kind", "")) != "door":
+            continue
+        var action_cell := vector2i_from_route_value(action.get("cell", waypoint_cell), waypoint_cell)
+        var entry_position := vector3_from_route_value(action.get("entryPosition", waypoint), waypoint)
+        var exit_position := vector3_from_route_value(action.get("exitPosition", waypoint), waypoint)
+        if absi(action_cell.x - waypoint_cell.x) + absi(action_cell.y - waypoint_cell.y) <= 1:
+            return { "key": key, "action": action }
+        if flat_distance(waypoint, entry_position) <= CELL * 1.25 or flat_distance(waypoint, exit_position) <= CELL * 1.25:
+            return { "key": key, "action": action }
+    return {}
+
+func execute_player_route_action(action: Dictionary, action_key: String, label: String, waypoint_index: int) -> bool:
+    if String(action.get("kind", "")) != "door":
+        return true
+    var door := route_action_door(action)
+    if door == null or not is_instance_valid(door):
+        add_failure("player_route_door_missing", JSON.stringify({
+            "label": label,
+            "actionKey": action_key,
+            "action": route_action_summary(action),
+            "waypointIndex": waypoint_index
+        }))
+        return false
+    if bool(door.get_meta("open", false)):
+        record_player_route_event(label, "door_already_open", {
+            "actionKey": action_key,
+            "door": block_summary(door),
+            "waypointIndex": waypoint_index
+        })
+        return true
+    var entry_position := vector3_from_route_value(action.get("entryPosition", door.global_position), door.global_position)
+    var reached_entry := true
+    if flat_distance(player.global_position, entry_position) > CELL * 0.8:
+        reached_entry = await walk_near(entry_position, CELL * 0.7, 8.0, "%s_authority_door_entry_%02d" % [label, waypoint_index])
+    if not reached_entry:
+        add_failure("player_route_door_entry_not_reached", JSON.stringify({
+            "label": label,
+            "actionKey": action_key,
+            "door": block_summary(door),
+            "entryPosition": vec3(entry_position),
+            "player": vec3(player.global_position)
+        }))
+        return false
+    await wait_physics_frames(POST_ACTION_FRAMES)
+    var hit := await aim_until_interaction_hit(door, "%s_authority_door_%02d" % [label, waypoint_index])
+    interaction_timeline.append({
+        "label": "player_route_before_door_action",
+        "routeLabel": label,
+        "actionKey": action_key,
+        "door": block_summary(door),
+        "player": vec3(player.global_position),
+        "hit": hit
+    })
+    if not interaction_hit_matches_block(hit, door):
+        add_failure("player_route_door_aim_miss", JSON.stringify({
+            "label": label,
+            "actionKey": action_key,
+            "door": block_summary(door),
+            "hit": hit,
+            "player": vec3(player.global_position)
+        }))
+        return false
+    dispatch_mouse_button(MOUSE_BUTTON_RIGHT, true)
+    dispatch_mouse_button(MOUSE_BUTTON_RIGHT, false)
+    await wait_physics_frames(POST_ACTION_FRAMES)
+    var opened := bool(door.get_meta("open", false))
+    record_player_route_event(label, "door_action", {
+        "actionKey": action_key,
+        "opened": opened,
+        "door": block_summary(door),
+        "player": vec3(player.global_position),
+        "waypointIndex": waypoint_index,
+        "hit": hit
+    })
+    if not opened:
+        add_failure("player_route_door_did_not_open", JSON.stringify({
+            "label": label,
+            "actionKey": action_key,
+            "door": block_summary(door),
+            "player": vec3(player.global_position),
+            "hit": hit
+        }))
+    return opened
+
+func route_action_door(action: Dictionary) -> Node3D:
+    var door_value = action.get("door", null)
+    var door := door_value as Node3D
+    if door != null and is_instance_valid(door):
+        return door
+    var cell := vector2i_from_route_value(action.get("cell", Vector2i(999999, 999999)), Vector2i(999999, 999999))
+    if cell.x == 999999:
+        return null
+    var door_position := world_position_for_flat_cell(cell)
+    var nearest := nearest_block("door", door_position)
+    if nearest != null and is_instance_valid(nearest) and flat_distance(nearest.global_position, door_position) <= CELL * 2.0:
+        return nearest
+    return null
+
+func vector2i_from_route_value(value, fallback: Vector2i) -> Vector2i:
+    if value is Vector2i:
+        return value
+    if value is Vector3i:
+        return Vector2i(value.x, value.z)
+    if value is Vector2:
+        return Vector2i(roundi(value.x), roundi(value.y))
+    if value is Array and value.size() >= 2:
+        return Vector2i(int(value[0]), int(value[1]))
+    if value is Dictionary:
+        return Vector2i(int(value.get("x", fallback.x)), int(value.get("y", fallback.y)))
+    return fallback
+
+func vector3_from_route_value(value, fallback: Vector3) -> Vector3:
+    if value is Vector3:
+        return value
+    return vector3_from_summary(value) if (value is Array or value is Dictionary) else fallback
+
+func record_player_route_event(label: String, event_type: String, data: Dictionary) -> void:
+    var event := data.duplicate(true)
+    event["label"] = label
+    event["event"] = event_type
+    event["time"] = rounded(elapsed)
+    event["physicsFrame"] = int(Engine.get_physics_frames())
+    player_route_authority_events.append(event)
+    if player_route_authority_events.size() > 240:
+        player_route_authority_events.remove_at(0)
+    report_data["playerRouteAuthorityEvents"] = player_route_authority_events
+    if event_type in ["already_at_route_target", "plan_ready", "plan_terminal", "plan_timeout", "block_pose_attempt", "block_reach_approach", "placement_pose_attempt", "waypoint_not_reached", "movement_stuck"]:
+        mark_progress("player_route_%s_%s" % [safe_capture_id(label), event_type])
+
+func player_route_summary(route: Dictionary) -> Dictionary:
+    if route.is_empty():
+        return {}
+    var waypoints: Array = route.get("waypoints", []) if route.get("waypoints", []) is Array else []
+    var actions: Dictionary = route.get("actions", {}) if route.get("actions", {}) is Dictionary else {}
+    return {
+        "ok": bool(route.get("ok", false)),
+        "status": String(route.get("status", "")),
+        "reason": String(route.get("reason", "")),
+        "source": String(route.get("source", "")),
+        "routeAuthorityReady": bool(route.get("routeAuthorityReady", false)),
+        "routeAuthorityState": String(route.get("routeAuthorityState", "")),
+        "routeAuthorityReason": String(route.get("routeAuthorityReason", "")),
+        "routeAuthorityPending": bool(route.get("routeAuthorityPending", false)),
+        "routeAuthorityTerminalFailure": bool(route.get("routeAuthorityTerminalFailure", false)),
+        "waypointCount": waypoints.size(),
+        "waypoints": vec3_array_limited(waypoints, 18),
+        "actions": route_actions_summary(actions),
+        "collisionProbe": collision_probe_summary(route.get("collisionProbe", {}))
+    }
+
+func route_actions_summary(actions: Dictionary) -> Array[Dictionary]:
+    var result: Array[Dictionary] = []
+    var keys := actions.keys()
+    keys.sort()
+    for key_value in keys:
+        var action_value = actions[key_value]
+        if action_value is Dictionary:
+            var action: Dictionary = action_value
+            var summary := route_action_summary(action)
+            summary["key"] = String(key_value)
+            result.append(summary)
+    return result
+
+func route_action_summary(action: Dictionary) -> Dictionary:
+    var summary := {
+        "kind": String(action.get("kind", "")),
+        "portalId": String(action.get("portalId", "")),
+        "actionId": String(action.get("actionId", "")),
+        "direction": String(action.get("direction", "")),
+        "navLink": bool(action.get("navLink", false)),
+        "requiresSmartObject": bool(action.get("requiresSmartObject", false)),
+        "enabled": bool(action.get("enabled", false)),
+        "cell": vec2i(vector2i_from_route_value(action.get("cell", Vector2i.ZERO), Vector2i.ZERO)),
+        "entryCell": vec2i(vector2i_from_route_value(action.get("entryCell", Vector2i.ZERO), Vector2i.ZERO)),
+        "entryPosition": vec3(vector3_from_route_value(action.get("entryPosition", Vector3.ZERO), Vector3.ZERO)),
+        "exitPosition": vec3(vector3_from_route_value(action.get("exitPosition", Vector3.ZERO), Vector3.ZERO))
+    }
+    var door := route_action_door(action)
+    if door != null and is_instance_valid(door):
+        summary["door"] = block_summary(door)
+    return summary
+
+func collision_probe_summary(value) -> Dictionary:
+    if not (value is Dictionary):
+        return {}
+    var probe: Dictionary = value
+    var details_value = probe.get("details", {})
+    var details := {}
+    if details_value is Dictionary:
+        details = details_value.duplicate(true)
+        if details.get("sample") is Vector3:
+            details["sample"] = vec3(details.get("sample"))
+        if details.get("position") is Vector3:
+            details["position"] = vec3(details.get("position"))
+        if details.get("cell") is Vector2i:
+            details["cell"] = vec2i(details.get("cell"))
+    return {
+        "ok": bool(probe.get("ok", false)),
+        "status": String(probe.get("status", "")),
+        "reason": String(probe.get("reason", "")),
+        "authoritative": bool(probe.get("authoritative", false)),
+        "sampleCount": int(probe.get("sampleCount", 0)),
+        "details": details
+    }
+
 func append_unique_route_cell(route_cells: Array[Vector2i], cell: Vector2i) -> void:
     if route_cells.is_empty() or route_cells[route_cells.size() - 1] != cell:
         route_cells.append(cell)
+
+func tutorial_perimeter_crossing(current_cell: Vector2i, target_cell: Vector2i, town_center: Vector2i) -> Dictionary:
+    var current_inside := tutorial_cell_inside_or_on_perimeter(current_cell, town_center)
+    var target_inside := tutorial_cell_inside_or_on_perimeter(target_cell, town_center)
+    var current_outside := tutorial_cell_outside_perimeter(current_cell, town_center)
+    var target_outside := tutorial_cell_outside_perimeter(target_cell, town_center)
+    if not ((current_inside and target_outside) or (current_outside and target_inside)):
+        return {}
+    var gate := tutorial_gate_cells_for_reference(target_cell if current_inside else current_cell, town_center)
+    if gate.is_empty():
+        return {}
+    var gate_cell: Vector2i = gate.get("gateCell", Vector2i(999999, 999999))
+    var inside_cell: Vector2i = gate.get("insideCell", gate_cell)
+    var outside_cell: Vector2i = gate.get("outsideCell", gate_cell)
+    if current_inside:
+        return {
+            "active": true,
+            "direction": "outbound",
+            "gateCell": gate_cell,
+            "approachCell": inside_cell,
+            "tailCells": [gate_cell, outside_cell, target_cell]
+        }
+    return {
+        "active": true,
+        "direction": "inbound",
+        "gateCell": gate_cell,
+        "approachCell": outside_cell,
+        "tailCells": [gate_cell, inside_cell, target_cell]
+    }
+
+func tutorial_cell_inside_or_on_perimeter(cell: Vector2i, town_center: Vector2i) -> bool:
+    return absi(cell.x - town_center.x) <= TUTORIAL_REPAIR_RADIUS_CELLS \
+        and absi(cell.y - town_center.y) <= TUTORIAL_REPAIR_RADIUS_CELLS
+
+func tutorial_cell_outside_perimeter(cell: Vector2i, town_center: Vector2i) -> bool:
+    return absi(cell.x - town_center.x) > TUTORIAL_REPAIR_RADIUS_CELLS + 1 \
+        or absi(cell.y - town_center.y) > TUTORIAL_REPAIR_RADIUS_CELLS + 1
+
+func tutorial_gate_cells_for_reference(reference_cell: Vector2i, town_center: Vector2i) -> Dictionary:
+    var dx := reference_cell.x - town_center.x
+    var dy := reference_cell.y - town_center.y
+    if absi(dx) >= absi(dy):
+        if dx >= 0:
+            return {
+                "side": "east",
+                "gateCell": Vector2i(town_center.x + TUTORIAL_REPAIR_RADIUS_CELLS, town_center.y),
+                "insideCell": Vector2i(town_center.x + TUTORIAL_REPAIR_RADIUS_CELLS - 3, town_center.y),
+                "outsideCell": Vector2i(town_center.x + TUTORIAL_REPAIR_RADIUS_CELLS + 3, town_center.y)
+            }
+        return {
+            "side": "west",
+            "gateCell": Vector2i(town_center.x - TUTORIAL_REPAIR_RADIUS_CELLS, town_center.y),
+            "insideCell": Vector2i(town_center.x - TUTORIAL_REPAIR_RADIUS_CELLS + 3, town_center.y),
+            "outsideCell": Vector2i(town_center.x - TUTORIAL_REPAIR_RADIUS_CELLS - 3, town_center.y)
+        }
+    if dy >= 0:
+        return {
+            "side": "south",
+            "gateCell": Vector2i(town_center.x, town_center.y + TUTORIAL_REPAIR_RADIUS_CELLS),
+            "insideCell": Vector2i(town_center.x, town_center.y + TUTORIAL_REPAIR_RADIUS_CELLS - 3),
+            "outsideCell": Vector2i(town_center.x, town_center.y + TUTORIAL_REPAIR_RADIUS_CELLS + 3)
+        }
+    return {
+        "side": "north",
+        "gateCell": Vector2i(town_center.x, town_center.y - TUTORIAL_REPAIR_RADIUS_CELLS),
+        "insideCell": Vector2i(town_center.x, town_center.y - TUTORIAL_REPAIR_RADIUS_CELLS + 3),
+        "outsideCell": Vector2i(town_center.x, town_center.y - TUTORIAL_REPAIR_RADIUS_CELLS - 3)
+    }
+
+func open_tutorial_route_gate(gate_cell: Vector2i, label: String) -> bool:
+    var gate_position := world_position_for_flat_cell(gate_cell)
+    var gate := nearest_block("door", gate_position)
+    if gate == null or not is_instance_valid(gate) or flat_distance(gate.global_position, gate_position) > CELL * 2.0:
+        add_failure("tutorial_route_gate_missing", JSON.stringify({
+            "label": label,
+            "gateCell": vec2i(gate_cell),
+            "gatePosition": vec3(gate_position)
+        }))
+        return false
+    if bool(gate.get_meta("open", false)):
+        return true
+    var reached := await walk_near(gate.global_position, CELL * 1.65, 10.0, "%s_route_gate_approach" % label)
+    if not reached:
+        add_failure("tutorial_route_gate_not_reached", JSON.stringify({
+            "label": label,
+            "gate": block_summary(gate),
+            "player": vec3(player.global_position)
+        }))
+        return false
+    var hit := await aim_until_interaction_hit(gate, "%s_route_gate" % label)
+    if not interaction_hit_matches_block(hit, gate):
+        add_failure("tutorial_route_gate_aim_miss", JSON.stringify({
+            "label": label,
+            "gate": block_summary(gate),
+            "hit": hit,
+            "player": vec3(player.global_position)
+        }))
+        return false
+    dispatch_mouse_button(MOUSE_BUTTON_RIGHT, true)
+    dispatch_mouse_button(MOUSE_BUTTON_RIGHT, false)
+    await wait_physics_frames(POST_ACTION_FRAMES)
+    if not bool(gate.get_meta("open", false)):
+        add_failure("tutorial_route_gate_did_not_open", JSON.stringify({
+            "label": label,
+            "gate": block_summary(gate),
+            "hit": hit,
+            "player": vec3(player.global_position)
+        }))
+        return false
+    interaction_timeline.append({
+        "label": "%s_route_gate_opened" % label,
+        "gate": block_summary(gate),
+        "player": vec3(player.global_position)
+    })
+    return true
 
 func walk_intro_path_to_town_center(tutorial, label: String) -> bool:
     var start_cell := intro_state_cell(tutorial, "startCell", flat_cell(player.global_position))
@@ -3858,6 +4941,39 @@ func use_block_with_real_action(block: Node3D, label: String, stop_distance: flo
     if block == null or not is_instance_valid(block):
         add_failure("%s_block_missing_for_real_action" % label, "block was null or invalid")
         return false
+    ensure_live_player_navigator()
+    if live_player_navigator != null and live_player_navigator.has_method("use_block") and player_route_authority_available():
+        mark_progress("using_%s_with_player_navigator" % label)
+        var navigator_result: Dictionary = await live_player_navigator.call("use_block", block, label, {
+            "timeout": maxf(timeout_seconds, 16.0),
+            "poseStopDistance": minf(stop_distance, CELL * 0.75),
+            "actionKind": "use_block"
+        })
+        interaction_timeline.append({
+            "label": "navigator_%s_action" % label,
+            "player": vec3(player.global_position),
+            "block": block_summary(block),
+            "result": navigator_result
+        })
+        sample_player("after_navigator_%s_action" % label)
+        if bool(navigator_result.get("ok", false)):
+            return true
+        if full_player_pov_visual_mode():
+            await capture_player_pov_stage(
+                "player_pov_failure_%s_navigator_action" % safe_capture_id(label),
+                block.global_position + Vector3(0.0, CELL * 0.65, 0.0),
+                {
+                    "failureCandidate": "%s_navigator_action_failed" % label,
+                    "block": block_summary(block),
+                    "navigatorResult": navigator_result
+                }
+            )
+        add_failure("%s_navigator_action_failed" % label, JSON.stringify({
+            "player": vec3(player.global_position),
+            "block": block_summary(block),
+            "result": navigator_result
+        }))
+        return false
     mark_progress("walking_to_%s" % label)
     var reached := false
     if day_one_tutorial and label.begins_with("day_one"):
@@ -3955,6 +5071,38 @@ func reposition_and_aim_for_block_interaction(block: Node3D, label: String) -> D
 func use_bed_with_real_action(bed: Node3D, label: String, timeout_seconds: float) -> bool:
     if bed == null or not is_instance_valid(bed):
         add_failure("%s_block_missing_for_real_action" % label, "bed was null or invalid")
+        return false
+    ensure_live_player_navigator()
+    if live_player_navigator != null and live_player_navigator.has_method("use_block") and player_route_authority_available():
+        var navigator_result: Dictionary = await live_player_navigator.call("use_block", bed, label, {
+            "timeout": maxf(timeout_seconds, 16.0),
+            "poseStopDistance": CELL * 0.55,
+            "actionKind": "use_bed"
+        })
+        interaction_timeline.append({
+            "label": "navigator_bed_%s" % label,
+            "player": vec3(player.global_position),
+            "block": block_summary(bed),
+            "result": navigator_result
+        })
+        sample_player("after_navigator_%s_action" % label)
+        if bool(navigator_result.get("ok", false)):
+            return true
+        if full_player_pov_visual_mode():
+            await capture_player_pov_stage(
+                "player_pov_failure_%s_no_reachable_bed_hit" % safe_capture_id(label),
+                bed.global_position + Vector3(0.0, CELL * 0.45, 0.0),
+                {
+                    "failureCandidate": "%s_no_reachable_bed_hit" % label,
+                    "bed": block_summary(bed),
+                    "navigatorResult": navigator_result
+                }
+            )
+        add_failure("%s_no_reachable_bed_hit" % label, JSON.stringify({
+            "player": vec3(player.global_position),
+            "bed": block_summary(bed),
+            "navigatorResult": navigator_result
+        }))
         return false
     var last_hit := {}
     var stand_positions := [
@@ -4054,6 +5202,16 @@ func press_craft_button(recipe_id: String, label: String) -> void:
     add_failure("craft_button_missing", "%s prefix=%s" % [label, prefix])
 
 func place_repair_item(item_id: String, cell: Vector2i, label: String, tutorial) -> void:
+    if repair_target_already_counted(tutorial, item_id, cell):
+        repair_placement_events.append({
+            "label": label,
+            "item": item_id,
+            "targetCell": vec2i(cell),
+            "skipped": true,
+            "reason": "target_already_counted_by_gameplay",
+            "inventory": inventory_totals()
+        })
+        return
     var selected_item := await select_hotbar_item(item_id)
     if not selected_item:
         add_failure("repair_item_not_in_hotbar", "%s item=%s inventory=%s" % [label, item_id, JSON.stringify(inventory_totals())])
@@ -4063,7 +5221,87 @@ func place_repair_item(item_id: String, cell: Vector2i, label: String, tutorial)
     var before_lamps := int(before.get("lampsPlaced", 0))
     var target_position := world_position_for_flat_cell(cell)
     var stand_position := placement_stand_position(cell, tutorial)
-    var reached_stand := await walk_to_repair_stand(cell, stand_position, tutorial, label)
+    var town_center_for_pose := intro_state_cell(tutorial, "townCenter", flat_cell(player.global_position))
+    var preview := {}
+    var stand_attempts: Array[Dictionary] = []
+    var reached_stand := false
+    var preview_matched := false
+    var strict_placement_cell := false
+    ensure_live_player_navigator()
+    if live_player_navigator != null and live_player_navigator.has_method("place_item_at_cell") and player_route_authority_available():
+        var navigator_result: Dictionary = await live_player_navigator.call("place_item_at_cell", item_id, cell, label, {
+            "timeout": 24.0,
+            "poseStopDistance": CELL * 0.45,
+            "performAction": false,
+            "strictPlacementCell": strict_placement_cell,
+            "preferredStandTowardCell": town_center_for_pose
+        })
+        var proof: Dictionary = navigator_result.get("proof", {}) if navigator_result.get("proof", {}) is Dictionary else {}
+        stand_position = vector3_from_summary(proof.get("pose", stand_position))
+        preview = proof.get("preview", {}) if proof.get("preview", {}) is Dictionary else {}
+        var attempts_value = proof.get("attempts", [])
+        if attempts_value is Array:
+            for attempt_value in attempts_value:
+                if attempt_value is Dictionary:
+                    stand_attempts.append(attempt_value)
+        var navigator_event := {
+            "label": label,
+            "item": item_id,
+            "targetCell": vec2i(cell),
+            "standPosition": vec3(stand_position),
+            "playerPosition": vec3(player.global_position),
+            "preview": preview,
+            "attempts": stand_attempts,
+            "navigatorResult": navigator_result,
+            "inventory": inventory_totals()
+        }
+        repair_placement_events.append(navigator_event)
+        if bool(navigator_result.get("ok", false)):
+            reached_stand = true
+            preview_matched = placement_preview_matches_target(preview, item_id, cell, strict_placement_cell)
+        else:
+            var any_route_ok := false
+            for attempt in stand_attempts:
+                if bool(attempt.get("routeOk", false)):
+                    any_route_ok = true
+                    break
+            var failure_code := "repair_placement_preview_miss" if any_route_ok else "repair_placement_stand_not_reached"
+            if full_player_pov_visual_mode():
+                await capture_player_pov_stage(
+                    "player_pov_failure_%s_%s" % [safe_capture_id(label), "preview_miss" if any_route_ok else "stand_not_reached"],
+                    target_position + Vector3(0.0, CELL * 0.75, 0.0),
+                    navigator_event
+                )
+            add_failure(failure_code, JSON.stringify(navigator_event))
+            return
+    if not reached_stand:
+        var stand_candidates := placement_stand_positions(cell, tutorial)
+        for stand_index in range(stand_candidates.size()):
+            stand_position = stand_candidates[stand_index]
+            var stand_label := "%s_stand_%02d" % [label, stand_index]
+            var reached_candidate := await walk_to_repair_stand(cell, stand_position, tutorial, stand_label)
+            var stand_attempt := {
+                "label": stand_label,
+                "item": item_id,
+                "targetCell": vec2i(cell),
+                "standPosition": vec3(stand_position),
+                "playerPosition": vec3(player.global_position),
+                "reached": reached_candidate,
+                "inventory": inventory_totals()
+            }
+            if not reached_candidate:
+                stand_attempts.append(stand_attempt)
+                repair_placement_events.append(stand_attempt)
+                continue
+            reached_stand = true
+            preview = await aim_until_placement_preview(item_id, cell, stand_label, strict_placement_cell)
+            stand_attempt["preview"] = preview
+            stand_attempt["previewMatched"] = placement_preview_matches_target(preview, item_id, cell, strict_placement_cell)
+            stand_attempts.append(stand_attempt)
+            repair_placement_events.append(stand_attempt)
+            if bool(stand_attempt.get("previewMatched", false)):
+                preview_matched = true
+                break
     if not reached_stand:
         var stand_event := {
             "label": label,
@@ -4071,6 +5309,7 @@ func place_repair_item(item_id: String, cell: Vector2i, label: String, tutorial)
             "targetCell": vec2i(cell),
             "standPosition": vec3(stand_position),
             "playerPosition": vec3(player.global_position),
+            "attempts": stand_attempts,
             "inventory": inventory_totals()
         }
         repair_placement_events.append(stand_event)
@@ -4082,8 +5321,7 @@ func place_repair_item(item_id: String, cell: Vector2i, label: String, tutorial)
             )
         add_failure("repair_placement_stand_not_reached", JSON.stringify(stand_event))
         return
-    var preview := await aim_until_placement_preview(item_id, cell, label)
-    if not placement_preview_matches_target(preview, item_id, cell):
+    if not preview_matched:
         var preview_event := {
             "label": label,
             "item": item_id,
@@ -4091,6 +5329,7 @@ func place_repair_item(item_id: String, cell: Vector2i, label: String, tutorial)
             "standPosition": vec3(stand_position),
             "playerPosition": vec3(player.global_position),
             "preview": preview,
+            "attempts": stand_attempts,
             "inventory": inventory_totals()
         }
         repair_placement_events.append(preview_event)
@@ -4146,6 +5385,100 @@ func place_repair_item(item_id: String, cell: Vector2i, label: String, tutorial)
             )
         add_failure("repair_placement_not_counted", JSON.stringify(event))
 
+func place_next_unrepaired_target(item_id: String, targets: Array, north_side: bool, town_center: Vector2i, label_prefix: String, tutorial) -> bool:
+    for index in repair_target_indices(targets.size(), north_side):
+        if not (targets[index] is Vector2i):
+            continue
+        var cell: Vector2i = targets[index]
+        if (cell.y <= town_center.y) != north_side:
+            continue
+        if repair_target_already_counted(tutorial, item_id, cell):
+            continue
+        await place_repair_item(item_id, cell, "%s_%02d" % [label_prefix, index], tutorial)
+        return true
+    return false
+
+func compact_final_rescue_return_snapshot(row: Dictionary) -> Dictionary:
+    return {
+        "label": str(row.get("label", "")),
+        "time": row.get("time", 0.0),
+        "state": row.get("state", {}),
+        "survival": row.get("survival", {}),
+        "hostileStats": row.get("hostileStats", {}),
+        "combatEventCount": final_rescue_combat_events.size(),
+        "mira": compact_return_npc_summary(row.get("mira", {}) if row.get("mira", {}) is Dictionary else {}),
+        "niko": compact_return_npc_summary(row.get("niko", {}) if row.get("niko", {}) is Dictionary else {}),
+        "sera": compact_return_npc_summary(row.get("sera", {}) if row.get("sera", {}) is Dictionary else {})
+    }
+
+func compact_return_npc_summary(summary: Dictionary) -> Dictionary:
+    if summary.is_empty():
+        return {}
+    var authority: Dictionary = summary.get("routeAuthorityV2", {}) if summary.get("routeAuthorityV2", {}) is Dictionary else {}
+    var lease: Dictionary = authority.get("routeLease", {}) if authority.get("routeLease", {}) is Dictionary else {}
+    var proof: Dictionary = authority.get("proof", {}) if authority.get("proof", {}) is Dictionary else {}
+    var recent_events: Array = authority.get("recentEvents", []) if authority.get("recentEvents", []) is Array else []
+    return {
+        "id": str(summary.get("id", "")),
+        "name": str(summary.get("name", "")),
+        "position": summary.get("position", []),
+        "cell": summary.get("cell", []),
+        "homeCell": summary.get("homeCell", []),
+        "porchCell": summary.get("porchCell", []),
+        "doorCell": summary.get("doorCell", []),
+        "interiorMinCell": summary.get("interiorMinCell", []),
+        "interiorMaxCell": summary.get("interiorMaxCell", []),
+        "strictInsideHome": bool(summary.get("strictInsideHome", false)),
+        "insideHomeMeta": bool(summary.get("insideHomeMeta", false)),
+        "routeStatus": str(summary.get("routeStatus", "")),
+        "routeReason": str(summary.get("routeReason", "")),
+        "lastMoveDistance": summary.get("lastMoveDistance", 0.0),
+        "npcSpeedMode": str(summary.get("npcSpeedMode", "")),
+        "npcSpeed": summary.get("npcSpeed", 0.0),
+        "npcSpeedReason": str(summary.get("npcSpeedReason", "")),
+        "activeDoorPortalId": str(summary.get("activeDoorPortalId", "")),
+        "activeDoorDirection": str(summary.get("activeDoorDirection", "")),
+        "motorRequestedVelocity": summary.get("motorRequestedVelocity", []),
+        "motorBlockedContactKind": str(summary.get("motorBlockedContactKind", "")),
+        "motorBlockedContactName": str(summary.get("motorBlockedContactName", "")),
+        "corridorFollow": summary.get("corridorFollow", {}),
+        "corridorProgress": summary.get("corridorProgress", {}),
+        "routeAuthorityV2": {
+            "state": str(authority.get("state", "")),
+            "reason": str(authority.get("reason", "")),
+            "requestId": str(authority.get("requestId", "")),
+            "leaseId": str(authority.get("leaseId", "")),
+            "pendingBudgetFrames": int(authority.get("pendingBudgetFrames", 0)),
+            "pendingNavDataFrames": int(authority.get("pendingNavDataFrames", 0)),
+            "pendingProbeFrames": int(authority.get("pendingProbeFrames", 0)),
+            "planningWaitFrames": int(authority.get("planningWaitFrames", 0)),
+            "queuedFrames": int(authority.get("queuedFrames", 0)),
+            "eventCount": int(authority.get("eventCount", 0)),
+            "recentEvents": recent_events.slice(maxi(0, recent_events.size() - 4), recent_events.size()),
+            "proof": {
+                "ok": bool(proof.get("ok", false)),
+                "status": str(proof.get("status", "")),
+                "reason": str(proof.get("reason", "")),
+                "routeSource": str(proof.get("routeSource", "")),
+                "collisionBacked": bool(proof.get("collisionBacked", false))
+            },
+            "routeLease": {
+                "targetCell": str(lease.get("targetCell", "")),
+                "cellCount": (lease.get("cells", []) as Array).size() if lease.get("cells", []) is Array else 0,
+                "actionCount": (lease.get("actions", {}) as Dictionary).size() if lease.get("actions", {}) is Dictionary else 0,
+                "source": str(lease.get("source", "")),
+                "state": str(lease.get("state", ""))
+            }
+        }
+    }
+
+func repair_target_already_counted(tutorial, item_id: String, cell: Vector2i) -> bool:
+    if tutorial == null:
+        return false
+    var key := repair_cell_key(cell)
+    var repaired_value = tutorial.get("repaired_fence") if item_id == "woodBlock" else tutorial.get("repaired_lamps")
+    return repaired_value is Dictionary and (repaired_value as Dictionary).has(key)
+
 func select_hotbar_item(item_id: String) -> bool:
     var inventory_system = main.get("inventory_system") if main != null else null
     if inventory_system == null:
@@ -4178,7 +5511,9 @@ func placement_stand_position(cell: Vector2i, tutorial) -> Vector3:
     var town_center := Vector2i.ZERO
     if tutorial != null and tutorial.has_method("state"):
         var state: Dictionary = tutorial.call("state")
-        town_center = state.get("townCenter", Vector2i.ZERO)
+        var town_center_value = state.get("townCenter", Vector2i.ZERO)
+        if town_center_value is Vector2i:
+            town_center = town_center_value
     var direction := Vector2(float(town_center.x - cell.x), float(town_center.y - cell.y))
     if direction.length_squared() < 0.001:
         direction = Vector2(1.0, 0.0)
@@ -4186,6 +5521,48 @@ func placement_stand_position(cell: Vector2i, tutorial) -> Vector3:
     var stand_x := float(cell.x) + direction.x * 1.15
     var stand_z := float(cell.y) + direction.y * 1.15
     return world_position_for_flat_coords(stand_x, stand_z)
+
+func placement_stand_positions(cell: Vector2i, tutorial) -> Array[Vector3]:
+    var town_center := Vector2i.ZERO
+    if tutorial != null and tutorial.has_method("state"):
+        var state: Dictionary = tutorial.call("state")
+        var town_center_value = state.get("townCenter", Vector2i.ZERO)
+        if town_center_value is Vector2i:
+            town_center = town_center_value
+    var direction := Vector2(float(town_center.x - cell.x), float(town_center.y - cell.y))
+    if direction.length_squared() < 0.001:
+        direction = Vector2(1.0, 0.0)
+    direction = direction.normalized()
+    var lateral := Vector2(-direction.y, direction.x)
+    var result: Array[Vector3] = []
+    var seen := {}
+    for forward in [1.15, 1.75, 2.35, 2.95, 3.45]:
+        for side in [0.0, 0.55, -0.55, 1.05, -1.05, 1.55, -1.55]:
+            var stand_x := float(cell.x) + direction.x * float(forward) + lateral.x * float(side)
+            var stand_z := float(cell.y) + direction.y * float(forward) + lateral.y * float(side)
+            append_unique_stand_position(result, seen, world_position_for_flat_coords(stand_x, stand_z))
+    for cardinal in [
+        Vector2(2.0, 0.0),
+        Vector2(-2.0, 0.0),
+        Vector2(0.0, 2.0),
+        Vector2(0.0, -2.0),
+        Vector2(2.0, 2.0),
+        Vector2(-2.0, 2.0),
+        Vector2(2.0, -2.0),
+        Vector2(-2.0, -2.0)
+    ]:
+        append_unique_stand_position(result, seen, world_position_for_flat_coords(float(cell.x) + cardinal.x, float(cell.y) + cardinal.y))
+    result.sort_custom(func(a: Vector3, b: Vector3):
+        return flat_distance(player.global_position, a) < flat_distance(player.global_position, b)
+    )
+    return result
+
+func append_unique_stand_position(result: Array[Vector3], seen: Dictionary, position: Vector3) -> void:
+    var key := "%d,%d" % [roundi(position.x * 10.0), roundi(position.z * 10.0)]
+    if seen.has(key):
+        return
+    seen[key] = true
+    result.append(position)
 
 func repair_target_indices(count: int, north_side: bool) -> Array:
     var result := []
@@ -4240,8 +5617,11 @@ func walk_to_repair_stand(cell: Vector2i, stand_position: Vector3, tutorial, lab
         return await walk_tutorial_route_near(stand_position, CELL * 0.38, maxf(stand_timeout, 18.0), "walking_to_%s" % label)
     return await walk_near(stand_position, CELL * 0.38, stand_timeout, "walking_to_%s" % label)
 
-func aim_until_placement_preview(item_id: String, cell: Vector2i, label: String) -> Dictionary:
+func aim_until_placement_preview(item_id: String, cell: Vector2i, label: String, strict_cell := false, match_cell := Vector2i(2147483647, 2147483647)) -> Dictionary:
     var target_position := world_position_for_flat_cell(cell)
+    var target_cell := match_cell
+    if target_cell == Vector2i(2147483647, 2147483647):
+        target_cell = cell
     var offsets := [
         Vector3(0.0, -CELL * 0.16, 0.0),
         Vector3(0.0, CELL * 0.02, 0.0),
@@ -4256,11 +5636,13 @@ func aim_until_placement_preview(item_id: String, cell: Vector2i, label: String)
         aim_at(target_position + offset)
         await wait_physics_frames(2)
         summary = placement_preview_summary(item_id)
-        if placement_preview_matches_target(summary, item_id, cell):
+        if placement_preview_matches_target(summary, item_id, target_cell, strict_cell):
             repair_placement_events.append({
                 "label": "preview_%s" % label,
                 "item": item_id,
-                "targetCell": vec2i(cell),
+                "aimCell": vec2i(cell),
+                "targetCell": vec2i(target_cell),
+                "strictPlacementCell": strict_cell,
                 "playerPosition": vec3(player.global_position),
                 "preview": summary
             })
@@ -4268,7 +5650,9 @@ func aim_until_placement_preview(item_id: String, cell: Vector2i, label: String)
     repair_placement_events.append({
         "label": "preview_miss_%s" % label,
         "item": item_id,
-        "targetCell": vec2i(cell),
+        "aimCell": vec2i(cell),
+        "targetCell": vec2i(target_cell),
+        "strictPlacementCell": strict_cell,
         "playerPosition": vec3(player.global_position),
         "preview": summary
     })
@@ -4318,7 +5702,7 @@ func placement_hit_summary(hit: Dictionary) -> Dictionary:
         "normal": vec3(normal)
     }
 
-func placement_preview_matches_target(summary: Dictionary, item_id: String, target_cell: Vector2i) -> bool:
+func placement_preview_matches_target(summary: Dictionary, item_id: String, target_cell: Vector2i, strict_cell := false) -> bool:
     if not bool(summary.get("hit", false)) or not bool(summary.get("withinReach", false)) or bool(summary.get("blocked", false)):
         return false
     var flat_value = summary.get("flatCell", {})
@@ -4329,6 +5713,8 @@ func placement_preview_matches_target(summary: Dictionary, item_id: String, targ
         flat = Vector2i(int(flat_value.get("x", 2147483647)), int(flat_value.get("y", 2147483647)))
     else:
         return false
+    if strict_cell:
+        return flat == target_cell
     var tolerance := 1 if item_id == "woodBlock" else 3
     return absi(flat.x - target_cell.x) + absi(flat.y - target_cell.y) <= tolerance
 
@@ -4481,40 +5867,28 @@ func block_summary(block: Node3D) -> Dictionary:
     }
 
 func dispatch_mouse_button(button_index: int, pressed: bool) -> void:
+    dispatch_mouse_button_at(button_index, pressed, get_viewport().get_visible_rect().size * 0.5, "dispatch_mouse")
+
+func dispatch_mouse_button_at(button_index: int, pressed: bool, position: Vector2, label := "dispatch_mouse") -> void:
     var event := InputEventMouseButton.new()
     event.button_index = button_index
     event.pressed = pressed
-    var center := get_viewport().get_visible_rect().size * 0.5
-    event.position = center
-    event.global_position = center
-    var has_use_or_place := main != null and main.has_method("use_or_place")
-    var routes_to_use_or_place := pressed and button_index == MOUSE_BUTTON_RIGHT and has_use_or_place
+    event.position = position
+    event.global_position = position
     interaction_timeline.append({
-        "label": "dispatch_mouse",
+        "label": label,
         "button": button_index,
         "pressed": pressed,
-        "hasUseOrPlace": has_use_or_place,
-        "usingUseOrPlace": routes_to_use_or_place
+        "position": vec2(position),
+        "routedThroughViewportInput": true
     })
-    if routes_to_use_or_place:
-        main.call("use_or_place")
-        interaction_timeline.append({
-            "label": "after_use_or_place_call",
-            "state": runtime_action_state()
-        })
-    elif main != null and main.has_method("_unhandled_input"):
-        main.call("_unhandled_input", event)
-    else:
-        get_viewport().push_input(event)
+    get_viewport().push_input(event)
 
 func dispatch_key(keycode: int, pressed: bool) -> void:
     var event := InputEventKey.new()
     event.keycode = keycode
     event.pressed = pressed
-    if main != null and main.has_method("_unhandled_input"):
-        main.call("_unhandled_input", event)
-    else:
-        get_viewport().push_input(event)
+    get_viewport().push_input(event)
 
 func runtime_action_state() -> Dictionary:
     var utility = main.get("utility_system") if main != null else null
@@ -4550,6 +5924,15 @@ func bind_scene_nodes() -> void:
     player = main.get("player") as CharacterBody3D
     if player != null:
         camera = player.get("camera") as Camera3D
+    ensure_live_player_navigator()
+
+func ensure_live_player_navigator() -> void:
+    if main == null or player == null or camera == null:
+        return
+    if live_player_navigator == null:
+        live_player_navigator = LivePlaytestPlayerNavigatorScript.new()
+    if live_player_navigator != null and live_player_navigator.has_method("setup"):
+        live_player_navigator.call("setup", main, player, camera, self)
 
 func nearest_block(block_type: String, origin: Vector3) -> Node3D:
     if main == null:
@@ -4965,6 +6348,7 @@ func npc_summary(entry: Dictionary) -> Dictionary:
         "strictInsideHome": bool(strict_home_status(entry).get("strictInside", false)),
         "routeStatus": String(entry.get("routeStatus", "")),
         "routeReason": String(entry.get("routeReason", "")),
+        "routeAuthorityV2": route_authority_v2_debug(entry),
         "routePriority": int(entry.get("routePriority", 0)),
         "forageRouteFailures": int(entry.get("forageRouteFailures", 0)),
         "foragePendingRouteTime": rounded(float(entry.get("foragePendingRouteTime", 0.0))),
@@ -5024,6 +6408,14 @@ func npc_summary(entry: Dictionary) -> Dictionary:
         "firstPathWaypointValid": first_waypoint_valid,
         "firstPathWaypoint": vec3(first_waypoint),
         "lastRoutePlanDebug": entry.get("lastRoutePlanDebug", {}),
+        "routineRouteV2Key": String(entry.get("routineRouteV2Key", "")),
+        "routineRouteV2RequestReason": String(entry.get("routineRouteV2RequestReason", "")),
+        "routineRouteV2IntentKind": String(entry.get("routineRouteV2IntentKind", "")),
+        "routineRouteV2SemanticKind": String(entry.get("routineRouteV2SemanticKind", "")),
+        "routineRouteV2LastCandidates": entry.get("routineRouteV2LastCandidates", {}),
+        "routineRouteV2LastPlan": entry.get("routineRouteV2LastPlan", {}),
+        "routineRouteV2LastAuthority": entry.get("routineRouteV2LastAuthority", {}),
+        "routineRouteV2LastExecution": entry.get("routineRouteV2LastExecution", {}),
         "lastNavmeshTilePublishDebug": entry.get("lastNavmeshTilePublishDebug", []),
         "routePlannerStats": route_planner_stats(),
         "corridorFollow": entry.get("corridorFollow", {}),
@@ -5031,6 +6423,15 @@ func npc_summary(entry: Dictionary) -> Dictionary:
         "lastMotorLocalEscape": entry.get("lastMotorLocalEscape", {}),
         "lastMotorLocalEscapeFailed": entry.get("lastMotorLocalEscapeFailed", {})
     }
+
+func route_authority_v2_debug(entry: Dictionary) -> Dictionary:
+    var npc_system = main.get("npc_system") if main != null else null
+    if npc_system == null:
+        return {}
+    var autonomy = npc_system.get("autonomy_system")
+    if autonomy != null and autonomy.has_method("route_authority_v2_debug_for_entry"):
+        return autonomy.call("route_authority_v2_debug_for_entry", entry)
+    return entry.get("routeAuthorityV2", {}) if entry.get("routeAuthorityV2", {}) is Dictionary else {}
 
 func route_planner_stats() -> Dictionary:
     var npc_system = main.get("npc_system") if main != null else null
@@ -5132,6 +6533,7 @@ func add_failure(code: String, details: String) -> void:
     report_data["results"] = results
     report_data["failureReasons"] = failure_reasons
     report_data["lastFailure"] = failure_reasons[failure_reasons.size() - 1]
+    report_data["playerRouteAuthorityEvents"] = player_route_authority_events
     report_data["timeline"] = final_rescue_timeline if final_rescue_tutorial else morning_observation_timeline
     report_data["playerTimeline"] = player_timeline
     report_data["doorStateTimeline"] = door_timeline
@@ -5139,6 +6541,7 @@ func add_failure(code: String, details: String) -> void:
     report_data["miraRouteOrderTimeline"] = route_order_timeline
     report_data["miraSpeedSamples"] = mira_speed_samples
     report_data["visualCaptures"] = visual_captures
+    report_data["playerRouteAuthorityEvents"] = player_route_authority_events
     report_data["nonGuardHomeVisualMatrix"] = non_guard_home_visual_matrix
     report_data["morningOutsideVisualMatrix"] = morning_outside_visual_matrix
     report_data["npcScheduleMatrix"] = schedule_matrix
@@ -5171,6 +6574,7 @@ func finish() -> void:
     report_data["miraRouteOrderTimeline"] = route_order_timeline
     report_data["miraSpeedSamples"] = mira_speed_samples
     report_data["visualCaptures"] = visual_captures
+    report_data["playerRouteAuthorityEvents"] = player_route_authority_events
     report_data["nonGuardHomeVisualMatrix"] = non_guard_home_visual_matrix
     report_data["morningOutsideVisualMatrix"] = morning_outside_visual_matrix
     report_data["npcScheduleMatrix"] = schedule_matrix
@@ -5202,12 +6606,30 @@ func save_report() -> void:
     var path := OS.get_environment("VOXEL_REAL_TUTORIAL_REPORT")
     if path == "":
         path = "user://real-tutorial-playthrough-report.json"
-    var file := FileAccess.open(path, FileAccess.WRITE)
+    var temp_path := "%s.tmp" % path
+    var serialized := JSON.stringify(report_data, "  ")
+    var file := FileAccess.open(temp_path, FileAccess.WRITE)
     if file == null:
-        push_error("Could not write real tutorial report: %s" % path)
+        file = FileAccess.open(path, FileAccess.WRITE)
+        if file == null:
+            push_warning("Could not write real tutorial report: %s" % path)
+            return
+        file.store_string(serialized)
+        file.close()
         return
-    file.store_string(JSON.stringify(report_data, "  "))
+    file.store_string(serialized)
     file.close()
+    if FileAccess.file_exists(path):
+        DirAccess.remove_absolute(path)
+    var rename_error := DirAccess.rename_absolute(temp_path, path)
+    if rename_error != OK:
+        file = FileAccess.open(path, FileAccess.WRITE)
+        if file == null:
+            push_warning("Could not finalize real tutorial report: %s -> %s (%d)" % [temp_path, path, rename_error])
+            return
+        file.store_string(serialized)
+        file.close()
+        DirAccess.remove_absolute(temp_path)
 
 func save_live_report_checkpoint(label: String) -> void:
     if finished:
@@ -5224,6 +6646,7 @@ func save_live_report_checkpoint(label: String) -> void:
     report_data["timeline"] = final_rescue_timeline if final_rescue_tutorial else morning_observation_timeline
     report_data["playerTimeline"] = player_timeline
     report_data["visualCaptures"] = visual_captures
+    report_data["playerRouteAuthorityEvents"] = player_route_authority_events
     report_data["finalRescueTimeline"] = final_rescue_timeline
     report_data["finalRescueNormalBehaviorTimeline"] = final_rescue_normal_behavior_timeline
     report_data["finalRescueSpeedProofs"] = final_rescue_speed_proofs
@@ -5261,10 +6684,25 @@ func watchdog_seconds() -> float:
         return 220.0
     return maxf(10.0, float(raw))
 
+func vec2(value) -> Array:
+    if value is Vector2:
+        return [rounded(value.x), rounded(value.y)]
+    return [0.0, 0.0]
+
 func vec3(value) -> Array:
     if value is Vector3:
         return [rounded(value.x), rounded(value.y), rounded(value.z)]
     return [0.0, 0.0, 0.0]
+
+func vec3_array_limited(values, limit := 8) -> Array:
+    var result := []
+    if not (values is Array):
+        return result
+    for value in values:
+        if result.size() >= limit:
+            break
+        result.append(vec3(value))
+    return result
 
 func vec2i(value) -> Array:
     if value is Vector2i:

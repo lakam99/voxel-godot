@@ -27,6 +27,14 @@ const EXACT_HOME_COLLISION_LATTICE_MAX_VISITS := 4096
 const EXACT_HOME_COLLISION_LATTICE_MAX_USEC := 32000
 const EXACT_HOME_COLLISION_LATTICE_CLEARANCE_EPSILON := 0.04
 const EXACT_HOME_COLLISION_LATTICE_START_CENTER_MIN_DISTANCE := CELL * 0.36
+const EXACT_HOME_COLLISION_LATTICE_RECOVERABLE_REASONS := [
+	"no_route",
+	"path_endpoint_mismatch",
+	"path_crosses_static_collision",
+	"blocked_static_collision",
+	"blocked_static_transition",
+	"forbidden_private_door_link"
+]
 const ROUTE_CACHE_LIMIT := 128
 # Tile publish budgets. The static town is now pre-baked at spawn
 # (prebake_area_tiles), so runtime publishing only needs to cover a few tiles
@@ -121,9 +129,12 @@ func begin_frame() -> void:
 	if BACKGROUND_NAVMESH_TILE_PUBLISHES_PER_FRAME > 0 and priority_tiles_waiting:
 		var foreground_processed := _process_queued_navmesh_tile_publishes(ACTIVE_JOB_NAVMESH_TILE_FOREGROUND_PUBLISHES_PER_FRAME, ACTIVE_JOB_NAVMESH_TILE_FOREGROUND_USEC_BUDGET, true, true)
 		var remaining_priority_tiles := maxi(0, PRIORITY_NAVMESH_TILE_PUBLISHES_PER_FRAME - foreground_processed)
+		var priority_processed := 0
 		if remaining_priority_tiles > 0 and not queued_navmesh_tile_priority_keys.is_empty():
 			var remaining_usec := PRIORITY_NAVMESH_TILE_POST_FOREGROUND_USEC_BUDGET if foreground_processed > 0 else PRIORITY_NAVMESH_TILE_PUBLISH_USEC_BUDGET
-			_process_queued_navmesh_tile_publishes(remaining_priority_tiles, remaining_usec, false, false)
+			priority_processed = _process_queued_navmesh_tile_publishes(remaining_priority_tiles, remaining_usec, false, false)
+		if foreground_processed + priority_processed > 0:
+			_sync_navmesh_after_queued_tile_publish()
 	elif BACKGROUND_NAVMESH_TILE_PUBLISHES_PER_FRAME > 0 and background_queue_due:
 		if _background_navmesh_tile_publish_should_wait():
 			var monitor = performance_monitor()
@@ -131,7 +142,9 @@ func begin_frame() -> void:
 				monitor.increment_counter("navmesh_tile_publish_queue_deferred_frame_work")
 				monitor.increment_counter("queued_navmesh_tile_depth", queued_navmesh_tile_keys.size())
 		else:
-			_process_queued_navmesh_tile_publishes(BACKGROUND_NAVMESH_TILE_PUBLISHES_PER_FRAME, BACKGROUND_NAVMESH_TILE_PUBLISH_USEC_BUDGET)
+			var background_processed := _process_queued_navmesh_tile_publishes(BACKGROUND_NAVMESH_TILE_PUBLISHES_PER_FRAME, BACKGROUND_NAVMESH_TILE_PUBLISH_USEC_BUDGET)
+			if background_processed > 0:
+				_sync_navmesh_after_queued_tile_publish()
 
 func invalidate() -> void:
 	route_cache.clear()
@@ -169,40 +182,6 @@ func plan_route(entry: Dictionary, intent: Dictionary) -> Dictionary:
 	if monitor != null:
 		monitor.increment_counter("route_cache_misses")
 	var generated_section := ""
-	if _should_try_generated_cell_home_route(entry, intent):
-		generated_section = "generated_cell_home_route"
-	elif _should_try_generated_cell_job_route(entry, intent):
-		generated_section = "generated_cell_job_route"
-	var intent_kind := String(intent.get("kind", ""))
-	var prebudget_home_exit_route := generated_section == "generated_cell_job_route" \
-		and bool(entry.get("insideHome", false)) \
-		and intent_kind in ["work", "forage", "job"]
-	var prebudget_forage_departure_route := _should_try_prebudget_forage_departure_route(entry, intent)
-	if prebudget_forage_departure_route and generated_section == "":
-		generated_section = "generated_cell_job_route"
-	if prebudget_home_exit_route or prebudget_forage_departure_route:
-		var prebudget_generated_start: int = monitor.begin_section(generated_section) if monitor != null else Time.get_ticks_usec()
-		var prebudget_generated_intent := intent.duplicate(true)
-		prebudget_generated_intent["safeOpenTerrainGeneratedFallback"] = true
-		prebudget_generated_intent["requiresAuthorityProbe"] = true
-		if prebudget_forage_departure_route:
-			prebudget_generated_intent["generatedBridgeReason"] = "forage_departure_navmesh_budget_fallback"
-			prebudget_generated_intent["allowPartial"] = true
-			prebudget_generated_intent["generatedBridgeCritical"] = true
-		var prebudget_generated_route: Dictionary = navmesh_planner.plan_generated_cell_route(entry, prebudget_generated_intent, world) if navmesh_planner != null and navmesh_planner.has_method("plan_generated_cell_route") else {}
-		if monitor != null:
-			monitor.end_section(generated_section, prebudget_generated_start)
-		if not prebudget_generated_route.is_empty() and bool(prebudget_generated_route.get("ok", false)):
-			_annotate_route_intent(prebudget_generated_route, intent)
-			prebudget_generated_route["generatedCellBridge"] = true
-			prebudget_generated_route["requiresAuthorityProbe"] = true
-			if prebudget_forage_departure_route:
-				prebudget_generated_route["navmeshFallbackReason"] = "forage_departure_navmesh_budget_fallback"
-			if monitor != null:
-				monitor.increment_counter("generated_cell_forage_departure_routes" if prebudget_forage_departure_route else "generated_cell_home_exit_job_routes")
-				monitor.increment_counter("route_jobs_completed")
-			_store_route_cache(cache_key, prebudget_generated_route)
-			return prebudget_generated_route
 	if generated_section == "" and _routine_route_should_wait_after_navmesh_tile_publish(entry, intent):
 		if monitor != null:
 			monitor.increment_counter("route_jobs_pending")
@@ -223,34 +202,6 @@ func plan_route(entry: Dictionary, intent: Dictionary) -> Dictionary:
 		return failure
 	if monitor != null:
 		monitor.end_section("route_budget_claim", budget_start)
-	if generated_section != "":
-		var generated_start: int = monitor.begin_section(generated_section) if monitor != null else Time.get_ticks_usec()
-		var generated_intent := intent.duplicate(true)
-		generated_intent["safeOpenTerrainGeneratedFallback"] = true
-		generated_intent["requiresAuthorityProbe"] = true
-		if generated_section == "generated_cell_home_route":
-			generated_intent["generatedBridgeUsecBudget"] = STARVED_HOME_GENERATED_BRIDGE_USEC
-			generated_intent["generatedBridgeMaxVisits"] = STARVED_HOME_GENERATED_BRIDGE_VISITS
-			generated_intent["generatedBridgeReason"] = "starved_home_navmesh_tile_fallback"
-		elif prebudget_forage_departure_route:
-			generated_intent = intent.duplicate(true)
-			generated_intent["generatedBridgeReason"] = "forage_departure_navmesh_budget_fallback"
-			generated_intent["allowPartial"] = true
-			generated_intent["generatedBridgeCritical"] = true
-		var generated_route: Dictionary = navmesh_planner.plan_generated_cell_route(entry, generated_intent, world) if navmesh_planner != null and navmesh_planner.has_method("plan_generated_cell_route") else {}
-		if monitor != null:
-			monitor.end_section(generated_section, generated_start)
-		if not generated_route.is_empty() and bool(generated_route.get("ok", false)):
-			_annotate_route_intent(generated_route, intent)
-			generated_route["generatedCellBridge"] = true
-			generated_route["requiresAuthorityProbe"] = true
-			if generated_section == "generated_cell_home_route":
-				generated_route["navmeshFallbackReason"] = "starved_home_navmesh_tile_fallback"
-			if monitor != null:
-				monitor.increment_counter("generated_cell_home_routes" if generated_section == "generated_cell_home_route" else "generated_cell_job_routes")
-				monitor.increment_counter("route_jobs_completed")
-			_store_route_cache(cache_key, generated_route)
-			return generated_route
 	var tile_prepare_start: int = monitor.begin_section("navmesh_route_tile_prepare") if monitor != null else Time.get_ticks_usec()
 	var readiness: Dictionary = nav_data_readiness.ensure_ready_for_route(entry, intent) if nav_data_readiness != null else { "ready": _ensure_navmesh_route_tiles(entry, intent), "reason": "navmesh_tile_budget" }
 	if not bool(readiness.get("ready", false)):
@@ -272,10 +223,10 @@ func plan_route(entry: Dictionary, intent: Dictionary) -> Dictionary:
 	var navmesh_start: int = monitor.begin_section("navmesh_route_query") if monitor != null else Time.get_ticks_usec()
 	var result: Dictionary = navmesh_planner.plan_runtime_route(entry, intent, world, 0)
 	_annotate_route_intent(result, intent)
-	if _should_try_exact_home_collision_lattice_route(entry, result, intent):
-		var exact_lattice_result := _plan_exact_home_collision_lattice_route(entry, intent, result)
-		if not exact_lattice_result.is_empty() and bool(exact_lattice_result.get("ok", false)):
-			result = exact_lattice_result
+	if _should_try_exact_collision_lattice_route(entry, result, intent):
+		var lattice_result := _plan_exact_collision_lattice_route(entry, intent, result, "exact_collision_lattice")
+		if not lattice_result.is_empty() and bool(lattice_result.get("ok", false)):
+			result = lattice_result
 			_annotate_route_intent(result, intent)
 	if _should_try_static_collision_repair(result, intent):
 		var repaired_result := plan_probe_repair_route(entry, intent, result, _static_collision_repair_certificate(result))
@@ -299,19 +250,19 @@ func plan_route(entry: Dictionary, intent: Dictionary) -> Dictionary:
 	return result
 
 func _should_try_static_collision_repair(route: Dictionary, intent: Dictionary) -> bool:
+	return false
+
+func _should_try_exact_collision_lattice_route(_entry: Dictionary, route: Dictionary, intent: Dictionary) -> bool:
 	if bool(route.get("ok", false)):
 		return false
-	if bool(intent.get("probeRepair", false)) or bool(intent.get("probeRepairAttempt", false)):
+	if String(route.get("status", "")) != "blocked":
 		return false
-	var reason := String(route.get("reason", ""))
+	if not (String(route.get("reason", "")) in EXACT_HOME_COLLISION_LATTICE_RECOVERABLE_REASONS):
+		return false
 	var route_kind := String(intent.get("kind", "move"))
-	if bool(intent.get("movingHome", false)) or route_kind == "home":
-		return false
-	if reason in ["path_crosses_static_collision", "blocked_static_collision", "blocked_static_transition"]:
-		return true
-	var navmesh_route: Dictionary = route.get("navmeshRoute", {}) if route.get("navmeshRoute", {}) is Dictionary else {}
-	var navmesh_reason := String(navmesh_route.get("reason", ""))
-	return String(navmesh_route.get("reason", "")) in ["path_crosses_static_collision", "blocked_static_collision", "blocked_static_transition"]
+	if route_kind == "scripted":
+		return int(intent.get("priority", 0)) >= 180 and bool(intent.get("strictArrival", false))
+	return false
 
 func _static_collision_repair_certificate(route: Dictionary) -> Dictionary:
 	var validation: Dictionary = route.get("validation", {}) if route.get("validation", {}) is Dictionary else {}
@@ -370,36 +321,16 @@ func plan_probe_repair_route(entry: Dictionary, intent: Dictionary, failed_route
 	repair_intent["probeBlockedCell"] = _probe_blocked_cell(probe_certificate)
 	repair_intent["blockedRepairCells"] = _probe_blocked_repair_cells(probe_certificate)
 	repair_intent["fallbackCells"] = _probe_repair_fallback_cells(entry, repair_intent, target, target_cell, probe_certificate)
-	if _intent_uses_exact_home_collision_lattice(entry, repair_intent):
-		var exact_home_repair_route := _plan_exact_home_collision_lattice_route(entry, repair_intent, failed_route)
-		if not exact_home_repair_route.is_empty() and bool(exact_home_repair_route.get("ok", false)):
-			_annotate_route_intent(exact_home_repair_route, intent)
-			exact_home_repair_route["probeRepair"] = {
-				"reason": String(probe_certificate.get("reason", "route_repair")),
-				"blockedCell": _probe_blocked_cell(probe_certificate),
-				"blockedType": String(((probe_certificate.get("details", {}) as Dictionary) if probe_certificate.get("details", {}) is Dictionary else {}).get("blockType", "")),
-				"candidateCount": (repair_intent.get("fallbackCells", []) as Array).size(),
-				"source": "exact_home_collision_lattice"
-			}
-			return exact_home_repair_route
-		_record_probe_repair_failure(failed_route, "exact_home_collision_lattice_failed", repair_intent.get("fallbackCells", []))
-		return {}
 	if (repair_intent.get("fallbackCells", []) as Array).is_empty():
 		_record_probe_repair_failure(failed_route, "no_repair_candidates", repair_intent.get("fallbackCells", []))
 		return {}
 	var forbidden_private_door_ids: Array[String] = world.forbidden_private_door_portal_ids_for_entry(entry) if world.has_method("forbidden_private_door_portal_ids_for_entry") else []
 	var repair_world = _generated_world_for_repair()
 	var repair_route := {}
-	var prefer_collision_lattice := _probe_repair_prefers_collision_lattice(probe_certificate)
-	if prefer_collision_lattice:
-		repair_route = _plan_collision_lattice_repair_route(entry, repair_intent, failed_route, start_cell, target_cell)
-	if (repair_route.is_empty() or not bool(repair_route.get("ok", false))) and not prefer_collision_lattice:
-		repair_route = navmesh_planner._plan_fallback_cell_route(entry, repair_intent, repair_world, start, start_cell, target_cell, failed_route, forbidden_private_door_ids)
+	repair_route = navmesh_planner._plan_fallback_cell_route(entry, repair_intent, repair_world, start, start_cell, target_cell, failed_route, forbidden_private_door_ids)
 	if repair_route.is_empty() or not bool(repair_route.get("ok", false)):
-		repair_route = _plan_collision_lattice_repair_route(entry, repair_intent, failed_route, start_cell, target_cell)
-		if repair_route.is_empty() or not bool(repair_route.get("ok", false)):
-			_record_probe_repair_failure(failed_route, "no_repair_route", repair_intent.get("fallbackCells", []))
-			return {}
+		_record_probe_repair_failure(failed_route, "no_repair_route", repair_intent.get("fallbackCells", []))
+		return {}
 	_annotate_route_intent(repair_route, intent)
 	repair_route["probeRepair"] = {
 		"reason": String(probe_certificate.get("reason", "route_repair")),
@@ -419,41 +350,10 @@ func _generated_world_for_repair():
 	return world
 
 func _plan_collision_lattice_repair_route(entry: Dictionary, repair_intent: Dictionary, failed_route: Dictionary, start_cell: Vector2i, target_cell: Vector2i) -> Dictionary:
-	if _intent_uses_exact_home_collision_lattice(entry, repair_intent):
-		return {}
-	var repair_world = _generated_world_for_repair()
-	if navmesh_planner == null or repair_world == null or not navmesh_planner.has_method("_plan_generated_cell_bridge_route"):
-		return {}
-	var lattice_intent := repair_intent.duplicate(true)
-	lattice_intent["allowHomeCellBridgeRepair"] = true
-	lattice_intent["generatedBridgeCritical"] = true
-	lattice_intent["generatedBridgeReason"] = "collision_lattice_probe_repair"
-	lattice_intent["generatedBridgeFallbackOnly"] = true
-	var route: Dictionary = navmesh_planner._plan_generated_cell_bridge_route(entry, lattice_intent, repair_world, start_cell, target_cell, failed_route)
-	if route.is_empty() or not bool(route.get("ok", false)):
-		return {}
-	route["source"] = "collision_lattice"
-	route["reason"] = "collision_lattice_probe_repair"
-	route["collisionLatticeRepair"] = {
-		"ok": true,
-		"candidateCount": (repair_intent.get("fallbackCells", []) as Array).size()
-	}
-	return route
+	return {}
 
 func _should_try_exact_home_collision_lattice_route(entry: Dictionary, route: Dictionary, intent: Dictionary) -> bool:
-	if bool(route.get("ok", false)):
-		return false
-	if String(route.get("status", "")) == "pending":
-		return false
-	if bool(intent.get("probeRepair", false)) or bool(intent.get("probeRepairAttempt", false)):
-		return false
-	if not _intent_uses_exact_home_collision_lattice(entry, intent):
-		return false
-	var reason := String(route.get("reason", ""))
-	if reason in ["no_route", "path_endpoint_mismatch", "path_crosses_static_collision", "blocked_static_collision", "blocked_static_transition"]:
-		return true
-	var navmesh_route: Dictionary = route.get("navmeshRoute", {}) if route.get("navmeshRoute", {}) is Dictionary else {}
-	return String(navmesh_route.get("reason", "")) in ["no_route", "path_endpoint_mismatch", "path_crosses_static_collision", "blocked_static_collision", "blocked_static_transition"]
+	return false
 
 func _intent_uses_exact_home_collision_lattice(entry: Dictionary, intent: Dictionary) -> bool:
 	var route_kind := String(intent.get("kind", "move"))
@@ -523,6 +423,9 @@ func _cell_distance(a: Vector2i, b: Vector2i) -> int:
 	return absi(a.x - b.x) + absi(a.y - b.y)
 
 func _plan_exact_home_collision_lattice_route(entry: Dictionary, intent: Dictionary, failed_route: Dictionary) -> Dictionary:
+	return _plan_exact_collision_lattice_route(entry, intent, failed_route, "exact_collision_lattice_home", true)
+
+func _plan_exact_collision_lattice_route(entry: Dictionary, intent: Dictionary, failed_route: Dictionary, success_reason := "exact_collision_lattice", force_moving_home = null) -> Dictionary:
 	var source = _generated_world_for_repair()
 	if source == null \
 		or not source.has_method("world_cell") \
@@ -541,7 +444,9 @@ func _plan_exact_home_collision_lattice_route(entry: Dictionary, intent: Diction
 		start = body.global_position if body.is_inside_tree() else body.position
 	var start_cell: Vector2i = source.world_cell(start)
 	var allow_outside := bool(intent.get("allowOutside", false))
-	var moving_home := true
+	var moving_home := bool(intent.get("movingHome", false))
+	if force_moving_home != null:
+		moving_home = bool(force_moving_home)
 	var physical_home_egress := _is_physical_home_egress_route(entry, intent, source)
 	var target_lookup := { target_cell: true, "_strictTargetCollision": true }
 	var bounds := _exact_collision_lattice_bounds(entry, start_cell, target_cell)
@@ -610,7 +515,7 @@ func _plan_exact_home_collision_lattice_route(entry: Dictionary, intent: Diction
 	return {
 		"ok": true,
 		"status": "routed",
-		"reason": "exact_collision_lattice_home",
+		"reason": success_reason,
 		"cells": route_cells,
 		"waypoints": waypoints,
 		"actions": actions,
@@ -1086,54 +991,13 @@ func _should_try_generated_cell_home_route(entry: Dictionary, intent: Dictionary
 	return false
 
 func _safe_open_terrain_generated_fallback_allowed(entry: Dictionary, intent: Dictionary) -> bool:
-	if not NpcConstantsScript.NPC_NAV_ENABLE_SAFE_GENERATED_OPEN_TERRAIN_FALLBACK:
-		return false
-	if world == null or navmesh_planner == null:
-		return false
-	if bool(entry.get("insideHome", false)):
-		return false
-	if String(entry.get("activeDoorPortalId", "")) != "":
-		return false
-	if String(intent.get("action", "")) != "":
-		return false
-	if bool(intent.get("movingHome", false)):
-		return false
-	if _is_physical_home_egress_route(entry, intent):
-		return false
-	var route_kind := String(intent.get("kind", "move"))
-	if route_kind not in ["forage", "guard", "work", "job", "move", "idle", "wander"]:
-		return false
-
-	var body := entry.get("body") as Node3D
-	if body == null or not is_instance_valid(body):
-		return false
-
-	var start_cell: Vector2i = world.world_cell(body.global_position)
-	var target_cell: Vector2i = intent.get("targetCell", world.world_cell(intent.get("target", body.global_position)))
-	var door_cell: Vector2i = entry.get("doorCell", Vector2i(999999, 999999))
-	var porch_cell: Vector2i = entry.get("porchCell", Vector2i(999999, 999999))
-	var home_cell: Vector2i = entry.get("homeCell", Vector2i(999999, 999999))
-
-	for sensitive_cell in [door_cell, porch_cell, home_cell]:
-		if sensitive_cell is Vector2i:
-			if absi(start_cell.x - sensitive_cell.x) + absi(start_cell.y - sensitive_cell.y) <= 2:
-				return false
-			if absi(target_cell.x - sensitive_cell.x) + absi(target_cell.y - sensitive_cell.y) <= 2:
-				return false
-
-	var manhattan := absi(start_cell.x - target_cell.x) + absi(start_cell.y - target_cell.y)
-	if manhattan > 24:
-		return false
-
-	return true
+	return false
 
 func _should_try_generated_cell_job_route(entry: Dictionary, intent: Dictionary) -> bool:
 	return _safe_open_terrain_generated_fallback_allowed(entry, intent)
 
 func _should_try_prebudget_forage_departure_route(entry: Dictionary, intent: Dictionary) -> bool:
-	if String(intent.get("kind", "move")) != "forage":
-		return false
-	return _safe_open_terrain_generated_fallback_allowed(entry, intent)
+	return false
 
 func route_cost(entry: Dictionary, target: Vector3, allow_outside := false, moving_home := false, arrival_radius := CELL * 0.85, approach_cells: Array = [], require_ready := false) -> float:
 	if world == null:
@@ -1448,7 +1312,7 @@ func _ensure_navmesh_route_tiles(entry: Dictionary, intent: Dictionary) -> bool:
 				queued_route_tiles_still_loading = true
 				if endpoint_tile:
 					queued_endpoint_tile_this_call = true
-				publish_debug.append({ "tile": tile_key, "status": "queued_priority" if priority_queue else "queued_budgeted" })
+				publish_debug.append({ "tile": tile_key, "status": "queued_priority" if priority_queue else "queued_budgeted", "region": tile_status })
 			else:
 				publish_debug.append({ "tile": tile_key, "status": "cost_skipped_budgeted" })
 			continue
@@ -1505,9 +1369,15 @@ func _ensure_navmesh_route_tiles(entry: Dictionary, intent: Dictionary) -> bool:
 	if queued_tile_this_call:
 		if monitor != null:
 			monitor.increment_counter("navmesh_tile_publish_queued_queries")
+		if published_tile_this_call:
+			_sync_navmesh_after_partial_readiness_publish()
 		entry["navmeshTileBudgetWaitFrames"] = tile_budget_wait_frames + 1
 		entry["navmeshRouteTilesStillLoading"] = queued_route_tiles_still_loading
 		entry["navmeshEndpointTilesStillLoading"] = queued_endpoint_tile_this_call or not missing_endpoint_tile_keys.is_empty()
+		if critical_route_needs_tiles and missing_endpoint_tile_keys.is_empty() and not queued_endpoint_tile_this_call:
+			entry["navmeshRouteTilesStillLoading"] = false
+			entry["navmeshEndpointTilesStillLoading"] = false
+			return true
 		if home_exit_job_route and missing_endpoint_tile_keys.is_empty() and not queued_endpoint_tile_this_call and not published_tile_this_call:
 			entry["navmeshRouteTilesStillLoading"] = false
 			entry["navmeshEndpointTilesStillLoading"] = false
@@ -1529,6 +1399,7 @@ func _ensure_navmesh_route_tiles(entry: Dictionary, intent: Dictionary) -> bool:
 			entry["navmeshTileBudgetWaitFrames"] = 0
 			entry["navmeshEndpointTilesStillLoading"] = false
 			return true
+		_sync_navmesh_after_partial_readiness_publish()
 		entry["navmeshTileBudgetWaitFrames"] = tile_budget_wait_frames + 1
 		return false
 	if published_tile_this_call and inline_publish_route and monitor != null:
@@ -1537,6 +1408,24 @@ func _ensure_navmesh_route_tiles(entry: Dictionary, intent: Dictionary) -> bool:
 	entry["navmeshMissingEndpointTiles"] = []
 	entry["navmeshEndpointTilesStillLoading"] = false
 	return true
+
+func _sync_navmesh_after_partial_readiness_publish() -> void:
+	if navmesh_world == null or not navmesh_world.has_method("sync_navigation_map_if_dirty"):
+		return
+	var monitor = performance_monitor()
+	var sync_start: int = monitor.begin_section("navmesh_map_partial_readiness_sync") if monitor != null else Time.get_ticks_usec()
+	navmesh_world.sync_navigation_map_if_dirty()
+	if monitor != null:
+		monitor.end_section("navmesh_map_partial_readiness_sync", sync_start)
+
+func _sync_navmesh_after_queued_tile_publish() -> void:
+	if navmesh_world == null or not navmesh_world.has_method("sync_navigation_map_if_dirty"):
+		return
+	var monitor = performance_monitor()
+	var sync_start: int = monitor.begin_section("navmesh_map_queued_publish_sync") if monitor != null else Time.get_ticks_usec()
+	navmesh_world.sync_navigation_map_if_dirty()
+	if monitor != null:
+		monitor.end_section("navmesh_map_queued_publish_sync", sync_start)
 
 func _navmesh_tile_region_status(tile_key: String) -> Dictionary:
 	if navmesh_world != null and navmesh_world.has_method("tile_region_status"):
@@ -2270,8 +2159,7 @@ func _route_failure_cacheable(route: Dictionary) -> bool:
 		"path_endpoint_mismatch",
 		"path_crosses_static_collision",
 		"blocked_static_collision",
-		"blocked_static_transition",
-		"forbidden_private_door_link"
+		"blocked_static_transition"
 	]
 
 func _compact_route_for_cache(route: Dictionary) -> Dictionary:

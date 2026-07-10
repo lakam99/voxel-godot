@@ -2,6 +2,7 @@ extends RefCounted
 class_name NpcSemanticGoalPlanner
 
 const HomeInteriorServiceScript := preload("res://scripts/npc_ai/behavior/HomeInteriorService.gd")
+const NpcRouteStateStoreScript := preload("res://scripts/npc_ai/routing/NpcRouteStateStore.gd")
 
 const CELL := 1.35
 const MAX_ROUTE_SCORED_CANDIDATES := 16
@@ -863,19 +864,11 @@ func position_key(pos: Vector3) -> String:
     return "%d,%d" % [roundi(pos.x / CELL), roundi(pos.z / CELL)]
 
 func set_goal_fallback(entry: Dictionary, status: String, reason: String) -> void:
-    entry["routeStatus"] = status
-    entry["routeReason"] = reason
-    var body := entry.get("body") as Node
-    if body:
-        body.set_meta("npc_route_status", status)
-        body.set_meta("npc_route_reason", reason)
+    NpcRouteStateStoreScript.write_status(entry, status, reason, "NpcSemanticGoalPlanner.goal_fallback")
 
 func clear_goal_fallback(entry: Dictionary) -> void:
     if String(entry.get("routeReason", "")).begins_with("no_reachable_"):
-        entry["routeReason"] = ""
-        var body := entry.get("body") as Node
-        if body:
-            body.set_meta("npc_route_reason", "")
+        NpcRouteStateStoreScript.write_reason(entry, "", "NpcSemanticGoalPlanner.clear_goal_fallback")
 
 func add_deterministic_ring_candidates(candidates: Array[Vector3], entry: Dictionary, outside_town := false) -> void:
     var center: Vector2i = entry.get("townCenter", Vector2i.ZERO)

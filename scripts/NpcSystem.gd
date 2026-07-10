@@ -15,6 +15,7 @@ const NpcMotionControllerScript := preload("res://scripts/npc_ai/NpcMotionContro
 const NpcSafePlacementServiceScript := preload("res://scripts/npc_ai/NpcSafePlacementService.gd")
 const HomeInteriorServiceScript := preload("res://scripts/npc_ai/behavior/HomeInteriorService.gd")
 const CharacterMotorProfileScript := preload("res://scripts/npc_ai/contracts/CharacterMotorProfile.gd")
+const NpcRouteStateStoreScript := preload("res://scripts/npc_ai/routing/NpcRouteStateStore.gd")
 
 const CELL := 1.35
 const DOOR_TRAFFIC_RELEASE_RADIUS := CELL * 0.72
@@ -227,8 +228,6 @@ func order_go_home(actor_id, reason := "scripted_go_home", speed_mode := NPC_SPE
 
 func release_intro_hold_and_order_home(actor_id, reason := "intro_acknowledged_return_home", speed_mode := NPC_SPEED_MODE_WALKING) -> Dictionary:
     var entry := npc_entry_for_actor(actor_id)
-    if entry.is_empty() and String(actor_id) != "mira":
-        entry = npc_entry_for_actor("mira")
     if entry.is_empty():
         return scripted_order_result(null, "FAILED_TARGET_GONE", reason, "missing_actor")
     clear_intro_hold_for_entry(entry)
@@ -604,10 +603,7 @@ func register_npc(body: Node3D, profile: Dictionary) -> Dictionary:
         var spawn_inside := spawn_cell.x >= interior_min.x and spawn_cell.x <= interior_max.x and spawn_cell.y >= interior_min.y and spawn_cell.y <= interior_max.y
         if spawn_inside:
             mark_npc_inside_home(entry)
-            entry["routeStatus"] = "arrived"
-            entry["routeReason"] = ""
-            body.set_meta("npc_route_status", "arrived")
-            body.set_meta("npc_route_reason", "")
+            NpcRouteStateStoreScript.write_status(entry, "arrived", "", "NpcSystem.spawn_inside_home")
     ensure_autonomy_system()
     var context = autonomy_system.register_npc(body, profile, entry)
     if context != null:
@@ -690,8 +686,7 @@ func apply_npc_metadata(body: Node, entry: Dictionary, home_cell: Vector2i, porc
     body.set_meta("npc_has_home", true)
     body.set_meta("npc_inside_home", false)
     body.set_meta("npc_weapon", String(entry["weaponId"]))
-    body.set_meta("npc_route_status", String(entry.get("routeStatus", "idle")))
-    body.set_meta("npc_route_reason", String(entry.get("routeReason", "")))
+    NpcRouteStateStoreScript.publish_to_body(entry)
     body.set_meta("npc_simulation_lod", String(entry.get("simulationLod", "active")))
     body.set_meta("npc_tutorial", bool(entry.get("tutorial", false)))
     body.set_meta("npc_required_visible_sequence", bool(entry.get("requiredVisibleScripted", false)))
@@ -1276,6 +1271,14 @@ func npc_job_route_motion_required(entry: Dictionary) -> bool:
     var phase := String(entry.get("jobPhase", ""))
     if phase in ["outbound", "searching", "gathering", "returning", "stall"]:
         return true
+    var job := String(entry.get("job", ""))
+    if phase == "idle" and job in ["forage", "wood", "stone", "trade"]:
+        var expected_goal := String(NpcEnumsScript.GOAL_KIND_FORAGE) if job == "forage" else String(NpcEnumsScript.GOAL_KIND_WORK)
+        if String(entry.get("activeGoalKind", entry.get("goal", ""))) == expected_goal:
+            return true
+        var active_goal_value = entry.get("activeMotionGoal", {})
+        if active_goal_value is Dictionary and String((active_goal_value as Dictionary).get("goalKind", "")) == expected_goal:
+            return true
     var route_status := String(entry.get("routeStatus", ""))
     if not (route_status in ["moving", "pending", "waiting"]):
         return false
@@ -1517,15 +1520,12 @@ func set_npc_goal(entry: Dictionary, goal: String) -> void:
 func clear_home_route_terminal(entry: Dictionary) -> void:
     if not (String(entry.get("routeReason", "")) in ["home_porch_fallback", "home_porch_fallback_not_inside", "porch_not_inside", "threshold_not_inside"]):
         return
-    entry["routeStatus"] = "idle"
-    entry["routeReason"] = ""
+    NpcRouteStateStoreScript.write_status(entry, "idle", "", "NpcSystem.clear_home_route_terminal")
     entry["homeBlocked"] = false
     entry["routeFallbackCell"] = Vector2i(999999, 999999)
     entry["routeForceReplan"] = true
     var body := entry.get("body") as Node
     if body:
-        body.set_meta("npc_route_status", "idle")
-        body.set_meta("npc_route_reason", "")
         body.set_meta("npc_home_blocked", false)
 
 func npc_inventory_count(entry: Dictionary, item_id: String) -> int:
@@ -2303,7 +2303,7 @@ func home_route_target(entry: Dictionary) -> Vector3:
         var route_index := clampi(int(entry.get("homeRouteIndex", 0)), 0, route_positions.size())
         if route_index > 0 and not home_route_actor_inside(entry, body) and route_positions[0] is Vector3:
             var porch_target: Vector3 = route_positions[0]
-            if body.global_position.distance_to(porch_target) > CELL * 2.0:
+            if home_route_should_restart_from_porch(entry, body, porch_target):
                 route_index = 0
                 entry["homeRouteIndex"] = route_index
         if route_index < route_positions.size():
@@ -2355,6 +2355,21 @@ func home_route_actor_inside(entry: Dictionary, body: Node3D) -> bool:
     if autonomy_system != null and autonomy_system.has_method("is_inside_home_interior"):
         return bool(autonomy_system.call("is_inside_home_interior", entry, body.global_position))
     return bool(entry.get("insideHome", false))
+
+func home_route_should_restart_from_porch(entry: Dictionary, body: Node3D, porch_target: Vector3) -> bool:
+    if body == null:
+        return false
+    if body.global_position.distance_to(porch_target) <= CELL * 2.0:
+        return false
+    if String(entry.get("activeDoorPortalId", "")) != "":
+        return false
+    var current_cell := flat_cell_for_position(body.global_position)
+    if HomeInteriorServiceScript.cell_inside_home_bounds(entry, current_cell, true):
+        return false
+    var door_cell: Vector2i = entry.get("doorCell", Vector2i(999999, 999999))
+    if door_cell != Vector2i(999999, 999999) and current_cell == door_cell:
+        return false
+    return true
 
 func home_route_step_reached(entry: Dictionary, route_target: Vector3) -> bool:
     var body := entry.get("body") as Node3D
@@ -2528,13 +2543,10 @@ func mark_npc_home_blocked(entry: Dictionary, reason := "home_blocked") -> void:
         return
     entry["insideHome"] = false
     entry["homeBlocked"] = true
-    entry["routeStatus"] = "blocked"
-    entry["routeReason"] = reason
+    NpcRouteStateStoreScript.write_status(entry, "blocked", reason, "NpcSystem.mark_npc_home_blocked")
     entry["unreachableGoals"] = int(entry.get("unreachableGoals", 0)) + 1
     body.set_meta("npc_inside_home", false)
     body.set_meta("npc_home_blocked", true)
-    body.set_meta("npc_route_status", "blocked")
-    body.set_meta("npc_route_reason", reason)
 
 func mark_npc_inside_home(entry: Dictionary, fallback_reason := "") -> void:
     var body := entry.get("body") as Node3D
@@ -2547,10 +2559,7 @@ func mark_npc_inside_home(entry: Dictionary, fallback_reason := "") -> void:
     body.set_meta("npc_home_blocked", false)
     if fallback_reason != "":
         record_home_fallback(entry, fallback_reason)
-        entry["routeStatus"] = "partial"
-        entry["routeReason"] = fallback_reason
-        body.set_meta("npc_route_status", "partial")
-        body.set_meta("npc_route_reason", fallback_reason)
+        NpcRouteStateStoreScript.write_status(entry, "partial", fallback_reason, "NpcSystem.mark_npc_inside_home_fallback")
 
 func record_home_fallback(entry: Dictionary, reason: String) -> void:
     var home_cell: Vector2i = entry.get("homeCell", Vector2i.ZERO)
@@ -2655,8 +2664,7 @@ func cleanup_npc_route_state(actor_id: String, entry := {}, reason := "cleanup")
             if entry_dict.has(key):
                 entry_dict.erase(key)
                 route_state_released += 1
-        entry_dict["routeStatus"] = "idle"
-        entry_dict["routeReason"] = reason
+        NpcRouteStateStoreScript.write_status(entry_dict, "idle", reason, "NpcSystem.cleanup_npc_route_state")
     var avoidance := {}
     if pathing != null and pathing.has_method("cleanup_actor_state"):
         avoidance = pathing.cleanup_actor_state(actor_id)

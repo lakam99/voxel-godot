@@ -4,6 +4,7 @@ class_name NpcRouteAuthority
 const NpcEnumsScript := preload("res://scripts/npc_ai/NpcEnums.gd")
 const RouteLeaseScript := preload("res://scripts/npc_ai/contracts/RouteLease.gd")
 const CollisionProbeServiceScript := preload("res://scripts/npc_ai/routing/CollisionProbeService.gd")
+const NpcRouteStateStoreScript := preload("res://scripts/npc_ai/routing/NpcRouteStateStore.gd")
 
 const DEFAULT_PROBE_SAMPLE_BUDGET_PER_FRAME := 160
 
@@ -124,15 +125,12 @@ func _annotate_authority(entry: Dictionary, intent: Dictionary, route: Dictionar
 		route["routeLease"] = lease.to_dictionary()
 		route["routeLeaseId"] = lease.lease_id
 		route["routeLeaseGeneration"] = generation
-		entry["routeLease"] = lease.to_dictionary()
-		entry["routeLeaseId"] = lease.lease_id
-		entry["routeLeaseGeneration"] = generation
+		NpcRouteStateStoreScript.write_route_lease(entry, lease.to_dictionary(), lease.lease_id, generation, "NpcRouteAuthority.ready")
 	else:
 		route["routeLease"] = {}
 		route["routeLeaseId"] = ""
 		route["routeLeaseGeneration"] = int(route_generations.get(actor_id, 0))
-		entry.erase("routeLease")
-		entry.erase("routeLeaseId")
+		NpcRouteStateStoreScript.clear_route_lease(entry, "NpcRouteAuthority.not_ready")
 	entry["lastRouteAuthority"] = {
 		"state": String(state),
 		"reason": String(reason),
