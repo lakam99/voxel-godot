@@ -753,6 +753,7 @@ func request_chunk_terrain_mesh_assets(chunk_key: Vector2i, include_collision :=
     if runtime_perf_monitor != null:
         if status == "queued":
             runtime_perf_monitor.increment_counter("terrain_meshing_jobs_queued")
+            runtime_perf_monitor.increment_counter("terrain_fluid_jobs_queued")
         elif status == "pending":
             runtime_perf_monitor.increment_counter("terrain_meshing_jobs_already_pending")
         elif status == "ready":
@@ -807,9 +808,14 @@ func process_pending_terrain_meshing_jobs(center: Vector2i) -> int:
         monitor.increment_counter("terrain_meshing_jobs_deferred_without_native", int(result.get("deferredWithoutNative", 0)))
         monitor.increment_counter("terrain_volume_sections_prepared_for_mesh", int(result.get("preparedSections", 0)))
         monitor.increment_counter("terrain_meshing_payload_cells_prepared", int(result.get("payloadCells", 0)))
+        monitor.increment_counter("terrain_fluid_payload_cells_prepared", int(result.get("fluidPayloadCells", 0)))
+        monitor.increment_counter("terrain_fluid_payload_sections_prepared", int(result.get("fluidPreparedSections", 0)))
+        monitor.increment_counter("terrain_fluid_jobs_completed", processed)
+        monitor.increment_counter("terrain_fluid_jobs_dropped", int(result.get("dropped", 0)))
         monitor.increment_counter("terrain_meshing_job_queue_depth", int(result.get("pendingJobs", 0)))
         monitor.increment_counter("terrain_meshing_completed_queue_depth", int(result.get("completedJobs", 0)))
         monitor.observe_external_duration("terrain_meshing_payload_prep", float(result.get("payloadPrepMs", 0.0)))
+        monitor.observe_external_duration("terrain_fluid_payload_prep", float(result.get("fluidPayloadPrepMs", 0.0)))
         monitor.observe_external_duration("terrain_meshing_collect", float(result.get("collectMs", 0.0)))
         monitor.observe_external_duration("terrain_meshing_worker_join", float(result.get("workerJoinMs", 0.0)))
         monitor.observe_external_duration("terrain_meshing_worker_start", float(result.get("workerStartMs", 0.0)))
@@ -818,6 +824,9 @@ func process_pending_terrain_meshing_jobs(center: Vector2i) -> int:
         monitor.observe_external_duration("terrain_meshing_native_fluid_build", float(result.get("fluidMeshBuildMs", 0.0)))
         monitor.observe_external_duration("terrain_meshing_native_collision_build", float(result.get("collisionBuildMs", 0.0)))
         monitor.observe_external_duration("terrain_meshing_job_elapsed", float(result.get("elapsedMs", 0.0)))
+        var drop_reason := String(result.get("dropReason", ""))
+        if drop_reason == "stale_worker_signature" or drop_reason == "exact_fluid_payload_stale":
+            monitor.increment_counter("terrain_fluid_stale_results_rejected")
         monitor.end_section("terrain_meshing_job_queue", queue_start)
     return work_count
 
@@ -1581,6 +1590,21 @@ func apply_chunk_fluid_mesh(chunk: Node3D, fluid_mesh: Mesh, key: Vector2i) -> v
     fluid_instance.set_meta("chunk", key)
     fluid_instance.set_meta("collision_source", "none")
 
+func clear_stale_chunk_fluid_mesh(chunk: Node3D, key: Vector2i) -> bool:
+    if chunk == null:
+        return false
+    var existing := chunk.get_node_or_null("TerrainFluidMesh") as MeshInstance3D
+    var existing_mesh: Mesh = existing.mesh if existing != null else null
+    if existing_mesh == null:
+        return false
+    var current_signature := chunk_asset_signature(key)
+    if String(existing_mesh.get_meta("terrainSignature", "")) == current_signature:
+        return false
+    apply_chunk_fluid_mesh(chunk, ArrayMesh.new(), key)
+    if runtime_perf_monitor != null:
+        runtime_perf_monitor.increment_counter("terrain_fluid_stale_mesh_cleared")
+    return true
+
 func chunk_collision_shape_for_mesh(mesh: Mesh) -> Shape3D:
     var monitor = runtime_perf_monitor
     var shape_start: int = monitor.begin_section("chunk_create_trimesh_shape") if monitor != null else Time.get_ticks_usec()
@@ -1619,6 +1643,13 @@ func observe_terrain_mesh_asset_backend(assets: Dictionary) -> void:
         runtime_perf_monitor.increment_counter("terrain_meshing_direct_build_deferred_without_native")
     else:
         runtime_perf_monitor.increment_counter("terrain_meshing_gdscript_fallback_chunks")
+    var fluid_mesh = assets.get("fluidMesh") as Mesh
+    if fluid_mesh != null:
+        runtime_perf_monitor.increment_counter("terrain_fluid_exact_cells", int(fluid_mesh.get_meta("nativeFluidCellCount", 0)))
+        runtime_perf_monitor.increment_counter("terrain_fluid_water_faces", int(fluid_mesh.get_meta("chunk_water_faces", 0)))
+        runtime_perf_monitor.increment_counter("terrain_fluid_lava_faces", int(fluid_mesh.get_meta("chunk_lava_faces", 0)))
+        if bool(fluid_mesh.get_meta("forbiddenCoarseFluidPayload", false)):
+            runtime_perf_monitor.increment_counter("terrain_fluid_forbidden_coarse_payload_attempts")
 
 func touch_chunk_asset_cache_key(key: Vector2i) -> void:
     var index := chunk_asset_cache_order.find(key)
@@ -1667,9 +1698,12 @@ func chunk_asset_cache_entry_valid(key: Vector2i, assets: Dictionary) -> bool:
 
 func chunk_asset_signature(key: Vector2i) -> String:
     var chunk_revision := 0
+    var fluid_revision := 0
     if world_generation_system != null:
         if world_generation_system.has_method("terrain_volume_chunk_revision"):
             chunk_revision = int(world_generation_system.call("terrain_volume_chunk_revision", key, CHUNK_SIZE))
+        if world_generation_system.has_method("terrain_fluid_chunk_revision_with_halo"):
+            fluid_revision = int(world_generation_system.call("terrain_fluid_chunk_revision_with_halo", key, CHUNK_SIZE))
     var backend_id := "none"
     var backend_native := false
     if terrain_meshing_service != null and terrain_meshing_service.has_method("backend_summary"):
@@ -1697,11 +1731,12 @@ func chunk_asset_signature(key: Vector2i) -> String:
         var focus_overlap := bool(call("chunk_has_underground_focus_overlap", start_x, start_z)) if focus_active else false
         if focus_overlap:
             focus_key = "active"
-    return "seed=%s|chunk=%d,%d|chunkRev=%d|backend=%s|native=%s|volume=%s|step=%d|radius=%d|focus=%s" % [
+    return "seed=%s|chunk=%d,%d|chunkRev=%d|fluidRev=%d|backend=%s|native=%s|volume=%s|step=%d|radius=%d|focus=%s" % [
         seed_text,
         key.x,
         key.y,
         chunk_revision,
+        fluid_revision,
         backend_id,
         str(backend_native),
         str(volume_required),
@@ -1724,6 +1759,7 @@ func refresh_chunk_terrain_assets(cx: int, cz: int, notify_navigation := true, d
     if mesh_instance == null or body == null or collision == null:
         return false
     invalidate_chunk_asset_cache(key)
+    clear_stale_chunk_fluid_mesh(chunk, key)
     var start_x := cx * CHUNK_SIZE
     var start_z := cz * CHUNK_SIZE
     var has_volume_edits := false

@@ -294,6 +294,7 @@ func process_jobs(max_jobs := 1, budget_ms := 3.0, center := Vector2i(999999, 99
 			"terrainMeshBuildMs": float(completed_summary.get("terrainMeshBuildMs", 0.0)),
 			"fluidMeshBuildMs": float(completed_summary.get("fluidMeshBuildMs", 0.0)),
 			"collisionBuildMs": float(completed_summary.get("collisionBuildMs", 0.0)),
+			"dropReason": String(completed_summary.get("dropReason", "")),
 			"elapsedMs": float(completed_summary.get("elapsedMs", elapsed_ms(started_usec)))
 		}
 	if async_worker_active:
@@ -326,6 +327,7 @@ func process_jobs(max_jobs := 1, budget_ms := 3.0, center := Vector2i(999999, 99
 			"payloadPrepMs": float(started.get("payloadPrepMs", 0.0)),
 			"fluidPayloadPrepMs": float(started.get("fluidPayloadPrepMs", 0.0)),
 			"fluidPayloadCells": int(started.get("fluidPayloadCells", 0)),
+			"fluidPreparedSections": int(started.get("fluidPreparedSections", 0)),
 			"dropReason": String(started.get("dropReason", "")),
 			"requestedSignature": String(started.get("requestedSignature", "")),
 			"currentSignature": String(started.get("currentSignature", "")),
@@ -445,6 +447,7 @@ func start_next_async_native_job(center: Vector2i, budget_ms := 2.0) -> Dictiona
 	async_payload_job["fluidState"] = fluid_advanced.get("state", fluid_state)
 	result["fluidPayloadPrepMs"] = float(fluid_advanced.get("elapsedMs", 0.0))
 	result["fluidPayloadCells"] = int(fluid_advanced.get("cellsProcessed", 0))
+	result["fluidPreparedSections"] = int(fluid_advanced.get("preparedSections", 0))
 	result["payloadPrepMs"] = float(result.get("payloadPrepMs", 0.0)) + float(fluid_advanced.get("elapsedMs", 0.0))
 	result["payloadCells"] = int(result.get("payloadCells", 0)) + int(fluid_advanced.get("cellsProcessed", 0))
 	result["preparedSections"] = maxi(int(result.get("preparedSections", 0)), int(fluid_advanced.get("preparedSections", 0)))
@@ -588,7 +591,8 @@ func collect_async_worker_result() -> Dictionary:
 		"terrainMeshBuildMs": 0.0,
 		"fluidMeshBuildMs": 0.0,
 		"collisionBuildMs": 0.0,
-		"elapsedMs": 0.0
+		"elapsedMs": 0.0,
+		"dropReason": ""
 	}
 	if not async_worker_active or async_worker_thread == null:
 		return summary
@@ -612,9 +616,11 @@ func collect_async_worker_result() -> Dictionary:
 	async_worker_payload = {}
 	if cancelled:
 		summary["dropped"] = 1
+		summary["dropReason"] = "worker_cancelled"
 		return summary
 	if not (value is Dictionary):
 		summary["dropped"] = 1
+		summary["dropReason"] = "worker_result_invalid"
 		return summary
 	var result: Dictionary = value
 	summary["elapsedMs"] = float(result.get("elapsedMs", 0.0))
@@ -625,10 +631,12 @@ func collect_async_worker_result() -> Dictionary:
 	var current_signature := current_signature_for_chunk(key)
 	if signature != "" and current_signature != "" and signature != current_signature:
 		summary["dropped"] = 1
+		summary["dropReason"] = "stale_worker_signature"
 		return summary
 	var mesh: Mesh = result.get("mesh") as Mesh
 	if mesh == null:
 		summary["dropped"] = 1
+		summary["dropReason"] = "worker_mesh_missing"
 		return summary
 	var fluid_mesh: Mesh = result.get("fluidMesh") as Mesh
 	if fluid_mesh == null:
@@ -644,6 +652,7 @@ func collect_async_worker_result() -> Dictionary:
 	fluid_mesh.set_meta("terrainMeshingBackend", backend_id)
 	fluid_mesh.set_meta("terrainMeshingNative", true)
 	fluid_mesh.set_meta("terrainFluidSectionPayload", true)
+	fluid_mesh.set_meta("terrainSignature", signature)
 	apply_fluid_materials(fluid_mesh)
 	var assets := {
 		"mesh": mesh,

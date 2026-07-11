@@ -544,12 +544,25 @@ func summarize_samples(samples: Array) -> Dictionary:
     var terrain_meshing_payload_cells_prepared := 0
     var terrain_volume_sections_prepared_for_mesh := 0
     var terrain_volume_exposure_scan_deferred_without_native := 0
+    var terrain_fluid_jobs_queued := 0
+    var terrain_fluid_jobs_completed := 0
+    var terrain_fluid_jobs_dropped := 0
+    var terrain_fluid_payload_cells_prepared := 0
+    var terrain_fluid_payload_sections_prepared := 0
+    var terrain_fluid_exact_cells := 0
+    var terrain_fluid_water_faces := 0
+    var terrain_fluid_lava_faces := 0
+    var terrain_fluid_stale_results_rejected := 0
+    var terrain_fluid_stale_mesh_cleared := 0
+    var terrain_fluid_forbidden_coarse_payload_attempts := 0
     var surface_prop_volume_projection_queries := 0
     var underground_prop_cells_scanned := 0
     var underground_prop_candidates_found := 0
     var underground_prop_volume_service_scans := 0
     var max_terrain_meshing_payload_prep := 0.0
     var max_terrain_meshing_job_elapsed := 0.0
+    var max_terrain_fluid_payload_prep := 0.0
+    var max_terrain_fluid_native_build := 0.0
     var max_runtime_graph := 0.0
     var max_runtime_graph_snapshot := 0.0
     var max_runtime_graph_targets := 0.0
@@ -639,12 +652,25 @@ func summarize_samples(samples: Array) -> Dictionary:
         terrain_meshing_payload_cells_prepared = max(terrain_meshing_payload_cells_prepared, int(counters.get("terrain_meshing_payload_cells_prepared", terrain_meshing_payload_cells_prepared)))
         terrain_volume_sections_prepared_for_mesh = max(terrain_volume_sections_prepared_for_mesh, int(counters.get("terrain_volume_sections_prepared_for_mesh", terrain_volume_sections_prepared_for_mesh)))
         terrain_volume_exposure_scan_deferred_without_native = max(terrain_volume_exposure_scan_deferred_without_native, int(counters.get("terrain_volume_exposure_scan_deferred_without_native", terrain_volume_exposure_scan_deferred_without_native)))
+        terrain_fluid_jobs_queued = max(terrain_fluid_jobs_queued, int(counters.get("terrain_fluid_jobs_queued", terrain_fluid_jobs_queued)))
+        terrain_fluid_jobs_completed = max(terrain_fluid_jobs_completed, int(counters.get("terrain_fluid_jobs_completed", terrain_fluid_jobs_completed)))
+        terrain_fluid_jobs_dropped = max(terrain_fluid_jobs_dropped, int(counters.get("terrain_fluid_jobs_dropped", terrain_fluid_jobs_dropped)))
+        terrain_fluid_payload_cells_prepared = max(terrain_fluid_payload_cells_prepared, int(counters.get("terrain_fluid_payload_cells_prepared", terrain_fluid_payload_cells_prepared)))
+        terrain_fluid_payload_sections_prepared = max(terrain_fluid_payload_sections_prepared, int(counters.get("terrain_fluid_payload_sections_prepared", terrain_fluid_payload_sections_prepared)))
+        terrain_fluid_exact_cells = max(terrain_fluid_exact_cells, int(counters.get("terrain_fluid_exact_cells", terrain_fluid_exact_cells)))
+        terrain_fluid_water_faces = max(terrain_fluid_water_faces, int(counters.get("terrain_fluid_water_faces", terrain_fluid_water_faces)))
+        terrain_fluid_lava_faces = max(terrain_fluid_lava_faces, int(counters.get("terrain_fluid_lava_faces", terrain_fluid_lava_faces)))
+        terrain_fluid_stale_results_rejected = max(terrain_fluid_stale_results_rejected, int(counters.get("terrain_fluid_stale_results_rejected", terrain_fluid_stale_results_rejected)))
+        terrain_fluid_stale_mesh_cleared = max(terrain_fluid_stale_mesh_cleared, int(counters.get("terrain_fluid_stale_mesh_cleared", terrain_fluid_stale_mesh_cleared)))
+        terrain_fluid_forbidden_coarse_payload_attempts = max(terrain_fluid_forbidden_coarse_payload_attempts, int(counters.get("terrain_fluid_forbidden_coarse_payload_attempts", terrain_fluid_forbidden_coarse_payload_attempts)))
         surface_prop_volume_projection_queries = max(surface_prop_volume_projection_queries, int(counters.get("surface_prop_volume_projection_queries", surface_prop_volume_projection_queries)))
         underground_prop_cells_scanned = max(underground_prop_cells_scanned, int(counters.get("underground_prop_cells_scanned", underground_prop_cells_scanned)))
         underground_prop_candidates_found = max(underground_prop_candidates_found, int(counters.get("underground_prop_candidates_found", underground_prop_candidates_found)))
         underground_prop_volume_service_scans = max(underground_prop_volume_service_scans, int(counters.get("underground_prop_volume_service_scans", underground_prop_volume_service_scans)))
         max_terrain_meshing_payload_prep = maxf(max_terrain_meshing_payload_prep, float(section_max.get("terrain_meshing_payload_prep", 0.0)))
         max_terrain_meshing_job_elapsed = maxf(max_terrain_meshing_job_elapsed, float(section_max.get("terrain_meshing_job_elapsed", 0.0)))
+        max_terrain_fluid_payload_prep = maxf(max_terrain_fluid_payload_prep, float(section_max.get("terrain_fluid_payload_prep", 0.0)))
+        max_terrain_fluid_native_build = maxf(max_terrain_fluid_native_build, float(section_max.get("terrain_meshing_native_fluid_build", 0.0)))
         route_jobs_completed = max(route_jobs_completed, int(counters.get("route_jobs_completed", route_jobs_completed)))
         route_jobs_pending = max(route_jobs_pending, int(counters.get("route_jobs_pending", route_jobs_pending)))
         job_scan_nodes = max(job_scan_nodes, int(counters.get("job_scan_nodes", job_scan_nodes)))
@@ -703,12 +729,25 @@ func summarize_samples(samples: Array) -> Dictionary:
         "terrainMeshingPayloadCellsPrepared": terrain_meshing_payload_cells_prepared,
         "terrainVolumeSectionsPreparedForMesh": terrain_volume_sections_prepared_for_mesh,
         "terrainVolumeExposureScanDeferredWithoutNative": terrain_volume_exposure_scan_deferred_without_native,
+        "terrainFluidJobsQueued": terrain_fluid_jobs_queued,
+        "terrainFluidJobsCompleted": terrain_fluid_jobs_completed,
+        "terrainFluidJobsDropped": terrain_fluid_jobs_dropped,
+        "terrainFluidPayloadCellsPrepared": terrain_fluid_payload_cells_prepared,
+        "terrainFluidPayloadSectionsPrepared": terrain_fluid_payload_sections_prepared,
+        "terrainFluidExactCells": terrain_fluid_exact_cells,
+        "terrainFluidWaterFaces": terrain_fluid_water_faces,
+        "terrainFluidLavaFaces": terrain_fluid_lava_faces,
+        "terrainFluidStaleResultsRejected": terrain_fluid_stale_results_rejected,
+        "terrainFluidStaleMeshCleared": terrain_fluid_stale_mesh_cleared,
+        "terrainFluidForbiddenCoarsePayloadAttempts": terrain_fluid_forbidden_coarse_payload_attempts,
         "surfacePropVolumeProjectionQueries": surface_prop_volume_projection_queries,
         "undergroundPropCellsScanned": underground_prop_cells_scanned,
         "undergroundPropCandidatesFound": underground_prop_candidates_found,
         "undergroundPropVolumeServiceScans": underground_prop_volume_service_scans,
         "maxTerrainMeshingPayloadPrepMs": max_terrain_meshing_payload_prep,
         "maxTerrainMeshingJobElapsedMs": max_terrain_meshing_job_elapsed,
+        "maxTerrainFluidPayloadPrepMs": max_terrain_fluid_payload_prep,
+        "maxTerrainFluidNativeBuildMs": max_terrain_fluid_native_build,
         "maxRuntimeGraphBuildMs": max_runtime_graph,
         "maxRuntimeGraphSnapshotMs": max_runtime_graph_snapshot,
         "maxRuntimeGraphTargetsMs": max_runtime_graph_targets,

@@ -27,6 +27,7 @@ var block_light_sources := {}
 var pending_sky_light_columns := {}
 var section_revisions := {}
 var fluid_section_revisions := {}
+var fluid_dirty_cells := {}
 var dirty_sections := {}
 var top_surface_y_cache := {}
 var exposed_floor_cache := {}
@@ -48,6 +49,7 @@ func reset() -> void:
 	pending_sky_light_columns.clear()
 	section_revisions.clear()
 	fluid_section_revisions.clear()
+	fluid_dirty_cells.clear()
 	dirty_sections.clear()
 	top_surface_y_cache.clear()
 	exposed_floor_cache.clear()
@@ -406,7 +408,7 @@ func advance_exact_fluid_payload_state(state: Dictionary, budget_ms := 2.0, max_
 	while cursor_z <= max_cell.z:
 		var cell := Vector3i(cursor_x, cursor_y, cursor_z)
 		var authoritative_state := get_cell_state(cell)
-		var fluid_state := terrain_mesh_payload_state(cell, authoritative_state)
+		var fluid_state := fluid_mesh_payload_state(authoritative_state)
 		var local := cell - min_cell
 		var payload_index := local.y + payload_size.y * (local.x + payload_size.x * local.z)
 		var solid := bool(fluid_state.get("solid", false))
@@ -532,9 +534,32 @@ func fluid_state_changed(before: Dictionary, after: Dictionary) -> bool:
 	return bool(before.get("solid", false)) != bool(after.get("solid", false)) \
 		or fluid_type_id(String(before.get("fluid", ""))) != fluid_type_id(String(after.get("fluid", "")))
 
+func classify_fluid_only_edit(before: Dictionary, after: Dictionary) -> Dictionary:
+	var normalized := after.duplicate(true)
+	var metadata: Dictionary = normalized.get("metadata", {}) if normalized.get("metadata", {}) is Dictionary else {}
+	if metadata.has("terrainMeshAffects"):
+		return normalized
+	var changes_fluid := fluid_type_id(String(before.get("fluid", ""))) != fluid_type_id(String(normalized.get("fluid", "")))
+	if changes_fluid and not bool(before.get("solid", false)) and not bool(normalized.get("solid", false)):
+		metadata = metadata.duplicate(true)
+		metadata["terrainMeshAffects"] = false
+		normalized["metadata"] = metadata
+	return normalized
+
+func fluid_mesh_payload_state(state: Dictionary) -> Dictionary:
+	var metadata: Dictionary = state.get("metadata", {}) if state.get("metadata", {}) is Dictionary else {}
+	var source := String(metadata.get("source", ""))
+	if bool(metadata.get("renderedBySceneBlock", false)) or source == "scene_block":
+		var empty_state := state.duplicate(true)
+		empty_state["solid"] = false
+		empty_state["fluid"] = ""
+		return empty_state
+	return state
+
 func mark_fluid_section_changed(cell: Vector3i) -> void:
 	fluid_revision += 1
 	fluid_section_revisions[section_key_for_cell(cell)] = fluid_revision
+	fluid_dirty_cells[cell] = true
 
 func elapsed_ms_since(started_usec: int) -> float:
 	return float(Time.get_ticks_usec() - started_usec) / 1000.0
@@ -922,6 +947,7 @@ func set_cell_state(cell: Vector3i, state: Dictionary, reason := "", rebuild_sky
 		previous_mesh_affects = cell_state_affects_terrain_mesh(previous_state)
 		previous_surface_affects = cell_state_affects_surface_projection(previous_state)
 	var normalized := normalize_cell_state(cell, state, true)
+	normalized = classify_fluid_only_edit(previous_fluid_state, normalized)
 	normalized["editReason"] = String(reason)
 	if previous_mesh_affects:
 		adjust_mesh_edited_column_count(cell, -1)
@@ -935,7 +961,7 @@ func set_cell_state(cell: Vector3i, state: Dictionary, reason := "", rebuild_sky
 	if cell_state_affects_surface_projection(normalized):
 		adjust_surface_projection_edited_column_count(cell, 1)
 	revision += 1
-	if fluid_state_changed(terrain_mesh_payload_state(cell, previous_fluid_state), terrain_mesh_payload_state(cell, normalized)):
+	if fluid_state_changed(fluid_mesh_payload_state(previous_fluid_state), fluid_mesh_payload_state(normalized)):
 		mark_fluid_section_changed(cell)
 	write_loaded_section_cell_state(cell, normalized)
 	if previous_mesh_affects or cell_state_affects_terrain_mesh(normalized):
@@ -956,7 +982,7 @@ func clear_cell_state(cell: Vector3i, reason := "") -> void:
 	if cell_state_affects_surface_projection(previous):
 		adjust_surface_projection_edited_column_count(cell, -1)
 	revision += 1
-	if fluid_state_changed(terrain_mesh_payload_state(cell, previous), terrain_mesh_payload_state(cell, restored_state)):
+	if fluid_state_changed(fluid_mesh_payload_state(previous), fluid_mesh_payload_state(restored_state)):
 		mark_fluid_section_changed(cell)
 	write_loaded_section_cell_state(cell, restored_state)
 	if cell_state_affects_terrain_mesh(previous):
@@ -1531,6 +1557,26 @@ func chunk_revision(chunk_key: Vector2i, chunk_size: int) -> int:
 		max_revision = maxi(max_revision, int(section_revisions.get(section_key, 0)))
 	return max_revision
 
+func fluid_chunk_revision_with_halo(chunk_key: Vector2i, chunk_size: int) -> int:
+	var size := maxi(1, int(chunk_size))
+	var start_x := chunk_key.x * size - 1
+	var start_z := chunk_key.y * size - 1
+	var end_x := (chunk_key.x + 1) * size + 1
+	var end_z := (chunk_key.y + 1) * size + 1
+	var max_revision := 0
+	for section_value in fluid_section_revisions.keys():
+		var section_key: Vector3i = section_value
+		var section_start_x := section_key.x * SECTION_SIZE
+		var section_start_z := section_key.z * SECTION_SIZE
+		var section_end_x := section_start_x + SECTION_SIZE
+		var section_end_z := section_start_z + SECTION_SIZE
+		if section_end_x <= start_x or section_start_x >= end_x:
+			continue
+		if section_end_z <= start_z or section_start_z >= end_z:
+			continue
+		max_revision = maxi(max_revision, int(fluid_section_revisions.get(section_key, 0)))
+	return max_revision
+
 func edited_cell_count(include_non_mesh := true) -> int:
 	if include_non_mesh:
 		return edited_cells.size()
@@ -1586,7 +1632,13 @@ func consume_dirty_chunk_keys(chunk_size: int) -> Array[Vector2i]:
 		for chunk_z in range(chunk_min_z, chunk_max_z + 1):
 			for chunk_x in range(chunk_min_x, chunk_max_x + 1):
 				lookup[Vector2i(chunk_x, chunk_z)] = true
+	for cell_value in fluid_dirty_cells.keys():
+		var cell: Vector3i = cell_value
+		for offset in [Vector2i.ZERO, Vector2i(-1, 0), Vector2i(1, 0), Vector2i(0, -1), Vector2i(0, 1)]:
+			var neighbor_cell := Vector2i(cell.x + offset.x, cell.z + offset.y)
+			lookup[Vector2i(floori(float(neighbor_cell.x) / float(size)), floori(float(neighbor_cell.y) / float(size)))] = true
 	dirty_sections.clear()
+	fluid_dirty_cells.clear()
 	for key_value in lookup.keys():
 		result.append(key_value)
 	return result

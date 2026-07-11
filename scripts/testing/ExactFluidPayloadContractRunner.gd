@@ -195,6 +195,30 @@ func run() -> void:
 			"fluidRevisionAfter": scene_block_service.fluid_revision
 		}
 	)
+
+	var boundary_service = TerrainVolumeServiceScript.new()
+	boundary_service.setup(null, FixtureGenerator.new())
+	var boundary_cell := Vector3i(1, 0, 1)
+	boundary_service.set_cell_state(boundary_cell, fluid_state("water"), "payload_contract_boundary_fluid", false)
+	var boundary_dirty_chunks: Array = boundary_service.consume_dirty_chunk_keys(2)
+	add_result(
+		"boundary_fluid_edit_invalidates_halo_chunks",
+		boundary_service.fluid_chunk_revision_with_halo(Vector2i(0, 0), 2) > 0 \
+			and boundary_service.fluid_chunk_revision_with_halo(Vector2i(1, 0), 2) > 0 \
+			and boundary_service.fluid_chunk_revision_with_halo(Vector2i(0, 1), 2) > 0 \
+			and not boundary_service.chunk_has_edits(Vector2i(0, 0), 2) \
+			and boundary_dirty_chunks.size() == 3 \
+			and boundary_dirty_chunks.has(Vector2i(0, 0)) \
+			and boundary_dirty_chunks.has(Vector2i(1, 0)) \
+			and boundary_dirty_chunks.has(Vector2i(0, 1)),
+		{
+			"ownerRevision": boundary_service.fluid_chunk_revision_with_halo(Vector2i(0, 0), 2),
+			"eastRevision": boundary_service.fluid_chunk_revision_with_halo(Vector2i(1, 0), 2),
+			"southRevision": boundary_service.fluid_chunk_revision_with_halo(Vector2i(0, 1), 2),
+			"solidTerrainDirty": boundary_service.chunk_has_edits(Vector2i(0, 0), 2),
+			"dirtyChunks": boundary_dirty_chunks
+		}
+	)
 	finish()
 
 func build_snapshot(service, terrain_step_cells: int, max_cells: int) -> Dictionary:

@@ -441,6 +441,11 @@ func terrain_volume_chunk_revision(chunk_key: Vector2i, chunk_size: int) -> int:
 		return int(terrain_volume_service.chunk_revision(chunk_key, chunk_size))
 	return 0
 
+func terrain_fluid_chunk_revision_with_halo(chunk_key: Vector2i, chunk_size: int) -> int:
+	if terrain_volume_service != null and terrain_volume_service.has_method("fluid_chunk_revision_with_halo"):
+		return int(terrain_volume_service.fluid_chunk_revision_with_halo(chunk_key, chunk_size))
+	return 0
+
 func terrain_volume_edit_count(include_non_mesh := true) -> int:
 	if terrain_volume_service != null and terrain_volume_service.has_method("edited_cell_count"):
 		return int(terrain_volume_service.edited_cell_count(include_non_mesh))
