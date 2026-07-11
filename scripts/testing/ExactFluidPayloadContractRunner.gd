@@ -242,6 +242,19 @@ func solid_state() -> Dictionary:
 	}
 
 func sample_payload(payload: Dictionary, cell: Vector3i) -> Dictionary:
+	var cells: Dictionary = payload.get("cells", {}) if payload.get("cells", {}) is Dictionary else {}
+	if not cells.is_empty():
+		var min_cell: Vector3i = payload.get("minCell", Vector3i.ZERO)
+		var size: Vector3i = cells.get("size", Vector3i.ZERO)
+		var local := cell - min_cell
+		var index := local.y + size.y * (local.x + size.x * local.z)
+		var solid_values: PackedByteArray = cells.get("solid", PackedByteArray())
+		var fluid_values: PackedByteArray = cells.get("fluidTypeIds", PackedByteArray())
+		return {
+			"found": index >= 0 and index < solid_values.size() and index < fluid_values.size(),
+			"solid": index >= 0 and index < solid_values.size() and int(solid_values[index]) > 0,
+			"fluidType": int(fluid_values[index]) if index >= 0 and index < fluid_values.size() else -1
+		}
 	var section_key := Vector3i(
 		floori(float(cell.x) / float(SECTION_SIZE)),
 		floori(float(cell.y) / float(SECTION_SIZE)),
@@ -266,6 +279,17 @@ func sample_payload(payload: Dictionary, cell: Vector3i) -> Dictionary:
 	return {"found": false, "solid": false, "fluidType": -1}
 
 func payload_sections_are_minimal(payload: Dictionary) -> bool:
+	var cells: Dictionary = payload.get("cells", {}) if payload.get("cells", {}) is Dictionary else {}
+	if cells.keys().size() != 3 or not cells.has("size") or not cells.has("solid") or not cells.has("fluidTypeIds"):
+		return false
+	if not (cells.get("size") is Vector3i) or not (cells.get("solid") is PackedByteArray) or not (cells.get("fluidTypeIds") is PackedByteArray):
+		return false
+	var size: Vector3i = cells.get("size", Vector3i.ZERO)
+	var expected_size := size.x * size.y * size.z
+	if (cells.get("solid") as PackedByteArray).size() != expected_size or (cells.get("fluidTypeIds") as PackedByteArray).size() != expected_size:
+		return false
+	if not (payload.get("sections", []) as Array).is_empty():
+		return false
 	for value in payload.get("sections", []):
 		if not (value is Dictionary):
 			return false

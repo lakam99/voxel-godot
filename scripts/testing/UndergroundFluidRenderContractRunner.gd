@@ -11,6 +11,12 @@ var results: Array[Dictionary] = []
 var selected_sample := {}
 var selected_cell := Vector3i.ZERO
 var selected_chunk := Vector2i.ZERO
+var async_mesh_frames := 0
+var async_mesh_applied := false
+var async_mesh_last_result := {}
+var async_mesh_request_accepted := false
+var async_mesh_initial_pending := 0
+var async_mesh_timeline := []
 
 func _init() -> void:
 	call_deferred("run")
@@ -57,7 +63,7 @@ func run() -> void:
 		player.global_position = sample_position
 	selected_chunk = main.call("cell_to_chunk", selected_cell.x, selected_cell.z)
 	add_result("underground_fluid_render_sample_found", true, JSON.stringify(sample_signature(selected_sample)))
-	load_runtime_chunk(selected_chunk)
+	await load_runtime_chunk(selected_chunk)
 	await process_frame
 	await process_frame
 	var geometry := fluid_geometry_summary(selected_chunk)
@@ -94,6 +100,48 @@ func load_runtime_chunk(chunk_key: Vector2i) -> void:
 		main.call("rebuild_chunk", chunk_key.x, chunk_key.y, true)
 	else:
 		main.call("create_chunk", chunk_key.x, chunk_key.y, true)
+	if not main.has_method("request_chunk_terrain_mesh_assets"):
+		return
+	async_mesh_request_accepted = bool(main.call("request_chunk_terrain_mesh_assets", chunk_key, true, 100))
+	var service = main.get("terrain_meshing_service")
+	if service == null or not service.has_method("process_jobs"):
+		return
+	async_mesh_initial_pending = int(service.call("pending_job_count")) if service.has_method("pending_job_count") else -1
+	var async_started_usec := Time.get_ticks_usec()
+	while float(Time.get_ticks_usec() - async_started_usec) / 1000.0 < 60000.0:
+		async_mesh_frames += 1
+		var process_value = service.call("process_jobs", 1, 3.0, chunk_key)
+		async_mesh_last_result = process_value if process_value is Dictionary else {}
+		if async_mesh_timeline.size() < 24 and (async_mesh_frames <= 3 \
+			or int(async_mesh_last_result.get("payloadCells", 0)) > 0 \
+			or int(async_mesh_last_result.get("dropped", 0)) > 0 \
+			or int(async_mesh_last_result.get("processed", 0)) > 0):
+			async_mesh_timeline.append(async_mesh_last_result.duplicate(true))
+		if service.has_method("completed_job_count") and int(service.call("completed_job_count")) > 0:
+			if main.has_method("apply_completed_terrain_meshing_jobs"):
+				async_mesh_applied = int(main.call("apply_completed_terrain_meshing_jobs", chunk_key)) > 0
+			break
+		var pending_count := int(service.call("pending_job_count")) if service.has_method("pending_job_count") else 1
+		if async_mesh_frames > 1 and pending_count <= 0:
+			break
+		if async_mesh_frames % 100 == 0:
+			write_async_progress(service)
+		await process_frame
+	write_async_progress(service)
+
+func write_async_progress(service) -> void:
+	var progress := {
+		"frames": async_mesh_frames,
+		"requestAccepted": async_mesh_request_accepted,
+		"initialPending": async_mesh_initial_pending,
+		"applied": async_mesh_applied,
+		"lastResult": async_mesh_last_result,
+		"service": service.call("payload_progress_summary") if service != null and service.has_method("payload_progress_summary") else {}
+	}
+	var progress_file := FileAccess.open(report_path + ".progress.json", FileAccess.WRITE)
+	if progress_file != null:
+		progress_file.store_string(JSON.stringify(progress, "  "))
+		progress_file.close()
 
 func fluid_geometry_summary(chunk_key: Vector2i) -> Dictionary:
 	var chunks_value = main.get("chunks") if main != null else {}
@@ -111,9 +159,12 @@ func fluid_geometry_summary(chunk_key: Vector2i) -> Dictionary:
 	var fluid_faces := int(mesh.get_meta("chunk_fluid_faces", 0)) if mesh != null else 0
 	var water_faces := int(mesh.get_meta("chunk_water_faces", 0)) if mesh != null else 0
 	var lava_faces := int(mesh.get_meta("chunk_lava_faces", 0)) if mesh != null else 0
+	var fluid_step := int(mesh.get_meta("nativeFluidStepCells", -1)) if mesh != null else -1
+	var legacy_exact_payload := bool(mesh.get_meta("terrainFluidLegacyExactPayload", false)) if mesh != null else false
+	var forbidden_coarse_payload := bool(mesh.get_meta("forbiddenCoarseFluidPayload", false)) if mesh != null else false
 	var body := chunk.get_node_or_null("TerrainBody") as StaticBody3D
 	return {
-		"passed": fluid_instance != null and surface_count > 0 and fluid_faces > 0 and body != null,
+		"passed": fluid_instance != null and surface_count > 0 and fluid_faces > 0 and body != null and fluid_step == 1 and not forbidden_coarse_payload,
 		"chunk": vec2i(chunk_key),
 		"sampleCell": vec3i(selected_cell),
 		"fluid": String(selected_sample.get("fluid", "")),
@@ -122,8 +173,17 @@ func fluid_geometry_summary(chunk_key: Vector2i) -> Dictionary:
 		"fluidFaces": fluid_faces,
 		"waterFaces": water_faces,
 		"lavaFaces": lava_faces,
+		"nativeFluidStepCells": fluid_step,
+		"terrainFluidLegacyExactPayload": legacy_exact_payload,
+		"forbiddenCoarseFluidPayload": forbidden_coarse_payload,
 		"collisionBodyPresent": body != null,
-		"fluidCollisionSource": String(fluid_instance.get_meta("collision_source", "")) if fluid_instance != null else ""
+		"fluidCollisionSource": String(fluid_instance.get_meta("collision_source", "")) if fluid_instance != null else "",
+		"asyncMeshFrames": async_mesh_frames,
+		"asyncMeshApplied": async_mesh_applied,
+		"asyncMeshLastResult": async_mesh_last_result,
+		"asyncMeshRequestAccepted": async_mesh_request_accepted,
+		"asyncMeshInitialPending": async_mesh_initial_pending,
+		"asyncMeshTimeline": async_mesh_timeline
 	}
 
 func cell_center(cell: Vector3i) -> Vector3:
@@ -169,6 +229,9 @@ func failure_count() -> int:
 func finish() -> void:
 	save_report()
 	if main != null:
+		var service = main.get("terrain_meshing_service")
+		if service != null and service.has_method("clear_jobs"):
+			service.call("clear_jobs", true)
 		main.queue_free()
 	quit(0 if all_passed() else 1)
 
@@ -186,6 +249,12 @@ func save_report() -> void:
 		"failureCount": failure_count(),
 		"selectedChunk": vec2i(selected_chunk),
 		"selectedSample": sample_signature(selected_sample) if not selected_sample.is_empty() else {},
+		"asyncMeshFrames": async_mesh_frames,
+		"asyncMeshApplied": async_mesh_applied,
+		"asyncMeshLastResult": async_mesh_last_result,
+		"asyncMeshRequestAccepted": async_mesh_request_accepted,
+		"asyncMeshInitialPending": async_mesh_initial_pending,
+		"asyncMeshTimeline": async_mesh_timeline,
 		"results": results
 	}
 	var file := FileAccess.open(report_path, FileAccess.WRITE)

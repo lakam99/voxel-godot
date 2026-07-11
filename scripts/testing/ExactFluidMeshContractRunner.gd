@@ -32,7 +32,7 @@ func run() -> void:
 
 	run_case(
 		"single_water_cell",
-		payload_for_cells([
+		exact_payload_for_cells([
 			cell_state(Vector3i(0, 2, 0), "water")
 		], {"chunkSize": 2, "stepCells": 1}),
 		{
@@ -46,7 +46,7 @@ func run() -> void:
 	)
 	run_case(
 		"adjacent_same_fluid_cells",
-		payload_for_cells([
+		exact_payload_for_cells([
 			cell_state(Vector3i(0, 2, 0), "water"),
 			cell_state(Vector3i(1, 2, 0), "water")
 		], {"chunkSize": 2, "stepCells": 1}),
@@ -60,7 +60,7 @@ func run() -> void:
 	)
 	run_case(
 		"solid_adjacent_fluid_cell",
-		payload_for_cells([
+		exact_payload_for_cells([
 			cell_state(Vector3i(0, 2, 0), "water"),
 			cell_state(Vector3i(1, 2, 0), "", true)
 		], {"chunkSize": 2, "stepCells": 1}),
@@ -74,7 +74,7 @@ func run() -> void:
 	)
 	run_case(
 		"cross_chunk_same_fluid_halo",
-		payload_for_cells([
+		exact_payload_for_cells([
 			cell_state(Vector3i(1, 2, 0), "water"),
 			cell_state(Vector3i(2, 2, 0), "water")
 		], {"chunkSize": 2, "stepCells": 1}),
@@ -88,7 +88,7 @@ func run() -> void:
 	)
 	run_case(
 		"water_and_lava_surface_identity",
-		payload_for_cells([
+		exact_payload_for_cells([
 			cell_state(Vector3i(0, 2, 0), "water"),
 			cell_state(Vector3i(1, 2, 0), "lava")
 		], {"chunkSize": 2, "stepCells": 1}),
@@ -101,7 +101,7 @@ func run() -> void:
 	)
 	run_case(
 		"atlas_71906947_chunk_11_1_coarse_aquifer",
-		payload_for_cells([
+		exact_payload_for_cells([
 			cell_state(Vector3i(322, 2, 28), "water")
 		], {
 			"chunkSize": 28,
@@ -123,6 +123,18 @@ func run() -> void:
 			"observedBrokenCubeSizeMeters": 18.9
 		}
 	)
+	run_deferred_case(
+		"legacy_coarse_payload_rejected",
+		legacy_payload_for_cells([
+			cell_state(Vector3i(322, 2, 28), "water")
+		], {
+			"chunkSize": 28,
+			"startX": 308,
+			"startZ": 28,
+			"stepCells": 14,
+			"revision": 0
+		})
+	)
 	finish()
 
 func cell_state(cell: Vector3i, fluid := "", solid := false) -> Dictionary:
@@ -132,7 +144,103 @@ func cell_state(cell: Vector3i, fluid := "", solid := false) -> Dictionary:
 		"solid": bool(solid)
 	}
 
-func payload_for_cells(cells: Array, options: Dictionary) -> Dictionary:
+func exact_payload_for_cells(cells: Array, options: Dictionary) -> Dictionary:
+	var start_x := int(options.get("startX", 0))
+	var start_z := int(options.get("startZ", 0))
+	var chunk_size := int(options.get("chunkSize", 2))
+	var min_y := 2
+	var max_y := 2
+	var min_cell := Vector3i(start_x - 1, min_y - 1, start_z - 1)
+	var max_cell := Vector3i(start_x + chunk_size, max_y + 1, start_z + chunk_size)
+	var sections_by_key := {}
+	for z in range(min_cell.z, max_cell.z + 1):
+		for x in range(min_cell.x, max_cell.x + 1):
+			for y in range(min_cell.y, max_cell.y + 1):
+				ensure_exact_section(sections_by_key, Vector3i(x, y, z))
+	var fluid_cell_count := 0
+	for value in cells:
+		if not (value is Dictionary):
+			continue
+		set_exact_cell(sections_by_key, value)
+		if not bool(value.get("solid", false)) and String(value.get("fluid", "")) != "":
+			fluid_cell_count += 1
+	var sections := []
+	for section in sections_by_key.values():
+		sections.append(section)
+	return {
+		"schemaVersion": 1,
+		"immutable": true,
+		"sectionSize": SECTION_SIZE,
+		"cellSize": CELL_SIZE,
+		"chunkSize": chunk_size,
+		"chunkX": floori(float(start_x) / float(chunk_size)),
+		"chunkZ": floori(float(start_z) / float(chunk_size)),
+		"startX": start_x,
+		"startZ": start_z,
+		"minY": min_y,
+		"maxY": max_y,
+		"minCell": min_cell,
+		"maxCell": max_cell,
+		"boundsInclusive": true,
+		"terrainStepCells": int(options.get("stepCells", 1)),
+		"fluidStepCells": 1,
+		"stepCells": 1,
+		"revision": int(options.get("revision", 1)),
+		"fluidRevision": int(options.get("revision", 1)),
+		"signature": "exact-fluid-mesh-contract",
+		"hasFluid": fluid_cell_count > 0,
+		"fluidCellCount": fluid_cell_count,
+		"sections": sections
+	}
+
+func ensure_exact_section(sections_by_key: Dictionary, cell: Vector3i) -> void:
+	var section_key := Vector3i(
+		floori(float(cell.x) / float(SECTION_SIZE)),
+		floori(float(cell.y) / float(SECTION_SIZE)),
+		floori(float(cell.z) / float(SECTION_SIZE))
+	)
+	var key_text := "%d,%d,%d" % [section_key.x, section_key.y, section_key.z]
+	if sections_by_key.has(key_text):
+		return
+	var solid_values := PackedByteArray()
+	var fluid_values := PackedByteArray()
+	solid_values.resize(SECTION_SIZE * SECTION_SIZE * SECTION_SIZE)
+	fluid_values.resize(SECTION_SIZE * SECTION_SIZE * SECTION_SIZE)
+	sections_by_key[key_text] = {
+		"sectionKey": section_key,
+		"sectionSize": SECTION_SIZE,
+		"channelSchema": 1,
+		"revision": 1,
+		"channels": {
+			"solid": solid_values,
+			"fluidTypeIds": fluid_values
+		}
+	}
+
+func set_exact_cell(sections_by_key: Dictionary, value: Dictionary) -> void:
+	var cell: Vector3i = value.get("cell", Vector3i.ZERO)
+	ensure_exact_section(sections_by_key, cell)
+	var section_key := Vector3i(
+		floori(float(cell.x) / float(SECTION_SIZE)),
+		floori(float(cell.y) / float(SECTION_SIZE)),
+		floori(float(cell.z) / float(SECTION_SIZE))
+	)
+	var key_text := "%d,%d,%d" % [section_key.x, section_key.y, section_key.z]
+	var section: Dictionary = sections_by_key[key_text]
+	var channels: Dictionary = section.get("channels", {})
+	var solid_values: PackedByteArray = channels.get("solid", PackedByteArray())
+	var fluid_values: PackedByteArray = channels.get("fluidTypeIds", PackedByteArray())
+	var local := Vector3i(posmod(cell.x, SECTION_SIZE), posmod(cell.y, SECTION_SIZE), posmod(cell.z, SECTION_SIZE))
+	var index := local.x + SECTION_SIZE * (local.y + SECTION_SIZE * local.z)
+	var fluid := String(value.get("fluid", ""))
+	solid_values[index] = 1 if bool(value.get("solid", false)) else 0
+	fluid_values[index] = 2 if fluid == "lava" else (1 if fluid == "water" else 0)
+	channels["solid"] = solid_values
+	channels["fluidTypeIds"] = fluid_values
+	section["channels"] = channels
+	sections_by_key[key_text] = section
+
+func legacy_payload_for_cells(cells: Array, options: Dictionary) -> Dictionary:
 	var sections_by_key := {}
 	for value in cells:
 		if not (value is Dictionary):
@@ -299,6 +407,32 @@ func run_case(name: String, payload: Dictionary, expected: Dictionary) -> void:
 		"actual": json_safe(summary)
 	})
 
+func run_deferred_case(name: String, payload: Dictionary) -> void:
+	var mesh_value = backend.call("build_chunk_fluid_mesh_from_sections", payload)
+	if not (mesh_value is Mesh):
+		results.append({
+			"name": name,
+			"passed": false,
+			"failures": ["native backend did not return a deferred Mesh"]
+		})
+		return
+	var summary := mesh_summary(mesh_value as Mesh)
+	var failures: Array[String] = []
+	if not bool(summary.get("terrainFluidNativeDeferred", false)):
+		failures.append("legacy coarse payload was not explicitly deferred")
+	if not bool(summary.get("forbiddenCoarseFluidPayload", false)):
+		failures.append("legacy coarse payload was not marked forbidden")
+	if int(summary.get("surfaceCount", -1)) != 0 or int(summary.get("fluidFaces", -1)) != 0:
+		failures.append("legacy coarse payload emitted fluid geometry")
+	if String(summary.get("terrainFluidDeferredReason", "")) != "exact_fluid_payload_required":
+		failures.append("unexpected deferred reason: %s" % String(summary.get("terrainFluidDeferredReason", "")))
+	results.append({
+		"name": name,
+		"passed": failures.is_empty(),
+		"failures": failures,
+		"actual": json_safe(summary)
+	})
+
 func mesh_summary(mesh: Mesh) -> Dictionary:
 	var vertex_count := 0
 	var has_vertices := false
@@ -326,12 +460,16 @@ func mesh_summary(mesh: Mesh) -> Dictionary:
 		"terrainMeshingBackend": String(mesh.get_meta("terrainMeshingBackend", "")),
 		"terrainFluidSectionPayload": bool(mesh.get_meta("terrainFluidSectionPayload", false)),
 		"nativeFluidStepCells": int(mesh.get_meta("nativeFluidStepCells", -1)),
+		"nativeFluidCellCount": int(mesh.get_meta("nativeFluidCellCount", -1)),
 		"fluidFaces": int(mesh.get_meta("chunk_fluid_faces", -1)),
 		"waterFaces": int(mesh.get_meta("chunk_water_faces", -1)),
 		"lavaFaces": int(mesh.get_meta("chunk_lava_faces", -1)),
 		"surfaceCount": mesh.get_surface_count(),
 		"surfaceOrder": surface_order,
 		"vertexCount": vertex_count,
+		"terrainFluidNativeDeferred": bool(mesh.get_meta("terrainFluidNativeDeferred", false)),
+		"terrainFluidDeferredReason": String(mesh.get_meta("terrainFluidDeferredReason", "")),
+		"forbiddenCoarseFluidPayload": bool(mesh.get_meta("forbiddenCoarseFluidPayload", false)),
 		"boundsMin": bounds_min,
 		"boundsMax": bounds_max,
 		"boundsSize": bounds_max - bounds_min,
@@ -391,7 +529,7 @@ func finish() -> void:
 		"finished": true,
 		"passed": all_passed(),
 		"evidenceLevel": "contract",
-		"scope": "Native production sparse-section fluid mesh contract. This is not headed visual acceptance.",
+		"scope": "Native production exact fluid payload and geometry contract. This is not headed visual acceptance.",
 		"resultCount": results.size(),
 		"failureCount": failure_count(),
 		"results": json_safe(results)

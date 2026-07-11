@@ -308,6 +308,23 @@ func advance_section_payload_state(state: Dictionary, budget_ms := 2.0, max_cell
 		"elapsedMs": 0.0
 	}
 
+func begin_exact_fluid_payload_for_meshing_chunk(start_x: int, start_z: int, chunk_size: int, min_y: int, max_y: int, terrain_step_cells := 1) -> Dictionary:
+	if terrain_volume_service != null and terrain_volume_service.has_method("begin_exact_fluid_payload_for_meshing_chunk"):
+		return terrain_volume_service.begin_exact_fluid_payload_for_meshing_chunk(start_x, start_z, chunk_size, min_y, max_y, terrain_step_cells)
+	return {}
+
+func advance_exact_fluid_payload_state(state: Dictionary, budget_ms := 2.0, max_cells := 512) -> Dictionary:
+	if terrain_volume_service != null and terrain_volume_service.has_method("advance_exact_fluid_payload_state"):
+		return terrain_volume_service.advance_exact_fluid_payload_state(state, budget_ms, max_cells)
+	return {
+		"state": state,
+		"complete": true,
+		"payload": {},
+		"cellsProcessed": 0,
+		"preparedSections": 0,
+		"elapsedMs": 0.0
+	}
+
 func generate_section(section_key: Vector3i) -> Dictionary:
 	if terrain_volume_service != null and terrain_volume_service.has_method("generate_section"):
 		return terrain_volume_service.generate_section(section_key)
@@ -1197,6 +1214,12 @@ func cell_size() -> float:
 
 func world_bottom_cell_y() -> int:
 	return WORLD_BOTTOM_CELL_Y
+
+func generated_fluid_cell_y_bounds() -> Dictionary:
+	return {
+		"minY": world_bottom_cell_y(),
+		"maxY": ceili(float(main.WATER_LEVEL) / cell_size()) if main != null else 0
+	}
 
 func world_top_cell_y() -> int:
 	var max_height := float(main.MAX_HEIGHT) if main != null else 96.0

@@ -7,6 +7,7 @@ const NATIVE_EXTENSION_PATH := "res://addons/terrain_meshing_backend/terrain_mes
 const EXTENSION_LOAD_STATUS_OK := 0
 const EXTENSION_LOAD_STATUS_ALREADY_LOADED := 2
 const ASYNC_PAYLOAD_PREP_MAX_CELLS_PER_FRAME := 192
+const ASYNC_EXACT_FLUID_PAYLOAD_MAX_CELLS_PER_FRAME := 2048
 const ASYNC_WORKER_MIN_COLLECT_DELAY_MS := 36.0
 
 var main
@@ -100,6 +101,24 @@ func backend_summary() -> Dictionary:
 		"workerActive": async_worker_active,
 		"payloadActive": not async_payload_job.is_empty(),
 		"backendDetails": backend_details
+	}
+
+func payload_progress_summary() -> Dictionary:
+	var terrain_state: Dictionary = async_payload_job.get("terrainState", {}) if async_payload_job.get("terrainState", {}) is Dictionary else {}
+	var fluid_state: Dictionary = async_payload_job.get("fluidState", {}) if async_payload_job.get("fluidState", {}) is Dictionary else {}
+	var payload_size: Vector3i = fluid_state.get("payloadSize", Vector3i.ZERO)
+	return {
+		"active": not async_payload_job.is_empty(),
+		"key": async_payload_job.get("key", Vector2i(999999, 999999)),
+		"terrainComplete": not (async_payload_job.get("terrainPayload", {}) as Dictionary).is_empty() if async_payload_job.get("terrainPayload", {}) is Dictionary else false,
+		"terrainCellsProcessed": int(terrain_state.get("cellsProcessed", 0)),
+		"fluidComplete": bool(fluid_state.get("complete", false)),
+		"fluidCellsProcessed": int(fluid_state.get("cellsProcessed", 0)),
+		"fluidExpectedCells": payload_size.x * payload_size.y * payload_size.z,
+		"fluidPayloadSize": payload_size,
+		"workerActive": async_worker_active,
+		"workerKey": async_worker_key,
+		"workerElapsedMs": elapsed_ms(async_worker_started_usec) if async_worker_active and async_worker_started_usec > 0 else 0.0
 	}
 
 func can_process_native_section_jobs_async() -> bool:
@@ -305,6 +324,11 @@ func process_jobs(max_jobs := 1, budget_ms := 3.0, center := Vector2i(999999, 99
 			"pendingJobs": pending_job_count(),
 			"completedJobs": completed_jobs.size(),
 			"payloadPrepMs": float(started.get("payloadPrepMs", 0.0)),
+			"fluidPayloadPrepMs": float(started.get("fluidPayloadPrepMs", 0.0)),
+			"fluidPayloadCells": int(started.get("fluidPayloadCells", 0)),
+			"dropReason": String(started.get("dropReason", "")),
+			"requestedSignature": String(started.get("requestedSignature", "")),
+			"currentSignature": String(started.get("currentSignature", "")),
 			"collectMs": collect_ms,
 			"workerJoinMs": 0.0,
 			"workerStartMs": float(started.get("workerStartMs", 0.0)),
@@ -357,7 +381,10 @@ func start_next_async_native_job(center: Vector2i, budget_ms := 2.0) -> Dictiona
 		"preparedSections": 0,
 		"payloadPrepMs": 0.0,
 		"payloadCells": 0,
-		"workerStartMs": 0.0
+		"workerStartMs": 0.0,
+		"dropReason": "",
+		"requestedSignature": "",
+		"currentSignature": ""
 	}
 	collect_retired_worker_threads(false)
 	if not retired_worker_threads.is_empty():
@@ -370,35 +397,75 @@ func start_next_async_native_job(center: Vector2i, budget_ms := 2.0) -> Dictiona
 	var key: Vector2i = async_payload_job.get("key", Vector2i(999999, 999999))
 	var requested_signature := String(async_payload_job.get("terrainSignature", ""))
 	var current_signature := current_signature_for_chunk(key)
+	result["requestedSignature"] = requested_signature
+	result["currentSignature"] = current_signature
 	if requested_signature != "" and current_signature != "" and requested_signature != current_signature:
 		async_payload_job = {}
 		result["dropped"] = 1
+		result["dropReason"] = "terrain_signature_changed_during_payload"
 		return result
 	var world_generation = main.get("world_generation_system") if main != null else null
-	if world_generation == null or not world_generation.has_method("advance_section_payload_state"):
+	if world_generation == null \
+		or not world_generation.has_method("advance_section_payload_state") \
+		or not world_generation.has_method("advance_exact_fluid_payload_state"):
 		async_payload_job = {}
 		result["dropped"] = 1
 		return result
-	var state: Dictionary = async_payload_job.get("state", {}) if async_payload_job.get("state", {}) is Dictionary else {}
-	var advanced_value = world_generation.call(
-		"advance_section_payload_state",
-		state,
-		maxf(0.1, float(budget_ms)),
-		ASYNC_PAYLOAD_PREP_MAX_CELLS_PER_FRAME
+	var payload: Dictionary = async_payload_job.get("terrainPayload", {}) if async_payload_job.get("terrainPayload", {}) is Dictionary else {}
+	if payload.is_empty():
+		var terrain_state: Dictionary = async_payload_job.get("terrainState", {}) if async_payload_job.get("terrainState", {}) is Dictionary else {}
+		var terrain_advanced_value = world_generation.call(
+			"advance_section_payload_state",
+			terrain_state,
+			maxf(0.1, float(budget_ms)),
+			ASYNC_PAYLOAD_PREP_MAX_CELLS_PER_FRAME
+		)
+		var terrain_advanced: Dictionary = terrain_advanced_value if terrain_advanced_value is Dictionary else {}
+		async_payload_job["terrainState"] = terrain_advanced.get("state", terrain_state)
+		result["payloadPrepMs"] = float(terrain_advanced.get("elapsedMs", 0.0))
+		result["payloadCells"] = int(terrain_advanced.get("cellsProcessed", 0))
+		result["preparedSections"] = int(terrain_advanced.get("preparedSections", 0))
+		if not bool(terrain_advanced.get("complete", false)):
+			return result
+		payload = terrain_advanced.get("payload", {}) if terrain_advanced.get("payload", {}) is Dictionary else {}
+		if payload.is_empty():
+			async_payload_job = {}
+			result["dropped"] = 1
+			return result
+		async_payload_job["terrainPayload"] = payload
+	var fluid_state: Dictionary = async_payload_job.get("fluidState", {}) if async_payload_job.get("fluidState", {}) is Dictionary else {}
+	var fluid_budget_ms := maxf(0.1, float(budget_ms) - float(result.get("payloadPrepMs", 0.0)))
+	var fluid_advanced_value = world_generation.call(
+		"advance_exact_fluid_payload_state",
+		fluid_state,
+		fluid_budget_ms,
+		ASYNC_EXACT_FLUID_PAYLOAD_MAX_CELLS_PER_FRAME
 	)
-	var advanced: Dictionary = advanced_value if advanced_value is Dictionary else {}
-	async_payload_job["state"] = advanced.get("state", state)
-	result["payloadPrepMs"] = float(advanced.get("elapsedMs", 0.0))
-	result["payloadCells"] = int(advanced.get("cellsProcessed", 0))
-	result["preparedSections"] = int(advanced.get("preparedSections", 0))
-	if not bool(advanced.get("complete", false)):
+	var fluid_advanced: Dictionary = fluid_advanced_value if fluid_advanced_value is Dictionary else {}
+	async_payload_job["fluidState"] = fluid_advanced.get("state", fluid_state)
+	result["fluidPayloadPrepMs"] = float(fluid_advanced.get("elapsedMs", 0.0))
+	result["fluidPayloadCells"] = int(fluid_advanced.get("cellsProcessed", 0))
+	result["payloadPrepMs"] = float(result.get("payloadPrepMs", 0.0)) + float(fluid_advanced.get("elapsedMs", 0.0))
+	result["payloadCells"] = int(result.get("payloadCells", 0)) + int(fluid_advanced.get("cellsProcessed", 0))
+	result["preparedSections"] = maxi(int(result.get("preparedSections", 0)), int(fluid_advanced.get("preparedSections", 0)))
+	if bool(fluid_advanced.get("cancelled", false)) or bool(fluid_advanced.get("stale", false)):
+		async_payload_job = {}
+		result["dropped"] = 1
+		result["dropReason"] = "exact_fluid_payload_cancelled" if bool(fluid_advanced.get("cancelled", false)) else "exact_fluid_payload_stale"
 		return result
-	var payload: Dictionary = advanced.get("payload", {}) if advanced.get("payload", {}) is Dictionary else {}
+	if not bool(fluid_advanced.get("complete", false)):
+		return result
+	var fluid_payload: Dictionary = fluid_advanced.get("payload", {}) if fluid_advanced.get("payload", {}) is Dictionary else {}
+	if fluid_payload.is_empty():
+		async_payload_job = {}
+		result["dropped"] = 1
+		result["dropReason"] = "exact_fluid_payload_empty"
+		return result
+	payload["fluidPayload"] = fluid_payload
+	payload["hasFluid"] = bool(fluid_payload.get("hasFluid", false))
+	payload["terrainStepCells"] = maxi(1, int(payload.get("terrainStepCells", payload.get("stepCells", 1))))
 	var include_collision := bool(async_payload_job.get("includeCollision", true))
 	async_payload_job = {}
-	if payload.is_empty():
-		result["dropped"] = 1
-		return result
 	result = start_async_worker_from_payload(key, requested_signature, payload, include_collision, result)
 	return result
 
@@ -419,15 +486,21 @@ func begin_next_async_payload_job(center: Vector2i) -> Dictionary:
 	if requested_signature != "" and current_signature != "" and requested_signature != current_signature:
 		result["dropped"] = 1
 		return result
-	var payload_state := begin_section_payload_for_chunk(key.x, key.y)
-	if payload_state.is_empty():
+	var terrain_state := begin_section_payload_for_chunk(key.x, key.y)
+	if terrain_state.is_empty():
+		result["dropped"] = 1
+		return result
+	var fluid_state := begin_exact_fluid_payload_for_chunk(terrain_state)
+	if fluid_state.is_empty():
 		result["dropped"] = 1
 		return result
 	async_payload_job = {
 		"key": key,
 		"terrainSignature": requested_signature,
 		"includeCollision": bool(job.get("includeCollision", true)),
-		"state": payload_state
+		"terrainState": terrain_state,
+		"fluidState": fluid_state,
+		"terrainPayload": {}
 	}
 	result["began"] = true
 	return result
@@ -456,6 +529,22 @@ func begin_section_payload_for_chunk(cx: int, cz: int) -> Dictionary:
 	if main.has_method("underground_volume_mesh_step_for_chunk"):
 		step = maxi(1, int(main.call("underground_volume_mesh_step_for_chunk", start_x, start_z)))
 	return world_generation.call("begin_section_payload_for_meshing_chunk", start_x, start_z, size, min_y, max_y, step)
+
+func begin_exact_fluid_payload_for_chunk(terrain_state: Dictionary) -> Dictionary:
+	if main == null or main.get("world_generation_system") == null:
+		return {}
+	var world_generation = main.get("world_generation_system")
+	if not world_generation.has_method("begin_exact_fluid_payload_for_meshing_chunk"):
+		return {}
+	return world_generation.call(
+		"begin_exact_fluid_payload_for_meshing_chunk",
+		int(terrain_state.get("startX", 0)),
+		int(terrain_state.get("startZ", 0)),
+		int(terrain_state.get("chunkSize", chunk_size())),
+		int(terrain_state.get("minY", 0)),
+		int(terrain_state.get("maxY", 0)),
+		int(terrain_state.get("terrainStepCells", terrain_state.get("stepCells", 1)))
+	)
 
 func start_async_worker_from_payload(key: Vector2i, requested_signature: String, payload: Dictionary, include_collision: bool, result: Dictionary) -> Dictionary:
 	async_worker_key = key

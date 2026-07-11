@@ -1696,11 +1696,7 @@ func chunk_asset_signature(key: Vector2i) -> String:
         var focus_active := bool(call("position_is_near_underground_air_focus", player.global_position))
         var focus_overlap := bool(call("chunk_has_underground_focus_overlap", start_x, start_z)) if focus_active else false
         if focus_overlap:
-            focus_key = "%d,%d,%d" % [
-                world_to_cell(player.global_position.x),
-                world_to_cell(player.global_position.y),
-                world_to_cell(player.global_position.z)
-            ]
+            focus_key = "active"
     return "seed=%s|chunk=%d,%d|chunkRev=%d|backend=%s|native=%s|volume=%s|step=%d|radius=%d|focus=%s" % [
         seed_text,
         key.x,

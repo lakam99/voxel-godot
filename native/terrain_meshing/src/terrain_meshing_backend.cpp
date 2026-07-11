@@ -58,6 +58,12 @@ struct PayloadSample {
 	bool solid = false;
 };
 
+struct ExactFluidSample {
+	bool known = false;
+	bool solid = false;
+	int fluid_type = 0;
+};
+
 int get_main_int(Object *p_main, const StringName &p_name, int p_fallback) {
 	if (p_main == nullptr) {
 		return p_fallback;
@@ -246,6 +252,144 @@ PayloadSample sample_section_payload(const Dictionary &p_payload, const Dictiona
 		result.material = result.solid ? String("stone") : String("air");
 	}
 	return result;
+}
+
+ExactFluidSample sample_exact_fluid_payload(const Dictionary &p_payload, const Dictionary &p_section_lookup, const Vector3i &p_cell) {
+	ExactFluidSample result;
+	Variant min_value = p_payload.get("minCell", Variant());
+	Variant max_value = p_payload.get("maxCell", Variant());
+	if (min_value.get_type() != Variant::VECTOR3I || max_value.get_type() != Variant::VECTOR3I) {
+		return result;
+	}
+	Vector3i min_cell = min_value;
+	Vector3i max_cell = max_value;
+	if (p_cell.x < min_cell.x || p_cell.x > max_cell.x || p_cell.y < min_cell.y || p_cell.y > max_cell.y || p_cell.z < min_cell.z || p_cell.z > max_cell.z) {
+		return result;
+	}
+	Variant cells_value = p_payload.get("cells", Dictionary());
+	if (cells_value.get_type() == Variant::DICTIONARY) {
+		Dictionary cells = cells_value;
+		Variant size_value = cells.get("size", Variant());
+		PackedByteArray solid_values = cells.get("solid", PackedByteArray());
+		PackedByteArray fluid_values = cells.get("fluidTypeIds", PackedByteArray());
+		if (size_value.get_type() == Variant::VECTOR3I) {
+			Vector3i size = size_value;
+			int expected_size = size.x * size.y * size.z;
+			if (size.x > 0 && size.y > 0 && size.z > 0 && solid_values.size() == expected_size && fluid_values.size() == expected_size) {
+				Vector3i local = p_cell - min_cell;
+				int index = local.y + size.y * (local.x + size.x * local.z);
+				result.known = index >= 0 && index < expected_size;
+				result.solid = result.known && int(solid_values[index]) > 0;
+				result.fluid_type = result.known ? CLAMP(int(fluid_values[index]), 0, 2) : 0;
+				return result;
+			}
+		}
+	}
+	int section_size = int(p_payload.get("sectionSize", 16));
+	Vector3i section_key(
+		floor_divide(p_cell.x, section_size),
+		floor_divide(p_cell.y, section_size),
+		floor_divide(p_cell.z, section_size)
+	);
+	String key_text = section_key_text(section_key);
+	if (!p_section_lookup.has(key_text)) {
+		return result;
+	}
+	Variant section_value = p_section_lookup[key_text];
+	if (section_value.get_type() != Variant::DICTIONARY) {
+		return result;
+	}
+	Dictionary section = section_value;
+	Variant channels_value = section.get("channels", Dictionary());
+	if (channels_value.get_type() != Variant::DICTIONARY) {
+		return result;
+	}
+	Dictionary channels = channels_value;
+	PackedByteArray solid_values = channels.get("solid", PackedByteArray());
+	PackedByteArray fluid_values = channels.get("fluidTypeIds", PackedByteArray());
+	int expected_size = section_size * section_size * section_size;
+	if (solid_values.size() != expected_size || fluid_values.size() != expected_size) {
+		return result;
+	}
+	Vector3i local(
+		positive_modulo(p_cell.x, section_size),
+		positive_modulo(p_cell.y, section_size),
+		positive_modulo(p_cell.z, section_size)
+	);
+	int index = section_cell_index(local, section_size);
+	result.known = index >= 0 && index < expected_size;
+	result.solid = result.known && int(solid_values[index]) > 0;
+	result.fluid_type = result.known ? CLAMP(int(fluid_values[index]), 0, 2) : 0;
+	return result;
+}
+
+ExactFluidSample sample_legacy_exact_fluid_payload(const Dictionary &p_payload, const Dictionary &p_section_lookup, const Vector3i &p_cell) {
+	ExactFluidSample result;
+	int section_size = int(p_payload.get("sectionSize", 16));
+	Vector3i section_key(
+		floor_divide(p_cell.x, section_size),
+		floor_divide(p_cell.y, section_size),
+		floor_divide(p_cell.z, section_size)
+	);
+	String key_text = section_key_text(section_key);
+	if (!p_section_lookup.has(key_text)) {
+		return result;
+	}
+	Variant section_value = p_section_lookup[key_text];
+	if (section_value.get_type() != Variant::DICTIONARY) {
+		return result;
+	}
+	Dictionary section = section_value;
+	Variant channels_value = section.get("channels", Dictionary());
+	if (channels_value.get_type() != Variant::DICTIONARY) {
+		return result;
+	}
+	Dictionary channels = channels_value;
+	Vector3i local(
+		positive_modulo(p_cell.x, section_size),
+		positive_modulo(p_cell.y, section_size),
+		positive_modulo(p_cell.z, section_size)
+	);
+	int index = section_cell_index(local, section_size);
+	bool sparse_section = bool(section.get("sparse", false)) || bool(p_payload.get("sparse", false));
+	if (sparse_section) {
+		Variant sparse_lookup_value = channels.get("sparseIndexByCellIndex", Dictionary());
+		if (sparse_lookup_value.get_type() != Variant::DICTIONARY) {
+			return result;
+		}
+		Dictionary sparse_lookup = sparse_lookup_value;
+		if (!sparse_lookup.has(index)) {
+			return result;
+		}
+	}
+	PayloadSample sample = sample_section_payload(p_payload, p_section_lookup, p_cell);
+	result.known = true;
+	result.solid = sample.solid;
+	result.fluid_type = sample.fluid == "lava" ? 2 : (sample.fluid == "water" ? 1 : 0);
+	return result;
+}
+
+String fluid_id_from_type(int p_fluid_type) {
+	return p_fluid_type == 2 ? String("lava") : String("water");
+}
+
+Ref<ArrayMesh> deferred_exact_fluid_mesh(const String &p_reason, bool p_forbidden_coarse_payload, int p_unknown_neighbor_count = 0) {
+	Ref<ArrayMesh> mesh;
+	mesh.instantiate();
+	mesh->set_meta("terrainMeshingBackend", "native_volume_mesher");
+	mesh->set_meta("terrainMeshingNative", true);
+	mesh->set_meta("terrainMeshingQueued", false);
+	mesh->set_meta("terrainFluidSectionPayload", false);
+	mesh->set_meta("terrainFluidNativeDeferred", true);
+	mesh->set_meta("terrainFluidDeferredReason", p_reason);
+	mesh->set_meta("forbiddenCoarseFluidPayload", p_forbidden_coarse_payload);
+	mesh->set_meta("unknownFluidNeighborCount", p_unknown_neighbor_count);
+	mesh->set_meta("chunk_fluid_faces", 0);
+	mesh->set_meta("chunk_water_faces", 0);
+	mesh->set_meta("chunk_lava_faces", 0);
+	mesh->set_meta("nativeFluidStepCells", 0);
+	mesh->set_meta("nativeFluidCellCount", 0);
+	return mesh;
 }
 
 Vector3 sample_section_payload_numeric(const Dictionary &p_payload, const Dictionary &p_section_lookup, const Vector3i &p_cell) {
@@ -924,20 +1068,55 @@ Variant TerrainMeshingBackend::build_chunk_mesh_from_sections(const Dictionary &
 }
 
 Variant TerrainMeshingBackend::build_chunk_fluid_mesh_from_sections(const Dictionary &p_payload) {
-	int chunk_size = int(p_payload.get("chunkSize", 28));
-	double cell_size = double(p_payload.get("cellSize", 1.35));
-	int start_x = int(p_payload.get("startX", int(p_payload.get("chunkX", 0)) * chunk_size));
-	int start_z = int(p_payload.get("startZ", int(p_payload.get("chunkZ", 0)) * chunk_size));
-	int min_y = int(p_payload.get("minY", int(p_payload.get("worldBottomCellY", -64)))) - 1;
-	int max_y = int(p_payload.get("maxY", int(p_payload.get("worldTopCellY", 96)))) + 1;
-	if (chunk_size <= 0 || cell_size <= 0.0 || max_y <= min_y) {
-		return Variant();
+	Dictionary fluid_payload;
+	Variant nested_payload_value = p_payload.get("fluidPayload", Variant());
+	if (nested_payload_value.get_type() == Variant::DICTIONARY) {
+		fluid_payload = Dictionary(nested_payload_value);
+	} else {
+		fluid_payload = p_payload;
 	}
-	Dictionary section_lookup = section_lookup_from_payload(p_payload);
-	if (section_lookup.is_empty()) {
-		return Variant();
+	bool exact_contract = int(fluid_payload.get("schemaVersion", 0)) == 1 &&
+		int(fluid_payload.get("fluidStepCells", 0)) == 1 &&
+		int(fluid_payload.get("stepCells", 0)) == 1 &&
+		bool(fluid_payload.get("boundsInclusive", false));
+	bool legacy_exact_contract = !exact_contract && int(fluid_payload.get("stepCells", 0)) == 1;
+	if (!exact_contract && !legacy_exact_contract) {
+		return deferred_exact_fluid_mesh("exact_fluid_payload_required", true);
 	}
-	int step = CLAMP(int(p_payload.get("stepCells", 2)), 1, 16);
+	int chunk_size = int(fluid_payload.get("chunkSize", 28));
+	double cell_size = double(fluid_payload.get("cellSize", 1.35));
+	int start_x = int(fluid_payload.get("startX", int(fluid_payload.get("chunkX", 0)) * chunk_size));
+	int start_z = int(fluid_payload.get("startZ", int(fluid_payload.get("chunkZ", 0)) * chunk_size));
+	int min_y = int(fluid_payload.get("minY", int(fluid_payload.get("worldBottomCellY", -64))));
+	int max_y = int(fluid_payload.get("maxY", int(fluid_payload.get("worldTopCellY", 96))));
+	Variant min_cell_value = fluid_payload.get("minCell", Variant());
+	Variant max_cell_value = fluid_payload.get("maxCell", Variant());
+	if (chunk_size <= 0 || cell_size <= 0.0 || max_y < min_y || min_cell_value.get_type() != Variant::VECTOR3I || max_cell_value.get_type() != Variant::VECTOR3I) {
+		return deferred_exact_fluid_mesh("invalid_exact_fluid_bounds", false);
+	}
+	Vector3i min_cell = min_cell_value;
+	Vector3i max_cell = max_cell_value;
+	bool halo_complete = min_cell.x <= start_x - 1 && max_cell.x >= start_x + chunk_size &&
+		min_cell.z <= start_z - 1 && max_cell.z >= start_z + chunk_size &&
+		min_cell.y <= min_y - 1 && max_cell.y >= max_y + 1;
+	if (!halo_complete) {
+		return deferred_exact_fluid_mesh("incomplete_exact_fluid_halo", false);
+	}
+	Dictionary section_lookup = section_lookup_from_payload(fluid_payload);
+	bool has_fluid = bool(fluid_payload.get("hasFluid", false));
+	if (!has_fluid) {
+		Ref<ArrayMesh> empty_mesh = deferred_exact_fluid_mesh("no_exact_fluid_cells", false);
+		empty_mesh->set_meta("terrainFluidNativeDeferred", false);
+		empty_mesh->set_meta("terrainFluidSectionPayload", true);
+		empty_mesh->set_meta("nativeFluidStepCells", 1);
+		empty_mesh->set_meta("fluidPayloadRevision", int(fluid_payload.get("fluidRevision", 0)));
+		return empty_mesh;
+	}
+	Variant cells_value = fluid_payload.get("cells", Dictionary());
+	bool has_flat_cells = cells_value.get_type() == Variant::DICTIONARY && !Dictionary(cells_value).is_empty();
+	if (section_lookup.is_empty() && !has_flat_cells) {
+		return deferred_exact_fluid_mesh("missing_exact_fluid_sections", false);
+	}
 	PackedVector3Array water_vertices;
 	PackedVector3Array water_normals;
 	PackedColorArray water_colors;
@@ -946,29 +1125,43 @@ Variant TerrainMeshingBackend::build_chunk_fluid_mesh_from_sections(const Dictio
 	PackedColorArray lava_colors;
 	int water_faces = 0;
 	int lava_faces = 0;
-	for (int z = start_z; z < start_z + chunk_size; z += step) {
-		for (int x = start_x; x < start_x + chunk_size; x += step) {
-			for (int y = min_y; y < max_y; y += step) {
+	int exact_fluid_cells = 0;
+	int unknown_neighbor_count = 0;
+	for (int z = start_z; z < start_z + chunk_size; ++z) {
+		for (int x = start_x; x < start_x + chunk_size; ++x) {
+			for (int y = min_y; y <= max_y; ++y) {
 				Vector3i cell(x, y, z);
-				PayloadSample sample = sample_section_payload(p_payload, section_lookup, cell);
-				if (sample.solid || sample.fluid.is_empty()) {
+				ExactFluidSample sample = exact_contract ? sample_exact_fluid_payload(fluid_payload, section_lookup, cell) : sample_legacy_exact_fluid_payload(fluid_payload, section_lookup, cell);
+				if (!sample.known || sample.solid || sample.fluid_type == 0) {
 					continue;
 				}
+				exact_fluid_cells += 1;
 				for (const Vector3i &direction : CARDINAL_DIRECTIONS) {
-					PayloadSample neighbor = sample_section_payload(p_payload, section_lookup, cell + direction * step);
-					if (!neighbor.solid && neighbor.fluid == sample.fluid) {
+					ExactFluidSample neighbor = exact_contract ? sample_exact_fluid_payload(fluid_payload, section_lookup, cell + direction) : sample_legacy_exact_fluid_payload(fluid_payload, section_lookup, cell + direction);
+					if (!neighbor.known) {
+						unknown_neighbor_count += 1;
 						continue;
 					}
-					if (sample.fluid == "lava") {
-						append_fluid_boundary_face(lava_vertices, lava_normals, lava_colors, cell, direction, step, start_x, start_z, cell_size, sample.fluid);
+					if (neighbor.solid || neighbor.fluid_type == sample.fluid_type) {
+						continue;
+					}
+					if (neighbor.fluid_type != 0 && sample.fluid_type < neighbor.fluid_type) {
+						continue;
+					}
+					String fluid_id = fluid_id_from_type(sample.fluid_type);
+					if (sample.fluid_type == 2) {
+						append_fluid_boundary_face(lava_vertices, lava_normals, lava_colors, cell, direction, 1, start_x, start_z, cell_size, fluid_id);
 						lava_faces += 1;
 					} else {
-						append_fluid_boundary_face(water_vertices, water_normals, water_colors, cell, direction, step, start_x, start_z, cell_size, sample.fluid);
+						append_fluid_boundary_face(water_vertices, water_normals, water_colors, cell, direction, 1, start_x, start_z, cell_size, fluid_id);
 						water_faces += 1;
 					}
 				}
 			}
 		}
+	}
+	if (unknown_neighbor_count > 0) {
+		return deferred_exact_fluid_mesh("incomplete_exact_fluid_halo", false, unknown_neighbor_count);
 	}
 
 	Ref<ArrayMesh> mesh;
@@ -990,8 +1183,17 @@ Variant TerrainMeshingBackend::build_chunk_fluid_mesh_from_sections(const Dictio
 	mesh->set_meta("chunk_fluid_faces", water_faces + lava_faces);
 	mesh->set_meta("chunk_water_faces", water_faces);
 	mesh->set_meta("chunk_lava_faces", lava_faces);
-	mesh->set_meta("nativeFluidStepCells", step);
-	mesh->set_meta("nativeFluidSections", section_lookup.size());
+	mesh->set_meta("nativeFluidStepCells", 1);
+	Variant section_revisions_value = fluid_payload.get("sectionRevisions", Array());
+	int exact_section_count = section_revisions_value.get_type() == Variant::ARRAY ? Array(section_revisions_value).size() : section_lookup.size();
+	mesh->set_meta("nativeFluidSections", exact_section_count);
+	mesh->set_meta("nativeFluidCellCount", exact_fluid_cells);
+	mesh->set_meta("fluidPayloadRevision", int(fluid_payload.get("fluidRevision", 0)));
+	mesh->set_meta("fluidPayloadSignature", String(fluid_payload.get("signature", "")));
+	mesh->set_meta("terrainFluidNativeDeferred", false);
+	mesh->set_meta("forbiddenCoarseFluidPayload", false);
+	mesh->set_meta("terrainFluidExactPayload", exact_contract);
+	mesh->set_meta("terrainFluidLegacyExactPayload", legacy_exact_contract);
 	return mesh;
 }
 

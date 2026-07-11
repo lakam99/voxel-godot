@@ -356,6 +356,15 @@
       "required": true
     },
     {
+      "id": "exact_fluid_mesh_contract",
+      "description": "Native exact step-1 fluid geometry, boundary culling, material identity, and coarse-payload rejection contract",
+      "command": ".\\tools\\run-exact-fluid-mesh-contract.ps1",
+      "args": ["-ReportPath", "artifacts\\test-runners\\exact-fluid-mesh-contract.json"],
+      "reportPath": "artifacts\\test-runners\\exact-fluid-mesh-contract.json",
+      "evidenceLevel": "contract",
+      "required": true
+    },
+    {
       "id": "underground_visual_playtest",
       "description": "Headed player-POV visual proof for generated underground air, solid material boundaries, mesh, and collision",
       "command": ".\\tools\\run-underground-visual-playtest.ps1",

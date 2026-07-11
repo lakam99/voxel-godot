@@ -305,8 +305,39 @@ func begin_exact_fluid_payload_for_meshing_chunk(
 	var safe_chunk_size := maxi(1, int(chunk_size))
 	var from_y := mini(int(min_y), int(max_y))
 	var to_y := maxi(int(min_y), int(max_y))
+	var requested_from_y := from_y
+	var requested_to_y := to_y
+	if generator != null and generator.has_method("generated_fluid_cell_y_bounds"):
+		var generated_bounds_value = generator.call("generated_fluid_cell_y_bounds")
+		if generated_bounds_value is Dictionary:
+			var generated_bounds: Dictionary = generated_bounds_value
+			var generated_from_y := maxi(from_y, int(generated_bounds.get("minY", from_y)))
+			var generated_to_y := mini(to_y, int(generated_bounds.get("maxY", to_y)))
+			if generated_to_y >= generated_from_y:
+				from_y = generated_from_y
+				to_y = generated_to_y
+	var edit_min_x := int(start_x) - 1
+	var edit_max_x := int(start_x) + safe_chunk_size
+	var edit_min_z := int(start_z) - 1
+	var edit_max_z := int(start_z) + safe_chunk_size
+	for cell_value in edited_cells.keys():
+		var edited_cell: Vector3i = cell_value
+		if edited_cell.x < edit_min_x or edited_cell.x > edit_max_x or edited_cell.z < edit_min_z or edited_cell.z > edit_max_z:
+			continue
+		var edited_state: Dictionary = edited_cells[edited_cell] if edited_cells[edited_cell] is Dictionary else {}
+		if bool(edited_state.get("solid", false)) or fluid_type_id(String(edited_state.get("fluid", ""))) == FLUID_TYPE_NONE:
+			continue
+		if edited_cell.y >= requested_from_y and edited_cell.y <= requested_to_y:
+			from_y = mini(from_y, edited_cell.y)
+			to_y = maxi(to_y, edited_cell.y)
 	var min_cell := Vector3i(int(start_x) - 1, from_y - 1, int(start_z) - 1)
 	var max_cell := Vector3i(int(start_x) + safe_chunk_size, to_y + 1, int(start_z) + safe_chunk_size)
+	var payload_size := max_cell - min_cell + Vector3i.ONE
+	var payload_cell_count := payload_size.x * payload_size.y * payload_size.z
+	var solid_values := PackedByteArray()
+	var fluid_type_ids := PackedByteArray()
+	solid_values.resize(payload_cell_count)
+	fluid_type_ids.resize(payload_cell_count)
 	return {
 		"schemaVersion": 1,
 		"terrainStepCells": maxi(1, int(terrain_step_cells)),
@@ -325,7 +356,10 @@ func begin_exact_fluid_payload_for_meshing_chunk(
 		"cursorX": min_cell.x,
 		"cursorY": min_cell.y,
 		"cursorZ": min_cell.z,
-		"sectionsByKey": {},
+		"payloadSize": payload_size,
+		"solidValues": solid_values,
+		"fluidTypeIds": fluid_type_ids,
+		"sectionKeySeen": {},
 		"sectionKeys": [],
 		"hasFluid": false,
 		"fluidCellCount": 0,
@@ -361,13 +395,34 @@ func advance_exact_fluid_payload_state(state: Dictionary, budget_ms := 2.0, max_
 	var cursor_x := int(state.get("cursorX", min_cell.x))
 	var cursor_y := int(state.get("cursorY", min_cell.y))
 	var cursor_z := int(state.get("cursorZ", min_cell.z))
+	var solid_values: PackedByteArray = state.get("solidValues", PackedByteArray())
+	var fluid_type_ids: PackedByteArray = state.get("fluidTypeIds", PackedByteArray())
+	var payload_size: Vector3i = state.get("payloadSize", Vector3i.ZERO)
+	var section_key_seen: Dictionary = state.get("sectionKeySeen", {}) if state.get("sectionKeySeen", {}) is Dictionary else {}
+	var section_keys: Array = state.get("sectionKeys", []) if state.get("sectionKeys", []) is Array else []
 	var processed := 0
 	var cell_cap := maxi(1, int(max_cells))
 	var time_cap := maxf(0.1, float(budget_ms))
 	while cursor_z <= max_cell.z:
 		var cell := Vector3i(cursor_x, cursor_y, cursor_z)
 		var authoritative_state := get_cell_state(cell)
-		write_exact_fluid_payload_cell(state, cell, terrain_mesh_payload_state(cell, authoritative_state))
+		var fluid_state := terrain_mesh_payload_state(cell, authoritative_state)
+		var local := cell - min_cell
+		var payload_index := local.y + payload_size.y * (local.x + payload_size.x * local.z)
+		var solid := bool(fluid_state.get("solid", false))
+		var fluid_type := fluid_type_id(String(fluid_state.get("fluid", "")))
+		solid_values[payload_index] = 1 if solid else 0
+		fluid_type_ids[payload_index] = fluid_type
+		if solid:
+			state["solidCellCount"] = int(state.get("solidCellCount", 0)) + 1
+		elif fluid_type != FLUID_TYPE_NONE:
+			state["hasFluid"] = true
+			state["fluidCellCount"] = int(state.get("fluidCellCount", 0)) + 1
+		var section_key := section_key_for_cell(cell)
+		var section_key_text := "%d,%d,%d" % [section_key.x, section_key.y, section_key.z]
+		if not section_key_seen.has(section_key_text):
+			section_key_seen[section_key_text] = true
+			section_keys.append(section_key)
 		processed += 1
 		cursor_y += 1
 		if cursor_y > max_cell.y:
@@ -381,6 +436,10 @@ func advance_exact_fluid_payload_state(state: Dictionary, budget_ms := 2.0, max_
 	state["cursorX"] = cursor_x
 	state["cursorY"] = cursor_y
 	state["cursorZ"] = cursor_z
+	state["solidValues"] = solid_values
+	state["fluidTypeIds"] = fluid_type_ids
+	state["sectionKeySeen"] = section_key_seen
+	state["sectionKeys"] = section_keys
 	state["cellsProcessed"] = int(state.get("cellsProcessed", 0)) + processed
 	var complete := cursor_z > max_cell.z
 	state["complete"] = complete
@@ -401,59 +460,12 @@ func exact_fluid_payload_advance_result(state: Dictionary, payload: Dictionary, 
 		"elapsedMs": elapsed_ms
 	}
 
-func write_exact_fluid_payload_cell(state: Dictionary, cell: Vector3i, cell_state: Dictionary) -> void:
-	var section_key := section_key_for_cell(cell)
-	var key_text := "%d,%d,%d" % [section_key.x, section_key.y, section_key.z]
-	var sections_by_key: Dictionary = state.get("sectionsByKey", {}) if state.get("sectionsByKey", {}) is Dictionary else {}
-	var section: Dictionary = {}
-	if sections_by_key.has(key_text):
-		section = sections_by_key[key_text]
-	else:
-		var solid_cells := PackedByteArray()
-		var fluid_type_ids := PackedByteArray()
-		solid_cells.resize(SECTION_CELL_COUNT)
-		fluid_type_ids.resize(SECTION_CELL_COUNT)
-		section = {
-			"sectionKey": section_key,
-			"sectionSize": SECTION_SIZE,
-			"channelSchema": 1,
-			"revision": exact_fluid_section_revision(section_key),
-			"channels": {
-				"solid": solid_cells,
-				"fluidTypeIds": fluid_type_ids
-			}
-		}
-		sections_by_key[key_text] = section
-		var section_keys: Array = state.get("sectionKeys", []) if state.get("sectionKeys", []) is Array else []
-		section_keys.append(section_key)
-		state["sectionKeys"] = section_keys
-	var channels: Dictionary = section.get("channels", {}) if section.get("channels", {}) is Dictionary else {}
-	var solid_values: PackedByteArray = channels.get("solid", PackedByteArray())
-	var fluid_values: PackedByteArray = channels.get("fluidTypeIds", PackedByteArray())
-	var index := section_cell_index(local_cell_for(cell))
-	var solid := bool(cell_state.get("solid", false))
-	var fluid_type := fluid_type_id(String(cell_state.get("fluid", "")))
-	solid_values[index] = 1 if solid else 0
-	fluid_values[index] = fluid_type
-	channels["solid"] = solid_values
-	channels["fluidTypeIds"] = fluid_values
-	section["channels"] = channels
-	sections_by_key[key_text] = section
-	state["sectionsByKey"] = sections_by_key
-	if solid:
-		state["solidCellCount"] = int(state.get("solidCellCount", 0)) + 1
-	elif fluid_type != FLUID_TYPE_NONE:
-		state["hasFluid"] = true
-		state["fluidCellCount"] = int(state.get("fluidCellCount", 0)) + 1
-
 func finalized_exact_fluid_payload_from_state(state: Dictionary) -> Dictionary:
 	if state.is_empty() or bool(state.get("cancelled", false)) or bool(state.get("stale", false)):
 		return {}
 	var has_fluid := bool(state.get("hasFluid", false))
-	var sections := []
 	var revision_entries := []
 	var signature_parts := PackedStringArray()
-	var sections_by_key: Dictionary = state.get("sectionsByKey", {}) if state.get("sectionsByKey", {}) is Dictionary else {}
 	var section_keys: Array = state.get("sectionKeys", []) if state.get("sectionKeys", []) is Array else []
 	for key_value in section_keys:
 		var section_key: Vector3i = key_value
@@ -461,10 +473,15 @@ func finalized_exact_fluid_payload_from_state(state: Dictionary) -> Dictionary:
 		var section_revision := exact_fluid_section_revision(section_key)
 		revision_entries.append({"sectionKey": section_key, "revision": section_revision})
 		signature_parts.append("%s:%d" % [key_text, section_revision])
-		if has_fluid and sections_by_key.has(key_text):
-			sections.append((sections_by_key[key_text] as Dictionary).duplicate(true))
 	var volume_revision := int(state.get("volumeRevision", revision))
 	var snapshot_fluid_revision := int(state.get("fluidRevision", fluid_revision))
+	var cells := {}
+	if has_fluid:
+		cells = {
+			"size": state.get("payloadSize", Vector3i.ZERO),
+			"solid": state.get("solidValues", PackedByteArray()),
+			"fluidTypeIds": state.get("fluidTypeIds", PackedByteArray())
+		}
 	return {
 		"schemaVersion": 1,
 		"immutable": true,
@@ -490,7 +507,8 @@ func finalized_exact_fluid_payload_from_state(state: Dictionary) -> Dictionary:
 		"solidCellCount": int(state.get("solidCellCount", 0)),
 		"cellCount": int(state.get("cellsProcessed", 0)),
 		"fluidTypeSchema": {"none": FLUID_TYPE_NONE, "water": FLUID_TYPE_WATER, "lava": FLUID_TYPE_LAVA},
-		"sections": sections
+		"cells": cells,
+		"sections": []
 	}
 
 func exact_fluid_section_revision(section_key: Vector3i) -> int:
