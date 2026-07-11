@@ -11,6 +11,9 @@ const UNDERGROUND_AIR_DEFAULT_SEARCH_DEPTH_CELLS := 72
 const UNDERGROUND_AIR_VISUAL_MIN_SOLID_NEIGHBORS := 3
 const MAX_BLOCK_LIGHT_LEVEL := 15
 const SKY_LIGHT_COLUMNS_PER_PROCESS := 2
+const FLUID_TYPE_NONE := 0
+const FLUID_TYPE_WATER := 1
+const FLUID_TYPE_LAVA := 2
 
 var main
 var generator
@@ -23,10 +26,12 @@ var light_cells := {}
 var block_light_sources := {}
 var pending_sky_light_columns := {}
 var section_revisions := {}
+var fluid_section_revisions := {}
 var dirty_sections := {}
 var top_surface_y_cache := {}
 var exposed_floor_cache := {}
 var revision := 0
+var fluid_revision := 0
 
 func setup(main_node, generator_node) -> void:
 	main = main_node
@@ -42,10 +47,12 @@ func reset() -> void:
 	block_light_sources.clear()
 	pending_sky_light_columns.clear()
 	section_revisions.clear()
+	fluid_section_revisions.clear()
 	dirty_sections.clear()
 	top_surface_y_cache.clear()
 	exposed_floor_cache.clear()
 	revision = 0
+	fluid_revision = 0
 
 func reset_for_seed() -> void:
 	reset()
@@ -151,6 +158,8 @@ func section_payload_for_meshing_chunk(start_x: int, start_z: int, chunk_size: i
 		"worldBottomCellY": world_bottom_cell_y(),
 		"worldTopCellY": world_top_cell_y(),
 		"revision": revision,
+		"terrainStepCells": step,
+		"stepCells": step,
 		"sparse": true,
 		"hasFluid": has_fluid,
 		"sections": payload_sections
@@ -176,6 +185,7 @@ func begin_section_payload_for_meshing_chunk(start_x: int, start_z: int, chunk_s
 		"worldBottomCellY": world_bottom_cell_y(),
 		"worldTopCellY": world_top_cell_y(),
 		"revision": revision,
+		"terrainStepCells": step,
 		"sparse": true,
 		"chunkSize": safe_chunk_size,
 		"startX": int(start_x),
@@ -272,6 +282,7 @@ func finalized_section_payload_from_state(state: Dictionary) -> Dictionary:
 		"worldBottomCellY": world_bottom_cell_y(),
 		"worldTopCellY": world_top_cell_y(),
 		"revision": int(state.get("revision", revision)),
+		"terrainStepCells": maxi(1, int(state.get("terrainStepCells", state.get("stepCells", 1)))),
 		"sparse": true,
 		"hasFluid": bool(state.get("hasFluid", false)),
 		"chunkSize": int(state.get("chunkSize", SECTION_SIZE)),
@@ -282,6 +293,233 @@ func finalized_section_payload_from_state(state: Dictionary) -> Dictionary:
 		"stepCells": maxi(1, int(state.get("stepCells", 1))),
 		"sections": payload_sections
 	}
+
+func begin_exact_fluid_payload_for_meshing_chunk(
+	start_x: int,
+	start_z: int,
+	chunk_size: int,
+	min_y: int,
+	max_y: int,
+	terrain_step_cells := 1
+) -> Dictionary:
+	var safe_chunk_size := maxi(1, int(chunk_size))
+	var from_y := mini(int(min_y), int(max_y))
+	var to_y := maxi(int(min_y), int(max_y))
+	var min_cell := Vector3i(int(start_x) - 1, from_y - 1, int(start_z) - 1)
+	var max_cell := Vector3i(int(start_x) + safe_chunk_size, to_y + 1, int(start_z) + safe_chunk_size)
+	return {
+		"schemaVersion": 1,
+		"terrainStepCells": maxi(1, int(terrain_step_cells)),
+		"fluidStepCells": 1,
+		"stepCells": 1,
+		"chunkSize": safe_chunk_size,
+		"startX": int(start_x),
+		"startZ": int(start_z),
+		"minY": from_y,
+		"maxY": to_y,
+		"minCell": min_cell,
+		"maxCell": max_cell,
+		"boundsInclusive": true,
+		"volumeRevision": revision,
+		"fluidRevision": fluid_revision,
+		"cursorX": min_cell.x,
+		"cursorY": min_cell.y,
+		"cursorZ": min_cell.z,
+		"sectionsByKey": {},
+		"sectionKeys": [],
+		"hasFluid": false,
+		"fluidCellCount": 0,
+		"solidCellCount": 0,
+		"cellsProcessed": 0,
+		"complete": false,
+		"cancelled": false,
+		"stale": false
+	}
+
+func cancel_exact_fluid_payload_state(state: Dictionary) -> Dictionary:
+	state["cancelled"] = true
+	return state
+
+func advance_exact_fluid_payload_state(state: Dictionary, budget_ms := 2.0, max_cells := 512) -> Dictionary:
+	var started_usec := Time.get_ticks_usec()
+	if state.is_empty():
+		return exact_fluid_payload_advance_result(state, {}, 0, 0.0)
+	if bool(state.get("complete", false)):
+		var existing_payload: Dictionary = state.get("payload", {}) if state.get("payload", {}) is Dictionary else {}
+		return exact_fluid_payload_advance_result(state, existing_payload, 0, 0.0)
+	if bool(state.get("cancelled", false)):
+		state["complete"] = true
+		state["payload"] = {}
+		return exact_fluid_payload_advance_result(state, {}, 0, elapsed_ms_since(started_usec))
+	if int(state.get("volumeRevision", -1)) != revision or int(state.get("fluidRevision", -1)) != fluid_revision:
+		state["stale"] = true
+		state["complete"] = true
+		state["payload"] = {}
+		return exact_fluid_payload_advance_result(state, {}, 0, elapsed_ms_since(started_usec))
+	var min_cell: Vector3i = state.get("minCell", Vector3i.ZERO)
+	var max_cell: Vector3i = state.get("maxCell", min_cell)
+	var cursor_x := int(state.get("cursorX", min_cell.x))
+	var cursor_y := int(state.get("cursorY", min_cell.y))
+	var cursor_z := int(state.get("cursorZ", min_cell.z))
+	var processed := 0
+	var cell_cap := maxi(1, int(max_cells))
+	var time_cap := maxf(0.1, float(budget_ms))
+	while cursor_z <= max_cell.z:
+		var cell := Vector3i(cursor_x, cursor_y, cursor_z)
+		var authoritative_state := get_cell_state(cell)
+		write_exact_fluid_payload_cell(state, cell, terrain_mesh_payload_state(cell, authoritative_state))
+		processed += 1
+		cursor_y += 1
+		if cursor_y > max_cell.y:
+			cursor_y = min_cell.y
+			cursor_x += 1
+			if cursor_x > max_cell.x:
+				cursor_x = min_cell.x
+				cursor_z += 1
+		if processed >= cell_cap or elapsed_ms_since(started_usec) >= time_cap:
+			break
+	state["cursorX"] = cursor_x
+	state["cursorY"] = cursor_y
+	state["cursorZ"] = cursor_z
+	state["cellsProcessed"] = int(state.get("cellsProcessed", 0)) + processed
+	var complete := cursor_z > max_cell.z
+	state["complete"] = complete
+	var payload := finalized_exact_fluid_payload_from_state(state) if complete else {}
+	if complete:
+		state["payload"] = payload
+	return exact_fluid_payload_advance_result(state, payload, processed, elapsed_ms_since(started_usec))
+
+func exact_fluid_payload_advance_result(state: Dictionary, payload: Dictionary, cells_processed: int, elapsed_ms: float) -> Dictionary:
+	return {
+		"state": state,
+		"complete": bool(state.get("complete", false)),
+		"cancelled": bool(state.get("cancelled", false)),
+		"stale": bool(state.get("stale", false)),
+		"payload": payload,
+		"cellsProcessed": int(cells_processed),
+		"preparedSections": (state.get("sectionKeys", []) as Array).size() if state.get("sectionKeys", []) is Array else 0,
+		"elapsedMs": elapsed_ms
+	}
+
+func write_exact_fluid_payload_cell(state: Dictionary, cell: Vector3i, cell_state: Dictionary) -> void:
+	var section_key := section_key_for_cell(cell)
+	var key_text := "%d,%d,%d" % [section_key.x, section_key.y, section_key.z]
+	var sections_by_key: Dictionary = state.get("sectionsByKey", {}) if state.get("sectionsByKey", {}) is Dictionary else {}
+	var section: Dictionary = {}
+	if sections_by_key.has(key_text):
+		section = sections_by_key[key_text]
+	else:
+		var solid_cells := PackedByteArray()
+		var fluid_type_ids := PackedByteArray()
+		solid_cells.resize(SECTION_CELL_COUNT)
+		fluid_type_ids.resize(SECTION_CELL_COUNT)
+		section = {
+			"sectionKey": section_key,
+			"sectionSize": SECTION_SIZE,
+			"channelSchema": 1,
+			"revision": exact_fluid_section_revision(section_key),
+			"channels": {
+				"solid": solid_cells,
+				"fluidTypeIds": fluid_type_ids
+			}
+		}
+		sections_by_key[key_text] = section
+		var section_keys: Array = state.get("sectionKeys", []) if state.get("sectionKeys", []) is Array else []
+		section_keys.append(section_key)
+		state["sectionKeys"] = section_keys
+	var channels: Dictionary = section.get("channels", {}) if section.get("channels", {}) is Dictionary else {}
+	var solid_values: PackedByteArray = channels.get("solid", PackedByteArray())
+	var fluid_values: PackedByteArray = channels.get("fluidTypeIds", PackedByteArray())
+	var index := section_cell_index(local_cell_for(cell))
+	var solid := bool(cell_state.get("solid", false))
+	var fluid_type := fluid_type_id(String(cell_state.get("fluid", "")))
+	solid_values[index] = 1 if solid else 0
+	fluid_values[index] = fluid_type
+	channels["solid"] = solid_values
+	channels["fluidTypeIds"] = fluid_values
+	section["channels"] = channels
+	sections_by_key[key_text] = section
+	state["sectionsByKey"] = sections_by_key
+	if solid:
+		state["solidCellCount"] = int(state.get("solidCellCount", 0)) + 1
+	elif fluid_type != FLUID_TYPE_NONE:
+		state["hasFluid"] = true
+		state["fluidCellCount"] = int(state.get("fluidCellCount", 0)) + 1
+
+func finalized_exact_fluid_payload_from_state(state: Dictionary) -> Dictionary:
+	if state.is_empty() or bool(state.get("cancelled", false)) or bool(state.get("stale", false)):
+		return {}
+	var has_fluid := bool(state.get("hasFluid", false))
+	var sections := []
+	var revision_entries := []
+	var signature_parts := PackedStringArray()
+	var sections_by_key: Dictionary = state.get("sectionsByKey", {}) if state.get("sectionsByKey", {}) is Dictionary else {}
+	var section_keys: Array = state.get("sectionKeys", []) if state.get("sectionKeys", []) is Array else []
+	for key_value in section_keys:
+		var section_key: Vector3i = key_value
+		var key_text := "%d,%d,%d" % [section_key.x, section_key.y, section_key.z]
+		var section_revision := exact_fluid_section_revision(section_key)
+		revision_entries.append({"sectionKey": section_key, "revision": section_revision})
+		signature_parts.append("%s:%d" % [key_text, section_revision])
+		if has_fluid and sections_by_key.has(key_text):
+			sections.append((sections_by_key[key_text] as Dictionary).duplicate(true))
+	var volume_revision := int(state.get("volumeRevision", revision))
+	var snapshot_fluid_revision := int(state.get("fluidRevision", fluid_revision))
+	return {
+		"schemaVersion": 1,
+		"immutable": true,
+		"sectionSize": SECTION_SIZE,
+		"cellSize": cell_size(),
+		"terrainStepCells": maxi(1, int(state.get("terrainStepCells", 1))),
+		"fluidStepCells": 1,
+		"stepCells": 1,
+		"chunkSize": int(state.get("chunkSize", SECTION_SIZE)),
+		"startX": int(state.get("startX", 0)),
+		"startZ": int(state.get("startZ", 0)),
+		"minY": int(state.get("minY", 0)),
+		"maxY": int(state.get("maxY", 0)),
+		"minCell": state.get("minCell", Vector3i.ZERO),
+		"maxCell": state.get("maxCell", Vector3i.ZERO),
+		"boundsInclusive": true,
+		"revision": volume_revision,
+		"fluidRevision": snapshot_fluid_revision,
+		"sectionRevisions": revision_entries,
+		"signature": "exact-fluid-v1:%d:%d:%s" % [volume_revision, snapshot_fluid_revision, ";".join(signature_parts)],
+		"hasFluid": has_fluid,
+		"fluidCellCount": int(state.get("fluidCellCount", 0)),
+		"solidCellCount": int(state.get("solidCellCount", 0)),
+		"cellCount": int(state.get("cellsProcessed", 0)),
+		"fluidTypeSchema": {"none": FLUID_TYPE_NONE, "water": FLUID_TYPE_WATER, "lava": FLUID_TYPE_LAVA},
+		"sections": sections
+	}
+
+func exact_fluid_section_revision(section_key: Vector3i) -> int:
+	var result := int(section_revisions.get(section_key, 0))
+	result = maxi(result, int(fluid_section_revisions.get(section_key, 0)))
+	if sections.has(section_key):
+		var section: Dictionary = sections[section_key]
+		result = maxi(result, int(section.get("revision", 0)))
+	return result
+
+func fluid_type_id(fluid_id: String) -> int:
+	match fluid_id:
+		"water":
+			return FLUID_TYPE_WATER
+		"lava":
+			return FLUID_TYPE_LAVA
+		_:
+			return FLUID_TYPE_NONE
+
+func fluid_state_changed(before: Dictionary, after: Dictionary) -> bool:
+	return bool(before.get("solid", false)) != bool(after.get("solid", false)) \
+		or fluid_type_id(String(before.get("fluid", ""))) != fluid_type_id(String(after.get("fluid", "")))
+
+func mark_fluid_section_changed(cell: Vector3i) -> void:
+	fluid_revision += 1
+	fluid_section_revisions[section_key_for_cell(cell)] = fluid_revision
+
+func elapsed_ms_since(started_usec: int) -> float:
+	return float(Time.get_ticks_usec() - started_usec) / 1000.0
 
 func write_sparse_payload_cell(payload_sections_by_key: Dictionary, cell: Vector3i) -> Dictionary:
 	var section_key := section_key_for_cell(cell)
@@ -657,6 +895,7 @@ func get_cell_state(cell: Vector3i) -> Dictionary:
 	return with_light_override(cell, generated_cell_state(cell))
 
 func set_cell_state(cell: Vector3i, state: Dictionary, reason := "", rebuild_sky_light := true) -> Dictionary:
+	var previous_fluid_state := get_cell_state(cell)
 	var previous_state := {}
 	var previous_mesh_affects := false
 	var previous_surface_affects := false
@@ -678,6 +917,8 @@ func set_cell_state(cell: Vector3i, state: Dictionary, reason := "", rebuild_sky
 	if cell_state_affects_surface_projection(normalized):
 		adjust_surface_projection_edited_column_count(cell, 1)
 	revision += 1
+	if fluid_state_changed(terrain_mesh_payload_state(cell, previous_fluid_state), terrain_mesh_payload_state(cell, normalized)):
+		mark_fluid_section_changed(cell)
 	write_loaded_section_cell_state(cell, normalized)
 	if previous_mesh_affects or cell_state_affects_terrain_mesh(normalized):
 		mark_section_dirty(section_key_for_cell(cell), { "reason": reason, "cell": cell })
@@ -690,13 +931,16 @@ func clear_cell_state(cell: Vector3i, reason := "") -> void:
 		return
 	var previous: Dictionary = edited_cells[cell]
 	edited_cells.erase(cell)
+	var restored_state := generated_cell_state(cell)
 	if cell_state_affects_terrain_mesh(previous):
 		adjust_mesh_edited_column_count(cell, -1)
 		set_mesh_edited_cell_index(cell, false)
 	if cell_state_affects_surface_projection(previous):
 		adjust_surface_projection_edited_column_count(cell, -1)
 	revision += 1
-	write_loaded_section_cell_state(cell, generated_cell_state(cell))
+	if fluid_state_changed(terrain_mesh_payload_state(cell, previous), terrain_mesh_payload_state(cell, restored_state)):
+		mark_fluid_section_changed(cell)
+	write_loaded_section_cell_state(cell, restored_state)
 	if cell_state_affects_terrain_mesh(previous):
 		mark_section_dirty(section_key_for_cell(cell), { "reason": reason, "cell": cell })
 	if terrain_edit_updates_sky_light(previous):

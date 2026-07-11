@@ -347,6 +347,15 @@
       "required": true
     },
     {
+      "id": "exact_fluid_payload_contract",
+      "description": "Exact immutable step-1 fluid occupancy snapshot, halo, revision, cancellation, and save-load contract",
+      "command": ".\\tools\\run-exact-fluid-payload-contract.ps1",
+      "args": ["-ReportPath", "artifacts\\test-runners\\exact-fluid-payload-contract.json"],
+      "reportPath": "artifacts\\test-runners\\exact-fluid-payload-contract.json",
+      "evidenceLevel": "contract",
+      "required": true
+    },
+    {
       "id": "underground_visual_playtest",
       "description": "Headed player-POV visual proof for generated underground air, solid material boundaries, mesh, and collision",
       "command": ".\\tools\\run-underground-visual-playtest.ps1",
