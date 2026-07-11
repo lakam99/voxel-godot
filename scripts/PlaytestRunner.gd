@@ -1249,7 +1249,8 @@ func test_escape_menu_new_game() -> void:
     var new_game_button := find_button_by_text(hud.get("game_menu_panel") as Node, "New Game")
     if new_game_button:
         new_game_button.emit_signal("pressed")
-    await wait_physics_frames(24)
+    var loading_completed := await wait_for_runtime_loading_complete()
+    await wait_physics_frames(4)
     var new_seed := String(main.get("seed_text"))
 
     var cell := Vector2i(main.call("world_to_cell", player.global_position.x), main.call("world_to_cell", player.global_position.z))
@@ -1277,10 +1278,11 @@ func test_escape_menu_new_game() -> void:
     )
     add_result(
         "escape_menu_new_game",
-        opened_menu and new_game_button != null and saved_before and reset_started and save_deleted and active_seed_changed and remembered_seed and fresh_state,
-        "opened %s, button %s, saved %s, reset %s, deleted %s, seed %s->%s remembered %s, biome %s, weather %s, shelter %s, starter beds %d, inv %d, totals %s, main totals %s, menu %s, mouse %d" % [
+        opened_menu and new_game_button != null and loading_completed and saved_before and reset_started and save_deleted and active_seed_changed and remembered_seed and fresh_state,
+        "opened %s, button %s, loading complete %s, saved %s, reset %s, deleted %s, seed %s->%s remembered %s, biome %s, weather %s, shelter %s, starter beds %d, inv %d, totals %s, main totals %s, menu %s, mouse %d" % [
             str(opened_menu),
             str(new_game_button != null),
+            str(loading_completed),
             str(saved_before),
             str(reset_started),
             str(save_deleted),
@@ -1310,6 +1312,19 @@ func test_escape_menu_new_game() -> void:
         await wait_for_chunk_streaming_after_restore()
         main.call("refresh_intro_knock_audio")
     unlock_intro_gate_for_followup_tests(tutorial_system)
+
+func wait_for_runtime_loading_complete(max_frames := 1800) -> bool:
+    if main == null:
+        return false
+    for frame in range(max_frames):
+        if not bool(main.get("runtime_loading_active")):
+            mark_progress("escape_menu_new_game_loaded")
+            return true
+        if frame % 60 == 0:
+            mark_progress("escape_menu_new_game_loading_%04d" % frame)
+        await wait_physics_frames(1)
+    mark_progress("escape_menu_new_game_loading_timeout")
+    return false
 
 func wait_for_chunk_streaming_after_restore(max_frames := 90) -> void:
     if main == null:

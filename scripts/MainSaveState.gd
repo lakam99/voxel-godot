@@ -138,6 +138,7 @@ func create_save_snapshot() -> Dictionary:
 func apply_save_snapshot(snapshot: Dictionary) -> bool:
     if String(snapshot.get("seed", seed_text)) != seed_text:
         return false
+    save_load_progress("core systems")
     time_of_day = clampf(float(snapshot.get("timeOfDay", time_of_day)), 0.0, 1.0)
     if inventory_system and snapshot.has("inventory"):
         inventory_system.restore(snapshot["inventory"])
@@ -153,15 +154,18 @@ func apply_save_snapshot(snapshot: Dictionary) -> bool:
         contract_system.restore(snapshot["contracts"])
     if story_director:
         story_director.restore(snapshot.get("story", {}))
+    save_load_progress("exploration and survival")
     restore_exploration(snapshot.get("exploration", {}))
     if survival_system and snapshot.has("survival"):
         survival_system.restore(snapshot["survival"])
     restore_subsurface(snapshot.get("subsurface", {}))
     restore_volume_edits(snapshot.get("terrain", []))
+    save_load_progress("terrain volume")
     var terrain_volume_snapshot: Dictionary = snapshot.get("terrainVolume", {}) if snapshot.get("terrainVolume", {}) is Dictionary else {}
     if not terrain_volume_snapshot.is_empty():
         restore_terrain_volume(terrain_volume_snapshot)
     restore_removed_props(snapshot.get("removedProps", []))
+    save_load_progress("NPC and player state")
     if npc_system and npc_system.has_method("restore_job_facts"):
         npc_system.restore_job_facts(snapshot.get("npcJobFacts", []))
     restore_player_state(snapshot.get("player", {}))
@@ -169,6 +173,7 @@ func apply_save_snapshot(snapshot: Dictionary) -> bool:
         worldmark_encounter_controller.recover_after_load()
     if region_aftermath_system and region_aftermath_system.has_method("reconstruct_after_load"):
         region_aftermath_system.reconstruct_after_load()
+    save_load_progress("blocks and tutorial")
     restore_player_blocks(snapshot.get("blocks", []))
     if tutorial_system:
         tutorial_system.restore(snapshot.get("tutorial", {}))
@@ -195,9 +200,15 @@ func apply_save_snapshot(snapshot: Dictionary) -> bool:
     if held_item:
         held_item.refresh_active()
     reset_break_progress()
-    reload_chunks()
+    save_load_progress("reloading chunks")
+    reload_chunks(startup_loading_active)
+    save_load_progress("chunks reloaded")
     refresh_intro_knock_audio()
     return true
+
+func save_load_progress(message: String) -> void:
+    if startup_loading_active:
+        startup_loading_step.emit("Loading save: %s" % message)
 
 func ensure_story_handoff_for_completed_tutorial_save() -> void:
     if story_director == null or tutorial_system == null:

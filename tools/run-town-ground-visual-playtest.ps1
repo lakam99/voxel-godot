@@ -68,8 +68,18 @@ $process.StartInfo.Arguments = ($args | ForEach-Object { '"' + ($_ -replace '"',
 $started = Get-Date
 [void]$process.Start()
 
+$reportFinished = $false
 while (-not $process.HasExited) {
     Start-Sleep -Milliseconds 250
+    if (Test-Path -LiteralPath $ReportPath) {
+        try {
+            $candidate = Get-Content -LiteralPath $ReportPath -Raw | ConvertFrom-Json
+            if (($candidate.runToken -eq $runToken) -and ($true -eq $candidate.finished)) {
+                $reportFinished = $true
+                break
+            }
+        } catch {}
+    }
     if (((Get-Date) - $started).TotalSeconds -gt $WatchdogSeconds) {
         Stop-ProcessTree $process
         Write-Error "Town ground visual playtest watchdog exceeded $WatchdogSeconds seconds"
@@ -83,7 +93,10 @@ while (-not $process.HasExited) {
     }
 }
 
-$exitCode = $process.ExitCode
+if ($reportFinished -and -not $process.HasExited) {
+    Stop-ProcessTree $process
+}
+$exitCode = if ($reportFinished) { 0 } else { $process.ExitCode }
 if (-not (Test-Path -LiteralPath $ReportPath)) {
     Write-Error "Missing fresh town ground visual report: $ReportPath"
     exit 1

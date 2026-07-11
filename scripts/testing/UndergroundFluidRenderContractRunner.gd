@@ -57,9 +57,11 @@ func run() -> void:
 		return
 	selected_cell = selected_sample.get("cell", Vector3i.ZERO)
 	var sample_position := cell_center(selected_cell)
-	var player := main.get("player") as Node3D
+	var player := main.get("player") as CharacterBody3D
 	if player != null:
 		player.global_position = sample_position
+		player.velocity = Vector3.ZERO
+		player.set_physics_process(false)
 	selected_chunk = main.call("cell_to_chunk", selected_cell.x, selected_cell.z)
 	add_result("underground_fluid_render_sample_found", true, JSON.stringify(sample_signature(selected_sample)))
 	await load_runtime_chunk(selected_chunk)

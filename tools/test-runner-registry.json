@@ -386,6 +386,73 @@
       "required": true
     },
     {
+      "id": "vox43_known_save_visual",
+      "description": "Headed normal-project Continue proof that the real atlas-71906947 save renders opaque forest and savanna terrain without a surface fluid overlay",
+      "command": ".\\tools\\run-vox43-known-save-visual-playtest.ps1",
+      "args": ["-ReportPath", "artifacts\\test-runners\\vox43-known-save-visual.json", "-ProgressPath", "artifacts\\test-runners\\vox43-known-save-visual-progress.txt", "-ScreenshotDir", "artifacts\\test-runners\\screenshots\\vox43-known-save-visual", "-ProofPath", "artifacts\\test-runners\\vox43-known-save-visual-proof.json"],
+      "reportPath": "artifacts\\test-runners\\vox43-known-save-visual.json",
+      "screenshotDir": "artifacts\\test-runners\\screenshots\\vox43-known-save-visual",
+      "evidenceLevel": "acceptance_visual",
+      "acceptanceClaims": ["vox43_known_save_surface_fluid_visual"],
+      "requiredScreenshots": [
+        "menu_before_continue.png",
+        "known_save_initial.png",
+        "known_save_forest.png",
+        "known_save_savanna.png",
+        "known_save_failure_area.png"
+      ],
+      "requiresVisualProof": true,
+      "required": true
+    },
+    {
+      "id": "vox43_fresh_world_traversal",
+      "description": "Normal-project headed New Game proof using collision-backed player-controller traversal through fresh random forest and savanna",
+      "command": ".\\tools\\run-vox43-fresh-world-traversal.ps1",
+      "args": ["-ReportPath", "artifacts\\test-runners\\vox43-fresh-world-traversal.json", "-ProgressPath", "artifacts\\test-runners\\vox43-fresh-world-traversal-progress.txt", "-ScreenshotDir", "artifacts\\test-runners\\screenshots\\vox43-fresh-world-traversal"],
+      "reportPath": "artifacts\\test-runners\\vox43-fresh-world-traversal.json",
+      "screenshotDir": "artifacts\\test-runners\\screenshots\\vox43-fresh-world-traversal",
+      "evidenceLevel": "acceptance_visual",
+      "acceptanceClaims": ["vox43_fresh_world_surface_traversal"],
+      "requiredScreenshots": [
+        "menu_before_new_game.png",
+        "fresh_world_initial.png",
+        "fresh_world_forest.png",
+        "fresh_world_savanna.png"
+      ],
+      "requiresVisualProof": true,
+      "required": true
+    },
+    {
+      "id": "vox43_underground_fluid_visual",
+      "description": "Headed generated-cave proof that exact step-1 water and lava remain visible when exposed and are occluded by collision-bearing solid terrain",
+      "command": ".\\tools\\run-vox43-underground-fluid-visual.ps1",
+      "args": ["-Seed", "atlas-71906947", "-ReportPath", "artifacts\\test-runners\\vox43-underground-fluid-visual.json", "-ProgressPath", "artifacts\\test-runners\\vox43-underground-fluid-visual-progress.txt", "-ScreenshotDir", "artifacts\\test-runners\\screenshots\\vox43-underground-fluid-visual"],
+      "reportPath": "artifacts\\test-runners\\vox43-underground-fluid-visual.json",
+      "screenshotDir": "artifacts\\test-runners\\screenshots\\vox43-underground-fluid-visual",
+      "evidenceLevel": "acceptance_visual",
+      "acceptanceClaims": ["vox43_generated_underground_fluid_visual"],
+      "requiredScreenshots": [
+        "generated_water_exposed.png",
+        "generated_water_enclosed.png",
+        "generated_lava_exposed.png"
+      ],
+      "requiresVisualProof": true,
+      "required": true
+    },
+    {
+      "id": "vox43_surface_cave_visual",
+      "description": "Headed fresh generated-world visual proof of an open surface-to-underground cave entrance with real terrain mesh and collision",
+      "command": ".\\tools\\run-vox43-surface-cave-visual.ps1",
+      "args": ["-ReportPath", "artifacts\\test-runners\\vox43-surface-cave-visual.json", "-ProgressPath", "artifacts\\test-runners\\vox43-surface-cave-visual-progress.txt", "-ScreenshotDir", "artifacts\\test-runners\\screenshots\\vox43-surface-cave-visual"],
+      "reportPath": "artifacts\\test-runners\\vox43-surface-cave-visual.json",
+      "screenshotDir": "artifacts\\test-runners\\screenshots\\vox43-surface-cave-visual",
+      "evidenceLevel": "acceptance_visual",
+      "acceptanceClaims": ["vox43_fresh_surface_cave_visual"],
+      "requiredScreenshots": ["fresh_surface_cave_entrance.png"],
+      "requiresVisualProof": true,
+      "required": true
+    },
+    {
       "id": "digging_visual_playtest",
       "description": "Headed player-POV visual proof that digging through terrain exposes generated material beneath and adds the matching material drop",
       "command": ".\\tools\\run-digging-visual-playtest.ps1",

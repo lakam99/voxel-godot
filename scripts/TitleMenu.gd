@@ -23,6 +23,7 @@ func _ready() -> void:
     refresh_save_state()
     maybe_start_real_boot_mira_runner()
     maybe_start_real_boot_tutorial_runner()
+    maybe_start_vox43_known_save_runner()
 
 func maybe_start_real_boot_mira_runner() -> void:
     if OS.get_environment("VOXEL_ACTUAL_GAMEPLAY_MIRA_REAL_BOOT").strip_edges() != "1":
@@ -50,6 +51,22 @@ func maybe_start_real_boot_tutorial_runner() -> void:
         push_error("Real tutorial runner could not be instantiated")
         return
     runner.name = "RealTutorialRealBootRunner"
+    add_child(runner)
+
+func maybe_start_vox43_known_save_runner() -> void:
+    var known_save := OS.get_environment("VOXEL_VOX43_KNOWN_SAVE_REAL_BOOT").strip_edges() == "1"
+    var fresh_world := OS.get_environment("VOXEL_VOX43_FRESH_WORLD_REAL_BOOT").strip_edges() == "1"
+    if not known_save and not fresh_world:
+        return
+    var runner_script = load("res://scripts/testing/terrain/Vox43KnownSaveVisualRunner.gd")
+    if runner_script == null or not runner_script.can_instantiate():
+        push_error("VOX-43 known-save runner script could not be loaded")
+        return
+    var runner = runner_script.new()
+    if runner == null:
+        push_error("VOX-43 known-save runner could not be instantiated")
+        return
+    runner.name = "Vox43KnownSaveRealBootRunner"
     add_child(runner)
 
 func _process(delta: float) -> void:

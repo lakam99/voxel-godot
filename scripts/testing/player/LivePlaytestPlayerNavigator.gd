@@ -121,6 +121,9 @@ func go_to_position(target: Vector3, options := {}) -> Dictionary:
 	var final_reached := await _drive_to_point(target, stop_distance, minf(final_remaining, 4.0), "%s_authority_final" % label)
 	return _result(final_reached, "arrived" if final_reached else "movement_stuck", "" if final_reached else "final_not_reached", label, target, plan)
 
+func drive_to_point_for_home_exit(target: Vector3, stop_distance: float, timeout_seconds: float, label: String) -> bool:
+	return await _drive_to_point(target, stop_distance, timeout_seconds, label)
+
 func plan_route_to_position(target: Vector3, stop_distance: float, timeout_seconds: float, label: String, options := {}) -> Dictionary:
 	var planner = _route_planner()
 	if planner == null or not planner.has_method("plan_route"):
