@@ -104,6 +104,55 @@ class BudgetedCollisionProbe:
 			"details": { "completedSamples": completed }
 		}
 
+class CrossFrameRepairProbe:
+	extends RefCounted
+	var probe_calls := 0
+
+	func setup(_system_node, _main_node) -> void:
+		pass
+
+	func probe_route(_entry: Dictionary, _route: Dictionary, _intent: Dictionary, _options := {}) -> Dictionary:
+		probe_calls += 1
+		if probe_calls == 1 or probe_calls == 3:
+			var blocked_cell := Vector2i(2, 0) if probe_calls == 1 else Vector2i(3, 0)
+			return {
+				"ok": false,
+				"status": "failed",
+				"reason": "blocked_capsule_probe",
+				"authoritative": true,
+				"sampleCount": 1,
+				"details": { "cell": blocked_cell, "sample": blocked_cell }
+			}
+		if probe_calls == 2:
+			return {
+				"ok": false,
+				"status": "pending_probe",
+				"reason": "collision_probe_budget",
+				"authoritative": true,
+				"sampleCount": 1,
+				"details": { "completedSamples": 1, "cursor": { "completedSamples": 1 } }
+			}
+		return {
+			"ok": true,
+			"status": "passed",
+			"reason": "",
+			"authoritative": true,
+			"sampleCount": 1,
+			"details": {}
+		}
+
+class RecordingRepairSubstrate:
+	extends RefCounted
+	var avoid_history: Array = []
+
+	func repair_route_after_probe(_entry: Dictionary, _start_cell: Vector2i, _candidate_cells: Array, failed_route: Dictionary, _certificate: Dictionary, options := {}) -> Dictionary:
+		avoid_history.append((options.get("avoidCells", []) as Array).duplicate())
+		var repaired := failed_route.duplicate(true)
+		repaired["ok"] = true
+		repaired["status"] = "reachable"
+		repaired["reason"] = "test_repair"
+		return repaired
+
 class GeneratedFallbackWorld:
 	extends RefCounted
 
@@ -294,6 +343,7 @@ func cases() -> Array[Dictionary]:
 		["npc_route_pending_budget_resumes", "test_route_pending_budget_resumes"],
 		["npc_route_authority_planning_budget_fairness", "test_route_authority_planning_budget_fairness"],
 		["npc_route_authority_probe_budget_starvation_recovery", "test_route_authority_probe_budget_starvation_recovery"],
+		["npc_route_authority_probe_repair_avoids_persist_across_budget", "test_route_authority_probe_repair_avoids_persist_across_budget"],
 		["npc_route_authority_phase10_counters", "test_route_authority_phase10_counters"],
 		["npc_route_authority_stuck_revokes_moving_lease", "test_route_authority_stuck_revokes_moving_lease"],
 		["npc_route_lease_executor_skips_passed_non_door_waypoint", "test_route_lease_executor_skips_passed_non_door_waypoint"],
@@ -637,6 +687,39 @@ func test_route_authority_probe_budget_starvation_recovery(_mode: String) -> Dic
 		"first=%s deferred=%s final=%s counters=%s" % [JSON.stringify(authority_summary(first)), JSON.stringify(authority_summary(deferred)), JSON.stringify(authority_summary(final)), JSON.stringify(counters)],
 		["probe_budget_bounded", "probe_starvation_override", "probe_wait_counted"],
 		{ "first": authority_summary(first), "deferred": authority_summary(deferred), "final": authority_summary(final), "counters": counters }
+	)
+
+func test_route_authority_probe_repair_avoids_persist_across_budget(_mode: String) -> Dictionary:
+	var authority = NpcRouteAuthorityV2Script.new()
+	var probe := CrossFrameRepairProbe.new()
+	var substrate := RecordingRepairSubstrate.new()
+	authority.setup(null, null, probe)
+	var entry := { "id": "probe-repair-persistent" }
+	var request: Dictionary = authority.submit_request(entry, { "kind": "forage", "targetCell": Vector2i(4, 0) }, {})
+	var request_id := String(request.get("requestId", ""))
+	var route := authority_test_route(4)
+	var intent := { "kind": "forage", "targetCell": Vector2i(4, 0) }
+	var options := {
+		"repairSubstrate": substrate,
+		"repairStartCell": Vector2i.ZERO,
+		"repairCandidateCells": [Vector2i(4, 0)],
+		"repairPlanOptions": {},
+		"maxProbeRepairAttempts": 3
+	}
+	var first: Dictionary = authority.commit_route_after_probe(entry, request_id, route, intent, options)
+	authority.begin_frame()
+	var continued_route: Dictionary = first.get("route", {}) if first.get("route", {}) is Dictionary else route
+	var final: Dictionary = authority.commit_route_after_probe(entry, request_id, continued_route, intent, options)
+	var second_avoids: Array = substrate.avoid_history[1] if substrate.avoid_history.size() > 1 and substrate.avoid_history[1] is Array else []
+	var passed := String(first.get("state", "")) == "probing" \
+		and String(final.get("state", "")) == "ready" \
+		and second_avoids.has(Vector2i(2, 0)) \
+		and second_avoids.has(Vector2i(3, 0))
+	return outcome(
+		passed,
+		"first=%s final=%s avoids=%s" % [JSON.stringify(authority_summary(first)), JSON.stringify(authority_summary(final)), JSON.stringify(substrate.avoid_history)],
+		["probe_repair_avoids_survive_budget_boundary", "probe_repair_does_not_rediscover_prior_blocker"],
+		{ "first": authority_summary(first), "final": authority_summary(final), "avoidHistory": substrate.avoid_history }
 	)
 
 func test_route_authority_phase10_counters(_mode: String) -> Dictionary:

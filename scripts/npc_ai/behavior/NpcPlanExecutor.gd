@@ -12,6 +12,7 @@ const HOME_V2_ROUTE_MAX_EXPANSIONS := 8192
 const HOME_V2_WAYPOINT_RADIUS := 0.28
 const ROUTINE_V2_ROUTE_MAX_EXPANSIONS := 8192
 const ROUTINE_V2_WAYPOINT_RADIUS := 0.32
+const V2_ROUTE_EXPANSIONS_PER_CALL := 16
 const V2_EXECUTION_REPAIR_RETRY_FRAMES := 1
 
 var autonomy_system = null
@@ -39,7 +40,7 @@ const JOB_SELECTION_DEFERRED_FRAME_LIMIT := 12
 const GUARD_TARGET_REFRESHES_PER_FRAME := 1
 const FORAGE_PENDING_ROUTE_TIMEOUT_SECONDS := 4.0
 const FORAGE_PENDING_ROUTE_FAILURE_LIMIT := 2
-const FORAGE_BLOCKED_ROUTE_FAILURE_LIMIT := 3
+const FORAGE_DYNAMIC_REPAIR_LIMIT := 1
 
 func setup(autonomy, system_node, main_node, services: Dictionary) -> void:
 	autonomy_system = autonomy
@@ -308,8 +309,7 @@ func _advance_job_motion(entry: Dictionary, body: Node3D, delta: float) -> Dicti
 	if not (phase in ["outbound", "searching", "returning"]):
 		if _inside_home_now(entry, body) \
 			or _inside_home_bounds_now(entry, body.global_position) \
-			or _near_home_exit_needs_clearance(entry, body) \
-			or String(entry.get("activeDoorPortalId", "")) != "":
+			or _near_home_exit_needs_clearance(entry, body):
 			return _advance_job_home_exit(entry, body, delta, "job_idle_home_exit")
 		entry["lastMoveDistance"] = 0.0
 		if phase in ["gathering", "stall"]:
@@ -319,7 +319,6 @@ func _advance_job_motion(entry: Dictionary, body: Node3D, delta: float) -> Dicti
 		_inside_home_now(entry, body)
 		or _inside_home_bounds_now(entry, body.global_position)
 		or _near_home_exit_needs_clearance(entry, body)
-		or String(entry.get("activeDoorPortalId", "")) != ""
 	):
 		return _advance_job_home_exit(entry, body, delta, "job_departure_home_exit")
 	var target: Vector3 = entry.get("jobTarget", body.global_position)
@@ -329,6 +328,8 @@ func _advance_job_motion(entry: Dictionary, body: Node3D, delta: float) -> Dicti
 	var speed := _set_motion_speed_mode(entry, "walking", "%s_route" % job_intent_kind)
 	var semantic_kind := _routine_v2_semantic_for_job(entry, phase)
 	var route_result := _execute_routine_route_v2(entry, body, delta, speed, job_intent_kind, target, semantic_kind, _job_route_allows_outside(entry, body), int(entry.get("routePriority", 90)), "job_route")
+	if job_intent_kind == "forage" and semantic_kind == "forage_target":
+		_bind_forage_reservation_to_route(entry, semantic_kind)
 	entry["lastMoveDistance"] = float(route_result.get("moved", 0.0))
 	_clear_inside_home_if_not_semantic(entry, body)
 	return _motion_result(entry, "job", "job_route")
@@ -340,8 +341,27 @@ func _advance_job_home_exit(entry: Dictionary, body: Node3D, delta: float, reaso
 	var speed := _set_motion_speed_mode(entry, "walking", "job_home_exit")
 	var route_result := _execute_routine_route_v2(entry, body, delta, speed, job_intent_kind, target, "home_departure_clearance", _job_route_allows_outside(entry, body), int(entry.get("routePriority", 95)), reason)
 	entry["lastMoveDistance"] = float(route_result.get("moved", 0.0))
+	if String(route_result.get("status", route_result.get("state", ""))) == "arrived" and not _inside_home_now(entry, body) and not _near_home_exit_needs_clearance(entry, body):
+		_complete_job_departure_stage(entry, body)
 	_clear_inside_home_if_not_semantic(entry, body)
 	return _motion_result(entry, "job", reason)
+
+func _complete_job_departure_stage(entry: Dictionary, body: Node3D) -> void:
+	if String(entry.get("activeDoorPortalId", "")) != "" and autonomy_system != null:
+		if autonomy_system.has_method("release_npc_door_hold"):
+			autonomy_system.call("release_npc_door_hold", body if body != null else String(entry.get("id", "")), true)
+		if autonomy_system.has_method("release_npc_traffic_reservations"):
+			autonomy_system.call("release_npc_traffic_reservations", entry, "job_departure_stage_complete")
+	for key in [
+		"activeDoorPortalId",
+		"activeDoorActorId",
+		"activeDoorDirection",
+		"activeDoorTrafficGroupId",
+		"_activeDoorForwardStep",
+		"portalRecenterTicks"
+	]:
+		entry.erase(key)
+	_reset_route_for_replan(entry, "job_departure_stage_complete")
 
 func _advance_idle_motion(entry: Dictionary, body: Node3D, delta: float) -> Dictionary:
 	if not entry.has("dayTarget"):
@@ -624,7 +644,7 @@ func _execute_home_v2_lease(entry: Dictionary, body: Node3D, authority, executor
 	var request_id := String(summary.get("requestId", entry.get("homeRouteV2RequestId", "")))
 	var lease: Dictionary = summary.get("routeLease", {}) if summary.get("routeLease", {}) is Dictionary else {}
 	if lease.is_empty():
-		var refreshed: Dictionary = authority.debug_for_entry(entry)
+		var refreshed: Dictionary = authority.runtime_for_entry(entry)
 		lease = refreshed.get("routeLease", {}) if refreshed.get("routeLease", {}) is Dictionary else {}
 	if lease.is_empty():
 		return { "ok": false, "status": "pending", "state": "pending_budget", "reason": "home_v2_missing_lease", "moved": 0.0 }
@@ -719,12 +739,12 @@ func _finish_home_v2_arrival_if_needed(entry: Dictionary, reason: String) -> voi
 
 
 func _home_v2_active_summary(authority, entry: Dictionary) -> Dictionary:
-	if authority == null or not authority.has_method("debug_for_entry"):
+	if authority == null or not authority.has_method("runtime_for_entry"):
 		return {}
 	var request_id := String(entry.get("homeRouteV2RequestId", ""))
 	if request_id == "":
 		return {}
-	var debug: Dictionary = authority.debug_for_entry(entry)
+	var debug: Dictionary = authority.runtime_for_entry(entry)
 	if String(debug.get("requestId", "")) != request_id:
 		return {}
 	return debug
@@ -861,7 +881,8 @@ func _home_v2_plan_options(start_position: Vector3) -> Dictionary:
 		"movingHome": true,
 		"ignoreDynamic": false,
 		"startPosition": start_position,
-		"maxExpansions": HOME_V2_ROUTE_MAX_EXPANSIONS
+		"maxExpansions": HOME_V2_ROUTE_MAX_EXPANSIONS,
+		"expansionsPerCall": V2_ROUTE_EXPANSIONS_PER_CALL
 	}
 
 
@@ -872,7 +893,8 @@ func _routine_v2_plan_options(allow_outside: bool, semantic_kind: String, start_
 		"ignoreDynamic": false,
 		"semanticKind": semantic_kind,
 		"startPosition": start_position,
-		"maxExpansions": ROUTINE_V2_ROUTE_MAX_EXPANSIONS
+		"maxExpansions": ROUTINE_V2_ROUTE_MAX_EXPANSIONS,
+		"expansionsPerCall": V2_ROUTE_EXPANSIONS_PER_CALL
 	}
 
 
@@ -949,6 +971,8 @@ func _home_v2_route_debug(route: Dictionary) -> Dictionary:
 		"acceptedGoals": proof.get("acceptedGoals", []),
 		"rejectedGoals": proof.get("rejectedGoals", []),
 		"visitedCount": (route.get("visited", []) as Array).size() if route.get("visited", []) is Array else 0,
+		"totalVisitedCount": int(proof.get("visitedCount", 0)),
+		"expansions": int(proof.get("expansions", 0)),
 		"blockedCount": blocked.size(),
 		"blockedSample": blocked.slice(0, mini(blocked.size(), 8)),
 		"doorEdges": proof.get("doorEdges", []),
@@ -965,16 +989,25 @@ func _execute_routine_route_v2(entry: Dictionary, body: Node3D, delta: float, sp
 	if not (body is CharacterBody3D):
 		NpcRouteStateStoreScript.write_status(entry, "pending", "routine_v2_missing_character_body", "NpcPlanExecutor.routine_v2_missing_body")
 		return { "ok": false, "status": "pending", "state": "pending_nav_data", "reason": "routine_v2_missing_character_body", "moved": 0.0 }
+	entry["routineRouteV2IntentKind"] = intent_kind
+	entry["routineRouteV2SemanticKind"] = semantic_kind
 	var authority = components.get("authority")
 	var substrate = components.get("substrate")
 	var executor = components.get("executor")
 	var world = components.get("world")
 	var target_cell := _home_v2_world_cell(world, target)
 	var route_key := _routine_v2_route_key(entry, intent_kind, semantic_kind, target_cell, allow_outside, reason)
-	if bool(entry.get("routeForceReplan", false)):
-		_cancel_routine_v2_request(authority, entry, "route_force_replan")
 	var active := _routine_v2_active_summary(authority, entry, route_key)
 	var state := String(active.get("state", "none"))
+	if bool(entry.get("routeForceReplan", false)):
+		entry["routeForceReplan"] = false
+		var forage_terminal_handoff := intent_kind == "forage" \
+			and semantic_kind == "forage_target" \
+			and state in ["blocked_dynamic", "unreachable_static", "invalid_goal", "arrived"]
+		if not (state in ["queued", "pending_nav_data", "pending_budget", "probing"]) and not forage_terminal_handoff:
+			_cancel_routine_v2_request(authority, entry, "route_force_replan")
+			active = {}
+			state = "none"
 	if state in ["ready", "moving"]:
 		if _routine_v2_repair_replan_due(entry):
 			_cancel_routine_v2_request(authority, entry, "routine_execution_repair_replan")
@@ -996,6 +1029,8 @@ func _execute_routine_route_v2(entry: Dictionary, body: Node3D, delta: float, sp
 	if state in ["queued", "pending_nav_data", "pending_budget"]:
 		return _plan_and_commit_routine_v2_route(entry, body, authority, substrate, world, active, delta, speed, intent_kind, target, semantic_kind, allow_outside, priority, reason, route_key)
 	if state == "blocked_dynamic":
+		if intent_kind == "forage" and semantic_kind == "forage_target":
+			return { "ok": false, "status": state, "state": state, "reason": String(active.get("reason", state)), "moved": 0.0, "authority": active }
 		if not _routine_v2_dynamic_retry_due(entry):
 			return { "ok": false, "status": state, "state": state, "reason": String(active.get("reason", state)), "moved": 0.0, "authority": active }
 		_cancel_routine_v2_request(authority, entry, "blocked_dynamic_retry")
@@ -1030,6 +1065,9 @@ func _plan_and_commit_routine_v2_route(entry: Dictionary, body: Node3D, authorit
 		entry["routineRouteV2LastAuthority"] = invalid_result
 		return _routine_v2_pending_or_failure_result(invalid_result)
 	var intent := _routine_v2_intent(entry, intent_kind, semantic_kind, target, target_cell, candidate_cells, allow_outside, priority, reason)
+	var interaction_claim: Dictionary = intent.get("interactionClaim", {}) if intent.get("interactionClaim", {}) is Dictionary else {}
+	interaction_claim["routeGeneration"] = int(request.get("generation", 0))
+	intent["interactionClaim"] = interaction_claim
 	entry["_routineRouteV2Intent"] = intent.duplicate(true)
 	var plan_options := _routine_v2_plan_options(allow_outside, semantic_kind, body.global_position)
 	var route: Dictionary = substrate.plan_route(entry, start_cell, candidate_cells, plan_options)
@@ -1038,6 +1076,7 @@ func _plan_and_commit_routine_v2_route(entry: Dictionary, body: Node3D, authorit
 		var failure := _apply_home_v2_route_failure(authority, request_id, route)
 		entry["routineRouteV2LastAuthority"] = failure
 		return _routine_v2_pending_or_failure_result(failure)
+	route["interactionClaim"] = interaction_claim.duplicate(true)
 	entry["_routineRouteV2Route"] = route.duplicate(true)
 	entry["routeForceReplan"] = false
 	var commit_options := _v2_probe_repair_commit_options(substrate, start_cell, candidate_cells, plan_options)
@@ -1053,7 +1092,7 @@ func _execute_routine_v2_lease(entry: Dictionary, body: Node3D, authority, execu
 	var request_id := String(summary.get("requestId", entry.get("routineRouteV2RequestId", "")))
 	var lease: Dictionary = summary.get("routeLease", {}) if summary.get("routeLease", {}) is Dictionary else {}
 	if lease.is_empty():
-		var refreshed: Dictionary = authority.debug_for_entry(entry)
+		var refreshed: Dictionary = authority.runtime_for_entry(entry)
 		lease = refreshed.get("routeLease", {}) if refreshed.get("routeLease", {}) is Dictionary else {}
 	if lease.is_empty():
 		return { "ok": false, "status": "pending", "state": "pending_budget", "reason": "routine_v2_missing_lease", "moved": 0.0 }
@@ -1085,7 +1124,7 @@ func _routine_v2_request(authority, entry: Dictionary, intent_kind: String, sema
 
 
 func _routine_v2_intent(entry: Dictionary, intent_kind: String, semantic_kind: String, target: Vector3, target_cell: Vector2i, candidate_cells: Array, allow_outside: bool, priority: int, reason: String) -> Dictionary:
-	return {
+	var intent := {
 		"kind": intent_kind,
 		"semanticKind": semantic_kind,
 		"movingHome": semantic_kind == "home_interior",
@@ -1098,6 +1137,19 @@ func _routine_v2_intent(entry: Dictionary, intent_kind: String, semantic_kind: S
 		"jobPhase": String(entry.get("jobPhase", "")),
 		"jobObjectId": String(entry.get("jobObjectId", "")),
 		"reason": reason
+	}
+	if semantic_kind == "forage_target":
+		intent["interactionClaim"] = _forage_interaction_claim(entry, target, target_cell)
+	return intent
+
+func _forage_interaction_claim(entry: Dictionary, target: Vector3, target_cell: Vector2i) -> Dictionary:
+	return {
+		"objectId": String(entry.get("jobObjectId", "")),
+		"reservationId": String(entry.get("jobReservationId", "")),
+		"slotId": String(entry.get("jobApproachSlotId", "")),
+		"slotPosition": entry.get("jobApproachSlotPosition", target),
+		"slotCell": entry.get("jobApproachSlotCell", target_cell),
+		"routeGeneration": int(entry.get("jobReservationRouteGeneration", 0))
 	}
 
 
@@ -1115,6 +1167,11 @@ func _routine_v2_target_data(entry: Dictionary, target: Vector3, target_cell: Ve
 		data["position"] = target
 		data["cell"] = target_cell
 		data["porchCell"] = porch_cell if target_cell == porch_cell else CollisionBackedRouteSubstrateScript.INVALID_CELL
+	elif semantic_kind == "forage_target":
+		data["position"] = entry.get("jobApproachSlotPosition", target)
+		data["cell"] = entry.get("jobApproachSlotCell", target_cell)
+		data["exactSlotCell"] = entry.get("jobApproachSlotCell", target_cell)
+		data["interactionClaim"] = _forage_interaction_claim(entry, target, target_cell)
 	elif semantic_kind == "guard_post":
 		data["guardCell"] = entry.get("guardCell", target_cell)
 		data["guardPosition"] = entry.get("guardPosition", target)
@@ -1134,7 +1191,7 @@ func _routine_v2_candidate_cells(candidates_result: Dictionary) -> Array:
 
 
 func _routine_v2_active_summary(authority, entry: Dictionary, route_key: String) -> Dictionary:
-	if authority == null or not authority.has_method("debug_for_entry"):
+	if authority == null or not authority.has_method("runtime_for_entry"):
 		return {}
 	if String(entry.get("routineRouteV2Key", "")) != route_key:
 		_cancel_routine_v2_request(authority, entry, "routine_route_key_changed")
@@ -1142,7 +1199,7 @@ func _routine_v2_active_summary(authority, entry: Dictionary, route_key: String)
 	var request_id := String(entry.get("routineRouteV2RequestId", ""))
 	if request_id == "":
 		return {}
-	var debug: Dictionary = authority.debug_for_entry(entry)
+	var debug: Dictionary = authority.runtime_for_entry(entry)
 	if String(debug.get("requestId", "")) != request_id:
 		return {}
 	return debug
@@ -1870,6 +1927,8 @@ func _update_forager_goal(entry: Dictionary, body: Node3D, delta: float) -> bool
 		return true
 	if phase == "outbound" or phase == "searching":
 		var target_node := _job_target_node(entry)
+		if target_node != null and _forager_reservation_deadline_exceeded(entry):
+			return _retarget_forager_after_route_failure(entry, body, target_node, "forage_reservation_deadline", false)
 		var inside_town := _point_inside_town(entry, body.global_position)
 		if phase == "searching" and target_node == null and timer <= 0.0:
 			var forage_retry := _find_forage_target(entry) if not inside_town else null
@@ -1909,10 +1968,9 @@ func _update_forager_goal(entry: Dictionary, body: Node3D, delta: float) -> bool
 		if target_node != null and String(entry.get("jobObjectId", "")) == "":
 			_reserve_job_target(entry, target_node, "harvest_resource")
 		var target: Vector3 = entry.get("jobTarget", body.global_position)
-		var forage_action_reach := _smart_object_action_reach(entry, NpcConstantsScript.CELL_SIZE * 2.50)
-		var vertical_ok := target_node == null or absf(body.global_position.y - target.y) <= NpcConstantsScript.CELL_SIZE * 2.0
-		var reached_target := _flat_distance(body.global_position, target) <= forage_action_reach
-		if target_node != null and vertical_ok and reached_target:
+		var arrival_proof := _forager_exact_arrival_proof(entry, body)
+		entry["forageArrivalProof"] = arrival_proof.duplicate(true)
+		if target_node != null and bool(arrival_proof.get("ok", false)):
 			entry["jobPhase"] = "gathering"
 			entry["jobTimer"] = _deterministic_seconds(entry, "forage_gather_duration", 0.4, 0.8)
 			entry["foragePendingRouteTime"] = 0.0
@@ -1922,39 +1980,44 @@ func _update_forager_goal(entry: Dictionary, body: Node3D, delta: float) -> bool
 			_play_npc_use(entry, "gather")
 			body.set_meta("npc_job_phase", "gathering")
 			return false
-		var pending_route_timeout := target_node != null and _forager_pending_route_timed_out(entry, delta)
-		var route_blocked := target_node != null and _current_route_failure_blocks_forager(entry)
-		if target_node != null and (route_blocked or pending_route_timeout):
-			if route_blocked:
-				_release_job_reservation(entry, "route_blocked")
-			var failures := 0
-			if pending_route_timeout:
-				failures = int(entry.get("foragePendingRouteRetries", 0)) + 1
-				entry["foragePendingRouteRetries"] = failures
-			else:
-				failures = int(entry.get("forageRouteFailures", 0)) + 1
-				entry["forageRouteFailures"] = failures
-			entry["routeForceReplan"] = true
-			var forage_failure_limit := FORAGE_PENDING_ROUTE_FAILURE_LIMIT if pending_route_timeout else FORAGE_BLOCKED_ROUTE_FAILURE_LIMIT
-			if failures >= forage_failure_limit:
-				if route_blocked:
-					_mark_forager_target_unreachable(entry, target_node)
-				else:
-					_release_job_reservation(entry, "pending_route_timeout")
-				entry["jobTargetNode"] = null
-				entry["jobPhase"] = "searching"
-				_advance_forage_search_serial(entry)
-				entry["jobTarget"] = _choose_job_target(entry)
-				entry["jobTimer"] = _deterministic_seconds(entry, "forage_blocked_search", 3.0, 7.0)
-				entry["foragePendingRouteTime"] = 0.0
-				_set_npc_goal(entry, "search for berries")
-				body.set_meta("npc_job_phase", "searching")
+		var route_disposition := _forager_v2_route_disposition(entry)
+		var route_action := String(route_disposition.get("action", "continue"))
+		if target_node != null and route_action == "repair":
+			entry["forageRouteRepairAttempts"] = int(entry.get("forageRouteRepairAttempts", 0)) + 1
+			entry["jobTimer"] = _deterministic_seconds(entry, "forage_dynamic_repair", 2.0, 4.0)
+			_reset_route_for_replan(entry, "forage_blocked_dynamic_repair")
+			_set_npc_goal(entry, "forage berries")
+			body.set_meta("npc_job_phase", "outbound")
+			return true
+		if target_node != null and route_action == "release":
+			return _retarget_forager_after_route_failure(entry, body, target_node, String(route_disposition.get("releaseReason", "route_failed")), bool(route_disposition.get("markUnreachable", false)))
+		if target_node != null and route_action == "next_slot":
+			if _advance_forage_approach_slot(entry, target_node):
+				entry.erase("_routineRouteV2Intent")
+				entry.erase("routineRouteV2IntentKind")
+				entry.erase("routineRouteV2SemanticKind")
+				entry["forageRouteRepairAttempts"] = 0
+				entry["routeForceReplan"] = true
+				entry["jobPhase"] = "outbound"
+				entry["jobTimer"] = _deterministic_seconds(entry, "forage_next_slot_route", 3.0, 6.0)
+				_set_npc_goal(entry, "forage berries")
+				body.set_meta("npc_job_phase", "outbound")
 				return true
+			return _retarget_forager_after_route_failure(entry, body, target_node, String(route_disposition.get("releaseReason", "route_slot_failed")), bool(route_disposition.get("markUnreachable", false)))
+		var pending_route_timeout := target_node != null and _forager_pending_route_timed_out(entry, delta)
+		if target_node != null and pending_route_timeout:
+			var failures := int(entry.get("foragePendingRouteRetries", 0)) + 1
+			entry["foragePendingRouteRetries"] = failures
+			entry["routeForceReplan"] = true
+			if failures >= FORAGE_PENDING_ROUTE_FAILURE_LIMIT:
+				return _retarget_forager_after_route_failure(entry, body, target_node, "pending_route_timeout", false)
 			entry["jobTargetNode"] = target_node
 			entry["jobPhase"] = "outbound"
 			entry["jobTimer"] = _deterministic_seconds(entry, "forage_route_retry", 3.0, 7.0)
 			entry["foragePendingRouteTime"] = 0.0
-			NpcRouteStateStoreScript.write_status(entry, "waiting", "retry_forage_pending_route" if pending_route_timeout else "retry_forage_route", "NpcPlanExecutor.forage_route_retry")
+			entry.erase("foragePendingRouteFrame")
+			entry.erase("foragePendingRouteKey")
+			NpcRouteStateStoreScript.write_status(entry, "waiting", "retry_forage_pending_route", "NpcPlanExecutor.forage_route_retry")
 			_set_npc_goal(entry, "forage berries")
 			body.set_meta("npc_job_phase", "outbound")
 			return true
@@ -2045,6 +2108,145 @@ func _update_forager_goal(entry: Dictionary, body: Node3D, delta: float) -> bool
 	entry["jobPhase"] = "idle"
 	entry["jobTimer"] = _deterministic_seconds(entry, "forage_idle_reset", 3.0, 7.0)
 	return false
+
+func _forager_v2_route_disposition(entry: Dictionary) -> Dictionary:
+	if String(entry.get("jobObjectId", "")) == "" or String(entry.get("jobReservationId", "")) == "":
+		return { "action": "continue", "reason": "no_reservation" }
+	var binding: Dictionary = entry.get("forageReservationRouteBinding", {}) if entry.get("forageReservationRouteBinding", {}) is Dictionary else {}
+	var binding_reason := String(binding.get("reason", ""))
+	if not binding.is_empty() and not bool(binding.get("ok", false)) and binding_reason in [
+		"missing_registration",
+		"missing_reservation",
+		"reservation_owner_mismatch",
+		"reservation_slot_mismatch",
+		"reservation_deadline",
+		"stale_route_generation",
+		"route_request_generation_conflict"
+	]:
+		return { "action": "release", "releaseReason": "reservation_route_%s" % binding_reason, "markUnreachable": false }
+	if String(entry.get("routineRouteV2IntentKind", "")) != "forage" or String(entry.get("routineRouteV2SemanticKind", "")) != "forage_target":
+		return { "action": "continue", "reason": "route_not_for_forage_target" }
+	var intent: Dictionary = entry.get("_routineRouteV2Intent", {}) if entry.get("_routineRouteV2Intent", {}) is Dictionary else {}
+	if String(intent.get("jobObjectId", "")) != String(entry.get("jobObjectId", "")):
+		return { "action": "continue", "reason": "route_object_mismatch" }
+	var authority: Dictionary = entry.get("routeAuthorityV2", {}) if entry.get("routeAuthorityV2", {}) is Dictionary else {}
+	var request_id := String(authority.get("requestId", ""))
+	var generation := int(authority.get("generation", 0))
+	if request_id == "" or request_id != String(entry.get("routineRouteV2RequestId", "")):
+		return { "action": "continue", "reason": "route_request_not_current" }
+	var bound_generation := int(entry.get("jobReservationRouteGeneration", 0))
+	var bound_request_id := String(entry.get("jobReservationRouteRequestId", ""))
+	if bound_generation > 0 and (generation < bound_generation or (generation == bound_generation and bound_request_id != "" and bound_request_id != request_id)):
+		return { "action": "release", "releaseReason": "stale_reservation_route_identity", "markUnreachable": false }
+	var state := String(authority.get("state", ""))
+	if state in ["unreachable_static", "invalid_goal"]:
+		return {
+			"action": "next_slot",
+			"releaseReason": "route_%s" % state,
+			"markUnreachable": true,
+			"state": state,
+			"reason": String(authority.get("reason", ""))
+		}
+	if state == "blocked_dynamic":
+		if int(entry.get("forageRouteRepairAttempts", 0)) < FORAGE_DYNAMIC_REPAIR_LIMIT:
+			return { "action": "repair", "state": state, "reason": String(authority.get("reason", "")) }
+		return {
+			"action": "next_slot",
+			"releaseReason": "route_blocked_dynamic_after_repair",
+			"markUnreachable": false,
+			"state": state,
+			"reason": String(authority.get("reason", ""))
+		}
+	return { "action": "continue", "state": state, "reason": String(authority.get("reason", "")) }
+
+func _forager_exact_arrival_proof(entry: Dictionary, body: Node3D) -> Dictionary:
+	if body == null:
+		return { "ok": false, "reason": "missing_body" }
+	var authority: Dictionary = entry.get("routeAuthorityV2", {}) if entry.get("routeAuthorityV2", {}) is Dictionary else {}
+	if String(authority.get("state", "")) != "arrived":
+		return { "ok": false, "reason": "route_not_arrived", "state": String(authority.get("state", "")) }
+	var request_id := String(authority.get("requestId", ""))
+	if request_id == "" or request_id != String(entry.get("routineRouteV2RequestId", "")) or request_id != String(entry.get("jobReservationRouteRequestId", "")):
+		return { "ok": false, "reason": "arrival_request_mismatch", "requestId": request_id }
+	var generation := int(authority.get("generation", 0))
+	if generation <= 0 or generation != int(entry.get("jobReservationRouteGeneration", 0)):
+		return { "ok": false, "reason": "arrival_generation_mismatch", "generation": generation }
+	var claim: Dictionary = authority.get("interactionClaim", {}) if authority.get("interactionClaim", {}) is Dictionary else {}
+	var expected_object_id := String(entry.get("jobObjectId", ""))
+	var expected_reservation_id := String(entry.get("jobReservationId", ""))
+	var expected_slot_id := String(entry.get("jobApproachSlotId", ""))
+	if String(claim.get("objectId", "")) != expected_object_id \
+		or String(claim.get("reservationId", "")) != expected_reservation_id \
+		or String(claim.get("slotId", "")) != expected_slot_id \
+		or int(claim.get("routeGeneration", 0)) != generation:
+		return { "ok": false, "reason": "arrival_claim_mismatch", "claim": claim }
+	var expected_cell = entry.get("jobApproachSlotCell", Vector2i(999999, 999999))
+	var claim_cell = claim.get("slotCell", Vector2i(999999, 999999))
+	var lease: Dictionary = authority.get("routeLease", {}) if authority.get("routeLease", {}) is Dictionary else {}
+	if not (expected_cell is Vector2i) or claim_cell != expected_cell or lease.get("targetCell", Vector2i(999999, 999999)) != expected_cell:
+		return { "ok": false, "reason": "arrival_cell_mismatch", "expectedCell": expected_cell, "claimCell": claim_cell, "leaseTargetCell": lease.get("targetCell") }
+	var slot_position = entry.get("jobApproachSlotPosition", entry.get("jobTarget", Vector3.INF))
+	if not (slot_position is Vector3) or slot_position == Vector3.INF:
+		return { "ok": false, "reason": "missing_slot_position" }
+	var flat_distance := _flat_distance(body.global_position, slot_position)
+	var vertical_distance := absf(body.global_position.y - slot_position.y)
+	var arrival_radius := ROUTINE_V2_WAYPOINT_RADIUS + 0.10
+	if flat_distance > arrival_radius or vertical_distance > NpcConstantsScript.CELL_SIZE * 0.72:
+		return { "ok": false, "reason": "actor_not_at_reserved_slot", "flatDistance": flat_distance, "verticalDistance": vertical_distance, "arrivalRadius": arrival_radius }
+	return {
+		"ok": true,
+		"reason": "arrived_at_reserved_slot",
+		"requestId": request_id,
+		"generation": generation,
+		"objectId": expected_object_id,
+		"reservationId": expected_reservation_id,
+		"slotId": expected_slot_id,
+		"slotCell": expected_cell,
+		"flatDistance": flat_distance
+	}
+
+func _retarget_forager_after_route_failure(entry: Dictionary, body: Node3D, target_node: Node3D, release_reason: String, mark_unreachable: bool) -> bool:
+	_release_job_reservation(entry, release_reason)
+	if release_reason.find("reservation_deadline") >= 0 and target_node != null:
+		_defer_forager_target(entry, target_node)
+	elif mark_unreachable and target_node != null:
+		_mark_forager_target_unreachable(entry, target_node)
+	entry["jobTargetNode"] = null
+	entry["jobPhase"] = "searching"
+	entry["jobFailureReason"] = release_reason
+	entry["forageRouteRepairAttempts"] = 0
+	entry["forageRouteFailures"] = 0
+	entry["foragePendingRouteRetries"] = 0
+	entry["foragePendingRouteTime"] = 0.0
+	entry.erase("foragePendingRouteFrame")
+	entry.erase("foragePendingRouteKey")
+	entry.erase("forageReservationRouteBinding")
+	entry.erase("forageReservationStartedPhysicsFrame")
+	entry.erase("forageReservationElapsedSeconds")
+	entry.erase("jobApproachCandidates")
+	entry.erase("jobApproachCandidateIndex")
+	entry.erase("jobApproachTargetObjectId")
+	_advance_forage_search_serial(entry)
+	entry["jobTarget"] = _choose_job_target(entry)
+	entry["jobTimer"] = _deterministic_seconds(entry, "forage_route_failure_search", 3.0, 7.0)
+	entry["routeForceReplan"] = true
+	_set_npc_goal(entry, "search for berries")
+	if body != null:
+		body.set_meta("npc_job_phase", "searching")
+	return true
+
+func _bind_forage_reservation_to_route(entry: Dictionary, semantic_kind: String) -> Dictionary:
+	if npc_system == null or not npc_system.has_method("bind_job_reservation_to_route"):
+		return { "ok": false, "status": "failed", "reason": "missing_reservation_route_binding" }
+	var authority: Dictionary = entry.get("routeAuthorityV2", {}) if entry.get("routeAuthorityV2", {}) is Dictionary else {}
+	if authority.is_empty():
+		return { "ok": false, "status": "failed", "reason": "missing_route_authority_state" }
+	var result: Dictionary = npc_system.call("bind_job_reservation_to_route", entry, authority, semantic_kind)
+	entry["forageReservationRouteBinding"] = result.duplicate(true)
+	return result
+
+func _advance_forage_approach_slot(entry: Dictionary, target_node: Node3D) -> bool:
+	return bool(npc_system.call("advance_forage_approach_slot", entry, target_node)) if npc_system != null and npc_system.has_method("advance_forage_approach_slot") else false
 
 func _entry_has_active_goal_kind(entry: Dictionary, expected_kind) -> bool:
 	var expected := String(expected_kind)
@@ -2210,29 +2412,27 @@ func _current_route_failure_blocks_forager(entry: Dictionary) -> bool:
 	return bool(npc_system.call("current_route_failure_blocks_forager", entry)) if npc_system != null and npc_system.has_method("current_route_failure_blocks_forager") else false
 
 func _forager_pending_route_timed_out(entry: Dictionary, delta: float) -> bool:
-	var status := String(entry.get("routeStatus", ""))
-	var reason := String(entry.get("routeReason", ""))
-	var pending_reason := reason in [
-		"navmesh_tile_budget",
-		"navmesh_tile_publish_frame_budget",
-		"route_budget"
-	]
-	var endpoint_readiness_reason := reason in [
-		"endpoint_not_server_walkable",
-		"no_start_server_walkable",
-		"no_target_server_walkable",
-		"path_endpoint_mismatch"
-	]
-	var waiting_for_route_readiness := (status == "pending" and pending_reason) or (status == "blocked" and endpoint_readiness_reason)
+	var authority: Dictionary = entry.get("routeAuthorityV2", {}) if entry.get("routeAuthorityV2", {}) is Dictionary else {}
+	var state := String(authority.get("state", ""))
+	var waiting_for_route_readiness := state in ["queued", "pending_nav_data", "pending_budget", "probing"] \
+		and String(entry.get("routineRouteV2IntentKind", "")) == "forage" \
+		and String(entry.get("routineRouteV2SemanticKind", "")) == "forage_target" \
+		and String(authority.get("requestId", "")) == String(entry.get("routineRouteV2RequestId", ""))
 	if not waiting_for_route_readiness:
 		entry["foragePendingRouteTime"] = 0.0
 		entry.erase("foragePendingRouteFrame")
 		entry.erase("foragePendingRouteKey")
 		return false
 	var target: Vector3 = entry.get("jobTarget", Vector3.ZERO)
-	var pending_key := "%s|%s|%d,%d" % [
+	var authority_wait_frames := maxi(
+		maxi(int(authority.get("pendingNavDataFrames", 0)), int(authority.get("pendingBudgetFrames", 0))),
+		maxi(int(authority.get("pendingProbeFrames", 0)), int(authority.get("planningWaitFrames", 0)))
+	)
+	var ticks_per_second := maxf(float(Engine.physics_ticks_per_second), 1.0)
+	var pending_key := "%s|%s|%s|%d,%d" % [
 		String(entry.get("jobObjectId", "")),
-		"route_readiness_wait",
+		state,
+		String(authority.get("requestId", "")),
 		roundi(target.x / NpcConstantsScript.CELL_SIZE),
 		roundi(target.z / NpcConstantsScript.CELL_SIZE)
 	]
@@ -2241,11 +2441,28 @@ func _forager_pending_route_timed_out(entry: Dictionary, delta: float) -> bool:
 		entry["foragePendingRouteKey"] = pending_key
 		entry["foragePendingRouteFrame"] = current_frame
 		entry["foragePendingRouteTime"] = 0.0
-		return false
+		if float(authority_wait_frames) / ticks_per_second < FORAGE_PENDING_ROUTE_TIMEOUT_SECONDS:
+			return false
 	var start_frame := int(entry.get("foragePendingRouteFrame", current_frame))
-	var pending_time := maxf(float(current_frame - start_frame) / maxf(float(Engine.physics_ticks_per_second), 1.0), float(entry.get("foragePendingRouteTime", 0.0)) + maxf(delta, 0.0))
+	var pending_time := maxf(
+		maxf(float(current_frame - start_frame) / ticks_per_second, float(authority_wait_frames) / ticks_per_second),
+		float(entry.get("foragePendingRouteTime", 0.0)) + maxf(delta, 0.0)
+	)
 	entry["foragePendingRouteTime"] = pending_time
 	return pending_time >= FORAGE_PENDING_ROUTE_TIMEOUT_SECONDS
+
+func _forager_reservation_deadline_exceeded(entry: Dictionary) -> bool:
+	if String(entry.get("jobReservationId", "")) == "":
+		entry.erase("forageReservationStartedPhysicsFrame")
+		entry.erase("forageReservationElapsedSeconds")
+		return false
+	var current_frame := Engine.get_physics_frames()
+	var started_frame := int(entry.get("forageReservationStartedPhysicsFrame", current_frame))
+	if not entry.has("forageReservationStartedPhysicsFrame"):
+		entry["forageReservationStartedPhysicsFrame"] = current_frame
+	var elapsed := float(maxi(0, current_frame - started_frame)) / maxf(float(Engine.physics_ticks_per_second), 1.0)
+	entry["forageReservationElapsedSeconds"] = elapsed
+	return elapsed >= NpcConstantsScript.FORAGE_RESERVATION_DEADLINE_SECONDS
 
 func forager_route_is_progressing(entry: Dictionary) -> bool:
 	if String(entry.get("routeStatus", "")) != "moving":
@@ -2259,6 +2476,10 @@ func forager_route_is_progressing(entry: Dictionary) -> bool:
 func _mark_forager_target_unreachable(entry: Dictionary, node: Node3D) -> void:
 	if npc_system != null and npc_system.has_method("mark_forager_target_unreachable"):
 		npc_system.call("mark_forager_target_unreachable", entry, node)
+
+func _defer_forager_target(entry: Dictionary, node: Node3D) -> void:
+	if npc_system != null and npc_system.has_method("defer_forager_target"):
+		npc_system.call("defer_forager_target", entry, node, NpcConstantsScript.FORAGE_TARGET_RETRY_COOLDOWN_SECONDS)
 
 func _mark_job_resource_target_unreachable(entry: Dictionary, node: Node3D, job: String) -> void:
 	if npc_system != null and npc_system.has_method("mark_job_resource_target_unreachable"):

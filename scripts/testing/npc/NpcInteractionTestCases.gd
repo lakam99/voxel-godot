@@ -19,6 +19,11 @@ func setup(owner) -> void:
 func cases() -> Array[Dictionary]:
 	return [
 		case("npc_interaction_resource_reserved_single_user", "day", "test_resource_reserved_single_user"),
+		case("npc_interaction_reservation_lifecycle_diagnostics", "day", "test_reservation_lifecycle_diagnostics"),
+		case("npc_interaction_reservation_route_heartbeat_identity", "day", "test_reservation_route_heartbeat_identity"),
+		case("npc_interaction_reservation_deadline_rejects_heartbeat", "day", "test_reservation_deadline_rejects_heartbeat"),
+		case("npc_interaction_preferred_slot_is_capacity_authority", "day", "test_preferred_slot_is_capacity_authority"),
+		case("npc_interaction_reregistration_preserves_live_slot", "day", "test_reregistration_preserves_live_slot"),
 		case("npc_interaction_resource_removed_during_approach", "day", "test_resource_removed_during_approach"),
 		case("npc_interaction_player_harvests_before_npc_replans", "day", "test_player_harvests_before_npc_replans"),
 		case("npc_interaction_workstation_capacity", "day", "test_workstation_capacity"),
@@ -70,6 +75,170 @@ func test_resource_reserved_single_user(_mode: String) -> Dictionary:
 	var second = reserve(service, object_id, prop, make_actor("npc-b", Vector3(-1.4, 0.0, 0.0)), "npc-b")
 	var passed: bool = succeeded(first) and failed_reason(second, "capacity_busy")
 	return outcome(passed, "first=%s second=%s" % [summary(first), summary(second)], ["single_capacity_owner", "second_user_busy"], state(service))
+
+func test_reservation_lifecycle_diagnostics(_mode: String) -> Dictionary:
+	var service = make_service()
+	var prop := make_prop("reservation-diagnostics", "berryBush", "berries", 2, Vector3.ZERO)
+	var object_id: String = service.register_resource(prop)
+	var owner := make_actor("diagnostic-owner", Vector3(CELL * 1.05, 0.0, 0.0))
+	var request = InteractionRequestScript.make(SmartObjectServiceScript.COMMAND_RESERVE, object_id, "diagnostic-owner", {
+		"action": "harvest_resource",
+		"actorKind": "npc",
+		"routeRequestId": "route-request-42",
+		"routeGeneration": 7,
+		"goalKey": "forage|outbound|reservation-diagnostics"
+	})
+	request.object_node = prop
+	request.actor_node = owner
+	request.actor_kind = "npc"
+	var reserved = service.request_interaction(request)
+	var contender = reserve(service, object_id, prop, make_actor("diagnostic-contender", Vector3(-CELL * 1.05, 0.0, 0.0)), "diagnostic-contender")
+	var active_debug: Dictionary = service.reservation_debug(object_id, "diagnostic-owner")
+	var active_rows: Array = active_debug.get("reservations", []) if active_debug.get("reservations", []) is Array else []
+	var active: Dictionary = active_rows[0] if not active_rows.is_empty() and active_rows[0] is Dictionary else {}
+	var busy_rows: Array = contender.metrics.get("ownerReservations", []) if contender != null and contender.metrics.get("ownerReservations", []) is Array else []
+	var released = release(service, object_id, prop, owner, "diagnostic-owner", reserved)
+	var released_debug: Dictionary = service.reservation_debug(object_id, "diagnostic-owner")
+	var last_release: Dictionary = released_debug.get("lastRelease", {}) if released_debug.get("lastRelease", {}) is Dictionary else {}
+	var passed := succeeded(reserved) \
+		and failed_reason(contender, "capacity_busy") \
+		and active_rows.size() == 1 \
+		and busy_rows.size() == 1 \
+		and String(active.get("routeRequestId", "")) == "route-request-42" \
+		and int(active.get("routeGeneration", 0)) == 7 \
+		and active.has("createdPhysicsFrame") \
+		and active.has("ageFrames") \
+		and succeeded(released) \
+		and (released_debug.get("reservations", []) as Array).is_empty() \
+		and String(last_release.get("releaseReason", "")) == "cancel"
+	return outcome(passed, "active=%s busy=%s release=%s" % [JSON.stringify(active_debug), summary(contender), JSON.stringify(released_debug)], ["reservation_owner_age_visible", "capacity_busy_names_owner_reservation", "release_reason_retained"], state(service))
+
+func test_reservation_route_heartbeat_identity(_mode: String) -> Dictionary:
+	var service = make_service()
+	var prop := make_prop("reservation-heartbeat", "berryBush", "berries", 2, Vector3.ZERO)
+	var object_id: String = service.register_resource(prop)
+	var owner := make_actor("heartbeat-owner", Vector3(CELL * 1.05, 0.0, 0.0))
+	var reserved = reserve(service, object_id, prop, owner, "heartbeat-owner")
+	var reservation_id := String(reserved.metrics.get("reservationId", ""))
+	var first: Dictionary = service.heartbeat_reservation(object_id, reservation_id, "heartbeat-owner", {
+		"slotId": String(reserved.metrics.get("slotId", "")),
+		"routeRequestId": "heartbeat-owner:v2:4:1",
+		"routeGeneration": 4,
+		"goalKey": "forage|outbound|%s" % object_id
+	})
+	var stale: Dictionary = service.heartbeat_reservation(object_id, reservation_id, "heartbeat-owner", {
+		"slotId": String(reserved.metrics.get("slotId", "")),
+		"routeRequestId": "heartbeat-owner:v2:3:9",
+		"routeGeneration": 3,
+		"goalKey": "forage|outbound|%s" % object_id
+	})
+	var replacement: Dictionary = service.heartbeat_reservation(object_id, reservation_id, "heartbeat-owner", {
+		"slotId": String(reserved.metrics.get("slotId", "")),
+		"routeRequestId": "heartbeat-owner:v2:5:2",
+		"routeGeneration": 5,
+		"goalKey": "forage|outbound|%s" % object_id
+	})
+	var debug: Dictionary = service.reservation_debug(object_id, "heartbeat-owner")
+	var rows: Array = debug.get("reservations", []) if debug.get("reservations", []) is Array else []
+	var active: Dictionary = rows[0] if not rows.is_empty() and rows[0] is Dictionary else {}
+	var passed := succeeded(reserved) \
+		and bool(first.get("ok", false)) \
+		and not bool(stale.get("ok", true)) \
+		and String(stale.get("reason", "")) == "stale_route_generation" \
+		and bool(replacement.get("ok", false)) \
+		and String(active.get("routeRequestId", "")) == "heartbeat-owner:v2:5:2" \
+		and int(active.get("routeGeneration", 0)) == 5
+	return outcome(passed, "first=%s stale=%s replacement=%s active=%s" % [JSON.stringify(first), JSON.stringify(stale), JSON.stringify(replacement), JSON.stringify(active)], ["heartbeat_binds_route_identity", "older_generation_rejected", "newer_generation_rebinds"], state(service))
+
+func test_reservation_deadline_rejects_heartbeat(_mode: String) -> Dictionary:
+	var service = make_service()
+	var prop := make_prop("reservation-deadline", "berryBush", "berries", 2, Vector3.ZERO)
+	var object_id: String = service.register_resource(prop)
+	var owner := make_actor("deadline-owner", Vector3(CELL * 1.05, 0.0, 0.0))
+	var request = InteractionRequestScript.make(SmartObjectServiceScript.COMMAND_RESERVE, object_id, "deadline-owner", {
+		"action": "harvest_resource",
+		"actorKind": "npc",
+		"maxReservationAgeSeconds": 45.0
+	})
+	request.object_node = prop
+	request.actor_node = owner
+	request.actor_kind = "npc"
+	var reserved = service.request_interaction(request)
+	var reservation_id := String(reserved.metrics.get("reservationId", ""))
+	var registration = service.registrations.get(object_id)
+	var reservation: Dictionary = registration.reservations.get(reservation_id, {})
+	reservation["deadlinePhysicsFrame"] = Engine.get_physics_frames()
+	registration.reservations[reservation_id] = reservation
+	var heartbeat: Dictionary = service.heartbeat_reservation(object_id, reservation_id, "deadline-owner", {
+		"slotId": String(reserved.metrics.get("slotId", "")),
+		"routeRequestId": "deadline-owner:v2:1:1",
+		"routeGeneration": 1,
+		"goalKey": "forage|outbound|%s" % object_id
+	})
+	var debug: Dictionary = service.reservation_debug(object_id, "deadline-owner")
+	var available: Dictionary = service.object_available(object_id, "other-forager")
+	var last_release: Dictionary = debug.get("lastRelease", {}) if debug.get("lastRelease", {}) is Dictionary else {}
+	var passed := succeeded(reserved) \
+		and not bool(heartbeat.get("ok", true)) \
+		and String(heartbeat.get("reason", "")) == "reservation_deadline" \
+		and (debug.get("reservations", []) as Array).is_empty() \
+		and String(last_release.get("releaseReason", "")) == "reservation_deadline" \
+		and bool(available.get("ok", false))
+	return outcome(passed, "heartbeat=%s debug=%s available=%s" % [JSON.stringify(heartbeat), JSON.stringify(debug), JSON.stringify(available)], ["absolute_deadline_beats_heartbeat", "deadline_releases_slot", "deadline_restores_availability"], state(service))
+
+func test_preferred_slot_is_capacity_authority(_mode: String) -> Dictionary:
+	var service = make_service()
+	var prop := make_prop("preferred-slot", "berryBush", "berries", 2, Vector3.ZERO)
+	var object_id: String = service.register_resource(prop, { "slots": two_test_slots(Vector3.ZERO, Vector3(CELL, 0.0, 0.0)) })
+	var actor := make_actor("preferred-owner", Vector3(CELL, 0.0, 0.0))
+	var request = InteractionRequestScript.make(SmartObjectServiceScript.COMMAND_RESERVE, object_id, "preferred-owner", {
+		"action": "harvest_resource",
+		"actorKind": "npc",
+		"preferredSlotId": "slot:1"
+	})
+	request.object_node = prop
+	request.actor_node = actor
+	request.actor_kind = "npc"
+	var reserved = service.request_interaction(request)
+	var passed := succeeded(reserved) and String(reserved.metrics.get("slotId", "")) == "slot:1"
+	return outcome(passed, summary(reserved), ["preferred_slot_selected_exactly", "smart_object_remains_capacity_authority"], state(service))
+
+func test_reregistration_preserves_live_slot(_mode: String) -> Dictionary:
+	var service = make_service()
+	var prop := make_prop("reregister-slot", "berryBush", "berries", 2, Vector3.ZERO)
+	var original_position := Vector3(CELL, 0.0, 0.0)
+	var object_id: String = service.register_resource(prop, { "slots": two_test_slots(Vector3.ZERO, original_position) })
+	var actor := make_actor("reregister-owner", original_position)
+	var request = InteractionRequestScript.make(SmartObjectServiceScript.COMMAND_RESERVE, object_id, "reregister-owner", {
+		"action": "harvest_resource",
+		"actorKind": "npc",
+		"preferredSlotId": "slot:1"
+	})
+	request.object_node = prop
+	request.actor_node = actor
+	request.actor_kind = "npc"
+	var reserved = service.request_interaction(request)
+	service.register_resource(prop, { "slots": two_test_slots(Vector3(CELL * 3.0, 0.0, 0.0), Vector3(CELL * 4.0, 0.0, 0.0)) })
+	var debug: Dictionary = service.reservation_debug(object_id, "reregister-owner")
+	var rows: Array = debug.get("reservations", []) if debug.get("reservations", []) is Array else []
+	var active: Dictionary = rows[0] if not rows.is_empty() and rows[0] is Dictionary else {}
+	var current_position := summary_vector(active.get("approachPosition", []))
+	var passed := succeeded(reserved) \
+		and String(active.get("slotId", "")) == "slot:1" \
+		and current_position.is_equal_approx(original_position) \
+		and not bool(active.get("slotGeometryChanged", true))
+	return outcome(passed, "reserved=%s active=%s" % [summary(reserved), JSON.stringify(active)], ["live_slot_not_moved_on_reregistration", "live_reservation_not_orphaned"], state(service))
+
+func two_test_slots(first_position: Vector3, second_position: Vector3) -> Dictionary:
+	return {
+		"slot:0": { "slotId": "slot:0", "position": first_position, "capacity": 1, "occupants": [] },
+		"slot:1": { "slotId": "slot:1", "position": second_position, "capacity": 1, "occupants": [] }
+	}
+
+func summary_vector(value) -> Vector3:
+	if value is Array and value.size() >= 3:
+		return Vector3(float(value[0]), float(value[1]), float(value[2]))
+	return Vector3.INF
 
 func test_resource_removed_during_approach(_mode: String) -> Dictionary:
 	var service = make_service()

@@ -1564,6 +1564,7 @@ func find_forage_target(entry: Dictionary) -> Node3D:
         "chunkRadius": 2,
         "cacheFrames": 30
     })
+    candidates = filter_forage_candidates(entry, candidates)
     var scanned_nodes := 0
     if candidates.is_empty() and allow_resource_scan_fallback():
         var remaining_scan_nodes := FORAGE_SCAN_NODE_LIMIT
@@ -1611,6 +1612,8 @@ func is_valid_forage_node(node: Node3D, entry: Dictionary) -> bool:
         return false
     if bool(node.get_meta(forager_unreachable_meta_key(entry), false)):
         return false
+    if forager_target_cooldown_active(entry, node):
+        return false
     if String(node.get_meta("kind", "")) != "prop":
         return false
     if String(node.get_meta("drop", "")) != "berries" and String(node.get_meta("material", "")) != "berryBush":
@@ -1634,32 +1637,17 @@ func forage_node_within_home_return_radius(entry: Dictionary, position: Vector3)
     return flat_home_delta.length() <= max_return_distance
 
 func current_route_failure_blocks_forager(entry: Dictionary) -> bool:
-    if String(entry.get("routeStatus", "")) != "blocked":
-        return false
     if String(entry.get("activeDoorPortalId", "")) != "":
         return false
-    var reason := String(entry.get("routeReason", ""))
-    if reason in ["endpoint_not_server_walkable", "no_start_server_walkable", "no_target_server_walkable", "path_endpoint_mismatch"] and _route_still_waiting_for_navmesh_tiles(entry):
+    if String(entry.get("routineRouteV2IntentKind", "")) != "forage" or String(entry.get("routineRouteV2SemanticKind", "")) != "forage_target":
         return false
-    var body := entry.get("body") as Node3D
-    if body != null and is_instance_valid(body):
-        var current_cell := flat_cell_for_position(body.global_position)
-        var porch_cell: Vector2i = entry.get("porchCell", current_cell)
-        if abs(current_cell.x - porch_cell.x) <= 1 and abs(current_cell.y - porch_cell.y) <= 1:
-            return false
-    return reason in [
-        "no_route",
-        "no_goal_span",
-        "empty_route",
-        "target_blocked",
-        "blocked_capsule_probe",
-        "path_crosses_static_collision",
-        "blocked_static_collision",
-        "endpoint_not_server_walkable",
-        "no_start_server_walkable",
-        "no_target_server_walkable",
-        "path_endpoint_mismatch"
-    ]
+    var authority: Dictionary = entry.get("routeAuthorityV2", {}) if entry.get("routeAuthorityV2", {}) is Dictionary else {}
+    if String(authority.get("requestId", "")) == "" or String(authority.get("requestId", "")) != String(entry.get("routineRouteV2RequestId", "")):
+        return false
+    var state := String(authority.get("state", ""))
+    if state in ["unreachable_static", "invalid_goal"]:
+        return true
+    return state == "blocked_dynamic" and int(entry.get("forageRouteRepairAttempts", 0)) >= 1
 
 func _route_still_waiting_for_navmesh_tiles(entry: Dictionary) -> bool:
     if int(entry.get("navmeshTileBudgetWaitFrames", 0)) > 0:
@@ -1679,6 +1667,32 @@ func mark_forager_target_unreachable(entry: Dictionary, node: Node3D) -> void:
     if node == null or not is_instance_valid(node):
         return
     node.set_meta(forager_unreachable_meta_key(entry), true)
+
+func defer_forager_target(entry: Dictionary, node: Node3D, seconds := NpcConstantsScript.FORAGE_TARGET_RETRY_COOLDOWN_SECONDS) -> void:
+    if node == null or not is_instance_valid(node):
+        return
+    var object_id := smart_object_id_for_node(node)
+    if object_id == "":
+        return
+    var cooldowns: Dictionary = entry.get("forageTargetCooldowns", {}) if entry.get("forageTargetCooldowns", {}) is Dictionary else {}
+    var duration_frames := ceili(maxf(0.0, float(seconds)) * maxf(float(Engine.physics_ticks_per_second), 1.0))
+    cooldowns[object_id] = Engine.get_physics_frames() + duration_frames
+    entry["forageTargetCooldowns"] = cooldowns
+    clear_cached_resource_target(entry, node)
+
+func forager_target_cooldown_active(entry: Dictionary, node: Node3D) -> bool:
+    var cooldowns: Dictionary = entry.get("forageTargetCooldowns", {}) if entry.get("forageTargetCooldowns", {}) is Dictionary else {}
+    if cooldowns.is_empty():
+        return false
+    var current_frame := Engine.get_physics_frames()
+    for object_id_value in cooldowns.keys().duplicate():
+        if int(cooldowns.get(object_id_value, 0)) <= current_frame:
+            cooldowns.erase(object_id_value)
+    if cooldowns.is_empty():
+        entry.erase("forageTargetCooldowns")
+        return false
+    entry["forageTargetCooldowns"] = cooldowns
+    return cooldowns.has(smart_object_id_for_node(node))
 
 func mark_job_resource_target_unreachable(entry: Dictionary, node: Node3D, job: String) -> void:
     if node == null or not is_instance_valid(node):
@@ -2005,6 +2019,15 @@ func smart_object_action_reach(object_id: String, fallback: float) -> float:
         return float((metadata as Dictionary).get("actionReach", fallback))
     return fallback
 
+func smart_object_reservation_debug(object_id: String, owner_id := "") -> Dictionary:
+    var service = smart_object_service()
+    if service == null or not service.has_method("reservation_debug"):
+        return { "ok": false, "reason": "missing_smart_object_debug", "objectId": object_id }
+    return service.call("reservation_debug", object_id, owner_id)
+
+func smart_object_reservation_debug_for_entry(entry: Dictionary) -> Dictionary:
+    return smart_object_reservation_debug(String(entry.get("jobObjectId", "")), String(entry.get("id", "")))
+
 func resource_approach_slots_for_entry(entry: Dictionary, target_node: Node3D) -> Dictionary:
     if target_node == null or not is_instance_valid(target_node) or pathing == null:
         return {}
@@ -2062,7 +2085,7 @@ func resource_approach_slots_for_entry(entry: Dictionary, target_node: Node3D) -
         }
     return slots
 
-func reserve_job_target(entry: Dictionary, target_node: Node3D, action: String) -> bool:
+func reserve_job_target(entry: Dictionary, target_node: Node3D, action: String, preferred_slot_id := "") -> bool:
     if target_node == null or not is_instance_valid(target_node) or autonomy_system == null:
         return false
     var body := entry.get("body") as Node
@@ -2079,15 +2102,31 @@ func reserve_job_target(entry: Dictionary, target_node: Node3D, action: String) 
         var monitor = performance_monitor()
         if monitor != null:
             monitor.increment_counter("npc_smart_resource_registration_reused")
+    var approach_candidates := forage_approach_candidates(approach_slots)
+    if String(entry.get("job", "")) == "forage" and not approach_candidates.is_empty():
+        if String(entry.get("jobApproachTargetObjectId", "")) != object_id:
+            entry["jobApproachCandidateIndex"] = 0
+        entry["jobApproachCandidates"] = approach_candidates
+        entry["jobApproachTargetObjectId"] = object_id
+        if preferred_slot_id == "":
+            var preferred_index := clampi(int(entry.get("jobApproachCandidateIndex", 0)), 0, approach_candidates.size() - 1)
+            preferred_slot_id = String((approach_candidates[preferred_index] as Dictionary).get("slotId", ""))
     var result = autonomy_system.reserve_smart_object(object_id, target_node, body, String(entry.get("id", "")), action, {
         "actorKind": "npc",
-        "requiresApproach": true
+        "requiresApproach": true,
+        "preferredSlotId": preferred_slot_id,
+        "routeRequestId": "",
+        "routeGeneration": 0,
+        "goalKey": "%s|%s|%s" % [String(entry.get("job", "")), String(entry.get("jobPhase", "")), object_id],
+        "maxReservationAgeSeconds": NpcConstantsScript.FORAGE_RESERVATION_DEADLINE_SECONDS if String(entry.get("job", "")) == "forage" else 0.0
     })
     if result == null or String(result.get("status")) != "succeeded":
         entry["jobFailureReason"] = String(result.get("reason")) if result != null else "missing_smart_object"
         entry["jobObjectId"] = ""
         entry["jobReservationId"] = ""
         entry["jobApproachSlotId"] = ""
+        entry.erase("jobApproachSlotPosition")
+        entry.erase("jobApproachSlotCell")
         clear_cached_resource_target(entry, target_node)
         return false
     var metrics: Dictionary = result.get("metrics")
@@ -2096,8 +2135,82 @@ func reserve_job_target(entry: Dictionary, target_node: Node3D, action: String) 
     entry["jobReservationId"] = String(metrics.get("reservationId", ""))
     entry["jobApproachSlotId"] = String(metrics.get("slotId", ""))
     entry["jobTarget"] = vector_from_summary(metrics.get("approachPosition", []), target_node.global_position)
+    entry["jobApproachSlotPosition"] = entry["jobTarget"]
+    entry["jobApproachSlotCell"] = flat_cell_for_position(entry["jobTarget"])
+    for candidate_index in range(approach_candidates.size()):
+        var candidate: Dictionary = approach_candidates[candidate_index]
+        if String(candidate.get("slotId", "")) == String(entry.get("jobApproachSlotId", "")):
+            entry["jobApproachCandidateIndex"] = candidate_index
+            break
     entry["jobFailureReason"] = ""
+    entry["forageRouteRepairAttempts"] = 0
+    if String(entry.get("job", "")) == "forage":
+        entry["forageReservationStartedPhysicsFrame"] = Engine.get_physics_frames()
+        entry["forageReservationElapsedSeconds"] = 0.0
+    entry.erase("forageReservationRouteBinding")
+    entry.erase("jobReservationRouteRequestId")
+    entry.erase("jobReservationRouteGeneration")
     return true
+
+func forage_approach_candidates(slots: Dictionary) -> Array:
+    var result: Array = []
+    var slot_ids: Array = slots.keys()
+    slot_ids.sort()
+    for slot_id_value in slot_ids:
+        var slot: Dictionary = slots.get(slot_id_value, {})
+        var position = slot.get("position")
+        if not (position is Vector3):
+            continue
+        result.append({
+            "slotId": String(slot.get("slotId", slot_id_value)),
+            "position": position,
+            "cell": flat_cell_for_position(position)
+        })
+    return result
+
+func advance_forage_approach_slot(entry: Dictionary, target_node: Node3D) -> bool:
+    if target_node == null or not is_instance_valid(target_node):
+        return false
+    var candidates: Array = entry.get("jobApproachCandidates", []) if entry.get("jobApproachCandidates", []) is Array else []
+    var next_index := int(entry.get("jobApproachCandidateIndex", -1)) + 1
+    if next_index >= candidates.size():
+        return false
+    release_job_reservation(entry, "forage_slot_route_rejected")
+    while next_index < candidates.size():
+        var candidate: Dictionary = candidates[next_index] if candidates[next_index] is Dictionary else {}
+        entry["jobApproachCandidateIndex"] = next_index
+        var slot_id := String(candidate.get("slotId", ""))
+        if slot_id != "" and reserve_job_target(entry, target_node, "harvest_resource", slot_id):
+            return true
+        next_index += 1
+    return false
+
+func bind_job_reservation_to_route(entry: Dictionary, authority: Dictionary, semantic_kind: String) -> Dictionary:
+    var object_id := String(entry.get("jobObjectId", ""))
+    var reservation_id := String(entry.get("jobReservationId", ""))
+    var actor_id := String(entry.get("id", ""))
+    if object_id == "" or reservation_id == "" or actor_id == "":
+        return { "ok": false, "status": "failed", "reason": "missing_reservation_identity" }
+    if semantic_kind != "forage_target":
+        return { "ok": false, "status": "failed", "reason": "route_not_for_reserved_forage_target" }
+    if autonomy_system == null or not autonomy_system.has_method("heartbeat_smart_object_reservation"):
+        return { "ok": false, "status": "failed", "reason": "missing_reservation_heartbeat" }
+    var request_id := String(authority.get("requestId", ""))
+    var generation := int(authority.get("generation", 0))
+    var result: Dictionary = autonomy_system.heartbeat_smart_object_reservation(object_id, reservation_id, actor_id, {
+        "slotId": String(entry.get("jobApproachSlotId", "")),
+        "routeRequestId": request_id,
+        "routeGeneration": generation,
+        "goalKey": "%s|%s|%s" % [String(entry.get("job", "")), String(entry.get("jobPhase", "")), object_id]
+    })
+    if bool(result.get("ok", false)):
+        entry["jobReservationRouteRequestId"] = request_id
+        entry["jobReservationRouteGeneration"] = generation
+        entry["jobReservationLastHeartbeatPhysicsFrame"] = Engine.get_physics_frames()
+        entry["jobFailureReason"] = ""
+    else:
+        entry["jobFailureReason"] = String(result.get("reason", "reservation_route_bind_failed"))
+    return result
 
 func reserve_station_target(entry: Dictionary, station: Node3D, action: String) -> bool:
     if station == null or not is_instance_valid(station) or autonomy_system == null:
@@ -2183,20 +2296,25 @@ func find_trader_stall(entry: Dictionary) -> Node3D:
     return best
 
 func release_job_reservation(entry: Dictionary, reason := "released") -> void:
-    if autonomy_system == null:
-        return
     var object_id: String = String(entry.get("jobObjectId", ""))
-    if object_id == "":
-        return
-    var target_node := job_target_node(entry)
-    var body := entry.get("body") as Node
-    autonomy_system.release_smart_object(object_id, target_node, body, String(entry.get("id", "")), reason, {
-        "actorKind": "npc",
-        "reservationId": String(entry.get("jobReservationId", ""))
-    })
+    if autonomy_system != null and object_id != "":
+        var target_node := job_target_node(entry)
+        var body := entry.get("body") as Node
+        autonomy_system.release_smart_object(object_id, target_node, body, String(entry.get("id", "")), reason, {
+            "actorKind": "npc",
+            "reservationId": String(entry.get("jobReservationId", ""))
+        })
     entry["jobObjectId"] = ""
     entry["jobReservationId"] = ""
     entry["jobApproachSlotId"] = ""
+    entry.erase("jobApproachSlotPosition")
+    entry.erase("jobApproachSlotCell")
+    entry.erase("jobReservationRouteRequestId")
+    entry.erase("jobReservationRouteGeneration")
+    entry.erase("jobReservationLastHeartbeatPhysicsFrame")
+    entry.erase("forageReservationRouteBinding")
+    entry.erase("forageReservationStartedPhysicsFrame")
+    entry.erase("forageReservationElapsedSeconds")
 
 func job_target_node(entry: Dictionary) -> Node3D:
     var target_value = entry.get("jobTargetNode")
@@ -2245,6 +2363,8 @@ func complete_worker_resource_target(entry: Dictionary) -> bool:
     entry["jobTargetNode"] = null
     entry["jobReservationId"] = ""
     entry["jobApproachSlotId"] = ""
+    entry.erase("forageReservationStartedPhysicsFrame")
+    entry.erase("forageReservationElapsedSeconds")
     entry["jobFailureReason"] = ""
     last_message = "%s gathered %s" % [String(entry.get("name", "NPC")), drop]
     return true

@@ -10,8 +10,13 @@ const CLASS_BLOCKED_DYNAMIC := "blocked_dynamic"
 const CLASS_UNREACHABLE_STATIC := "unreachable_static"
 const CLASS_INVALID_GOAL := "invalid_goal"
 const INVALID_CELL := Vector2i(2147483000, 2147483000)
+const DEFAULT_EXPANSIONS_PER_CALL := 128
+const MAX_RECORDED_BLOCKS := 128
+const MAX_RECORDED_VISITED := 256
 
 var world_adapter = null
+var search_jobs := {}
+var active_search_key_by_actor := {}
 
 
 func setup(adapter) -> void:
@@ -86,17 +91,46 @@ func plan_route(entry: Dictionary, start_cell: Vector2i, candidate_cells: Array,
 			"rejectedGoals": rejected_goals,
 			"cellProof": [start_validation]
 		}, {}, start_position)
-	var queue: Array[Vector2i] = [start_cell]
-	var visited := { start_cell: true }
-	var parent := {}
-	var cell_proofs := { start_cell: start_validation }
-	var blocked_records: Array = []
-	var door_edges: Array = []
-	var expansions := 0
+	var search_key := _search_key(entry, start_cell, accepted_goals, snapshot, allow_outside, moving_home, ignore_dynamic, semantic_kind, avoid_cells)
+	var actor_key := _search_actor_key(entry)
+	_clear_replaced_actor_search(actor_key, search_key)
+	var job: Dictionary = search_jobs.get(search_key, {}) if search_jobs.get(search_key, {}) is Dictionary else {}
+	if job.is_empty():
+		var initial_open := [{
+			"cell": start_cell,
+			"g": 0,
+			"f": _goal_heuristic(start_cell, accepted_goals),
+			"sequence": 0
+		}]
+		job = {
+			"open": initial_open,
+			"closed": {},
+			"gScore": { start_cell: 0 },
+			"parent": {},
+			"cellProofs": { start_cell: start_validation },
+			"blockedRecords": [],
+			"doorEdges": [],
+			"expansions": 0,
+			"sequence": 1
+		}
+		search_jobs[search_key] = job
+		active_search_key_by_actor[actor_key] = search_key
+	var open: Array = job.get("open", []) if job.get("open", []) is Array else []
+	var closed: Dictionary = job.get("closed", {}) if job.get("closed", {}) is Dictionary else {}
+	var g_score: Dictionary = job.get("gScore", {}) if job.get("gScore", {}) is Dictionary else {}
+	var parent: Dictionary = job.get("parent", {}) if job.get("parent", {}) is Dictionary else {}
+	var cell_proofs: Dictionary = job.get("cellProofs", {}) if job.get("cellProofs", {}) is Dictionary else {}
+	var blocked_records: Array = job.get("blockedRecords", []) if job.get("blockedRecords", []) is Array else []
+	var door_edges: Array = job.get("doorEdges", []) if job.get("doorEdges", []) is Array else []
+	var expansions := int(job.get("expansions", 0))
+	var sequence := int(job.get("sequence", 1))
+	var expansions_this_call := 0
+	var expansions_per_call := maxi(1, int(options.get("expansionsPerCall", DEFAULT_EXPANSIONS_PER_CALL)))
 	var found := INVALID_CELL
-	while not queue.is_empty():
+	while not open.is_empty():
 		if expansions >= max_expansions:
-			return _result(false, CLASS_PENDING_BUDGET, "expansion_budget_exhausted", [], _cell_array(visited.keys()), {
+			_update_search_job(job, open, closed, g_score, parent, cell_proofs, blocked_records, door_edges, expansions, sequence)
+			return _result(false, CLASS_PENDING_BUDGET, "expansion_budget_exhausted", [], _limited_cell_array(closed.keys(), MAX_RECORDED_VISITED), {
 				"collisionBacked": true,
 				"generatedWorldInformed": true,
 				"snapshotRevision": String(snapshot.get("revision", "")),
@@ -105,42 +139,74 @@ func plan_route(entry: Dictionary, start_cell: Vector2i, candidate_cells: Array,
 				"blocked": blocked_records,
 				"doorEdges": door_edges,
 				"maxExpansions": max_expansions,
+				"expansions": expansions,
+				"visitedCount": closed.size(),
 				"avoidCells": avoid_cells
 			})
-		var current: Vector2i = queue.pop_front()
+		if expansions_this_call >= expansions_per_call:
+			_update_search_job(job, open, closed, g_score, parent, cell_proofs, blocked_records, door_edges, expansions, sequence)
+			return _result(false, CLASS_PENDING_BUDGET, "search_budget_deferred", [], _limited_cell_array(closed.keys(), MAX_RECORDED_VISITED), {
+				"collisionBacked": true,
+				"generatedWorldInformed": true,
+				"snapshotRevision": String(snapshot.get("revision", "")),
+				"acceptedGoals": _cell_array(accepted_goals.keys()),
+				"rejectedGoals": rejected_goals,
+				"blocked": blocked_records,
+				"doorEdges": door_edges,
+				"maxExpansions": max_expansions,
+				"expansions": expansions,
+				"expansionsThisCall": expansions_this_call,
+				"visitedCount": closed.size(),
+				"avoidCells": avoid_cells
+			})
+		var current_record: Dictionary = _open_heap_pop(open)
+		var current: Vector2i = current_record.get("cell", INVALID_CELL)
+		if current == INVALID_CELL or closed.has(current):
+			continue
+		closed[current] = true
+		if accepted_goals.has(current):
+			found = current
+			break
 		expansions += 1
+		expansions_this_call += 1
 		for neighbor in _neighbors(current):
-			if visited.has(neighbor):
+			if closed.has(neighbor):
 				continue
 			if _route_avoid_blocks_cell(avoid_lookup, neighbor, start_cell, accepted_goals):
-				blocked_records.append(_avoid_block_record(current, neighbor))
+				_append_bounded(blocked_records, _avoid_block_record(current, neighbor), MAX_RECORDED_BLOCKS)
 				continue
 			var cell_validation := validate_route_cell(entry, snapshot, neighbor, target_lookup, allow_outside, moving_home, ignore_dynamic, false)
 			if not bool(cell_validation.get("ok", false)):
-				blocked_records.append(cell_validation)
+				_append_bounded(blocked_records, cell_validation, MAX_RECORDED_BLOCKS)
 				continue
 			var transition := validate_transition(entry, snapshot, current, neighbor, target_lookup, ignore_dynamic)
 			if not bool(transition.get("ok", false)):
-				blocked_records.append(transition)
+				_append_bounded(blocked_records, transition, MAX_RECORDED_BLOCKS)
 				continue
-			visited[neighbor] = true
+			var tentative_g := int(current_record.get("g", 0)) + 1
+			if g_score.has(neighbor) and tentative_g >= int(g_score.get(neighbor, 2147483000)):
+				continue
+			g_score[neighbor] = tentative_g
 			parent[neighbor] = current
 			cell_proofs[neighbor] = cell_validation
 			if bool(transition.get("doorEdge", false)):
-				door_edges.append(transition)
-			if accepted_goals.has(neighbor):
-				found = neighbor
-				queue.clear()
-				break
-			queue.append(neighbor)
+				_append_bounded(door_edges, transition, MAX_RECORDED_BLOCKS)
+			_open_heap_push(open, {
+				"cell": neighbor,
+				"g": tentative_g,
+				"f": tentative_g + _goal_heuristic(neighbor, accepted_goals),
+				"sequence": sequence
+			})
+			sequence += 1
 	if found != INVALID_CELL:
+		_clear_search_job(actor_key, search_key)
 		var route := _reconstruct_route(parent, start_cell, found)
 		var route_door_edges := _door_edges_for_route(entry, snapshot, route, target_lookup, ignore_dynamic)
 		var route_actions := _door_actions_for_edges(route_door_edges)
 		var route_proofs: Array = []
 		for cell in route:
 			route_proofs.append(cell_proofs.get(cell, { "cell": cell, "ok": true }))
-		return _result(true, CLASS_REACHABLE, "route_found", route, _cell_array(visited.keys()), {
+		return _result(true, CLASS_REACHABLE, "route_found", route, _limited_cell_array(closed.keys(), MAX_RECORDED_VISITED), {
 			"collisionBacked": true,
 			"generatedWorldInformed": true,
 			"snapshotRevision": String(snapshot.get("revision", "")),
@@ -151,8 +217,10 @@ func plan_route(entry: Dictionary, start_cell: Vector2i, candidate_cells: Array,
 			"exploredDoorEdges": door_edges,
 			"cellProof": route_proofs,
 			"expansions": expansions,
+			"visitedCount": closed.size(),
 			"avoidCells": avoid_cells
 		}, route_actions, start_position)
+	_clear_search_job(actor_key, search_key)
 	var terminal_class := CLASS_UNREACHABLE_STATIC
 	var terminal_reason := "no_static_route"
 	for blocked in blocked_records:
@@ -160,7 +228,7 @@ func plan_route(entry: Dictionary, start_cell: Vector2i, candidate_cells: Array,
 			terminal_class = CLASS_BLOCKED_DYNAMIC
 			terminal_reason = "dynamic_blocker_prevents_route"
 			break
-	return _result(false, terminal_class, terminal_reason, [], _cell_array(visited.keys()), {
+	return _result(false, terminal_class, terminal_reason, [], _limited_cell_array(closed.keys(), MAX_RECORDED_VISITED), {
 		"collisionBacked": true,
 		"generatedWorldInformed": true,
 		"snapshotRevision": String(snapshot.get("revision", "")),
@@ -169,6 +237,7 @@ func plan_route(entry: Dictionary, start_cell: Vector2i, candidate_cells: Array,
 		"blocked": blocked_records,
 		"doorEdges": door_edges,
 		"expansions": expansions,
+		"visitedCount": closed.size(),
 		"avoidCells": avoid_cells
 	})
 
@@ -195,12 +264,15 @@ func candidate_poses_for_target(entry: Dictionary, target: Dictionary, semantic_
 		if bool(validation.get("ok", false)):
 			validation = validate_semantic_goal_cell(entry, cell, semantic_kind, snapshot)
 		if bool(validation.get("ok", false)):
-			accepted.append({
+			var candidate := {
 				"cell": cell,
 				"position": _cell_position(cell),
 				"semanticKind": semantic_kind,
 				"proof": validation
-			})
+			}
+			if target.get("interactionClaim", {}) is Dictionary:
+				candidate["interactionClaim"] = (target.get("interactionClaim", {}) as Dictionary).duplicate(true)
+			accepted.append(candidate)
 		else:
 			rejected.append(validation)
 	return {
@@ -488,7 +560,9 @@ func _target_candidate_cells(entry: Dictionary, target: Dictionary, semantic_kin
 		_append_position_approaches(result, entry, target.get("position", Vector3.ZERO), allow_outside)
 	elif semantic_kind == "forage_search_anchor":
 		_append_cell(result, target.get("cell", INVALID_CELL))
-	elif semantic_kind == "forage_target" or semantic_kind == "interaction_target":
+	elif semantic_kind == "forage_target":
+		_append_cell(result, target.get("exactSlotCell", target.get("cell", INVALID_CELL)))
+	elif semantic_kind == "interaction_target":
 		_append_cell(result, target.get("cell", INVALID_CELL))
 		_append_position_approaches(result, entry, target.get("position", Vector3.ZERO), allow_outside)
 	elif semantic_kind == "guard_post":
@@ -720,6 +794,142 @@ func _cell_array(values: Array) -> Array:
 		if value is Vector2i:
 			result.append(value)
 	return result
+
+
+func _limited_cell_array(values: Array, limit: int) -> Array:
+	var result: Array = []
+	for value in values:
+		if value is Vector2i:
+			result.append(value)
+			if result.size() >= limit:
+				break
+	return result
+
+
+func _search_actor_key(entry: Dictionary) -> String:
+	var actor_id := String(entry.get("id", entry.get("actorId", "")))
+	if actor_id != "":
+		return actor_id
+	var body = entry.get("body")
+	if body is Object and is_instance_valid(body):
+		return "instance:%d" % (body as Object).get_instance_id()
+	return "entry:%d" % entry.hash()
+
+
+func _search_key(entry: Dictionary, start_cell: Vector2i, accepted_goals: Dictionary, snapshot: Dictionary, allow_outside: bool, moving_home: bool, ignore_dynamic: bool, semantic_kind: String, avoid_cells: Array) -> String:
+	var goal_keys: Array[String] = []
+	for cell in accepted_goals.keys():
+		if cell is Vector2i:
+			goal_keys.append("%d,%d" % [cell.x, cell.y])
+	goal_keys.sort()
+	var avoid_keys: Array[String] = []
+	for cell in avoid_cells:
+		if cell is Vector2i:
+			avoid_keys.append("%d,%d" % [cell.x, cell.y])
+	avoid_keys.sort()
+	return "%s|%d,%d|%s|%s|%s|%s|%s|%s" % [
+		_search_actor_key(entry),
+		start_cell.x,
+		start_cell.y,
+		_search_snapshot_revision(snapshot),
+		semantic_kind,
+		"1" if allow_outside else "0",
+		"1" if moving_home else "0",
+		"1" if ignore_dynamic else "0",
+		"%s|%s" % [",".join(goal_keys), ",".join(avoid_keys)]
+	]
+
+
+func _search_snapshot_revision(snapshot: Dictionary) -> String:
+	if snapshot.has("staticSnapshotRevision"):
+		return "%s:%s:%s" % [
+			str(snapshot.get("staticSnapshotRevision", 0)),
+			str(snapshot.get("semanticRevision", 0)),
+			str(snapshot.get("doorStateRevision", 0))
+		]
+	return String(snapshot.get("revision", ""))
+
+
+func _clear_replaced_actor_search(actor_key: String, search_key: String) -> void:
+	var previous := String(active_search_key_by_actor.get(actor_key, ""))
+	if previous != "" and previous != search_key:
+		search_jobs.erase(previous)
+	active_search_key_by_actor[actor_key] = search_key
+
+
+func _clear_search_job(actor_key: String, search_key: String) -> void:
+	search_jobs.erase(search_key)
+	if String(active_search_key_by_actor.get(actor_key, "")) == search_key:
+		active_search_key_by_actor.erase(actor_key)
+
+
+func _update_search_job(job: Dictionary, open: Array, closed: Dictionary, g_score: Dictionary, parent: Dictionary, cell_proofs: Dictionary, blocked_records: Array, door_edges: Array, expansions: int, sequence: int) -> void:
+	job["open"] = open
+	job["closed"] = closed
+	job["gScore"] = g_score
+	job["parent"] = parent
+	job["cellProofs"] = cell_proofs
+	job["blockedRecords"] = blocked_records
+	job["doorEdges"] = door_edges
+	job["expansions"] = expansions
+	job["sequence"] = sequence
+
+
+func _goal_heuristic(cell: Vector2i, accepted_goals: Dictionary) -> int:
+	var best := 2147483000
+	for goal in accepted_goals.keys():
+		if goal is Vector2i:
+			best = mini(best, absi(cell.x - goal.x) + absi(cell.y - goal.y))
+	return 0 if best == 2147483000 else best
+
+
+func _open_heap_push(heap: Array, value: Dictionary) -> void:
+	heap.append(value)
+	var index := heap.size() - 1
+	while index > 0:
+		var parent_index := (index - 1) / 2
+		if not _open_heap_less(value, heap[parent_index]):
+			break
+		heap[index] = heap[parent_index]
+		index = parent_index
+	heap[index] = value
+
+
+func _open_heap_pop(heap: Array) -> Dictionary:
+	if heap.is_empty():
+		return {}
+	var result: Dictionary = heap[0]
+	var tail = heap.pop_back()
+	if heap.is_empty():
+		return result
+	var index := 0
+	while true:
+		var left := index * 2 + 1
+		if left >= heap.size():
+			break
+		var right := left + 1
+		var child := left
+		if right < heap.size() and _open_heap_less(heap[right], heap[left]):
+			child = right
+		if not _open_heap_less(heap[child], tail):
+			break
+		heap[index] = heap[child]
+		index = child
+	heap[index] = tail
+	return result
+
+
+func _open_heap_less(a: Dictionary, b: Dictionary) -> bool:
+	var a_f := int(a.get("f", 2147483000))
+	var b_f := int(b.get("f", 2147483000))
+	if a_f != b_f:
+		return a_f < b_f
+	return int(a.get("sequence", 0)) < int(b.get("sequence", 0))
+
+
+func _append_bounded(values: Array, value, limit: int) -> void:
+	if values.size() < limit:
+		values.append(value)
 
 
 func _door_at(snapshot: Dictionary, cell: Vector2i):

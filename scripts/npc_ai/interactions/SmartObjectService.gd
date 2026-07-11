@@ -35,6 +35,7 @@ var index_by_region := {}
 var index_by_town := {}
 var index_by_layer := {}
 var query_cache := {}
+var last_release_by_object := {}
 
 func setup(owner_node: Node, door_portal_service) -> void:
 	owner = owner_node
@@ -53,6 +54,7 @@ func clear() -> void:
 	index_by_town.clear()
 	index_by_layer.clear()
 	query_cache.clear()
+	last_release_by_object.clear()
 	revision_counter = 0
 	if door_portals != null:
 		door_portals.clear()
@@ -90,7 +92,9 @@ func register_object(object_id: String, kind: String, node: Node = null, metadat
 		existing.kind = kind
 		existing.node = node
 		existing.metadata = merged
-		existing.slots = merged.get("slots", {}).duplicate(true) if merged.get("slots", {}) is Dictionary else {}
+		var incoming_slots: Dictionary = merged.get("slots", {}).duplicate(true) if merged.get("slots", {}) is Dictionary else {}
+		existing.slots = reconcile_registered_slots(existing, incoming_slots)
+		existing.metadata["slots"] = existing.slots.duplicate(true)
 		existing.depleted = bool(merged.get("depleted", existing.depleted))
 		existing.revision += 1
 	else:
@@ -214,21 +218,29 @@ func reserve_interaction(request):
 	if not bool(access.get("ok", false)):
 		return _result(NpcEnumsScript.INTERACTION_STATUS_FAILED, StringName(String(access.get("reason", "access_denied"))), access)
 	var owner_id := _actor_id(request)
+	expire_deadline_reservations(registration)
 	var existing := reservation_for_owner(registration, owner_id)
 	if not existing.is_empty():
 		return _result(NpcEnumsScript.INTERACTION_STATUS_SUCCEEDED, &"already_reserved", reservation_metrics(registration, existing, false))
 	var metadata := request_metadata(request)
 	var action_kind := String(metadata.get("action", registration.metadata.get("action", String(request_value(request, "command", "")))))
-	var slot := first_available_slot(registration, owner_id, action_kind)
+	var preferred_slot_id := String(metadata.get("preferredSlotId", ""))
+	var slot := first_available_slot(registration, owner_id, action_kind, preferred_slot_id)
 	if slot.is_empty():
 		return _result(NpcEnumsScript.INTERACTION_STATUS_FAILED, &"capacity_busy", {
 			"objectId": registration.object_id,
 			"kind": registration.kind,
 			"capacity": int(registration.metadata.get("capacity", 1)),
-			"owners": reservation_owners(registration)
+			"owners": reservation_owners(registration),
+			"ownerReservations": reservation_debug_rows(registration),
+			"preferredSlotId": preferred_slot_id
 		})
 	var slot_id := String(slot.get("slotId", "slot:0"))
 	var reservation_id := "%s:%s:%s:%d" % [registration.object_id, slot_id, owner_id, registration.revision]
+	var current_frame := Engine.get_physics_frames()
+	var max_age_seconds := maxf(0.0, float(metadata.get("maxReservationAgeSeconds", 0.0)))
+	var max_age_frames := ceili(max_age_seconds * maxf(float(Engine.physics_ticks_per_second), 1.0))
+	var slot_position: Vector3 = slot.get("position", object_position(registration))
 	var reservation := {
 		"reservationId": reservation_id,
 		"slotId": slot_id,
@@ -237,6 +249,15 @@ func reserve_interaction(request):
 		"action": action_kind,
 		"requestId": String(request_value(request, "request_id", "")),
 		"generation": int(request_value(request, "generation", 0)),
+		"routeRequestId": String(metadata.get("routeRequestId", "")),
+		"routeGeneration": int(metadata.get("routeGeneration", 0)),
+		"goalKey": String(metadata.get("goalKey", "")),
+		"createdPhysicsFrame": current_frame,
+		"updatedPhysicsFrame": current_frame,
+		"lastHeartbeatPhysicsFrame": current_frame,
+		"maxAgeFrames": max_age_frames,
+		"deadlinePhysicsFrame": current_frame + max_age_frames if max_age_frames > 0 else -1,
+		"reservedSlotPosition": slot_position,
 		"state": "reserved"
 	}
 	registration.reservations[reservation_id] = reservation
@@ -256,11 +277,62 @@ func release_interaction(request):
 		return _result(NpcEnumsScript.INTERACTION_STATUS_SUCCEEDED, &"release_target_gone")
 	var reservation_id := String(request_metadata(request).get("reservationId", ""))
 	var owner_id := _actor_id(request)
-	var released := release_reservation(registration, reservation_id, owner_id, String(request_value(request, "command", "")))
+	var release_reason := String(request_metadata(request).get("reason", request_value(request, "command", "released")))
+	var released := release_reservation(registration, reservation_id, owner_id, release_reason)
 	return _result(NpcEnumsScript.INTERACTION_STATUS_SUCCEEDED, &"released" if released > 0 else &"nothing_to_release", {
 		"objectId": registration.object_id,
 		"released": released
 	})
+
+func heartbeat_reservation(object_id: String, reservation_id: String, owner_id: String, route_metadata := {}) -> Dictionary:
+	if object_id == "" or not registrations.has(object_id):
+		return { "ok": false, "status": "failed", "reason": "missing_registration", "objectId": object_id }
+	var registration = registrations[object_id]
+	if reservation_id == "" or not registration.reservations.has(reservation_id):
+		return { "ok": false, "status": "failed", "reason": "missing_reservation", "objectId": object_id, "reservationId": reservation_id }
+	var reservation: Dictionary = registration.reservations[reservation_id]
+	var current_frame := Engine.get_physics_frames()
+	if reservation_deadline_expired(reservation, current_frame):
+		var expired_metrics := reservation_metrics(registration, reservation, false)
+		release_reservation(registration, reservation_id, owner_id, "reservation_deadline")
+		_count("reservation_deadlines_expired")
+		return {
+			"ok": false,
+			"status": "failed",
+			"reason": "reservation_deadline",
+			"objectId": object_id,
+			"reservationId": reservation_id,
+			"metrics": expired_metrics
+		}
+	if owner_id == "" or String(reservation.get("ownerId", "")) != owner_id:
+		return { "ok": false, "status": "failed", "reason": "reservation_owner_mismatch", "objectId": object_id, "reservationId": reservation_id }
+	var expected_slot_id := String(route_metadata.get("slotId", ""))
+	if expected_slot_id != "" and String(reservation.get("slotId", "")) != expected_slot_id:
+		return { "ok": false, "status": "failed", "reason": "reservation_slot_mismatch", "objectId": object_id, "reservationId": reservation_id }
+	var incoming_generation := int(route_metadata.get("routeGeneration", 0))
+	var current_generation := int(reservation.get("routeGeneration", 0))
+	var incoming_request_id := String(route_metadata.get("routeRequestId", ""))
+	var current_request_id := String(reservation.get("routeRequestId", ""))
+	if incoming_generation <= 0 or incoming_request_id == "":
+		return { "ok": false, "status": "failed", "reason": "missing_route_identity", "objectId": object_id, "reservationId": reservation_id }
+	if current_generation > 0 and incoming_generation < current_generation:
+		return { "ok": false, "status": "failed", "reason": "stale_route_generation", "objectId": object_id, "reservationId": reservation_id, "routeGeneration": current_generation }
+	if current_generation == incoming_generation and current_request_id != "" and current_request_id != incoming_request_id:
+		return { "ok": false, "status": "failed", "reason": "route_request_generation_conflict", "objectId": object_id, "reservationId": reservation_id, "routeRequestId": current_request_id, "routeGeneration": current_generation }
+	reservation["routeRequestId"] = incoming_request_id
+	reservation["routeGeneration"] = incoming_generation
+	reservation["goalKey"] = String(route_metadata.get("goalKey", reservation.get("goalKey", "")))
+	reservation["updatedPhysicsFrame"] = current_frame
+	reservation["lastHeartbeatPhysicsFrame"] = current_frame
+	reservation["state"] = "route_bound"
+	registration.reservations[reservation_id] = reservation
+	_count("reservation_heartbeats")
+	return {
+		"ok": true,
+		"status": "succeeded",
+		"reason": "heartbeat",
+		"metrics": reservation_metrics(registration, reservation, false)
+	}
 
 func complete_interaction(request):
 	var registration = registration_for_request(request)
@@ -356,9 +428,15 @@ func object_available(object_id: String, actor_id := "") -> Dictionary:
 		return { "ok": false, "reason": "target_gone" }
 	if registration.depleted:
 		return { "ok": false, "reason": "resource_depleted" }
+	expire_deadline_reservations(registration)
 	if not first_available_slot(registration, actor_id, "").is_empty():
 		return { "ok": true, "reason": "available" }
-	return { "ok": false, "reason": "capacity_busy", "owners": reservation_owners(registration) }
+	return {
+		"ok": false,
+		"reason": "capacity_busy",
+		"owners": reservation_owners(registration),
+		"ownerReservations": reservation_debug_rows(registration)
+	}
 
 func query_resource_nodes(entry: Dictionary, kinds: Array, options := {}) -> Array[Node3D]:
 	var option_map: Dictionary = options if options is Dictionary else {}
@@ -648,7 +726,7 @@ func registration_for_request(request):
 			return registrations[object_id]
 	return null
 
-func first_available_slot(registration, owner_id: String, _action_kind: String) -> Dictionary:
+func first_available_slot(registration, owner_id: String, _action_kind: String, preferred_slot_id := "") -> Dictionary:
 	var slots: Dictionary = registration.slots
 	var keys: Array = slots.keys()
 	keys.sort()
@@ -660,6 +738,13 @@ func first_available_slot(registration, owner_id: String, _action_kind: String) 
 	var object_capacity := int(registration.metadata.get("capacity", 1))
 	if registration.reservations.size() >= object_capacity:
 		return {}
+	if preferred_slot_id != "":
+		if not slots.has(preferred_slot_id):
+			return {}
+		var preferred: Dictionary = slots[preferred_slot_id]
+		var preferred_capacity := int(preferred.get("capacity", registration.metadata.get("capacity", 1)))
+		var preferred_occupants: Array = preferred.get("occupants", [])
+		return preferred if preferred_occupants.size() < preferred_capacity else {}
 	for key in keys:
 		var slot: Dictionary = slots[key]
 		var capacity := int(slot.get("capacity", registration.metadata.get("capacity", 1)))
@@ -667,6 +752,30 @@ func first_available_slot(registration, owner_id: String, _action_kind: String) 
 		if occupants.size() < capacity:
 			return slot
 	return {}
+
+func reconcile_registered_slots(registration, incoming_slots: Dictionary) -> Dictionary:
+	var reconciled := incoming_slots.duplicate(true)
+	for reservation_value in registration.reservations.values():
+		var reservation: Dictionary = reservation_value
+		var slot_id := String(reservation.get("slotId", ""))
+		if slot_id == "":
+			continue
+		var previous_slot: Dictionary = registration.slots.get(slot_id, {}).duplicate(true)
+		var live_slot: Dictionary = reconciled.get(slot_id, previous_slot).duplicate(true)
+		var reserved_position = reservation.get("reservedSlotPosition", previous_slot.get("position", live_slot.get("position", Vector3.ZERO)))
+		if reserved_position is Vector3:
+			live_slot["position"] = reserved_position
+		if previous_slot.has("facing"):
+			live_slot["facing"] = previous_slot.get("facing")
+		live_slot["slotId"] = slot_id
+		live_slot["capacity"] = maxi(1, int(live_slot.get("capacity", previous_slot.get("capacity", 1))))
+		var occupants: Array = live_slot.get("occupants", []).duplicate()
+		var owner_id := String(reservation.get("ownerId", ""))
+		if owner_id != "" and not occupants.has(owner_id):
+			occupants.append(owner_id)
+		live_slot["occupants"] = occupants
+		reconciled[slot_id] = live_slot
+	return reconciled
 
 func reservation_for_owner(registration, owner_id: String) -> Dictionary:
 	if owner_id == "":
@@ -676,6 +785,22 @@ func reservation_for_owner(registration, owner_id: String) -> Dictionary:
 		if String(reservation.get("ownerId", "")) == owner_id:
 			return reservation
 	return {}
+
+func reservation_deadline_expired(reservation: Dictionary, current_frame: int) -> bool:
+	var deadline_frame := int(reservation.get("deadlinePhysicsFrame", -1))
+	return deadline_frame > 0 and current_frame >= deadline_frame
+
+func expire_deadline_reservations(registration, current_frame := -1) -> int:
+	var frame := current_frame if current_frame >= 0 else Engine.get_physics_frames()
+	var released := 0
+	for reservation_id_value in registration.reservations.keys().duplicate():
+		var reservation: Dictionary = registration.reservations.get(reservation_id_value, {})
+		if not reservation_deadline_expired(reservation, frame):
+			continue
+		released += release_reservation(registration, String(reservation_id_value), String(reservation.get("ownerId", "")), "reservation_deadline")
+	if released > 0:
+		counters["reservation_deadlines_expired"] = int(counters.get("reservation_deadlines_expired", 0)) + released
+	return released
 
 func reservation_for_request(registration, request) -> Dictionary:
 	var reservation_id := String(request_metadata(request).get("reservationId", ""))
@@ -693,6 +818,11 @@ func release_reservation(registration, reservation_id: String, owner_id: String,
 		if reservation_id == "" and owner_id != "" and String(reservation.get("ownerId", "")) != owner_id:
 			continue
 		var slot_id := String(reservation.get("slotId", ""))
+		var release_frame := Engine.get_physics_frames()
+		var release_debug := reservation_debug_row(registration, reservation, release_frame)
+		release_debug["releaseReason"] = reason
+		release_debug["releasedPhysicsFrame"] = release_frame
+		last_release_by_object[registration.object_id] = release_debug
 		registration.reservations.erase(key)
 		var slot: Dictionary = registration.slots.get(slot_id, {}).duplicate(true)
 		var occupants: Array = slot.get("occupants", [])
@@ -820,6 +950,10 @@ func effect_metrics(registration, request, reservation: Dictionary, action_kind:
 func reservation_metrics(registration, reservation: Dictionary, effect_applied: bool) -> Dictionary:
 	var slot := slot_for_reservation(registration, reservation)
 	var position: Vector3 = slot.get("position", object_position(registration)) if not slot.is_empty() else object_position(registration)
+	var current_frame := Engine.get_physics_frames()
+	var created_frame := int(reservation.get("createdPhysicsFrame", current_frame))
+	var heartbeat_frame := int(reservation.get("lastHeartbeatPhysicsFrame", created_frame))
+	var reserved_position: Vector3 = reservation.get("reservedSlotPosition", position) if reservation.get("reservedSlotPosition", position) is Vector3 else position
 	return {
 		"objectId": registration.object_id,
 		"kind": registration.kind,
@@ -827,9 +961,64 @@ func reservation_metrics(registration, reservation: Dictionary, effect_applied: 
 		"slotId": String(slot.get("slotId", reservation.get("slotId", ""))),
 		"ownerId": String(reservation.get("ownerId", "")),
 		"approachPosition": _vector_summary(position),
+		"reservedApproachPosition": _vector_summary(reserved_position),
+		"slotGeometryChanged": not reserved_position.is_equal_approx(position),
+		"createdPhysicsFrame": created_frame,
+		"updatedPhysicsFrame": int(reservation.get("updatedPhysicsFrame", created_frame)),
+		"lastHeartbeatPhysicsFrame": heartbeat_frame,
+		"ageFrames": maxi(0, current_frame - created_frame),
+		"heartbeatAgeFrames": maxi(0, current_frame - heartbeat_frame),
+		"maxAgeFrames": int(reservation.get("maxAgeFrames", 0)),
+		"deadlinePhysicsFrame": int(reservation.get("deadlinePhysicsFrame", -1)),
+		"routeRequestId": String(reservation.get("routeRequestId", "")),
+		"routeGeneration": int(reservation.get("routeGeneration", 0)),
+		"goalKey": String(reservation.get("goalKey", "")),
 		"effectApplied": effect_applied,
 		"depleted": registration.depleted
 	}
+
+func reservation_debug(object_id: String, owner_id := "") -> Dictionary:
+	if object_id == "" or not registrations.has(object_id):
+		return {
+			"ok": false,
+			"reason": "missing_registration",
+			"objectId": object_id,
+			"lastRelease": last_release_by_object.get(object_id, {}).duplicate(true)
+		}
+	var registration = registrations[object_id]
+	var rows := reservation_debug_rows(registration, owner_id)
+	return {
+		"ok": true,
+		"objectId": object_id,
+		"kind": String(registration.kind),
+		"depleted": bool(registration.depleted),
+		"registrationRevision": int(registration.revision),
+		"capacity": int(registration.metadata.get("capacity", 1)),
+		"reservations": rows,
+		"lastRelease": last_release_by_object.get(object_id, {}).duplicate(true)
+	}
+
+func reservation_debug_rows(registration, owner_id := "") -> Array:
+	var rows: Array = []
+	var current_frame := Engine.get_physics_frames()
+	for reservation_value in registration.reservations.values():
+		var reservation: Dictionary = reservation_value
+		if owner_id != "" and String(reservation.get("ownerId", "")) != owner_id:
+			continue
+		rows.append(reservation_debug_row(registration, reservation, current_frame))
+	rows.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+		return String(a.get("reservationId", "")) < String(b.get("reservationId", ""))
+	)
+	return rows
+
+func reservation_debug_row(registration, reservation: Dictionary, current_frame: int) -> Dictionary:
+	var metrics := reservation_metrics(registration, reservation, false)
+	metrics["state"] = String(reservation.get("state", ""))
+	metrics["action"] = String(reservation.get("action", ""))
+	metrics["requestId"] = String(reservation.get("requestId", ""))
+	metrics["actorKind"] = String(reservation.get("actorKind", ""))
+	metrics["debugPhysicsFrame"] = current_frame
+	return metrics
 
 func make_default_slots(node: Node, kind: String, metadata: Dictionary) -> Dictionary:
 	var base := object_position_from_node_or_metadata(node, metadata)
@@ -1199,11 +1388,18 @@ func _record(action: String, object_id: String, kind: String, metadata := {}) ->
 
 func stats() -> Dictionary:
 	var reservation_count := 0
+	var oldest_reservation_age_frames := 0
+	var current_frame := Engine.get_physics_frames()
 	for registration in registrations.values():
 		reservation_count += registration.reservations.size()
+		for reservation_value in registration.reservations.values():
+			var reservation: Dictionary = reservation_value
+			oldest_reservation_age_frames = maxi(oldest_reservation_age_frames, current_frame - int(reservation.get("createdPhysicsFrame", current_frame)))
 	return {
 		"registrations": registrations.size(),
 		"reservations": reservation_count,
+		"oldestReservationAgeFrames": oldest_reservation_age_frames,
+		"trackedReleaseObjects": last_release_by_object.size(),
 		"doorPortals": door_portals.stats() if door_portals != null else {},
 		"completedEffects": completed_effects.size(),
 		"counters": counters.duplicate(true)

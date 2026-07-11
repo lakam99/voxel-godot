@@ -622,6 +622,11 @@ func reserve_smart_object(object_id: String, object_node: Node, actor: Node, act
 	request.metadata["action"] = action
 	return smart_objects.request_interaction(request)
 
+func heartbeat_smart_object_reservation(object_id: String, reservation_id: String, actor_id: String, route_metadata := {}) -> Dictionary:
+	if smart_objects == null or not smart_objects.has_method("heartbeat_reservation"):
+		return { "ok": false, "status": "failed", "reason": "missing_smart_object_service" }
+	return smart_objects.heartbeat_reservation(object_id, reservation_id, actor_id, route_metadata)
+
 func complete_smart_object(object_id: String, object_node: Node, actor: Node, actor_id: String, action: String, metadata := {}):
 	if smart_objects == null:
 		return null
@@ -918,6 +923,9 @@ func stats() -> Dictionary:
 
 func route_authority_v2_debug_for_entry(entry: Dictionary) -> Dictionary:
 	return route_authority_v2.debug_for_entry(entry) if route_authority_v2 != null else {}
+
+func route_authority_v2_telemetry_for_entry(entry: Dictionary) -> Dictionary:
+	return route_authority_v2.telemetry_for_entry(entry) if route_authority_v2 != null else {}
 
 func route_authority_v2_debug_snapshot() -> Dictionary:
 	return route_authority_v2.debug_snapshot() if route_authority_v2 != null else {}

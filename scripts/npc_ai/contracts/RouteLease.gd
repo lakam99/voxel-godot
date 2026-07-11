@@ -18,6 +18,7 @@ var waypoints: Array = []
 var actions := {}
 var probe_certificate := {}
 var route_summary := {}
+var interaction_claim := {}
 
 static func from_route(route: Dictionary, owner_id: String, generation_value: int, state_value: StringName, reason_value: StringName):
 	var lease = load("res://scripts/npc_ai/contracts/RouteLease.gd").new()
@@ -35,6 +36,7 @@ static func from_route(route: Dictionary, owner_id: String, generation_value: in
 	lease.waypoints = (route.get("waypoints", []) as Array).duplicate()
 	lease.actions = (route.get("actions", {}) as Dictionary).duplicate(true)
 	lease.probe_certificate = (route.get("probeCertificate", {}) as Dictionary).duplicate(true) if route.get("probeCertificate", {}) is Dictionary else {}
+	lease.interaction_claim = (route.get("interactionClaim", {}) as Dictionary).duplicate(true) if route.get("interactionClaim", {}) is Dictionary else {}
 	lease.route_summary = {
 		"ok": bool(route.get("ok", false)),
 		"status": String(route.get("status", "")),
@@ -65,6 +67,7 @@ func to_dictionary() -> Dictionary:
 		"waypoints": waypoints.duplicate(),
 		"actions": actions.duplicate(true),
 		"probeCertificate": probe_certificate.duplicate(true),
+		"interactionClaim": interaction_claim.duplicate(true),
 		"route": route_summary.duplicate(true)
 	}
 

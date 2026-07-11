@@ -13,6 +13,7 @@ const MIRA_HOME_TIMEOUT_SECONDS := 36.0
 const MIRA_HOME_SETTLED_FRAMES := 30
 const MIRA_STARTER_WALL_STUCK_FRAMES := 240
 const MORNING_FORAGE_TIMEOUT_SECONDS := 70.0
+const MORNING_FORAGE_SAMPLE_EVERY_FRAMES := 30
 const MORNING_OUTSIDE_TIMEOUT_SECONDS := 60.0
 const MORNING_OUTSIDE_TARGETS := ["rowan", "mira", "niko"]
 const FOLLOWING_MORNING_TIME := 0.04
@@ -1787,11 +1788,14 @@ func observe_morning_npcs_and_foragers(seconds: float) -> void:
     var reservation_id := ""
     var approach_slot_id := ""
     var observed_departures := {}
+    var captured_forage_approach := false
+    var captured_forage_gathering := false
+    var captured_forage_post_release := false
     var frame_count := ceili(seconds * float(Engine.physics_ticks_per_second))
     for frame in range(frame_count):
         await get_tree().physics_frame
-        if frame % SAMPLE_EVERY_FRAMES == 0:
-            var rows := npc_schedule_matrix()
+        if frame % MORNING_FORAGE_SAMPLE_EVERY_FRAMES == 0:
+            var rows := npc_departure_matrix()
             morning_departure_matrix = rows
             for row in rows:
                 var npc_id := String(row.get("id", ""))
@@ -1805,8 +1809,9 @@ func observe_morning_npcs_and_foragers(seconds: float) -> void:
                     departure["leftHome"] = true
                 observed_departures[npc_id] = departure
             var niko := npc_entry("niko")
+            var niko_row := {}
             if not niko.is_empty():
-                var niko_row := niko_forage_row(niko, "morning_%03d" % frame)
+                niko_row = niko_forage_row(niko, "morning_%03d" % frame)
                 niko_timeline.append(niko_row)
                 if selected_object_id == "" and String(niko.get("jobObjectId", "")) != "":
                     selected_object_id = String(niko.get("jobObjectId", ""))
@@ -1814,10 +1819,37 @@ func observe_morning_npcs_and_foragers(seconds: float) -> void:
                     reservation_id = String(niko.get("jobReservationId", ""))
                 if approach_slot_id == "" and String(niko.get("jobApproachSlotId", "")) != "":
                     approach_slot_id = String(niko.get("jobApproachSlotId", ""))
+                var niko_body := niko.get("body") as Node3D
+                var approach_position = niko.get("jobApproachSlotPosition", niko.get("jobTarget", Vector3.INF))
+                if visual_required \
+                and not captured_forage_approach \
+                and niko_body != null \
+                and approach_position is Vector3 \
+                and approach_position != Vector3.INF \
+                and String(niko.get("jobReservationId", "")) != "" \
+                and flat_distance(niko_body.global_position, approach_position) <= CELL * 3.0:
+                    captured_forage_approach = await capture_npc_outside_stage(niko, "niko_forage_reserved_slot_approach")
+                if visual_required and not captured_forage_gathering and String(niko.get("jobPhase", "")) == "gathering":
+                    captured_forage_gathering = await capture_npc_outside_stage(niko, "niko_forage_gathering")
+                if visual_required \
+                and not captured_forage_post_release \
+                and reservation_id != "" \
+                and String(niko.get("jobReservationId", "")) != reservation_id:
+                    captured_forage_post_release = await capture_npc_outside_stage(niko, "niko_forage_post_release")
                 if int(niko.get("jobRuns", 0)) > before_runs:
+                    if visual_required and not captured_forage_post_release:
+                        captured_forage_post_release = await capture_npc_outside_stage(niko, "niko_forage_post_release")
                     break
-            mark_progress("morning_%03d" % frame)
+            var authority: Dictionary = niko_row.get("routeAuthorityV2", {}) if niko_row.get("routeAuthorityV2", {}) is Dictionary else {}
+            mark_progress("morning_%03d_%s_%s_%s_runs%d" % [
+                frame,
+                String(niko_row.get("jobPhase", "none")),
+                String(niko_row.get("routeStatus", "none")),
+                String(authority.get("state", "none")),
+                int(niko_row.get("jobRuns", 0))
+            ])
     var final_niko := npc_entry("niko")
+    mark_progress("morning_forage_summarizing")
     var final_runs := int(final_niko.get("jobRuns", 0))
     var final_hunger := float(final_niko.get("hunger", 0.0))
     var personal_inventory: Dictionary = final_niko.get("personalInventory", {}) if final_niko.get("personalInventory", {}) is Dictionary else {}
@@ -1833,21 +1865,45 @@ func observe_morning_npcs_and_foragers(seconds: float) -> void:
         "hungerBefore": rounded(before_hunger),
         "hungerAfter": rounded(final_hunger),
         "personalInventory": personal_inventory.duplicate(true),
-        "timeline": niko_timeline,
-        "departureObservations": observed_departures
+        "timelineSampleCount": niko_timeline.size(),
+        "firstTimelineSample": niko_timeline[0] if not niko_timeline.is_empty() else {},
+        "lastTimelineSample": niko_timeline[niko_timeline.size() - 1] if not niko_timeline.is_empty() else {},
+        "departureObservations": observed_departures,
+        "visualEvidence": {
+            "reservedSlotApproach": captured_forage_approach,
+            "gathering": captured_forage_gathering,
+            "postRelease": captured_forage_post_release
+        }
     }
     var forage_complete := final_runs > before_runs
     var outside_search_proof := niko_outside_forage_activity_proof(before_niko, final_niko, niko_timeline, observed_departures)
     niko_proof["outsideSearchProof"] = outside_search_proof
     var route_proof := selected_object_id != "" and reservation_id != "" and approach_slot_id != ""
+    var system = main.get("npc_system") if main != null else null
+    var selected_object_debug: Dictionary = system.call("smart_object_reservation_debug", selected_object_id, "niko") if system != null and system.has_method("smart_object_reservation_debug") else {}
+    var selected_release: Dictionary = selected_object_debug.get("lastRelease", {}) if selected_object_debug.get("lastRelease", {}) is Dictionary else {}
+    var selected_active_reservations: Array = selected_object_debug.get("reservations", []) if selected_object_debug.get("reservations", []) is Array else []
+    var bounded_retarget := not forage_complete \
+        and String(selected_release.get("reservationId", "")) == reservation_id \
+        and String(selected_release.get("releaseReason", "")) == "reservation_deadline" \
+        and selected_active_reservations.is_empty() \
+        and String(final_niko.get("jobReservationId", "")) != reservation_id \
+        and String(final_niko.get("jobObjectId", "")) != selected_object_id
+    niko_proof["boundedRetarget"] = {
+        "ok": bounded_retarget,
+        "selectedObjectDebug": selected_object_debug,
+        "finalObjectId": String(final_niko.get("jobObjectId", "")),
+        "finalReservationId": String(final_niko.get("jobReservationId", ""))
+    }
     if forage_complete:
         results.append({ "name": "niko_real_forage_cycle_completed", "passed": true, "details": "object=%s reservation=%s slot=%s runs=%d->%d" % [selected_object_id, reservation_id, approach_slot_id, before_runs, final_runs] })
-    elif bool(outside_search_proof.get("ok", false)):
-        results.append({ "name": "niko_real_forage_search_active", "passed": true, "details": "moved=%.2f outsideSamples=%d activeSamples=%d" % [float(outside_search_proof.get("maxDistanceFromStart", 0.0)), int(outside_search_proof.get("outsideTownSamples", 0)), int(outside_search_proof.get("activeForageSamples", 0))] })
+    elif bounded_retarget:
+        results.append({ "name": "niko_forage_reservation_bounded_retargeted", "passed": true, "details": "object=%s reservation=%s release=%s finalObject=%s" % [selected_object_id, reservation_id, String(selected_release.get("releaseReason", "")), String(final_niko.get("jobObjectId", ""))] })
     elif not route_proof:
         add_failure("niko_forager_route_proof_missing", JSON.stringify(niko_proof))
     else:
         add_failure("niko_forager_cycle_not_completed", JSON.stringify(niko_proof))
+    mark_progress("morning_forage_proof_finished")
 
 func niko_outside_forage_activity_proof(before_niko: Dictionary, final_niko: Dictionary, timeline: Array, observed_departures: Dictionary) -> Dictionary:
     var departure: Dictionary = observed_departures.get("niko", {}) if observed_departures.get("niko", {}) is Dictionary else {}
@@ -1928,7 +1984,18 @@ func niko_recent_route_stuck(timeline: Array) -> bool:
         sample_count += 1
         var route_status := String(row.get("routeStatus", ""))
         var route_reason := String(row.get("routeReason", ""))
-        if route_status in ["pending", "blocked"] and route_reason in ["navmesh_tile_budget", "navmesh_tile_publish_frame_budget", "route_budget", "path_crosses_static_collision", "blocked_static_collision"]:
+        var authority: Dictionary = row.get("routeAuthorityV2", {}) if row.get("routeAuthorityV2", {}) is Dictionary else {}
+        var authority_state := String(authority.get("state", ""))
+        var reservation_debug: Dictionary = row.get("smartObjectReservationDebug", {}) if row.get("smartObjectReservationDebug", {}) is Dictionary else {}
+        var reservations: Array = reservation_debug.get("reservations", []) if reservation_debug.get("reservations", []) is Array else []
+        var corridor: Dictionary = row.get("corridorProgress", {}) if row.get("corridorProgress", {}) is Dictionary else {}
+        var terminal_route_with_reservation := not reservations.is_empty() and (
+            authority_state in ["unreachable_static", "invalid_goal", "cancelled"]
+            or route_status in ["unreachable", "blocked"]
+        )
+        var no_progress_with_reservation := not reservations.is_empty() and int(corridor.get("noProgressTicks", 0)) >= 24
+        var legacy_stale_route := route_status in ["pending", "blocked"] and route_reason in ["navmesh_tile_budget", "navmesh_tile_publish_frame_budget", "route_budget", "path_crosses_static_collision", "blocked_static_collision"]
+        if terminal_route_with_reservation or no_progress_with_reservation or legacy_stale_route:
             stale_route_samples += 1
     return sample_count >= 8 and stale_route_samples >= sample_count / 2 and max_recent_distance < CELL * 0.35
 
@@ -6258,6 +6325,29 @@ func npc_schedule_matrix() -> Array[Dictionary]:
         rows.append(npc_summary(entry))
     return rows
 
+func npc_departure_matrix() -> Array[Dictionary]:
+    var rows: Array[Dictionary] = []
+    var npc_system = main.get("npc_system") if main != null else null
+    if npc_system == null:
+        return rows
+    var entries: Array = npc_system.get("npcs")
+    for entry_value in entries:
+        var entry: Dictionary = entry_value
+        var body := entry.get("body") as Node3D
+        var position := body.global_position if body != null and is_instance_valid(body) else Vector3.ZERO
+        rows.append({
+            "id": String(entry.get("id", "")),
+            "name": String(entry.get("name", "")),
+            "position": vec3(position),
+            "strictInsideHome": bool(strict_home_status(entry).get("strictInside", false)),
+            "job": String(entry.get("job", "")),
+            "jobPhase": String(entry.get("jobPhase", "")),
+            "jobRuns": int(entry.get("jobRuns", 0)),
+            "routeStatus": String(entry.get("routeStatus", "")),
+            "routeReason": String(entry.get("routeReason", ""))
+        })
+    return rows
+
 func npc_summary(entry: Dictionary) -> Dictionary:
     var body := entry.get("body") as Node3D
     var body_valid := body != null and is_instance_valid(body)
@@ -6349,6 +6439,7 @@ func npc_summary(entry: Dictionary) -> Dictionary:
         "routeStatus": String(entry.get("routeStatus", "")),
         "routeReason": String(entry.get("routeReason", "")),
         "routeAuthorityV2": route_authority_v2_debug(entry),
+        "smartObjectReservationDebug": smart_object_reservation_debug(entry),
         "routePriority": int(entry.get("routePriority", 0)),
         "forageRouteFailures": int(entry.get("forageRouteFailures", 0)),
         "foragePendingRouteTime": rounded(float(entry.get("foragePendingRouteTime", 0.0))),
@@ -6477,12 +6568,41 @@ func forager_state_summary() -> Array[Dictionary]:
     return rows
 
 func niko_forage_row(entry: Dictionary, label: String) -> Dictionary:
-    var row := npc_summary(entry)
-    row["label"] = label
-    row["time"] = rounded(elapsed)
-    row["targetNode"] = target_node_summary(entry.get("jobTargetNode"))
-    row["target"] = vec3(entry.get("jobTarget", Vector3.ZERO))
-    return row
+    var body := entry.get("body") as Node3D
+    var position := body.global_position if body != null and is_instance_valid(body) else Vector3.ZERO
+    var path_waypoints: Array = entry.get("pathWaypoints", []) if entry.get("pathWaypoints", []) is Array else []
+    return {
+        "label": label,
+        "time": rounded(elapsed),
+        "id": String(entry.get("id", "")),
+        "position": vec3(position),
+        "strictInsideHome": bool(strict_home_status(entry).get("strictInside", false)),
+        "jobPhase": String(entry.get("jobPhase", "")),
+        "jobObjectId": String(entry.get("jobObjectId", "")),
+        "jobReservationId": String(entry.get("jobReservationId", "")),
+        "jobApproachSlotId": String(entry.get("jobApproachSlotId", "")),
+        "jobRuns": int(entry.get("jobRuns", 0)),
+        "hunger": rounded(float(entry.get("hunger", 0.0))),
+        "targetNode": target_node_summary(entry.get("jobTargetNode")),
+        "target": vec3(entry.get("jobTarget", Vector3.ZERO)),
+        "routeStatus": String(entry.get("routeStatus", "")),
+        "routeReason": String(entry.get("routeReason", "")),
+        "routeAuthorityV2": compact_route_authority_v2_debug(entry),
+        "smartObjectReservationDebug": smart_object_reservation_debug(entry),
+        "lastMoveDistance": rounded(float(entry.get("lastMoveDistance", 0.0))),
+        "pathWaypointCount": path_waypoints.size(),
+        "activeMotionGoal": entry.get("activeMotionGoal", {}),
+        "corridorProgress": entry.get("corridorProgress", {})
+    }
+
+func compact_route_authority_v2_debug(entry: Dictionary) -> Dictionary:
+    var npc_system = main.get("npc_system") if main != null else null
+    if npc_system == null:
+        return {}
+    var autonomy = npc_system.get("autonomy_system")
+    if autonomy != null and autonomy.has_method("route_authority_v2_telemetry_for_entry"):
+        return autonomy.call("route_authority_v2_telemetry_for_entry", entry)
+    return {}
 
 func target_node_summary(node_value) -> Dictionary:
     if node_value == null:
@@ -6505,6 +6625,18 @@ func target_node_summary(node_value) -> Dictionary:
     if node.has_meta("drop"):
         row["drop"] = String(node.get_meta("drop"))
     return row
+
+func smart_object_reservation_debug(entry: Dictionary) -> Dictionary:
+    if main == null:
+        return { "ok": false, "reason": "missing_main" }
+    var system = main.get("npc_system")
+    if system == null or not system.has_method("smart_object_reservation_debug"):
+        return { "ok": false, "reason": "missing_reservation_debug" }
+    return system.call(
+        "smart_object_reservation_debug",
+        String(entry.get("jobObjectId", "")),
+        String(entry.get("id", ""))
+    )
 
 func profile_speed_limit(entry: Dictionary) -> float:
     var limit := 6.4 * 1.15

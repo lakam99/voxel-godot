@@ -12,6 +12,7 @@ const DEFAULT_PLAN_ATTEMPT_BUDGET_PER_FRAME := 4
 const PLANNING_STARVATION_FRAME_LIMIT := 24
 const PROBE_STARVATION_FRAME_LIMIT := 24
 const MAX_PROBE_REPAIR_ATTEMPTS := 3
+const MAX_REQUEST_EVENTS := 64
 const INVALID_CELL := Vector2i(2147483000, 2147483000)
 
 const STATE_NONE := "none"
@@ -221,6 +222,7 @@ func mark_ready(request_id: String, route: Dictionary, proof := {}) -> Dictionar
 	var record: Dictionary = requests_by_id[request_id]
 	var actor_id := String(record.get("actorId", ""))
 	var generation := int(record.get("generation", 0))
+	record.erase("probeRepairAvoidCells")
 	var route_copy := route.duplicate(true)
 	route_copy["probeCertificate"] = certificate.duplicate(true)
 	var lease = RouteLeaseScript.from_route(route_copy, actor_id, generation, NpcEnumsScript.ROUTE_AUTHORITY_READY, NpcEnumsScript.ROUTE_REASON_NONE)
@@ -237,6 +239,9 @@ func commit_route_after_probe(entry: Dictionary, request_id: String, route: Dict
 	if not requests_by_id.has(request_id):
 		return { "ok": false, "reason": "missing_request", "requestId": request_id }
 	var intent_dict: Dictionary = intent if intent is Dictionary else {}
+	var intent_record: Dictionary = requests_by_id[request_id]
+	intent_record["intent"] = intent_dict.duplicate(true)
+	requests_by_id[request_id] = intent_record
 	var route_copy := route.duplicate(true)
 	var route_geometry := _validate_route_geometry(route_copy)
 	if not bool(route_geometry.get("ok", false)):
@@ -251,7 +256,7 @@ func commit_route_after_probe(entry: Dictionary, request_id: String, route: Dict
 		_record_probe_decision(request_id, route_copy, invalid_proof)
 		return report_invalid_goal(request_id, String(route_geometry.get("reason", "invalid_route_geometry")))
 	var repair_attempts := 0
-	var repair_avoid_cells: Array = []
+	var repair_avoid_cells: Array = intent_record.get("probeRepairAvoidCells", []).duplicate() if intent_record.get("probeRepairAvoidCells", []) is Array else []
 	while true:
 		mark_probing(request_id, "collision_probe")
 		var certificate := _probe_ready_route(entry, request_id, route_copy, intent_dict, options)
@@ -270,6 +275,9 @@ func commit_route_after_probe(entry: Dictionary, request_id: String, route: Dict
 		if state == STATE_INVALID_GOAL:
 			return report_invalid_goal(request_id, reason)
 		repair_avoid_cells = _merge_repair_avoid_cells(repair_avoid_cells, _probe_repair_avoid_cells(certificate))
+		var repair_record: Dictionary = requests_by_id[request_id]
+		repair_record["probeRepairAvoidCells"] = repair_avoid_cells.duplicate()
+		requests_by_id[request_id] = repair_record
 		if _should_attempt_probe_repair(certificate, state, options, repair_attempts):
 			var repaired_route := _plan_probe_repair_route(entry, request_id, route_copy, intent_dict, certificate, options, repair_avoid_cells, repair_attempts)
 			if not repaired_route.is_empty() and bool(repaired_route.get("ok", false)):
@@ -345,9 +353,7 @@ func report_execution_event(request_id: String, event_type: String, reason := ""
 		return { "ok": false, "reason": "missing_request", "requestId": request_id }
 	var record: Dictionary = requests_by_id[request_id]
 	var details_dict: Dictionary = details if details is Dictionary else {}
-	var events: Array = record.get("events", []) if record.get("events", []) is Array else []
-	events.append(_event("execution:%s" % event_type, reason, details_dict))
-	record["events"] = events
+	_append_event(record, _event("execution:%s" % event_type, reason, details_dict))
 	record["updatedFrame"] = frame_serial
 	record["lastServicedFrame"] = frame_serial
 	requests_by_id[request_id] = record
@@ -390,6 +396,99 @@ func transition_request(request_id: String, state: String, reason := "") -> Dict
 
 func debug_for_entry(entry: Dictionary) -> Dictionary:
 	return debug_for_actor(actor_id_for_entry(entry))
+
+func telemetry_for_entry(entry: Dictionary) -> Dictionary:
+	return telemetry_for_actor(actor_id_for_entry(entry))
+
+func runtime_for_entry(entry: Dictionary) -> Dictionary:
+	return runtime_for_actor(actor_id_for_entry(entry))
+
+func runtime_for_actor(actor_id: String) -> Dictionary:
+	if actor_id == "":
+		return { "hasRequest": false, "state": STATE_NONE, "reason": "missing_actor_id" }
+	var request_id := String(active_request_by_actor.get(actor_id, ""))
+	if request_id == "" or not requests_by_id.has(request_id):
+		return {
+			"hasRequest": false,
+			"actorId": actor_id,
+			"state": STATE_NONE,
+			"reason": "no_active_request"
+		}
+	var record: Dictionary = requests_by_id[request_id]
+	var counts: Dictionary = record.get("stateFrameCounts", {}) if record.get("stateFrameCounts", {}) is Dictionary else {}
+	return {
+		"ok": true,
+		"hasRequest": true,
+		"requestId": request_id,
+		"actorId": actor_id,
+		"generation": int(record.get("generation", 0)),
+		"state": String(record.get("state", STATE_NONE)),
+		"reason": String(record.get("reason", "")),
+		"priority": int(record.get("priority", 0)),
+		"lastServicedFrame": int(record.get("lastServicedFrame", -1)),
+		"planningWaitFrames": _planning_wait_frames(record),
+		"queuedFrames": int(counts.get(STATE_QUEUED, 0)),
+		"pendingBudgetFrames": int(counts.get(STATE_PENDING_BUDGET, 0)),
+		"pendingNavDataFrames": int(counts.get(STATE_PENDING_NAV_DATA, 0)),
+		"pendingProbeFrames": int(counts.get(STATE_PROBING, 0)),
+		"routeLease": record.get("routeLease", {}),
+		"route": record.get("route", {})
+	}
+
+func telemetry_for_actor(actor_id: String) -> Dictionary:
+	if actor_id == "":
+		return { "hasRequest": false, "state": STATE_NONE, "reason": "missing_actor_id" }
+	var request_id := String(active_request_by_actor.get(actor_id, ""))
+	if request_id == "" or not requests_by_id.has(request_id):
+		return {
+			"hasRequest": false,
+			"actorId": actor_id,
+			"state": STATE_NONE,
+			"reason": "no_active_request"
+		}
+	var record: Dictionary = requests_by_id[request_id]
+	var counts: Dictionary = record.get("stateFrameCounts", {}) if record.get("stateFrameCounts", {}) is Dictionary else {}
+	var lease: Dictionary = record.get("routeLease", {}) if record.get("routeLease", {}) is Dictionary else {}
+	var route: Dictionary = record.get("route", {}) if record.get("route", {}) is Dictionary else {}
+	var proof: Dictionary = record.get("routeProof", {}) if record.get("routeProof", {}) is Dictionary else {}
+	return {
+		"hasRequest": true,
+		"requestId": request_id,
+		"actorId": actor_id,
+		"generation": int(record.get("generation", 0)),
+		"state": String(record.get("state", STATE_NONE)),
+		"reason": String(record.get("reason", "")),
+		"priority": int(record.get("priority", 0)),
+		"createdFrame": int(record.get("createdFrame", 0)),
+		"updatedFrame": int(record.get("updatedFrame", 0)),
+		"lastServicedFrame": int(record.get("lastServicedFrame", -1)),
+		"planningWaitFrames": _planning_wait_frames(record),
+		"queuedFrames": int(counts.get(STATE_QUEUED, 0)),
+		"pendingBudgetFrames": int(counts.get(STATE_PENDING_BUDGET, 0)),
+		"pendingNavDataFrames": int(counts.get(STATE_PENDING_NAV_DATA, 0)),
+		"pendingProbeFrames": int(counts.get(STATE_PROBING, 0)),
+		"hasLease": not lease.is_empty(),
+		"leaseId": String(lease.get("leaseId", "")),
+		"interactionClaim": (lease.get("interactionClaim", {}) as Dictionary).duplicate(true) if lease.get("interactionClaim", {}) is Dictionary else {},
+		"route": {
+			"ok": bool(route.get("ok", false)),
+			"status": String(route.get("status", "")),
+			"classification": String(route.get("classification", "")),
+			"reason": String(route.get("reason", "")),
+			"source": String(route.get("source", "")),
+			"targetCell": route.get("targetCell", INVALID_CELL),
+			"cellCount": (route.get("cells", []) as Array).size() if route.get("cells", []) is Array else 0,
+			"waypointCount": (route.get("waypoints", []) as Array).size() if route.get("waypoints", []) is Array else 0
+		},
+		"proof": {
+			"ok": bool(proof.get("ok", false)),
+			"status": String(proof.get("status", "")),
+			"reason": String(proof.get("reason", "")),
+			"authoritative": bool(proof.get("authoritative", false)),
+			"sampleCount": int(proof.get("sampleCount", 0))
+		},
+		"eventCount": (record.get("events", []) as Array).size() if record.get("events", []) is Array else 0
+	}
 
 func debug_for_actor(actor_id: String) -> Dictionary:
 	if actor_id == "":
@@ -458,6 +557,7 @@ func record_summary(record: Dictionary) -> Dictionary:
 		"pendingProbeFrames": int(counts.get(STATE_PROBING, 0)),
 		"hasLease": not lease.is_empty(),
 		"leaseId": String(lease.get("leaseId", "")),
+		"interactionClaim": (lease.get("interactionClaim", {}) as Dictionary).duplicate(true) if lease.get("interactionClaim", {}) is Dictionary else {},
 		"routeLease": lease.duplicate(true),
 		"route": _record_route_summary(route),
 		"proof": proof.duplicate(true),
@@ -781,9 +881,7 @@ func _transition_record(record: Dictionary, state: String, reason: String) -> vo
 	record["reason"] = reason
 	record["updatedFrame"] = frame_serial
 	record["lastServicedFrame"] = frame_serial
-	var events: Array = record.get("events", []) if record.get("events", []) is Array else []
-	events.append(_event(state, reason))
-	record["events"] = events
+	_append_event(record, _event(state, reason))
 
 func _increment_state_frame(record: Dictionary) -> void:
 	var state := String(record.get("state", STATE_NONE))
@@ -807,11 +905,16 @@ func _execution_details_with_segment(segment_index: int, details) -> Dictionary:
 	return result
 
 func _record_service_event(record: Dictionary, event_state: String, reason: String, details := {}) -> void:
-	var events: Array = record.get("events", []) if record.get("events", []) is Array else []
-	events.append(_event(event_state, reason, details))
-	record["events"] = events
+	_append_event(record, _event(event_state, reason, details))
 	record["updatedFrame"] = frame_serial
 	record["lastServicedFrame"] = frame_serial
+
+func _append_event(record: Dictionary, event: Dictionary) -> void:
+	var events: Array = record.get("events", []) if record.get("events", []) is Array else []
+	events.append(event)
+	while events.size() > MAX_REQUEST_EVENTS:
+		events.remove_at(0)
+	record["events"] = events
 
 func _observe_wait_counters(record: Dictionary) -> void:
 	var state := String(record.get("state", STATE_NONE))

@@ -64,6 +64,7 @@ var captures: Array[Dictionary] = []
 var timeline: Array[Dictionary] = []
 var npc_entries: Array[Dictionary] = []
 var initial_positions := {}
+var initial_job_runs := {}
 var town_summary := {}
 var role_summary := {}
 var fence_gate_summary := {}
@@ -403,6 +404,7 @@ func find_non_tutorial_town() -> Dictionary:
 func collect_natural_npcs() -> void:
     npc_entries.clear()
     initial_positions.clear()
+    initial_job_runs.clear()
     if npc_system == null:
         return
     var entries = npc_system.get("npcs")
@@ -422,6 +424,7 @@ func collect_natural_npcs() -> void:
             continue
         npc_entries.append(entry)
         initial_positions[id] = body.global_position
+        initial_job_runs[id] = int(entry.get("jobRuns", 0))
     role_summary = build_role_summary()
 
 func build_role_summary() -> Dictionary:
@@ -558,7 +561,9 @@ func observe_day_jobs() -> void:
     if not capture_stage_saved("day_guard_guarding"):
         await capture_stage("day_guard_guarding", "guard")
     await capture_stage("day_jobs_overview", "overview")
+    var stale_foragers := stale_forager_rows(day_matrix)
     add_result("day_forager_uses_builtin_forage", observed_forage, JSON.stringify(filtered_job_rows(day_matrix, "forage")))
+    add_result("day_forager_has_no_stale_reservation", stale_foragers.is_empty(), JSON.stringify(stale_foragers))
     add_result("day_guard_uses_builtin_guard", observed_guard, JSON.stringify(filtered_job_rows(day_matrix, "guard")))
     add_result("day_non_guard_non_foragers_stay_near_town", non_special_workers_near_town(day_matrix), JSON.stringify(filtered_non_special_rows(day_matrix)))
     add_result("day_non_guard_non_foragers_move_or_work_in_town", non_special_workers_move_or_work(non_special_distance_by_id, day_matrix), JSON.stringify(sanitize_value(non_special_distance_by_id)))
@@ -697,12 +702,14 @@ func npc_summary(entry: Dictionary, phase: String) -> Dictionary:
     var id := String(entry.get("id", ""))
     var initial = initial_positions.get(id, position)
     var initial_position: Vector3 = initial if initial is Vector3 else position
+    var initial_runs := int(initial_job_runs.get(id, int(entry.get("jobRuns", 0))))
     var door := npc_home_door(entry)
     var home_status := strict_home_status(entry)
     var home_route := home_route_summary(entry, position)
     var porch_position: Vector3 = entry.get("porchPosition", position) if entry.get("porchPosition", position) is Vector3 else position
     var home_position: Vector3 = entry.get("homePosition", position) if entry.get("homePosition", position) is Vector3 else position
     var guard_position: Vector3 = entry.get("guardPosition", position) if entry.get("guardPosition", position) is Vector3 else position
+    var job_target: Vector3 = entry.get("jobTarget", position) if entry.get("jobTarget", position) is Vector3 else position
     var guard_cell: Vector2i = entry.get("guardCell", flat_cell(guard_position)) if entry.get("guardCell", flat_cell(guard_position)) is Vector2i else flat_cell(guard_position)
     var door_position := (door as Node3D).global_position if door is Node3D else position
     return {
@@ -718,8 +725,14 @@ func npc_summary(entry: Dictionary, phase: String) -> Dictionary:
         "jobPhase": String(entry.get("jobPhase", "")),
         "jobTimer": rounded(float(entry.get("jobTimer", 0.0))),
         "jobRuns": int(entry.get("jobRuns", 0)),
+        "initialJobRuns": initial_runs,
         "jobObjectId": String(entry.get("jobObjectId", "")),
-        "jobTarget": vec3(entry.get("jobTarget", position) if entry.get("jobTarget", position) is Vector3 else position),
+        "jobReservationId": String(entry.get("jobReservationId", "")),
+        "jobApproachSlotId": String(entry.get("jobApproachSlotId", "")),
+        "jobFailureReason": String(entry.get("jobFailureReason", "")),
+        "jobTarget": vec3(job_target),
+        "distanceToJobTarget": rounded(flat_distance(position, job_target)),
+        "smartObjectReservationDebug": smart_object_reservation_debug(entry),
         "homePosition": vec3(entry.get("homePosition", position) if entry.get("homePosition", position) is Vector3 else position),
         "porchPosition": vec3(entry.get("porchPosition", position) if entry.get("porchPosition", position) is Vector3 else position),
         "guardPosition": vec3(guard_position),
@@ -779,6 +792,15 @@ func npc_summary(entry: Dictionary, phase: String) -> Dictionary:
         "nightGuard": bool(entry.get("nightGuard", false))
     }
 
+func smart_object_reservation_debug(entry: Dictionary) -> Dictionary:
+    if npc_system == null or not npc_system.has_method("smart_object_reservation_debug"):
+        return { "ok": false, "reason": "missing_reservation_debug" }
+    return npc_system.call(
+        "smart_object_reservation_debug",
+        String(entry.get("jobObjectId", "")),
+        String(entry.get("id", ""))
+    )
+
 func npc_route_planner_stats() -> Dictionary:
     if npc_system == null:
         return {}
@@ -808,15 +830,7 @@ func matrix_has_forager_work(matrix: Array[Dictionary]) -> bool:
     for row in matrix:
         if String(row.get("job", "")) != "forage":
             continue
-        var phase := String(row.get("jobPhase", ""))
-        var strict_home_value = row.get("strictHome", {})
-        var strict_home: Dictionary = strict_home_value if strict_home_value is Dictionary else {}
-        var outside_home := not bool(strict_home.get("strictInside", false))
-        var visible_search := phase == "searching" and String(row.get("activeGoalKind", "")) == "forage" and (not bool(row.get("insideTown", false)) or float(row.get("distanceFromInitial", 0.0)) >= CELL * 4.0)
-        var has_work_state := visible_search or phase in ["outbound", "gathering", "returning"] or int(row.get("jobRuns", 0)) > 0 or String(row.get("jobObjectId", "")) != ""
-        var route_status := String(row.get("routeStatus", ""))
-        var has_motion_or_target := int(row.get("pathWaypointCount", 0)) > 0 or route_status in ["moving", "pending", "waiting"] or String(row.get("jobObjectId", "")) != "" or float(row.get("distanceFromInitial", 0.0)) >= CELL * 0.65
-        if outside_home and has_work_state and has_motion_or_target:
+        if int(row.get("jobRuns", 0)) > int(row.get("initialJobRuns", 0)):
             return true
     return false
 
@@ -832,10 +846,36 @@ func matrix_has_forager_visual_work(matrix: Array[Dictionary]) -> bool:
             continue
         var phase := String(row.get("jobPhase", ""))
         var active := String(row.get("activeGoalKind", "")) == "forage"
-        var away_from_home := float(row.get("distanceToHome", 0.0)) >= CELL * 8.0 or float(row.get("distanceFromInitial", 0.0)) >= CELL * 8.0
-        if active and (not bool(row.get("insideTown", false)) or phase == "gathering" or away_from_home):
+        var completed := int(row.get("jobRuns", 0)) > int(row.get("initialJobRuns", 0))
+        var gathering_at_target := phase == "gathering" \
+            and String(row.get("jobObjectId", "")) != "" \
+            and float(row.get("distanceToJobTarget", INF)) <= CELL * 2.5 \
+            and not forager_reservation_is_stale(row)
+        if active and (gathering_at_target or completed):
             return true
     return false
+
+func stale_forager_rows(matrix: Array[Dictionary]) -> Array[Dictionary]:
+    var result: Array[Dictionary] = []
+    for row in matrix:
+        if String(row.get("job", "")) == "forage" and forager_reservation_is_stale(row):
+            result.append(row)
+    return result
+
+func forager_reservation_is_stale(row: Dictionary) -> bool:
+    var reservation_debug: Dictionary = row.get("smartObjectReservationDebug", {}) if row.get("smartObjectReservationDebug", {}) is Dictionary else {}
+    var reservations: Array = reservation_debug.get("reservations", []) if reservation_debug.get("reservations", []) is Array else []
+    if reservations.is_empty():
+        return false
+    var authority: Dictionary = row.get("routeAuthorityV2", {}) if row.get("routeAuthorityV2", {}) is Dictionary else {}
+    var authority_state := String(authority.get("state", ""))
+    if authority_state in ["unreachable_static", "invalid_goal", "cancelled"] or String(row.get("routeStatus", "")) in ["unreachable", "blocked"]:
+        return true
+    var reservation: Dictionary = reservations[0] if reservations[0] is Dictionary else {}
+    var corridor: Dictionary = row.get("corridorProgress", {}) if row.get("corridorProgress", {}) is Dictionary else {}
+    return int(reservation.get("ageFrames", 0)) >= 180 \
+        and int(corridor.get("noProgressTicks", 0)) >= 24 \
+        and float(row.get("lastMoveDistance", 0.0)) <= 0.001
 
 func matrix_has_guard_work(matrix: Array[Dictionary]) -> bool:
     for row in matrix:

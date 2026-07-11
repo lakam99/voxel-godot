@@ -13,6 +13,7 @@ const NpcPerceptionServiceScript := preload("res://scripts/npc_ai/behavior/NpcPe
 const NpcSemanticGoalPlannerScript := preload("res://scripts/npc_ai/behavior/NpcSemanticGoalPlanner.gd")
 const NpcRouteMovementControllerScript := preload("res://scripts/npc_ai/movement/NpcRouteMovementController.gd")
 const NpcRouteAuthorityV2Script := preload("res://scripts/npc_ai/routing/NpcRouteAuthorityV2.gd")
+const NpcConstantsScript := preload("res://scripts/npc_ai/NpcConstants.gd")
 const CELL := 1.35
 
 var runner = null
@@ -205,6 +206,13 @@ class FakeNpcSystem:
 	var allow_outside_calls := 0
 	var last_allow_outside := false
 	var moved_actor_ids := {}
+	var reservation_releases := 0
+	var reservation_release_reasons: Array[String] = []
+	var reservation_route_binds := 0
+	var forage_slot_advances := 0
+	var forage_target_deferrals := 0
+	var deferred_forage_target_names: Array[String] = []
+	var test_route_authority_v2 = null
 
 	func update_npc_needs(_entry: Dictionary, _delta: float, _night_factor: float) -> void:
 		pass
@@ -302,6 +310,58 @@ class FakeNpcSystem:
 		if to_target.length_squared() > 0.001:
 			body.rotation.y = atan2(to_target.x, to_target.z)
 
+	func job_target_node(entry: Dictionary) -> Node3D:
+		var value = entry.get("jobTargetNode")
+		return value if value is Node3D and is_instance_valid(value) else null
+
+	func smart_object_action_reach(_object_id: String, fallback: float) -> float:
+		return fallback
+
+	func smart_object_approach_position(entry: Dictionary, target_node: Node3D) -> Vector3:
+		return entry.get("jobTarget", target_node.global_position if target_node != null else Vector3.ZERO)
+
+	func release_job_reservation(entry: Dictionary, reason := "released") -> void:
+		if String(entry.get("jobObjectId", "")) == "":
+			return
+		reservation_releases += 1
+		reservation_release_reasons.append(String(reason))
+		entry["jobObjectId"] = ""
+		entry["jobReservationId"] = ""
+		entry["jobApproachSlotId"] = ""
+
+	func bind_job_reservation_to_route(entry: Dictionary, authority: Dictionary, semantic_kind: String) -> Dictionary:
+		reservation_route_binds += 1
+		entry["jobReservationRouteRequestId"] = String(authority.get("requestId", ""))
+		entry["jobReservationRouteGeneration"] = int(authority.get("generation", 0))
+		return {
+			"ok": semantic_kind == "forage_target",
+			"status": "succeeded" if semantic_kind == "forage_target" else "failed",
+			"reason": "heartbeat",
+			"routeRequestId": String(authority.get("requestId", "")),
+			"routeGeneration": int(authority.get("generation", 0))
+		}
+
+	func advance_forage_approach_slot(entry: Dictionary, _target_node: Node3D) -> bool:
+		var candidates: Array = entry.get("jobApproachCandidates", []) if entry.get("jobApproachCandidates", []) is Array else []
+		var next_index := int(entry.get("jobApproachCandidateIndex", -1)) + 1
+		if next_index >= candidates.size() or not (candidates[next_index] is Dictionary):
+			return false
+		release_job_reservation(entry, "forage_slot_route_rejected")
+		var candidate: Dictionary = candidates[next_index]
+		forage_slot_advances += 1
+		entry["jobApproachCandidateIndex"] = next_index
+		entry["jobObjectId"] = String(entry.get("jobApproachTargetObjectId", "prop:next-slot"))
+		entry["jobApproachSlotId"] = String(candidate.get("slotId", ""))
+		entry["jobReservationId"] = "%s:%s:%s:next" % [String(entry.get("jobObjectId", "")), String(entry.get("jobApproachSlotId", "")), String(entry.get("id", ""))]
+		entry["jobTarget"] = candidate.get("position", Vector3.ZERO)
+		entry["jobApproachSlotPosition"] = entry["jobTarget"]
+		entry["jobApproachSlotCell"] = candidate.get("cell", Vector2i.ZERO)
+		return true
+
+	func defer_forager_target(_entry: Dictionary, target_node: Node3D, _seconds: float) -> void:
+		forage_target_deferrals += 1
+		deferred_forage_target_names.append(target_node.name if target_node != null else "")
+
 	func scripted_order_result(entry: Dictionary, state: String, reason: String, failure_reason := "") -> Dictionary:
 		var result: Dictionary = entry.get("scriptedOrder", {}) if entry.get("scriptedOrder", {}) is Dictionary else {}
 		result = result.duplicate(true)
@@ -377,6 +437,18 @@ func cases() -> Array[Dictionary]:
 		case("npc_behavior_resource_worker_outbound_stays_town_bound", "day", "test_resource_worker_outbound_stays_town_bound"),
 		case("npc_behavior_forager_outbound_allows_outside", "day", "test_forager_outbound_allows_outside"),
 		case("npc_behavior_forager_active_goal_enters_search_from_idle", "day", "test_forager_active_goal_enters_search_from_idle"),
+		case("npc_behavior_vox42_generic_forager_stale_reservation_regression", "day", "test_vox42_generic_forager_stale_reservation_regression"),
+		case("npc_behavior_vox42_terminal_v2_releases_reservation", "day", "test_vox42_terminal_v2_releases_reservation"),
+		case("npc_behavior_vox42_blocked_dynamic_repairs_then_releases", "day", "test_vox42_blocked_dynamic_repairs_then_releases"),
+		case("npc_behavior_vox42_home_departure_yields_to_forage", "day", "test_vox42_home_departure_yields_to_forage"),
+		case("npc_behavior_vox42_forage_route_binds_reservation", "day", "test_vox42_forage_route_binds_reservation"),
+		case("npc_behavior_vox42_force_replan_preserves_pending_request", "day", "test_vox42_force_replan_preserves_pending_request"),
+		case("npc_behavior_vox42_terminal_forage_handoff_survives_stale_force", "day", "test_vox42_terminal_forage_handoff_survives_stale_force"),
+		case("npc_behavior_vox42_reservation_deadline_retargets", "day", "test_vox42_reservation_deadline_retargets"),
+		case("npc_behavior_vox42_gathering_requires_exact_arrived_claim", "day", "test_vox42_gathering_requires_exact_arrived_claim"),
+		case("npc_behavior_vox42_blocked_slot_replans_to_clear_slot", "day", "test_vox42_blocked_slot_replans_to_clear_slot"),
+		case("npc_behavior_vox42_pending_probe_publishes_bounded_semantic", "day", "test_vox42_pending_probe_publishes_bounded_semantic"),
+		case("npc_behavior_vox42_non_home_door_keeps_forage_route", "day", "test_vox42_non_home_door_keeps_forage_route"),
 		case("npc_traffic_door_crossing_continues_while_brain_skipped", "day", "test_door_crossing_continues_while_brain_skipped"),
 		case("npc_behavior_motor_blocked_local_escape_forces_replan", "day", "test_motor_blocked_local_escape_forces_replan"),
 		case("npc_behavior_unreachable_goal_terminal", "day", "test_unreachable_goal_terminal"),
@@ -1067,7 +1139,12 @@ func test_forager_outbound_allows_outside(_mode: String) -> Dictionary:
 	entry_data["jobPhase"] = "outbound"
 	entry_data["jobTarget"] = Vector3(42.0, 0.0, 0.0)
 	entry_data["activeMotionGoal"] = { "goalKind": NpcEnumsScript.GOAL_KIND_FORAGE }
-	executor.advance_motion_npc(entry_data, 1.0 / 60.0, 0.0)
+	for _tick in range(8):
+		if fake_npc.test_route_authority_v2 != null:
+			fake_npc.test_route_authority_v2.begin_frame()
+		executor.advance_motion_npc(entry_data, 1.0 / 60.0, 0.0)
+		if (entry_data.get("body") as Node3D).global_position.x > 0.0:
+			break
 	var body := entry_data.get("body") as Node3D
 	var routine_intent: Dictionary = entry_data.get("_routineRouteV2Intent", {}) if entry_data.get("_routineRouteV2Intent", {}) is Dictionary else {}
 	var passed: bool = fake_npc.move_calls == 0 \
@@ -1114,6 +1191,511 @@ func test_forager_active_goal_enters_search_from_idle(_mode: String) -> Dictiona
 		["forager_active_goal_promotes_idle_to_searching", "forager_idle_intent_uses_v2_authority", "forager_idle_intent_does_not_rest_outside"],
 		{ "result": result, "jobPhase": entry_data.get("jobPhase", ""), "moveCalls": fake_npc.move_calls, "routeStatus": entry_data.get("routeStatus", ""), "routineIntent": routine_intent, "lastAuthority": last_authority }
 	)
+
+func test_vox42_generic_forager_stale_reservation_regression(_mode: String) -> Dictionary:
+	var fake_npc := FakeNpcSystem.new()
+	var executor: Variant = make_executor(fake_npc)
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 42042
+	var forager_id := "forager_%d" % rng.randi_range(100000, 999999)
+	var prop := Node3D.new()
+	prop.name = "VOX42_Berry_%s" % forager_id
+	fake_npc.add_child(prop)
+	var target_position := Vector3(CELL * 40.0, 0.0, 0.0)
+	prop.position = target_position
+	var object_id := "prop:vox42-%s" % forager_id
+	var reservation_id := "%s:slot:0:%s:1" % [object_id, forager_id]
+	var entry_data := entry("Forager", {
+		"id": forager_id,
+		"job": "forage",
+		"position": Vector3.ZERO,
+		"homeCell": Vector2i(-4, 0),
+		"porchCell": Vector2i(-3, 0)
+	})
+	var body := entry_data.get("body") as Node3D
+	body.global_position = Vector3.ZERO
+	entry_data["jobPhase"] = "outbound"
+	entry_data["jobTimer"] = 0.0
+	entry_data["jobTargetNode"] = prop
+	entry_data["jobTarget"] = target_position
+	entry_data["jobObjectId"] = object_id
+	entry_data["jobReservationId"] = reservation_id
+	entry_data["jobApproachSlotId"] = "slot:0"
+	entry_data["routeStatus"] = "moving"
+	entry_data["routeReason"] = "stuck"
+	entry_data["pathWaypoints"] = [entry_data["jobTarget"]]
+	entry_data["corridorProgress"] = { "noProgressTicks": 48 }
+	entry_data["lastMoveDistance"] = 0.0
+	entry_data["routineRouteV2RequestId"] = "%s:v2:2:1" % forager_id
+	entry_data["routineRouteV2IntentKind"] = "forage"
+	entry_data["routineRouteV2SemanticKind"] = "forage_target"
+	entry_data["routineRouteV2Key"] = "%s|forage|forage_target|40,0|true|%s|job_route|0" % [forager_id, object_id]
+	entry_data["_routineRouteV2Intent"] = { "jobObjectId": object_id }
+	entry_data["routeAuthorityV2"] = {
+		"requestId": entry_data["routineRouteV2RequestId"],
+		"generation": 2,
+		"state": "blocked_dynamic",
+		"reason": "stuck"
+	}
+	entry_data["jobReservationRouteRequestId"] = entry_data["routineRouteV2RequestId"]
+	entry_data["jobReservationRouteGeneration"] = 2
+	entry_data["forageRouteRepairAttempts"] = 1
+	var distance_before := body.global_position.distance_to(target_position)
+	var moving_job := bool(executor.call("_update_forager_goal", entry_data, body, 1.0))
+	var distance_after := body.global_position.distance_to(target_position)
+	var still_reserved := String(entry_data.get("jobObjectId", "")) == object_id and String(entry_data.get("jobReservationId", "")) == reservation_id
+	var passed: bool = forager_id != "niko" \
+		and moving_job \
+		and not still_reserved \
+		and fake_npc.reservation_releases == 1 \
+		and fake_npc.reservation_release_reasons == ["route_blocked_dynamic_after_repair"] \
+		and bool(entry_data.get("routeForceReplan", false)) \
+		and String(entry_data.get("jobPhase", "")) == "searching"
+	var details := {
+		"foragerId": forager_id,
+		"objectId": object_id,
+		"reservationId": reservation_id,
+		"stillReserved": still_reserved,
+		"releaseCount": fake_npc.reservation_releases,
+		"releaseReasons": fake_npc.reservation_release_reasons.duplicate(),
+		"jobPhase": String(entry_data.get("jobPhase", "")),
+		"routeStatus": String(entry_data.get("routeStatus", "")),
+		"distanceBefore": distance_before,
+		"distanceAfter": distance_after,
+		"noProgressTicks": int((entry_data.get("corridorProgress", {}) as Dictionary).get("noProgressTicks", -1)),
+		"routeForceReplan": bool(entry_data.get("routeForceReplan", false))
+	}
+	fake_npc.queue_free()
+	return outcome(passed, "generic=%s stillReserved=%s releases=%d phase=%s noProgress=%d" % [forager_id, str(still_reserved), fake_npc.reservation_releases, String(details.get("jobPhase", "")), int(details.get("noProgressTicks", -1))], ["generic_forager_not_niko", "stale_forage_reservation_released", "no_progress_does_not_keep_capacity_busy"], details)
+
+func test_vox42_terminal_v2_releases_reservation(_mode: String) -> Dictionary:
+	var setup := vox42_reserved_forager_setup("terminal")
+	var fake_npc: FakeNpcSystem = setup.fakeNpc
+	var executor: Variant = setup.executor
+	var entry_data: Dictionary = setup.entry
+	var body: CharacterBody3D = entry_data.get("body")
+	entry_data["routeAuthorityV2"] = {
+		"requestId": "forager-terminal:v2:8:1",
+		"generation": 8,
+		"state": "unreachable_static",
+		"reason": "no_route"
+	}
+	entry_data["routineRouteV2RequestId"] = "forager-terminal:v2:8:1"
+	entry_data["routineRouteV2SemanticKind"] = "forage_target"
+	entry_data["routineRouteV2IntentKind"] = "forage"
+	entry_data["routineRouteV2Key"] = "forager-terminal|forage|forage_target|40,0|true|prop:terminal|job_route|0"
+	entry_data["_routineRouteV2Intent"] = { "jobObjectId": "prop:terminal" }
+	entry_data["jobReservationRouteRequestId"] = "forager-terminal:v2:8:1"
+	entry_data["jobReservationRouteGeneration"] = 8
+	var moving_job := bool(executor.call("_update_forager_goal", entry_data, body, 1.0 / 60.0))
+	var passed := moving_job \
+		and fake_npc.reservation_releases == 1 \
+		and fake_npc.reservation_release_reasons == ["route_unreachable_static"] \
+		and String(entry_data.get("jobPhase", "")) == "searching" \
+		and String(entry_data.get("jobObjectId", "")) == "" \
+		and entry_data.get("jobTargetNode") == null
+	var details := {
+		"releaseCount": fake_npc.reservation_releases,
+		"releaseReasons": fake_npc.reservation_release_reasons.duplicate(),
+		"jobPhase": String(entry_data.get("jobPhase", "")),
+		"jobFailureReason": String(entry_data.get("jobFailureReason", ""))
+	}
+	fake_npc.queue_free()
+	return outcome(passed, JSON.stringify(details), ["terminal_v2_state_releases_once", "terminal_target_reselected"], details)
+
+func test_vox42_blocked_dynamic_repairs_then_releases(_mode: String) -> Dictionary:
+	var setup := vox42_reserved_forager_setup("dynamic")
+	var fake_npc: FakeNpcSystem = setup.fakeNpc
+	var executor: Variant = setup.executor
+	var entry_data: Dictionary = setup.entry
+	var body: CharacterBody3D = entry_data.get("body")
+	entry_data["routeAuthorityV2"] = {
+		"requestId": "forager-dynamic:v2:5:1",
+		"generation": 5,
+		"state": "blocked_dynamic",
+		"reason": "stuck"
+	}
+	entry_data["routineRouteV2RequestId"] = "forager-dynamic:v2:5:1"
+	entry_data["routineRouteV2SemanticKind"] = "forage_target"
+	entry_data["routineRouteV2IntentKind"] = "forage"
+	entry_data["routineRouteV2Key"] = "forager-dynamic|forage|forage_target|40,0|true|prop:dynamic|job_route|0"
+	entry_data["_routineRouteV2Intent"] = { "jobObjectId": "prop:dynamic" }
+	entry_data["jobReservationRouteRequestId"] = "forager-dynamic:v2:5:1"
+	entry_data["jobReservationRouteGeneration"] = 5
+	var first_moving := bool(executor.call("_update_forager_goal", entry_data, body, 1.0 / 60.0))
+	var first_release_count := fake_npc.reservation_releases
+	var first_repair_count := int(entry_data.get("forageRouteRepairAttempts", 0))
+	entry_data["routeAuthorityV2"] = {
+		"requestId": "forager-dynamic:v2:6:2",
+		"generation": 6,
+		"state": "blocked_dynamic",
+		"reason": "stuck"
+	}
+	entry_data["routineRouteV2RequestId"] = "forager-dynamic:v2:6:2"
+	entry_data["jobReservationRouteRequestId"] = "forager-dynamic:v2:6:2"
+	entry_data["jobReservationRouteGeneration"] = 6
+	var second_moving := bool(executor.call("_update_forager_goal", entry_data, body, 1.0 / 60.0))
+	var passed := first_moving \
+		and first_release_count == 0 \
+		and first_repair_count == 1 \
+		and second_moving \
+		and fake_npc.reservation_releases == 1 \
+		and fake_npc.reservation_release_reasons == ["route_blocked_dynamic_after_repair"] \
+		and String(entry_data.get("jobPhase", "")) == "searching"
+	var details := {
+		"firstReleaseCount": first_release_count,
+		"firstRepairCount": first_repair_count,
+		"releaseCount": fake_npc.reservation_releases,
+		"releaseReasons": fake_npc.reservation_release_reasons.duplicate(),
+		"jobPhase": String(entry_data.get("jobPhase", ""))
+	}
+	fake_npc.queue_free()
+	return outcome(passed, JSON.stringify(details), ["dynamic_block_gets_one_repair", "repeated_dynamic_block_releases_once"], details)
+
+func test_vox42_home_departure_yields_to_forage(_mode: String) -> Dictionary:
+	var fake_npc := FakeNpcSystem.new()
+	var fake_autonomy := FakeAutonomy.new()
+	fake_npc.add_child(fake_autonomy)
+	var executor: Variant = make_executor(fake_npc, fake_autonomy)
+	var entry_data := entry("Forager", {
+		"id": "forager_departure",
+		"job": "forage",
+		"homeCell": Vector2i.ZERO,
+		"porchCell": Vector2i(1, 0),
+		"position": Vector3(CELL * 4.0, 0.0, 0.0)
+	})
+	var body: CharacterBody3D = entry_data.get("body")
+	entry_data["jobPhase"] = "outbound"
+	entry_data["jobObjectId"] = "prop:departure"
+	entry_data["jobReservationId"] = "prop:departure:slot:0:forager_departure:1"
+	entry_data["jobApproachSlotId"] = "slot:0"
+	entry_data["activeDoorPortalId"] = "door:departure"
+	var result: Dictionary = executor.call("_advance_job_home_exit", entry_data, body, 1.0 / 60.0, "job_departure_home_exit")
+	var passed := String(result.get("routeStatus", "")) == "waiting" \
+		and fake_autonomy.door_releases == 1 \
+		and String(entry_data.get("activeDoorPortalId", "")) == "" \
+		and bool(entry_data.get("routeForceReplan", false))
+	var details := {
+		"result": result,
+		"doorReleases": fake_autonomy.door_releases,
+		"activeDoorPortalId": String(entry_data.get("activeDoorPortalId", "")),
+		"routeForceReplan": bool(entry_data.get("routeForceReplan", false))
+	}
+	fake_npc.queue_free()
+	return outcome(passed, JSON.stringify(details), ["departure_arrival_releases_door", "departure_arrival_forces_forage_route"], details)
+
+func test_vox42_forage_route_binds_reservation(_mode: String) -> Dictionary:
+	var setup := vox42_reserved_forager_setup("binding")
+	var fake_npc: FakeNpcSystem = setup.fakeNpc
+	var executor: Variant = setup.executor
+	var entry_data: Dictionary = setup.entry
+	entry_data["jobTimer"] = 5.0
+	(entry_data.get("body") as CharacterBody3D).global_position = Vector3(CELL * 4.0, 0.0, 0.0)
+	var result := {}
+	for _tick in range(8):
+		if fake_npc.test_route_authority_v2 != null:
+			fake_npc.test_route_authority_v2.begin_frame()
+		result = executor.call("_advance_job_motion", entry_data, entry_data.get("body"), 1.0 / 60.0)
+		var current_authority: Dictionary = entry_data.get("routeAuthorityV2", {}) if entry_data.get("routeAuthorityV2", {}) is Dictionary else {}
+		if current_authority.get("interactionClaim", {}) is Dictionary and not (current_authority.get("interactionClaim", {}) as Dictionary).is_empty():
+			break
+	var bound_request_id := String(entry_data.get("jobReservationRouteRequestId", ""))
+	var bound_generation := int(entry_data.get("jobReservationRouteGeneration", 0))
+	var intent: Dictionary = entry_data.get("_routineRouteV2Intent", {}) if entry_data.get("_routineRouteV2Intent", {}) is Dictionary else {}
+	var claim: Dictionary = intent.get("interactionClaim", {}) if intent.get("interactionClaim", {}) is Dictionary else {}
+	var authority: Dictionary = entry_data.get("routeAuthorityV2", {}) if entry_data.get("routeAuthorityV2", {}) is Dictionary else {}
+	var lease_claim: Dictionary = authority.get("interactionClaim", {}) if authority.get("interactionClaim", {}) is Dictionary else {}
+	var candidate_cells: Array = intent.get("candidateCells", []) if intent.get("candidateCells", []) is Array else []
+	var passed := fake_npc.reservation_route_binds >= 1 \
+		and bound_request_id != "" \
+		and bound_generation > 0 \
+		and String(intent.get("semanticKind", "")) == "forage_target" \
+		and String(intent.get("jobObjectId", "")) == "prop:binding" \
+		and candidate_cells.size() == 1 \
+		and String(claim.get("reservationId", "")) == String(entry_data.get("jobReservationId", "")) \
+		and String(claim.get("slotId", "")) == "slot:0" \
+		and int(lease_claim.get("routeGeneration", 0)) == bound_generation
+	var details := {
+		"result": result,
+		"bindCount": fake_npc.reservation_route_binds,
+		"boundRequestId": bound_request_id,
+		"boundGeneration": bound_generation,
+		"intent": intent,
+		"leaseClaim": lease_claim
+	}
+	fake_npc.queue_free()
+	return outcome(passed, JSON.stringify(details), ["forage_target_route_binds_reservation", "binding_uses_v2_generation"], details)
+
+func test_vox42_force_replan_preserves_pending_request(_mode: String) -> Dictionary:
+	var setup := vox42_reserved_forager_setup("force_replan")
+	var fake_npc: FakeNpcSystem = setup.fakeNpc
+	var executor: Variant = setup.executor
+	var entry_data: Dictionary = setup.entry
+	var body: CharacterBody3D = entry_data.get("body")
+	body.global_position = Vector3(CELL * 4.0, 0.0, 0.0)
+	entry_data["routeForceReplan"] = true
+	var first: Dictionary = executor.call("_advance_job_motion", entry_data, body, 1.0 / 60.0)
+	var first_request_id := String(entry_data.get("routineRouteV2RequestId", ""))
+	var first_authority: Dictionary = entry_data.get("routeAuthorityV2", {}) if entry_data.get("routeAuthorityV2", {}) is Dictionary else {}
+	var first_generation := int(first_authority.get("generation", 0))
+	entry_data["routeForceReplan"] = true
+	var second: Dictionary = executor.call("_advance_job_motion", entry_data, body, 1.0 / 60.0)
+	var second_request_id := String(entry_data.get("routineRouteV2RequestId", ""))
+	var second_authority: Dictionary = entry_data.get("routeAuthorityV2", {}) if entry_data.get("routeAuthorityV2", {}) is Dictionary else {}
+	var second_generation := int(second_authority.get("generation", 0))
+	var passed := not bool(entry_data.get("routeForceReplan", true)) \
+		and first_request_id != "" \
+		and second_request_id == first_request_id \
+		and first_generation > 0 \
+		and second_generation == first_generation \
+		and String(entry_data.get("jobReservationId", "")) != ""
+	var details := {
+		"first": first,
+		"second": second,
+		"firstRequestId": first_request_id,
+		"secondRequestId": second_request_id,
+		"firstGeneration": first_generation,
+		"secondGeneration": second_generation,
+		"routeForceReplan": bool(entry_data.get("routeForceReplan", false))
+	}
+	fake_npc.queue_free()
+	return outcome(passed, JSON.stringify(details), ["force_replan_consumed_once", "pending_route_request_identity_stable", "forage_lease_not_rebound_each_tick"], details)
+
+func test_vox42_terminal_forage_handoff_survives_stale_force(_mode: String) -> Dictionary:
+	var setup := vox42_reserved_forager_setup("terminal_handoff")
+	var fake_npc: FakeNpcSystem = setup.fakeNpc
+	var executor: Variant = setup.executor
+	var entry_data: Dictionary = setup.entry
+	var body: CharacterBody3D = entry_data.get("body")
+	body.global_position = Vector3(CELL * 4.0, 0.0, 0.0)
+	entry_data["routeForceReplan"] = true
+	executor.call("_advance_job_motion", entry_data, body, 1.0 / 60.0)
+	var request_id := String(entry_data.get("routineRouteV2RequestId", ""))
+	var authority = fake_npc.test_route_authority_v2
+	var terminal: Dictionary = authority.report_unreachable_static(request_id, "blocked_capsule_probe")
+	entry_data["routeForceReplan"] = true
+	var motion: Dictionary = executor.call("_advance_job_motion", entry_data, body, 1.0 / 60.0)
+	var current: Dictionary = entry_data.get("routeAuthorityV2", {}) if entry_data.get("routeAuthorityV2", {}) is Dictionary else {}
+	var passed := request_id != "" \
+		and String(terminal.get("state", "")) == "unreachable_static" \
+		and fake_npc.reservation_releases == 1 \
+		and fake_npc.reservation_release_reasons == ["route_unreachable_static"] \
+		and String(entry_data.get("jobObjectId", "")) == "" \
+		and String(entry_data.get("jobReservationId", "")) == "" \
+		and String(entry_data.get("jobPhase", "")) == "searching" \
+		and not bool(entry_data.get("routeForceReplan", true)) \
+		and int(current.get("generation", 0)) > int(terminal.get("generation", 0))
+	var details := {
+		"requestId": request_id,
+		"terminal": terminal,
+		"current": current,
+		"motion": motion,
+		"releaseReasons": fake_npc.reservation_release_reasons.duplicate(),
+		"jobPhase": String(entry_data.get("jobPhase", "")),
+		"routeForceReplan": bool(entry_data.get("routeForceReplan", false))
+	}
+	fake_npc.queue_free()
+	return outcome(passed, JSON.stringify(details), ["terminal_forage_state_not_cancelled", "behavior_can_observe_terminal", "stale_force_consumed"], details)
+
+func test_vox42_reservation_deadline_retargets(_mode: String) -> Dictionary:
+	var setup := vox42_reserved_forager_setup("deadline")
+	var fake_npc: FakeNpcSystem = setup.fakeNpc
+	var executor: Variant = setup.executor
+	var entry_data: Dictionary = setup.entry
+	var body: CharacterBody3D = entry_data.get("body")
+	var deadline_frames := ceili(NpcConstantsScript.FORAGE_RESERVATION_DEADLINE_SECONDS * float(Engine.physics_ticks_per_second))
+	entry_data["forageReservationStartedPhysicsFrame"] = Engine.get_physics_frames() - deadline_frames - 1
+	var moving_job := bool(executor.call("_update_forager_goal", entry_data, body, 1.0 / 60.0))
+	var passed := moving_job \
+		and fake_npc.reservation_releases == 1 \
+		and fake_npc.reservation_release_reasons == ["forage_reservation_deadline"] \
+		and fake_npc.forage_target_deferrals == 1 \
+		and String(entry_data.get("jobReservationId", "")) == "" \
+		and String(entry_data.get("jobObjectId", "")) == "" \
+		and String(entry_data.get("jobPhase", "")) == "searching" \
+		and not entry_data.has("forageReservationStartedPhysicsFrame")
+	var details := {
+		"movingJob": moving_job,
+		"releaseCount": fake_npc.reservation_releases,
+		"releaseReasons": fake_npc.reservation_release_reasons.duplicate(),
+		"targetDeferrals": fake_npc.forage_target_deferrals,
+		"jobPhase": String(entry_data.get("jobPhase", "")),
+		"jobObjectId": String(entry_data.get("jobObjectId", "")),
+		"jobReservationId": String(entry_data.get("jobReservationId", ""))
+	}
+	fake_npc.queue_free()
+	return outcome(passed, JSON.stringify(details), ["forage_reservation_has_hard_deadline", "deadline_releases_capacity", "deadline_retargets_generic_forager"], details)
+
+func test_vox42_gathering_requires_exact_arrived_claim(_mode: String) -> Dictionary:
+	var setup := vox42_reserved_forager_setup("arrival")
+	var fake_npc: FakeNpcSystem = setup.fakeNpc
+	var executor: Variant = setup.executor
+	var entry_data: Dictionary = setup.entry
+	var body: CharacterBody3D = entry_data.get("body")
+	var target: Vector3 = entry_data.get("jobTarget")
+	body.global_position = target
+	var target_cell := Vector2i(roundi(target.x / CELL), roundi(target.z / CELL))
+	entry_data["jobApproachSlotPosition"] = target
+	entry_data["jobApproachSlotCell"] = target_cell
+	entry_data["routineRouteV2RequestId"] = "forager_arrival:v2:3:1"
+	entry_data["routineRouteV2IntentKind"] = "forage"
+	entry_data["routineRouteV2SemanticKind"] = "forage_target"
+	entry_data["_routineRouteV2Intent"] = { "jobObjectId": "prop:arrival" }
+	entry_data["jobReservationRouteRequestId"] = "forager_arrival:v2:3:1"
+	entry_data["jobReservationRouteGeneration"] = 3
+	entry_data["routeAuthorityV2"] = {
+		"requestId": "forager_arrival:v2:3:1",
+		"generation": 3,
+		"state": "moving",
+		"interactionClaim": {
+			"objectId": "prop:arrival",
+			"reservationId": String(entry_data.get("jobReservationId", "")),
+			"slotId": "slot:0",
+			"slotCell": target_cell,
+			"slotPosition": target,
+			"routeGeneration": 3
+		},
+		"routeLease": { "targetCell": target_cell }
+	}
+	executor.call("_update_forager_goal", entry_data, body, 1.0 / 60.0)
+	var moving_phase := String(entry_data.get("jobPhase", ""))
+	entry_data["routeAuthorityV2"]["state"] = "arrived"
+	executor.call("_update_forager_goal", entry_data, body, 1.0 / 60.0)
+	var arrived_phase := String(entry_data.get("jobPhase", ""))
+	var passed := moving_phase == "outbound" and arrived_phase == "gathering"
+	var details := { "movingPhase": moving_phase, "arrivedPhase": arrived_phase, "targetCell": target_cell }
+	fake_npc.queue_free()
+	return outcome(passed, JSON.stringify(details), ["proximity_without_arrival_cannot_gather", "exact_arrived_claim_enters_gathering"], details)
+
+func test_vox42_blocked_slot_replans_to_clear_slot(_mode: String) -> Dictionary:
+	var setup := vox42_reserved_forager_setup("slot_retry")
+	var fake_npc: FakeNpcSystem = setup.fakeNpc
+	var executor: Variant = setup.executor
+	var entry_data: Dictionary = setup.entry
+	var body: CharacterBody3D = entry_data.get("body")
+	var blocked_position: Vector3 = entry_data.get("jobTarget")
+	var clear_position := blocked_position + Vector3(0.0, 0.0, CELL)
+	entry_data["jobApproachTargetObjectId"] = "prop:slot_retry"
+	entry_data["jobApproachCandidateIndex"] = 0
+	entry_data["jobApproachCandidates"] = [
+		{ "slotId": "slot:0", "position": blocked_position, "cell": Vector2i(40, 0) },
+		{ "slotId": "slot:1", "position": clear_position, "cell": Vector2i(40, 1) }
+	]
+	entry_data["routineRouteV2RequestId"] = "forager_slot_retry:v2:2:1"
+	entry_data["routineRouteV2IntentKind"] = "forage"
+	entry_data["routineRouteV2SemanticKind"] = "forage_target"
+	entry_data["_routineRouteV2Intent"] = { "jobObjectId": "prop:slot_retry" }
+	entry_data["jobReservationRouteRequestId"] = "forager_slot_retry:v2:2:1"
+	entry_data["jobReservationRouteGeneration"] = 2
+	entry_data["routeAuthorityV2"] = {
+		"requestId": "forager_slot_retry:v2:2:1",
+		"generation": 2,
+		"state": "unreachable_static",
+		"reason": "blocked_capsule_probe"
+	}
+	executor.call("_update_forager_goal", entry_data, body, 1.0 / 60.0)
+	var advanced_slot := String(entry_data.get("jobApproachSlotId", ""))
+	body.global_position = Vector3(CELL * 4.0, 0.0, 0.0)
+	var route_result: Dictionary = executor.call("_advance_job_motion", entry_data, body, 1.0 / 60.0)
+	var intent: Dictionary = entry_data.get("_routineRouteV2Intent", {}) if entry_data.get("_routineRouteV2Intent", {}) is Dictionary else {}
+	var claim: Dictionary = intent.get("interactionClaim", {}) if intent.get("interactionClaim", {}) is Dictionary else {}
+	var cells: Array = intent.get("candidateCells", []) if intent.get("candidateCells", []) is Array else []
+	var passed: bool = fake_npc.forage_slot_advances == 1 \
+		and advanced_slot == "slot:1" \
+		and String(entry_data.get("jobPhase", "")) == "outbound" \
+		and cells == [Vector2i(40, 1)] \
+		and String(claim.get("slotId", "")) == "slot:1" \
+		and claim.get("slotCell", Vector2i.ZERO) == Vector2i(40, 1)
+	var details := {
+		"slotAdvances": fake_npc.forage_slot_advances,
+		"advancedSlot": advanced_slot,
+		"releaseReasons": fake_npc.reservation_release_reasons.duplicate(),
+		"routeResult": route_result,
+		"intent": intent
+	}
+	fake_npc.queue_free()
+	return outcome(passed, JSON.stringify(details), ["blocked_exact_slot_released", "clear_exact_slot_replanned_and_claimed"], details)
+
+func test_vox42_pending_probe_publishes_bounded_semantic(_mode: String) -> Dictionary:
+	var fake_npc := FakeNpcSystem.new()
+	var fake_autonomy := FakeAutonomy.new()
+	fake_npc.add_child(fake_autonomy)
+	var executor: Variant = make_executor(fake_npc, fake_autonomy)
+	fake_autonomy.route_authority_v2.probe_sample_budget_per_frame = 0
+	var prop := Node3D.new()
+	fake_npc.add_child(prop)
+	prop.position = Vector3(CELL * 40.0, 0.0, 0.0)
+	var entry_data := entry("Forager", { "id": "forager_pending_semantic", "job": "forage", "position": Vector3(CELL * 4.0, 0.0, 0.0) })
+	var body: CharacterBody3D = entry_data.get("body")
+	entry_data["jobPhase"] = "outbound"
+	entry_data["jobTimer"] = 5.0
+	entry_data["jobTargetNode"] = prop
+	entry_data["jobTarget"] = prop.position
+	entry_data["jobObjectId"] = "prop:pending_semantic"
+	entry_data["jobReservationId"] = "prop:pending_semantic:slot:0:forager_pending_semantic:1"
+	entry_data["jobApproachSlotId"] = "slot:0"
+	entry_data["jobApproachSlotPosition"] = prop.position
+	entry_data["jobApproachSlotCell"] = Vector2i(40, 0)
+	for _slice in range(512):
+		fake_autonomy.route_authority_v2.begin_frame()
+		executor.call("_advance_job_motion", entry_data, body, 1.0 / 60.0)
+		var slice_authority: Dictionary = entry_data.get("routeAuthorityV2", {}) if entry_data.get("routeAuthorityV2", {}) is Dictionary else {}
+		if String(slice_authority.get("state", "")) == "probing":
+			break
+	var semantic_kind := String(entry_data.get("routineRouteV2SemanticKind", ""))
+	var intent_kind := String(entry_data.get("routineRouteV2IntentKind", ""))
+	var authority: Dictionary = entry_data.get("routeAuthorityV2", {}) if entry_data.get("routeAuthorityV2", {}) is Dictionary else {}
+	authority["pendingProbeFrames"] = 300
+	entry_data["routeAuthorityV2"] = authority
+	var timed_out := bool(executor.call("_forager_pending_route_timed_out", entry_data, 1.0 / 60.0))
+	var passed := semantic_kind == "forage_target" \
+		and intent_kind == "forage" \
+		and String(authority.get("state", "")) == "probing" \
+		and timed_out
+	var details := { "semanticKind": semantic_kind, "intentKind": intent_kind, "authority": authority, "timedOut": timed_out }
+	fake_npc.queue_free()
+	return outcome(passed, JSON.stringify(details), ["probing_request_publishes_forage_semantic", "probe_starvation_enters_bounded_pending_policy"], details)
+
+func test_vox42_non_home_door_keeps_forage_route(_mode: String) -> Dictionary:
+	var setup := vox42_reserved_forager_setup("non_home_door")
+	var fake_npc: FakeNpcSystem = setup.fakeNpc
+	var executor: Variant = setup.executor
+	var entry_data: Dictionary = setup.entry
+	var body: CharacterBody3D = entry_data.get("body")
+	body.global_position = Vector3(CELL * 4.0, 0.0, 0.0)
+	entry_data["activeDoorPortalId"] = "door:other-building"
+	entry_data["activeDoorDirection"] = "z+"
+	var result: Dictionary = executor.call("_advance_job_motion", entry_data, body, 1.0 / 60.0)
+	var intent: Dictionary = entry_data.get("_routineRouteV2Intent", {}) if entry_data.get("_routineRouteV2Intent", {}) is Dictionary else {}
+	var passed: bool = String(intent.get("semanticKind", "")) == "forage_target" \
+		and intent.get("targetCell", Vector2i.ZERO) == Vector2i(40, 0) \
+		and String(result.get("reason", "")) == "job_route"
+	var details := { "result": result, "intent": intent, "activeDoorPortalId": String(entry_data.get("activeDoorPortalId", "")) }
+	fake_npc.queue_free()
+	return outcome(passed, JSON.stringify(details), ["non_home_door_does_not_hijack_job_route", "door_crossing_continues_exact_forage_intent"], details)
+
+func vox42_reserved_forager_setup(suffix: String) -> Dictionary:
+	var fake_npc := FakeNpcSystem.new()
+	var executor: Variant = make_executor(fake_npc)
+	var prop := Node3D.new()
+	prop.name = "VOX42_%s" % suffix
+	fake_npc.add_child(prop)
+	prop.position = Vector3(CELL * 40.0, 0.0, 0.0)
+	var entry_data := entry("Forager", {
+		"id": "forager_%s" % suffix,
+		"job": "forage",
+		"position": Vector3.ZERO
+	})
+	entry_data["jobPhase"] = "outbound"
+	entry_data["jobTimer"] = 5.0
+	entry_data["jobTargetNode"] = prop
+	entry_data["jobTarget"] = prop.position
+	entry_data["jobObjectId"] = "prop:%s" % suffix
+	entry_data["jobReservationId"] = "prop:%s:slot:0:forager_%s:1" % [suffix, suffix]
+	entry_data["jobApproachSlotId"] = "slot:0"
+	entry_data["jobApproachSlotPosition"] = prop.position
+	entry_data["jobApproachSlotCell"] = Vector2i(40, 0)
+	return { "fakeNpc": fake_npc, "executor": executor, "entry": entry_data }
 
 func test_door_crossing_continues_while_brain_skipped(_mode: String) -> Dictionary:
 	var fake_npc := FakeNpcSystem.new()
@@ -1229,6 +1811,7 @@ func make_executor(fake_npc: FakeNpcSystem, fake_autonomy: Variant = null) -> Va
 	autonomy.route_world = FakeRouteWorld.new()
 	autonomy.route_authority_v2 = NpcRouteAuthorityV2Script.new()
 	autonomy.route_authority_v2.setup(fake_npc, fake_main, FakeCollisionProbe.new())
+	fake_npc.test_route_authority_v2 = autonomy.route_authority_v2
 	var perception := NpcPerceptionServiceScript.new()
 	perception.setup(autonomy, fake_npc)
 	var executor := NpcPlanExecutorScript.new()
