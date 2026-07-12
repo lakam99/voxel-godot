@@ -2524,11 +2524,12 @@ func test_motor_player_npc_solid_separation(_mode: String) -> Dictionary:
 		(npc_mask & NpcConstantsScript.COLLISION_PLAYER_BODY) != 0
 		and (npc_mask & NpcConstantsScript.COLLISION_NPC_BODY) != 0
 		and (npc_mask & NpcConstantsScript.COLLISION_WORLD_QUERY) != 0
+		and (npc_mask & NpcConstantsScript.COLLISION_TERRAIN_BODY) != 0
 	)
 	return outcome(
 		passed,
-		"npcMask=%d playerLayer=%d npcLayer=%d worldLayer=%d" % [npc_mask, NpcConstantsScript.COLLISION_PLAYER_BODY, NpcConstantsScript.COLLISION_NPC_BODY, NpcConstantsScript.COLLISION_WORLD_QUERY],
-		["npc_collides_with_player_layer", "npc_collides_with_npc_layer", "npc_collides_with_world_layer"],
+		"npcMask=%d playerLayer=%d npcLayer=%d worldLayer=%d terrainLayer=%d" % [npc_mask, NpcConstantsScript.COLLISION_PLAYER_BODY, NpcConstantsScript.COLLISION_NPC_BODY, NpcConstantsScript.COLLISION_WORLD_QUERY, NpcConstantsScript.COLLISION_TERRAIN_BODY],
+		["npc_collides_with_player_layer", "npc_collides_with_npc_layer", "npc_collides_with_world_layer", "npc_collides_with_terrain_layer"],
 		{ "npcMask": npc_mask, "playerLayer": NpcConstantsScript.COLLISION_PLAYER_BODY, "npcLayer": NpcConstantsScript.COLLISION_NPC_BODY }
 	)
 

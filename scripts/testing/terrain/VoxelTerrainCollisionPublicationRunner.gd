@@ -1,6 +1,8 @@
 extends Node
 
 const MAIN_SCENE: PackedScene = preload("res://scenes/Main.tscn")
+const CELL := 1.35
+const SURFACE_ALIGNMENT_TOLERANCE := CELL * 0.08
 
 var results: Array[Dictionary] = []
 var report_path := ""
@@ -23,6 +25,11 @@ func run() -> void:
 	player.velocity = Vector3.ZERO
 	var authority_ready := bool(main.call("ensure_voxel_terrain_authority"))
 	add_result("voxel_publication_authority_ready", authority_ready, "")
+	add_result(
+		"voxel_publication_player_mask_includes_terrain",
+		(player.collision_mask & 2) != 0,
+		"playerMask=%d terrainLayer=%d" % [player.collision_mask, 2]
+	)
 	var chunk_key: Vector2i = main.call("world_to_chunk", player.global_position.x, player.global_position.z)
 	main.call("create_chunk", chunk_key.x, chunk_key.y, true)
 	var runtime := main.get_node_or_null("VoxelTerrainRuntime")
@@ -49,6 +56,24 @@ func run() -> void:
 			and int(proof.get("hits", 0)) == int(proof.get("probeCount", -1))
 			and int(proof.get("surfaceMatches", 0)) == int(proof.get("probeCount", -1)),
 		JSON.stringify({"frame": published_frame, "chunk": chunk_key, "proof": proof, "runtime": runtime.call("stats")})
+	)
+	var position_proof: Dictionary = runtime.call("collision_proof_for_world_position", player.global_position, 0.0)
+	var position_samples = position_proof.get("samples", [])
+	var center_sample: Dictionary = position_samples[0] if position_samples is Array and not position_samples.is_empty() and position_samples[0] is Dictionary else {}
+	var expected_y := float(center_sample.get("expectedY", INF))
+	var hit_y := float(center_sample.get("hitY", -INF))
+	var alignment_delta := absf(expected_y - hit_y)
+	add_result(
+		"voxel_publication_analytic_surface_matches_collision",
+		bool(center_sample.get("hit", false)) and alignment_delta <= SURFACE_ALIGNMENT_TOLERANCE,
+		JSON.stringify({
+			"position": player.global_position,
+			"expectedY": expected_y,
+			"hitY": hit_y,
+			"delta": alignment_delta,
+			"tolerance": SURFACE_ALIGNMENT_TOLERANCE,
+			"proof": position_proof
+		})
 	)
 	var navigation_loaded_after := navigation_chunk_loaded_count(main)
 	add_result(

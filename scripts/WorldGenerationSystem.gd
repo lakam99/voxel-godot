@@ -179,7 +179,7 @@ func volume_surface_numeric_sample_at_grid_cell(cell: Vector3i) -> Vector3:
 	var position := Vector3(float(cell.x) * s, float(cell.y) * s, float(cell.z) * s)
 	if terrain_volume_service != null and terrain_volume_service.has_method("get_cell_state"):
 		var state: Dictionary = terrain_volume_service.get_cell_state(cell)
-		if terrain_state_affects_surface_projection(state):
+		if bool(state.get("edited", false)) and terrain_state_affects_surface_projection(state):
 			var solid := bool(state.get("solid", false))
 			var underground_air := String(state.get("biome", "")) == UNDERGROUND_AIR_BIOME and not solid
 			return Vector3(
@@ -687,10 +687,11 @@ func surface_boundary_y_between_numeric_samples(solid_cell_y: int, solid_density
 	var denominator := solid_density - air_density
 	if absf(denominator) <= 0.0001:
 		return float(solid_cell_y + 1) * cell_size()
-	var solid_center_y := (float(solid_cell_y) + 0.5) * cell_size()
-	var air_center_y := (float(solid_cell_y) + 1.5) * cell_size()
+	# VoxelTerrainGenerator writes these numeric samples at integer lattice positions.
+	var solid_lattice_y := float(solid_cell_y) * cell_size()
+	var air_lattice_y := float(solid_cell_y + 1) * cell_size()
 	var t := clampf(solid_density / denominator, 0.0, 1.0)
-	return lerp(solid_center_y, air_center_y, t)
+	return lerp(solid_lattice_y, air_lattice_y, t)
 
 func surface_boundary_y_between_samples(solid_cell_y: int, solid_sample: Dictionary, air_sample: Dictionary) -> float:
 	var solid_density := float(solid_sample.get("density", 1.0))

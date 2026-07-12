@@ -3,6 +3,7 @@ extends CharacterBody3D
 const CharacterMotor3DScript := preload("res://scripts/npc_ai/motor/CharacterMotor3D.gd")
 const CharacterMotorCommandScript := preload("res://scripts/npc_ai/contracts/CharacterMotorCommand.gd")
 const CharacterMotorProfileScript := preload("res://scripts/npc_ai/contracts/CharacterMotorProfile.gd")
+const NpcConstantsScript := preload("res://scripts/npc_ai/NpcConstants.gd")
 
 const WALK_SPEED := 9.5
 const SPRINT_SPEED := 15.5
@@ -50,6 +51,8 @@ var last_terrain_collision_proof := {}
 
 func _ready() -> void:
     set_physics_process(true)
+    collision_layer = NpcConstantsScript.COLLISION_PLAYER_BODY
+    collision_mask = NpcConstantsScript.COLLISION_WORLD_QUERY | NpcConstantsScript.COLLISION_TERRAIN_BODY
 
     camera = Camera3D.new()
     camera.name = "Camera3D"
