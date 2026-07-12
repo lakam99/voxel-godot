@@ -347,6 +347,15 @@
       "required": true
     },
     {
+      "id": "town_runtime_manifest_contract",
+      "description": "Serializable generated-town manifest, semantic home requirements, startup readiness, and generic NPC order-acceptance contracts",
+      "command": ".\\tools\\run-town-runtime-manifest-contract-tests.ps1",
+      "args": ["-ReportPath", "artifacts\\test-runners\\town-runtime-manifest-contract.json"],
+      "reportPath": "artifacts\\test-runners\\town-runtime-manifest-contract.json",
+      "evidenceLevel": "contract",
+      "required": true
+    },
+    {
       "id": "exact_fluid_payload_contract",
       "description": "Exact immutable step-1 fluid occupancy snapshot, halo, revision, cancellation, and save-load contract",
       "command": ".\\tools\\run-exact-fluid-payload-contract.ps1",
