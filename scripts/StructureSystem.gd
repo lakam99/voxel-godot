@@ -3,6 +3,8 @@ class_name StructureSystem
 
 const StructureDoorRulesScript := preload("res://scripts/StructureDoorRules.gd")
 const StructureLootScript := preload("res://scripts/StructureLoot.gd")
+const TownRuntimeManifestScript := preload("res://scripts/world/TownRuntimeManifest.gd")
+const StartupReadinessResultScript := preload("res://scripts/world/StartupReadinessResult.gd")
 
 const STREAMING_STRUCTURE_OPS_PER_FRAME := 24
 const STREAMING_STRUCTURE_FRAME_BUDGET_MS := 6.0
@@ -26,6 +28,8 @@ var pending_structure_ops: Array = []
 var pending_structure_op_index := 0
 var defer_structure_ops := false
 var deferred_town_home_records := {}
+var town_manifest_publish_states := {}
+var active_structure_town_key := ""
 var terrain_surface_sample_cache := {}
 var terrain_footprint_records := {}
 var natural_prop_exclusion_records := {}
@@ -51,6 +55,8 @@ func reset() -> void:
     pending_structure_op_index = 0
     defer_structure_ops = false
     deferred_town_home_records.clear()
+    town_manifest_publish_states.clear()
+    active_structure_town_key = ""
     terrain_surface_sample_cache.clear()
     terrain_footprint_records.clear()
     natural_prop_exclusion_records.clear()
@@ -187,13 +193,29 @@ func enqueue_deferred_build(build_callable: Callable) -> void:
     defer_structure_ops = previous
 
 func enqueue_deferred_town_build(town: Dictionary) -> void:
+    if town.is_empty() or main == null:
+        return
     var rng := RandomNumberGenerator.new()
     rng.seed = main.hash_string("%s:town-build:%d,%d" % [main.seed_text, int(town["regionX"]), int(town["regionZ"])])
     var town_key := town_key_for(town)
+    var publish_state: Dictionary = town_manifest_publish_states.get(town_key, {}) if town_manifest_publish_states.get(town_key, {}) is Dictionary else {}
+    if String(publish_state.get("status", "")) in ["queued", "building", "published"]:
+        return
+    var attempts := int(publish_state.get("generationAttempts", 0)) + 1
+    town_manifest_publish_states[town_key] = {
+        "status": "queued",
+        "generationAttempts": attempts,
+        "startedUsec": int(publish_state.get("startedUsec", Time.get_ticks_usec())),
+        "updatedUsec": Time.get_ticks_usec(),
+        "desiredHomeCount": town_home_count(town),
+        "builtHomeCount": 0,
+        "failureReasons": []
+    }
     deferred_town_home_records[town_key] = []
     generated_town_count += 1
     enqueue_structure_op({
         "type": "town_build_phase",
+        "townKey": town_key,
         "state": {
             "town": town.duplicate(true),
             "townKey": town_key,
@@ -223,7 +245,14 @@ func process_deferred_town_build_phase(state_value) -> void:
     var phase := String(state.get("phase", "paths"))
     var complete := false
     var previous := defer_structure_ops
+    var previous_town_key := active_structure_town_key
     defer_structure_ops = true
+    active_structure_town_key = town_key
+    update_town_manifest_publish_state(town_key, {
+        "status": "building",
+        "builtHomeCount": int(state.get("builtHomeCount", 0)),
+        "desiredHomeCount": int(state.get("desiredHomeCount", town_home_count(town)))
+    })
     if phase == "paths":
         build_town_paths(center_x, center_z, int(town["radius"]), level)
         state["phase"] = "perimeter"
@@ -253,9 +282,11 @@ func process_deferred_town_build_phase(state_value) -> void:
     else:
         complete = true
     defer_structure_ops = previous
+    active_structure_town_key = previous_town_key
     if not complete:
         enqueue_structure_op({
             "type": "town_build_phase",
+            "townKey": town_key,
             "state": state
         })
 
@@ -289,6 +320,10 @@ func process_deferred_town_home_phase(state: Dictionary, town: Dictionary, rng: 
         break
     state["homeSiteIndex"] = site_index
     state["builtHomeCount"] = built_home_count
+    update_town_manifest_publish_state(town_key, {
+        "builtHomeCount": built_home_count,
+        "desiredHomeCount": desired_home_count
+    })
     if built_home_count >= desired_home_count or site_index >= sites.size():
         state["phase"] = "market"
 
@@ -301,6 +336,8 @@ func pending_structure_op_count() -> int:
     return max(0, pending_structure_ops.size() - pending_structure_op_index)
 
 func enqueue_structure_op(op: Dictionary) -> void:
+    if active_structure_town_key != "" and String(op.get("townKey", "")) == "":
+        op["townKey"] = active_structure_town_key
     pending_structure_ops.append(op)
 
 func process_pending_structure_ops(max_ops := STREAMING_STRUCTURE_OPS_PER_FRAME, budget_ms := STREAMING_STRUCTURE_FRAME_BUDGET_MS) -> int:
@@ -368,9 +405,17 @@ func publish_deferred_town_home_records(town_key: String) -> void:
     var existing_records: Array = existing_value if existing_value is Array else []
     if existing_records.size() > records.size():
         deferred_town_home_records.erase(town_key)
+        update_town_manifest_publish_state(town_key, {
+            "status": "published",
+            "builtHomeCount": existing_records.size()
+        })
         return
     town_home_records[town_key] = records.duplicate(true)
     deferred_town_home_records.erase(town_key)
+    update_town_manifest_publish_state(town_key, {
+        "status": "published",
+        "builtHomeCount": records.size()
+    })
 
 func standalone_structure_type(rng: RandomNumberGenerator) -> String:
     var roll := rng.randf()
@@ -651,6 +696,9 @@ func build_town(town: Dictionary) -> void:
     var center_z := int(town["centerZ"])
     var level := float(town["level"])
     var town_key := town_key_for(town)
+    var previous_town_key := active_structure_town_key
+    active_structure_town_key = town_key
+    begin_town_manifest_generation_state(town_key, town)
     if defer_structure_ops:
         deferred_town_home_records[town_key] = []
     else:
@@ -695,6 +743,12 @@ func build_town(town: Dictionary) -> void:
             "type": "publish_town_home_records",
             "townKey": town_key
         })
+    else:
+        update_town_manifest_publish_state(town_key, {
+            "status": "published",
+            "builtHomeCount": built_home_count
+        })
+    active_structure_town_key = previous_town_key
 
 func build_town_paths(center_x: int, center_z: int, radius: int, level: float) -> void:
     var path_span: int = max(10, radius - 2)
@@ -848,6 +902,13 @@ func build_town_market(center_x: int, center_z: int, level: float, rng: RandomNu
 func town_key_for(town: Dictionary) -> String:
     return "%d,%d" % [int(town.get("centerX", 0)), int(town.get("centerZ", 0))]
 
+func town_home_door_portal_id(door_cell: Vector2i, level: float, door_side: int) -> String:
+    if main == null:
+        return ""
+    var world_y: float = level + float(main.CELL) * 0.48
+    var cell_y: int = floori(world_y / float(main.CELL)) + 1
+    return "door:door-group:%d,%d,%d:%d" % [door_cell.x, cell_y, door_cell.y, door_side]
+
 func record_town_home(town_key: String, town: Dictionary, base_x: int, base_z: int, width: int, depth: int, door_side: int, index: int) -> void:
     if town_key == "":
         return
@@ -906,6 +967,8 @@ func record_town_home(town_key: String, town: Dictionary, base_x: int, base_z: i
             home_route_cells.append(route_cell)
     var record := {
         "id": "%s:home:%d" % [town_key, index],
+        "stableId": "%s:home:%d" % [town_key, index],
+        "homeKey": index,
         "townKey": town_key,
         "townCenter": Vector2i(int(town.get("centerX", 0)), int(town.get("centerZ", 0))),
         "townRadius": int(town.get("radius", main.TOWN_RADIUS_CELLS)),
@@ -913,6 +976,7 @@ func record_town_home(town_key: String, town: Dictionary, base_x: int, base_z: i
         "homeCell": home_cell,
         "porchCell": porch_cell,
         "doorCell": door_cell,
+        "doorPortalId": town_home_door_portal_id(door_cell, float(town.get("level", 16.0)), door_side),
         "interiorLandingCell": interior_landing_cell,
         "homeRouteCells": home_route_cells,
         "guardCell": guard_cell,
@@ -930,66 +994,183 @@ func record_town_home(town_key: String, town: Dictionary, base_x: int, base_z: i
 func town_home_records_snapshot() -> Dictionary:
     return town_home_records.duplicate(true)
 
-func ensure_town_home_records(town: Dictionary, minimum_count := 4) -> Array:
-    if town.is_empty():
+func ensure_town_home_records(town: Dictionary, requirements_or_minimum = {}) -> Array:
+    var requirements := normalized_town_manifest_requirements(requirements_or_minimum)
+    var status := town_manifest_status(town, requirements)
+    if String(status.get("status", "")) != StartupReadinessResultScript.STATUS_READY:
         return []
     var town_key := town_key_for(town)
-    if town_key == "":
-        return []
-    var existing_value = town_home_records.get(town_key, [])
-    var existing: Array = existing_value if existing_value is Array else []
-    if existing.size() >= minimum_count:
-        return existing.duplicate(true)
-    var deferred_value = deferred_town_home_records.get(town_key, [])
-    var deferred_records: Array = deferred_value if deferred_value is Array else []
-    if deferred_records.size() >= minimum_count:
-        town_home_records[town_key] = deferred_records.duplicate(true)
-        deferred_town_home_records.erase(town_key)
-        return (town_home_records[town_key] as Array).duplicate(true)
-    build_town_homes_now(town, town_key)
-    existing_value = town_home_records.get(town_key, [])
-    existing = existing_value if existing_value is Array else []
-    return existing.duplicate(true)
+    var records_value = town_home_records.get(town_key, [])
+    return (records_value as Array).duplicate(true) if records_value is Array else []
 
-func build_town_homes_now(town: Dictionary, town_key: String) -> void:
-    if main == null or town_key == "":
+func town_manifest_status(town: Dictionary, requirements: Dictionary) -> Dictionary:
+    if main == null:
+        return StartupReadinessResultScript.failed("missing_structure_main", {}, [], {})
+    if town.is_empty():
+        return StartupReadinessResultScript.failed("missing_town", {}, [], {})
+    var requirements_validation := validate_town_manifest_requirements(requirements)
+    if not bool(requirements_validation.get("ok", false)):
+        return StartupReadinessResultScript.failed("invalid_town_requirements", {}, [], {
+            "failureReasons": requirements_validation.get("problems", [])
+        })
+    var town_key := town_key_for(town)
+    var required_keys: Array = requirements.get("requiredHomeKeys", [])
+    var records_value = town_home_records.get(town_key, [])
+    var records: Array = records_value.duplicate(true) if records_value is Array else []
+    var portal_ids: Array = []
+    var published_keys: Array = []
+    for record_value in records:
+        if not (record_value is Dictionary):
+            continue
+        var record: Dictionary = record_value
+        published_keys.append(int(record.get("homeKey", record.get("buildingIndex", -1))))
+        var portal_id := String(record.get("doorPortalId", ""))
+        if portal_id != "":
+            portal_ids.append(portal_id)
+    published_keys = TownRuntimeManifestScript.sorted_unique_ints(published_keys)
+    var pending_count := pending_structure_op_count_for_town(town_key)
+    var manifest := TownRuntimeManifestScript.build(
+        String(main.seed_text),
+        town_key,
+        Vector2i(int(town.get("centerX", 0)), int(town.get("centerZ", 0))),
+        1,
+        required_keys,
+        records,
+        portal_ids,
+        pending_count
+    )
+    var validation: Dictionary = TownRuntimeManifestScript.validate(manifest)
+    var publish_state: Dictionary = town_manifest_publish_states.get(town_key, {}) if town_manifest_publish_states.get(town_key, {}) is Dictionary else {}
+    var elapsed_ms := 0.0
+    var started_usec := int(publish_state.get("startedUsec", 0))
+    if started_usec > 0:
+        elapsed_ms = maxf(0.0, float(Time.get_ticks_usec() - started_usec) / 1000.0)
+    var metrics := {
+        "townKey": town_key,
+        "requiredKeys": required_keys.duplicate(),
+        "publishedKeys": published_keys,
+        "pendingOpCount": pending_count,
+        "generationAttempts": int(publish_state.get("generationAttempts", 0)),
+        "elapsedLoadingMs": snappedf(elapsed_ms, 0.001),
+        "publishState": String(publish_state.get("status", "not_requested")),
+        "failureReasons": validation.get("problems", [])
+    }
+    if pending_count > 0 or String(publish_state.get("status", "")) in ["queued", "building"]:
+        return StartupReadinessResultScript.pending(
+            "required_town_structure_operations_pending",
+            manifest,
+            ["town_structure_operations"],
+            metrics
+        )
+    if bool(validation.get("ok", false)):
+        return StartupReadinessResultScript.ready(manifest, metrics)
+    if int(publish_state.get("generationAttempts", 0)) > 0 or String(publish_state.get("status", "")) in ["published", "failed"]:
+        metrics["publishState"] = "failed"
+        return StartupReadinessResultScript.failed("required_town_manifest_generation_failed", manifest, [], metrics)
+    return StartupReadinessResultScript.pending("town_manifest_generation_not_requested", manifest, ["town_generation"], metrics)
+
+func request_town_manifest_publication(town: Dictionary, requirements: Dictionary, max_ops := STREAMING_STRUCTURE_OPS_PER_FRAME, budget_ms := STREAMING_STRUCTURE_FRAME_BUDGET_MS) -> Dictionary:
+    var initial := town_manifest_status(town, requirements)
+    if String(initial.get("status", "")) in [StartupReadinessResultScript.STATUS_READY, StartupReadinessResultScript.STATUS_FAILED]:
+        return initial
+    var town_key := town_key_for(town)
+    var publish_state: Dictionary = town_manifest_publish_states.get(town_key, {}) if town_manifest_publish_states.get(town_key, {}) is Dictionary else {}
+    if int(publish_state.get("generationAttempts", 0)) == 0 and pending_structure_op_count_for_town(town_key) == 0:
+        generated_towns[Vector2i(int(town.get("regionX", 0)), int(town.get("regionZ", 0)))] = true
+        enqueue_deferred_town_build(town)
+    process_pending_structure_ops(maxi(1, int(max_ops)), maxf(0.1, float(budget_ms)))
+    return town_manifest_status(town, requirements)
+
+func pending_structure_op_count_for_town(town_key: String) -> int:
+    if town_key == "":
+        return 0
+    var count := 0
+    for index in range(pending_structure_op_index, pending_structure_ops.size()):
+        var op_value = pending_structure_ops[index]
+        if not (op_value is Dictionary):
+            continue
+        var op: Dictionary = op_value
+        var owner_key := String(op.get("townKey", ""))
+        if owner_key == "" and op.get("state", {}) is Dictionary:
+            owner_key = String((op.get("state", {}) as Dictionary).get("townKey", ""))
+        if owner_key == town_key:
+            count += 1
+    return count
+
+func begin_town_manifest_generation_state(town_key: String, town: Dictionary) -> void:
+    var current: Dictionary = town_manifest_publish_states.get(town_key, {}) if town_manifest_publish_states.get(town_key, {}) is Dictionary else {}
+    town_manifest_publish_states[town_key] = {
+        "status": "building",
+        "generationAttempts": maxi(1, int(current.get("generationAttempts", 0))),
+        "startedUsec": int(current.get("startedUsec", Time.get_ticks_usec())),
+        "updatedUsec": Time.get_ticks_usec(),
+        "desiredHomeCount": town_home_count(town),
+        "builtHomeCount": int(current.get("builtHomeCount", 0)),
+        "failureReasons": []
+    }
+
+func update_town_manifest_publish_state(town_key: String, changes: Dictionary) -> void:
+    if town_key == "":
         return
-    var rng := RandomNumberGenerator.new()
-    rng.seed = main.hash_string("%s:town-build:%d,%d" % [main.seed_text, int(town["regionX"]), int(town["regionZ"])])
-    var center_x := int(town["centerX"])
-    var center_z := int(town["centerZ"])
-    var level := float(town["level"])
-    var desired_home_count := town_home_count(town)
-    var sites := town_home_sites(town, rng)
-    town_home_records[town_key] = []
-    deferred_town_home_records.erase(town_key)
-    var previous := defer_structure_ops
-    defer_structure_ops = false
-    var built_home_count := 0
-    for i in range(sites.size()):
-        if built_home_count >= desired_home_count:
-            break
-        var site: Dictionary = sites[i] if sites[i] is Dictionary else {}
-        if site.is_empty():
-            continue
-        var base_x := center_x + int(site["dx"])
-        var base_z := center_z + int(site["dz"])
-        var side := int(site["side"])
-        if town_home_site_excluded(town, base_x, base_z, 10, 10, side):
-            continue
-        var width := rng.randi_range(7, 9)
-        var depth := rng.randi_range(7, 9)
-        var wall_height := rng.randi_range(4, 5)
-        var wall_type := "woodBlock" if i % 2 == 0 else "stoneBlock"
-        if rng.randf() < 0.35:
-            wall_type = "stoneBlock" if wall_type == "woodBlock" else "woodBlock"
-        var roof_type := "stoneBlock" if wall_type == "woodBlock" else "woodBlock"
-        if town_home_site_excluded(town, base_x, base_z, width, depth, side):
-            continue
-        build_building(base_x, base_z, level, width, depth, wall_height, wall_type, roof_type, side, rng, true)
-        record_town_home(town_key, town, base_x, base_z, width, depth, side, built_home_count)
-        built_home_count += 1
-    defer_structure_ops = previous
+    var state: Dictionary = town_manifest_publish_states.get(town_key, {}) if town_manifest_publish_states.get(town_key, {}) is Dictionary else {}
+    for key in changes.keys():
+        state[key] = changes[key]
+    state["updatedUsec"] = Time.get_ticks_usec()
+    town_manifest_publish_states[town_key] = state
+
+func normalized_town_manifest_requirements(value) -> Dictionary:
+    if value is Dictionary:
+        return (value as Dictionary).duplicate(true)
+    var minimum_count := maxi(0, int(value))
+    var keys: Array = []
+    for key in range(minimum_count):
+        keys.append(key)
+    return {
+        "ok": true,
+        "requiredHomeKeys": keys,
+        "actorHomeAssignments": {},
+        "problems": []
+    }
+
+func validate_town_manifest_requirements(requirements: Dictionary) -> Dictionary:
+    var problems: Array[String] = []
+    var required_keys_value = requirements.get("requiredHomeKeys", [])
+    var required_keys := {}
+    if not (required_keys_value is Array):
+        problems.append("requiredHomeKeys must be an array")
+    else:
+        for index in range((required_keys_value as Array).size()):
+            var key_value = (required_keys_value as Array)[index]
+            if not (key_value is int):
+                problems.append("requiredHomeKeys[%d] must be an integer" % index)
+                continue
+            var home_key := int(key_value)
+            if home_key < 0:
+                problems.append("requiredHomeKeys[%d] must be non-negative" % index)
+            elif required_keys.has(home_key):
+                problems.append("requiredHomeKeys contains duplicate key %d" % home_key)
+            else:
+                required_keys[home_key] = true
+    var assignments_value = requirements.get("actorHomeAssignments", {})
+    if not (assignments_value is Dictionary):
+        problems.append("actorHomeAssignments must be a dictionary")
+    else:
+        for actor_id_value in (assignments_value as Dictionary).keys():
+            var actor_id := String(actor_id_value).strip_edges()
+            var assignment_value = (assignments_value as Dictionary).get(actor_id_value)
+            if actor_id == "":
+                problems.append("actorHomeAssignments contains an empty actor id")
+            if not (assignment_value is int):
+                problems.append("actorHomeAssignments[%s] must be an integer" % actor_id)
+                continue
+            var assigned_key := int(assignment_value)
+            if assigned_key < 0 or not required_keys.has(assigned_key):
+                problems.append("actorHomeAssignments[%s] references undeclared homeKey %d" % [actor_id, assigned_key])
+    for problem in requirements.get("problems", []):
+        problems.append(String(problem))
+    if requirements.has("ok") and not bool(requirements.get("ok", false)) and problems.is_empty():
+        problems.append("requirements builder reported failure")
+    return {"ok": problems.is_empty(), "problems": problems}
 
 func build_building(base_x: int, base_z: int, level: float, width: int, depth: int, wall_height: int, wall_type: String, roof_type: String, door_side: int, rng: RandomNumberGenerator, town_building: bool) -> void:
     generated_building_count += 1

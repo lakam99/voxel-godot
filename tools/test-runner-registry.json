@@ -356,6 +356,15 @@
       "required": true
     },
     {
+      "id": "structure_town_manifest_contract",
+      "description": "StructureSystem deterministic town-manifest publication, queue ownership, pending readiness, failure, and idempotency contracts",
+      "command": ".\\tools\\run-structure-town-manifest-contract-tests.ps1",
+      "args": ["-ReportPath", "artifacts\\test-runners\\structure-town-manifest-contract.json"],
+      "reportPath": "artifacts\\test-runners\\structure-town-manifest-contract.json",
+      "evidenceLevel": "contract",
+      "required": true
+    },
+    {
       "id": "exact_fluid_payload_contract",
       "description": "Exact immutable step-1 fluid occupancy snapshot, halo, revision, cancellation, and save-load contract",
       "command": ".\\tools\\run-exact-fluid-payload-contract.ps1",
