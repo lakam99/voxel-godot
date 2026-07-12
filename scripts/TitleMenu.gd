@@ -24,6 +24,7 @@ func _ready() -> void:
     maybe_start_real_boot_mira_runner()
     maybe_start_real_boot_tutorial_runner()
     maybe_start_vox43_known_save_runner()
+    maybe_start_vox55_terrain_survey_runner()
 
 func maybe_start_real_boot_mira_runner() -> void:
     if OS.get_environment("VOXEL_ACTUAL_GAMEPLAY_MIRA_REAL_BOOT").strip_edges() != "1":
@@ -67,6 +68,20 @@ func maybe_start_vox43_known_save_runner() -> void:
         push_error("VOX-43 known-save runner could not be instantiated")
         return
     runner.name = "Vox43KnownSaveRealBootRunner"
+    add_child(runner)
+
+func maybe_start_vox55_terrain_survey_runner() -> void:
+    if OS.get_environment("VOXEL_VOX55_TERRAIN_SURVEY_REAL_BOOT").strip_edges() != "1":
+        return
+    var runner_script = load("res://scripts/testing/terrain/Vox55TerrainScopeSurveyRunner.gd")
+    if runner_script == null or not runner_script.can_instantiate():
+        push_error("VOX-55 terrain survey runner script could not be loaded")
+        return
+    var runner = runner_script.new()
+    if runner == null:
+        push_error("VOX-55 terrain survey runner could not be instantiated")
+        return
+    runner.name = "Vox55TerrainScopeSurveyRealBootRunner"
     add_child(runner)
 
 func _process(delta: float) -> void:
