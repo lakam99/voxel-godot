@@ -1,5 +1,7 @@
 extends "res://scripts/MainDiscoveryFlow.gd"
 
+const VoxelTerrainRuntimeScript := preload("res://scripts/terrain/VoxelTerrainRuntime.gd")
+
 const STREAMING_CHUNK_CREATES_PER_FRAME := 1
 const STREAMING_CHUNK_PROP_ATTEMPTS_PER_FRAME := 1
 const STREAMING_CHUNK_DETAIL_ATTEMPTS_PER_FRAME := 3
@@ -17,6 +19,7 @@ const STREAMING_EXTERIOR_FULL_REFRESH_MAX_CHUNK_DISTANCE := 0
 const STREAMING_SOLID_PLACEHOLDER_DEPTH_CELLS := 80
 
 var last_streaming_exterior_full_refresh_frame := -1000000
+var voxel_terrain_runtime: Node3D
 
 func setup_playtest_camp_case(cell: Vector2i) -> void:
     if inventory_system:
@@ -343,6 +346,12 @@ func process_pending_terrain_volume_light_updates(max_columns := 2) -> int:
     return processed
 
 func update_chunks(force: bool = false) -> void:
+    if not ensure_voxel_terrain_authority():
+        report_voxel_authority_failure_once("update_chunks")
+        return
+    update_voxel_authority_chunks(force)
+
+func update_legacy_terrain_chunks_for_diagnostics(force: bool = false) -> void:
     var monitor = runtime_perf_monitor
     var center := world_to_chunk(player.position.x, player.position.z)
     process_pending_terrain_volume_light_updates()
@@ -417,7 +426,9 @@ func update_chunks(force: bool = false) -> void:
     var unload_start: int = monitor.begin_section("chunk_unload") if monitor != null else Time.get_ticks_usec()
     for key in chunks.keys():
         if not needed.has(key):
-            if npc_system and npc_system.has_method("notify_navigation_chunk_unloaded"):
+            if voxel_terrain_authority_active() and voxel_terrain_runtime.has_method("release_gameplay_chunk"):
+                voxel_terrain_runtime.call("release_gameplay_chunk", key)
+            elif npc_system and npc_system.has_method("notify_navigation_chunk_unloaded"):
                 npc_system.notify_navigation_chunk_unloaded(key)
             chunks[key].queue_free()
             chunks.erase(key)
@@ -437,6 +448,80 @@ func update_chunks(force: bool = false) -> void:
             structure_system.update_around(center_cell)
         if monitor != null:
             monitor.end_section("structure_update_around", structure_start)
+
+func ensure_voxel_terrain_authority() -> bool:
+    if voxel_terrain_runtime != null and is_instance_valid(voxel_terrain_runtime):
+        if String(voxel_terrain_runtime.get("configured_seed")) == seed_text:
+            return bool(voxel_terrain_runtime.get("authority_ready"))
+        voxel_terrain_runtime.queue_free()
+        voxel_terrain_runtime = null
+    var runtime := VoxelTerrainRuntimeScript.new() as Node3D
+    runtime.name = "VoxelTerrainRuntime"
+    add_child(runtime)
+    var result: Dictionary = runtime.call("setup", self)
+    if not bool(result.get("ok", false)):
+        push_error("VOX-59 terrain authority failed: %s" % String(result.get("reason", "unknown")))
+        runtime.queue_free()
+        return false
+    voxel_terrain_runtime = runtime
+    clear_chunk_asset_cache()
+    return true
+
+func report_voxel_authority_failure_once(source: String) -> void:
+    if bool(get_meta("voxel_authority_failure_reported", false)):
+        return
+    set_meta("voxel_authority_failure_reported", true)
+    push_error("VOX-59 fail-closed terrain authority unavailable at %s; legacy terrain presenters will not be activated" % source)
+
+func voxel_terrain_authority_active() -> bool:
+    return voxel_terrain_runtime != null \
+        and is_instance_valid(voxel_terrain_runtime) \
+        and bool(voxel_terrain_runtime.get("authority_ready"))
+
+func terrain_collision_motion_proof(from_position: Vector3, to_position: Vector3, footprint_radius := 0.42) -> Dictionary:
+    if not voxel_terrain_authority_active():
+        return {"passed": false, "reason": "voxel_terrain_authority_unavailable"}
+    if not voxel_terrain_runtime.has_method("collision_proof_for_motion"):
+        return {"passed": false, "reason": "voxel_collision_motion_api_missing"}
+    return voxel_terrain_runtime.call("collision_proof_for_motion", from_position, to_position, footprint_radius)
+
+func update_voxel_authority_chunks(force: bool) -> void:
+    var center := world_to_chunk(player.position.x, player.position.z)
+    var needed := {}
+    for dz in range(-render_distance, render_distance + 1):
+        for dx in range(-render_distance, render_distance + 1):
+            var chunk_key := Vector2i(center.x + dx, center.y + dz)
+            needed[chunk_key] = true
+            if chunks.has(chunk_key):
+                continue
+            if force:
+                create_chunk(chunk_key.x, chunk_key.y)
+            else:
+                queue_chunk_load(chunk_key)
+    if not force:
+        process_pending_chunk_loads(center)
+    for key_value in chunks.keys():
+        var key: Vector2i = key_value
+        if needed.has(key):
+            continue
+        chunks[key].queue_free()
+        chunks.erase(key)
+    prune_stale_pending_chunk_loads(needed)
+    prune_stale_pending_chunk_prop_spawns(needed)
+    queue_dirty_terrain_volume_chunk_refreshes()
+    var fluid_refreshes := process_pending_chunk_terrain_refreshes(center)
+    var fluid_assets_applied := apply_completed_terrain_meshing_jobs(center)
+    if fluid_refreshes <= 0 and fluid_assets_applied <= 0:
+        process_pending_terrain_meshing_jobs(center)
+    if not force:
+        if pending_streaming_structure_work_count() > 0 and pending_chunk_loads.is_empty():
+            process_streaming_structure_work()
+        if pending_chunk_loads.is_empty():
+            process_pending_chunk_prop_spawns()
+    elif structure_system != null:
+        var center_cell := Vector2i(world_to_cell(player.position.x), world_to_cell(player.position.z))
+        structure_system.update_around(center_cell)
+    last_center_chunk = center
 
 func process_streaming_structure_work() -> int:
     if structure_system == null:
@@ -600,6 +685,8 @@ func prune_stale_pending_generated_volume_exposure_scans(needed: Dictionary) -> 
 func queue_dirty_terrain_volume_chunk_refreshes() -> int:
     if world_generation_system == null or not world_generation_system.has_method("consume_terrain_volume_dirty_chunk_keys"):
         return 0
+    if voxel_terrain_authority_active() and voxel_terrain_runtime.has_method("collect_volume_edit_changes"):
+        voxel_terrain_runtime.call("collect_volume_edit_changes")
     var dirty_value = world_generation_system.call("consume_terrain_volume_dirty_chunk_keys", CHUNK_SIZE)
     if not (dirty_value is Array):
         return 0
@@ -831,6 +918,9 @@ func process_pending_terrain_meshing_jobs(center: Vector2i) -> int:
     return work_count
 
 func terrain_meshing_runtime_work_allowed(_center: Vector2i) -> bool:
+    if voxel_terrain_authority_active() and terrain_meshing_service != null and terrain_meshing_service.has_method("pending_job_count"):
+        if int(terrain_meshing_service.call("pending_job_count")) > 0:
+            return true
     if bool(get("visual_capture_active")) or bool(get("force_underground_volume_debug")) or bool(get("force_underground_volume_fine_focus")):
         return true
     if loaded_provisional_volume_mesh_work_pending():
@@ -1326,6 +1416,9 @@ func apply_terrain_mesh_assets_to_chunk(chunk_key: Vector2i, assets: Dictionary,
     if chunk == null or not is_instance_valid(chunk):
         chunks.erase(chunk_key)
         return false
+    if bool(chunk.get_meta("terrain_geometry_owned_by_chunk", true)) == false:
+        apply_chunk_fluid_mesh(chunk, assets.get("fluidMesh") as Mesh, chunk_key)
+        return true
     var mesh_instance := chunk.get_node_or_null("TerrainMesh") as MeshInstance3D
     var body := chunk.get_node_or_null("TerrainBody") as StaticBody3D
     var collision := body.get_node_or_null("TerrainCollision") as CollisionShape3D if body != null else null
@@ -1406,6 +1499,12 @@ func prune_stale_pending_chunk_prop_spawns(needed: Dictionary) -> void:
             pending_chunk_prop_spawns.erase(key)
 
 func create_chunk(cx: int, cz: int, defer_props := false, defer_streaming_collision := false) -> void:
+    if not ensure_voxel_terrain_authority():
+        report_voxel_authority_failure_once("create_chunk")
+        return
+    create_voxel_authority_chunk_container(cx, cz, defer_props)
+
+func create_legacy_terrain_chunk_for_diagnostics(cx: int, cz: int, defer_props := false, defer_streaming_collision := false) -> void:
     var monitor = runtime_perf_monitor
     var create_start: int = monitor.begin_section("chunk_create") if monitor != null else Time.get_ticks_usec()
     var chunk_key := Vector2i(cx, cz)
@@ -1493,6 +1592,49 @@ func create_chunk(cx: int, cz: int, defer_props := false, defer_streaming_collis
     if monitor != null:
         monitor.increment_counter("chunks_created")
         monitor.end_section("chunk_create", create_start)
+
+func create_voxel_authority_chunk_container(cx: int, cz: int, defer_props := false) -> void:
+    var chunk_key := Vector2i(cx, cz)
+    if chunks.has(chunk_key):
+        return
+    var monitor = runtime_perf_monitor
+    var create_start: int = monitor.begin_section("chunk_create") if monitor != null else Time.get_ticks_usec()
+    var chunk := Node3D.new()
+    chunk.name = "Chunk_%d_%d" % [cx, cz]
+    chunk.position = Vector3(cx * CHUNK_SIZE * CELL, 0.0, cz * CHUNK_SIZE * CELL)
+    chunk.set_meta("terrain_authority", "VoxelTerrain")
+    chunk.set_meta("terrain_geometry_owned_by_chunk", false)
+    chunk_root.add_child(chunk)
+    chunks[chunk_key] = chunk
+    if voxel_terrain_runtime != null and voxel_terrain_runtime.has_method("request_gameplay_chunk_publication"):
+        voxel_terrain_runtime.call("request_gameplay_chunk_publication", chunk_key)
+    request_voxel_authority_chunk_fluid(chunk_key, 0)
+    if defer_props:
+        queue_chunk_prop_spawn(chunk_key, chunk)
+    else:
+        var props_start: int = monitor.begin_section("chunk_spawn_props") if monitor != null else Time.get_ticks_usec()
+        spawn_chunk_props(chunk, cx, cz)
+        if monitor != null:
+            monitor.end_section("chunk_spawn_props", props_start)
+    if monitor != null:
+        monitor.increment_counter("voxel_authority_chunk_containers_created")
+        monitor.increment_counter("chunks_created")
+        monitor.end_section("chunk_create", create_start)
+
+func request_voxel_authority_chunk_fluid(chunk_key: Vector2i, priority := 0) -> bool:
+    if terrain_meshing_service == null or not terrain_meshing_service.has_method("request_chunk_assets"):
+        return false
+    var signature := chunk_asset_signature(chunk_key)
+    var result: Dictionary = terrain_meshing_service.call(
+        "request_chunk_assets",
+        chunk_key.x,
+        chunk_key.y,
+        signature,
+        false,
+        priority,
+        true
+    )
+    return String(result.get("status", "")) in ["queued", "pending", "ready"]
 
 func chunk_assets(cx: int, cz: int) -> Dictionary:
     var monitor = runtime_perf_monitor
@@ -1753,6 +1895,10 @@ func refresh_chunk_terrain_assets(cx: int, cz: int, notify_navigation := true, d
     if chunk == null or not is_instance_valid(chunk):
         chunks.erase(key)
         return false
+    if bool(chunk.get_meta("terrain_geometry_owned_by_chunk", true)) == false:
+        invalidate_chunk_asset_cache(key)
+        clear_stale_chunk_fluid_mesh(chunk, key)
+        return request_voxel_authority_chunk_fluid(key, 10)
     var mesh_instance := chunk.get_node_or_null("TerrainMesh") as MeshInstance3D
     var body := chunk.get_node_or_null("TerrainBody") as StaticBody3D
     var collision := body.get_node_or_null("TerrainCollision") as CollisionShape3D if body != null else null
@@ -1859,6 +2005,10 @@ func refresh_chunk_collision_shape(cx: int, cz: int) -> bool:
     return true
 
 func rebuild_chunk(cx: int, cz: int, defer_props := false) -> void:
+    if voxel_terrain_authority_active():
+        if voxel_terrain_runtime.has_method("collect_volume_edit_changes"):
+            voxel_terrain_runtime.call("collect_volume_edit_changes")
+        return
     var key := Vector2i(cx, cz)
     if defer_props and refresh_chunk_terrain_assets(cx, cz, true, is_processing()):
         return
@@ -1871,6 +2021,10 @@ func rebuild_chunk(cx: int, cz: int, defer_props := false) -> void:
     create_chunk(cx, cz, defer_props)
 
 func rebuild_chunks_for_cells(cells: Array, neighbor_radius := 0, defer_props := false) -> void:
+    if voxel_terrain_authority_active():
+        if voxel_terrain_runtime.has_method("collect_volume_edit_changes"):
+            voxel_terrain_runtime.call("collect_volume_edit_changes")
+        return
     var chunk_keys := {}
     for value in cells:
         if not (value is Vector2i):

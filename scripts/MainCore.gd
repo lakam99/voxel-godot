@@ -365,6 +365,8 @@ func _run_deferred_startup_boot() -> void:
     setup_tutorial_system()
 
     setup_player()
+    if player != null:
+        player.set_physics_process(false)
     setup_hostiles()
     setup_npc_system()
     setup_player_projectiles()
@@ -386,7 +388,11 @@ func _run_deferred_startup_boot() -> void:
             started_intro_tutorial = tutorial_system.start_new_world()
         playtest_progress("main_tutorial_start_done")
     if not skip_synchronous_world_boot:
-        await bootstrap_initial_chunks_staged()
+        var terrain_ready := bool(await bootstrap_initial_chunks_staged())
+        if not terrain_ready:
+            await startup_loading_yield("Terrain collision failed to load")
+            push_error("VOX-59 startup stopped because terrain collision was not ready")
+            return
         await drain_initial_navigation_changes_staged()
         await prime_initial_navigation_snapshot_staged()
         await startup_loading_yield("Finalizing startup")
@@ -422,9 +428,9 @@ func startup_loading_yield(message: String) -> void:
         hud.set_loading_message(message)
     await get_tree().process_frame
 
-func bootstrap_initial_chunks_staged(urgent_radius := 1) -> void:
+func bootstrap_initial_chunks_staged(urgent_radius := 1) -> bool:
     if player == null:
-        return
+        return false
     var center := world_to_chunk(player.position.x, player.position.z)
     var urgent_keys: Array[Vector2i] = []
     for dz in range(-urgent_radius, urgent_radius + 1):
@@ -441,9 +447,45 @@ func bootstrap_initial_chunks_staged(urgent_radius := 1) -> void:
         await startup_loading_yield("Loading terrain %d/%d" % [loaded, total])
         process_pending_chunk_loads(center)
         guard += 1
+    if not bool(await wait_for_initial_voxel_collision_publication([center])):
+        return false
+    if not bool(await wait_for_initial_player_collision_publication()):
+        return false
     process_pending_chunk_prop_spawns()
     last_center_chunk = Vector2i(999999, 999999)
     await startup_loading_yield("Terrain ready")
+    return true
+
+func wait_for_initial_voxel_collision_publication(chunk_keys: Array[Vector2i]) -> bool:
+    var runtime = get("voxel_terrain_runtime")
+    if runtime == null or not is_instance_valid(runtime) or not runtime.has_method("gameplay_chunks_published"):
+        return false
+    var started_usec := Time.get_ticks_usec()
+    while not bool(runtime.call("gameplay_chunks_published", chunk_keys)):
+        var published := int(runtime.call("published_gameplay_chunk_count", chunk_keys))
+        await startup_loading_yield("Loading terrain collision %d/%d" % [published, chunk_keys.size()])
+        if float(Time.get_ticks_usec() - started_usec) / 1000000.0 >= 120.0:
+            push_error("Voxel terrain collision publication timed out during startup")
+            return false
+    return true
+
+
+func wait_for_initial_player_collision_publication() -> bool:
+    var runtime = get("voxel_terrain_runtime")
+    if runtime == null or not is_instance_valid(runtime) or not runtime.has_method("collision_proof_for_world_position") or player == null:
+        return false
+    var started_usec := Time.get_ticks_usec()
+    var footprint_radius := 0.35
+    while true:
+        var proof: Dictionary = runtime.call("collision_proof_for_world_position", player.global_position, footprint_radius)
+        if bool(proof.get("passed", false)):
+            player.set_meta("startup_terrain_collision_proof", proof)
+            return true
+        await startup_loading_yield("Loading terrain collision at player spawn")
+        if float(Time.get_ticks_usec() - started_usec) / 1000000.0 >= 120.0:
+            push_error("Voxel terrain collision at player spawn timed out during startup")
+            return false
+    return false
 
 func count_loaded_chunks(keys: Array[Vector2i]) -> int:
     var count := 0

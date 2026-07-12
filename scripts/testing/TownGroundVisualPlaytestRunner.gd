@@ -322,26 +322,42 @@ func position_player_for_edge() -> void:
 func wait_for_completed_edge_volume_mesh(max_frames: int) -> bool:
 	for _i in range(maxi(1, max_frames)):
 		var summary := mesh_summary_for_selected_edge()
-		if edge_mesh_is_final_volume(summary):
+		if edge_mesh_is_final_volume(summary) and authority_sightline_ready(edge_camera_position(), edge_camera_target()):
 			return true
 		if main.has_method("update_chunks"):
 			main.call("update_chunks", false)
 		await wait_process_frames(1)
 		await wait_physics_frames(1)
-	return edge_mesh_is_final_volume(mesh_summary_for_selected_edge())
+	return edge_mesh_is_final_volume(mesh_summary_for_selected_edge()) and authority_sightline_ready(edge_camera_position(), edge_camera_target())
 
 func wait_for_completed_house_volume_mesh(max_frames: int) -> bool:
 	for _i in range(maxi(1, max_frames)):
 		var summary := mesh_summary_for_selected_house()
-		if house_mesh_is_final_volume(summary):
+		if house_mesh_is_final_volume(summary) and authority_sightline_ready(house_camera_position(), house_camera_target()):
 			return true
 		if main.has_method("update_chunks"):
 			main.call("update_chunks", false)
 		await wait_process_frames(1)
 		await wait_physics_frames(1)
-	return house_mesh_is_final_volume(mesh_summary_for_selected_house())
+	return house_mesh_is_final_volume(mesh_summary_for_selected_house()) and authority_sightline_ready(house_camera_position(), house_camera_target())
+
+func authority_sightline_ready(from: Vector3, target: Vector3) -> bool:
+	var world := main.get_world_3d() if main != null else null
+	if world == null:
+		return false
+	var direction := (target - from).normalized()
+	var query := PhysicsRayQueryParameters3D.create(from, target + direction * CELL * 2.0, 2)
+	query.collide_with_areas = false
+	query.collide_with_bodies = true
+	var hit := world.direct_space_state.intersect_ray(query)
+	if hit.is_empty():
+		return false
+	var collider = hit.get("collider", null)
+	return collider is VoxelTerrain and String((collider as Node).name) == "VoxelTerrainAuthority"
 
 func edge_mesh_is_final_volume(summary: Dictionary) -> bool:
+	if bool(summary.get("voxelAuthorityActive", false)):
+		return int(summary.get("legacyTerrainPresenterCount", -1)) == 0
 	if bool(summary.get("edgeChunkProvisional", false)):
 		return false
 	if String(summary.get("edgeChunkBackend", "")) == "provisional_exterior_surface":
@@ -360,6 +376,8 @@ func edge_mesh_is_closed_or_final(summary: Dictionary) -> bool:
 	return bool(summary.get("edgeChunkSolidPlaceholder", false))
 
 func house_mesh_is_final_volume(summary: Dictionary) -> bool:
+	if bool(summary.get("voxelAuthorityActive", false)):
+		return int(summary.get("legacyTerrainPresenterCount", -1)) == 0
 	if bool(summary.get("houseChunkProvisional", false)):
 		return false
 	if not bool(summary.get("houseChunkRequiresVolume", false)):
@@ -376,6 +394,7 @@ func house_mesh_is_closed_or_final(summary: Dictionary) -> bool:
 	return bool(summary.get("houseChunkSolidPlaceholder", false)) and bool(summary.get("houseChunkStructureFoundationPlaceholder", false))
 
 func mesh_summary_for_selected_edge() -> Dictionary:
+	var authority := voxel_authority_summary()
 	var chunk_key: Vector2i = selected_edge.get("chunkKey", Vector2i.ZERO)
 	var chunks_value = main.get("chunks")
 	var chunks: Dictionary = chunks_value if chunks_value is Dictionary else {}
@@ -393,6 +412,9 @@ func mesh_summary_for_selected_edge() -> Dictionary:
 	var requires_volume := bool(main.call("chunk_needs_generated_underground_volume_mesh", start_x, start_z)) if main.has_method("chunk_needs_generated_underground_volume_mesh") else false
 	var has_town_edge := bool(main.call("chunk_has_town_surface_volume_edge", start_x, start_z)) if main.has_method("chunk_has_town_surface_volume_edge") else false
 	return {
+		"voxelAuthorityActive": bool(authority.get("active", false)),
+		"voxelAuthorityNode": String(authority.get("node", "")),
+		"legacyTerrainPresenterCount": int(authority.get("legacyTerrainPresenterCount", -1)),
 		"selectedEdge": encode_json_value(selected_edge),
 		"edgeChunk": vector2i_to_array(chunk_key),
 		"edgeChunkFound": bool(edge_summary.get("found", false)),
@@ -410,6 +432,7 @@ func mesh_summary_for_selected_edge() -> Dictionary:
 	}
 
 func mesh_summary_for_selected_house() -> Dictionary:
+	var authority := voxel_authority_summary()
 	var chunk_key: Vector2i = selected_house.get("chunkKey", Vector2i.ZERO)
 	var chunks_value = main.get("chunks")
 	var chunks: Dictionary = chunks_value if chunks_value is Dictionary else {}
@@ -427,6 +450,9 @@ func mesh_summary_for_selected_house() -> Dictionary:
 	var requires_volume := bool(main.call("chunk_needs_generated_underground_volume_mesh", start_x, start_z)) if main.has_method("chunk_needs_generated_underground_volume_mesh") else false
 	var has_edits := bool(main.call("chunk_has_terrain_volume_edits", start_x, start_z)) if main.has_method("chunk_has_terrain_volume_edits") else false
 	return {
+		"voxelAuthorityActive": bool(authority.get("active", false)),
+		"voxelAuthorityNode": String(authority.get("node", "")),
+		"legacyTerrainPresenterCount": int(authority.get("legacyTerrainPresenterCount", -1)),
 		"selectedHouse": encode_json_value(selected_house),
 		"houseChunk": vector2i_to_array(chunk_key),
 		"houseChunkFound": bool(house_summary.get("found", false)),
@@ -469,6 +495,25 @@ func mesh_summary_for_chunk(chunk_key: Vector2i) -> Dictionary:
 		"volumeFaces": int(mesh.get_meta("chunk_volume_faces", 0)),
 		"volumeVertices": int(mesh.get_meta("chunk_volume_vertices", 0)),
 		"surfaceCount": mesh.get_surface_count()
+	}
+
+func voxel_authority_summary() -> Dictionary:
+	var runtime := main.get_node_or_null("VoxelTerrainRuntime") if main != null else null
+	var terrain := runtime.get_node_or_null("VoxelTerrainAuthority") if runtime != null else null
+	var legacy_count := 0
+	var chunks_value = main.get("chunks") if main != null else {}
+	if chunks_value is Dictionary:
+		for chunk_value in (chunks_value as Dictionary).values():
+			if not (chunk_value is Node):
+				continue
+			if (chunk_value as Node).get_node_or_null("TerrainMesh") != null:
+				legacy_count += 1
+			if (chunk_value as Node).get_node_or_null("TerrainBody") != null:
+				legacy_count += 1
+	return {
+		"active": terrain is VoxelTerrain,
+		"node": str(terrain),
+		"legacyTerrainPresenterCount": legacy_count
 	}
 
 func capture_edge(mesh_summary: Dictionary) -> void:
@@ -543,8 +588,9 @@ func edge_camera_position() -> Vector3:
 
 func house_camera_target() -> Vector3:
 	var center: Vector2 = selected_house.get("center", Vector2.ZERO)
-	var level := float(selected_house.get("level", 0.0))
-	return Vector3(center.x * CELL, level - CELL * 0.52, center.y * CELL)
+	var footprint: Dictionary = selected_house.get("footprint", {}) if selected_house.get("footprint", {}) is Dictionary else {}
+	var floor_y := int(footprint.get("floorY", floori(float(selected_house.get("level", 0.0)) / CELL)))
+	return Vector3(center.x * CELL, float(floor_y) * CELL - CELL * 0.10, center.y * CELL)
 
 func house_camera_position() -> Vector3:
 	var center: Vector2 = selected_house.get("center", Vector2.ZERO)

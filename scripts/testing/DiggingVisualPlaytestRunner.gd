@@ -123,12 +123,8 @@ func run() -> void:
 		return
 	load_test_chunks()
 	setup_inventory()
-	await wait_process_frames(4)
-	await wait_physics_frames(4)
-	calibrate_surface_collision()
 	position_player_for_depth(0)
-	await wait_process_frames(3)
-	await wait_physics_frames(2)
+	await wait_for_surface_collision(420)
 	await flush_terrain_work_after_dig()
 
 	add_result("digging_visual_scene_ready", true, "main scene ready with real player camera and terrain collision")
@@ -193,7 +189,21 @@ func flush_terrain_work_after_dig() -> void:
 		if terrain_flush_looks_idle():
 			break
 
+func wait_for_surface_collision(max_frames: int) -> bool:
+	for _i in range(maxi(1, max_frames)):
+		calibrate_surface_collision()
+		if has_surface_collision:
+			return true
+		await wait_process_frames(1)
+		await wait_physics_frames(1)
+	return false
+
 func terrain_flush_looks_idle() -> bool:
+	var runtime := main.get_node_or_null("VoxelTerrainRuntime") if main != null else null
+	if runtime != null and runtime.has_method("stats"):
+		var runtime_stats: Dictionary = runtime.call("stats")
+		if int(runtime_stats.get("pendingEditSections", 0)) > 0:
+			return false
 	var terrain_refreshes = main.get("pending_chunk_terrain_refreshes") if main != null else null
 	if terrain_refreshes is Dictionary and not (terrain_refreshes as Dictionary).is_empty():
 		return false
@@ -710,7 +720,7 @@ func position_player_for_depth(depth_index: int) -> void:
 	gameplay_camera.current = true
 
 func position_player_for_excavated_focus(focus: Vector3) -> void:
-	var eye_offset := Vector3(CELL * 0.45, CELL * 1.85, CELL * 0.45) if preferred_material != "" else Vector3(CELL * 0.62, CELL * 1.65, CELL * 0.62)
+	var eye_offset := Vector3(CELL * 0.10, CELL * 1.85, CELL * 0.10)
 	player.global_position = focus + eye_offset - Vector3(0.0, 1.65, 0.0)
 	player.velocity = Vector3.ZERO
 	gameplay_camera.rotation = Vector3.ZERO

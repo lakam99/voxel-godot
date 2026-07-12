@@ -1,0 +1,95 @@
+extends Node
+
+const MAIN_SCENE: PackedScene = preload("res://scenes/Main.tscn")
+
+var results: Array[Dictionary] = []
+var report_path := ""
+
+func _ready() -> void:
+	call_deferred("run")
+
+func run() -> void:
+	report_path = OS.get_environment("VOXEL_TERRAIN_PUBLICATION_REPORT")
+	var main := MAIN_SCENE.instantiate() as Node3D
+	main.set("startup_mode", "new_game")
+	get_tree().root.add_child(main)
+	for _i in range(240):
+		await get_tree().process_frame
+		if not bool(main.get("startup_loading_active")):
+			break
+	main.set_physics_process(false)
+	var player = main.get("player") as CharacterBody3D
+	player.set_physics_process(false)
+	player.velocity = Vector3.ZERO
+	var authority_ready := bool(main.call("ensure_voxel_terrain_authority"))
+	add_result("voxel_publication_authority_ready", authority_ready, "")
+	var chunk_key: Vector2i = main.call("world_to_chunk", player.global_position.x, player.global_position.z)
+	main.call("create_chunk", chunk_key.x, chunk_key.y, true)
+	var runtime := main.get_node_or_null("VoxelTerrainRuntime")
+	var navigation_loaded_before := navigation_chunk_loaded_count(main)
+	var initially_published := bool(runtime.call("gameplay_chunks_published", [chunk_key]))
+	add_result("voxel_publication_not_guessed_at_container_create", not initially_published, str(chunk_key))
+	var published_frame := -1
+	var frame := 0
+	var started_usec := Time.get_ticks_usec()
+	while float(Time.get_ticks_usec() - started_usec) / 1000000.0 < 75.0:
+		await get_tree().physics_frame
+		await get_tree().process_frame
+		if bool(runtime.call("gameplay_chunks_published", [chunk_key])):
+			published_frame = frame
+			break
+		frame += 1
+	var proof: Dictionary = runtime.get("published_gameplay_chunks").get(chunk_key, {})
+	if proof.is_empty():
+		proof = runtime.call("collision_proof_for_game_chunk", chunk_key)
+	add_result(
+		"voxel_publication_collision_proven",
+		published_frame >= 0
+			and bool(proof.get("areaMeshed", false))
+			and int(proof.get("hits", 0)) == int(proof.get("probeCount", -1))
+			and int(proof.get("surfaceMatches", 0)) == int(proof.get("probeCount", -1)),
+		JSON.stringify({"frame": published_frame, "chunk": chunk_key, "proof": proof, "runtime": runtime.call("stats")})
+	)
+	var navigation_loaded_after := navigation_chunk_loaded_count(main)
+	add_result(
+		"voxel_publication_navigation_follows_collision",
+		published_frame >= 0 and navigation_loaded_after > navigation_loaded_before,
+		"before=%d after=%d publishedFrame=%d" % [navigation_loaded_before, navigation_loaded_after, published_frame]
+	)
+	main.queue_free()
+	finish()
+
+func add_result(name: String, passed: bool, details: String) -> void:
+	results.append({"name": name, "passed": passed, "details": details})
+	print("[%s] %s %s" % ["PASS" if passed else "FAIL", name, details])
+
+func navigation_chunk_loaded_count(main: Node) -> int:
+	var npc_system = main.get("npc_system") if main != null else null
+	var autonomy = npc_system.get("autonomy_system") if npc_system != null else null
+	if autonomy == null or not autonomy.has_method("stats"):
+		return -1
+	var autonomy_stats: Dictionary = autonomy.call("stats")
+	var telemetry: Dictionary = autonomy_stats.get("telemetry", {}) if autonomy_stats.get("telemetry", {}) is Dictionary else {}
+	var counters: Dictionary = telemetry.get("counters", {}) if telemetry.get("counters", {}) is Dictionary else {}
+	return int(counters.get("change_chunk_loaded", 0))
+
+func finish() -> void:
+	var passed := true
+	for result in results:
+		if not bool(result.get("passed", false)):
+			passed = false
+	var report := {
+		"schemaVersion": 1,
+		"runnerId": "voxel_terrain_collision_publication",
+		"evidenceLevel": "integration",
+		"passed": passed,
+		"results": results
+	}
+	if report_path != "":
+		DirAccess.make_dir_recursive_absolute(report_path.get_base_dir())
+		var file := FileAccess.open(report_path, FileAccess.WRITE)
+		if file != null:
+			file.store_string(JSON.stringify(report, "  "))
+			file.close()
+	print(JSON.stringify(report, "  "))
+	get_tree().quit(0 if passed else 1)

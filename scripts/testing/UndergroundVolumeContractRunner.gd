@@ -19,6 +19,7 @@ class FakeMain:
 	var temp_noise: FastNoiseLite
 	var volume_edit_markers := {}
 	var town_slope_apron_cache := {}
+	var towns_enabled := false
 
 	func _init() -> void:
 		setup_noise()
@@ -38,8 +39,17 @@ class FakeMain:
 		noise.fractal_gain = 0.52
 		return noise
 
-	func town_region(_region_x: int, _region_z: int) -> Dictionary:
-		return {}
+	func town_region(region_x: int, region_z: int) -> Dictionary:
+		if not towns_enabled or region_x != 0 or region_z != 0:
+			return {}
+		return {
+			"regionX": 0,
+			"regionZ": 0,
+			"centerX": 0,
+			"centerZ": 0,
+			"radius": 30,
+			"level": 18.9
+		}
 
 	func noise01(noise: FastNoiseLite, x: float, z: float) -> float:
 		return noise.get_noise_2d(x, z) * 0.5 + 0.5
@@ -79,6 +89,7 @@ func run() -> void:
 	test_underground_air_has_connected_volume()
 	test_sample_contract()
 	test_world_bottom_is_solid()
+	test_generated_surface_overburden_is_solid()
 	test_air_has_generated_solid_boundaries()
 	test_removed_production_api_absent()
 	save_report()
@@ -164,6 +175,40 @@ func test_world_bottom_is_solid() -> void:
 		passed = passed and ok
 		summaries.append({ "column": sanitize(column), "bottomCellY": bottom_y, "bedrock": sample_signature(bedrock_sample), "above": sample_signature(above_sample), "passed": ok })
 	add_result("underground_world_bottom_solid", passed, JSON.stringify(summaries))
+
+
+func test_generated_surface_overburden_is_solid() -> void:
+	var natural_columns: Array[Vector2i] = [Vector2i(0, 0), Vector2i(18, -24), Vector2i(-35, 42), Vector2i(96, 96)]
+	var natural_ok := true
+	var natural_samples := []
+	for column in natural_columns:
+		var surface_y := float(world_generation.call("terrain_reference_surface_y_for_cell", Vector3i(column.x, 0, column.y)))
+		for depth_cells in [0.5, 1.5, 2.5, 3.0]:
+			var position := Vector3(float(column.x) * FakeMain.CELL, surface_y - float(depth_cells) * FakeMain.CELL, float(column.y) * FakeMain.CELL)
+			var sample: Dictionary = world_generation.call("generate_sample_without_volume", position)
+			var sample_ok := float(sample.get("density", -1.0)) >= 0.0 and bool(sample.get("solid", false))
+			natural_ok = natural_ok and sample_ok
+			natural_samples.append({"column": sanitize(column), "depthCells": depth_cells, "density": snapped_float(float(sample.get("density", 0.0))), "solid": bool(sample.get("solid", false))})
+	var town_main := FakeMain.new()
+	town_main.towns_enabled = true
+	var town_generation = WorldGenerationSystemScript.new()
+	town_generation.setup(town_main)
+	var town_columns: Array[Vector2i] = [Vector2i.ZERO, Vector2i(29, 0), Vector2i(36, 0), Vector2i(0, -36)]
+	var town_ok := true
+	var town_samples := []
+	for column in town_columns:
+		var surface_y := float(town_generation.call("terrain_reference_surface_y_for_cell", Vector3i(column.x, 0, column.y)))
+		for depth_cells in [0.5, 2.5, 5.5, 8.0]:
+			var position := Vector3(float(column.x) * FakeMain.CELL, surface_y - float(depth_cells) * FakeMain.CELL, float(column.y) * FakeMain.CELL)
+			var sample: Dictionary = town_generation.call("generate_sample_without_volume", position)
+			var sample_ok := float(sample.get("density", -1.0)) >= 0.0 and bool(sample.get("solid", false))
+			town_ok = town_ok and sample_ok
+			town_samples.append({"column": sanitize(column), "depthCells": depth_cells, "density": snapped_float(float(sample.get("density", 0.0))), "solid": bool(sample.get("solid", false))})
+	add_result(
+		"generated_surface_overburden_is_solid",
+		natural_ok and town_ok,
+		JSON.stringify({"natural": natural_samples, "townAndApron": town_samples})
+	)
 
 func test_air_has_generated_solid_boundaries() -> void:
 	var found: Dictionary = world_generation.call("find_underground_air_sample", SEARCH_RADIUS, 4, 30)

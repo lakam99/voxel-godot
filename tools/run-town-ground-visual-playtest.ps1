@@ -50,10 +50,6 @@ function Stop-ProcessTree([System.Diagnostics.Process]$Process) {
     if ($null -eq $Process) {
         return
     }
-    $children = Get-CimInstance Win32_Process -Filter "ParentProcessId = $($Process.Id)" -ErrorAction SilentlyContinue
-    foreach ($child in $children) {
-        Stop-Process -Id $child.ProcessId -Force -ErrorAction SilentlyContinue
-    }
     if (-not $Process.HasExited) {
         Stop-Process -Id $Process.Id -Force -ErrorAction SilentlyContinue
     }
@@ -76,9 +72,18 @@ while (-not $process.HasExited) {
             $candidate = Get-Content -LiteralPath $ReportPath -Raw | ConvertFrom-Json
             if (($candidate.runToken -eq $runToken) -and ($true -eq $candidate.finished)) {
                 $reportFinished = $true
+                Stop-ProcessTree $process
                 break
             }
         } catch {}
+    }
+    if ((Test-Path -LiteralPath $ProgressPath) -and (Test-Path -LiteralPath $ReportPath)) {
+        $progressHead = Get-Content -LiteralPath $ProgressPath -TotalCount 1 -ErrorAction SilentlyContinue
+        if ($progressHead -like "finish:*") {
+            $reportFinished = $true
+            Stop-ProcessTree $process
+            break
+        }
     }
     if (((Get-Date) - $started).TotalSeconds -gt $WatchdogSeconds) {
         Stop-ProcessTree $process

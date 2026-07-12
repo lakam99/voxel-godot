@@ -4,8 +4,9 @@ class_name WorldGenerationSystem
 const TerrainVolumeServiceScript := preload("res://scripts/TerrainVolumeService.gd")
 
 const UNDERGROUND_AIR_BIOME := "underground_air"
-const UNDERGROUND_AIR_SOFT_START_DEPTH_CELLS := 0.35
-const UNDERGROUND_AIR_FULL_STRENGTH_DEPTH_CELLS := 5.5
+const NATURAL_SURFACE_MIN_OVERBURDEN_CELLS := 3.0
+const TOWN_SURFACE_MIN_OVERBURDEN_CELLS := 8.0
+const UNDERGROUND_AIR_TRANSITION_DEPTH_CELLS := 5.0
 const UNDERGROUND_AIR_SEARCH_STEP_CELLS := 4
 const UNDERGROUND_AIR_MIN_CONNECTED_CELLS := 24
 const UNDERGROUND_AIR_CONNECTIVITY_RADIUS_CELLS := 8
@@ -22,6 +23,7 @@ var deformed_surface_y_cache := {}
 var natural_surface_y_cache := {}
 var base_surface_y_cache := {}
 var surface_biome_cache := {}
+var minimum_overburden_cache := {}
 var terrain_volume_service
 
 func setup(main_node) -> void:
@@ -39,6 +41,7 @@ func reset() -> void:
 	natural_surface_y_cache.clear()
 	base_surface_y_cache.clear()
 	surface_biome_cache.clear()
+	minimum_overburden_cache.clear()
 
 func reset_for_seed() -> void:
 	excavation_brushes.clear()
@@ -535,9 +538,13 @@ func underground_air_density_at(position: Vector3, surface_y: float, depth_cells
 	var porous_strength := porous_air * smoothstep_local(local_air, 0.52, 0.82)
 	var chamber_depth := smoothstep_local(depth_cells, 8.0, 18.0) * (1.0 - smoothstep_local(depth_cells, 48.0, 64.0))
 	var air_signal := clampf(maxf(maxf(broad_strength, chamber_strength * 0.96), porous_strength * 0.90) + chamber_depth * 0.10 + cellular * 0.025, 0.0, 1.0)
-	var depth_open := maxf(
-		smoothstep_local(depth_cells, UNDERGROUND_AIR_SOFT_START_DEPTH_CELLS, UNDERGROUND_AIR_FULL_STRENGTH_DEPTH_CELLS),
-		smoothstep_local(air_signal, 0.86, 0.97) * 0.85
+	var minimum_overburden := minimum_overburden_cells_for_position(position)
+	if depth_cells <= minimum_overburden:
+		return s
+	var depth_open := smoothstep_local(
+		depth_cells,
+		minimum_overburden,
+		minimum_overburden + UNDERGROUND_AIR_TRANSITION_DEPTH_CELLS
 	)
 	var deep_compaction := 1.0 - smoothstep_local(depth_cells, 58.0, 74.0)
 	var depth_fade := clampf(depth_open * deep_compaction, 0.0, 1.0)
@@ -545,6 +552,17 @@ func underground_air_density_at(position: Vector3, surface_y: float, depth_cells
 	var threshold := lerpf(0.50, 0.60, strata) - chamber_depth * 0.04
 	var raw_density := (threshold - air_signal) * s * 4.25
 	return lerpf(s, raw_density, depth_fade)
+
+
+func minimum_overburden_cells_for_position(position: Vector3) -> float:
+	var cell := world_to_cell3(position)
+	var key := Vector2i(cell.x, cell.z)
+	if minimum_overburden_cache.has(key):
+		return float(minimum_overburden_cache[key])
+	var protected_town_surface := not town_region_for_surface_cell3(Vector3i(cell.x, 0, cell.z)).is_empty()
+	var result := TOWN_SURFACE_MIN_OVERBURDEN_CELLS if protected_town_surface else NATURAL_SURFACE_MIN_OVERBURDEN_CELLS
+	minimum_overburden_cache[key] = result
+	return result
 
 func noise3d01(noise: FastNoiseLite, x: float, y: float, z: float) -> float:
 	if noise == null:
@@ -634,10 +652,6 @@ func volume_surface_y_for_cell(cell: Vector3i) -> float:
 	var key := Vector2i(cell.x, cell.z)
 	if surface_projection_cache.has(key):
 		return float(surface_projection_cache[key])
-	if not terrain_volume_column_has_surface_projection_affecting_edits(cell):
-		var generated_surface := terrain_deformed_surface_y_for_cell(cell)
-		surface_projection_cache[key] = generated_surface
-		return generated_surface
 	var reference_y := terrain_deformed_surface_y_for_cell(cell)
 	var reference_cell_y := floori(reference_y / cell_size())
 	var high := mini(world_top_cell_y(), reference_cell_y + 8)

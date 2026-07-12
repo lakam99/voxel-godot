@@ -128,7 +128,7 @@ func can_process_native_section_jobs_async() -> bool:
 		and backend.has_method("build_chunk_fluid_mesh_from_sections") \
 		and backend.has_method("collision_shape_for_mesh")
 
-func request_chunk_assets(cx: int, cz: int, signature := "", include_collision := true, priority := 0) -> Dictionary:
+func request_chunk_assets(cx: int, cz: int, signature := "", include_collision := true, priority := 0, fluid_only := false) -> Dictionary:
 	var key := Vector2i(cx, cz)
 	var signature_text := String(signature)
 	if completed_jobs.has(key):
@@ -147,6 +147,8 @@ func request_chunk_assets(cx: int, cz: int, signature := "", include_collision :
 	if pending_jobs.has(key):
 		var existing: Dictionary = pending_jobs[key]
 		if signature_text == "" or String(existing.get("terrainSignature", "")) == signature_text:
+			if not fluid_only and bool(existing.get("fluidOnly", false)):
+				existing["fluidOnly"] = false
 			if include_collision and not bool(existing.get("includeCollision", true)):
 				existing["includeCollision"] = true
 				existing["priority"] = maxi(int(existing.get("priority", 0)), int(priority))
@@ -161,6 +163,7 @@ func request_chunk_assets(cx: int, cz: int, signature := "", include_collision :
 		"key": key,
 		"terrainSignature": signature_text,
 		"includeCollision": include_collision,
+		"fluidOnly": fluid_only,
 		"priority": int(priority),
 		"sequence": job_sequence
 	}
@@ -413,8 +416,19 @@ func start_next_async_native_job(center: Vector2i, budget_ms := 2.0) -> Dictiona
 		async_payload_job = {}
 		result["dropped"] = 1
 		return result
+	var fluid_only := bool(async_payload_job.get("fluidOnly", false))
 	var payload: Dictionary = async_payload_job.get("terrainPayload", {}) if async_payload_job.get("terrainPayload", {}) is Dictionary else {}
-	if payload.is_empty():
+	if fluid_only and payload.is_empty():
+		payload = {
+			"sections": [],
+			"chunkX": key.x,
+			"chunkZ": key.y,
+			"chunkSize": chunk_size(),
+			"terrainStepCells": 1,
+			"stepCells": 1
+		}
+		async_payload_job["terrainPayload"] = payload
+	elif payload.is_empty():
 		var terrain_state: Dictionary = async_payload_job.get("terrainState", {}) if async_payload_job.get("terrainState", {}) is Dictionary else {}
 		var terrain_advanced_value = world_generation.call(
 			"advance_section_payload_state",
@@ -469,7 +483,7 @@ func start_next_async_native_job(center: Vector2i, budget_ms := 2.0) -> Dictiona
 	payload["terrainStepCells"] = maxi(1, int(payload.get("terrainStepCells", payload.get("stepCells", 1))))
 	var include_collision := bool(async_payload_job.get("includeCollision", true))
 	async_payload_job = {}
-	result = start_async_worker_from_payload(key, requested_signature, payload, include_collision, result)
+	result = start_async_worker_from_payload(key, requested_signature, payload, include_collision, fluid_only, result)
 	return result
 
 func begin_next_async_payload_job(center: Vector2i) -> Dictionary:
@@ -501,6 +515,7 @@ func begin_next_async_payload_job(center: Vector2i) -> Dictionary:
 		"key": key,
 		"terrainSignature": requested_signature,
 		"includeCollision": bool(job.get("includeCollision", true)),
+		"fluidOnly": bool(job.get("fluidOnly", false)),
 		"terrainState": terrain_state,
 		"fluidState": fluid_state,
 		"terrainPayload": {}
@@ -549,7 +564,7 @@ func begin_exact_fluid_payload_for_chunk(terrain_state: Dictionary) -> Dictionar
 		int(terrain_state.get("terrainStepCells", terrain_state.get("stepCells", 1)))
 	)
 
-func start_async_worker_from_payload(key: Vector2i, requested_signature: String, payload: Dictionary, include_collision: bool, result: Dictionary) -> Dictionary:
+func start_async_worker_from_payload(key: Vector2i, requested_signature: String, payload: Dictionary, include_collision: bool, fluid_only: bool, result: Dictionary) -> Dictionary:
 	async_worker_key = key
 	async_worker_signature = requested_signature
 	async_worker_cancelled = false
@@ -563,6 +578,7 @@ func start_async_worker_from_payload(key: Vector2i, requested_signature: String,
 		key,
 		requested_signature,
 		include_collision,
+		fluid_only,
 		payload,
 		backend
 	))
@@ -633,6 +649,7 @@ func collect_async_worker_result() -> Dictionary:
 		summary["dropped"] = 1
 		summary["dropReason"] = "stale_worker_signature"
 		return summary
+	var fluid_only := bool(result.get("fluidOnly", false))
 	var mesh: Mesh = result.get("mesh") as Mesh
 	if mesh == null:
 		summary["dropped"] = 1
@@ -644,10 +661,11 @@ func collect_async_worker_result() -> Dictionary:
 	mesh.set_meta("terrainMeshingQueued", true)
 	mesh.set_meta("terrainMeshingBackend", backend_id)
 	mesh.set_meta("terrainMeshingNative", true)
-	mesh.set_meta("terrainMeshingSectionPayload", true)
-	mesh = project_chunk_surface_normals(mesh, key.x, key.y)
+	mesh.set_meta("terrainMeshingSectionPayload", not fluid_only)
 	var finalize_started_usec := Time.get_ticks_usec()
-	apply_terrain_material(mesh)
+	if not fluid_only:
+		mesh = project_chunk_surface_normals(mesh, key.x, key.y)
+		apply_terrain_material(mesh)
 	fluid_mesh.set_meta("terrainMeshingQueued", true)
 	fluid_mesh.set_meta("terrainMeshingBackend", backend_id)
 	fluid_mesh.set_meta("terrainMeshingNative", true)
@@ -661,6 +679,7 @@ func collect_async_worker_result() -> Dictionary:
 		"terrainSignature": signature,
 		"terrainMeshingBackend": backend_id,
 		"terrainMeshingNative": true,
+		"fluidOnly": fluid_only,
 		"terrainPreparedSections": int(result.get("preparedSections", 0))
 	}
 	if String(assets.get("terrainSignature", "")) == "":
@@ -670,10 +689,10 @@ func collect_async_worker_result() -> Dictionary:
 	summary["processed"] = 1
 	return summary
 
-func _thread_build_native_chunk_assets(key: Vector2i, signature: String, include_collision: bool, payload: Dictionary, worker_backend) -> Dictionary:
+func _thread_build_native_chunk_assets(key: Vector2i, signature: String, include_collision: bool, fluid_only: bool, payload: Dictionary, worker_backend) -> Dictionary:
 	var started_usec := Time.get_ticks_usec()
 	var terrain_started_usec := Time.get_ticks_usec()
-	var mesh = worker_backend.call("build_chunk_mesh_from_sections", payload) if worker_backend != null and worker_backend.has_method("build_chunk_mesh_from_sections") else null
+	var mesh = ArrayMesh.new() if fluid_only else (worker_backend.call("build_chunk_mesh_from_sections", payload) if worker_backend != null and worker_backend.has_method("build_chunk_mesh_from_sections") else null)
 	var terrain_mesh_build_ms := elapsed_ms(terrain_started_usec)
 	var fluid_started_usec := Time.get_ticks_usec()
 	var fluid_mesh = ArrayMesh.new()
@@ -682,7 +701,7 @@ func _thread_build_native_chunk_assets(key: Vector2i, signature: String, include
 	var fluid_mesh_build_ms := elapsed_ms(fluid_started_usec)
 	var collision_started_usec := Time.get_ticks_usec()
 	var shape = null
-	if include_collision and mesh is Mesh and worker_backend != null and worker_backend.has_method("collision_shape_for_mesh"):
+	if not fluid_only and include_collision and mesh is Mesh and worker_backend != null and worker_backend.has_method("collision_shape_for_mesh"):
 		shape = worker_backend.call("collision_shape_for_mesh", mesh)
 	var collision_build_ms := elapsed_ms(collision_started_usec)
 	var result := {
@@ -691,6 +710,7 @@ func _thread_build_native_chunk_assets(key: Vector2i, signature: String, include
 		"mesh": mesh,
 		"fluidMesh": fluid_mesh,
 		"shape": shape,
+		"fluidOnly": fluid_only,
 		"preparedSections": int((payload.get("sections", []) as Array).size()) if payload.get("sections", []) is Array else 0,
 		"terrainMeshBuildMs": terrain_mesh_build_ms,
 		"fluidMeshBuildMs": fluid_mesh_build_ms,

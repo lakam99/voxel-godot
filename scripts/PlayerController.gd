@@ -45,6 +45,8 @@ var head_bob_phase := 0.0
 var base_camera_position := Vector3(0.0, 1.65, 0.0)
 var character_motor = CharacterMotor3DScript.new()
 var motor_profile = CharacterMotorProfileScript.player_default()
+var terrain_collision_hold_frames := 0
+var last_terrain_collision_proof := {}
 
 func _ready() -> void:
     set_physics_process(true)
@@ -119,6 +121,22 @@ func _physics_process(delta: float) -> void:
     is_sprinting = sprinting and is_moving
     var speed := SPRINT_SPEED if sprinting else WALK_SPEED
     var jumping := automated_jump if automated_input else Input.is_key_pressed(KEY_SPACE)
+    if main != null and main.has_method("terrain_collision_motion_proof"):
+        var predicted_position := global_position + wish * speed * delta
+        var collision_proof: Dictionary = main.call("terrain_collision_motion_proof", global_position, predicted_position, 0.42)
+        last_terrain_collision_proof = collision_proof
+        if not bool(collision_proof.get("passed", false)):
+            terrain_collision_hold_frames += 1
+            velocity = Vector3.ZERO
+            is_moving = false
+            is_sprinting = false
+            terrain_grounded = false
+            set_meta("terrain_collision_hold", true)
+            set_meta("terrain_collision_hold_reason", String(collision_proof.get("reason", "collision_not_ready")))
+            update_camera_feel(delta)
+            return
+    set_meta("terrain_collision_hold", false)
+    set_meta("terrain_collision_hold_reason", "")
     var command = CharacterMotorCommandScript.from_direction(wish, speed, jumping, sprinting)
     command.terrain_grounded = terrain_grounded
     command.grounded_hint = is_on_floor()

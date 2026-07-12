@@ -16,7 +16,7 @@ config/features=PackedStringArray("4.6", "Forward Plus")
 
 [native_extensions]
 
-paths=["res://addons/terrain_meshing_backend/terrain_meshing_backend.gdextension"]
+paths=["res://addons/terrain_meshing_backend/terrain_meshing_backend.gdextension", "res://addons/zylann.voxel/voxel.gdextension"]
 
 [display]
 

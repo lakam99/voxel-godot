@@ -11,6 +11,7 @@ const SEGMENT_PAUSE_SECONDS := 0.65
 const SEGMENT_LANE_CHECK_CELLS := 48
 const JUMP_INTERVAL_FRAMES := 150
 const MIN_RUNTIME_TRAVEL_DISTANCE := 45.0
+const MAX_ALLOWED_BELOW_COLLISION := 1.35
 
 var report_path := ""
 var progress_path := ""
@@ -33,6 +34,13 @@ var direction_change_count := 0
 var pause_frame_count := 0
 var jump_request_count := 0
 var jump_observed_count := 0
+var minimum_surface_clearance := INF
+var maximum_below_surface := 0.0
+var minimum_collision_clearance := INF
+var maximum_below_collision := 0.0
+var collision_surface_samples := 0
+var terrain_collision_hold_frames := 0
+var terrain_collision_hold_reasons := {}
 var last_segment_index := -1
 var segment_visit_counts := {}
 var samples := []
@@ -130,6 +138,13 @@ func run_normal_runtime_scenario() -> Dictionary:
     pause_frame_count = 0
     jump_request_count = 0
     jump_observed_count = 0
+    minimum_surface_clearance = INF
+    maximum_below_surface = 0.0
+    minimum_collision_clearance = INF
+    maximum_below_collision = 0.0
+    collision_surface_samples = 0
+    terrain_collision_hold_frames = 0
+    terrain_collision_hold_reasons.clear()
     last_segment_index = -1
     segment_visit_counts.clear()
     samples.clear()
@@ -161,6 +176,10 @@ func run_normal_runtime_scenario() -> Dictionary:
         failures.append("normal runtime traversal did not move far enough to exercise streaming")
     if int(metrics.get("directionChanges", 0)) < 3:
         failures.append("normal runtime traversal did not change directions enough")
+    if int(metrics.get("collisionSurfaceSamples", 0)) <= 0:
+        failures.append("normal runtime traversal captured no voxel collision-surface samples")
+    elif float(metrics.get("maximumBelowVoxelCollision", 0.0)) > MAX_ALLOWED_BELOW_COLLISION:
+        failures.append("player moved %.3f below the VoxelTerrain collision surface" % float(metrics.get("maximumBelowVoxelCollision", 0.0)))
     var passed := failures.is_empty()
     flush_async_save()
     return {
@@ -301,8 +320,41 @@ func observe_player_travel() -> void:
         accumulated_travel_distance += delta.length()
     last_travel_position = current
     var player_body := main.get("player") as CharacterBody3D if main != null else null
-    if player_body != null and bool(player_body.get("jumped_this_frame")):
-        jump_observed_count += 1
+    if player_body != null:
+        if bool(player_body.get("jumped_this_frame")):
+            jump_observed_count += 1
+        if player_body.has_meta("terrain_collision_hold") and bool(player_body.get_meta("terrain_collision_hold")):
+            terrain_collision_hold_frames += 1
+            var hold_reason := String(player_body.get_meta("terrain_collision_hold_reason", "unknown"))
+            terrain_collision_hold_reasons[hold_reason] = int(terrain_collision_hold_reasons.get(hold_reason, 0)) + 1
+        observe_voxel_collision_clearance(player_body, current)
+    if main != null and main.has_method("surface_y_at_position"):
+        var surface_y := float(main.call("surface_y_at_position", current))
+        var clearance := current.y - surface_y
+        minimum_surface_clearance = minf(minimum_surface_clearance, clearance)
+        maximum_below_surface = maxf(maximum_below_surface, -clearance)
+
+func observe_voxel_collision_clearance(player_body: CharacterBody3D, current: Vector3) -> void:
+    var motion_proof = player_body.get("last_terrain_collision_proof")
+    if not (motion_proof is Dictionary) or not bool((motion_proof as Dictionary).get("passed", false)):
+        return
+    var position_proofs = (motion_proof as Dictionary).get("proofs", [])
+    if not (position_proofs is Array) or position_proofs.is_empty():
+        return
+    var position_proof = position_proofs[0]
+    if not (position_proof is Dictionary):
+        return
+    var collision_samples = (position_proof as Dictionary).get("samples", [])
+    if not (collision_samples is Array) or collision_samples.is_empty():
+        return
+    var center_sample = collision_samples[0]
+    if not (center_sample is Dictionary) or not bool((center_sample as Dictionary).get("hit", false)):
+        return
+    var hit_y := float((center_sample as Dictionary).get("hitY", current.y))
+    var clearance := current.y - hit_y
+    minimum_collision_clearance = minf(minimum_collision_clearance, clearance)
+    maximum_below_collision = maxf(maximum_below_collision, -clearance)
+    collision_surface_samples += 1
 
 func stop_player_automation() -> void:
     var player_body := main.get("player") as CharacterBody3D if main != null else null
@@ -344,6 +396,13 @@ func append_normal_metrics(metrics: Dictionary, frame_count: int) -> void:
     metrics["pauseFrames"] = pause_frame_count
     metrics["jumpRequests"] = jump_request_count
     metrics["jumpObserved"] = jump_observed_count
+    metrics["minimumSurfaceClearance"] = minimum_surface_clearance if minimum_surface_clearance != INF else 0.0
+    metrics["maximumBelowSurface"] = maximum_below_surface
+    metrics["minimumVoxelCollisionClearance"] = minimum_collision_clearance if minimum_collision_clearance != INF else 0.0
+    metrics["maximumBelowVoxelCollision"] = maximum_below_collision
+    metrics["collisionSurfaceSamples"] = collision_surface_samples
+    metrics["terrainCollisionHoldFrames"] = terrain_collision_hold_frames
+    metrics["terrainCollisionHoldReasons"] = terrain_collision_hold_reasons.duplicate(true)
     metrics["segmentVisitCounts"] = segment_visit_counts.duplicate(true)
     if measurement_start == Vector3.INF or measurement_end == Vector3.INF:
         metrics["playerTravelDistance"] = 0.0

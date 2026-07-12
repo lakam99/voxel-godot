@@ -107,13 +107,11 @@ func load_runtime_chunk(chunk_key: Vector2i) -> void:
 		main.call("rebuild_chunk", chunk_key.x, chunk_key.y, true)
 	else:
 		main.call("create_chunk", chunk_key.x, chunk_key.y, true)
-	if not main.has_method("request_chunk_terrain_mesh_assets"):
-		return
-	async_mesh_request_accepted = bool(main.call("request_chunk_terrain_mesh_assets", chunk_key, true, 100))
 	var service = main.get("terrain_meshing_service")
 	if service == null or not service.has_method("process_jobs"):
 		return
 	async_mesh_initial_pending = int(service.call("pending_job_count")) if service.has_method("pending_job_count") else -1
+	async_mesh_request_accepted = async_mesh_initial_pending > 0
 	var async_started_usec := Time.get_ticks_usec()
 	while float(Time.get_ticks_usec() - async_started_usec) / 1000.0 < 60000.0:
 		async_mesh_frames += 1
@@ -261,9 +259,12 @@ func fluid_geometry_summary(chunk_key: Vector2i) -> Dictionary:
 	var forbidden_coarse_payload := bool(mesh.get_meta("forbiddenCoarseFluidPayload", false)) if mesh != null else false
 	var terrain_signature := String(mesh.get_meta("terrainSignature", "")) if mesh != null else ""
 	var fluid_payload_revision := int(mesh.get_meta("fluidPayloadRevision", -1)) if mesh != null else -1
-	var body := chunk.get_node_or_null("TerrainBody") as StaticBody3D
+	var terrain_authority := main.get_node_or_null("VoxelTerrainRuntime/VoxelTerrainAuthority") if main != null else null
+	var collision_authority_present := terrain_authority is VoxelTerrain \
+		and bool((terrain_authority as VoxelTerrain).generate_collisions) \
+		and int((terrain_authority as VoxelTerrain).collision_layer) == 2
 	return {
-		"passed": fluid_instance != null and surface_count > 0 and fluid_faces > 0 and body != null and fluid_step == 1 and not forbidden_coarse_payload,
+		"passed": fluid_instance != null and surface_count > 0 and fluid_faces > 0 and collision_authority_present and fluid_step == 1 and not forbidden_coarse_payload,
 		"chunk": vec2i(chunk_key),
 		"sampleCell": vec3i(selected_cell),
 		"fluid": String(selected_sample.get("fluid", "")),
@@ -277,7 +278,8 @@ func fluid_geometry_summary(chunk_key: Vector2i) -> Dictionary:
 		"forbiddenCoarseFluidPayload": forbidden_coarse_payload,
 		"terrainSignature": terrain_signature,
 		"fluidPayloadRevision": fluid_payload_revision,
-		"collisionBodyPresent": body != null,
+		"collisionAuthorityPresent": collision_authority_present,
+		"collisionAuthority": "VoxelTerrain" if collision_authority_present else "missing",
 		"fluidCollisionSource": String(fluid_instance.get_meta("collision_source", "")) if fluid_instance != null else "",
 		"asyncMeshFrames": async_mesh_frames,
 		"asyncMeshApplied": async_mesh_applied,
