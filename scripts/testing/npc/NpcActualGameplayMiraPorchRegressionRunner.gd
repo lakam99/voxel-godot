@@ -8,10 +8,12 @@ const CAPTURE_HEIGHT := 720
 const STARTUP_FRAMES := 80
 const POST_ACTION_FRAMES := 24
 const SAMPLE_EVERY_FRAMES := 6
-const OBSERVE_SECONDS := 72.0
+const OBSERVE_SECONDS := 150.0
 const PORCH_LEAVE_DISTANCE := CELL * 3.0
 const PORCH_SETTLED_FRAMES := 30
 const DOOR_CLOSE_APPROACH_DISTANCE := CELL * 0.75
+const FIRST_DISPLACEMENT_DISTANCE := CELL * 0.10
+const POST_HOME_DOOR_OBSERVE_SECONDS := 8.0
 
 var menu: Node = null
 var main: Node3D = null
@@ -44,6 +46,11 @@ var mira_max_flat_speed := 0.0
 var mira_max_player_porch_distance := 0.0
 var mira_left_player_porch := false
 var mira_reached_strict_home := false
+var mira_ack_position := Vector3.ZERO
+var mira_ack_position_valid := false
+var mira_home_door_ever_open := false
+var mira_strict_home_first_time := -1.0
+var phase0_timing: Dictionary = {}
 
 func _ready() -> void:
     configure_paths()
@@ -108,6 +115,7 @@ func run() -> void:
         "miraTimeline": mira_timeline,
         "inputTimeline": input_timeline,
         "startupLoadingSteps": startup_loading_steps,
+        "phase0Timing": phase0_timing,
         "scriptErrorScan": { "status": "pending-wrapper-scan", "matches": [] },
         "forbiddenCallSelfScan": { "status": "passed-by-wrapper-before-launch" }
     }
@@ -163,6 +171,10 @@ func launch_main_via_menu_input() -> bool:
     await capture_stage("menu_before_new_game", { "button": control_summary(button) })
     dispatch_mouse_button(button_center(button), MOUSE_BUTTON_LEFT, true, "menu_new_game_press")
     dispatch_mouse_button(button_center(button), MOUSE_BUTTON_LEFT, false, "menu_new_game_release")
+    record_phase0_event("newGameClick", {
+        "button": control_summary(button),
+        "realBootAttachedToMainMenu": real_boot_attached_to_menu()
+    })
     mark_progress("main_menu_new_game_button_input")
     var max_frames := ceili(140.0 * float(Engine.physics_ticks_per_second))
     var observed_main := false
@@ -180,6 +192,10 @@ func launch_main_via_menu_input() -> bool:
             if frame % 60 == 0:
                 mark_progress("main_menu_waiting_for_main_load active=%s loading=%s" % [str(main != null), str(loading_active)])
             if not loading_active:
+                record_phase0_event("startupLoadingComplete", {
+                    "framesAfterClick": frame,
+                    "startupLoadingStepCount": startup_loading_steps.size()
+                })
                 report_data["mainMenuLaunch"] = {
                     "clickedViaInput": true,
                     "frames": frame,
@@ -293,6 +309,11 @@ func run_knock_and_mira_observation() -> void:
         }))
         return
     mark_progress("right_clicking_player_house_door")
+    record_phase0_event("doorInteraction", {
+        "door": block_summary(starter_door),
+        "hit": hit,
+        "player": player_summary()
+    })
     dispatch_mouse_button(viewport_center(), MOUSE_BUTTON_RIGHT, true, "starter_door_right_click_press")
     dispatch_mouse_button(viewport_center(), MOUSE_BUTTON_RIGHT, false, "starter_door_right_click_release")
     await wait_physics_frames(POST_ACTION_FRAMES)
@@ -337,6 +358,16 @@ func run_knock_and_mira_observation() -> void:
     if not bool(after_dialogue_state.get("elderAcknowledged", false)):
         add_failure("mira_dialogue_ack_not_recorded", "tutorial state did not record elder acknowledgement after HUD close")
         return
+    var mira_at_ack := npc_entry("mira")
+    var mira_ack_body := mira_at_ack.get("body") as Node3D
+    if mira_ack_body != null and is_instance_valid(mira_ack_body):
+        mira_ack_position = mira_ack_body.global_position
+        mira_ack_position_valid = true
+    report_data["homeRefreshAtAcknowledgement"] = after_dialogue_state.get("homeRefresh", {})
+    record_phase0_event("dialogueAcknowledgement", {
+        "tutorialState": after_dialogue_state,
+        "mira": npc_summary(mira_at_ack) if not mira_at_ack.is_empty() else {}
+    })
     mark_progress("observing_mira_after_knock")
     await observe_mira_after_knock(OBSERVE_SECONDS)
     var mira := npc_entry("mira")
@@ -347,6 +378,8 @@ func run_knock_and_mira_observation() -> void:
     report_data["miraMaxPlayerPorchDistance"] = rounded(mira_max_player_porch_distance)
     report_data["miraLeftPlayerPorch"] = mira_left_player_porch
     report_data["miraReachedStrictHome"] = mira_reached_strict_home
+    report_data["phase0Timing"] = phase0_timing
+    report_data["phase0DepartureDiagnosis"] = departure_diagnosis(mira)
     var target = mira_visual_target(mira)
     await capture_stage("player_pov_mira_post_knock_final_state", {
         "mira": report_data["miraFinal"],
@@ -393,6 +426,7 @@ func observe_mira_after_knock(seconds: float) -> void:
         await get_tree().physics_frame
         var mira := npc_entry("mira")
         track_mira(mira)
+        track_phase0_transitions(mira)
         var home_status := strict_home_status(mira)
         if not mira.is_empty():
             var body := mira.get("body") as Node3D
@@ -408,14 +442,63 @@ func observe_mira_after_knock(seconds: float) -> void:
                     home_settled_frames = 0
                 if left_settled_frames >= PORCH_SETTLED_FRAMES:
                     mira_left_player_porch = true
+                    record_phase0_event("playerPorchClearance", {
+                        "settledFrames": left_settled_frames,
+                        "mira": npc_summary(mira)
+                    })
                 if home_settled_frames >= PORCH_SETTLED_FRAMES:
                     mira_reached_strict_home = true
+                    if mira_strict_home_first_time < 0.0:
+                        mira_strict_home_first_time = elapsed
+                    record_phase0_event("strictHomeArrival", {
+                        "settledFrames": home_settled_frames,
+                        "homeStatus": home_status,
+                        "mira": npc_summary(mira)
+                    })
         if frame % SAMPLE_EVERY_FRAMES == 0:
             sample_mira("observe_mira_%04d" % frame, home_status)
             sample_player("observe_mira_%04d" % frame)
             mark_progress("observing_mira_after_knock_%04d" % frame)
         if mira_left_player_porch and mira_reached_strict_home:
-            return
+            if phase0_timing.has("homeDoorClosure"):
+                return
+            if mira_strict_home_first_time >= 0.0 and elapsed - mira_strict_home_first_time >= POST_HOME_DOOR_OBSERVE_SECONDS:
+                return
+
+func track_phase0_transitions(entry: Dictionary) -> void:
+    if entry.is_empty():
+        return
+    var order := scripted_order_summary(entry)
+    if String(order.get("kind", "")) == "go_home":
+        record_phase0_event("goHomeCommandSubmission", {
+            "order": order,
+            "homeRefresh": tutorial_state_summary(main.get("tutorial_system")).get("homeRefresh", {}) if main != null else {}
+        })
+    var authority := route_authority_summary(entry)
+    var route_ticket_id := String(entry.get("routeTicketId", ""))
+    if route_ticket_id != "" or String(authority.get("requestId", "")) != "":
+        record_phase0_event("firstRouteTicketOrRequest", {
+            "routeTicket": route_ticket_summary(entry),
+            "routeAuthority": authority
+        })
+    var body := entry.get("body") as Node3D
+    if body != null and is_instance_valid(body) and mira_ack_position_valid:
+        var displacement := flat_distance(body.global_position, mira_ack_position)
+        if displacement >= FIRST_DISPLACEMENT_DISTANCE:
+            record_phase0_event("firstNontrivialDisplacement", {
+                "distanceFromAcknowledgement": rounded(displacement),
+                "position": vec3(body.global_position),
+                "waitClassification": departure_wait_classification(entry)
+            })
+    var home_door := home_door_for_entry(entry)
+    if home_door == null:
+        return
+    var is_open := bool(home_door.get_meta("open", false))
+    if is_open:
+        mira_home_door_ever_open = true
+        record_phase0_event("homeDoorOpened", { "door": block_summary(home_door) })
+    elif mira_home_door_ever_open:
+        record_phase0_event("homeDoorClosure", { "door": block_summary(home_door) })
 
 func track_mira(entry: Dictionary) -> void:
     if entry.is_empty():
@@ -714,6 +797,7 @@ func npc_summary(entry: Dictionary) -> Dictionary:
         "flatCell": vec2i(flat_cell(position)),
         "homeCell": vec2i(entry.get("homeCell", Vector2i.ZERO)),
         "porchCell": vec2i(entry.get("porchCell", Vector2i.ZERO)),
+        "doorCell": vec2i(entry.get("doorCell", Vector2i.ZERO)),
         "homePosition": vec3(entry_position(entry, "homePosition", position)),
         "porchPosition": vec3(entry_position(entry, "porchPosition", position)),
         "distanceToPlayerPorch": rounded(flat_distance(position, starter_door_position)),
@@ -730,8 +814,110 @@ func npc_summary(entry: Dictionary) -> Dictionary:
         "blockedContactName": String(body.get_meta("npc_blocked_contact_name", "")) if body_valid else "",
         "lastMoveDistance": rounded(float(entry.get("lastMoveDistance", 0.0))),
         "activeDoorPortalId": String(entry.get("activeDoorPortalId", "")),
-        "activeDoorDirection": String(entry.get("activeDoorDirection", ""))
+        "activeDoorDirection": String(entry.get("activeDoorDirection", "")),
+        "holdIntroDoor": bool(entry.get("holdIntroDoor", false)),
+        "requiredVisibleScripted": bool(entry.get("requiredVisibleScripted", false)),
+        "tutorial": bool(entry.get("tutorial", false)),
+        "scriptedOrder": scripted_order_summary(entry),
+        "routeTicket": route_ticket_summary(entry),
+        "routeAuthority": route_authority_summary(entry),
+        "departureWaitClassification": departure_wait_classification(entry),
+        "homeDoor": block_summary(home_door_for_entry(entry))
     }
+
+func scripted_order_summary(entry: Dictionary) -> Dictionary:
+    var value = entry.get("scriptedOrder", {})
+    if not (value is Dictionary):
+        return {}
+    var order: Dictionary = value
+    var target = order.get("target", Vector3.ZERO)
+    return {
+        "id": String(order.get("id", "")),
+        "kind": String(order.get("kind", "")),
+        "state": String(order.get("state", "")),
+        "reason": String(order.get("reason", "")),
+        "failureReason": String(order.get("failureReason", "")),
+        "target": vec3(target) if target is Vector3 else [],
+        "arrivalRadius": rounded(float(order.get("arrivalRadius", 0.0))),
+        "usesRouteStack": bool(order.get("usesRouteStack", false))
+    }
+
+func route_ticket_summary(entry: Dictionary) -> Dictionary:
+    return {
+        "id": String(entry.get("routeTicketId", "")),
+        "state": String(entry.get("routeTicketState", "")),
+        "reason": String(entry.get("routeTicketReason", "")),
+        "attempts": int(entry.get("routeTicketAttempts", 0)),
+        "updatedFrame": int(entry.get("routeTicketUpdatedFrame", -1))
+    }
+
+func route_authority_summary(entry: Dictionary) -> Dictionary:
+    var value = entry.get("routeAuthorityV2", {})
+    if not (value is Dictionary):
+        return {}
+    var authority: Dictionary = value
+    return {
+        "requestId": String(authority.get("requestId", "")),
+        "generation": int(authority.get("generation", 0)),
+        "state": String(authority.get("state", "")),
+        "reason": String(authority.get("reason", "")),
+        "priority": int(authority.get("priority", 0)),
+        "planningWaitFrames": int(authority.get("planningWaitFrames", 0)),
+        "queuedFrames": int(authority.get("queuedFrames", 0)),
+        "pendingBudgetFrames": int(authority.get("pendingBudgetFrames", 0)),
+        "pendingNavDataFrames": int(authority.get("pendingNavDataFrames", 0)),
+        "pendingProbeFrames": int(authority.get("pendingProbeFrames", 0)),
+        "hasLease": bool(authority.get("hasLease", false)),
+        "leaseId": String(authority.get("leaseId", ""))
+    }
+
+func departure_wait_classification(entry: Dictionary) -> String:
+    var order := scripted_order_summary(entry)
+    if String(order.get("kind", "")) != "go_home":
+        return "no_go_home_command"
+    var authority := route_authority_summary(entry)
+    var request_id := String(authority.get("requestId", ""))
+    var ticket_id := String(entry.get("routeTicketId", ""))
+    if request_id == "" and ticket_id == "":
+        return "go_home_order_without_route_request"
+    var state := String(authority.get("state", ""))
+    if state in ["queued", "pending_budget", "pending_nav_data", "probing"]:
+        return "route_pending:%s" % state
+    if state in ["ready", "following", "arrived"]:
+        return "route_executable:%s" % state
+    return "route_state:%s" % (state if state != "" else String(entry.get("routeTicketState", "unknown")))
+
+func departure_diagnosis(entry: Dictionary) -> Dictionary:
+    return {
+        "classificationAtFinish": departure_wait_classification(entry) if not entry.is_empty() else "missing_mira",
+        "goHomeCommandObserved": phase0_timing.has("goHomeCommandSubmission"),
+        "routeTicketOrRequestObserved": phase0_timing.has("firstRouteTicketOrRequest"),
+        "movementObserved": phase0_timing.has("firstNontrivialDisplacement"),
+        "porchClearanceObserved": phase0_timing.has("playerPorchClearance"),
+        "strictHomeObserved": phase0_timing.has("strictHomeArrival"),
+        "homeDoorOpenedObserved": phase0_timing.has("homeDoorOpened"),
+        "homeDoorClosureObserved": phase0_timing.has("homeDoorClosure")
+    }
+
+func record_phase0_event(name: String, details: Dictionary = {}) -> void:
+    if phase0_timing.has(name):
+        return
+    phase0_timing[name] = {
+        "time": rounded(elapsed),
+        "physicsFrame": Engine.get_physics_frames(),
+        "details": details
+    }
+    report_data["phase0Timing"] = phase0_timing
+
+func home_door_for_entry(entry: Dictionary) -> Node3D:
+    if entry.is_empty():
+        return null
+    var door_cell_value = entry.get("doorCell", null)
+    if not (door_cell_value is Vector2i):
+        return null
+    var door_cell: Vector2i = door_cell_value
+    var expected := world_position_for_flat_cell(door_cell)
+    return nearest_block("door", expected)
 
 func sample_mira(label: String, home_status: Dictionary = {}) -> void:
     var mira := npc_entry("mira")
@@ -987,7 +1173,7 @@ func ensure_dir(path: String) -> void:
 func watchdog_seconds() -> float:
     var text := OS.get_environment("VOXEL_ACTUAL_GAMEPLAY_MIRA_WATCHDOG_SECONDS").strip_edges()
     if text == "":
-        return 260.0
+        return 420.0
     return maxf(float(text), 30.0)
 
 func capture_names() -> Array[String]:

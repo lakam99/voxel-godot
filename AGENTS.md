@@ -71,6 +71,7 @@ Prefer composed systems under `scripts/` or `scripts/story/` over expanding that
 
 - `CODEX_NPC_PATHFINDING_FINAL_IMPLEMENTATION_PLAN.md`: controlling mandatory specification for the NPC autonomy/pathfinding replacement. When executing this work, reread the current phase, global invariants, test protocol, and prohibited-shortcuts section before editing. Follow one phase branch/report/merge cycle at a time.
 - `CODEX_MATURE_NAV_PLAN.md` and `NPC_PATHFINDING_REGRESSION_HANDOFF.md`: current context for the systemic NPC pathfinding regression. Use these before changing NPC routing, route readiness, collision, door traversal, forager behavior, or live NPC playtests.
+- `CODEX_TUTORIAL_TOWN_NPC_LOADING_PLAN.md`: controlling sequential plan for making the tutorial town a fully published loading artifact and removing tutorial-specific movement privilege from generic NPC systems. Follow it before changing tutorial-town readiness, tutorial NPC spawning/home assignment, post-knock behavior, or tutorial-owned NPC commands.
 - `Minecraft-Equivalent Terrain Migr.md`: terrain architecture migration context. The target is Minecraft-like terrain authority with smooth/non-blocky rendering, not a heightfield plus cave band-aids.
 - `CODEX_PERFORMANCE_PLAN.md`: performance roadmap and prior performance constraints. Recheck when touching terrain, chunk streaming, structures, NPC/nav, autosave, or main menu/runtime loading.
 - `CODEX_VISUAL_UPGRADE_PLAN.md`: visual polish roadmap.
@@ -180,6 +181,9 @@ Use random seeds for broad tutorial or generated-town playtests unless replaying
 
 - The main menu should defer expensive world loading until `New Game` or `Continue` is selected.
 - If loading or exiting takes noticeable time, show a loading/progress state and yield work across frames where possible. A frozen window is a bug even if the eventual result is correct.
+- `startup_loading_completed` means the initial playable world is actually ready. For the tutorial town this includes drained required structure operations, a complete validated town manifest, required home/door records, registered NPC home assignments, authoritative terrain collision, and the initial navigation publication needed by those actors.
+- Do not enter playable tutorial state with partial town records and repair them later from dialogue, interaction, or NPC behavior code. Missing required generated records are a loading failure, not an NPC wait state.
+- Loading work may be budgeted across frames, but readiness commands and gameplay intents must never be dropped when a budget or dependency is pending. Either keep loading active or retain an explicit retryable request with bounded telemetry.
 - Tutorial playtests can be smoother than normal gameplay because they may stage or constrain the world differently. Use normal runtime performance passes when diagnosing player-reported gameplay hitches.
 - Treat sprinting/running traversal as a streaming stress test. It is the common path that exposes chunk, terrain, prop, NPC, and autosave spikes.
 
@@ -207,6 +211,20 @@ Use random seeds for broad tutorial or generated-town playtests unless replaying
 - `scripts/GameHud*.gd`, `MainHudFlow.gd`: HUD, inventory UI, settings, objectives, contracts.
 - `scripts/visual/*Registry.gd`: generated visual asset registries.
 - `scripts/ItemVisualFactory.gd`, `HeldItemSystem.gd`, `ItemIconFactory.gd`: item meshes, held visuals, UI icons.
+
+## Tutorial Town And NPC Boundaries
+
+- Tutorial-town NPCs are ordinary production NPCs. They use the same registration, schedule, intent, route authority, collision probes, motor, doors, traffic, save, and recovery contracts as every other NPC.
+- Named NPC IDs such as `mira`, `niko`, `rowan`, or `sera` may appear in tutorial scenario data, dialogue, quest conditions, and presentation code. They must not create named movement, routing, home-readiness, collision, door, budget, or recovery behavior in `NpcSystem` or `scripts/npc_ai/`.
+- Generic NPC systems must expose generic commands such as wait, go to, go home, resume schedule, or cancel. Do not add APIs such as `release_intro_hold_and_order_home`, named-NPC helpers, tutorial-only route writers, or actor-specific fallback movement.
+- The tutorial orchestration layer may select an actor and issue a generic command. For example, completing the knock interaction may replace a generic wait order with `order_go_home(actor, reason)`. After command submission, normal NPC authority owns readiness, routing, execution, and arrival.
+- Temporary story choreography must use generic, owner-scoped orders or suspension tokens. Do not control movement through ad hoc metadata such as `holdIntroDoor`, `npc_hold_intro_door`, or named flags that generic NPC code interprets specially.
+- Generated town/home/door data is produced and validated before gameplay is enabled. Tutorial dialogue must not call town generation, refresh home records, wait for structure publication, rebuild assignments, or silently fall back to guessed home/porch/door cells.
+- A town manifest must validate the records actually required by the scenario, including unique stable IDs, home cells, porch cells, door cells/portals, strict interior bounds, structure existence, and deterministic assignment. Do not use a magic record count as a substitute for semantic completeness.
+- If required tutorial-town generation cannot complete, keep the loading screen active and surface a structured failure. Do not let an NPC stand indefinitely while a one-shot command is discarded, and do not rely on later schedule evaluation to mask the dropped command.
+- Tutorial identity metadata may decorate dialogue, UI, quest ownership, or save state, but generic NPC behavior must not branch on `tutorial` identity when an ordinary role, job, schedule, order, capability, or story-owned state can express the requirement.
+- When modifying this boundary, audit New Game and Continue, old saves, random seeds, generated-home variation, dialogue close paths, immediate command acceptance, eventual strict-home arrival, door clearance/close, and normal non-tutorial NPC behavior.
+- Acceptance must include a real main-menu -> New Game headed run with no gameplay-affecting flags. Prove the command is accepted promptly after the visible interaction and that the NPC completes the same generic go-home flow; a synthetic direct `go_home` call is contract evidence only.
 
 ## Known Bugs
 
