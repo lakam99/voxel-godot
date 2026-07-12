@@ -16,6 +16,9 @@ var seed_hash := 1
 var startup_mode := "auto"
 var deferred_startup_boot := false
 var startup_loading_active := false
+var startup_loading_started_usec := 0
+var startup_loading_last_step_usec := 0
+var startup_loading_timeline: Array[Dictionary] = []
 var runtime_loading_active := false
 var post_startup_trace_frames := 0
 var height_noise: FastNoiseLite
@@ -321,6 +324,9 @@ func _ready() -> void:
     reset_autosave_dirty_tracking(not loaded and not skip_synchronous_world_boot, "new_world")
 
 func _run_deferred_startup_boot() -> void:
+    startup_loading_started_usec = Time.get_ticks_usec()
+    startup_loading_last_step_usec = startup_loading_started_usec
+    startup_loading_timeline.clear()
     await startup_loading_yield("Preparing world")
     playtest_progress("main_ready_start")
     var requested_startup_mode := startup_mode.strip_edges()
@@ -423,6 +429,18 @@ func _run_deferred_startup_boot() -> void:
     startup_loading_completed.emit()
 
 func startup_loading_yield(message: String) -> void:
+    var now_usec := Time.get_ticks_usec()
+    if startup_loading_started_usec <= 0:
+        startup_loading_started_usec = now_usec
+        startup_loading_last_step_usec = now_usec
+    startup_loading_timeline.append({
+        "message": message,
+        "elapsedMs": float(now_usec - startup_loading_started_usec) / 1000.0,
+        "stepMs": float(now_usec - startup_loading_last_step_usec) / 1000.0
+    })
+    if startup_loading_timeline.size() > 128:
+        startup_loading_timeline.pop_front()
+    startup_loading_last_step_usec = now_usec
     startup_loading_step.emit(message)
     if hud != null and hud.has_method("set_loading_message"):
         hud.set_loading_message(message)
@@ -1553,6 +1571,11 @@ func wait_for_async_save_before_quit() -> void:
         save_system.call("poll_async_save", true)
 
 func wait_for_terrain_workers_before_quit() -> void:
+    var voxel_runtime = get("voxel_terrain_runtime")
+    if voxel_runtime != null and is_instance_valid(voxel_runtime) and voxel_runtime.has_method("begin_shutdown"):
+        voxel_runtime.call("begin_shutdown")
+        await startup_loading_yield("Stopping voxel terrain")
+        await startup_loading_yield("Stopping voxel terrain")
     if terrain_meshing_service == null or not terrain_meshing_service.has_method("clear_jobs"):
         return
     await startup_loading_yield("Stopping terrain jobs")

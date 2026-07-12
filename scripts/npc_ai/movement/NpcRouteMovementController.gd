@@ -8,7 +8,6 @@ const NpcCorridorFollowerScript := preload("res://scripts/npc_ai/movement/NpcCor
 const ReciprocalAvoidanceAdapterScript := preload("res://scripts/npc_ai/movement/ReciprocalAvoidanceAdapter.gd")
 const NpcRouteStateStoreScript := preload("res://scripts/npc_ai/routing/NpcRouteStateStore.gd")
 const CAPSULE_RADIUS := 0.34
-const CAPSULE_HEIGHT := 1.64
 const DOOR_ACTION_LOOKAHEAD_CELLS := 4
 const DOOR_ACTION_DIRECT_MAX_CELL_STEPS := 2
 const DOOR_ACTION_LOOKAHEAD_MAX_CELL_STEPS := 3
@@ -38,7 +37,6 @@ const FAILED_ROUTE_RETRY_LOW_PRIORITY_FRAMES := 12
 
 var system
 var main
-var capsule_shape: CapsuleShape3D
 var corridor_follower
 var avoidance_adapter
 var frame_claimed_cells := {}
@@ -46,9 +44,6 @@ var frame_claimed_cells := {}
 func setup(system_node, main_node) -> void:
     system = system_node
     main = main_node
-    capsule_shape = CapsuleShape3D.new()
-    capsule_shape.radius = CAPSULE_RADIUS
-    capsule_shape.height = CAPSULE_HEIGHT
     corridor_follower = NpcCorridorFollowerScript.new()
     avoidance_adapter = ReciprocalAvoidanceAdapterScript.new()
     avoidance_adapter.setup(system, main)
@@ -2390,50 +2385,47 @@ func entry_loses_to_dynamic(entry: Dictionary, blocker, priority := 0) -> bool:
     return npc_id > blocker_id
 
 func capsule_hits_obstacle(entry: Dictionary, body: CharacterBody3D, previous: Vector3, candidate: Vector3) -> bool:
-    if system == null or body == null or capsule_shape == null:
+    if system == null or body == null:
         return false
     entry.erase("capsuleBlocker")
     body.set_meta("npc_capsule_blocker", {})
     var delta: Vector3 = candidate - previous
-    delta.y = 0.0
-    var samples: int = clampi(ceili(delta.length() / (CELL * 0.28)), 1, 5)
-    for i in range(1, samples + 1):
-        var sample: Vector3 = previous.lerp(candidate, float(i) / float(samples))
-        sample.y = float(main.call("surface_y_at_position", sample)) + 0.04 if main.has_method("surface_y_at_position") else sample.y + 0.04
-        var query := PhysicsShapeQueryParameters3D.new()
-        query.shape = capsule_shape
-        query.transform = Transform3D(Basis(), sample + Vector3(0.0, CAPSULE_HEIGHT * 0.5, 0.0))
-        query.collision_mask = NpcConstantsScript.COLLISION_NPC_STATIC_QUERY_MASK
-        query.collide_with_bodies = true
-        query.collide_with_areas = false
-        query.exclude = [body.get_rid()]
-        var hits: Array = system.get_world_3d().direct_space_state.intersect_shape(query, 12)
-        for hit in hits:
-            var hit_dict: Dictionary = hit
-            var collider := hit_dict.get("collider") as Node
-            if collider == null or collider == body:
-                continue
-            if collider_allows_overlap_escape(collider, previous, candidate):
-                continue
-            if collider_blocks_capsule(entry, collider, body):
-                var collider_body := collider as Node3D
-                var collider_position := collider_body.global_position if collider_body != null else Vector3.ZERO
-                var blocker := {
-                    "name": collider.name,
-                    "kind": String(collider.get_meta("kind", "")),
-                    "blockType": String(collider.get_meta("block_type", "")),
-                    "class": collider.get_class(),
-                    "position": collider_position,
-                    "cell": Vector2i(roundi(collider_position.x / CELL), roundi(collider_position.z / CELL)),
-                    "sample": sample,
-                    "sampleCell": Vector2i(roundi(sample.x / CELL), roundi(sample.z / CELL)),
-                    "candidate": candidate,
-                    "candidateCell": Vector2i(roundi(candidate.x / CELL), roundi(candidate.z / CELL))
-                }
-                entry["capsuleBlocker"] = blocker
-                body.set_meta("npc_capsule_blocker", blocker)
-                return true
+    if delta.length_squared() <= 0.000001:
+        return false
+    # This is a collision-only dry run through the exact CharacterBody3D shape.
+    # It cannot diverge from the body's configured capsule, mask, or exceptions.
+    var collision: KinematicCollision3D = body.move_and_collide(delta, true, 0.001, false, 8)
+    if collision == null:
+        return false
+    var sample := previous + collision.get_travel()
+    for index in range(collision.get_collision_count()):
+        var collider := collision.get_collider(index) as Node
+        if collider == null or collider == body:
+            continue
+        if collider_allows_overlap_escape(collider, previous, candidate):
+            continue
+        if collider_blocks_capsule(entry, collider, body):
+            record_capsule_blocker(entry, body, collider, sample, candidate)
+            return true
     return false
+
+func record_capsule_blocker(entry: Dictionary, body: CharacterBody3D, collider: Node, sample: Vector3, candidate: Vector3) -> void:
+    var collider_body := collider as Node3D
+    var collider_position := collider_body.global_position if collider_body != null else Vector3.ZERO
+    var blocker := {
+        "name": collider.name,
+        "kind": String(collider.get_meta("kind", "")),
+        "blockType": String(collider.get_meta("block_type", "")),
+        "class": collider.get_class(),
+        "position": collider_position,
+        "cell": Vector2i(roundi(collider_position.x / CELL), roundi(collider_position.z / CELL)),
+        "sample": sample,
+        "sampleCell": Vector2i(roundi(sample.x / CELL), roundi(sample.z / CELL)),
+        "candidate": candidate,
+        "candidateCell": Vector2i(roundi(candidate.x / CELL), roundi(candidate.z / CELL))
+    }
+    entry["capsuleBlocker"] = blocker
+    body.set_meta("npc_capsule_blocker", blocker)
 
 func collider_allows_overlap_escape(collider: Node, previous: Vector3, candidate: Vector3) -> bool:
     if collider == null:

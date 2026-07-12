@@ -2435,12 +2435,12 @@ func test_motor_fence_window_corner_no_penetration(_mode: String) -> Dictionary:
 		locomotion_text.find("capsule_hits_obstacle") >= 0
 		and locomotion_text.find("collider_blocks_capsule") >= 0
 		and locomotion_text.find("\"prop\", \"npc\", \"tutorial_npc\", \"hostile\"") >= 0
-		and locomotion_text.find("intersect_shape") >= 0
+		and locomotion_text.find("move_and_collide(delta, true") >= 0
 	)
 	return outcome(
 		passed,
-		"capsule=%d blockers=%d intersect=%d" % [locomotion_text.find("capsule_hits_obstacle"), locomotion_text.find("collider_blocks_capsule"), locomotion_text.find("intersect_shape")],
-		["capsule_probe", "dynamic_blockers_include_npcs", "shape_query_collision_probe"],
+		"capsule=%d blockers=%d testMove=%d" % [locomotion_text.find("capsule_hits_obstacle"), locomotion_text.find("collider_blocks_capsule"), locomotion_text.find("move_and_collide(delta, true")],
+		["capsule_probe", "dynamic_blockers_include_npcs", "actual_body_test_only_collision_probe"],
 		{}
 	)
 

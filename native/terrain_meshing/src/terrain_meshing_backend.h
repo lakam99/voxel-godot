@@ -28,6 +28,7 @@ public:
 	Dictionary backend_summary() const;
 	Variant build_chunk_mesh(Object *p_main, int32_t p_cx, int32_t p_cz);
 	Variant build_chunk_mesh_from_sections(const Dictionary &p_payload);
+	Dictionary build_chunk_fluid_surface_data_from_sections(const Dictionary &p_payload);
 	Variant build_chunk_fluid_mesh_from_sections(const Dictionary &p_payload);
 	Variant build_chunk_fluid_mesh(Object *p_main, int32_t p_cx, int32_t p_cz);
 	Variant collision_shape_for_mesh(const Ref<Mesh> &p_mesh);

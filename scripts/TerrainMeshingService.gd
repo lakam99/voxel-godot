@@ -9,6 +9,7 @@ const EXTENSION_LOAD_STATUS_ALREADY_LOADED := 2
 const ASYNC_PAYLOAD_PREP_MAX_CELLS_PER_FRAME := 192
 const ASYNC_EXACT_FLUID_PAYLOAD_MAX_CELLS_PER_FRAME := 2048
 const ASYNC_WORKER_MIN_COLLECT_DELAY_MS := 36.0
+const ASYNC_FLUID_FINALIZE_MAX_VERTICES_PER_FRAME := 768
 
 var main
 var backend
@@ -27,6 +28,7 @@ var async_worker_done := false
 var async_worker_started_usec := 0
 var async_worker_payload := {}
 var async_payload_job := {}
+var async_finalize_job := {}
 var retired_worker_threads := []
 var setup_initialized := false
 
@@ -125,7 +127,7 @@ func can_process_native_section_jobs_async() -> bool:
 	return native_backend_available \
 		and backend != null \
 		and backend.has_method("build_chunk_mesh_from_sections") \
-		and backend.has_method("build_chunk_fluid_mesh_from_sections") \
+		and backend.has_method("build_chunk_fluid_surface_data_from_sections") \
 		and backend.has_method("collision_shape_for_mesh")
 
 func request_chunk_assets(cx: int, cz: int, signature := "", include_collision := true, priority := 0, fluid_only := false) -> Dictionary:
@@ -181,6 +183,8 @@ func invalidate_chunk(cx: int, cz: int) -> void:
 		async_worker_cancelled = true
 	if not async_payload_job.is_empty() and async_payload_job.get("key", Vector2i(999999, 999999)) == key:
 		async_payload_job = {}
+	if not async_finalize_job.is_empty() and async_finalize_job.get("key", Vector2i(999999, 999999)) == key:
+		async_finalize_job = {}
 
 func clear_jobs(blocking := true) -> void:
 	if async_worker_active and async_worker_thread != null:
@@ -199,6 +203,7 @@ func clear_jobs(blocking := true) -> void:
 	async_worker_started_usec = 0
 	async_worker_payload = {}
 	async_payload_job = {}
+	async_finalize_job = {}
 	pending_jobs.clear()
 	completed_jobs.clear()
 	job_sequence = 0
@@ -250,6 +255,8 @@ func pending_job_count() -> int:
 		active_count += 1
 	if not async_payload_job.is_empty():
 		active_count += 1
+	if not async_finalize_job.is_empty():
+		active_count += 1
 	return pending_jobs.size() + active_count
 
 func completed_job_count() -> int:
@@ -300,6 +307,23 @@ func process_jobs(max_jobs := 1, budget_ms := 3.0, center := Vector2i(999999, 99
 			"dropReason": String(completed_summary.get("dropReason", "")),
 			"elapsedMs": float(completed_summary.get("elapsedMs", elapsed_ms(started_usec)))
 		}
+	if not async_finalize_job.is_empty():
+		return {
+			"processed": 0,
+			"dropped": 0,
+			"deferredWithoutNative": deferred_without_native,
+			"preparedSections": prepared_sections,
+			"pendingJobs": pending_job_count(),
+			"completedJobs": completed_jobs.size(),
+			"collectMs": collect_ms,
+			"workerJoinMs": float(completed_summary.get("workerJoinMs", 0.0)),
+			"workerStartMs": 0.0,
+			"assetFinalizeMs": float(completed_summary.get("assetFinalizeMs", 0.0)),
+			"terrainMeshBuildMs": 0.0,
+			"fluidMeshBuildMs": float(completed_summary.get("fluidMeshBuildMs", 0.0)),
+			"collisionBuildMs": 0.0,
+			"elapsedMs": elapsed_ms(started_usec)
+		}
 	if async_worker_active:
 		return {
 			"processed": 0,
@@ -320,7 +344,7 @@ func process_jobs(max_jobs := 1, budget_ms := 3.0, center := Vector2i(999999, 99
 	if can_process_native_section_jobs_async():
 		var started := start_next_async_native_job(center, budget_ms)
 		return {
-			"processed": 0,
+			"processed": int(started.get("processed", 0)),
 			"dropped": int(started.get("dropped", 0)),
 			"deferredWithoutNative": deferred_without_native,
 			"preparedSections": int(started.get("preparedSections", 0)),
@@ -328,6 +352,12 @@ func process_jobs(max_jobs := 1, budget_ms := 3.0, center := Vector2i(999999, 99
 			"pendingJobs": pending_job_count(),
 			"completedJobs": completed_jobs.size(),
 			"payloadPrepMs": float(started.get("payloadPrepMs", 0.0)),
+			"payloadBeginMs": float(started.get("payloadBeginMs", 0.0)),
+			"signatureCheckMs": float(started.get("signatureCheckMs", 0.0)),
+			"payloadSelectMs": float(started.get("payloadSelectMs", 0.0)),
+			"payloadSignatureMs": float(started.get("payloadSignatureMs", 0.0)),
+			"terrainPayloadStateBeginMs": float(started.get("terrainPayloadStateBeginMs", 0.0)),
+			"fluidPayloadStateBeginMs": float(started.get("fluidPayloadStateBeginMs", 0.0)),
 			"fluidPayloadPrepMs": float(started.get("fluidPayloadPrepMs", 0.0)),
 			"fluidPayloadCells": int(started.get("fluidPayloadCells", 0)),
 			"fluidPreparedSections": int(started.get("fluidPreparedSections", 0)),
@@ -385,6 +415,12 @@ func start_next_async_native_job(center: Vector2i, budget_ms := 2.0) -> Dictiona
 		"dropped": 0,
 		"preparedSections": 0,
 		"payloadPrepMs": 0.0,
+		"payloadBeginMs": 0.0,
+		"signatureCheckMs": 0.0,
+		"payloadSelectMs": 0.0,
+		"payloadSignatureMs": 0.0,
+		"terrainPayloadStateBeginMs": 0.0,
+		"fluidPayloadStateBeginMs": 0.0,
 		"payloadCells": 0,
 		"workerStartMs": 0.0,
 		"dropReason": "",
@@ -395,13 +431,21 @@ func start_next_async_native_job(center: Vector2i, budget_ms := 2.0) -> Dictiona
 	if not retired_worker_threads.is_empty():
 		return result
 	if async_payload_job.is_empty():
+		var payload_begin_started_usec := Time.get_ticks_usec()
 		var began := begin_next_async_payload_job(center)
+		result["payloadBeginMs"] = elapsed_ms(payload_begin_started_usec)
+		result["payloadSelectMs"] = float(began.get("selectMs", 0.0))
+		result["payloadSignatureMs"] = float(began.get("signatureMs", 0.0))
+		result["terrainPayloadStateBeginMs"] = float(began.get("terrainStateMs", 0.0))
+		result["fluidPayloadStateBeginMs"] = float(began.get("fluidStateMs", 0.0))
 		result["dropped"] = int(began.get("dropped", 0))
 		if result["dropped"] > 0 or async_payload_job.is_empty():
 			return result
 	var key: Vector2i = async_payload_job.get("key", Vector2i(999999, 999999))
 	var requested_signature := String(async_payload_job.get("terrainSignature", ""))
+	var signature_started_usec := Time.get_ticks_usec()
 	var current_signature := current_signature_for_chunk(key)
+	result["signatureCheckMs"] = elapsed_ms(signature_started_usec)
 	result["requestedSignature"] = requested_signature
 	result["currentSignature"] = current_signature
 	if requested_signature != "" and current_signature != "" and requested_signature != current_signature:
@@ -483,31 +527,45 @@ func start_next_async_native_job(center: Vector2i, budget_ms := 2.0) -> Dictiona
 	payload["terrainStepCells"] = maxi(1, int(payload.get("terrainStepCells", payload.get("stepCells", 1))))
 	var include_collision := bool(async_payload_job.get("includeCollision", true))
 	async_payload_job = {}
+	if fluid_only and not bool(payload.get("hasFluid", false)):
+		return complete_empty_fluid_only_job(key, requested_signature, result)
 	result = start_async_worker_from_payload(key, requested_signature, payload, include_collision, fluid_only, result)
 	return result
 
 func begin_next_async_payload_job(center: Vector2i) -> Dictionary:
 	var result := {
 		"began": false,
-		"dropped": 0
+		"dropped": 0,
+		"selectMs": 0.0,
+		"signatureMs": 0.0,
+		"terrainStateMs": 0.0,
+		"fluidStateMs": 0.0
 	}
 	if pending_jobs.is_empty():
 		return result
+	var select_started_usec := Time.get_ticks_usec()
 	var key := nearest_pending_job_key(center)
+	result["selectMs"] = elapsed_ms(select_started_usec)
 	if key == Vector2i(999999, 999999):
 		return result
 	var job: Dictionary = pending_jobs[key]
 	pending_jobs.erase(key)
 	var requested_signature := String(job.get("terrainSignature", ""))
+	var signature_started_usec := Time.get_ticks_usec()
 	var current_signature := current_signature_for_chunk(key)
+	result["signatureMs"] = elapsed_ms(signature_started_usec)
 	if requested_signature != "" and current_signature != "" and requested_signature != current_signature:
 		result["dropped"] = 1
 		return result
+	var terrain_state_started_usec := Time.get_ticks_usec()
 	var terrain_state := begin_section_payload_for_chunk(key.x, key.y)
+	result["terrainStateMs"] = elapsed_ms(terrain_state_started_usec)
 	if terrain_state.is_empty():
 		result["dropped"] = 1
 		return result
+	var fluid_state_started_usec := Time.get_ticks_usec()
 	var fluid_state := begin_exact_fluid_payload_for_chunk(terrain_state)
+	result["fluidStateMs"] = elapsed_ms(fluid_state_started_usec)
 	if fluid_state.is_empty():
 		result["dropped"] = 1
 		return result
@@ -597,6 +655,36 @@ func start_async_worker_from_payload(key: Vector2i, requested_signature: String,
 	result["preparedSections"] = int((payload.get("sections", []) as Array).size()) if payload.get("sections", []) is Array else 0
 	return result
 
+func complete_empty_fluid_only_job(key: Vector2i, requested_signature: String, result: Dictionary) -> Dictionary:
+	var signature := requested_signature
+	if signature == "":
+		signature = current_signature_for_chunk(key)
+	var mesh := ArrayMesh.new()
+	mesh.set_meta("terrainMeshingQueued", true)
+	mesh.set_meta("terrainMeshingBackend", backend_id)
+	mesh.set_meta("terrainMeshingNative", true)
+	mesh.set_meta("terrainMeshingSectionPayload", false)
+	var fluid_mesh := ArrayMesh.new()
+	fluid_mesh.set_meta("terrainMeshingQueued", true)
+	fluid_mesh.set_meta("terrainMeshingBackend", backend_id)
+	fluid_mesh.set_meta("terrainMeshingNative", true)
+	fluid_mesh.set_meta("terrainFluidSectionPayload", true)
+	fluid_mesh.set_meta("terrainFluidEmpty", true)
+	fluid_mesh.set_meta("terrainSignature", signature)
+	completed_jobs[key] = {
+		"mesh": mesh,
+		"shape": null,
+		"fluidMesh": fluid_mesh,
+		"terrainSignature": signature,
+		"terrainMeshingBackend": backend_id,
+		"terrainMeshingNative": true,
+		"fluidOnly": true,
+		"terrainPreparedSections": 0
+	}
+	result["processed"] = 1
+	result["emptyFluidFastPath"] = true
+	return result
+
 func collect_async_worker_result() -> Dictionary:
 	var summary := {
 		"processed": 0,
@@ -610,6 +698,8 @@ func collect_async_worker_result() -> Dictionary:
 		"elapsedMs": 0.0,
 		"dropReason": ""
 	}
+	if not async_finalize_job.is_empty():
+		return advance_async_fluid_finalize()
 	if not async_worker_active or async_worker_thread == null:
 		return summary
 	if async_worker_started_usec > 0 and elapsed_ms(async_worker_started_usec) < ASYNC_WORKER_MIN_COLLECT_DELAY_MS:
@@ -650,12 +740,33 @@ func collect_async_worker_result() -> Dictionary:
 		summary["dropReason"] = "stale_worker_signature"
 		return summary
 	var fluid_only := bool(result.get("fluidOnly", false))
+	var fluid_surface_data: Dictionary = result.get("fluidSurfaceData", {}) if result.get("fluidSurfaceData", {}) is Dictionary else {}
+	if fluid_only and not fluid_surface_data.is_empty():
+		async_finalize_job = {
+			"key": key,
+			"terrainSignature": signature,
+			"data": fluid_surface_data,
+			"mesh": ArrayMesh.new(),
+			"fluidKind": "water",
+			"vertexOffset": 0,
+			"surfaceOrder": PackedStringArray(),
+			"preparedSections": int(result.get("preparedSections", 0)),
+			"workerElapsedMs": float(result.get("elapsedMs", 0.0)),
+			"fluidMeshBuildMs": float(result.get("fluidMeshBuildMs", 0.0))
+		}
+		var finalize_summary := advance_async_fluid_finalize()
+		finalize_summary["workerJoinMs"] = summary["workerJoinMs"]
+		finalize_summary["fluidMeshBuildMs"] = summary["fluidMeshBuildMs"]
+		finalize_summary["elapsedMs"] = summary["elapsedMs"]
+		return finalize_summary
 	var mesh: Mesh = result.get("mesh") as Mesh
+	if fluid_only and mesh == null:
+		mesh = ArrayMesh.new()
 	if mesh == null:
 		summary["dropped"] = 1
 		summary["dropReason"] = "worker_mesh_missing"
 		return summary
-	var fluid_mesh: Mesh = result.get("fluidMesh") as Mesh
+	var fluid_mesh: Mesh = fluid_mesh_from_surface_data(fluid_surface_data) if not fluid_surface_data.is_empty() else result.get("fluidMesh") as Mesh
 	if fluid_mesh == null:
 		fluid_mesh = ArrayMesh.new()
 	mesh.set_meta("terrainMeshingQueued", true)
@@ -689,15 +800,127 @@ func collect_async_worker_result() -> Dictionary:
 	summary["processed"] = 1
 	return summary
 
+func advance_async_fluid_finalize() -> Dictionary:
+	var summary := {
+		"processed": 0,
+		"dropped": 0,
+		"preparedSections": int(async_finalize_job.get("preparedSections", 0)),
+		"workerJoinMs": 0.0,
+		"assetFinalizeMs": 0.0,
+		"terrainMeshBuildMs": 0.0,
+		"fluidMeshBuildMs": float(async_finalize_job.get("fluidMeshBuildMs", 0.0)),
+		"collisionBuildMs": 0.0,
+		"elapsedMs": float(async_finalize_job.get("workerElapsedMs", 0.0)),
+		"dropReason": ""
+	}
+	if async_finalize_job.is_empty():
+		return summary
+	var key: Vector2i = async_finalize_job.get("key", Vector2i(999999, 999999))
+	var signature := String(async_finalize_job.get("terrainSignature", ""))
+	var current_signature := current_signature_for_chunk(key)
+	if signature != "" and current_signature != "" and signature != current_signature:
+		async_finalize_job = {}
+		summary["dropped"] = 1
+		summary["dropReason"] = "stale_finalize_signature"
+		return summary
+	var started_usec := Time.get_ticks_usec()
+	var data: Dictionary = async_finalize_job.get("data", {})
+	var mesh := async_finalize_job.get("mesh") as ArrayMesh
+	var kind := String(async_finalize_job.get("fluidKind", "water"))
+	var offset := int(async_finalize_job.get("vertexOffset", 0))
+	var vertices: PackedVector3Array = data.get("%sVertices" % kind, PackedVector3Array())
+	if offset >= vertices.size() and kind == "water":
+		kind = "lava"
+		offset = 0
+		async_finalize_job["fluidKind"] = kind
+		async_finalize_job["vertexOffset"] = offset
+		vertices = data.get("lavaVertices", PackedVector3Array())
+	if offset < vertices.size():
+		var end := mini(vertices.size(), offset + ASYNC_FLUID_FINALIZE_MAX_VERTICES_PER_FRAME)
+		end -= (end - offset) % 3
+		if end <= offset:
+			end = mini(vertices.size(), offset + 3)
+		var normals: PackedVector3Array = data.get("%sNormals" % kind, PackedVector3Array())
+		var colors: PackedColorArray = data.get("%sColors" % kind, PackedColorArray())
+		add_fluid_surface_from_data(mesh, vertices.slice(offset, end), normals.slice(offset, end), colors.slice(offset, end))
+		var order: PackedStringArray = async_finalize_job.get("surfaceOrder", PackedStringArray())
+		order.append(kind)
+		async_finalize_job["surfaceOrder"] = order
+		async_finalize_job["vertexOffset"] = end
+		summary["assetFinalizeMs"] = elapsed_ms(started_usec)
+		return summary
+	apply_fluid_surface_metadata(mesh, data, async_finalize_job.get("surfaceOrder", PackedStringArray()))
+	mesh.set_meta("terrainMeshingQueued", true)
+	mesh.set_meta("terrainMeshingBackend", backend_id)
+	mesh.set_meta("terrainMeshingNative", true)
+	mesh.set_meta("terrainSignature", signature)
+	apply_fluid_materials(mesh)
+	var terrain_mesh := ArrayMesh.new()
+	terrain_mesh.set_meta("terrainMeshingQueued", true)
+	terrain_mesh.set_meta("terrainMeshingBackend", backend_id)
+	terrain_mesh.set_meta("terrainMeshingNative", true)
+	terrain_mesh.set_meta("terrainMeshingSectionPayload", false)
+	completed_jobs[key] = {
+		"mesh": terrain_mesh,
+		"shape": null,
+		"fluidMesh": mesh,
+		"terrainSignature": signature if signature != "" else current_signature,
+		"terrainMeshingBackend": backend_id,
+		"terrainMeshingNative": true,
+		"fluidOnly": true,
+		"terrainPreparedSections": int(async_finalize_job.get("preparedSections", 0))
+	}
+	async_finalize_job = {}
+	summary["assetFinalizeMs"] = elapsed_ms(started_usec)
+	summary["processed"] = 1
+	return summary
+
+func fluid_mesh_from_surface_data(data: Dictionary) -> ArrayMesh:
+	var mesh := ArrayMesh.new()
+	add_fluid_surface_from_data(mesh, data.get("waterVertices", PackedVector3Array()), data.get("waterNormals", PackedVector3Array()), data.get("waterColors", PackedColorArray()))
+	add_fluid_surface_from_data(mesh, data.get("lavaVertices", PackedVector3Array()), data.get("lavaNormals", PackedVector3Array()), data.get("lavaColors", PackedColorArray()))
+	apply_fluid_surface_metadata(mesh, data, data.get("surfaceOrder", PackedStringArray()))
+	return mesh
+
+func apply_fluid_surface_metadata(mesh: ArrayMesh, data: Dictionary, surface_order: PackedStringArray) -> void:
+	mesh.set_meta("terrainFluidSectionPayload", not bool(data.get("deferred", true)))
+	mesh.set_meta("terrainFluidSurfaceOrder", surface_order)
+	mesh.set_meta("chunk_fluid_faces", int(data.get("fluidFaces", 0)))
+	mesh.set_meta("chunk_water_faces", int(data.get("waterFaces", 0)))
+	mesh.set_meta("chunk_lava_faces", int(data.get("lavaFaces", 0)))
+	mesh.set_meta("nativeFluidStepCells", 0 if bool(data.get("forbiddenCoarseFluidPayload", false)) else 1)
+	mesh.set_meta("nativeFluidSections", int(data.get("exactSectionCount", 0)))
+	mesh.set_meta("nativeFluidCellCount", int(data.get("exactFluidCellCount", 0)))
+	mesh.set_meta("fluidPayloadRevision", int(data.get("fluidPayloadRevision", 0)))
+	mesh.set_meta("fluidPayloadSignature", String(data.get("fluidPayloadSignature", "")))
+	mesh.set_meta("terrainFluidNativeDeferred", bool(data.get("deferred", true)))
+	mesh.set_meta("terrainFluidDeferredReason", String(data.get("reason", "")))
+	mesh.set_meta("unknownFluidNeighborCount", int(data.get("unknownNeighborCount", 0)))
+	mesh.set_meta("forbiddenCoarseFluidPayload", bool(data.get("forbiddenCoarseFluidPayload", false)))
+	mesh.set_meta("terrainFluidExactPayload", bool(data.get("exactContract", false)))
+	mesh.set_meta("terrainFluidLegacyExactPayload", bool(data.get("legacyExactContract", false)))
+
+func add_fluid_surface_from_data(mesh: ArrayMesh, vertices_value, normals_value, colors_value) -> void:
+	var vertices: PackedVector3Array = vertices_value if vertices_value is PackedVector3Array else PackedVector3Array()
+	if vertices.is_empty():
+		return
+	var arrays := []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = vertices
+	arrays[Mesh.ARRAY_NORMAL] = normals_value if normals_value is PackedVector3Array else PackedVector3Array()
+	arrays[Mesh.ARRAY_COLOR] = colors_value if colors_value is PackedColorArray else PackedColorArray()
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+
 func _thread_build_native_chunk_assets(key: Vector2i, signature: String, include_collision: bool, fluid_only: bool, payload: Dictionary, worker_backend) -> Dictionary:
 	var started_usec := Time.get_ticks_usec()
 	var terrain_started_usec := Time.get_ticks_usec()
-	var mesh = ArrayMesh.new() if fluid_only else (worker_backend.call("build_chunk_mesh_from_sections", payload) if worker_backend != null and worker_backend.has_method("build_chunk_mesh_from_sections") else null)
+	var mesh = null if fluid_only else (worker_backend.call("build_chunk_mesh_from_sections", payload) if worker_backend != null and worker_backend.has_method("build_chunk_mesh_from_sections") else null)
 	var terrain_mesh_build_ms := elapsed_ms(terrain_started_usec)
 	var fluid_started_usec := Time.get_ticks_usec()
-	var fluid_mesh = ArrayMesh.new()
-	if bool(payload.get("hasFluid", true)) and worker_backend != null and worker_backend.has_method("build_chunk_fluid_mesh_from_sections"):
-		fluid_mesh = worker_backend.call("build_chunk_fluid_mesh_from_sections", payload)
+	var fluid_mesh = null
+	var fluid_surface_data := {}
+	if bool(payload.get("hasFluid", true)) and worker_backend != null and worker_backend.has_method("build_chunk_fluid_surface_data_from_sections"):
+		fluid_surface_data = worker_backend.call("build_chunk_fluid_surface_data_from_sections", payload)
 	var fluid_mesh_build_ms := elapsed_ms(fluid_started_usec)
 	var collision_started_usec := Time.get_ticks_usec()
 	var shape = null
@@ -709,6 +932,7 @@ func _thread_build_native_chunk_assets(key: Vector2i, signature: String, include
 		"terrainSignature": signature,
 		"mesh": mesh,
 		"fluidMesh": fluid_mesh,
+		"fluidSurfaceData": fluid_surface_data,
 		"shape": shape,
 		"fluidOnly": fluid_only,
 		"preparedSections": int((payload.get("sections", []) as Array).size()) if payload.get("sections", []) is Array else 0,

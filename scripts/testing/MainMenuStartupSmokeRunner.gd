@@ -71,6 +71,8 @@ func collect_details(menu: Node, main, started_msec: int) -> Dictionary:
 	}
 	if main != null:
 		details["startupLoadingActive"] = bool(main.get("startup_loading_active"))
+		var timeline_value = main.get("startup_loading_timeline")
+		details["startupTimeline"] = (timeline_value as Array).duplicate(true) if timeline_value is Array else []
 		details["seed"] = String(main.get("seed_text"))
 		var chunks_value = main.get("chunks")
 		details["chunks"] = (chunks_value as Dictionary).size() if chunks_value is Dictionary else 0

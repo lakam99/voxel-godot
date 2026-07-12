@@ -27,6 +27,8 @@ var block_light_sources := {}
 var pending_sky_light_columns := {}
 var section_revisions := {}
 var fluid_section_revisions := {}
+var section_column_revisions := {}
+var fluid_section_column_revisions := {}
 var fluid_dirty_cells := {}
 var dirty_sections := {}
 var top_surface_y_cache := {}
@@ -49,6 +51,8 @@ func reset() -> void:
 	pending_sky_light_columns.clear()
 	section_revisions.clear()
 	fluid_section_revisions.clear()
+	section_column_revisions.clear()
+	fluid_section_column_revisions.clear()
 	fluid_dirty_cells.clear()
 	dirty_sections.clear()
 	top_surface_y_cache.clear()
@@ -558,7 +562,9 @@ func fluid_mesh_payload_state(state: Dictionary) -> Dictionary:
 
 func mark_fluid_section_changed(cell: Vector3i) -> void:
 	fluid_revision += 1
-	fluid_section_revisions[section_key_for_cell(cell)] = fluid_revision
+	var section_key := section_key_for_cell(cell)
+	fluid_section_revisions[section_key] = fluid_revision
+	update_section_column_revision(fluid_section_column_revisions, section_key, fluid_revision)
 	fluid_dirty_cells[cell] = true
 
 func elapsed_ms_since(started_usec: int) -> float:
@@ -1376,6 +1382,7 @@ func mark_section_dirty(section_key: Vector3i, flags := {}) -> void:
 		"revision": revision
 	}
 	section_revisions[section_key] = revision
+	update_section_column_revision(section_column_revisions, section_key, revision)
 	dirty_sections[section_key] = entry
 
 func save_section_delta(section_key: Vector3i) -> Dictionary:
@@ -1543,19 +1550,7 @@ func chunk_revision(chunk_key: Vector2i, chunk_size: int) -> int:
 	var start_z := chunk_key.y * chunk_size
 	var end_x := start_x + chunk_size
 	var end_z := start_z + chunk_size
-	var max_revision := 0
-	for section_value in section_revisions.keys():
-		var section_key: Vector3i = section_value
-		var section_start_x := section_key.x * SECTION_SIZE
-		var section_start_z := section_key.z * SECTION_SIZE
-		var section_end_x := section_start_x + SECTION_SIZE
-		var section_end_z := section_start_z + SECTION_SIZE
-		if section_end_x <= start_x or section_start_x >= end_x:
-			continue
-		if section_end_z <= start_z or section_start_z >= end_z:
-			continue
-		max_revision = maxi(max_revision, int(section_revisions.get(section_key, 0)))
-	return max_revision
+	return max_section_column_revision(section_column_revisions, start_x, start_z, end_x, end_z)
 
 func fluid_chunk_revision_with_halo(chunk_key: Vector2i, chunk_size: int) -> int:
 	var size := maxi(1, int(chunk_size))
@@ -1563,18 +1558,23 @@ func fluid_chunk_revision_with_halo(chunk_key: Vector2i, chunk_size: int) -> int
 	var start_z := chunk_key.y * size - 1
 	var end_x := (chunk_key.x + 1) * size + 1
 	var end_z := (chunk_key.y + 1) * size + 1
+	return max_section_column_revision(fluid_section_column_revisions, start_x, start_z, end_x, end_z)
+
+func update_section_column_revision(index: Dictionary, section_key: Vector3i, value: int) -> void:
+	var column_key := Vector2i(section_key.x, section_key.z)
+	index[column_key] = maxi(int(index.get(column_key, 0)), value)
+
+func max_section_column_revision(index: Dictionary, start_x: int, start_z: int, end_x: int, end_z: int) -> int:
+	if end_x <= start_x or end_z <= start_z:
+		return 0
+	var min_section_x := floori(float(start_x) / float(SECTION_SIZE))
+	var max_section_x := floori(float(end_x - 1) / float(SECTION_SIZE))
+	var min_section_z := floori(float(start_z) / float(SECTION_SIZE))
+	var max_section_z := floori(float(end_z - 1) / float(SECTION_SIZE))
 	var max_revision := 0
-	for section_value in fluid_section_revisions.keys():
-		var section_key: Vector3i = section_value
-		var section_start_x := section_key.x * SECTION_SIZE
-		var section_start_z := section_key.z * SECTION_SIZE
-		var section_end_x := section_start_x + SECTION_SIZE
-		var section_end_z := section_start_z + SECTION_SIZE
-		if section_end_x <= start_x or section_start_x >= end_x:
-			continue
-		if section_end_z <= start_z or section_start_z >= end_z:
-			continue
-		max_revision = maxi(max_revision, int(fluid_section_revisions.get(section_key, 0)))
+	for section_x in range(min_section_x, max_section_x + 1):
+		for section_z in range(min_section_z, max_section_z + 1):
+			max_revision = maxi(max_revision, int(index.get(Vector2i(section_x, section_z), 0)))
 	return max_revision
 
 func edited_cell_count(include_non_mesh := true) -> int:

@@ -873,6 +873,7 @@ void TerrainMeshingBackend::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("backend_summary"), &TerrainMeshingBackend::backend_summary);
 	ClassDB::bind_method(D_METHOD("build_chunk_mesh", "main", "cx", "cz"), &TerrainMeshingBackend::build_chunk_mesh);
 	ClassDB::bind_method(D_METHOD("build_chunk_mesh_from_sections", "payload"), &TerrainMeshingBackend::build_chunk_mesh_from_sections);
+	ClassDB::bind_method(D_METHOD("build_chunk_fluid_surface_data_from_sections", "payload"), &TerrainMeshingBackend::build_chunk_fluid_surface_data_from_sections);
 	ClassDB::bind_method(D_METHOD("build_chunk_fluid_mesh_from_sections", "payload"), &TerrainMeshingBackend::build_chunk_fluid_mesh_from_sections);
 	ClassDB::bind_method(D_METHOD("build_chunk_fluid_mesh", "main", "cx", "cz"), &TerrainMeshingBackend::build_chunk_fluid_mesh);
 	ClassDB::bind_method(D_METHOD("collision_shape_for_mesh", "mesh"), &TerrainMeshingBackend::collision_shape_for_mesh);
@@ -1067,7 +1068,21 @@ Variant TerrainMeshingBackend::build_chunk_mesh_from_sections(const Dictionary &
 	return mesh;
 }
 
-Variant TerrainMeshingBackend::build_chunk_fluid_mesh_from_sections(const Dictionary &p_payload) {
+Dictionary TerrainMeshingBackend::build_chunk_fluid_surface_data_from_sections(const Dictionary &p_payload) {
+	auto deferred_data = [](const String &p_reason, bool p_forbidden, int p_unknown_neighbors = 0) {
+		Dictionary result;
+		result["deferred"] = true;
+		result["reason"] = p_reason;
+		result["forbiddenCoarseFluidPayload"] = p_forbidden;
+		result["unknownNeighborCount"] = p_unknown_neighbors;
+		result["waterVertices"] = PackedVector3Array();
+		result["waterNormals"] = PackedVector3Array();
+		result["waterColors"] = PackedColorArray();
+		result["lavaVertices"] = PackedVector3Array();
+		result["lavaNormals"] = PackedVector3Array();
+		result["lavaColors"] = PackedColorArray();
+		return result;
+	};
 	Dictionary fluid_payload;
 	Variant nested_payload_value = p_payload.get("fluidPayload", Variant());
 	if (nested_payload_value.get_type() == Variant::DICTIONARY) {
@@ -1081,7 +1096,7 @@ Variant TerrainMeshingBackend::build_chunk_fluid_mesh_from_sections(const Dictio
 		bool(fluid_payload.get("boundsInclusive", false));
 	bool legacy_exact_contract = !exact_contract && int(fluid_payload.get("stepCells", 0)) == 1;
 	if (!exact_contract && !legacy_exact_contract) {
-		return deferred_exact_fluid_mesh("exact_fluid_payload_required", true);
+		return deferred_data("exact_fluid_payload_required", true);
 	}
 	int chunk_size = int(fluid_payload.get("chunkSize", 28));
 	double cell_size = double(fluid_payload.get("cellSize", 1.35));
@@ -1092,7 +1107,7 @@ Variant TerrainMeshingBackend::build_chunk_fluid_mesh_from_sections(const Dictio
 	Variant min_cell_value = fluid_payload.get("minCell", Variant());
 	Variant max_cell_value = fluid_payload.get("maxCell", Variant());
 	if (chunk_size <= 0 || cell_size <= 0.0 || max_y < min_y || min_cell_value.get_type() != Variant::VECTOR3I || max_cell_value.get_type() != Variant::VECTOR3I) {
-		return deferred_exact_fluid_mesh("invalid_exact_fluid_bounds", false);
+		return deferred_data("invalid_exact_fluid_bounds", false);
 	}
 	Vector3i min_cell = min_cell_value;
 	Vector3i max_cell = max_cell_value;
@@ -1100,22 +1115,23 @@ Variant TerrainMeshingBackend::build_chunk_fluid_mesh_from_sections(const Dictio
 		min_cell.z <= start_z - 1 && max_cell.z >= start_z + chunk_size &&
 		min_cell.y <= min_y - 1 && max_cell.y >= max_y + 1;
 	if (!halo_complete) {
-		return deferred_exact_fluid_mesh("incomplete_exact_fluid_halo", false);
+		return deferred_data("incomplete_exact_fluid_halo", false);
 	}
 	Dictionary section_lookup = section_lookup_from_payload(fluid_payload);
 	bool has_fluid = bool(fluid_payload.get("hasFluid", false));
 	if (!has_fluid) {
-		Ref<ArrayMesh> empty_mesh = deferred_exact_fluid_mesh("no_exact_fluid_cells", false);
-		empty_mesh->set_meta("terrainFluidNativeDeferred", false);
-		empty_mesh->set_meta("terrainFluidSectionPayload", true);
-		empty_mesh->set_meta("nativeFluidStepCells", 1);
-		empty_mesh->set_meta("fluidPayloadRevision", int(fluid_payload.get("fluidRevision", 0)));
-		return empty_mesh;
+		Dictionary result = deferred_data("no_exact_fluid_cells", false);
+		result["deferred"] = false;
+		result["exactContract"] = exact_contract;
+		result["legacyExactContract"] = legacy_exact_contract;
+		result["fluidPayloadRevision"] = int(fluid_payload.get("fluidRevision", 0));
+		result["fluidPayloadSignature"] = String(fluid_payload.get("signature", ""));
+		return result;
 	}
 	Variant cells_value = fluid_payload.get("cells", Dictionary());
 	bool has_flat_cells = cells_value.get_type() == Variant::DICTIONARY && !Dictionary(cells_value).is_empty();
 	if (section_lookup.is_empty() && !has_flat_cells) {
-		return deferred_exact_fluid_mesh("missing_exact_fluid_sections", false);
+		return deferred_data("missing_exact_fluid_sections", false);
 	}
 	PackedVector3Array water_vertices;
 	PackedVector3Array water_normals;
@@ -1161,39 +1177,72 @@ Variant TerrainMeshingBackend::build_chunk_fluid_mesh_from_sections(const Dictio
 		}
 	}
 	if (unknown_neighbor_count > 0) {
-		return deferred_exact_fluid_mesh("incomplete_exact_fluid_halo", false, unknown_neighbor_count);
+		return deferred_data("incomplete_exact_fluid_halo", false, unknown_neighbor_count);
 	}
-
-	Ref<ArrayMesh> mesh;
-	mesh.instantiate();
 	PackedStringArray surface_order;
 	if (water_vertices.size() > 0) {
-		add_colored_surface(mesh, water_vertices, water_normals, water_colors);
 		surface_order.append("water");
 	}
 	if (lava_vertices.size() > 0) {
-		add_colored_surface(mesh, lava_vertices, lava_normals, lava_colors);
 		surface_order.append("lava");
+	}
+	Variant section_revisions_value = fluid_payload.get("sectionRevisions", Array());
+	int exact_section_count = section_revisions_value.get_type() == Variant::ARRAY ? Array(section_revisions_value).size() : section_lookup.size();
+	Dictionary result;
+	result["deferred"] = false;
+	result["reason"] = "";
+	result["forbiddenCoarseFluidPayload"] = false;
+	result["unknownNeighborCount"] = 0;
+	result["waterVertices"] = water_vertices;
+	result["waterNormals"] = water_normals;
+	result["waterColors"] = water_colors;
+	result["lavaVertices"] = lava_vertices;
+	result["lavaNormals"] = lava_normals;
+	result["lavaColors"] = lava_colors;
+	result["surfaceOrder"] = surface_order;
+	result["fluidFaces"] = water_faces + lava_faces;
+	result["waterFaces"] = water_faces;
+	result["lavaFaces"] = lava_faces;
+	result["exactSectionCount"] = exact_section_count;
+	result["exactFluidCellCount"] = exact_fluid_cells;
+	result["fluidPayloadRevision"] = int(fluid_payload.get("fluidRevision", 0));
+	result["fluidPayloadSignature"] = String(fluid_payload.get("signature", ""));
+	result["exactContract"] = exact_contract;
+	result["legacyExactContract"] = legacy_exact_contract;
+	return result;
+}
+
+Variant TerrainMeshingBackend::build_chunk_fluid_mesh_from_sections(const Dictionary &p_payload) {
+	Dictionary data = build_chunk_fluid_surface_data_from_sections(p_payload);
+	Ref<ArrayMesh> mesh;
+	mesh.instantiate();
+	PackedVector3Array water_vertices = data.get("waterVertices", PackedVector3Array());
+	PackedVector3Array lava_vertices = data.get("lavaVertices", PackedVector3Array());
+	if (water_vertices.size() > 0) {
+		add_colored_surface(mesh, water_vertices, data.get("waterNormals", PackedVector3Array()), data.get("waterColors", PackedColorArray()));
+	}
+	if (lava_vertices.size() > 0) {
+		add_colored_surface(mesh, lava_vertices, data.get("lavaNormals", PackedVector3Array()), data.get("lavaColors", PackedColorArray()));
 	}
 	mesh->set_meta("terrainMeshingBackend", "native_volume_mesher");
 	mesh->set_meta("terrainMeshingNative", true);
 	mesh->set_meta("terrainMeshingQueued", false);
-	mesh->set_meta("terrainFluidSectionPayload", true);
-	mesh->set_meta("terrainFluidSurfaceOrder", surface_order);
-	mesh->set_meta("chunk_fluid_faces", water_faces + lava_faces);
-	mesh->set_meta("chunk_water_faces", water_faces);
-	mesh->set_meta("chunk_lava_faces", lava_faces);
-	mesh->set_meta("nativeFluidStepCells", 1);
-	Variant section_revisions_value = fluid_payload.get("sectionRevisions", Array());
-	int exact_section_count = section_revisions_value.get_type() == Variant::ARRAY ? Array(section_revisions_value).size() : section_lookup.size();
-	mesh->set_meta("nativeFluidSections", exact_section_count);
-	mesh->set_meta("nativeFluidCellCount", exact_fluid_cells);
-	mesh->set_meta("fluidPayloadRevision", int(fluid_payload.get("fluidRevision", 0)));
-	mesh->set_meta("fluidPayloadSignature", String(fluid_payload.get("signature", "")));
-	mesh->set_meta("terrainFluidNativeDeferred", false);
-	mesh->set_meta("forbiddenCoarseFluidPayload", false);
-	mesh->set_meta("terrainFluidExactPayload", exact_contract);
-	mesh->set_meta("terrainFluidLegacyExactPayload", legacy_exact_contract);
+	mesh->set_meta("terrainFluidSectionPayload", !bool(data.get("deferred", true)));
+	mesh->set_meta("terrainFluidSurfaceOrder", data.get("surfaceOrder", PackedStringArray()));
+	mesh->set_meta("chunk_fluid_faces", int(data.get("fluidFaces", 0)));
+	mesh->set_meta("chunk_water_faces", int(data.get("waterFaces", 0)));
+	mesh->set_meta("chunk_lava_faces", int(data.get("lavaFaces", 0)));
+	mesh->set_meta("nativeFluidStepCells", bool(data.get("forbiddenCoarseFluidPayload", false)) ? 0 : 1);
+	mesh->set_meta("nativeFluidSections", int(data.get("exactSectionCount", 0)));
+	mesh->set_meta("nativeFluidCellCount", int(data.get("exactFluidCellCount", 0)));
+	mesh->set_meta("fluidPayloadRevision", int(data.get("fluidPayloadRevision", 0)));
+	mesh->set_meta("fluidPayloadSignature", String(data.get("fluidPayloadSignature", "")));
+	mesh->set_meta("terrainFluidNativeDeferred", bool(data.get("deferred", true)));
+	mesh->set_meta("terrainFluidDeferredReason", String(data.get("reason", "")));
+	mesh->set_meta("unknownFluidNeighborCount", int(data.get("unknownNeighborCount", 0)));
+	mesh->set_meta("forbiddenCoarseFluidPayload", bool(data.get("forbiddenCoarseFluidPayload", false)));
+	mesh->set_meta("terrainFluidExactPayload", bool(data.get("exactContract", false)));
+	mesh->set_meta("terrainFluidLegacyExactPayload", bool(data.get("legacyExactContract", false)));
 	return mesh;
 }
 

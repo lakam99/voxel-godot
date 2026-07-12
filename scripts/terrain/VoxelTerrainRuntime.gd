@@ -73,6 +73,12 @@ func setup(main_node) -> Dictionary:
 	terrain.collision_mask = 0
 	terrain.mesh_block_size = 16
 	terrain.max_view_distance = 128
+	var bottom_cell := int(main.get("world_generation_system").call("world_bottom_cell_y")) - COLLISION_MESH_VERTICAL_MARGIN_CELLS
+	var top_cell := int(main.get("world_generation_system").call("world_top_cell_y")) + COLLISION_MESH_VERTICAL_MARGIN_CELLS
+	var terrain_bounds := terrain.bounds
+	terrain_bounds.position.y = float(bottom_cell)
+	terrain_bounds.size.y = float(top_cell - bottom_cell + 1)
+	terrain.bounds = terrain_bounds
 	terrain.scale = Vector3.ONE * CELL
 	var material := ShaderMaterial.new()
 	material.shader = TERRAIN_SHADER
@@ -110,6 +116,20 @@ func _physics_process(_delta: float) -> void:
 func _exit_tree() -> void:
 	if viewer != null and is_instance_valid(viewer) and viewer.get_parent() != self:
 		viewer.queue_free()
+
+func begin_shutdown() -> void:
+	authority_ready = false
+	set_process(false)
+	set_physics_process(false)
+	if viewer != null and is_instance_valid(viewer):
+		viewer.requires_visuals = false
+		viewer.requires_collisions = false
+		viewer.queue_free()
+		viewer = null
+	if terrain != null and is_instance_valid(terrain):
+		terrain.automatic_loading_enabled = false
+	pending_gameplay_chunks.clear()
+	desired_gameplay_chunks.clear()
 
 func update_viewer_position() -> void:
 	if viewer == null or main == null:
