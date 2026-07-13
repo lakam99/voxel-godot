@@ -14,6 +14,7 @@ const PORCH_SETTLED_FRAMES := 30
 const DOOR_CLOSE_APPROACH_DISTANCE := CELL * 0.75
 const FIRST_DISPLACEMENT_DISTANCE := CELL * 0.10
 const MAX_FIRST_DISPLACEMENT_DELAY_SECONDS := 5.0
+const MAX_PORCH_CLEARANCE_DELAY_SECONDS := 6.0
 const POST_HOME_DOOR_OBSERVE_SECONDS := 8.0
 
 var menu: Node = null
@@ -388,6 +389,9 @@ func run_knock_and_mira_observation() -> void:
     var displacement_event: Dictionary = phase0_timing.get("firstNontrivialDisplacement", {}) if phase0_timing.get("firstNontrivialDisplacement", {}) is Dictionary else {}
     var displacement_delay := float(displacement_event.get("time", INF)) - float(acknowledgement_event.get("time", 0.0))
     report_data["firstDisplacementDelayAfterAcknowledgement"] = rounded(displacement_delay) if is_finite(displacement_delay) else null
+    var porch_clearance_event: Dictionary = phase0_timing.get("playerPorchClearance", {}) if phase0_timing.get("playerPorchClearance", {}) is Dictionary else {}
+    var porch_clearance_delay := float(porch_clearance_event.get("time", INF)) - float(acknowledgement_event.get("time", 0.0))
+    report_data["porchClearanceDelayAfterAcknowledgement"] = rounded(porch_clearance_delay) if is_finite(porch_clearance_delay) else null
     var target = mira_visual_target(mira)
     await capture_stage("player_pov_mira_post_knock_final_state", {
         "mira": report_data["miraFinal"],
@@ -431,6 +435,16 @@ func run_knock_and_mira_observation() -> void:
             "acknowledgement": acknowledgement_event,
             "firstDisplacement": displacement_event,
             "departureDiagnosis": report_data["phase0DepartureDiagnosis"]
+        }))
+        return
+    if porch_clearance_event.is_empty() or not is_finite(porch_clearance_delay) or porch_clearance_delay > MAX_PORCH_CLEARANCE_DELAY_SECONDS:
+        add_failure("mira_did_not_clear_player_porch_promptly", JSON.stringify({
+            "delaySeconds": porch_clearance_delay,
+            "maximumSeconds": MAX_PORCH_CLEARANCE_DELAY_SECONDS,
+            "acknowledgement": acknowledgement_event,
+            "porchClearance": porch_clearance_event,
+            "departureDiagnosis": report_data["phase0DepartureDiagnosis"],
+            "player": player_summary()
         }))
         return
     if not mira_reached_strict_home:

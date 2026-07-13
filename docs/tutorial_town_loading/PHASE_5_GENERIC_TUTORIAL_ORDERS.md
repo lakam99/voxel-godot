@@ -118,6 +118,22 @@ This was a real Main Menu -> New Game run on fresh seed `atlas-80812744`. The re
 
 The final search began at static/semantic revision `1436:1378` and completed at `1485:1378`. It accumulated work through the revision change, revalidated against the current collision snapshot, received a successful probe, opened the home door, cleared the threshold, and reached strict interior. Captures include the dialogue acknowledgement, player final state, and an observer view with Mira inside her home.
 
+### Reopened Porch-Latency Gate
+
+A subsequent live New Game observation found Mira eventually departing after roughly 30 seconds. That contradicted the intended outcome even though the runner passed: it only required a 0.135 m displacement in five seconds and permitted up to 150 seconds for actual porch clearance. Historical real-boot traces confirmed the gap: three pre-repair VOX-75 reports recorded first movement after 21.8 to 22.7 seconds and porch clearance after 23.5 to 24.3 seconds.
+
+The acceptance runner now records `porchClearanceDelayAfterAcknowledgement` and fails when clearance takes more than 6.0 seconds. This is a test-contract correction only; it does not alter gameplay movement, route budgets, tutorial state, or player position.
+
+Three fresh headed Main Menu -> New Game runs passed with no gameplay-affecting flags:
+
+| Seed | First displacement | Porch clearance | Strict-home arrival |
+| --- | ---: | ---: | ---: |
+| `atlas-99899211` | 0.800 s | 2.450 s | 33.534 s |
+| `atlas-64377753` | 0.784 s | 2.434 s | 33.517 s |
+| `atlas-44991666` | 0.717 s | 2.367 s | 32.900 s |
+
+Each report has `VOXEL_PLAYTEST=false`, an empty `VOXEL_TEST_SEED`, and no save-path override. The runner leaves the live player at the starter doorway after visible input, so the collision-backed planner must account for that player as a dynamic blocker. In every run, Mira received the generic order, planned a real collision-backed route, cleared the porch, opened her home door, crossed it, and arrived in the strict interior.
+
 ### Broad Playtest Note
 
 `tools/run-playtest.ps1` was launched but produced no progress marker or report before the external 240-second shell limit. Its exact Playtest child processes were stopped after verifying their command line. This is neither a pass nor a gameplay failure and is not used as acceptance evidence. The focused NPC contracts, full route suite, and unflagged headed actual-gameplay acceptance above are the Phase 5 evidence. The broad Playtest runner needs separate diagnosis if it remains non-reporting.
@@ -130,7 +146,8 @@ The final search began at static/semantic revision `1436:1378` and completed at 
 - Generic replacement cleanup releases route, door, traffic, and reservation state: yes.
 - Generic code contains named tutorial actor routing checks: no.
 - Route budgets were increased: no.
-- Mira begins home execution without schedule-selection wait: yes, 0.683 seconds after acknowledgement.
+- Mira begins home execution without schedule-selection wait: yes, 0.717 to 0.800 seconds after acknowledgement across three fresh real boots.
+- Mira clears the player porch promptly: yes, 2.367 to 2.450 seconds after acknowledgement across three fresh real boots; acceptance maximum is 6.0 seconds.
 - Mira reaches strict home in unflagged real gameplay: yes.
 - Non-tutorial generic scripted home order remains green: yes.
 - Phase 5: passed.
