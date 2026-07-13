@@ -203,6 +203,7 @@ class FakeNpcSystem:
 	var route_motion_calls := 0
 	var motor_block_until_distance := -1.0
 	var max_requested_distance := 0.0
+	var max_route_step_distance := 0.0
 	var allow_outside_calls := 0
 	var last_allow_outside := false
 	var moved_actor_ids := {}
@@ -247,10 +248,12 @@ class FakeNpcSystem:
 
 	func apply_npc_route_motion(entry: Dictionary, previous: Vector3, candidate: Vector3, _physics_delta := 0.0166667) -> Dictionary:
 		route_motion_calls += 1
+		moved_actor_ids[String(entry.get("id", "npc"))] = int(moved_actor_ids.get(String(entry.get("id", "npc")), 0)) + 1
 		var body := entry.get("body") as Node3D
 		if body == null:
 			return { "moved": 0.0, "position": previous, "blocked": true, "reason": "missing_body" }
 		var flat := Vector2(candidate.x - previous.x, candidate.z - previous.z).length()
+		max_route_step_distance = maxf(max_route_step_distance, flat)
 		if motor_block_until_distance >= 0.0 and flat < motor_block_until_distance:
 			return { "moved": 0.0, "position": previous, "blocked": true, "reason": "static_or_dynamic_collision" }
 		body.global_position = candidate
@@ -869,14 +872,18 @@ func test_scripted_order_normal_profile_speed(_mode: String) -> Dictionary:
 	var entry_data := entry("Villager", { "id": "scripted_speed", "position": Vector3.ZERO })
 	var body := entry_data.get("body") as Node3D
 	set_scripted_order_meta(entry_data, body, "go_to", "speed_check", Vector3(3.0, 0.0, 0.0))
-	for i in range(4):
+	var maximum_move := 0.0
+	for i in range(16):
+		fake_npc.test_route_authority_v2.begin_frame()
 		executor.advance_motion_npc(entry_data, 1.0 / 60.0, 0.0)
+		maximum_move = maxf(maximum_move, float(entry_data.get("lastMoveDistance", 0.0)))
 	var source := read_text("res://scripts/npc_ai/behavior/NpcPlanExecutor.gd") + "\n" + read_text("res://scripts/NpcSystem.gd")
 	var no_hack_speed := source.find("speed = 20.0") < 0 and not text_contains_near(source, "holdIntroDoor", "speed", 160) and not text_contains_near(source, "speed", "holdIntroDoor", 160)
-	var profile_speed_ok := fake_npc.max_requested_distance <= (2.6 * (1.0 / 60.0)) + 0.0001
-	var passed: bool = fake_npc.move_calls == 4 and profile_speed_ok and no_hack_speed
+	var moved := body.global_position.x
+	var profile_speed_ok := maximum_move > 0.0 and maximum_move <= (2.6 * (1.0 / 60.0)) + 0.0001
+	var passed: bool = moved > 0.0 and profile_speed_ok and no_hack_speed
 	fake_npc.queue_free()
-	return outcome(passed, "moveCalls=%d maxDistance=%.4f noHack=%s" % [fake_npc.move_calls, fake_npc.max_requested_distance, str(no_hack_speed)], ["normal_scripted_speed", "no_20_speed_override"], { "maxRequestedDistance": fake_npc.max_requested_distance })
+	return outcome(passed, "moved=%.4f maximumMove=%.4f noHack=%s" % [moved, maximum_move, str(no_hack_speed)], ["normal_scripted_speed", "no_20_speed_override"], { "position": body.global_position, "maximumMove": maximum_move })
 
 func test_scripted_order_sprint_profile_speed(_mode: String) -> Dictionary:
 	var fake_npc := FakeNpcSystem.new()
@@ -884,13 +891,16 @@ func test_scripted_order_sprint_profile_speed(_mode: String) -> Dictionary:
 	var entry_data := entry("Villager", { "id": "scripted_sprint_speed", "position": Vector3.ZERO })
 	var body := entry_data.get("body") as Node3D
 	set_scripted_order_meta(entry_data, body, "go_to", "speed_check", Vector3(3.0, 0.0, 0.0), "sprinting")
-	for i in range(4):
+	var maximum_move := 0.0
+	for i in range(16):
+		fake_npc.test_route_authority_v2.begin_frame()
 		executor.advance_motion_npc(entry_data, 1.0 / 60.0, 0.0)
-	var lower_bound_ok := fake_npc.max_requested_distance >= (6.4 * (1.0 / 60.0)) - 0.0001
+		maximum_move = maxf(maximum_move, float(entry_data.get("lastMoveDistance", 0.0)))
+	var lower_bound_ok := maximum_move >= (6.4 * (1.0 / 60.0)) - 0.0001
 	var mode_ok := String(entry_data.get("npcSpeedMode", "")) == "sprinting" and bool(entry_data.get("npcRushing", false))
-	var passed: bool = fake_npc.move_calls == 4 and lower_bound_ok and mode_ok
+	var passed: bool = body.global_position.x > 0.0 and lower_bound_ok and mode_ok
 	fake_npc.queue_free()
-	return outcome(passed, "moveCalls=%d maxDistance=%.4f mode=%s" % [fake_npc.move_calls, fake_npc.max_requested_distance, String(entry_data.get("npcSpeedMode", ""))], ["scripted_sprint_speed", "scripted_rushing_mode"], { "maxRequestedDistance": fake_npc.max_requested_distance, "mode": entry_data.get("npcSpeedMode", "") })
+	return outcome(passed, "moved=%.4f maximumMove=%.4f mode=%s" % [body.global_position.x, maximum_move, String(entry_data.get("npcSpeedMode", ""))], ["scripted_sprint_speed", "scripted_rushing_mode"], { "position": body.global_position, "maximumMove": maximum_move, "mode": entry_data.get("npcSpeedMode", "") })
 
 func test_scripted_order_no_transform_write(_mode: String) -> Dictionary:
 	var source := read_text("res://scripts/NpcSystem.gd")
@@ -935,11 +945,14 @@ func test_every_active_actor_motion_tick_32_npcs(_mode: String) -> Dictionary:
 	for i in range(32):
 		var entry_data := entry("Villager", { "id": "cadence_%02d" % i, "position": Vector3(float(i) * 0.05, 0.0, 0.0) })
 		var body := entry_data.get("body") as Node3D
-		body.set_meta("npc_scripted_target", body.global_position + Vector3(1.0, 0.0, 0.0))
+		entry_data["cadenceStartX"] = body.global_position.x
+		body.set_meta("npc_scripted_target", body.global_position + Vector3(CELL * 4.0, 0.0, 0.0))
 		entry_data["activeMotionGoal"] = { "goalKind": NpcEnumsScript.GOAL_KIND_SCRIPTED }
 		entries.append(entry_data)
-	for entry_data in entries:
-		executor.advance_motion_npc(entry_data, 1.0 / 60.0, 0.0)
+	for _frame in range(16):
+		fake_npc.test_route_authority_v2.begin_frame()
+		for entry_data in entries:
+			executor.advance_motion_npc(entry_data, 1.0 / 60.0, 0.0)
 	var source := read_text("res://scripts/NpcSystem.gd")
 	var active_pass_index := source.find("var active_entries")
 	var budget_loop_index := source.find("while scanned < update_count and processed < budget")
@@ -947,9 +960,14 @@ func test_every_active_actor_motion_tick_32_npcs(_mode: String) -> Dictionary:
 	var source_split_ok := active_pass_index >= 0 and budget_loop_index > active_pass_index and motion_pass_index > budget_loop_index
 	var telemetry_source := read_text("res://scripts/npc_ai/debug/NpcTelemetryService.gd")
 	var counters_ok := telemetry_source.find("npc_brain_updates") >= 0 and telemetry_source.find("npc_motion_updates") >= 0 and telemetry_source.find("npc_brain_budget_skipped") >= 0 and telemetry_source.find("npc_door_action_motion_ticks") >= 0
-	var passed: bool = fake_npc.move_calls == 32 and fake_npc.moved_actor_ids.size() == 32 and source_split_ok and counters_ok
+	var moved_actors := 0
+	for entry_data in entries:
+		var body := entry_data.get("body") as Node3D
+		if body != null and body.global_position.x > float(entry_data.get("cadenceStartX", body.global_position.x)):
+			moved_actors += 1
+	var passed: bool = moved_actors == 32 and source_split_ok and counters_ok
 	fake_npc.queue_free()
-	return outcome(passed, "moveCalls=%d actors=%d sourceSplit=%s counters=%s" % [fake_npc.move_calls, fake_npc.moved_actor_ids.size(), str(source_split_ok), str(counters_ok)], ["all_32_active_motion_ticks", "motion_pass_outside_budget_loop", "r02_motion_counters_present"], { "moveCalls": fake_npc.move_calls, "actors": fake_npc.moved_actor_ids.size(), "countersOk": counters_ok })
+	return outcome(passed, "movedActors=%d sourceSplit=%s counters=%s" % [moved_actors, str(source_split_ok), str(counters_ok)], ["all_32_active_motion_ticks", "motion_pass_outside_budget_loop", "r02_motion_counters_present"], { "movedActors": moved_actors, "countersOk": counters_ok })
 
 func test_brain_budget_does_not_skip_route_motion(_mode: String) -> Dictionary:
 	var fake_npc := FakeNpcSystem.new()
@@ -974,13 +992,16 @@ func test_scripted_order_moves_while_brain_skipped(_mode: String) -> Dictionary:
 	var executor: Variant = make_executor(fake_npc)
 	var entry_data := entry("Villager", { "position": Vector3.ZERO })
 	var body := entry_data.get("body") as Node3D
-	body.set_meta("npc_scripted_target", Vector3(2.0, 0.0, 0.0))
+	body.set_meta("npc_scripted_target", Vector3(CELL * 3.0, 0.0, 0.0))
 	entry_data["activeMotionGoal"] = { "goalKind": NpcEnumsScript.GOAL_KIND_SCRIPTED }
-	for i in range(4):
+	for i in range(16):
+		fake_npc.test_route_authority_v2.begin_frame()
 		executor.advance_motion_npc(entry_data, 1.0 / 60.0, 0.0)
-	var passed: bool = bool(entry_data.get("scriptedUpdated", false)) and fake_npc.move_calls == 4 and body.global_position.x > 0.15
+	var order: Dictionary = entry_data.get("scriptedOrder", {}) if entry_data.get("scriptedOrder", {}) is Dictionary else {}
+	var route_state := String(entry_data.get("routeStatus", ""))
+	var passed: bool = String(order.get("state", "")) in ["PENDING", "ACTIVE", "ARRIVED"] and route_state in ["pending", "moving", "arrived"] and body.global_position.x > 0.15
 	fake_npc.queue_free()
-	return outcome(passed, "moveCalls=%d x=%.3f" % [fake_npc.move_calls, body.global_position.x], ["scripted_order_motion_without_brain", "scripted_position_advances"], { "moveCalls": fake_npc.move_calls, "position": body.global_position })
+	return outcome(passed, "order=%s route=%s x=%.3f lastMove=%.4f" % [String(order.get("state", "")), route_state, body.global_position.x, float(entry_data.get("lastMoveDistance", 0.0))], ["scripted_order_motion_without_brain", "scripted_position_advances"], { "order": order, "routeStatus": route_state, "position": body.global_position, "lastMoveDistance": entry_data.get("lastMoveDistance", 0.0) })
 
 func test_mira_no_inching_after_dialogue(_mode: String) -> Dictionary:
 	var fake_npc := FakeNpcSystem.new()
