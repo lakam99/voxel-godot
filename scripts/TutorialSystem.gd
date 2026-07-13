@@ -64,9 +64,9 @@ var scene_builder
 var repair_quest
 var rescue_system
 var dialogue_system
-var last_home_refresh_debug := {}
 var startup_town_manifest := {}
 var startup_scenario_requirements := {}
+var startup_actor_specs: Array = []
 var startup_readiness_result := {}
 var restore_world_setup_pending := false
 
@@ -117,14 +117,19 @@ func start_new_world() -> bool:
     completed_steps.clear()
     configure_starting_inventory()
     ensure_town_generated()
+    var manifest_result: Dictionary = current_tutorial_manifest_result()
+    if String(manifest_result.get("status", "")) != StartupReadinessResultScript.STATUS_READY:
+        return false
+    startup_town_manifest = (manifest_result.get("manifest", {}) as Dictionary).duplicate(true)
     ensure_village_perimeter()
     ensure_village_lights()
     ensure_starter_shelter()
     ensure_starter_bed()
     setup_intro_repair_quest()
     place_player_in_starter_house()
-    spawn_tutorial_npcs()
-    refresh_tutorial_npc_home_records()
+    var spawn_result: Dictionary = spawn_tutorial_npcs()
+    if not bool(spawn_result.get("ok", false)):
+        return false
     force_stormy_night()
     last_message = "Knock, knock. Someone is at the door."
     last_dialogue.clear()
@@ -175,6 +180,14 @@ func prepare_tutorial_world_staged(restoring: bool) -> Dictionary:
     if String(manifest_result.get("status", "")) != StartupReadinessResultScript.STATUS_READY:
         return remember_startup_readiness(manifest_result)
     startup_town_manifest = (manifest_result.get("manifest", {}) as Dictionary).duplicate(true)
+    var actor_resolution: Dictionary = resolve_tutorial_actor_specs(startup_town_manifest)
+    if not bool(actor_resolution.get("ok", false)):
+        return await fail_tutorial_startup(
+            "tutorial_actor_manifest_resolution_failed",
+            startup_town_manifest,
+            actor_resolution
+        )
+    startup_actor_specs = (actor_resolution.get("specs", []) as Array).duplicate(true)
     var door_result := tutorial_manifest_door_readiness(startup_town_manifest)
     if String(door_result.get("status", "")) != StartupReadinessResultScript.STATUS_READY:
         return await fail_tutorial_startup(
@@ -195,14 +208,14 @@ func prepare_tutorial_world_staged(restoring: bool) -> Dictionary:
     if not restoring:
         place_player_in_starter_house()
     await loading_yield("Preparing villagers", "npc_registration", "pending")
-    spawn_tutorial_npcs()
-    set_registered_npc_physics_enabled(false)
-    if not refresh_tutorial_npc_home_records(true):
+    var spawn_result: Dictionary = scene_builder.spawn_tutorial_npcs(startup_actor_specs)
+    if not bool(spawn_result.get("ok", false)):
         return await fail_tutorial_startup(
-            "manifest_home_assignment_failed",
+            "tutorial_actor_spawn_failed",
             startup_town_manifest,
-            last_home_refresh_debug
+            spawn_result
         )
+    set_registered_npc_physics_enabled(false)
     var registration_result := tutorial_npc_registration_readiness(startup_town_manifest)
     if String(registration_result.get("status", "")) != StartupReadinessResultScript.STATUS_READY:
         return await fail_tutorial_startup(
@@ -222,7 +235,9 @@ func prepare_tutorial_world_staged(restoring: bool) -> Dictionary:
         "tutorialActive": true,
         "manifest": manifest_result.get("metrics", {}),
         "doors": door_result.get("metrics", {}),
-        "npcRegistration": registration_result.get("metrics", {})
+        "npcRegistration": registration_result.get("metrics", {}),
+        "actorResolution": actor_resolution.get("metrics", {}),
+        "actorSpawn": spawn_result.get("metrics", {})
     }
     await loading_yield("Tutorial world ready", "tutorial_world", "ready", metrics)
     return remember_startup_readiness(StartupReadinessResultScript.ready(startup_town_manifest, metrics))
@@ -281,15 +296,157 @@ func ensure_town_manifest_ready_staged(requirements: Dictionary) -> Dictionary:
     return await fail_tutorial_startup("tutorial_town_manifest_loop_ended")
 
 func tutorial_scenario_requirements() -> Dictionary:
-    return TownRuntimeManifestScript.requirements_from_actor_specs([
-        {"id": "player_starter_home", "homeKey": 0},
-        {"id": "rowan", "homeKey": 1},
-        {"id": "sera", "homeKey": 1},
-        {"id": "toma", "homeKey": 1},
-        {"id": "niko", "homeKey": 2},
-        {"id": "lyra", "homeKey": 2},
-        {"id": "mira", "homeKey": 3}
-    ])
+    var assignments: Array = [{"id": "player_starter_home", "homeKey": 0}]
+    for scenario_value in tutorial_actor_scenarios():
+        if scenario_value is Dictionary:
+            var scenario: Dictionary = scenario_value
+            assignments.append({
+                "id": String(scenario.get("id", "")),
+                "homeKey": int(scenario.get("homeKey", -1))
+            })
+    return TownRuntimeManifestScript.requirements_from_actor_specs(assignments)
+
+func tutorial_actor_scenarios() -> Array:
+    return [
+        {
+            "id": "mira",
+            "homeKey": 3,
+            "presentation": {
+                "name": "Mira",
+                "role": "Elder",
+                "color": Color(0.70, 0.46, 0.34),
+                "accent": Color(0.92, 0.76, 0.42),
+                "dialogue": [
+                    "Storms bring the dark close. Start by meeting Rowan near the workbench.",
+                    "The lights mark the safe ground. Beyond them, shadows notice you."
+                ]
+            },
+            "simulation": {
+                "role": "Civilian",
+                "job": "",
+                "holdIntroDoor": true
+            },
+            "spawn": {"kind": "offset", "offset": Vector2i(-13, -15)},
+            "initialOrder": {"kind": "wait", "reason": "tutorial_knock_pending"}
+        },
+        {
+            "id": "rowan",
+            "homeKey": 1,
+            "presentation": {
+                "name": "Rowan",
+                "role": "Carpenter",
+                "color": Color(0.48, 0.32, 0.18),
+                "accent": Color(0.73, 0.52, 0.28),
+                "dialogue": [
+                    "Workbench first. Logs become blocks, blocks become shelter.",
+                    "Bring me wood when you're ready and we'll turn it into something sturdy."
+                ]
+            },
+            "simulation": {"role": "Carpenter", "job": "wood", "startInsideHome": true},
+            "spawn": {"kind": "home"}
+        },
+        {
+            "id": "niko",
+            "homeKey": 2,
+            "presentation": {
+                "name": "Niko",
+                "role": "Forager",
+                "color": Color(0.31, 0.50, 0.28),
+                "accent": Color(0.82, 0.42, 0.35),
+                "dialogue": [
+                    "Food keeps your hands steady. Berries, fish, and cooked meat all matter.",
+                    "Stay near the path while the rain is heavy."
+                ]
+            },
+            "simulation": {"role": "Forager", "job": "forage", "startInsideHome": true},
+            "spawn": {"kind": "home"}
+        },
+        {
+            "id": "sera",
+            "homeKey": 1,
+            "presentation": {
+                "name": "Sera",
+                "role": "Watch",
+                "color": Color(0.30, 0.34, 0.42),
+                "accent": Color(0.66, 0.72, 0.86),
+                "dialogue": [
+                    "Do not cross the last lantern unarmed. Hostiles gather outside the village lights.",
+                    "Craft a blade or bow before you brave the wilds."
+                ]
+            },
+            "simulation": {
+                "role": "Guard",
+                "job": "guard",
+                "guardOffset": Vector2i(FENCE_RADIUS_CELLS - 3, 0),
+                "canFight": true,
+                "nightGuard": true,
+                "weapon": "hunterBow"
+            },
+            "spawn": {"kind": "offset", "offset": Vector2i(7, 0)}
+        },
+        {
+            "id": "toma",
+            "homeKey": 1,
+            "presentation": {
+                "name": "Toma",
+                "role": "Gate Watch",
+                "color": Color(0.34, 0.34, 0.30),
+                "accent": Color(0.78, 0.66, 0.38),
+                "dialogue": [
+                    "The fence slows them. Arrows finish the rest.",
+                    "Stay behind the lantern line when the gate splinters."
+                ]
+            },
+            "simulation": {
+                "role": "Guard",
+                "job": "guard",
+                "guardOffset": Vector2i(0, -FENCE_RADIUS_CELLS + 2),
+                "canFight": true,
+                "nightGuard": true,
+                "weapon": "hunterBow"
+            },
+            "spawn": {"kind": "offset", "offset": Vector2i(0, -FENCE_RADIUS_CELLS + 4)}
+        },
+        {
+            "id": "lyra",
+            "homeKey": 2,
+            "presentation": {
+                "name": "Lyra",
+                "role": "Lantern Archer",
+                "color": Color(0.28, 0.38, 0.44),
+                "accent": Color(0.68, 0.78, 0.88),
+                "dialogue": [
+                    "If a rail breaks, we hold the gap.",
+                    "Watch their movement. They hate the light."
+                ]
+            },
+            "simulation": {
+                "role": "Guard",
+                "job": "guard",
+                "guardOffset": Vector2i(-FENCE_RADIUS_CELLS + 2, 0),
+                "canFight": true,
+                "nightGuard": true,
+                "weapon": "hunterBow"
+            },
+            "spawn": {"kind": "offset", "offset": Vector2i(-FENCE_RADIUS_CELLS + 4, 0)}
+        }
+    ]
+
+func current_tutorial_manifest_result() -> Dictionary:
+    startup_scenario_requirements = tutorial_scenario_requirements()
+    if not bool(startup_scenario_requirements.get("ok", false)):
+        return StartupReadinessResultScript.failed("invalid_tutorial_scenario_requirements")
+    if main == null or main.structure_system == null or not main.structure_system.has_method("town_manifest_status"):
+        return StartupReadinessResultScript.failed("missing_structure_manifest_authority")
+    var result_value = main.structure_system.call("town_manifest_status", town, startup_scenario_requirements)
+    if not (result_value is Dictionary):
+        return StartupReadinessResultScript.failed("invalid_structure_manifest_result")
+    return result_value
+
+func resolve_tutorial_actor_specs(manifest: Dictionary) -> Dictionary:
+    if scene_builder == null:
+        return {"ok": false, "reason": "missing_tutorial_scene_builder", "problems": ["missing tutorial scene builder"]}
+    return scene_builder.resolve_tutorial_actor_specs(manifest, tutorial_actor_scenarios(), town)
 
 func tutorial_expected_npc_ids() -> Array[String]:
     return ["mira", "rowan", "niko", "sera", "toma", "lyra"]
@@ -342,20 +499,63 @@ func tutorial_npc_registration_readiness(manifest: Dictionary) -> Dictionary:
             var npc_id := String(entry.get("id", ""))
             var body := entry.get("body") as Node
             if npc_id != "" and body != null and is_instance_valid(body):
-                registered[npc_id] = true
+                registered[npc_id] = entry
     var missing: Array[String] = []
+    var profile_mismatches: Array[Dictionary] = []
+    var assignments: Dictionary = startup_scenario_requirements.get("actorHomeAssignments", {}) if startup_scenario_requirements.get("actorHomeAssignments", {}) is Dictionary else {}
+    var homes: Dictionary = manifest.get("homesByKey", {}) if manifest.get("homesByKey", {}) is Dictionary else {}
     for npc_id in expected_ids:
         if not registered.has(npc_id):
             missing.append(npc_id)
+            continue
+        var home_key := int(assignments.get(npc_id, -1))
+        var home_value = homes.get(str(home_key))
+        if not (home_value is Dictionary):
+            profile_mismatches.append({"id": npc_id, "problems": ["manifest homeKey %d missing" % home_key]})
+            continue
+        var problems := tutorial_registration_profile_problems(registered[npc_id], home_key, home_value, manifest)
+        if not problems.is_empty():
+            profile_mismatches.append({"id": npc_id, "problems": problems})
     var metrics := {
         "expectedNpcIds": expected_ids,
         "expectedNpcCount": expected_ids.size(),
         "registeredNpcCount": expected_ids.size() - missing.size(),
-        "missingNpcIds": missing
+        "missingNpcIds": missing,
+        "profileMismatchCount": profile_mismatches.size(),
+        "profileMismatches": profile_mismatches
     }
     if not missing.is_empty():
         return StartupReadinessResultScript.failed("required_tutorial_npcs_not_registered", manifest, [], metrics)
+    if not profile_mismatches.is_empty():
+        return StartupReadinessResultScript.failed("tutorial_npc_manifest_profile_mismatch", manifest, [], metrics)
     return StartupReadinessResultScript.ready(manifest, metrics)
+
+func tutorial_registration_profile_problems(entry: Dictionary, home_key: int, home_value, manifest: Dictionary) -> Array[String]:
+    var problems: Array[String] = []
+    if not (home_value is Dictionary):
+        problems.append("home record is not a dictionary")
+        return problems
+    var home: Dictionary = home_value
+    var expected := {
+        "homeKey": home_key,
+        "homeStableId": String(home.get("stableId", "")),
+        "doorPortalId": String(home.get("doorPortalId", "")),
+        "townKey": String(manifest.get("townKey", "")),
+        "homeCell": home.get("homeCell"),
+        "porchCell": home.get("porchCell"),
+        "doorCell": home.get("doorCell"),
+        "interiorLandingCell": home.get("interiorLandingCell"),
+        "interiorMinCell": home.get("interiorMinCell"),
+        "interiorMaxCell": home.get("interiorMaxCell")
+    }
+    for field in expected.keys():
+        if entry.get(field) != expected[field]:
+            problems.append("%s does not match manifest" % field)
+    var expected_route: Array = home.get("homeRouteCells", []) if home.get("homeRouteCells", []) is Array else []
+    var actual_route: Array = entry.get("homeRouteCells", []) if entry.get("homeRouteCells", []) is Array else []
+    if actual_route != expected_route:
+        problems.append("homeRouteCells do not match manifest")
+    return problems
 
 func set_registered_npc_physics_enabled(enabled: bool) -> void:
     if main != null and main.has_method("set_registered_npc_physics_enabled"):
@@ -380,6 +580,7 @@ func remember_startup_readiness(result: Dictionary) -> Dictionary:
 func reset_startup_readiness_state() -> void:
     startup_town_manifest.clear()
     startup_scenario_requirements.clear()
+    startup_actor_specs.clear()
     startup_readiness_result.clear()
     restore_world_setup_pending = false
 
@@ -427,12 +628,20 @@ func should_defer_restore_world_setup() -> bool:
 
 func complete_restore_world_now() -> void:
     ensure_town_generated()
+    var manifest_result: Dictionary = current_tutorial_manifest_result()
+    if String(manifest_result.get("status", "")) != StartupReadinessResultScript.STATUS_READY:
+        last_message = "Tutorial town records are not ready."
+        return
+    startup_town_manifest = (manifest_result.get("manifest", {}) as Dictionary).duplicate(true)
     ensure_village_perimeter()
     ensure_village_lights()
     ensure_starter_shelter()
     ensure_starter_bed()
     setup_intro_repair_quest(false)
-    spawn_tutorial_npcs()
+    var spawn_result: Dictionary = spawn_tutorial_npcs()
+    if not bool(spawn_result.get("ok", false)):
+        last_message = "Tutorial villagers could not be registered."
+        return
     restore_world_setup_pending = false
 
 func reserve_tutorial_town_layout() -> void:
@@ -494,7 +703,6 @@ func state() -> Dictionary:
         "rescueRemaining": rescue_remaining_hostiles(),
         "rescueRequired": RESCUE_MONSTER_COUNT,
         "rescueSite": rescue_site,
-        "homeRefresh": last_home_refresh_debug.duplicate(true),
         "introRepairTargets": {
             "fence": repair_fence_cells.duplicate(),
             "lamps": repair_lamp_cells.duplicate()
@@ -505,117 +713,6 @@ func tutorial_town_key() -> String:
     if town.is_empty():
         return ""
     return "%d,%d" % [int(town.get("centerX", 0)), int(town.get("centerZ", 0))]
-
-func tutorial_home_record(index: int, fallback_home: Vector2i, fallback_porch: Vector2i, fallback_guard: Vector2i = Vector2i.ZERO) -> Dictionary:
-    if fallback_guard == Vector2i.ZERO:
-        fallback_guard = fallback_porch
-    var generated_record := tutorial_home_record_from_records(index, fallback_home, fallback_porch, fallback_guard)
-    if not generated_record.is_empty():
-        return generated_record
-    return normalized_tutorial_home_record({
-        "homeCell": fallback_home,
-        "porchCell": fallback_porch,
-        "guardCell": fallback_guard
-    }, fallback_home, fallback_porch, fallback_guard)
-
-func tutorial_home_records_for_current_town() -> Array:
-    var records: Array = []
-    if main == null or main.structure_system == null or not main.structure_system.has_method("town_home_records_snapshot"):
-        return records
-    var records_by_town: Dictionary = main.structure_system.town_home_records_snapshot()
-    var exact_value = records_by_town.get(tutorial_town_key(), [])
-    if exact_value is Array:
-        records.append_array(exact_value)
-    if not records.is_empty() or town.is_empty():
-        return records
-    var center := Vector2i(int(town.get("centerX", 0)), int(town.get("centerZ", 0)))
-    for town_key_value in records_by_town.keys():
-        var town_records_value = records_by_town.get(town_key_value, [])
-        if not (town_records_value is Array):
-            continue
-        for record_value in town_records_value:
-            if not (record_value is Dictionary):
-                continue
-            var record: Dictionary = record_value
-            var record_center: Vector2i = record.get("townCenter", Vector2i.ZERO)
-            if record_center == center:
-                records.append(record)
-    return records
-
-func ensure_tutorial_town_home_records(minimum_count := 4) -> bool:
-    if main == null or main.structure_system == null or town.is_empty():
-        return false
-    if not main.structure_system.has_method("ensure_town_home_records"):
-        return not tutorial_home_records_for_current_town().is_empty()
-    var ensured_value = main.structure_system.call("ensure_town_home_records", town, minimum_count)
-    if ensured_value is Array and not (ensured_value as Array).is_empty():
-        return true
-    return not tutorial_home_records_for_current_town().is_empty()
-
-func tutorial_home_record_from_records(index: int, fallback_home: Vector2i, fallback_porch: Vector2i, fallback_guard: Vector2i = Vector2i.ZERO) -> Dictionary:
-    if fallback_guard == Vector2i.ZERO:
-        fallback_guard = fallback_porch
-    var records := tutorial_home_records_for_current_town()
-    for record_value in records:
-        if not (record_value is Dictionary):
-            continue
-        var indexed_record: Dictionary = record_value
-        if int(indexed_record.get("buildingIndex", -1)) == index:
-            return normalized_tutorial_home_record(indexed_record, fallback_home, fallback_porch, fallback_guard)
-    var nearest_record: Dictionary = {}
-    var nearest_score := INF
-    for record_value in records:
-        if not (record_value is Dictionary):
-            continue
-        var record: Dictionary = record_value
-        var record_home: Vector2i = record.get("homeCell", fallback_home)
-        var record_porch: Vector2i = record.get("porchCell", record_home)
-        var home_delta := record_home - fallback_home
-        var porch_delta := record_porch - fallback_porch
-        var score := float(home_delta.length_squared()) + float(porch_delta.length_squared()) * 0.35
-        if int(record.get("buildingIndex", -1)) == index:
-            score -= 0.01
-        if score < nearest_score:
-            nearest_score = score
-            nearest_record = record
-    if nearest_record.is_empty():
-        return {}
-    return normalized_tutorial_home_record(nearest_record, fallback_home, fallback_porch, fallback_guard)
-
-func normalized_tutorial_home_record(source: Dictionary, fallback_home: Vector2i, fallback_porch: Vector2i, fallback_guard: Vector2i) -> Dictionary:
-    var home_cell: Vector2i = source.get("homeCell", fallback_home)
-    var porch_cell: Vector2i = source.get("porchCell", fallback_porch)
-    var inward := cardinal_home_direction(home_cell - porch_cell)
-    var door_cell: Vector2i = source.get("doorCell", porch_cell + inward if inward != Vector2i.ZERO else porch_cell)
-    var interior_landing_cell: Vector2i = source.get("interiorLandingCell", door_cell + inward if inward != Vector2i.ZERO else home_cell)
-    var route_cells: Array = source.get("homeRouteCells", []) if source.get("homeRouteCells", []) is Array else []
-    if route_cells.size() < 3:
-        route_cells = []
-        for candidate in [porch_cell, door_cell, interior_landing_cell, home_cell]:
-            if route_cells.is_empty() or route_cells[route_cells.size() - 1] != candidate:
-                route_cells.append(candidate)
-    var interior_min: Vector2i = source.get("interiorMinCell", home_cell)
-    var interior_max: Vector2i = source.get("interiorMaxCell", home_cell)
-    for interior_cell in [interior_landing_cell, home_cell]:
-        interior_min = Vector2i(mini(interior_min.x, interior_cell.x), mini(interior_min.y, interior_cell.y))
-        interior_max = Vector2i(maxi(interior_max.x, interior_cell.x), maxi(interior_max.y, interior_cell.y))
-    return {
-        "homeCell": home_cell,
-        "porchCell": porch_cell,
-        "doorCell": door_cell,
-        "interiorLandingCell": interior_landing_cell,
-        "homeRouteCells": route_cells,
-        "guardCell": source.get("guardCell", fallback_guard),
-        "interiorMinCell": interior_min,
-        "interiorMaxCell": interior_max
-    }
-
-func cardinal_home_direction(delta: Vector2i) -> Vector2i:
-    if delta == Vector2i.ZERO:
-        return Vector2i.ZERO
-    if absi(delta.x) >= absi(delta.y):
-        return Vector2i(1 if delta.x > 0 else -1, 0)
-    return Vector2i(0, 1 if delta.y > 0 else -1)
 
 func configure_starting_inventory() -> void:
     if main == null or main.inventory_system == null:
@@ -821,9 +918,6 @@ func dialogue_payload() -> Dictionary:
 func release_intro_elder_home_order() -> void:
     if main == null or main.npc_system == null or not main.npc_system.has_method("order_go_home"):
         return
-    if not refresh_tutorial_npc_home_records(true):
-        last_message = "Mira waits while the village paths settle."
-        return
     var actor = intro_elder_dialogue_actor()
     if actor == null:
         last_message = "The elder is no longer in reach."
@@ -850,61 +944,6 @@ func intro_elder_dialogue_actor():
     if npc_id != "":
         return npc_id
     return null
-
-func refresh_tutorial_npc_home_records(require_generated := false) -> bool:
-    if main == null or main.npc_system == null or not main.npc_system.has_method("update_npc_home_record"):
-        last_home_refresh_debug = { "ok": false, "reason": "missing_npc_system" }
-        return false
-    if town.is_empty():
-        last_home_refresh_debug = { "ok": false, "reason": "missing_town" }
-        return false
-    var cx := int(town.get("centerX", 0))
-    var cz := int(town.get("centerZ", 0))
-    var records := tutorial_home_records_for_current_town()
-    if records.size() < 4:
-        ensure_tutorial_town_home_records(4)
-        records = tutorial_home_records_for_current_town()
-    if require_generated and records.size() < 4:
-        last_home_refresh_debug = {
-            "ok": false,
-            "reason": "generated_records_missing" if records.is_empty() else "generated_records_incomplete",
-            "generatedRecordCount": records.size(),
-            "requiredGenerated": true,
-            "townKey": tutorial_town_key(),
-            "townCenter": [cx, cz]
-        }
-        return false
-    var north_home: Dictionary = tutorial_home_record_from_records(1, Vector2i(cx + 12, cz - 10), Vector2i(cx + 12, cz - 15))
-    var west_home: Dictionary = tutorial_home_record_from_records(2, Vector2i(cx - 13, cz + 12), Vector2i(cx - 13, cz + 17))
-    var elder_home: Dictionary = tutorial_home_record_from_records(3, Vector2i(cx + 13, cz + 12), Vector2i(cx + 13, cz + 17))
-    if north_home.is_empty():
-        north_home = tutorial_home_record(1, Vector2i(cx + 12, cz - 10), Vector2i(cx + 12, cz - 15))
-    if west_home.is_empty():
-        west_home = tutorial_home_record(2, Vector2i(cx - 13, cz + 12), Vector2i(cx - 13, cz + 17))
-    if elder_home.is_empty():
-        elder_home = tutorial_home_record(3, Vector2i(cx + 13, cz + 12), Vector2i(cx + 13, cz + 17))
-    var assignments := {
-        "rowan": north_home,
-        "sera": north_home,
-        "toma": north_home,
-        "niko": west_home,
-        "lyra": west_home,
-        "mira": elder_home
-    }
-    var updated := 0
-    for actor_id in assignments.keys():
-        if main.npc_system.update_npc_home_record(String(actor_id), assignments[actor_id]):
-            updated += 1
-    last_home_refresh_debug = {
-        "ok": updated == assignments.size() and (not require_generated or not records.is_empty()),
-        "reason": "refreshed" if updated == assignments.size() else "missing_npc_entry",
-        "generatedRecordCount": records.size(),
-        "updated": updated,
-        "requiredGenerated": require_generated,
-        "townKey": tutorial_town_key(),
-        "miraHome": elder_home.duplicate(true)
-    }
-    return bool(last_home_refresh_debug.get("ok", false))
 
 func resume_intro_elder_schedule() -> void:
     if main == null or main.npc_system == null or not main.npc_system.has_method("order_resume_schedule"):
@@ -1144,7 +1183,6 @@ func danger_profile(position: Vector3) -> Dictionary:
 
 func ensure_town_generated() -> void:
     scene_builder.ensure_town_generated()
-    ensure_tutorial_town_home_records(4)
 
 func ensure_starter_bed() -> void:
     scene_builder.ensure_starter_bed()
@@ -1170,12 +1208,21 @@ func place_player_in_starter_house() -> void:
 func force_stormy_night() -> void:
     scene_builder.force_stormy_night()
 
-func spawn_tutorial_npcs() -> void:
-    ensure_tutorial_town_home_records(4)
-    scene_builder.spawn_tutorial_npcs()
-
-func spawn_npc(spec: Dictionary, level: float, look_target: Vector3) -> Node3D:
-    return scene_builder.spawn_npc(spec, level, look_target)
+func spawn_tutorial_npcs() -> Dictionary:
+    if startup_town_manifest.is_empty():
+        var manifest_result: Dictionary = current_tutorial_manifest_result()
+        if String(manifest_result.get("status", "")) != StartupReadinessResultScript.STATUS_READY:
+            return {
+                "ok": false,
+                "reason": String(manifest_result.get("reason", "tutorial_town_manifest_not_ready")),
+                "manifestResult": manifest_result
+            }
+        startup_town_manifest = (manifest_result.get("manifest", {}) as Dictionary).duplicate(true)
+    var resolution: Dictionary = resolve_tutorial_actor_specs(startup_town_manifest)
+    if not bool(resolution.get("ok", false)):
+        return resolution
+    startup_actor_specs = (resolution.get("specs", []) as Array).duplicate(true)
+    return scene_builder.spawn_tutorial_npcs(startup_actor_specs)
 
 func add_npc_visual(parent: Node3D, color: Color, accent: Color, npc_name: String, role: String) -> void:
     scene_builder.add_npc_visual(parent, color, accent, npc_name, role)

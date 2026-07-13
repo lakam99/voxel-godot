@@ -16,8 +16,7 @@ const ROLE_RESOURCE_PATHS := {
 	"forager": "res://resources/npc_roles/forager.tres",
 	"mason": "res://resources/npc_roles/mason.tres",
 	"trader": "res://resources/npc_roles/trader.tres",
-	"civilian": "res://resources/npc_roles/civilian.tres",
-	"tutorial": "res://resources/npc_roles/tutorial.tres"
+	"civilian": "res://resources/npc_roles/civilian.tres"
 }
 
 var guard_roster = null
@@ -90,8 +89,6 @@ func role_profile_for(context, entry: Dictionary) -> Dictionary:
 		role = "mason"
 	elif role.find("trader") >= 0:
 		role = "trader"
-	elif bool(entry.get("tutorial", false)):
-		role = "tutorial"
 	else:
 		role = "civilian"
 	var resource = role_profiles.get(role, role_profiles.get("civilian"))
@@ -133,8 +130,6 @@ func _load_default_role_profiles() -> void:
 		role_profiles["trader"] = _profile("trader", "", NpcEnumsScript.GOAL_KIND_IDLE, NpcEnumsScript.GOAL_KIND_HOME, NpcEnumsScript.GOAL_KIND_HOME, false, ["trader_stall", "road"])
 	if not role_profiles.has("civilian"):
 		role_profiles["civilian"] = _profile("civilian", "", NpcEnumsScript.GOAL_KIND_IDLE, NpcEnumsScript.GOAL_KIND_HOME, NpcEnumsScript.GOAL_KIND_HOME, false, ["home_interior", "road"])
-	if not role_profiles.has("tutorial"):
-		role_profiles["tutorial"] = _profile("tutorial", "", NpcEnumsScript.GOAL_KIND_IDLE, NpcEnumsScript.GOAL_KIND_HOME, NpcEnumsScript.GOAL_KIND_HOME, false, ["home_interior", "road"])
 
 func _profile(role_id: String, job: String, day_goal: StringName, dusk_goal: StringName, night_goal: StringName, guard_capable: bool, anchors: Array[String]) -> Resource:
 	var profile = RoleScheduleResourceScript.new()

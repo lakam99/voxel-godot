@@ -374,6 +374,15 @@
       "required": true
     },
     {
+      "id": "tutorial_actor_registration_contract",
+      "description": "Manifest-derived tutorial actor profiles, ordinary registration parity, and no tutorial simulation privilege",
+      "command": ".\\tools\\run-tutorial-actor-registration-contract-tests.ps1",
+      "args": ["-ReportPath", "artifacts\\test-runners\\tutorial-actor-registration-contract.json"],
+      "reportPath": "artifacts\\test-runners\\tutorial-actor-registration-contract.json",
+      "evidenceLevel": "contract",
+      "required": true
+    },
+    {
       "id": "main_menu_startup_smoke",
       "description": "Main Menu to New Game production-scene startup readiness domains, physics gate, and zero pending town structure operations",
       "command": ".\\tools\\run-main-menu-startup-readiness-smoke.ps1",
