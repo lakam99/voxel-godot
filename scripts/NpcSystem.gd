@@ -513,13 +513,17 @@ func register_npc(body: Node3D, profile: Dictionary) -> Dictionary:
         "id": String(profile.get("id", body.name)),
         "name": String(profile.get("name", body.name)),
         "role": role,
+        "displayRole": String(profile.get("displayRole", role)),
         "townKey": String(profile.get("townKey", "")),
         "townCenter": profile.get("townCenter", Vector2i(roundi(body_position.x / CELL), roundi(body_position.z / CELL))),
         "townRadius": int(profile.get("townRadius", 18)),
         "level": level,
         "homeCell": home_cell,
+        "homeKey": int(profile.get("homeKey", -1)),
+        "homeStableId": String(profile.get("homeStableId", "")),
         "porchCell": porch_cell,
         "doorCell": door_cell,
+        "doorPortalId": String(profile.get("doorPortalId", "")),
         "interiorLandingCell": interior_landing_cell,
         "guardCell": guard_cell,
         "homePosition": home_position,
@@ -556,7 +560,7 @@ func register_npc(body: Node3D, profile: Dictionary) -> Dictionary:
         "jobRuns": 0,
         "holdIntroDoor": bool(profile.get("holdIntroDoor", false)),
         "tutorial": bool(profile.get("tutorial", false)),
-        "requiredVisibleScripted": bool(profile.get("requiredVisibleScripted", profile.get("tutorial", false))),
+        "requiredVisibleScripted": bool(profile.get("requiredVisibleScripted", false)),
         "cooldown": deterministic_profile_float(profile, body, "cooldown", 0.2, 1.2),
         "homeReturnTime": 0.0,
         "dayTarget": body_position,
@@ -673,7 +677,10 @@ func apply_saved_npc_facts(entry: Dictionary) -> void:
 
 func apply_npc_metadata(body: Node, entry: Dictionary, home_cell: Vector2i, porch_cell: Vector2i, guard_cell: Vector2i, job: String) -> void:
     body.set_meta("npc_home_cell", home_cell)
+    body.set_meta("npc_home_key", int(entry.get("homeKey", -1)))
+    body.set_meta("npc_home_stable_id", String(entry.get("homeStableId", "")))
     body.set_meta("npc_porch_cell", porch_cell)
+    body.set_meta("npc_door_portal_id", String(entry.get("doorPortalId", "")))
     body.set_meta("npc_guard_cell", guard_cell)
     body.set_meta("npc_town_key", String(entry["townKey"]))
     body.set_meta("npc_can_fight", bool(entry["canFight"]))
@@ -914,9 +921,12 @@ func spawn_town_npc(record: Dictionary, index: int) -> CharacterBody3D:
         "townCenter": record.get("townCenter", Vector2i.ZERO),
         "townRadius": int(record.get("townRadius", 18)),
         "level": level,
+        "homeKey": int(record.get("homeKey", record.get("buildingIndex", -1))),
+        "homeStableId": String(record.get("stableId", "")),
         "homeCell": record.get("homeCell", Vector2i.ZERO),
         "porchCell": porch_cell,
         "doorCell": record.get("doorCell", porch_cell),
+        "doorPortalId": String(record.get("doorPortalId", "")),
         "interiorLandingCell": record.get("interiorLandingCell", record.get("homeCell", Vector2i.ZERO)),
         "homeRouteCells": record.get("homeRouteCells", []),
         "interiorMinCell": record.get("interiorMinCell", record.get("homeCell", Vector2i.ZERO)),

@@ -196,69 +196,199 @@ func force_stormy_night() -> void:
     if main.has_method("update_sky"):
         main.update_sky(0.0)
 
-func spawn_tutorial_npcs() -> void:
+func resolve_tutorial_actor_specs(manifest: Dictionary, scenarios: Array, town_data: Dictionary) -> Dictionary:
+    var problems: Array[String] = []
+    var specs: Array = []
+    var homes: Dictionary = manifest.get("homesByKey", {}) if manifest.get("homesByKey", {}) is Dictionary else {}
+    var town_key := String(manifest.get("townKey", ""))
+    var center_value = manifest.get("center")
+    if town_key == "":
+        problems.append("manifest is missing townKey")
+    if not (center_value is Vector2i):
+        problems.append("manifest center must be Vector2i")
+    if homes.is_empty():
+        problems.append("manifest homesByKey is empty")
+    if not problems.is_empty():
+        return actor_resolution_result(specs, problems)
+    var center: Vector2i = center_value
+    var seen_ids := {}
+    for scenario_value in scenarios:
+        if not (scenario_value is Dictionary):
+            problems.append("scenario entry must be a dictionary")
+            continue
+        var scenario: Dictionary = scenario_value
+        var actor_id := String(scenario.get("id", "")).strip_edges()
+        var home_key := int(scenario.get("homeKey", -1))
+        if actor_id == "":
+            problems.append("scenario actor is missing id")
+            continue
+        if seen_ids.has(actor_id):
+            problems.append("duplicate scenario actor id %s" % actor_id)
+            continue
+        seen_ids[actor_id] = true
+        var home_value = homes.get(str(home_key))
+        if not (home_value is Dictionary):
+            problems.append("actor %s cannot resolve homeKey %d" % [actor_id, home_key])
+            continue
+        var home: Dictionary = home_value
+        var profile_problem := validate_manifest_home_for_actor(actor_id, home_key, home, town_key)
+        if profile_problem != "":
+            problems.append(profile_problem)
+            continue
+        var presentation: Dictionary = (scenario.get("presentation", {}) as Dictionary).duplicate(true) if scenario.get("presentation", {}) is Dictionary else {}
+        var simulation: Dictionary = (scenario.get("simulation", {}) as Dictionary).duplicate(true) if scenario.get("simulation", {}) is Dictionary else {}
+        var spawn: Dictionary = (scenario.get("spawn", {}) as Dictionary).duplicate(true) if scenario.get("spawn", {}) is Dictionary else {}
+        var spawn_cell_result := resolve_actor_spawn_cell(actor_id, spawn, center, home)
+        if not bool(spawn_cell_result.get("ok", false)):
+            problems.append(String(spawn_cell_result.get("reason", "actor %s has invalid spawn" % actor_id)))
+            continue
+        var spawn_cell: Vector2i = spawn_cell_result.get("cell")
+        var guard_cell: Vector2i = home.get("porchCell")
+        if simulation.get("guardOffset") is Vector2i:
+            guard_cell = center + (simulation.get("guardOffset") as Vector2i)
+        simulation.erase("guardOffset")
+        var profile := simulation.duplicate(true)
+        profile.merge({
+            "id": actor_id,
+            "name": String(presentation.get("name", actor_id)),
+            "displayRole": String(presentation.get("role", profile.get("role", "Villager"))),
+            "townKey": town_key,
+            "townCenter": center,
+            "townRadius": int(town_data.get("radius", SAFE_RADIUS_CELLS)),
+            "level": float(town_data.get("level", 16.0)),
+            "cell": spawn_cell,
+            "homeKey": home_key,
+            "homeStableId": String(home.get("stableId")),
+            "homeCell": home.get("homeCell"),
+            "porchCell": home.get("porchCell"),
+            "doorCell": home.get("doorCell"),
+            "doorPortalId": String(home.get("doorPortalId")),
+            "interiorLandingCell": home.get("interiorLandingCell"),
+            "homeRouteCells": (home.get("homeRouteCells") as Array).duplicate(),
+            "interiorMinCell": home.get("interiorMinCell"),
+            "interiorMaxCell": home.get("interiorMaxCell"),
+            "guardCell": guard_cell,
+            "tutorial": true
+        }, true)
+        specs.append({
+            "id": actor_id,
+            "homeKey": home_key,
+            "presentation": presentation,
+            "profile": profile,
+            "spawnCell": spawn_cell,
+            "initialOrder": (scenario.get("initialOrder", {}) as Dictionary).duplicate(true) if scenario.get("initialOrder", {}) is Dictionary else {}
+        })
+    return actor_resolution_result(specs, problems)
+
+func actor_resolution_result(specs: Array, problems: Array[String]) -> Dictionary:
+    return {
+        "ok": problems.is_empty(),
+        "reason": "" if problems.is_empty() else "tutorial_actor_manifest_resolution_failed",
+        "specs": specs,
+        "problems": problems,
+        "metrics": {
+            "scenarioActorCount": specs.size() + problems.size(),
+            "resolvedActorCount": specs.size(),
+            "problemCount": problems.size()
+        }
+    }
+
+func validate_manifest_home_for_actor(actor_id: String, home_key: int, home: Dictionary, town_key: String) -> String:
+    if int(home.get("homeKey", -1)) != home_key:
+        return "actor %s homeKey %d record identity mismatch" % [actor_id, home_key]
+    if String(home.get("stableId", "")).strip_edges() == "":
+        return "actor %s homeKey %d is missing stableId" % [actor_id, home_key]
+    if String(home.get("townKey", "")) != town_key:
+        return "actor %s homeKey %d belongs to wrong town" % [actor_id, home_key]
+    if String(home.get("doorPortalId", "")).strip_edges() == "":
+        return "actor %s homeKey %d is missing doorPortalId" % [actor_id, home_key]
+    for field in ["homeCell", "porchCell", "doorCell", "interiorLandingCell", "interiorMinCell", "interiorMaxCell"]:
+        if not (home.get(field) is Vector2i):
+            return "actor %s homeKey %d is missing %s" % [actor_id, home_key, field]
+    var route_value = home.get("homeRouteCells")
+    if not (route_value is Array) or (route_value as Array).is_empty():
+        return "actor %s homeKey %d has no homeRouteCells" % [actor_id, home_key]
+    for route_cell in route_value:
+        if not (route_cell is Vector2i):
+            return "actor %s homeKey %d has an invalid home route cell" % [actor_id, home_key]
+    return ""
+
+func resolve_actor_spawn_cell(actor_id: String, spawn: Dictionary, center: Vector2i, home: Dictionary) -> Dictionary:
+    match String(spawn.get("kind", "")):
+        "home":
+            return {"ok": true, "cell": home.get("homeCell")}
+        "porch":
+            return {"ok": true, "cell": home.get("porchCell")}
+        "offset":
+            if spawn.get("offset") is Vector2i:
+                return {"ok": true, "cell": center + (spawn.get("offset") as Vector2i)}
+    return {"ok": false, "reason": "actor %s has invalid spawn declaration" % actor_id}
+
+func spawn_tutorial_npcs(specs: Array) -> Dictionary:
     clear_npcs()
-    if main == null or system.town.is_empty():
-        return
+    if main == null or system.town.is_empty() or specs.is_empty():
+        return {"ok": false, "reason": "missing_resolved_tutorial_actor_specs", "problems": ["resolved actor specs are required"]}
     var cx := int(system.town.get("centerX", 0))
     var cz := int(system.town.get("centerZ", 0))
     var level := float(system.town.get("level", 16.0))
-    var north_home: Dictionary = system.tutorial_home_record(1, Vector2i(cx + 12, cz - 10), Vector2i(cx + 12, cz - 15))
-    var west_home: Dictionary = system.tutorial_home_record(2, Vector2i(cx - 13, cz + 12), Vector2i(cx - 13, cz + 17))
-    var elder_home: Dictionary = system.tutorial_home_record(3, Vector2i(cx + 13, cz + 12), Vector2i(cx + 13, cz + 17))
-    for spec in tutorial_npc_specs(cx, cz, north_home, west_home, elder_home):
-        spawn_npc(spec, level, Vector3(float(cx) * CELL, level, float(cz) * CELL))
+    var spawned_ids: Array[String] = []
+    var problems: Array[String] = []
+    for spec_value in specs:
+        if not (spec_value is Dictionary):
+            problems.append("resolved actor spec must be a dictionary")
+            break
+        var result: Dictionary = spawn_npc(spec_value, level, Vector3(float(cx) * CELL, level, float(cz) * CELL))
+        if not bool(result.get("ok", false)):
+            problems.append(String(result.get("reason", "tutorial actor spawn failed")))
+            break
+        spawned_ids.append(String(result.get("id", "")))
+    if not problems.is_empty():
+        clear_npcs()
+    return {
+        "ok": problems.is_empty(),
+        "reason": "" if problems.is_empty() else "tutorial_actor_spawn_failed",
+        "problems": problems,
+        "spawnedIds": spawned_ids,
+        "metrics": {"requestedActorCount": specs.size(), "spawnedActorCount": spawned_ids.size()}
+    }
 
-func tutorial_npc_specs(cx: int, cz: int, north_home: Dictionary, west_home: Dictionary, elder_home: Dictionary) -> Array:
-    return [
-        npc_spec("mira", "Mira", "Elder", Vector2i(cx - 13, cz - 15), elder_home, Color(0.70, 0.46, 0.34), Color(0.92, 0.76, 0.42), ["Storms bring the dark close. Start by meeting Rowan near the workbench.", "The lights mark the safe ground. Beyond them, shadows notice you."], { "holdIntroDoor": true }),
-        npc_spec("rowan", "Rowan", "Carpenter", north_home.get("homeCell", Vector2i(cx, cz - 6)), north_home, Color(0.48, 0.32, 0.18), Color(0.73, 0.52, 0.28), ["Workbench first. Logs become blocks, blocks become shelter.", "Bring me wood when you're ready and we'll turn it into something sturdy."], { "job": "wood", "startInsideHome": true }),
-        npc_spec("niko", "Niko", "Forager", west_home.get("homeCell", Vector2i(cx - 5, cz + 5)), west_home, Color(0.31, 0.50, 0.28), Color(0.82, 0.42, 0.35), ["Food keeps your hands steady. Berries, fish, and cooked meat all matter.", "Stay near the path while the rain is heavy."], { "job": "forage", "startInsideHome": true }),
-        npc_spec("sera", "Sera", "Watch", Vector2i(cx + 7, cz), north_home, Color(0.30, 0.34, 0.42), Color(0.66, 0.72, 0.86), ["Do not cross the last lantern unarmed. Hostiles gather outside the village lights.", "Craft a blade or bow before you brave the wilds."], { "job": "guard", "guardCell": Vector2i(cx + FENCE_RADIUS_CELLS - 3, cz), "canFight": true, "nightGuard": true, "weapon": "hunterBow" }),
-        npc_spec("toma", "Toma", "Gate Watch", Vector2i(cx, cz - FENCE_RADIUS_CELLS + 4), north_home, Color(0.34, 0.34, 0.30), Color(0.78, 0.66, 0.38), ["The fence slows them. Arrows finish the rest.", "Stay behind the lantern line when the gate splinters."], { "job": "guard", "guardCell": Vector2i(cx, cz - FENCE_RADIUS_CELLS + 2), "canFight": true, "nightGuard": true, "weapon": "hunterBow" }),
-        npc_spec("lyra", "Lyra", "Lantern Archer", Vector2i(cx - FENCE_RADIUS_CELLS + 4, cz), west_home, Color(0.28, 0.38, 0.44), Color(0.68, 0.78, 0.88), ["If a rail breaks, we hold the gap.", "Watch their movement. They hate the light."], { "job": "guard", "guardCell": Vector2i(cx - FENCE_RADIUS_CELLS + 2, cz), "canFight": true, "nightGuard": true, "weapon": "hunterBow" })
-    ]
-
-func npc_spec(id: String, npc_name: String, role: String, cell: Vector2i, home: Dictionary, color: Color, accent: Color, dialogue: Array, extra := {}) -> Dictionary:
-    var result := extra.duplicate(true)
-    result.merge({
-        "id": id,
-        "name": npc_name,
-        "role": role,
-        "cell": cell,
-        "homeCell": home.get("homeCell", cell),
-        "porchCell": home.get("porchCell", cell),
-        "doorCell": home.get("doorCell", home.get("porchCell", cell)),
-        "interiorLandingCell": home.get("interiorLandingCell", home.get("homeCell", cell)),
-        "homeRouteCells": home.get("homeRouteCells", [home.get("porchCell", cell), home.get("homeCell", cell)]),
-        "interiorMinCell": home.get("interiorMinCell", home.get("homeCell", cell)),
-        "interiorMaxCell": home.get("interiorMaxCell", home.get("homeCell", cell)),
-        "color": color,
-        "accent": accent,
-        "dialogue": dialogue
-    }, true)
-    return result
-
-func spawn_npc(spec: Dictionary, level: float, look_target: Vector3) -> CharacterBody3D:
+func spawn_npc(spec: Dictionary, level: float, look_target: Vector3) -> Dictionary:
     if main == null or main.npc_system == null or not main.npc_system.has_method("create_npc_body"):
-        return null
-    var body := main.npc_system.create_npc_body("TutorialNPC_%s" % String(spec.get("id", "villager")), "tutorial_npc") as CharacterBody3D
+        return {"ok": false, "reason": "missing_npc_body_factory"}
+    var profile: Dictionary = spec.get("profile", {}) if spec.get("profile", {}) is Dictionary else {}
+    var presentation: Dictionary = spec.get("presentation", {}) if spec.get("presentation", {}) is Dictionary else {}
+    var actor_id := String(spec.get("id", ""))
+    var body := main.npc_system.create_npc_body("TutorialNPC_%s" % actor_id, "tutorial_npc") as CharacterBody3D
     if body == null:
-        return null
-    var cell: Vector2i = spec.get("cell", Vector2i.ZERO)
-    body.set_meta("npc_id", String(spec.get("id", "")))
-    body.set_meta("npc_name", String(spec.get("name", "Villager")))
-    body.set_meta("npc_role", String(spec.get("role", "")))
-    body.set_meta("dialogue", spec.get("dialogue", []))
+        return {"ok": false, "reason": "npc_body_creation_failed", "id": actor_id}
+    var cell: Vector2i = spec.get("spawnCell")
+    body.set_meta("npc_id", actor_id)
+    body.set_meta("npc_name", String(presentation.get("name", actor_id)))
+    body.set_meta("npc_role", String(presentation.get("role", profile.get("role", ""))))
+    body.set_meta("dialogue", presentation.get("dialogue", []))
     body.set_meta("dialogue_index", 0)
-    add_npc_visual(body, spec.get("color", Color(0.55, 0.42, 0.31)), spec.get("accent", Color(0.80, 0.66, 0.42)), String(spec.get("name", "Villager")), String(spec.get("role", "")))
+    add_npc_visual(
+        body,
+        presentation.get("color", Color(0.55, 0.42, 0.31)),
+        presentation.get("accent", Color(0.80, 0.66, 0.42)),
+        String(presentation.get("name", actor_id)),
+        String(presentation.get("role", profile.get("role", "")))
+    )
     add_npc_collider(body)
     system.npc_root.add_child(body)
-    place_tutorial_npc(body, cell, level, String(spec.get("id", "")))
-    register_with_npc_system(body, spec, level, cell)
+    var placement := place_tutorial_npc(body, cell, level, actor_id)
+    if not bool(placement.get("ok", false)):
+        system.npc_root.remove_child(body)
+        body.free()
+        return {"ok": false, "reason": "tutorial_actor_placement_failed", "id": actor_id, "placement": placement}
+    var entry := register_with_npc_system(body, profile)
+    if entry.is_empty():
+        system.npc_root.remove_child(body)
+        body.free()
+        return {"ok": false, "reason": "tutorial_actor_registration_failed", "id": actor_id}
     if body.global_position.distance_to(look_target) > 0.2:
         body.look_at(look_target, Vector3.UP)
-    return body
+    return {"ok": true, "id": actor_id, "body": body, "entry": entry, "placement": placement}
 
 func place_tutorial_npc(body: CharacterBody3D, requested_cell: Vector2i, level: float, npc_id: String) -> Dictionary:
     if body == null or main == null or main.npc_system == null or not main.npc_system.has_method("safe_place_npc"):
@@ -298,34 +428,10 @@ func place_tutorial_npc(body: CharacterBody3D, requested_cell: Vector2i, level: 
     body.set_meta("npc_spawn_placement", failed)
     return failed
 
-func register_with_npc_system(body: Node3D, spec: Dictionary, level: float, cell: Vector2i) -> void:
+func register_with_npc_system(body: Node3D, profile: Dictionary) -> Dictionary:
     if main == null or main.npc_system == null or not main.npc_system.has_method("register_npc"):
-        return
-    main.npc_system.register_npc(body, {
-        "id": String(spec.get("id", "")),
-        "name": String(spec.get("name", "Villager")),
-        "role": String(spec.get("role", "")),
-        "townKey": system.tutorial_town_key(),
-        "townCenter": Vector2i(int(system.town.get("centerX", 0)), int(system.town.get("centerZ", 0))),
-        "townRadius": int(system.town.get("radius", SAFE_RADIUS_CELLS)),
-        "level": level,
-        "cell": cell,
-        "homeCell": spec.get("homeCell", cell),
-        "porchCell": spec.get("porchCell", cell),
-        "doorCell": spec.get("doorCell", spec.get("porchCell", cell)),
-        "interiorLandingCell": spec.get("interiorLandingCell", spec.get("homeCell", cell)),
-        "homeRouteCells": spec.get("homeRouteCells", [spec.get("porchCell", cell), spec.get("homeCell", cell)]),
-        "interiorMinCell": spec.get("interiorMinCell", spec.get("homeCell", cell)),
-        "interiorMaxCell": spec.get("interiorMaxCell", spec.get("homeCell", cell)),
-        "guardCell": spec.get("guardCell", spec.get("porchCell", cell)),
-        "canFight": bool(spec.get("canFight", false)),
-        "nightGuard": bool(spec.get("nightGuard", false)),
-        "weapon": String(spec.get("weapon", "")),
-        "job": String(spec.get("job", "")),
-        "holdIntroDoor": bool(spec.get("holdIntroDoor", false)),
-        "tutorial": true,
-        "requiredVisibleScripted": true
-    })
+        return {}
+    return main.npc_system.register_npc(body, profile)
 
 func add_npc_collider(body: Node3D) -> void:
     if npc_visual_factory != null:
