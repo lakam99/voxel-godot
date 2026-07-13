@@ -110,11 +110,11 @@ func compliance(entry: Dictionary, perception: Dictionary, schedule: Dictionary)
 func _held_by_script(entry: Dictionary, body: Node3D) -> bool:
 	if body == null:
 		return false
-	if npc_system != null and npc_system.has_method("npc_is_held_by_intro_or_dialogue"):
-		return bool(npc_system.call("npc_is_held_by_intro_or_dialogue", entry, body))
+	if npc_system != null and npc_system.has_method("npc_movement_is_paused"):
+		return bool(npc_system.call("npc_movement_is_paused", entry, body))
 	if bool(body.get_meta("npc_dialogue_focused", false)):
 		return true
-	return bool(entry.get("holdIntroDoor", false))
+	return false
 
 func _fallback_inside_home(entry: Dictionary, position: Vector3) -> bool:
 	var home_cell: Vector2i = entry.get("homeCell", Vector2i.ZERO)

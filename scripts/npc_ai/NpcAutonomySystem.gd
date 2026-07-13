@@ -402,6 +402,19 @@ func release_action_owned_state(entry: Dictionary, reason := "released") -> void
 	if smart_objects != null and smart_objects.has_method("release_owner"):
 		smart_objects.release_owner(String(entry.get("id", "")), reason)
 
+func cancel_active_route_request(entry: Dictionary, reason := "order_replaced") -> Dictionary:
+	if route_authority_v2 == null:
+		return {"ok": true, "cancelled": false, "reason": "missing_route_authority"}
+	var active: Dictionary = route_authority_v2.runtime_for_entry(entry)
+	if not bool(active.get("hasRequest", false)):
+		return {"ok": true, "cancelled": false, "reason": "no_active_request"}
+	var request_id := String(active.get("requestId", ""))
+	if request_id == "":
+		return {"ok": true, "cancelled": false, "reason": "missing_request_id"}
+	var result: Dictionary = route_authority_v2.cancel_request(request_id, reason)
+	result["cancelled"] = bool(result.get("ok", false))
+	return result
+
 func cleanup_actor_ownership(entry_or_id, reason := "cleanup") -> Dictionary:
 	if simulation_lod == null:
 		return {}

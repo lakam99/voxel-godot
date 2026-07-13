@@ -986,7 +986,9 @@ func test_tutorial_start_system() -> void:
     var rescue_required: int = int(final_started_state.get("rescueRequired", 6))
     var rescue_remaining_start: int = int(final_started_state.get("rescueRemaining", 0))
     var niko_body := niko as Node3D
-    var niko_held: bool = niko_body != null and bool(niko_body.get_meta("npc_force_hold", false)) and bool(niko_body.get_meta("npc_rescue_stranded", false))
+    var niko_entry: Dictionary = npc_system.npc_entry_for_actor(niko) if npc_system and npc_system.has_method("npc_entry_for_actor") else {}
+    var niko_order: Dictionary = niko_entry.get("scriptedOrder", {}) if niko_entry.get("scriptedOrder", {}) is Dictionary else {}
+    var niko_held: bool = String(niko_order.get("kind", "")) == "wait" and String(niko_order.get("reason", "")) == "rescue_encounter_stranded"
     var rescue_torch_present: bool = tutorial_system.get("rescue_torch") != null
     var rescue_bubble_present: bool = niko_body != null and niko_body.get_node_or_null("SpeechBubble") != null
     var guard_before: Vector3 = (sera as Node3D).global_position if sera is Node3D else Vector3.ZERO
@@ -1013,7 +1015,9 @@ func test_tutorial_start_system() -> void:
     var guard_route_reason := String((sera as Node).get_meta("npc_route_reason", "")) if sera is Node else ""
     var guard_scripted := sera is Node and (sera as Node).has_meta("npc_scripted_target")
     var guard_focused := sera is Node and bool((sera as Node).get_meta("npc_dialogue_focused", false))
-    var guard_held := sera is Node and bool((sera as Node).get_meta("npc_force_hold", false))
+    var guard_entry: Dictionary = npc_system.npc_entry_for_actor(sera) if npc_system and npc_system.has_method("npc_entry_for_actor") else {}
+    var guard_order: Dictionary = guard_entry.get("scriptedOrder", {}) if guard_entry.get("scriptedOrder", {}) is Dictionary else {}
+    var guard_held := String(guard_order.get("kind", "")) == "wait"
     var rescue_battle_engaged := false
     for i in range(1800):
         tutorial_system.refresh_rescue_progress(1.0 / 60.0)
@@ -5422,8 +5426,6 @@ func test_npc_equipment_and_pathing() -> void:
         "nightGuard": true,
         "weapon": "woodenSword"
     })
-    body.set_meta("npc_force_hold", true)
-
     var weapon_visible := bool(body.get_meta("npc_weapon_visible", false)) and String(body.get_meta("npc_weapon", "")) == "woodenSword"
     var anchor := entry.get("heldAnchor") as Node3D
     var rest_rotation := anchor.rotation if anchor else Vector3.ZERO
@@ -8900,7 +8902,7 @@ func npc_route_debug(npc_system, body: Node) -> String:
             int(entry.get("navmeshTileBudgetWaitFrames", 0)),
             JSON.stringify(entry.get("lastNavmeshTilePublishDebug", [])),
             JSON.stringify(nav_debug),
-            str(body.get_meta("npc_force_hold", false)),
+            JSON.stringify(entry.get("scriptedOrder", {})),
             str(body.get_meta("npc_dialogue_focused", false))
         ]
     return "entry missing"

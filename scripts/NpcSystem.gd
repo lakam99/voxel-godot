@@ -226,13 +226,6 @@ func order_go_home(actor_id, reason := "scripted_go_home", speed_mode := NPC_SPE
         return scripted_order_result(null, "FAILED_TARGET_GONE", reason, "missing_actor")
     return apply_scripted_order(entry, "go_home", reason, entry.get("homePosition", Vector3.INF), CELL * 0.82, false, true, speed_mode)
 
-func release_intro_hold_and_order_home(actor_id, reason := "intro_acknowledged_return_home", speed_mode := NPC_SPEED_MODE_WALKING) -> Dictionary:
-    var entry := npc_entry_for_actor(actor_id)
-    if entry.is_empty():
-        return scripted_order_result(null, "FAILED_TARGET_GONE", reason, "missing_actor")
-    clear_intro_hold_for_entry(entry)
-    return apply_scripted_order(entry, "go_home", reason, entry.get("homePosition", Vector3.INF), CELL * 0.82, false, true, speed_mode)
-
 func order_face_player(actor_id, reason := "scripted_face_player") -> Dictionary:
     var entry := npc_entry_for_actor(actor_id)
     if entry.is_empty():
@@ -247,9 +240,11 @@ func cancel_order(actor_id, reason := "scripted_cancelled") -> Dictionary:
     if entry.is_empty():
         return scripted_order_result(null, "FAILED_TARGET_GONE", reason, "missing_actor")
     var body := entry.get("body") as Node
+    var cleanup := release_replaced_order_state(entry, reason)
     var result := scripted_order_result(entry, "CANCELLED", reason, "")
-    clear_scripted_order_metadata(body)
+    result["replacementCleanup"] = cleanup
     entry["scriptedOrder"] = result
+    clear_scripted_order_metadata(body)
     entry["activeGoalKind"] = "idle"
     entry.erase("activeMotionGoal")
     entry.erase("activeMotionPlan")
@@ -324,6 +319,7 @@ func apply_scripted_order(entry: Dictionary, kind: String, reason: String, targe
     var body := entry.get("body") as Node
     if body == null or not is_instance_valid(body):
         return scripted_order_result(entry, "FAILED_TARGET_GONE", reason, "missing_body")
+    var replacement_cleanup := release_replaced_order_state(entry, "scripted_order_replaced:%s" % kind)
     var order_serial := int(entry.get("scriptedOrderSerial", 0)) + 1
     entry["scriptedOrderSerial"] = order_serial
     var order_id := "%s:%s:%d" % [String(entry.get("id", body.name)), kind, order_serial]
@@ -337,6 +333,8 @@ func apply_scripted_order(entry: Dictionary, kind: String, reason: String, targe
         "kind": kind,
         "state": "PENDING",
         "reason": reason,
+        "submissionReason": reason,
+        "statusReason": reason,
         "failureReason": "",
         "target": target,
         "arrivalRadius": normalized_radius,
@@ -345,7 +343,8 @@ func apply_scripted_order(entry: Dictionary, kind: String, reason: String, targe
         "speedMode": normalized_speed_mode,
         "speed": movement_speed,
         "combatOverlay": combat_overlay,
-        "usesRouteStack": kind in ["go_to", "go_home"]
+        "usesRouteStack": kind in ["go_to", "go_home"],
+        "replacementCleanup": replacement_cleanup
     }
     entry["scriptedOrder"] = result
     entry["activeGoalKind"] = "home" if kind == "go_home" else "scripted"
@@ -384,13 +383,59 @@ func apply_scripted_order(entry: Dictionary, kind: String, reason: String, targe
     entry["activeMotionGoal"] = { "goalKind": NpcEnumsScript.GOAL_KIND_HOME if kind == "go_home" else NpcEnumsScript.GOAL_KIND_SCRIPTED, "reason": reason }
     return result
 
+func release_replaced_order_state(entry: Dictionary, reason: String) -> Dictionary:
+    ensure_autonomy_system()
+    var route_cancellation := {"ok": true, "cancelled": false, "reason": "missing_autonomy"}
+    if autonomy_system != null:
+        if autonomy_system.has_method("cancel_active_route_request"):
+            route_cancellation = autonomy_system.cancel_active_route_request(entry, reason)
+        if autonomy_system.has_method("release_action_owned_state"):
+            autonomy_system.release_action_owned_state(entry, reason)
+    release_job_reservation(entry, reason)
+    for key in [
+        "pathWaypoints",
+        "routeCells",
+        "routeActions",
+        "routeForceReplan",
+        "routeKey",
+        "routePendingKey",
+        "routePendingRetryFrame",
+        "routePendingSnapshotRevision",
+        "routeFailureRetryFrame",
+        "routeDynamicAvoidCells",
+        "routeDynamicAvoidUntilFrame",
+        "homeRouteV2RequestId",
+        "homeRouteV2Key",
+        "routineRouteV2RequestId",
+        "routineRouteV2Key",
+        "_routineRouteV2Intent",
+        "routineRouteV2IntentKind",
+        "routineRouteV2SemanticKind",
+        "activeDoorPortalId",
+        "activeDoorActorId",
+        "activeDoorDirection",
+        "activeDoorTrafficGroupId",
+        "activeTrafficStepGroup"
+    ]:
+        entry.erase(key)
+    NpcRouteStateStoreScript.clear_route_lease(entry, "NpcSystem.release_replaced_order_state")
+    NpcRouteStateStoreScript.write_status(entry, "idle", reason, "NpcSystem.release_replaced_order_state")
+    return {
+        "routeCancellation": route_cancellation,
+        "doorAndTrafficReleased": autonomy_system != null,
+        "jobReservationReleased": true
+    }
+
 func scripted_order_result(entry, state: String, reason: String, failure_reason := "") -> Dictionary:
     var result := {}
     if entry is Dictionary:
         result = (entry as Dictionary).get("scriptedOrder", {}) if (entry as Dictionary).get("scriptedOrder", {}) is Dictionary else {}
     result = result.duplicate(true)
+    if not result.has("submissionReason"):
+        result["submissionReason"] = String(result.get("reason", reason))
     result["state"] = state
     result["reason"] = reason
+    result["statusReason"] = reason
     result["failureReason"] = failure_reason
     if entry is Dictionary:
         (entry as Dictionary)["scriptedOrder"] = result
@@ -558,7 +603,6 @@ func register_npc(body: Node3D, profile: Dictionary) -> Dictionary:
         "hunger": deterministic_profile_float(profile, body, "hunger", 72.0, 96.0),
         "maxHunger": 100.0,
         "jobRuns": 0,
-        "holdIntroDoor": bool(profile.get("holdIntroDoor", false)),
         "tutorial": bool(profile.get("tutorial", false)),
         "requiredVisibleScripted": bool(profile.get("requiredVisibleScripted", false)),
         "cooldown": deterministic_profile_float(profile, body, "cooldown", 0.2, 1.2),
@@ -1038,13 +1082,6 @@ func update_npcs(delta: float, day_factor: float) -> void:
         if body == null or not is_instance_valid(body):
             npcs.erase(entry)
             continue
-        if bool(body.get_meta("npc_force_hold", false)) and not body.has_meta("npc_scripted_target"):
-            if main.player:
-                face_position(body, main.player.global_position)
-            entry["lastMoveDistance"] = 0.0
-            if autonomy_system != null and autonomy_system.has_method("record_motion_skipped"):
-                autonomy_system.record_motion_skipped(entry, "force_hold")
-            continue
         var lod_state := "active"
         if autonomy_system != null and autonomy_system.has_method("update_simulation_lod"):
             var observer_position := Vector3.INF
@@ -1347,24 +1384,9 @@ func update_npc(entry: Dictionary, delta: float, night_factor: float) -> void:
         if monitor != null:
             monitor.end_section("NpcAutonomySystem", autonomy_start)
 
-func npc_is_held_by_intro_or_dialogue(entry: Dictionary, body: Node3D) -> bool:
-    if bool(entry.get("holdIntroDoor", false)) and main and main.tutorial_system:
-        var waiting_for_door := not bool(main.tutorial_system.get("intro_door_opened"))
-        var waiting_for_ack: bool = main.tutorial_system.has_method("is_intro_elder_waiting_for_ack") and bool(main.tutorial_system.is_intro_elder_waiting_for_ack())
-        if waiting_for_door or waiting_for_ack:
-            entry["insideHome"] = false
-            body.set_meta("npc_inside_home", false)
-            if main.player:
-                face_position(body, main.player.global_position)
-            return true
-        clear_intro_hold_for_entry(entry)
+func npc_movement_is_paused(entry: Dictionary, body: Node3D) -> bool:
     if bool(body.get_meta("npc_dialogue_focused", false)):
         face_position(body, body.get_meta("npc_dialogue_face_position", body.global_position))
-        entry["lastMoveDistance"] = 0.0
-        return true
-    if bool(body.get_meta("npc_force_hold", false)):
-        if main.player:
-            face_position(body, main.player.global_position)
         entry["lastMoveDistance"] = 0.0
         return true
     return false
@@ -1931,36 +1953,6 @@ func is_valid_job_resource_node(node: Node3D, entry: Dictionary, job: String) ->
             return false
         return material == "berryBush" or drop == "berries"
     return false
-
-func clear_intro_hold_for_entry(entry: Dictionary) -> void:
-    entry["holdIntroDoor"] = false
-    entry["npc_lod_brain_due"] = true
-    var body := entry.get("body") as Node
-    if String(entry.get("activeDoorPortalId", "")) != "":
-        var actor_id := String(entry.get("id", ""))
-        release_npc_door_hold(actor_id if actor_id != "" else body, true)
-        release_npc_traffic_reservations(entry, "intro_hold_released")
-        for key in [
-            "activeDoorPortalId",
-            "activeDoorActorId",
-            "activeDoorDirection",
-            "activeDoorTrafficGroupId",
-            "_activeDoorForwardStep",
-            "doorStageActive",
-            "doorStagePortalId",
-            "doorStagePosition"
-        ]:
-            entry.erase(key)
-    var active_goal_value = entry.get("activeMotionGoal", {})
-    if active_goal_value is Dictionary and String((active_goal_value as Dictionary).get("reason", "")) == "held_by_script":
-        entry.erase("activeMotionGoal")
-        entry.erase("activeMotionPlan")
-        entry.erase("activeMotionSchedule")
-        entry.erase("activeMotionPerception")
-    if String(entry.get("npcMotionSkippedReason", "")) == "held_by_script":
-        entry.erase("npcMotionSkippedReason")
-    if body != null and is_instance_valid(body):
-        body.set_meta("npc_hold_intro_door", false)
 
 func resource_job_uses_outside_work_area(job: String) -> bool:
     return job == "forage"
@@ -2584,7 +2576,7 @@ func debug_cell_value(value, fallback: Vector2i) -> Vector2i:
     return fallback
 
 func route_requires_exact_porch_arrival(entry: Dictionary) -> bool:
-    return bool(entry.get("holdDoorOrder", false)) or bool(entry.get("holdIntroDoor", false))
+    return bool(entry.get("holdDoorOrder", false))
 
 func settle_home_if_reached(entry: Dictionary) -> void:
     var body := entry.get("body") as Node3D

@@ -217,7 +217,7 @@ class FakeNpcSystem:
 	func update_npc_needs(_entry: Dictionary, _delta: float, _night_factor: float) -> void:
 		pass
 
-	func npc_is_held_by_intro_or_dialogue(_entry: Dictionary, _body: Node3D) -> bool:
+	func npc_movement_is_paused(_entry: Dictionary, _body: Node3D) -> bool:
 		return false
 
 	func choose_day_target(_entry: Dictionary) -> Vector3:
@@ -424,9 +424,9 @@ func cases() -> Array[Dictionary]:
 		case("npc_behavior_scripted_order_normal_profile_speed", "day", "test_scripted_order_normal_profile_speed"),
 		case("npc_behavior_scripted_order_sprint_profile_speed", "day", "test_scripted_order_sprint_profile_speed"),
 		case("npc_behavior_scripted_order_no_transform_write", "day", "test_scripted_order_no_transform_write"),
-		case("npc_behavior_mira_dialogue_ack_releases_go_home_order", "day", "test_mira_dialogue_ack_releases_go_home_order"),
+		case("npc_behavior_dialogue_ack_submits_generic_go_home_order", "day", "test_dialogue_ack_submits_generic_go_home_order"),
 		case("npc_behavior_mira_home_arrival_requires_interior", "day", "test_mira_home_arrival_requires_interior"),
-		case("npc_behavior_hold_intro_door_not_speed_override", "day", "test_hold_intro_door_not_speed_override"),
+		case("npc_behavior_tutorial_uses_generic_orders_without_speed_override", "day", "test_tutorial_uses_generic_orders_without_speed_override"),
 		case("npc_motor_every_active_actor_motion_tick_32_npcs", "day", "test_every_active_actor_motion_tick_32_npcs"),
 		case("npc_behavior_brain_budget_does_not_skip_route_motion", "day", "test_brain_budget_does_not_skip_route_motion"),
 		case("npc_behavior_scripted_order_moves_while_brain_skipped", "day", "test_scripted_order_moves_while_brain_skipped"),
@@ -808,14 +808,14 @@ func test_scripted_order_go_home_uses_route_stack(_mode: String) -> Dictionary:
 	var executor: Variant = make_executor(fake_npc)
 	var entry_data := entry("Villager", { "id": "mira", "position": Vector3.ZERO, "homeCell": Vector2i(3, 0), "porchCell": Vector2i(1, 0) })
 	var body := entry_data.get("body") as Node3D
-	set_scripted_order_meta(entry_data, body, "go_home", "intro_acknowledged_return_home")
+	set_scripted_order_meta(entry_data, body, "go_home", "tutorial_knock_complete")
 	for i in range(8):
 		executor.advance_motion_npc(entry_data, 1.0 / 60.0, 0.0)
 	var order: Dictionary = entry_data.get("scriptedOrder", {})
 	var home_intent: Dictionary = entry_data.get("_homeRouteV2Intent", {}) if entry_data.get("_homeRouteV2Intent", {}) is Dictionary else {}
-	var passed: bool = String(home_intent.get("kind", "")) == "home" and bool(home_intent.get("movingHome", false)) and not body.has_meta("npc_scripted_target") and String(order.get("state", "")) in ["ACTIVE", "ARRIVED"]
+	var passed: bool = String(home_intent.get("kind", "")) == "home" and bool(home_intent.get("movingHome", false)) and int(home_intent.get("priority", 0)) == 180 and not body.has_meta("npc_scripted_target") and String(order.get("state", "")) in ["ACTIVE", "ARRIVED"]
 	fake_npc.queue_free()
-	return outcome(passed, "v2=%s targetMeta=%s order=%s" % [JSON.stringify(home_intent), str(body.has_meta("npc_scripted_target")), JSON.stringify(order)], ["go_home_uses_v2_home_route", "go_home_no_scripted_target", "order_state_recorded"], { "order": order, "homeIntent": home_intent })
+	return outcome(passed, "v2=%s targetMeta=%s order=%s" % [JSON.stringify(home_intent), str(body.has_meta("npc_scripted_target")), JSON.stringify(order)], ["go_home_uses_v2_home_route", "scripted_home_priority_preserved", "go_home_no_scripted_target", "order_state_recorded"], { "order": order, "homeIntent": home_intent })
 
 func test_scripted_go_home_arrival_clears_cached_motion(_mode: String) -> Dictionary:
 	var fake_npc := FakeNpcSystem.new()
@@ -900,13 +900,15 @@ func test_scripted_order_no_transform_write(_mode: String) -> Dictionary:
 	var passed: bool = update_source.find("global_position =") < 0 and update_source.find("position =") < 0 and update_source.find("move_npc(") >= 0
 	return outcome(passed, "usesMove=%s directGlobal=%s directPosition=%s" % [str(update_source.find("move_npc(") >= 0), str(update_source.find("global_position =") >= 0), str(update_source.find("position =") >= 0)], ["scripted_order_uses_move_npc", "scripted_order_no_transform_assignment"], {})
 
-func test_mira_dialogue_ack_releases_go_home_order(_mode: String) -> Dictionary:
+func test_dialogue_ack_submits_generic_go_home_order(_mode: String) -> Dictionary:
 	var tutorial_source := read_text("res://scripts/TutorialSystem.gd")
 	var npc_source := read_text("res://scripts/NpcSystem.gd")
-	var has_ack_hook := tutorial_source.find("release_intro_elder_home_order") >= 0 and tutorial_source.find("intro_acknowledged_return_home") >= 0 and tutorial_source.find("order_go_home") >= 0
+	var has_ack_hook := tutorial_source.find('order_go_home(actor, "tutorial_knock_complete")') >= 0 \
+		and tutorial_source.find('"reason": "tutorial_knock_pending"') >= 0 \
+		and tutorial_source.find("release_intro_elder_home_order") < 0
 	var has_order_api := npc_source.find("func order_go_home") >= 0 and npc_source.find("func order_resume_schedule") >= 0 and npc_source.find("func cancel_order") >= 0
 	var passed: bool = has_ack_hook and has_order_api
-	return outcome(passed, "ackHook=%s api=%s" % [str(has_ack_hook), str(has_order_api)], ["dialogue_ack_orders_mira_home", "scripted_order_api_present"], {})
+	return outcome(passed, "ackHook=%s api=%s" % [str(has_ack_hook), str(has_order_api)], ["dialogue_ack_submits_generic_home", "scripted_order_api_present"], {})
 
 func test_mira_home_arrival_requires_interior(_mode: String) -> Dictionary:
 	var source := read_text("res://scripts/NpcSystem.gd")
@@ -918,12 +920,13 @@ func test_mira_home_arrival_requires_interior(_mode: String) -> Dictionary:
 	var passed: bool = has_interior_check and porch_blocked
 	return outcome(passed, "interiorCheck=%s porchBlocked=%s" % [str(has_interior_check), str(porch_blocked)], ["mira_home_requires_interior_semantics", "porch_fallback_not_inside"], {})
 
-func test_hold_intro_door_not_speed_override(_mode: String) -> Dictionary:
+func test_tutorial_uses_generic_orders_without_speed_override(_mode: String) -> Dictionary:
 	var source := read_text("res://scripts/NpcSystem.gd") + "\n" + read_text("res://scripts/npc_ai/behavior/NpcPlanExecutor.gd") + "\n" + read_text("res://scripts/TutorialSystem.gd") + "\n" + read_text("res://scripts/TutorialDialogueSystem.gd")
-	var forbidden := source.find("speed = 20.0") >= 0 or text_contains_near(source, "holdIntroDoor", "speed", 160) or text_contains_near(source, "speed", "holdIntroDoor", 160)
-	var hold_still_state_only := source.find("holdIntroDoor") >= 0 and source.find("npc_is_held_by_intro_or_dialogue") >= 0
-	var passed: bool = not forbidden and hold_still_state_only
-	return outcome(passed, "forbidden=%s holdStateOnly=%s" % [str(forbidden), str(hold_still_state_only)], ["hold_intro_door_not_speed", "hold_intro_door_state_only"], {})
+	var removed_privileges := source.find("holdIntroDoor") < 0 and source.find("npc_hold_intro_door") < 0 and source.find("release_intro_hold_and_order_home") < 0
+	var generic_orders := source.find("order_wait(actor_id") >= 0 and source.find("order_go_home(actor_id") >= 0 and source.find("tutorial_knock_complete") >= 0
+	var no_speed_override := source.find("speed = 20.0") < 0
+	var passed: bool = removed_privileges and generic_orders and no_speed_override
+	return outcome(passed, "removed=%s generic=%s noHack=%s" % [str(removed_privileges), str(generic_orders), str(no_speed_override)], ["intro_hold_privileges_removed", "tutorial_uses_generic_orders", "no_20_speed_override"], {})
 
 func test_every_active_actor_motion_tick_32_npcs(_mode: String) -> Dictionary:
 	var fake_npc := FakeNpcSystem.new()
@@ -1772,7 +1775,7 @@ func test_no_raw_random_world_goal(_mode: String) -> Dictionary:
 	var npc_source := read_text("res://scripts/NpcSystem.gd")
 	var goal_source := read_text("res://scripts/npc_ai/behavior/NpcSemanticGoalPlanner.gd")
 	var update_start := npc_source.find("func update_npc(entry")
-	var update_end := npc_source.find("func npc_is_held_by_intro_or_dialogue")
+	var update_end := npc_source.find("func npc_movement_is_paused")
 	var update_source := npc_source.substr(update_start, update_end - update_start)
 	var idle_start := goal_source.find("func town_anchor_candidates")
 	var idle_end := goal_source.find("func job_anchor_candidates")
