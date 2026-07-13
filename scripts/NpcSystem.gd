@@ -702,6 +702,13 @@ func restore_job_facts(facts) -> void:
         if npc_id != "":
             pending_saved_npc_facts[npc_id] = fact.duplicate(true)
 
+func saved_npc_fact(actor_id) -> Dictionary:
+    var npc_id := String(actor_id)
+    if npc_id == "" or not pending_saved_npc_facts.has(npc_id):
+        return {}
+    var fact_value = pending_saved_npc_facts.get(npc_id, {})
+    return fact_value.duplicate(true) if fact_value is Dictionary else {}
+
 func apply_saved_npc_facts(entry: Dictionary) -> void:
     var npc_id := String(entry.get("id", ""))
     if npc_id == "" or not pending_saved_npc_facts.has(npc_id):

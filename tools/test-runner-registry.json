@@ -392,6 +392,15 @@
       "required": true
     },
     {
+      "id": "tutorial_save_compatibility_contract",
+      "description": "Additive tutorial save contract, regenerated-manifest validation, home-assignment preservation, and idempotent generic-order restoration",
+      "command": ".\\tools\\run-tutorial-save-compatibility-contract-tests.ps1",
+      "args": ["-ReportPath", "artifacts\\test-runners\\tutorial-save-compatibility-contract.json"],
+      "reportPath": "artifacts\\test-runners\\tutorial-save-compatibility-contract.json",
+      "evidenceLevel": "contract",
+      "required": true
+    },
+    {
       "id": "main_menu_startup_smoke",
       "description": "Main Menu to New Game production-scene startup readiness domains, physics gate, and zero pending town structure operations",
       "command": ".\\tools\\run-main-menu-startup-readiness-smoke.ps1",

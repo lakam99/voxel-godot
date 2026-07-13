@@ -27,9 +27,11 @@ func _ready() -> void:
     maybe_start_vox55_terrain_survey_runner()
 
 func maybe_start_real_boot_mira_runner() -> void:
-    if OS.get_environment("VOXEL_ACTUAL_GAMEPLAY_MIRA_REAL_BOOT").strip_edges() != "1":
+    var save_continue_mode := OS.get_environment("VOXEL_TUTORIAL_SAVE_CONTINUE_REAL_BOOT").strip_edges() == "1"
+    if not save_continue_mode and OS.get_environment("VOXEL_ACTUAL_GAMEPLAY_MIRA_REAL_BOOT").strip_edges() != "1":
         return
-    var runner_script = load("res://scripts/testing/npc/NpcActualGameplayMiraPorchRegressionRunner.gd")
+    var runner_path := "res://scripts/testing/npc/NpcTutorialSaveContinueRunner.gd" if save_continue_mode else "res://scripts/testing/npc/NpcActualGameplayMiraPorchRegressionRunner.gd"
+    var runner_script = load(runner_path)
     if runner_script == null:
         push_error("Mira real-boot runner script could not be loaded")
         return

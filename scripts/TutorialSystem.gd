@@ -7,6 +7,7 @@ const TutorialRescueSystemScript := preload("res://scripts/TutorialRescueSystem.
 const TutorialDialogueSystemScript := preload("res://scripts/TutorialDialogueSystem.gd")
 const TownRuntimeManifestScript := preload("res://scripts/world/TownRuntimeManifest.gd")
 const StartupReadinessResultScript := preload("res://scripts/world/StartupReadinessResult.gd")
+const TutorialTownSaveContractScript := preload("res://scripts/tutorial/TutorialTownSaveContract.gd")
 
 const CELL := 1.35
 const TUTORIAL_TOWN_REGION := Vector2i(1, 0)
@@ -72,6 +73,8 @@ var startup_readiness_result := {}
 var restore_world_setup_pending := false
 var intro_knock_initial_order_result := {}
 var intro_knock_home_order_result := {}
+var restored_tutorial_save_contract := {}
+var tutorial_save_restore_result := {}
 
 func setup(main_node) -> void:
     main = main_node
@@ -233,6 +236,16 @@ func prepare_tutorial_world_staged(restoring: bool) -> Dictionary:
             startup_town_manifest,
             initial_orders
         )
+    var save_restore := {}
+    if restoring:
+        save_restore = reconcile_restored_tutorial_save_contract()
+        if not bool(save_restore.get("ok", false)):
+            return await fail_tutorial_startup(
+                "tutorial_save_order_restore_failed",
+                startup_town_manifest,
+                save_restore
+            )
+        await loading_yield("Tutorial save state restored", "tutorial_save", "ready", save_restore)
     await loading_yield("Villagers registered", "npc_registration", "ready", registration_result.get("metrics", {}))
     if not restoring:
         force_stormy_night()
@@ -248,7 +261,8 @@ func prepare_tutorial_world_staged(restoring: bool) -> Dictionary:
         "npcRegistration": registration_result.get("metrics", {}),
         "actorResolution": actor_resolution.get("metrics", {}),
         "actorSpawn": spawn_result.get("metrics", {}),
-        "initialOrders": initial_orders
+        "initialOrders": initial_orders,
+        "saveRestore": save_restore
     }
     await loading_yield("Tutorial world ready", "tutorial_world", "ready", metrics)
     return remember_startup_readiness(StartupReadinessResultScript.ready(startup_town_manifest, metrics))
@@ -599,6 +613,8 @@ func reset_startup_readiness_state() -> void:
     restore_world_setup_pending = false
     intro_knock_initial_order_result.clear()
     intro_knock_home_order_result.clear()
+    restored_tutorial_save_contract.clear()
+    tutorial_save_restore_result.clear()
 
 func submit_initial_actor_orders(specs: Array, restoring: bool) -> Dictionary:
     if main == null or main.npc_system == null:
@@ -658,6 +674,145 @@ func npc_order_state_summary(order_value) -> Dictionary:
         "usesRouteStack": bool(order.get("usesRouteStack", false))
     }
 
+func fallback_intro_knock_intent() -> Dictionary:
+    if not started or not intro_repair_active or intro_bed_used:
+        return {
+            "kind": TutorialTownSaveContractScript.INTENT_RESUME_SCHEDULE,
+            "reason": "resume_schedule"
+        }
+    if not intro_elder_dialogue_acknowledged:
+        return {
+            "kind": TutorialTownSaveContractScript.INTENT_WAIT,
+            "reason": "tutorial_knock_pending"
+        }
+    return {
+        "kind": TutorialTownSaveContractScript.INTENT_GO_HOME,
+        "reason": "tutorial_knock_complete"
+    }
+
+func intro_knock_intent_for_snapshot() -> Dictionary:
+    var fallback := fallback_intro_knock_intent()
+    if String(fallback.get("kind", "")) != TutorialTownSaveContractScript.INTENT_GO_HOME:
+        return fallback
+    if main == null or main.npc_system == null:
+        return fallback
+    var entry: Dictionary = main.npc_system.npc_entry_for_actor(INTRO_KNOCK_ACTOR_ID)
+    if entry.is_empty():
+        return fallback
+    if main.npc_system.has_method("settle_home_if_reached"):
+        main.npc_system.settle_home_if_reached(entry)
+    if bool(entry.get("insideHome", false)):
+        return {
+            "kind": TutorialTownSaveContractScript.INTENT_RESUME_SCHEDULE,
+            "reason": "resume_schedule"
+        }
+    return fallback
+
+func tutorial_save_contract_snapshot() -> Dictionary:
+    var manifest: Dictionary = startup_town_manifest.duplicate(true)
+    return TutorialTownSaveContractScript.build(
+        manifest,
+        startup_actor_specs,
+        intro_knock_intent_for_snapshot()
+    )
+
+func reconcile_restored_tutorial_save_contract() -> Dictionary:
+    if main == null or main.npc_system == null:
+        tutorial_save_restore_result = {
+            "ok": false,
+            "reason": "missing_npc_order_authority"
+        }
+        return tutorial_save_restore_result.duplicate(true)
+    var contract: Dictionary = restored_tutorial_save_contract if not restored_tutorial_save_contract.is_empty() else TutorialTownSaveContractScript.normalize({}, fallback_intro_knock_intent())
+    var manifest_validation := TutorialTownSaveContractScript.validate_manifest_reference(
+        contract.get("manifestReference", {}),
+        startup_town_manifest,
+        startup_actor_specs
+    )
+    var entry: Dictionary = main.npc_system.npc_entry_for_actor(INTRO_KNOCK_ACTOR_ID)
+    if entry.is_empty():
+        tutorial_save_restore_result = {
+            "ok": false,
+            "reason": "missing_intro_knock_actor",
+            "manifestValidation": manifest_validation
+        }
+        return tutorial_save_restore_result.duplicate(true)
+    if main.npc_system.has_method("settle_home_if_reached"):
+        main.npc_system.settle_home_if_reached(entry)
+    var saved_fact := {}
+    if main.npc_system.has_method("saved_npc_fact"):
+        saved_fact = main.npc_system.saved_npc_fact(INTRO_KNOCK_ACTOR_ID)
+    var assignment_validation := TutorialTownSaveContractScript.validate_saved_assignment(saved_fact, entry)
+    var desired: Dictionary = TutorialTownSaveContractScript.normalize_intro_intent(
+        contract.get("introKnockIntent", {}),
+        fallback_intro_knock_intent()
+    )
+    if String(desired.get("kind", "")) == TutorialTownSaveContractScript.INTENT_GO_HOME and bool(entry.get("insideHome", false)):
+        desired = {
+            "kind": TutorialTownSaveContractScript.INTENT_RESUME_SCHEDULE,
+            "reason": "resume_schedule"
+        }
+    var active: Dictionary = main.npc_system.scripted_order_status(INTRO_KNOCK_ACTOR_ID)
+    var action := "retained"
+    var order_result: Dictionary = active.duplicate(true)
+    var kind := String(desired.get("kind", ""))
+    var reason := String(desired.get("reason", ""))
+    if kind == TutorialTownSaveContractScript.INTENT_WAIT:
+        if not intro_knock_order_matches(active, kind, reason):
+            action = "submitted"
+            order_result = main.npc_system.order_wait(INTRO_KNOCK_ACTOR_ID, reason)
+        intro_knock_initial_order_result = order_result.duplicate(true)
+    elif kind == TutorialTownSaveContractScript.INTENT_GO_HOME:
+        if not intro_knock_order_matches(active, kind, reason):
+            action = "submitted"
+            order_result = main.npc_system.order_go_home(INTRO_KNOCK_ACTOR_ID, reason)
+        intro_knock_home_order_result = order_result.duplicate(true)
+    else:
+        if intro_knock_order_is_active(active):
+            action = "resumed_schedule"
+            order_result = main.npc_system.order_resume_schedule(INTRO_KNOCK_ACTOR_ID)
+        else:
+            order_result = {
+                "kind": TutorialTownSaveContractScript.INTENT_RESUME_SCHEDULE,
+                "state": "RETAINED",
+                "reason": "resume_schedule"
+            }
+        intro_knock_home_order_result = order_result.duplicate(true)
+    var order_failed := String(order_result.get("state", "")).begins_with("FAILED")
+    tutorial_save_restore_result = {
+        "ok": not order_failed,
+        "reason": "" if not order_failed else String(order_result.get("failureReason", order_result.get("reason", "order_restore_failed"))),
+        "contractMigration": String(contract.get("migration", "")),
+        "manifestValidation": manifest_validation,
+        "assignmentValidation": assignment_validation,
+        "desiredIntent": desired,
+        "action": action,
+        "order": npc_order_state_summary(order_result)
+    }
+    return tutorial_save_restore_result.duplicate(true)
+
+func intro_knock_order_matches(order_value, kind: String, reason: String) -> bool:
+    if not (order_value is Dictionary):
+        return false
+    var order: Dictionary = order_value
+    var state := String(order.get("state", ""))
+    if not state in ["PENDING", "ACTIVE"]:
+        return false
+    if String(order.get("kind", "")) != kind:
+        return false
+    var submission_reason := String(order.get("submissionReason", order.get("reason", "")))
+    return submission_reason == reason
+
+func intro_knock_order_is_active(order_value) -> bool:
+    if not (order_value is Dictionary):
+        return false
+    var order: Dictionary = order_value
+    var state := String(order.get("state", ""))
+    if not state in ["PENDING", "ACTIVE"]:
+        return false
+    var reason := String(order.get("submissionReason", order.get("reason", "")))
+    return reason in ["tutorial_knock_pending", "tutorial_knock_complete"]
+
 func loading_yield(message: String, domain := "tutorial", status := "pending", metrics := {}) -> void:
     if main != null and main.has_method("startup_loading_yield"):
         await main.call("startup_loading_yield", message, domain, status, metrics)
@@ -683,6 +838,10 @@ func restore(snapshot_value = {}) -> void:
     if start_cell_value is Array and start_cell_value.size() >= 2:
         start_cell = Vector2i(int(start_cell_value[0]), int(start_cell_value[1]))
     restore_intro_state(state.get("introRepair", {}))
+    restored_tutorial_save_contract = TutorialTownSaveContractScript.normalize(
+        state.get("saveContract", {}),
+        fallback_intro_knock_intent()
+    )
     last_message = String(state.get("lastMessage", ""))
     if not started or main == null:
         town = {}
@@ -742,6 +901,7 @@ func snapshot() -> Dictionary:
         "townRegion": [TUTORIAL_TOWN_REGION.x, TUTORIAL_TOWN_REGION.y],
         "startCell": [start_cell.x, start_cell.y],
         "introRepair": intro_snapshot(),
+        "saveContract": tutorial_save_contract_snapshot(),
         "npcCount": npc_count()
     }
 
@@ -761,6 +921,7 @@ func state() -> Dictionary:
             "initial": npc_order_state_summary(intro_knock_initial_order_result),
             "home": npc_order_state_summary(intro_knock_home_order_result)
         },
+        "tutorialSaveRestore": tutorial_save_restore_result.duplicate(true),
         "introRepairChestOpened": intro_repair_chest_opened,
         "introRepairActive": intro_repair_active,
         "introRepairComplete": intro_repair_complete,
@@ -1296,6 +1457,15 @@ func spawn_tutorial_npcs(restoring := false) -> Dictionary:
     if not bool(initial_orders.get("ok", false)):
         return initial_orders
     spawn_result["initialOrders"] = initial_orders
+    if restoring:
+        var save_restore := reconcile_restored_tutorial_save_contract()
+        if not bool(save_restore.get("ok", false)):
+            return {
+                "ok": false,
+                "reason": "tutorial_save_order_restore_failed",
+                "saveRestore": save_restore
+            }
+        spawn_result["saveRestore"] = save_restore
     return spawn_result
 
 func add_npc_visual(parent: Node3D, color: Color, accent: Color, npc_name: String, role: String) -> void:
