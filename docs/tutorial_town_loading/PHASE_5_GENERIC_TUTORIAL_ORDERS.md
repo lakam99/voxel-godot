@@ -9,7 +9,7 @@ This report follows Phase 5 of `CODEX_TUTORIAL_TOWN_NPC_LOADING_PLAN.md`.
 ## Branch And Commit
 
 - Branch: `codex/vox-75-generic-tutorial-orders`
-- Implementation commit: `681e0d6` (`Replace tutorial NPC holds with generic orders`)
+- Implementation commit: `c913028` (`Replace tutorial NPC holds with generic orders`)
 - Linear: `VOX-75`
 
 ## Production Contract
