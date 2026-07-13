@@ -95,6 +95,7 @@ func run() -> void:
         "suite": "normal_runtime_performance",
         "evidenceLevel": "integration",
         "scenario": scenario,
+        "requestedTestSeed": OS.get_environment("VOXEL_TEST_SEED").strip_edges(),
         "seed": String(main.get("seed_text")) if main != null else "",
         "runToken": run_token,
         "durationSeconds": duration_seconds,
@@ -437,7 +438,8 @@ func normal_runtime_controls() -> Dictionary:
         "fixedFps": false,
         "autosaveExpectedEnabled": true,
         "savePathOverride": OS.get_environment("VOXEL_SAVE_PATH_OVERRIDE").strip_edges(),
-        "testSeed": OS.get_environment("VOXEL_TEST_SEED").strip_edges(),
+        "requestedTestSeed": OS.get_environment("VOXEL_TEST_SEED").strip_edges(),
+        "deterministicSeedSequence": OS.get_environment("VOXEL_NORMAL_RUNTIME_PERF_RUN_TOKEN").strip_edges() != "",
         "movementSegments": runtime_movement_segment_labels(),
         "segmentSeconds": SEGMENT_SECONDS,
         "segmentPauseSeconds": SEGMENT_PAUSE_SECONDS

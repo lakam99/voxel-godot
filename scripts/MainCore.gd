@@ -1317,7 +1317,9 @@ func apply_world_seed(new_seed: String, remember := false) -> void:
 
 func random_world_seed(exclude_seed := "") -> String:
     var forced_test_seed := test_seed_text()
-    if forced_test_seed != "" and OS.get_environment("VOXEL_PLAYTEST") != "":
+    var deterministic_test_sequence := OS.get_environment("VOXEL_PLAYTEST") != "" \
+        or OS.get_environment("VOXEL_NORMAL_RUNTIME_PERF_RUN_TOKEN").strip_edges() != ""
+    if forced_test_seed != "" and deterministic_test_sequence:
         for attempt in range(8):
             var candidate_index: int = test_seed_sequence + attempt
             var stable_value: int = absi(hash_string("%s:test-world:%d" % [forced_test_seed, candidate_index]))
