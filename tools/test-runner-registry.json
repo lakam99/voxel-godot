@@ -365,6 +365,42 @@
       "required": true
     },
     {
+      "id": "startup_loading_readiness_contract",
+      "description": "Tutorial startup semantic requirements, failure gating, deferred Continue setup, disabled gameplay, and visible failure contracts",
+      "command": ".\\tools\\run-startup-loading-readiness-contract-tests.ps1",
+      "args": ["-ReportPath", "artifacts\\test-runners\\startup-loading-readiness-contract.json"],
+      "reportPath": "artifacts\\test-runners\\startup-loading-readiness-contract.json",
+      "evidenceLevel": "contract",
+      "required": true
+    },
+    {
+      "id": "main_menu_startup_smoke",
+      "description": "Main Menu to New Game production-scene startup readiness domains, physics gate, and zero pending town structure operations",
+      "command": ".\\tools\\run-main-menu-startup-readiness-smoke.ps1",
+      "args": ["-ReportPath", "artifacts\\test-runners\\main-menu-startup-readiness-smoke.json"],
+      "reportPath": "artifacts\\test-runners\\main-menu-startup-readiness-smoke.json",
+      "evidenceLevel": "scene-load-smoke",
+      "required": true
+    },
+    {
+      "id": "main_menu_runtime_reset_smoke",
+      "description": "Known-seed Forward+ in-session New Game terrain reset, collision republication, navigation readiness, and native terrain instance preservation",
+      "command": ".\\tools\\run-main-menu-startup-readiness-smoke.ps1",
+      "args": ["-RuntimeReset", "-Visible", "-TestSeed", "atlas-1492", "-ReportPath", "artifacts\\test-runners\\main-menu-runtime-reset-smoke.json"],
+      "reportPath": "artifacts\\test-runners\\main-menu-runtime-reset-smoke.json",
+      "evidenceLevel": "scene-load-smoke",
+      "required": true
+    },
+    {
+      "id": "main_menu_continue_startup_smoke",
+      "description": "Main Menu to Continue production-scene manifest, collision, navigation, and physics readiness parity",
+      "command": ".\\tools\\run-main-menu-continue-readiness-smoke.ps1",
+      "args": ["-ReportPath", "artifacts\\test-runners\\main-menu-continue-startup-smoke.json"],
+      "reportPath": "artifacts\\test-runners\\main-menu-continue-startup-smoke.json",
+      "evidenceLevel": "scene-load-smoke",
+      "required": true
+    },
+    {
       "id": "exact_fluid_payload_contract",
       "description": "Exact immutable step-1 fluid occupancy snapshot, halo, revision, cancellation, and save-load contract",
       "command": ".\\tools\\run-exact-fluid-payload-contract.ps1",

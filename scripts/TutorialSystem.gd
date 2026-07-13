@@ -5,6 +5,8 @@ const TutorialSceneBuilderScript := preload("res://scripts/TutorialSceneBuilder.
 const TutorialRepairQuestScript := preload("res://scripts/TutorialRepairQuest.gd")
 const TutorialRescueSystemScript := preload("res://scripts/TutorialRescueSystem.gd")
 const TutorialDialogueSystemScript := preload("res://scripts/TutorialDialogueSystem.gd")
+const TownRuntimeManifestScript := preload("res://scripts/world/TownRuntimeManifest.gd")
+const StartupReadinessResultScript := preload("res://scripts/world/StartupReadinessResult.gd")
 
 const CELL := 1.35
 const TUTORIAL_TOWN_REGION := Vector2i(1, 0)
@@ -18,6 +20,9 @@ const RESCUE_MONSTER_COUNT := 6
 const RESCUE_GUARD_ID := "sera"
 const RESCUE_FORAGER_ID := "niko"
 const INVALID_REPAIR_CELL := Vector2i(2147483647, 2147483647)
+const TOWN_MANIFEST_LOADING_TIMEOUT_SECONDS := 120.0
+const TOWN_MANIFEST_OPS_PER_FRAME := 24
+const TOWN_MANIFEST_FRAME_BUDGET_MS := 6.0
 
 var main
 var npc_root: Node3D
@@ -60,6 +65,10 @@ var repair_quest
 var rescue_system
 var dialogue_system
 var last_home_refresh_debug := {}
+var startup_town_manifest := {}
+var startup_scenario_requirements := {}
+var startup_readiness_result := {}
+var restore_world_setup_pending := false
 
 func setup(main_node) -> void:
     main = main_node
@@ -122,70 +131,266 @@ func start_new_world() -> bool:
     last_dialogue_node = null
     return true
 
-func start_new_world_staged() -> bool:
+func start_new_world_staged() -> Dictionary:
+    reset_startup_readiness_state()
     if main == null:
-        return false
+        return remember_startup_readiness(StartupReadinessResultScript.failed("missing_tutorial_main"))
     clear_scene()
     town = main.town_region(TUTORIAL_TOWN_REGION.x, TUTORIAL_TOWN_REGION.y)
     if town.is_empty():
-        return false
+        return remember_startup_readiness(StartupReadinessResultScript.failed("missing_tutorial_town"))
     reserve_tutorial_town_layout()
     started = true
     interacted.clear()
     completed_steps.clear()
     configure_starting_inventory()
-    await loading_yield("Building tutorial town")
-    await ensure_town_generated_staged()
-    await loading_yield("Preparing village perimeter")
+    return await prepare_tutorial_world_staged(false)
+
+func complete_restore_world_staged() -> Dictionary:
+    if not started:
+        return remember_startup_readiness(StartupReadinessResultScript.ready({}, {
+            "mode": "continue",
+            "tutorialActive": false
+        }))
+    if main == null:
+        return remember_startup_readiness(StartupReadinessResultScript.failed("missing_tutorial_main"))
+    if town.is_empty():
+        town = main.town_region(TUTORIAL_TOWN_REGION.x, TUTORIAL_TOWN_REGION.y)
+        if town.is_empty():
+            return remember_startup_readiness(StartupReadinessResultScript.failed("missing_tutorial_town"))
+        reserve_tutorial_town_layout()
+    return await prepare_tutorial_world_staged(true)
+
+func prepare_tutorial_world_staged(restoring: bool) -> Dictionary:
+    startup_scenario_requirements = tutorial_scenario_requirements()
+    if not bool(startup_scenario_requirements.get("ok", false)):
+        return await fail_tutorial_startup("invalid_tutorial_scenario_requirements", {}, {
+            "failureReasons": startup_scenario_requirements.get("problems", [])
+        })
+    await loading_yield("Tutorial requirements ready", "tutorial_scenario", "ready", {
+        "requiredHomeKeys": startup_scenario_requirements.get("requiredHomeKeys", []),
+        "actorAssignmentCount": (startup_scenario_requirements.get("actorHomeAssignments", {}) as Dictionary).size()
+    })
+    var manifest_result: Dictionary = await ensure_town_manifest_ready_staged(startup_scenario_requirements)
+    if String(manifest_result.get("status", "")) != StartupReadinessResultScript.STATUS_READY:
+        return remember_startup_readiness(manifest_result)
+    startup_town_manifest = (manifest_result.get("manifest", {}) as Dictionary).duplicate(true)
+    var door_result := tutorial_manifest_door_readiness(startup_town_manifest)
+    if String(door_result.get("status", "")) != StartupReadinessResultScript.STATUS_READY:
+        return await fail_tutorial_startup(
+            String(door_result.get("reason", "required_town_doors_not_registered")),
+            startup_town_manifest,
+            door_result.get("metrics", {})
+        )
+    await loading_yield("Tutorial town doors ready", "town_doors", "ready", door_result.get("metrics", {}))
+    await loading_yield("Preparing village perimeter", "tutorial_scene", "pending")
     ensure_village_perimeter()
-    await loading_yield("Preparing village lights")
+    await loading_yield("Preparing village lights", "tutorial_scene", "pending")
     ensure_village_lights()
-    await loading_yield("Preparing starter shelter")
+    await loading_yield("Preparing starter shelter", "tutorial_scene", "pending")
     ensure_starter_shelter()
     ensure_starter_bed()
-    setup_intro_repair_quest()
-    place_player_in_starter_house()
-    await loading_yield("Preparing villagers")
+    await loading_yield("Tutorial scene ready", "tutorial_scene", "ready")
+    setup_intro_repair_quest(not restoring)
+    if not restoring:
+        place_player_in_starter_house()
+    await loading_yield("Preparing villagers", "npc_registration", "pending")
     spawn_tutorial_npcs()
-    refresh_tutorial_npc_home_records()
-    force_stormy_night()
-    last_message = "Knock, knock. Someone is at the door."
-    last_dialogue.clear()
-    last_dialogue_node = null
-    return true
+    set_registered_npc_physics_enabled(false)
+    if not refresh_tutorial_npc_home_records(true):
+        return await fail_tutorial_startup(
+            "manifest_home_assignment_failed",
+            startup_town_manifest,
+            last_home_refresh_debug
+        )
+    var registration_result := tutorial_npc_registration_readiness(startup_town_manifest)
+    if String(registration_result.get("status", "")) != StartupReadinessResultScript.STATUS_READY:
+        return await fail_tutorial_startup(
+            String(registration_result.get("reason", "required_tutorial_npcs_not_registered")),
+            startup_town_manifest,
+            registration_result.get("metrics", {})
+        )
+    await loading_yield("Villagers registered", "npc_registration", "ready", registration_result.get("metrics", {}))
+    if not restoring:
+        force_stormy_night()
+        last_message = "Knock, knock. Someone is at the door."
+        last_dialogue.clear()
+        last_dialogue_node = null
+    restore_world_setup_pending = false
+    var metrics := {
+        "mode": "continue" if restoring else "new_game",
+        "tutorialActive": true,
+        "manifest": manifest_result.get("metrics", {}),
+        "doors": door_result.get("metrics", {}),
+        "npcRegistration": registration_result.get("metrics", {})
+    }
+    await loading_yield("Tutorial world ready", "tutorial_world", "ready", metrics)
+    return remember_startup_readiness(StartupReadinessResultScript.ready(startup_town_manifest, metrics))
 
-func ensure_town_generated_staged() -> void:
+func ensure_town_manifest_ready_staged(requirements: Dictionary) -> Dictionary:
     if main == null or town.is_empty() or main.structure_system == null:
-        return
-    var center := Vector2i(int(town.get("centerX", 0)), int(town.get("centerZ", 0)))
-    var town_key := tutorial_town_key()
-    var max_frames := 360
-    for frame in range(max_frames):
-        if main.structure_system.has_method("update_around_budgeted"):
-            main.structure_system.update_around_budgeted(center, true)
-        else:
-            main.structure_system.update_around(center)
-            return
-        var pending := 0
-        if main.structure_system.has_method("pending_structure_op_count"):
-            pending = int(main.structure_system.pending_structure_op_count())
-        var records_ready := false
-        if main.structure_system.has_method("town_home_records_snapshot"):
-            var records_by_town: Dictionary = main.structure_system.town_home_records_snapshot()
-            var records: Array = records_by_town.get(town_key, []) if records_by_town.get(town_key, []) is Array else []
-            records_ready = records.size() >= 4
-        if records_ready and pending <= 0:
-            return
-        await loading_yield("Building tutorial town %d" % pending)
-    ensure_tutorial_town_home_records(4)
+        return await fail_tutorial_startup("missing_structure_manifest_authority")
+    if not main.structure_system.has_method("request_town_manifest_publication"):
+        return await fail_tutorial_startup("missing_structure_manifest_publication_api")
+    var started_usec := Time.get_ticks_usec()
+    var last_result: Dictionary = {}
+    while true:
+        var result_value = main.structure_system.call(
+            "request_town_manifest_publication",
+            town,
+            requirements,
+            TOWN_MANIFEST_OPS_PER_FRAME,
+            TOWN_MANIFEST_FRAME_BUDGET_MS
+        )
+        if not (result_value is Dictionary):
+            return await fail_tutorial_startup("invalid_structure_manifest_result")
+        last_result = result_value
+        var status := String(last_result.get("status", ""))
+        var metrics: Dictionary = last_result.get("metrics", {}) if last_result.get("metrics", {}) is Dictionary else {}
+        if status == StartupReadinessResultScript.STATUS_READY:
+            await loading_yield("Tutorial town manifest ready", "town_manifest", "ready", metrics)
+            return last_result
+        if status == StartupReadinessResultScript.STATUS_FAILED:
+            return await fail_tutorial_startup(
+                String(last_result.get("reason", "tutorial_town_manifest_failed")),
+                last_result.get("manifest", {}),
+                metrics
+            )
+        var elapsed_seconds := float(Time.get_ticks_usec() - started_usec) / 1000000.0
+        if elapsed_seconds >= TOWN_MANIFEST_LOADING_TIMEOUT_SECONDS:
+            var timeout_metrics := metrics.duplicate(true)
+            timeout_metrics["timeoutSeconds"] = TOWN_MANIFEST_LOADING_TIMEOUT_SECONDS
+            timeout_metrics["elapsedSeconds"] = snappedf(elapsed_seconds, 0.001)
+            return await fail_tutorial_startup(
+                "tutorial_town_manifest_timeout",
+                last_result.get("manifest", {}),
+                timeout_metrics
+            )
+        var published_keys: Array = metrics.get("publishedKeys", []) if metrics.get("publishedKeys", []) is Array else []
+        var required_keys: Array = metrics.get("requiredKeys", []) if metrics.get("requiredKeys", []) is Array else []
+        await loading_yield(
+            "Building tutorial town %d/%d homes, %d operations" % [
+                published_keys.size(),
+                required_keys.size(),
+                int(metrics.get("pendingOpCount", 0))
+            ],
+            "town_manifest",
+            "pending",
+            metrics
+        )
+    return await fail_tutorial_startup("tutorial_town_manifest_loop_ended")
 
-func loading_yield(message: String) -> void:
+func tutorial_scenario_requirements() -> Dictionary:
+    return TownRuntimeManifestScript.requirements_from_actor_specs([
+        {"id": "player_starter_home", "homeKey": 0},
+        {"id": "rowan", "homeKey": 1},
+        {"id": "sera", "homeKey": 1},
+        {"id": "toma", "homeKey": 1},
+        {"id": "niko", "homeKey": 2},
+        {"id": "lyra", "homeKey": 2},
+        {"id": "mira", "homeKey": 3}
+    ])
+
+func tutorial_expected_npc_ids() -> Array[String]:
+    return ["mira", "rowan", "niko", "sera", "toma", "lyra"]
+
+func tutorial_manifest_door_readiness(manifest: Dictionary) -> Dictionary:
+    var required_ids: Array = manifest.get("doorPortalIds", []) if manifest.get("doorPortalIds", []) is Array else []
+    var live_block_ids := {}
+    if main != null and main.get("blocks") is Dictionary:
+        for block_value in (main.get("blocks") as Dictionary).values():
+            var block := block_value as Node
+            if block == null or not is_instance_valid(block):
+                continue
+            var portal_id := String(block.get_meta("door_portal_id", ""))
+            if portal_id != "":
+                live_block_ids[portal_id] = true
+    var service_ids := {}
+    if main != null and main.npc_system != null:
+        var autonomy = main.npc_system.get("autonomy_system")
+        var door_portals = autonomy.get("door_portals") if autonomy != null else null
+        if door_portals != null and door_portals.get("portals") is Dictionary:
+            for portal_id_value in (door_portals.get("portals") as Dictionary).keys():
+                service_ids[String(portal_id_value)] = true
+    var missing_blocks: Array[String] = []
+    var missing_services: Array[String] = []
+    for portal_id_value in required_ids:
+        var portal_id := String(portal_id_value)
+        if not live_block_ids.has(portal_id):
+            missing_blocks.append(portal_id)
+        if not service_ids.has(portal_id):
+            missing_services.append(portal_id)
+    var metrics := {
+        "requiredDoorCount": required_ids.size(),
+        "liveDoorBlockCount": required_ids.size() - missing_blocks.size(),
+        "registeredDoorPortalCount": required_ids.size() - missing_services.size(),
+        "missingDoorBlocks": missing_blocks,
+        "missingDoorPortals": missing_services
+    }
+    if not missing_blocks.is_empty() or not missing_services.is_empty():
+        return StartupReadinessResultScript.failed("required_town_doors_not_registered", manifest, [], metrics)
+    return StartupReadinessResultScript.ready(manifest, metrics)
+
+func tutorial_npc_registration_readiness(manifest: Dictionary) -> Dictionary:
+    var expected_ids := tutorial_expected_npc_ids()
+    var registered := {}
+    if main != null and main.npc_system != null and main.npc_system.get("npcs") is Array:
+        for entry_value in (main.npc_system.get("npcs") as Array):
+            if not (entry_value is Dictionary):
+                continue
+            var entry: Dictionary = entry_value
+            var npc_id := String(entry.get("id", ""))
+            var body := entry.get("body") as Node
+            if npc_id != "" and body != null and is_instance_valid(body):
+                registered[npc_id] = true
+    var missing: Array[String] = []
+    for npc_id in expected_ids:
+        if not registered.has(npc_id):
+            missing.append(npc_id)
+    var metrics := {
+        "expectedNpcIds": expected_ids,
+        "expectedNpcCount": expected_ids.size(),
+        "registeredNpcCount": expected_ids.size() - missing.size(),
+        "missingNpcIds": missing
+    }
+    if not missing.is_empty():
+        return StartupReadinessResultScript.failed("required_tutorial_npcs_not_registered", manifest, [], metrics)
+    return StartupReadinessResultScript.ready(manifest, metrics)
+
+func set_registered_npc_physics_enabled(enabled: bool) -> void:
+    if main != null and main.has_method("set_registered_npc_physics_enabled"):
+        main.call("set_registered_npc_physics_enabled", enabled)
+        return
+    if npc_root == null:
+        return
+    for child in npc_root.get_children():
+        if child is Node:
+            (child as Node).set_physics_process(enabled)
+
+func fail_tutorial_startup(reason: String, manifest := {}, metrics := {}) -> Dictionary:
+    var normalized_manifest: Dictionary = manifest if manifest is Dictionary else {}
+    var normalized_metrics: Dictionary = metrics if metrics is Dictionary else {}
+    await loading_yield("Tutorial loading failed: %s" % reason, "tutorial_world", "failed", normalized_metrics)
+    return remember_startup_readiness(StartupReadinessResultScript.failed(reason, normalized_manifest, [], normalized_metrics))
+
+func remember_startup_readiness(result: Dictionary) -> Dictionary:
+    startup_readiness_result = result.duplicate(true)
+    return startup_readiness_result.duplicate(true)
+
+func reset_startup_readiness_state() -> void:
+    startup_town_manifest.clear()
+    startup_scenario_requirements.clear()
+    startup_readiness_result.clear()
+    restore_world_setup_pending = false
+
+func loading_yield(message: String, domain := "tutorial", status := "pending", metrics := {}) -> void:
     if main != null and main.has_method("startup_loading_yield"):
-        await main.call("startup_loading_yield", message)
+        await main.call("startup_loading_yield", message, domain, status, metrics)
     elif get_tree() != null:
         await get_tree().process_frame
 
 func restore(snapshot_value = {}) -> void:
+    reset_startup_readiness_state()
     clear_scene()
     var state: Dictionary = snapshot_value if snapshot_value is Dictionary else {}
     started = bool(state.get("started", false))
@@ -203,11 +408,24 @@ func restore(snapshot_value = {}) -> void:
     if start_cell_value is Array and start_cell_value.size() >= 2:
         start_cell = Vector2i(int(start_cell_value[0]), int(start_cell_value[1]))
     restore_intro_state(state.get("introRepair", {}))
+    last_message = String(state.get("lastMessage", ""))
     if not started or main == null:
         town = {}
         return
     town = main.town_region(TUTORIAL_TOWN_REGION.x, TUTORIAL_TOWN_REGION.y)
     reserve_tutorial_town_layout()
+    sync_crafting_unlocks_from_tutorial()
+    if should_defer_restore_world_setup():
+        restore_world_setup_pending = true
+        return
+    complete_restore_world_now()
+
+func should_defer_restore_world_setup() -> bool:
+    if main == null:
+        return false
+    return bool(main.get("startup_loading_active")) or bool(main.get("runtime_loading_active"))
+
+func complete_restore_world_now() -> void:
     ensure_town_generated()
     ensure_village_perimeter()
     ensure_village_lights()
@@ -215,8 +433,7 @@ func restore(snapshot_value = {}) -> void:
     ensure_starter_bed()
     setup_intro_repair_quest(false)
     spawn_tutorial_npcs()
-    last_message = String(state.get("lastMessage", ""))
-    sync_crafting_unlocks_from_tutorial()
+    restore_world_setup_pending = false
 
 func reserve_tutorial_town_layout() -> void:
     if main == null or town.is_empty():

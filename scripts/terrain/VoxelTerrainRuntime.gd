@@ -3,6 +3,7 @@ class_name VoxelTerrainRuntime
 
 const GENERATOR_SCRIPT := preload("res://scripts/terrain/VoxelTerrainGenerator.gd")
 const CONTEXT_SCRIPT := preload("res://scripts/terrain/VoxelWorldGenerationContext.gd")
+const STARTUP_READINESS_RESULT_SCRIPT := preload("res://scripts/world/StartupReadinessResult.gd")
 const TERRAIN_SHADER := preload("res://shaders/voxel_terrain_authority.gdshader")
 
 const CELL := 1.35
@@ -33,6 +34,7 @@ var pending_edit_sections := {}
 var edit_batches_applied := 0
 var desired_gameplay_chunks := {}
 var pending_gameplay_chunks := {}
+var pending_gameplay_chunk_order: Array[Vector2i] = []
 var published_gameplay_chunks := {}
 var collision_probe_attempts := 0
 var collision_probe_passes := 0
@@ -42,15 +44,10 @@ func setup(main_node) -> Dictionary:
 	configured_seed = String(main.get("seed_text"))
 	if not required_classes_available():
 		return {"ok": false, "reason": "voxel_tools_runtime_classes_missing"}
-	var context = CONTEXT_SCRIPT.new()
-	context.setup_from_main(main)
-	for cell_value in context.initial_terrain_edits.keys():
-		var state: Dictionary = context.initial_terrain_edits[cell_value]
-		applied_edit_signatures[cell_value] = edit_signature(state)
-	var service = volume_service()
-	last_volume_revision = int(service.get("revision")) if service != null else -1
-	generator = GENERATOR_SCRIPT.new()
-	generator.setup(context)
+	var generation_state := build_generation_state()
+	if not bool(generation_state.get("ok", false)):
+		return generation_state
+	apply_generation_tracking(generation_state)
 
 	terrain = VoxelTerrain.new()
 	terrain.name = "VoxelTerrainAuthority"
@@ -102,6 +99,127 @@ func setup(main_node) -> Dictionary:
 	authority_ready = true
 	return {"ok": true, "backend": "VoxelTerrain", "mesher": "VoxelMesherTransvoxel"}
 
+func reset_for_current_seed_staged() -> Dictionary:
+	if main == null:
+		return STARTUP_READINESS_RESULT_SCRIPT.failed("voxel_terrain_reset_main_missing")
+	if terrain == null or not is_instance_valid(terrain):
+		return STARTUP_READINESS_RESULT_SCRIPT.failed("voxel_terrain_reset_authority_missing")
+	var next_seed := String(main.get("seed_text"))
+	if next_seed.strip_edges() == "":
+		return STARTUP_READINESS_RESULT_SCRIPT.failed("voxel_terrain_reset_seed_missing")
+	if configured_seed == next_seed and authority_ready:
+		return STARTUP_READINESS_RESULT_SCRIPT.ready({}, {
+			"seed": configured_seed,
+			"resetMode": "already_current",
+			"terrainInstanceId": terrain.get_instance_id()
+		})
+	var generation_state := build_generation_state()
+	if not bool(generation_state.get("ok", false)):
+		return STARTUP_READINESS_RESULT_SCRIPT.failed(
+			String(generation_state.get("reason", "voxel_terrain_generation_state_failed"))
+		)
+	var previous_seed := configured_seed
+	var terrain_instance_id := terrain.get_instance_id()
+	var previous_mesh_blocks := published_mesh_blocks.size()
+	var previous_gameplay_chunks := published_gameplay_chunks.size()
+	var invalidated_chunks := invalidate_gameplay_publication()
+	authority_ready = false
+	set_process(false)
+	set_physics_process(false)
+	if viewer != null and is_instance_valid(viewer):
+		viewer.requires_visuals = false
+		viewer.requires_collisions = false
+	terrain.automatic_loading_enabled = false
+	await get_tree().physics_frame
+	var reset_started_usec := Time.get_ticks_usec()
+	var next_generator = generation_state.get("generator")
+	terrain.generator = next_generator
+	var reset_map_usec := Time.get_ticks_usec() - reset_started_usec
+	if terrain.generator != next_generator:
+		return STARTUP_READINESS_RESULT_SCRIPT.failed("voxel_terrain_generator_replacement_failed", {}, [], {
+			"previousSeed": previous_seed,
+			"nextSeed": next_seed,
+			"terrainInstanceId": terrain_instance_id,
+			"resetMapUsec": reset_map_usec
+		})
+	published_mesh_blocks.clear()
+	pending_edit_sections.clear()
+	edit_batches_applied = 0
+	collision_probe_attempts = 0
+	collision_probe_passes = 0
+	apply_generation_tracking(generation_state)
+	configured_seed = next_seed
+	update_terrain_vertical_bounds()
+	terrain.automatic_loading_enabled = true
+	if viewer != null and is_instance_valid(viewer):
+		viewer.requires_visuals = true
+		viewer.requires_collisions = true
+	update_viewer_position()
+	authority_ready = true
+	set_process(true)
+	set_physics_process(true)
+	await get_tree().process_frame
+	return STARTUP_READINESS_RESULT_SCRIPT.ready({}, {
+		"previousSeed": previous_seed,
+		"seed": configured_seed,
+		"resetMode": "in_place_generator_reload",
+		"terrainInstanceId": terrain_instance_id,
+		"terrainInstancePreserved": terrain.get_instance_id() == terrain_instance_id,
+		"previousPublishedMeshBlocks": previous_mesh_blocks,
+		"previousPublishedGameplayChunks": previous_gameplay_chunks,
+		"invalidatedGameplayChunks": invalidated_chunks,
+		"resetMapUsec": reset_map_usec
+	})
+
+func build_generation_state() -> Dictionary:
+	if main == null:
+		return {"ok": false, "reason": "voxel_terrain_generation_main_missing"}
+	var context = CONTEXT_SCRIPT.new()
+	context.setup_from_main(main)
+	var signatures := {}
+	for cell_value in context.initial_terrain_edits.keys():
+		var state: Dictionary = context.initial_terrain_edits[cell_value]
+		signatures[cell_value] = edit_signature(state)
+	var next_generator = GENERATOR_SCRIPT.new()
+	next_generator.setup(context)
+	var service = volume_service()
+	return {
+		"ok": true,
+		"generator": next_generator,
+		"editSignatures": signatures,
+		"volumeRevision": int(service.get("revision")) if service != null else -1
+	}
+
+func apply_generation_tracking(generation_state: Dictionary) -> void:
+	generator = generation_state.get("generator")
+	var signatures_value = generation_state.get("editSignatures", {})
+	applied_edit_signatures = (signatures_value as Dictionary).duplicate(true) if signatures_value is Dictionary else {}
+	last_volume_revision = int(generation_state.get("volumeRevision", -1))
+
+func invalidate_gameplay_publication() -> int:
+	var invalidated := published_gameplay_chunks.size()
+	for chunk_value in published_gameplay_chunks.keys():
+		if chunk_value is Vector2i:
+			notify_navigation_chunk_unloaded(chunk_value)
+	desired_gameplay_chunks.clear()
+	pending_gameplay_chunks.clear()
+	pending_gameplay_chunk_order.clear()
+	published_gameplay_chunks.clear()
+	return invalidated
+
+func update_terrain_vertical_bounds() -> void:
+	if terrain == null or main == null:
+		return
+	var world_generation = main.get("world_generation_system")
+	if world_generation == null:
+		return
+	var bottom_cell := int(world_generation.call("world_bottom_cell_y")) - COLLISION_MESH_VERTICAL_MARGIN_CELLS
+	var top_cell := int(world_generation.call("world_top_cell_y")) + COLLISION_MESH_VERTICAL_MARGIN_CELLS
+	var terrain_bounds := terrain.bounds
+	terrain_bounds.position.y = float(bottom_cell)
+	terrain_bounds.size.y = float(top_cell - bottom_cell + 1)
+	terrain.bounds = terrain_bounds
+
 func _process(_delta: float) -> void:
 	if authority_ready:
 		update_viewer_position()
@@ -129,6 +247,7 @@ func begin_shutdown() -> void:
 	if terrain != null and is_instance_valid(terrain):
 		terrain.automatic_loading_enabled = false
 	pending_gameplay_chunks.clear()
+	pending_gameplay_chunk_order.clear()
 	desired_gameplay_chunks.clear()
 
 func update_viewer_position() -> void:
@@ -161,6 +280,7 @@ func stats() -> Dictionary:
 		"appliedEditSignatures": applied_edit_signatures.size(),
 		"desiredGameplayChunks": desired_gameplay_chunks.size(),
 		"pendingGameplayChunks": pending_gameplay_chunks.size(),
+		"pendingGameplayChunkQueue": pending_gameplay_chunk_order.size(),
 		"publishedGameplayChunks": published_gameplay_chunks.size(),
 		"collisionProbeAttempts": collision_probe_attempts,
 		"collisionProbePasses": collision_probe_passes,
@@ -282,20 +402,27 @@ func apply_edit_batch(changes: Dictionary) -> bool:
 func request_gameplay_chunk_publication(chunk_key: Vector2i) -> void:
 	desired_gameplay_chunks[chunk_key] = true
 	if not published_gameplay_chunks.has(chunk_key):
-		pending_gameplay_chunks[chunk_key] = true
+		queue_pending_gameplay_chunk(chunk_key)
 
 func request_gameplay_chunk_republication(chunk_key: Vector2i) -> void:
 	if not desired_gameplay_chunks.has(chunk_key):
 		return
 	if published_gameplay_chunks.erase(chunk_key):
 		notify_navigation_chunk_unloaded(chunk_key)
-	pending_gameplay_chunks[chunk_key] = true
+	queue_pending_gameplay_chunk(chunk_key)
 
 func release_gameplay_chunk(chunk_key: Vector2i) -> void:
 	desired_gameplay_chunks.erase(chunk_key)
 	pending_gameplay_chunks.erase(chunk_key)
+	pending_gameplay_chunk_order.erase(chunk_key)
 	if published_gameplay_chunks.erase(chunk_key):
 		notify_navigation_chunk_unloaded(chunk_key)
+
+func queue_pending_gameplay_chunk(chunk_key: Vector2i) -> void:
+	if pending_gameplay_chunks.has(chunk_key):
+		return
+	pending_gameplay_chunks[chunk_key] = true
+	pending_gameplay_chunk_order.append(chunk_key)
 
 func gameplay_chunks_published(chunk_keys: Array) -> bool:
 	for key_value in chunk_keys:
@@ -310,21 +437,55 @@ func published_gameplay_chunk_count(chunk_keys: Array) -> int:
 			count += 1
 	return count
 
+func gameplay_publication_diagnostics(chunk_keys: Array) -> Dictionary:
+	var chunk_diagnostics: Array = []
+	for key_value in chunk_keys:
+		if not (key_value is Vector2i):
+			continue
+		var chunk_key: Vector2i = key_value
+		var proof: Dictionary = published_gameplay_chunks.get(chunk_key, {}) if published_gameplay_chunks.get(chunk_key, {}) is Dictionary else {}
+		if proof.is_empty():
+			proof = collision_proof_for_game_chunk(chunk_key)
+		chunk_diagnostics.append({
+			"key": "%d,%d" % [chunk_key.x, chunk_key.y],
+			"desired": desired_gameplay_chunks.has(chunk_key),
+			"pending": pending_gameplay_chunks.has(chunk_key),
+			"published": published_gameplay_chunks.has(chunk_key),
+			"proof": proof
+		})
+	return {
+		"configuredSeed": configured_seed,
+		"authorityReady": authority_ready,
+		"viewerPosition": viewer.global_position if viewer != null and is_instance_valid(viewer) else Vector3.ZERO,
+		"viewerRequiresVisuals": bool(viewer.requires_visuals) if viewer != null and is_instance_valid(viewer) else false,
+		"viewerRequiresCollisions": bool(viewer.requires_collisions) if viewer != null and is_instance_valid(viewer) else false,
+		"publishedMeshBlockCount": published_mesh_blocks.size(),
+		"desiredGameplayChunkCount": desired_gameplay_chunks.size(),
+		"pendingGameplayChunkCount": pending_gameplay_chunks.size(),
+		"publishedGameplayChunkCount": published_gameplay_chunks.size(),
+		"terrainStatistics": terrain.get_statistics() if terrain != null else {},
+		"chunks": chunk_diagnostics
+	}
+
 func process_pending_gameplay_chunk_publications() -> void:
 	if pending_gameplay_chunks.is_empty() or main == null or not is_inside_tree():
 		return
-	var processed := 0
-	for key_value in pending_gameplay_chunks.keys():
-		if processed >= PUBLICATION_PROBES_PER_PHYSICS_FRAME:
-			break
-		var chunk_key: Vector2i = key_value
+	if pending_gameplay_chunk_order.is_empty():
+		for key_value in pending_gameplay_chunks.keys():
+			if key_value is Vector2i:
+				pending_gameplay_chunk_order.append(key_value)
+	var probe_count := mini(PUBLICATION_PROBES_PER_PHYSICS_FRAME, pending_gameplay_chunk_order.size())
+	for _index in range(probe_count):
+		var chunk_key: Vector2i = pending_gameplay_chunk_order.pop_front()
+		if not pending_gameplay_chunks.has(chunk_key):
+			continue
 		if not desired_gameplay_chunks.has(chunk_key):
 			pending_gameplay_chunks.erase(chunk_key)
 			continue
-		processed += 1
 		collision_probe_attempts += 1
 		var proof := collision_proof_for_game_chunk(chunk_key)
 		if not bool(proof.get("passed", false)):
+			pending_gameplay_chunk_order.append(chunk_key)
 			continue
 		pending_gameplay_chunks.erase(chunk_key)
 		published_gameplay_chunks[chunk_key] = proof
@@ -391,11 +552,13 @@ func collision_proof_for_game_chunk(chunk_key: Vector2i) -> Dictionary:
 	)
 	var area_meshed := terrain.is_area_meshed(mesh_area)
 	return {
-		"passed": area_meshed and hits == offsets.size() and matched == offsets.size(),
+		"passed": area_meshed and hits == offsets.size(),
 		"areaMeshed": area_meshed,
 		"meshArea": mesh_area,
 		"hits": hits,
 		"surfaceMatches": matched,
+		"heightfieldComparisonPassed": matched == offsets.size(),
+		"collisionAuthority": "VoxelTerrain",
 		"probeCount": offsets.size(),
 		"samples": samples
 	}

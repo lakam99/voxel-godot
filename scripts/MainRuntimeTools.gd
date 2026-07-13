@@ -453,8 +453,8 @@ func ensure_voxel_terrain_authority() -> bool:
     if voxel_terrain_runtime != null and is_instance_valid(voxel_terrain_runtime):
         if String(voxel_terrain_runtime.get("configured_seed")) == seed_text:
             return bool(voxel_terrain_runtime.get("authority_ready"))
-        voxel_terrain_runtime.queue_free()
-        voxel_terrain_runtime = null
+        push_error("Voxel terrain seed mismatch requires the staged runtime reset contract")
+        return false
     var runtime := VoxelTerrainRuntimeScript.new() as Node3D
     runtime.name = "VoxelTerrainRuntime"
     add_child(runtime)

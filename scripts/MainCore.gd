@@ -6,9 +6,11 @@ signal startup_loading_failed(message)
 
 const DEFAULT_VISUAL_STYLE := preload("res://resources/visual/gamecube_style.tres")
 const NpcConstantsScript := preload("res://scripts/npc_ai/NpcConstants.gd")
+const StartupReadinessResultScript := preload("res://scripts/world/StartupReadinessResult.gd")
 const INITIAL_NAVMESH_PRIME_TILE_LIMIT := 32
 const INITIAL_NAV_CHANGE_DRAIN_EVENT_LIMIT := 64
 const INITIAL_NAV_CHANGE_DRAIN_ITERATION_LIMIT := 16
+const INITIAL_READINESS_TIMEOUT_SECONDS := 120.0
 const AUTOSAVE_ACTIVITY_MAX_DEFER_SECONDS := 30.0
 
 var seed_text := "atlas-1492"
@@ -19,6 +21,9 @@ var startup_loading_active := false
 var startup_loading_started_usec := 0
 var startup_loading_last_step_usec := 0
 var startup_loading_timeline: Array[Dictionary] = []
+var startup_readiness_domains := {}
+var startup_loading_failure_result := {}
+var startup_loading_max_step := {}
 var runtime_loading_active := false
 var post_startup_trace_frames := 0
 var height_noise: FastNoiseLite
@@ -299,6 +304,18 @@ func _ready() -> void:
     var loaded := false
     if requested_startup_mode != "new_game":
         loaded = try_load_world()
+    if requested_startup_mode == "continue" and not loaded:
+        await stop_startup_loading(StartupReadinessResultScript.failed(
+            "continue_save_restore_failed",
+            {},
+            [],
+            {
+                "requestedMode": requested_startup_mode,
+                "activeSeed": active_seed,
+                "selectedSeed": seed_text
+            }
+        ))
+        return
     var started_intro_tutorial := false
     playtest_progress("main_load_done")
     if not loaded and tutorial_system and not skip_synchronous_world_boot:
@@ -324,10 +341,8 @@ func _ready() -> void:
     reset_autosave_dirty_tracking(not loaded and not skip_synchronous_world_boot, "new_world")
 
 func _run_deferred_startup_boot() -> void:
-    startup_loading_started_usec = Time.get_ticks_usec()
-    startup_loading_last_step_usec = startup_loading_started_usec
-    startup_loading_timeline.clear()
-    await startup_loading_yield("Preparing world")
+    begin_startup_loading_timeline()
+    await startup_loading_yield("Preparing world", "startup", "pending")
     playtest_progress("main_ready_start")
     var requested_startup_mode := startup_mode.strip_edges()
     if requested_startup_mode == "":
@@ -336,8 +351,15 @@ func _run_deferred_startup_boot() -> void:
     var digging_visual_fast_boot := OS.get_environment("VOXEL_DIGGING_VISUAL_FAST_BOOT").strip_edges() == "1"
     var runtime_perf_fast_boot := OS.get_environment("VOXEL_RUNTIME_PERF_FAST_BOOT").strip_edges() == "1"
     var skip_synchronous_world_boot := underground_visual_fast_boot or digging_visual_fast_boot or runtime_perf_fast_boot
+    if skip_synchronous_world_boot:
+        await startup_loading_yield("Diagnostic fast boot excludes gameplay readiness", "diagnostic_fast_boot", "excluded", {
+            "undergroundVisual": underground_visual_fast_boot,
+            "diggingVisual": digging_visual_fast_boot,
+            "runtimePerformance": runtime_perf_fast_boot,
+            "gameplayAcceptance": false
+        })
     setup_save_system()
-    await startup_loading_yield("Selecting world")
+    await startup_loading_yield("Selecting world", "world_seed", "pending")
     var active_seed := ""
     if autosave_enabled and save_system and save_system.has_method("active_seed"):
         active_seed = save_system.active_seed("")
@@ -350,7 +372,7 @@ func _run_deferred_startup_boot() -> void:
         seed_text = active_seed
     apply_world_seed(seed_text, requested_startup_mode == "new_game")
     playtest_progress("main_noise_done")
-    await startup_loading_yield("Preparing terrain systems")
+    await startup_loading_yield("Preparing terrain systems", "systems", "pending")
     setup_materials()
     setup_environment()
     setup_game_systems()
@@ -365,7 +387,7 @@ func _run_deferred_startup_boot() -> void:
     block_root = Node3D.new()
     block_root.name = "Blocks"
     add_child(block_root)
-    await startup_loading_yield("Preparing scene")
+    await startup_loading_yield("Preparing scene", "scene", "pending")
     setup_audio_effects()
     setup_break_overlay()
     setup_tutorial_system()
@@ -379,29 +401,86 @@ func _run_deferred_startup_boot() -> void:
     setup_held_item()
     setup_hud()
     playtest_progress("main_scene_nodes_done")
-    await startup_loading_yield("Loading save")
+    await startup_loading_yield("Loading save", "save_restore", "pending")
     var loaded := false
     if requested_startup_mode != "new_game":
         loaded = try_load_world()
-    var started_intro_tutorial := false
+    if requested_startup_mode == "continue" and not loaded:
+        await stop_startup_loading(StartupReadinessResultScript.failed(
+            "continue_save_restore_failed",
+            {},
+            [],
+            {
+                "requestedMode": requested_startup_mode,
+                "activeSeed": active_seed,
+                "selectedSeed": seed_text
+            }
+        ))
+        return
+    var tutorial_result := StartupReadinessResultScript.ready({}, {
+        "tutorialActive": false,
+        "mode": "continue" if loaded else "new_game"
+    })
     playtest_progress("main_load_done")
     if not loaded and tutorial_system and not skip_synchronous_world_boot:
         if autosave_enabled:
             apply_world_seed(random_world_seed(seed_text), true)
-        if tutorial_system.has_method("start_new_world_staged"):
-            started_intro_tutorial = bool(await tutorial_system.call("start_new_world_staged"))
-        else:
-            started_intro_tutorial = tutorial_system.start_new_world()
-        playtest_progress("main_tutorial_start_done")
-    if not skip_synchronous_world_boot:
-        var terrain_ready := bool(await bootstrap_initial_chunks_staged())
-        if not terrain_ready:
-            await startup_loading_yield("Terrain collision failed to load")
-            push_error("VOX-59 startup stopped because terrain collision was not ready")
+        if not tutorial_system.has_method("start_new_world_staged"):
+            await stop_startup_loading(StartupReadinessResultScript.failed("missing_staged_tutorial_startup"))
             return
-        await drain_initial_navigation_changes_staged()
-        await prime_initial_navigation_snapshot_staged()
-        await startup_loading_yield("Finalizing startup")
+        tutorial_result = normalized_startup_result(
+            await tutorial_system.call("start_new_world_staged"),
+            "invalid_staged_tutorial_startup_result"
+        )
+        if not startup_result_is_ready(tutorial_result):
+            await stop_startup_loading(tutorial_result, "tutorial_startup_failed")
+            return
+        playtest_progress("main_tutorial_start_done")
+    elif loaded and tutorial_system and bool(tutorial_system.get("started")) and not skip_synchronous_world_boot:
+        if not tutorial_system.has_method("complete_restore_world_staged"):
+            await stop_startup_loading(StartupReadinessResultScript.failed("missing_staged_tutorial_restore"))
+            return
+        tutorial_result = normalized_startup_result(
+            await tutorial_system.call("complete_restore_world_staged"),
+            "invalid_staged_tutorial_restore_result"
+        )
+        if not startup_result_is_ready(tutorial_result):
+            await stop_startup_loading(tutorial_result, "tutorial_restore_readiness_failed")
+            return
+    if loaded:
+        await startup_loading_yield("Saved world restored", "save_restore", "ready", {
+            "requestedMode": requested_startup_mode,
+            "seed": seed_text,
+            "tutorial": tutorial_result.get("metrics", {})
+        })
+    if not skip_synchronous_world_boot:
+        var terrain_result := normalized_startup_result(
+            await bootstrap_initial_chunks_staged(),
+            "invalid_terrain_readiness_result"
+        )
+        if not startup_result_is_ready(terrain_result):
+            await stop_startup_loading(terrain_result, "terrain_collision_not_ready")
+            return
+        var navigation_change_result := normalized_startup_result(
+            await drain_initial_navigation_changes_staged(),
+            "invalid_navigation_change_readiness_result"
+        )
+        if not startup_result_is_ready(navigation_change_result):
+            await stop_startup_loading(navigation_change_result, "navigation_changes_not_ready")
+            return
+        var navigation_result := normalized_startup_result(
+            await prime_initial_navigation_snapshot_staged(),
+            "invalid_navigation_readiness_result"
+        )
+        if not startup_result_is_ready(navigation_result):
+            await stop_startup_loading(navigation_result, "navigation_not_ready")
+            return
+        await startup_loading_yield("Finalizing startup", "startup", "pending", {
+            "tutorial": tutorial_result.get("metrics", {}),
+            "terrain": terrain_result.get("metrics", {}),
+            "navigationChanges": navigation_change_result.get("metrics", {}),
+            "navigation": navigation_result.get("metrics", {})
+        })
         playtest_progress("main_initial_chunks_queued")
     var interactive_underground_message := "" if skip_synchronous_world_boot else apply_interactive_underground_launch_if_requested()
     if not skip_synchronous_world_boot:
@@ -417,7 +496,23 @@ func _run_deferred_startup_boot() -> void:
         update_hud(ready_message)
     await startup_loading_yield("Resetting save tracking")
     reset_autosave_dirty_tracking(not loaded and not skip_synchronous_world_boot, "new_world")
-    await startup_loading_yield("Enabling gameplay")
+    if skip_synchronous_world_boot:
+        await startup_loading_yield("Diagnostic fast boot ready", "diagnostic_fast_boot", "excluded", {
+            "playerPhysicsEnabled": false,
+            "npcPhysicsEnabled": false,
+            "gameplayAcceptance": false
+        })
+    else:
+        var physics_gate_result := startup_physics_gate_readiness()
+        if not startup_result_is_ready(physics_gate_result):
+            await stop_startup_loading(physics_gate_result, "gameplay_physics_gate_failed")
+            return
+        await startup_loading_yield(
+            "Gameplay prerequisites ready",
+            "gameplay",
+            "ready",
+            physics_gate_result.get("metrics", {})
+        )
     startup_loading_active = false
     post_startup_trace_frames = 3
     set_process(true)
@@ -425,20 +520,43 @@ func _run_deferred_startup_boot() -> void:
     set_physics_process(true)
     if player != null:
         player.set_physics_process(true)
-    startup_loading_step.emit("Startup complete")
+    set_registered_npc_physics_enabled(true)
     startup_loading_completed.emit()
 
-func startup_loading_yield(message: String) -> void:
+func begin_startup_loading_timeline() -> void:
+    startup_loading_started_usec = Time.get_ticks_usec()
+    startup_loading_last_step_usec = startup_loading_started_usec
+    startup_loading_timeline.clear()
+    startup_readiness_domains.clear()
+    startup_loading_failure_result.clear()
+    startup_loading_max_step.clear()
+
+func startup_loading_yield(message: String, domain := "general", status := "pending", metrics := {}) -> void:
     var now_usec := Time.get_ticks_usec()
     if startup_loading_started_usec <= 0:
         startup_loading_started_usec = now_usec
         startup_loading_last_step_usec = now_usec
-    startup_loading_timeline.append({
+    var normalized_domain := String(domain).strip_edges()
+    if normalized_domain == "":
+        normalized_domain = "general"
+    var normalized_status := String(status).strip_edges()
+    if normalized_status == "":
+        normalized_status = "pending"
+    var normalized_metrics: Dictionary = metrics.duplicate(true) if metrics is Dictionary else {}
+    var timeline_row := {
         "message": message,
+        "domain": normalized_domain,
+        "status": normalized_status,
+        "metrics": normalized_metrics,
         "elapsedMs": float(now_usec - startup_loading_started_usec) / 1000.0,
         "stepMs": float(now_usec - startup_loading_last_step_usec) / 1000.0
-    })
-    if startup_loading_timeline.size() > 128:
+    }
+    if startup_loading_max_step.is_empty() \
+        or float(timeline_row.get("stepMs", 0.0)) > float(startup_loading_max_step.get("stepMs", 0.0)):
+        startup_loading_max_step = timeline_row.duplicate(true)
+    startup_loading_timeline.append(timeline_row)
+    startup_readiness_domains[normalized_domain] = timeline_row.duplicate(true)
+    if startup_loading_timeline.size() > 256:
         startup_loading_timeline.pop_front()
     startup_loading_last_step_usec = now_usec
     startup_loading_step.emit(message)
@@ -446,64 +564,260 @@ func startup_loading_yield(message: String) -> void:
         hud.set_loading_message(message)
     await get_tree().process_frame
 
-func bootstrap_initial_chunks_staged(urgent_radius := 1) -> bool:
+func normalized_startup_result(value, fallback_reason: String) -> Dictionary:
+    if value is Dictionary:
+        var result: Dictionary = value
+        if bool(StartupReadinessResultScript.validate(result).get("ok", false)):
+            return result.duplicate(true)
+    return StartupReadinessResultScript.failed(fallback_reason, {}, [], {
+        "invalidResultType": type_string(typeof(value))
+    })
+
+func startup_result_is_ready(value) -> bool:
+    return value is Dictionary and String((value as Dictionary).get("status", "")) == StartupReadinessResultScript.STATUS_READY
+
+func stop_startup_loading(result_value, fallback_reason := "startup_readiness_failed") -> void:
+    var reason := apply_startup_loading_failure_state(result_value, fallback_reason)
+    await startup_loading_yield(
+        "Load failed: %s" % reason,
+        "startup",
+        "failed",
+        startup_loading_failure_result.get("metrics", {})
+    )
+
+func apply_startup_loading_failure_state(result_value, fallback_reason := "startup_readiness_failed") -> String:
+    var result := normalized_startup_result(result_value, fallback_reason)
+    var reason := String(result.get("reason", fallback_reason)).strip_edges()
+    if reason == "":
+        reason = fallback_reason
+        result["reason"] = reason
+    set_process(false)
+    set_process_unhandled_input(false)
+    set_physics_process(false)
+    if player != null:
+        player.velocity = Vector3.ZERO
+        player.set_physics_process(false)
+    set_registered_npc_physics_enabled(false)
+    startup_loading_failure_result = result.duplicate(true)
+    startup_loading_active = false
+    runtime_loading_active = false
+    startup_loading_failed.emit(reason)
+    return reason
+
+func registered_npc_entries() -> Array:
+    if npc_system == null or not (npc_system.get("npcs") is Array):
+        return []
+    return npc_system.get("npcs")
+
+func set_registered_npc_physics_enabled(enabled: bool) -> void:
+    for entry_value in registered_npc_entries():
+        if not (entry_value is Dictionary):
+            continue
+        var body := (entry_value as Dictionary).get("body") as Node
+        if body != null and is_instance_valid(body):
+            body.set_physics_process(enabled)
+
+func startup_physics_gate_readiness() -> Dictionary:
+    var enabled_npc_ids: Array[String] = []
+    var registered_npc_count := 0
+    for entry_value in registered_npc_entries():
+        if not (entry_value is Dictionary):
+            continue
+        var entry: Dictionary = entry_value
+        var body := entry.get("body") as Node
+        if body == null or not is_instance_valid(body):
+            continue
+        registered_npc_count += 1
+        if body.is_physics_processing():
+            enabled_npc_ids.append(String(entry.get("id", "unknown")))
+    var metrics := {
+        "mainProcessEnabled": is_processing(),
+        "mainInputEnabled": is_processing_unhandled_input(),
+        "mainPhysicsEnabled": is_physics_processing(),
+        "playerPhysicsEnabled": player != null and player.is_physics_processing(),
+        "npcPhysicsEnabled": not enabled_npc_ids.is_empty(),
+        "enabledNpcIds": enabled_npc_ids,
+        "registeredNpcCount": registered_npc_count,
+        "diagnosticFastBoot": false
+    }
     if player == null:
-        return false
+        return StartupReadinessResultScript.failed("missing_player_at_gameplay_physics_gate", {}, [], metrics)
+    if bool(metrics.get("mainProcessEnabled", false)) \
+        or bool(metrics.get("mainInputEnabled", false)) \
+        or bool(metrics.get("mainPhysicsEnabled", false)) \
+        or bool(metrics.get("playerPhysicsEnabled", false)) \
+        or bool(metrics.get("npcPhysicsEnabled", false)):
+        return StartupReadinessResultScript.failed("gameplay_physics_enabled_before_readiness", {}, [], metrics)
+    return StartupReadinessResultScript.ready({}, metrics)
+
+func reinitialize_voxel_terrain_authority_staged() -> Dictionary:
+    var runtime = get("voxel_terrain_runtime")
+    var reset_result := StartupReadinessResultScript.ready({}, {})
+    if runtime == null or not is_instance_valid(runtime):
+        if not has_method("ensure_voxel_terrain_authority") \
+            or not bool(call("ensure_voxel_terrain_authority")):
+            return StartupReadinessResultScript.failed("voxel_terrain_authority_initialization_failed", {}, [], {
+                "seed": seed_text
+            })
+        runtime = get("voxel_terrain_runtime")
+    elif String(runtime.get("configured_seed")) != seed_text:
+        if not runtime.has_method("reset_for_current_seed_staged"):
+            return StartupReadinessResultScript.failed("voxel_terrain_seed_reset_api_missing", {}, [], {
+                "expectedSeed": seed_text,
+                "configuredSeed": String(runtime.get("configured_seed"))
+            })
+        reset_result = normalized_startup_result(
+            await runtime.call("reset_for_current_seed_staged"),
+            "invalid_voxel_terrain_seed_reset_result"
+        )
+        if not startup_result_is_ready(reset_result):
+            return reset_result
+    if runtime == null or not is_instance_valid(runtime) \
+        or not bool(runtime.get("authority_ready")) \
+        or String(runtime.get("configured_seed")) != seed_text:
+        return StartupReadinessResultScript.failed("voxel_terrain_authority_seed_mismatch", {}, [], {
+            "expectedSeed": seed_text,
+            "configuredSeed": String(runtime.get("configured_seed")) if runtime != null else ""
+        })
+    return StartupReadinessResultScript.ready({}, {
+        "seed": seed_text,
+        "authorityReady": true,
+        "reset": reset_result.get("metrics", {}) if reset_result is Dictionary else {}
+    })
+
+func bootstrap_initial_chunks_staged(urgent_radius := 1) -> Dictionary:
+    if player == null:
+        return StartupReadinessResultScript.failed("missing_player_for_terrain_readiness")
     var center := world_to_chunk(player.position.x, player.position.z)
-    var urgent_keys: Array[Vector2i] = []
-    for dz in range(-urgent_radius, urgent_radius + 1):
-        for dx in range(-urgent_radius, urgent_radius + 1):
-            var key := Vector2i(center.x + dx, center.y + dz)
-            urgent_keys.append(key)
-            if not chunks.has(key):
-                queue_chunk_load(key)
+    var urgent_keys := initial_gameplay_chunk_keys(urgent_radius)
+    if urgent_keys.is_empty():
+        return StartupReadinessResultScript.failed("missing_required_gameplay_chunks")
+    for key in urgent_keys:
+        if not chunks.has(key):
+            queue_chunk_load(key)
     last_center_chunk = center
     var total := urgent_keys.size()
-    var guard := 0
-    while guard < total + 12 and count_loaded_chunks(urgent_keys) < total:
+    var started_usec := Time.get_ticks_usec()
+    while count_loaded_chunks(urgent_keys) < total:
         var loaded := count_loaded_chunks(urgent_keys)
-        await startup_loading_yield("Loading terrain %d/%d" % [loaded, total])
+        await startup_loading_yield("Loading terrain %d/%d" % [loaded, total], "terrain_chunks", "pending", {
+            "loadedChunkCount": loaded,
+            "requiredChunkCount": total
+        })
         process_pending_chunk_loads(center)
-        guard += 1
-    if not bool(await wait_for_initial_voxel_collision_publication([center])):
-        return false
-    if not bool(await wait_for_initial_player_collision_publication()):
-        return false
+        if float(Time.get_ticks_usec() - started_usec) / 1000000.0 >= INITIAL_READINESS_TIMEOUT_SECONDS:
+            return StartupReadinessResultScript.failed("initial_gameplay_chunk_loading_timeout", {}, [], {
+                "loadedChunkCount": count_loaded_chunks(urgent_keys),
+                "requiredChunkCount": total,
+                "timeoutSeconds": INITIAL_READINESS_TIMEOUT_SECONDS
+            })
+    var collision_result := normalized_startup_result(
+        await wait_for_initial_voxel_collision_publication(urgent_keys),
+        "invalid_voxel_collision_readiness_result"
+    )
+    if not startup_result_is_ready(collision_result):
+        return collision_result
+    var player_collision_result := normalized_startup_result(
+        await wait_for_initial_player_collision_publication(),
+        "invalid_player_collision_readiness_result"
+    )
+    if not startup_result_is_ready(player_collision_result):
+        return player_collision_result
     process_pending_chunk_prop_spawns()
     last_center_chunk = Vector2i(999999, 999999)
-    await startup_loading_yield("Terrain ready")
-    return true
+    var metrics := {
+        "loadedChunkCount": total,
+        "requiredChunkCount": total,
+        "voxelCollision": collision_result.get("metrics", {}),
+        "playerCollision": player_collision_result.get("metrics", {})
+    }
+    await startup_loading_yield("Terrain collision ready", "terrain_collision", "ready", metrics)
+    return StartupReadinessResultScript.ready({}, metrics)
 
-func wait_for_initial_voxel_collision_publication(chunk_keys: Array[Vector2i]) -> bool:
+func initial_gameplay_chunk_keys(urgent_radius := 1) -> Array[Vector2i]:
+    var unique := {}
+    if player != null:
+        var player_center := world_to_chunk(player.position.x, player.position.z)
+        for dz in range(-urgent_radius, urgent_radius + 1):
+            for dx in range(-urgent_radius, urgent_radius + 1):
+                unique[Vector2i(player_center.x + dx, player_center.y + dz)] = true
+    for entry_value in registered_npc_entries():
+        if not (entry_value is Dictionary):
+            continue
+        var entry: Dictionary = entry_value
+        var body := entry.get("body") as Node3D
+        if body != null and is_instance_valid(body):
+            unique[world_to_chunk(body.global_position.x, body.global_position.z)] = true
+        for field in ["homePosition", "porchPosition", "doorPosition", "guardPosition"]:
+            var position_value = entry.get(field, null)
+            if position_value is Vector3:
+                var position: Vector3 = position_value
+                unique[world_to_chunk(position.x, position.z)] = true
+        for field in ["homeCell", "porchCell", "doorCell", "guardCell"]:
+            var cell_value = entry.get(field, null)
+            if cell_value is Vector2i:
+                var cell: Vector2i = cell_value
+                unique[world_to_chunk(float(cell.x) * CELL, float(cell.y) * CELL)] = true
+    var result: Array[Vector2i] = []
+    for key_value in unique.keys():
+        if key_value is Vector2i:
+            result.append(key_value)
+    result.sort_custom(func(a: Vector2i, b: Vector2i):
+        return a.x < b.x if a.x != b.x else a.y < b.y
+    )
+    return result
+
+func wait_for_initial_voxel_collision_publication(chunk_keys: Array[Vector2i]) -> Dictionary:
     var runtime = get("voxel_terrain_runtime")
     if runtime == null or not is_instance_valid(runtime) or not runtime.has_method("gameplay_chunks_published"):
-        return false
+        return StartupReadinessResultScript.failed("missing_voxel_collision_publication_authority")
     var started_usec := Time.get_ticks_usec()
     while not bool(runtime.call("gameplay_chunks_published", chunk_keys)):
         var published := int(runtime.call("published_gameplay_chunk_count", chunk_keys))
-        await startup_loading_yield("Loading terrain collision %d/%d" % [published, chunk_keys.size()])
-        if float(Time.get_ticks_usec() - started_usec) / 1000000.0 >= 120.0:
-            push_error("Voxel terrain collision publication timed out during startup")
-            return false
-    return true
+        await startup_loading_yield("Loading terrain collision %d/%d" % [published, chunk_keys.size()], "terrain_collision", "pending", {
+            "publishedChunkCount": published,
+            "requiredChunkCount": chunk_keys.size()
+        })
+        if float(Time.get_ticks_usec() - started_usec) / 1000000.0 >= INITIAL_READINESS_TIMEOUT_SECONDS:
+            var diagnostics := {}
+            if runtime.has_method("gameplay_publication_diagnostics"):
+                diagnostics = runtime.call("gameplay_publication_diagnostics", chunk_keys)
+            return StartupReadinessResultScript.failed("voxel_collision_publication_timeout", {}, [], {
+                "publishedChunkCount": published,
+                "requiredChunkCount": chunk_keys.size(),
+                "timeoutSeconds": INITIAL_READINESS_TIMEOUT_SECONDS,
+                "diagnostics": diagnostics
+            })
+    return StartupReadinessResultScript.ready({}, {
+        "publishedChunkCount": chunk_keys.size(),
+        "requiredChunkCount": chunk_keys.size()
+    })
 
 
-func wait_for_initial_player_collision_publication() -> bool:
+func wait_for_initial_player_collision_publication() -> Dictionary:
     var runtime = get("voxel_terrain_runtime")
     if runtime == null or not is_instance_valid(runtime) or not runtime.has_method("collision_proof_for_world_position") or player == null:
-        return false
+        return StartupReadinessResultScript.failed("missing_player_collision_proof_authority")
     var started_usec := Time.get_ticks_usec()
     var footprint_radius := 0.35
     while true:
         var proof: Dictionary = runtime.call("collision_proof_for_world_position", player.global_position, footprint_radius)
         if bool(proof.get("passed", false)):
             player.set_meta("startup_terrain_collision_proof", proof)
-            return true
-        await startup_loading_yield("Loading terrain collision at player spawn")
-        if float(Time.get_ticks_usec() - started_usec) / 1000000.0 >= 120.0:
-            push_error("Voxel terrain collision at player spawn timed out during startup")
-            return false
-    return false
+            return StartupReadinessResultScript.ready({}, {
+                "playerCollisionPassed": true,
+                "proof": proof
+            })
+        await startup_loading_yield("Loading terrain collision at player spawn", "terrain_collision", "pending", {
+            "playerCollisionPassed": false,
+            "proofReason": String(proof.get("reason", "pending"))
+        })
+        if float(Time.get_ticks_usec() - started_usec) / 1000000.0 >= INITIAL_READINESS_TIMEOUT_SECONDS:
+            return StartupReadinessResultScript.failed("player_collision_publication_timeout", {}, [], {
+                "timeoutSeconds": INITIAL_READINESS_TIMEOUT_SECONDS,
+                "lastProof": proof
+            })
+    return StartupReadinessResultScript.failed("player_collision_publication_loop_ended")
 
 func count_loaded_chunks(keys: Array[Vector2i]) -> int:
     var count := 0
@@ -512,40 +826,101 @@ func count_loaded_chunks(keys: Array[Vector2i]) -> int:
             count += 1
     return count
 
-func drain_initial_navigation_changes_staged() -> void:
+func drain_initial_navigation_changes_staged() -> Dictionary:
     if npc_system == null:
-        return
+        return StartupReadinessResultScript.failed("missing_npc_system_for_navigation_readiness")
+    var entries := registered_npc_entries()
+    if entries.is_empty():
+        return StartupReadinessResultScript.ready({}, {
+            "registeredNpcCount": 0,
+            "processedEventCount": 0,
+            "remainingEventCount": 0
+        })
     var autonomy = npc_system.get("autonomy_system")
     if autonomy == null or not autonomy.has_method("process_navigation_changes"):
-        return
+        return StartupReadinessResultScript.failed("missing_navigation_change_processor")
     if not autonomy.has_method("pending_navigation_change_count"):
-        return
+        return StartupReadinessResultScript.failed("missing_navigation_change_readiness_query")
     var iterations := 0
-    while iterations < INITIAL_NAV_CHANGE_DRAIN_ITERATION_LIMIT:
+    var processed_event_count := 0
+    var started_usec := Time.get_ticks_usec()
+    while true:
         var pending := int(autonomy.call("pending_navigation_change_count"))
         if pending <= 0:
-            break
-        await startup_loading_yield("Preparing navigation %d" % pending)
-        autonomy.call("process_navigation_changes", INITIAL_NAV_CHANGE_DRAIN_EVENT_LIMIT, -1)
+            var metrics := {
+                "registeredNpcCount": entries.size(),
+                "iterationCount": iterations,
+                "processedEventCount": processed_event_count,
+                "remainingEventCount": 0
+            }
+            await startup_loading_yield("Navigation changes ready", "navigation_changes", "ready", metrics)
+            return StartupReadinessResultScript.ready({}, metrics)
+        if float(Time.get_ticks_usec() - started_usec) / 1000000.0 >= INITIAL_READINESS_TIMEOUT_SECONDS:
+            return StartupReadinessResultScript.failed("navigation_change_drain_timeout", {}, [], {
+                "registeredNpcCount": entries.size(),
+                "iterationCount": iterations,
+                "processedEventCount": processed_event_count,
+                "remainingEventCount": pending,
+                "timeoutSeconds": INITIAL_READINESS_TIMEOUT_SECONDS
+            })
+        await startup_loading_yield("Preparing navigation changes %d" % pending, "navigation_changes", "pending", {
+            "registeredNpcCount": entries.size(),
+            "iterationCount": iterations,
+            "processedEventCount": processed_event_count,
+            "remainingEventCount": pending
+        })
+        var processed_value = autonomy.call("process_navigation_changes", INITIAL_NAV_CHANGE_DRAIN_EVENT_LIMIT, -1)
+        if processed_value is Array:
+            processed_event_count += (processed_value as Array).size()
         iterations += 1
+    return StartupReadinessResultScript.failed("navigation_change_drain_loop_ended")
 
-func prime_initial_navigation_snapshot_staged() -> void:
+func prime_initial_navigation_snapshot_staged() -> Dictionary:
     if npc_system == null:
-        return
+        return StartupReadinessResultScript.failed("missing_npc_system_for_navigation_snapshot")
     var pathing = npc_system.get("pathing")
     var navigation_world = pathing.get("navigation_world") if pathing != null else null
     if navigation_world == null or not navigation_world.has_method("build_snapshot"):
-        return
-    var entries: Array = []
+        return StartupReadinessResultScript.failed("missing_generated_navigation_world")
+    var entries: Array = registered_npc_entries()
+    if entries.is_empty():
+        return StartupReadinessResultScript.ready({}, {
+            "registeredNpcCount": 0,
+            "publishedTileCount": 0,
+            "navigationMapReady": false,
+            "reason": "no_registered_npcs"
+        })
     var entry := {}
-    var entries_value = npc_system.get("npcs")
-    if entries_value is Array:
-        entries = entries_value
     if not entries.is_empty() and entries[0] is Dictionary:
         entry = entries[0]
-    await startup_loading_yield("Preparing NPC routes")
-    navigation_world.call("build_snapshot", entry, true, false)
-    await prime_initial_navigation_tiles_staged(navigation_world, entries)
+    await startup_loading_yield("Preparing NPC navigation snapshot", "navigation_snapshot", "pending", {
+        "registeredNpcCount": entries.size()
+    })
+    var snapshot_value = navigation_world.call("build_snapshot", entry, true, false)
+    if not (snapshot_value is Dictionary) or (snapshot_value as Dictionary).is_empty():
+        return StartupReadinessResultScript.failed("initial_navigation_snapshot_empty", {}, [], {
+            "registeredNpcCount": entries.size()
+        })
+    var tile_result := normalized_startup_result(
+        await prime_initial_navigation_tiles_staged(navigation_world, entries),
+        "invalid_navigation_tile_readiness_result"
+    )
+    if not startup_result_is_ready(tile_result):
+        return tile_result
+    var map_result := normalized_startup_result(
+        await wait_for_initial_navigation_map_readiness(),
+        "invalid_navigation_map_readiness_result"
+    )
+    if not startup_result_is_ready(map_result):
+        return map_result
+    var metrics := {
+        "registeredNpcCount": entries.size(),
+        "snapshotRevision": String((snapshot_value as Dictionary).get("revision", "")),
+        "tiles": tile_result.get("metrics", {}),
+        "navigationMap": map_result.get("metrics", {})
+    }
+    await startup_loading_yield("NPC navigation ready", "navigation_snapshot", "ready", metrics)
+    return StartupReadinessResultScript.ready({}, metrics)
 
 func initial_navigation_route_delegate():
     if npc_system == null:
@@ -575,15 +950,18 @@ func publish_startup_navmesh_tile(navigation_world, route_delegate, tile_key: St
     var status := String(result.get("status", ""))
     return bool(result.get("installed", false)) or status in ["installed", "updated", "registered"]
 
-func prime_initial_navigation_tiles_staged(navigation_world, entries: Array) -> void:
+func prime_initial_navigation_tiles_staged(navigation_world, entries: Array) -> Dictionary:
     if not NpcConstantsScript.NPC_NAV_ENABLE_STARTUP_TILE_PRIMING:
-        return
+        return StartupReadinessResultScript.failed("startup_navigation_tile_priming_disabled")
     if navigation_world == null:
-        return
+        return StartupReadinessResultScript.failed("missing_navigation_world_for_tile_publication")
 
     var route_delegate = initial_navigation_route_delegate()
     if route_delegate == null:
-        return
+        return StartupReadinessResultScript.failed("missing_navigation_route_delegate")
+    var navmesh_world = route_delegate.get("navmesh_world")
+    if navmesh_world == null or not navmesh_world.has_method("tile_region_status"):
+        return StartupReadinessResultScript.failed("missing_navmesh_tile_publication_authority")
 
     var tile_keys := {}
     for entry_value in entries:
@@ -592,15 +970,74 @@ func prime_initial_navigation_tiles_staged(navigation_world, entries: Array) -> 
         if entry_value is Dictionary:
             prime_navigation_tiles_for_entry(navigation_world, entry_value, tile_keys)
 
-    var total := mini(tile_keys.size(), INITIAL_NAVMESH_PRIME_TILE_LIMIT)
+    var keys: Array = tile_keys.keys()
+    keys.sort()
+    var total := mini(keys.size(), INITIAL_NAVMESH_PRIME_TILE_LIMIT)
+    if total <= 0:
+        return StartupReadinessResultScript.failed("no_startup_navigation_tiles_derived", {}, [], {
+            "registeredNpcCount": entries.size()
+        })
     var published := 0
-    for tile_key_value in tile_keys.keys():
+    for tile_key_value in keys:
         if published >= INITIAL_NAVMESH_PRIME_TILE_LIMIT:
             break
         var tile_key := String(tile_key_value)
-        await startup_loading_yield("Preparing NPC route tiles %d/%d" % [published, total])
-        if publish_startup_navmesh_tile(navigation_world, route_delegate, tile_key):
-            published += 1
+        await startup_loading_yield("Preparing NPC route tiles %d/%d" % [published, total], "navigation_tiles", "pending", {
+            "publishedTileCount": published,
+            "requiredTileCount": total,
+            "tileKey": tile_key
+        })
+        if not publish_startup_navmesh_tile(navigation_world, route_delegate, tile_key):
+            return StartupReadinessResultScript.failed("startup_navigation_tile_publication_failed", {}, [], {
+                "publishedTileCount": published,
+                "requiredTileCount": total,
+                "failedTileKey": tile_key,
+                "tileStatus": navmesh_world.call("tile_region_status", tile_key)
+            })
+        var tile_status: Dictionary = navmesh_world.call("tile_region_status", tile_key)
+        if not bool(tile_status.get("installed", false)) or bool(tile_status.get("dirty", false)):
+            return StartupReadinessResultScript.failed("startup_navigation_tile_not_installed", {}, [], {
+                "publishedTileCount": published,
+                "requiredTileCount": total,
+                "failedTileKey": tile_key,
+                "tileStatus": tile_status
+            })
+        published += 1
+    var metrics := {
+        "publishedTileCount": published,
+        "requiredTileCount": total,
+        "tileKeys": keys.slice(0, total)
+    }
+    await startup_loading_yield("NPC route tiles ready", "navigation_tiles", "ready", metrics)
+    return StartupReadinessResultScript.ready({}, metrics)
+
+func wait_for_initial_navigation_map_readiness() -> Dictionary:
+    var route_delegate = initial_navigation_route_delegate()
+    if route_delegate == null:
+        return StartupReadinessResultScript.failed("missing_navigation_route_delegate")
+    var navmesh_world = route_delegate.get("navmesh_world")
+    if navmesh_world == null or not navmesh_world.has_method("navigation_map_readiness"):
+        return StartupReadinessResultScript.failed("missing_navigation_map_readiness_authority")
+    var started_usec := Time.get_ticks_usec()
+    while true:
+        if navmesh_world.has_method("sync_navigation_map_if_dirty"):
+            navmesh_world.call("sync_navigation_map_if_dirty")
+        var readiness_value = navmesh_world.call("navigation_map_readiness")
+        if not (readiness_value is Dictionary):
+            return StartupReadinessResultScript.failed("invalid_navigation_map_readiness")
+        var readiness: Dictionary = readiness_value
+        if bool(readiness.get("ready", false)):
+            await startup_loading_yield("Navigation map ready", "navigation_map", "ready", readiness)
+            return StartupReadinessResultScript.ready({}, readiness)
+        var reason := String(readiness.get("reason", "navigation_map_pending"))
+        if reason in ["navmesh_backend_disabled", "missing_navigation_map", "missing_navmesh_regions"]:
+            return StartupReadinessResultScript.failed(reason, {}, [], readiness)
+        if float(Time.get_ticks_usec() - started_usec) / 1000000.0 >= INITIAL_READINESS_TIMEOUT_SECONDS:
+            var timeout_metrics := readiness.duplicate(true)
+            timeout_metrics["timeoutSeconds"] = INITIAL_READINESS_TIMEOUT_SECONDS
+            return StartupReadinessResultScript.failed("navigation_map_readiness_timeout", {}, [], timeout_metrics)
+        await startup_loading_yield("Waiting for navigation map", "navigation_map", "pending", readiness)
+    return StartupReadinessResultScript.failed("navigation_map_readiness_loop_ended")
 
 func playtest_progress(label: String) -> void:
     var path: String = OS.get_environment("VOXEL_PLAYTEST_PROGRESS")
@@ -1474,11 +1911,14 @@ func start_new_game_staged(show_message := true) -> bool:
     if runtime_loading_active:
         return false
     runtime_loading_active = true
+    begin_startup_loading_timeline()
     playtest_progress("new_game_staged_start")
     if hud != null and hud.has_method("show_loading_overlay"):
         hud.show_loading_overlay("Starting new game")
     set_process(false)
     set_process_unhandled_input(false)
+    set_physics_process(false)
+    set_registered_npc_physics_enabled(false)
     if player != null:
         player.set_physics_process(false)
         player.velocity = Vector3.ZERO
@@ -1491,18 +1931,51 @@ func start_new_game_staged(show_message := true) -> bool:
     apply_world_seed(random_world_seed(previous_seed), true)
     await startup_loading_yield("Resetting world")
     reset_runtime_world_state(false)
-    var started := false
+    await startup_loading_yield("Clearing previous world", "terrain_authority", "pending")
+    var terrain_authority_result := normalized_startup_result(
+        await reinitialize_voxel_terrain_authority_staged(),
+        "invalid_voxel_terrain_reinitialization_result"
+    )
+    if not startup_result_is_ready(terrain_authority_result):
+        await stop_startup_loading(terrain_authority_result, "voxel_terrain_reinitialization_failed")
+        return false
+    await startup_loading_yield("Terrain authority ready", "terrain_authority", "ready", terrain_authority_result.get("metrics", {}))
+    var tutorial_result := StartupReadinessResultScript.failed("missing_tutorial_system")
     if tutorial_system:
         playtest_progress("new_game_staged_start_tutorial")
-        if tutorial_system.has_method("start_new_world_staged"):
-            started = bool(await tutorial_system.call("start_new_world_staged"))
-        else:
-            started = tutorial_system.start_new_world()
+        if not tutorial_system.has_method("start_new_world_staged"):
+            await stop_startup_loading(StartupReadinessResultScript.failed("missing_staged_tutorial_startup"))
+            return false
+        tutorial_result = normalized_startup_result(
+            await tutorial_system.call("start_new_world_staged"),
+            "invalid_staged_tutorial_startup_result"
+        )
+    if not startup_result_is_ready(tutorial_result):
+        await stop_startup_loading(tutorial_result, "tutorial_startup_failed")
+        return false
     await startup_loading_yield("Reloading terrain")
     reload_chunks(true)
-    await bootstrap_initial_chunks_staged()
-    await drain_initial_navigation_changes_staged()
-    await prime_initial_navigation_snapshot_staged()
+    var terrain_result := normalized_startup_result(
+        await bootstrap_initial_chunks_staged(),
+        "invalid_terrain_readiness_result"
+    )
+    if not startup_result_is_ready(terrain_result):
+        await stop_startup_loading(terrain_result, "terrain_collision_not_ready")
+        return false
+    var navigation_change_result := normalized_startup_result(
+        await drain_initial_navigation_changes_staged(),
+        "invalid_navigation_change_readiness_result"
+    )
+    if not startup_result_is_ready(navigation_change_result):
+        await stop_startup_loading(navigation_change_result, "navigation_changes_not_ready")
+        return false
+    var navigation_result := normalized_startup_result(
+        await prime_initial_navigation_snapshot_staged(),
+        "invalid_navigation_readiness_result"
+    )
+    if not startup_result_is_ready(navigation_result):
+        await stop_startup_loading(navigation_result, "navigation_not_ready")
+        return false
     if tutorial_system:
         tutorial_system.configure_starting_inventory()
     update_objectives_and_contracts()
@@ -1516,17 +1989,29 @@ func start_new_game_staged(show_message := true) -> bool:
         hud.hide_victory()
     Input.set_mouse_mode(Input.MOUSE_MODE_CAPTURED)
     if show_message:
-        update_hud("New game started" if started else "New game reset")
+        update_hud("New game started")
     reset_autosave_dirty_tracking(true, "new_game")
+    var physics_gate_result := startup_physics_gate_readiness()
+    if not startup_result_is_ready(physics_gate_result):
+        await stop_startup_loading(physics_gate_result, "gameplay_physics_gate_failed")
+        return false
+    var gameplay_metrics: Dictionary = physics_gate_result.get("metrics", {}).duplicate(true)
+    gameplay_metrics["tutorial"] = tutorial_result.get("metrics", {})
+    gameplay_metrics["terrain"] = terrain_result.get("metrics", {})
+    gameplay_metrics["navigationChanges"] = navigation_change_result.get("metrics", {})
+    gameplay_metrics["navigation"] = navigation_result.get("metrics", {})
+    await startup_loading_yield("Gameplay prerequisites ready", "gameplay", "ready", gameplay_metrics)
     if hud != null and hud.has_method("hide_loading_overlay"):
         hud.hide_loading_overlay()
     runtime_loading_active = false
     set_process(true)
     set_process_unhandled_input(true)
+    set_physics_process(true)
     if player != null:
         player.set_physics_process(true)
+    set_registered_npc_physics_enabled(true)
     playtest_progress("new_game_staged_done")
-    return started
+    return true
 
 func request_graceful_quit(exit_code := 0) -> void:
     if runtime_loading_active:

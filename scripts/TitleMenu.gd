@@ -298,11 +298,11 @@ func _on_game_loading_completed() -> void:
 func _on_game_loading_failed(message: String) -> void:
     launching = false
     disconnect_game_loading_signals()
-    status_label.text = message if message != "" else "Load failed"
     loading_overlay.visible = false
     new_game_button.disabled = false
     quit_button.disabled = false
     refresh_save_state()
+    status_label.text = message if message != "" else "Load failed"
 
 func disconnect_game_loading_signals() -> void:
     if active_main == null or not is_instance_valid(active_main):
