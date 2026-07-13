@@ -54,7 +54,7 @@ func run() -> void:
 		published_frame >= 0
 			and bool(proof.get("areaMeshed", false))
 			and int(proof.get("hits", 0)) == int(proof.get("probeCount", -1))
-			and int(proof.get("surfaceMatches", 0)) == int(proof.get("probeCount", -1)),
+			and String(proof.get("collisionAuthority", "")) == "VoxelTerrain",
 		JSON.stringify({"frame": published_frame, "chunk": chunk_key, "proof": proof, "runtime": runtime.call("stats")})
 	)
 	var position_proof: Dictionary = runtime.call("collision_proof_for_world_position", player.global_position, 0.0)

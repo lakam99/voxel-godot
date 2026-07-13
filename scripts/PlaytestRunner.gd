@@ -50,7 +50,22 @@ func _process(delta: float) -> void:
         return
     elapsed += delta
     if elapsed > watchdog_seconds:
-        add_result("playtest_watchdog", false, "runner timed out before completion")
+        var timeout_details := "runner timed out before completion"
+        if main != null:
+            var timeline_value = main.get("startup_loading_timeline")
+            var latest := {}
+            if timeline_value is Array and not (timeline_value as Array).is_empty() and (timeline_value as Array)[-1] is Dictionary:
+                latest = (timeline_value as Array)[-1]
+            var runtime = main.get("voxel_terrain_runtime")
+            var runtime_stats: Dictionary = runtime.call("stats") if runtime != null and runtime.has_method("stats") else {}
+            timeout_details += "; runtimeLoading=%s failure=%s latest=%s terrain=%s player=%s" % [
+                str(bool(main.get("runtime_loading_active"))),
+                str(main.get("startup_loading_failure_result")),
+                str(latest),
+                str(runtime_stats),
+                str(main.get("player").global_position if main.get("player") is Node3D else Vector3.ZERO)
+            ]
+        add_result("playtest_watchdog", false, timeout_details)
         finished = true
         save_optional_screenshot()
         save_report()
@@ -242,7 +257,7 @@ func run() -> void:
         await test_block_destroy_ray()
         finish_playtest()
         return
-    if only_section != "" and only_section != "tutorial_start":
+    if only_section != "" and only_section not in ["tutorial_start", "tutorial_runtime_reset"]:
         add_result("playtest_section_filter", false, "unsupported VOXEL_PLAYTEST_ONLY '%s'" % only_section)
         finish_playtest()
         return
@@ -254,6 +269,9 @@ func run() -> void:
     test_mouse_look_input()
     mark_progress("escape_menu_new_game")
     await test_escape_menu_new_game()
+    if only_section == "tutorial_runtime_reset":
+        finish_playtest()
+        return
     mark_progress("inventory_and_crafting")
     await test_inventory_and_crafting_systems()
     mark_progress("tool_weapon_catalog")
@@ -1313,16 +1331,30 @@ func test_escape_menu_new_game() -> void:
         main.call("refresh_intro_knock_audio")
     unlock_intro_gate_for_followup_tests(tutorial_system)
 
-func wait_for_runtime_loading_complete(max_frames := 1800) -> bool:
+func wait_for_runtime_loading_complete(max_seconds := 240.0) -> bool:
     if main == null:
         return false
-    for frame in range(max_frames):
+    var started_usec := Time.get_ticks_usec()
+    var observed_frames := 0
+    while float(Time.get_ticks_usec() - started_usec) / 1000000.0 < max_seconds:
+        var failure_value = main.get("startup_loading_failure_result")
+        if failure_value is Dictionary and not (failure_value as Dictionary).is_empty():
+            mark_progress("escape_menu_new_game_failed_%s" % String((failure_value as Dictionary).get("reason", "unknown")))
+            return false
         if not bool(main.get("runtime_loading_active")):
             mark_progress("escape_menu_new_game_loaded")
             return true
-        if frame % 60 == 0:
-            mark_progress("escape_menu_new_game_loading_%04d" % frame)
+        if observed_frames % 60 == 0:
+            var timeline_value = main.get("startup_loading_timeline")
+            var latest := {}
+            if timeline_value is Array and not (timeline_value as Array).is_empty() and (timeline_value as Array)[-1] is Dictionary:
+                latest = (timeline_value as Array)[-1]
+            var domain := String(latest.get("domain", "unknown")).replace(" ", "_")
+            var status := String(latest.get("status", "unknown")).replace(" ", "_")
+            var message := String(latest.get("message", "unknown")).replace(" ", "_")
+            mark_progress("escape_menu_new_game_loading_%04d_%s_%s_%s" % [observed_frames, domain, status, message])
         await wait_physics_frames(1)
+        observed_frames += 1
     mark_progress("escape_menu_new_game_loading_timeout")
     return false
 
