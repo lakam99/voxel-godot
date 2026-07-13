@@ -59,14 +59,13 @@ func complete_final_night() -> bool:
         var forager := find_tutorial_npc(RESCUE_FORAGER_ID)
         var guard := find_tutorial_npc(RESCUE_GUARD_ID)
         if forager:
-            forager.set_meta("npc_force_hold", false)
             forager.set_meta("npc_hostile_target_immune", false)
             forager.set_meta("hostile_target_immune", false)
         if main.npc_system:
             if forager:
-                main.npc_system.clear_scripted_target(forager)
+                main.npc_system.cancel_order(forager, "rescue_complete")
             if guard:
-                main.npc_system.clear_scripted_target(guard)
+                main.npc_system.cancel_order(guard, "rescue_complete")
         if main.hostile_system:
             main.hostile_system.clear()
         if main.has_method("emit_story_event"):
@@ -101,8 +100,8 @@ func setup_rescue_scene() -> void:
     var forager := find_tutorial_npc(RESCUE_FORAGER_ID)
     if forager:
         safe_place_tutorial_npc(forager, system.rescue_site, "rescue_encounter_spawn")
-        forager.set_meta("npc_force_hold", true)
-        forager.set_meta("npc_rescue_stranded", true)
+        if main.npc_system:
+            main.npc_system.order_wait(forager, "rescue_encounter_stranded")
         forager.set_meta("npc_hostile_target_immune", true)
         forager.set_meta("hostile_target_immune", true)
         show_speech_bubble(RESCUE_FORAGER_ID, "Help!", 3.8)
@@ -259,7 +258,6 @@ func start_rescue_escort() -> void:
     if guard and main and main.npc_system:
         system.clear_dialogue_focus()
         guard.set_meta("npc_dialogue_focused", false)
-        guard.set_meta("npc_force_hold", false)
         var guard_target: Vector3 = rescue_guard_target(guard)
         main.npc_system.order_go_to(guard, guard_target, "rescue_escort_to_niko", CELL * 1.2, "sprinting", true)
     show_speech_bubble(RESCUE_GUARD_ID, "With me!", 2.5)
@@ -496,10 +494,7 @@ func start_rescue_return() -> void:
     system.rescue_return_elapsed = 0.0
     var forager := find_tutorial_npc(RESCUE_FORAGER_ID)
     var guard := find_tutorial_npc(RESCUE_GUARD_ID)
-    var home := rescue_return_position()
     if forager:
-        forager.set_meta("npc_force_hold", false)
-        forager.set_meta("npc_rescue_stranded", false)
         forager.set_meta("npc_hostile_target_immune", false)
         forager.set_meta("hostile_target_immune", false)
         if main and main.npc_system:
@@ -540,7 +535,6 @@ func send_elder_home_after_rescue_briefing() -> void:
     var elder := find_tutorial_npc(RESCUE_ELDER_ID)
     if elder == null:
         return
-    elder.set_meta("npc_force_hold", false)
     main.npc_system.order_go_home(elder, "final_rescue_briefing_return_home", "walking")
 
 func rescue_party_home() -> bool:

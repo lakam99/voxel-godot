@@ -204,6 +204,9 @@ class GeneratedTownRouteSubstrateFixtureWorld:
 	var doors := {}
 	var pending_nav_data := false
 	var revision := 0
+	var static_snapshot_revision := 1
+	var semantic_revision := 1
+	var door_state_revision := 1
 
 	func _init() -> void:
 		add_standable_rect(Vector2i(0, -2), Vector2i(5, 2))
@@ -236,6 +239,9 @@ class GeneratedTownRouteSubstrateFixtureWorld:
 			}
 		return {
 			"revision": "fixture:%d" % revision,
+			"staticSnapshotRevision": static_snapshot_revision,
+			"semanticRevision": semantic_revision,
+			"doorStateRevision": door_state_revision,
 			"blocked": blocked,
 			"staticCollisionByCell": static_collision_index(),
 			"staticCollision": static_collision.values(),
@@ -342,6 +348,7 @@ func cases() -> Array[Dictionary]:
 		["npc_route_no_iteration_cap_false_failure", "test_route_no_iteration_cap_false_failure"],
 		["npc_route_pending_budget_resumes", "test_route_pending_budget_resumes"],
 		["npc_route_authority_planning_budget_fairness", "test_route_authority_planning_budget_fairness"],
+		["npc_route_authority_planning_grants_ignore_actor_update_order", "test_route_authority_planning_grants_ignore_actor_update_order"],
 		["npc_route_authority_probe_budget_starvation_recovery", "test_route_authority_probe_budget_starvation_recovery"],
 		["npc_route_authority_probe_repair_avoids_persist_across_budget", "test_route_authority_probe_repair_avoids_persist_across_budget"],
 		["npc_route_authority_phase10_counters", "test_route_authority_phase10_counters"],
@@ -380,7 +387,10 @@ func cases() -> Array[Dictionary]:
 		["npc_route_substrate_forage_search_anchor_exact_outside_goal", "test_route_substrate_forage_search_anchor_exact_outside_goal"],
 		["npc_route_substrate_blocked_generated_town_fixture", "test_route_substrate_blocked_generated_town_fixture"],
 		["npc_route_substrate_invalid_goal_generated_town_fixture", "test_route_substrate_invalid_goal_generated_town_fixture"],
-		["npc_route_substrate_pending_generated_town_fixture", "test_route_substrate_pending_generated_town_fixture"]
+		["npc_route_substrate_pending_generated_town_fixture", "test_route_substrate_pending_generated_town_fixture"],
+		["npc_route_substrate_unrelated_door_state_preserves_incremental_search", "test_route_substrate_unrelated_door_state_preserves_incremental_search"],
+		["npc_route_substrate_unrelated_topology_revision_preserves_incremental_search", "test_route_substrate_unrelated_topology_revision_preserves_incremental_search"],
+		["npc_route_substrate_changed_collision_revalidates_before_commit", "test_route_substrate_changed_collision_revalidates_before_commit"]
 	]
 	var result: Array[Dictionary] = []
 	for spec in ids:
@@ -649,6 +659,49 @@ func test_route_authority_planning_budget_fairness(_mode: String) -> Dictionary:
 		"first=%s deferred=%s recovered=%s counters=%s" % [JSON.stringify(authority_summary(first_claim)), JSON.stringify(authority_summary(deferred)), JSON.stringify(authority_summary(recovered)), JSON.stringify(counters)],
 		["planning_budget_bounded", "planning_starvation_override", "queue_wait_counted"],
 		{ "first": authority_summary(first_claim), "deferred": authority_summary(deferred), "recovered": authority_summary(recovered), "counters": counters }
+	)
+
+func test_route_authority_planning_grants_ignore_actor_update_order(_mode: String) -> Dictionary:
+	var authority = NpcRouteAuthorityV2Script.new()
+	authority.setup(null, null, BudgetedCollisionProbe.new())
+	authority.plan_attempt_budget_per_frame = 4
+	var requests: Array[Dictionary] = []
+	for actor_index in range(6):
+		var actor_id := "ordered-%d" % actor_index
+		var priority := 190 if actor_index == 5 else 140
+		requests.append(authority.submit_request({ "id": actor_id }, { "kind": "home", "priority": priority }, { "priority": priority }))
+	authority.begin_frame()
+	var first_frame_grants: Array[String] = []
+	var serviced := {}
+	for request in requests:
+		var request_id := String(request.get("requestId", ""))
+		var claim: Dictionary = authority.claim_planning_budget(request_id, "ordered_actor_update")
+		if bool(claim.get("granted", false)):
+			first_frame_grants.append(request_id)
+			serviced[request_id] = true
+	var high_request_id := String(requests[5].get("requestId", ""))
+	authority.begin_frame()
+	var second_frame_grants: Array[String] = []
+	for request in requests:
+		var request_id := String(request.get("requestId", ""))
+		var claim: Dictionary = authority.claim_planning_budget(request_id, "ordered_actor_update")
+		if bool(claim.get("granted", false)):
+			second_frame_grants.append(request_id)
+			serviced[request_id] = true
+	var passed: bool = first_frame_grants.size() == 4 \
+		and first_frame_grants.has(high_request_id) \
+		and second_frame_grants.size() == 4 \
+		and serviced.size() == requests.size()
+	return outcome(
+		passed,
+		"first=%s second=%s high=%s serviced=%d" % [JSON.stringify(first_frame_grants), JSON.stringify(second_frame_grants), high_request_id, serviced.size()],
+		["planning_priority_independent_of_update_order", "planning_budget_remains_bounded", "equal_priority_requests_rotate_fairly"],
+		{
+			"firstFrameGrants": first_frame_grants,
+			"secondFrameGrants": second_frame_grants,
+			"highPriorityRequestId": high_request_id,
+			"servicedRequestCount": serviced.size()
+		}
 	)
 
 func test_route_authority_probe_budget_starvation_recovery(_mode: String) -> Dictionary:
@@ -1957,6 +2010,125 @@ func test_route_substrate_pending_generated_town_fixture(_mode: String) -> Dicti
 		"pendingNav=%s pendingBudget=%s" % [JSON.stringify(substrate_route_summary(pending_nav)), JSON.stringify(substrate_route_summary(pending_budget))],
 		["pending_nav_data_not_unreachable", "pending_budget_not_unreachable", "target_not_poisoned_by_missing_budget"],
 		{ "pendingNav": substrate_route_summary(pending_nav), "pendingBudget": substrate_route_summary(pending_budget) }
+	)
+
+func test_route_substrate_unrelated_door_state_preserves_incremental_search(_mode: String) -> Dictionary:
+	var fixture := GeneratedTownRouteSubstrateFixtureWorld.new()
+	fixture.standable.clear()
+	fixture.add_standable_rect(Vector2i(0, 0), Vector2i(260, 0))
+	var substrate = CollisionBackedRouteSubstrateScript.new()
+	substrate.setup(fixture)
+	var entry := fixture.generated_town_entry()
+	var options := {
+		"allowOutside": true,
+		"maxExpansions": 512,
+		"expansionsPerCall": 64
+	}
+	var results: Array[Dictionary] = []
+	for call_index in range(6):
+		var result: Dictionary = substrate.plan_route(entry, Vector2i.ZERO, [Vector2i(260, 0)], options)
+		results.append(result)
+		if bool(result.get("ok", false)):
+			break
+		fixture.door_state_revision += 1
+	var first_expansions := int((results[0].get("proof", {}) as Dictionary).get("expansions", 0)) if not results.is_empty() else 0
+	var second_expansions := int((results[1].get("proof", {}) as Dictionary).get("expansions", 0)) if results.size() > 1 else 0
+	var final_result: Dictionary = results.back() if not results.is_empty() else {}
+	var route_cells: Array = final_result.get("cells", []) if final_result.get("cells", []) is Array else []
+	var passed: bool = first_expansions == 64 \
+		and second_expansions > first_expansions \
+		and bool(final_result.get("ok", false)) \
+		and not route_cells.is_empty() \
+		and route_cells.back() == Vector2i(260, 0)
+	return outcome(
+		passed,
+		"calls=%d first=%d second=%d final=%s" % [results.size(), first_expansions, second_expansions, JSON.stringify(substrate_route_summary(final_result))],
+		["incremental_search_survives_unrelated_door_state", "search_work_accumulates_across_frames", "collision_backed_route_eventually_commits"],
+		{
+			"callCount": results.size(),
+			"firstExpansions": first_expansions,
+			"secondExpansions": second_expansions,
+			"final": substrate_route_summary(final_result)
+		}
+	)
+
+func test_route_substrate_unrelated_topology_revision_preserves_incremental_search(_mode: String) -> Dictionary:
+	var fixture := GeneratedTownRouteSubstrateFixtureWorld.new()
+	fixture.standable.clear()
+	fixture.add_standable_rect(Vector2i(0, 0), Vector2i(260, 0))
+	var substrate = CollisionBackedRouteSubstrateScript.new()
+	substrate.setup(fixture)
+	var entry := fixture.generated_town_entry()
+	var options := {
+		"allowOutside": true,
+		"maxExpansions": 512,
+		"expansionsPerCall": 64
+	}
+	var results: Array[Dictionary] = []
+	for call_index in range(6):
+		var result: Dictionary = substrate.plan_route(entry, Vector2i.ZERO, [Vector2i(260, 0)], options)
+		results.append(result)
+		if bool(result.get("ok", false)):
+			break
+		fixture.static_snapshot_revision += 1
+		fixture.semantic_revision += 1
+	var first_expansions := int((results[0].get("proof", {}) as Dictionary).get("expansions", 0)) if not results.is_empty() else 0
+	var second_expansions := int((results[1].get("proof", {}) as Dictionary).get("expansions", 0)) if results.size() > 1 else 0
+	var final_result: Dictionary = results.back() if not results.is_empty() else {}
+	var passed: bool = first_expansions == 64 \
+		and second_expansions > first_expansions \
+		and bool(final_result.get("ok", false))
+	return outcome(
+		passed,
+		"calls=%d first=%d second=%d final=%s" % [results.size(), first_expansions, second_expansions, JSON.stringify(substrate_route_summary(final_result))],
+		["unrelated_topology_revision_does_not_discard_search", "search_uses_fresh_collision_snapshot_each_call", "route_eventually_commits"],
+		{
+			"callCount": results.size(),
+			"firstExpansions": first_expansions,
+			"secondExpansions": second_expansions,
+			"final": substrate_route_summary(final_result)
+		}
+	)
+
+func test_route_substrate_changed_collision_revalidates_before_commit(_mode: String) -> Dictionary:
+	var fixture := GeneratedTownRouteSubstrateFixtureWorld.new()
+	fixture.standable.clear()
+	fixture.add_standable_rect(Vector2i(0, 0), Vector2i(260, 0))
+	var substrate = CollisionBackedRouteSubstrateScript.new()
+	substrate.setup(fixture)
+	var entry := fixture.generated_town_entry()
+	var options := {
+		"allowOutside": true,
+		"maxExpansions": 512,
+		"expansionsPerCall": 64
+	}
+	var first: Dictionary = substrate.plan_route(entry, Vector2i.ZERO, [Vector2i(260, 0)], options)
+	fixture.static_collision[Vector2i(32, 0)] = {
+		"id": "late-wall",
+		"cell": Vector2i(32, 0),
+		"blockType": "generated_wall"
+	}
+	fixture.static_snapshot_revision += 1
+	var saw_revalidation_restart := false
+	var final: Dictionary = first
+	for _call_index in range(10):
+		final = substrate.plan_route(entry, Vector2i.ZERO, [Vector2i(260, 0)], options)
+		if String(final.get("reason", "")) == "route_snapshot_changed":
+			saw_revalidation_restart = true
+		if String(final.get("classification", "")) in ["unreachable_static", "invalid_goal"]:
+			break
+	var passed: bool = not bool(final.get("ok", true)) \
+		and saw_revalidation_restart \
+		and String(final.get("classification", "")) == "unreachable_static"
+	return outcome(
+		passed,
+		"first=%s restart=%s final=%s" % [JSON.stringify(substrate_route_summary(first)), str(saw_revalidation_restart), JSON.stringify(substrate_route_summary(final))],
+		["changed_collision_revalidates_completed_route", "stale_route_never_commits", "fresh_search_reports_terminal_block"],
+		{
+			"first": substrate_route_summary(first),
+			"sawRevalidationRestart": saw_revalidation_restart,
+			"final": substrate_route_summary(final)
+		}
 	)
 
 func collision_adapter_with_blocks(block_nodes: Array) -> Dictionary:

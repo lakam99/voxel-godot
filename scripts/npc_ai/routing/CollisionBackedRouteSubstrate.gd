@@ -111,10 +111,17 @@ func plan_route(entry: Dictionary, start_cell: Vector2i, candidate_cells: Array,
 			"blockedRecords": [],
 			"doorEdges": [],
 			"expansions": 0,
-			"sequence": 1
+			"sequence": 1,
+			"startedSnapshotRevision": _search_snapshot_revision(snapshot),
+			"latestSnapshotRevision": _search_snapshot_revision(snapshot),
+			"snapshotChanged": false
 		}
 		search_jobs[search_key] = job
 		active_search_key_by_actor[actor_key] = search_key
+	var current_search_revision := _search_snapshot_revision(snapshot)
+	if current_search_revision != String(job.get("startedSnapshotRevision", current_search_revision)):
+		job["snapshotChanged"] = true
+	job["latestSnapshotRevision"] = current_search_revision
 	var open: Array = job.get("open", []) if job.get("open", []) is Array else []
 	var closed: Dictionary = job.get("closed", {}) if job.get("closed", {}) is Dictionary else {}
 	var g_score: Dictionary = job.get("gScore", {}) if job.get("gScore", {}) is Dictionary else {}
@@ -134,6 +141,9 @@ func plan_route(entry: Dictionary, start_cell: Vector2i, candidate_cells: Array,
 				"collisionBacked": true,
 				"generatedWorldInformed": true,
 				"snapshotRevision": String(snapshot.get("revision", "")),
+				"searchStartedRevision": String(job.get("startedSnapshotRevision", "")),
+				"searchSnapshotRevision": current_search_revision,
+				"searchSnapshotChanged": bool(job.get("snapshotChanged", false)),
 				"acceptedGoals": _cell_array(accepted_goals.keys()),
 				"rejectedGoals": rejected_goals,
 				"blocked": blocked_records,
@@ -149,6 +159,9 @@ func plan_route(entry: Dictionary, start_cell: Vector2i, candidate_cells: Array,
 				"collisionBacked": true,
 				"generatedWorldInformed": true,
 				"snapshotRevision": String(snapshot.get("revision", "")),
+				"searchStartedRevision": String(job.get("startedSnapshotRevision", "")),
+				"searchSnapshotRevision": current_search_revision,
+				"searchSnapshotChanged": bool(job.get("snapshotChanged", false)),
 				"acceptedGoals": _cell_array(accepted_goals.keys()),
 				"rejectedGoals": rejected_goals,
 				"blocked": blocked_records,
@@ -199,8 +212,22 @@ func plan_route(entry: Dictionary, start_cell: Vector2i, candidate_cells: Array,
 			})
 			sequence += 1
 	if found != INVALID_CELL:
-		_clear_search_job(actor_key, search_key)
 		var route := _reconstruct_route(parent, start_cell, found)
+		var completed_validation := _validate_completed_route(entry, snapshot, route, target_lookup, allow_outside, moving_home, ignore_dynamic)
+		if not bool(completed_validation.get("ok", false)):
+			_clear_search_job(actor_key, search_key)
+			return _result(false, CLASS_PENDING_BUDGET, "route_snapshot_changed", [], _limited_cell_array(closed.keys(), MAX_RECORDED_VISITED), {
+				"collisionBacked": true,
+				"generatedWorldInformed": true,
+				"snapshotRevision": String(snapshot.get("revision", "")),
+				"searchStartedRevision": String(job.get("startedSnapshotRevision", "")),
+				"searchSnapshotRevision": current_search_revision,
+				"searchSnapshotChanged": bool(job.get("snapshotChanged", false)),
+				"completedRouteValidation": completed_validation,
+				"expansions": expansions,
+				"visitedCount": closed.size()
+			})
+		_clear_search_job(actor_key, search_key)
 		var route_door_edges := _door_edges_for_route(entry, snapshot, route, target_lookup, ignore_dynamic)
 		var route_actions := _door_actions_for_edges(route_door_edges)
 		var route_proofs: Array = []
@@ -210,6 +237,9 @@ func plan_route(entry: Dictionary, start_cell: Vector2i, candidate_cells: Array,
 			"collisionBacked": true,
 			"generatedWorldInformed": true,
 			"snapshotRevision": String(snapshot.get("revision", "")),
+			"searchStartedRevision": String(job.get("startedSnapshotRevision", "")),
+			"searchSnapshotRevision": current_search_revision,
+			"searchSnapshotChanged": bool(job.get("snapshotChanged", false)),
 			"acceptedGoals": _cell_array(accepted_goals.keys()),
 			"rejectedGoals": rejected_goals,
 			"blocked": blocked_records,
@@ -220,6 +250,18 @@ func plan_route(entry: Dictionary, start_cell: Vector2i, candidate_cells: Array,
 			"visitedCount": closed.size(),
 			"avoidCells": avoid_cells
 		}, route_actions, start_position)
+	if bool(job.get("snapshotChanged", false)):
+		_clear_search_job(actor_key, search_key)
+		return _result(false, CLASS_PENDING_BUDGET, "search_snapshot_changed", [], _limited_cell_array(closed.keys(), MAX_RECORDED_VISITED), {
+			"collisionBacked": true,
+			"generatedWorldInformed": true,
+			"snapshotRevision": String(snapshot.get("revision", "")),
+			"searchStartedRevision": String(job.get("startedSnapshotRevision", "")),
+			"searchSnapshotRevision": current_search_revision,
+			"searchSnapshotChanged": true,
+			"expansions": expansions,
+			"visitedCount": closed.size()
+		})
 	_clear_search_job(actor_key, search_key)
 	var terminal_class := CLASS_UNREACHABLE_STATIC
 	var terminal_reason := "no_static_route"
@@ -816,7 +858,7 @@ func _search_actor_key(entry: Dictionary) -> String:
 	return "entry:%d" % entry.hash()
 
 
-func _search_key(entry: Dictionary, start_cell: Vector2i, accepted_goals: Dictionary, snapshot: Dictionary, allow_outside: bool, moving_home: bool, ignore_dynamic: bool, semantic_kind: String, avoid_cells: Array) -> String:
+func _search_key(entry: Dictionary, start_cell: Vector2i, accepted_goals: Dictionary, _snapshot: Dictionary, allow_outside: bool, moving_home: bool, ignore_dynamic: bool, semantic_kind: String, avoid_cells: Array) -> String:
 	var goal_keys: Array[String] = []
 	for cell in accepted_goals.keys():
 		if cell is Vector2i:
@@ -827,11 +869,10 @@ func _search_key(entry: Dictionary, start_cell: Vector2i, accepted_goals: Dictio
 		if cell is Vector2i:
 			avoid_keys.append("%d,%d" % [cell.x, cell.y])
 	avoid_keys.sort()
-	return "%s|%d,%d|%s|%s|%s|%s|%s|%s" % [
+	return "%s|%d,%d|%s|%s|%s|%s|%s" % [
 		_search_actor_key(entry),
 		start_cell.x,
 		start_cell.y,
-		_search_snapshot_revision(snapshot),
 		semantic_kind,
 		"1" if allow_outside else "0",
 		"1" if moving_home else "0",
@@ -840,12 +881,31 @@ func _search_key(entry: Dictionary, start_cell: Vector2i, accepted_goals: Dictio
 	]
 
 
+func _validate_completed_route(entry: Dictionary, snapshot: Dictionary, route: Array, target_lookup: Dictionary, allow_outside: bool, moving_home: bool, ignore_dynamic: bool) -> Dictionary:
+	for index in range(route.size()):
+		var cell_value = route[index]
+		if not (cell_value is Vector2i):
+			return { "ok": false, "reason": "invalid_route_cell", "index": index }
+		var cell: Vector2i = cell_value
+		var cell_validation := validate_route_cell(entry, snapshot, cell, target_lookup, allow_outside, moving_home, ignore_dynamic, index == 0)
+		if not bool(cell_validation.get("ok", false)):
+			return { "ok": false, "reason": String(cell_validation.get("reason", "route_cell_invalid")), "index": index, "cell": cell, "validation": cell_validation }
+		if index == 0:
+			continue
+		var previous: Vector2i = route[index - 1]
+		var transition := validate_transition(entry, snapshot, previous, cell, target_lookup, ignore_dynamic)
+		if not bool(transition.get("ok", false)):
+			return { "ok": false, "reason": String(transition.get("reason", "route_transition_invalid")), "index": index, "cell": cell, "validation": transition }
+	return { "ok": true, "reason": "route_revalidated", "cellCount": route.size() }
+
+
 func _search_snapshot_revision(snapshot: Dictionary) -> String:
 	if snapshot.has("staticSnapshotRevision"):
-		return "%s:%s:%s" % [
+		# Door open/closed state does not change portal topology. Route execution
+		# probes current collision and opens the portal before crossing.
+		return "%s:%s" % [
 			str(snapshot.get("staticSnapshotRevision", 0)),
-			str(snapshot.get("semanticRevision", 0)),
-			str(snapshot.get("doorStateRevision", 0))
+			str(snapshot.get("semanticRevision", 0))
 		]
 	return String(snapshot.get("revision", ""))
 

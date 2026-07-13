@@ -65,7 +65,7 @@ func hold_existing_ambient_npcs() -> void:
         var entry: Dictionary = entry_value
         var body := entry.get("body") as Node
         if body != null and is_instance_valid(body):
-            body.set_meta("npc_force_hold", true)
+            npc_system.order_wait(body, "npc_navigation_fixture_hold")
 
 func snapshot_height_fixture() -> Array:
     if main != null and main.has_method("snapshot_volume_edits"):
@@ -300,7 +300,7 @@ func test_generic_town_npc_navigation() -> void:
                 "jobFailureReason": String(generic_forager.get("jobFailureReason", "")),
                 "jobReservationId": String(generic_forager.get("jobReservationId", "")),
                 "jobApproachSlotId": String(generic_forager.get("jobApproachSlotId", "")),
-                "forceHold": bool(forager_body.get_meta("npc_force_hold", false)),
+                "scriptedOrder": generic_forager.get("scriptedOrder", {}),
                 "lod": String(generic_forager.get("simulationLod", "")),
                 "brainDue": bool(generic_forager.get("npc_lod_brain_due", false)),
                 "brainUpdates": int(generic_forager.get("npc_brain_updates", 0)),

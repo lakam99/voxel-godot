@@ -45,6 +45,9 @@ var collision_probe_required := true
 var plan_attempt_budget_per_frame := DEFAULT_PLAN_ATTEMPT_BUDGET_PER_FRAME
 var plan_attempts_used_this_frame := 0
 var planning_starvation_override_used_this_frame := false
+var planning_grants_this_frame := {}
+var planning_claimed_this_frame := {}
+var planning_grants_prepared_frame := -1
 var probe_sample_budget_per_frame := DEFAULT_PROBE_SAMPLE_BUDGET_PER_FRAME
 var probe_samples_used_this_frame := 0
 var probe_starvation_override_used_this_frame := false
@@ -93,6 +96,9 @@ func begin_frame() -> void:
 	frame_serial += 1
 	plan_attempts_used_this_frame = 0
 	planning_starvation_override_used_this_frame = false
+	planning_grants_this_frame.clear()
+	planning_claimed_this_frame.clear()
+	planning_grants_prepared_frame = -1
 	probe_samples_used_this_frame = 0
 	probe_starvation_override_used_this_frame = false
 	for request_id in requests_by_id.keys():
@@ -102,6 +108,7 @@ func begin_frame() -> void:
 		_increment_state_frame(record)
 		_observe_wait_counters(record)
 		requests_by_id[request_id] = record
+	_prepare_planning_grants()
 
 func register_actor(entry: Dictionary) -> Dictionary:
 	var actor_id := actor_id_for_entry(entry)
@@ -144,6 +151,8 @@ func submit_request(entry: Dictionary, intent: Dictionary, options := {}) -> Dic
 	}
 	requests_by_id[request_id] = record
 	active_request_by_actor[actor_id] = request_id
+	if planning_grants_prepared_frame == frame_serial:
+		_prepare_planning_grants()
 	counters["requests"] = int(counters.get("requests", 0)) + 1
 	_publish_entry_debug(entry, record)
 	return record_summary(record)
@@ -171,11 +180,15 @@ func claim_planning_budget(request_id: String, reason := "planning") -> Dictiona
 			"reason": "already_terminal_or_ready",
 			"budget": _planning_budget_debug(record)
 		}
+	_ensure_planning_grants()
+	var grant: Dictionary = planning_grants_this_frame.get(request_id, {}) if planning_grants_this_frame.get(request_id, {}) is Dictionary else {}
 	var wait_frames := _planning_wait_frames(record)
-	var starvation_override := wait_frames >= PLANNING_STARVATION_FRAME_LIMIT and not planning_starvation_override_used_this_frame
-	if plan_attempts_used_this_frame < plan_attempt_budget_per_frame or starvation_override:
+	var starvation_override := bool(grant.get("starvationOverride", false))
+	if not grant.is_empty() and plan_attempts_used_this_frame < plan_attempt_budget_per_frame:
+		planning_grants_this_frame.erase(request_id)
+		planning_claimed_this_frame[request_id] = true
 		plan_attempts_used_this_frame += 1
-		if starvation_override and plan_attempts_used_this_frame > plan_attempt_budget_per_frame:
+		if starvation_override:
 			planning_starvation_override_used_this_frame = true
 			counters["planningStarvationOverrides"] = int(counters.get("planningStarvationOverrides", 0)) + 1
 		counters["planningBudgetGrants"] = int(counters.get("planningBudgetGrants", 0)) + 1
@@ -196,13 +209,93 @@ func claim_planning_budget(request_id: String, reason := "planning") -> Dictiona
 			"starvationOverride": starvation_override
 		}
 	counters["planningBudgetDeferrals"] = int(counters.get("planningBudgetDeferrals", 0)) + 1
-	_transition_record(record, STATE_PENDING_BUDGET, "planning_budget")
+	_mark_planning_deferred(record)
 	requests_by_id[request_id] = record
 	_publish_record_to_entry(record)
 	var summary := record_summary(record)
 	summary["granted"] = false
 	summary["budget"] = _planning_budget_debug(record)
 	return summary
+
+func _ensure_planning_grants() -> void:
+	if planning_grants_prepared_frame != frame_serial:
+		_prepare_planning_grants()
+
+func _prepare_planning_grants() -> void:
+	planning_grants_prepared_frame = frame_serial
+	planning_grants_this_frame.clear()
+	var available := maxi(0, plan_attempt_budget_per_frame - plan_attempts_used_this_frame)
+	if available == 0:
+		return
+	var eligible: Array[Dictionary] = []
+	for request_id in requests_by_id.keys():
+		if planning_claimed_this_frame.has(request_id):
+			continue
+		var record: Dictionary = requests_by_id[request_id]
+		var actor_id := String(record.get("actorId", ""))
+		if String(active_request_by_actor.get(actor_id, "")) != String(request_id):
+			continue
+		if not String(record.get("state", STATE_NONE)) in [STATE_QUEUED, STATE_PENDING_NAV_DATA, STATE_PENDING_BUDGET]:
+			continue
+		eligible.append(record)
+	if eligible.is_empty():
+		return
+	var starved: Array[Dictionary] = []
+	for record in eligible:
+		if _planning_service_age(record) >= PLANNING_STARVATION_FRAME_LIMIT:
+			starved.append(record)
+	if not starved.is_empty() and not planning_starvation_override_used_this_frame:
+		starved.sort_custom(Callable(self, "_planning_starved_precedes"))
+		var starved_record: Dictionary = starved[0]
+		var starved_id := String(starved_record.get("requestId", ""))
+		planning_grants_this_frame[starved_id] = { "starvationOverride": true }
+		available -= 1
+		for index in range(eligible.size() - 1, -1, -1):
+			if String(eligible[index].get("requestId", "")) == starved_id:
+				eligible.remove_at(index)
+				break
+	if available <= 0:
+		return
+	eligible.sort_custom(Callable(self, "_planning_record_precedes"))
+	for record in eligible:
+		if available <= 0:
+			break
+		planning_grants_this_frame[String(record.get("requestId", ""))] = { "starvationOverride": false }
+		available -= 1
+
+func _planning_record_precedes(a: Dictionary, b: Dictionary) -> bool:
+	var priority_a := int(a.get("priority", 0))
+	var priority_b := int(b.get("priority", 0))
+	if priority_a != priority_b:
+		return priority_a > priority_b
+	var age_a := _planning_service_age(a)
+	var age_b := _planning_service_age(b)
+	if age_a != age_b:
+		return age_a > age_b
+	var created_a := int(a.get("createdFrame", 0))
+	var created_b := int(b.get("createdFrame", 0))
+	if created_a != created_b:
+		return created_a < created_b
+	return String(a.get("requestId", "")) < String(b.get("requestId", ""))
+
+func _planning_starved_precedes(a: Dictionary, b: Dictionary) -> bool:
+	var age_a := _planning_service_age(a)
+	var age_b := _planning_service_age(b)
+	if age_a != age_b:
+		return age_a > age_b
+	return _planning_record_precedes(a, b)
+
+func _planning_service_age(record: Dictionary) -> int:
+	var last_serviced := int(record.get("lastServicedFrame", -1))
+	if last_serviced >= 0:
+		return maxi(0, frame_serial - last_serviced)
+	return maxi(1, frame_serial - int(record.get("createdFrame", frame_serial)) + 1)
+
+func _mark_planning_deferred(record: Dictionary) -> void:
+	record["state"] = STATE_PENDING_BUDGET
+	record["reason"] = "planning_budget"
+	record["updatedFrame"] = frame_serial
+	_append_event(record, _event(STATE_PENDING_BUDGET, "planning_budget"))
 
 func mark_ready(request_id: String, route: Dictionary, proof := {}) -> Dictionary:
 	if not requests_by_id.has(request_id):

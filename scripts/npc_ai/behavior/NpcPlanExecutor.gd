@@ -82,7 +82,7 @@ func update_npc(entry: Dictionary, delta: float, night_factor: float) -> void:
 	var perception: Dictionary = perception_service.snapshot(entry, schedule)
 	if monitor != null:
 		monitor.end_section("npc_perception", perception_start)
-	if npc_system.has_method("npc_is_held_by_intro_or_dialogue") and bool(npc_system.call("npc_is_held_by_intro_or_dialogue", entry, body)):
+	if npc_system.has_method("npc_movement_is_paused") and bool(npc_system.call("npc_movement_is_paused", entry, body)):
 		_release_action_owned_state(entry, "script_hold")
 		var held_goal := { "goalKind": NpcEnumsScript.GOAL_KIND_IDLE, "reason": "held_by_script" }
 		_publish_debug(entry, blackboard, held_goal, {}, schedule, perception)
@@ -117,7 +117,7 @@ func advance_motion_npc(entry: Dictionary, delta: float, _night_factor := 0.0) -
 	var body := entry.get("body") as Node3D
 	if body == null or not is_instance_valid(body):
 		return { "advanced": false, "reason": "missing_body" }
-	if npc_system.has_method("npc_is_held_by_intro_or_dialogue") and bool(npc_system.call("npc_is_held_by_intro_or_dialogue", entry, body)):
+	if npc_system.has_method("npc_movement_is_paused") and bool(npc_system.call("npc_movement_is_paused", entry, body)):
 		_release_action_owned_state(entry, "script_hold")
 		return { "advanced": false, "reason": "held_by_script" }
 	var goal: Dictionary = _cached_goal_for_motion(entry, body, _night_factor)
@@ -540,8 +540,9 @@ func _execute_home(entry: Dictionary, body: Node3D, perception: Dictionary, delt
 			_mark_scripted_order(entry, "ARRIVED", "home_interior_reached")
 		return
 	entry["homeReturnTime"] = float(entry.get("homeReturnTime", 0.0)) + delta
-	entry["routePriority"] = 140
-	var speed_mode := _scripted_speed_mode(body) if _scripted_order_kind(body, entry) == "go_home" else "walking"
+	var scripted_home := _scripted_order_kind(body, entry) == "go_home"
+	entry["routePriority"] = maxi(int(entry.get("routePriority", 180)), 180) if scripted_home else 140
+	var speed_mode := _scripted_speed_mode(body) if scripted_home else "walking"
 	var speed := _set_motion_speed_mode(entry, speed_mode, "home_route")
 	var home_result := _execute_home_route_v2(entry, body, delta, speed)
 	entry["lastMoveDistance"] = float(home_result.get("moved", 0.0))
@@ -678,7 +679,7 @@ func _execute_home_v2_lease(entry: Dictionary, body: Node3D, authority, executor
 
 func _home_v2_request(authority, entry: Dictionary, reason: String) -> Dictionary:
 	var intent := _home_v2_intent(entry, [])
-	var request: Dictionary = authority.submit_request(entry, intent, { "priority": 140 })
+	var request: Dictionary = authority.submit_request(entry, intent, { "priority": int(intent.get("priority", 140)) })
 	entry["homeRouteV2RequestId"] = String(request.get("requestId", ""))
 	entry["homeRouteV2RequestReason"] = reason
 	return request
@@ -868,7 +869,7 @@ func _home_v2_intent(entry: Dictionary, candidate_cells: Array) -> Dictionary:
 		"kind": "home",
 		"movingHome": true,
 		"allowOutside": false,
-		"priority": 140,
+		"priority": int(entry.get("routePriority", 140)),
 		"target": entry.get("homePosition", Vector3.ZERO),
 		"targetCell": target_cell,
 		"candidateCells": candidate_cells.duplicate()
@@ -973,6 +974,9 @@ func _home_v2_route_debug(route: Dictionary) -> Dictionary:
 		"visitedCount": (route.get("visited", []) as Array).size() if route.get("visited", []) is Array else 0,
 		"totalVisitedCount": int(proof.get("visitedCount", 0)),
 		"expansions": int(proof.get("expansions", 0)),
+		"searchStartedRevision": String(proof.get("searchStartedRevision", "")),
+		"searchSnapshotRevision": String(proof.get("searchSnapshotRevision", "")),
+		"searchSnapshotChanged": bool(proof.get("searchSnapshotChanged", false)),
 		"blockedCount": blocked.size(),
 		"blockedSample": blocked.slice(0, mini(blocked.size(), 8)),
 		"doorEdges": proof.get("doorEdges", []),

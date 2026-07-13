@@ -383,6 +383,15 @@
       "required": true
     },
     {
+      "id": "tutorial_generic_order_contract",
+      "description": "Generic tutorial wait/go-home order replacement, route ownership cancellation, dialogue pause, and removal of movement holds",
+      "command": ".\\tools\\run-tutorial-generic-order-contract-tests.ps1",
+      "args": ["-ReportPath", "artifacts\\test-runners\\tutorial-generic-order-contract.json"],
+      "reportPath": "artifacts\\test-runners\\tutorial-generic-order-contract.json",
+      "evidenceLevel": "contract",
+      "required": true
+    },
+    {
       "id": "main_menu_startup_smoke",
       "description": "Main Menu to New Game production-scene startup readiness domains, physics gate, and zero pending town structure operations",
       "command": ".\\tools\\run-main-menu-startup-readiness-smoke.ps1",

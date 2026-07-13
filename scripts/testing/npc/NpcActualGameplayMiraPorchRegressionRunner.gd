@@ -13,6 +13,7 @@ const PORCH_LEAVE_DISTANCE := CELL * 3.0
 const PORCH_SETTLED_FRAMES := 30
 const DOOR_CLOSE_APPROACH_DISTANCE := CELL * 0.75
 const FIRST_DISPLACEMENT_DISTANCE := CELL * 0.10
+const MAX_FIRST_DISPLACEMENT_DELAY_SECONDS := 5.0
 const POST_HOME_DOOR_OBSERVE_SECONDS := 8.0
 
 var menu: Node = null
@@ -363,7 +364,7 @@ func run_knock_and_mira_observation() -> void:
     if mira_ack_body != null and is_instance_valid(mira_ack_body):
         mira_ack_position = mira_ack_body.global_position
         mira_ack_position_valid = true
-    report_data["homeRefreshAtAcknowledgement"] = after_dialogue_state.get("homeRefresh", {})
+    report_data["knockOrdersAtAcknowledgement"] = after_dialogue_state.get("introKnockOrders", {})
     record_phase0_event("dialogueAcknowledgement", {
         "tutorialState": after_dialogue_state,
         "mira": npc_summary(mira_at_ack) if not mira_at_ack.is_empty() else {}
@@ -380,6 +381,13 @@ func run_knock_and_mira_observation() -> void:
     report_data["miraReachedStrictHome"] = mira_reached_strict_home
     report_data["phase0Timing"] = phase0_timing
     report_data["phase0DepartureDiagnosis"] = departure_diagnosis(mira)
+    var acknowledgement_event: Dictionary = phase0_timing.get("dialogueAcknowledgement", {}) if phase0_timing.get("dialogueAcknowledgement", {}) is Dictionary else {}
+    var command_event: Dictionary = phase0_timing.get("goHomeCommandSubmission", {}) if phase0_timing.get("goHomeCommandSubmission", {}) is Dictionary else {}
+    var command_delay := float(command_event.get("time", INF)) - float(acknowledgement_event.get("time", 0.0))
+    report_data["goHomeCommandDelayAfterAcknowledgement"] = rounded(command_delay) if is_finite(command_delay) else null
+    var displacement_event: Dictionary = phase0_timing.get("firstNontrivialDisplacement", {}) if phase0_timing.get("firstNontrivialDisplacement", {}) is Dictionary else {}
+    var displacement_delay := float(displacement_event.get("time", INF)) - float(acknowledgement_event.get("time", 0.0))
+    report_data["firstDisplacementDelayAfterAcknowledgement"] = rounded(displacement_delay) if is_finite(displacement_delay) else null
     var target = mira_visual_target(mira)
     await capture_stage("player_pov_mira_post_knock_final_state", {
         "mira": report_data["miraFinal"],
@@ -407,6 +415,22 @@ func run_knock_and_mira_observation() -> void:
             "mira": report_data["miraFinal"],
             "starterDoor": block_summary(starter_door),
             "captures": capture_names()
+        }))
+        return
+    if command_event.is_empty() or not is_finite(command_delay) or command_delay > 0.5:
+        add_failure("generic_go_home_not_submitted_promptly_after_acknowledgement", JSON.stringify({
+            "delaySeconds": command_delay,
+            "acknowledgement": acknowledgement_event,
+            "command": command_event
+        }))
+        return
+    if displacement_event.is_empty() or not is_finite(displacement_delay) or displacement_delay > MAX_FIRST_DISPLACEMENT_DELAY_SECONDS:
+        add_failure("mira_did_not_begin_home_execution_promptly", JSON.stringify({
+            "delaySeconds": displacement_delay,
+            "maximumSeconds": MAX_FIRST_DISPLACEMENT_DELAY_SECONDS,
+            "acknowledgement": acknowledgement_event,
+            "firstDisplacement": displacement_event,
+            "departureDiagnosis": report_data["phase0DepartureDiagnosis"]
         }))
         return
     if not mira_reached_strict_home:
@@ -469,10 +493,10 @@ func track_phase0_transitions(entry: Dictionary) -> void:
     if entry.is_empty():
         return
     var order := scripted_order_summary(entry)
-    if String(order.get("kind", "")) == "go_home":
+    if String(order.get("kind", "")) == "go_home" and String(order.get("submissionReason", "")) == "tutorial_knock_complete":
         record_phase0_event("goHomeCommandSubmission", {
             "order": order,
-            "homeRefresh": tutorial_state_summary(main.get("tutorial_system")).get("homeRefresh", {}) if main != null else {}
+            "tutorialOrderState": tutorial_state_summary(main.get("tutorial_system")).get("introKnockOrders", {}) if main != null else {}
         })
     var authority := route_authority_summary(entry)
     var route_ticket_id := String(entry.get("routeTicketId", ""))
@@ -714,7 +738,7 @@ func tutorial_state_summary(tutorial) -> Dictionary:
         "bedUsed": bool(state.get("introBedUsed", false)),
         "townCenter": vec2i(state.get("townCenter", Vector2i.ZERO)),
         "startCell": vec2i(state.get("startCell", Vector2i.ZERO)),
-        "homeRefresh": state.get("homeRefresh", {})
+        "introKnockOrders": state.get("introKnockOrders", {})
     }
 
 func state_start_cell(tutorial, fallback: Vector2i) -> Vector2i:
@@ -815,10 +839,10 @@ func npc_summary(entry: Dictionary) -> Dictionary:
         "lastMoveDistance": rounded(float(entry.get("lastMoveDistance", 0.0))),
         "activeDoorPortalId": String(entry.get("activeDoorPortalId", "")),
         "activeDoorDirection": String(entry.get("activeDoorDirection", "")),
-        "holdIntroDoor": bool(entry.get("holdIntroDoor", false)),
         "requiredVisibleScripted": bool(entry.get("requiredVisibleScripted", false)),
         "tutorial": bool(entry.get("tutorial", false)),
         "scriptedOrder": scripted_order_summary(entry),
+        "homeRoutePlan": (entry.get("homeRouteV2LastPlan", {}) as Dictionary).duplicate(true) if entry.get("homeRouteV2LastPlan", {}) is Dictionary else {},
         "routeTicket": route_ticket_summary(entry),
         "routeAuthority": route_authority_summary(entry),
         "departureWaitClassification": departure_wait_classification(entry),
@@ -836,6 +860,8 @@ func scripted_order_summary(entry: Dictionary) -> Dictionary:
         "kind": String(order.get("kind", "")),
         "state": String(order.get("state", "")),
         "reason": String(order.get("reason", "")),
+        "submissionReason": String(order.get("submissionReason", order.get("reason", ""))),
+        "statusReason": String(order.get("statusReason", order.get("reason", ""))),
         "failureReason": String(order.get("failureReason", "")),
         "target": vec3(target) if target is Vector3 else [],
         "arrivalRadius": rounded(float(order.get("arrivalRadius", 0.0))),

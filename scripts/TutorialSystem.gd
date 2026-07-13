@@ -19,6 +19,7 @@ const REPAIR_LAMP_TOLERANCE_CELLS := 3
 const RESCUE_MONSTER_COUNT := 6
 const RESCUE_GUARD_ID := "sera"
 const RESCUE_FORAGER_ID := "niko"
+const INTRO_KNOCK_ACTOR_ID := "mira"
 const INVALID_REPAIR_CELL := Vector2i(2147483647, 2147483647)
 const TOWN_MANIFEST_LOADING_TIMEOUT_SECONDS := 120.0
 const TOWN_MANIFEST_OPS_PER_FRAME := 24
@@ -69,6 +70,8 @@ var startup_scenario_requirements := {}
 var startup_actor_specs: Array = []
 var startup_readiness_result := {}
 var restore_world_setup_pending := false
+var intro_knock_initial_order_result := {}
+var intro_knock_home_order_result := {}
 
 func setup(main_node) -> void:
     main = main_node
@@ -223,6 +226,13 @@ func prepare_tutorial_world_staged(restoring: bool) -> Dictionary:
             startup_town_manifest,
             registration_result.get("metrics", {})
         )
+    var initial_orders := submit_initial_actor_orders(startup_actor_specs, restoring)
+    if not bool(initial_orders.get("ok", false)):
+        return await fail_tutorial_startup(
+            "tutorial_initial_order_failed",
+            startup_town_manifest,
+            initial_orders
+        )
     await loading_yield("Villagers registered", "npc_registration", "ready", registration_result.get("metrics", {}))
     if not restoring:
         force_stormy_night()
@@ -237,7 +247,8 @@ func prepare_tutorial_world_staged(restoring: bool) -> Dictionary:
         "doors": door_result.get("metrics", {}),
         "npcRegistration": registration_result.get("metrics", {}),
         "actorResolution": actor_resolution.get("metrics", {}),
-        "actorSpawn": spawn_result.get("metrics", {})
+        "actorSpawn": spawn_result.get("metrics", {}),
+        "initialOrders": initial_orders
     }
     await loading_yield("Tutorial world ready", "tutorial_world", "ready", metrics)
     return remember_startup_readiness(StartupReadinessResultScript.ready(startup_town_manifest, metrics))
@@ -323,11 +334,14 @@ func tutorial_actor_scenarios() -> Array:
             },
             "simulation": {
                 "role": "Civilian",
-                "job": "",
-                "holdIntroDoor": true
+                "job": ""
             },
             "spawn": {"kind": "offset", "offset": Vector2i(-13, -15)},
-            "initialOrder": {"kind": "wait", "reason": "tutorial_knock_pending"}
+            "initialOrder": {
+                "kind": "wait",
+                "reason": "tutorial_knock_pending",
+                "activeWhen": "intro_knock_unacknowledged"
+            }
         },
         {
             "id": "rowan",
@@ -583,6 +597,66 @@ func reset_startup_readiness_state() -> void:
     startup_actor_specs.clear()
     startup_readiness_result.clear()
     restore_world_setup_pending = false
+    intro_knock_initial_order_result.clear()
+    intro_knock_home_order_result.clear()
+
+func submit_initial_actor_orders(specs: Array, restoring: bool) -> Dictionary:
+    if main == null or main.npc_system == null:
+        return {"ok": false, "reason": "missing_npc_order_authority", "submissions": []}
+    var submissions: Array[Dictionary] = []
+    var problems: Array[String] = []
+    for spec_value in specs:
+        if not (spec_value is Dictionary):
+            continue
+        var spec: Dictionary = spec_value
+        var order_value = spec.get("initialOrder", {})
+        if not (order_value is Dictionary) or (order_value as Dictionary).is_empty():
+            continue
+        var order: Dictionary = order_value
+        var active_when := String(order.get("activeWhen", "always"))
+        if active_when == "intro_knock_unacknowledged" and (not intro_repair_active or intro_elder_dialogue_acknowledged):
+            continue
+        if restoring and active_when == "new_game_only":
+            continue
+        var actor_id := String(spec.get("id", ""))
+        var kind := String(order.get("kind", ""))
+        var reason := String(order.get("reason", "tutorial_initial_order"))
+        var result: Dictionary = {}
+        match kind:
+            "wait":
+                result = main.npc_system.order_wait(actor_id, reason)
+            "go_home":
+                result = main.npc_system.order_go_home(actor_id, reason)
+            _:
+                problems.append("actor %s has unsupported initial order %s" % [actor_id, kind])
+                continue
+        var summary := npc_order_state_summary(result)
+        summary["actorId"] = actor_id
+        submissions.append(summary)
+        if actor_id == INTRO_KNOCK_ACTOR_ID and kind == "wait":
+            intro_knock_initial_order_result = result.duplicate(true)
+        if String(result.get("state", "")).begins_with("FAILED"):
+            problems.append("actor %s initial order failed: %s" % [actor_id, String(result.get("failureReason", result.get("reason", "unknown")))])
+    return {
+        "ok": problems.is_empty(),
+        "reason": "" if problems.is_empty() else "initial_order_submission_failed",
+        "submissions": submissions,
+        "problems": problems
+    }
+
+func npc_order_state_summary(order_value) -> Dictionary:
+    if not (order_value is Dictionary):
+        return {}
+    var order: Dictionary = order_value
+    return {
+        "id": String(order.get("id", "")),
+        "kind": String(order.get("kind", "")),
+        "state": String(order.get("state", "")),
+        "reason": String(order.get("reason", "")),
+        "failureReason": String(order.get("failureReason", "")),
+        "speedMode": String(order.get("speedMode", "")),
+        "usesRouteStack": bool(order.get("usesRouteStack", false))
+    }
 
 func loading_yield(message: String, domain := "tutorial", status := "pending", metrics := {}) -> void:
     if main != null and main.has_method("startup_loading_yield"):
@@ -638,7 +712,7 @@ func complete_restore_world_now() -> void:
     ensure_starter_shelter()
     ensure_starter_bed()
     setup_intro_repair_quest(false)
-    var spawn_result: Dictionary = spawn_tutorial_npcs()
+    var spawn_result: Dictionary = spawn_tutorial_npcs(true)
     if not bool(spawn_result.get("ok", false)):
         last_message = "Tutorial villagers could not be registered."
         return
@@ -683,6 +757,10 @@ func state() -> Dictionary:
         "startCell": start_cell,
         "introDoorOpened": intro_door_opened,
         "introElderDialogueAcknowledged": intro_elder_dialogue_acknowledged,
+        "introKnockOrders": {
+            "initial": npc_order_state_summary(intro_knock_initial_order_result),
+            "home": npc_order_state_summary(intro_knock_home_order_result)
+        },
         "introRepairChestOpened": intro_repair_chest_opened,
         "introRepairActive": intro_repair_active,
         "introRepairComplete": intro_repair_complete,
@@ -878,7 +956,7 @@ func on_bed_used() -> void:
         return
     intro_bed_used = true
     intro_repair_active = false
-    resume_intro_elder_schedule()
+    resume_knock_actor_schedule()
     complete_step("introFirstSleep")
     last_message = "You slept through the storm. Dawn breaks over the repaired village."
     last_dialogue.clear()
@@ -909,35 +987,24 @@ func acknowledge_dialogue(context := {}) -> void:
         )
     if intro_ack:
         intro_elder_dialogue_acknowledged = true
-        release_intro_elder_home_order()
+        if main == null or main.npc_system == null:
+            intro_knock_home_order_result = {
+                "kind": "go_home",
+                "state": "FAILED_TARGET_GONE",
+                "reason": "tutorial_knock_complete",
+                "failureReason": "missing_npc_order_authority"
+            }
+        else:
+            var actor = dialogue_actor_reference()
+            intro_knock_home_order_result = main.npc_system.order_go_home(actor, "tutorial_knock_complete")
+            if String(intro_knock_home_order_result.get("state", "")).begins_with("FAILED"):
+                last_message = "The speaker is no longer in reach."
     clear_dialogue_focus()
 
 func dialogue_payload() -> Dictionary:
     return last_dialogue.duplicate(true)
 
-func release_intro_elder_home_order() -> void:
-    if main == null or main.npc_system == null or not main.npc_system.has_method("order_go_home"):
-        return
-    var actor = intro_elder_dialogue_actor()
-    if actor == null:
-        last_message = "The elder is no longer in reach."
-        return
-    if main.npc_system.has_method("release_intro_hold_and_order_home"):
-        var release_result: Dictionary = main.npc_system.release_intro_hold_and_order_home(actor, "intro_acknowledged_return_home")
-        if String(release_result.get("state", "")) != "FAILED_TARGET_GONE":
-            return
-    var entry: Dictionary = main.npc_system.npc_entry_for_actor(actor) if main.npc_system.has_method("npc_entry_for_actor") else {}
-    if not entry.is_empty():
-        if main.npc_system.has_method("clear_intro_hold_for_entry"):
-            main.npc_system.clear_intro_hold_for_entry(entry)
-        else:
-            entry["holdIntroDoor"] = false
-        var body := entry.get("body") as Node
-        if body != null and is_instance_valid(body):
-            body.set_meta("npc_hold_intro_door", false)
-    main.npc_system.order_go_home(actor, "intro_acknowledged_return_home")
-
-func intro_elder_dialogue_actor():
+func dialogue_actor_reference():
     if last_dialogue_node != null and is_instance_valid(last_dialogue_node):
         return last_dialogue_node
     var npc_id := String(last_dialogue.get("npcId", ""))
@@ -945,10 +1012,10 @@ func intro_elder_dialogue_actor():
         return npc_id
     return null
 
-func resume_intro_elder_schedule() -> void:
+func resume_knock_actor_schedule() -> void:
     if main == null or main.npc_system == null or not main.npc_system.has_method("order_resume_schedule"):
         return
-    main.npc_system.order_resume_schedule("mira")
+    main.npc_system.order_resume_schedule(INTRO_KNOCK_ACTOR_ID)
 
 func focus_dialogue_npc() -> void:
     if last_dialogue_node == null or main == null or main.npc_system == null or main.player == null:
@@ -1208,7 +1275,7 @@ func place_player_in_starter_house() -> void:
 func force_stormy_night() -> void:
     scene_builder.force_stormy_night()
 
-func spawn_tutorial_npcs() -> Dictionary:
+func spawn_tutorial_npcs(restoring := false) -> Dictionary:
     if startup_town_manifest.is_empty():
         var manifest_result: Dictionary = current_tutorial_manifest_result()
         if String(manifest_result.get("status", "")) != StartupReadinessResultScript.STATUS_READY:
@@ -1222,7 +1289,14 @@ func spawn_tutorial_npcs() -> Dictionary:
     if not bool(resolution.get("ok", false)):
         return resolution
     startup_actor_specs = (resolution.get("specs", []) as Array).duplicate(true)
-    return scene_builder.spawn_tutorial_npcs(startup_actor_specs)
+    var spawn_result: Dictionary = scene_builder.spawn_tutorial_npcs(startup_actor_specs)
+    if not bool(spawn_result.get("ok", false)):
+        return spawn_result
+    var initial_orders := submit_initial_actor_orders(startup_actor_specs, restoring)
+    if not bool(initial_orders.get("ok", false)):
+        return initial_orders
+    spawn_result["initialOrders"] = initial_orders
+    return spawn_result
 
 func add_npc_visual(parent: Node3D, color: Color, accent: Color, npc_name: String, role: String) -> void:
     scene_builder.add_npc_visual(parent, color, accent, npc_name, role)
