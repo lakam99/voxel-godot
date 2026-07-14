@@ -1038,7 +1038,6 @@ func test_tutorial_start_system() -> void:
     var guard_applied: Vector3 = (sera as Node).get_meta("npc_applied_velocity", Vector3.ZERO) if sera is Node else Vector3.ZERO
     var guard_displacement: Vector3 = (sera as Node).get_meta("npc_last_displacement", Vector3.ZERO) if sera is Node else Vector3.ZERO
     var guard_blocked_contact := String((sera as Node).get_meta("npc_blocked_contact", "")) if sera is Node else ""
-    var guard_entry: Dictionary = npc_system.npc_entry_for_actor(sera) if npc_system != null and npc_system.has_method("npc_entry_for_actor") and sera is Node else {}
     var guard_motion_summary := "pos %s target %s req %s applied %s disp %s block %s near %s plan %s tiles %s" % [
         compact_vec3(guard_after),
         compact_vec3(guard_target),

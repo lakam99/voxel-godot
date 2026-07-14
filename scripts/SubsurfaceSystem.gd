@@ -76,6 +76,100 @@ func break_target_for_hit(hit: Dictionary, _collider: Node, kind: String) -> Dic
 		"cell3": cell
 	}
 
+func begin_excavation_from_hit(hit: Dictionary, collider: Node = null) -> Dictionary:
+	var sample_pos := hit_sample_position(hit)
+	var hit_position: Vector3 = hit.get("position", sample_pos)
+	var hit_normal: Vector3 = hit.get("normal", Vector3.UP)
+	if hit_normal.length_squared() < 0.001:
+		hit_normal = Vector3.UP
+	else:
+		hit_normal = hit_normal.normalized()
+	var surface_facing := hit_normal.y > 0.8
+	var radius := float(main.CELL) * EXCAVATION_RADIUS_CELLS
+	var edit_radius := radius * SURFACE_EXCAVATION_RADIUS_SCALE if surface_facing else radius
+	excavation_sequence += 1
+	var edit_id := "dig:%d" % excavation_sequence
+	var target_cell := solid_target_cell_for_hit(hit)
+	var fallback_material := subsurface_material_at(target_cell)
+	var edit_center := surface_edit_center_for_hit(hit, target_cell) if surface_facing else sample_pos
+	var volume_job := {}
+	var edit_state := terrain_air_edit_state("player_dig")
+	if surface_facing and sampler().has_method("begin_surface_deformation_edit_incremental"):
+		volume_job = sampler().call("begin_surface_deformation_edit_incremental", edit_center, edit_radius, float(main.CELL) * 1.35, edit_state, edit_id)
+	elif sampler().has_method("begin_sphere_edit_incremental"):
+		volume_job = sampler().call("begin_sphere_edit_incremental", edit_center, edit_radius, edit_state, edit_id)
+	return {
+		"id": edit_id,
+		"complete": false,
+		"hit": hit.duplicate(true),
+		"collider": collider,
+		"center": edit_center,
+		"radius": edit_radius,
+		"fallbackMaterial": fallback_material,
+		"surfaceFacing": surface_facing,
+		"volumeJob": volume_job,
+		"legacy": volume_job.is_empty()
+	}
+
+func advance_excavation(job: Dictionary, frame_budget_ms := 0.35, max_work_units := 8) -> Dictionary:
+	if bool(job.get("complete", false)):
+		return { "state": job, "complete": true, "processedWorkUnits": 0, "result": job.get("result", {}) }
+	var monitor = main.get("runtime_perf_monitor") if main != null else null
+	var advance_start: int = monitor.begin_section("terrain_edit_incremental") if monitor != null else Time.get_ticks_usec()
+	if bool(job.get("legacy", false)):
+		var legacy_hit_value: Variant = job.get("hit", {})
+		var legacy_hit: Dictionary = legacy_hit_value if legacy_hit_value is Dictionary else {}
+		var legacy_result := excavate_from_hit(legacy_hit, job.get("collider") as Node)
+		job["complete"] = true
+		job["result"] = legacy_result
+		if monitor != null:
+			monitor.end_section("terrain_edit_incremental", advance_start)
+		return { "state": job, "complete": true, "processedWorkUnits": 1, "result": legacy_result }
+	var volume_job_value: Variant = job.get("volumeJob", {})
+	var volume_job: Dictionary = volume_job_value if volume_job_value is Dictionary else {}
+	var advanced: Dictionary = sampler().call("advance_incremental_terrain_edit", volume_job, frame_budget_ms, max_work_units)
+	var next_volume_value: Variant = advanced.get("state", volume_job)
+	volume_job = next_volume_value if next_volume_value is Dictionary else volume_job
+	job["volumeJob"] = volume_job
+	var complete := bool(advanced.get("complete", false))
+	var result := {}
+	if complete:
+		result = finalize_incremental_excavation(job, volume_job)
+		job["complete"] = true
+		job["result"] = result
+	if monitor != null:
+		monitor.end_section("terrain_edit_incremental", advance_start)
+	return {
+		"state": job,
+		"complete": complete,
+		"processedWorkUnits": int(advanced.get("processedWorkUnits", 0)),
+		"result": result
+	}
+
+func finalize_incremental_excavation(job: Dictionary, volume_job: Dictionary) -> Dictionary:
+	var changed_value: Variant = volume_job.get("changedCells", [])
+	var changed_cells: Array = changed_value if changed_value is Array else []
+	var removed_value: Variant = volume_job.get("removedMaterials", {})
+	var removed_materials: Dictionary = removed_value if removed_value is Dictionary else {}
+	var center: Vector3 = job.get("center", Vector3.ZERO)
+	var radius := float(job.get("radius", float(main.CELL) * EXCAVATION_RADIUS_CELLS))
+	var affected := affected_surface_cells_for_cell3_edits(changed_cells, center, radius)
+	if main != null and main.has_method("rebuild_chunks_for_cells"):
+		main.call("rebuild_chunks_for_cells", affected, 0, true)
+	else:
+		for cell in affected:
+			if main != null and main.has_method("rebuild_chunks_around_cell"):
+				main.call("rebuild_chunks_around_cell", cell)
+	var fallback_material := String(job.get("fallbackMaterial", ""))
+	return {
+		"id": String(job.get("id", "")),
+		"authority": "terrainVolume",
+		"affectedCells": affected,
+		"affectedCells3": changed_cells,
+		"primaryMaterial": primary_removed_material(removed_materials, fallback_material),
+		"removedMaterials": removed_materials
+	}
+
 func excavate_from_hit(hit: Dictionary, _collider: Node = null) -> Dictionary:
 	var monitor = main.get("runtime_perf_monitor") if main != null else null
 	var excavate_start: int = monitor.begin_section("terrain_edit_excavate_from_hit") if monitor != null else Time.get_ticks_usec()

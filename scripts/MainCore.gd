@@ -75,6 +75,8 @@ var crafting_system
 var objective_system
 var world_generation_system
 var terrain_meshing_service
+var world_edit_followup_queue
+var last_destroy_target_metrics := {}
 var structure_system
 var subsurface_system
 var utility_system
@@ -1516,6 +1518,8 @@ func setup_game_systems() -> void:
     )
     objective_system = ObjectiveSystemScript.new()
     setup_world_generation_system()
+    world_edit_followup_queue = WorldEditFollowupQueueScript.new()
+    world_edit_followup_queue.setup(self)
     subsurface_system = SubsurfaceSystemScript.new()
     subsurface_system.setup(self)
     structure_system = StructureSystemScript.new()

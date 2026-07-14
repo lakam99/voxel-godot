@@ -223,12 +223,35 @@ func get_cell_state(cell: Vector3i) -> Dictionary:
 		return terrain_volume_service.get_cell_state(cell)
 	return generate_cell_state(cell)
 
+func set_scene_block_overlay(cell: Vector3i, state: Dictionary, reason := "") -> Dictionary:
+	if terrain_volume_service != null and terrain_volume_service.has_method("set_scene_block_overlay"):
+		return terrain_volume_service.set_scene_block_overlay(cell, state, reason)
+	return set_cell_state(cell, state, reason)
+
+func clear_scene_block_overlay(cell: Vector3i) -> bool:
+	if terrain_volume_service != null and terrain_volume_service.has_method("clear_scene_block_overlay"):
+		return bool(terrain_volume_service.clear_scene_block_overlay(cell))
+	return false
+
 func set_cell_state(cell: Vector3i, state: Dictionary, reason := "") -> Dictionary:
 	var affects_surface_projection := terrain_state_affects_surface_projection(state)
 	if affects_surface_projection:
 		surface_projection_cache.clear()
 	var result := {}
 	if terrain_volume_service != null and terrain_volume_service.has_method("set_cell_state"):
+		result = terrain_volume_service.set_cell_state(cell, state, reason)
+	if affects_surface_projection:
+		surface_projection_cache.clear()
+	return result
+
+func set_cell_state_with_previous(cell: Vector3i, state: Dictionary, previous_state: Dictionary, reason := "") -> Dictionary:
+	var affects_surface_projection := terrain_state_affects_surface_projection(state)
+	if affects_surface_projection:
+		surface_projection_cache.clear()
+	var result := {}
+	if terrain_volume_service != null and terrain_volume_service.has_method("set_cell_state_with_previous"):
+		result = terrain_volume_service.set_cell_state_with_previous(cell, state, previous_state, reason)
+	elif terrain_volume_service != null and terrain_volume_service.has_method("set_cell_state"):
 		result = terrain_volume_service.set_cell_state(cell, state, reason)
 	if affects_surface_projection:
 		surface_projection_cache.clear()
@@ -274,6 +297,28 @@ func apply_surface_deformation_edit(center: Vector3, radius: float, drop_depth: 
 	if affects_surface_projection:
 		surface_projection_cache.clear()
 	return changed
+
+func begin_sphere_edit_incremental(center: Vector3, radius: float, state: Dictionary, reason := "") -> Dictionary:
+	if terrain_state_affects_surface_projection(state):
+		surface_projection_cache.clear()
+	if terrain_volume_service != null and terrain_volume_service.has_method("begin_sphere_edit_incremental"):
+		return terrain_volume_service.begin_sphere_edit_incremental(center, radius, state, reason)
+	return { "kind": "sphere", "complete": true, "changedCells": [], "removedMaterials": {} }
+
+func begin_surface_deformation_edit_incremental(center: Vector3, radius: float, drop_depth: float, state: Dictionary, reason := "") -> Dictionary:
+	if terrain_state_affects_surface_projection(state):
+		surface_projection_cache.clear()
+	if terrain_volume_service != null and terrain_volume_service.has_method("begin_surface_deformation_edit_incremental"):
+		return terrain_volume_service.begin_surface_deformation_edit_incremental(center, radius, drop_depth, state, reason)
+	return begin_sphere_edit_incremental(center, radius, state, reason)
+
+func advance_incremental_terrain_edit(job: Dictionary, frame_budget_ms := 0.35, max_work_units := 8) -> Dictionary:
+	if terrain_volume_service == null or not terrain_volume_service.has_method("advance_incremental_edit"):
+		return { "state": job, "complete": true, "processedWorkUnits": 0 }
+	var result: Dictionary = terrain_volume_service.advance_incremental_edit(job, frame_budget_ms, max_work_units)
+	if int(result.get("processedWorkUnits", 0)) > 0:
+		surface_projection_cache.clear()
+	return result
 
 func request_section(chunk_key, section_y := 0) -> Dictionary:
 	if terrain_volume_service != null and terrain_volume_service.has_method("request_section"):
@@ -618,6 +663,16 @@ func set_cell_light(cell: Vector3i, light: Dictionary, reason := "") -> Dictiona
 	if terrain_volume_service != null and terrain_volume_service.has_method("set_cell_light"):
 		return terrain_volume_service.set_cell_light(cell, light, reason)
 	return {}
+
+func begin_cell_light_update(cell: Vector3i, light: Dictionary, reason := "", rebuild_radius := -1) -> Dictionary:
+	if terrain_volume_service != null and terrain_volume_service.has_method("begin_cell_light_update"):
+		return terrain_volume_service.begin_cell_light_update(cell, light, reason, rebuild_radius)
+	return {}
+
+func advance_cell_light_update(state: Dictionary, frame_budget_ms := 0.5, max_work_units := 96) -> Dictionary:
+	if terrain_volume_service != null and terrain_volume_service.has_method("advance_cell_light_update"):
+		return terrain_volume_service.advance_cell_light_update(state, frame_budget_ms, max_work_units)
+	return { "state": state, "complete": true, "processedWorkUnits": 0, "elapsedMs": 0.0 }
 
 func set_cell_lights_batch(changes: Array, reason := "") -> Dictionary:
 	if terrain_volume_service != null and terrain_volume_service.has_method("set_cell_lights_batch"):

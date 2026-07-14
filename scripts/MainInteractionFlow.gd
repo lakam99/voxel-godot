@@ -362,7 +362,8 @@ func place_selected_block() -> void:
         return
     var block_options := {
         "player_placed": true,
-        "world_y": float(placement["world_y"])
+        "world_y": float(placement["world_y"]),
+        "deferWorldEditFollowup": true
     }
     if should_face_player(block_type):
         block_options["facing"] = snapped_player_yaw()
@@ -378,9 +379,9 @@ func place_selected_block() -> void:
         objective_system.complete("place_workbench")
     award_place_xp(block_type)
     if tutorial_system and tutorial_system.has_method("on_block_placed") and bool(tutorial_system.on_block_placed(block)):
-        update_hud(tutorial_system.last_message)
+        show_action_message(tutorial_system.last_message)
     else:
-        update_hud("Placed %s" % ItemCatalogScript.label(block_type))
+        show_action_message("Placed %s" % ItemCatalogScript.label(block_type))
 
 func should_face_player(block_type: String) -> bool:
     return block_type in ["door", "bed", "chest", "furnace", "anvil", "workbench", "traderStall"]

@@ -18,6 +18,8 @@ const WATER_MESH_STEP_CELLS := 4
 const WATER_MESH_REBUILD_STEP_CELLS := 16
 const WATER_MESH_BUILD_MAX_CELLS_PER_FRAME := 128
 const WATER_MESH_BUILD_BUDGET_MS := 2.0
+const WORLD_EDIT_FOLLOWUP_BUDGET_MS := 0.45
+const WORLD_EDIT_FOLLOWUP_MAX_WORK_UNITS := 512
 
 var last_requested_mouse_mode: int = Input.MOUSE_MODE_VISIBLE
 var water_mesh_key := Vector2i(999999, 999999)
@@ -245,8 +247,14 @@ func setup_break_overlay() -> void:
     break_material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
     break_overlay = MeshInstance3D.new()
     break_overlay.name = "BreakageOverlay"
-    break_overlay.visible = false
     break_overlay.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+    var prime_mesh := ImmediateMesh.new()
+    prime_mesh.surface_begin(Mesh.PRIMITIVE_LINES, break_material)
+    prime_mesh.surface_add_vertex(Vector3(0.0, -10000.0, 0.0))
+    prime_mesh.surface_add_vertex(Vector3(0.01, -10000.0, 0.0))
+    prime_mesh.surface_end()
+    break_overlay.mesh = prime_mesh
+    break_overlay.visible = true
     add_child(break_overlay)
 
 func make_sky_body(node_name: String, material: Material, radius: float) -> MeshInstance3D:
@@ -377,6 +385,19 @@ func setup_audio_effects() -> void:
     audio_effects = AudioEffectsSystemScript.new()
     audio_effects.name = "AudioEffects"
     add_child(audio_effects)
+    if audio_effects.has_method("prime_materials"):
+        var feedback_colors := [
+            Color(0.72, 0.68, 0.58),
+            Color(0.39, 0.27, 0.16),
+            Color(0.82, 0.72, 0.46),
+            Color(0.86, 0.91, 0.90),
+            BIOME_COLORS["plains"].lightened(0.12)
+        ]
+        for material_value in materials.values():
+            var material := material_value as StandardMaterial3D
+            if material != null:
+                feedback_colors.append(material.albedo_color)
+        audio_effects.prime_materials(feedback_colors)
 
 func play_feedback(effect_name: String, position := Vector3.INF, color := Color.WHITE, count := 0) -> void:
     if audio_effects == null:
@@ -660,6 +681,10 @@ func _process(delta: float) -> void:
         if runtime_perf_monitor != null:
             runtime_perf_monitor.end_section("water_surface", water_surface_start)
     var defer_noncritical_frame_work := perf_chunk_ms >= STREAMING_FRAME_DEFER_NONCRITICAL_MS
+    var world_edit_start: int = runtime_perf_monitor.begin_section("world_edit_followup") if runtime_perf_monitor != null else Time.get_ticks_usec()
+    process_world_edit_followups()
+    if runtime_perf_monitor != null:
+        runtime_perf_monitor.end_section("world_edit_followup", world_edit_start)
     var tutorial_realtime_simulation := tutorial_realtime_simulation_required()
     if trace_post_startup:
         startup_loading_step.emit("Runtime frame: sky")

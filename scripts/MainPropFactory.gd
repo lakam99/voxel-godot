@@ -74,10 +74,11 @@ func destroy_target() -> void:
     show_break_overlay(hit["position"], hit["normal"], ratio)
 
     if break_progress < hardness:
-        update_hud("Breaking %s %.0f%%" % [ItemCatalogScript.material_label(material_id), ratio * 100.0])
+        show_action_message("Breaking %s %.0f%%" % [ItemCatalogScript.material_label(material_id), ratio * 100.0])
         return
 
     reset_break_progress()
+    hit["breakTargetId"] = target_id
     complete_destroy_target(hit, collider, kind, material_id)
 
 func play_melee_miss() -> void:
@@ -119,55 +120,52 @@ func break_target_for_hit(hit: Dictionary, collider: Node, kind: String) -> Dict
 func complete_destroy_target(hit: Dictionary, collider: Node, kind: String, material_id: String) -> void:
     var monitor = runtime_perf_monitor
     var destroy_start: int = monitor.begin_section("destroy_target_complete") if monitor != null else Time.get_ticks_usec()
+    var feedback_ms := 0.0
+    var block_mutation_ms := 0.0
+    var block_reward_ms := 0.0
+    var block_message_ms := 0.0
+    var feedback_start: int = monitor.begin_section("destroy_target_feedback") if monitor != null else Time.get_ticks_usec()
     play_feedback("break", hit["position"], feedback_color_for_material(material_id), 12)
-    if (kind == "terrain" or kind == "subsurface") and subsurface_system != null and subsurface_system.has_method("excavate_from_hit"):
+    feedback_ms = float(Time.get_ticks_usec() - feedback_start) / 1000.0
+    if monitor != null:
+        monitor.end_section("destroy_target_feedback", feedback_start)
+    if (kind == "terrain" or kind == "subsurface") and subsurface_system != null and subsurface_system.has_method("begin_excavation_from_hit"):
         var excavate_start: int = monitor.begin_section("destroy_target_subsurface_excavate") if monitor != null else Time.get_ticks_usec()
-        var excavation: Dictionary = subsurface_system.excavate_from_hit(hit, collider)
+        var queued := queue_terrain_excavation_followup(hit, collider, material_id, String(hit.get("breakTargetId", "")))
         if monitor != null:
             monitor.end_section("destroy_target_subsurface_excavate", excavate_start)
-        mark_world_dirty("subsurface_excavated")
-        var affected_cells: Array = excavation.get("affectedCells", [])
-        var nav_start: int = monitor.begin_section("destroy_target_nav_notify") if monitor != null else Time.get_ticks_usec()
-        if npc_system and npc_system.has_method("notify_navigation_terrain_cells_edited"):
-            npc_system.notify_navigation_terrain_cells_edited(affected_cells)
-        else:
-            for affected_cell in affected_cells:
-                if affected_cell is Vector2i and npc_system and npc_system.has_method("notify_navigation_terrain_edited"):
-                    var old_height := surface_y_at_cell(Vector3i(affected_cell.x, 0, affected_cell.y))
-                    npc_system.notify_navigation_terrain_edited(affected_cell, old_height, old_height)
-        if monitor != null:
-            monitor.end_section("destroy_target_nav_notify", nav_start)
-        var removed_material := String(excavation.get("primaryMaterial", material_id))
-        if removed_material == "" or removed_material == "air":
-            removed_material = material_id
-        var terrain_drop := ItemCatalogScript.material_drop(removed_material)
-        if terrain_drop != "":
-            inventory_system.add_item(terrain_drop, 1)
-        award_break_xp(removed_material)
-        complete_break_objectives(removed_material)
-        update_hud("Dug %s" % ItemCatalogScript.material_label(removed_material))
+        show_action_message("Digging %s" % ItemCatalogScript.material_label(material_id) if queued else "Dig already in progress")
     elif kind == "terrain":
         update_hud("Cannot dig terrain until the volume sampler is ready")
     elif kind == "block":
+        var block_mutation_start: int = monitor.begin_section("destroy_target_block_mutation") if monitor != null else Time.get_ticks_usec()
         var block_cell: Vector3i = collider.get_meta("cell")
         var block_type: String = collider.get_meta("block_type")
         if npc_system and npc_system.has_method("notify_navigation_block_removed"):
             npc_system.notify_navigation_block_removed(block_cell, block_type, collider)
-        if world_generation_system != null and world_generation_system.has_method("set_cell_light"):
-            world_generation_system.call("set_cell_light", block_cell, { "sky": 0, "block": 0 }, "block_removed:%s" % block_type)
-        clear_block_state_from_terrain(block_cell, block_type, "block_removed")
+        queue_block_removed_followup(block_cell, block_type, collider, "block_removed")
         blocks.erase(block_cell)
         invalidate_navigation_marker_cache()
         mark_world_dirty("block_removed")
         collider.queue_free()
-        inventory_system.add_item(ItemCatalogScript.material_drop(material_id), 1)
-        award_break_xp(material_id)
-        complete_break_objectives(material_id)
-        var collapsed_blocks := collapse_unsupported_structures() if is_structural_block_type(block_type) else 0
+        block_mutation_ms = float(Time.get_ticks_usec() - block_mutation_start) / 1000.0
+        if monitor != null:
+            monitor.end_section("destroy_target_block_mutation", block_mutation_start)
+        var block_reward_start: int = monitor.begin_section("destroy_target_block_reward") if monitor != null else Time.get_ticks_usec()
+        var recovered_item := ItemCatalogScript.material_drop(material_id)
+        var block_reward_items := []
+        if recovered_item != "":
+            block_reward_items.append({ "item": recovered_item, "count": 1 })
+        queue_break_reward(block_reward_items, material_id, material_id)
+        block_reward_ms = float(Time.get_ticks_usec() - block_reward_start) / 1000.0
+        if monitor != null:
+            monitor.end_section("destroy_target_block_reward", block_reward_start)
+        if is_structural_block_type(block_type):
+            queue_structural_integrity_check(block_cell)
         var block_message := "Recovered %s" % ItemCatalogScript.label(block_type)
-        if collapsed_blocks > 0:
-            block_message = "Structure collapsed: %d blocks" % collapsed_blocks
-        update_hud(block_message)
+        var block_message_started_usec := Time.get_ticks_usec()
+        show_action_message(block_message)
+        block_message_ms = float(Time.get_ticks_usec() - block_message_started_usec) / 1000.0
     elif kind == "prop":
         var prop_id: String = collider.get_meta("prop_id")
         var drop: String = collider.get_meta("drop")
@@ -192,28 +190,52 @@ func complete_destroy_target(hit: Dictionary, collider: Node, kind: String, mate
             wildlife_nodes.erase(collider)
         if drop == "logs":
             spawn_falling_tree_visual(collider as Node3D)
-            inventory_system.add_item("logs", max(1, drop_count))
-            award_break_xp("tree")
-            complete_break_objectives(material_id)
-            update_hud("Tree dropped logs")
+            queue_break_reward([{ "item": "logs", "count": max(1, drop_count) }], "tree", material_id)
+            show_action_message("Tree dropped logs")
         elif drop == "stones":
-            inventory_system.add_item("stones", max(1, drop_count))
-            award_break_xp(material_id)
-            complete_break_objectives(material_id)
-            update_hud("Rock dropped stones")
+            queue_break_reward([{ "item": "stones", "count": max(1, drop_count) }], material_id, material_id)
+            show_action_message("Rock dropped stones")
         else:
-            inventory_system.add_item(drop, max(1, drop_count))
+            var prop_reward_items := [{ "item": drop, "count": max(1, drop_count) }]
             if collider.has_meta("extra_drop"):
                 var extra_drop := String(collider.get_meta("extra_drop", ""))
                 var extra_count := int(collider.get_meta("extra_drop_count", 0))
                 if extra_drop != "" and extra_count > 0:
-                    inventory_system.add_item(extra_drop, extra_count)
-            award_break_xp(material_id)
-            complete_break_objectives(material_id)
-            update_hud("%s dropped" % ItemCatalogScript.label(drop))
+                    prop_reward_items.append({ "item": extra_drop, "count": extra_count })
+            queue_break_reward(prop_reward_items, material_id, material_id)
+            show_action_message("%s dropped" % ItemCatalogScript.label(drop))
         collider.queue_free()
     if monitor != null:
         monitor.end_section("destroy_target_complete", destroy_start)
+    last_destroy_target_metrics = {
+        "kind": kind,
+        "materialId": material_id,
+        "totalMs": float(Time.get_ticks_usec() - destroy_start) / 1000.0,
+        "feedbackMs": feedback_ms,
+        "blockMutationMs": block_mutation_ms,
+        "blockRewardMs": block_reward_ms,
+        "blockMessageMs": block_message_ms
+    }
+
+func complete_terrain_excavation_followup(excavation: Dictionary, fallback_material: String) -> void:
+    mark_world_dirty("subsurface_excavated")
+    var affected_cells: Array = excavation.get("affectedCells", [])
+    if npc_system and npc_system.has_method("notify_navigation_terrain_cells_edited"):
+        npc_system.notify_navigation_terrain_cells_edited(affected_cells)
+    else:
+        for affected_cell in affected_cells:
+            if affected_cell is Vector2i and npc_system and npc_system.has_method("notify_navigation_terrain_edited"):
+                var old_height := surface_y_at_cell(Vector3i(affected_cell.x, 0, affected_cell.y))
+                npc_system.notify_navigation_terrain_edited(affected_cell, old_height, old_height)
+    var removed_material := String(excavation.get("primaryMaterial", fallback_material))
+    if removed_material == "" or removed_material == "air":
+        removed_material = fallback_material
+    var terrain_drop := ItemCatalogScript.material_drop(removed_material)
+    var terrain_reward_items := []
+    if terrain_drop != "":
+        terrain_reward_items.append({ "item": terrain_drop, "count": 1 })
+    queue_break_reward(terrain_reward_items, removed_material, removed_material)
+    show_action_message("Dug %s" % ItemCatalogScript.material_label(removed_material))
 
 func complete_break_objectives(material_id: String) -> void:
     if objective_system == null:
@@ -422,7 +444,11 @@ func show_break_overlay(hit_position: Vector3, normal: Vector3, ratio: float) ->
     var center: Vector3 = hit_position + n * 0.035
     var size: float = lerp(CELL * 0.22, CELL * 0.86, ratio)
     var branch: float = size * 0.34
-    var mesh := ImmediateMesh.new()
+    var mesh := break_overlay.mesh as ImmediateMesh
+    if mesh == null:
+        mesh = ImmediateMesh.new()
+    else:
+        mesh.clear_surfaces()
     mesh.surface_begin(Mesh.PRIMITIVE_LINES, break_material)
     add_crack_line(mesh, center - tangent * size * 0.36, center + tangent * size * 0.24)
     add_crack_line(mesh, center - bitangent * size * 0.34, center + bitangent * size * 0.28)

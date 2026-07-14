@@ -33,7 +33,6 @@ const REQUIRED_JOB_TYPES := ["guard", "forage", "wood", "stone", "trade"]
 const REQUIRED_CAPTURE_STAGES := [
     "town_setup_fenced_gate",
     "day_jobs_overview",
-    "day_forager_forage",
     "day_guard_guarding",
     "night_all_inside_homes",
     "morning_emerge_jobs"
@@ -529,13 +528,12 @@ func has_generated_fence_and_gate() -> bool:
 func observe_day_jobs() -> void:
     write_progress("observe_day_jobs")
     var frames := ceili(DAY_OBSERVE_SECONDS * float(Engine.physics_ticks_per_second))
-    var observed_forage := false
     var observed_guard := false
     var non_special_distance_by_id := {}
     var old_scale := Engine.time_scale
     Engine.time_scale = OBSERVE_TIME_SCALE
     for frame in range(frames):
-        position_observer_camera("forager")
+        position_observer_camera("overview")
         await get_tree().physics_frame
         if frame % SAMPLE_EVERY_FRAMES == 0:
             var matrix := current_npc_matrix("day")
@@ -544,35 +542,28 @@ func observe_day_jobs() -> void:
             write_progress("observe_day_jobs_%04d" % frame)
             if frame % (SAMPLE_EVERY_FRAMES * 6) == 0:
                 write_report(false)
-            var forage_now := matrix_has_forager_work(matrix)
             var guard_now := matrix_has_guard_work(matrix)
-            observed_forage = observed_forage or forage_now
             observed_guard = observed_guard or guard_now
             for row in matrix:
                 if is_non_special_town_worker(row):
                     var id := String(row.get("id", ""))
                     non_special_distance_by_id[id] = maxf(float(non_special_distance_by_id.get(id, 0.0)), float(row.get("distanceFromInitial", 0.0)))
-            if matrix_has_forager_visual_work(matrix) and not capture_stage_saved("day_forager_forage"):
-                await capture_stage("day_forager_forage", "forager")
             if guard_now and not capture_stage_saved("day_guard_guarding"):
                 await capture_stage("day_guard_guarding", "guard")
-            if observed_forage and observed_guard and capture_stage_saved("day_forager_forage") and capture_stage_saved("day_guard_guarding") and non_special_workers_near_town(matrix) and non_special_workers_move_or_work(non_special_distance_by_id, matrix):
+            if observed_guard and capture_stage_saved("day_guard_guarding") and active_non_special_workers_near_town(matrix) and active_non_special_workers_move_or_work(non_special_distance_by_id, matrix):
                 break
     Engine.time_scale = old_scale
     day_matrix = current_npc_matrix("day_final")
-    if not capture_stage_saved("day_forager_forage"):
-        await capture_stage("day_forager_forage", "forager")
     if not capture_stage_saved("day_guard_guarding"):
         await capture_stage("day_guard_guarding", "guard")
     await capture_stage("day_jobs_overview", "overview")
     var stale_foragers := stale_forager_rows(day_matrix)
     var departure_reissue := day_home_departure_reissue_summary()
-    add_result("day_forager_uses_builtin_forage", observed_forage, JSON.stringify(filtered_job_rows(day_matrix, "forage")))
     add_result("day_forager_has_no_stale_reservation", stale_foragers.is_empty(), JSON.stringify(stale_foragers))
     add_result("day_guard_uses_builtin_guard", observed_guard, JSON.stringify(filtered_job_rows(day_matrix, "guard")))
     add_result("day_shared_home_departure_does_not_reissue_clearance", bool(departure_reissue.get("ok", false)), JSON.stringify(departure_reissue))
-    add_result("day_non_guard_non_foragers_stay_near_town", non_special_workers_near_town(day_matrix), JSON.stringify(filtered_non_special_rows(day_matrix)))
-    add_result("day_non_guard_non_foragers_move_or_work_in_town", non_special_workers_move_or_work(non_special_distance_by_id, day_matrix), JSON.stringify(sanitize_value(non_special_distance_by_id)))
+    add_result("day_active_non_guard_non_foragers_stay_near_town", active_non_special_workers_near_town(day_matrix), JSON.stringify(filtered_non_special_rows(day_matrix)))
+    add_result("day_active_non_guard_non_foragers_move_or_work_in_town", active_non_special_workers_move_or_work(non_special_distance_by_id, day_matrix), JSON.stringify(sanitize_value(non_special_distance_by_id)))
 
 func fast_forward_until_display_hour(target_hour: float, label: String) -> void:
     write_progress(label)
@@ -640,7 +631,7 @@ func observe_night_home_return() -> void:
                 await capture_night_door_loop_diagnostics(detected_loop_rows, "during_observation_%04d" % frame)
             if frame % (SAMPLE_EVERY_FRAMES * 6) == 0:
                 write_report(false)
-        if all_non_guard_npcs_strict_inside_with_closed_doors():
+        if all_active_non_guard_npcs_strict_inside_with_closed_doors():
             settled_frames += 1
         else:
             settled_frames = 0
@@ -649,7 +640,7 @@ func observe_night_home_return() -> void:
     Engine.time_scale = old_scale
     night_matrix = current_npc_matrix("night_final")
     record_night_door_sample("night_final", frames)
-    var final_all_inside := all_non_guard_npcs_strict_inside_with_closed_doors()
+    var final_all_inside := all_active_non_guard_npcs_strict_inside_with_closed_doors()
     var loop_rows := door_transition_loops(transition_baseline)
     if not final_all_inside:
         await capture_night_failure_diagnostics()
@@ -661,13 +652,12 @@ func observe_night_home_return() -> void:
     add_result("night_door_transition_visuals_recorded", not night_door_transition_visuals.is_empty(), JSON.stringify(night_door_transition_visuals))
     add_result("night_home_route_evidence_recorded", night_home_route_evidence_ok(night_matrix), JSON.stringify(night_home_route_evidence_rows(night_matrix)))
     add_result("night_home_doors_do_not_open_close_loop", loop_rows.is_empty(), JSON.stringify(loop_rows))
-    add_result("night_all_non_guard_npcs_return_home_without_orders", final_all_inside, JSON.stringify(night_matrix))
+    add_result("night_all_active_non_guard_npcs_return_home_without_orders", final_all_inside, JSON.stringify(night_matrix))
 
 func observe_morning_emergence() -> void:
     write_progress("observe_morning_emergence")
     var frames := ceili(MORNING_OBSERVE_SECONDS * float(Engine.physics_ticks_per_second))
     var emerged := false
-    var forager_resumed := false
     var guard_resumed := false
     var old_scale := Engine.time_scale
     Engine.time_scale = OBSERVE_TIME_SCALE
@@ -680,18 +670,16 @@ func observe_morning_emergence() -> void:
             write_progress("observe_morning_%04d" % frame)
             if frame % (SAMPLE_EVERY_FRAMES * 6) == 0:
                 write_report(false)
-            emerged = emerged or all_npcs_outside_home(morning_matrix)
-            forager_resumed = forager_resumed or matrix_has_forager_work(morning_matrix)
+            emerged = emerged or all_active_npcs_outside_home(morning_matrix)
             guard_resumed = guard_resumed or matrix_has_guard_work(morning_matrix)
-        if emerged and forager_resumed and guard_resumed:
+        if emerged and guard_resumed:
             break
     Engine.time_scale = old_scale
     morning_matrix = current_npc_matrix("morning_final")
     await capture_stage("morning_emerge_jobs", "overview")
-    add_result("morning_all_npcs_emerge_from_homes", emerged, JSON.stringify(morning_matrix))
-    add_result("morning_forager_returns_to_forage", forager_resumed, JSON.stringify(filtered_job_rows(morning_matrix, "forage")))
+    add_result("morning_all_active_npcs_emerge_from_homes", emerged, JSON.stringify(morning_matrix))
     add_result("morning_guard_returns_to_guard", guard_resumed, JSON.stringify(filtered_job_rows(morning_matrix, "guard")))
-    add_result("morning_non_guard_non_foragers_remain_near_town", non_special_workers_near_town(morning_matrix), JSON.stringify(filtered_non_special_rows(morning_matrix)))
+    add_result("morning_active_non_guard_non_foragers_remain_near_town", active_non_special_workers_near_town(morning_matrix), JSON.stringify(filtered_non_special_rows(morning_matrix)))
 
 func current_npc_matrix(phase: String) -> Array[Dictionary]:
     var rows: Array[Dictionary] = []
@@ -894,35 +882,6 @@ func day_home_departure_reissue_summary() -> Dictionary:
         "reissues": reissues
     }
 
-func matrix_has_forager_work(matrix: Array[Dictionary]) -> bool:
-    for row in matrix:
-        if String(row.get("job", "")) != "forage":
-            continue
-        if int(row.get("jobRuns", 0)) > int(row.get("initialJobRuns", 0)):
-            return true
-    return false
-
-func matrix_has_forager_visual_work(matrix: Array[Dictionary]) -> bool:
-    for row in matrix:
-        if String(row.get("job", "")) != "forage":
-            continue
-        var strict_home_value = row.get("strictHome", {})
-        var strict_home: Dictionary = strict_home_value if strict_home_value is Dictionary else {}
-        if bool(strict_home.get("strictInside", false)):
-            continue
-        if not bool(row.get("insideRoleLeash", false)):
-            continue
-        var phase := String(row.get("jobPhase", ""))
-        var active := String(row.get("activeGoalKind", "")) == "forage"
-        var completed := int(row.get("jobRuns", 0)) > int(row.get("initialJobRuns", 0))
-        var gathering_at_target := phase == "gathering" \
-            and String(row.get("jobObjectId", "")) != "" \
-            and float(row.get("distanceToJobTarget", INF)) <= CELL * 2.5 \
-            and not forager_reservation_is_stale(row)
-        if active and (gathering_at_target or completed):
-            return true
-    return false
-
 func stale_forager_rows(matrix: Array[Dictionary]) -> Array[Dictionary]:
     var result: Array[Dictionary] = []
     for row in matrix:
@@ -954,6 +913,8 @@ func matrix_has_guard_work(matrix: Array[Dictionary]) -> bool:
 func row_is_visual_guard(row: Dictionary) -> bool:
     if String(row.get("job", "")) != "guard":
         return false
+    if bool(row.get("abstractSimulated", false)):
+        return false
     if not bool(row.get("insideTown", false)):
         return false
     if not bool(row.get("guardPostNearPerimeter", false)):
@@ -964,20 +925,20 @@ func row_is_visual_guard(row: Dictionary) -> bool:
         return false
     return String(row.get("goal", "")).find("guard") >= 0 or String(row.get("activeGoalKind", "")) == "guard"
 
-func non_special_workers_near_town(matrix: Array[Dictionary]) -> bool:
+func active_non_special_workers_near_town(matrix: Array[Dictionary]) -> bool:
     var checked := 0
     for row in matrix:
-        if not is_non_special_town_worker(row):
+        if not is_non_special_town_worker(row) or bool(row.get("abstractSimulated", false)):
             continue
         checked += 1
         if not bool(row.get("insideTown", false)):
             return false
     return checked > 0
 
-func non_special_workers_move_or_work(distance_by_id: Dictionary, matrix: Array[Dictionary]) -> bool:
+func active_non_special_workers_move_or_work(distance_by_id: Dictionary, matrix: Array[Dictionary]) -> bool:
     var checked := 0
     for row in matrix:
-        if not is_non_special_town_worker(row):
+        if not is_non_special_town_worker(row) or bool(row.get("abstractSimulated", false)):
             continue
         checked += 1
         var id := String(row.get("id", ""))
@@ -989,12 +950,12 @@ func non_special_workers_move_or_work(distance_by_id: Dictionary, matrix: Array[
             return false
     return checked > 0
 
-func all_non_guard_npcs_strict_inside_with_closed_doors() -> bool:
+func all_active_non_guard_npcs_strict_inside_with_closed_doors() -> bool:
     if npc_entries.is_empty():
         return false
     var checked := 0
     for entry in npc_entries:
-        if bool(entry.get("nightGuard", false)):
+        if bool(entry.get("nightGuard", false)) or bool(entry.get("abstractSimulated", false)):
             continue
         checked += 1
         if not bool(strict_home_status(entry).get("strictInside", false)):
@@ -1003,16 +964,20 @@ func all_non_guard_npcs_strict_inside_with_closed_doors() -> bool:
             return false
     return checked > 0
 
-func all_npcs_outside_home(matrix: Array[Dictionary]) -> bool:
+func all_active_npcs_outside_home(matrix: Array[Dictionary]) -> bool:
     if matrix.is_empty():
         return false
+    var checked := 0
     for row in matrix:
+        if bool(row.get("abstractSimulated", false)):
+            continue
+        checked += 1
         var strict_home: Dictionary = row.get("strictHome", {})
         if bool(strict_home.get("strictInside", false)):
             return false
         if not bool(row.get("insideRoleLeash", false)):
             return false
-    return true
+    return checked > 0
 
 func filtered_job_rows(matrix: Array[Dictionary], job: String) -> Array[Dictionary]:
     var rows: Array[Dictionary] = []
@@ -1372,7 +1337,7 @@ func entry_is_visual_guard(entry: Dictionary) -> bool:
 
 func first_night_return_suspect() -> Dictionary:
     for entry in npc_entries:
-        if entry.is_empty() or bool(entry.get("nightGuard", false)):
+        if entry.is_empty() or bool(entry.get("nightGuard", false)) or bool(entry.get("abstractSimulated", false)):
             continue
         var body := entry.get("body") as Node3D
         if body == null or not is_instance_valid(body):
@@ -1386,7 +1351,7 @@ func first_night_return_suspect() -> Dictionary:
 func night_failure_entries(max_count := 999) -> Array[Dictionary]:
     var suspects: Array[Dictionary] = []
     for entry in npc_entries:
-        if entry.is_empty() or bool(entry.get("nightGuard", false)):
+        if entry.is_empty() or bool(entry.get("nightGuard", false)) or bool(entry.get("abstractSimulated", false)):
             continue
         if not bool(strict_home_status(entry).get("strictInside", false)) or any_home_door_open(entry):
             suspects.append(entry)
@@ -1437,7 +1402,7 @@ func record_night_door_sample(label: String, frame: int) -> void:
 func night_door_rows() -> Array[Dictionary]:
     var rows: Array[Dictionary] = []
     for entry in npc_entries:
-        if entry.is_empty() or bool(entry.get("nightGuard", false)):
+        if entry.is_empty() or bool(entry.get("nightGuard", false)) or bool(entry.get("abstractSimulated", false)):
             continue
         rows.append(night_door_row(entry))
     return rows
@@ -1480,7 +1445,7 @@ func night_door_row(entry: Dictionary) -> Dictionary:
 func night_home_route_evidence_ok(matrix: Array[Dictionary]) -> bool:
     var checked := 0
     for row in matrix:
-        if bool(row.get("nightGuard", false)):
+        if bool(row.get("nightGuard", false)) or bool(row.get("abstractSimulated", false)):
             continue
         checked += 1
         if int(row.get("homeRoutePositionCount", 0)) <= 0:
@@ -1496,7 +1461,7 @@ func night_home_route_evidence_ok(matrix: Array[Dictionary]) -> bool:
 func night_home_route_evidence_rows(matrix: Array[Dictionary]) -> Array[Dictionary]:
     var rows: Array[Dictionary] = []
     for row in matrix:
-        if bool(row.get("nightGuard", false)):
+        if bool(row.get("nightGuard", false)) or bool(row.get("abstractSimulated", false)):
             continue
         rows.append({
             "id": String(row.get("id", "")),

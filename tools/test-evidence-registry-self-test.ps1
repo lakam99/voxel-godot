@@ -94,6 +94,33 @@ Add-Result `
     -Passed ($goodAcceptanceResult.exitCode -eq 0) `
     -Details "exitCode=$($goodAcceptanceResult.exitCode)"
 
+$integrationVisualReport = Join-Path $workDir "integration-visual-without-claims.json"
+[pscustomobject]@{
+    schemaVersion = 1
+    testId = "integration_visual_without_claims"
+    evidenceLevel = "integration"
+    acceptanceClaims = @()
+    finished = $true
+    passed = $true
+    failureCount = 0
+    resultCount = 1
+    captures = @([pscustomobject]@{ stage = "spawn"; saved = $true })
+    timeline = @([pscustomobject]@{ event = "camera_pose"; time = 1.0 })
+} | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $integrationVisualReport
+$integrationVisualResult = Run-Evidence -EvidenceArgs @(
+    "-ReportPath", $integrationVisualReport,
+    "-RunnerId", "integration_visual_without_claims",
+    "-EvidenceLevel", "integration",
+    "-RequiredScreenshots", "spawn.png;door_open.png",
+    "-ScreenshotDir", $screenshotDir,
+    "-RegistryPath", $registryPath,
+    "-RequireVisualProof"
+)
+Add-Result `
+    -Name "integration_visual_report_without_acceptance_claims_passes" `
+    -Passed ($integrationVisualResult.exitCode -eq 0) `
+    -Details "exitCode=$($integrationVisualResult.exitCode)"
+
 $badGuardReport = Join-Path $workDir "bad-guard-acceptance.json"
 [pscustomobject]@{
     schemaVersion = 1

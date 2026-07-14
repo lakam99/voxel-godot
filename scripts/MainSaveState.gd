@@ -4,6 +4,8 @@ const FIRST_STORY_QUEST_ID := "story.gloam_hart.storm"
 
 func reset_runtime_world_state(reload_world := true) -> void:
     playtest_progress("reset_runtime_start")
+    if world_edit_followup_queue != null and world_edit_followup_queue.has_method("reset"):
+        world_edit_followup_queue.reset()
     world_elapsed = 0.0
     autosave_elapsed = 0.0
     time_of_day = 0.32

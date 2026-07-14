@@ -238,6 +238,14 @@ func update_hud(message: String = "", throttled: bool = false) -> void:
     if startup_loading_active:
         startup_loading_step.emit("HUD refresh: done")
 
+func show_action_message(message: String) -> void:
+    if message == "" or hud == null:
+        return
+    hud_message_refresh_count += 1
+    last_hud_refresh_message = message
+    hud_refresh_elapsed = 0.0
+    hud.set_target_message(message)
+
 func hud_refresh_stats() -> Dictionary:
     return {
         "refreshes": hud_refresh_count,

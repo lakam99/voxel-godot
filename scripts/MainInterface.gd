@@ -19,6 +19,7 @@ const SubsurfaceSystemScript := preload("res://scripts/SubsurfaceSystem.gd")
 const UtilityBlockSystemScript := preload("res://scripts/UtilityBlockSystem.gd")
 const SaveSystemScript := preload("res://scripts/SaveSystem.gd")
 const RuntimePerformanceMonitorScript := preload("res://scripts/perf/RuntimePerformanceMonitor.gd")
+const WorldEditFollowupQueueScript := preload("res://scripts/WorldEditFollowupQueue.gd")
 const SurvivalSystemScript := preload("res://scripts/SurvivalSystem.gd")
 const HostileSystemScript := preload("res://scripts/HostileSystem.gd")
 const ProgressionSystemScript := preload("res://scripts/ProgressionSystem.gd")
@@ -161,6 +162,16 @@ func snapshot_player_blocks() -> Array: return []
 func restore_player_blocks(entries) -> void: pass
 func clear_player_blocks() -> void: pass
 func clear_all_blocks() -> void: pass
+func queue_block_created_followup(cell: Vector3i, block_type: String, block: Node, options := {}) -> void: pass
+func queue_block_removed_followup(cell: Vector3i, block_type: String, block: Node = null, reason := "block_removed") -> void: pass
+func queue_structural_integrity_check(removed_cell: Vector3i) -> void: pass
+func queue_break_reward(items: Array, xp_material := "", objective_material := "") -> void: pass
+func queue_terrain_excavation_followup(hit: Dictionary, collider: Node, material_id: String, target_id := "") -> bool: return false
+func complete_terrain_excavation_followup(excavation: Dictionary, fallback_material: String) -> void: pass
+func process_world_edit_followups() -> Dictionary: return {}
+func world_edit_followup_stats() -> Dictionary: return {}
+func collapse_structure_block_deferred(block: Node3D) -> bool: return false
+func finalize_deferred_structure_collapse(collapsed_count: int, center_sum: Vector3) -> void: pass
 func serialize_slots(slots_value) -> Array: return []
 func restore_slots(slots_value, size: int) -> Array: return []
 func serialize_furnace_state(state_value) -> Dictionary: return {}
@@ -260,6 +271,7 @@ func _unhandled_input(event: InputEvent) -> void: pass
 func select_hotbar_delta(delta: int) -> int: return 0
 func update_hud_frame(delta: float) -> void: pass
 func update_hud(message: String = "", throttled: bool = false) -> void: pass
+func show_action_message(message: String) -> void: pass
 func hud_refresh_stats() -> Dictionary: return {}
 func update_exploration_state(cell: Vector2i, biome: String) -> void: pass
 func discover_landmarks_near(position: Vector3, radius: float = CELL * 8.0) -> int: return 0

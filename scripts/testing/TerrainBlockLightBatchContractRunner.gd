@@ -30,6 +30,8 @@ func run() -> void:
 	test_multi_source_batch_matches_sequential()
 	test_batch_removal_and_level_change_matches_sequential()
 	test_incremental_batch_matches_synchronous_authority()
+	test_local_incremental_edit_matches_authoritative_field()
+	test_scene_block_overlay_restores_underlying_volume_state()
 	finish()
 
 func test_multi_source_batch_matches_sequential() -> void:
@@ -138,6 +140,103 @@ func test_incremental_batch_matches_synchronous_authority() -> void:
 		"incrementalLightCellCount": incremental.light_cells.size(),
 		"field": field_check,
 		"summary": summary
+	})
+
+func test_local_incremental_edit_matches_authoritative_field() -> void:
+	var initial: Array[Dictionary] = [
+		{ "cell": Vector3i(-10, 0, 0), "level": 15 },
+		{ "cell": Vector3i(12, 1, 4), "level": 11 }
+	]
+	var added := { "cell": Vector3i(0, 0, 0), "level": 12 }
+	var expected_entries: Array[Dictionary] = initial.duplicate(true)
+	expected_entries.append(added)
+	var authoritative = make_service()
+	authoritative.set_cell_lights_batch(light_changes(expected_entries), "local_edit_authoritative")
+	var incremental = make_service()
+	incremental.set_cell_lights_batch(light_changes(initial), "local_edit_initial")
+	var state: Dictionary = incremental.begin_cell_light_update(added["cell"], { "sky": 0, "block": int(added["level"]) }, "local_edit_add", 1)
+	var steps := 0
+	var max_step_ms := 0.0
+	while not bool(state.get("complete", false)) and steps < 8192:
+		var advanced: Dictionary = incremental.advance_cell_light_update(state, 0.20, 24)
+		state = advanced.get("state", state)
+		max_step_ms = maxf(max_step_ms, float(advanced.get("elapsedMs", 0.0)))
+		steps += 1
+	var add_matches: bool = light_signature(authoritative) == light_signature(incremental)
+	var removal_reference = make_service()
+	removal_reference.set_cell_lights_batch(light_changes(initial), "local_edit_remove_authoritative")
+	state = incremental.begin_cell_light_update(added["cell"], { "sky": 0, "block": 0 }, "local_edit_remove", 1)
+	var removal_steps := 0
+	while not bool(state.get("complete", false)) and removal_steps < 8192:
+		var advanced: Dictionary = incremental.advance_cell_light_update(state, 0.20, 24)
+		state = advanced.get("state", state)
+		max_step_ms = maxf(max_step_ms, float(advanced.get("elapsedMs", 0.0)))
+		removal_steps += 1
+	var removal_matches: bool = light_signature(removal_reference) == light_signature(incremental)
+	var index_count := 0
+	for bucket_value in incremental.light_cells_by_section.values():
+		if bucket_value is Dictionary:
+			index_count += (bucket_value as Dictionary).size()
+	var passed: bool = (
+		steps > 1
+		and removal_steps > 1
+		and bool(state.get("complete", false))
+		and add_matches
+		and removal_matches
+		and index_count == incremental.light_cells.size()
+		and max_step_ms <= 2.0
+	)
+	add_result("local_incremental_light_add_remove_is_bounded_and_authoritative", passed, {
+		"addSteps": steps,
+		"removalSteps": removal_steps,
+		"maxStepMs": max_step_ms,
+		"addMatches": add_matches,
+		"removalMatches": removal_matches,
+		"indexedLightCells": index_count,
+		"lightCellCount": incremental.light_cells.size()
+	})
+
+func test_scene_block_overlay_restores_underlying_volume_state() -> void:
+	var service = make_service()
+	var cell := Vector3i(3, 2, -5)
+	service.set_cell_state(cell, {
+		"blockId": "copperOre",
+		"material": "copperOre",
+		"biome": "underground",
+		"solid": true,
+		"density": 1.35,
+		"fluid": "",
+		"light": { "sky": 0, "block": 0 },
+		"metadata": { "source": "dig_edit", "saveDelta": true }
+	}, "overlay_contract_underlying")
+	var edited_count_before: int = int(service.edited_cell_count())
+	service.set_scene_block_overlay(cell, {
+		"blockId": "torch",
+		"material": "torch",
+		"biome": "plains",
+		"solid": false,
+		"density": -1.35,
+		"fluid": "",
+		"light": { "sky": 15, "block": 12 },
+		"metadata": { "source": "scene_block", "renderedBySceneBlock": true, "terrainMeshAffects": false }
+	}, "overlay_contract_scene_block")
+	var overlay_state: Dictionary = service.get_cell_state(cell)
+	var cleared := bool(service.clear_scene_block_overlay(cell))
+	var restored_state: Dictionary = service.get_cell_state(cell)
+	var passed: bool = (
+		String(overlay_state.get("blockId", "")) == "torch"
+		and cleared
+		and String(restored_state.get("blockId", "")) == "copperOre"
+		and String(restored_state.get("material", "")) == "copperOre"
+		and service.edited_cell_count() == edited_count_before
+		and service.scene_block_cells.is_empty()
+	)
+	add_result("scene_block_overlay_is_o1_and_reveals_underlying_volume_state", passed, {
+		"overlayBlockId": String(overlay_state.get("blockId", "")),
+		"restoredBlockId": String(restored_state.get("blockId", "")),
+		"editedCountBefore": edited_count_before,
+		"editedCountAfter": service.edited_cell_count(),
+		"overlayCount": service.scene_block_cells.size()
 	})
 
 func make_service():

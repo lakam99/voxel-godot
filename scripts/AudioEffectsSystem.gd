@@ -3,6 +3,7 @@ class_name AudioEffectsSystem
 
 const SAMPLE_RATE := 22050
 const MAX_VISUAL_EFFECTS := 160
+const INITIAL_VISUAL_EFFECT_POOL_SIZE := 64
 const SFX_POOL_SIZE := 8
 const WAV_PATHS := {
     "rainLoop": "res://assets/audio/sfx/rain_loop.wav",
@@ -55,6 +56,8 @@ var material_cache := {}
 var effect_mesh: SphereMesh
 var effect_nodes_created := 0
 var effect_nodes_reused := 0
+var feedback_prime_nodes: Array[MeshInstance3D] = []
+var feedback_prime_frames_remaining := 0
 
 func _ready() -> void:
     for i in range(SFX_POOL_SIZE):
@@ -84,10 +87,12 @@ func _ready() -> void:
     night_player.volume_db = night_volume_db
     add_child(night_player)
     build_streams()
+    prime_sfx_output()
     prime_ambient_loop_players()
     if streams.has("knock"):
         knock_player.stream = streams["knock"]
     setup_effect_mesh()
+    prime_visual_effect_pool()
     set_process(true)
 
 func _exit_tree() -> void:
@@ -183,6 +188,46 @@ func setup_effect_mesh() -> void:
     effect_mesh.height = 0.095
     effect_mesh.radial_segments = 6
     effect_mesh.rings = 3
+
+func prime_visual_effect_pool() -> void:
+    for _index in range(INITIAL_VISUAL_EFFECT_POOL_SIZE):
+        var instance := MeshInstance3D.new()
+        instance.name = "EffectParticle_%03d" % effect_nodes_created
+        instance.mesh = effect_mesh
+        instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+        instance.visible = false
+        instance.scale = Vector3.ZERO
+        add_child(instance)
+        visual_effect_pool.append(instance)
+        effect_nodes_created += 1
+
+func prime_materials(colors: Array) -> void:
+    for color_value in colors:
+        if color_value is Color:
+            var material := material_for(color_value)
+            if visual_effect_pool.is_empty():
+                continue
+            var instance: MeshInstance3D = visual_effect_pool.pop_back()
+            instance.material_override = material
+            instance.global_position = Vector3(0.0, -10000.0, 0.0)
+            instance.scale = Vector3.ONE * 0.01
+            instance.visible = true
+            feedback_prime_nodes.append(instance)
+    if not feedback_prime_nodes.is_empty():
+        feedback_prime_frames_remaining = 2
+
+func prime_sfx_output() -> void:
+    var prime_names := ["place", "break", "strike", "woodChop", "pickup"]
+    for index in range(mini(prime_names.size(), sfx_players.size())):
+        var stream_name := String(prime_names[index])
+        if not streams.has(stream_name):
+            continue
+        var sfx_player := sfx_players[index]
+        sfx_player.volume_db = -80.0
+        sfx_player.stream = streams[stream_name]
+        sfx_player.play()
+        sfx_player.stop()
+        sfx_player.volume_db = 0.0
 
 func play(name: String) -> void:
     if not enabled or streams.is_empty() or not streams.has(name):
@@ -349,6 +394,12 @@ func recycle_effect_node(effect: Dictionary) -> void:
         visual_effect_pool.append(node)
 
 func _process(delta: float) -> void:
+    if feedback_prime_frames_remaining > 0:
+        feedback_prime_frames_remaining -= 1
+        if feedback_prime_frames_remaining <= 0:
+            for instance in feedback_prime_nodes:
+                recycle_effect_node({ "node": instance })
+            feedback_prime_nodes.clear()
     update_ambient_players(delta)
     update_knock_loop(delta)
     for effect in visual_effects.duplicate():

@@ -222,6 +222,61 @@ func clear_block_light_from_terrain(cell: Vector3i, block_type: String, reason :
     if world_generation_system != null and world_generation_system.has_method("set_cell_light"):
         world_generation_system.call("set_cell_light", cell, { "sky": 0, "block": 0 }, "%s:%s" % [reason, block_type])
 
+func queue_block_created_followup(cell: Vector3i, block_type: String, block: Node, options := {}) -> void:
+    if world_edit_followup_queue == null:
+        sync_block_state_to_terrain(cell, block_type, options)
+        sync_block_light_to_terrain(cell, block_type)
+        if block != null:
+            block.set_meta("terrain_state_synced", true)
+        return
+    world_edit_followup_queue.enqueue_block_created(cell, block_type, block, options)
+
+func queue_block_removed_followup(cell: Vector3i, block_type: String, block: Node = null, reason := "block_removed") -> void:
+    var state_synced := true
+    if block != null:
+        state_synced = bool(block.get_meta("terrain_state_synced", true))
+    if world_edit_followup_queue == null:
+        clear_block_light_from_terrain(cell, block_type, reason)
+        if state_synced:
+            clear_block_state_from_terrain(cell, block_type, reason)
+        return
+    world_edit_followup_queue.enqueue_block_removed(cell, block_type, state_synced, reason)
+
+func queue_structural_integrity_check(removed_cell: Vector3i) -> void:
+    if world_edit_followup_queue != null:
+        world_edit_followup_queue.request_structure_check(removed_cell)
+        return
+    collapse_unsupported_structures()
+
+func queue_break_reward(items: Array, xp_material := "", objective_material := "") -> void:
+    if world_edit_followup_queue != null:
+        world_edit_followup_queue.enqueue_reward(items, xp_material, objective_material)
+        return
+    for item_value in items:
+        if item_value is Dictionary:
+            inventory_system.add_item(String(item_value.get("item", "")), int(item_value.get("count", 0)))
+    if String(xp_material) != "":
+        award_break_xp(String(xp_material))
+    if String(objective_material) != "":
+        complete_break_objectives(String(objective_material))
+
+func queue_terrain_excavation_followup(hit: Dictionary, collider: Node, material_id: String, target_id := "") -> bool:
+    if world_edit_followup_queue != null:
+        return bool(world_edit_followup_queue.enqueue_terrain_excavation(hit, collider, material_id, target_id))
+    if subsurface_system == null or not subsurface_system.has_method("excavate_from_hit"):
+        return false
+    var excavation: Dictionary = subsurface_system.excavate_from_hit(hit, collider)
+    complete_terrain_excavation_followup(excavation, material_id)
+    return true
+
+func process_world_edit_followups() -> Dictionary:
+    if world_edit_followup_queue == null:
+        return { "processedWorkUnits": 0, "elapsedMs": 0.0, "pendingEdits": 0 }
+    return world_edit_followup_queue.process(0.45, 512)
+
+func world_edit_followup_stats() -> Dictionary:
+    return world_edit_followup_queue.stats() if world_edit_followup_queue != null else {}
+
 func block_solid_for_terrain_state(block_type: String) -> bool:
     return not (block_type in ["cobblestonePath", "torch", "campfire"])
 
@@ -238,10 +293,24 @@ func sync_block_state_to_terrain(cell: Vector3i, block_type: String, options: Di
         "generated": bool(options.get("generated", false)),
         "playerPlaced": bool(options.get("player_placed", false))
     }
-    var inherited_biome := surface_biome_at_cell(Vector3i(cell.x, 0, cell.z))
+    var inherited_biome := "plains"
     var inherited_light := { "sky": 0 if solid else 15, "block": terrain_block_light_level(block_type) }
+    var next_state := {
+        "blockId": block_type,
+        "material": block_type,
+        "biome": inherited_biome,
+        "solid": solid,
+        "density": CELL if solid else -CELL,
+        "fluid": "",
+        "light": inherited_light,
+        "metadata": metadata
+    }
+    if world_generation_system.has_method("set_scene_block_overlay"):
+        world_generation_system.call("set_scene_block_overlay", cell, next_state, "scene_block_created:%s" % block_type)
+        return
+    var previous := {}
     if world_generation_system.has_method("get_cell_state"):
-        var previous: Dictionary = world_generation_system.call("get_cell_state", cell)
+        previous = world_generation_system.call("get_cell_state", cell)
         var previous_metadata: Dictionary = previous.get("metadata", {}) if previous.get("metadata", {}) is Dictionary else {}
         inherited_biome = String(previous.get("biome", inherited_biome))
         var previous_light: Dictionary = previous.get("light", {}) if previous.get("light", {}) is Dictionary else {}
@@ -251,19 +320,18 @@ func sync_block_state_to_terrain(cell: Vector3i, block_type: String, options: Di
         }
         if bool(previous.get("edited", false)) and String(previous_metadata.get("source", "")) != "scene_block":
             metadata["replacedState"] = previous.duplicate(true)
-    world_generation_system.call("set_cell_state", cell, {
-        "blockId": block_type,
-        "material": block_type,
-        "biome": inherited_biome,
-        "solid": solid,
-        "density": CELL if solid else -CELL,
-        "fluid": "",
-        "light": inherited_light,
-        "metadata": metadata
-    }, "scene_block_created:%s" % block_type)
+    next_state["biome"] = inherited_biome
+    next_state["light"] = inherited_light
+    next_state["metadata"] = metadata
+    if not previous.is_empty() and world_generation_system.has_method("set_cell_state_with_previous"):
+        world_generation_system.call("set_cell_state_with_previous", cell, next_state, previous, "scene_block_created:%s" % block_type)
+    else:
+        world_generation_system.call("set_cell_state", cell, next_state, "scene_block_created:%s" % block_type)
 
 func clear_block_state_from_terrain(cell: Vector3i, block_type: String, reason := "block_removed") -> void:
     if world_generation_system == null:
+        return
+    if world_generation_system.has_method("clear_scene_block_overlay") and bool(world_generation_system.call("clear_scene_block_overlay", cell)):
         return
     if not world_generation_system.has_method("get_cell_state"):
         return
@@ -854,11 +922,17 @@ func create_block(cell: Vector3i, block_type: String, options: Dictionary = {}) 
     block_root.add_child(body)
     blocks[cell] = body
     record_block_creation_instrumentation(instrumentation_metrics, instrumentation_prefix, "NodeBuild", node_build_started_usec)
+    var defer_world_edit_followup := bool(options.get("deferWorldEditFollowup", false))
     var terrain_state_started_usec := Time.get_ticks_usec()
-    sync_block_state_to_terrain(cell, block_type, options)
+    if defer_world_edit_followup:
+        body.set_meta("terrain_state_synced", false)
+        queue_block_created_followup(cell, block_type, body, options)
+    else:
+        sync_block_state_to_terrain(cell, block_type, options)
+        body.set_meta("terrain_state_synced", true)
     record_block_creation_instrumentation(instrumentation_metrics, instrumentation_prefix, "TerrainState", terrain_state_started_usec)
     var terrain_light_started_usec := Time.get_ticks_usec()
-    if not bool(options.get("deferBlockLightSync", false)):
+    if not defer_world_edit_followup and not bool(options.get("deferBlockLightSync", false)):
         sync_block_light_to_terrain(cell, block_type)
     record_block_creation_instrumentation(instrumentation_metrics, instrumentation_prefix, "TerrainLight", terrain_light_started_usec)
     var marker_cache_started_usec := Time.get_ticks_usec()
@@ -1012,6 +1086,31 @@ func collapse_structure_component(component: Array) -> int:
         center /= float(collapsed)
         play_feedback("break", center, Color(0.80, 0.64, 0.42), min(18, collapsed + 4))
     return collapsed
+
+func collapse_structure_block_deferred(block: Node3D) -> bool:
+    if block == null or not is_instance_valid(block) or not block.has_meta("cell"):
+        return false
+    var block_type := String(block.get_meta("block_type", ""))
+    var block_cell: Vector3i = block.get_meta("cell")
+    drop_stored_items_for_block(block)
+    spawn_pickup_stack(ItemCatalogScript.material_drop(block_type), 1, block.global_position)
+    if utility_system and utility_system.active_block == block:
+        utility_system.close()
+    if npc_system and npc_system.has_method("notify_navigation_block_removed"):
+        npc_system.notify_navigation_block_removed(block_cell, block_type, block)
+    queue_block_removed_followup(block_cell, block_type, block, "block_collapsed")
+    blocks.erase(block_cell)
+    block.queue_free()
+    return true
+
+func finalize_deferred_structure_collapse(collapsed_count: int, center_sum: Vector3) -> void:
+    if collapsed_count <= 0:
+        return
+    invalidate_navigation_marker_cache()
+    mark_world_dirty("structure_collapsed")
+    var center := center_sum / float(collapsed_count)
+    play_feedback("break", center, Color(0.80, 0.64, 0.42), min(18, collapsed_count + 4))
+    show_action_message("Structure collapsed: %d blocks" % collapsed_count)
 
 func collapse_unsupported_structures() -> int:
     var visited := {}

@@ -298,6 +298,18 @@ func clear_repair_markers() -> void:
         system.repair_marker_root.remove_child(child)
         child.queue_free()
 
+func remove_repair_marker(cell: Vector2i, block_type: String) -> void:
+    if system.repair_marker_root == null:
+        return
+    for child in system.repair_marker_root.get_children():
+        if child.get_meta("repair_cell", INVALID_REPAIR_CELL) != cell:
+            continue
+        if String(child.get_meta("block_type", "")) != block_type:
+            continue
+        system.repair_marker_root.remove_child(child)
+        child.queue_free()
+        return
+
 func add_repair_marker(cell: Vector2i, block_type: String) -> void:
     if system.repair_marker_root == null or system.town.is_empty():
         return
@@ -349,21 +361,28 @@ func on_block_placed(block: Node) -> bool:
     var flat := Vector2i(cell.x, cell.z)
     var changed := false
     var handled := false
+    var completed_target := INVALID_REPAIR_CELL
+    var completed_marker_type := ""
     if block_type == "woodBlock":
         handled = true
         var fence_target := nearest_unrepaired_cell(flat, system.repair_fence_cells, system.repaired_fence, REPAIR_FENCE_TOLERANCE_CELLS)
         if valid_repair_cell(fence_target):
             system.repaired_fence[repair_cell_key(fence_target)] = true
+            completed_target = fence_target
+            completed_marker_type = "woodBlock"
             changed = true
     elif repair_lamp_type(block_type):
         handled = true
         var lamp_target := nearest_unrepaired_cell(flat, system.repair_lamp_cells, system.repaired_lamps, REPAIR_LAMP_TOLERANCE_CELLS)
         if valid_repair_cell(lamp_target):
             system.repaired_lamps[repair_cell_key(lamp_target)] = true
+            completed_target = lamp_target
+            completed_marker_type = "torch"
             changed = true
     if not changed:
         return handled_placement_miss(block_type) if handled else false
-    refresh_intro_repair_complete()
+    remove_repair_marker(completed_target, completed_marker_type)
+    refresh_intro_repair_complete(false)
     system.last_message = "Perimeter repaired. The storm is still heavy, but you can sleep now." if system.intro_repair_complete else intro_repair_progress_message()
     system.last_dialogue.clear()
     if main and main.has_method("update_objectives_and_contracts"):
@@ -378,9 +397,11 @@ func handled_placement_miss(block_type: String) -> bool:
     system.last_dialogue.clear()
     return true
 
-func refresh_intro_repair_complete() -> bool:
+func refresh_intro_repair_complete(refresh_markers := true) -> bool:
     system.intro_repair_complete = system.repaired_fence.size() >= INTRO_REQUIRED_FENCE and system.repaired_lamps.size() >= INTRO_REQUIRED_LAMPS
     if system.intro_repair_complete:
         system.complete_step("introPerimeterRepaired")
-    refresh_repair_markers()
+        clear_repair_markers()
+    elif refresh_markers:
+        refresh_repair_markers()
     return system.intro_repair_complete

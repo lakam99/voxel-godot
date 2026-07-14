@@ -19,10 +19,13 @@ var main
 var generator
 var sections := {}
 var edited_cells := {}
+var scene_block_cells := {}
 var mesh_edited_column_counts := {}
 var mesh_edited_cells_by_section := {}
 var surface_projection_edited_column_counts := {}
+var scene_block_previous_states := {}
 var light_cells := {}
+var light_cells_by_section := {}
 var block_light_sources := {}
 var pending_sky_light_columns := {}
 var section_revisions := {}
@@ -43,10 +46,13 @@ func setup(main_node, generator_node) -> void:
 func reset() -> void:
 	sections.clear()
 	edited_cells.clear()
+	scene_block_cells.clear()
 	mesh_edited_column_counts.clear()
 	mesh_edited_cells_by_section.clear()
 	surface_projection_edited_column_counts.clear()
+	scene_block_previous_states.clear()
 	light_cells.clear()
+	light_cells_by_section.clear()
 	block_light_sources.clear()
 	pending_sky_light_columns.clear()
 	section_revisions.clear()
@@ -934,6 +940,8 @@ func write_loaded_section_cell_light(cell: Vector3i, light: Dictionary) -> void:
 	sections[section_key] = section
 
 func get_cell_state(cell: Vector3i) -> Dictionary:
+	if scene_block_cells.has(cell):
+		return with_light_override(cell, (scene_block_cells[cell] as Dictionary).duplicate(true))
 	if edited_cells.has(cell):
 		return with_light_override(cell, (edited_cells[cell] as Dictionary).duplicate(true))
 	var section_key := section_key_for_cell(cell)
@@ -943,8 +951,25 @@ func get_cell_state(cell: Vector3i) -> Dictionary:
 		return with_light_override(cell, section_cell_state(section, local, cell))
 	return with_light_override(cell, generated_cell_state(cell))
 
+func set_scene_block_overlay(cell: Vector3i, state: Dictionary, reason := "") -> Dictionary:
+	var normalized := normalize_cell_state(cell, state, true)
+	normalized["editReason"] = String(reason)
+	scene_block_cells[cell] = normalized
+	revision += 1
+	return normalized.duplicate(true)
+
+func clear_scene_block_overlay(cell: Vector3i) -> bool:
+	if not scene_block_cells.has(cell):
+		return false
+	scene_block_cells.erase(cell)
+	revision += 1
+	return true
+
 func set_cell_state(cell: Vector3i, state: Dictionary, reason := "", rebuild_sky_light := true) -> Dictionary:
 	var previous_fluid_state := get_cell_state(cell)
+	return set_cell_state_with_previous(cell, state, previous_fluid_state, reason, rebuild_sky_light)
+
+func set_cell_state_with_previous(cell: Vector3i, state: Dictionary, previous_fluid_state: Dictionary, reason := "", rebuild_sky_light := true) -> Dictionary:
 	var previous_state := {}
 	var previous_mesh_affects := false
 	var previous_surface_affects := false
@@ -955,6 +980,12 @@ func set_cell_state(cell: Vector3i, state: Dictionary, reason := "", rebuild_sky
 	var normalized := normalize_cell_state(cell, state, true)
 	normalized = classify_fluid_only_edit(previous_fluid_state, normalized)
 	normalized["editReason"] = String(reason)
+	var normalized_metadata: Dictionary = normalized.get("metadata", {}) if normalized.get("metadata", {}) is Dictionary else {}
+	var previous_metadata: Dictionary = previous_fluid_state.get("metadata", {}) if previous_fluid_state.get("metadata", {}) is Dictionary else {}
+	if String(normalized_metadata.get("source", "")) == "scene_block" and String(previous_metadata.get("source", "")) != "scene_block":
+		scene_block_previous_states[cell] = previous_fluid_state.duplicate(true)
+	elif String(normalized_metadata.get("source", "")) != "scene_block":
+		scene_block_previous_states.erase(cell)
 	if previous_mesh_affects:
 		adjust_mesh_edited_column_count(cell, -1)
 		set_mesh_edited_cell_index(cell, false)
@@ -969,7 +1000,11 @@ func set_cell_state(cell: Vector3i, state: Dictionary, reason := "", rebuild_sky
 	revision += 1
 	if fluid_state_changed(fluid_mesh_payload_state(previous_fluid_state), fluid_mesh_payload_state(normalized)):
 		mark_fluid_section_changed(cell)
-	write_loaded_section_cell_state(cell, normalized)
+	var skip_loaded_section_write := String(normalized_metadata.get("source", "")) == "scene_block" \
+		and bool(normalized_metadata.get("renderedBySceneBlock", false)) \
+		and not bool(normalized_metadata.get("terrainMeshAffects", false))
+	if not skip_loaded_section_write:
+		write_loaded_section_cell_state(cell, normalized)
 	if previous_mesh_affects or cell_state_affects_terrain_mesh(normalized):
 		mark_section_dirty(section_key_for_cell(cell), { "reason": reason, "cell": cell })
 	if rebuild_sky_light and (terrain_edit_updates_sky_light(normalized) or terrain_edit_updates_sky_light(previous_state)):
@@ -981,7 +1016,12 @@ func clear_cell_state(cell: Vector3i, reason := "") -> void:
 		return
 	var previous: Dictionary = edited_cells[cell]
 	edited_cells.erase(cell)
-	var restored_state := generated_cell_state(cell)
+	var restored_state: Dictionary
+	if scene_block_previous_states.has(cell):
+		restored_state = (scene_block_previous_states[cell] as Dictionary).duplicate(true)
+		scene_block_previous_states.erase(cell)
+	else:
+		restored_state = generated_cell_state(cell)
 	if cell_state_affects_terrain_mesh(previous):
 		adjust_mesh_edited_column_count(cell, -1)
 		set_mesh_edited_cell_index(cell, false)
@@ -990,7 +1030,12 @@ func clear_cell_state(cell: Vector3i, reason := "") -> void:
 	revision += 1
 	if fluid_state_changed(fluid_mesh_payload_state(previous), fluid_mesh_payload_state(restored_state)):
 		mark_fluid_section_changed(cell)
-	write_loaded_section_cell_state(cell, restored_state)
+	var previous_metadata: Dictionary = previous.get("metadata", {}) if previous.get("metadata", {}) is Dictionary else {}
+	var skipped_loaded_section_write := String(previous_metadata.get("source", "")) == "scene_block" \
+		and bool(previous_metadata.get("renderedBySceneBlock", false)) \
+		and not bool(previous_metadata.get("terrainMeshAffects", false))
+	if not skipped_loaded_section_write:
+		write_loaded_section_cell_state(cell, restored_state)
 	if cell_state_affects_terrain_mesh(previous):
 		mark_section_dirty(section_key_for_cell(cell), { "reason": reason, "cell": cell })
 	if terrain_edit_updates_sky_light(previous):
@@ -1010,6 +1055,155 @@ func set_cell_light(cell: Vector3i, light: Dictionary, reason := "") -> Dictiona
 	radius = maxi(1, mini(MAX_BLOCK_LIGHT_LEVEL, radius))
 	rebuild_block_light_neighborhood(cell, radius, reason)
 	return get_cell_state(cell)
+
+func begin_cell_light_update(cell: Vector3i, light: Dictionary, reason := "", rebuild_radius := -1) -> Dictionary:
+	var previous_level := int(block_light_sources.get(cell, 0))
+	var new_level := clampi(int(light.get("block", 0)), 0, MAX_BLOCK_LIGHT_LEVEL)
+	if new_level > 0:
+		block_light_sources[cell] = new_level
+	else:
+		block_light_sources.erase(cell)
+	revision += 1
+	var source_radius := maxi(previous_level, new_level)
+	var occlusion_radius := clampi(int(rebuild_radius), 0, MAX_BLOCK_LIGHT_LEVEL) if rebuild_radius >= 0 else 0
+	var radius := maxi(1, mini(MAX_BLOCK_LIGHT_LEVEL, maxi(source_radius, occlusion_radius)))
+	var clear_distance := maxi(1, source_radius)
+	if occlusion_radius > 0:
+		clear_distance = maxi(clear_distance, occlusion_radius + MAX_BLOCK_LIGHT_LEVEL)
+	var additive_update := new_level > 0 and new_level >= previous_level and occlusion_radius <= 0
+	var min_section := section_key_for_cell(cell - Vector3i.ONE * clear_distance)
+	var max_section := section_key_for_cell(cell + Vector3i.ONE * clear_distance)
+	var section_keys: Array[Vector3i] = []
+	for section_x in range(min_section.x, max_section.x + 1):
+		for section_y in range(min_section.y, max_section.y + 1):
+			for section_z in range(min_section.z, max_section.z + 1):
+				var section_key := Vector3i(section_x, section_y, section_z)
+				if light_cells_by_section.has(section_key):
+					section_keys.append(section_key)
+	return {
+		"cell": cell,
+		"reason": reason,
+		"previousLevel": previous_level,
+		"newLevel": new_level,
+		"radius": radius,
+		"sourceRadius": source_radius,
+		"occlusionRadius": occlusion_radius,
+		"clearDistance": clear_distance,
+		"sectionKeys": section_keys,
+		"sectionIndex": 0,
+		"sectionCells": [],
+		"sectionCellIndex": 0,
+		"sourceCells": [],
+		"sourceIndex": 0,
+		"affectedSources": [cell] if additive_update else [],
+		"propagation": {},
+		"propagationInitialized": false,
+		"phase": "propagate" if additive_update else "clear",
+		"dirtySections": {},
+		"clearedCount": 0,
+		"lightWriteCount": 0,
+		"complete": false
+	}
+
+func advance_cell_light_update(state_value, frame_budget_ms := 0.5, max_work_units := 96) -> Dictionary:
+	var state: Dictionary = state_value if state_value is Dictionary else {}
+	if state.is_empty() or bool(state.get("complete", false)):
+		return { "state": state, "complete": true, "processedWorkUnits": 0, "elapsedMs": 0.0 }
+	var started_usec := Time.get_ticks_usec()
+	var budget_usec := 0 if frame_budget_ms <= 0.0 else maxi(1, roundi(frame_budget_ms * 1000.0))
+	var work_limit := maxi(1, max_work_units)
+	var processed_work_units := 0
+	while processed_work_units < work_limit:
+		if budget_usec > 0 and Time.get_ticks_usec() - started_usec >= budget_usec:
+			break
+		var phase := String(state.get("phase", "clear"))
+		if phase == "clear":
+			var section_cells_value: Variant = state.get("sectionCells", [])
+			var section_cells: Array = section_cells_value if section_cells_value is Array else []
+			var section_cell_index := int(state.get("sectionCellIndex", 0))
+			if section_cell_index < section_cells.size():
+				var light_cell_value: Variant = section_cells[section_cell_index]
+				state["sectionCellIndex"] = section_cell_index + 1
+				if light_cell_value is Vector3i:
+					var light_cell: Vector3i = light_cell_value
+					var center: Vector3i = state.get("cell", Vector3i.ZERO)
+					if manhattan_distance(light_cell, center) <= int(state.get("clearDistance", MAX_BLOCK_LIGHT_LEVEL + 1)) and light_cells.has(light_cell):
+						erase_light_cell(light_cell)
+						write_loaded_section_cell_light(light_cell, base_light_for_cell(light_cell))
+						record_block_light_batch_dirty_section(state, light_cell)
+						state["clearedCount"] = int(state.get("clearedCount", 0)) + 1
+						state["lightWriteCount"] = int(state.get("lightWriteCount", 0)) + 1
+				processed_work_units += 1
+				continue
+			var section_keys_value: Variant = state.get("sectionKeys", [])
+			var section_keys: Array = section_keys_value if section_keys_value is Array else []
+			var section_index := int(state.get("sectionIndex", 0))
+			if section_index < section_keys.size():
+				var section_key_value: Variant = section_keys[section_index]
+				state["sectionIndex"] = section_index + 1
+				var next_cells: Array = []
+				if section_key_value is Vector3i:
+					var bucket_value: Variant = light_cells_by_section.get(section_key_value, {})
+					if bucket_value is Dictionary:
+						next_cells = (bucket_value as Dictionary).keys()
+				state["sectionCells"] = next_cells
+				state["sectionCellIndex"] = 0
+				processed_work_units += 1
+				continue
+			state["sourceCells"] = block_light_sources.keys()
+			state["sourceIndex"] = 0
+			state["sectionCells"] = []
+			state["phase"] = "sources"
+			continue
+		if phase == "sources":
+			var source_cells_value: Variant = state.get("sourceCells", [])
+			var source_cells: Array = source_cells_value if source_cells_value is Array else []
+			var source_index := int(state.get("sourceIndex", 0))
+			if source_index < source_cells.size():
+				var source_cell_value: Variant = source_cells[source_index]
+				state["sourceIndex"] = source_index + 1
+				if source_cell_value is Vector3i:
+					var source_cell: Vector3i = source_cell_value
+					var source_level := int(block_light_sources.get(source_cell, 0))
+					var center: Vector3i = state.get("cell", Vector3i.ZERO)
+					if source_level > 0 and manhattan_distance(source_cell, center) <= int(state.get("clearDistance", MAX_BLOCK_LIGHT_LEVEL + 1)) + source_level:
+						var affected_value: Variant = state.get("affectedSources", [])
+						var affected_sources: Array = affected_value if affected_value is Array else []
+						affected_sources.append(source_cell)
+						state["affectedSources"] = affected_sources
+				processed_work_units += 1
+				continue
+			state["phase"] = "propagate"
+			continue
+		if phase == "propagate":
+			var propagation_value: Variant = state.get("propagation", {})
+			var propagation: Dictionary = propagation_value if propagation_value is Dictionary else {}
+			if not bool(state.get("propagationInitialized", false)):
+				var affected_value: Variant = state.get("affectedSources", [])
+				var affected_sources: Array = affected_value if affected_value is Array else []
+				propagation = begin_all_block_light_propagation(affected_sources)
+				state["propagation"] = propagation
+				state["propagationInitialized"] = true
+			var dirty_value: Variant = state.get("dirtySections", {})
+			var dirty_sections: Dictionary = dirty_value if dirty_value is Dictionary else {}
+			var propagation_result := advance_block_light_propagation(propagation, String(state.get("reason", "")), dirty_sections)
+			state["propagation"] = propagation_result.get("state", propagation)
+			state["dirtySections"] = dirty_sections
+			processed_work_units += maxi(1, int(propagation_result.get("processedWorkUnits", 0)))
+			if bool(propagation_result.get("complete", false)):
+				flush_block_light_batch_dirty_sections(state)
+				state["complete"] = true
+				state["phase"] = "complete"
+				break
+			continue
+		state["complete"] = true
+		break
+	return {
+		"state": state,
+		"complete": bool(state.get("complete", false)),
+		"processedWorkUnits": processed_work_units,
+		"elapsedMs": float(Time.get_ticks_usec() - started_usec) / 1000.0
+	}
 
 func set_cell_lights_batch(changes: Array, reason := "") -> Dictionary:
 	var state := begin_cell_lights_batch(changes, reason)
@@ -1091,7 +1285,7 @@ func advance_cell_lights_batch(state_value, frame_budget_ms := 2.0, max_work_uni
 			state["clearIndex"] = clear_index + 1
 			if light_cell_value is Vector3i:
 				var light_cell: Vector3i = light_cell_value
-				light_cells.erase(light_cell)
+				erase_light_cell(light_cell)
 				write_loaded_section_cell_light(light_cell, base_light_for_cell(light_cell))
 				record_block_light_batch_dirty_section(state, light_cell)
 				state["lightWriteCount"] = int(state.get("lightWriteCount", 0)) + 1
@@ -1189,7 +1383,7 @@ func advance_block_light_propagation(propagation_value, reason := "", dirty_sect
 			current_light = (light_cells[cell] as Dictionary).duplicate(true)
 		if cell_level > int(current_light.get("block", 0)):
 			current_light["block"] = cell_level
-			light_cells[cell] = current_light
+			store_light_cell(cell, current_light)
 			write_loaded_section_cell_light(cell, current_light)
 			record_block_light_batch_dirty_section_lookup(dirty_sections, cell)
 		if cell_level > 1:
@@ -1233,6 +1427,25 @@ func record_block_light_batch_dirty_section_lookup(dirty_sections: Dictionary, c
 	var section_key := section_key_for_cell(cell)
 	dirty_sections[section_key] = int(dirty_sections.get(section_key, 0)) + 1
 
+func store_light_cell(cell: Vector3i, light: Dictionary) -> void:
+	light_cells[cell] = light
+	var section_key := section_key_for_cell(cell)
+	var bucket: Dictionary = light_cells_by_section.get(section_key, {}) if light_cells_by_section.get(section_key, {}) is Dictionary else {}
+	bucket[cell] = true
+	light_cells_by_section[section_key] = bucket
+
+func erase_light_cell(cell: Vector3i) -> void:
+	light_cells.erase(cell)
+	var section_key := section_key_for_cell(cell)
+	if not light_cells_by_section.has(section_key):
+		return
+	var bucket: Dictionary = light_cells_by_section.get(section_key, {}) if light_cells_by_section.get(section_key, {}) is Dictionary else {}
+	bucket.erase(cell)
+	if bucket.is_empty():
+		light_cells_by_section.erase(section_key)
+	else:
+		light_cells_by_section[section_key] = bucket
+
 func flush_block_light_batch_dirty_sections(state: Dictionary) -> void:
 	var dirty_value: Variant = state.get("dirtySections", {})
 	var dirty_sections: Dictionary = dirty_value if dirty_value is Dictionary else {}
@@ -1273,7 +1486,9 @@ func with_light_override(cell: Vector3i, state: Dictionary) -> Dictionary:
 
 func base_light_for_cell(cell: Vector3i) -> Dictionary:
 	var state := {}
-	if edited_cells.has(cell):
+	if scene_block_cells.has(cell):
+		state = (scene_block_cells[cell] as Dictionary).duplicate(true)
+	elif edited_cells.has(cell):
 		state = (edited_cells[cell] as Dictionary).duplicate(true)
 	else:
 		state = generated_cell_state(cell)
@@ -1287,7 +1502,7 @@ func rebuild_block_light_neighborhood(center_cell: Vector3i, radius: int, reason
 		if manhattan_distance(light_cell, center_cell) <= clamped_radius + MAX_BLOCK_LIGHT_LEVEL:
 			cleared_cells.append(light_cell)
 	for light_cell in cleared_cells:
-		light_cells.erase(light_cell)
+		erase_light_cell(light_cell)
 		write_loaded_section_cell_light(light_cell, base_light_for_cell(light_cell))
 		mark_section_dirty(section_key_for_cell(light_cell), { "reason": reason, "cell": light_cell, "lightOnly": true })
 	for source_value in block_light_sources.keys():
@@ -1306,7 +1521,7 @@ func rebuild_all_block_light_sources(reason := "") -> void:
 			cleared_cells.append(cell_value)
 	sort_light_cells(cleared_cells)
 	for light_cell in cleared_cells:
-		light_cells.erase(light_cell)
+		erase_light_cell(light_cell)
 		write_loaded_section_cell_light(light_cell, base_light_for_cell(light_cell))
 		mark_section_dirty(section_key_for_cell(light_cell), { "reason": reason, "cell": light_cell, "lightOnly": true })
 	var source_cells: Array[Vector3i] = []
@@ -1348,7 +1563,7 @@ func propagate_block_light_from_source(source_cell: Vector3i, source_level: int,
 			current_light = (light_cells[cell] as Dictionary).duplicate(true)
 		if cell_level > int(current_light.get("block", 0)):
 			current_light["block"] = cell_level
-			light_cells[cell] = current_light
+			store_light_cell(cell, current_light)
 			write_loaded_section_cell_light(cell, current_light)
 			mark_section_dirty(section_key_for_cell(cell), { "reason": reason, "cell": cell, "lightOnly": true })
 		if cell_level <= 1:
@@ -1495,6 +1710,264 @@ func apply_surface_deformation_edit(center: Vector3, radius: float, drop_depth: 
 	queue_sky_light_columns(skylight_columns, reason)
 	return changed
 
+func begin_sphere_edit_incremental(center: Vector3, radius: float, state: Dictionary, reason := "") -> Dictionary:
+	var candidates: Array[Vector3i] = []
+	if radius <= 0.0:
+		return { "kind": "sphere", "complete": true, "changedCells": [], "removedMaterials": {} }
+	var s := cell_size()
+	var target_solid := bool(state.get("solid", false))
+	var shell_radius := radius if target_solid else radius + s * 1.15
+	var min_cell := Vector3i(floori((center.x - shell_radius) / s), floori((center.y - shell_radius) / s), floori((center.z - shell_radius) / s))
+	var max_cell := Vector3i(ceili((center.x + shell_radius) / s), ceili((center.y + shell_radius) / s), ceili((center.z + shell_radius) / s))
+	for z in range(min_cell.z, max_cell.z + 1):
+		for y in range(min_cell.y, max_cell.y + 1):
+			for x in range(min_cell.x, max_cell.x + 1):
+				candidates.append(Vector3i(x, y, z))
+	return {
+		"kind": "sphere",
+		"complete": false,
+		"center": center,
+		"radius": radius,
+		"radiusSq": radius * radius,
+		"shellRadiusSq": shell_radius * shell_radius,
+		"state": state.duplicate(true),
+		"reason": reason,
+		"targetSolid": target_solid,
+		"deferSkyLight": terrain_edit_defer_sky_light(state),
+		"candidates": candidates,
+		"candidateIndex": 0,
+		"changedCells": [],
+		"removedMaterials": {},
+		"skylightColumns": {}
+	}
+
+func begin_surface_deformation_edit_incremental(center: Vector3, radius: float, drop_depth: float, state: Dictionary, reason := "") -> Dictionary:
+	var s := cell_size()
+	var safe_radius := maxf(radius, s * 0.75)
+	var columns: Array[Vector2i] = []
+	var min_cell_x := floori((center.x - safe_radius) / s) - 1
+	var max_cell_x := ceili((center.x + safe_radius) / s) + 1
+	var min_cell_z := floori((center.z - safe_radius) / s) - 1
+	var max_cell_z := ceili((center.z + safe_radius) / s) + 1
+	for z in range(min_cell_z, max_cell_z + 1):
+		for x in range(min_cell_x, max_cell_x + 1):
+			columns.append(Vector2i(x, z))
+	return {
+		"kind": "surface_deformation",
+		"phase": "plan_columns",
+		"complete": false,
+		"center": center,
+		"safeRadius": safe_radius,
+		"safeDrop": maxf(drop_depth, s * 0.35),
+		"state": state.duplicate(true),
+		"reason": reason,
+		"columns": columns,
+		"columnIndex": 0,
+		"columnTargets": [],
+		"targetIndex": 0,
+		"activeColumn": {},
+		"changedCells": [],
+		"removedMaterials": {},
+		"skylightColumns": {}
+	}
+
+func advance_incremental_edit(job: Dictionary, frame_budget_ms := 0.35, max_work_units := 8) -> Dictionary:
+	if bool(job.get("complete", false)):
+		return { "state": job, "complete": true, "processedWorkUnits": 0 }
+	var started_usec := Time.get_ticks_usec()
+	var budget_usec := 0 if frame_budget_ms <= 0.0 else maxi(1, roundi(frame_budget_ms * 1000.0))
+	var processed := 0
+	var work_limit := maxi(1, max_work_units)
+	while processed < work_limit and (budget_usec <= 0 or Time.get_ticks_usec() - started_usec < budget_usec):
+		if String(job.get("kind", "")) == "surface_deformation":
+			advance_surface_deformation_edit_unit(job)
+		else:
+			advance_sphere_edit_unit(job)
+		processed += 1
+		if bool(job.get("complete", false)):
+			break
+	return {
+		"state": job,
+		"complete": bool(job.get("complete", false)),
+		"processedWorkUnits": processed,
+		"elapsedMs": float(Time.get_ticks_usec() - started_usec) / 1000.0
+	}
+
+func advance_sphere_edit_unit(job: Dictionary) -> void:
+	var candidates_value: Variant = job.get("candidates", [])
+	var candidates: Array = candidates_value if candidates_value is Array else []
+	var index := int(job.get("candidateIndex", 0))
+	if index >= candidates.size():
+		finish_incremental_edit(job)
+		return
+	job["candidateIndex"] = index + 1
+	var cell_value: Variant = candidates[index]
+	if not (cell_value is Vector3i):
+		return
+	var cell: Vector3i = cell_value
+	var s := cell_size()
+	var center: Vector3 = job.get("center", Vector3.ZERO)
+	var cell_center := Vector3((float(cell.x) + 0.5) * s, (float(cell.y) + 0.5) * s, (float(cell.z) + 0.5) * s)
+	var distance_sq := cell_center.distance_squared_to(center)
+	if distance_sq > float(job.get("shellRadiusSq", 0.0)):
+		return
+	var distance := sqrt(distance_sq)
+	var radius := float(job.get("radius", 0.0))
+	var target_solid := bool(job.get("targetSolid", false))
+	var state_value: Variant = job.get("state", {})
+	var state: Dictionary = state_value if state_value is Dictionary else {}
+	var existing := get_cell_state(cell)
+	var edited_state := {}
+	if distance_sq <= float(job.get("radiusSq", 0.0)) or target_solid:
+		edited_state = state.duplicate(true)
+		edited_state["density"] = sphere_edit_density(distance, radius, target_solid)
+	else:
+		if not bool(existing.get("solid", false)):
+			return
+		edited_state = existing.duplicate(true)
+		edited_state["density"] = clampf(distance - radius, s * 0.05, s * 1.35)
+		var metadata: Dictionary = edited_state.get("metadata", {}) if edited_state.get("metadata", {}) is Dictionary else {}
+		metadata = metadata.duplicate(true)
+		metadata["source"] = "excavation_boundary"
+		if bool(job.get("deferSkyLight", false)):
+			metadata["deferSkyLight"] = true
+		edited_state["metadata"] = metadata
+	record_incremental_edit_change(job, cell, existing, edited_state)
+	set_cell_state_with_previous(cell, edited_state, existing, String(job.get("reason", "")), false)
+
+func advance_surface_deformation_edit_unit(job: Dictionary) -> void:
+	var phase := String(job.get("phase", "plan_columns"))
+	if phase == "plan_columns":
+		var columns_value: Variant = job.get("columns", [])
+		var columns: Array = columns_value if columns_value is Array else []
+		var column_index := int(job.get("columnIndex", 0))
+		if column_index >= columns.size():
+			job["phase"] = "edit_columns"
+			return
+		job["columnIndex"] = column_index + 1
+		var column_value: Variant = columns[column_index]
+		if not (column_value is Vector2i):
+			return
+		var column: Vector2i = column_value
+		var s := cell_size()
+		var center: Vector3 = job.get("center", Vector3.ZERO)
+		var safe_radius := float(job.get("safeRadius", s))
+		var column_center := Vector2((float(column.x) + 0.5) * s, (float(column.y) + 0.5) * s)
+		var horizontal_distance := column_center.distance_to(Vector2(center.x, center.z))
+		if horizontal_distance > safe_radius:
+			return
+		var t := clampf(horizontal_distance / safe_radius, 0.0, 1.0)
+		var falloff := 1.0 - smoothstep01(t)
+		if falloff <= 0.001:
+			return
+		var surface_y := current_surface_projection_y_for_column(Vector3i(column.x, 0, column.y))
+		var safe_drop := float(job.get("safeDrop", s * 0.35))
+		var surface_target_y := surface_y - safe_drop * falloff
+		var impact_strength := clampf(falloff * 1.35, 0.0, 1.0)
+		var impact_target_y: float = lerp(surface_y, center.y - safe_drop * 0.72, impact_strength)
+		var target_y := minf(surface_target_y, impact_target_y)
+		if target_y >= surface_y - s * 0.08:
+			return
+		var targets_value: Variant = job.get("columnTargets", [])
+		var targets: Array = targets_value if targets_value is Array else []
+		targets.append({ "x": column.x, "z": column.y, "surfaceY": surface_y, "targetY": target_y })
+		job["columnTargets"] = targets
+		return
+	if phase != "edit_columns":
+		finish_incremental_edit(job)
+		return
+	var active_value: Variant = job.get("activeColumn", {})
+	var active: Dictionary = active_value if active_value is Dictionary else {}
+	if active.is_empty():
+		var targets_value: Variant = job.get("columnTargets", [])
+		var targets: Array = targets_value if targets_value is Array else []
+		var target_index := int(job.get("targetIndex", 0))
+		if target_index >= targets.size():
+			finish_incremental_edit(job)
+			return
+		var target_value: Variant = targets[target_index]
+		job["targetIndex"] = target_index + 1
+		if not (target_value is Dictionary):
+			return
+		active = (target_value as Dictionary).duplicate(true)
+		var s := cell_size()
+		active["nextY"] = ceili((float(active.get("surfaceY", 0.0)) + s * 0.60) / s)
+		active["lowY"] = floori((float(active.get("targetY", 0.0)) - s * 0.85) / s)
+		job["activeColumn"] = active
+		return
+	var next_y := int(active.get("nextY", 0))
+	var low_y := int(active.get("lowY", 0))
+	if next_y < low_y:
+		job["activeColumn"] = {}
+		return
+	active["nextY"] = next_y - 1
+	job["activeColumn"] = active
+	var cell := Vector3i(int(active.get("x", 0)), next_y, int(active.get("z", 0)))
+	var s := cell_size()
+	var cell_center_y := (float(next_y) + 0.5) * s
+	var surface_y := float(active.get("surfaceY", 0.0))
+	var target_y := float(active.get("targetY", surface_y))
+	var existing := get_cell_state(cell)
+	var state_value: Variant = job.get("state", {})
+	var state: Dictionary = state_value if state_value is Dictionary else {}
+	var edited_state := {}
+	if cell_center_y > target_y and cell_center_y <= surface_y + s * 0.65:
+		edited_state = state.duplicate(true)
+		edited_state["density"] = clampf(target_y - cell_center_y, -s * 2.0, -s * 0.05)
+		var air_metadata: Dictionary = edited_state.get("metadata", {}) if edited_state.get("metadata", {}) is Dictionary else {}
+		air_metadata = air_metadata.duplicate(true)
+		air_metadata["source"] = String(air_metadata.get("source", "player_dig"))
+		air_metadata["terrainMeshAffects"] = true
+		air_metadata["surfaceProjectionAffects"] = true
+		air_metadata["saveDelta"] = true
+		edited_state["metadata"] = air_metadata
+	elif bool(existing.get("solid", false)) and cell_center_y <= target_y and cell_center_y >= target_y - s * 1.25:
+		edited_state = existing.duplicate(true)
+		edited_state["density"] = clampf(target_y - cell_center_y, s * 0.05, s * 1.35)
+		var solid_metadata: Dictionary = edited_state.get("metadata", {}) if edited_state.get("metadata", {}) is Dictionary else {}
+		solid_metadata = solid_metadata.duplicate(true)
+		solid_metadata["source"] = "surface_excavation_boundary"
+		solid_metadata["terrainMeshAffects"] = true
+		solid_metadata["surfaceProjectionAffects"] = true
+		solid_metadata["saveDelta"] = true
+		edited_state["metadata"] = solid_metadata
+	else:
+		return
+	record_incremental_edit_change(job, cell, existing, edited_state)
+	set_cell_state_with_previous(cell, edited_state, existing, String(job.get("reason", "")), false)
+
+func record_incremental_edit_change(job: Dictionary, cell: Vector3i, existing: Dictionary, edited_state: Dictionary) -> void:
+	var changed_value: Variant = job.get("changedCells", [])
+	var changed: Array = changed_value if changed_value is Array else []
+	changed.append(cell)
+	job["changedCells"] = changed
+	if bool(existing.get("solid", false)) and not bool(edited_state.get("solid", false)):
+		var material_id := String(existing.get("material", ""))
+		if material_id != "" and material_id != "air":
+			var removed_value: Variant = job.get("removedMaterials", {})
+			var removed: Dictionary = removed_value if removed_value is Dictionary else {}
+			removed[material_id] = int(removed.get(material_id, 0)) + 1
+			job["removedMaterials"] = removed
+	if terrain_edit_updates_sky_light(edited_state) or terrain_edit_updates_sky_light(existing):
+		var columns_value: Variant = job.get("skylightColumns", {})
+		var columns: Dictionary = columns_value if columns_value is Dictionary else {}
+		columns[Vector2i(cell.x, cell.z)] = true
+		job["skylightColumns"] = columns
+
+func finish_incremental_edit(job: Dictionary) -> void:
+	if bool(job.get("finalized", false)):
+		job["complete"] = true
+		return
+	var columns_value: Variant = job.get("skylightColumns", {})
+	var columns: Dictionary = columns_value if columns_value is Dictionary else {}
+	queue_sky_light_columns(columns, String(job.get("reason", "")))
+	job["finalized"] = true
+	job["complete"] = true
+
+func terrain_edit_defer_sky_light(state: Dictionary) -> bool:
+	var metadata: Dictionary = state.get("metadata", {}) if state.get("metadata", {}) is Dictionary else {}
+	return bool(metadata.get("deferSkyLight", false))
+
 func current_surface_projection_y_for_column(cell: Vector3i) -> float:
 	if generator != null and generator.has_method("volume_surface_y_for_cell"):
 		return float(generator.call("volume_surface_y_for_cell", Vector3i(cell.x, 0, cell.z)))
@@ -1607,7 +2080,7 @@ func rebuild_sky_light_column(cell_x: int, cell_z: int, reason := "") -> void:
 			"block": int(existing_light.get("block", 0))
 		}
 		if int(existing_light.get("sky", 0)) != next_sky:
-			light_cells[cell] = next_light
+			store_light_cell(cell, next_light)
 			write_loaded_section_cell_light(cell, next_light)
 			mark_section_dirty(section_key_for_cell(cell), { "reason": reason, "cell": cell, "lightOnly": true, "skyColumn": true })
 		if solid:

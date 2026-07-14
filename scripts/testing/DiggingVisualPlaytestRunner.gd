@@ -157,6 +157,16 @@ func run() -> void:
 			JSON.stringify(outcome)
 		)
 		add_result(
+			"digging_visual_dig_%d_immediate_transaction_bounded" % [dig_index + 1],
+			float(outcome.get("destroyTargetFinalMs", INF)) < 2.0,
+			"finalDestroyMs=%.3f maxStrikeMs=%.3f" % [float(outcome.get("destroyTargetFinalMs", INF)), float(outcome.get("destroyTargetMaxMs", INF))]
+		)
+		add_result(
+			"digging_visual_dig_%d_all_strikes_bounded" % [dig_index + 1],
+			float(outcome.get("destroyTargetMaxMs", INF)) < 3.0,
+			"maxStrikeMs=%.3f" % float(outcome.get("destroyTargetMaxMs", INF))
+		)
+		add_result(
 			"digging_visual_dig_%d_opens_surface_cap" % [dig_index + 1],
 			bool(vertical_probe.get("passed", false)),
 			JSON.stringify(vertical_probe)
@@ -183,6 +193,8 @@ func flush_terrain_work_after_dig() -> void:
 	if main == null:
 		return
 	for _i in range(90):
+		if main.has_method("process_world_edit_followups"):
+			main.call("process_world_edit_followups")
 		if main.has_method("update_chunks"):
 			main.call("update_chunks", false)
 		await wait_process_frames(1)
@@ -199,6 +211,10 @@ func wait_for_surface_collision(max_frames: int) -> bool:
 	return false
 
 func terrain_flush_looks_idle() -> bool:
+	if main != null and main.has_method("world_edit_followup_stats"):
+		var edit_stats: Dictionary = main.call("world_edit_followup_stats")
+		if int(edit_stats.get("pendingEdits", 0)) > 0 or bool(edit_stats.get("structurePending", false)):
+			return false
 	var runtime := main.get_node_or_null("VoxelTerrainRuntime") if main != null else null
 	if runtime != null and runtime.has_method("stats"):
 		var runtime_stats: Dictionary = runtime.call("stats")
@@ -557,6 +573,7 @@ func perform_dig(dig_index: int) -> Dictionary:
 		max_destroy_ms = maxf(max_destroy_ms, destroy_ms)
 		final_destroy_ms = destroy_ms
 		final_performance_summary = performance_summary()
+		await drain_world_edit_followups(180)
 		await wait_process_frames(3)
 		await wait_physics_frames(1)
 		var after_count := inventory_count(drop_id)
@@ -595,6 +612,17 @@ func perform_dig(dig_index: int) -> Dictionary:
 		"targetSnapshots": target_snapshots,
 		"inventoryAfter": inventory_totals()
 	}
+
+func drain_world_edit_followups(max_frames: int) -> void:
+	if main == null or live_process:
+		return
+	for _i in range(maxi(1, max_frames)):
+		if main.has_method("process_world_edit_followups"):
+			main.call("process_world_edit_followups")
+		var stats: Dictionary = main.call("world_edit_followup_stats") if main.has_method("world_edit_followup_stats") else {}
+		if int(stats.get("pendingEdits", 0)) <= 0 and not bool(stats.get("structurePending", false)):
+			return
+		await wait_process_frames(1)
 
 func select_tool_for_material(material_id: String) -> void:
 	if inventory_system == null:

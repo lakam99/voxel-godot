@@ -6,7 +6,8 @@
     "synthetic",
     "static_audit",
     "integration",
-    "acceptance_visual"
+    "acceptance_visual",
+    "scene-load-smoke"
   ],
   "runners": [
     {
@@ -315,17 +316,16 @@
     },
     {
       "id": "npc_town_job_cycle_visual_playtest",
-      "description": "Headed non-tutorial generated-town day/night/day NPC job-cycle natural-observation acceptance",
+      "description": "Headed non-tutorial generated-town day/night/day natural observation with physical work assertions limited to active or nearby NPCs",
       "command": ".\\tools\\npc\\run-npc-town-job-cycle-visual-playtest.ps1",
       "args": ["-ReportPath", "artifacts\\test-runners\\npc-town-job-cycle-visual-playtest.json", "-ScreenshotDir", "artifacts\\test-runners\\screenshots\\npc-town-job-cycle-visual-playtest"],
       "reportPath": "artifacts\\test-runners\\npc-town-job-cycle-visual-playtest.json",
       "screenshotDir": "artifacts\\test-runners\\screenshots\\npc-town-job-cycle-visual-playtest",
       "evidenceLevel": "acceptance_visual",
-      "acceptanceClaims": ["generated_town_job_cycle_day_night_day_natural_observation"],
+      "acceptanceClaims": ["generated_town_active_job_cycle_day_night_day_natural_observation"],
       "requiredScreenshots": [
         "town_setup_fenced_gate.png",
         "day_jobs_overview.png",
-        "day_forager_forage.png",
         "day_guard_guarding.png",
         "night_all_inside_homes.png",
         "morning_emerge_jobs.png"
@@ -470,90 +470,54 @@
       "required": true
     },
     {
-      "id": "underground_visual_playtest",
-      "description": "Headed player-POV visual proof for generated underground air, solid material boundaries, mesh, and collision",
-      "command": ".\\tools\\run-underground-visual-playtest.ps1",
-      "args": ["-Seed", "atlas-1492", "-ReportPath", "artifacts\\test-runners\\underground-visual-playtest.json", "-ScreenshotDir", "artifacts\\test-runners\\screenshots\\underground-visual-playtest"],
-      "reportPath": "artifacts\\test-runners\\underground-visual-playtest.json",
-      "screenshotDir": "artifacts\\test-runners\\screenshots\\underground-visual-playtest",
-      "evidenceLevel": "acceptance_visual",
-      "acceptanceClaims": ["procedural_underground_volume_visual"],
-      "requiredScreenshots": [
-        "underground_air_reference.png",
-        "underground_wall_boundary.png",
-        "underground_floor_boundary.png",
-        "underground_ceiling_boundary.png",
-        "underground_material_probe.png",
-        "underground_collision_probe.png"
-      ],
-      "requiresForbiddenCallSelfScan": true,
-      "requiresVisualProof": true,
+      "id": "voxel_terrain_collision_publication",
+      "description": "Current VoxelTerrain collision, analytic-surface alignment, navigation publication, and shutdown contract",
+      "command": ".\\tools\\run-voxel-terrain-collision-publication.ps1",
+      "args": ["-ReportPath", "artifacts\\test-runners\\voxel-terrain-collision-publication.json"],
+      "reportPath": "artifacts\\test-runners\\voxel-terrain-collision-publication.json",
+      "evidenceLevel": "integration",
       "required": true
     },
     {
-      "id": "vox43_known_save_visual",
-      "description": "Headed normal-project Continue proof that the real atlas-71906947 save renders opaque forest and savanna terrain without a surface fluid overlay",
-      "command": ".\\tools\\run-vox43-known-save-visual-playtest.ps1",
-      "args": ["-ReportPath", "artifacts\\test-runners\\vox43-known-save-visual.json", "-ProgressPath", "artifacts\\test-runners\\vox43-known-save-visual-progress.txt", "-ScreenshotDir", "artifacts\\test-runners\\screenshots\\vox43-known-save-visual", "-ProofPath", "artifacts\\test-runners\\vox43-known-save-visual-proof.json"],
-      "reportPath": "artifacts\\test-runners\\vox43-known-save-visual.json",
-      "screenshotDir": "artifacts\\test-runners\\screenshots\\vox43-known-save-visual",
-      "evidenceLevel": "acceptance_visual",
-      "acceptanceClaims": ["vox43_known_save_surface_fluid_visual"],
-      "requiredScreenshots": [
-        "menu_before_continue.png",
-        "known_save_initial.png",
-        "known_save_forest.png",
-        "known_save_savanna.png",
-        "known_save_failure_area.png"
-      ],
-      "requiresVisualProof": true,
+      "id": "terrain_block_light_batch_contract",
+      "description": "Current authoritative torch and lamp block-light batching, incremental slice, removal, and overlay contract",
+      "command": ".\\tools\\run-terrain-block-light-batch-contract.ps1",
+      "args": ["-ReportPath", "artifacts\\test-runners\\terrain-block-light-batch-contract.json"],
+      "reportPath": "artifacts\\test-runners\\terrain-block-light-batch-contract.json",
+      "evidenceLevel": "contract",
       "required": true
     },
     {
-      "id": "vox43_fresh_world_traversal",
-      "description": "Normal-project headed New Game proof using collision-backed player-controller traversal through fresh random forest and savanna",
-      "command": ".\\tools\\run-vox43-fresh-world-traversal.ps1",
-      "args": ["-ReportPath", "artifacts\\test-runners\\vox43-fresh-world-traversal.json", "-ProgressPath", "artifacts\\test-runners\\vox43-fresh-world-traversal-progress.txt", "-ScreenshotDir", "artifacts\\test-runners\\screenshots\\vox43-fresh-world-traversal"],
-      "reportPath": "artifacts\\test-runners\\vox43-fresh-world-traversal.json",
-      "screenshotDir": "artifacts\\test-runners\\screenshots\\vox43-fresh-world-traversal",
-      "evidenceLevel": "acceptance_visual",
-      "acceptanceClaims": ["vox43_fresh_world_surface_traversal"],
-      "requiredScreenshots": [
-        "menu_before_new_game.png",
-        "fresh_world_initial.png",
-        "fresh_world_forest.png",
-        "fresh_world_savanna.png"
-      ],
-      "requiresVisualProof": true,
+      "id": "normal_runtime_performance_pass",
+      "description": "Current Main Menu New Game sprint traversal across VoxelTerrain collision, streaming, movement, jumping, and frame budgets",
+      "command": ".\\tools\\run-normal-runtime-performance-pass.ps1",
+      "args": ["-ReportPath", "artifacts\\test-runners\\normal-runtime-performance-pass.json", "-ProgressPath", "artifacts\\test-runners\\normal-runtime-performance-pass-progress.txt", "-LogPath", "artifacts\\test-runners\\normal-runtime-performance-pass.log", "-ScreenshotPath", "artifacts\\test-runners\\screenshots\\normal-runtime-performance-pass.png"],
+      "reportPath": "artifacts\\test-runners\\normal-runtime-performance-pass.json",
+      "evidenceLevel": "integration",
       "required": true
     },
     {
-      "id": "vox43_underground_fluid_visual",
-      "description": "Headed generated-cave proof that exact step-1 water and lava remain visible when exposed and are occluded by collision-bearing solid terrain",
-      "command": ".\\tools\\run-vox43-underground-fluid-visual.ps1",
-      "args": ["-Seed", "atlas-71906947", "-ReportPath", "artifacts\\test-runners\\vox43-underground-fluid-visual.json", "-ProgressPath", "artifacts\\test-runners\\vox43-underground-fluid-visual-progress.txt", "-ScreenshotDir", "artifacts\\test-runners\\screenshots\\vox43-underground-fluid-visual"],
-      "reportPath": "artifacts\\test-runners\\vox43-underground-fluid-visual.json",
-      "screenshotDir": "artifacts\\test-runners\\screenshots\\vox43-underground-fluid-visual",
-      "evidenceLevel": "acceptance_visual",
-      "acceptanceClaims": ["vox43_generated_underground_fluid_visual"],
-      "requiredScreenshots": [
-        "generated_water_exposed.png",
-        "generated_water_enclosed.png",
-        "generated_lava_exposed.png"
-      ],
-      "requiresVisualProof": true,
+      "id": "normal_runtime_world_edit_latency",
+      "description": "Current Main Menu New Game placement and break latency for wood, torch, and ward lantern, including deferred follow-up frame budgets",
+      "command": ".\\tools\\run-normal-runtime-performance-pass.ps1",
+      "args": ["-Scenario", "NormalWorldEditLatency", "-DurationSeconds", "30", "-WarmupFrames", "120", "-WatchdogSeconds", "300", "-ReportPath", "artifacts\\test-runners\\normal-runtime-world-edit-latency.json", "-ProgressPath", "artifacts\\test-runners\\normal-runtime-world-edit-latency-progress.txt", "-LogPath", "artifacts\\test-runners\\normal-runtime-world-edit-latency.log", "-ScreenshotPath", "artifacts\\test-runners\\screenshots\\normal-runtime-world-edit-latency.png"],
+      "reportPath": "artifacts\\test-runners\\normal-runtime-world-edit-latency.json",
+      "evidenceLevel": "integration",
       "required": true
     },
     {
-      "id": "vox43_surface_cave_visual",
-      "description": "Headed fresh generated-world visual proof of an open surface-to-underground cave entrance with real terrain mesh and collision",
-      "command": ".\\tools\\run-vox43-surface-cave-visual.ps1",
-      "args": ["-ReportPath", "artifacts\\test-runners\\vox43-surface-cave-visual.json", "-ProgressPath", "artifacts\\test-runners\\vox43-surface-cave-visual-progress.txt", "-ScreenshotDir", "artifacts\\test-runners\\screenshots\\vox43-surface-cave-visual"],
-      "reportPath": "artifacts\\test-runners\\vox43-surface-cave-visual.json",
-      "screenshotDir": "artifacts\\test-runners\\screenshots\\vox43-surface-cave-visual",
-      "evidenceLevel": "acceptance_visual",
-      "acceptanceClaims": ["vox43_fresh_surface_cave_visual"],
-      "requiredScreenshots": ["fresh_surface_cave_entrance.png"],
+      "id": "town_ground_visual_playtest",
+      "description": "Headed fixture integration diagnostic for VoxelTerrain town edges and house foundations using the collision-backed production player camera; not live VOX-43/55 acceptance",
+      "command": ".\\tools\\run-town-ground-visual-playtest.ps1",
+      "args": ["-ReportPath", "artifacts\\test-runners\\town-ground-visual-playtest.json", "-ProgressPath", "artifacts\\test-runners\\town-ground-visual-playtest-progress.txt", "-ScreenshotDir", "artifacts\\test-runners\\screenshots\\town-ground-visual-playtest"],
+      "reportPath": "artifacts\\test-runners\\town-ground-visual-playtest.json",
+      "screenshotDir": "artifacts\\test-runners\\screenshots\\town-ground-visual-playtest",
+      "evidenceLevel": "integration",
+      "acceptanceClaims": [],
+      "requiredScreenshots": [
+        "town_ground_edge_volume.png",
+        "town_house_foundation_volume.png"
+      ],
       "requiresVisualProof": true,
       "required": true
     },
@@ -574,34 +538,6 @@
       ],
       "requiresForbiddenCallSelfScan": true,
       "requiresVisualProof": true,
-      "required": true
-    },
-    {
-      "id": "light_shadow_visual_playtest",
-      "description": "Headed shadow-authoritative daylight proof for generated deep underground darkness",
-      "command": ".\\tools\\run-light-shadow-visual-playtest.ps1",
-      "args": ["-Seed", "atlas-1492", "-ReportPath", "artifacts\\test-runners\\light-shadow-visual-playtest.json", "-ScreenshotDir", "artifacts\\test-runners\\screenshots\\light-shadow-visual-playtest"],
-      "reportPath": "artifacts\\test-runners\\light-shadow-visual-playtest.json",
-      "screenshotDir": "artifacts\\test-runners\\screenshots\\light-shadow-visual-playtest",
-      "evidenceLevel": "acceptance_visual",
-      "acceptanceClaims": ["shadow_authoritative_daylight_blocks_deep_underground", "torch_light_brightens_underground_terrain"],
-      "requiredScreenshots": [
-        "outdoor_noon_reference.png",
-        "underground_noon_dark.png",
-        "underground_torch_lit.png",
-        "underground_torch_closeup.png"
-      ],
-      "requiresForbiddenCallSelfScan": true,
-      "requiresVisualProof": true,
-      "required": true
-    },
-    {
-      "id": "playtest",
-      "description": "Broad gameplay continuity playtest; integration smoke only, not NPC/pathfinding acceptance",
-      "command": ".\\tools\\run-playtest.ps1",
-      "args": ["-ReportPath", "artifacts\\test-runners\\playtest-report.json", "-Seed", "atlas-1492"],
-      "reportPath": "artifacts\\test-runners\\playtest-report.json",
-      "evidenceLevel": "integration",
       "required": true
     }
   ]

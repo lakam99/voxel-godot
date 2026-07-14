@@ -9,7 +9,7 @@ param(
     [string]$ScreenshotPath = "",
     [string]$Resolution = "",
     [int]$WatchdogSeconds = 0,
-    [ValidateSet("NormalSprintTraversal", "NormalTutorialTownGuardActivation")]
+    [ValidateSet("NormalSprintTraversal", "NormalTutorialTownGuardActivation", "NormalWorldEditLatency")]
     [string]$Scenario = "NormalSprintTraversal",
     [switch]$Headless,
     [switch]$UseRealSave

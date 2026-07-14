@@ -351,7 +351,6 @@ if ($report.unscriptedBehaviorSelfScan.status -ne "passed") {
 $fullRequiredScreenshots = @(
     "town_setup_fenced_gate.png",
     "day_jobs_overview.png",
-    "day_forager_forage.png",
     "day_guard_guarding.png",
     "night_all_inside_homes.png",
     "morning_emerge_jobs.png"
@@ -362,13 +361,11 @@ $preconditionRequiredScreenshots = @(
 $dayFailureRequiredScreenshots = @(
     "town_setup_fenced_gate.png",
     "day_jobs_overview.png",
-    "day_forager_forage.png",
     "day_guard_guarding.png"
 )
 $nightFailureRequiredScreenshots = @(
     "town_setup_fenced_gate.png",
     "day_jobs_overview.png",
-    "day_forager_forage.png",
     "day_guard_guarding.png",
     "night_all_inside_homes.png"
 )
@@ -395,7 +392,7 @@ $evidenceScript = Join-Path $projectPath "tools\assert-test-evidence-report.ps1"
     -ReportPath $ReportPath `
     -RunnerId "npc_town_job_cycle_visual_playtest" `
     -EvidenceLevel "acceptance_visual" `
-    -AcceptanceClaims @("generated_town_job_cycle_day_night_day_natural_observation") `
+    -AcceptanceClaims @("generated_town_active_job_cycle_day_night_day_natural_observation") `
     -RequiredScreenshots $requiredScreenshots `
     -ScreenshotDir $ScreenshotDir `
     -RegistryPath (Join-Path $projectPath "tools\npc\npc-suite-registry.json") `

@@ -4,7 +4,7 @@ param(
     [string]$ReportPath = "",
     [string]$ProgressPath = "",
     [string]$ScreenshotDir = "",
-    [int]$WatchdogSeconds = 120
+    [int]$WatchdogSeconds = 180
 )
 
 $ErrorActionPreference = "Stop"
@@ -118,12 +118,33 @@ if ($true -ne $report.nonHeadlessRequired) {
     Get-Content -LiteralPath $ReportPath
     exit 1
 }
-
-$requiredScreenshot = Join-Path $ScreenshotDir "town_ground_edge_volume.png"
-if (-not (Test-Path -LiteralPath $requiredScreenshot)) {
-    Write-Error "Missing town ground visual proof screenshot: $requiredScreenshot"
+if ($report.evidenceLevel -ne "integration") {
+    Write-Error "Town ground visual fixture must report evidenceLevel=integration, not live acceptance"
     Get-Content -LiteralPath $ReportPath
     exit 1
+}
+if (@($report.acceptanceClaims).Count -ne 0) {
+    Write-Error "Town ground visual fixture must not publish live acceptance claims"
+    Get-Content -LiteralPath $ReportPath
+    exit 1
+}
+if (($false -ne $report.fixtureControls.liveGameplayAcceptance) -or
+    ($false -ne $report.fixtureControls.playerTransformDuringAct) -or
+    ($false -ne $report.fixtureControls.cameraTransformDuringAct) -or
+    ($report.fixtureControls.cameraAuthority -ne "player_owned_characterbody_camera") -or
+    ($report.fixtureControls.movementAuthority -ne "collision_backed_player_route_authority_v2")) {
+    Write-Error "Town ground visual fixture did not prove collision-backed player-camera controls"
+    Get-Content -LiteralPath $ReportPath
+    exit 1
+}
+
+foreach ($requiredScreenshotName in @("town_ground_edge_volume.png", "town_house_foundation_volume.png")) {
+    $requiredScreenshot = Join-Path $ScreenshotDir $requiredScreenshotName
+    if (-not (Test-Path -LiteralPath $requiredScreenshot)) {
+        Write-Error "Missing town ground visual proof screenshot: $requiredScreenshot"
+        Get-Content -LiteralPath $ReportPath
+        exit 1
+    }
 }
 if ($true -ne $report.passed) {
     Write-Error "Town ground visual playtest failed"

@@ -3,7 +3,7 @@ param(
     [string]$ReportPath,
     [Parameter(Mandatory = $true)]
     [string]$RunnerId,
-    [ValidateSet("unit", "contract", "synthetic", "static_audit", "integration", "acceptance_visual")]
+    [ValidateSet("unit", "contract", "synthetic", "static_audit", "integration", "acceptance_visual", "scene-load-smoke")]
     [string]$EvidenceLevel = "unit",
     [string[]]$AcceptanceClaims = @(),
     [string[]]$RequiredScreenshots = @(),
@@ -139,11 +139,11 @@ if ($expectedClaims.Count -gt 0 -or $RequireForbiddenCallSelfScan) {
 }
 
 if ($EvidenceLevel -eq "acceptance_visual" -or $RequireVisualProof) {
-    if ($expectedClaims.Count -eq 0) {
+    if (($EvidenceLevel -eq "acceptance_visual") -and ($expectedClaims.Count -eq 0)) {
         $errors += "acceptance_visual runner must declare at least one acceptance claim"
     }
     if ($requiredScreenshots.Count -eq 0) {
-        $errors += "acceptance_visual runner must declare required screenshots"
+        $errors += "visual-evidence runner must declare required screenshots"
     }
     foreach ($fileName in $requiredScreenshots) {
         $candidate = if ([System.IO.Path]::IsPathRooted($fileName)) { $fileName } else { Join-Path $ScreenshotDir $fileName }
@@ -158,7 +158,7 @@ if ($EvidenceLevel -eq "acceptance_visual" -or $RequireVisualProof) {
 
     $captureCount = (Value-Count (Get-PropValue $report "captures")) + (Value-Count (Get-PropValue $report "visualCaptures"))
     if ($captureCount -le 0) {
-        $errors += "acceptance_visual report must include captures or visualCaptures"
+        $errors += "visual-evidence report must include captures or visualCaptures"
     }
 
     $timelineCount = (Value-Count (Get-PropValue $report "timeline")) +
@@ -166,7 +166,7 @@ if ($EvidenceLevel -eq "acceptance_visual" -or $RequireVisualProof) {
         (Value-Count (Get-PropValue $report "miraTimeline")) +
         (Value-Count (Get-PropValue $report "doorStateTimeline"))
     if ($timelineCount -le 0) {
-        $errors += "acceptance_visual report must include timeline proof"
+        $errors += "visual-evidence report must include timeline proof"
     }
 }
 

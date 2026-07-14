@@ -3244,12 +3244,12 @@ func add_npc_visual(parent: Node3D, body_material: StandardMaterial3D, accent_ma
 func notify_navigation_block_created(cell: Vector3i, block_type: String, block: Node = null) -> void:
     if autonomy_system:
         autonomy_system.notify_block_created(cell, block_type, block)
-        flush_navigation_change_bus()
+        navigation_change_flush_pending = true
 
 func notify_navigation_block_removed(cell: Vector3i, block_type: String, block: Node = null) -> void:
     if autonomy_system:
         autonomy_system.notify_block_removed(cell, block_type, block)
-        flush_navigation_change_bus()
+        navigation_change_flush_pending = true
 
 func notify_navigation_terrain_edited(cell: Vector2i, old_height: float, new_height: float) -> void:
     if autonomy_system:
@@ -3323,7 +3323,7 @@ func process_navigation_route_changes(events: Array) -> Array[Dictionary]:
 func notify_navigation_door_registered(door: Node) -> void:
     if autonomy_system:
         autonomy_system.notify_door_registered(door)
-        flush_navigation_change_bus()
+        navigation_change_flush_pending = true
 
 func notify_navigation_structure_metadata_changed(structure_id: String, bounds: AABB, metadata := {}) -> void:
     if autonomy_system:

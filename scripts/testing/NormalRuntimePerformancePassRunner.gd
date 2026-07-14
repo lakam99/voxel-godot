@@ -14,6 +14,7 @@ const MIN_RUNTIME_TRAVEL_DISTANCE := 45.0
 const MAX_ALLOWED_BELOW_COLLISION := 1.35
 const SCENARIO_SPRINT_TRAVERSAL := "NormalSprintTraversal"
 const SCENARIO_TUTORIAL_TOWN_GUARD_ACTIVATION := "NormalTutorialTownGuardActivation"
+const SCENARIO_WORLD_EDIT_LATENCY := "NormalWorldEditLatency"
 
 var report_path := ""
 var progress_path := ""
@@ -132,6 +133,8 @@ func run_normal_runtime_scenario() -> Dictionary:
         return failed_result(startup_loading_failure if startup_loading_failure != "" else "Main Menu New Game did not reach gameplay readiness")
     if scenario == SCENARIO_TUTORIAL_TOWN_GUARD_ACTIVATION:
         return await run_tutorial_town_guard_activation_scenario()
+    if scenario == SCENARIO_WORLD_EDIT_LATENCY:
+        return await run_world_edit_latency_scenario()
     if not configure_player_for_runtime_traversal():
         return failed_result("player could not be configured for normal runtime traversal")
     await warmup()
@@ -240,6 +243,137 @@ func run_tutorial_town_guard_activation_scenario() -> Dictionary:
         "metrics": metrics
     }
 
+func run_world_edit_latency_scenario() -> Dictionary:
+    stop_player_automation()
+    write_progress("world_edit_warmup:%d" % warmup_frames)
+    for _frame in range(warmup_frames):
+        await get_tree().process_frame
+    reset_runtime_performance_monitor()
+    samples.clear()
+    write_progress("world_edit_measure_start")
+    var operation_rows: Array[Dictionary] = []
+    var placed_blocks: Array[Node] = []
+    var player_body := main.get("player") as Node3D
+    if player_body == null:
+        return failed_result("world-edit latency scenario has no live player")
+    var origin_cell := Vector2i(int(main.call("world_to_cell", player_body.global_position.x)), int(main.call("world_to_cell", player_body.global_position.z)))
+    var block_types := ["woodBlock", "torch", "wardLantern"]
+    for index in range(block_types.size()):
+        var block_type := String(block_types[index])
+        var flat_cell := origin_cell + Vector2i(5 + index * 2, 4)
+        var world_y := float(main.call("surface_y_at_cell", Vector3i(flat_cell.x, 0, flat_cell.y))) + 0.04
+        var cell := Vector3i(flat_cell.x, roundi(world_y / 1.35), flat_cell.y)
+        var started_usec := Time.get_ticks_usec()
+        var block = main.call("create_block", cell, block_type, {
+            "player_placed": true,
+            "world_y": world_y,
+            "deferWorldEditFollowup": true
+        })
+        var create_ms := elapsed_ms(started_usec)
+        var feedback_started_usec := Time.get_ticks_usec()
+        if block is Node3D:
+            var feedback_color: Color = main.call("feedback_color_for_material", block_type)
+            main.call("play_feedback", "place", (block as Node3D).global_position, feedback_color, 5)
+        var feedback_ms := elapsed_ms(feedback_started_usec)
+        var award_started_usec := Time.get_ticks_usec()
+        main.call("award_place_xp", block_type)
+        var award_ms := elapsed_ms(award_started_usec)
+        var message_started_usec := Time.get_ticks_usec()
+        main.call("show_action_message", "Placed %s" % block_type)
+        var message_ms := elapsed_ms(message_started_usec)
+        var elapsed := elapsed_ms(started_usec)
+        operation_rows.append({
+            "operation": "place",
+            "blockType": block_type,
+            "elapsedMs": elapsed,
+            "createMs": create_ms,
+            "feedbackMs": feedback_ms,
+            "awardMs": award_ms,
+            "messageMs": message_ms
+        })
+        if block is Node:
+            placed_blocks.append(block)
+        await sample_world_edit_frame(operation_rows.size())
+    var placement_drain: Dictionary = await drain_world_edit_followups("placement", 4800)
+    for block_value in placed_blocks:
+        var block := block_value as Node3D
+        if block == null or not is_instance_valid(block):
+            continue
+        var block_type := String(block.get_meta("block_type", ""))
+        var started_usec := Time.get_ticks_usec()
+        main.call("complete_destroy_target", { "position": block.global_position }, block, "block", block_type)
+        var break_row := { "operation": "break", "blockType": block_type, "elapsedMs": elapsed_ms(started_usec) }
+        var destroy_metrics = main.get("last_destroy_target_metrics")
+        if destroy_metrics is Dictionary:
+            break_row.merge(destroy_metrics, true)
+            break_row["elapsedMs"] = elapsed_ms(started_usec)
+        operation_rows.append(break_row)
+        await sample_world_edit_frame(operation_rows.size())
+    var removal_drain: Dictionary = await drain_world_edit_followups("removal", 4800)
+    if screenshot_path != "":
+        write_progress("capture_screenshot")
+        await capture_screenshot()
+        write_progress("capture_screenshot_done")
+    var metrics: Dictionary = metrics_helper.call("summarize_samples", samples)
+    append_normal_metrics(metrics, int(placement_drain.get("frames", 0)) + int(removal_drain.get("frames", 0)))
+    var queue_stats: Dictionary = main.call("world_edit_followup_stats") if main.has_method("world_edit_followup_stats") else {}
+    metrics["worldEditOperations"] = operation_rows
+    metrics["worldEditFollowupQueue"] = queue_stats
+    metrics["placementDrain"] = placement_drain
+    metrics["removalDrain"] = removal_drain
+    metrics["worldEditLatencyThresholdsMs"] = { "immediateTransaction": 2.0, "enqueue": 0.5, "followupSlice": 3.0 }
+    var contextual_failures: Array = metrics_helper.call("performance_failures", metrics)
+    metrics["contextualRuntimeFailures"] = contextual_failures
+    var failures: Array = contextual_failures.duplicate()
+    if samples.is_empty():
+        failures.append("no world-edit performance samples captured")
+    for row in operation_rows:
+        if float(row.get("elapsedMs", 0.0)) > 2.0:
+            failures.append("%s %s immediate transaction took %.3fms" % [String(row.get("operation", "edit")), String(row.get("blockType", "block")), float(row.get("elapsedMs", 0.0))])
+    if not bool(placement_drain.get("complete", false)):
+        failures.append("placement follow-up queue did not drain")
+    if not bool(removal_drain.get("complete", false)):
+        failures.append("removal follow-up queue did not drain")
+    if float(queue_stats.get("peakEnqueueMs", 0.0)) > 0.5:
+        failures.append("world-edit enqueue peak %.3fms exceeded 0.5ms" % float(queue_stats.get("peakEnqueueMs", 0.0)))
+    if float(queue_stats.get("peakProcessMs", 0.0)) > 3.0:
+        failures.append("world-edit follow-up peak %.3fms exceeded 3ms" % float(queue_stats.get("peakProcessMs", 0.0)))
+    var passed := failures.is_empty()
+    flush_async_save()
+    return {
+        "id": "normal_runtime_world_edit_latency",
+        "scenario": scenario,
+        "passed": passed,
+        "details": result_details(metrics, failures),
+        "failures": failures,
+        "sampleCount": samples.size(),
+        "metrics": metrics
+    }
+
+func sample_world_edit_frame(frame: int) -> void:
+    await get_tree().process_frame
+    if frame % 1 == 0 and main != null and main.has_method("debug_performance_state"):
+        samples.append(main.call("debug_performance_state"))
+
+func drain_world_edit_followups(label: String, max_frames: int) -> Dictionary:
+    var max_frame_gap_ms := 0.0
+    var stable_empty_frames := 0
+    for frame in range(max_frames):
+        var frame_started_usec := Time.get_ticks_usec()
+        await get_tree().process_frame
+        max_frame_gap_ms = maxf(max_frame_gap_ms, elapsed_ms(frame_started_usec))
+        if frame % 3 == 0 and main != null and main.has_method("debug_performance_state"):
+            samples.append(main.call("debug_performance_state"))
+        var queue_stats: Dictionary = main.call("world_edit_followup_stats") if main != null and main.has_method("world_edit_followup_stats") else {}
+        var empty := int(queue_stats.get("pendingEdits", 0)) <= 0 and not bool(queue_stats.get("structurePending", false))
+        stable_empty_frames = stable_empty_frames + 1 if empty else 0
+        if stable_empty_frames >= 3:
+            write_progress("world_edit_%s_drained:%d" % [label, frame + 1])
+            return { "complete": true, "frames": frame + 1, "maxFrameGapMs": max_frame_gap_ms }
+        if frame % 240 == 0:
+            write_progress("world_edit_%s_wait:%d" % [label, frame])
+    return { "complete": false, "frames": max_frames, "maxFrameGapMs": max_frame_gap_ms }
+
 func launch_main_via_menu_new_game_input() -> bool:
     Input.set_mouse_mode(Input.MOUSE_MODE_VISIBLE)
     write_progress("instantiate_main_menu")
@@ -329,7 +463,7 @@ func dispatch_menu_mouse_button(position: Vector2, button_index: int, pressed: b
     get_viewport().push_input(event)
 
 func normal_runtime_environment_failure() -> String:
-    if not [SCENARIO_SPRINT_TRAVERSAL, SCENARIO_TUTORIAL_TOWN_GUARD_ACTIVATION].has(scenario):
+    if not [SCENARIO_SPRINT_TRAVERSAL, SCENARIO_TUTORIAL_TOWN_GUARD_ACTIVATION, SCENARIO_WORLD_EDIT_LATENCY].has(scenario):
         return "unsupported normal runtime performance scenario: %s" % scenario
     if OS.get_environment("VOXEL_PLAYTEST").strip_edges() != "":
         return "VOXEL_PLAYTEST must be unset for normal runtime performance"
