@@ -81,6 +81,31 @@ func run() -> void:
 		published_frame >= 0 and navigation_loaded_after > navigation_loaded_before,
 		"before=%d after=%d publishedFrame=%d" % [navigation_loaded_before, navigation_loaded_after, published_frame]
 	)
+	var motion_proof: Dictionary = runtime.call(
+		"collision_proof_for_motion",
+		player.global_position,
+		player.global_position + Vector3(0.25, 0.0, 0.0),
+		0.42
+	)
+	var motion_samples = motion_proof.get("proofs", [])
+	var first_motion_sample: Dictionary = motion_samples[0] \
+		if motion_samples is Array and not motion_samples.is_empty() and motion_samples[0] is Dictionary else {}
+	add_result(
+		"voxel_publication_motion_gate_uses_mesh_authority",
+		bool(motion_proof.get("passed", false))
+			and not bool(motion_proof.get("supportRequiredForMotion", true))
+			and bool((first_motion_sample.get("mesh", {}) as Dictionary).get("passed", false)),
+		JSON.stringify(motion_proof)
+	)
+	var disconnected_components: Array = runtime.call(
+		"connected_gameplay_chunk_components",
+		[chunk_key, chunk_key + Vector2i(0, 5)]
+	)
+	add_result(
+		"voxel_publication_disconnected_startup_regions_are_identified",
+		disconnected_components.size() == 2,
+		JSON.stringify(disconnected_components)
+	)
 	var shutdown_started_usec := Time.get_ticks_usec()
 	main.set_process(false)
 	main.set_physics_process(false)

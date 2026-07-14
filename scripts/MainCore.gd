@@ -813,20 +813,26 @@ func wait_for_initial_voxel_collision_publication(chunk_keys: Array[Vector2i]) -
 
 func wait_for_initial_player_collision_publication() -> Dictionary:
     var runtime = get("voxel_terrain_runtime")
-    if runtime == null or not is_instance_valid(runtime) or not runtime.has_method("collision_proof_for_world_position") or player == null:
+    if runtime == null or not is_instance_valid(runtime) or player == null:
+        return StartupReadinessResultScript.failed("missing_player_collision_proof_authority")
+    var proof_method := "collision_mesh_ready_for_body_position" \
+        if runtime.has_method("collision_mesh_ready_for_body_position") else "collision_proof_for_world_position"
+    if not runtime.has_method(proof_method):
         return StartupReadinessResultScript.failed("missing_player_collision_proof_authority")
     var started_usec := Time.get_ticks_usec()
     var footprint_radius := 0.35
     while true:
-        var proof: Dictionary = runtime.call("collision_proof_for_world_position", player.global_position, footprint_radius)
+        var proof: Dictionary = runtime.call(proof_method, player.global_position, footprint_radius)
         if bool(proof.get("passed", false)):
             player.set_meta("startup_terrain_collision_proof", proof)
             return StartupReadinessResultScript.ready({}, {
                 "playerCollisionPassed": true,
+                "proofMethod": proof_method,
                 "proof": proof
             })
         await startup_loading_yield("Loading terrain collision at player spawn", "terrain_collision", "pending", {
             "playerCollisionPassed": false,
+            "proofMethod": proof_method,
             "proofReason": String(proof.get("reason", "pending"))
         })
         if float(Time.get_ticks_usec() - started_usec) / 1000000.0 >= INITIAL_READINESS_TIMEOUT_SECONDS:

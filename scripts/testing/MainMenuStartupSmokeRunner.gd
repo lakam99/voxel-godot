@@ -69,6 +69,8 @@ func run() -> void:
 		errors.append("menu ui was not released after startup")
 	else:
 		validate_readiness(main)
+	if errors.is_empty() and OS.get_environment("VOXEL_MAIN_MENU_STARTUP_MOVEMENT_AUDIT").strip_edges() == "1":
+		await exercise_saved_player_movement(main, details)
 	if errors.is_empty() and OS.get_environment("VOXEL_MAIN_MENU_STARTUP_RUNTIME_RESET").strip_edges() == "1":
 		await exercise_runtime_new_game(main, details)
 	if errors.is_empty() and OS.get_environment("VOXEL_MAIN_MENU_STARTUP_PERSIST_SAVE").strip_edges() == "1":
@@ -179,6 +181,85 @@ func persist_save_fixture(main, details: Dictionary) -> void:
 	if not saved:
 		errors.append("Continue fixture save failed")
 
+
+func exercise_saved_player_movement(main, details: Dictionary) -> void:
+	var player: CharacterBody3D = main.get("player") as CharacterBody3D if main != null else null
+	var runtime: Node = main.get("voxel_terrain_runtime") as Node if main != null else null
+	if player == null or runtime == null:
+		errors.append("VOX-115 movement audit could not find player or voxel runtime")
+		return
+	main.set("autosave_enabled", false)
+	var initial_position: Vector3 = player.global_position
+	var initial_hold_frames := int(player.get("terrain_collision_hold_frames"))
+	var strict_support_proof: Dictionary = runtime.call("collision_proof_for_world_position", initial_position, 0.42) \
+		if runtime.has_method("collision_proof_for_world_position") else {}
+	var initial_motion_proofs: Array = []
+	var directions: Array[Vector3] = [Vector3.RIGHT, Vector3.FORWARD, Vector3.LEFT, Vector3.BACK]
+	for direction in directions:
+		var target: Vector3 = initial_position + direction * 0.25
+		var proof: Dictionary = main.call("terrain_collision_motion_proof", initial_position, target, 0.42)
+		initial_motion_proofs.append({"direction": direction, "proof": proof})
+	player.velocity = Vector3.ZERO
+	player.set("automated_input", true)
+	player.set("automated_sprint", false)
+	player.set("automated_jump", true)
+	var max_horizontal_displacement: float = 0.0
+	var accumulated_horizontal_distance: float = 0.0
+	var previous_position: Vector3 = initial_position
+	var max_vertical_position: float = initial_position.y
+	var min_vertical_position: float = initial_position.y
+	var jump_observed := false
+	var physics_frames := 0
+	for index in range(360):
+		var direction: Vector3 = directions[int(index / 90)]
+		player.set("automated_move", direction)
+		if index % 45 == 0:
+			player.set("automated_jump", true)
+		await physics_frame
+		physics_frames += 1
+		jump_observed = jump_observed or bool(player.get("jumped_this_frame"))
+		var current: Vector3 = player.global_position
+		var from_start: Vector3 = current - initial_position
+		from_start.y = 0.0
+		max_horizontal_displacement = maxf(max_horizontal_displacement, from_start.length())
+		var step: Vector3 = current - previous_position
+		step.y = 0.0
+		accumulated_horizontal_distance += step.length()
+		previous_position = current
+		max_vertical_position = maxf(max_vertical_position, current.y)
+		min_vertical_position = minf(min_vertical_position, current.y)
+		await process_frame
+	player.set("automated_move", Vector3.ZERO)
+	player.set("automated_sprint", false)
+	player.set("automated_jump", false)
+	player.set("automated_input", false)
+	var hold_frame_delta := int(player.get("terrain_collision_hold_frames")) - initial_hold_frames
+	var audit := {
+		"initialPosition": initial_position,
+		"finalPosition": player.global_position,
+		"physicsFrames": physics_frames,
+		"terrainCollisionHoldFrameDelta": hold_frame_delta,
+		"maxHorizontalDisplacement": max_horizontal_displacement,
+		"accumulatedHorizontalDistance": accumulated_horizontal_distance,
+		"maxVerticalRise": max_vertical_position - initial_position.y,
+		"maxVerticalDrop": initial_position.y - min_vertical_position,
+		"jumpObserved": jump_observed,
+		"strictSupportProof": strict_support_proof,
+		"initialMotionProofs": initial_motion_proofs,
+		"lastMotionProof": (player.get("last_terrain_collision_proof") as Dictionary).duplicate(true) \
+			if player.get("last_terrain_collision_proof") is Dictionary else {},
+		"startupCollisionProof": (player.get_meta("startup_terrain_collision_proof", {}) as Dictionary).duplicate(true) \
+			if player.get_meta("startup_terrain_collision_proof", {}) is Dictionary else {},
+		"runtimeStats": runtime.call("stats") if runtime.has_method("stats") else {}
+	}
+	details["vox115MovementAudit"] = audit
+	if hold_frame_delta != 0:
+		errors.append("VOX-115 movement audit entered the terrain collision hold for %d frames" % hold_frame_delta)
+	if max_horizontal_displacement < 0.5:
+		errors.append("VOX-115 movement audit remained horizontally immobilized (%.3f m)" % max_horizontal_displacement)
+	if not jump_observed:
+		errors.append("VOX-115 movement audit never executed a jump")
+
 func exercise_runtime_new_game(main, details: Dictionary) -> void:
 	var started_msec := Time.get_ticks_msec()
 	var runtime_before = main.get("voxel_terrain_runtime")
@@ -250,21 +331,27 @@ func cleanup_loaded_game(menu: Node, main) -> void:
 func write_report(passed: bool, details: Dictionary) -> void:
 	DirAccess.make_dir_recursive_absolute(report_path.get_base_dir())
 	var runtime_reset_mode := OS.get_environment("VOXEL_MAIN_MENU_STARTUP_RUNTIME_RESET").strip_edges() == "1"
+	var movement_audit_mode := OS.get_environment("VOXEL_MAIN_MENU_STARTUP_MOVEMENT_AUDIT").strip_edges() == "1"
 	var runner_id := "main_menu_continue_startup_smoke" if launch_mode == "continue" else "main_menu_startup_smoke"
 	var test_id := "vox_73_main_menu_continue_readiness_smoke" if launch_mode == "continue" else "vox_73_main_menu_startup_readiness_smoke"
 	if runtime_reset_mode:
 		runner_id = "main_menu_runtime_reset_smoke"
 		test_id = "vox_73_main_menu_runtime_reset_readiness_smoke"
+	if movement_audit_mode:
+		runner_id = "vox_115_mountain_save_continue_movement_audit"
+		test_id = "vox_115_affected_save_continue_and_player_movement"
 	var report := {
 		"schemaVersion": 1,
 		"runnerId": runner_id,
 		"testId": test_id,
 		"finished": true,
 		"passed": passed,
-		"evidenceLevel": "scene-load-smoke",
-		"scope": "Main Menu -> %s startup readiness%s through the production scene with an isolated save mode. This is scene-load evidence, not unflagged live gameplay acceptance." % [
+		"evidenceLevel": "integration" if movement_audit_mode else "scene-load-smoke",
+		"scope": "Main Menu -> %s startup readiness%s%s through the production scene with an isolated save mode. %s" % [
 			"Continue" if launch_mode == "continue" else "New Game",
-			" plus an in-session New Game reset" if runtime_reset_mode else ""
+			" plus an in-session New Game reset" if runtime_reset_mode else "",
+			" plus saved-pose movement/jump auditing" if movement_audit_mode else "",
+			"The VOX-115 audit uses the real saved player pose and physics without teleporting during the act phase." if movement_audit_mode else "This is scene-load evidence, not unflagged live gameplay acceptance."
 		],
 		"status": "passed" if passed else "failed",
 		"steps": steps,

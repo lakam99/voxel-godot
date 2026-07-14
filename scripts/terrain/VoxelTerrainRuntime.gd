@@ -46,6 +46,10 @@ var collision_probe_attempts := 0
 var collision_probe_passes := 0
 var view_distance_expansion_elapsed := 0.0
 var view_distance_expansion_requested := false
+var startup_auxiliary_viewers: Array[Dictionary] = []
+var startup_auxiliary_cleanup_requested := false
+var startup_auxiliary_cleanup_frames_remaining := 0
+var startup_auxiliary_viewers_created := 0
 
 func setup(main_node) -> Dictionary:
 	main = main_node
@@ -126,6 +130,7 @@ func reset_for_current_seed_staged() -> Dictionary:
 	var previous_mesh_blocks := published_mesh_blocks.size()
 	var previous_gameplay_chunks := published_gameplay_chunks.size()
 	var invalidated_chunks := invalidate_gameplay_publication()
+	clear_startup_auxiliary_viewers()
 	authority_ready = false
 	set_process(false)
 	set_physics_process(false)
@@ -243,6 +248,7 @@ func apply_startup_vertical_bounds() -> void:
 	)
 
 func configure_startup_collision_bounds(chunk_keys: Array) -> void:
+	clear_startup_auxiliary_viewers()
 	if terrain == null or main == null or chunk_keys.is_empty():
 		return
 	var world_generation = main.get("world_generation_system")
@@ -265,6 +271,187 @@ func configure_startup_collision_bounds(chunk_keys: Array) -> void:
 	if min_surface_cell > max_surface_cell:
 		return
 	apply_vertical_cell_bounds(min_surface_cell - 16, max_surface_cell + 16)
+	configure_startup_auxiliary_viewers(chunk_keys, world_generation)
+
+
+func configure_startup_auxiliary_viewers(chunk_keys: Array, world_generation) -> void:
+	if viewer == null or not is_instance_valid(viewer):
+		return
+	var player_value = main.get("player") if main != null else null
+	if not (player_value is Node3D) or not is_instance_valid(player_value):
+		return
+	var player_position: Vector3 = (player_value as Node3D).global_position
+	var player_chunk := Vector2i(
+		floori(player_position.x / (float(GAME_CHUNK_SIZE) * CELL)),
+		floori(player_position.z / (float(GAME_CHUNK_SIZE) * CELL))
+	)
+	var components := connected_gameplay_chunk_components(chunk_keys)
+	for component_value in components:
+		var component: Array = component_value
+		if component.has(player_chunk) or primary_viewer_covers_component(component):
+			continue
+		for spec_value in auxiliary_viewer_specs_for_component(component, world_generation):
+			var spec: Dictionary = spec_value
+			var auxiliary := VoxelViewer.new()
+			auxiliary.name = "StartupAuxiliaryVoxelViewer_%d" % startup_auxiliary_viewers_created
+			auxiliary.view_distance = int(spec.get("viewDistance", STARTUP_VIEW_DISTANCE))
+			auxiliary.requires_visuals = true
+			auxiliary.requires_collisions = true
+			auxiliary.set_meta("startup_auxiliary", true)
+			add_child(auxiliary)
+			auxiliary.global_position = spec.get("position", Vector3.ZERO)
+			startup_auxiliary_viewers.append({
+				"viewer": auxiliary,
+				"chunks": (spec.get("chunks", []) as Array).duplicate()
+			})
+			startup_auxiliary_viewers_created += 1
+
+
+func connected_gameplay_chunk_components(chunk_keys: Array) -> Array:
+	var remaining := {}
+	for key_value in chunk_keys:
+		if key_value is Vector2i:
+			remaining[key_value] = true
+	var components: Array = []
+	while not remaining.is_empty():
+		var ordered_keys: Array = remaining.keys()
+		ordered_keys.sort_custom(func(a: Vector2i, b: Vector2i):
+			return a.x < b.x if a.x != b.x else a.y < b.y
+		)
+		var seed: Vector2i = ordered_keys[0]
+		var pending: Array[Vector2i] = [seed]
+		var component: Array[Vector2i] = []
+		remaining.erase(seed)
+		while not pending.is_empty():
+			var current: Vector2i = pending.pop_front()
+			component.append(current)
+			for neighbor in [
+				current + Vector2i.LEFT,
+				current + Vector2i.RIGHT,
+				current + Vector2i.UP,
+				current + Vector2i.DOWN
+			]:
+				if remaining.erase(neighbor):
+					pending.append(neighbor)
+		component.sort_custom(func(a: Vector2i, b: Vector2i):
+			return a.x < b.x if a.x != b.x else a.y < b.y
+		)
+		components.append(component)
+	return components
+
+
+func primary_viewer_covers_component(component: Array) -> bool:
+	if viewer == null or not is_instance_valid(viewer) or component.is_empty():
+		return false
+	var available_distance := maxf(0.0, float(viewer.view_distance) - CELL * 4.0)
+	var viewer_xz := Vector2(viewer.global_position.x, viewer.global_position.z)
+	var half_chunk_diagonal := float(GAME_CHUNK_SIZE) * CELL * sqrt(2.0) * 0.5
+	for key_value in component:
+		if not (key_value is Vector2i):
+			continue
+		var chunk_key: Vector2i = key_value
+		var center := Vector2(
+			(float(chunk_key.x * GAME_CHUNK_SIZE) + float(GAME_CHUNK_SIZE) * 0.5) * CELL,
+			(float(chunk_key.y * GAME_CHUNK_SIZE) + float(GAME_CHUNK_SIZE) * 0.5) * CELL
+		)
+		if viewer_xz.distance_to(center) + half_chunk_diagonal > available_distance:
+			return false
+	return true
+
+
+func auxiliary_viewer_specs_for_component(component: Array, world_generation) -> Array[Dictionary]:
+	var specs: Array[Dictionary] = []
+	if component.is_empty():
+		return specs
+	var min_chunk := Vector2i(2147483000, 2147483000)
+	var max_chunk := Vector2i(-2147483000, -2147483000)
+	for key_value in component:
+		if not (key_value is Vector2i):
+			continue
+		var chunk_key: Vector2i = key_value
+		min_chunk = Vector2i(mini(min_chunk.x, chunk_key.x), mini(min_chunk.y, chunk_key.y))
+		max_chunk = Vector2i(maxi(max_chunk.x, chunk_key.x), maxi(max_chunk.y, chunk_key.y))
+	var minimum := Vector2(float(min_chunk.x * GAME_CHUNK_SIZE) * CELL, float(min_chunk.y * GAME_CHUNK_SIZE) * CELL)
+	var maximum := Vector2(float((max_chunk.x + 1) * GAME_CHUNK_SIZE) * CELL, float((max_chunk.y + 1) * GAME_CHUNK_SIZE) * CELL)
+	var center_xz := (minimum + maximum) * 0.5
+	var required_distance := center_xz.distance_to(maximum) + CELL * 16.0
+	var maximum_view_distance := int(terrain.max_view_distance) if terrain != null else FINAL_VIEW_DISTANCE
+	if required_distance <= float(maximum_view_distance):
+		var center_position := Vector3(center_xz.x, 0.0, center_xz.y)
+		center_position.y = float(world_generation.call("surface_y_at", center_position))
+		specs.append({
+			"position": center_position,
+			"viewDistance": clampi(ceili(required_distance), STARTUP_VIEW_DISTANCE, maximum_view_distance),
+			"chunks": component.duplicate()
+		})
+		return specs
+	for key_value in component:
+		if not (key_value is Vector2i):
+			continue
+		var chunk_key: Vector2i = key_value
+		var position := Vector3(
+			(float(chunk_key.x * GAME_CHUNK_SIZE) + float(GAME_CHUNK_SIZE) * 0.5) * CELL,
+			0.0,
+			(float(chunk_key.y * GAME_CHUNK_SIZE) + float(GAME_CHUNK_SIZE) * 0.5) * CELL
+		)
+		position.y = float(world_generation.call("surface_y_at", position))
+		specs.append({
+			"position": position,
+			"viewDistance": STARTUP_VIEW_DISTANCE,
+			"chunks": [chunk_key]
+		})
+	return specs
+
+
+func clear_startup_auxiliary_viewers() -> void:
+	for record_value in startup_auxiliary_viewers:
+		var record: Dictionary = record_value
+		var auxiliary = record.get("viewer")
+		if auxiliary == null or not is_instance_valid(auxiliary):
+			continue
+		auxiliary.requires_visuals = false
+		auxiliary.requires_collisions = false
+		auxiliary.queue_free()
+	startup_auxiliary_viewers.clear()
+	startup_auxiliary_cleanup_requested = false
+	startup_auxiliary_cleanup_frames_remaining = 0
+
+
+func prune_startup_auxiliary_viewers() -> void:
+	if not startup_auxiliary_cleanup_requested:
+		return
+	if startup_auxiliary_viewers.is_empty():
+		startup_auxiliary_cleanup_requested = false
+		startup_auxiliary_cleanup_frames_remaining = 0
+		return
+	if startup_auxiliary_cleanup_frames_remaining > 0:
+		startup_auxiliary_cleanup_frames_remaining -= 1
+		return
+	clear_startup_auxiliary_viewers()
+
+
+func startup_auxiliary_viewer_diagnostics() -> Array:
+	var diagnostics: Array = []
+	for record_value in startup_auxiliary_viewers:
+		var record: Dictionary = record_value
+		var auxiliary = record.get("viewer")
+		if auxiliary == null or not is_instance_valid(auxiliary):
+			continue
+		var keys: Array[String] = []
+		var chunks_value = record.get("chunks", [])
+		if chunks_value is Array:
+			for key_value in chunks_value:
+				if key_value is Vector2i:
+					keys.append("%d,%d" % [key_value.x, key_value.y])
+		diagnostics.append({
+			"name": auxiliary.name,
+			"position": auxiliary.global_position,
+			"viewDistance": int(auxiliary.view_distance),
+			"requiresVisuals": bool(auxiliary.requires_visuals),
+			"requiresCollisions": bool(auxiliary.requires_collisions),
+			"chunks": keys
+		})
+	return diagnostics
 
 func vertical_cell_bounds() -> Vector2i:
 	if terrain == null:
@@ -287,6 +474,7 @@ func _process(delta: float) -> void:
 	if authority_ready:
 		update_viewer_position()
 		update_viewer_distance(delta)
+		prune_startup_auxiliary_viewers()
 		collect_volume_edit_changes()
 		process_pending_edit_sections()
 
@@ -308,6 +496,7 @@ func begin_shutdown() -> void:
 		viewer.requires_collisions = false
 		viewer.queue_free()
 		viewer = null
+	clear_startup_auxiliary_viewers()
 	if terrain != null and is_instance_valid(terrain):
 		terrain.automatic_loading_enabled = false
 	pending_gameplay_chunks.clear()
@@ -321,6 +510,8 @@ func request_final_view_distance_expansion() -> void:
 		return
 	view_distance_expansion_requested = true
 	view_distance_expansion_elapsed = 0.0
+	startup_auxiliary_cleanup_requested = true
+	startup_auxiliary_cleanup_frames_remaining = 2
 
 func update_viewer_distance(delta: float) -> void:
 	if viewer == null or not is_instance_valid(viewer) or main == null:
@@ -401,6 +592,11 @@ func stats() -> Dictionary:
 		"currentViewDistance": int(viewer.view_distance) if viewer != null and is_instance_valid(viewer) else 0,
 		"finalViewDistance": FINAL_VIEW_DISTANCE,
 		"viewDistanceExpansionRequested": view_distance_expansion_requested,
+		"startupAuxiliaryViewerCount": startup_auxiliary_viewers.size(),
+		"startupAuxiliaryViewersCreated": startup_auxiliary_viewers_created,
+		"startupAuxiliaryCleanupRequested": startup_auxiliary_cleanup_requested,
+		"startupAuxiliaryCleanupFramesRemaining": startup_auxiliary_cleanup_frames_remaining,
+		"startupAuxiliaryViewers": startup_auxiliary_viewer_diagnostics(),
 		"verticalCellBounds": vertical_cell_bounds(),
 		"finalVerticalCellBounds": full_vertical_cell_bounds(),
 		"voxelEngine": voxel_engine_task_stats(),
@@ -579,6 +775,7 @@ func gameplay_publication_diagnostics(chunk_keys: Array) -> Dictionary:
 		"viewerPosition": viewer.global_position if viewer != null and is_instance_valid(viewer) else Vector3.ZERO,
 		"viewerRequiresVisuals": bool(viewer.requires_visuals) if viewer != null and is_instance_valid(viewer) else false,
 		"viewerRequiresCollisions": bool(viewer.requires_collisions) if viewer != null and is_instance_valid(viewer) else false,
+		"startupAuxiliaryViewers": startup_auxiliary_viewer_diagnostics(),
 		"publishedMeshBlockCount": published_mesh_blocks.size(),
 		"desiredGameplayChunkCount": desired_gameplay_chunks.size(),
 		"pendingGameplayChunkCount": pending_gameplay_chunks.size(),
@@ -783,6 +980,34 @@ func collision_mesh_ready_for_world_position(world_position: Vector3, footprint_
 	}
 
 
+func collision_mesh_ready_for_body_position(world_position: Vector3, footprint_radius := 0.0) -> Dictionary:
+	if terrain == null:
+		return {"passed": false, "reason": "terrain_missing"}
+	var radius_cells := maxi(1, ceili(maxf(0.0, footprint_radius) / CELL) + 1)
+	var local_position := terrain.to_local(world_position)
+	var area := AABB(
+		Vector3(
+			floorf(local_position.x) - float(radius_cells),
+			floorf(local_position.y) - float(COLLISION_MESH_VERTICAL_MARGIN_CELLS),
+			floorf(local_position.z) - float(radius_cells)
+		),
+		Vector3(
+			float(radius_cells * 2 + 1),
+			float(COLLISION_MESH_VERTICAL_MARGIN_CELLS * 2 + 3),
+			float(radius_cells * 2 + 1)
+		)
+	)
+	var passed := terrain.is_area_meshed(area)
+	return {
+		"passed": passed,
+		"reason": "collision_mesh_ready" if passed else "collision_mesh_not_ready",
+		"area": area,
+		"position": world_position,
+		"footprintRadius": maxf(0.0, footprint_radius),
+		"collisionAuthority": "VoxelTerrain"
+	}
+
+
 func collision_proof_for_motion(from_position: Vector3, to_position: Vector3, footprint_radius := 0.42) -> Dictionary:
 	var distance := Vector2(to_position.x - from_position.x, to_position.z - from_position.z).length()
 	var sample_count := maxi(1, ceili(distance / maxf(CELL, footprint_radius * 2.0)))
@@ -790,7 +1015,19 @@ func collision_proof_for_motion(from_position: Vector3, to_position: Vector3, fo
 	for index in range(sample_count + 1):
 		var weight := float(index) / float(sample_count)
 		var sample_position := from_position.lerp(to_position, weight)
-		var proof := collision_proof_for_world_position(sample_position, footprint_radius)
+		var mesh_proof := collision_mesh_ready_for_body_position(sample_position, footprint_radius)
+		var support_observation := collision_proof_for_world_position(sample_position, footprint_radius) \
+			if bool(mesh_proof.get("passed", false)) else {}
+		var proof := {
+			"passed": bool(mesh_proof.get("passed", false)),
+			"reason": String(mesh_proof.get("reason", "collision_mesh_not_ready")),
+			"position": sample_position,
+			"mesh": mesh_proof,
+			"supportRequiredForMotion": false,
+			"supportObservationPassed": bool(support_observation.get("passed", false)) if not support_observation.is_empty() else false,
+			"supportObservationReason": String(support_observation.get("reason", "not_sampled")) if not support_observation.is_empty() else "not_sampled",
+			"samples": support_observation.get("samples", []) if not support_observation.is_empty() else []
+		}
 		proofs.append(proof)
 		if not bool(proof.get("passed", false)):
 			return {
@@ -802,7 +1039,8 @@ func collision_proof_for_motion(from_position: Vector3, to_position: Vector3, fo
 			}
 	return {
 		"passed": true,
-		"reason": "collision_ready",
+		"reason": "collision_mesh_ready",
+		"supportRequiredForMotion": false,
 		"sampleCount": sample_count + 1,
 		"proofs": proofs
 	}
