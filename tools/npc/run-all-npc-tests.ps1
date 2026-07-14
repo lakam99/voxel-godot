@@ -148,7 +148,9 @@ try {
         Write-Host "== NPC suite: $id =="
         $scriptFailed = $false
         try {
-            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $commandPath @runnerArgs
+            # Suite reports are the durable evidence. Some headed reports are well over
+            # 100 MB, so never relay their full JSON through nested aggregate runners.
+            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $commandPath @runnerArgs | Out-Null
         } catch {
             Write-Error $_
             $scriptFailed = $true
@@ -211,7 +213,7 @@ $report = [pscustomobject]@{
     }
 }
 $report | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $ReportPath
-Get-Content -LiteralPath $ReportPath
+Write-Host ("NPC aggregate complete: suites={0}, failures={1}, report={2}" -f $results.Count, $failureCount, $ReportPath)
 
 if ($failureCount -gt 0) {
     exit 1

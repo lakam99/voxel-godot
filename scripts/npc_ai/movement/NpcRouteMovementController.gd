@@ -2466,7 +2466,7 @@ func collider_blocks_capsule(entry: Dictionary, collider: Node, body: CharacterB
                 return true
             return true
         return true
-    return kind in ["prop", "npc", "tutorial_npc", "hostile"]
+    return kind in ["prop", "npc", "hostile"]
 
 func route_has_door_action(entry: Dictionary, door: Node) -> bool:
     return not route_door_action(entry, door).is_empty()

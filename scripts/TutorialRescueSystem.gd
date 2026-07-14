@@ -99,9 +99,15 @@ func setup_rescue_scene() -> void:
     spawn_rescue_torch(system.rescue_site)
     var forager := find_tutorial_npc(RESCUE_FORAGER_ID)
     if forager:
-        safe_place_tutorial_npc(forager, system.rescue_site, "rescue_encounter_spawn")
         if main.npc_system:
-            main.npc_system.order_wait(forager, "rescue_encounter_stranded")
+            main.npc_system.order_go_to(
+                forager,
+                system.rescue_site,
+                "rescue_encounter_travel",
+                CELL * 0.72,
+                "sprinting",
+                true
+            )
         forager.set_meta("npc_hostile_target_immune", true)
         forager.set_meta("hostile_target_immune", true)
         show_speech_bubble(RESCUE_FORAGER_ID, "Help!", 3.8)
@@ -479,8 +485,11 @@ func rescue_remaining_hostiles() -> int:
         return 0
     var remaining := 0
     for body_variant in system.rescue_hostiles.duplicate():
+        if body_variant == null or not is_instance_valid(body_variant):
+            system.rescue_hostiles.erase(body_variant)
+            continue
         var body := body_variant as Node
-        if body == null or not is_instance_valid(body):
+        if body == null:
             system.rescue_hostiles.erase(body_variant)
             continue
         if main.hostile_system.enemy_for_body(body).is_empty():
@@ -596,20 +605,6 @@ func tutorial_npc_strictly_inside_home(body: Node3D) -> bool:
         and cell.y >= mini(min_cell.y, max_cell.y)
         and cell.y <= maxi(min_cell.y, max_cell.y)
     )
-
-func settle_rescue_party_home() -> void:
-    var home := rescue_return_position()
-    var forager := find_tutorial_npc(RESCUE_FORAGER_ID)
-    var guard := find_tutorial_npc(RESCUE_GUARD_ID)
-    if forager:
-        safe_place_tutorial_npc(forager, home, "rescue_return_home")
-    if guard:
-        safe_place_tutorial_npc(guard, rescue_guard_return_position(), "rescue_return_home")
-
-func safe_place_tutorial_npc(body: Node3D, position: Vector3, reason: String) -> void:
-    if body == null or main == null or main.npc_system == null or not main.npc_system.has_method("safe_place_npc"):
-        return
-    main.npc_system.safe_place_npc(body, position, null, reason)
 
 func find_tutorial_npc(npc_id: String) -> Node3D:
     if system.npc_root == null:

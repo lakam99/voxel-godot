@@ -129,6 +129,7 @@ func run() -> void:
 		add_result("startup_physics_frames_advanced", false, "physics frames did not advance during startup")
 		finish(1)
 		return
+	await claim_fixture_population_ownership()
 	await setup_one_house_one_npc_fixture()
 	if failed:
 		finish(1)
@@ -187,6 +188,24 @@ func configure_playtest_scene() -> void:
 	observer_camera.fov = 62.0
 	add_child(observer_camera)
 	observer_camera.make_current()
+
+func claim_fixture_population_ownership() -> void:
+	# Startup may publish ordinary town records after configure_playtest_scene()
+	# clears the initial roster. Reset once publication has settled, then claim
+	# those populations through the same generic ownership contract used by
+	# scenario orchestration before registering the one-NPC fixture.
+	if npc_system == null:
+		return
+	if npc_system.has_method("clear"):
+		npc_system.call("clear")
+	if npc_system.has_method("claim_town_population"):
+		var structure_system = main.get("structure_system") if main != null else null
+		if structure_system != null and structure_system.has_method("town_home_records_snapshot"):
+			var records_by_town: Dictionary = structure_system.call("town_home_records_snapshot")
+			for town_key_value in records_by_town.keys():
+				npc_system.call("claim_town_population", String(town_key_value), "go_home_visual_fixture")
+		npc_system.call("claim_town_population", "visual-go-home-fixture", "go_home_visual_fixture")
+	await wait_physics_frames(2)
 
 func setup_one_house_one_npc_fixture() -> void:
 	write_progress("fixture_setup_start")

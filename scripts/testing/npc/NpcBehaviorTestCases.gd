@@ -252,6 +252,7 @@ class FakeNpcSystem:
 	var forage_slot_advances := 0
 	var forage_target_deferrals := 0
 	var deferred_forage_target_names: Array[String] = []
+	var fighter_target_updates := 0
 	var test_route_authority_v2 = null
 
 	func update_npc_needs(_entry: Dictionary, _delta: float, _night_factor: float) -> void:
@@ -309,6 +310,7 @@ class FakeNpcSystem:
 			body.set_meta("npc_inside_home", true)
 
 	func update_fighter_target(entry: Dictionary, _body: Node3D, target_hostile: Node3D, _weapon_id: String) -> Vector3:
+		fighter_target_updates += 1
 		entry["guardDutyState"] = "intercept_threat" if target_hostile != null else "patrol"
 		return Vector3(4.05, 0.0, 0.0)
 
@@ -478,6 +480,7 @@ func cases() -> Array[Dictionary]:
 		case("npc_motor_every_active_actor_motion_tick_32_npcs", "day", "test_every_active_actor_motion_tick_32_npcs"),
 		case("npc_behavior_brain_budget_does_not_skip_route_motion", "day", "test_brain_budget_does_not_skip_route_motion"),
 		case("npc_behavior_scripted_order_moves_while_brain_skipped", "day", "test_scripted_order_moves_while_brain_skipped"),
+		case("npc_behavior_scripted_combat_overlay_advances_with_v2_route_service", "day", "test_scripted_combat_overlay_advances_with_v2_route_service"),
 		case("npc_behavior_mira_no_inching_after_dialogue", "day", "test_mira_no_inching_after_dialogue"),
 		case("npc_behavior_morning_departures_not_brain_starved", "day", "test_morning_departures_not_brain_starved"),
 		case("npc_behavior_idle_worker_exits_home_clearance", "day", "test_idle_worker_exits_home_clearance"),
@@ -534,21 +537,21 @@ func test_task_catalog_resource_backed(_mode: String) -> Dictionary:
 	var catalog_exists := ResourceLoader.exists("res://resources/npc_behavior/task_catalog.tres")
 	var hardcoded_defaults_removed := library_source.find("func _register_defaults") < 0 and library_source.find("_add(") < 0
 	var rest: Dictionary = library.definition("rest_at_bed")
-	var tutorial: Dictionary = library.definition("complete_tutorial_world_action")
-	var passed := bool(validation.get("ok", false)) and catalog_exists and hardcoded_defaults_removed and int(validation.get("actionCount", 0)) >= 28 and int(validation.get("sequenceCount", 0)) >= 9 and String(rest.get("targetKind", "")) == "bed" and bool(rest.get("reservationRequired", false)) and bool(rest.get("routeRequired", false)) and String(tutorial.get("targetKind", "")) == "tutorial_action"
-	return outcome(passed, "validation=%s catalog=%s hardcoded=%s" % [JSON.stringify(validation), str(catalog_exists), str(hardcoded_defaults_removed)], ["resource_catalog_loads", "hardcoded_action_defaults_removed", "task_fields_declared"], { "validation": validation, "rest": rest, "tutorial": tutorial })
+	var scripted: Dictionary = library.definition("complete_scripted_world_action")
+	var passed := bool(validation.get("ok", false)) and catalog_exists and hardcoded_defaults_removed and int(validation.get("actionCount", 0)) >= 28 and int(validation.get("sequenceCount", 0)) >= 9 and String(rest.get("targetKind", "")) == "bed" and bool(rest.get("reservationRequired", false)) and bool(rest.get("routeRequired", false)) and String(scripted.get("targetKind", "")) == "scripted_action"
+	return outcome(passed, "validation=%s catalog=%s hardcoded=%s" % [JSON.stringify(validation), str(catalog_exists), str(hardcoded_defaults_removed)], ["resource_catalog_loads", "hardcoded_action_defaults_removed", "task_fields_declared"], { "validation": validation, "rest": rest, "scripted": scripted })
 
 func test_shared_task_definitions_cover_phase4_goals(_mode: String) -> Dictionary:
 	var forage := select_and_plan(entry("Forager", { "job": "forage", "jobTarget": Vector3(8.1, 0.0, 0.0) }), NpcEnumsScript.SCHEDULE_STATE_DAY)
 	var trader := select_and_plan(entry("Trader", { "job": "trade", "jobTarget": Vector3(2.7, 0.0, 0.0), "stallPosition": Vector3(2.7, 0.0, 0.0) }), NpcEnumsScript.SCHEDULE_STATE_DAY)
 	var guard := select_and_plan(entry("Guard", { "job": "guard", "canFight": true, "nightGuard": true }), NpcEnumsScript.SCHEDULE_STATE_DAY)
 	var home := select_and_plan(entry("Villager", { "job": "" }), NpcEnumsScript.SCHEDULE_STATE_NIGHT, { "insideHome": false })
-	var tutorial_entry := entry("Villager", { "id": "tutorial_npc", "tutorialActionPosition": Vector3(1.35, 0.0, 0.0) })
-	var tutorial_body := tutorial_entry.get("body") as Node3D
-	tutorial_body.set_meta("npc_scripted_order_kind", "tutorial_action")
-	tutorial_body.set_meta("npc_scripted_order_state", "PENDING")
-	tutorial_body.set_meta("npc_scripted_target", Vector3(1.35, 0.0, 0.0))
-	var tutorial := select_and_plan(tutorial_entry, NpcEnumsScript.SCHEDULE_STATE_DAY, { "scriptedOrder": true, "scriptedOrderKind": "tutorial_action", "scriptedOrderState": "PENDING" })
+	var scripted_entry := entry("Villager", { "id": "scripted_npc", "scriptedActionPosition": Vector3(1.35, 0.0, 0.0) })
+	var scripted_body := scripted_entry.get("body") as Node3D
+	scripted_body.set_meta("npc_scripted_order_kind", "scripted_action")
+	scripted_body.set_meta("npc_scripted_order_state", "PENDING")
+	scripted_body.set_meta("npc_scripted_target", Vector3(1.35, 0.0, 0.0))
+	var scripted := select_and_plan(scripted_entry, NpcEnumsScript.SCHEDULE_STATE_DAY, { "scriptedOrder": true, "scriptedOrderKind": "scripted_action", "scriptedOrderState": "PENDING" })
 	var passed := (
 		(forage.plan.get("actionIds", []) as Array).has("reserve_resource_slot")
 		and String(forage.plan.get("targetKind", "")) == "forage_source"
@@ -556,10 +559,10 @@ func test_shared_task_definitions_cover_phase4_goals(_mode: String) -> Dictionar
 		and String(trader.plan.get("sequenceId", "")) == "trader_stall_work"
 		and (guard.plan.get("actionIds", []) as Array).has("occupy_guard_post")
 		and (home.plan.get("actionIds", []) as Array).has("rest_at_bed")
-		and (tutorial.plan.get("actionIds", []) as Array).has("complete_tutorial_world_action")
-		and String(tutorial.plan.get("sequenceId", "")) == "tutorial_scripted_action"
+		and (scripted.plan.get("actionIds", []) as Array).has("complete_scripted_world_action")
+		and String(scripted.plan.get("sequenceId", "")) == "scripted_world_action"
 	)
-	return outcome(passed, "forage=%s trader=%s guard=%s home=%s tutorial=%s" % [JSON.stringify(forage.plan.get("actionIds", [])), JSON.stringify(trader.plan.get("actionIds", [])), JSON.stringify(guard.plan.get("actionIds", [])), JSON.stringify(home.plan.get("actionIds", [])), JSON.stringify(tutorial.plan.get("actionIds", []))], ["forage_task_definition", "trader_stall_task_definition", "guard_post_task_definition", "home_bed_task_definition", "tutorial_scripted_task_definition"], { "forage": forage.plan, "trader": trader.plan, "guard": guard.plan, "home": home.plan, "tutorial": tutorial.plan })
+	return outcome(passed, "forage=%s trader=%s guard=%s home=%s scripted=%s" % [JSON.stringify(forage.plan.get("actionIds", [])), JSON.stringify(trader.plan.get("actionIds", [])), JSON.stringify(guard.plan.get("actionIds", [])), JSON.stringify(home.plan.get("actionIds", [])), JSON.stringify(scripted.plan.get("actionIds", []))], ["forage_task_definition", "trader_stall_task_definition", "guard_post_task_definition", "home_bed_task_definition", "scripted_world_task_definition"], { "forage": forage.plan, "trader": trader.plan, "guard": guard.plan, "home": home.plan, "scripted": scripted.plan })
 
 func test_goal_target_validation_reachable_navmesh(_mode: String) -> Dictionary:
 	var library := NpcActionLibraryScript.new()
@@ -1242,9 +1245,9 @@ func test_mira_home_arrival_requires_interior(_mode: String) -> Dictionary:
 	var end := source.find("func mark_npc_home_blocked", start)
 	var settle_source := source.substr(start, end - start)
 	var has_interior_check := settle_source.find("is_inside_home_interior") >= 0
-	var porch_blocked := settle_source.find("home_porch_fallback_not_inside") >= 0
-	var passed: bool = has_interior_check and porch_blocked
-	return outcome(passed, "interiorCheck=%s porchBlocked=%s" % [str(has_interior_check), str(porch_blocked)], ["mira_home_requires_interior_semantics", "porch_fallback_not_inside"], {})
+	var outside_terminal_blocked := settle_source.find("home_route_terminal_outside") >= 0
+	var passed: bool = has_interior_check and outside_terminal_blocked
+	return outcome(passed, "interiorCheck=%s outsideTerminalBlocked=%s" % [str(has_interior_check), str(outside_terminal_blocked)], ["home_arrival_requires_interior_semantics", "terminal_outside_is_not_inside"], {})
 
 func test_tutorial_uses_generic_orders_without_speed_override(_mode: String) -> Dictionary:
 	var source := read_text("res://scripts/NpcSystem.gd") + "\n" + read_text("res://scripts/npc_ai/behavior/NpcPlanExecutor.gd") + "\n" + read_text("res://scripts/TutorialSystem.gd") + "\n" + read_text("res://scripts/TutorialDialogueSystem.gd")
@@ -1318,6 +1321,52 @@ func test_scripted_order_moves_while_brain_skipped(_mode: String) -> Dictionary:
 	var passed: bool = String(order.get("state", "")) in ["PENDING", "ACTIVE", "ARRIVED"] and route_state in ["pending", "moving", "arrived"] and body.global_position.x > 0.15
 	fake_npc.queue_free()
 	return outcome(passed, "order=%s route=%s x=%.3f lastMove=%.4f" % [String(order.get("state", "")), route_state, body.global_position.x, float(entry_data.get("lastMoveDistance", 0.0))], ["scripted_order_motion_without_brain", "scripted_position_advances"], { "order": order, "routeStatus": route_state, "position": body.global_position, "lastMoveDistance": entry_data.get("lastMoveDistance", 0.0) })
+
+func test_scripted_combat_overlay_advances_with_v2_route_service(_mode: String) -> Dictionary:
+	var fake_npc := FakeNpcSystem.new()
+	var executor: Variant = make_executor(fake_npc)
+	var entry_data := entry("Guard", { "position": Vector3.ZERO, "canFight": true, "weaponId": "hunterBow" })
+	var body := entry_data.get("body") as Node3D
+	var hostile := Node3D.new()
+	if runner != null:
+		runner.add_child(hostile)
+	hostile.global_position = Vector3(CELL * 2.0, 0.0, 0.0)
+	set_scripted_order_meta(entry_data, body, "go_to", "scripted_combat_route_service", Vector3(CELL * 5.0, 0.0, 0.0))
+	body.set_meta("npc_scripted_combat_overlay_enabled", true)
+	entry_data["activeMotionPerception"] = { "activeThreat": true, "threat": hostile }
+	fake_npc.test_route_authority_v2.begin_frame()
+	executor.advance_motion_npc(entry_data, 1.0 / 60.0, 0.0)
+	var service_owns: bool = executor.physics_route_service_owns_motion(entry_data)
+	# The brain pass normally refreshes this cache before the physics service.
+	# Keep the act phase focused on the service ownership boundary itself.
+	entry_data["activeMotionPerception"] = { "activeThreat": true, "threat": hostile }
+	fake_npc.fighter_target_updates = 0
+	entry_data["scriptedCombatOverlay"] = false
+	body.set_meta("npc_scripted_combat_overlay", false)
+	var before := body.global_position
+	fake_npc.test_route_authority_v2.begin_frame()
+	var result: Dictionary = executor.advance_physics_route_service(entry_data, 1.0 / 60.0) if service_owns else {}
+	var combat_inputs := {
+		"enabled": body.get_meta("npc_scripted_combat_overlay_enabled", false),
+		"canFight": entry_data.get("canFight", null),
+		"activeThreat": (entry_data.get("activeMotionPerception", {}) as Dictionary).get("activeThreat", null),
+		"threatValid": is_instance_valid(hostile),
+		"hasUpdate": fake_npc.has_method("update_fighter_target")
+	}
+	var passed := service_owns \
+		and fake_npc.fighter_target_updates == 1 \
+		and bool(entry_data.get("scriptedCombatOverlay", false)) \
+		and bool(body.get_meta("npc_scripted_combat_overlay", false)) \
+		and String(result.get("status", "")) in ["moving", "arrived"] \
+		and body.global_position.distance_to(before) > 0.001
+	hostile.free()
+	fake_npc.queue_free()
+	return outcome(
+		passed,
+		"serviceOwns=%s fighterUpdates=%d overlay=%s overlayReason=%s inputs=%s result=%s moved=%.4f" % [str(service_owns), fake_npc.fighter_target_updates, str(entry_data.get("scriptedCombatOverlay", false)), String(entry_data.get("scriptedCombatOverlayReason", "missing")), JSON.stringify(combat_inputs), JSON.stringify(result), body.global_position.distance_to(before)],
+		["scripted_v2_route_service_preserves_combat_overlay", "scripted_combat_target_updates_during_route_motion", "scripted_route_motion_continues_with_combat_overlay"],
+		{ "serviceOwns": service_owns, "fighterTargetUpdates": fake_npc.fighter_target_updates, "overlay": entry_data.get("scriptedCombatOverlay", false), "combatInputs": combat_inputs, "result": result }
+	)
 
 func test_mira_no_inching_after_dialogue(_mode: String) -> Dictionary:
 	var fake_npc := FakeNpcSystem.new()
@@ -2301,7 +2350,7 @@ func entry(role: String, options := {}) -> Dictionary:
 		"routeReason": "",
 		"personalInventory": {}
 	}
-	for optional_key in ["jobTarget", "jobTargetNode", "stallPosition", "tutorialActionPosition", "dayTarget", "guardTargetCache"]:
+	for optional_key in ["jobTarget", "jobTargetNode", "stallPosition", "scriptedActionPosition", "dayTarget", "guardTargetCache"]:
 		if options.has(optional_key):
 			result[optional_key] = options[optional_key]
 	return result

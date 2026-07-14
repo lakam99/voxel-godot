@@ -193,7 +193,8 @@ while (-not $process.HasExited) {
         $progressItem = Get-Item -LiteralPath $ProgressPath
         if ($progressItem.LastWriteTimeUtc -gt $lastProgressWriteUtc) {
             $lastProgressWriteUtc = $progressItem.LastWriteTimeUtc
-            $progress = (Get-Content -LiteralPath $ProgressPath -Raw -ErrorAction SilentlyContinue).Trim()
+            $rawProgress = Get-Content -LiteralPath $ProgressPath -Raw -ErrorAction SilentlyContinue
+            $progress = if ($null -eq $rawProgress) { "" } else { ([string]$rawProgress).Trim() }
             Write-Host "progress: $($progress -replace [Environment]::NewLine, ' | ')"
         }
     }

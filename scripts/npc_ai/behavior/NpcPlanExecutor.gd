@@ -177,6 +177,11 @@ func advance_physics_route_service(entry: Dictionary, delta: float) -> Dictionar
 			_execute_home(entry, body, entry.get("activeMotionPerception", {}) if entry.get("activeMotionPerception", {}) is Dictionary else {}, delta)
 			result = _motion_result(entry, "home", "physics_route_service_home")
 		"scripted":
+			_execute_scripted_combat_overlay(
+				entry,
+				body,
+				entry.get("activeMotionPerception", {}) if entry.get("activeMotionPerception", {}) is Dictionary else {}
+			)
 			result = _execute_scripted_go_to_route_v2(entry, body, delta)
 		"routine":
 			result = _advance_physics_routine_route(entry, body, delta)
@@ -620,21 +625,29 @@ func _execute_scripted_go_to_route_v2(entry: Dictionary, body: Node3D, delta: fl
 
 func _execute_scripted_combat_overlay(entry: Dictionary, body: Node3D, perception: Dictionary) -> void:
 	entry["scriptedCombatOverlay"] = false
+	entry["scriptedCombatOverlayReason"] = "disabled"
 	body.set_meta("npc_scripted_combat_overlay", false)
 	if not bool(body.get_meta("npc_scripted_combat_overlay_enabled", false)):
 		return
 	if npc_system == null or not npc_system.has_method("update_fighter_target"):
+		entry["scriptedCombatOverlayReason"] = "missing_combat_service"
 		return
 	if not bool(entry.get("canFight", false)):
+		entry["scriptedCombatOverlayReason"] = "actor_cannot_fight"
 		return
 	var target_hostile = perception.get("threat") if bool(perception.get("activeThreat", false)) else null
 	if target_hostile == null and npc_system.has_method("scripted_combat_target"):
 		target_hostile = npc_system.call("scripted_combat_target", entry, body, 42.0)
-	if target_hostile == null or not is_instance_valid(target_hostile):
+	if target_hostile == null:
+		entry["scriptedCombatOverlayReason"] = "no_hostile_in_range"
+		return
+	if not is_instance_valid(target_hostile):
+		entry["scriptedCombatOverlayReason"] = "hostile_invalid"
 		return
 	var weapon_id := String(entry.get("weaponId", ""))
 	npc_system.call("update_fighter_target", entry, body, target_hostile, weapon_id)
 	entry["scriptedCombatOverlay"] = true
+	entry["scriptedCombatOverlayReason"] = "active"
 	body.set_meta("npc_scripted_combat_overlay", true)
 
 func _execute_home(entry: Dictionary, body: Node3D, perception: Dictionary, delta: float) -> void:

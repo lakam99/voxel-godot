@@ -4,6 +4,7 @@ param(
     [string]$ScreenshotPath = "",
     [string]$Seed = "atlas-1492",
     [int]$TimeoutSeconds = 1800,
+    [int]$StartupProgressSeconds = 120,
     [int]$StaleProgressSeconds = 300,
     [switch]$Visible
 )
@@ -95,6 +96,15 @@ while (-not $process.HasExited) {
     $now = Get-Date
     if ($TimeoutSeconds -gt 0 -and (($now - $started).TotalSeconds -gt $TimeoutSeconds)) {
         $watchdogReason = "NPC navigation test timeout after $TimeoutSeconds seconds"
+        Write-Warning $watchdogReason
+        Stop-ProcessTree $process
+        $exitCode = 1
+        break
+    }
+    if (-not (Test-Path -LiteralPath $progressPath) -and
+        $StartupProgressSeconds -gt 0 -and
+        (($now - $started).TotalSeconds -gt $StartupProgressSeconds)) {
+        $watchdogReason = "NPC navigation test wrote no startup progress within $StartupProgressSeconds seconds"
         Write-Warning $watchdogReason
         Stop-ProcessTree $process
         $exitCode = 1

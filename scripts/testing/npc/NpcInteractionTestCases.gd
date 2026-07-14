@@ -63,7 +63,7 @@ func cases() -> Array[Dictionary]:
 		case("npc_interaction_guard_reachable_ranged_intercept", "night", "test_guard_reachable_ranged_intercept"),
 		case("npc_interaction_guard_reachable_melee_intercept", "night", "test_guard_reachable_melee_intercept"),
 		case("npc_interaction_guard_no_attack_through_wall", "night", "test_guard_no_attack_through_wall"),
-		case("npc_interaction_tutorial_scripted_action_migrated", "day", "test_tutorial_scripted_action_migrated"),
+		case("npc_interaction_scripted_world_action", "day", "test_scripted_world_action"),
 		case("npc_interaction_cancel_releases_slot", "day", "test_cancel_releases_slot"),
 		case("npc_interaction_day_night_object_policy", "night", "test_day_night_object_policy")
 	]
@@ -636,14 +636,14 @@ func test_guard_no_attack_through_wall(_mode: String) -> Dictionary:
 	var result = use_object(service, object_id, null, actor, "guard", "occupy_guard_post", "blocked-guard")
 	return outcome(failed_reason(result, "line_of_sight_blocked"), "result=%s" % summary(result), ["guard_wall_occlusion_blocks_effect"], state(service))
 
-func test_tutorial_scripted_action_migrated(_mode: String) -> Dictionary:
+func test_scripted_world_action(_mode: String) -> Dictionary:
 	var library := NpcActionLibraryScript.new()
-	var action := library.definition("complete_tutorial_world_action")
+	var action := library.definition("complete_scripted_world_action")
 	var service = make_service()
-	var object_id: String = service.register_anchor("tutorial:repair", "tutorial_action", Vector3.ZERO, { "action": "complete_tutorial_world_action" })
-	var result = use_object(service, object_id, null, make_actor("tutorial-npc", Vector3(0.0, 0.0, 1.0)), "tutorial-npc", "complete_tutorial_world_action", "tutorial-action")
+	var object_id: String = service.register_anchor("scripted:world", "scripted_action", Vector3.ZERO, { "action": "complete_scripted_world_action" })
+	var result = use_object(service, object_id, null, make_actor("scripted-npc", Vector3(0.0, 0.0, 1.0)), "scripted-npc", "complete_scripted_world_action", "scripted-action")
 	var passed: bool = String(action.get("execution", "")) == "smart_object" and succeeded(result)
-	return outcome(passed, "action=%s result=%s" % [JSON.stringify(action), summary(result)], ["tutorial_action_uses_smart_object"], state(service))
+	return outcome(passed, "action=%s result=%s" % [JSON.stringify(action), summary(result)], ["scripted_action_uses_smart_object"], state(service))
 
 func test_cancel_releases_slot(_mode: String) -> Dictionary:
 	var service = make_service()

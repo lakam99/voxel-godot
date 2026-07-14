@@ -267,7 +267,7 @@ func focused_interaction_prompt() -> String:
         return story_prompt
     if collider.has_meta("kind"):
         var kind := String(collider.get_meta("kind"))
-        if kind == "tutorial_npc" or kind == "npc":
+        if kind == "npc":
             return "[RMB] Talk to %s" % String(collider.get_meta("npc_name", "Resident"))
     var block := interaction_block_from_collider(collider)
     if block == null or not block.has_meta("kind") or String(block.get_meta("kind")) != "block":

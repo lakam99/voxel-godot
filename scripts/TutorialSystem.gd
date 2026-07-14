@@ -233,6 +233,16 @@ func prepare_tutorial_world_staged(restoring: bool) -> Dictionary:
             startup_town_manifest,
             registration_result.get("metrics", {})
         )
+    var population_claim: Dictionary = main.npc_system.claim_town_population(
+        String(startup_town_manifest.get("townKey", "")),
+        "tutorial_scenario"
+    ) if main.npc_system.has_method("claim_town_population") else {"ok": false, "reason": "missing_town_population_claim_api"}
+    if not bool(population_claim.get("ok", false)):
+        return await fail_tutorial_startup(
+            String(population_claim.get("reason", "tutorial_population_claim_failed")),
+            startup_town_manifest,
+            population_claim
+        )
     var initial_orders := submit_initial_actor_orders(startup_actor_specs, restoring)
     if not bool(initial_orders.get("ok", false)):
         return await fail_tutorial_startup(
@@ -1338,11 +1348,6 @@ func rescue_party_home() -> bool:
     if not ensure_rescue_system():
         return true
     return rescue_system.rescue_party_home()
-
-func settle_rescue_party_home() -> void:
-    if not ensure_rescue_system():
-        return
-    rescue_system.settle_rescue_party_home()
 
 func find_tutorial_npc(npc_id: String) -> Node3D:
     if not ensure_rescue_system():

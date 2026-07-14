@@ -120,6 +120,22 @@ This proves the current run did not take the source-level early return for missi
 
 Test-only observations and contract fixtures that read these fields are evidence consumers, not production privileges. They must be updated when each production privilege is removed; they must not preserve obsolete behavior.
 
+## Phase 8 Resolution
+
+Phase 8 of `CODEX_TUTORIAL_TOWN_NPC_LOADING_PLAN.md` closed every prohibited production item in the inventory above:
+
+- tutorial actor profiles no longer contain `tutorial`, and ordinary bodies use `kind=npc`;
+- story presentation uses `story_actor_scope=tutorial` only in the tutorial/dialogue layer;
+- generic scheduling, routing, navigation, collision, home settlement, and simulation LOD do not read tutorial identity;
+- the starter shelter is published through `StructureSystem.register_private_interior()` instead of inferred by generic navigation from tutorial state or nearby blocks;
+- tutorial-town population ownership uses the generic `claim_town_population()` startup contract instead of a tutorial-town exception;
+- the resource-backed smart-object task is now `complete_scripted_world_action` / `scripted_action`;
+- rescue travel and return use generic `order_go_to` / `order_go_home`; the unused rescue teleport fallback was deleted;
+- the porch/home fallback helper and partial-inside compatibility path were deleted; only strict interior semantics can set `insideHome`;
+- the static Phase 8 audit recursively scans `NpcSystem.gd` and `scripts/npc_ai/` for named actors, tutorial movement metadata, guessed starter bounds, combined intro APIs, and obsolete home fallback symbols.
+
+The original table remains as the historical baseline; this resolution section records its final production disposition.
+
 ## Contract Decisions
 
 1. Complete generated records must be a startup invariant. Dialogue must not generate or refresh home records.

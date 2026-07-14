@@ -108,6 +108,13 @@ func reserve_starter_shelter_volume(center_x: int, center_z: int, level: float) 
         "tutorial_starter_shelter",
         "stone"
     )
+    if main.structure_system.has_method("register_private_interior"):
+        main.structure_system.register_private_interior(
+            "player_starter_home",
+            Vector2i(base_x + 1, base_z + 2),
+            Vector2i(base_x + width - 2, base_z + depth - 2),
+            "player"
+        )
     refresh_starter_shelter_terrain(base_x, base_z, width, depth)
 
 func refresh_starter_shelter_terrain(base_x: int, base_z: int, width: int, depth: int) -> void:
@@ -353,8 +360,7 @@ func resolve_tutorial_actor_specs(manifest: Dictionary, scenarios: Array, town_d
             "homeRouteCells": (home.get("homeRouteCells") as Array).duplicate(),
             "interiorMinCell": home.get("interiorMinCell"),
             "interiorMaxCell": home.get("interiorMaxCell"),
-            "guardCell": guard_cell,
-            "tutorial": true
+            "guardCell": guard_cell
         }, true)
         specs.append({
             "id": actor_id,
@@ -444,13 +450,14 @@ func spawn_npc(spec: Dictionary, level: float, look_target: Vector3) -> Dictiona
     var profile: Dictionary = spec.get("profile", {}) if spec.get("profile", {}) is Dictionary else {}
     var presentation: Dictionary = spec.get("presentation", {}) if spec.get("presentation", {}) is Dictionary else {}
     var actor_id := String(spec.get("id", ""))
-    var body := main.npc_system.create_npc_body("TutorialNPC_%s" % actor_id, "tutorial_npc") as CharacterBody3D
+    var body := main.npc_system.create_npc_body("TutorialNPC_%s" % actor_id, "npc") as CharacterBody3D
     if body == null:
         return {"ok": false, "reason": "npc_body_creation_failed", "id": actor_id}
     var cell: Vector2i = spec.get("spawnCell")
     body.set_meta("npc_id", actor_id)
     body.set_meta("npc_name", String(presentation.get("name", actor_id)))
     body.set_meta("npc_role", String(presentation.get("role", profile.get("role", ""))))
+    body.set_meta("story_actor_scope", "tutorial")
     body.set_meta("dialogue", presentation.get("dialogue", []))
     body.set_meta("dialogue_index", 0)
     add_npc_visual(

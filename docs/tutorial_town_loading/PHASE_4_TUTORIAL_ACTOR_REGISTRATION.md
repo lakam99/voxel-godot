@@ -35,7 +35,7 @@ Registration readiness now compares every registered actor profile to the manife
 - The tutorial role no longer selects a privileged schedule resource or fallback schedule.
 - Canonical roles drive ordinary schedules: Civilian, Carpenter, Forager, and Guard.
 - Generated-town NPC registration now carries the same `homeKey`, stable home ID, and door portal ID fields.
-- Tutorial identity remains available only for dialogue, quest, and presentation behavior.
+- Tutorial identity is not part of the NPC profile. The body carries only the story-layer `story_actor_scope=tutorial` presentation tag used by dialogue and quest orchestration.
 - No actor-ID checks were added to generic NPC simulation code.
 
 The Phase 5 legacy `holdIntroDoor` field remains temporarily for sequential compatibility. It does not alter the actor's manifest home, collision, route authority, or schedule contract, and Phase 5 owns its removal.
@@ -62,7 +62,7 @@ Results:
 - Startup readiness: 6/6 passed.
 - Missing manifest home assignment fails before body creation.
 - Generic generated-town registration retains a complete ordinary profile.
-- Tutorial identity does not change collision, motor, schedule, or LOD pin behavior.
+- Story presentation scope does not enter the generic NPC profile or change collision, motor, schedule, or LOD pin behavior.
 - Static audit found no production home refresh, coordinate fallback, or tutorial schedule privilege.
 
 ### NPC And Registry Contracts

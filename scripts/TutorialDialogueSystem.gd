@@ -17,7 +17,7 @@ func setup(tutorial_system) -> void:
     main = system.main
 
 func is_tutorial_npc(node: Node) -> bool:
-    return node != null and node.has_meta("kind") and String(node.get_meta("kind")) == "tutorial_npc"
+    return node != null and String(node.get_meta("story_actor_scope", "")) == "tutorial"
 
 func interact_with(node: Node) -> bool:
     if not is_tutorial_npc(node):

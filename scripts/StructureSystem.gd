@@ -33,6 +33,8 @@ var active_structure_town_key := ""
 var terrain_surface_sample_cache := {}
 var terrain_footprint_records := {}
 var natural_prop_exclusion_records := {}
+var private_interior_records := {}
+var private_interior_revision := 0
 
 func setup(main_node) -> void:
     main = main_node
@@ -60,6 +62,34 @@ func reset() -> void:
     terrain_surface_sample_cache.clear()
     terrain_footprint_records.clear()
     natural_prop_exclusion_records.clear()
+    private_interior_records.clear()
+    private_interior_revision += 1
+
+func register_private_interior(stable_id: String, min_cell: Vector2i, max_cell: Vector2i, owner_actor_id := "") -> bool:
+    var normalized_id := stable_id.strip_edges()
+    if normalized_id == "":
+        return false
+    var record := {
+        "stableId": normalized_id,
+        "interiorMinCell": Vector2i(mini(min_cell.x, max_cell.x), mini(min_cell.y, max_cell.y)),
+        "interiorMaxCell": Vector2i(maxi(min_cell.x, max_cell.x), maxi(min_cell.y, max_cell.y)),
+        "ownerActorId": String(owner_actor_id).strip_edges()
+    }
+    if private_interior_records.get(normalized_id, {}) == record:
+        return true
+    private_interior_records[normalized_id] = record
+    private_interior_revision += 1
+    return true
+
+func private_interior_records_snapshot() -> Array:
+    var records: Array = []
+    for stable_id in private_interior_records.keys():
+        records.append((private_interior_records[stable_id] as Dictionary).duplicate(true))
+    records.sort_custom(func(a, b): return String(a.get("stableId", "")) < String(b.get("stableId", "")))
+    return records
+
+func private_interior_records_revision() -> int:
+    return private_interior_revision
 
 func update_around(center_cell: Vector2i) -> void:
     if main == null:

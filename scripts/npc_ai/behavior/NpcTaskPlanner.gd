@@ -120,9 +120,9 @@ func _semantic_target_position(goal_kind: StringName, target_kind: String, entry
 		if entry.get("scriptedTarget", null) is Vector3:
 			return entry.get("scriptedTarget")
 		return Vector3.INF
-	if target_kind == "tutorial_action":
-		if entry.get("tutorialActionPosition", null) is Vector3:
-			return entry.get("tutorialActionPosition")
+	if target_kind == "scripted_action":
+		if entry.get("scriptedActionPosition", null) is Vector3:
+			return entry.get("scriptedActionPosition")
 		if body != null and body.has_meta("npc_scripted_target"):
 			return body.get_meta("npc_scripted_target")
 		return Vector3.INF

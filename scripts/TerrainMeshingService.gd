@@ -10,6 +10,7 @@ const ASYNC_PAYLOAD_PREP_MAX_CELLS_PER_FRAME := 192
 const ASYNC_EXACT_FLUID_PAYLOAD_MAX_CELLS_PER_FRAME := 2048
 const ASYNC_WORKER_MIN_COLLECT_DELAY_MS := 36.0
 const ASYNC_FLUID_FINALIZE_MAX_VERTICES_PER_FRAME := 768
+const RETIRED_PAYLOAD_JOB_LIMIT := 4
 
 var main
 var backend
@@ -31,12 +32,16 @@ var async_payload_job := {}
 var async_finalize_job := {}
 var retired_worker_threads := []
 var retired_payload_jobs := []
+var retired_payload_cleanup_thread: Thread = null
+var retired_payload_cleanup_count := 0
+var retired_payload_cleanup_start_failures := 0
 var setup_initialized := false
 
 func setup(main_node) -> void:
 	main = main_node
 	allow_blocking_gdscript_fallback = OS.get_environment("VOXEL_ALLOW_BLOCKING_GDSCRIPT_TERRAIN_MESHING").strip_edges() == "1"
 	collect_retired_worker_threads(false)
+	advance_retired_payload_cleanup(false)
 	if setup_initialized:
 		return
 	backend = discover_native_backend()
@@ -103,6 +108,11 @@ func backend_summary() -> Dictionary:
 		"completedJobs": completed_jobs.size(),
 		"workerActive": async_worker_active,
 		"payloadActive": not async_payload_job.is_empty(),
+		"retiredPayloadBacklog": retired_payload_backlog(),
+		"retiredPayloadLimit": RETIRED_PAYLOAD_JOB_LIMIT,
+		"retiredPayloadCleanupActive": retired_payload_cleanup_thread != null,
+		"retiredPayloadCleanupCount": retired_payload_cleanup_count,
+		"retiredPayloadCleanupStartFailures": retired_payload_cleanup_start_failures,
 		"backendDetails": backend_details
 	}
 
@@ -208,9 +218,46 @@ func clear_jobs(blocking := true) -> void:
 	async_finalize_job = {}
 	pending_jobs.clear()
 	completed_jobs.clear()
-	retired_payload_jobs.clear()
+	if blocking:
+		advance_retired_payload_cleanup(true)
+		retired_payload_jobs.clear()
+	else:
+		advance_retired_payload_cleanup(false)
 	job_sequence = 0
 	collect_retired_worker_threads(blocking)
+
+func retired_payload_backlog() -> int:
+	return retired_payload_jobs.size() + (1 if retired_payload_cleanup_thread != null else 0)
+
+func advance_retired_payload_cleanup(blocking := false) -> void:
+	if retired_payload_cleanup_thread != null:
+		if not blocking and not worker_thread_finished(retired_payload_cleanup_thread):
+			return
+		retired_payload_cleanup_thread.wait_to_finish()
+		retired_payload_cleanup_thread = null
+		retired_payload_cleanup_count += 1
+	while retired_payload_cleanup_thread == null and not retired_payload_jobs.is_empty():
+		var retired_job = retired_payload_jobs.pop_front()
+		if not (retired_job is Dictionary):
+			continue
+		var cleanup_thread := Thread.new()
+		var err := cleanup_thread.start(
+			Callable(self, "_thread_release_retired_payload_job").bind(retired_job),
+			Thread.PRIORITY_LOW
+		)
+		if err != OK:
+			retired_payload_cleanup_start_failures += 1
+			retired_payload_jobs.push_front(retired_job)
+			return
+		retired_payload_cleanup_thread = cleanup_thread
+		if not blocking:
+			return
+		retired_payload_cleanup_thread.wait_to_finish()
+		retired_payload_cleanup_thread = null
+		retired_payload_cleanup_count += 1
+
+func _thread_release_retired_payload_job(retired_job: Dictionary) -> void:
+	retired_job.clear()
 
 func collect_retired_worker_threads(blocking := false) -> int:
 	var collected := 0
@@ -268,6 +315,7 @@ func completed_job_count() -> int:
 func process_jobs(max_jobs := 1, budget_ms := 3.0, center := Vector2i(999999, 999999)) -> Dictionary:
 	var collect_started_usec := Time.get_ticks_usec()
 	collect_retired_worker_threads(false)
+	advance_retired_payload_cleanup(false)
 	var completed_summary := collect_async_worker_result()
 	var collect_ms := elapsed_ms(collect_started_usec)
 	var processed := int(completed_summary.get("processed", 0))
@@ -442,6 +490,10 @@ func start_next_async_native_job(center: Vector2i, budget_ms := 2.0) -> Dictiona
 		"requestedSignature": "",
 		"currentSignature": ""
 	}
+	advance_retired_payload_cleanup(false)
+	if retired_payload_backlog() >= RETIRED_PAYLOAD_JOB_LIMIT:
+		result["dropReason"] = "retired_payload_cleanup_backpressure"
+		return result
 	collect_retired_worker_threads(false)
 	if not retired_worker_threads.is_empty():
 		return result
@@ -801,11 +853,11 @@ func collect_async_worker_result() -> Dictionary:
 	var result: Dictionary = value
 	var retired_payload_job = result.get("retiredPayloadJob", {})
 	if retired_payload_job is Dictionary and not (retired_payload_job as Dictionary).is_empty():
-		# Keep large worker-bound state alive through gameplay. Releasing these Variant
-		# graphs on either the main or worker thread can contend with the frame; clear_jobs
-		# owns their bounded lifecycle during the explicit shutdown drain.
+		# Retire large worker-bound Variant graphs on one low-priority cleanup thread.
+		# Backpressure in start_next_async_native_job bounds this queue during traversal.
 		retired_payload_jobs.append(retired_payload_job)
 		result.erase("retiredPayloadJob")
+		advance_retired_payload_cleanup(false)
 	summary["elapsedMs"] = float(result.get("elapsedMs", 0.0))
 	summary["preparedSections"] = int(result.get("preparedSections", 0))
 	summary["terrainMeshBuildMs"] = float(result.get("terrainMeshBuildMs", 0.0))

@@ -33,10 +33,8 @@ var cached_static_collision_records: Array[Dictionary] = []
 var cached_static_collision_by_cell := {}
 var cached_door_collision_records: Array[Dictionary] = []
 var cached_door_collision_by_cell := {}
-var cached_private_interior_records_revision := -1
+var cached_private_interior_records_revision := ""
 var cached_private_interior_records: Array = []
-var cached_tutorial_starter_bounds_key := ""
-var cached_tutorial_starter_bounds := {}
 var height_cache := {}
 var terrain_projection_cache := {}
 var navmesh_tile_snapshot_cache := {}
@@ -74,12 +72,10 @@ func invalidate() -> void:
     navmesh_tile_door_revision_by_key.clear()
     cached_prop_cell_by_object_id = {}
     cached_prop_collision_records_by_object_id = {}
-    cached_private_interior_records_revision = -1
+    cached_private_interior_records_revision = ""
     dynamic_occupant_cache_frame_key = ""
     dynamic_occupant_cache = {}
     cached_private_interior_records = []
-    cached_tutorial_starter_bounds_key = ""
-    cached_tutorial_starter_bounds = {}
 
 func apply_navigation_events(events: Array) -> void:
     var monitor = performance_monitor()
@@ -1599,16 +1595,22 @@ func private_interior_blocks_entry(entry: Dictionary, cell: Vector2i) -> bool:
         if not (record_value is Dictionary):
             continue
         var record: Dictionary = record_value
+        if String(record.get("ownerActorId", "")) == String(entry.get("id", "")):
+            continue
         if record_interior_contains_cell(record, cell):
             return true
-    return tutorial_starter_interior_blocks_cell(cell)
+    return false
 
 func private_interior_records_for_entry(_entry: Dictionary, structure_system) -> Array:
-    if cached_private_interior_records_revision == static_snapshot_revision:
+    var structure_revision := 0
+    if structure_system != null and structure_system.has_method("private_interior_records_revision"):
+        structure_revision = int(structure_system.private_interior_records_revision())
+    var revision_key := "%d:%d" % [static_snapshot_revision, structure_revision]
+    if cached_private_interior_records_revision == revision_key:
         return cached_private_interior_records
     var records: Array = []
     if structure_system == null or not structure_system.has_method("town_home_records_snapshot"):
-        cached_private_interior_records_revision = static_snapshot_revision
+        cached_private_interior_records_revision = revision_key
         cached_private_interior_records = records
         return records
     var records_by_town: Dictionary = structure_system.town_home_records_snapshot()
@@ -1616,7 +1618,9 @@ func private_interior_records_for_entry(_entry: Dictionary, structure_system) ->
         var town_records_value = records_by_town.get(key_value, [])
         if town_records_value is Array:
             records.append_array(town_records_value)
-    cached_private_interior_records_revision = static_snapshot_revision
+    if structure_system.has_method("private_interior_records_snapshot"):
+        records.append_array(structure_system.private_interior_records_snapshot())
+    cached_private_interior_records_revision = revision_key
     cached_private_interior_records = records
     return records
 
@@ -1629,71 +1633,6 @@ func record_interior_contains_cell(record: Dictionary, cell: Vector2i) -> bool:
         and cell.x <= maxi(interior_min.x, interior_max.x) \
         and cell.y >= mini(interior_min.y, interior_max.y) \
         and cell.y <= maxi(interior_min.y, interior_max.y)
-
-func tutorial_starter_interior_blocks_cell(cell: Vector2i) -> bool:
-    if main == null or main.get("tutorial_system") == null:
-        return false
-    var tutorial = main.get("tutorial_system")
-    if not tutorial.has_method("state"):
-        return false
-    var state: Dictionary = tutorial.call("state")
-    var start_value = state.get("startCell", INVALID_CELL)
-    var start_cell: Vector2i = HomeInteriorServiceScript.cell_value(start_value, INVALID_CELL)
-    if start_cell == INVALID_CELL:
-        return false
-    var bounds := tutorial_starter_structure_bounds(start_cell)
-    var min_cell: Vector2i = bounds.get("min", start_cell)
-    var max_cell: Vector2i = bounds.get("max", start_cell)
-    var interior_min := Vector2i(min_cell.x + 1, min_cell.y + 2)
-    var interior_max := Vector2i(max_cell.x - 1, max_cell.y - 1)
-    return cell.x >= mini(interior_min.x, interior_max.x) \
-        and cell.x <= maxi(interior_min.x, interior_max.x) \
-        and cell.y >= mini(interior_min.y, interior_max.y) \
-        and cell.y <= maxi(interior_min.y, interior_max.y)
-
-func tutorial_starter_structure_bounds(start_cell: Vector2i) -> Dictionary:
-    var cache_key := "%d:%d,%d" % [static_snapshot_revision, start_cell.x, start_cell.y]
-    if cached_tutorial_starter_bounds_key == cache_key and not cached_tutorial_starter_bounds.is_empty():
-        return cached_tutorial_starter_bounds
-    var min_cell := Vector2i(start_cell.x - 4, start_cell.y - 5)
-    var max_cell := Vector2i(start_cell.x + 4, start_cell.y + 4)
-    if main == null:
-        cached_tutorial_starter_bounds_key = cache_key
-        cached_tutorial_starter_bounds = { "min": min_cell, "max": max_cell }
-        return cached_tutorial_starter_bounds
-    var blocks_value = main.get("blocks")
-    if not (blocks_value is Dictionary):
-        cached_tutorial_starter_bounds_key = cache_key
-        cached_tutorial_starter_bounds = { "min": min_cell, "max": max_cell }
-        return cached_tutorial_starter_bounds
-    var blocks: Dictionary = blocks_value
-    var found := false
-    for block_value in blocks.values():
-        var block := block_value as Node
-        if block == null or not is_instance_valid(block) or not block.has_meta("cell"):
-            continue
-        var block_type := String(block.get_meta("block_type", ""))
-        if block_type == "torch" or block_type == "cobblestonePath":
-            continue
-        var cell_value = block.get_meta("cell")
-        if not (cell_value is Vector3i):
-            continue
-        var cell3: Vector3i = cell_value
-        var flat := Vector2i(cell3.x, cell3.z)
-        if abs(flat.x - start_cell.x) > 9 or abs(flat.y - start_cell.y) > 9:
-            continue
-        if not found:
-            min_cell = flat
-            max_cell = flat
-            found = true
-        else:
-            min_cell.x = mini(min_cell.x, flat.x)
-            min_cell.y = mini(min_cell.y, flat.y)
-            max_cell.x = maxi(max_cell.x, flat.x)
-            max_cell.y = maxi(max_cell.y, flat.y)
-    cached_tutorial_starter_bounds_key = cache_key
-    cached_tutorial_starter_bounds = { "min": min_cell, "max": max_cell }
-    return cached_tutorial_starter_bounds
 
 func candidate_cells_near(entry: Dictionary, target_cell: Vector2i, allow_outside := false, moving_home := false, radius := 2) -> Array[Vector2i]:
     var result: Array[Vector2i] = []

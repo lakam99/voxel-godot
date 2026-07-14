@@ -794,7 +794,7 @@ func hostile_movement_obstacle(collider: Node) -> bool:
     var kind := String(collider.get_meta("kind", ""))
     if kind == "block":
         return String(collider.get_meta("block_type", "")) != "cobblestonePath"
-    if kind == "prop" or kind == "tutorial_npc" or kind == "npc":
+    if kind == "prop" or kind == "npc":
         return true
     return false
 
@@ -1013,7 +1013,7 @@ func update_enemy(enemy: Dictionary, delta: float, night_factor: float) -> void:
     var can_attack := bool(enemy.get("canAttack", true))
     if variant == "seer" and can_attack and aware and active_threat and distance >= 8.0 and distance <= 28.0 and float(enemy.get("cooldown", 0.0)) <= 0.0:
         projectile_system.spawn_projectile(body.global_position + Vector3(0.0, 1.25, 0.0), target_aim_position, 8.0, body, target_node, target_kind)
-        if target_kind in ["npc", "tutorial_npc"]:
+        if target_kind == "npc":
             register_hostile_npc_attack(target_node, body, variant, "projectile")
             npc_target_projectiles += 1
         enemy["cooldown"] = 2.2
@@ -1022,7 +1022,7 @@ func update_enemy(enemy: Dictionary, delta: float, night_factor: float) -> void:
             var damage: float = 21.0 + night_factor * 5.0 if variant == "rift" else 8.0 + night_factor * 4.0
             var label: String = "Hit by Rift Colossus" if variant == "rift" else "Hit by Shadow Stalker"
             survival.apply_damage(damage, label, "hostile")
-        elif target_kind in ["npc", "tutorial_npc"]:
+        elif target_kind == "npc":
             register_hostile_npc_attack(target_node, body, variant, "melee")
         enemy["cooldown"] = 1.85 if variant == "rift" else 1.25
 
@@ -1088,7 +1088,7 @@ func closest_hostile_target(origin: Vector3, enemy: Dictionary) -> Dictionary:
         if bool(entry.get("insideHome", false)) or bool(npc_body.get_meta("npc_inside_home", false)):
             continue
         var kind := String(npc_body.get_meta("kind", "npc"))
-        if not (kind in ["npc", "tutorial_npc"]):
+        if kind != "npc":
             continue
         var npc_id := String(entry.get("id", npc_body.name))
         if encounter_id == "tutorial_final_rescue" and npc_id != battle_source_npc_id:

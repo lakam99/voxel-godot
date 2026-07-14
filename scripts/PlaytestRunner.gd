@@ -9180,7 +9180,7 @@ func nearest_static_in_tree(node: Node, origin: Node3D, best: Dictionary, remain
     var node_3d := node as Node3D
     if node_3d != null and node_3d != origin and node is PhysicsBody3D:
         var kind := String(node.get_meta("kind", ""))
-        if kind in ["block", "prop", "hostile", "npc", "tutorial_npc"]:
+        if kind in ["block", "prop", "hostile", "npc"]:
             var distance := origin.global_position.distance_to(node_3d.global_position)
             if distance < float(best.get("distance", INF)):
                 best["distance"] = distance

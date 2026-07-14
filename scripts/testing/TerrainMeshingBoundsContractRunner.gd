@@ -1,6 +1,7 @@
 extends SceneTree
 
 const WorldGenerationSystemScript := preload("res://scripts/WorldGenerationSystem.gd")
+const TerrainMeshingServiceScript := preload("res://scripts/TerrainMeshingService.gd")
 const CHUNK_SIZE := 28
 const BELOW_SURFACE_CELLS := 10
 const ABOVE_SURFACE_CELLS := 2
@@ -72,6 +73,7 @@ func run() -> void:
 	test_generated_surface_bounds_enclose_exact_projection()
 	test_incremental_bounds_match_direct_authority()
 	test_mesh_edits_expand_authoritative_bounds()
+	test_retired_payload_cleanup_is_bounded()
 	finish()
 
 func test_generated_surface_bounds_enclose_exact_projection() -> void:
@@ -175,6 +177,29 @@ func test_mesh_edits_expand_authoritative_bounds() -> void:
 		JSON.stringify({ "baseline": baseline, "raised": raised_cell, "carved": carved_cell, "edited": edited, "repeated": repeated })
 	)
 	dispose_world(world)
+
+func test_retired_payload_cleanup_is_bounded() -> void:
+	var service = TerrainMeshingServiceScript.new()
+	for index in range(service.RETIRED_PAYLOAD_JOB_LIMIT):
+		service.retired_payload_jobs.append({
+			"id": index,
+			"scratch": PackedByteArray([index])
+		})
+	var before: Dictionary = service.backend_summary()
+	service.advance_retired_payload_cleanup(true)
+	var after: Dictionary = service.backend_summary()
+	var source := FileAccess.get_file_as_string("res://scripts/TerrainMeshingService.gd")
+	var passed: bool = int(before.get("retiredPayloadBacklog", -1)) == service.RETIRED_PAYLOAD_JOB_LIMIT \
+		and int(before.get("retiredPayloadLimit", -1)) == service.RETIRED_PAYLOAD_JOB_LIMIT \
+		and int(after.get("retiredPayloadBacklog", -1)) == 0 \
+		and int(after.get("retiredPayloadCleanupCount", -1)) == service.RETIRED_PAYLOAD_JOB_LIMIT \
+		and source.find("retired_payload_backlog() >= RETIRED_PAYLOAD_JOB_LIMIT") >= 0 \
+		and source.find("Thread.PRIORITY_LOW") >= 0
+	add_result(
+		"retired_payload_cleanup_has_bounded_backpressure_and_low_priority_retirement",
+		passed,
+		JSON.stringify({"before": before, "after": after})
+	)
 
 func make_world(seed: String) -> Object:
 	var main := FakeMain.new()

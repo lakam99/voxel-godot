@@ -736,10 +736,10 @@ func test_home_return_fallback_semantics() -> void:
         npc_system.add_child(body)
     npc_system.safe_place_npc(body, Vector3(float(start_cell.x) * CELL, level + 0.04, float(start_cell.y) * CELL), null, "test_spawn")
     var entry: Dictionary = npc_system.register_npc(body, {
-        "id": "npc-nav-home-fallback",
-        "name": "Home Fallback Tester",
+        "id": "npc-nav-home-terminal",
+        "name": "Home Terminal Tester",
         "role": "Worker",
-        "townKey": "npc-nav-home-fallback",
+        "townKey": "npc-nav-home-terminal",
         "townCenter": start_cell,
         "townRadius": 24,
         "level": level,
@@ -751,8 +751,7 @@ func test_home_return_fallback_semantics() -> void:
 
     entry["homeReturnTime"] = 8.0
     entry["homeActiveTargetCell"] = home_cell
-    NpcRouteStateStoreScript.write_status(entry, "moving", "", "NpcNavigationTestRunner.home_fallback_fixture")
-    entry["routeFallbackCell"] = start_cell
+    NpcRouteStateStoreScript.write_status(entry, "moving", "", "NpcNavigationTestRunner.home_terminal_fixture")
     var timed_position := body.global_position
     npc_system.settle_home_if_reached(entry)
     var timer_did_not_mark := not bool(entry.get("insideHome", false)) and not bool(body.get_meta("npc_inside_home", false)) and body.global_position.distance_to(timed_position) <= 0.001
@@ -785,27 +784,26 @@ func test_home_return_fallback_semantics() -> void:
     entry["homeRoutePositions"] = []
     entry["homeRouteIndex"] = 0
     NpcRouteStateStoreScript.write_status(entry, "blocked", "no_candidate_goal", "NpcNavigationTestRunner.blocked_home_fixture")
-    entry["routeFallbackCell"] = porch_cell
     entry["homeActiveTargetCell"] = home_cell
     entry.erase("homeSettleDebug")
     var unreachable_before := int(entry.get("unreachableGoals", 0))
     npc_system.settle_home_if_reached(entry)
     var unreachable_after := int(entry.get("unreachableGoals", 0))
-    var fallback_blocked := not bool(entry.get("insideHome", false)) \
+    var terminal_blocked := not bool(entry.get("insideHome", false)) \
         and not bool(body.get_meta("npc_inside_home", false)) \
         and String(entry.get("routeStatus", "")) == "blocked" \
-        and String(entry.get("routeReason", "")) == "home_porch_fallback_not_inside" \
+        and String(entry.get("routeReason", "")) == "home_route_terminal_outside" \
         and unreachable_after > unreachable_before \
         and body.global_position.distance_to(blocked_start_position) <= 0.001
 
     add_result(
-        "npc_nav_home_return_fallback_semantics",
-        timer_did_not_mark and advanced_route_waypoint and advanced_from_porch and fallback_blocked,
-        "timer safe %s, route advance %s, porch advance %s, fallback %s, route %s/%s, unreachable %d->%d, debug %s" % [
+        "npc_nav_home_return_terminal_semantics",
+        timer_did_not_mark and advanced_route_waypoint and advanced_from_porch and terminal_blocked,
+        "timer safe %s, route advance %s, porch advance %s, terminal %s, route %s/%s, unreachable %d->%d, debug %s" % [
             str(timer_did_not_mark),
             str(advanced_route_waypoint),
             str(advanced_from_porch),
-            str(fallback_blocked),
+            str(terminal_blocked),
             String(entry.get("routeStatus", "")),
             String(entry.get("routeReason", "")),
             unreachable_before,

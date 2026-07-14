@@ -140,6 +140,10 @@ func run() -> void:
         finish(1)
         return
     await load_natural_generated_town()
+    # Distant-town streaming completes after the initial scene configuration and
+    # may rebuild the tutorial intro state. Neutralize its clock freeze only after
+    # loading has settled so the unscripted day/night observation starts at 10:00.
+    neutralize_intro_clock_freeze()
     set_display_hour(10.0)
     write_progress("initial_day_staged")
     await wait_physics_frames(LOAD_SETTLE_FRAMES)

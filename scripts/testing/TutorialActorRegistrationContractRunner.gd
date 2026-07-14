@@ -25,7 +25,7 @@ func run() -> void:
 	test_missing_home_fails_before_spawn(builder, scenarios, manifest)
 	test_shared_homes_are_declared(scenarios)
 	await test_generated_town_spawn_still_uses_generic_registration(manifest)
-	await test_tutorial_identity_has_ordinary_simulation(builder, scenarios, manifest)
+	await test_scenario_presentation_has_ordinary_simulation(builder, scenarios, manifest)
 	test_source_audit()
 	tutorial.free()
 	finish()
@@ -73,7 +73,8 @@ func test_manifest_resolution(builder, scenarios: Array, manifest: Dictionary) -
 			and profile.get("interiorMinCell") == home.get("interiorMinCell") \
 			and profile.get("interiorMaxCell") == home.get("interiorMaxCell") \
 			and profile.get("homeRouteCells", []) == home.get("homeRouteCells", []) \
-			and not profile.has("requiredVisibleScripted")
+			and not profile.has("requiredVisibleScripted") \
+			and not profile.has("tutorial")
 	add_result(
 		"all_tutorial_actor_profiles_resolve_exactly_from_manifest_before_spawn",
 		exact \
@@ -130,14 +131,14 @@ func test_generated_town_spawn_still_uses_generic_registration(manifest: Diction
 			and String(entry.get("doorPortalId", "")) == String(record.get("doorPortalId", "")) \
 			and entry.get("homeCell") == record.get("homeCell") \
 			and entry.get("homeRouteCells", []) == record.get("homeRouteCells", []) \
-			and not bool(entry.get("tutorial", true)) \
+			and not entry.has("tutorial") \
 			and not bool(entry.get("requiredVisibleScripted", true)),
 		entry
 	)
 	system.free()
 	await process_frame
 
-func test_tutorial_identity_has_ordinary_simulation(builder, scenarios: Array, manifest: Dictionary) -> void:
+func test_scenario_presentation_has_ordinary_simulation(builder, scenarios: Array, manifest: Dictionary) -> void:
 	var resolution: Dictionary = builder.resolve_tutorial_actor_specs(manifest, scenarios, {"radius": 25, "level": 16.0})
 	var base_profile: Dictionary = {}
 	for spec_value in resolution.get("specs", []):
@@ -147,44 +148,45 @@ func test_tutorial_identity_has_ordinary_simulation(builder, scenarios: Array, m
 	var system := NpcSystemScript.new()
 	root.add_child(system)
 	system.setup(null, null)
-	var tutorial_body := CharacterBody3D.new()
+	var scenario_body := CharacterBody3D.new()
 	var ordinary_body := CharacterBody3D.new()
-	system.add_child(tutorial_body)
+	system.add_child(scenario_body)
 	system.add_child(ordinary_body)
-	var tutorial_profile := base_profile.duplicate(true)
-	tutorial_profile["id"] = "tutorial-contract"
-	tutorial_profile["tutorial"] = true
+	scenario_body.set_meta("story_actor_scope", "tutorial")
+	var scenario_profile := base_profile.duplicate(true)
+	scenario_profile["id"] = "scenario-contract"
 	var ordinary_profile := base_profile.duplicate(true)
 	ordinary_profile["id"] = "ordinary-contract"
-	ordinary_profile["tutorial"] = false
-	var tutorial_entry: Dictionary = system.register_npc(tutorial_body, tutorial_profile)
+	var scenario_entry: Dictionary = system.register_npc(scenario_body, scenario_profile)
 	var ordinary_entry: Dictionary = system.register_npc(ordinary_body, ordinary_profile)
-	var tutorial_context = tutorial_entry.get("agentContext")
+	var scenario_context = scenario_entry.get("agentContext")
 	var ordinary_context = ordinary_entry.get("agentContext")
 	var schedule_service = system.autonomy_system.get("schedule_service")
-	var tutorial_schedule: Dictionary = schedule_service.role_profile_for(tutorial_context, tutorial_entry)
+	var scenario_schedule: Dictionary = schedule_service.role_profile_for(scenario_context, scenario_entry)
 	var ordinary_schedule: Dictionary = schedule_service.role_profile_for(ordinary_context, ordinary_entry)
-	var tutorial_motor = tutorial_entry.get("motorProfile")
+	var scenario_motor = scenario_entry.get("motorProfile")
 	var ordinary_motor = ordinary_entry.get("motorProfile")
-	var motor_equal: bool = tutorial_motor != null and ordinary_motor != null \
-		and tutorial_motor.to_summary() == ordinary_motor.to_summary()
+	var motor_equal: bool = scenario_motor != null and ordinary_motor != null \
+		and scenario_motor.to_summary() == ordinary_motor.to_summary()
 	add_result(
-		"tutorial_identity_does_not_change_collision_motor_schedule_or_lod_pin",
-		not tutorial_entry.is_empty() \
+		"story_presentation_scope_does_not_enter_generic_simulation_profile",
+		not scenario_entry.is_empty() \
 			and not ordinary_entry.is_empty() \
-			and tutorial_body.collision_layer == ordinary_body.collision_layer \
-			and tutorial_body.collision_mask == ordinary_body.collision_mask \
+			and not scenario_profile.has("tutorial") \
+			and not scenario_entry.has("tutorial") \
+			and scenario_body.collision_layer == ordinary_body.collision_layer \
+			and scenario_body.collision_mask == ordinary_body.collision_mask \
 			and motor_equal \
-			and tutorial_schedule == ordinary_schedule \
-			and String(tutorial_schedule.get("roleId", "")) == "carpenter" \
-			and not bool(tutorial_entry.get("requiredVisibleScripted", true)) \
+			and scenario_schedule == ordinary_schedule \
+			and String(scenario_schedule.get("roleId", "")) == "carpenter" \
+			and not bool(scenario_entry.get("requiredVisibleScripted", true)) \
 			and not bool(ordinary_entry.get("requiredVisibleScripted", true)),
 		{
-			"tutorialSchedule": tutorial_schedule,
+			"scenarioSchedule": scenario_schedule,
 			"ordinarySchedule": ordinary_schedule,
-			"tutorialLayer": tutorial_body.collision_layer,
+			"scenarioLayer": scenario_body.collision_layer,
 			"ordinaryLayer": ordinary_body.collision_layer,
-			"tutorialRequiredVisible": tutorial_entry.get("requiredVisibleScripted"),
+			"scenarioRequiredVisible": scenario_entry.get("requiredVisibleScripted"),
 			"ordinaryRequiredVisible": ordinary_entry.get("requiredVisibleScripted")
 		}
 	)
@@ -200,7 +202,10 @@ func test_source_audit() -> void:
 		and tutorial_source.find("func tutorial_home_record(") < 0 \
 		and tutorial_source.find("ensure_tutorial_town_home_records") < 0 \
 		and builder_source.find("\"requiredVisibleScripted\": true") < 0 \
+		and builder_source.find("\"tutorial\": true") < 0 \
 		and npc_source.find("profile.get(\"requiredVisibleScripted\", profile.get(\"tutorial\"") < 0 \
+		and npc_source.find("profile.get(\"tutorial\"") < 0 \
+		and npc_source.find("npc_tutorial") < 0 \
 		and schedule_source.find("entry.get(\"tutorial\", false)") < 0
 	add_result(
 		"source_has_no_home_refresh_coordinate_fallback_or_tutorial_simulation_privilege",

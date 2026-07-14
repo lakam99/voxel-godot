@@ -90,7 +90,7 @@ func update_projectiles(delta: float) -> void:
             var collider_kind := String(collider.get_meta("kind", "")) if collider != null and collider.has_meta("kind") else ""
             if collider == player and survival:
                 survival.apply_damage(float(projectile_state.get("damage", 8.0)), "Rift bolt", "hostile")
-            elif collider_kind in ["npc", "tutorial_npc"]:
+            elif collider_kind == "npc":
                 npc_target_hits += 1
                 collider.set_meta("npc_hostile_projectile_hits", int(collider.get_meta("npc_hostile_projectile_hits", 0)) + 1)
                 collider.set_meta("npc_last_hostile_attack", "projectile")

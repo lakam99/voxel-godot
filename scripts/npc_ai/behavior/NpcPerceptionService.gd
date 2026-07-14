@@ -116,8 +116,3 @@ func _held_by_script(entry: Dictionary, body: Node3D) -> bool:
 		return true
 	return false
 
-func _fallback_inside_home(entry: Dictionary, position: Vector3) -> bool:
-	var home_cell: Vector2i = entry.get("homeCell", Vector2i.ZERO)
-	var current_cell := Vector2i(roundi(position.x / NpcConstantsScript.CELL_SIZE), roundi(position.z / NpcConstantsScript.CELL_SIZE))
-	return current_cell == home_cell and position.distance_to(entry.get("homePosition", position)) <= NpcConstantsScript.CELL_SIZE * 0.82
-

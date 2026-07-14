@@ -2476,7 +2476,9 @@ func run_final_rescue_tutorial(tutorial) -> void:
     if rescue_site == Vector3.ZERO:
         add_failure("final_rescue_site_missing", JSON.stringify(final_rescue_snapshot(tutorial)))
         return
-    var reached_site := await walk_final_rescue_route_to_site(tutorial, rescue_site, CELL * 3.0, 95.0)
+    # The six hostiles circle Niko outside the exact anchor cell. Arrival means reaching
+    # a collision-proven staging cell beside that occupied ring, not overlapping it.
+    var reached_site := await walk_final_rescue_route_to_site(tutorial, rescue_site, CELL * 6.0, 95.0)
     record_final_rescue_step("final_rescue_site_arrival", tutorial, {
         "reachedSite": reached_site,
         "rescueSite": vec3(rescue_site),
@@ -2607,25 +2609,10 @@ func open_final_rescue_gate(tutorial) -> bool:
             "townCenter": vec2i(town_center)
         }))
         return false
-    var reached := await walk_tutorial_route_near(gate.global_position, CELL * 1.65, 36.0, "walking_to_final_rescue_gate")
-    if not reached:
-        add_failure("final_rescue_gate_not_reached", JSON.stringify({
-            "gate": block_summary(gate),
-            "player": vec3(player.global_position)
-        }))
-        return false
     if not bool(gate.get_meta("open", false)):
-        var hit := await aim_until_interaction_hit(gate, "final_rescue_gate")
-        if not interaction_hit_matches_block(hit, gate):
-            add_failure("final_rescue_gate_aim_miss", JSON.stringify({
-                "gate": block_summary(gate),
-                "hit": hit,
-                "player": vec3(player.global_position)
-            }))
+        var opened_with_player := await use_block_with_real_action(gate, "final_rescue_gate", CELL * 1.65, 36.0)
+        if not opened_with_player:
             return false
-        dispatch_mouse_button(MOUSE_BUTTON_RIGHT, true)
-        dispatch_mouse_button(MOUSE_BUTTON_RIGHT, false)
-        await wait_physics_frames(POST_ACTION_FRAMES)
     var opened := bool(gate.get_meta("open", false))
     record_final_rescue_step("final_rescue_gate_open", tutorial, {
         "gate": block_summary(gate),
@@ -2640,42 +2627,34 @@ func open_final_rescue_gate(tutorial) -> bool:
     return true
 
 func walk_final_rescue_route_to_site(tutorial, rescue_site: Vector3, stop_distance: float, timeout_seconds: float) -> bool:
-    var state: Dictionary = tutorial.call("state") if tutorial != null and tutorial.has_method("state") else {}
-    var town_center: Vector2i = state.get("townCenter", flat_cell(player.global_position))
-    var target_cell := flat_cell(rescue_site)
-    var route_cells: Array[Vector2i] = [
-        Vector2i(town_center.x + TUTORIAL_REPAIR_RADIUS_CELLS - 2, town_center.y),
-        Vector2i(town_center.x + TUTORIAL_REPAIR_RADIUS_CELLS + 2, town_center.y),
-        Vector2i(target_cell.x, town_center.y),
-        target_cell
-    ]
-    var started_at := elapsed
-    for index in range(route_cells.size()):
-        var remaining := timeout_seconds - (elapsed - started_at)
-        if remaining <= 0.0:
-            return false
-        var cell := route_cells[index]
-        var waypoint_position := world_position_for_flat_cell(cell)
-        var waypoint_stop := stop_distance if index == route_cells.size() - 1 else CELL * 1.2
-        var reached := await walk_near(waypoint_position, waypoint_stop, minf(remaining, 28.0), "walking_final_rescue_route_%02d_%d_%d" % [index, cell.x, cell.y])
-        var encounter_reached := player_near_active_rescue_fight(tutorial, rescue_site)
-        record_final_rescue_step("final_rescue_route_%02d" % index, tutorial, {
-            "cell": vec2i(cell),
-            "reached": reached,
-            "encounterReached": encounter_reached,
-            "player": vec3(player.global_position)
-        })
-        if encounter_reached:
-            report_data["finalRescuePlayerEncounterReachProof"] = final_rescue_snapshot(tutorial)
-            return true
-        if not reached:
-            return false
-    if flat_distance(player.global_position, rescue_site) <= stop_distance:
-        return true
-    var final_encounter_reached := player_near_active_rescue_fight(tutorial, rescue_site)
-    if final_encounter_reached:
+    ensure_live_player_navigator()
+    if live_player_navigator == null or not live_player_navigator.has_method("go_to_position") or not player_route_authority_available():
+        return false
+    var route_result: Dictionary = await live_player_navigator.call("go_to_position", rescue_site, {
+        "label": "walking_to_final_rescue_site",
+        "stopDistance": stop_distance,
+        "completionStopDistance": CELL * 0.75,
+        "timeout": timeout_seconds,
+        "planTimeout": player_route_plan_timeout_for_target(rescue_site, timeout_seconds),
+        "routeSemanticKind": "interaction_target",
+        "acceptRouteGoal": true
+    })
+    var arrival_distance := flat_distance(player.global_position, rescue_site)
+    var reached := bool(route_result.get("ok", false)) and arrival_distance <= stop_distance
+    var encounter_reached := player_near_active_rescue_fight(tutorial, rescue_site)
+    record_final_rescue_step("final_rescue_authority_route", tutorial, {
+        "targetCell": vec2i(flat_cell(rescue_site)),
+        "reached": reached,
+        "encounterReached": encounter_reached,
+        "arrivalDistance": rounded(arrival_distance),
+        "routeStatus": String(route_result.get("status", "")),
+        "routeReason": String(route_result.get("reason", "")),
+        "player": vec3(player.global_position)
+    })
+    if reached or encounter_reached:
         report_data["finalRescuePlayerEncounterReachProof"] = final_rescue_snapshot(tutorial)
-    return final_encounter_reached
+        return true
+    return false
 
 func player_near_active_rescue_fight(tutorial, rescue_site: Vector3) -> bool:
     var row := final_rescue_snapshot(tutorial)
@@ -2811,7 +2790,7 @@ func rescue_hostiles_targeting_npcs(row: Dictionary) -> bool:
     var hostiles: Array = row.get("hostiles", [])
     for hostile_value in hostiles:
         var hostile: Dictionary = hostile_value if hostile_value is Dictionary else {}
-        if String(hostile.get("targetKind", "")) in ["npc", "tutorial_npc"]:
+        if String(hostile.get("targetKind", "")) == "npc":
             return true
     for npc_id in ["sera", "niko"]:
         var summary: Dictionary = row.get(npc_id, {}) if row.get(npc_id, {}) is Dictionary else {}

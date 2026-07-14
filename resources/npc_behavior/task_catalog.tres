@@ -390,19 +390,19 @@ action_definitions = Array[Dictionary]([
 "failureReasons": ["precondition_failed", "timeout", "target_invalidated", "route_terminal_failure"]
 },
 {
-"actionId": "complete_tutorial_world_action",
+"actionId": "complete_scripted_world_action",
 "preconditions": ["scripted_target_present", "smart_object_available"],
-"effects": ["tutorial_action_effect_applied"],
+"effects": ["scripted_action_effect_applied"],
 "baseCost": 0.4,
 "contextCost": {},
 "interruptible": false,
 "timeoutSeconds": 8.0,
 "execution": "smart_object",
-"targetKind": "tutorial_action",
+"targetKind": "scripted_action",
 "reservationRequired": true,
 "routeRequired": true,
 "failurePolicy": "fail_scripted_order",
-"successEffect": "tutorial_action_effect_applied",
+"successEffect": "scripted_action_effect_applied",
 "failureReasons": ["precondition_failed", "timeout", "target_invalidated", "route_terminal_failure"]
 },
 {
@@ -465,13 +465,13 @@ goal_sequences = Array[Dictionary]([
 "actionIds": ["scripted_order"]
 },
 {
-"sequenceId": "tutorial_scripted_action",
+"sequenceId": "scripted_world_action",
 "goalKind": "scripted",
-"context": { "scriptedOrderKind": "tutorial_action" },
-"targetKind": "tutorial_action",
+"context": { "scriptedOrderKind": "scripted_action" },
+"targetKind": "scripted_action",
 "reservationRequired": true,
 "routeRequired": true,
-"actionIds": ["scripted_order", "complete_tutorial_world_action"]
+"actionIds": ["scripted_order", "complete_scripted_world_action"]
 },
 {
 "sequenceId": "home_return_bed_rest",

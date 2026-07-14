@@ -71,6 +71,7 @@ func run() -> void:
 	test_missing_npc_registration_is_structured_failure()
 	test_continue_restore_defers_world_setup()
 	test_gameplay_physics_gate_rejects_enabled_npc()
+	test_loading_completion_requires_all_readiness_domains()
 	await test_forced_manifest_failure_keeps_gameplay_disabled_and_visible()
 	finish()
 
@@ -182,6 +183,38 @@ func test_gameplay_physics_gate_rejects_enabled_npc() -> void:
 	player_body.free()
 	npc_body.free()
 	main.free()
+
+func test_loading_completion_requires_all_readiness_domains() -> void:
+	var main_source := FileAccess.get_file_as_string("res://scripts/MainCore.gd")
+	var tutorial_source := FileAccess.get_file_as_string("res://scripts/TutorialSystem.gd")
+	var completion_index := main_source.find("startup_loading_completed.emit()")
+	var tutorial_ready_index := main_source.find("if not startup_result_is_ready(tutorial_result):")
+	var gameplay_ready_index := main_source.find("if not startup_result_is_ready(physics_gate_result):")
+	var loading_release_index := main_source.find("startup_loading_active = false", gameplay_ready_index)
+	var new_game_start := main_source.find("func start_new_game")
+	var new_game_tutorial_ready := main_source.find("if not startup_result_is_ready(tutorial_result):", new_game_start)
+	var new_game_release := main_source.find("runtime_loading_active = false", new_game_start)
+	var tutorial_domains_present := tutorial_source.find("ensure_town_manifest_ready_staged") >= 0 \
+		and tutorial_source.find("tutorial_manifest_door_readiness") >= 0 \
+		and tutorial_source.find("tutorial_npc_registration_readiness") >= 0 \
+		and tutorial_source.find("claim_town_population") >= 0 \
+		and tutorial_source.find("submit_initial_actor_orders") >= 0
+	var passed := completion_index >= 0 \
+		and tutorial_ready_index >= 0 and tutorial_ready_index < completion_index \
+		and gameplay_ready_index >= 0 and gameplay_ready_index < completion_index \
+		and loading_release_index > gameplay_ready_index and loading_release_index < completion_index \
+		and new_game_tutorial_ready > new_game_start \
+		and new_game_release > new_game_tutorial_ready \
+		and tutorial_domains_present
+	add_result("loading_completion_is_guarded_by_manifest_door_registration_order_and_physics_readiness", passed, {
+		"completionIndex": completion_index,
+		"tutorialReadyIndex": tutorial_ready_index,
+		"gameplayReadyIndex": gameplay_ready_index,
+		"loadingReleaseIndex": loading_release_index,
+		"newGameTutorialReadyIndex": new_game_tutorial_ready,
+		"newGameReleaseIndex": new_game_release,
+		"tutorialDomainsPresent": tutorial_domains_present
+	})
 
 func test_forced_manifest_failure_keeps_gameplay_disabled_and_visible() -> void:
 	failure_signal_reason = ""

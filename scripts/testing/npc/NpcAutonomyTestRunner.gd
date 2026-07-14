@@ -2623,7 +2623,7 @@ func test_motor_fence_window_corner_no_penetration(_mode: String) -> Dictionary:
 	var passed := (
 		locomotion_text.find("capsule_hits_obstacle") >= 0
 		and locomotion_text.find("collider_blocks_capsule") >= 0
-		and locomotion_text.find("\"prop\", \"npc\", \"tutorial_npc\", \"hostile\"") >= 0
+		and locomotion_text.find("\"prop\", \"npc\", \"hostile\"") >= 0
 		and locomotion_text.find("move_and_collide(delta, true") >= 0
 	)
 	return outcome(

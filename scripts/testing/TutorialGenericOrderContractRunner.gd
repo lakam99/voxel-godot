@@ -36,7 +36,7 @@ func run() -> void:
 	test_source_has_no_tutorial_movement_privileges()
 	finish()
 
-func make_system_and_entry(actor_id: String, tutorial := false) -> Dictionary:
+func make_system_and_entry(actor_id: String) -> Dictionary:
 	var system = NpcSystemScript.new()
 	root.add_child(system)
 	var autonomy := FakeAutonomy.new()
@@ -52,7 +52,6 @@ func make_system_and_entry(actor_id: String, tutorial := false) -> Dictionary:
 		"jobReservationId": "",
 		"jobApproachSlotId": "",
 		"scriptedOrderSerial": 0,
-		"tutorial": tutorial,
 		"npcWalkSpeed": 2.6,
 		"npcSprintSpeed": 4.4
 	}
@@ -73,7 +72,7 @@ func seed_owned_route_state(entry: Dictionary) -> void:
 	entry["activeTrafficStepGroup"] = "traffic:contract"
 
 func test_wait_replaced_by_go_home_cleans_owned_state() -> void:
-	var fixture := make_system_and_entry("mira", true)
+	var fixture := make_system_and_entry("mira")
 	var system = fixture.system
 	var autonomy: FakeAutonomy = fixture.autonomy
 	var entry: Dictionary = fixture.entry
@@ -105,7 +104,7 @@ func test_wait_replaced_by_go_home_cleans_owned_state() -> void:
 	system.free()
 
 func test_cancel_order_cleans_non_tutorial_actor_state() -> void:
-	var fixture := make_system_and_entry("ordinary-worker", false)
+	var fixture := make_system_and_entry("ordinary-worker")
 	var system = fixture.system
 	var autonomy: FakeAutonomy = fixture.autonomy
 	var body: Node = fixture.body
@@ -131,7 +130,7 @@ func test_cancel_order_cleans_non_tutorial_actor_state() -> void:
 	system.free()
 
 func test_dialogue_pause_is_generic() -> void:
-	var fixture := make_system_and_entry("dialogue-worker", false)
+	var fixture := make_system_and_entry("dialogue-worker")
 	var system = fixture.system
 	var body: Node3D = fixture.body
 	var entry: Dictionary = fixture.entry
@@ -158,13 +157,9 @@ func test_tutorial_scenario_and_acknowledgement_use_generic_orders() -> void:
 	})
 
 func test_source_has_no_tutorial_movement_privileges() -> void:
-	var sources := "\n".join([
-		FileAccess.get_file_as_string("res://scripts/TutorialSystem.gd"),
-		FileAccess.get_file_as_string("res://scripts/TutorialRescueSystem.gd"),
-		FileAccess.get_file_as_string("res://scripts/NpcSystem.gd"),
-		FileAccess.get_file_as_string("res://scripts/npc_ai/behavior/NpcPlanExecutor.gd"),
-		FileAccess.get_file_as_string("res://scripts/npc_ai/behavior/NpcPerceptionService.gd")
-	])
+	var generic_sources := FileAccess.get_file_as_string("res://scripts/NpcSystem.gd")
+	for path in gd_sources_under("res://scripts/npc_ai"):
+		generic_sources += "\n" + FileAccess.get_file_as_string(path)
 	var forbidden := [
 		"release_intro_hold_and_order_home",
 		"holdIntroDoor",
@@ -173,13 +168,52 @@ func test_source_has_no_tutorial_movement_privileges() -> void:
 		"npc_is_held_by_intro_or_dialogue",
 		"release_intro_elder_home_order",
 		"npc_force_hold",
-		"npc_rescue_stranded"
+		"npc_rescue_stranded",
+		"entry.get(\"tutorial\"",
+		"profile.get(\"tutorial\"",
+		"npc_tutorial",
+		"tutorialActionPosition",
+		"tutorial_action",
+		"tutorial_starter_",
+		"tutorial_town_key",
+		"home_porch_fallback",
+		"record_home_fallback",
+		"\"mira\"",
+		"\"niko\"",
+		"\"rowan\"",
+		"\"sera\""
 	]
 	var found: Array[String] = []
 	for symbol in forbidden:
-		if sources.find(symbol) >= 0:
+		if generic_sources.find(symbol) >= 0:
 			found.append(symbol)
-	add_result("production_source_has_no_tutorial_movement_hold_privileges", found.is_empty(), {"found": found})
+	var rescue_source := FileAccess.get_file_as_string("res://scripts/TutorialRescueSystem.gd")
+	for symbol in ["safe_place_tutorial_npc", ".safe_place_npc(", "settle_rescue_party_home"]:
+		if rescue_source.find(symbol) >= 0:
+			found.append("TutorialRescueSystem:" + symbol)
+	add_result("production_source_has_one_generic_npc_movement_contract", found.is_empty(), {"found": found})
+
+func gd_sources_under(path: String) -> Array[String]:
+	var result: Array[String] = []
+	collect_gd_sources(path, result)
+	result.sort()
+	return result
+
+func collect_gd_sources(path: String, result: Array[String]) -> void:
+	var directory := DirAccess.open(path)
+	if directory == null:
+		return
+	directory.list_dir_begin()
+	var name := directory.get_next()
+	while name != "":
+		if name != "." and name != "..":
+			var child := path.path_join(name)
+			if directory.current_is_dir():
+				collect_gd_sources(child, result)
+			elif name.ends_with(".gd"):
+				result.append(child)
+		name = directory.get_next()
+	directory.list_dir_end()
 
 func add_result(name: String, passed: bool, details) -> void:
 	results.append({"name": name, "passed": passed, "details": details})

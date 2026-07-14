@@ -50,6 +50,7 @@ var npcs: Array = []
 var npc_by_id := {}
 var pending_saved_npc_facts := {}
 var spawned_town_keys := {}
+var town_population_claims := {}
 var guard_shots := 0
 var guard_melee_strikes := 0
 var door_opens := 0
@@ -161,6 +162,7 @@ func clear() -> void:
     npcs.clear()
     npc_by_id.clear()
     spawned_town_keys.clear()
+    town_population_claims.clear()
     published_navigation_semantics.clear()
     pending_saved_npc_facts.clear()
     focused_dialogue_body = null
@@ -605,7 +607,6 @@ func register_npc(body: Node3D, profile: Dictionary) -> Dictionary:
         "hunger": deterministic_profile_float(profile, body, "hunger", 72.0, 96.0),
         "maxHunger": 100.0,
         "jobRuns": 0,
-        "tutorial": bool(profile.get("tutorial", false)),
         "requiredVisibleScripted": bool(profile.get("requiredVisibleScripted", false)),
         "cooldown": deterministic_profile_float(profile, body, "cooldown", 0.2, 1.2),
         "homeReturnTime": 0.0,
@@ -748,7 +749,6 @@ func apply_npc_metadata(body: Node, entry: Dictionary, home_cell: Vector2i, porc
     body.set_meta("npc_weapon", String(entry["weaponId"]))
     NpcRouteStateStoreScript.publish_to_body(entry)
     body.set_meta("npc_simulation_lod", String(entry.get("simulationLod", "active")))
-    body.set_meta("npc_tutorial", bool(entry.get("tutorial", false)))
     body.set_meta("npc_required_visible_sequence", bool(entry.get("requiredVisibleScripted", false)))
     body.set_meta("npc_speed_mode", normalize_npc_speed_mode(entry.get("npcSpeedMode", NPC_SPEED_MODE_WALKING)))
     body.set_meta("npc_rushing", false)
@@ -904,7 +904,6 @@ func spawn_generic_town_npcs() -> void:
         return
     last_spawn_scan_frame = current_frame
     var records_by_town: Dictionary = main.structure_system.town_home_records_snapshot()
-    var tutorial_key := tutorial_town_key()
     for town_key_variant in records_by_town.keys():
         var town_key := String(town_key_variant)
         if town_key == "" or spawned_town_keys.has(town_key):
@@ -915,7 +914,7 @@ func spawn_generic_town_npcs() -> void:
         var records: Array = records_value
         if records.is_empty():
             continue
-        if tutorial_key != "" and town_key == tutorial_key:
+        if town_population_is_claimed(town_key):
             spawned_town_keys[town_key] = true
             continue
         for i in range(records.size()):
@@ -941,10 +940,24 @@ func prebake_town_navmesh(records: Array) -> void:
         monitor.increment_counter("navmesh_town_prebake_published", int(summary.get("published", 0)))
         monitor.increment_counter("navmesh_town_prebake_tiles", int(summary.get("tiles", 0)))
 
-func tutorial_town_key() -> String:
-    if main == null or main.tutorial_system == null or not main.tutorial_system.has_method("tutorial_town_key"):
-        return ""
-    return String(main.tutorial_system.tutorial_town_key())
+func claim_town_population(town_key: String, owner_id: String) -> Dictionary:
+    var normalized_town_key := town_key.strip_edges()
+    var normalized_owner_id := owner_id.strip_edges()
+    if normalized_town_key == "" or normalized_owner_id == "":
+        return {"ok": false, "reason": "invalid_town_population_claim"}
+    var existing_owner := String(town_population_claims.get(normalized_town_key, ""))
+    if existing_owner != "" and existing_owner != normalized_owner_id:
+        return {
+            "ok": false,
+            "reason": "town_population_already_claimed",
+            "townKey": normalized_town_key,
+            "ownerId": existing_owner
+        }
+    town_population_claims[normalized_town_key] = normalized_owner_id
+    return {"ok": true, "townKey": normalized_town_key, "ownerId": normalized_owner_id}
+
+func town_population_is_claimed(town_key: String) -> bool:
+    return town_population_claims.has(town_key.strip_edges())
 
 func spawn_town_npc(record: Dictionary, index: int) -> CharacterBody3D:
     ensure_components()
@@ -1569,7 +1582,7 @@ func set_npc_goal(entry: Dictionary, goal: String) -> void:
         body.set_meta("npc_goal", goal)
 
 func clear_home_route_terminal(entry: Dictionary) -> void:
-    if not (String(entry.get("routeReason", "")) in ["home_porch_fallback", "home_porch_fallback_not_inside", "porch_not_inside", "threshold_not_inside"]):
+    if not (String(entry.get("routeReason", "")) in ["home_route_terminal_outside", "porch_not_inside", "threshold_not_inside"]):
         return
     NpcRouteStateStoreScript.write_status(entry, "idle", "", "NpcSystem.clear_home_route_terminal")
     entry["homeBlocked"] = false
@@ -2645,44 +2658,22 @@ func settle_home_if_reached(entry: Dictionary) -> void:
         entry["insideHome"] = false
         body.set_meta("npc_inside_home", false)
     var home_cell: Vector2i = entry.get("homeCell", Vector2i.ZERO)
-    var porch_cell: Vector2i = entry.get("porchCell", home_cell)
-    var porch: Vector3 = entry.get("porchPosition", body.global_position)
-    var home: Vector3 = entry.get("homePosition", body.global_position)
-    var near_home := body.global_position.distance_to(home) <= CELL * 0.92
     var route_status := String(entry.get("routeStatus", ""))
-    var route_arrived := route_status == "arrived"
     var current_cell := flat_cell_for_position(body.global_position)
     var active_target_cell: Vector2i = entry.get("homeActiveTargetCell", home_cell)
-    var fallback_cell: Vector2i = entry.get("routeFallbackCell", flat_cell_for_position(body.global_position))
-    var level := float(entry.get("level", body.global_position.y - 0.04))
-    var fallback_position := cell_to_position(fallback_cell, level)
     var target_is_home := active_target_cell == home_cell
-    var target_is_home_edge := target_is_home or active_target_cell == porch_cell
-    var route_arrived_at_porch_fallback := route_arrived and target_is_home and fallback_cell == porch_cell and current_cell == porch_cell
-
     var route_terminal := route_status in ["arrived", "partial", "blocked"]
-    var fallback_is_safe_home_edge := fallback_cell == porch_cell or fallback_cell == home_cell
-    var at_fallback := current_cell == fallback_cell or body.global_position.distance_to(fallback_position) <= CELL * 0.95
-    var fallback_missing := fallback_cell == Vector2i(999999, 999999)
-    var current_is_safe_home_edge := current_cell == porch_cell or current_cell == home_cell or body.global_position.distance_to(porch) <= CELL * 1.75
-    var at_safe_porch := body.global_position.distance_to(porch) <= CELL * 1.75
-    var fallback_supports_safe_edge := (fallback_is_safe_home_edge and at_fallback) or fallback_missing or current_is_safe_home_edge
     entry["homeSettleDebug"] = {
         "insideSemantic": inside_semantic,
         "routeStatus": route_status,
         "currentCell": current_cell,
         "homeCell": home_cell,
-        "porchCell": porch_cell,
         "activeTargetCell": active_target_cell,
-        "fallbackCell": fallback_cell,
-        "targetIsHomeEdge": target_is_home_edge,
-        "routeTerminal": route_terminal,
-        "fallbackSupportsSafeEdge": fallback_supports_safe_edge,
-        "atSafePorch": at_safe_porch,
-        "distanceToPorch": body.global_position.distance_to(porch)
+        "targetIsHome": target_is_home,
+        "routeTerminal": route_terminal
     }
-    if target_is_home and route_terminal and fallback_supports_safe_edge and at_safe_porch:
-        mark_npc_home_blocked(entry, "home_porch_fallback_not_inside")
+    if target_is_home and route_terminal and String(entry.get("routeReason", "")) != "home_route_terminal_outside":
+        mark_npc_home_blocked(entry, "home_route_terminal_outside")
 
 func body_occupies_open_door_clearance(entry: Dictionary) -> bool:
     if autonomy_system == null or autonomy_system.door_portals == null:
@@ -2709,7 +2700,7 @@ func mark_npc_home_blocked(entry: Dictionary, reason := "home_blocked") -> void:
     body.set_meta("npc_inside_home", false)
     body.set_meta("npc_home_blocked", true)
 
-func mark_npc_inside_home(entry: Dictionary, fallback_reason := "") -> void:
+func mark_npc_inside_home(entry: Dictionary) -> void:
     var body := entry.get("body") as Node3D
     if body == null:
         return
@@ -2718,18 +2709,6 @@ func mark_npc_inside_home(entry: Dictionary, fallback_reason := "") -> void:
     entry["homeRouteIndex"] = int((entry.get("homeRoutePositions", []) as Array).size())
     body.set_meta("npc_inside_home", true)
     body.set_meta("npc_home_blocked", false)
-    if fallback_reason != "":
-        record_home_fallback(entry, fallback_reason)
-        NpcRouteStateStoreScript.write_status(entry, "partial", fallback_reason, "NpcSystem.mark_npc_inside_home_fallback")
-
-func record_home_fallback(entry: Dictionary, reason: String) -> void:
-    var home_cell: Vector2i = entry.get("homeCell", Vector2i.ZERO)
-    var signature := "home:%d,%d:%s" % [home_cell.x, home_cell.y, reason]
-    if String(entry.get("lastUnreachableSignature", "")) == signature:
-        return
-    entry["lastUnreachableSignature"] = signature
-    entry["unreachableGoals"] = int(entry.get("unreachableGoals", 0)) + 1
-    npc_unreachable_goals += 1
 
 func request_npc_door_traversal(collider: Node, npc_body: Node3D = null, entry: Dictionary = {}, action: Dictionary = {}) -> Dictionary:
     ensure_autonomy_system()

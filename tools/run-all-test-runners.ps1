@@ -142,11 +142,13 @@ try {
         $scriptFailed = $false
         try {
             if ($commandPath.EndsWith(".ps1", [System.StringComparison]::OrdinalIgnoreCase)) {
-                & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $commandPath @runnerArgs
+                # Runner reports are validated from disk below. Do not pipe their full
+                # JSON through this aggregate process; large visual traces can be huge.
+                & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $commandPath @runnerArgs | Out-Null
             } elseif ($command -eq "node") {
-                & $commandPath @runnerArgs
+                & $commandPath @runnerArgs | Out-Null
             } else {
-                & $commandPath @runnerArgs
+                & $commandPath @runnerArgs | Out-Null
             }
         } catch {
             Write-Error $_
@@ -220,7 +222,7 @@ $report = [pscustomobject]@{
     }
 }
 $report | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $ReportPath
-Get-Content -LiteralPath $ReportPath
+Write-Host ("Test-runner aggregate complete: runners={0}, failures={1}, report={2}" -f $results.Count, $failureCount, $ReportPath)
 
 if ($failureCount -gt 0) {
     exit 1

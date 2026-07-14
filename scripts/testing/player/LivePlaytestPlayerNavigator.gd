@@ -80,12 +80,18 @@ func go_to_position(target: Vector3, options := {}) -> Dictionary:
 		})
 		return _result(false, String(plan.get("status", "route_failed")), String(plan.get("reason", "")), label, target, plan)
 	var route: Dictionary = plan.get("route", {})
-	var completion_target := _route_completion_target(route, target, bool(route_options.get("acceptRouteGoal", false)))
+	var accept_route_goal := bool(route_options.get("acceptRouteGoal", false))
+	var completion_target := _route_completion_target(route, target, accept_route_goal)
+	var completion_stop_distance := float(route_options.get(
+		"completionStopDistance",
+		minf(stop_distance, CELL * 0.75) if accept_route_goal else stop_distance
+	))
 	plan["routeGoal"] = _vec3(completion_target)
+	plan["completionStopDistance"] = completion_stop_distance
 	var movement_started_at := _elapsed()
 	var waypoints := _route_waypoints(route)
 	if waypoints.is_empty():
-		var arrived := _flat_distance(player.global_position, completion_target) <= stop_distance
+		var arrived := _flat_distance(player.global_position, completion_target) <= completion_stop_distance
 		if arrived:
 			route_authority_v2.report_arrived({ "target": _vec3(target), "routeGoal": _vec3(completion_target), "player": _vec3(player.global_position) })
 		return _result(arrived, "arrived" if arrived else "empty_route", "", label, target, plan)
@@ -104,7 +110,7 @@ func go_to_position(target: Vector3, options := {}) -> Dictionary:
 		"route": _route_summary(route)
 	})
 	for index in range(waypoints.size()):
-		if _flat_distance(player.global_position, completion_target) <= stop_distance:
+		if _flat_distance(player.global_position, completion_target) <= completion_stop_distance:
 			route_authority_v2.report_arrived({ "waypointIndex": index, "target": _vec3(target), "routeGoal": _vec3(completion_target) })
 			return _result(true, "arrived", "", label, target, plan)
 		var remaining := timeout_seconds - (_elapsed() - movement_started_at)
@@ -126,7 +132,7 @@ func go_to_position(target: Vector3, options := {}) -> Dictionary:
 				})
 				action_result["route"] = _route_summary(route)
 				return action_result
-		var waypoint_stop := stop_distance if index == waypoints.size() - 1 else CELL * 0.75
+		var waypoint_stop := completion_stop_distance if index == waypoints.size() - 1 else CELL * 0.75
 		var distance := _flat_distance(player.global_position, waypoint)
 		var step_timeout := minf(remaining, clampf(distance / (CELL * 2.4) + 3.0, 3.0, 14.0))
 		var reached := await _drive_to_point(waypoint, waypoint_stop, step_timeout, "%s_authority_%02d" % [label, index])
@@ -145,7 +151,7 @@ func go_to_position(target: Vector3, options := {}) -> Dictionary:
 			return _result(false, "movement_stuck", "waypoint_not_reached", label, target, plan)
 		route_authority_v2.report_segment_completed(index, { "waypoint": _vec3(waypoint), "player": _vec3(player.global_position) })
 	var final_remaining := timeout_seconds - (_elapsed() - movement_started_at)
-	if _flat_distance(player.global_position, completion_target) <= stop_distance:
+	if _flat_distance(player.global_position, completion_target) <= completion_stop_distance:
 		route_authority_v2.report_arrived({ "target": _vec3(target), "routeGoal": _vec3(completion_target), "player": _vec3(player.global_position) })
 		return _result(true, "arrived", "", label, target, plan)
 	route_authority_v2.report_stuck("route_completed_outside_target", {
@@ -387,20 +393,60 @@ func use_block(block: Node3D, label: String, options := {}) -> Dictionary:
 	return _result(false, status, reason, label, block.global_position, { "attempts": attempts })
 
 func talk_to(npc_body: Node3D, label: String, options := {}) -> Dictionary:
-	var pose := await go_to_interaction_pose(npc_body, "talk", {
-		"label": label,
-		"timeout": float(options.get("timeout", options.get("timeoutSeconds", 18.0))),
-		"stopDistance": float(options.get("poseStopDistance", CELL * 0.75))
-	})
-	if not bool(pose.get("ok", false)):
-		return pose
-	var hit := await _aim_until_npc_hit(npc_body, label)
-	if not bool(hit.get("matches", false)):
-		return _result(false, "raycast_miss", "npc_not_hit", label, npc_body.global_position, { "hit": hit, "pose": pose.get("proof", {}) })
-	_dispatch_mouse_button(MOUSE_BUTTON_RIGHT, true)
-	_dispatch_mouse_button(MOUSE_BUTTON_RIGHT, false)
-	await _wait_physics_frames(int(options.get("postActionFrames", 24)))
-	return _result(true, "talk_clicked", "", label, npc_body.global_position, { "hit": hit, "pose": pose.get("proof", {}) })
+	var timeout_seconds := float(options.get("timeout", options.get("timeoutSeconds", 18.0)))
+	var started_at := _elapsed()
+	var moving_target_attempts := maxi(1, int(options.get("movingTargetAttempts", 3)))
+	var moving_target_distance := float(options.get("movingTargetReplanDistance", CELL * 0.75))
+	var attempts: Array[Dictionary] = []
+	var last_result := _result(false, "action_pose_missing", "talk_not_attempted", label, npc_body.global_position)
+	for attempt_index in range(moving_target_attempts):
+		if npc_body == null or not is_instance_valid(npc_body):
+			return _result(false, "target_missing", "npc_freed_before_talk", label, Vector3.ZERO, { "talkAttempts": attempts })
+		var remaining := timeout_seconds - (_elapsed() - started_at)
+		if remaining <= 0.25:
+			break
+		var target_before := npc_body.global_position
+		var pose := await go_to_interaction_pose(npc_body, "talk", {
+			"label": label,
+			"timeout": remaining,
+			"stopDistance": float(options.get("poseStopDistance", CELL * 0.75))
+		})
+		if npc_body == null or not is_instance_valid(npc_body):
+			return _result(false, "target_missing", "npc_freed_during_talk", label, target_before, { "pose": pose.get("proof", {}), "talkAttempts": attempts })
+		var target_after := npc_body.global_position
+		var moved_distance := _flat_distance(target_before, target_after)
+		if not bool(pose.get("ok", false)):
+			attempts.append({
+				"index": attempt_index,
+				"targetBefore": target_before,
+				"targetAfter": target_after,
+				"movedDistance": moved_distance,
+				"pose": pose
+			})
+			last_result = pose.duplicate(true)
+		else:
+			var hit := await _aim_until_npc_hit(npc_body, label)
+			attempts.append({
+				"index": attempt_index,
+				"targetBefore": target_before,
+				"targetAfter": target_after,
+				"movedDistance": moved_distance,
+				"pose": pose.get("proof", {}),
+				"hit": hit
+			})
+			if bool(hit.get("matches", false)):
+				_dispatch_mouse_button(MOUSE_BUTTON_RIGHT, true)
+				_dispatch_mouse_button(MOUSE_BUTTON_RIGHT, false)
+				await _wait_physics_frames(int(options.get("postActionFrames", 24)))
+				return _result(true, "talk_clicked", "", label, npc_body.global_position, { "hit": hit, "pose": pose.get("proof", {}), "talkAttempts": attempts })
+			last_result = _result(false, "raycast_miss", "npc_not_hit", label, target_after, { "hit": hit, "pose": pose.get("proof", {}) })
+		if moved_distance <= moving_target_distance or attempt_index + 1 >= moving_target_attempts:
+			break
+		await _wait_physics_frames(2)
+	var proof: Dictionary = last_result.get("proof", {}) if last_result.get("proof", {}) is Dictionary else {}
+	proof["talkAttempts"] = attempts
+	last_result["proof"] = proof
+	return last_result
 
 func harvest_prop(prop: Node3D, label: String, options := {}) -> Dictionary:
 	var pose := await go_to_interaction_pose(prop, "harvest_prop", {
@@ -1304,11 +1350,10 @@ func _route_action_for_waypoint(actions: Dictionary, waypoint: Vector3, handled:
 		if String(action.get("kind", "")) != "door":
 			continue
 		var action_cell := _vector2i_from_value(action.get("cell", waypoint_cell), waypoint_cell)
-		var entry_position := _vector3_from_value(action.get("entryPosition", waypoint), waypoint)
 		var exit_position := _vector3_from_value(action.get("exitPosition", waypoint), waypoint)
-		if absi(action_cell.x - waypoint_cell.x) + absi(action_cell.y - waypoint_cell.y) <= 1:
+		if action_cell == waypoint_cell:
 			return { "key": key, "action": action }
-		if _flat_distance(waypoint, entry_position) <= CELL * 1.25 or _flat_distance(waypoint, exit_position) <= CELL * 1.25:
+		if _flat_distance(waypoint, exit_position) <= CELL * 0.25:
 			return { "key": key, "action": action }
 	return {}
 
