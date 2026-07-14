@@ -11,6 +11,7 @@ const INITIAL_NAVMESH_PRIME_TILE_LIMIT := 32
 const INITIAL_NAV_CHANGE_DRAIN_EVENT_LIMIT := 64
 const INITIAL_NAV_CHANGE_DRAIN_ITERATION_LIMIT := 16
 const INITIAL_READINESS_TIMEOUT_SECONDS := 120.0
+const VOXEL_SHUTDOWN_TASK_DRAIN_TIMEOUT_SECONDS := 30.0
 const AUTOSAVE_ACTIVITY_MAX_DEFER_SECONDS := 30.0
 
 var seed_text := "atlas-1492"
@@ -300,6 +301,7 @@ func _ready() -> void:
     setup_player_projectiles()
     setup_held_item()
     setup_hud()
+    await prewarm_runtime_visuals_staged()
     playtest_progress("main_scene_nodes_done")
     var loaded := false
     if requested_startup_mode != "new_game":
@@ -521,7 +523,13 @@ func _run_deferred_startup_boot() -> void:
     if player != null:
         player.set_physics_process(true)
     set_registered_npc_physics_enabled(true)
+    request_final_voxel_view_distance()
     startup_loading_completed.emit()
+
+func request_final_voxel_view_distance() -> void:
+    var voxel_runtime = get("voxel_terrain_runtime")
+    if voxel_runtime != null and is_instance_valid(voxel_runtime) and voxel_runtime.has_method("request_final_view_distance_expansion"):
+        voxel_runtime.call("request_final_view_distance_expansion")
 
 func begin_startup_loading_timeline() -> void:
     startup_loading_started_usec = Time.get_ticks_usec()
@@ -771,6 +779,8 @@ func wait_for_initial_voxel_collision_publication(chunk_keys: Array[Vector2i]) -
     var runtime = get("voxel_terrain_runtime")
     if runtime == null or not is_instance_valid(runtime) or not runtime.has_method("gameplay_chunks_published"):
         return StartupReadinessResultScript.failed("missing_voxel_collision_publication_authority")
+    if runtime.has_method("configure_startup_collision_bounds"):
+        runtime.call("configure_startup_collision_bounds", chunk_keys)
     var started_usec := Time.get_ticks_usec()
     while not bool(runtime.call("gameplay_chunks_published", chunk_keys)):
         var published := int(runtime.call("published_gameplay_chunk_count", chunk_keys))
@@ -788,9 +798,14 @@ func wait_for_initial_voxel_collision_publication(chunk_keys: Array[Vector2i]) -
                 "timeoutSeconds": INITIAL_READINESS_TIMEOUT_SECONDS,
                 "diagnostics": diagnostics
             })
+    var diagnostics := {}
+    if runtime.has_method("gameplay_publication_diagnostics"):
+        diagnostics = runtime.call("gameplay_publication_diagnostics", chunk_keys)
     return StartupReadinessResultScript.ready({}, {
         "publishedChunkCount": chunk_keys.size(),
-        "requiredChunkCount": chunk_keys.size()
+        "requiredChunkCount": chunk_keys.size(),
+        "publicationElapsedMs": float(Time.get_ticks_usec() - started_usec) / 1000.0,
+        "diagnostics": diagnostics
     })
 
 
@@ -933,22 +948,35 @@ func initial_navigation_route_delegate():
         return null
     return coordinator.get("route_delegate")
 
-func publish_startup_navmesh_tile(navigation_world, route_delegate, tile_key: String) -> bool:
+func publish_startup_navmesh_tile(navigation_world, route_delegate, tile_key: String) -> Dictionary:
     if navigation_world == null or route_delegate == null or tile_key == "":
-        return false
+        return { "ok": false, "reason": "missing_navigation_tile_publication_input" }
     if not navigation_world.has_method("build_navmesh_tile_snapshot"):
-        return false
+        return { "ok": false, "reason": "navigation_tile_snapshot_api_missing" }
     var navmesh_world = route_delegate.get("navmesh_world")
     if navmesh_world == null or not navmesh_world.has_method("register_tile_snapshot"):
-        return false
+        return { "ok": false, "reason": "navmesh_tile_registration_api_missing" }
+    var snapshot_started_usec := Time.get_ticks_usec()
     var snapshot: Dictionary = navigation_world.call("build_navmesh_tile_snapshot", tile_key)
+    var snapshot_ms := float(Time.get_ticks_usec() - snapshot_started_usec) / 1000.0
     if snapshot.is_empty():
-        return false
+        return { "ok": false, "reason": "empty_navigation_tile_snapshot", "snapshotMs": snapshot_ms }
+    var register_started_usec := Time.get_ticks_usec()
     var result: Dictionary = navmesh_world.call("register_tile_snapshot", snapshot)
+    var register_ms := float(Time.get_ticks_usec() - register_started_usec) / 1000.0
+    var sync_ms := 0.0
     if navmesh_world.has_method("sync_navigation_map_if_dirty"):
+        var sync_started_usec := Time.get_ticks_usec()
         navmesh_world.call("sync_navigation_map_if_dirty")
+        sync_ms = float(Time.get_ticks_usec() - sync_started_usec) / 1000.0
     var status := String(result.get("status", ""))
-    return bool(result.get("installed", false)) or status in ["installed", "updated", "registered"]
+    return {
+        "ok": bool(result.get("installed", false)) or status in ["installed", "updated", "registered"],
+        "status": status,
+        "snapshotMs": snapshot_ms,
+        "registerMs": register_ms,
+        "syncMs": sync_ms
+    }
 
 func prime_initial_navigation_tiles_staged(navigation_world, entries: Array) -> Dictionary:
     if not NpcConstantsScript.NPC_NAV_ENABLE_STARTUP_TILE_PRIMING:
@@ -978,6 +1006,7 @@ func prime_initial_navigation_tiles_staged(navigation_world, entries: Array) -> 
             "registeredNpcCount": entries.size()
         })
     var published := 0
+    var tile_timings: Array[Dictionary] = []
     for tile_key_value in keys:
         if published >= INITIAL_NAVMESH_PRIME_TILE_LIMIT:
             break
@@ -987,12 +1016,20 @@ func prime_initial_navigation_tiles_staged(navigation_world, entries: Array) -> 
             "requiredTileCount": total,
             "tileKey": tile_key
         })
-        if not publish_startup_navmesh_tile(navigation_world, route_delegate, tile_key):
+        var publish_result: Dictionary = publish_startup_navmesh_tile(navigation_world, route_delegate, tile_key)
+        tile_timings.append({
+            "tileKey": tile_key,
+            "snapshotMs": float(publish_result.get("snapshotMs", 0.0)),
+            "registerMs": float(publish_result.get("registerMs", 0.0)),
+            "syncMs": float(publish_result.get("syncMs", 0.0))
+        })
+        if not bool(publish_result.get("ok", false)):
             return StartupReadinessResultScript.failed("startup_navigation_tile_publication_failed", {}, [], {
                 "publishedTileCount": published,
                 "requiredTileCount": total,
                 "failedTileKey": tile_key,
-                "tileStatus": navmesh_world.call("tile_region_status", tile_key)
+                "tileStatus": navmesh_world.call("tile_region_status", tile_key),
+                "publish": publish_result
             })
         var tile_status: Dictionary = navmesh_world.call("tile_region_status", tile_key)
         if not bool(tile_status.get("installed", false)) or bool(tile_status.get("dirty", false)):
@@ -1006,7 +1043,8 @@ func prime_initial_navigation_tiles_staged(navigation_world, entries: Array) -> 
     var metrics := {
         "publishedTileCount": published,
         "requiredTileCount": total,
-        "tileKeys": keys.slice(0, total)
+        "tileKeys": keys.slice(0, total),
+        "tileTimings": tile_timings
     }
     await startup_loading_yield("NPC route tiles ready", "navigation_tiles", "ready", metrics)
     return StartupReadinessResultScript.ready({}, metrics)
@@ -1792,6 +1830,39 @@ func setup_visual_asset_registry() -> void:
     if not visual_asset_registry.setup():
         push_warning("Generated visual asset registry loaded with fallbacks: %s" % str(visual_asset_registry.last_errors))
 
+func prewarm_runtime_visuals_staged() -> void:
+    if visual_asset_registry != null and visual_asset_registry.has_method("cached_asset_ids"):
+        var asset_ids: Array[String] = visual_asset_registry.call("cached_asset_ids")
+        for index in range(asset_ids.size()):
+            var visual := visual_asset_registry.instantiate_asset(asset_ids[index]) as Node3D
+            var prewarm_node: Node3D = visual
+            if visual != null:
+                visual.name = "RuntimeVisualPrewarm_%d" % index
+                if asset_ids[index].begins_with("rock_"):
+                    var rock_body := StaticBody3D.new()
+                    rock_body.name = "RuntimeRockPrewarm_%d" % index
+                    rock_body.add_child(visual)
+                    var collider := CollisionShape3D.new()
+                    var shape := SphereShape3D.new()
+                    shape.radius = 0.8
+                    collider.shape = shape
+                    rock_body.add_child(collider)
+                    prewarm_node = rock_body
+                prewarm_node.position = Vector3(0.0, -10000.0, 0.0)
+                add_child(prewarm_node)
+            await startup_loading_yield(
+                "Preparing world visuals %d/%d" % [index + 1, asset_ids.size()],
+                "scene",
+                "pending",
+                {"warmedAssetCount": index + 1, "requiredAssetCount": asset_ids.size()}
+            )
+            if prewarm_node != null:
+                prewarm_node.queue_free()
+    if hostile_system != null and hostile_system.has_method("prewarm_visuals_staged"):
+        await startup_loading_yield("Preparing hostile visuals", "scene", "pending")
+        var hostile_metrics = await hostile_system.call("prewarm_visuals_staged")
+        await startup_loading_yield("Hostile visuals ready", "scene", "pending", hostile_metrics)
+
 func setup_static_item_asset_registry() -> void:
     static_item_asset_registry = StaticItemAssetRegistryScript.new()
     if not static_item_asset_registry.setup():
@@ -2012,6 +2083,7 @@ func start_new_game_staged(show_message := true) -> bool:
     if player != null:
         player.set_physics_process(true)
     set_registered_npc_physics_enabled(true)
+    request_final_voxel_view_distance()
     playtest_progress("new_game_staged_done")
     return true
 
@@ -2063,6 +2135,15 @@ func wait_for_terrain_workers_before_quit() -> void:
         voxel_runtime.call("begin_shutdown")
         await startup_loading_yield("Stopping voxel terrain")
         await startup_loading_yield("Stopping voxel terrain")
+        if voxel_runtime.has_method("voxel_engine_pending_task_count"):
+            var voxel_drain_started_usec := Time.get_ticks_usec()
+            var pending_voxel_tasks := int(voxel_runtime.call("voxel_engine_pending_task_count"))
+            while pending_voxel_tasks > 0 \
+                and float(Time.get_ticks_usec() - voxel_drain_started_usec) / 1000000.0 < VOXEL_SHUTDOWN_TASK_DRAIN_TIMEOUT_SECONDS:
+                await startup_loading_yield("Stopping voxel terrain: %d tasks" % pending_voxel_tasks)
+                pending_voxel_tasks = int(voxel_runtime.call("voxel_engine_pending_task_count"))
+            if pending_voxel_tasks > 0:
+                push_warning("Voxel terrain shutdown task drain timed out with %d tasks pending" % pending_voxel_tasks)
     if terrain_meshing_service == null or not terrain_meshing_service.has_method("clear_jobs"):
         return
     await startup_loading_yield("Stopping terrain jobs")

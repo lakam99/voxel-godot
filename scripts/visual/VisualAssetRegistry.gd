@@ -126,6 +126,13 @@ func asset_count() -> int:
 func cached_scene_count() -> int:
     return scene_cache.size()
 
+func cached_asset_ids() -> Array[String]:
+    var result: Array[String] = []
+    for asset_id_value in scene_cache.keys():
+        result.append(String(asset_id_value))
+    result.sort()
+    return result
+
 func profile_count() -> int:
     return profiles_by_biome.size()
 

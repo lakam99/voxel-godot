@@ -1709,6 +1709,18 @@ func chunk_volume_y_bounds(start_x: int, start_z: int) -> Dictionary:
             "minY": floori((player.global_position.y - radius_world) / CELL),
             "maxY": ceili((player.global_position.y + radius_world) / CELL)
         }
+    if world_generation_system != null and world_generation_system.has_method("terrain_meshing_y_bounds_for_chunk"):
+        var authoritative_bounds_value = world_generation_system.call(
+            "terrain_meshing_y_bounds_for_chunk",
+            start_x,
+            start_z,
+            CHUNK_SIZE,
+            UNDERGROUND_VOLUME_SURFACE_EXPOSURE_DEPTH_CELLS + 4,
+            2,
+            2
+        )
+        if authoritative_bounds_value is Dictionary:
+            return authoritative_bounds_value
     var chunk_key := Vector2i(floori(float(start_x) / float(CHUNK_SIZE)), floori(float(start_z) / float(CHUNK_SIZE)))
     var edited_bounds := {}
     if world_generation_system != null and world_generation_system.has_method("terrain_volume_chunk_edited_y_bounds"):
@@ -4058,6 +4070,7 @@ func prop_biome_for_position(parent: Node, position: Vector3) -> String:
     return surface_biome_at_cell(Vector3i(world_to_cell(world_position.x), world_to_cell(world_position.y), world_to_cell(world_position.z)))
 
 func make_rock(parent: Node, prop_id: String, position: Vector3, rng: RandomNumberGenerator):
+    var setup_started: int = runtime_perf_monitor.begin_section("rock_setup") if runtime_perf_monitor != null else Time.get_ticks_usec()
     var spec := rock_visual_spec(rng)
     var biome := prop_biome_for_position(parent, position)
     var body := StaticBody3D.new()
@@ -4070,19 +4083,33 @@ func make_rock(parent: Node, prop_id: String, position: Vector3, rng: RandomNumb
     body.set_meta("material", "rock")
     body.set_meta("drop_count", 4)
     body.set_meta("visual_biome", biome)
+    if runtime_perf_monitor != null:
+        runtime_perf_monitor.end_section("rock_setup", setup_started)
 
     var radius := float(spec.get("radius", 0.8))
+    var visual_started: int = runtime_perf_monitor.begin_section("rock_visual") if runtime_perf_monitor != null else Time.get_ticks_usec()
     add_rock_visual(body, prop_id, biome, spec)
+    if runtime_perf_monitor != null:
+        runtime_perf_monitor.end_section("rock_visual", visual_started)
 
+    var collision_started: int = runtime_perf_monitor.begin_section("rock_collision") if runtime_perf_monitor != null else Time.get_ticks_usec()
     var shape := SphereShape3D.new()
     shape.radius = radius * 1.05
     var collider := CollisionShape3D.new()
     collider.shape = shape
     collider.position.y = radius * 0.42
     body.add_child(collider)
+    if runtime_perf_monitor != null:
+        runtime_perf_monitor.end_section("rock_collision", collision_started)
+    var tree_started: int = runtime_perf_monitor.begin_section("rock_tree_attach") if runtime_perf_monitor != null else Time.get_ticks_usec()
     parent.add_child(body)
+    if runtime_perf_monitor != null:
+        runtime_perf_monitor.end_section("rock_tree_attach", tree_started)
     if npc_system and npc_system.has_method("notify_navigation_prop_created"):
+        var navigation_started: int = runtime_perf_monitor.begin_section("rock_navigation_notify") if runtime_perf_monitor != null else Time.get_ticks_usec()
         npc_system.notify_navigation_prop_created(prop_id, body)
+        if runtime_perf_monitor != null:
+            runtime_perf_monitor.end_section("rock_navigation_notify", navigation_started)
     return body
 
 func make_ore_cluster(parent: Node, prop_id: String, position: Vector3, ore_type: String, rng: RandomNumberGenerator, count: int = 3) -> Array:

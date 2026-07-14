@@ -13,6 +13,8 @@ const HOME_V2_WAYPOINT_RADIUS := 0.28
 const ROUTINE_V2_ROUTE_MAX_EXPANSIONS := 8192
 const ROUTINE_V2_WAYPOINT_RADIUS := 0.32
 const V2_ROUTE_EXPANSIONS_PER_CALL := 16
+const GUARD_V2_ROUTE_EXPANSIONS_PER_CALL := 2
+const GUARD_V2_CANDIDATE_VALIDATIONS_PER_CALL := 2
 const V2_EXECUTION_REPAIR_RETRY_FRAMES := 1
 
 var autonomy_system = null
@@ -150,6 +152,102 @@ func advance_motion_npc(entry: Dictionary, delta: float, _night_factor := 0.0) -
 			monitor.end_section("npc_face_hostile", face_start)
 	return result
 
+
+func physics_route_service_owns_motion(entry: Dictionary) -> bool:
+	return _physics_route_service_kind(entry) != ""
+
+
+func advance_physics_route_service(entry: Dictionary, delta: float) -> Dictionary:
+	if npc_system == null:
+		return { "advanced": false, "reason": "missing_npc_system" }
+	if delta <= 0.0:
+		return { "advanced": false, "reason": "invalid_delta" }
+	var body := entry.get("body") as Node3D
+	if body == null or not is_instance_valid(body):
+		return { "advanced": false, "reason": "missing_body" }
+	if npc_system.has_method("npc_movement_is_paused") and bool(npc_system.call("npc_movement_is_paused", entry, body)):
+		_release_action_owned_state(entry, "script_hold")
+		return { "advanced": false, "reason": "held_by_script" }
+	var service_kind := _physics_route_service_kind(entry)
+	if service_kind == "":
+		return { "advanced": false, "reason": "no_active_route_service_work" }
+	var result: Dictionary = {}
+	match service_kind:
+		"home":
+			_execute_home(entry, body, entry.get("activeMotionPerception", {}) if entry.get("activeMotionPerception", {}) is Dictionary else {}, delta)
+			result = _motion_result(entry, "home", "physics_route_service_home")
+		"scripted":
+			result = _execute_scripted_go_to_route_v2(entry, body, delta)
+		"routine":
+			result = _advance_physics_routine_route(entry, body, delta)
+		_:
+			return { "advanced": false, "reason": "unknown_route_service_kind" }
+	_record_physics_route_service(entry, service_kind, result)
+	return result
+
+
+func _physics_route_service_kind(entry: Dictionary) -> String:
+	var body := entry.get("body") as Node
+	var order_kind := _scripted_order_kind(body, entry)
+	var authority = autonomy_system.get("route_authority_v2") if autonomy_system != null else null
+	var home_request_id := String(entry.get("homeRouteV2RequestId", ""))
+	if _v2_request_requires_physics_service(authority, entry, home_request_id):
+		return "home"
+	var routine_request_id := String(entry.get("routineRouteV2RequestId", ""))
+	if _v2_request_requires_physics_service(authority, entry, routine_request_id) and _has_executable_routine_route_intent(entry):
+		if String(entry.get("routineRouteV2IntentKind", "")) == "scripted" and order_kind != "":
+			return "scripted"
+		return "routine"
+	if order_kind == "go_home":
+		return "home"
+	if order_kind == "go_to" or (body != null and is_instance_valid(body) and body.has_meta("npc_scripted_target")):
+		return "scripted"
+	return ""
+
+
+func _has_executable_routine_route_intent(entry: Dictionary) -> bool:
+	var intent: Dictionary = entry.get("_routineRouteV2Intent", {}) if entry.get("_routineRouteV2Intent", {}) is Dictionary else {}
+	if intent.is_empty() or not (intent.get("target", null) is Vector3):
+		return false
+	return String(intent.get("kind", "")) != "" and String(intent.get("semanticKind", "")) != ""
+
+
+func _v2_request_requires_physics_service(authority, entry: Dictionary, request_id: String) -> bool:
+	if request_id == "" or authority == null or not authority.has_method("runtime_for_entry"):
+		return false
+	var runtime: Dictionary = authority.runtime_for_entry(entry)
+	if String(runtime.get("requestId", "")) != request_id:
+		return false
+	return String(runtime.get("state", "")) in ["queued", "pending_nav_data", "pending_budget", "probing", "ready", "moving", "blocked_dynamic"]
+
+
+func _advance_physics_routine_route(entry: Dictionary, body: Node3D, delta: float) -> Dictionary:
+	var intent: Dictionary = entry.get("_routineRouteV2Intent", {}) if entry.get("_routineRouteV2Intent", {}) is Dictionary else {}
+	if not _has_executable_routine_route_intent(entry):
+		return { "advanced": false, "reason": "missing_route_service_target" }
+	var target: Vector3 = intent.get("target", Vector3.ZERO)
+	var intent_kind := String(intent.get("kind", entry.get("routineRouteV2IntentKind", "")))
+	var semantic_kind := String(intent.get("semanticKind", entry.get("routineRouteV2SemanticKind", "")))
+	if intent_kind == "" or semantic_kind == "":
+		return { "advanced": false, "reason": "missing_route_service_intent" }
+	var allow_outside := bool(intent.get("allowOutside", false))
+	var priority := int(intent.get("priority", entry.get("routePriority", 0)))
+	var reason := String(intent.get("reason", entry.get("routineRouteV2RequestReason", "route_service")))
+	var speed_mode := String(entry.get("npcSpeedMode", "walking"))
+	var speed := _set_motion_speed_mode(entry, speed_mode, "physics_route_service")
+	var route_result := _execute_routine_route_v2(entry, body, delta, speed, intent_kind, target, semantic_kind, allow_outside, priority, reason)
+	entry["lastMoveDistance"] = float(route_result.get("moved", 0.0))
+	return _motion_result(entry, intent_kind, "physics_route_service_routine")
+
+
+func _record_physics_route_service(entry: Dictionary, service_kind: String, result: Dictionary) -> void:
+	var physics_frame := Engine.get_physics_frames()
+	entry["routePhysicsServiceTicks"] = int(entry.get("routePhysicsServiceTicks", 0)) + 1
+	entry["routePhysicsServiceLastFrame"] = physics_frame
+	entry["routePhysicsServiceKind"] = service_kind
+	entry["routePhysicsServiceReason"] = String(result.get("reason", ""))
+	entry["routePhysicsServiceSinceBrainFrames"] = maxi(0, physics_frame - int(entry.get("npc_last_brain_tick", physics_frame)))
+
 func _cache_motion_intent(entry: Dictionary, goal: Dictionary, plan: Dictionary, schedule: Dictionary, perception: Dictionary) -> void:
 	entry["activeMotionGoal"] = goal.duplicate(false)
 	entry["activeMotionPlan"] = plan.duplicate(false)
@@ -241,16 +339,24 @@ func _advance_guard_motion(entry: Dictionary, body: Node3D, perception: Dictiona
 	var refresh_required := refresh_timer <= 0.0 or hostile_key != String(entry.get("guardTargetHostileKey", ""))
 	var monitor = performance_monitor()
 	var target_start: int = monitor.begin_section("npc_guard_target") if monitor != null else Time.get_ticks_usec()
+	var target_selection_pending := bool(entry.get("guardInterceptSelectionPending", false))
 	if refresh_required and _guard_target_refresh_budget_available(entry):
 		target = npc_system.call("update_fighter_target", entry, body, target_hostile, weapon_id) if npc_system.has_method("update_fighter_target") else entry.get("guardPosition", body.global_position)
-		refresh_timer = _deterministic_seconds(entry, "guard_threat_refresh", 0.25, 0.45) if target_hostile != null else _deterministic_seconds(entry, "guard_post_refresh", 2.0, 3.2)
-		entry["guardTargetCache"] = target
-		entry["guardTargetHostileKey"] = hostile_key
+		target_selection_pending = bool(entry.get("guardInterceptSelectionPending", false))
+		if target_selection_pending:
+			refresh_timer = 0.0
+			entry.erase("guardTargetHostileKey")
+		else:
+			refresh_timer = _deterministic_seconds(entry, "guard_threat_refresh", 0.25, 0.45) if target_hostile != null else _deterministic_seconds(entry, "guard_post_refresh", 2.0, 3.2)
+			entry["guardTargetCache"] = target
+			entry["guardTargetHostileKey"] = hostile_key
 	elif refresh_required:
 		refresh_timer = minf(float(entry.get("guardTargetRefreshTimer", 0.0)), 0.05)
 	entry["guardTargetRefreshTimer"] = refresh_timer
 	if monitor != null:
 		monitor.end_section("npc_guard_target", target_start)
+	if target_selection_pending:
+		return _motion_result(entry, "guard", "guard_target_selection_pending")
 	if _guard_needs_departure_stage(entry, body, target):
 		return _advance_guard_departure_stage(entry, body, delta)
 	var move_start: int = performance_monitor().begin_section("npc_guard_move") if performance_monitor() != null else Time.get_ticks_usec()
@@ -270,8 +376,10 @@ func _guard_needs_departure_stage(entry: Dictionary, body: Node3D, target: Vecto
 	if body == null:
 		return false
 	if _inside_home_now(entry, body) or _inside_home_bounds_now(entry, body.global_position):
-		return not _inside_home_bounds_now(entry, target)
-	return _near_home_exit_needs_clearance(entry, body)
+		_set_home_departure_state(entry, "inside", "strict_interior")
+		if _inside_home_bounds_now(entry, target):
+			return false
+	return _home_departure_needs_clearance(entry, body)
 
 func _advance_guard_departure_stage(entry: Dictionary, body: Node3D, delta: float) -> Dictionary:
 	var target := _home_exit_stage_target(entry, body)
@@ -280,7 +388,7 @@ func _advance_guard_departure_stage(entry: Dictionary, body: Node3D, delta: floa
 	var route_result := _execute_routine_route_v2(entry, body, delta, speed, "guard", target, "home_departure_clearance", true, int(entry.get("routePriority", 170)), "guard_departure_home_exit")
 	entry["lastMoveDistance"] = float(route_result.get("moved", 0.0))
 	if String(route_result.get("status", route_result.get("state", ""))) == "arrived":
-		_reset_route_for_replan(entry, "guard_departure_stage_complete")
+		_complete_home_departure_stage(entry, body, "guard_departure_stage_complete")
 	entry["guardDutyState"] = "patrol"
 	body.set_meta("npc_guard_duty_state", entry["guardDutyState"])
 	_clear_inside_home_if_not_semantic(entry, body)
@@ -309,16 +417,19 @@ func _advance_job_motion(entry: Dictionary, body: Node3D, delta: float) -> Dicti
 	if not (phase in ["outbound", "searching", "returning"]):
 		if _inside_home_now(entry, body) \
 			or _inside_home_bounds_now(entry, body.global_position) \
-			or _near_home_exit_needs_clearance(entry, body):
+			or _home_departure_needs_clearance(entry, body):
 			return _advance_job_home_exit(entry, body, delta, "job_idle_home_exit")
 		entry["lastMoveDistance"] = 0.0
 		if phase in ["gathering", "stall"]:
 			return { "advanced": true, "reason": "job_action_phase", "intentKind": "job" }
 		return { "advanced": false, "reason": "job_phase_not_moving", "intentKind": "job" }
+	if phase == "searching" and bool(entry.get("forageSearchWaiting", false)):
+		entry["lastMoveDistance"] = 0.0
+		return { "advanced": false, "reason": "forage_no_new_search_anchor", "intentKind": "forage" }
 	if phase in ["outbound", "searching"] and (
 		_inside_home_now(entry, body)
 		or _inside_home_bounds_now(entry, body.global_position)
-		or _near_home_exit_needs_clearance(entry, body)
+		or _home_departure_needs_clearance(entry, body)
 	):
 		return _advance_job_home_exit(entry, body, delta, "job_departure_home_exit")
 	var target: Vector3 = entry.get("jobTarget", body.global_position)
@@ -341,17 +452,20 @@ func _advance_job_home_exit(entry: Dictionary, body: Node3D, delta: float, reaso
 	var speed := _set_motion_speed_mode(entry, "walking", "job_home_exit")
 	var route_result := _execute_routine_route_v2(entry, body, delta, speed, job_intent_kind, target, "home_departure_clearance", _job_route_allows_outside(entry, body), int(entry.get("routePriority", 95)), reason)
 	entry["lastMoveDistance"] = float(route_result.get("moved", 0.0))
-	if String(route_result.get("status", route_result.get("state", ""))) == "arrived" and not _inside_home_now(entry, body) and not _near_home_exit_needs_clearance(entry, body):
-		_complete_job_departure_stage(entry, body)
+	if String(route_result.get("status", route_result.get("state", ""))) == "arrived":
+		_complete_home_departure_stage(entry, body, "job_departure_stage_complete")
 	_clear_inside_home_if_not_semantic(entry, body)
 	return _motion_result(entry, "job", reason)
 
-func _complete_job_departure_stage(entry: Dictionary, body: Node3D) -> void:
-	if String(entry.get("activeDoorPortalId", "")) != "" and autonomy_system != null:
-		if autonomy_system.has_method("release_npc_door_hold"):
+func _complete_home_departure_stage(entry: Dictionary, body: Node3D, reason: String) -> bool:
+	if not _home_departure_at_exterior_clearance(entry, body):
+		return false
+	_set_home_departure_state(entry, "outside", "exterior_clearance_reached")
+	if autonomy_system != null:
+		if String(entry.get("activeDoorPortalId", "")) != "" and autonomy_system.has_method("release_npc_door_hold"):
 			autonomy_system.call("release_npc_door_hold", body if body != null else String(entry.get("id", "")), true)
 		if autonomy_system.has_method("release_npc_traffic_reservations"):
-			autonomy_system.call("release_npc_traffic_reservations", entry, "job_departure_stage_complete")
+			autonomy_system.call("release_npc_traffic_reservations", entry, reason)
 	for key in [
 		"activeDoorPortalId",
 		"activeDoorActorId",
@@ -361,7 +475,8 @@ func _complete_job_departure_stage(entry: Dictionary, body: Node3D) -> void:
 		"portalRecenterTicks"
 	]:
 		entry.erase(key)
-	_reset_route_for_replan(entry, "job_departure_stage_complete")
+	_reset_route_for_replan(entry, reason)
+	return true
 
 func _advance_idle_motion(entry: Dictionary, body: Node3D, delta: float) -> Dictionary:
 	if not entry.has("dayTarget"):
@@ -528,6 +643,7 @@ func _execute_home(entry: Dictionary, body: Node3D, perception: Dictionary, delt
 	if npc_system.has_method("settle_home_if_reached"):
 		npc_system.call("settle_home_if_reached", entry)
 	if bool(entry.get("insideHome", false)):
+		_set_home_departure_state(entry, "inside", "home_arrival")
 		entry["homeReturnTime"] = 0.0
 		entry["lastMoveDistance"] = 0.0
 		_finish_home_v2_arrival_if_needed(entry, "home_interior_reached")
@@ -623,7 +739,8 @@ func _plan_and_commit_home_v2_route(entry: Dictionary, body: Node3D, authority, 
 		return _home_v2_pending_or_failure_result(planning_budget)
 	var intent := _home_v2_intent(entry, candidate_cells)
 	entry["_homeRouteV2Intent"] = intent.duplicate(true)
-	var plan_options := _home_v2_plan_options(body.global_position)
+	var plan_options := _home_v2_plan_options(body.global_position, planning_budget)
+	plan_options = _v2_plan_options_with_probe_repair_avoidance(plan_options, active)
 	var route: Dictionary = substrate.plan_route(entry, start_cell, candidate_cells, plan_options)
 	entry["homeRouteV2LastPlan"] = _home_v2_route_debug(route)
 	if not bool(route.get("ok", false)):
@@ -876,18 +993,21 @@ func _home_v2_intent(entry: Dictionary, candidate_cells: Array) -> Dictionary:
 	}
 
 
-func _home_v2_plan_options(start_position: Vector3) -> Dictionary:
+func _home_v2_plan_options(start_position: Vector3, planning_budget := {}) -> Dictionary:
 	return {
 		"allowOutside": false,
 		"movingHome": true,
 		"ignoreDynamic": false,
 		"startPosition": start_position,
 		"maxExpansions": HOME_V2_ROUTE_MAX_EXPANSIONS,
-		"expansionsPerCall": V2_ROUTE_EXPANSIONS_PER_CALL
+		"expansionsPerCall": _v2_route_search_expansions(planning_budget)
 	}
 
 
-func _routine_v2_plan_options(allow_outside: bool, semantic_kind: String, start_position: Vector3) -> Dictionary:
+func _routine_v2_plan_options(allow_outside: bool, semantic_kind: String, start_position: Vector3, planning_budget := {}, use_staged_guard_budget := false) -> Dictionary:
+	var expansions_per_call := _v2_route_search_expansions(planning_budget)
+	if use_staged_guard_budget:
+		expansions_per_call = mini(GUARD_V2_ROUTE_EXPANSIONS_PER_CALL, expansions_per_call)
 	return {
 		"allowOutside": allow_outside,
 		"movingHome": semantic_kind == "home_interior",
@@ -895,8 +1015,14 @@ func _routine_v2_plan_options(allow_outside: bool, semantic_kind: String, start_
 		"semanticKind": semantic_kind,
 		"startPosition": start_position,
 		"maxExpansions": ROUTINE_V2_ROUTE_MAX_EXPANSIONS,
-		"expansionsPerCall": V2_ROUTE_EXPANSIONS_PER_CALL
+		"expansionsPerCall": expansions_per_call
 	}
+
+
+func _v2_route_search_expansions(planning_budget) -> int:
+	if planning_budget is Dictionary:
+		return maxi(1, int((planning_budget as Dictionary).get("routeSearchExpansions", V2_ROUTE_EXPANSIONS_PER_CALL)))
+	return V2_ROUTE_EXPANSIONS_PER_CALL
 
 
 func _v2_probe_repair_commit_options(substrate, start_cell: Vector2i, candidate_cells: Array, plan_options: Dictionary) -> Dictionary:
@@ -907,6 +1033,14 @@ func _v2_probe_repair_commit_options(substrate, start_cell: Vector2i, candidate_
 		"repairPlanOptions": plan_options.duplicate(true),
 		"maxProbeRepairAttempts": 3
 	}
+
+
+func _v2_plan_options_with_probe_repair_avoidance(plan_options: Dictionary, active: Dictionary) -> Dictionary:
+	var result := plan_options.duplicate(true)
+	var avoid_cells: Array = active.get("probeRepairAvoidCells", []) if active.get("probeRepairAvoidCells", []) is Array else []
+	if not avoid_cells.is_empty():
+		result["avoidCells"] = avoid_cells.duplicate()
+	return result
 
 
 func _update_v2_stored_route_from_authority(entry: Dictionary, key: String, summary: Dictionary) -> void:
@@ -1046,50 +1180,96 @@ func _execute_routine_route_v2(entry: Dictionary, body: Node3D, delta: float, sp
 
 
 func _plan_and_commit_routine_v2_route(entry: Dictionary, body: Node3D, authority, substrate, world, active: Dictionary, _delta: float, speed: float, intent_kind: String, target: Vector3, semantic_kind: String, allow_outside: bool, priority: int, reason: String, route_key: String) -> Dictionary:
+	var monitor = performance_monitor()
+	var candidate_ms := 0.0
+	var plan_ms := 0.0
+	var probe_commit_ms := 0.0
 	var start_cell := _home_v2_world_cell(world, body.global_position)
 	var target_cell := _home_v2_world_cell(world, target)
 	var target_data := _routine_v2_target_data(entry, target, target_cell, semantic_kind)
 	var moving_home := semantic_kind == "home_interior"
+	var use_staged_guard_budget: bool = intent_kind == "guard" \
+		and semantic_kind in ["guard_post", "interaction_target"] \
+		and world != null and world.has_method("approach_candidate_cells_for_target")
 	var request := active
 	if request.is_empty() or String(request.get("requestId", "")) == "":
-		request = _routine_v2_request(authority, entry, intent_kind, semantic_kind, target, target_cell, [], allow_outside, priority, reason, route_key)
+		request = _routine_v2_request(authority, entry, intent_kind, semantic_kind, target, target_cell, [], allow_outside, priority, reason, route_key, use_staged_guard_budget)
 	var request_id := String(request.get("requestId", ""))
 	var planning_budget := _claim_v2_planning_budget(authority, request_id, "routine_route_plan")
 	if not bool(planning_budget.get("granted", planning_budget.get("ok", false))):
 		entry["routineRouteV2LastAuthority"] = planning_budget
+		_record_routine_v2_planning_profile(entry, intent_kind, semantic_kind, reason, candidate_ms, plan_ms, probe_commit_ms, "planning_budget")
 		return _routine_v2_pending_or_failure_result(planning_budget)
-	var candidates_result: Dictionary = substrate.candidate_poses_for_target(entry, target_data, semantic_kind, {
+	var candidate_start: int = monitor.begin_section("npc_routine_v2_candidates") if monitor != null else Time.get_ticks_usec()
+	var candidate_options := {
 		"allowOutside": allow_outside,
 		"movingHome": moving_home
-	})
+	}
+	if use_staged_guard_budget:
+		candidate_options["candidateValidationsPerCall"] = GUARD_V2_CANDIDATE_VALIDATIONS_PER_CALL
+	var candidates_result: Dictionary = substrate.candidate_poses_for_target(entry, target_data, semantic_kind, candidate_options)
+	candidate_ms = monitor.end_section("npc_routine_v2_candidates", candidate_start) if monitor != null else float(Time.get_ticks_usec() - candidate_start) / 1000.0
 	entry["routineRouteV2LastCandidates"] = candidates_result
+	if String(candidates_result.get("classification", "")) == "pending_budget":
+		var pending_candidates: Dictionary = authority.mark_pending_budget(request_id, String(candidates_result.get("reason", "candidate_validation_deferred")))
+		entry["routineRouteV2LastAuthority"] = pending_candidates
+		_record_routine_v2_planning_profile(entry, intent_kind, semantic_kind, reason, candidate_ms, plan_ms, probe_commit_ms, "candidate_budget")
+		return _routine_v2_pending_or_failure_result(pending_candidates)
 	var candidate_cells := _routine_v2_candidate_cells(candidates_result)
 	if candidate_cells.is_empty():
 		var invalid_result: Dictionary = authority.report_invalid_goal(request_id, String(candidates_result.get("reason", "no_routeable_candidate_pose")))
 		entry["routineRouteV2LastAuthority"] = invalid_result
+		_record_routine_v2_planning_profile(entry, intent_kind, semantic_kind, reason, candidate_ms, plan_ms, probe_commit_ms, "invalid_goal")
 		return _routine_v2_pending_or_failure_result(invalid_result)
 	var intent := _routine_v2_intent(entry, intent_kind, semantic_kind, target, target_cell, candidate_cells, allow_outside, priority, reason)
 	var interaction_claim: Dictionary = intent.get("interactionClaim", {}) if intent.get("interactionClaim", {}) is Dictionary else {}
 	interaction_claim["routeGeneration"] = int(request.get("generation", 0))
 	intent["interactionClaim"] = interaction_claim
 	entry["_routineRouteV2Intent"] = intent.duplicate(true)
-	var plan_options := _routine_v2_plan_options(allow_outside, semantic_kind, body.global_position)
+	var plan_options := _routine_v2_plan_options(allow_outside, semantic_kind, body.global_position, planning_budget, use_staged_guard_budget)
+	plan_options = _v2_plan_options_with_probe_repair_avoidance(plan_options, active)
+	var plan_start: int = monitor.begin_section("npc_routine_v2_plan") if monitor != null else Time.get_ticks_usec()
 	var route: Dictionary = substrate.plan_route(entry, start_cell, candidate_cells, plan_options)
+	plan_ms = monitor.end_section("npc_routine_v2_plan", plan_start) if monitor != null else float(Time.get_ticks_usec() - plan_start) / 1000.0
 	entry["routineRouteV2LastPlan"] = _home_v2_route_debug(route)
 	if not bool(route.get("ok", false)):
 		var failure := _apply_home_v2_route_failure(authority, request_id, route)
 		entry["routineRouteV2LastAuthority"] = failure
+		_record_routine_v2_planning_profile(entry, intent_kind, semantic_kind, reason, candidate_ms, plan_ms, probe_commit_ms, "route_failure")
 		return _routine_v2_pending_or_failure_result(failure)
 	route["interactionClaim"] = interaction_claim.duplicate(true)
 	entry["_routineRouteV2Route"] = route.duplicate(true)
 	entry["routeForceReplan"] = false
 	var commit_options := _v2_probe_repair_commit_options(substrate, start_cell, candidate_cells, plan_options)
+	var probe_commit_start: int = monitor.begin_section("npc_routine_v2_probe_commit") if monitor != null else Time.get_ticks_usec()
 	var commit: Dictionary = authority.commit_route_after_probe(entry, request_id, route, intent, commit_options)
+	probe_commit_ms = monitor.end_section("npc_routine_v2_probe_commit", probe_commit_start) if monitor != null else float(Time.get_ticks_usec() - probe_commit_start) / 1000.0
 	_update_v2_stored_route_from_authority(entry, "_routineRouteV2Route", commit)
 	entry["routineRouteV2LastAuthority"] = commit
+	_record_routine_v2_planning_profile(entry, intent_kind, semantic_kind, reason, candidate_ms, plan_ms, probe_commit_ms, String(commit.get("state", commit.get("status", "unknown"))))
 	if String(commit.get("state", "")) in ["ready", "moving"]:
 		return _execute_routine_v2_lease(entry, body, authority, home_route_executor, commit, _delta, speed, intent_kind, semantic_kind)
 	return _routine_v2_pending_or_failure_result(commit)
+
+
+func _record_routine_v2_planning_profile(entry: Dictionary, intent_kind: String, semantic_kind: String, reason: String, candidate_ms: float, plan_ms: float, probe_commit_ms: float, outcome: String) -> void:
+	var total_ms := candidate_ms + plan_ms + probe_commit_ms
+	var profile := {
+		"actorId": String(entry.get("id", "")),
+		"intentKind": intent_kind,
+		"semanticKind": semantic_kind,
+		"reason": reason,
+		"outcome": outcome,
+		"candidateMs": candidate_ms,
+		"planMs": plan_ms,
+		"probeCommitMs": probe_commit_ms,
+		"totalMs": total_ms,
+		"physicsFrame": Engine.get_physics_frames()
+	}
+	entry["routineRouteV2LastPlanningProfile"] = profile
+	var maximum: Dictionary = entry.get("routineRouteV2MaxPlanningProfile", {}) if entry.get("routineRouteV2MaxPlanningProfile", {}) is Dictionary else {}
+	if maximum.is_empty() or total_ms >= float(maximum.get("totalMs", 0.0)):
+		entry["routineRouteV2MaxPlanningProfile"] = profile.duplicate(true)
 
 
 func _execute_routine_v2_lease(entry: Dictionary, body: Node3D, authority, executor, summary: Dictionary, delta: float, speed: float, intent_kind: String, semantic_kind: String) -> Dictionary:
@@ -1118,9 +1298,17 @@ func _execute_routine_v2_lease(entry: Dictionary, body: Node3D, authority, execu
 	return execution
 
 
-func _routine_v2_request(authority, entry: Dictionary, intent_kind: String, semantic_kind: String, target: Vector3, target_cell: Vector2i, candidate_cells: Array, allow_outside: bool, priority: int, reason: String, route_key: String) -> Dictionary:
+func _routine_v2_request(authority, entry: Dictionary, intent_kind: String, semantic_kind: String, target: Vector3, target_cell: Vector2i, candidate_cells: Array, allow_outside: bool, priority: int, reason: String, route_key: String, use_staged_guard_budget := false) -> Dictionary:
 	var intent := _routine_v2_intent(entry, intent_kind, semantic_kind, target, target_cell, candidate_cells, allow_outside, priority, reason)
-	var request: Dictionary = authority.submit_request(entry, intent, { "priority": priority })
+	# Pending budget work is still owned by the collision-backed route authority. Cache
+	# the semantic request before submission so the physics service can resume it.
+	entry["_routineRouteV2Intent"] = intent.duplicate(true)
+	entry["routineRouteV2IntentKind"] = intent_kind
+	entry["routineRouteV2SemanticKind"] = semantic_kind
+	var request_options := { "priority": priority }
+	if use_staged_guard_budget:
+		request_options["maxExpansionsPerPlanningSlice"] = GUARD_V2_ROUTE_EXPANSIONS_PER_CALL
+	var request: Dictionary = authority.submit_request(entry, intent, request_options)
 	entry["routineRouteV2RequestId"] = String(request.get("requestId", ""))
 	entry["routineRouteV2Key"] = route_key
 	entry["routineRouteV2RequestReason"] = reason
@@ -1387,7 +1575,7 @@ func _job_route_allows_outside(entry: Dictionary, body: Node3D) -> bool:
 		return true
 	if body == null:
 		return false
-	return _inside_home_bounds_now(entry, body.global_position) or _near_home_exit_needs_clearance(entry, body)
+	return _inside_home_bounds_now(entry, body.global_position) or _home_departure_needs_clearance(entry, body)
 
 func _worker_needs_town_recovery(entry: Dictionary, body: Node3D) -> bool:
 	if body == null:
@@ -1563,7 +1751,7 @@ func _staged_departure_motion_target(entry: Dictionary, body: Node3D, target: Ve
 	if inside_home and not _inside_home_bounds_now(entry, target):
 		return _home_door_exit_target(entry, body.global_position.y)
 	var leaving_town := _point_inside_town(entry, body.global_position) and not _point_inside_town(entry, target)
-	if leaving_town and _near_home_exit_needs_clearance(entry, body):
+	if leaving_town and _home_departure_needs_clearance(entry, body):
 		return _home_exit_clearance_target(entry, body.global_position.y)
 	return target
 
@@ -1574,22 +1762,47 @@ func _home_exit_stage_target(entry: Dictionary, body: Node3D) -> Vector3:
 		return _home_door_exit_target(entry, body.global_position.y)
 	return _home_exit_clearance_target(entry, body.global_position.y)
 
-func _near_home_exit_needs_clearance(entry: Dictionary, body: Node3D) -> bool:
+func _home_departure_needs_clearance(entry: Dictionary, body: Node3D) -> bool:
 	if body == null:
 		return false
-	var porch_cell: Vector2i = entry.get("porchCell", entry.get("homeCell", Vector2i.ZERO))
-	var current_cell := _flat_cell_for_position(body.global_position)
 	var status := _home_interior_status(entry, body.global_position)
-	if bool(status.get("doorThresholdOccupied", false)) \
-		or bool(status.get("doorSweepOccupied", false)) \
-		or bool(status.get("doorClearanceOccupied", false)):
+	if bool(status.get("strictInside", false)):
+		_set_home_departure_state(entry, "inside", "strict_interior")
+		_set_home_departure_state(entry, "clearing", "outbound_from_interior")
 		return true
-	var status_reason := String(status.get("reason", ""))
-	if status_reason in ["door_cell_not_inside", "door_clearance_not_inside", "not_past_door_plane"]:
+	var state := String(entry.get("homeDepartureState", ""))
+	if state == "clearing":
 		return true
-	if abs(current_cell.x - porch_cell.x) > 1 or abs(current_cell.y - porch_cell.y) > 1:
+	if state == "outside":
 		return false
-	return current_cell != _home_exit_clearance_cell(entry)
+	if bool(entry.get("insideHome", false)) \
+		or bool(status.get("onPorch", false)) \
+		or bool(status.get("onDoorCell", false)) \
+		or not bool(status.get("clearOfDoor", true)):
+		_set_home_departure_state(entry, "clearing", "threshold_or_porch")
+		return true
+	_set_home_departure_state(entry, "outside", "recovered_clear_outside")
+	return false
+
+func _home_departure_at_exterior_clearance(entry: Dictionary, body: Node3D) -> bool:
+	if body == null:
+		return false
+	var status := _home_interior_status(entry, body.global_position)
+	if bool(status.get("strictInside", false)) or not bool(status.get("clearOfDoor", false)):
+		return false
+	return _flat_cell_for_position(body.global_position) == _home_exit_clearance_cell(entry)
+
+func _set_home_departure_state(entry: Dictionary, state: String, reason: String) -> void:
+	var previous := String(entry.get("homeDepartureState", ""))
+	if previous == state:
+		return
+	entry["homeDepartureState"] = state
+	entry["homeDepartureLastTransition"] = {
+		"from": previous,
+		"to": state,
+		"reason": reason,
+		"frame": Engine.get_physics_frames()
+	}
 
 func _inside_home_now(entry: Dictionary, body: Node3D) -> bool:
 	if body == null:
@@ -1602,6 +1815,7 @@ func _clear_inside_home_if_not_semantic(entry: Dictionary, body: Node3D) -> void
 	if body == null or not is_instance_valid(body):
 		return
 	if _inside_home_now(entry, body):
+		_set_home_departure_state(entry, "inside", "strict_interior")
 		return
 	if bool(entry.get("insideHome", false)):
 		entry["insideHome"] = false
@@ -1894,39 +2108,22 @@ func _update_forager_goal(entry: Dictionary, body: Node3D, delta: float) -> bool
 			body.set_meta("npc_job_phase", "idle")
 			return false
 		if active_forage_intent or _point_inside_town(entry, body.global_position):
-			entry["jobPhase"] = "searching"
-			_advance_forage_search_serial(entry)
-			entry["jobTimer"] = _deterministic_seconds(entry, "forage_depart_town_search", 3.0, 7.0)
-			entry["jobTarget"] = _choose_job_target(entry)
-			entry["routeForceReplan"] = true
+			_schedule_forager_search(entry, body, "forage_depart_town_search", 3.0, 7.0, "forage_depart_town_search")
 			_clear_home_route_terminal(entry)
-			_set_npc_goal(entry, "search for berries")
-			body.set_meta("npc_job_phase", "searching")
 			return true
 		var forage := _find_forage_target(entry)
 		if forage == null:
-			entry["jobPhase"] = "searching"
-			_advance_forage_search_serial(entry)
-			entry["jobTimer"] = _deterministic_seconds(entry, "forage_search_retry", 3.0, 7.0)
-			entry["jobTarget"] = _choose_job_target(entry)
-			entry["routeForceReplan"] = true
-			_set_npc_goal(entry, "search for berries")
-			body.set_meta("npc_job_phase", "searching")
+			_schedule_forager_search(entry, body, "forage_search_retry", 3.0, 7.0, "forage_search_retry")
 			return true
 		if not _reserve_job_target(entry, forage, "harvest_resource"):
-			entry["jobPhase"] = "searching"
-			_advance_forage_search_serial(entry)
-			entry["jobTimer"] = _deterministic_seconds(entry, "forage_reserve_retry", 2.0, 4.5)
-			entry["jobTarget"] = _choose_job_target(entry)
-			entry["routeForceReplan"] = true
-			_set_npc_goal(entry, "search for berries")
-			body.set_meta("npc_job_phase", "searching")
+			_schedule_forager_search(entry, body, "forage_reserve_retry", 2.0, 4.5, "forage_reserve_retry")
 			return true
 		entry["jobPhase"] = "outbound"
+		entry.erase("forageSearchWaiting")
 		entry["jobTimer"] = _deterministic_seconds(entry, "forage_outbound_timeout", 12.0, 22.0)
 		entry["foragePendingRouteRetries"] = 0
 		_clear_home_route_terminal(entry)
-		_set_npc_goal(entry, "forage berries")
+		_set_npc_goal(entry, "forage food")
 		body.set_meta("npc_job_phase", "outbound")
 		return true
 	if phase == "outbound" or phase == "searching":
@@ -1942,32 +2139,23 @@ func _update_forager_goal(entry: Dictionary, body: Node3D, delta: float) -> bool
 				entry["forageRouteFailures"] = 0
 				entry["foragePendingRouteRetries"] = 0
 				entry["routeForceReplan"] = true
+				entry.erase("forageSearchWaiting")
 				_clear_home_route_terminal(entry)
-				_set_npc_goal(entry, "forage berries")
+				_set_npc_goal(entry, "forage food")
 				body.set_meta("npc_job_phase", "outbound")
 				return true
-			_advance_forage_search_serial(entry)
-			entry["jobTarget"] = _choose_job_target(entry)
-			entry["jobTimer"] = _deterministic_seconds(entry, "forage_search_retry", 3.0, 7.0)
-			entry["routeForceReplan"] = true
-			_set_npc_goal(entry, "search for berries")
-			body.set_meta("npc_job_phase", "searching")
+			_schedule_forager_search(entry, body, "forage_search_retry", 3.0, 7.0, "forage_search_retry")
 			return true
 		if phase == "searching" and target_node != null:
 			phase = "outbound"
 			entry["jobPhase"] = "outbound"
-			_set_npc_goal(entry, "forage berries")
+			entry.erase("forageSearchWaiting")
+			_set_npc_goal(entry, "forage food")
 			body.set_meta("npc_job_phase", "outbound")
 		if target_node == null and phase == "outbound":
 			entry["jobTargetNode"] = null
 			_release_job_reservation(entry, "target_gone")
-			entry["jobPhase"] = "searching"
-			_advance_forage_search_serial(entry)
-			entry["jobTarget"] = _choose_job_target(entry)
-			entry["jobTimer"] = _deterministic_seconds(entry, "forage_target_gone_search", 2.0, 5.0)
-			entry["routeForceReplan"] = true
-			_set_npc_goal(entry, "search for berries")
-			body.set_meta("npc_job_phase", "searching")
+			_schedule_forager_search(entry, body, "forage_target_gone_search", 2.0, 5.0, "forage_target_gone_search")
 			return true
 		if target_node != null and String(entry.get("jobObjectId", "")) == "":
 			_reserve_job_target(entry, target_node, "harvest_resource")
@@ -1980,7 +2168,7 @@ func _update_forager_goal(entry: Dictionary, body: Node3D, delta: float) -> bool
 			entry["foragePendingRouteTime"] = 0.0
 			entry["foragePendingRouteRetries"] = 0
 			_clear_route_for_action(entry, "forage_gathering")
-			_set_npc_goal(entry, "pick berries")
+			_set_npc_goal(entry, "gather forage")
 			_play_npc_use(entry, "gather")
 			body.set_meta("npc_job_phase", "gathering")
 			return false
@@ -1990,7 +2178,7 @@ func _update_forager_goal(entry: Dictionary, body: Node3D, delta: float) -> bool
 			entry["forageRouteRepairAttempts"] = int(entry.get("forageRouteRepairAttempts", 0)) + 1
 			entry["jobTimer"] = _deterministic_seconds(entry, "forage_dynamic_repair", 2.0, 4.0)
 			_reset_route_for_replan(entry, "forage_blocked_dynamic_repair")
-			_set_npc_goal(entry, "forage berries")
+			_set_npc_goal(entry, "forage food")
 			body.set_meta("npc_job_phase", "outbound")
 			return true
 		if target_node != null and route_action == "release":
@@ -2004,7 +2192,7 @@ func _update_forager_goal(entry: Dictionary, body: Node3D, delta: float) -> bool
 				entry["routeForceReplan"] = true
 				entry["jobPhase"] = "outbound"
 				entry["jobTimer"] = _deterministic_seconds(entry, "forage_next_slot_route", 3.0, 6.0)
-				_set_npc_goal(entry, "forage berries")
+				_set_npc_goal(entry, "forage food")
 				body.set_meta("npc_job_phase", "outbound")
 				return true
 			return _retarget_forager_after_route_failure(entry, body, target_node, String(route_disposition.get("releaseReason", "route_slot_failed")), bool(route_disposition.get("markUnreachable", false)))
@@ -2022,7 +2210,7 @@ func _update_forager_goal(entry: Dictionary, body: Node3D, delta: float) -> bool
 			entry.erase("foragePendingRouteFrame")
 			entry.erase("foragePendingRouteKey")
 			NpcRouteStateStoreScript.write_status(entry, "waiting", "retry_forage_pending_route", "NpcPlanExecutor.forage_route_retry")
-			_set_npc_goal(entry, "forage berries")
+			_set_npc_goal(entry, "forage food")
 			body.set_meta("npc_job_phase", "outbound")
 			return true
 		var search_anchor_arrived := phase == "searching" and target_node == null and (String(entry.get("routeStatus", "")) == "arrived" or body.global_position.distance_to(target) <= NpcConstantsScript.CELL_SIZE * 1.2)
@@ -2035,19 +2223,14 @@ func _update_forager_goal(entry: Dictionary, body: Node3D, delta: float) -> bool
 				entry["forageRouteFailures"] = 0
 				entry["foragePendingRouteRetries"] = 0
 				entry["routeForceReplan"] = true
+				entry.erase("forageSearchWaiting")
 				_clear_home_route_terminal(entry)
-				_set_npc_goal(entry, "forage berries")
+				_set_npc_goal(entry, "forage food")
 				body.set_meta("npc_job_phase", "outbound")
 				return true
-			_advance_forage_search_serial(entry)
-			entry["jobTarget"] = _choose_job_target(entry)
-			entry["jobTimer"] = _deterministic_seconds(entry, "forage_search_roam", 2.0, 5.0)
-			entry["routeForceReplan"] = true
-			NpcRouteStateStoreScript.write_reason(entry, "forage_search_roam", "NpcPlanExecutor.forage_search_roam")
-			_set_npc_goal(entry, "search for berries")
-			body.set_meta("npc_job_phase", "searching")
+			_schedule_forager_search(entry, body, "forage_search_roam", 2.0, 5.0, "forage_search_roam")
 		else:
-			_set_npc_goal(entry, "forage berries" if phase == "outbound" else "search for berries")
+			_set_npc_goal(entry, "forage food" if phase == "outbound" else "search for forage")
 			if timer <= 0.0:
 				if phase == "outbound" and forager_route_is_progressing(entry):
 					entry["jobTimer"] = _deterministic_seconds(entry, "forage_route_continue", 3.0, 6.0)
@@ -2056,8 +2239,8 @@ func _update_forager_goal(entry: Dictionary, body: Node3D, delta: float) -> bool
 				if target_node != null:
 					entry["jobTarget"] = _smart_object_approach_position(entry, target_node)
 				else:
-					_advance_forage_search_serial(entry)
-					entry["jobTarget"] = _choose_job_target(entry)
+					_schedule_forager_search(entry, body, "forage_route_retry", 3.0, 7.0, "forage_route_retry")
+					return true
 				_clear_home_route_terminal(entry)
 				entry["routeForceReplan"] = true
 				timer = _deterministic_seconds(entry, "forage_route_retry", 3.0, 7.0)
@@ -2066,7 +2249,7 @@ func _update_forager_goal(entry: Dictionary, body: Node3D, delta: float) -> bool
 	if phase == "gathering":
 		if timer > 0.0:
 			entry["jobTimer"] = timer
-			_set_npc_goal(entry, "pick berries")
+			_set_npc_goal(entry, "gather forage")
 			body.set_meta("npc_job_phase", "gathering")
 			return false
 		if not _harvest_forager_target(entry):
@@ -2083,19 +2266,22 @@ func _update_forager_goal(entry: Dictionary, body: Node3D, delta: float) -> bool
 		entry["jobPhase"] = "returning"
 		entry["jobTarget"] = entry.get("homePosition", body.global_position)
 		entry["jobTimer"] = _deterministic_seconds(entry, "forage_return_timeout", 10.0, 18.0)
-		_set_npc_goal(entry, "bring berries home")
+		_set_npc_goal(entry, "bring forage home")
 		body.set_meta("npc_job_phase", "returning")
 		body.set_meta("npc_job_runs", runs)
-		body.set_meta("npc_carried_resource", "berries")
+		body.set_meta("npc_carried_resource", String(entry.get("carriedResource", entry.get("jobResource", ""))))
 		return true
 	if phase == "returning":
 		var home: Vector3 = entry.get("homePosition", entry.get("porchPosition", body.global_position))
 		var inside_semantic := bool(autonomy_system.call("is_inside_home_interior", entry, body.global_position)) if autonomy_system != null and autonomy_system.has_method("is_inside_home_interior") else false
 		if body.global_position.distance_to(home) <= NpcConstantsScript.CELL_SIZE * 1.15 or inside_semantic or timer <= 0.0:
-			if float(entry.get("hunger", 100.0)) < 86.0 and _npc_inventory_count(entry, "berries") > 0:
-				_npc_inventory_add(entry, "berries", -1)
-				entry["hunger"] = minf(float(entry.get("maxHunger", 100.0)), float(entry.get("hunger", 100.0)) + 24.0)
-				_increment_npc_system_counter("npc_food_eaten")
+			if float(entry.get("hunger", 100.0)) < 86.0:
+				var consumed_food := _consume_forage_food(entry, String(entry.get("carriedResource", "")))
+				if bool(consumed_food.get("ok", false)):
+					entry["hunger"] = minf(float(entry.get("maxHunger", 100.0)), float(entry.get("hunger", 100.0)) + float(consumed_food.get("food", 0)))
+					_increment_npc_system_counter("npc_food_eaten")
+				else:
+					_complete_deposit_interaction(entry)
 			else:
 				_complete_deposit_interaction(entry)
 			entry["jobPhase"] = "idle"
@@ -2106,7 +2292,7 @@ func _update_forager_goal(entry: Dictionary, body: Node3D, delta: float) -> bool
 			return false
 		entry["jobTarget"] = home
 		entry["jobTimer"] = timer
-		_set_npc_goal(entry, "bring berries home")
+		_set_npc_goal(entry, "bring forage home")
 		body.set_meta("npc_job_phase", "returning")
 		return true
 	entry["jobPhase"] = "idle"
@@ -2230,13 +2416,7 @@ func _retarget_forager_after_route_failure(entry: Dictionary, body: Node3D, targ
 	entry.erase("jobApproachCandidates")
 	entry.erase("jobApproachCandidateIndex")
 	entry.erase("jobApproachTargetObjectId")
-	_advance_forage_search_serial(entry)
-	entry["jobTarget"] = _choose_job_target(entry)
-	entry["jobTimer"] = _deterministic_seconds(entry, "forage_route_failure_search", 3.0, 7.0)
-	entry["routeForceReplan"] = true
-	_set_npc_goal(entry, "search for berries")
-	if body != null:
-		body.set_meta("npc_job_phase", "searching")
+	_schedule_forager_search(entry, body, "forage_route_failure_search", 3.0, 7.0, "forage_route_failure_search")
 	return true
 
 func _bind_forage_reservation_to_route(entry: Dictionary, semantic_kind: String) -> Dictionary:
@@ -2267,6 +2447,26 @@ func _advance_forage_search_serial(entry: Dictionary) -> void:
 	var body := entry.get("body") as Node
 	if body != null and is_instance_valid(body):
 		body.set_meta("npc_forage_search_serial", serial)
+
+func _schedule_forager_search(entry: Dictionary, body: Node3D, timer_key: String, minimum_seconds: float, maximum_seconds: float, reason: String) -> void:
+	entry["jobPhase"] = "searching"
+	_advance_forage_search_serial(entry)
+	entry["jobTimer"] = _deterministic_seconds(entry, timer_key, minimum_seconds, maximum_seconds)
+	var target := _choose_job_target(entry)
+	var target_is_new := target != Vector3.INF and (body == null or _flat_cell_for_position(target) != _flat_cell_for_position(body.global_position))
+	if target_is_new:
+		entry["jobTarget"] = target
+		entry["routeForceReplan"] = true
+		entry.erase("forageSearchWaiting")
+		NpcRouteStateStoreScript.write_reason(entry, reason, "NpcPlanExecutor.schedule_forager_search")
+	else:
+		entry["jobTarget"] = body.global_position if body != null else entry.get("porchPosition", Vector3.ZERO)
+		entry["routeForceReplan"] = false
+		entry["forageSearchWaiting"] = true
+		NpcRouteStateStoreScript.write_status(entry, "waiting", "forage_no_new_search_anchor", "NpcPlanExecutor.schedule_forager_search")
+	_set_npc_goal(entry, "search for forage")
+	if body != null:
+		body.set_meta("npc_job_phase", "searching")
 
 func _execute_idle(entry: Dictionary, body: Node3D, delta: float) -> void:
 	entry["homeReturnTime"] = 0.0
@@ -2526,6 +2726,12 @@ func _npc_inventory_add(entry: Dictionary, item_id: String, amount: int) -> void
 	else:
 		personal_inventory[item_id] = new_count
 	entry["personalInventory"] = personal_inventory
+
+func _consume_forage_food(entry: Dictionary, preferred_item_id := "") -> Dictionary:
+	if npc_system != null and npc_system.has_method("consume_forage_food"):
+		var result = npc_system.call("consume_forage_food", entry, preferred_item_id)
+		return result if result is Dictionary else { "ok": false, "reason": "invalid_consume_result" }
+	return { "ok": false, "reason": "missing_forage_food_authority" }
 
 func _increment_npc_system_counter(counter_name: String) -> void:
 	if npc_system == null:

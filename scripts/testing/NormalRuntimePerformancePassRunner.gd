@@ -1,6 +1,6 @@
 extends Node
 
-const MAIN_SCENE := preload("res://scenes/Main.tscn")
+const MENU_SCENE := preload("res://scenes/MainMenu.tscn")
 const RuntimePerformanceObservationRunnerScript := preload("res://scripts/testing/RuntimePerformanceObservationRunner.gd")
 
 const SAMPLE_EVERY_FRAMES := 6
@@ -12,6 +12,8 @@ const SEGMENT_LANE_CHECK_CELLS := 48
 const JUMP_INTERVAL_FRAMES := 150
 const MIN_RUNTIME_TRAVEL_DISTANCE := 45.0
 const MAX_ALLOWED_BELOW_COLLISION := 1.35
+const SCENARIO_SPRINT_TRAVERSAL := "NormalSprintTraversal"
+const SCENARIO_TUTORIAL_TOWN_GUARD_ACTIVATION := "NormalTutorialTownGuardActivation"
 
 var report_path := ""
 var progress_path := ""
@@ -20,12 +22,21 @@ var run_token := ""
 var duration_seconds := DEFAULT_DURATION_SECONDS
 var watchdog_seconds := 240.0
 var warmup_frames := DEFAULT_WARMUP_FRAMES
-var scenario := "NormalSprintTraversal"
+var scenario := SCENARIO_SPRINT_TRAVERSAL
+var menu: Node = null
 var main: Node = null
 var finished := false
 var watchdog_elapsed := 0.0
-var boot_add_child_ms := 0.0
-var boot_first_frames_ms := 0.0
+var menu_to_new_game_input_ms := 0.0
+var new_game_input_to_first_loading_frame_ms := 0.0
+var new_game_input_to_gameplay_ready_ms := 0.0
+var first_gameplay_frames_ms := 0.0
+var new_game_input_started_usec := 0
+var first_loading_frame_usec := 0
+var gameplay_ready_usec := 0
+var startup_loading_completed := false
+var startup_loading_failure := ""
+var startup_loading_steps: Array[Dictionary] = []
 var measurement_start := Vector3.INF
 var measurement_end := Vector3.INF
 var last_travel_position := Vector3.INF
@@ -45,6 +56,7 @@ var last_segment_index := -1
 var segment_visit_counts := {}
 var samples := []
 var metrics_helper = RuntimePerformanceObservationRunnerScript.new()
+var measurement_start_physics_frame := -1
 
 func _ready() -> void:
     configure_from_environment()
@@ -60,10 +72,6 @@ func _process(delta: float) -> void:
         finish(1)
 
 func configure_from_environment() -> void:
-    OS.set_environment("VOXEL_PLAYTEST", "")
-    OS.set_environment("VOXEL_RUNTIME_PERF_FAST_BOOT", "")
-    OS.set_environment("VOXEL_UNDERGROUND_VISUAL_FAST_BOOT", "")
-    OS.set_environment("VOXEL_DIGGING_VISUAL_FAST_BOOT", "")
     report_path = OS.get_environment("VOXEL_NORMAL_RUNTIME_PERF_REPORT").strip_edges()
     if report_path == "":
         report_path = ProjectSettings.globalize_path("res://artifacts/performance/normal-runtime-performance-pass.json")
@@ -117,17 +125,13 @@ func run() -> void:
     finish(1 if failure_count > 0 else 0)
 
 func run_normal_runtime_scenario() -> Dictionary:
-    write_progress("instantiate_main")
-    main = MAIN_SCENE.instantiate()
-    var add_child_started := Time.get_ticks_usec()
-    add_child(main)
-    boot_add_child_ms = elapsed_ms(add_child_started)
-    write_progress("main_added")
-    var first_frames_started := Time.get_ticks_usec()
-    await get_tree().process_frame
-    await get_tree().physics_frame
-    boot_first_frames_ms = elapsed_ms(first_frames_started)
-    write_progress("main_first_frames")
+    var environment_failure := normal_runtime_environment_failure()
+    if environment_failure != "":
+        return failed_result(environment_failure)
+    if not await launch_main_via_menu_new_game_input():
+        return failed_result(startup_loading_failure if startup_loading_failure != "" else "Main Menu New Game did not reach gameplay readiness")
+    if scenario == SCENARIO_TUTORIAL_TOWN_GUARD_ACTIVATION:
+        return await run_tutorial_town_guard_activation_scenario()
     if not configure_player_for_runtime_traversal():
         return failed_result("player could not be configured for normal runtime traversal")
     await warmup()
@@ -192,6 +196,150 @@ func run_normal_runtime_scenario() -> Dictionary:
         "sampleCount": samples.size(),
         "metrics": metrics
     }
+
+func run_tutorial_town_guard_activation_scenario() -> Dictionary:
+    # This observes the production tutorial's initial night guard routes. It leaves
+    # player and NPC transforms, clock, orders, route state, and doors untouched.
+    stop_player_automation()
+    reset_runtime_performance_monitor()
+    measurement_start_physics_frame = Engine.get_physics_frames()
+    samples.clear()
+    write_progress("guard_activation_measure_start")
+    var started_msec := Time.get_ticks_msec()
+    var frame := 0
+    while float(Time.get_ticks_msec() - started_msec) / 1000.0 < duration_seconds:
+        await get_tree().process_frame
+        if frame % SAMPLE_EVERY_FRAMES == 0 and main != null and main.has_method("debug_performance_state"):
+            samples.append(main.call("debug_performance_state"))
+        if frame % 120 == 0:
+            write_progress("guard_activation_measure_frame:%d" % frame)
+        frame += 1
+    if screenshot_path != "":
+        write_progress("capture_screenshot")
+        await capture_screenshot()
+        write_progress("capture_screenshot_done")
+    var metrics: Dictionary = metrics_helper.call("summarize_samples", samples)
+    append_normal_metrics(metrics, frame)
+    var failures: Array = metrics_helper.call("performance_failures", metrics)
+    if samples.is_empty():
+        failures.append("no performance samples captured")
+    var guard_profiles := routine_guard_route_profiles()
+    metrics["routineGuardRouteV2PlanningProfiles"] = guard_profiles
+    metrics["routineGuardRouteV2PlanningProfileCount"] = guard_profiles.size()
+    if guard_profiles.is_empty():
+        failures.append("tutorial-town guard activation captured no routine V2 guard route profile")
+    var passed := failures.is_empty()
+    flush_async_save()
+    return {
+        "id": "normal_runtime_tutorial_town_guard_activation",
+        "scenario": scenario,
+        "passed": passed,
+        "details": result_details(metrics, failures),
+        "failures": failures,
+        "sampleCount": samples.size(),
+        "metrics": metrics
+    }
+
+func launch_main_via_menu_new_game_input() -> bool:
+    Input.set_mouse_mode(Input.MOUSE_MODE_VISIBLE)
+    write_progress("instantiate_main_menu")
+    var menu_started_usec := Time.get_ticks_usec()
+    menu = MENU_SCENE.instantiate()
+    if menu == null:
+        startup_loading_failure = "MainMenu.tscn could not be instantiated"
+        return false
+    add_child(menu)
+    await get_tree().process_frame
+    await get_tree().process_frame
+    await get_tree().process_frame
+    await get_tree().process_frame
+    var button := menu.get("new_game_button") as Button
+    if button == null or not is_instance_valid(button) or button.disabled:
+        startup_loading_failure = "Main Menu did not expose an enabled New Game button"
+        return false
+    menu_to_new_game_input_ms = elapsed_ms(menu_started_usec)
+    new_game_input_started_usec = Time.get_ticks_usec()
+    dispatch_menu_mouse_button(button.get_global_rect().get_center(), MOUSE_BUTTON_LEFT, true)
+    dispatch_menu_mouse_button(button.get_global_rect().get_center(), MOUSE_BUTTON_LEFT, false)
+    write_progress("main_menu_new_game_button_input")
+    var max_frames := ceili(140.0 * float(Engine.physics_ticks_per_second))
+    for frame in range(max_frames):
+        await get_tree().process_frame
+        if first_loading_frame_usec <= 0 and bool(menu.get("launching")):
+            first_loading_frame_usec = Time.get_ticks_usec()
+            new_game_input_to_first_loading_frame_ms = elapsed_ms(new_game_input_started_usec)
+            write_progress("main_menu_loading_frame")
+        var active_main = menu.get("active_main") if menu != null else null
+        if active_main is Node:
+            main = active_main
+            connect_main_loading_signals()
+        if startup_loading_failure != "":
+            return false
+        if startup_loading_completed:
+            var readiness_domains = main.get("startup_readiness_domains") if main != null else {}
+            var gameplay_readiness: Dictionary = readiness_domains.get("gameplay", {}) if readiness_domains is Dictionary else {}
+            if String(gameplay_readiness.get("status", "")) != "ready":
+                startup_loading_failure = "Main Menu New Game completed without gameplay readiness"
+                return false
+            new_game_input_to_gameplay_ready_ms = float(gameplay_ready_usec - new_game_input_started_usec) / 1000.0
+            var first_gameplay_started_usec := Time.get_ticks_usec()
+            await get_tree().process_frame
+            if scenario != SCENARIO_TUTORIAL_TOWN_GUARD_ACTIVATION:
+                await get_tree().physics_frame
+            first_gameplay_frames_ms = elapsed_ms(first_gameplay_started_usec)
+            write_progress("main_menu_new_game_gameplay_ready")
+            return main != null and is_instance_valid(main)
+        if frame % 120 == 0:
+            write_progress("main_menu_waiting_for_gameplay_ready frame=%d" % frame)
+    startup_loading_failure = "Main Menu New Game loading timed out"
+    return false
+
+func connect_main_loading_signals() -> void:
+    if main == null:
+        return
+    var completed_callback := Callable(self, "_on_main_startup_loading_completed")
+    if main.has_signal("startup_loading_completed") and not main.is_connected("startup_loading_completed", completed_callback):
+        main.connect("startup_loading_completed", completed_callback)
+    var failed_callback := Callable(self, "_on_main_startup_loading_failed")
+    if main.has_signal("startup_loading_failed") and not main.is_connected("startup_loading_failed", failed_callback):
+        main.connect("startup_loading_failed", failed_callback)
+    var step_callback := Callable(self, "_on_main_startup_loading_step")
+    if main.has_signal("startup_loading_step") and not main.is_connected("startup_loading_step", step_callback):
+        main.connect("startup_loading_step", step_callback)
+
+func _on_main_startup_loading_step(message: String) -> void:
+    startup_loading_steps.append({
+        "elapsedMs": elapsed_ms(new_game_input_started_usec),
+        "message": message
+    })
+
+func _on_main_startup_loading_completed() -> void:
+    gameplay_ready_usec = Time.get_ticks_usec()
+    startup_loading_completed = true
+
+func _on_main_startup_loading_failed(message: String) -> void:
+    startup_loading_failure = message if message != "" else "Main Menu New Game loading failed"
+
+func dispatch_menu_mouse_button(position: Vector2, button_index: int, pressed: bool) -> void:
+    var event := InputEventMouseButton.new()
+    event.button_index = button_index
+    event.pressed = pressed
+    event.position = position
+    event.global_position = position
+    get_viewport().push_input(event)
+
+func normal_runtime_environment_failure() -> String:
+    if not [SCENARIO_SPRINT_TRAVERSAL, SCENARIO_TUTORIAL_TOWN_GUARD_ACTIVATION].has(scenario):
+        return "unsupported normal runtime performance scenario: %s" % scenario
+    if OS.get_environment("VOXEL_PLAYTEST").strip_edges() != "":
+        return "VOXEL_PLAYTEST must be unset for normal runtime performance"
+    if OS.get_environment("VOXEL_TEST_SEED").strip_edges() != "":
+        return "VOXEL_TEST_SEED must be unset for Main Menu New Game performance"
+    if OS.get_environment("VOXEL_RUNTIME_PERF_FAST_BOOT").strip_edges() != "":
+        return "VOXEL_RUNTIME_PERF_FAST_BOOT must be unset for normal runtime performance"
+    if OS.get_environment("VOXEL_UNDERGROUND_VISUAL_FAST_BOOT").strip_edges() != "" or OS.get_environment("VOXEL_DIGGING_VISUAL_FAST_BOOT").strip_edges() != "":
+        return "visual fast boot flags must be unset for normal runtime performance"
+    return ""
 
 func configure_player_for_runtime_traversal() -> bool:
     if main == null:
@@ -377,6 +525,14 @@ func reset_runtime_performance_monitor() -> void:
     var navmesh_world = autonomy.get("navmesh_world") if autonomy != null else null
     if navmesh_world != null and navmesh_world.has_method("reset_timing_stats"):
         navmesh_world.call("reset_timing_stats")
+    var entries = npc_system.get("npcs") if npc_system != null else []
+    if entries is Array:
+        for entry_value in entries:
+            if not (entry_value is Dictionary):
+                continue
+            var entry: Dictionary = entry_value
+            entry.erase("routineRouteV2LastPlanningProfile")
+            entry.erase("routineRouteV2MaxPlanningProfile")
 
 func flush_async_save() -> void:
     if main == null:
@@ -386,8 +542,13 @@ func flush_async_save() -> void:
         save_system.call("poll_async_save", true)
 
 func append_normal_metrics(metrics: Dictionary, frame_count: int) -> void:
-    metrics["bootAddChildMs"] = boot_add_child_ms
-    metrics["bootFirstFramesMs"] = boot_first_frames_ms
+    metrics["launchPath"] = "MainMenu.tscn -> visible New Game button viewport input -> startup_loading_completed"
+    metrics["menuToNewGameInputMs"] = menu_to_new_game_input_ms
+    metrics["newGameInputToFirstLoadingFrameMs"] = new_game_input_to_first_loading_frame_ms
+    metrics["newGameInputToGameplayReadyMs"] = new_game_input_to_gameplay_ready_ms
+    metrics["firstGameplayFramesMs"] = first_gameplay_frames_ms
+    metrics["startupLoadingSteps"] = startup_loading_steps.duplicate(true)
+    metrics["startupReadinessDomains"] = main.get("startup_readiness_domains").duplicate(true) if main != null and main.get("startup_readiness_domains") is Dictionary else {}
     metrics["measuredFrames"] = frame_count
     metrics["autosaveEnabled"] = bool(main.get("autosave_enabled")) if main != null else false
     metrics["savePathOverridden"] = OS.get_environment("VOXEL_SAVE_PATH_OVERRIDE").strip_edges() != ""
@@ -405,6 +566,7 @@ func append_normal_metrics(metrics: Dictionary, frame_count: int) -> void:
     metrics["terrainCollisionHoldFrames"] = terrain_collision_hold_frames
     metrics["terrainCollisionHoldReasons"] = terrain_collision_hold_reasons.duplicate(true)
     metrics["segmentVisitCounts"] = segment_visit_counts.duplicate(true)
+    metrics["routineRouteV2PlanningProfiles"] = routine_v2_planning_profiles(measurement_start_physics_frame)
     if measurement_start == Vector3.INF or measurement_end == Vector3.INF:
         metrics["playerTravelDistance"] = 0.0
         return
@@ -415,8 +577,41 @@ func append_normal_metrics(metrics: Dictionary, frame_count: int) -> void:
     metrics["playerStart"] = vec3(measurement_start)
     metrics["playerEnd"] = vec3(measurement_end)
 
+func routine_v2_planning_profiles(after_physics_frame := -1) -> Array:
+    if main == null:
+        return []
+    var npc_system = main.get("npc_system")
+    var entries = npc_system.get("npcs") if npc_system != null else []
+    if not (entries is Array):
+        return []
+    var profiles: Array = []
+    for entry_value in entries:
+        if not (entry_value is Dictionary):
+            continue
+        var entry: Dictionary = entry_value
+        var profile_value = entry.get("routineRouteV2MaxPlanningProfile", {})
+        if profile_value is Dictionary and not (profile_value as Dictionary).is_empty():
+            var profile: Dictionary = profile_value
+            if after_physics_frame >= 0 and int(profile.get("physicsFrame", -1)) < after_physics_frame:
+                continue
+            profiles.append(profile.duplicate(true))
+    profiles.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+        return float(a.get("totalMs", 0.0)) > float(b.get("totalMs", 0.0))
+    )
+    return profiles.slice(0, 12)
+
+func routine_guard_route_profiles() -> Array:
+    var profiles: Array = []
+    for profile_value in routine_v2_planning_profiles(measurement_start_physics_frame):
+        if not (profile_value is Dictionary):
+            continue
+        var profile: Dictionary = profile_value
+        if String(profile.get("intentKind", "")) == "guard" and String(profile.get("semanticKind", "")) in ["guard_post", "home_departure_clearance"]:
+            profiles.append(profile)
+    return profiles
+
 func result_details(metrics: Dictionary, failures: Array) -> String:
-    return "samples=%d p99=%.2f max=%.2f chunkMax=%.2f npcMax=%.2f saveMax=%.2f travel=%.2f turns=%d jumps=%d/%d bootAddChild=%.2f failures=%d" % [
+    return "samples=%d p99=%.2f max=%.2f chunkMax=%.2f npcMax=%.2f saveMax=%.2f travel=%.2f turns=%d jumps=%d/%d menuToReady=%.2f failures=%d" % [
         samples.size(),
         float(metrics.get("frameP99Ms", 0.0)),
         float(metrics.get("frameMaxMs", 0.0)),
@@ -427,12 +622,13 @@ func result_details(metrics: Dictionary, failures: Array) -> String:
         int(metrics.get("directionChanges", 0)),
         int(metrics.get("jumpObserved", 0)),
         int(metrics.get("jumpRequests", 0)),
-        float(metrics.get("bootAddChildMs", 0.0)),
+        float(metrics.get("newGameInputToGameplayReadyMs", 0.0)),
         failures.size()
     ]
 
 func normal_runtime_controls() -> Dictionary:
     return {
+        "launchPath": "MainMenu.tscn -> visible New Game button viewport input -> startup_loading_completed",
         "voxelPlaytest": OS.get_environment("VOXEL_PLAYTEST").strip_edges(),
         "runtimePerfFastBoot": OS.get_environment("VOXEL_RUNTIME_PERF_FAST_BOOT").strip_edges(),
         "fixedFps": false,
@@ -440,6 +636,11 @@ func normal_runtime_controls() -> Dictionary:
         "savePathOverride": OS.get_environment("VOXEL_SAVE_PATH_OVERRIDE").strip_edges(),
         "requestedTestSeed": OS.get_environment("VOXEL_TEST_SEED").strip_edges(),
         "deterministicSeedSequence": OS.get_environment("VOXEL_NORMAL_RUNTIME_PERF_RUN_TOKEN").strip_edges() != "",
+        "scenario": scenario,
+        "playerRelocatedForStreaming": scenario == SCENARIO_SPRINT_TRAVERSAL,
+        "playerAutomation": scenario == SCENARIO_SPRINT_TRAVERSAL,
+        "clockMutation": false,
+        "npcMutation": false,
         "movementSegments": runtime_movement_segment_labels(),
         "segmentSeconds": SEGMENT_SECONDS,
         "segmentPauseSeconds": SEGMENT_PAUSE_SECONDS
@@ -472,8 +673,10 @@ func failed_result(reason: String) -> Dictionary:
         "failures": [reason],
         "sampleCount": 0,
         "metrics": {
-            "bootAddChildMs": boot_add_child_ms,
-            "bootFirstFramesMs": boot_first_frames_ms
+            "menuToNewGameInputMs": menu_to_new_game_input_ms,
+            "newGameInputToFirstLoadingFrameMs": new_game_input_to_first_loading_frame_ms,
+            "newGameInputToGameplayReadyMs": new_game_input_to_gameplay_ready_ms,
+            "firstGameplayFramesMs": first_gameplay_frames_ms
         }
     }
 
@@ -512,11 +715,18 @@ func write_report(report: Dictionary) -> void:
 
 func finish(code: int) -> void:
     finished = true
-    if main != null and is_instance_valid(main):
-        main.queue_free()
     call_deferred("_quit_deferred", code)
 
 func _quit_deferred(code: int) -> void:
+    if main != null and is_instance_valid(main):
+        main.set_process(false)
+        main.set_physics_process(false)
+        if main.has_method("set_registered_npc_physics_enabled"):
+            main.call("set_registered_npc_physics_enabled", false)
+        if main.has_method("wait_for_terrain_workers_before_quit"):
+            await main.call("wait_for_terrain_workers_before_quit")
+        main.queue_free()
+        await get_tree().process_frame
     get_tree().quit(code)
 
 func elapsed_ms(start_usec: int) -> float:

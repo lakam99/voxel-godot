@@ -1011,6 +1011,257 @@ func set_cell_light(cell: Vector3i, light: Dictionary, reason := "") -> Dictiona
 	rebuild_block_light_neighborhood(cell, radius, reason)
 	return get_cell_state(cell)
 
+func set_cell_lights_batch(changes: Array, reason := "") -> Dictionary:
+	var state := begin_cell_lights_batch(changes, reason)
+	while not bool(state.get("complete", false)):
+		var advanced: Dictionary = advance_cell_lights_batch(state, -1.0, 1000000)
+		state = advanced.get("state", state)
+	return cell_lights_batch_summary(state)
+
+func begin_cell_lights_batch(changes: Array, reason := "") -> Dictionary:
+	var changed_count := 0
+	for change_value in changes:
+		if not (change_value is Dictionary):
+			continue
+		var change: Dictionary = change_value
+		var cell_value: Variant = change.get("cell", Vector3i.ZERO)
+		if not (cell_value is Vector3i):
+			continue
+		var cell: Vector3i = cell_value
+		var light_value: Variant = change.get("light", {})
+		var light: Dictionary = light_value if light_value is Dictionary else {}
+		var state := get_cell_state(cell)
+		var normalized_light := normalize_light(light, bool(state.get("solid", false)))
+		var new_level := int(normalized_light.get("block", 0))
+		if new_level > 0:
+			block_light_sources[cell] = mini(MAX_BLOCK_LIGHT_LEVEL, new_level)
+		else:
+			block_light_sources.erase(cell)
+		revision += 1
+		changed_count += 1
+	var clear_cells: Array[Vector3i] = []
+	var source_cells: Array[Vector3i] = []
+	if changed_count > 0:
+		for cell_value in light_cells.keys():
+			if cell_value is Vector3i:
+				clear_cells.append(cell_value)
+		for cell_value in block_light_sources.keys():
+			if cell_value is Vector3i:
+				source_cells.append(cell_value)
+		sort_light_cells(clear_cells)
+		sort_light_cells(source_cells)
+	return {
+		"changedCount": changed_count,
+		"sourceCount": block_light_sources.size(),
+		"reason": reason,
+		"clearCells": clear_cells,
+		"clearIndex": 0,
+		"sourceCells": source_cells,
+		"sourceIndex": 0,
+		"propagation": {},
+		"propagationInitialized": false,
+		"dirtySections": {},
+		"lightWriteCount": 0,
+		"clearedCount": 0,
+		"propagatedSourceCount": 0,
+		"complete": changed_count <= 0
+	}
+
+func advance_cell_lights_batch(state_value, frame_budget_ms := 2.0, max_work_units := 192) -> Dictionary:
+	var state: Dictionary = state_value if state_value is Dictionary else {}
+	if state.is_empty() or bool(state.get("complete", false)):
+		return {
+			"state": state,
+			"complete": true,
+			"processedWorkUnits": 0,
+			"elapsedMs": 0.0
+		}
+	var started_usec := Time.get_ticks_usec()
+	var processed_work_units := 0
+	var work_limit := maxi(1, max_work_units)
+	var budget_usec: int = 0 if frame_budget_ms <= 0.0 else maxi(1, roundi(frame_budget_ms * 1000.0))
+	while processed_work_units < work_limit:
+		if budget_usec > 0 and Time.get_ticks_usec() - started_usec >= budget_usec:
+			break
+		var clear_cells_value: Variant = state.get("clearCells", [])
+		var clear_cells: Array = clear_cells_value if clear_cells_value is Array else []
+		var clear_index := int(state.get("clearIndex", 0))
+		if clear_index < clear_cells.size():
+			var light_cell_value: Variant = clear_cells[clear_index]
+			state["clearIndex"] = clear_index + 1
+			if light_cell_value is Vector3i:
+				var light_cell: Vector3i = light_cell_value
+				light_cells.erase(light_cell)
+				write_loaded_section_cell_light(light_cell, base_light_for_cell(light_cell))
+				record_block_light_batch_dirty_section(state, light_cell)
+				state["lightWriteCount"] = int(state.get("lightWriteCount", 0)) + 1
+				state["clearedCount"] = int(state.get("clearedCount", 0)) + 1
+			processed_work_units += 1
+			continue
+		var propagation_value: Variant = state.get("propagation", {})
+		var propagation: Dictionary = propagation_value if propagation_value is Dictionary else {}
+		if not bool(state.get("propagationInitialized", false)):
+			var source_cells_value: Variant = state.get("sourceCells", [])
+			var source_cells: Array = source_cells_value if source_cells_value is Array else []
+			propagation = begin_all_block_light_propagation(source_cells)
+			state["propagation"] = propagation
+			state["propagationInitialized"] = true
+			state["sourceIndex"] = source_cells.size()
+		var dirty_sections_value: Variant = state.get("dirtySections", {})
+		var dirty_sections: Dictionary = dirty_sections_value if dirty_sections_value is Dictionary else {}
+		var propagation_result: Dictionary = advance_block_light_propagation(propagation, String(state.get("reason", "")), dirty_sections)
+		state["propagation"] = propagation_result.get("state", propagation)
+		state["dirtySections"] = dirty_sections
+		processed_work_units += int(propagation_result.get("processedWorkUnits", 0))
+		if bool(propagation_result.get("complete", false)):
+			var source_count := int(state.get("sourceCount", 0))
+			state["propagatedSourceCount"] = source_count
+			flush_block_light_batch_dirty_sections(state)
+			state["complete"] = true
+			break
+	return {
+		"state": state,
+		"complete": bool(state.get("complete", false)),
+		"processedWorkUnits": processed_work_units,
+		"elapsedMs": float(Time.get_ticks_usec() - started_usec) / 1000.0
+	}
+
+func begin_all_block_light_propagation(source_cells: Array) -> Dictionary:
+	var buckets: Array = []
+	for _level in range(MAX_BLOCK_LIGHT_LEVEL + 1):
+		buckets.append([])
+	var levels := {}
+	var source_set := {}
+	for source_cell_value in source_cells:
+		if not (source_cell_value is Vector3i):
+			continue
+		var source_cell: Vector3i = source_cell_value
+		var source_level := int(block_light_sources.get(source_cell, 0))
+		if source_level <= 0:
+			continue
+		source_set[source_cell] = true
+		if source_level <= int(levels.get(source_cell, 0)):
+			continue
+		levels[source_cell] = source_level
+		var bucket_value: Variant = buckets[source_level]
+		var bucket: Array = bucket_value if bucket_value is Array else []
+		bucket.append({ "cell": source_cell, "level": source_level })
+		buckets[source_level] = bucket
+	return {
+		"buckets": buckets,
+		"levels": levels,
+		"sourceCells": source_set
+	}
+
+func advance_block_light_propagation(propagation_value, reason := "", dirty_sections: Dictionary = {}) -> Dictionary:
+	var propagation: Dictionary = propagation_value if propagation_value is Dictionary else {}
+	var buckets_value: Variant = propagation.get("buckets", [])
+	var buckets: Array = buckets_value if buckets_value is Array else []
+	var levels_value: Variant = propagation.get("levels", {})
+	var levels: Dictionary = levels_value if levels_value is Dictionary else {}
+	var source_cells_value: Variant = propagation.get("sourceCells", {})
+	var source_cells: Dictionary = source_cells_value if source_cells_value is Dictionary else {}
+	var bucket_level := highest_pending_block_light_level(buckets)
+	if bucket_level <= 0:
+		return { "state": propagation, "complete": true, "processedWorkUnits": 0 }
+	var bucket_value: Variant = buckets[bucket_level]
+	var bucket: Array = bucket_value if bucket_value is Array else []
+	var entry_value: Variant = bucket.pop_back()
+	buckets[bucket_level] = bucket
+	if not (entry_value is Dictionary):
+		propagation["buckets"] = buckets
+		return { "state": propagation, "complete": highest_pending_block_light_level(buckets) <= 0, "processedWorkUnits": 1 }
+	var entry: Dictionary = entry_value
+	var cell_value: Variant = entry.get("cell", Vector3i.ZERO)
+	var cell_level := int(entry.get("level", 0))
+	if not (cell_value is Vector3i) or cell_level <= 0:
+		propagation["buckets"] = buckets
+		return { "state": propagation, "complete": highest_pending_block_light_level(buckets) <= 0, "processedWorkUnits": 1 }
+	var cell: Vector3i = cell_value
+	if cell_level != int(levels.get(cell, 0)):
+		propagation["buckets"] = buckets
+		return { "state": propagation, "complete": highest_pending_block_light_level(buckets) <= 0, "processedWorkUnits": 1 }
+	var cell_state := get_cell_state(cell)
+	var solid := bool(cell_state.get("solid", false))
+	if not (solid and not source_cells.has(cell)):
+		var current_light := base_light_for_cell(cell)
+		if light_cells.has(cell):
+			current_light = (light_cells[cell] as Dictionary).duplicate(true)
+		if cell_level > int(current_light.get("block", 0)):
+			current_light["block"] = cell_level
+			light_cells[cell] = current_light
+			write_loaded_section_cell_light(cell, current_light)
+			record_block_light_batch_dirty_section_lookup(dirty_sections, cell)
+		if cell_level > 1:
+			var next_level := cell_level - 1
+			for direction in cardinal_directions():
+				var next_cell := cell + direction
+				if next_level <= int(levels.get(next_cell, 0)):
+					continue
+				var next_state := get_cell_state(next_cell)
+				if bool(next_state.get("solid", false)) and not source_cells.has(next_cell):
+					continue
+				levels[next_cell] = next_level
+				var next_bucket_value: Variant = buckets[next_level]
+				var next_bucket: Array = next_bucket_value if next_bucket_value is Array else []
+				next_bucket.append({ "cell": next_cell, "level": next_level })
+				buckets[next_level] = next_bucket
+	propagation["buckets"] = buckets
+	propagation["levels"] = levels
+	return {
+		"state": propagation,
+		"complete": highest_pending_block_light_level(buckets) <= 0,
+		"processedWorkUnits": 1
+	}
+
+func highest_pending_block_light_level(buckets: Array) -> int:
+	for level in range(MAX_BLOCK_LIGHT_LEVEL, 0, -1):
+		if level >= buckets.size():
+			continue
+		var bucket_value: Variant = buckets[level]
+		if bucket_value is Array and not (bucket_value as Array).is_empty():
+			return level
+	return 0
+
+func record_block_light_batch_dirty_section(state: Dictionary, cell: Vector3i) -> void:
+	var dirty_value: Variant = state.get("dirtySections", {})
+	var dirty_sections: Dictionary = dirty_value if dirty_value is Dictionary else {}
+	record_block_light_batch_dirty_section_lookup(dirty_sections, cell)
+	state["dirtySections"] = dirty_sections
+
+func record_block_light_batch_dirty_section_lookup(dirty_sections: Dictionary, cell: Vector3i) -> void:
+	var section_key := section_key_for_cell(cell)
+	dirty_sections[section_key] = int(dirty_sections.get(section_key, 0)) + 1
+
+func flush_block_light_batch_dirty_sections(state: Dictionary) -> void:
+	var dirty_value: Variant = state.get("dirtySections", {})
+	var dirty_sections: Dictionary = dirty_value if dirty_value is Dictionary else {}
+	var reason := String(state.get("reason", ""))
+	for section_value in dirty_sections.keys():
+		if not (section_value is Vector3i):
+			continue
+		var section_key: Vector3i = section_value
+		mark_section_dirty(section_key, {
+			"reason": reason,
+			"lightOnly": true,
+			"batched": true,
+			"cellCount": int(dirty_sections.get(section_key, 0))
+		})
+	state["dirtySectionCount"] = dirty_sections.size()
+	state["dirtySections"] = {}
+
+func cell_lights_batch_summary(state_value) -> Dictionary:
+	var state: Dictionary = state_value if state_value is Dictionary else {}
+	return {
+		"changedCount": int(state.get("changedCount", 0)),
+		"sourceCount": int(state.get("sourceCount", block_light_sources.size())),
+		"clearedCount": int(state.get("clearedCount", 0)),
+		"propagatedSourceCount": int(state.get("propagatedSourceCount", 0)),
+		"dirtySectionCount": int(state.get("dirtySectionCount", 0)),
+		"lightWriteCount": int(state.get("lightWriteCount", 0)),
+		"complete": bool(state.get("complete", false))
+	}
+
 func light_at_cell(cell: Vector3i) -> Dictionary:
 	var state := get_cell_state(cell)
 	return normalize_light(state.get("light", {}), bool(state.get("solid", false)))
@@ -1047,6 +1298,35 @@ func rebuild_block_light_neighborhood(center_cell: Vector3i, radius: int, reason
 		if manhattan_distance(source_cell, center_cell) > clamped_radius + source_level:
 			continue
 		propagate_block_light_from_source(source_cell, source_level, reason)
+
+func rebuild_all_block_light_sources(reason := "") -> void:
+	var cleared_cells: Array[Vector3i] = []
+	for cell_value in light_cells.keys():
+		if cell_value is Vector3i:
+			cleared_cells.append(cell_value)
+	sort_light_cells(cleared_cells)
+	for light_cell in cleared_cells:
+		light_cells.erase(light_cell)
+		write_loaded_section_cell_light(light_cell, base_light_for_cell(light_cell))
+		mark_section_dirty(section_key_for_cell(light_cell), { "reason": reason, "cell": light_cell, "lightOnly": true })
+	var source_cells: Array[Vector3i] = []
+	for cell_value in block_light_sources.keys():
+		if cell_value is Vector3i:
+			source_cells.append(cell_value)
+	sort_light_cells(source_cells)
+	for source_cell in source_cells:
+		var source_level := int(block_light_sources.get(source_cell, 0))
+		if source_level > 0:
+			propagate_block_light_from_source(source_cell, source_level, reason)
+
+func sort_light_cells(cells: Array[Vector3i]) -> void:
+	cells.sort_custom(func(a: Vector3i, b: Vector3i) -> bool:
+		if a.x != b.x:
+			return a.x < b.x
+		if a.y != b.y:
+			return a.y < b.y
+		return a.z < b.z
+	)
 
 func propagate_block_light_from_source(source_cell: Vector3i, source_level: int, reason := "") -> void:
 	var level := mini(MAX_BLOCK_LIGHT_LEVEL, maxi(0, source_level))
@@ -1485,16 +1765,30 @@ func chunk_has_edits(chunk_key: Vector2i, chunk_size: int) -> bool:
 func chunk_edited_y_bounds(chunk_key: Vector2i, chunk_size: int) -> Dictionary:
 	var start_x := chunk_key.x * chunk_size
 	var start_z := chunk_key.y * chunk_size
-	var end_x := start_x + chunk_size
-	var end_z := start_z + chunk_size
+	return mesh_edited_y_bounds_for_region(start_x, start_x + chunk_size - 1, start_z, start_z + chunk_size - 1)
+
+func mesh_edited_y_bounds_for_region(min_x: int, max_x: int, min_z: int, max_z: int) -> Dictionary:
+	var from_x := mini(min_x, max_x)
+	var to_x := maxi(min_x, max_x)
+	var from_z := mini(min_z, max_z)
+	var to_z := maxi(min_z, max_z)
 	var min_y := 999999
 	var max_y := -999999
 	var count := 0
-	for section_key in mesh_edited_section_keys_for_chunk(chunk_key, chunk_size):
+	for section_value in mesh_edited_cells_by_section.keys():
+		var section_key: Vector3i = section_value
+		var section_start_x := section_key.x * SECTION_SIZE
+		var section_start_z := section_key.z * SECTION_SIZE
+		var section_end_x := section_start_x + SECTION_SIZE - 1
+		var section_end_z := section_start_z + SECTION_SIZE - 1
+		if section_end_x < from_x or section_start_x > to_x:
+			continue
+		if section_end_z < from_z or section_start_z > to_z:
+			continue
 		var bucket: Dictionary = mesh_edited_cells_by_section.get(section_key, {}) if mesh_edited_cells_by_section.get(section_key, {}) is Dictionary else {}
 		for cell_value in bucket.keys():
 			var cell: Vector3i = cell_value
-			if cell.x < start_x or cell.x >= end_x or cell.z < start_z or cell.z >= end_z:
+			if cell.x < from_x or cell.x > to_x or cell.z < from_z or cell.z > to_z:
 				continue
 			min_y = mini(min_y, cell.y)
 			max_y = maxi(max_y, cell.y)

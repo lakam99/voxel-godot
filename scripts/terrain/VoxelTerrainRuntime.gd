@@ -9,7 +9,13 @@ const TERRAIN_SHADER := preload("res://shaders/voxel_terrain_authority.gdshader"
 const CELL := 1.35
 const GAME_CHUNK_SIZE := 28
 const TERRAIN_COLLISION_LAYER := 2
-const VIEW_DISTANCE := 112
+const FINAL_VIEW_DISTANCE := 112
+const STARTUP_VIEW_DISTANCE := 80
+const VIEW_DISTANCE_EXPANSION_STEP := 16
+const VIEW_DISTANCE_EXPANSION_INTERVAL_SECONDS := 2.0
+const STARTUP_VERTICAL_MIN_CELL := -16
+const STARTUP_VERTICAL_MAX_CELL := 48
+const VERTICAL_BOUNDS_EXPANSION_STEP_CELLS := 16
 const SECTION_SIZE := 16
 const EDIT_SECTIONS_PER_FRAME := 1
 const PUBLICATION_PROBES_PER_PHYSICS_FRAME := 2
@@ -38,6 +44,8 @@ var pending_gameplay_chunk_order: Array[Vector2i] = []
 var published_gameplay_chunks := {}
 var collision_probe_attempts := 0
 var collision_probe_passes := 0
+var view_distance_expansion_elapsed := 0.0
+var view_distance_expansion_requested := false
 
 func setup(main_node) -> Dictionary:
 	main = main_node
@@ -70,12 +78,7 @@ func setup(main_node) -> Dictionary:
 	terrain.collision_mask = 0
 	terrain.mesh_block_size = 16
 	terrain.max_view_distance = 128
-	var bottom_cell := int(main.get("world_generation_system").call("world_bottom_cell_y")) - COLLISION_MESH_VERTICAL_MARGIN_CELLS
-	var top_cell := int(main.get("world_generation_system").call("world_top_cell_y")) + COLLISION_MESH_VERTICAL_MARGIN_CELLS
-	var terrain_bounds := terrain.bounds
-	terrain_bounds.position.y = float(bottom_cell)
-	terrain_bounds.size.y = float(top_cell - bottom_cell + 1)
-	terrain.bounds = terrain_bounds
+	apply_startup_vertical_bounds()
 	terrain.scale = Vector3.ONE * CELL
 	var material := ShaderMaterial.new()
 	material.shader = TERRAIN_SHADER
@@ -84,7 +87,7 @@ func setup(main_node) -> Dictionary:
 
 	viewer = VoxelViewer.new()
 	viewer.name = "VoxelTerrainViewer"
-	viewer.view_distance = VIEW_DISTANCE
+	viewer.view_distance = STARTUP_VIEW_DISTANCE
 	viewer.requires_visuals = true
 	viewer.requires_collisions = true
 	var player_value = main.get("player")
@@ -149,11 +152,14 @@ func reset_for_current_seed_staged() -> Dictionary:
 	collision_probe_passes = 0
 	apply_generation_tracking(generation_state)
 	configured_seed = next_seed
-	update_terrain_vertical_bounds()
+	apply_startup_vertical_bounds()
 	terrain.automatic_loading_enabled = true
 	if viewer != null and is_instance_valid(viewer):
 		viewer.requires_visuals = true
 		viewer.requires_collisions = true
+		viewer.view_distance = STARTUP_VIEW_DISTANCE
+	view_distance_expansion_elapsed = 0.0
+	view_distance_expansion_requested = false
 	update_viewer_position()
 	authority_ready = true
 	set_process(true)
@@ -207,22 +213,80 @@ func invalidate_gameplay_publication() -> int:
 	published_gameplay_chunks.clear()
 	return invalidated
 
-func update_terrain_vertical_bounds() -> void:
-	if terrain == null or main == null:
-		return
+func full_vertical_cell_bounds() -> Vector2i:
+	if main == null:
+		return Vector2i(STARTUP_VERTICAL_MIN_CELL, STARTUP_VERTICAL_MAX_CELL)
 	var world_generation = main.get("world_generation_system")
 	if world_generation == null:
+		return Vector2i(STARTUP_VERTICAL_MIN_CELL, STARTUP_VERTICAL_MAX_CELL)
+	return Vector2i(
+		int(world_generation.call("world_bottom_cell_y")) - COLLISION_MESH_VERTICAL_MARGIN_CELLS,
+		int(world_generation.call("world_top_cell_y")) + COLLISION_MESH_VERTICAL_MARGIN_CELLS
+	)
+
+func apply_vertical_cell_bounds(min_cell: int, max_cell: int) -> void:
+	if terrain == null or main == null:
 		return
-	var bottom_cell := int(world_generation.call("world_bottom_cell_y")) - COLLISION_MESH_VERTICAL_MARGIN_CELLS
-	var top_cell := int(world_generation.call("world_top_cell_y")) + COLLISION_MESH_VERTICAL_MARGIN_CELLS
+	var full_bounds := full_vertical_cell_bounds()
+	var bottom_cell := clampi(min_cell, full_bounds.x, full_bounds.y)
+	var top_cell := clampi(max_cell, bottom_cell, full_bounds.y)
 	var terrain_bounds := terrain.bounds
 	terrain_bounds.position.y = float(bottom_cell)
 	terrain_bounds.size.y = float(top_cell - bottom_cell + 1)
 	terrain.bounds = terrain_bounds
 
-func _process(_delta: float) -> void:
+func apply_startup_vertical_bounds() -> void:
+	var full_bounds := full_vertical_cell_bounds()
+	apply_vertical_cell_bounds(
+		maxi(full_bounds.x, STARTUP_VERTICAL_MIN_CELL),
+		mini(full_bounds.y, STARTUP_VERTICAL_MAX_CELL)
+	)
+
+func configure_startup_collision_bounds(chunk_keys: Array) -> void:
+	if terrain == null or main == null or chunk_keys.is_empty():
+		return
+	var world_generation = main.get("world_generation_system")
+	if world_generation == null or not world_generation.has_method("surface_y_at"):
+		return
+	var min_surface_cell := 2147483000
+	var max_surface_cell := -2147483000
+	for key_value in chunk_keys:
+		if not (key_value is Vector2i):
+			continue
+		var chunk_key: Vector2i = key_value
+		var center := Vector3(
+			(float(chunk_key.x * GAME_CHUNK_SIZE) + float(GAME_CHUNK_SIZE) * 0.5) * CELL,
+			0.0,
+			(float(chunk_key.y * GAME_CHUNK_SIZE) + float(GAME_CHUNK_SIZE) * 0.5) * CELL
+		)
+		var surface_cell := floori(float(world_generation.call("surface_y_at", center)) / CELL)
+		min_surface_cell = mini(min_surface_cell, surface_cell)
+		max_surface_cell = maxi(max_surface_cell, surface_cell)
+	if min_surface_cell > max_surface_cell:
+		return
+	apply_vertical_cell_bounds(min_surface_cell - 16, max_surface_cell + 16)
+
+func vertical_cell_bounds() -> Vector2i:
+	if terrain == null:
+		return Vector2i.ZERO
+	var current := terrain.bounds
+	var min_cell := floori(current.position.y)
+	return Vector2i(min_cell, min_cell + floori(current.size.y) - 1)
+
+func expand_vertical_bounds_step() -> void:
+	var current := vertical_cell_bounds()
+	var target := full_vertical_cell_bounds()
+	if current == target:
+		return
+	apply_vertical_cell_bounds(
+		maxi(target.x, current.x - VERTICAL_BOUNDS_EXPANSION_STEP_CELLS),
+		mini(target.y, current.y + VERTICAL_BOUNDS_EXPANSION_STEP_CELLS)
+	)
+
+func _process(delta: float) -> void:
 	if authority_ready:
 		update_viewer_position()
+		update_viewer_distance(delta)
 		collect_volume_edit_changes()
 		process_pending_edit_sections()
 
@@ -249,6 +313,55 @@ func begin_shutdown() -> void:
 	pending_gameplay_chunks.clear()
 	pending_gameplay_chunk_order.clear()
 	desired_gameplay_chunks.clear()
+	view_distance_expansion_elapsed = 0.0
+	view_distance_expansion_requested = false
+
+func request_final_view_distance_expansion() -> void:
+	if not authority_ready:
+		return
+	view_distance_expansion_requested = true
+	view_distance_expansion_elapsed = 0.0
+
+func update_viewer_distance(delta: float) -> void:
+	if viewer == null or not is_instance_valid(viewer) or main == null:
+		return
+	var loading := bool(main.get("startup_loading_active")) or bool(main.get("runtime_loading_active"))
+	if loading:
+		if int(viewer.view_distance) != STARTUP_VIEW_DISTANCE:
+			viewer.view_distance = STARTUP_VIEW_DISTANCE
+		view_distance_expansion_elapsed = 0.0
+		return
+	if not view_distance_expansion_requested:
+		return
+	var vertical_bounds_ready := vertical_cell_bounds() == full_vertical_cell_bounds()
+	if int(viewer.view_distance) >= FINAL_VIEW_DISTANCE and vertical_bounds_ready:
+		return
+	view_distance_expansion_elapsed += maxf(0.0, delta)
+	if view_distance_expansion_elapsed < VIEW_DISTANCE_EXPANSION_INTERVAL_SECONDS:
+		return
+	view_distance_expansion_elapsed = 0.0
+	viewer.view_distance = mini(FINAL_VIEW_DISTANCE, int(viewer.view_distance) + VIEW_DISTANCE_EXPANSION_STEP)
+	expand_vertical_bounds_step()
+
+func voxel_engine_task_stats() -> Dictionary:
+	if not Engine.has_singleton("VoxelEngine"):
+		return {}
+	var voxel_engine = Engine.get_singleton("VoxelEngine")
+	if voxel_engine == null or not voxel_engine.has_method("get_stats"):
+		return {}
+	var stats_value = voxel_engine.call("get_stats")
+	return (stats_value as Dictionary).duplicate(true) if stats_value is Dictionary else {}
+
+func voxel_engine_pending_task_count() -> int:
+	var engine_stats := voxel_engine_task_stats()
+	var tasks_value = engine_stats.get("tasks", {})
+	if not (tasks_value is Dictionary):
+		return 0
+	var tasks: Dictionary = tasks_value
+	var total := 0
+	for key in ["streaming", "meshing", "generation", "main_thread", "gpu"]:
+		total += maxi(0, int(tasks.get(key, 0)))
+	return total
 
 func update_viewer_position() -> void:
 	if viewer == null or main == null:
@@ -284,6 +397,13 @@ func stats() -> Dictionary:
 		"publishedGameplayChunks": published_gameplay_chunks.size(),
 		"collisionProbeAttempts": collision_probe_attempts,
 		"collisionProbePasses": collision_probe_passes,
+		"startupViewDistance": STARTUP_VIEW_DISTANCE,
+		"currentViewDistance": int(viewer.view_distance) if viewer != null and is_instance_valid(viewer) else 0,
+		"finalViewDistance": FINAL_VIEW_DISTANCE,
+		"viewDistanceExpansionRequested": view_distance_expansion_requested,
+		"verticalCellBounds": vertical_cell_bounds(),
+		"finalVerticalCellBounds": full_vertical_cell_bounds(),
+		"voxelEngine": voxel_engine_task_stats(),
 		"terrain": terrain.get_statistics() if terrain != null else {},
 		"configuredSeed": configured_seed
 	}

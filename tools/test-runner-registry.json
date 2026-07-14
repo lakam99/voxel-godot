@@ -243,6 +243,30 @@
       "required": true
     },
     {
+      "id": "npc_real_tutorial_no_flags",
+      "description": "Headed project-main-menu New Game tutorial playthrough with no gameplay-affecting test flags",
+      "command": ".\\tools\\npc\\run-real-tutorial-playthrough-no-flags.ps1",
+      "args": ["-Visible", "-ReportPath", "artifacts\\test-runners\\npc-real-tutorial-no-flags.json", "-ScreenshotDir", "artifacts\\test-runners\\screenshots\\npc-real-tutorial-no-flags"],
+      "reportPath": "artifacts\\test-runners\\npc-real-tutorial-no-flags.json",
+      "screenshotDir": "artifacts\\test-runners\\screenshots\\npc-real-tutorial-no-flags",
+      "evidenceLevel": "acceptance_visual",
+      "acceptanceClaims": ["tutorial_no_flags_main_menu_new_game_full_playthrough"],
+      "requiredScreenshots": [
+        "phase7_menu_before_new_game.png",
+        "phase7_loading_gameplay_prerequisites.png",
+        "player_pov_dialogue_acknowledged.png",
+        "mira_go_home_start.png",
+        "mira_route_departure.png",
+        "mira_at_home_door.png",
+        "mira_home_door_open.png",
+        "mira_inside_home_closed_door.png",
+        "player_pov_after_mira_home.png"
+      ],
+      "requiresForbiddenCallSelfScan": true,
+      "requiresVisualProof": true,
+      "required": true
+    },
+    {
       "id": "npc_real_tutorial_morning_outside",
       "description": "Headed real tutorial following-morning NPC outside observation acceptance",
       "command": ".\\tools\\npc\\run-real-tutorial-playthrough.ps1",

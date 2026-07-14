@@ -6,6 +6,7 @@ const InteractionRequestScript := preload("res://scripts/npc_ai/contracts/Intera
 const InteractionResultScript := preload("res://scripts/npc_ai/contracts/InteractionResult.gd")
 const SmartObjectRegistrationScript := preload("res://scripts/npc_ai/interactions/SmartObjectRegistration.gd")
 const NpcConstantsScript := preload("res://scripts/npc_ai/NpcConstants.gd")
+const ItemCatalogScript := preload("res://scripts/ItemCatalog.gd")
 
 const CELL := 1.35
 const WORLD_CHUNK_CELL_SIZE := 28
@@ -116,7 +117,7 @@ func register_resource(prop: Node, metadata := {}) -> String:
 		kind = "tree_source"
 	elif drop in ["stones", "copperOre", "ironOre"] or material in ["rock", "copperOre", "ironOre"]:
 		kind = "stone_source"
-	elif drop in ["berries", "aloe", "mirecap", "frostHerb"] or material in ["berryBush", "aloePatch", "mushroomCluster", "frostHerbPatch"]:
+	elif ItemCatalogScript.is_forage_food(drop) or material in ["berryBush", "aloePatch", "mushroomCluster", "frostHerbPatch"]:
 		kind = "forage_source"
 	else:
 		return ""
@@ -682,7 +683,7 @@ func score_candidates(entry: Dictionary, action_kind: String, candidates: Array)
 		var role_bonus := 0.0
 		var drop := String(metadata.get("drop", ""))
 		var material := String(metadata.get("material", ""))
-		if role == "forage" and (drop == "berries" or material == "berryBush"):
+		if role == "forage" and ItemCatalogScript.is_forage_food(drop):
 			role_bonus = 18.0
 		elif role == "wood" and (drop == "logs" or material == "tree"):
 			role_bonus = 18.0

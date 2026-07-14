@@ -17,6 +17,7 @@ const CollisionProbeServiceScript := preload("res://scripts/npc_ai/routing/Colli
 const CollisionBackedRouteSubstrateScript := preload("res://scripts/npc_ai/routing/CollisionBackedRouteSubstrate.gd")
 const NpcRouteAuthorityV2Script := preload("res://scripts/npc_ai/routing/NpcRouteAuthorityV2.gd")
 const NpcRouteLeaseExecutorScript := preload("res://scripts/npc_ai/movement/NpcRouteLeaseExecutor.gd")
+const LiveRoutePlanningProgressWatchdogScript := preload("res://scripts/testing/player/LiveRoutePlanningProgressWatchdog.gd")
 const CELL := NpcConstantsScript.CELL_SIZE
 
 var runner = null
@@ -141,12 +142,47 @@ class CrossFrameRepairProbe:
 			"details": {}
 		}
 
+class DynamicActorRepairProbe:
+	extends RefCounted
+	var probe_calls := 0
+
+	func setup(_system_node, _main_node) -> void:
+		pass
+
+	func probe_route(_entry: Dictionary, _route: Dictionary, _intent: Dictionary, _options := {}) -> Dictionary:
+		probe_calls += 1
+		if probe_calls == 1:
+			return {
+				"ok": false,
+				"status": "failed",
+				"reason": "blocked_capsule_probe",
+				"authoritative": true,
+				"sampleCount": 1,
+				"details": {
+					"cell": Vector2i(2, 0),
+					"sample": Vector2i(2, 0),
+					"collider": "Player",
+					"class": "CharacterBody3D",
+					"kind": "player"
+				}
+			}
+		return {
+			"ok": true,
+			"status": "passed",
+			"reason": "",
+			"authoritative": true,
+			"sampleCount": 1,
+			"details": {}
+		}
+
 class RecordingRepairSubstrate:
 	extends RefCounted
 	var avoid_history: Array = []
+	var repair_radius_history: Array = []
 
 	func repair_route_after_probe(_entry: Dictionary, _start_cell: Vector2i, _candidate_cells: Array, failed_route: Dictionary, _certificate: Dictionary, options := {}) -> Dictionary:
 		avoid_history.append((options.get("avoidCells", []) as Array).duplicate())
+		repair_radius_history.append(int(options.get("probeRepairAvoidRadius", 0)))
 		var repaired := failed_route.duplicate(true)
 		repaired["ok"] = true
 		repaired["status"] = "reachable"
@@ -348,9 +384,12 @@ func cases() -> Array[Dictionary]:
 		["npc_route_no_iteration_cap_false_failure", "test_route_no_iteration_cap_false_failure"],
 		["npc_route_pending_budget_resumes", "test_route_pending_budget_resumes"],
 		["npc_route_authority_planning_budget_fairness", "test_route_authority_planning_budget_fairness"],
+		["npc_route_authority_urgent_slice_preserves_normal_service", "test_route_authority_urgent_slice_preserves_normal_service"],
 		["npc_route_authority_planning_grants_ignore_actor_update_order", "test_route_authority_planning_grants_ignore_actor_update_order"],
 		["npc_route_authority_probe_budget_starvation_recovery", "test_route_authority_probe_budget_starvation_recovery"],
 		["npc_route_authority_probe_repair_avoids_persist_across_budget", "test_route_authority_probe_repair_avoids_persist_across_budget"],
+		["npc_route_player_watchdog_retains_collision_repair_progress", "test_route_player_watchdog_retains_collision_repair_progress"],
+		["npc_route_authority_dynamic_probe_repairs_before_blocking", "test_route_authority_dynamic_probe_repairs_before_blocking"],
 		["npc_route_authority_phase10_counters", "test_route_authority_phase10_counters"],
 		["npc_route_authority_stuck_revokes_moving_lease", "test_route_authority_stuck_revokes_moving_lease"],
 		["npc_route_lease_executor_skips_passed_non_door_waypoint", "test_route_lease_executor_skips_passed_non_door_waypoint"],
@@ -367,6 +406,7 @@ func cases() -> Array[Dictionary]:
 		["npc_route_generated_fallback_disabled_in_production", "test_route_generated_fallback_open_terrain_only"],
 		["npc_route_diagnostic_generated_fallback_rejects_no_progress_partial", "test_route_generated_fallback_rejects_no_progress_partial"],
 		["npc_route_probe_start_overlap_escape_outward_only", "test_route_probe_start_overlap_escape_outward_only"],
+		["npc_route_probe_covers_terrain_body_layer", "test_route_probe_covers_terrain_body_layer"],
 		["npc_route_probe_repair_cell_bridge_uses_fallback_goal", "test_route_probe_repair_cell_bridge_uses_fallback_goal"],
 		["npc_route_runtime_door_uses_group_portal_id", "test_route_runtime_door_uses_group_portal_id"],
 		["npc_route_collision_boundary_blocks_open_destination", "test_route_collision_boundary_blocks_open_destination"],
@@ -661,6 +701,33 @@ func test_route_authority_planning_budget_fairness(_mode: String) -> Dictionary:
 		{ "first": authority_summary(first_claim), "deferred": authority_summary(deferred), "recovered": authority_summary(recovered), "counters": counters }
 	)
 
+func test_route_authority_urgent_slice_preserves_normal_service(_mode: String) -> Dictionary:
+	var authority = NpcRouteAuthorityV2Script.new()
+	authority.setup(null, null, BudgetedCollisionProbe.new())
+	authority.plan_attempt_budget_per_frame = 4
+	authority.route_search_expansion_budget_per_frame = 64
+	var urgent_request: Dictionary = authority.submit_request({ "id": "urgent-home" }, { "kind": "home", "priority": 190 }, { "priority": 190 })
+	var normal_request: Dictionary = authority.submit_request({ "id": "normal-work" }, { "kind": "work", "priority": 140 }, { "priority": 140 })
+	authority.begin_frame()
+	# Claim in the less favorable order: grants must be decided independently of actor update order.
+	var normal_claim: Dictionary = authority.claim_planning_budget(String(normal_request.get("requestId", "")), "normal_first")
+	var urgent_claim: Dictionary = authority.claim_planning_budget(String(urgent_request.get("requestId", "")), "urgent_second")
+	var stats: Dictionary = authority.stats()
+	var urgent_expansions := int(urgent_claim.get("routeSearchExpansions", 0))
+	var normal_expansions := int(normal_claim.get("routeSearchExpansions", 0))
+	var used_expansions := int(stats.get("routeSearchExpansionsUsedThisFrame", 0))
+	var passed: bool = bool(urgent_claim.get("granted", false)) \
+		and bool(normal_claim.get("granted", false)) \
+		and urgent_expansions == NpcRouteAuthorityV2Script.URGENT_ROUTE_SEARCH_EXPANSIONS_PER_REQUEST \
+		and normal_expansions == NpcRouteAuthorityV2Script.DEFAULT_ROUTE_SEARCH_EXPANSIONS_PER_REQUEST \
+		and used_expansions == authority.route_search_expansion_budget_per_frame
+	return outcome(
+		passed,
+		"urgent=%s normal=%s stats=%s" % [JSON.stringify(authority_summary(urgent_claim)), JSON.stringify(authority_summary(normal_claim)), JSON.stringify(stats)],
+		["urgent_collision_search_slice", "normal_service_reserved", "route_search_budget_bounded"],
+		{ "urgent": authority_summary(urgent_claim), "normal": authority_summary(normal_claim), "stats": stats }
+	)
+
 func test_route_authority_planning_grants_ignore_actor_update_order(_mode: String) -> Dictionary:
 	var authority = NpcRouteAuthorityV2Script.new()
 	authority.setup(null, null, BudgetedCollisionProbe.new())
@@ -688,14 +755,15 @@ func test_route_authority_planning_grants_ignore_actor_update_order(_mode: Strin
 		if bool(claim.get("granted", false)):
 			second_frame_grants.append(request_id)
 			serviced[request_id] = true
-	var passed: bool = first_frame_grants.size() == 4 \
+	var passed: bool = first_frame_grants.size() == 2 \
 		and first_frame_grants.has(high_request_id) \
-		and second_frame_grants.size() == 4 \
-		and serviced.size() == requests.size()
+		and second_frame_grants.size() == 2 \
+		and second_frame_grants.has(high_request_id) \
+		and serviced.size() >= 3
 	return outcome(
 		passed,
 		"first=%s second=%s high=%s serviced=%d" % [JSON.stringify(first_frame_grants), JSON.stringify(second_frame_grants), high_request_id, serviced.size()],
-		["planning_priority_independent_of_update_order", "planning_budget_remains_bounded", "equal_priority_requests_rotate_fairly"],
+		["planning_priority_independent_of_update_order", "route_search_budget_remains_bounded", "normal_requests_rotate_fairly"],
 		{
 			"firstFrameGrants": first_frame_grants,
 			"secondFrameGrants": second_frame_grants,
@@ -760,19 +828,117 @@ func test_route_authority_probe_repair_avoids_persist_across_budget(_mode: Strin
 		"maxProbeRepairAttempts": 3
 	}
 	var first: Dictionary = authority.commit_route_after_probe(entry, request_id, route, intent, options)
+	var resumed: Dictionary = authority.runtime_for_entry(entry)
+	var resumed_avoids: Array = resumed.get("probeRepairAvoidCells", []) if resumed.get("probeRepairAvoidCells", []) is Array else []
 	authority.begin_frame()
 	var continued_route: Dictionary = first.get("route", {}) if first.get("route", {}) is Dictionary else route
 	var final: Dictionary = authority.commit_route_after_probe(entry, request_id, continued_route, intent, options)
 	var second_avoids: Array = substrate.avoid_history[1] if substrate.avoid_history.size() > 1 and substrate.avoid_history[1] is Array else []
 	var passed := String(first.get("state", "")) == "probing" \
 		and String(final.get("state", "")) == "ready" \
+		and resumed_avoids.has(Vector2i(2, 0)) \
 		and second_avoids.has(Vector2i(2, 0)) \
 		and second_avoids.has(Vector2i(3, 0))
 	return outcome(
 		passed,
-		"first=%s final=%s avoids=%s" % [JSON.stringify(authority_summary(first)), JSON.stringify(authority_summary(final)), JSON.stringify(substrate.avoid_history)],
-		["probe_repair_avoids_survive_budget_boundary", "probe_repair_does_not_rediscover_prior_blocker"],
-		{ "first": authority_summary(first), "final": authority_summary(final), "avoidHistory": substrate.avoid_history }
+		"first=%s resumed=%s final=%s avoids=%s" % [JSON.stringify(authority_summary(first)), JSON.stringify(authority_summary(resumed)), JSON.stringify(authority_summary(final)), JSON.stringify(substrate.avoid_history)],
+		["probe_repair_avoids_survive_budget_boundary", "runtime_summary_preserves_probe_repair_avoidance", "probe_repair_does_not_rediscover_prior_blocker"],
+		{ "first": authority_summary(first), "resumed": authority_summary(resumed), "final": authority_summary(final), "avoidHistory": substrate.avoid_history }
+	)
+
+func test_route_player_watchdog_retains_collision_repair_progress(_mode: String) -> Dictionary:
+	var watchdog = LiveRoutePlanningProgressWatchdogScript.new()
+	watchdog.setup(0.0, 4.0, 3.0, 20.0)
+	var base := {
+		"requestId": "player:v2:repair:1",
+		"status": "pending_budget",
+		"reason": "search_budget_deferred",
+		"authority": {
+			"requestId": "player:v2:repair:1",
+			"state": "pending_budget",
+			"lastServicedFrame": 10,
+			"pendingBudgetFrames": 1,
+			"probeRepairAvoidCells": []
+		},
+		"details": {
+			"route": {
+				"searchExpansions": 16,
+				"searchVisited": 16,
+				"probeSamples": 0,
+				"repairAttempt": 0
+			}
+		}
+	}
+	var initial: Dictionary = watchdog.observe(base, 0.25)
+	var repaired := base.duplicate(true)
+	repaired["authority"]["lastServicedFrame"] = 260
+	repaired["authority"]["pendingBudgetFrames"] = 251
+	repaired["authority"]["probeRepairAvoidCells"] = [Vector2i(7, 3)]
+	repaired["details"]["route"]["repairAttempt"] = 1
+	var beyond_soft: Dictionary = watchdog.observe(repaired, 4.5)
+	var resumed := repaired.duplicate(true)
+	resumed["authority"]["lastServicedFrame"] = 370
+	resumed["details"]["route"]["searchExpansions"] = 48
+	resumed["details"]["route"]["searchVisited"] = 44
+	var continued: Dictionary = watchdog.observe(resumed, 6.25)
+	var stalled: Dictionary = watchdog.observe(resumed, 9.5)
+	var hard_watchdog = LiveRoutePlanningProgressWatchdogScript.new()
+	hard_watchdog.setup(0.0, 4.0, 3.0, 20.0)
+	hard_watchdog.observe(base, 0.25)
+	var hard_stopped: Dictionary = hard_watchdog.observe(repaired, 20.0)
+	var passed := bool(initial.get("continue", false)) \
+		and bool(beyond_soft.get("continue", false)) \
+		and bool(beyond_soft.get("softExceeded", false)) \
+		and bool(beyond_soft.get("progressed", false)) \
+		and bool(continued.get("continue", false)) \
+		and bool(continued.get("progressed", false)) \
+		and not bool(stalled.get("continue", true)) \
+		and String(stalled.get("reason", "")) == "no_progress_timeout" \
+		and not bool(hard_stopped.get("continue", true)) \
+		and String(hard_stopped.get("reason", "")) == "hard_timeout" \
+		and String((continued.get("marker", {}) as Dictionary).get("requestId", "")) == "player:v2:repair:1"
+	return outcome(
+		passed,
+		"initial=%s beyondSoft=%s continued=%s stalled=%s hard=%s" % [JSON.stringify(initial), JSON.stringify(beyond_soft), JSON.stringify(continued), JSON.stringify(stalled), JSON.stringify(hard_stopped)],
+		["same_request_retained_beyond_four_seconds_while_repair_progresses", "search_progress_extends_bounded_window", "no_progress_stops_diagnostically", "hard_timeout_remains_bounded"],
+		{
+			"initial": initial,
+			"beyondSoft": beyond_soft,
+			"continued": continued,
+			"stalled": stalled,
+			"hard": hard_stopped
+		}
+	)
+
+
+func test_route_authority_dynamic_probe_repairs_before_blocking(_mode: String) -> Dictionary:
+	var authority = NpcRouteAuthorityV2Script.new()
+	var probe := DynamicActorRepairProbe.new()
+	var substrate := RecordingRepairSubstrate.new()
+	authority.setup(null, null, probe)
+	var entry := { "id": "dynamic-probe-repair" }
+	var request: Dictionary = authority.submit_request(entry, { "kind": "home", "targetCell": Vector2i(4, 0) }, { "priority": 140 })
+	var request_id := String(request.get("requestId", ""))
+	var route := authority_test_route(4)
+	var options := {
+		"repairSubstrate": substrate,
+		"repairStartCell": Vector2i.ZERO,
+		"repairCandidateCells": [Vector2i(4, 0)],
+		"repairPlanOptions": { "probeRepairAvoidRadius": 1 },
+		"maxProbeRepairAttempts": 3
+	}
+	var result: Dictionary = authority.commit_route_after_probe(entry, request_id, route, { "kind": "home", "targetCell": Vector2i(4, 0) }, options)
+	var first_avoids: Array = substrate.avoid_history[0] if not substrate.avoid_history.is_empty() and substrate.avoid_history[0] is Array else []
+	var first_radius := int(substrate.repair_radius_history[0]) if not substrate.repair_radius_history.is_empty() else 0
+	var passed := String(result.get("state", "")) == "ready" \
+		and probe.probe_calls == 2 \
+		and first_avoids.has(Vector2i(2, 0)) \
+		and first_radius == 1
+	return outcome(
+		passed,
+		"result=%s probes=%d avoids=%s radius=%d" % [JSON.stringify(authority_summary(result)), probe.probe_calls, JSON.stringify(first_avoids), first_radius],
+		["dynamic_character_body_probe_classified", "dynamic_probe_repaired_before_commit", "dynamic_clearance_cells_avoided", "repaired_route_requires_clear_probe"],
+		{ "result": authority_summary(result), "probeCalls": probe.probe_calls, "avoidCells": first_avoids, "repairAvoidRadius": first_radius }
 	)
 
 func test_route_authority_phase10_counters(_mode: String) -> Dictionary:
@@ -1313,6 +1479,48 @@ func test_route_probe_start_overlap_escape_outward_only(_mode: String) -> Dictio
 			"outwardDistance": outward_distance,
 			"inwardDistance": inward_distance,
 			"lateralDistance": lateral_distance
+		}
+	)
+
+func test_route_probe_covers_terrain_body_layer(_mode: String) -> Dictionary:
+	var service = CollisionProbeServiceScript.new()
+	var terrain := StaticBody3D.new()
+	terrain.set_meta("kind", "terrain")
+	var path := collision_block(Vector2i.ZERO, "cobblestonePath")
+	var body := CharacterBody3D.new()
+	body.collision_mask = NpcConstantsScript.COLLISION_WORLD_QUERY | NpcConstantsScript.COLLISION_TERRAIN_BODY
+	body.floor_max_angle = deg_to_rad(46.0)
+	var static_mask := service.route_blocking_collision_mask()
+	var terrain_motion_mask := service.terrain_motion_collision_mask(body)
+	var terrain_is_motion_blocking := service._is_terrain_collider(terrain)
+	var walkable_support_blocks := service._terrain_contact_blocks_motion(body, Vector3(0.0, 0.99, 0.0))
+	var lateral_wall_blocks := service._terrain_contact_blocks_motion(body, Vector3(1.0, 0.0, 0.0))
+	var over_limit_slope_blocks := service._terrain_contact_blocks_motion(body, Vector3(0.866, 0.50, 0.0))
+	var path_is_nonblocking := service._collider_allowed_for_route({}, path, { "actions": {} })
+	var passed := (static_mask & NpcConstantsScript.COLLISION_WORLD_QUERY) != 0 \
+		and (static_mask & NpcConstantsScript.COLLISION_TERRAIN_BODY) == 0 \
+		and (terrain_motion_mask & NpcConstantsScript.COLLISION_TERRAIN_BODY) != 0 \
+		and (terrain_motion_mask & NpcConstantsScript.COLLISION_NONBLOCKING_PATH) == 0 \
+		and terrain_is_motion_blocking \
+		and not walkable_support_blocks \
+		and lateral_wall_blocks \
+		and over_limit_slope_blocks \
+		and path_is_nonblocking
+	terrain.free()
+	path.free()
+	body.free()
+	return outcome(
+		passed,
+		"staticMask=%d terrainMotionMask=%d terrainMotionBlocking=%s walkableSupportBlocks=%s lateralWallBlocks=%s overLimitSlopeBlocks=%s pathNonblocking=%s" % [static_mask, terrain_motion_mask, str(terrain_is_motion_blocking), str(walkable_support_blocks), str(lateral_wall_blocks), str(over_limit_slope_blocks), str(path_is_nonblocking)],
+		["static_overlap_excludes_support_floor", "terrain_uses_character_body_motion_probe", "walkable_terrain_support_does_not_block_route", "lateral_or_over_limit_terrain_blocks_route", "decorative_path_remains_nonblocking"],
+		{
+			"staticMask": static_mask,
+			"terrainMotionMask": terrain_motion_mask,
+			"terrainMotionBlocking": terrain_is_motion_blocking,
+			"walkableSupportBlocks": walkable_support_blocks,
+			"lateralWallBlocks": lateral_wall_blocks,
+			"overLimitSlopeBlocks": over_limit_slope_blocks,
+			"pathNonblocking": path_is_nonblocking
 		}
 	)
 

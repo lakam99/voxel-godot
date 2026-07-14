@@ -872,6 +872,7 @@ Ref<Material> terrain_material(Object *p_main) {
 void TerrainMeshingBackend::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("backend_summary"), &TerrainMeshingBackend::backend_summary);
 	ClassDB::bind_method(D_METHOD("build_chunk_mesh", "main", "cx", "cz"), &TerrainMeshingBackend::build_chunk_mesh);
+	ClassDB::bind_method(D_METHOD("build_chunk_surface_data_from_sections", "payload"), &TerrainMeshingBackend::build_chunk_surface_data_from_sections);
 	ClassDB::bind_method(D_METHOD("build_chunk_mesh_from_sections", "payload"), &TerrainMeshingBackend::build_chunk_mesh_from_sections);
 	ClassDB::bind_method(D_METHOD("build_chunk_fluid_surface_data_from_sections", "payload"), &TerrainMeshingBackend::build_chunk_fluid_surface_data_from_sections);
 	ClassDB::bind_method(D_METHOD("build_chunk_fluid_mesh_from_sections", "payload"), &TerrainMeshingBackend::build_chunk_fluid_mesh_from_sections);
@@ -888,6 +889,7 @@ Dictionary TerrainMeshingBackend::backend_summary() const {
 	result["implementation"] = "native_density_marching_tetrahedra_v1";
 	result["colorModel"] = "underground_air_dark_palette_depth_v4";
 	result["ready"] = true;
+	result["terrainSurfaceDataReady"] = true;
 	result["fluidReady"] = true;
 	result["fluidImplementation"] = "native_section_payload_fluid_faces_v1";
 	return result;
@@ -987,7 +989,7 @@ Variant TerrainMeshingBackend::build_chunk_mesh(Object *p_main, int32_t p_cx, in
 	return mesh;
 }
 
-Variant TerrainMeshingBackend::build_chunk_mesh_from_sections(const Dictionary &p_payload) {
+Dictionary TerrainMeshingBackend::build_chunk_surface_data_from_sections(const Dictionary &p_payload) {
 	int chunk_size = int(p_payload.get("chunkSize", 28));
 	double cell_size = double(p_payload.get("cellSize", 1.35));
 	int start_x = int(p_payload.get("startX", int(p_payload.get("chunkX", 0)) * chunk_size));
@@ -995,11 +997,11 @@ Variant TerrainMeshingBackend::build_chunk_mesh_from_sections(const Dictionary &
 	int min_y = int(p_payload.get("minY", int(p_payload.get("worldBottomCellY", -64)))) - 1;
 	int max_y = int(p_payload.get("maxY", int(p_payload.get("worldTopCellY", 96)))) + 1;
 	if (chunk_size <= 0 || cell_size <= 0.0 || max_y <= min_y) {
-		return Variant();
+		return Dictionary();
 	}
 	Dictionary section_lookup = section_lookup_from_payload(p_payload);
 	if (section_lookup.is_empty()) {
-		return Variant();
+		return Dictionary();
 	}
 	int step = CLAMP(int(p_payload.get("stepCells", 2)), 1, 16);
 	PackedVector3Array vertices;
@@ -1045,14 +1047,32 @@ Variant TerrainMeshingBackend::build_chunk_mesh_from_sections(const Dictionary &
 		}
 	}
 
+	Dictionary result;
+	result["vertices"] = vertices;
+	result["normals"] = normals;
+	result["colors"] = colors;
+	result["faceCount"] = vertices.size() / 3;
+	result["vertexCount"] = vertices.size();
+	result["stepCells"] = step;
+	result["sectionCount"] = section_lookup.size();
+	result["valid"] = true;
+	return result;
+}
+
+Variant TerrainMeshingBackend::build_chunk_mesh_from_sections(const Dictionary &p_payload) {
+	Dictionary data = build_chunk_surface_data_from_sections(p_payload);
+	if (data.is_empty() || !bool(data.get("valid", false))) {
+		return Variant();
+	}
+	PackedVector3Array vertices = data.get("vertices", PackedVector3Array());
 	Ref<ArrayMesh> mesh;
 	mesh.instantiate();
 	if (vertices.size() > 0) {
 		Array arrays;
 		arrays.resize(Mesh::ARRAY_MAX);
 		arrays[Mesh::ARRAY_VERTEX] = vertices;
-		arrays[Mesh::ARRAY_NORMAL] = normals;
-		arrays[Mesh::ARRAY_COLOR] = colors;
+		arrays[Mesh::ARRAY_NORMAL] = data.get("normals", PackedVector3Array());
+		arrays[Mesh::ARRAY_COLOR] = data.get("colors", PackedColorArray());
 		mesh->add_surface_from_arrays(Mesh::PRIMITIVE_TRIANGLES, arrays);
 	}
 	mesh->set_meta("terrainMeshingBackend", "native_volume_mesher");
@@ -1060,11 +1080,11 @@ Variant TerrainMeshingBackend::build_chunk_mesh_from_sections(const Dictionary &
 	mesh->set_meta("terrainMeshingQueued", false);
 	mesh->set_meta("terrainMeshingSectionPayload", true);
 	mesh->set_meta("nativeVolumeMaterialIds", true);
-	mesh->set_meta("chunk_volume_faces", vertices.size() / 3);
-	mesh->set_meta("chunk_volume_vertices", vertices.size());
-	mesh->set_meta("nativeVolumeVertices", vertices.size());
-	mesh->set_meta("nativeVolumeStepCells", step);
-	mesh->set_meta("nativeVolumeSections", section_lookup.size());
+	mesh->set_meta("chunk_volume_faces", int(data.get("faceCount", 0)));
+	mesh->set_meta("chunk_volume_vertices", int(data.get("vertexCount", 0)));
+	mesh->set_meta("nativeVolumeVertices", int(data.get("vertexCount", 0)));
+	mesh->set_meta("nativeVolumeStepCells", int(data.get("stepCells", 1)));
+	mesh->set_meta("nativeVolumeSections", int(data.get("sectionCount", 0)));
 	return mesh;
 }
 
@@ -1133,6 +1153,42 @@ Dictionary TerrainMeshingBackend::build_chunk_fluid_surface_data_from_sections(c
 	if (section_lookup.is_empty() && !has_flat_cells) {
 		return deferred_data("missing_exact_fluid_sections", false);
 	}
+	// The exact payload normally includes one dense, halo-complete cell block. Resolve
+	// its channels once instead of repeating Dictionary and PackedArray lookups for
+	// every cell and each of its six neighbors. The section sampler remains the exact
+	// fallback for older payloads and malformed dense blocks.
+	Vector3i flat_size;
+	PackedByteArray flat_solid_values;
+	PackedByteArray flat_fluid_values;
+	bool flat_cells_valid = false;
+	if (exact_contract && has_flat_cells) {
+		Dictionary flat_cells = cells_value;
+		Variant flat_size_value = flat_cells.get("size", Variant());
+		flat_solid_values = flat_cells.get("solid", PackedByteArray());
+		flat_fluid_values = flat_cells.get("fluidTypeIds", PackedByteArray());
+		if (flat_size_value.get_type() == Variant::VECTOR3I) {
+			flat_size = flat_size_value;
+			int expected_size = flat_size.x * flat_size.y * flat_size.z;
+			flat_cells_valid = flat_size.x > 0 && flat_size.y > 0 && flat_size.z > 0 &&
+				flat_solid_values.size() == expected_size && flat_fluid_values.size() == expected_size;
+		}
+	}
+	auto sample_fluid = [&](const Vector3i &p_cell) -> ExactFluidSample {
+		if (flat_cells_valid) {
+			ExactFluidSample result;
+			if (p_cell.x < min_cell.x || p_cell.x > max_cell.x || p_cell.y < min_cell.y || p_cell.y > max_cell.y || p_cell.z < min_cell.z || p_cell.z > max_cell.z) {
+				return result;
+			}
+			Vector3i local = p_cell - min_cell;
+			int index = local.y + flat_size.y * (local.x + flat_size.x * local.z);
+			int expected_size = flat_size.x * flat_size.y * flat_size.z;
+			result.known = index >= 0 && index < expected_size;
+			result.solid = result.known && int(flat_solid_values[index]) > 0;
+			result.fluid_type = result.known ? CLAMP(int(flat_fluid_values[index]), 0, 2) : 0;
+			return result;
+		}
+		return exact_contract ? sample_exact_fluid_payload(fluid_payload, section_lookup, p_cell) : sample_legacy_exact_fluid_payload(fluid_payload, section_lookup, p_cell);
+	};
 	PackedVector3Array water_vertices;
 	PackedVector3Array water_normals;
 	PackedColorArray water_colors;
@@ -1147,13 +1203,13 @@ Dictionary TerrainMeshingBackend::build_chunk_fluid_surface_data_from_sections(c
 		for (int x = start_x; x < start_x + chunk_size; ++x) {
 			for (int y = min_y; y <= max_y; ++y) {
 				Vector3i cell(x, y, z);
-				ExactFluidSample sample = exact_contract ? sample_exact_fluid_payload(fluid_payload, section_lookup, cell) : sample_legacy_exact_fluid_payload(fluid_payload, section_lookup, cell);
+				ExactFluidSample sample = sample_fluid(cell);
 				if (!sample.known || sample.solid || sample.fluid_type == 0) {
 					continue;
 				}
 				exact_fluid_cells += 1;
 				for (const Vector3i &direction : CARDINAL_DIRECTIONS) {
-					ExactFluidSample neighbor = exact_contract ? sample_exact_fluid_payload(fluid_payload, section_lookup, cell + direction) : sample_legacy_exact_fluid_payload(fluid_payload, section_lookup, cell + direction);
+					ExactFluidSample neighbor = sample_fluid(cell + direction);
 					if (!neighbor.known) {
 						unknown_neighbor_count += 1;
 						continue;

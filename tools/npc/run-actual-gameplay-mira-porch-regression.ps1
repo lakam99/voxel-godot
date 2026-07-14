@@ -6,6 +6,8 @@ param(
     [string]$SavePathOverride = "",
     [int]$TimeoutSeconds = 300,
     [int]$StaleProgressSeconds = 45,
+    [double]$DialogueDwellSeconds = 0,
+    [switch]$FixedFps,
     [switch]$Headless,
     [switch]$RealBoot
 )
@@ -77,6 +79,7 @@ $env:VOXEL_ACTUAL_GAMEPLAY_MIRA_PROGRESS = $ProgressPath
 $env:VOXEL_ACTUAL_GAMEPLAY_MIRA_SCREENSHOT_DIR = $ScreenshotDir
 $env:VOXEL_ACTUAL_GAMEPLAY_MIRA_RUN_TOKEN = $runToken
 $env:VOXEL_ACTUAL_GAMEPLAY_MIRA_WATCHDOG_SECONDS = [string]$TimeoutSeconds
+$env:VOXEL_ACTUAL_GAMEPLAY_MIRA_DIALOGUE_DWELL_SECONDS = [string][Math]::Max(0.0, $DialogueDwellSeconds)
 $env:VOXEL_GIT_BRANCH = $branch
 $env:VOXEL_GIT_COMMIT = $commit
 
@@ -180,7 +183,12 @@ function Set-ReportDiagnostics([int]$ExitCode, [string]$StopReason) {
     $report | ConvertTo-Json -Depth 24 | Set-Content -LiteralPath $ReportPath
 }
 
-$godotArgs = @("--fixed-fps", "60", "--resolution", "1280x720", "--path", $projectPath)
+# A real-boot latency run must retain normal frame pacing.  Fixed FPS is available
+# only for an explicitly labeled deterministic diagnostic, never live acceptance.
+$godotArgs = @("--resolution", "1280x720", "--path", $projectPath)
+if ($FixedFps) {
+    $godotArgs = @("--fixed-fps", "60") + $godotArgs
+}
 if (-not $RealBoot) {
     $godotArgs += @("--scene", "res://scenes/testing/npc/NpcActualGameplayMiraPorchRegressionTest.tscn")
 }

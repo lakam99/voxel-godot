@@ -13,6 +13,8 @@ const NpcPerceptionServiceScript := preload("res://scripts/npc_ai/behavior/NpcPe
 const NpcSemanticGoalPlannerScript := preload("res://scripts/npc_ai/behavior/NpcSemanticGoalPlanner.gd")
 const NpcRouteMovementControllerScript := preload("res://scripts/npc_ai/movement/NpcRouteMovementController.gd")
 const NpcRouteAuthorityV2Script := preload("res://scripts/npc_ai/routing/NpcRouteAuthorityV2.gd")
+const HostileSystemScript := preload("res://scripts/HostileSystem.gd")
+const NpcCombatScript := preload("res://scripts/NpcCombat.gd")
 const NpcConstantsScript := preload("res://scripts/npc_ai/NpcConstants.gd")
 const CELL := 1.35
 
@@ -91,6 +93,13 @@ class FakeMain:
 	func surface_y_at_position(_position: Vector3) -> float:
 		return 0.0
 
+class FakeHostileClockMain:
+	extends Node
+	var day_factor := 1.0
+
+	func clock_day_factor() -> float:
+		return day_factor
+
 class FakeRouteWorld:
 	extends RefCounted
 
@@ -167,11 +176,15 @@ class FakeRouteWorld:
 
 class FakeGuardTargetWorld:
 	extends RefCounted
+	var snapshot_calls := 0
+	var static_goal_checks := 0
+	var cell_position_calls := 0
 
 	func world_cell(position: Vector3) -> Vector2i:
 		return Vector2i(roundi(position.x / CELL), roundi(position.z / CELL))
 
 	func cell_position(cell: Vector2i) -> Vector3:
+		cell_position_calls += 1
 		return Vector3(float(cell.x) * CELL, 0.0, float(cell.y) * CELL)
 
 	func point_allowed(_entry: Dictionary, _position: Vector3, _allow_outside := false, _moving_home := false) -> bool:
@@ -189,11 +202,37 @@ class FakeGuardTargetWorld:
 	func cell_is_standable_goal(_entry: Dictionary, _cell: Vector2i, _allow_outside := false, _moving_home := false) -> bool:
 		return true
 
+	func cell_is_static_standable_goal(_entry: Dictionary, _cell: Vector2i, _allow_outside := false, _moving_home := false) -> bool:
+		static_goal_checks += 1
+		return true
+
+	func cached_validation_snapshot(_entry: Dictionary, _allow_outside := false, _moving_home := false) -> Dictionary:
+		snapshot_calls += 1
+		return {}
+
 class FakeUnreachableRoutePlanner:
 	extends RefCounted
+	var route_cost_calls := 0
 
 	func route_cost(_entry: Dictionary, _target: Vector3, _allow_outside := false, _moving_home := false, _arrival_radius := CELL * 0.85, _approach_cells := [], _require_ready := false) -> float:
+		route_cost_calls += 1
 		return INF
+
+class FakeForageSmartObjectService:
+	extends RefCounted
+	var nodes: Array[Node3D] = []
+	var last_options: Dictionary = {}
+
+	func query_resource_nodes(_entry: Dictionary, _kinds: Array, options := {}) -> Array[Node3D]:
+		last_options = options.duplicate(true) if options is Dictionary else {}
+		return nodes.duplicate()
+
+class FakeForageSystem:
+	extends RefCounted
+	var service = null
+
+	func smart_object_service():
+		return service
 
 class FakeNpcSystem:
 	extends Node
@@ -399,7 +438,13 @@ func cases() -> Array[Dictionary]:
 		case("npc_behavior_day_forager_goal_plan_shape", "day", "test_day_forager_goal_plan_shape"),
 		case("npc_behavior_day_guard_patrol", "day", "test_day_guard_patrol"),
 		case("npc_behavior_guard_departure_does_not_arrive_at_exit_as_post", "day", "test_guard_departure_does_not_arrive_at_exit_as_post"),
+		case("npc_behavior_guard_near_porch_does_not_restart_departure", "day", "test_guard_near_porch_does_not_restart_departure"),
+		case("npc_behavior_pending_route_budget_resumes_through_physics_service", "day", "test_pending_route_budget_resumes_through_physics_service"),
 		case("npc_behavior_guard_target_never_falls_back_to_porch", "day", "test_guard_target_never_falls_back_to_porch"),
+		case("npc_behavior_guard_intercept_defers_topology_to_v2", "day", "test_guard_intercept_defers_topology_to_v2"),
+		case("npc_behavior_guard_intercept_selection_is_incremental", "day", "test_guard_intercept_selection_is_incremental"),
+		case("npc_behavior_guard_pending_intercept_does_not_submit_stale_route", "day", "test_guard_pending_intercept_does_not_submit_stale_route"),
+		case("npc_behavior_daylight_inactive_hostile_not_selected", "day", "test_daylight_inactive_hostile_not_selected"),
 		case("npc_behavior_day_idle_semantic_anchor", "day", "test_day_idle_semantic_anchor"),
 		case("npc_behavior_dusk_civilian_returns_before_night", "transition", "test_dusk_civilian_returns_before_night"),
 		case("npc_behavior_dusk_guard_reports_to_duty", "transition", "test_dusk_guard_reports_to_duty"),
@@ -440,6 +485,9 @@ func cases() -> Array[Dictionary]:
 		case("npc_behavior_resource_worker_outbound_stays_town_bound", "day", "test_resource_worker_outbound_stays_town_bound"),
 		case("npc_behavior_forager_outbound_allows_outside", "day", "test_forager_outbound_allows_outside"),
 		case("npc_behavior_forager_active_goal_enters_search_from_idle", "day", "test_forager_active_goal_enters_search_from_idle"),
+		case("npc_behavior_forager_search_excludes_current_cell", "day", "test_forager_search_excludes_current_cell"),
+		case("npc_behavior_forager_unscored_search_anchor_defers_to_v2", "day", "test_forager_unscored_search_anchor_defers_to_v2"),
+		case("npc_behavior_forager_semantic_catalog_accepts_biome_food", "day", "test_forager_semantic_catalog_accepts_biome_food"),
 		case("npc_behavior_vox42_generic_forager_stale_reservation_regression", "day", "test_vox42_generic_forager_stale_reservation_regression"),
 		case("npc_behavior_vox42_terminal_v2_releases_reservation", "day", "test_vox42_terminal_v2_releases_reservation"),
 		case("npc_behavior_vox42_blocked_dynamic_repairs_then_releases", "day", "test_vox42_blocked_dynamic_repairs_then_releases"),
@@ -538,29 +586,44 @@ func test_day_guard_patrol(_mode: String) -> Dictionary:
 func test_guard_departure_does_not_arrive_at_exit_as_post(_mode: String) -> Dictionary:
 	var fake_npc := FakeNpcSystem.new()
 	var executor: Variant = make_executor(fake_npc)
-	var guard_post := Vector3(CELL * 8.0, 0.0, 0.0)
+	# Mirrors the generated-town guard geometry from VOX-94. Exercise the real
+	# brain/physics ownership handoff, not a direct executor-only shortcut.
+	var home_cell := Vector2i(2228, -10)
+	var porch_cell := Vector2i(2226, -14)
+	var guard_cell := Vector2i(2226, -43)
+	var guard_post := Vector3(float(guard_cell.x) * CELL, 0.0, float(guard_cell.y) * CELL)
 	var entry_data := entry("Guard", {
 		"job": "guard",
 		"canFight": true,
 		"nightGuard": true,
-		"position": Vector3.ZERO,
-		"homeCell": Vector2i(0, 0),
-		"porchCell": Vector2i(1, 0),
-		"guardCell": Vector2i(8, 0),
+		"position": Vector3(float(home_cell.x) * CELL, 0.0, float(home_cell.y) * CELL),
+		"homeCell": home_cell,
+		"porchCell": porch_cell,
+		"guardCell": guard_cell,
 		"guardPosition": guard_post,
 		"guardTargetCache": guard_post
 	})
+	entry_data["interiorMinCell"] = Vector2i(2225, -12)
+	entry_data["interiorMaxCell"] = Vector2i(2229, -7)
 	entry_data["guardTargetRefreshTimer"] = 100.0
 	entry_data["activeMotionGoal"] = { "goalKind": NpcEnumsScript.GOAL_KIND_GUARD, "reason": "day_guard_patrol" }
 	entry_data["activeMotionSchedule"] = { "scheduleState": NpcEnumsScript.SCHEDULE_STATE_DAY, "activeGuardDuty": false }
 	entry_data["activeMotionPerception"] = { "insideHome": true, "activeThreat": false, "threat": null }
-	var saw_departure_stage := false
+	var departure_request_targets: Array[Vector2i] = []
+	var last_departure_request := ""
 	var guard_post_intent: Dictionary = {}
-	for _i in range(320):
-		var result: Dictionary = executor.advance_motion_npc(entry_data, 1.0 / 60.0, 0.0)
+	for _i in range(900):
+		fake_npc.test_route_authority_v2.begin_frame()
+		var result: Dictionary = executor.advance_physics_route_service(entry_data, 1.0 / 60.0) \
+			if executor.physics_route_service_owns_motion(entry_data) \
+			else executor.advance_motion_npc(entry_data, 1.0 / 60.0, 0.0)
 		var routine_intent: Dictionary = entry_data.get("_routineRouteV2Intent", {}) if entry_data.get("_routineRouteV2Intent", {}) is Dictionary else {}
 		if String(routine_intent.get("semanticKind", "")) == "home_departure_clearance":
-			saw_departure_stage = true
+			var request_id := String(entry_data.get("routineRouteV2RequestId", ""))
+			if request_id != "" and request_id != last_departure_request:
+				last_departure_request = request_id
+				var target_cell: Vector2i = routine_intent.get("targetCell", Vector2i(999999, 999999)) if routine_intent.get("targetCell", Vector2i(999999, 999999)) is Vector2i else Vector2i(999999, 999999)
+				departure_request_targets.append(target_cell)
 		if String(routine_intent.get("semanticKind", "")) == "guard_post":
 			guard_post_intent = routine_intent.duplicate(true)
 			break
@@ -568,21 +631,107 @@ func test_guard_departure_does_not_arrive_at_exit_as_post(_mode: String) -> Dict
 			break
 	var target_cell: Vector2i = guard_post_intent.get("targetCell", Vector2i(999999, 999999)) if guard_post_intent.get("targetCell", Vector2i(999999, 999999)) is Vector2i else Vector2i(999999, 999999)
 	var passed := fake_npc.move_calls == 0 \
-		and saw_departure_stage \
+		and departure_request_targets == [porch_cell, Vector2i(2226, -17)] \
 		and String(guard_post_intent.get("kind", "")) == "guard" \
 		and String(guard_post_intent.get("semanticKind", "")) == "guard_post" \
-		and target_cell == Vector2i(8, 0)
+		and target_cell == guard_cell
 	fake_npc.queue_free()
 	return outcome(
 		passed,
-		"departure=%s guardIntent=%s legacyMoveCalls=%d position=%s" % [str(saw_departure_stage), JSON.stringify(guard_post_intent), fake_npc.move_calls, str((entry_data.get("body") as Node3D).global_position)],
-		["guard_departure_uses_clearance_route", "guard_post_route_targets_assigned_post", "guard_route_does_not_use_legacy_move"],
-		{ "sawDepartureStage": saw_departure_stage, "guardPostIntent": guard_post_intent, "moveCalls": fake_npc.move_calls }
+		"departureTargets=%s guardIntent=%s legacyMoveCalls=%d position=%s" % [str(departure_request_targets), JSON.stringify(guard_post_intent), fake_npc.move_calls, str((entry_data.get("body") as Node3D).global_position)],
+		["guard_departure_uses_ordered_interior_and_exterior_clearance_routes", "guard_physics_route_service_hands_off_to_assigned_post", "guard_route_does_not_use_legacy_move"],
+		{ "departureTargets": departure_request_targets, "guardPostIntent": guard_post_intent, "moveCalls": fake_npc.move_calls }
+	)
+
+func test_guard_near_porch_does_not_restart_departure(_mode: String) -> Dictionary:
+	var fake_npc := FakeNpcSystem.new()
+	var executor: Variant = make_executor(fake_npc)
+	var home_cell := Vector2i(2228, -10)
+	var porch_cell := Vector2i(2226, -14)
+	var guard_cell := Vector2i(2226, -43)
+	var body_position := Vector3(float(porch_cell.x) * CELL, 0.0, float(porch_cell.y - 1) * CELL)
+	var entry_data := entry("Guard", {
+		"job": "guard",
+		"canFight": true,
+		"nightGuard": true,
+		"position": body_position,
+		"homeCell": home_cell,
+		"porchCell": porch_cell,
+		"guardCell": guard_cell,
+		"guardPosition": Vector3(float(guard_cell.x) * CELL, 0.0, float(guard_cell.y) * CELL),
+		"guardTargetCache": Vector3(float(guard_cell.x) * CELL, 0.0, float(guard_cell.y) * CELL)
+	})
+	entry_data["interiorMinCell"] = Vector2i(2225, -12)
+	entry_data["interiorMaxCell"] = Vector2i(2229, -7)
+	entry_data["guardTargetRefreshTimer"] = 100.0
+	entry_data["activeMotionGoal"] = { "goalKind": NpcEnumsScript.GOAL_KIND_GUARD, "reason": "day_guard_patrol" }
+	entry_data["activeMotionSchedule"] = { "scheduleState": NpcEnumsScript.SCHEDULE_STATE_DAY, "activeGuardDuty": false }
+	entry_data["activeMotionPerception"] = { "insideHome": false, "activeThreat": false, "threat": null }
+	var status: Dictionary = executor.call("_home_interior_status", entry_data, body_position)
+	var result: Dictionary = executor.advance_motion_npc(entry_data, 1.0 / 60.0, 0.0)
+	var routine_intent: Dictionary = entry_data.get("_routineRouteV2Intent", {}) if entry_data.get("_routineRouteV2Intent", {}) is Dictionary else {}
+	var passed := not bool(status.get("strictInside", false)) \
+		and bool(status.get("clearOfDoor", false)) \
+		and bool(result.get("advanced", false)) \
+		and String(routine_intent.get("semanticKind", "")) == "guard_post" \
+		and String(routine_intent.get("reason", "")) == "guard_route"
+	fake_npc.queue_free()
+	return outcome(
+		passed,
+		"status=%s result=%s intent=%s" % [JSON.stringify(status), JSON.stringify(result), JSON.stringify(routine_intent)],
+		["outside_guard_near_porch_preserves_normal_route", "clear_of_door_does_not_restart_departure", "guard_route_uses_v2_authority"],
+		{ "status": status, "result": result, "intent": routine_intent }
+	)
+
+func test_pending_route_budget_resumes_through_physics_service(_mode: String) -> Dictionary:
+	var fake_npc := FakeNpcSystem.new()
+	var executor: Variant = make_executor(fake_npc)
+	var authority = fake_npc.test_route_authority_v2
+	authority.plan_attempt_budget_per_frame = 0
+	var entry_data := entry("Forager", {
+		"id": "pending-budget-resume",
+		"job": "forage",
+		"position": Vector3.ZERO,
+		"homeCell": Vector2i(-4, 0),
+		"porchCell": Vector2i(-3, 0),
+		"jobTarget": Vector3(CELL * 4.0, 0.0, 0.0)
+	})
+	entry_data["jobPhase"] = "outbound"
+	entry_data["activeMotionGoal"] = { "goalKind": NpcEnumsScript.GOAL_KIND_FORAGE, "reason": "budget_resume" }
+	var first: Dictionary = executor.advance_motion_npc(entry_data, 1.0 / 60.0, 0.0)
+	var request_id := String(entry_data.get("routineRouteV2RequestId", ""))
+	var pending: Dictionary = authority.runtime_for_entry(entry_data)
+	var cached_intent: Dictionary = entry_data.get("_routineRouteV2Intent", {}) if entry_data.get("_routineRouteV2Intent", {}) is Dictionary else {}
+	authority.plan_attempt_budget_per_frame = 4
+	authority.begin_frame()
+	var service_owns: bool = executor.physics_route_service_owns_motion(entry_data)
+	var resumed: Dictionary = executor.advance_physics_route_service(entry_data, 1.0 / 60.0) if service_owns else {}
+	var after: Dictionary = authority.runtime_for_entry(entry_data)
+	var body := entry_data.get("body") as Node3D
+	var passed: bool = request_id != "" \
+		and String(pending.get("state", "")) == "pending_budget" \
+		and String(cached_intent.get("kind", "")) == "forage" \
+		and String(cached_intent.get("semanticKind", "")) != "" \
+		and cached_intent.get("target", null) is Vector3 \
+		and service_owns \
+		and bool(resumed.get("advanced", false)) \
+		and int(after.get("lastServicedFrame", -1)) >= 0 \
+		and String(after.get("state", "")) != "pending_budget" \
+		and String(resumed.get("reason", "")) == "physics_route_service_routine" \
+		and body != null
+	fake_npc.queue_free()
+	return outcome(
+		passed,
+		"first=%s pending=%s intent=%s serviceOwns=%s resumed=%s after=%s" % [JSON.stringify(first), JSON.stringify(pending), JSON.stringify(cached_intent), str(service_owns), JSON.stringify(resumed), JSON.stringify(after)],
+		["initial_budget_deferral_retains_semantic_intent", "physics_service_resumes_pending_route", "pending_route_receives_later_planning_service_or_terminal_classification"],
+		{ "first": first, "pending": pending, "intent": cached_intent, "serviceOwns": service_owns, "resumed": resumed, "after": after }
 	)
 
 func test_guard_target_never_falls_back_to_porch(_mode: String) -> Dictionary:
 	var goal_planner = NpcSemanticGoalPlannerScript.new()
-	goal_planner.setup(null, FakeMain.new(), FakeGuardTargetWorld.new(), FakeUnreachableRoutePlanner.new())
+	var world := FakeGuardTargetWorld.new()
+	var route_planner := FakeUnreachableRoutePlanner.new()
+	goal_planner.setup(null, FakeMain.new(), world, route_planner)
 	var body := Node3D.new()
 	body.global_position = Vector3.ZERO
 	var porch := Vector3(CELL, 0.0, 0.0)
@@ -602,13 +751,180 @@ func test_guard_target_never_falls_back_to_porch(_mode: String) -> Dictionary:
 	for candidate in candidates:
 		if candidate is Vector3 and (candidate as Vector3).distance_to(porch) <= 0.01:
 			porch_present = true
-	var passed := target.distance_to(guard_post) <= 0.01 and not porch_present and String(entry_data.get("routeReason", "")) == "no_reachable_guard_anchor"
+	var passed := target.distance_to(guard_post) <= 0.01 \
+		and not porch_present \
+		and route_planner.route_cost_calls == 0 \
+		and world.static_goal_checks == 0 \
+		and String(entry_data.get("routeReason", "")) == ""
 	body.free()
 	return outcome(
 		passed,
-		"target=%s guard=%s porchPresent=%s reason=%s" % [str(target), str(guard_post), str(porch_present), String(entry_data.get("routeReason", ""))],
-		["guard_target_preserves_assigned_post", "guard_candidates_exclude_home_porch", "guard_unreachable_remains_diagnostic"],
-		{ "target": target, "guardPost": guard_post, "porch": porch, "porchPresent": porch_present, "reason": String(entry_data.get("routeReason", "")) }
+		"target=%s guard=%s porchPresent=%s routeCostCalls=%d staticGoalChecks=%d reason=%s" % [str(target), str(guard_post), str(porch_present), route_planner.route_cost_calls, world.static_goal_checks, String(entry_data.get("routeReason", ""))],
+		["guard_target_preserves_assigned_post", "guard_candidates_exclude_home_porch", "guard_target_defers_route_reachability_to_v2"],
+		{ "target": target, "guardPost": guard_post, "porch": porch, "porchPresent": porch_present, "routeCostCalls": route_planner.route_cost_calls, "staticGoalChecks": world.static_goal_checks, "reason": String(entry_data.get("routeReason", "")) }
+	)
+
+func test_guard_intercept_defers_topology_to_v2(_mode: String) -> Dictionary:
+	var goal_planner = NpcSemanticGoalPlannerScript.new()
+	var world := FakeGuardTargetWorld.new()
+	var route_planner := FakeUnreachableRoutePlanner.new()
+	goal_planner.setup(null, FakeMain.new(), world, route_planner)
+	var body := Node3D.new()
+	body.global_position = Vector3.ZERO
+	var hostile := Node3D.new()
+	hostile.global_position = Vector3(CELL * 12.0, 0.0, 0.0)
+	var entry_data := {
+		"id": "guard-intercept-test",
+		"body": body,
+		"job": "guard",
+		"guardPosition": Vector3(CELL * 4.0, 0.0, 0.0),
+		"porchPosition": Vector3(CELL, 0.0, 0.0),
+		"townCenter": Vector2i.ZERO,
+		"townRadius": 32
+	}
+	var target := Vector3.INF
+	for _refresh in range(8):
+		target = goal_planner.choose_guard_target(entry_data, hostile, false)
+		if not bool(entry_data.get("guardInterceptSelectionPending", false)):
+			break
+	var target_distance := target.distance_to(hostile.global_position) if target != Vector3.INF else INF
+	var passed := target != Vector3.INF \
+		and target_distance >= CELL * 2.5 \
+		and not bool(entry_data.get("guardInterceptSelectionPending", false)) \
+		and world.snapshot_calls == 0 \
+		and world.static_goal_checks == 0 \
+		and route_planner.route_cost_calls == 0
+	body.free()
+	hostile.free()
+	return outcome(
+		passed,
+		"target=%s hostileDistance=%.3f snapshotCalls=%d staticGoalChecks=%d routeCostCalls=%d" % [str(target), target_distance, world.snapshot_calls, world.static_goal_checks, route_planner.route_cost_calls],
+		["guard_intercept_is_bounded_semantic_anchor", "guard_intercept_defers_topology_to_v2", "guard_intercept_defers_route_cost_to_v2"],
+		{ "target": target, "targetDistance": target_distance, "snapshotCalls": world.snapshot_calls, "staticGoalChecks": world.static_goal_checks, "routeCostCalls": route_planner.route_cost_calls }
+	)
+
+func test_guard_intercept_selection_is_incremental(_mode: String) -> Dictionary:
+	var goal_planner = NpcSemanticGoalPlannerScript.new()
+	var world := FakeGuardTargetWorld.new()
+	goal_planner.setup(null, FakeMain.new(), world, FakeUnreachableRoutePlanner.new())
+	var body := Node3D.new()
+	body.global_position = Vector3.ZERO
+	var hostile := Node3D.new()
+	hostile.global_position = Vector3(CELL * 12.0, 0.0, 0.0)
+	var entry_data := {
+		"id": "guard-intercept-budget-test",
+		"body": body,
+		"job": "guard",
+		"guardPosition": Vector3(CELL * 4.0, 0.0, 0.0),
+		"porchPosition": Vector3(CELL, 0.0, 0.0),
+		"townCenter": Vector2i.ZERO,
+		"townRadius": 32
+	}
+	var calls_per_refresh: Array[int] = []
+	var target := Vector3.INF
+	for _refresh in range(8):
+		var before := world.cell_position_calls
+		target = goal_planner.choose_guard_target(entry_data, hostile, false)
+		calls_per_refresh.append(world.cell_position_calls - before)
+		if not bool(entry_data.get("guardInterceptSelectionPending", false)):
+			break
+	var target_distance := target.distance_to(hostile.global_position) if target != Vector3.INF else INF
+	var passed := calls_per_refresh == [2, 2, 2, 2, 2, 2, 2, 2] \
+		and world.cell_position_calls == 16 \
+		and not bool(entry_data.get("guardInterceptSelectionPending", false)) \
+		and target_distance >= CELL * 2.5 \
+		and world.snapshot_calls == 0 \
+		and world.static_goal_checks == 0
+	body.free()
+	hostile.free()
+	return outcome(
+		passed,
+		"calls=%s total=%d target=%s distance=%.3f pending=%s" % [JSON.stringify(calls_per_refresh), world.cell_position_calls, str(target), target_distance, str(entry_data.get("guardInterceptSelectionPending", false))],
+		["guard_intercept_evaluates_two_grounded_cells_per_refresh", "guard_intercept_preserves_semantic_candidate_set", "guard_intercept_defers_topology_to_v2"],
+		{ "callsPerRefresh": calls_per_refresh, "totalCellPositionCalls": world.cell_position_calls, "target": target, "targetDistance": target_distance }
+	)
+
+func test_guard_pending_intercept_does_not_submit_stale_route(_mode: String) -> Dictionary:
+	var fake_npc := FakeNpcSystem.new()
+	var executor: Variant = make_executor(fake_npc)
+	var hostile := Node3D.new()
+	hostile.global_position = Vector3(CELL * 12.0, 0.0, 0.0)
+	var entry_data := entry("Guard", {
+		"id": "guard-pending-intercept-test",
+		"job": "guard",
+		"canFight": true,
+		"nightGuard": true,
+		"position": Vector3.ZERO,
+		"guardPosition": Vector3(CELL * 4.0, 0.0, 0.0)
+	})
+	entry_data["guardInterceptSelectionPending"] = true
+	entry_data["guardTargetRefreshTimer"] = 0.0
+	entry_data["activeMotionGoal"] = { "goalKind": NpcEnumsScript.GOAL_KIND_GUARD, "reason": "guard_intercept" }
+	entry_data["activeMotionSchedule"] = { "scheduleState": NpcEnumsScript.SCHEDULE_STATE_NIGHT, "activeGuardDuty": true }
+	entry_data["activeMotionPerception"] = { "insideHome": false, "activeThreat": true, "threat": hostile }
+	executor.begin_update_frame()
+	var refresh_slot_consumed := bool(executor.call("_guard_target_refresh_budget_available", {}))
+	var result: Dictionary = executor.advance_motion_npc(entry_data, 1.0 / 60.0, 0.0)
+	var passed := refresh_slot_consumed \
+		and String(result.get("reason", "")) == "guard_target_selection_pending" \
+		and String(entry_data.get("routineRouteV2RequestId", "")) == "" \
+		and not entry_data.has("_routineRouteV2Intent") \
+		and fake_npc.move_calls == 0
+	(entry_data.get("body") as Node3D).free()
+	hostile.free()
+	fake_npc.queue_free()
+	return outcome(
+		passed,
+		"slotConsumed=%s result=%s request=%s intent=%s moveCalls=%d" % [str(refresh_slot_consumed), JSON.stringify(result), String(entry_data.get("routineRouteV2RequestId", "")), JSON.stringify(entry_data.get("_routineRouteV2Intent", {})), fake_npc.move_calls],
+		["pending_guard_intercept_holds_motion", "refresh_budget_deferral_does_not_submit_stale_guard_route", "no_legacy_move"],
+		{ "result": result, "requestId": entry_data.get("routineRouteV2RequestId", ""), "intent": entry_data.get("_routineRouteV2Intent", {}), "moveCalls": fake_npc.move_calls }
+	)
+
+func test_daylight_inactive_hostile_not_selected(_mode: String) -> Dictionary:
+	var hostile_system = HostileSystemScript.new()
+	var clock_main := FakeHostileClockMain.new()
+	hostile_system.main = clock_main
+	var combat = NpcCombatScript.new()
+	combat.hostile_system = hostile_system
+	var ordinary := Node3D.new()
+	ordinary.name = "ordinary_shadow"
+	ordinary.global_position = Vector3(CELL * 4.0, 0.0, 0.0)
+	var daylight_immune := Node3D.new()
+	daylight_immune.name = "daylight_immune_guardian"
+	daylight_immune.global_position = Vector3(CELL * 8.0, 0.0, 0.0)
+	var scripted_battle := Node3D.new()
+	scripted_battle.name = "scripted_battle_hostile"
+	scripted_battle.global_position = Vector3(CELL * 12.0, 0.0, 0.0)
+	hostile_system.enemies = [
+		{ "body": ordinary, "daylightImmune": false, "scriptedEncounter": "", "scriptedPhase": "" },
+		{ "body": daylight_immune, "daylightImmune": true, "scriptedEncounter": "", "scriptedPhase": "" },
+		{ "body": scripted_battle, "daylightImmune": false, "scriptedEncounter": "story_encounter", "scriptedPhase": "battle" }
+	]
+	var day_target = combat.nearest_hostile(Vector3.ZERO, CELL * 24.0)
+	var day_target_name: String = String(day_target.name) if day_target != null else ""
+	var ordinary_day_available := hostile_system.hostile_available_for_npc_combat(ordinary, Vector3.ZERO)
+	var immune_day_available := hostile_system.hostile_available_for_npc_combat(daylight_immune, Vector3.ZERO)
+	var battle_day_available := hostile_system.hostile_available_for_npc_combat(scripted_battle, Vector3.ZERO)
+	clock_main.day_factor = 0.0
+	var night_target = combat.nearest_hostile(Vector3.ZERO, CELL * 24.0)
+	var night_target_name: String = String(night_target.name) if night_target != null else ""
+	var ordinary_night_available := hostile_system.hostile_available_for_npc_combat(ordinary, Vector3.ZERO)
+	var passed := day_target == daylight_immune \
+		and not ordinary_day_available \
+		and immune_day_available \
+		and battle_day_available \
+		and night_target == ordinary \
+		and ordinary_night_available
+	ordinary.free()
+	daylight_immune.free()
+	scripted_battle.free()
+	clock_main.free()
+	hostile_system.free()
+	return outcome(
+		passed,
+		"dayTarget=%s nightTarget=%s ordinaryDay=%s immuneDay=%s battleDay=%s ordinaryNight=%s" % [day_target_name, night_target_name, str(ordinary_day_available), str(immune_day_available), str(battle_day_available), str(ordinary_night_available)],
+		["ordinary_daylight_hostile_not_a_threat", "night_hostile_remains_selectable", "daylight_immune_hostile_remains_selectable", "scripted_battle_remains_selectable"],
+		{ "ordinaryDayAvailable": ordinary_day_available, "immuneDayAvailable": immune_day_available, "battleDayAvailable": battle_day_available, "ordinaryNightAvailable": ordinary_night_available }
 	)
 
 func test_day_idle_semantic_anchor(_mode: String) -> Dictionary:
@@ -1203,7 +1519,7 @@ func test_forager_active_goal_enters_search_from_idle(_mode: String) -> Dictiona
 	var last_authority: Dictionary = entry_data.get("routineRouteV2LastAuthority", {}) if entry_data.get("routineRouteV2LastAuthority", {}) is Dictionary else {}
 	var passed := bool(result.get("advanced", false)) \
 		and String(entry_data.get("jobPhase", "")) == "searching" \
-		and String(entry_data.get("goal", "")) == "search for berries" \
+		and String(entry_data.get("goal", "")) == "search for forage" \
 		and fake_npc.move_calls == 0 \
 		and String(entry_data.get("routeStatus", "")) != "idle" \
 		and String(entry_data.get("routineRouteV2RequestId", "")) != "" \
@@ -1214,6 +1530,84 @@ func test_forager_active_goal_enters_search_from_idle(_mode: String) -> Dictiona
 		"result=%s phase=%s legacyMoveCalls=%d routeStatus=%s v2=%s authority=%s" % [JSON.stringify(result), String(entry_data.get("jobPhase", "")), fake_npc.move_calls, String(entry_data.get("routeStatus", "")), JSON.stringify(routine_intent), JSON.stringify(last_authority)],
 		["forager_active_goal_promotes_idle_to_searching", "forager_idle_intent_uses_v2_authority", "forager_idle_intent_does_not_rest_outside"],
 		{ "result": result, "jobPhase": entry_data.get("jobPhase", ""), "moveCalls": fake_npc.move_calls, "routeStatus": entry_data.get("routeStatus", ""), "routineIntent": routine_intent, "lastAuthority": last_authority }
+	)
+
+func test_forager_search_excludes_current_cell(_mode: String) -> Dictionary:
+	var semantic_planner := NpcSemanticGoalPlannerScript.new()
+	var body := Node3D.new()
+	body.global_position = Vector3(CELL * 3.0, 0.0, CELL * 2.0)
+	var current_cell_candidate := body.global_position + Vector3(0.2, 0.0, -0.2)
+	var next_cell_candidate := body.global_position + Vector3(CELL, 0.0, 0.0)
+	var filtered := semantic_planner.forage_search_candidates_away_from_current_cell(
+		{ "body": body },
+		[current_cell_candidate, next_cell_candidate]
+	)
+	var passed := filtered.size() == 1 and semantic_planner.position_key(filtered[0]) == semantic_planner.position_key(next_cell_candidate)
+	body.queue_free()
+	return outcome(
+		passed,
+		"filtered=%s" % JSON.stringify(filtered),
+		["forager_search_filters_current_cell_before_route_scoring", "forager_search_retains_next_cell_candidate"],
+		{ "filtered": filtered }
+	)
+
+func test_forager_unscored_search_anchor_defers_to_v2(_mode: String) -> Dictionary:
+	var semantic_planner := NpcSemanticGoalPlannerScript.new()
+	var world := FakeRouteWorld.new()
+	var body := Node3D.new()
+	body.global_position = Vector3(CELL * 3.0, 0.0, 0.0)
+	semantic_planner.setup(null, FakeMain.new(), world, FakeUnreachableRoutePlanner.new())
+	var entry_data := {
+		"id": "forager-unscored-search-anchor",
+		"job": "forage",
+		"jobPhase": "searching",
+		"body": body,
+		"townCenter": Vector2i.ZERO,
+		"townRadius": 2,
+		"homePosition": Vector3(CELL * 6.0, 0.0, 0.0),
+		"porchPosition": Vector3(CELL * 5.0, 0.0, 0.0)
+	}
+	var target := semantic_planner.choose_forage_search_target(entry_data)
+	var passed := target != Vector3.INF \
+		and semantic_planner.forage_search_target_requires_travel(entry_data, target) \
+		and not world.point_inside_town(entry_data, target) \
+		and world.point_inside_work_area(entry_data, target)
+	body.queue_free()
+	return outcome(
+		passed,
+		"target=%s routeReason=%s" % [str(target), String(entry_data.get("routeReason", ""))],
+		["semantic_search_anchor_survives_unscored_route_cost", "search_anchor_is_outside_town", "v2_remains_collision_route_authority"],
+		{ "target": target, "routeReason": String(entry_data.get("routeReason", "")) }
+	)
+
+func test_forager_semantic_catalog_accepts_biome_food(_mode: String) -> Dictionary:
+	var service := FakeForageSmartObjectService.new()
+	var system := FakeForageSystem.new()
+	system.service = service
+	var semantic_planner := NpcSemanticGoalPlannerScript.new()
+	semantic_planner.setup(system, FakeMain.new(), FakeRouteWorld.new(), null)
+	var aloe := Node3D.new()
+	aloe.set_meta("kind", "prop")
+	aloe.set_meta("material", "aloePatch")
+	aloe.set_meta("drop", "aloe")
+	aloe.global_position = Vector3(CELL * 24.0, 0.0, 0.0)
+	service.nodes = [aloe]
+	var entry_data := {
+		"job": "forage",
+		"townCenter": Vector2i.ZERO,
+		"townRadius": 18
+	}
+	var queried := semantic_planner.indexed_resource_props(entry_data, "forage")
+	var drops: Array = service.last_options.get("drops", []) if service.last_options.get("drops", []) is Array else []
+	var passed := drops == ["aloe", "berries", "frostHerb", "mirecap"] \
+		and queried.size() == 1 \
+		and semantic_planner.prop_matches_job(aloe, entry_data, "forage")
+	aloe.queue_free()
+	return outcome(
+		passed,
+		"drops=%s queried=%d" % [JSON.stringify(drops), queried.size()],
+		["forager_semantic_query_uses_catalog_food_ids", "forager_semantic_validation_accepts_biome_food"],
+		{ "drops": drops, "queried": queried.size() }
 	)
 
 func test_vox42_generic_forager_stale_reservation_regression(_mode: String) -> Dictionary:

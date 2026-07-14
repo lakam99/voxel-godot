@@ -52,7 +52,14 @@ func clone_for_worker():
 	context.seed_hash = seed_hash
 	context.pinned_town_regions = pinned_town_regions
 	context.initial_terrain_edits = initial_terrain_edits
-	context.setup_noise()
+	# These noise resources are immutable after setup and safe to share for
+	# concurrent sampling. Reusing them avoids constructing five resources for
+	# every 16^3 VoxelTerrain generation block.
+	context.height_noise = height_noise
+	context.ridge_noise = ridge_noise
+	context.flat_noise = flat_noise
+	context.moisture_noise = moisture_noise
+	context.temp_noise = temp_noise
 	return context
 
 func setup_noise() -> void:

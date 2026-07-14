@@ -44,7 +44,7 @@ Remove-Item -LiteralPath $errLog -ErrorAction SilentlyContinue
 
 $guardScript = Join-Path $PSScriptRoot "assert-npc-acceptance-runner-clean.ps1"
 $guardAllowed = @(
-    'player\.global_position\s*=.*town_job_cycle_fixture_camera_load'
+    'player\.global_position\s*=.*town_job_cycle_pre_act_stream_anchor'
 )
 $guardJson = & $guardScript `
     -RunnerPath $runnerPath `

@@ -3,6 +3,7 @@ class_name NpcSemanticGoalPlanner
 
 const HomeInteriorServiceScript := preload("res://scripts/npc_ai/behavior/HomeInteriorService.gd")
 const NpcRouteStateStoreScript := preload("res://scripts/npc_ai/routing/NpcRouteStateStore.gd")
+const ItemCatalogScript := preload("res://scripts/ItemCatalog.gd")
 
 const CELL := 1.35
 const MAX_ROUTE_SCORED_CANDIDATES := 16
@@ -11,6 +12,11 @@ const RESOURCE_SCAN_NODE_LIMIT := 1200
 const RESOURCE_SCAN_CANDIDATE_LIMIT := 16
 const BLOCKED_ENDPOINT_MEMORY_FRAMES := 360
 const INVALID_CELL := Vector2i(999999, 999999)
+const GUARD_INTERCEPT_DIRECTIONS := [
+    Vector2i(-1, 0), Vector2i(0, -1), Vector2i(0, 1), Vector2i(1, 0),
+    Vector2i(-1, -1), Vector2i(-1, 1), Vector2i(1, -1), Vector2i(1, 1)
+]
+const GUARD_INTERCEPT_CANDIDATES_PER_CALL := 2
 
 var system
 var main
@@ -27,13 +33,6 @@ func surface_y_at_position(position: Vector3) -> float:
     if main != null and main.has_method("surface_y_at_position"):
         return float(main.call("surface_y_at_position", position))
     return position.y
-
-func navigation_snapshot(entry: Dictionary, allow_outside := false, moving_home := false) -> Dictionary:
-    if world == null:
-        return {}
-    if world.has_method("cached_validation_snapshot"):
-        return world.cached_validation_snapshot(entry, allow_outside, moving_home)
-    return world.build_snapshot(entry, allow_outside, moving_home) if world.has_method("build_snapshot") else {}
 
 func make_intent(entry: Dictionary, target: Vector3, max_distance: float, moving_home := false, allow_outside := false) -> Dictionary:
     var body := entry.get("body") as Node3D
@@ -168,10 +167,12 @@ func choose_job_target(entry: Dictionary) -> Vector3:
     var job := String(entry.get("job", ""))
     var outside_town_job := resource_job_uses_outside_work_area(job)
     if job == "forage" and forager_prefers_search_anchor(entry):
-        var early_search := choose_forage_search_target(entry)
-        if early_search != Vector3.INF:
+        var search_target := choose_forage_search_target(entry)
+        if search_target != Vector3.INF:
             clear_goal_fallback(entry)
-            return early_search
+            return search_target
+        set_goal_fallback(entry, "waiting", "forage_no_new_search_anchor")
+        return Vector3.INF
     var resource_candidates: Array[Vector3] = []
     add_resource_prop_candidates(resource_candidates, entry, job)
     var resource_reachable := choose_best_reachable_position(entry, resource_candidates, outside_town_job, false, CELL * 0.85, MAX_ROUTE_SCORED_CANDIDATES, true)
@@ -210,26 +211,52 @@ func forager_prefers_search_anchor(entry: Dictionary) -> bool:
     return world.point_inside_town(entry, body.global_position)
 
 func choose_guard_target(entry: Dictionary, target_hostile: Node3D = null, melee := false) -> Vector3:
-    if world == null or planner == null:
+    if world == null:
         return entry.get("guardPosition", entry.get("porchPosition", Vector3.ZERO))
-    var candidates: Array[Vector3] = []
     if target_hostile != null and is_instance_valid(target_hostile):
-        candidates = hostile_intercept_candidates(entry, target_hostile, melee)
-        var intercept := choose_best_reachable_position(entry, candidates, true, false, CELL * 0.72, MAX_ROUTE_SCORED_CANDIDATES)
+        var intercept_selection := advance_hostile_intercept_selection(entry, target_hostile, melee)
+        if String(intercept_selection.get("status", "")) == "pending":
+            return entry.get("guardTargetCache", entry.get("guardPosition", entry.get("porchPosition", Vector3.ZERO)))
+        var intercept: Vector3 = intercept_selection.get("target", Vector3.INF)
         if intercept != Vector3.INF:
             clear_goal_fallback(entry)
             return intercept
+    else:
+        clear_hostile_intercept_selection(entry)
     var assigned_guard_post: Vector3 = entry.get("guardPosition", entry.get("porchPosition", Vector3.ZERO))
-    if resolve_reachable_endpoint(entry, assigned_guard_post, false, false, CELL * 0.85, true) != Vector3.INF:
+    if position_is_semantic_guard_anchor(entry, assigned_guard_post, false):
         clear_goal_fallback(entry)
-        return resolved_endpoint_position(entry)
-    candidates = guard_post_candidates(entry)
-    var guard_target := choose_best_reachable_position(entry, candidates, false, false, CELL * 0.85, 10, true)
+        return assigned_guard_post
+    var candidates: Array[Vector3] = guard_post_candidates(entry)
+    var guard_target := choose_nearest_guard_anchor(entry, candidates, false)
     if guard_target != Vector3.INF:
         clear_goal_fallback(entry)
         return guard_target
     set_goal_fallback(entry, "blocked", "no_reachable_guard_anchor")
     return assigned_guard_post
+
+func choose_nearest_guard_anchor(entry: Dictionary, candidates: Array[Vector3], allow_outside := false) -> Vector3:
+    var body := entry.get("body") as Node3D
+    var origin: Vector3 = body.global_position if body != null else entry.get("guardPosition", Vector3.ZERO)
+    var ordered := unique_positions(candidates)
+    ordered.sort_custom(func(a: Vector3, b: Vector3) -> bool:
+        var a_distance := a.distance_squared_to(origin)
+        var b_distance := b.distance_squared_to(origin)
+        if is_equal_approx(a_distance, b_distance):
+            return position_key(a) < position_key(b)
+        return a_distance < b_distance
+    )
+    for candidate in ordered:
+        if position_is_semantic_guard_anchor(entry, candidate, allow_outside):
+            return candidate
+    return Vector3.INF
+
+func position_is_semantic_guard_anchor(entry: Dictionary, position: Vector3, allow_outside := false) -> bool:
+    if position == Vector3.INF:
+        return false
+    if not world.point_allowed(entry, position, allow_outside, false):
+        return false
+    return surface_y_at_position(position) >= main.WATER_LEVEL + 0.45
 
 func choose_best_forage(entry: Dictionary, candidates: Array[Node3D]) -> Node3D:
     if world == null:
@@ -288,10 +315,37 @@ func choose_forage_search_target(entry: Dictionary) -> Vector3:
         candidates.append(outward)
     add_forage_search_sweep_candidates(candidates, entry)
     add_deterministic_ring_candidates(candidates, entry, true)
+    candidates = forage_search_candidates_away_from_current_cell(entry, candidates)
     var reachable := choose_best_reachable_position(entry, candidates, true, false, CELL * 0.85, MAX_ROUTE_SCORED_CANDIDATES, true)
-    if reachable != Vector3.INF and job_position_allowed(entry, reachable, true):
+    if reachable != Vector3.INF and forage_search_target_requires_travel(entry, reachable) and job_position_allowed(entry, reachable, true):
         return reachable
+    # Route cost is an advisory scorer only. V2 owns the collision-backed decision
+    # to execute, defer, or reject this legal outside-work-area search intent.
+    for candidate in unique_positions(candidates):
+        if not forage_search_target_requires_travel(entry, candidate):
+            continue
+        if not job_position_allowed(entry, candidate, true):
+            continue
+        if position_can_be_static_goal(entry, candidate, true, false):
+            return candidate
     return Vector3.INF
+
+func forage_search_candidates_away_from_current_cell(entry: Dictionary, candidates: Array[Vector3]) -> Array[Vector3]:
+    var body := entry.get("body") as Node3D
+    if body == null or not is_instance_valid(body):
+        return candidates
+    var current_key := position_key(body.global_position)
+    var filtered: Array[Vector3] = []
+    for candidate in candidates:
+        if position_key(candidate) != current_key:
+            filtered.append(candidate)
+    return filtered
+
+func forage_search_target_requires_travel(entry: Dictionary, target: Vector3) -> bool:
+    var body := entry.get("body") as Node3D
+    if body == null or not is_instance_valid(body):
+        return true
+    return position_key(target) != position_key(body.global_position)
 
 func add_nearest_forage_exit_candidates(candidates: Array[Vector3], entry: Dictionary) -> void:
     if world == null or main == null:
@@ -711,7 +765,7 @@ func indexed_resource_props(entry: Dictionary, job: String) -> Array[Node3D]:
         "cacheFrames": 30
     }
     if job == "forage":
-        options["drops"] = ["berries"]
+        options["drops"] = ItemCatalogScript.forage_food_ids()
     return service.query_resource_nodes(entry, resource_kinds_for_job(job), options)
 
 func resource_job_uses_outside_work_area(job: String) -> bool:
@@ -773,7 +827,7 @@ func prop_matches_job(prop: Node3D, entry: Dictionary, job: String) -> bool:
     if job == "stone":
         return material in ["rock", "copperOre", "ironOre"] or drop in ["stones", "copperOre", "ironOre"]
     if job == "forage":
-        return material == "berryBush" or drop == "berries"
+        return ItemCatalogScript.is_forage_food(drop)
     return false
 
 func job_position_allowed(entry: Dictionary, position: Vector3, outside_town_job: bool) -> bool:
@@ -798,43 +852,106 @@ func guard_post_candidates(entry: Dictionary) -> Array[Vector3]:
                     candidates.append(world.cell_position(guard_cell + Vector2i(dx, dz)))
     return candidates
 
-func hostile_intercept_candidates(entry: Dictionary, hostile: Node3D, melee := false) -> Array[Vector3]:
-    var candidates: Array[Vector3] = []
+func advance_hostile_intercept_selection(entry: Dictionary, hostile: Node3D, melee := false) -> Dictionary:
     var hostile_cell: Vector2i = world.world_cell(hostile.global_position)
+    var hostile_key := str(hostile.get_instance_id())
+    var selection: Dictionary = entry.get("_guardInterceptSelection", {}) if entry.get("_guardInterceptSelection", {}) is Dictionary else {}
+    var selection_matches: bool = String(selection.get("hostileKey", "")) == hostile_key \
+        and selection.get("hostileCell", INVALID_CELL) == hostile_cell \
+        and bool(selection.get("melee", false)) == melee
+    if not selection_matches:
+        selection = {
+            "hostileKey": hostile_key,
+            "hostileCell": hostile_cell,
+            "melee": melee,
+            "cells": hostile_intercept_candidate_cells(hostile_cell, melee),
+            "nextIndex": 0,
+            "candidates": []
+        }
+    var cells: Array = selection.get("cells", []) if selection.get("cells", []) is Array else []
+    var candidates: Array = selection.get("candidates", []) if selection.get("candidates", []) is Array else []
+    var next_index := int(selection.get("nextIndex", 0))
+    var evaluated := 0
+    while next_index < cells.size() and evaluated < GUARD_INTERCEPT_CANDIDATES_PER_CALL:
+        var cell_value = cells[next_index]
+        next_index += 1
+        evaluated += 1
+        if not (cell_value is Vector2i):
+            continue
+        var cell: Vector2i = cell_value
+        var position: Vector3 = world.cell_position(cell)
+        if not world.point_inside_work_area(entry, position):
+            continue
+        var surface_y := surface_y_at_position(position)
+        if surface_y < main.WATER_LEVEL + 0.45:
+            continue
+        candidates.append({ "position": position, "surfaceY": surface_y })
+    selection["nextIndex"] = next_index
+    selection["candidates"] = candidates
+    if next_index < cells.size():
+        entry["_guardInterceptSelection"] = selection
+        entry["guardInterceptSelectionPending"] = true
+        return {
+            "status": "pending",
+            "evaluated": evaluated,
+            "remaining": cells.size() - next_index
+        }
+    clear_hostile_intercept_selection(entry)
+    return {
+        "status": "ready",
+        "target": choose_nearest_hostile_intercept_anchor(entry, candidates),
+        "evaluated": evaluated,
+        "candidateCount": candidates.size()
+    }
+
+func hostile_intercept_candidate_cells(hostile_cell: Vector2i, melee := false) -> Array[Vector2i]:
+    var cells: Array[Vector2i] = []
     var min_radius := 1 if melee else 3
     var max_radius := 2 if melee else 6
-    var snapshot: Dictionary = navigation_snapshot(entry, true, false)
-    for radius in range(min_radius, max_radius + 1):
-        for dx in range(-radius, radius + 1):
-            for dz in range(-radius, radius + 1):
-                if max(abs(dx), abs(dz)) != radius:
-                    continue
-                var cell: Vector2i = hostile_cell + Vector2i(dx, dz)
-                var pos: Vector3 = world.cell_position(cell)
-                if not world.point_inside_work_area(entry, pos):
-                    continue
-                if surface_y_at_position(pos) < main.WATER_LEVEL + 0.45:
-                    continue
-                if not line_of_sight_cells_clear(entry, snapshot, pos, hostile.global_position):
-                    continue
-                candidates.append(pos)
-    return candidates
+    var radii := [min_radius, max_radius]
+    for radius_value in radii:
+        var radius: int = int(radius_value)
+        for direction in GUARD_INTERCEPT_DIRECTIONS:
+            cells.append(hostile_cell + direction * radius)
+    return cells
 
-func line_of_sight_cells_clear(_entry: Dictionary, snapshot: Dictionary, from_pos: Vector3, to_pos: Vector3) -> bool:
-    var from_cell: Vector2i = world.world_cell(from_pos)
-    var to_cell: Vector2i = world.world_cell(to_pos)
-    var delta := to_pos - from_pos
-    delta.y = 0.0
-    var samples := clampi(ceili(delta.length() / (CELL * 0.65)), 1, 24)
-    for i in range(1, samples):
-        var t := float(i) / float(samples)
-        var sample := from_pos.lerp(to_pos, t)
-        var cell: Vector2i = world.world_cell(sample)
-        if cell == from_cell or cell == to_cell:
+func choose_nearest_hostile_intercept_anchor(entry: Dictionary, candidates: Array) -> Vector3:
+    var body := entry.get("body") as Node3D
+    var origin: Vector3 = body.global_position if body != null else entry.get("guardPosition", Vector3.ZERO)
+    var ordered: Array = []
+    var seen := {}
+    for candidate in candidates:
+        if not (candidate is Dictionary):
             continue
-        if world.static_blocker(snapshot, cell) != null:
-            return false
-    return true
+        var position: Vector3 = candidate.get("position", Vector3.INF)
+        if position == Vector3.INF:
+            continue
+        var key := position_key(position)
+        if seen.has(key):
+            continue
+        seen[key] = true
+        ordered.append(candidate)
+    ordered.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+        var a_position: Vector3 = a.get("position", Vector3.INF)
+        var b_position: Vector3 = b.get("position", Vector3.INF)
+        var a_distance := a_position.distance_squared_to(origin)
+        var b_distance := b_position.distance_squared_to(origin)
+        if is_equal_approx(a_distance, b_distance):
+            return position_key(a_position) < position_key(b_position)
+        return a_distance < b_distance
+    )
+    for candidate in ordered:
+        var position: Vector3 = candidate.get("position", Vector3.INF)
+        if not world.point_allowed(entry, position, true, false):
+            continue
+        if float(candidate.get("surfaceY", -INF)) < main.WATER_LEVEL + 0.45:
+            continue
+        return position
+    return Vector3.INF
+
+func clear_hostile_intercept_selection(entry: Dictionary) -> void:
+    entry.erase("_guardInterceptSelection")
+    entry.erase("guardInterceptSelectionPending")
 
 func position_can_be_goal(entry: Dictionary, position: Vector3, allow_outside := false, moving_home := false) -> bool:
     if position == Vector3.INF:
@@ -843,6 +960,20 @@ func position_can_be_goal(entry: Dictionary, position: Vector3, allow_outside :=
         return false
     if world.has_method("cell_is_standable_goal"):
         var cell: Vector2i = world.world_cell(position) if world.has_method("world_cell") else Vector2i(roundi(position.x / CELL), roundi(position.z / CELL))
+        if not bool(world.cell_is_standable_goal(entry, cell, allow_outside, moving_home)):
+            return false
+    return surface_y_at_position(position) >= main.WATER_LEVEL + 0.45
+
+func position_can_be_static_goal(entry: Dictionary, position: Vector3, allow_outside := false, moving_home := false) -> bool:
+    if position == Vector3.INF:
+        return false
+    if not world.point_allowed(entry, position, allow_outside, moving_home):
+        return false
+    var cell: Vector2i = world.world_cell(position) if world.has_method("world_cell") else Vector2i(roundi(position.x / CELL), roundi(position.z / CELL))
+    if world.has_method("cell_is_static_standable_goal"):
+        if not bool(world.cell_is_static_standable_goal(entry, cell, allow_outside, moving_home)):
+            return false
+    elif world.has_method("cell_is_standable_goal"):
         if not bool(world.cell_is_standable_goal(entry, cell, allow_outside, moving_home)):
             return false
     return surface_y_at_position(position) >= main.WATER_LEVEL + 0.45

@@ -6,11 +6,15 @@ const CharacterMotorProfileScript := preload("res://scripts/npc_ai/contracts/Cha
 const LivePlaytestPlayerNavigatorScript := preload("res://scripts/testing/player/LivePlaytestPlayerNavigator.gd")
 const TEST_ID := "npc_tutorial_real_knock_repair_sleep_morning_foragers"
 const CELL := 1.35
-const STARTUP_FRAMES := 80
 const POST_ACTION_FRAMES := 24
 const SAMPLE_EVERY_FRAMES := 6
 const MIRA_HOME_TIMEOUT_SECONDS := 36.0
 const MIRA_HOME_SETTLED_FRAMES := 30
+const MIRA_FIRST_DEPARTURE_DISTANCE := CELL * 0.10
+const MIRA_PORCH_CLEARANCE_DISTANCE := CELL * 3.0
+const MIRA_PORCH_CLEARANCE_SETTLED_FRAMES := 30
+const MIRA_FIRST_MOTION_MAX_SECONDS := 5.0
+const MIRA_PORCH_CLEARANCE_MAX_SECONDS := 6.0
 const MIRA_STARTER_WALL_STUCK_FRAMES := 240
 const MORNING_FORAGE_TIMEOUT_SECONDS := 70.0
 const MORNING_FORAGE_SAMPLE_EVERY_FRAMES := 30
@@ -67,6 +71,12 @@ var niko_proof := {}
 var startup_loading_steps: Array[Dictionary] = []
 var max_mira_flat_speed := 0.0
 var mira_total_flat_distance := 0.0
+var mira_departure_timing: Dictionary = {}
+var mira_departure_ack_position := Vector3.ZERO
+var mira_departure_ack_position_valid := false
+var mira_player_porch_position := Vector3.ZERO
+var mira_player_porch_position_valid := false
+var mira_porch_clearance_settled_frames := 0
 var previous_mira_position := Vector3.ZERO
 var previous_mira_valid := false
 var previous_mira_elapsed := 0.0
@@ -79,6 +89,8 @@ var morning_outside_only := false
 var day_one_tutorial := false
 var final_rescue_tutorial := false
 var playtest_god_mode := false
+var phase7_live_acceptance := false
+var phase7_loading_capture_taken := false
 var captured_mira_start := false
 var captured_mira_route_departure := false
 var captured_mira_route_midpoint := false
@@ -114,6 +126,7 @@ func configure_visual_capture() -> void:
     morning_outside_only = OS.get_environment("VOXEL_REAL_TUTORIAL_MORNING_OUTSIDE_ONLY").strip_edges() == "1"
     final_rescue_tutorial = OS.get_environment("VOXEL_REAL_TUTORIAL_FINAL_RESCUE").strip_edges() == "1"
     playtest_god_mode = OS.get_environment("VOXEL_REAL_TUTORIAL_GOD_MODE").strip_edges() == "1"
+    phase7_live_acceptance = OS.get_environment("VOXEL_REAL_TUTORIAL_PHASE7_LIVE_ACCEPTANCE").strip_edges() == "1"
     day_one_tutorial = OS.get_environment("VOXEL_REAL_TUTORIAL_DAY_ONE").strip_edges() == "1" or final_rescue_tutorial
     screenshot_dir = OS.get_environment("VOXEL_REAL_TUTORIAL_SCREENSHOT_DIR")
     if screenshot_dir == "":
@@ -139,6 +152,7 @@ func run() -> void:
         "dayOneTutorial": day_one_tutorial,
         "finalRescueTutorial": final_rescue_tutorial,
         "playtestGodMode": playtest_god_mode,
+        "phase7LiveAcceptance": phase7_live_acceptance,
         "fullPlayerPov": full_player_pov_visual_mode(),
         "screenshotDir": screenshot_dir,
         "visualCaptures": visual_captures,
@@ -161,6 +175,11 @@ func run() -> void:
         "forbiddenCallSelfScan": { "status": "passed-by-wrapper-before-launch" }
     }
 
+    if phase7_live_acceptance and not phase7_environment_is_clean():
+        add_failure("phase7_live_acceptance_environment_invalid", "Phase 7 live acceptance requires VOXEL_PLAYTEST, VOXEL_TEST_SEED, VOXEL_SAVE_PATH_OVERRIDE, and god mode to be unset")
+        finish()
+        return
+
     if not await launch_main_via_menu():
         finish()
         return
@@ -168,9 +187,10 @@ func run() -> void:
     mark_progress("preparing_tutorial_world")
     await prepare_tutorial_world()
     mark_progress("tutorial_world_prepared")
-    mark_progress("waiting_startup_frames")
-    await wait_physics_frames(STARTUP_FRAMES)
-    mark_progress("startup_frames_ready")
+    report_data["preInteractionStagingFrames"] = 0
+    report_data["preInteractionGate"] = "live_main_tutorial_player_and_starter_door_readiness"
+    report_data["postLoadFixedWaitFrames"] = 0
+    mark_progress("no_fixed_post_load_wait")
     bind_scene_nodes()
 
     if main == null or player == null or camera == null:
@@ -224,6 +244,17 @@ func launch_main_via_menu() -> bool:
     if button == null or not is_instance_valid(button) or not button.visible or button.disabled:
         add_failure("main_menu_new_game_button_missing", "Title menu did not expose a visible enabled New Game button")
         return false
+    if phase7_live_acceptance:
+        await capture_phase7_viewport_stage("phase7_menu_before_new_game", {
+            "button": {
+                "text": button.text,
+                "position": vec2(button.global_position),
+                "size": vec2(button.size),
+                "visible": button.visible,
+                "disabled": button.disabled
+            },
+            "realBootAttachedToMainMenu": report_data.get("realBootAttachedToMainMenu", false)
+        })
     dispatch_mouse_button_at(MOUSE_BUTTON_LEFT, true, button_center(button), "menu_new_game_press")
     dispatch_mouse_button_at(MOUSE_BUTTON_LEFT, false, button_center(button), "menu_new_game_release")
     mark_progress("main_menu_new_game_button_input")
@@ -244,6 +275,7 @@ func launch_main_via_menu() -> bool:
             if frame % 60 == 0:
                 mark_progress("main_menu_waiting_for_main_load active=%s loading=%s" % [str(main != null), str(loading_active)])
             if not loading_active:
+                record_actual_world_seed()
                 mark_progress("main_menu_new_game_loaded")
                 return true
     add_failure("main_menu_launch_timeout", "New Game did not produce a loaded Main scene")
@@ -257,6 +289,16 @@ func existing_main_menu_parent() -> Node:
     if button is Button:
         return parent
     return null
+
+func record_actual_world_seed() -> void:
+    if main == null or not is_instance_valid(main):
+        return
+    var actual_seed := String(main.get("seed_text")).strip_edges()
+    if actual_seed == "":
+        return
+    report_data["seed"] = actual_seed
+    report_data["actualWorldSeed"] = actual_seed
+    report_data["actualWorldSeedSource"] = "Main.seed_text_after_new_game_loading"
 
 func button_center(button: Button) -> Vector2:
     if button == null:
@@ -284,6 +326,19 @@ func _on_main_startup_loading_step(message: String) -> void:
     startup_loading_steps.append(entry)
     report_data["startupLoadingSteps"] = startup_loading_steps
     mark_progress("main_loading_step:%s" % message)
+    if phase7_live_acceptance and not phase7_loading_capture_taken and message == "Gameplay prerequisites ready":
+        phase7_loading_capture_taken = true
+        call_deferred("capture_phase7_loading_step", message)
+
+func capture_phase7_loading_step(message: String) -> void:
+    # Capture the frame that renders the final loading message. The generic
+    # visual helper deliberately settles for two process frames, but the title
+    # and HUD loading overlays are removed as soon as startup completes.
+    await RenderingServer.frame_post_draw
+    await capture_phase7_viewport_stage("phase7_loading_gameplay_prerequisites", {
+        "loadingStep": message,
+        "startupLoadingSteps": startup_loading_steps.duplicate(true)
+    }, 0)
 
 func wait_for_tutorial_town_ready(max_seconds: float) -> bool:
     var max_frames := ceili(max_seconds * float(Engine.physics_ticks_per_second))
@@ -655,11 +710,6 @@ func run_real_knock_to_morning_foragers() -> void:
             door_position + Vector3(0.0, CELL * 0.75, 0.0),
             { "stageReason": "tutorial_start_before_intro_door_walk" }
         )
-    mark_progress("walking_to_door")
-    await walk_near(door_position, CELL * 1.55, 9.0)
-    sample_player("near_door")
-    aim_at(door_position + Vector3(0.0, CELL * 0.75, 0.0))
-    await wait_physics_frames(POST_ACTION_FRAMES)
     sample_door("before_click", starter_door)
     if full_player_pov_visual_mode():
         await capture_player_pov_stage(
@@ -667,9 +717,9 @@ func run_real_knock_to_morning_foragers() -> void:
             door_position + Vector3(0.0, CELL * 0.75, 0.0),
             { "door": block_summary(starter_door) }
         )
-    mark_progress("dispatching_door_action")
-    dispatch_mouse_button(MOUSE_BUTTON_RIGHT, true)
-    dispatch_mouse_button(MOUSE_BUTTON_RIGHT, false)
+    mark_progress("opening_intro_door_with_player_navigator")
+    var door_input_ok := await use_block_with_real_action(starter_door, "opening_tutorial_door", CELL * 1.55, 12.0)
+    sample_player("after_navigator_intro_door_action")
     await wait_physics_frames(POST_ACTION_FRAMES)
     sample_door("after_click", starter_door)
     sample_player("after_door_action")
@@ -686,11 +736,11 @@ func run_real_knock_to_morning_foragers() -> void:
     var dialogue_open := hud_dialogue_open()
     results.append({
         "name": "real_door_input_opened_tutorial_dialogue",
-        "passed": opened and dialogue_open,
-        "details": "doorOpened=%s dialogueOpen=%s" % [str(opened), str(dialogue_open)]
+        "passed": door_input_ok and opened and dialogue_open,
+        "details": "navigatorInput=%s doorOpened=%s dialogueOpen=%s" % [str(door_input_ok), str(opened), str(dialogue_open)]
     })
-    if not opened or not dialogue_open:
-        add_failure("real_input_path_failed_before_mira_observation", "doorOpened=%s dialogueOpen=%s" % [str(opened), str(dialogue_open)])
+    if not door_input_ok or not opened or not dialogue_open:
+        add_failure("real_input_path_failed_before_mira_observation", "navigatorInput=%s doorOpened=%s dialogueOpen=%s" % [str(door_input_ok), str(opened), str(dialogue_open)])
         return
 
     mark_progress("closing_dialogue")
@@ -711,11 +761,14 @@ func run_real_knock_to_morning_foragers() -> void:
     if not bool(report_data["afterDialogueTutorialState"].get("elderAcknowledged", false)):
         add_failure("mira_dialogue_ack_not_recorded", "tutorial state did not record elder acknowledgement after HUD close")
         return
+    begin_phase7_mira_departure_observation(starter_door)
 
     mark_progress("observing_mira_return_home")
     var mira_home_timeout := mira_home_observation_timeout(MIRA_HOME_TIMEOUT_SECONDS)
     report_data["miraHomeObservationTimeout"] = rounded(mira_home_timeout)
     await observe_mira_until_home(mira_home_timeout)
+    if not validate_phase7_mira_departure_timing():
+        return
     if focused_mira_visual_mode() and not captured_mira_inside_closed:
         await capture_mira_stage("mira_timeout_final_state", "front")
     var mira := npc_entry("mira")
@@ -857,6 +910,7 @@ func observe_mira_until_home(seconds: float) -> void:
         await get_tree().physics_frame
         track_mira_speed()
         var mira := npc_entry("mira")
+        track_phase7_mira_departure(mira)
         var starter_regression := mira_starter_house_route_regression_sample(mira)
         if bool(starter_regression.get("enteredStarterInterior", false)):
             mira_starter_route_regression = starter_regression
@@ -901,6 +955,109 @@ func observe_mira_until_home(seconds: float) -> void:
             mark_progress("mira_home_%03d" % frame)
         if settled_frames >= MIRA_HOME_SETTLED_FRAMES:
             break
+
+func begin_phase7_mira_departure_observation(starter_door: Node3D) -> void:
+    if not phase7_live_acceptance:
+        return
+    mira_departure_timing = {
+        "dialogueAcknowledgement": {
+            "time": rounded(elapsed),
+            "physicsFrame": Engine.get_physics_frames()
+        }
+    }
+    mira_porch_clearance_settled_frames = 0
+    mira_player_porch_position_valid = starter_door != null and is_instance_valid(starter_door)
+    if mira_player_porch_position_valid:
+        mira_player_porch_position = starter_door.global_position
+    var mira := npc_entry("mira")
+    var body := mira.get("body") as Node3D
+    mira_departure_ack_position_valid = body != null and is_instance_valid(body)
+    if mira_departure_ack_position_valid:
+        mira_departure_ack_position = body.global_position
+    report_data["miraDepartureTiming"] = mira_departure_timing
+
+func track_phase7_mira_departure(mira: Dictionary) -> void:
+    if not phase7_live_acceptance or mira_departure_timing.is_empty():
+        return
+    var body := mira.get("body") as Node3D
+    if body == null or not is_instance_valid(body):
+        return
+    var order: Dictionary = mira.get("scriptedOrder", {}) if mira.get("scriptedOrder", {}) is Dictionary else {}
+    if not mira_departure_timing.has("goHomeOrderSubmission") and String(order.get("kind", "")) == "go_home":
+        phase7_record_mira_departure_event("goHomeOrderSubmission", {
+            "order": order.duplicate(true)
+        })
+    var authority := route_authority_v2_debug(mira)
+    if not mira_departure_timing.has("firstRouteRequest") and String(authority.get("requestId", "")) != "":
+        phase7_record_mira_departure_event("firstRouteRequest", {
+            "routeAuthority": authority.duplicate(true)
+        })
+    if mira_departure_ack_position_valid and not mira_departure_timing.has("firstNontrivialDisplacement"):
+        var displacement := flat_distance(body.global_position, mira_departure_ack_position)
+        if displacement >= MIRA_FIRST_DEPARTURE_DISTANCE:
+            phase7_record_mira_departure_event("firstNontrivialDisplacement", {
+                "distanceFromAcknowledgement": rounded(displacement),
+                "position": vec3(body.global_position),
+                "routeAuthority": authority.duplicate(true)
+            })
+    if mira_player_porch_position_valid and not mira_departure_timing.has("playerPorchClearance"):
+        if flat_distance(body.global_position, mira_player_porch_position) > MIRA_PORCH_CLEARANCE_DISTANCE:
+            mira_porch_clearance_settled_frames += 1
+        else:
+            mira_porch_clearance_settled_frames = 0
+        if mira_porch_clearance_settled_frames >= MIRA_PORCH_CLEARANCE_SETTLED_FRAMES:
+            phase7_record_mira_departure_event("playerPorchClearance", {
+                "settledFrames": mira_porch_clearance_settled_frames,
+                "position": vec3(body.global_position),
+                "routeAuthority": authority.duplicate(true)
+            })
+
+func phase7_record_mira_departure_event(name: String, details: Dictionary) -> void:
+    if mira_departure_timing.has(name):
+        return
+    mira_departure_timing[name] = {
+        "time": rounded(elapsed),
+        "physicsFrame": Engine.get_physics_frames(),
+        "details": details
+    }
+    report_data["miraDepartureTiming"] = mira_departure_timing
+
+func validate_phase7_mira_departure_timing() -> bool:
+    if not phase7_live_acceptance:
+        return true
+    report_data["miraDepartureTiming"] = mira_departure_timing
+    var acknowledgement: Dictionary = mira_departure_timing.get("dialogueAcknowledgement", {}) if mira_departure_timing.get("dialogueAcknowledgement", {}) is Dictionary else {}
+    var acknowledgement_time := float(acknowledgement.get("time", INF))
+    var command: Dictionary = mira_departure_timing.get("goHomeOrderSubmission", {}) if mira_departure_timing.get("goHomeOrderSubmission", {}) is Dictionary else {}
+    var command_frame_delay := int(command.get("physicsFrame", -1)) - int(acknowledgement.get("physicsFrame", -1))
+    if command.is_empty() or command_frame_delay < 0 or command_frame_delay > 1:
+        add_failure("phase7_mira_go_home_not_retained_after_acknowledgement", JSON.stringify(mira_departure_timing))
+        return false
+    var route_request: Dictionary = mira_departure_timing.get("firstRouteRequest", {}) if mira_departure_timing.get("firstRouteRequest", {}) is Dictionary else {}
+    if route_request.is_empty() or float(route_request.get("time", INF)) - acknowledgement_time > 1.0:
+        add_failure("phase7_mira_route_work_not_started_promptly", JSON.stringify(mira_departure_timing))
+        return false
+    var first_motion: Dictionary = mira_departure_timing.get("firstNontrivialDisplacement", {}) if mira_departure_timing.get("firstNontrivialDisplacement", {}) is Dictionary else {}
+    var first_motion_delay := float(first_motion.get("time", INF)) - acknowledgement_time
+    report_data["miraFirstMotionDelayAfterAcknowledgement"] = rounded(first_motion_delay) if is_finite(first_motion_delay) else null
+    if first_motion.is_empty() or not is_finite(first_motion_delay) or first_motion_delay > MIRA_FIRST_MOTION_MAX_SECONDS:
+        add_failure("phase7_mira_home_execution_started_too_late", JSON.stringify({
+            "delaySeconds": first_motion_delay,
+            "maximumSeconds": MIRA_FIRST_MOTION_MAX_SECONDS,
+            "timing": mira_departure_timing
+        }))
+        return false
+    var porch_clearance: Dictionary = mira_departure_timing.get("playerPorchClearance", {}) if mira_departure_timing.get("playerPorchClearance", {}) is Dictionary else {}
+    var porch_clearance_delay := float(porch_clearance.get("time", INF)) - acknowledgement_time
+    report_data["miraPorchClearanceDelayAfterAcknowledgement"] = rounded(porch_clearance_delay) if is_finite(porch_clearance_delay) else null
+    if porch_clearance.is_empty() or not is_finite(porch_clearance_delay) or porch_clearance_delay > MIRA_PORCH_CLEARANCE_MAX_SECONDS:
+        add_failure("phase7_mira_player_porch_clearance_too_late", JSON.stringify({
+            "delaySeconds": porch_clearance_delay,
+            "maximumSeconds": MIRA_PORCH_CLEARANCE_MAX_SECONDS,
+            "timing": mira_departure_timing
+        }))
+        return false
+    return true
 
 func mira_home_observation_timeout(minimum_seconds: float) -> float:
     var mira := npc_entry("mira")
@@ -1130,7 +1287,7 @@ func restore_gameplay_camera() -> void:
         camera.make_current()
 
 func focused_mira_visual_mode() -> bool:
-    return visual_required and mira_home_only and not morning_outside_only
+    return visual_required and (mira_home_only or phase7_live_acceptance) and not morning_outside_only
 
 func full_player_pov_visual_mode() -> bool:
     return visual_required and not mira_home_only and not morning_outside_only
@@ -1163,6 +1320,39 @@ func capture_player_pov_stage(stage: String, look_target = null, extra_sample: D
     if not saved_ok:
         add_failure("player_pov_screenshot_empty", JSON.stringify(capture))
     return saved_ok
+
+func capture_phase7_viewport_stage(stage: String, extra_sample: Dictionary = {}, settle_frames: int = 2) -> bool:
+    if not phase7_live_acceptance or not visual_required:
+        return true
+    if settle_frames > 0:
+        await wait_process_frames(settle_frames)
+    var image := get_viewport().get_texture().get_image()
+    var path := screenshot_dir.path_join("%s.png" % stage)
+    var err := image.save_png(path)
+    var byte_count := 0
+    if FileAccess.file_exists(path):
+        byte_count = FileAccess.get_file_as_bytes(path).size()
+    var saved_ok := err == OK and byte_count > 0
+    var capture := {
+        "stage": stage,
+        "path": path,
+        "saved": saved_ok,
+        "bytes": byte_count,
+        "cameraMode": "system_viewport",
+        "time": rounded(elapsed),
+        "sample": extra_sample.duplicate(true)
+    }
+    visual_captures.append(capture)
+    report_data["visualCaptures"] = visual_captures
+    if not saved_ok:
+        add_failure("phase7_viewport_screenshot_empty", JSON.stringify(capture))
+    return saved_ok
+
+func phase7_environment_is_clean() -> bool:
+    return OS.get_environment("VOXEL_PLAYTEST").strip_edges() == "" \
+        and OS.get_environment("VOXEL_TEST_SEED").strip_edges() == "" \
+        and OS.get_environment("VOXEL_SAVE_PATH_OVERRIDE").strip_edges() == "" \
+        and OS.get_environment("VOXEL_REAL_TUTORIAL_GOD_MODE").strip_edges() == ""
 
 func player_pov_capture_sample(extra_sample: Dictionary = {}) -> Dictionary:
     var sample := extra_sample.duplicate(true)
@@ -1644,9 +1834,10 @@ func attempt_sleep_before_repair(tutorial) -> void:
         add_failure("starter_bed_missing", "could not find tutorial starter bed")
         return
     var before := tutorial_state_summary(tutorial)
-    var route_reached := await walk_intro_path_to_starter_bed(tutorial, "bed_before_repair_route")
-    if not route_reached:
-        return
+    if not phase7_live_acceptance:
+        var route_reached := await walk_intro_path_to_starter_bed(tutorial, "bed_before_repair_route")
+        if not route_reached:
+            return
     var bed_used := await use_bed_with_real_action(bed, "bed_before_repair", 10.0)
     if not bed_used:
         return
@@ -1670,9 +1861,10 @@ func run_repair_flow(tutorial) -> void:
     if chest == null:
         add_failure("intro_repair_chest_missing", "could not find repair chest")
         return
-    var chest_route_reached := await walk_intro_path_to_town_center(tutorial, "repair_chest_route")
-    if not chest_route_reached:
-        return
+    if not phase7_live_acceptance:
+        var chest_route_reached := await walk_intro_path_to_town_center(tutorial, "repair_chest_route")
+        if not chest_route_reached:
+            return
     var chest_used := await use_block_with_real_action(chest, "repair_chest", CELL * 1.75, 14.0)
     if not chest_used:
         return
@@ -1726,7 +1918,7 @@ func run_repair_flow(tutorial) -> void:
     var town_center := intro_state_cell(tutorial, "townCenter", flat_cell(player.global_position))
     var failures_before_repair := failure_reasons.size()
     for north_side in [true, false]:
-        if not north_side:
+        if not phase7_live_acceptance and not north_side:
             var bypass_reached := await walk_to_south_repair_bypass(town_center)
             if not bypass_reached:
                 return
@@ -1758,9 +1950,10 @@ func attempt_sleep_after_repair(tutorial) -> void:
         add_failure("starter_bed_missing_after_repair", "could not find tutorial starter bed")
         return
     var before := tutorial_state_summary(tutorial)
-    var bed_route_reached := await walk_intro_path_to_starter_bed(tutorial, "bed_after_repair_route")
-    if not bed_route_reached:
-        return
+    if not phase7_live_acceptance:
+        var bed_route_reached := await walk_intro_path_to_starter_bed(tutorial, "bed_after_repair_route")
+        if not bed_route_reached:
+            return
     var bed_used := await use_bed_with_real_action(bed, "bed_after_repair", 12.0)
     if not bed_used:
         return
@@ -1875,6 +2068,7 @@ func observe_morning_npcs_and_foragers(seconds: float) -> void:
             "postRelease": captured_forage_post_release
         }
     }
+    niko_proof["candidateDiagnostics"] = niko_forage_candidate_diagnostics(final_niko)
     var forage_complete := final_runs > before_runs
     var outside_search_proof := niko_outside_forage_activity_proof(before_niko, final_niko, niko_timeline, observed_departures)
     niko_proof["outsideSearchProof"] = outside_search_proof
@@ -1904,6 +2098,109 @@ func observe_morning_npcs_and_foragers(seconds: float) -> void:
     else:
         add_failure("niko_forager_cycle_not_completed", JSON.stringify(niko_proof))
     mark_progress("morning_forage_proof_finished")
+
+func niko_forage_candidate_diagnostics(entry: Dictionary) -> Dictionary:
+    var system = main.get("npc_system") if main != null else null
+    if system == null:
+        return { "ok": false, "reason": "missing_npc_system" }
+    var autonomy = system.get("autonomy_system")
+    var service = autonomy.get("smart_objects") if autonomy != null else null
+    if service == null:
+        return { "ok": false, "reason": "missing_smart_object_service" }
+    var registrations = service.get("registrations")
+    if not (registrations is Dictionary):
+        return { "ok": false, "reason": "missing_registration_index" }
+    var forage_drops: Array = system.call("forage_food_item_ids") if system.has_method("forage_food_item_ids") else []
+    var query_options := {
+        "limit": 48,
+        "drops": forage_drops,
+        "outsideTown": true,
+        "workAreaOnly": true,
+        "chunkRadius": 2,
+        "cacheFrames": 0,
+        "unreachableMetaKey": String(entry.get("foragerUnreachableMetaKey", ""))
+    }
+    var query_nodes: Array = service.call("query_resource_nodes", entry, ["forage_source"], query_options)
+    var query_ids: Array[String] = []
+    for node_value in query_nodes:
+        if node_value is Node and (node_value as Node).has_meta("prop_id"):
+            query_ids.append("prop:%s" % String((node_value as Node).get_meta("prop_id")))
+    query_ids.sort()
+    var counters := {
+        "forageSourceRegistrations": 0,
+        "liveNodes": 0,
+        "harvested": 0,
+        "depleted": 0,
+        "wrongDrop": 0,
+        "outsideWorkArea": 0,
+        "insideTown": 0,
+        "belowWater": 0,
+        "unavailable": 0,
+        "eligible": 0
+    }
+    var rows: Array = []
+    var object_ids: Array = registrations.keys()
+    object_ids.sort()
+    for object_id_value in object_ids:
+        var object_id := String(object_id_value)
+        var registration = registrations.get(object_id)
+        if registration == null or String(registration.kind) != "forage_source":
+            continue
+        counters["forageSourceRegistrations"] = int(counters.get("forageSourceRegistrations", 0)) + 1
+        var node = registration.node
+        var row := { "objectId": object_id, "reasons": [] }
+        if node == null or not is_instance_valid(node) or not (node is Node3D):
+            row["reasons"].append("missing_live_node")
+            rows.append(row)
+            continue
+        var prop := node as Node3D
+        counters["liveNodes"] = int(counters.get("liveNodes", 0)) + 1
+        var drop := String(prop.get_meta("drop", registration.metadata.get("drop", "")))
+        var harvested := bool(prop.get_meta("npc_harvested", false))
+        var depleted := bool(prop.get_meta("smart_object_depleted", false)) or bool(registration.depleted)
+        var inside_work_area := bool(system.call("point_inside_work_area", entry, prop.global_position)) if system.has_method("point_inside_work_area") else false
+        var inside_town := bool(system.call("point_inside_town_footprint", entry, prop.global_position, 3)) if system.has_method("point_inside_town_footprint") else true
+        var surface_y := float(main.surface_y_at_position(prop.global_position)) if main != null and main.has_method("surface_y_at_position") else prop.global_position.y
+        var above_water := main == null or surface_y >= float(main.WATER_LEVEL) + 0.45
+        var available: Dictionary = service.call("object_available", object_id, String(entry.get("id", "")))
+        var drop_is_forage := forage_drops.has(drop)
+        if harvested:
+            counters["harvested"] = int(counters.get("harvested", 0)) + 1
+            row["reasons"].append("harvested")
+        if depleted:
+            counters["depleted"] = int(counters.get("depleted", 0)) + 1
+            row["reasons"].append("depleted")
+        if not drop_is_forage:
+            counters["wrongDrop"] = int(counters.get("wrongDrop", 0)) + 1
+            row["reasons"].append("wrong_drop")
+        if not inside_work_area:
+            counters["outsideWorkArea"] = int(counters.get("outsideWorkArea", 0)) + 1
+            row["reasons"].append("outside_work_area")
+        if inside_town:
+            counters["insideTown"] = int(counters.get("insideTown", 0)) + 1
+            row["reasons"].append("inside_town")
+        if not above_water:
+            counters["belowWater"] = int(counters.get("belowWater", 0)) + 1
+            row["reasons"].append("below_water")
+        if not bool(available.get("ok", false)):
+            counters["unavailable"] = int(counters.get("unavailable", 0)) + 1
+            row["reasons"].append("unavailable:%s" % String(available.get("reason", "unknown")))
+        if (row["reasons"] as Array).is_empty():
+            counters["eligible"] = int(counters.get("eligible", 0)) + 1
+        row["drop"] = drop
+        row["position"] = vec3(prop.global_position)
+        row["insideWorkArea"] = inside_work_area
+        row["insideTown"] = inside_town
+        row["aboveWater"] = above_water
+        row["available"] = bool(available.get("ok", false))
+        rows.append(row)
+    return {
+        "ok": true,
+        "queryOptions": query_options,
+        "queryCandidateIds": query_ids,
+        "counters": counters,
+        "registrations": rows
+    }
 
 func niko_outside_forage_activity_proof(before_niko: Dictionary, final_niko: Dictionary, timeline: Array, observed_departures: Dictionary) -> Dictionary:
     var departure: Dictionary = observed_departures.get("niko", {}) if observed_departures.get("niko", {}) is Dictionary else {}
@@ -3422,44 +3719,81 @@ func position_inside_entry_home(entry: Dictionary, position: Vector3) -> bool:
     return cell.x >= min_cell.x and cell.x <= max_cell.x and cell.y >= min_cell.y and cell.y <= max_cell.y
 
 func player_current_home_entry() -> Dictionary:
-    var starter_entry := player_starter_shelter_entry()
-    if not starter_entry.is_empty() and position_inside_entry_home(starter_entry, player.global_position):
-        return starter_entry
-    var npc_system = main.get("npc_system") if main != null else null
-    if npc_system == null:
-        return {}
-    var entries: Array = npc_system.get("npcs")
-    for entry_value in entries:
-        var entry: Dictionary = entry_value
+    for entry in player_navigation_home_entries():
         if position_inside_entry_home(entry, player.global_position):
-            return entry
+            return entry.duplicate(true)
     return {}
+
+func player_navigation_home_entries() -> Array[Dictionary]:
+    var results: Array[Dictionary] = []
+    var starter_entry := player_starter_shelter_entry()
+    if not starter_entry.is_empty():
+        results.append(starter_entry)
+    var npc_system = main.get("npc_system") if main != null else null
+    if npc_system == null or not (npc_system.get("npcs") is Array):
+        return results
+    for entry_value in npc_system.get("npcs"):
+        if entry_value is Dictionary:
+            results.append((entry_value as Dictionary).duplicate(true))
+    return results
 
 func player_starter_shelter_entry() -> Dictionary:
     if main == null or player == null:
         return {}
     var tutorial = main.get("tutorial_system")
-    if tutorial == null or not tutorial.has_method("state"):
+    if tutorial == null:
         return {}
-    var start_cell := intro_state_cell(tutorial, "startCell", flat_cell(player.global_position))
-    var bounds := starter_house_bounds(start_cell)
-    var min_cell: Vector2i = bounds.get("min", start_cell)
-    var max_cell: Vector2i = bounds.get("max", start_cell)
-    var door_cell := Vector2i(start_cell.x, start_cell.y - 3)
-    var porch_cell := Vector2i(start_cell.x, start_cell.y - 4)
-    var interior_landing_cell := Vector2i(start_cell.x, start_cell.y - 1)
+    var manifest_value = tutorial.get("startup_town_manifest")
+    if not (manifest_value is Dictionary):
+        return {}
+    var manifest: Dictionary = manifest_value
+    var homes_value = manifest.get("homesByKey", {})
+    if not (homes_value is Dictionary):
+        return {}
+    var homes: Dictionary = homes_value
+    var home_value = homes.get("0", homes.get(0, {}))
+    if not (home_value is Dictionary):
+        return {}
+    var home: Dictionary = home_value
+    var home_cell_value = home.get("homeCell", null)
+    var porch_cell_value = home.get("porchCell", null)
+    var door_cell_value = home.get("doorCell", null)
+    var landing_cell_value = home.get("interiorLandingCell", null)
+    var min_cell_value = home.get("interiorMinCell", null)
+    var max_cell_value = home.get("interiorMaxCell", null)
+    if not (home_cell_value is Vector2i \
+    and porch_cell_value is Vector2i \
+    and door_cell_value is Vector2i \
+    and landing_cell_value is Vector2i \
+    and min_cell_value is Vector2i \
+    and max_cell_value is Vector2i):
+        return {}
+    var home_cell: Vector2i = home_cell_value
+    var porch_cell: Vector2i = porch_cell_value
+    var door_cell: Vector2i = door_cell_value
+    var interior_landing_cell: Vector2i = landing_cell_value
+    var min_cell: Vector2i = min_cell_value
+    var max_cell: Vector2i = max_cell_value
     var door := nearest_block("door", world_position_for_flat_cell(door_cell))
     return {
         "id": "player_starter_shelter",
         "name": "Player Starter Shelter",
-        "homeCell": start_cell,
-        "homePosition": world_position_for_flat_cell(start_cell),
+        "homeKey": int(home.get("homeKey", 0)),
+        "homeStableId": String(home.get("stableId", home.get("id", ""))),
+        "homeCell": home_cell,
+        "homePosition": world_position_for_flat_cell(home_cell),
         "porchCell": porch_cell,
         "porchPosition": world_position_for_flat_cell(porch_cell),
         "doorCell": door_cell,
+        "doorPosition": world_position_for_flat_cell(door_cell),
+        "doorPortalId": String(home.get("doorPortalId", "")),
         "interiorLandingCell": interior_landing_cell,
         "interiorMinCell": min_cell,
         "interiorMaxCell": max_cell,
+        "homeRouteCells": (home.get("homeRouteCells", []) as Array).duplicate(true),
+        "townKey": String(manifest.get("townKey", "")),
+        "townCenter": manifest.get("center", Vector2i.ZERO),
+        "townRadius": int(manifest.get("radius", 0)),
         "activeDoorPortalId": "",
         "doorPath": String(door.get_path()) if door != null and is_instance_valid(door) else ""
     }
@@ -4098,13 +4432,15 @@ func walk_near(target: Vector3, stop_distance: float, timeout_seconds: float, la
     return reached
 
 func walk_tutorial_route_near(target: Vector3, stop_distance: float, timeout_seconds: float, label: String) -> bool:
-    var current_home := player_current_home_entry()
-    if not current_home.is_empty() and not position_inside_entry_home(current_home, target):
-        var left_home := await leave_current_player_home_for_route(current_home, label)
-        if not left_home:
-            return false
     if player_route_authority_available():
         return await walk_authority_route_near(target, stop_distance, timeout_seconds, label)
+    if phase7_live_acceptance:
+        add_failure("phase7_player_route_authority_unavailable", JSON.stringify({
+            "label": label,
+            "target": vec3(target),
+            "stopDistance": rounded(stop_distance)
+        }))
+        return false
     record_player_route_event(label, "authority_unavailable", {
         "target": vec3(target),
         "stopDistance": rounded(stop_distance),
@@ -4251,7 +4587,9 @@ func walk_authority_route_near(target: Vector3, stop_distance: float, timeout_se
             "label": label,
             "stopDistance": stop_distance,
             "timeout": timeout_seconds,
-            "planTimeout": player_route_plan_timeout_for_target(target, timeout_seconds)
+            "planTimeout": player_route_plan_timeout_for_target(target, timeout_seconds),
+            "tutorialPerimeterRecovery": false,
+            "routeSemanticKind": "interaction_target"
         })
         if not bool(navigator_result.get("ok", false)) and full_player_pov_visual_mode():
             await capture_player_pov_stage(
@@ -4267,73 +4605,8 @@ func walk_authority_route_near(target: Vector3, stop_distance: float, timeout_se
             )
         return bool(navigator_result.get("ok", false))
 
-    var started_at := elapsed
-    var plan_timeout := player_route_plan_timeout_for_target(target, timeout_seconds)
-    var route_result := await plan_player_authority_route(target, stop_distance, plan_timeout, label)
-    if not bool(route_result.get("available", false)):
-        return await walk_near(target, stop_distance, timeout_seconds, label)
-    if not bool(route_result.get("ready", false)):
-        if full_player_pov_visual_mode():
-            await capture_player_pov_stage(
-                "player_pov_failure_%s_authority_route" % safe_capture_id(label),
-                target,
-                {
-                    "failureCandidate": "player_route_authority_not_ready",
-                    "label": label,
-                    "target": vec3(target),
-                    "player": vec3(player.global_position),
-                    "route": route_result.get("routeSummary", {})
-                }
-            )
-        return false
-
-    var route: Dictionary = route_result.get("route", {})
-    var waypoints := player_route_waypoints(route)
-    var actions: Dictionary = route.get("actions", {}) if route.get("actions", {}) is Dictionary else {}
-    var handled_action_keys := {}
-    record_player_route_event(label, "execute_ready_route", {
-        "target": vec3(target),
-        "stopDistance": rounded(stop_distance),
-        "route": player_route_summary(route)
-    })
-
-    if waypoints.is_empty():
-        return flat_distance(player.global_position, target) <= stop_distance
-
-    for index in range(waypoints.size()):
-        if flat_distance(player.global_position, target) <= stop_distance:
-            return true
-        var remaining := timeout_seconds - (elapsed - started_at)
-        if remaining <= 0.0:
-            return false
-        var waypoint: Vector3 = waypoints[index]
-        var action_info := player_route_action_for_waypoint(actions, waypoint, handled_action_keys)
-        if not action_info.is_empty():
-            var action: Dictionary = action_info.get("action", {})
-            var action_key := String(action_info.get("key", ""))
-            var opened := await execute_player_route_action(action, action_key, label, index)
-            handled_action_keys[action_key] = true
-            if not opened:
-                return false
-        var waypoint_stop := stop_distance if index == waypoints.size() - 1 else CELL * 0.75
-        var distance := flat_distance(player.global_position, waypoint)
-        var step_timeout := minf(remaining, clampf(distance / (CELL * 2.4) + 3.0, 3.0, 14.0))
-        var reached := await walk_near(waypoint, waypoint_stop, step_timeout, "%s_authority_%02d" % [label, index])
-        if not reached:
-            record_player_route_event(label, "waypoint_not_reached", {
-                "index": index,
-                "waypoint": vec3(waypoint),
-                "player": vec3(player.global_position),
-                "route": player_route_summary(route)
-            })
-            return false
-
-    var final_remaining := timeout_seconds - (elapsed - started_at)
-    if final_remaining <= 0.0:
-        return flat_distance(player.global_position, target) <= stop_distance
-    if flat_distance(player.global_position, target) <= stop_distance:
-        return true
-    return await walk_near(target, stop_distance, minf(final_remaining, 4.0), "%s_authority_final" % label)
+    add_failure("%s_player_route_authority_missing" % label, "Live tutorial movement requires the V2 collision-backed player navigator.")
+    return false
 
 func player_route_timeout_for_target(target: Vector3, minimum_seconds: float, maximum_seconds: float) -> float:
     var distance := flat_distance(player.global_position, target) if player != null else 0.0
@@ -5041,64 +5314,8 @@ func use_block_with_real_action(block: Node3D, label: String, stop_distance: flo
             "result": navigator_result
         }))
         return false
-    mark_progress("walking_to_%s" % label)
-    var reached := false
-    if day_one_tutorial and label.begins_with("day_one"):
-        reached = await walk_tutorial_route_near(block.global_position, stop_distance, maxf(timeout_seconds, 36.0), "walking_to_%s" % label)
-    else:
-        reached = await walk_near(block.global_position, stop_distance, timeout_seconds, "walking_to_%s" % label)
-    if not reached:
-        if full_player_pov_visual_mode():
-            await capture_player_pov_stage(
-                "player_pov_failure_%s_not_reached" % safe_capture_id(label),
-                block.global_position + Vector3(0.0, CELL * 0.65, 0.0),
-                {
-                    "failureCandidate": "%s_not_reached_for_real_action" % label,
-                    "block": block_summary(block),
-                    "stopDistance": rounded(stop_distance)
-                }
-            )
-        add_failure("%s_not_reached_for_real_action" % label, JSON.stringify({
-            "player": vec3(player.global_position),
-            "block": vec3(block.global_position),
-            "distance": rounded(Vector2(block.global_position.x - player.global_position.x, block.global_position.z - player.global_position.z).length()),
-            "stopDistance": rounded(stop_distance)
-        }))
-        return false
-    var flat_from_block := Vector3(player.global_position.x - block.global_position.x, 0.0, player.global_position.z - block.global_position.z)
-    if flat_from_block.length() < CELL * 1.25:
-        var away := flat_from_block.normalized() if flat_from_block.length() > 0.05 else Vector3(0.0, 0.0, -1.0)
-        var stand_position := block.global_position + away * CELL * 1.65
-        await walk_near(stand_position, CELL * 0.35, 4.0, "adjusting_%s_stand" % label)
-    await wait_physics_frames(POST_ACTION_FRAMES)
-    var before_hit := await aim_until_interaction_hit(block, label)
-    if not interaction_hit_matches_block(before_hit, block):
-        before_hit = await reposition_and_aim_for_block_interaction(block, label)
-    interaction_timeline.append({
-        "label": "before_%s_action" % label,
-        "player": vec3(player.global_position),
-        "block": block_summary(block),
-        "hit": before_hit
-    })
-    sample_player("before_%s_action" % label)
-    if not interaction_hit_matches_block(before_hit, block):
-        add_failure("%s_aim_miss_for_real_action" % label, JSON.stringify({
-            "player": vec3(player.global_position),
-            "block": block_summary(block),
-            "hit": before_hit
-        }))
-        return false
-    dispatch_mouse_button(MOUSE_BUTTON_RIGHT, true)
-    dispatch_mouse_button(MOUSE_BUTTON_RIGHT, false)
-    await wait_physics_frames(POST_ACTION_FRAMES)
-    interaction_timeline.append({
-        "label": "after_%s_action" % label,
-        "player": vec3(player.global_position),
-        "block": block_summary(block),
-        "hit": interaction_hit_summary()
-    })
-    sample_player("after_%s_action" % label)
-    return true
+    add_failure("%s_player_route_authority_missing" % label, "Live tutorial interactions require the V2 collision-backed player navigator.")
+    return false
 
 func reposition_and_aim_for_block_interaction(block: Node3D, label: String) -> Dictionary:
     var last_hit := interaction_hit_summary()
@@ -5171,58 +5388,7 @@ func use_bed_with_real_action(bed: Node3D, label: String, timeout_seconds: float
             "navigatorResult": navigator_result
         }))
         return false
-    var last_hit := {}
-    var stand_positions := [
-        bed.global_position + Vector3(0.0, 0.0, -CELL * 0.72),
-        bed.global_position + Vector3(CELL * 0.42, 0.0, -CELL * 0.72),
-        bed.global_position + Vector3(-CELL * 0.42, 0.0, -CELL * 0.72),
-        bed.global_position + Vector3(0.0, 0.0, CELL * 0.72),
-        bed.global_position + Vector3(CELL * 0.42, 0.0, CELL * 0.72),
-        bed.global_position + Vector3(-CELL * 0.42, 0.0, CELL * 0.72)
-    ]
-    for index in range(stand_positions.size()):
-        var stand_position: Vector3 = stand_positions[index]
-        var flat_distance := Vector2(stand_position.x - player.global_position.x, stand_position.z - player.global_position.z).length()
-        var stand_timeout := clampf(flat_distance / (CELL * 2.6) + 2.0, 3.0, timeout_seconds)
-        var reached := await walk_near(stand_position, CELL * 0.22, stand_timeout, "walking_to_%s_stand_%02d" % [label, index])
-        await wait_physics_frames(POST_ACTION_FRAMES)
-        last_hit = await aim_until_interaction_hit(bed, "%s_stand_%02d" % [label, index])
-        interaction_timeline.append({
-            "label": "bed_stand_%s_%02d" % [label, index],
-            "reached": reached,
-            "stand": vec3(stand_position),
-            "player": vec3(player.global_position),
-            "block": block_summary(bed),
-            "hit": last_hit
-        })
-        if interaction_hit_matches_block(last_hit, bed) and bool(last_hit.get("withinReach", false)):
-            sample_player("before_%s_action" % label)
-            dispatch_mouse_button(MOUSE_BUTTON_RIGHT, true)
-            dispatch_mouse_button(MOUSE_BUTTON_RIGHT, false)
-            await wait_physics_frames(POST_ACTION_FRAMES)
-            interaction_timeline.append({
-                "label": "after_%s_action" % label,
-                "player": vec3(player.global_position),
-                "block": block_summary(bed),
-                "hit": interaction_hit_summary()
-            })
-            sample_player("after_%s_action" % label)
-            return true
-    if full_player_pov_visual_mode():
-        await capture_player_pov_stage(
-            "player_pov_failure_%s_no_reachable_bed_hit" % safe_capture_id(label),
-            bed.global_position + Vector3(0.0, CELL * 0.45, 0.0),
-            {
-                "failureCandidate": "%s_no_reachable_bed_hit" % label,
-                "bed": block_summary(bed),
-                "lastHit": last_hit
-            }
-        )
-    add_failure("%s_no_reachable_bed_hit" % label, JSON.stringify({
-        "player": vec3(player.global_position),
-        "bed": block_summary(bed),
-        "lastHit": last_hit
-    }))
+    add_failure("%s_player_route_authority_missing" % label, "Live tutorial bed use requires the V2 collision-backed player navigator.")
     return false
 
 func press_utility_slot(index: int, label: String) -> void:
@@ -5871,14 +6037,31 @@ func flat_distance(a: Vector3, b: Vector3) -> float:
     return Vector2(a.x - b.x, a.z - b.z).length()
 
 func aim_at(target: Vector3) -> void:
-    if player == null or camera == null:
+    if player == null or camera == null or main == null:
         return
-    var flat_target := Vector3(target.x, player.global_position.y, target.z)
-    if flat_target.distance_to(player.global_position) > 0.05:
-        player.look_at(flat_target, Vector3.UP)
-    if target.distance_to(camera.global_position) > 0.05:
-        camera.look_at(target, Vector3.UP)
-    player.set("pitch", camera.rotation.x)
+    # Drive the same mouse-look input path that normal gameplay uses. Directly
+    # rotating the camera produces a view ray that can diverge from controller state.
+    if main.has_method("set_game_mouse_mode"):
+        main.call("set_game_mouse_mode", Input.MOUSE_MODE_CAPTURED)
+    else:
+        Input.set_mouse_mode(Input.MOUSE_MODE_CAPTURED)
+    var direction := target - camera.global_position
+    if direction.length_squared() <= 0.0025:
+        return
+    direction = direction.normalized()
+    var horizontal_length := Vector2(direction.x, direction.z).length()
+    var desired_yaw := atan2(-direction.x, -direction.z)
+    var desired_pitch := atan2(direction.y, horizontal_length)
+    var current_yaw := player.global_rotation.y
+    var current_pitch := float(player.get("pitch"))
+    var yaw_delta := wrapf(desired_yaw - current_yaw, -PI, PI)
+    var pitch_delta := desired_pitch - current_pitch
+    var sensitivity := maxf(0.0001, float(player.get("mouse_sensitivity")))
+    var relative := Vector2(-yaw_delta / sensitivity, -pitch_delta / sensitivity)
+    var step_count := maxi(1, ceili(maxf(absf(relative.x), absf(relative.y)) / 280.0))
+    var step_relative := relative / float(step_count)
+    for step in range(step_count):
+        dispatch_mouse_motion(step_relative, "aim_at_%02d" % step)
 
 func aim_until_interaction_hit(block: Node3D, label: String) -> Dictionary:
     var summary := {}
@@ -5935,6 +6118,19 @@ func block_summary(block: Node3D) -> Dictionary:
 
 func dispatch_mouse_button(button_index: int, pressed: bool) -> void:
     dispatch_mouse_button_at(button_index, pressed, get_viewport().get_visible_rect().size * 0.5, "dispatch_mouse")
+
+func dispatch_mouse_motion(relative: Vector2, label := "dispatch_mouse_motion") -> void:
+    var position := get_viewport().get_visible_rect().size * 0.5
+    var event := InputEventMouseMotion.new()
+    event.relative = relative
+    event.position = position
+    event.global_position = position
+    interaction_timeline.append({
+        "label": label,
+        "relative": vec2(relative),
+        "routedThroughViewportInput": true
+    })
+    get_viewport().push_input(event)
 
 func dispatch_mouse_button_at(button_index: int, pressed: bool, position: Vector2, label := "dispatch_mouse") -> void:
     var event := InputEventMouseButton.new()
@@ -6472,6 +6668,13 @@ func npc_summary(entry: Dictionary) -> Dictionary:
         "npcMotionSkippedReason": String(entry.get("npc_motion_skipped_reason", "")),
         "npcMotionUpdates": int(entry.get("npc_motion_updates", 0)),
         "npcBrainUpdates": int(entry.get("npc_brain_updates", 0)),
+        "routePhysicsService": {
+            "ticks": int(entry.get("routePhysicsServiceTicks", 0)),
+            "lastFrame": int(entry.get("routePhysicsServiceLastFrame", -1)),
+            "kind": String(entry.get("routePhysicsServiceKind", "")),
+            "reason": String(entry.get("routePhysicsServiceReason", "")),
+            "sinceBrainFrames": int(entry.get("routePhysicsServiceSinceBrainFrames", -1))
+        },
         "forceHoldMeta": force_hold_meta,
         "dialogueFocusedMeta": dialogue_focused_meta,
         "scriptedTargetMeta": scripted_target_meta,

@@ -101,6 +101,34 @@ Add-Result `
     -Passed $fakeReportHasOffense `
     -Details "guardStatus=$fakeGuardStatus reportHasOffense=$fakeReportHasOffense"
 
+$fixedDelayRunner = Join-Path $workDir "FixedPostLoadDelayRunner.gd"
+$fixedDelayReport = Join-Path $workDir "fixed-post-load-delay-guard-report.json"
+@"
+extends Node
+
+const STARTUP_FRAMES := 80
+
+func _ready() -> void:
+    await wait_physics_frames(STARTUP_FRAMES)
+"@ | Set-Content -LiteralPath $fixedDelayRunner
+
+$fixedDelayScan = Run-Guard `
+    -RunnerPath $fixedDelayRunner `
+    -OutReport $fixedDelayReport `
+    -TestId "fixed_post_load_delay_acceptance_runner"
+$fixedDelayReportHasOffense = $false
+$fixedDelayGuardStatus = ""
+if (Test-Path -LiteralPath $fixedDelayReport) {
+    $fixedDelayReportJson = Get-Content -LiteralPath $fixedDelayReport -Raw | ConvertFrom-Json
+    $fixedDelayScan = $fixedDelayReportJson.forbiddenCallSelfScan
+    $fixedDelayGuardStatus = [string]$fixedDelayScan.status
+    $fixedDelayReportHasOffense = ($fixedDelayGuardStatus -eq "failed") -and ($null -ne $fixedDelayScan.matches) -and ($fixedDelayScan.matches.Count -gt 0)
+}
+Add-Result `
+    -Name "guard_fails_fixed_post_load_startup_delay" `
+    -Passed $fixedDelayReportHasOffense `
+    -Details "guardStatus=$fixedDelayGuardStatus reportHasOffense=$fixedDelayReportHasOffense"
+
 $report = [pscustomobject]@{
     schemaVersion = 1
     testId = "npc_acceptance_guard_self_test"
@@ -115,6 +143,7 @@ $report = [pscustomobject]@{
         realTutorial = Join-Path $workDir "real-tutorial-guard.json"
         goHomeVisual = Join-Path $workDir "go-home-visual-guard.json"
         fakeRunner = $fakeReport
+        fixedPostLoadDelay = $fixedDelayReport
     }
 }
 $report | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $ReportPath

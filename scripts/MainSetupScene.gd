@@ -16,9 +16,13 @@ const HOSTILE_SIMULATION_MAX_STEP_DELTA := 1.0 / 30.0
 const WATER_MESH_RADIUS_CELLS := 160
 const WATER_MESH_STEP_CELLS := 4
 const WATER_MESH_REBUILD_STEP_CELLS := 16
+const WATER_MESH_BUILD_MAX_CELLS_PER_FRAME := 128
+const WATER_MESH_BUILD_BUDGET_MS := 2.0
 
 var last_requested_mouse_mode: int = Input.MOUSE_MODE_VISIBLE
 var water_mesh_key := Vector2i(999999, 999999)
+var water_mesh_requested_key := Vector2i(999999, 999999)
+var water_mesh_build_state := {}
 var deferred_npc_simulation_delta := 0.0
 var deferred_hostile_simulation_delta := 0.0
 
@@ -498,29 +502,76 @@ func update_water_surface_mesh() -> void:
         floori(float(center_cell.x) / float(WATER_MESH_REBUILD_STEP_CELLS)),
         floori(float(center_cell.y) / float(WATER_MESH_REBUILD_STEP_CELLS))
     )
-    if key == water_mesh_key:
+    if key != water_mesh_key and key != water_mesh_requested_key:
+        water_mesh_requested_key = key
+    if water_mesh_build_state.is_empty():
+        if water_mesh_requested_key == water_mesh_key:
+            return
+        water_mesh_build_state = begin_water_surface_mesh_build(water_mesh_requested_key)
+    var advanced := advance_water_surface_mesh_build(water_mesh_build_state)
+    if runtime_perf_monitor != null:
+        runtime_perf_monitor.increment_counter("water_surface_cells_processed", int(advanced.get("processed", 0)))
+    if not bool(advanced.get("complete", false)):
         return
-    water_mesh_key = key
-    var mesh_center := Vector2i(key.x * WATER_MESH_REBUILD_STEP_CELLS, key.y * WATER_MESH_REBUILD_STEP_CELLS)
+    var completed_key: Vector2i = water_mesh_build_state.get("key", water_mesh_requested_key)
+    var mesh_center: Vector2i = water_mesh_build_state.get("centerCell", Vector2i.ZERO)
     water.position = Vector3(float(mesh_center.x) * CELL, WATER_LEVEL, float(mesh_center.y) * CELL)
-    water.mesh = build_water_surface_mesh(mesh_center)
+    water.mesh = water_surface_mesh_from_build_state(water_mesh_build_state)
+    water_mesh_key = completed_key
+    water_mesh_build_state = {}
+    if runtime_perf_monitor != null:
+        runtime_perf_monitor.increment_counter("water_surface_rebuilds_completed")
 
-func build_water_surface_mesh(center_cell: Vector2i) -> ArrayMesh:
-    var mesh := ArrayMesh.new()
+func begin_water_surface_mesh_build(key: Vector2i) -> Dictionary:
+    var mesh_center := Vector2i(key.x * WATER_MESH_REBUILD_STEP_CELLS, key.y * WATER_MESH_REBUILD_STEP_CELLS)
+    var grid_width := ceili(float(WATER_MESH_RADIUS_CELLS * 2) / float(WATER_MESH_STEP_CELLS))
+    return {
+        "key": key,
+        "centerCell": mesh_center,
+        "cursor": 0,
+        "gridWidth": grid_width,
+        "totalCells": grid_width * grid_width,
+        "vertices": PackedVector3Array(),
+        "normals": PackedVector3Array(),
+        "uvs": PackedVector2Array(),
+        "indices": PackedInt32Array()
+    }
+
+func advance_water_surface_mesh_build(state: Dictionary) -> Dictionary:
+    if state.is_empty():
+        return {"complete": true, "processed": 0}
+    var started_usec := Time.get_ticks_usec()
+    var center_cell: Vector2i = state.get("centerCell", Vector2i.ZERO)
+    var grid_width := int(state.get("gridWidth", 0))
+    var total_cells := int(state.get("totalCells", 0))
+    var cursor := int(state.get("cursor", 0))
     var vertices := PackedVector3Array()
     var normals := PackedVector3Array()
     var uvs := PackedVector2Array()
     var indices := PackedInt32Array()
+    if state.get("vertices", PackedVector3Array()) is PackedVector3Array:
+        vertices = state.get("vertices", PackedVector3Array())
+    if state.get("normals", PackedVector3Array()) is PackedVector3Array:
+        normals = state.get("normals", PackedVector3Array())
+    if state.get("uvs", PackedVector2Array()) is PackedVector2Array:
+        uvs = state.get("uvs", PackedVector2Array())
+    if state.get("indices", PackedInt32Array()) is PackedInt32Array:
+        indices = state.get("indices", PackedInt32Array())
     var origin_x := float(center_cell.x) * CELL
     var origin_z := float(center_cell.y) * CELL
     var half := WATER_MESH_RADIUS_CELLS
     var step := WATER_MESH_STEP_CELLS
-    for z_offset in range(-half, half, step):
-        for x_offset in range(-half, half, step):
-            var sample_x := center_cell.x + x_offset + step / 2
-            var sample_z := center_cell.y + z_offset + step / 2
-            if not water_surface_cell_has_natural_water(sample_x, sample_z):
-                continue
+    var processed := 0
+    while cursor < total_cells and processed < WATER_MESH_BUILD_MAX_CELLS_PER_FRAME:
+        if processed > 0 and profiled_ms(started_usec) >= WATER_MESH_BUILD_BUDGET_MS:
+            break
+        var x_index := cursor % grid_width
+        var z_index := cursor / grid_width
+        var x_offset := -half + x_index * step
+        var z_offset := -half + z_index * step
+        var sample_x := center_cell.x + x_offset + step / 2
+        var sample_z := center_cell.y + z_offset + step / 2
+        if water_surface_cell_has_natural_water(sample_x, sample_z):
             var base_index := vertices.size()
             var x0 := float(center_cell.x + x_offset) * CELL - origin_x
             var z0 := float(center_cell.y + z_offset) * CELL - origin_z
@@ -544,14 +595,29 @@ func build_water_surface_mesh(center_cell: Vector2i) -> ArrayMesh:
             indices.append(base_index + 1)
             indices.append(base_index + 2)
             indices.append(base_index + 3)
+        cursor += 1
+        processed += 1
+    state["cursor"] = cursor
+    state["vertices"] = vertices
+    state["normals"] = normals
+    state["uvs"] = uvs
+    state["indices"] = indices
+    return {
+        "complete": cursor >= total_cells,
+        "processed": processed
+    }
+
+func water_surface_mesh_from_build_state(state: Dictionary) -> ArrayMesh:
+    var mesh := ArrayMesh.new()
+    var vertices: PackedVector3Array = state.get("vertices", PackedVector3Array())
     if vertices.is_empty():
         return mesh
     var arrays := []
     arrays.resize(Mesh.ARRAY_MAX)
     arrays[Mesh.ARRAY_VERTEX] = vertices
-    arrays[Mesh.ARRAY_NORMAL] = normals
-    arrays[Mesh.ARRAY_TEX_UV] = uvs
-    arrays[Mesh.ARRAY_INDEX] = indices
+    arrays[Mesh.ARRAY_NORMAL] = state.get("normals", PackedVector3Array())
+    arrays[Mesh.ARRAY_TEX_UV] = state.get("uvs", PackedVector2Array())
+    arrays[Mesh.ARRAY_INDEX] = state.get("indices", PackedInt32Array())
     mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
     return mesh
 
@@ -589,7 +655,10 @@ func _process(delta: float) -> void:
             runtime_perf_monitor.observe_duration("chunk", perf_chunk_ms)
         if trace_post_startup:
             startup_loading_step.emit("Runtime frame: chunks done %.2fms" % perf_chunk_ms)
+        var water_surface_start: int = runtime_perf_monitor.begin_section("water_surface") if runtime_perf_monitor != null else Time.get_ticks_usec()
         update_water_surface_mesh()
+        if runtime_perf_monitor != null:
+            runtime_perf_monitor.end_section("water_surface", water_surface_start)
     var defer_noncritical_frame_work := perf_chunk_ms >= STREAMING_FRAME_DEFER_NONCRITICAL_MS
     var tutorial_realtime_simulation := tutorial_realtime_simulation_required()
     if trace_post_startup:
@@ -602,7 +671,10 @@ func _process(delta: float) -> void:
         runtime_perf_monitor.observe_duration("sky", perf_sky_ms)
     if trace_post_startup:
         startup_loading_step.emit("Runtime frame: sky done %.2fms" % perf_sky_ms)
+    var sleep_transition_start: int = runtime_perf_monitor.begin_section("sleep_transition") if runtime_perf_monitor != null else Time.get_ticks_usec()
     update_sleep_transition(delta)
+    if runtime_perf_monitor != null:
+        runtime_perf_monitor.end_section("sleep_transition", sleep_transition_start)
     var utility_start := Time.get_ticks_usec()
     var defer_utility := should_defer_frame_work(frame_start, defer_noncritical_frame_work, FRAME_BUDGET_DEFER_OPTIONAL_MS)
     if defer_utility:
@@ -625,11 +697,14 @@ func _process(delta: float) -> void:
         perf_pickups_ms = profiled_ms(pickups_start)
     if runtime_perf_monitor != null:
         runtime_perf_monitor.observe_duration("pickups", perf_pickups_ms)
+    var wildlife_start: int = runtime_perf_monitor.begin_section("wildlife") if runtime_perf_monitor != null else Time.get_ticks_usec()
     var defer_wildlife := should_defer_frame_work(frame_start, defer_noncritical_frame_work, FRAME_BUDGET_DEFER_OPTIONAL_MS)
     if defer_wildlife:
         increment_defer_counter("streaming_frame_wildlife_deferred", "frame_budget_wildlife_deferred", defer_noncritical_frame_work)
     else:
         update_wildlife(delta)
+    if runtime_perf_monitor != null:
+        runtime_perf_monitor.end_section("wildlife", wildlife_start)
     var survival_start := Time.get_ticks_usec()
     var defer_survival := should_defer_frame_work(frame_start, defer_noncritical_frame_work, FRAME_BUDGET_DEFER_OPTIONAL_MS)
     if defer_survival:
@@ -684,9 +759,12 @@ func _process(delta: float) -> void:
         runtime_perf_monitor.observe_duration("update_npcs", perf_npc_ms)
     if trace_post_startup:
         startup_loading_step.emit("Runtime frame: npcs done %.2fms" % perf_npc_ms)
+    var aftermath_collapse_start: int = runtime_perf_monitor.begin_section("aftermath_collapse") if runtime_perf_monitor != null else Time.get_ticks_usec()
     if region_aftermath_system:
         region_aftermath_system.update(delta)
     handle_collapse_if_needed()
+    if runtime_perf_monitor != null:
+        runtime_perf_monitor.end_section("aftermath_collapse", aftermath_collapse_start)
     var defer_remaining_frame_work := defer_noncritical_frame_work or profiled_ms(frame_start) >= FRAME_BUDGET_DEFER_REMAINING_MS
     var beacon_start := Time.get_ticks_usec()
     if defer_remaining_frame_work:
@@ -719,7 +797,10 @@ func _process(delta: float) -> void:
         perf_hud_ms = profiled_ms(hud_start)
     if runtime_perf_monitor != null:
         runtime_perf_monitor.observe_duration("hud", perf_hud_ms)
+    var performance_overlay_start: int = runtime_perf_monitor.begin_section("performance_overlay") if runtime_perf_monitor != null else Time.get_ticks_usec()
     update_performance_overlay(delta)
+    if runtime_perf_monitor != null:
+        runtime_perf_monitor.end_section("performance_overlay", performance_overlay_start)
     perf_frame_ms = profiled_ms(frame_start)
     if runtime_perf_monitor != null:
         perf_frame_ms = runtime_perf_monitor.end_frame()

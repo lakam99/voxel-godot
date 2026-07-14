@@ -10,6 +10,8 @@ const DEFAULT_GROUND_OFFSET := 0.04
 const START_OVERLAP_ESCAPE_EPSILON := 0.02
 const START_OVERLAP_ESCAPE_MIN_DOT := 0.25
 const DUPLICATE_WAYPOINT_EPSILON := 0.02
+const TERRAIN_MOTION_MAX_COLLISIONS := 8
+const TERRAIN_MOTION_MARGIN := 0.001
 
 var system = null
 var main = null
@@ -47,10 +49,12 @@ func probe_route(entry: Dictionary, route: Dictionary, intent: Dictionary, optio
 			"singlePointRoute": true,
 			"radius": shape.radius,
 			"height": shape.height,
-			"collisionMask": NpcConstantsScript.COLLISION_NPC_STATIC_QUERY_MASK,
+			"staticCollisionMask": route_blocking_collision_mask(),
+			"terrainMotionMask": terrain_motion_collision_mask(body),
 			"completedSamples": 0
 		})
 	var start_overlap_escape_colliders := _current_overlap_escape_colliders(entry, body, shape, route)
+	var terrain_motion_from := _grounded_sample(body.global_position)
 	var sample_count := 0
 	var max_samples := int(options.get("maxSamples", MAX_ROUTE_PROBE_SAMPLES))
 	var cursor: Dictionary = options.get("cursor", {}) if options.get("cursor", {}) is Dictionary else {}
@@ -88,16 +92,34 @@ func probe_route(entry: Dictionary, route: Dictionary, intent: Dictionary, optio
 				blocker["completedSamples"] = completed_before + sample_count
 				blocker["sample"] = sample
 				return _certificate(false, "blocked", "blocked_capsule_probe", true, sample_count, blocker)
+			var terrain_blocker := _terrain_motion_blocker(body, terrain_motion_from, sample)
+			if not terrain_blocker.is_empty():
+				terrain_blocker["segmentIndex"] = index
+				terrain_blocker["sampleIndex"] = sample_index
+				terrain_blocker["sampleCount"] = sample_count
+				terrain_blocker["completedSamples"] = completed_before + sample_count
+				terrain_blocker["sample"] = sample
+				return _certificate(false, "blocked", "blocked_terrain_motion_probe", true, sample_count, terrain_blocker)
+			terrain_motion_from = sample
 	return _certificate(true, "passed", "", true, sample_count, {
 		"pointCount": points.size(),
 		"radius": shape.radius,
 		"height": shape.height,
-		"collisionMask": NpcConstantsScript.COLLISION_NPC_STATIC_QUERY_MASK,
+		"staticCollisionMask": route_blocking_collision_mask(),
+		"terrainMotionMask": terrain_motion_collision_mask(body),
 		"completedSamples": completed_before + sample_count
 	})
 
 func _flat_points_close(a: Vector3, b: Vector3) -> bool:
 	return Vector2(a.x - b.x, a.z - b.z).length() <= DUPLICATE_WAYPOINT_EPSILON
+
+func route_blocking_collision_mask() -> int:
+	return NpcConstantsScript.COLLISION_NPC_STATIC_QUERY_MASK
+
+func terrain_motion_collision_mask(body: CharacterBody3D) -> int:
+	if body == null:
+		return 0
+	return int(body.collision_mask) & NpcConstantsScript.COLLISION_NPC_TERRAIN_MOTION_MASK
 
 func _grounded_sample(sample: Vector3) -> Vector3:
 	var result := sample
@@ -113,7 +135,7 @@ func _current_overlap_escape_colliders(entry: Dictionary, body: CharacterBody3D,
 	var query := PhysicsShapeQueryParameters3D.new()
 	query.shape = shape
 	query.transform = Transform3D(Basis(), current_sample + Vector3(0.0, shape.height * 0.5, 0.0))
-	query.collision_mask = NpcConstantsScript.COLLISION_NPC_STATIC_QUERY_MASK
+	query.collision_mask = route_blocking_collision_mask()
 	query.collide_with_bodies = true
 	query.collide_with_areas = false
 	query.exclude = [body.get_rid()]
@@ -140,7 +162,7 @@ func _blocking_overlap(entry: Dictionary, body: CharacterBody3D, shape: CapsuleS
 	var query := PhysicsShapeQueryParameters3D.new()
 	query.shape = shape
 	query.transform = Transform3D(Basis(), sample + Vector3(0.0, shape.height * 0.5, 0.0))
-	query.collision_mask = NpcConstantsScript.COLLISION_NPC_STATIC_QUERY_MASK
+	query.collision_mask = route_blocking_collision_mask()
 	query.collide_with_bodies = true
 	query.collide_with_areas = false
 	query.exclude = [body.get_rid()]
@@ -171,11 +193,78 @@ func _blocking_overlap(entry: Dictionary, body: CharacterBody3D, shape: CapsuleS
 		return blocker
 	return {}
 
+func _terrain_motion_blocker(body: CharacterBody3D, from_point: Vector3, to_point: Vector3) -> Dictionary:
+	if terrain_motion_collision_mask(body) == 0:
+		return {
+			"probe": "body_test_motion",
+			"reason": "terrain_collision_mask_missing",
+			"bodyCollisionMask": int(body.collision_mask),
+			"terrainMotionMask": terrain_motion_collision_mask(body)
+		}
+	var motion := Vector3(to_point.x - from_point.x, 0.0, to_point.z - from_point.z)
+	if motion.length_squared() <= 0.000001:
+		return {}
+	var parameters := PhysicsTestMotionParameters3D.new()
+	var from_transform := body.global_transform
+	from_transform.origin = from_point
+	parameters.from = from_transform
+	parameters.motion = motion
+	parameters.margin = TERRAIN_MOTION_MARGIN
+	parameters.max_collisions = TERRAIN_MOTION_MAX_COLLISIONS
+	parameters.recovery_as_collision = false
+	parameters.exclude_bodies = [body.get_rid()]
+	var result := PhysicsTestMotionResult3D.new()
+	var would_collide := PhysicsServer3D.body_test_motion(body.get_rid(), parameters, result)
+	if not would_collide:
+		return {}
+	var collision_count := result.get_collision_count()
+	for collision_index in range(collision_count):
+		var collider = result.get_collider(collision_index)
+		if not (collider is Node):
+			continue
+		var collider_node := collider as Node
+		if not _is_terrain_collider(collider_node):
+			continue
+		var collision_normal: Vector3 = result.get_collision_normal(collision_index)
+		if not _terrain_contact_blocks_motion(body, collision_normal):
+			continue
+		var collider_body := collider_node as Node3D
+		var collider_position := collider_body.global_position if collider_body != null else Vector3.ZERO
+		return {
+			"probe": "body_test_motion",
+			"collider": collider_node.name,
+			"class": collider_node.get_class(),
+			"kind": String(collider_node.get_meta("kind", "")),
+			"position": collider_position,
+			"motionFrom": from_point,
+			"motion": motion,
+			"collisionNormal": collision_normal,
+			"collisionPoint": result.get_collision_point(collision_index),
+			"safeFraction": result.get_collision_safe_fraction(),
+			"unsafeFraction": result.get_collision_unsafe_fraction(),
+			"bodyCollisionMask": int(body.collision_mask),
+			"terrainMotionMask": terrain_motion_collision_mask(body),
+			"collisionCount": collision_count
+		}
+	return {}
+
+func _terrain_contact_blocks_motion(body: CharacterBody3D, collision_normal: Vector3) -> bool:
+	if collision_normal.length_squared() <= 0.000001:
+		return true
+	var floor_normal_y := cos(body.floor_max_angle)
+	return collision_normal.normalized().y < floor_normal_y
+
+func _is_terrain_collider(collider: Node) -> bool:
+	if collider == null:
+		return false
+	if String(collider.get_meta("kind", "")) == "terrain":
+		return true
+	var collision_object := collider as CollisionObject3D
+	return collision_object != null and (int(collision_object.collision_layer) & NpcConstantsScript.COLLISION_NPC_TERRAIN_MOTION_MASK) != 0
+
 func _collider_allowed_for_route(_entry: Dictionary, collider: Node, route: Dictionary) -> bool:
 	var kind := String(collider.get_meta("kind", ""))
 	var block_type := String(collider.get_meta("block_type", ""))
-	if kind == "terrain":
-		return true
 	if kind == "block" and block_type in ["cobblestonePath", "torch"]:
 		return true
 	if block_type == "door" and _route_has_matching_door_action(collider, route):

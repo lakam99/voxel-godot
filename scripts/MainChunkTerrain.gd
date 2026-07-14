@@ -133,6 +133,89 @@ func sync_block_light_to_terrain(cell: Vector3i, block_type: String) -> void:
     if world_generation_system != null and world_generation_system.has_method("set_cell_light"):
         world_generation_system.call("set_cell_light", cell, { "sky": 0, "block": level }, "block_light:%s" % block_type)
 
+func sync_block_lights_to_terrain(entries: Array, reason := "block_light_batch") -> Dictionary:
+    if world_generation_system == null:
+        return {}
+    var changes := block_light_changes_for_entries(entries)
+    if changes.is_empty():
+        return { "changedCount": 0, "sourceCount": 0 }
+    if world_generation_system.has_method("set_cell_lights_batch"):
+        var result: Variant = world_generation_system.call("set_cell_lights_batch", changes, reason)
+        return result if result is Dictionary else {}
+    for change in changes:
+        world_generation_system.call("set_cell_light", change.get("cell", Vector3i.ZERO), change.get("light", {}), reason)
+    return { "changedCount": changes.size() }
+
+func sync_block_lights_to_terrain_staged(entries: Array, reason := "block_light_batch", frame_budget_ms := 2.0, max_work_units := 192) -> Dictionary:
+    if world_generation_system == null:
+        return {}
+    var changes := block_light_changes_for_entries(entries)
+    if changes.is_empty():
+        return { "changedCount": 0, "sourceCount": 0, "complete": true, "frames": 0, "maxStepMs": 0.0 }
+    if not world_generation_system.has_method("begin_cell_lights_batch") or not world_generation_system.has_method("advance_cell_lights_batch"):
+        return sync_block_lights_to_terrain(entries, reason)
+    var state_value: Variant = world_generation_system.call("begin_cell_lights_batch", changes, reason)
+    if not (state_value is Dictionary):
+        return sync_block_lights_to_terrain(entries, reason)
+    var state: Dictionary = state_value
+    var started_usec := Time.get_ticks_usec()
+    var frames := 0
+    var max_step_ms := 0.0
+    var processed_work_units := 0
+    while not bool(state.get("complete", false)):
+        var advanced_value: Variant = world_generation_system.call("advance_cell_lights_batch", state, frame_budget_ms, max_work_units)
+        if not (advanced_value is Dictionary):
+            return sync_block_lights_to_terrain(entries, reason)
+        var advanced: Dictionary = advanced_value
+        var next_state_value: Variant = advanced.get("state", state)
+        if not (next_state_value is Dictionary):
+            return sync_block_lights_to_terrain(entries, reason)
+        state = next_state_value
+        frames += 1
+        max_step_ms = maxf(max_step_ms, float(advanced.get("elapsedMs", 0.0)))
+        processed_work_units += int(advanced.get("processedWorkUnits", 0))
+        if not bool(state.get("complete", false)):
+            await get_tree().process_frame
+    return {
+        "changedCount": int(state.get("changedCount", 0)),
+        "sourceCount": int(state.get("sourceCount", 0)),
+        "clearedCount": int(state.get("clearedCount", 0)),
+        "propagatedSourceCount": int(state.get("propagatedSourceCount", 0)),
+        "dirtySectionCount": int(state.get("dirtySectionCount", 0)),
+        "lightWriteCount": int(state.get("lightWriteCount", 0)),
+        "complete": bool(state.get("complete", false)),
+        "frames": frames,
+        "maxStepMs": max_step_ms,
+        "processedWorkUnits": processed_work_units,
+        "elapsedMs": float(Time.get_ticks_usec() - started_usec) / 1000.0
+    }
+
+func block_light_changes_for_entries(entries: Array) -> Array[Dictionary]:
+    var changes: Array[Dictionary] = []
+    var seen_cells := {}
+    for entry_value in entries:
+        if not (entry_value is Dictionary):
+            continue
+        var entry: Dictionary = entry_value
+        var cell_value: Variant = entry.get("cell", Vector3i.ZERO)
+        if not (cell_value is Vector3i):
+            continue
+        var cell: Vector3i = cell_value
+        if seen_cells.has(cell):
+            continue
+        var block_type := String(entry.get("blockType", ""))
+        var level := terrain_block_light_level(block_type)
+        if level <= 0:
+            continue
+        seen_cells[cell] = true
+        changes.append({
+            "cell": cell,
+            "light": { "sky": 0, "block": level }
+        })
+    if changes.is_empty():
+        return changes
+    return changes
+
 func clear_block_light_from_terrain(cell: Vector3i, block_type: String, reason := "block_removed") -> void:
     if terrain_block_light_level(block_type) <= 0:
         return
@@ -613,6 +696,9 @@ func door_portal_id_for_cell(cell: Vector3i, side: int, secondary: bool) -> Stri
 func create_block(cell: Vector3i, block_type: String, options: Dictionary = {}) -> StaticBody3D:
     if blocks.has(cell):
         return blocks[cell]
+    var instrumentation_metrics: Dictionary = options.get("instrumentationMetrics", {}) if options.get("instrumentationMetrics", {}) is Dictionary else {}
+    var instrumentation_prefix := String(options.get("instrumentationMetricPrefix", ""))
+    var node_build_started_usec := Time.get_ticks_usec()
     var body := StaticBody3D.new()
     body.name = "Block_%s_%d_%d_%d" % [block_type, cell.x, cell.y, cell.z]
     var world_y := float(options.get("world_y", cell.y * CELL))
@@ -767,16 +853,32 @@ func create_block(cell: Vector3i, block_type: String, options: Dictionary = {}) 
 
     block_root.add_child(body)
     blocks[cell] = body
+    record_block_creation_instrumentation(instrumentation_metrics, instrumentation_prefix, "NodeBuild", node_build_started_usec)
+    var terrain_state_started_usec := Time.get_ticks_usec()
     sync_block_state_to_terrain(cell, block_type, options)
-    sync_block_light_to_terrain(cell, block_type)
+    record_block_creation_instrumentation(instrumentation_metrics, instrumentation_prefix, "TerrainState", terrain_state_started_usec)
+    var terrain_light_started_usec := Time.get_ticks_usec()
+    if not bool(options.get("deferBlockLightSync", false)):
+        sync_block_light_to_terrain(cell, block_type)
+    record_block_creation_instrumentation(instrumentation_metrics, instrumentation_prefix, "TerrainLight", terrain_light_started_usec)
+    var marker_cache_started_usec := Time.get_ticks_usec()
     invalidate_navigation_marker_cache()
+    record_block_creation_instrumentation(instrumentation_metrics, instrumentation_prefix, "NavigationMarkerCache", marker_cache_started_usec)
     if bool(options.get("player_placed", false)):
         mark_world_dirty("block_created")
     if npc_system and npc_system.has_method("notify_navigation_block_created"):
+        var navigation_notify_started_usec := Time.get_ticks_usec()
         npc_system.notify_navigation_block_created(cell, block_type, body)
+        record_block_creation_instrumentation(instrumentation_metrics, instrumentation_prefix, "NavigationNotify", navigation_notify_started_usec)
     if block_type == "door" and npc_system and npc_system.has_method("notify_navigation_door_registered"):
         npc_system.notify_navigation_door_registered(body)
     return body
+
+func record_block_creation_instrumentation(metrics: Dictionary, prefix: String, phase: String, started_usec: int) -> void:
+    if metrics.is_empty() or prefix == "" or phase == "":
+        return
+    var metric_key := "%s%sMs" % [prefix, phase]
+    metrics[metric_key] = float(metrics.get(metric_key, 0.0)) + float(Time.get_ticks_usec() - started_usec) / 1000.0
 
 func yaw_for_cell_direction(direction: Vector2i) -> float:
     if direction == Vector2i.ZERO:

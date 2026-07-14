@@ -436,6 +436,12 @@ func contract_cases() -> Array[Dictionary]:
 			"callable": Callable(self, "test_route_authority_v2_repairs_static_probe_block")
 		},
 		{
+			"id": "npc_contract_route_authority_v2_defers_probe_repair_under_budget",
+			"suite": "contract",
+			"timeModes": ["day", "night"],
+			"callable": Callable(self, "test_route_authority_v2_defers_probe_repair_under_budget")
+		},
+		{
 			"id": "npc_contract_route_authority_v2_probe_pending_budget",
 			"suite": "contract",
 			"timeModes": ["day", "night"],
@@ -482,6 +488,24 @@ func contract_cases() -> Array[Dictionary]:
 			"suite": "contract",
 			"timeModes": ["day", "night"],
 			"callable": Callable(self, "test_stable_tie_break")
+		},
+		{
+			"id": "npc_contract_urgent_brain_admission_is_fair",
+			"suite": "contract",
+			"timeModes": ["day", "night"],
+			"callable": Callable(self, "test_urgent_brain_admission_is_fair")
+		},
+		{
+			"id": "npc_contract_scripted_order_stall_trace_precedes_route_request",
+			"suite": "contract",
+			"timeModes": ["day", "night"],
+			"callable": Callable(self, "test_scripted_order_stall_trace_precedes_route_request")
+		},
+		{
+			"id": "npc_contract_collision_recovery_stall_trace",
+			"suite": "contract",
+			"timeModes": ["day", "night"],
+			"callable": Callable(self, "test_collision_recovery_stall_trace")
 		},
 		{
 			"id": "npc_contract_profile_capability_filter",
@@ -1330,6 +1354,7 @@ func test_route_authority_attaches_probe_certificate(_mode: String) -> Dictionar
 	var authority := NpcRouteAuthorityScript.new()
 	authority.setup(null, null, null, delegate)
 	var body := CharacterBody3D.new()
+	body.collision_mask = NpcConstantsScript.COLLISION_WORLD_QUERY | NpcConstantsScript.COLLISION_TERRAIN_BODY
 	add_child(body)
 	body.global_position = Vector3.ZERO
 	var entry := { "id": "contract-npc", "body": body }
@@ -1715,6 +1740,53 @@ func test_route_authority_v2_repairs_static_probe_block(_mode: String) -> Dictio
 		{ "ready": ready, "probeCalls": probe.calls, "repairCalls": repair_substrate.calls }
 	)
 
+func test_route_authority_v2_defers_probe_repair_under_budget(_mode: String) -> Dictionary:
+	var probe := FakeRouteAuthorityV2Probe.new()
+	probe.response = {
+		"ok": false,
+		"status": "blocked",
+		"reason": "blocked_capsule_probe",
+		"authoritative": true,
+		"sampleCount": 2,
+		"details": {
+			"collider": "fixture-tree",
+			"class": "StaticBody3D",
+			"kind": "prop",
+			"blockType": "prop",
+			"cell": Vector2i(1, 0)
+		}
+	}
+	var repair_substrate := FakeProbeRepairSubstrate.new()
+	repair_substrate.repaired_route = {
+		"ok": false,
+		"status": "pending_budget",
+		"classification": "pending_budget",
+		"reason": "search_budget_deferred",
+		"probeRepair": { "ok": false, "reason": "blocked_capsule_probe" }
+	}
+	var authority := NpcRouteAuthorityV2Script.new()
+	authority.setup(null, null, probe)
+	var entry := { "id": "v2-probe-repair-budget-npc" }
+	var request: Dictionary = authority.submit_request(entry, { "kind": "forage", "targetCell": Vector2i(2, 0) }, { "priority": 90 })
+	var pending: Dictionary = authority.commit_route_after_probe(entry, String(request.get("requestId", "")), v2_probe_contract_route(), { "kind": "forage", "targetCell": Vector2i(2, 0) }, {
+		"repairSubstrate": repair_substrate,
+		"repairStartCell": Vector2i(0, 0),
+		"repairCandidateCells": [Vector2i(2, 0)],
+		"repairPlanOptions": { "allowOutside": true, "semanticKind": "forage_target" }
+	})
+	var avoid_cells: Array = pending.get("probeRepairAvoidCells", []) if pending.get("probeRepairAvoidCells", []) is Array else []
+	var passed := String(pending.get("state", "")) == "pending_budget" \
+		and String(pending.get("reason", "")) == "search_budget_deferred" \
+		and not bool(pending.get("hasLease", true)) \
+		and repair_substrate.calls.size() == 1 \
+		and avoid_cells.has(Vector2i(1, 0))
+	return outcome(
+		passed,
+		"pending=%s repairCalls=%s" % [JSON.stringify(pending), JSON.stringify(repair_substrate.calls)],
+		["v2_probe_repair_budget_is_pending_not_terminal", "v2_probe_repair_retains_blocked_cell_avoidance"],
+		{ "pending": pending, "repairCalls": repair_substrate.calls }
+	)
+
 func test_route_authority_v2_probe_pending_budget(_mode: String) -> Dictionary:
 	var probe := FakeRouteAuthorityV2Probe.new()
 	probe.response = {
@@ -1737,17 +1809,20 @@ func test_route_authority_v2_probe_pending_budget(_mode: String) -> Dictionary:
 	var request: Dictionary = authority.submit_request(entry, { "kind": "home", "targetCell": Vector2i(2, 0) }, { "priority": 120 })
 	var request_id := String(request.get("requestId", ""))
 	var pending: Dictionary = authority.commit_route_after_probe(entry, request_id, v2_probe_contract_route(), { "kind": "home", "targetCell": Vector2i(2, 0) })
+	# Pending-state duration is measured only after a physics-frame clock advance.
+	authority.begin_frame()
+	var pending_debug: Dictionary = authority.debug_for_entry(entry)
 	var stats: Dictionary = authority.stats()
 	var passed := String(pending.get("state", "")) == "probing" \
 		and String(pending.get("reason", "")) == "collision_probe_budget" \
 		and not bool(pending.get("hasLease", true)) \
-		and int(pending.get("pendingProbeFrames", 0)) > 0 \
+		and int(pending_debug.get("pendingProbeFrames", 0)) > 0 \
 		and int(stats.get("probeCursors", 0)) == 1
 	return outcome(
 		passed,
-		"pending=%s stats=%s calls=%s" % [JSON.stringify(pending), JSON.stringify(stats), JSON.stringify(probe.calls)],
+		"pending=%s pendingDebug=%s stats=%s calls=%s" % [JSON.stringify(pending), JSON.stringify(pending_debug), JSON.stringify(stats), JSON.stringify(probe.calls)],
 		["v2_probe_budget_stays_pending", "v2_probe_budget_does_not_block_target", "v2_probe_cursor_retained"],
-		{ "pending": pending, "stats": stats, "probeCalls": probe.calls }
+		{ "pending": pending, "pendingDebug": pending_debug, "stats": stats, "probeCalls": probe.calls }
 	)
 
 func v2_probe_contract_route(with_door := false) -> Dictionary:
@@ -2054,6 +2129,120 @@ func test_stable_tie_break(_mode: String) -> Dictionary:
 		"sorted=%s slice=%s" % [JSON.stringify(sorted), JSON.stringify(first_slice)],
 		["stable_id_order", "scheduler_sorted_order"],
 		{ "stableSorted": sorted, "schedulerSlice": first_slice }
+	)
+
+func test_urgent_brain_admission_is_fair(_mode: String) -> Dictionary:
+	var autonomy := NpcAutonomySystemScript.new()
+	autonomy.setup(null, null)
+	var urgent_entries: Array = []
+	for index in range(25):
+		urgent_entries.append({ "id": "urgent-%02d" % index })
+	var first_slice: Array = autonomy.select_urgent_brain_entries(urgent_entries, 12)
+	var second_slice: Array = autonomy.select_urgent_brain_entries(urgent_entries, 12)
+	var third_slice: Array = autonomy.select_urgent_brain_entries(urgent_entries, 12)
+	var admitted := {}
+	for slice in [first_slice, second_slice, third_slice]:
+		for entry_value in slice:
+			if entry_value is Dictionary:
+				admitted[String((entry_value as Dictionary).get("id", ""))] = true
+	var system_source := read_text("res://scripts/NpcSystem.gd")
+	var passed := first_slice.size() == 12 \
+		and second_slice.size() == 12 \
+		and third_slice.size() == 12 \
+		and admitted.size() == 25 \
+		and system_source.find("select_urgent_brain_entries") >= 0
+	autonomy.free()
+	return outcome(
+		passed,
+		"first=%s second=%s third=%s admitted=%d" % [JSON.stringify(first_slice), JSON.stringify(second_slice), JSON.stringify(third_slice), admitted.size()],
+		["urgent_brain_round_robin", "lower_list_urgent_actor_admitted", "npc_system_uses_fair_urgent_selection"],
+		{
+			"first": first_slice,
+			"second": second_slice,
+			"third": third_slice,
+			"admittedCount": admitted.size()
+		}
+	)
+
+func test_scripted_order_stall_trace_precedes_route_request(_mode: String) -> Dictionary:
+	var trace_path := "user://npc_scripted_order_stall_trace.json"
+	var prior_trace := isolate_trace_file(trace_path)
+	var authority := NpcRouteAuthorityV2Script.new()
+	var actor_id := "trace-order-actor"
+	var entry := {
+		"id": actor_id,
+		"scriptedOrder": {
+			"id": "trace-order-actor:go_home:1",
+			"kind": "go_home",
+			"state": "PENDING",
+			"usesRouteStack": true,
+			"submittedPhysicsFrame": 41,
+			"submittedWallMsec": Time.get_ticks_msec() - 9000
+		}
+	}
+	authority.actor_entries[actor_id] = entry
+	authority.begin_frame()
+	var trace_value = read_json_file(trace_path)
+	var traces: Array = trace_value.get("traces", []) if trace_value is Dictionary and trace_value.get("traces", []) is Array else []
+	var trace: Dictionary = traces[0] if not traces.is_empty() and traces[0] is Dictionary else {}
+	var source := read_text("res://scripts/NpcSystem.gd")
+	var passed := String(trace.get("actorId", "")) == actor_id \
+		and String(trace.get("activeRequestId", "")) == "" \
+		and int(trace.get("wallWaitMsec", 0)) >= 8000 \
+		and source.find("submittedWallMsec") >= 0
+	restore_isolated_trace_file(trace_path, prior_trace)
+	var trace_restored := trace_file_matches_prior(trace_path, prior_trace)
+	passed = passed and trace_restored
+	return outcome(
+		passed,
+		"trace=%s restored=%s" % [JSON.stringify(trace), str(trace_restored)],
+		["scripted_order_trace", "pre_request_stall_capture", "generic_route_stack_order", "preexisting_trace_preserved"],
+		{ "trace": trace, "traceRestored": trace_restored }
+	)
+
+
+func test_collision_recovery_stall_trace(_mode: String) -> Dictionary:
+	var trace_path := "user://npc_route_collision_recovery_stall_trace.json"
+	var prior_trace := isolate_trace_file(trace_path)
+	var authority := NpcRouteAuthorityV2Script.new()
+	var actor_id := "collision-recovery-actor"
+	var entry := {
+		"id": actor_id,
+		"scriptedOrder": {
+			"id": "collision-recovery-actor:go_home:1",
+			"kind": "go_home",
+			"state": "ACTIVE",
+			"usesRouteStack": true
+		}
+	}
+	var request: Dictionary = authority.submit_request(entry, { "kind": "home", "targetCell": Vector2i(3, 4) }, { "priority": 180 })
+	var request_id := String(request.get("requestId", ""))
+	authority.collision_recovery_stalls_by_actor[actor_id] = {
+		"firstWallMsec": Time.get_ticks_msec() - 9000,
+		"collisionCount": 1,
+		"captured": false
+	}
+	authority.report_unexpected_collision(request_id, "unexpected_collision", {
+		"blockedContactName": "Fence",
+		"blockedContactKind": "static_body"
+	})
+	var trace_value = read_json_file(trace_path)
+	var traces: Array = trace_value.get("traces", []) if trace_value is Dictionary and trace_value.get("traces", []) is Array else []
+	var trace: Dictionary = traces[0] if not traces.is_empty() and traces[0] is Dictionary else {}
+	var collision: Dictionary = trace.get("lastCollision", {}) if trace.get("lastCollision", {}) is Dictionary else {}
+	var passed := String(trace.get("actorId", "")) == actor_id \
+		and int(trace.get("collisionCount", 0)) >= 2 \
+		and int(trace.get("wallRecoveryMsec", 0)) >= 8000 \
+		and String(collision.get("blockedContactName", "")) == "Fence" \
+		and String((trace.get("activeRequest", {}) as Dictionary).get("requestId", "")) == request_id
+	restore_isolated_trace_file(trace_path, prior_trace)
+	var trace_restored := trace_file_matches_prior(trace_path, prior_trace)
+	passed = passed and trace_restored
+	return outcome(
+		passed,
+		"trace=%s restored=%s" % [JSON.stringify(trace), str(trace_restored)],
+		["collision_recovery_trace", "repeated_collision_loop_capture", "route_repair_observation", "preexisting_trace_preserved"],
+		{ "trace": trace, "traceRestored": trace_restored }
 	)
 
 func test_profile_capability_filter(_mode: String) -> Dictionary:
@@ -3465,6 +3654,34 @@ func read_text(path: String) -> String:
 	var text := file.get_as_text()
 	file.close()
 	return text
+
+
+func isolate_trace_file(path: String) -> Dictionary:
+	var existed := FileAccess.file_exists(path)
+	var contents := read_text(path) if existed else ""
+	DirAccess.remove_absolute(ProjectSettings.globalize_path(path))
+	return {
+		"existed": existed,
+		"contents": contents
+	}
+
+
+func restore_isolated_trace_file(path: String, prior_trace: Dictionary) -> void:
+	if not bool(prior_trace.get("existed", false)):
+		DirAccess.remove_absolute(ProjectSettings.globalize_path(path))
+		return
+	var file := FileAccess.open(path, FileAccess.WRITE)
+	if file == null:
+		return
+	file.store_string(String(prior_trace.get("contents", "")))
+	file.close()
+
+
+func trace_file_matches_prior(path: String, prior_trace: Dictionary) -> bool:
+	var existed := bool(prior_trace.get("existed", false))
+	if not existed:
+		return not FileAccess.file_exists(path)
+	return FileAccess.file_exists(path) and read_text(path) == String(prior_trace.get("contents", ""))
 
 func outcome(passed: bool, details: String, assertions: Array, key_state: Dictionary) -> Dictionary:
 	return {

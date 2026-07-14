@@ -50,21 +50,31 @@ func _generate_block(out_buffer: VoxelBuffer, origin_in_voxels: Vector3i, lod: i
 				var cell := origin_in_voxels + Vector3i(x, y, z) * voxel_scale
 				var position := Vector3(cell) * CELL
 				var saved_edit: Dictionary = context.initial_terrain_edits.get(cell, {}) if context.initial_terrain_edits.get(cell, {}) is Dictionary else {}
-				var sample: Dictionary = saved_edit if not saved_edit.is_empty() else world_generation.generate_sample_without_volume(position)
-				var density := float(sample.get("density", -CELL)) / float(voxel_scale)
-				var material_name := String(sample.get("material", "air")) if not saved_edit.is_empty() else material_for_sample(world_generation, cell, position, sample, density)
+				var density := -CELL
+				var material_name := "air"
+				if not saved_edit.is_empty():
+					density = float(saved_edit.get("density", -CELL)) / float(voxel_scale)
+					material_name = String(saved_edit.get("material", "air"))
+				else:
+					# The VoxelTerrain backend only consumes density and the final solid
+					# material. Building the full gameplay sample dictionary here also
+					# computed biome/material fields that were immediately discarded and
+					# then recomputed by material_for_generated_density.
+					var base_surface_y := world_generation.terrain_reference_surface_y_at(position)
+					var surface_y := world_generation.terrain_deformed_surface_y_at(position)
+					density = world_generation.density_from_components(position, surface_y, base_surface_y) / float(voxel_scale)
+					material_name = material_for_generated_density(world_generation, cell, position, base_surface_y, density)
 				var material_id := int(MATERIAL_IDS.get(material_name, MATERIAL_IDS["stone"]))
 				out_buffer.set_voxel_f(-density / CELL, x, y, z, VoxelBuffer.CHANNEL_SDF)
 				out_buffer.set_voxel(material_id, x, y, z, VoxelBuffer.CHANNEL_INDICES)
 				out_buffer.set_voxel(material_id, x, y, z, VoxelBuffer.CHANNEL_DATA5)
 	out_buffer.compress_uniform_channels()
 
-func material_for_sample(world_generation, cell: Vector3i, position: Vector3, sample: Dictionary, density: float) -> String:
+func material_for_generated_density(world_generation, cell: Vector3i, position: Vector3, base_surface_y: float, density: float) -> String:
 	if density < 0.0:
 		return "air"
-	if cell.y <= int(world_generation.call("world_bottom_cell_y")) + 1:
+	if cell.y <= int(world_generation.world_bottom_cell_y()) + 1:
 		return "bedrock"
-	var surface_y := float(sample.get("baseSurfaceY", sample.get("surfaceY", position.y)))
-	var surface_biome := String(world_generation.call("surface_biome_for_cell3", Vector3i(cell.x, 0, cell.z)))
-	var depth := maxf(0.0, surface_y - position.y)
-	return String(world_generation.call("generated_solid_material_for_cell", cell, surface_y, surface_biome, depth))
+	var surface_biome := String(world_generation.surface_biome_for_cell3(Vector3i(cell.x, 0, cell.z)))
+	var depth := maxf(0.0, base_surface_y - position.y)
+	return String(world_generation.generated_solid_material_for_cell(cell, base_surface_y, surface_biome, depth))

@@ -7,8 +7,10 @@ const HostileVisualFactoryScript := preload("res://scripts/HostileVisualFactory.
 const CELL := 1.35
 const HOSTILE_SPACING_RADIUS := CELL * 0.95
 const HOSTILE_RIFT_SPACING_RADIUS := CELL * 1.25
-const HOSTILE_UPDATE_BUDGET := 4
+const HOSTILE_UPDATE_BUDGET := 2
 const HOSTILE_ACCUMULATED_DELTA_CAP := 4.0
+const TUTORIAL_SPAWN_ATTEMPTS_PER_UPDATE := 4
+const TUTORIAL_SPAWN_ATTEMPT_LIMIT := 24
 
 var main
 var player: CharacterBody3D
@@ -27,6 +29,8 @@ var npc_target_attacks := 0
 var npc_target_projectiles := 0
 var scripted_battle_starts := 0
 var hostile_update_cursor := 0
+var tutorial_spawn_attempts_remaining := 0
+var hostile_body_pool := {}
 
 func setup(main_node, player_node: CharacterBody3D, survival_system, inventory_system) -> void:
     main = main_node
@@ -39,6 +43,61 @@ func setup(main_node, player_node: CharacterBody3D, survival_system, inventory_s
     add_child(projectile_system)
     projectile_system.setup(main, player, survival)
     projectiles = projectile_system.projectiles
+
+func prewarm_visuals_staged() -> Dictionary:
+    if visual_factory == null or not is_inside_tree():
+        return {"variantCount": 0, "elapsedMs": 0.0}
+    var started_usec := Time.get_ticks_usec()
+    var pool_counts := {"shadow": 6, "frost": 2, "seer": 2, "rift": 1, "skitter": 1}
+    var warmed := 0
+    for variant_value in pool_counts.keys():
+        var variant := String(variant_value)
+        var pool: Array = hostile_body_pool.get(variant, []) if hostile_body_pool.get(variant, []) is Array else []
+        while pool.size() < int(pool_counts[variant]):
+            var body := StaticBody3D.new()
+            body.name = "HostileVisualPool_%s_%d" % [variant, pool.size()]
+            body.position = Vector3(0.0, -10000.0, 0.0)
+            var spec: Dictionary = visual_factory.build_visual(body, variant)
+            body.set_meta("hostile_pool_variant", variant)
+            body.set_meta("hostile_pool_spec", spec)
+            body.visible = false
+            add_child(body)
+            await get_tree().process_frame
+            pool.append(body)
+            warmed += 1
+        hostile_body_pool[variant] = pool
+    return {
+        "variantCount": pool_counts.size(),
+        "bodyCount": warmed,
+        "elapsedMs": float(Time.get_ticks_usec() - started_usec) / 1000.0
+    }
+
+func acquire_hostile_body(variant: String) -> StaticBody3D:
+    var pool: Array = hostile_body_pool.get(variant, []) if hostile_body_pool.get(variant, []) is Array else []
+    while not pool.is_empty():
+        var body := pool.pop_back() as StaticBody3D
+        if body != null and is_instance_valid(body):
+            hostile_body_pool[variant] = pool
+            body.visible = true
+            return body
+    hostile_body_pool[variant] = pool
+    return null
+
+func recycle_hostile_body(body: Node) -> bool:
+    var body_3d := body as StaticBody3D
+    if body_3d == null or not is_instance_valid(body_3d):
+        return false
+    var variant := String(body_3d.get_meta("hostile_pool_variant", ""))
+    if variant == "":
+        return false
+    body_3d.visible = false
+    body_3d.position = Vector3(0.0, -10000.0, 0.0)
+    body_3d.rotation = Vector3.ZERO
+    var pool: Array = hostile_body_pool.get(variant, []) if hostile_body_pool.get(variant, []) is Array else []
+    if not pool.has(body_3d):
+        pool.append(body_3d)
+    hostile_body_pool[variant] = pool
+    return true
 
 func surface_y_at_position(position: Vector3) -> float:
     if main != null and main.has_method("surface_y_at_position"):
@@ -59,7 +118,8 @@ func clear() -> void:
     for enemy in enemies:
         var body := enemy.get("body") as Node
         if body and is_instance_valid(body):
-            body.queue_free()
+            if not recycle_hostile_body(body):
+                body.queue_free()
     enemies.clear()
     if projectile_system:
         projectile_system.clear()
@@ -67,26 +127,36 @@ func clear() -> void:
 func update_hostiles(delta: float, day_factor: float, biome: String, sanctuary_established := false) -> void:
     if player == null or main == null:
         return
+    var monitor = main.get("runtime_perf_monitor")
     if sanctuary_established:
         if not enemies.is_empty() or (projectile_system and not projectile_system.projectiles.is_empty()):
             clear()
         spawn_cooldown = maxf(spawn_cooldown, 4.0)
         return
     if projectile_system:
+        var projectiles_started: int = monitor.begin_section("hostile_projectiles") if monitor != null else Time.get_ticks_usec()
         projectile_system.update_projectiles(delta)
-    var night_factor: float = clampf((1.0 - day_factor - 0.30) / 0.55, 0.0, 1.0)
+        if monitor != null:
+            monitor.end_section("hostile_projectiles", projectiles_started)
+    var context_started: int = monitor.begin_section("hostile_context") if monitor != null else Time.get_ticks_usec()
+    var night_factor := hostile_night_factor(day_factor)
     var player_safety: float = main.light_safety_at(player.global_position, sanctuary_established)
     var tutorial_profile := tutorial_danger_profile(night_factor)
     var tutorial_pressure := not tutorial_profile.is_empty()
     var rescue_mission_active := tutorial_rescue_mission_active()
     var enemy_capacity := tutorial_hostile_capacity(tutorial_profile) if tutorial_pressure else 3
     spawn_cooldown = maxf(0.0, spawn_cooldown - delta)
+    if monitor != null:
+        monitor.end_section("hostile_context", context_started)
+    var spawn_started: int = monitor.begin_section("hostile_spawn") if monitor != null else Time.get_ticks_usec()
     if rescue_mission_active or (tutorial_pressure and bool(tutorial_profile.get("rescueMission", false))):
         clear_non_rescue_hostiles()
         spawn_cooldown = maxf(spawn_cooldown, 2.0)
     elif tutorial_pressure and spawn_cooldown <= 0.0 and enemies.size() < enemy_capacity:
         if spawn_tutorial_perimeter(tutorial_profile, biome) != null:
             spawn_cooldown = (2.0 + randf() * 2.5) if bool(tutorial_profile.get("finalNight", false)) else (6.0 + randf() * 6.0)
+        elif tutorial_spawn_attempts_remaining > 0:
+            spawn_cooldown = 0.05
         else:
             spawn_cooldown = 3.0 + randf() * 2.0
     elif night_factor > 0.34 and player_safety < 0.82 and spawn_cooldown <= 0.0 and enemies.size() < enemy_capacity:
@@ -95,7 +165,12 @@ func update_hostiles(delta: float, day_factor: float, biome: String, sanctuary_e
         else:
             spawn_near_player(biome)
         spawn_cooldown = 16.0 + randf() * 12.0
+    if monitor != null:
+        monitor.end_section("hostile_spawn", spawn_started)
+    var enemies_started: int = monitor.begin_section("hostile_enemy_updates") if monitor != null else Time.get_ticks_usec()
     update_enemy_budgeted(delta, night_factor)
+    if monitor != null:
+        monitor.end_section("hostile_enemy_updates", enemies_started)
 
 func update_enemy_budgeted(delta: float, night_factor: float) -> void:
     var active_enemies: Array = enemies.duplicate()
@@ -283,11 +358,28 @@ func hostile_available_for_npc_combat(body: Node, origin: Vector3) -> bool:
     var enemy := enemy_for_body(body)
     if enemy.is_empty():
         return true
-    if String(enemy.get("scriptedEncounter", "")) != "tutorial_final_rescue":
+    return hostile_is_active_combat_threat(enemy, origin)
+
+func hostile_is_active_combat_threat(enemy: Dictionary, origin: Vector3) -> bool:
+    var encounter_id := String(enemy.get("scriptedEncounter", ""))
+    var scripted_phase := String(enemy.get("scriptedPhase", ""))
+    if encounter_id == "tutorial_final_rescue":
+        if scripted_phase == "battle":
+            return true
+        return tutorial_rescue_escort_started() and scripted_origin_near_anchor(enemy, origin)
+    if scripted_phase != "":
+        return scripted_phase == "battle"
+    if bool(enemy.get("daylightImmune", false)):
         return true
-    if String(enemy.get("scriptedPhase", "")) == "battle":
-        return true
-    return tutorial_rescue_escort_started() and scripted_origin_near_anchor(enemy, origin)
+    return hostile_night_factor() > 0.18
+
+func hostile_night_factor(day_factor := -1.0) -> float:
+    var resolved_day_factor := day_factor
+    if resolved_day_factor < 0.0 and main != null and main.has_method("clock_day_factor"):
+        resolved_day_factor = float(main.call("clock_day_factor"))
+    if resolved_day_factor < 0.0:
+        return 1.0
+    return clampf((1.0 - clampf(resolved_day_factor, 0.0, 1.0) - 0.30) / 0.55, 0.0, 1.0)
 
 func nearest_scripted_encounter_hostile_for_npc(source: Node, origin: Vector3, radius := 42.0, encounter_id := "") -> Node3D:
     var best: Node3D = null
@@ -315,7 +407,11 @@ func spawn_tutorial_perimeter(profile: Dictionary, biome: String) -> StaticBody3
     var center: Vector3 = profile.get("center", player.global_position)
     var safe_radius := float(profile.get("safeRadius", CELL * 15.0))
     var outer_radius := maxf(float(profile.get("outerRadius", CELL * 36.0)), safe_radius + CELL * 8.0)
-    for attempt in range(24):
+    if tutorial_spawn_attempts_remaining <= 0:
+        tutorial_spawn_attempts_remaining = TUTORIAL_SPAWN_ATTEMPT_LIMIT
+    var attempts_this_update := mini(TUTORIAL_SPAWN_ATTEMPTS_PER_UPDATE, tutorial_spawn_attempts_remaining)
+    for _attempt in range(attempts_this_update):
+        tutorial_spawn_attempts_remaining -= 1
         var angle: float = randf() * TAU
         var radius: float = safe_radius + CELL * 10.0 + randf() * maxf(CELL * 6.0, outer_radius - safe_radius)
         var position := center + Vector3(cos(angle) * radius, 0.0, sin(angle) * radius)
@@ -335,6 +431,7 @@ func spawn_tutorial_perimeter(profile: Dictionary, biome: String) -> StaticBody3
             enemy["awarenessDelay"] = 1.0 + randf() * 2.4
             enemy["naturalSpawn"] = true
             enemy["tutorialSpawn"] = true
+        tutorial_spawn_attempts_remaining = 0
         return body
     return null
 
@@ -430,7 +527,11 @@ func spawn_underground_near_player() -> StaticBody3D:
     if world_generation == null or not world_generation.has_method("walkable_surface_cell_near"):
         return null
     var player_cell := Vector3i(main.world_to_cell(player.global_position.x), main.world_to_cell(player.global_position.y), main.world_to_cell(player.global_position.z))
-    for attempt in range(24):
+    if tutorial_spawn_attempts_remaining <= 0:
+        tutorial_spawn_attempts_remaining = TUTORIAL_SPAWN_ATTEMPT_LIMIT
+    var attempts_this_update := mini(TUTORIAL_SPAWN_ATTEMPTS_PER_UPDATE, tutorial_spawn_attempts_remaining)
+    for _attempt in range(attempts_this_update):
+        tutorial_spawn_attempts_remaining -= 1
         var angle := randf() * TAU
         var distance_cells := randi_range(8, 22)
         var probe := player_cell + Vector3i(roundi(cos(angle) * float(distance_cells)), randi_range(-4, 5), roundi(sin(angle) * float(distance_cells)))
@@ -456,6 +557,7 @@ func spawn_underground_near_player() -> StaticBody3D:
             enemy["awarenessDelay"] = 1.2 + randf() * 2.0
             enemy["naturalSpawn"] = true
             enemy["undergroundSpawn"] = true
+        tutorial_spawn_attempts_remaining = 0
         return body
     return null
 
@@ -575,15 +677,19 @@ func spawn_shrine_guardians(origin: Vector3, count := 3) -> int:
     return spawned
 
 func spawn_enemy(position: Vector3, variant := "shadow") -> StaticBody3D:
-    var body := StaticBody3D.new()
+    var body := acquire_hostile_body(variant)
+    var spec: Dictionary = {}
+    if body == null:
+        body = StaticBody3D.new()
+        spec = visual_factory.build_visual(body, variant)
+        add_child(body)
+    else:
+        spec = body.get_meta("hostile_pool_spec", {}) if body.get_meta("hostile_pool_spec", {}) is Dictionary else {}
     body.name = "Hostile_%s_%d" % [variant, enemies.size()]
     body.position = position
+    body.rotation = Vector3.ZERO
     body.set_meta("kind", "hostile")
     body.set_meta("variant", variant)
-
-    var spec: Dictionary = visual_factory.build_visual(body, variant)
-
-    add_child(body)
     enemies.append({
         "body": body,
         "variant": variant,
@@ -1051,7 +1157,8 @@ func enemy_for_body(body: Node) -> Dictionary:
 func remove_enemy(enemy: Dictionary, drop := true) -> void:
     var body := enemy.get("body") as Node
     if body and is_instance_valid(body):
-        body.queue_free()
+        if not recycle_hostile_body(body):
+            body.queue_free()
     enemies.erase(enemy)
     if drop:
         var variant := String(enemy.get("variant", "shadow"))

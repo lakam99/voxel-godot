@@ -119,12 +119,14 @@ func setup(system_node: Node, main_node: Node) -> void:
 		"navigationBackend": navigation_backend_config.to_summary()
 	})
 
-func _physics_process(_delta: float) -> void:
+func _physics_process(delta: float) -> void:
 	if route_authority_v2 != null:
 		route_authority_v2.begin_frame()
 	process_navigation_changes(NAV_CHANGE_EVENTS_PER_PHYSICS_TICK, NAV_CHANGE_OBJECT_IDS_PER_PHYSICS_TICK)
 	build_navigation_tiles(NpcConstantsScript.NAV_BUILD_MAX_JOBS_PER_TICK)
 	process_navmesh_dirty_regions(1)
+	advance_traffic(delta)
+	service_active_route_work(delta)
 
 func _notification(what: int) -> void:
 	if what == NOTIFICATION_PREDELETE:
@@ -293,6 +295,71 @@ func advance_npc_motion(entry: Dictionary, delta: float, night_factor: float) ->
 	else:
 		record_motion_skipped(entry, String(result.get("reason", "no_motion_intent")))
 	return result
+
+
+func physics_route_service_owns_motion(entry: Dictionary) -> bool:
+	return plan_executor != null and plan_executor.has_method("physics_route_service_owns_motion") and bool(plan_executor.physics_route_service_owns_motion(entry))
+
+
+func service_active_route_work(delta: float) -> void:
+	if plan_executor == null or npc_system == null:
+		return
+	var entries = npc_system.get("npcs")
+	if not (entries is Array):
+		return
+	for entry_value in entries:
+		if not (entry_value is Dictionary):
+			continue
+		var entry: Dictionary = entry_value
+		if not physics_route_service_owns_motion(entry):
+			continue
+		if simulation_lod != null and simulation_lod.should_hold_active_movement(entry):
+			record_motion_skipped(entry, "topology_hold")
+			continue
+		if bool(entry.get("abstractSimulated", false)) or String(entry.get("simulationLod", "")) == NpcSimulationLodServiceScript.STATE_ABSTRACT:
+			record_motion_skipped(entry, "abstract")
+			continue
+		var result: Dictionary = plan_executor.advance_physics_route_service(entry, delta)
+		if bool(result.get("advanced", false)):
+			record_motion_update(entry, result)
+		else:
+			record_motion_skipped(entry, String(result.get("reason", "route_service_not_advanced")))
+
+
+func select_urgent_brain_entries(entries: Array, maximum_count: int) -> Array:
+	var selected: Array = []
+	if maximum_count <= 0 or entries.is_empty():
+		return selected
+	var entries_by_stable_id := {}
+	var eligible_ids: Array[String] = []
+	for entry_value in entries:
+		if not (entry_value is Dictionary):
+			continue
+		var entry: Dictionary = entry_value
+		var stable_id := String(entry.get("id", ""))
+		var body := entry.get("body") as Node
+		if body != null and is_instance_valid(body) and body.has_meta("npc_stable_id"):
+			stable_id = String(body.get_meta("npc_stable_id"))
+		if stable_id == "" or entries_by_stable_id.has(stable_id):
+			continue
+		if not scheduler.registered_ids.has(stable_id):
+			scheduler.register_agent(stable_id)
+		entries_by_stable_id[stable_id] = entry
+		eligible_ids.append(stable_id)
+	var selected_ids: Array[String] = scheduler.next_eligible_slice(eligible_ids, maximum_count)
+	for stable_id in selected_ids:
+		if entries_by_stable_id.has(stable_id):
+			selected.append(entries_by_stable_id[stable_id])
+	if selected.size() >= maximum_count:
+		return selected
+	eligible_ids.sort()
+	for stable_id in eligible_ids:
+		if selected.size() >= maximum_count:
+			break
+		var entry: Dictionary = entries_by_stable_id[stable_id]
+		if not selected.has(entry):
+			selected.append(entry)
+	return selected
 
 func record_brain_update(entry: Dictionary) -> void:
 	var tick := Engine.get_physics_frames()

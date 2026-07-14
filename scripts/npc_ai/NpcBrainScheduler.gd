@@ -35,6 +35,35 @@ func next_update_slice() -> Array[String]:
 	cursor = (cursor + count) % registered_ids.size()
 	return result
 
+
+func next_eligible_slice(eligible_ids: Array[String], maximum_count := -1) -> Array[String]:
+	var result: Array[String] = []
+	if registered_ids.is_empty() or eligible_ids.is_empty():
+		return result
+	var eligible := {}
+	for stable_id in eligible_ids:
+		if stable_id != "":
+			eligible[stable_id] = true
+	if eligible.is_empty():
+		return result
+	var count := eligible.size() if maximum_count < 0 else mini(maximum_count, eligible.size())
+	var start_cursor := cursor
+	var last_selected_index := -1
+	var scanned := 0
+	while scanned < registered_ids.size() and result.size() < count:
+		var index := (start_cursor + scanned) % registered_ids.size()
+		var stable_id := registered_ids[index]
+		scanned += 1
+		if not eligible.has(stable_id):
+			continue
+		result.append(stable_id)
+		last_selected_index = index
+	if last_selected_index >= 0:
+		cursor = (last_selected_index + 1) % registered_ids.size()
+	else:
+		cursor = (start_cursor + 1) % registered_ids.size()
+	return result
+
 func stats() -> Dictionary:
 	return {
 		"registered": registered_ids.size(),

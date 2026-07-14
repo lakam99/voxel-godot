@@ -9,10 +9,21 @@ const NpcRouteStateStoreScript := preload("res://scripts/npc_ai/routing/NpcRoute
 
 const DEFAULT_PROBE_SAMPLE_BUDGET_PER_FRAME := 160
 const DEFAULT_PLAN_ATTEMPT_BUDGET_PER_FRAME := 4
+const DEFAULT_ROUTE_SEARCH_EXPANSION_BUDGET_PER_FRAME := 64
+const DEFAULT_ROUTE_SEARCH_EXPANSIONS_PER_REQUEST := 16
+const URGENT_ROUTE_PRIORITY := 180
+const URGENT_ROUTE_SEARCH_EXPANSIONS_PER_REQUEST := 48
 const PLANNING_STARVATION_FRAME_LIMIT := 24
 const PROBE_STARVATION_FRAME_LIMIT := 24
 const MAX_PROBE_REPAIR_ATTEMPTS := 3
+# Collision probes see live CharacterBody3D actors. Keep one cell of clearance when
+# repairing around one so the replacement route is not committed into the same body.
+const DYNAMIC_PROBE_REPAIR_AVOID_RADIUS := 1
 const MAX_REQUEST_EVENTS := 64
+const PENDING_STALL_TRACE_WALL_MSEC := 8000
+const STALL_TRACE_PATH := "user://npc_route_stall_trace.json"
+const SCRIPTED_ORDER_STALL_TRACE_PATH := "user://npc_scripted_order_stall_trace.json"
+const COLLISION_RECOVERY_STALL_TRACE_PATH := "user://npc_route_collision_recovery_stall_trace.json"
 const INVALID_CELL := Vector2i(2147483000, 2147483000)
 
 const STATE_NONE := "none"
@@ -48,10 +59,16 @@ var planning_starvation_override_used_this_frame := false
 var planning_grants_this_frame := {}
 var planning_claimed_this_frame := {}
 var planning_grants_prepared_frame := -1
+var route_search_expansion_budget_per_frame := DEFAULT_ROUTE_SEARCH_EXPANSION_BUDGET_PER_FRAME
+var route_search_expansions_used_this_frame := 0
 var probe_sample_budget_per_frame := DEFAULT_PROBE_SAMPLE_BUDGET_PER_FRAME
 var probe_samples_used_this_frame := 0
 var probe_starvation_override_used_this_frame := false
 var probe_cursors := {}
+var pending_stall_trace_records: Array = []
+var scripted_order_stall_trace_records: Array = []
+var collision_recovery_stalls_by_actor := {}
+var collision_recovery_stall_trace_records: Array = []
 var counters := {
 	"registeredActors": 0,
 	"requests": 0,
@@ -79,8 +96,11 @@ var counters := {
 	"probePassed": 0,
 	"probeFailed": 0,
 	"probeSkipped": 0,
+	"collisionRecoveryStallTraceCaptures": 0,
 	"probeBudgetDeferrals": 0,
-	"probeStarvationOverrides": 0
+	"probeStarvationOverrides": 0,
+	"pendingStallTraceCaptures": 0,
+	"scriptedOrderStallTraceCaptures": 0
 }
 
 func setup(system_node, main_node, route_probe = null) -> void:
@@ -95,6 +115,7 @@ func setup(system_node, main_node, route_probe = null) -> void:
 func begin_frame() -> void:
 	frame_serial += 1
 	plan_attempts_used_this_frame = 0
+	route_search_expansions_used_this_frame = 0
 	planning_starvation_override_used_this_frame = false
 	planning_grants_this_frame.clear()
 	planning_claimed_this_frame.clear()
@@ -107,7 +128,13 @@ func begin_frame() -> void:
 			continue
 		_increment_state_frame(record)
 		_observe_wait_counters(record)
+		_maybe_capture_pending_stall_trace(record)
 		requests_by_id[request_id] = record
+	for actor_id_value in actor_entries.keys():
+		var actor_id := String(actor_id_value)
+		var entry_value = actor_entries.get(actor_id, {})
+		if entry_value is Dictionary:
+			_maybe_capture_scripted_order_stall_trace(actor_id, entry_value)
 	_prepare_planning_grants()
 
 func register_actor(entry: Dictionary) -> Dictionary:
@@ -139,8 +166,10 @@ func submit_request(entry: Dictionary, intent: Dictionary, options := {}) -> Dic
 		"state": STATE_QUEUED,
 		"reason": "queued",
 		"priority": int(options.get("priority", intent.get("priority", 0))),
+		"maxExpansionsPerPlanningSlice": maxi(0, int(options.get("maxExpansionsPerPlanningSlice", 0))),
 		"deadlineFrame": int(options.get("deadlineFrame", -1)),
 		"createdFrame": frame_serial,
+		"createdWallMsec": Time.get_ticks_msec(),
 		"updatedFrame": frame_serial,
 		"lastServicedFrame": -1,
 		"stateFrameCounts": _empty_state_frame_counts(),
@@ -184,10 +213,12 @@ func claim_planning_budget(request_id: String, reason := "planning") -> Dictiona
 	var grant: Dictionary = planning_grants_this_frame.get(request_id, {}) if planning_grants_this_frame.get(request_id, {}) is Dictionary else {}
 	var wait_frames := _planning_wait_frames(record)
 	var starvation_override := bool(grant.get("starvationOverride", false))
-	if not grant.is_empty() and plan_attempts_used_this_frame < plan_attempt_budget_per_frame:
+	var route_search_expansions := maxi(1, int(grant.get("routeSearchExpansions", DEFAULT_ROUTE_SEARCH_EXPANSIONS_PER_REQUEST)))
+	if not grant.is_empty() and plan_attempts_used_this_frame < plan_attempt_budget_per_frame and route_search_expansions_used_this_frame + route_search_expansions <= route_search_expansion_budget_per_frame:
 		planning_grants_this_frame.erase(request_id)
 		planning_claimed_this_frame[request_id] = true
 		plan_attempts_used_this_frame += 1
+		route_search_expansions_used_this_frame += route_search_expansions
 		if starvation_override:
 			planning_starvation_override_used_this_frame = true
 			counters["planningStarvationOverrides"] = int(counters.get("planningStarvationOverrides", 0)) + 1
@@ -196,6 +227,9 @@ func claim_planning_budget(request_id: String, reason := "planning") -> Dictiona
 			"waitFrames": wait_frames,
 			"budgetPerFrame": plan_attempt_budget_per_frame,
 			"usedThisFrame": plan_attempts_used_this_frame,
+			"routeSearchExpansions": route_search_expansions,
+			"routeSearchExpansionBudgetPerFrame": route_search_expansion_budget_per_frame,
+			"routeSearchExpansionsUsedThisFrame": route_search_expansions_used_this_frame,
 			"starvationOverride": starvation_override
 		})
 		requests_by_id[request_id] = record
@@ -206,6 +240,7 @@ func claim_planning_budget(request_id: String, reason := "planning") -> Dictiona
 			"state": state,
 			"reason": reason,
 			"budget": _planning_budget_debug(record),
+			"routeSearchExpansions": route_search_expansions,
 			"starvationOverride": starvation_override
 		}
 	counters["planningBudgetDeferrals"] = int(counters.get("planningBudgetDeferrals", 0)) + 1
@@ -224,8 +259,9 @@ func _ensure_planning_grants() -> void:
 func _prepare_planning_grants() -> void:
 	planning_grants_prepared_frame = frame_serial
 	planning_grants_this_frame.clear()
-	var available := maxi(0, plan_attempt_budget_per_frame - plan_attempts_used_this_frame)
-	if available == 0:
+	var available_attempts := maxi(0, plan_attempt_budget_per_frame - plan_attempts_used_this_frame)
+	var available_expansions := maxi(0, route_search_expansion_budget_per_frame - route_search_expansions_used_this_frame)
+	if available_attempts == 0 or available_expansions == 0:
 		return
 	var eligible: Array[Dictionary] = []
 	for request_id in requests_by_id.keys():
@@ -240,28 +276,102 @@ func _prepare_planning_grants() -> void:
 		eligible.append(record)
 	if eligible.is_empty():
 		return
-	var starved: Array[Dictionary] = []
-	for record in eligible:
-		if _planning_service_age(record) >= PLANNING_STARVATION_FRAME_LIMIT:
-			starved.append(record)
-	if not starved.is_empty() and not planning_starvation_override_used_this_frame:
-		starved.sort_custom(Callable(self, "_planning_starved_precedes"))
-		var starved_record: Dictionary = starved[0]
-		var starved_id := String(starved_record.get("requestId", ""))
-		planning_grants_this_frame[starved_id] = { "starvationOverride": true }
-		available -= 1
-		for index in range(eligible.size() - 1, -1, -1):
-			if String(eligible[index].get("requestId", "")) == starved_id:
-				eligible.remove_at(index)
-				break
-	if available <= 0:
-		return
 	eligible.sort_custom(Callable(self, "_planning_record_precedes"))
-	for record in eligible:
-		if available <= 0:
+	var remaining := eligible.duplicate()
+	var starved_record := _most_starved_planning_record(remaining)
+	var starvation_override_id := String(starved_record.get("requestId", ""))
+	var ordinary_record := _first_ordinary_planning_record(remaining, starved_record)
+
+	# Preserve the former 64-expansion global cap. Reserve one normal slice whenever
+	# ordinary work is waiting; divide the rest between selected urgent requests so
+	# a busy scripted moment continues to service every active actor fairly.
+	if not ordinary_record.is_empty() and available_attempts > 0 and available_expansions > 0:
+		var ordinary_slice := _planning_slice_for_record(ordinary_record, available_expansions)
+		_grant_planning_slice(ordinary_record, ordinary_slice, String(ordinary_record.get("requestId", "")) == starvation_override_id)
+		_remove_planning_record(remaining, String(ordinary_record.get("requestId", "")))
+		available_attempts -= 1
+		available_expansions -= ordinary_slice
+	var urgent_records := _selected_urgent_planning_records(remaining, starved_record, available_attempts)
+	if not urgent_records.is_empty() and available_expansions > 0:
+		var urgent_count := urgent_records.size()
+		var base_urgent_slice := int(available_expansions / urgent_count)
+		var urgent_remainder := available_expansions % urgent_count
+		for index in range(urgent_count):
+			var urgent_record: Dictionary = urgent_records[index]
+			var urgent_slice := base_urgent_slice + (1 if index < urgent_remainder else 0)
+			var urgent_cap := int(urgent_record.get("maxExpansionsPerPlanningSlice", 0))
+			if urgent_cap > 0:
+				urgent_slice = mini(urgent_slice, urgent_cap)
+			_grant_planning_slice(urgent_record, urgent_slice, String(urgent_record.get("requestId", "")) == starvation_override_id)
+			_remove_planning_record(remaining, String(urgent_record.get("requestId", "")))
+			available_attempts -= 1
+			available_expansions -= urgent_slice
+	while urgent_records.is_empty() and available_attempts > 0 and available_expansions > 0 and not remaining.is_empty():
+		var record: Dictionary = remaining[0]
+		var slice := _planning_slice_for_record(record, available_expansions)
+		_grant_planning_slice(record, slice, String(record.get("requestId", "")) == starvation_override_id)
+		remaining.remove_at(0)
+		available_attempts -= 1
+		available_expansions -= slice
+
+func _most_starved_planning_record(records: Array) -> Dictionary:
+	var starved: Array[Dictionary] = []
+	for record_value in records:
+		if record_value is Dictionary and _is_starved_planning_record(record_value):
+			starved.append(record_value)
+	if starved.is_empty():
+		return {}
+	starved.sort_custom(Callable(self, "_planning_starved_precedes"))
+	return starved[0]
+
+func _selected_urgent_planning_records(records: Array, starved_record: Dictionary, maximum_count: int) -> Array[Dictionary]:
+	var selected: Array[Dictionary] = []
+	if maximum_count <= 0:
+		return selected
+	if not starved_record.is_empty() and int(starved_record.get("priority", 0)) >= URGENT_ROUTE_PRIORITY:
+		selected.append(starved_record)
+	for record_value in records:
+		if not record_value is Dictionary or int(record_value.get("priority", 0)) < URGENT_ROUTE_PRIORITY:
+			continue
+		if String(record_value.get("requestId", "")) == String(starved_record.get("requestId", "")):
+			continue
+		selected.append(record_value)
+		if selected.size() >= maximum_count:
 			break
-		planning_grants_this_frame[String(record.get("requestId", ""))] = { "starvationOverride": false }
-		available -= 1
+	return selected
+
+func _first_ordinary_planning_record(records: Array, starved_record: Dictionary) -> Dictionary:
+	if not starved_record.is_empty() and int(starved_record.get("priority", 0)) < URGENT_ROUTE_PRIORITY:
+		return starved_record
+	for record_value in records:
+		if record_value is Dictionary and int(record_value.get("priority", 0)) < URGENT_ROUTE_PRIORITY:
+			return record_value
+	return {}
+
+func _is_starved_planning_record(record: Dictionary) -> bool:
+	return _planning_service_age(record) >= PLANNING_STARVATION_FRAME_LIMIT
+
+func _planning_slice_for_record(record: Dictionary, available_expansions: int) -> int:
+	var requested := int(record.get("maxExpansionsPerPlanningSlice", 0))
+	if requested <= 0:
+		requested = DEFAULT_ROUTE_SEARCH_EXPANSIONS_PER_REQUEST
+	return mini(requested, available_expansions)
+
+
+func _grant_planning_slice(record: Dictionary, route_search_expansions: int, starvation_override: bool) -> void:
+	var request_id := String(record.get("requestId", ""))
+	if request_id == "":
+		return
+	planning_grants_this_frame[request_id] = {
+		"starvationOverride": starvation_override,
+		"routeSearchExpansions": maxi(1, route_search_expansions)
+	}
+
+func _remove_planning_record(records: Array, request_id: String) -> void:
+	for index in range(records.size() - 1, -1, -1):
+		if String((records[index] as Dictionary).get("requestId", "")) == request_id:
+			records.remove_at(index)
+			return
 
 func _planning_record_precedes(a: Dictionary, b: Dictionary) -> bool:
 	var priority_a := int(a.get("priority", 0))
@@ -363,8 +473,6 @@ func commit_route_after_probe(entry: Dictionary, request_id: String, route: Dict
 		if not bool(certificate.get("authoritative", false)) or String(certificate.get("status", "")) == "skipped":
 			return mark_probing(request_id, reason)
 		var state := _state_for_probe_certificate(certificate)
-		if state == STATE_BLOCKED_DYNAMIC:
-			return report_blocked_dynamic(request_id, reason)
 		if state == STATE_INVALID_GOAL:
 			return report_invalid_goal(request_id, reason)
 		repair_avoid_cells = _merge_repair_avoid_cells(repair_avoid_cells, _probe_repair_avoid_cells(certificate))
@@ -373,10 +481,17 @@ func commit_route_after_probe(entry: Dictionary, request_id: String, route: Dict
 		requests_by_id[request_id] = repair_record
 		if _should_attempt_probe_repair(certificate, state, options, repair_attempts):
 			var repaired_route := _plan_probe_repair_route(entry, request_id, route_copy, intent_dict, certificate, options, repair_avoid_cells, repair_attempts)
+			var repair_classification := String(repaired_route.get("classification", repaired_route.get("status", ""))) if not repaired_route.is_empty() else ""
+			if repair_classification == STATE_PENDING_BUDGET:
+				return mark_pending_budget(request_id, String(repaired_route.get("reason", "probe_repair_budget")))
+			if repair_classification == STATE_PENDING_NAV_DATA:
+				return mark_pending_nav_data(request_id, String(repaired_route.get("reason", "probe_repair_nav_data")))
 			if not repaired_route.is_empty() and bool(repaired_route.get("ok", false)):
 				route_copy = repaired_route
 				repair_attempts += 1
 				continue
+		if state == STATE_BLOCKED_DYNAMIC:
+			return report_blocked_dynamic(request_id, reason)
 		return report_unreachable_static(request_id, reason)
 	return report_unreachable_static(request_id, "probe_commit_exhausted")
 
@@ -402,13 +517,17 @@ func report_arrived(request_id: String, reason := "arrived") -> Dictionary:
 	if bool(result.get("ok", false)):
 		counters["arrived"] = int(counters.get("arrived", 0)) + 1
 		counters["successfulArrivals"] = int(counters.get("successfulArrivals", 0)) + 1
+		_reset_collision_recovery_stall_for_request(request_id)
 	return result
 
 func report_segment_started(request_id: String, segment_index: int, details := {}) -> Dictionary:
 	return report_execution_event(request_id, "segment_started", "segment_started", _execution_details_with_segment(segment_index, details))
 
 func report_segment_completed(request_id: String, segment_index: int, details := {}) -> Dictionary:
-	return report_execution_event(request_id, "segment_completed", "segment_completed", _execution_details_with_segment(segment_index, details))
+	var result := report_execution_event(request_id, "segment_completed", "segment_completed", _execution_details_with_segment(segment_index, details))
+	if bool(result.get("ok", false)):
+		_reset_collision_recovery_stall_for_request(request_id)
+	return result
 
 func report_stuck(request_id: String, reason := "stuck", details := {}) -> Dictionary:
 	var result := report_execution_event(request_id, "stuck", reason, details)
@@ -436,7 +555,10 @@ func report_route_repair(request_id: String, reason := "route_repair", details :
 	return result
 
 func report_unexpected_collision(request_id: String, reason := "unexpected_collision", details := {}) -> Dictionary:
-	return report_execution_event(request_id, "unexpected_collision", reason, details)
+	var result := report_execution_event(request_id, "unexpected_collision", reason, details)
+	if bool(result.get("ok", false)) and requests_by_id.has(request_id):
+		_observe_collision_recovery_stall(requests_by_id[request_id], details)
+	return result
 
 func report_door_wait(request_id: String, reason := "door_wait", details := {}) -> Dictionary:
 	return report_execution_event(request_id, "door_wait", reason, details)
@@ -525,7 +647,8 @@ func runtime_for_actor(actor_id: String) -> Dictionary:
 		"pendingNavDataFrames": int(counts.get(STATE_PENDING_NAV_DATA, 0)),
 		"pendingProbeFrames": int(counts.get(STATE_PROBING, 0)),
 		"routeLease": record.get("routeLease", {}),
-		"route": record.get("route", {})
+		"route": record.get("route", {}),
+		"probeRepairAvoidCells": (record.get("probeRepairAvoidCells", []) as Array).duplicate() if record.get("probeRepairAvoidCells", []) is Array else []
 	}
 
 func telemetry_for_actor(actor_id: String) -> Dictionary:
@@ -616,6 +739,8 @@ func debug_snapshot() -> Dictionary:
 		"counters": counters.duplicate(true),
 		"planAttemptBudgetPerFrame": plan_attempt_budget_per_frame,
 		"planAttemptsUsedThisFrame": plan_attempts_used_this_frame,
+		"routeSearchExpansionBudgetPerFrame": route_search_expansion_budget_per_frame,
+		"routeSearchExpansionsUsedThisFrame": route_search_expansions_used_this_frame,
 		"planningStarvationOverrideUsedThisFrame": planning_starvation_override_used_this_frame,
 		"probeCursors": probe_cursors.size(),
 		"probeSampleBudgetPerFrame": probe_sample_budget_per_frame,
@@ -653,6 +778,7 @@ func record_summary(record: Dictionary) -> Dictionary:
 		"interactionClaim": (lease.get("interactionClaim", {}) as Dictionary).duplicate(true) if lease.get("interactionClaim", {}) is Dictionary else {},
 		"routeLease": lease.duplicate(true),
 		"route": _record_route_summary(route),
+		"probeRepairAvoidCells": (record.get("probeRepairAvoidCells", []) as Array).duplicate() if record.get("probeRepairAvoidCells", []) is Array else [],
 		"proof": proof.duplicate(true),
 		"eventCount": (record.get("events", []) as Array).size() if record.get("events", []) is Array else 0,
 		"recentEvents": _recent_events(record, 8)
@@ -803,6 +929,8 @@ func _state_for_probe_certificate(certificate: Dictionary) -> String:
 func _should_attempt_probe_repair(certificate: Dictionary, state: String, options: Dictionary, repair_attempts: int) -> bool:
 	if not bool(options.get("enableProbeRepair", true)):
 		return false
+	if state == STATE_BLOCKED_DYNAMIC:
+		return _probe_certificate_is_dynamic_actor_block(certificate, options, repair_attempts)
 	if state != STATE_UNREACHABLE_STATIC:
 		return false
 	if repair_attempts >= int(options.get("maxProbeRepairAttempts", MAX_PROBE_REPAIR_ATTEMPTS)):
@@ -811,6 +939,22 @@ func _should_attempt_probe_repair(certificate: Dictionary, state: String, option
 		return false
 	var reason := String(certificate.get("reason", ""))
 	return reason in ["blocked_capsule_probe", "path_crosses_static_collision", "blocked_static_collision", "blocked_static_transition"]
+
+
+func _probe_certificate_is_dynamic_actor_block(certificate: Dictionary, options: Dictionary, repair_attempts: int) -> bool:
+	if repair_attempts >= int(options.get("maxProbeRepairAttempts", MAX_PROBE_REPAIR_ATTEMPTS)):
+		return false
+	if options.get("repairSubstrate", null) == null:
+		return false
+	if String(certificate.get("reason", "")) != "blocked_capsule_probe":
+		return false
+	var details: Dictionary = certificate.get("details", {}) if certificate.get("details", {}) is Dictionary else {}
+	var kind := String(details.get("kind", ""))
+	var block_type := String(details.get("blockType", ""))
+	var collider_class := String(details.get("class", ""))
+	return kind in ["npc", "actor", "character", "player"] \
+		or block_type in ["npc", "actor", "player"] \
+		or collider_class in ["CharacterBody3D", "KinematicBody3D"]
 
 func _plan_probe_repair_route(entry: Dictionary, request_id: String, failed_route: Dictionary, intent: Dictionary, certificate: Dictionary, options: Dictionary, repair_avoid_cells: Array, repair_attempts: int) -> Dictionary:
 	var substrate = options.get("repairSubstrate", null)
@@ -828,10 +972,21 @@ func _plan_probe_repair_route(entry: Dictionary, request_id: String, failed_rout
 	repair_plan_options = repair_plan_options.duplicate(true)
 	repair_plan_options["probeRepairAttempt"] = repair_attempts + 1
 	repair_plan_options["avoidCells"] = _merge_repair_avoid_cells(repair_plan_options.get("avoidCells", []), repair_avoid_cells)
+	if _state_for_probe_certificate(certificate) == STATE_BLOCKED_DYNAMIC:
+		repair_plan_options["probeRepairAvoidRadius"] = maxi(
+			int(repair_plan_options.get("probeRepairAvoidRadius", 0)),
+			DYNAMIC_PROBE_REPAIR_AVOID_RADIUS
+		)
 	var repaired = substrate.call("repair_route_after_probe", entry, start_cell, candidate_cells, failed_route, certificate, repair_plan_options)
 	var repaired_route: Dictionary = repaired if repaired is Dictionary else {}
-	if repaired_route.is_empty() or not bool(repaired_route.get("ok", false)):
+	if repaired_route.is_empty():
 		_record_probe_repair_attempt(request_id, false, String(repaired_route.get("reason", "probe_repair_no_route")), certificate, repair_avoid_cells, repair_attempts, repaired_route)
+		return {}
+	var classification := String(repaired_route.get("classification", repaired_route.get("status", "")))
+	if not bool(repaired_route.get("ok", false)):
+		_record_probe_repair_attempt(request_id, false, String(repaired_route.get("reason", "probe_repair_no_route")), certificate, repair_avoid_cells, repair_attempts, repaired_route)
+		if classification in [STATE_PENDING_BUDGET, STATE_PENDING_NAV_DATA]:
+			return repaired_route
 		return {}
 	_record_probe_repair_attempt(request_id, true, "probe_collision_repair", certificate, repair_avoid_cells, repair_attempts, {
 		"targetCell": repaired_route.get("targetCell", INVALID_CELL),
@@ -969,7 +1124,7 @@ func actor_id_for_entry(entry: Dictionary) -> String:
 	return ""
 
 func _transition_record(record: Dictionary, state: String, reason: String) -> void:
-	_increment_state_frame(record)
+	# begin_frame is the sole physics clock for pending-state durations.
 	record["state"] = state
 	record["reason"] = reason
 	record["updatedFrame"] = frame_serial
@@ -1039,6 +1194,8 @@ func _planning_budget_debug(record: Dictionary) -> Dictionary:
 	return {
 		"budgetPerFrame": plan_attempt_budget_per_frame,
 		"usedThisFrame": plan_attempts_used_this_frame,
+		"routeSearchExpansionBudgetPerFrame": route_search_expansion_budget_per_frame,
+		"routeSearchExpansionsUsedThisFrame": route_search_expansions_used_this_frame,
 		"planningWaitFrames": _planning_wait_frames(record),
 		"starvationFrameLimit": PLANNING_STARVATION_FRAME_LIMIT
 	}
@@ -1052,12 +1209,271 @@ func _recent_events(record: Dictionary, limit: int) -> Array:
 func _event(state: String, reason: String, details := {}) -> Dictionary:
 	var result := {
 		"frame": frame_serial,
+		"wallMsec": Time.get_ticks_msec(),
 		"state": state,
 		"reason": reason
 	}
 	if details is Dictionary and not (details as Dictionary).is_empty():
 		result["details"] = (details as Dictionary).duplicate(true)
 	return result
+
+
+func _maybe_capture_pending_stall_trace(record: Dictionary) -> void:
+	var state := String(record.get("state", STATE_NONE))
+	if not (state in PENDING_STATES) or bool(record.get("pendingStallTraceCaptured", false)):
+		return
+	var now_msec := Time.get_ticks_msec()
+	var created_msec := int(record.get("createdWallMsec", now_msec))
+	var wall_wait_msec := maxi(0, now_msec - created_msec)
+	if wall_wait_msec < PENDING_STALL_TRACE_WALL_MSEC:
+		return
+	record["pendingStallTraceCaptured"] = true
+	counters["pendingStallTraceCaptures"] = int(counters.get("pendingStallTraceCaptures", 0)) + 1
+	var actor_id := String(record.get("actorId", ""))
+	var entry_value = actor_entries.get(actor_id, {})
+	var entry: Dictionary = entry_value if entry_value is Dictionary else {}
+	var body := entry.get("body") as Node3D
+	var position = body.global_position if body != null and is_instance_valid(body) else null
+	var route: Dictionary = record.get("route", {}) if record.get("route", {}) is Dictionary else {}
+	var proof: Dictionary = record.get("routeProof", {}) if record.get("routeProof", {}) is Dictionary else {}
+	var trace := {
+		"capturedWallMsec": now_msec,
+		"authorityPhysicsFrame": frame_serial,
+		"worldSeed": String(main.get("seed_text")) if main != null else "",
+		"actorId": actor_id,
+		"requestId": String(record.get("requestId", "")),
+		"generation": int(record.get("generation", 0)),
+		"intent": _trace_safe_value(record.get("intent", {})),
+		"state": state,
+		"reason": String(record.get("reason", "")),
+		"priority": int(record.get("priority", 0)),
+		"createdFrame": int(record.get("createdFrame", 0)),
+		"createdWallMsec": created_msec,
+		"wallWaitMsec": wall_wait_msec,
+		"stateFrameCounts": _trace_safe_value(record.get("stateFrameCounts", {})),
+		"lastServicedFrame": int(record.get("lastServicedFrame", -1)),
+		"recentEvents": _trace_safe_value(_recent_events(record, MAX_REQUEST_EVENTS)),
+		"route": _trace_safe_value(_record_route_summary(route)),
+		"proof": _trace_safe_value({
+			"ok": bool(proof.get("ok", false)),
+			"status": String(proof.get("status", "")),
+			"reason": String(proof.get("reason", "")),
+			"sampleCount": int(proof.get("sampleCount", 0))
+		}),
+		"bodyPosition": _trace_safe_value(position),
+		"routePhysicsService": _trace_safe_value({
+			"ticks": int(entry.get("routePhysicsServiceTicks", 0)),
+			"lastFrame": int(entry.get("routePhysicsServiceLastFrame", -1)),
+			"kind": String(entry.get("routePhysicsServiceKind", "")),
+			"reason": String(entry.get("routePhysicsServiceReason", "")),
+			"sinceBrainFrames": int(entry.get("routePhysicsServiceSinceBrainFrames", -1))
+		}),
+		"lastPlan": _trace_safe_value(entry.get("homeRouteV2LastPlan", {}))
+	}
+	pending_stall_trace_records.append(trace)
+	while pending_stall_trace_records.size() > 8:
+		pending_stall_trace_records.remove_at(0)
+	_write_pending_stall_trace()
+
+
+func _write_pending_stall_trace() -> void:
+	var file := FileAccess.open(STALL_TRACE_PATH, FileAccess.WRITE)
+	if file == null:
+		return
+	file.store_string(JSON.stringify({
+		"schemaVersion": 1,
+		"captureKind": "npc_route_pending_stall",
+		"thresholdWallMsec": PENDING_STALL_TRACE_WALL_MSEC,
+		"traces": pending_stall_trace_records
+	}, "\t"))
+
+
+func _maybe_capture_scripted_order_stall_trace(actor_id: String, entry: Dictionary) -> void:
+	var order_value = entry.get("scriptedOrder", {})
+	if not (order_value is Dictionary):
+		return
+	var order: Dictionary = order_value
+	var order_state := String(order.get("state", ""))
+	if not bool(order.get("usesRouteStack", false)) or not (order_state in ["PENDING", "ACTIVE"]):
+		return
+	var active_request_id := String(active_request_by_actor.get(actor_id, ""))
+	if active_request_id != "" and requests_by_id.has(active_request_id):
+		return
+	var order_id := String(order.get("id", ""))
+	if order_id == "" or String(entry.get("_scriptedOrderStallTraceOrderId", "")) == order_id:
+		return
+	var now_msec := Time.get_ticks_msec()
+	var submitted_msec := int(order.get("submittedWallMsec", now_msec))
+	var wall_wait_msec := maxi(0, now_msec - submitted_msec)
+	if wall_wait_msec < PENDING_STALL_TRACE_WALL_MSEC:
+		return
+	entry["_scriptedOrderStallTraceOrderId"] = order_id
+	counters["scriptedOrderStallTraceCaptures"] = int(counters.get("scriptedOrderStallTraceCaptures", 0)) + 1
+	var body := entry.get("body") as Node3D
+	var trace := {
+		"capturedWallMsec": now_msec,
+		"authorityPhysicsFrame": frame_serial,
+		"worldSeed": String(main.get("seed_text", "")) if main != null else "",
+		"actorId": actor_id,
+		"order": _trace_safe_value(order),
+		"submittedPhysicsFrame": int(order.get("submittedPhysicsFrame", -1)),
+		"submittedWallMsec": submitted_msec,
+		"wallWaitMsec": wall_wait_msec,
+		"activeRequestId": active_request_id,
+		"routeStatus": String(entry.get("routeStatus", "")),
+		"routeReason": String(entry.get("routeReason", "")),
+		"homeRequestId": String(entry.get("homeRouteV2RequestId", "")),
+		"routineRequestId": String(entry.get("routineRouteV2RequestId", "")),
+		"bodyPosition": _trace_safe_value(body.global_position if body != null and is_instance_valid(body) else null),
+		"dialogueFocused": bool(body.get_meta("npc_dialogue_focused", false)) if body != null and is_instance_valid(body) else false,
+		"brain": _trace_safe_value({
+			"lastTick": int(entry.get("npc_last_brain_tick", -1)),
+			"budgetSkipStreak": int(entry.get("npc_brain_budget_skip_streak", 0)),
+			"lastSkipReason": String(entry.get("npc_brain_budget_skip_reason", ""))
+		}),
+		"routePhysicsService": _trace_safe_value({
+			"ticks": int(entry.get("routePhysicsServiceTicks", 0)),
+			"lastFrame": int(entry.get("routePhysicsServiceLastFrame", -1)),
+			"kind": String(entry.get("routePhysicsServiceKind", "")),
+			"reason": String(entry.get("routePhysicsServiceReason", ""))
+		})
+	}
+	scripted_order_stall_trace_records.append(trace)
+	while scripted_order_stall_trace_records.size() > 8:
+		scripted_order_stall_trace_records.remove_at(0)
+	_write_scripted_order_stall_trace()
+
+
+func _write_scripted_order_stall_trace() -> void:
+	var file := FileAccess.open(SCRIPTED_ORDER_STALL_TRACE_PATH, FileAccess.WRITE)
+	if file == null:
+		return
+	file.store_string(JSON.stringify({
+		"schemaVersion": 1,
+		"captureKind": "npc_scripted_order_without_route_request_stall",
+		"thresholdWallMsec": PENDING_STALL_TRACE_WALL_MSEC,
+		"traces": scripted_order_stall_trace_records
+	}, "\t"))
+
+
+func _observe_collision_recovery_stall(record: Dictionary, details) -> void:
+	var actor_id := String(record.get("actorId", ""))
+	if actor_id == "":
+		return
+	var now_msec := Time.get_ticks_msec()
+	var state_value = collision_recovery_stalls_by_actor.get(actor_id, {})
+	var state: Dictionary = state_value if state_value is Dictionary else {}
+	if state.is_empty():
+		state = {
+			"firstWallMsec": now_msec,
+			"collisionCount": 0,
+			"captured": false
+		}
+	state["lastWallMsec"] = now_msec
+	state["collisionCount"] = int(state.get("collisionCount", 0)) + 1
+	state["lastRequestId"] = String(record.get("requestId", ""))
+	state["lastCollision"] = _trace_safe_value(details if details is Dictionary else {})
+	collision_recovery_stalls_by_actor[actor_id] = state
+	if bool(state.get("captured", false)) or int(state.get("collisionCount", 0)) < 2:
+		return
+	var first_msec := int(state.get("firstWallMsec", now_msec))
+	var wall_wait_msec := maxi(0, now_msec - first_msec)
+	if wall_wait_msec < PENDING_STALL_TRACE_WALL_MSEC:
+		return
+	state["captured"] = true
+	collision_recovery_stalls_by_actor[actor_id] = state
+	counters["collisionRecoveryStallTraceCaptures"] = int(counters.get("collisionRecoveryStallTraceCaptures", 0)) + 1
+	var entry_value = actor_entries.get(actor_id, {})
+	var entry: Dictionary = entry_value if entry_value is Dictionary else {}
+	var body := entry.get("body") as Node3D
+	var trace := {
+		"capturedWallMsec": now_msec,
+		"authorityPhysicsFrame": frame_serial,
+		"worldSeed": String(main.get("seed_text", "")) if main != null else "",
+		"actorId": actor_id,
+		"firstCollisionWallMsec": first_msec,
+		"wallRecoveryMsec": wall_wait_msec,
+		"collisionCount": int(state.get("collisionCount", 0)),
+		"lastRequestId": String(state.get("lastRequestId", "")),
+		"lastCollision": state.get("lastCollision", {}),
+		"activeRequest": _trace_safe_value(runtime_for_actor(actor_id)),
+		"bodyPosition": _trace_safe_value(body.global_position if body != null and is_instance_valid(body) else null),
+		"scriptedOrder": _trace_safe_value(entry.get("scriptedOrder", {})),
+		"routePhysicsService": _trace_safe_value({
+			"ticks": int(entry.get("routePhysicsServiceTicks", 0)),
+			"lastFrame": int(entry.get("routePhysicsServiceLastFrame", -1)),
+			"kind": String(entry.get("routePhysicsServiceKind", "")),
+			"reason": String(entry.get("routePhysicsServiceReason", ""))
+		})
+	}
+	collision_recovery_stall_trace_records.append(trace)
+	while collision_recovery_stall_trace_records.size() > 8:
+		collision_recovery_stall_trace_records.remove_at(0)
+	_write_collision_recovery_stall_trace()
+
+
+func _reset_collision_recovery_stall_for_request(request_id: String) -> void:
+	if request_id == "" or not requests_by_id.has(request_id):
+		return
+	var record: Dictionary = requests_by_id[request_id]
+	var actor_id := String(record.get("actorId", ""))
+	if actor_id != "":
+		collision_recovery_stalls_by_actor.erase(actor_id)
+
+
+func _write_collision_recovery_stall_trace() -> void:
+	var file := FileAccess.open(COLLISION_RECOVERY_STALL_TRACE_PATH, FileAccess.WRITE)
+	if file == null:
+		return
+	file.store_string(JSON.stringify({
+		"schemaVersion": 1,
+		"captureKind": "npc_repeated_collision_recovery_stall",
+		"thresholdWallMsec": PENDING_STALL_TRACE_WALL_MSEC,
+		"traces": collision_recovery_stall_trace_records
+	}, "\t"))
+
+
+func _trace_safe_value(value, depth := 0):
+	if depth >= 5:
+		return str(value)
+	if value is Vector3:
+		var vector3: Vector3 = value
+		return [vector3.x, vector3.y, vector3.z]
+	if value is Vector2:
+		var vector2: Vector2 = value
+		return [vector2.x, vector2.y]
+	if value is Vector3i:
+		var vector3i: Vector3i = value
+		return [vector3i.x, vector3i.y, vector3i.z]
+	if value is Vector2i:
+		var vector2i: Vector2i = value
+		return [vector2i.x, vector2i.y]
+	if value is Dictionary:
+		var result := {}
+		var count := 0
+		for key in (value as Dictionary).keys():
+			if count >= 48:
+				break
+			result[str(key)] = _trace_safe_value((value as Dictionary).get(key), depth + 1)
+			count += 1
+		return result
+	if value is Array:
+		var result: Array = []
+		for item in value:
+			if result.size() >= 48:
+				break
+			result.append(_trace_safe_value(item, depth + 1))
+		return result
+	if value is PackedVector3Array:
+		var result: Array = []
+		for item in value:
+			if result.size() >= 48:
+				break
+			result.append(_trace_safe_value(item, depth + 1))
+		return result
+	if value == null or value is bool or value is int or value is float or value is String:
+		return value
+	return str(value)
 
 func _publish_entry_debug(entry: Dictionary, record: Dictionary) -> void:
 	if entry.is_empty():

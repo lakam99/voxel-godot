@@ -1871,14 +1871,26 @@ func _nearest_route_tiles(keys: Array[String], start_cell: Vector2i, target_cell
 func approach_cells_for_target(entry: Dictionary, target_position: Vector3, allow_outside := true) -> Array[Vector2i]:
     var target_cell := world_cell(target_position)
     var result: Array[Vector2i] = []
+    for cell in approach_candidate_cells_for_target(entry, target_position, allow_outside):
+        if cell_is_standable_goal(entry, cell, allow_outside, false):
+            result.append(cell)
+    result.sort_custom(func(a: Vector2i, b: Vector2i) -> bool:
+        return cell_distance(a, target_cell) < cell_distance(b, target_cell)
+    )
+    return result
+
+
+# Raw geometry only. Collision-backed consumers validate these poses through their
+# own snapshot so that validation can be scheduled under the route budget.
+func approach_candidate_cells_for_target(_entry: Dictionary, target_position: Vector3, _allow_outside := true) -> Array[Vector2i]:
+    var target_cell := world_cell(target_position)
+    var result: Array[Vector2i] = []
     for radius in range(1, 4):
         for dx in range(-radius, radius + 1):
             for dz in range(-radius, radius + 1):
                 if max(abs(dx), abs(dz)) != radius:
                     continue
-                var cell := target_cell + Vector2i(dx, dz)
-                if cell_is_standable_goal(entry, cell, allow_outside, false):
-                    result.append(cell)
+                result.append(target_cell + Vector2i(dx, dz))
     result.sort_custom(func(a: Vector2i, b: Vector2i) -> bool:
         return cell_distance(a, target_cell) < cell_distance(b, target_cell)
     )
@@ -1914,7 +1926,7 @@ func cell_is_static_standable_goal(entry: Dictionary, cell: Vector2i, allow_outs
     var terrain := terrain_allows_step(cell, cell, moving_home)
     if not bool(terrain.get("ok", false)):
         return false
-    var snapshot := cached_validation_snapshot(entry, allow_outside, moving_home)
+    var snapshot := static_validation_snapshot(entry, allow_outside, moving_home)
     var door := door_at(snapshot, cell)
     if door != null and not door_allows_route_for_entry(entry, door, cell, moving_home):
         return false
@@ -1925,3 +1937,27 @@ func cell_is_static_standable_goal(entry: Dictionary, cell: Vector2i, allow_outs
     if prop_clearance_blocker(snapshot, cell) != null:
         return false
     return true
+
+
+func static_validation_snapshot(entry: Dictionary, allow_outside := false, moving_home := false) -> Dictionary:
+    if cached_revision == "" and cached_blocked.is_empty() and cached_doors.is_empty() and cached_paths.is_empty() and cached_props.is_empty():
+        build_snapshot(entry, allow_outside, moving_home)
+    return {
+        "revision": revision(),
+        "staticSnapshotRevision": static_snapshot_revision,
+        "dynamicRevision": dynamic_revision,
+        "semanticRevision": semantic_revision,
+        "doorStateRevision": door_state_revision,
+        "blocked": cached_blocked,
+        "doors": cached_doors,
+        "paths": cached_paths,
+        "props": cached_props,
+        "propClearance": cached_prop_clearance,
+        "staticCollision": cached_static_collision_records,
+        "staticCollisionByCell": cached_static_collision_by_cell,
+        "doorCollision": cached_door_collision_records,
+        "doorCollisionByCell": cached_door_collision_by_cell,
+        "dynamic": {},
+        "allowOutside": allow_outside,
+        "movingHome": moving_home
+    }

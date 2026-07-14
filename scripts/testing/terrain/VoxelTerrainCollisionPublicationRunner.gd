@@ -81,7 +81,25 @@ func run() -> void:
 		published_frame >= 0 and navigation_loaded_after > navigation_loaded_before,
 		"before=%d after=%d publishedFrame=%d" % [navigation_loaded_before, navigation_loaded_after, published_frame]
 	)
+	var shutdown_started_usec := Time.get_ticks_usec()
+	main.set_process(false)
+	main.set_physics_process(false)
+	if runtime != null and is_instance_valid(runtime) and runtime.has_method("begin_shutdown"):
+		runtime.call("begin_shutdown")
+		await get_tree().process_frame
+		await get_tree().process_frame
+	var shutdown_pending_tasks := int(runtime.call("voxel_engine_pending_task_count")) \
+		if runtime != null and is_instance_valid(runtime) and runtime.has_method("voxel_engine_pending_task_count") else 0
+	while shutdown_pending_tasks > 0 and float(Time.get_ticks_usec() - shutdown_started_usec) / 1000000.0 < 30.0:
+		await get_tree().process_frame
+		shutdown_pending_tasks = int(runtime.call("voxel_engine_pending_task_count"))
+	add_result(
+		"voxel_publication_shutdown_tasks_drained",
+		shutdown_pending_tasks == 0,
+		"pending=%d elapsedMs=%.3f" % [shutdown_pending_tasks, float(Time.get_ticks_usec() - shutdown_started_usec) / 1000.0]
+	)
 	main.queue_free()
+	await get_tree().process_frame
 	finish()
 
 func add_result(name: String, passed: bool, details: String) -> void:

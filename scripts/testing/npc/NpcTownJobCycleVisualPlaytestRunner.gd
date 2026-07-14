@@ -147,7 +147,7 @@ func run() -> void:
     write_town_summary()
 
     add_result("natural_town_selected_non_tutorial", is_non_tutorial_town(), JSON.stringify(town_summary))
-    add_result("runner_does_not_mutate_town_or_npc_roster", true, "observer only: no town blocks, homes, resources, or NPCs are created by this runner")
+    add_result("runner_does_not_mutate_town_or_npc_roster", true, "observer only: no town blocks, homes, resources, or NPCs are created; the player is placed once before the act phase only as the streaming anchor")
     add_result("natural_town_has_generated_fence_and_gate", has_generated_fence_and_gate(), JSON.stringify(fence_gate_summary))
     add_result("natural_town_has_every_required_role", missing_required_roles().is_empty(), JSON.stringify(role_summary))
     add_result("natural_town_has_every_required_job_type", missing_required_jobs().is_empty(), JSON.stringify(role_summary))
@@ -239,8 +239,8 @@ func load_natural_generated_town() -> void:
     town_center = Vector2i(int(town.get("centerX", 0)), int(town.get("centerZ", 0)))
     town_level = float(town.get("level", 16.0))
     town_key = "%d,%d" % [town_center.x, town_center.y]
-    write_progress("load_town_move_player")
-    move_player_for_lod(town_center, town_level)
+    write_progress("load_town_place_pre_act_stream_anchor")
+    place_player_pre_act_stream_anchor(town_center, town_level)
     if main.has_method("update_chunks"):
         write_progress("load_town_budgeted_stream_start")
         if not await stream_town_chunks_budgeted():
@@ -562,9 +562,11 @@ func observe_day_jobs() -> void:
         await capture_stage("day_guard_guarding", "guard")
     await capture_stage("day_jobs_overview", "overview")
     var stale_foragers := stale_forager_rows(day_matrix)
+    var departure_reissue := day_home_departure_reissue_summary()
     add_result("day_forager_uses_builtin_forage", observed_forage, JSON.stringify(filtered_job_rows(day_matrix, "forage")))
     add_result("day_forager_has_no_stale_reservation", stale_foragers.is_empty(), JSON.stringify(stale_foragers))
     add_result("day_guard_uses_builtin_guard", observed_guard, JSON.stringify(filtered_job_rows(day_matrix, "guard")))
+    add_result("day_shared_home_departure_does_not_reissue_clearance", bool(departure_reissue.get("ok", false)), JSON.stringify(departure_reissue))
     add_result("day_non_guard_non_foragers_stay_near_town", non_special_workers_near_town(day_matrix), JSON.stringify(filtered_non_special_rows(day_matrix)))
     add_result("day_non_guard_non_foragers_move_or_work_in_town", non_special_workers_move_or_work(non_special_distance_by_id, day_matrix), JSON.stringify(sanitize_value(non_special_distance_by_id)))
 
@@ -721,6 +723,7 @@ func npc_summary(entry: Dictionary, phase: String) -> Dictionary:
         "goal": String(entry.get("goal", "")),
         "activeGoalKind": String(entry.get("activeGoalKind", "")),
         "activeMotionGoal": sanitize_value(entry.get("activeMotionGoal", {})),
+        "motionPerception": motion_perception_summary(entry),
         "scheduleState": String(entry.get("scheduleState", "")),
         "jobPhase": String(entry.get("jobPhase", "")),
         "jobTimer": rounded(float(entry.get("jobTimer", 0.0))),
@@ -736,6 +739,8 @@ func npc_summary(entry: Dictionary, phase: String) -> Dictionary:
         "homePosition": vec3(entry.get("homePosition", position) if entry.get("homePosition", position) is Vector3 else position),
         "porchPosition": vec3(entry.get("porchPosition", position) if entry.get("porchPosition", position) is Vector3 else position),
         "guardPosition": vec3(guard_position),
+        "guardTargetCache": vec3(entry.get("guardTargetCache", guard_position) if entry.get("guardTargetCache", guard_position) is Vector3 else guard_position),
+        "guardDutyState": String(entry.get("guardDutyState", "")),
         "guardCell": vec2i(guard_cell),
         "homeActiveTargetCell": vec2i(entry.get("homeActiveTargetCell", Vector2i(999999, 999999)) if entry.get("homeActiveTargetCell", Vector2i(999999, 999999)) is Vector2i else Vector2i(999999, 999999)),
         "homeRoute": home_route,
@@ -769,6 +774,10 @@ func npc_summary(entry: Dictionary, phase: String) -> Dictionary:
         "corridorFollow": sanitize_value(entry.get("corridorFollow", {})),
         "corridorProgress": sanitize_value(entry.get("corridorProgress", {})),
         "homeSettleDebug": sanitize_value(entry.get("homeSettleDebug", {})),
+		"homeDeparture": sanitize_value({
+			"state": String(entry.get("homeDepartureState", "")),
+			"lastTransition": entry.get("homeDepartureLastTransition", {})
+		}),
         "activeDoorPortalId": String(entry.get("activeDoorPortalId", "")),
         "simulationLod": String(entry.get("simulationLod", "")),
         "abstractSimulated": bool(entry.get("abstractSimulated", false)),
@@ -790,6 +799,20 @@ func npc_summary(entry: Dictionary, phase: String) -> Dictionary:
         "homeDoorOpen": any_home_door_open(entry),
         "canFight": bool(entry.get("canFight", false)),
         "nightGuard": bool(entry.get("nightGuard", false))
+    }
+
+func motion_perception_summary(entry: Dictionary) -> Dictionary:
+    var perception: Dictionary = entry.get("activeMotionPerception", {}) if entry.get("activeMotionPerception", {}) is Dictionary else {}
+    var threat = perception.get("threat") as Node3D
+    var threat_position: Vector3 = threat.global_position if threat != null and is_instance_valid(threat) else Vector3.ZERO
+    return {
+        "activeThreat": bool(perception.get("activeThreat", false)),
+        "threatValid": threat != null and is_instance_valid(threat),
+        "threatName": threat.name if threat != null and is_instance_valid(threat) else "",
+        "threatPosition": vec3(threat_position),
+        "threatCell": vec2i(flat_cell(threat_position)) if threat != null and is_instance_valid(threat) else vec2i(Vector2i(999999, 999999)),
+        "onThreshold": bool(perception.get("onThreshold", false)),
+        "scheduleState": String(perception.get("scheduleState", ""))
     }
 
 func smart_object_reservation_debug(entry: Dictionary) -> Dictionary:
@@ -825,6 +848,47 @@ func record_timeline(sample: Dictionary) -> void:
     timeline.append(sample)
     while timeline.size() > MAX_TIMELINE_SAMPLES:
         timeline.pop_front()
+
+func day_home_departure_reissue_summary() -> Dictionary:
+    var actors_cleared := {}
+    var reissues: Array[Dictionary] = []
+    for sample_value in timeline:
+        if not (sample_value is Dictionary):
+            continue
+        var sample: Dictionary = sample_value
+        var label := String(sample.get("label", ""))
+        if not label.begins_with("day_"):
+            continue
+        var matrix: Array = sample.get("matrix", []) if sample.get("matrix", []) is Array else []
+        for row_value in matrix:
+            if not (row_value is Dictionary):
+                continue
+            var row: Dictionary = row_value
+            var id := String(row.get("id", ""))
+            if id == "":
+                continue
+            var departure: Dictionary = row.get("homeDeparture", {}) if row.get("homeDeparture", {}) is Dictionary else {}
+            var state := String(departure.get("state", ""))
+            if state == "outside":
+                actors_cleared[id] = true
+                continue
+            if state != "clearing" or not actors_cleared.has(id):
+                continue
+            var routine: Dictionary = row.get("routineRouteV2", {}) if row.get("routineRouteV2", {}) is Dictionary else {}
+            reissues.append({
+                "id": id,
+                "name": String(row.get("name", "")),
+                "job": String(row.get("job", "")),
+                "sample": label,
+                "departure": departure,
+                "routeReason": String(row.get("routeReason", "")),
+                "semanticKind": String(routine.get("semanticKind", ""))
+            })
+    return {
+        "ok": not actors_cleared.is_empty() and reissues.is_empty(),
+        "observedOutsideActorIds": actors_cleared.keys(),
+        "reissues": reissues
+    }
 
 func matrix_has_forager_work(matrix: Array[Dictionary]) -> bool:
     for row in matrix:
@@ -1172,7 +1236,6 @@ func position_observer_camera(mode: String) -> void:
         observer_camera.global_position = center + Vector3(CELL * 35.0, CELL * 22.0, CELL * 35.0)
         observer_camera.look_at(target, Vector3.UP)
         last_observer_camera_target = target
-        update_lod_observer_anchor(target)
         observer_camera.make_current()
         return
     if mode == "overview":
@@ -1196,14 +1259,6 @@ func position_observer_camera(mode: String) -> void:
         float(target_summary.get("y", center.y)),
         float(target_summary.get("z", center.z))
     )
-    update_lod_observer_anchor(last_observer_camera_target)
-
-func update_lod_observer_anchor(target: Vector3) -> void:
-    if player == null:
-        return
-    player.global_position = Vector3(target.x, town_level + 0.15, target.z) # town_job_cycle_fixture_camera_load
-    player.velocity = Vector3.ZERO
-
 func observer_context() -> Dictionary:
     return {
         "townCenterPosition": town_center_position(),
@@ -1793,11 +1848,11 @@ func block_summary(block: Node) -> Dictionary:
         "position": vec3((block as Node3D).global_position) if block is Node3D else {}
     }
 
-func move_player_for_lod(center: Vector2i, level: float) -> void:
+func place_player_pre_act_stream_anchor(center: Vector2i, level: float) -> void:
     if player == null:
         return
     var radius := int(town.get("radius", 30))
-    player.global_position = Vector3(float(center.x - radius - 8) * CELL, level + 0.15, float(center.y - radius - 8) * CELL) # town_job_cycle_fixture_camera_load
+    player.global_position = Vector3(float(center.x - radius - 8) * CELL, level + 0.15, float(center.y - radius - 8) * CELL) # town_job_cycle_pre_act_stream_anchor
     player.velocity = Vector3.ZERO
 
 func town_records() -> Array:

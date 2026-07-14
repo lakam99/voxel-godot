@@ -6,6 +6,7 @@ const NpcPathingScript := preload("res://scripts/NpcPathing.gd")
 const NpcCombatScript := preload("res://scripts/NpcCombat.gd")
 const NpcProfileRulesScript := preload("res://scripts/NpcProfileRules.gd")
 const NpcStatsScript := preload("res://scripts/NpcStats.gd")
+const ItemCatalogScript := preload("res://scripts/ItemCatalog.gd")
 const NpcAutonomySystemScript := preload("res://scripts/npc_ai/NpcAutonomySystem.gd")
 const NpcEnumsScript := preload("res://scripts/npc_ai/NpcEnums.gd")
 const NpcAgentScene := preload("res://scenes/npc/NpcAgent.tscn")
@@ -21,7 +22,6 @@ const CELL := 1.35
 const DOOR_TRAFFIC_RELEASE_RADIUS := CELL * 0.72
 const FORAGE_SCAN_NODE_LIMIT := 1200
 const FORAGE_SCAN_CANDIDATE_LIMIT := 8
-const FORAGE_HOME_RETURN_MAX_DISTANCE := CELL * 36.0
 const RESOURCE_TARGET_CACHE_FRAMES := 240
 const NO_DETOUR := Vector3(9999999.0, 9999999.0, 9999999.0)
 const NPC_SPEED_MODE_WALKING := "walking"
@@ -332,6 +332,8 @@ func apply_scripted_order(entry: Dictionary, kind: String, reason: String, targe
         "id": order_id,
         "kind": kind,
         "state": "PENDING",
+        "submittedPhysicsFrame": Engine.get_physics_frames(),
+        "submittedWallMsec": Time.get_ticks_msec(),
         "reason": reason,
         "submissionReason": reason,
         "statusReason": reason,
@@ -1117,12 +1119,15 @@ func update_npcs(delta: float, day_factor: float) -> void:
     var scanned := 0
     var processed := 0
     var brain_processed_entries: Array = []
-    var immediate_brain_entries: Array = []
+    var immediate_brain_candidates: Array = []
     for entry in active_entries:
         if npc_brain_requires_immediate_update(entry, night_factor):
-            immediate_brain_entries.append(entry)
-    if not immediate_brain_entries.is_empty():
-        budget = maxi(budget, mini(immediate_brain_entries.size(), 12))
+            immediate_brain_candidates.append(entry)
+    if not immediate_brain_candidates.is_empty():
+        budget = maxi(budget, mini(immediate_brain_candidates.size(), 12))
+    var immediate_brain_entries: Array = immediate_brain_candidates
+    if autonomy_system != null and autonomy_system.has_method("select_urgent_brain_entries"):
+        immediate_brain_entries = autonomy_system.select_urgent_brain_entries(immediate_brain_candidates, budget)
     for entry in immediate_brain_entries:
         if processed >= budget:
             break
@@ -1161,6 +1166,11 @@ func update_npcs(delta: float, day_factor: float) -> void:
     var motion_frame_start := Time.get_ticks_usec()
     var motion_processed := 0
     for entry in active_entries:
+        if autonomy_system != null and autonomy_system.has_method("physics_route_service_owns_motion") and bool(autonomy_system.physics_route_service_owns_motion(entry)):
+            if autonomy_system.has_method("record_motion_skipped"):
+                autonomy_system.record_motion_skipped(entry, "physics_route_service")
+            update_npc_visual_state(entry, delta)
+            continue
         if not motion_entries.has(entry):
             if autonomy_system != null and autonomy_system.has_method("record_motion_skipped"):
                 autonomy_system.record_motion_skipped(entry, "motion_budget")
@@ -1497,14 +1507,16 @@ func update_npc_needs(entry: Dictionary, delta: float, night_factor: float) -> v
     var body := entry.get("body") as Node
     if body:
         body.set_meta("npc_hunger", hunger)
-    if hunger < max_hunger * 0.55 and npc_inventory_count(entry, "berries") > 0:
-        npc_inventory_add(entry, "berries", -1)
-        hunger = minf(max_hunger, hunger + 24.0)
-        entry["hunger"] = hunger
-        npc_food_eaten += 1
-        if body:
-            body.set_meta("npc_hunger", hunger)
-        last_message = "%s ate berries" % String(entry.get("name", "NPC"))
+    if hunger < max_hunger * 0.55:
+        var consumed_food := consume_forage_food(entry)
+        if bool(consumed_food.get("ok", false)):
+            var item_id := String(consumed_food.get("itemId", ""))
+            hunger = minf(max_hunger, hunger + float(consumed_food.get("food", 0)))
+            entry["hunger"] = hunger
+            npc_food_eaten += 1
+            if body:
+                body.set_meta("npc_hunger", hunger)
+            last_message = "%s ate %s" % [String(entry.get("name", "NPC")), ItemCatalogScript.label(item_id)]
 
 func update_name_label_visibility(entry: Dictionary) -> void:
     var body := entry.get("body") as Node3D
@@ -1585,6 +1597,37 @@ func npc_inventory_add(entry: Dictionary, item_id: String, amount: int) -> void:
     if body:
         body.set_meta("npc_inventory", personal_inventory.duplicate())
 
+func forage_food_item_ids() -> Array[String]:
+    return ItemCatalogScript.forage_food_ids()
+
+func is_forage_food_item(item_id: String) -> bool:
+    return ItemCatalogScript.is_forage_food(item_id)
+
+func forage_food_value(item_id: String) -> int:
+    return ItemCatalogScript.food_value(item_id) if is_forage_food_item(item_id) else 0
+
+func consume_forage_food(entry: Dictionary, preferred_item_id := "") -> Dictionary:
+    var inventory: Dictionary = entry.get("personalInventory", {})
+    if preferred_item_id != "" and is_forage_food_item(preferred_item_id) and int(inventory.get(preferred_item_id, 0)) > 0:
+        npc_inventory_add(entry, preferred_item_id, -1)
+        return { "ok": true, "itemId": preferred_item_id, "food": forage_food_value(preferred_item_id) }
+    var candidates: Array[String] = []
+    for item_id in forage_food_item_ids():
+        if int(inventory.get(item_id, 0)) > 0:
+            candidates.append(item_id)
+    if candidates.is_empty():
+        return { "ok": false, "reason": "no_forage_food" }
+    candidates.sort_custom(func(a: String, b: String) -> bool:
+        var a_food := forage_food_value(a)
+        var b_food := forage_food_value(b)
+        if a_food != b_food:
+            return a_food > b_food
+        return a < b
+    )
+    var item_id := candidates[0]
+    npc_inventory_add(entry, item_id, -1)
+    return { "ok": true, "itemId": item_id, "food": forage_food_value(item_id) }
+
 func find_forage_target(entry: Dictionary) -> Node3D:
     var body := entry.get("body") as Node3D
     if body == null:
@@ -1597,7 +1640,7 @@ func find_forage_target(entry: Dictionary) -> Node3D:
     var candidates: Array[Node3D] = indexed_resource_candidates(entry, ["forage_source"], {
         "limit": FORAGE_SCAN_CANDIDATE_LIMIT,
         "unreachableMetaKey": forager_unreachable_meta_key(entry),
-        "drops": ["berries"],
+        "drops": forage_food_item_ids(),
         "outsideTown": true,
         "workAreaOnly": true,
         "chunkRadius": 2,
@@ -1655,25 +1698,16 @@ func is_valid_forage_node(node: Node3D, entry: Dictionary) -> bool:
         return false
     if String(node.get_meta("kind", "")) != "prop":
         return false
-    if String(node.get_meta("drop", "")) != "berries" and String(node.get_meta("material", "")) != "berryBush":
+    if not is_forage_food_item(String(node.get_meta("drop", ""))):
         return false
     if not point_inside_work_area(entry, node.global_position):
         return false
     if point_inside_town_footprint(entry, node.global_position, 3):
         return false
-    if not forage_node_within_home_return_radius(entry, node.global_position):
-        return false
     if not smart_object_available(smart_object_id_for_node(node), String(entry.get("id", ""))):
         return false
     var h: float = main.surface_y_at_position(node.global_position)
     return h >= main.WATER_LEVEL + 0.45
-
-func forage_node_within_home_return_radius(entry: Dictionary, position: Vector3) -> bool:
-    var home_position: Vector3 = entry.get("homePosition", entry.get("porchPosition", position))
-    var flat_home_delta := Vector2(position.x - home_position.x, position.z - home_position.z)
-    var leash_radius := float(entry.get("roleLeashRadius", FORAGE_HOME_RETURN_MAX_DISTANCE))
-    var max_return_distance := minf(FORAGE_HOME_RETURN_MAX_DISTANCE, maxf(CELL * 18.0, leash_radius * 0.62))
-    return flat_home_delta.length() <= max_return_distance
 
 func current_route_failure_blocks_forager(entry: Dictionary) -> bool:
     if String(entry.get("activeDoorPortalId", "")) != "":
@@ -1835,7 +1869,7 @@ func resource_query_options_for_job(entry: Dictionary, job: String) -> Dictionar
         "unreachableMetaKey": job_resource_unreachable_meta_key(entry, job)
     }
     if job == "forage":
-        options["drops"] = ["berries"]
+        options["drops"] = forage_food_item_ids()
     return options
 
 func cached_resource_target_for_entry(entry: Dictionary, job: String) -> Node3D:
@@ -1956,9 +1990,7 @@ func is_valid_job_resource_node(node: Node3D, entry: Dictionary, job: String) ->
     if job == "forage":
         if bool(node.get_meta(forager_unreachable_meta_key(entry), false)):
             return false
-        if not forage_node_within_home_return_radius(entry, node.global_position):
-            return false
-        return material == "berryBush" or drop == "berries"
+        return is_forage_food_item(drop)
     return false
 
 func resource_job_uses_outside_work_area(job: String) -> bool:

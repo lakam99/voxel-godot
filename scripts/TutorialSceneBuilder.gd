@@ -6,6 +6,8 @@ const LocalLightRigScript := preload("res://scripts/LocalLightRig.gd")
 const CELL := 1.35
 const SAFE_RADIUS_CELLS := 24
 const FENCE_RADIUS_CELLS := 25
+const STARTUP_LIGHT_BATCH_FRAME_BUDGET_MS := 8.0
+const STARTUP_LIGHT_BATCH_MAX_WORK_UNITS := 768
 
 var system
 var main
@@ -60,14 +62,22 @@ func clear_overlapping_starter_beds(center_cell: Vector2i, level: float) -> void
             main.blocks.erase(key)
             body.queue_free()
 
-func ensure_starter_shelter() -> void:
+func ensure_starter_shelter() -> Dictionary:
+    var metrics := {
+        "shelterTerrainReservationMs": 0.0,
+        "shelterRoofBlocksMs": 0.0,
+        "shelterRoofBlockCount": 0
+    }
     if main == null or system.town.is_empty() or main.structure_system == null:
-        return
+        return metrics
     var center_x := int(system.town.get("centerX", 0))
     var center_z := int(system.town.get("centerZ", 0))
     var level := float(system.town.get("level", 16.0))
+    var terrain_started_usec := Time.get_ticks_usec()
     reserve_starter_shelter_volume(center_x, center_z, level)
+    metrics["shelterTerrainReservationMs"] = float(Time.get_ticks_usec() - terrain_started_usec) / 1000.0
     var roof_center := Vector2i(center_x - 13, center_z - 10)
+    var roof_started_usec := Time.get_ticks_usec()
     for dz in range(-1, 2):
         for dx in range(-1, 2):
             var cell := roof_center + Vector2i(dx, dz)
@@ -75,6 +85,9 @@ func ensure_starter_shelter() -> void:
                 "generatedTier": "town",
                 "cacheKey": "%s:tutorial-starter-roof:%d,%d" % [main.seed_text, cell.x, cell.y]
             })
+            metrics["shelterRoofBlockCount"] = int(metrics.get("shelterRoofBlockCount", 0)) + 1
+    metrics["shelterRoofBlocksMs"] = float(Time.get_ticks_usec() - roof_started_usec) / 1000.0
+    return metrics
 
 func reserve_starter_shelter_volume(center_x: int, center_z: int, level: float) -> void:
     if main == null or main.structure_system == null:
@@ -116,6 +129,8 @@ func ensure_village_perimeter() -> void:
     var center_x := int(system.town.get("centerX", 0))
     var center_z := int(system.town.get("centerZ", 0))
     var level := float(system.town.get("level", 16.0))
+    var deferred_light_entries: Array[Dictionary] = []
+    var deferred_light_cells := {}
     var gate_cells := {}
     for offset in [0, 1]:
         gate_cells[Vector2i(center_x + offset, center_z - FENCE_RADIUS_CELLS)] = { "side": 2, "secondary": offset == 1 }
@@ -139,22 +154,44 @@ func place_perimeter_cell(cell_x: int, cell_z: int, level: float, gate_cells: Di
         "cacheKey": "%s:tutorial-fence:%d,%d" % [main.seed_text, cell_x, cell_z]
     })
 
-func ensure_village_lights() -> void:
+func prepare_village_light_setup() -> Dictionary:
+    var metrics := {
+        "villageLightBlockCount": 0,
+        "villageLightBlocksMs": 0.0,
+        "villageLightRigCount": 0,
+        "villageLightRigsMs": 0.0
+    }
     if main == null or system.town.is_empty() or main.structure_system == null:
-        return
+        return { "metrics": metrics, "entries": [] }
     var center_x := int(system.town.get("centerX", 0))
     var center_z := int(system.town.get("centerZ", 0))
     var level := float(system.town.get("level", 16.0))
+    var deferred_light_entries: Array[Dictionary] = []
+    var deferred_light_cells := {}
     for cell in [
         Vector2i(center_x, center_z - 7), Vector2i(center_x - 8, center_z),
         Vector2i(center_x + 8, center_z), Vector2i(center_x, center_z + 8),
         Vector2i(center_x - 14, center_z - 9), Vector2i(center_x + 14, center_z + 9)
     ]:
+        var terrain_cell := tutorial_light_terrain_cell(cell, level, 0)
+        var should_defer_light: bool = not main.blocks.has(terrain_cell)
+        var block_started_usec := Time.get_ticks_usec()
         main.structure_system.place_utility(cell.x, cell.y, level, "torch", {
             "generatedTier": "town",
-            "cacheKey": "%s:tutorial-light:%d,%d" % [main.seed_text, cell.x, cell.y]
+            "cacheKey": "%s:tutorial-light:%d,%d" % [main.seed_text, cell.x, cell.y],
+            "instrumentationMetrics": metrics,
+            "instrumentationMetricPrefix": "villageLight",
+            "deferBlockLightSync": true
         })
-        add_warm_light(Vector3(float(cell.x) * CELL, level + CELL * 1.25, float(cell.y) * CELL), 9.0, 1.15)
+        if should_defer_light and main.blocks.has(terrain_cell) and not deferred_light_cells.has(terrain_cell):
+            deferred_light_cells[terrain_cell] = true
+            deferred_light_entries.append({ "cell": terrain_cell, "blockType": "torch" })
+        metrics["villageLightBlockCount"] = int(metrics.get("villageLightBlockCount", 0)) + 1
+        metrics["villageLightBlocksMs"] = float(metrics.get("villageLightBlocksMs", 0.0)) + float(Time.get_ticks_usec() - block_started_usec) / 1000.0
+        var rig_started_usec := Time.get_ticks_usec()
+        add_warm_light(Vector3(float(cell.x) * CELL, level + CELL * 1.25, float(cell.y) * CELL), 9.0, 1.15, level)
+        metrics["villageLightRigCount"] = int(metrics.get("villageLightRigCount", 0)) + 1
+        metrics["villageLightRigsMs"] = float(metrics.get("villageLightRigsMs", 0.0)) + float(Time.get_ticks_usec() - rig_started_usec) / 1000.0
 
     for offset in range(-FENCE_RADIUS_CELLS, FENCE_RADIUS_CELLS + 1, 5):
         for cell in [
@@ -163,11 +200,60 @@ func ensure_village_lights() -> void:
             Vector2i(center_x - FENCE_RADIUS_CELLS, center_z + offset),
             Vector2i(center_x + FENCE_RADIUS_CELLS, center_z + offset)
         ]:
+            var terrain_cell := tutorial_light_terrain_cell(cell, level, 1)
+            var should_defer_light: bool = not main.blocks.has(terrain_cell)
+            var block_started_usec := Time.get_ticks_usec()
             main.structure_system.place_structure_block(cell.x, cell.y, level, 1, "torch", {
                 "generatedTier": "town",
-                "cacheKey": "%s:tutorial-perimeter-light:%d,%d" % [main.seed_text, cell.x, cell.y]
+                "cacheKey": "%s:tutorial-perimeter-light:%d,%d" % [main.seed_text, cell.x, cell.y],
+                "instrumentationMetrics": metrics,
+                "instrumentationMetricPrefix": "villageLight",
+                "deferBlockLightSync": true
             })
-            add_warm_light(Vector3(float(cell.x) * CELL, level + CELL * 2.25, float(cell.y) * CELL), 9.0, 1.15)
+            if should_defer_light and main.blocks.has(terrain_cell) and not deferred_light_cells.has(terrain_cell):
+                deferred_light_cells[terrain_cell] = true
+                deferred_light_entries.append({ "cell": terrain_cell, "blockType": "torch" })
+            metrics["villageLightBlockCount"] = int(metrics.get("villageLightBlockCount", 0)) + 1
+            metrics["villageLightBlocksMs"] = float(metrics.get("villageLightBlocksMs", 0.0)) + float(Time.get_ticks_usec() - block_started_usec) / 1000.0
+            var rig_started_usec := Time.get_ticks_usec()
+            add_warm_light(Vector3(float(cell.x) * CELL, level + CELL * 2.25, float(cell.y) * CELL), 9.0, 1.15, level)
+            metrics["villageLightRigCount"] = int(metrics.get("villageLightRigCount", 0)) + 1
+            metrics["villageLightRigsMs"] = float(metrics.get("villageLightRigsMs", 0.0)) + float(Time.get_ticks_usec() - rig_started_usec) / 1000.0
+    return { "metrics": metrics, "entries": deferred_light_entries }
+
+func ensure_village_lights() -> Dictionary:
+    var setup_result: Dictionary = prepare_village_light_setup()
+    var metrics: Dictionary = setup_result.get("metrics", {}) if setup_result.get("metrics", {}) is Dictionary else {}
+    var deferred_light_entries: Array = setup_result.get("entries", []) if setup_result.get("entries", []) is Array else []
+    var terrain_light_batch_started_usec := Time.get_ticks_usec()
+    if not deferred_light_entries.is_empty() and main.has_method("sync_block_lights_to_terrain"):
+        metrics["villageLightBatch"] = main.call("sync_block_lights_to_terrain", deferred_light_entries, "tutorial_village_lights")
+    metrics["villageLightDeferredSourceCount"] = deferred_light_entries.size()
+    metrics["villageLightTerrainLightBatchMs"] = float(Time.get_ticks_usec() - terrain_light_batch_started_usec) / 1000.0
+    return metrics
+
+func ensure_village_lights_staged() -> Dictionary:
+    var setup_result: Dictionary = prepare_village_light_setup()
+    var metrics: Dictionary = setup_result.get("metrics", {}) if setup_result.get("metrics", {}) is Dictionary else {}
+    var deferred_light_entries: Array = setup_result.get("entries", []) if setup_result.get("entries", []) is Array else []
+    var terrain_light_batch_started_usec := Time.get_ticks_usec()
+    if not deferred_light_entries.is_empty() and main.has_method("sync_block_lights_to_terrain_staged"):
+        var batch_value: Variant = await main.sync_block_lights_to_terrain_staged(
+            deferred_light_entries,
+            "tutorial_village_lights",
+            STARTUP_LIGHT_BATCH_FRAME_BUDGET_MS,
+            STARTUP_LIGHT_BATCH_MAX_WORK_UNITS
+        )
+        metrics["villageLightBatch"] = batch_value if batch_value is Dictionary else {}
+    elif not deferred_light_entries.is_empty() and main.has_method("sync_block_lights_to_terrain"):
+        metrics["villageLightBatch"] = main.call("sync_block_lights_to_terrain", deferred_light_entries, "tutorial_village_lights")
+    metrics["villageLightDeferredSourceCount"] = deferred_light_entries.size()
+    metrics["villageLightTerrainLightBatchMs"] = float(Time.get_ticks_usec() - terrain_light_batch_started_usec) / 1000.0
+    return metrics
+
+func tutorial_light_terrain_cell(cell: Vector2i, level: float, dy: int) -> Vector3i:
+    var world_y := level + CELL * 0.48 + float(dy) * CELL
+    return Vector3i(cell.x, floori(world_y / CELL) + 1, cell.y)
 
 func place_player_in_starter_house() -> void:
     if main == null or system.town.is_empty() or main.player == null:
@@ -493,12 +579,14 @@ func add_mesh(parent: Node3D, mesh: Mesh, material: Material, position: Vector3,
     instance.scale = scale
     parent.add_child(instance)
 
-func add_warm_light(position: Vector3, radius: float, energy: float) -> void:
+func add_warm_light(position: Vector3, radius: float, energy: float, foundation_y := NAN) -> void:
     if system.light_root == null:
         return
     var cast_shadows := main != null and bool(main.get("shadows_enabled"))
     var fill_position := position
-    if main != null and main.has_method("surface_y_at_position"):
+    if not is_nan(float(foundation_y)):
+        fill_position.y = float(foundation_y) + CELL * 0.36
+    elif main != null and main.has_method("surface_y_at_position"):
         fill_position.y = float(main.call("surface_y_at_position", position)) + CELL * 0.36
     else:
         fill_position.y = position.y - CELL * 0.85

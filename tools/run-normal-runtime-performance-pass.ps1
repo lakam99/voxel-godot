@@ -9,6 +9,8 @@ param(
     [string]$ScreenshotPath = "",
     [string]$Resolution = "",
     [int]$WatchdogSeconds = 0,
+    [ValidateSet("NormalSprintTraversal", "NormalTutorialTownGuardActivation")]
+    [string]$Scenario = "NormalSprintTraversal",
     [switch]$Headless,
     [switch]$UseRealSave
 )
@@ -64,7 +66,7 @@ $env:VOXEL_NORMAL_RUNTIME_PERF_RUN_TOKEN = $runToken
 $env:VOXEL_NORMAL_RUNTIME_PERF_DURATION_SECONDS = [string]$DurationSeconds
 $env:VOXEL_NORMAL_RUNTIME_PERF_WATCHDOG_SECONDS = [string]$WatchdogSeconds
 $env:VOXEL_NORMAL_RUNTIME_PERF_WARMUP_FRAMES = [string]$WarmupFrames
-$env:VOXEL_NORMAL_RUNTIME_PERF_SCENARIO = "NormalSprintTraversal"
+$env:VOXEL_NORMAL_RUNTIME_PERF_SCENARIO = $Scenario
 
 if ($UseRealSave) {
     Remove-Item Env:VOXEL_SAVE_PATH_OVERRIDE -ErrorAction SilentlyContinue

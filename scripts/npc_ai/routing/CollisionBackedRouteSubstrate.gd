@@ -11,12 +11,15 @@ const CLASS_UNREACHABLE_STATIC := "unreachable_static"
 const CLASS_INVALID_GOAL := "invalid_goal"
 const INVALID_CELL := Vector2i(2147483000, 2147483000)
 const DEFAULT_EXPANSIONS_PER_CALL := 128
+const DEFAULT_CANDIDATE_VALIDATIONS_PER_CALL := 128
 const MAX_RECORDED_BLOCKS := 128
 const MAX_RECORDED_VISITED := 256
 
 var world_adapter = null
 var search_jobs := {}
 var active_search_key_by_actor := {}
+var candidate_jobs := {}
+var active_candidate_key_by_actor := {}
 
 
 func setup(adapter) -> void:
@@ -289,6 +292,14 @@ func candidate_poses_for_target(entry: Dictionary, target: Dictionary, semantic_
 		return { "ok": false, "classification": CLASS_PENDING_NAV_DATA, "reason": "missing_world_adapter", "candidates": [] }
 	var allow_outside := bool(options.get("allowOutside", true))
 	var moving_home := semantic_kind == "home_interior" or bool(options.get("movingHome", false))
+	var raw_cells := _target_candidate_cells(entry, target, semantic_kind, allow_outside)
+	if raw_cells.is_empty():
+		return {
+			"ok": false,
+			"classification": CLASS_INVALID_GOAL,
+			"reason": "no_candidate_cells",
+			"candidates": []
+		}
 	var snapshot_result := _build_snapshot(entry, allow_outside, moving_home)
 	if not bool(snapshot_result.get("ok", false)):
 		return {
@@ -298,25 +309,69 @@ func candidate_poses_for_target(entry: Dictionary, target: Dictionary, semantic_
 			"candidates": []
 		}
 	var snapshot: Dictionary = snapshot_result.get("snapshot", {})
-	var raw_cells := _target_candidate_cells(entry, target, semantic_kind, allow_outside)
-	var accepted: Array = []
-	var rejected: Array = []
-	for cell in raw_cells:
-		var validation := validate_goal_cell(entry, snapshot, cell, allow_outside, moving_home, false)
+	var actor_key := _search_actor_key(entry)
+	var candidate_key := _candidate_search_key(actor_key, raw_cells, semantic_kind, allow_outside, moving_home)
+	_clear_replaced_actor_candidate_job(actor_key, candidate_key)
+	var job: Dictionary = candidate_jobs.get(candidate_key, {}) if candidate_jobs.get(candidate_key, {}) is Dictionary else {}
+	if job.is_empty():
+		job = {
+			"nextIndex": 0,
+			"acceptedCells": [],
+			"rejected": []
+		}
+		candidate_jobs[candidate_key] = job
+	var accepted_cells: Array = job.get("acceptedCells", []) if job.get("acceptedCells", []) is Array else []
+	var rejected: Array = job.get("rejected", []) if job.get("rejected", []) is Array else []
+	var next_index := clampi(int(job.get("nextIndex", 0)), 0, raw_cells.size())
+	var validations_per_call := maxi(1, int(options.get("candidateValidationsPerCall", DEFAULT_CANDIDATE_VALIDATIONS_PER_CALL)))
+	var validated_this_call := 0
+	while next_index < raw_cells.size() and validated_this_call < validations_per_call:
+		var cell: Vector2i = raw_cells[next_index]
+		# Candidate selection is stable/static work. Live dynamic occupancy is
+		# rechecked by the route search and then the collision probe before commit.
+		var validation := validate_goal_cell(entry, snapshot, cell, allow_outside, moving_home, true)
 		if bool(validation.get("ok", false)):
 			validation = validate_semantic_goal_cell(entry, cell, semantic_kind, snapshot)
 		if bool(validation.get("ok", false)):
-			var candidate := {
-				"cell": cell,
-				"position": _cell_position(cell),
-				"semanticKind": semantic_kind,
-				"proof": validation
-			}
-			if target.get("interactionClaim", {}) is Dictionary:
-				candidate["interactionClaim"] = (target.get("interactionClaim", {}) as Dictionary).duplicate(true)
-			accepted.append(candidate)
+			accepted_cells.append(cell)
 		else:
 			rejected.append(validation)
+		next_index += 1
+		validated_this_call += 1
+	job["nextIndex"] = next_index
+	job["acceptedCells"] = accepted_cells
+	job["rejected"] = rejected
+	candidate_jobs[candidate_key] = job
+	if next_index < raw_cells.size():
+		return {
+			"ok": false,
+			"classification": CLASS_PENDING_BUDGET,
+			"reason": "candidate_validation_deferred",
+			"candidates": [],
+			"rejected": rejected.duplicate(true),
+			"collisionBacked": true,
+			"generatedWorldInformed": true,
+			"candidateProgress": {
+				"validated": next_index,
+				"total": raw_cells.size(),
+				"validatedThisCall": validated_this_call
+			}
+		}
+	_clear_candidate_job(actor_key, candidate_key)
+	var accepted: Array = []
+	for cell_value in accepted_cells:
+		if not (cell_value is Vector2i):
+			continue
+		var cell: Vector2i = cell_value
+		var candidate := {
+			"cell": cell,
+			"position": _cell_position(cell),
+			"semanticKind": semantic_kind,
+			"proof": { "ok": true, "classification": CLASS_REACHABLE, "cell": cell, "staticCandidateValidation": true }
+		}
+		if target.get("interactionClaim", {}) is Dictionary:
+			candidate["interactionClaim"] = (target.get("interactionClaim", {}) as Dictionary).duplicate(true)
+		accepted.append(candidate)
 	return {
 		"ok": not accepted.is_empty(),
 		"classification": CLASS_REACHABLE if not accepted.is_empty() else CLASS_INVALID_GOAL,
@@ -326,6 +381,28 @@ func candidate_poses_for_target(entry: Dictionary, target: Dictionary, semantic_
 		"collisionBacked": true,
 		"generatedWorldInformed": true
 	}
+
+
+func _candidate_search_key(actor_key: String, raw_cells: Array, semantic_kind: String, allow_outside: bool, moving_home: bool) -> String:
+	var cells: Array[String] = []
+	for value in raw_cells:
+		if value is Vector2i:
+			var cell: Vector2i = value
+			cells.append("%d,%d" % [cell.x, cell.y])
+	return "%s|%s|%s|%s|%s" % [actor_key, semantic_kind, str(allow_outside), str(moving_home), ";".join(cells)]
+
+
+func _clear_replaced_actor_candidate_job(actor_key: String, candidate_key: String) -> void:
+	var previous_key := String(active_candidate_key_by_actor.get(actor_key, ""))
+	if previous_key != "" and previous_key != candidate_key:
+		candidate_jobs.erase(previous_key)
+	active_candidate_key_by_actor[actor_key] = candidate_key
+
+
+func _clear_candidate_job(actor_key: String, candidate_key: String) -> void:
+	candidate_jobs.erase(candidate_key)
+	if String(active_candidate_key_by_actor.get(actor_key, "")) == candidate_key:
+		active_candidate_key_by_actor.erase(actor_key)
 
 func repair_route_after_probe(entry: Dictionary, start_cell: Vector2i, candidate_cells: Array, failed_route: Dictionary, probe_certificate: Dictionary, options := {}) -> Dictionary:
 	var repair_options: Dictionary = options.duplicate(true) if options is Dictionary else {}
@@ -352,18 +429,6 @@ func validate_goal_cell(entry: Dictionary, snapshot: Dictionary, cell: Vector2i,
 	if not bool(result.get("ok", false)):
 		result["goal"] = true
 		return result
-	if _adapter_has("cell_is_standable_goal"):
-		var standable = world_adapter.call("cell_is_standable_goal", entry, cell, allow_outside, moving_home)
-		if not bool(standable):
-			return {
-				"ok": false,
-				"classification": CLASS_INVALID_GOAL,
-				"reason": "goal_not_standable",
-				"cell": cell,
-				"goal": true,
-				"collisionBacked": true,
-				"generatedWorldInformed": true
-			}
 	result["goal"] = true
 	return result
 
@@ -446,7 +511,14 @@ func validate_route_cell(entry: Dictionary, snapshot: Dictionary, cell: Vector2i
 	var door = _door_at(snapshot, cell)
 	if door != null:
 		base["door"] = _door_summary(door)
-	if _adapter_has("cell_is_standable_goal"):
+	if ignore_dynamic and _adapter_has("cell_is_static_standable_goal"):
+		var static_standable = world_adapter.call("cell_is_static_standable_goal", entry, cell, allow_outside, moving_home)
+		if not bool(static_standable) and not allow_start and door == null:
+			base["ok"] = false
+			base["classification"] = CLASS_INVALID_GOAL if target_lookup.has(cell) else CLASS_UNREACHABLE_STATIC
+			base["reason"] = "cell_not_standable"
+			return base
+	elif _adapter_has("cell_is_standable_goal"):
 		var standable = world_adapter.call("cell_is_standable_goal", entry, cell, allow_outside, moving_home)
 		if not bool(standable) and not allow_start and door == null:
 			base["ok"] = false
@@ -621,7 +693,10 @@ func _append_position_approaches(result: Array, entry: Dictionary, position, all
 		return
 	if _adapter_has("world_cell"):
 		_append_cell(result, world_adapter.call("world_cell", position))
-	if _adapter_has("approach_cells_for_target"):
+	if _adapter_has("approach_candidate_cells_for_target"):
+		for cell in world_adapter.call("approach_candidate_cells_for_target", entry, position, allow_outside):
+			_append_cell(result, cell)
+	elif _adapter_has("approach_cells_for_target"):
 		for cell in world_adapter.call("approach_cells_for_target", entry, position, allow_outside):
 			_append_cell(result, cell)
 

@@ -279,6 +279,25 @@ const MATERIALS := {
 static func item_spec(item_id: String) -> Dictionary:
     return ITEMS.get(item_id, {})
 
+static func has_tag(item_id: String, tag: String) -> bool:
+    var tags: Array = item_spec(item_id).get("tags", [])
+    return tags.has(tag)
+
+static func food_value(item_id: String) -> int:
+    return maxi(0, int(item_spec(item_id).get("food", 0)))
+
+static func is_forage_food(item_id: String) -> bool:
+    return has_tag(item_id, "forage") and has_tag(item_id, "food") and food_value(item_id) > 0
+
+static func forage_food_ids() -> Array[String]:
+    var item_ids: Array[String] = []
+    for item_id_value in ITEMS:
+        var item_id := String(item_id_value)
+        if is_forage_food(item_id):
+            item_ids.append(item_id)
+    item_ids.sort()
+    return item_ids
+
 static func label(item_id: String) -> String:
     return item_spec(item_id).get("label", item_id)
 

@@ -13,6 +13,13 @@ const CELL := 1.35
 var runner = null
 var transient_nodes: Array[Node] = []
 
+class FakeForageWorld:
+	extends RefCounted
+	const WATER_LEVEL := -100.0
+
+	func surface_y_at_position(_position: Vector3) -> float:
+		return 0.0
+
 func setup(owner) -> void:
 	runner = owner
 
@@ -34,6 +41,8 @@ func cases() -> Array[Dictionary]:
 		case("npc_interaction_access_policy_shared", "day", "test_access_policy_shared"),
 		case("npc_interaction_idempotent_effect", "day", "test_idempotent_effect"),
 		case("npc_interaction_forager_harvest_carry_eat", "day", "test_forager_harvest_carry_eat"),
+		case("npc_interaction_forager_catalog_accepts_biome_food", "day", "test_forager_catalog_accepts_biome_food"),
+		case("npc_interaction_forager_work_area_is_static_target_boundary", "day", "test_forager_work_area_is_static_target_boundary"),
 		case("npc_interaction_stale_registered_resource_ignored", "day", "test_stale_registered_resource_ignored"),
 		case("npc_interaction_queue_free_resource_query_no_script_error", "day", "test_queue_free_resource_query_no_script_error"),
 		case("npc_interaction_stale_resource_unindexed", "day", "test_stale_resource_unindexed"),
@@ -343,6 +352,55 @@ func test_forager_harvest_carry_eat(_mode: String) -> Dictionary:
 		hunger = minf(100.0, hunger + 24.0)
 	var passed: bool = succeeded(completed) and String(completed.metrics.get("drop", "")) == "berries" and int(completed.metrics.get("amount", 0)) == 3 and hunger > 42.0
 	return outcome(passed, "complete=%s hunger=%.1f" % [summary(completed), hunger], ["forager_harvests_berries", "forager_can_eat_carried_food"], state(service))
+
+func test_forager_catalog_accepts_biome_food(_mode: String) -> Dictionary:
+	var service = make_service()
+	var resources := [
+		make_prop("forager-berries", "berryBush", "berries", 1, Vector3(12.0, 0.0, 0.0)),
+		make_prop("forager-aloe", "aloePatch", "aloe", 1, Vector3(13.35, 0.0, 0.0)),
+		make_prop("forager-mirecap", "mushroomCluster", "mirecap", 1, Vector3(14.7, 0.0, 0.0)),
+		make_prop("forager-frost-herb", "frostHerbPatch", "frostHerb", 1, Vector3(16.05, 0.0, 0.0))
+	]
+	for resource in resources:
+		service.register_resource(resource)
+	var npc_system := track_transient_node(NpcSystemScript.new()) as NpcSystem
+	var entry := make_query_entry()
+	var options: Dictionary = npc_system.resource_query_options_for_job(entry, "forage")
+	options["cacheFrames"] = 0
+	var queried: Array[Node3D] = service.query_resource_nodes(entry, ["forage_source"], options)
+	var queried_drops: Array[String] = []
+	for node in queried:
+		queried_drops.append(String(node.get_meta("drop", "")))
+	queried_drops.sort()
+	var expected := npc_system.forage_food_item_ids()
+	var consumed: Dictionary = npc_system.consume_forage_food({ "personalInventory": { "aloe": 1 } }, "aloe")
+	var passed := expected == ["aloe", "berries", "frostHerb", "mirecap"] \
+		and queried_drops == expected \
+		and bool(consumed.get("ok", false)) \
+		and String(consumed.get("itemId", "")) == "aloe" \
+		and int(consumed.get("food", 0)) == 6
+	return outcome(passed, "expected=%s queried=%s consumed=%s" % [JSON.stringify(expected), JSON.stringify(queried_drops), JSON.stringify(consumed)], ["forager_queries_catalog_forage_food", "savanna_aloe_is_forage_target", "forager_consumes_catalog_food"], state(service))
+
+func test_forager_work_area_is_static_target_boundary(_mode: String) -> Dictionary:
+	var npc_system := track_transient_node(NpcSystemScript.new()) as NpcSystem
+	if runner is Node:
+		(runner as Node).add_child(npc_system)
+	npc_system.main = FakeForageWorld.new()
+	var entry := make_query_entry()
+	entry["homePosition"] = Vector3(-CELL * 4.0, 0.0, 0.0)
+	entry["porchPosition"] = entry["homePosition"]
+	var prop := make_prop("forager-work-area", "aloePatch", "aloe", 1, Vector3(CELL * 27.0, 0.0, 0.0))
+	npc_system.add_child(prop)
+	var in_work_area := npc_system.point_inside_work_area(entry, prop.global_position)
+	var outside_town := not npc_system.point_inside_town_footprint(entry, prop.global_position, 3)
+	var valid := npc_system.is_valid_forage_node(prop, entry)
+	var passed := in_work_area and outside_town and valid
+	return outcome(
+		passed,
+		"inWorkArea=%s outsideTown=%s valid=%s" % [str(in_work_area), str(outside_town), str(valid)],
+		["forager_work_area_is_single_static_target_boundary", "home_distance_does_not_reject_live_forage", "collision_route_remains_separate_authority"],
+		{ "inWorkArea": in_work_area, "outsideTown": outside_town, "valid": valid }
+	)
 
 func test_stale_registered_resource_ignored(_mode: String) -> Dictionary:
 	var service = make_service()

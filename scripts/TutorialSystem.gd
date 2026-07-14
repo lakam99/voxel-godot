@@ -205,11 +205,15 @@ func prepare_tutorial_world_staged(restoring: bool) -> Dictionary:
     await loading_yield("Preparing village perimeter", "tutorial_scene", "pending")
     ensure_village_perimeter()
     await loading_yield("Preparing village lights", "tutorial_scene", "pending")
-    ensure_village_lights()
+    var village_light_metrics: Dictionary = await ensure_village_lights_staged()
+    await loading_yield("Village lights ready", "tutorial_scene", "pending", village_light_metrics)
     await loading_yield("Preparing starter shelter", "tutorial_scene", "pending")
-    ensure_starter_shelter()
+    var starter_shelter_metrics := ensure_starter_shelter()
+    await loading_yield("Starter shelter terrain ready", "tutorial_scene", "pending", starter_shelter_metrics)
+    var starter_bed_started_usec := Time.get_ticks_usec()
     ensure_starter_bed()
-    await loading_yield("Tutorial scene ready", "tutorial_scene", "ready")
+    starter_shelter_metrics["starterBedMs"] = float(Time.get_ticks_usec() - starter_bed_started_usec) / 1000.0
+    await loading_yield("Tutorial scene ready", "tutorial_scene", "ready", starter_shelter_metrics)
     setup_intro_repair_quest(not restoring)
     if not restoring:
         place_player_in_starter_house()
@@ -261,6 +265,7 @@ func prepare_tutorial_world_staged(restoring: bool) -> Dictionary:
         "npcRegistration": registration_result.get("metrics", {}),
         "actorResolution": actor_resolution.get("metrics", {}),
         "actorSpawn": spawn_result.get("metrics", {}),
+        "villageLights": village_light_metrics,
         "initialOrders": initial_orders,
         "saveRestore": save_restore
     }
@@ -1418,8 +1423,8 @@ func ensure_starter_bed() -> void:
 func clear_overlapping_starter_beds(center_cell: Vector2i, level: float) -> void:
     scene_builder.clear_overlapping_starter_beds(center_cell, level)
 
-func ensure_starter_shelter() -> void:
-    scene_builder.ensure_starter_shelter()
+func ensure_starter_shelter() -> Dictionary:
+    return scene_builder.ensure_starter_shelter()
 
 func ensure_village_perimeter() -> void:
     scene_builder.ensure_village_perimeter()
@@ -1427,8 +1432,11 @@ func ensure_village_perimeter() -> void:
 func place_perimeter_cell(cell_x: int, cell_z: int, level: float, gate_cells: Dictionary) -> void:
     scene_builder.place_perimeter_cell(cell_x, cell_z, level, gate_cells)
 
-func ensure_village_lights() -> void:
-    scene_builder.ensure_village_lights()
+func ensure_village_lights() -> Dictionary:
+    return scene_builder.ensure_village_lights()
+
+func ensure_village_lights_staged() -> Dictionary:
+    return await scene_builder.ensure_village_lights_staged()
 
 func place_player_in_starter_house() -> void:
     scene_builder.place_player_in_starter_house()
@@ -1471,8 +1479,8 @@ func spawn_tutorial_npcs(restoring := false) -> Dictionary:
 func add_npc_visual(parent: Node3D, color: Color, accent: Color, npc_name: String, role: String) -> void:
     scene_builder.add_npc_visual(parent, color, accent, npc_name, role)
 
-func add_warm_light(position: Vector3, radius: float, energy: float) -> void:
-    scene_builder.add_warm_light(position, radius, energy)
+func add_warm_light(position: Vector3, radius: float, energy: float, foundation_y := NAN) -> void:
+    scene_builder.add_warm_light(position, radius, energy, foundation_y)
 
 func make_material(color: Color, roughness: float) -> StandardMaterial3D:
     return scene_builder.make_material(color, roughness)

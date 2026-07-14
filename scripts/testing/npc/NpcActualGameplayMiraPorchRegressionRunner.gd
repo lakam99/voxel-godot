@@ -5,23 +5,29 @@ const TEST_ID := "npc_actual_gameplay_mira_porch_regression"
 const CELL := 1.35
 const CAPTURE_WIDTH := 1280
 const CAPTURE_HEIGHT := 720
-const STARTUP_FRAMES := 80
-const POST_ACTION_FRAMES := 24
 const SAMPLE_EVERY_FRAMES := 6
 const OBSERVE_SECONDS := 150.0
 const PORCH_LEAVE_DISTANCE := CELL * 3.0
 const PORCH_SETTLED_FRAMES := 30
 const DOOR_CLOSE_APPROACH_DISTANCE := CELL * 0.75
 const FIRST_DISPLACEMENT_DISTANCE := CELL * 0.10
+const MAX_DIALOGUE_ACKNOWLEDGEMENT_DELAY_SECONDS := 1.0
 const MAX_FIRST_DISPLACEMENT_DELAY_SECONDS := 5.0
-const MAX_PORCH_CLEARANCE_DELAY_SECONDS := 6.0
+const MAX_PORCH_CLEARANCE_DELAY_SECONDS := 5.0
 const POST_HOME_DOOR_OBSERVE_SECONDS := 8.0
+const DEFAULT_DIALOGUE_DWELL_SECONDS := 0.0
+const ROUTE_STALL_TRACE_PATHS := [
+    "user://npc_route_stall_trace.json",
+    "user://npc_scripted_order_stall_trace.json",
+    "user://npc_route_collision_recovery_stall_trace.json"
+]
 
 var menu: Node = null
 var main: Node3D = null
 var player: CharacterBody3D = null
 var camera: Camera3D = null
 var elapsed := 0.0
+var wall_clock_started_msec := 0
 var finished := false
 var failed := false
 var report_data: Dictionary = {}
@@ -53,8 +59,12 @@ var mira_ack_position_valid := false
 var mira_home_door_ever_open := false
 var mira_strict_home_first_time := -1.0
 var phase0_timing: Dictionary = {}
+var mira_route_service_ticks_at_dialogue_close := -1
+var mira_route_service_frame_at_dialogue_close := -1
+var dialogue_dwell_seconds := DEFAULT_DIALOGUE_DWELL_SECONDS
 
 func _ready() -> void:
+    wall_clock_started_msec = Time.get_ticks_msec()
     configure_paths()
     get_viewport().size = Vector2i(CAPTURE_WIDTH, CAPTURE_HEIGHT)
     call_deferred("run")
@@ -69,6 +79,7 @@ func _process(delta: float) -> void:
         finish()
 
 func configure_paths() -> void:
+    dialogue_dwell_seconds = maxf(0.0, float(OS.get_environment("VOXEL_ACTUAL_GAMEPLAY_MIRA_DIALOGUE_DWELL_SECONDS").strip_edges()))
     report_path = OS.get_environment("VOXEL_ACTUAL_GAMEPLAY_MIRA_REPORT").strip_edges()
     if report_path == "":
         report_path = ProjectSettings.globalize_path("res://artifacts/npc/reports/actual-gameplay-mira-porch-regression.json")
@@ -81,6 +92,7 @@ func configure_paths() -> void:
     ensure_dir(report_path.get_base_dir())
     ensure_dir(progress_path.get_base_dir())
     ensure_dir(screenshot_dir)
+    clear_route_stall_traces()
 
 func run() -> void:
     mark_progress("start")
@@ -110,6 +122,8 @@ func run() -> void:
             "syntheticViewportInput": true,
             "directNpcMovement": false
         },
+        "dialogueDwellSecondsRequested": dialogue_dwell_seconds,
+        "dialogueDwellPurpose": "optional normal-player reading interval before the visible Close-button input",
         "screenshotDir": screenshot_dir,
         "visualCaptures": visual_captures,
         "playerTimeline": player_timeline,
@@ -118,6 +132,7 @@ func run() -> void:
         "inputTimeline": input_timeline,
         "startupLoadingSteps": startup_loading_steps,
         "phase0Timing": phase0_timing,
+        "routeStallTraces": route_stall_trace_snapshot(),
         "scriptErrorScan": { "status": "pending-wrapper-scan", "matches": [] },
         "forbiddenCallSelfScan": { "status": "passed-by-wrapper-before-launch" }
     }
@@ -133,8 +148,6 @@ func run() -> void:
         finish()
         return
     bind_scene_nodes()
-    await wait_physics_frames(STARTUP_FRAMES)
-    bind_scene_nodes()
     if main == null or player == null or camera == null:
         add_failure("scene_bootstrap_failed", "main/player/camera missing after New Game boot")
         finish()
@@ -146,6 +159,11 @@ func run() -> void:
         add_failure("actual_gameplay_player_automation_enabled", "player automated_input was enabled in a real-gameplay gate")
         finish()
         return
+    report_data["preInteractionStagingFrames"] = 0
+    report_data["preInteractionGate"] = "starter_door_live_and_tutorial_started"
+    report_data["postDoorInputSettleFrames"] = 0
+    report_data["postDialogueCloseSettleFrames"] = 0
+    report_data["dialogueCloseGate"] = "visible_dialogue_and_close_button"
     if not await wait_for_tutorial_town_ready(180.0):
         finish()
         return
@@ -318,18 +336,18 @@ func run_knock_and_mira_observation() -> void:
     })
     dispatch_mouse_button(viewport_center(), MOUSE_BUTTON_RIGHT, true, "starter_door_right_click_press")
     dispatch_mouse_button(viewport_center(), MOUSE_BUTTON_RIGHT, false, "starter_door_right_click_release")
-    await wait_physics_frames(POST_ACTION_FRAMES)
+    var dialogue_ready := await wait_for_intro_dialogue_ready(5.0)
+    report_data["introDialogueReady"] = {
+        "ok": bool(dialogue_ready.get("ok", false)),
+        "frames": int(dialogue_ready.get("frames", -1)),
+        "wallElapsedMsec": int(dialogue_ready.get("wallElapsedMsec", -1))
+    }
     sample_door("after_knock_click", starter_door)
     sample_player("after_knock_click")
-    await capture_stage("player_pov_intro_dialogue_open", {
-        "door": block_summary(starter_door),
-        "tutorialState": tutorial_state_summary(tutorial),
-        "dialogueOpen": hud_dialogue_open()
-    })
     var after_door_state := tutorial_state_summary(tutorial)
     report_data["afterDoorTutorialState"] = after_door_state
     var opened := bool(after_door_state.get("doorOpened", false))
-    var dialogue_open := hud_dialogue_open()
+    var dialogue_open := bool(dialogue_ready.get("ok", false)) and hud_dialogue_open()
     results.append({
         "name": "actual_input_opened_player_house_door_and_dialogue",
         "passed": opened and dialogue_open,
@@ -338,22 +356,31 @@ func run_knock_and_mira_observation() -> void:
     if not opened or not dialogue_open:
         add_failure("actual_input_path_failed_before_mira_observation", "doorOpened=%s dialogueOpen=%s" % [str(opened), str(dialogue_open)])
         return
+    var dialogue_dwell := await dwell_with_intro_dialogue_open(dialogue_dwell_seconds)
+    report_data["dialogueDwell"] = dialogue_dwell
+    if not bool(dialogue_dwell.get("ok", false)):
+        add_failure("dialogue_closed_during_requested_dwell", JSON.stringify(dialogue_dwell))
+        return
     mark_progress("closing_intro_dialogue_with_visible_button")
-    var close_button := dialogue_close_button()
+    var close_button := dialogue_ready.get("closeButton", null) as Button
     report_data["dialogueCloseButton"] = control_summary(close_button)
     if close_button == null:
         add_failure("dialogue_close_button_missing", "HUD dialogue was open but no visible Close button was found")
         return
+    var mira_before_dialogue_close := npc_entry("mira")
+    var service_before_dialogue_close := route_physics_service_summary(mira_before_dialogue_close)
+    mira_route_service_ticks_at_dialogue_close = int(service_before_dialogue_close.get("ticks", -1))
+    mira_route_service_frame_at_dialogue_close = int(service_before_dialogue_close.get("lastFrame", -1))
+    record_phase0_event("dialogueCloseInput", {
+        "closeButton": report_data["dialogueCloseButton"],
+        "mira": npc_summary(mira_before_dialogue_close) if not mira_before_dialogue_close.is_empty() else {},
+        "routePhysicsService": service_before_dialogue_close
+    })
     dispatch_mouse_button(button_center(close_button), MOUSE_BUTTON_LEFT, true, "dialogue_close_button_press")
     dispatch_mouse_button(button_center(close_button), MOUSE_BUTTON_LEFT, false, "dialogue_close_button_release")
-    await wait_physics_frames(POST_ACTION_FRAMES)
+    await get_tree().process_frame
     var after_dialogue_state := tutorial_state_summary(tutorial)
     report_data["afterDialogueTutorialState"] = after_dialogue_state
-    await capture_stage("player_pov_dialogue_acknowledged", {
-        "tutorialState": after_dialogue_state,
-        "dialogueOpen": hud_dialogue_open(),
-        "closeButton": report_data["dialogueCloseButton"]
-    })
     if hud_dialogue_open():
         add_failure("dialogue_still_open_after_close_button_input", "HUD dialogue remained open after visible Close button input")
         return
@@ -368,8 +395,15 @@ func run_knock_and_mira_observation() -> void:
     report_data["knockOrdersAtAcknowledgement"] = after_dialogue_state.get("introKnockOrders", {})
     record_phase0_event("dialogueAcknowledgement", {
         "tutorialState": after_dialogue_state,
-        "mira": npc_summary(mira_at_ack) if not mira_at_ack.is_empty() else {}
+        "mira": npc_summary(mira_at_ack) if not mira_at_ack.is_empty() else {},
+        "routePhysicsService": route_physics_service_summary(mira_at_ack)
     })
+    track_phase0_transitions(mira_at_ack)
+    await capture_stage("player_pov_dialogue_acknowledged", {
+        "tutorialState": after_dialogue_state,
+        "dialogueOpen": hud_dialogue_open(),
+        "closeButton": report_data["dialogueCloseButton"]
+    }, null, 0)
     mark_progress("observing_mira_after_knock")
     await observe_mira_after_knock(OBSERVE_SECONDS)
     var mira := npc_entry("mira")
@@ -381,17 +415,41 @@ func run_knock_and_mira_observation() -> void:
     report_data["miraLeftPlayerPorch"] = mira_left_player_porch
     report_data["miraReachedStrictHome"] = mira_reached_strict_home
     report_data["phase0Timing"] = phase0_timing
+    report_data["phase0TimingClock"] = {
+        "kind": "physics_frame",
+        "ticksPerSecond": Engine.physics_ticks_per_second,
+        "wallClock": {
+            "kind": "monotonic_ticks_msec",
+            "reference": "runner_ready"
+        }
+    }
     report_data["phase0DepartureDiagnosis"] = departure_diagnosis(mira)
+    var close_input_event: Dictionary = phase0_timing.get("dialogueCloseInput", {}) if phase0_timing.get("dialogueCloseInput", {}) is Dictionary else {}
     var acknowledgement_event: Dictionary = phase0_timing.get("dialogueAcknowledgement", {}) if phase0_timing.get("dialogueAcknowledgement", {}) is Dictionary else {}
+    var acknowledgement_delay = phase0_physics_delay_seconds(acknowledgement_event, close_input_event)
+    report_data["dialogueAcknowledgementDelayAfterCloseInput"] = acknowledgement_delay
+    var acknowledgement_wall_delay = phase0_wall_delay_seconds(acknowledgement_event, close_input_event)
+    report_data["dialogueAcknowledgementWallDelayAfterCloseInput"] = acknowledgement_wall_delay
     var command_event: Dictionary = phase0_timing.get("goHomeCommandSubmission", {}) if phase0_timing.get("goHomeCommandSubmission", {}) is Dictionary else {}
-    var command_delay := float(command_event.get("time", INF)) - float(acknowledgement_event.get("time", 0.0))
-    report_data["goHomeCommandDelayAfterAcknowledgement"] = rounded(command_delay) if is_finite(command_delay) else null
+    var command_delay = phase0_physics_delay_seconds(command_event, acknowledgement_event)
+    report_data["goHomeCommandDelayAfterAcknowledgement"] = command_delay
+    var command_wall_delay = phase0_wall_delay_seconds(command_event, acknowledgement_event)
+    report_data["goHomeCommandWallDelayAfterAcknowledgement"] = command_wall_delay
     var displacement_event: Dictionary = phase0_timing.get("firstNontrivialDisplacement", {}) if phase0_timing.get("firstNontrivialDisplacement", {}) is Dictionary else {}
-    var displacement_delay := float(displacement_event.get("time", INF)) - float(acknowledgement_event.get("time", 0.0))
-    report_data["firstDisplacementDelayAfterAcknowledgement"] = rounded(displacement_delay) if is_finite(displacement_delay) else null
+    var displacement_delay = phase0_physics_delay_seconds(displacement_event, acknowledgement_event)
+    report_data["firstDisplacementDelayAfterAcknowledgement"] = displacement_delay
+    var displacement_wall_delay = phase0_wall_delay_seconds(displacement_event, acknowledgement_event)
+    report_data["firstDisplacementWallDelayAfterAcknowledgement"] = displacement_wall_delay
     var porch_clearance_event: Dictionary = phase0_timing.get("playerPorchClearance", {}) if phase0_timing.get("playerPorchClearance", {}) is Dictionary else {}
-    var porch_clearance_delay := float(porch_clearance_event.get("time", INF)) - float(acknowledgement_event.get("time", 0.0))
-    report_data["porchClearanceDelayAfterAcknowledgement"] = rounded(porch_clearance_delay) if is_finite(porch_clearance_delay) else null
+    var porch_clearance_delay = phase0_physics_delay_seconds(porch_clearance_event, acknowledgement_event)
+    report_data["porchClearanceDelayAfterAcknowledgement"] = porch_clearance_delay
+    var porch_clearance_wall_delay = phase0_wall_delay_seconds(porch_clearance_event, acknowledgement_event)
+    report_data["porchClearanceWallDelayAfterAcknowledgement"] = porch_clearance_wall_delay
+    var route_service_event: Dictionary = phase0_timing.get("firstRoutePhysicsService", {}) if phase0_timing.get("firstRoutePhysicsService", {}) is Dictionary else {}
+    var route_service_delay = phase0_physics_delay_seconds(route_service_event, acknowledgement_event)
+    report_data["firstRoutePhysicsServiceDelayAfterAcknowledgement"] = route_service_delay
+    var route_service_wall_delay = phase0_wall_delay_seconds(route_service_event, acknowledgement_event)
+    report_data["firstRoutePhysicsServiceWallDelayAfterAcknowledgement"] = route_service_wall_delay
     var target = mira_visual_target(mira)
     await capture_stage("player_pov_mira_post_knock_final_state", {
         "mira": report_data["miraFinal"],
@@ -421,25 +479,38 @@ func run_knock_and_mira_observation() -> void:
             "captures": capture_names()
         }))
         return
-    if command_event.is_empty() or not is_finite(command_delay) or command_delay > 0.5:
+    if command_delay == null or float(command_delay) > 0.5 or command_wall_delay == null or float(command_wall_delay) > 0.5:
         add_failure("generic_go_home_not_submitted_promptly_after_acknowledgement", JSON.stringify({
-            "delaySeconds": command_delay,
+            "physicsDelaySeconds": command_delay,
+            "wallDelaySeconds": command_wall_delay,
+            "maximumSeconds": 0.5,
             "acknowledgement": acknowledgement_event,
             "command": command_event
         }))
         return
-    if displacement_event.is_empty() or not is_finite(displacement_delay) or displacement_delay > MAX_FIRST_DISPLACEMENT_DELAY_SECONDS:
+    if acknowledgement_delay == null or float(acknowledgement_delay) > MAX_DIALOGUE_ACKNOWLEDGEMENT_DELAY_SECONDS or acknowledgement_wall_delay == null or float(acknowledgement_wall_delay) > MAX_DIALOGUE_ACKNOWLEDGEMENT_DELAY_SECONDS:
+        add_failure("dialogue_acknowledgement_not_observed_promptly_after_close_input", JSON.stringify({
+            "physicsDelaySeconds": acknowledgement_delay,
+            "wallDelaySeconds": acknowledgement_wall_delay,
+            "maximumSeconds": MAX_DIALOGUE_ACKNOWLEDGEMENT_DELAY_SECONDS,
+            "closeInput": close_input_event,
+            "acknowledgement": acknowledgement_event
+        }))
+        return
+    if displacement_delay == null or float(displacement_delay) > MAX_FIRST_DISPLACEMENT_DELAY_SECONDS or displacement_wall_delay == null or float(displacement_wall_delay) > MAX_FIRST_DISPLACEMENT_DELAY_SECONDS:
         add_failure("mira_did_not_begin_home_execution_promptly", JSON.stringify({
-            "delaySeconds": displacement_delay,
+            "physicsDelaySeconds": displacement_delay,
+            "wallDelaySeconds": displacement_wall_delay,
             "maximumSeconds": MAX_FIRST_DISPLACEMENT_DELAY_SECONDS,
             "acknowledgement": acknowledgement_event,
             "firstDisplacement": displacement_event,
             "departureDiagnosis": report_data["phase0DepartureDiagnosis"]
         }))
         return
-    if porch_clearance_event.is_empty() or not is_finite(porch_clearance_delay) or porch_clearance_delay > MAX_PORCH_CLEARANCE_DELAY_SECONDS:
+    if porch_clearance_delay == null or float(porch_clearance_delay) > MAX_PORCH_CLEARANCE_DELAY_SECONDS or porch_clearance_wall_delay == null or float(porch_clearance_wall_delay) > MAX_PORCH_CLEARANCE_DELAY_SECONDS:
         add_failure("mira_did_not_clear_player_porch_promptly", JSON.stringify({
-            "delaySeconds": porch_clearance_delay,
+            "physicsDelaySeconds": porch_clearance_delay,
+            "wallDelaySeconds": porch_clearance_wall_delay,
             "maximumSeconds": MAX_PORCH_CLEARANCE_DELAY_SECONDS,
             "acknowledgement": acknowledgement_event,
             "porchClearance": porch_clearance_event,
@@ -518,6 +589,17 @@ func track_phase0_transitions(entry: Dictionary) -> void:
         record_phase0_event("firstRouteTicketOrRequest", {
             "routeTicket": route_ticket_summary(entry),
             "routeAuthority": authority
+        })
+    var route_service := route_physics_service_summary(entry)
+    var serviced_since_dialogue_close := int(route_service.get("ticks", -1)) > mira_route_service_ticks_at_dialogue_close \
+        or int(route_service.get("lastFrame", -1)) > mira_route_service_frame_at_dialogue_close
+    if mira_route_service_ticks_at_dialogue_close >= 0 and serviced_since_dialogue_close:
+        record_phase0_event("firstRoutePhysicsService", {
+            "baselineTicks": mira_route_service_ticks_at_dialogue_close,
+            "baselineLastFrame": mira_route_service_frame_at_dialogue_close,
+            "routePhysicsService": route_service,
+            "routeAuthority": authority,
+            "waitClassification": departure_wait_classification(entry)
         })
     var body := entry.get("body") as Node3D
     if body != null and is_instance_valid(body) and mira_ack_position_valid:
@@ -648,10 +730,10 @@ func dispatch_mouse_button(position: Vector2, button_index: int, pressed: bool, 
     report_data["inputTimeline"] = input_timeline
     get_viewport().push_input(event)
 
-func capture_stage(stage: String, extra_sample: Dictionary = {}, look_target = null) -> void:
+func capture_stage(stage: String, extra_sample: Dictionary = {}, look_target = null, settle_process_frames := 3) -> void:
     if look_target is Vector3:
         aim_at(look_target)
-    await wait_process_frames(3)
+    await wait_process_frames(maxi(0, settle_process_frames))
     save_capture(stage, extra_sample)
 
 func capture_observer_stage(stage: String, eye: Vector3, target: Vector3, extra_sample: Dictionary = {}) -> void:
@@ -766,6 +848,63 @@ func hud_dialogue_open() -> bool:
     var hud = main.get("hud") if main != null else null
     return hud != null and hud.has_method("is_dialogue_open") and bool(hud.call("is_dialogue_open"))
 
+func wait_for_intro_dialogue_ready(timeout_seconds: float) -> Dictionary:
+    var max_frames := ceili(maxf(timeout_seconds, 0.1) * float(Engine.physics_ticks_per_second))
+    for frame in range(max_frames):
+        var close_button := dialogue_close_button()
+        if hud_dialogue_open() and close_button != null:
+            return {
+                "ok": true,
+                "frames": frame,
+                "closeButton": close_button,
+                "wallElapsedMsec": wall_elapsed_msec()
+            }
+        await get_tree().physics_frame
+    return {
+        "ok": false,
+        "frames": max_frames,
+        "closeButton": null,
+        "wallElapsedMsec": wall_elapsed_msec()
+    }
+
+func dwell_with_intro_dialogue_open(requested_seconds: float) -> Dictionary:
+    var requested_msec := roundi(maxf(0.0, requested_seconds) * 1000.0)
+    var started_msec := Time.get_ticks_msec()
+    var started_frame := Engine.get_physics_frames()
+    if requested_msec <= 0:
+        return {
+            "ok": hud_dialogue_open(),
+            "requestedSeconds": requested_seconds,
+            "actualWallSeconds": 0.0,
+            "physicsFrames": 0
+        }
+    mark_progress("dwelling_with_intro_dialogue_open")
+    record_phase0_event("dialogueDwellStarted", {
+        "requestedSeconds": requested_seconds,
+        "dialogueOpen": hud_dialogue_open()
+    })
+    while Time.get_ticks_msec() - started_msec < requested_msec:
+        if not hud_dialogue_open():
+            return {
+                "ok": false,
+                "reason": "dialogue_closed_before_requested_dwell",
+                "requestedSeconds": requested_seconds,
+                "actualWallSeconds": rounded(float(Time.get_ticks_msec() - started_msec) / 1000.0),
+                "physicsFrames": Engine.get_physics_frames() - started_frame
+            }
+        var mira := npc_entry("mira")
+        if not mira.is_empty() and Engine.get_physics_frames() % SAMPLE_EVERY_FRAMES == 0:
+            sample_mira("dialogue_dwell_%04d" % (Engine.get_physics_frames() - started_frame))
+        await get_tree().physics_frame
+    var result := {
+        "ok": hud_dialogue_open(),
+        "requestedSeconds": requested_seconds,
+        "actualWallSeconds": rounded(float(Time.get_ticks_msec() - started_msec) / 1000.0),
+        "physicsFrames": Engine.get_physics_frames() - started_frame
+    }
+    record_phase0_event("dialogueDwellCompleted", result)
+    return result
+
 func dialogue_close_button() -> Button:
     var hud = main.get("hud") if main != null else null
     if hud == null:
@@ -851,6 +990,13 @@ func npc_summary(entry: Dictionary) -> Dictionary:
         "blockedContact": String(body.get_meta("npc_blocked_contact", "")) if body_valid else "",
         "blockedContactName": String(body.get_meta("npc_blocked_contact_name", "")) if body_valid else "",
         "lastMoveDistance": rounded(float(entry.get("lastMoveDistance", 0.0))),
+        "routePhysicsService": {
+            "ticks": int(entry.get("routePhysicsServiceTicks", 0)),
+            "lastFrame": int(entry.get("routePhysicsServiceLastFrame", -1)),
+            "kind": String(entry.get("routePhysicsServiceKind", "")),
+            "reason": String(entry.get("routePhysicsServiceReason", "")),
+            "sinceBrainFrames": int(entry.get("routePhysicsServiceSinceBrainFrames", -1))
+        },
         "activeDoorPortalId": String(entry.get("activeDoorPortalId", "")),
         "activeDoorDirection": String(entry.get("activeDoorDirection", "")),
         "requiredVisibleScripted": bool(entry.get("requiredVisibleScripted", false)),
@@ -911,6 +1057,15 @@ func route_authority_summary(entry: Dictionary) -> Dictionary:
         "leaseId": String(authority.get("leaseId", ""))
     }
 
+func route_physics_service_summary(entry: Dictionary) -> Dictionary:
+    return {
+        "ticks": int(entry.get("routePhysicsServiceTicks", 0)),
+        "lastFrame": int(entry.get("routePhysicsServiceLastFrame", -1)),
+        "kind": String(entry.get("routePhysicsServiceKind", "")),
+        "reason": String(entry.get("routePhysicsServiceReason", "")),
+        "sinceBrainFrames": int(entry.get("routePhysicsServiceSinceBrainFrames", -1))
+    }
+
 func departure_wait_classification(entry: Dictionary) -> String:
     var order := scripted_order_summary(entry)
     if String(order.get("kind", "")) != "go_home":
@@ -930,8 +1085,10 @@ func departure_wait_classification(entry: Dictionary) -> String:
 func departure_diagnosis(entry: Dictionary) -> Dictionary:
     return {
         "classificationAtFinish": departure_wait_classification(entry) if not entry.is_empty() else "missing_mira",
+        "dialogueCloseInputObserved": phase0_timing.has("dialogueCloseInput"),
         "goHomeCommandObserved": phase0_timing.has("goHomeCommandSubmission"),
         "routeTicketOrRequestObserved": phase0_timing.has("firstRouteTicketOrRequest"),
+        "routePhysicsServiceObserved": phase0_timing.has("firstRoutePhysicsService"),
         "movementObserved": phase0_timing.has("firstNontrivialDisplacement"),
         "porchClearanceObserved": phase0_timing.has("playerPorchClearance"),
         "strictHomeObserved": phase0_timing.has("strictHomeArrival"),
@@ -942,12 +1099,36 @@ func departure_diagnosis(entry: Dictionary) -> Dictionary:
 func record_phase0_event(name: String, details: Dictionary = {}) -> void:
     if phase0_timing.has(name):
         return
+    var wall_elapsed := wall_elapsed_msec()
     phase0_timing[name] = {
         "time": rounded(elapsed),
         "physicsFrame": Engine.get_physics_frames(),
+        "wallElapsedMsec": wall_elapsed,
+        "wallElapsedSeconds": rounded(float(wall_elapsed) / 1000.0),
         "details": details
     }
     report_data["phase0Timing"] = phase0_timing
+
+func phase0_physics_delay_seconds(later_event: Dictionary, earlier_event: Dictionary):
+    if later_event.is_empty() or earlier_event.is_empty():
+        return null
+    var later_frame := int(later_event.get("physicsFrame", -1))
+    var earlier_frame := int(earlier_event.get("physicsFrame", -1))
+    if later_frame < earlier_frame or earlier_frame < 0:
+        return null
+    return rounded(float(later_frame - earlier_frame) / maxf(float(Engine.physics_ticks_per_second), 1.0))
+
+func phase0_wall_delay_seconds(later_event: Dictionary, earlier_event: Dictionary):
+    if later_event.is_empty() or earlier_event.is_empty():
+        return null
+    var later_msec := int(later_event.get("wallElapsedMsec", -1))
+    var earlier_msec := int(earlier_event.get("wallElapsedMsec", -1))
+    if later_msec < earlier_msec or earlier_msec < 0:
+        return null
+    return rounded(float(later_msec - earlier_msec) / 1000.0)
+
+func wall_elapsed_msec() -> int:
+    return maxi(Time.get_ticks_msec() - wall_clock_started_msec, 0)
 
 func home_door_for_entry(entry: Dictionary) -> Node3D:
     if entry.is_empty():
@@ -1169,6 +1350,7 @@ func finish() -> void:
     report_data["doorTimeline"] = door_timeline
     report_data["miraTimeline"] = mira_timeline
     report_data["inputTimeline"] = input_timeline
+    report_data["routeStallTraces"] = route_stall_trace_snapshot()
     report_data["completedAtUnix"] = Time.get_unix_time_from_system()
     save_report(true)
     mark_progress("finished passed=%s failures=%d" % [str(passed), failure_reasons.size()])
@@ -1182,6 +1364,7 @@ func save_report(done: bool) -> void:
     report_data["resultCount"] = results.size()
     report_data["results"] = results
     report_data["failureReasons"] = failure_reasons
+    report_data["routeStallTraces"] = route_stall_trace_snapshot()
     var file := FileAccess.open(report_path, FileAccess.WRITE)
     if file == null:
         return
@@ -1210,6 +1393,30 @@ func ensure_dir(path: String) -> void:
         return
     DirAccess.make_dir_recursive_absolute(path)
 
+func clear_route_stall_traces() -> void:
+    for trace_path in ROUTE_STALL_TRACE_PATHS:
+        DirAccess.remove_absolute(ProjectSettings.globalize_path(trace_path))
+
+func route_stall_trace_snapshot() -> Dictionary:
+    var traces := {}
+    for trace_path in ROUTE_STALL_TRACE_PATHS:
+        var absolute_path := ProjectSettings.globalize_path(trace_path)
+        if not FileAccess.file_exists(absolute_path):
+            traces[trace_path] = { "present": false }
+            continue
+        var file := FileAccess.open(absolute_path, FileAccess.READ)
+        if file == null:
+            traces[trace_path] = { "present": true, "readable": false }
+            continue
+        var parsed = JSON.parse_string(file.get_as_text())
+        file.close()
+        traces[trace_path] = {
+            "present": true,
+            "readable": parsed is Dictionary,
+            "data": parsed if parsed is Dictionary else {}
+        }
+    return traces
+
 func watchdog_seconds() -> float:
     var text := OS.get_environment("VOXEL_ACTUAL_GAMEPLAY_MIRA_WATCHDOG_SECONDS").strip_edges()
     if text == "":
@@ -1229,6 +1436,8 @@ func vec2(value: Vector2) -> Array:
     return [rounded(value.x), rounded(value.y)]
 
 func vec3(value: Vector3) -> Array:
+    if not is_finite(value.x) or not is_finite(value.y) or not is_finite(value.z):
+        return []
     return [rounded(value.x), rounded(value.y), rounded(value.z)]
 
 func vec2i(value: Vector2i) -> Array:

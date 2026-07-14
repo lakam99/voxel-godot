@@ -35,7 +35,12 @@ const TRANSIENT_SAVE_KEYS := [
 	"debugTrace",
 	"plannerOpenSet",
 	"plannerClosedSet",
-	"waitForGraph"
+	"waitForGraph",
+	"routePhysicsServiceTicks",
+	"routePhysicsServiceLastFrame",
+	"routePhysicsServiceKind",
+	"routePhysicsServiceReason",
+	"routePhysicsServiceSinceBrainFrames"
 ]
 
 var autonomy_system = null

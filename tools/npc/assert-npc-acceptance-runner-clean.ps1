@@ -92,6 +92,11 @@ $rules = @(
         Id = "source_scan_acceptance"
         Pattern = '\bread_text\s*\('
         Reason = "Acceptance tests must not pass by scanning source text instead of exercising behavior."
+    },
+    [pscustomobject]@{
+        Id = "fixed_post_load_startup_delay"
+        Pattern = '\bawait\s+wait_physics_frames\s*\(\s*STARTUP_FRAMES\s*\)'
+        Reason = "Live acceptance must begin from live readiness gates, not a fixed post-load physics-frame delay."
     }
 )
 

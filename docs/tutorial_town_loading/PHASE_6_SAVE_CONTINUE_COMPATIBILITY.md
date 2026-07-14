@@ -48,6 +48,7 @@ The contract coverage proves deterministic reference validation, legacy migratio
 
 ```powershell
 .\tools\npc\run-tutorial-save-continue-playtest.ps1 `
+  -Visible `
   -ReportPath artifacts\npc\reports\tutorial-save-continue-vox76.json `
   -SavePathOverride artifacts\npc\saves\tutorial-save-continue-vox76.json `
   -TimeoutSeconds 360 -StaleProgressSeconds 90

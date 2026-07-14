@@ -15,6 +15,7 @@ const SURFACE_EXCAVATION_RADIUS_MULTIPLIER := 2.35
 const WORLD_BOTTOM_CELL_Y := -64
 const TOWN_SLOPE_APRON_CACHE_VERSION := 2
 const LEGACY_BRUSH_TERRAIN_AUTHORITY_ENABLED := false
+const MESHING_SURFACE_PROJECTION_UPPER_ENVELOPE_CELLS := 1
 
 var main
 var excavation_brushes: Array[Dictionary] = []
@@ -434,6 +435,145 @@ func terrain_volume_chunk_edited_y_bounds(chunk_key: Vector2i, chunk_size: int) 
 		return terrain_volume_service.chunk_edited_y_bounds(chunk_key, chunk_size)
 	return { "found": false, "count": 0 }
 
+func terrain_volume_mesh_edited_y_bounds_for_region(min_x: int, max_x: int, min_z: int, max_z: int) -> Dictionary:
+	if terrain_volume_service != null and terrain_volume_service.has_method("mesh_edited_y_bounds_for_region"):
+		return terrain_volume_service.mesh_edited_y_bounds_for_region(min_x, max_x, min_z, max_z)
+	return { "found": false, "count": 0 }
+
+func terrain_meshing_y_bounds_for_chunk(
+	start_x: int,
+	start_z: int,
+	chunk_size: int,
+	below_surface_cells := 10,
+	above_surface_cells := 2,
+	border_cells := 2
+) -> Dictionary:
+	var state := begin_terrain_meshing_bounds_state(
+		start_x,
+		start_z,
+		chunk_size,
+		below_surface_cells,
+		above_surface_cells,
+		border_cells
+	)
+	var advanced := advance_terrain_meshing_bounds_state(state, 1000.0, int(state.get("sampleColumnCount", 1)))
+	while not bool(advanced.get("complete", false)):
+		advanced = advance_terrain_meshing_bounds_state(
+			advanced.get("state", state),
+			1000.0,
+			int(state.get("sampleColumnCount", 1))
+		)
+	var bounds: Dictionary = advanced.get("bounds", {}) if advanced.get("bounds", {}) is Dictionary else {}
+	return bounds
+
+func begin_terrain_meshing_bounds_state(
+	start_x: int,
+	start_z: int,
+	chunk_size: int,
+	below_surface_cells := 10,
+	above_surface_cells := 2,
+	border_cells := 2
+) -> Dictionary:
+	var safe_chunk_size := maxi(1, int(chunk_size))
+	var border := maxi(0, int(border_cells))
+	var min_sample_x := start_x - border
+	var max_sample_x := start_x + safe_chunk_size + border
+	var min_sample_z := start_z - border
+	var max_sample_z := start_z + safe_chunk_size + border
+	var edited_bounds := terrain_volume_mesh_edited_y_bounds_for_region(min_sample_x, max_sample_x, min_sample_z, max_sample_z)
+	return {
+		"startX": start_x,
+		"startZ": start_z,
+		"chunkSize": safe_chunk_size,
+		"belowSurfaceCells": maxi(0, int(below_surface_cells)),
+		"aboveSurfaceCells": maxi(0, int(above_surface_cells)),
+		"minSampleX": min_sample_x,
+		"maxSampleX": max_sample_x,
+		"minSampleZ": min_sample_z,
+		"maxSampleZ": max_sample_z,
+		"cursorX": min_sample_x,
+		"cursorZ": min_sample_z,
+		"sampleColumnCount": (max_sample_x - min_sample_x + 1) * (max_sample_z - min_sample_z + 1),
+		"minSurfaceY": INF,
+		"maxSurfaceY": -INF,
+		"editedBounds": edited_bounds,
+		"complete": false
+	}
+
+func advance_terrain_meshing_bounds_state(state: Dictionary, budget_ms := 2.0, max_columns := 192) -> Dictionary:
+	var started_usec := Time.get_ticks_usec()
+	if state.is_empty() or bool(state.get("complete", false)):
+		return {
+			"state": state,
+			"complete": bool(state.get("complete", false)),
+			"bounds": finalized_terrain_meshing_bounds_from_state(state) if bool(state.get("complete", false)) else {},
+			"columnsProcessed": 0,
+			"elapsedMs": 0.0
+		}
+	var min_x := int(state.get("minSampleX", 0))
+	var max_x := int(state.get("maxSampleX", min_x))
+	var min_z := int(state.get("minSampleZ", 0))
+	var max_z := int(state.get("maxSampleZ", min_z))
+	var cursor_x := int(state.get("cursorX", min_x))
+	var cursor_z := int(state.get("cursorZ", min_z))
+	var min_surface_y := float(state.get("minSurfaceY", INF))
+	var max_surface_y := float(state.get("maxSurfaceY", -INF))
+	var processed := 0
+	var column_cap := maxi(1, int(max_columns))
+	var time_cap := maxf(0.1, float(budget_ms))
+	while cursor_z <= max_z:
+		var surface_y := terrain_deformed_surface_y_for_cell(Vector3i(cursor_x, 0, cursor_z))
+		min_surface_y = minf(min_surface_y, surface_y)
+		max_surface_y = maxf(max_surface_y, surface_y)
+		processed += 1
+		cursor_x += 1
+		if cursor_x > max_x:
+			cursor_x = min_x
+			cursor_z += 1
+		if processed >= column_cap:
+			break
+		if float(Time.get_ticks_usec() - started_usec) / 1000.0 >= time_cap:
+			break
+	var complete := cursor_z > max_z
+	state["cursorX"] = cursor_x
+	state["cursorZ"] = cursor_z
+	state["minSurfaceY"] = min_surface_y
+	state["maxSurfaceY"] = max_surface_y
+	state["complete"] = complete
+	return {
+		"state": state,
+		"complete": complete,
+		"bounds": finalized_terrain_meshing_bounds_from_state(state) if complete else {},
+		"columnsProcessed": processed,
+		"elapsedMs": float(Time.get_ticks_usec() - started_usec) / 1000.0
+	}
+
+func finalized_terrain_meshing_bounds_from_state(state: Dictionary) -> Dictionary:
+	if state.is_empty():
+		return {}
+	var min_surface_y := float(state.get("minSurfaceY", INF))
+	var max_surface_y := float(state.get("maxSurfaceY", -INF))
+	if min_surface_y == INF:
+		min_surface_y = float(main.MIN_HEIGHT) if main != null else 0.0
+		max_surface_y = float(main.MAX_HEIGHT) if main != null else min_surface_y
+	var cell := cell_size()
+	var bottom_world := float(world_bottom_cell_y()) * cell
+	var min_bound := maxf(bottom_world, min_surface_y - float(maxi(0, int(state.get("belowSurfaceCells", 10)))) * cell)
+	# Generated cells are sampled at centers while the mesher projects on lattice points.
+	var upper_padding_cells := maxi(0, int(state.get("aboveSurfaceCells", 2))) + MESHING_SURFACE_PROJECTION_UPPER_ENVELOPE_CELLS
+	var max_bound := max_surface_y + float(upper_padding_cells) * cell
+	var edited_bounds: Dictionary = state.get("editedBounds", {}) if state.get("editedBounds", {}) is Dictionary else {}
+	if bool(edited_bounds.get("found", false)):
+		min_bound = minf(min_bound, maxf(bottom_world, float(int(edited_bounds.get("minY", floori(min_bound / cell))) - 3) * cell))
+		max_bound = maxf(max_bound, float(int(edited_bounds.get("maxY", ceili(max_bound / cell))) + 3) * cell)
+	return {
+		"minY": floori(min_bound / cell),
+		"maxY": ceili(max_bound / cell),
+		"surfaceMinY": min_surface_y,
+		"surfaceMaxY": max_surface_y,
+		"editedBounds": edited_bounds
+	}
+
 func terrain_volume_edited_mesh_cells_for_chunk(chunk_key: Vector2i, chunk_size: int) -> Array[Vector3i]:
 	if terrain_volume_service != null and terrain_volume_service.has_method("edited_mesh_cells_for_chunk"):
 		return terrain_volume_service.edited_mesh_cells_for_chunk(chunk_key, chunk_size)
@@ -477,6 +617,21 @@ func consume_terrain_volume_dirty_chunk_keys(chunk_size: int) -> Array[Vector2i]
 func set_cell_light(cell: Vector3i, light: Dictionary, reason := "") -> Dictionary:
 	if terrain_volume_service != null and terrain_volume_service.has_method("set_cell_light"):
 		return terrain_volume_service.set_cell_light(cell, light, reason)
+	return {}
+
+func set_cell_lights_batch(changes: Array, reason := "") -> Dictionary:
+	if terrain_volume_service != null and terrain_volume_service.has_method("set_cell_lights_batch"):
+		return terrain_volume_service.set_cell_lights_batch(changes, reason)
+	return {}
+
+func begin_cell_lights_batch(changes: Array, reason := "") -> Dictionary:
+	if terrain_volume_service != null and terrain_volume_service.has_method("begin_cell_lights_batch"):
+		return terrain_volume_service.begin_cell_lights_batch(changes, reason)
+	return {}
+
+func advance_cell_lights_batch(state: Dictionary, frame_budget_ms := 2.0, max_work_units := 192) -> Dictionary:
+	if terrain_volume_service != null and terrain_volume_service.has_method("advance_cell_lights_batch"):
+		return terrain_volume_service.advance_cell_lights_batch(state, frame_budget_ms, max_work_units)
 	return {}
 
 func process_pending_sky_light_columns(max_columns := 2) -> int:

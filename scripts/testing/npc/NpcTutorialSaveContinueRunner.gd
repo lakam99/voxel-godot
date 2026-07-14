@@ -79,17 +79,18 @@ func knock_then_save_post_ack() -> void:
     record_phase0_event("doorInteraction", {"door": block_summary(starter_door), "hit": hit, "player": player_summary()})
     dispatch_mouse_button(viewport_center(), MOUSE_BUTTON_RIGHT, true, "starter_door_right_click_press")
     dispatch_mouse_button(viewport_center(), MOUSE_BUTTON_RIGHT, false, "starter_door_right_click_release")
-    await wait_physics_frames(POST_ACTION_FRAMES)
-    if not bool(tutorial_state_summary(tutorial).get("doorOpened", false)) or not hud_dialogue_open():
+    var dialogue_ready := await wait_for_intro_dialogue_ready(5.0)
+    var after_door_state := tutorial_state_summary(tutorial)
+    if not bool(after_door_state.get("doorOpened", false)) or not bool(dialogue_ready.get("ok", false)) or not hud_dialogue_open():
         add_failure("actual_input_path_failed_before_save", JSON.stringify(tutorial_state_summary(tutorial)))
         return
-    var close_button := dialogue_close_button()
+    var close_button := dialogue_ready.get("closeButton", null) as Button
     if close_button == null:
         add_failure("dialogue_close_button_missing", "HUD dialogue was open but no visible Close button was found")
         return
     dispatch_mouse_button(button_center(close_button), MOUSE_BUTTON_LEFT, true, "dialogue_close_button_press")
     dispatch_mouse_button(button_center(close_button), MOUSE_BUTTON_LEFT, false, "dialogue_close_button_release")
-    await wait_physics_frames(POST_ACTION_FRAMES)
+    await get_tree().process_frame
     var acknowledged := tutorial_state_summary(tutorial)
     await capture_stage("player_pov_dialogue_acknowledged_before_save", {"tutorialState": acknowledged, "dialogueOpen": hud_dialogue_open()})
     if hud_dialogue_open() or not bool(acknowledged.get("elderAcknowledged", false)):
@@ -159,6 +160,12 @@ func observe_after_continue() -> void:
     var clearance_delay := float(clearance_event.get("time", INF)) - float(observation_event.get("time", 0.0))
     report_data["continuePorchClearanceDelayAfterObservation"] = rounded(clearance_delay) if is_finite(clearance_delay) else null
     await capture_stage("player_pov_continue_mira_final_state", {"mira": report_data["miraFinal"], "homeStatus": report_data["miraFinalHomeInteriorStatus"]})
+    var observer_view := mira_observer_view(mira)
+    if not observer_view.is_empty():
+        await capture_observer_stage("observer_continue_mira_final_state", observer_view.get("eye", Vector3.ZERO), observer_view.get("target", Vector3.ZERO), {
+            "mira": report_data["miraFinal"],
+            "homeStatus": report_data["miraFinalHomeInteriorStatus"]
+        })
     if not mira_left_player_porch:
         add_failure("continue_mira_did_not_leave_player_porch", JSON.stringify(report_data["miraFinal"]))
         return
