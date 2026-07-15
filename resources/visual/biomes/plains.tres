@@ -1,6 +1,6 @@
-[gd_resource type="Resource" script_class="BiomeVisualProfile" load_steps=2 format=3]
+[gd_resource type="Resource" script_class="BiomeEnvironmentProfile" load_steps=2 format=3]
 
-[ext_resource type="Script" path="res://scripts/visual/BiomeVisualProfile.gd" id="1_profile"]
+[ext_resource type="Script" path="res://scripts/environment/BiomeEnvironmentProfile.gd" id="1_profile"]
 
 [resource]
 script = ExtResource("1_profile")
@@ -9,4 +9,7 @@ tree_families = PackedStringArray("broadleaf_tree", "savanna_tree")
 rock_families = PackedStringArray("rock")
 tree_scale = 0.98
 rock_scale = 0.95
-
+tree_chance = 0.22
+rock_base_chance = 0.16
+forage_chance = 0.14
+wildlife_chance = 0.10

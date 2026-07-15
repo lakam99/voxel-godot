@@ -107,6 +107,7 @@ var story_accessibility_settings
 var story_debug_tools
 var item_visual_factory
 var visual_asset_registry
+var biome_environment_catalog
 var static_item_asset_registry
 var animated_asset_registry
 var hud
@@ -1505,6 +1506,7 @@ func vec3_dictionary(value: Vector3) -> Dictionary:
     }
 
 func setup_game_systems() -> void:
+    setup_biome_environment_catalog()
     setup_visual_asset_registry()
     setup_static_item_asset_registry()
     setup_animated_asset_registry()
@@ -1837,8 +1839,13 @@ func debug_story_dump() -> Dictionary:
 
 func setup_visual_asset_registry() -> void:
     visual_asset_registry = VisualAssetRegistryScript.new()
-    if not visual_asset_registry.setup():
+    if not visual_asset_registry.setup(biome_environment_catalog):
         push_warning("Generated visual asset registry loaded with fallbacks: %s" % str(visual_asset_registry.last_errors))
+
+func setup_biome_environment_catalog() -> void:
+    biome_environment_catalog = BiomeEnvironmentCatalogScript.new()
+    if not biome_environment_catalog.setup():
+        push_warning("Biome environment catalog loaded with bounded fallbacks: %s" % str(biome_environment_catalog.last_errors))
 
 func prewarm_runtime_visuals_staged() -> void:
     if visual_asset_registry != null and visual_asset_registry.has_method("cached_asset_ids"):

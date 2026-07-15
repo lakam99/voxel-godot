@@ -1,6 +1,6 @@
-[gd_resource type="Resource" script_class="BiomeVisualProfile" load_steps=2 format=3]
+[gd_resource type="Resource" script_class="BiomeEnvironmentProfile" load_steps=2 format=3]
 
-[ext_resource type="Script" path="res://scripts/visual/BiomeVisualProfile.gd" id="1_profile"]
+[ext_resource type="Script" path="res://scripts/environment/BiomeEnvironmentProfile.gd" id="1_profile"]
 
 [resource]
 script = ExtResource("1_profile")
@@ -9,4 +9,17 @@ tree_families = PackedStringArray("savanna_tree")
 rock_families = PackedStringArray("rock")
 tree_scale = 0.94
 rock_scale = 1.08
-
+rock_base_chance = 0.36
+forage_chance = 0.10
+forage_material = "aloePatch"
+forage_drop = "aloe"
+forage_drop_min = 1
+forage_drop_max = 3
+forage_radius = 0.48
+weather_precip = 0.16
+weather_clouds = 0.28
+detail_types = PackedStringArray("scrub", "pebble")
+detail_thresholds = PackedFloat32Array(0.44, 1.0)
+detail_y_offsets = PackedFloat32Array(0.17, 0.05)
+detail_scale_mins = PackedFloat32Array(0.65, 0.55)
+detail_scale_maxs = PackedFloat32Array(1.22, 1.28)

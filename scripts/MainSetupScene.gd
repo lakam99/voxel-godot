@@ -230,7 +230,7 @@ func setup_environment() -> void:
 
     weather_system = WeatherSystemScript.new()
     weather_system.name = "Weather"
-    weather_system.setup(self, seed_hash)
+    weather_system.setup(self, seed_hash, biome_environment_catalog)
     add_child(weather_system)
     update_sky(0.0)
 

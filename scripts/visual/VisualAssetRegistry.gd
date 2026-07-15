@@ -2,46 +2,28 @@ extends RefCounted
 class_name VisualAssetRegistry
 
 const MANIFEST_PATH := "res://assets/visual/generated/visual-manifest.json"
-const PROFILE_PATHS := [
-    "res://resources/visual/biomes/default.tres",
-    "res://resources/visual/biomes/plains.tres",
-    "res://resources/visual/biomes/forest.tres",
-    "res://resources/visual/biomes/taiga.tres",
-    "res://resources/visual/biomes/snow.tres",
-    "res://resources/visual/biomes/tundra.tres",
-    "res://resources/visual/biomes/alpine.tres",
-    "res://resources/visual/biomes/savanna.tres",
-    "res://resources/visual/biomes/desert.tres",
-    "res://resources/visual/biomes/swamp.tres",
-    "res://resources/visual/biomes/beach.tres",
-]
+const BiomeEnvironmentCatalogScript := preload("res://scripts/environment/BiomeEnvironmentCatalog.gd")
 
 var assets_by_id := {}
 var assets_by_family := {}
-var profiles_by_biome := {}
+var environment_catalog: BiomeEnvironmentCatalog
 var scene_cache := {}
 var disabled_asset_ids := {}
 var last_errors: Array[String] = []
 var loaded := false
 
-func setup() -> bool:
+func setup(catalog: BiomeEnvironmentCatalog = null) -> bool:
     assets_by_id.clear()
     assets_by_family.clear()
-    profiles_by_biome.clear()
     scene_cache.clear()
     disabled_asset_ids.clear()
     last_errors.clear()
-    load_profiles()
+    environment_catalog = catalog
+    if environment_catalog == null:
+        environment_catalog = BiomeEnvironmentCatalogScript.new()
+        environment_catalog.setup()
     loaded = load_manifest() and cache_asset_scenes()
     return loaded
-
-func load_profiles() -> void:
-    for path in PROFILE_PATHS:
-        var profile := load(path) as Resource
-        if profile == null:
-            last_errors.append("Missing visual profile %s" % path)
-            continue
-        profiles_by_biome[String(profile.get("biome_id"))] = profile
 
 func load_manifest() -> bool:
     var manifest_text := read_text(MANIFEST_PATH)
@@ -134,7 +116,7 @@ func cached_asset_ids() -> Array[String]:
     return result
 
 func profile_count() -> int:
-    return profiles_by_biome.size()
+    return environment_catalog.profile_count() if environment_catalog != null else 0
 
 func select_tree_asset_id(biome: String, prop_id: String) -> String:
     var profile := profile_for_biome(biome)
@@ -151,10 +133,7 @@ func select_rock_asset_id(biome: String, prop_id: String) -> String:
     return select_asset_id(families, biome, prop_id, "rock")
 
 func profile_for_biome(biome: String) -> Resource:
-    var key := biome
-    if profiles_by_biome.has(key):
-        return profiles_by_biome[key]
-    return profiles_by_biome.get("default") as Resource
+    return environment_catalog.profile_for_biome(biome) if environment_catalog != null else null
 
 func select_asset_id(families: PackedStringArray, biome: String, prop_id: String, role: String) -> String:
     var candidates: Array[String] = []

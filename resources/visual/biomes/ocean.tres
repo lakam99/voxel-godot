@@ -1,0 +1,15 @@
+[gd_resource type="Resource" script_class="BiomeEnvironmentProfile" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://scripts/environment/BiomeEnvironmentProfile.gd" id="1_profile"]
+
+[resource]
+script = ExtResource("1_profile")
+biome_id = "ocean"
+weather_precip = 0.72
+weather_clouds = 0.62
+detail_types = PackedStringArray("reed", "")
+detail_thresholds = PackedFloat32Array(0.52, 1.0)
+detail_y_offsets = PackedFloat32Array(0.36, 0.0)
+detail_scale_mins = PackedFloat32Array(0.75, 1.0)
+detail_scale_maxs = PackedFloat32Array(1.28, 1.0)
+detail_max_height_above_water = 0.25

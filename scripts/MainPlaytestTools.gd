@@ -3586,48 +3586,20 @@ func surface_volume_spawn_sample_at_cell(cell_x: int, cell_z: int) -> Dictionary
 
 func add_detail_for_biome(batches: Dictionary, local_position: Vector3, biome: String, height: float, rng: RandomNumberGenerator) -> void:
     var roll := rng.randf()
-    if biome == "ocean":
-        if height <= WATER_LEVEL + 0.25 and roll < 0.52:
-            append_detail_transform(batches, "reed", local_position + Vector3(0.0, 0.36, 0.0), rng.randf() * TAU, Vector3.ONE * rng.randf_range(0.75, 1.28))
+    var choice: Dictionary = biome_environment_catalog.detail_choice(biome, height, WATER_LEVEL, roll) if biome_environment_catalog != null else {}
+    var detail_type := String(choice.get("type", ""))
+    if detail_type == "":
         return
-    if biome == "beach":
-        if roll < 0.46:
-            append_detail_transform(batches, "pebble", local_position + Vector3(0.0, 0.05, 0.0), rng.randf() * TAU, Vector3.ONE * rng.randf_range(0.65, 1.35))
-        elif roll < 0.70:
-            append_detail_transform(batches, "reed", local_position + Vector3(0.0, 0.34, 0.0), rng.randf() * TAU, Vector3.ONE * rng.randf_range(0.7, 1.15))
-        return
-    if biome == "snow" or biome == "tundra" or biome == "alpine":
-        if roll < 0.56:
-            append_detail_transform(batches, "snowClump", local_position + Vector3(0.0, 0.05, 0.0), rng.randf() * TAU, Vector3.ONE * rng.randf_range(0.65, 1.35))
-        else:
-            append_detail_transform(batches, "pebble", local_position + Vector3(0.0, 0.05, 0.0), rng.randf() * TAU, Vector3.ONE * rng.randf_range(0.55, 1.10))
-        return
-    if biome == "desert" or biome == "savanna":
-        if roll < 0.44:
-            append_detail_transform(batches, "scrub", local_position + Vector3(0.0, 0.17, 0.0), rng.randf() * TAU, Vector3.ONE * rng.randf_range(0.65, 1.22))
-        else:
-            append_detail_transform(batches, "pebble", local_position + Vector3(0.0, 0.05, 0.0), rng.randf() * TAU, Vector3.ONE * rng.randf_range(0.55, 1.28))
-        return
-    if biome == "swamp":
-        if roll < 0.50:
-            append_detail_transform(batches, "reed", local_position + Vector3(0.0, 0.36, 0.0), rng.randf() * TAU, Vector3.ONE * rng.randf_range(0.75, 1.30))
-        else:
-            append_detail_transform(batches, "grass", local_position + Vector3(0.0, 0.19, 0.0), rng.randf() * TAU, Vector3.ONE * rng.randf_range(0.65, 1.15))
-        return
-    if biome == "forest" or biome == "taiga":
-        if roll < 0.34:
-            append_detail_transform(batches, "leafLitter", local_position + Vector3(0.0, 0.015, 0.0), rng.randf() * TAU, Vector3.ONE * rng.randf_range(0.70, 1.40))
-        elif roll < 0.78:
-            append_detail_transform(batches, "grass", local_position + Vector3(0.0, 0.19, 0.0), rng.randf() * TAU, Vector3.ONE * rng.randf_range(0.65, 1.20))
-        else:
-            append_flower_detail(batches, local_position, rng)
-        return
-    if roll < 0.62:
-        append_detail_transform(batches, "grass", local_position + Vector3(0.0, 0.19, 0.0), rng.randf() * TAU, Vector3.ONE * rng.randf_range(0.62, 1.18))
-    elif roll < 0.84:
+    if detail_type == "flower":
         append_flower_detail(batches, local_position, rng)
-    else:
-        append_detail_transform(batches, "pebble", local_position + Vector3(0.0, 0.05, 0.0), rng.randf() * TAU, Vector3.ONE * rng.randf_range(0.5, 0.95))
+        return
+    append_detail_transform(
+        batches,
+        detail_type,
+        local_position + Vector3(0.0, float(choice.get("yOffset", 0.0)), 0.0),
+        rng.randf() * TAU,
+        Vector3.ONE * rng.randf_range(float(choice.get("scaleMin", 1.0)), float(choice.get("scaleMax", 1.0)))
+    )
 
 func append_flower_detail(batches: Dictionary, local_position: Vector3, rng: RandomNumberGenerator) -> void:
     var yaw := rng.randf() * TAU

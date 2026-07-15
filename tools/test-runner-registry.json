@@ -398,6 +398,15 @@
       "required": true
     },
     {
+      "id": "biome_environment_catalog_contract",
+      "description": "Biome environment profile schema, exact behavior parity, bounded fallback, shared consumer injection, RNG firewall, and duplicate-table retirement",
+      "command": ".\\tools\\run-biome-environment-catalog-contract-tests.ps1",
+      "args": ["-ReportPath", "artifacts\\test-runners\\biome-environment-catalog-contract.json"],
+      "reportPath": "artifacts\\test-runners\\biome-environment-catalog-contract.json",
+      "evidenceLevel": "contract",
+      "required": true
+    },
+    {
       "id": "tutorial_actor_registration_contract",
       "description": "Manifest-derived tutorial actor profiles, ordinary registration parity, and no tutorial simulation privilege",
       "command": ".\\tools\\run-tutorial-actor-registration-contract-tests.ps1",

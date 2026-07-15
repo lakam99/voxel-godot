@@ -1,6 +1,8 @@
 extends Node3D
 class_name WeatherSystem
 
+const BiomeEnvironmentCatalogScript := preload("res://scripts/environment/BiomeEnvironmentCatalog.gd")
+
 const CLOUD_COUNT := 18
 const STAR_COUNT := 160
 const PRECIP_COUNT := 128
@@ -31,9 +33,14 @@ var star_material: StandardMaterial3D
 var rain_material: StandardMaterial3D
 var snow_material: StandardMaterial3D
 var particle_quality := 1.0
+var environment_catalog: BiomeEnvironmentCatalog
 
-func setup(main_node, seed_value: int) -> void:
+func setup(main_node, seed_value: int, catalog: BiomeEnvironmentCatalog = null) -> void:
     main = main_node
+    environment_catalog = catalog
+    if environment_catalog == null:
+        environment_catalog = BiomeEnvironmentCatalogScript.new()
+        environment_catalog.setup()
     reset_for_seed(seed_value)
     set_process(false)
 
@@ -203,11 +210,11 @@ func update_weather(delta: float, observer: Vector3, biome: String, day_factor: 
     if main and main.has_method("world_to_cell"):
         cell = Vector2i(main.world_to_cell(observer.x), main.world_to_cell(observer.z))
     water_influence = water_influence_at_cell(cell)
-    var profile := profile_for_biome(biome)
+    var profile := environment_catalog.profile_for_biome(biome)
     var roll := weather_roll(cell)
-    var humidity: float = clampf(float(profile.get("precip", 0.35)) * 0.48 + water_influence * 0.36 + roll * 0.28, 0.0, 1.0)
+    var humidity: float = clampf(profile.weather_precip * 0.48 + water_influence * 0.36 + roll * 0.28, 0.0, 1.0)
     target_intensity = clampf((humidity - 0.68) * 2.6, 0.0, 1.0)
-    target_cloud_cover = clampf(float(profile.get("clouds", 0.35)) * 0.45 + humidity * 0.42 + roll * 0.26 + target_intensity * 0.25, 0.14, 0.95)
+    target_cloud_cover = clampf(profile.weather_clouds * 0.45 + humidity * 0.42 + roll * 0.26 + target_intensity * 0.25, 0.14, 0.95)
     cloud_cover = lerpf(cloud_cover, target_cloud_cover, clampf(delta * 0.30, 0.0, 1.0))
     intensity = lerpf(intensity, target_intensity, clampf(delta * 0.42, 0.0, 1.0))
     if intensity > 0.12:
@@ -345,25 +352,9 @@ func water_influence_at_cell(cell: Vector2i) -> float:
             wet += 1
     return float(wet) / float(offsets.size())
 
-func profile_for_biome(biome: String) -> Dictionary:
-    match biome:
-        "ocean":
-            return { "precip": 0.72, "clouds": 0.62 }
-        "beach":
-            return { "precip": 0.56, "clouds": 0.46 }
-        "forest", "taiga", "swamp":
-            return { "precip": 0.68, "clouds": 0.62 }
-        "snow", "tundra", "alpine":
-            return { "precip": 0.58, "clouds": 0.58 }
-        "desert", "savanna":
-            return { "precip": 0.16, "clouds": 0.28 }
-        "town":
-            return { "precip": 0.48, "clouds": 0.44 }
-        _:
-            return { "precip": 0.36, "clouds": 0.36 }
-
 func is_cold(biome: String, observer: Vector3) -> bool:
-    if biome in ["snow", "tundra", "alpine", "taiga"]:
+    var profile := environment_catalog.profile_for_biome(biome) if environment_catalog != null else null
+    if profile != null and profile.cold_weather:
         return true
     if main and main.has_method("surface_y_at_position"):
         return float(main.call("surface_y_at_position", observer)) > 54.0

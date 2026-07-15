@@ -39,114 +39,28 @@ func hash01(text: String) -> float:
 	return float(abs(hash_string("%s:%s" % [seed_text, text])) % 100000) / 100000.0
 
 func tree_chance(biome: String) -> float:
-	match biome:
-		"forest":
-			return 0.58
-		"taiga":
-			return 0.48
-		"plains":
-			return 0.22
-		"swamp":
-			return 0.26
-		"savanna":
-			return 0.10
-		_:
-			return 0.02
+	var profile = biome_environment_catalog.profile_for_biome(biome) if biome_environment_catalog != null else null
+	return profile.tree_chance if profile != null else 0.02
 
 func forage_for_biome(biome: String) -> Dictionary:
-	if biome == "desert" or biome == "beach" or biome == "savanna":
-		return {
-			"material": "aloePatch",
-			"drop": "aloe",
-			"drop_min": 1,
-			"drop_max": 3,
-			"radius": 0.48
-		}
-	if biome == "swamp":
-		return {
-			"material": "mushroomCluster",
-			"drop": "mirecap",
-			"drop_min": 1,
-			"drop_max": 3,
-			"radius": 0.50
-		}
-	if biome == "snow" or biome == "tundra" or biome == "alpine" or biome == "taiga":
-		return {
-			"material": "frostHerbPatch",
-			"drop": "frostHerb",
-			"drop_min": 1,
-			"drop_max": 2,
-			"radius": 0.48
-		}
-	return {
-		"material": "berryBush",
-		"drop": "berries",
-		"drop_min": 2,
-		"drop_max": 4,
-		"radius": 0.56
+	var profile = biome_environment_catalog.profile_for_biome(biome) if biome_environment_catalog != null else null
+	return profile.forage_spec() if profile != null else {
+		"material": "berryBush", "drop": "berries", "drop_min": 2, "drop_max": 4, "radius": 0.56
 	}
 
 func forage_chance(biome: String) -> float:
-	match biome:
-		"forest":
-			return 0.20
-		"plains":
-			return 0.14
-		"savanna":
-			return 0.12
-		"beach":
-			return 0.08
-		"desert":
-			return 0.10
-		"taiga":
-			return 0.13
-		"swamp":
-			return 0.18
-		"tundra":
-			return 0.10
-		"alpine":
-			return 0.08
-		"snow":
-			return 0.12
-		_:
-			return 0.0
+	var profile = biome_environment_catalog.profile_for_biome(biome) if biome_environment_catalog != null else null
+	return profile.forage_chance if profile != null else 0.0
 
 func wildlife_chance(biome: String, height: float) -> float:
 	if height > 70.0:
 		return 0.0
-	match biome:
-		"plains":
-			return 0.10
-		"forest":
-			return 0.07
-		"savanna":
-			return 0.09
-		"taiga":
-			return 0.06
-		"tundra":
-			return 0.045
-		"alpine":
-			return 0.028
-		"snow":
-			return 0.035
-		"swamp":
-			return 0.035
-		_:
-			return 0.0
+	var profile = biome_environment_catalog.profile_for_biome(biome) if biome_environment_catalog != null else null
+	return profile.wildlife_chance if profile != null else 0.0
 
 func rock_chance(biome: String, height: float) -> float:
-	var base := 0.10
-	match biome:
-		"alpine", "tundra", "snow":
-			base = 0.55
-		"desert", "savanna":
-			base = 0.36
-		"plains":
-			base = 0.16
-		"forest", "taiga":
-			base = 0.12
-		_:
-			base = 0.08
+	var profile = biome_environment_catalog.profile_for_biome(biome) if biome_environment_catalog != null else null
+	var base: float = profile.rock_base_chance if profile != null else 0.08
 	if height > 42.0:
 		base += 0.12
 	return base

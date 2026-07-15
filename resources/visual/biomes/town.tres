@@ -4,8 +4,6 @@
 
 [resource]
 script = ExtResource("1_profile")
-biome_id = "default"
-tree_families = PackedStringArray("broadleaf_tree")
-rock_families = PackedStringArray("rock")
-tree_scale = 1.0
-rock_scale = 1.0
+biome_id = "town"
+weather_precip = 0.48
+weather_clouds = 0.44

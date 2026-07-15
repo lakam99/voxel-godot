@@ -1,6 +1,6 @@
-[gd_resource type="Resource" script_class="BiomeVisualProfile" load_steps=2 format=3]
+[gd_resource type="Resource" script_class="BiomeEnvironmentProfile" load_steps=2 format=3]
 
-[ext_resource type="Script" path="res://scripts/visual/BiomeVisualProfile.gd" id="1_profile"]
+[ext_resource type="Script" path="res://scripts/environment/BiomeEnvironmentProfile.gd" id="1_profile"]
 
 [resource]
 script = ExtResource("1_profile")
@@ -9,4 +9,14 @@ tree_families = PackedStringArray("broadleaf_tree")
 rock_families = PackedStringArray("rock")
 tree_scale = 1.04
 rock_scale = 0.94
-
+tree_chance = 0.58
+rock_base_chance = 0.12
+forage_chance = 0.20
+wildlife_chance = 0.07
+weather_precip = 0.68
+weather_clouds = 0.62
+detail_types = PackedStringArray("leafLitter", "grass", "flower")
+detail_thresholds = PackedFloat32Array(0.34, 0.78, 1.0)
+detail_y_offsets = PackedFloat32Array(0.015, 0.19, 0.15)
+detail_scale_mins = PackedFloat32Array(0.70, 0.65, 0.82)
+detail_scale_maxs = PackedFloat32Array(1.40, 1.20, 1.18)
