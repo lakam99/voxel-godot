@@ -60,9 +60,26 @@ The intended coherent trunk/collision change moved the observer across an exact 
 - Broad fixed-seed gameplay rerun: passed after updating two dated generated-asset smoke predicates to the ecological registry contract; production was not changed for the test.
 - NPC contract: 82/82 runs, 240 assertions.
 
-The first full protected aggregate passed 16/17 suites. Its only red suite was `streaming_save`: the newly updated working-tree baseline was compared with the still-old generated `latest` artifact. Blob inspection proves `latest` exactly matches the unchanged `HEAD` baseline (`2b4fec...`), while the new baseline exactly matches both new runs (`224f7d...`). This is an evidence-publication ordering failure, not a gameplay/pathfinding failure. No protected test or source was changed. The official signature and full protected aggregate will be rerun after the baseline commit; final results will be appended before Linear closure.
+The first full protected aggregate passed 16/17 suites. Its only red suite was `streaming_save`: the newly updated working-tree baseline was compared with the still-old generated `latest` artifact. Blob inspection proves `latest` exactly matched the unchanged entry baseline (`2b4fec...`), while the new baseline exactly matched both new runs (`224f7d...`). This was an evidence-publication ordering failure, not a gameplay/pathfinding failure. No protected test or source changed.
+
+After commit `484d62e`, the official `tools/run-world-signature.ps1 -Seed atlas-1492` regenerated `latest` and matched the committed baseline. The unchanged streaming/save suite then passed 40/40 runs and 92 assertions at `artifacts/npc/reports/vox131-streaming-save-postsignature.json`.
+
+The final manifesto aggregate passed 17/17 suites with zero failures in 867.699 seconds:
+
+```powershell
+.\tools\npc\run-all-npc-tests.ps1 -TimeMode Both -Seed atlas-1492 -ReportPath artifacts\npc\reports\vox131-all-npc-both-final.json
+```
+
+Live acceptance included:
+
+- go-home 13/13: approach, door open, crossing, strict interior, clearance, and close;
+- real tutorial 5/5: Mira uses the ordinary home/door path and non-guards return home;
+- following morning: Mira, Rowan, and Niko resume outside behavior;
+- final rescue: live combat, Niko home, and Sera guard restoration;
+- town job cycle 25/25: day jobs/foraging, night transitions/interiors, and morning re-emergence.
+
+Representative captures and timelines under `artifacts/npc/screenshots/*-both/` were inspected. The go-home final frame remains extremely dark, so its image is not used alone as proof; the clearer tutorial interior frame, door timeline, and acceptance trace carry that claim. The rescue combat frame is partially blocked by a nearby actor, so the combat-complete/return frames and timeline are used together. This is consistent with the live-evidence boundary in `CODEX_TUTORIAL_TOWN_NPC_LOADING_PLAN.md`.
 
 ## Release boundary
 
-The ecology implementation, visual acceptance, live harvesting/Continue, broad gameplay, direct edit latency, and normal traversal gates are green. Final release closure is conditional only on republishing the committed signature and obtaining a green protected aggregate with unchanged NPC/pathfinding code.
-
+The ecology implementation, visual acceptance, live harvesting/Continue, broad gameplay, direct edit latency, normal traversal, deterministic signature, and protected NPC/town gates are green. Existing shutdown RID/resource warnings remain visible after headed suites and are not attributed to this feature. VOX-125 through VOX-131 are release-complete with unchanged NPC/pathfinding implementation.

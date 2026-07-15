@@ -32,4 +32,3 @@ The Blender validator and Godot import contract prove UV0 presence for every eco
 - Manual inspection confirms vertical irregular trunk grain after the final shader change; no horizontal banding or world-space swimming was observed.
 
 Material architecture remains within the completed VOX-121 shared GPU wind system. This phase adds no CPU tree animation and no pathfinding/town behavior.
-

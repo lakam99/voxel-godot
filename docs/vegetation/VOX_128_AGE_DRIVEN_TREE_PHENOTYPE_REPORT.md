@@ -44,4 +44,3 @@ Results:
 - Ecological fields, fullness, grounding, wind colors, bark UV0, triangle bounds, and monotonic growth all passed.
 
 This phase changes asset capability only. Runtime publication is owned by VOX-130.
-

@@ -41,4 +41,3 @@ Tree metadata now exposes architecture, age band, exact age/range, maturity, gen
 The night portion uses the project-approved player-only playtest survival policy while preserving real night, NPC, and hostile behavior.
 
 `CODEX_TUTORIAL_TOWN_NPC_LOADING_PLAN.md` remains controlling throughout: startup readiness, town facts, actor registration, and commands are untouched.
-

@@ -1,10 +1,15 @@
 # VOX-126 Tree Ecology Baseline and Frozen Schema
 
-Date: 2026-07-15  
-Branch: `codex/vox-125-age-driven-trees`  
-Entry commit: `959f98c4`  
-Godot: 4.6.1 stable  
-Blender: 5.1.2  
+Date: 2026-07-15
+
+Branch: `codex/vox-125-age-driven-trees`
+
+Entry commit: `959f98c4`
+
+Godot: 4.6.1 stable
+
+Blender: 5.1.2
+
 Fixed seed: `atlas-1492`
 
 ## Outcome
@@ -58,4 +63,3 @@ Every phenotype must meet deterministic minimum branch, terminal, leaf, attachme
 The prior generated tree library was 4.87-21.63 m tall, with mature forest trees generally 10-16 m. VOX-118 measured the original sparse assets at 3.0-6.0 m and recorded the pre-existing terrain-meshing hitch separately. The release target therefore requires ordinary mature forest/taiga trees to exceed house height without changing placement ownership.
 
 The pre-change protected baseline is documented in `VOX_123_CANOPY_RELEASE_REPORT.md`. The final post-change firewall is recorded in the VOX-131 report.
-

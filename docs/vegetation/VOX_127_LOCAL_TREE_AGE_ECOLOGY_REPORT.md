@@ -33,4 +33,3 @@ The sampler consumes no placement RNG and changes neither the 28 surface-prop at
 Two fresh `atlas-1492` signatures are byte-identical. All 628 stable prop records in the old/new loaded-window overlap are byte-identical, which proves the shared prop RNG was not reordered. The intentional signature-window delta is discussed in VOX-131.
 
 `manifesto.md` and `CODEX_TUTORIAL_TOWN_NPC_LOADING_PLAN.md` boundaries remain intact: this sampler has no navigation, town-readiness, NPC, or story authority.
-
