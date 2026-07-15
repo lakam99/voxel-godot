@@ -2,7 +2,7 @@ param(
     [int]$DurationSeconds = 75,
     [int]$WarmupFrames = 120,
     [string]$Seed = "",
-    [string]$GodotExe = "C:\Users\arkam\Downloads\Godot_v4.6.1-stable_win64.exe\Godot_v4.6.1-stable_win64_console.exe",
+    [string]$GodotExe = "C:\Users\arkam\Desktop\Godot_v4.6.1-stable_win64.exe\Godot_v4.6.1-stable_win64_console.exe",
     [string]$ReportPath = "",
     [string]$ProgressPath = "",
     [string]$LogPath = "",
