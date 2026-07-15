@@ -2,7 +2,8 @@ param(
     [ValidateSet("Day", "Night", "Both", "Transition", "day", "night", "both", "transition")]
     [string]$TimeMode = "Both",
     [string]$Seed = "atlas-1492",
-    [string]$ReportPath = ""
+    [string]$ReportPath = "",
+    [string]$GodotExe = "C:\Users\arkam\Desktop\Godot_v4.6.1-stable_win64.exe\Godot_v4.6.1-stable_win64_console.exe"
 )
 
 $ErrorActionPreference = "Continue"
@@ -142,6 +143,9 @@ try {
         }
         if ($screenshotDir -ne "") {
             $runnerArgs = @(Set-NamedArg -ArgList $runnerArgs -Name "-ScreenshotDir" -Value $screenshotDir)
+        }
+        if ($GodotExe -ne "") {
+            $runnerArgs = @(Set-NamedArg -ArgList $runnerArgs -Name "-GodotExe" -Value $GodotExe)
         }
 
         $suiteStarted = Get-Date

@@ -168,7 +168,7 @@
       "id": "real_tutorial_final_rescue",
       "description": "Headed real tutorial final rescue acceptance from Mira briefing through Sera escort, combat, and Niko return",
       "command": ".\\tools\\npc\\run-real-tutorial-playthrough.ps1",
-      "defaultArgs": ["-TimeMode", "Both", "-Visible", "-FinalRescue"],
+      "defaultArgs": ["-TimeMode", "Both", "-Visible", "-FinalRescue", "-GodMode"],
       "supportsScreenshotDir": true,
       "evidenceLevel": "acceptance_visual",
       "acceptanceClaims": ["tutorial_final_rescue_combat_niko_home_sera_guard_visual"],

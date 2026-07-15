@@ -46,6 +46,8 @@ func run() -> void:
         capture_cases = ui_layout_capture_cases()
     elif OS.get_environment("VOXEL_HUD_REFINEMENT_CAPTURE") == "1":
         capture_cases = hud_refinement_capture_cases()
+    elif OS.get_environment("VOXEL_CANOPY_CAPTURE") == "1":
+        capture_cases = canopy_capture_cases()
     if OS.get_environment("VOXEL_VISUAL_CAPTURE_TOOLS") == "1":
         capture_cases.append_array(tool_capture_cases())
     for case_spec in capture_cases:
@@ -116,6 +118,19 @@ func hud_refinement_capture_cases() -> Array[Dictionary]:
         { "name": "hud_interaction", "playtest": "town", "clock": 12.0, "weather": "clear", "intensity": 0.0, "clouds": 0.22, "hud": true, "lookAtBlockOffset": Vector2i(1, -2), "focusBlock": "door", "offset": Vector3(-1.8, 0.0, -1.4), "pitch": -4.0 }
     ]
 
+func canopy_capture_cases() -> Array[Dictionary]:
+    return [
+        { "name": "canopy_plains_midday", "biome": "plains", "clock": 12.0, "weather": "clear", "intensity": 0.0, "clouds": 0.20, "hud": false, "offset": Vector3(12.0, 0.0, 14.0), "pitch": -8.0 },
+        { "name": "canopy_forest_midday", "biome": "forest", "clock": 12.0, "weather": "clear", "intensity": 0.0, "clouds": 0.20, "hud": false, "offset": Vector3(10.0, 0.0, 14.0), "pitch": -7.0 },
+        { "name": "canopy_taiga_midday", "biome": "taiga", "clock": 12.0, "weather": "clear", "intensity": 0.0, "clouds": 0.24, "hud": false, "offset": Vector3(10.0, 0.0, 14.0), "pitch": -7.0 },
+        { "name": "canopy_swamp_rain", "biome": "swamp", "clock": 14.5, "weather": "rain", "intensity": 0.72, "clouds": 0.90, "hud": false, "offset": Vector3(10.0, 0.0, 13.0), "pitch": -7.0 },
+        { "name": "canopy_savanna_midday", "biome": "savanna", "clock": 12.0, "weather": "clear", "intensity": 0.0, "clouds": 0.16, "hud": false, "offset": Vector3(12.0, 0.0, 15.0), "pitch": -8.0 },
+        { "name": "canopy_forest_storm", "biome": "forest", "clock": 16.5, "weather": "rain", "intensity": 0.88, "clouds": 0.96, "hud": false, "offset": Vector3(10.0, 0.0, 14.0), "pitch": -7.0 },
+        { "name": "canopy_forest_night_torch", "biome": "forest", "clock": 0.0, "weather": "clear", "intensity": 0.0, "clouds": 0.18, "hud": false, "offset": Vector3(9.0, 0.0, 13.0), "pitch": -6.0, "heldItem": "torch" },
+        { "name": "canopy_forest_traversal_line", "biome": "forest", "clock": 11.0, "weather": "clear", "intensity": 0.0, "clouds": 0.20, "hud": false, "offset": Vector3(4.0, 0.0, 18.0), "pitch": -3.0 },
+        { "name": "canopy_town_edge_midday", "playtest": "town", "clock": 12.0, "weather": "clear", "intensity": 0.0, "clouds": 0.22, "hud": false, "offset": Vector3(22.0, 0.0, 20.0), "pitch": -8.0 }
+    ]
+
 func ui_layout_capture_cases() -> Array[Dictionary]:
     return [
         { "name": "ui_objectives", "playtest": "town", "clock": 12.0, "weather": "clear", "intensity": 0.0, "clouds": 0.22, "hud": true, "offset": Vector3(8.5, 0.0, 8.5), "pitch": -10.0, "openObjectives": true },
@@ -154,8 +169,8 @@ func disable_tutorial_capture_overrides() -> void:
 
 func capture_case(capture_case: Dictionary) -> void:
     main.set_process(true)
-    var ok := bool(main.run_playtest_case(String(capture_case["playtest"])))
-    await wait_frames(8)
+    var ok := await load_capture_destination(capture_case)
+    await wait_frames(120 if capture_case.has("biome") else 24)
     main.set_process(false)
     if not ok:
         push_error("Could not load visual capture case: %s" % capture_case["name"])
@@ -188,10 +203,24 @@ func capture_case(capture_case: Dictionary) -> void:
     metadata.append(case_metadata)
     write_json(path_join(output_dir, "%s.json" % case_name), case_metadata)
 
+func load_capture_destination(capture_case: Dictionary) -> bool:
+    if not capture_case.has("biome"):
+        return bool(main.run_playtest_case(String(capture_case.get("playtest", "forest"))))
+    var biome := String(capture_case.get("biome", "plains"))
+    var cell: Vector2i = main.call("find_biome_playtest_cell", [biome], main.WATER_LEVEL + 1.0, 92.0, false)
+    if cell == Vector2i(999999, 999999):
+        push_error("Could not resolve canopy capture biome: %s" % biome)
+        return false
+    if main.has_method("cleanup_playtest_case_assets"):
+        main.call("cleanup_playtest_case_assets")
+    capture_case["resolvedCell"] = cell
+    capture_case["resolvedBiome"] = String(main.call("surface_biome_at_cell", Vector3i(cell.x, 0, cell.y)))
+    return bool(main.call("teleport_to_cell", cell, "Canopy capture: %s" % biome.capitalize()))
+
 func position_camera(capture_case: Dictionary) -> void:
     if player == null or camera == null:
         return
-    var target_cell := current_playtest_cell(String(capture_case["playtest"]))
+    var target_cell: Vector2i = capture_case.get("resolvedCell", current_playtest_cell(String(capture_case.get("playtest", "forest"))))
     if capture_case.has("lookAtBlockOffset"):
         position_block_focus_camera(capture_case, target_cell)
         return
@@ -404,7 +433,10 @@ func make_case_metadata(capture_case: Dictionary, png_path: String) -> Dictionar
     return {
         "seed": seed,
         "case": String(capture_case["name"]),
-        "playtestDestination": String(capture_case["playtest"]),
+        "playtestDestination": String(capture_case.get("playtest", "biome")),
+        "requestedBiome": String(capture_case.get("biome", "")),
+        "resolvedBiome": String(capture_case.get("resolvedBiome", "")),
+        "resolvedCell": vec2i(capture_case.get("resolvedCell", Vector2i.ZERO)),
         "clockHour": float(capture_case["clock"]),
         "clockText": main.clock_time_text(),
         "timeOfDay": snapped_float(main.time_of_day),
@@ -513,6 +545,9 @@ func path_join(base: String, file_name: String) -> String:
 
 func vec3(value: Vector3) -> Dictionary:
     return { "x": snapped_float(value.x), "y": snapped_float(value.y), "z": snapped_float(value.z) }
+
+func vec2i(value: Vector2i) -> Dictionary:
+    return { "x": value.x, "y": value.y }
 
 func vec3_degrees(value: Vector3) -> Dictionary:
     return { "x": snapped_float(rad_to_deg(value.x)), "y": snapped_float(rad_to_deg(value.y)), "z": snapped_float(rad_to_deg(value.z)) }
