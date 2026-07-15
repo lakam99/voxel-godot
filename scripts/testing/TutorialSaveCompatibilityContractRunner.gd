@@ -87,7 +87,60 @@ func run() -> void:
     test_home_restore_reissues_once_then_retains()
     test_strict_home_restore_resumes_schedule_without_knock_replay()
     test_assignment_mismatch_is_reported_without_mutating_regenerated_profile()
+    test_final_rescue_mission_snapshot_round_trip()
+    test_legacy_final_rescue_state_derives_phase_without_migration()
     finish()
+
+func make_rescue_tutorial():
+    var tutorial = TutorialSystemScript.new()
+    tutorial.setup(null)
+    return tutorial
+
+func test_final_rescue_mission_snapshot_round_trip() -> void:
+    var tutorial = make_rescue_tutorial()
+    tutorial.final_night_active = true
+    tutorial.rescue_escort_started = true
+    tutorial.rescue_site = Vector3(51.3, 16.1, 2.7)
+    tutorial.rescue_system.restore({
+        "version": 1,
+        "phase": "battle",
+        "gatePortalId": "door:east-public-gate",
+        "site": [51.3, 16.1, 2.7],
+        "guardTarget": [43.2, 16.1, 2.7],
+        "remainingSlots": ["ring_01", "ring_04"]
+    })
+    var snapshot: Dictionary = tutorial.rescue_system.snapshot()
+    var restored = make_rescue_tutorial()
+    restored.final_night_active = true
+    restored.rescue_escort_started = true
+    restored.rescue_system.restore(snapshot)
+    var state: Dictionary = restored.rescue_system.mission_state()
+    add_result(
+        "final_rescue_mission_snapshot_round_trips_phase_site_gate_and_remaining_slots",
+        String(state.get("phase", "")) == "battle" \
+            and String(state.get("gatePortalId", "")) == "door:east-public-gate" \
+            and restored.rescue_site.is_equal_approx(Vector3(51.3, 16.1, 2.7)) \
+            and (state.get("remainingSlots", []) as Array) == ["ring_01", "ring_04"],
+        {"snapshot": snapshot, "restored": state}
+    )
+    tutorial.free()
+    restored.free()
+
+func test_legacy_final_rescue_state_derives_phase_without_migration() -> void:
+    var tutorial = make_rescue_tutorial()
+    tutorial.final_night_active = true
+    tutorial.final_night_complete = false
+    tutorial.rescue_escort_started = true
+    tutorial.rescue_returning = false
+    tutorial.rescue_system.restore({})
+    var state: Dictionary = tutorial.rescue_system.mission_state()
+    add_result(
+        "legacy_final_rescue_save_without_mission_payload_derives_retryable_escort_phase",
+        String(state.get("phase", "")) == "escorting" \
+            and (state.get("remainingSlots", []) as Array).size() == 6,
+        state
+    )
+    tutorial.free()
 
 func sample_manifest() -> Dictionary:
     return {

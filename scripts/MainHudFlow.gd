@@ -398,7 +398,7 @@ func _on_utility_action_requested(action: String, payload) -> void:
 
 func _on_dialogue_closed(context) -> void:
     if tutorial_system and tutorial_system.has_method("acknowledge_dialogue"):
-        tutorial_system.acknowledge_dialogue(context)
+        await tutorial_system.acknowledge_dialogue(context)
         update_objectives_and_contracts()
     capture_mouse_if_no_modal()
 

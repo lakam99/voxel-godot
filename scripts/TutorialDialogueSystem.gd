@@ -136,7 +136,7 @@ func handle_mira_quest() -> String:
             if system.rescue_returning:
                 return "Get Niko and Sera back inside the lanterns. The storm is almost spent."
             return "Niko's torch is holding the swarm back. Clear the monsters around them."
-        system.start_final_night()
+        system.begin_final_night_briefing()
         return "Niko stayed out too late and is pinned beyond the lamps. Speak with Sera at the gate and follow them to the rescue."
     return "One step at a time. Forage, gather, build, then arm yourself."
 
@@ -199,7 +199,6 @@ func handle_sera_quest() -> String:
     var sera_totals: Dictionary = main.inventory_system.totals() if main and main.inventory_system else {}
     if system.final_night_active and not system.final_night_complete:
         if not system.rescue_escort_started:
-            system.start_rescue_escort()
             return "Niko is surrounded beyond the lamps. Stay on my heels; we cut through to the torch."
         if system.rescue_returning:
             return "Niko is moving. Keep the path clear until we reach the village."
@@ -220,13 +219,18 @@ func handle_sera_quest() -> String:
     return "Weapon alone is not enough. Get food and shelter supplies before the wilds."
 
 func make_dialogue_payload(speaker: String, role: String, text: String, npc_id: String, intro_elder := false) -> Dictionary:
-    return {
+    var payload := {
         "speaker": speaker,
         "role": role,
         "text": text,
         "npcId": npc_id,
         "introElder": intro_elder
     }
+    if system != null and system.has_method("dialogue_close_action_for"):
+        var close_action := String(system.call("dialogue_close_action_for", npc_id))
+        if close_action != "":
+            payload["closeAction"] = close_action
+    return payload
 
 func current_tutorial_stage() -> String:
     if not system.intro_bed_used:

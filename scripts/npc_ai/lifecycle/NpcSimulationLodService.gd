@@ -114,7 +114,12 @@ func update_actor(entry: Dictionary, delta: float, observer_position := Vector3.
 		return { "state": STATE_ACTIVE, "brainDue": true, "reason": "missing_actor_id" }
 	var current_state := String(record.get("state", STATE_ACTIVE))
 	var distance := distance_to_observer(entry, observer_position)
-	var next_state := classify_distance(distance, current_state)
+	# A route-backed generic order is an executable gameplay intent. It cannot
+	# remain accepted while its actor stays abstract and therefore never services
+	# routing. Keep the intent authoritative and promote through the ordinary LOD
+	# placement contract; failed promotion remains retryable on the next update.
+	var order_requires_active := route_order_requires_active_simulation(entry)
+	var next_state := STATE_ACTIVE if order_requires_active else classify_distance(distance, current_state)
 	record["lastDistance"] = distance
 	if current_state == STATE_ABSTRACT:
 		advance_abstract(entry, delta)
@@ -149,6 +154,13 @@ func update_actor(entry: Dictionary, delta: float, observer_position := Vector3.
 			record["brainAccumulator"] = 0.0
 		return { "state": STATE_NEARBY, "brainDue": due, "reason": "nearby_cadence", "distance": distance }
 	return { "state": STATE_ACTIVE, "brainDue": true, "reason": "active", "distance": distance }
+
+func route_order_requires_active_simulation(entry: Dictionary) -> bool:
+	var value = entry.get("scriptedOrder", {})
+	if not (value is Dictionary):
+		return false
+	var order: Dictionary = value
+	return bool(order.get("usesRouteStack", false)) and String(order.get("state", "")) in ["PENDING", "ACTIVE"]
 
 func classify_distance(distance: float, previous_state := STATE_ACTIVE) -> String:
 	if previous_state == STATE_ACTIVE:
@@ -236,7 +248,8 @@ func can_demote(entry: Dictionary, context := {}) -> Dictionary:
 		"immediate_combat": bool(entry.get("immediateCombat", context.get("immediateCombat", false))) or bool(entry.get("inCombat", false)),
 		"physically_blocked": bool(entry.get("physicallyBlocked", context.get("physicallyBlocked", false))) or bool(entry.get("penetrating", context.get("penetrating", false))),
 		"noninterruptible_interaction": bool(entry.get("nonInterruptibleInteraction", context.get("nonInterruptibleInteraction", false))),
-		"visible_scripted_sequence": bool(entry.get("visibleScriptedSequence", context.get("visibleScriptedSequence", false))) or bool(entry.get("requiredVisibleScripted", false))
+		"visible_scripted_sequence": bool(entry.get("visibleScriptedSequence", context.get("visibleScriptedSequence", false))) or bool(entry.get("requiredVisibleScripted", false)),
+		"route_backed_scripted_order": route_order_requires_active_simulation(entry)
 	}
 	var body := entry.get("body") as Node
 	if body != null and is_instance_valid(body):

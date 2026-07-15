@@ -251,6 +251,7 @@ func prepare_tutorial_world_staged(restoring: bool) -> Dictionary:
             initial_orders
         )
     var save_restore := {}
+    var rescue_restore := {}
     if restoring:
         save_restore = reconcile_restored_tutorial_save_contract()
         if not bool(save_restore.get("ok", false)):
@@ -260,6 +261,15 @@ func prepare_tutorial_world_staged(restoring: bool) -> Dictionary:
                 save_restore
             )
         await loading_yield("Tutorial save state restored", "tutorial_save", "ready", save_restore)
+        if ensure_rescue_system():
+            rescue_restore = await rescue_system.reconcile_after_world_ready()
+            if not bool(rescue_restore.get("ok", false)):
+                return await fail_tutorial_startup(
+                    "tutorial_rescue_mission_restore_failed",
+                    startup_town_manifest,
+                    rescue_restore
+                )
+            await loading_yield("Rescue mission state restored", "tutorial_mission", "ready", rescue_restore)
     await loading_yield("Villagers registered", "npc_registration", "ready", registration_result.get("metrics", {}))
     if not restoring:
         force_stormy_night()
@@ -277,7 +287,8 @@ func prepare_tutorial_world_staged(restoring: bool) -> Dictionary:
         "actorSpawn": spawn_result.get("metrics", {}),
         "villageLights": village_light_metrics,
         "initialOrders": initial_orders,
-        "saveRestore": save_restore
+        "saveRestore": save_restore,
+        "rescueRestore": rescue_restore
     }
     await loading_yield("Tutorial world ready", "tutorial_world", "ready", metrics)
     return remember_startup_readiness(StartupReadinessResultScript.ready(startup_town_manifest, metrics))
@@ -853,6 +864,8 @@ func restore(snapshot_value = {}) -> void:
     if start_cell_value is Array and start_cell_value.size() >= 2:
         start_cell = Vector2i(int(start_cell_value[0]), int(start_cell_value[1]))
     restore_intro_state(state.get("introRepair", {}))
+    if ensure_rescue_system():
+        rescue_system.restore(state.get("finalRescueMission", {}))
     restored_tutorial_save_contract = TutorialTownSaveContractScript.normalize(
         state.get("saveContract", {}),
         fallback_intro_knock_intent()
@@ -916,6 +929,7 @@ func snapshot() -> Dictionary:
         "townRegion": [TUTORIAL_TOWN_REGION.x, TUTORIAL_TOWN_REGION.y],
         "startCell": [start_cell.x, start_cell.y],
         "introRepair": intro_snapshot(),
+        "finalRescueMission": rescue_system.snapshot() if ensure_rescue_system() else {},
         "saveContract": tutorial_save_contract_snapshot(),
         "npcCount": npc_count()
     }
@@ -957,6 +971,7 @@ func state() -> Dictionary:
         "rescueRemaining": rescue_remaining_hostiles(),
         "rescueRequired": RESCUE_MONSTER_COUNT,
         "rescueSite": rescue_site,
+        "finalRescueMission": rescue_system.mission_state() if ensure_rescue_system() else {},
         "introRepairTargets": {
             "fence": repair_fence_cells.duplicate(),
             "lamps": repair_lamp_cells.duplicate()
@@ -1175,7 +1190,14 @@ func acknowledge_dialogue(context := {}) -> void:
             intro_knock_home_order_result = main.npc_system.order_go_home(actor, "tutorial_knock_complete")
             if String(intro_knock_home_order_result.get("state", "")).begins_with("FAILED"):
                 last_message = "The speaker is no longer in reach."
+    var close_action := String(state.get("closeAction", ""))
+    if close_action == "" and state_npc_id != "" and state_npc_id == current_npc_id:
+        close_action = String(last_dialogue.get("closeAction", ""))
     clear_dialogue_focus()
+    if close_action != "" and ensure_rescue_system():
+        var result: Dictionary = await rescue_system.handle_dialogue_close_action(close_action)
+        if not bool(result.get("ok", false)):
+            last_message = "The rescue could not begin: %s" % String(result.get("reason", "unknown_error"))
 
 func dialogue_payload() -> Dictionary:
     return last_dialogue.duplicate(true)
@@ -1277,7 +1299,17 @@ func mira_morning_briefed() -> bool:
 func start_final_night() -> bool:
     if not ensure_rescue_system():
         return false
-    return rescue_system.start_final_night()
+    return await rescue_system.start_final_night()
+
+func begin_final_night_briefing() -> bool:
+    if not ensure_rescue_system():
+        return false
+    return rescue_system.begin_final_night_briefing()
+
+func dialogue_close_action_for(npc_id: String) -> String:
+    if not ensure_rescue_system():
+        return ""
+    return rescue_system.dialogue_close_action_for(npc_id)
 
 func complete_final_night() -> bool:
     if not ensure_rescue_system():

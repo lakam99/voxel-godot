@@ -28,6 +28,8 @@ var projectile_system
 var npc_target_attacks := 0
 var npc_target_projectiles := 0
 var scripted_battle_starts := 0
+var scripted_leash_returns := 0
+var scripted_leash_max_distance := 0.0
 var hostile_update_cursor := 0
 var tutorial_spawn_attempts_remaining := 0
 var hostile_body_pool := {}
@@ -124,6 +126,18 @@ func clear() -> void:
     if projectile_system:
         projectile_system.clear()
 
+func clear_scripted_encounter(encounter_id: String, drop := false) -> int:
+    if encounter_id == "":
+        return 0
+    var removed := 0
+    for enemy_value in enemies.duplicate():
+        var enemy: Dictionary = enemy_value if enemy_value is Dictionary else {}
+        if String(enemy.get("scriptedEncounter", "")) != encounter_id:
+            continue
+        remove_enemy(enemy, drop)
+        removed += 1
+    return removed
+
 func update_hostiles(delta: float, day_factor: float, biome: String, sanctuary_established := false) -> void:
     if player == null or main == null:
         return
@@ -143,14 +157,14 @@ func update_hostiles(delta: float, day_factor: float, biome: String, sanctuary_e
     var player_safety: float = main.light_safety_at(player.global_position, sanctuary_established)
     var tutorial_profile := tutorial_danger_profile(night_factor)
     var tutorial_pressure := not tutorial_profile.is_empty()
-    var rescue_mission_active := tutorial_rescue_mission_active()
+    var exclusive_encounter_active := exclusive_scripted_encounter_active()
     var enemy_capacity := tutorial_hostile_capacity(tutorial_profile) if tutorial_pressure else 3
     spawn_cooldown = maxf(0.0, spawn_cooldown - delta)
     if monitor != null:
         monitor.end_section("hostile_context", context_started)
     var spawn_started: int = monitor.begin_section("hostile_spawn") if monitor != null else Time.get_ticks_usec()
-    if rescue_mission_active or (tutorial_pressure and bool(tutorial_profile.get("rescueMission", false))):
-        clear_non_rescue_hostiles()
+    if exclusive_encounter_active:
+        clear_non_scripted_hostiles()
         spawn_cooldown = maxf(spawn_cooldown, 2.0)
     elif tutorial_pressure and spawn_cooldown <= 0.0 and enemies.size() < enemy_capacity:
         if spawn_tutorial_perimeter(tutorial_profile, biome) != null:
@@ -215,31 +229,25 @@ func tutorial_danger_profile(night_factor: float) -> Dictionary:
         return {}
     return profile
 
-func tutorial_rescue_mission_active() -> bool:
-    if main == null:
-        return false
-    var tutorial_system = main.get("tutorial_system")
-    if tutorial_system == null:
-        return false
-    return bool(tutorial_system.get("final_night_active")) and not bool(tutorial_system.get("final_night_complete"))
+func exclusive_scripted_encounter_active() -> bool:
+    for enemy_value in enemies:
+        var enemy: Dictionary = enemy_value if enemy_value is Dictionary else {}
+        if String(enemy.get("scriptedEncounter", "")) != "" and bool(enemy.get("exclusiveWorldSpawns", false)):
+            return true
+    return false
 
 func tutorial_hostile_capacity(profile: Dictionary) -> int:
     return 3 if profile.is_empty() else (8 if bool(profile.get("finalNight", false)) else (4 if bool(profile.get("readyForWilds", false)) else 6))
 
-func clear_non_rescue_hostiles() -> int:
+func clear_non_scripted_hostiles() -> int:
     var removed := 0
-    for enemy in enemies.duplicate():
-        if rescue_enemy(enemy):
+    for enemy_value in enemies.duplicate():
+        var enemy: Dictionary = enemy_value if enemy_value is Dictionary else {}
+        if String(enemy.get("scriptedEncounter", "")) != "":
             continue
         remove_enemy(enemy, false)
         removed += 1
     return removed
-
-func rescue_enemy(enemy: Dictionary) -> bool:
-    if bool(enemy.get("tutorialRescue", false)):
-        return true
-    var body := enemy.get("body") as Node
-    return body != null and is_instance_valid(body) and bool(body.get_meta("tutorial_rescue_hostile", false))
 
 func configure_scripted_encounter(body: Node, encounter_id: String, phase: String, options := {}) -> void:
     if body == null or not is_instance_valid(body):
@@ -252,6 +260,20 @@ func configure_scripted_encounter(body: Node, encounter_id: String, phase: Strin
     enemy["scriptedTargetName"] = String(options.get("targetName", enemy.get("scriptedTargetName", "")))
     enemy["scriptedTargetNpcId"] = String(options.get("targetNpcId", enemy.get("scriptedTargetNpcId", "")))
     enemy["battleSourceNpcId"] = String(options.get("battleSourceNpcId", enemy.get("battleSourceNpcId", "")))
+    enemy["scriptedSlotId"] = String(options.get("slotId", enemy.get("scriptedSlotId", "")))
+    enemy["scriptedTargetNpcIds"] = options.get("targetNpcIds", enemy.get("scriptedTargetNpcIds", [])).duplicate() if options.get("targetNpcIds", enemy.get("scriptedTargetNpcIds", [])) is Array else []
+    enemy["scriptedTargetPlayer"] = bool(options.get("targetPlayer", enemy.get("scriptedTargetPlayer", true)))
+    enemy["playerCanStartBattle"] = bool(options.get("playerCanStartBattle", enemy.get("playerCanStartBattle", true)))
+    enemy["battleSourceRequiresAnchor"] = bool(options.get("battleSourceRequiresAnchor", enemy.get("battleSourceRequiresAnchor", false)))
+    enemy["battleSourceRadius"] = float(options.get("battleSourceRadius", enemy.get("battleSourceRadius", 0.0)))
+    if options.has("leashAnchor"):
+        enemy["scriptedLeashAnchor"] = options.get("leashAnchor")
+    enemy["scriptedLeashRadius"] = maxf(0.0, float(options.get("leashRadius", enemy.get("scriptedLeashRadius", 0.0))))
+    enemy["scriptedLeashReleaseRadius"] = maxf(0.0, float(options.get("leashReleaseRadius", enemy.get("scriptedLeashReleaseRadius", 0.0))))
+    enemy["scriptedLeashReturning"] = false
+    enemy["scriptedLeashReturnCount"] = 0
+    enemy["scriptedLeashMaxDistance"] = 0.0
+    enemy["exclusiveWorldSpawns"] = bool(options.get("exclusiveWorldSpawns", enemy.get("exclusiveWorldSpawns", false)))
     enemy["damageable"] = bool(options.get("damageable", phase == "battle"))
     enemy["canAttack"] = bool(options.get("canAttack", phase == "battle"))
     enemy["frenzy"] = bool(options.get("frenzy", enemy.get("frenzy", false)))
@@ -274,6 +296,8 @@ func publish_scripted_hostile_meta(enemy: Dictionary) -> void:
     body.set_meta("hostile_damageable", bool(enemy.get("damageable", true)))
     body.set_meta("hostile_can_attack", bool(enemy.get("canAttack", true)))
     body.set_meta("hostile_scripted_battle_started_by", String(enemy.get("scriptedBattleStartedBy", "")))
+    body.set_meta("hostile_scripted_slot_id", String(enemy.get("scriptedSlotId", "")))
+    body.set_meta("hostile_scripted_leash_returning", bool(enemy.get("scriptedLeashReturning", false)))
 
 func maybe_begin_scripted_battle_from_damage(enemy: Dictionary, source: Node, source_kind: String) -> bool:
     var encounter_id := String(enemy.get("scriptedEncounter", ""))
@@ -288,14 +312,14 @@ func maybe_begin_scripted_battle_from_damage(enemy: Dictionary, source: Node, so
 
 func scripted_battle_source_allowed(enemy: Dictionary, source: Node, source_kind: String) -> bool:
     if source == player or source_kind.begins_with("player"):
-        return true
+        return bool(enemy.get("playerCanStartBattle", true))
     var expected_npc_id := String(enemy.get("battleSourceNpcId", ""))
     if expected_npc_id == "":
         return false
     if scripted_battle_source_id(source, source_kind) != expected_npc_id:
         return false
-    if String(enemy.get("scriptedEncounter", "")) == "tutorial_final_rescue":
-        return tutorial_rescue_escort_started() and scripted_source_near_anchor(enemy, source)
+    if bool(enemy.get("battleSourceRequiresAnchor", false)):
+        return scripted_source_near_anchor(enemy, source)
     return true
 
 func scripted_battle_source_id(source: Node, source_kind: String) -> String:
@@ -332,14 +356,6 @@ func begin_scripted_battle(encounter_id: String, source: Node, source_kind: Stri
         last_message = "Hostiles surged toward the fight"
     return changed
 
-func tutorial_rescue_escort_started() -> bool:
-    if main == null:
-        return false
-    var tutorial_system = main.get("tutorial_system")
-    if tutorial_system == null:
-        return false
-    return bool(tutorial_system.get("rescue_escort_started"))
-
 func scripted_source_near_anchor(enemy: Dictionary, source: Node) -> bool:
     var source_3d := source as Node3D
     if source_3d == null or not is_instance_valid(source_3d):
@@ -349,10 +365,50 @@ func scripted_source_near_anchor(enemy: Dictionary, source: Node) -> bool:
 func scripted_origin_near_anchor(enemy: Dictionary, origin: Vector3) -> bool:
     var anchor: Vector3 = enemy.get("circleAnchor", enemy.get("spawnOrigin", origin))
     var radius := maxf(CELL * 2.2, float(enemy.get("circleRadius", CELL * 3.8)))
-    var threshold := maxf(CELL * 8.5, radius + CELL * 3.0)
-    if String(enemy.get("scriptedEncounter", "")) == "tutorial_final_rescue":
-        threshold = maxf(threshold, CELL * 26.0)
+    var configured_radius := float(enemy.get("battleSourceRadius", 0.0))
+    var threshold := configured_radius if configured_radius > 0.0 else maxf(CELL * 8.5, radius + CELL * 3.0)
     return flat_distance_squared(origin, anchor) <= threshold * threshold
+
+func scripted_leash_state(enemy: Dictionary, origin: Vector3) -> Dictionary:
+    var encounter_id := String(enemy.get("scriptedEncounter", ""))
+    var radius := float(enemy.get("scriptedLeashRadius", 0.0))
+    if encounter_id == "" or String(enemy.get("scriptedPhase", "")) != "battle" or radius <= 0.0:
+        return {"enabled": false, "returning": false}
+    var anchor_value = enemy.get("scriptedLeashAnchor", enemy.get("circleAnchor", enemy.get("spawnOrigin", origin)))
+    if not (anchor_value is Vector3):
+        return {"enabled": false, "returning": false}
+    var anchor: Vector3 = anchor_value
+    var distance := sqrt(flat_distance_squared(origin, anchor))
+    var previous_max := float(enemy.get("scriptedLeashMaxDistance", 0.0))
+    enemy["scriptedLeashMaxDistance"] = maxf(previous_max, distance)
+    scripted_leash_max_distance = maxf(scripted_leash_max_distance, distance)
+    var release_radius := float(enemy.get("scriptedLeashReleaseRadius", 0.0))
+    if release_radius <= 0.0 or release_radius >= radius:
+        release_radius = radius * 0.72
+    var was_returning := bool(enemy.get("scriptedLeashReturning", false))
+    var returning := was_returning
+    if not returning and distance >= radius * 0.92:
+        returning = true
+        enemy["scriptedLeashReturnCount"] = int(enemy.get("scriptedLeashReturnCount", 0)) + 1
+        scripted_leash_returns += 1
+    elif returning and distance <= release_radius:
+        returning = false
+    enemy["scriptedLeashReturning"] = returning
+    var direction := anchor - origin
+    direction.y = 0.0
+    if direction.length_squared() > 0.001:
+        direction = direction.normalized()
+    if returning != was_returning:
+        publish_scripted_hostile_meta(enemy)
+    return {
+        "enabled": true,
+        "returning": returning,
+        "anchor": anchor,
+        "radius": radius,
+        "releaseRadius": release_radius,
+        "distance": distance,
+        "direction": direction
+    }
 
 func hostile_available_for_npc_combat(body: Node, origin: Vector3) -> bool:
     var enemy := enemy_for_body(body)
@@ -361,12 +417,7 @@ func hostile_available_for_npc_combat(body: Node, origin: Vector3) -> bool:
     return hostile_is_active_combat_threat(enemy, origin)
 
 func hostile_is_active_combat_threat(enemy: Dictionary, origin: Vector3) -> bool:
-    var encounter_id := String(enemy.get("scriptedEncounter", ""))
     var scripted_phase := String(enemy.get("scriptedPhase", ""))
-    if encounter_id == "tutorial_final_rescue":
-        if scripted_phase == "battle":
-            return true
-        return tutorial_rescue_escort_started() and scripted_origin_near_anchor(enemy, origin)
     if scripted_phase != "":
         return scripted_phase == "battle"
     if bool(enemy.get("daylightImmune", false)):
@@ -908,13 +959,17 @@ func update_enemy(enemy: Dictionary, delta: float, night_factor: float) -> void:
     to_target.y = 0.0
     var distance: float = to_target.length()
     var direction: Vector3 = to_target.normalized() if distance > 0.001 else Vector3.ZERO
-    var active_threat: bool = night_factor > 0.18 or bool(enemy.get("daylightImmune", false))
+    var scripted_leash := scripted_leash_state(enemy, body.global_position)
+    var leash_returning := bool(scripted_leash.get("returning", false))
+    var active_threat: bool = scripted_phase == "battle" or night_factor > 0.18 or bool(enemy.get("daylightImmune", false))
     var aware: bool = bool(enemy.get("aware", false))
     var awareness_delay: float = maxf(0.0, float(enemy.get("awarenessDelay", 0.0)) - delta)
     enemy["awarenessDelay"] = awareness_delay
     if not active_threat:
         aware = false
-    elif aware and distance > HostileRulesScript.leash_radius(enemy):
+    elif leash_returning:
+        aware = true
+    elif aware and scripted_phase == "" and distance > HostileRulesScript.leash_radius(enemy):
         aware = false
     elif awareness_delay <= 0.0 and not aware and distance <= HostileRulesScript.awareness_radius(enemy):
         aware = true
@@ -935,25 +990,32 @@ func update_enemy(enemy: Dictionary, delta: float, night_factor: float) -> void:
     body.set_meta("hostile_frenzy", frenzy)
     var separation_direction := hostile_separation_direction(body, variant)
     if aware and active_threat:
-        var move_direction: Vector3 = direction
+        var move_direction: Vector3 = scripted_leash.get("direction", direction) if leash_returning else direction
         var speed: float = 2.35 + night_factor * 0.95
         if variant == "rift":
             speed = 1.85 + night_factor * 0.70
         elif variant == "skitter":
             speed = 2.85 + night_factor * 0.90
-        if variant == "seer" and distance < 9.0:
+        if not leash_returning and variant == "seer" and distance < 9.0:
             move_direction *= -1.0
-        elif variant == "seer" and distance <= 28.0:
+        elif not leash_returning and variant == "seer" and distance <= 28.0:
             speed *= 0.18
-        if separation_direction.length_squared() > 0.001:
+        if not leash_returning and separation_direction.length_squared() > 0.001:
             move_direction = (move_direction + separation_direction * 1.45).normalized()
         move_distance = horizontal_move(body, move_direction * speed * delta, variant, frenzy)
-        if move_distance <= 0.001 and separation_direction.length_squared() > 0.001:
+        if move_distance <= 0.001 and leash_returning:
+            for steering_angle in [PI * 0.22, -PI * 0.22, PI * 0.42, -PI * 0.42]:
+                var steered_direction := move_direction.rotated(Vector3.UP, steering_angle)
+                move_distance = horizontal_move(body, steered_direction * speed * delta * 0.9, variant, frenzy)
+                if move_distance > 0.001:
+                    move_direction = steered_direction
+                    break
+        elif move_distance <= 0.001 and separation_direction.length_squared() > 0.001:
             move_distance = horizontal_move(body, separation_direction * speed * delta * 0.9, variant, frenzy)
         if move_direction.length_squared() > 0.001:
             facing_direction = move_direction.normalized()
         var light_safety: float = main.light_safety_at(body.global_position, false)
-        if light_safety > 0.34 and variant != "rift" and not frenzy:
+        if not leash_returning and light_safety > 0.34 and variant != "rift" and not frenzy:
             move_distance += horizontal_move(body, -direction * delta * (5.0 + light_safety * 4.0), variant, frenzy)
             if direction.length_squared() > 0.001:
                 facing_direction = -direction
@@ -1070,10 +1132,9 @@ func update_scripted_enemy(enemy: Dictionary, body: StaticBody3D, delta: float, 
 
 func closest_hostile_target(origin: Vector3, enemy: Dictionary) -> Dictionary:
     var best := {}
-    if player != null and is_instance_valid(player):
+    if player != null and is_instance_valid(player) and bool(enemy.get("scriptedTargetPlayer", true)):
         best = hostile_target_row(player, "player", origin, player.global_position, player.global_position + Vector3(0.0, 0.8, 0.0), "player")
-    var encounter_id := String(enemy.get("scriptedEncounter", ""))
-    var battle_source_npc_id := String(enemy.get("battleSourceNpcId", ""))
+    var target_npc_ids: Array = enemy.get("scriptedTargetNpcIds", []) if enemy.get("scriptedTargetNpcIds", []) is Array else []
     var npc_system = main.get("npc_system") if main != null else null
     if npc_system == null:
         return best
@@ -1091,7 +1152,7 @@ func closest_hostile_target(origin: Vector3, enemy: Dictionary) -> Dictionary:
         if kind != "npc":
             continue
         var npc_id := String(entry.get("id", npc_body.name))
-        if encounter_id == "tutorial_final_rescue" and npc_id != battle_source_npc_id:
+        if not target_npc_ids.is_empty() and not target_npc_ids.has(npc_id):
             continue
         var row := hostile_target_row(npc_body, kind, origin, npc_body.global_position, npc_body.global_position + Vector3(0.0, 0.95, 0.0), String(entry.get("id", npc_body.name)))
         if best.is_empty() or float(row.get("distance", INF)) < float(best.get("distance", INF)):
@@ -1178,15 +1239,15 @@ func remove_enemy(enemy: Dictionary, drop := true) -> void:
         last_message = "Hostile left"
 func stats() -> Dictionary:
     var projectile_stats: Dictionary = projectile_system.stats() if projectile_system else {}
-    var rescue_count := 0
+    var scripted_count := 0
     for enemy in enemies:
-        if rescue_enemy(enemy):
-            rescue_count += 1
+        if String(enemy.get("scriptedEncounter", "")) != "":
+            scripted_count += 1
     var spacing := hostile_spacing_summary()
     var result := {
         "enemies": enemies.size(),
-        "tutorialRescueEnemies": rescue_count,
-        "nonRescueEnemies": maxi(0, enemies.size() - rescue_count),
+        "scriptedEnemies": scripted_count,
+        "nonScriptedEnemies": maxi(0, enemies.size() - scripted_count),
         "hostileSpacingMinDistance": spacing.get("minDistance", 0.0),
         "hostileSpacingViolations": spacing.get("violations", 0),
         "defeated": defeated,
@@ -1194,6 +1255,8 @@ func stats() -> Dictionary:
         "hostileNpcTargetAttacks": npc_target_attacks,
         "hostileNpcTargetProjectiles": npc_target_projectiles,
         "scriptedBattleStarts": scripted_battle_starts,
+        "scriptedLeashReturns": scripted_leash_returns,
+        "scriptedLeashMaxDistance": scripted_leash_max_distance,
         "scriptedHostilePhases": scripted_hostile_phase_summary()
     }
     for key in projectile_stats.keys():

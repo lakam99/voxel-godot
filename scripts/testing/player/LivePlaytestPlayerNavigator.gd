@@ -396,7 +396,6 @@ func talk_to(npc_body: Node3D, label: String, options := {}) -> Dictionary:
 	var timeout_seconds := float(options.get("timeout", options.get("timeoutSeconds", 18.0)))
 	var started_at := _elapsed()
 	var moving_target_attempts := maxi(1, int(options.get("movingTargetAttempts", 3)))
-	var moving_target_distance := float(options.get("movingTargetReplanDistance", CELL * 0.75))
 	var attempts: Array[Dictionary] = []
 	var last_result := _result(false, "action_pose_missing", "talk_not_attempted", label, npc_body.global_position)
 	for attempt_index in range(moving_target_attempts):
@@ -406,10 +405,17 @@ func talk_to(npc_body: Node3D, label: String, options := {}) -> Dictionary:
 		if remaining <= 0.25:
 			break
 		var target_before := npc_body.global_position
+		# A valid route pose can still have its eye ray occluded by a slope or prop.
+		# Each retry uses a wider standoff so a stationary NPC gets alternate real
+		# movement/aim attempts instead of repeating the same obstructed cell.
+		var retry_standoff := float(options.get("minActionPoseDistance", 0.0))
+		if attempt_index > 0:
+			retry_standoff = maxf(retry_standoff, CELL * (1.0 + 0.55 * float(attempt_index - 1)))
 		var pose := await go_to_interaction_pose(npc_body, "talk", {
 			"label": label,
 			"timeout": remaining,
-			"stopDistance": float(options.get("poseStopDistance", CELL * 0.75))
+			"stopDistance": float(options.get("poseStopDistance", CELL * 0.75)),
+			"minActionPoseDistance": retry_standoff
 		})
 		if npc_body == null or not is_instance_valid(npc_body):
 			return _result(false, "target_missing", "npc_freed_during_talk", label, target_before, { "pose": pose.get("proof", {}), "talkAttempts": attempts })
@@ -440,7 +446,7 @@ func talk_to(npc_body: Node3D, label: String, options := {}) -> Dictionary:
 				await _wait_physics_frames(int(options.get("postActionFrames", 24)))
 				return _result(true, "talk_clicked", "", label, npc_body.global_position, { "hit": hit, "pose": pose.get("proof", {}), "talkAttempts": attempts })
 			last_result = _result(false, "raycast_miss", "npc_not_hit", label, target_after, { "hit": hit, "pose": pose.get("proof", {}) })
-		if moved_distance <= moving_target_distance or attempt_index + 1 >= moving_target_attempts:
+		if attempt_index + 1 >= moving_target_attempts:
 			break
 		await _wait_physics_frames(2)
 	var proof: Dictionary = last_result.get("proof", {}) if last_result.get("proof", {}) is Dictionary else {}
@@ -928,6 +934,11 @@ func _interaction_pose_candidates(target: Vector3, action_kind: String, options 
 			if bool(candidate_closest.get("found", false)) and candidate_closest.get("position") is Vector3:
 				candidate = candidate_closest.get("position")
 			_add_standable_cell_position(result, seen, entry, _world_cell(candidate), allow_outside, moving_home, target_cell, target, max_pose_distance)
+	var min_pose_distance := maxf(0.0, float(options.get("minActionPoseDistance", 0.0)))
+	if min_pose_distance > 0.0:
+		for index in range(result.size() - 1, -1, -1):
+			if _flat_distance(target, result[index]) < min_pose_distance:
+				result.remove_at(index)
 	result = _filter_interaction_pose_home_region(result, pose_home, pose_home_region)
 	result.sort_custom(func(a: Vector3, b: Vector3):
 		var a_target_distance := _flat_distance(target, a)

@@ -13,6 +13,7 @@ const NpcPerceptionServiceScript := preload("res://scripts/npc_ai/behavior/NpcPe
 const NpcSemanticGoalPlannerScript := preload("res://scripts/npc_ai/behavior/NpcSemanticGoalPlanner.gd")
 const NpcRouteMovementControllerScript := preload("res://scripts/npc_ai/movement/NpcRouteMovementController.gd")
 const NpcRouteAuthorityV2Script := preload("res://scripts/npc_ai/routing/NpcRouteAuthorityV2.gd")
+const NpcSimulationLodServiceScript := preload("res://scripts/npc_ai/lifecycle/NpcSimulationLodService.gd")
 const HostileSystemScript := preload("res://scripts/HostileSystem.gd")
 const NpcCombatScript := preload("res://scripts/NpcCombat.gd")
 const NpcConstantsScript := preload("res://scripts/npc_ai/NpcConstants.gd")
@@ -255,6 +256,12 @@ class FakeNpcSystem:
 	var fighter_target_updates := 0
 	var test_route_authority_v2 = null
 
+	func safe_place_npc(body: CharacterBody3D, target: Vector3, _profile = null, _reason := "test") -> Dictionary:
+		if body == null:
+			return {"ok": false, "reason": "missing_body"}
+		body.global_position = target
+		return {"ok": true, "position": target, "reason": "test_safe_placement"}
+
 	func update_npc_needs(_entry: Dictionary, _delta: float, _night_factor: float) -> void:
 		pass
 
@@ -447,6 +454,7 @@ func cases() -> Array[Dictionary]:
 		case("npc_behavior_guard_intercept_selection_is_incremental", "day", "test_guard_intercept_selection_is_incremental"),
 		case("npc_behavior_guard_pending_intercept_does_not_submit_stale_route", "day", "test_guard_pending_intercept_does_not_submit_stale_route"),
 		case("npc_behavior_daylight_inactive_hostile_not_selected", "day", "test_daylight_inactive_hostile_not_selected"),
+		case("npc_behavior_scripted_hostile_leash_returns_without_named_logic", "day", "test_scripted_hostile_leash_returns_without_named_logic"),
 		case("npc_behavior_day_idle_semantic_anchor", "day", "test_day_idle_semantic_anchor"),
 		case("npc_behavior_dusk_civilian_returns_before_night", "transition", "test_dusk_civilian_returns_before_night"),
 		case("npc_behavior_dusk_guard_reports_to_duty", "transition", "test_dusk_guard_reports_to_duty"),
@@ -469,6 +477,7 @@ func cases() -> Array[Dictionary]:
 		case("npc_behavior_action_interrupt_releases_resources", "day", "test_action_interrupt_releases_resources"),
 		case("npc_behavior_scripted_order_priority_and_cancel", "day", "test_scripted_order_priority_and_cancel"),
 		case("npc_behavior_scripted_order_go_home_uses_route_stack", "day", "test_scripted_order_go_home_uses_route_stack"),
+		case("npc_behavior_route_order_promotes_abstract_actor", "day", "test_route_order_promotes_abstract_actor"),
 		case("npc_behavior_scripted_go_home_arrival_clears_cached_motion", "day", "test_scripted_go_home_arrival_clears_cached_motion"),
 		case("npc_behavior_scripted_go_home_hold_arrival_stays_home", "day", "test_scripted_go_home_hold_arrival_stays_home"),
 		case("npc_behavior_scripted_order_normal_profile_speed", "day", "test_scripted_order_normal_profile_speed"),
@@ -930,6 +939,37 @@ func test_daylight_inactive_hostile_not_selected(_mode: String) -> Dictionary:
 		{ "ordinaryDayAvailable": ordinary_day_available, "immuneDayAvailable": immune_day_available, "battleDayAvailable": battle_day_available, "ordinaryNightAvailable": ordinary_night_available }
 	)
 
+func test_scripted_hostile_leash_returns_without_named_logic(_mode: String) -> Dictionary:
+	var hostile_system = HostileSystemScript.new()
+	var enemy := {
+		"scriptedEncounter": "generic_story_encounter",
+		"scriptedPhase": "battle",
+		"scriptedLeashAnchor": Vector3.ZERO,
+		"scriptedLeashRadius": CELL * 12.0,
+		"scriptedLeashReleaseRadius": CELL * 8.0,
+		"scriptedLeashReturning": false
+	}
+	var outside := hostile_system.scripted_leash_state(enemy, Vector3(CELL * 12.1, 0.0, 0.0))
+	var inside := hostile_system.scripted_leash_state(enemy, Vector3(CELL * 7.9, 0.0, 0.0))
+	var unconfigured := hostile_system.scripted_leash_state({
+		"scriptedEncounter": "generic_story_encounter",
+		"scriptedPhase": "battle"
+	}, Vector3(CELL * 40.0, 0.0, 0.0))
+	var outside_direction: Vector3 = outside.get("direction", Vector3.ZERO)
+	var passed := bool(outside.get("enabled", false)) \
+		and bool(outside.get("returning", false)) \
+		and outside_direction.is_equal_approx(Vector3.LEFT) \
+		and not bool(inside.get("returning", true)) \
+		and int(enemy.get("scriptedLeashReturnCount", 0)) == 1 \
+		and not bool(unconfigured.get("enabled", true))
+	hostile_system.free()
+	return outcome(
+		passed,
+		"outside=%s inside=%s returnCount=%d unconfigured=%s" % [str(outside), str(inside), int(enemy.get("scriptedLeashReturnCount", 0)), str(unconfigured)],
+		["generic_scripted_leash_enters_before_boundary", "leash_releases_inside_hysteresis", "unconfigured_hostiles_unchanged"],
+		{"outside": outside, "inside": inside, "unconfigured": unconfigured}
+	)
+
 func test_day_idle_semantic_anchor(_mode: String) -> Dictionary:
 	var source := read_text("res://scripts/npc_ai/behavior/NpcSemanticGoalPlanner.gd")
 	var town_anchor_start := source.find("func town_anchor_candidates")
@@ -1138,6 +1178,36 @@ func test_scripted_order_go_home_uses_route_stack(_mode: String) -> Dictionary:
 	var passed: bool = String(home_intent.get("kind", "")) == "home" and bool(home_intent.get("movingHome", false)) and int(home_intent.get("priority", 0)) == 180 and not body.has_meta("npc_scripted_target") and String(order.get("state", "")) in ["ACTIVE", "ARRIVED"]
 	fake_npc.queue_free()
 	return outcome(passed, "v2=%s targetMeta=%s order=%s" % [JSON.stringify(home_intent), str(body.has_meta("npc_scripted_target")), JSON.stringify(order)], ["go_home_uses_v2_home_route", "scripted_home_priority_preserved", "go_home_no_scripted_target", "order_state_recorded"], { "order": order, "homeIntent": home_intent })
+
+func test_route_order_promotes_abstract_actor(_mode: String) -> Dictionary:
+	var fake_npc := FakeNpcSystem.new()
+	var lod := NpcSimulationLodServiceScript.new()
+	lod.setup(null, fake_npc, null)
+	var entry_data := entry("Villager", {"id": "abstract_order_actor", "position": Vector3(8.1, 0.0, 0.0)})
+	var body := entry_data.get("body") as CharacterBody3D
+	entry_data["simulationLod"] = "abstract"
+	entry_data["abstractSimulated"] = true
+	entry_data["scriptedOrder"] = {
+		"id": "abstract_order_actor:go_to:1",
+		"kind": "go_to",
+		"state": "PENDING",
+		"usesRouteStack": true
+	}
+	body.visible = false
+	body.set_meta("npc_simulation_lod", "abstract")
+	lod.register_actor(entry_data)
+	var result: Dictionary = lod.update_actor(entry_data, 1.0 / 60.0, Vector3.INF, {"allowStationaryAbstract": true})
+	var passed := String(result.get("state", "")) == "active" \
+		and String(entry_data.get("simulationLod", "")) == "active" \
+		and not bool(entry_data.get("abstractSimulated", true)) \
+		and body.visible
+	fake_npc.queue_free()
+	return outcome(
+		passed,
+		"result=%s lod=%s visible=%s" % [JSON.stringify(result), String(entry_data.get("simulationLod", "")), str(body.visible)],
+		["route_order_promotes_abstract_actor", "accepted_order_can_service_motion"],
+		{"result": result, "simulationLod": entry_data.get("simulationLod", ""), "visible": body.visible}
+	)
 
 func test_scripted_go_home_arrival_clears_cached_motion(_mode: String) -> Dictionary:
 	var fake_npc := FakeNpcSystem.new()

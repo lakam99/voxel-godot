@@ -1,190 +1,128 @@
-# NPC Pathfinding Manifesto
+# NPC Pathfinding Stability Manifesto
 
-## The Situation
+## The Current Situation
 
-This game was progressing well until NPC pathfinding became the dominant blocker. For roughly two weeks, the project has been stuck in a loop: one NPC gets moving, another stops; one route passes, another stalls; one screenshot looks correct, then live gameplay contradicts it.
+NPC pathfinding is stable. The replacement work that this manifesto originally demanded has been completed, and the production route stack is now established infrastructure.
 
-That pattern is the signal. This is not a Mira bug, a Niko bug, a Rowan bug, or a single bad seed. The current NPC pathfinding approach is not working as a production system.
+Pathfinding is no longer a general project priority, an invitation to continue iterating, or a subsystem to improve opportunistically. Future agents must not read the historical pathfinding plans as an active mandate. Those documents remain useful context only when a task is specifically and expressly about pathfinding.
 
-The game needs reliable NPC autonomy more than it needs another patch around today's stuck actor.
+The priority now is preservation.
 
-## What Is Not Working
+## The Prime Directive
 
-The existing system has too many authorities. Schedule logic, behavior planning, route planning, navmesh readiness, generated-cell fallbacks, traffic reservations, door traversal, home settlement, scripted tutorial orders, and movement recovery can all influence whether an NPC moves.
+Leave pathfinding alone unless the assigned work is specifically and expressly pathfinding work.
 
-When an NPC stands still, the system cannot give one clear answer:
+Use a ten-thousand-foot pole. Do not refactor, simplify, modernize, optimize, clean up, reorganize, rename, consolidate, or otherwise alter stable pathfinding code while working on another feature or bug.
 
-- Is the NPC waiting by schedule?
-- Did behavior fail to choose a goal?
-- Did route planning fail?
-- Is nav data still pending?
-- Is a door blocking the route?
-- Is traffic reservation holding it?
-- Is the route considered arrived too early?
-- Is the NPC inside, outside, or stuck on a threshold?
+In particular:
 
-If the system cannot answer that question clearly, it cannot be trusted.
+- Do not make opportunistic pathfinding changes while touching NPC gameplay, world generation, loading, performance, doors, structures, or the tutorial.
+- Do not replace a working pathfinding contract with an approach that appears cleaner in isolation.
+- Do not change route behavior merely because a synthetic test, static inspection, or local code preference suggests an improvement.
+- Do not widen a task into pathfinding work because pathfinding is adjacent to the requested system.
+- Do not silently fix a suspected pathfinding regression encountered during unrelated work.
+- Do not weaken, bypass, or rewrite pathfinding tests to accommodate a change elsewhere.
 
-## The Principle
+Passing pathfinding code is protected code. Stability is more valuable than speculative improvement.
 
-Live gameplay is the source of truth.
+## What Is Protected
 
-A test scene, synthetic setup, metadata flag, direct helper call, or isolated happy-path screenshot cannot overrule what happens when the player boots the game, clicks New Game, and watches NPCs fail to live their lives.
+The protected pathfinding surface includes, but is not limited to:
 
-The pathfinding system must serve the game, not the test harness.
+- navigation topology and publication;
+- route planning, proof, commitment, leasing, repair, and cancellation;
+- route readiness and failure classifications;
+- collision-backed route validation;
+- NPC route-following and movement-controller contracts;
+- door portal and threshold traversal;
+- traffic reservations and crossing ownership;
+- pathfinding recovery and fallback behavior;
+- pathfinding-specific save, streaming, observation, and test contracts;
+- `scripts/NpcPathing.gd` and the navigation, routing, movement, interaction, and traffic systems under `scripts/npc_ai/`.
 
-## The Line In The Sand
+NPC profiles, schedules, dialogue, quests, jobs, combat, and presentation may still be changed when they are in scope, but those changes must consume the established route authority through its existing public contracts. They must not alter pathfinding internals as an incidental implementation detail.
 
-No more named-NPC patches.
+If a requested feature appears to require a protected change, stop and explain why. Obtain explicit agreement that pathfinding work is now in scope before editing it.
 
-No more fixes that make Mira move but leave Niko idle.
+## What Counts As Express Authorization
 
-No more fixes that make Niko forage but leave Rowan trapped indoors.
+A broad request to work on NPCs, terrain, a town, doors, loading, performance, or world generation is not authorization to change pathfinding.
 
-No more "arrived" states that mean an NPC is on a porch, in a doorway, or near a wall.
+Authorization must specifically identify pathfinding, navigation, routing, route execution, or a confirmed regression in that layer as work to be performed. When intent is ambiguous, preserve the subsystem and ask before changing it.
 
-No more route success based primarily on metadata.
+Read-only diagnosis is allowed when necessary to determine whether pathfinding is involved. Diagnosis does not authorize a fix.
 
-No more broad claims from narrow acceptance tests.
+## The World-Generation Firewall
 
-No more expanding a stack that cannot explain its own failures.
+World generation and pathfinding are tightly coupled through terrain occupancy, collision, structures, towns, doors, chunk streaming, and navigation publication. Any work that can affect generated geometry or those contracts must treat pathfinding verification as a hard gate.
 
-## The Replacement Standard
+Before world-generation implementation begins:
 
-The project needs one NPC route authority.
+1. Record the current branch, working-tree state, seed, and relevant baseline behavior.
+2. Run the applicable pathfinding regression suites against the unchanged baseline.
+3. Include a real headed gameplay run when generated terrain, towns, homes, doors, collision, streaming, or navigation publication may be affected.
+4. Inspect the reports, traces, progress files, and screenshots rather than trusting a result boolean alone.
 
-Behavior may choose intent:
+At minimum, use the established NPC regression commands relevant to the change, including:
 
-- `go_home`
-- `go_work`
-- `forage`
-- `guard`
-- `idle`
+```powershell
+.\tools\npc\run-npc-contract-tests.ps1 -TimeMode Both
+.\tools\npc\run-all-npc-tests.ps1 -TimeMode Both
+```
 
-But one route authority must decide whether that intent can become movement.
+Use the applicable live runner as well, such as the real tutorial playthrough or town job/home visual playtests, when the affected generated-world behavior is exercised there.
 
-That authority must own:
+If the baseline exposes any pathfinding regression, no implementation work begins. Stop, report the regression, and discuss it with the user first.
 
-- route planning;
-- collision validation;
-- dynamic blocker response;
-- door portal traversal;
-- threshold clearance;
-- route commitment;
-- route cancellation;
-- route failure reasons.
+After each meaningful world-generation change, and again before acceptance, rerun the applicable pathfinding regression coverage using the same baseline conditions. Add fresh random generated-town seeds where practical, while retaining any known failing seed for reproduction.
 
-The movement motor should only follow committed route segments. It should not invent route semantics. Behavior should not guess around route failures. Tests should not certify success by bypassing the route authority.
+If a pathfinding regression appears after work has begun:
 
-## Collision Is The Contract
+- Stop further implementation immediately.
+- Do not patch pathfinding.
+- Do not add a fallback, special case, teleport, doctored vector, named-NPC exception, or test-only bypass.
+- Do not reinterpret the regression as acceptable collateral damage.
+- Preserve the failing seed and evidence.
+- Report and discuss the regression before any work resumes.
 
-A route is not real until the game can prove it physically.
+Resuming with a pathfinding fix requires explicit direction that expands the task to include pathfinding. Until then, the correct action is to leave the protected subsystem untouched.
 
-NPC pathfinding must be collision-based. It should not guess whether a route is blocked. Before committing an NPC to a route, the route authority must be able to probe the path with the actor's real movement footprint and answer:
+## Regression Reporting Is Mandatory
 
-- Can the NPC stand here?
-- Can the NPC move from this point to the next point?
-- Does this segment collide with terrain, walls, fences, props, doors, or other blocking bodies?
-- If a door is involved, can it open, provide clearance, allow crossing, and close after the NPC clears it?
-- If the route is blocked dynamically, can the NPC wait, replan, or choose a valid fallback without poisoning the goal forever?
+Any suspected pathfinding regression must be reported with:
 
-If the answer is not known, the route is not ready.
+- the exact command used;
+- the seed and relevant setup;
+- the report and artifact paths;
+- screenshots, trace, or timeline evidence when behavior is visual;
+- the expected behavior and actual behavior;
+- whether the failure exists on the unchanged baseline;
+- the earliest known change after which it appears;
+- a clear statement of what each test does and does not prove.
 
-## Door And Home Rules
+Mocked, synthetic, direct-service, metadata-only, source-scan, helper-call, and teleport-driven tests may support diagnosis, but they are not live gameplay acceptance evidence.
 
-Homes and doors are not metadata achievements.
+Do not conceal a regression by continuing unrelated work. Do not start remedial work until the regression and the proposed scope have been discussed.
 
-An NPC is home only when the body reaches a strict interior location, clears the threshold, and is no longer occupying the door sweep or porch edge.
+## If Pathfinding Work Is Explicitly Authorized
 
-A door route must prove the visible sequence:
+The established production contracts remain mandatory:
 
-1. Approach the door.
-2. Open the door before crossing.
-3. Cross through valid clearance.
-4. Reach a strict interior or exterior target.
-5. Clear the threshold.
-6. Close the door when safe.
+- One route authority decides whether intent can become movement.
+- Committed routes are backed by real collision and actor-footprint proof.
+- Route readiness distinguishes ready, pending navigation data, pending budget, dynamic blockage, static unreachability, and invalid goals.
+- Doors open before crossing, provide real clearance, retain crossing ownership, and close after clearance.
+- An NPC is indoors only at a strict interior location, not on a porch, threshold, wall edge, or roof.
+- Named NPCs do not receive routing privileges, special movement logic, or actor-specific fallbacks.
+- Production movement does not use teleports, doctored vectors, hand-authored offsets, partial endpoint success, or direct loops that bypass route authority.
+- Live gameplay is the source of truth, and headed acceptance must agree with automated coverage.
 
-Porches, thresholds, exterior wall edges, roofs, and "close enough" cells do not count as inside.
-
-## Acceptance Must Match The Game
-
-The next acceptance target should be a real-boot town autonomy matrix, not a single NPC screenshot.
-
-The gate should boot the actual game, click New Game, avoid gameplay-affecting test flags, complete the relevant tutorial flow through player input, sleep, and observe the following morning.
-
-For each major NPC, the report must show:
-
-- schedule state;
-- behavior intent;
-- target;
-- route status;
-- route reason;
-- route authority proof;
-- distance moved;
-- door state if applicable;
-- final gameplay-visible state.
-
-At minimum, the matrix should cover:
-
-- Mira returning home after the knock and behaving correctly the next morning.
-- Niko leaving or starting outside and actively foraging when that is their role.
-- Rowan leaving home or moving to the expected work behavior.
-- Guards remaining on guard when appropriate.
-- Non-guards returning indoors at night.
-
-Standing still is acceptable only if the report gives a truthful gameplay reason.
-
-## What To Keep
-
-Do not throw away useful game data just because the route stack is suspect.
-
-Likely reusable pieces include:
-
-- NPC profiles;
-- roles and schedules;
-- home records;
-- town structure metadata;
-- door metadata;
-- semantic intent selection;
-- character motor movement;
-- visual NPC bodies and animation hooks;
-- existing live playtest lessons.
-
-The problem is not that NPCs have homes, jobs, doors, or goals. The problem is that too many systems compete to interpret and execute those facts.
-
-## What To Retire
-
-The current route decision stack should be treated as legacy until proven otherwise.
-
-Any pathfinding component that cannot clearly answer "why is this NPC not moving?" should either be replaced or demoted behind the new authority.
-
-Fallbacks must not become normal behavior. Recovery code must not define the main route contract.
-
-## Definition Of Done
-
-NPC pathfinding is not done when one NPC reaches one destination.
-
-It is done when, in real gameplay:
-
-- NPCs consistently choose appropriate goals;
-- NPCs move with purpose;
-- NPCs enter and exit homes through real doors;
-- foragers forage;
-- workers work;
-- guards guard;
-- night behavior and morning behavior both function;
-- blocked routes produce clear, actionable reasons;
-- live playtests and manual gameplay tell the same story.
-
-Until then, the project should prioritize replacing the NPC pathfinding authority over adding more gameplay features that depend on it.
+Read the controlling pathfinding plans, invariants, prohibited shortcuts, and test protocols before making any authorized change. Keep the change narrowly scoped and prove that the rest of the stable system remains intact.
 
 ## The Mandate
 
-Stop patching symptoms.
+Pathfinding is stable. Protect it.
 
-Build one collision-backed route authority.
+Do not continue the old replacement campaign. Do not touch pathfinding as collateral work. Test it whenever world generation could affect it, and treat any regression as a stop-work event requiring evidence, disclosure, and discussion.
 
-Make live gameplay and automated playtests agree.
-
-Then the game can move forward again.
+When in doubt, keep the ten-thousand-foot pole between the task and the pathfinding code.

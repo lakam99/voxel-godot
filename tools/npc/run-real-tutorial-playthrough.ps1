@@ -80,7 +80,7 @@ $commit = (& git -C $projectPath rev-parse HEAD).Trim()
 $focusedVisualAcceptance = $Visible -and ($MiraHomeOnly -or $MorningOutsideOnly -or $FinalRescue)
 $dayOneVisualAcceptance = $Visible -and $DayOne
 $fullPlayerPovVisible = $Visible -and (-not $MiraHomeOnly) -and (-not $MorningOutsideOnly)
-$godModeEnabled = $GodMode -or $FinalRescue
+$godModeEnabled = [bool]$GodMode
 
 $env:VOXEL_PLAYTEST = "1"
 $env:VOXEL_TEST_SEED = $Seed
@@ -93,6 +93,7 @@ $env:VOXEL_REAL_TUTORIAL_MORNING_OUTSIDE_ONLY = if ($MorningOutsideOnly) { "1" }
 $env:VOXEL_REAL_TUTORIAL_DAY_ONE = if ($DayOne) { "1" } else { "0" }
 $env:VOXEL_REAL_TUTORIAL_FINAL_RESCUE = if ($FinalRescue) { "1" } else { "0" }
 $env:VOXEL_REAL_TUTORIAL_GOD_MODE = if ($godModeEnabled) { "1" } else { "0" }
+$env:VOXEL_REAL_TUTORIAL_REAL_BOOT = "1"
 $env:VOXEL_REAL_TUTORIAL_RUN_TOKEN = $runToken
 $env:VOXEL_REAL_TUTORIAL_WATCHDOG_SECONDS = [string]$TimeoutSeconds
 $env:VOXEL_GIT_BRANCH = $branch
@@ -169,7 +170,11 @@ function Set-ReportDiagnostics([int]$ExitCode, [string]$StopReason) {
         $fallback | ConvertTo-Json -Depth 16 | Set-Content -LiteralPath $ReportPath
         return
     }
-    $report = Get-Content -LiteralPath $ReportPath -Raw | ConvertFrom-Json
+    # Godot serializes Vector INF sentinels as 1e99999. Windows PowerShell's
+    # legacy JSON parser rejects that otherwise-valid report number, so retain
+    # its sentinel meaning with the largest exponent the parser accepts.
+    $reportJson = (Get-Content -LiteralPath $ReportPath -Raw).Replace("-1e99999", "-1e308").Replace("1e99999", "1e308")
+    $report = $reportJson | ConvertFrom-Json
     $report | Add-Member -Force -NotePropertyName forbiddenCallSelfScan -NotePropertyValue $staticScan
     $report | Add-Member -Force -NotePropertyName scriptErrorScan -NotePropertyValue $scriptScan
     $report | Add-Member -Force -NotePropertyName processExitCode -NotePropertyValue $ExitCode
@@ -207,7 +212,7 @@ function Set-ReportDiagnostics([int]$ExitCode, [string]$StopReason) {
     $report | ConvertTo-Json -Depth 24 | Set-Content -LiteralPath $ReportPath
 }
 
-$godotArgs = @("--fixed-fps", "60", "--resolution", "1280x720", "--path", $projectPath, "--scene", "res://scenes/testing/npc/NpcRealTutorialPlaythroughTest.tscn")
+$godotArgs = @("--fixed-fps", "60", "--resolution", "1280x720", "--path", $projectPath)
 if (-not $Visible) {
     $godotArgs = @("--headless") + $godotArgs
 }
