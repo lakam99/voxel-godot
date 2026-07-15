@@ -71,6 +71,9 @@ func run() -> void:
         add_failure("scene_bootstrap_failed", "main/player/camera missing after startup")
         finish()
         return
+    if not enable_night_safe_player_policy("canopy_release_visual"):
+        finish()
+        return
     report_data["seed"] = String(main.get("seed_text"))
     if release_stage == STAGE_SAVE_AND_HARVEST:
         await run_save_and_harvest_stage()
@@ -367,7 +370,10 @@ func collect_mature_trees(node: Node, output: Array[Node3D]) -> void:
 func find_prop_id_recursive(node: Node, prop_id: String) -> Node:
     if node == null:
         return null
-    if String(node.get_meta("prop_id", "")) == prop_id:
+    # FallingTree is a short-lived, non-colliding visual duplicate that keeps the
+    # source prop ID. It is evidence of the fall animation, not an active resource.
+    if String(node.get_meta("prop_id", "")) == prop_id \
+        and String(node.get_meta("kind", "")) == "prop":
         return node
     for child in node.get_children():
         var found := find_prop_id_recursive(child, prop_id)

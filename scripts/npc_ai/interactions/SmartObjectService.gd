@@ -215,6 +215,8 @@ func reserve_interaction(request):
 		return _result(NpcEnumsScript.INTERACTION_STATUS_FAILED, &"target_gone", { "objectId": String(request_value(request, "object_id", "")) })
 	if registration.depleted:
 		return _result(NpcEnumsScript.INTERACTION_STATUS_FAILED, &"resource_depleted", { "objectId": registration.object_id })
+	if not registration_is_live(registration):
+		return _result(NpcEnumsScript.INTERACTION_STATUS_FAILED, &"target_gone", { "objectId": registration.object_id })
 	var access := validate_access_policy(registration, request)
 	if not bool(access.get("ok", false)):
 		return _result(NpcEnumsScript.INTERACTION_STATUS_FAILED, StringName(String(access.get("reason", "access_denied"))), access)
@@ -346,8 +348,7 @@ func complete_interaction(request):
 		return _result(NpcEnumsScript.INTERACTION_STATUS_FAILED, &"target_gone", { "requestId": request_id })
 	if registration.depleted and _is_single_use(registration):
 		return _result(NpcEnumsScript.INTERACTION_STATUS_FAILED, &"resource_depleted", { "objectId": registration.object_id })
-	if registration_node_is_stale(registration):
-		mark_registration_stale(registration, "freed_node")
+	if not registration_is_live(registration):
 		return _result(NpcEnumsScript.INTERACTION_STATUS_FAILED, &"target_gone", { "objectId": registration.object_id })
 	var access := validate_access_policy(registration, request)
 	if not bool(access.get("ok", false)):
@@ -418,17 +419,16 @@ func notify_object_removed(object_id: String, node_or_reason = null, reason := "
 	var registration = registrations.get(object_id)
 	if registration == null:
 		return
-	mark_registration_stale(registration, removal_reason)
+	mark_registration_removed(registration, removal_reason)
 
 func object_available(object_id: String, actor_id := "") -> Dictionary:
 	var registration = registrations.get(object_id)
 	if registration == null:
 		return { "ok": false, "reason": "target_gone" }
-	if registration_node_is_stale(registration):
-		mark_registration_stale(registration, "freed_node")
-		return { "ok": false, "reason": "target_gone" }
 	if registration.depleted:
 		return { "ok": false, "reason": "resource_depleted" }
+	if not registration_is_live(registration):
+		return { "ok": false, "reason": "target_gone" }
 	expire_deadline_reservations(registration)
 	if not first_available_slot(registration, actor_id, "").is_empty():
 		return { "ok": true, "reason": "available" }
@@ -568,7 +568,7 @@ func registration_matches_candidate_filters(registration, entry: Dictionary, opt
 	if registration == null or registration.depleted:
 		return false
 	if registration_node_is_stale(registration):
-		mark_registration_stale(registration)
+		mark_registration_unbound(registration)
 		return false
 	if not kind_lookup.has(String(registration.kind)):
 		return false
@@ -637,7 +637,7 @@ func cached_resource_node_for_query(registration, entry: Dictionary, options: Di
 	if registration == null:
 		return null
 	if registration_node_is_stale(registration):
-		mark_registration_stale(registration)
+		mark_registration_unbound(registration)
 		return null
 	if registration.depleted:
 		return null
@@ -1082,13 +1082,13 @@ func live_registration_node_3d(registration) -> Node3D:
 	var node = registration.node
 	if node == null:
 		if bool(registration.metadata.get("nodeBacked", false)) and not bool(registration.metadata.get("stale", false)):
-			mark_registration_stale(registration, "missing_node")
+			mark_registration_unbound(registration, "missing_node")
 		return null
 	if not is_instance_valid(node):
-		mark_registration_stale(registration, "freed_node")
+		mark_registration_unbound(registration, "freed_node")
 		return null
 	if not (node is Node3D):
-		mark_registration_stale(registration, "not_node_3d")
+		mark_registration_unbound(registration, "not_node_3d")
 		return null
 	return node as Node3D
 
@@ -1111,23 +1111,29 @@ func registration_is_live(registration) -> bool:
 		return registration.metadata.has("position")
 	return live_registration_node_3d(registration) != null
 
-func mark_registration_stale(registration, reason := "stale_node") -> void:
+func mark_registration_unbound(registration, reason := "stale_node") -> void:
 	if registration == null:
 		return
 	var object_id := String(registration.object_id)
 	if object_id == "":
 		return
-	if not registration.depleted:
-		release_object_reservations(registration, reason)
-	registration.depleted = true
+	release_object_reservations(registration, reason)
 	registration.node = null
-	registration.metadata["depleted"] = true
+	registration.metadata["depleted"] = bool(registration.depleted)
 	registration.metadata["available"] = false
 	registration.metadata["stale"] = true
 	_unindex_registration(registration)
 	registration.revision = _next_revision()
 	query_cache.clear()
-	_record("removed", object_id, registration.kind, { "reason": reason })
+	_record("unbound", object_id, registration.kind, { "reason": reason, "depleted": bool(registration.depleted) })
+
+func mark_registration_removed(registration, reason := "node_removed") -> void:
+	if registration == null:
+		return
+	registration.depleted = true
+	registration.metadata["depleted"] = true
+	mark_registration_unbound(registration, reason)
+	_record("removed", String(registration.object_id), registration.kind, { "reason": reason })
 
 func _connect_registration_lifecycle(registration) -> void:
 	if registration == null:
@@ -1146,10 +1152,12 @@ func _on_registered_node_tree_exiting(object_id: String, instance_id: int) -> vo
 	var registration = registrations.get(object_id)
 	if registration == null:
 		return
+	if bool(registration.metadata.get("stale", false)):
+		return
 	var node = registration.node
 	if node != null and is_instance_valid(node) and int(node.get_instance_id()) != instance_id:
 		return
-	mark_registration_stale(registration, "node_removed")
+	mark_registration_unbound(registration, "node_streamed_out")
 
 func actor_position_for_request(request) -> Vector3:
 	var metadata := request_metadata(request)

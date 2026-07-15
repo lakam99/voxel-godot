@@ -1,6 +1,7 @@
 extends Node
 
 const MAIN_SCENE: PackedScene = preload("res://scenes/Main.tscn")
+const PlaytestSurvivalPolicyScript := preload("res://scripts/testing/PlaytestSurvivalPolicy.gd")
 const DEFAULT_SEED := "atlas-1492"
 const CASES := [
     { "name": "town_noon", "playtest": "town", "clock": 12.0, "weather": "clear", "intensity": 0.0, "clouds": 0.22, "hud": false, "offset": Vector3(8.5, 0.0, 8.5), "pitch": -10.0 },
@@ -23,6 +24,7 @@ var output_dir := ""
 var seed := DEFAULT_SEED
 var metadata: Array[Dictionary] = []
 var failed := false
+var playtest_survival_policy := {}
 var canopy_capture_cell_cache := {}
 var canopy_capture_cell_cache_ready := false
 
@@ -41,6 +43,11 @@ func run() -> void:
     apply_capture_resolution_override()
     main = MAIN_SCENE.instantiate()
     add_child(main)
+    await wait_frames(1)
+    playtest_survival_policy = PlaytestSurvivalPolicyScript.enable_player_god_mode(main, "visual_capture_night_cases")
+    if not bool(playtest_survival_policy.get("enabled", false)):
+        failed = true
+        push_error("Night visual captures require player godmode: %s" % JSON.stringify(playtest_survival_policy))
     await wait_frames(90)
     configure_static_scene()
     var capture_cases := CASES.duplicate()
@@ -556,6 +563,7 @@ func make_case_metadata(capture_case: Dictionary, png_path: String) -> Dictionar
         "clockHour": float(capture_case["clock"]),
         "clockText": main.clock_time_text(),
         "timeOfDay": snapped_float(main.time_of_day),
+        "playtestSurvivalPolicy": playtest_survival_policy,
         "weather": weather.snapshot() if weather and weather.has_method("snapshot") else {},
         "hudVisible": bool(capture_case.get("hud", false)),
         "png": png_path,
@@ -716,6 +724,7 @@ func stable_performance_values() -> Dictionary:
 func write_metadata() -> void:
     write_json(path_join(output_dir, "visual-captures.json"), {
         "seed": seed,
+        "playtestSurvivalPolicy": playtest_survival_policy,
         "cases": metadata
     })
 

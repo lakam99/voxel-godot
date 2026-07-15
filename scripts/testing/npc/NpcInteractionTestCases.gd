@@ -20,6 +20,20 @@ class FakeForageWorld:
 	func surface_y_at_position(_position: Vector3) -> float:
 		return 0.0
 
+class FakeAutonomyRelease:
+	extends RefCounted
+	var releases: Array[Dictionary] = []
+
+	func release_smart_object(object_id: String, object_node: Node, _actor: Node, actor_id: String, reason := "released", metadata := {}):
+		releases.append({
+			"objectId": object_id,
+			"objectNode": object_node,
+			"actorId": actor_id,
+			"reason": reason,
+			"reservationId": String(metadata.get("reservationId", ""))
+		})
+		return null
+
 func setup(owner) -> void:
 	runner = owner
 
@@ -47,6 +61,10 @@ func cases() -> Array[Dictionary]:
 		case("npc_interaction_queue_free_resource_query_no_script_error", "day", "test_queue_free_resource_query_no_script_error"),
 		case("npc_interaction_stale_resource_unindexed", "day", "test_stale_resource_unindexed"),
 		case("npc_interaction_stale_resource_reservation_released", "day", "test_stale_resource_reservation_released"),
+		case("npc_interaction_stream_unbind_is_not_depletion", "day", "test_stream_unbind_is_not_depletion"),
+		case("npc_interaction_stream_rebind_restores_availability", "day", "test_stream_rebind_restores_availability"),
+		case("npc_interaction_true_depletion_survives_rebind", "day", "test_true_depletion_survives_rebind"),
+		case("npc_interaction_freed_job_target_release_clears_state", "day", "test_freed_job_target_release_clears_state"),
 		case("npc_interaction_query_cache_invalidates_on_resource_removal", "day", "test_query_cache_invalidates_on_resource_removal"),
 		case("npc_interaction_forager_query_after_harvest_no_crash", "day", "test_forager_query_after_harvest_no_crash"),
 		case("npc_interaction_forager_live_candidate_only", "day", "test_forager_live_candidate_only"),
@@ -258,8 +276,8 @@ func test_resource_removed_during_approach(_mode: String) -> Dictionary:
 	service.notify_object_removed(object_id, prop)
 	var completed = complete(service, object_id, prop, actor, "npc-a", first)
 	var reason := String(completed.reason)
-	var passed: bool = succeeded(first) and reason in ["resource_depleted", "target_gone"]
-	return outcome(passed, "complete=%s" % summary(completed), ["removed_invalidates_reservation", "bounded_replan_reason"], state(service))
+	var passed: bool = succeeded(first) and reason == "resource_depleted"
+	return outcome(passed, "complete=%s" % summary(completed), ["removed_invalidates_reservation", "explicit_removal_is_resource_depleted"], state(service))
 
 func test_player_harvests_before_npc_replans(_mode: String) -> Dictionary:
 	var service = make_service()
@@ -410,8 +428,8 @@ func test_stale_registered_resource_ignored(_mode: String) -> Dictionary:
 	prop.free()
 	var after: Array[Node3D] = query_forage_nodes(service)
 	var availability: Dictionary = service.object_available(object_id, "forager")
-	var passed: bool = before.size() == 1 and after.is_empty() and String(availability.get("reason", "")) in ["target_gone", "resource_depleted"]
-	return outcome(passed, "before=%d after=%d availability=%s" % [before.size(), after.size(), JSON.stringify(availability)], ["stale_resource_skipped", "query_continues_after_stale_node"], state(service))
+	var passed: bool = before.size() == 1 and after.is_empty() and String(availability.get("reason", "")) == "target_gone"
+	return outcome(passed, "before=%d after=%d availability=%s" % [before.size(), after.size(), JSON.stringify(availability)], ["stale_resource_skipped", "temporary_absence_is_target_gone_not_depleted", "query_continues_after_stale_node"], state(service))
 
 func test_queue_free_resource_query_no_script_error(_mode: String) -> Dictionary:
 	var service = make_service()
@@ -448,6 +466,93 @@ func test_stale_resource_reservation_released(_mode: String) -> Dictionary:
 	var passed: bool = succeeded(first) and before == 1 and after == 0
 	return outcome(passed, "reserve=%s before=%d after=%d" % [summary(first), before, after], ["stale_resource_releases_owner_reservation"], state(service))
 
+func test_stream_unbind_is_not_depletion(_mode: String) -> Dictionary:
+	var service = make_service()
+	var prop := attach_to_runner(make_prop("stream-unbind", "aloePatch", "aloe", 1, Vector3(12.0, 0.0, 0.0)))
+	var object_id: String = service.register_resource(prop)
+	var actor := make_actor("generic-forager", Vector3(12.0, 0.0, CELL))
+	var reserved = reserve(service, object_id, prop, actor, "generic-forager")
+	if prop.get_parent() != null:
+		prop.get_parent().remove_child(prop)
+	var debug: Dictionary = service.reservation_debug(object_id, "generic-forager")
+	var availability: Dictionary = service.object_available(object_id, "generic-forager")
+	var available_indexed := index_contains(service.get("available_index_by_kind"), "forage_source", object_id)
+	var depleted_indexed := index_contains(service.get("depleted_index_by_kind"), "forage_source", object_id)
+	var passed := succeeded(reserved) \
+		and not bool(debug.get("depleted", true)) \
+		and (debug.get("reservations", []) as Array).is_empty() \
+		and String(availability.get("reason", "")) == "target_gone" \
+		and not available_indexed \
+		and not depleted_indexed
+	return outcome(passed, "reserved=%s debug=%s availability=%s availableIndexed=%s depletedIndexed=%s" % [summary(reserved), JSON.stringify(debug), JSON.stringify(availability), str(available_indexed), str(depleted_indexed)], ["stream_unbind_releases_reservation", "stream_unbind_is_not_depletion", "unbound_resource_is_not_queryable"], state(service))
+
+func test_stream_rebind_restores_availability(_mode: String) -> Dictionary:
+	var service = make_service()
+	var original := attach_to_runner(make_prop("stream-rebind", "aloePatch", "aloe", 1, Vector3(12.0, 0.0, 0.0)))
+	var object_id: String = service.register_resource(original)
+	if original.get_parent() != null:
+		original.get_parent().remove_child(original)
+	var replacement := attach_to_runner(make_prop("stream-rebind", "aloePatch", "aloe", 1, Vector3(12.0, 0.0, 0.0)))
+	var rebound_id: String = service.register_resource(replacement)
+	var availability: Dictionary = service.object_available(object_id, "generic-forager")
+	var queried: Array[Node3D] = service.query_resource_nodes(make_query_entry(), ["forage_source"], {
+		"drops": ["aloe"],
+		"limit": 8,
+		"cacheFrames": 0
+	})
+	var debug: Dictionary = service.reservation_debug(object_id, "generic-forager")
+	var passed := rebound_id == object_id \
+		and bool(availability.get("ok", false)) \
+		and not bool(debug.get("depleted", true)) \
+		and queried.size() == 1 \
+		and queried[0] == replacement
+	return outcome(passed, "objectId=%s reboundId=%s availability=%s debug=%s queried=%d" % [object_id, rebound_id, JSON.stringify(availability), JSON.stringify(debug), queried.size()], ["stable_resource_id_rebound", "stream_rebind_restores_availability", "rebound_resource_returns_to_forage_index"], state(service))
+
+func test_true_depletion_survives_rebind(_mode: String) -> Dictionary:
+	var service = make_service()
+	var original := attach_to_runner(make_prop("depleted-rebind", "aloePatch", "aloe", 1, Vector3(12.0, 0.0, 0.0)))
+	var object_id: String = service.register_resource(original)
+	var actor := make_actor("player", Vector3(12.0, 0.0, CELL))
+	var harvested = harvest(service, object_id, original, actor, "player", "player")
+	if original.get_parent() != null:
+		original.get_parent().remove_child(original)
+	var replacement := attach_to_runner(make_prop("depleted-rebind", "aloePatch", "aloe", 1, Vector3(12.0, 0.0, 0.0)))
+	service.register_resource(replacement)
+	var availability: Dictionary = service.object_available(object_id, "generic-forager")
+	var queried: Array[Node3D] = service.query_resource_nodes(make_query_entry(), ["forage_source"], {
+		"drops": ["aloe"],
+		"limit": 8,
+		"cacheFrames": 0
+	})
+	var passed := succeeded(harvested) \
+		and String(availability.get("reason", "")) == "resource_depleted" \
+		and queried.is_empty()
+	return outcome(passed, "harvested=%s availability=%s queried=%d" % [summary(harvested), JSON.stringify(availability), queried.size()], ["true_depletion_is_durable_in_service", "depleted_rebind_cannot_duplicate_reward", "depleted_resource_stays_out_of_forage_index"], state(service))
+
+func test_freed_job_target_release_clears_state(_mode: String) -> Dictionary:
+	var npc_system := track_transient_node(NpcSystemScript.new()) as NpcSystem
+	var autonomy := FakeAutonomyRelease.new()
+	npc_system.autonomy_system = autonomy
+	var target := make_prop("freed-job-target", "aloePatch", "aloe", 1, Vector3(12.0, 0.0, 0.0))
+	var entry := {
+		"id": "generic-forager",
+		"jobTargetNode": target,
+		"jobObjectId": "prop:freed-job-target",
+		"jobReservationId": "reservation:freed-job-target",
+		"jobApproachSlotId": "slot:0",
+		"forageReservationStartedPhysicsFrame": 1,
+		"forageReservationElapsedSeconds": 2.0
+	}
+	target.free()
+	npc_system.release_job_reservation(entry, "target_streamed_out")
+	var cleared := String(entry.get("jobObjectId", "")) == "" \
+		and String(entry.get("jobReservationId", "")) == "" \
+		and String(entry.get("jobApproachSlotId", "")) == "" \
+		and not entry.has("forageReservationStartedPhysicsFrame") \
+		and not entry.has("forageReservationElapsedSeconds")
+	var passed := cleared and autonomy.releases.size() == 1 and autonomy.releases[0].get("objectNode") == null
+	return outcome(passed, "cleared=%s releases=%s" % [str(cleared), JSON.stringify(autonomy.releases)], ["freed_target_never_type_checked", "release_uses_stable_object_id_without_live_node", "job_reservation_state_cleared"], {"entry": entry.duplicate(true), "releases": autonomy.releases.duplicate(true)})
+
 func test_query_cache_invalidates_on_resource_removal(_mode: String) -> Dictionary:
 	var service = make_service()
 	var prop := make_prop("cache-removal", "berryBush", "berries", 2, Vector3(12.0, 0.0, 0.0))
@@ -480,8 +585,8 @@ func test_forager_live_candidate_only(_mode: String) -> Dictionary:
 	stale.free()
 	var queried: Array[Node3D] = query_forage_nodes(service)
 	var stale_available: Dictionary = service.object_available(stale_id, "forager")
-	var passed: bool = queried.size() == 1 and queried[0] == live and String(stale_available.get("reason", "")) in ["target_gone", "resource_depleted"]
-	return outcome(passed, "queried=%d stale=%s" % [queried.size(), JSON.stringify(stale_available)], ["forager_query_returns_only_live_candidate", "stale_candidate_suppressed"], state(service))
+	var passed: bool = queried.size() == 1 and queried[0] == live and String(stale_available.get("reason", "")) == "target_gone"
+	return outcome(passed, "queried=%d stale=%s" % [queried.size(), JSON.stringify(stale_available)], ["forager_query_returns_only_live_candidate", "temporarily_absent_candidate_is_target_gone"], state(service))
 
 func test_forager_reachable_approach_slot(_mode: String) -> Dictionary:
 	var service = make_service()
@@ -522,8 +627,7 @@ func test_forager_target_gone_reselects(_mode: String) -> Dictionary:
 	service.notify_object_removed(removed_id, removed)
 	var completed = complete(service, removed_id, removed, actor, "forager", first)
 	var queried: Array[Node3D] = query_forage_nodes(service)
-	var terminal_reason: bool = failed_reason(completed, "target_gone") or failed_reason(completed, "resource_depleted")
-	var passed: bool = succeeded(first) and terminal_reason and queried.size() == 1 and queried[0] == alternate
+	var passed: bool = succeeded(first) and failed_reason(completed, "resource_depleted") and queried.size() == 1 and queried[0] == alternate
 	return outcome(passed, "complete=%s queried=%d" % [summary(completed), queried.size()], ["target_gone_is_terminal_for_old_resource", "forager_reselects_live_alternate"], state(service))
 
 func test_forager_route_blocked_marks_target_unreachable(_mode: String) -> Dictionary:
@@ -732,6 +836,11 @@ func make_block(block_type: String, position: Vector3) -> Node3D:
 
 func track_transient_node(node: Node3D) -> Node3D:
 	transient_nodes.append(node)
+	return node
+
+func attach_to_runner(node: Node3D) -> Node3D:
+	if runner is Node:
+		(runner as Node).add_child(node)
 	return node
 
 func cleanup_transient_nodes() -> void:

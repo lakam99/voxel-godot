@@ -2361,6 +2361,7 @@ func release_job_reservation(entry: Dictionary, reason := "released") -> void:
     entry["jobObjectId"] = ""
     entry["jobReservationId"] = ""
     entry["jobApproachSlotId"] = ""
+    entry["jobTargetNode"] = null
     entry.erase("jobApproachSlotPosition")
     entry.erase("jobApproachSlotCell")
     entry.erase("jobReservationRouteRequestId")
@@ -2372,7 +2373,9 @@ func release_job_reservation(entry: Dictionary, reason := "released") -> void:
 
 func job_target_node(entry: Dictionary) -> Node3D:
     var target_value = entry.get("jobTargetNode")
-    return target_value if target_value is Node3D and is_instance_valid(target_value) else null
+    if target_value == null or not is_instance_valid(target_value):
+        return null
+    return target_value as Node3D if target_value is Node3D else null
 
 func smart_object_approach_position(entry: Dictionary, target_node: Node3D) -> Vector3:
     var target: Vector3 = target_node.global_position if target_node != null else entry.get("jobTarget", Vector3.ZERO)

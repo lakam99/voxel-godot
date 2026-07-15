@@ -1,6 +1,7 @@
 extends Node
 
 const MAIN_SCENE := preload("res://scenes/Main.tscn")
+const PlaytestSurvivalPolicyScript := preload("res://scripts/testing/PlaytestSurvivalPolicy.gd")
 const DEFAULT_SCENARIOS := ["DayWork", "DuskReturnHome", "MidnightTown", "CrowdedDoorTraffic", "SprintTraversal", "UndergroundTraversal", "AutosaveEnabled", "AutosaveDisabled"]
 const TARGET_NPC_COUNT := 32
 const SAMPLE_EVERY_FRAMES := 6
@@ -118,6 +119,16 @@ func run_scenario(scenario_name: String) -> Dictionary:
     await get_tree().physics_frame
     write_progress("scenario:%s:configure" % scenario_name)
     configure_main_for_scenario(scenario_name)
+    var playtest_survival_policy: Dictionary = {
+        "required": scenario_uses_night(scenario_name),
+        "enabled": false,
+        "scope": "not_applicable_day_scenario"
+    }
+    if scenario_uses_night(scenario_name):
+        playtest_survival_policy = PlaytestSurvivalPolicyScript.enable_player_god_mode(
+            main,
+            "runtime_performance_%s" % scenario_name.to_lower()
+        )
     var warmup_count := 90
     if scenario_name == "CrowdedDoorTraffic":
         warmup_count = 240
@@ -152,6 +163,8 @@ func run_scenario(scenario_name: String) -> Dictionary:
     var metrics := summarize_samples(samples)
     append_scenario_metrics(metrics, scenario_name)
     var failures: Array[String] = performance_failures(metrics)
+    if scenario_uses_night(scenario_name) and not bool(playtest_survival_policy.get("enabled", false)):
+        failures.append("night scenario player godmode was not enabled")
     if scenario_name == "SprintTraversal" and float(metrics.get("playerTravelDistance", 0.0)) < SPRINT_TRAVERSAL_MIN_MEASURED_DISTANCE:
         failures.append("sprint traversal did not move far enough to exercise streaming")
     var passed := not samples.is_empty() and failures.is_empty()
@@ -181,8 +194,12 @@ func run_scenario(scenario_name: String) -> Dictionary:
         "details": details,
         "metrics": metrics,
         "failures": failures,
+        "playtestSurvivalPolicy": playtest_survival_policy,
         "sampleCount": samples.size()
     }
+
+func scenario_uses_night(scenario_name: String) -> bool:
+    return scenario_name in ["DuskReturnHome", "MidnightTown"]
 
 func configure_main_for_scenario(scenario_name: String) -> void:
     if main == null:

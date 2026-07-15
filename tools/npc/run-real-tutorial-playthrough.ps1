@@ -80,7 +80,9 @@ $commit = (& git -C $projectPath rev-parse HEAD).Trim()
 $focusedVisualAcceptance = $Visible -and ($MiraHomeOnly -or $MorningOutsideOnly -or $FinalRescue)
 $dayOneVisualAcceptance = $Visible -and $DayOne
 $fullPlayerPovVisible = $Visible -and (-not $MiraHomeOnly) -and (-not $MorningOutsideOnly)
-$godModeEnabled = [bool]$GodMode
+# All headed tutorial flows can cross night. Keep the legacy -GodMode switch
+# accepted for existing commands, but make player-only protection the default.
+$godModeEnabled = $true
 
 $env:VOXEL_PLAYTEST = "1"
 $env:VOXEL_TEST_SEED = $Seed
