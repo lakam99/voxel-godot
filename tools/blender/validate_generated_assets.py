@@ -23,6 +23,9 @@ CANOPY_FAMILIES = {
     "mature_conifer_tree",
     "mature_savanna_tree",
 }
+CANOPY_MAX_WIDTH = {
+    "old_growth_broadleaf_tree": 18.0,
+}
 
 
 def parse_args():
@@ -123,7 +126,8 @@ def validate_asset(asset, manifest, project_root, allowed_materials, errors):
     if size.z <= 0.08 or size.x <= 0.04 or size.y <= 0.04:
         fail(errors, asset_id, f"degenerate bounds size {tuple(size)}")
     max_height = 22.5 if str(asset.get("family", "")) in CANOPY_FAMILIES else 7.5
-    max_width = 16.0 if str(asset.get("family", "")) in CANOPY_FAMILIES else 4.5
+    family = str(asset.get("family", ""))
+    max_width = CANOPY_MAX_WIDTH.get(family, 16.0 if family in CANOPY_FAMILIES else 4.5)
     if size.z > max_height or size.x > max_width or size.y > max_width:
         fail(errors, asset_id, f"unexpectedly large bounds size {tuple(size)}")
 

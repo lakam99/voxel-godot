@@ -35,6 +35,15 @@ const HEIGHT_BANDS = {
   mature_conifer_tree: [11, 18],
   mature_savanna_tree: [8, 13],
 };
+const CANOPY_MAX_WIDTH = {
+  old_growth_broadleaf_tree: 18.0,
+};
+const CANOPY_MIN_FOLIAGE_PRIMITIVES = {
+  mature_broadleaf_tree: 220,
+  old_growth_broadleaf_tree: 300,
+  mature_conifer_tree: 220,
+  mature_savanna_tree: 175,
+};
 
 const ALLOWED_MATERIALS = new Set([
   "trunk",
@@ -88,7 +97,7 @@ function validateBoundingBox(errors, asset) {
   }
   const canopyFamily = asset.family in HEIGHT_BANDS;
   const maxHeight = canopyFamily ? 22.5 : 7.5;
-  const maxWidth = canopyFamily ? 16.0 : 4.5;
+  const maxWidth = CANOPY_MAX_WIDTH[asset.family] ?? (canopyFamily ? 16.0 : 4.5);
   if (box.size?.[2] > maxHeight || box.size?.[0] > maxWidth || box.size?.[1] > maxWidth) {
     fail(errors, `${asset.id}: bounding box unexpectedly large ${JSON.stringify(box.size)}`);
   }
@@ -111,6 +120,22 @@ function validateTreeContract(errors, asset) {
   if (band && metrics.trunkRadius < 0.32) fail(errors, `${asset.id}: mature trunk radius ${metrics.trunkRadius} is too thin`);
   if (asset.family === "mature_broadleaf_tree" && metrics.canopyBase < 3.0) fail(errors, `${asset.id}: crown base ${metrics.canopyBase} is not walk-under`);
   const wind = asset.windData;
+  if (asset.family in CANOPY_MIN_FOLIAGE_PRIMITIVES) {
+    const structure = asset.canopyStructure;
+    const minimum = CANOPY_MIN_FOLIAGE_PRIMITIVES[asset.family];
+    if (structure?.foliagePrimitive !== "folded_diamond_leaf" || !Number.isInteger(structure?.foliagePrimitiveCount) || structure.foliagePrimitiveCount < minimum) {
+      fail(errors, `${asset.id}: canopy must contain at least ${minimum} folded leaf primitives, got ${structure?.foliagePrimitiveCount}`);
+    }
+    if (typeof structure?.structure !== "string" || !structure.structure.includes("spray")) {
+      fail(errors, `${asset.id}: canopy structure must be explicit branch-attached sprays`);
+    }
+    if ((wind?.foliageVertexCount ?? 0) < structure.foliagePrimitiveCount * 5) {
+      fail(errors, `${asset.id}: authored foliage vertex count cannot represent declared leaf primitives`);
+    }
+    if (asset.family === "mature_conifer_tree" && (structure.crownLayerCount < 6 || structure.branchClusterCount < 24)) {
+      fail(errors, `${asset.id}: conifer lacks layered radial bough structure`);
+    }
+  }
   if (wind?.attribute !== "COLOR_0" || wind?.sourceAttribute !== "wind" || wind?.domain !== "POINT") {
     fail(errors, `${asset.id}: missing COLOR_0 POINT wind encoding`);
   }
@@ -232,6 +257,10 @@ if (manifest) {
   const contactSheet = path.join(projectRoot, manifest.contactSheet ?? "");
   if (!manifest.contactSheet || !fs.existsSync(contactSheet)) {
     fail(errors, `Missing contact sheet ${manifest.contactSheet}`);
+  }
+  const detailSheet = path.join(projectRoot, manifest.canopyDetailSheet ?? "");
+  if (!manifest.canopyDetailSheet || !fs.existsSync(detailSheet)) {
+    fail(errors, `Missing canopy detail sheet ${manifest.canopyDetailSheet}`);
   }
 
   if (!Array.isArray(manifest.assets)) {
