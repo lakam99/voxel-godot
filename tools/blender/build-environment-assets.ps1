@@ -1,6 +1,7 @@
 param(
     [string]$BlenderPath = "",
     [string]$NodePath = "",
+    [string]$GodotExe = "C:\Users\arkam\Desktop\Godot_v4.6.1-stable_win64.exe\Godot_v4.6.1-stable_win64_console.exe",
     [switch]$SkipGenerate
 )
 
@@ -15,6 +16,8 @@ $ValidationReportPath = Join-Path $GeneratedRoot "environment-validation.json"
 $GeneratorScript = Join-Path $PSScriptRoot "generate_environment_assets.py"
 $BlenderValidator = Join-Path $PSScriptRoot "validate_generated_assets.py"
 $ManifestValidator = Join-Path $ProjectRoot "tools\art\validate-visual-manifest.mjs"
+$GodotImportContract = Join-Path $ProjectRoot "tools\run-canopy-asset-import-contract-tests.ps1"
+$GodotImportReport = Join-Path $ProjectRoot "artifacts\vegetation\canopy-asset-import-contract.json"
 
 New-Item -ItemType Directory -Force -Path $EnvironmentDir | Out-Null
 
@@ -56,8 +59,14 @@ if ($LASTEXITCODE -ne 0) {
     throw "Visual manifest validation failed with exit code $LASTEXITCODE"
 }
 
+& $GodotImportContract -GodotExe $GodotExe -ReportPath $GodotImportReport
+if ($LASTEXITCODE -ne 0) {
+    throw "Godot canopy asset import contract failed with exit code $LASTEXITCODE"
+}
+
 Write-Output "Generated environment assets:"
 Write-Output "  Blender: $BlenderExe"
 Write-Output "  Manifest: $ManifestPath"
 Write-Output "  Contact sheet: $ContactSheetPath"
 Write-Output "  Validation: $ValidationReportPath"
+Write-Output "  Godot import contract: $GodotImportReport"

@@ -8,6 +8,23 @@ import bpy
 from mathutils import Vector
 
 
+TREE_FAMILIES = {
+    "broadleaf_tree",
+    "conifer_tree",
+    "savanna_tree",
+    "mature_broadleaf_tree",
+    "old_growth_broadleaf_tree",
+    "mature_conifer_tree",
+    "mature_savanna_tree",
+}
+CANOPY_FAMILIES = {
+    "mature_broadleaf_tree",
+    "old_growth_broadleaf_tree",
+    "mature_conifer_tree",
+    "mature_savanna_tree",
+}
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Validate generated GLB assets through Blender import.")
     parser.add_argument("--manifest", required=True, help="Path to assets/visual/generated/visual-manifest.json")
@@ -105,7 +122,9 @@ def validate_asset(asset, manifest, project_root, allowed_materials, errors):
         fail(errors, asset_id, f"not ground-centered, min z {min_v.z:.4f}")
     if size.z <= 0.08 or size.x <= 0.04 or size.y <= 0.04:
         fail(errors, asset_id, f"degenerate bounds size {tuple(size)}")
-    if size.z > 7.5 or size.x > 4.5 or size.y > 4.5:
+    max_height = 22.5 if str(asset.get("family", "")) in CANOPY_FAMILIES else 7.5
+    max_width = 16.0 if str(asset.get("family", "")) in CANOPY_FAMILIES else 4.5
+    if size.z > max_height or size.x > max_width or size.y > max_width:
         fail(errors, asset_id, f"unexpectedly large bounds size {tuple(size)}")
 
     triangles = triangle_count(meshes)
@@ -127,6 +146,36 @@ def validate_asset(asset, manifest, project_root, allowed_materials, errors):
     if missing_slots:
         fail(errors, asset_id, f"missing material slots after import {missing_slots}")
 
+    family = str(asset.get("family", ""))
+    color_attributes = list(obj.data.color_attributes)
+    if family in TREE_FAMILIES:
+        if not color_attributes:
+            fail(errors, asset_id, "missing imported vertex color wind data")
+        else:
+            color_attribute = color_attributes[0]
+            colors = [tuple(value.color) for value in color_attribute.data]
+            if colors:
+                bend_max = max(color[0] for color in colors)
+                phase_range = max(color[1] for color in colors) - min(color[1] for color in colors)
+                flutter_max = max(color[2] for color in colors)
+                if color_attribute.domain == "POINT":
+                    root_colors = [colors[vertex.index][0] for vertex in obj.data.vertices if (vertex.co.z - min_v.z) / max(0.001, size.z) <= 0.08]
+                elif color_attribute.domain == "CORNER":
+                    root_colors = [colors[loop.index][0] for loop in obj.data.loops if (obj.data.vertices[loop.vertex_index].co.z - min_v.z) / max(0.001, size.z) <= 0.08]
+                else:
+                    root_colors = []
+                    fail(errors, asset_id, f"unsupported imported wind color domain {color_attribute.domain}")
+                if root_colors and max(root_colors) > 0.035:
+                    fail(errors, asset_id, f"imported root bend exceeds immobility budget: {max(root_colors):.4f}")
+                if bend_max < 0.45 or phase_range < 0.20 or flutter_max < 0.50:
+                    fail(errors, asset_id, f"imported wind channel range is not useful: bend={bend_max:.3f} phase={phase_range:.3f} flutter={flutter_max:.3f}")
+    if any(obj.type == "ARMATURE" for obj in bpy.context.scene.objects):
+        fail(errors, asset_id, "imported GLB contains an armature")
+    if obj.data.shape_keys is not None:
+        fail(errors, asset_id, "imported GLB contains shape keys")
+    if bpy.data.actions:
+        fail(errors, asset_id, f"imported GLB contains {len(bpy.data.actions)} animation actions")
+
     manifest_box = asset.get("boundingBox", {})
     manifest_size = manifest_box.get("size", [0, 0, 0])
     actual_size = [snap(size.x), snap(size.y), snap(size.z)]
@@ -146,6 +195,10 @@ def validate_asset(asset, manifest, project_root, allowed_materials, errors):
         },
         "pivotAtOrigin": close(obj.location.length, 0.0, 0.005),
         "grounded": abs(float(min_v.z)) <= 0.055,
+        "vertexColorAttributes": [{"name": attribute.name, "domain": attribute.domain, "count": len(attribute.data)} for attribute in color_attributes],
+        "armatures": sum(1 for scene_obj in bpy.context.scene.objects if scene_obj.type == "ARMATURE"),
+        "shapeKeys": 1 if obj.data.shape_keys is not None else 0,
+        "animationActions": len(bpy.data.actions),
     }
 
 

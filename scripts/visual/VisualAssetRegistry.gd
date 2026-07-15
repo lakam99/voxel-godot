@@ -41,6 +41,8 @@ func load_manifest() -> bool:
             last_errors.append("Skipping non-dictionary asset row")
             continue
         var asset: Dictionary = asset_variant
+        if not bool(asset.get("runtimeEnabled", true)):
+            continue
         var asset_id := String(asset.get("id", ""))
         var family := String(asset.get("family", ""))
         if asset_id == "" or family == "":

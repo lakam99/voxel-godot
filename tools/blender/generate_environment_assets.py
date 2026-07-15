@@ -11,12 +11,28 @@ import bpy
 from mathutils import Vector
 
 
-GENERATOR_VERSION = "phase5-environment-v1"
+GENERATOR_VERSION = "vox120-canopy-environment-v2"
 SEED = 1492
 TRIANGLE_LIMIT = 2200
-GALLERY_COLUMNS = 7
-GALLERY_SPACING_X = 3.1
-GALLERY_SPACING_Y = 3.45
+GALLERY_COLUMNS = 4
+GALLERY_SPACING_X = 24.0
+GALLERY_SPACING_Z = 26.0
+WIND_ATTRIBUTE_NAME = "wind"
+TREE_FAMILIES = {
+    "broadleaf_tree",
+    "conifer_tree",
+    "savanna_tree",
+    "mature_broadleaf_tree",
+    "old_growth_broadleaf_tree",
+    "mature_conifer_tree",
+    "mature_savanna_tree",
+}
+CANOPY_FAMILIES = {
+    "mature_broadleaf_tree",
+    "old_growth_broadleaf_tree",
+    "mature_conifer_tree",
+    "mature_savanna_tree",
+}
 
 MATERIAL_SPECS = {
     "trunk": (0.42, 0.22, 0.10, 1.0),
@@ -66,6 +82,54 @@ ASSET_SPECS = [
     ],
     *[
         {
+            "id": f"mature_broadleaf_{index:02d}",
+            "family": "mature_broadleaf_tree",
+            "biomes": ["forest", "plains", "swamp"],
+            "builder": "mature_broadleaf",
+            "variant": index,
+            "growthClass": "mature",
+            "runtimeEnabled": False,
+        }
+        for index in range(1, 5)
+    ],
+    *[
+        {
+            "id": f"old_growth_broadleaf_{index:02d}",
+            "family": "old_growth_broadleaf_tree",
+            "biomes": ["forest"],
+            "builder": "old_growth_broadleaf",
+            "variant": index,
+            "growthClass": "old_growth",
+            "runtimeEnabled": False,
+        }
+        for index in range(1, 3)
+    ],
+    *[
+        {
+            "id": f"mature_conifer_{index:02d}",
+            "family": "mature_conifer_tree",
+            "biomes": ["taiga", "snow", "alpine", "tundra"],
+            "builder": "mature_conifer",
+            "variant": index,
+            "growthClass": "mature",
+            "runtimeEnabled": False,
+        }
+        for index in range(1, 5)
+    ],
+    *[
+        {
+            "id": f"mature_savanna_{index:02d}",
+            "family": "mature_savanna_tree",
+            "biomes": ["savanna", "plains", "desert"],
+            "builder": "mature_savanna",
+            "variant": index,
+            "growthClass": "mature",
+            "runtimeEnabled": False,
+        }
+        for index in range(1, 4)
+    ],
+    *[
+        {
             "id": f"rock_{index:02d}",
             "family": "rock",
             "biomes": ["plains", "forest", "mountain", "beach", "snow"],
@@ -110,8 +174,8 @@ def reset_scene():
     bpy.ops.object.select_all(action="SELECT")
     bpy.ops.object.delete()
     bpy.context.scene.unit_settings.system = "METRIC"
-    bpy.context.scene.render.resolution_x = 2600
-    bpy.context.scene.render.resolution_y = 1600
+    bpy.context.scene.render.resolution_x = 3200
+    bpy.context.scene.render.resolution_y = 3600
     bpy.context.scene.view_settings.view_transform = "Standard"
     bpy.context.scene.view_settings.look = "Medium High Contrast"
     bpy.context.scene.view_settings.exposure = 0.0
@@ -322,6 +386,136 @@ def build_savanna(spec, materials, rng):
     return combine_asset(spec["id"], objects)
 
 
+def build_mature_broadleaf(spec, materials, rng):
+    variant = spec["variant"]
+    total_height = 10.6 + (variant - 1) * 1.55 + rng.uniform(-0.18, 0.18)
+    trunk_radius = 0.38 + variant * 0.035 + rng.uniform(-0.018, 0.018)
+    crown_base = total_height * rng.uniform(0.47, 0.54)
+    trunk_top = total_height * rng.uniform(0.72, 0.78)
+    trunk = add_cone(
+        "trunk",
+        9,
+        trunk_radius * 1.18,
+        trunk_radius * 0.62,
+        trunk_top,
+        (0, 0, trunk_top * 0.5),
+        materials["trunk"],
+    )
+    objects = [trunk]
+    branch_count = 7 + variant
+    branch_ends = []
+    crown_radius = 3.05 + variant * 0.42
+    for index in range(branch_count):
+        angle = (index / branch_count) * math.tau + rng.uniform(-0.20, 0.20)
+        start_z = crown_base + rng.uniform(0.0, total_height * 0.14)
+        reach = crown_radius * rng.uniform(0.56, 0.96)
+        end_z = min(total_height - 1.35, start_z + rng.uniform(1.15, 2.75))
+        end = (math.cos(angle) * reach, math.sin(angle) * reach, end_z)
+        branch_ends.append(Vector(end))
+        objects.append(add_branch(f"branch_{index}", (0, 0, start_z), end, trunk_radius * rng.uniform(0.24, 0.34), 7, materials["bark_dark"]))
+    lobe_count = 10 + variant
+    canopy_materials = [materials["leaf_primary"], materials["leaf_secondary"], materials["leaf_warm"]]
+    for index in range(lobe_count):
+        branch_end = branch_ends[index % len(branch_ends)]
+        radial = Vector((branch_end.x, branch_end.y, 0.0))
+        radial.normalize()
+        loc = branch_end + radial * rng.uniform(-0.20, 0.45)
+        loc.z = min(total_height - 1.15, max(crown_base + 1.0, loc.z + rng.uniform(-0.25, 0.65)))
+        scale = (
+            rng.uniform(1.55, 2.35),
+            rng.uniform(1.35, 2.10),
+            min(rng.uniform(0.95, 1.55), total_height - loc.z),
+        )
+        objects.append(add_ico(f"leaf_{index}", 1, 1.0, loc, scale, canopy_materials[index % len(canopy_materials)], rng, 0.045))
+    combined = combine_asset(spec["id"], objects)
+    combined["trunk_radius"] = trunk_radius
+    return combined
+
+
+def build_old_growth_broadleaf(spec, materials, rng):
+    variant = spec["variant"]
+    total_height = 17.4 + variant * 1.85 + rng.uniform(-0.20, 0.20)
+    trunk_radius = 0.66 + variant * 0.075 + rng.uniform(-0.02, 0.02)
+    crown_base = total_height * rng.uniform(0.43, 0.49)
+    trunk_top = total_height * 0.76
+    trunk = add_cone("trunk", 10, trunk_radius * 1.22, trunk_radius * 0.60, trunk_top, (0, 0, trunk_top * 0.5), materials["trunk"])
+    objects = [trunk]
+    crown_radius = 5.1 + variant * 0.58
+    branch_count = 11 + variant * 2
+    branch_ends = []
+    for index in range(branch_count):
+        angle = (index / branch_count) * math.tau + rng.uniform(-0.16, 0.16)
+        start_z = crown_base + rng.uniform(0.0, total_height * 0.19)
+        reach = crown_radius * rng.uniform(0.52, 0.98)
+        end = (math.cos(angle) * reach, math.sin(angle) * reach, min(total_height - 1.8, start_z + rng.uniform(1.8, 4.2)))
+        branch_ends.append(Vector(end))
+        objects.append(add_branch(f"branch_{index}", (0, 0, start_z), end, trunk_radius * rng.uniform(0.22, 0.32), 7, materials["bark_dark"]))
+    canopy_materials = [materials["leaf_primary"], materials["leaf_secondary"], materials["leaf_warm"]]
+    lobe_count = 15 + variant * 2
+    for index in range(lobe_count):
+        branch_end = branch_ends[index % len(branch_ends)]
+        radial = Vector((branch_end.x, branch_end.y, 0.0))
+        radial.normalize()
+        loc = branch_end + radial * rng.uniform(-0.35, 0.60)
+        loc.z = min(total_height - 1.55, max(crown_base + 1.2, loc.z + rng.uniform(-0.35, 0.90)))
+        scale = (
+            rng.uniform(2.10, 3.10),
+            rng.uniform(1.75, 2.65),
+            min(rng.uniform(1.30, 2.10), total_height - loc.z),
+        )
+        objects.append(add_ico(f"leaf_{index}", 1, 1.0, loc, scale, canopy_materials[index % len(canopy_materials)], rng, 0.04))
+    combined = combine_asset(spec["id"], objects)
+    combined["trunk_radius"] = trunk_radius
+    return combined
+
+
+def build_mature_conifer(spec, materials, rng):
+    variant = spec["variant"]
+    total_height = 11.5 + (variant - 1) * 1.85 + rng.uniform(-0.16, 0.16)
+    trunk_radius = 0.34 + variant * 0.035
+    trunk_height = total_height * 0.94
+    objects = [add_cone("trunk", 9, trunk_radius * 1.18, trunk_radius * 0.42, trunk_height, (0, 0, trunk_height * 0.5), materials["trunk"])]
+    tier_count = 6 + variant
+    crown_base = total_height * rng.uniform(0.22, 0.28)
+    for index in range(tier_count):
+        progress = float(index) / float(max(1, tier_count - 1))
+        radius = (2.75 + variant * 0.22) * (1.0 - progress * 0.68) * rng.uniform(0.92, 1.05)
+        tier_height = rng.uniform(1.35, 1.80)
+        z = crown_base + progress * (total_height - crown_base - 1.0)
+        material = materials["needle_primary"] if index % 2 == 0 else materials["needle_secondary"]
+        objects.append(add_cone(f"needles_{index}", 10, radius, max(0.10, radius * 0.09), tier_height, (0, 0, z), material))
+    objects.append(add_cone("top", 10, 0.82, 0.0, 1.85, (0, 0, total_height - 0.92), materials["needle_secondary"]))
+    combined = combine_asset(spec["id"], objects)
+    combined["trunk_radius"] = trunk_radius
+    return combined
+
+
+def build_mature_savanna(spec, materials, rng):
+    variant = spec["variant"]
+    total_height = 8.4 + (variant - 1) * 1.75 + rng.uniform(-0.12, 0.12)
+    trunk_radius = 0.39 + variant * 0.045
+    lean = rng.uniform(-0.72, 0.72)
+    crown_base = total_height * rng.uniform(0.58, 0.65)
+    crown_center = Vector((lean, rng.uniform(-0.28, 0.28), crown_base + total_height * 0.08))
+    objects = [add_branch("trunk", (0, 0, 0.0), crown_center, trunk_radius, 9, materials["trunk"])]
+    crown_radius = 3.7 + variant * 0.55
+    branch_count = 7 + variant * 2
+    branch_ends = []
+    for index in range(branch_count):
+        angle = (index / branch_count) * math.tau + rng.uniform(-0.20, 0.20)
+        reach = crown_radius * rng.uniform(0.60, 1.0)
+        end = crown_center + Vector((math.cos(angle) * reach, math.sin(angle) * reach * 0.70, rng.uniform(0.18, 0.75)))
+        branch_ends.append(end)
+        objects.append(add_branch(f"branch_{index}", crown_center, end, trunk_radius * 0.25, 7, materials["bark_dark"]))
+    for index, end in enumerate(branch_ends):
+        loc = end + Vector((rng.uniform(-0.28, 0.28), rng.uniform(-0.24, 0.24), min(1.0, total_height - end.z - 0.35)))
+        scale = (rng.uniform(1.65, 2.45), rng.uniform(1.05, 1.75), min(rng.uniform(0.48, 0.85), total_height - loc.z))
+        objects.append(add_ico(f"savanna_leaf_{index}", 1, 1.0, loc, scale, materials["savanna_leaf"], rng, 0.035))
+    combined = combine_asset(spec["id"], objects)
+    combined["trunk_radius"] = trunk_radius
+    return combined
+
+
 def build_rock(spec, materials, rng):
     variant = spec["variant"]
     radius = 0.48 + variant * 0.07
@@ -381,6 +575,10 @@ BUILDERS = {
     "broadleaf": build_broadleaf,
     "conifer": build_conifer,
     "savanna": build_savanna,
+    "mature_broadleaf": build_mature_broadleaf,
+    "old_growth_broadleaf": build_old_growth_broadleaf,
+    "mature_conifer": build_mature_conifer,
+    "mature_savanna": build_mature_savanna,
     "rock": build_rock,
     "bush": build_bush,
     "stump_log": build_stump_log,
@@ -402,10 +600,120 @@ def material_slot_names(obj):
     return [slot.material.name for slot in obj.material_slots if slot.material]
 
 
+def is_foliage_material(name):
+    return name.startswith("leaf_") or name.startswith("needle_") or name == "savanna_leaf"
+
+
+def vertex_roles(obj):
+    foliage = set()
+    rigid = set()
+    for polygon in obj.data.polygons:
+        material = obj.material_slots[polygon.material_index].material if polygon.material_index < len(obj.material_slots) else None
+        material_name = material.name if material else ""
+        target = foliage if is_foliage_material(material_name) else rigid
+        target.update(polygon.vertices)
+    return foliage, rigid
+
+
+def paint_wind_colors(spec, obj):
+    if spec["family"] not in TREE_FAMILIES:
+        return None
+    mesh = obj.data
+    old = mesh.color_attributes.get(WIND_ATTRIBUTE_NAME)
+    if old:
+        mesh.color_attributes.remove(old)
+    attribute = mesh.color_attributes.new(name=WIND_ATTRIBUTE_NAME, type="BYTE_COLOR", domain="POINT")
+    mesh.color_attributes.active_color_index = list(mesh.color_attributes).index(attribute)
+    mesh.color_attributes.render_color_index = mesh.color_attributes.active_color_index
+    foliage, _rigid = vertex_roles(obj)
+    min_v, max_v = bounding_box(obj)
+    height = max(0.001, max_v.z - min_v.z)
+    variant_phase = float(spec.get("variant", 0)) * 0.173
+    for index, vertex in enumerate(mesh.vertices):
+        normalized_height = max(0.0, min(1.0, (vertex.co.z - min_v.z) / height))
+        root_factor = max(0.0, min(1.0, (normalized_height - 0.06) / 0.94))
+        foliage_factor = 1.0 if index in foliage else 0.0
+        bend = (root_factor ** 1.35) * (0.32 + foliage_factor * 0.68)
+        if normalized_height <= 0.06:
+            bend = 0.0
+        phase = (math.atan2(vertex.co.y, vertex.co.x) / math.tau + 0.5 + variant_phase + normalized_height * 0.19) % 1.0
+        flutter = (0.58 + 0.38 * ((math.sin(index * 2.399 + variant_phase * 17.0) + 1.0) * 0.5)) if index in foliage else 0.02 * root_factor
+        attribute.data[index].color = (bend, phase, flutter, 1.0)
+    mesh.update()
+    return wind_metadata(obj, attribute, foliage)
+
+
+def wind_metadata(obj, attribute=None, foliage=None):
+    attribute = attribute or obj.data.color_attributes.get(WIND_ATTRIBUTE_NAME)
+    if attribute is None:
+        return None
+    foliage = foliage if foliage is not None else vertex_roles(obj)[0]
+    min_v, max_v = bounding_box(obj)
+    height = max(0.001, max_v.z - min_v.z)
+    root_values = []
+    crown_values = []
+    channels = [[], [], [], []]
+    for index, vertex in enumerate(obj.data.vertices):
+        color = attribute.data[index].color
+        for channel in range(4):
+            channels[channel].append(float(color[channel]))
+        normalized_height = (vertex.co.z - min_v.z) / height
+        if normalized_height <= 0.08:
+            root_values.append(float(color[0]))
+        if index in foliage:
+            crown_values.append(float(color[0]))
+    names = ["bendR", "phaseG", "flutterB", "reservedA"]
+    ranges = {}
+    for index, name in enumerate(names):
+        values = channels[index]
+        ranges[name] = {
+            "min": snap(min(values)),
+            "max": snap(max(values)),
+            "mean": snap(sum(values) / len(values)),
+        }
+    return {
+        "attribute": "COLOR_0",
+        "sourceAttribute": WIND_ATTRIBUTE_NAME,
+        "domain": "POINT",
+        "storage": "BYTE_COLOR",
+        "vertexCount": len(obj.data.vertices),
+        "foliageVertexCount": len(foliage),
+        "rootVertexCount": len(root_values),
+        "rootMaxBend": snap(max(root_values) if root_values else 0.0),
+        "crownMinBend": snap(min(crown_values) if crown_values else 0.0),
+        "crownMaxBend": snap(max(crown_values) if crown_values else 0.0),
+        "channels": ranges,
+    }
+
+
+def tree_metrics(spec, obj):
+    if spec["family"] not in TREE_FAMILIES:
+        return None
+    min_v, max_v = bounding_box(obj)
+    foliage, _rigid = vertex_roles(obj)
+    foliage_vertices = [obj.matrix_world @ obj.data.vertices[index].co for index in foliage]
+    if foliage_vertices:
+        foliage_min = Vector((min(v.x for v in foliage_vertices), min(v.y for v in foliage_vertices), min(v.z for v in foliage_vertices)))
+        foliage_max = Vector((max(v.x for v in foliage_vertices), max(v.y for v in foliage_vertices), max(v.z for v in foliage_vertices)))
+    else:
+        foliage_min, foliage_max = min_v, max_v
+    crown_size = foliage_max - foliage_min
+    return {
+        "growthClass": str(spec.get("growthClass", "legacy")),
+        "height": snap(max_v.z - min_v.z),
+        "trunkRadius": snap(float(obj.get("trunk_radius", 0.16))),
+        "canopyRadius": snap(max(crown_size.x, crown_size.y) * 0.5),
+        "canopyRadiusX": snap(crown_size.x * 0.5),
+        "canopyRadiusY": snap(crown_size.y * 0.5),
+        "canopyBase": snap(foliage_min.z),
+        "canopyTop": snap(foliage_max.z),
+    }
+
+
 def asset_metadata(spec, obj, relative_path):
     min_v, max_v = bounding_box(obj)
     triangle_count = len(obj.data.polygons)
-    return {
+    metadata = {
         "id": spec["id"],
         "path": relative_path.replace("\\", "/"),
         "family": spec["family"],
@@ -423,7 +731,24 @@ def asset_metadata(spec, obj, relative_path):
             "originXYCentered": abs(float(obj.location.x)) <= 0.001 and abs(float(obj.location.y)) <= 0.001,
         },
         "materialSlots": material_slot_names(obj),
+        "materialRoles": {
+            "trunkBranch": [name for name in material_slot_names(obj) if name in {"trunk", "bark_dark"}],
+            "foliage": [name for name in material_slot_names(obj) if is_foliage_material(name)],
+        },
+        "runtimeEnabled": bool(spec.get("runtimeEnabled", True)),
+        "animationContract": {
+            "skeletons": 0,
+            "shapeKeys": 0,
+            "animationClips": 0,
+        },
     }
+    metrics = tree_metrics(spec, obj)
+    wind = wind_metadata(obj)
+    if metrics:
+        metadata["treeMetrics"] = metrics
+    if wind:
+        metadata["windData"] = wind
+    return metadata
 
 
 def export_glb(obj, filepath):
@@ -436,18 +761,29 @@ def export_glb(obj, filepath):
         use_selection=True,
         export_apply=True,
         export_materials="EXPORT",
+        export_vertex_color="ACTIVE",
+        export_all_vertex_colors=False,
+        export_animations=False,
+        export_morph=False,
+        export_skins=False,
     )
 
 
-def place_for_gallery(obj, index):
+def place_for_gallery(obj, index, asset_count):
+    rows = math.ceil(asset_count / GALLERY_COLUMNS)
     row = index // GALLERY_COLUMNS
     column = index % GALLERY_COLUMNS
-    obj.location.x = (column - (GALLERY_COLUMNS - 1) * 0.5) * GALLERY_SPACING_X
-    obj.location.y = -row * GALLERY_SPACING_Y
+    columns_in_row = min(GALLERY_COLUMNS, asset_count - row * GALLERY_COLUMNS)
+    obj.location.x = (column - (columns_in_row - 1) * 0.5) * GALLERY_SPACING_X
+    obj.location.y = 0.0
+    obj.location.z = (rows - row - 1) * GALLERY_SPACING_Z
 
 
 def add_gallery_label(text, obj):
-    bpy.ops.object.text_add(location=(obj.location.x - 0.95, obj.location.y - 1.18, 0.02), rotation=(math.radians(90), 0, 0))
+    bpy.ops.object.text_add(
+        location=(obj.location.x - 7.0, obj.location.y - 1.0, obj.location.z + 0.25),
+        rotation=(math.radians(90), 0, 0),
+    )
     label = bpy.context.object
     label.name = f"label_{text}"
     label.data.body = text
@@ -461,25 +797,25 @@ def add_gallery_label(text, obj):
 def setup_gallery_camera(asset_count):
     rows = math.ceil(asset_count / GALLERY_COLUMNS)
     center_x = 0.0
-    center_y = -((rows - 1) * GALLERY_SPACING_Y) * 0.5
+    center_z = ((rows - 1) * GALLERY_SPACING_Z + 22.0) * 0.5
     camera_data = bpy.data.cameras.new("AssetGalleryCamera")
     camera = bpy.data.objects.new("AssetGalleryCamera", camera_data)
     bpy.context.collection.objects.link(camera)
-    camera.location = (center_x, center_y - 16.5, 7.7)
-    target = Vector((center_x, center_y, 2.0))
+    camera.location = (center_x, -100.0, center_z)
+    target = Vector((center_x, 0.0, center_z))
     direction = target - Vector(camera.location)
     camera.rotation_euler = direction.to_track_quat("-Z", "Y").to_euler()
     camera.data.type = "ORTHO"
-    camera.data.ortho_scale = max(25.5, rows * 4.1)
+    camera.data.ortho_scale = max(56.0, rows * GALLERY_SPACING_Z + 4.0)
     bpy.context.scene.camera = camera
 
-    bpy.ops.object.light_add(type="AREA", location=(center_x - 4.5, center_y - 6.5, 8.0))
+    bpy.ops.object.light_add(type="AREA", location=(center_x - 14.5, -18.5, center_z + 18.0))
     key = bpy.context.object
     key.name = "GalleryKeyLight"
     key.data.energy = 520.0
-    key.data.size = 8.0
+    key.data.size = 22.0
 
-    bpy.ops.object.light_add(type="POINT", location=(center_x + 5.0, center_y + 2.0, 5.0))
+    bpy.ops.object.light_add(type="POINT", location=(center_x + 18.0, 9.0, center_z + 7.0))
     fill = bpy.context.object
     fill.name = "GalleryFillLight"
     fill.data.energy = 80.0
@@ -535,10 +871,13 @@ def main():
     reset_scene()
     materials = make_materials()
     assets = []
+    gallery_specs = [spec for spec in ASSET_SPECS if spec["family"] in CANOPY_FAMILIES]
+    gallery_index = 0
 
     for index, spec in enumerate(ASSET_SPECS):
         rng = stable_rng(spec["id"])
         obj = BUILDERS[spec["builder"]](spec, materials, rng)
+        paint_wind_colors(spec, obj)
         glb_path = environment_dir / f"{spec['id']}.glb"
         export_glb(obj, glb_path)
         relative_path = Path("assets/visual/generated/environment") / glb_path.name
@@ -546,14 +885,18 @@ def main():
         if metadata["triangleCount"] <= 0 or metadata["triangleCount"] > TRIANGLE_LIMIT:
             raise RuntimeError(f"{spec['id']} triangle count outside allowed range: {metadata['triangleCount']}")
         assets.append(metadata)
-        place_for_gallery(obj, index)
-        add_gallery_label(spec["id"], obj)
+        if spec["family"] in CANOPY_FAMILIES:
+            place_for_gallery(obj, gallery_index, len(gallery_specs))
+            add_gallery_label(spec["id"], obj)
+            gallery_index += 1
+        else:
+            obj.hide_render = True
 
-    setup_gallery_camera(len(ASSET_SPECS))
+    setup_gallery_camera(gallery_index)
     render_contact_sheet(contact_sheet_path)
 
     manifest = {
-        "schemaVersion": 1,
+        "schemaVersion": 2,
         "generator": GENERATOR_VERSION,
         "seed": SEED,
         "coordinateSystem": "Blender Z-up source; GLB import verified in Godot",
@@ -565,9 +908,21 @@ def main():
             "broadleaf_tree": 6,
             "conifer_tree": 4,
             "savanna_tree": 3,
+            "mature_broadleaf_tree": 4,
+            "old_growth_broadleaf_tree": 2,
+            "mature_conifer_tree": 4,
+            "mature_savanna_tree": 3,
             "rock": 6,
             "bush": 4,
             "stump_log": 3,
+        },
+        "windEncoding": {
+            "attribute": "COLOR_0",
+            "sourceAttribute": WIND_ATTRIBUTE_NAME,
+            "R": "main bend weight, zero at root and increasing into crown",
+            "G": "stable per-vertex phase offset",
+            "B": "foliage detail flutter weight",
+            "A": "reserved/AO, currently one",
         },
         "materialVocabulary": sorted(MATERIAL_SPECS.keys()),
     }

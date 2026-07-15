@@ -407,6 +407,15 @@
       "required": true
     },
     {
+      "id": "canopy_asset_import_contract",
+      "description": "VOX-120 Godot import integrity and runtime dormancy for generated mature canopy assets",
+      "command": ".\\tools\\run-canopy-asset-import-contract-tests.ps1",
+      "args": ["-ReportPath", "artifacts\\test-runners\\canopy-asset-import-contract.json"],
+      "reportPath": "artifacts\\test-runners\\canopy-asset-import-contract.json",
+      "evidenceLevel": "contract",
+      "required": true
+    },
+    {
       "id": "tutorial_actor_registration_contract",
       "description": "Manifest-derived tutorial actor profiles, ordinary registration parity, and no tutorial simulation privilege",
       "command": ".\\tools\\run-tutorial-actor-registration-contract-tests.ps1",
