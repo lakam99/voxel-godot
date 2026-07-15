@@ -106,6 +106,40 @@ func run() -> void:
 		disconnected_components.size() == 2,
 		JSON.stringify(disconnected_components)
 	)
+	var connected_player_region: Array[Vector2i] = [chunk_key]
+	var extension_index := 1
+	while bool(runtime.call("primary_viewer_covers_component", connected_player_region)) and extension_index <= 32:
+		connected_player_region.append(chunk_key + Vector2i(extension_index, 0))
+		extension_index += 1
+	var connected_player_region_needs_help := not bool(
+		runtime.call("primary_viewer_covers_component", connected_player_region)
+	)
+	var world_generation = main.get("world_generation_system")
+	runtime.call("configure_startup_auxiliary_viewers", connected_player_region, world_generation)
+	var auxiliary_viewer_records: Array = runtime.get("startup_auxiliary_viewers")
+	var auxiliary_covers_far_edge := false
+	for record_value in auxiliary_viewer_records:
+		if not (record_value is Dictionary):
+			continue
+		var record: Dictionary = record_value
+		var covered_chunks: Array = record.get("chunks", [])
+		if covered_chunks.has(connected_player_region.back()):
+			auxiliary_covers_far_edge = true
+			break
+	add_result(
+		"voxel_publication_player_connected_region_gets_auxiliary_coverage_when_needed",
+		connected_player_region.has(chunk_key)
+			and connected_player_region_needs_help
+			and auxiliary_covers_far_edge,
+		JSON.stringify({
+			"playerChunk": chunk_key,
+			"region": connected_player_region,
+			"primaryCovers": not connected_player_region_needs_help,
+			"auxiliaryViewerCount": auxiliary_viewer_records.size(),
+			"auxiliaryCoversFarEdge": auxiliary_covers_far_edge
+		})
+	)
+	runtime.call("clear_startup_auxiliary_viewers")
 	var shutdown_started_usec := Time.get_ticks_usec()
 	main.set_process(false)
 	main.set_physics_process(false)

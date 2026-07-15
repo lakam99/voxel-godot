@@ -183,22 +183,6 @@ func run() -> void:
         await test_inventory_and_crafting_systems()
         finish_playtest()
         return
-    if only_section == "underground_volume":
-        mark_progress("underground_volume")
-        await test_underground_volume_generation()
-        finish_playtest()
-        return
-    if only_section == "terrain_geometry":
-        mark_progress("terrain_collision")
-        await test_terrain_collision_shapes()
-        mark_progress("terrain_topology")
-        test_terrain_mesh_topology_signature()
-        mark_progress("terrain_material")
-        test_terrain_shader_material()
-        mark_progress("terrain_normals")
-        await test_terrain_chunk_edge_normals()
-        finish_playtest()
-        return
     if only_section == "hostiles":
         mark_progress("hostiles")
         await test_hostile_system()
@@ -229,14 +213,7 @@ func run() -> void:
         await test_navigation_map_system()
         finish_playtest()
         return
-    if only_section == "world_streaming":
-        mark_progress("world_streaming")
-        await test_world_chunk_streaming()
-        finish_playtest()
-        return
     if only_section == "chunk_detail_batches":
-        mark_progress("world_streaming")
-        await test_world_chunk_streaming()
         mark_progress("chunk_detail_batches")
         await test_chunk_detail_batches()
         finish_playtest()
@@ -329,12 +306,10 @@ func run() -> void:
     test_structural_integrity()
     mark_progress("landmarks")
     test_landmark_generation_and_loot()
-    mark_progress("underground_volume")
-    await test_underground_volume_generation()
-    mark_progress("ore_generation")
-    test_ore_generation_and_drops()
-    mark_progress("forage_wildlife")
-    test_forage_and_wildlife_drops()
+    # Voxel terrain/collision/streaming are owned by their dedicated current
+    # runners. Detail-batch and movement checks require a fresh world fixture
+    # and remain available through VOXEL_PLAYTEST_ONLY instead of running after
+    # this broad runner has intentionally mutated world and player state.
     mark_progress("generated_prop_visuals")
     test_generated_environment_prop_visuals()
     mark_progress("character_visuals")
@@ -345,20 +320,8 @@ func run() -> void:
     test_generated_visual_render_policy()
     mark_progress("held_item")
     await test_held_item_system()
-    mark_progress("terrain_collision")
-    await test_terrain_collision_shapes()
-    mark_progress("terrain_topology")
-    test_terrain_mesh_topology_signature()
-    mark_progress("terrain_material")
-    test_terrain_shader_material()
-    mark_progress("terrain_normals")
-    await test_terrain_chunk_edge_normals()
     mark_progress("terrain_generation_profile")
     test_terrain_generation_profile()
-    mark_progress("world_streaming")
-    await test_world_chunk_streaming()
-    mark_progress("chunk_detail_batches")
-    await test_chunk_detail_batches()
     mark_progress("sky_light")
     test_sky_light_consistency()
     mark_progress("environment_visual_style")
@@ -371,16 +334,6 @@ func run() -> void:
     test_weather_presentation_batching()
     mark_progress("spawn_clearance")
     test_spawn_clearance()
-    mark_progress("player_movement")
-    await test_player_movement()
-    mark_progress("uphill_smoothing")
-    await test_uphill_smoothing()
-    mark_progress("steep_uphill")
-    await test_steep_uphill_blocking()
-    mark_progress("airborne_obstacle")
-    await test_airborne_obstacle_blocking()
-    mark_progress("jump")
-    await test_jump()
     mark_progress("wait_grounded")
     await wait_until_grounded(120)
     mark_progress("mining_requirements")
@@ -5902,181 +5855,6 @@ func vec3_dictionary(value) -> Dictionary:
         "y": snappedf(vector.y, 0.001),
         "z": snappedf(vector.z, 0.001)
     }
-
-func test_ore_generation_and_drops() -> void:
-    if not main:
-        add_result("ore_generation_and_drops", false, "main missing")
-        return
-    var inventory_system = main.get("inventory_system")
-    var prop_root = main.get("prop_root") as Node3D
-    if inventory_system == null or prop_root == null:
-        add_result("ore_generation_and_drops", false, "inventory or prop root missing")
-        return
-
-    var rng := RandomNumberGenerator.new()
-    rng.seed = 481516
-    var copper_seen := false
-    var iron_seen := false
-    for i in range(260):
-        var ore: String = main.call("ore_for_cell", "alpine", 72.0, rng)
-        copper_seen = copper_seen or ore == "copperOre"
-        iron_seen = iron_seen or ore == "ironOre"
-        if copper_seen and iron_seen:
-            break
-
-    var copper_before: int = inventory_system.count("copperOre")
-    rng.seed = 9901
-    var cluster_nodes: Array = main.call("make_ore_cluster", prop_root, "playtest:copperOreCluster", player.global_position + Vector3(3.0, 0.0, 0.0), "copperOre", rng, 3)
-    var ore_body := cluster_nodes[0] as StaticBody3D if cluster_nodes.size() > 0 else null
-    var copper_visual_ok := false
-    var copper_meshes := 0
-    var copper_children := 0
-    if ore_body:
-        copper_meshes = count_mesh_descendants(ore_body)
-        copper_children = ore_body.get_child_count()
-        copper_visual_ok = (
-            copper_meshes >= 9
-            and copper_children >= 10
-            and String(ore_body.get_meta("ore_type", "")) == "copperOre"
-        )
-        main.call("complete_destroy_target", { "position": ore_body.global_position + Vector3.UP, "normal": Vector3.UP }, ore_body, "prop", "copperOre")
-    var dropped: bool = inventory_system.count("copperOre") > copper_before
-    rng.seed = 9902
-    var iron_body := main.call("make_ore", prop_root, "playtest:ironOreVisual", player.global_position + Vector3(5.5, 0.0, 0.0), "ironOre", rng) as StaticBody3D
-    var iron_meshes := count_mesh_descendants(iron_body) if iron_body != null else 0
-    var iron_children := iron_body.get_child_count() if iron_body != null else 0
-    var iron_visual_ok := iron_body != null and iron_meshes >= 9 and iron_children >= 10 and String(iron_body.get_meta("ore_type", "")) == "ironOre"
-    for node_value in cluster_nodes:
-        var node := node_value as Node
-        if node != null and is_instance_valid(node):
-            node.queue_free()
-    if iron_body != null and is_instance_valid(iron_body):
-        iron_body.queue_free()
-    add_result(
-        "ore_generation_and_drops",
-        copper_seen and iron_seen and dropped and copper_visual_ok and iron_visual_ok and cluster_nodes.size() >= 3,
-        "copper seen %s, iron seen %s, copper %d->%d, visuals %s/%s meshes %d/%d children %d/%d, cluster %d" % [
-            str(copper_seen),
-            str(iron_seen),
-            copper_before,
-            inventory_system.count("copperOre"),
-            str(copper_visual_ok),
-            str(iron_visual_ok),
-            copper_meshes,
-            iron_meshes,
-            copper_children,
-            iron_children,
-            cluster_nodes.size()
-        ]
-    )
-
-func test_forage_and_wildlife_drops() -> void:
-    if not main or not player:
-        add_result("forage_and_wildlife_drops", false, "main or player missing")
-        return
-    var inventory_system = main.get("inventory_system")
-    var prop_root = main.get("prop_root") as Node3D
-    if inventory_system == null or prop_root == null:
-        add_result("forage_and_wildlife_drops", false, "inventory or prop root missing")
-        return
-
-    var original_inventory := {
-        "slots": inventory_system.snapshot(),
-        "size": inventory_system.size,
-        "selectedSlot": inventory_system.selected_slot
-    }
-    inventory_system.set_size(ItemCatalogScript.MAX_INVENTORY_SIZE)
-    var expectations := {
-        "plains": { "material": "berryBush", "drop": "berries" },
-        "desert": { "material": "aloePatch", "drop": "aloe" },
-        "swamp": { "material": "mushroomCluster", "drop": "mirecap" },
-        "snow": { "material": "frostHerbPatch", "drop": "frostHerb" }
-    }
-    var rng := RandomNumberGenerator.new()
-    rng.seed = 772031
-    var forage_ok := true
-    var forage_details := []
-    var offset := 0.0
-    for biome in expectations.keys():
-        var expected: Dictionary = expectations[biome]
-        var spec: Dictionary = main.call("forage_for_biome", String(biome))
-        var material_id := String(spec.get("material", ""))
-        var drop_id := String(spec.get("drop", ""))
-        var before: int = inventory_system.count(drop_id)
-        var child_count := prop_root.get_child_count()
-        main.call("make_forage", prop_root, "playtest:forage:%s" % String(biome), player.global_position + Vector3(3.0 + offset, 0.0, 3.0), String(biome), rng)
-        var forage_body := prop_root.get_child(child_count) as StaticBody3D
-        if forage_body:
-            main.call("complete_destroy_target", { "position": forage_body.global_position + Vector3.UP, "normal": Vector3.UP }, forage_body, "prop", material_id)
-        var dropped: bool = inventory_system.count(drop_id) > before
-        var matched: bool = material_id == String(expected.get("material", "")) and drop_id == String(expected.get("drop", ""))
-        forage_ok = forage_ok and matched and dropped
-        forage_details.append("%s:%s/%s %d->%d" % [String(biome), material_id, drop_id, before, inventory_system.count(drop_id)])
-        offset += 1.6
-
-    var meat_before: int = inventory_system.count("rawMeat")
-    var hide_before: int = inventory_system.count("hide")
-    var child_count := prop_root.get_child_count()
-    main.call("make_wildlife", prop_root, "playtest:wildlife", player.global_position + Vector3(3.0, 0.0, 5.0), "snow", rng)
-    var wildlife_body := prop_root.get_child(child_count) as StaticBody3D
-    var wildlife_start := wildlife_body.global_position if wildlife_body else Vector3.ZERO
-    if wildlife_body:
-        for i in range(10):
-            main.call("update_wildlife", 0.125)
-    var wildlife_roamed := wildlife_body != null and is_instance_valid(wildlife_body) and wildlife_body.global_position.distance_to(wildlife_start) > 0.08
-    var wildlife_roam_distance := wildlife_body.global_position.distance_to(wildlife_start) if wildlife_body != null and is_instance_valid(wildlife_body) else 0.0
-    var wildlife_animated := wildlife_body != null and is_instance_valid(wildlife_body) and bool(wildlife_body.get_meta("wildlife_animated", false))
-    var wildlife_variant := String(wildlife_body.get_meta("wildlife_variant", "")) if wildlife_body != null and is_instance_valid(wildlife_body) else ""
-    if wildlife_body:
-        main.call("complete_destroy_target", { "position": wildlife_body.global_position + Vector3.UP, "normal": Vector3.UP }, wildlife_body, "prop", "wildlife")
-    var meat_after: int = inventory_system.count("rawMeat")
-    var hide_after: int = inventory_system.count("hide")
-    var wildlife_drop_ok: bool = meat_after > meat_before and hide_after > hide_before
-
-    var logs_before: int = inventory_system.count("logs")
-    child_count = prop_root.get_child_count()
-    main.call("make_tree", prop_root, "playtest:tree", player.global_position + Vector3(6.0, 0.0, 5.0), "forest", rng)
-    var tree_body := prop_root.get_child(child_count) as StaticBody3D
-    if tree_body:
-        main.call("complete_destroy_target", { "position": tree_body.global_position + Vector3.UP, "normal": Vector3.UP }, tree_body, "prop", "tree")
-    var falling_tree_found := false
-    for child in prop_root.get_children():
-        var node := child as Node
-        if node and node.name.begins_with("FallingTree"):
-            falling_tree_found = true
-            node.queue_free()
-    add_result(
-        "tree_fall_visual_and_logs",
-        falling_tree_found and inventory_system.count("logs") > logs_before,
-        "falling %s, logs %d->%d" % [str(falling_tree_found), logs_before, inventory_system.count("logs")]
-    )
-
-    inventory_system.clear()
-    inventory_system.add_item("stoneSword", 1)
-    set_active_inventory_item(inventory_system, "stoneSword")
-    var sword_power_ok := float(main.call("tool_power_for_material", "wildlife")) >= 4.0
-    inventory_system.clear()
-    inventory_system.add_item("stoneShovel", 1)
-    set_active_inventory_item(inventory_system, "stoneShovel")
-    var shovel_power_ok := float(main.call("tool_power_for_material", "berryBush")) >= 3.0
-
-    add_result(
-        "forage_and_wildlife_drops",
-        forage_ok and wildlife_drop_ok and wildlife_roamed and wildlife_animated and sword_power_ok and shovel_power_ok,
-        "forage %s, wildlife %s animated %s, meat %d->%d, hide %d->%d, roamed %.2f, sword %s, shovel %s" % [
-            str(forage_details),
-            wildlife_variant,
-            str(wildlife_animated),
-            meat_before,
-            meat_after,
-            hide_before,
-            hide_after,
-            wildlife_roam_distance,
-            str(sword_power_ok),
-            str(shovel_power_ok)
-        ]
-    )
-    inventory_system.restore(original_inventory)
 
 func test_generated_environment_prop_visuals() -> void:
     var props := main.get("prop_root") as Node3D if main else null

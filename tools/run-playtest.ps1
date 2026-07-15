@@ -6,6 +6,8 @@ param(
     [int]$TimeoutSeconds = 1800,
     [int]$StartupProgressSeconds = 120,
     [int]$StaleProgressSeconds = 300,
+    [ValidateSet("", "scene_bootstrap", "inventory_and_crafting", "hostiles", "structures", "movement", "navigation_map", "chunk_detail_batches", "mining_requirements", "mouse_interaction", "settings_debug", "tutorial_start", "tutorial_runtime_reset")]
+    [string]$Only = "",
     [switch]$Visible
 )
 
@@ -26,6 +28,11 @@ $env:VOXEL_PLAYTEST_PROGRESS = $progressPath
 $env:VOXEL_PLAYTEST = "1"
 $env:VOXEL_TEST_SEED = $Seed
 $env:VOXEL_PLAYTEST_RUN_TOKEN = $runToken
+if ($Only -ne "") {
+    $env:VOXEL_PLAYTEST_ONLY = $Only
+} else {
+    Remove-Item Env:\VOXEL_PLAYTEST_ONLY -ErrorAction SilentlyContinue
+}
 if ($ScreenshotPath -ne "") {
     $env:VOXEL_PLAYTEST_SCREENSHOT = $ScreenshotPath
 } else {

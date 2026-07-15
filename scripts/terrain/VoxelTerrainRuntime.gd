@@ -277,18 +277,10 @@ func configure_startup_collision_bounds(chunk_keys: Array) -> void:
 func configure_startup_auxiliary_viewers(chunk_keys: Array, world_generation) -> void:
 	if viewer == null or not is_instance_valid(viewer):
 		return
-	var player_value = main.get("player") if main != null else null
-	if not (player_value is Node3D) or not is_instance_valid(player_value):
-		return
-	var player_position: Vector3 = (player_value as Node3D).global_position
-	var player_chunk := Vector2i(
-		floori(player_position.x / (float(GAME_CHUNK_SIZE) * CELL)),
-		floori(player_position.z / (float(GAME_CHUNK_SIZE) * CELL))
-	)
 	var components := connected_gameplay_chunk_components(chunk_keys)
 	for component_value in components:
 		var component: Array = component_value
-		if component.has(player_chunk) or primary_viewer_covers_component(component):
+		if primary_viewer_covers_component(component):
 			continue
 		for spec_value in auxiliary_viewer_specs_for_component(component, world_generation):
 			var spec: Dictionary = spec_value

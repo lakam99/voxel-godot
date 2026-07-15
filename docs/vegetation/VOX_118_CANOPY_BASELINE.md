@@ -25,7 +25,7 @@ Phase 2 may proceed. The protected NPC suite is green, fixed-seed generation is 
 - Ground details use 53 attempts per chunk under the default density multiplier, then batch by detail family into `MultiMeshInstance3D` nodes. Detail shadows are disabled and visibility fading is self-relative.
 - Forest/taiga detail distribution is leaf litter 0.34, grass to 0.78, then flowers. Swamp uses reeds 0.50 then grass. Savanna/desert uses scrub 0.44 then pebbles.
 - Generated tree visibility is 260 m and trees cast shadows. The general visual-profile default is 180 m, matching the directional-shadow maximum. These ranges must be re-evaluated with the larger silhouettes rather than blindly retained.
-- Production foliage has no wind mask and does not read `foliageSway`. That key exists only in stale test fixtures and is scheduled for removal in VOX-123.
+- The pre-canopy fixture sway key was a no-op and was removed from every test in VOX-123. Production wind now uses the shared shader-global field and generated vertex masks described by VOX-121.
 
 ## Current generated tree metrics
 

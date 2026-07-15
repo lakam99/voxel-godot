@@ -44,7 +44,7 @@ func run() -> void:
 	main = MAIN_SCENE.instantiate()
 	main.set("render_distance", 1)
 	main.set("force_underground_volume_debug", true)
-	main.set("visual_quality", {"decorativeDensity": 0.0, "decorativeDetailCap": 0, "particleDensity": 0.0, "foliageSway": 0.0})
+	main.set("visual_quality", {"decorativeDensity": 0.0, "decorativeDetailCap": 0, "particleDensity": 0.0})
 	add_child(main)
 	main.set_process(false)
 	main.set_physics_process(false)

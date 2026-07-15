@@ -102,7 +102,6 @@ func run() -> void:
 	main.set("visual_quality", {
 		"decorativeDensity": 0.02,
 		"decorativeDetailCap": 3,
-		"foliageSway": 0.0,
 		"particleDensity": 0.0
 	})
 	add_child(main)
