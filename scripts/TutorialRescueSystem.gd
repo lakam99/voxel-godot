@@ -9,7 +9,11 @@ const MissionSceneReadinessRunnerScript := preload("res://scripts/missions/Missi
 const MissionTransitionRunnerScript := preload("res://scripts/missions/MissionTransitionRunner.gd")
 const FENCE_RADIUS_CELLS := 25
 const RESCUE_MONSTER_COUNT := 6
-const RESCUE_BATTLE_ACTIVATION_RADIUS := CELL * 10.0
+const RESCUE_GUARD_APPROACH_OFFSET := CELL * 3.0
+## The generic route authority may normalize the requested guard pose to a nearby
+## collision-proven endpoint. Keep that valid endpoint inside the mission trigger
+## while remaining strictly inside the encounter leash.
+const RESCUE_BATTLE_ACTIVATION_RADIUS := CELL * 11.0
 const RESCUE_ENCOUNTER_LEASH_RADIUS := CELL * 12.0
 const RESCUE_ELDER_ID := "mira"
 const RESCUE_GUARD_ID := "sera"
@@ -261,7 +265,10 @@ func rescue_scene_readiness() -> Dictionary:
     var outward := Vector3(site.x - float(center_x) * CELL, 0.0, site.z - float(center_z) * CELL).normalized()
     if outward.length_squared() < 0.5:
         outward = Vector3.RIGHT
-    var escort_target := site - outward * CELL * 6.0
+    # Keep the semantic goal far enough beyond the published perimeter that the
+    # generic runner's collision-backed endpoint normalization cannot satisfy it
+    # from an inside-fence cell. The guard still stops at the edge of the ring.
+    var escort_target := site - outward * RESCUE_GUARD_APPROACH_OFFSET
     escort_target.y = surface_y_at_position(escort_target) + 0.04
     var probes: Array = [site, escort_target, gate_result.get("position", expected_gate)]
     for index in range(RESCUE_MONSTER_COUNT):

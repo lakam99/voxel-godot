@@ -483,7 +483,7 @@ func run_final_rescue_from_ready_fixture() -> void:
     if full_player_pov_visual_mode():
         await capture_player_pov_stage(
             "player_pov_final_rescue_ready_fixture",
-            npc_target_position("mira"),
+            starter_house_exit_view_target(tutorial),
             { "fixture": report_data.get("finalRescueFixtureSetup", {}), "state": final_rescue_state_summary(tutorial) }
         )
     var exited_starter_house := await ensure_player_outside_starter_house_for_final_rescue(tutorial)
@@ -492,7 +492,7 @@ func run_final_rescue_from_ready_fixture() -> void:
     if full_player_pov_visual_mode():
         await capture_player_pov_stage(
             "player_pov_final_rescue_starter_exit",
-            npc_target_position("mira"),
+            starter_house_exit_view_target(tutorial),
             { "state": final_rescue_state_summary(tutorial) }
         )
     await run_final_rescue_tutorial(tutorial)
@@ -568,17 +568,23 @@ func stage_final_rescue_ready_fixture(tutorial) -> void:
 func place_player_for_final_rescue_fixture(tutorial) -> Dictionary:
     if player == null or tutorial == null:
         return {"ok": false, "reason": "missing_fixture_player_or_tutorial"}
-    var start_cell := intro_state_cell(tutorial, "startCell", flat_cell(player.global_position))
-    var outside_cell := Vector2i(start_cell.x, start_cell.y - 5)
-    var outside_position := world_position_for_flat_cell(outside_cell)
-    var runtime = main.get("voxel_terrain_runtime") if main != null else null
-    var proof: Dictionary = runtime.call("collision_proof_for_world_position", outside_position, 0.38) \
-        if runtime != null and runtime.has_method("collision_proof_for_world_position") else {}
-    if not bool(proof.get("passed", false)):
-        return {"ok": false, "reason": "fixture_outside_collision_not_ready", "proof": proof}
+    var exit_spec := starter_house_exit_spec(tutorial)
+    if not bool(exit_spec.get("ok", false)):
+        return exit_spec
+    var outside_cell: Vector2i = exit_spec.get("outsideCell", Vector2i.ZERO)
+    var outside_position: Vector3 = exit_spec.get("outsidePosition", Vector3.ZERO)
     player.global_position = outside_position # final_rescue_fixture_setup_allowance: pre-act placement outside the unrelated starter house.
     player.velocity = Vector3.ZERO
-    return {"ok": true, "cell": vec2i(outside_cell), "position": vec3(outside_position), "proof": proof}
+    return {
+        "ok": true,
+        "cell": vec2i(outside_cell),
+        "position": vec3(outside_position),
+        "startCell": exit_spec.get("startCell", []),
+        "doorCell": exit_spec.get("doorCell", []),
+        "houseBounds": exit_spec.get("houseBounds", {}),
+        "terrainProof": exit_spec.get("terrainProof", {}),
+        "capsuleProof": exit_spec.get("capsuleProof", {})
+    }
 
 func grant_final_rescue_fixture_items() -> Array[String]:
     var granted: Array[String] = []
@@ -600,12 +606,22 @@ func grant_final_rescue_fixture_items() -> Array[String]:
     return granted
 
 func ensure_player_outside_starter_house_for_final_rescue(tutorial) -> bool:
-    var start_cell := intro_state_cell(tutorial, "startCell", flat_cell(player.global_position))
+    var exit_spec := starter_house_exit_spec(tutorial)
+    if not bool(exit_spec.get("ok", false)):
+        add_failure("final_rescue_starter_exit_not_clear", JSON.stringify(exit_spec))
+        return false
+    var start_cell: Vector2i = exit_spec.get("startCellValue", Vector2i.ZERO)
+    var bounds: Dictionary = exit_spec.get("houseBoundsValue", {})
+    var starter_door := exit_spec.get("door") as Node3D
+    var starter_door_cell: Vector2i = exit_spec.get("doorCellValue", Vector2i.ZERO)
+    var outward: Vector2i = exit_spec.get("outwardValue", Vector2i(0, -1))
+    var exit_cell: Vector2i = exit_spec.get("outsideCell", Vector2i.ZERO)
     var current_cell := flat_cell(player.global_position)
-    if abs(current_cell.x - start_cell.x) > 8 or current_cell.y <= start_cell.y - 4:
+    var current_clearance := player_capsule_clearance_proof(player.global_position)
+    var door_offset := current_cell - starter_door_cell
+    var beyond_door: bool = door_offset.x * outward.x + door_offset.y * outward.y > 0
+    if not cell_in_flat_bounds(current_cell, bounds) and beyond_door and bool(current_clearance.get("ok", false)):
         return true
-    var starter_door_cell := Vector2i(start_cell.x, start_cell.y - 3)
-    var starter_door := nearest_block("door", world_position_for_flat_cell(starter_door_cell))
     if starter_door == null or not is_instance_valid(starter_door):
         add_failure("final_rescue_starter_exit_door_missing", JSON.stringify({
             "startCell": vec2i(start_cell),
@@ -618,9 +634,9 @@ func ensure_player_outside_starter_house_for_final_rescue(tutorial) -> bool:
         if not opened:
             return false
         await wait_physics_frames(POST_ACTION_FRAMES)
-    var exit_cell := Vector2i(start_cell.x, start_cell.y - 5)
+    var inside_door_cell := starter_door_cell - outward
     var reached_exit := await walk_intro_waypoints(
-        [Vector2i(start_cell.x, start_cell.y - 1), starter_door_cell, exit_cell],
+        [inside_door_cell, starter_door_cell, exit_cell],
         "final_rescue_starter_exit",
         CELL * 1.05,
         14.0
@@ -636,7 +652,23 @@ func ensure_player_outside_starter_house_for_final_rescue(tutorial) -> bool:
     if not reached_exit:
         return false
     await wait_physics_frames(POST_ACTION_FRAMES)
-    return true
+    current_cell = flat_cell(player.global_position)
+    current_clearance = player_capsule_clearance_proof(player.global_position)
+    door_offset = current_cell - starter_door_cell
+    beyond_door = door_offset.x * outward.x + door_offset.y * outward.y > 0
+    var safely_outside := not cell_in_flat_bounds(current_cell, bounds) \
+        and beyond_door \
+        and bool(current_clearance.get("ok", false))
+    if not safely_outside:
+        add_failure("final_rescue_starter_exit_not_proven", JSON.stringify({
+            "player": vec3(player.global_position),
+            "playerCell": vec2i(current_cell),
+            "doorCell": vec2i(starter_door_cell),
+            "houseBounds": flat_bounds_summary(bounds),
+            "beyondDoor": beyond_door,
+            "capsuleProof": current_clearance
+        }))
+    return safely_outside
 
 func observe_following_morning_outside_targets(seconds: float) -> void:
     var frame_count := ceili(seconds * float(Engine.physics_ticks_per_second))
@@ -2971,7 +3003,12 @@ func defeat_rescue_hostiles_with_player_input(tutorial, timeout_seconds: float) 
             await wait_physics_frames(POST_ACTION_FRAMES)
             continue
         await maybe_record_rescue_hostile_npc_target(tutorial, true)
-        var reached := await walk_near(target.global_position, CELL * 1.35, 8.0, "walking_to_final_rescue_hostile")
+        var reached := await walk_tutorial_route_near(
+            target.global_position,
+            CELL * 1.35,
+            12.0,
+            "walking_to_final_rescue_hostile"
+        )
         var defeated := await attack_rescue_hostile_with_player_input(target, "final_rescue_hostile_%02d" % final_rescue_combat_events.size())
         var remaining := alive_rescue_hostile_bodies().size()
         record_final_rescue_step("final_rescue_combat_%02d" % final_rescue_combat_events.size(), tutorial, {
@@ -2999,10 +3036,34 @@ func attack_rescue_hostile_with_player_input(target: Node3D, label: String) -> b
     while elapsed - started_at < 15.0 and hostile_body_alive(target):
         var target_position := target.global_position + Vector3(0.0, CELL * 0.65, 0.0)
         if flat_distance(player.global_position, target.global_position) > CELL * 1.55:
-            await walk_near(target.global_position, CELL * 1.25, 3.0, "closing_%s" % label)
+            await walk_tutorial_route_near(
+                target.global_position,
+                CELL * 1.25,
+                5.0,
+                "closing_%s" % label
+            )
         await aim_at(target_position)
         await wait_physics_frames(3)
         var before_hit := combat_hit_summary()
+        var valid_target_hit := combat_hit_matches_hostile_target(before_hit, target)
+        if not valid_target_hit:
+            attempts += 1
+            final_rescue_combat_events.append({
+                "label": label,
+                "attempt": attempts,
+                "time": rounded(elapsed),
+                "hitBeforeAttack": before_hit,
+                "targetPath": String(target.get_path()) if is_instance_valid(target) else "",
+                "attackDispatched": false,
+                "reason": "view_ray_not_on_target_hostile",
+                "targetPosition": vec3(target.global_position) if is_instance_valid(target) else [],
+                "remainingAfter": alive_rescue_hostile_bodies().size(),
+                "survival": survival_snapshot(),
+                "activeItem": active_stack_summary()
+            })
+            report_data["finalRescueCombatEvents"] = final_rescue_combat_events
+            await wait_physics_frames(4)
+            continue
         dispatch_mouse_button(MOUSE_BUTTON_LEFT, true)
         await wait_physics_frames(2)
         dispatch_mouse_button(MOUSE_BUTTON_LEFT, false)
@@ -3014,6 +3075,7 @@ func attack_rescue_hostile_with_player_input(target: Node3D, label: String) -> b
             "attempt": attempts,
             "time": rounded(elapsed),
             "hitBeforeAttack": before_hit,
+            "attackDispatched": true,
             "targetPosition": vec3(target.global_position) if is_instance_valid(target) else [],
             "aliveAfter": alive_after,
             "remainingAfter": alive_rescue_hostile_bodies().size(),
@@ -3368,6 +3430,16 @@ func combat_hit_summary() -> Dictionary:
         "distance": rounded(player.global_position.distance_to(position)),
         "position": vec3(position)
     }
+
+func combat_hit_matches_hostile_target(hit: Dictionary, target) -> bool:
+    if target == null or not is_instance_valid(target) or not bool(hit.get("hit", false)):
+        return false
+    if String(hit.get("colliderKind", "")) != "hostile":
+        return false
+    var collider_path := String(hit.get("colliderPath", ""))
+    if collider_path != "":
+        return collider_path == String(target.get_path())
+    return String(hit.get("collider", "")) == String(target.name)
 
 func maybe_use_field_ration_for_rescue() -> void:
     if survival_health() > 46.0 or int(inventory_totals().get("fieldRation", 0)) <= 0:
@@ -5292,6 +5364,141 @@ func starter_house_bounds(start_cell: Vector2i) -> Dictionary:
             max_cell.x = maxi(max_cell.x, flat.x)
             max_cell.y = maxi(max_cell.y, flat.y)
     return { "min": min_cell, "max": max_cell }
+
+func starter_house_exit_spec(tutorial) -> Dictionary:
+    if main == null or player == null or tutorial == null:
+        return { "ok": false, "reason": "missing_starter_exit_context" }
+    var start_cell := intro_state_cell(tutorial, "startCell", flat_cell(player.global_position))
+    var bounds := starter_house_bounds(start_cell)
+    var expected_door_cell := Vector2i(start_cell.x, start_cell.y - 3)
+    var starter_door := nearest_block("door", world_position_for_flat_cell(expected_door_cell))
+    if starter_door == null or not is_instance_valid(starter_door):
+        return {
+            "ok": false,
+            "reason": "starter_exit_door_missing",
+            "startCell": vec2i(start_cell),
+            "expectedDoorCell": vec2i(expected_door_cell),
+            "houseBounds": flat_bounds_summary(bounds)
+        }
+    var door_cell := block_flat_cell(starter_door)
+    var door_delta := door_cell - start_cell
+    var outward := Vector2i(signi(door_delta.x), 0) \
+        if absi(door_delta.x) > absi(door_delta.y) else Vector2i(0, signi(door_delta.y))
+    if outward == Vector2i.ZERO:
+        return {
+            "ok": false,
+            "reason": "starter_exit_door_direction_invalid",
+            "startCell": vec2i(start_cell),
+            "door": block_summary(starter_door),
+            "doorCell": vec2i(door_cell),
+            "houseBounds": flat_bounds_summary(bounds)
+        }
+    var first_outside := door_cell
+    var boundary_steps := 0
+    while cell_in_flat_bounds(first_outside, bounds) and boundary_steps < 32:
+        first_outside += outward
+        boundary_steps += 1
+    if cell_in_flat_bounds(first_outside, bounds):
+        return {
+            "ok": false,
+            "reason": "starter_exit_bounds_not_escaped",
+            "startCell": vec2i(start_cell),
+            "doorCell": vec2i(door_cell),
+            "outward": vec2i(outward),
+            "houseBounds": flat_bounds_summary(bounds)
+        }
+    var runtime = main.get("voxel_terrain_runtime")
+    var candidates: Array[Dictionary] = []
+    for extra_clearance in range(6):
+        var candidate_cell := first_outside + outward * extra_clearance
+        var candidate_position := world_position_for_flat_cell(candidate_cell)
+        var terrain_proof: Dictionary = runtime.call("collision_proof_for_world_position", candidate_position, 0.42) \
+            if runtime != null and runtime.has_method("collision_proof_for_world_position") else {}
+        var capsule_proof := player_capsule_clearance_proof(candidate_position)
+        var candidate := {
+            "cell": vec2i(candidate_cell),
+            "position": vec3(candidate_position),
+            "terrainProof": terrain_proof,
+            "capsuleProof": capsule_proof
+        }
+        candidates.append(candidate)
+        if bool(terrain_proof.get("passed", false)) and bool(capsule_proof.get("ok", false)):
+            return {
+                "ok": true,
+                "startCellValue": start_cell,
+                "doorCellValue": door_cell,
+                "outwardValue": outward,
+                "houseBoundsValue": bounds,
+                "door": starter_door,
+                "startCell": vec2i(start_cell),
+                "doorCell": vec2i(door_cell),
+                "outward": vec2i(outward),
+                "houseBounds": flat_bounds_summary(bounds),
+                "outsideCell": candidate_cell,
+                "outsidePosition": candidate_position,
+                "terrainProof": terrain_proof,
+                "capsuleProof": capsule_proof
+            }
+    return {
+        "ok": false,
+        "reason": "starter_exit_has_no_clear_collision_backed_cell",
+        "startCell": vec2i(start_cell),
+        "doorCell": vec2i(door_cell),
+        "outward": vec2i(outward),
+        "houseBounds": flat_bounds_summary(bounds),
+        "candidates": candidates
+    }
+
+func starter_house_exit_view_target(tutorial) -> Vector3:
+    var exit_spec := starter_house_exit_spec(tutorial)
+    if not bool(exit_spec.get("ok", false)):
+        return player.global_position + Vector3(0.0, 0.5, -CELL * 6.0) if player != null else Vector3.FORWARD * CELL * 6.0
+    var outside_position: Vector3 = exit_spec.get("outsidePosition", player.global_position)
+    var outward: Vector2i = exit_spec.get("outwardValue", Vector2i(0, -1))
+    return outside_position + Vector3(float(outward.x), 0.35, float(outward.y)) * CELL * 6.0
+
+func block_flat_cell(block: Node3D) -> Vector2i:
+    if block != null and block.has_meta("cell"):
+        var cell_value = block.get_meta("cell")
+        if cell_value is Vector3i:
+            return Vector2i(cell_value.x, cell_value.z)
+    return flat_cell(block.global_position) if block != null else Vector2i.ZERO
+
+func player_capsule_clearance_proof(position: Vector3) -> Dictionary:
+    if player == null or player.get_world_3d() == null:
+        return { "ok": false, "reason": "missing_player_collision_world" }
+    var shape := CapsuleShape3D.new()
+    shape.radius = 0.42
+    shape.height = 1.72
+    var query := PhysicsShapeQueryParameters3D.new()
+    query.shape = shape
+    query.transform = Transform3D(Basis(), position + Vector3(0.0, 0.86, 0.0))
+    query.collision_mask = player.collision_mask
+    query.collide_with_bodies = true
+    query.collide_with_areas = false
+    query.exclude = [player.get_rid()]
+    var hits: Array = player.get_world_3d().direct_space_state.intersect_shape(query, 16)
+    var ignored: Array[Dictionary] = []
+    for hit_value in hits:
+        var hit: Dictionary = hit_value if hit_value is Dictionary else {}
+        var collider := hit.get("collider") as Node
+        if collider == null or collider == player:
+            continue
+        var kind := String(collider.get_meta("kind", ""))
+        var block_type := String(collider.get_meta("block_type", ""))
+        if kind == "terrain" or (kind == "block" and block_type in ["cobblestonePath", "torch"]):
+            ignored.append({ "name": collider.name, "kind": kind, "blockType": block_type })
+            continue
+        return {
+            "ok": false,
+            "reason": "occupied_player_capsule",
+            "collider": collider.name,
+            "colliderPath": String(collider.get_path()),
+            "kind": kind,
+            "blockType": block_type,
+            "ignored": ignored
+        }
+    return { "ok": true, "reason": "", "ignored": ignored }
 
 func shrink_flat_bounds(bounds: Dictionary, x_padding: int, min_z_padding: int, max_z_padding: int) -> Dictionary:
     var min_cell: Vector2i = bounds.get("min", Vector2i.ZERO)
