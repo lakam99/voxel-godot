@@ -12,13 +12,16 @@ import bpy
 from mathutils import Vector
 
 
-GENERATOR_VERSION = "vox122-canopy-environment-v5"
+GENERATOR_VERSION = "vox128-age-ecology-environment-v1"
 SEED = 1492
 TRIANGLE_LIMIT = 2200
-GALLERY_COLUMNS = 4
-GALLERY_SPACING_X = 24.0
-GALLERY_SPACING_Z = 26.0
+TREE_TRIANGLE_LIMIT = 6200
+GALLERY_COLUMNS = 5
+GALLERY_SPACING_X = 38.0
+GALLERY_SPACING_Z = 46.0
 WIND_ATTRIBUTE_NAME = "wind"
+BARK_REPEATS_PER_METER = 0.72
+ECOLOGY_AGE_BANDS = ("young", "established", "mature", "old", "ancient")
 TREE_FAMILIES = {
     "broadleaf_tree",
     "conifer_tree",
@@ -27,12 +30,18 @@ TREE_FAMILIES = {
     "old_growth_broadleaf_tree",
     "mature_conifer_tree",
     "mature_savanna_tree",
+    "ecological_broadleaf_tree",
+    "ecological_conifer_tree",
+    "ecological_savanna_tree",
 }
 CANOPY_FAMILIES = {
     "mature_broadleaf_tree",
     "old_growth_broadleaf_tree",
     "mature_conifer_tree",
     "mature_savanna_tree",
+    "ecological_broadleaf_tree",
+    "ecological_conifer_tree",
+    "ecological_savanna_tree",
 }
 
 MATERIAL_SPECS = {
@@ -80,6 +89,51 @@ ASSET_SPECS = [
             "variant": index,
         }
         for index in range(1, 4)
+    ],
+    *[
+        {
+            "id": f"ecological_broadleaf_{age_band}_{variant:02d}",
+            "family": "ecological_broadleaf_tree",
+            "biomes": ["forest", "plains", "swamp", "beach"],
+            "builder": "ecological_broadleaf",
+            "variant": variant,
+            "growthClass": age_band,
+            "ageBand": age_band,
+            "architecture": "broadleaf",
+            "runtimeEnabled": True,
+        }
+        for age_band in ECOLOGY_AGE_BANDS
+        for variant in range(1, 3)
+    ],
+    *[
+        {
+            "id": f"ecological_conifer_{age_band}_{variant:02d}",
+            "family": "ecological_conifer_tree",
+            "biomes": ["taiga", "snow", "alpine", "tundra"],
+            "builder": "ecological_conifer",
+            "variant": variant,
+            "growthClass": age_band,
+            "ageBand": age_band,
+            "architecture": "conifer",
+            "runtimeEnabled": True,
+        }
+        for age_band in ECOLOGY_AGE_BANDS
+        for variant in range(1, 3)
+    ],
+    *[
+        {
+            "id": f"ecological_savanna_{age_band}_{variant:02d}",
+            "family": "ecological_savanna_tree",
+            "biomes": ["savanna", "plains", "desert", "beach"],
+            "builder": "ecological_savanna",
+            "variant": variant,
+            "growthClass": age_band,
+            "ageBand": age_band,
+            "architecture": "savanna",
+            "runtimeEnabled": True,
+        }
+        for age_band in ECOLOGY_AGE_BANDS
+        for variant in range(1, 3)
     ],
     *[
         {
@@ -215,6 +269,40 @@ def assign_material(obj, material):
         polygon.material_index = 0
 
 
+def author_bark_uv(obj, repeats_per_meter=BARK_REPEATS_PER_METER):
+    """Author branch-local, physical-length bark coordinates before transforms.
+
+    Cylinder/cone primitives are created along local Z. U follows circumference
+    and V follows local metric length, so forks and elongated trunks do not smear
+    one normalized texture over their full height. Caps use a compact planar map.
+    """
+    mesh = obj.data
+    uv_layer = mesh.uv_layers.get("UVMap") or mesh.uv_layers.new(name="UVMap")
+    z_values = [vertex.co.z for vertex in mesh.vertices]
+    z_min = min(z_values) if z_values else 0.0
+    radius = max(
+        0.001,
+        max((math.hypot(vertex.co.x, vertex.co.y) for vertex in mesh.vertices), default=1.0),
+    )
+    for polygon in mesh.polygons:
+        side_face = abs(float(polygon.normal.z)) < 0.72
+        raw_u = []
+        if side_face:
+            for loop_index in polygon.loop_indices:
+                vertex = mesh.vertices[mesh.loops[loop_index].vertex_index]
+                raw_u.append((math.atan2(vertex.co.y, vertex.co.x) / math.tau + 1.0) % 1.0)
+            if raw_u and max(raw_u) - min(raw_u) > 0.5:
+                raw_u = [value + 1.0 if value < 0.5 else value for value in raw_u]
+        for local_index, loop_index in enumerate(polygon.loop_indices):
+            vertex = mesh.vertices[mesh.loops[loop_index].vertex_index]
+            if side_face:
+                uv = (raw_u[local_index], (vertex.co.z - z_min) * repeats_per_meter)
+            else:
+                uv = (vertex.co.x / (radius * 2.0) + 0.5, vertex.co.y / (radius * 2.0) + 0.5)
+            uv_layer.data[loop_index].uv = uv
+    mesh.update()
+
+
 def add_cone(name, vertices, radius1, radius2, depth, location, material, rotation=(0.0, 0.0, 0.0)):
     bpy.ops.mesh.primitive_cone_add(
         vertices=vertices,
@@ -228,6 +316,8 @@ def add_cone(name, vertices, radius1, radius2, depth, location, material, rotati
     obj = bpy.context.object
     obj.name = name
     assign_material(obj, material)
+    if material.name in {"trunk", "bark_dark"}:
+        author_bark_uv(obj)
     apply_object_transform(obj)
     return obj
 
@@ -244,6 +334,8 @@ def add_cylinder(name, vertices, radius, depth, location, material, rotation=(0.
     obj = bpy.context.object
     obj.name = name
     assign_material(obj, material)
+    if material.name in {"trunk", "bark_dark"}:
+        author_bark_uv(obj)
     apply_object_transform(obj)
     return obj
 
@@ -307,6 +399,11 @@ def add_leaf_mesh(name, leaves, materials):
     mesh = bpy.data.meshes.new(f"{name}_mesh")
     mesh.from_pydata(vertices, [], faces)
     mesh.update()
+    uv_layer = mesh.uv_layers.new(name="UVMap")
+    leaf_uvs = ((0.5, 1.0), (1.0, 0.0), (0.0, 0.0))
+    for polygon in mesh.polygons:
+        for local_index, loop_index in enumerate(polygon.loop_indices):
+            uv_layer.data[loop_index].uv = leaf_uvs[local_index % 3]
     obj = bpy.data.objects.new(name, mesh)
     bpy.context.collection.objects.link(obj)
     for material in material_order:
@@ -364,6 +461,8 @@ def add_branch(name, start, end, radius, vertices, material):
     obj.name = name
     obj.rotation_euler = direction.to_track_quat("Z", "Y").to_euler()
     assign_material(obj, material)
+    if material.name in {"trunk", "bark_dark"}:
+        author_bark_uv(obj)
     apply_object_transform(obj)
     return obj
 
@@ -781,6 +880,244 @@ def build_mature_savanna(spec, materials, rng):
     return combined
 
 
+ECOLOGICAL_BROADLEAF_CONFIG = {
+    "young":       {"height": 10.0, "trunk": 0.32, "crown": 3.6,  "primary": 6,  "secondary": 1, "leaves": 320},
+    "established": {"height": 16.0, "trunk": 0.56, "crown": 6.0,  "primary": 9,  "secondary": 1, "leaves": 760},
+    "mature":      {"height": 25.0, "trunk": 0.95, "crown": 9.5,  "primary": 12, "secondary": 2, "leaves": 1480},
+    "old":         {"height": 32.0, "trunk": 1.35, "crown": 12.5, "primary": 15, "secondary": 2, "leaves": 2320},
+    "ancient":     {"height": 39.0, "trunk": 1.80, "crown": 15.5, "primary": 18, "secondary": 2, "leaves": 3240},
+}
+
+ECOLOGICAL_CONIFER_CONFIG = {
+    "young":       {"height": 11.0, "trunk": 0.30, "crown": 2.8, "tiers": 5,  "leaves": 320},
+    "established": {"height": 17.0, "trunk": 0.48, "crown": 4.0, "tiers": 7,  "leaves": 720},
+    "mature":      {"height": 25.0, "trunk": 0.75, "crown": 5.5, "tiers": 10, "leaves": 1420},
+    "old":         {"height": 34.0, "trunk": 1.05, "crown": 7.0, "tiers": 13, "leaves": 2260},
+    "ancient":     {"height": 43.0, "trunk": 1.40, "crown": 8.5, "tiers": 16, "leaves": 3160},
+}
+
+ECOLOGICAL_SAVANNA_CONFIG = {
+    "young":       {"height": 9.0,  "trunk": 0.30, "crown": 4.8,  "primary": 5,  "secondary": 1, "leaves": 320},
+    "established": {"height": 14.0, "trunk": 0.50, "crown": 7.5,  "primary": 7,  "secondary": 1, "leaves": 700},
+    "mature":      {"height": 20.0, "trunk": 0.78, "crown": 10.5, "primary": 9,  "secondary": 2, "leaves": 1320},
+    "old":         {"height": 26.0, "trunk": 1.08, "crown": 13.5, "primary": 11, "secondary": 2, "leaves": 2100},
+    "ancient":     {"height": 32.0, "trunk": 1.45, "crown": 16.5, "primary": 13, "secondary": 2, "leaves": 3020},
+}
+
+
+def age_band_index(spec):
+    return ECOLOGY_AGE_BANDS.index(str(spec["ageBand"]))
+
+
+def record_ecological_properties(combined, spec, trunk_radius, leaf_count, structure, layers, primary_count, secondary_count, terminal_count):
+    band_index = age_band_index(spec)
+    combined["trunk_radius"] = trunk_radius
+    combined["foliage_primitive_count"] = leaf_count
+    combined["foliage_structure"] = structure
+    combined["crown_layer_count"] = layers
+    combined["branch_cluster_count"] = primary_count + secondary_count
+    combined["age_band"] = spec["ageBand"]
+    combined["architecture"] = spec["architecture"]
+    combined["branch_generation_count"] = 2 if secondary_count == 0 else 3
+    combined["primary_branch_count"] = primary_count
+    combined["secondary_branch_count"] = secondary_count
+    combined["terminal_tip_count"] = terminal_count
+    combined["minimum_sector_occupancy"] = 1
+    combined["nominal_growth"] = float(band_index) / float(len(ECOLOGY_AGE_BANDS) - 1)
+    combined["minimum_fullness_passed"] = terminal_count >= primary_count and leaf_count >= 300
+    return combined
+
+
+def build_ecological_broadleaf(spec, materials, rng):
+    config = ECOLOGICAL_BROADLEAF_CONFIG[spec["ageBand"]]
+    variant_sign = -1.0 if spec["variant"] == 1 else 1.0
+    total_height = config["height"] * (1.0 + variant_sign * 0.025 + rng.uniform(-0.012, 0.012))
+    trunk_radius = config["trunk"] * (1.0 + variant_sign * 0.035)
+    crown_radius = config["crown"] * (1.0 - variant_sign * 0.025)
+    crown_base = total_height * (0.34 + age_band_index(spec) * 0.012)
+    trunk_top = total_height * 0.72
+    objects = [add_cone(
+        "trunk", 10, trunk_radius * 1.24, trunk_radius * 0.50, trunk_top,
+        (0.0, 0.0, trunk_top * 0.5), materials["trunk"]
+    )]
+    leader_end = Vector((rng.uniform(-0.35, 0.35), rng.uniform(-0.35, 0.35), total_height * 0.96))
+    objects.append(add_branch(
+        "leader", (0.0, 0.0, trunk_top - trunk_radius), leader_end,
+        max(0.07, trunk_radius * 0.22), 6, materials["bark_dark"]
+    ))
+    primary_count = int(config["primary"])
+    secondary_per_primary = int(config["secondary"])
+    primary_ends = []
+    terminals = []
+    secondary_count = 0
+    for index in range(primary_count):
+        angle = float(index) / float(primary_count) * math.tau + variant_sign * 0.11 + rng.uniform(-0.10, 0.10)
+        layer = index % 4
+        start = Vector((0.0, 0.0, crown_base + layer * total_height * 0.055 + rng.uniform(0.0, total_height * 0.025)))
+        layer_factor = 1.0 - layer * 0.055
+        reach = crown_radius * rng.uniform(0.73, 0.96) * layer_factor
+        end = Vector((math.cos(angle) * reach, math.sin(angle) * reach, min(total_height * 0.88, start.z + total_height * rng.uniform(0.12, 0.22))))
+        objects.append(add_branch(
+            f"primary_{index}", start, end,
+            max(0.07, trunk_radius * rng.uniform(0.23, 0.33)), 7, materials["bark_dark"]
+        ))
+        primary_ends.append(end)
+        if secondary_per_primary == 0:
+            terminals.append(end)
+        branch_vector = end - start
+        branch_tangent = Vector((-math.sin(angle), math.cos(angle), 0.0))
+        for secondary_index in range(secondary_per_primary):
+            branch_start = start.lerp(end, 0.52 + secondary_index * 0.12)
+            side = -1.0 if secondary_index % 2 == 0 else 1.0
+            secondary_end = end + branch_tangent * side * crown_radius * rng.uniform(0.16, 0.25)
+            secondary_end.z = min(total_height * 0.94, end.z + total_height * rng.uniform(0.035, 0.09))
+            objects.append(add_branch(
+                f"secondary_{index}_{secondary_index}", branch_start, secondary_end,
+                max(0.045, trunk_radius * rng.uniform(0.10, 0.16)), 6, materials["bark_dark"]
+            ))
+            terminals.append(secondary_end)
+            secondary_count += 1
+        terminals.append(end + branch_vector.normalized() * crown_radius * 0.08)
+    terminals.append(leader_end)
+    leaf_materials = [materials["leaf_primary"], materials["leaf_secondary"], materials["leaf_warm"]]
+    leaf_target = int(config["leaves"])
+    leaves = []
+    base_per_terminal = leaf_target // len(terminals)
+    remainder = leaf_target % len(terminals)
+    spray_scale = max(0.72, crown_radius * 0.115)
+    for index, terminal in enumerate(terminals):
+        radial = Vector((terminal.x, terminal.y, 0.0))
+        if radial.length < 0.001:
+            radial = Vector((1.0, 0.0, 0.0))
+        count = base_per_terminal + (1 if index < remainder else 0)
+        center = terminal.copy()
+        center.z = min(total_height * 0.965, max(crown_base + 0.7, center.z))
+        leaves.extend(leafy_spray_records(
+            center, radial, count, rng,
+            leaf_materials[index % 3:] + leaf_materials[:index % 3],
+            (0.62, 1.18), (0.36, 0.70), spray_scale, spray_scale * 0.78, 0.24,
+        ))
+    objects.append(add_leaf_mesh("terminal_leaf_sprays", leaves, leaf_materials))
+    combined = combine_asset(spec["id"], objects)
+    return record_ecological_properties(
+        combined, spec, trunk_radius, len(leaves), "three_generation_terminal_leaf_canopy",
+        4, primary_count, secondary_count, len(terminals)
+    )
+
+
+def build_ecological_conifer(spec, materials, rng):
+    config = ECOLOGICAL_CONIFER_CONFIG[spec["ageBand"]]
+    variant_sign = -1.0 if spec["variant"] == 1 else 1.0
+    total_height = config["height"] * (1.0 + variant_sign * 0.022 + rng.uniform(-0.01, 0.01))
+    trunk_radius = config["trunk"] * (1.0 + variant_sign * 0.03)
+    crown_radius = config["crown"] * (1.0 - variant_sign * 0.025)
+    tiers = int(config["tiers"])
+    trunk_height = total_height * 0.97
+    objects = [add_cone(
+        "trunk", 10, trunk_radius * 1.22, trunk_radius * 0.24, trunk_height,
+        (0.0, 0.0, trunk_height * 0.5), materials["trunk"]
+    )]
+    crown_base = total_height * 0.18
+    terminals = []
+    primary_count = 0
+    for tier in range(tiers):
+        progress = float(tier) / float(max(1, tiers - 1))
+        tier_radius = crown_radius * (1.0 - progress * 0.70) * rng.uniform(0.94, 1.04)
+        z = crown_base + progress * (total_height - crown_base - 1.1)
+        boughs = 4 + ((tier + spec["variant"]) % 2)
+        rotation = tier * 0.67 + variant_sign * 0.13
+        for bough in range(boughs):
+            angle = rotation + float(bough) / float(boughs) * math.tau
+            start = Vector((0.0, 0.0, z))
+            end = Vector((math.cos(angle) * tier_radius, math.sin(angle) * tier_radius, z + tier_radius * rng.uniform(-0.05, 0.09)))
+            objects.append(add_branch(
+                f"bough_{tier}_{bough}", start, end,
+                max(0.045, trunk_radius * (0.15 - progress * 0.045)), 4, materials["bark_dark"]
+            ))
+            terminals.append(end)
+            primary_count += 1
+    terminals.append(Vector((0.0, 0.0, total_height * 0.965)))
+    needle_materials = [materials["needle_primary"], materials["needle_secondary"]]
+    leaf_target = int(config["leaves"])
+    base_per_terminal = leaf_target // len(terminals)
+    remainder = leaf_target % len(terminals)
+    needles = []
+    spray = max(0.42, crown_radius * 0.105)
+    for index, terminal in enumerate(terminals):
+        radial = Vector((terminal.x, terminal.y, 0.12))
+        if radial.length < 0.001:
+            radial = Vector((0.0, 0.0, 1.0))
+        count = base_per_terminal + (1 if index < remainder else 0)
+        needles.extend(leafy_spray_records(
+            terminal, radial, count, rng,
+            needle_materials[index % 2:] + needle_materials[:index % 2],
+            (0.58, 1.08), (0.30, 0.58), spray, spray * 0.70, 0.14,
+        ))
+    objects.append(add_leaf_mesh("terminal_needle_sprays", needles, needle_materials))
+    combined = combine_asset(spec["id"], objects)
+    return record_ecological_properties(
+        combined, spec, trunk_radius, len(needles), "layered_radial_bough_terminal_needle_canopy",
+        tiers, primary_count, 0, len(terminals)
+    )
+
+
+def build_ecological_savanna(spec, materials, rng):
+    config = ECOLOGICAL_SAVANNA_CONFIG[spec["ageBand"]]
+    variant_sign = -1.0 if spec["variant"] == 1 else 1.0
+    total_height = config["height"] * (1.0 + variant_sign * 0.025 + rng.uniform(-0.012, 0.012))
+    trunk_radius = config["trunk"] * (1.0 + variant_sign * 0.035)
+    crown_radius = config["crown"] * (1.0 - variant_sign * 0.025)
+    primary_count = int(config["primary"])
+    secondary_per_primary = int(config["secondary"])
+    lean = rng.uniform(-0.55, 0.55)
+    crown_center = Vector((lean, rng.uniform(-0.3, 0.3), total_height * 0.68))
+    objects = [add_branch("trunk", (0.0, 0.0, 0.0), crown_center, trunk_radius, 10, materials["trunk"])]
+    terminals = []
+    secondary_count = 0
+    for index in range(primary_count):
+        angle = float(index) / float(primary_count) * math.tau + variant_sign * 0.12 + rng.uniform(-0.09, 0.09)
+        reach = crown_radius * rng.uniform(0.70, 0.96)
+        end = crown_center + Vector((math.cos(angle) * reach, math.sin(angle) * reach * 0.74, total_height * rng.uniform(0.07, 0.16)))
+        objects.append(add_branch(
+            f"primary_{index}", crown_center, end,
+            max(0.06, trunk_radius * rng.uniform(0.22, 0.31)), 7, materials["bark_dark"]
+        ))
+        tangent = Vector((-math.sin(angle), math.cos(angle), 0.0))
+        for secondary_index in range(secondary_per_primary):
+            side = -1.0 if secondary_index % 2 == 0 else 1.0
+            branch_start = crown_center.lerp(end, 0.55 + secondary_index * 0.12)
+            secondary_end = end + tangent * side * crown_radius * rng.uniform(0.13, 0.22)
+            secondary_end.z += total_height * rng.uniform(0.025, 0.065)
+            objects.append(add_branch(
+                f"secondary_{index}_{secondary_index}", branch_start, secondary_end,
+                max(0.04, trunk_radius * rng.uniform(0.10, 0.15)), 6, materials["bark_dark"]
+            ))
+            terminals.append(secondary_end)
+            secondary_count += 1
+        terminals.append(end)
+    leaf_materials = [materials["savanna_leaf"], materials["leaf_warm"]]
+    leaf_target = int(config["leaves"])
+    base_per_terminal = leaf_target // len(terminals)
+    remainder = leaf_target % len(terminals)
+    leaves = []
+    spray_x = max(0.76, crown_radius * 0.11)
+    for index, terminal in enumerate(terminals):
+        radial = Vector((terminal.x - crown_center.x, terminal.y - crown_center.y, 0.0))
+        count = base_per_terminal + (1 if index < remainder else 0)
+        center = terminal + Vector((0.0, 0.0, max(0.35, total_height * 0.94 - terminal.z)))
+        leaves.extend(leafy_spray_records(
+            center, radial, count, rng,
+            leaf_materials[index % 2:] + leaf_materials[:index % 2],
+            (0.68, 1.22), (0.40, 0.74), spray_x, spray_x * 0.55, 0.16,
+        ))
+    objects.append(add_leaf_mesh("umbrella_terminal_leaf_sprays", leaves, leaf_materials))
+    combined = combine_asset(spec["id"], objects)
+    return record_ecological_properties(
+        combined, spec, trunk_radius, len(leaves), "three_generation_umbrella_terminal_leaf_canopy",
+        3, primary_count, secondary_count, len(terminals)
+    )
+
+
 def build_rock(spec, materials, rng):
     variant = spec["variant"]
     radius = 0.48 + variant * 0.07
@@ -844,6 +1181,9 @@ BUILDERS = {
     "old_growth_broadleaf": build_old_growth_broadleaf,
     "mature_conifer": build_mature_conifer,
     "mature_savanna": build_mature_savanna,
+    "ecological_broadleaf": build_ecological_broadleaf,
+    "ecological_conifer": build_ecological_conifer,
+    "ecological_savanna": build_ecological_savanna,
     "rock": build_rock,
     "bush": build_bush,
     "stump_log": build_stump_log,
@@ -975,6 +1315,34 @@ def tree_metrics(spec, obj):
     }
 
 
+def bark_uv_metadata(obj):
+    uv_layer = obj.data.uv_layers.get("UVMap")
+    if uv_layer is None:
+        return None
+    values = []
+    vertex_indices = set()
+    for polygon in obj.data.polygons:
+        material = obj.material_slots[polygon.material_index].material if polygon.material_index < len(obj.material_slots) else None
+        if material is None or material.name not in {"trunk", "bark_dark"}:
+            continue
+        for loop_index in polygon.loop_indices:
+            uv = uv_layer.data[loop_index].uv
+            values.append((float(uv.x), float(uv.y)))
+            vertex_indices.add(obj.data.loops[loop_index].vertex_index)
+    if not values:
+        return None
+    return {
+        "attribute": "TEXCOORD_0",
+        "mapping": "branch_local_circumference_u_physical_length_v",
+        "authoredRepeatsPerMeter": BARK_REPEATS_PER_METER,
+        "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
+        "barkVertexCount": len(vertex_indices),
+        "barkLoopCount": len(values),
+        "uRange": [snap(min(value[0] for value in values)), snap(max(value[0] for value in values))],
+        "vRange": [snap(min(value[1] for value in values)), snap(max(value[1] for value in values))],
+    }
+
+
 def asset_metadata(spec, obj, relative_path):
     min_v, max_v = bounding_box(obj)
     triangle_count = len(obj.data.polygons)
@@ -982,8 +1350,11 @@ def asset_metadata(spec, obj, relative_path):
         "id": spec["id"],
         "path": relative_path.replace("\\", "/"),
         "family": spec["family"],
+        "growthClass": str(spec.get("growthClass", "legacy")),
+        "ageBand": str(spec.get("ageBand", "")),
         "biomeTags": spec["biomes"],
         "triangleCount": triangle_count,
+        "triangleLimit": TREE_TRIANGLE_LIMIT if spec["family"] in TREE_FAMILIES else TRIANGLE_LIMIT,
         "boundingBox": {
             "min": [snap(min_v.x), snap(min_v.y), snap(min_v.z)],
             "max": [snap(max_v.x), snap(max_v.y), snap(max_v.z)],
@@ -1013,6 +1384,9 @@ def asset_metadata(spec, obj, relative_path):
         metadata["treeMetrics"] = metrics
     if wind:
         metadata["windData"] = wind
+    bark_uv = bark_uv_metadata(obj)
+    if bark_uv:
+        metadata["barkData"] = bark_uv
     foliage_primitive_count = int(obj.get("foliage_primitive_count", 0))
     if foliage_primitive_count > 0:
         metadata["canopyStructure"] = {
@@ -1021,6 +1395,20 @@ def asset_metadata(spec, obj, relative_path):
             "structure": str(obj.get("foliage_structure", "leaf_sprays")),
             "crownLayerCount": int(obj.get("crown_layer_count", 0)),
             "branchClusterCount": int(obj.get("branch_cluster_count", 0)),
+            "terminalTipCount": int(obj.get("terminal_tip_count", 0)),
+        }
+    if str(spec.get("ageBand", "")):
+        metadata["treePhenotype"] = {
+            "architecture": str(obj.get("architecture", spec.get("architecture", ""))),
+            "ageBand": str(obj.get("age_band", spec["ageBand"])),
+            "nominalGrowth": snap(float(obj.get("nominal_growth", 0.0))),
+            "branchGenerationCount": int(obj.get("branch_generation_count", 0)),
+            "primaryBranchCount": int(obj.get("primary_branch_count", 0)),
+            "secondaryBranchCount": int(obj.get("secondary_branch_count", 0)),
+            "terminalTipCount": int(obj.get("terminal_tip_count", 0)),
+            "minimumSectorOccupancy": int(obj.get("minimum_sector_occupancy", 0)),
+            "minimumFullnessPassed": bool(obj.get("minimum_fullness_passed", False)),
+            "variant": int(spec["variant"]),
         }
     return metadata
 
@@ -1110,10 +1498,10 @@ def render_contact_sheet(path):
 
 def render_canopy_detail_sheet(gallery_objects, assets, path):
     representative_ids = [
-        "mature_broadleaf_03",
-        "old_growth_broadleaf_02",
-        "mature_conifer_03",
-        "mature_savanna_02",
+        "ecological_broadleaf_mature_02",
+        "ecological_broadleaf_ancient_02",
+        "ecological_conifer_mature_02",
+        "ecological_savanna_old_02",
     ]
     metadata_by_id = {asset["id"]: asset for asset in assets}
     for obj in gallery_objects.values():
@@ -1145,15 +1533,15 @@ def render_canopy_detail_sheet(gallery_objects, assets, path):
         detail.data.update()
         row = index // 2
         column = index % 2
-        center_x = (column - 0.5) * 22.0
-        center_z = (0.5 - row) * 16.0
+        center_x = (column - 0.5) * 36.0
+        center_z = (0.5 - row) * 28.0
         metrics = metadata_by_id[asset_id]["treeMetrics"]
         crown_center = (float(metrics["canopyBase"]) + float(metrics["canopyTop"])) * 0.5
         detail.location = (center_x, 0.0, center_z - crown_center)
         detail.hide_render = False
         detail_objects.append(detail)
         bpy.ops.object.text_add(
-            location=(center_x, -1.0, center_z - 7.3),
+            location=(center_x, -1.0, center_z - 12.8),
             rotation=(math.radians(90), 0, 0),
         )
         label = bpy.context.object
@@ -1169,7 +1557,7 @@ def render_canopy_detail_sheet(gallery_objects, assets, path):
     camera.location = (0.0, -100.0, 0.0)
     camera.rotation_euler = Vector((0.0, 100.0, 0.0)).to_track_quat("-Z", "Y").to_euler()
     camera.data.type = "ORTHO"
-    camera.data.ortho_scale = 38.0
+    camera.data.ortho_scale = 64.0
     bpy.context.scene.camera = camera
     bpy.context.scene.render.resolution_x = 3600
     bpy.context.scene.render.resolution_y = 2600
@@ -1214,7 +1602,7 @@ def main():
     reset_scene()
     materials = make_materials()
     assets = []
-    gallery_specs = [spec for spec in ASSET_SPECS if spec["family"] in CANOPY_FAMILIES]
+    gallery_specs = [spec for spec in ASSET_SPECS if spec["family"].startswith("ecological_")]
     gallery_objects = {}
     gallery_index = 0
 
@@ -1226,10 +1614,11 @@ def main():
         export_glb(obj, glb_path)
         relative_path = Path("assets/visual/generated/environment") / glb_path.name
         metadata = asset_metadata(spec, obj, str(relative_path))
-        if metadata["triangleCount"] <= 0 or metadata["triangleCount"] > TRIANGLE_LIMIT:
+        triangle_limit = int(metadata["triangleLimit"])
+        if metadata["triangleCount"] <= 0 or metadata["triangleCount"] > triangle_limit:
             raise RuntimeError(f"{spec['id']} triangle count outside allowed range: {metadata['triangleCount']}")
         assets.append(metadata)
-        if spec["family"] in CANOPY_FAMILIES:
+        if spec["family"].startswith("ecological_"):
             gallery_objects[spec["id"]] = obj
             place_for_gallery(obj, gallery_index, len(gallery_specs))
             add_gallery_label(spec["id"], obj)
@@ -1239,15 +1628,17 @@ def main():
 
     setup_gallery_camera(gallery_index)
     render_contact_sheet(contact_sheet_path)
-    detail_sheet_path = contact_sheet_path.with_name("canopy-leaf-detail-sheet-v3.png")
+    detail_sheet_path = contact_sheet_path.with_name("tree-ecology-leaf-detail-sheet-v1.png")
     render_canopy_detail_sheet(gallery_objects, assets, detail_sheet_path)
 
     manifest = {
-        "schemaVersion": 2,
+        "schemaVersion": 3,
         "generator": GENERATOR_VERSION,
         "seed": SEED,
         "coordinateSystem": "Blender Z-up source; GLB import verified in Godot",
-        "triangleLimit": TRIANGLE_LIMIT,
+        "triangleLimit": TREE_TRIANGLE_LIMIT,
+        "standardTriangleLimit": TRIANGLE_LIMIT,
+        "ecologicalTreeTriangleLimit": TREE_TRIANGLE_LIMIT,
         "environmentDirectory": "assets/visual/generated/environment",
         "contactSheet": f"assets/visual/generated/environment/{contact_sheet_path.name}",
         "canopyDetailSheet": f"assets/visual/generated/environment/{detail_sheet_path.name}",
@@ -1260,6 +1651,9 @@ def main():
             "old_growth_broadleaf_tree": 2,
             "mature_conifer_tree": 4,
             "mature_savanna_tree": 3,
+            "ecological_broadleaf_tree": 10,
+            "ecological_conifer_tree": 10,
+            "ecological_savanna_tree": 10,
             "rock": 6,
             "bush": 4,
             "stump_log": 3,
@@ -1271,6 +1665,19 @@ def main():
             "G": "stable per-vertex phase offset",
             "B": "foliage detail flutter weight",
             "A": "reserved/AO, currently one",
+        },
+        "treeEcology": {
+            "ageBands": list(ECOLOGY_AGE_BANDS),
+            "variantsPerArchitectureAndAgeBand": 2,
+            "selectionAuthority": "seed + biome + continuous local maturity + stable tree genetics",
+            "runtimeMeshGeneration": False,
+            "minimumFullness": "every primary sector has terminal foliage and each phenotype has at least 300 individual foliage cards",
+        },
+        "barkEncoding": {
+            "attribute": "TEXCOORD_0",
+            "mapping": "branch-local U circumference and V physical length",
+            "authoredRepeatsPerMeter": BARK_REPEATS_PER_METER,
+            "runtimeScaleCompensation": "instance shader bark_scale",
         },
         "materialVocabulary": sorted(MATERIAL_SPECS.keys()),
     }

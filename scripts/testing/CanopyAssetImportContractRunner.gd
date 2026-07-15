@@ -6,7 +6,12 @@ const CANOPY_FAMILIES := {
 	"old_growth_broadleaf_tree": true,
 	"mature_conifer_tree": true,
 	"mature_savanna_tree": true,
+	"ecological_broadleaf_tree": true,
+	"ecological_conifer_tree": true,
+	"ecological_savanna_tree": true,
 }
+const EXPECTED_CANOPY_ASSET_COUNT := 43
+const EXPECTED_RUNTIME_ASSET_COUNT := 69
 const VisualAssetRegistryScript := preload("res://scripts/visual/VisualAssetRegistry.gd")
 
 var report_path := ""
@@ -22,7 +27,7 @@ func run() -> void:
 	DirAccess.make_dir_recursive_absolute(report_path.get_base_dir())
 	var manifest := read_json(MANIFEST_PATH)
 	var canopy_assets := select_canopy_assets(manifest)
-	add_result("manifest_exposes_runtime_canopy_asset_set", int(manifest.get("schemaVersion", 0)) == 2 and canopy_assets.size() == 13 and all_runtime_enabled(canopy_assets), {
+	add_result("manifest_exposes_runtime_canopy_asset_set", int(manifest.get("schemaVersion", 0)) == 3 and canopy_assets.size() == EXPECTED_CANOPY_ASSET_COUNT and all_runtime_enabled(canopy_assets), {
 		"schemaVersion": manifest.get("schemaVersion", 0),
 		"assetIds": asset_ids(canopy_assets),
 		"runtimeEnabled": runtime_states(canopy_assets),
@@ -33,12 +38,15 @@ func run() -> void:
 		var row := import_asset(asset, import_errors)
 		if not row.is_empty():
 			imported_rows.append(row)
-	add_result("godot_imports_all_canopy_glbs", import_errors.is_empty() and imported_rows.size() == 13, {
+	add_result("godot_imports_all_canopy_glbs", import_errors.is_empty() and imported_rows.size() == EXPECTED_CANOPY_ASSET_COUNT, {
 		"importedCount": imported_rows.size(),
 		"errors": import_errors,
 	})
 	add_result("import_preserves_geometry_material_and_grounding_contract", rows_all_true(imported_rows, ["triangleCountMatches", "materialsMatch", "heightMatches", "grounded"]), compact_rows(imported_rows, ["id", "triangleCount", "height", "materials", "triangleCountMatches", "materialsMatch", "heightMatches", "grounded"]))
 	add_result("import_preserves_wind_vertex_color_contract", rows_all_true(imported_rows, ["allSurfacesHaveColor", "hasRootWeight", "hasCrownWeight", "hasFlutterWeight", "alphaReserved"]), compact_rows(imported_rows, ["id", "coloredVertexCount", "bendRange", "flutterRange", "alphaRange", "allSurfacesHaveColor", "hasRootWeight", "hasCrownWeight", "hasFlutterWeight", "alphaReserved"]))
+	add_result("import_preserves_scale_safe_bark_uv0", rows_all_true(imported_rows, ["allSurfacesHaveUv0"]), compact_rows(imported_rows, ["id", "uvVertexCount", "allSurfacesHaveUv0"]))
+	add_result("ecological_assets_publish_complete_age_and_fullness_contract", ecological_contract_complete(canopy_assets), ecological_contract_rows(canopy_assets))
+	add_result("ecological_phenotypes_grow_monotonically_with_age", ecological_growth_is_monotonic(canopy_assets), ecological_growth_rows(canopy_assets))
 	add_result("canopy_assets_remain_static_meshes", rows_all_true(imported_rows, ["staticOnly"]), compact_rows(imported_rows, ["id", "skeletonCount", "animationPlayerCount", "staticOnly"]))
 	var registry = VisualAssetRegistryScript.new()
 	var registry_ready: bool = registry.setup()
@@ -47,7 +55,7 @@ func run() -> void:
 		var asset_id := String(asset.get("id", ""))
 		if registry.assets_by_id.has(asset_id) or registry.scene_cache.has(asset_id):
 			runtime_ids_present.append(asset_id)
-	add_result("runtime_registry_publishes_vox120_canopy_assets", registry_ready and registry.asset_count() == 39 and registry.cached_scene_count() == 39 and runtime_ids_present.size() == 13, {
+	add_result("runtime_registry_publishes_finite_ecological_canopy_library", registry_ready and registry.asset_count() == EXPECTED_RUNTIME_ASSET_COUNT and registry.cached_scene_count() == EXPECTED_RUNTIME_ASSET_COUNT and runtime_ids_present.size() == EXPECTED_CANOPY_ASSET_COUNT, {
 		"registryReady": registry_ready,
 		"assetCount": registry.asset_count(),
 		"cachedSceneCount": registry.cached_scene_count(),
@@ -94,6 +102,7 @@ func import_asset(asset: Dictionary, errors: Array[String]) -> Dictionary:
 	var mesh := mesh_instance.mesh
 	var bounds := transformed_aabb(mesh_instance.global_transform, mesh.get_aabb())
 	var colors := inspect_colors(mesh)
+	var uvs := inspect_uv0(mesh)
 	var materials := imported_material_names(mesh)
 	var expected_materials := string_array(asset.get("materialSlots", []))
 	var imported_triangles := triangle_count(mesh)
@@ -112,6 +121,8 @@ func import_asset(asset: Dictionary, errors: Array[String]) -> Dictionary:
 		"bendRange": colors.bendRange,
 		"flutterRange": colors.flutterRange,
 		"alphaRange": colors.alphaRange,
+		"uvVertexCount": uvs.uvVertexCount,
+		"allSurfacesHaveUv0": uvs.allSurfacesHaveUv0,
 		"hasRootWeight": float(colors.bendRange[0]) <= 0.01,
 		"hasCrownWeight": float(colors.bendRange[1]) >= 0.95,
 		"hasFlutterWeight": float(colors.flutterRange[1]) >= 0.75,
@@ -122,6 +133,21 @@ func import_asset(asset: Dictionary, errors: Array[String]) -> Dictionary:
 	row["staticOnly"] = int(row.skeletonCount) == 0 and int(row.animationPlayerCount) == 0
 	instance.queue_free()
 	return row
+
+func inspect_uv0(mesh: Mesh) -> Dictionary:
+	var uv_vertex_count := 0
+	var surfaces_with_uv := 0
+	for surface_index in range(mesh.get_surface_count()):
+		var arrays := mesh.surface_get_arrays(surface_index)
+		var uvs: PackedVector2Array = arrays[Mesh.ARRAY_TEX_UV]
+		if uvs.is_empty():
+			continue
+		surfaces_with_uv += 1
+		uv_vertex_count += uvs.size()
+	return {
+		"uvVertexCount": uv_vertex_count,
+		"allSurfacesHaveUv0": mesh.get_surface_count() > 0 and surfaces_with_uv == mesh.get_surface_count(),
+	}
 
 func inspect_colors(mesh: Mesh) -> Dictionary:
 	var colored_vertex_count := 0
@@ -212,13 +238,96 @@ func all_runtime_enabled(assets: Array[Dictionary]) -> bool:
 	return true
 
 func rows_all_true(rows: Array[Dictionary], fields: Array[String]) -> bool:
-	if rows.size() != 13:
+	if rows.size() != EXPECTED_CANOPY_ASSET_COUNT:
 		return false
 	for row in rows:
 		for field in fields:
 			if not bool(row.get(field, false)):
 				return false
 	return true
+
+func ecological_contract_complete(assets: Array[Dictionary]) -> bool:
+	var band_counts := {}
+	for asset in assets:
+		var family := String(asset.get("family", ""))
+		if not family.begins_with("ecological_"):
+			continue
+		var phenotype: Dictionary = asset.get("treePhenotype", {})
+		var band := String(phenotype.get("ageBand", ""))
+		var key := "%s:%s" % [family, band]
+		band_counts[key] = int(band_counts.get(key, 0)) + 1
+		if not bool(phenotype.get("minimumFullnessPassed", false)) \
+			or int(phenotype.get("minimumSectorOccupancy", 0)) < 1 \
+			or int(phenotype.get("terminalTipCount", 0)) <= 0 \
+			or String(asset.get("barkData", {}).get("attribute", "")) != "TEXCOORD_0":
+			return false
+	for family in ["ecological_broadleaf_tree", "ecological_conifer_tree", "ecological_savanna_tree"]:
+		for band in ["young", "established", "mature", "old", "ancient"]:
+			if int(band_counts.get("%s:%s" % [family, band], 0)) != 2:
+				return false
+	return true
+
+func ecological_contract_rows(assets: Array[Dictionary]) -> Array[Dictionary]:
+	var rows: Array[Dictionary] = []
+	for asset in assets:
+		if String(asset.get("family", "")).begins_with("ecological_"):
+			rows.append({
+				"id": asset.get("id", ""),
+				"phenotype": asset.get("treePhenotype", {}),
+				"foliagePrimitiveCount": asset.get("canopyStructure", {}).get("foliagePrimitiveCount", 0),
+				"bark": asset.get("barkData", {}),
+			})
+	return rows
+
+func ecological_growth_is_monotonic(assets: Array[Dictionary]) -> bool:
+	var groups := ecological_growth_groups(assets)
+	for group_variant in groups.values():
+		var group: Dictionary = group_variant
+		var previous := {}
+		for band in ["young", "established", "mature", "old", "ancient"]:
+			var current: Dictionary = group.get(band, {})
+			if current.is_empty():
+				return false
+			if not previous.is_empty() and (
+				float(current.height) <= float(previous.height) \
+				or float(current.trunkRadius) <= float(previous.trunkRadius) \
+				or float(current.canopyRadius) <= float(previous.canopyRadius) \
+				or int(current.leaves) <= int(previous.leaves) \
+				or int(current.terminalTips) <= int(previous.terminalTips)
+			):
+				return false
+			previous = current
+	return groups.size() == 6
+
+func ecological_growth_rows(assets: Array[Dictionary]) -> Array[Dictionary]:
+	var rows: Array[Dictionary] = []
+	var groups := ecological_growth_groups(assets)
+	for key_variant in groups.keys():
+		rows.append({"group": String(key_variant), "bands": groups[key_variant]})
+	rows.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return String(a.group) < String(b.group))
+	return rows
+
+func ecological_growth_groups(assets: Array[Dictionary]) -> Dictionary:
+	var groups := {}
+	for asset in assets:
+		var family := String(asset.get("family", ""))
+		if not family.begins_with("ecological_"):
+			continue
+		var phenotype: Dictionary = asset.get("treePhenotype", {})
+		var metrics: Dictionary = asset.get("treeMetrics", {})
+		var structure: Dictionary = asset.get("canopyStructure", {})
+		var key := "%s:%d" % [family, int(phenotype.get("variant", 0))]
+		if not groups.has(key):
+			groups[key] = {}
+		groups[key][String(phenotype.get("ageBand", ""))] = {
+			"height": float(metrics.get("height", 0.0)),
+			"trunkRadius": float(metrics.get("trunkRadius", 0.0)),
+			"canopyRadius": float(metrics.get("canopyRadius", 0.0)),
+			"leaves": int(structure.get("foliagePrimitiveCount", 0)),
+			"terminalTips": int(phenotype.get("terminalTipCount", 0)),
+			"branchGenerations": int(phenotype.get("branchGenerationCount", 0)),
+		}
+	return groups
 
 func compact_rows(rows: Array[Dictionary], fields: Array[String]) -> Array[Dictionary]:
 	var output: Array[Dictionary] = []
@@ -266,11 +375,11 @@ func finish(imported_rows: Array[Dictionary]) -> void:
 	var report := {
 		"schemaVersion": 1,
 		"runnerId": "canopy_asset_import_contract",
-		"testId": "vox_122_canopy_asset_import_contract",
+		"testId": "vox_128_129_ecological_tree_asset_import_contract",
 		"finished": true,
 		"passed": failure_count == 0,
 		"evidenceLevel": "contract",
-		"scope": "Godot GLTF import, static mesh/material/geometry/wind-channel integrity, and VOX-122 runtime-registry publication for the VOX-120 canopy assets. This is import contract evidence, not live visual or gameplay acceptance.",
+		"scope": "Godot GLTF import, static mesh/material/geometry/wind-channel/UV integrity, finite five-band phenotype completeness, minimum foliage fullness, and runtime-registry publication. This is import contract evidence, not live visual or gameplay acceptance.",
 		"resultCount": results.size(),
 		"failureCount": failure_count,
 		"importedAssetCount": imported_rows.size(),
