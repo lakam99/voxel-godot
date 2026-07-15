@@ -127,7 +127,10 @@ func configure_visual_capture() -> void:
     mira_home_only = OS.get_environment("VOXEL_REAL_TUTORIAL_MIRA_HOME_ONLY").strip_edges() == "1"
     morning_outside_only = OS.get_environment("VOXEL_REAL_TUTORIAL_MORNING_OUTSIDE_ONLY").strip_edges() == "1"
     final_rescue_tutorial = OS.get_environment("VOXEL_REAL_TUTORIAL_FINAL_RESCUE").strip_edges() == "1"
-    playtest_god_mode = OS.get_environment("VOXEL_REAL_TUTORIAL_GOD_MODE").strip_edges() == "1"
+    # Headed tutorial playthroughs cross night phases. Player-only damage
+    # protection is the default test policy so NPC/night behavior remains
+    # observable even when the automated player would otherwise die.
+    playtest_god_mode = OS.get_environment("VOXEL_REAL_TUTORIAL_GOD_MODE").strip_edges() != "0"
     phase7_live_acceptance = OS.get_environment("VOXEL_REAL_TUTORIAL_PHASE7_LIVE_ACCEPTANCE").strip_edges() == "1"
     day_one_tutorial = OS.get_environment("VOXEL_REAL_TUTORIAL_DAY_ONE").strip_edges() == "1" or final_rescue_tutorial
     screenshot_dir = OS.get_environment("VOXEL_REAL_TUTORIAL_SCREENSHOT_DIR")
@@ -178,7 +181,7 @@ func run() -> void:
     }
 
     if phase7_live_acceptance and not phase7_environment_is_clean():
-        add_failure("phase7_live_acceptance_environment_invalid", "Phase 7 live acceptance requires VOXEL_PLAYTEST, VOXEL_TEST_SEED, VOXEL_SAVE_PATH_OVERRIDE, and god mode to be unset")
+        add_failure("phase7_live_acceptance_environment_invalid", "Phase 7 live acceptance requires gameplay fixture environment flags to be unset; player-only damage protection is runner-owned and reported separately")
         finish()
         return
 

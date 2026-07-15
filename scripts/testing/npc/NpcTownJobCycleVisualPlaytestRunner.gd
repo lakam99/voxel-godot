@@ -4,6 +4,7 @@ const MAIN_SCENE: PackedScene = preload("res://scenes/Main.tscn")
 const NpcFocusCameraObserverScript := preload("res://scripts/testing/npc/NpcFocusCameraObserver.gd")
 const NpcConstantsScript := preload("res://scripts/npc_ai/NpcConstants.gd")
 const HomeInteriorServiceScript := preload("res://scripts/npc_ai/behavior/HomeInteriorService.gd")
+const PlaytestSurvivalPolicyScript := preload("res://scripts/testing/PlaytestSurvivalPolicy.gd")
 
 const TEST_ID := "npc_generated_town_job_cycle_visual"
 const CELL := 1.35
@@ -12,7 +13,7 @@ const LOAD_SETTLE_FRAMES := 150
 const SAMPLE_EVERY_FRAMES := 30
 const CAPTURE_WIDTH := 1280
 const CAPTURE_HEIGHT := 720
-const DAY_OBSERVE_SECONDS := 10.0
+const DAY_OBSERVE_SECONDS := 45.0
 const NIGHT_HOME_TIMEOUT_SECONDS := 7.0
 const MORNING_OBSERVE_SECONDS := 8.0
 const SETTLED_FRAMES_REQUIRED := 8
@@ -33,6 +34,8 @@ const REQUIRED_JOB_TYPES := ["guard", "forage", "wood", "stone", "trade"]
 const REQUIRED_CAPTURE_STAGES := [
     "town_setup_fenced_gate",
     "day_jobs_overview",
+    "day_forager_reserved_resource",
+    "day_forager_after_resource_release",
     "day_guard_guarding",
     "night_all_inside_homes",
     "morning_emerge_jobs"
@@ -68,6 +71,9 @@ var town_summary := {}
 var role_summary := {}
 var fence_gate_summary := {}
 var day_matrix: Array[Dictionary] = []
+var day_resource_catalog := {}
+var day_initial_removed_props := {}
+var day_resource_lifecycle := {}
 var night_matrix: Array[Dictionary] = []
 var morning_matrix: Array[Dictionary] = []
 var night_door_timeline: Array[Dictionary] = []
@@ -79,6 +85,7 @@ var last_observer_camera_target := Vector3.ZERO
 var last_town_streaming_summary := {}
 var precondition_blocked := false
 var stopped_phase := ""
+var playtest_survival_policy := {}
 
 func _ready() -> void:
     wall_started_msec = Time.get_ticks_msec()
@@ -133,6 +140,15 @@ func run() -> void:
         finish(1)
         return
 
+    playtest_survival_policy = PlaytestSurvivalPolicyScript.enable_player_god_mode(main, TEST_ID)
+    add_result(
+        "observer_player_god_mode_enabled",
+        bool(playtest_survival_policy.get("enabled", false)),
+        JSON.stringify(playtest_survival_policy)
+    )
+    if failed:
+        finish(1)
+        return
     configure_observer_scene()
     if not await wait_startup_physics_frames(STARTUP_FRAMES, "startup"):
         add_result("startup_physics_frames_advanced", false, "physics frames did not advance during startup")
@@ -147,6 +163,8 @@ func run() -> void:
     write_progress("initial_day_staged")
     await wait_physics_frames(LOAD_SETTLE_FRAMES)
     collect_natural_npcs()
+    day_resource_catalog = resource_catalog_snapshot()
+    day_initial_removed_props = removed_props_snapshot()
     write_town_summary()
 
     add_result("natural_town_selected_non_tutorial", is_non_tutorial_town(), JSON.stringify(town_summary))
@@ -471,7 +489,8 @@ func write_town_summary() -> void:
             "random seed world load",
             "non-tutorial generated town selection",
             "player/camera placement for chunk loading and observation",
-            "intro tutorial clock-freeze neutralized so the global day/night clock can fast-forward"
+            "intro tutorial clock-freeze neutralized so the global day/night clock can fast-forward",
+            "day-job observation clock held at 10:00 while accelerated production physics and autonomy advance"
         ],
         "forbiddenFixtureSetup": [
             "no NPC creation or registration",
@@ -535,6 +554,9 @@ func observe_day_jobs() -> void:
     for frame in range(frames):
         position_observer_camera("overview")
         await get_tree().physics_frame
+        # Keep this observation in the daytime schedule while accelerated physics
+        # lets naturally assigned jobs, routes, reservations, and harvesting run.
+        set_display_hour(10.0)
         if frame % SAMPLE_EVERY_FRAMES == 0:
             var matrix := current_npc_matrix("day")
             day_matrix = matrix
@@ -550,16 +572,39 @@ func observe_day_jobs() -> void:
                     non_special_distance_by_id[id] = maxf(float(non_special_distance_by_id.get(id, 0.0)), float(row.get("distanceFromInitial", 0.0)))
             if guard_now and not capture_stage_saved("day_guard_guarding"):
                 await capture_stage("day_guard_guarding", "guard")
-            if observed_guard and capture_stage_saved("day_guard_guarding") and active_non_special_workers_near_town(matrix) and active_non_special_workers_move_or_work(non_special_distance_by_id, matrix):
+            if matrix_has_forager_reservation(matrix) and not capture_stage_saved("day_forager_reserved_resource"):
+                await capture_stage("day_forager_reserved_resource", "forager")
+            day_resource_lifecycle = resource_lifecycle_summary()
+            if resource_lifecycle_acceptance_ready(day_resource_lifecycle) and not capture_stage_saved("day_forager_after_resource_release"):
+                await capture_stage("day_forager_after_resource_release", "forager")
+            if observed_guard \
+                and capture_stage_saved("day_guard_guarding") \
+                and capture_stage_saved("day_forager_reserved_resource") \
+                and capture_stage_saved("day_forager_after_resource_release") \
+                and active_non_special_workers_near_town(matrix) \
+                and active_non_special_workers_move_or_work(non_special_distance_by_id, matrix) \
+                and resource_lifecycle_acceptance_ready(day_resource_lifecycle):
                 break
     Engine.time_scale = old_scale
+    await wait_physics_frames(4)
     day_matrix = current_npc_matrix("day_final")
     if not capture_stage_saved("day_guard_guarding"):
         await capture_stage("day_guard_guarding", "guard")
+    if not capture_stage_saved("day_forager_reserved_resource"):
+        await capture_stage("day_forager_reserved_resource", "forager")
+    if not capture_stage_saved("day_forager_after_resource_release"):
+        await capture_stage("day_forager_after_resource_release", "forager")
     await capture_stage("day_jobs_overview", "overview")
     var stale_foragers := stale_forager_rows(day_matrix)
+    var depleted_target_samples := depleted_forager_target_samples()
+    var circle_suspects := forager_circle_suspects()
+    day_resource_lifecycle = resource_lifecycle_summary()
     var departure_reissue := day_home_departure_reissue_summary()
     add_result("day_forager_has_no_stale_reservation", stale_foragers.is_empty(), JSON.stringify(stale_foragers))
+    add_result("day_forager_never_holds_depleted_target", depleted_target_samples.is_empty(), JSON.stringify(depleted_target_samples))
+    add_result("day_forager_does_not_circle_or_oscillate_between_targets", circle_suspects.is_empty(), JSON.stringify(circle_suspects))
+    add_result("day_ground_forage_depletion_retires_prop_and_releases_forager", bool(day_resource_lifecycle.get("forageAccepted", false)), JSON.stringify(day_resource_lifecycle.get("forage", [])))
+    add_result("day_non_tutorial_forager_makes_bounded_forward_progress_after_release", bool(day_resource_lifecycle.get("foragerProgressAccepted", false)), JSON.stringify(day_resource_lifecycle.get("foragerProgress", {})))
     add_result("day_guard_uses_builtin_guard", observed_guard, JSON.stringify(filtered_job_rows(day_matrix, "guard")))
     add_result("day_shared_home_departure_does_not_reissue_clearance", bool(departure_reissue.get("ok", false)), JSON.stringify(departure_reissue))
     add_result("day_active_non_guard_non_foragers_stay_near_town", active_non_special_workers_near_town(day_matrix), JSON.stringify(filtered_non_special_rows(day_matrix)))
@@ -904,6 +949,286 @@ func forager_reservation_is_stale(row: Dictionary) -> bool:
         and int(corridor.get("noProgressTicks", 0)) >= 24 \
         and float(row.get("lastMoveDistance", 0.0)) <= 0.001
 
+func matrix_has_forager_reservation(matrix: Array[Dictionary]) -> bool:
+    for row in matrix:
+        if String(row.get("job", "")) == "forage" \
+            and String(row.get("jobObjectId", "")) != "" \
+            and String(row.get("jobReservationId", "")) != "":
+            return true
+    return false
+
+func depleted_forager_target_samples() -> Array[Dictionary]:
+    var rows: Array[Dictionary] = []
+    for sample_value in timeline:
+        if not (sample_value is Dictionary):
+            continue
+        var sample: Dictionary = sample_value
+        if not String(sample.get("label", "")).begins_with("day_"):
+            continue
+        var matrix: Array = sample.get("matrix", []) if sample.get("matrix", []) is Array else []
+        for row_value in matrix:
+            if not (row_value is Dictionary):
+                continue
+            var row: Dictionary = row_value
+            if String(row.get("job", "")) != "forage" or String(row.get("jobObjectId", "")) == "":
+                continue
+            var debug: Dictionary = row.get("smartObjectReservationDebug", {}) if row.get("smartObjectReservationDebug", {}) is Dictionary else {}
+            var depleted := bool(debug.get("depleted", false)) or String(row.get("jobFailureReason", "")) == "resource_depleted"
+            var reservation_id := String(row.get("jobReservationId", ""))
+            var phase := String(row.get("jobPhase", ""))
+            # A completed job retains its object ID as provenance while returning
+            # home, but it no longer holds or targets that resource. Only active
+            # resource-facing phases (or a live reservation) can be stale here.
+            var actively_holds_resource := reservation_id != "" \
+                or phase not in ["returning", "idle"]
+            if depleted and actively_holds_resource:
+                rows.append({
+                    "sample": String(sample.get("label", "")),
+                    "id": String(row.get("id", "")),
+                    "name": String(row.get("name", "")),
+                    "objectId": String(row.get("jobObjectId", "")),
+                    "reservationId": reservation_id,
+                    "phase": phase,
+                    "failureReason": String(row.get("jobFailureReason", "")),
+                    "debug": debug
+                })
+    return rows
+
+func forager_circle_suspects() -> Array[Dictionary]:
+    var samples_by_id := {}
+    for sample_value in timeline:
+        if not (sample_value is Dictionary):
+            continue
+        var sample: Dictionary = sample_value
+        if not String(sample.get("label", "")).begins_with("day_"):
+            continue
+        var matrix: Array = sample.get("matrix", []) if sample.get("matrix", []) is Array else []
+        for row_value in matrix:
+            if not (row_value is Dictionary):
+                continue
+            var row: Dictionary = row_value
+            if String(row.get("job", "")) != "forage" or bool(row.get("abstractSimulated", false)):
+                continue
+            var id := String(row.get("id", ""))
+            var actor_samples: Array = samples_by_id.get(id, [])
+            actor_samples.append(row)
+            samples_by_id[id] = actor_samples
+    var suspects: Array[Dictionary] = []
+    for id_value in samples_by_id.keys():
+        var id := String(id_value)
+        var actor_samples: Array = samples_by_id[id]
+        if actor_samples.size() < 8:
+            continue
+        var first_position := summary_position(actor_samples[0].get("position", {}))
+        var previous_position := first_position
+        var last_position := first_position
+        var path_length := 0.0
+        var min_x := first_position.x
+        var max_x := first_position.x
+        var min_z := first_position.z
+        var max_z := first_position.z
+        var target_ids := {}
+        var visited_cells := {}
+        var depleted_samples := 0
+        var max_job_runs := int(actor_samples[0].get("jobRuns", 0))
+        var initial_runs := int(actor_samples[0].get("initialJobRuns", 0))
+        for row_value in actor_samples:
+            var row: Dictionary = row_value
+            var position := summary_position(row.get("position", {}))
+            path_length += flat_distance(previous_position, position)
+            previous_position = position
+            last_position = position
+            min_x = minf(min_x, position.x)
+            max_x = maxf(max_x, position.x)
+            min_z = minf(min_z, position.z)
+            max_z = maxf(max_z, position.z)
+            visited_cells[JSON.stringify(row.get("cell", {}))] = true
+            var object_id := String(row.get("jobObjectId", ""))
+            if object_id != "":
+                target_ids[object_id] = true
+            var debug: Dictionary = row.get("smartObjectReservationDebug", {}) if row.get("smartObjectReservationDebug", {}) is Dictionary else {}
+            if bool(debug.get("depleted", false)) or String(row.get("jobFailureReason", "")) == "resource_depleted":
+                depleted_samples += 1
+            max_job_runs = maxi(max_job_runs, int(row.get("jobRuns", 0)))
+        var net_displacement := flat_distance(first_position, last_position)
+        var bounds_span := Vector2(max_x - min_x, max_z - min_z).length()
+        var suspicious := path_length >= CELL * 8.0 \
+            and net_displacement <= CELL * 2.0 \
+            and bounds_span <= CELL * 6.0 \
+            and max_job_runs <= initial_runs \
+            and (depleted_samples >= 2 or target_ids.size() <= 2) \
+            and visited_cells.size() <= 14
+        if suspicious:
+            suspects.append({
+                "id": id,
+                "name": String(actor_samples.back().get("name", "")),
+                "sampleCount": actor_samples.size(),
+                "pathLength": rounded(path_length),
+                "netDisplacement": rounded(net_displacement),
+                "boundsSpan": rounded(bounds_span),
+                "visitedCellCount": visited_cells.size(),
+                "targetIds": target_ids.keys(),
+                "depletedSamples": depleted_samples,
+                "initialJobRuns": initial_runs,
+                "maximumJobRuns": max_job_runs
+            })
+    return suspects
+
+func summary_position(value) -> Vector3:
+    if value is Vector3:
+        return value
+    if value is Dictionary:
+        return Vector3(float(value.get("x", 0.0)), float(value.get("y", 0.0)), float(value.get("z", 0.0)))
+    return Vector3.ZERO
+
+func resource_catalog_snapshot() -> Dictionary:
+    var catalog := {}
+    var service = smart_object_service()
+    if service == null:
+        return catalog
+    var registrations = service.get("registrations")
+    if not (registrations is Dictionary):
+        return catalog
+    var maximum_distance := (float(town.get("radius", 30)) + 28.0) * CELL
+    for object_id_value in registrations.keys():
+        var object_id := String(object_id_value)
+        var registration = registrations.get(object_id)
+        if registration == null or not (String(registration.kind) in ["forage_source", "tree_source"]):
+            continue
+        var node = registration.node as Node3D
+        if node == null or not is_instance_valid(node) or flat_distance(node.global_position, town_center_position()) > maximum_distance:
+            continue
+        var prop_id := String(node.get_meta("prop_id", ""))
+        if prop_id == "":
+            continue
+        catalog[prop_id] = {
+            "propId": prop_id,
+            "objectId": object_id,
+            "kind": String(registration.kind),
+            "material": String(node.get_meta("material", registration.metadata.get("material", ""))),
+            "drop": String(node.get_meta("drop", registration.metadata.get("drop", ""))),
+            "position": vec3(node.global_position)
+        }
+    return catalog
+
+func removed_props_snapshot() -> Dictionary:
+    if main == null or not (main.get("removed_props") is Dictionary):
+        return {}
+    return (main.get("removed_props") as Dictionary).duplicate(true)
+
+func resource_lifecycle_summary() -> Dictionary:
+    var removed := removed_props_snapshot()
+    var forage_rows: Array[Dictionary] = []
+    var tree_rows: Array[Dictionary] = []
+    for prop_id_value in removed.keys():
+        var prop_id := String(prop_id_value)
+        if day_initial_removed_props.has(prop_id) or not day_resource_catalog.has(prop_id):
+            continue
+        var catalog_row: Dictionary = day_resource_catalog.get(prop_id, {})
+        var object_id := String(catalog_row.get("objectId", "prop:%s" % prop_id))
+        var debug: Dictionary = npc_system.call("smart_object_reservation_debug", object_id, "") if npc_system != null and npc_system.has_method("smart_object_reservation_debug") else {}
+        var reservations: Array = debug.get("reservations", []) if debug.get("reservations", []) is Array else []
+        var release: Dictionary = debug.get("lastRelease", {}) if debug.get("lastRelease", {}) is Dictionary else {}
+        var owner_id := String(release.get("ownerId", ""))
+        var owner_entry := npc_entry_by_id(owner_id)
+        var live_node := find_prop_id_recursive(main, prop_id)
+        var lifecycle_ok := bool(debug.get("depleted", false)) \
+            and reservations.is_empty() \
+            and live_node == null \
+            and String(release.get("releaseReason", "")) == "completed" \
+            and owner_id != ""
+        var row := catalog_row.duplicate(true)
+        row["ownerId"] = owner_id
+        row["ownerName"] = String(owner_entry.get("name", ""))
+        row["ownerJob"] = String(owner_entry.get("job", ""))
+        row["depleted"] = bool(debug.get("depleted", false))
+        row["reservationCount"] = reservations.size()
+        row["lastRelease"] = release
+        row["livePropPresent"] = live_node != null
+        row["lifecycleAccepted"] = lifecycle_ok
+        if String(catalog_row.get("kind", "")) == "forage_source":
+            forage_rows.append(row)
+        elif String(catalog_row.get("kind", "")) == "tree_source":
+            tree_rows.append(row)
+    var accepted_forage := forage_rows.filter(func(row): return bool(row.get("lifecycleAccepted", false)) and String(row.get("ownerJob", "")) == "forage")
+    var accepted_trees := tree_rows.filter(func(row): return bool(row.get("lifecycleAccepted", false)) and String(row.get("ownerJob", "")) == "wood")
+    var progress := forager_progress_after_release(accepted_forage)
+    return {
+        "catalogResourceCount": day_resource_catalog.size(),
+        "newRemovedPropCount": forage_rows.size() + tree_rows.size(),
+        "forage": forage_rows,
+        "trees": tree_rows,
+        "forageAccepted": not accepted_forage.is_empty(),
+        "treeAccepted": not accepted_trees.is_empty(),
+        "foragerProgress": progress,
+        "foragerProgressAccepted": bool(progress.get("ok", false))
+    }
+
+func resource_lifecycle_acceptance_ready(summary: Dictionary) -> bool:
+    return bool(summary.get("forageAccepted", false)) \
+        and bool(summary.get("foragerProgressAccepted", false))
+
+func forager_progress_after_release(accepted_forage: Array) -> Dictionary:
+    var rows: Array[Dictionary] = []
+    for lifecycle_value in accepted_forage:
+        if not (lifecycle_value is Dictionary):
+            continue
+        var lifecycle: Dictionary = lifecycle_value
+        var owner_id := String(lifecycle.get("ownerId", ""))
+        var final_row := matrix_row_by_id(day_matrix, owner_id)
+        var initial_runs := int(initial_job_runs.get(owner_id, 0))
+        var final_runs := int(final_row.get("jobRuns", initial_runs))
+        var released_object_id := String(lifecycle.get("objectId", ""))
+        var active_reservation := String(final_row.get("jobReservationId", ""))
+        var final_phase := String(final_row.get("jobPhase", ""))
+        var advanced := final_runs > initial_runs \
+            or String(final_row.get("jobObjectId", "")) != released_object_id \
+            or (active_reservation == "" and final_phase in ["returning", "depositing", "searching", "idle"])
+        rows.append({
+            "id": owner_id,
+            "name": String(final_row.get("name", lifecycle.get("ownerName", ""))),
+            "releasedObjectId": released_object_id,
+            "initialJobRuns": initial_runs,
+            "finalJobRuns": final_runs,
+            "finalObjectId": String(final_row.get("jobObjectId", "")),
+            "finalReservationId": active_reservation,
+            "finalPhase": final_phase,
+            "advanced": advanced
+        })
+    return {
+        "ok": not rows.is_empty() and rows.any(func(row): return bool(row.get("advanced", false))),
+        "rows": rows
+    }
+
+func matrix_row_by_id(matrix: Array[Dictionary], id: String) -> Dictionary:
+    for row in matrix:
+        if String(row.get("id", "")) == id:
+            return row
+    return {}
+
+func npc_entry_by_id(id: String) -> Dictionary:
+    for entry in npc_entries:
+        if String(entry.get("id", "")) == id:
+            return entry
+    return {}
+
+func smart_object_service():
+    if npc_system == null:
+        return null
+    var autonomy = npc_system.get("autonomy_system")
+    return autonomy.get("smart_objects") if autonomy != null else null
+
+func find_prop_id_recursive(node: Node, prop_id: String) -> Node:
+    if node == null:
+        return null
+    if String(node.get_meta("prop_id", "")) == prop_id:
+        return node
+    for child in node.get_children():
+        var found := find_prop_id_recursive(child, prop_id)
+        if found != null:
+            return found
+    return null
+
 func matrix_has_guard_work(matrix: Array[Dictionary]) -> bool:
     for row in matrix:
         if row_is_visual_guard(row):
@@ -1212,7 +1537,12 @@ func position_observer_camera(mode: String) -> void:
     else:
         var entry := focus_entry_for_mode(mode)
         var focus_mode := "front_overhead"
-        if mode == "guard":
+        if mode == "forager":
+            # Stay below the mature canopy so the actor/resource lifecycle is
+            # visible instead of placing the observer among leaf clusters.
+            context["distance"] = CELL * 7.0
+            context["height"] = CELL * 3.4
+        elif mode == "guard":
             focus_mode = "front_overhead"
         elif mode == "night_suspect":
             focus_mode = "door_inspection"
@@ -1908,6 +2238,7 @@ func write_report(verbose := true) -> void:
         "resultCount": results.size(),
         "preconditionBlocked": precondition_blocked,
         "stoppedPhase": stopped_phase,
+        "playtestSurvivalPolicy": playtest_survival_policy,
         "results": results,
         "town": town_summary,
         "behaviorAuthority": {
@@ -1917,7 +2248,8 @@ func write_report(verbose := true) -> void:
             "directTownFixtureConstruction": false,
             "directDoorServiceCalls": false,
             "directInsideHomeMetadata": false,
-            "clockTransitions": "time_scale_fast_forward"
+            "clockTransitions": "time_scale_fast_forward",
+            "dayJobObservationClock": "pinned at 10:00 while production physics and autonomy advance"
         },
         "captures": captures,
         "timeline": timeline,
@@ -1927,6 +2259,8 @@ func write_report(verbose := true) -> void:
         "nightDoorLoopDiagnostics": night_loop_diagnostics,
         "nightDoorTransitionVisuals": night_door_transition_visuals,
         "doorLifecycleTraceTail": door_lifecycle_trace_snapshot("", 192),
+        "dayResourceCatalogCount": day_resource_catalog.size(),
+        "dayResourceLifecycle": day_resource_lifecycle,
         "dayMatrix": day_matrix,
         "nightMatrix": night_matrix,
         "morningMatrix": morning_matrix

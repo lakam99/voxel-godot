@@ -2,6 +2,7 @@ extends Node
 
 const MENU_SCENE := preload("res://scenes/MainMenu.tscn")
 const RuntimePerformanceObservationRunnerScript := preload("res://scripts/testing/RuntimePerformanceObservationRunner.gd")
+const PlaytestSurvivalPolicyScript := preload("res://scripts/testing/PlaytestSurvivalPolicy.gd")
 
 const SAMPLE_EVERY_FRAMES := 6
 const DEFAULT_DURATION_SECONDS := 75.0
@@ -58,6 +59,7 @@ var segment_visit_counts := {}
 var samples := []
 var metrics_helper = RuntimePerformanceObservationRunnerScript.new()
 var measurement_start_physics_frame := -1
+var playtest_survival_policy := {}
 
 func _ready() -> void:
     configure_from_environment()
@@ -131,6 +133,11 @@ func run_normal_runtime_scenario() -> Dictionary:
         return failed_result(environment_failure)
     if not await launch_main_via_menu_new_game_input():
         return failed_result(startup_loading_failure if startup_loading_failure != "" else "Main Menu New Game did not reach gameplay readiness")
+    # New Game opens in the tutorial night. Protect only the observer/player so
+    # long performance observations cannot terminate before their measured act.
+    playtest_survival_policy = PlaytestSurvivalPolicyScript.enable_player_god_mode(main, "normal_runtime_night_safe_observer")
+    if not bool(playtest_survival_policy.get("enabled", false)):
+        return failed_result("normal runtime night-safe player godmode was not enabled")
     if scenario == SCENARIO_TUTORIAL_TOWN_GUARD_ACTIVATION:
         return await run_tutorial_town_guard_activation_scenario()
     if scenario == SCENARIO_WORLD_EDIT_LATENCY:
@@ -774,6 +781,7 @@ func normal_runtime_controls() -> Dictionary:
         "playerRelocatedForStreaming": scenario == SCENARIO_SPRINT_TRAVERSAL,
         "playerAutomation": scenario == SCENARIO_SPRINT_TRAVERSAL,
         "clockMutation": false,
+        "playtestSurvivalPolicy": playtest_survival_policy,
         "npcMutation": false,
         "movementSegments": runtime_movement_segment_labels(),
         "segmentSeconds": SEGMENT_SECONDS,

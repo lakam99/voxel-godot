@@ -326,6 +326,8 @@
       "requiredScreenshots": [
         "town_setup_fenced_gate.png",
         "day_jobs_overview.png",
+        "day_forager_reserved_resource.png",
+        "day_forager_after_resource_release.png",
         "day_guard_guarding.png",
         "night_all_inside_homes.png",
         "morning_emerge_jobs.png"

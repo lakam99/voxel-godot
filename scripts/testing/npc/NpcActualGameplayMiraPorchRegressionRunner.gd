@@ -1,6 +1,7 @@
 extends Node
 
 const MENU_SCENE: PackedScene = preload("res://scenes/MainMenu.tscn")
+const PlaytestSurvivalPolicyScript := preload("res://scripts/testing/PlaytestSurvivalPolicy.gd")
 const TEST_ID := "npc_actual_gameplay_mira_porch_regression"
 const CELL := 1.35
 const CAPTURE_WIDTH := 1280
@@ -31,6 +32,7 @@ var wall_clock_started_msec := 0
 var finished := false
 var failed := false
 var report_data: Dictionary = {}
+var playtest_survival_policy := {}
 var results: Array[Dictionary] = []
 var failure_reasons: Array[Dictionary] = []
 var visual_captures: Array[Dictionary] = []
@@ -152,6 +154,9 @@ func run() -> void:
         add_failure("scene_bootstrap_failed", "main/player/camera missing after New Game boot")
         finish()
         return
+    if not enable_night_safe_player_policy("npc_actual_gameplay_mira_porch"):
+        finish()
+        return
     report_data["bootedSeed"] = String(main.get("seed_text"))
     report_data["initialMouseMode"] = Input.get_mouse_mode()
     report_data["initialPlayerAutomation"] = player_automation_state()
@@ -169,6 +174,14 @@ func run() -> void:
         return
     await run_knock_and_mira_observation()
     finish()
+
+func enable_night_safe_player_policy(reason: String) -> bool:
+    playtest_survival_policy = PlaytestSurvivalPolicyScript.enable_player_god_mode(main, reason)
+    report_data["playtestSurvivalPolicy"] = playtest_survival_policy.duplicate(true)
+    if not bool(playtest_survival_policy.get("enabled", false)):
+        add_failure("player_god_mode_unavailable", JSON.stringify(playtest_survival_policy))
+        return false
+    return true
 
 func launch_main_via_menu_input() -> bool:
     Input.set_mouse_mode(Input.MOUSE_MODE_VISIBLE)
