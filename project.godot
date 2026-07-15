@@ -24,6 +24,29 @@ window/size/viewport_width=1280
 window/size/viewport_height=720
 window/stretch/mode="canvas_items"
 
+[shader_globals]
+
+environment_wind_direction={
+"type": "vec3",
+"value": Vector3(0.8, 0, 0.6)
+}
+environment_wind_strength={
+"type": "float",
+"value": 0.22
+}
+environment_wind_gust_strength={
+"type": "float",
+"value": 0.08
+}
+environment_wind_gust_frequency={
+"type": "float",
+"value": 0.28
+}
+environment_wind_time={
+"type": "float",
+"value": 0.0
+}
+
 [rendering]
 
 environment/defaults/default_clear_color=Color(0.66, 0.84, 0.87, 1)

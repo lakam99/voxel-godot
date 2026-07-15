@@ -232,6 +232,10 @@ func setup_environment() -> void:
     weather_system.name = "Weather"
     weather_system.setup(self, seed_hash, biome_environment_catalog)
     add_child(weather_system)
+    environment_wind_system = EnvironmentWindSystemScript.new()
+    environment_wind_system.name = "EnvironmentWind"
+    environment_wind_system.setup(seed_hash, biome_environment_catalog)
+    add_child(environment_wind_system)
     update_sky(0.0)
 
 func configure_directional_shadow_style(light: DirectionalLight3D, angular_distance: float) -> void:

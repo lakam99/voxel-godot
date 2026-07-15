@@ -3,11 +3,23 @@ class_name VisualAssetRegistry
 
 const MANIFEST_PATH := "res://assets/visual/generated/visual-manifest.json"
 const BiomeEnvironmentCatalogScript := preload("res://scripts/environment/BiomeEnvironmentCatalog.gd")
+const TREE_WIND_SHADER := preload("res://resources/visual/tree_wind_material.gdshader")
+const TREE_WIND_CULL_MARGIN := 1.25
+const WIND_TREE_FAMILIES := {
+    "broadleaf_tree": true,
+    "conifer_tree": true,
+    "savanna_tree": true,
+    "mature_broadleaf_tree": true,
+    "old_growth_broadleaf_tree": true,
+    "mature_conifer_tree": true,
+    "mature_savanna_tree": true
+}
 
 var assets_by_id := {}
 var assets_by_family := {}
 var environment_catalog: BiomeEnvironmentCatalog
 var scene_cache := {}
+var tree_wind_material_cache := {}
 var disabled_asset_ids := {}
 var last_errors: Array[String] = []
 var loaded := false
@@ -16,6 +28,7 @@ func setup(catalog: BiomeEnvironmentCatalog = null) -> bool:
     assets_by_id.clear()
     assets_by_family.clear()
     scene_cache.clear()
+    tree_wind_material_cache.clear()
     disabled_asset_ids.clear()
     last_errors.clear()
     environment_catalog = catalog
@@ -159,7 +172,9 @@ func select_asset_id(families: PackedStringArray, biome: String, prop_id: String
     return candidates[index]
 
 func instantiate_tree_visual(biome: String, prop_id: String) -> Node3D:
-    return instantiate_asset(select_tree_asset_id(biome, prop_id))
+    var node := instantiate_asset(select_tree_asset_id(biome, prop_id))
+    configure_tree_wind_instance(node, biome, prop_id)
+    return node
 
 func instantiate_rock_visual(biome: String, prop_id: String) -> Node3D:
     return instantiate_asset(select_rock_asset_id(biome, prop_id))
@@ -190,9 +205,10 @@ func apply_render_policy(node: Node3D, asset_id: String) -> void:
     var family := String(asset.get("family", ""))
     var shadow_policy := shadow_policy_for_family(family)
     var visibility_end := visibility_range_for_family(family)
-    apply_render_policy_recursive(node, shadow_policy, visibility_end)
+    apply_render_policy_recursive(node, family, shadow_policy, visibility_end)
     node.set_meta("shadow_policy", shadow_policy)
     node.set_meta("visibility_range_end", visibility_end)
+    node.set_meta("shared_tree_wind_material", WIND_TREE_FAMILIES.has(family))
 
 func shadow_policy_for_family(family: String) -> int:
     if family == "bush":
@@ -211,15 +227,86 @@ func visibility_range_for_family(family: String) -> float:
             return 120.0
     return 180.0
 
-func apply_render_policy_recursive(node: Node, shadow_policy: int, visibility_end: float) -> void:
+func apply_render_policy_recursive(node: Node, family: String, shadow_policy: int, visibility_end: float) -> void:
     if node is MeshInstance3D:
         var mesh_instance := node as MeshInstance3D
         mesh_instance.cast_shadow = shadow_policy
         mesh_instance.visibility_range_end = visibility_end
         mesh_instance.visibility_range_end_margin = minf(24.0, visibility_end * 0.12)
         mesh_instance.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
+        if WIND_TREE_FAMILIES.has(family):
+            apply_tree_wind_materials(mesh_instance)
+            mesh_instance.extra_cull_margin = TREE_WIND_CULL_MARGIN
     for child in node.get_children():
-        apply_render_policy_recursive(child, shadow_policy, visibility_end)
+        apply_render_policy_recursive(child, family, shadow_policy, visibility_end)
+
+func apply_tree_wind_materials(mesh_instance: MeshInstance3D) -> void:
+    if mesh_instance.mesh == null:
+        return
+    for surface_index in range(mesh_instance.mesh.get_surface_count()):
+        var source_material := mesh_instance.get_surface_override_material(surface_index)
+        if source_material == null:
+            source_material = mesh_instance.mesh.surface_get_material(surface_index)
+        mesh_instance.set_surface_override_material(surface_index, shared_tree_wind_material(source_material))
+
+func shared_tree_wind_material(source_material: Material) -> ShaderMaterial:
+    var role := "tree_default"
+    var base_color := Color(0.26, 0.48, 0.22, 1.0)
+    var roughness := 0.82
+    if source_material != null:
+        role = source_material.resource_name.strip_edges()
+        if role == "":
+            role = "tree_default"
+        if source_material is BaseMaterial3D:
+            var base_material := source_material as BaseMaterial3D
+            base_color = base_material.albedo_color
+            roughness = base_material.roughness
+    if tree_wind_material_cache.has(role):
+        return tree_wind_material_cache[role] as ShaderMaterial
+    var material := ShaderMaterial.new()
+    material.resource_name = "shared_tree_wind_%s" % role
+    material.shader = TREE_WIND_SHADER
+    material.set_shader_parameter("base_color", base_color)
+    material.set_shader_parameter("roughness", roughness)
+    material.set_shader_parameter("main_bend_meters", 0.48)
+    material.set_shader_parameter("detail_flutter_meters", 0.075 if foliage_material_role(role) else 0.018)
+    tree_wind_material_cache[role] = material
+    return material
+
+func foliage_material_role(role: String) -> bool:
+    return role.begins_with("leaf_") or role.begins_with("needle_") or role == "savanna_leaf"
+
+func configure_tree_wind_instance(node: Node3D, biome: String, prop_id: String) -> void:
+    if node == null:
+        return
+    var profile := profile_for_biome(biome)
+    var response := clampf(float(profile.get("wind_response")) if profile != null else 1.0, 0.0, 2.0)
+    var phase := stable_unit("tree-wind-phase:%s:%s" % [biome, prop_id]) * TAU
+    var variation := stable_unit("tree-wind-stiffness:%s:%s" % [biome, prop_id])
+    var stiffness := clampf(1.18 - response * 0.18 + variation * 0.22, 0.68, 1.32)
+    configure_tree_wind_instance_recursive(node, phase, stiffness, response)
+    node.set_meta("tree_wind_phase", phase)
+    node.set_meta("tree_wind_stiffness", stiffness)
+    node.set_meta("tree_wind_response", response)
+
+func configure_tree_wind_instance_recursive(node: Node, phase: float, stiffness: float, response: float) -> void:
+    if node is MeshInstance3D:
+        var mesh_instance := node as MeshInstance3D
+        mesh_instance.set_instance_shader_parameter("tree_phase", phase)
+        mesh_instance.set_instance_shader_parameter("tree_stiffness", stiffness)
+        mesh_instance.set_instance_shader_parameter("tree_response", response)
+    for child in node.get_children():
+        configure_tree_wind_instance_recursive(child, phase, stiffness, response)
+
+func tree_wind_material_count() -> int:
+    return tree_wind_material_cache.size()
+
+func tree_wind_material_roles() -> Array[String]:
+    var roles: Array[String] = []
+    for role_variant in tree_wind_material_cache.keys():
+        roles.append(String(role_variant))
+    roles.sort()
+    return roles
 
 func asset_size(asset_id: String) -> Vector3:
     var asset: Dictionary = assets_by_id.get(asset_id, {})
@@ -248,6 +335,9 @@ func stable_index(text: String, modulo: int) -> int:
     if modulo <= 0:
         return 0
     return abs(stable_hash(text)) % modulo
+
+func stable_unit(text: String) -> float:
+    return float(abs(stable_hash(text)) % 100000) / 100000.0
 
 func stable_hash(text: String) -> int:
     var h := 2166136261

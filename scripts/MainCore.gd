@@ -89,6 +89,7 @@ var contract_system
 var audio_effects
 var player_projectiles
 var weather_system
+var environment_wind_system
 var tutorial_system
 var npc_system
 var story_event_bus
@@ -1340,6 +1341,8 @@ func apply_world_seed(new_seed: String, remember := false) -> void:
     if weather_system and weather_system.has_method("reset_for_seed"):
         playtest_progress("apply_seed_weather_reset")
         weather_system.reset_for_seed(seed_hash)
+    if environment_wind_system and environment_wind_system.has_method("reset_for_seed"):
+        environment_wind_system.reset_for_seed(seed_hash)
     if region_story_generator and region_story_generator.has_method("setup"):
         playtest_progress("apply_seed_region_story")
         region_story_generator.setup(seed_text, seed_hash, TOWN_REGION_CELLS)

@@ -3636,6 +3636,7 @@ func spawn_detail_batch(parent: Node3D, detail_type: String, transforms: Array) 
     instance.visibility_range_end = detail_visibility_range(detail_type)
     instance.visibility_range_end_margin = 12.0
     instance.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
+    instance.extra_cull_margin = 0.16 if override_material is ShaderMaterial else 0.0
     instance.set_meta("kind", "decor")
     instance.set_meta("detail_type", detail_type)
     instance.set_meta("detail_visibility_end", instance.visibility_range_end)
@@ -3907,6 +3908,7 @@ func add_generated_tree_visual(body: StaticBody3D, prop_id: String, biome: Strin
     visual.scale = Vector3.ONE * scale
     visual.set_meta("visual_source", "generated_asset")
     visual.set_meta("visual_asset_id", asset_id)
+    visual_asset_registry.configure_tree_wind_instance(visual, biome, prop_id)
     body.add_child(visual)
     body.set_meta("visual_source", "generated_asset")
     body.set_meta("visual_asset_id", asset_id)

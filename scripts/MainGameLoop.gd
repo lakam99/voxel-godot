@@ -51,6 +51,11 @@ func update_sky(delta: float) -> void:
             weather_state = weather_system.update_weather(delta, observer, biome, day, time_of_day)
         if monitor != null:
             monitor.end_section("sky_weather", weather_start)
+        if environment_wind_system:
+            var wind_start: int = monitor.begin_section("environment_wind_cpu") if monitor != null else Time.get_ticks_usec()
+            environment_wind_system.update_wind(delta, weather_state, biome)
+            if monitor != null:
+                monitor.end_section("environment_wind_cpu", wind_start)
         var weather_environment_start: int = monitor.begin_section("sky_environment") if monitor != null else Time.get_ticks_usec()
         apply_weather_lighting(weather_state, day, underground_environment)
         if monitor != null:
