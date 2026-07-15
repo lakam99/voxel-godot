@@ -5,6 +5,7 @@ const STAGE_CONTINUE_VERIFY := "continue_verify"
 const WOODED_BIOMES := ["forest", "taiga"]
 const MAX_FOREST_CANDIDATES := 8
 const TREE_SEARCH_FRAMES := 420
+const MIN_DENSE_FOREST_TREE_COUNT := 12
 
 var release_stage := ""
 
@@ -153,15 +154,21 @@ func run_save_and_harvest_stage() -> void:
     await wait_physics_frames(4)
     var initial_hit: Dictionary = player.call("view_ray", 3.6)
     var initial_collider := initial_hit.get("collider") as Node
-    var target_hit := initial_collider == tree
+    var hit_prop_id := String(initial_collider.get_meta("prop_id", "")) if initial_collider != null else ""
+    var target_hit := initial_collider is Node3D \
+        and hit_prop_id == prop_id \
+        and String(initial_collider.get_meta("material", "")) == "tree"
     results.append({"name": "live_tree_targeting_hits_coherent_trunk", "passed": target_hit, "details": JSON.stringify({
         "propId": prop_id,
+        "hitPropId": hit_prop_id,
         "collider": String(initial_collider.name) if initial_collider != null else "",
         "distance": camera.global_position.distance_to(initial_hit.get("position", camera.global_position)) if not initial_hit.is_empty() else -1.0
     })})
     if not target_hit:
         add_failure("tree_targeting_missed", JSON.stringify(tree_summary_before))
         return
+    tree = initial_collider as Node3D
+    target_point = tree.global_position + Vector3.UP * clampf(float(tree.get_meta("tree_visual_height", 8.0)) * 0.16, 1.2, 2.2)
     Input.set_mouse_mode(Input.MOUSE_MODE_CAPTURED)
     var clicks := 0
     while is_instance_valid(tree) and clicks < 8:
@@ -234,16 +241,20 @@ func run_continue_verify_stage() -> void:
         return
     var biome := String(main.call("surface_biome_at_cell", world_cell(player.global_position)))
     for _frame in range(TREE_SEARCH_FRAMES):
-        if count_mature_trees_near(player.global_position, 96.0) >= 2:
+        if count_mature_trees_near(player.global_position, 96.0) >= MIN_DENSE_FOREST_TREE_COUNT:
             break
         await get_tree().process_frame
     var nearby_count := count_mature_trees_near(player.global_position, 96.0)
     var removed_state: Dictionary = main.get("removed_props") if main.get("removed_props") is Dictionary else {}
     var respawned := find_prop_in_world(expected_prop_id) != null
-    var passed := biome in WOODED_BIOMES and nearby_count >= 2 and bool(removed_state.get(expected_prop_id, false)) and not respawned
+    var passed := biome in WOODED_BIOMES \
+        and nearby_count >= MIN_DENSE_FOREST_TREE_COUNT \
+        and bool(removed_state.get(expected_prop_id, false)) \
+        and not respawned
     results.append({"name": "continue_restores_dense_forest_pose_and_removed_tree", "passed": passed, "details": JSON.stringify({
         "biome": biome,
         "nearbyMatureTreeCount": nearby_count,
+        "minimumDenseForestTreeCount": MIN_DENSE_FOREST_TREE_COUNT,
         "removedPropId": expected_prop_id,
         "removedState": bool(removed_state.get(expected_prop_id, false)),
         "respawned": respawned,
@@ -252,6 +263,7 @@ func run_continue_verify_stage() -> void:
     await capture_observer_stage("continue_dense_forest_removed_tree_persisted", player.global_position + Vector3(12.0, 8.0, 14.0), player.global_position + Vector3.UP * 4.0, {
         "biome": biome,
         "nearbyMatureTreeCount": nearby_count,
+        "minimumDenseForestTreeCount": MIN_DENSE_FOREST_TREE_COUNT,
         "removedPropId": expected_prop_id,
         "removedState": bool(removed_state.get(expected_prop_id, false)),
         "respawned": respawned
