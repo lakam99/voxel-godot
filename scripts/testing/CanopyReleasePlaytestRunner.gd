@@ -127,7 +127,7 @@ func launch_release_main_via_menu_input() -> bool:
 func run_save_and_harvest_stage() -> void:
     var fixture := await stage_player_beside_generated_tree()
     if fixture.is_empty():
-        add_failure("generated_wooded_tree_missing", "no real mature tree published after bounded wooded-biome search")
+        add_failure("generated_wooded_tree_missing", "no real mature or older ecological tree published after bounded wooded-biome search")
         return
     var tree := fixture.get("node") as Node3D
     fixture.erase("node")
@@ -362,7 +362,10 @@ func collect_mature_trees(node: Node, output: Array[Node3D]) -> void:
         return
     if node is Node3D and String(node.get_meta("kind", "")) == "prop" and String(node.get_meta("material", "")) == "tree":
         var family := String(node.get_meta("tree_family", ""))
-        if family.begins_with("mature_") or family.begins_with("old_growth_"):
+        var age_band := String(node.get_meta("tree_age_band", ""))
+        if family.begins_with("mature_") \
+            or family.begins_with("old_growth_") \
+            or (family.begins_with("ecological_") and age_band in ["mature", "old", "ancient"]):
             output.append(node as Node3D)
     for child in node.get_children():
         collect_mature_trees(child, output)

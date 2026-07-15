@@ -98,10 +98,13 @@ func test_shared_tree_materials(catalog) -> void:
         "errors": registry.last_errors
     })
     var mature_exposed := false
+    var ecology_exposed := false
     for asset_id in registry.cached_asset_ids():
         if asset_id.begins_with("mature_") or asset_id.begins_with("old_growth_"):
             mature_exposed = true
-    add_result("vox122_canopies_are_runtime_published", registry.asset_count() == 39 and mature_exposed, {"assetCount": registry.asset_count(), "matureExposed": mature_exposed})
+        if asset_id.begins_with("ecological_"):
+            ecology_exposed = true
+    add_result("finite_age_canopies_are_runtime_published", registry.asset_count() == 69 and mature_exposed and ecology_exposed, {"assetCount": registry.asset_count(), "matureExposed": mature_exposed, "ecologyExposed": ecology_exposed})
     if first != null:
         first.free()
     if second != null:

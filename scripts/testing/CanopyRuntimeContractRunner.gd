@@ -20,7 +20,7 @@ func run() -> void:
     var catalog_ready: bool = catalog.setup()
     var registry := RegistryScript.new()
     var registry_ready: bool = registry.setup(catalog)
-    add_result("runtime_catalog_and_registry_publish_mature_canopies", catalog_ready and registry_ready and registry.asset_count() == 39, {
+    add_result("runtime_catalog_and_registry_publish_age_driven_canopies", catalog_ready and registry_ready and registry.asset_count() == 69, {
         "catalogReady": catalog_ready,
         "registryReady": registry_ready,
         "assetCount": registry.asset_count(),
@@ -28,7 +28,9 @@ func run() -> void:
         "registryErrors": registry.last_errors
     })
     test_biome_specs(registry)
-    test_old_growth_selection(registry)
+    test_age_ecology_selection(registry)
+    test_age_ecology_seed_and_biome_variation(registry)
+    test_shared_scale_safe_bark(registry)
     test_physical_tree_contract(registry)
     test_structure_exclusion_and_rng_parity(registry)
     test_removed_tree_save_contract()
@@ -37,16 +39,16 @@ func run() -> void:
 
 func test_biome_specs(registry) -> void:
     var cases := {
-        "forest": ["mature_broadleaf_tree", 11.0, 9.0],
-        "taiga": ["mature_conifer_tree", 12.0, 6.0],
-        "swamp": ["mature_broadleaf_tree", 9.0, 8.0],
-        "savanna": ["mature_savanna_tree", 8.5, 9.5]
+        "forest": ["ecological_broadleaf_tree", 17.0, 7.0],
+        "taiga": ["ecological_conifer_tree", 17.0, 4.0],
+        "swamp": ["ecological_broadleaf_tree", 16.0, 7.0],
+        "savanna": ["ecological_savanna_tree", 11.0, 8.0]
     }
     var rows: Array[Dictionary] = []
     var valid := true
     for biome in cases.keys():
-        var first: Dictionary = registry.tree_runtime_spec(biome, "canopy-contract:%s" % biome, 4.2)
-        var second: Dictionary = registry.tree_runtime_spec(biome, "canopy-contract:%s" % biome, 4.2)
+        var first: Dictionary = registry.tree_runtime_spec(biome, "canopy-contract:%s:40,40" % biome, 4.2, Vector2i(40, 40), "canopy-contract")
+        var second: Dictionary = registry.tree_runtime_spec(biome, "canopy-contract:%s:40,40" % biome, 4.2, Vector2i(40, 40), "canopy-contract")
         var expected: Array = cases[biome]
         var row_ok := String(first.family) == String(expected[0]) \
             and float(first.visualHeight) >= float(expected[1]) \
@@ -54,30 +56,97 @@ func test_biome_specs(registry) -> void:
             and runtime_specs_match(first, second)
         valid = valid and row_ok
         rows.append({"biome": biome, "ok": row_ok, "spec": first})
-    var plains: Dictionary = registry.tree_runtime_spec("plains", "canopy-contract:plains", 4.2)
-    var plains_open := String(plains.family) in ["broadleaf_tree", "savanna_tree"] and float(plains.visualHeight) < 8.0
+    var plains: Dictionary = registry.tree_runtime_spec("plains", "canopy-contract:plains:40,40", 4.2, Vector2i(40, 40), "canopy-contract")
+    var plains_open := String(plains.family) in ["ecological_broadleaf_tree", "ecological_savanna_tree"] \
+        and float(plains.visualHeight) >= 6.5 and float(plains.visualHeight) <= 19.0
     rows.append({"biome": "plains", "ok": plains_open, "spec": plains})
-    add_result("wooded_biomes_are_mature_while_plains_remain_open", valid and plains_open, rows)
+    add_result("biomes_select_ecological_architectures_and_profile_scaled_dimensions", valid and plains_open, rows)
 
-func test_old_growth_selection(registry) -> void:
-    var old_growth_id := ""
-    var standard_id := ""
-    for index in range(256):
-        var prop_id := "old-growth-probe:%d" % index
-        var asset_id: String = registry.select_tree_asset_id("forest", prop_id)
-        var family := String(registry.asset_record(asset_id).get("family", ""))
-        if family == "old_growth_broadleaf_tree" and old_growth_id == "":
-            old_growth_id = prop_id
-        elif family == "mature_broadleaf_tree" and standard_id == "":
-            standard_id = prop_id
-        if old_growth_id != "" and standard_id != "":
-            break
-    var first: Dictionary = registry.tree_runtime_spec("forest", old_growth_id, 4.0) if old_growth_id != "" else {}
-    var second: Dictionary = registry.tree_runtime_spec("forest", old_growth_id, 4.0) if old_growth_id != "" else {}
-    add_result("old_growth_selection_is_rare_stable_and_seed_keyed", old_growth_id != "" and standard_id != "" and bool(first.get("oldGrowth", false)) and runtime_specs_match(first, second), {
-        "oldGrowthPropId": old_growth_id,
-        "standardPropId": standard_id,
-        "oldGrowthSpec": first
+func test_age_ecology_selection(registry) -> void:
+    var bands := {}
+    var samples: Array[Dictionary] = []
+    var established_or_older := 0
+    var total := 0
+    for z in range(-1200, 1201, 137):
+        for x in range(-1200, 1201, 137):
+            var cell := Vector2i(x, z)
+            var prop_id := "ecology-contract:tree:%d,%d:%d" % [x, z, total]
+            var spec: Dictionary = registry.tree_runtime_spec("forest", prop_id, 4.0, cell, "ecology-contract")
+            var band := String(spec.get("ageBand", ""))
+            bands[band] = int(bands.get(band, 0)) + 1
+            if band in ["established", "mature", "old", "ancient"]:
+                established_or_older += 1
+            if samples.size() < 12:
+                samples.append(spec)
+            total += 1
+    var first: Dictionary = registry.tree_runtime_spec("forest", "ecology-contract:tree:8,8:1", 4.0, Vector2i(8, 8), "ecology-contract")
+    var second: Dictionary = registry.tree_runtime_spec("forest", "ecology-contract:tree:8,8:1", 4.0, Vector2i(8, 8), "ecology-contract")
+    var adjacent: Dictionary = registry.tree_ecology_spec("forest", "ecology-contract:tree:9,8:2", Vector2i(9, 8), "ecology-contract")
+    var continuity := absf(float(first.get("localMaturity", 0.0)) - float(adjacent.get("maturity", 1.0))) < 0.08
+    var selected_record: Dictionary = registry.asset_record(String(first.get("assetId", "")))
+    var phenotype_matches := String(selected_record.get("treePhenotype", {}).get("ageBand", "")) == String(first.get("ageBand", ""))
+    var mature_by_default := total > 0 and float(established_or_older) / float(total) >= 0.72
+    add_result("local_maturity_is_continuous_and_age_selects_matching_stable_phenotypes", runtime_specs_match(first, second) and continuity and phenotype_matches and bands.size() >= 3 and mature_by_default, {
+        "bandCounts": bands,
+        "establishedOrOlderRatio": float(established_or_older) / float(maxi(1, total)),
+        "first": first,
+        "adjacentEcology": adjacent,
+        "continuity": continuity,
+        "phenotypeMatches": phenotype_matches,
+        "samples": samples,
+    })
+
+func test_shared_scale_safe_bark(registry) -> void:
+    var shader_source := FileAccess.get_file_as_string("res://resources/visual/tree_wind_material.gdshader")
+    var registry_source := FileAccess.get_file_as_string("res://scripts/visual/VisualAssetRegistry.gd")
+    var spec: Dictionary = registry.tree_runtime_spec("forest", "bark-contract:tree:12,18:0", 4.0, Vector2i(12, 18), "bark-contract")
+    var asset: Dictionary = registry.asset_record(String(spec.get("assetId", "")))
+    var bark: Dictionary = asset.get("barkData", {})
+    var source_contract := shader_source.contains("UV * bark_scale") \
+        and registry_source.contains("tree_wind_material_cache") \
+        and registry_source.contains("set_instance_shader_parameter(\"bark_scale\"")
+    add_result("shared_shader_uses_branch_uv_and_instance_scale_for_non_smearing_bark", source_contract \
+        and String(bark.get("attribute", "")) == "TEXCOORD_0" \
+        and is_equal_approx(float(spec.get("barkScale", 0.0)), float(spec.get("scale", -1.0))), {
+        "spec": spec,
+        "bark": bark,
+        "sharedMaterialCount": registry.tree_wind_material_count(),
+        "sourceContract": source_contract,
+    })
+
+func test_age_ecology_seed_and_biome_variation(registry) -> void:
+    var cell := Vector2i(311, -227)
+    var first: Dictionary = registry.tree_ecology_spec("forest", "ecology-a:tree:311,-227:1", cell, "ecology-a")
+    var same: Dictionary = registry.tree_ecology_spec("forest", "ecology-a:tree:311,-227:1", cell, "ecology-a")
+    var sibling: Dictionary = registry.tree_ecology_spec("forest", "ecology-a:tree:311,-227:2", cell, "ecology-a")
+    var adjacent: Dictionary = registry.tree_ecology_spec("forest", "ecology-a:tree:312,-227:3", Vector2i(312, -227), "ecology-a")
+    var different_seed: Dictionary = registry.tree_ecology_spec("forest", "ecology-b:tree:311,-227:1", cell, "ecology-b")
+    var taiga: Dictionary = registry.tree_ecology_spec("taiga", "ecology-a:tree:311,-227:1", cell, "ecology-a")
+    var exact_same := is_equal_approx(float(first.get("maturity", -1.0)), float(same.get("maturity", -2.0))) \
+        and is_equal_approx(float(first.get("ageYears", -1.0)), float(same.get("ageYears", -2.0))) \
+        and int(first.get("geneticSeed", 0)) == int(same.get("geneticSeed", -1)) \
+        and String(first.get("ageBand", "")) == String(same.get("ageBand", "missing"))
+    var coherent_siblings := is_equal_approx(float(first.get("ageRangeMin", -1.0)), float(sibling.get("ageRangeMin", -2.0))) \
+        and is_equal_approx(float(first.get("ageRangeMax", -1.0)), float(sibling.get("ageRangeMax", -2.0))) \
+        and not is_equal_approx(float(first.get("ageYears", 0.0)), float(sibling.get("ageYears", 0.0)))
+    var boundary_continuous := absf(float(first.get("maturity", 0.0)) - float(adjacent.get("maturity", 1.0))) < 0.08 \
+        and absf(float(first.get("ageRangeMin", 0.0)) - float(adjacent.get("ageRangeMin", 1000.0))) < 4.0
+    var seed_varies := not is_equal_approx(float(first.get("maturity", 0.0)), float(different_seed.get("maturity", 0.0))) \
+        and int(first.get("geneticSeed", 0)) != int(different_seed.get("geneticSeed", 0))
+    var biome_varies := String(first.get("architecture", "")) == "broadleaf" \
+        and String(taiga.get("architecture", "")) == "conifer" \
+        and float(first.get("ageRangeMax", 0.0)) != float(taiga.get("ageRangeMax", 0.0))
+    add_result("tree_age_facts_are_seeded_coherent_chunk_continuous_and_biome_specific", exact_same and coherent_siblings and boundary_continuous and seed_varies and biome_varies, {
+        "first": first,
+        "sibling": sibling,
+        "adjacent": adjacent,
+        "differentSeed": different_seed,
+        "taiga": taiga,
+        "exactSame": exact_same,
+        "coherentSiblings": coherent_siblings,
+        "boundaryContinuous": boundary_continuous,
+        "seedVaries": seed_varies,
+        "biomeVaries": biome_varies,
     })
 
 func test_physical_tree_contract(registry) -> void:
@@ -99,7 +168,7 @@ func test_physical_tree_contract(registry) -> void:
         and absf(shape.radius - trunk_radius) <= 0.001 \
         and absf(shape.height - visual_height) <= 0.001 \
         and absf(collider.position.y - visual_height * 0.5) <= 0.001
-    add_result("manifest_trunk_metrics_drive_one_coherent_static_cylinder", tree != null and aligned and collisions == 1 and String(tree.get_meta("visual_asset_id", "")).begins_with("mature_"), {
+    add_result("manifest_trunk_metrics_drive_one_coherent_static_cylinder", tree != null and aligned and collisions == 1 and String(tree.get_meta("visual_asset_id", "")).begins_with("ecological_"), {
         "assetId": tree.get_meta("visual_asset_id", "") if tree != null else "",
         "family": tree.get_meta("tree_family", "") if tree != null else "",
         "visualHeight": visual_height,
@@ -171,7 +240,9 @@ func test_integration_firewall() -> void:
     var tutorial_source := FileAccess.get_file_as_string("res://scripts/TutorialSystem.gd")
     var generic_notification := tree_source.contains("notify_navigation_prop_created") and tree_source.contains("notify_navigation_prop_removed") == false
     var structure_contract := structure_source.contains("blocks_natural_prop_with_separate_margins_at_cell")
-    var tutorial_is_unaware := not tutorial_source.contains("tree_runtime_spec") and not tutorial_source.contains("mature_broadleaf_tree")
+    var tutorial_is_unaware := not tutorial_source.contains("tree_runtime_spec") \
+        and not tutorial_source.contains("mature_broadleaf_tree") \
+        and not tutorial_source.contains("ecological_broadleaf_tree")
     add_result("canopy_uses_generic_prop_notification_and_stays_out_of_tutorial_authority", generic_notification and structure_contract and tutorial_is_unaware, {
         "genericNotification": generic_notification,
         "structureContract": structure_contract,
@@ -183,7 +254,9 @@ func runtime_specs_match(first: Dictionary, second: Dictionary) -> bool:
         and is_equal_approx(float(first.get("scale", 0.0)), float(second.get("scale", 0.0))) \
         and is_equal_approx(float(first.get("visualHeight", 0.0)), float(second.get("visualHeight", 0.0))) \
         and is_equal_approx(float(first.get("trunkRadius", 0.0)), float(second.get("trunkRadius", 0.0))) \
-        and is_equal_approx(float(first.get("canopyRadius", 0.0)), float(second.get("canopyRadius", 0.0)))
+        and is_equal_approx(float(first.get("canopyRadius", 0.0)), float(second.get("canopyRadius", 0.0))) \
+        and String(first.get("ageBand", "")) == String(second.get("ageBand", "")) \
+        and is_equal_approx(float(first.get("ageYears", 0.0)), float(second.get("ageYears", -1.0)))
 
 func first_collision_shape(node: Node) -> CollisionShape3D:
     if node == null:
@@ -216,11 +289,11 @@ func finish() -> void:
     var report := {
         "schemaVersion": 1,
         "runnerId": "canopy_runtime_contract",
-        "testId": "vox_122_canopy_runtime_contract",
+        "testId": "vox_127_130_131_tree_ecology_runtime_contract",
         "finished": true,
         "passed": failure_count == 0,
         "evidenceLevel": "contract",
-        "scope": "Mature biome family publication, deterministic archetype/old-growth selection, manifest-scaled tree dimensions, trunk/collision alignment, separate natural-corridor and building-footprint margins, RNG parity, additive removed-tree save restoration, chunk respawn gating, and tutorial authority separation. This is contract evidence, not live visual, harvesting, Continue, or NPC acceptance.",
+        "scope": "Continuous deterministic local maturity, age-band phenotype selection, mature-by-default tuning, shared scale-safe bark, manifest-scaled dimensions, trunk/collision alignment, structure exclusion, RNG parity, removed-tree save restoration, chunk respawn gating, and tutorial authority separation. This is contract evidence, not live visual, harvesting, Continue, or NPC acceptance.",
         "resultCount": results.size(),
         "failureCount": failure_count,
         "results": results

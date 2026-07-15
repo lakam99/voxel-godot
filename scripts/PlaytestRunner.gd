@@ -5882,7 +5882,7 @@ func test_generated_environment_prop_visuals() -> void:
     var cache_stable: bool = cached_before == cached_after_spawn
     add_result(
         "generated_environment_prop_visuals",
-        registry_ready and asset_count == 39 and profile_count >= 8 and tree_generated and rock_generated and tree_collision and rock_collision and cache_stable,
+        registry_ready and asset_count > 0 and cached_before == asset_count and profile_count >= 8 and tree_generated and rock_generated and tree_collision and rock_collision and cache_stable,
         "ready %s, assets %d, profiles %d, tree %s meshes %d collisions %d, rock %s meshes %d collisions %d, cache %d->%d" % [
             str(registry_ready),
             asset_count,
@@ -5903,7 +5903,15 @@ func test_generated_environment_prop_visuals() -> void:
     var disabled_tree := ""
     var disabled_rock := ""
     if registry_ready:
-        disabled_tree = registry.select_tree_asset_id("forest", "playtest:fallback:tree")
+        # Tree selection is now an ecological fact of seed + biome + cell. Select
+        # the exact asset that make_tree() will request instead of disabling the
+        # dated pre-ecology family-only guess.
+        disabled_tree = registry.select_tree_asset_id(
+            "forest",
+            "playtest:fallback:tree",
+            Vector2i(2147483647, 2147483647),
+            String(main.get("seed_text"))
+        )
         var fallback_position := player.global_position + Vector3(10.5, 0.0, 7.0)
         var fallback_rock_position := fallback_position + Vector3(1.7, 0.0, 0.0)
         var fallback_rock_biome: String = surface_biome_at_cell2(Vector2i(roundi(fallback_rock_position.x / CELL), roundi(fallback_rock_position.z / CELL)))

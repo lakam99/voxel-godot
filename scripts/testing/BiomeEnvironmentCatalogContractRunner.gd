@@ -21,6 +21,7 @@ func run() -> void:
 		"ids": catalog.biome_ids(), "errors": catalog.last_errors
 	})
 	test_profile_parity(catalog)
+	test_tree_ecology_schema(catalog)
 	test_detail_parity(catalog)
 	test_fallback_and_validation(catalog)
 	test_shared_consumer_injection(catalog)
@@ -53,12 +54,12 @@ func test_profile_parity(catalog) -> void:
 	add_result("placement_weather_values_match_pre_catalog_behavior", mismatches.is_empty(), mismatches)
 
 	var asset_expected := {
-		"default": [PackedStringArray(["broadleaf_tree"]), 1.0, 1.0],
-		"forest": [PackedStringArray(["mature_broadleaf_tree"]), 1.04, 0.94],
-		"taiga": [PackedStringArray(["mature_conifer_tree"]), 1.08, 1.0],
-		"plains": [PackedStringArray(["broadleaf_tree", "savanna_tree"]), 0.98, 0.95],
-		"savanna": [PackedStringArray(["mature_savanna_tree"]), 1.0, 1.04],
-		"swamp": [PackedStringArray(["mature_broadleaf_tree"]), 0.94, 0.92]
+		"default": [PackedStringArray(["ecological_broadleaf_tree"]), 1.0, 1.0],
+		"forest": [PackedStringArray(["ecological_broadleaf_tree"]), 1.04, 0.94],
+		"taiga": [PackedStringArray(["ecological_conifer_tree"]), 1.08, 1.0],
+		"plains": [PackedStringArray(["ecological_broadleaf_tree", "ecological_savanna_tree"]), 0.98, 0.95],
+		"savanna": [PackedStringArray(["ecological_savanna_tree"]), 1.0, 1.04],
+		"swamp": [PackedStringArray(["ecological_broadleaf_tree"]), 0.94, 0.92]
 	}
 	var asset_mismatches: Array[Dictionary] = []
 	for biome in asset_expected.keys():
@@ -92,6 +93,21 @@ func test_profile_parity(catalog) -> void:
 		if String(spec.material) != row[0] or String(spec.drop) != row[1] or int(spec.drop_min) != row[2] or int(spec.drop_max) != row[3] or not is_equal_approx(float(spec.radius), float(row[4])):
 			forage_mismatches.append({"biome": biome, "spec": spec})
 	add_result("forage_specs_match_pre_catalog_behavior", forage_mismatches.is_empty(), forage_mismatches)
+
+func test_tree_ecology_schema(catalog) -> void:
+	var mismatches: Array[Dictionary] = []
+	for biome in ["default", "beach", "plains", "forest", "taiga", "snow", "tundra", "alpine", "savanna", "desert", "swamp"]:
+		var profile = catalog.profile_for_biome(biome)
+		var valid: bool = profile.tree_architecture in ["broadleaf", "conifer", "savanna"] \
+			and profile.tree_age_min_years >= 0.0 \
+			and profile.tree_age_min_years <= profile.tree_age_typical_years \
+			and profile.tree_age_typical_years <= profile.tree_age_max_years \
+			and profile.tree_maturity_cell_scale >= 8.0 \
+			and profile.tree_age_band_thresholds.size() == 4 \
+			and String(profile.tree_families[0]).begins_with("ecological_")
+		if not valid:
+			mismatches.append({"biome": biome, "profile": profile})
+	add_result("tree_biomes_publish_age_ecology_and_finite_phenotype_families", mismatches.is_empty(), mismatches)
 
 func test_detail_parity(catalog) -> void:
 	var cases := [
@@ -197,11 +213,11 @@ func finish() -> void:
 	var report := {
 		"schemaVersion": 1,
 		"runnerId": "biome_environment_catalog_contract",
-		"testId": "vox_119_biome_environment_catalog_contract",
+		"testId": "vox_126_127_biome_tree_ecology_contract",
 		"finished": true,
 		"passed": failure_count == 0,
 		"evidenceLevel": "contract",
-		"scope": "Resource schema, exact pre-catalog values, detail selection, bounded fallback, shared consumer injection, no-RNG reads, and static duplicate-table retirement. This is contract evidence, not live visual acceptance.",
+		"scope": "Resource schema, placement/weather parity, age-ecology ranges, finite phenotype family publication, detail selection, bounded fallback, shared consumer injection, no-RNG reads, and static duplicate-table retirement. This is contract evidence, not live visual acceptance.",
 		"resultCount": results.size(),
 		"failureCount": failure_count,
 		"results": results

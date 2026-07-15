@@ -3905,7 +3905,7 @@ func add_generated_tree_visual(body: StaticBody3D, prop_id: String, biome: Strin
     visual.scale = Vector3.ONE * scale
     visual.set_meta("visual_source", "generated_asset")
     visual.set_meta("visual_asset_id", asset_id)
-    visual_asset_registry.configure_tree_wind_instance(visual, biome, prop_id)
+    visual_asset_registry.configure_tree_wind_instance(visual, biome, prop_id, scale)
     body.add_child(visual)
     body.set_meta("visual_source", "generated_asset")
     body.set_meta("visual_asset_id", asset_id)
@@ -3963,7 +3963,7 @@ func make_tree(
     var legacy_height := float(spec.get("height", 4.0))
     var runtime_spec := {}
     if visual_asset_registry != null and visual_asset_registry.is_ready() and visual_asset_registry.has_method("tree_runtime_spec"):
-        runtime_spec = visual_asset_registry.tree_runtime_spec(biome, prop_id, legacy_height)
+        runtime_spec = visual_asset_registry.tree_runtime_spec(biome, prop_id, legacy_height, world_cell, seed_text)
     if not runtime_spec.is_empty():
         spec["legacy_height"] = legacy_height
         spec["asset_id"] = String(runtime_spec.get("assetId", ""))
@@ -3993,6 +3993,13 @@ func make_tree(
     body.set_meta("visual_biome", biome)
     body.set_meta("tree_family", String(runtime_spec.get("family", "primitive_fallback")))
     body.set_meta("tree_growth_class", String(runtime_spec.get("growthClass", "standard")))
+    body.set_meta("tree_architecture", String(runtime_spec.get("architecture", "legacy")))
+    body.set_meta("tree_age_band", String(runtime_spec.get("ageBand", "standard")))
+    body.set_meta("tree_age_years", float(runtime_spec.get("ageYears", 0.0)))
+    body.set_meta("tree_age_range_min", float(runtime_spec.get("ageRangeMin", 0.0)))
+    body.set_meta("tree_age_range_max", float(runtime_spec.get("ageRangeMax", 0.0)))
+    body.set_meta("tree_local_maturity", float(runtime_spec.get("localMaturity", 0.5)))
+    body.set_meta("tree_genetic_seed", int(runtime_spec.get("geneticSeed", 0)))
     body.set_meta("tree_canopy_radius", canopy_radius)
     body.set_meta("tree_trunk_radius", trunk_radius)
     body.set_meta("tree_visual_height", float(spec.get("height", legacy_height)))

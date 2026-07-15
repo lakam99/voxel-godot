@@ -3,8 +3,10 @@ class_name VisualAssetRegistry
 
 const MANIFEST_PATH := "res://assets/visual/generated/visual-manifest.json"
 const BiomeEnvironmentCatalogScript := preload("res://scripts/environment/BiomeEnvironmentCatalog.gd")
+const TreeEcologySamplerScript := preload("res://scripts/environment/TreeEcologySampler.gd")
 const TREE_WIND_SHADER := preload("res://resources/visual/tree_wind_material.gdshader")
 const TREE_WIND_CULL_MARGIN := 1.25
+const INVALID_TREE_CELL := Vector2i(2147483647, 2147483647)
 const WIND_TREE_FAMILIES := {
     "broadleaf_tree": true,
     "conifer_tree": true,
@@ -12,12 +14,16 @@ const WIND_TREE_FAMILIES := {
     "mature_broadleaf_tree": true,
     "old_growth_broadleaf_tree": true,
     "mature_conifer_tree": true,
-    "mature_savanna_tree": true
+    "mature_savanna_tree": true,
+    "ecological_broadleaf_tree": true,
+    "ecological_conifer_tree": true,
+    "ecological_savanna_tree": true
 }
 
 var assets_by_id := {}
 var assets_by_family := {}
 var environment_catalog: BiomeEnvironmentCatalog
+var tree_ecology_sampler
 var scene_cache := {}
 var tree_wind_material_cache := {}
 var disabled_asset_ids := {}
@@ -35,6 +41,7 @@ func setup(catalog: BiomeEnvironmentCatalog = null) -> bool:
     if environment_catalog == null:
         environment_catalog = BiomeEnvironmentCatalogScript.new()
         environment_catalog.setup()
+    tree_ecology_sampler = TreeEcologySamplerScript.new()
     loaded = load_manifest() and cache_asset_scenes()
     return loaded
 
@@ -133,17 +140,69 @@ func cached_asset_ids() -> Array[String]:
 func profile_count() -> int:
     return environment_catalog.profile_count() if environment_catalog != null else 0
 
-func select_tree_asset_id(biome: String, prop_id: String) -> String:
+func select_tree_asset_id(
+    biome: String,
+    prop_id: String,
+    world_cell := INVALID_TREE_CELL,
+    world_seed := ""
+) -> String:
     var profile := profile_for_biome(biome)
     var families := PackedStringArray(["broadleaf_tree"])
+    var ecology := {}
     if profile != null:
         families = profile.get("tree_families")
+        ecology = tree_ecology_spec(biome, prop_id, world_cell, world_seed)
+        if not ecology.is_empty() and families_contain_ecological_tree(families):
+            return select_tree_asset_for_age_band(
+                families,
+                biome,
+                prop_id,
+                String(ecology.get("ageBand", "mature"))
+            )
         var old_growth_chance := clampf(float(profile.get("old_growth_chance")), 0.0, 1.0)
         if families.has("mature_broadleaf_tree") \
             and old_growth_chance > 0.0 \
             and stable_unit("tree-old-growth:%s:%s" % [biome, prop_id]) < old_growth_chance:
             families = PackedStringArray(["old_growth_broadleaf_tree"])
     return select_asset_id(families, biome, prop_id, "tree")
+
+func tree_ecology_spec(
+    biome: String,
+    prop_id: String,
+    world_cell := INVALID_TREE_CELL,
+    world_seed := ""
+) -> Dictionary:
+    var profile := profile_for_biome(biome) as BiomeEnvironmentProfile
+    if profile == null or tree_ecology_sampler == null:
+        return {}
+    return tree_ecology_sampler.sample_tree(profile, biome, world_seed, prop_id, world_cell)
+
+func families_contain_ecological_tree(families: PackedStringArray) -> bool:
+    for family in families:
+        if String(family).begins_with("ecological_"):
+            return true
+    return false
+
+func select_tree_asset_for_age_band(
+    families: PackedStringArray,
+    biome: String,
+    prop_id: String,
+    age_band: String
+) -> String:
+    var candidates: Array[String] = []
+    for family in families:
+        for id_variant in assets_by_family.get(String(family), []):
+            var asset_id := String(id_variant)
+            var asset: Dictionary = assets_by_id.get(asset_id, {})
+            var tags: Array = asset.get("biomeTags", [])
+            var phenotype: Dictionary = asset.get("treePhenotype", {})
+            if String(phenotype.get("ageBand", "")) == age_band \
+                and (tags.is_empty() or tags.has(biome)):
+                candidates.append(asset_id)
+    if candidates.is_empty():
+        return select_asset_id(families, biome, prop_id, "tree")
+    candidates.sort()
+    return candidates[stable_index("tree-phenotype:%s:%s:%s" % [biome, age_band, prop_id], candidates.size())]
 
 func select_rock_asset_id(biome: String, prop_id: String) -> String:
     var profile := profile_for_biome(biome)
@@ -228,6 +287,8 @@ func visibility_range_for_family(family: String) -> float:
             return 340.0
         "old_growth_broadleaf_tree":
             return 380.0
+        "ecological_broadleaf_tree", "ecological_conifer_tree", "ecological_savanna_tree":
+            return 440.0
         "rock":
             return 220.0
         "stump_log":
@@ -279,13 +340,17 @@ func shared_tree_wind_material(source_material: Material) -> ShaderMaterial:
     material.set_shader_parameter("roughness", roughness)
     material.set_shader_parameter("main_bend_meters", 0.48)
     material.set_shader_parameter("detail_flutter_meters", 0.075 if foliage_material_role(role) else 0.018)
+    var bark_role := role == "trunk" or role == "bark_dark"
+    material.set_shader_parameter("bark_enabled", 1.0 if bark_role else 0.0)
+    material.set_shader_parameter("bark_accent_color", base_color.darkened(0.30) if bark_role else base_color)
+    material.set_shader_parameter("bark_grain_contrast", 0.34 if role == "trunk" else 0.46)
     tree_wind_material_cache[role] = material
     return material
 
 func foliage_material_role(role: String) -> bool:
     return role.begins_with("leaf_") or role.begins_with("needle_") or role == "savanna_leaf"
 
-func configure_tree_wind_instance(node: Node3D, biome: String, prop_id: String) -> void:
+func configure_tree_wind_instance(node: Node3D, biome: String, prop_id: String, visual_scale := 1.0) -> void:
     if node == null:
         return
     var profile := profile_for_biome(biome)
@@ -293,19 +358,22 @@ func configure_tree_wind_instance(node: Node3D, biome: String, prop_id: String) 
     var phase := stable_unit("tree-wind-phase:%s:%s" % [biome, prop_id]) * TAU
     var variation := stable_unit("tree-wind-stiffness:%s:%s" % [biome, prop_id])
     var stiffness := clampf(1.18 - response * 0.18 + variation * 0.22, 0.68, 1.32)
-    configure_tree_wind_instance_recursive(node, phase, stiffness, response)
+    var bark_scale := maxf(0.1, float(visual_scale))
+    configure_tree_wind_instance_recursive(node, phase, stiffness, response, bark_scale)
     node.set_meta("tree_wind_phase", phase)
     node.set_meta("tree_wind_stiffness", stiffness)
     node.set_meta("tree_wind_response", response)
+    node.set_meta("tree_bark_scale", bark_scale)
 
-func configure_tree_wind_instance_recursive(node: Node, phase: float, stiffness: float, response: float) -> void:
+func configure_tree_wind_instance_recursive(node: Node, phase: float, stiffness: float, response: float, bark_scale: float) -> void:
     if node is MeshInstance3D:
         var mesh_instance := node as MeshInstance3D
         mesh_instance.set_instance_shader_parameter("tree_phase", phase)
         mesh_instance.set_instance_shader_parameter("tree_stiffness", stiffness)
         mesh_instance.set_instance_shader_parameter("tree_response", response)
+        mesh_instance.set_instance_shader_parameter("bark_scale", Vector2(bark_scale, bark_scale))
     for child in node.get_children():
-        configure_tree_wind_instance_recursive(child, phase, stiffness, response)
+        configure_tree_wind_instance_recursive(child, phase, stiffness, response, bark_scale)
 
 func tree_wind_material_count() -> int:
     return tree_wind_material_cache.size()
@@ -329,8 +397,15 @@ func asset_record(asset_id: String) -> Dictionary:
     var asset: Dictionary = assets_by_id.get(asset_id, {})
     return asset.duplicate(true)
 
-func tree_runtime_spec(biome: String, prop_id: String, fallback_height := 4.0) -> Dictionary:
-    var asset_id := select_tree_asset_id(biome, prop_id)
+func tree_runtime_spec(
+    biome: String,
+    prop_id: String,
+    fallback_height := 4.0,
+    world_cell := INVALID_TREE_CELL,
+    world_seed := ""
+) -> Dictionary:
+    var ecology := tree_ecology_spec(biome, prop_id, world_cell, world_seed)
+    var asset_id := select_tree_asset_id(biome, prop_id, world_cell, world_seed)
     var asset: Dictionary = assets_by_id.get(asset_id, {})
     if asset.is_empty():
         return {
@@ -352,12 +427,16 @@ func tree_runtime_spec(biome: String, prop_id: String, fallback_height := 4.0) -
     var target_height := maxf(0.1, fallback_height) * scale_multiplier
     var height_min := float(profile.get("tree_height_min")) if profile != null else 0.0
     var height_max := float(profile.get("tree_height_max")) if profile != null else 0.0
-    if family == "old_growth_broadleaf_tree":
+    if not ecology.is_empty() and height_min > 0.0 and height_max >= height_min:
+        var genetics := float(ecology.get("geneticUnit", 0.5))
+        target_height = lerpf(height_min, height_max, float(ecology.get("heightGrowth", 0.5)))
+        target_height *= lerpf(0.95, 1.05, genetics) * scale_multiplier
+    elif family == "old_growth_broadleaf_tree":
         var old_growth_variation := lerpf(0.96, 1.04, stable_unit("tree-old-growth-height:%s:%s" % [biome, prop_id]))
         target_height = source_height * scale_multiplier * old_growth_variation
     elif height_min > 0.0 and height_max >= height_min:
         target_height = lerpf(height_min, height_max, stable_unit("tree-height:%s:%s" % [biome, prop_id])) * scale_multiplier
-    var scale := clampf(target_height / source_height, 0.55, 1.55)
+    var scale := clampf(target_height / source_height, 0.55, 1.85)
     var visual_height := source_height * scale
     var trunk_radius := source_trunk_radius * scale
     var canopy_radius := source_canopy_radius * scale
@@ -365,12 +444,21 @@ func tree_runtime_spec(biome: String, prop_id: String, fallback_height := 4.0) -
         "assetId": asset_id,
         "family": family,
         "growthClass": String(asset.get("growthClass", "standard")),
+        "architecture": String(ecology.get("architecture", "legacy")),
+        "ageBand": String(ecology.get("ageBand", asset.get("growthClass", "standard"))),
+        "ageYears": float(ecology.get("ageYears", 0.0)),
+        "ageRangeMin": float(ecology.get("ageRangeMin", 0.0)),
+        "ageRangeMax": float(ecology.get("ageRangeMax", 0.0)),
+        "localMaturity": float(ecology.get("maturity", 0.5)),
+        "growthStage": float(ecology.get("growthStage", 0.5)),
+        "geneticSeed": int(ecology.get("geneticSeed", 0)),
         "scale": scale,
+        "barkScale": scale,
         "sourceHeight": source_height,
         "visualHeight": visual_height,
         "trunkRadius": trunk_radius,
         "canopyRadius": canopy_radius,
-        "oldGrowth": family == "old_growth_broadleaf_tree",
+        "oldGrowth": family == "old_growth_broadleaf_tree" or String(ecology.get("ageBand", "")) in ["old", "ancient"],
         "exclusionMargin": float(profile.get("natural_prop_exclusion_margin")) if profile != null else 0.0,
         "canopyDensity": float(profile.get("canopy_density")) if profile != null else 0.0
     }
