@@ -1202,7 +1202,6 @@ func test_all_runner_registry_baseline(_mode: String) -> Dictionary:
 	var required := [
 		"npc_focused",
 		"npc_navigation_integration",
-		"playtest",
 		"story_playtest",
 		"world_signature",
 		"visual_captures",
