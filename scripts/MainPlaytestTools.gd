@@ -3101,7 +3101,7 @@ func spawn_chunk_prop_attempt(state: Dictionary, i: int, rng: RandomNumberGenera
             runtime_perf_monitor.end_section("chunk_surface_prop_make_rock", rock_start)
     elif prop_roll < rock_roll + tree_roll:
         var tree_start: int = runtime_perf_monitor.begin_section("chunk_surface_prop_make_tree") if runtime_perf_monitor != null else Time.get_ticks_usec()
-        make_tree(chunk, prop_id, local_position, biome, rng)
+        make_tree(chunk, prop_id, local_position, biome, rng, Vector2i(x, z))
         if runtime_perf_monitor != null:
             runtime_perf_monitor.end_section("chunk_surface_prop_make_tree", tree_start)
     elif prop_roll < rock_roll + tree_roll + forage_roll:
@@ -3894,14 +3894,11 @@ func add_tree_visual(body: StaticBody3D, prop_id: String, biome: String, spec: D
 func add_generated_tree_visual(body: StaticBody3D, prop_id: String, biome: String, spec: Dictionary) -> bool:
     if visual_asset_registry == null or not visual_asset_registry.is_ready():
         return false
-    var asset_id: String = visual_asset_registry.select_tree_asset_id(biome, prop_id)
+    var asset_id := String(spec.get("asset_id", visual_asset_registry.select_tree_asset_id(biome, prop_id)))
     var visual: Node3D = visual_asset_registry.instantiate_asset(asset_id)
     if visual == null:
         return false
-    var asset_size: Vector3 = visual_asset_registry.asset_size(asset_id)
-    var source_height := maxf(0.1, asset_size.z)
-    var target_height := maxf(0.1, float(spec.get("height", source_height)))
-    var scale := clampf((target_height / source_height) * visual_asset_registry.tree_scale_for_biome(biome), 0.55, 1.55)
+    var scale := maxf(0.1, float(spec.get("asset_scale", 1.0)))
     visual.name = "GeneratedTreeVisual"
     visual.position = Vector3.ZERO
     visual.rotation = Vector3.ZERO
@@ -3916,9 +3913,14 @@ func add_generated_tree_visual(body: StaticBody3D, prop_id: String, biome: Strin
 
 func add_fallback_tree_visual(body: StaticBody3D, spec: Dictionary) -> void:
     var height := float(spec.get("height", 4.0))
+    var trunk_radius := maxf(0.12, float(spec.get("trunk_radius", 0.36)))
+    var canopy_radius := maxf(1.2, float(spec.get("canopy_radius", 1.8)))
+    var legacy_height := maxf(0.1, float(spec.get("legacy_height", height)))
+    var height_ratio := height / legacy_height
+    var canopy_ratio := canopy_radius / 1.8
     var trunk_mesh := CylinderMesh.new()
-    trunk_mesh.top_radius = 0.16
-    trunk_mesh.bottom_radius = 0.28
+    trunk_mesh.top_radius = trunk_radius * 0.62
+    trunk_mesh.bottom_radius = trunk_radius
     trunk_mesh.height = height
     trunk_mesh.radial_segments = 7
     var trunk := MeshInstance3D.new()
@@ -3931,21 +3933,54 @@ func add_fallback_tree_visual(body: StaticBody3D, spec: Dictionary) -> void:
 
     for leaf_spec in spec.get("clumps", []):
         var leaf_mesh := SphereMesh.new()
-        leaf_mesh.radius = float(leaf_spec.get("radius", 0.95))
+        leaf_mesh.radius = float(leaf_spec.get("radius", 0.95)) * canopy_ratio
         leaf_mesh.height = leaf_mesh.radius * 1.25
         var leaf := MeshInstance3D.new()
         leaf.name = "PrimitiveTreeLeaf"
         leaf.mesh = leaf_mesh
         leaf.material_override = materials["leaf"]
-        leaf.position = leaf_spec.get("position", Vector3(0.0, height + 0.5, 0.0))
+        var authored_position: Vector3 = leaf_spec.get("position", Vector3(0.0, legacy_height + 0.5, 0.0))
+        leaf.position = Vector3(
+            authored_position.x * canopy_ratio,
+            height * 0.72 + (authored_position.y - legacy_height) * minf(height_ratio, 2.2),
+            authored_position.z * canopy_ratio
+        )
         leaf.scale = leaf_spec.get("scale", Vector3.ONE)
         leaf.set_meta("visual_source", "primitive_fallback")
         body.add_child(leaf)
     body.set_meta("visual_source", "primitive_fallback")
     body.set_meta("visual_asset_id", "")
 
-func make_tree(parent: Node, prop_id: String, position: Vector3, biome: String, rng: RandomNumberGenerator):
+func make_tree(
+    parent: Node,
+    prop_id: String,
+    position: Vector3,
+    biome: String,
+    rng: RandomNumberGenerator,
+    world_cell := Vector2i(2147483647, 2147483647)
+):
     var spec := tree_visual_spec(biome, rng)
+    var legacy_height := float(spec.get("height", 4.0))
+    var runtime_spec := {}
+    if visual_asset_registry != null and visual_asset_registry.is_ready() and visual_asset_registry.has_method("tree_runtime_spec"):
+        runtime_spec = visual_asset_registry.tree_runtime_spec(biome, prop_id, legacy_height)
+    if not runtime_spec.is_empty():
+        spec["legacy_height"] = legacy_height
+        spec["asset_id"] = String(runtime_spec.get("assetId", ""))
+        spec["asset_scale"] = float(runtime_spec.get("scale", 1.0))
+        spec["height"] = float(runtime_spec.get("visualHeight", legacy_height))
+        spec["trunk_radius"] = float(runtime_spec.get("trunkRadius", 0.36))
+        spec["canopy_radius"] = float(runtime_spec.get("canopyRadius", 1.8))
+    var trunk_radius := maxf(0.12, float(spec.get("trunk_radius", 0.36)))
+    var canopy_radius := maxf(trunk_radius, float(spec.get("canopy_radius", 1.8)))
+    var exclusion_margin := float(runtime_spec.get("exclusionMargin", 0.0))
+    if world_cell.x != 2147483647 and natural_tree_blocked_at_cell(
+        world_cell.x,
+        world_cell.y,
+        trunk_radius + exclusion_margin,
+        canopy_radius + exclusion_margin
+    ):
+        return null
     var body := StaticBody3D.new()
     body.name = "Tree"
     body.position = position
@@ -3956,12 +3991,18 @@ func make_tree(parent: Node, prop_id: String, position: Vector3, biome: String, 
     body.set_meta("material", "tree")
     body.set_meta("drop_count", 3)
     body.set_meta("visual_biome", biome)
+    body.set_meta("tree_family", String(runtime_spec.get("family", "primitive_fallback")))
+    body.set_meta("tree_growth_class", String(runtime_spec.get("growthClass", "standard")))
+    body.set_meta("tree_canopy_radius", canopy_radius)
+    body.set_meta("tree_trunk_radius", trunk_radius)
+    body.set_meta("tree_visual_height", float(spec.get("height", legacy_height)))
+    body.set_meta("tree_old_growth", bool(runtime_spec.get("oldGrowth", false)))
 
     var height := float(spec.get("height", 4.0))
     add_tree_visual(body, prop_id, biome, spec)
 
     var trunk_shape := CylinderShape3D.new()
-    trunk_shape.radius = 0.36
+    trunk_shape.radius = trunk_radius
     trunk_shape.height = height
     var collider := CollisionShape3D.new()
     collider.shape = trunk_shape
@@ -3972,6 +4013,28 @@ func make_tree(parent: Node, prop_id: String, position: Vector3, biome: String, 
     if npc_system and npc_system.has_method("notify_navigation_prop_created"):
         npc_system.notify_navigation_prop_created(prop_id, body)
     return body
+
+func natural_tree_blocked_at_cell(
+    x: int,
+    z: int,
+    natural_exclusion_margin_world: float,
+    structure_footprint_margin_world: float
+) -> bool:
+    if structure_system == null:
+        return false
+    var natural_margin_cells := ceili(maxf(0.0, natural_exclusion_margin_world) / CELL)
+    var structure_margin_cells := ceili(maxf(0.0, structure_footprint_margin_world) / CELL)
+    if structure_system.has_method("blocks_natural_prop_with_separate_margins_at_cell"):
+        return bool(structure_system.call(
+            "blocks_natural_prop_with_separate_margins_at_cell",
+            x,
+            z,
+            natural_margin_cells,
+            structure_margin_cells
+        ))
+    if structure_system.has_method("blocks_natural_prop_with_margin_at_cell"):
+        return bool(structure_system.call("blocks_natural_prop_with_margin_at_cell", x, z, structure_margin_cells))
+    return natural_props_blocked_at_cell(x, z)
 
 func rock_visual_spec(rng: RandomNumberGenerator) -> Dictionary:
     var rotation := rng.randf() * TAU

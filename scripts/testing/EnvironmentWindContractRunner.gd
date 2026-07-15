@@ -101,7 +101,7 @@ func test_shared_tree_materials(catalog) -> void:
     for asset_id in registry.cached_asset_ids():
         if asset_id.begins_with("mature_") or asset_id.begins_with("old_growth_"):
             mature_exposed = true
-    add_result("vox120_canopies_remain_dormant_during_wind_phase", registry.asset_count() == 26 and not mature_exposed, {"assetCount": registry.asset_count(), "matureExposed": mature_exposed})
+    add_result("vox122_canopies_are_runtime_published", registry.asset_count() == 39 and mature_exposed, {"assetCount": registry.asset_count(), "matureExposed": mature_exposed})
     if first != null:
         first.free()
     if second != null:
@@ -254,7 +254,7 @@ func finish() -> void:
         "finished": true,
         "passed": failure_count == 0,
         "evidenceLevel": "contract",
-        "scope": "Deterministic O(1) weather/biome wind field, declared shader globals, shared tree material cache, instance phase/stiffness, shader channel use, static detail classes, and VOX-120 runtime dormancy. This is contract evidence, not live visual or performance acceptance.",
+        "scope": "Deterministic O(1) weather/biome wind field, declared shader globals, shared tree material cache, instance phase/stiffness, shader channel use, static detail classes, and VOX-122 runtime canopy publication. This is contract evidence, not live visual or performance acceptance.",
         "resultCount": results.size(),
         "failureCount": failure_count,
         "results": results

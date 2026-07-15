@@ -700,22 +700,36 @@ func reserve_natural_prop_exclusion(base_x: int, base_z: int, width: int, depth:
     }
 
 func blocks_natural_prop_at_cell(x: int, z: int) -> bool:
+    return blocks_natural_prop_with_margin_at_cell(x, z, 0)
+
+func blocks_natural_prop_with_margin_at_cell(x: int, z: int, margin_cells: int) -> bool:
+    return blocks_natural_prop_with_separate_margins_at_cell(x, z, margin_cells, margin_cells)
+
+func blocks_natural_prop_with_separate_margins_at_cell(
+    x: int,
+    z: int,
+    natural_exclusion_margin_cells: int,
+    structure_footprint_margin_cells: int
+) -> bool:
+    var natural_margin := maxi(0, natural_exclusion_margin_cells)
     for record_value in natural_prop_exclusion_records.values():
         if not (record_value is Dictionary):
             continue
         var record: Dictionary = record_value
-        if x >= int(record.get("minX", x)) \
-            and x <= int(record.get("maxX", x)) \
-            and z >= int(record.get("minZ", z)) \
-            and z <= int(record.get("maxZ", z)):
+        if x >= int(record.get("minX", x)) - natural_margin \
+            and x <= int(record.get("maxX", x)) + natural_margin \
+            and z >= int(record.get("minZ", z)) - natural_margin \
+            and z <= int(record.get("maxZ", z)) + natural_margin:
             return true
+    var structure_margin := maxi(0, structure_footprint_margin_cells)
     for record_value in terrain_footprint_records.values():
         if not (record_value is Dictionary):
             continue
         var record: Dictionary = record_value
         var min_cell: Vector3i = record.get("minCell", Vector3i.ZERO)
         var max_cell: Vector3i = record.get("maxCell", Vector3i.ZERO)
-        if x >= min_cell.x and x <= max_cell.x and z >= min_cell.z and z <= max_cell.z:
+        if x >= min_cell.x - structure_margin and x <= max_cell.x + structure_margin \
+            and z >= min_cell.z - structure_margin and z <= max_cell.z + structure_margin:
             return true
     return false
 

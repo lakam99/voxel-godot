@@ -22,7 +22,7 @@ func run() -> void:
 	DirAccess.make_dir_recursive_absolute(report_path.get_base_dir())
 	var manifest := read_json(MANIFEST_PATH)
 	var canopy_assets := select_canopy_assets(manifest)
-	add_result("manifest_exposes_dormant_canopy_asset_set", int(manifest.get("schemaVersion", 0)) == 2 and canopy_assets.size() == 13 and all_runtime_disabled(canopy_assets), {
+	add_result("manifest_exposes_runtime_canopy_asset_set", int(manifest.get("schemaVersion", 0)) == 2 and canopy_assets.size() == 13 and all_runtime_enabled(canopy_assets), {
 		"schemaVersion": manifest.get("schemaVersion", 0),
 		"assetIds": asset_ids(canopy_assets),
 		"runtimeEnabled": runtime_states(canopy_assets),
@@ -42,16 +42,16 @@ func run() -> void:
 	add_result("canopy_assets_remain_static_meshes", rows_all_true(imported_rows, ["staticOnly"]), compact_rows(imported_rows, ["id", "skeletonCount", "animationPlayerCount", "staticOnly"]))
 	var registry = VisualAssetRegistryScript.new()
 	var registry_ready: bool = registry.setup()
-	var dormant_ids_present: Array[String] = []
+	var runtime_ids_present: Array[String] = []
 	for asset in canopy_assets:
 		var asset_id := String(asset.get("id", ""))
 		if registry.assets_by_id.has(asset_id) or registry.scene_cache.has(asset_id):
-			dormant_ids_present.append(asset_id)
-	add_result("runtime_registry_excludes_vox120_canopy_assets", registry_ready and registry.asset_count() == 26 and registry.cached_scene_count() == 26 and dormant_ids_present.is_empty(), {
+			runtime_ids_present.append(asset_id)
+	add_result("runtime_registry_publishes_vox120_canopy_assets", registry_ready and registry.asset_count() == 39 and registry.cached_scene_count() == 39 and runtime_ids_present.size() == 13, {
 		"registryReady": registry_ready,
 		"assetCount": registry.asset_count(),
 		"cachedSceneCount": registry.cached_scene_count(),
-		"dormantIdsPresent": dormant_ids_present,
+		"runtimeIdsPresent": runtime_ids_present,
 		"errors": registry.last_errors,
 	})
 	finish(imported_rows)
@@ -205,9 +205,9 @@ func transformed_aabb(transform: Transform3D, bounds: AABB) -> AABB:
 					result = result.expand(transformed)
 	return result
 
-func all_runtime_disabled(assets: Array[Dictionary]) -> bool:
+func all_runtime_enabled(assets: Array[Dictionary]) -> bool:
 	for asset in assets:
-		if bool(asset.get("runtimeEnabled", true)):
+		if not bool(asset.get("runtimeEnabled", false)):
 			return false
 	return true
 
@@ -266,11 +266,11 @@ func finish(imported_rows: Array[Dictionary]) -> void:
 	var report := {
 		"schemaVersion": 1,
 		"runnerId": "canopy_asset_import_contract",
-		"testId": "vox_120_canopy_asset_import_contract",
+		"testId": "vox_122_canopy_asset_import_contract",
 		"finished": true,
 		"passed": failure_count == 0,
 		"evidenceLevel": "contract",
-		"scope": "Godot GLTF import, static mesh/material/geometry/wind-channel integrity, and runtime-registry dormancy for VOX-120 canopy assets. This is import contract evidence, not live visual or gameplay acceptance.",
+		"scope": "Godot GLTF import, static mesh/material/geometry/wind-channel integrity, and VOX-122 runtime-registry publication for the VOX-120 canopy assets. This is import contract evidence, not live visual or gameplay acceptance.",
 		"resultCount": results.size(),
 		"failureCount": failure_count,
 		"importedAssetCount": imported_rows.size(),

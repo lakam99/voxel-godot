@@ -5,7 +5,7 @@
 [resource]
 script = ExtResource("1_profile")
 biome_id = "savanna"
-tree_families = PackedStringArray("savanna_tree")
+tree_families = PackedStringArray("mature_savanna_tree")
 rock_families = PackedStringArray("rock")
 tree_scale = 1.0
 rock_scale = 1.04
@@ -25,3 +25,14 @@ detail_thresholds = PackedFloat32Array(0.44, 1.0)
 detail_y_offsets = PackedFloat32Array(0.17, 0.05)
 detail_scale_mins = PackedFloat32Array(0.65, 0.55)
 detail_scale_maxs = PackedFloat32Array(1.22, 1.28)
+tree_height_min = 9.0
+tree_height_max = 12.5
+crown_radius_min = 5.4
+crown_radius_max = 7.0
+trunk_radius_min = 0.44
+trunk_radius_max = 0.58
+wind_response = 1.20
+canopy_density = 0.34
+natural_prop_exclusion_margin = 0.45
+tree_visibility_range = 330.0
+tree_shadow_range = 205.0

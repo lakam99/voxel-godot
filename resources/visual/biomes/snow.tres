@@ -5,7 +5,7 @@
 [resource]
 script = ExtResource("1_profile")
 biome_id = "snow"
-tree_families = PackedStringArray("conifer_tree")
+tree_families = PackedStringArray("mature_conifer_tree")
 rock_families = PackedStringArray("rock")
 tree_scale = 1.04
 rock_scale = 1.06
@@ -20,6 +20,17 @@ forage_radius = 0.48
 weather_precip = 0.58
 weather_clouds = 0.58
 cold_weather = true
+tree_height_min = 12.0
+tree_height_max = 16.0
+crown_radius_min = 3.0
+crown_radius_max = 4.2
+trunk_radius_min = 0.38
+trunk_radius_max = 0.52
+wind_response = 0.78
+canopy_density = 0.36
+natural_prop_exclusion_margin = 0.40
+tree_visibility_range = 340.0
+tree_shadow_range = 205.0
 detail_types = PackedStringArray("snowClump", "pebble")
 detail_thresholds = PackedFloat32Array(0.56, 1.0)
 detail_y_offsets = PackedFloat32Array(0.05, 0.05)

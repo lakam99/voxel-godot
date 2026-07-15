@@ -138,6 +138,11 @@ func select_tree_asset_id(biome: String, prop_id: String) -> String:
     var families := PackedStringArray(["broadleaf_tree"])
     if profile != null:
         families = profile.get("tree_families")
+        var old_growth_chance := clampf(float(profile.get("old_growth_chance")), 0.0, 1.0)
+        if families.has("mature_broadleaf_tree") \
+            and old_growth_chance > 0.0 \
+            and stable_unit("tree-old-growth:%s:%s" % [biome, prop_id]) < old_growth_chance:
+            families = PackedStringArray(["old_growth_broadleaf_tree"])
     return select_asset_id(families, biome, prop_id, "tree")
 
 func select_rock_asset_id(biome: String, prop_id: String) -> String:
@@ -219,6 +224,10 @@ func visibility_range_for_family(family: String) -> float:
     match family:
         "broadleaf_tree", "conifer_tree", "savanna_tree":
             return 260.0
+        "mature_broadleaf_tree", "mature_conifer_tree", "mature_savanna_tree":
+            return 340.0
+        "old_growth_broadleaf_tree":
+            return 380.0
         "rock":
             return 220.0
         "stump_log":
@@ -315,6 +324,56 @@ func asset_size(asset_id: String) -> Vector3:
     if size.size() < 3:
         return Vector3.ONE
     return Vector3(float(size[0]), float(size[1]), float(size[2]))
+
+func asset_record(asset_id: String) -> Dictionary:
+    var asset: Dictionary = assets_by_id.get(asset_id, {})
+    return asset.duplicate(true)
+
+func tree_runtime_spec(biome: String, prop_id: String, fallback_height := 4.0) -> Dictionary:
+    var asset_id := select_tree_asset_id(biome, prop_id)
+    var asset: Dictionary = assets_by_id.get(asset_id, {})
+    if asset.is_empty():
+        return {
+            "assetId": "",
+            "family": "primitive_fallback",
+            "scale": 1.0,
+            "visualHeight": maxf(0.1, fallback_height),
+            "trunkRadius": 0.36,
+            "canopyRadius": 1.8,
+            "oldGrowth": false
+        }
+    var metrics: Dictionary = asset.get("treeMetrics", {})
+    var source_height := maxf(0.1, float(metrics.get("height", asset_size(asset_id).z)))
+    var source_trunk_radius := maxf(0.08, float(metrics.get("trunkRadius", 0.36)))
+    var source_canopy_radius := maxf(source_trunk_radius, float(metrics.get("canopyRadius", 1.8)))
+    var family := String(asset.get("family", ""))
+    var profile := profile_for_biome(biome)
+    var scale_multiplier := float(profile.get("tree_scale")) if profile != null else 1.0
+    var target_height := maxf(0.1, fallback_height) * scale_multiplier
+    var height_min := float(profile.get("tree_height_min")) if profile != null else 0.0
+    var height_max := float(profile.get("tree_height_max")) if profile != null else 0.0
+    if family == "old_growth_broadleaf_tree":
+        var old_growth_variation := lerpf(0.96, 1.04, stable_unit("tree-old-growth-height:%s:%s" % [biome, prop_id]))
+        target_height = source_height * scale_multiplier * old_growth_variation
+    elif height_min > 0.0 and height_max >= height_min:
+        target_height = lerpf(height_min, height_max, stable_unit("tree-height:%s:%s" % [biome, prop_id])) * scale_multiplier
+    var scale := clampf(target_height / source_height, 0.55, 1.55)
+    var visual_height := source_height * scale
+    var trunk_radius := source_trunk_radius * scale
+    var canopy_radius := source_canopy_radius * scale
+    return {
+        "assetId": asset_id,
+        "family": family,
+        "growthClass": String(asset.get("growthClass", "standard")),
+        "scale": scale,
+        "sourceHeight": source_height,
+        "visualHeight": visual_height,
+        "trunkRadius": trunk_radius,
+        "canopyRadius": canopy_radius,
+        "oldGrowth": family == "old_growth_broadleaf_tree",
+        "exclusionMargin": float(profile.get("natural_prop_exclusion_margin")) if profile != null else 0.0,
+        "canopyDensity": float(profile.get("canopy_density")) if profile != null else 0.0
+    }
 
 func tree_scale_for_biome(biome: String) -> float:
     var profile := profile_for_biome(biome)

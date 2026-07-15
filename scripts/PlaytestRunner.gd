@@ -6104,7 +6104,7 @@ func test_generated_environment_prop_visuals() -> void:
     var cache_stable: bool = cached_before == cached_after_spawn
     add_result(
         "generated_environment_prop_visuals",
-        registry_ready and asset_count == 26 and profile_count >= 8 and tree_generated and rock_generated and tree_collision and rock_collision and cache_stable,
+        registry_ready and asset_count == 39 and profile_count >= 8 and tree_generated and rock_generated and tree_collision and rock_collision and cache_stable,
         "ready %s, assets %d, profiles %d, tree %s meshes %d collisions %d, rock %s meshes %d collisions %d, cache %d->%d" % [
             str(registry_ready),
             asset_count,

@@ -7,6 +7,9 @@ const SAMPLE_CELLS := [
     Vector2i(28, 28), Vector2i(56, -28), Vector2i(84, 56), Vector2i(112, -56),
     Vector2i(140, 70), Vector2i(196, 0), Vector2i(280, 0), Vector2i(280, 25)
 ]
+const SIGNATURE_READINESS_MAX_FRAMES := 1800
+const SIGNATURE_STABLE_FRAMES := 12
+const SURFACE_PROP_ATTEMPTS_PER_CHUNK := 28
 
 var main
 var output_path := ""
@@ -27,8 +30,15 @@ func run() -> void:
     OS.set_environment("VOXEL_PLAYTEST", "1")
     main = MAIN_SCENE.instantiate()
     add_child(main)
-    await wait_frames(90)
+    if not await wait_for_signature_chunk_readiness("initial world"):
+        get_tree().quit(1)
+        return
     prepare_world()
+    if not await wait_for_signature_chunk_readiness("signature town"):
+        get_tree().quit(1)
+        return
+    freeze_world()
+    complete_signature_surface_props()
     var signature := build_signature()
     write_json(output_path, signature)
     get_tree().quit(0)
@@ -38,13 +48,68 @@ func prepare_world() -> void:
     var cell := Vector2i(int(town.get("centerX", 0)), int(town.get("centerZ", 0)) + 5)
     if main.has_method("teleport_to_cell"):
         main.teleport_to_cell(cell, "World signature")
+
+func freeze_world() -> void:
     main.set_process(false)
     var player = main.get("player") as CharacterBody3D
     if player:
         player.set_physics_process(false)
 
+func wait_for_signature_chunk_readiness(stage: String) -> bool:
+    var stable_frames := 0
+    var previous_chunk_count := -1
+    for frame in range(SIGNATURE_READINESS_MAX_FRAMES):
+        await get_tree().process_frame
+        var chunks_value = main.get("chunks")
+        var pending_loads_value = main.get("pending_chunk_loads")
+        var chunk_count: int = int(chunks_value.size()) if chunks_value is Dictionary else -1
+        var pending_load_count: int = int(pending_loads_value.size()) if pending_loads_value is Dictionary else -1
+        var loading_active := bool(main.get("startup_loading_active"))
+        var chunk_queue_drained: bool = not loading_active and pending_load_count == 0
+        if chunk_queue_drained and chunk_count == previous_chunk_count:
+            stable_frames += 1
+        else:
+            stable_frames = 0
+        previous_chunk_count = chunk_count
+        if stable_frames >= SIGNATURE_STABLE_FRAMES:
+            print("World signature chunk readiness: %s chunks=%d frame=%d" % [stage, chunk_count, frame])
+            return true
+    push_error("World signature chunk readiness timed out: %s chunks=%d" % [stage, previous_chunk_count])
+    return false
+
+func complete_signature_surface_props() -> void:
+    var pending_value = main.get("pending_chunk_prop_spawns")
+    if not (pending_value is Dictionary):
+        return
+    var pending: Dictionary = pending_value
+    var keys: Array = pending.keys()
+    keys.sort_custom(func(first, second): return chunk_key_text(first) < chunk_key_text(second))
+    var completed_attempts := 0
+    for key in keys:
+        var state_value = pending.get(key)
+        if not (state_value is Dictionary):
+            continue
+        var state: Dictionary = state_value
+        var rng := state.get("rng") as RandomNumberGenerator
+        if rng == null:
+            continue
+        var prop_index := int(state.get("propIndex", 0))
+        while prop_index < SURFACE_PROP_ATTEMPTS_PER_CHUNK:
+            main.call("spawn_chunk_prop_attempt", state, prop_index, rng)
+            prop_index += 1
+            completed_attempts += 1
+        state["propIndex"] = prop_index
+    print("World signature completed pending surface prop attempts: %d" % completed_attempts)
+
+func chunk_key_text(value) -> String:
+    if value is Vector2i:
+        return "%08d,%08d" % [value.x + 100000, value.y + 100000]
+    return String(value)
+
 func build_signature() -> Dictionary:
     return {
+        "schemaVersion": 2,
+        "fixtureContract": "stable_loaded_chunks_with_completed_surface_prop_attempts",
         "seed": seed,
         "terrainSamples": terrain_samples(),
         "loadedChunkKeys": loaded_chunk_keys(),

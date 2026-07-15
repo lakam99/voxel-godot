@@ -1,4 +1,5 @@
 {
+  "fixtureContract": "stable_loaded_chunks_with_completed_surface_prop_attempts",
   "generatedBlocks": [
     {
       "cell": {
@@ -14318,52 +14319,86 @@
     "11,0",
     "11,1",
     "11,2",
+    "11,3",
     "12,-1",
     "12,-2",
     "12,-3",
     "12,0",
     "12,1",
     "12,2",
+    "12,3",
+    "13,-1",
+    "13,-2",
+    "13,-3",
+    "13,0",
+    "13,1",
+    "13,2",
+    "13,3",
     "7,-1",
     "7,-2",
     "7,-3",
     "7,0",
     "7,1",
     "7,2",
+    "7,3",
     "8,-1",
     "8,-2",
     "8,-3",
     "8,0",
     "8,1",
     "8,2",
+    "8,3",
     "9,-1",
     "9,-2",
     "9,-3",
     "9,0",
     "9,1",
-    "9,2"
+    "9,2",
+    "9,3"
   ],
   "props": [
     {
       "drop": "rawMeat",
-      "id": "atlas-1492:175,-53:0",
+      "id": "atlas-1492:198,-23:7",
       "kind": "prop",
       "material": "wildlife",
       "position": {
-        "x": 236.25,
-        "y": 19.278,
-        "z": -71.55
+        "x": 267.3,
+        "y": 19.737,
+        "z": -31.05
       }
     },
     {
-      "drop": "aloe",
-      "id": "atlas-1492:188,-78:0",
+      "drop": "stones",
+      "id": "atlas-1492:198,-63:16",
       "kind": "prop",
-      "material": "aloePatch",
+      "material": "rock",
       "position": {
-        "x": 253.8,
-        "y": 19.278,
-        "z": -105.3
+        "x": 267.3,
+        "y": 17.911,
+        "z": -85.05
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:198,13:4",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 267.3,
+        "y": 36.311,
+        "z": 17.55
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:198,46:23",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 267.3,
+        "y": 28.208,
+        "z": 62.1
       }
     },
     {
@@ -14375,6 +14410,17 @@
         "x": 267.3,
         "y": 32.236,
         "z": 8.1
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:198,76:3",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 267.3,
+        "y": 19.291,
+        "z": 102.6
       }
     },
     {
@@ -14390,6 +14436,358 @@
     },
     {
       "drop": "logs",
+      "id": "atlas-1492:199,-18:12",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 268.65,
+        "y": 21.114,
+        "z": -24.3
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:199,-33:18",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 268.65,
+        "y": 19.737,
+        "z": -44.55
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:199,-34:12",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 268.65,
+        "y": 19.853,
+        "z": -45.9
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:199,-45:8",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 268.65,
+        "y": 21.114,
+        "z": -60.75
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:199,39:6",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 268.65,
+        "y": 32.479,
+        "z": 52.65
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:199,49:5",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 268.65,
+        "y": 27.966,
+        "z": 66.15
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:200,-30:10",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 270.0,
+        "y": 19.737,
+        "z": -40.5
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:200,-32:2",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 270.0,
+        "y": 20.196,
+        "z": -43.2
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:200,-32:25",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 270.0,
+        "y": 20.196,
+        "z": -43.2
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:200,59:4",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 270.0,
+        "y": 23.409,
+        "z": 79.65
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:201,-62:10",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 271.35,
+        "y": 19.56,
+        "z": -83.7
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:201,-81:11",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 271.35,
+        "y": 19.278,
+        "z": -109.35
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:201,103:12",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 271.35,
+        "y": 21.114,
+        "z": 139.05
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:201,69:1",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 271.35,
+        "y": 21.114,
+        "z": 93.15
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:202,-22:8",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 272.7,
+        "y": 20.196,
+        "z": -29.7
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:202,-59:27",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 272.7,
+        "y": 18.619,
+        "z": -79.65
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:202,-64:24",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 272.7,
+        "y": 18.667,
+        "z": -86.4
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:202,-71:20",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 272.7,
+        "y": 19.803,
+        "z": -95.85
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:202,-82:13",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 272.7,
+        "y": 19.278,
+        "z": -110.7
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:202,109:6",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 272.7,
+        "y": 20.655,
+        "z": 147.15
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:202,31:24",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 272.7,
+        "y": 28.893,
+        "z": 41.85
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:202,66:23",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 272.7,
+        "y": 22.032,
+        "z": 89.1
+      }
+    },
+    {
+      "drop": "aloe",
+      "id": "atlas-1492:202,9:20",
+      "kind": "prop",
+      "material": "aloePatch",
+      "position": {
+        "x": 272.7,
+        "y": 35.439,
+        "z": 12.15
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:203,-4:13",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 274.05,
+        "y": 24.659,
+        "z": -5.4
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:203,-81:22",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 274.05,
+        "y": 19.278,
+        "z": -109.35
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:203,105:21",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 274.05,
+        "y": 21.114,
+        "z": 141.75
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:203,17:24",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 274.05,
+        "y": 34.073,
+        "z": 22.95
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:203,36:21",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 274.05,
+        "y": 30.736,
+        "z": 48.6
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:203,86:1",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 274.05,
+        "y": 19.278,
+        "z": 116.1
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:203,9:8",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 274.05,
+        "y": 35.439,
+        "z": 12.15
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:204,-34:4",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 275.4,
+        "y": 21.062,
+        "z": -45.9
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:204,-53:21",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 275.4,
+        "y": 19.352,
+        "z": -71.55
+      }
+    },
+    {
+      "drop": "logs",
       "id": "atlas-1492:204,-61:0",
       "kind": "prop",
       "material": "tree",
@@ -14401,13 +14799,1025 @@
     },
     {
       "drop": "berries",
-      "id": "atlas-1492:213,-87:0",
+      "id": "atlas-1492:204,51:3",
       "kind": "prop",
       "material": "berryBush",
       "position": {
-        "x": 287.55,
+        "x": 275.4,
+        "y": 27.237,
+        "z": 68.85
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:204,80:11",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 275.4,
+        "y": 19.278,
+        "z": 108.0
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:204,93:11",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 275.4,
         "y": 19.737,
-        "z": -117.45
+        "z": 125.55
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:205,-41:14",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 276.75,
+        "y": 22.228,
+        "z": -55.35
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:205,38:9",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 276.75,
+        "y": 31.704,
+        "z": 51.3
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:205,96:27",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 276.75,
+        "y": 20.196,
+        "z": 129.6
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:205,97:18",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 276.75,
+        "y": 20.196,
+        "z": 130.95
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:206,-36:17",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 278.1,
+        "y": 21.782,
+        "z": -48.6
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:206,-5:2",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 278.1,
+        "y": 25.551,
+        "z": -6.75
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:206,-80:19",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 278.1,
+        "y": 18.819,
+        "z": -108.0
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:206,107:20",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 278.1,
+        "y": 20.655,
+        "z": 144.45
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:206,110:15",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 278.1,
+        "y": 20.196,
+        "z": 148.5
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:206,15:9",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 278.1,
+        "y": 35.569,
+        "z": 20.25
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:206,18:26",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 278.1,
+        "y": 34.25,
+        "z": 24.3
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:207,-41:23",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 279.45,
+        "y": 22.598,
+        "z": -55.35
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:207,-49:6",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 279.45,
+        "y": 20.926,
+        "z": -66.15
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:207,-77:15",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 279.45,
+        "y": 18.819,
+        "z": -103.95
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:207,101:2",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 279.45,
+        "y": 20.196,
+        "z": 136.35
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:207,70:2",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 279.45,
+        "y": 22.032,
+        "z": 94.5
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:208,-38:24",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 280.8,
+        "y": 22.011,
+        "z": -51.3
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:208,-5:11",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 280.8,
+        "y": 25.623,
+        "z": -6.75
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:208,-75:25",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 280.8,
+        "y": 18.724,
+        "z": -101.25
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:208,-7:6",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 280.8,
+        "y": 24.632,
+        "z": -9.45
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:208,110:5",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 280.8,
+        "y": 20.196,
+        "z": 148.5
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:209,-10:4",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 282.15,
+        "y": 22.95,
+        "z": -13.5
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:209,-32:11",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 282.15,
+        "y": 21.573,
+        "z": -43.2
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:209,-3:19",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 282.15,
+        "y": 25.887,
+        "z": -4.05
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:209,-51:26",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 282.15,
+        "y": 20.35,
+        "z": -68.85
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:209,-73:18",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 282.15,
+        "y": 19.347,
+        "z": -98.55
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:209,67:10",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 282.15,
+        "y": 22.491,
+        "z": 90.45
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:209,93:24",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 282.15,
+        "y": 19.278,
+        "z": 125.55
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:209,99:3",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 282.15,
+        "y": 19.737,
+        "z": 133.65
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:210,-33:3",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 283.5,
+        "y": 21.573,
+        "z": -44.55
+      }
+    },
+    {
+      "drop": "aloe",
+      "id": "atlas-1492:210,-6:9",
+      "kind": "prop",
+      "material": "aloePatch",
+      "position": {
+        "x": 283.5,
+        "y": 24.289,
+        "z": -8.1
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:211,-16:18",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 284.85,
+        "y": 21.114,
+        "z": -21.6
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:211,107:26",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 284.85,
+        "y": 19.737,
+        "z": 144.45
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:211,30:19",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 284.85,
+        "y": 29.959,
+        "z": 40.5
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:212,5:14",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 286.2,
+        "y": 27.833,
+        "z": 6.75
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:213,110:17",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 287.55,
+        "y": 20.196,
+        "z": 148.5
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:213,15:22",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 287.55,
+        "y": 36.451,
+        "z": 20.25
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:213,86:19",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 287.55,
+        "y": 19.278,
+        "z": 116.1
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:214,-13:17",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 288.9,
+        "y": 21.573,
+        "z": -17.55
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:214,73:19",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 288.9,
+        "y": 21.114,
+        "z": 98.55
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:214,73:24",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 288.9,
+        "y": 21.114,
+        "z": 98.55
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:214,74:17",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 288.9,
+        "y": 21.114,
+        "z": 99.9
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:215,-4:24",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 290.25,
+        "y": 23.039,
+        "z": -5.4
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:215,110:9",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 290.25,
+        "y": 20.196,
+        "z": 148.5
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:215,70:15",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 290.25,
+        "y": 21.573,
+        "z": 94.5
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:215,78:18",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 290.25,
+        "y": 19.737,
+        "z": 105.3
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:216,-20:10",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 291.6,
+        "y": 20.196,
+        "z": -27.0
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:216,-39:13",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 291.6,
+        "y": 21.573,
+        "z": -52.65
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:216,-79:23",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 291.6,
+        "y": 19.737,
+        "z": -106.65
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:216,-82:8",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 291.6,
+        "y": 19.737,
+        "z": -110.7
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:216,102:8",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 291.6,
+        "y": 17.901,
+        "z": 137.7
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:216,107:13",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 291.6,
+        "y": 18.819,
+        "z": 144.45
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:216,45:7",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 291.6,
+        "y": 27.571,
+        "z": 60.75
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:217,-71:26",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 292.95,
+        "y": 19.045,
+        "z": -95.85
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:217,100:25",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 292.95,
+        "y": 17.901,
+        "z": 135.0
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:217,101:16",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 292.95,
+        "y": 17.901,
+        "z": 136.35
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:217,103:22",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 292.95,
+        "y": 18.36,
+        "z": 139.05
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:217,104:14",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 292.95,
+        "y": 18.36,
+        "z": 140.4
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:217,58:22",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 292.95,
+        "y": 24.786,
+        "z": 78.3
+      }
+    },
+    {
+      "drop": "copperOre",
+      "id": "atlas-1492:217,9:19",
+      "kind": "prop",
+      "material": "copperOre",
+      "position": {
+        "x": 292.95,
+        "y": 27.0,
+        "z": 12.15
+      }
+    },
+    {
+      "drop": "copperOre",
+      "id": "atlas-1492:217,9:19:cluster1",
+      "kind": "prop",
+      "material": "copperOre",
+      "position": {
+        "x": 292.896,
+        "y": 26.956,
+        "z": 10.955
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:218,-24:25",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 294.3,
+        "y": 20.196,
+        "z": -32.4
+      }
+    },
+    {
+      "drop": "copperOre",
+      "id": "atlas-1492:218,12:17",
+      "kind": "prop",
+      "material": "copperOre",
+      "position": {
+        "x": 294.3,
+        "y": 29.635,
+        "z": 16.2
+      }
+    },
+    {
+      "drop": "copperOre",
+      "id": "atlas-1492:218,12:17:cluster1",
+      "kind": "prop",
+      "material": "copperOre",
+      "position": {
+        "x": 293.267,
+        "y": 29.627,
+        "z": 16.677
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:218,17:10",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 294.3,
+        "y": 34.045,
+        "z": 22.95
+      }
+    },
+    {
+      "drop": "aloe",
+      "id": "atlas-1492:218,22:16",
+      "kind": "prop",
+      "material": "aloePatch",
+      "position": {
+        "x": 294.3,
+        "y": 38.917,
+        "z": 29.7
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:218,31:18",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 294.3,
+        "y": 31.265,
+        "z": 41.85
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:219,-49:5",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 295.65,
+        "y": 19.898,
+        "z": -66.15
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:219,-68:5",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 295.65,
+        "y": 19.151,
+        "z": -91.8
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:219,-70:14",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 295.65,
+        "y": 18.887,
+        "z": -94.5
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:219,38:14",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 295.65,
+        "y": 31.558,
+        "z": 51.3
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:219,65:13",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 295.65,
+        "y": 22.95,
+        "z": 87.75
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:219,67:27",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 295.65,
+        "y": 22.95,
+        "z": 90.45
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:219,6:1",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 295.65,
+        "y": 25.591,
+        "z": 8.1
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:219,87:0",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 295.65,
+        "y": 18.819,
+        "z": 117.45
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:219,99:7",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 295.65,
+        "y": 18.36,
+        "z": 133.65
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:220,-13:14",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 297.0,
+        "y": 20.196,
+        "z": -17.55
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:220,-38:1",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 297.0,
+        "y": 21.114,
+        "z": -51.3
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:220,-80:12",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 297.0,
+        "y": 19.737,
+        "z": -108.0
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:220,110:23",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 297.0,
+        "y": 20.196,
+        "z": 148.5
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:220,32:25",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 297.0,
+        "y": 31.188,
+        "z": 43.2
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:220,59:6",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 297.0,
+        "y": 24.786,
+        "z": 79.65
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:221,-51:20",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 298.35,
+        "y": 19.278,
+        "z": -68.85
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:221,41:8",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 298.35,
+        "y": 28.135,
+        "z": 55.35
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:221,46:17",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 298.35,
+        "y": 27.081,
+        "z": 62.1
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:221,48:27",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 298.35,
+        "y": 26.622,
+        "z": 64.8
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:221,92:10",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 298.35,
+        "y": 19.278,
+        "z": 124.2
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:222,109:4",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 299.7,
+        "y": 19.278,
+        "z": 147.15
+      }
+    },
+    {
+      "drop": "copperOre",
+      "id": "atlas-1492:222,35:16",
+      "kind": "prop",
+      "material": "copperOre",
+      "position": {
+        "x": 299.7,
+        "y": 30.444,
+        "z": 47.25
+      }
+    },
+    {
+      "drop": "copperOre",
+      "id": "atlas-1492:222,35:16:cluster1",
+      "kind": "prop",
+      "material": "copperOre",
+      "position": {
+        "x": 299.132,
+        "y": 30.403,
+        "z": 46.43
       }
     },
     {
@@ -14419,6 +15829,28 @@
         "x": 299.7,
         "y": 27.081,
         "z": 60.75
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:222,64:8",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 299.7,
+        "y": 24.327,
+        "z": 86.4
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:222,65:26",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 299.7,
+        "y": 24.327,
+        "z": 87.75
       }
     },
     {
@@ -14444,6 +15876,72 @@
       }
     },
     {
+      "drop": "copperOre",
+      "id": "atlas-1492:226,12:14",
+      "kind": "prop",
+      "material": "copperOre",
+      "position": {
+        "x": 305.1,
+        "y": 24.81,
+        "z": 16.2
+      }
+    },
+    {
+      "drop": "copperOre",
+      "id": "atlas-1492:226,12:14:cluster1",
+      "kind": "prop",
+      "material": "copperOre",
+      "position": {
+        "x": 305.504,
+        "y": 24.846,
+        "z": 17.389
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:226,16:3",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 305.1,
+        "y": 25.704,
+        "z": 21.6
+      }
+    },
+    {
+      "drop": "aloe",
+      "id": "atlas-1492:226,20:25",
+      "kind": "prop",
+      "material": "aloePatch",
+      "position": {
+        "x": 305.1,
+        "y": 27.008,
+        "z": 27.0
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:226,51:13",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 305.1,
+        "y": 26.163,
+        "z": 68.85
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:226,8:2",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 305.1,
+        "y": 22.95,
+        "z": 10.8
+      }
+    },
+    {
       "drop": "logs",
       "id": "atlas-1492:227,-19:0",
       "kind": "prop",
@@ -14455,6 +15953,754 @@
       }
     },
     {
+      "drop": "berries",
+      "id": "atlas-1492:227,-33:3",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 306.45,
+        "y": 19.278,
+        "z": -44.55
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:227,-72:3",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 306.45,
+        "y": 20.196,
+        "z": -97.2
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:227,41:21",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 306.45,
+        "y": 26.276,
+        "z": 55.35
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:227,61:22",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 306.45,
+        "y": 24.327,
+        "z": 82.35
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:227,79:15",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 306.45,
+        "y": 20.196,
+        "z": 106.65
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:227,87:21",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 306.45,
+        "y": 19.278,
+        "z": 117.45
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:228,-16:12",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 307.8,
+        "y": 17.901,
+        "z": -21.6
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:228,-19:7",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 307.8,
+        "y": 18.36,
+        "z": -25.65
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:228,-2:23",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 307.8,
+        "y": 20.196,
+        "z": -2.7
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:228,-68:11",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 307.8,
+        "y": 19.737,
+        "z": -91.8
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:228,104:12",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 307.8,
+        "y": 17.901,
+        "z": 140.4
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:228,41:1",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 307.8,
+        "y": 26.276,
+        "z": 55.35
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:228,43:2",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 307.8,
+        "y": 26.163,
+        "z": 58.05
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:229,-31:17",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 309.15,
+        "y": 18.819,
+        "z": -41.85
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:229,-39:4",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 309.15,
+        "y": 18.36,
+        "z": -52.65
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:229,-49:27",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 309.15,
+        "y": 17.633,
+        "z": -66.15
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:229,-62:20",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 309.15,
+        "y": 18.945,
+        "z": -83.7
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:229,-81:22",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 309.15,
+        "y": 21.114,
+        "z": -109.35
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:229,106:24",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 309.15,
+        "y": 18.819,
+        "z": 143.1
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:229,11:19",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 309.15,
+        "y": 24.327,
+        "z": 14.85
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:230,-18:14",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 310.5,
+        "y": 17.442,
+        "z": -24.3
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:230,-22:25",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 310.5,
+        "y": 17.442,
+        "z": -29.7
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:230,78:5",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 310.5,
+        "y": 20.655,
+        "z": 105.3
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:230,91:16",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 310.5,
+        "y": 19.737,
+        "z": 122.85
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:230,97:3",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 310.5,
+        "y": 18.819,
+        "z": 130.95
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:231,-42:5",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 311.85,
+        "y": 17.442,
+        "z": -56.7
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:231,-51:7",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 311.85,
+        "y": 17.218,
+        "z": -68.85
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:231,-75:1",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 311.85,
+        "y": 20.196,
+        "z": -101.25
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:231,79:1",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 311.85,
+        "y": 20.655,
+        "z": 106.65
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:232,-58:15",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 313.2,
+        "y": 18.423,
+        "z": -78.3
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:232,-60:9",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 313.2,
+        "y": 18.449,
+        "z": -81.0
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:233,-16:15",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 314.55,
+        "y": 16.983,
+        "z": -21.6
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:233,-62:4",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 314.55,
+        "y": 19.054,
+        "z": -83.7
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:233,-66:10",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 314.55,
+        "y": 19.737,
+        "z": -89.1
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:233,-75:14",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 314.55,
+        "y": 20.196,
+        "z": -101.25
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:233,105:15",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 314.55,
+        "y": 18.819,
+        "z": 141.75
+      }
+    },
+    {
+      "drop": "copperOre",
+      "id": "atlas-1492:233,43:9",
+      "kind": "prop",
+      "material": "copperOre",
+      "position": {
+        "x": 314.55,
+        "y": 25.721,
+        "z": 58.05
+      }
+    },
+    {
+      "drop": "copperOre",
+      "id": "atlas-1492:233,43:9:cluster1",
+      "kind": "prop",
+      "material": "copperOre",
+      "position": {
+        "x": 313.913,
+        "y": 25.759,
+        "z": 57.251
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:233,63:24",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 314.55,
+        "y": 22.95,
+        "z": 85.05
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:233,90:14",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 314.55,
+        "y": 19.278,
+        "z": 121.5
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:234,-11:9",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 315.9,
+        "y": 17.442,
+        "z": -14.85
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:234,-17:26",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 315.9,
+        "y": 16.983,
+        "z": -22.95
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:234,-48:24",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 315.9,
+        "y": 17.024,
+        "z": -64.8
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:234,-4:19",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 315.9,
+        "y": 18.819,
+        "z": -5.4
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:234,-54:19",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 315.9,
+        "y": 17.619,
+        "z": -72.9
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:234,14:5",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 315.9,
+        "y": 23.868,
+        "z": 18.9
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:234,35:25",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 315.9,
+        "y": 27.096,
+        "z": 47.25
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:234,60:8",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 315.9,
+        "y": 22.95,
+        "z": 81.0
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:234,79:25",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 315.9,
+        "y": 20.655,
+        "z": 106.65
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:235,-49:10",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 317.25,
+        "y": 17.174,
+        "z": -66.15
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:235,-79:25",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 317.25,
+        "y": 20.655,
+        "z": -106.65
+      }
+    },
+    {
+      "drop": "copperOre",
+      "id": "atlas-1492:235,21:12",
+      "kind": "prop",
+      "material": "copperOre",
+      "position": {
+        "x": 317.25,
+        "y": 24.221,
+        "z": 28.35
+      }
+    },
+    {
+      "drop": "copperOre",
+      "id": "atlas-1492:235,21:12:cluster1",
+      "kind": "prop",
+      "material": "copperOre",
+      "position": {
+        "x": 316.165,
+        "y": 24.22,
+        "z": 28.36
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:235,24:27",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 317.25,
+        "y": 25.436,
+        "z": 32.4
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:235,65:3",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 317.25,
+        "y": 22.95,
+        "z": 87.75
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:236,-20:20",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 318.6,
+        "y": 16.524,
+        "z": -27.0
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:236,-20:3",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 318.6,
+        "y": 16.524,
+        "z": -27.0
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:236,-22:10",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 318.6,
+        "y": 16.065,
+        "z": -29.7
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:236,-41:26",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 318.6,
+        "y": 16.983,
+        "z": -55.35
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:236,-41:8",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 318.6,
+        "y": 16.983,
+        "z": -55.35
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:236,-64:6",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 318.6,
+        "y": 19.737,
+        "z": -86.4
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:236,74:20",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 318.6,
+        "y": 22.032,
+        "z": 99.9
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:237,101:11",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 319.95,
+        "y": 18.819,
+        "z": 136.35
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:237,106:13",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 319.95,
+        "y": 19.278,
+        "z": 143.1
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:237,47:6",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 319.95,
+        "y": 23.868,
+        "z": 63.45
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:238,-32:15",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 321.3,
+        "y": 15.606,
+        "z": -43.2
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:238,-71:24",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 321.3,
+        "y": 20.196,
+        "z": -95.85
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:238,-81:18",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 321.3,
+        "y": 20.655,
+        "z": -109.35
+      }
+    },
+    {
       "drop": "stones",
       "id": "atlas-1492:238,72:0",
       "kind": "prop",
@@ -14463,6 +16709,270 @@
         "x": 321.3,
         "y": 22.032,
         "z": 97.2
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:238,86:22",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 321.3,
+        "y": 19.278,
+        "z": 116.1
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:238,87:5",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 321.3,
+        "y": 19.278,
+        "z": 117.45
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:238,87:8",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 321.3,
+        "y": 19.278,
+        "z": 117.45
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:239,-22:21",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 322.65,
+        "y": 16.065,
+        "z": -29.7
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:239,-8:18",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 322.65,
+        "y": 18.36,
+        "z": -10.8
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:239,101:6",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 322.65,
+        "y": 18.819,
+        "z": 136.35
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:239,32:26",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 322.65,
+        "y": 25.898,
+        "z": 43.2
+      }
+    },
+    {
+      "drop": "copperOre",
+      "id": "atlas-1492:239,35:12",
+      "kind": "prop",
+      "material": "copperOre",
+      "position": {
+        "x": 322.65,
+        "y": 26.376,
+        "z": 47.25
+      }
+    },
+    {
+      "drop": "copperOre",
+      "id": "atlas-1492:239,35:12:cluster1",
+      "kind": "prop",
+      "material": "copperOre",
+      "position": {
+        "x": 322.068,
+        "y": 26.428,
+        "z": 46.393
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:240,-35:22",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 324.0,
+        "y": 15.606,
+        "z": -47.25
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:240,-38:16",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 324.0,
+        "y": 16.065,
+        "z": -51.3
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:240,-9:2",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 324.0,
+        "y": 18.378,
+        "z": -12.15
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:240,72:7",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 324.0,
+        "y": 21.573,
+        "z": 97.2
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:240,94:7",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 324.0,
+        "y": 18.36,
+        "z": 126.9
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:240,99:25",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 324.0,
+        "y": 18.36,
+        "z": 133.65
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:241,-24:6",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 325.35,
+        "y": 16.065,
+        "z": -32.4
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:241,-42:25",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 325.35,
+        "y": 17.442,
+        "z": -56.7
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:241,-60:12",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 325.35,
+        "y": 19.278,
+        "z": -81.0
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:241,-67:2",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 325.35,
+        "y": 20.196,
+        "z": -90.45
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:241,-77:21",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 325.35,
+        "y": 20.655,
+        "z": -103.95
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:241,26:26",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 325.35,
+        "y": 22.95,
+        "z": 35.1
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:241,94:9",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 325.35,
+        "y": 18.36,
+        "z": 126.9
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:242,-40:2",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 326.7,
+        "y": 16.983,
+        "z": -54.0
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:242,-45:20",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 326.7,
+        "y": 17.901,
+        "z": -60.75
       }
     },
     {
@@ -14478,6 +16988,490 @@
     },
     {
       "drop": "logs",
+      "id": "atlas-1492:242,110:18",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 326.7,
+        "y": 20.196,
+        "z": 148.5
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:242,16:18",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 326.7,
+        "y": 22.43,
+        "z": 21.6
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:242,18:11",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 326.7,
+        "y": 22.454,
+        "z": 24.3
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:242,24:15",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 326.7,
+        "y": 22.95,
+        "z": 32.4
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:242,33:20",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 326.7,
+        "y": 25.245,
+        "z": 44.55
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:242,70:14",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 326.7,
+        "y": 21.573,
+        "z": 94.5
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:243,-10:24",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 328.05,
+        "y": 18.567,
+        "z": -13.5
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:243,-35:6",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 328.05,
+        "y": 16.065,
+        "z": -47.25
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:243,-70:27",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 328.05,
+        "y": 20.655,
+        "z": -94.5
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:243,101:10",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 328.05,
+        "y": 18.819,
+        "z": 136.35
+      }
+    },
+    {
+      "drop": "aloe",
+      "id": "atlas-1492:243,26:7",
+      "kind": "prop",
+      "material": "aloePatch",
+      "position": {
+        "x": 328.05,
+        "y": 22.95,
+        "z": 35.1
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:243,65:26",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 328.05,
+        "y": 22.491,
+        "z": 87.75
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:244,-11:5",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 329.4,
+        "y": 18.211,
+        "z": -14.85
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:244,-25:22",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 329.4,
+        "y": 16.065,
+        "z": -33.75
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:244,-48:14",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 329.4,
+        "y": 17.901,
+        "z": -64.8
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:244,-68:17",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 329.4,
+        "y": 20.655,
+        "z": -91.8
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:244,-77:19",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 329.4,
+        "y": 21.116,
+        "z": -103.95
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:244,18:16",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 329.4,
+        "y": 22.392,
+        "z": 24.3
+      }
+    },
+    {
+      "drop": "aloe",
+      "id": "atlas-1492:244,2:24",
+      "kind": "prop",
+      "material": "aloePatch",
+      "position": {
+        "x": 329.4,
+        "y": 20.552,
+        "z": 2.7
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:244,92:19",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 329.4,
+        "y": 18.36,
+        "z": 124.2
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:245,-66:23",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 330.75,
+        "y": 20.655,
+        "z": -89.1
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:245,93:20",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 330.75,
+        "y": 18.36,
+        "z": 125.55
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:246,107:27",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 332.1,
+        "y": 19.278,
+        "z": 144.45
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:246,71:11",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 332.1,
+        "y": 21.573,
+        "z": 95.85
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:246,93:4",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 332.1,
+        "y": 18.36,
+        "z": 125.55
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:246,96:26",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 332.1,
+        "y": 18.36,
+        "z": 129.6
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:247,-13:11",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 333.45,
+        "y": 18.505,
+        "z": -17.55
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:247,-16:13",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 333.45,
+        "y": 17.457,
+        "z": -21.6
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:247,-37:9",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 333.45,
+        "y": 17.901,
+        "z": -49.95
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:247,-40:13",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 333.45,
+        "y": 17.901,
+        "z": -54.0
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:247,-74:5",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 333.45,
+        "y": 21.573,
+        "z": -99.9
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:247,-9:27",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 333.45,
+        "y": 19.273,
+        "z": -12.15
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:247,36:27",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 333.45,
+        "y": 24.786,
+        "z": 48.6
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:247,43:11",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 333.45,
+        "y": 25.704,
+        "z": 58.05
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:247,62:13",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 333.45,
+        "y": 22.032,
+        "z": 83.7
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:247,64:23",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 333.45,
+        "y": 22.032,
+        "z": 86.4
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:247,66:10",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 333.45,
+        "y": 22.032,
+        "z": 89.1
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:247,72:18",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 333.45,
+        "y": 21.114,
+        "z": 97.2
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:247,80:21",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 333.45,
+        "y": 18.819,
+        "z": 108.0
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:247,90:2",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 333.45,
+        "y": 18.36,
+        "z": 121.5
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:247,93:23",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 333.45,
+        "y": 18.36,
+        "z": 125.55
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:247,97:0",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 333.45,
+        "y": 18.36,
+        "z": 130.95
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:248,-22:8",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 334.8,
+        "y": 16.762,
+        "z": -29.7
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:248,-30:12",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 334.8,
+        "y": 17.442,
+        "z": -40.5
+      }
+    },
+    {
+      "drop": "logs",
       "id": "atlas-1492:248,34:0",
       "kind": "prop",
       "material": "tree",
@@ -14485,6 +17479,556 @@
         "x": 334.8,
         "y": 24.786,
         "z": 45.9
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:248,51:17",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 334.8,
+        "y": 23.868,
+        "z": 68.85
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:248,51:3",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 334.8,
+        "y": 23.868,
+        "z": 68.85
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:248,53:7",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 334.8,
+        "y": 22.95,
+        "z": 71.55
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:248,60:4",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 334.8,
+        "y": 22.032,
+        "z": 81.0
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:248,79:17",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 334.8,
+        "y": 18.819,
+        "z": 106.65
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:249,-39:11",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 336.15,
+        "y": 18.36,
+        "z": -52.65
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:249,-5:16",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 336.15,
+        "y": 19.556,
+        "z": -6.75
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:249,-72:13",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 336.15,
+        "y": 21.573,
+        "z": -97.2
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:249,45:15",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 336.15,
+        "y": 25.245,
+        "z": 60.75
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:249,51:19",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 336.15,
+        "y": 23.868,
+        "z": 68.85
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:249,68:27",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 336.15,
+        "y": 21.573,
+        "z": 91.8
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:249,73:9",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 336.15,
+        "y": 20.655,
+        "z": 98.55
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:249,79:16",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 336.15,
+        "y": 18.819,
+        "z": 106.65
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:249,94:1",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 336.15,
+        "y": 18.36,
+        "z": 126.9
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:250,-22:17",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 337.5,
+        "y": 17.083,
+        "z": -29.7
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:250,-46:21",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 337.5,
+        "y": 18.36,
+        "z": -62.1
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:250,-7:4",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 337.5,
+        "y": 19.647,
+        "z": -9.45
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:250,107:17",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 337.5,
+        "y": 18.819,
+        "z": 144.45
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:250,24:10",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 337.5,
+        "y": 22.64,
+        "z": 32.4
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:250,46:10",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 337.5,
+        "y": 25.245,
+        "z": 62.1
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:254,-47:20",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 342.9,
+        "y": 18.819,
+        "z": -63.45
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:254,-73:2",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 342.9,
+        "y": 21.573,
+        "z": -98.55
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:254,43:18",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 342.9,
+        "y": 24.786,
+        "z": 58.05
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:254,53:4",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 342.9,
+        "y": 22.491,
+        "z": 71.55
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:255,-17:2",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 344.25,
+        "y": 19.108,
+        "z": -22.95
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:255,-23:3",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 344.25,
+        "y": 18.679,
+        "z": -31.05
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:255,-26:6",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 344.25,
+        "y": 18.55,
+        "z": -35.1
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:255,-32:8",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 344.25,
+        "y": 18.376,
+        "z": -43.2
+      }
+    },
+    {
+      "drop": "aloe",
+      "id": "atlas-1492:255,-59:14",
+      "kind": "prop",
+      "material": "aloePatch",
+      "position": {
+        "x": 344.25,
+        "y": 21.114,
+        "z": -79.65
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:255,-7:24",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 344.25,
+        "y": 20.19,
+        "z": -9.45
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:255,14:26",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 344.25,
+        "y": 20.542,
+        "z": 18.9
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:255,3:9",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 344.25,
+        "y": 20.261,
+        "z": 4.05
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:255,94:16",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 344.25,
+        "y": 17.901,
+        "z": 126.9
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:256,-33:14",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 345.6,
+        "y": 18.438,
+        "z": -44.55
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:256,-65:13",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 345.6,
+        "y": 22.032,
+        "z": -87.75
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:256,106:4",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 345.6,
+        "y": 17.901,
+        "z": 143.1
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:256,14:11",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 345.6,
+        "y": 20.35,
+        "z": 18.9
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:256,58:23",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 345.6,
+        "y": 22.032,
+        "z": 78.3
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:257,107:18",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 346.95,
+        "y": 17.901,
+        "z": 144.45
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:257,15:8",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 346.95,
+        "y": 20.321,
+        "z": 20.25
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:257,73:12",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 346.95,
+        "y": 19.737,
+        "z": 98.55
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:257,92:10",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 346.95,
+        "y": 17.442,
+        "z": 124.2
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:258,-14:22",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 348.3,
+        "y": 20.117,
+        "z": -18.9
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:258,-70:18",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 348.3,
+        "y": 22.032,
+        "z": -94.5
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:258,110:9",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 348.3,
+        "y": 18.36,
+        "z": 148.5
+      }
+    },
+    {
+      "drop": "aloe",
+      "id": "atlas-1492:258,36:5",
+      "kind": "prop",
+      "material": "aloePatch",
+      "position": {
+        "x": 348.3,
+        "y": 23.374,
+        "z": 48.6
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:259,-65:3",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 349.65,
+        "y": 22.032,
+        "z": -87.75
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:259,16:21",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 349.65,
+        "y": 20.342,
+        "z": 21.6
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:259,40:6",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 349.65,
+        "y": 23.409,
+        "z": 54.0
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:260,-16:18",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 351.0,
+        "y": 20.205,
+        "z": -21.6
       }
     },
     {
@@ -14496,6 +18040,116 @@
         "x": 351.0,
         "y": 16.983,
         "z": -62.1
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:260,106:6",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 351.0,
+        "y": 17.901,
+        "z": 143.1
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:261,-17:14",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 352.35,
+        "y": 20.221,
+        "z": -22.95
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:261,-65:17",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 352.35,
+        "y": 21.573,
+        "z": -87.75
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:261,-70:15",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 352.35,
+        "y": 22.032,
+        "z": -94.5
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:261,71:21",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 352.35,
+        "y": 19.278,
+        "z": 95.85
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:261,74:26",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 352.35,
+        "y": 18.819,
+        "z": 99.9
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:261,88:13",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 352.35,
+        "y": 16.524,
+        "z": 118.8
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:262,-66:7",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 353.7,
+        "y": 21.573,
+        "z": -89.1
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:262,108:20",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 353.7,
+        "y": 17.901,
+        "z": 145.8
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:262,65:8",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 353.7,
+        "y": 20.655,
+        "z": 87.75
       }
     },
     {
@@ -14511,6 +18165,611 @@
     },
     {
       "drop": "berries",
+      "id": "atlas-1492:262,97:21",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 353.7,
+        "y": 17.442,
+        "z": 130.95
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:263,-53:13",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 355.05,
+        "y": 17.901,
+        "z": -71.55
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:264,30:21",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 356.4,
+        "y": 21.514,
+        "z": 40.5
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:264,69:9",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 356.4,
+        "y": 19.278,
+        "z": 93.15
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:264,98:5",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 356.4,
+        "y": 17.442,
+        "z": 132.3
+      }
+    },
+    {
+      "drop": "aloe",
+      "id": "atlas-1492:265,-53:6",
+      "kind": "prop",
+      "material": "aloePatch",
+      "position": {
+        "x": 357.75,
+        "y": 17.442,
+        "z": -71.55
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:265,-71:10",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 357.75,
+        "y": 21.114,
+        "z": -95.85
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:265,102:22",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 357.75,
+        "y": 16.983,
+        "z": 137.7
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:265,65:24",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 357.75,
+        "y": 20.196,
+        "z": 87.75
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:266,-33:23",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 359.1,
+        "y": 17.822,
+        "z": -44.55
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:266,47:8",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 359.1,
+        "y": 22.491,
+        "z": 63.45
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:266,61:25",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 359.1,
+        "y": 20.655,
+        "z": 82.35
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:266,65:14",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 359.1,
+        "y": 20.196,
+        "z": 87.75
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:267,-38:21",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 360.45,
+        "y": 15.916,
+        "z": -51.3
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:267,34:2",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 360.45,
+        "y": 21.17,
+        "z": 45.9
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:267,64:10",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 360.45,
+        "y": 20.196,
+        "z": 86.4
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:268,-53:26",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 361.8,
+        "y": 17.442,
+        "z": -71.55
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:268,42:13",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 361.8,
+        "y": 21.114,
+        "z": 56.7
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:268,81:4",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 361.8,
+        "y": 16.524,
+        "z": 109.35
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:268,91:7",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 361.8,
+        "y": 15.606,
+        "z": 122.85
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:269,-38:2",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 363.15,
+        "y": 15.983,
+        "z": -51.3
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:269,-38:22",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 363.15,
+        "y": 15.983,
+        "z": -51.3
+      }
+    },
+    {
+      "drop": "aloe",
+      "id": "atlas-1492:269,33:7",
+      "kind": "prop",
+      "material": "aloePatch",
+      "position": {
+        "x": 363.15,
+        "y": 20.931,
+        "z": 44.55
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:269,45:1",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 363.15,
+        "y": 21.573,
+        "z": 60.75
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:269,93:25",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 363.15,
+        "y": 16.065,
+        "z": 125.55
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:270,90:0",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 364.5,
+        "y": 15.606,
+        "z": 121.5
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:271,-60:20",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 365.85,
+        "y": 19.278,
+        "z": -81.0
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:271,-63:25",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 365.85,
+        "y": 19.737,
+        "z": -85.05
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:271,105:12",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 365.85,
+        "y": 16.524,
+        "z": 141.75
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:272,63:16",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 367.2,
+        "y": 19.737,
+        "z": 85.05
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:272,76:11",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 367.2,
+        "y": 17.442,
+        "z": 102.6
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:273,-68:8",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 368.55,
+        "y": 20.196,
+        "z": -91.8
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:273,-78:11",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 368.55,
+        "y": 21.114,
+        "z": -105.3
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:273,38:15",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 368.55,
+        "y": 20.575,
+        "z": 51.3
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:273,39:3",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 368.55,
+        "y": 20.621,
+        "z": 52.65
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:274,-36:5",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 369.9,
+        "y": 17.252,
+        "z": -48.6
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:274,-43:19",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 369.9,
+        "y": 16.524,
+        "z": -58.05
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:274,-51:25",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 369.9,
+        "y": 16.983,
+        "z": -68.85
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:275,92:24",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 371.25,
+        "y": 15.606,
+        "z": 124.2
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:276,-49:18",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 372.6,
+        "y": 16.983,
+        "z": -66.15
+      }
+    },
+    {
+      "drop": "aloe",
+      "id": "atlas-1492:276,-52:27",
+      "kind": "prop",
+      "material": "aloePatch",
+      "position": {
+        "x": 372.6,
+        "y": 17.442,
+        "z": -70.2
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:276,-69:22",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 372.6,
+        "y": 20.196,
+        "z": -93.15
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:277,-80:23",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 373.95,
+        "y": 21.114,
+        "z": -108.0
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:277,65:2",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 373.95,
+        "y": 19.737,
+        "z": 87.75
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:277,72:1",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 373.95,
+        "y": 18.36,
+        "z": 97.2
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:278,74:22",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 375.3,
+        "y": 17.442,
+        "z": 99.9
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:278,94:26",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 375.3,
+        "y": 15.606,
+        "z": 126.9
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:282,-61:17",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 380.7,
+        "y": 18.36,
+        "z": -82.35
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:282,-68:1",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 380.7,
+        "y": 19.737,
+        "z": -91.8
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:282,79:15",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 380.7,
+        "y": 16.983,
+        "z": 106.65
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:282,94:0",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 380.7,
+        "y": 15.606,
+        "z": 126.9
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:283,-44:22",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 382.05,
+        "y": 17.442,
+        "z": -59.4
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:283,-70:19",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 382.05,
+        "y": 19.737,
+        "z": -94.5
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:283,54:15",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 382.05,
+        "y": 20.655,
+        "z": 72.9
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:283,78:11",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 382.05,
+        "y": 17.442,
+        "z": 105.3
+      }
+    },
+    {
+      "drop": "berries",
       "id": "atlas-1492:284,-32:0",
       "kind": "prop",
       "material": "berryBush",
@@ -14518,6 +18777,193 @@
         "x": 383.4,
         "y": 19.244,
         "z": -43.2
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:284,-32:10",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 383.4,
+        "y": 19.244,
+        "z": -43.2
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:284,-71:10",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 383.4,
+        "y": 20.196,
+        "z": -95.85
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:284,38:25",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 383.4,
+        "y": 20.554,
+        "z": 51.3
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:284,72:23",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 383.4,
+        "y": 18.36,
+        "z": 97.2
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:285,101:17",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 384.75,
+        "y": 15.147,
+        "z": 136.35
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:285,49:5",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 384.75,
+        "y": 21.114,
+        "z": 66.15
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:285,81:17",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 384.75,
+        "y": 17.442,
+        "z": 109.35
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:285,91:19",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 384.75,
+        "y": 16.524,
+        "z": 122.85
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:286,31:23",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 386.1,
+        "y": 20.554,
+        "z": 41.85
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:287,-36:21",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 387.45,
+        "y": 18.896,
+        "z": -48.6
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:287,-72:20",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 387.45,
+        "y": 20.196,
+        "z": -97.2
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:287,39:20",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 387.45,
+        "y": 21.451,
+        "z": 52.65
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:287,82:25",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 387.45,
+        "y": 17.901,
+        "z": 110.7
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:288,-36:16",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 388.8,
+        "y": 18.896,
+        "z": -48.6
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:288,-40:13",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 388.8,
+        "y": 18.451,
+        "z": -54.0
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:288,-59:5",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 388.8,
+        "y": 18.819,
+        "z": -79.65
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:288,-62:9",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 388.8,
+        "y": 18.819,
+        "z": -83.7
       }
     },
     {
@@ -14533,6 +18979,303 @@
     },
     {
       "drop": "logs",
+      "id": "atlas-1492:288,-80:6",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 388.8,
+        "y": 20.655,
+        "z": -108.0
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:288,35:8",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 388.8,
+        "y": 21.096,
+        "z": 47.25
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:288,38:13",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 388.8,
+        "y": 21.292,
+        "z": 51.3
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:289,104:24",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 390.15,
+        "y": 15.606,
+        "z": 140.4
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:289,51:22",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 390.15,
+        "y": 21.573,
+        "z": 68.85
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:289,76:6",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 390.15,
+        "y": 18.36,
+        "z": 102.6
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:289,94:6",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 390.15,
+        "y": 16.524,
+        "z": 126.9
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:290,-25:22",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 391.5,
+        "y": 20.234,
+        "z": -33.75
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:290,-37:11",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 391.5,
+        "y": 18.976,
+        "z": -49.95
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:290,-66:7",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 391.5,
+        "y": 19.278,
+        "z": -89.1
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:290,34:21",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 391.5,
+        "y": 20.843,
+        "z": 45.9
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:290,34:24",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 391.5,
+        "y": 20.843,
+        "z": 45.9
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:290,38:7",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 391.5,
+        "y": 21.352,
+        "z": 51.3
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:290,67:1",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 391.5,
+        "y": 19.737,
+        "z": 90.45
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:290,81:10",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 391.5,
+        "y": 18.36,
+        "z": 109.35
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:291,44:19",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 392.85,
+        "y": 22.032,
+        "z": 59.4
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:291,58:2",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 392.85,
+        "y": 21.114,
+        "z": 78.3
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:291,88:14",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 392.85,
+        "y": 18.36,
+        "z": 118.8
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:292,63:12",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 394.2,
+        "y": 20.655,
+        "z": 85.05
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:292,73:7",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 394.2,
+        "y": 19.278,
+        "z": 98.55
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:293,-34:4",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 395.55,
+        "y": 19.87,
+        "z": -45.9
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:294,-35:18",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 396.9,
+        "y": 19.857,
+        "z": -47.25
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:294,68:5",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 396.9,
+        "y": 20.196,
+        "z": 91.8
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:295,-32:26",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 398.25,
+        "y": 20.213,
+        "z": -43.2
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:295,-35:2",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 398.25,
+        "y": 20.206,
+        "z": -47.25
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:295,-58:18",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 398.25,
+        "y": 18.36,
+        "z": -78.3
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:295,109:18",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 398.25,
+        "y": 17.901,
+        "z": 147.15
+      }
+    },
+    {
+      "drop": "logs",
       "id": "atlas-1492:295,43:0",
       "kind": "prop",
       "material": "tree",
@@ -14540,6 +19283,94 @@
         "x": 398.25,
         "y": 22.929,
         "z": 58.05
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:295,94:23",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 398.25,
+        "y": 17.901,
+        "z": 126.9
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:296,-51:24",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 399.6,
+        "y": 17.901,
+        "z": -68.85
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:296,65:16",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 399.6,
+        "y": 20.655,
+        "z": 87.75
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:296,70:4",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 399.6,
+        "y": 20.196,
+        "z": 94.5
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:297,88:20",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 400.95,
+        "y": 18.819,
+        "z": 118.8
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:298,-77:23",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 402.3,
+        "y": 20.196,
+        "z": -103.95
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:298,21:15",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 402.3,
+        "y": 20.463,
+        "z": 28.35
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:299,102:15",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 403.65,
+        "y": 16.983,
+        "z": 137.7
       }
     },
     {
@@ -14554,14 +19385,443 @@
       }
     },
     {
+      "drop": "berries",
+      "id": "atlas-1492:299,46:1",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 403.65,
+        "y": 24.573,
+        "z": 62.1
+      }
+    },
+    {
       "drop": "logs",
-      "id": "atlas-1492:306,-100:0",
+      "id": "atlas-1492:299,47:10",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 403.65,
+        "y": 23.458,
+        "z": 63.45
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:300,100:3",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 405.0,
+        "y": 17.442,
+        "z": 135.0
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:300,106:5",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 405.0,
+        "y": 17.442,
+        "z": 143.1
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:300,40:9",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 405.0,
+        "y": 26.145,
+        "z": 54.0
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:300,74:3",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 405.0,
+        "y": 20.196,
+        "z": 99.9
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:301,-14:6",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 406.35,
+        "y": 20.25,
+        "z": -18.9
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:301,-69:3",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 406.35,
+        "y": 19.737,
+        "z": -93.15
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:301,43:27",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 406.35,
+        "y": 26.18,
+        "z": 58.05
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:301,72:9",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 406.35,
+        "y": 20.685,
+        "z": 97.2
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:301,97:1",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 406.35,
+        "y": 17.442,
+        "z": 130.95
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:302,31:4",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 407.7,
+        "y": 27.232,
+        "z": 41.85
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:302,53:6",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 407.7,
+        "y": 22.76,
+        "z": 71.55
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:302,99:12",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 407.7,
+        "y": 17.453,
+        "z": 133.65
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:303,-34:25",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 409.05,
+        "y": 20.645,
+        "z": -45.9
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:303,11:2",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 409.05,
+        "y": 20.25,
+        "z": 14.85
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:303,38:11",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 409.05,
+        "y": 29.063,
+        "z": 51.3
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:304,-62:16",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 410.4,
+        "y": 19.737,
+        "z": -83.7
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:304,103:13",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 410.4,
+        "y": 17.394,
+        "z": 139.05
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:304,74:27",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 410.4,
+        "y": 20.196,
+        "z": 99.9
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:305,-9:5",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 411.75,
+        "y": 20.288,
+        "z": -12.15
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:305,109:25",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 411.75,
+        "y": 19.599,
+        "z": 147.15
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:305,26:12",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 411.75,
+        "y": 22.766,
+        "z": 35.1
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:305,37:18",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 411.75,
+        "y": 29.45,
+        "z": 49.95
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:305,68:22",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 411.75,
+        "y": 22.957,
+        "z": 91.8
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:305,86:26",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 411.75,
+        "y": 19.278,
+        "z": 116.1
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:306,-31:12",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 413.1,
+        "y": 20.199,
+        "z": -41.85
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:306,-40:17",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 413.1,
+        "y": 19.737,
+        "z": -54.0
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:306,-42:27",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 413.1,
+        "y": 19.278,
+        "z": -56.7
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:306,31:12",
       "kind": "prop",
       "material": "tree",
       "position": {
         "x": 413.1,
-        "y": 20.196,
-        "z": -135.0
+        "y": 24.301,
+        "z": 41.85
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:310,-15:24",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 418.5,
+        "y": 20.861,
+        "z": -20.25
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:310,-17:7",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 418.5,
+        "y": 20.753,
+        "z": -22.95
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:310,-48:23",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 418.5,
+        "y": 18.819,
+        "z": -64.8
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:310,-6:13",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 418.5,
+        "y": 21.237,
+        "z": -8.1
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:310,24:10",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 418.5,
+        "y": 22.711,
+        "z": 32.4
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:310,34:10",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 418.5,
+        "y": 24.722,
+        "z": 45.9
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:310,60:10",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 418.5,
+        "y": 27.238,
+        "z": 81.0
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:310,74:11",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 418.5,
+        "y": 23.648,
+        "z": 99.9
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:310,78:20",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 418.5,
+        "y": 21.488,
+        "z": 105.3
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:311,-25:4",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 419.85,
+        "y": 20.2,
+        "z": -33.75
       }
     },
     {
@@ -14577,6 +19837,116 @@
     },
     {
       "drop": "logs",
+      "id": "atlas-1492:311,23:23",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 419.85,
+        "y": 23.978,
+        "z": 31.05
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:311,41:19",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 419.85,
+        "y": 24.724,
+        "z": 55.35
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:311,64:14",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 419.85,
+        "y": 26.762,
+        "z": 86.4
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:311,72:19",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 419.85,
+        "y": 25.406,
+        "z": 97.2
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:312,-46:13",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 421.2,
+        "y": 18.819,
+        "z": -62.1
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:312,-52:9",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 421.2,
+        "y": 19.737,
+        "z": -70.2
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:312,-6:9",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 421.2,
+        "y": 21.936,
+        "z": -8.1
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:312,37:17",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 421.2,
+        "y": 26.372,
+        "z": 49.95
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:312,47:8",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 421.2,
+        "y": 26.229,
+        "z": 63.45
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:312,6:11",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 421.2,
+        "y": 23.772,
+        "z": 8.1
+      }
+    },
+    {
+      "drop": "logs",
       "id": "atlas-1492:312,73:0",
       "kind": "prop",
       "material": "tree",
@@ -14584,6 +19954,83 @@
         "x": 421.2,
         "y": 25.55,
         "z": 98.55
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:312,73:27",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 421.2,
+        "y": 25.55,
+        "z": 98.55
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:313,-32:20",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 422.55,
+        "y": 19.278,
+        "z": -43.2
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:313,-43:5",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 422.55,
+        "y": 18.819,
+        "z": -58.05
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:314,-62:1",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 423.9,
+        "y": 22.491,
+        "z": -83.7
+      }
+    },
+    {
+      "drop": "aloe",
+      "id": "atlas-1492:314,13:19",
+      "kind": "prop",
+      "material": "aloePatch",
+      "position": {
+        "x": 423.9,
+        "y": 29.338,
+        "z": 17.55
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:314,59:2",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 423.9,
+        "y": 27.905,
+        "z": 79.65
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:314,99:7",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 423.9,
+        "y": 18.799,
+        "z": 133.65
       }
     },
     {
@@ -14598,6 +20045,292 @@
       }
     },
     {
+      "drop": "logs",
+      "id": "atlas-1492:315,-11:12",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 425.25,
+        "y": 22.054,
+        "z": -14.85
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:315,-68:18",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 425.25,
+        "y": 23.409,
+        "z": -91.8
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:315,21:6",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 425.25,
+        "y": 30.612,
+        "z": 28.35
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:315,26:1",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 425.25,
+        "y": 24.84,
+        "z": 35.1
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:315,38:14",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 425.25,
+        "y": 26.27,
+        "z": 51.3
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:315,43:12",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 425.25,
+        "y": 25.344,
+        "z": 58.05
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:315,63:22",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 425.25,
+        "y": 28.465,
+        "z": 85.05
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:315,89:27",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 425.25,
+        "y": 20.196,
+        "z": 120.15
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:316,-52:18",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 426.6,
+        "y": 20.655,
+        "z": -70.2
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:316,-8:17",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 426.6,
+        "y": 23.266,
+        "z": -10.8
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:316,106:17",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 426.6,
+        "y": 27.37,
+        "z": 143.1
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:316,22:3",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 426.6,
+        "y": 30.986,
+        "z": 29.7
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:316,61:8",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 426.6,
+        "y": 27.82,
+        "z": 82.35
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:316,78:24",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 426.6,
+        "y": 25.94,
+        "z": 105.3
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:316,7:26",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 426.6,
+        "y": 26.748,
+        "z": 9.45
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:317,-51:10",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 427.95,
+        "y": 20.655,
+        "z": -68.85
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:317,-54:7",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 427.95,
+        "y": 22.032,
+        "z": -72.9
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:317,-5:16",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 427.95,
+        "y": 24.456,
+        "z": -6.75
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:317,-66:15",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 427.95,
+        "y": 23.868,
+        "z": -89.1
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:317,107:4",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 427.95,
+        "y": 27.341,
+        "z": 144.45
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:317,11:2",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 427.95,
+        "y": 32.979,
+        "z": 14.85
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:317,90:5",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 427.95,
+        "y": 20.196,
+        "z": 121.5
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:317,91:6",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 427.95,
+        "y": 20.196,
+        "z": 122.85
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:318,-78:12",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 429.3,
+        "y": 22.032,
+        "z": -105.3
+      }
+    },
+    {
+      "drop": "aloe",
+      "id": "atlas-1492:318,32:3",
+      "kind": "prop",
+      "material": "aloePatch",
+      "position": {
+        "x": 429.3,
+        "y": 25.787,
+        "z": 43.2
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:319,-18:6",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 430.65,
+        "y": 21.562,
+        "z": -24.3
+      }
+    },
+    {
       "drop": "rawMeat",
       "id": "atlas-1492:319,-46:0",
       "kind": "prop",
@@ -14606,6 +20339,105 @@
         "x": 430.65,
         "y": 19.278,
         "z": -62.1
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:319,86:24",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 430.65,
+        "y": 21.878,
+        "z": 116.1
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:320,105:26",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 432.0,
+        "y": 24.643,
+        "z": 141.75
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:320,67:5",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 432.0,
+        "y": 26.976,
+        "z": 90.45
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:320,74:7",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 432.0,
+        "y": 26.755,
+        "z": 99.9
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:320,75:13",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 432.0,
+        "y": 27.75,
+        "z": 101.25
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:321,-11:21",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 433.35,
+        "y": 23.74,
+        "z": -14.85
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:321,-69:21",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 433.35,
+        "y": 24.327,
+        "z": -93.15
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:321,-77:23",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 433.35,
+        "y": 22.95,
+        "z": -103.95
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:321,46:26",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 433.35,
+        "y": 27.529,
+        "z": 62.1
       }
     },
     {
@@ -14620,14 +20452,718 @@
       }
     },
     {
+      "drop": "berries",
+      "id": "atlas-1492:321,68:17",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 433.35,
+        "y": 26.924,
+        "z": 91.8
+      }
+    },
+    {
       "drop": "logs",
-      "id": "atlas-1492:327,-90:0",
+      "id": "atlas-1492:322,-16:23",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 434.7,
+        "y": 21.573,
+        "z": -21.6
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:322,-26:15",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 434.7,
+        "y": 20.196,
+        "z": -35.1
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:322,-38:24",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 434.7,
+        "y": 18.36,
+        "z": -51.3
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:322,-71:6",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 434.7,
+        "y": 24.327,
+        "z": -95.85
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:322,104:25",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 434.7,
+        "y": 22.74,
+        "z": 140.4
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:322,35:21",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 434.7,
+        "y": 27.666,
+        "z": 47.25
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:322,99:22",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 434.7,
+        "y": 20.309,
+        "z": 133.65
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:323,-19:25",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 436.05,
+        "y": 21.114,
+        "z": -25.65
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:323,-2:22",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 436.05,
+        "y": 27.185,
+        "z": -2.7
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:323,-53:6",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 436.05,
+        "y": 22.032,
+        "z": -71.55
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:323,47:15",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 436.05,
+        "y": 27.721,
+        "z": 63.45
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:323,63:18",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 436.05,
+        "y": 27.205,
+        "z": 85.05
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:323,65:15",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 436.05,
+        "y": 27.025,
+        "z": 87.75
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:323,68:25",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 436.05,
+        "y": 26.635,
+        "z": 91.8
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:323,72:3",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 436.05,
+        "y": 26.869,
+        "z": 97.2
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:324,106:18",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 437.4,
+        "y": 21.614,
+        "z": 143.1
+      }
+    },
+    {
+      "drop": "copperOre",
+      "id": "atlas-1492:324,52:13",
+      "kind": "prop",
+      "material": "copperOre",
+      "position": {
+        "x": 437.4,
+        "y": 29.349,
+        "z": 70.2
+      }
+    },
+    {
+      "drop": "copperOre",
+      "id": "atlas-1492:324,52:13:cluster1",
+      "kind": "prop",
+      "material": "copperOre",
+      "position": {
+        "x": 437.528,
+        "y": 29.354,
+        "z": 69.374
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:324,53:6",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 437.4,
+        "y": 30.898,
+        "z": 71.55
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:324,79:21",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 437.4,
+        "y": 28.032,
+        "z": 106.65
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:325,-21:18",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 438.75,
+        "y": 20.196,
+        "z": -28.35
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:325,-31:26",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 438.75,
+        "y": 19.278,
+        "z": -41.85
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:325,-75:8",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 438.75,
+        "y": 23.409,
+        "z": -101.25
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:325,101:19",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 438.75,
+        "y": 21.111,
+        "z": 136.35
+      }
+    },
+    {
+      "drop": "aloe",
+      "id": "atlas-1492:325,3:12",
+      "kind": "prop",
+      "material": "aloePatch",
+      "position": {
+        "x": 438.75,
+        "y": 27.945,
+        "z": 4.05
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:325,71:26",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 438.75,
+        "y": 26.091,
+        "z": 95.85
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:325,73:9",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 438.75,
+        "y": 27.016,
+        "z": 98.55
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:326,-31:12",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 440.1,
+        "y": 19.278,
+        "z": -41.85
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:326,-72:3",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 440.1,
+        "y": 23.868,
+        "z": -97.2
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:326,17:4",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 440.1,
+        "y": 46.998,
+        "z": 22.95
+      }
+    },
+    {
+      "drop": "frostHerb",
+      "id": "atlas-1492:327,11:25",
+      "kind": "prop",
+      "material": "frostHerbPatch",
+      "position": {
+        "x": 441.45,
+        "y": 46.575,
+        "z": 14.85
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:327,14:18",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 441.45,
+        "y": 52.785,
+        "z": 18.9
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:327,52:5",
       "kind": "prop",
       "material": "tree",
       "position": {
         "x": 441.45,
-        "y": 21.114,
-        "z": -121.5
+        "y": 31.05,
+        "z": 70.2
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:327,53:27",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 441.45,
+        "y": 32.602,
+        "z": 71.55
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:327,62:6",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 441.45,
+        "y": 30.365,
+        "z": 83.7
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:327,81:23",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 441.45,
+        "y": 26.462,
+        "z": 109.35
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:327,92:0",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 441.45,
+        "y": 21.573,
+        "z": 124.2
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:328,-4:5",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 442.8,
+        "y": 27.229,
+        "z": -5.4
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:328,-68:11",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 442.8,
+        "y": 24.327,
+        "z": -91.8
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:328,24:17",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 442.8,
+        "y": 31.212,
+        "z": 32.4
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:328,44:7",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 442.8,
+        "y": 29.497,
+        "z": 59.4
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:328,76:1",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 442.8,
+        "y": 26.813,
+        "z": 102.6
+      }
+    },
+    {
+      "drop": "aloe",
+      "id": "atlas-1492:328,7:16",
+      "kind": "prop",
+      "material": "aloePatch",
+      "position": {
+        "x": 442.8,
+        "y": 34.155,
+        "z": 9.45
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:329,52:4",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 444.15,
+        "y": 31.05,
+        "z": 70.2
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:329,66:4",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 444.15,
+        "y": 30.22,
+        "z": 89.1
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:329,87:1",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 444.15,
+        "y": 23.433,
+        "z": 117.45
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:329,87:12",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 444.15,
+        "y": 23.433,
+        "z": 117.45
+      }
+    },
+    {
+      "drop": "aloe",
+      "id": "atlas-1492:330,-5:27",
+      "kind": "prop",
+      "material": "aloePatch",
+      "position": {
+        "x": 445.5,
+        "y": 25.254,
+        "z": -6.75
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:330,-79:24",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 445.5,
+        "y": 22.95,
+        "z": -106.65
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:330,104:11",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 445.5,
+        "y": 20.152,
+        "z": 140.4
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:330,53:20",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 445.5,
+        "y": 34.155,
+        "z": 71.55
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:331,-69:10",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 446.85,
+        "y": 23.409,
+        "z": -93.15
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:331,20:24",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 446.85,
+        "y": 40.013,
+        "z": 27.0
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:331,94:15",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 446.85,
+        "y": 22.206,
+        "z": 126.9
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:332,-6:1",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 448.2,
+        "y": 23.987,
+        "z": -8.1
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:332,-78:17",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 448.2,
+        "y": 23.409,
+        "z": -105.3
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:332,13:22",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 448.2,
+        "y": 43.469,
+        "z": 17.55
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:332,30:16",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 448.2,
+        "y": 42.695,
+        "z": 40.5
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:332,47:11",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 448.2,
+        "y": 29.497,
+        "z": 63.45
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:333,-48:11",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 449.55,
+        "y": 18.819,
+        "z": -64.8
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:333,-49:14",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 449.55,
+        "y": 19.278,
+        "z": -66.15
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:333,-62:14",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 449.55,
+        "y": 22.95,
+        "z": -83.7
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:333,-70:22",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 449.55,
+        "y": 23.409,
+        "z": -94.5
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:333,-77:13",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 449.55,
+        "y": 23.409,
+        "z": -103.95
       }
     },
     {
@@ -14642,6 +21178,237 @@
       }
     },
     {
+      "drop": "logs",
+      "id": "atlas-1492:333,-82:2",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 449.55,
+        "y": 22.95,
+        "z": -110.7
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:333,103:9",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 449.55,
+        "y": 19.737,
+        "z": 139.05
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:333,105:2",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 449.55,
+        "y": 19.278,
+        "z": 141.75
+      }
+    },
+    {
+      "drop": "aloe",
+      "id": "atlas-1492:333,21:27",
+      "kind": "prop",
+      "material": "aloePatch",
+      "position": {
+        "x": 449.55,
+        "y": 34.29,
+        "z": 28.35
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:333,62:16",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 449.55,
+        "y": 42.064,
+        "z": 83.7
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:333,90:8",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 449.55,
+        "y": 22.954,
+        "z": 121.5
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:334,-60:26",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 450.9,
+        "y": 22.491,
+        "z": -81.0
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:334,-82:20",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 450.9,
+        "y": 22.95,
+        "z": -110.7
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:338,-68:23",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 456.3,
+        "y": 22.491,
+        "z": -91.8
+      }
+    },
+    {
+      "drop": "aloe",
+      "id": "atlas-1492:338,2:6",
+      "kind": "prop",
+      "material": "aloePatch",
+      "position": {
+        "x": 456.3,
+        "y": 24.381,
+        "z": 2.7
+      }
+    },
+    {
+      "drop": "aloe",
+      "id": "atlas-1492:339,-19:4",
+      "kind": "prop",
+      "material": "aloePatch",
+      "position": {
+        "x": 457.65,
+        "y": 19.737,
+        "z": -25.65
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:339,-77:4",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 457.65,
+        "y": 23.409,
+        "z": -103.95
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:339,20:8",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 457.65,
+        "y": 26.033,
+        "z": 27.0
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:339,36:16",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 457.65,
+        "y": 53.26,
+        "z": 48.6
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:340,-70:9",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 459.0,
+        "y": 22.491,
+        "z": -94.5
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:340,-78:13",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 459.0,
+        "y": 22.95,
+        "z": -105.3
+      }
+    },
+    {
+      "drop": "aloe",
+      "id": "atlas-1492:340,4:2",
+      "kind": "prop",
+      "material": "aloePatch",
+      "position": {
+        "x": 459.0,
+        "y": 23.515,
+        "z": 5.4
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:340,70:14",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 459.0,
+        "y": 27.208,
+        "z": 94.5
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:340,86:23",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 459.0,
+        "y": 24.786,
+        "z": 116.1
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:340,93:9",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 459.0,
+        "y": 22.95,
+        "z": 125.55
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:340,94:10",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 459.0,
+        "y": 22.491,
+        "z": 126.9
+      }
+    },
+    {
       "drop": "stones",
       "id": "atlas-1492:341,-44:0",
       "kind": "prop",
@@ -14650,6 +21417,523 @@
         "x": 460.35,
         "y": 16.983,
         "z": -59.4
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:341,-46:16",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 460.35,
+        "y": 16.983,
+        "z": -62.1
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:341,44:26",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 460.35,
+        "y": 30.385,
+        "z": 59.4
+      }
+    },
+    {
+      "drop": "ironOre",
+      "id": "atlas-1492:341,49:24",
+      "kind": "prop",
+      "material": "ironOre",
+      "position": {
+        "x": 460.35,
+        "y": 31.127,
+        "z": 66.15
+      }
+    },
+    {
+      "drop": "ironOre",
+      "id": "atlas-1492:341,49:24:cluster1",
+      "kind": "prop",
+      "material": "ironOre",
+      "position": {
+        "x": 459.523,
+        "y": 31.185,
+        "z": 65.14
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:341,50:7",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 460.35,
+        "y": 30.644,
+        "z": 67.5
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:341,66:6",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 460.35,
+        "y": 31.971,
+        "z": 89.1
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:341,75:10",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 460.35,
+        "y": 27.081,
+        "z": 101.25
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:341,80:2",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 460.35,
+        "y": 26.622,
+        "z": 108.0
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:342,-21:3",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 461.7,
+        "y": 18.819,
+        "z": -28.35
+      }
+    },
+    {
+      "drop": "aloe",
+      "id": "atlas-1492:342,-37:5",
+      "kind": "prop",
+      "material": "aloePatch",
+      "position": {
+        "x": 461.7,
+        "y": 16.065,
+        "z": -49.95
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:342,-63:16",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 461.7,
+        "y": 22.491,
+        "z": -85.05
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:342,-82:18",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 461.7,
+        "y": 22.491,
+        "z": -110.7
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:342,80:8",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 461.7,
+        "y": 26.622,
+        "z": 108.0
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:343,-16:16",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 463.05,
+        "y": 18.819,
+        "z": -21.6
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:343,-25:5",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 463.05,
+        "y": 18.36,
+        "z": -33.75
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:343,-35:7",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 463.05,
+        "y": 16.065,
+        "z": -47.25
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:343,104:21",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 463.05,
+        "y": 18.819,
+        "z": 140.4
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:343,47:2",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 463.05,
+        "y": 29.808,
+        "z": 63.45
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:343,63:3",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 463.05,
+        "y": 32.161,
+        "z": 85.05
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:344,-54:27",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 464.4,
+        "y": 19.737,
+        "z": -72.9
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:344,-59:11",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 464.4,
+        "y": 21.573,
+        "z": -79.65
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:344,-62:26",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 464.4,
+        "y": 22.491,
+        "z": -83.7
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:344,-82:10",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 464.4,
+        "y": 22.032,
+        "z": -110.7
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:344,-82:25",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 464.4,
+        "y": 22.032,
+        "z": -110.7
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:344,38:14",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 464.4,
+        "y": 27.031,
+        "z": 51.3
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:344,45:4",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 464.4,
+        "y": 28.6,
+        "z": 60.75
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:344,76:27",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 464.4,
+        "y": 27.081,
+        "z": 102.6
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:344,81:5",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 464.4,
+        "y": 26.622,
+        "z": 109.35
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:345,-62:19",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 465.75,
+        "y": 22.032,
+        "z": -83.7
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:345,-70:14",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 465.75,
+        "y": 22.491,
+        "z": -94.5
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:345,-9:23",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 465.75,
+        "y": 21.629,
+        "z": -12.15
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:345,43:11",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 465.75,
+        "y": 24.885,
+        "z": 58.05
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:345,76:19",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 465.75,
+        "y": 26.622,
+        "z": 102.6
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:345,95:22",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 465.75,
+        "y": 22.032,
+        "z": 128.25
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:345,9:12",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 465.75,
+        "y": 21.781,
+        "z": 12.15
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:346,-21:8",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 467.1,
+        "y": 18.36,
+        "z": -28.35
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:346,102:0",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 467.1,
+        "y": 19.278,
+        "z": 137.7
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:346,23:23",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 467.1,
+        "y": 24.013,
+        "z": 31.05
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:346,36:18",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 467.1,
+        "y": 23.553,
+        "z": 48.6
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:346,92:24",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 467.1,
+        "y": 23.409,
+        "z": 124.2
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:347,-51:11",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 468.45,
+        "y": 18.819,
+        "z": -68.85
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:347,32:3",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 468.45,
+        "y": 22.995,
+        "z": 43.2
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:347,46:27",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 468.45,
+        "y": 25.235,
+        "z": 62.1
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:347,65:1",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 468.45,
+        "y": 28.831,
+        "z": 87.75
+      }
+    },
+    {
+      "drop": "aloe",
+      "id": "atlas-1492:348,-41:20",
+      "kind": "prop",
+      "material": "aloePatch",
+      "position": {
+        "x": 469.8,
+        "y": 16.524,
+        "z": -55.35
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:348,105:5",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 469.8,
+        "y": 17.901,
+        "z": 141.75
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:348,110:7",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 469.8,
+        "y": 17.442,
+        "z": 148.5
       }
     },
     {
@@ -14664,14 +21948,344 @@
       }
     },
     {
+      "drop": "berries",
+      "id": "atlas-1492:348,59:21",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 469.8,
+        "y": 31.747,
+        "z": 79.65
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:348,74:16",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 469.8,
+        "y": 26.163,
+        "z": 99.9
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:348,76:17",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 469.8,
+        "y": 26.163,
+        "z": 102.6
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:349,-13:13",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 471.15,
+        "y": 19.737,
+        "z": -17.55
+      }
+    },
+    {
+      "drop": "aloe",
+      "id": "atlas-1492:349,-26:22",
+      "kind": "prop",
+      "material": "aloePatch",
+      "position": {
+        "x": 471.15,
+        "y": 17.901,
+        "z": -35.1
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:349,35:6",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 471.15,
+        "y": 23.319,
+        "z": 47.25
+      }
+    },
+    {
       "drop": "rawMeat",
-      "id": "atlas-1492:355,-107:0",
+      "id": "atlas-1492:349,67:9",
       "kind": "prop",
       "material": "wildlife",
       "position": {
+        "x": 471.15,
+        "y": 27.656,
+        "z": 90.45
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:350,-78:20",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 472.5,
+        "y": 22.032,
+        "z": -105.3
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:350,-79:12",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 472.5,
+        "y": 21.573,
+        "z": -106.65
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:350,103:1",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 472.5,
+        "y": 17.901,
+        "z": 139.05
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:350,107:6",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 472.5,
+        "y": 16.983,
+        "z": 144.45
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:350,9:14",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 472.5,
+        "y": 21.811,
+        "z": 12.15
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:351,-67:8",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 473.85,
+        "y": 21.573,
+        "z": -90.45
+      }
+    },
+    {
+      "drop": "aloe",
+      "id": "atlas-1492:351,-7:20",
+      "kind": "prop",
+      "material": "aloePatch",
+      "position": {
+        "x": 473.85,
+        "y": 21.114,
+        "z": -9.45
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:351,12:16",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 473.85,
+        "y": 22.032,
+        "z": 16.2
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:351,43:22",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 473.85,
+        "y": 23.418,
+        "z": 58.05
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:351,45:23",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 473.85,
+        "y": 23.427,
+        "z": 60.75
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:352,109:4",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 475.2,
+        "y": 16.524,
+        "z": 147.15
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:352,10:22",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 475.2,
+        "y": 22.032,
+        "z": 13.5
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:352,14:27",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 475.2,
+        "y": 22.032,
+        "z": 18.9
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:352,48:12",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 475.2,
+        "y": 23.409,
+        "z": 64.8
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:352,60:20",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 475.2,
+        "y": 28.464,
+        "z": 81.0
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:352,89:11",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 475.2,
+        "y": 23.409,
+        "z": 120.15
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:352,92:12",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 475.2,
+        "y": 22.491,
+        "z": 124.2
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:353,-35:1",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 476.55,
+        "y": 16.065,
+        "z": -47.25
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:353,-62:22",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 476.55,
+        "y": 20.655,
+        "z": -83.7
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:353,42:15",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 476.55,
+        "y": 23.409,
+        "z": 56.7
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:353,5:13",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 476.55,
+        "y": 22.204,
+        "z": 6.75
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:353,68:18",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 476.55,
+        "y": 27.081,
+        "z": 91.8
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:354,-34:15",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 477.9,
+        "y": 16.065,
+        "z": -45.9
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:355,-19:6",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
         "x": 479.25,
-        "y": 17.442,
-        "z": -144.45
+        "y": 19.737,
+        "z": -25.65
       }
     },
     {
@@ -14686,6 +22300,380 @@
       }
     },
     {
+      "drop": "stones",
+      "id": "atlas-1492:355,-82:1",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 479.25,
+        "y": 21.114,
+        "z": -110.7
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:355,14:19",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 479.25,
+        "y": 22.491,
+        "z": 18.9
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:355,42:5",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 479.25,
+        "y": 23.409,
+        "z": 56.7
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:355,51:13",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 479.25,
+        "y": 23.409,
+        "z": 68.85
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:355,58:24",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 479.25,
+        "y": 25.48,
+        "z": 78.3
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:355,71:12",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 479.25,
+        "y": 26.622,
+        "z": 95.85
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:356,-79:5",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 480.6,
+        "y": 21.573,
+        "z": -106.65
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:356,4:26",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 480.6,
+        "y": 22.95,
+        "z": 5.4
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:356,73:22",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 480.6,
+        "y": 26.622,
+        "z": 98.55
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:357,-3:2",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 481.95,
+        "y": 21.114,
+        "z": -4.05
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:357,-7:26",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 481.95,
+        "y": 20.655,
+        "z": -9.45
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:357,41:10",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 481.95,
+        "y": 23.868,
+        "z": 55.35
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:358,-37:19",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 483.3,
+        "y": 16.524,
+        "z": -49.95
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:358,-40:4",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 483.3,
+        "y": 16.524,
+        "z": -54.0
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:358,-4:12",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 483.3,
+        "y": 21.114,
+        "z": -5.4
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:358,-78:15",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 483.3,
+        "y": 21.573,
+        "z": -105.3
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:358,-7:10",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 483.3,
+        "y": 20.655,
+        "z": -9.45
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:358,-81:6",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 483.3,
+        "y": 21.114,
+        "z": -109.35
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:358,22:21",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 483.3,
+        "y": 24.327,
+        "z": 29.7
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:358,61:13",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 483.3,
+        "y": 25.704,
+        "z": 82.35
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:358,76:25",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 483.3,
+        "y": 26.163,
+        "z": 102.6
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:358,76:26",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 483.3,
+        "y": 26.163,
+        "z": 102.6
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:358,89:17",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 483.3,
+        "y": 22.491,
+        "z": 120.15
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:358,91:3",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 483.3,
+        "y": 22.491,
+        "z": 122.85
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:358,93:13",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 483.3,
+        "y": 21.114,
+        "z": 125.55
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:359,-21:27",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 484.65,
+        "y": 18.819,
+        "z": -28.35
+      }
+    },
+    {
+      "drop": "aloe",
+      "id": "atlas-1492:359,-46:23",
+      "kind": "prop",
+      "material": "aloePatch",
+      "position": {
+        "x": 484.65,
+        "y": 16.983,
+        "z": -62.1
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:359,-74:3",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 484.65,
+        "y": 21.573,
+        "z": -99.9
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:359,108:16",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 484.65,
+        "y": 16.983,
+        "z": 145.8
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:360,-58:27",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 486.0,
+        "y": 17.901,
+        "z": -78.3
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:360,-59:2",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 486.0,
+        "y": 18.36,
+        "z": -79.65
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:361,-52:14",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 487.35,
+        "y": 16.983,
+        "z": -70.2
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:361,25:3",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 487.35,
+        "y": 24.327,
+        "z": 33.75
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:361,66:11",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 487.35,
+        "y": 25.245,
+        "z": 89.1
+      }
+    },
+    {
       "drop": "logs",
       "id": "atlas-1492:361,69:0",
       "kind": "prop",
@@ -14695,8 +22683,1538 @@
         "y": 26.163,
         "z": 93.15
       }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:361,74:7",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 487.35,
+        "y": 26.163,
+        "z": 99.9
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:362,12:1",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 488.7,
+        "y": 23.409,
+        "z": 16.2
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:362,37:1",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 488.7,
+        "y": 24.327,
+        "z": 49.95
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:362,46:17",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 488.7,
+        "y": 23.868,
+        "z": 62.1
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:366,-14:13",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 494.1,
+        "y": 18.819,
+        "z": -18.9
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:366,-19:18",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 494.1,
+        "y": 18.819,
+        "z": -25.65
+      }
+    },
+    {
+      "drop": "aloe",
+      "id": "atlas-1492:366,-3:9",
+      "kind": "prop",
+      "material": "aloePatch",
+      "position": {
+        "x": 494.1,
+        "y": 20.196,
+        "z": -4.05
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:366,-79:24",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 494.1,
+        "y": 20.196,
+        "z": -106.65
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:366,14:24",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 494.1,
+        "y": 23.868,
+        "z": 18.9
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:367,-12:15",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 495.45,
+        "y": 18.819,
+        "z": -16.2
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:367,-44:8",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 495.45,
+        "y": 16.065,
+        "z": -59.4
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:367,-76:3",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 495.45,
+        "y": 19.278,
+        "z": -102.6
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:367,42:11",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 495.45,
+        "y": 24.327,
+        "z": 56.7
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:367,68:1",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 495.45,
+        "y": 25.245,
+        "z": 91.8
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:368,-11:22",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 496.8,
+        "y": 18.819,
+        "z": -14.85
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:368,-24:11",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 496.8,
+        "y": 19.299,
+        "z": -32.4
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:369,-14:3",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 498.15,
+        "y": 18.36,
+        "z": -18.9
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:369,-60:21",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 498.15,
+        "y": 16.983,
+        "z": -81.0
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:369,45:9",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 498.15,
+        "y": 23.868,
+        "z": 60.75
+      }
+    },
+    {
+      "drop": "aloe",
+      "id": "atlas-1492:370,-22:19",
+      "kind": "prop",
+      "material": "aloePatch",
+      "position": {
+        "x": 499.5,
+        "y": 19.278,
+        "z": -29.7
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:370,-69:0",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 499.5,
+        "y": 17.901,
+        "z": -93.15
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:370,47:0",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 499.5,
+        "y": 23.409,
+        "z": 63.45
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:370,53:2",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 499.5,
+        "y": 22.95,
+        "z": 71.55
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:370,53:7",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 499.5,
+        "y": 22.95,
+        "z": 71.55
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:370,74:4",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 499.5,
+        "y": 24.786,
+        "z": 99.9
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:370,75:18",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 499.5,
+        "y": 24.786,
+        "z": 101.25
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:370,92:10",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 499.5,
+        "y": 22.491,
+        "z": 124.2
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:371,51:6",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 500.85,
+        "y": 23.409,
+        "z": 68.85
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:371,60:6",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 500.85,
+        "y": 23.868,
+        "z": 81.0
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:371,8:18",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 500.85,
+        "y": 22.95,
+        "z": 10.8
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:371,91:14",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 500.85,
+        "y": 22.491,
+        "z": 122.85
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:372,-38:4",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 502.2,
+        "y": 16.983,
+        "z": -51.3
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:372,-60:10",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 502.2,
+        "y": 15.606,
+        "z": -81.0
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:372,-60:23",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 502.2,
+        "y": 15.606,
+        "z": -81.0
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:372,21:13",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 502.2,
+        "y": 24.327,
+        "z": 28.35
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:372,39:4",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 502.2,
+        "y": 25.245,
+        "z": 52.65
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:372,60:9",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 502.2,
+        "y": 23.868,
+        "z": 81.0
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:373,-53:19",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 503.55,
+        "y": 14.688,
+        "z": -71.55
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:373,105:22",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 503.55,
+        "y": 18.36,
+        "z": 141.75
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:373,50:22",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 503.55,
+        "y": 23.409,
+        "z": 67.5
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:373,95:2",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 503.55,
+        "y": 22.032,
+        "z": 128.25
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:373,99:8",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 503.55,
+        "y": 20.655,
+        "z": 133.65
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:374,-82:19",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 504.9,
+        "y": 18.36,
+        "z": -110.7
+      }
+    },
+    {
+      "drop": "aloe",
+      "id": "atlas-1492:374,10:27",
+      "kind": "prop",
+      "material": "aloePatch",
+      "position": {
+        "x": 504.9,
+        "y": 23.409,
+        "z": 13.5
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:374,30:10",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 504.9,
+        "y": 25.245,
+        "z": 40.5
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:374,65:23",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 504.9,
+        "y": 24.327,
+        "z": 87.75
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:375,-73:26",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 506.25,
+        "y": 16.524,
+        "z": -98.55
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:376,-15:0",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 507.6,
+        "y": 19.278,
+        "z": -20.25
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:376,-18:1",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 507.6,
+        "y": 18.819,
+        "z": -24.3
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:376,-30:24",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 507.6,
+        "y": 18.36,
+        "z": -40.5
+      }
+    },
+    {
+      "drop": "aloe",
+      "id": "atlas-1492:376,-47:7",
+      "kind": "prop",
+      "material": "aloePatch",
+      "position": {
+        "x": 507.6,
+        "y": 15.147,
+        "z": -63.45
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:376,2:9",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 507.6,
+        "y": 22.95,
+        "z": 2.7
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:376,36:1",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 507.6,
+        "y": 26.163,
+        "z": 48.6
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:376,72:0",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 507.6,
+        "y": 24.786,
+        "z": 97.2
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:377,-22:6",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 508.95,
+        "y": 18.819,
+        "z": -29.7
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:377,-36:21",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 508.95,
+        "y": 16.983,
+        "z": -48.6
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:377,-60:18",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 508.95,
+        "y": 14.229,
+        "z": -81.0
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:377,-7:12",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 508.95,
+        "y": 20.196,
+        "z": -9.45
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:377,104:6",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 508.95,
+        "y": 19.737,
+        "z": 140.4
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:377,35:26",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 508.95,
+        "y": 26.163,
+        "z": 47.25
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:377,66:10",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 508.95,
+        "y": 24.327,
+        "z": 89.1
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:377,87:11",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 508.95,
+        "y": 23.409,
+        "z": 117.45
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:377,96:18",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 508.95,
+        "y": 22.032,
+        "z": 129.6
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:378,-38:1",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 510.3,
+        "y": 16.524,
+        "z": -51.3
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:378,13:14",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 510.3,
+        "y": 23.868,
+        "z": 17.55
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:378,33:8",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 510.3,
+        "y": 26.163,
+        "z": 44.55
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:378,41:14",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 510.3,
+        "y": 26.163,
+        "z": 55.35
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:378,41:15",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 510.3,
+        "y": 26.163,
+        "z": 55.35
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:378,62:8",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 510.3,
+        "y": 23.868,
+        "z": 83.7
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:379,-19:20",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 511.65,
+        "y": 19.278,
+        "z": -25.65
+      }
+    },
+    {
+      "drop": "copperOre",
+      "id": "atlas-1492:379,21:19",
+      "kind": "prop",
+      "material": "copperOre",
+      "position": {
+        "x": 511.65,
+        "y": 24.81,
+        "z": 28.35
+      }
+    },
+    {
+      "drop": "copperOre",
+      "id": "atlas-1492:379,21:19:cluster1",
+      "kind": "prop",
+      "material": "copperOre",
+      "position": {
+        "x": 511.899,
+        "y": 24.812,
+        "z": 27.41
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:379,67:5",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 511.65,
+        "y": 24.327,
+        "z": 90.45
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:380,-68:27",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 513.0,
+        "y": 14.688,
+        "z": -91.8
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:380,110:16",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 513.0,
+        "y": 18.819,
+        "z": 148.5
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:380,35:24",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 513.0,
+        "y": 26.163,
+        "z": 47.25
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:380,3:22",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 513.0,
+        "y": 22.95,
+        "z": 4.05
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:380,49:25",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 513.0,
+        "y": 24.786,
+        "z": 66.15
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:380,75:27",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 513.0,
+        "y": 24.786,
+        "z": 101.25
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:380,82:22",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 513.0,
+        "y": 24.327,
+        "z": 110.7
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:381,-33:20",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 514.35,
+        "y": 17.938,
+        "z": -44.55
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:381,-41:15",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 514.35,
+        "y": 16.065,
+        "z": -55.35
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:381,-65:7",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 514.35,
+        "y": 14.229,
+        "z": -87.75
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:381,-9:27",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 514.35,
+        "y": 20.655,
+        "z": -12.15
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:381,12:20",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 514.35,
+        "y": 23.868,
+        "z": 16.2
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:381,49:17",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 514.35,
+        "y": 24.786,
+        "z": 66.15
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:381,4:16",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 514.35,
+        "y": 23.409,
+        "z": 5.4
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:381,50:19",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 514.35,
+        "y": 24.786,
+        "z": 67.5
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:381,89:3",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 514.35,
+        "y": 23.409,
+        "z": 120.15
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:382,-10:23",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 515.7,
+        "y": 20.68,
+        "z": -13.5
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:382,-14:16",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 515.7,
+        "y": 20.427,
+        "z": -18.9
+      }
+    },
+    {
+      "drop": "aloe",
+      "id": "atlas-1492:382,-38:6",
+      "kind": "prop",
+      "material": "aloePatch",
+      "position": {
+        "x": 515.7,
+        "y": 16.983,
+        "z": -51.3
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:382,-82:4",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 515.7,
+        "y": 15.606,
+        "z": -110.7
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:382,109:12",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 515.7,
+        "y": 18.819,
+        "z": 147.15
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:382,60:19",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 515.7,
+        "y": 24.327,
+        "z": 81.0
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:382,71:13",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 515.7,
+        "y": 24.786,
+        "z": 95.85
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:382,9:2",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 515.7,
+        "y": 23.409,
+        "z": 12.15
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:383,-42:18",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 517.05,
+        "y": 15.606,
+        "z": -56.7
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:383,-51:3",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 517.05,
+        "y": 15.021,
+        "z": -68.85
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:383,103:21",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 517.05,
+        "y": 19.737,
+        "z": 139.05
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:383,41:13",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 517.05,
+        "y": 26.163,
+        "z": 55.35
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:383,5:25",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 517.05,
+        "y": 22.95,
+        "z": 6.75
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:383,79:14",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 517.05,
+        "y": 24.327,
+        "z": 106.65
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:384,-30:13",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 518.4,
+        "y": 19.144,
+        "z": -40.5
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:384,95:25",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 518.4,
+        "y": 22.032,
+        "z": 128.25
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:385,-46:22",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 519.75,
+        "y": 14.407,
+        "z": -62.1
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:385,102:26",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 519.75,
+        "y": 20.655,
+        "z": 137.7
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:385,11:1",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 519.75,
+        "y": 22.95,
+        "z": 14.85
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:385,21:21",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 519.75,
+        "y": 23.868,
+        "z": 28.35
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:386,-15:8",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 521.1,
+        "y": 20.602,
+        "z": -20.25
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:386,5:7",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 521.1,
+        "y": 22.032,
+        "z": 6.75
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:386,69:20",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 521.1,
+        "y": 25.245,
+        "z": 93.15
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:386,88:7",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 521.1,
+        "y": 22.95,
+        "z": 118.8
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:387,-13:25",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 522.45,
+        "y": 20.502,
+        "z": -17.55
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:387,-72:11",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 522.45,
+        "y": 13.77,
+        "z": -97.2
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:387,11:12",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 522.45,
+        "y": 22.491,
+        "z": 14.85
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:388,-68:20",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 523.8,
+        "y": 13.77,
+        "z": -91.8
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:388,101:19",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 523.8,
+        "y": 20.655,
+        "z": 136.35
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:388,106:17",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 523.8,
+        "y": 19.278,
+        "z": 143.1
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:388,26:17",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 523.8,
+        "y": 24.327,
+        "z": 35.1
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:388,26:5",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 523.8,
+        "y": 24.327,
+        "z": 35.1
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:388,37:3",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 523.8,
+        "y": 24.786,
+        "z": 49.95
+      }
+    },
+    {
+      "drop": "aloe",
+      "id": "atlas-1492:388,5:26",
+      "kind": "prop",
+      "material": "aloePatch",
+      "position": {
+        "x": 523.8,
+        "y": 21.573,
+        "z": 6.75
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:388,71:12",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 523.8,
+        "y": 25.245,
+        "z": 95.85
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:388,73:25",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 523.8,
+        "y": 25.245,
+        "z": 98.55
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:388,78:3",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 523.8,
+        "y": 24.786,
+        "z": 105.3
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:388,89:27",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 523.8,
+        "y": 22.491,
+        "z": 120.15
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:389,-19:2",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 525.15,
+        "y": 19.724,
+        "z": -25.65
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:389,-44:9",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 525.15,
+        "y": 15.361,
+        "z": -59.4
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:389,-82:9",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 525.15,
+        "y": 14.688,
+        "z": -110.7
+      }
+    },
+    {
+      "drop": "stones",
+      "id": "atlas-1492:389,18:8",
+      "kind": "prop",
+      "material": "rock",
+      "position": {
+        "x": 525.15,
+        "y": 22.95,
+        "z": 24.3
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:389,21:4",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 525.15,
+        "y": 23.409,
+        "z": 28.35
+      }
+    },
+    {
+      "drop": "rawMeat",
+      "id": "atlas-1492:389,25:10",
+      "kind": "prop",
+      "material": "wildlife",
+      "position": {
+        "x": 525.15,
+        "y": 24.327,
+        "z": 33.75
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:389,71:24",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 525.15,
+        "y": 25.245,
+        "z": 95.85
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:390,34:5",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 526.5,
+        "y": 23.868,
+        "z": 45.9
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:390,61:7",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 526.5,
+        "y": 25.704,
+        "z": 82.35
+      }
+    },
+    {
+      "drop": "berries",
+      "id": "atlas-1492:390,62:11",
+      "kind": "prop",
+      "material": "berryBush",
+      "position": {
+        "x": 526.5,
+        "y": 25.704,
+        "z": 83.7
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:390,76:16",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 526.5,
+        "y": 24.786,
+        "z": 102.6
+      }
+    },
+    {
+      "drop": "logs",
+      "id": "atlas-1492:390,92:20",
+      "kind": "prop",
+      "material": "tree",
+      "position": {
+        "x": 526.5,
+        "y": 22.032,
+        "z": 124.2
+      }
     }
   ],
+  "schemaVersion": 2,
   "seed": "atlas-1492",
   "structureCounts": {
     "bed": 2,

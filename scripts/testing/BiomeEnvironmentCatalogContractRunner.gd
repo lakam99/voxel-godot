@@ -54,10 +54,11 @@ func test_profile_parity(catalog) -> void:
 
 	var asset_expected := {
 		"default": [PackedStringArray(["broadleaf_tree"]), 1.0, 1.0],
-		"forest": [PackedStringArray(["broadleaf_tree"]), 1.04, 0.94],
-		"taiga": [PackedStringArray(["conifer_tree"]), 1.08, 1.0],
+		"forest": [PackedStringArray(["mature_broadleaf_tree"]), 1.04, 0.94],
+		"taiga": [PackedStringArray(["mature_conifer_tree"]), 1.08, 1.0],
 		"plains": [PackedStringArray(["broadleaf_tree", "savanna_tree"]), 0.98, 0.95],
-		"savanna": [PackedStringArray(["savanna_tree"]), 1.0, 1.04]
+		"savanna": [PackedStringArray(["mature_savanna_tree"]), 1.0, 1.04],
+		"swamp": [PackedStringArray(["mature_broadleaf_tree"]), 0.94, 0.92]
 	}
 	var asset_mismatches: Array[Dictionary] = []
 	for biome in asset_expected.keys():
@@ -66,6 +67,17 @@ func test_profile_parity(catalog) -> void:
 		if profile.tree_families != row[0] or not is_equal_approx(profile.tree_scale, float(row[1])) or not is_equal_approx(profile.rock_scale, float(row[2])):
 			asset_mismatches.append({"biome": biome, "families": profile.tree_families, "treeScale": profile.tree_scale, "rockScale": profile.rock_scale})
 	add_result("asset_family_and_scale_values_match_visual_profiles", asset_mismatches.is_empty(), asset_mismatches)
+	var canopy_profile_mismatches: Array[Dictionary] = []
+	for biome in ["forest", "taiga", "swamp", "savanna"]:
+		var profile = catalog.profile_for_biome(biome)
+		if profile.tree_height_min <= 0.0 \
+			or profile.tree_height_max < profile.tree_height_min \
+			or profile.crown_radius_min <= 0.0 \
+			or profile.trunk_radius_min <= 0.0 \
+			or profile.canopy_density <= 0.0 \
+			or profile.tree_visibility_range <= profile.tree_shadow_range:
+			canopy_profile_mismatches.append({"biome": biome, "profile": profile})
+	add_result("wooded_biomes_publish_complete_canopy_profiles", canopy_profile_mismatches.is_empty(), canopy_profile_mismatches)
 
 	var forage_expected := {
 		"forest": ["berryBush", "berries", 2, 4, 0.56],

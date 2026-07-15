@@ -129,7 +129,6 @@ func run() -> void:
 		add_result("startup_physics_frames_advanced", false, "physics frames did not advance during startup")
 		finish(1)
 		return
-	await claim_fixture_population_ownership()
 	await setup_one_house_one_npc_fixture()
 	if failed:
 		finish(1)
@@ -223,6 +222,7 @@ func setup_one_house_one_npc_fixture() -> void:
 	write_progress("fixture_chunks_requested")
 	await wait_physics_frames(12)
 	write_progress("fixture_chunks_settled")
+	await claim_fixture_population_ownership()
 
 	var structure_system = main.get("structure_system")
 	if structure_system == null or not structure_system.has_method("build_building"):

@@ -5,7 +5,7 @@
 [resource]
 script = ExtResource("1_profile")
 biome_id = "tundra"
-tree_families = PackedStringArray("conifer_tree")
+tree_families = PackedStringArray("mature_conifer_tree")
 rock_families = PackedStringArray("rock")
 tree_scale = 0.96
 rock_scale = 1.08
@@ -20,6 +20,17 @@ forage_radius = 0.48
 weather_precip = 0.58
 weather_clouds = 0.58
 cold_weather = true
+tree_height_min = 10.5
+tree_height_max = 14.0
+crown_radius_min = 2.8
+crown_radius_max = 3.8
+trunk_radius_min = 0.36
+trunk_radius_max = 0.48
+wind_response = 1.05
+canopy_density = 0.20
+natural_prop_exclusion_margin = 0.35
+tree_visibility_range = 320.0
+tree_shadow_range = 190.0
 detail_types = PackedStringArray("snowClump", "pebble")
 detail_thresholds = PackedFloat32Array(0.56, 1.0)
 detail_y_offsets = PackedFloat32Array(0.05, 0.05)

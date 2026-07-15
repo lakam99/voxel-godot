@@ -3,7 +3,8 @@ param(
     [string]$OutputDir = "",
     [string]$Seed = "atlas-1492",
     [switch]$UpdateBaseline,
-    [switch]$Headless
+    [switch]$Headless,
+    [switch]$Canopy
 )
 
 $ErrorActionPreference = "Stop"
@@ -18,6 +19,10 @@ $baselineDir = [System.IO.Path]::GetFullPath((Join-Path $projectPath "artifacts\
 $env:VOXEL_PLAYTEST = "1"
 $env:VOXEL_VISUAL_CAPTURE_DIR = $OutputDir
 $env:VOXEL_TEST_SEED = $Seed
+$canopyCapture = $Canopy -or $env:VOXEL_CANOPY_CAPTURE -eq "1"
+if ($Canopy) {
+    $env:VOXEL_CANOPY_CAPTURE = "1"
+}
 
 New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
 
@@ -32,16 +37,30 @@ if ($exitCode -ne 0) {
     exit $exitCode
 }
 
-$expectedCases = @(
-    "town_noon",
-    "town_sunset",
-    "forest_midnight",
-    "forest_midnight_lights",
-    "forest_rain",
-    "mountain_day",
-    "water_overcast",
-    "hud_gameplay"
-)
+$expectedCases = if ($canopyCapture) {
+    @(
+        "canopy_plains_midday",
+        "canopy_forest_midday",
+        "canopy_taiga_midday",
+        "canopy_swamp_rain",
+        "canopy_savanna_midday",
+        "canopy_forest_storm",
+        "canopy_forest_night_torch",
+        "canopy_forest_traversal_line",
+        "canopy_town_edge_midday"
+    )
+} else {
+    @(
+        "town_noon",
+        "town_sunset",
+        "forest_midnight",
+        "forest_midnight_lights",
+        "forest_rain",
+        "mountain_day",
+        "water_overcast",
+        "hud_gameplay"
+    )
+}
 foreach ($caseName in $expectedCases) {
     $pngPath = Join-Path $OutputDir "$caseName.png"
     $jsonPath = Join-Path $OutputDir "$caseName.json"

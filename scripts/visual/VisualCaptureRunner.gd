@@ -23,6 +23,8 @@ var output_dir := ""
 var seed := DEFAULT_SEED
 var metadata: Array[Dictionary] = []
 var failed := false
+var canopy_capture_cell_cache := {}
+var canopy_capture_cell_cache_ready := false
 
 func _ready() -> void:
     call_deferred("run")
@@ -128,7 +130,7 @@ func canopy_capture_cases() -> Array[Dictionary]:
         { "name": "canopy_forest_storm", "biome": "forest", "clock": 16.5, "weather": "rain", "intensity": 0.88, "clouds": 0.96, "hud": false, "offset": Vector3(10.0, 0.0, 14.0), "pitch": -7.0 },
         { "name": "canopy_forest_night_torch", "biome": "forest", "clock": 0.0, "weather": "clear", "intensity": 0.0, "clouds": 0.18, "hud": false, "offset": Vector3(9.0, 0.0, 13.0), "pitch": -6.0, "heldItem": "torch" },
         { "name": "canopy_forest_traversal_line", "biome": "forest", "clock": 11.0, "weather": "clear", "intensity": 0.0, "clouds": 0.20, "hud": false, "offset": Vector3(4.0, 0.0, 18.0), "pitch": -3.0 },
-        { "name": "canopy_town_edge_midday", "playtest": "town", "clock": 12.0, "weather": "clear", "intensity": 0.0, "clouds": 0.22, "hud": false, "offset": Vector3(22.0, 0.0, 20.0), "pitch": -8.0 }
+        { "name": "canopy_town_edge_midday", "playtest": "town", "clock": 12.0, "weather": "clear", "intensity": 0.0, "clouds": 0.22, "hud": false, "offset": Vector3(46.0, 0.0, 0.0), "pitch": -4.0, "eyeHeight": 3.0 }
     ]
 
 func ui_layout_capture_cases() -> Array[Dictionary]:
@@ -171,6 +173,9 @@ func capture_case(capture_case: Dictionary) -> void:
     main.set_process(true)
     var ok := await load_capture_destination(capture_case)
     await wait_frames(120 if capture_case.has("biome") else 24)
+    if ok and capture_case.has("biome") and String(capture_case.get("biome", "")) != "plains":
+        if retarget_canopy_capture_to_runtime_tree(capture_case):
+            await wait_frames(60)
     main.set_process(false)
     if not ok:
         push_error("Could not load visual capture case: %s" % capture_case["name"])
@@ -203,11 +208,40 @@ func capture_case(capture_case: Dictionary) -> void:
     metadata.append(case_metadata)
     write_json(path_join(output_dir, "%s.json" % case_name), case_metadata)
 
+func retarget_canopy_capture_to_runtime_tree(capture_case: Dictionary) -> bool:
+    var requested_biome := String(capture_case.get("biome", ""))
+    var current_cell: Vector2i = capture_case.get("resolvedCell", Vector2i.ZERO)
+    var center := Vector3(float(current_cell.x) * main.CELL, 0.0, float(current_cell.y) * main.CELL)
+    var chunk_root = main.get("chunk_root") if main != null else null
+    if chunk_root == null:
+        return false
+    var trees: Array[Node3D] = []
+    collect_runtime_trees(chunk_root, center, 160.0, trees)
+    var nearest_tree: Node3D = null
+    var nearest_distance := INF
+    for tree in trees:
+        if String(tree.get_meta("visual_biome", "")) != requested_biome:
+            continue
+        var distance := Vector2(tree.global_position.x - center.x, tree.global_position.z - center.z).length()
+        if distance < nearest_distance:
+            nearest_tree = tree
+            nearest_distance = distance
+    if nearest_tree == null:
+        return false
+    var tree_cell := Vector2i(
+        roundi(nearest_tree.global_position.x / main.CELL),
+        roundi(nearest_tree.global_position.z / main.CELL)
+    )
+    capture_case["resolvedCell"] = tree_cell
+    capture_case["resolvedBiome"] = String(main.call("surface_biome_at_cell", Vector3i(tree_cell.x, 0, tree_cell.y)))
+    capture_case["biomeNeighborhood"] = canopy_biome_neighborhood(tree_cell, requested_biome)
+    return bool(main.call("teleport_to_cell", tree_cell, "Canopy capture tree: %s" % requested_biome.capitalize()))
+
 func load_capture_destination(capture_case: Dictionary) -> bool:
     if not capture_case.has("biome"):
         return bool(main.run_playtest_case(String(capture_case.get("playtest", "forest"))))
     var biome := String(capture_case.get("biome", "plains"))
-    var cell: Vector2i = main.call("find_biome_playtest_cell", [biome], main.WATER_LEVEL + 1.0, 92.0, false)
+    var cell: Vector2i = await find_canopy_capture_cell(biome)
     if cell == Vector2i(999999, 999999):
         push_error("Could not resolve canopy capture biome: %s" % biome)
         return false
@@ -215,7 +249,86 @@ func load_capture_destination(capture_case: Dictionary) -> bool:
         main.call("cleanup_playtest_case_assets")
     capture_case["resolvedCell"] = cell
     capture_case["resolvedBiome"] = String(main.call("surface_biome_at_cell", Vector3i(cell.x, 0, cell.y)))
+    capture_case["biomeNeighborhood"] = canopy_biome_neighborhood(cell, biome)
     return bool(main.call("teleport_to_cell", cell, "Canopy capture: %s" % biome.capitalize()))
+
+func find_canopy_capture_cell(biome: String) -> Vector2i:
+    await build_canopy_capture_cell_cache()
+    return canopy_capture_cell_cache.get(biome, Vector2i(999999, 999999))
+
+func build_canopy_capture_cell_cache() -> void:
+    if canopy_capture_cell_cache_ready:
+        return
+    canopy_capture_cell_cache_ready = true
+    var target_biomes := ["plains", "forest", "taiga", "swamp", "savanna"]
+    var candidate_rows := {}
+    for biome in target_biomes:
+        candidate_rows[biome] = []
+    var processed := 0
+    for z in range(-560, 561, 56):
+        for x in range(-560, 561, 56):
+            processed += 1
+            if processed % 8 == 0:
+                await get_tree().process_frame
+            var biome := String(main.call("surface_biome_at_cell", Vector3i(x, 0, z)))
+            if not target_biomes.has(biome):
+                continue
+            var height := float(main.call("surface_y_at_cell", Vector3i(x, 0, z)))
+            if height < main.WATER_LEVEL + 1.0 or height > 92.0:
+                continue
+            var cell := Vector2i(x, z)
+            var rows: Array = candidate_rows.get(biome, [])
+            rows.append({"cell": cell, "distance": Vector2(float(x), float(z)).length()})
+            candidate_rows[biome] = rows
+    for biome in target_biomes:
+        var rows: Array = candidate_rows.get(biome, [])
+        if rows.is_empty():
+            canopy_capture_cell_cache[biome] = Vector2i(999999, 999999)
+            continue
+        rows.sort_custom(func(first: Dictionary, second: Dictionary) -> bool: return float(first.get("distance", INF)) < float(second.get("distance", INF)))
+        var selected_indices := {}
+        for index in range(mini(6, rows.size())):
+            selected_indices[index] = true
+        var stride := maxi(1, ceili(float(rows.size()) / 8.0))
+        for index in range(0, rows.size(), stride):
+            selected_indices[index] = true
+        var indices: Array = selected_indices.keys()
+        indices.sort()
+        var best_row := {}
+        for index_variant in indices:
+            processed += 1
+            if processed % 4 == 0:
+                await get_tree().process_frame
+            var row: Dictionary = rows[int(index_variant)]
+            var cell: Vector2i = row.get("cell", Vector2i.ZERO)
+            var neighborhood := canopy_biome_neighborhood(cell, biome)
+            var matches := int(neighborhood.get("matchingSamples", 0))
+            var variation := float(main.height_variation_cell(cell.x, cell.y, 2))
+            var score := float(row.get("distance", INF)) + variation * 9.0
+            if best_row.is_empty() \
+                or matches > int(best_row.get("matches", -1)) \
+                or (matches == int(best_row.get("matches", -1)) and score < float(best_row.get("score", INF))):
+                best_row = {"cell": cell, "matches": matches, "score": score}
+        canopy_capture_cell_cache[biome] = best_row.get("cell", Vector2i(999999, 999999))
+
+func canopy_biome_neighborhood(center: Vector2i, biome: String) -> Dictionary:
+    var offsets: Array[Vector2i] = [
+        Vector2i.ZERO,
+        Vector2i(0, -21), Vector2i(-21, 0),
+        Vector2i(21, 0), Vector2i(0, 21)
+    ]
+    var matching := 0
+    for offset in offsets:
+        var sample := center + offset
+        if String(main.call("surface_biome_at_cell", Vector3i(sample.x, 0, sample.y))) == biome:
+            matching += 1
+    return {
+        "requestedBiome": biome,
+        "sampleRadiusCells": 21,
+        "matchingSamples": matching,
+        "sampleCount": offsets.size(),
+        "purity": snapped_float(float(matching) / float(offsets.size()))
+    }
 
 func position_camera(capture_case: Dictionary) -> void:
     if player == null or camera == null:
@@ -430,6 +543,8 @@ func make_case_metadata(capture_case: Dictionary, png_path: String) -> Dictionar
     var prompt_visible := target_label.visible if target_label != null else false
     var ray_state := focused_ray_state()
     var overlay_state := hud_overlay_state(hud)
+    var requested_biome := String(capture_case.get("biome", ""))
+    var canopy_stats := canopy_runtime_stats(capture_case.get("resolvedCell", Vector2i.ZERO), requested_biome) if capture_case.has("biome") else {}
     return {
         "seed": seed,
         "case": String(capture_case["name"]),
@@ -437,6 +552,7 @@ func make_case_metadata(capture_case: Dictionary, png_path: String) -> Dictionar
         "requestedBiome": String(capture_case.get("biome", "")),
         "resolvedBiome": String(capture_case.get("resolvedBiome", "")),
         "resolvedCell": vec2i(capture_case.get("resolvedCell", Vector2i.ZERO)),
+        "biomeNeighborhood": capture_case.get("biomeNeighborhood", {}),
         "clockHour": float(capture_case["clock"]),
         "clockText": main.clock_time_text(),
         "timeOfDay": snapped_float(main.time_of_day),
@@ -453,7 +569,87 @@ func make_case_metadata(capture_case: Dictionary, png_path: String) -> Dictionar
             "position": vec3(camera.global_position if camera else Vector3.ZERO),
             "rotationDegrees": vec3_degrees(camera.global_rotation if camera else Vector3.ZERO)
         },
+        "canopy": canopy_stats,
         "performance": stable_performance_values()
+    }
+
+func canopy_runtime_stats(center_cell: Vector2i, requested_biome: String) -> Dictionary:
+    var chunk_root = main.get("chunk_root") if main != null else null
+    if chunk_root == null:
+        return {}
+    var trees: Array[Node3D] = []
+    var center := Vector3(float(center_cell.x) * main.CELL, 0.0, float(center_cell.y) * main.CELL)
+    collect_runtime_trees(chunk_root, center, 48.0, trees)
+    var families := {}
+    var biomes := {}
+    var heights: Array[float] = []
+    var canopy_radii: Array[float] = []
+    var trunk_radii: Array[float] = []
+    var requested_families := {}
+    var requested_heights: Array[float] = []
+    var requested_canopy_radii: Array[float] = []
+    var requested_trunk_radii: Array[float] = []
+    var requested_projected_crown_area := 0.0
+    for tree in trees:
+        var family := String(tree.get_meta("tree_family", "unknown"))
+        var tree_biome := String(tree.get_meta("visual_biome", "unknown"))
+        families[family] = int(families.get(family, 0)) + 1
+        biomes[tree_biome] = int(biomes.get(tree_biome, 0)) + 1
+        var height := float(tree.get_meta("tree_visual_height", 0.0))
+        var canopy_radius := float(tree.get_meta("tree_canopy_radius", 0.0))
+        var trunk_radius := float(tree.get_meta("tree_trunk_radius", 0.0))
+        heights.append(height)
+        canopy_radii.append(canopy_radius)
+        trunk_radii.append(trunk_radius)
+        if tree_biome == requested_biome:
+            requested_families[family] = int(requested_families.get(family, 0)) + 1
+            requested_heights.append(height)
+            requested_canopy_radii.append(canopy_radius)
+            requested_trunk_radii.append(trunk_radius)
+            requested_projected_crown_area += PI * canopy_radius * canopy_radius
+    var observation_area := PI * 48.0 * 48.0
+    return {
+        "radiusWorld": 48.0,
+        "treeCount": trees.size(),
+        "families": families,
+        "biomes": biomes,
+        "height": float_range(heights),
+        "canopyRadius": float_range(canopy_radii),
+        "trunkRadius": float_range(trunk_radii),
+        "requestedBiome": requested_biome,
+        "requestedBiomeTreeCount": requested_heights.size(),
+        "requestedBiomeFamilies": requested_families,
+        "requestedBiomeHeight": float_range(requested_heights),
+        "requestedBiomeCanopyRadius": float_range(requested_canopy_radii),
+        "requestedBiomeTrunkRadius": float_range(requested_trunk_radii),
+        "requestedBiomeProjectedCrownAreaRatio": snapped_float(requested_projected_crown_area / observation_area)
+    }
+
+func collect_runtime_trees(node: Node, center: Vector3, radius: float, output: Array[Node3D]) -> void:
+    if node is Node3D \
+        and String(node.get_meta("kind", "")) == "prop" \
+        and String(node.get_meta("drop", "")) == "logs":
+        var tree := node as Node3D
+        var horizontal_distance := Vector2(tree.global_position.x - center.x, tree.global_position.z - center.z).length()
+        if horizontal_distance <= radius:
+            output.append(tree)
+    for child in node.get_children():
+        collect_runtime_trees(child, center, radius, output)
+
+func float_range(values: Array[float]) -> Dictionary:
+    if values.is_empty():
+        return {"min": 0.0, "max": 0.0, "average": 0.0}
+    var minimum := INF
+    var maximum := -INF
+    var total := 0.0
+    for value in values:
+        minimum = minf(minimum, value)
+        maximum = maxf(maximum, value)
+        total += value
+    return {
+        "min": snapped_float(minimum),
+        "max": snapped_float(maximum),
+        "average": snapped_float(total / float(values.size()))
     }
 
 func hud_overlay_state(hud) -> Dictionary:

@@ -5,7 +5,7 @@
 [resource]
 script = ExtResource("1_profile")
 biome_id = "taiga"
-tree_families = PackedStringArray("conifer_tree")
+tree_families = PackedStringArray("mature_conifer_tree")
 rock_families = PackedStringArray("rock")
 tree_scale = 1.08
 rock_scale = 1.0
@@ -26,3 +26,14 @@ detail_thresholds = PackedFloat32Array(0.34, 0.78, 1.0)
 detail_y_offsets = PackedFloat32Array(0.015, 0.19, 0.15)
 detail_scale_mins = PackedFloat32Array(0.70, 0.65, 0.82)
 detail_scale_maxs = PackedFloat32Array(1.40, 1.20, 1.18)
+tree_height_min = 13.0
+tree_height_max = 18.0
+crown_radius_min = 3.3
+crown_radius_max = 4.5
+trunk_radius_min = 0.40
+trunk_radius_max = 0.55
+wind_response = 0.92
+canopy_density = 0.74
+natural_prop_exclusion_margin = 0.40
+tree_visibility_range = 360.0
+tree_shadow_range = 220.0

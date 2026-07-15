@@ -30,7 +30,7 @@ const TREE_FAMILIES = new Set([
 ]);
 
 const HEIGHT_BANDS = {
-  mature_broadleaf_tree: [10, 16],
+  mature_broadleaf_tree: [12, 18],
   old_growth_broadleaf_tree: [16, 22],
   mature_conifer_tree: [11, 18],
   mature_savanna_tree: [8, 13],
@@ -39,10 +39,10 @@ const CANOPY_MAX_WIDTH = {
   old_growth_broadleaf_tree: 18.0,
 };
 const CANOPY_MIN_FOLIAGE_PRIMITIVES = {
-  mature_broadleaf_tree: 220,
-  old_growth_broadleaf_tree: 300,
-  mature_conifer_tree: 220,
-  mature_savanna_tree: 175,
+  mature_broadleaf_tree: 1100,
+  old_growth_broadleaf_tree: 1300,
+  mature_conifer_tree: 700,
+  mature_savanna_tree: 800,
 };
 
 const ALLOWED_MATERIALS = new Set([
@@ -123,13 +123,14 @@ function validateTreeContract(errors, asset) {
   if (asset.family in CANOPY_MIN_FOLIAGE_PRIMITIVES) {
     const structure = asset.canopyStructure;
     const minimum = CANOPY_MIN_FOLIAGE_PRIMITIVES[asset.family];
-    if (structure?.foliagePrimitive !== "folded_diamond_leaf" || !Number.isInteger(structure?.foliagePrimitiveCount) || structure.foliagePrimitiveCount < minimum) {
-      fail(errors, `${asset.id}: canopy must contain at least ${minimum} folded leaf primitives, got ${structure?.foliagePrimitiveCount}`);
+    if (structure?.foliagePrimitive !== "individual_triangular_leaf_card" || !Number.isInteger(structure?.foliagePrimitiveCount) || structure.foliagePrimitiveCount < minimum) {
+      fail(errors, `${asset.id}: canopy must contain at least ${minimum} individual leaf cards, got ${structure?.foliagePrimitiveCount}`);
     }
-    if (typeof structure?.structure !== "string" || !structure.structure.includes("spray")) {
-      fail(errors, `${asset.id}: canopy structure must be explicit branch-attached sprays`);
+    const expectedStructure = asset.family === "mature_conifer_tree" ? "radial_bough_needle_sprays" : "leaf_canopy";
+    if (typeof structure?.structure !== "string" || !structure.structure.includes(expectedStructure)) {
+      fail(errors, `${asset.id}: canopy structure must be layered branch-attached foliage (${expectedStructure})`);
     }
-    if ((wind?.foliageVertexCount ?? 0) < structure.foliagePrimitiveCount * 5) {
+    if ((wind?.foliageVertexCount ?? 0) < structure.foliagePrimitiveCount * 3) {
       fail(errors, `${asset.id}: authored foliage vertex count cannot represent declared leaf primitives`);
     }
     if (asset.family === "mature_conifer_tree" && (structure.crownLayerCount < 6 || structure.branchClusterCount < 24)) {

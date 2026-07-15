@@ -12,7 +12,7 @@ import bpy
 from mathutils import Vector
 
 
-GENERATOR_VERSION = "vox120-canopy-environment-v3"
+GENERATOR_VERSION = "vox122-canopy-environment-v5"
 SEED = 1492
 TRIANGLE_LIMIT = 2200
 GALLERY_COLUMNS = 4
@@ -89,7 +89,7 @@ ASSET_SPECS = [
             "builder": "mature_broadleaf",
             "variant": index,
             "growthClass": "mature",
-            "runtimeEnabled": False,
+            "runtimeEnabled": True,
         }
         for index in range(1, 5)
     ],
@@ -101,7 +101,7 @@ ASSET_SPECS = [
             "builder": "old_growth_broadleaf",
             "variant": index,
             "growthClass": "old_growth",
-            "runtimeEnabled": False,
+            "runtimeEnabled": True,
         }
         for index in range(1, 3)
     ],
@@ -113,7 +113,7 @@ ASSET_SPECS = [
             "builder": "mature_conifer",
             "variant": index,
             "growthClass": "mature",
-            "runtimeEnabled": False,
+            "runtimeEnabled": True,
         }
         for index in range(1, 5)
     ],
@@ -125,7 +125,7 @@ ASSET_SPECS = [
             "builder": "mature_savanna",
             "variant": index,
             "growthClass": "mature",
-            "runtimeEnabled": False,
+            "runtimeEnabled": True,
         }
         for index in range(1, 4)
     ],
@@ -264,12 +264,12 @@ def add_ico(name, subdivisions, radius, location, scale, material, rng=None, rou
 
 
 def add_leaf_mesh(name, leaves, materials):
-    """Build many visible leaf solids as one efficient foliage object.
+    """Build many visible individual leaf cards as one efficient foliage object.
 
-    Each leaf is a shallow folded diamond (four triangles, double-sided by the
-    foliage material). The finished tree is
-    still joined into one exported mesh, while the crown silhouette comes from
-    distinct branch-attached leaves instead of a handful of large blobs.
+    Each leaf is a shallow triangular card (one triangle, double-sided by the
+    foliage material). Mature crowns author twice as many independently placed
+    leaves as v4 without increasing the foliage triangle budget. The finished
+    tree is still one exported mesh and one runtime draw object.
     """
     vertices = []
     faces = []
@@ -293,24 +293,17 @@ def add_leaf_mesh(name, leaves, materials):
             width_axis = width_axis * math.cos(roll) + normal_axis * math.sin(roll)
             normal_axis = long_axis.cross(width_axis).normalized()
         half_length = float(leaf["length"]) * 0.5
-        half_width = float(leaf["width"]) * 0.5
+        leaf_width = float(leaf["width"]) * 0.90
         thickness = float(leaf["thickness"])
         base = len(vertices)
         vertices.extend([
-            center - long_axis * half_length,
-            center + width_axis * half_width,
             center + long_axis * half_length,
-            center - width_axis * half_width,
-            center + normal_axis * thickness,
+            center - long_axis * half_length + width_axis * leaf_width + normal_axis * thickness,
+            center - long_axis * half_length - width_axis * leaf_width - normal_axis * thickness,
         ])
-        faces.extend([
-            (base + 0, base + 1, base + 4),
-            (base + 1, base + 2, base + 4),
-            (base + 2, base + 3, base + 4),
-            (base + 3, base + 0, base + 4),
-        ])
+        faces.append((base + 0, base + 1, base + 2))
         material_index = material_indices[leaf["material"].name]
-        face_materials.extend([material_index] * 4)
+        face_materials.append(material_index)
     mesh = bpy.data.meshes.new(f"{name}_mesh")
     mesh.from_pydata(vertices, [], faces)
     mesh.update()
@@ -480,10 +473,10 @@ def build_savanna(spec, materials, rng):
 
 def build_mature_broadleaf(spec, materials, rng):
     variant = spec["variant"]
-    total_height = 10.6 + (variant - 1) * 1.55 + rng.uniform(-0.18, 0.18)
-    trunk_radius = 0.38 + variant * 0.035 + rng.uniform(-0.018, 0.018)
-    crown_base = total_height * rng.uniform(0.47, 0.54)
-    trunk_top = total_height * rng.uniform(0.72, 0.78)
+    total_height = 12.8 + (variant - 1) * 1.55 + rng.uniform(-0.18, 0.18)
+    trunk_radius = 0.46 + variant * 0.042 + rng.uniform(-0.018, 0.018)
+    crown_base = total_height * rng.uniform(0.38, 0.44)
+    trunk_top = total_height * rng.uniform(0.74, 0.80)
     trunk = add_cone(
         "trunk",
         9,
@@ -497,14 +490,15 @@ def build_mature_broadleaf(spec, materials, rng):
     leader_end = Vector((rng.uniform(-0.22, 0.22), rng.uniform(-0.20, 0.20), total_height - 1.18))
     objects.append(add_branch("crown_leader", (0.0, 0.0, trunk_top - 0.28), leader_end, trunk_radius * 0.22, 6, materials["bark_dark"]))
     objects.append(add_branch("crown_fork", (0.0, 0.0, trunk_top - 0.45), (leader_end.x + 0.72, leader_end.y - 0.48, leader_end.z - 0.38), trunk_radius * 0.15, 6, materials["bark_dark"]))
-    branch_count = 7 + variant
+    branch_count = 10 + variant
     branch_ends = []
-    crown_radius = 3.65 + variant * 0.55
+    crown_radius = 5.0 + variant * 0.50
     for index in range(branch_count):
         angle = (index / branch_count) * math.tau + rng.uniform(-0.20, 0.20)
-        start_z = crown_base + rng.uniform(0.0, total_height * 0.14)
-        reach = crown_radius * rng.uniform(0.56, 0.96)
-        end_z = min(total_height - 1.35, start_z + rng.uniform(1.15, 2.75))
+        layer = index % 3
+        start_z = crown_base + float(layer) * total_height * 0.075 + rng.uniform(0.0, total_height * 0.045)
+        reach = crown_radius * rng.uniform(0.62, 1.0) * (1.0 - float(layer) * 0.055)
+        end_z = min(total_height - 1.15, start_z + rng.uniform(1.30, 3.15))
         end = (math.cos(angle) * reach, math.sin(angle) * reach, end_z)
         branch_ends.append(Vector(end))
         objects.append(add_branch(f"branch_{index}", (0, 0, start_z), end, trunk_radius * rng.uniform(0.24, 0.34), 7, materials["bark_dark"]))
@@ -515,8 +509,8 @@ def build_mature_broadleaf(spec, materials, rng):
         radial.normalize()
         spray_center = branch_end + radial * rng.uniform(-0.15, 0.28)
         spray_center.z = min(total_height - 1.05, max(crown_base + 1.1, spray_center.z + rng.uniform(-0.18, 0.42)))
-        per_branch = 22 + variant * 2
-        outer_count = int(math.ceil(per_branch * 0.58))
+        per_branch = 84 + variant * 4
+        outer_count = int(math.ceil(per_branch * 0.62))
         inner_count = per_branch - outer_count
         leaves.extend(leafy_spray_records(
             spray_center,
@@ -524,10 +518,10 @@ def build_mature_broadleaf(spec, materials, rng):
             outer_count,
             rng,
             canopy_materials[index % len(canopy_materials):] + canopy_materials[:index % len(canopy_materials)],
-            (1.12, 1.68),
-            (0.70, 1.10),
-            1.14 + variant * 0.07,
-            0.94,
+            (0.56, 0.92),
+            (0.34, 0.58),
+            1.32 + variant * 0.06,
+            1.02,
             0.20,
         ))
         inner_center = Vector((branch_end.x * 0.52, branch_end.y * 0.52, max(crown_base + 0.72, branch_end.z - 0.48)))
@@ -537,41 +531,43 @@ def build_mature_broadleaf(spec, materials, rng):
             inner_count,
             rng,
             canopy_materials[(index + 1) % len(canopy_materials):] + canopy_materials[:(index + 1) % len(canopy_materials)],
-            (1.06, 1.56),
-            (0.66, 1.02),
-            1.20,
-            0.90,
+            (0.52, 0.86),
+            (0.32, 0.54),
+            1.42,
+            1.02,
             0.26,
         ))
     leaves.extend(leafy_spray_records(
         (0.0, 0.0, total_height - 1.05),
         (1.0, 0.0, 0.0),
-        44 + variant * 4,
+        160 + variant * 10,
         rng,
         canopy_materials,
-        (1.08, 1.58),
-        (0.66, 1.02),
-        1.82 + variant * 0.10,
-        0.82,
+        (0.54, 0.90),
+        (0.34, 0.56),
+        2.35 + variant * 0.12,
+        1.10,
         0.34,
     ))
     leaves.extend(leafy_spray_records(
         (leader_end.x * 0.55, leader_end.y * 0.55, total_height - 2.18),
         (1.0, 0.0, 0.0),
-        12,
+        68,
         rng,
         canopy_materials,
-        (0.88, 1.28),
-        (0.52, 0.82),
-        0.92,
-        0.66,
+        (0.48, 0.78),
+        (0.30, 0.50),
+        1.24,
+        0.82,
         0.28,
     ))
     objects.append(add_leaf_mesh("leaf_sprays", leaves, canopy_materials))
     combined = combine_asset(spec["id"], objects)
     combined["trunk_radius"] = trunk_radius
     combined["foliage_primitive_count"] = len(leaves)
-    combined["foliage_structure"] = "branch_attached_leaf_sprays"
+    combined["foliage_structure"] = "layered_branch_attached_leaf_canopy"
+    combined["crown_layer_count"] = 4
+    combined["branch_cluster_count"] = branch_count
     return combined
 
 
@@ -579,21 +575,22 @@ def build_old_growth_broadleaf(spec, materials, rng):
     variant = spec["variant"]
     total_height = 17.4 + variant * 1.85 + rng.uniform(-0.20, 0.20)
     trunk_radius = 0.66 + variant * 0.075 + rng.uniform(-0.02, 0.02)
-    crown_base = total_height * rng.uniform(0.43, 0.49)
+    crown_base = total_height * rng.uniform(0.36, 0.42)
     trunk_top = total_height * 0.76
     trunk = add_cone("trunk", 10, trunk_radius * 1.22, trunk_radius * 0.60, trunk_top, (0, 0, trunk_top * 0.5), materials["trunk"])
     objects = [trunk]
     leader_end = Vector((rng.uniform(-0.30, 0.30), rng.uniform(-0.28, 0.28), total_height - 1.34))
     objects.append(add_branch("crown_leader", (0.0, 0.0, trunk_top - 0.35), leader_end, trunk_radius * 0.20, 6, materials["bark_dark"]))
     objects.append(add_branch("crown_fork", (0.0, 0.0, trunk_top - 0.62), (leader_end.x - 1.05, leader_end.y + 0.76, leader_end.z - 0.52), trunk_radius * 0.14, 6, materials["bark_dark"]))
-    crown_radius = 5.8 + variant * 0.75
-    branch_count = 11 + variant * 2
+    crown_radius = 6.25 + variant * 0.70
+    branch_count = 12 + variant * 2
     branch_ends = []
     for index in range(branch_count):
         angle = (index / branch_count) * math.tau + rng.uniform(-0.16, 0.16)
-        start_z = crown_base + rng.uniform(0.0, total_height * 0.19)
-        reach = crown_radius * rng.uniform(0.52, 0.98)
-        end = (math.cos(angle) * reach, math.sin(angle) * reach, min(total_height - 1.8, start_z + rng.uniform(1.8, 4.2)))
+        layer = index % 4
+        start_z = crown_base + float(layer) * total_height * 0.065 + rng.uniform(0.0, total_height * 0.035)
+        reach = crown_radius * rng.uniform(0.58, 1.0) * (1.0 - float(layer) * 0.045)
+        end = (math.cos(angle) * reach, math.sin(angle) * reach, min(total_height - 1.45, start_z + rng.uniform(1.9, 4.5)))
         branch_ends.append(Vector(end))
         objects.append(add_branch(f"branch_{index}", (0, 0, start_z), end, trunk_radius * rng.uniform(0.22, 0.32), 7, materials["bark_dark"]))
     canopy_materials = [materials["leaf_primary"], materials["leaf_secondary"], materials["leaf_warm"]]
@@ -603,8 +600,8 @@ def build_old_growth_broadleaf(spec, materials, rng):
         radial.normalize()
         spray_center = branch_end + radial * rng.uniform(-0.22, 0.40)
         spray_center.z = min(total_height - 1.22, max(crown_base + 1.35, spray_center.z + rng.uniform(-0.25, 0.58)))
-        per_branch = 19 + variant
-        outer_count = int(math.ceil(per_branch * 0.58))
+        per_branch = 74 + variant * 4
+        outer_count = int(math.ceil(per_branch * 0.62))
         inner_count = per_branch - outer_count
         leaves.extend(leafy_spray_records(
             spray_center,
@@ -612,10 +609,10 @@ def build_old_growth_broadleaf(spec, materials, rng):
             outer_count,
             rng,
             canopy_materials[index % len(canopy_materials):] + canopy_materials[:index % len(canopy_materials)],
-            (1.28, 1.92),
-            (0.78, 1.20),
-            1.54 + variant * 0.12,
-            1.16,
+            (0.62, 1.02),
+            (0.38, 0.64),
+            1.72 + variant * 0.12,
+            1.24,
             0.20,
         ))
         inner_center = Vector((branch_end.x * 0.55, branch_end.y * 0.55, max(crown_base + 0.95, branch_end.z - 0.62)))
@@ -625,41 +622,43 @@ def build_old_growth_broadleaf(spec, materials, rng):
             inner_count,
             rng,
             canopy_materials[(index + 1) % len(canopy_materials):] + canopy_materials[:(index + 1) % len(canopy_materials)],
-            (1.20, 1.78),
-            (0.74, 1.14),
-            1.58,
-            1.08,
+            (0.58, 0.96),
+            (0.36, 0.60),
+            1.78,
+            1.20,
             0.28,
         ))
     leaves.extend(leafy_spray_records(
         (0.0, 0.0, total_height - 1.18),
         (1.0, 0.0, 0.0),
-        60 + variant * 5,
+        208 + variant * 16,
         rng,
         canopy_materials,
-        (1.22, 1.82),
-        (0.74, 1.16),
-        2.42,
-        1.04,
+        (0.60, 0.98),
+        (0.36, 0.62),
+        2.88,
+        1.36,
         0.36,
     ))
     leaves.extend(leafy_spray_records(
         (leader_end.x * 0.55, leader_end.y * 0.55, total_height - 2.55),
         (1.0, 0.0, 0.0),
-        14,
+        84,
         rng,
         canopy_materials,
-        (1.00, 1.46),
-        (0.60, 0.94),
-        1.08,
-        0.78,
+        (0.54, 0.88),
+        (0.34, 0.56),
+        1.46,
+        0.96,
         0.30,
     ))
     objects.append(add_leaf_mesh("old_growth_leaf_sprays", leaves, canopy_materials))
     combined = combine_asset(spec["id"], objects)
     combined["trunk_radius"] = trunk_radius
     combined["foliage_primitive_count"] = len(leaves)
-    combined["foliage_structure"] = "layered_old_growth_leaf_sprays"
+    combined["foliage_structure"] = "layered_old_growth_leaf_canopy"
+    combined["crown_layer_count"] = 5
+    combined["branch_cluster_count"] = branch_count
     return combined
 
 
@@ -687,29 +686,31 @@ def build_mature_conifer(spec, materials, rng):
             end = start + Vector((radial.x * radius, radial.y * radius, radial.z * radius))
             objects.append(add_branch(f"bough_{index}_{bough_index}", start, end, max(0.045, trunk_radius * (0.16 - progress * 0.055)), 4, materials["bark_dark"]))
             tangent = Vector((-radial.y, radial.x, 0.0))
-            for needle_index, distance in enumerate((0.28, 0.39, 0.51, 0.63, 0.75, 0.86, 0.96)):
-                center = start.lerp(end, distance)
-                center += tangent * (0.13 if needle_index % 2 == 0 else -0.13)
-                center.z += 0.08 + needle_index * 0.035
-                needles.append({
-                    "center": center,
-                    "axis": (radial + Vector((0.0, 0.0, 0.10 + progress * 0.12))).normalized(),
-                    "roll": angle + needle_index * 0.91 + index * 0.17,
-                    "length": rng.uniform(1.22, 1.92) * (1.0 - progress * 0.15),
-                    "width": rng.uniform(0.66, 1.04) * (1.0 - progress * 0.10),
-                    "thickness": rng.uniform(0.08, 0.14),
-                    "material": needle_materials[(index + needle_index) % 2],
-                })
+            for needle_index, distance in enumerate((0.22, 0.29, 0.37, 0.45, 0.53, 0.61, 0.69, 0.77, 0.85, 0.92, 0.98)):
+                for side_index in range(2):
+                    side = -1.0 if side_index == 0 else 1.0
+                    center = start.lerp(end, distance)
+                    center += tangent * side * (0.12 + 0.035 * float(needle_index % 3))
+                    center.z += 0.06 + needle_index * 0.035 + side * 0.025
+                    needles.append({
+                        "center": center,
+                        "axis": (radial + tangent * side * 0.16 + Vector((0.0, 0.0, 0.10 + progress * 0.12))).normalized(),
+                        "roll": angle + needle_index * 0.91 + index * 0.17 + side * 0.34,
+                        "length": rng.uniform(0.66, 1.12) * (1.0 - progress * 0.15),
+                        "width": rng.uniform(0.38, 0.68) * (1.0 - progress * 0.10),
+                        "thickness": rng.uniform(0.08, 0.14),
+                        "material": needle_materials[(index + needle_index + side_index) % 2],
+                    })
             bough_count += 1
     top_center = Vector((0.0, 0.0, total_height - 0.58))
-    for index in range(18):
-        angle = float(index) / 18.0 * math.tau
+    for index in range(56):
+        angle = float(index) / 56.0 * math.tau
         needles.append({
             "center": top_center + Vector((math.cos(angle) * 0.28, math.sin(angle) * 0.28, rng.uniform(-0.18, 0.22))),
             "axis": Vector((math.cos(angle) * 0.34, math.sin(angle) * 0.34, 0.94)).normalized(),
             "roll": angle,
-            "length": rng.uniform(0.98, 1.42),
-            "width": rng.uniform(0.42, 0.66),
+            "length": rng.uniform(0.58, 0.92),
+            "width": rng.uniform(0.32, 0.52),
             "thickness": 0.09,
             "material": needle_materials[index % 2],
         })
@@ -749,32 +750,34 @@ def build_mature_savanna(spec, materials, rng):
         leaves.extend(leafy_spray_records(
             pad_center,
             radial,
-            16 + variant,
+            76 + variant * 4,
             rng,
             savanna_materials[index % 2:] + savanna_materials[:index % 2],
-            (1.08, 1.62),
-            (0.66, 1.04),
-            1.14 + variant * 0.09,
-            0.66,
+            (0.58, 0.94),
+            (0.36, 0.60),
+            1.34 + variant * 0.10,
+            0.78,
             0.18,
         ))
     leaves.extend(leafy_spray_records(
         crown_center + Vector((0.0, 0.0, total_height - crown_center.z - 0.92)),
         (1.0, 0.0, 0.0),
-        34 + variant * 4,
+        152 + variant * 12,
         rng,
         savanna_materials,
-        (1.04, 1.54),
-        (0.64, 1.00),
-        1.66,
-        0.70,
+        (0.56, 0.90),
+        (0.34, 0.58),
+        2.08,
+        0.82,
         0.18,
     ))
     objects.append(add_leaf_mesh("savanna_leaf_sprays", leaves, savanna_materials))
     combined = combine_asset(spec["id"], objects)
     combined["trunk_radius"] = trunk_radius
     combined["foliage_primitive_count"] = len(leaves)
-    combined["foliage_structure"] = "layered_umbrella_leaf_sprays"
+    combined["foliage_structure"] = "layered_umbrella_leaf_canopy"
+    combined["crown_layer_count"] = 3
+    combined["branch_cluster_count"] = branch_count
     return combined
 
 
@@ -1013,7 +1016,7 @@ def asset_metadata(spec, obj, relative_path):
     foliage_primitive_count = int(obj.get("foliage_primitive_count", 0))
     if foliage_primitive_count > 0:
         metadata["canopyStructure"] = {
-            "foliagePrimitive": "folded_diamond_leaf",
+            "foliagePrimitive": "individual_triangular_leaf_card",
             "foliagePrimitiveCount": foliage_primitive_count,
             "structure": str(obj.get("foliage_structure", "leaf_sprays")),
             "crownLayerCount": int(obj.get("crown_layer_count", 0)),

@@ -105,6 +105,12 @@ func validate_profile(profile: BiomeEnvironmentProfile, path := "") -> Dictionar
 		return invalid("incomplete_detail_distribution", "last detail threshold must be 1.0", path)
 	if profile.forage_drop_min > profile.forage_drop_max:
 		return invalid("invalid_forage_range", "forage drop minimum exceeds maximum", path)
+	if profile.tree_height_min < 0.0 or profile.tree_height_max < profile.tree_height_min:
+		return invalid("invalid_tree_height_range", "tree height range must be ordered and non-negative", path)
+	if profile.crown_radius_min < 0.0 or profile.crown_radius_max < profile.crown_radius_min:
+		return invalid("invalid_crown_radius_range", "crown radius range must be ordered and non-negative", path)
+	if profile.trunk_radius_min < 0.0 or profile.trunk_radius_max < profile.trunk_radius_min:
+		return invalid("invalid_trunk_radius_range", "trunk radius range must be ordered and non-negative", path)
 	return {"ok": true}
 
 func invalid(code: String, message: String, path: String) -> Dictionary:

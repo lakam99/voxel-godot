@@ -5,7 +5,7 @@
 [resource]
 script = ExtResource("1_profile")
 biome_id = "swamp"
-tree_families = PackedStringArray("broadleaf_tree")
+tree_families = PackedStringArray("mature_broadleaf_tree")
 rock_families = PackedStringArray("rock")
 tree_scale = 0.94
 rock_scale = 0.92
@@ -24,3 +24,15 @@ detail_thresholds = PackedFloat32Array(0.50, 1.0)
 detail_y_offsets = PackedFloat32Array(0.36, 0.19)
 detail_scale_mins = PackedFloat32Array(0.75, 0.65)
 detail_scale_maxs = PackedFloat32Array(1.30, 1.15)
+tree_height_min = 10.0
+tree_height_max = 14.0
+crown_radius_min = 4.6
+crown_radius_max = 6.5
+trunk_radius_min = 0.42
+trunk_radius_max = 0.58
+old_growth_chance = 0.04
+wind_response = 1.28
+canopy_density = 0.62
+natural_prop_exclusion_margin = 0.55
+tree_visibility_range = 320.0
+tree_shadow_range = 195.0
