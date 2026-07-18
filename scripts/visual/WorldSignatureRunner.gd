@@ -34,17 +34,28 @@ func run() -> void:
     main = MAIN_SCENE.instantiate()
     add_child(main)
     if not await wait_for_signature_chunk_readiness("initial world"):
-        get_tree().quit(1)
+        finish(1)
         return
     prepare_world()
     if not await wait_for_signature_chunk_readiness("signature town"):
-        get_tree().quit(1)
+        finish(1)
         return
     freeze_world()
     complete_signature_surface_props()
     var signature := build_signature()
     write_json(output_path, signature)
-    get_tree().quit(0)
+    finish(0)
+
+func finish(exit_code: int) -> void:
+    # The signature fixture instantiates the real Main scene.  Its exit must
+    # therefore use the same ordered shutdown as production, so generated
+    # terrain and navigation resources retire before Godot tears down servers.
+    # A direct SceneTree quit bypasses that contract and leaks the live-world
+    # navigation graph even when the signature itself is correct.
+    if main != null and is_instance_valid(main) and main.has_method("request_graceful_quit"):
+        main.call("request_graceful_quit", exit_code)
+        return
+    get_tree().quit(exit_code)
 
 func prepare_world() -> void:
     var town: Dictionary = main.town_region(1, 0)
