@@ -10,10 +10,13 @@ const SAMPLE_CELLS := [
 const SIGNATURE_READINESS_MAX_FRAMES := 1800
 const SIGNATURE_STABLE_FRAMES := 12
 const SURFACE_PROP_ATTEMPTS_PER_CHUNK := 28
+const SIGNATURE_TOWN_CELL_OFFSET := Vector2i(0, 5)
+const SIGNATURE_CHUNK_RADIUS := 3
 
 var main
 var output_path := ""
 var seed := DEFAULT_SEED
+var signature_center_chunk := Vector2i(2147483647, 2147483647)
 
 func _ready() -> void:
     call_deferred("run")
@@ -45,7 +48,8 @@ func run() -> void:
 
 func prepare_world() -> void:
     var town: Dictionary = main.town_region(1, 0)
-    var cell := Vector2i(int(town.get("centerX", 0)), int(town.get("centerZ", 0)) + 5)
+    var cell := Vector2i(int(town.get("centerX", 0)), int(town.get("centerZ", 0))) + SIGNATURE_TOWN_CELL_OFFSET
+    signature_center_chunk = main.call("cell_to_chunk", cell.x, cell.y)
     if main.has_method("teleport_to_cell"):
         main.teleport_to_cell(cell, "World signature")
 
@@ -65,7 +69,10 @@ func wait_for_signature_chunk_readiness(stage: String) -> bool:
         var chunk_count: int = int(chunks_value.size()) if chunks_value is Dictionary else -1
         var pending_load_count: int = int(pending_loads_value.size()) if pending_loads_value is Dictionary else -1
         var loading_active := bool(main.get("startup_loading_active"))
-        var chunk_queue_drained: bool = not loading_active and pending_load_count == 0
+        var canonical_window_ready := true
+        if signature_center_chunk.x != 2147483647 and chunks_value is Dictionary:
+            canonical_window_ready = signature_window_is_loaded(chunks_value as Dictionary)
+        var chunk_queue_drained: bool = not loading_active and pending_load_count == 0 and canonical_window_ready
         if chunk_queue_drained and chunk_count == previous_chunk_count:
             stable_frames += 1
         else:
@@ -109,7 +116,12 @@ func chunk_key_text(value) -> String:
 func build_signature() -> Dictionary:
     return {
         "schemaVersion": 2,
-        "fixtureContract": "stable_loaded_chunks_with_completed_surface_prop_attempts",
+        "fixtureContract": "explicit_canonical_chunk_window_with_completed_surface_prop_attempts",
+        "fixtureWindow": {
+            "centerChunk": vec2i(signature_center_chunk),
+            "radius": SIGNATURE_CHUNK_RADIUS,
+            "keys": signature_window_chunk_keys()
+        },
         "seed": seed,
         "terrainSamples": terrain_samples(),
         "loadedChunkKeys": loaded_chunk_keys(),
@@ -131,13 +143,29 @@ func terrain_samples() -> Array:
     return samples
 
 func loaded_chunk_keys() -> Array:
-    var keys := []
-    var chunks: Dictionary = main.get("chunks")
-    for key_variant in chunks.keys():
-        var key: Vector2i = key_variant
-        keys.append("%d,%d" % [key.x, key.y])
+    # The fixture has one declared observation window. Readiness proves the
+    # whole window is published before serializing it, rather than recording
+    # whichever chunks the streaming loop happened to retain.
+    return signature_window_chunk_keys()
+
+func signature_window_chunk_keys() -> Array:
+    var keys: Array[String] = []
+    if signature_center_chunk.x == 2147483647:
+        return keys
+    for x in range(signature_center_chunk.x - SIGNATURE_CHUNK_RADIUS, signature_center_chunk.x + SIGNATURE_CHUNK_RADIUS + 1):
+        for z in range(signature_center_chunk.y - SIGNATURE_CHUNK_RADIUS, signature_center_chunk.y + SIGNATURE_CHUNK_RADIUS + 1):
+            keys.append("%d,%d" % [x, z])
     keys.sort()
     return keys
+
+func signature_window_is_loaded(chunks: Dictionary) -> bool:
+    if signature_center_chunk.x == 2147483647:
+        return true
+    for x in range(signature_center_chunk.x - SIGNATURE_CHUNK_RADIUS, signature_center_chunk.x + SIGNATURE_CHUNK_RADIUS + 1):
+        for z in range(signature_center_chunk.y - SIGNATURE_CHUNK_RADIUS, signature_center_chunk.y + SIGNATURE_CHUNK_RADIUS + 1):
+            if not chunks.has(Vector2i(x, z)):
+                return false
+    return true
 
 func prop_records() -> Array:
     var records := []
@@ -158,6 +186,8 @@ func collect_prop_records(root: Node, records: Array) -> void:
             var stable_position: Vector3 = (node as Node3D).global_position if node is Node3D else Vector3.ZERO
             if material_id == "wildlife" and node.has_meta("wildlife_home"):
                 stable_position = node.get_meta("wildlife_home", stable_position)
+            if not prop_in_signature_window(stable_position):
+                continue
             records.append({
                 "id": String(node.get_meta("prop_id", node.name)),
                 "kind": String(node.get_meta("kind", "")),
@@ -166,6 +196,14 @@ func collect_prop_records(root: Node, records: Array) -> void:
                 "position": vec3(stable_position)
             })
         collect_prop_records(node, records)
+
+func prop_in_signature_window(position: Vector3) -> bool:
+    if signature_center_chunk.x == 2147483647:
+        return true
+    var cell := Vector2i(main.call("world_to_cell", position.x), main.call("world_to_cell", position.z))
+    var chunk: Vector2i = main.call("cell_to_chunk", cell.x, cell.y)
+    return abs(chunk.x - signature_center_chunk.x) <= SIGNATURE_CHUNK_RADIUS \
+        and abs(chunk.y - signature_center_chunk.y) <= SIGNATURE_CHUNK_RADIUS
 
 func generated_block_records() -> Array:
     var records := []
