@@ -28,6 +28,13 @@ const NIGHT_DIAGNOSTIC_SEQUENCE_FRAMES := 30
 const NIGHT_LOOP_SEQUENCE_FRAMES := 10
 const DOOR_LOOP_TRANSITION_MIN_DELTA := 3
 const TOWN_STREAMING_MAX_FRAMES := 1500
+# A headed acceptance report must remain small enough for its wrapper to read,
+# validate, and attach before the watchdog expires. These limits apply only to
+# nested diagnostic payloads already sampled by the runner; they never change
+# its live observations, assertions, screenshots, or failure decision.
+const MAX_REPORT_DIAGNOSTIC_DEPTH := 3
+const MAX_REPORT_DICTIONARY_KEYS := 16
+const MAX_REPORT_ARRAY_ITEMS := 12
 
 const REQUIRED_ROLE_LABELS := ["Guard", "Forager", "Farmer", "Carpenter", "Mason", "Trader"]
 const REQUIRED_JOB_TYPES := ["guard", "forage", "wood", "stone", "trade"]
@@ -759,7 +766,7 @@ func npc_summary(entry: Dictionary, phase: String) -> Dictionary:
         "job": String(entry.get("job", "")),
         "goal": String(entry.get("goal", "")),
         "activeGoalKind": String(entry.get("activeGoalKind", "")),
-        "activeMotionGoal": sanitize_value(entry.get("activeMotionGoal", {})),
+        "activeMotionGoal": bounded_report_value(entry.get("activeMotionGoal", {})),
         "motionPerception": motion_perception_summary(entry),
         "scheduleState": String(entry.get("scheduleState", "")),
         "jobPhase": String(entry.get("jobPhase", "")),
@@ -772,7 +779,7 @@ func npc_summary(entry: Dictionary, phase: String) -> Dictionary:
         "jobFailureReason": String(entry.get("jobFailureReason", "")),
         "jobTarget": vec3(job_target),
         "distanceToJobTarget": rounded(flat_distance(position, job_target)),
-        "smartObjectReservationDebug": smart_object_reservation_debug(entry),
+        "smartObjectReservationDebug": bounded_report_value(smart_object_reservation_debug(entry)),
         "homePosition": vec3(entry.get("homePosition", position) if entry.get("homePosition", position) is Vector3 else position),
         "porchPosition": vec3(entry.get("porchPosition", position) if entry.get("porchPosition", position) is Vector3 else position),
         "guardPosition": vec3(guard_position),
@@ -804,14 +811,14 @@ func npc_summary(entry: Dictionary, phase: String) -> Dictionary:
         "pathWaypointCount": (entry.get("pathWaypoints", []) as Array).size(),
         "routeCellSample": sanitize_value((entry.get("routeCells", []) as Array).slice(0, 8)),
         "pathWaypointSample": sanitize_value((entry.get("pathWaypoints", []) as Array).slice(0, 5)),
-        "lastResolvedEndpointDebug": sanitize_value(entry.get("lastResolvedEndpointDebug", {})),
-        "lastRoutePlanDebug": sanitize_value(entry.get("lastRoutePlanDebug", {})),
-        "lastNavmeshTilePublishDebug": sanitize_value(entry.get("lastNavmeshTilePublishDebug", [])),
-        "routePlannerStats": sanitize_value(npc_route_planner_stats()),
-        "corridorFollow": sanitize_value(entry.get("corridorFollow", {})),
-        "corridorProgress": sanitize_value(entry.get("corridorProgress", {})),
-        "homeSettleDebug": sanitize_value(entry.get("homeSettleDebug", {})),
-		"homeDeparture": sanitize_value({
+        "lastResolvedEndpointDebug": bounded_report_value(entry.get("lastResolvedEndpointDebug", {})),
+        "lastRoutePlanDebug": bounded_report_value(entry.get("lastRoutePlanDebug", {})),
+        "lastNavmeshTilePublishDebug": bounded_report_value(entry.get("lastNavmeshTilePublishDebug", [])),
+        "routePlannerStats": bounded_report_value(npc_route_planner_stats()),
+        "corridorFollow": bounded_report_value(entry.get("corridorFollow", {})),
+        "corridorProgress": bounded_report_value(entry.get("corridorProgress", {})),
+        "homeSettleDebug": bounded_report_value(entry.get("homeSettleDebug", {})),
+		"homeDeparture": bounded_report_value({
 			"state": String(entry.get("homeDepartureState", "")),
 			"lastTransition": entry.get("homeDepartureLastTransition", {})
 		}),
@@ -878,8 +885,58 @@ func phase_sample(label: String, matrix: Array[Dictionary]) -> Dictionary:
         "displayHour": rounded(display_hour()),
         "clockPhase": rounded(clock_phase()),
         "focusCamera": observer_camera_summary(),
-        "matrix": matrix
+        # Keep the periodic timeline focused on observations that the timeline
+        # assertions actually consume. Full final matrices and focused failure
+        # captures remain in the report, while this avoids writing recursive
+        # routing diagnostics dozens of times during a headed observation.
+        "matrix": timeline_matrix_summary(matrix)
     }
+
+func timeline_matrix_summary(matrix: Array[Dictionary]) -> Array[Dictionary]:
+    var rows: Array[Dictionary] = []
+    for row in matrix:
+        var reservation_debug: Dictionary = row.get("smartObjectReservationDebug", {}) if row.get("smartObjectReservationDebug", {}) is Dictionary else {}
+        var reservations: Array = reservation_debug.get("reservations", []) if reservation_debug.get("reservations", []) is Array else []
+        var authority: Dictionary = row.get("routeAuthorityV2", {}) if row.get("routeAuthorityV2", {}) is Dictionary else {}
+        var corridor: Dictionary = row.get("corridorProgress", {}) if row.get("corridorProgress", {}) is Dictionary else {}
+        var departure: Dictionary = row.get("homeDeparture", {}) if row.get("homeDeparture", {}) is Dictionary else {}
+        var routine: Dictionary = row.get("routineRouteV2", {}) if row.get("routineRouteV2", {}) is Dictionary else {}
+        rows.append({
+            "id": String(row.get("id", "")),
+            "name": String(row.get("name", "")),
+            "job": String(row.get("job", "")),
+            "jobPhase": String(row.get("jobPhase", "")),
+            "jobRuns": int(row.get("jobRuns", 0)),
+            "initialJobRuns": int(row.get("initialJobRuns", 0)),
+            "jobObjectId": String(row.get("jobObjectId", "")),
+            "jobReservationId": String(row.get("jobReservationId", "")),
+            "jobFailureReason": String(row.get("jobFailureReason", "")),
+            "position": row.get("position", {}),
+            "cell": row.get("cell", {}),
+            "abstractSimulated": bool(row.get("abstractSimulated", false)),
+            "lastMoveDistance": float(row.get("lastMoveDistance", 0.0)),
+            "routeStatus": String(row.get("routeStatus", "")),
+            "routeReason": String(row.get("routeReason", "")),
+            "routeAuthorityV2": {
+                "state": String(authority.get("state", "")),
+                "reason": String(authority.get("reason", ""))
+            },
+            "corridorProgress": {
+                "noProgressTicks": int(corridor.get("noProgressTicks", 0))
+            },
+            "smartObjectReservationDebug": {
+                "objectId": String(reservation_debug.get("objectId", "")),
+                "depleted": bool(reservation_debug.get("depleted", false)),
+                "reservations": bounded_report_value(reservations)
+            },
+            "homeDeparture": {
+                "state": String(departure.get("state", ""))
+            },
+            "routineRouteV2": {
+                "semanticKind": String(routine.get("semanticKind", ""))
+            }
+        })
+    return rows
 
 func record_timeline(sample: Dictionary) -> void:
     timeline.append(sample)
@@ -976,11 +1033,12 @@ func depleted_forager_target_samples() -> Array[Dictionary]:
             var depleted := bool(debug.get("depleted", false)) or String(row.get("jobFailureReason", "")) == "resource_depleted"
             var reservation_id := String(row.get("jobReservationId", ""))
             var phase := String(row.get("jobPhase", ""))
-            # A completed job retains its object ID as provenance while returning
-            # home, but it no longer holds or targets that resource. Only active
-            # resource-facing phases (or a live reservation) can be stale here.
+            # The completion path retains an object ID as resource provenance
+            # through return/search, but a search anchor has no target node or
+            # reservation to consume. Only a live reservation or a phase that
+            # is actively approaching/gathering a resource can be stale here.
             var actively_holds_resource := reservation_id != "" \
-                or phase not in ["returning", "idle"]
+                or phase in ["outbound", "gathering"]
             if depleted and actively_holds_resource:
                 rows.append({
                     "sample": String(sample.get("label", "")),
@@ -2040,7 +2098,7 @@ func v2_authority_summary(entry: Dictionary) -> Dictionary:
     if not (authority_value is Dictionary):
         return {}
     var authority: Dictionary = authority_value
-    return sanitize_value({
+    return bounded_report_value({
         "requestId": String(authority.get("requestId", "")),
         "intentKind": String(authority.get("intentKind", "")),
         "semanticKind": String(authority.get("semanticKind", "")),
@@ -2056,7 +2114,7 @@ func v2_authority_summary(entry: Dictionary) -> Dictionary:
         "leaseId": String(authority.get("leaseId", "")),
         "proof": authority.get("proof", {}),
         "routeLease": route_lease_summary(authority.get("routeLease", {})),
-        "recentEvents": authority.get("recentEvents", [])
+        "recentEvents": (authority.get("recentEvents", []) as Array).slice(maxi(0, (authority.get("recentEvents", []) as Array).size() - 8), (authority.get("recentEvents", []) as Array).size()) if authority.get("recentEvents", []) is Array else []
     })
 
 func route_lease_summary(lease_value) -> Dictionary:
@@ -2074,12 +2132,12 @@ func route_lease_summary(lease_value) -> Dictionary:
         "actionCount": (lease.get("actions", {}) as Dictionary).size() if lease.get("actions", {}) is Dictionary else 0,
         "targetCell": lease.get("targetCell", Vector2i(999999, 999999)),
         "source": String(lease.get("source", "")),
-        "proof": lease.get("proof", {}),
-        "probeCertificate": lease.get("probeCertificate", {})
+        "proof": bounded_report_value(lease.get("proof", {})),
+        "probeCertificate": bounded_report_value(lease.get("probeCertificate", {}))
     }
 
 func home_route_v2_summary(entry: Dictionary) -> Dictionary:
-    return sanitize_value({
+    return bounded_report_value({
         "requestId": String(entry.get("homeRouteV2RequestId", "")),
         "requestReason": String(entry.get("homeRouteV2RequestReason", "")),
         "retryAfterFrame": int(entry.get("homeRouteV2RetryAfterFrame", 0)),
@@ -2092,7 +2150,7 @@ func home_route_v2_summary(entry: Dictionary) -> Dictionary:
     })
 
 func routine_route_v2_summary(entry: Dictionary) -> Dictionary:
-    return sanitize_value({
+    return bounded_report_value({
         "requestId": String(entry.get("routineRouteV2RequestId", "")),
         "routeKey": String(entry.get("routineRouteV2Key", "")),
         "requestReason": String(entry.get("routineRouteV2RequestReason", "")),
@@ -2367,6 +2425,57 @@ func vec3i(value: Vector3i) -> Dictionary:
 
 func vec3(value: Vector3) -> Dictionary:
     return { "x": rounded(value.x), "y": rounded(value.y), "z": rounded(value.z) }
+
+func bounded_report_value(value, depth := 0):
+    # Route/debug services carry complete topology and historical trace data.
+    # Keeping that recursively in every periodic NPC matrix turned a passing
+    # acceptance report into hundreds of megabytes and prevented the wrapper
+    # from validating its actual result. Preserve a deterministic, readable
+    # prefix plus cardinality at the boundary; failure-specific captures and
+    # the bounded door trace remain available separately.
+    if value is float:
+        return rounded(value)
+    if value is Vector2i:
+        return vec2i(value)
+    if value is Vector3i:
+        return vec3i(value)
+    if value is Vector3:
+        return vec3(value)
+    if value is Color:
+        return { "r": value.r, "g": value.g, "b": value.b, "a": value.a }
+    if value is Node:
+        return (value as Node).name
+    if value is Dictionary:
+        var dictionary: Dictionary = value
+        if depth >= MAX_REPORT_DIAGNOSTIC_DEPTH:
+            return { "truncated": true, "kind": "dictionary", "entryCount": dictionary.size() }
+        var keys: Array[String] = []
+        for key in dictionary.keys():
+            keys.append(String(key))
+        keys.sort()
+        var out := {}
+        var emitted := 0
+        for key in keys:
+            if emitted >= MAX_REPORT_DICTIONARY_KEYS:
+                break
+            out[key] = bounded_report_value(dictionary.get(key), depth + 1)
+            emitted += 1
+        if dictionary.size() > emitted:
+            out["truncated"] = true
+            out["entryCount"] = dictionary.size()
+        return out
+    if value is Array:
+        var array: Array = value
+        if depth >= MAX_REPORT_DIAGNOSTIC_DEPTH:
+            return { "truncated": true, "kind": "array", "itemCount": array.size() }
+        var out_array: Array = []
+        var limit := mini(array.size(), MAX_REPORT_ARRAY_ITEMS)
+        for index in range(limit):
+            out_array.append(bounded_report_value(array[index], depth + 1))
+        if array.size() > limit:
+            out_array.append({ "truncated": true, "itemCount": array.size() })
+        return out_array
+    return value
 
 func sanitize_value(value):
     if value is float:

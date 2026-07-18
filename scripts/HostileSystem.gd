@@ -11,6 +11,18 @@ const HOSTILE_UPDATE_BUDGET := 2
 const HOSTILE_ACCUMULATED_DELTA_CAP := 4.0
 const TUTORIAL_SPAWN_ATTEMPTS_PER_UPDATE := 4
 const TUTORIAL_SPAWN_ATTEMPT_LIMIT := 24
+const HOSTILE_RUNTIME_BODY_META_KEYS: Array[StringName] = [
+    &"hostile_target_kind",
+    &"hostile_target_name",
+    &"hostile_frenzy",
+    &"hostile_scripted_encounter",
+    &"hostile_scripted_phase",
+    &"hostile_damageable",
+    &"hostile_can_attack",
+    &"hostile_scripted_battle_started_by",
+    &"hostile_scripted_slot_id",
+    &"hostile_scripted_leash_returning"
+]
 
 var main
 var player: CharacterBody3D
@@ -85,6 +97,13 @@ func acquire_hostile_body(variant: String) -> StaticBody3D:
     hostile_body_pool[variant] = pool
     return null
 
+func reset_hostile_runtime_body_state(body: StaticBody3D) -> void:
+    if body == null or not is_instance_valid(body):
+        return
+    for key in HOSTILE_RUNTIME_BODY_META_KEYS:
+        if body.has_meta(key):
+            body.remove_meta(key)
+
 func recycle_hostile_body(body: Node) -> bool:
     var body_3d := body as StaticBody3D
     if body_3d == null or not is_instance_valid(body_3d):
@@ -92,6 +111,7 @@ func recycle_hostile_body(body: Node) -> bool:
     var variant := String(body_3d.get_meta("hostile_pool_variant", ""))
     if variant == "":
         return false
+    reset_hostile_runtime_body_state(body_3d)
     body_3d.visible = false
     body_3d.position = Vector3(0.0, -10000.0, 0.0)
     body_3d.rotation = Vector3.ZERO
@@ -736,6 +756,7 @@ func spawn_enemy(position: Vector3, variant := "shadow") -> StaticBody3D:
         add_child(body)
     else:
         spec = body.get_meta("hostile_pool_spec", {}) if body.get_meta("hostile_pool_spec", {}) is Dictionary else {}
+    reset_hostile_runtime_body_state(body)
     body.name = "Hostile_%s_%d" % [variant, enemies.size()]
     body.position = position
     body.rotation = Vector3.ZERO

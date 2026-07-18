@@ -46,6 +46,10 @@ environment_wind_time={
 "type": "float",
 "value": 0.0
 }
+environment_daylight={
+"type": "float",
+"value": 1.0
+}
 
 [rendering]
 

@@ -67,6 +67,7 @@ func cases() -> Array[Dictionary]:
 		["npc_stream_abstract_to_active_safe_span", "test_abstract_to_active_safe_span"],
 		["npc_stream_no_promote_in_door_threshold", "test_no_promote_in_door_threshold"],
 		["npc_stream_no_demote_during_crossing", "test_no_demote_during_crossing"],
+		["npc_stream_active_forage_lifecycle_stays_physical", "test_active_forage_lifecycle_stays_physical"],
 		["npc_stream_route_across_chunk_boundary", "test_route_across_chunk_boundary"],
 		["npc_stream_prefetch_before_boundary", "test_prefetch_before_boundary"],
 		["npc_stream_unloaded_goal_pending_not_teleport", "test_unloaded_goal_pending_not_teleport"],
@@ -130,6 +131,26 @@ func test_no_demote_during_crossing(_mode: String) -> Dictionary:
 	var result: Dictionary = setup.service.update_actor(entry, 0.1, Vector3(200.0, 0.0, 0.0))
 	var passed: bool = String(result.get("state", "")) == "active" and String(result.get("reason", "")) == "in_door_threshold" and not bool(entry.get("abstractSimulated", false))
 	return outcome(passed, "result=%s" % JSON.stringify(result), ["active_crossing_blocks_demote", "actor_remains_physical"], { "result": result, "entry": entry_summary(entry) })
+
+func test_active_forage_lifecycle_stays_physical(_mode: String) -> Dictionary:
+	var setup := lod_setup()
+	var entry := make_entry("stream-active-forager", Vector3.ZERO)
+	entry["activeGoalKind"] = "forage"
+	entry["activeMotionGoal"] = { "goalKind": "forage", "reason": "role_forager_food_loop" }
+	entry["jobPhase"] = "searching"
+	entry["routineRouteV2RequestId"] = "stream-active-forager:v2:1:1"
+	var result: Dictionary = setup.service.update_actor(entry, 0.1, Vector3(200.0, 0.0, 0.0), { "transitEdge": open_edge() })
+	var body := entry.get("body") as CharacterBody3D
+	var passed: bool = String(result.get("state", "")) == "active" \
+		and String(entry.get("simulationLod", "")) == "active" \
+		and not bool(entry.get("abstractSimulated", true)) \
+		and body != null and body.visible
+	return outcome(
+		passed,
+		"result=%s" % JSON.stringify(result),
+		["active_forage_lifecycle_blocks_distance_demotion", "collision_backed_forage_route_remains_physical"],
+		{ "result": result, "entry": entry_summary(entry) }
+	)
 
 func test_route_across_chunk_boundary(_mode: String) -> Dictionary:
 	var setup := lod_setup()

@@ -3,7 +3,8 @@ class_name VisualAssetRegistry
 
 const MANIFEST_PATH := "res://assets/visual/generated/visual-manifest.json"
 const BiomeEnvironmentCatalogScript := preload("res://scripts/environment/BiomeEnvironmentCatalog.gd")
-const TreeEcologySamplerScript := preload("res://scripts/environment/TreeEcologySampler.gd")
+const TreeRuntimeRequestBuilderScript := preload("res://scripts/environment/TreeRuntimeRequestBuilder.gd")
+const TreeSpawnServiceScript := preload("res://scripts/environment/TreeSpawnService.gd")
 const TREE_WIND_SHADER := preload("res://resources/visual/tree_wind_material.gdshader")
 const TREE_WIND_CULL_MARGIN := 1.25
 const INVALID_TREE_CELL := Vector2i(2147483647, 2147483647)
@@ -23,7 +24,8 @@ const WIND_TREE_FAMILIES := {
 var assets_by_id := {}
 var assets_by_family := {}
 var environment_catalog: BiomeEnvironmentCatalog
-var tree_ecology_sampler
+var tree_runtime_request_builder
+var tree_spawn_service
 var scene_cache := {}
 var tree_wind_material_cache := {}
 var disabled_asset_ids := {}
@@ -41,7 +43,12 @@ func setup(catalog: BiomeEnvironmentCatalog = null) -> bool:
     if environment_catalog == null:
         environment_catalog = BiomeEnvironmentCatalogScript.new()
         environment_catalog.setup()
-    tree_ecology_sampler = TreeEcologySamplerScript.new()
+    tree_runtime_request_builder = TreeRuntimeRequestBuilderScript.new()
+    tree_spawn_service = TreeSpawnServiceScript.new()
+    # Prewarm shared procedural geometry while the game is still in its loading
+    # path. The first streamed tree then cannot pay mesh construction in a
+    # player movement frame.
+    tree_spawn_service.prewarm_visuals()
     loaded = load_manifest() and cache_asset_scenes()
     return loaded
 
@@ -80,6 +87,11 @@ func cache_asset_scenes() -> bool:
     var ok := true
     for asset_id in assets_by_id.keys():
         var asset: Dictionary = assets_by_id[asset_id]
+        # Complete tree GLBs are retained as Blender-reference/import assets
+        # during migration, but they no longer participate in runtime loading.
+        # Natural trees are now recipe-driven from profile + ecology inputs.
+        if is_complete_tree_asset(asset):
+            continue
         var resource_path := "res://%s" % String(asset.get("path", ""))
         var absolute_path := ProjectSettings.globalize_path(resource_path)
         if not FileAccess.file_exists(absolute_path):
@@ -109,7 +121,7 @@ func cache_asset_scenes() -> bool:
             ok = false
             continue
         scene_cache[asset_id] = packed
-    return ok and scene_cache.size() == assets_by_id.size()
+    return ok
 
 func read_text(path: String) -> String:
     if not FileAccess.file_exists(path):
@@ -173,9 +185,9 @@ func tree_ecology_spec(
     world_seed := ""
 ) -> Dictionary:
     var profile := profile_for_biome(biome) as BiomeEnvironmentProfile
-    if profile == null or tree_ecology_sampler == null:
+    if profile == null or tree_runtime_request_builder == null:
         return {}
-    return tree_ecology_sampler.sample_tree(profile, biome, world_seed, prop_id, world_cell)
+    return tree_runtime_request_builder.sample_ecology(profile, biome, prop_id, world_cell, world_seed)
 
 func families_contain_ecological_tree(families: PackedStringArray) -> bool:
     for family in families:
@@ -239,6 +251,23 @@ func instantiate_tree_visual(biome: String, prop_id: String) -> Node3D:
     var node := instantiate_asset(select_tree_asset_id(biome, prop_id))
     configure_tree_wind_instance(node, biome, prop_id)
     return node
+
+func instantiate_procedural_tree_visual(
+    biome: String,
+    prop_id: String,
+    runtime_spec: Dictionary,
+    world_seed := ""
+) -> Node3D:
+    if tree_spawn_service == null:
+        return null
+    if not is_procedural_tree_family(String(runtime_spec.get("family", ""))):
+        return null
+    var request := runtime_spec.duplicate(true)
+    request["treeId"] = prop_id
+    request["biome"] = biome
+    request["worldSeed"] = world_seed
+    request["presentation"] = "runtime"
+    return tree_spawn_service.spawn_tree(request)
 
 func instantiate_rock_visual(biome: String, prop_id: String) -> Node3D:
     return instantiate_asset(select_rock_asset_id(biome, prop_id))
@@ -404,64 +433,30 @@ func tree_runtime_spec(
     world_cell := INVALID_TREE_CELL,
     world_seed := ""
 ) -> Dictionary:
-    var ecology := tree_ecology_spec(biome, prop_id, world_cell, world_seed)
-    var asset_id := select_tree_asset_id(biome, prop_id, world_cell, world_seed)
-    var asset: Dictionary = assets_by_id.get(asset_id, {})
-    if asset.is_empty():
-        return {
-            "assetId": "",
-            "family": "primitive_fallback",
-            "scale": 1.0,
-            "visualHeight": maxf(0.1, fallback_height),
-            "trunkRadius": 0.36,
-            "canopyRadius": 1.8,
-            "oldGrowth": false
-        }
-    var metrics: Dictionary = asset.get("treeMetrics", {})
-    var source_height := maxf(0.1, float(metrics.get("height", asset_size(asset_id).z)))
-    var source_trunk_radius := maxf(0.08, float(metrics.get("trunkRadius", 0.36)))
-    var source_canopy_radius := maxf(source_trunk_radius, float(metrics.get("canopyRadius", 1.8)))
-    var family := String(asset.get("family", ""))
     var profile := profile_for_biome(biome)
-    var scale_multiplier := float(profile.get("tree_scale")) if profile != null else 1.0
-    var target_height := maxf(0.1, fallback_height) * scale_multiplier
-    var height_min := float(profile.get("tree_height_min")) if profile != null else 0.0
-    var height_max := float(profile.get("tree_height_max")) if profile != null else 0.0
-    if not ecology.is_empty() and height_min > 0.0 and height_max >= height_min:
-        var genetics := float(ecology.get("geneticUnit", 0.5))
-        target_height = lerpf(height_min, height_max, float(ecology.get("heightGrowth", 0.5)))
-        target_height *= lerpf(0.95, 1.05, genetics) * scale_multiplier
-    elif family == "old_growth_broadleaf_tree":
-        var old_growth_variation := lerpf(0.96, 1.04, stable_unit("tree-old-growth-height:%s:%s" % [biome, prop_id]))
-        target_height = source_height * scale_multiplier * old_growth_variation
-    elif height_min > 0.0 and height_max >= height_min:
-        target_height = lerpf(height_min, height_max, stable_unit("tree-height:%s:%s" % [biome, prop_id])) * scale_multiplier
-    var scale := clampf(target_height / source_height, 0.55, 1.85)
-    var visual_height := source_height * scale
-    var trunk_radius := source_trunk_radius * scale
-    var canopy_radius := source_canopy_radius * scale
-    return {
-        "assetId": asset_id,
-        "family": family,
-        "growthClass": String(asset.get("growthClass", "standard")),
-        "architecture": String(ecology.get("architecture", "legacy")),
-        "ageBand": String(ecology.get("ageBand", asset.get("growthClass", "standard"))),
-        "ageYears": float(ecology.get("ageYears", 0.0)),
-        "ageRangeMin": float(ecology.get("ageRangeMin", 0.0)),
-        "ageRangeMax": float(ecology.get("ageRangeMax", 0.0)),
-        "localMaturity": float(ecology.get("maturity", 0.5)),
-        "growthStage": float(ecology.get("growthStage", 0.5)),
-        "geneticSeed": int(ecology.get("geneticSeed", 0)),
-        "scale": scale,
-        "barkScale": scale,
-        "sourceHeight": source_height,
-        "visualHeight": visual_height,
-        "trunkRadius": trunk_radius,
-        "canopyRadius": canopy_radius,
-        "oldGrowth": family == "old_growth_broadleaf_tree" or String(ecology.get("ageBand", "")) in ["old", "ancient"],
-        "exclusionMargin": float(profile.get("natural_prop_exclusion_margin")) if profile != null else 0.0,
-        "canopyDensity": float(profile.get("canopy_density")) if profile != null else 0.0
-    }
+    if profile == null or tree_runtime_request_builder == null:
+        return {}
+    return tree_runtime_request_builder.build(profile, biome, prop_id, fallback_height, world_cell, world_seed)
+
+func tree_biome_parameters(profile: BiomeEnvironmentProfile) -> Dictionary:
+    return TreeRuntimeRequestBuilderScript.biome_parameters_for_profile(profile)
+
+func select_tree_family(profile: BiomeEnvironmentProfile, biome: String, prop_id: String, world_seed: String) -> String:
+    return TreeRuntimeRequestBuilderScript.select_tree_family(profile, biome, prop_id, world_seed)
+
+func architecture_for_tree_family(family: String) -> String:
+    return TreeRuntimeRequestBuilderScript.architecture_for_tree_family(family)
+
+func species_grammar_for_tree(family: String, biome: String, prop_id: String, world_seed: String) -> String:
+    # The registry turns ecology into a request; canonical grammar authority lives
+    # in TreeSpawnService so the PoC and the live world cannot silently diverge.
+    return TreeSpawnServiceScript.grammar_for_architecture(architecture_for_tree_family(family))
+
+func is_procedural_tree_family(family: String) -> bool:
+    return architecture_for_tree_family(family) != ""
+
+func is_complete_tree_asset(asset: Dictionary) -> bool:
+    return is_procedural_tree_family(String(asset.get("family", "")))
 
 func tree_scale_for_biome(biome: String) -> float:
     var profile := profile_for_biome(biome)

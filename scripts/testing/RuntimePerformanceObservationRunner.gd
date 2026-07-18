@@ -607,6 +607,59 @@ func summarize_samples(samples: Array) -> Dictionary:
     var max_navmesh_path_query_p95_usec := 0
     var max_navmesh_path_query_failures := 0
     var slowest_navmesh_path_query := {}
+    # Tree recipe work is intentionally asynchronous, so runtime samples must
+    # retain both the queue pressure and the bounded main-thread publication
+    # stage timing. Without this, a normal traversal report can only speculate
+    # about vegetation's contribution to a hitch.
+    var max_tree_publication_pending := 0
+    var max_tree_publication_active_workers := 0
+    var max_tree_publication_completed := 0
+    var tree_publication_queued := 0
+    var tree_publication_published := 0
+    var tree_publication_dropped := 0
+    var max_tree_publication_p99_usec := 0
+    var max_tree_publication_usec := 0
+    var max_tree_publication_frame_p99_usec := 0
+    var max_tree_publication_frame_usec := 0
+    var max_tree_publication_scheduler_p99_usec := 0
+    var max_tree_publication_scheduler_usec := 0
+    var max_tree_publication_validation_p99_usec := 0
+    var max_tree_publication_validation_usec := 0
+    var max_tree_publication_bookkeeping_p99_usec := 0
+    var max_tree_publication_bookkeeping_usec := 0
+    var max_tree_publication_reporting_p99_usec := 0
+    var max_tree_publication_reporting_usec := 0
+    var max_tree_publication_unattributed_p99_usec := 0
+    var max_tree_publication_unattributed_usec := 0
+    var max_tree_publication_loop_tail_p99_usec := 0
+    var max_tree_publication_loop_tail_usec := 0
+    var worst_tree_publication_frame := {}
+    var max_tree_priority_selection_p99_usec := 0
+    var max_tree_priority_selection_usec := 0
+    var max_tree_priority_selection_candidates := 0
+    var max_tree_priority_full_fallbacks := 0
+    var max_tree_priority_viewless_fifo_selections := 0
+    var max_tree_worker_priority_selection_p99_usec := 0
+    var max_tree_worker_priority_selection_usec := 0
+    var max_tree_worker_priority_selection_candidates := 0
+    var max_tree_worker_priority_full_fallbacks := 0
+    var max_tree_root_p99_usec := 0
+    var max_tree_bole_p99_usec := 0
+    var max_tree_distal_p99_usec := 0
+    var max_tree_foliage_p99_usec := 0
+    var max_tree_commit_p99_usec := 0
+    var max_tree_retier_p99_usec := 0
+    var max_tree_cancellation_p99_usec := 0
+    # These are publication-boundary aggregates from the canonical recipe.
+    # They quantify the renderer load without walking live scene nodes during
+    # the observation loop.
+    var max_tree_render_visible_trees := 0
+    var max_tree_render_branch_instances := 0
+    var max_tree_render_foliage_instances := 0
+    var max_tree_render_draw_calls := 0
+    var max_tree_render_triangles := 0
+    var max_tree_render_shadow_triangles := 0
+    var max_tree_render_lod_distribution := {"near": 0, "mid": 0, "far": 0, "impostor": 0}
     var section_maxima := {}
     var last_spike := {}
     for sample_value in samples:
@@ -702,6 +755,81 @@ func summarize_samples(samples: Array) -> Dictionary:
         max_navmesh_path_query_usec = max(max_navmesh_path_query_usec, sample_navmesh_path_query_usec)
         max_navmesh_path_query_p95_usec = max(max_navmesh_path_query_p95_usec, int(navmesh_stats.get("pathQueryP95Usec", 0)))
         max_navmesh_path_query_failures = max(max_navmesh_path_query_failures, int(navmesh_stats.get("pathQueryFailureCount", 0)))
+        var tree_publication: Dictionary = sample.get("treePublication", {}) if sample.get("treePublication", {}) is Dictionary else {}
+        max_tree_publication_pending = max(max_tree_publication_pending, int(tree_publication.get("pending", 0)))
+        max_tree_publication_active_workers = max(max_tree_publication_active_workers, int(tree_publication.get("activeWorkers", 0)))
+        max_tree_publication_completed = max(max_tree_publication_completed, int(tree_publication.get("completed", 0)))
+        tree_publication_queued = max(tree_publication_queued, int(tree_publication.get("queued", 0)))
+        tree_publication_published = max(tree_publication_published, int(tree_publication.get("published", 0)))
+        tree_publication_dropped = max(tree_publication_dropped, int(tree_publication.get("dropped", 0)))
+        var tree_timing: Dictionary = tree_publication.get("publicationTiming", {}) if tree_publication.get("publicationTiming", {}) is Dictionary else {}
+        max_tree_publication_p99_usec = max(max_tree_publication_p99_usec, int(tree_timing.get("p99Usec", 0)))
+        max_tree_publication_usec = max(max_tree_publication_usec, int(tree_timing.get("maxUsec", 0)))
+        var tree_frame_timing: Dictionary = tree_publication.get("publicationFrameTiming", {}) if tree_publication.get("publicationFrameTiming", {}) is Dictionary else {}
+        max_tree_publication_frame_p99_usec = max(max_tree_publication_frame_p99_usec, int(tree_frame_timing.get("p99Usec", 0)))
+        max_tree_publication_frame_usec = max(max_tree_publication_frame_usec, int(tree_frame_timing.get("maxUsec", 0)))
+        var tree_scheduler_timing: Dictionary = tree_publication.get("publicationSchedulerTiming", {}) if tree_publication.get("publicationSchedulerTiming", {}) is Dictionary else {}
+        max_tree_publication_scheduler_p99_usec = max(max_tree_publication_scheduler_p99_usec, int(tree_scheduler_timing.get("p99Usec", 0)))
+        max_tree_publication_scheduler_usec = max(max_tree_publication_scheduler_usec, int(tree_scheduler_timing.get("maxUsec", 0)))
+        var tree_validation_timing: Dictionary = tree_publication.get("publicationValidationTiming", {}) if tree_publication.get("publicationValidationTiming", {}) is Dictionary else {}
+        max_tree_publication_validation_p99_usec = max(max_tree_publication_validation_p99_usec, int(tree_validation_timing.get("p99Usec", 0)))
+        max_tree_publication_validation_usec = max(max_tree_publication_validation_usec, int(tree_validation_timing.get("maxUsec", 0)))
+        var tree_bookkeeping_timing: Dictionary = tree_publication.get("publicationBookkeepingTiming", {}) if tree_publication.get("publicationBookkeepingTiming", {}) is Dictionary else {}
+        max_tree_publication_bookkeeping_p99_usec = max(max_tree_publication_bookkeeping_p99_usec, int(tree_bookkeeping_timing.get("p99Usec", 0)))
+        max_tree_publication_bookkeeping_usec = max(max_tree_publication_bookkeeping_usec, int(tree_bookkeeping_timing.get("maxUsec", 0)))
+        var tree_reporting_timing: Dictionary = tree_publication.get("publicationReportingTiming", {}) if tree_publication.get("publicationReportingTiming", {}) is Dictionary else {}
+        max_tree_publication_reporting_p99_usec = max(max_tree_publication_reporting_p99_usec, int(tree_reporting_timing.get("p99Usec", 0)))
+        max_tree_publication_reporting_usec = max(max_tree_publication_reporting_usec, int(tree_reporting_timing.get("maxUsec", 0)))
+        var tree_unattributed_timing: Dictionary = tree_publication.get("publicationUnattributedTiming", {}) if tree_publication.get("publicationUnattributedTiming", {}) is Dictionary else {}
+        max_tree_publication_unattributed_p99_usec = max(max_tree_publication_unattributed_p99_usec, int(tree_unattributed_timing.get("p99Usec", 0)))
+        max_tree_publication_unattributed_usec = max(max_tree_publication_unattributed_usec, int(tree_unattributed_timing.get("maxUsec", 0)))
+        var tree_loop_tail_timing: Dictionary = tree_publication.get("publicationLoopTailTiming", {}) if tree_publication.get("publicationLoopTailTiming", {}) is Dictionary else {}
+        max_tree_publication_loop_tail_p99_usec = max(max_tree_publication_loop_tail_p99_usec, int(tree_loop_tail_timing.get("p99Usec", 0)))
+        max_tree_publication_loop_tail_usec = max(max_tree_publication_loop_tail_usec, int(tree_loop_tail_timing.get("maxUsec", 0)))
+        var tree_worst_frame: Dictionary = tree_publication.get("publicationWorstFrame", {}) if tree_publication.get("publicationWorstFrame", {}) is Dictionary else {}
+        if int(tree_worst_frame.get("elapsedUsec", 0)) > int(worst_tree_publication_frame.get("elapsedUsec", 0)):
+            worst_tree_publication_frame = tree_worst_frame.duplicate()
+        var tree_priority: Dictionary = tree_publication.get("priorityScheduling", {}) if tree_publication.get("priorityScheduling", {}) is Dictionary else {}
+        var tree_priority_timing: Dictionary = tree_priority.get("selectionTiming", {}) if tree_priority.get("selectionTiming", {}) is Dictionary else {}
+        max_tree_priority_selection_p99_usec = max(max_tree_priority_selection_p99_usec, int(tree_priority_timing.get("p99Usec", 0)))
+        max_tree_priority_selection_usec = max(max_tree_priority_selection_usec, int(tree_priority_timing.get("maxUsec", 0)))
+        max_tree_priority_selection_candidates = max(max_tree_priority_selection_candidates, int(tree_priority.get("maxSelectionCandidates", 0)))
+        max_tree_priority_full_fallbacks = max(max_tree_priority_full_fallbacks, int(tree_priority.get("fullFallbackSelections", 0)))
+        max_tree_priority_viewless_fifo_selections = max(max_tree_priority_viewless_fifo_selections, int(tree_priority.get("viewlessFifoSelections", 0)))
+        var tree_worker_priority: Dictionary = tree_publication.get("workerPriorityScheduling", {}) if tree_publication.get("workerPriorityScheduling", {}) is Dictionary else {}
+        var tree_worker_priority_timing: Dictionary = tree_worker_priority.get("selectionTiming", {}) if tree_worker_priority.get("selectionTiming", {}) is Dictionary else {}
+        max_tree_worker_priority_selection_p99_usec = max(max_tree_worker_priority_selection_p99_usec, int(tree_worker_priority_timing.get("p99Usec", 0)))
+        max_tree_worker_priority_selection_usec = max(max_tree_worker_priority_selection_usec, int(tree_worker_priority_timing.get("maxUsec", 0)))
+        max_tree_worker_priority_selection_candidates = max(max_tree_worker_priority_selection_candidates, int(tree_worker_priority.get("maxSelectionCandidates", 0)))
+        max_tree_worker_priority_full_fallbacks = max(max_tree_worker_priority_full_fallbacks, int(tree_worker_priority.get("fullFallbackSelections", 0)))
+        var tree_stage_timing: Dictionary = tree_publication.get("publicationStageTiming", {}) if tree_publication.get("publicationStageTiming", {}) is Dictionary else {}
+        var tree_root_timing: Dictionary = tree_stage_timing.get("root", {}) if tree_stage_timing.get("root", {}) is Dictionary else {}
+        var tree_bole_timing: Dictionary = tree_stage_timing.get("bole", {}) if tree_stage_timing.get("bole", {}) is Dictionary else {}
+        var tree_distal_timing: Dictionary = tree_stage_timing.get("distal", {}) if tree_stage_timing.get("distal", {}) is Dictionary else {}
+        var tree_foliage_timing: Dictionary = tree_stage_timing.get("foliage", {}) if tree_stage_timing.get("foliage", {}) is Dictionary else {}
+        var tree_commit_timing: Dictionary = tree_stage_timing.get("commit", {}) if tree_stage_timing.get("commit", {}) is Dictionary else {}
+        var tree_retier_timing: Dictionary = tree_stage_timing.get("retier", {}) if tree_stage_timing.get("retier", {}) is Dictionary else {}
+        var tree_cancellation_timing: Dictionary = tree_stage_timing.get("cancellation", {}) if tree_stage_timing.get("cancellation", {}) is Dictionary else {}
+        max_tree_root_p99_usec = max(max_tree_root_p99_usec, int(tree_root_timing.get("p99Usec", 0)))
+        max_tree_bole_p99_usec = max(max_tree_bole_p99_usec, int(tree_bole_timing.get("p99Usec", 0)))
+        max_tree_distal_p99_usec = max(max_tree_distal_p99_usec, int(tree_distal_timing.get("p99Usec", 0)))
+        max_tree_foliage_p99_usec = max(max_tree_foliage_p99_usec, int(tree_foliage_timing.get("p99Usec", 0)))
+        max_tree_commit_p99_usec = max(max_tree_commit_p99_usec, int(tree_commit_timing.get("p99Usec", 0)))
+        max_tree_retier_p99_usec = max(max_tree_retier_p99_usec, int(tree_retier_timing.get("p99Usec", 0)))
+        max_tree_cancellation_p99_usec = max(max_tree_cancellation_p99_usec, int(tree_cancellation_timing.get("p99Usec", 0)))
+        var tree_render: Dictionary = tree_publication.get("render", {}) if tree_publication.get("render", {}) is Dictionary else {}
+        max_tree_render_visible_trees = max(max_tree_render_visible_trees, int(tree_render.get("visibleTrees", 0)))
+        max_tree_render_branch_instances = max(max_tree_render_branch_instances, int(tree_render.get("branchInstances", 0)))
+        max_tree_render_foliage_instances = max(max_tree_render_foliage_instances, int(tree_render.get("foliageInstances", 0)))
+        max_tree_render_draw_calls = max(max_tree_render_draw_calls, int(tree_render.get("estimatedDrawCalls", 0)))
+        max_tree_render_triangles = max(max_tree_render_triangles, int(tree_render.get("estimatedTriangles", 0)))
+        max_tree_render_shadow_triangles = max(max_tree_render_shadow_triangles, int(tree_render.get("estimatedShadowTriangles", 0)))
+        var tree_render_lods: Dictionary = tree_render.get("lodDistribution", {}) if tree_render.get("lodDistribution", {}) is Dictionary else {}
+        for tier in max_tree_render_lod_distribution.keys():
+            max_tree_render_lod_distribution[tier] = max(
+                int(max_tree_render_lod_distribution.get(tier, 0)),
+                int(tree_render_lods.get(tier, 0))
+            )
         if float(sample.get("lastSpikeFrameMs", 0.0)) >= float(last_spike.get("frameMs", 0.0)):
             last_spike = {
                 "frameMs": float(sample.get("lastSpikeFrameMs", 0.0)),
@@ -792,6 +920,56 @@ func summarize_samples(samples: Array) -> Dictionary:
         "maxNavmeshPathQueryP95Usec": max_navmesh_path_query_p95_usec,
         "maxNavmeshPathQueryFailures": max_navmesh_path_query_failures,
         "slowestNavmeshPathQuery": slowest_navmesh_path_query,
+        "treePublication": {
+            "maxPending": max_tree_publication_pending,
+            "maxActiveWorkers": max_tree_publication_active_workers,
+            "maxCompleted": max_tree_publication_completed,
+            "queued": tree_publication_queued,
+            "published": tree_publication_published,
+            "dropped": tree_publication_dropped,
+            "maxP99Usec": max_tree_publication_p99_usec,
+            "maxUsec": max_tree_publication_usec,
+            "maxFrameP99Usec": max_tree_publication_frame_p99_usec,
+            "maxFrameUsec": max_tree_publication_frame_usec,
+            "maxSchedulerP99Usec": max_tree_publication_scheduler_p99_usec,
+            "maxSchedulerUsec": max_tree_publication_scheduler_usec,
+            "maxValidationP99Usec": max_tree_publication_validation_p99_usec,
+            "maxValidationUsec": max_tree_publication_validation_usec,
+            "maxBookkeepingP99Usec": max_tree_publication_bookkeeping_p99_usec,
+            "maxBookkeepingUsec": max_tree_publication_bookkeeping_usec,
+            "maxReportingP99Usec": max_tree_publication_reporting_p99_usec,
+            "maxReportingUsec": max_tree_publication_reporting_usec,
+            "maxUnattributedP99Usec": max_tree_publication_unattributed_p99_usec,
+            "maxUnattributedUsec": max_tree_publication_unattributed_usec,
+            "maxLoopTailP99Usec": max_tree_publication_loop_tail_p99_usec,
+            "maxLoopTailUsec": max_tree_publication_loop_tail_usec,
+            "worstFrame": worst_tree_publication_frame,
+            "maxPrioritySelectionP99Usec": max_tree_priority_selection_p99_usec,
+            "maxPrioritySelectionUsec": max_tree_priority_selection_usec,
+            "maxPrioritySelectionCandidates": max_tree_priority_selection_candidates,
+            "maxPriorityFullFallbacks": max_tree_priority_full_fallbacks,
+            "maxPriorityViewlessFifoSelections": max_tree_priority_viewless_fifo_selections,
+            "maxWorkerPrioritySelectionP99Usec": max_tree_worker_priority_selection_p99_usec,
+            "maxWorkerPrioritySelectionUsec": max_tree_worker_priority_selection_usec,
+            "maxWorkerPrioritySelectionCandidates": max_tree_worker_priority_selection_candidates,
+            "maxWorkerPriorityFullFallbacks": max_tree_worker_priority_full_fallbacks,
+            "maxRootP99Usec": max_tree_root_p99_usec,
+            "maxBoleP99Usec": max_tree_bole_p99_usec,
+            "maxDistalP99Usec": max_tree_distal_p99_usec,
+            "maxFoliageP99Usec": max_tree_foliage_p99_usec,
+            "maxCommitP99Usec": max_tree_commit_p99_usec,
+            "maxRetierP99Usec": max_tree_retier_p99_usec,
+            "maxCancellationP99Usec": max_tree_cancellation_p99_usec,
+            "render": {
+                "maxVisibleTrees": max_tree_render_visible_trees,
+                "maxBranchInstances": max_tree_render_branch_instances,
+                "maxFoliageInstances": max_tree_render_foliage_instances,
+                "maxEstimatedDrawCalls": max_tree_render_draw_calls,
+                "maxEstimatedTriangles": max_tree_render_triangles,
+                "maxEstimatedShadowTriangles": max_tree_render_shadow_triangles,
+                "maxLodDistribution": max_tree_render_lod_distribution
+            }
+        },
         "topSectionMaxMs": top_section_maxima(section_maxima, 20),
         "lastSpike": last_spike
     }

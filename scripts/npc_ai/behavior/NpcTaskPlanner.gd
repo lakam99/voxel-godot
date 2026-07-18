@@ -7,13 +7,18 @@ const ActionLibraryScript := preload("res://scripts/npc_ai/behavior/NpcActionLib
 var action_library = ActionLibraryScript.new()
 var max_actions := 8
 var navigation_service = null
+var runtime_perf_monitor = null
 
 func setup(library = null, nav_service = null) -> void:
 	if library != null:
 		action_library = library
 	navigation_service = nav_service
 
+func set_performance_monitor(monitor) -> void:
+	runtime_perf_monitor = monitor
+
 func plan(goal: Dictionary, context, entry: Dictionary, perception: Dictionary, schedule: Dictionary) -> Dictionary:
+	var monitor = runtime_perf_monitor
 	var goal_kind: StringName = goal.get("goalKind", NpcEnumsScript.GOAL_KIND_IDLE)
 	var library_context := {
 		"activeThreat": bool(perception.get("activeThreat", false)),
@@ -23,8 +28,11 @@ func plan(goal: Dictionary, context, entry: Dictionary, perception: Dictionary, 
 		"role": String(entry.get("role", "")),
 		"goalReason": String(goal.get("reason", ""))
 	}
+	var sequence_start: int = monitor.begin_section("npc_task_plan_sequence") if monitor != null else Time.get_ticks_usec()
 	var sequence_metadata: Dictionary = action_library.sequence_metadata_for_goal(goal_kind, library_context) if action_library.has_method("sequence_metadata_for_goal") else {}
 	var actions: Array = action_library.sequence_for_goal(goal_kind, library_context)
+	if monitor != null:
+		monitor.end_section("npc_task_plan_sequence", sequence_start)
 	if actions.size() > max_actions:
 		actions = actions.slice(0, max_actions)
 	var cost := 0.0
@@ -32,7 +40,10 @@ func plan(goal: Dictionary, context, entry: Dictionary, perception: Dictionary, 
 	for action in actions:
 		cost += float(action.get("baseCost", 0.0))
 		action_ids.append(String(action.get("actionId", "")))
+	var semantic_target_start: int = monitor.begin_section("npc_task_plan_semantic_target") if monitor != null else Time.get_ticks_usec()
 	var semantic_target := validate_semantic_target(goal_kind, sequence_metadata, actions, entry, perception, schedule)
+	if monitor != null:
+		monitor.end_section("npc_task_plan_semantic_target", semantic_target_start)
 	var status := "planned" if not actions.is_empty() else "failed"
 	var failure_reason := "" if not actions.is_empty() else "no_action_sequence"
 	if status == "planned" and bool(semantic_target.get("required", false)) and not bool(semantic_target.get("reachable", false)):
@@ -61,6 +72,7 @@ func plan(goal: Dictionary, context, entry: Dictionary, perception: Dictionary, 
 	}
 
 func validate_semantic_target(goal_kind: StringName, sequence_metadata: Dictionary, actions: Array, entry: Dictionary, perception: Dictionary, schedule: Dictionary) -> Dictionary:
+	var monitor = runtime_perf_monitor
 	var target_kind := String(sequence_metadata.get("targetKind", _target_kind_from_actions(actions)))
 	var route_required := bool(sequence_metadata.get("routeRequired", _any_action_requires(actions, "routeRequired")))
 	var reservation_required := bool(sequence_metadata.get("reservationRequired", _any_action_requires(actions, "reservationRequired")))
@@ -76,13 +88,19 @@ func validate_semantic_target(goal_kind: StringName, sequence_metadata: Dictiona
 	if not bool(result.get("required", false)):
 		result["reachable"] = true
 		return result
+	var target_resolution_start: int = monitor.begin_section("npc_task_target_resolution") if monitor != null else Time.get_ticks_usec()
 	var target_position = _semantic_target_position(goal_kind, target_kind, entry, perception, schedule)
+	if monitor != null:
+		monitor.end_section("npc_task_target_resolution", target_resolution_start)
 	if not (target_position is Vector3) or target_position == Vector3.INF:
 		result["status"] = "pending" if _sequence_selects_target(actions) else "missing"
 		result["reason"] = "target_selection_pending" if result["status"] == "pending" else "missing_semantic_target"
 		return result
 	result["position"] = target_position
+	var reachability_start: int = monitor.begin_section("npc_task_target_reachability") if monitor != null else Time.get_ticks_usec()
 	var reachability := _reachable_target(target_position, entry)
+	if monitor != null:
+		monitor.end_section("npc_task_target_reachability", reachability_start)
 	result["reachable"] = bool(reachability.get("reachable", false))
 	result["status"] = String(reachability.get("status", "reachable" if bool(result["reachable"]) else "unreachable"))
 	result["reason"] = String(reachability.get("reason", ""))
@@ -157,8 +175,12 @@ func _semantic_target_position(goal_kind: StringName, target_kind: String, entry
 	return entry.get("porchPosition", Vector3.INF)
 
 func _reachable_target(target_position: Vector3, entry: Dictionary) -> Dictionary:
+	var monitor = runtime_perf_monitor
 	if navigation_service != null and navigation_service.has_method("closest_walkable"):
+		var closest_start: int = monitor.begin_section("npc_task_closest_walkable") if monitor != null else Time.get_ticks_usec()
 		var closest: Dictionary = navigation_service.closest_walkable(target_position, 2.70)
+		if monitor != null:
+			monitor.end_section("npc_task_closest_walkable", closest_start)
 		if bool(closest.get("found", false)):
 			return {
 				"reachable": true,

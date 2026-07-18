@@ -1,7 +1,6 @@
-extends MathematicalTreePocRecipeBuilder
-class_name MathematicalTreePocConiferRecipeBuilder
+extends "res://scripts/environment/tree_grammars/MathematicalTreePocRecipeBuilder.gd"
 
-## VOX-140 Norway-spruce-like isolated visual PoC.
+## VOX-140 approved Norway-spruce-like mathematical grammar.
 ##
 ## This is intentionally a separate species grammar. It reuses only the pure
 ## graph/pipe-model helpers and the generic renderer from the broadleaf PoC;
@@ -13,7 +12,7 @@ const MAX_CONIFER_WHORLS := 14
 const MAX_CONIFER_BRANCH_SEGMENTS := 1120
 const MAX_CONIFER_FOLIAGE_CLUSTERS := 1480
 
-func build_recipe(seed := DEFAULT_SEED, maturity := 0.92) -> Dictionary:
+func build_recipe(seed := DEFAULT_SEED, maturity := 0.92, _growth_profile: Dictionary = {}) -> Dictionary:
 	var resolved_seed := int(seed)
 	var resolved_maturity := clampf(float(maturity), 0.12, 1.0)
 	var rng := RandomNumberGenerator.new()

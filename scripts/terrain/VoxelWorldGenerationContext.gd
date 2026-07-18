@@ -21,7 +21,10 @@ var town_region_cache := {}
 var pinned_town_regions := {}
 var town_slope_apron_cache := {}
 var initial_terrain_edits := {}
-var generator
+# Worker contexts need the generator only for a few callback-style terrain
+# queries. A strong reference here would close a RefCounted cycle with the
+# short-lived WorldGenerationSystem created by VoxelTerrain's native workers.
+var generator_ref: WeakRef
 
 func setup_from_main(main) -> void:
 	seed_text = String(main.get("seed_text"))
@@ -62,6 +65,12 @@ func clone_for_worker():
 	context.temp_noise = temp_noise
 	return context
 
+func set_generator(generator_node) -> void:
+	generator_ref = weakref(generator_node) if generator_node != null else null
+
+func active_generator():
+	return generator_ref.get_ref() if generator_ref != null else null
+
 func setup_noise() -> void:
 	height_noise = make_noise(17, 0.0058, 4)
 	ridge_noise = make_noise(43, 0.014, 3)
@@ -92,8 +101,9 @@ func town_region(region_x: int, region_z: int) -> Dictionary:
 	var center_x := region_x * TOWN_REGION_CELLS
 	var center_z := region_z * TOWN_REGION_CELLS
 	var natural_level := WATER_LEVEL + 3.0
-	if generator != null and generator.has_method("natural_surface_y_for_cell"):
-		natural_level = float(generator.call("natural_surface_y_for_cell", Vector3i(center_x, 0, center_z)))
+	var generation = active_generator()
+	if generation != null and generation.has_method("natural_surface_y_for_cell"):
+		natural_level = float(generation.call("natural_surface_y_for_cell", Vector3i(center_x, 0, center_z)))
 	var level := clampf(round(maxf(natural_level, WATER_LEVEL + 3.0) / CELL) * CELL, WATER_LEVEL + 3.0, 52.0)
 	var town := {
 		"regionX": region_x,

@@ -3,6 +3,7 @@ extends SceneTree
 const CatalogScript := preload("res://scripts/environment/BiomeEnvironmentCatalog.gd")
 const WindSystemScript := preload("res://scripts/environment/EnvironmentWindSystem.gd")
 const VisualAssetRegistryScript := preload("res://scripts/visual/VisualAssetRegistry.gd")
+const TreeSpawnServiceScript := preload("res://scripts/environment/TreeSpawnService.gd")
 
 var report_path := ""
 var results: Array[Dictionary] = []
@@ -73,38 +74,52 @@ func test_deterministic_weather_response(catalog) -> void:
 func test_shared_tree_materials(catalog) -> void:
     var registry = VisualAssetRegistryScript.new()
     var ready: bool = registry.setup(catalog)
-    var first := registry.instantiate_tree_visual("forest", "wind-contract-a")
-    var second := registry.instantiate_tree_visual("forest", "wind-contract-b")
-    var first_materials := tree_materials(first)
-    var second_materials := tree_materials(second)
+    var tree_service = TreeSpawnServiceScript.new()
+    var first := tree_service.spawn_tree(procedural_tree_request("wind-contract-a", "forest", "broadleaf", "bushy_oak"))
+    var second := tree_service.spawn_tree(procedural_tree_request("wind-contract-b", "forest", "broadleaf", "bushy_oak"))
+    # The headless renderer deliberately returns a no-RID tree proxy, so it
+    # cannot expose GeometryInstance materials. Assert the real factory cache
+    # directly here; the headed wind visual runner proves those cached resources
+    # are actually bound to rendered MultiMeshes.
+    var factory = tree_service.get_visual_factory()
+    var branch_a = factory.branch_material("broadleaf", "forest") if factory != null else null
+    var branch_b = factory.branch_material("broadleaf", "forest") if factory != null else null
+    var foliage_a = factory.foliage_material("broadleaf", "forest") if factory != null else null
+    var foliage_b = factory.foliage_material("broadleaf", "forest") if factory != null else null
     var shared_count := 0
-    for first_material in first_materials:
-        if second_materials.has(first_material):
-            shared_count += 1
+    if branch_a != null and branch_a == branch_b:
+        shared_count += 1
+    if foliage_a != null and foliage_a == foliage_b:
+        shared_count += 1
+    var materials_have_expected_shaders := branch_a != null and foliage_a != null \
+        and branch_a.shader != null and foliage_a.shader != null
     var margins_ok := tree_margins_at_least(first, 1.24) and tree_margins_at_least(second, 1.24)
     var phase_a := float(first.get_meta("tree_wind_phase", -1.0)) if first != null else -1.0
     var phase_b := float(second.get_meta("tree_wind_phase", -1.0)) if second != null else -1.0
     var configured := phase_a >= 0.0 and phase_b >= 0.0 and not is_equal_approx(phase_a, phase_b)
-    add_result("tree_materials_are_shared_cached_and_instance_phased", ready and registry.tree_wind_material_count() <= 8 and shared_count > 0 and margins_ok and configured, {
+    add_result("procedural_tree_materials_are_shared_cached_and_instance_phased", ready and shared_count == 2 and materials_have_expected_shaders and margins_ok and configured, {
         "ready": ready,
-        "materialCount": registry.tree_wind_material_count(),
-        "roles": registry.tree_wind_material_roles(),
-        "firstMaterials": first_materials.size(),
-        "secondMaterials": second_materials.size(),
+        "headlessProxy": first != null and first.get_child_count() == 0,
         "sharedMaterials": shared_count,
+        "materialsHaveExpectedShaders": materials_have_expected_shaders,
         "phaseA": phase_a,
         "phaseB": phase_b,
         "marginsOk": margins_ok,
         "errors": registry.last_errors
     })
-    var mature_exposed := false
-    var ecology_exposed := false
+    var static_tree_cached := false
     for asset_id in registry.cached_asset_ids():
-        if asset_id.begins_with("mature_") or asset_id.begins_with("old_growth_"):
-            mature_exposed = true
-        if asset_id.begins_with("ecological_"):
-            ecology_exposed = true
-    add_result("finite_age_canopies_are_runtime_published", registry.asset_count() == 69 and mature_exposed and ecology_exposed, {"assetCount": registry.asset_count(), "matureExposed": mature_exposed, "ecologyExposed": ecology_exposed})
+        if asset_id.contains("broadleaf") or asset_id.contains("conifer") or asset_id.contains("savanna"):
+            static_tree_cached = true
+    var procedural_authority := first != null and second != null \
+        and String(first.get_meta("visual_source", "")) == "procedural_tree_recipe" \
+        and String(second.get_meta("visual_source", "")) == "procedural_tree_recipe"
+    add_result("natural_canopies_publish_from_recipe_authority_not_static_tree_glbs", registry.asset_count() == 69 and not static_tree_cached and procedural_authority, {
+        "assetCount": registry.asset_count(),
+        "cachedSceneCount": registry.cached_scene_count(),
+        "staticTreeCached": static_tree_cached,
+        "proceduralAuthority": procedural_authority
+    })
     if first != null:
         first.free()
     if second != null:
@@ -137,17 +152,21 @@ func test_cpu_update_budget(catalog) -> void:
     wind.free()
 
 func test_shader_contracts() -> void:
-    var tree_source := FileAccess.get_file_as_string("res://resources/visual/tree_wind_material.gdshader")
+    var branch_source := FileAccess.get_file_as_string("res://resources/visual/procedural_tree_branch.gdshader")
+    var foliage_source := FileAccess.get_file_as_string("res://resources/visual/procedural_tree_foliage.gdshader")
     var detail_source := FileAccess.get_file_as_string("res://resources/visual/detail_material.gdshader")
     var globals := ["environment_wind_direction", "environment_wind_strength", "environment_wind_gust_strength", "environment_wind_gust_frequency", "environment_wind_time"]
     var tree_complete := true
     var detail_complete := true
     for global_name in globals:
-        tree_complete = tree_complete and tree_source.contains("global uniform") and tree_source.contains(global_name)
+        tree_complete = tree_complete and branch_source.contains("global uniform") and branch_source.contains(global_name) \
+            and foliage_source.contains("global uniform") and foliage_source.contains(global_name)
         detail_complete = detail_complete and detail_source.contains("global uniform") and detail_source.contains(global_name)
-    tree_complete = tree_complete and tree_source.contains("COLOR.r") and tree_source.contains("COLOR.g") and tree_source.contains("COLOR.b") and tree_source.contains("instance uniform float tree_phase") and tree_source.contains("inverse(MODEL_MATRIX)")
+    tree_complete = tree_complete and branch_source.contains("INSTANCE_CUSTOM") and branch_source.contains("bark_coordinates") \
+        and branch_source.contains("inverse(MODEL_MATRIX)") and foliage_source.contains("INSTANCE_CUSTOM") \
+        and foliage_source.contains("leaf_variation") and foliage_source.contains("inverse(MODEL_MATRIX)")
     detail_complete = detail_complete and detail_source.contains("UV2.x") and detail_source.contains("INSTANCE_CUSTOM.x") and detail_source.contains("inverse(MODEL_MATRIX)") and not detail_source.contains("TIME")
-    add_result("tree_and_multimesh_detail_shaders_share_one_world_wind_field", tree_complete and detail_complete, {"treeComplete": tree_complete, "detailComplete": detail_complete})
+    add_result("procedural_tree_and_multimesh_detail_shaders_share_one_world_wind_field", tree_complete and detail_complete, {"treeComplete": tree_complete, "detailComplete": detail_complete})
 
     var setup_source := FileAccess.get_file_as_string("res://scripts/MainSetupScene.gd")
     var static_details := setup_source.contains("detailPebble\"] = make_detail_material") and setup_source.contains("detailPebble\"] = make_detail_material(Color(0.48, 0.51, 0.48), 0.92, 0.0)") \
@@ -175,6 +194,10 @@ func tree_materials(node: Node) -> Array[Material]:
     var materials: Array[Material] = []
     if node == null:
         return materials
+    if node is GeometryInstance3D:
+        var geometry_material := (node as GeometryInstance3D).material_override
+        if geometry_material != null:
+            materials.append(geometry_material)
     if node is MeshInstance3D:
         var mesh_instance := node as MeshInstance3D
         if mesh_instance.mesh != null:
@@ -197,6 +220,21 @@ func tree_margins_at_least(node: Node, minimum: float) -> bool:
         if not tree_margins_at_least(child, minimum):
             return false
     return true
+
+func procedural_tree_request(tree_id: String, biome: String, architecture: String, grammar: String) -> Dictionary:
+    return {
+        "treeId": tree_id,
+        "worldSeed": "wind-contract-world",
+        "biome": biome,
+        "architecture": architecture,
+        "speciesGrammar": grammar,
+        "growthStage": 0.82,
+        "visualHeight": 20.0,
+        "trunkRadius": 1.05,
+        "canopyRadius": 9.4,
+        "canopyDensity": 0.86,
+        "presentation": "runtime"
+    }
 
 func snapshots_match(first: Dictionary, second: Dictionary) -> bool:
     return (first.direction as Vector3).is_equal_approx(second.direction as Vector3) \

@@ -1,13 +1,12 @@
-extends MathematicalTreePocRecipeBuilder
-class_name MathematicalTreePocBushyOakRecipeBuilder
+extends "res://scripts/environment/tree_grammars/MathematicalTreePocRecipeBuilder.gd"
 
-## VOX-142 isolated bushy spreading-oak visual PoC.
+## VOX-142 approved bushy spreading-oak mathematical grammar.
 ##
 ## This is intentionally a second broadleaf habit. Its long, low scaffolds and
 ## dense fine protrusions are generated as a bounded graph, rather than being a
 ## rounded broadleaf recipe with a larger foliage scale.
 
-const BUSHY_OAK_RECIPE_VERSION := 16
+const BUSHY_OAK_RECIPE_VERSION := 21
 const MAX_OAK_BRANCH_SEGMENTS := 1800
 const MAX_OAK_FOLIAGE_CLUSTERS := 1600
 # The headed PoC's dense-leaf review cap. Keep this separate from the eventual
@@ -52,8 +51,8 @@ const OAK_CROWN_LAYER_COUNT := 8
 const OAK_CROWN_LAYER_REACH_STEP := 0.10
 const OAK_CROWN_BASE_REACH_FRACTION := 0.90
 
-func build_recipe(seed := DEFAULT_SEED, maturity := 0.92) -> Dictionary:
-	return build_oak_space_colony_recipe(seed, maturity)
+func build_recipe(seed := DEFAULT_SEED, maturity := 0.92, growth_profile: Dictionary = {}) -> Dictionary:
+	return build_oak_space_colony_recipe(seed, maturity, growth_profile)
 
 func oak_outward_dome_profile() -> Dictionary:
 	# This defines a species growth field, not a list of boughs. A mature oak
@@ -325,13 +324,19 @@ func grow_oak_reference_axis(
 			crown_center, crown_radii, seed, state
 		)
 
-func build_oak_space_colony_recipe(seed: int, maturity: float) -> Dictionary:
+func build_oak_space_colony_recipe(seed: int, maturity: float, growth_profile: Dictionary = {}) -> Dictionary:
 	# Runions-style space colonization supplies local competition for available
 	# crown space. The oak grammar changes only the organism-scale constraints:
 	# a taller clean bole, a broad oblate envelope, and a low number of durable
 	# decurrent scaffold limbs. It never asks for a prescribed branch tier.
 	var resolved_seed: int = int(seed)
 	var resolved_maturity: float = clampf(float(maturity), 0.12, 1.0)
+	# Keep a small, per-recipe timing breakdown for the production performance
+	# benchmark. This is pure worker-side diagnostic data: it identifies which
+	# biological process is costly without moving any render work onto gameplay
+	# frames or changing the generated topology.
+	var recipe_started_usec := Time.get_ticks_usec()
+	var timing_usec := {}
 	var rng := RandomNumberGenerator.new()
 	rng.seed = resolved_seed
 	var normalized_growth: float = (1.0 - exp(-3.40 * resolved_maturity)) / (1.0 - exp(-3.40))
@@ -345,6 +350,11 @@ func build_oak_space_colony_recipe(seed: int, maturity: float) -> Dictionary:
 	var crown_phase: float = rng.randf() * TAU
 	var crown_lobes: Array[Dictionary] = build_crown_lobes(rng, crown_center, crown_radii, crown_phase)
 	var dome_profile := oak_outward_dome_profile()
+	# Streaming may reduce sample resolution, yet it still uses the oak's own
+	# outward-dome, girth-gated bud, pipe, and leaf-on-wood rules.  These values
+	# are therefore algorithmic budgets, never an authored alternate silhouette.
+	for key in growth_profile:
+		dome_profile[key] = growth_profile[key]
 
 	var nodes: Array[Dictionary] = []
 	var raw_segments: Array[Dictionary] = []
@@ -359,15 +369,26 @@ func build_oak_space_colony_recipe(seed: int, maturity: float) -> Dictionary:
 	var mid_crown_bud_count: int = germinate_mid_crown_buds(
 		nodes, raw_segments, trunk_nodes, crown_center, crown_radii, crown_phase, resolved_seed, dome_profile
 	)
+	timing_usec["scaffold"] = Time.get_ticks_usec() - recipe_started_usec
+	var attraction_started_usec := Time.get_ticks_usec()
 	var attraction_points: Array[Vector3] = build_attraction_points(
 		rng, crown_center, crown_radii, crown_phase, crown_lobes,
 		int(dome_profile.get("attractionPointCount", 460)), dome_profile
 	)
+	timing_usec["attractions"] = Time.get_ticks_usec() - attraction_started_usec
 	var initial_attraction_count: int = attraction_points.size()
-	var colonization: Dictionary = colonize_crown(
+	var colonization_started_usec := Time.get_ticks_usec()
+	# The oak owns a spatially indexed SCA pass. Calling the inherited broadleaf
+	# scan here made a mature near tree compare every crown target with every bud
+	# on every iteration (quadratic worker time), even though this grammar already
+	# defines the same deterministic nearest-bud rule with a local grid.
+	var colonization: Dictionary = colonize_oak_space_crown(
 		nodes, raw_segments, attraction_points, crown_center, crown_radii, crown_phase,
-		1.38, resolved_seed, dome_profile
+		1.38, resolved_seed,
+		int(dome_profile.get("spaceColonizationIterationBudget", 15)),
+		int(dome_profile.get("branchSegmentBudget", MAX_OAK_BRANCH_SEGMENTS))
 	)
+	timing_usec["colonization"] = Time.get_ticks_usec() - colonization_started_usec
 	var remaining_attractions: Array = colonization.get("remainingAttractions", attraction_points)
 	smooth_non_junction_chains(nodes, 2)
 
@@ -375,7 +396,9 @@ func build_oak_space_colony_recipe(seed: int, maturity: float) -> Dictionary:
 	# solved pipe pass then lets every derived (non-bole) axis expose latent bud
 	# sites in proportion to its actual girth. This removes the old blank spans
 	# on split trunks without turning the base bole into a brush of tiny twigs.
+	var first_pipe_started_usec := Time.get_ticks_usec()
 	var preliminary_pipe: Dictionary = solve_pipe_model(nodes, raw_segments, trunk_radius, height, crown_base)
+	timing_usec["initialPipe"] = Time.get_ticks_usec() - first_pipe_started_usec
 	var derived_axis_seasons: Array[Dictionary] = []
 	# Developmental time is maturity-scaled. It is not a prescription of branch
 	# layers: each season simply gives the resource and density feedback another
@@ -386,6 +409,7 @@ func build_oak_space_colony_recipe(seed: int, maturity: float) -> Dictionary:
 		float(dome_profile.get("derivedAxisDensityCompletionThreshold", 0.20)), 0.01, 0.95
 	)
 	var season_pipe := preliminary_pipe
+	var seasonal_growth_started_usec := Time.get_ticks_usec()
 	for season_index in range(season_count):
 		var season_result: Dictionary = germinate_continuous_axis_buds(
 			nodes, raw_segments, season_pipe, crown_center, crown_radii,
@@ -399,15 +423,24 @@ func build_oak_space_colony_recipe(seed: int, maturity: float) -> Dictionary:
 				or float(season_result.get("meanCrownDensityDeficit", 1.0)) <= density_completion_threshold:
 			break
 		season_pipe = solve_pipe_model(nodes, raw_segments, trunk_radius, height, crown_base)
+	timing_usec["seasonalGrowth"] = Time.get_ticks_usec() - seasonal_growth_started_usec
 	var derived_axis_buds: Dictionary = summarize_derived_axis_seasons(derived_axis_seasons)
+	var final_pipe_started_usec := Time.get_ticks_usec()
 	var pipe_result: Dictionary = solve_pipe_model(nodes, raw_segments, trunk_radius, height, crown_base)
+	timing_usec["finalPipe"] = Time.get_ticks_usec() - final_pipe_started_usec
 	var branches: Array[Dictionary] = pipe_result.get("branches", [])
 	branches.append_array(build_root_buttresses(trunk_radius, resolved_seed))
-	var foliage: Array[Dictionary] = build_oak_full_axis_foliage(nodes, raw_segments, crown_center, crown_radii, height, resolved_seed)
+	var foliage_budget := maxi(160, int(dome_profile.get("foliageClusterBudget", OAK_REVIEW_FOLIAGE_BUDGET)))
+	var foliage_started_usec := Time.get_ticks_usec()
+	var foliage: Array[Dictionary] = build_oak_full_axis_foliage(nodes, raw_segments, crown_center, crown_radii, height, resolved_seed, foliage_budget)
+	timing_usec["foliage"] = Time.get_ticks_usec() - foliage_started_usec
+	var analysis_started_usec := Time.get_ticks_usec()
 	var counts: Dictionary = segment_counts_by_order(raw_segments)
 	var occupancy: Dictionary = crown_occupancy(foliage, crown_center, crown_radii)
 	var major_reach: float = maximum_major_wood_reach(branches)
 	var signature: String = recipe_signature(resolved_seed, resolved_maturity, height, branches, foliage)
+	timing_usec["analysis"] = Time.get_ticks_usec() - analysis_started_usec
+	timing_usec["total"] = Time.get_ticks_usec() - recipe_started_usec
 	return {
 		"recipeVersion": BUSHY_OAK_RECIPE_VERSION,
 		"methodology": "deterministic_oak_space_colonization_pipe_model",
@@ -430,6 +463,7 @@ func build_oak_space_colony_recipe(seed: int, maturity: float) -> Dictionary:
 		"branchCount": branches.size(),
 		"foliageClusterCount": foliage.size(),
 		"stats": {
+			"timingUsec": timing_usec,
 			"nodeCount": nodes.size(),
 			"segmentCountsByOrder": counts,
 			"scaffoldAxisCount": 5 + lower_primary_count + mid_crown_bud_count,
@@ -451,9 +485,9 @@ func build_oak_space_colony_recipe(seed: int, maturity: float) -> Dictionary:
 			"foliageUsesSupportingWoodAcrossOrders": true,
 			"budgetSaturation": {
 				"branchSegments": float(branches.size()) / float(maxi(1, int(colonization.get("branchSegmentLimit", MAX_BRANCH_SEGMENTS)))),
-				"foliageClusters": float(foliage.size()) / float(MAX_FOLIAGE_CLUSTERS),
+				"foliageClusters": float(foliage.size()) / float(foliage_budget),
 				"branchLimitReached": raw_segments.size() >= int(colonization.get("branchSegmentLimit", MAX_BRANCH_SEGMENTS)),
-				"foliageLimitReached": foliage.size() >= MAX_FOLIAGE_CLUSTERS
+				"foliageLimitReached": foliage.size() >= foliage_budget
 			}
 		}
 	}
@@ -1036,6 +1070,14 @@ func germinate_continuous_axis_buds(
 			if bool(candidate.get("coDominant", false)):
 				co_dominant_fork_count += 1
 			remaining_budget -= budget_cost
+	for order_name in observed_radius_by_order:
+		var observed: Dictionary = observed_radius_by_order[order_name]
+		# A seasonal pass can legitimately have no axes of a fine order. Keep the
+		# diagnostic finite so its report remains valid JSON; zero says exactly what
+		# happened, whereas INF made otherwise valid runtime PoCs unparsable.
+		if int(observed.get("count", 0)) == 0:
+			observed["minimum"] = 0.0
+			observed_radius_by_order[order_name] = observed
 	var rebuilt := rebuild_graph_with_continuous_axis_buds(nodes, segments, plans_by_child)
 	return {
 		"rule": "continuous_derived_axis_resource_competition_seasons",
@@ -1520,7 +1562,8 @@ func build_oak_full_axis_foliage(
 	crown_center: Vector3,
 	crown_radii: Vector3,
 	height: float,
-	seed: int
+	seed: int,
+	foliage_budget := OAK_REVIEW_FOLIAGE_BUDGET
 ) -> Array[Dictionary]:
 	# Leaf sites are first discovered across the entire supporting wood graph,
 	# then compete for the bounded foliage budget. Iterating until the cap used to
@@ -1537,7 +1580,17 @@ func build_oak_full_axis_foliage(
 			continue
 		var child: Dictionary = nodes[child_index]
 		var terminal := (child.get("children", []) as Array).is_empty()
-		if order < 3 and not (order == 2 and terminal):
+		# The base bole and first structural split remain wood-dominant, but any
+		# secondary axis carries living crown tissue along its full length. Limiting
+		# leaves to third-order wood (or a terminal second-order stub) made shallow,
+		# perfectly valid mature runtime graphs look bare even though they had ample
+		# viable supporting branch length. This is an allometric eligibility rule,
+		# not a crown fill: every emitted cluster is still attached to actual wood.
+		# Runtime LOD may legitimately end an otherwise living primary limb before
+		# it has emitted a secondary split. Treat that terminal limb as crown tissue
+		# too. The main bole remains excluded, while every supported non-bole axis
+		# can develop leaves rather than producing a seed-dependent bare candelabra.
+		if order < 2 and not (order == 1 and terminal):
 			continue
 		var start: Vector3 = nodes[parent_index].get("position", Vector3.ZERO)
 		var end: Vector3 = child.get("position", Vector3.UP)
@@ -1553,7 +1606,12 @@ func build_oak_full_axis_foliage(
 		var exposure := clampf((midpoint_envelope - 0.12) / 0.88, 0.0, 1.0)
 		var capacity := (length * (0.96 if order >= 4 else 0.72) + (0.82 if terminal else 0.28)) \
 			* lerpf(0.76, 1.34, exposure) * 1.42
-		var cluster_count := clampi(ceili(capacity), 1, 5)
+		# Longer, better exposed living axes support proportionally more leaf
+		# clusters. The runtime foliage budget selects a deterministic bounded
+		# subset later, so this increases ecological colonization without allowing
+		# an unbounded publication cost.
+		var density_multiplier := lerpf(1.28, 1.72, exposure)
+		var cluster_count := clampi(ceili(capacity * density_multiplier), 1, 6)
 		var direction := (end - start).normalized()
 		var side := direction.cross(Vector3.UP)
 		if side.length_squared() < 0.001:
@@ -1589,13 +1647,9 @@ func build_oak_full_axis_foliage(
 				"clusterIndex": cluster_index,
 				"capacity": capacity
 			})
-	candidates.sort_custom(func(left: Dictionary, right: Dictionary) -> bool:
-		return float(left.get("priority", 0.0)) > float(right.get("priority", 0.0))
-	)
+	var selected_candidates := select_full_axis_foliage_candidates(candidates, foliage_budget)
 	var foliage: Array[Dictionary] = []
-	var leaf_budget := mini(OAK_REVIEW_FOLIAGE_BUDGET, candidates.size())
-	for candidate_index in range(leaf_budget):
-		var candidate: Dictionary = candidates[candidate_index]
+	for candidate in selected_candidates:
 		var position: Vector3 = candidate.get("position", Vector3.ZERO)
 		var exposure := float(candidate.get("exposure", 0.0))
 		var segment_index := int(candidate.get("sourceSegment", -1))
@@ -1630,6 +1684,53 @@ func build_oak_full_axis_foliage(
 			"exposure": exposure
 		})
 	return foliage
+
+func select_full_axis_foliage_candidates(candidates: Array[Dictionary], foliage_budget: int) -> Array[Dictionary]:
+	# Foliage is attached to living wood, not painted into a crown volume. Give
+	# each eligible supporting axis its best leaf site before allowing exposed
+	# terminal twigs to consume the rest of the bounded budget. The old global
+	# priority sort concentrated a mathematically large leaf count on only a few
+	# tips, producing the visible pom-pom/candelabra failure in runtime trees.
+	if candidates.is_empty() or foliage_budget <= 0:
+		return []
+	var candidates_by_segment := {}
+	var segment_indices: Array[int] = []
+	for candidate in candidates:
+		var segment_index := int(candidate.get("sourceSegment", -1))
+		if not candidates_by_segment.has(segment_index):
+			candidates_by_segment[segment_index] = []
+			segment_indices.append(segment_index)
+		var segment_candidates: Array = candidates_by_segment[segment_index]
+		segment_candidates.append(candidate)
+		candidates_by_segment[segment_index] = segment_candidates
+	segment_indices.sort()
+	var representatives: Array[Dictionary] = []
+	var overflow: Array[Dictionary] = []
+	for segment_index in segment_indices:
+		var segment_candidates: Array = candidates_by_segment[segment_index]
+		segment_candidates.sort_custom(func(left: Dictionary, right: Dictionary) -> bool:
+			return float(left.get("priority", 0.0)) > float(right.get("priority", 0.0))
+		)
+		if not segment_candidates.is_empty():
+			representatives.append(segment_candidates[0] as Dictionary)
+		for candidate_index in range(1, segment_candidates.size()):
+			overflow.append(segment_candidates[candidate_index] as Dictionary)
+	if representatives.size() > foliage_budget:
+		# At reduced LOD, not every axis can be represented. Evenly traverse the
+		# independent supporting axes instead of reverting to global tip priority.
+		var reduced: Array[Dictionary] = []
+		var stride := float(representatives.size()) / float(foliage_budget)
+		for index in range(foliage_budget):
+			reduced.append(representatives[clampi(floori((float(index) + 0.5) * stride), 0, representatives.size() - 1)])
+		return reduced
+	var selected: Array[Dictionary] = representatives.duplicate(true)
+	overflow.sort_custom(func(left: Dictionary, right: Dictionary) -> bool:
+		return float(left.get("priority", 0.0)) > float(right.get("priority", 0.0))
+	)
+	var remaining := mini(foliage_budget - selected.size(), overflow.size())
+	for index in range(remaining):
+		selected.append(overflow[index])
+	return selected
 
 func build_recipe_v10_allometric(seed := DEFAULT_SEED, maturity := 0.92) -> Dictionary:
 	var resolved_seed := int(seed)
@@ -1997,7 +2098,8 @@ func colonize_oak_space_crown(
 	crown_phase: float,
 	_branch_reach_factor: float,
 	seed: int,
-	maximum_iterations: int
+	maximum_iterations: int,
+	branch_segment_budget: int
 ) -> Dictionary:
 	# This is the bounded, spatial-hashed form of space colonization. It keeps
 	# the research model's "nearest bud claims available space" rule without the
@@ -2007,11 +2109,12 @@ func colonize_oak_space_crown(
 	# Match the grid cell to the influence radius. A nearest-bud query then needs
 	# the containing cell and its 26 neighbors, not a 5x5x5 neighborhood.
 	const cell_size := influence_distance
+	var branch_budget := clampi(branch_segment_budget, 48, MAX_OAK_BRANCH_SEGMENTS)
 	var remaining: Array[Vector3] = attraction_points.duplicate()
 	var claimed_points := 0
 	var iterations := 0
 	for iteration in range(maximum_iterations):
-		if remaining.is_empty() or segments.size() >= MAX_OAK_BRANCH_SEGMENTS:
+		if remaining.is_empty() or segments.size() >= branch_budget:
 			break
 		iterations = iteration + 1
 		var active_bud_grid: Dictionary = build_oak_node_grid(nodes, cell_size, true)
@@ -2041,7 +2144,7 @@ func colonize_oak_space_crown(
 		var added := 0
 		var all_nodes_grid: Dictionary = build_oak_node_grid(nodes, cell_size, false)
 		for bud_key in influenced_indices:
-			if segments.size() >= MAX_OAK_BRANCH_SEGMENTS:
+			if segments.size() >= branch_budget:
 				break
 			var bud_index := int(bud_key)
 			if bud_index < 0 or bud_index >= nodes.size():

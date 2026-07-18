@@ -43,6 +43,7 @@ const GUARD_TARGET_REFRESHES_PER_FRAME := 1
 const FORAGE_PENDING_ROUTE_TIMEOUT_SECONDS := 4.0
 const FORAGE_PENDING_ROUTE_FAILURE_LIMIT := 2
 const FORAGE_DYNAMIC_REPAIR_LIMIT := 1
+const SCHEDULE_HOME_ROUTE_PRIORITY := 180
 
 func setup(autonomy, system_node, main_node, services: Dictionary) -> void:
 	autonomy_system = autonomy
@@ -53,6 +54,8 @@ func setup(autonomy, system_node, main_node, services: Dictionary) -> void:
 	perception_service = services.get("perception")
 	goal_selector = services.get("goalSelector")
 	task_planner = services.get("taskPlanner")
+	if task_planner != null and task_planner.has_method("set_performance_monitor"):
+		task_planner.set_performance_monitor(performance_monitor())
 	recovery_policy = services.get("recovery")
 
 func performance_monitor():
@@ -197,9 +200,22 @@ func _physics_route_service_kind(entry: Dictionary) -> String:
 	var authority = autonomy_system.get("route_authority_v2") if autonomy_system != null else null
 	var home_request_id := String(entry.get("homeRouteV2RequestId", ""))
 	if _v2_request_requires_physics_service(authority, entry, home_request_id):
-		return "home"
+		# Route ownership follows the current semantic goal.  A pending home route
+		# may outlive a transition to ordinary forage/work/guard behavior; allowing
+		# it to keep the physics-service slot prevents the new job lifecycle from
+		# ever selecting its first target.
+		if _active_non_home_goal_supersedes_home_route(entry, order_kind):
+			_cancel_home_v2_request(authority, entry, "active_goal_supersedes_home_route")
+		else:
+			return "home"
 	var routine_request_id := String(entry.get("routineRouteV2RequestId", ""))
 	if _v2_request_requires_physics_service(authority, entry, routine_request_id) and _has_executable_routine_route_intent(entry):
+		# A forage routine is an action lifecycle as well as a route.  The job loop
+		# owns its departure, search, reservation, timeout, and release transitions.
+		# Letting the physics route service consume even a pending search/departure
+		# request starves that loop before it can select or retire a target.
+		if _forage_route_needs_lifecycle_tick(authority, entry, routine_request_id):
+			return ""
 		if String(entry.get("routineRouteV2IntentKind", "")) == "scripted" and order_kind != "":
 			return "scripted"
 		return "routine"
@@ -224,6 +240,34 @@ func _v2_request_requires_physics_service(authority, entry: Dictionary, request_
 	if String(runtime.get("requestId", "")) != request_id:
 		return false
 	return String(runtime.get("state", "")) in ["queued", "pending_nav_data", "pending_budget", "probing", "ready", "moving", "blocked_dynamic"]
+
+
+func _forage_route_needs_lifecycle_tick(authority, entry: Dictionary, request_id: String) -> bool:
+	if request_id == "" \
+		or String(entry.get("job", "")) != "forage" \
+		or String(entry.get("routineRouteV2IntentKind", "")) != "forage":
+		return false
+	if authority == null or not authority.has_method("runtime_for_entry"):
+		return false
+	var runtime: Dictionary = authority.runtime_for_entry(entry)
+	if String(runtime.get("requestId", "")) != request_id:
+		return false
+	return String(runtime.get("state", "")) in ["queued", "pending_nav_data", "pending_budget", "probing", "ready", "moving", "blocked_dynamic"]
+
+
+func _active_non_home_goal_supersedes_home_route(entry: Dictionary, order_kind: String) -> bool:
+	if order_kind == "go_home":
+		return false
+	var goal_kind := String(entry.get("activeGoalKind", ""))
+	if goal_kind == "":
+		var motion_goal: Dictionary = entry.get("activeMotionGoal", {}) if entry.get("activeMotionGoal", {}) is Dictionary else {}
+		goal_kind = String(motion_goal.get("goalKind", ""))
+	return goal_kind in [
+		String(NpcEnumsScript.GOAL_KIND_FORAGE),
+		String(NpcEnumsScript.GOAL_KIND_WORK),
+		String(NpcEnumsScript.GOAL_KIND_GUARD),
+		String(NpcEnumsScript.GOAL_KIND_SCRIPTED)
+	]
 
 
 func _advance_physics_routine_route(entry: Dictionary, body: Node3D, delta: float) -> Dictionary:
@@ -670,7 +714,16 @@ func _execute_home(entry: Dictionary, body: Node3D, perception: Dictionary, delt
 		return
 	entry["homeReturnTime"] = float(entry.get("homeReturnTime", 0.0)) + delta
 	var scripted_home := _scripted_order_kind(body, entry) == "go_home"
-	entry["routePriority"] = maxi(int(entry.get("routePriority", 180)), 180) if scripted_home else 140
+	var motion_schedule: Dictionary = entry.get("activeMotionSchedule", {}) if entry.get("activeMotionSchedule", {}) is Dictionary else {}
+	var schedule_state := String(motion_schedule.get("scheduleState", ""))
+	var schedule_requires_interior := bool(motion_schedule.get("mustBeInside", false)) \
+		or schedule_state in [String(NpcEnumsScript.SCHEDULE_STATE_DUSK), String(NpcEnumsScript.SCHEDULE_STATE_NIGHT)]
+	# A schedule-mandated home return is a survival/collision commitment, not
+	# ordinary idle work.  Give it the same bounded route-planning priority as a
+	# generic explicit go-home order so an active daytime work/forage queue cannot
+	# consume the whole night before the actor receives a route lease.
+	entry["routePriority"] = maxi(int(entry.get("routePriority", SCHEDULE_HOME_ROUTE_PRIORITY)), SCHEDULE_HOME_ROUTE_PRIORITY) \
+		if scripted_home or schedule_requires_interior else 140
 	var speed_mode := _scripted_speed_mode(body) if scripted_home else "walking"
 	var speed := _set_motion_speed_mode(entry, speed_mode, "home_route")
 	var home_result := _execute_home_route_v2(entry, body, delta, speed)
@@ -2410,7 +2463,11 @@ func _forager_exact_arrival_proof(entry: Dictionary, body: Node3D) -> Dictionary
 
 func _retarget_forager_after_route_failure(entry: Dictionary, body: Node3D, target_node: Node3D, release_reason: String, mark_unreachable: bool) -> bool:
 	_release_job_reservation(entry, release_reason)
-	if release_reason.find("reservation_deadline") >= 0 and target_node != null:
+	# A readiness timeout is not proof that a resource is permanently unreachable.
+	# It is, however, a failed attempt for this forager at this moment.  Cool the
+	# reservation down before searching again so the generic job loop can choose
+	# another resource instead of re-reserving the same budget-deferred prop.
+	if (release_reason.find("reservation_deadline") >= 0 or release_reason.find("pending_route_timeout") >= 0) and target_node != null:
 		_defer_forager_target(entry, target_node)
 	elif mark_unreachable and target_node != null:
 		_mark_forager_target_unreachable(entry, target_node)
@@ -2628,7 +2685,7 @@ func _release_job_reservation(entry: Dictionary, reason := "released") -> void:
 func _current_route_failure_blocks_forager(entry: Dictionary) -> bool:
 	return bool(npc_system.call("current_route_failure_blocks_forager", entry)) if npc_system != null and npc_system.has_method("current_route_failure_blocks_forager") else false
 
-func _forager_pending_route_timed_out(entry: Dictionary, delta: float) -> bool:
+func _forager_pending_route_timed_out(entry: Dictionary, _delta: float) -> bool:
 	var authority: Dictionary = entry.get("routeAuthorityV2", {}) if entry.get("routeAuthorityV2", {}) is Dictionary else {}
 	var state := String(authority.get("state", ""))
 	var waiting_for_route_readiness := state in ["queued", "pending_nav_data", "pending_budget", "probing"] \
@@ -2661,9 +2718,12 @@ func _forager_pending_route_timed_out(entry: Dictionary, delta: float) -> bool:
 		if float(authority_wait_frames) / ticks_per_second < FORAGE_PENDING_ROUTE_TIMEOUT_SECONDS:
 			return false
 	var start_frame := int(entry.get("foragePendingRouteFrame", current_frame))
+	# This is a service-readiness watchdog, not simulation-time gameplay.  It must
+	# use real physics frames so a fast-forwarded day/night clock cannot exhaust a
+	# multi-slice, collision-backed route plan after only a few planning frames.
 	var pending_time := maxf(
-		maxf(float(current_frame - start_frame) / ticks_per_second, float(authority_wait_frames) / ticks_per_second),
-		float(entry.get("foragePendingRouteTime", 0.0)) + maxf(delta, 0.0)
+		float(current_frame - start_frame) / ticks_per_second,
+		float(authority_wait_frames) / ticks_per_second
 	)
 	entry["foragePendingRouteTime"] = pending_time
 	return pending_time >= FORAGE_PENDING_ROUTE_TIMEOUT_SECONDS

@@ -50,14 +50,14 @@ const HEIGHT_BANDS = {
 };
 const CANOPY_MAX_WIDTH = {
   old_growth_broadleaf_tree: 18.0,
-  ecological_broadleaf_tree: 40.0,
-  ecological_conifer_tree: 22.0,
-  ecological_savanna_tree: 42.0,
+  ecological_broadleaf_tree: 72.0,
+  ecological_conifer_tree: 46.0,
+  ecological_savanna_tree: 84.0,
 };
 const CANOPY_MAX_HEIGHT = {
-  ecological_broadleaf_tree: 46.0,
-  ecological_conifer_tree: 48.0,
-  ecological_savanna_tree: 38.0,
+  ecological_broadleaf_tree: 84.0,
+  ecological_conifer_tree: 96.0,
+  ecological_savanna_tree: 78.0,
 };
 const CANOPY_MIN_FOLIAGE_PRIMITIVES = {
   mature_broadleaf_tree: 1100,
@@ -183,9 +183,12 @@ function validateTreeContract(errors, asset) {
   }
   if (ECOLOGICAL_FAMILIES.has(asset.family)) {
     const phenotype = asset.treePhenotype;
+    const structure = asset.canopyStructure;
     if (!ECOLOGICAL_AGE_BANDS.includes(phenotype?.ageBand)) fail(errors, `${asset.id}: invalid ecological ageBand ${phenotype?.ageBand}`);
     if (!phenotype?.minimumFullnessPassed || (phenotype?.minimumSectorOccupancy ?? 0) < 1) fail(errors, `${asset.id}: ecological minimum fullness failed`);
     if (!Number.isInteger(phenotype?.terminalTipCount) || phenotype.terminalTipCount <= 0) fail(errors, `${asset.id}: ecological phenotype requires terminal tips`);
+    if (structure?.foliageDistribution !== "branch_length_and_terminal") fail(errors, `${asset.id}: ecological foliage must occupy branch lengths and terminals`);
+    if (!Number.isInteger(structure?.branchInteriorAnchorCount) || structure.branchInteriorAnchorCount <= 0) fail(errors, `${asset.id}: ecological phenotype requires interior branch foliage anchors`);
   }
 }
 

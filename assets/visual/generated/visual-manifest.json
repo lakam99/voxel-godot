@@ -1,14 +1,22 @@
 {
   "schemaVersion": 3,
-  "generator": "vox128-age-ecology-environment-v1",
+  "generator": "vox132-multitier-crown-preview-v2",
   "seed": 1492,
   "coordinateSystem": "Blender Z-up source; GLB import verified in Godot",
-  "triangleLimit": 6200,
+  "triangleLimit": 8200,
   "standardTriangleLimit": 2200,
-  "ecologicalTreeTriangleLimit": 6200,
+  "ecologicalTreeTriangleLimit": 15400,
+  "ecologicalTreeTriangleLimitsByAge": {
+    "young": 2600,
+    "established": 4400,
+    "mature": 7400,
+    "old": 11600,
+    "ancient": 15400
+  },
   "environmentDirectory": "assets/visual/generated/environment",
-  "contactSheet": "assets/visual/generated/environment/tree-ecology-contact-sheet-v1.png",
-  "canopyDetailSheet": "assets/visual/generated/environment/tree-ecology-leaf-detail-sheet-v1.png",
+  "contactSheet": "assets/visual/generated/environment/tree-ecology-contact-sheet-v2.png",
+  "canopyDetailSheet": "assets/visual/generated/environment/tree-ecology-leaf-detail-sheet-v2.png",
+  "crownArchitecturePreview": "assets/visual/generated/environment/tree-ecology-crown-architecture-preview-v2.png",
   "assets": [
     {
       "id": "broadleaf_01",
@@ -21,7 +29,7 @@
         "plains"
       ],
       "triangleCount": 224,
-      "triangleLimit": 6200,
+      "triangleLimit": 8200,
       "boundingBox": {
         "min": [
           -1.236,
@@ -143,7 +151,7 @@
         "plains"
       ],
       "triangleCount": 268,
-      "triangleLimit": 6200,
+      "triangleLimit": 8200,
       "boundingBox": {
         "min": [
           -1.0401,
@@ -265,7 +273,7 @@
         "plains"
       ],
       "triangleCount": 180,
-      "triangleLimit": 6200,
+      "triangleLimit": 8200,
       "boundingBox": {
         "min": [
           -1.3899,
@@ -387,7 +395,7 @@
         "plains"
       ],
       "triangleCount": 224,
-      "triangleLimit": 6200,
+      "triangleLimit": 8200,
       "boundingBox": {
         "min": [
           -1.2415,
@@ -509,7 +517,7 @@
         "plains"
       ],
       "triangleCount": 268,
-      "triangleLimit": 6200,
+      "triangleLimit": 8200,
       "boundingBox": {
         "min": [
           -1.392,
@@ -631,7 +639,7 @@
         "plains"
       ],
       "triangleCount": 180,
-      "triangleLimit": 6200,
+      "triangleLimit": 8200,
       "boundingBox": {
         "min": [
           -1.2705,
@@ -754,7 +762,7 @@
         "alpine"
       ],
       "triangleCount": 172,
-      "triangleLimit": 6200,
+      "triangleLimit": 8200,
       "boundingBox": {
         "min": [
           -1.0495,
@@ -875,7 +883,7 @@
         "alpine"
       ],
       "triangleCount": 140,
-      "triangleLimit": 6200,
+      "triangleLimit": 8200,
       "boundingBox": {
         "min": [
           -1.0657,
@@ -996,7 +1004,7 @@
         "alpine"
       ],
       "triangleCount": 172,
-      "triangleLimit": 6200,
+      "triangleLimit": 8200,
       "boundingBox": {
         "min": [
           -1.021,
@@ -1117,7 +1125,7 @@
         "alpine"
       ],
       "triangleCount": 140,
-      "triangleLimit": 6200,
+      "triangleLimit": 8200,
       "boundingBox": {
         "min": [
           -1.0237,
@@ -1238,7 +1246,7 @@
         "desert"
       ],
       "triangleCount": 204,
-      "triangleLimit": 6200,
+      "triangleLimit": 8200,
       "boundingBox": {
         "min": [
           -1.5501,
@@ -1359,7 +1367,7 @@
         "desert"
       ],
       "triangleCount": 248,
-      "triangleLimit": 6200,
+      "triangleLimit": 8200,
       "boundingBox": {
         "min": [
           -1.3685,
@@ -1480,7 +1488,7 @@
         "desert"
       ],
       "triangleCount": 292,
-      "triangleLimit": 6200,
+      "triangleLimit": 8200,
       "boundingBox": {
         "min": [
           -1.7583,
@@ -1601,23 +1609,23 @@
         "swamp",
         "beach"
       ],
-      "triangleCount": 696,
-      "triangleLimit": 6200,
+      "triangleCount": 1016,
+      "triangleLimit": 2600,
       "boundingBox": {
         "min": [
-          -4.0298,
-          -4.03,
+          -4.1098,
+          -2.9665,
           0.0
         ],
         "max": [
-          4.3549,
-          4.0558,
-          10.052
+          3.8883,
+          3.2566,
+          9.8861
         ],
         "size": [
-          8.3847,
-          8.0858,
-          10.052
+          7.9981,
+          6.223,
+          9.8861
         ]
       },
       "pivotCheck": {
@@ -1656,40 +1664,40 @@
       },
       "treeMetrics": {
         "growthClass": "young",
-        "height": 10.052,
+        "height": 9.8861,
         "trunkRadius": 0.3088,
-        "canopyRadius": 4.1923,
-        "canopyRadiusX": 4.1923,
-        "canopyRadiusY": 4.0429,
-        "canopyBase": 3.7158,
-        "canopyTop": 10.052
+        "canopyRadius": 3.999,
+        "canopyRadiusX": 3.999,
+        "canopyRadiusY": 3.1115,
+        "canopyBase": 2.4806,
+        "canopyTop": 9.8861
       },
       "windData": {
         "attribute": "COLOR_0",
         "sourceAttribute": "wind",
         "domain": "POINT",
         "storage": "BYTE_COLOR",
-        "vertexCount": 1176,
-        "foliageVertexCount": 960,
+        "vertexCount": 2136,
+        "foliageVertexCount": 1920,
         "rootVertexCount": 11,
         "rootMaxBend": 0.0,
-        "crownMinBend": 0.2232,
+        "crownMinBend": 0.117,
         "crownMaxBend": 1.0,
         "channels": {
           "bendR": {
             "min": 0.0,
             "max": 1.0,
-            "mean": 0.4376
+            "mean": 0.4646
           },
           "phaseG": {
-            "min": 0.0033,
+            "min": 0.0003,
             "max": 1.0,
-            "mean": 0.5011
+            "mean": 0.4847
           },
           "flutterB": {
             "min": 0.0,
             "max": 0.956,
-            "mean": 0.63
+            "mean": 0.6931
           },
           "reservedA": {
             "min": 1.0,
@@ -1716,10 +1724,13 @@
       },
       "canopyStructure": {
         "foliagePrimitive": "individual_triangular_leaf_card",
-        "foliagePrimitiveCount": 320,
-        "structure": "three_generation_terminal_leaf_canopy",
-        "crownLayerCount": 4,
+        "foliagePrimitiveCount": 640,
+        "structure": "multitier_four_generation_branch_length_and_terminal_leaf_canopy",
+        "foliageDistribution": "branch_length_and_terminal",
+        "crownLayerCount": 3,
         "branchClusterCount": 12,
+        "branchInteriorAnchorCount": 13,
+        "terminalFoliageAnchorCount": 13,
         "terminalTipCount": 13
       },
       "treePhenotype": {
@@ -1729,7 +1740,9 @@
         "branchGenerationCount": 3,
         "primaryBranchCount": 6,
         "secondaryBranchCount": 6,
+        "tertiaryBranchCount": 0,
         "terminalTipCount": 13,
+        "branchInteriorAnchorCount": 13,
         "minimumSectorOccupancy": 1,
         "minimumFullnessPassed": true,
         "variant": 1
@@ -1747,23 +1760,23 @@
         "swamp",
         "beach"
       ],
-      "triangleCount": 696,
-      "triangleLimit": 6200,
+      "triangleCount": 1016,
+      "triangleLimit": 2600,
       "boundingBox": {
         "min": [
-          -3.7761,
-          -3.755,
+          -4.2365,
+          -2.8636,
           0.0
         ],
         "max": [
-          4.5039,
-          3.7201,
-          10.6203
+          3.8367,
+          3.8374,
+          10.6804
         ],
         "size": [
-          8.28,
-          7.4751,
-          10.6203
+          8.0732,
+          6.7009,
+          10.6804
         ]
       },
       "pivotCheck": {
@@ -1802,40 +1815,40 @@
       },
       "treeMetrics": {
         "growthClass": "young",
-        "height": 10.6203,
+        "height": 10.6804,
         "trunkRadius": 0.3312,
-        "canopyRadius": 4.14,
-        "canopyRadiusX": 4.14,
-        "canopyRadiusY": 3.7375,
-        "canopyBase": 4.901,
-        "canopyTop": 10.6203
+        "canopyRadius": 4.0366,
+        "canopyRadiusX": 4.0366,
+        "canopyRadiusY": 3.3505,
+        "canopyBase": 2.9262,
+        "canopyTop": 10.6804
       },
       "windData": {
         "attribute": "COLOR_0",
         "sourceAttribute": "wind",
         "domain": "POINT",
         "storage": "BYTE_COLOR",
-        "vertexCount": 1176,
-        "foliageVertexCount": 960,
+        "vertexCount": 2136,
+        "foliageVertexCount": 1920,
         "rootVertexCount": 11,
         "rootMaxBend": 0.0,
-        "crownMinBend": 0.3185,
+        "crownMinBend": 0.1356,
         "crownMaxBend": 1.0,
         "channels": {
           "bendR": {
             "min": 0.0,
             "max": 1.0,
-            "mean": 0.4546
+            "mean": 0.5074
           },
           "phaseG": {
-            "min": 0.0012,
+            "min": 0.0003,
             "max": 1.0,
-            "mean": 0.5343
+            "mean": 0.5553
           },
           "flutterB": {
             "min": 0.0,
             "max": 0.956,
-            "mean": 0.6305
+            "mean": 0.6931
           },
           "reservedA": {
             "min": 1.0,
@@ -1862,10 +1875,13 @@
       },
       "canopyStructure": {
         "foliagePrimitive": "individual_triangular_leaf_card",
-        "foliagePrimitiveCount": 320,
-        "structure": "three_generation_terminal_leaf_canopy",
-        "crownLayerCount": 4,
+        "foliagePrimitiveCount": 640,
+        "structure": "multitier_four_generation_branch_length_and_terminal_leaf_canopy",
+        "foliageDistribution": "branch_length_and_terminal",
+        "crownLayerCount": 3,
         "branchClusterCount": 12,
+        "branchInteriorAnchorCount": 13,
+        "terminalFoliageAnchorCount": 13,
         "terminalTipCount": 13
       },
       "treePhenotype": {
@@ -1875,7 +1891,9 @@
         "branchGenerationCount": 3,
         "primaryBranchCount": 6,
         "secondaryBranchCount": 6,
+        "tertiaryBranchCount": 0,
         "terminalTipCount": 13,
+        "branchInteriorAnchorCount": 13,
         "minimumSectorOccupancy": 1,
         "minimumFullnessPassed": true,
         "variant": 2
@@ -1893,23 +1911,23 @@
         "swamp",
         "beach"
       ],
-      "triangleCount": 1292,
-      "triangleLimit": 6200,
+      "triangleCount": 2524,
+      "triangleLimit": 4400,
       "boundingBox": {
         "min": [
-          -6.561,
-          -5.6051,
+          -7.6953,
+          -5.9912,
           0.0
         ],
         "max": [
-          7.2672,
-          5.5778,
-          15.6015
+          7.5201,
+          5.7254,
+          17.6317
         ],
         "size": [
-          13.8283,
-          11.1829,
-          15.6015
+          15.2155,
+          11.7166,
+          17.6317
         ]
       },
       "pivotCheck": {
@@ -1948,40 +1966,40 @@
       },
       "treeMetrics": {
         "growthClass": "established",
-        "height": 15.6015,
-        "trunkRadius": 0.5404,
-        "canopyRadius": 6.9141,
-        "canopyRadiusX": 6.9141,
-        "canopyRadiusY": 5.5915,
-        "canopyBase": 6.9388,
-        "canopyTop": 15.6015
+        "height": 17.6317,
+        "trunkRadius": 0.6272,
+        "canopyRadius": 7.6077,
+        "canopyRadiusX": 7.6077,
+        "canopyRadiusY": 5.8583,
+        "canopyBase": 5.1204,
+        "canopyTop": 17.6317
       },
       "windData": {
         "attribute": "COLOR_0",
         "sourceAttribute": "wind",
         "domain": "POINT",
         "storage": "BYTE_COLOR",
-        "vertexCount": 2586,
-        "foliageVertexCount": 2280,
+        "vertexCount": 5576,
+        "foliageVertexCount": 5100,
         "rootVertexCount": 11,
         "rootMaxBend": 0.0,
-        "crownMinBend": 0.3005,
+        "crownMinBend": 0.15,
         "crownMaxBend": 1.0,
         "channels": {
           "bendR": {
             "min": 0.0,
             "max": 1.0,
-            "mean": 0.4961
+            "mean": 0.4517
           },
           "phaseG": {
-            "min": 0.0003,
+            "min": 0.0,
             "max": 1.0,
-            "mean": 0.4992
+            "mean": 0.4836
           },
           "flutterB": {
             "min": 0.0,
             "max": 0.956,
-            "mean": 0.68
+            "mean": 0.705
           },
           "reservedA": {
             "min": 1.0,
@@ -1995,33 +2013,38 @@
         "mapping": "branch_local_circumference_u_physical_length_v",
         "authoredRepeatsPerMeter": 0.72,
         "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
-        "barkVertexCount": 306,
-        "barkLoopCount": 1596,
+        "barkVertexCount": 476,
+        "barkLoopCount": 2472,
         "uRange": [
           0.0125,
           1.1071
         ],
         "vRange": [
           0.0,
-          7.9906
+          8.9894
         ]
       },
       "canopyStructure": {
         "foliagePrimitive": "individual_triangular_leaf_card",
-        "foliagePrimitiveCount": 760,
-        "structure": "three_generation_terminal_leaf_canopy",
+        "foliagePrimitiveCount": 1700,
+        "structure": "multitier_four_generation_branch_length_and_terminal_leaf_canopy",
+        "foliageDistribution": "branch_length_and_terminal",
         "crownLayerCount": 4,
-        "branchClusterCount": 18,
-        "terminalTipCount": 19
+        "branchClusterCount": 30,
+        "branchInteriorAnchorCount": 42,
+        "terminalFoliageAnchorCount": 31,
+        "terminalTipCount": 31
       },
       "treePhenotype": {
         "architecture": "broadleaf",
         "ageBand": "established",
         "nominalGrowth": 0.25,
         "branchGenerationCount": 3,
-        "primaryBranchCount": 9,
-        "secondaryBranchCount": 9,
-        "terminalTipCount": 19,
+        "primaryBranchCount": 10,
+        "secondaryBranchCount": 20,
+        "tertiaryBranchCount": 0,
+        "terminalTipCount": 31,
+        "branchInteriorAnchorCount": 42,
         "minimumSectorOccupancy": 1,
         "minimumFullnessPassed": true,
         "variant": 1
@@ -2039,23 +2062,23 @@
         "swamp",
         "beach"
       ],
-      "triangleCount": 1292,
-      "triangleLimit": 6200,
+      "triangleCount": 2524,
+      "triangleLimit": 4400,
       "boundingBox": {
         "min": [
-          -6.3813,
-          -5.7185,
+          -6.982,
+          -6.3321,
           0.0
         ],
         "max": [
-          5.7953,
-          5.8126,
-          16.6933
+          6.4215,
+          5.971,
+          18.585
         ],
         "size": [
-          12.1766,
-          11.5312,
-          16.6933
+          13.4034,
+          12.303,
+          18.585
         ]
       },
       "pivotCheck": {
@@ -2094,40 +2117,40 @@
       },
       "treeMetrics": {
         "growthClass": "established",
-        "height": 16.6933,
-        "trunkRadius": 0.5796,
-        "canopyRadius": 6.0883,
-        "canopyRadiusX": 6.0883,
-        "canopyRadiusY": 5.7656,
-        "canopyBase": 7.2412,
-        "canopyTop": 16.6933
+        "height": 18.585,
+        "trunkRadius": 0.6727,
+        "canopyRadius": 6.7017,
+        "canopyRadiusX": 6.7017,
+        "canopyRadiusY": 6.1515,
+        "canopyBase": 5.5955,
+        "canopyTop": 18.585
       },
       "windData": {
         "attribute": "COLOR_0",
         "sourceAttribute": "wind",
         "domain": "POINT",
         "storage": "BYTE_COLOR",
-        "vertexCount": 2586,
-        "foliageVertexCount": 2280,
+        "vertexCount": 5576,
+        "foliageVertexCount": 5100,
         "rootVertexCount": 11,
         "rootMaxBend": 0.0,
-        "crownMinBend": 0.2874,
+        "crownMinBend": 0.159,
         "crownMaxBend": 1.0,
         "channels": {
           "bendR": {
             "min": 0.0,
             "max": 1.0,
-            "mean": 0.4921
+            "mean": 0.4666
           },
           "phaseG": {
-            "min": 0.0012,
+            "min": 0.0,
             "max": 1.0,
-            "mean": 0.5135
+            "mean": 0.5283
           },
           "flutterB": {
             "min": 0.0,
             "max": 0.956,
-            "mean": 0.6799
+            "mean": 0.705
           },
           "reservedA": {
             "min": 1.0,
@@ -2141,33 +2164,38 @@
         "mapping": "branch_local_circumference_u_physical_length_v",
         "authoredRepeatsPerMeter": 0.72,
         "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
-        "barkVertexCount": 306,
-        "barkLoopCount": 1596,
+        "barkVertexCount": 476,
+        "barkLoopCount": 2472,
         "uRange": [
           0.0125,
           1.1071
         ],
         "vRange": [
           0.0,
-          8.5814
+          9.6541
         ]
       },
       "canopyStructure": {
         "foliagePrimitive": "individual_triangular_leaf_card",
-        "foliagePrimitiveCount": 760,
-        "structure": "three_generation_terminal_leaf_canopy",
+        "foliagePrimitiveCount": 1700,
+        "structure": "multitier_four_generation_branch_length_and_terminal_leaf_canopy",
+        "foliageDistribution": "branch_length_and_terminal",
         "crownLayerCount": 4,
-        "branchClusterCount": 18,
-        "terminalTipCount": 19
+        "branchClusterCount": 30,
+        "branchInteriorAnchorCount": 42,
+        "terminalFoliageAnchorCount": 31,
+        "terminalTipCount": 31
       },
       "treePhenotype": {
         "architecture": "broadleaf",
         "ageBand": "established",
         "nominalGrowth": 0.25,
         "branchGenerationCount": 3,
-        "primaryBranchCount": 9,
-        "secondaryBranchCount": 9,
-        "terminalTipCount": 19,
+        "primaryBranchCount": 10,
+        "secondaryBranchCount": 20,
+        "tertiaryBranchCount": 0,
+        "terminalTipCount": 31,
+        "branchInteriorAnchorCount": 42,
         "minimumSectorOccupancy": 1,
         "minimumFullnessPassed": true,
         "variant": 2
@@ -2185,23 +2213,23 @@
         "swamp",
         "beach"
       ],
-      "triangleCount": 2456,
-      "triangleLimit": 6200,
+      "triangleCount": 5208,
+      "triangleLimit": 7400,
       "boundingBox": {
         "min": [
-          -9.8137,
-          -9.8414,
+          -12.1589,
+          -14.322,
           0.0
         ],
         "max": [
-          10.9422,
-          8.6194,
-          24.2934
+          13.3384,
+          12.6678,
+          30.9468
         ],
         "size": [
-          20.7559,
-          18.4608,
-          24.2934
+          25.4973,
+          26.9898,
+          30.9468
         ]
       },
       "pivotCheck": {
@@ -2240,40 +2268,40 @@
       },
       "treeMetrics": {
         "growthClass": "mature",
-        "height": 24.2934,
-        "trunkRadius": 0.9167,
-        "canopyRadius": 10.378,
-        "canopyRadiusX": 10.378,
-        "canopyRadiusY": 9.2304,
-        "canopyBase": 11.2906,
-        "canopyTop": 24.2934
+        "height": 30.9468,
+        "trunkRadius": 1.544,
+        "canopyRadius": 13.4949,
+        "canopyRadiusX": 12.7487,
+        "canopyRadiusY": 13.4949,
+        "canopyBase": 10.1456,
+        "canopyTop": 30.9468
       },
       "windData": {
         "attribute": "COLOR_0",
         "sourceAttribute": "wind",
         "domain": "POINT",
         "storage": "BYTE_COLOR",
-        "vertexCount": 5004,
-        "foliageVertexCount": 4440,
+        "vertexCount": 12220,
+        "foliageVertexCount": 11400,
         "rootVertexCount": 11,
         "rootMaxBend": 0.0,
-        "crownMinBend": 0.3185,
+        "crownMinBend": 0.1845,
         "crownMaxBend": 1.0,
         "channels": {
           "bendR": {
             "min": 0.0,
             "max": 1.0,
-            "mean": 0.5287
+            "mean": 0.5123
           },
           "phaseG": {
             "min": 0.0,
             "max": 1.0,
-            "mean": 0.4947
+            "mean": 0.4723
           },
           "flutterB": {
             "min": 0.0,
             "max": 0.956,
-            "mean": 0.6842
+            "mean": 0.7189
           },
           "reservedA": {
             "min": 1.0,
@@ -2287,33 +2315,38 @@
         "mapping": "branch_local_circumference_u_physical_length_v",
         "authoredRepeatsPerMeter": 0.72,
         "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
-        "barkVertexCount": 564,
-        "barkLoopCount": 2928,
+        "barkVertexCount": 820,
+        "barkLoopCount": 4224,
         "uRange": [
           0.0125,
           1.1071
         ],
         "vRange": [
           0.0,
-          12.5481
+          16.0615
         ]
       },
       "canopyStructure": {
         "foliagePrimitive": "individual_triangular_leaf_card",
-        "foliagePrimitiveCount": 1480,
-        "structure": "three_generation_terminal_leaf_canopy",
-        "crownLayerCount": 4,
-        "branchClusterCount": 36,
-        "terminalTipCount": 37
+        "foliagePrimitiveCount": 3800,
+        "structure": "multitier_four_generation_branch_length_and_terminal_leaf_canopy",
+        "foliageDistribution": "branch_length_and_terminal",
+        "crownLayerCount": 5,
+        "branchClusterCount": 56,
+        "branchInteriorAnchorCount": 72,
+        "terminalFoliageAnchorCount": 57,
+        "terminalTipCount": 57
       },
       "treePhenotype": {
         "architecture": "broadleaf",
         "ageBand": "mature",
         "nominalGrowth": 0.5,
-        "branchGenerationCount": 3,
-        "primaryBranchCount": 12,
-        "secondaryBranchCount": 24,
-        "terminalTipCount": 37,
+        "branchGenerationCount": 4,
+        "primaryBranchCount": 14,
+        "secondaryBranchCount": 28,
+        "tertiaryBranchCount": 14,
+        "terminalTipCount": 57,
+        "branchInteriorAnchorCount": 72,
         "minimumSectorOccupancy": 1,
         "minimumFullnessPassed": true,
         "variant": 1
@@ -2331,23 +2364,23 @@
         "swamp",
         "beach"
       ],
-      "triangleCount": 2456,
-      "triangleLimit": 6200,
+      "triangleCount": 5208,
+      "triangleLimit": 7400,
       "boundingBox": {
         "min": [
-          -9.4386,
-          -9.6573,
+          -10.645,
+          -13.1589,
           0.0
         ],
         "max": [
-          10.0168,
-          9.4059,
-          25.5882
+          12.0818,
+          12.2084,
+          32.8497
         ],
         "size": [
-          19.4554,
-          19.0632,
-          25.5882
+          22.7268,
+          25.3673,
+          32.8497
         ]
       },
       "pivotCheck": {
@@ -2386,40 +2419,40 @@
       },
       "treeMetrics": {
         "growthClass": "mature",
-        "height": 25.5882,
-        "trunkRadius": 0.9832,
-        "canopyRadius": 9.7277,
-        "canopyRadiusX": 9.7277,
-        "canopyRadiusY": 9.5316,
-        "canopyBase": 12.6988,
-        "canopyTop": 25.5882
+        "height": 32.8497,
+        "trunkRadius": 1.656,
+        "canopyRadius": 12.6836,
+        "canopyRadiusX": 11.3634,
+        "canopyRadiusY": 12.6836,
+        "canopyBase": 10.8267,
+        "canopyTop": 32.8497
       },
       "windData": {
         "attribute": "COLOR_0",
         "sourceAttribute": "wind",
         "domain": "POINT",
         "storage": "BYTE_COLOR",
-        "vertexCount": 5004,
-        "foliageVertexCount": 4440,
+        "vertexCount": 12220,
+        "foliageVertexCount": 11400,
         "rootVertexCount": 11,
         "rootMaxBend": 0.0,
-        "crownMinBend": 0.3564,
+        "crownMinBend": 0.1845,
         "crownMaxBend": 1.0,
         "channels": {
           "bendR": {
             "min": 0.0,
             "max": 1.0,
-            "mean": 0.5277
+            "mean": 0.5036
           },
           "phaseG": {
-            "min": 0.0003,
+            "min": 0.0,
             "max": 1.0,
-            "mean": 0.5012
+            "mean": 0.5475
           },
           "flutterB": {
             "min": 0.0,
             "max": 0.956,
-            "mean": 0.6843
+            "mean": 0.7189
           },
           "reservedA": {
             "min": 1.0,
@@ -2433,33 +2466,38 @@
         "mapping": "branch_local_circumference_u_physical_length_v",
         "authoredRepeatsPerMeter": 0.72,
         "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
-        "barkVertexCount": 564,
-        "barkLoopCount": 2928,
+        "barkVertexCount": 820,
+        "barkLoopCount": 4224,
         "uRange": [
           0.0125,
           1.1071
         ],
         "vRange": [
           0.0,
-          13.2102
+          16.9091
         ]
       },
       "canopyStructure": {
         "foliagePrimitive": "individual_triangular_leaf_card",
-        "foliagePrimitiveCount": 1480,
-        "structure": "three_generation_terminal_leaf_canopy",
-        "crownLayerCount": 4,
-        "branchClusterCount": 36,
-        "terminalTipCount": 37
+        "foliagePrimitiveCount": 3800,
+        "structure": "multitier_four_generation_branch_length_and_terminal_leaf_canopy",
+        "foliageDistribution": "branch_length_and_terminal",
+        "crownLayerCount": 5,
+        "branchClusterCount": 56,
+        "branchInteriorAnchorCount": 72,
+        "terminalFoliageAnchorCount": 57,
+        "terminalTipCount": 57
       },
       "treePhenotype": {
         "architecture": "broadleaf",
         "ageBand": "mature",
         "nominalGrowth": 0.5,
-        "branchGenerationCount": 3,
-        "primaryBranchCount": 12,
-        "secondaryBranchCount": 24,
-        "terminalTipCount": 37,
+        "branchGenerationCount": 4,
+        "primaryBranchCount": 14,
+        "secondaryBranchCount": 28,
+        "tertiaryBranchCount": 14,
+        "terminalTipCount": 57,
+        "branchInteriorAnchorCount": 72,
         "minimumSectorOccupancy": 1,
         "minimumFullnessPassed": true,
         "variant": 2
@@ -2477,23 +2515,23 @@
         "swamp",
         "beach"
       ],
-      "triangleCount": 3524,
-      "triangleLimit": 6200,
+      "triangleCount": 9384,
+      "triangleLimit": 11600,
       "boundingBox": {
         "min": [
-          -14.4245,
-          -14.1322,
+          -20.2095,
+          -21.5127,
           0.0
         ],
         "max": [
-          14.9745,
-          13.7689,
-          31.4906
+          20.7939,
+          22.2317,
+          49.4194
         ],
         "size": [
-          29.399,
-          27.901,
-          31.4906
+          41.0034,
+          43.7444,
+          49.4194
         ]
       },
       "pivotCheck": {
@@ -2532,40 +2570,40 @@
       },
       "treeMetrics": {
         "growthClass": "old",
-        "height": 31.4906,
-        "trunkRadius": 1.3028,
-        "canopyRadius": 14.6995,
-        "canopyRadiusX": 14.6995,
-        "canopyRadiusY": 13.9505,
-        "canopyBase": 14.9082,
-        "canopyTop": 31.4906
+        "height": 49.4194,
+        "trunkRadius": 3.1362,
+        "canopyRadius": 21.8722,
+        "canopyRadiusX": 20.5017,
+        "canopyRadiusY": 21.8722,
+        "canopyBase": 16.626,
+        "canopyTop": 49.4194
       },
       "windData": {
         "attribute": "COLOR_0",
         "sourceAttribute": "wind",
         "domain": "POINT",
         "storage": "BYTE_COLOR",
-        "vertexCount": 7656,
-        "foliageVertexCount": 6960,
+        "vertexCount": 21912,
+        "foliageVertexCount": 20400,
         "rootVertexCount": 11,
         "rootMaxBend": 0.0,
-        "crownMinBend": 0.3278,
+        "crownMinBend": 0.1912,
         "crownMaxBend": 1.0,
         "channels": {
           "bendR": {
             "min": 0.0,
             "max": 1.0,
-            "mean": 0.5351
+            "mean": 0.5247
           },
           "phaseG": {
-            "min": 0.0006,
+            "min": 0.0,
             "max": 1.0,
-            "mean": 0.4893
+            "mean": 0.4807
           },
           "flutterB": {
             "min": 0.0,
             "max": 0.956,
-            "mean": 0.7008
+            "mean": 0.7175
           },
           "reservedA": {
             "min": 1.0,
@@ -2579,33 +2617,38 @@
         "mapping": "branch_local_circumference_u_physical_length_v",
         "authoredRepeatsPerMeter": 0.72,
         "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
-        "barkVertexCount": 696,
-        "barkLoopCount": 3612,
+        "barkVertexCount": 1512,
+        "barkLoopCount": 7752,
         "uRange": [
           0.0125,
           1.1071
         ],
         "vRange": [
           0.0,
-          16.292
+          25.4562
         ]
       },
       "canopyStructure": {
         "foliagePrimitive": "individual_triangular_leaf_card",
-        "foliagePrimitiveCount": 2320,
-        "structure": "three_generation_terminal_leaf_canopy",
-        "crownLayerCount": 4,
-        "branchClusterCount": 45,
-        "terminalTipCount": 46
+        "foliagePrimitiveCount": 6800,
+        "structure": "multitier_four_generation_branch_length_and_terminal_leaf_canopy",
+        "foliageDistribution": "branch_length_and_terminal",
+        "crownLayerCount": 7,
+        "branchClusterCount": 108,
+        "branchInteriorAnchorCount": 201,
+        "terminalFoliageAnchorCount": 109,
+        "terminalTipCount": 109
       },
       "treePhenotype": {
         "architecture": "broadleaf",
         "ageBand": "old",
         "nominalGrowth": 0.75,
-        "branchGenerationCount": 3,
-        "primaryBranchCount": 15,
-        "secondaryBranchCount": 30,
-        "terminalTipCount": 46,
+        "branchGenerationCount": 4,
+        "primaryBranchCount": 18,
+        "secondaryBranchCount": 54,
+        "tertiaryBranchCount": 36,
+        "terminalTipCount": 109,
+        "branchInteriorAnchorCount": 201,
         "minimumSectorOccupancy": 1,
         "minimumFullnessPassed": true,
         "variant": 1
@@ -2623,23 +2666,23 @@
         "swamp",
         "beach"
       ],
-      "triangleCount": 3524,
-      "triangleLimit": 6200,
+      "triangleCount": 9384,
+      "triangleLimit": 11600,
       "boundingBox": {
         "min": [
-          -12.7231,
-          -12.1413,
+          -20.1752,
+          -19.5534,
           0.0
         ],
         "max": [
-          11.9576,
-          12.3447,
-          33.0559
+          19.8584,
+          19.5214,
+          51.6635
         ],
         "size": [
-          24.6806,
-          24.486,
-          33.0559
+          40.0336,
+          39.0748,
+          51.6635
         ]
       },
       "pivotCheck": {
@@ -2678,40 +2721,40 @@
       },
       "treeMetrics": {
         "growthClass": "old",
-        "height": 33.0559,
-        "trunkRadius": 1.3972,
-        "canopyRadius": 12.3403,
-        "canopyRadiusX": 12.3403,
-        "canopyRadiusY": 12.243,
-        "canopyBase": 15.3033,
-        "canopyTop": 33.0559
+        "height": 51.6635,
+        "trunkRadius": 3.3637,
+        "canopyRadius": 20.0168,
+        "canopyRadiusX": 20.0168,
+        "canopyRadiusY": 19.5374,
+        "canopyBase": 17.1047,
+        "canopyTop": 51.6635
       },
       "windData": {
         "attribute": "COLOR_0",
         "sourceAttribute": "wind",
         "domain": "POINT",
         "storage": "BYTE_COLOR",
-        "vertexCount": 7656,
-        "foliageVertexCount": 6960,
+        "vertexCount": 21912,
+        "foliageVertexCount": 20400,
         "rootVertexCount": 11,
         "rootMaxBend": 0.0,
-        "crownMinBend": 0.3185,
+        "crownMinBend": 0.1878,
         "crownMaxBend": 1.0,
         "channels": {
           "bendR": {
             "min": 0.0,
             "max": 1.0,
-            "mean": 0.5374
+            "mean": 0.5277
           },
           "phaseG": {
-            "min": 0.0003,
+            "min": 0.0,
             "max": 1.0,
-            "mean": 0.499
+            "mean": 0.4921
           },
           "flutterB": {
             "min": 0.0,
             "max": 0.956,
-            "mean": 0.7008
+            "mean": 0.7175
           },
           "reservedA": {
             "min": 1.0,
@@ -2725,33 +2768,38 @@
         "mapping": "branch_local_circumference_u_physical_length_v",
         "authoredRepeatsPerMeter": 0.72,
         "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
-        "barkVertexCount": 696,
-        "barkLoopCount": 3612,
+        "barkVertexCount": 1512,
+        "barkLoopCount": 7752,
         "uRange": [
           0.0125,
           1.1071
         ],
         "vRange": [
           0.0,
-          17.1622
+          26.8159
         ]
       },
       "canopyStructure": {
         "foliagePrimitive": "individual_triangular_leaf_card",
-        "foliagePrimitiveCount": 2320,
-        "structure": "three_generation_terminal_leaf_canopy",
-        "crownLayerCount": 4,
-        "branchClusterCount": 45,
-        "terminalTipCount": 46
+        "foliagePrimitiveCount": 6800,
+        "structure": "multitier_four_generation_branch_length_and_terminal_leaf_canopy",
+        "foliageDistribution": "branch_length_and_terminal",
+        "crownLayerCount": 7,
+        "branchClusterCount": 108,
+        "branchInteriorAnchorCount": 201,
+        "terminalFoliageAnchorCount": 109,
+        "terminalTipCount": 109
       },
       "treePhenotype": {
         "architecture": "broadleaf",
         "ageBand": "old",
         "nominalGrowth": 0.75,
-        "branchGenerationCount": 3,
-        "primaryBranchCount": 15,
-        "secondaryBranchCount": 30,
-        "terminalTipCount": 46,
+        "branchGenerationCount": 4,
+        "primaryBranchCount": 18,
+        "secondaryBranchCount": 54,
+        "tertiaryBranchCount": 36,
+        "terminalTipCount": 109,
+        "branchInteriorAnchorCount": 201,
         "minimumSectorOccupancy": 1,
         "minimumFullnessPassed": true,
         "variant": 2
@@ -2769,23 +2817,23 @@
         "swamp",
         "beach"
       ],
-      "triangleCount": 4672,
-      "triangleLimit": 6200,
+      "triangleCount": 13144,
+      "triangleLimit": 15400,
       "boundingBox": {
         "min": [
-          -15.45,
-          -14.6902,
+          -25.6776,
+          -30.7778,
           0.0
         ],
         "max": [
-          16.8809,
-          16.5797,
-          37.8875
+          29.6075,
+          29.1465,
+          71.9212
         ],
         "size": [
-          32.331,
-          31.2699,
-          37.8875
+          55.2851,
+          59.9244,
+          71.9212
         ]
       },
       "pivotCheck": {
@@ -2824,40 +2872,40 @@
       },
       "treeMetrics": {
         "growthClass": "ancient",
-        "height": 37.8875,
-        "trunkRadius": 1.737,
-        "canopyRadius": 16.1655,
-        "canopyRadiusX": 16.1655,
-        "canopyRadiusY": 15.6349,
-        "canopyBase": 18.6552,
-        "canopyTop": 37.8875
+        "height": 71.9212,
+        "trunkRadius": 5.79,
+        "canopyRadius": 29.9622,
+        "canopyRadiusX": 27.6426,
+        "canopyRadiusY": 29.9622,
+        "canopyBase": 25.593,
+        "canopyTop": 71.9212
       },
       "windData": {
         "attribute": "COLOR_0",
         "sourceAttribute": "wind",
         "domain": "POINT",
         "storage": "BYTE_COLOR",
-        "vertexCount": 10548,
-        "foliageVertexCount": 9720,
+        "vertexCount": 31840,
+        "foliageVertexCount": 30000,
         "rootVertexCount": 11,
         "rootMaxBend": 0.0,
-        "crownMinBend": 0.3515,
+        "crownMinBend": 0.2086,
         "crownMaxBend": 1.0,
         "channels": {
           "bendR": {
             "min": 0.0,
             "max": 1.0,
-            "mean": 0.5446
+            "mean": 0.5442
           },
           "phaseG": {
             "min": 0.0,
             "max": 1.0,
-            "mean": 0.5035
+            "mean": 0.4897
           },
           "flutterB": {
             "min": 0.0,
             "max": 0.956,
-            "mean": 0.7102
+            "mean": 0.726
           },
           "reservedA": {
             "min": 1.0,
@@ -2871,33 +2919,38 @@
         "mapping": "branch_local_circumference_u_physical_length_v",
         "authoredRepeatsPerMeter": 0.72,
         "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
-        "barkVertexCount": 828,
-        "barkLoopCount": 4296,
+        "barkVertexCount": 1840,
+        "barkLoopCount": 9432,
         "uRange": [
           0.0125,
           1.1071
         ],
         "vRange": [
           0.0,
-          19.6151
+          37.2184
         ]
       },
       "canopyStructure": {
         "foliagePrimitive": "individual_triangular_leaf_card",
-        "foliagePrimitiveCount": 3240,
-        "structure": "three_generation_terminal_leaf_canopy",
-        "crownLayerCount": 4,
-        "branchClusterCount": 54,
-        "terminalTipCount": 55
+        "foliagePrimitiveCount": 10000,
+        "structure": "multitier_four_generation_branch_length_and_terminal_leaf_canopy",
+        "foliageDistribution": "branch_length_and_terminal",
+        "crownLayerCount": 9,
+        "branchClusterCount": 132,
+        "branchInteriorAnchorCount": 334,
+        "terminalFoliageAnchorCount": 133,
+        "terminalTipCount": 133
       },
       "treePhenotype": {
         "architecture": "broadleaf",
         "ageBand": "ancient",
         "nominalGrowth": 1.0,
-        "branchGenerationCount": 3,
-        "primaryBranchCount": 18,
-        "secondaryBranchCount": 36,
-        "terminalTipCount": 55,
+        "branchGenerationCount": 4,
+        "primaryBranchCount": 22,
+        "secondaryBranchCount": 66,
+        "tertiaryBranchCount": 44,
+        "terminalTipCount": 133,
+        "branchInteriorAnchorCount": 334,
         "minimumSectorOccupancy": 1,
         "minimumFullnessPassed": true,
         "variant": 1
@@ -2915,23 +2968,23 @@
         "swamp",
         "beach"
       ],
-      "triangleCount": 4672,
-      "triangleLimit": 6200,
+      "triangleCount": 13144,
+      "triangleLimit": 15400,
       "boundingBox": {
         "min": [
-          -15.604,
-          -15.6785,
+          -26.9327,
+          -29.1195,
           0.0
         ],
         "max": [
-          15.3049,
-          16.8944,
-          39.6964
+          26.5338,
+          30.1013,
+          75.4427
         ],
         "size": [
-          30.9089,
-          32.5729,
-          39.6964
+          53.4665,
+          59.2208,
+          75.4427
         ]
       },
       "pivotCheck": {
@@ -2970,40 +3023,40 @@
       },
       "treeMetrics": {
         "growthClass": "ancient",
-        "height": 39.6964,
-        "trunkRadius": 1.863,
-        "canopyRadius": 16.2865,
-        "canopyRadiusX": 15.4544,
-        "canopyRadiusY": 16.2865,
-        "canopyBase": 20.6589,
-        "canopyTop": 39.6964
+        "height": 75.4427,
+        "trunkRadius": 6.21,
+        "canopyRadius": 29.6104,
+        "canopyRadiusX": 26.7333,
+        "canopyRadiusY": 29.6104,
+        "canopyBase": 27.2525,
+        "canopyTop": 75.4427
       },
       "windData": {
         "attribute": "COLOR_0",
         "sourceAttribute": "wind",
         "domain": "POINT",
         "storage": "BYTE_COLOR",
-        "vertexCount": 10548,
-        "foliageVertexCount": 9720,
+        "vertexCount": 31840,
+        "foliageVertexCount": 30000,
         "rootVertexCount": 11,
         "rootMaxBend": 0.0,
-        "crownMinBend": 0.3813,
+        "crownMinBend": 0.2159,
         "crownMaxBend": 1.0,
         "channels": {
           "bendR": {
             "min": 0.0,
             "max": 1.0,
-            "mean": 0.5763
+            "mean": 0.5485
           },
           "phaseG": {
             "min": 0.0,
             "max": 1.0,
-            "mean": 0.5068
+            "mean": 0.5244
           },
           "flutterB": {
             "min": 0.0,
             "max": 0.956,
-            "mean": 0.7103
+            "mean": 0.726
           },
           "reservedA": {
             "min": 1.0,
@@ -3017,33 +3070,38 @@
         "mapping": "branch_local_circumference_u_physical_length_v",
         "authoredRepeatsPerMeter": 0.72,
         "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
-        "barkVertexCount": 828,
-        "barkLoopCount": 4296,
+        "barkVertexCount": 1840,
+        "barkLoopCount": 9432,
         "uRange": [
           0.0125,
           1.1071
         ],
         "vRange": [
           0.0,
-          20.6763
+          39.2319
         ]
       },
       "canopyStructure": {
         "foliagePrimitive": "individual_triangular_leaf_card",
-        "foliagePrimitiveCount": 3240,
-        "structure": "three_generation_terminal_leaf_canopy",
-        "crownLayerCount": 4,
-        "branchClusterCount": 54,
-        "terminalTipCount": 55
+        "foliagePrimitiveCount": 10000,
+        "structure": "multitier_four_generation_branch_length_and_terminal_leaf_canopy",
+        "foliageDistribution": "branch_length_and_terminal",
+        "crownLayerCount": 9,
+        "branchClusterCount": 132,
+        "branchInteriorAnchorCount": 334,
+        "terminalFoliageAnchorCount": 133,
+        "terminalTipCount": 133
       },
       "treePhenotype": {
         "architecture": "broadleaf",
         "ageBand": "ancient",
         "nominalGrowth": 1.0,
-        "branchGenerationCount": 3,
-        "primaryBranchCount": 18,
-        "secondaryBranchCount": 36,
-        "terminalTipCount": 55,
+        "branchGenerationCount": 4,
+        "primaryBranchCount": 22,
+        "secondaryBranchCount": 66,
+        "tertiaryBranchCount": 44,
+        "terminalTipCount": 133,
+        "branchInteriorAnchorCount": 334,
         "minimumSectorOccupancy": 1,
         "minimumFullnessPassed": true,
         "variant": 2
@@ -3061,23 +3119,23 @@
         "alpine",
         "tundra"
       ],
-      "triangleCount": 728,
-      "triangleLimit": 6200,
+      "triangleCount": 1048,
+      "triangleLimit": 2600,
       "boundingBox": {
         "min": [
-          -3.1507,
-          -3.4135,
+          -3.0681,
+          -3.3477,
           0.0
         ],
         "max": [
-          3.5042,
-          3.2517,
-          11.0711
+          3.3301,
+          3.1979,
+          10.9447
         ],
         "size": [
-          6.6548,
-          6.6653,
-          11.0711
+          6.3982,
+          6.5456,
+          10.9447
         ]
       },
       "pivotCheck": {
@@ -3114,21 +3172,21 @@
       },
       "treeMetrics": {
         "growthClass": "young",
-        "height": 11.0711,
+        "height": 10.9447,
         "trunkRadius": 0.291,
-        "canopyRadius": 3.3326,
-        "canopyRadiusX": 3.3274,
-        "canopyRadiusY": 3.3326,
-        "canopyBase": 1.0463,
-        "canopyTop": 11.0711
+        "canopyRadius": 3.2728,
+        "canopyRadiusX": 3.1991,
+        "canopyRadiusY": 3.2728,
+        "canopyBase": 1.0423,
+        "canopyTop": 10.9447
       },
       "windData": {
         "attribute": "COLOR_0",
         "sourceAttribute": "wind",
         "domain": "POINT",
         "storage": "BYTE_COLOR",
-        "vertexCount": 1212,
-        "foliageVertexCount": 960,
+        "vertexCount": 2172,
+        "foliageVertexCount": 1920,
         "rootVertexCount": 11,
         "rootMaxBend": 0.0,
         "crownMinBend": 0.0116,
@@ -3137,17 +3195,17 @@
           "bendR": {
             "min": 0.0,
             "max": 1.0,
-            "mean": 0.3646
+            "mean": 0.2869
           },
           "phaseG": {
-            "min": 0.0012,
+            "min": 0.0024,
             "max": 1.0,
-            "mean": 0.4948
+            "mean": 0.4875
           },
           "flutterB": {
             "min": 0.0,
             "max": 0.956,
-            "mean": 0.6114
+            "mean": 0.6816
           },
           "reservedA": {
             "min": 1.0,
@@ -3174,10 +3232,13 @@
       },
       "canopyStructure": {
         "foliagePrimitive": "individual_triangular_leaf_card",
-        "foliagePrimitiveCount": 320,
-        "structure": "layered_radial_bough_terminal_needle_canopy",
+        "foliagePrimitiveCount": 640,
+        "structure": "multitier_phyllotactic_bough_and_subbranch_needle_canopy",
+        "foliageDistribution": "branch_length_and_terminal",
         "crownLayerCount": 5,
         "branchClusterCount": 23,
+        "branchInteriorAnchorCount": 23,
+        "terminalFoliageAnchorCount": 24,
         "terminalTipCount": 24
       },
       "treePhenotype": {
@@ -3187,7 +3248,9 @@
         "branchGenerationCount": 2,
         "primaryBranchCount": 23,
         "secondaryBranchCount": 0,
+        "tertiaryBranchCount": 0,
         "terminalTipCount": 24,
+        "branchInteriorAnchorCount": 23,
         "minimumSectorOccupancy": 1,
         "minimumFullnessPassed": true,
         "variant": 1
@@ -3205,23 +3268,23 @@
         "alpine",
         "tundra"
       ],
-      "triangleCount": 712,
-      "triangleLimit": 6200,
+      "triangleCount": 1032,
+      "triangleLimit": 2600,
       "boundingBox": {
         "min": [
-          -3.3866,
-          -3.486,
+          -3.3921,
+          -3.312,
           0.0
         ],
         "max": [
-          3.4701,
-          3.4055,
-          11.4543
+          3.3626,
+          3.3166,
+          11.5406
         ],
         "size": [
-          6.8567,
-          6.8915,
-          11.4543
+          6.7547,
+          6.6286,
+          11.5406
         ]
       },
       "pivotCheck": {
@@ -3258,21 +3321,21 @@
       },
       "treeMetrics": {
         "growthClass": "young",
-        "height": 11.4543,
+        "height": 11.5406,
         "trunkRadius": 0.309,
-        "canopyRadius": 3.4457,
-        "canopyRadiusX": 3.4283,
-        "canopyRadiusY": 3.4457,
-        "canopyBase": 1.228,
-        "canopyTop": 11.4543
+        "canopyRadius": 3.3773,
+        "canopyRadiusX": 3.3773,
+        "canopyRadiusY": 3.3143,
+        "canopyBase": 1.2376,
+        "canopyTop": 11.5406
       },
       "windData": {
         "attribute": "COLOR_0",
         "sourceAttribute": "wind",
         "domain": "POINT",
         "storage": "BYTE_COLOR",
-        "vertexCount": 1202,
-        "foliageVertexCount": 960,
+        "vertexCount": 2162,
+        "foliageVertexCount": 1920,
         "rootVertexCount": 11,
         "rootMaxBend": 0.0,
         "crownMinBend": 0.0176,
@@ -3281,17 +3344,17 @@
           "bendR": {
             "min": 0.0,
             "max": 1.0,
-            "mean": 0.379
+            "mean": 0.2849
           },
           "phaseG": {
-            "min": 0.0012,
+            "min": 0.0006,
             "max": 1.0,
-            "mean": 0.5056
+            "mean": 0.5125
           },
           "flutterB": {
             "min": 0.0,
             "max": 0.956,
-            "mean": 0.6171
+            "mean": 0.6848
           },
           "reservedA": {
             "min": 1.0,
@@ -3318,10 +3381,13 @@
       },
       "canopyStructure": {
         "foliagePrimitive": "individual_triangular_leaf_card",
-        "foliagePrimitiveCount": 320,
-        "structure": "layered_radial_bough_terminal_needle_canopy",
+        "foliagePrimitiveCount": 640,
+        "structure": "multitier_phyllotactic_bough_and_subbranch_needle_canopy",
+        "foliageDistribution": "branch_length_and_terminal",
         "crownLayerCount": 5,
         "branchClusterCount": 22,
+        "branchInteriorAnchorCount": 22,
+        "terminalFoliageAnchorCount": 23,
         "terminalTipCount": 23
       },
       "treePhenotype": {
@@ -3331,7 +3397,9 @@
         "branchGenerationCount": 2,
         "primaryBranchCount": 22,
         "secondaryBranchCount": 0,
+        "tertiaryBranchCount": 0,
         "terminalTipCount": 23,
+        "branchInteriorAnchorCount": 22,
         "minimumSectorOccupancy": 1,
         "minimumFullnessPassed": true,
         "variant": 2
@@ -3349,23 +3417,23 @@
         "alpine",
         "tundra"
       ],
-      "triangleCount": 1272,
-      "triangleLimit": 6200,
+      "triangleCount": 2792,
+      "triangleLimit": 4400,
       "boundingBox": {
         "min": [
-          -4.1471,
-          -4.6776,
+          -4.8426,
+          -5.3102,
           0.0
         ],
         "max": [
-          4.8008,
-          4.2288,
-          16.8536
+          5.5317,
+          5.0932,
+          19.5767
         ],
         "size": [
-          8.9478,
-          8.9064,
-          16.8536
+          10.3743,
+          10.4034,
+          19.5767
         ]
       },
       "pivotCheck": {
@@ -3402,40 +3470,40 @@
       },
       "treeMetrics": {
         "growthClass": "established",
-        "height": 16.8536,
-        "trunkRadius": 0.4656,
-        "canopyRadius": 4.4739,
-        "canopyRadiusX": 4.4739,
-        "canopyRadiusY": 4.4532,
-        "canopyBase": 2.1346,
-        "canopyTop": 16.8536
+        "height": 19.5767,
+        "trunkRadius": 0.6305,
+        "canopyRadius": 5.2017,
+        "canopyRadiusX": 5.1871,
+        "canopyRadiusY": 5.2017,
+        "canopyBase": 2.7513,
+        "canopyTop": 19.5767
       },
       "windData": {
         "attribute": "COLOR_0",
         "sourceAttribute": "wind",
         "domain": "POINT",
         "storage": "BYTE_COLOR",
-        "vertexCount": 2502,
-        "foliageVertexCount": 2160,
+        "vertexCount": 5542,
+        "foliageVertexCount": 4800,
         "rootVertexCount": 11,
         "rootMaxBend": 0.0,
-        "crownMinBend": 0.0284,
+        "crownMinBend": 0.0369,
         "crownMaxBend": 1.0,
         "channels": {
           "bendR": {
             "min": 0.0,
             "max": 1.0,
-            "mean": 0.414
+            "mean": 0.3238
           },
           "phaseG": {
-            "min": 0.0003,
+            "min": 0.0006,
             "max": 1.0,
-            "mean": 0.486
+            "mean": 0.4961
           },
           "flutterB": {
             "min": 0.0,
             "max": 0.956,
-            "mean": 0.666
+            "mean": 0.6681
           },
           "reservedA": {
             "min": 1.0,
@@ -3449,33 +3517,38 @@
         "mapping": "branch_local_circumference_u_physical_length_v",
         "authoredRepeatsPerMeter": 0.72,
         "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
-        "barkVertexCount": 342,
-        "barkLoopCount": 1656,
+        "barkVertexCount": 742,
+        "barkLoopCount": 3576,
         "uRange": [
           0.0,
           1.05
         ],
         "vRange": [
           0.0,
-          11.6527
+          13.7091
         ]
       },
       "canopyStructure": {
         "foliagePrimitive": "individual_triangular_leaf_card",
-        "foliagePrimitiveCount": 720,
-        "structure": "layered_radial_bough_terminal_needle_canopy",
-        "crownLayerCount": 7,
-        "branchClusterCount": 32,
-        "terminalTipCount": 33
+        "foliagePrimitiveCount": 1600,
+        "structure": "multitier_phyllotactic_bough_and_subbranch_needle_canopy",
+        "foliageDistribution": "branch_length_and_terminal",
+        "crownLayerCount": 8,
+        "branchClusterCount": 72,
+        "branchInteriorAnchorCount": 108,
+        "terminalFoliageAnchorCount": 73,
+        "terminalTipCount": 73
       },
       "treePhenotype": {
         "architecture": "conifer",
         "ageBand": "established",
         "nominalGrowth": 0.25,
-        "branchGenerationCount": 2,
-        "primaryBranchCount": 32,
-        "secondaryBranchCount": 0,
-        "terminalTipCount": 33,
+        "branchGenerationCount": 3,
+        "primaryBranchCount": 36,
+        "secondaryBranchCount": 36,
+        "tertiaryBranchCount": 0,
+        "terminalTipCount": 73,
+        "branchInteriorAnchorCount": 108,
         "minimumSectorOccupancy": 1,
         "minimumFullnessPassed": true,
         "variant": 1
@@ -3493,23 +3566,23 @@
         "alpine",
         "tundra"
       ],
-      "triangleCount": 1256,
-      "triangleLimit": 6200,
+      "triangleCount": 2792,
+      "triangleLimit": 4400,
       "boundingBox": {
         "min": [
-          -4.608,
-          -4.6142,
+          -5.3279,
+          -5.3012,
           0.0
         ],
         "max": [
-          4.5133,
-          4.6502,
-          17.5353
+          5.3197,
+          5.5282,
+          20.3966
         ],
         "size": [
-          9.1214,
-          9.2645,
-          17.5353
+          10.6476,
+          10.8293,
+          20.3966
         ]
       },
       "pivotCheck": {
@@ -3546,21 +3619,21 @@
       },
       "treeMetrics": {
         "growthClass": "established",
-        "height": 17.5353,
-        "trunkRadius": 0.4944,
-        "canopyRadius": 4.6322,
-        "canopyRadiusX": 4.5607,
-        "canopyRadiusY": 4.6322,
-        "canopyBase": 2.4871,
-        "canopyTop": 17.5353
+        "height": 20.3966,
+        "trunkRadius": 0.6695,
+        "canopyRadius": 5.4147,
+        "canopyRadiusX": 5.3238,
+        "canopyRadiusY": 5.4147,
+        "canopyBase": 2.9009,
+        "canopyTop": 20.3966
       },
       "windData": {
         "attribute": "COLOR_0",
         "sourceAttribute": "wind",
         "domain": "POINT",
         "storage": "BYTE_COLOR",
-        "vertexCount": 2492,
-        "foliageVertexCount": 2160,
+        "vertexCount": 5542,
+        "foliageVertexCount": 4800,
         "rootVertexCount": 11,
         "rootMaxBend": 0.0,
         "crownMinBend": 0.0369,
@@ -3569,17 +3642,17 @@
           "bendR": {
             "min": 0.0,
             "max": 1.0,
-            "mean": 0.4172
+            "mean": 0.3374
           },
           "phaseG": {
-            "min": 0.0003,
+            "min": 0.0009,
             "max": 1.0,
-            "mean": 0.506
+            "mean": 0.5152
           },
           "flutterB": {
             "min": 0.0,
             "max": 0.956,
-            "mean": 0.6686
+            "mean": 0.6682
           },
           "reservedA": {
             "min": 1.0,
@@ -3593,33 +3666,38 @@
         "mapping": "branch_local_circumference_u_physical_length_v",
         "authoredRepeatsPerMeter": 0.72,
         "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
-        "barkVertexCount": 332,
-        "barkLoopCount": 1608,
+        "barkVertexCount": 742,
+        "barkLoopCount": 3576,
         "uRange": [
           0.0,
           1.05
         ],
         "vRange": [
           0.0,
-          12.1999
+          14.3529
         ]
       },
       "canopyStructure": {
         "foliagePrimitive": "individual_triangular_leaf_card",
-        "foliagePrimitiveCount": 720,
-        "structure": "layered_radial_bough_terminal_needle_canopy",
-        "crownLayerCount": 7,
-        "branchClusterCount": 31,
-        "terminalTipCount": 32
+        "foliagePrimitiveCount": 1600,
+        "structure": "multitier_phyllotactic_bough_and_subbranch_needle_canopy",
+        "foliageDistribution": "branch_length_and_terminal",
+        "crownLayerCount": 8,
+        "branchClusterCount": 72,
+        "branchInteriorAnchorCount": 108,
+        "terminalFoliageAnchorCount": 73,
+        "terminalTipCount": 73
       },
       "treePhenotype": {
         "architecture": "conifer",
         "ageBand": "established",
         "nominalGrowth": 0.25,
-        "branchGenerationCount": 2,
-        "primaryBranchCount": 31,
-        "secondaryBranchCount": 0,
-        "terminalTipCount": 32,
+        "branchGenerationCount": 3,
+        "primaryBranchCount": 36,
+        "secondaryBranchCount": 36,
+        "tertiaryBranchCount": 0,
+        "terminalTipCount": 73,
+        "branchInteriorAnchorCount": 108,
         "minimumSectorOccupancy": 1,
         "minimumFullnessPassed": true,
         "variant": 2
@@ -3637,23 +3715,23 @@
         "alpine",
         "tundra"
       ],
-      "triangleCount": 2180,
-      "triangleLimit": 6200,
+      "triangleCount": 5368,
+      "triangleLimit": 7400,
       "boundingBox": {
         "min": [
-          -6.0282,
-          -6.5418,
+          -8.3556,
+          -9.1524,
           0.0
         ],
         "max": [
-          6.7669,
-          6.1352,
-          24.4771
+          9.1937,
+          8.4928,
+          35.2652
         ],
         "size": [
-          12.7951,
-          12.677,
-          24.4771
+          17.5492,
+          17.6452,
+          35.2652
         ]
       },
       "pivotCheck": {
@@ -3690,40 +3768,40 @@
       },
       "treeMetrics": {
         "growthClass": "mature",
-        "height": 24.4771,
-        "trunkRadius": 0.7275,
-        "canopyRadius": 6.3975,
-        "canopyRadiusX": 6.3975,
-        "canopyRadiusY": 6.3385,
-        "canopyBase": 3.2089,
-        "canopyTop": 24.4771
+        "height": 35.2652,
+        "trunkRadius": 1.455,
+        "canopyRadius": 8.8226,
+        "canopyRadiusX": 8.7746,
+        "canopyRadiusY": 8.8226,
+        "canopyBase": 5.3034,
+        "canopyTop": 35.2652
       },
       "windData": {
         "attribute": "COLOR_0",
         "sourceAttribute": "wind",
         "domain": "POINT",
         "storage": "BYTE_COLOR",
-        "vertexCount": 4732,
-        "foliageVertexCount": 4260,
+        "vertexCount": 11902,
+        "foliageVertexCount": 10800,
         "rootVertexCount": 11,
         "rootMaxBend": 0.0,
-        "crownMinBend": 0.0307,
+        "crownMinBend": 0.0423,
         "crownMaxBend": 1.0,
         "channels": {
           "bendR": {
             "min": 0.0,
             "max": 1.0,
-            "mean": 0.4352
+            "mean": 0.36
           },
           "phaseG": {
             "min": 0.0003,
             "max": 1.0,
-            "mean": 0.4757
+            "mean": 0.4876
           },
           "flutterB": {
             "min": 0.0,
             "max": 0.956,
-            "mean": 0.694
+            "mean": 0.6995
           },
           "reservedA": {
             "min": 1.0,
@@ -3737,33 +3815,38 @@
         "mapping": "branch_local_circumference_u_physical_length_v",
         "authoredRepeatsPerMeter": 0.72,
         "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
-        "barkVertexCount": 472,
-        "barkLoopCount": 2280,
+        "barkVertexCount": 1102,
+        "barkLoopCount": 5304,
         "uRange": [
           0.0,
           1.05
         ],
         "vRange": [
           0.0,
-          17.1671
+          24.7206
         ]
       },
       "canopyStructure": {
         "foliagePrimitive": "individual_triangular_leaf_card",
-        "foliagePrimitiveCount": 1420,
-        "structure": "layered_radial_bough_terminal_needle_canopy",
-        "crownLayerCount": 10,
-        "branchClusterCount": 45,
-        "terminalTipCount": 46
+        "foliagePrimitiveCount": 3600,
+        "structure": "multitier_phyllotactic_bough_and_subbranch_needle_canopy",
+        "foliageDistribution": "branch_length_and_terminal",
+        "crownLayerCount": 12,
+        "branchClusterCount": 108,
+        "branchInteriorAnchorCount": 162,
+        "terminalFoliageAnchorCount": 109,
+        "terminalTipCount": 109
       },
       "treePhenotype": {
         "architecture": "conifer",
         "ageBand": "mature",
         "nominalGrowth": 0.5,
-        "branchGenerationCount": 2,
-        "primaryBranchCount": 45,
-        "secondaryBranchCount": 0,
-        "terminalTipCount": 46,
+        "branchGenerationCount": 3,
+        "primaryBranchCount": 54,
+        "secondaryBranchCount": 54,
+        "tertiaryBranchCount": 0,
+        "terminalTipCount": 109,
+        "branchInteriorAnchorCount": 162,
         "minimumSectorOccupancy": 1,
         "minimumFullnessPassed": true,
         "variant": 1
@@ -3781,23 +3864,23 @@
         "alpine",
         "tundra"
       ],
-      "triangleCount": 2180,
-      "triangleLimit": 6200,
+      "triangleCount": 5368,
+      "triangleLimit": 7400,
       "boundingBox": {
         "min": [
-          -6.2491,
-          -6.1564,
+          -8.5049,
+          -8.495,
           0.0
         ],
         "max": [
-          6.1574,
-          6.0206,
-          25.3099
+          8.5632,
+          8.6347,
+          36.5115
         ],
         "size": [
-          12.4066,
-          12.177,
-          25.3099
+          17.0682,
+          17.1297,
+          36.5115
         ]
       },
       "pivotCheck": {
@@ -3834,40 +3917,40 @@
       },
       "treeMetrics": {
         "growthClass": "mature",
-        "height": 25.3099,
-        "trunkRadius": 0.7725,
-        "canopyRadius": 6.2033,
-        "canopyRadiusX": 6.2033,
-        "canopyRadiusY": 6.0885,
-        "canopyBase": 3.4936,
-        "canopyTop": 25.3099
+        "height": 36.5115,
+        "trunkRadius": 1.545,
+        "canopyRadius": 8.5648,
+        "canopyRadiusX": 8.5341,
+        "canopyRadiusY": 8.5648,
+        "canopyBase": 5.5679,
+        "canopyTop": 36.5115
       },
       "windData": {
         "attribute": "COLOR_0",
         "sourceAttribute": "wind",
         "domain": "POINT",
         "storage": "BYTE_COLOR",
-        "vertexCount": 4732,
-        "foliageVertexCount": 4260,
+        "vertexCount": 11902,
+        "foliageVertexCount": 10800,
         "rootVertexCount": 11,
         "rootMaxBend": 0.0,
-        "crownMinBend": 0.0343,
+        "crownMinBend": 0.0437,
         "crownMaxBend": 1.0,
         "channels": {
           "bendR": {
             "min": 0.0,
             "max": 1.0,
-            "mean": 0.4468
+            "mean": 0.3481
           },
           "phaseG": {
-            "min": 0.0006,
+            "min": 0.0,
             "max": 1.0,
-            "mean": 0.5014
+            "mean": 0.5059
           },
           "flutterB": {
             "min": 0.0,
             "max": 0.956,
-            "mean": 0.6942
+            "mean": 0.6995
           },
           "reservedA": {
             "min": 1.0,
@@ -3881,33 +3964,38 @@
         "mapping": "branch_local_circumference_u_physical_length_v",
         "authoredRepeatsPerMeter": 0.72,
         "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
-        "barkVertexCount": 472,
-        "barkLoopCount": 2280,
+        "barkVertexCount": 1102,
+        "barkLoopCount": 5304,
         "uRange": [
           0.0,
           1.05
         ],
         "vRange": [
           0.0,
-          17.7761
+          25.5976
         ]
       },
       "canopyStructure": {
         "foliagePrimitive": "individual_triangular_leaf_card",
-        "foliagePrimitiveCount": 1420,
-        "structure": "layered_radial_bough_terminal_needle_canopy",
-        "crownLayerCount": 10,
-        "branchClusterCount": 45,
-        "terminalTipCount": 46
+        "foliagePrimitiveCount": 3600,
+        "structure": "multitier_phyllotactic_bough_and_subbranch_needle_canopy",
+        "foliageDistribution": "branch_length_and_terminal",
+        "crownLayerCount": 12,
+        "branchClusterCount": 108,
+        "branchInteriorAnchorCount": 162,
+        "terminalFoliageAnchorCount": 109,
+        "terminalTipCount": 109
       },
       "treePhenotype": {
         "architecture": "conifer",
         "ageBand": "mature",
         "nominalGrowth": 0.5,
-        "branchGenerationCount": 2,
-        "primaryBranchCount": 45,
-        "secondaryBranchCount": 0,
-        "terminalTipCount": 46,
+        "branchGenerationCount": 3,
+        "primaryBranchCount": 54,
+        "secondaryBranchCount": 54,
+        "tertiaryBranchCount": 0,
+        "terminalTipCount": 109,
+        "branchInteriorAnchorCount": 162,
         "minimumSectorOccupancy": 1,
         "minimumFullnessPassed": true,
         "variant": 2
@@ -3925,23 +4013,23 @@
         "alpine",
         "tundra"
       ],
-      "triangleCount": 3244,
-      "triangleLimit": 6200,
+      "triangleCount": 8904,
+      "triangleLimit": 11600,
       "boundingBox": {
         "min": [
-          -6.8426,
-          -7.5916,
+          -12.1605,
+          -12.7285,
           0.0
         ],
         "max": [
-          7.7002,
-          7.0389,
-          32.8857
+          12.8292,
+          11.784,
+          56.5714
         ],
         "size": [
-          14.5428,
-          14.6305,
-          32.8857
+          24.9898,
+          24.5125,
+          56.5714
         ]
       },
       "pivotCheck": {
@@ -3978,40 +4066,40 @@
       },
       "treeMetrics": {
         "growthClass": "old",
-        "height": 32.8857,
-        "trunkRadius": 1.0185,
-        "canopyRadius": 7.3152,
-        "canopyRadiusX": 7.2714,
-        "canopyRadiusY": 7.3152,
-        "canopyBase": 4.5867,
-        "canopyTop": 32.8857
+        "height": 56.5714,
+        "trunkRadius": 2.91,
+        "canopyRadius": 12.4949,
+        "canopyRadiusX": 12.4949,
+        "canopyRadiusY": 12.2563,
+        "canopyBase": 8.7156,
+        "canopyTop": 56.5714
       },
       "windData": {
         "attribute": "COLOR_0",
         "sourceAttribute": "wind",
         "domain": "POINT",
         "storage": "BYTE_COLOR",
-        "vertexCount": 7392,
-        "foliageVertexCount": 6780,
+        "vertexCount": 20762,
+        "foliageVertexCount": 19200,
         "rootVertexCount": 11,
         "rootMaxBend": 0.0,
-        "crownMinBend": 0.0356,
+        "crownMinBend": 0.0452,
         "crownMaxBend": 1.0,
         "channels": {
           "bendR": {
             "min": 0.0,
             "max": 1.0,
-            "mean": 0.4503
+            "mean": 0.361
           },
           "phaseG": {
             "min": 0.0,
             "max": 1.0,
-            "mean": 0.4822
+            "mean": 0.4937
           },
           "flutterB": {
             "min": 0.0,
             "max": 0.956,
-            "mean": 0.7069
+            "mean": 0.7127
           },
           "reservedA": {
             "min": 1.0,
@@ -4025,33 +4113,38 @@
         "mapping": "branch_local_circumference_u_physical_length_v",
         "authoredRepeatsPerMeter": 0.72,
         "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
-        "barkVertexCount": 612,
-        "barkLoopCount": 2952,
+        "barkVertexCount": 1562,
+        "barkLoopCount": 7512,
         "uRange": [
           0.0,
           1.05
         ],
         "vRange": [
           0.0,
-          23.0763
+          39.3654
         ]
       },
       "canopyStructure": {
         "foliagePrimitive": "individual_triangular_leaf_card",
-        "foliagePrimitiveCount": 2260,
-        "structure": "layered_radial_bough_terminal_needle_canopy",
-        "crownLayerCount": 13,
-        "branchClusterCount": 59,
-        "terminalTipCount": 60
+        "foliagePrimitiveCount": 6400,
+        "structure": "multitier_phyllotactic_bough_and_subbranch_needle_canopy",
+        "foliageDistribution": "branch_length_and_terminal",
+        "crownLayerCount": 17,
+        "branchClusterCount": 154,
+        "branchInteriorAnchorCount": 385,
+        "terminalFoliageAnchorCount": 155,
+        "terminalTipCount": 155
       },
       "treePhenotype": {
         "architecture": "conifer",
         "ageBand": "old",
         "nominalGrowth": 0.75,
-        "branchGenerationCount": 2,
-        "primaryBranchCount": 59,
-        "secondaryBranchCount": 0,
-        "terminalTipCount": 60,
+        "branchGenerationCount": 3,
+        "primaryBranchCount": 77,
+        "secondaryBranchCount": 77,
+        "tertiaryBranchCount": 0,
+        "terminalTipCount": 155,
+        "branchInteriorAnchorCount": 385,
         "minimumSectorOccupancy": 1,
         "minimumFullnessPassed": true,
         "variant": 1
@@ -4069,23 +4162,23 @@
         "alpine",
         "tundra"
       ],
-      "triangleCount": 3228,
-      "triangleLimit": 6200,
+      "triangleCount": 8872,
+      "triangleLimit": 11600,
       "boundingBox": {
         "min": [
-          -7.6087,
-          -7.6125,
+          -12.6385,
+          -12.7792,
           0.0
         ],
         "max": [
-          7.7449,
-          7.5923,
-          34.7244
+          12.7186,
+          12.6493,
+          59.4849
         ],
         "size": [
-          15.3536,
-          15.2048,
-          34.7244
+          25.357,
+          25.4285,
+          59.4849
         ]
       },
       "pivotCheck": {
@@ -4122,40 +4215,40 @@
       },
       "treeMetrics": {
         "growthClass": "old",
-        "height": 34.7244,
-        "trunkRadius": 1.0815,
-        "canopyRadius": 7.6768,
-        "canopyRadiusX": 7.6768,
-        "canopyRadiusY": 7.6024,
-        "canopyBase": 4.9409,
-        "canopyTop": 34.7244
+        "height": 59.4849,
+        "trunkRadius": 3.09,
+        "canopyRadius": 12.7142,
+        "canopyRadiusX": 12.6785,
+        "canopyRadiusY": 12.7142,
+        "canopyBase": 9.2026,
+        "canopyTop": 59.4849
       },
       "windData": {
         "attribute": "COLOR_0",
         "sourceAttribute": "wind",
         "domain": "POINT",
         "storage": "BYTE_COLOR",
-        "vertexCount": 7382,
-        "foliageVertexCount": 6780,
+        "vertexCount": 20742,
+        "foliageVertexCount": 19200,
         "rootVertexCount": 11,
         "rootMaxBend": 0.0,
-        "crownMinBend": 0.0369,
+        "crownMinBend": 0.0452,
         "crownMaxBend": 1.0,
         "channels": {
           "bendR": {
             "min": 0.0,
             "max": 1.0,
-            "mean": 0.4488
+            "mean": 0.3685
           },
           "phaseG": {
-            "min": 0.0015,
+            "min": 0.0,
             "max": 1.0,
-            "mean": 0.4911
+            "mean": 0.5027
           },
           "flutterB": {
             "min": 0.0,
             "max": 0.956,
-            "mean": 0.7079
+            "mean": 0.7133
           },
           "reservedA": {
             "min": 1.0,
@@ -4169,33 +4262,38 @@
         "mapping": "branch_local_circumference_u_physical_length_v",
         "authoredRepeatsPerMeter": 0.72,
         "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
-        "barkVertexCount": 602,
-        "barkLoopCount": 2904,
+        "barkVertexCount": 1542,
+        "barkLoopCount": 7416,
         "uRange": [
           0.0,
           1.05
         ],
         "vRange": [
           0.0,
-          24.285
+          41.4273
         ]
       },
       "canopyStructure": {
         "foliagePrimitive": "individual_triangular_leaf_card",
-        "foliagePrimitiveCount": 2260,
-        "structure": "layered_radial_bough_terminal_needle_canopy",
-        "crownLayerCount": 13,
-        "branchClusterCount": 58,
-        "terminalTipCount": 59
+        "foliagePrimitiveCount": 6400,
+        "structure": "multitier_phyllotactic_bough_and_subbranch_needle_canopy",
+        "foliageDistribution": "branch_length_and_terminal",
+        "crownLayerCount": 17,
+        "branchClusterCount": 152,
+        "branchInteriorAnchorCount": 380,
+        "terminalFoliageAnchorCount": 153,
+        "terminalTipCount": 153
       },
       "treePhenotype": {
         "architecture": "conifer",
         "ageBand": "old",
         "nominalGrowth": 0.75,
-        "branchGenerationCount": 2,
-        "primaryBranchCount": 58,
-        "secondaryBranchCount": 0,
-        "terminalTipCount": 59,
+        "branchGenerationCount": 3,
+        "primaryBranchCount": 76,
+        "secondaryBranchCount": 76,
+        "tertiaryBranchCount": 0,
+        "terminalTipCount": 153,
+        "branchInteriorAnchorCount": 380,
         "minimumSectorOccupancy": 1,
         "minimumFullnessPassed": true,
         "variant": 2
@@ -4213,23 +4311,23 @@
         "alpine",
         "tundra"
       ],
-      "triangleCount": 4352,
-      "triangleLimit": 6200,
+      "triangleCount": 12808,
+      "triangleLimit": 15400,
       "boundingBox": {
         "min": [
-          -8.7323,
-          -9.7187,
+          -16.9619,
+          -18.7075,
           0.0
         ],
         "max": [
-          9.7022,
-          8.916,
-          42.2347
+          18.9051,
+          17.3592,
+          85.5162
         ],
         "size": [
-          18.4345,
-          18.6346,
-          42.2347
+          35.867,
+          36.0667,
+          85.5162
         ]
       },
       "pivotCheck": {
@@ -4266,40 +4364,40 @@
       },
       "treeMetrics": {
         "growthClass": "ancient",
-        "height": 42.2347,
-        "trunkRadius": 1.358,
-        "canopyRadius": 9.3173,
-        "canopyRadiusX": 9.2173,
-        "canopyRadiusY": 9.3173,
-        "canopyBase": 6.1292,
-        "canopyTop": 42.2347
+        "height": 85.5162,
+        "trunkRadius": 5.044,
+        "canopyRadius": 18.0333,
+        "canopyRadiusX": 17.9335,
+        "canopyRadiusY": 18.0333,
+        "canopyBase": 13.2535,
+        "canopyTop": 85.5162
       },
       "windData": {
         "attribute": "COLOR_0",
         "sourceAttribute": "wind",
         "domain": "POINT",
         "storage": "BYTE_COLOR",
-        "vertexCount": 10222,
-        "foliageVertexCount": 9480,
+        "vertexCount": 30802,
+        "foliageVertexCount": 28800,
         "rootVertexCount": 11,
         "rootMaxBend": 0.0,
-        "crownMinBend": 0.0395,
+        "crownMinBend": 0.0452,
         "crownMaxBend": 1.0,
         "channels": {
           "bendR": {
             "min": 0.0,
             "max": 1.0,
-            "mean": 0.4513
+            "mean": 0.3675
           },
           "phaseG": {
-            "min": 0.0003,
+            "min": 0.0,
             "max": 1.0,
-            "mean": 0.5015
+            "mean": 0.4967
           },
           "flutterB": {
             "min": 0.0,
             "max": 0.956,
-            "mean": 0.7147
+            "mean": 0.7204
           },
           "reservedA": {
             "min": 1.0,
@@ -4313,33 +4411,38 @@
         "mapping": "branch_local_circumference_u_physical_length_v",
         "authoredRepeatsPerMeter": 0.72,
         "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
-        "barkVertexCount": 742,
-        "barkLoopCount": 3576,
+        "barkVertexCount": 2002,
+        "barkLoopCount": 9624,
         "uRange": [
           0.0,
           1.05
         ],
         "vRange": [
           0.0,
-          29.5535
+          59.1069
         ]
       },
       "canopyStructure": {
         "foliagePrimitive": "individual_triangular_leaf_card",
-        "foliagePrimitiveCount": 3160,
-        "structure": "layered_radial_bough_terminal_needle_canopy",
-        "crownLayerCount": 16,
-        "branchClusterCount": 72,
-        "terminalTipCount": 73
+        "foliagePrimitiveCount": 9600,
+        "structure": "multitier_phyllotactic_bough_and_subbranch_needle_canopy",
+        "foliageDistribution": "branch_length_and_terminal",
+        "crownLayerCount": 22,
+        "branchClusterCount": 198,
+        "branchInteriorAnchorCount": 693,
+        "terminalFoliageAnchorCount": 199,
+        "terminalTipCount": 199
       },
       "treePhenotype": {
         "architecture": "conifer",
         "ageBand": "ancient",
         "nominalGrowth": 1.0,
-        "branchGenerationCount": 2,
-        "primaryBranchCount": 72,
-        "secondaryBranchCount": 0,
-        "terminalTipCount": 73,
+        "branchGenerationCount": 3,
+        "primaryBranchCount": 99,
+        "secondaryBranchCount": 99,
+        "tertiaryBranchCount": 0,
+        "terminalTipCount": 199,
+        "branchInteriorAnchorCount": 693,
         "minimumSectorOccupancy": 1,
         "minimumFullnessPassed": true,
         "variant": 1
@@ -4357,23 +4460,23 @@
         "alpine",
         "tundra"
       ],
-      "triangleCount": 4352,
-      "triangleLimit": 6200,
+      "triangleCount": 12808,
+      "triangleLimit": 15400,
       "boundingBox": {
         "min": [
-          -9.2255,
-          -9.1024,
+          -17.5405,
+          -17.8966,
           0.0
         ],
         "max": [
-          9.2734,
-          9.1828,
-          43.5886
+          18.2416,
+          17.6524,
+          88.1128
         ],
         "size": [
-          18.4989,
-          18.2852,
-          43.5886
+          35.7821,
+          35.549,
+          88.1128
         ]
       },
       "pivotCheck": {
@@ -4410,40 +4513,40 @@
       },
       "treeMetrics": {
         "growthClass": "ancient",
-        "height": 43.5886,
-        "trunkRadius": 1.442,
-        "canopyRadius": 9.2494,
-        "canopyRadiusX": 9.2494,
-        "canopyRadiusY": 9.1426,
-        "canopyBase": 6.4096,
-        "canopyTop": 43.5886
+        "height": 88.1128,
+        "trunkRadius": 5.356,
+        "canopyRadius": 17.8911,
+        "canopyRadiusX": 17.8911,
+        "canopyRadiusY": 17.7745,
+        "canopyBase": 14.0862,
+        "canopyTop": 88.1128
       },
       "windData": {
         "attribute": "COLOR_0",
         "sourceAttribute": "wind",
         "domain": "POINT",
         "storage": "BYTE_COLOR",
-        "vertexCount": 10222,
-        "foliageVertexCount": 9480,
+        "vertexCount": 30802,
+        "foliageVertexCount": 28800,
         "rootVertexCount": 11,
         "rootMaxBend": 0.0,
-        "crownMinBend": 0.0409,
+        "crownMinBend": 0.0482,
         "crownMaxBend": 1.0,
         "channels": {
           "bendR": {
             "min": 0.0,
             "max": 1.0,
-            "mean": 0.4568
+            "mean": 0.3691
           },
           "phaseG": {
-            "min": 0.0003,
+            "min": 0.0,
             "max": 1.0,
-            "mean": 0.4812
+            "mean": 0.502
           },
           "flutterB": {
             "min": 0.0,
             "max": 0.956,
-            "mean": 0.7147
+            "mean": 0.7204
           },
           "reservedA": {
             "min": 1.0,
@@ -4457,33 +4560,38 @@
         "mapping": "branch_local_circumference_u_physical_length_v",
         "authoredRepeatsPerMeter": 0.72,
         "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
-        "barkVertexCount": 742,
-        "barkLoopCount": 3576,
+        "barkVertexCount": 2002,
+        "barkLoopCount": 9624,
         "uRange": [
           0.0,
           1.05
         ],
         "vRange": [
           0.0,
-          30.4795
+          60.9591
         ]
       },
       "canopyStructure": {
         "foliagePrimitive": "individual_triangular_leaf_card",
-        "foliagePrimitiveCount": 3160,
-        "structure": "layered_radial_bough_terminal_needle_canopy",
-        "crownLayerCount": 16,
-        "branchClusterCount": 72,
-        "terminalTipCount": 73
+        "foliagePrimitiveCount": 9600,
+        "structure": "multitier_phyllotactic_bough_and_subbranch_needle_canopy",
+        "foliageDistribution": "branch_length_and_terminal",
+        "crownLayerCount": 22,
+        "branchClusterCount": 198,
+        "branchInteriorAnchorCount": 693,
+        "terminalFoliageAnchorCount": 199,
+        "terminalTipCount": 199
       },
       "treePhenotype": {
         "architecture": "conifer",
         "ageBand": "ancient",
         "nominalGrowth": 1.0,
-        "branchGenerationCount": 2,
-        "primaryBranchCount": 72,
-        "secondaryBranchCount": 0,
-        "terminalTipCount": 73,
+        "branchGenerationCount": 3,
+        "primaryBranchCount": 99,
+        "secondaryBranchCount": 99,
+        "tertiaryBranchCount": 0,
+        "terminalTipCount": 199,
+        "branchInteriorAnchorCount": 693,
         "minimumSectorOccupancy": 1,
         "minimumFullnessPassed": true,
         "variant": 2
@@ -4501,23 +4609,23 @@
         "desert",
         "beach"
       ],
-      "triangleCount": 620,
-      "triangleLimit": 6200,
+      "triangleCount": 968,
+      "triangleLimit": 2600,
       "boundingBox": {
         "min": [
-          -6.2696,
-          -4.3062,
-          -0.0249
+          -4.4352,
+          -3.7475,
+          0.0
         ],
         "max": [
-          4.7281,
-          3.3893,
-          9.1992
+          5.0047,
+          3.1509,
+          9.2515
         ],
         "size": [
-          10.9977,
-          7.6955,
-          9.2241
+          9.4399,
+          6.8984,
+          9.2515
         ]
       },
       "pivotCheck": {
@@ -4527,7 +4635,7 @@
           0.0
         ],
         "grounded": true,
-        "minZ": -0.0249,
+        "minZ": 0.0,
         "originXYCentered": true
       },
       "materialSlots": [
@@ -4554,40 +4662,40 @@
       },
       "treeMetrics": {
         "growthClass": "young",
-        "height": 9.2241,
+        "height": 9.2515,
         "trunkRadius": 0.2895,
-        "canopyRadius": 5.4988,
-        "canopyRadiusX": 5.4988,
-        "canopyRadiusY": 3.8477,
-        "canopyBase": 7.0583,
-        "canopyTop": 9.1992
+        "canopyRadius": 4.7199,
+        "canopyRadiusX": 4.7199,
+        "canopyRadiusY": 3.4492,
+        "canopyBase": 4.2449,
+        "canopyTop": 9.2515
       },
       "windData": {
         "attribute": "COLOR_0",
         "sourceAttribute": "wind",
         "domain": "POINT",
         "storage": "BYTE_COLOR",
-        "vertexCount": 1132,
-        "foliageVertexCount": 960,
+        "vertexCount": 2108,
+        "foliageVertexCount": 1920,
         "rootVertexCount": 11,
         "rootMaxBend": 0.0,
-        "crownMinBend": 0.6795,
+        "crownMinBend": 0.314,
         "crownMaxBend": 1.0,
         "channels": {
           "bendR": {
             "min": 0.0,
             "max": 1.0,
-            "mean": 0.7512
+            "mean": 0.5558
           },
           "phaseG": {
-            "min": 0.0003,
+            "min": 0.0009,
             "max": 1.0,
-            "mean": 0.4685
+            "mean": 0.4458
           },
           "flutterB": {
             "min": 0.0,
             "max": 0.956,
-            "mean": 0.6548
+            "mean": 0.7023
           },
           "reservedA": {
             "min": 1.0,
@@ -4601,24 +4709,27 @@
         "mapping": "branch_local_circumference_u_physical_length_v",
         "authoredRepeatsPerMeter": 0.72,
         "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
-        "barkVertexCount": 172,
-        "barkLoopCount": 900,
+        "barkVertexCount": 188,
+        "barkLoopCount": 984,
         "uRange": [
           0.0125,
           1.1071
         ],
         "vRange": [
           0.0,
-          4.3236
+          3.305
         ]
       },
       "canopyStructure": {
         "foliagePrimitive": "individual_triangular_leaf_card",
-        "foliagePrimitiveCount": 320,
-        "structure": "three_generation_umbrella_terminal_leaf_canopy",
-        "crownLayerCount": 3,
+        "foliagePrimitiveCount": 640,
+        "structure": "multitier_raised_lobe_four_generation_savanna_leaf_canopy",
+        "foliageDistribution": "branch_length_and_terminal",
+        "crownLayerCount": 2,
         "branchClusterCount": 10,
-        "terminalTipCount": 10
+        "branchInteriorAnchorCount": 11,
+        "terminalFoliageAnchorCount": 11,
+        "terminalTipCount": 11
       },
       "treePhenotype": {
         "architecture": "savanna",
@@ -4627,7 +4738,9 @@
         "branchGenerationCount": 3,
         "primaryBranchCount": 5,
         "secondaryBranchCount": 5,
-        "terminalTipCount": 10,
+        "tertiaryBranchCount": 0,
+        "terminalTipCount": 11,
+        "branchInteriorAnchorCount": 11,
         "minimumSectorOccupancy": 1,
         "minimumFullnessPassed": true,
         "variant": 1
@@ -4645,23 +4758,23 @@
         "desert",
         "beach"
       ],
-      "triangleCount": 620,
-      "triangleLimit": 6200,
+      "triangleCount": 968,
+      "triangleLimit": 2600,
       "boundingBox": {
         "min": [
-          -4.7545,
-          -4.5753,
-          -0.023
+          -3.7221,
+          -4.1602,
+          0.0
         ],
         "max": [
-          4.8528,
-          3.3678,
-          9.4086
+          3.8504,
+          3.0991,
+          9.532
         ],
         "size": [
-          9.6073,
-          7.943,
-          9.4316
+          7.5725,
+          7.2593,
+          9.532
         ]
       },
       "pivotCheck": {
@@ -4671,7 +4784,7 @@
           0.0
         ],
         "grounded": true,
-        "minZ": -0.023,
+        "minZ": 0.0,
         "originXYCentered": true
       },
       "materialSlots": [
@@ -4698,40 +4811,40 @@
       },
       "treeMetrics": {
         "growthClass": "young",
-        "height": 9.4316,
+        "height": 9.532,
         "trunkRadius": 0.3105,
-        "canopyRadius": 4.8037,
-        "canopyRadiusX": 4.8037,
-        "canopyRadiusY": 3.9715,
-        "canopyBase": 7.4,
-        "canopyTop": 9.4086
+        "canopyRadius": 3.7863,
+        "canopyRadiusX": 3.7863,
+        "canopyRadiusY": 3.6296,
+        "canopyBase": 4.3371,
+        "canopyTop": 9.532
       },
       "windData": {
         "attribute": "COLOR_0",
         "sourceAttribute": "wind",
         "domain": "POINT",
         "storage": "BYTE_COLOR",
-        "vertexCount": 1132,
-        "foliageVertexCount": 960,
+        "vertexCount": 2108,
+        "foliageVertexCount": 1920,
         "rootVertexCount": 11,
         "rootMaxBend": 0.0,
-        "crownMinBend": 0.7084,
+        "crownMinBend": 0.3095,
         "crownMaxBend": 1.0,
         "channels": {
           "bendR": {
             "min": 0.0,
             "max": 1.0,
-            "mean": 0.7668
+            "mean": 0.5493
           },
           "phaseG": {
-            "min": 0.0006,
+            "min": 0.0,
             "max": 1.0,
-            "mean": 0.4902
+            "mean": 0.5159
           },
           "flutterB": {
             "min": 0.0,
             "max": 0.956,
-            "mean": 0.655
+            "mean": 0.7022
           },
           "reservedA": {
             "min": 1.0,
@@ -4745,24 +4858,27 @@
         "mapping": "branch_local_circumference_u_physical_length_v",
         "authoredRepeatsPerMeter": 0.72,
         "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
-        "barkVertexCount": 172,
-        "barkLoopCount": 900,
+        "barkVertexCount": 188,
+        "barkLoopCount": 984,
         "uRange": [
           0.0125,
           1.1071
         ],
         "vRange": [
           0.0,
-          4.4784
+          3.4237
         ]
       },
       "canopyStructure": {
         "foliagePrimitive": "individual_triangular_leaf_card",
-        "foliagePrimitiveCount": 320,
-        "structure": "three_generation_umbrella_terminal_leaf_canopy",
-        "crownLayerCount": 3,
+        "foliagePrimitiveCount": 640,
+        "structure": "multitier_raised_lobe_four_generation_savanna_leaf_canopy",
+        "foliageDistribution": "branch_length_and_terminal",
+        "crownLayerCount": 2,
         "branchClusterCount": 10,
-        "terminalTipCount": 10
+        "branchInteriorAnchorCount": 11,
+        "terminalFoliageAnchorCount": 11,
+        "terminalTipCount": 11
       },
       "treePhenotype": {
         "architecture": "savanna",
@@ -4771,7 +4887,9 @@
         "branchGenerationCount": 3,
         "primaryBranchCount": 5,
         "secondaryBranchCount": 5,
-        "terminalTipCount": 10,
+        "tertiaryBranchCount": 0,
+        "terminalTipCount": 11,
+        "branchInteriorAnchorCount": 11,
         "minimumSectorOccupancy": 1,
         "minimumFullnessPassed": true,
         "variant": 2
@@ -4789,23 +4907,23 @@
         "desert",
         "beach"
       ],
-      "triangleCount": 1104,
-      "triangleLimit": 6200,
+      "triangleCount": 2276,
+      "triangleLimit": 4400,
       "boundingBox": {
         "min": [
-          -7.8776,
-          -6.8338,
-          -0.0039
+          -8.4753,
+          -6.4421,
+          0.0
         ],
         "max": [
-          7.9177,
-          6.3149,
-          13.8636
+          7.7475,
+          6.1827,
+          17.3027
         ],
         "size": [
-          15.7954,
-          13.1487,
-          13.8675
+          16.2228,
+          12.6249,
+          17.3027
         ]
       },
       "pivotCheck": {
@@ -4815,7 +4933,7 @@
           0.0
         ],
         "grounded": true,
-        "minZ": -0.0039,
+        "minZ": 0.0,
         "originXYCentered": true
       },
       "materialSlots": [
@@ -4842,40 +4960,40 @@
       },
       "treeMetrics": {
         "growthClass": "established",
-        "height": 13.8675,
-        "trunkRadius": 0.4825,
-        "canopyRadius": 7.8977,
-        "canopyRadiusX": 7.8977,
-        "canopyRadiusY": 6.5743,
-        "canopyBase": 11.7264,
-        "canopyTop": 13.8636
+        "height": 17.3027,
+        "trunkRadius": 0.6272,
+        "canopyRadius": 8.1114,
+        "canopyRadiusX": 8.1114,
+        "canopyRadiusY": 6.3124,
+        "canopyBase": 8.546,
+        "canopyTop": 17.3027
       },
       "windData": {
         "attribute": "COLOR_0",
         "sourceAttribute": "wind",
         "domain": "POINT",
         "storage": "BYTE_COLOR",
-        "vertexCount": 2332,
-        "foliageVertexCount": 2100,
+        "vertexCount": 5190,
+        "foliageVertexCount": 4800,
         "rootVertexCount": 11,
         "rootMaxBend": 0.0,
-        "crownMinBend": 0.7835,
+        "crownMinBend": 0.3515,
         "crownMaxBend": 1.0,
         "channels": {
           "bendR": {
             "min": 0.0,
             "max": 1.0,
-            "mean": 0.8313
+            "mean": 0.5906
           },
           "phaseG": {
-            "min": 0.0006,
+            "min": 0.0012,
             "max": 1.0,
-            "mean": 0.5194
+            "mean": 0.5577
           },
           "flutterB": {
             "min": 0.0,
             "max": 0.956,
-            "mean": 0.6946
+            "mean": 0.7129
           },
           "reservedA": {
             "min": 1.0,
@@ -4889,33 +5007,38 @@
         "mapping": "branch_local_circumference_u_physical_length_v",
         "authoredRepeatsPerMeter": 0.72,
         "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
-        "barkVertexCount": 232,
-        "barkLoopCount": 1212,
+        "barkVertexCount": 390,
+        "barkLoopCount": 2028,
         "uRange": [
           0.0125,
           1.1071
         ],
         "vRange": [
           0.0,
-          6.7427
+          6.261
         ]
       },
       "canopyStructure": {
         "foliagePrimitive": "individual_triangular_leaf_card",
-        "foliagePrimitiveCount": 700,
-        "structure": "three_generation_umbrella_terminal_leaf_canopy",
+        "foliagePrimitiveCount": 1600,
+        "structure": "multitier_raised_lobe_four_generation_savanna_leaf_canopy",
+        "foliageDistribution": "branch_length_and_terminal",
         "crownLayerCount": 3,
-        "branchClusterCount": 14,
-        "terminalTipCount": 14
+        "branchClusterCount": 24,
+        "branchInteriorAnchorCount": 34,
+        "terminalFoliageAnchorCount": 25,
+        "terminalTipCount": 25
       },
       "treePhenotype": {
         "architecture": "savanna",
         "ageBand": "established",
         "nominalGrowth": 0.25,
         "branchGenerationCount": 3,
-        "primaryBranchCount": 7,
-        "secondaryBranchCount": 7,
-        "terminalTipCount": 14,
+        "primaryBranchCount": 8,
+        "secondaryBranchCount": 16,
+        "tertiaryBranchCount": 0,
+        "terminalTipCount": 25,
+        "branchInteriorAnchorCount": 34,
         "minimumSectorOccupancy": 1,
         "minimumFullnessPassed": true,
         "variant": 1
@@ -4933,23 +5056,23 @@
         "desert",
         "beach"
       ],
-      "triangleCount": 1104,
-      "triangleLimit": 6200,
+      "triangleCount": 2276,
+      "triangleLimit": 4400,
       "boundingBox": {
         "min": [
-          -7.7714,
-          -5.1996,
-          -0.0294
+          -8.0336,
+          -6.156,
+          0.0
         ],
         "max": [
-          6.5017,
-          6.7474,
-          14.4567
+          6.3344,
+          6.4409,
+          17.9094
         ],
         "size": [
-          14.2732,
-          11.947,
-          14.4861
+          14.368,
+          12.5969,
+          17.9094
         ]
       },
       "pivotCheck": {
@@ -4959,7 +5082,7 @@
           0.0
         ],
         "grounded": true,
-        "minZ": -0.0294,
+        "minZ": 0.0,
         "originXYCentered": true
       },
       "materialSlots": [
@@ -4986,40 +5109,40 @@
       },
       "treeMetrics": {
         "growthClass": "established",
-        "height": 14.4861,
-        "trunkRadius": 0.5175,
-        "canopyRadius": 7.1366,
-        "canopyRadiusX": 7.1366,
-        "canopyRadiusY": 5.9735,
-        "canopyBase": 12.3918,
-        "canopyTop": 14.4567
+        "height": 17.9094,
+        "trunkRadius": 0.6727,
+        "canopyRadius": 7.184,
+        "canopyRadiusX": 7.184,
+        "canopyRadiusY": 6.2984,
+        "canopyBase": 8.9979,
+        "canopyTop": 17.9094
       },
       "windData": {
         "attribute": "COLOR_0",
         "sourceAttribute": "wind",
         "domain": "POINT",
         "storage": "BYTE_COLOR",
-        "vertexCount": 2332,
-        "foliageVertexCount": 2100,
+        "vertexCount": 5190,
+        "foliageVertexCount": 4800,
         "rootVertexCount": 11,
         "rootMaxBend": 0.0,
-        "crownMinBend": 0.7991,
+        "crownMinBend": 0.3613,
         "crownMaxBend": 1.0,
         "channels": {
           "bendR": {
             "min": 0.0,
             "max": 1.0,
-            "mean": 0.8326
+            "mean": 0.5946
           },
           "phaseG": {
-            "min": 0.0012,
+            "min": 0.0003,
             "max": 1.0,
-            "mean": 0.4731
+            "mean": 0.5143
           },
           "flutterB": {
             "min": 0.0,
             "max": 0.956,
-            "mean": 0.6946
+            "mean": 0.713
           },
           "reservedA": {
             "min": 1.0,
@@ -5033,33 +5156,38 @@
         "mapping": "branch_local_circumference_u_physical_length_v",
         "authoredRepeatsPerMeter": 0.72,
         "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
-        "barkVertexCount": 232,
-        "barkLoopCount": 1212,
+        "barkVertexCount": 390,
+        "barkLoopCount": 2028,
         "uRange": [
           0.0125,
           1.1071
         ],
         "vRange": [
           0.0,
-          7.0489
+          6.5412
         ]
       },
       "canopyStructure": {
         "foliagePrimitive": "individual_triangular_leaf_card",
-        "foliagePrimitiveCount": 700,
-        "structure": "three_generation_umbrella_terminal_leaf_canopy",
+        "foliagePrimitiveCount": 1600,
+        "structure": "multitier_raised_lobe_four_generation_savanna_leaf_canopy",
+        "foliageDistribution": "branch_length_and_terminal",
         "crownLayerCount": 3,
-        "branchClusterCount": 14,
-        "terminalTipCount": 14
+        "branchClusterCount": 24,
+        "branchInteriorAnchorCount": 34,
+        "terminalFoliageAnchorCount": 25,
+        "terminalTipCount": 25
       },
       "treePhenotype": {
         "architecture": "savanna",
         "ageBand": "established",
         "nominalGrowth": 0.25,
         "branchGenerationCount": 3,
-        "primaryBranchCount": 7,
-        "secondaryBranchCount": 7,
-        "terminalTipCount": 14,
+        "primaryBranchCount": 8,
+        "secondaryBranchCount": 16,
+        "tertiaryBranchCount": 0,
+        "terminalTipCount": 25,
+        "branchInteriorAnchorCount": 34,
         "minimumSectorOccupancy": 1,
         "minimumFullnessPassed": true,
         "variant": 2
@@ -5077,23 +5205,23 @@
         "desert",
         "beach"
       ],
-      "triangleCount": 2044,
-      "triangleLimit": 6200,
+      "triangleCount": 4724,
+      "triangleLimit": 7400,
       "boundingBox": {
         "min": [
-          -11.7747,
-          -7.6218,
-          -0.0144
+          -13.9999,
+          -9.3853,
+          0.0
         ],
         "max": [
-          10.5581,
-          9.1992,
-          19.1806
+          14.391,
+          9.9302,
+          29.2199
         ],
         "size": [
-          22.3328,
-          16.821,
-          19.195
+          28.3908,
+          19.3154,
+          29.2199
         ]
       },
       "pivotCheck": {
@@ -5103,7 +5231,7 @@
           0.0
         ],
         "grounded": true,
-        "minZ": -0.0144,
+        "minZ": 0.0,
         "originXYCentered": true
       },
       "materialSlots": [
@@ -5130,40 +5258,40 @@
       },
       "treeMetrics": {
         "growthClass": "mature",
-        "height": 19.195,
-        "trunkRadius": 0.7527,
-        "canopyRadius": 11.1664,
-        "canopyRadiusX": 11.1664,
-        "canopyRadiusY": 8.4105,
-        "canopyBase": 16.7445,
-        "canopyTop": 19.1806
+        "height": 29.2199,
+        "trunkRadius": 1.4475,
+        "canopyRadius": 14.1954,
+        "canopyRadiusX": 14.1954,
+        "canopyRadiusY": 9.6577,
+        "canopyBase": 15.5794,
+        "canopyTop": 29.2199
       },
       "windData": {
         "attribute": "COLOR_0",
         "sourceAttribute": "wind",
         "domain": "POINT",
         "storage": "BYTE_COLOR",
-        "vertexCount": 4378,
-        "foliageVertexCount": 3960,
+        "vertexCount": 11454,
+        "foliageVertexCount": 10800,
         "rootVertexCount": 11,
         "rootMaxBend": 0.0,
-        "crownMinBend": 0.8228,
+        "crownMinBend": 0.3968,
         "crownMaxBend": 1.0,
         "channels": {
           "bendR": {
             "min": 0.0,
             "max": 1.0,
-            "mean": 0.8495
+            "mean": 0.6167
           },
           "phaseG": {
             "min": 0.0,
             "max": 1.0,
-            "mean": 0.5085
+            "mean": 0.5389
           },
           "flutterB": {
             "min": 0.0,
             "max": 0.956,
-            "mean": 0.6976
+            "mean": 0.7266
           },
           "reservedA": {
             "min": 1.0,
@@ -5177,33 +5305,38 @@
         "mapping": "branch_local_circumference_u_physical_length_v",
         "authoredRepeatsPerMeter": 0.72,
         "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
-        "barkVertexCount": 418,
-        "barkLoopCount": 2172,
+        "barkVertexCount": 654,
+        "barkLoopCount": 3372,
         "uRange": [
           0.0125,
           1.1071
         ],
         "vRange": [
           0.0,
-          9.4346
+          10.8208
         ]
       },
       "canopyStructure": {
         "foliagePrimitive": "individual_triangular_leaf_card",
-        "foliagePrimitiveCount": 1320,
-        "structure": "three_generation_umbrella_terminal_leaf_canopy",
-        "crownLayerCount": 3,
-        "branchClusterCount": 27,
-        "terminalTipCount": 27
+        "foliagePrimitiveCount": 3600,
+        "structure": "multitier_raised_lobe_four_generation_savanna_leaf_canopy",
+        "foliageDistribution": "branch_length_and_terminal",
+        "crownLayerCount": 4,
+        "branchClusterCount": 44,
+        "branchInteriorAnchorCount": 57,
+        "terminalFoliageAnchorCount": 45,
+        "terminalTipCount": 45
       },
       "treePhenotype": {
         "architecture": "savanna",
         "ageBand": "mature",
         "nominalGrowth": 0.5,
-        "branchGenerationCount": 3,
-        "primaryBranchCount": 9,
-        "secondaryBranchCount": 18,
-        "terminalTipCount": 27,
+        "branchGenerationCount": 4,
+        "primaryBranchCount": 11,
+        "secondaryBranchCount": 22,
+        "tertiaryBranchCount": 11,
+        "terminalTipCount": 45,
+        "branchInteriorAnchorCount": 57,
         "minimumSectorOccupancy": 1,
         "minimumFullnessPassed": true,
         "variant": 1
@@ -5221,23 +5354,23 @@
         "desert",
         "beach"
       ],
-      "triangleCount": 2044,
-      "triangleLimit": 6200,
+      "triangleCount": 4724,
+      "triangleLimit": 7400,
       "boundingBox": {
         "min": [
-          -10.4604,
-          -8.1796,
-          -0.0083
+          -12.8485,
+          -8.6711,
+          0.0
         ],
         "max": [
-          11.2662,
-          8.0558,
-          20.5254
+          14.6448,
+          8.2162,
+          31.7484
         ],
         "size": [
-          21.7266,
-          16.2354,
-          20.5337
+          27.4933,
+          16.8873,
+          31.7484
         ]
       },
       "pivotCheck": {
@@ -5247,7 +5380,7 @@
           0.0
         ],
         "grounded": true,
-        "minZ": -0.0083,
+        "minZ": 0.0,
         "originXYCentered": true
       },
       "materialSlots": [
@@ -5274,40 +5407,40 @@
       },
       "treeMetrics": {
         "growthClass": "mature",
-        "height": 20.5337,
-        "trunkRadius": 0.8073,
-        "canopyRadius": 10.8633,
-        "canopyRadiusX": 10.8633,
-        "canopyRadiusY": 8.1177,
-        "canopyBase": 18.0882,
-        "canopyTop": 20.5254
+        "height": 31.7484,
+        "trunkRadius": 1.5525,
+        "canopyRadius": 13.7467,
+        "canopyRadiusX": 13.7467,
+        "canopyRadiusY": 8.4436,
+        "canopyBase": 16.6513,
+        "canopyTop": 31.7484
       },
       "windData": {
         "attribute": "COLOR_0",
         "sourceAttribute": "wind",
         "domain": "POINT",
         "storage": "BYTE_COLOR",
-        "vertexCount": 4378,
-        "foliageVertexCount": 3960,
+        "vertexCount": 11454,
+        "foliageVertexCount": 10800,
         "rootVertexCount": 11,
         "rootMaxBend": 0.0,
-        "crownMinBend": 0.8308,
+        "crownMinBend": 0.3864,
         "crownMaxBend": 1.0,
         "channels": {
           "bendR": {
             "min": 0.0,
             "max": 1.0,
-            "mean": 0.8538
+            "mean": 0.6271
           },
           "phaseG": {
             "min": 0.0,
             "max": 1.0,
-            "mean": 0.4831
+            "mean": 0.5484
           },
           "flutterB": {
             "min": 0.0,
             "max": 0.956,
-            "mean": 0.6977
+            "mean": 0.7266
           },
           "reservedA": {
             "min": 1.0,
@@ -5321,33 +5454,38 @@
         "mapping": "branch_local_circumference_u_physical_length_v",
         "authoredRepeatsPerMeter": 0.72,
         "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
-        "barkVertexCount": 418,
-        "barkLoopCount": 2172,
+        "barkVertexCount": 654,
+        "barkLoopCount": 3372,
         "uRange": [
           0.0125,
           1.1071
         ],
         "vRange": [
           0.0,
-          10.1221
+          11.6103
         ]
       },
       "canopyStructure": {
         "foliagePrimitive": "individual_triangular_leaf_card",
-        "foliagePrimitiveCount": 1320,
-        "structure": "three_generation_umbrella_terminal_leaf_canopy",
-        "crownLayerCount": 3,
-        "branchClusterCount": 27,
-        "terminalTipCount": 27
+        "foliagePrimitiveCount": 3600,
+        "structure": "multitier_raised_lobe_four_generation_savanna_leaf_canopy",
+        "foliageDistribution": "branch_length_and_terminal",
+        "crownLayerCount": 4,
+        "branchClusterCount": 44,
+        "branchInteriorAnchorCount": 57,
+        "terminalFoliageAnchorCount": 45,
+        "terminalTipCount": 45
       },
       "treePhenotype": {
         "architecture": "savanna",
         "ageBand": "mature",
         "nominalGrowth": 0.5,
-        "branchGenerationCount": 3,
-        "primaryBranchCount": 9,
-        "secondaryBranchCount": 18,
-        "terminalTipCount": 27,
+        "branchGenerationCount": 4,
+        "primaryBranchCount": 11,
+        "secondaryBranchCount": 22,
+        "tertiaryBranchCount": 11,
+        "terminalTipCount": 45,
+        "branchInteriorAnchorCount": 57,
         "minimumSectorOccupancy": 1,
         "minimumFullnessPassed": true,
         "variant": 2
@@ -5365,23 +5503,23 @@
         "desert",
         "beach"
       ],
-      "triangleCount": 2976,
-      "triangleLimit": 6200,
+      "triangleCount": 8568,
+      "triangleLimit": 11600,
       "boundingBox": {
         "min": [
-          -13.0276,
-          -11.2398,
-          -0.0352
+          -18.1263,
+          -16.4158,
+          0.0
         ],
         "max": [
-          15.0859,
-          11.2393,
-          25.043
+          18.673,
+          19.8831,
+          47.5921
         ],
         "size": [
-          28.1135,
-          22.4791,
-          25.0782
+          36.7992,
+          36.2989,
+          47.5921
         ]
       },
       "pivotCheck": {
@@ -5391,7 +5529,7 @@
           0.0
         ],
         "grounded": true,
-        "minZ": -0.0352,
+        "minZ": 0.0,
         "originXYCentered": true
       },
       "materialSlots": [
@@ -5418,40 +5556,40 @@
       },
       "treeMetrics": {
         "growthClass": "old",
-        "height": 25.0782,
-        "trunkRadius": 1.0422,
-        "canopyRadius": 14.0567,
-        "canopyRadiusX": 14.0567,
-        "canopyRadiusY": 11.2395,
-        "canopyBase": 22.2849,
-        "canopyTop": 25.043
+        "height": 47.5921,
+        "trunkRadius": 2.895,
+        "canopyRadius": 18.3996,
+        "canopyRadiusX": 18.3996,
+        "canopyRadiusY": 18.1495,
+        "canopyBase": 24.9609,
+        "canopyTop": 47.5921
       },
       "windData": {
         "attribute": "COLOR_0",
         "sourceAttribute": "wind",
         "domain": "POINT",
         "storage": "BYTE_COLOR",
-        "vertexCount": 6806,
-        "foliageVertexCount": 6300,
+        "vertexCount": 20468,
+        "foliageVertexCount": 19200,
         "rootVertexCount": 11,
         "rootMaxBend": 0.0,
-        "crownMinBend": 0.8469,
+        "crownMinBend": 0.3864,
         "crownMaxBend": 1.0,
         "channels": {
           "bendR": {
             "min": 0.0,
             "max": 1.0,
-            "mean": 0.8741
+            "mean": 0.6608
           },
           "phaseG": {
-            "min": 0.0003,
+            "min": 0.0,
             "max": 1.0,
-            "mean": 0.5306
+            "mean": 0.4864
           },
           "flutterB": {
             "min": 0.0,
             "max": 0.956,
-            "mean": 0.7136
+            "mean": 0.723
           },
           "reservedA": {
             "min": 1.0,
@@ -5465,33 +5603,38 @@
         "mapping": "branch_local_circumference_u_physical_length_v",
         "authoredRepeatsPerMeter": 0.72,
         "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
-        "barkVertexCount": 506,
-        "barkLoopCount": 2628,
+        "barkVertexCount": 1268,
+        "barkLoopCount": 6504,
         "uRange": [
           0.0125,
           1.1071
         ],
         "vRange": [
           0.0,
-          12.4
+          17.4985
         ]
       },
       "canopyStructure": {
         "foliagePrimitive": "individual_triangular_leaf_card",
-        "foliagePrimitiveCount": 2100,
-        "structure": "three_generation_umbrella_terminal_leaf_canopy",
-        "crownLayerCount": 3,
-        "branchClusterCount": 33,
-        "terminalTipCount": 33
+        "foliagePrimitiveCount": 6400,
+        "structure": "multitier_raised_lobe_four_generation_savanna_leaf_canopy",
+        "foliageDistribution": "branch_length_and_terminal",
+        "crownLayerCount": 5,
+        "branchClusterCount": 90,
+        "branchInteriorAnchorCount": 168,
+        "terminalFoliageAnchorCount": 91,
+        "terminalTipCount": 91
       },
       "treePhenotype": {
         "architecture": "savanna",
         "ageBand": "old",
         "nominalGrowth": 0.75,
-        "branchGenerationCount": 3,
-        "primaryBranchCount": 11,
-        "secondaryBranchCount": 22,
-        "terminalTipCount": 33,
+        "branchGenerationCount": 4,
+        "primaryBranchCount": 15,
+        "secondaryBranchCount": 45,
+        "tertiaryBranchCount": 30,
+        "terminalTipCount": 91,
+        "branchInteriorAnchorCount": 168,
         "minimumSectorOccupancy": 1,
         "minimumFullnessPassed": true,
         "variant": 1
@@ -5509,23 +5652,23 @@
         "desert",
         "beach"
       ],
-      "triangleCount": 2976,
-      "triangleLimit": 6200,
+      "triangleCount": 8568,
+      "triangleLimit": 11600,
       "boundingBox": {
         "min": [
-          -13.8087,
-          -9.9697,
-          -0.0152
+          -19.1229,
+          -17.3164,
+          0.0
         ],
         "max": [
-          14.4976,
-          11.3118,
-          26.3927
+          20.1904,
+          17.3403,
+          50.0877
         ],
         "size": [
-          28.3062,
-          21.2815,
-          26.4079
+          39.3134,
+          34.6566,
+          50.0877
         ]
       },
       "pivotCheck": {
@@ -5535,7 +5678,7 @@
           0.0
         ],
         "grounded": true,
-        "minZ": -0.0152,
+        "minZ": 0.0,
         "originXYCentered": true
       },
       "materialSlots": [
@@ -5562,40 +5705,40 @@
       },
       "treeMetrics": {
         "growthClass": "old",
-        "height": 26.4079,
-        "trunkRadius": 1.1178,
-        "canopyRadius": 14.1531,
-        "canopyRadiusX": 14.1531,
-        "canopyRadiusY": 10.6408,
-        "canopyBase": 23.6001,
-        "canopyTop": 26.3927
+        "height": 50.0877,
+        "trunkRadius": 3.105,
+        "canopyRadius": 19.6567,
+        "canopyRadiusX": 19.6567,
+        "canopyRadiusY": 17.3283,
+        "canopyBase": 26.7719,
+        "canopyTop": 50.0877
       },
       "windData": {
         "attribute": "COLOR_0",
         "sourceAttribute": "wind",
         "domain": "POINT",
         "storage": "BYTE_COLOR",
-        "vertexCount": 6806,
-        "foliageVertexCount": 6300,
+        "vertexCount": 20468,
+        "foliageVertexCount": 19200,
         "rootVertexCount": 11,
         "rootMaxBend": 0.0,
-        "crownMinBend": 0.855,
+        "crownMinBend": 0.3968,
         "crownMaxBend": 1.0,
         "channels": {
           "bendR": {
             "min": 0.0,
             "max": 1.0,
-            "mean": 0.8769
+            "mean": 0.6651
           },
           "phaseG": {
-            "min": 0.0003,
+            "min": 0.0,
             "max": 1.0,
-            "mean": 0.4841
+            "mean": 0.5698
           },
           "flutterB": {
             "min": 0.0,
             "max": 0.956,
-            "mean": 0.7137
+            "mean": 0.723
           },
           "reservedA": {
             "min": 1.0,
@@ -5609,33 +5752,38 @@
         "mapping": "branch_local_circumference_u_physical_length_v",
         "authoredRepeatsPerMeter": 0.72,
         "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
-        "barkVertexCount": 506,
-        "barkLoopCount": 2628,
+        "barkVertexCount": 1268,
+        "barkLoopCount": 6504,
         "uRange": [
           0.0125,
           1.1071
         ],
         "vRange": [
           0.0,
-          13.0987
+          18.491
         ]
       },
       "canopyStructure": {
         "foliagePrimitive": "individual_triangular_leaf_card",
-        "foliagePrimitiveCount": 2100,
-        "structure": "three_generation_umbrella_terminal_leaf_canopy",
-        "crownLayerCount": 3,
-        "branchClusterCount": 33,
-        "terminalTipCount": 33
+        "foliagePrimitiveCount": 6400,
+        "structure": "multitier_raised_lobe_four_generation_savanna_leaf_canopy",
+        "foliageDistribution": "branch_length_and_terminal",
+        "crownLayerCount": 5,
+        "branchClusterCount": 90,
+        "branchInteriorAnchorCount": 168,
+        "terminalFoliageAnchorCount": 91,
+        "terminalTipCount": 91
       },
       "treePhenotype": {
         "architecture": "savanna",
         "ageBand": "old",
         "nominalGrowth": 0.75,
-        "branchGenerationCount": 3,
-        "primaryBranchCount": 11,
-        "secondaryBranchCount": 22,
-        "terminalTipCount": 33,
+        "branchGenerationCount": 4,
+        "primaryBranchCount": 15,
+        "secondaryBranchCount": 45,
+        "tertiaryBranchCount": 30,
+        "terminalTipCount": 91,
+        "branchInteriorAnchorCount": 168,
         "minimumSectorOccupancy": 1,
         "minimumFullnessPassed": true,
         "variant": 2
@@ -5653,23 +5801,23 @@
         "desert",
         "beach"
       ],
-      "triangleCount": 4048,
-      "triangleLimit": 6200,
+      "triangleCount": 11928,
+      "triangleLimit": 15400,
       "boundingBox": {
         "min": [
-          -17.5235,
-          -12.749,
-          -0.0189
+          -28.7431,
+          -27.9489,
+          0.0
         ],
         "max": [
-          17.0778,
-          13.9188,
-          31.1814
+          29.2417,
+          23.9844,
+          67.7049
         ],
         "size": [
-          34.6013,
-          26.6679,
-          31.2003
+          57.9849,
+          51.9333,
+          67.7049
         ]
       },
       "pivotCheck": {
@@ -5679,7 +5827,7 @@
           0.0
         ],
         "grounded": true,
-        "minZ": -0.0189,
+        "minZ": 0.0,
         "originXYCentered": true
       },
       "materialSlots": [
@@ -5706,40 +5854,40 @@
       },
       "treeMetrics": {
         "growthClass": "ancient",
-        "height": 31.2003,
-        "trunkRadius": 1.3992,
-        "canopyRadius": 17.3006,
-        "canopyRadiusX": 17.3006,
-        "canopyRadiusY": 13.3339,
-        "canopyBase": 27.8455,
-        "canopyTop": 31.1814
+        "height": 67.7049,
+        "trunkRadius": 5.018,
+        "canopyRadius": 28.9924,
+        "canopyRadiusX": 28.9924,
+        "canopyRadiusY": 25.9666,
+        "canopyBase": 35.978,
+        "canopyTop": 67.7049
       },
       "windData": {
         "attribute": "COLOR_0",
         "sourceAttribute": "wind",
         "domain": "POINT",
         "storage": "BYTE_COLOR",
-        "vertexCount": 9654,
-        "foliageVertexCount": 9060,
+        "vertexCount": 29196,
+        "foliageVertexCount": 27600,
         "rootVertexCount": 11,
         "rootMaxBend": 0.0,
-        "crownMinBend": 0.8469,
+        "crownMinBend": 0.3916,
         "crownMaxBend": 1.0,
         "channels": {
           "bendR": {
             "min": 0.0,
             "max": 1.0,
-            "mean": 0.8822
+            "mean": 0.6569
           },
           "phaseG": {
             "min": 0.0,
             "max": 1.0,
-            "mean": 0.5233
+            "mean": 0.5345
           },
           "flutterB": {
             "min": 0.0,
             "max": 0.956,
-            "mean": 0.7233
+            "mean": 0.7285
           },
           "reservedA": {
             "min": 1.0,
@@ -5753,33 +5901,38 @@
         "mapping": "branch_local_circumference_u_physical_length_v",
         "authoredRepeatsPerMeter": 0.72,
         "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
-        "barkVertexCount": 594,
-        "barkLoopCount": 3084,
+        "barkVertexCount": 1596,
+        "barkLoopCount": 8184,
         "uRange": [
           0.0125,
           1.1071
         ],
         "vRange": [
           0.0,
-          15.4166
+          25.0502
         ]
       },
       "canopyStructure": {
         "foliagePrimitive": "individual_triangular_leaf_card",
-        "foliagePrimitiveCount": 3020,
-        "structure": "three_generation_umbrella_terminal_leaf_canopy",
-        "crownLayerCount": 3,
-        "branchClusterCount": 39,
-        "terminalTipCount": 39
+        "foliagePrimitiveCount": 9200,
+        "structure": "multitier_raised_lobe_four_generation_savanna_leaf_canopy",
+        "foliageDistribution": "branch_length_and_terminal",
+        "crownLayerCount": 6,
+        "branchClusterCount": 114,
+        "branchInteriorAnchorCount": 289,
+        "terminalFoliageAnchorCount": 115,
+        "terminalTipCount": 115
       },
       "treePhenotype": {
         "architecture": "savanna",
         "ageBand": "ancient",
         "nominalGrowth": 1.0,
-        "branchGenerationCount": 3,
-        "primaryBranchCount": 13,
-        "secondaryBranchCount": 26,
-        "terminalTipCount": 39,
+        "branchGenerationCount": 4,
+        "primaryBranchCount": 19,
+        "secondaryBranchCount": 57,
+        "tertiaryBranchCount": 38,
+        "terminalTipCount": 115,
+        "branchInteriorAnchorCount": 289,
         "minimumSectorOccupancy": 1,
         "minimumFullnessPassed": true,
         "variant": 1
@@ -5797,23 +5950,23 @@
         "desert",
         "beach"
       ],
-      "triangleCount": 4048,
-      "triangleLimit": 6200,
+      "triangleCount": 11928,
+      "triangleLimit": 15400,
       "boundingBox": {
         "min": [
-          -16.7299,
-          -13.2218,
-          -0.0213
+          -27.5255,
+          -24.8238,
+          0.0
         ],
         "max": [
-          15.7716,
-          13.1508,
-          32.0886
+          28.9536,
+          22.0517,
+          70.2808
         ],
         "size": [
-          32.5015,
-          26.3727,
-          32.1099
+          56.4791,
+          46.8755,
+          70.2808
         ]
       },
       "pivotCheck": {
@@ -5823,7 +5976,7 @@
           0.0
         ],
         "grounded": true,
-        "minZ": -0.0213,
+        "minZ": 0.0,
         "originXYCentered": true
       },
       "materialSlots": [
@@ -5850,40 +6003,40 @@
       },
       "treeMetrics": {
         "growthClass": "ancient",
-        "height": 32.1099,
-        "trunkRadius": 1.5007,
-        "canopyRadius": 16.2508,
-        "canopyRadiusX": 16.2508,
-        "canopyRadiusY": 13.1863,
-        "canopyBase": 28.8454,
-        "canopyTop": 32.0886
+        "height": 70.2808,
+        "trunkRadius": 5.382,
+        "canopyRadius": 28.2396,
+        "canopyRadiusX": 28.2396,
+        "canopyRadiusY": 23.4377,
+        "canopyBase": 37.1677,
+        "canopyTop": 70.2808
       },
       "windData": {
         "attribute": "COLOR_0",
         "sourceAttribute": "wind",
         "domain": "POINT",
         "storage": "BYTE_COLOR",
-        "vertexCount": 9654,
-        "foliageVertexCount": 9060,
+        "vertexCount": 29196,
+        "foliageVertexCount": 27600,
         "rootVertexCount": 11,
         "rootMaxBend": 0.0,
-        "crownMinBend": 0.855,
+        "crownMinBend": 0.3916,
         "crownMaxBend": 1.0,
         "channels": {
           "bendR": {
             "min": 0.0,
             "max": 1.0,
-            "mean": 0.8905
+            "mean": 0.6615
           },
           "phaseG": {
-            "min": 0.0003,
+            "min": 0.0,
             "max": 1.0,
-            "mean": 0.4935
+            "mean": 0.4999
           },
           "flutterB": {
             "min": 0.0,
             "max": 0.956,
-            "mean": 0.7233
+            "mean": 0.7285
           },
           "reservedA": {
             "min": 1.0,
@@ -5897,33 +6050,38 @@
         "mapping": "branch_local_circumference_u_physical_length_v",
         "authoredRepeatsPerMeter": 0.72,
         "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
-        "barkVertexCount": 594,
-        "barkLoopCount": 3084,
+        "barkVertexCount": 1596,
+        "barkLoopCount": 8184,
         "uRange": [
           0.0125,
           1.1071
         ],
         "vRange": [
           0.0,
-          15.9714
+          25.9514
         ]
       },
       "canopyStructure": {
         "foliagePrimitive": "individual_triangular_leaf_card",
-        "foliagePrimitiveCount": 3020,
-        "structure": "three_generation_umbrella_terminal_leaf_canopy",
-        "crownLayerCount": 3,
-        "branchClusterCount": 39,
-        "terminalTipCount": 39
+        "foliagePrimitiveCount": 9200,
+        "structure": "multitier_raised_lobe_four_generation_savanna_leaf_canopy",
+        "foliageDistribution": "branch_length_and_terminal",
+        "crownLayerCount": 6,
+        "branchClusterCount": 114,
+        "branchInteriorAnchorCount": 289,
+        "terminalFoliageAnchorCount": 115,
+        "terminalTipCount": 115
       },
       "treePhenotype": {
         "architecture": "savanna",
         "ageBand": "ancient",
         "nominalGrowth": 1.0,
-        "branchGenerationCount": 3,
-        "primaryBranchCount": 13,
-        "secondaryBranchCount": 26,
-        "terminalTipCount": 39,
+        "branchGenerationCount": 4,
+        "primaryBranchCount": 19,
+        "secondaryBranchCount": 57,
+        "tertiaryBranchCount": 38,
+        "terminalTipCount": 115,
+        "branchInteriorAnchorCount": 289,
         "minimumSectorOccupancy": 1,
         "minimumFullnessPassed": true,
         "variant": 2
@@ -5941,7 +6099,7 @@
         "swamp"
       ],
       "triangleCount": 1598,
-      "triangleLimit": 6200,
+      "triangleLimit": 8200,
       "boundingBox": {
         "min": [
           -6.218,
@@ -6057,8 +6215,11 @@
         "foliagePrimitive": "individual_triangular_leaf_card",
         "foliagePrimitiveCount": 1206,
         "structure": "layered_branch_attached_leaf_canopy",
+        "foliageDistribution": "terminal",
         "crownLayerCount": 4,
         "branchClusterCount": 11,
+        "branchInteriorAnchorCount": 0,
+        "terminalFoliageAnchorCount": 0,
         "terminalTipCount": 0
       }
     },
@@ -6074,7 +6235,7 @@
         "swamp"
       ],
       "triangleCount": 1772,
-      "triangleLimit": 6200,
+      "triangleLimit": 8200,
       "boundingBox": {
         "min": [
           -7.5438,
@@ -6190,8 +6351,11 @@
         "foliagePrimitive": "individual_triangular_leaf_card",
         "foliagePrimitiveCount": 1352,
         "structure": "layered_branch_attached_leaf_canopy",
+        "foliageDistribution": "terminal",
         "crownLayerCount": 4,
         "branchClusterCount": 12,
+        "branchInteriorAnchorCount": 0,
+        "terminalFoliageAnchorCount": 0,
         "terminalTipCount": 0
       }
     },
@@ -6207,7 +6371,7 @@
         "swamp"
       ],
       "triangleCount": 1954,
-      "triangleLimit": 6200,
+      "triangleLimit": 8200,
       "boundingBox": {
         "min": [
           -8.0032,
@@ -6323,8 +6487,11 @@
         "foliagePrimitive": "individual_triangular_leaf_card",
         "foliagePrimitiveCount": 1506,
         "structure": "layered_branch_attached_leaf_canopy",
+        "foliageDistribution": "terminal",
         "crownLayerCount": 4,
         "branchClusterCount": 13,
+        "branchInteriorAnchorCount": 0,
+        "terminalFoliageAnchorCount": 0,
         "terminalTipCount": 0
       }
     },
@@ -6340,7 +6507,7 @@
         "swamp"
       ],
       "triangleCount": 2144,
-      "triangleLimit": 6200,
+      "triangleLimit": 8200,
       "boundingBox": {
         "min": [
           -6.6244,
@@ -6456,8 +6623,11 @@
         "foliagePrimitive": "individual_triangular_leaf_card",
         "foliagePrimitiveCount": 1668,
         "structure": "layered_branch_attached_leaf_canopy",
+        "foliageDistribution": "terminal",
         "crownLayerCount": 4,
         "branchClusterCount": 14,
+        "branchInteriorAnchorCount": 0,
+        "terminalFoliageAnchorCount": 0,
         "terminalTipCount": 0
       }
     },
@@ -6471,7 +6641,7 @@
         "forest"
       ],
       "triangleCount": 1880,
-      "triangleLimit": 6200,
+      "triangleLimit": 8200,
       "boundingBox": {
         "min": [
           -8.0943,
@@ -6587,8 +6757,11 @@
         "foliagePrimitive": "individual_triangular_leaf_card",
         "foliagePrimitiveCount": 1400,
         "structure": "layered_old_growth_leaf_canopy",
+        "foliageDistribution": "terminal",
         "crownLayerCount": 5,
         "branchClusterCount": 14,
+        "branchInteriorAnchorCount": 0,
+        "terminalFoliageAnchorCount": 0,
         "terminalTipCount": 0
       }
     },
@@ -6602,7 +6775,7 @@
         "forest"
       ],
       "triangleCount": 2172,
-      "triangleLimit": 6200,
+      "triangleLimit": 8200,
       "boundingBox": {
         "min": [
           -7.6791,
@@ -6718,8 +6891,11 @@
         "foliagePrimitive": "individual_triangular_leaf_card",
         "foliagePrimitiveCount": 1636,
         "structure": "layered_old_growth_leaf_canopy",
+        "foliageDistribution": "terminal",
         "crownLayerCount": 5,
         "branchClusterCount": 16,
+        "branchInteriorAnchorCount": 0,
+        "terminalFoliageAnchorCount": 0,
         "terminalTipCount": 0
       }
     },
@@ -6736,7 +6912,7 @@
         "tundra"
       ],
       "triangleCount": 1308,
-      "triangleLimit": 6200,
+      "triangleLimit": 8200,
       "boundingBox": {
         "min": [
           -2.6962,
@@ -6850,8 +7026,11 @@
         "foliagePrimitive": "individual_triangular_leaf_card",
         "foliagePrimitiveCount": 760,
         "structure": "radial_bough_needle_sprays",
+        "foliageDistribution": "terminal",
         "crownLayerCount": 7,
         "branchClusterCount": 32,
+        "branchInteriorAnchorCount": 0,
+        "terminalFoliageAnchorCount": 0,
         "terminalTipCount": 0
       }
     },
@@ -6868,7 +7047,7 @@
         "tundra"
       ],
       "triangleCount": 1460,
-      "triangleLimit": 6200,
+      "triangleLimit": 8200,
       "boundingBox": {
         "min": [
           -3.3723,
@@ -6982,8 +7161,11 @@
         "foliagePrimitive": "individual_triangular_leaf_card",
         "foliagePrimitiveCount": 848,
         "structure": "radial_bough_needle_sprays",
+        "foliageDistribution": "terminal",
         "crownLayerCount": 8,
         "branchClusterCount": 36,
+        "branchInteriorAnchorCount": 0,
+        "terminalFoliageAnchorCount": 0,
         "terminalTipCount": 0
       }
     },
@@ -7000,7 +7182,7 @@
         "tundra"
       ],
       "triangleCount": 1650,
-      "triangleLimit": 6200,
+      "triangleLimit": 8200,
       "boundingBox": {
         "min": [
           -3.294,
@@ -7114,8 +7296,11 @@
         "foliagePrimitive": "individual_triangular_leaf_card",
         "foliagePrimitiveCount": 958,
         "structure": "radial_bough_needle_sprays",
+        "foliageDistribution": "terminal",
         "crownLayerCount": 9,
         "branchClusterCount": 41,
+        "branchInteriorAnchorCount": 0,
+        "terminalFoliageAnchorCount": 0,
         "terminalTipCount": 0
       }
     },
@@ -7132,7 +7317,7 @@
         "tundra"
       ],
       "triangleCount": 1802,
-      "triangleLimit": 6200,
+      "triangleLimit": 8200,
       "boundingBox": {
         "min": [
           -3.8629,
@@ -7246,8 +7431,11 @@
         "foliagePrimitive": "individual_triangular_leaf_card",
         "foliagePrimitiveCount": 1046,
         "structure": "radial_bough_needle_sprays",
+        "foliageDistribution": "terminal",
         "crownLayerCount": 10,
         "branchClusterCount": 45,
+        "branchInteriorAnchorCount": 0,
+        "terminalFoliageAnchorCount": 0,
         "terminalTipCount": 0
       }
     },
@@ -7263,7 +7451,7 @@
         "desert"
       ],
       "triangleCount": 1172,
-      "triangleLimit": 6200,
+      "triangleLimit": 8200,
       "boundingBox": {
         "min": [
           -5.5854,
@@ -7377,8 +7565,11 @@
         "foliagePrimitive": "individual_triangular_leaf_card",
         "foliagePrimitiveCount": 884,
         "structure": "layered_umbrella_leaf_canopy",
+        "foliageDistribution": "terminal",
         "crownLayerCount": 3,
         "branchClusterCount": 9,
+        "branchInteriorAnchorCount": 0,
+        "terminalFoliageAnchorCount": 0,
         "terminalTipCount": 0
       }
     },
@@ -7394,7 +7585,7 @@
         "desert"
       ],
       "triangleCount": 1444,
-      "triangleLimit": 6200,
+      "triangleLimit": 8200,
       "boundingBox": {
         "min": [
           -6.2986,
@@ -7508,8 +7699,11 @@
         "foliagePrimitive": "individual_triangular_leaf_card",
         "foliagePrimitiveCount": 1100,
         "structure": "layered_umbrella_leaf_canopy",
+        "foliageDistribution": "terminal",
         "crownLayerCount": 3,
         "branchClusterCount": 11,
+        "branchInteriorAnchorCount": 0,
+        "terminalFoliageAnchorCount": 0,
         "terminalTipCount": 0
       }
     },
@@ -7525,7 +7719,7 @@
         "desert"
       ],
       "triangleCount": 1732,
-      "triangleLimit": 6200,
+      "triangleLimit": 8200,
       "boundingBox": {
         "min": [
           -6.9801,
@@ -7639,8 +7833,11 @@
         "foliagePrimitive": "individual_triangular_leaf_card",
         "foliagePrimitiveCount": 1332,
         "structure": "layered_umbrella_leaf_canopy",
+        "foliageDistribution": "terminal",
         "crownLayerCount": 3,
         "branchClusterCount": 13,
+        "branchInteriorAnchorCount": 0,
+        "terminalFoliageAnchorCount": 0,
         "terminalTipCount": 0
       }
     },

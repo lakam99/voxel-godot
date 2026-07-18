@@ -159,6 +159,22 @@ func invalidate() -> void:
 	queued_navmesh_tile_keys.clear()
 	queued_navmesh_tile_sequence = 0
 
+func shutdown_for_process_exit() -> void:
+	# This adapter is retained by the legacy facade as well as route helpers.
+	# A world reset must keep that graph ready, whereas process exit must break
+	# the reciprocal readiness-service reference instead of constructing another
+	# graph during teardown.
+	invalidate()
+	if nav_data_readiness != null:
+		nav_data_readiness.adapter = null
+	nav_data_readiness = null
+	navmesh_planner = null
+	navmesh_world = null
+	backend_config = null
+	world = null
+	system = null
+	main = null
+
 func plan_route(entry: Dictionary, intent: Dictionary) -> Dictionary:
 	if navmesh_planner == null:
 		navmesh_world = _navmesh_world_from_system()

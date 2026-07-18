@@ -169,6 +169,7 @@ var pickup_nodes_created := 0
 var pickup_nodes_reused := 0
 var pickup_nodes_discarded := 0
 var wildlife_nodes: Array = []
+var wildlife_update_cursor := 0
 var map_sample_cache_key := ""
 var map_sample_cache: Array = []
 var map_sample_build_key := ""
@@ -192,6 +193,12 @@ var navigation_map_state_cache_interval := 0.75
 var block_stats_cache := {}
 var block_stats_cache_size := -1
 var block_stats_cache_dirty := true
+# Runtime light-safety queries occur in several gameplay loops. This contains
+# only the small set of block types which can affect the answer. Entries retain
+# object instance IDs rather than node references so queued/deleted sources can
+# resolve to null safely during a later gameplay query.
+var light_safety_sources := {}
+var light_safety_sources_initialized := false
 var visual_quality := {
     "decorativeDensity": 0.74,
     "decorativeDetailCap": 72,
@@ -2115,6 +2122,12 @@ func request_graceful_quit(exit_code := 0) -> void:
         hud.show_loading_overlay("Saving and exiting")
     set_process(false)
     set_process_unhandled_input(false)
+    # Terrain shutdown yields across frames while the native voxel engine drains.
+    # Stop all gameplay physics first: otherwise Main/NPC physics can submit new
+    # streaming, navigation, or collision work against an authority already
+    # being retired.
+    set_physics_process(false)
+    set_registered_npc_physics_enabled(false)
     if player != null:
         player.velocity = Vector3.ZERO
         player.set_physics_process(false)
@@ -2134,6 +2147,7 @@ func _graceful_quit_deferred(exit_code: int) -> void:
             await wait_for_async_save_before_quit()
         else:
             save_system.save(seed_text, snapshot)
+    await wait_for_npc_navigation_before_quit()
     await wait_for_terrain_workers_before_quit()
     get_tree().quit(exit_code)
 
@@ -2148,6 +2162,19 @@ func wait_for_async_save_before_quit() -> void:
         guard += 1
     if save_system.has_method("poll_async_save"):
         save_system.call("poll_async_save", true)
+
+func wait_for_npc_navigation_before_quit() -> void:
+    if npc_system == null or not is_instance_valid(npc_system):
+        return
+    if npc_system.has_method("shutdown_for_process_exit"):
+        npc_system.call("shutdown_for_process_exit")
+        # NavigationServer3D retires RIDs on physics frames.  Give it two full
+        # physics/process cycles after the explicit map release instead of
+        # relying on the engine's final shutdown order.
+        await get_tree().physics_frame
+        await startup_loading_yield("Stopping NPC navigation")
+        await get_tree().physics_frame
+        await startup_loading_yield("Stopping NPC navigation")
 
 func wait_for_terrain_workers_before_quit() -> void:
     var voxel_runtime = get("voxel_terrain_runtime")
@@ -2170,16 +2197,19 @@ func wait_for_terrain_workers_before_quit() -> void:
     terrain_meshing_service.call("clear_jobs", false)
     var guard := 0
     while guard < 600:
-        if terrain_meshing_service.has_method("collect_retired_worker_threads"):
-            terrain_meshing_service.call("collect_retired_worker_threads", false)
-        var retired_value = terrain_meshing_service.get("retired_worker_threads")
-        var retired_count := (retired_value as Array).size() if retired_value is Array else 0
-        if retired_count <= 0:
+        if terrain_meshing_service.has_method("collect_retired_worker_tasks"):
+            terrain_meshing_service.call("collect_retired_worker_tasks", false)
+        if terrain_meshing_service.has_method("advance_retired_payload_cleanup"):
+            terrain_meshing_service.call("advance_retired_payload_cleanup", false)
+        var pending_count := int(terrain_meshing_service.call("shutdown_pending_work_count")) if terrain_meshing_service.has_method("shutdown_pending_work_count") else 0
+        if pending_count <= 0:
             break
         await startup_loading_yield("Stopping terrain jobs")
         guard += 1
-    if terrain_meshing_service.has_method("collect_retired_worker_threads"):
-        terrain_meshing_service.call("collect_retired_worker_threads", true)
+    # The final join is deliberately blocking only after all normal frames have
+    # been used to drain the workers.  No native mesh payload may outlive the
+    # scene tree or its GDExtension backend during process shutdown.
+    terrain_meshing_service.call("clear_jobs", true)
 
 func _notification(what: int) -> void:
     if what == NOTIFICATION_WM_CLOSE_REQUEST:

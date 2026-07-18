@@ -1,7 +1,6 @@
-extends MathematicalTreePocRecipeBuilder
-class_name MathematicalTreePocSavannaRecipeBuilder
+extends "res://scripts/environment/tree_grammars/MathematicalTreePocRecipeBuilder.gd"
 
-## VOX-141 umbrella-thorn-like isolated visual PoC.
+## VOX-141 approved umbrella-thorn-like mathematical grammar.
 ##
 ## This is a distinct species grammar: a finite, multi-forked lateral tree
 ## rather than a broadleaf crown compressed along Y.  It produces only pure
@@ -15,7 +14,7 @@ const MAX_RAISED_FORKS := 6
 # raised-fork scaffold must never consume the total tree budget by itself.
 const MAX_SAVANNA_SCAFFOLD_SEGMENTS := 760
 
-func build_recipe(seed := DEFAULT_SEED, maturity := 0.92) -> Dictionary:
+func build_recipe(seed := DEFAULT_SEED, maturity := 0.92, _growth_profile: Dictionary = {}) -> Dictionary:
 	var resolved_seed := int(seed)
 	var resolved_maturity := clampf(float(maturity), 0.12, 1.0)
 	# Umbrella thorns stay proportionately lower and wider than the other two

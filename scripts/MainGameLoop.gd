@@ -207,6 +207,10 @@ func apply_environment_style(day: float, warmth: float, weather_tint: float, und
         setup_visual_style()
     var tint := clampf(weather_tint, 0.0, visual_style.max_weather_tint)
     var underground := clampf(float(underground_factor), 0.0, 1.0)
+    # Shared vegetation materials use this only for a small daylight-only bark
+    # readability floor under dense self-shadow. It is zero at night and below
+    # ground, so it does not turn trunks into emissive night props.
+    RenderingServer.global_shader_parameter_set("environment_daylight", clampf(day * (1.0 - underground), 0.0, 1.0))
     var shader_material := terrain_material as ShaderMaterial
     if shader_material != null:
         var terrain_shadow_fill := day * 0.24 * lerpf(1.0, 0.08, underground)
@@ -515,26 +519,38 @@ func shelter_state_at(position: Vector3) -> Dictionary:
     var structural_nearby := 0
     var bed_bonus := 0.0
     var near_light := light_safety_at(position, false, CELL * 7.0)
-    for block in blocks.values():
-        var body := block as Node3D
-        if body == null or not body.has_meta("block_type"):
-            continue
-        var block_type := String(body.get_meta("block_type", ""))
-        var rel := body.global_position - position
-        if absf(rel.x) > CELL * 4.2 or absf(rel.z) > CELL * 4.2 or absf(rel.y) > CELL * 5.2:
-            continue
-        var horizontal := Vector2(rel.x, rel.z).length()
-        if block_type == "bed" and horizontal <= CELL * 3.2 and absf(rel.y) < CELL * 1.2:
-            bed_bonus = maxf(bed_bonus, 0.08)
-        var shelter_block := is_structural_block_type(block_type) or block_type in ["door", "glass"]
-        if not shelter_block:
-            continue
-        if rel.y > CELL * 0.95 and rel.y < CELL * 5.4 and absf(rel.x) < CELL * 1.65 and absf(rel.z) < CELL * 1.65:
-            roof_score = 1.0
-        if rel.y > -CELL * 0.75 and rel.y < CELL * 2.45 and horizontal > CELL * 0.65 and horizontal < CELL * 3.8:
-            var sector := floori(posmod(atan2(rel.z, rel.x) + PI, TAU) / (PI * 0.25))
-            wall_sectors[sector] = true
-            structural_nearby += 1
+    # Blocks are spatially keyed by cell. Shelter is intentionally local, so
+    # query a conservative cell envelope instead of cloning/scanning every
+    # world block. The original relative-position checks below remain the
+    # authority, including for structures placed on fractional terrain levels.
+    var min_x := floori((position.x - CELL * 4.2) / CELL) - 1
+    var max_x := ceili((position.x + CELL * 4.2) / CELL) + 1
+    var min_z := floori((position.z - CELL * 4.2) / CELL) - 1
+    var max_z := ceili((position.z + CELL * 4.2) / CELL) + 1
+    var min_y := floori((position.y - CELL * 5.2) / CELL) - 2
+    var max_y := ceili((position.y + CELL * 5.2) / CELL) + 2
+    for x in range(min_x, max_x + 1):
+        for z in range(min_z, max_z + 1):
+            for y in range(min_y, max_y + 1):
+                var body := blocks.get(Vector3i(x, y, z)) as Node3D
+                if body == null or not body.has_meta("block_type"):
+                    continue
+                var block_type := String(body.get_meta("block_type", ""))
+                var rel := body.global_position - position
+                if absf(rel.x) > CELL * 4.2 or absf(rel.z) > CELL * 4.2 or absf(rel.y) > CELL * 5.2:
+                    continue
+                var horizontal := Vector2(rel.x, rel.z).length()
+                if block_type == "bed" and horizontal <= CELL * 3.2 and absf(rel.y) < CELL * 1.2:
+                    bed_bonus = maxf(bed_bonus, 0.08)
+                var shelter_block := is_structural_block_type(block_type) or block_type in ["door", "glass"]
+                if not shelter_block:
+                    continue
+                if rel.y > CELL * 0.95 and rel.y < CELL * 5.4 and absf(rel.x) < CELL * 1.65 and absf(rel.z) < CELL * 1.65:
+                    roof_score = 1.0
+                if rel.y > -CELL * 0.75 and rel.y < CELL * 2.45 and horizontal > CELL * 0.65 and horizontal < CELL * 3.8:
+                    var sector := floori(posmod(atan2(rel.z, rel.x) + PI, TAU) / (PI * 0.25))
+                    wall_sectors[sector] = true
+                    structural_nearby += 1
     var wall_score: float = minf(1.0, float(wall_sectors.size()) / 5.0)
     var density_score: float = minf(1.0, float(structural_nearby) / 10.0)
     var comfort: float = clampf(

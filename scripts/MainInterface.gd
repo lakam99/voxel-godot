@@ -423,6 +423,7 @@ func should_face_player(block_type: String) -> bool: return false
 func snapped_player_yaw() -> float: return 0.0
 func fallback_ground_placement_hit(max_distance: float) -> Dictionary: return {}
 func placement_from_hit(hit: Dictionary, block_type: String) -> Dictionary: return {}
+func placement_action_reach_distance() -> float: return CELL * 1.85
 func placement_within_action_reach(placement: Dictionary) -> bool: return false
 func hit_within_action_reach(hit: Dictionary) -> bool: return false
 func placement_surface_height(x: float, z: float, block_type: String) -> float: return 0.0

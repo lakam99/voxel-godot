@@ -529,19 +529,19 @@
       ],
       "bounds": {
         "min": [
-          -4.0298,
-          -4.03,
+          -4.0085,
+          -3.9112,
           0.0
         ],
         "max": [
-          4.3549,
-          4.0558,
-          10.052
+          4.4688,
+          3.977,
+          10.0544
         ],
         "size": [
-          8.3847,
-          8.0858,
-          10.052
+          8.4774,
+          7.8882,
+          10.0544
         ]
       },
       "pivotAtOrigin": true,
@@ -570,19 +570,19 @@
       ],
       "bounds": {
         "min": [
-          -3.7761,
-          -3.755,
+          -4.0142,
+          -3.786,
           0.0
         ],
         "max": [
-          4.5039,
-          3.7201,
-          10.6203
+          4.3232,
+          3.7199,
+          10.5005
         ],
         "size": [
-          8.28,
-          7.4751,
-          10.6203
+          8.3374,
+          7.506,
+          10.5005
         ]
       },
       "pivotAtOrigin": true,
@@ -601,7 +601,7 @@
     {
       "id": "ecological_broadleaf_established_01",
       "path": "assets/visual/generated/environment/ecological_broadleaf_established_01.glb",
-      "triangles": 1292,
+      "triangles": 1674,
       "materials": [
         "trunk",
         "bark_dark",
@@ -611,19 +611,19 @@
       ],
       "bounds": {
         "min": [
-          -6.561,
-          -5.6051,
+          -7.8471,
+          -7.1823,
           0.0
         ],
         "max": [
-          7.2672,
-          5.5778,
-          15.6015
+          8.1666,
+          6.9666,
+          17.3848
         ],
         "size": [
-          13.8283,
-          11.1829,
-          15.6015
+          16.0137,
+          14.149,
+          17.3848
         ]
       },
       "pivotAtOrigin": true,
@@ -632,7 +632,7 @@
         {
           "name": "Color",
           "domain": "CORNER",
-          "count": 3876
+          "count": 5022
         }
       ],
       "armatures": 0,
@@ -642,7 +642,7 @@
     {
       "id": "ecological_broadleaf_established_02",
       "path": "assets/visual/generated/environment/ecological_broadleaf_established_02.glb",
-      "triangles": 1292,
+      "triangles": 1674,
       "materials": [
         "trunk",
         "bark_dark",
@@ -652,19 +652,19 @@
       ],
       "bounds": {
         "min": [
-          -6.3813,
-          -5.7185,
+          -6.5497,
+          -6.5731,
           0.0
         ],
         "max": [
-          5.7953,
-          5.8126,
-          16.6933
+          6.511,
+          6.1339,
+          18.681
         ],
         "size": [
-          12.1766,
-          11.5312,
-          16.6933
+          13.0606,
+          12.707,
+          18.681
         ]
       },
       "pivotAtOrigin": true,
@@ -673,7 +673,7 @@
         {
           "name": "Color",
           "domain": "CORNER",
-          "count": 3876
+          "count": 5022
         }
       ],
       "armatures": 0,
@@ -683,7 +683,7 @@
     {
       "id": "ecological_broadleaf_mature_01",
       "path": "assets/visual/generated/environment/ecological_broadleaf_mature_01.glb",
-      "triangles": 2456,
+      "triangles": 3028,
       "materials": [
         "trunk",
         "bark_dark",
@@ -693,19 +693,19 @@
       ],
       "bounds": {
         "min": [
-          -9.8137,
-          -9.8414,
+          -14.1756,
+          -12.5459,
           0.0
         ],
         "max": [
-          10.9422,
-          8.6194,
-          24.2934
+          14.5974,
+          12.293,
+          30.9631
         ],
         "size": [
-          20.7559,
-          18.4608,
-          24.2934
+          28.773,
+          24.8388,
+          30.9631
         ]
       },
       "pivotAtOrigin": true,
@@ -714,7 +714,7 @@
         {
           "name": "Color",
           "domain": "CORNER",
-          "count": 7368
+          "count": 9084
         }
       ],
       "armatures": 0,
@@ -724,7 +724,7 @@
     {
       "id": "ecological_broadleaf_mature_02",
       "path": "assets/visual/generated/environment/ecological_broadleaf_mature_02.glb",
-      "triangles": 2456,
+      "triangles": 3028,
       "materials": [
         "trunk",
         "bark_dark",
@@ -734,19 +734,19 @@
       ],
       "bounds": {
         "min": [
-          -9.4386,
-          -9.6573,
+          -12.0492,
+          -11.7592,
           0.0
         ],
         "max": [
-          10.0168,
-          9.4059,
-          25.5882
+          13.4253,
+          13.4121,
+          32.4073
         ],
         "size": [
-          19.4554,
-          19.0632,
-          25.5882
+          25.4745,
+          25.1714,
+          32.4073
         ]
       },
       "pivotAtOrigin": true,
@@ -755,7 +755,7 @@
         {
           "name": "Color",
           "domain": "CORNER",
-          "count": 7368
+          "count": 9084
         }
       ],
       "armatures": 0,
@@ -765,7 +765,7 @@
     {
       "id": "ecological_broadleaf_old_01",
       "path": "assets/visual/generated/environment/ecological_broadleaf_old_01.glb",
-      "triangles": 3524,
+      "triangles": 5264,
       "materials": [
         "trunk",
         "bark_dark",
@@ -775,19 +775,19 @@
       ],
       "bounds": {
         "min": [
-          -14.4245,
-          -14.1322,
+          -20.2514,
+          -20.0325,
           0.0
         ],
         "max": [
-          14.9745,
-          13.7689,
-          31.4906
+          23.5396,
+          22.3149,
+          48.8066
         ],
         "size": [
-          29.399,
-          27.901,
-          31.4906
+          43.791,
+          42.3474,
+          48.8066
         ]
       },
       "pivotAtOrigin": true,
@@ -796,7 +796,7 @@
         {
           "name": "Color",
           "domain": "CORNER",
-          "count": 10572
+          "count": 15792
         }
       ],
       "armatures": 0,
@@ -806,7 +806,7 @@
     {
       "id": "ecological_broadleaf_old_02",
       "path": "assets/visual/generated/environment/ecological_broadleaf_old_02.glb",
-      "triangles": 3524,
+      "triangles": 5264,
       "materials": [
         "trunk",
         "bark_dark",
@@ -816,19 +816,19 @@
       ],
       "bounds": {
         "min": [
-          -12.7231,
-          -12.1413,
+          -18.7954,
+          -19.7394,
           0.0
         ],
         "max": [
-          11.9576,
-          12.3447,
-          33.0559
+          19.2352,
+          20.1656,
+          51.4445
         ],
         "size": [
-          24.6806,
-          24.486,
-          33.0559
+          38.0306,
+          39.9051,
+          51.4445
         ]
       },
       "pivotAtOrigin": true,
@@ -837,7 +837,7 @@
         {
           "name": "Color",
           "domain": "CORNER",
-          "count": 10572
+          "count": 15792
         }
       ],
       "armatures": 0,
@@ -847,7 +847,7 @@
     {
       "id": "ecological_broadleaf_ancient_01",
       "path": "assets/visual/generated/environment/ecological_broadleaf_ancient_01.glb",
-      "triangles": 4672,
+      "triangles": 7464,
       "materials": [
         "trunk",
         "bark_dark",
@@ -857,19 +857,19 @@
       ],
       "bounds": {
         "min": [
-          -15.45,
-          -14.6902,
+          -32.05,
+          -28.9385,
           0.0
         ],
         "max": [
-          16.8809,
-          16.5797,
-          37.8875
+          29.5429,
+          28.3303,
+          71.3766
         ],
         "size": [
-          32.331,
-          31.2699,
-          37.8875
+          61.5929,
+          57.2688,
+          71.3766
         ]
       },
       "pivotAtOrigin": true,
@@ -878,7 +878,7 @@
         {
           "name": "Color",
           "domain": "CORNER",
-          "count": 14016
+          "count": 22392
         }
       ],
       "armatures": 0,
@@ -888,7 +888,7 @@
     {
       "id": "ecological_broadleaf_ancient_02",
       "path": "assets/visual/generated/environment/ecological_broadleaf_ancient_02.glb",
-      "triangles": 4672,
+      "triangles": 7464,
       "materials": [
         "trunk",
         "bark_dark",
@@ -898,19 +898,19 @@
       ],
       "bounds": {
         "min": [
-          -15.604,
-          -15.6785,
+          -29.3446,
+          -26.0289,
           0.0
         ],
         "max": [
-          15.3049,
-          16.8944,
-          39.6964
+          27.2989,
+          27.1776,
+          74.4737
         ],
         "size": [
-          30.9089,
-          32.5729,
-          39.6964
+          56.6435,
+          53.2065,
+          74.4737
         ]
       },
       "pivotAtOrigin": true,
@@ -919,7 +919,7 @@
         {
           "name": "Color",
           "domain": "CORNER",
-          "count": 14016
+          "count": 22392
         }
       ],
       "armatures": 0,
@@ -938,19 +938,19 @@
       ],
       "bounds": {
         "min": [
-          -3.1507,
-          -3.4135,
+          -3.0401,
+          -3.3633,
           0.0
         ],
         "max": [
-          3.5042,
-          3.2517,
-          11.0711
+          3.2536,
+          2.9396,
+          11.0733
         ],
         "size": [
-          6.6548,
-          6.6653,
-          11.0711
+          6.2937,
+          6.3029,
+          11.0733
         ]
       },
       "pivotAtOrigin": true,
@@ -978,19 +978,19 @@
       ],
       "bounds": {
         "min": [
-          -3.3866,
-          -3.486,
+          -3.4486,
+          -3.4587,
           0.0
         ],
         "max": [
-          3.4701,
-          3.4055,
-          11.4543
+          3.4533,
+          3.3971,
+          11.5306
         ],
         "size": [
-          6.8567,
-          6.8915,
-          11.4543
+          6.9019,
+          6.8559,
+          11.5306
         ]
       },
       "pivotAtOrigin": true,
@@ -1009,7 +1009,7 @@
     {
       "id": "ecological_conifer_established_01",
       "path": "assets/visual/generated/environment/ecological_conifer_established_01.glb",
-      "triangles": 1272,
+      "triangles": 1416,
       "materials": [
         "trunk",
         "bark_dark",
@@ -1018,19 +1018,19 @@
       ],
       "bounds": {
         "min": [
-          -4.1471,
-          -4.6776,
+          -4.977,
+          -5.5285,
           0.0
         ],
         "max": [
-          4.8008,
-          4.2288,
-          16.8536
+          5.7552,
+          5.3393,
+          19.6148
         ],
         "size": [
-          8.9478,
-          8.9064,
-          16.8536
+          10.7323,
+          10.8678,
+          19.6148
         ]
       },
       "pivotAtOrigin": true,
@@ -1039,7 +1039,7 @@
         {
           "name": "Color",
           "domain": "CORNER",
-          "count": 3816
+          "count": 4248
         }
       ],
       "armatures": 0,
@@ -1049,7 +1049,7 @@
     {
       "id": "ecological_conifer_established_02",
       "path": "assets/visual/generated/environment/ecological_conifer_established_02.glb",
-      "triangles": 1256,
+      "triangles": 1416,
       "materials": [
         "trunk",
         "bark_dark",
@@ -1058,19 +1058,19 @@
       ],
       "bounds": {
         "min": [
-          -4.608,
-          -4.6142,
+          -5.6602,
+          -5.548,
           0.0
         ],
         "max": [
-          4.5133,
-          4.6502,
-          17.5353
+          5.601,
+          5.585,
+          20.6354
         ],
         "size": [
-          9.1214,
-          9.2645,
-          17.5353
+          11.2612,
+          11.1329,
+          20.6354
         ]
       },
       "pivotAtOrigin": true,
@@ -1079,7 +1079,7 @@
         {
           "name": "Color",
           "domain": "CORNER",
-          "count": 3768
+          "count": 4248
         }
       ],
       "armatures": 0,
@@ -1089,7 +1089,7 @@
     {
       "id": "ecological_conifer_mature_01",
       "path": "assets/visual/generated/environment/ecological_conifer_mature_01.glb",
-      "triangles": 2180,
+      "triangles": 2704,
       "materials": [
         "trunk",
         "bark_dark",
@@ -1098,19 +1098,19 @@
       ],
       "bounds": {
         "min": [
-          -6.0282,
-          -6.5418,
+          -8.3661,
+          -9.3772,
           0.0
         ],
         "max": [
-          6.7669,
-          6.1352,
-          24.4771
+          9.5266,
+          8.676,
+          35.1352
         ],
         "size": [
-          12.7951,
-          12.677,
-          24.4771
+          17.8927,
+          18.0532,
+          35.1352
         ]
       },
       "pivotAtOrigin": true,
@@ -1119,7 +1119,7 @@
         {
           "name": "Color",
           "domain": "CORNER",
-          "count": 6540
+          "count": 8112
         }
       ],
       "armatures": 0,
@@ -1129,7 +1129,7 @@
     {
       "id": "ecological_conifer_mature_02",
       "path": "assets/visual/generated/environment/ecological_conifer_mature_02.glb",
-      "triangles": 2180,
+      "triangles": 2704,
       "materials": [
         "trunk",
         "bark_dark",
@@ -1138,19 +1138,19 @@
       ],
       "bounds": {
         "min": [
-          -6.2491,
-          -6.1564,
+          -8.6258,
+          -8.7784,
           0.0
         ],
         "max": [
-          6.1574,
-          6.0206,
-          25.3099
+          8.8358,
+          8.6701,
+          36.4406
         ],
         "size": [
-          12.4066,
-          12.177,
-          25.3099
+          17.4616,
+          17.4486,
+          36.4406
         ]
       },
       "pivotAtOrigin": true,
@@ -1159,7 +1159,7 @@
         {
           "name": "Color",
           "domain": "CORNER",
-          "count": 6540
+          "count": 8112
         }
       ],
       "armatures": 0,
@@ -1169,7 +1169,7 @@
     {
       "id": "ecological_conifer_old_01",
       "path": "assets/visual/generated/environment/ecological_conifer_old_01.glb",
-      "triangles": 3244,
+      "triangles": 4472,
       "materials": [
         "trunk",
         "bark_dark",
@@ -1178,19 +1178,19 @@
       ],
       "bounds": {
         "min": [
-          -6.8426,
-          -7.5916,
+          -11.4434,
+          -12.4887,
           0.0
         ],
         "max": [
-          7.7002,
-          7.0389,
-          32.8857
+          12.7467,
+          11.7556,
+          56.4906
         ],
         "size": [
-          14.5428,
-          14.6305,
-          32.8857
+          24.1901,
+          24.2443,
+          56.4906
         ]
       },
       "pivotAtOrigin": true,
@@ -1199,7 +1199,7 @@
         {
           "name": "Color",
           "domain": "CORNER",
-          "count": 9732
+          "count": 13416
         }
       ],
       "armatures": 0,
@@ -1209,7 +1209,7 @@
     {
       "id": "ecological_conifer_old_02",
       "path": "assets/visual/generated/environment/ecological_conifer_old_02.glb",
-      "triangles": 3228,
+      "triangles": 4456,
       "materials": [
         "trunk",
         "bark_dark",
@@ -1218,19 +1218,19 @@
       ],
       "bounds": {
         "min": [
-          -7.6087,
-          -7.6125,
+          -12.5684,
+          -12.6003,
           0.0
         ],
         "max": [
-          7.7449,
-          7.5923,
-          34.7244
+          12.5799,
+          12.5303,
+          59.1309
         ],
         "size": [
-          15.3536,
-          15.2048,
-          34.7244
+          25.1483,
+          25.1306,
+          59.1309
         ]
       },
       "pivotAtOrigin": true,
@@ -1239,7 +1239,7 @@
         {
           "name": "Color",
           "domain": "CORNER",
-          "count": 9684
+          "count": 13368
         }
       ],
       "armatures": 0,
@@ -1249,7 +1249,7 @@
     {
       "id": "ecological_conifer_ancient_01",
       "path": "assets/visual/generated/environment/ecological_conifer_ancient_01.glb",
-      "triangles": 4352,
+      "triangles": 6424,
       "materials": [
         "trunk",
         "bark_dark",
@@ -1258,19 +1258,19 @@
       ],
       "bounds": {
         "min": [
-          -8.7323,
-          -9.7187,
+          -16.8884,
+          -18.3414,
           0.0
         ],
         "max": [
-          9.7022,
-          8.916,
-          42.2347
+          18.7731,
+          17.2482,
+          85.1498
         ],
         "size": [
-          18.4345,
-          18.6346,
-          42.2347
+          35.6615,
+          35.5896,
+          85.1498
         ]
       },
       "pivotAtOrigin": true,
@@ -1279,7 +1279,7 @@
         {
           "name": "Color",
           "domain": "CORNER",
-          "count": 13056
+          "count": 19272
         }
       ],
       "armatures": 0,
@@ -1289,7 +1289,7 @@
     {
       "id": "ecological_conifer_ancient_02",
       "path": "assets/visual/generated/environment/ecological_conifer_ancient_02.glb",
-      "triangles": 4352,
+      "triangles": 6424,
       "materials": [
         "trunk",
         "bark_dark",
@@ -1298,19 +1298,19 @@
       ],
       "bounds": {
         "min": [
-          -9.2255,
-          -9.1024,
+          -17.6035,
+          -17.5327,
           0.0
         ],
         "max": [
-          9.2734,
-          9.1828,
-          43.5886
+          17.4607,
+          17.4902,
+          87.687
         ],
         "size": [
-          18.4989,
-          18.2852,
-          43.5886
+          35.0642,
+          35.0229,
+          87.687
         ]
       },
       "pivotAtOrigin": true,
@@ -1319,7 +1319,7 @@
         {
           "name": "Color",
           "domain": "CORNER",
-          "count": 13056
+          "count": 19272
         }
       ],
       "armatures": 0,
@@ -1338,19 +1338,19 @@
       ],
       "bounds": {
         "min": [
-          -6.2696,
-          -4.3062,
-          -0.0249
+          -6.0597,
+          -4.1285,
+          0.0
         ],
         "max": [
-          4.7281,
-          3.3893,
-          9.1992
+          4.8153,
+          3.437,
+          9.0698
         ],
         "size": [
-          10.9977,
-          7.6955,
-          9.2241
+          10.875,
+          7.5655,
+          9.0698
         ]
       },
       "pivotAtOrigin": true,
@@ -1378,19 +1378,19 @@
       ],
       "bounds": {
         "min": [
-          -4.7545,
-          -4.5753,
-          -0.023
+          -4.6747,
+          -4.4746,
+          0.0
         ],
         "max": [
-          4.8528,
-          3.3678,
-          9.4086
+          4.9572,
+          3.2769,
+          9.4529
         ],
         "size": [
-          9.6073,
-          7.943,
-          9.4316
+          9.632,
+          7.7515,
+          9.4529
         ]
       },
       "pivotAtOrigin": true,
@@ -1409,7 +1409,7 @@
     {
       "id": "ecological_savanna_established_01",
       "path": "assets/visual/generated/environment/ecological_savanna_established_01.glb",
-      "triangles": 1104,
+      "triangles": 1448,
       "materials": [
         "trunk",
         "bark_dark",
@@ -1418,19 +1418,19 @@
       ],
       "bounds": {
         "min": [
-          -7.8776,
-          -6.8338,
-          -0.0039
+          -9.7354,
+          -7.2084,
+          0.0
         ],
         "max": [
-          7.9177,
-          6.3149,
-          13.8636
+          9.1254,
+          6.6503,
+          16.5884
         ],
         "size": [
-          15.7954,
-          13.1487,
-          13.8675
+          18.8609,
+          13.8587,
+          16.5884
         ]
       },
       "pivotAtOrigin": true,
@@ -1439,7 +1439,7 @@
         {
           "name": "Color",
           "domain": "CORNER",
-          "count": 3312
+          "count": 4344
         }
       ],
       "armatures": 0,
@@ -1449,7 +1449,7 @@
     {
       "id": "ecological_savanna_established_02",
       "path": "assets/visual/generated/environment/ecological_savanna_established_02.glb",
-      "triangles": 1104,
+      "triangles": 1448,
       "materials": [
         "trunk",
         "bark_dark",
@@ -1458,19 +1458,19 @@
       ],
       "bounds": {
         "min": [
-          -7.7714,
-          -5.1996,
-          -0.0294
+          -9.3039,
+          -6.1356,
+          0.0
         ],
         "max": [
-          6.5017,
-          6.7474,
-          14.4567
+          7.6738,
+          6.1634,
+          17.3011
         ],
         "size": [
-          14.2732,
-          11.947,
-          14.4861
+          16.9778,
+          12.2989,
+          17.3011
         ]
       },
       "pivotAtOrigin": true,
@@ -1479,7 +1479,7 @@
         {
           "name": "Color",
           "domain": "CORNER",
-          "count": 3312
+          "count": 4344
         }
       ],
       "armatures": 0,
@@ -1489,7 +1489,7 @@
     {
       "id": "ecological_savanna_mature_01",
       "path": "assets/visual/generated/environment/ecological_savanna_mature_01.glb",
-      "triangles": 2044,
+      "triangles": 2676,
       "materials": [
         "trunk",
         "bark_dark",
@@ -1498,19 +1498,19 @@
       ],
       "bounds": {
         "min": [
-          -11.7747,
-          -7.6218,
-          -0.0144
+          -15.189,
+          -10.203,
+          0.0
         ],
         "max": [
-          10.5581,
-          9.1992,
-          19.1806
+          13.8502,
+          11.5823,
+          28.5329
         ],
         "size": [
-          22.3328,
-          16.821,
-          19.195
+          29.0392,
+          21.7853,
+          28.5329
         ]
       },
       "pivotAtOrigin": true,
@@ -1519,7 +1519,7 @@
         {
           "name": "Color",
           "domain": "CORNER",
-          "count": 6132
+          "count": 8028
         }
       ],
       "armatures": 0,
@@ -1529,7 +1529,7 @@
     {
       "id": "ecological_savanna_mature_02",
       "path": "assets/visual/generated/environment/ecological_savanna_mature_02.glb",
-      "triangles": 2044,
+      "triangles": 2676,
       "materials": [
         "trunk",
         "bark_dark",
@@ -1538,19 +1538,19 @@
       ],
       "bounds": {
         "min": [
-          -10.4604,
-          -8.1796,
-          -0.0083
+          -13.1265,
+          -10.9574,
+          0.0
         ],
         "max": [
-          11.2662,
-          8.0558,
-          20.5254
+          14.6665,
+          10.8949,
+          30.4416
         ],
         "size": [
-          21.7266,
-          16.2354,
-          20.5337
+          27.793,
+          21.8524,
+          30.4416
         ]
       },
       "pivotAtOrigin": true,
@@ -1559,7 +1559,7 @@
         {
           "name": "Color",
           "domain": "CORNER",
-          "count": 6132
+          "count": 8028
         }
       ],
       "armatures": 0,
@@ -1569,7 +1569,7 @@
     {
       "id": "ecological_savanna_old_01",
       "path": "assets/visual/generated/environment/ecological_savanna_old_01.glb",
-      "triangles": 2976,
+      "triangles": 4740,
       "materials": [
         "trunk",
         "bark_dark",
@@ -1578,19 +1578,19 @@
       ],
       "bounds": {
         "min": [
-          -13.0276,
-          -11.2398,
-          -0.0352
+          -21.8287,
+          -16.4346,
+          0.0
         ],
         "max": [
-          15.0859,
-          11.2393,
-          25.043
+          21.882,
+          18.0441,
+          45.5845
         ],
         "size": [
-          28.1135,
-          22.4791,
-          25.0782
+          43.7106,
+          34.4788,
+          45.5845
         ]
       },
       "pivotAtOrigin": true,
@@ -1599,7 +1599,7 @@
         {
           "name": "Color",
           "domain": "CORNER",
-          "count": 8928
+          "count": 14220
         }
       ],
       "armatures": 0,
@@ -1609,7 +1609,7 @@
     {
       "id": "ecological_savanna_old_02",
       "path": "assets/visual/generated/environment/ecological_savanna_old_02.glb",
-      "triangles": 2976,
+      "triangles": 4740,
       "materials": [
         "trunk",
         "bark_dark",
@@ -1618,19 +1618,19 @@
       ],
       "bounds": {
         "min": [
-          -13.8087,
-          -9.9697,
-          -0.0152
+          -20.5691,
+          -16.2836,
+          0.0
         ],
         "max": [
-          14.4976,
-          11.3118,
-          26.3927
+          22.0385,
+          15.7346,
+          48.1418
         ],
         "size": [
-          28.3062,
-          21.2815,
-          26.4079
+          42.6076,
+          32.0182,
+          48.1418
         ]
       },
       "pivotAtOrigin": true,
@@ -1639,7 +1639,7 @@
         {
           "name": "Color",
           "domain": "CORNER",
-          "count": 8928
+          "count": 14220
         }
       ],
       "armatures": 0,
@@ -1649,7 +1649,7 @@
     {
       "id": "ecological_savanna_ancient_01",
       "path": "assets/visual/generated/environment/ecological_savanna_ancient_01.glb",
-      "triangles": 4048,
+      "triangles": 6540,
       "materials": [
         "trunk",
         "bark_dark",
@@ -1658,19 +1658,19 @@
       ],
       "bounds": {
         "min": [
-          -17.5235,
-          -12.749,
-          -0.0189
+          -28.7084,
+          -24.7238,
+          0.0
         ],
         "max": [
-          17.0778,
-          13.9188,
-          31.1814
+          30.9153,
+          24.2164,
+          65.1629
         ],
         "size": [
-          34.6013,
-          26.6679,
-          31.2003
+          59.6237,
+          48.9402,
+          65.1629
         ]
       },
       "pivotAtOrigin": true,
@@ -1679,7 +1679,7 @@
         {
           "name": "Color",
           "domain": "CORNER",
-          "count": 12144
+          "count": 19620
         }
       ],
       "armatures": 0,
@@ -1689,7 +1689,7 @@
     {
       "id": "ecological_savanna_ancient_02",
       "path": "assets/visual/generated/environment/ecological_savanna_ancient_02.glb",
-      "triangles": 4048,
+      "triangles": 6540,
       "materials": [
         "trunk",
         "bark_dark",
@@ -1698,19 +1698,19 @@
       ],
       "bounds": {
         "min": [
-          -16.7299,
-          -13.2218,
-          -0.0213
+          -27.8174,
+          -22.874,
+          0.0
         ],
         "max": [
-          15.7716,
-          13.1508,
-          32.0886
+          28.3764,
+          22.0908,
+          67.2163
         ],
         "size": [
-          32.5015,
-          26.3727,
-          32.1099
+          56.1938,
+          44.9648,
+          67.2163
         ]
       },
       "pivotAtOrigin": true,
@@ -1719,7 +1719,7 @@
         {
           "name": "Color",
           "domain": "CORNER",
-          "count": 12144
+          "count": 19620
         }
       ],
       "armatures": 0,

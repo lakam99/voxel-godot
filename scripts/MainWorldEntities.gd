@@ -184,16 +184,29 @@ func update_hud(message: String = "", throttled: bool = false) -> void:
             hud_refresh_elapsed = 0.0
     if startup_loading_active:
         startup_loading_step.emit("HUD refresh: cell")
+    var world_state_start := Time.get_ticks_usec()
+    var biome_start := Time.get_ticks_usec()
     var cell := Vector2i(world_to_cell(player.position.x), world_to_cell(player.position.z))
     var biome := surface_biome_at_cell(Vector3i(cell.x, 0, cell.y))
+    if runtime_perf_monitor != null:
+        runtime_perf_monitor.observe_duration("hud_biome_lookup", profiled_ms(biome_start))
     if startup_loading_active:
         startup_loading_step.emit("HUD refresh: exploration")
+    var exploration_start := Time.get_ticks_usec()
     update_exploration_state(cell, biome)
+    if runtime_perf_monitor != null:
+        runtime_perf_monitor.observe_duration("hud_exploration_state", profiled_ms(exploration_start))
     if startup_loading_active:
         startup_loading_step.emit("HUD refresh: objectives")
+    var objectives_start := Time.get_ticks_usec()
     update_objectives_and_contracts()
+    if runtime_perf_monitor != null:
+        runtime_perf_monitor.observe_duration("hud_objectives_contracts", profiled_ms(objectives_start))
+    if runtime_perf_monitor != null:
+        runtime_perf_monitor.observe_duration("hud_world_state", profiled_ms(world_state_start))
     if startup_loading_active:
         startup_loading_step.emit("HUD refresh: status")
+    var status_start := Time.get_ticks_usec()
     var time_text := "Day %d %s" % [max(1, int(floor(world_elapsed / DAY_LENGTH)) + 1), clock_time_text()]
     var weather_state: Dictionary = weather_system.snapshot() if weather_system else { "kind": "clear", "intensity": 0.0 }
     hud.set_status(
@@ -210,10 +223,16 @@ func update_hud(message: String = "", throttled: bool = false) -> void:
         hud.set_progression(progression_system.state())
     if equipment_system:
         hud.set_equipment(equipment_system.state())
-    if contract_system:
+    # Contract rows are only visible in the contracts panel. Avoid allocating
+    # and rebuilding the complete 24-row list during ordinary HUD refreshes;
+    # the panel's open/close paths render the same authoritative state on
+    # demand, while an already-open panel remains live.
+    if contract_system and hud.is_contracts_open():
         hud.set_contracts(contract_system.state())
     if story_journal_model and hud.has_method("set_story_journal_state"):
         hud.set_story_journal_state(story_journal_model.state())
+    if runtime_perf_monitor != null:
+        runtime_perf_monitor.observe_duration("hud_status_panels", profiled_ms(status_start))
     if startup_loading_active:
         startup_loading_step.emit("HUD refresh: navigation state")
     var nav_state_start := Time.get_ticks_usec()
@@ -231,8 +250,11 @@ func update_hud(message: String = "", throttled: bool = false) -> void:
     )
     if runtime_perf_monitor != null:
         runtime_perf_monitor.observe_duration("hud_navigation_apply", profiled_ms(nav_apply_start))
+    var interaction_start := Time.get_ticks_usec()
     if hud.has_method("set_interaction_prompt"):
         hud.set_interaction_prompt(focused_interaction_prompt())
+    if runtime_perf_monitor != null:
+        runtime_perf_monitor.observe_duration("hud_interaction_prompt", profiled_ms(interaction_start))
     if message != "":
         hud.show_notification(message) if hud.has_method("show_notification") else hud.set_target_message(message)
     if startup_loading_active:
@@ -451,13 +473,25 @@ func trigger_landmark_ambush(position: Vector3, tier: String, label: String) -> 
     return int(hostile_system.spawn_landmark_ambush(position, tier))
 
 func update_objectives_and_contracts() -> void:
+    var objective_state_start := Time.get_ticks_usec()
     var state := objective_state()
+    if runtime_perf_monitor != null:
+        runtime_perf_monitor.observe_duration("hud_objective_state_snapshot", profiled_ms(objective_state_start))
+    var tutorial_progress_start := Time.get_ticks_usec()
     if tutorial_system and tutorial_system.update_progress(state):
         state = objective_state()
+    if runtime_perf_monitor != null:
+        runtime_perf_monitor.observe_duration("hud_tutorial_progress", profiled_ms(tutorial_progress_start))
+    var objective_update_start := Time.get_ticks_usec()
     if objective_system:
         objective_system.update(state)
+    if runtime_perf_monitor != null:
+        runtime_perf_monitor.observe_duration("hud_objective_update", profiled_ms(objective_update_start))
+    var contract_update_start := Time.get_ticks_usec()
     if contract_system:
         contract_system.update(state)
+    if runtime_perf_monitor != null:
+        runtime_perf_monitor.observe_duration("hud_contract_update", profiled_ms(contract_update_start))
 
 func objective_state() -> Dictionary:
     var totals: Dictionary = inventory_system.totals() if inventory_system else {}

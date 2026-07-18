@@ -80,9 +80,11 @@ func plan_route(entry: Dictionary, target: Vector3, semantic_kind: String, optio
 		"maxExpansions": int(options.get("maxExpansions", 8192)),
 		"expansionsPerCall": int(options.get("expansionsPerCall", 16))
 	}
+	var requested_avoids: Array = options.get("avoidCells", []) if options.get("avoidCells", []) is Array else []
 	var repair_avoids: Array = runtime.get("probeRepairAvoidCells", []) if runtime.get("probeRepairAvoidCells", []) is Array else []
-	if not repair_avoids.is_empty():
-		plan_options["avoidCells"] = _merge_avoid_cells(options.get("avoidCells", []), repair_avoids)
+	var combined_avoids := _merge_avoid_cells(requested_avoids, repair_avoids)
+	if not combined_avoids.is_empty():
+		plan_options["avoidCells"] = combined_avoids
 	var route: Dictionary = substrate.plan_route(entry, start_cell, candidate_cells, plan_options)
 	if not bool(route.get("ok", false)):
 		var route_classification := String(route.get("classification", "unreachable_static"))
@@ -180,12 +182,41 @@ func _bind_entry(entry: Dictionary) -> void:
 		authority.register_actor(entry)
 
 func _candidate_poses(entry: Dictionary, target: Vector3, semantic_kind: String, allow_outside: bool, moving_home: bool, options: Dictionary) -> Dictionary:
-	var candidates: Dictionary = substrate.candidate_poses_for_target(entry, _target_data(entry, target, semantic_kind), semantic_kind, {
+	var candidates: Dictionary = substrate.candidate_poses_for_target(entry, _target_data(entry, target, semantic_kind, options), semantic_kind, {
 		"allowOutside": allow_outside,
 		"movingHome": moving_home
 	})
+	var unfiltered_cells := _candidate_cells(candidates)
+	var constrained: Array = []
+	var max_candidate_distance := float(options.get("maxCandidateDistance", -1.0))
+	var exclude_target_cell := bool(options.get("excludeTargetCell", false))
+	var target_cell := _world_cell(target)
+	for candidate_value in candidates.get("candidates", []):
+		if not (candidate_value is Dictionary):
+			continue
+		var candidate: Dictionary = candidate_value
+		var candidate_cell = candidate.get("cell", Vector2i(2147483000, 2147483000))
+		if not (candidate_cell is Vector2i):
+			continue
+		if exclude_target_cell and candidate_cell == target_cell:
+			continue
+		var candidate_position = candidate.get("position", Vector3.ZERO)
+		if max_candidate_distance >= 0.0 and candidate_position is Vector3:
+			var offset: Vector3 = candidate_position - target
+			offset.y = 0.0
+			if offset.length() > max_candidate_distance:
+				continue
+		constrained.append(candidate)
+	candidates["candidates"] = constrained
+	candidates["unfilteredCandidateCells"] = unfiltered_cells
+	candidates["maxCandidateDistance"] = max_candidate_distance
+	candidates["targetCellExcluded"] = exclude_target_cell
 	var requested_cells: Array = options.get("candidateCells", []) if options.get("candidateCells", []) is Array else []
 	if requested_cells.is_empty():
+		if constrained.is_empty():
+			candidates["ok"] = false
+			candidates["classification"] = "invalid_goal"
+			candidates["reason"] = "no_v2_compatible_candidate_pose"
 		return candidates
 	var requested_lookup := {}
 	for value in requested_cells:
@@ -203,9 +234,12 @@ func _candidate_poses(entry: Dictionary, target: Vector3, semantic_kind: String,
 		candidates["reason"] = "no_v2_compatible_candidate_pose"
 	return candidates
 
-func _target_data(entry: Dictionary, target: Vector3, semantic_kind: String) -> Dictionary:
+func _target_data(entry: Dictionary, target: Vector3, semantic_kind: String, options: Dictionary = {}) -> Dictionary:
 	var target_cell := _world_cell(target)
 	var result := { "position": target, "cell": target_cell }
+	var candidate_cells: Array = options.get("candidateCells", []) if options.get("candidateCells", []) is Array else []
+	if not candidate_cells.is_empty():
+		result["candidateCells"] = candidate_cells.duplicate()
 	if semantic_kind == "home_interior":
 		result["homeCell"] = entry.get("homeCell", target_cell)
 		result["interiorMinCell"] = entry.get("interiorMinCell", target_cell)
@@ -246,6 +280,33 @@ func _candidate_cells(candidates_result: Dictionary) -> Array:
 			result.append(cell)
 	return result
 
+
+func _candidate_summary(candidates_result: Dictionary) -> Dictionary:
+	var accepted := _candidate_cells(candidates_result)
+	var requested: Array = candidates_result.get("requestedCandidateCells", []) if candidates_result.get("requestedCandidateCells", []) is Array else []
+	var unfiltered: Array = candidates_result.get("unfilteredCandidateCells", []) if candidates_result.get("unfilteredCandidateCells", []) is Array else []
+	return {
+		"acceptedCount": accepted.size(),
+		"acceptedCells": _limited_cell_keys(accepted),
+		"requestedCount": requested.size(),
+		"requestedCells": _limited_cell_keys(requested),
+		"unfilteredCount": unfiltered.size(),
+		"unfilteredCells": _limited_cell_keys(unfiltered),
+		"rejectedCount": (candidates_result.get("rejected", []) as Array).size() if candidates_result.get("rejected", []) is Array else 0,
+		"reason": String(candidates_result.get("reason", "")),
+		"classification": String(candidates_result.get("classification", ""))
+	}
+
+
+func _limited_cell_keys(values: Array, limit := 16) -> Array[String]:
+	var result: Array[String] = []
+	for value in values:
+		if not (value is Vector2i) or result.size() >= limit:
+			continue
+		var cell: Vector2i = value
+		result.append("%d,%d" % [cell.x, cell.y])
+	return result
+
 func _merge_avoid_cells(first, second) -> Array:
 	var result: Array = []
 	for values in [first, second]:
@@ -278,6 +339,9 @@ func _runtime_result(runtime: Dictionary, details: Dictionary) -> Dictionary:
 	if route.is_empty() and not active_route.is_empty():
 		route = active_route.duplicate(true)
 	var result := _result(state in [STATE_READY, STATE_MOVING], state, String(runtime.get("reason", "")), route, runtime, details)
+	var candidate_value = details.get("candidatePoses", {})
+	if candidate_value is Dictionary:
+		result["routeSummary"]["candidatePoses"] = _candidate_summary(candidate_value)
 	result["pending"] = not bool(result.get("ok", false)) and not (state in TERMINAL_STATES)
 	result["terminal"] = state in TERMINAL_STATES
 	return result
@@ -311,15 +375,22 @@ func _request_signature(entry: Dictionary, target: Vector3, semantic_kind: Strin
 			var cell: Vector2i = value
 			candidate_keys.append("%d,%d" % [cell.x, cell.y])
 	candidate_keys.sort()
+	var avoid_keys: Array[String] = []
+	for value in options.get("avoidCells", []):
+		if value is Vector2i:
+			var avoid_cell: Vector2i = value
+			avoid_keys.append("%d,%d" % [avoid_cell.x, avoid_cell.y])
+	avoid_keys.sort()
 	var target_cell := _world_cell(target)
-	return "%s|%s|%d,%d|%s|%s|%s" % [
+	return "%s|%s|%d,%d|%s|%s|%s|%s" % [
 		String(entry.get("id", "")),
 		semantic_kind,
 		target_cell.x,
 		target_cell.y,
 		"1" if allow_outside else "0",
 		String(entry.get("homeStableId", "")),
-		",".join(candidate_keys)
+		",".join(candidate_keys),
+		",".join(avoid_keys)
 	]
 
 func _world_cell(position: Vector3) -> Vector2i:
@@ -333,6 +404,7 @@ func _route_summary(route: Dictionary) -> Dictionary:
 	var proof: Dictionary = route.get("proof", {}) if route.get("proof", {}) is Dictionary else {}
 	var probe_repair: Dictionary = route.get("probeRepair", {}) if route.get("probeRepair", {}) is Dictionary else {}
 	var collision_probe: Dictionary = route.get("collisionProbe", {}) if route.get("collisionProbe", {}) is Dictionary else {}
+	var completed_validation: Dictionary = proof.get("completedRouteValidation", {}) if proof.get("completedRouteValidation", {}) is Dictionary else {}
 	return {
 		"ok": bool(route.get("ok", false)),
 		"classification": String(route.get("classification", "")),
@@ -345,6 +417,15 @@ func _route_summary(route: Dictionary) -> Dictionary:
 		"targetCell": route.get("targetCell", Vector2i(2147483000, 2147483000)),
 		"searchExpansions": int(proof.get("expansions", 0)),
 		"searchVisited": int(proof.get("visitedCount", 0)),
+		"searchStartedRevision": String(proof.get("searchStartedRevision", "")),
+		"searchSnapshotRevision": String(proof.get("searchSnapshotRevision", "")),
+		"searchSnapshotChanged": bool(proof.get("searchSnapshotChanged", false)),
+		"completedValidation": {
+			"ok": bool(completed_validation.get("ok", false)),
+			"reason": String(completed_validation.get("reason", "")),
+			"cell": completed_validation.get("cell", Vector2i(2147483000, 2147483000)),
+			"index": int(completed_validation.get("index", -1))
+		} if not completed_validation.is_empty() else {},
 		"probeSamples": int(collision_probe.get("sampleCount", 0)),
 		"repairAttempt": int(probe_repair.get("attempt", 0))
 	}

@@ -4,6 +4,8 @@ param(
     [double]$Maturity = 0.92,
     [ValidateSet("broadleaf", "conifer", "savanna", "bushy_oak")]
     [string]$Species = "broadleaf",
+    [ValidateSet("review", "runtime")]
+    [string]$Presentation = "review",
     [double]$ReviewSeconds = 0.0,
     [string]$ReportPath = "",
     [string]$ScreenshotDir = ""
@@ -28,6 +30,7 @@ $env:VOXEL_MATHEMATICAL_TREE_POC_SCREENSHOT_DIR = $ScreenshotDir
 $env:VOXEL_MATHEMATICAL_TREE_POC_SEED = [string]$Seed
 $env:VOXEL_MATHEMATICAL_TREE_POC_MATURITY = [string]$Maturity
 $env:VOXEL_MATHEMATICAL_TREE_POC_SPECIES = $Species
+$env:VOXEL_MATHEMATICAL_TREE_POC_PRESENTATION = $Presentation
 $env:VOXEL_MATHEMATICAL_TREE_POC_REVIEW_SECONDS = [string]$ReviewSeconds
 try {
     $godotOutput = & $GodotExe --path $projectPath --resolution 1280x720 "res://scenes/testing/MathematicalTreePocTest.tscn" 2>&1
@@ -38,6 +41,7 @@ try {
     Remove-Item Env:\VOXEL_MATHEMATICAL_TREE_POC_SEED -ErrorAction SilentlyContinue
     Remove-Item Env:\VOXEL_MATHEMATICAL_TREE_POC_MATURITY -ErrorAction SilentlyContinue
     Remove-Item Env:\VOXEL_MATHEMATICAL_TREE_POC_SPECIES -ErrorAction SilentlyContinue
+    Remove-Item Env:\VOXEL_MATHEMATICAL_TREE_POC_PRESENTATION -ErrorAction SilentlyContinue
     Remove-Item Env:\VOXEL_MATHEMATICAL_TREE_POC_REVIEW_SECONDS -ErrorAction SilentlyContinue
 }
 if ($godotOutput) {

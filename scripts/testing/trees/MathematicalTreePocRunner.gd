@@ -1,10 +1,6 @@
 extends Node3D
 
-const BroadleafRecipeBuilderScript := preload("res://scripts/testing/trees/MathematicalTreePocRecipeBuilder.gd")
-const ConiferRecipeBuilderScript := preload("res://scripts/testing/trees/MathematicalTreePocConiferRecipeBuilder.gd")
-const SavannaRecipeBuilderScript := preload("res://scripts/testing/trees/MathematicalTreePocSavannaRecipeBuilder.gd")
-const BushyOakRecipeBuilderScript := preload("res://scripts/testing/trees/MathematicalTreePocBushyOakRecipeBuilder.gd")
-const VisualFactoryScript := preload("res://scripts/visual/ProceduralTreeVisualFactory.gd")
+const TreeSpawnServiceScript := preload("res://scripts/environment/TreeSpawnService.gd")
 
 const CAPTURE_SIZE := Vector2i(1280, 720)
 const DEFAULT_SEED := 0x4D415448
@@ -12,7 +8,10 @@ const DEFAULT_SEED := 0x4D415448
 var report_path := ""
 var screenshot_dir := ""
 var selected_species := "broadleaf"
+var selected_presentation := "review"
 var recipe: Dictionary = {}
+var tree_request: Dictionary = {}
+var tree_spawn_service
 var tree_visual: Node3D
 var review_camera: Camera3D
 var loading_layer: CanvasLayer
@@ -47,6 +46,9 @@ func configure_paths() -> void:
 	selected_species = OS.get_environment("VOXEL_MATHEMATICAL_TREE_POC_SPECIES").strip_edges().to_lower()
 	if selected_species not in ["broadleaf", "conifer", "savanna", "bushy_oak"]:
 		selected_species = "broadleaf"
+	selected_presentation = OS.get_environment("VOXEL_MATHEMATICAL_TREE_POC_PRESENTATION").strip_edges().to_lower()
+	if selected_presentation not in ["review", "runtime"]:
+		selected_presentation = "review"
 	report_path = OS.get_environment("VOXEL_MATHEMATICAL_TREE_POC_REPORT").strip_edges()
 	if report_path == "":
 		report_path = ProjectSettings.globalize_path("res://artifacts/vegetation/mathematical-tree-poc/report.json")
@@ -140,10 +142,11 @@ func run_review() -> void:
 	var seed := int(OS.get_environment("VOXEL_MATHEMATICAL_TREE_POC_SEED")) if OS.get_environment("VOXEL_MATHEMATICAL_TREE_POC_SEED").is_valid_int() else DEFAULT_SEED
 	var maturity_text := OS.get_environment("VOXEL_MATHEMATICAL_TREE_POC_MATURITY").strip_edges()
 	var maturity := clampf(float(maturity_text) if maturity_text.is_valid_float() else 0.92, 0.12, 1.0)
-	var builder = recipe_builder_for_selected_species()
+	tree_request = review_request(seed, maturity)
+	tree_spawn_service = TreeSpawnServiceScript.new()
 	var recipe_thread := Thread.new()
 	var generation_started := Time.get_ticks_usec()
-	var thread_error := recipe_thread.start(Callable(builder, "build_recipe").bind(seed, maturity))
+	var thread_error := recipe_thread.start(Callable(tree_spawn_service, "build_recipe").bind(tree_request))
 	if thread_error != OK:
 		add_result("pure_recipe_worker_started", false, {"error": thread_error})
 		finish(1)
@@ -168,8 +171,7 @@ func run_review() -> void:
 	loading_label.text = "Publishing shared branch and foliage instances..."
 	await get_tree().process_frame
 	var publish_started := Time.get_ticks_usec()
-	var factory = VisualFactoryScript.new()
-	tree_visual = factory.instantiate_recipe(recipe, "forest", "mathematical-tree-poc:%s:%d" % [selected_species, seed])
+	tree_visual = tree_spawn_service.spawn_tree(tree_request)
 	var publication_milliseconds := float(Time.get_ticks_usec() - publish_started) / 1000.0
 	if tree_visual == null:
 		add_result("one_procedural_tree_published", false, {"publicationMilliseconds": publication_milliseconds})
@@ -221,14 +223,53 @@ func run_review() -> void:
 		await get_tree().create_timer(review_seconds).timeout
 	finish(1 if failure_count() > 0 else 0, generation_milliseconds, publication_milliseconds)
 
-func recipe_builder_for_selected_species():
+func review_request(seed: int, maturity: float) -> Dictionary:
+	var architecture := "broadleaf"
+	# "broadleaf" is retained as the friendly CLI choice, but it exercises the
+	# canonical oak grammar used by streamed world trees.
+	var grammar := "bushy_oak"
+	var height := 47.0
+	var trunk_radius := 3.15
+	var canopy_radius := 28.0
 	if selected_species == "conifer":
-		return ConiferRecipeBuilderScript.new()
-	if selected_species == "savanna":
-		return SavannaRecipeBuilderScript.new()
-	if selected_species == "bushy_oak":
-		return BushyOakRecipeBuilderScript.new()
-	return BroadleafRecipeBuilderScript.new()
+		architecture = "conifer"
+		grammar = "norway_spruce"
+		height = 53.0
+		trunk_radius = 2.08
+		canopy_radius = 14.3
+	elif selected_species == "savanna":
+		architecture = "savanna"
+		grammar = "umbrella_thorn"
+		height = 29.5
+		trunk_radius = 2.48
+		canopy_radius = 23.5
+	elif selected_species == "bushy_oak":
+		grammar = "bushy_oak"
+		height = 42.0
+		trunk_radius = 3.10
+		canopy_radius = 28.0
+	return {
+		"treeId": "mathematical-tree-poc:%s:%d" % [selected_species, seed],
+		"worldSeed": str(seed),
+		# The requested PoC seed is the tree's genetics as well as its world
+		# identity. Without this, the service derived a second hash and made the
+		# report's recipe seed disagree with the seed supplied on the command line.
+		"geneticSeed": seed,
+		"biome": "forest",
+		"architecture": architecture,
+		"speciesGrammar": grammar,
+		"growthStage": maturity,
+		"visualHeight": height,
+		"trunkRadius": trunk_radius,
+		"canopyRadius": canopy_radius,
+		"canopyDensity": 0.92,
+		"ageBand": "ancient" if maturity > 0.86 else "mature",
+		# Review preserves the complete grammar for botanical scrutiny. Runtime
+		# deliberately exercises the exact bounded recipe and MultiMesh path used
+		# by the world; it is an optional visual comparison, never a replacement
+		# for the complete review fixture.
+		"presentation": selected_presentation
+	}
 
 func add_player_scale_reference(trunk_radius: float, canopy_radius: float) -> void:
 	var reference := Node3D.new()
@@ -515,7 +556,8 @@ func finish(exit_code: int, generation_milliseconds := 0.0, publication_millisec
 		"runnerId": "mathematical_tree_poc_visual",
 		"linearIssues": ["VOX-138", "VOX-140"] if selected_species == "conifer" else (["VOX-138", "VOX-141"] if selected_species == "savanna" else (["VOX-138", "VOX-142"] if selected_species == "bushy_oak" else ["VOX-138", "VOX-139"])),
 		"evidenceLevel": "headed_isolated_visual_fixture",
-		"scope": "One deterministic mathematical tree in a standalone headed review scene. This proves neither biome/chunk integration nor gameplay, save, NPC, pathfinding, terrain or broad performance acceptance.",
+		"scope": "One deterministic mathematical tree in a standalone headed %s scene. It proves neither biome/chunk integration nor gameplay, save, NPC, pathfinding, terrain or broad performance acceptance." % selected_presentation,
+		"presentation": selected_presentation,
 		"finished": true,
 		"passed": failures == 0,
 		"failureCount": failures,

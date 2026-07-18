@@ -42,24 +42,30 @@ func run() -> void:
 		"importedCount": imported_rows.size(),
 		"errors": import_errors,
 	})
-	add_result("import_preserves_geometry_material_and_grounding_contract", rows_all_true(imported_rows, ["triangleCountMatches", "materialsMatch", "heightMatches", "grounded"]), compact_rows(imported_rows, ["id", "triangleCount", "height", "materials", "triangleCountMatches", "materialsMatch", "heightMatches", "grounded"]))
+	# Complete-tree GLBs are now Blender reference outputs, not live topology.
+	# Their exact triangle/phenotype metrics belong to the generator review, while
+	# this migration gate only proves that the retained reference library imports
+	# as grounded static material data.
+	add_result("reference_tree_library_imports_as_grounded_static_material_data", rows_all_true(imported_rows, ["materialsMatch", "grounded"]), compact_rows(imported_rows, ["id", "triangleCount", "height", "materials", "materialsMatch", "grounded"]))
 	add_result("import_preserves_wind_vertex_color_contract", rows_all_true(imported_rows, ["allSurfacesHaveColor", "hasRootWeight", "hasCrownWeight", "hasFlutterWeight", "alphaReserved"]), compact_rows(imported_rows, ["id", "coloredVertexCount", "bendRange", "flutterRange", "alphaRange", "allSurfacesHaveColor", "hasRootWeight", "hasCrownWeight", "hasFlutterWeight", "alphaReserved"]))
 	add_result("import_preserves_scale_safe_bark_uv0", rows_all_true(imported_rows, ["allSurfacesHaveUv0"]), compact_rows(imported_rows, ["id", "uvVertexCount", "allSurfacesHaveUv0"]))
 	add_result("ecological_assets_publish_complete_age_and_fullness_contract", ecological_contract_complete(canopy_assets), ecological_contract_rows(canopy_assets))
+	add_result("ecological_foliage_colonizes_branch_lengths_and_terminal_tips", ecological_branch_foliage_complete(canopy_assets), ecological_contract_rows(canopy_assets))
 	add_result("ecological_phenotypes_grow_monotonically_with_age", ecological_growth_is_monotonic(canopy_assets), ecological_growth_rows(canopy_assets))
+	add_result("upper_age_ecological_phenotypes_are_monumental_landmarks", ecological_monumental_dimensions_complete(canopy_assets), ecological_monumental_dimension_rows(canopy_assets))
 	add_result("canopy_assets_remain_static_meshes", rows_all_true(imported_rows, ["staticOnly"]), compact_rows(imported_rows, ["id", "skeletonCount", "animationPlayerCount", "staticOnly"]))
 	var registry = VisualAssetRegistryScript.new()
 	var registry_ready: bool = registry.setup()
-	var runtime_ids_present: Array[String] = []
+	var cached_tree_ids: Array[String] = []
 	for asset in canopy_assets:
 		var asset_id := String(asset.get("id", ""))
-		if registry.assets_by_id.has(asset_id) or registry.scene_cache.has(asset_id):
-			runtime_ids_present.append(asset_id)
-	add_result("runtime_registry_publishes_finite_ecological_canopy_library", registry_ready and registry.asset_count() == EXPECTED_RUNTIME_ASSET_COUNT and registry.cached_scene_count() == EXPECTED_RUNTIME_ASSET_COUNT and runtime_ids_present.size() == EXPECTED_CANOPY_ASSET_COUNT, {
+		if registry.scene_cache.has(asset_id):
+			cached_tree_ids.append(asset_id)
+	add_result("complete_tree_glbs_remain_importable_reference_assets_but_not_runtime_authority", registry_ready and registry.asset_count() == EXPECTED_RUNTIME_ASSET_COUNT and registry.cached_scene_count() < EXPECTED_RUNTIME_ASSET_COUNT and cached_tree_ids.is_empty(), {
 		"registryReady": registry_ready,
 		"assetCount": registry.asset_count(),
 		"cachedSceneCount": registry.cached_scene_count(),
-		"runtimeIdsPresent": runtime_ids_present,
+		"cachedTreeIds": cached_tree_ids,
 		"errors": registry.last_errors,
 	})
 	finish(imported_rows)
@@ -279,6 +285,48 @@ func ecological_contract_rows(assets: Array[Dictionary]) -> Array[Dictionary]:
 			})
 	return rows
 
+func ecological_branch_foliage_complete(assets: Array[Dictionary]) -> bool:
+	var checked := 0
+	for asset in assets:
+		if not String(asset.get("family", "")).begins_with("ecological_"):
+			continue
+		var structure: Dictionary = asset.get("canopyStructure", {})
+		var phenotype: Dictionary = asset.get("treePhenotype", {})
+		if String(structure.get("foliageDistribution", "")) != "branch_length_and_terminal" \
+			or int(structure.get("branchInteriorAnchorCount", 0)) < int(phenotype.get("primaryBranchCount", 1)) \
+			or int(structure.get("terminalFoliageAnchorCount", 0)) != int(phenotype.get("terminalTipCount", -1)):
+			return false
+		checked += 1
+	return checked == 30
+
+func ecological_monumental_dimensions_complete(assets: Array[Dictionary]) -> bool:
+	var thresholds := {
+		"ecological_broadleaf_tree": {"mature": [30.0, 1.45], "old": [47.0, 3.0], "ancient": [70.0, 5.5]},
+		"ecological_conifer_tree": {"mature": [34.0, 1.35], "old": [54.0, 2.75], "ancient": [82.0, 4.75]},
+		"ecological_savanna_tree": {"mature": [28.0, 1.35], "old": [45.0, 2.75], "ancient": [64.0, 4.75]},
+	}
+	var checked := 0
+	for asset in assets:
+		var family := String(asset.get("family", ""))
+		var band := String(asset.get("treePhenotype", {}).get("ageBand", ""))
+		if not thresholds.has(family) or not (thresholds[family] as Dictionary).has(band):
+			continue
+		var expected: Array = (thresholds[family] as Dictionary)[band]
+		var metrics: Dictionary = asset.get("treeMetrics", {})
+		if float(metrics.get("height", 0.0)) < float(expected[0]) \
+			or float(metrics.get("trunkRadius", 0.0)) < float(expected[1]):
+			return false
+		checked += 1
+	return checked == 18
+
+func ecological_monumental_dimension_rows(assets: Array[Dictionary]) -> Array[Dictionary]:
+	var rows: Array[Dictionary] = []
+	for asset in assets:
+		var band := String(asset.get("treePhenotype", {}).get("ageBand", ""))
+		if String(asset.get("family", "")).begins_with("ecological_") and band in ["mature", "old", "ancient"]:
+			rows.append({"id": asset.get("id", ""), "ageBand": band, "treeMetrics": asset.get("treeMetrics", {})})
+	return rows
+
 func ecological_growth_is_monotonic(assets: Array[Dictionary]) -> bool:
 	var groups := ecological_growth_groups(assets)
 	for group_variant in groups.values():
@@ -293,7 +341,8 @@ func ecological_growth_is_monotonic(assets: Array[Dictionary]) -> bool:
 				or float(current.trunkRadius) <= float(previous.trunkRadius) \
 				or float(current.canopyRadius) <= float(previous.canopyRadius) \
 				or int(current.leaves) <= int(previous.leaves) \
-				or int(current.terminalTips) <= int(previous.terminalTips)
+				or int(current.terminalTips) <= int(previous.terminalTips) \
+				or int(current.branchFoliageAnchors) <= int(previous.branchFoliageAnchors)
 			):
 				return false
 			previous = current
@@ -325,6 +374,7 @@ func ecological_growth_groups(assets: Array[Dictionary]) -> Dictionary:
 			"canopyRadius": float(metrics.get("canopyRadius", 0.0)),
 			"leaves": int(structure.get("foliagePrimitiveCount", 0)),
 			"terminalTips": int(phenotype.get("terminalTipCount", 0)),
+			"branchFoliageAnchors": int(structure.get("branchInteriorAnchorCount", 0)),
 			"branchGenerations": int(phenotype.get("branchGenerationCount", 0)),
 		}
 	return groups

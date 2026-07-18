@@ -921,6 +921,7 @@ func create_block(cell: Vector3i, block_type: String, options: Dictionary = {}) 
 
     block_root.add_child(body)
     blocks[cell] = body
+    register_light_safety_source(cell, block_type, body)
     record_block_creation_instrumentation(instrumentation_metrics, instrumentation_prefix, "NodeBuild", node_build_started_usec)
     var defer_world_edit_followup := bool(options.get("deferWorldEditFollowup", false))
     var terrain_state_started_usec := Time.get_ticks_usec()
@@ -1148,15 +1149,51 @@ func trap_damage_at(position: Vector3, delta: float = 0.0) -> float:
         damage += 12.0
     return damage
 
-func light_safety_at(position: Vector3, include_beacon := true, range: float = CELL * 9.0) -> float:
-    var safety := 0.0
-    for block in blocks.values():
-        var body := block as StaticBody3D
-        if body == null:
+func is_light_safety_source_type(block_type: String) -> bool:
+    return block_type in ["campfire", "torch", "wardLantern", "sanctuaryBeacon", "riftAnchor"]
+
+func register_light_safety_source(cell: Vector3i, block_type: String, body: StaticBody3D) -> void:
+    # All production blocks enter through create_block. Keeping this compact
+    # registry current there turns safety evaluation from an every-block scan
+    # into an every-light-source scan without changing the safety calculation.
+    light_safety_sources_initialized = true
+    if is_light_safety_source_type(block_type):
+        light_safety_sources[cell] = body.get_instance_id()
+    else:
+        light_safety_sources.erase(cell)
+
+func rebuild_light_safety_sources() -> void:
+    light_safety_sources.clear()
+    for cell_value in blocks:
+        var cell := cell_value as Vector3i
+        var body := blocks[cell] as StaticBody3D
+        if body == null or not is_instance_valid(body):
             continue
         var block_type := String(body.get_meta("block_type", ""))
-        if not (block_type in ["campfire", "torch", "wardLantern", "sanctuaryBeacon", "riftAnchor"]):
+        if is_light_safety_source_type(block_type):
+            light_safety_sources[cell] = body.get_instance_id()
+    light_safety_sources_initialized = true
+
+func light_safety_at(position: Vector3, include_beacon := true, range: float = CELL * 9.0) -> float:
+    if not light_safety_sources_initialized:
+        rebuild_light_safety_sources()
+    var safety := 0.0
+    var stale_cells: Array[Vector3i] = []
+    for cell_value in light_safety_sources:
+        var cell := cell_value as Vector3i
+        var source_id := int(light_safety_sources[cell])
+        var source_object := instance_from_id(source_id)
+        # A few diagnostic fixtures remove from `blocks` directly. Checking the
+        # authoritative dictionary makes stale registry entries harmless and
+        # lets normal queued-free removal release on the next safety query.
+        if source_object == null or not is_instance_valid(source_object) or not blocks.has(cell):
+            stale_cells.append(cell)
             continue
+        var body := source_object as StaticBody3D
+        if body == null:
+            stale_cells.append(cell)
+            continue
+        var block_type := String(body.get_meta("block_type", ""))
         if block_type == "sanctuaryBeacon" and not include_beacon:
             continue
         var effect_range := range
@@ -1177,4 +1214,6 @@ func light_safety_at(position: Vector3, include_beacon := true, range: float = C
         if distance > effect_range:
             continue
         safety = maxf(safety, minf(1.0, (1.0 - distance / effect_range) * strength))
+    for cell in stale_cells:
+        light_safety_sources.erase(cell)
     return safety

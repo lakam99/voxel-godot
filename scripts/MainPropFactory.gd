@@ -3,7 +3,7 @@
 func destroy_target() -> void:
     if try_fire_ranged():
         return
-    var hit: Dictionary = player.view_ray(MELEE_RANGE)
+    var hit: Dictionary = player.view_ray(monumental_tree_melee_ray_range())
     if hit.is_empty():
         reset_break_progress()
         play_melee_miss()
@@ -121,6 +121,7 @@ func complete_destroy_target(hit: Dictionary, collider: Node, kind: String, mate
     var monitor = runtime_perf_monitor
     var destroy_start: int = monitor.begin_section("destroy_target_complete") if monitor != null else Time.get_ticks_usec()
     var feedback_ms := 0.0
+    var tree_fall_visual_ms := 0.0
     var block_mutation_ms := 0.0
     var block_reward_ms := 0.0
     var block_message_ms := 0.0
@@ -189,7 +190,9 @@ func complete_destroy_target(hit: Dictionary, collider: Node, kind: String, mate
         if material_id == "wildlife":
             wildlife_nodes.erase(collider)
         if drop == "logs":
+            var tree_fall_started_usec := Time.get_ticks_usec()
             spawn_falling_tree_visual(collider as Node3D)
+            tree_fall_visual_ms = float(Time.get_ticks_usec() - tree_fall_started_usec) / 1000.0
             queue_break_reward([{ "item": "logs", "count": max(1, drop_count) }], "tree", material_id)
             show_action_message("Tree dropped logs")
         elif drop == "stones":
@@ -212,6 +215,7 @@ func complete_destroy_target(hit: Dictionary, collider: Node, kind: String, mate
         "materialId": material_id,
         "totalMs": float(Time.get_ticks_usec() - destroy_start) / 1000.0,
         "feedbackMs": feedback_ms,
+        "treeFallVisualMs": tree_fall_visual_ms,
         "blockMutationMs": block_mutation_ms,
         "blockRewardMs": block_reward_ms,
         "blockMessageMs": block_message_ms

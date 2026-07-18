@@ -143,7 +143,12 @@ func clear() -> void:
 	navigation_world = NavigationWorldServiceScript.new()
 	navigation_world.setup(main, change_bus)
 	_clear_navmesh_world()
-	navmesh_world = NavmeshWorldServiceScript.new()
+	# Route delegates retain the shared navmesh service across a world reset.  Keep
+	# that service's identity stable: replacing it here lets those delegates publish
+	# into an orphaned NavigationServer map that the active autonomy system can no
+	# longer release.
+	if navmesh_world == null:
+		navmesh_world = NavmeshWorldServiceScript.new()
 	navmesh_world.setup(navigation_backend_config)
 	door_portals = DoorPortalServiceScript.new()
 	door_portals.setup(main, self)
@@ -162,6 +167,41 @@ func clear() -> void:
 	route_authority_v2 = NpcRouteAuthorityV2Script.new()
 	route_authority_v2.setup(npc_system, main)
 	setup_behavior_services()
+
+func shutdown_for_process_exit() -> void:
+	# clear() deliberately reconstructs services for an in-session world reset.
+	# Process exit has the opposite contract: release the navigation map and all
+	# service references without allocating a fresh routing graph.
+	contexts_by_instance_id.clear()
+	contexts_by_stable_id.clear()
+	blackboards_by_stable_id.clear()
+	_clear_navmesh_world()
+	route_authority_v2 = null
+	plan_executor = null
+	recovery_policy = null
+	task_planner = null
+	action_library = null
+	goal_selector = null
+	perception_service = null
+	schedule_service = null
+	guard_roster = null
+	simulation_lod = null
+	traffic_reservations = null
+	traffic_priority_policy = null
+	wait_for_graph = null
+	safe_interval_planner = null
+	bottleneck_classifier = null
+	door_traversal = null
+	smart_objects = null
+	door_portals = null
+	navmesh_world = null
+	navigation_world = null
+	navigation_backend_config = null
+	change_bus = null
+	telemetry = null
+	scheduler = null
+	npc_system = null
+	main = null
 
 func _clear_navmesh_world() -> void:
 	if navmesh_world != null:

@@ -1,7 +1,13 @@
 param(
     [string]$GodotExe = "C:\Users\arkam\Desktop\Godot_v4.6.1-stable_win64.exe\Godot_v4.6.1-stable_win64_console.exe",
     [string]$ArtifactDir = "",
-    [int]$WatchdogSeconds = 420
+    [int]$WatchdogSeconds = 420,
+    [ValidateSet("", "forest", "taiga", "savanna")]
+    [string]$TargetBiome = "",
+    [ValidateSet("", "broadleaf", "conifer", "savanna")]
+    [string]$TargetArchitecture = "",
+    [ValidateSet("", "mature", "old", "ancient")]
+    [string]$RequiredAgeBand = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -23,9 +29,20 @@ Get-ChildItem -LiteralPath $ArtifactDir -File -ErrorAction SilentlyContinue | Wh
 Get-ChildItem -LiteralPath $screenshotDir -File -Filter "*.png" -ErrorAction SilentlyContinue | Remove-Item -Force
 
 Remove-Item Env:\VOXEL_PLAYTEST,Env:\VOXEL_TEST_SEED -ErrorAction SilentlyContinue
+$selectionProvided = $TargetBiome -ne "" -or $TargetArchitecture -ne "" -or $RequiredAgeBand -ne ""
+if ($selectionProvided -and ($TargetBiome -eq "" -or $TargetArchitecture -eq "" -or $RequiredAgeBand -eq "")) {
+    throw "TargetBiome, TargetArchitecture, and RequiredAgeBand must be provided together for the family/age interaction matrix."
+}
 $env:VOXEL_SAVE_PATH_OVERRIDE = $savePath
 $env:VOXEL_CANOPY_RELEASE_SCREENSHOT_DIR = $screenshotDir
 $env:VOXEL_CANOPY_RELEASE_WATCHDOG_SECONDS = [string]$WatchdogSeconds
+if ($selectionProvided) {
+    $env:VOXEL_CANOPY_RELEASE_TARGET_BIOME = $TargetBiome
+    $env:VOXEL_CANOPY_RELEASE_TARGET_ARCHITECTURE = $TargetArchitecture
+    $env:VOXEL_CANOPY_RELEASE_REQUIRED_AGE_BAND = $RequiredAgeBand
+} else {
+    Remove-Item Env:\VOXEL_CANOPY_RELEASE_TARGET_BIOME,Env:\VOXEL_CANOPY_RELEASE_TARGET_ARCHITECTURE,Env:\VOXEL_CANOPY_RELEASE_REQUIRED_AGE_BAND -ErrorAction SilentlyContinue
+}
 
 function Invoke-CanopyStage([string]$Stage, [string]$ReportPath, [string]$ProgressPath, [string]$ExpectedPropId = "") {
     $env:VOXEL_CANOPY_RELEASE_STAGE = $Stage
@@ -61,6 +78,7 @@ try {
     $continued = Invoke-CanopyStage "continue_verify" $continueReport $continueProgress $removedPropId
     $requiredCaptures = @(
         "menu_before_save_and_harvest.png",
+        "generated_tree_trunk_player_pov.png",
         "generated_tree_before_harvest.png",
         "tree_falling_after_live_input.png",
         "forest_after_chunk_reload.png",
@@ -75,6 +93,9 @@ try {
         runnerId = "canopy_release_playtest"
         passed = $true
         seed = $save.seed
+        targetBiome = $TargetBiome
+        targetArchitecture = $TargetArchitecture
+        requiredAgeBand = $RequiredAgeBand
         removedPropId = $removedPropId
         saveResultCount = $save.resultCount
         continueResultCount = $continued.resultCount
@@ -83,5 +104,5 @@ try {
         screenshotDir = $screenshotDir
     } | ConvertTo-Json
 } finally {
-    Remove-Item Env:\VOXEL_SAVE_PATH_OVERRIDE,Env:\VOXEL_CANOPY_RELEASE_SCREENSHOT_DIR,Env:\VOXEL_CANOPY_RELEASE_WATCHDOG_SECONDS,Env:\VOXEL_CANOPY_RELEASE_STAGE,Env:\VOXEL_CANOPY_RELEASE_REPORT,Env:\VOXEL_CANOPY_RELEASE_PROGRESS,Env:\VOXEL_CANOPY_RELEASE_RUN_TOKEN,Env:\VOXEL_CANOPY_EXPECTED_REMOVED_PROP_ID -ErrorAction SilentlyContinue
+    Remove-Item Env:\VOXEL_SAVE_PATH_OVERRIDE,Env:\VOXEL_CANOPY_RELEASE_SCREENSHOT_DIR,Env:\VOXEL_CANOPY_RELEASE_WATCHDOG_SECONDS,Env:\VOXEL_CANOPY_RELEASE_TARGET_BIOME,Env:\VOXEL_CANOPY_RELEASE_TARGET_ARCHITECTURE,Env:\VOXEL_CANOPY_RELEASE_REQUIRED_AGE_BAND,Env:\VOXEL_CANOPY_RELEASE_STAGE,Env:\VOXEL_CANOPY_RELEASE_REPORT,Env:\VOXEL_CANOPY_RELEASE_PROGRESS,Env:\VOXEL_CANOPY_RELEASE_RUN_TOKEN,Env:\VOXEL_CANOPY_EXPECTED_REMOVED_PROP_ID -ErrorAction SilentlyContinue
 }

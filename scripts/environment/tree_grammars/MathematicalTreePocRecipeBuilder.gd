@@ -1,10 +1,9 @@
 extends RefCounted
-class_name MathematicalTreePocRecipeBuilder
 
-## VOX-138 proof-of-concept recipe builder.
+## VOX-138 approved mathematical broadleaf grammar.
 ##
-## This intentionally lives under testing until the visual review gate passes. It
-## produces pure numeric data and never touches the SceneTree, Resources, global
+## This production pure-data grammar is shared by the isolated review fixture
+## and TreeSpawnService. It never touches the SceneTree, Resources, global
 ## world RNG, biome placement, saves, collision, or gameplay systems.
 
 const RECIPE_VERSION := 2
@@ -19,9 +18,16 @@ const CROWN_INFLUENCE_DISTANCE := 7.4
 const CROWN_KILL_DISTANCE := 1.35
 const MIN_ENDPOINT_SEPARATION := 0.52
 
-func build_recipe(seed := DEFAULT_SEED, maturity := 0.92) -> Dictionary:
+func build_recipe(seed := DEFAULT_SEED, maturity := 0.92, growth_profile: Dictionary = {}) -> Dictionary:
+	var recipe_started_usec := Time.get_ticks_usec()
 	var resolved_seed := int(seed)
 	var resolved_maturity := clampf(float(maturity), 0.12, 1.0)
+	# A runtime request may lower sampling resolution, but never substitutes a
+	# different tree model.  The same colonisation, pipe model, and leaf-on-twig
+	# equations drive both the high-detail PoC and streaming recipes.
+	var attraction_budget := maxi(64, int(growth_profile.get("attractionPointCount", MAX_ATTRACTION_POINTS)))
+	var branch_budget := maxi(96, int(growth_profile.get("branchSegmentBudget", MAX_BRANCH_SEGMENTS)))
+	var foliage_budget := maxi(120, int(growth_profile.get("foliageClusterBudget", MAX_FOLIAGE_CLUSTERS)))
 	var rng := RandomNumberGenerator.new()
 	rng.seed = resolved_seed
 
@@ -57,6 +63,7 @@ func build_recipe(seed := DEFAULT_SEED, maturity := 0.92) -> Dictionary:
 		branch_reach_factor,
 		resolved_seed
 	)
+	var structure_ready_usec := Time.get_ticks_usec()
 
 	var attraction_points := build_attraction_points(
 		rng,
@@ -64,7 +71,7 @@ func build_recipe(seed := DEFAULT_SEED, maturity := 0.92) -> Dictionary:
 		crown_radii,
 		crown_phase,
 		crown_lobes,
-		MAX_ATTRACTION_POINTS
+		attraction_budget
 	)
 	var initial_attraction_count := attraction_points.size()
 	var colonization := colonize_crown(
@@ -75,12 +82,16 @@ func build_recipe(seed := DEFAULT_SEED, maturity := 0.92) -> Dictionary:
 		crown_radii,
 		crown_phase,
 		branch_reach_factor,
-		resolved_seed
+		resolved_seed,
+		growth_profile
 	)
+	var colonization_finished_usec := Time.get_ticks_usec()
+	var colonization_timing: Dictionary = colonization.get("timingUsec", {}) if colonization.get("timingUsec", {}) is Dictionary else {}
 	attraction_points = colonization.get("remainingAttractions", attraction_points)
 	smooth_non_junction_chains(nodes, 2)
 
 	var pipe_result := solve_pipe_model(nodes, raw_segments, trunk_radius, height, crown_base)
+	var pipe_finished_usec := Time.get_ticks_usec()
 	var branches: Array[Dictionary] = pipe_result.get("branches", [])
 	var buttresses := build_root_buttresses(trunk_radius, resolved_seed)
 	branches.append_array(buttresses)
@@ -90,8 +101,10 @@ func build_recipe(seed := DEFAULT_SEED, maturity := 0.92) -> Dictionary:
 		crown_center,
 		crown_radii,
 		height,
-		resolved_seed
+		resolved_seed,
+		foliage_budget
 	)
+	var foliage_finished_usec := Time.get_ticks_usec()
 	var order_counts := segment_counts_by_order(raw_segments)
 	var occupancy := crown_occupancy(foliage, crown_center, crown_radii)
 	var stratum_pitch := branch_pitch_by_crown_stratum(branches, crown_center, crown_radii)
@@ -99,12 +112,13 @@ func build_recipe(seed := DEFAULT_SEED, maturity := 0.92) -> Dictionary:
 	var major_wood_reach_to_trunk_width := major_wood_reach / maxf(0.1, trunk_radius * 2.0)
 	var connected := graph_is_connected(nodes, raw_segments)
 	var signature := recipe_signature(resolved_seed, resolved_maturity, height, branches, foliage)
+	var analysis_finished_usec := Time.get_ticks_usec()
 
 	return {
 		"recipeVersion": RECIPE_VERSION,
 		"methodology": "bounded_space_colonization_pipe_model",
 		"architecture": "broadleaf",
-		"speciesGrammar": "temperate_rounded_broadleaf_poc",
+		"speciesGrammar": "mathematical_broadleaf_base",
 		"crownHabit": "rounded_oval",
 		"seed": resolved_seed,
 		"maturity": resolved_maturity,
@@ -127,6 +141,15 @@ func build_recipe(seed := DEFAULT_SEED, maturity := 0.92) -> Dictionary:
 		"branchCount": branches.size(),
 		"foliageClusterCount": foliage.size(),
 		"stats": {
+			"timingUsec": {
+				"setup": structure_ready_usec - recipe_started_usec,
+				"colonization": colonization_finished_usec - structure_ready_usec,
+				"pipe": pipe_finished_usec - colonization_finished_usec,
+				"foliage": foliage_finished_usec - pipe_finished_usec,
+				"analysis": analysis_finished_usec - foliage_finished_usec,
+				"total": analysis_finished_usec - recipe_started_usec
+			},
+			"colonizationTimingUsec": colonization_timing,
 			"nodeCount": nodes.size(),
 			"segmentCountsByOrder": order_counts,
 			"attractionPointCount": initial_attraction_count,
@@ -144,11 +167,11 @@ func build_recipe(seed := DEFAULT_SEED, maturity := 0.92) -> Dictionary:
 			"majorWoodReachToTrunkWidth": major_wood_reach_to_trunk_width,
 			"foliageDerivedFromFineSegments": true,
 			"budgetSaturation": {
-				"attractionPoints": float(initial_attraction_count) / float(MAX_ATTRACTION_POINTS),
-				"branchSegments": float(branches.size()) / float(MAX_BRANCH_SEGMENTS),
-				"foliageClusters": float(foliage.size()) / float(MAX_FOLIAGE_CLUSTERS),
-				"branchLimitReached": branches.size() >= MAX_BRANCH_SEGMENTS,
-				"foliageLimitReached": foliage.size() >= MAX_FOLIAGE_CLUSTERS
+				"attractionPoints": float(initial_attraction_count) / float(attraction_budget),
+				"branchSegments": float(branches.size()) / float(branch_budget),
+				"foliageClusters": float(foliage.size()) / float(foliage_budget),
+				"branchLimitReached": branches.size() >= branch_budget,
+				"foliageLimitReached": foliage.size() >= foliage_budget
 			}
 		}
 	}
@@ -298,42 +321,87 @@ func colonize_crown(
 	var branch_segment_limit := maxi(1, int(growth_profile.get("branchSegmentBudget", MAX_BRANCH_SEGMENTS)))
 	var remaining := attractions.duplicate()
 	var iterations := 0
+	var spatial_index_usec := 0
+	var attraction_assignment_usec := 0
+	var growth_step_usec := 0
+	# These profile gates are constant for an entire recipe.  Keeping them out
+	# of the attraction-by-node inner loop avoids repeatedly evaluating oak-only
+	# developmental fields for every ordinary broadleaf candidate.
+	var allow_trunk_buds := bool(growth_profile.get("allowTrunkBudsInColonization", false))
+	var allow_mid_crown_buds := bool(growth_profile.get("allowMidCrownTrunkBuds", false))
+	var enforce_outward_dome := bool(growth_profile.get("enforceOutwardDome", false))
 	var iteration_budget := maxi(1, int(growth_profile.get("spaceColonizationIterationBudget", MAX_GROWTH_ITERATIONS)))
 	for iteration in range(iteration_budget):
 		if remaining.is_empty() or segments.size() >= branch_segment_limit:
 			break
 		iterations = iteration + 1
+		# Each attraction used to scan every node in the crown.  That gives the
+		# same answer, but turns a mature broadleaf into a repeated O(A * N)
+		# global search on a worker.  The influence radius is a strict upper
+		# bound for a useful candidate, so a fixed-size spatial hash can examine
+		# every eligible node (and no ineligible distant node).  Candidate indices
+		# are restored to insertion order before evaluation, preserving the
+		# previous deterministic tie behavior and therefore the generated tree.
+		var index_started_usec := Time.get_ticks_usec()
+		# Candidate eligibility is fixed for this whole growth season: new shoots
+		# are appended only after attraction assignment completes.  Indexing only
+		# nodes that can possibly accept an attraction preserves the same nearest
+		# winner while avoiding repeated dictionary/capacity work for exhausted wood.
+		# Attraction-dependent tests (trunk-bud germination and outward-dome
+		# direction) deliberately remain in the exact inner selection path.
+		var node_spatial_index := build_colonization_spatial_index(
+			nodes,
+			influence_distance,
+			crown_center,
+			crown_radii,
+			growth_profile,
+			allow_trunk_buds,
+			allow_mid_crown_buds
+		)
+		spatial_index_usec += Time.get_ticks_usec() - index_started_usec
 		var influenced := {}
 		var survivors: Array[Vector3] = []
+		var assignment_started_usec := Time.get_ticks_usec()
 		for attraction in remaining:
 			var nearest_index := -1
 			var nearest_distance := INF
-			for node_index in range(nodes.size()):
-				var node: Dictionary = nodes[node_index]
-				var position: Vector3 = node.get("position", Vector3.ZERO)
-				if position.y < crown_center.y - crown_radii.y - crown_radii.y * 0.30:
-					continue
-				var children: Array = node.get("children", [])
-				var order := int(node.get("order", 0))
-				# A species may expose latent trunk buds to crown-space competition. The
-				# generic case remains a terminated trunk; the oak profile activates only
-				# mid-crown buds with both local developmental potential and available
-				# horizontal crown space.
-				if order == 0 and not trunk_bud_can_compete(
-					position, attraction, crown_center, crown_radii, node_index, seed, growth_profile
-				):
-					continue
-				var max_children := local_bud_child_capacity(
-					position, order, crown_center, crown_radii, growth_profile
-				)
-				if children.size() >= max_children:
-					continue
-				if not attraction_is_ahead_of_growth(node, position, attraction, order, growth_profile):
-					continue
-				var distance := position.distance_squared_to(attraction)
-				if distance < nearest_distance:
-					nearest_distance = distance
-					nearest_index = node_index
+			# Do the bounded 3³-cell scan directly.  Materialising a temporary
+			# nearby-node array per attraction dominated worker time for a mature
+			# broadleaf even though the same candidates were immediately traversed.
+			# Exact ties still select the lower insertion index, preserving the
+			# prior deterministic topology without sorting those temporary arrays.
+			var center_cell := colonization_spatial_cell(attraction, influence_distance)
+			for offset_x in range(-1, 2):
+				for offset_y in range(-1, 2):
+					for offset_z in range(-1, 2):
+						# Missing cells are the common case around a sparse crown. Do not
+						# allocate an empty Array as a Dictionary.get default for every
+						# such query; that allocation was pure worker overhead and never
+						# contributed a candidate. Present buckets retain their original
+						# insertion order, so exact-distance tie behavior is unchanged.
+						var bucket_value: Variant = node_spatial_index.get(center_cell + Vector3i(offset_x, offset_y, offset_z))
+						if bucket_value is not Array:
+							continue
+						for node_value in bucket_value:
+							var node_index := int(node_value)
+							var node: Dictionary = nodes[node_index]
+							var position: Vector3 = node.get("position", Vector3.ZERO)
+							var order := int(node.get("order", 0))
+							# A species may expose latent trunk buds to crown-space competition. The
+							# generic case remains a terminated trunk; the oak profile activates only
+							# mid-crown buds with both local developmental potential and available
+							# horizontal crown space.
+							if order == 0:
+								if not allow_trunk_buds or not trunk_bud_can_compete(
+									position, attraction, crown_center, crown_radii, node_index, seed, growth_profile
+								):
+									continue
+							if enforce_outward_dome and not attraction_is_ahead_of_growth(node, position, attraction, order, growth_profile):
+								continue
+							var distance := position.distance_squared_to(attraction)
+							if distance < nearest_distance or (distance == nearest_distance and (nearest_index < 0 or node_index < nearest_index)):
+								nearest_distance = distance
+								nearest_index = node_index
 			if nearest_distance <= kill_squared:
 				continue
 			survivors.append(attraction)
@@ -345,10 +413,12 @@ func colonize_crown(
 			row["sum"] = row.get("sum", Vector3.ZERO) + direction
 			row["count"] = int(row.get("count", 0)) + 1
 			influenced[nearest_index] = row
+		attraction_assignment_usec += Time.get_ticks_usec() - assignment_started_usec
 		remaining = survivors
 		if influenced.is_empty():
 			break
 
+		var growth_started_usec := Time.get_ticks_usec()
 		var added := 0
 		var influenced_indices := influenced.keys()
 		influenced_indices.sort()
@@ -484,13 +554,81 @@ func colonize_crown(
 				child["domeHeading"] = child_heading
 				nodes[child_index] = child
 			added += 1
+		growth_step_usec += Time.get_ticks_usec() - growth_started_usec
 		if added == 0:
 			break
 	return {
 		"remainingAttractions": remaining,
 		"iterations": iterations,
-		"branchSegmentLimit": branch_segment_limit
+		"branchSegmentLimit": branch_segment_limit,
+		"timingUsec": {
+			"spatialIndex": spatial_index_usec,
+			"attractionAssignment": attraction_assignment_usec,
+			"growthStep": growth_step_usec
+		}
 	}
+
+func build_colonization_spatial_index(
+	nodes: Array[Dictionary],
+	cell_size: float,
+	crown_center: Vector3,
+	crown_radii: Vector3,
+	growth_profile: Dictionary,
+	allow_trunk_buds: bool,
+	allow_mid_crown_buds: bool
+) -> Dictionary:
+	var buckets := {}
+	var resolved_cell_size := maxf(0.01, cell_size)
+	for node_index in range(nodes.size()):
+		var node: Dictionary = nodes[node_index]
+		var position: Vector3 = node.get("position", Vector3.ZERO)
+		if position.y < crown_center.y - crown_radii.y - crown_radii.y * 0.30:
+			continue
+		var order := int(node.get("order", 0))
+		if order == 0 and not allow_trunk_buds:
+			continue
+		var children: Array = node.get("children", [])
+		var max_children := 1 if order == 0 or order == 2 or order >= 4 else 2
+		if allow_mid_crown_buds:
+			max_children = local_bud_child_capacity(
+				position, order, crown_center, crown_radii, growth_profile
+			)
+		if children.size() >= max_children:
+			continue
+		var cell := colonization_spatial_cell(position, resolved_cell_size)
+		var indices_value: Variant = buckets.get(cell)
+		if indices_value is Array:
+			indices_value.append(node_index)
+		else:
+			buckets[cell] = [node_index]
+	return buckets
+
+func colonization_nearby_node_indices(buckets: Dictionary, attraction: Vector3, cell_size: float) -> Array[int]:
+	var indices: Array[int] = []
+	var center := colonization_spatial_cell(attraction, maxf(0.01, cell_size))
+	# With a bucket edge equal to the influence radius, every point inside the
+	# spherical influence range lies in this 3 x 3 x 3 neighbourhood.  The
+	# subsequent exact distance check in `colonize_crown` remains authoritative.
+	for offset_x in range(-1, 2):
+		for offset_y in range(-1, 2):
+			for offset_z in range(-1, 2):
+				var bucket_value: Variant = buckets.get(center + Vector3i(offset_x, offset_y, offset_z))
+				if bucket_value is not Array:
+					continue
+				for node_value in bucket_value:
+					indices.append(int(node_value))
+	# Buckets are populated in node-index order. Callers resolve any exact
+	# equal-distance candidate by the lowest index, so a global sort here would
+	# only allocate and compare an array for every attraction point without
+	# changing the deterministic winner.
+	return indices
+
+func colonization_spatial_cell(position: Vector3, cell_size: float) -> Vector3i:
+	return Vector3i(
+		floori(position.x / cell_size),
+		floori(position.y / cell_size),
+		floori(position.z / cell_size)
+	)
 
 func append_node(
 	nodes: Array[Dictionary],
@@ -1031,11 +1169,12 @@ func build_twig_foliage(
 	crown_center: Vector3,
 	crown_radii: Vector3,
 	height: float,
-	seed: int
+	seed: int,
+	foliage_budget := MAX_FOLIAGE_CLUSTERS
 ) -> Array[Dictionary]:
 	var foliage: Array[Dictionary] = []
 	for segment_index in range(segments.size()):
-		if foliage.size() >= MAX_FOLIAGE_CLUSTERS:
+		if foliage.size() >= foliage_budget:
 			break
 		var segment: Dictionary = segments[segment_index]
 		var order := int(segment.get("order", 0))
@@ -1044,11 +1183,19 @@ func build_twig_foliage(
 			continue
 		var child: Dictionary = nodes[child_index]
 		var terminal := (child.get("children", []) as Array).is_empty()
-		if order < 3 and not (order == 2 and terminal):
+		# The bole is not a leaf-bearing axis, but every branch that emerges from
+		# it can support leaves along its viable length.  This is a developmental
+		# capacity rule, not a terminal-only decoration: split trunks and strong
+		# limbs receive fewer clusters than fine twigs, while terminal wood still
+		# receives the highest allocation.
+		if order <= 0:
 			continue
 		var parent_index := int(segment.get("parentNode", -1))
 		var start: Vector3 = nodes[parent_index].get("position", Vector3.ZERO)
 		var end: Vector3 = child.get("position", Vector3.UP)
+		var crown_floor := crown_center.y - crown_radii.y * 0.88
+		if maxf(start.y, end.y) < crown_floor:
+			continue
 		var length := start.distance_to(end)
 		var midpoint := start.lerp(end, 0.5)
 		var midpoint_envelope := Vector3(
@@ -1062,8 +1209,10 @@ func build_twig_foliage(
 		# wood, preserving the major-branch budget and the tree's architecture.
 		# The hard cap is still a runaway guard rather than the source of leaf
 		# quantity.
-		var capacity := (length * (0.96 if order >= 4 else 0.72) + (0.82 if terminal else 0.28)) \
-			* lerpf(0.68, 1.30, exposure) * 1.45
+		var branch_order_capacity := lerpf(0.36, 1.0, clampf(float(order - 1) / 3.0, 0.0, 1.0))
+		var terminal_capacity := 0.82 if terminal else 0.22
+		var capacity := (length * lerpf(0.50, 0.96, branch_order_capacity) + terminal_capacity) \
+			* lerpf(0.70, 1.34, exposure) * lerpf(1.00, 1.58, branch_order_capacity)
 		var cluster_count := clampi(ceili(capacity), 1, 5)
 		var direction := (end - start).normalized()
 		var side := direction.cross(Vector3.UP)
@@ -1073,7 +1222,7 @@ func build_twig_foliage(
 			side = side.normalized()
 		var normal := direction.cross(side).normalized()
 		for cluster_index in range(cluster_count):
-			if foliage.size() >= MAX_FOLIAGE_CLUSTERS:
+			if foliage.size() >= foliage_budget:
 				break
 			var unit := (float(cluster_index) + 0.42) / float(cluster_count)
 			var jitter_a := stable_signed("leaf-a:%d:%d:%d" % [seed, segment_index, cluster_index])

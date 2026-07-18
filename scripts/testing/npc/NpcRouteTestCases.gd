@@ -175,6 +175,53 @@ class DynamicActorRepairProbe:
 			"details": {}
 		}
 
+class TerrainMotionRepairProbe:
+	extends RefCounted
+	var probe_calls := 0
+
+	func setup(_system_node, _main_node) -> void:
+		pass
+
+	func probe_route(_entry: Dictionary, _route: Dictionary, _intent: Dictionary, _options := {}) -> Dictionary:
+		probe_calls += 1
+		if probe_calls == 1:
+			return {
+				"ok": false,
+				"status": "failed",
+				"reason": "blocked_terrain_motion_probe",
+				"authoritative": true,
+				"sampleCount": 1,
+				# Production terrain probes supply a sampled world position; the
+				# authority must turn it into a collision repair avoid cell.
+				"details": { "sample": Vector3(CELL * 2.0, 0.0, 0.0) }
+			}
+		return {
+			"ok": true,
+			"status": "passed",
+			"reason": "",
+			"authoritative": true,
+			"sampleCount": 1,
+			"details": {}
+		}
+
+class RepeatingTerrainMotionRepairProbe:
+	extends RefCounted
+	var probe_calls := 0
+
+	func setup(_system_node, _main_node) -> void:
+		pass
+
+	func probe_route(_entry: Dictionary, _route: Dictionary, _intent: Dictionary, _options := {}) -> Dictionary:
+		probe_calls += 1
+		return {
+			"ok": false,
+			"status": "failed",
+			"reason": "blocked_terrain_motion_probe",
+			"authoritative": true,
+			"sampleCount": 1,
+			"details": { "sample": Vector3(CELL * 2.0, 0.0, 0.0) }
+		}
+
 class RecordingRepairSubstrate:
 	extends RefCounted
 	var avoid_history: Array = []
@@ -390,6 +437,8 @@ func cases() -> Array[Dictionary]:
 		["npc_route_authority_probe_repair_avoids_persist_across_budget", "test_route_authority_probe_repair_avoids_persist_across_budget"],
 		["npc_route_player_watchdog_retains_collision_repair_progress", "test_route_player_watchdog_retains_collision_repair_progress"],
 		["npc_route_authority_dynamic_probe_repairs_before_blocking", "test_route_authority_dynamic_probe_repairs_before_blocking"],
+		["npc_route_authority_terrain_motion_probe_repairs_before_blocking", "test_route_authority_terrain_motion_probe_repairs_before_blocking"],
+		["npc_route_authority_failed_goal_cells_exclude_only_failed_destinations", "test_route_authority_failed_goal_cells_exclude_only_failed_destinations"],
 		["npc_route_authority_phase10_counters", "test_route_authority_phase10_counters"],
 		["npc_route_authority_stuck_revokes_moving_lease", "test_route_authority_stuck_revokes_moving_lease"],
 		["npc_route_lease_executor_skips_passed_non_door_waypoint", "test_route_lease_executor_skips_passed_non_door_waypoint"],
@@ -408,6 +457,7 @@ func cases() -> Array[Dictionary]:
 		["npc_route_probe_start_overlap_escape_outward_only", "test_route_probe_start_overlap_escape_outward_only"],
 		["npc_route_probe_covers_terrain_body_layer", "test_route_probe_covers_terrain_body_layer"],
 		["npc_route_probe_repair_cell_bridge_uses_fallback_goal", "test_route_probe_repair_cell_bridge_uses_fallback_goal"],
+		["npc_route_probe_avoid_excludes_failed_candidate_goal", "test_route_probe_avoid_excludes_failed_candidate_goal"],
 		["npc_route_runtime_door_uses_group_portal_id", "test_route_runtime_door_uses_group_portal_id"],
 		["npc_route_collision_boundary_blocks_open_destination", "test_route_collision_boundary_blocks_open_destination"],
 		["npc_route_collision_occupied_cell_blocks_node", "test_route_collision_occupied_cell_blocks_node"],
@@ -939,6 +989,63 @@ func test_route_authority_dynamic_probe_repairs_before_blocking(_mode: String) -
 		"result=%s probes=%d avoids=%s radius=%d" % [JSON.stringify(authority_summary(result)), probe.probe_calls, JSON.stringify(first_avoids), first_radius],
 		["dynamic_character_body_probe_classified", "dynamic_probe_repaired_before_commit", "dynamic_clearance_cells_avoided", "repaired_route_requires_clear_probe"],
 		{ "result": authority_summary(result), "probeCalls": probe.probe_calls, "avoidCells": first_avoids, "repairAvoidRadius": first_radius }
+	)
+
+func test_route_authority_terrain_motion_probe_repairs_before_blocking(_mode: String) -> Dictionary:
+	var authority = NpcRouteAuthorityV2Script.new()
+	var probe := TerrainMotionRepairProbe.new()
+	var substrate := RecordingRepairSubstrate.new()
+	authority.setup(null, null, probe)
+	var entry := { "id": "terrain-motion-probe-repair" }
+	var request: Dictionary = authority.submit_request(entry, { "kind": "home", "targetCell": Vector2i(4, 0) }, { "priority": 140 })
+	var request_id := String(request.get("requestId", ""))
+	var route := authority_test_route(4)
+	var options := {
+		"repairSubstrate": substrate,
+		"repairStartCell": Vector2i.ZERO,
+		"repairCandidateCells": [Vector2i(4, 0)],
+		"repairPlanOptions": {},
+		"maxProbeRepairAttempts": 3
+	}
+	var result: Dictionary = authority.commit_route_after_probe(entry, request_id, route, { "kind": "home", "targetCell": Vector2i(4, 0) }, options)
+	var first_avoids: Array = substrate.avoid_history[0] if not substrate.avoid_history.is_empty() and substrate.avoid_history[0] is Array else []
+	var first_radius := int(substrate.repair_radius_history[0]) if not substrate.repair_radius_history.is_empty() else 0
+	var passed: bool = String(result.get("state", "")) == "ready" \
+		and probe.probe_calls == 2 \
+		and first_avoids.has(Vector2i(2, 0)) \
+		and first_radius == 0
+	return outcome(
+		passed,
+		"result=%s probes=%d avoids=%s radius=%d" % [JSON.stringify(authority_summary(result)), probe.probe_calls, JSON.stringify(first_avoids), first_radius],
+		["terrain_motion_probe_classified_as_static", "terrain_motion_probe_repaired_before_commit", "sample_world_position_becomes_repair_avoid_cell", "terrain_motion_repair_avoids_exact_failed_sample"],
+		{ "result": authority_summary(result), "probeCalls": probe.probe_calls, "avoidCells": first_avoids, "repairAvoidRadius": first_radius }
+	)
+
+func test_route_authority_failed_goal_cells_exclude_only_failed_destinations(_mode: String) -> Dictionary:
+	var authority = NpcRouteAuthorityV2Script.new()
+	var probe := RepeatingTerrainMotionRepairProbe.new()
+	var substrate := RecordingRepairSubstrate.new()
+	authority.setup(null, null, probe)
+	var entry := { "id": "failed-goal-cell-recording" }
+	var target := Vector2i(4, 0)
+	var request: Dictionary = authority.submit_request(entry, { "kind": "scripted", "targetCell": target }, { "priority": 140 })
+	var result: Dictionary = authority.commit_route_after_probe(entry, String(request.get("requestId", "")), authority_test_route(4), { "kind": "scripted", "targetCell": target }, {
+		"repairSubstrate": substrate,
+		"repairStartCell": Vector2i.ZERO,
+		"repairCandidateCells": [target],
+		"repairPlanOptions": {},
+		"maxProbeRepairAttempts": 3
+	})
+	var failed_goals: Array = result.get("probeRepairFailedGoalCells", []) if result.get("probeRepairFailedGoalCells", []) is Array else []
+	var passed: bool = String(result.get("state", "")) == "unreachable_static" \
+		and probe.probe_calls == 4 \
+		and failed_goals.size() == 1 \
+		and failed_goals.has(target)
+	return outcome(
+		passed,
+		"result=%s probes=%d failedGoals=%s" % [JSON.stringify(authority_summary(result)), probe.probe_calls, JSON.stringify(failed_goals)],
+		["terrain_probe_failure_records_failed_goal", "failed_goal_cells_do_not_expand_to_intermediate_repair_avoids"],
+		{ "result": authority_summary(result), "probeCalls": probe.probe_calls, "failedGoals": failed_goals }
 	)
 
 func test_route_authority_phase10_counters(_mode: String) -> Dictionary:
@@ -1539,6 +1646,32 @@ func test_route_probe_repair_cell_bridge_uses_fallback_goal(_mode: String) -> Di
 		"goals=%s" % JSON.stringify(vec2i_array_summary(goals)),
 		["probe_repair_lattice_does_not_retry_blocked_target", "probe_repair_lattice_moves_to_fallback_first"],
 		{ "goals": vec2i_array_summary(goals) }
+	)
+
+func test_route_probe_avoid_excludes_failed_candidate_goal(_mode: String) -> Dictionary:
+	var fixture := GeneratedTownRouteSubstrateFixtureWorld.new()
+	fixture.standable.clear()
+	fixture.add_standable_rect(Vector2i(0, 0), Vector2i(2, 2))
+	var substrate = CollisionBackedRouteSubstrateScript.new()
+	substrate.setup(fixture)
+	var blocked_goal := Vector2i(2, 0)
+	var fallback_goal := Vector2i(0, 2)
+	var route: Dictionary = substrate.plan_route(fixture.generated_town_entry(), Vector2i.ZERO, [blocked_goal, fallback_goal], {
+		"allowOutside": true,
+		"avoidCells": [blocked_goal],
+		"maxExpansions": 128,
+		"expansionsPerCall": 128
+	})
+	var proof: Dictionary = route.get("proof", {}) if route.get("proof", {}) is Dictionary else {}
+	var passed: bool = bool(route.get("ok", false)) \
+		and route.get("targetCell", Vector2i(2147483000, 2147483000)) == fallback_goal \
+		and (proof.get("acceptedGoals", []) as Array).has(fallback_goal) \
+		and not (proof.get("acceptedGoals", []) as Array).has(blocked_goal)
+	return outcome(
+		passed,
+		"route=%s" % JSON.stringify(substrate_route_summary(route)),
+		["probe_avoid_removes_failed_interaction_pose_from_goal_set", "alternate_collision_backed_goal_remains_routeable"],
+		{ "route": substrate_route_summary(route), "blockedGoal": blocked_goal, "fallbackGoal": fallback_goal }
 	)
 
 func test_route_runtime_goal_adapter_uses_new_corridor(_mode: String) -> Dictionary:

@@ -63,24 +63,58 @@ func random_horizontal_direction(rng: RandomNumberGenerator = null) -> Vector3:
         angle = rng.randf() * TAU
     return Vector3(cos(angle), 0.0, sin(angle)).normalized()
 
+const WILDLIFE_SIMULATION_UPDATE_BUDGET := 10
+const WILDLIFE_SIMULATION_ACCUMULATED_DELTA_CAP := 0.16
+
 func update_wildlife(delta: float) -> void:
     if player == null or wildlife_nodes.is_empty():
         return
-    for wildlife_value in wildlife_nodes.duplicate():
+    var active_wildlife: Array[StaticBody3D] = []
+    var invalid_wildlife: Array = []
+    for wildlife_value in wildlife_nodes:
         if not is_instance_valid(wildlife_value):
-            wildlife_nodes.erase(wildlife_value)
+            invalid_wildlife.append(wildlife_value)
             continue
         var body := wildlife_value as StaticBody3D
         if body == null or not is_instance_valid(body) or not body.is_inside_tree():
-            wildlife_nodes.erase(wildlife_value)
+            invalid_wildlife.append(wildlife_value)
             continue
         if not body.has_meta("material") or String(body.get_meta("material", "")) != "wildlife":
-            wildlife_nodes.erase(wildlife_value)
+            invalid_wildlife.append(wildlife_value)
             continue
         if body.global_position.distance_to(player.global_position) > CELL * 92.0:
             body.set_meta("wildlife_last_move", 0.0)
+            body.set_meta("wildlife_accumulated_delta", 0.0)
             continue
-        update_single_wildlife(body, delta)
+        active_wildlife.append(body)
+    for wildlife_value in invalid_wildlife:
+        wildlife_nodes.erase(wildlife_value)
+    if active_wildlife.is_empty():
+        wildlife_update_cursor = 0
+        return
+    if active_wildlife.size() <= WILDLIFE_SIMULATION_UPDATE_BUDGET:
+        wildlife_update_cursor = 0
+        for body in active_wildlife:
+            body.set_meta("wildlife_accumulated_delta", 0.0)
+            update_single_wildlife(body, delta)
+        return
+    # Wildlife is non-hostile ambient simulation. Above the population budget,
+    # advance a stable round-robin slice and carry a short capped delta so a
+    # dense biome neither produces a terrain-probe spike nor slows its animals.
+    # Generation, collision, drops, and player interaction stay unchanged.
+    for body in active_wildlife:
+        body.set_meta(
+            "wildlife_accumulated_delta",
+            minf(float(body.get_meta("wildlife_accumulated_delta", 0.0)) + delta, WILDLIFE_SIMULATION_ACCUMULATED_DELTA_CAP)
+        )
+    wildlife_update_cursor = posmod(wildlife_update_cursor, active_wildlife.size())
+    var processed := mini(WILDLIFE_SIMULATION_UPDATE_BUDGET, active_wildlife.size())
+    for index in range(processed):
+        var body := active_wildlife[(wildlife_update_cursor + index) % active_wildlife.size()]
+        var accumulated_delta := float(body.get_meta("wildlife_accumulated_delta", delta))
+        body.set_meta("wildlife_accumulated_delta", 0.0)
+        update_single_wildlife(body, accumulated_delta)
+    wildlife_update_cursor = (wildlife_update_cursor + processed) % active_wildlife.size()
 
 func update_single_wildlife(body: StaticBody3D, delta: float) -> void:
     var direction: Vector3 = body.get_meta("wildlife_direction", Vector3.ZERO)

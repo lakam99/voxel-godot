@@ -1,6 +1,7 @@
 param(
     [string]$GodotExe = "C:\Users\arkam\Desktop\Godot_v4.6.1-stable_win64.exe\Godot_v4.6.1-stable_win64_console.exe",
-    [string]$ReportPath = ""
+    [string]$ReportPath = "",
+    [switch]$Visible
 )
 
 $ErrorActionPreference = "Stop"
@@ -30,7 +31,11 @@ function Invoke-StartupSmoke([string]$Mode, [string]$OutputPath, [bool]$PersistS
     }
     $previousErrorActionPreference = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
-    $output = & $GodotExe --headless --path $projectPath --script "res://scripts/testing/MainMenuStartupSmokeRunner.gd" 2>&1
+    $godotArgs = @("--path", $projectPath, "--script", "res://scripts/testing/MainMenuStartupSmokeRunner.gd")
+    if (-not $Visible) {
+        $godotArgs = @("--headless") + $godotArgs
+    }
+    $output = & $GodotExe @godotArgs 2>&1
     $exitCode = $LASTEXITCODE
     $ErrorActionPreference = $previousErrorActionPreference
     if ($output) {

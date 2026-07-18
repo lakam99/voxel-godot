@@ -448,7 +448,7 @@ func cases() -> Array[Dictionary]:
 		case("npc_behavior_day_guard_patrol", "day", "test_day_guard_patrol"),
 		case("npc_behavior_guard_departure_does_not_arrive_at_exit_as_post", "day", "test_guard_departure_does_not_arrive_at_exit_as_post"),
 		case("npc_behavior_guard_near_porch_does_not_restart_departure", "day", "test_guard_near_porch_does_not_restart_departure"),
-		case("npc_behavior_pending_route_budget_resumes_through_physics_service", "day", "test_pending_route_budget_resumes_through_physics_service"),
+		case("npc_behavior_forager_pending_route_budget_keeps_lifecycle_owner", "day", "test_forager_pending_route_budget_keeps_lifecycle_owner"),
 		case("npc_behavior_guard_target_never_falls_back_to_porch", "day", "test_guard_target_never_falls_back_to_porch"),
 		case("npc_behavior_guard_intercept_defers_topology_to_v2", "day", "test_guard_intercept_defers_topology_to_v2"),
 		case("npc_behavior_guard_intercept_selection_is_incremental", "day", "test_guard_intercept_selection_is_incremental"),
@@ -511,6 +511,9 @@ func cases() -> Array[Dictionary]:
 		case("npc_behavior_vox42_gathering_requires_exact_arrived_claim", "day", "test_vox42_gathering_requires_exact_arrived_claim"),
 		case("npc_behavior_vox42_blocked_slot_replans_to_clear_slot", "day", "test_vox42_blocked_slot_replans_to_clear_slot"),
 		case("npc_behavior_vox42_pending_probe_publishes_bounded_semantic", "day", "test_vox42_pending_probe_publishes_bounded_semantic"),
+		case("npc_behavior_vox42_forage_goal_cancels_stale_home_route", "day", "test_vox42_forage_goal_cancels_stale_home_route"),
+		case("npc_behavior_vox42_pending_forage_keeps_lifecycle_owner", "day", "test_vox42_pending_forage_keeps_lifecycle_owner"),
+		case("npc_behavior_vox42_pending_forage_timeout_defers_target", "day", "test_vox42_pending_forage_timeout_defers_target"),
 		case("npc_behavior_vox42_non_home_door_keeps_forage_route", "day", "test_vox42_non_home_door_keeps_forage_route"),
 		case("npc_traffic_door_crossing_continues_while_brain_skipped", "day", "test_door_crossing_continues_while_brain_skipped"),
 		case("npc_behavior_motor_blocked_local_escape_forces_replan", "day", "test_motor_blocked_local_escape_forces_replan"),
@@ -695,7 +698,7 @@ func test_guard_near_porch_does_not_restart_departure(_mode: String) -> Dictiona
 		{ "status": status, "result": result, "intent": routine_intent }
 	)
 
-func test_pending_route_budget_resumes_through_physics_service(_mode: String) -> Dictionary:
+func test_forager_pending_route_budget_keeps_lifecycle_owner(_mode: String) -> Dictionary:
 	var fake_npc := FakeNpcSystem.new()
 	var executor: Variant = make_executor(fake_npc)
 	var authority = fake_npc.test_route_authority_v2
@@ -717,7 +720,7 @@ func test_pending_route_budget_resumes_through_physics_service(_mode: String) ->
 	authority.plan_attempt_budget_per_frame = 4
 	authority.begin_frame()
 	var service_owns: bool = executor.physics_route_service_owns_motion(entry_data)
-	var resumed: Dictionary = executor.advance_physics_route_service(entry_data, 1.0 / 60.0) if service_owns else {}
+	var resumed: Dictionary = executor.advance_motion_npc(entry_data, 1.0 / 60.0, 0.0)
 	var after: Dictionary = authority.runtime_for_entry(entry_data)
 	var body := entry_data.get("body") as Node3D
 	var passed: bool = request_id != "" \
@@ -725,17 +728,16 @@ func test_pending_route_budget_resumes_through_physics_service(_mode: String) ->
 		and String(cached_intent.get("kind", "")) == "forage" \
 		and String(cached_intent.get("semanticKind", "")) != "" \
 		and cached_intent.get("target", null) is Vector3 \
-		and service_owns \
+		and not service_owns \
 		and bool(resumed.get("advanced", false)) \
-		and int(after.get("lastServicedFrame", -1)) >= 0 \
 		and String(after.get("state", "")) != "pending_budget" \
-		and String(resumed.get("reason", "")) == "physics_route_service_routine" \
+		and String(resumed.get("reason", "")) == "job_route" \
 		and body != null
 	fake_npc.queue_free()
 	return outcome(
 		passed,
 		"first=%s pending=%s intent=%s serviceOwns=%s resumed=%s after=%s" % [JSON.stringify(first), JSON.stringify(pending), JSON.stringify(cached_intent), str(service_owns), JSON.stringify(resumed), JSON.stringify(after)],
-		["initial_budget_deferral_retains_semantic_intent", "physics_service_resumes_pending_route", "pending_route_receives_later_planning_service_or_terminal_classification"],
+		["initial_budget_deferral_retains_semantic_intent", "forager_job_lifecycle_resumes_pending_route", "physics_service_cannot_starve_forager_target_selection"],
 		{ "first": first, "pending": pending, "intent": cached_intent, "serviceOwns": service_owns, "resumed": resumed, "after": after }
 	)
 
@@ -1082,9 +1084,15 @@ func test_night_job_phase_does_not_override_home_motion(_mode: String) -> Dictio
 	var after := body.global_position
 	var moved_toward_home := after.distance_to(entry_data.get("homePosition", Vector3.ZERO)) < before.distance_to(entry_data.get("homePosition", Vector3.ZERO))
 	var home_intent: Dictionary = entry_data.get("_homeRouteV2Intent", {}) if entry_data.get("_homeRouteV2Intent", {}) is Dictionary else {}
-	var passed: bool = fake_npc.moving_home_calls == 0 and String(home_intent.get("kind", "")) == "home" and bool(home_intent.get("movingHome", false)) and bool(result.get("advanced", false)) and String(result.get("intentKind", "")) == "home" and moved_toward_home
+	var passed: bool = fake_npc.moving_home_calls == 0 \
+		and String(home_intent.get("kind", "")) == "home" \
+		and bool(home_intent.get("movingHome", false)) \
+		and int(home_intent.get("priority", 0)) >= 180 \
+		and bool(result.get("advanced", false)) \
+		and String(result.get("intentKind", "")) == "home" \
+		and moved_toward_home
 	fake_npc.queue_free()
-	return outcome(passed, "result=%s v2=%s before=%s after=%s" % [JSON.stringify(result), JSON.stringify(home_intent), str(before), str(after)], ["night_home_goal_preempts_job_phase", "home_motion_uses_v2_authority", "home_motion_moves_toward_interior"], { "result": result, "homeIntent": home_intent, "before": before, "after": after })
+	return outcome(passed, "result=%s v2=%s before=%s after=%s" % [JSON.stringify(result), JSON.stringify(home_intent), str(before), str(after)], ["night_home_goal_preempts_job_phase", "schedule_home_route_is_urgent", "home_motion_uses_v2_authority", "home_motion_moves_toward_interior"], { "result": result, "homeIntent": home_intent, "before": before, "after": after })
 
 func test_day_job_phase_overrides_stale_home_motion(_mode: String) -> Dictionary:
 	var fake_npc := FakeNpcSystem.new()
@@ -1636,19 +1644,21 @@ func test_forager_active_goal_enters_search_from_idle(_mode: String) -> Dictiona
 	var result: Dictionary = executor.advance_motion_npc(entry_data, 1.0 / 60.0, 0.0)
 	var routine_intent: Dictionary = entry_data.get("_routineRouteV2Intent", {}) if entry_data.get("_routineRouteV2Intent", {}) is Dictionary else {}
 	var last_authority: Dictionary = entry_data.get("routineRouteV2LastAuthority", {}) if entry_data.get("routineRouteV2LastAuthority", {}) is Dictionary else {}
+	var service_owns: bool = executor.physics_route_service_owns_motion(entry_data)
 	var passed := bool(result.get("advanced", false)) \
 		and String(entry_data.get("jobPhase", "")) == "searching" \
 		and String(entry_data.get("goal", "")) == "search for forage" \
 		and fake_npc.move_calls == 0 \
 		and String(entry_data.get("routeStatus", "")) != "idle" \
 		and String(entry_data.get("routineRouteV2RequestId", "")) != "" \
+		and not service_owns \
 		and not last_authority.is_empty()
 	fake_npc.queue_free()
 	return outcome(
 		passed,
-		"result=%s phase=%s legacyMoveCalls=%d routeStatus=%s v2=%s authority=%s" % [JSON.stringify(result), String(entry_data.get("jobPhase", "")), fake_npc.move_calls, String(entry_data.get("routeStatus", "")), JSON.stringify(routine_intent), JSON.stringify(last_authority)],
-		["forager_active_goal_promotes_idle_to_searching", "forager_idle_intent_uses_v2_authority", "forager_idle_intent_does_not_rest_outside"],
-		{ "result": result, "jobPhase": entry_data.get("jobPhase", ""), "moveCalls": fake_npc.move_calls, "routeStatus": entry_data.get("routeStatus", ""), "routineIntent": routine_intent, "lastAuthority": last_authority }
+		"result=%s phase=%s legacyMoveCalls=%d routeStatus=%s serviceOwns=%s v2=%s authority=%s" % [JSON.stringify(result), String(entry_data.get("jobPhase", "")), fake_npc.move_calls, String(entry_data.get("routeStatus", "")), str(service_owns), JSON.stringify(routine_intent), JSON.stringify(last_authority)],
+		["forager_active_goal_promotes_idle_to_searching", "forager_idle_intent_uses_v2_authority", "forager_idle_intent_does_not_rest_outside", "forager_lifecycle_owns_search_anchor"],
+		{ "result": result, "jobPhase": entry_data.get("jobPhase", ""), "moveCalls": fake_npc.move_calls, "routeStatus": entry_data.get("routeStatus", ""), "serviceOwns": service_owns, "routineIntent": routine_intent, "lastAuthority": last_authority }
 	)
 
 func test_forager_search_excludes_current_cell(_mode: String) -> Dictionary:
@@ -2192,6 +2202,105 @@ func test_vox42_pending_probe_publishes_bounded_semantic(_mode: String) -> Dicti
 	var details := { "semanticKind": semantic_kind, "intentKind": intent_kind, "authority": authority, "timedOut": timed_out }
 	fake_npc.queue_free()
 	return outcome(passed, JSON.stringify(details), ["probing_request_publishes_forage_semantic", "probe_starvation_enters_bounded_pending_policy"], details)
+
+func test_vox42_forage_goal_cancels_stale_home_route(_mode: String) -> Dictionary:
+	var fake_npc := FakeNpcSystem.new()
+	var executor: Variant = make_executor(fake_npc)
+	var authority = fake_npc.test_route_authority_v2
+	var entry_data := entry("Forager", {
+		"id": "forager-stale-home-route",
+		"job": "forage",
+		"position": Vector3(CELL * 4.0, 0.0, 0.0),
+		"homeCell": Vector2i(-4, 0),
+		"porchCell": Vector2i(-3, 0)
+	})
+	entry_data["activeGoalKind"] = NpcEnumsScript.GOAL_KIND_FORAGE
+	entry_data["activeMotionGoal"] = { "goalKind": NpcEnumsScript.GOAL_KIND_FORAGE, "reason": "role_forager_food_loop" }
+	var stale_home_intent := {
+		"kind": "home",
+		"semanticKind": "home_interior",
+		"target": Vector3(-CELL * 4.0, 0.0, 0.0),
+		"priority": 140
+	}
+	var request: Dictionary = authority.submit_request(entry_data, stale_home_intent, { "priority": 140 })
+	var request_id := String(request.get("requestId", ""))
+	entry_data["homeRouteV2RequestId"] = request_id
+	entry_data["_homeRouteV2Intent"] = stale_home_intent
+	var service_owns: bool = executor.physics_route_service_owns_motion(entry_data)
+	var runtime: Dictionary = authority.runtime_for_entry(entry_data)
+	var passed: bool = request_id != "" \
+		and not service_owns \
+		and String(entry_data.get("homeRouteV2RequestId", "")) == "" \
+		and String(runtime.get("state", "")) == "cancelled"
+	var details := {
+		"requestId": request_id,
+		"serviceOwns": service_owns,
+		"homeRequestAfter": String(entry_data.get("homeRouteV2RequestId", "")),
+		"runtime": runtime
+	}
+	fake_npc.queue_free()
+	return outcome(passed, JSON.stringify(details), ["active_forage_goal_preempts_obsolete_home_route", "obsolete_home_route_cannot_starve_forager_lifecycle"], details)
+
+func test_vox42_pending_forage_keeps_lifecycle_owner(_mode: String) -> Dictionary:
+	var setup := vox42_reserved_forager_setup("pending_lifecycle_owner")
+	var fake_npc: FakeNpcSystem = setup.fakeNpc
+	var executor: Variant = setup.executor
+	var entry_data: Dictionary = setup.entry
+	var body: CharacterBody3D = entry_data.get("body")
+	body.global_position = Vector3(CELL * 4.0, 0.0, 0.0)
+	fake_npc.test_route_authority_v2.plan_attempt_budget_per_frame = 0
+	fake_npc.test_route_authority_v2.begin_frame()
+	executor.call("_advance_job_motion", entry_data, body, 1.0 / 60.0)
+	var authority: Dictionary = entry_data.get("routeAuthorityV2", {}) if entry_data.get("routeAuthorityV2", {}) is Dictionary else {}
+	authority["pendingBudgetFrames"] = 300
+	entry_data["routeAuthorityV2"] = authority
+	var service_owns: bool = executor.physics_route_service_owns_motion(entry_data)
+	var timed_out: bool = bool(executor.call("_forager_pending_route_timed_out", entry_data, 1.0 / 60.0))
+	var passed: bool = String(authority.get("state", "")) == "pending_budget" \
+		and String(entry_data.get("routineRouteV2IntentKind", "")) == "forage" \
+		and String(entry_data.get("routineRouteV2SemanticKind", "")) == "forage_target" \
+		and not service_owns \
+		and timed_out
+	var details := {
+		"authority": authority,
+		"serviceOwns": service_owns,
+		"timedOut": timed_out,
+		"intentKind": String(entry_data.get("routineRouteV2IntentKind", "")),
+		"semanticKind": String(entry_data.get("routineRouteV2SemanticKind", ""))
+	}
+	fake_npc.queue_free()
+	return outcome(passed, JSON.stringify(details), ["pending_forage_route_stays_with_job_lifecycle", "pending_budget_enters_bounded_release_policy"], details)
+
+func test_vox42_pending_forage_timeout_defers_target(_mode: String) -> Dictionary:
+	var setup := vox42_reserved_forager_setup("pending_timeout_defer")
+	var fake_npc: FakeNpcSystem = setup.fakeNpc
+	var executor: Variant = setup.executor
+	var entry_data: Dictionary = setup.entry
+	var body: CharacterBody3D = entry_data.get("body")
+	body.global_position = Vector3(CELL * 4.0, 0.0, 0.0)
+	fake_npc.test_route_authority_v2.plan_attempt_budget_per_frame = 0
+	fake_npc.test_route_authority_v2.begin_frame()
+	executor.call("_advance_job_motion", entry_data, body, 1.0 / 60.0)
+	var authority: Dictionary = entry_data.get("routeAuthorityV2", {}) if entry_data.get("routeAuthorityV2", {}) is Dictionary else {}
+	authority["pendingBudgetFrames"] = 300
+	entry_data["routeAuthorityV2"] = authority
+	entry_data["foragePendingRouteRetries"] = 1
+	var moving_job: bool = bool(executor.call("_update_forager_goal", entry_data, body, 1.0 / 60.0))
+	var passed: bool = moving_job \
+		and fake_npc.reservation_releases == 1 \
+		and fake_npc.reservation_release_reasons == ["pending_route_timeout"] \
+		and fake_npc.forage_target_deferrals == 1 \
+		and String(entry_data.get("jobPhase", "")) == "searching" \
+		and String(entry_data.get("jobObjectId", "")) == "" \
+		and String(entry_data.get("jobReservationId", "")) == ""
+	var details := {
+		"movingJob": moving_job,
+		"releaseReasons": fake_npc.reservation_release_reasons.duplicate(),
+		"targetDeferrals": fake_npc.forage_target_deferrals,
+		"jobPhase": String(entry_data.get("jobPhase", ""))
+	}
+	fake_npc.queue_free()
+	return outcome(passed, JSON.stringify(details), ["pending_timeout_releases_generic_reservation", "pending_timeout_defers_target_before_search"], details)
 
 func test_vox42_non_home_door_keeps_forage_route(_mode: String) -> Dictionary:
 	var setup := vox42_reserved_forager_setup("non_home_door")

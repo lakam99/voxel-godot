@@ -127,11 +127,13 @@ func configure_visual_capture() -> void:
     mira_home_only = OS.get_environment("VOXEL_REAL_TUTORIAL_MIRA_HOME_ONLY").strip_edges() == "1"
     morning_outside_only = OS.get_environment("VOXEL_REAL_TUTORIAL_MORNING_OUTSIDE_ONLY").strip_edges() == "1"
     final_rescue_tutorial = OS.get_environment("VOXEL_REAL_TUTORIAL_FINAL_RESCUE").strip_edges() == "1"
-    # Headed tutorial playthroughs cross night phases. Player-only damage
-    # protection is the default test policy so NPC/night behavior remains
-    # observable even when the automated player would otherwise die.
-    playtest_god_mode = OS.get_environment("VOXEL_REAL_TUTORIAL_GOD_MODE").strip_edges() != "0"
     phase7_live_acceptance = OS.get_environment("VOXEL_REAL_TUTORIAL_PHASE7_LIVE_ACCEPTANCE").strip_edges() == "1"
+    # Ordinary headed tutorial playthroughs may cross night and keep the
+    # player-only protection requested for visual test stability. Phase 7 is
+    # explicitly a no-flags live acceptance run: an unset GodMode variable
+    # must mean normal survival, not an implicit test override.
+    var requested_god_mode := OS.get_environment("VOXEL_REAL_TUTORIAL_GOD_MODE").strip_edges()
+    playtest_god_mode = requested_god_mode == "1" if phase7_live_acceptance else requested_god_mode != "0"
     day_one_tutorial = OS.get_environment("VOXEL_REAL_TUTORIAL_DAY_ONE").strip_edges() == "1" or final_rescue_tutorial
     screenshot_dir = OS.get_environment("VOXEL_REAL_TUTORIAL_SCREENSHOT_DIR")
     if screenshot_dir == "":
@@ -4544,14 +4546,15 @@ func walk_near(target: Vector3, stop_distance: float, timeout_seconds: float, la
         reached = final_offset.length() <= stop_distance
     return reached
 
-func walk_tutorial_route_near(target: Vector3, stop_distance: float, timeout_seconds: float, label: String) -> bool:
+func walk_tutorial_route_near(target: Vector3, stop_distance: float, timeout_seconds: float, label: String, options := {}) -> bool:
     if player_route_authority_available():
-        return await walk_authority_route_near(target, stop_distance, timeout_seconds, label)
-    if phase7_live_acceptance:
-        add_failure("phase7_player_route_authority_unavailable", JSON.stringify({
+        return await walk_authority_route_near(target, stop_distance, timeout_seconds, label, options)
+    if phase7_live_acceptance or bool(options.get("requireRouteAuthority", false)):
+        add_failure("player_route_authority_unavailable", JSON.stringify({
             "label": label,
             "target": vec3(target),
-            "stopDistance": rounded(stop_distance)
+            "stopDistance": rounded(stop_distance),
+            "requiredFor": "phase7_live_acceptance" if phase7_live_acceptance else "intro_route_waypoint"
         }))
         return false
     record_player_route_event(label, "authority_unavailable", {
@@ -4693,16 +4696,21 @@ func player_route_navigation_world():
         navigation_world = coordinator.get("navigation_world")
     return navigation_world
 
-func walk_authority_route_near(target: Vector3, stop_distance: float, timeout_seconds: float, label: String) -> bool:
+func walk_authority_route_near(target: Vector3, stop_distance: float, timeout_seconds: float, label: String, options := {}) -> bool:
     ensure_live_player_navigator()
     if live_player_navigator != null and live_player_navigator.has_method("go_to_position"):
+        var accept_route_goal := bool(options.get("acceptRouteGoal", false))
         var navigator_result: Dictionary = await live_player_navigator.call("go_to_position", target, {
             "label": label,
             "stopDistance": stop_distance,
             "timeout": timeout_seconds,
             "planTimeout": player_route_plan_timeout_for_target(target, timeout_seconds),
             "tutorialPerimeterRecovery": false,
-            "routeSemanticKind": "interaction_target"
+            "routeSemanticKind": "interaction_target",
+            # Exact action/interaction poses stay tied to their requested target.
+            # Transit-only checkpoints may complete at the authority's collision-
+            # backed semantic projection rather than a non-standable marker cell.
+            "acceptRouteGoal": accept_route_goal
         })
         if not bool(navigator_result.get("ok", false)) and full_player_pov_visual_mode():
             await capture_player_pov_stage(
@@ -5262,7 +5270,21 @@ func walk_intro_waypoints(cells: Array, label: String, stop_distance: float, tim
         if not (cell_value is Vector2i):
             continue
         var cell: Vector2i = cell_value
-        var reached := await walk_near(world_position_for_flat_cell(cell), stop_distance, timeout_seconds, "%s_%02d_%d_%d" % [label, index, cell.x, cell.y])
+        # These are transit checkpoints, not authored movement instructions.
+        # Ask the shared collision-backed authority for a legal goal near each
+        # checkpoint, then drive the real player body through that route. The
+        # following bed/block interaction remains separately proved by its own
+        # live interaction path.
+        var reached := await walk_tutorial_route_near(
+            world_position_for_flat_cell(cell),
+            stop_distance,
+            timeout_seconds,
+            "%s_%02d_%d_%d" % [label, index, cell.x, cell.y],
+            {
+                "acceptRouteGoal": true,
+                "requireRouteAuthority": true
+            }
+        )
         if reached:
             continue
         if full_player_pov_visual_mode():
@@ -6107,7 +6129,13 @@ func walk_to_south_repair_bypass(town_center: Vector2i) -> bool:
         var waypoint_position := world_position_for_flat_cell(waypoint)
         var distance := Vector2(waypoint_position.x - player.global_position.x, waypoint_position.z - player.global_position.z).length()
         var timeout := clampf(distance / (CELL * 2.2) + 5.0, 10.0, 38.0)
-        var reached := await walk_tutorial_route_near(waypoint_position, CELL * 1.25, timeout, "walking_to_south_repair_bypass_%02d_%d_%d" % [index, waypoint.x, waypoint.y])
+        var reached := await walk_tutorial_route_near(
+            waypoint_position,
+            CELL * 1.25,
+            timeout,
+            "walking_to_south_repair_bypass_%02d_%d_%d" % [index, waypoint.x, waypoint.y],
+            { "acceptRouteGoal": true }
+        )
         if not reached:
             if full_player_pov_visual_mode():
                 await capture_player_pov_stage(
@@ -6363,7 +6391,13 @@ func aim_at(target: Vector3) -> void:
 
 func aim_until_interaction_hit(block: Node3D, label: String) -> Dictionary:
     var summary := {}
-    for height_scale in [0.28, 0.48, 0.12, 0.70]:
+    # Interaction bodies do not all occupy a full upright block: beds, paths,
+    # low crafting stations, and similar props expose their useful collider low
+    # in the cell. Sweep the real player view ray through that physical volume
+    # before trying the higher points used by doors and standing objects. This
+    # remains a live mouse-look/raycast/input action, not a target-specific
+    # interaction or a test-only reach exception.
+    for height_scale in [-0.42, -0.18, 0.08, 0.28, 0.48, 0.70]:
         await aim_at(block.global_position + Vector3(0.0, CELL * float(height_scale), 0.0))
         await wait_physics_frames(6)
         summary = interaction_hit_summary()
@@ -7236,6 +7270,12 @@ func finish() -> void:
     report_data["finalRescueCombatEvents"] = final_rescue_combat_events
     save_report()
     mark_progress("finished")
+    # Exercise the production window-close lifecycle. A direct SceneTree quit
+    # bypasses MainCore's ordered save, navigation and terrain retirement and
+    # cannot validate a real game's shutdown behavior.
+    if main != null and main.has_method("request_graceful_quit"):
+        main.call("request_graceful_quit", 1 if failed else 0)
+        return
     get_tree().quit(1 if failed else 0)
 
 func player_stop() -> void:

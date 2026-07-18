@@ -426,6 +426,7 @@ func mark_ready(request_id: String, route: Dictionary, proof := {}) -> Dictionar
 	var actor_id := String(record.get("actorId", ""))
 	var generation := int(record.get("generation", 0))
 	record.erase("probeRepairAvoidCells")
+	record.erase("probeRepairFailedGoalCells")
 	var route_copy := route.duplicate(true)
 	route_copy["probeCertificate"] = certificate.duplicate(true)
 	var lease = RouteLeaseScript.from_route(route_copy, actor_id, generation, NpcEnumsScript.ROUTE_AUTHORITY_READY, NpcEnumsScript.ROUTE_REASON_NONE)
@@ -648,7 +649,8 @@ func runtime_for_actor(actor_id: String) -> Dictionary:
 		"pendingProbeFrames": int(counts.get(STATE_PROBING, 0)),
 		"routeLease": record.get("routeLease", {}),
 		"route": record.get("route", {}),
-		"probeRepairAvoidCells": (record.get("probeRepairAvoidCells", []) as Array).duplicate() if record.get("probeRepairAvoidCells", []) is Array else []
+		"probeRepairAvoidCells": (record.get("probeRepairAvoidCells", []) as Array).duplicate() if record.get("probeRepairAvoidCells", []) is Array else [],
+		"probeRepairFailedGoalCells": (record.get("probeRepairFailedGoalCells", []) as Array).duplicate() if record.get("probeRepairFailedGoalCells", []) is Array else []
 	}
 
 func telemetry_for_actor(actor_id: String) -> Dictionary:
@@ -703,6 +705,7 @@ func telemetry_for_actor(actor_id: String) -> Dictionary:
 			"authoritative": bool(proof.get("authoritative", false)),
 			"sampleCount": int(proof.get("sampleCount", 0))
 		},
+		"probeRepairFailedGoalCells": (record.get("probeRepairFailedGoalCells", []) as Array).duplicate() if record.get("probeRepairFailedGoalCells", []) is Array else [],
 		"eventCount": (record.get("events", []) as Array).size() if record.get("events", []) is Array else 0
 	}
 
@@ -779,6 +782,7 @@ func record_summary(record: Dictionary) -> Dictionary:
 		"routeLease": lease.duplicate(true),
 		"route": _record_route_summary(route),
 		"probeRepairAvoidCells": (record.get("probeRepairAvoidCells", []) as Array).duplicate() if record.get("probeRepairAvoidCells", []) is Array else [],
+		"probeRepairFailedGoalCells": (record.get("probeRepairFailedGoalCells", []) as Array).duplicate() if record.get("probeRepairFailedGoalCells", []) is Array else [],
 		"proof": proof.duplicate(true),
 		"eventCount": (record.get("events", []) as Array).size() if record.get("events", []) is Array else 0,
 		"recentEvents": _recent_events(record, 8)
@@ -877,7 +881,13 @@ func _record_probe_decision(request_id: String, route: Dictionary, proof: Dictio
 		return
 	var record: Dictionary = requests_by_id[request_id]
 	var route_copy := route.duplicate(true)
-	route_copy["probeCertificate"] = _probe_certificate_from_proof(proof)
+	var certificate := _probe_certificate_from_proof(proof)
+	route_copy["probeCertificate"] = certificate
+	if not _probe_certificate_allows_ready(certificate) and _state_for_probe_certificate(certificate) == STATE_UNREACHABLE_STATIC:
+		var failed_goal := _cell_from_value(route_copy.get("targetCell", INVALID_CELL))
+		if failed_goal != INVALID_CELL:
+			var failed_goals: Array = record.get("probeRepairFailedGoalCells", []).duplicate() if record.get("probeRepairFailedGoalCells", []) is Array else []
+			record["probeRepairFailedGoalCells"] = _merge_repair_avoid_cells(failed_goals, [failed_goal])
 	record["route"] = route_copy
 	record["routeProof"] = proof.duplicate(true)
 	requests_by_id[request_id] = record
@@ -938,7 +948,12 @@ func _should_attempt_probe_repair(certificate: Dictionary, state: String, option
 	if options.get("repairSubstrate", null) == null:
 		return false
 	var reason := String(certificate.get("reason", ""))
-	return reason in ["blocked_capsule_probe", "path_crosses_static_collision", "blocked_static_collision", "blocked_static_transition"]
+	# The motion probe is the final collision authority for terrain.  It reports the
+	# sampled world position rather than a navigation-cell collision, so let the
+	# normal bounded repair path convert that sample into an avoid cell and seek a
+	# different collision-backed route.  Treating it as terminal here leaves a
+	# valid alternative interaction pose unreachable after the substrate succeeded.
+	return reason in ["blocked_capsule_probe", "blocked_terrain_motion_probe", "path_crosses_static_collision", "blocked_static_collision", "blocked_static_transition"]
 
 
 func _probe_certificate_is_dynamic_actor_block(certificate: Dictionary, options: Dictionary, repair_attempts: int) -> bool:

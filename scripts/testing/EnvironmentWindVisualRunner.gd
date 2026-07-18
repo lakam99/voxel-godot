@@ -3,13 +3,14 @@ extends Node3D
 const CatalogScript := preload("res://scripts/environment/BiomeEnvironmentCatalog.gd")
 const WindSystemScript := preload("res://scripts/environment/EnvironmentWindSystem.gd")
 const VisualAssetRegistryScript := preload("res://scripts/visual/VisualAssetRegistry.gd")
+const TreeSpawnServiceScript := preload("res://scripts/environment/TreeSpawnService.gd")
 
 const CAPTURE_SIZE := Vector2i(1280, 720)
 const TREE_SPECS := [
-    ["old_growth_broadleaf_01", Vector3(-7.2, 0.0, 1.2), 0.72, "forest"],
-    ["mature_broadleaf_04", Vector3(3.4, 0.0, 1.8), 0.84, "forest"],
-    ["mature_conifer_03", Vector3(-1.0, 0.0, 7.0), 0.82, "taiga"],
-    ["mature_savanna_02", Vector3(8.8, 0.0, -4.0), 0.88, "savanna"]
+    {"treeId": "wind-broadleaf", "position": Vector3(-8.4, 0.0, 1.8), "biome": "forest", "architecture": "broadleaf", "speciesGrammar": "bushy_oak", "growthStage": 0.92, "visualHeight": 22.0, "trunkRadius": 1.35, "canopyRadius": 10.4, "canopyDensity": 0.90},
+    {"treeId": "wind-broadleaf-young", "position": Vector3(4.0, 0.0, 2.6), "biome": "forest", "architecture": "broadleaf", "speciesGrammar": "bushy_oak", "growthStage": 0.78, "visualHeight": 17.0, "trunkRadius": 0.78, "canopyRadius": 7.4, "canopyDensity": 0.82},
+    {"treeId": "wind-conifer", "position": Vector3(-1.5, 0.0, 10.2), "biome": "taiga", "architecture": "conifer", "speciesGrammar": "norway_spruce", "growthStage": 0.84, "visualHeight": 23.0, "trunkRadius": 0.66, "canopyRadius": 6.6, "canopyDensity": 0.88},
+    {"treeId": "wind-savanna", "position": Vector3(10.6, 0.0, -4.8), "biome": "savanna", "architecture": "savanna", "speciesGrammar": "umbrella_thorn", "growthStage": 0.86, "visualHeight": 16.0, "trunkRadius": 0.84, "canopyRadius": 9.1, "canopyDensity": 0.84}
 ]
 
 var report_path := ""
@@ -18,6 +19,7 @@ var results: Array[Dictionary] = []
 var captures: Array[Dictionary] = []
 var catalog
 var registry
+var tree_service
 var wind_system
 var sunlight: DirectionalLight3D
 var torch: OmniLight3D
@@ -67,7 +69,7 @@ func run() -> void:
     var trees_ready := setup_trees()
     await wait_frames(8)
     add_result("headed_forward_renderer_available", DisplayServer.get_name().to_lower() != "headless", {"display": DisplayServer.get_name(), "renderer": RenderingServer.get_video_adapter_name()})
-    add_result("wind_visual_fixture_loaded_four_production_canopies", catalog_ready and trees_ready and tree_phase_count() == TREE_SPECS.size(), {"treeCount": tree_phase_count(), "materialCount": registry.tree_wind_material_count()})
+    add_result("wind_visual_fixture_loaded_four_procedural_production_canopies", catalog_ready and trees_ready and tree_phase_count() == TREE_SPECS.size(), {"treeCount": tree_phase_count(), "materialCount": tree_material_count()})
 
     var clear_weather := {"kind": "clear", "intensity": 0.0, "cloudCover": 0.18}
     advance_wind(clear_weather, "forest", 120)
@@ -143,52 +145,31 @@ func setup_scene() -> void:
 
     var camera := Camera3D.new()
     camera.name = "WindReviewCamera"
-    camera.position = Vector3(23.5, 11.5, 27.0)
-    camera.look_at_from_position(camera.position, Vector3(0.0, 7.0, 2.0), Vector3.UP)
-    camera.fov = 58.0
+    camera.position = Vector3(30.0, 15.0, 34.0)
+    camera.look_at_from_position(camera.position, Vector3(0.0, 8.0, 2.0), Vector3.UP)
+    camera.fov = 62.0
     camera.current = true
     add_child(camera)
 
 func setup_trees() -> bool:
     var all_ready := true
+    tree_service = TreeSpawnServiceScript.new()
     for index in range(TREE_SPECS.size()):
-        var spec: Array = TREE_SPECS[index]
-        var asset_id := String(spec[0])
-        var tree := import_generated_asset(asset_id)
+        var spec: Dictionary = TREE_SPECS[index]
+        var request := spec.duplicate(true)
+        request["worldSeed"] = "wind-visual-world"
+        request["presentation"] = "runtime"
+        request.erase("position")
+        var tree: Node3D = tree_service.spawn_tree(request)
         if tree == null:
             all_ready = false
             continue
-        tree.name = "WindTree_%s" % asset_id
-        tree.position = spec[1]
-        tree.scale = Vector3.ONE * float(spec[2])
+        tree.name = "WindTree_%s" % String(spec.treeId)
+        tree.position = spec.position
         tree.rotation.y = float(index) * 0.73
-        apply_tree_materials(tree)
-        registry.configure_tree_wind_instance(tree, String(spec[3]), "wind-visual-%s" % asset_id)
         tree.set_meta("wind_visual_tree", true)
         add_child(tree)
     return all_ready
-
-func import_generated_asset(asset_id: String) -> Node3D:
-    var path := ProjectSettings.globalize_path("res://assets/visual/generated/environment/%s.glb" % asset_id)
-    if not FileAccess.file_exists(path):
-        return null
-    var document := GLTFDocument.new()
-    var state := GLTFState.new()
-    if document.append_from_file(path, state) != OK:
-        return null
-    return document.generate_scene(state) as Node3D
-
-func apply_tree_materials(node: Node) -> void:
-    if node is MeshInstance3D:
-        var mesh_instance := node as MeshInstance3D
-        mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
-        mesh_instance.extra_cull_margin = 1.25
-        if mesh_instance.mesh != null:
-            for surface_index in range(mesh_instance.mesh.get_surface_count()):
-                var source := mesh_instance.mesh.surface_get_material(surface_index)
-                mesh_instance.set_surface_override_material(surface_index, registry.shared_tree_wind_material(source))
-    for child in node.get_children():
-        apply_tree_materials(child)
 
 func advance_wind(weather: Dictionary, biome: String, frames: int) -> void:
     for _index in range(frames):
@@ -245,23 +226,16 @@ func add_visual_assertions() -> void:
     add_result("daylight_canopy_shadow_pattern_moves", floor_shadow_motion > 0.00015, {"changedFloorPixelRatio": floor_shadow_motion, "sunShadows": sunlight.shadow_enabled})
     var night_luminance := average_luminance(night)
     add_result("night_torch_keeps_near_canopy_readable", night_luminance > 0.025 and night_luminance < 0.42, {"averageLuminance": night_luminance, "torchEnergy": torch.light_energy})
-    add_result("authored_root_weights_remain_fixed", manifest_roots_are_fixed(), {"manifest": "res://assets/visual/generated/visual-manifest.json"})
+    add_result("all_wind_fixture_trees_use_recipe_authority", procedural_tree_roots_are_authoritative(), {"treeCount": tree_phase_count()})
 
-func manifest_roots_are_fixed() -> bool:
-    var parsed = JSON.parse_string(FileAccess.get_file_as_string("res://assets/visual/generated/visual-manifest.json"))
-    if not (parsed is Dictionary):
-        return false
-    for spec in TREE_SPECS:
-        var found := false
-        for asset_variant in (parsed as Dictionary).get("assets", []):
-            if asset_variant is Dictionary and String(asset_variant.get("id", "")) == String(spec[0]):
-                found = true
-                if float(asset_variant.get("windData", {}).get("rootMaxBend", 1.0)) > 0.02:
-                    return false
-                break
-        if not found:
-            return false
-    return true
+func procedural_tree_roots_are_authoritative() -> bool:
+    var count := 0
+    for child in get_children():
+        if child is Node3D and bool(child.get_meta("wind_visual_tree", false)):
+            if String(child.get_meta("visual_source", "")) != "procedural_tree_recipe":
+                return false
+            count += 1
+    return count == TREE_SPECS.size()
 
 func tree_phase_count() -> int:
     var phases := {}
@@ -269,6 +243,36 @@ func tree_phase_count() -> int:
         if child is Node3D and bool(child.get_meta("wind_visual_tree", false)):
             phases[snappedf(float(child.get_meta("tree_wind_phase", -1.0)), 0.0001)] = true
     return phases.size()
+
+func tree_recipe_summaries() -> Array[Dictionary]:
+    var summaries: Array[Dictionary] = []
+    for child in get_children():
+        if not (child is Node3D) or not bool(child.get_meta("wind_visual_tree", false)):
+            continue
+        summaries.append({
+            "treeId": String(child.get_meta("tree_id", child.name)),
+            "architecture": String(child.get_meta("tree_architecture", "")),
+            "speciesGrammar": String(child.get_meta("tree_species_grammar", "")),
+            "branchCount": int(child.get_meta("tree_branch_count", 0)),
+            "foliageClusterCount": int(child.get_meta("tree_foliage_cluster_count", 0)),
+            "height": float(child.get_meta("tree_visual_height", 0.0)),
+            "canopyRadius": float(child.get_meta("tree_canopy_radius", 0.0)),
+        })
+    return summaries
+
+func tree_material_count() -> int:
+    var materials := {}
+    for child in get_children():
+        collect_tree_materials(child, materials)
+    return materials.size()
+
+func collect_tree_materials(node: Node, materials: Dictionary) -> void:
+    if node is GeometryInstance3D:
+        var material := (node as GeometryInstance3D).material_override
+        if material != null:
+            materials[material.get_instance_id()] = true
+    for child in node.get_children():
+        collect_tree_materials(child, materials)
 
 func image_change_ratio(first: Image, second: Image, threshold: float, x_min: float, x_max: float, y_min: float, y_max: float) -> float:
     if first == null or second == null or first.get_size() != second.get_size():
@@ -341,10 +345,11 @@ func finish(exit_code: int) -> void:
         "finished": true,
         "passed": failures == 0,
         "evidenceLevel": "visual_fixture",
-        "scope": "Headed production-shader fixture for mature canopy sway, asynchronous per-tree phase, daylight shadow motion, authored fixed roots, and night/torch readability. This is visual fixture evidence, not procedural biome integration or normal-runtime performance acceptance.",
+        "scope": "Headed production-shader fixture for recipe-driven broadleaf, conifer, and savanna canopy sway, asynchronous deterministic phase, daylight shadow motion, and night/torch readability. This is visual fixture evidence, not normal-runtime procedural biome integration or performance acceptance.",
         "resultCount": results.size(),
         "failureCount": failures,
         "captures": captures,
+        "treeRecipes": tree_recipe_summaries(),
         "wind": wind_system.snapshot() if wind_system != null else {},
         "results": results
     }

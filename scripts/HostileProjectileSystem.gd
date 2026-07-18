@@ -2,6 +2,7 @@ extends Node3D
 class_name HostileProjectileSystem
 
 const CELL := 1.35
+const PROJECTILE_BLOCK_BROAD_PHASE_RADIUS_CELLS := 2
 
 var main
 var player: CharacterBody3D
@@ -156,23 +157,42 @@ func projectile_block_hit(previous: Vector3, next: Vector3) -> Dictionary:
         if sampled_body == null or first_enabled_box_collider(sampled_body) == null:
             continue
         best_t = minf(best_t, t)
-    for block_value in blocks.values():
-        var body := block_value as Node3D
-        if body == null or not is_instance_valid(body):
-            continue
-        var collider := first_enabled_box_collider(body)
-        if collider == null:
-            continue
-        var shape := collider.shape as BoxShape3D
-        var center := body.global_position + collider.position
-        var t := clampf((center - previous).dot(segment) / length_sq, 0.0, 1.0)
-        if t >= best_t:
-            continue
-        var closest := previous + segment * t
-        var half := shape.size * 0.5 + Vector3(0.08, 0.08, 0.08)
-        var delta := closest - center
-        if absf(delta.x) <= half.x and absf(delta.y) <= half.y and absf(delta.z) <= half.z:
-            best_t = t
+    # The physics ray above owns ordinary collision. This is a fallback for
+    # block bodies whose collision is temporarily unavailable during terrain
+    # publication. Restrict its box checks to the swept segment's nearby cells;
+    # scanning every loaded block for every projectile caused combat hitches.
+    var minimum := previous.min(next)
+    var maximum := previous.max(next)
+    var radius := PROJECTILE_BLOCK_BROAD_PHASE_RADIUS_CELLS
+    var min_cell := Vector3i(
+        roundi(minimum.x / CELL) - radius,
+        roundi(minimum.y / CELL) - radius,
+        roundi(minimum.z / CELL) - radius
+    )
+    var max_cell := Vector3i(
+        roundi(maximum.x / CELL) + radius,
+        roundi(maximum.y / CELL) + radius,
+        roundi(maximum.z / CELL) + radius
+    )
+    for z in range(min_cell.z, max_cell.z + 1):
+        for y in range(min_cell.y, max_cell.y + 1):
+            for x in range(min_cell.x, max_cell.x + 1):
+                var body := blocks.get(Vector3i(x, y, z)) as Node3D
+                if body == null or not is_instance_valid(body):
+                    continue
+                var collider := first_enabled_box_collider(body)
+                if collider == null:
+                    continue
+                var shape := collider.shape as BoxShape3D
+                var center := body.global_position + collider.position
+                var t := clampf((center - previous).dot(segment) / length_sq, 0.0, 1.0)
+                if t >= best_t:
+                    continue
+                var closest := previous + segment * t
+                var half := shape.size * 0.5 + Vector3(0.08, 0.08, 0.08)
+                var delta := closest - center
+                if absf(delta.x) <= half.x and absf(delta.y) <= half.y and absf(delta.z) <= half.z:
+                    best_t = t
     if best_t < INF:
         return { "hit": true, "t": best_t }
     return {}
