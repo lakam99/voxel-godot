@@ -469,39 +469,63 @@ func harvest_prop(prop: Node3D, label: String, options := {}) -> Dictionary:
 
 func place_item_at_cell(item_id: String, cell: Vector2i, label: String, options := {}) -> Dictionary:
 	var target_position := _cell_position(cell)
-	var candidates := _placement_pose_candidates(cell, target_position, options)
 	var attempts: Array[Dictionary] = []
-	if candidates.is_empty():
-		return _result(false, "action_pose_missing", "no_standable_placement_pose", label, target_position, { "attempts": attempts })
 	var timeout_seconds := float(options.get("timeout", options.get("timeoutSeconds", 18.0)))
-	var started_at := _elapsed()
-	for index in range(candidates.size()):
-		var remaining := timeout_seconds - (_elapsed() - started_at)
-		if remaining <= 0.0:
-			break
-		var pose: Vector3 = candidates[index]
-		var route_timeout := minf(remaining, clampf(_flat_distance(player.global_position, pose) / (CELL * 2.4) + 2.0, 3.0, 8.0))
-		var route := await go_to_position(pose, {
-			"label": "%s_place_pose_%02d" % [label, index],
+	# Derive all placement stands from the shared navigation/collision data before
+	# planning. The route substrate receives these as semantic goals and rechecks
+	# them against its own snapshot and body probe; this is not an authored stand
+	# location or a movement shortcut.
+	var placement_poses := _placement_pose_candidates(cell, target_position, options)
+	var placement_candidate_cells := _candidate_cells_for_positions(placement_poses)
+	if placement_candidate_cells.is_empty():
+		return _result(false, "action_pose_missing", "no_collision_valid_placement_pose", label, target_position, {
+			"targetCell": _vec2i(cell),
+			"placementPoseCount": placement_poses.size()
+		})
+	# Placement is a multi-goal interaction: the shared collision substrate owns
+	# the valid standing poses around the target, limited only by actual action
+	# reach. Do not replace this with an authored stand vector or a separate
+	# navigator-only standability rule. Collision repairs can invalidate a pose
+	# after planning. Restart through the same multi-goal substrate with that
+	# evidence excluded, allowing another valid action pose rather than retrying
+	# one failed cell or inventing an authored fallback.
+	var excluded_cells: Array = []
+	var max_pose_routes := clampi(int(options.get("candidateRouteAttempts", 3)), 1, 6)
+	for attempt_index in range(max_pose_routes):
+		var route_timeout := clampf(_flat_distance(player.global_position, target_position) / (CELL * 2.4) + 2.0, 3.0, minf(12.0, timeout_seconds))
+		var route_options := {
+			"label": "%s_place_pose" % label,
 			"stopDistance": float(options.get("poseStopDistance", CELL * 0.45)),
 			"timeout": route_timeout,
-			"planTimeout": minf(4.0, maxf(1.5, route_timeout * 0.55)),
-			"candidateCells": [_world_cell(pose)],
-			"routeSemanticKind": "interaction_target"
-		})
+			"planTimeout": minf(6.0, maxf(2.0, route_timeout * 0.55)),
+			"routeSemanticKind": "interaction_target",
+			"acceptRouteGoal": true,
+			"candidateCells": placement_candidate_cells.duplicate(),
+			"maxCandidateDistance": -1.0,
+			"excludeTargetCell": true
+		}
+		if not excluded_cells.is_empty():
+			route_options["avoidCells"] = excluded_cells.duplicate()
+		var route := await go_to_position(target_position, route_options)
+		var route_goal_cell := _result_route_goal_cell(route)
+		var route_goal := _cell_position(route_goal_cell) if route_goal_cell.x < 2147483000 else player.global_position
 		var attempt := {
-			"index": index,
-			"pose": _vec3(pose),
+			"source": "collision_authority_interaction_candidates",
+			"index": attempt_index,
+			"excludedCells": _vec2i_array(excluded_cells),
+			"pose": _vec3(route_goal),
+			"routeGoalCell": _vec2i(route_goal_cell) if route_goal_cell.x < 2147483000 else [],
 			"routeOk": bool(route.get("ok", false)),
 			"routeStatus": String(route.get("status", "")),
-			"routeReason": String(route.get("reason", ""))
+			"routeReason": String(route.get("reason", "")),
+			"route": route.get("routeSummary", {})
 		}
 		if bool(route.get("ok", false)):
 			var preview := await _aim_until_placement_preview_for_cells(
 				item_id,
 				cell,
 				_placement_aim_cells(cell, item_id, options),
-				"%s_pose_%02d" % [label, index],
+				"%s_pose" % label,
 				bool(options.get("strictPlacementCell", false))
 			)
 			attempt["preview"] = preview
@@ -511,12 +535,34 @@ func place_item_at_cell(item_id: String, cell: Vector2i, label: String, options 
 					_dispatch_mouse_button(MOUSE_BUTTON_RIGHT, true)
 					_dispatch_mouse_button(MOUSE_BUTTON_RIGHT, false)
 					await _wait_physics_frames(int(options.get("postActionFrames", 24)))
-				return _result(true, "placement_ready", "", label, target_position, { "pose": _vec3(pose), "preview": preview, "attempts": attempts + [attempt] })
+				return _result(true, "placement_ready", "", label, target_position, { "pose": _vec3(route_goal), "preview": preview, "attempts": attempts + [attempt] })
 		attempts.append(attempt)
 		_record(label, "placement_pose_attempt", attempt)
 		if _route_prerequisite_failed(route):
 			return _result(false, String(route.get("status", "route_failed")), String(route.get("reason", "")), label, target_position, { "attempts": attempts, "route": route })
+		var learned_cells := _route_probe_failed_goal_cells(route)
+		if route_goal_cell.x < 2147483000 and not learned_cells.has(route_goal_cell):
+			learned_cells.append(route_goal_cell)
+		var added_new_cell := false
+		for learned_cell in learned_cells:
+			if learned_cell is Vector2i and not excluded_cells.has(learned_cell):
+				excluded_cells.append(learned_cell)
+				added_new_cell = true
+		if not added_new_cell:
+			break
 	return _result(false, "placement_preview_miss", "no_routeable_preview_pose", label, target_position, { "attempts": attempts })
+
+func _route_probe_failed_goal_cells(result: Dictionary) -> Array:
+	var proof: Dictionary = result.get("proof", {}) if result.get("proof", {}) is Dictionary else {}
+	var plan: Dictionary = proof.get("plan", proof) if proof.get("plan", proof) is Dictionary else {}
+	var authority: Dictionary = plan.get("authority", {}) if plan.get("authority", {}) is Dictionary else {}
+	var cells: Array = authority.get("probeRepairFailedGoalCells", []) if authority.get("probeRepairFailedGoalCells", []) is Array else []
+	var result_cells: Array = []
+	for value in cells:
+		var candidate := _vector2i_from_value(value, Vector2i(2147483000, 2147483000))
+		if candidate.x < 2147483000 and not result_cells.has(candidate):
+			result_cells.append(candidate)
+	return result_cells
 
 func _make_route_entry(target: Vector3, stop_distance: float, label: String, options := {}) -> Dictionary:
 	var town_center := _flat_cell(player.global_position)
@@ -958,8 +1004,12 @@ func _placement_pose_candidates(cell: Vector2i, target_position: Vector3, option
 	var moving_home := bool(options.get("movingHome", false)) or String(home_context.get("kind", "")) in ["enter", "exit"]
 	var route_meta := _push_scripted_route_target(target_position, allow_outside)
 	var entry := _make_route_entry(target_position, CELL * 0.55, "placement_candidates", options)
-	var max_pose_distance := float(options.get("maxPlacementPoseDistance", CELL * 5.0))
-	if player != null and _flat_distance(player.global_position, target_position) <= float(options.get("currentPoseRadius", CELL * 2.65)):
+	# Placement poses must be actionable, not merely collision-valid. Read the
+	# live interaction contract rather than carrying an independently tuned
+	# playtest radius that can drift beyond the game's own reach rule.
+	var action_reach := _placement_action_reach_distance()
+	var max_pose_distance := float(options.get("maxPlacementPoseDistance", action_reach))
+	if player != null and _flat_distance(player.global_position, target_position) <= float(options.get("currentPoseRadius", action_reach)):
 		var current_cell := _world_cell(player.global_position)
 		if _cell_is_static_standable_goal(entry, current_cell, allow_outside, moving_home):
 			_add_unique_position(result, seen, _cell_position(current_cell))
@@ -1539,6 +1589,13 @@ func _surface_position(position: Vector3) -> Vector3:
 	if main != null and main.has_method("surface_y_at_position"):
 		result.y = float(main.call("surface_y_at_position", position)) + 0.08
 	return result
+
+func _placement_action_reach_distance() -> float:
+	if main != null and main.has_method("placement_action_reach_distance"):
+		return maxf(0.0, float(main.call("placement_action_reach_distance")))
+	# The fallback mirrors MainInterface for isolated test doubles that do not
+	# instantiate the gameplay interaction flow.
+	return CELL * 1.85
 
 func _add_unique_position(result: Array[Vector3], seen: Dictionary, position: Vector3) -> void:
 	var key := "%d,%d" % [roundi(position.x * 10.0), roundi(position.z * 10.0)]

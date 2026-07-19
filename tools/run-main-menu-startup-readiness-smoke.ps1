@@ -56,10 +56,13 @@ if ($RuntimeReset) {
     $runtimeResetReport = $report.details.runtimeReset
     $collision = $runtimeResetReport.readinessDomains.terrain_collision.metrics.voxelCollision
     $reset = $runtimeResetReport.readinessDomains.terrain_authority.metrics.reset
+    $taskDrain = $reset.taskDrain
     if (($true -ne $runtimeResetReport.runtimeInstancePreserved) -or
         ($true -ne $runtimeResetReport.terrainInstancePreserved) -or
         ([string]$reset.resetMode -ne "in_place_generator_reload") -or
-        ([int]$collision.publishedChunkCount -ne [int]$collision.requiredChunkCount)) {
+        ([int]$collision.publishedChunkCount -ne [int]$collision.requiredChunkCount) -or
+        ([int]$taskDrain.pendingTasks -ne 0) -or
+        ([int]$taskDrain.quietFrames -lt 2)) {
         Write-Error "Runtime New Game terrain reset readiness contract mismatch"
         exit 1
     }

@@ -6,7 +6,7 @@ param(
     [int]$TimeoutSeconds = 1800,
     [int]$StartupProgressSeconds = 120,
     [int]$StaleProgressSeconds = 300,
-    [ValidateSet("", "scene_bootstrap", "inventory_and_crafting", "hostiles", "structures", "movement", "navigation_map", "chunk_detail_batches", "mining_requirements", "mouse_interaction", "settings_debug", "tutorial_start", "tutorial_runtime_reset")]
+    [ValidateSet("", "scene_bootstrap", "inventory_and_crafting", "hostiles", "defensive_blocks", "structures", "movement", "navigation_map", "chunk_detail_batches", "mining_requirements", "mouse_interaction", "settings_debug", "generated_prop_visuals", "tutorial_start", "tutorial_runtime_reset")]
     [string]$Only = "",
     [switch]$Visible
 )
@@ -130,12 +130,23 @@ while (-not $process.HasExited) {
     if ((Test-Path -LiteralPath $progressPath) -and (Test-Path -LiteralPath $ReportPath)) {
         $progress = Get-Content -LiteralPath $progressPath -Raw -ErrorAction SilentlyContinue
         if ($progress -match "(?m)^finished$") {
-            Start-Sleep -Seconds 2
             $passed = Read-ReportPassed $ReportPath $runToken
             if ($null -ne $passed) {
                 $finishedByReport = $true
-                Stop-ProcessTree $process
                 $exitCode = if ($passed) { 0 } else { 1 }
+                # The report is written before MainCore drains VoxelTools and
+                # the custom meshing workers.  Wait for that normal shutdown;
+                # force termination is only a final watchdog fallback.
+                $shutdownDeadline = (Get-Date).AddSeconds(90)
+                while (-not $process.HasExited -and (Get-Date) -lt $shutdownDeadline) {
+                    Start-Sleep -Milliseconds 250
+                }
+                if (-not $process.HasExited) {
+                    $watchdogReason = "Playtest graceful shutdown exceeded 90 seconds"
+                    Write-Warning $watchdogReason
+                    Stop-ProcessTree $process
+                    $exitCode = 1
+                }
                 break
             }
         }

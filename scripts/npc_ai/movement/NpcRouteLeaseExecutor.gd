@@ -96,6 +96,27 @@ func execute(entry: Dictionary, request_id: String, lease: Dictionary, delta: fl
 			return { "ok": false, "status": "waiting", "reason": "stuck", "moved": moved }
 	else:
 		entry["_v2LeaseExecutorStuckTime"] = 0.0
+	# The route is collision-proven in continuous space, while a live frame can
+	# move farther than the remaining distance to a waypoint.  Treat a waypoint
+	# crossed by this exact motor displacement as completed before the generic
+	# progress watchdog runs.  Without this, the actor can oscillate across a
+	# corner on coarse frames and be reported as dynamically stuck even though it
+	# actually traversed the waypoint corridor.
+	if _crossed_waypoint(previous, body.global_position, target, waypoint_radius):
+		_reset_progress_watch(entry)
+		entry["_v2LeaseExecutorWaypointIndex"] = index + 1
+		if route_authority != null:
+			route_authority.report_segment_completed(request_id, index, {
+				"position": body.global_position,
+				"completion": "crossed_waypoint"
+			})
+		if index + 1 >= waypoints.size():
+			if bool(options.get("deferArrivalReport", false)):
+				return { "ok": true, "status": "route_complete", "reason": "awaiting_semantic_arrival", "moved": moved }
+			var arrived_after_crossing: Dictionary = route_authority.report_arrived(request_id, "lease_executor_arrived") if route_authority != null else { "ok": true }
+			_clear_request(entry)
+			return { "ok": true, "status": "arrived", "reason": "", "moved": moved, "authority": arrived_after_crossing }
+		return { "ok": true, "status": "moving", "reason": "", "moved": moved, "waypointIndex": index + 1 }
 	var no_progress := _update_progress_watch(entry, request_id, "waypoint", index, target, flat_distance, body.global_position, delta, moved, waypoint_radius)
 	if not bool(no_progress.get("ok", true)):
 		return no_progress
@@ -117,6 +138,20 @@ func execute(entry: Dictionary, request_id: String, lease: Dictionary, delta: fl
 		"moved": moved,
 		"waypointIndex": int(entry.get("_v2LeaseExecutorWaypointIndex", index))
 	}
+
+
+func _crossed_waypoint(previous: Vector3, current: Vector3, target: Vector3, waypoint_radius: float) -> bool:
+	var travel := current - previous
+	travel.y = 0.0
+	var travel_length_squared := travel.length_squared()
+	if travel_length_squared <= 0.000001:
+		return false
+	var target_offset := target - previous
+	target_offset.y = 0.0
+	var fraction := clampf(target_offset.dot(travel) / travel_length_squared, 0.0, 1.0)
+	var closest := previous + travel * fraction
+	closest.y = target.y
+	return Vector2(closest.x - target.x, closest.z - target.z).length() <= waypoint_radius
 
 
 func _validate_execution_context(entry: Dictionary, request_id: String, lease: Dictionary, delta: float) -> Dictionary:

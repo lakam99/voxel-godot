@@ -79,6 +79,26 @@ func cleanup_all() -> Dictionary:
         return { "avoidance": 0, "reason": "missing_coordinator" }
     return coordinator.cleanup_all()
 
+func shutdown_for_process_exit() -> Dictionary:
+    # Normal cleanup keeps this facade usable for a world reset.  Exit is a
+    # terminal lifecycle: release the coordinator graph and its reciprocal
+    # route-readiness services rather than letting RefCounted cycles survive
+    # until engine resource cleanup.
+    var result := { "avoidance": 0, "reason": "missing_coordinator" }
+    if coordinator != null and coordinator.has_method("shutdown_for_process_exit"):
+        result = coordinator.shutdown_for_process_exit()
+    elif coordinator != null and coordinator.has_method("cleanup_all"):
+        result = coordinator.cleanup_all()
+    coordinator = null
+    navigation_world = null
+    route_planner = null
+    locomotion = null
+    goal_planner = null
+    route_repair = null
+    system = null
+    main = null
+    return result
+
 func move_npc(entry: Dictionary, target: Vector3, max_distance: float, moving_home := false, allow_outside := false, physics_delta := 0.0166667) -> float:
     ensure_ready()
     if coordinator == null:

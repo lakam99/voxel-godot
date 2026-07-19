@@ -3,8 +3,11 @@ class_name VisualAssetRegistry
 
 const MANIFEST_PATH := "res://assets/visual/generated/visual-manifest.json"
 const BiomeEnvironmentCatalogScript := preload("res://scripts/environment/BiomeEnvironmentCatalog.gd")
+const TreeRuntimeRequestBuilderScript := preload("res://scripts/environment/TreeRuntimeRequestBuilder.gd")
+const TreeSpawnServiceScript := preload("res://scripts/environment/TreeSpawnService.gd")
 const TREE_WIND_SHADER := preload("res://resources/visual/tree_wind_material.gdshader")
 const TREE_WIND_CULL_MARGIN := 1.25
+const INVALID_TREE_CELL := Vector2i(2147483647, 2147483647)
 const WIND_TREE_FAMILIES := {
     "broadleaf_tree": true,
     "conifer_tree": true,
@@ -12,12 +15,17 @@ const WIND_TREE_FAMILIES := {
     "mature_broadleaf_tree": true,
     "old_growth_broadleaf_tree": true,
     "mature_conifer_tree": true,
-    "mature_savanna_tree": true
+    "mature_savanna_tree": true,
+    "ecological_broadleaf_tree": true,
+    "ecological_conifer_tree": true,
+    "ecological_savanna_tree": true
 }
 
 var assets_by_id := {}
 var assets_by_family := {}
 var environment_catalog: BiomeEnvironmentCatalog
+var tree_runtime_request_builder
+var tree_spawn_service
 var scene_cache := {}
 var tree_wind_material_cache := {}
 var disabled_asset_ids := {}
@@ -35,6 +43,12 @@ func setup(catalog: BiomeEnvironmentCatalog = null) -> bool:
     if environment_catalog == null:
         environment_catalog = BiomeEnvironmentCatalogScript.new()
         environment_catalog.setup()
+    tree_runtime_request_builder = TreeRuntimeRequestBuilderScript.new()
+    tree_spawn_service = TreeSpawnServiceScript.new()
+    # Prewarm shared procedural geometry while the game is still in its loading
+    # path. The first streamed tree then cannot pay mesh construction in a
+    # player movement frame.
+    tree_spawn_service.prewarm_visuals()
     loaded = load_manifest() and cache_asset_scenes()
     return loaded
 
@@ -73,6 +87,11 @@ func cache_asset_scenes() -> bool:
     var ok := true
     for asset_id in assets_by_id.keys():
         var asset: Dictionary = assets_by_id[asset_id]
+        # Complete tree GLBs are retained as Blender-reference/import assets
+        # during migration, but they no longer participate in runtime loading.
+        # Natural trees are now recipe-driven from profile + ecology inputs.
+        if is_complete_tree_asset(asset):
+            continue
         var resource_path := "res://%s" % String(asset.get("path", ""))
         var absolute_path := ProjectSettings.globalize_path(resource_path)
         if not FileAccess.file_exists(absolute_path):
@@ -102,7 +121,7 @@ func cache_asset_scenes() -> bool:
             ok = false
             continue
         scene_cache[asset_id] = packed
-    return ok and scene_cache.size() == assets_by_id.size()
+    return ok
 
 func read_text(path: String) -> String:
     if not FileAccess.file_exists(path):
@@ -133,17 +152,69 @@ func cached_asset_ids() -> Array[String]:
 func profile_count() -> int:
     return environment_catalog.profile_count() if environment_catalog != null else 0
 
-func select_tree_asset_id(biome: String, prop_id: String) -> String:
+func select_tree_asset_id(
+    biome: String,
+    prop_id: String,
+    world_cell := INVALID_TREE_CELL,
+    world_seed := ""
+) -> String:
     var profile := profile_for_biome(biome)
     var families := PackedStringArray(["broadleaf_tree"])
+    var ecology := {}
     if profile != null:
         families = profile.get("tree_families")
+        ecology = tree_ecology_spec(biome, prop_id, world_cell, world_seed)
+        if not ecology.is_empty() and families_contain_ecological_tree(families):
+            return select_tree_asset_for_age_band(
+                families,
+                biome,
+                prop_id,
+                String(ecology.get("ageBand", "mature"))
+            )
         var old_growth_chance := clampf(float(profile.get("old_growth_chance")), 0.0, 1.0)
         if families.has("mature_broadleaf_tree") \
             and old_growth_chance > 0.0 \
             and stable_unit("tree-old-growth:%s:%s" % [biome, prop_id]) < old_growth_chance:
             families = PackedStringArray(["old_growth_broadleaf_tree"])
     return select_asset_id(families, biome, prop_id, "tree")
+
+func tree_ecology_spec(
+    biome: String,
+    prop_id: String,
+    world_cell := INVALID_TREE_CELL,
+    world_seed := ""
+) -> Dictionary:
+    var profile := profile_for_biome(biome) as BiomeEnvironmentProfile
+    if profile == null or tree_runtime_request_builder == null:
+        return {}
+    return tree_runtime_request_builder.sample_ecology(profile, biome, prop_id, world_cell, world_seed)
+
+func families_contain_ecological_tree(families: PackedStringArray) -> bool:
+    for family in families:
+        if String(family).begins_with("ecological_"):
+            return true
+    return false
+
+func select_tree_asset_for_age_band(
+    families: PackedStringArray,
+    biome: String,
+    prop_id: String,
+    age_band: String
+) -> String:
+    var candidates: Array[String] = []
+    for family in families:
+        for id_variant in assets_by_family.get(String(family), []):
+            var asset_id := String(id_variant)
+            var asset: Dictionary = assets_by_id.get(asset_id, {})
+            var tags: Array = asset.get("biomeTags", [])
+            var phenotype: Dictionary = asset.get("treePhenotype", {})
+            if String(phenotype.get("ageBand", "")) == age_band \
+                and (tags.is_empty() or tags.has(biome)):
+                candidates.append(asset_id)
+    if candidates.is_empty():
+        return select_asset_id(families, biome, prop_id, "tree")
+    candidates.sort()
+    return candidates[stable_index("tree-phenotype:%s:%s:%s" % [biome, age_band, prop_id], candidates.size())]
 
 func select_rock_asset_id(biome: String, prop_id: String) -> String:
     var profile := profile_for_biome(biome)
@@ -180,6 +251,23 @@ func instantiate_tree_visual(biome: String, prop_id: String) -> Node3D:
     var node := instantiate_asset(select_tree_asset_id(biome, prop_id))
     configure_tree_wind_instance(node, biome, prop_id)
     return node
+
+func instantiate_procedural_tree_visual(
+    biome: String,
+    prop_id: String,
+    runtime_spec: Dictionary,
+    world_seed := ""
+) -> Node3D:
+    if tree_spawn_service == null:
+        return null
+    if not is_procedural_tree_family(String(runtime_spec.get("family", ""))):
+        return null
+    var request := runtime_spec.duplicate(true)
+    request["treeId"] = prop_id
+    request["biome"] = biome
+    request["worldSeed"] = world_seed
+    request["presentation"] = "runtime"
+    return tree_spawn_service.spawn_tree(request)
 
 func instantiate_rock_visual(biome: String, prop_id: String) -> Node3D:
     return instantiate_asset(select_rock_asset_id(biome, prop_id))
@@ -228,6 +316,8 @@ func visibility_range_for_family(family: String) -> float:
             return 340.0
         "old_growth_broadleaf_tree":
             return 380.0
+        "ecological_broadleaf_tree", "ecological_conifer_tree", "ecological_savanna_tree":
+            return 440.0
         "rock":
             return 220.0
         "stump_log":
@@ -279,13 +369,17 @@ func shared_tree_wind_material(source_material: Material) -> ShaderMaterial:
     material.set_shader_parameter("roughness", roughness)
     material.set_shader_parameter("main_bend_meters", 0.48)
     material.set_shader_parameter("detail_flutter_meters", 0.075 if foliage_material_role(role) else 0.018)
+    var bark_role := role == "trunk" or role == "bark_dark"
+    material.set_shader_parameter("bark_enabled", 1.0 if bark_role else 0.0)
+    material.set_shader_parameter("bark_accent_color", base_color.darkened(0.30) if bark_role else base_color)
+    material.set_shader_parameter("bark_grain_contrast", 0.34 if role == "trunk" else 0.46)
     tree_wind_material_cache[role] = material
     return material
 
 func foliage_material_role(role: String) -> bool:
     return role.begins_with("leaf_") or role.begins_with("needle_") or role == "savanna_leaf"
 
-func configure_tree_wind_instance(node: Node3D, biome: String, prop_id: String) -> void:
+func configure_tree_wind_instance(node: Node3D, biome: String, prop_id: String, visual_scale := 1.0) -> void:
     if node == null:
         return
     var profile := profile_for_biome(biome)
@@ -293,19 +387,22 @@ func configure_tree_wind_instance(node: Node3D, biome: String, prop_id: String) 
     var phase := stable_unit("tree-wind-phase:%s:%s" % [biome, prop_id]) * TAU
     var variation := stable_unit("tree-wind-stiffness:%s:%s" % [biome, prop_id])
     var stiffness := clampf(1.18 - response * 0.18 + variation * 0.22, 0.68, 1.32)
-    configure_tree_wind_instance_recursive(node, phase, stiffness, response)
+    var bark_scale := maxf(0.1, float(visual_scale))
+    configure_tree_wind_instance_recursive(node, phase, stiffness, response, bark_scale)
     node.set_meta("tree_wind_phase", phase)
     node.set_meta("tree_wind_stiffness", stiffness)
     node.set_meta("tree_wind_response", response)
+    node.set_meta("tree_bark_scale", bark_scale)
 
-func configure_tree_wind_instance_recursive(node: Node, phase: float, stiffness: float, response: float) -> void:
+func configure_tree_wind_instance_recursive(node: Node, phase: float, stiffness: float, response: float, bark_scale: float) -> void:
     if node is MeshInstance3D:
         var mesh_instance := node as MeshInstance3D
         mesh_instance.set_instance_shader_parameter("tree_phase", phase)
         mesh_instance.set_instance_shader_parameter("tree_stiffness", stiffness)
         mesh_instance.set_instance_shader_parameter("tree_response", response)
+        mesh_instance.set_instance_shader_parameter("bark_scale", Vector2(bark_scale, bark_scale))
     for child in node.get_children():
-        configure_tree_wind_instance_recursive(child, phase, stiffness, response)
+        configure_tree_wind_instance_recursive(child, phase, stiffness, response, bark_scale)
 
 func tree_wind_material_count() -> int:
     return tree_wind_material_cache.size()
@@ -329,51 +426,37 @@ func asset_record(asset_id: String) -> Dictionary:
     var asset: Dictionary = assets_by_id.get(asset_id, {})
     return asset.duplicate(true)
 
-func tree_runtime_spec(biome: String, prop_id: String, fallback_height := 4.0) -> Dictionary:
-    var asset_id := select_tree_asset_id(biome, prop_id)
-    var asset: Dictionary = assets_by_id.get(asset_id, {})
-    if asset.is_empty():
-        return {
-            "assetId": "",
-            "family": "primitive_fallback",
-            "scale": 1.0,
-            "visualHeight": maxf(0.1, fallback_height),
-            "trunkRadius": 0.36,
-            "canopyRadius": 1.8,
-            "oldGrowth": false
-        }
-    var metrics: Dictionary = asset.get("treeMetrics", {})
-    var source_height := maxf(0.1, float(metrics.get("height", asset_size(asset_id).z)))
-    var source_trunk_radius := maxf(0.08, float(metrics.get("trunkRadius", 0.36)))
-    var source_canopy_radius := maxf(source_trunk_radius, float(metrics.get("canopyRadius", 1.8)))
-    var family := String(asset.get("family", ""))
+func tree_runtime_spec(
+    biome: String,
+    prop_id: String,
+    fallback_height := 4.0,
+    world_cell := INVALID_TREE_CELL,
+    world_seed := ""
+) -> Dictionary:
     var profile := profile_for_biome(biome)
-    var scale_multiplier := float(profile.get("tree_scale")) if profile != null else 1.0
-    var target_height := maxf(0.1, fallback_height) * scale_multiplier
-    var height_min := float(profile.get("tree_height_min")) if profile != null else 0.0
-    var height_max := float(profile.get("tree_height_max")) if profile != null else 0.0
-    if family == "old_growth_broadleaf_tree":
-        var old_growth_variation := lerpf(0.96, 1.04, stable_unit("tree-old-growth-height:%s:%s" % [biome, prop_id]))
-        target_height = source_height * scale_multiplier * old_growth_variation
-    elif height_min > 0.0 and height_max >= height_min:
-        target_height = lerpf(height_min, height_max, stable_unit("tree-height:%s:%s" % [biome, prop_id])) * scale_multiplier
-    var scale := clampf(target_height / source_height, 0.55, 1.55)
-    var visual_height := source_height * scale
-    var trunk_radius := source_trunk_radius * scale
-    var canopy_radius := source_canopy_radius * scale
-    return {
-        "assetId": asset_id,
-        "family": family,
-        "growthClass": String(asset.get("growthClass", "standard")),
-        "scale": scale,
-        "sourceHeight": source_height,
-        "visualHeight": visual_height,
-        "trunkRadius": trunk_radius,
-        "canopyRadius": canopy_radius,
-        "oldGrowth": family == "old_growth_broadleaf_tree",
-        "exclusionMargin": float(profile.get("natural_prop_exclusion_margin")) if profile != null else 0.0,
-        "canopyDensity": float(profile.get("canopy_density")) if profile != null else 0.0
-    }
+    if profile == null or tree_runtime_request_builder == null:
+        return {}
+    return tree_runtime_request_builder.build(profile, biome, prop_id, fallback_height, world_cell, world_seed)
+
+func tree_biome_parameters(profile: BiomeEnvironmentProfile) -> Dictionary:
+    return TreeRuntimeRequestBuilderScript.biome_parameters_for_profile(profile)
+
+func select_tree_family(profile: BiomeEnvironmentProfile, biome: String, prop_id: String, world_seed: String) -> String:
+    return TreeRuntimeRequestBuilderScript.select_tree_family(profile, biome, prop_id, world_seed)
+
+func architecture_for_tree_family(family: String) -> String:
+    return TreeRuntimeRequestBuilderScript.architecture_for_tree_family(family)
+
+func species_grammar_for_tree(family: String, biome: String, prop_id: String, world_seed: String) -> String:
+    # The registry turns ecology into a request; canonical grammar authority lives
+    # in TreeSpawnService so the PoC and the live world cannot silently diverge.
+    return TreeSpawnServiceScript.grammar_for_architecture(architecture_for_tree_family(family))
+
+func is_procedural_tree_family(family: String) -> bool:
+    return architecture_for_tree_family(family) != ""
+
+func is_complete_tree_asset(asset: Dictionary) -> bool:
+    return is_procedural_tree_family(String(asset.get("family", "")))
 
 func tree_scale_for_biome(biome: String) -> float:
     var profile := profile_for_biome(biome)

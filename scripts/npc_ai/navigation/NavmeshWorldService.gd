@@ -100,6 +100,14 @@ func clear() -> void:
 	door_link_state_revision = 0
 	door_link_install_failure_count = 0
 	if owns_navigation_map and navigation_map.is_valid():
+		# Regions and links are queued through NavigationServer3D.  Flush their
+		# removal while the map still exists, then retire the map explicitly.  This
+		# keeps the server-side lifetime ordered during a live scene shutdown rather
+		# than leaving cleanup to engine teardown.
+		if NavigationServer3D.has_method("map_set_active"):
+			NavigationServer3D.call("map_set_active", navigation_map, false)
+		if NavigationServer3D.has_method("map_force_update"):
+			NavigationServer3D.call("map_force_update", navigation_map)
 		NavigationServer3D.free_rid(navigation_map)
 	navigation_map = RID()
 	owns_navigation_map = false

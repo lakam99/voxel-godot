@@ -119,7 +119,9 @@ func update_actor(entry: Dictionary, delta: float, observer_position := Vector3.
 	# routing. Keep the intent authoritative and promote through the ordinary LOD
 	# placement contract; failed promotion remains retryable on the next update.
 	var order_requires_active := route_order_requires_active_simulation(entry)
-	var next_state := STATE_ACTIVE if order_requires_active else classify_distance(distance, current_state)
+	var forage_lifecycle_requires_active := active_forage_lifecycle_requires_active_simulation(entry)
+	var active_simulation_required := order_requires_active or forage_lifecycle_requires_active
+	var next_state := STATE_ACTIVE if active_simulation_required else classify_distance(distance, current_state)
 	record["lastDistance"] = distance
 	if current_state == STATE_ABSTRACT:
 		advance_abstract(entry, delta)
@@ -131,7 +133,7 @@ func update_actor(entry: Dictionary, delta: float, observer_position := Vector3.
 				entry["abstractSimulated"] = true
 				return { "state": STATE_ABSTRACT, "brainDue": false, "reason": String(promoted.get("reason", "promotion_rejected")), "distance": distance }
 			current_state = STATE_ACTIVE
-			next_state = classify_distance(distance, STATE_ACTIVE)
+			next_state = STATE_ACTIVE if active_simulation_required else classify_distance(distance, STATE_ACTIVE)
 	if next_state == STATE_ABSTRACT and current_state != STATE_ABSTRACT:
 		var demoted := demote_actor(entry, "distance_hysteresis", context)
 		if not bool(demoted.get("ok", false)):
@@ -161,6 +163,21 @@ func route_order_requires_active_simulation(entry: Dictionary) -> bool:
 		return false
 	var order: Dictionary = value
 	return bool(order.get("usesRouteStack", false)) and String(order.get("state", "")) in ["PENDING", "ACTIVE"]
+
+
+func active_forage_lifecycle_requires_active_simulation(entry: Dictionary) -> bool:
+	# Foragers roam and harvest through collision-backed route and SmartObject
+	# contracts. Abstract transit cannot advance those local semantics, so never
+	# demote an active forage lifecycle halfway through search, travel, or use.
+	if String(entry.get("job", "")) != "forage":
+		return false
+	var goal_kind := String(entry.get("activeGoalKind", entry.get("goal", "")))
+	if goal_kind != "forage":
+		var motion_goal: Dictionary = entry.get("activeMotionGoal", {}) if entry.get("activeMotionGoal", {}) is Dictionary else {}
+		goal_kind = String(motion_goal.get("goalKind", ""))
+	if goal_kind != "forage":
+		return false
+	return String(entry.get("jobPhase", "")) in ["searching", "outbound", "gathering", "returning"]
 
 func classify_distance(distance: float, previous_state := STATE_ACTIVE) -> String:
 	if previous_state == STATE_ACTIVE:

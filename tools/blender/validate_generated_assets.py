@@ -16,15 +16,29 @@ TREE_FAMILIES = {
     "old_growth_broadleaf_tree",
     "mature_conifer_tree",
     "mature_savanna_tree",
+    "ecological_broadleaf_tree",
+    "ecological_conifer_tree",
+    "ecological_savanna_tree",
 }
 CANOPY_FAMILIES = {
     "mature_broadleaf_tree",
     "old_growth_broadleaf_tree",
     "mature_conifer_tree",
     "mature_savanna_tree",
+    "ecological_broadleaf_tree",
+    "ecological_conifer_tree",
+    "ecological_savanna_tree",
+}
+CANOPY_MAX_HEIGHT = {
+    "ecological_broadleaf_tree": 84.0,
+    "ecological_conifer_tree": 96.0,
+    "ecological_savanna_tree": 78.0,
 }
 CANOPY_MAX_WIDTH = {
     "old_growth_broadleaf_tree": 18.0,
+    "ecological_broadleaf_tree": 72.0,
+    "ecological_conifer_tree": 46.0,
+    "ecological_savanna_tree": 84.0,
 }
 
 
@@ -125,15 +139,15 @@ def validate_asset(asset, manifest, project_root, allowed_materials, errors):
         fail(errors, asset_id, f"not ground-centered, min z {min_v.z:.4f}")
     if size.z <= 0.08 or size.x <= 0.04 or size.y <= 0.04:
         fail(errors, asset_id, f"degenerate bounds size {tuple(size)}")
-    max_height = 22.5 if str(asset.get("family", "")) in CANOPY_FAMILIES else 7.5
     family = str(asset.get("family", ""))
+    max_height = CANOPY_MAX_HEIGHT.get(family, 22.5 if family in CANOPY_FAMILIES else 7.5)
     max_width = CANOPY_MAX_WIDTH.get(family, 16.0 if family in CANOPY_FAMILIES else 4.5)
     if size.z > max_height or size.x > max_width or size.y > max_width:
         fail(errors, asset_id, f"unexpectedly large bounds size {tuple(size)}")
 
     triangles = triangle_count(meshes)
     expected_triangles = int(asset.get("triangleCount", -1))
-    limit = int(manifest.get("triangleLimit", 2200))
+    limit = int(asset.get("triangleLimit", manifest.get("triangleLimit", 2200)))
     if triangles <= 0:
         fail(errors, asset_id, "zero triangles")
     if triangles > limit:
@@ -149,6 +163,26 @@ def validate_asset(asset, manifest, project_root, allowed_materials, errors):
     missing_slots = [name for name in expected_slots if name not in names]
     if missing_slots:
         fail(errors, asset_id, f"missing material slots after import {missing_slots}")
+
+    if family in TREE_FAMILIES:
+        bark_data = asset.get("barkData", {})
+        if bark_data.get("attribute") != "TEXCOORD_0" or bark_data.get("mapping") != "branch_local_circumference_u_physical_length_v":
+            fail(errors, asset_id, "missing scale-safe branch-local bark UV contract")
+        if not obj.data.uv_layers:
+            fail(errors, asset_id, "missing imported TEXCOORD_0 bark UV data")
+        if family.startswith("ecological_"):
+            phenotype = asset.get("treePhenotype", {})
+            structure = asset.get("canopyStructure", {})
+            if phenotype.get("ageBand") not in {"young", "established", "mature", "old", "ancient"}:
+                fail(errors, asset_id, "missing ecological age-band phenotype")
+            if not phenotype.get("minimumFullnessPassed", False):
+                fail(errors, asset_id, "ecological phenotype failed minimum fullness")
+            if int(phenotype.get("terminalTipCount", 0)) <= 0:
+                fail(errors, asset_id, "ecological phenotype has no terminal tips")
+            if structure.get("foliageDistribution") != "branch_length_and_terminal":
+                fail(errors, asset_id, "ecological foliage is not distributed along branches and terminals")
+            if int(structure.get("branchInteriorAnchorCount", 0)) <= 0:
+                fail(errors, asset_id, "ecological phenotype has no interior branch foliage anchors")
 
     family = str(asset.get("family", ""))
     color_attributes = list(obj.data.color_attributes)

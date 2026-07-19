@@ -111,6 +111,22 @@ func validate_profile(profile: BiomeEnvironmentProfile, path := "") -> Dictionar
 		return invalid("invalid_crown_radius_range", "crown radius range must be ordered and non-negative", path)
 	if profile.trunk_radius_min < 0.0 or profile.trunk_radius_max < profile.trunk_radius_min:
 		return invalid("invalid_trunk_radius_range", "trunk radius range must be ordered and non-negative", path)
+	if profile.tree_architecture not in ["broadleaf", "conifer", "savanna"]:
+		return invalid("invalid_tree_architecture", "tree_architecture must be broadleaf, conifer, or savanna", path)
+	if profile.tree_age_min_years < 0.0 \
+		or profile.tree_age_typical_years < profile.tree_age_min_years \
+		or profile.tree_age_max_years < profile.tree_age_typical_years:
+		return invalid("invalid_tree_age_range", "tree ages must be ordered min <= typical <= max", path)
+	if profile.tree_maturity_cell_scale < 8.0:
+		return invalid("invalid_tree_maturity_scale", "tree maturity correlation scale must be at least eight cells", path)
+	if profile.tree_age_band_thresholds.size() != 4:
+		return invalid("invalid_tree_age_bands", "tree age bands require four normalized thresholds", path)
+	var previous_age_threshold := 0.0
+	for threshold_variant in profile.tree_age_band_thresholds:
+		var age_threshold := float(threshold_variant)
+		if age_threshold <= previous_age_threshold or age_threshold >= 1.0:
+			return invalid("invalid_tree_age_bands", "tree age band thresholds must ascend within (0, 1)", path)
+		previous_age_threshold = age_threshold
 	return {"ok": true}
 
 func invalid(code: String, message: String, path: String) -> Dictionary:

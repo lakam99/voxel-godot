@@ -1,6 +1,6 @@
 {
   "passed": true,
-  "checked": 39,
+  "checked": 69,
   "errors": [],
   "assets": [
     {
@@ -510,6 +510,1216 @@
           "name": "Color",
           "domain": "CORNER",
           "count": 876
+        }
+      ],
+      "armatures": 0,
+      "shapeKeys": 0,
+      "animationActions": 0
+    },
+    {
+      "id": "ecological_broadleaf_young_01",
+      "path": "assets/visual/generated/environment/ecological_broadleaf_young_01.glb",
+      "triangles": 696,
+      "materials": [
+        "trunk",
+        "bark_dark",
+        "leaf_primary",
+        "leaf_secondary",
+        "leaf_warm"
+      ],
+      "bounds": {
+        "min": [
+          -4.0085,
+          -3.9112,
+          0.0
+        ],
+        "max": [
+          4.4688,
+          3.977,
+          10.0544
+        ],
+        "size": [
+          8.4774,
+          7.8882,
+          10.0544
+        ]
+      },
+      "pivotAtOrigin": true,
+      "grounded": true,
+      "vertexColorAttributes": [
+        {
+          "name": "Color",
+          "domain": "CORNER",
+          "count": 2088
+        }
+      ],
+      "armatures": 0,
+      "shapeKeys": 0,
+      "animationActions": 0
+    },
+    {
+      "id": "ecological_broadleaf_young_02",
+      "path": "assets/visual/generated/environment/ecological_broadleaf_young_02.glb",
+      "triangles": 696,
+      "materials": [
+        "trunk",
+        "bark_dark",
+        "leaf_primary",
+        "leaf_secondary",
+        "leaf_warm"
+      ],
+      "bounds": {
+        "min": [
+          -4.0142,
+          -3.786,
+          0.0
+        ],
+        "max": [
+          4.3232,
+          3.7199,
+          10.5005
+        ],
+        "size": [
+          8.3374,
+          7.506,
+          10.5005
+        ]
+      },
+      "pivotAtOrigin": true,
+      "grounded": true,
+      "vertexColorAttributes": [
+        {
+          "name": "Color",
+          "domain": "CORNER",
+          "count": 2088
+        }
+      ],
+      "armatures": 0,
+      "shapeKeys": 0,
+      "animationActions": 0
+    },
+    {
+      "id": "ecological_broadleaf_established_01",
+      "path": "assets/visual/generated/environment/ecological_broadleaf_established_01.glb",
+      "triangles": 1674,
+      "materials": [
+        "trunk",
+        "bark_dark",
+        "leaf_primary",
+        "leaf_secondary",
+        "leaf_warm"
+      ],
+      "bounds": {
+        "min": [
+          -7.8471,
+          -7.1823,
+          0.0
+        ],
+        "max": [
+          8.1666,
+          6.9666,
+          17.3848
+        ],
+        "size": [
+          16.0137,
+          14.149,
+          17.3848
+        ]
+      },
+      "pivotAtOrigin": true,
+      "grounded": true,
+      "vertexColorAttributes": [
+        {
+          "name": "Color",
+          "domain": "CORNER",
+          "count": 5022
+        }
+      ],
+      "armatures": 0,
+      "shapeKeys": 0,
+      "animationActions": 0
+    },
+    {
+      "id": "ecological_broadleaf_established_02",
+      "path": "assets/visual/generated/environment/ecological_broadleaf_established_02.glb",
+      "triangles": 1674,
+      "materials": [
+        "trunk",
+        "bark_dark",
+        "leaf_primary",
+        "leaf_secondary",
+        "leaf_warm"
+      ],
+      "bounds": {
+        "min": [
+          -6.5497,
+          -6.5731,
+          0.0
+        ],
+        "max": [
+          6.511,
+          6.1339,
+          18.681
+        ],
+        "size": [
+          13.0606,
+          12.707,
+          18.681
+        ]
+      },
+      "pivotAtOrigin": true,
+      "grounded": true,
+      "vertexColorAttributes": [
+        {
+          "name": "Color",
+          "domain": "CORNER",
+          "count": 5022
+        }
+      ],
+      "armatures": 0,
+      "shapeKeys": 0,
+      "animationActions": 0
+    },
+    {
+      "id": "ecological_broadleaf_mature_01",
+      "path": "assets/visual/generated/environment/ecological_broadleaf_mature_01.glb",
+      "triangles": 3028,
+      "materials": [
+        "trunk",
+        "bark_dark",
+        "leaf_primary",
+        "leaf_secondary",
+        "leaf_warm"
+      ],
+      "bounds": {
+        "min": [
+          -14.1756,
+          -12.5459,
+          0.0
+        ],
+        "max": [
+          14.5974,
+          12.293,
+          30.9631
+        ],
+        "size": [
+          28.773,
+          24.8388,
+          30.9631
+        ]
+      },
+      "pivotAtOrigin": true,
+      "grounded": true,
+      "vertexColorAttributes": [
+        {
+          "name": "Color",
+          "domain": "CORNER",
+          "count": 9084
+        }
+      ],
+      "armatures": 0,
+      "shapeKeys": 0,
+      "animationActions": 0
+    },
+    {
+      "id": "ecological_broadleaf_mature_02",
+      "path": "assets/visual/generated/environment/ecological_broadleaf_mature_02.glb",
+      "triangles": 3028,
+      "materials": [
+        "trunk",
+        "bark_dark",
+        "leaf_primary",
+        "leaf_secondary",
+        "leaf_warm"
+      ],
+      "bounds": {
+        "min": [
+          -12.0492,
+          -11.7592,
+          0.0
+        ],
+        "max": [
+          13.4253,
+          13.4121,
+          32.4073
+        ],
+        "size": [
+          25.4745,
+          25.1714,
+          32.4073
+        ]
+      },
+      "pivotAtOrigin": true,
+      "grounded": true,
+      "vertexColorAttributes": [
+        {
+          "name": "Color",
+          "domain": "CORNER",
+          "count": 9084
+        }
+      ],
+      "armatures": 0,
+      "shapeKeys": 0,
+      "animationActions": 0
+    },
+    {
+      "id": "ecological_broadleaf_old_01",
+      "path": "assets/visual/generated/environment/ecological_broadleaf_old_01.glb",
+      "triangles": 5264,
+      "materials": [
+        "trunk",
+        "bark_dark",
+        "leaf_primary",
+        "leaf_secondary",
+        "leaf_warm"
+      ],
+      "bounds": {
+        "min": [
+          -20.2514,
+          -20.0325,
+          0.0
+        ],
+        "max": [
+          23.5396,
+          22.3149,
+          48.8066
+        ],
+        "size": [
+          43.791,
+          42.3474,
+          48.8066
+        ]
+      },
+      "pivotAtOrigin": true,
+      "grounded": true,
+      "vertexColorAttributes": [
+        {
+          "name": "Color",
+          "domain": "CORNER",
+          "count": 15792
+        }
+      ],
+      "armatures": 0,
+      "shapeKeys": 0,
+      "animationActions": 0
+    },
+    {
+      "id": "ecological_broadleaf_old_02",
+      "path": "assets/visual/generated/environment/ecological_broadleaf_old_02.glb",
+      "triangles": 5264,
+      "materials": [
+        "trunk",
+        "bark_dark",
+        "leaf_primary",
+        "leaf_secondary",
+        "leaf_warm"
+      ],
+      "bounds": {
+        "min": [
+          -18.7954,
+          -19.7394,
+          0.0
+        ],
+        "max": [
+          19.2352,
+          20.1656,
+          51.4445
+        ],
+        "size": [
+          38.0306,
+          39.9051,
+          51.4445
+        ]
+      },
+      "pivotAtOrigin": true,
+      "grounded": true,
+      "vertexColorAttributes": [
+        {
+          "name": "Color",
+          "domain": "CORNER",
+          "count": 15792
+        }
+      ],
+      "armatures": 0,
+      "shapeKeys": 0,
+      "animationActions": 0
+    },
+    {
+      "id": "ecological_broadleaf_ancient_01",
+      "path": "assets/visual/generated/environment/ecological_broadleaf_ancient_01.glb",
+      "triangles": 7464,
+      "materials": [
+        "trunk",
+        "bark_dark",
+        "leaf_primary",
+        "leaf_secondary",
+        "leaf_warm"
+      ],
+      "bounds": {
+        "min": [
+          -32.05,
+          -28.9385,
+          0.0
+        ],
+        "max": [
+          29.5429,
+          28.3303,
+          71.3766
+        ],
+        "size": [
+          61.5929,
+          57.2688,
+          71.3766
+        ]
+      },
+      "pivotAtOrigin": true,
+      "grounded": true,
+      "vertexColorAttributes": [
+        {
+          "name": "Color",
+          "domain": "CORNER",
+          "count": 22392
+        }
+      ],
+      "armatures": 0,
+      "shapeKeys": 0,
+      "animationActions": 0
+    },
+    {
+      "id": "ecological_broadleaf_ancient_02",
+      "path": "assets/visual/generated/environment/ecological_broadleaf_ancient_02.glb",
+      "triangles": 7464,
+      "materials": [
+        "trunk",
+        "bark_dark",
+        "leaf_primary",
+        "leaf_secondary",
+        "leaf_warm"
+      ],
+      "bounds": {
+        "min": [
+          -29.3446,
+          -26.0289,
+          0.0
+        ],
+        "max": [
+          27.2989,
+          27.1776,
+          74.4737
+        ],
+        "size": [
+          56.6435,
+          53.2065,
+          74.4737
+        ]
+      },
+      "pivotAtOrigin": true,
+      "grounded": true,
+      "vertexColorAttributes": [
+        {
+          "name": "Color",
+          "domain": "CORNER",
+          "count": 22392
+        }
+      ],
+      "armatures": 0,
+      "shapeKeys": 0,
+      "animationActions": 0
+    },
+    {
+      "id": "ecological_conifer_young_01",
+      "path": "assets/visual/generated/environment/ecological_conifer_young_01.glb",
+      "triangles": 728,
+      "materials": [
+        "trunk",
+        "bark_dark",
+        "needle_primary",
+        "needle_secondary"
+      ],
+      "bounds": {
+        "min": [
+          -3.0401,
+          -3.3633,
+          0.0
+        ],
+        "max": [
+          3.2536,
+          2.9396,
+          11.0733
+        ],
+        "size": [
+          6.2937,
+          6.3029,
+          11.0733
+        ]
+      },
+      "pivotAtOrigin": true,
+      "grounded": true,
+      "vertexColorAttributes": [
+        {
+          "name": "Color",
+          "domain": "CORNER",
+          "count": 2184
+        }
+      ],
+      "armatures": 0,
+      "shapeKeys": 0,
+      "animationActions": 0
+    },
+    {
+      "id": "ecological_conifer_young_02",
+      "path": "assets/visual/generated/environment/ecological_conifer_young_02.glb",
+      "triangles": 712,
+      "materials": [
+        "trunk",
+        "bark_dark",
+        "needle_primary",
+        "needle_secondary"
+      ],
+      "bounds": {
+        "min": [
+          -3.4486,
+          -3.4587,
+          0.0
+        ],
+        "max": [
+          3.4533,
+          3.3971,
+          11.5306
+        ],
+        "size": [
+          6.9019,
+          6.8559,
+          11.5306
+        ]
+      },
+      "pivotAtOrigin": true,
+      "grounded": true,
+      "vertexColorAttributes": [
+        {
+          "name": "Color",
+          "domain": "CORNER",
+          "count": 2136
+        }
+      ],
+      "armatures": 0,
+      "shapeKeys": 0,
+      "animationActions": 0
+    },
+    {
+      "id": "ecological_conifer_established_01",
+      "path": "assets/visual/generated/environment/ecological_conifer_established_01.glb",
+      "triangles": 1416,
+      "materials": [
+        "trunk",
+        "bark_dark",
+        "needle_primary",
+        "needle_secondary"
+      ],
+      "bounds": {
+        "min": [
+          -4.977,
+          -5.5285,
+          0.0
+        ],
+        "max": [
+          5.7552,
+          5.3393,
+          19.6148
+        ],
+        "size": [
+          10.7323,
+          10.8678,
+          19.6148
+        ]
+      },
+      "pivotAtOrigin": true,
+      "grounded": true,
+      "vertexColorAttributes": [
+        {
+          "name": "Color",
+          "domain": "CORNER",
+          "count": 4248
+        }
+      ],
+      "armatures": 0,
+      "shapeKeys": 0,
+      "animationActions": 0
+    },
+    {
+      "id": "ecological_conifer_established_02",
+      "path": "assets/visual/generated/environment/ecological_conifer_established_02.glb",
+      "triangles": 1416,
+      "materials": [
+        "trunk",
+        "bark_dark",
+        "needle_primary",
+        "needle_secondary"
+      ],
+      "bounds": {
+        "min": [
+          -5.6602,
+          -5.548,
+          0.0
+        ],
+        "max": [
+          5.601,
+          5.585,
+          20.6354
+        ],
+        "size": [
+          11.2612,
+          11.1329,
+          20.6354
+        ]
+      },
+      "pivotAtOrigin": true,
+      "grounded": true,
+      "vertexColorAttributes": [
+        {
+          "name": "Color",
+          "domain": "CORNER",
+          "count": 4248
+        }
+      ],
+      "armatures": 0,
+      "shapeKeys": 0,
+      "animationActions": 0
+    },
+    {
+      "id": "ecological_conifer_mature_01",
+      "path": "assets/visual/generated/environment/ecological_conifer_mature_01.glb",
+      "triangles": 2704,
+      "materials": [
+        "trunk",
+        "bark_dark",
+        "needle_primary",
+        "needle_secondary"
+      ],
+      "bounds": {
+        "min": [
+          -8.3661,
+          -9.3772,
+          0.0
+        ],
+        "max": [
+          9.5266,
+          8.676,
+          35.1352
+        ],
+        "size": [
+          17.8927,
+          18.0532,
+          35.1352
+        ]
+      },
+      "pivotAtOrigin": true,
+      "grounded": true,
+      "vertexColorAttributes": [
+        {
+          "name": "Color",
+          "domain": "CORNER",
+          "count": 8112
+        }
+      ],
+      "armatures": 0,
+      "shapeKeys": 0,
+      "animationActions": 0
+    },
+    {
+      "id": "ecological_conifer_mature_02",
+      "path": "assets/visual/generated/environment/ecological_conifer_mature_02.glb",
+      "triangles": 2704,
+      "materials": [
+        "trunk",
+        "bark_dark",
+        "needle_primary",
+        "needle_secondary"
+      ],
+      "bounds": {
+        "min": [
+          -8.6258,
+          -8.7784,
+          0.0
+        ],
+        "max": [
+          8.8358,
+          8.6701,
+          36.4406
+        ],
+        "size": [
+          17.4616,
+          17.4486,
+          36.4406
+        ]
+      },
+      "pivotAtOrigin": true,
+      "grounded": true,
+      "vertexColorAttributes": [
+        {
+          "name": "Color",
+          "domain": "CORNER",
+          "count": 8112
+        }
+      ],
+      "armatures": 0,
+      "shapeKeys": 0,
+      "animationActions": 0
+    },
+    {
+      "id": "ecological_conifer_old_01",
+      "path": "assets/visual/generated/environment/ecological_conifer_old_01.glb",
+      "triangles": 4472,
+      "materials": [
+        "trunk",
+        "bark_dark",
+        "needle_primary",
+        "needle_secondary"
+      ],
+      "bounds": {
+        "min": [
+          -11.4434,
+          -12.4887,
+          0.0
+        ],
+        "max": [
+          12.7467,
+          11.7556,
+          56.4906
+        ],
+        "size": [
+          24.1901,
+          24.2443,
+          56.4906
+        ]
+      },
+      "pivotAtOrigin": true,
+      "grounded": true,
+      "vertexColorAttributes": [
+        {
+          "name": "Color",
+          "domain": "CORNER",
+          "count": 13416
+        }
+      ],
+      "armatures": 0,
+      "shapeKeys": 0,
+      "animationActions": 0
+    },
+    {
+      "id": "ecological_conifer_old_02",
+      "path": "assets/visual/generated/environment/ecological_conifer_old_02.glb",
+      "triangles": 4456,
+      "materials": [
+        "trunk",
+        "bark_dark",
+        "needle_primary",
+        "needle_secondary"
+      ],
+      "bounds": {
+        "min": [
+          -12.5684,
+          -12.6003,
+          0.0
+        ],
+        "max": [
+          12.5799,
+          12.5303,
+          59.1309
+        ],
+        "size": [
+          25.1483,
+          25.1306,
+          59.1309
+        ]
+      },
+      "pivotAtOrigin": true,
+      "grounded": true,
+      "vertexColorAttributes": [
+        {
+          "name": "Color",
+          "domain": "CORNER",
+          "count": 13368
+        }
+      ],
+      "armatures": 0,
+      "shapeKeys": 0,
+      "animationActions": 0
+    },
+    {
+      "id": "ecological_conifer_ancient_01",
+      "path": "assets/visual/generated/environment/ecological_conifer_ancient_01.glb",
+      "triangles": 6424,
+      "materials": [
+        "trunk",
+        "bark_dark",
+        "needle_primary",
+        "needle_secondary"
+      ],
+      "bounds": {
+        "min": [
+          -16.8884,
+          -18.3414,
+          0.0
+        ],
+        "max": [
+          18.7731,
+          17.2482,
+          85.1498
+        ],
+        "size": [
+          35.6615,
+          35.5896,
+          85.1498
+        ]
+      },
+      "pivotAtOrigin": true,
+      "grounded": true,
+      "vertexColorAttributes": [
+        {
+          "name": "Color",
+          "domain": "CORNER",
+          "count": 19272
+        }
+      ],
+      "armatures": 0,
+      "shapeKeys": 0,
+      "animationActions": 0
+    },
+    {
+      "id": "ecological_conifer_ancient_02",
+      "path": "assets/visual/generated/environment/ecological_conifer_ancient_02.glb",
+      "triangles": 6424,
+      "materials": [
+        "trunk",
+        "bark_dark",
+        "needle_primary",
+        "needle_secondary"
+      ],
+      "bounds": {
+        "min": [
+          -17.6035,
+          -17.5327,
+          0.0
+        ],
+        "max": [
+          17.4607,
+          17.4902,
+          87.687
+        ],
+        "size": [
+          35.0642,
+          35.0229,
+          87.687
+        ]
+      },
+      "pivotAtOrigin": true,
+      "grounded": true,
+      "vertexColorAttributes": [
+        {
+          "name": "Color",
+          "domain": "CORNER",
+          "count": 19272
+        }
+      ],
+      "armatures": 0,
+      "shapeKeys": 0,
+      "animationActions": 0
+    },
+    {
+      "id": "ecological_savanna_young_01",
+      "path": "assets/visual/generated/environment/ecological_savanna_young_01.glb",
+      "triangles": 620,
+      "materials": [
+        "trunk",
+        "bark_dark",
+        "savanna_leaf",
+        "leaf_warm"
+      ],
+      "bounds": {
+        "min": [
+          -6.0597,
+          -4.1285,
+          0.0
+        ],
+        "max": [
+          4.8153,
+          3.437,
+          9.0698
+        ],
+        "size": [
+          10.875,
+          7.5655,
+          9.0698
+        ]
+      },
+      "pivotAtOrigin": true,
+      "grounded": true,
+      "vertexColorAttributes": [
+        {
+          "name": "Color",
+          "domain": "CORNER",
+          "count": 1860
+        }
+      ],
+      "armatures": 0,
+      "shapeKeys": 0,
+      "animationActions": 0
+    },
+    {
+      "id": "ecological_savanna_young_02",
+      "path": "assets/visual/generated/environment/ecological_savanna_young_02.glb",
+      "triangles": 620,
+      "materials": [
+        "trunk",
+        "bark_dark",
+        "savanna_leaf",
+        "leaf_warm"
+      ],
+      "bounds": {
+        "min": [
+          -4.6747,
+          -4.4746,
+          0.0
+        ],
+        "max": [
+          4.9572,
+          3.2769,
+          9.4529
+        ],
+        "size": [
+          9.632,
+          7.7515,
+          9.4529
+        ]
+      },
+      "pivotAtOrigin": true,
+      "grounded": true,
+      "vertexColorAttributes": [
+        {
+          "name": "Color",
+          "domain": "CORNER",
+          "count": 1860
+        }
+      ],
+      "armatures": 0,
+      "shapeKeys": 0,
+      "animationActions": 0
+    },
+    {
+      "id": "ecological_savanna_established_01",
+      "path": "assets/visual/generated/environment/ecological_savanna_established_01.glb",
+      "triangles": 1448,
+      "materials": [
+        "trunk",
+        "bark_dark",
+        "savanna_leaf",
+        "leaf_warm"
+      ],
+      "bounds": {
+        "min": [
+          -9.7354,
+          -7.2084,
+          0.0
+        ],
+        "max": [
+          9.1254,
+          6.6503,
+          16.5884
+        ],
+        "size": [
+          18.8609,
+          13.8587,
+          16.5884
+        ]
+      },
+      "pivotAtOrigin": true,
+      "grounded": true,
+      "vertexColorAttributes": [
+        {
+          "name": "Color",
+          "domain": "CORNER",
+          "count": 4344
+        }
+      ],
+      "armatures": 0,
+      "shapeKeys": 0,
+      "animationActions": 0
+    },
+    {
+      "id": "ecological_savanna_established_02",
+      "path": "assets/visual/generated/environment/ecological_savanna_established_02.glb",
+      "triangles": 1448,
+      "materials": [
+        "trunk",
+        "bark_dark",
+        "savanna_leaf",
+        "leaf_warm"
+      ],
+      "bounds": {
+        "min": [
+          -9.3039,
+          -6.1356,
+          0.0
+        ],
+        "max": [
+          7.6738,
+          6.1634,
+          17.3011
+        ],
+        "size": [
+          16.9778,
+          12.2989,
+          17.3011
+        ]
+      },
+      "pivotAtOrigin": true,
+      "grounded": true,
+      "vertexColorAttributes": [
+        {
+          "name": "Color",
+          "domain": "CORNER",
+          "count": 4344
+        }
+      ],
+      "armatures": 0,
+      "shapeKeys": 0,
+      "animationActions": 0
+    },
+    {
+      "id": "ecological_savanna_mature_01",
+      "path": "assets/visual/generated/environment/ecological_savanna_mature_01.glb",
+      "triangles": 2676,
+      "materials": [
+        "trunk",
+        "bark_dark",
+        "savanna_leaf",
+        "leaf_warm"
+      ],
+      "bounds": {
+        "min": [
+          -15.189,
+          -10.203,
+          0.0
+        ],
+        "max": [
+          13.8502,
+          11.5823,
+          28.5329
+        ],
+        "size": [
+          29.0392,
+          21.7853,
+          28.5329
+        ]
+      },
+      "pivotAtOrigin": true,
+      "grounded": true,
+      "vertexColorAttributes": [
+        {
+          "name": "Color",
+          "domain": "CORNER",
+          "count": 8028
+        }
+      ],
+      "armatures": 0,
+      "shapeKeys": 0,
+      "animationActions": 0
+    },
+    {
+      "id": "ecological_savanna_mature_02",
+      "path": "assets/visual/generated/environment/ecological_savanna_mature_02.glb",
+      "triangles": 2676,
+      "materials": [
+        "trunk",
+        "bark_dark",
+        "savanna_leaf",
+        "leaf_warm"
+      ],
+      "bounds": {
+        "min": [
+          -13.1265,
+          -10.9574,
+          0.0
+        ],
+        "max": [
+          14.6665,
+          10.8949,
+          30.4416
+        ],
+        "size": [
+          27.793,
+          21.8524,
+          30.4416
+        ]
+      },
+      "pivotAtOrigin": true,
+      "grounded": true,
+      "vertexColorAttributes": [
+        {
+          "name": "Color",
+          "domain": "CORNER",
+          "count": 8028
+        }
+      ],
+      "armatures": 0,
+      "shapeKeys": 0,
+      "animationActions": 0
+    },
+    {
+      "id": "ecological_savanna_old_01",
+      "path": "assets/visual/generated/environment/ecological_savanna_old_01.glb",
+      "triangles": 4740,
+      "materials": [
+        "trunk",
+        "bark_dark",
+        "savanna_leaf",
+        "leaf_warm"
+      ],
+      "bounds": {
+        "min": [
+          -21.8287,
+          -16.4346,
+          0.0
+        ],
+        "max": [
+          21.882,
+          18.0441,
+          45.5845
+        ],
+        "size": [
+          43.7106,
+          34.4788,
+          45.5845
+        ]
+      },
+      "pivotAtOrigin": true,
+      "grounded": true,
+      "vertexColorAttributes": [
+        {
+          "name": "Color",
+          "domain": "CORNER",
+          "count": 14220
+        }
+      ],
+      "armatures": 0,
+      "shapeKeys": 0,
+      "animationActions": 0
+    },
+    {
+      "id": "ecological_savanna_old_02",
+      "path": "assets/visual/generated/environment/ecological_savanna_old_02.glb",
+      "triangles": 4740,
+      "materials": [
+        "trunk",
+        "bark_dark",
+        "savanna_leaf",
+        "leaf_warm"
+      ],
+      "bounds": {
+        "min": [
+          -20.5691,
+          -16.2836,
+          0.0
+        ],
+        "max": [
+          22.0385,
+          15.7346,
+          48.1418
+        ],
+        "size": [
+          42.6076,
+          32.0182,
+          48.1418
+        ]
+      },
+      "pivotAtOrigin": true,
+      "grounded": true,
+      "vertexColorAttributes": [
+        {
+          "name": "Color",
+          "domain": "CORNER",
+          "count": 14220
+        }
+      ],
+      "armatures": 0,
+      "shapeKeys": 0,
+      "animationActions": 0
+    },
+    {
+      "id": "ecological_savanna_ancient_01",
+      "path": "assets/visual/generated/environment/ecological_savanna_ancient_01.glb",
+      "triangles": 6540,
+      "materials": [
+        "trunk",
+        "bark_dark",
+        "savanna_leaf",
+        "leaf_warm"
+      ],
+      "bounds": {
+        "min": [
+          -28.7084,
+          -24.7238,
+          0.0
+        ],
+        "max": [
+          30.9153,
+          24.2164,
+          65.1629
+        ],
+        "size": [
+          59.6237,
+          48.9402,
+          65.1629
+        ]
+      },
+      "pivotAtOrigin": true,
+      "grounded": true,
+      "vertexColorAttributes": [
+        {
+          "name": "Color",
+          "domain": "CORNER",
+          "count": 19620
+        }
+      ],
+      "armatures": 0,
+      "shapeKeys": 0,
+      "animationActions": 0
+    },
+    {
+      "id": "ecological_savanna_ancient_02",
+      "path": "assets/visual/generated/environment/ecological_savanna_ancient_02.glb",
+      "triangles": 6540,
+      "materials": [
+        "trunk",
+        "bark_dark",
+        "savanna_leaf",
+        "leaf_warm"
+      ],
+      "bounds": {
+        "min": [
+          -27.8174,
+          -22.874,
+          0.0
+        ],
+        "max": [
+          28.3764,
+          22.0908,
+          67.2163
+        ],
+        "size": [
+          56.1938,
+          44.9648,
+          67.2163
+        ]
+      },
+      "pivotAtOrigin": true,
+      "grounded": true,
+      "vertexColorAttributes": [
+        {
+          "name": "Color",
+          "domain": "CORNER",
+          "count": 19620
         }
       ],
       "armatures": 0,

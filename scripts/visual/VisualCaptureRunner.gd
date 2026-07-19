@@ -589,11 +589,14 @@ func canopy_runtime_stats(center_cell: Vector2i, requested_biome: String) -> Dic
     var center := Vector3(float(center_cell.x) * main.CELL, 0.0, float(center_cell.y) * main.CELL)
     collect_runtime_trees(chunk_root, center, 48.0, trees)
     var families := {}
+    var age_bands := {}
     var biomes := {}
     var heights: Array[float] = []
     var canopy_radii: Array[float] = []
     var trunk_radii: Array[float] = []
     var requested_families := {}
+    var requested_age_bands := {}
+    var requested_ages: Array[float] = []
     var requested_heights: Array[float] = []
     var requested_canopy_radii: Array[float] = []
     var requested_trunk_radii: Array[float] = []
@@ -601,7 +604,9 @@ func canopy_runtime_stats(center_cell: Vector2i, requested_biome: String) -> Dic
     for tree in trees:
         var family := String(tree.get_meta("tree_family", "unknown"))
         var tree_biome := String(tree.get_meta("visual_biome", "unknown"))
+        var age_band := String(tree.get_meta("tree_age_band", "unknown"))
         families[family] = int(families.get(family, 0)) + 1
+        age_bands[age_band] = int(age_bands.get(age_band, 0)) + 1
         biomes[tree_biome] = int(biomes.get(tree_biome, 0)) + 1
         var height := float(tree.get_meta("tree_visual_height", 0.0))
         var canopy_radius := float(tree.get_meta("tree_canopy_radius", 0.0))
@@ -611,6 +616,8 @@ func canopy_runtime_stats(center_cell: Vector2i, requested_biome: String) -> Dic
         trunk_radii.append(trunk_radius)
         if tree_biome == requested_biome:
             requested_families[family] = int(requested_families.get(family, 0)) + 1
+            requested_age_bands[age_band] = int(requested_age_bands.get(age_band, 0)) + 1
+            requested_ages.append(float(tree.get_meta("tree_age_years", 0.0)))
             requested_heights.append(height)
             requested_canopy_radii.append(canopy_radius)
             requested_trunk_radii.append(trunk_radius)
@@ -620,6 +627,7 @@ func canopy_runtime_stats(center_cell: Vector2i, requested_biome: String) -> Dic
         "radiusWorld": 48.0,
         "treeCount": trees.size(),
         "families": families,
+        "ageBands": age_bands,
         "biomes": biomes,
         "height": float_range(heights),
         "canopyRadius": float_range(canopy_radii),
@@ -627,6 +635,8 @@ func canopy_runtime_stats(center_cell: Vector2i, requested_biome: String) -> Dic
         "requestedBiome": requested_biome,
         "requestedBiomeTreeCount": requested_heights.size(),
         "requestedBiomeFamilies": requested_families,
+        "requestedBiomeAgeBands": requested_age_bands,
+        "requestedBiomeAgeYears": float_range(requested_ages),
         "requestedBiomeHeight": float_range(requested_heights),
         "requestedBiomeCanopyRadius": float_range(requested_canopy_radii),
         "requestedBiomeTrunkRadius": float_range(requested_trunk_radii),

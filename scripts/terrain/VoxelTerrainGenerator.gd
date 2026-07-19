@@ -38,7 +38,7 @@ func _generate_block(out_buffer: VoxelBuffer, origin_in_voxels: Vector3i, lod: i
 	var context = context_template.clone_for_worker()
 	var world_generation = WORLD_GENERATION_SCRIPT.new()
 	world_generation.setup(context)
-	context.generator = world_generation
+	context.set_generator(world_generation)
 	out_buffer.set_channel_depth(VoxelBuffer.CHANNEL_SDF, VoxelBuffer.DEPTH_16_BIT)
 	out_buffer.set_channel_depth(VoxelBuffer.CHANNEL_INDICES, VoxelBuffer.DEPTH_8_BIT)
 	out_buffer.set_channel_depth(VoxelBuffer.CHANNEL_DATA5, VoxelBuffer.DEPTH_8_BIT)

@@ -469,14 +469,47 @@ func disable_collision_shapes_recursive(node: Node) -> void:
 func spawn_falling_tree_visual(tree: Node3D) -> void:
     if tree == null or tree.get_parent() == null:
         return
-    var visual := tree.duplicate() as Node3D
-    if visual == null:
-        return
+    # Never duplicate a generated canopy in the harvest interaction frame. A
+    # mature procedural tree owns a continuous structural-wood mesh plus dense
+    # MultiMesh branch/foliage data; duplicating that entire subtree turns an
+    # ordinary prop removal into synchronous render-resource churn. The falling
+    # visual only needs the readable load-bearing wood, which can share the
+    # immutable mesh/material Resource with the departing tree.
+    var visual := Node3D.new()
     visual.name = "FallingTree"
     tree.get_parent().add_child(visual)
     visual.global_transform = tree.global_transform
     visual.set_meta("kind", "falling")
-    disable_collision_shapes_recursive(visual)
+    visual.set_meta("prop_id", String(tree.get_meta("prop_id", "")))
+    var source_wood := falling_tree_wood_source(tree)
+    if source_wood != null and source_wood.mesh != null:
+        var shared_wood := MeshInstance3D.new()
+        shared_wood.name = "FallingTreeSharedWood"
+        shared_wood.mesh = source_wood.mesh
+        shared_wood.material_override = source_wood.material_override
+        shared_wood.cast_shadow = source_wood.cast_shadow
+        shared_wood.gi_mode = source_wood.gi_mode
+        shared_wood.transform = visual.global_transform.affine_inverse() * source_wood.global_transform
+        visual.add_child(shared_wood)
+        visual.set_meta("tree_fall_visual_mode", "shared_structural_wood")
+    else:
+        # A queued/legacy tree should still give readable fall feedback. This
+        # bounded fallback intentionally has one mesh and no collision; it is
+        # not a second procedural-tree publication path.
+        var fallback := MeshInstance3D.new()
+        var fallback_mesh := CylinderMesh.new()
+        var height := maxf(1.0, float(tree.get_meta("tree_collision_height", tree.get_meta("tree_visual_height", 4.0))))
+        var radius := maxf(0.12, float(tree.get_meta("tree_trunk_radius", 0.36)))
+        fallback_mesh.top_radius = radius * 0.68
+        fallback_mesh.bottom_radius = radius
+        fallback_mesh.height = height
+        fallback.mesh = fallback_mesh
+        fallback.position.y = height * 0.5
+        var trunk_material := materials.get("trunk", null) as Material
+        if trunk_material != null:
+            fallback.material_override = trunk_material
+        visual.add_child(fallback)
+        visual.set_meta("tree_fall_visual_mode", "bounded_trunk_fallback")
 
     var target_rotation := visual.rotation
     var fall_axis_z := true
@@ -498,6 +531,24 @@ func spawn_falling_tree_visual(tree: Node3D) -> void:
     tween.tween_property(visual, "rotation", target_rotation, 1.15)
     tween.tween_interval(0.25)
     tween.tween_callback(Callable(visual, "queue_free"))
+
+func falling_tree_wood_source(tree: Node3D) -> MeshInstance3D:
+    var continuous := tree.find_child("ProceduralTreeContinuousWood", true, false) as MeshInstance3D
+    if continuous != null and continuous.mesh != null:
+        return continuous
+    var impostor := tree.find_child("ImpostorTrunk", true, false) as MeshInstance3D
+    if impostor != null and impostor.mesh != null:
+        return impostor
+    return first_tree_mesh_descendant(tree)
+
+func first_tree_mesh_descendant(node: Node) -> MeshInstance3D:
+    for child in node.get_children():
+        if child is MeshInstance3D and (child as MeshInstance3D).mesh != null:
+            return child as MeshInstance3D
+        var nested := first_tree_mesh_descendant(child)
+        if nested != null:
+            return nested
+    return null
 
 func feedback_color_for_material(material_id: String) -> Color:
     var key := material_id

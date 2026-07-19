@@ -1,22 +1,35 @@
 {
-  "schemaVersion": 2,
-  "generator": "vox122-canopy-environment-v5",
+  "schemaVersion": 3,
+  "generator": "vox132-multitier-crown-preview-v2",
   "seed": 1492,
   "coordinateSystem": "Blender Z-up source; GLB import verified in Godot",
-  "triangleLimit": 2200,
+  "triangleLimit": 8200,
+  "standardTriangleLimit": 2200,
+  "ecologicalTreeTriangleLimit": 15400,
+  "ecologicalTreeTriangleLimitsByAge": {
+    "young": 2600,
+    "established": 4400,
+    "mature": 7400,
+    "old": 11600,
+    "ancient": 15400
+  },
   "environmentDirectory": "assets/visual/generated/environment",
-  "contactSheet": "assets/visual/generated/environment/canopy-contact-sheet-v3.png",
-  "canopyDetailSheet": "assets/visual/generated/environment/canopy-leaf-detail-sheet-v3.png",
+  "contactSheet": "assets/visual/generated/environment/tree-ecology-contact-sheet-v2.png",
+  "canopyDetailSheet": "assets/visual/generated/environment/tree-ecology-leaf-detail-sheet-v2.png",
+  "crownArchitecturePreview": "assets/visual/generated/environment/tree-ecology-crown-architecture-preview-v2.png",
   "assets": [
     {
       "id": "broadleaf_01",
       "path": "assets/visual/generated/environment/broadleaf_01.glb",
       "family": "broadleaf_tree",
+      "growthClass": "legacy",
+      "ageBand": "",
       "biomeTags": [
         "forest",
         "plains"
       ],
       "triangleCount": 224,
+      "triangleLimit": 8200,
       "boundingBox": {
         "min": [
           -1.236,
@@ -109,17 +122,36 @@
             "mean": 1.0
           }
         }
+      },
+      "barkData": {
+        "attribute": "TEXCOORD_0",
+        "mapping": "branch_local_circumference_u_physical_length_v",
+        "authoredRepeatsPerMeter": 0.72,
+        "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
+        "barkVertexCount": 72,
+        "barkLoopCount": 372,
+        "uRange": [
+          0.0125,
+          1.1071
+        ],
+        "vRange": [
+          0.0,
+          2.8797
+        ]
       }
     },
     {
       "id": "broadleaf_02",
       "path": "assets/visual/generated/environment/broadleaf_02.glb",
       "family": "broadleaf_tree",
+      "growthClass": "legacy",
+      "ageBand": "",
       "biomeTags": [
         "forest",
         "plains"
       ],
       "triangleCount": 268,
+      "triangleLimit": 8200,
       "boundingBox": {
         "min": [
           -1.0401,
@@ -212,17 +244,36 @@
             "mean": 1.0
           }
         }
+      },
+      "barkData": {
+        "attribute": "TEXCOORD_0",
+        "mapping": "branch_local_circumference_u_physical_length_v",
+        "authoredRepeatsPerMeter": 0.72,
+        "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
+        "barkVertexCount": 86,
+        "barkLoopCount": 444,
+        "uRange": [
+          0.0125,
+          1.1071
+        ],
+        "vRange": [
+          0.0,
+          3.0439
+        ]
       }
     },
     {
       "id": "broadleaf_03",
       "path": "assets/visual/generated/environment/broadleaf_03.glb",
       "family": "broadleaf_tree",
+      "growthClass": "legacy",
+      "ageBand": "",
       "biomeTags": [
         "forest",
         "plains"
       ],
       "triangleCount": 180,
+      "triangleLimit": 8200,
       "boundingBox": {
         "min": [
           -1.3899,
@@ -315,17 +366,36 @@
             "mean": 1.0
           }
         }
+      },
+      "barkData": {
+        "attribute": "TEXCOORD_0",
+        "mapping": "branch_local_circumference_u_physical_length_v",
+        "authoredRepeatsPerMeter": 0.72,
+        "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
+        "barkVertexCount": 58,
+        "barkLoopCount": 300,
+        "uRange": [
+          0.0125,
+          1.1071
+        ],
+        "vRange": [
+          0.0,
+          3.1688
+        ]
       }
     },
     {
       "id": "broadleaf_04",
       "path": "assets/visual/generated/environment/broadleaf_04.glb",
       "family": "broadleaf_tree",
+      "growthClass": "legacy",
+      "ageBand": "",
       "biomeTags": [
         "forest",
         "plains"
       ],
       "triangleCount": 224,
+      "triangleLimit": 8200,
       "boundingBox": {
         "min": [
           -1.2415,
@@ -418,17 +488,36 @@
             "mean": 1.0
           }
         }
+      },
+      "barkData": {
+        "attribute": "TEXCOORD_0",
+        "mapping": "branch_local_circumference_u_physical_length_v",
+        "authoredRepeatsPerMeter": 0.72,
+        "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
+        "barkVertexCount": 72,
+        "barkLoopCount": 372,
+        "uRange": [
+          0.0125,
+          1.1071
+        ],
+        "vRange": [
+          0.0,
+          3.3093
+        ]
       }
     },
     {
       "id": "broadleaf_05",
       "path": "assets/visual/generated/environment/broadleaf_05.glb",
       "family": "broadleaf_tree",
+      "growthClass": "legacy",
+      "ageBand": "",
       "biomeTags": [
         "forest",
         "plains"
       ],
       "triangleCount": 268,
+      "triangleLimit": 8200,
       "boundingBox": {
         "min": [
           -1.392,
@@ -521,17 +610,36 @@
             "mean": 1.0
           }
         }
+      },
+      "barkData": {
+        "attribute": "TEXCOORD_0",
+        "mapping": "branch_local_circumference_u_physical_length_v",
+        "authoredRepeatsPerMeter": 0.72,
+        "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
+        "barkVertexCount": 86,
+        "barkLoopCount": 444,
+        "uRange": [
+          0.0125,
+          1.1071
+        ],
+        "vRange": [
+          0.0,
+          3.4596
+        ]
       }
     },
     {
       "id": "broadleaf_06",
       "path": "assets/visual/generated/environment/broadleaf_06.glb",
       "family": "broadleaf_tree",
+      "growthClass": "legacy",
+      "ageBand": "",
       "biomeTags": [
         "forest",
         "plains"
       ],
       "triangleCount": 180,
+      "triangleLimit": 8200,
       "boundingBox": {
         "min": [
           -1.2705,
@@ -624,18 +732,37 @@
             "mean": 1.0
           }
         }
+      },
+      "barkData": {
+        "attribute": "TEXCOORD_0",
+        "mapping": "branch_local_circumference_u_physical_length_v",
+        "authoredRepeatsPerMeter": 0.72,
+        "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
+        "barkVertexCount": 58,
+        "barkLoopCount": 300,
+        "uRange": [
+          0.0125,
+          1.1071
+        ],
+        "vRange": [
+          0.0,
+          3.4409
+        ]
       }
     },
     {
       "id": "conifer_01",
       "path": "assets/visual/generated/environment/conifer_01.glb",
       "family": "conifer_tree",
+      "growthClass": "legacy",
+      "ageBand": "",
       "biomeTags": [
         "taiga",
         "snow",
         "alpine"
       ],
       "triangleCount": 172,
+      "triangleLimit": 8200,
       "boundingBox": {
         "min": [
           -1.0495,
@@ -726,18 +853,37 @@
             "mean": 1.0
           }
         }
+      },
+      "barkData": {
+        "attribute": "TEXCOORD_0",
+        "mapping": "branch_local_circumference_u_physical_length_v",
+        "authoredRepeatsPerMeter": 0.72,
+        "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
+        "barkVertexCount": 16,
+        "barkLoopCount": 84,
+        "uRange": [
+          0.0125,
+          1.1071
+        ],
+        "vRange": [
+          0.0,
+          2.9494
+        ]
       }
     },
     {
       "id": "conifer_02",
       "path": "assets/visual/generated/environment/conifer_02.glb",
       "family": "conifer_tree",
+      "growthClass": "legacy",
+      "ageBand": "",
       "biomeTags": [
         "taiga",
         "snow",
         "alpine"
       ],
       "triangleCount": 140,
+      "triangleLimit": 8200,
       "boundingBox": {
         "min": [
           -1.0657,
@@ -828,18 +974,37 @@
             "mean": 1.0
           }
         }
+      },
+      "barkData": {
+        "attribute": "TEXCOORD_0",
+        "mapping": "branch_local_circumference_u_physical_length_v",
+        "authoredRepeatsPerMeter": 0.72,
+        "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
+        "barkVertexCount": 16,
+        "barkLoopCount": 84,
+        "uRange": [
+          0.0125,
+          1.1071
+        ],
+        "vRange": [
+          0.0,
+          3.1277
+        ]
       }
     },
     {
       "id": "conifer_03",
       "path": "assets/visual/generated/environment/conifer_03.glb",
       "family": "conifer_tree",
+      "growthClass": "legacy",
+      "ageBand": "",
       "biomeTags": [
         "taiga",
         "snow",
         "alpine"
       ],
       "triangleCount": 172,
+      "triangleLimit": 8200,
       "boundingBox": {
         "min": [
           -1.021,
@@ -930,18 +1095,37 @@
             "mean": 1.0
           }
         }
+      },
+      "barkData": {
+        "attribute": "TEXCOORD_0",
+        "mapping": "branch_local_circumference_u_physical_length_v",
+        "authoredRepeatsPerMeter": 0.72,
+        "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
+        "barkVertexCount": 16,
+        "barkLoopCount": 84,
+        "uRange": [
+          0.0125,
+          1.1071
+        ],
+        "vRange": [
+          0.0,
+          3.3486
+        ]
       }
     },
     {
       "id": "conifer_04",
       "path": "assets/visual/generated/environment/conifer_04.glb",
       "family": "conifer_tree",
+      "growthClass": "legacy",
+      "ageBand": "",
       "biomeTags": [
         "taiga",
         "snow",
         "alpine"
       ],
       "triangleCount": 140,
+      "triangleLimit": 8200,
       "boundingBox": {
         "min": [
           -1.0237,
@@ -1032,18 +1216,37 @@
             "mean": 1.0
           }
         }
+      },
+      "barkData": {
+        "attribute": "TEXCOORD_0",
+        "mapping": "branch_local_circumference_u_physical_length_v",
+        "authoredRepeatsPerMeter": 0.72,
+        "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
+        "barkVertexCount": 16,
+        "barkLoopCount": 84,
+        "uRange": [
+          0.0125,
+          1.1071
+        ],
+        "vRange": [
+          0.0,
+          3.5486
+        ]
       }
     },
     {
       "id": "savanna_01",
       "path": "assets/visual/generated/environment/savanna_01.glb",
       "family": "savanna_tree",
+      "growthClass": "legacy",
+      "ageBand": "",
       "biomeTags": [
         "savanna",
         "plains",
         "desert"
       ],
       "triangleCount": 204,
+      "triangleLimit": 8200,
       "boundingBox": {
         "min": [
           -1.5501,
@@ -1134,18 +1337,37 @@
             "mean": 1.0
           }
         }
+      },
+      "barkData": {
+        "attribute": "TEXCOORD_0",
+        "mapping": "branch_local_circumference_u_physical_length_v",
+        "authoredRepeatsPerMeter": 0.72,
+        "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
+        "barkVertexCount": 72,
+        "barkLoopCount": 372,
+        "uRange": [
+          0.0125,
+          1.1071
+        ],
+        "vRange": [
+          0.0,
+          2.2798
+        ]
       }
     },
     {
       "id": "savanna_02",
       "path": "assets/visual/generated/environment/savanna_02.glb",
       "family": "savanna_tree",
+      "growthClass": "legacy",
+      "ageBand": "",
       "biomeTags": [
         "savanna",
         "plains",
         "desert"
       ],
       "triangleCount": 248,
+      "triangleLimit": 8200,
       "boundingBox": {
         "min": [
           -1.3685,
@@ -1236,18 +1458,37 @@
             "mean": 1.0
           }
         }
+      },
+      "barkData": {
+        "attribute": "TEXCOORD_0",
+        "mapping": "branch_local_circumference_u_physical_length_v",
+        "authoredRepeatsPerMeter": 0.72,
+        "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
+        "barkVertexCount": 86,
+        "barkLoopCount": 444,
+        "uRange": [
+          0.0125,
+          1.1071
+        ],
+        "vRange": [
+          0.0,
+          2.4349
+        ]
       }
     },
     {
       "id": "savanna_03",
       "path": "assets/visual/generated/environment/savanna_03.glb",
       "family": "savanna_tree",
+      "growthClass": "legacy",
+      "ageBand": "",
       "biomeTags": [
         "savanna",
         "plains",
         "desert"
       ],
       "triangleCount": 292,
+      "triangleLimit": 8200,
       "boundingBox": {
         "min": [
           -1.7583,
@@ -1338,18 +1579,4527 @@
             "mean": 1.0
           }
         }
+      },
+      "barkData": {
+        "attribute": "TEXCOORD_0",
+        "mapping": "branch_local_circumference_u_physical_length_v",
+        "authoredRepeatsPerMeter": 0.72,
+        "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
+        "barkVertexCount": 100,
+        "barkLoopCount": 516,
+        "uRange": [
+          0.0125,
+          1.1071
+        ],
+        "vRange": [
+          0.0,
+          2.6008
+        ]
+      }
+    },
+    {
+      "id": "ecological_broadleaf_young_01",
+      "path": "assets/visual/generated/environment/ecological_broadleaf_young_01.glb",
+      "family": "ecological_broadleaf_tree",
+      "growthClass": "young",
+      "ageBand": "young",
+      "biomeTags": [
+        "forest",
+        "plains",
+        "swamp",
+        "beach"
+      ],
+      "triangleCount": 1016,
+      "triangleLimit": 2600,
+      "boundingBox": {
+        "min": [
+          -4.1098,
+          -2.9665,
+          0.0
+        ],
+        "max": [
+          3.8883,
+          3.2566,
+          9.8861
+        ],
+        "size": [
+          7.9981,
+          6.223,
+          9.8861
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "grounded": true,
+        "minZ": 0.0,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "trunk",
+        "bark_dark",
+        "leaf_primary",
+        "leaf_secondary",
+        "leaf_warm"
+      ],
+      "materialRoles": {
+        "trunkBranch": [
+          "trunk",
+          "bark_dark"
+        ],
+        "foliage": [
+          "leaf_primary",
+          "leaf_secondary",
+          "leaf_warm"
+        ]
+      },
+      "runtimeEnabled": true,
+      "animationContract": {
+        "skeletons": 0,
+        "shapeKeys": 0,
+        "animationClips": 0
+      },
+      "treeMetrics": {
+        "growthClass": "young",
+        "height": 9.8861,
+        "trunkRadius": 0.3088,
+        "canopyRadius": 3.999,
+        "canopyRadiusX": 3.999,
+        "canopyRadiusY": 3.1115,
+        "canopyBase": 2.4806,
+        "canopyTop": 9.8861
+      },
+      "windData": {
+        "attribute": "COLOR_0",
+        "sourceAttribute": "wind",
+        "domain": "POINT",
+        "storage": "BYTE_COLOR",
+        "vertexCount": 2136,
+        "foliageVertexCount": 1920,
+        "rootVertexCount": 11,
+        "rootMaxBend": 0.0,
+        "crownMinBend": 0.117,
+        "crownMaxBend": 1.0,
+        "channels": {
+          "bendR": {
+            "min": 0.0,
+            "max": 1.0,
+            "mean": 0.4646
+          },
+          "phaseG": {
+            "min": 0.0003,
+            "max": 1.0,
+            "mean": 0.4847
+          },
+          "flutterB": {
+            "min": 0.0,
+            "max": 0.956,
+            "mean": 0.6931
+          },
+          "reservedA": {
+            "min": 1.0,
+            "max": 1.0,
+            "mean": 1.0
+          }
+        }
+      },
+      "barkData": {
+        "attribute": "TEXCOORD_0",
+        "mapping": "branch_local_circumference_u_physical_length_v",
+        "authoredRepeatsPerMeter": 0.72,
+        "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
+        "barkVertexCount": 216,
+        "barkLoopCount": 1128,
+        "uRange": [
+          0.0125,
+          1.1071
+        ],
+        "vRange": [
+          0.0,
+          5.0007
+        ]
+      },
+      "canopyStructure": {
+        "foliagePrimitive": "individual_triangular_leaf_card",
+        "foliagePrimitiveCount": 640,
+        "structure": "multitier_four_generation_branch_length_and_terminal_leaf_canopy",
+        "foliageDistribution": "branch_length_and_terminal",
+        "crownLayerCount": 3,
+        "branchClusterCount": 12,
+        "branchInteriorAnchorCount": 13,
+        "terminalFoliageAnchorCount": 13,
+        "terminalTipCount": 13
+      },
+      "treePhenotype": {
+        "architecture": "broadleaf",
+        "ageBand": "young",
+        "nominalGrowth": 0.0,
+        "branchGenerationCount": 3,
+        "primaryBranchCount": 6,
+        "secondaryBranchCount": 6,
+        "tertiaryBranchCount": 0,
+        "terminalTipCount": 13,
+        "branchInteriorAnchorCount": 13,
+        "minimumSectorOccupancy": 1,
+        "minimumFullnessPassed": true,
+        "variant": 1
+      }
+    },
+    {
+      "id": "ecological_broadleaf_young_02",
+      "path": "assets/visual/generated/environment/ecological_broadleaf_young_02.glb",
+      "family": "ecological_broadleaf_tree",
+      "growthClass": "young",
+      "ageBand": "young",
+      "biomeTags": [
+        "forest",
+        "plains",
+        "swamp",
+        "beach"
+      ],
+      "triangleCount": 1016,
+      "triangleLimit": 2600,
+      "boundingBox": {
+        "min": [
+          -4.2365,
+          -2.8636,
+          0.0
+        ],
+        "max": [
+          3.8367,
+          3.8374,
+          10.6804
+        ],
+        "size": [
+          8.0732,
+          6.7009,
+          10.6804
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "grounded": true,
+        "minZ": 0.0,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "trunk",
+        "bark_dark",
+        "leaf_primary",
+        "leaf_secondary",
+        "leaf_warm"
+      ],
+      "materialRoles": {
+        "trunkBranch": [
+          "trunk",
+          "bark_dark"
+        ],
+        "foliage": [
+          "leaf_primary",
+          "leaf_secondary",
+          "leaf_warm"
+        ]
+      },
+      "runtimeEnabled": true,
+      "animationContract": {
+        "skeletons": 0,
+        "shapeKeys": 0,
+        "animationClips": 0
+      },
+      "treeMetrics": {
+        "growthClass": "young",
+        "height": 10.6804,
+        "trunkRadius": 0.3312,
+        "canopyRadius": 4.0366,
+        "canopyRadiusX": 4.0366,
+        "canopyRadiusY": 3.3505,
+        "canopyBase": 2.9262,
+        "canopyTop": 10.6804
+      },
+      "windData": {
+        "attribute": "COLOR_0",
+        "sourceAttribute": "wind",
+        "domain": "POINT",
+        "storage": "BYTE_COLOR",
+        "vertexCount": 2136,
+        "foliageVertexCount": 1920,
+        "rootVertexCount": 11,
+        "rootMaxBend": 0.0,
+        "crownMinBend": 0.1356,
+        "crownMaxBend": 1.0,
+        "channels": {
+          "bendR": {
+            "min": 0.0,
+            "max": 1.0,
+            "mean": 0.5074
+          },
+          "phaseG": {
+            "min": 0.0003,
+            "max": 1.0,
+            "mean": 0.5553
+          },
+          "flutterB": {
+            "min": 0.0,
+            "max": 0.956,
+            "mean": 0.6931
+          },
+          "reservedA": {
+            "min": 1.0,
+            "max": 1.0,
+            "mean": 1.0
+          }
+        }
+      },
+      "barkData": {
+        "attribute": "TEXCOORD_0",
+        "mapping": "branch_local_circumference_u_physical_length_v",
+        "authoredRepeatsPerMeter": 0.72,
+        "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
+        "barkVertexCount": 216,
+        "barkLoopCount": 1128,
+        "uRange": [
+          0.0125,
+          1.1071
+        ],
+        "vRange": [
+          0.0,
+          5.3434
+        ]
+      },
+      "canopyStructure": {
+        "foliagePrimitive": "individual_triangular_leaf_card",
+        "foliagePrimitiveCount": 640,
+        "structure": "multitier_four_generation_branch_length_and_terminal_leaf_canopy",
+        "foliageDistribution": "branch_length_and_terminal",
+        "crownLayerCount": 3,
+        "branchClusterCount": 12,
+        "branchInteriorAnchorCount": 13,
+        "terminalFoliageAnchorCount": 13,
+        "terminalTipCount": 13
+      },
+      "treePhenotype": {
+        "architecture": "broadleaf",
+        "ageBand": "young",
+        "nominalGrowth": 0.0,
+        "branchGenerationCount": 3,
+        "primaryBranchCount": 6,
+        "secondaryBranchCount": 6,
+        "tertiaryBranchCount": 0,
+        "terminalTipCount": 13,
+        "branchInteriorAnchorCount": 13,
+        "minimumSectorOccupancy": 1,
+        "minimumFullnessPassed": true,
+        "variant": 2
+      }
+    },
+    {
+      "id": "ecological_broadleaf_established_01",
+      "path": "assets/visual/generated/environment/ecological_broadleaf_established_01.glb",
+      "family": "ecological_broadleaf_tree",
+      "growthClass": "established",
+      "ageBand": "established",
+      "biomeTags": [
+        "forest",
+        "plains",
+        "swamp",
+        "beach"
+      ],
+      "triangleCount": 2524,
+      "triangleLimit": 4400,
+      "boundingBox": {
+        "min": [
+          -7.6953,
+          -5.9912,
+          0.0
+        ],
+        "max": [
+          7.5201,
+          5.7254,
+          17.6317
+        ],
+        "size": [
+          15.2155,
+          11.7166,
+          17.6317
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "grounded": true,
+        "minZ": 0.0,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "trunk",
+        "bark_dark",
+        "leaf_primary",
+        "leaf_secondary",
+        "leaf_warm"
+      ],
+      "materialRoles": {
+        "trunkBranch": [
+          "trunk",
+          "bark_dark"
+        ],
+        "foliage": [
+          "leaf_primary",
+          "leaf_secondary",
+          "leaf_warm"
+        ]
+      },
+      "runtimeEnabled": true,
+      "animationContract": {
+        "skeletons": 0,
+        "shapeKeys": 0,
+        "animationClips": 0
+      },
+      "treeMetrics": {
+        "growthClass": "established",
+        "height": 17.6317,
+        "trunkRadius": 0.6272,
+        "canopyRadius": 7.6077,
+        "canopyRadiusX": 7.6077,
+        "canopyRadiusY": 5.8583,
+        "canopyBase": 5.1204,
+        "canopyTop": 17.6317
+      },
+      "windData": {
+        "attribute": "COLOR_0",
+        "sourceAttribute": "wind",
+        "domain": "POINT",
+        "storage": "BYTE_COLOR",
+        "vertexCount": 5576,
+        "foliageVertexCount": 5100,
+        "rootVertexCount": 11,
+        "rootMaxBend": 0.0,
+        "crownMinBend": 0.15,
+        "crownMaxBend": 1.0,
+        "channels": {
+          "bendR": {
+            "min": 0.0,
+            "max": 1.0,
+            "mean": 0.4517
+          },
+          "phaseG": {
+            "min": 0.0,
+            "max": 1.0,
+            "mean": 0.4836
+          },
+          "flutterB": {
+            "min": 0.0,
+            "max": 0.956,
+            "mean": 0.705
+          },
+          "reservedA": {
+            "min": 1.0,
+            "max": 1.0,
+            "mean": 1.0
+          }
+        }
+      },
+      "barkData": {
+        "attribute": "TEXCOORD_0",
+        "mapping": "branch_local_circumference_u_physical_length_v",
+        "authoredRepeatsPerMeter": 0.72,
+        "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
+        "barkVertexCount": 476,
+        "barkLoopCount": 2472,
+        "uRange": [
+          0.0125,
+          1.1071
+        ],
+        "vRange": [
+          0.0,
+          8.9894
+        ]
+      },
+      "canopyStructure": {
+        "foliagePrimitive": "individual_triangular_leaf_card",
+        "foliagePrimitiveCount": 1700,
+        "structure": "multitier_four_generation_branch_length_and_terminal_leaf_canopy",
+        "foliageDistribution": "branch_length_and_terminal",
+        "crownLayerCount": 4,
+        "branchClusterCount": 30,
+        "branchInteriorAnchorCount": 42,
+        "terminalFoliageAnchorCount": 31,
+        "terminalTipCount": 31
+      },
+      "treePhenotype": {
+        "architecture": "broadleaf",
+        "ageBand": "established",
+        "nominalGrowth": 0.25,
+        "branchGenerationCount": 3,
+        "primaryBranchCount": 10,
+        "secondaryBranchCount": 20,
+        "tertiaryBranchCount": 0,
+        "terminalTipCount": 31,
+        "branchInteriorAnchorCount": 42,
+        "minimumSectorOccupancy": 1,
+        "minimumFullnessPassed": true,
+        "variant": 1
+      }
+    },
+    {
+      "id": "ecological_broadleaf_established_02",
+      "path": "assets/visual/generated/environment/ecological_broadleaf_established_02.glb",
+      "family": "ecological_broadleaf_tree",
+      "growthClass": "established",
+      "ageBand": "established",
+      "biomeTags": [
+        "forest",
+        "plains",
+        "swamp",
+        "beach"
+      ],
+      "triangleCount": 2524,
+      "triangleLimit": 4400,
+      "boundingBox": {
+        "min": [
+          -6.982,
+          -6.3321,
+          0.0
+        ],
+        "max": [
+          6.4215,
+          5.971,
+          18.585
+        ],
+        "size": [
+          13.4034,
+          12.303,
+          18.585
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "grounded": true,
+        "minZ": 0.0,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "trunk",
+        "bark_dark",
+        "leaf_primary",
+        "leaf_secondary",
+        "leaf_warm"
+      ],
+      "materialRoles": {
+        "trunkBranch": [
+          "trunk",
+          "bark_dark"
+        ],
+        "foliage": [
+          "leaf_primary",
+          "leaf_secondary",
+          "leaf_warm"
+        ]
+      },
+      "runtimeEnabled": true,
+      "animationContract": {
+        "skeletons": 0,
+        "shapeKeys": 0,
+        "animationClips": 0
+      },
+      "treeMetrics": {
+        "growthClass": "established",
+        "height": 18.585,
+        "trunkRadius": 0.6727,
+        "canopyRadius": 6.7017,
+        "canopyRadiusX": 6.7017,
+        "canopyRadiusY": 6.1515,
+        "canopyBase": 5.5955,
+        "canopyTop": 18.585
+      },
+      "windData": {
+        "attribute": "COLOR_0",
+        "sourceAttribute": "wind",
+        "domain": "POINT",
+        "storage": "BYTE_COLOR",
+        "vertexCount": 5576,
+        "foliageVertexCount": 5100,
+        "rootVertexCount": 11,
+        "rootMaxBend": 0.0,
+        "crownMinBend": 0.159,
+        "crownMaxBend": 1.0,
+        "channels": {
+          "bendR": {
+            "min": 0.0,
+            "max": 1.0,
+            "mean": 0.4666
+          },
+          "phaseG": {
+            "min": 0.0,
+            "max": 1.0,
+            "mean": 0.5283
+          },
+          "flutterB": {
+            "min": 0.0,
+            "max": 0.956,
+            "mean": 0.705
+          },
+          "reservedA": {
+            "min": 1.0,
+            "max": 1.0,
+            "mean": 1.0
+          }
+        }
+      },
+      "barkData": {
+        "attribute": "TEXCOORD_0",
+        "mapping": "branch_local_circumference_u_physical_length_v",
+        "authoredRepeatsPerMeter": 0.72,
+        "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
+        "barkVertexCount": 476,
+        "barkLoopCount": 2472,
+        "uRange": [
+          0.0125,
+          1.1071
+        ],
+        "vRange": [
+          0.0,
+          9.6541
+        ]
+      },
+      "canopyStructure": {
+        "foliagePrimitive": "individual_triangular_leaf_card",
+        "foliagePrimitiveCount": 1700,
+        "structure": "multitier_four_generation_branch_length_and_terminal_leaf_canopy",
+        "foliageDistribution": "branch_length_and_terminal",
+        "crownLayerCount": 4,
+        "branchClusterCount": 30,
+        "branchInteriorAnchorCount": 42,
+        "terminalFoliageAnchorCount": 31,
+        "terminalTipCount": 31
+      },
+      "treePhenotype": {
+        "architecture": "broadleaf",
+        "ageBand": "established",
+        "nominalGrowth": 0.25,
+        "branchGenerationCount": 3,
+        "primaryBranchCount": 10,
+        "secondaryBranchCount": 20,
+        "tertiaryBranchCount": 0,
+        "terminalTipCount": 31,
+        "branchInteriorAnchorCount": 42,
+        "minimumSectorOccupancy": 1,
+        "minimumFullnessPassed": true,
+        "variant": 2
+      }
+    },
+    {
+      "id": "ecological_broadleaf_mature_01",
+      "path": "assets/visual/generated/environment/ecological_broadleaf_mature_01.glb",
+      "family": "ecological_broadleaf_tree",
+      "growthClass": "mature",
+      "ageBand": "mature",
+      "biomeTags": [
+        "forest",
+        "plains",
+        "swamp",
+        "beach"
+      ],
+      "triangleCount": 5208,
+      "triangleLimit": 7400,
+      "boundingBox": {
+        "min": [
+          -12.1589,
+          -14.322,
+          0.0
+        ],
+        "max": [
+          13.3384,
+          12.6678,
+          30.9468
+        ],
+        "size": [
+          25.4973,
+          26.9898,
+          30.9468
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "grounded": true,
+        "minZ": 0.0,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "trunk",
+        "bark_dark",
+        "leaf_primary",
+        "leaf_secondary",
+        "leaf_warm"
+      ],
+      "materialRoles": {
+        "trunkBranch": [
+          "trunk",
+          "bark_dark"
+        ],
+        "foliage": [
+          "leaf_primary",
+          "leaf_secondary",
+          "leaf_warm"
+        ]
+      },
+      "runtimeEnabled": true,
+      "animationContract": {
+        "skeletons": 0,
+        "shapeKeys": 0,
+        "animationClips": 0
+      },
+      "treeMetrics": {
+        "growthClass": "mature",
+        "height": 30.9468,
+        "trunkRadius": 1.544,
+        "canopyRadius": 13.4949,
+        "canopyRadiusX": 12.7487,
+        "canopyRadiusY": 13.4949,
+        "canopyBase": 10.1456,
+        "canopyTop": 30.9468
+      },
+      "windData": {
+        "attribute": "COLOR_0",
+        "sourceAttribute": "wind",
+        "domain": "POINT",
+        "storage": "BYTE_COLOR",
+        "vertexCount": 12220,
+        "foliageVertexCount": 11400,
+        "rootVertexCount": 11,
+        "rootMaxBend": 0.0,
+        "crownMinBend": 0.1845,
+        "crownMaxBend": 1.0,
+        "channels": {
+          "bendR": {
+            "min": 0.0,
+            "max": 1.0,
+            "mean": 0.5123
+          },
+          "phaseG": {
+            "min": 0.0,
+            "max": 1.0,
+            "mean": 0.4723
+          },
+          "flutterB": {
+            "min": 0.0,
+            "max": 0.956,
+            "mean": 0.7189
+          },
+          "reservedA": {
+            "min": 1.0,
+            "max": 1.0,
+            "mean": 1.0
+          }
+        }
+      },
+      "barkData": {
+        "attribute": "TEXCOORD_0",
+        "mapping": "branch_local_circumference_u_physical_length_v",
+        "authoredRepeatsPerMeter": 0.72,
+        "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
+        "barkVertexCount": 820,
+        "barkLoopCount": 4224,
+        "uRange": [
+          0.0125,
+          1.1071
+        ],
+        "vRange": [
+          0.0,
+          16.0615
+        ]
+      },
+      "canopyStructure": {
+        "foliagePrimitive": "individual_triangular_leaf_card",
+        "foliagePrimitiveCount": 3800,
+        "structure": "multitier_four_generation_branch_length_and_terminal_leaf_canopy",
+        "foliageDistribution": "branch_length_and_terminal",
+        "crownLayerCount": 5,
+        "branchClusterCount": 56,
+        "branchInteriorAnchorCount": 72,
+        "terminalFoliageAnchorCount": 57,
+        "terminalTipCount": 57
+      },
+      "treePhenotype": {
+        "architecture": "broadleaf",
+        "ageBand": "mature",
+        "nominalGrowth": 0.5,
+        "branchGenerationCount": 4,
+        "primaryBranchCount": 14,
+        "secondaryBranchCount": 28,
+        "tertiaryBranchCount": 14,
+        "terminalTipCount": 57,
+        "branchInteriorAnchorCount": 72,
+        "minimumSectorOccupancy": 1,
+        "minimumFullnessPassed": true,
+        "variant": 1
+      }
+    },
+    {
+      "id": "ecological_broadleaf_mature_02",
+      "path": "assets/visual/generated/environment/ecological_broadleaf_mature_02.glb",
+      "family": "ecological_broadleaf_tree",
+      "growthClass": "mature",
+      "ageBand": "mature",
+      "biomeTags": [
+        "forest",
+        "plains",
+        "swamp",
+        "beach"
+      ],
+      "triangleCount": 5208,
+      "triangleLimit": 7400,
+      "boundingBox": {
+        "min": [
+          -10.645,
+          -13.1589,
+          0.0
+        ],
+        "max": [
+          12.0818,
+          12.2084,
+          32.8497
+        ],
+        "size": [
+          22.7268,
+          25.3673,
+          32.8497
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "grounded": true,
+        "minZ": 0.0,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "trunk",
+        "bark_dark",
+        "leaf_primary",
+        "leaf_secondary",
+        "leaf_warm"
+      ],
+      "materialRoles": {
+        "trunkBranch": [
+          "trunk",
+          "bark_dark"
+        ],
+        "foliage": [
+          "leaf_primary",
+          "leaf_secondary",
+          "leaf_warm"
+        ]
+      },
+      "runtimeEnabled": true,
+      "animationContract": {
+        "skeletons": 0,
+        "shapeKeys": 0,
+        "animationClips": 0
+      },
+      "treeMetrics": {
+        "growthClass": "mature",
+        "height": 32.8497,
+        "trunkRadius": 1.656,
+        "canopyRadius": 12.6836,
+        "canopyRadiusX": 11.3634,
+        "canopyRadiusY": 12.6836,
+        "canopyBase": 10.8267,
+        "canopyTop": 32.8497
+      },
+      "windData": {
+        "attribute": "COLOR_0",
+        "sourceAttribute": "wind",
+        "domain": "POINT",
+        "storage": "BYTE_COLOR",
+        "vertexCount": 12220,
+        "foliageVertexCount": 11400,
+        "rootVertexCount": 11,
+        "rootMaxBend": 0.0,
+        "crownMinBend": 0.1845,
+        "crownMaxBend": 1.0,
+        "channels": {
+          "bendR": {
+            "min": 0.0,
+            "max": 1.0,
+            "mean": 0.5036
+          },
+          "phaseG": {
+            "min": 0.0,
+            "max": 1.0,
+            "mean": 0.5475
+          },
+          "flutterB": {
+            "min": 0.0,
+            "max": 0.956,
+            "mean": 0.7189
+          },
+          "reservedA": {
+            "min": 1.0,
+            "max": 1.0,
+            "mean": 1.0
+          }
+        }
+      },
+      "barkData": {
+        "attribute": "TEXCOORD_0",
+        "mapping": "branch_local_circumference_u_physical_length_v",
+        "authoredRepeatsPerMeter": 0.72,
+        "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
+        "barkVertexCount": 820,
+        "barkLoopCount": 4224,
+        "uRange": [
+          0.0125,
+          1.1071
+        ],
+        "vRange": [
+          0.0,
+          16.9091
+        ]
+      },
+      "canopyStructure": {
+        "foliagePrimitive": "individual_triangular_leaf_card",
+        "foliagePrimitiveCount": 3800,
+        "structure": "multitier_four_generation_branch_length_and_terminal_leaf_canopy",
+        "foliageDistribution": "branch_length_and_terminal",
+        "crownLayerCount": 5,
+        "branchClusterCount": 56,
+        "branchInteriorAnchorCount": 72,
+        "terminalFoliageAnchorCount": 57,
+        "terminalTipCount": 57
+      },
+      "treePhenotype": {
+        "architecture": "broadleaf",
+        "ageBand": "mature",
+        "nominalGrowth": 0.5,
+        "branchGenerationCount": 4,
+        "primaryBranchCount": 14,
+        "secondaryBranchCount": 28,
+        "tertiaryBranchCount": 14,
+        "terminalTipCount": 57,
+        "branchInteriorAnchorCount": 72,
+        "minimumSectorOccupancy": 1,
+        "minimumFullnessPassed": true,
+        "variant": 2
+      }
+    },
+    {
+      "id": "ecological_broadleaf_old_01",
+      "path": "assets/visual/generated/environment/ecological_broadleaf_old_01.glb",
+      "family": "ecological_broadleaf_tree",
+      "growthClass": "old",
+      "ageBand": "old",
+      "biomeTags": [
+        "forest",
+        "plains",
+        "swamp",
+        "beach"
+      ],
+      "triangleCount": 9384,
+      "triangleLimit": 11600,
+      "boundingBox": {
+        "min": [
+          -20.2095,
+          -21.5127,
+          0.0
+        ],
+        "max": [
+          20.7939,
+          22.2317,
+          49.4194
+        ],
+        "size": [
+          41.0034,
+          43.7444,
+          49.4194
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "grounded": true,
+        "minZ": 0.0,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "trunk",
+        "bark_dark",
+        "leaf_primary",
+        "leaf_secondary",
+        "leaf_warm"
+      ],
+      "materialRoles": {
+        "trunkBranch": [
+          "trunk",
+          "bark_dark"
+        ],
+        "foliage": [
+          "leaf_primary",
+          "leaf_secondary",
+          "leaf_warm"
+        ]
+      },
+      "runtimeEnabled": true,
+      "animationContract": {
+        "skeletons": 0,
+        "shapeKeys": 0,
+        "animationClips": 0
+      },
+      "treeMetrics": {
+        "growthClass": "old",
+        "height": 49.4194,
+        "trunkRadius": 3.1362,
+        "canopyRadius": 21.8722,
+        "canopyRadiusX": 20.5017,
+        "canopyRadiusY": 21.8722,
+        "canopyBase": 16.626,
+        "canopyTop": 49.4194
+      },
+      "windData": {
+        "attribute": "COLOR_0",
+        "sourceAttribute": "wind",
+        "domain": "POINT",
+        "storage": "BYTE_COLOR",
+        "vertexCount": 21912,
+        "foliageVertexCount": 20400,
+        "rootVertexCount": 11,
+        "rootMaxBend": 0.0,
+        "crownMinBend": 0.1912,
+        "crownMaxBend": 1.0,
+        "channels": {
+          "bendR": {
+            "min": 0.0,
+            "max": 1.0,
+            "mean": 0.5247
+          },
+          "phaseG": {
+            "min": 0.0,
+            "max": 1.0,
+            "mean": 0.4807
+          },
+          "flutterB": {
+            "min": 0.0,
+            "max": 0.956,
+            "mean": 0.7175
+          },
+          "reservedA": {
+            "min": 1.0,
+            "max": 1.0,
+            "mean": 1.0
+          }
+        }
+      },
+      "barkData": {
+        "attribute": "TEXCOORD_0",
+        "mapping": "branch_local_circumference_u_physical_length_v",
+        "authoredRepeatsPerMeter": 0.72,
+        "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
+        "barkVertexCount": 1512,
+        "barkLoopCount": 7752,
+        "uRange": [
+          0.0125,
+          1.1071
+        ],
+        "vRange": [
+          0.0,
+          25.4562
+        ]
+      },
+      "canopyStructure": {
+        "foliagePrimitive": "individual_triangular_leaf_card",
+        "foliagePrimitiveCount": 6800,
+        "structure": "multitier_four_generation_branch_length_and_terminal_leaf_canopy",
+        "foliageDistribution": "branch_length_and_terminal",
+        "crownLayerCount": 7,
+        "branchClusterCount": 108,
+        "branchInteriorAnchorCount": 201,
+        "terminalFoliageAnchorCount": 109,
+        "terminalTipCount": 109
+      },
+      "treePhenotype": {
+        "architecture": "broadleaf",
+        "ageBand": "old",
+        "nominalGrowth": 0.75,
+        "branchGenerationCount": 4,
+        "primaryBranchCount": 18,
+        "secondaryBranchCount": 54,
+        "tertiaryBranchCount": 36,
+        "terminalTipCount": 109,
+        "branchInteriorAnchorCount": 201,
+        "minimumSectorOccupancy": 1,
+        "minimumFullnessPassed": true,
+        "variant": 1
+      }
+    },
+    {
+      "id": "ecological_broadleaf_old_02",
+      "path": "assets/visual/generated/environment/ecological_broadleaf_old_02.glb",
+      "family": "ecological_broadleaf_tree",
+      "growthClass": "old",
+      "ageBand": "old",
+      "biomeTags": [
+        "forest",
+        "plains",
+        "swamp",
+        "beach"
+      ],
+      "triangleCount": 9384,
+      "triangleLimit": 11600,
+      "boundingBox": {
+        "min": [
+          -20.1752,
+          -19.5534,
+          0.0
+        ],
+        "max": [
+          19.8584,
+          19.5214,
+          51.6635
+        ],
+        "size": [
+          40.0336,
+          39.0748,
+          51.6635
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "grounded": true,
+        "minZ": 0.0,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "trunk",
+        "bark_dark",
+        "leaf_primary",
+        "leaf_secondary",
+        "leaf_warm"
+      ],
+      "materialRoles": {
+        "trunkBranch": [
+          "trunk",
+          "bark_dark"
+        ],
+        "foliage": [
+          "leaf_primary",
+          "leaf_secondary",
+          "leaf_warm"
+        ]
+      },
+      "runtimeEnabled": true,
+      "animationContract": {
+        "skeletons": 0,
+        "shapeKeys": 0,
+        "animationClips": 0
+      },
+      "treeMetrics": {
+        "growthClass": "old",
+        "height": 51.6635,
+        "trunkRadius": 3.3637,
+        "canopyRadius": 20.0168,
+        "canopyRadiusX": 20.0168,
+        "canopyRadiusY": 19.5374,
+        "canopyBase": 17.1047,
+        "canopyTop": 51.6635
+      },
+      "windData": {
+        "attribute": "COLOR_0",
+        "sourceAttribute": "wind",
+        "domain": "POINT",
+        "storage": "BYTE_COLOR",
+        "vertexCount": 21912,
+        "foliageVertexCount": 20400,
+        "rootVertexCount": 11,
+        "rootMaxBend": 0.0,
+        "crownMinBend": 0.1878,
+        "crownMaxBend": 1.0,
+        "channels": {
+          "bendR": {
+            "min": 0.0,
+            "max": 1.0,
+            "mean": 0.5277
+          },
+          "phaseG": {
+            "min": 0.0,
+            "max": 1.0,
+            "mean": 0.4921
+          },
+          "flutterB": {
+            "min": 0.0,
+            "max": 0.956,
+            "mean": 0.7175
+          },
+          "reservedA": {
+            "min": 1.0,
+            "max": 1.0,
+            "mean": 1.0
+          }
+        }
+      },
+      "barkData": {
+        "attribute": "TEXCOORD_0",
+        "mapping": "branch_local_circumference_u_physical_length_v",
+        "authoredRepeatsPerMeter": 0.72,
+        "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
+        "barkVertexCount": 1512,
+        "barkLoopCount": 7752,
+        "uRange": [
+          0.0125,
+          1.1071
+        ],
+        "vRange": [
+          0.0,
+          26.8159
+        ]
+      },
+      "canopyStructure": {
+        "foliagePrimitive": "individual_triangular_leaf_card",
+        "foliagePrimitiveCount": 6800,
+        "structure": "multitier_four_generation_branch_length_and_terminal_leaf_canopy",
+        "foliageDistribution": "branch_length_and_terminal",
+        "crownLayerCount": 7,
+        "branchClusterCount": 108,
+        "branchInteriorAnchorCount": 201,
+        "terminalFoliageAnchorCount": 109,
+        "terminalTipCount": 109
+      },
+      "treePhenotype": {
+        "architecture": "broadleaf",
+        "ageBand": "old",
+        "nominalGrowth": 0.75,
+        "branchGenerationCount": 4,
+        "primaryBranchCount": 18,
+        "secondaryBranchCount": 54,
+        "tertiaryBranchCount": 36,
+        "terminalTipCount": 109,
+        "branchInteriorAnchorCount": 201,
+        "minimumSectorOccupancy": 1,
+        "minimumFullnessPassed": true,
+        "variant": 2
+      }
+    },
+    {
+      "id": "ecological_broadleaf_ancient_01",
+      "path": "assets/visual/generated/environment/ecological_broadleaf_ancient_01.glb",
+      "family": "ecological_broadleaf_tree",
+      "growthClass": "ancient",
+      "ageBand": "ancient",
+      "biomeTags": [
+        "forest",
+        "plains",
+        "swamp",
+        "beach"
+      ],
+      "triangleCount": 13144,
+      "triangleLimit": 15400,
+      "boundingBox": {
+        "min": [
+          -25.6776,
+          -30.7778,
+          0.0
+        ],
+        "max": [
+          29.6075,
+          29.1465,
+          71.9212
+        ],
+        "size": [
+          55.2851,
+          59.9244,
+          71.9212
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "grounded": true,
+        "minZ": 0.0,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "trunk",
+        "bark_dark",
+        "leaf_primary",
+        "leaf_secondary",
+        "leaf_warm"
+      ],
+      "materialRoles": {
+        "trunkBranch": [
+          "trunk",
+          "bark_dark"
+        ],
+        "foliage": [
+          "leaf_primary",
+          "leaf_secondary",
+          "leaf_warm"
+        ]
+      },
+      "runtimeEnabled": true,
+      "animationContract": {
+        "skeletons": 0,
+        "shapeKeys": 0,
+        "animationClips": 0
+      },
+      "treeMetrics": {
+        "growthClass": "ancient",
+        "height": 71.9212,
+        "trunkRadius": 5.79,
+        "canopyRadius": 29.9622,
+        "canopyRadiusX": 27.6426,
+        "canopyRadiusY": 29.9622,
+        "canopyBase": 25.593,
+        "canopyTop": 71.9212
+      },
+      "windData": {
+        "attribute": "COLOR_0",
+        "sourceAttribute": "wind",
+        "domain": "POINT",
+        "storage": "BYTE_COLOR",
+        "vertexCount": 31840,
+        "foliageVertexCount": 30000,
+        "rootVertexCount": 11,
+        "rootMaxBend": 0.0,
+        "crownMinBend": 0.2086,
+        "crownMaxBend": 1.0,
+        "channels": {
+          "bendR": {
+            "min": 0.0,
+            "max": 1.0,
+            "mean": 0.5442
+          },
+          "phaseG": {
+            "min": 0.0,
+            "max": 1.0,
+            "mean": 0.4897
+          },
+          "flutterB": {
+            "min": 0.0,
+            "max": 0.956,
+            "mean": 0.726
+          },
+          "reservedA": {
+            "min": 1.0,
+            "max": 1.0,
+            "mean": 1.0
+          }
+        }
+      },
+      "barkData": {
+        "attribute": "TEXCOORD_0",
+        "mapping": "branch_local_circumference_u_physical_length_v",
+        "authoredRepeatsPerMeter": 0.72,
+        "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
+        "barkVertexCount": 1840,
+        "barkLoopCount": 9432,
+        "uRange": [
+          0.0125,
+          1.1071
+        ],
+        "vRange": [
+          0.0,
+          37.2184
+        ]
+      },
+      "canopyStructure": {
+        "foliagePrimitive": "individual_triangular_leaf_card",
+        "foliagePrimitiveCount": 10000,
+        "structure": "multitier_four_generation_branch_length_and_terminal_leaf_canopy",
+        "foliageDistribution": "branch_length_and_terminal",
+        "crownLayerCount": 9,
+        "branchClusterCount": 132,
+        "branchInteriorAnchorCount": 334,
+        "terminalFoliageAnchorCount": 133,
+        "terminalTipCount": 133
+      },
+      "treePhenotype": {
+        "architecture": "broadleaf",
+        "ageBand": "ancient",
+        "nominalGrowth": 1.0,
+        "branchGenerationCount": 4,
+        "primaryBranchCount": 22,
+        "secondaryBranchCount": 66,
+        "tertiaryBranchCount": 44,
+        "terminalTipCount": 133,
+        "branchInteriorAnchorCount": 334,
+        "minimumSectorOccupancy": 1,
+        "minimumFullnessPassed": true,
+        "variant": 1
+      }
+    },
+    {
+      "id": "ecological_broadleaf_ancient_02",
+      "path": "assets/visual/generated/environment/ecological_broadleaf_ancient_02.glb",
+      "family": "ecological_broadleaf_tree",
+      "growthClass": "ancient",
+      "ageBand": "ancient",
+      "biomeTags": [
+        "forest",
+        "plains",
+        "swamp",
+        "beach"
+      ],
+      "triangleCount": 13144,
+      "triangleLimit": 15400,
+      "boundingBox": {
+        "min": [
+          -26.9327,
+          -29.1195,
+          0.0
+        ],
+        "max": [
+          26.5338,
+          30.1013,
+          75.4427
+        ],
+        "size": [
+          53.4665,
+          59.2208,
+          75.4427
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "grounded": true,
+        "minZ": 0.0,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "trunk",
+        "bark_dark",
+        "leaf_primary",
+        "leaf_secondary",
+        "leaf_warm"
+      ],
+      "materialRoles": {
+        "trunkBranch": [
+          "trunk",
+          "bark_dark"
+        ],
+        "foliage": [
+          "leaf_primary",
+          "leaf_secondary",
+          "leaf_warm"
+        ]
+      },
+      "runtimeEnabled": true,
+      "animationContract": {
+        "skeletons": 0,
+        "shapeKeys": 0,
+        "animationClips": 0
+      },
+      "treeMetrics": {
+        "growthClass": "ancient",
+        "height": 75.4427,
+        "trunkRadius": 6.21,
+        "canopyRadius": 29.6104,
+        "canopyRadiusX": 26.7333,
+        "canopyRadiusY": 29.6104,
+        "canopyBase": 27.2525,
+        "canopyTop": 75.4427
+      },
+      "windData": {
+        "attribute": "COLOR_0",
+        "sourceAttribute": "wind",
+        "domain": "POINT",
+        "storage": "BYTE_COLOR",
+        "vertexCount": 31840,
+        "foliageVertexCount": 30000,
+        "rootVertexCount": 11,
+        "rootMaxBend": 0.0,
+        "crownMinBend": 0.2159,
+        "crownMaxBend": 1.0,
+        "channels": {
+          "bendR": {
+            "min": 0.0,
+            "max": 1.0,
+            "mean": 0.5485
+          },
+          "phaseG": {
+            "min": 0.0,
+            "max": 1.0,
+            "mean": 0.5244
+          },
+          "flutterB": {
+            "min": 0.0,
+            "max": 0.956,
+            "mean": 0.726
+          },
+          "reservedA": {
+            "min": 1.0,
+            "max": 1.0,
+            "mean": 1.0
+          }
+        }
+      },
+      "barkData": {
+        "attribute": "TEXCOORD_0",
+        "mapping": "branch_local_circumference_u_physical_length_v",
+        "authoredRepeatsPerMeter": 0.72,
+        "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
+        "barkVertexCount": 1840,
+        "barkLoopCount": 9432,
+        "uRange": [
+          0.0125,
+          1.1071
+        ],
+        "vRange": [
+          0.0,
+          39.2319
+        ]
+      },
+      "canopyStructure": {
+        "foliagePrimitive": "individual_triangular_leaf_card",
+        "foliagePrimitiveCount": 10000,
+        "structure": "multitier_four_generation_branch_length_and_terminal_leaf_canopy",
+        "foliageDistribution": "branch_length_and_terminal",
+        "crownLayerCount": 9,
+        "branchClusterCount": 132,
+        "branchInteriorAnchorCount": 334,
+        "terminalFoliageAnchorCount": 133,
+        "terminalTipCount": 133
+      },
+      "treePhenotype": {
+        "architecture": "broadleaf",
+        "ageBand": "ancient",
+        "nominalGrowth": 1.0,
+        "branchGenerationCount": 4,
+        "primaryBranchCount": 22,
+        "secondaryBranchCount": 66,
+        "tertiaryBranchCount": 44,
+        "terminalTipCount": 133,
+        "branchInteriorAnchorCount": 334,
+        "minimumSectorOccupancy": 1,
+        "minimumFullnessPassed": true,
+        "variant": 2
+      }
+    },
+    {
+      "id": "ecological_conifer_young_01",
+      "path": "assets/visual/generated/environment/ecological_conifer_young_01.glb",
+      "family": "ecological_conifer_tree",
+      "growthClass": "young",
+      "ageBand": "young",
+      "biomeTags": [
+        "taiga",
+        "snow",
+        "alpine",
+        "tundra"
+      ],
+      "triangleCount": 1048,
+      "triangleLimit": 2600,
+      "boundingBox": {
+        "min": [
+          -3.0681,
+          -3.3477,
+          0.0
+        ],
+        "max": [
+          3.3301,
+          3.1979,
+          10.9447
+        ],
+        "size": [
+          6.3982,
+          6.5456,
+          10.9447
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "grounded": true,
+        "minZ": 0.0,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "trunk",
+        "bark_dark",
+        "needle_primary",
+        "needle_secondary"
+      ],
+      "materialRoles": {
+        "trunkBranch": [
+          "trunk",
+          "bark_dark"
+        ],
+        "foliage": [
+          "needle_primary",
+          "needle_secondary"
+        ]
+      },
+      "runtimeEnabled": true,
+      "animationContract": {
+        "skeletons": 0,
+        "shapeKeys": 0,
+        "animationClips": 0
+      },
+      "treeMetrics": {
+        "growthClass": "young",
+        "height": 10.9447,
+        "trunkRadius": 0.291,
+        "canopyRadius": 3.2728,
+        "canopyRadiusX": 3.1991,
+        "canopyRadiusY": 3.2728,
+        "canopyBase": 1.0423,
+        "canopyTop": 10.9447
+      },
+      "windData": {
+        "attribute": "COLOR_0",
+        "sourceAttribute": "wind",
+        "domain": "POINT",
+        "storage": "BYTE_COLOR",
+        "vertexCount": 2172,
+        "foliageVertexCount": 1920,
+        "rootVertexCount": 11,
+        "rootMaxBend": 0.0,
+        "crownMinBend": 0.0116,
+        "crownMaxBend": 1.0,
+        "channels": {
+          "bendR": {
+            "min": 0.0,
+            "max": 1.0,
+            "mean": 0.2869
+          },
+          "phaseG": {
+            "min": 0.0024,
+            "max": 1.0,
+            "mean": 0.4875
+          },
+          "flutterB": {
+            "min": 0.0,
+            "max": 0.956,
+            "mean": 0.6816
+          },
+          "reservedA": {
+            "min": 1.0,
+            "max": 1.0,
+            "mean": 1.0
+          }
+        }
+      },
+      "barkData": {
+        "attribute": "TEXCOORD_0",
+        "mapping": "branch_local_circumference_u_physical_length_v",
+        "authoredRepeatsPerMeter": 0.72,
+        "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
+        "barkVertexCount": 252,
+        "barkLoopCount": 1224,
+        "uRange": [
+          0.0,
+          1.05
+        ],
+        "vRange": [
+          0.0,
+          7.5308
+        ]
+      },
+      "canopyStructure": {
+        "foliagePrimitive": "individual_triangular_leaf_card",
+        "foliagePrimitiveCount": 640,
+        "structure": "multitier_phyllotactic_bough_and_subbranch_needle_canopy",
+        "foliageDistribution": "branch_length_and_terminal",
+        "crownLayerCount": 5,
+        "branchClusterCount": 23,
+        "branchInteriorAnchorCount": 23,
+        "terminalFoliageAnchorCount": 24,
+        "terminalTipCount": 24
+      },
+      "treePhenotype": {
+        "architecture": "conifer",
+        "ageBand": "young",
+        "nominalGrowth": 0.0,
+        "branchGenerationCount": 2,
+        "primaryBranchCount": 23,
+        "secondaryBranchCount": 0,
+        "tertiaryBranchCount": 0,
+        "terminalTipCount": 24,
+        "branchInteriorAnchorCount": 23,
+        "minimumSectorOccupancy": 1,
+        "minimumFullnessPassed": true,
+        "variant": 1
+      }
+    },
+    {
+      "id": "ecological_conifer_young_02",
+      "path": "assets/visual/generated/environment/ecological_conifer_young_02.glb",
+      "family": "ecological_conifer_tree",
+      "growthClass": "young",
+      "ageBand": "young",
+      "biomeTags": [
+        "taiga",
+        "snow",
+        "alpine",
+        "tundra"
+      ],
+      "triangleCount": 1032,
+      "triangleLimit": 2600,
+      "boundingBox": {
+        "min": [
+          -3.3921,
+          -3.312,
+          0.0
+        ],
+        "max": [
+          3.3626,
+          3.3166,
+          11.5406
+        ],
+        "size": [
+          6.7547,
+          6.6286,
+          11.5406
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "grounded": true,
+        "minZ": 0.0,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "trunk",
+        "bark_dark",
+        "needle_primary",
+        "needle_secondary"
+      ],
+      "materialRoles": {
+        "trunkBranch": [
+          "trunk",
+          "bark_dark"
+        ],
+        "foliage": [
+          "needle_primary",
+          "needle_secondary"
+        ]
+      },
+      "runtimeEnabled": true,
+      "animationContract": {
+        "skeletons": 0,
+        "shapeKeys": 0,
+        "animationClips": 0
+      },
+      "treeMetrics": {
+        "growthClass": "young",
+        "height": 11.5406,
+        "trunkRadius": 0.309,
+        "canopyRadius": 3.3773,
+        "canopyRadiusX": 3.3773,
+        "canopyRadiusY": 3.3143,
+        "canopyBase": 1.2376,
+        "canopyTop": 11.5406
+      },
+      "windData": {
+        "attribute": "COLOR_0",
+        "sourceAttribute": "wind",
+        "domain": "POINT",
+        "storage": "BYTE_COLOR",
+        "vertexCount": 2162,
+        "foliageVertexCount": 1920,
+        "rootVertexCount": 11,
+        "rootMaxBend": 0.0,
+        "crownMinBend": 0.0176,
+        "crownMaxBend": 1.0,
+        "channels": {
+          "bendR": {
+            "min": 0.0,
+            "max": 1.0,
+            "mean": 0.2849
+          },
+          "phaseG": {
+            "min": 0.0006,
+            "max": 1.0,
+            "mean": 0.5125
+          },
+          "flutterB": {
+            "min": 0.0,
+            "max": 0.956,
+            "mean": 0.6848
+          },
+          "reservedA": {
+            "min": 1.0,
+            "max": 1.0,
+            "mean": 1.0
+          }
+        }
+      },
+      "barkData": {
+        "attribute": "TEXCOORD_0",
+        "mapping": "branch_local_circumference_u_physical_length_v",
+        "authoredRepeatsPerMeter": 0.72,
+        "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
+        "barkVertexCount": 242,
+        "barkLoopCount": 1176,
+        "uRange": [
+          0.0,
+          1.05
+        ],
+        "vRange": [
+          0.0,
+          7.9038
+        ]
+      },
+      "canopyStructure": {
+        "foliagePrimitive": "individual_triangular_leaf_card",
+        "foliagePrimitiveCount": 640,
+        "structure": "multitier_phyllotactic_bough_and_subbranch_needle_canopy",
+        "foliageDistribution": "branch_length_and_terminal",
+        "crownLayerCount": 5,
+        "branchClusterCount": 22,
+        "branchInteriorAnchorCount": 22,
+        "terminalFoliageAnchorCount": 23,
+        "terminalTipCount": 23
+      },
+      "treePhenotype": {
+        "architecture": "conifer",
+        "ageBand": "young",
+        "nominalGrowth": 0.0,
+        "branchGenerationCount": 2,
+        "primaryBranchCount": 22,
+        "secondaryBranchCount": 0,
+        "tertiaryBranchCount": 0,
+        "terminalTipCount": 23,
+        "branchInteriorAnchorCount": 22,
+        "minimumSectorOccupancy": 1,
+        "minimumFullnessPassed": true,
+        "variant": 2
+      }
+    },
+    {
+      "id": "ecological_conifer_established_01",
+      "path": "assets/visual/generated/environment/ecological_conifer_established_01.glb",
+      "family": "ecological_conifer_tree",
+      "growthClass": "established",
+      "ageBand": "established",
+      "biomeTags": [
+        "taiga",
+        "snow",
+        "alpine",
+        "tundra"
+      ],
+      "triangleCount": 2792,
+      "triangleLimit": 4400,
+      "boundingBox": {
+        "min": [
+          -4.8426,
+          -5.3102,
+          0.0
+        ],
+        "max": [
+          5.5317,
+          5.0932,
+          19.5767
+        ],
+        "size": [
+          10.3743,
+          10.4034,
+          19.5767
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "grounded": true,
+        "minZ": 0.0,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "trunk",
+        "bark_dark",
+        "needle_primary",
+        "needle_secondary"
+      ],
+      "materialRoles": {
+        "trunkBranch": [
+          "trunk",
+          "bark_dark"
+        ],
+        "foliage": [
+          "needle_primary",
+          "needle_secondary"
+        ]
+      },
+      "runtimeEnabled": true,
+      "animationContract": {
+        "skeletons": 0,
+        "shapeKeys": 0,
+        "animationClips": 0
+      },
+      "treeMetrics": {
+        "growthClass": "established",
+        "height": 19.5767,
+        "trunkRadius": 0.6305,
+        "canopyRadius": 5.2017,
+        "canopyRadiusX": 5.1871,
+        "canopyRadiusY": 5.2017,
+        "canopyBase": 2.7513,
+        "canopyTop": 19.5767
+      },
+      "windData": {
+        "attribute": "COLOR_0",
+        "sourceAttribute": "wind",
+        "domain": "POINT",
+        "storage": "BYTE_COLOR",
+        "vertexCount": 5542,
+        "foliageVertexCount": 4800,
+        "rootVertexCount": 11,
+        "rootMaxBend": 0.0,
+        "crownMinBend": 0.0369,
+        "crownMaxBend": 1.0,
+        "channels": {
+          "bendR": {
+            "min": 0.0,
+            "max": 1.0,
+            "mean": 0.3238
+          },
+          "phaseG": {
+            "min": 0.0006,
+            "max": 1.0,
+            "mean": 0.4961
+          },
+          "flutterB": {
+            "min": 0.0,
+            "max": 0.956,
+            "mean": 0.6681
+          },
+          "reservedA": {
+            "min": 1.0,
+            "max": 1.0,
+            "mean": 1.0
+          }
+        }
+      },
+      "barkData": {
+        "attribute": "TEXCOORD_0",
+        "mapping": "branch_local_circumference_u_physical_length_v",
+        "authoredRepeatsPerMeter": 0.72,
+        "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
+        "barkVertexCount": 742,
+        "barkLoopCount": 3576,
+        "uRange": [
+          0.0,
+          1.05
+        ],
+        "vRange": [
+          0.0,
+          13.7091
+        ]
+      },
+      "canopyStructure": {
+        "foliagePrimitive": "individual_triangular_leaf_card",
+        "foliagePrimitiveCount": 1600,
+        "structure": "multitier_phyllotactic_bough_and_subbranch_needle_canopy",
+        "foliageDistribution": "branch_length_and_terminal",
+        "crownLayerCount": 8,
+        "branchClusterCount": 72,
+        "branchInteriorAnchorCount": 108,
+        "terminalFoliageAnchorCount": 73,
+        "terminalTipCount": 73
+      },
+      "treePhenotype": {
+        "architecture": "conifer",
+        "ageBand": "established",
+        "nominalGrowth": 0.25,
+        "branchGenerationCount": 3,
+        "primaryBranchCount": 36,
+        "secondaryBranchCount": 36,
+        "tertiaryBranchCount": 0,
+        "terminalTipCount": 73,
+        "branchInteriorAnchorCount": 108,
+        "minimumSectorOccupancy": 1,
+        "minimumFullnessPassed": true,
+        "variant": 1
+      }
+    },
+    {
+      "id": "ecological_conifer_established_02",
+      "path": "assets/visual/generated/environment/ecological_conifer_established_02.glb",
+      "family": "ecological_conifer_tree",
+      "growthClass": "established",
+      "ageBand": "established",
+      "biomeTags": [
+        "taiga",
+        "snow",
+        "alpine",
+        "tundra"
+      ],
+      "triangleCount": 2792,
+      "triangleLimit": 4400,
+      "boundingBox": {
+        "min": [
+          -5.3279,
+          -5.3012,
+          0.0
+        ],
+        "max": [
+          5.3197,
+          5.5282,
+          20.3966
+        ],
+        "size": [
+          10.6476,
+          10.8293,
+          20.3966
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "grounded": true,
+        "minZ": 0.0,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "trunk",
+        "bark_dark",
+        "needle_primary",
+        "needle_secondary"
+      ],
+      "materialRoles": {
+        "trunkBranch": [
+          "trunk",
+          "bark_dark"
+        ],
+        "foliage": [
+          "needle_primary",
+          "needle_secondary"
+        ]
+      },
+      "runtimeEnabled": true,
+      "animationContract": {
+        "skeletons": 0,
+        "shapeKeys": 0,
+        "animationClips": 0
+      },
+      "treeMetrics": {
+        "growthClass": "established",
+        "height": 20.3966,
+        "trunkRadius": 0.6695,
+        "canopyRadius": 5.4147,
+        "canopyRadiusX": 5.3238,
+        "canopyRadiusY": 5.4147,
+        "canopyBase": 2.9009,
+        "canopyTop": 20.3966
+      },
+      "windData": {
+        "attribute": "COLOR_0",
+        "sourceAttribute": "wind",
+        "domain": "POINT",
+        "storage": "BYTE_COLOR",
+        "vertexCount": 5542,
+        "foliageVertexCount": 4800,
+        "rootVertexCount": 11,
+        "rootMaxBend": 0.0,
+        "crownMinBend": 0.0369,
+        "crownMaxBend": 1.0,
+        "channels": {
+          "bendR": {
+            "min": 0.0,
+            "max": 1.0,
+            "mean": 0.3374
+          },
+          "phaseG": {
+            "min": 0.0009,
+            "max": 1.0,
+            "mean": 0.5152
+          },
+          "flutterB": {
+            "min": 0.0,
+            "max": 0.956,
+            "mean": 0.6682
+          },
+          "reservedA": {
+            "min": 1.0,
+            "max": 1.0,
+            "mean": 1.0
+          }
+        }
+      },
+      "barkData": {
+        "attribute": "TEXCOORD_0",
+        "mapping": "branch_local_circumference_u_physical_length_v",
+        "authoredRepeatsPerMeter": 0.72,
+        "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
+        "barkVertexCount": 742,
+        "barkLoopCount": 3576,
+        "uRange": [
+          0.0,
+          1.05
+        ],
+        "vRange": [
+          0.0,
+          14.3529
+        ]
+      },
+      "canopyStructure": {
+        "foliagePrimitive": "individual_triangular_leaf_card",
+        "foliagePrimitiveCount": 1600,
+        "structure": "multitier_phyllotactic_bough_and_subbranch_needle_canopy",
+        "foliageDistribution": "branch_length_and_terminal",
+        "crownLayerCount": 8,
+        "branchClusterCount": 72,
+        "branchInteriorAnchorCount": 108,
+        "terminalFoliageAnchorCount": 73,
+        "terminalTipCount": 73
+      },
+      "treePhenotype": {
+        "architecture": "conifer",
+        "ageBand": "established",
+        "nominalGrowth": 0.25,
+        "branchGenerationCount": 3,
+        "primaryBranchCount": 36,
+        "secondaryBranchCount": 36,
+        "tertiaryBranchCount": 0,
+        "terminalTipCount": 73,
+        "branchInteriorAnchorCount": 108,
+        "minimumSectorOccupancy": 1,
+        "minimumFullnessPassed": true,
+        "variant": 2
+      }
+    },
+    {
+      "id": "ecological_conifer_mature_01",
+      "path": "assets/visual/generated/environment/ecological_conifer_mature_01.glb",
+      "family": "ecological_conifer_tree",
+      "growthClass": "mature",
+      "ageBand": "mature",
+      "biomeTags": [
+        "taiga",
+        "snow",
+        "alpine",
+        "tundra"
+      ],
+      "triangleCount": 5368,
+      "triangleLimit": 7400,
+      "boundingBox": {
+        "min": [
+          -8.3556,
+          -9.1524,
+          0.0
+        ],
+        "max": [
+          9.1937,
+          8.4928,
+          35.2652
+        ],
+        "size": [
+          17.5492,
+          17.6452,
+          35.2652
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "grounded": true,
+        "minZ": 0.0,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "trunk",
+        "bark_dark",
+        "needle_primary",
+        "needle_secondary"
+      ],
+      "materialRoles": {
+        "trunkBranch": [
+          "trunk",
+          "bark_dark"
+        ],
+        "foliage": [
+          "needle_primary",
+          "needle_secondary"
+        ]
+      },
+      "runtimeEnabled": true,
+      "animationContract": {
+        "skeletons": 0,
+        "shapeKeys": 0,
+        "animationClips": 0
+      },
+      "treeMetrics": {
+        "growthClass": "mature",
+        "height": 35.2652,
+        "trunkRadius": 1.455,
+        "canopyRadius": 8.8226,
+        "canopyRadiusX": 8.7746,
+        "canopyRadiusY": 8.8226,
+        "canopyBase": 5.3034,
+        "canopyTop": 35.2652
+      },
+      "windData": {
+        "attribute": "COLOR_0",
+        "sourceAttribute": "wind",
+        "domain": "POINT",
+        "storage": "BYTE_COLOR",
+        "vertexCount": 11902,
+        "foliageVertexCount": 10800,
+        "rootVertexCount": 11,
+        "rootMaxBend": 0.0,
+        "crownMinBend": 0.0423,
+        "crownMaxBend": 1.0,
+        "channels": {
+          "bendR": {
+            "min": 0.0,
+            "max": 1.0,
+            "mean": 0.36
+          },
+          "phaseG": {
+            "min": 0.0003,
+            "max": 1.0,
+            "mean": 0.4876
+          },
+          "flutterB": {
+            "min": 0.0,
+            "max": 0.956,
+            "mean": 0.6995
+          },
+          "reservedA": {
+            "min": 1.0,
+            "max": 1.0,
+            "mean": 1.0
+          }
+        }
+      },
+      "barkData": {
+        "attribute": "TEXCOORD_0",
+        "mapping": "branch_local_circumference_u_physical_length_v",
+        "authoredRepeatsPerMeter": 0.72,
+        "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
+        "barkVertexCount": 1102,
+        "barkLoopCount": 5304,
+        "uRange": [
+          0.0,
+          1.05
+        ],
+        "vRange": [
+          0.0,
+          24.7206
+        ]
+      },
+      "canopyStructure": {
+        "foliagePrimitive": "individual_triangular_leaf_card",
+        "foliagePrimitiveCount": 3600,
+        "structure": "multitier_phyllotactic_bough_and_subbranch_needle_canopy",
+        "foliageDistribution": "branch_length_and_terminal",
+        "crownLayerCount": 12,
+        "branchClusterCount": 108,
+        "branchInteriorAnchorCount": 162,
+        "terminalFoliageAnchorCount": 109,
+        "terminalTipCount": 109
+      },
+      "treePhenotype": {
+        "architecture": "conifer",
+        "ageBand": "mature",
+        "nominalGrowth": 0.5,
+        "branchGenerationCount": 3,
+        "primaryBranchCount": 54,
+        "secondaryBranchCount": 54,
+        "tertiaryBranchCount": 0,
+        "terminalTipCount": 109,
+        "branchInteriorAnchorCount": 162,
+        "minimumSectorOccupancy": 1,
+        "minimumFullnessPassed": true,
+        "variant": 1
+      }
+    },
+    {
+      "id": "ecological_conifer_mature_02",
+      "path": "assets/visual/generated/environment/ecological_conifer_mature_02.glb",
+      "family": "ecological_conifer_tree",
+      "growthClass": "mature",
+      "ageBand": "mature",
+      "biomeTags": [
+        "taiga",
+        "snow",
+        "alpine",
+        "tundra"
+      ],
+      "triangleCount": 5368,
+      "triangleLimit": 7400,
+      "boundingBox": {
+        "min": [
+          -8.5049,
+          -8.495,
+          0.0
+        ],
+        "max": [
+          8.5632,
+          8.6347,
+          36.5115
+        ],
+        "size": [
+          17.0682,
+          17.1297,
+          36.5115
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "grounded": true,
+        "minZ": 0.0,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "trunk",
+        "bark_dark",
+        "needle_primary",
+        "needle_secondary"
+      ],
+      "materialRoles": {
+        "trunkBranch": [
+          "trunk",
+          "bark_dark"
+        ],
+        "foliage": [
+          "needle_primary",
+          "needle_secondary"
+        ]
+      },
+      "runtimeEnabled": true,
+      "animationContract": {
+        "skeletons": 0,
+        "shapeKeys": 0,
+        "animationClips": 0
+      },
+      "treeMetrics": {
+        "growthClass": "mature",
+        "height": 36.5115,
+        "trunkRadius": 1.545,
+        "canopyRadius": 8.5648,
+        "canopyRadiusX": 8.5341,
+        "canopyRadiusY": 8.5648,
+        "canopyBase": 5.5679,
+        "canopyTop": 36.5115
+      },
+      "windData": {
+        "attribute": "COLOR_0",
+        "sourceAttribute": "wind",
+        "domain": "POINT",
+        "storage": "BYTE_COLOR",
+        "vertexCount": 11902,
+        "foliageVertexCount": 10800,
+        "rootVertexCount": 11,
+        "rootMaxBend": 0.0,
+        "crownMinBend": 0.0437,
+        "crownMaxBend": 1.0,
+        "channels": {
+          "bendR": {
+            "min": 0.0,
+            "max": 1.0,
+            "mean": 0.3481
+          },
+          "phaseG": {
+            "min": 0.0,
+            "max": 1.0,
+            "mean": 0.5059
+          },
+          "flutterB": {
+            "min": 0.0,
+            "max": 0.956,
+            "mean": 0.6995
+          },
+          "reservedA": {
+            "min": 1.0,
+            "max": 1.0,
+            "mean": 1.0
+          }
+        }
+      },
+      "barkData": {
+        "attribute": "TEXCOORD_0",
+        "mapping": "branch_local_circumference_u_physical_length_v",
+        "authoredRepeatsPerMeter": 0.72,
+        "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
+        "barkVertexCount": 1102,
+        "barkLoopCount": 5304,
+        "uRange": [
+          0.0,
+          1.05
+        ],
+        "vRange": [
+          0.0,
+          25.5976
+        ]
+      },
+      "canopyStructure": {
+        "foliagePrimitive": "individual_triangular_leaf_card",
+        "foliagePrimitiveCount": 3600,
+        "structure": "multitier_phyllotactic_bough_and_subbranch_needle_canopy",
+        "foliageDistribution": "branch_length_and_terminal",
+        "crownLayerCount": 12,
+        "branchClusterCount": 108,
+        "branchInteriorAnchorCount": 162,
+        "terminalFoliageAnchorCount": 109,
+        "terminalTipCount": 109
+      },
+      "treePhenotype": {
+        "architecture": "conifer",
+        "ageBand": "mature",
+        "nominalGrowth": 0.5,
+        "branchGenerationCount": 3,
+        "primaryBranchCount": 54,
+        "secondaryBranchCount": 54,
+        "tertiaryBranchCount": 0,
+        "terminalTipCount": 109,
+        "branchInteriorAnchorCount": 162,
+        "minimumSectorOccupancy": 1,
+        "minimumFullnessPassed": true,
+        "variant": 2
+      }
+    },
+    {
+      "id": "ecological_conifer_old_01",
+      "path": "assets/visual/generated/environment/ecological_conifer_old_01.glb",
+      "family": "ecological_conifer_tree",
+      "growthClass": "old",
+      "ageBand": "old",
+      "biomeTags": [
+        "taiga",
+        "snow",
+        "alpine",
+        "tundra"
+      ],
+      "triangleCount": 8904,
+      "triangleLimit": 11600,
+      "boundingBox": {
+        "min": [
+          -12.1605,
+          -12.7285,
+          0.0
+        ],
+        "max": [
+          12.8292,
+          11.784,
+          56.5714
+        ],
+        "size": [
+          24.9898,
+          24.5125,
+          56.5714
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "grounded": true,
+        "minZ": 0.0,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "trunk",
+        "bark_dark",
+        "needle_primary",
+        "needle_secondary"
+      ],
+      "materialRoles": {
+        "trunkBranch": [
+          "trunk",
+          "bark_dark"
+        ],
+        "foliage": [
+          "needle_primary",
+          "needle_secondary"
+        ]
+      },
+      "runtimeEnabled": true,
+      "animationContract": {
+        "skeletons": 0,
+        "shapeKeys": 0,
+        "animationClips": 0
+      },
+      "treeMetrics": {
+        "growthClass": "old",
+        "height": 56.5714,
+        "trunkRadius": 2.91,
+        "canopyRadius": 12.4949,
+        "canopyRadiusX": 12.4949,
+        "canopyRadiusY": 12.2563,
+        "canopyBase": 8.7156,
+        "canopyTop": 56.5714
+      },
+      "windData": {
+        "attribute": "COLOR_0",
+        "sourceAttribute": "wind",
+        "domain": "POINT",
+        "storage": "BYTE_COLOR",
+        "vertexCount": 20762,
+        "foliageVertexCount": 19200,
+        "rootVertexCount": 11,
+        "rootMaxBend": 0.0,
+        "crownMinBend": 0.0452,
+        "crownMaxBend": 1.0,
+        "channels": {
+          "bendR": {
+            "min": 0.0,
+            "max": 1.0,
+            "mean": 0.361
+          },
+          "phaseG": {
+            "min": 0.0,
+            "max": 1.0,
+            "mean": 0.4937
+          },
+          "flutterB": {
+            "min": 0.0,
+            "max": 0.956,
+            "mean": 0.7127
+          },
+          "reservedA": {
+            "min": 1.0,
+            "max": 1.0,
+            "mean": 1.0
+          }
+        }
+      },
+      "barkData": {
+        "attribute": "TEXCOORD_0",
+        "mapping": "branch_local_circumference_u_physical_length_v",
+        "authoredRepeatsPerMeter": 0.72,
+        "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
+        "barkVertexCount": 1562,
+        "barkLoopCount": 7512,
+        "uRange": [
+          0.0,
+          1.05
+        ],
+        "vRange": [
+          0.0,
+          39.3654
+        ]
+      },
+      "canopyStructure": {
+        "foliagePrimitive": "individual_triangular_leaf_card",
+        "foliagePrimitiveCount": 6400,
+        "structure": "multitier_phyllotactic_bough_and_subbranch_needle_canopy",
+        "foliageDistribution": "branch_length_and_terminal",
+        "crownLayerCount": 17,
+        "branchClusterCount": 154,
+        "branchInteriorAnchorCount": 385,
+        "terminalFoliageAnchorCount": 155,
+        "terminalTipCount": 155
+      },
+      "treePhenotype": {
+        "architecture": "conifer",
+        "ageBand": "old",
+        "nominalGrowth": 0.75,
+        "branchGenerationCount": 3,
+        "primaryBranchCount": 77,
+        "secondaryBranchCount": 77,
+        "tertiaryBranchCount": 0,
+        "terminalTipCount": 155,
+        "branchInteriorAnchorCount": 385,
+        "minimumSectorOccupancy": 1,
+        "minimumFullnessPassed": true,
+        "variant": 1
+      }
+    },
+    {
+      "id": "ecological_conifer_old_02",
+      "path": "assets/visual/generated/environment/ecological_conifer_old_02.glb",
+      "family": "ecological_conifer_tree",
+      "growthClass": "old",
+      "ageBand": "old",
+      "biomeTags": [
+        "taiga",
+        "snow",
+        "alpine",
+        "tundra"
+      ],
+      "triangleCount": 8872,
+      "triangleLimit": 11600,
+      "boundingBox": {
+        "min": [
+          -12.6385,
+          -12.7792,
+          0.0
+        ],
+        "max": [
+          12.7186,
+          12.6493,
+          59.4849
+        ],
+        "size": [
+          25.357,
+          25.4285,
+          59.4849
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "grounded": true,
+        "minZ": 0.0,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "trunk",
+        "bark_dark",
+        "needle_primary",
+        "needle_secondary"
+      ],
+      "materialRoles": {
+        "trunkBranch": [
+          "trunk",
+          "bark_dark"
+        ],
+        "foliage": [
+          "needle_primary",
+          "needle_secondary"
+        ]
+      },
+      "runtimeEnabled": true,
+      "animationContract": {
+        "skeletons": 0,
+        "shapeKeys": 0,
+        "animationClips": 0
+      },
+      "treeMetrics": {
+        "growthClass": "old",
+        "height": 59.4849,
+        "trunkRadius": 3.09,
+        "canopyRadius": 12.7142,
+        "canopyRadiusX": 12.6785,
+        "canopyRadiusY": 12.7142,
+        "canopyBase": 9.2026,
+        "canopyTop": 59.4849
+      },
+      "windData": {
+        "attribute": "COLOR_0",
+        "sourceAttribute": "wind",
+        "domain": "POINT",
+        "storage": "BYTE_COLOR",
+        "vertexCount": 20742,
+        "foliageVertexCount": 19200,
+        "rootVertexCount": 11,
+        "rootMaxBend": 0.0,
+        "crownMinBend": 0.0452,
+        "crownMaxBend": 1.0,
+        "channels": {
+          "bendR": {
+            "min": 0.0,
+            "max": 1.0,
+            "mean": 0.3685
+          },
+          "phaseG": {
+            "min": 0.0,
+            "max": 1.0,
+            "mean": 0.5027
+          },
+          "flutterB": {
+            "min": 0.0,
+            "max": 0.956,
+            "mean": 0.7133
+          },
+          "reservedA": {
+            "min": 1.0,
+            "max": 1.0,
+            "mean": 1.0
+          }
+        }
+      },
+      "barkData": {
+        "attribute": "TEXCOORD_0",
+        "mapping": "branch_local_circumference_u_physical_length_v",
+        "authoredRepeatsPerMeter": 0.72,
+        "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
+        "barkVertexCount": 1542,
+        "barkLoopCount": 7416,
+        "uRange": [
+          0.0,
+          1.05
+        ],
+        "vRange": [
+          0.0,
+          41.4273
+        ]
+      },
+      "canopyStructure": {
+        "foliagePrimitive": "individual_triangular_leaf_card",
+        "foliagePrimitiveCount": 6400,
+        "structure": "multitier_phyllotactic_bough_and_subbranch_needle_canopy",
+        "foliageDistribution": "branch_length_and_terminal",
+        "crownLayerCount": 17,
+        "branchClusterCount": 152,
+        "branchInteriorAnchorCount": 380,
+        "terminalFoliageAnchorCount": 153,
+        "terminalTipCount": 153
+      },
+      "treePhenotype": {
+        "architecture": "conifer",
+        "ageBand": "old",
+        "nominalGrowth": 0.75,
+        "branchGenerationCount": 3,
+        "primaryBranchCount": 76,
+        "secondaryBranchCount": 76,
+        "tertiaryBranchCount": 0,
+        "terminalTipCount": 153,
+        "branchInteriorAnchorCount": 380,
+        "minimumSectorOccupancy": 1,
+        "minimumFullnessPassed": true,
+        "variant": 2
+      }
+    },
+    {
+      "id": "ecological_conifer_ancient_01",
+      "path": "assets/visual/generated/environment/ecological_conifer_ancient_01.glb",
+      "family": "ecological_conifer_tree",
+      "growthClass": "ancient",
+      "ageBand": "ancient",
+      "biomeTags": [
+        "taiga",
+        "snow",
+        "alpine",
+        "tundra"
+      ],
+      "triangleCount": 12808,
+      "triangleLimit": 15400,
+      "boundingBox": {
+        "min": [
+          -16.9619,
+          -18.7075,
+          0.0
+        ],
+        "max": [
+          18.9051,
+          17.3592,
+          85.5162
+        ],
+        "size": [
+          35.867,
+          36.0667,
+          85.5162
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "grounded": true,
+        "minZ": 0.0,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "trunk",
+        "bark_dark",
+        "needle_primary",
+        "needle_secondary"
+      ],
+      "materialRoles": {
+        "trunkBranch": [
+          "trunk",
+          "bark_dark"
+        ],
+        "foliage": [
+          "needle_primary",
+          "needle_secondary"
+        ]
+      },
+      "runtimeEnabled": true,
+      "animationContract": {
+        "skeletons": 0,
+        "shapeKeys": 0,
+        "animationClips": 0
+      },
+      "treeMetrics": {
+        "growthClass": "ancient",
+        "height": 85.5162,
+        "trunkRadius": 5.044,
+        "canopyRadius": 18.0333,
+        "canopyRadiusX": 17.9335,
+        "canopyRadiusY": 18.0333,
+        "canopyBase": 13.2535,
+        "canopyTop": 85.5162
+      },
+      "windData": {
+        "attribute": "COLOR_0",
+        "sourceAttribute": "wind",
+        "domain": "POINT",
+        "storage": "BYTE_COLOR",
+        "vertexCount": 30802,
+        "foliageVertexCount": 28800,
+        "rootVertexCount": 11,
+        "rootMaxBend": 0.0,
+        "crownMinBend": 0.0452,
+        "crownMaxBend": 1.0,
+        "channels": {
+          "bendR": {
+            "min": 0.0,
+            "max": 1.0,
+            "mean": 0.3675
+          },
+          "phaseG": {
+            "min": 0.0,
+            "max": 1.0,
+            "mean": 0.4967
+          },
+          "flutterB": {
+            "min": 0.0,
+            "max": 0.956,
+            "mean": 0.7204
+          },
+          "reservedA": {
+            "min": 1.0,
+            "max": 1.0,
+            "mean": 1.0
+          }
+        }
+      },
+      "barkData": {
+        "attribute": "TEXCOORD_0",
+        "mapping": "branch_local_circumference_u_physical_length_v",
+        "authoredRepeatsPerMeter": 0.72,
+        "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
+        "barkVertexCount": 2002,
+        "barkLoopCount": 9624,
+        "uRange": [
+          0.0,
+          1.05
+        ],
+        "vRange": [
+          0.0,
+          59.1069
+        ]
+      },
+      "canopyStructure": {
+        "foliagePrimitive": "individual_triangular_leaf_card",
+        "foliagePrimitiveCount": 9600,
+        "structure": "multitier_phyllotactic_bough_and_subbranch_needle_canopy",
+        "foliageDistribution": "branch_length_and_terminal",
+        "crownLayerCount": 22,
+        "branchClusterCount": 198,
+        "branchInteriorAnchorCount": 693,
+        "terminalFoliageAnchorCount": 199,
+        "terminalTipCount": 199
+      },
+      "treePhenotype": {
+        "architecture": "conifer",
+        "ageBand": "ancient",
+        "nominalGrowth": 1.0,
+        "branchGenerationCount": 3,
+        "primaryBranchCount": 99,
+        "secondaryBranchCount": 99,
+        "tertiaryBranchCount": 0,
+        "terminalTipCount": 199,
+        "branchInteriorAnchorCount": 693,
+        "minimumSectorOccupancy": 1,
+        "minimumFullnessPassed": true,
+        "variant": 1
+      }
+    },
+    {
+      "id": "ecological_conifer_ancient_02",
+      "path": "assets/visual/generated/environment/ecological_conifer_ancient_02.glb",
+      "family": "ecological_conifer_tree",
+      "growthClass": "ancient",
+      "ageBand": "ancient",
+      "biomeTags": [
+        "taiga",
+        "snow",
+        "alpine",
+        "tundra"
+      ],
+      "triangleCount": 12808,
+      "triangleLimit": 15400,
+      "boundingBox": {
+        "min": [
+          -17.5405,
+          -17.8966,
+          0.0
+        ],
+        "max": [
+          18.2416,
+          17.6524,
+          88.1128
+        ],
+        "size": [
+          35.7821,
+          35.549,
+          88.1128
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "grounded": true,
+        "minZ": 0.0,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "trunk",
+        "bark_dark",
+        "needle_primary",
+        "needle_secondary"
+      ],
+      "materialRoles": {
+        "trunkBranch": [
+          "trunk",
+          "bark_dark"
+        ],
+        "foliage": [
+          "needle_primary",
+          "needle_secondary"
+        ]
+      },
+      "runtimeEnabled": true,
+      "animationContract": {
+        "skeletons": 0,
+        "shapeKeys": 0,
+        "animationClips": 0
+      },
+      "treeMetrics": {
+        "growthClass": "ancient",
+        "height": 88.1128,
+        "trunkRadius": 5.356,
+        "canopyRadius": 17.8911,
+        "canopyRadiusX": 17.8911,
+        "canopyRadiusY": 17.7745,
+        "canopyBase": 14.0862,
+        "canopyTop": 88.1128
+      },
+      "windData": {
+        "attribute": "COLOR_0",
+        "sourceAttribute": "wind",
+        "domain": "POINT",
+        "storage": "BYTE_COLOR",
+        "vertexCount": 30802,
+        "foliageVertexCount": 28800,
+        "rootVertexCount": 11,
+        "rootMaxBend": 0.0,
+        "crownMinBend": 0.0482,
+        "crownMaxBend": 1.0,
+        "channels": {
+          "bendR": {
+            "min": 0.0,
+            "max": 1.0,
+            "mean": 0.3691
+          },
+          "phaseG": {
+            "min": 0.0,
+            "max": 1.0,
+            "mean": 0.502
+          },
+          "flutterB": {
+            "min": 0.0,
+            "max": 0.956,
+            "mean": 0.7204
+          },
+          "reservedA": {
+            "min": 1.0,
+            "max": 1.0,
+            "mean": 1.0
+          }
+        }
+      },
+      "barkData": {
+        "attribute": "TEXCOORD_0",
+        "mapping": "branch_local_circumference_u_physical_length_v",
+        "authoredRepeatsPerMeter": 0.72,
+        "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
+        "barkVertexCount": 2002,
+        "barkLoopCount": 9624,
+        "uRange": [
+          0.0,
+          1.05
+        ],
+        "vRange": [
+          0.0,
+          60.9591
+        ]
+      },
+      "canopyStructure": {
+        "foliagePrimitive": "individual_triangular_leaf_card",
+        "foliagePrimitiveCount": 9600,
+        "structure": "multitier_phyllotactic_bough_and_subbranch_needle_canopy",
+        "foliageDistribution": "branch_length_and_terminal",
+        "crownLayerCount": 22,
+        "branchClusterCount": 198,
+        "branchInteriorAnchorCount": 693,
+        "terminalFoliageAnchorCount": 199,
+        "terminalTipCount": 199
+      },
+      "treePhenotype": {
+        "architecture": "conifer",
+        "ageBand": "ancient",
+        "nominalGrowth": 1.0,
+        "branchGenerationCount": 3,
+        "primaryBranchCount": 99,
+        "secondaryBranchCount": 99,
+        "tertiaryBranchCount": 0,
+        "terminalTipCount": 199,
+        "branchInteriorAnchorCount": 693,
+        "minimumSectorOccupancy": 1,
+        "minimumFullnessPassed": true,
+        "variant": 2
+      }
+    },
+    {
+      "id": "ecological_savanna_young_01",
+      "path": "assets/visual/generated/environment/ecological_savanna_young_01.glb",
+      "family": "ecological_savanna_tree",
+      "growthClass": "young",
+      "ageBand": "young",
+      "biomeTags": [
+        "savanna",
+        "plains",
+        "desert",
+        "beach"
+      ],
+      "triangleCount": 968,
+      "triangleLimit": 2600,
+      "boundingBox": {
+        "min": [
+          -4.4352,
+          -3.7475,
+          0.0
+        ],
+        "max": [
+          5.0047,
+          3.1509,
+          9.2515
+        ],
+        "size": [
+          9.4399,
+          6.8984,
+          9.2515
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "grounded": true,
+        "minZ": 0.0,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "trunk",
+        "bark_dark",
+        "savanna_leaf",
+        "leaf_warm"
+      ],
+      "materialRoles": {
+        "trunkBranch": [
+          "trunk",
+          "bark_dark"
+        ],
+        "foliage": [
+          "savanna_leaf",
+          "leaf_warm"
+        ]
+      },
+      "runtimeEnabled": true,
+      "animationContract": {
+        "skeletons": 0,
+        "shapeKeys": 0,
+        "animationClips": 0
+      },
+      "treeMetrics": {
+        "growthClass": "young",
+        "height": 9.2515,
+        "trunkRadius": 0.2895,
+        "canopyRadius": 4.7199,
+        "canopyRadiusX": 4.7199,
+        "canopyRadiusY": 3.4492,
+        "canopyBase": 4.2449,
+        "canopyTop": 9.2515
+      },
+      "windData": {
+        "attribute": "COLOR_0",
+        "sourceAttribute": "wind",
+        "domain": "POINT",
+        "storage": "BYTE_COLOR",
+        "vertexCount": 2108,
+        "foliageVertexCount": 1920,
+        "rootVertexCount": 11,
+        "rootMaxBend": 0.0,
+        "crownMinBend": 0.314,
+        "crownMaxBend": 1.0,
+        "channels": {
+          "bendR": {
+            "min": 0.0,
+            "max": 1.0,
+            "mean": 0.5558
+          },
+          "phaseG": {
+            "min": 0.0009,
+            "max": 1.0,
+            "mean": 0.4458
+          },
+          "flutterB": {
+            "min": 0.0,
+            "max": 0.956,
+            "mean": 0.7023
+          },
+          "reservedA": {
+            "min": 1.0,
+            "max": 1.0,
+            "mean": 1.0
+          }
+        }
+      },
+      "barkData": {
+        "attribute": "TEXCOORD_0",
+        "mapping": "branch_local_circumference_u_physical_length_v",
+        "authoredRepeatsPerMeter": 0.72,
+        "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
+        "barkVertexCount": 188,
+        "barkLoopCount": 984,
+        "uRange": [
+          0.0125,
+          1.1071
+        ],
+        "vRange": [
+          0.0,
+          3.305
+        ]
+      },
+      "canopyStructure": {
+        "foliagePrimitive": "individual_triangular_leaf_card",
+        "foliagePrimitiveCount": 640,
+        "structure": "multitier_raised_lobe_four_generation_savanna_leaf_canopy",
+        "foliageDistribution": "branch_length_and_terminal",
+        "crownLayerCount": 2,
+        "branchClusterCount": 10,
+        "branchInteriorAnchorCount": 11,
+        "terminalFoliageAnchorCount": 11,
+        "terminalTipCount": 11
+      },
+      "treePhenotype": {
+        "architecture": "savanna",
+        "ageBand": "young",
+        "nominalGrowth": 0.0,
+        "branchGenerationCount": 3,
+        "primaryBranchCount": 5,
+        "secondaryBranchCount": 5,
+        "tertiaryBranchCount": 0,
+        "terminalTipCount": 11,
+        "branchInteriorAnchorCount": 11,
+        "minimumSectorOccupancy": 1,
+        "minimumFullnessPassed": true,
+        "variant": 1
+      }
+    },
+    {
+      "id": "ecological_savanna_young_02",
+      "path": "assets/visual/generated/environment/ecological_savanna_young_02.glb",
+      "family": "ecological_savanna_tree",
+      "growthClass": "young",
+      "ageBand": "young",
+      "biomeTags": [
+        "savanna",
+        "plains",
+        "desert",
+        "beach"
+      ],
+      "triangleCount": 968,
+      "triangleLimit": 2600,
+      "boundingBox": {
+        "min": [
+          -3.7221,
+          -4.1602,
+          0.0
+        ],
+        "max": [
+          3.8504,
+          3.0991,
+          9.532
+        ],
+        "size": [
+          7.5725,
+          7.2593,
+          9.532
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "grounded": true,
+        "minZ": 0.0,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "trunk",
+        "bark_dark",
+        "savanna_leaf",
+        "leaf_warm"
+      ],
+      "materialRoles": {
+        "trunkBranch": [
+          "trunk",
+          "bark_dark"
+        ],
+        "foliage": [
+          "savanna_leaf",
+          "leaf_warm"
+        ]
+      },
+      "runtimeEnabled": true,
+      "animationContract": {
+        "skeletons": 0,
+        "shapeKeys": 0,
+        "animationClips": 0
+      },
+      "treeMetrics": {
+        "growthClass": "young",
+        "height": 9.532,
+        "trunkRadius": 0.3105,
+        "canopyRadius": 3.7863,
+        "canopyRadiusX": 3.7863,
+        "canopyRadiusY": 3.6296,
+        "canopyBase": 4.3371,
+        "canopyTop": 9.532
+      },
+      "windData": {
+        "attribute": "COLOR_0",
+        "sourceAttribute": "wind",
+        "domain": "POINT",
+        "storage": "BYTE_COLOR",
+        "vertexCount": 2108,
+        "foliageVertexCount": 1920,
+        "rootVertexCount": 11,
+        "rootMaxBend": 0.0,
+        "crownMinBend": 0.3095,
+        "crownMaxBend": 1.0,
+        "channels": {
+          "bendR": {
+            "min": 0.0,
+            "max": 1.0,
+            "mean": 0.5493
+          },
+          "phaseG": {
+            "min": 0.0,
+            "max": 1.0,
+            "mean": 0.5159
+          },
+          "flutterB": {
+            "min": 0.0,
+            "max": 0.956,
+            "mean": 0.7022
+          },
+          "reservedA": {
+            "min": 1.0,
+            "max": 1.0,
+            "mean": 1.0
+          }
+        }
+      },
+      "barkData": {
+        "attribute": "TEXCOORD_0",
+        "mapping": "branch_local_circumference_u_physical_length_v",
+        "authoredRepeatsPerMeter": 0.72,
+        "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
+        "barkVertexCount": 188,
+        "barkLoopCount": 984,
+        "uRange": [
+          0.0125,
+          1.1071
+        ],
+        "vRange": [
+          0.0,
+          3.4237
+        ]
+      },
+      "canopyStructure": {
+        "foliagePrimitive": "individual_triangular_leaf_card",
+        "foliagePrimitiveCount": 640,
+        "structure": "multitier_raised_lobe_four_generation_savanna_leaf_canopy",
+        "foliageDistribution": "branch_length_and_terminal",
+        "crownLayerCount": 2,
+        "branchClusterCount": 10,
+        "branchInteriorAnchorCount": 11,
+        "terminalFoliageAnchorCount": 11,
+        "terminalTipCount": 11
+      },
+      "treePhenotype": {
+        "architecture": "savanna",
+        "ageBand": "young",
+        "nominalGrowth": 0.0,
+        "branchGenerationCount": 3,
+        "primaryBranchCount": 5,
+        "secondaryBranchCount": 5,
+        "tertiaryBranchCount": 0,
+        "terminalTipCount": 11,
+        "branchInteriorAnchorCount": 11,
+        "minimumSectorOccupancy": 1,
+        "minimumFullnessPassed": true,
+        "variant": 2
+      }
+    },
+    {
+      "id": "ecological_savanna_established_01",
+      "path": "assets/visual/generated/environment/ecological_savanna_established_01.glb",
+      "family": "ecological_savanna_tree",
+      "growthClass": "established",
+      "ageBand": "established",
+      "biomeTags": [
+        "savanna",
+        "plains",
+        "desert",
+        "beach"
+      ],
+      "triangleCount": 2276,
+      "triangleLimit": 4400,
+      "boundingBox": {
+        "min": [
+          -8.4753,
+          -6.4421,
+          0.0
+        ],
+        "max": [
+          7.7475,
+          6.1827,
+          17.3027
+        ],
+        "size": [
+          16.2228,
+          12.6249,
+          17.3027
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "grounded": true,
+        "minZ": 0.0,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "trunk",
+        "bark_dark",
+        "savanna_leaf",
+        "leaf_warm"
+      ],
+      "materialRoles": {
+        "trunkBranch": [
+          "trunk",
+          "bark_dark"
+        ],
+        "foliage": [
+          "savanna_leaf",
+          "leaf_warm"
+        ]
+      },
+      "runtimeEnabled": true,
+      "animationContract": {
+        "skeletons": 0,
+        "shapeKeys": 0,
+        "animationClips": 0
+      },
+      "treeMetrics": {
+        "growthClass": "established",
+        "height": 17.3027,
+        "trunkRadius": 0.6272,
+        "canopyRadius": 8.1114,
+        "canopyRadiusX": 8.1114,
+        "canopyRadiusY": 6.3124,
+        "canopyBase": 8.546,
+        "canopyTop": 17.3027
+      },
+      "windData": {
+        "attribute": "COLOR_0",
+        "sourceAttribute": "wind",
+        "domain": "POINT",
+        "storage": "BYTE_COLOR",
+        "vertexCount": 5190,
+        "foliageVertexCount": 4800,
+        "rootVertexCount": 11,
+        "rootMaxBend": 0.0,
+        "crownMinBend": 0.3515,
+        "crownMaxBend": 1.0,
+        "channels": {
+          "bendR": {
+            "min": 0.0,
+            "max": 1.0,
+            "mean": 0.5906
+          },
+          "phaseG": {
+            "min": 0.0012,
+            "max": 1.0,
+            "mean": 0.5577
+          },
+          "flutterB": {
+            "min": 0.0,
+            "max": 0.956,
+            "mean": 0.7129
+          },
+          "reservedA": {
+            "min": 1.0,
+            "max": 1.0,
+            "mean": 1.0
+          }
+        }
+      },
+      "barkData": {
+        "attribute": "TEXCOORD_0",
+        "mapping": "branch_local_circumference_u_physical_length_v",
+        "authoredRepeatsPerMeter": 0.72,
+        "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
+        "barkVertexCount": 390,
+        "barkLoopCount": 2028,
+        "uRange": [
+          0.0125,
+          1.1071
+        ],
+        "vRange": [
+          0.0,
+          6.261
+        ]
+      },
+      "canopyStructure": {
+        "foliagePrimitive": "individual_triangular_leaf_card",
+        "foliagePrimitiveCount": 1600,
+        "structure": "multitier_raised_lobe_four_generation_savanna_leaf_canopy",
+        "foliageDistribution": "branch_length_and_terminal",
+        "crownLayerCount": 3,
+        "branchClusterCount": 24,
+        "branchInteriorAnchorCount": 34,
+        "terminalFoliageAnchorCount": 25,
+        "terminalTipCount": 25
+      },
+      "treePhenotype": {
+        "architecture": "savanna",
+        "ageBand": "established",
+        "nominalGrowth": 0.25,
+        "branchGenerationCount": 3,
+        "primaryBranchCount": 8,
+        "secondaryBranchCount": 16,
+        "tertiaryBranchCount": 0,
+        "terminalTipCount": 25,
+        "branchInteriorAnchorCount": 34,
+        "minimumSectorOccupancy": 1,
+        "minimumFullnessPassed": true,
+        "variant": 1
+      }
+    },
+    {
+      "id": "ecological_savanna_established_02",
+      "path": "assets/visual/generated/environment/ecological_savanna_established_02.glb",
+      "family": "ecological_savanna_tree",
+      "growthClass": "established",
+      "ageBand": "established",
+      "biomeTags": [
+        "savanna",
+        "plains",
+        "desert",
+        "beach"
+      ],
+      "triangleCount": 2276,
+      "triangleLimit": 4400,
+      "boundingBox": {
+        "min": [
+          -8.0336,
+          -6.156,
+          0.0
+        ],
+        "max": [
+          6.3344,
+          6.4409,
+          17.9094
+        ],
+        "size": [
+          14.368,
+          12.5969,
+          17.9094
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "grounded": true,
+        "minZ": 0.0,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "trunk",
+        "bark_dark",
+        "savanna_leaf",
+        "leaf_warm"
+      ],
+      "materialRoles": {
+        "trunkBranch": [
+          "trunk",
+          "bark_dark"
+        ],
+        "foliage": [
+          "savanna_leaf",
+          "leaf_warm"
+        ]
+      },
+      "runtimeEnabled": true,
+      "animationContract": {
+        "skeletons": 0,
+        "shapeKeys": 0,
+        "animationClips": 0
+      },
+      "treeMetrics": {
+        "growthClass": "established",
+        "height": 17.9094,
+        "trunkRadius": 0.6727,
+        "canopyRadius": 7.184,
+        "canopyRadiusX": 7.184,
+        "canopyRadiusY": 6.2984,
+        "canopyBase": 8.9979,
+        "canopyTop": 17.9094
+      },
+      "windData": {
+        "attribute": "COLOR_0",
+        "sourceAttribute": "wind",
+        "domain": "POINT",
+        "storage": "BYTE_COLOR",
+        "vertexCount": 5190,
+        "foliageVertexCount": 4800,
+        "rootVertexCount": 11,
+        "rootMaxBend": 0.0,
+        "crownMinBend": 0.3613,
+        "crownMaxBend": 1.0,
+        "channels": {
+          "bendR": {
+            "min": 0.0,
+            "max": 1.0,
+            "mean": 0.5946
+          },
+          "phaseG": {
+            "min": 0.0003,
+            "max": 1.0,
+            "mean": 0.5143
+          },
+          "flutterB": {
+            "min": 0.0,
+            "max": 0.956,
+            "mean": 0.713
+          },
+          "reservedA": {
+            "min": 1.0,
+            "max": 1.0,
+            "mean": 1.0
+          }
+        }
+      },
+      "barkData": {
+        "attribute": "TEXCOORD_0",
+        "mapping": "branch_local_circumference_u_physical_length_v",
+        "authoredRepeatsPerMeter": 0.72,
+        "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
+        "barkVertexCount": 390,
+        "barkLoopCount": 2028,
+        "uRange": [
+          0.0125,
+          1.1071
+        ],
+        "vRange": [
+          0.0,
+          6.5412
+        ]
+      },
+      "canopyStructure": {
+        "foliagePrimitive": "individual_triangular_leaf_card",
+        "foliagePrimitiveCount": 1600,
+        "structure": "multitier_raised_lobe_four_generation_savanna_leaf_canopy",
+        "foliageDistribution": "branch_length_and_terminal",
+        "crownLayerCount": 3,
+        "branchClusterCount": 24,
+        "branchInteriorAnchorCount": 34,
+        "terminalFoliageAnchorCount": 25,
+        "terminalTipCount": 25
+      },
+      "treePhenotype": {
+        "architecture": "savanna",
+        "ageBand": "established",
+        "nominalGrowth": 0.25,
+        "branchGenerationCount": 3,
+        "primaryBranchCount": 8,
+        "secondaryBranchCount": 16,
+        "tertiaryBranchCount": 0,
+        "terminalTipCount": 25,
+        "branchInteriorAnchorCount": 34,
+        "minimumSectorOccupancy": 1,
+        "minimumFullnessPassed": true,
+        "variant": 2
+      }
+    },
+    {
+      "id": "ecological_savanna_mature_01",
+      "path": "assets/visual/generated/environment/ecological_savanna_mature_01.glb",
+      "family": "ecological_savanna_tree",
+      "growthClass": "mature",
+      "ageBand": "mature",
+      "biomeTags": [
+        "savanna",
+        "plains",
+        "desert",
+        "beach"
+      ],
+      "triangleCount": 4724,
+      "triangleLimit": 7400,
+      "boundingBox": {
+        "min": [
+          -13.9999,
+          -9.3853,
+          0.0
+        ],
+        "max": [
+          14.391,
+          9.9302,
+          29.2199
+        ],
+        "size": [
+          28.3908,
+          19.3154,
+          29.2199
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "grounded": true,
+        "minZ": 0.0,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "trunk",
+        "bark_dark",
+        "savanna_leaf",
+        "leaf_warm"
+      ],
+      "materialRoles": {
+        "trunkBranch": [
+          "trunk",
+          "bark_dark"
+        ],
+        "foliage": [
+          "savanna_leaf",
+          "leaf_warm"
+        ]
+      },
+      "runtimeEnabled": true,
+      "animationContract": {
+        "skeletons": 0,
+        "shapeKeys": 0,
+        "animationClips": 0
+      },
+      "treeMetrics": {
+        "growthClass": "mature",
+        "height": 29.2199,
+        "trunkRadius": 1.4475,
+        "canopyRadius": 14.1954,
+        "canopyRadiusX": 14.1954,
+        "canopyRadiusY": 9.6577,
+        "canopyBase": 15.5794,
+        "canopyTop": 29.2199
+      },
+      "windData": {
+        "attribute": "COLOR_0",
+        "sourceAttribute": "wind",
+        "domain": "POINT",
+        "storage": "BYTE_COLOR",
+        "vertexCount": 11454,
+        "foliageVertexCount": 10800,
+        "rootVertexCount": 11,
+        "rootMaxBend": 0.0,
+        "crownMinBend": 0.3968,
+        "crownMaxBend": 1.0,
+        "channels": {
+          "bendR": {
+            "min": 0.0,
+            "max": 1.0,
+            "mean": 0.6167
+          },
+          "phaseG": {
+            "min": 0.0,
+            "max": 1.0,
+            "mean": 0.5389
+          },
+          "flutterB": {
+            "min": 0.0,
+            "max": 0.956,
+            "mean": 0.7266
+          },
+          "reservedA": {
+            "min": 1.0,
+            "max": 1.0,
+            "mean": 1.0
+          }
+        }
+      },
+      "barkData": {
+        "attribute": "TEXCOORD_0",
+        "mapping": "branch_local_circumference_u_physical_length_v",
+        "authoredRepeatsPerMeter": 0.72,
+        "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
+        "barkVertexCount": 654,
+        "barkLoopCount": 3372,
+        "uRange": [
+          0.0125,
+          1.1071
+        ],
+        "vRange": [
+          0.0,
+          10.8208
+        ]
+      },
+      "canopyStructure": {
+        "foliagePrimitive": "individual_triangular_leaf_card",
+        "foliagePrimitiveCount": 3600,
+        "structure": "multitier_raised_lobe_four_generation_savanna_leaf_canopy",
+        "foliageDistribution": "branch_length_and_terminal",
+        "crownLayerCount": 4,
+        "branchClusterCount": 44,
+        "branchInteriorAnchorCount": 57,
+        "terminalFoliageAnchorCount": 45,
+        "terminalTipCount": 45
+      },
+      "treePhenotype": {
+        "architecture": "savanna",
+        "ageBand": "mature",
+        "nominalGrowth": 0.5,
+        "branchGenerationCount": 4,
+        "primaryBranchCount": 11,
+        "secondaryBranchCount": 22,
+        "tertiaryBranchCount": 11,
+        "terminalTipCount": 45,
+        "branchInteriorAnchorCount": 57,
+        "minimumSectorOccupancy": 1,
+        "minimumFullnessPassed": true,
+        "variant": 1
+      }
+    },
+    {
+      "id": "ecological_savanna_mature_02",
+      "path": "assets/visual/generated/environment/ecological_savanna_mature_02.glb",
+      "family": "ecological_savanna_tree",
+      "growthClass": "mature",
+      "ageBand": "mature",
+      "biomeTags": [
+        "savanna",
+        "plains",
+        "desert",
+        "beach"
+      ],
+      "triangleCount": 4724,
+      "triangleLimit": 7400,
+      "boundingBox": {
+        "min": [
+          -12.8485,
+          -8.6711,
+          0.0
+        ],
+        "max": [
+          14.6448,
+          8.2162,
+          31.7484
+        ],
+        "size": [
+          27.4933,
+          16.8873,
+          31.7484
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "grounded": true,
+        "minZ": 0.0,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "trunk",
+        "bark_dark",
+        "savanna_leaf",
+        "leaf_warm"
+      ],
+      "materialRoles": {
+        "trunkBranch": [
+          "trunk",
+          "bark_dark"
+        ],
+        "foliage": [
+          "savanna_leaf",
+          "leaf_warm"
+        ]
+      },
+      "runtimeEnabled": true,
+      "animationContract": {
+        "skeletons": 0,
+        "shapeKeys": 0,
+        "animationClips": 0
+      },
+      "treeMetrics": {
+        "growthClass": "mature",
+        "height": 31.7484,
+        "trunkRadius": 1.5525,
+        "canopyRadius": 13.7467,
+        "canopyRadiusX": 13.7467,
+        "canopyRadiusY": 8.4436,
+        "canopyBase": 16.6513,
+        "canopyTop": 31.7484
+      },
+      "windData": {
+        "attribute": "COLOR_0",
+        "sourceAttribute": "wind",
+        "domain": "POINT",
+        "storage": "BYTE_COLOR",
+        "vertexCount": 11454,
+        "foliageVertexCount": 10800,
+        "rootVertexCount": 11,
+        "rootMaxBend": 0.0,
+        "crownMinBend": 0.3864,
+        "crownMaxBend": 1.0,
+        "channels": {
+          "bendR": {
+            "min": 0.0,
+            "max": 1.0,
+            "mean": 0.6271
+          },
+          "phaseG": {
+            "min": 0.0,
+            "max": 1.0,
+            "mean": 0.5484
+          },
+          "flutterB": {
+            "min": 0.0,
+            "max": 0.956,
+            "mean": 0.7266
+          },
+          "reservedA": {
+            "min": 1.0,
+            "max": 1.0,
+            "mean": 1.0
+          }
+        }
+      },
+      "barkData": {
+        "attribute": "TEXCOORD_0",
+        "mapping": "branch_local_circumference_u_physical_length_v",
+        "authoredRepeatsPerMeter": 0.72,
+        "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
+        "barkVertexCount": 654,
+        "barkLoopCount": 3372,
+        "uRange": [
+          0.0125,
+          1.1071
+        ],
+        "vRange": [
+          0.0,
+          11.6103
+        ]
+      },
+      "canopyStructure": {
+        "foliagePrimitive": "individual_triangular_leaf_card",
+        "foliagePrimitiveCount": 3600,
+        "structure": "multitier_raised_lobe_four_generation_savanna_leaf_canopy",
+        "foliageDistribution": "branch_length_and_terminal",
+        "crownLayerCount": 4,
+        "branchClusterCount": 44,
+        "branchInteriorAnchorCount": 57,
+        "terminalFoliageAnchorCount": 45,
+        "terminalTipCount": 45
+      },
+      "treePhenotype": {
+        "architecture": "savanna",
+        "ageBand": "mature",
+        "nominalGrowth": 0.5,
+        "branchGenerationCount": 4,
+        "primaryBranchCount": 11,
+        "secondaryBranchCount": 22,
+        "tertiaryBranchCount": 11,
+        "terminalTipCount": 45,
+        "branchInteriorAnchorCount": 57,
+        "minimumSectorOccupancy": 1,
+        "minimumFullnessPassed": true,
+        "variant": 2
+      }
+    },
+    {
+      "id": "ecological_savanna_old_01",
+      "path": "assets/visual/generated/environment/ecological_savanna_old_01.glb",
+      "family": "ecological_savanna_tree",
+      "growthClass": "old",
+      "ageBand": "old",
+      "biomeTags": [
+        "savanna",
+        "plains",
+        "desert",
+        "beach"
+      ],
+      "triangleCount": 8568,
+      "triangleLimit": 11600,
+      "boundingBox": {
+        "min": [
+          -18.1263,
+          -16.4158,
+          0.0
+        ],
+        "max": [
+          18.673,
+          19.8831,
+          47.5921
+        ],
+        "size": [
+          36.7992,
+          36.2989,
+          47.5921
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "grounded": true,
+        "minZ": 0.0,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "trunk",
+        "bark_dark",
+        "savanna_leaf",
+        "leaf_warm"
+      ],
+      "materialRoles": {
+        "trunkBranch": [
+          "trunk",
+          "bark_dark"
+        ],
+        "foliage": [
+          "savanna_leaf",
+          "leaf_warm"
+        ]
+      },
+      "runtimeEnabled": true,
+      "animationContract": {
+        "skeletons": 0,
+        "shapeKeys": 0,
+        "animationClips": 0
+      },
+      "treeMetrics": {
+        "growthClass": "old",
+        "height": 47.5921,
+        "trunkRadius": 2.895,
+        "canopyRadius": 18.3996,
+        "canopyRadiusX": 18.3996,
+        "canopyRadiusY": 18.1495,
+        "canopyBase": 24.9609,
+        "canopyTop": 47.5921
+      },
+      "windData": {
+        "attribute": "COLOR_0",
+        "sourceAttribute": "wind",
+        "domain": "POINT",
+        "storage": "BYTE_COLOR",
+        "vertexCount": 20468,
+        "foliageVertexCount": 19200,
+        "rootVertexCount": 11,
+        "rootMaxBend": 0.0,
+        "crownMinBend": 0.3864,
+        "crownMaxBend": 1.0,
+        "channels": {
+          "bendR": {
+            "min": 0.0,
+            "max": 1.0,
+            "mean": 0.6608
+          },
+          "phaseG": {
+            "min": 0.0,
+            "max": 1.0,
+            "mean": 0.4864
+          },
+          "flutterB": {
+            "min": 0.0,
+            "max": 0.956,
+            "mean": 0.723
+          },
+          "reservedA": {
+            "min": 1.0,
+            "max": 1.0,
+            "mean": 1.0
+          }
+        }
+      },
+      "barkData": {
+        "attribute": "TEXCOORD_0",
+        "mapping": "branch_local_circumference_u_physical_length_v",
+        "authoredRepeatsPerMeter": 0.72,
+        "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
+        "barkVertexCount": 1268,
+        "barkLoopCount": 6504,
+        "uRange": [
+          0.0125,
+          1.1071
+        ],
+        "vRange": [
+          0.0,
+          17.4985
+        ]
+      },
+      "canopyStructure": {
+        "foliagePrimitive": "individual_triangular_leaf_card",
+        "foliagePrimitiveCount": 6400,
+        "structure": "multitier_raised_lobe_four_generation_savanna_leaf_canopy",
+        "foliageDistribution": "branch_length_and_terminal",
+        "crownLayerCount": 5,
+        "branchClusterCount": 90,
+        "branchInteriorAnchorCount": 168,
+        "terminalFoliageAnchorCount": 91,
+        "terminalTipCount": 91
+      },
+      "treePhenotype": {
+        "architecture": "savanna",
+        "ageBand": "old",
+        "nominalGrowth": 0.75,
+        "branchGenerationCount": 4,
+        "primaryBranchCount": 15,
+        "secondaryBranchCount": 45,
+        "tertiaryBranchCount": 30,
+        "terminalTipCount": 91,
+        "branchInteriorAnchorCount": 168,
+        "minimumSectorOccupancy": 1,
+        "minimumFullnessPassed": true,
+        "variant": 1
+      }
+    },
+    {
+      "id": "ecological_savanna_old_02",
+      "path": "assets/visual/generated/environment/ecological_savanna_old_02.glb",
+      "family": "ecological_savanna_tree",
+      "growthClass": "old",
+      "ageBand": "old",
+      "biomeTags": [
+        "savanna",
+        "plains",
+        "desert",
+        "beach"
+      ],
+      "triangleCount": 8568,
+      "triangleLimit": 11600,
+      "boundingBox": {
+        "min": [
+          -19.1229,
+          -17.3164,
+          0.0
+        ],
+        "max": [
+          20.1904,
+          17.3403,
+          50.0877
+        ],
+        "size": [
+          39.3134,
+          34.6566,
+          50.0877
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "grounded": true,
+        "minZ": 0.0,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "trunk",
+        "bark_dark",
+        "savanna_leaf",
+        "leaf_warm"
+      ],
+      "materialRoles": {
+        "trunkBranch": [
+          "trunk",
+          "bark_dark"
+        ],
+        "foliage": [
+          "savanna_leaf",
+          "leaf_warm"
+        ]
+      },
+      "runtimeEnabled": true,
+      "animationContract": {
+        "skeletons": 0,
+        "shapeKeys": 0,
+        "animationClips": 0
+      },
+      "treeMetrics": {
+        "growthClass": "old",
+        "height": 50.0877,
+        "trunkRadius": 3.105,
+        "canopyRadius": 19.6567,
+        "canopyRadiusX": 19.6567,
+        "canopyRadiusY": 17.3283,
+        "canopyBase": 26.7719,
+        "canopyTop": 50.0877
+      },
+      "windData": {
+        "attribute": "COLOR_0",
+        "sourceAttribute": "wind",
+        "domain": "POINT",
+        "storage": "BYTE_COLOR",
+        "vertexCount": 20468,
+        "foliageVertexCount": 19200,
+        "rootVertexCount": 11,
+        "rootMaxBend": 0.0,
+        "crownMinBend": 0.3968,
+        "crownMaxBend": 1.0,
+        "channels": {
+          "bendR": {
+            "min": 0.0,
+            "max": 1.0,
+            "mean": 0.6651
+          },
+          "phaseG": {
+            "min": 0.0,
+            "max": 1.0,
+            "mean": 0.5698
+          },
+          "flutterB": {
+            "min": 0.0,
+            "max": 0.956,
+            "mean": 0.723
+          },
+          "reservedA": {
+            "min": 1.0,
+            "max": 1.0,
+            "mean": 1.0
+          }
+        }
+      },
+      "barkData": {
+        "attribute": "TEXCOORD_0",
+        "mapping": "branch_local_circumference_u_physical_length_v",
+        "authoredRepeatsPerMeter": 0.72,
+        "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
+        "barkVertexCount": 1268,
+        "barkLoopCount": 6504,
+        "uRange": [
+          0.0125,
+          1.1071
+        ],
+        "vRange": [
+          0.0,
+          18.491
+        ]
+      },
+      "canopyStructure": {
+        "foliagePrimitive": "individual_triangular_leaf_card",
+        "foliagePrimitiveCount": 6400,
+        "structure": "multitier_raised_lobe_four_generation_savanna_leaf_canopy",
+        "foliageDistribution": "branch_length_and_terminal",
+        "crownLayerCount": 5,
+        "branchClusterCount": 90,
+        "branchInteriorAnchorCount": 168,
+        "terminalFoliageAnchorCount": 91,
+        "terminalTipCount": 91
+      },
+      "treePhenotype": {
+        "architecture": "savanna",
+        "ageBand": "old",
+        "nominalGrowth": 0.75,
+        "branchGenerationCount": 4,
+        "primaryBranchCount": 15,
+        "secondaryBranchCount": 45,
+        "tertiaryBranchCount": 30,
+        "terminalTipCount": 91,
+        "branchInteriorAnchorCount": 168,
+        "minimumSectorOccupancy": 1,
+        "minimumFullnessPassed": true,
+        "variant": 2
+      }
+    },
+    {
+      "id": "ecological_savanna_ancient_01",
+      "path": "assets/visual/generated/environment/ecological_savanna_ancient_01.glb",
+      "family": "ecological_savanna_tree",
+      "growthClass": "ancient",
+      "ageBand": "ancient",
+      "biomeTags": [
+        "savanna",
+        "plains",
+        "desert",
+        "beach"
+      ],
+      "triangleCount": 11928,
+      "triangleLimit": 15400,
+      "boundingBox": {
+        "min": [
+          -28.7431,
+          -27.9489,
+          0.0
+        ],
+        "max": [
+          29.2417,
+          23.9844,
+          67.7049
+        ],
+        "size": [
+          57.9849,
+          51.9333,
+          67.7049
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "grounded": true,
+        "minZ": 0.0,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "trunk",
+        "bark_dark",
+        "savanna_leaf",
+        "leaf_warm"
+      ],
+      "materialRoles": {
+        "trunkBranch": [
+          "trunk",
+          "bark_dark"
+        ],
+        "foliage": [
+          "savanna_leaf",
+          "leaf_warm"
+        ]
+      },
+      "runtimeEnabled": true,
+      "animationContract": {
+        "skeletons": 0,
+        "shapeKeys": 0,
+        "animationClips": 0
+      },
+      "treeMetrics": {
+        "growthClass": "ancient",
+        "height": 67.7049,
+        "trunkRadius": 5.018,
+        "canopyRadius": 28.9924,
+        "canopyRadiusX": 28.9924,
+        "canopyRadiusY": 25.9666,
+        "canopyBase": 35.978,
+        "canopyTop": 67.7049
+      },
+      "windData": {
+        "attribute": "COLOR_0",
+        "sourceAttribute": "wind",
+        "domain": "POINT",
+        "storage": "BYTE_COLOR",
+        "vertexCount": 29196,
+        "foliageVertexCount": 27600,
+        "rootVertexCount": 11,
+        "rootMaxBend": 0.0,
+        "crownMinBend": 0.3916,
+        "crownMaxBend": 1.0,
+        "channels": {
+          "bendR": {
+            "min": 0.0,
+            "max": 1.0,
+            "mean": 0.6569
+          },
+          "phaseG": {
+            "min": 0.0,
+            "max": 1.0,
+            "mean": 0.5345
+          },
+          "flutterB": {
+            "min": 0.0,
+            "max": 0.956,
+            "mean": 0.7285
+          },
+          "reservedA": {
+            "min": 1.0,
+            "max": 1.0,
+            "mean": 1.0
+          }
+        }
+      },
+      "barkData": {
+        "attribute": "TEXCOORD_0",
+        "mapping": "branch_local_circumference_u_physical_length_v",
+        "authoredRepeatsPerMeter": 0.72,
+        "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
+        "barkVertexCount": 1596,
+        "barkLoopCount": 8184,
+        "uRange": [
+          0.0125,
+          1.1071
+        ],
+        "vRange": [
+          0.0,
+          25.0502
+        ]
+      },
+      "canopyStructure": {
+        "foliagePrimitive": "individual_triangular_leaf_card",
+        "foliagePrimitiveCount": 9200,
+        "structure": "multitier_raised_lobe_four_generation_savanna_leaf_canopy",
+        "foliageDistribution": "branch_length_and_terminal",
+        "crownLayerCount": 6,
+        "branchClusterCount": 114,
+        "branchInteriorAnchorCount": 289,
+        "terminalFoliageAnchorCount": 115,
+        "terminalTipCount": 115
+      },
+      "treePhenotype": {
+        "architecture": "savanna",
+        "ageBand": "ancient",
+        "nominalGrowth": 1.0,
+        "branchGenerationCount": 4,
+        "primaryBranchCount": 19,
+        "secondaryBranchCount": 57,
+        "tertiaryBranchCount": 38,
+        "terminalTipCount": 115,
+        "branchInteriorAnchorCount": 289,
+        "minimumSectorOccupancy": 1,
+        "minimumFullnessPassed": true,
+        "variant": 1
+      }
+    },
+    {
+      "id": "ecological_savanna_ancient_02",
+      "path": "assets/visual/generated/environment/ecological_savanna_ancient_02.glb",
+      "family": "ecological_savanna_tree",
+      "growthClass": "ancient",
+      "ageBand": "ancient",
+      "biomeTags": [
+        "savanna",
+        "plains",
+        "desert",
+        "beach"
+      ],
+      "triangleCount": 11928,
+      "triangleLimit": 15400,
+      "boundingBox": {
+        "min": [
+          -27.5255,
+          -24.8238,
+          0.0
+        ],
+        "max": [
+          28.9536,
+          22.0517,
+          70.2808
+        ],
+        "size": [
+          56.4791,
+          46.8755,
+          70.2808
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "grounded": true,
+        "minZ": 0.0,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "trunk",
+        "bark_dark",
+        "savanna_leaf",
+        "leaf_warm"
+      ],
+      "materialRoles": {
+        "trunkBranch": [
+          "trunk",
+          "bark_dark"
+        ],
+        "foliage": [
+          "savanna_leaf",
+          "leaf_warm"
+        ]
+      },
+      "runtimeEnabled": true,
+      "animationContract": {
+        "skeletons": 0,
+        "shapeKeys": 0,
+        "animationClips": 0
+      },
+      "treeMetrics": {
+        "growthClass": "ancient",
+        "height": 70.2808,
+        "trunkRadius": 5.382,
+        "canopyRadius": 28.2396,
+        "canopyRadiusX": 28.2396,
+        "canopyRadiusY": 23.4377,
+        "canopyBase": 37.1677,
+        "canopyTop": 70.2808
+      },
+      "windData": {
+        "attribute": "COLOR_0",
+        "sourceAttribute": "wind",
+        "domain": "POINT",
+        "storage": "BYTE_COLOR",
+        "vertexCount": 29196,
+        "foliageVertexCount": 27600,
+        "rootVertexCount": 11,
+        "rootMaxBend": 0.0,
+        "crownMinBend": 0.3916,
+        "crownMaxBend": 1.0,
+        "channels": {
+          "bendR": {
+            "min": 0.0,
+            "max": 1.0,
+            "mean": 0.6615
+          },
+          "phaseG": {
+            "min": 0.0,
+            "max": 1.0,
+            "mean": 0.4999
+          },
+          "flutterB": {
+            "min": 0.0,
+            "max": 0.956,
+            "mean": 0.7285
+          },
+          "reservedA": {
+            "min": 1.0,
+            "max": 1.0,
+            "mean": 1.0
+          }
+        }
+      },
+      "barkData": {
+        "attribute": "TEXCOORD_0",
+        "mapping": "branch_local_circumference_u_physical_length_v",
+        "authoredRepeatsPerMeter": 0.72,
+        "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
+        "barkVertexCount": 1596,
+        "barkLoopCount": 8184,
+        "uRange": [
+          0.0125,
+          1.1071
+        ],
+        "vRange": [
+          0.0,
+          25.9514
+        ]
+      },
+      "canopyStructure": {
+        "foliagePrimitive": "individual_triangular_leaf_card",
+        "foliagePrimitiveCount": 9200,
+        "structure": "multitier_raised_lobe_four_generation_savanna_leaf_canopy",
+        "foliageDistribution": "branch_length_and_terminal",
+        "crownLayerCount": 6,
+        "branchClusterCount": 114,
+        "branchInteriorAnchorCount": 289,
+        "terminalFoliageAnchorCount": 115,
+        "terminalTipCount": 115
+      },
+      "treePhenotype": {
+        "architecture": "savanna",
+        "ageBand": "ancient",
+        "nominalGrowth": 1.0,
+        "branchGenerationCount": 4,
+        "primaryBranchCount": 19,
+        "secondaryBranchCount": 57,
+        "tertiaryBranchCount": 38,
+        "terminalTipCount": 115,
+        "branchInteriorAnchorCount": 289,
+        "minimumSectorOccupancy": 1,
+        "minimumFullnessPassed": true,
+        "variant": 2
       }
     },
     {
       "id": "mature_broadleaf_01",
       "path": "assets/visual/generated/environment/mature_broadleaf_01.glb",
       "family": "mature_broadleaf_tree",
+      "growthClass": "mature",
+      "ageBand": "",
       "biomeTags": [
         "forest",
         "plains",
         "swamp"
       ],
       "triangleCount": 1598,
+      "triangleLimit": 8200,
       "boundingBox": {
         "min": [
           -6.218,
@@ -1445,24 +6195,47 @@
           }
         }
       },
+      "barkData": {
+        "attribute": "TEXCOORD_0",
+        "mapping": "branch_local_circumference_u_physical_length_v",
+        "authoredRepeatsPerMeter": 0.72,
+        "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
+        "barkVertexCount": 224,
+        "barkLoopCount": 1176,
+        "uRange": [
+          0.0076,
+          1.1071
+        ],
+        "vRange": [
+          0.0,
+          6.7983
+        ]
+      },
       "canopyStructure": {
         "foliagePrimitive": "individual_triangular_leaf_card",
         "foliagePrimitiveCount": 1206,
         "structure": "layered_branch_attached_leaf_canopy",
+        "foliageDistribution": "terminal",
         "crownLayerCount": 4,
-        "branchClusterCount": 11
+        "branchClusterCount": 11,
+        "branchInteriorAnchorCount": 0,
+        "terminalFoliageAnchorCount": 0,
+        "terminalTipCount": 0
       }
     },
     {
       "id": "mature_broadleaf_02",
       "path": "assets/visual/generated/environment/mature_broadleaf_02.glb",
       "family": "mature_broadleaf_tree",
+      "growthClass": "mature",
+      "ageBand": "",
       "biomeTags": [
         "forest",
         "plains",
         "swamp"
       ],
       "triangleCount": 1772,
+      "triangleLimit": 8200,
       "boundingBox": {
         "min": [
           -7.5438,
@@ -1558,24 +6331,47 @@
           }
         }
       },
+      "barkData": {
+        "attribute": "TEXCOORD_0",
+        "mapping": "branch_local_circumference_u_physical_length_v",
+        "authoredRepeatsPerMeter": 0.72,
+        "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
+        "barkVertexCount": 240,
+        "barkLoopCount": 1260,
+        "uRange": [
+          0.0076,
+          1.1071
+        ],
+        "vRange": [
+          0.0,
+          7.9568
+        ]
+      },
       "canopyStructure": {
         "foliagePrimitive": "individual_triangular_leaf_card",
         "foliagePrimitiveCount": 1352,
         "structure": "layered_branch_attached_leaf_canopy",
+        "foliageDistribution": "terminal",
         "crownLayerCount": 4,
-        "branchClusterCount": 12
+        "branchClusterCount": 12,
+        "branchInteriorAnchorCount": 0,
+        "terminalFoliageAnchorCount": 0,
+        "terminalTipCount": 0
       }
     },
     {
       "id": "mature_broadleaf_03",
       "path": "assets/visual/generated/environment/mature_broadleaf_03.glb",
       "family": "mature_broadleaf_tree",
+      "growthClass": "mature",
+      "ageBand": "",
       "biomeTags": [
         "forest",
         "plains",
         "swamp"
       ],
       "triangleCount": 1954,
+      "triangleLimit": 8200,
       "boundingBox": {
         "min": [
           -8.0032,
@@ -1671,24 +6467,47 @@
           }
         }
       },
+      "barkData": {
+        "attribute": "TEXCOORD_0",
+        "mapping": "branch_local_circumference_u_physical_length_v",
+        "authoredRepeatsPerMeter": 0.72,
+        "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
+        "barkVertexCount": 256,
+        "barkLoopCount": 1344,
+        "uRange": [
+          0.0076,
+          1.1071
+        ],
+        "vRange": [
+          0.0,
+          8.7863
+        ]
+      },
       "canopyStructure": {
         "foliagePrimitive": "individual_triangular_leaf_card",
         "foliagePrimitiveCount": 1506,
         "structure": "layered_branch_attached_leaf_canopy",
+        "foliageDistribution": "terminal",
         "crownLayerCount": 4,
-        "branchClusterCount": 13
+        "branchClusterCount": 13,
+        "branchInteriorAnchorCount": 0,
+        "terminalFoliageAnchorCount": 0,
+        "terminalTipCount": 0
       }
     },
     {
       "id": "mature_broadleaf_04",
       "path": "assets/visual/generated/environment/mature_broadleaf_04.glb",
       "family": "mature_broadleaf_tree",
+      "growthClass": "mature",
+      "ageBand": "",
       "biomeTags": [
         "forest",
         "plains",
         "swamp"
       ],
       "triangleCount": 2144,
+      "triangleLimit": 8200,
       "boundingBox": {
         "min": [
           -6.6244,
@@ -1784,22 +6603,45 @@
           }
         }
       },
+      "barkData": {
+        "attribute": "TEXCOORD_0",
+        "mapping": "branch_local_circumference_u_physical_length_v",
+        "authoredRepeatsPerMeter": 0.72,
+        "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
+        "barkVertexCount": 272,
+        "barkLoopCount": 1428,
+        "uRange": [
+          0.0076,
+          1.1071
+        ],
+        "vRange": [
+          0.0,
+          9.526
+        ]
+      },
       "canopyStructure": {
         "foliagePrimitive": "individual_triangular_leaf_card",
         "foliagePrimitiveCount": 1668,
         "structure": "layered_branch_attached_leaf_canopy",
+        "foliageDistribution": "terminal",
         "crownLayerCount": 4,
-        "branchClusterCount": 14
+        "branchClusterCount": 14,
+        "branchInteriorAnchorCount": 0,
+        "terminalFoliageAnchorCount": 0,
+        "terminalTipCount": 0
       }
     },
     {
       "id": "old_growth_broadleaf_01",
       "path": "assets/visual/generated/environment/old_growth_broadleaf_01.glb",
       "family": "old_growth_broadleaf_tree",
+      "growthClass": "old_growth",
+      "ageBand": "",
       "biomeTags": [
         "forest"
       ],
       "triangleCount": 1880,
+      "triangleLimit": 8200,
       "boundingBox": {
         "min": [
           -8.0943,
@@ -1895,22 +6737,45 @@
           }
         }
       },
+      "barkData": {
+        "attribute": "TEXCOORD_0",
+        "mapping": "branch_local_circumference_u_physical_length_v",
+        "authoredRepeatsPerMeter": 0.72,
+        "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
+        "barkVertexCount": 274,
+        "barkLoopCount": 1440,
+        "uRange": [
+          0.0125,
+          1.1071
+        ],
+        "vRange": [
+          0.0,
+          10.5559
+        ]
+      },
       "canopyStructure": {
         "foliagePrimitive": "individual_triangular_leaf_card",
         "foliagePrimitiveCount": 1400,
         "structure": "layered_old_growth_leaf_canopy",
+        "foliageDistribution": "terminal",
         "crownLayerCount": 5,
-        "branchClusterCount": 14
+        "branchClusterCount": 14,
+        "branchInteriorAnchorCount": 0,
+        "terminalFoliageAnchorCount": 0,
+        "terminalTipCount": 0
       }
     },
     {
       "id": "old_growth_broadleaf_02",
       "path": "assets/visual/generated/environment/old_growth_broadleaf_02.glb",
       "family": "old_growth_broadleaf_tree",
+      "growthClass": "old_growth",
+      "ageBand": "",
       "biomeTags": [
         "forest"
       ],
       "triangleCount": 2172,
+      "triangleLimit": 8200,
       "boundingBox": {
         "min": [
           -7.6791,
@@ -2006,18 +6871,40 @@
           }
         }
       },
+      "barkData": {
+        "attribute": "TEXCOORD_0",
+        "mapping": "branch_local_circumference_u_physical_length_v",
+        "authoredRepeatsPerMeter": 0.72,
+        "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
+        "barkVertexCount": 306,
+        "barkLoopCount": 1608,
+        "uRange": [
+          0.0125,
+          1.1071
+        ],
+        "vRange": [
+          0.0,
+          11.6047
+        ]
+      },
       "canopyStructure": {
         "foliagePrimitive": "individual_triangular_leaf_card",
         "foliagePrimitiveCount": 1636,
         "structure": "layered_old_growth_leaf_canopy",
+        "foliageDistribution": "terminal",
         "crownLayerCount": 5,
-        "branchClusterCount": 16
+        "branchClusterCount": 16,
+        "branchInteriorAnchorCount": 0,
+        "terminalFoliageAnchorCount": 0,
+        "terminalTipCount": 0
       }
     },
     {
       "id": "mature_conifer_01",
       "path": "assets/visual/generated/environment/mature_conifer_01.glb",
       "family": "mature_conifer_tree",
+      "growthClass": "mature",
+      "ageBand": "",
       "biomeTags": [
         "taiga",
         "snow",
@@ -2025,6 +6912,7 @@
         "tundra"
       ],
       "triangleCount": 1308,
+      "triangleLimit": 8200,
       "boundingBox": {
         "min": [
           -2.6962,
@@ -2118,18 +7006,40 @@
           }
         }
       },
+      "barkData": {
+        "attribute": "TEXCOORD_0",
+        "mapping": "branch_local_circumference_u_physical_length_v",
+        "authoredRepeatsPerMeter": 0.72,
+        "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
+        "barkVertexCount": 340,
+        "barkLoopCount": 1644,
+        "uRange": [
+          0.0,
+          1.0278
+        ],
+        "vRange": [
+          0.0,
+          7.816
+        ]
+      },
       "canopyStructure": {
         "foliagePrimitive": "individual_triangular_leaf_card",
         "foliagePrimitiveCount": 760,
         "structure": "radial_bough_needle_sprays",
+        "foliageDistribution": "terminal",
         "crownLayerCount": 7,
-        "branchClusterCount": 32
+        "branchClusterCount": 32,
+        "branchInteriorAnchorCount": 0,
+        "terminalFoliageAnchorCount": 0,
+        "terminalTipCount": 0
       }
     },
     {
       "id": "mature_conifer_02",
       "path": "assets/visual/generated/environment/mature_conifer_02.glb",
       "family": "mature_conifer_tree",
+      "growthClass": "mature",
+      "ageBand": "",
       "biomeTags": [
         "taiga",
         "snow",
@@ -2137,6 +7047,7 @@
         "tundra"
       ],
       "triangleCount": 1460,
+      "triangleLimit": 8200,
       "boundingBox": {
         "min": [
           -3.3723,
@@ -2230,18 +7141,40 @@
           }
         }
       },
+      "barkData": {
+        "attribute": "TEXCOORD_0",
+        "mapping": "branch_local_circumference_u_physical_length_v",
+        "authoredRepeatsPerMeter": 0.72,
+        "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
+        "barkVertexCount": 380,
+        "barkLoopCount": 1836,
+        "uRange": [
+          0.0,
+          1.0278
+        ],
+        "vRange": [
+          0.0,
+          8.9384
+        ]
+      },
       "canopyStructure": {
         "foliagePrimitive": "individual_triangular_leaf_card",
         "foliagePrimitiveCount": 848,
         "structure": "radial_bough_needle_sprays",
+        "foliageDistribution": "terminal",
         "crownLayerCount": 8,
-        "branchClusterCount": 36
+        "branchClusterCount": 36,
+        "branchInteriorAnchorCount": 0,
+        "terminalFoliageAnchorCount": 0,
+        "terminalTipCount": 0
       }
     },
     {
       "id": "mature_conifer_03",
       "path": "assets/visual/generated/environment/mature_conifer_03.glb",
       "family": "mature_conifer_tree",
+      "growthClass": "mature",
+      "ageBand": "",
       "biomeTags": [
         "taiga",
         "snow",
@@ -2249,6 +7182,7 @@
         "tundra"
       ],
       "triangleCount": 1650,
+      "triangleLimit": 8200,
       "boundingBox": {
         "min": [
           -3.294,
@@ -2342,18 +7276,40 @@
           }
         }
       },
+      "barkData": {
+        "attribute": "TEXCOORD_0",
+        "mapping": "branch_local_circumference_u_physical_length_v",
+        "authoredRepeatsPerMeter": 0.72,
+        "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
+        "barkVertexCount": 430,
+        "barkLoopCount": 2076,
+        "uRange": [
+          0.0,
+          1.0278
+        ],
+        "vRange": [
+          0.0,
+          10.3415
+        ]
+      },
       "canopyStructure": {
         "foliagePrimitive": "individual_triangular_leaf_card",
         "foliagePrimitiveCount": 958,
         "structure": "radial_bough_needle_sprays",
+        "foliageDistribution": "terminal",
         "crownLayerCount": 9,
-        "branchClusterCount": 41
+        "branchClusterCount": 41,
+        "branchInteriorAnchorCount": 0,
+        "terminalFoliageAnchorCount": 0,
+        "terminalTipCount": 0
       }
     },
     {
       "id": "mature_conifer_04",
       "path": "assets/visual/generated/environment/mature_conifer_04.glb",
       "family": "mature_conifer_tree",
+      "growthClass": "mature",
+      "ageBand": "",
       "biomeTags": [
         "taiga",
         "snow",
@@ -2361,6 +7317,7 @@
         "tundra"
       ],
       "triangleCount": 1802,
+      "triangleLimit": 8200,
       "boundingBox": {
         "min": [
           -3.8629,
@@ -2454,24 +7411,47 @@
           }
         }
       },
+      "barkData": {
+        "attribute": "TEXCOORD_0",
+        "mapping": "branch_local_circumference_u_physical_length_v",
+        "authoredRepeatsPerMeter": 0.72,
+        "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
+        "barkVertexCount": 470,
+        "barkLoopCount": 2268,
+        "uRange": [
+          0.0,
+          1.0278
+        ],
+        "vRange": [
+          0.0,
+          11.6336
+        ]
+      },
       "canopyStructure": {
         "foliagePrimitive": "individual_triangular_leaf_card",
         "foliagePrimitiveCount": 1046,
         "structure": "radial_bough_needle_sprays",
+        "foliageDistribution": "terminal",
         "crownLayerCount": 10,
-        "branchClusterCount": 45
+        "branchClusterCount": 45,
+        "branchInteriorAnchorCount": 0,
+        "terminalFoliageAnchorCount": 0,
+        "terminalTipCount": 0
       }
     },
     {
       "id": "mature_savanna_01",
       "path": "assets/visual/generated/environment/mature_savanna_01.glb",
       "family": "mature_savanna_tree",
+      "growthClass": "mature",
+      "ageBand": "",
       "biomeTags": [
         "savanna",
         "plains",
         "desert"
       ],
       "triangleCount": 1172,
+      "triangleLimit": 8200,
       "boundingBox": {
         "min": [
           -5.5854,
@@ -2565,24 +7545,47 @@
           }
         }
       },
+      "barkData": {
+        "attribute": "TEXCOORD_0",
+        "mapping": "branch_local_circumference_u_physical_length_v",
+        "authoredRepeatsPerMeter": 0.72,
+        "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
+        "barkVertexCount": 164,
+        "barkLoopCount": 864,
+        "uRange": [
+          0.0076,
+          1.1071
+        ],
+        "vRange": [
+          0.0,
+          4.271
+        ]
+      },
       "canopyStructure": {
         "foliagePrimitive": "individual_triangular_leaf_card",
         "foliagePrimitiveCount": 884,
         "structure": "layered_umbrella_leaf_canopy",
+        "foliageDistribution": "terminal",
         "crownLayerCount": 3,
-        "branchClusterCount": 9
+        "branchClusterCount": 9,
+        "branchInteriorAnchorCount": 0,
+        "terminalFoliageAnchorCount": 0,
+        "terminalTipCount": 0
       }
     },
     {
       "id": "mature_savanna_02",
       "path": "assets/visual/generated/environment/mature_savanna_02.glb",
       "family": "mature_savanna_tree",
+      "growthClass": "mature",
+      "ageBand": "",
       "biomeTags": [
         "savanna",
         "plains",
         "desert"
       ],
       "triangleCount": 1444,
+      "triangleLimit": 8200,
       "boundingBox": {
         "min": [
           -6.2986,
@@ -2676,24 +7679,47 @@
           }
         }
       },
+      "barkData": {
+        "attribute": "TEXCOORD_0",
+        "mapping": "branch_local_circumference_u_physical_length_v",
+        "authoredRepeatsPerMeter": 0.72,
+        "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
+        "barkVertexCount": 196,
+        "barkLoopCount": 1032,
+        "uRange": [
+          0.0076,
+          1.1071
+        ],
+        "vRange": [
+          0.0,
+          4.8571
+        ]
+      },
       "canopyStructure": {
         "foliagePrimitive": "individual_triangular_leaf_card",
         "foliagePrimitiveCount": 1100,
         "structure": "layered_umbrella_leaf_canopy",
+        "foliageDistribution": "terminal",
         "crownLayerCount": 3,
-        "branchClusterCount": 11
+        "branchClusterCount": 11,
+        "branchInteriorAnchorCount": 0,
+        "terminalFoliageAnchorCount": 0,
+        "terminalTipCount": 0
       }
     },
     {
       "id": "mature_savanna_03",
       "path": "assets/visual/generated/environment/mature_savanna_03.glb",
       "family": "mature_savanna_tree",
+      "growthClass": "mature",
+      "ageBand": "",
       "biomeTags": [
         "savanna",
         "plains",
         "desert"
       ],
       "triangleCount": 1732,
+      "triangleLimit": 8200,
       "boundingBox": {
         "min": [
           -6.9801,
@@ -2787,18 +7813,40 @@
           }
         }
       },
+      "barkData": {
+        "attribute": "TEXCOORD_0",
+        "mapping": "branch_local_circumference_u_physical_length_v",
+        "authoredRepeatsPerMeter": 0.72,
+        "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
+        "barkVertexCount": 228,
+        "barkLoopCount": 1200,
+        "uRange": [
+          0.0076,
+          1.1071
+        ],
+        "vRange": [
+          0.0,
+          5.7602
+        ]
+      },
       "canopyStructure": {
         "foliagePrimitive": "individual_triangular_leaf_card",
         "foliagePrimitiveCount": 1332,
         "structure": "layered_umbrella_leaf_canopy",
+        "foliageDistribution": "terminal",
         "crownLayerCount": 3,
-        "branchClusterCount": 13
+        "branchClusterCount": 13,
+        "branchInteriorAnchorCount": 0,
+        "terminalFoliageAnchorCount": 0,
+        "terminalTipCount": 0
       }
     },
     {
       "id": "rock_01",
       "path": "assets/visual/generated/environment/rock_01.glb",
       "family": "rock",
+      "growthClass": "legacy",
+      "ageBand": "",
       "biomeTags": [
         "plains",
         "forest",
@@ -2807,6 +7855,7 @@
         "snow"
       ],
       "triangleCount": 20,
+      "triangleLimit": 2200,
       "boundingBox": {
         "min": [
           -0.6787,
@@ -2853,6 +7902,8 @@
       "id": "rock_02",
       "path": "assets/visual/generated/environment/rock_02.glb",
       "family": "rock",
+      "growthClass": "legacy",
+      "ageBand": "",
       "biomeTags": [
         "plains",
         "forest",
@@ -2861,6 +7912,7 @@
         "snow"
       ],
       "triangleCount": 20,
+      "triangleLimit": 2200,
       "boundingBox": {
         "min": [
           -0.626,
@@ -2907,6 +7959,8 @@
       "id": "rock_03",
       "path": "assets/visual/generated/environment/rock_03.glb",
       "family": "rock",
+      "growthClass": "legacy",
+      "ageBand": "",
       "biomeTags": [
         "plains",
         "forest",
@@ -2915,6 +7969,7 @@
         "snow"
       ],
       "triangleCount": 80,
+      "triangleLimit": 2200,
       "boundingBox": {
         "min": [
           -0.7501,
@@ -2961,6 +8016,8 @@
       "id": "rock_04",
       "path": "assets/visual/generated/environment/rock_04.glb",
       "family": "rock",
+      "growthClass": "legacy",
+      "ageBand": "",
       "biomeTags": [
         "plains",
         "forest",
@@ -2969,6 +8026,7 @@
         "snow"
       ],
       "triangleCount": 20,
+      "triangleLimit": 2200,
       "boundingBox": {
         "min": [
           -0.673,
@@ -3015,6 +8073,8 @@
       "id": "rock_05",
       "path": "assets/visual/generated/environment/rock_05.glb",
       "family": "rock",
+      "growthClass": "legacy",
+      "ageBand": "",
       "biomeTags": [
         "plains",
         "forest",
@@ -3023,6 +8083,7 @@
         "snow"
       ],
       "triangleCount": 20,
+      "triangleLimit": 2200,
       "boundingBox": {
         "min": [
           -1.0706,
@@ -3069,6 +8130,8 @@
       "id": "rock_06",
       "path": "assets/visual/generated/environment/rock_06.glb",
       "family": "rock",
+      "growthClass": "legacy",
+      "ageBand": "",
       "biomeTags": [
         "plains",
         "forest",
@@ -3077,6 +8140,7 @@
         "snow"
       ],
       "triangleCount": 80,
+      "triangleLimit": 2200,
       "boundingBox": {
         "min": [
           -1.3804,
@@ -3123,12 +8187,15 @@
       "id": "bush_01",
       "path": "assets/visual/generated/environment/bush_01.glb",
       "family": "bush",
+      "growthClass": "legacy",
+      "ageBand": "",
       "biomeTags": [
         "forest",
         "plains",
         "savanna"
       ],
       "triangleCount": 80,
+      "triangleLimit": 2200,
       "boundingBox": {
         "min": [
           -0.5261,
@@ -3178,12 +8245,15 @@
       "id": "bush_02",
       "path": "assets/visual/generated/environment/bush_02.glb",
       "family": "bush",
+      "growthClass": "legacy",
+      "ageBand": "",
       "biomeTags": [
         "forest",
         "plains",
         "savanna"
       ],
       "triangleCount": 124,
+      "triangleLimit": 2200,
       "boundingBox": {
         "min": [
           -0.5419,
@@ -3230,18 +8300,37 @@
         "skeletons": 0,
         "shapeKeys": 0,
         "animationClips": 0
+      },
+      "barkData": {
+        "attribute": "TEXCOORD_0",
+        "mapping": "branch_local_circumference_u_physical_length_v",
+        "authoredRepeatsPerMeter": 0.72,
+        "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
+        "barkVertexCount": 14,
+        "barkLoopCount": 72,
+        "uRange": [
+          0.067,
+          1.0833
+        ],
+        "vRange": [
+          0.0,
+          1.0
+        ]
       }
     },
     {
       "id": "bush_03",
       "path": "assets/visual/generated/environment/bush_03.glb",
       "family": "bush",
+      "growthClass": "legacy",
+      "ageBand": "",
       "biomeTags": [
         "forest",
         "plains",
         "savanna"
       ],
       "triangleCount": 120,
+      "triangleLimit": 2200,
       "boundingBox": {
         "min": [
           -0.8323,
@@ -3291,12 +8380,15 @@
       "id": "bush_04",
       "path": "assets/visual/generated/environment/bush_04.glb",
       "family": "bush",
+      "growthClass": "legacy",
+      "ageBand": "",
       "biomeTags": [
         "forest",
         "plains",
         "savanna"
       ],
       "triangleCount": 164,
+      "triangleLimit": 2200,
       "boundingBox": {
         "min": [
           -0.6803,
@@ -3343,18 +8435,37 @@
         "skeletons": 0,
         "shapeKeys": 0,
         "animationClips": 0
+      },
+      "barkData": {
+        "attribute": "TEXCOORD_0",
+        "mapping": "branch_local_circumference_u_physical_length_v",
+        "authoredRepeatsPerMeter": 0.72,
+        "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
+        "barkVertexCount": 14,
+        "barkLoopCount": 72,
+        "uRange": [
+          0.067,
+          1.0833
+        ],
+        "vRange": [
+          0.0,
+          1.0
+        ]
       }
     },
     {
       "id": "stump_log_01",
       "path": "assets/visual/generated/environment/stump_log_01.glb",
       "family": "stump_log",
+      "growthClass": "legacy",
+      "ageBand": "",
       "biomeTags": [
         "forest",
         "taiga",
         "plains"
       ],
       "triangleCount": 88,
+      "triangleLimit": 2200,
       "boundingBox": {
         "min": [
           -0.2473,
@@ -3397,18 +8508,37 @@
         "skeletons": 0,
         "shapeKeys": 0,
         "animationClips": 0
+      },
+      "barkData": {
+        "attribute": "TEXCOORD_0",
+        "mapping": "branch_local_circumference_u_physical_length_v",
+        "authoredRepeatsPerMeter": 0.72,
+        "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
+        "barkVertexCount": 22,
+        "barkLoopCount": 120,
+        "uRange": [
+          0.0245,
+          1.05
+        ],
+        "vRange": [
+          0.0,
+          1.0
+        ]
       }
     },
     {
       "id": "stump_log_02",
       "path": "assets/visual/generated/environment/stump_log_02.glb",
       "family": "stump_log",
+      "growthClass": "legacy",
+      "ageBand": "",
       "biomeTags": [
         "forest",
         "taiga",
         "plains"
       ],
       "triangleCount": 160,
+      "triangleLimit": 2200,
       "boundingBox": {
         "min": [
           -0.9014,
@@ -3453,18 +8583,37 @@
         "skeletons": 0,
         "shapeKeys": 0,
         "animationClips": 0
+      },
+      "barkData": {
+        "attribute": "TEXCOORD_0",
+        "mapping": "branch_local_circumference_u_physical_length_v",
+        "authoredRepeatsPerMeter": 0.72,
+        "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
+        "barkVertexCount": 36,
+        "barkLoopCount": 192,
+        "uRange": [
+          0.0245,
+          1.0833
+        ],
+        "vRange": [
+          0.0,
+          1.26
+        ]
       }
     },
     {
       "id": "stump_log_03",
       "path": "assets/visual/generated/environment/stump_log_03.glb",
       "family": "stump_log",
+      "growthClass": "legacy",
+      "ageBand": "",
       "biomeTags": [
         "forest",
         "taiga",
         "plains"
       ],
       "triangleCount": 160,
+      "triangleLimit": 2200,
       "boundingBox": {
         "min": [
           -1.0322,
@@ -3509,6 +8658,22 @@
         "skeletons": 0,
         "shapeKeys": 0,
         "animationClips": 0
+      },
+      "barkData": {
+        "attribute": "TEXCOORD_0",
+        "mapping": "branch_local_circumference_u_physical_length_v",
+        "authoredRepeatsPerMeter": 0.72,
+        "runtimeScaleCompensation": "instance bark_scale preserves world-space repeat under visual scaling",
+        "barkVertexCount": 36,
+        "barkLoopCount": 192,
+        "uRange": [
+          0.0245,
+          1.0833
+        ],
+        "vRange": [
+          0.0,
+          1.44
+        ]
       }
     }
   ],
@@ -3520,6 +8685,9 @@
     "old_growth_broadleaf_tree": 2,
     "mature_conifer_tree": 4,
     "mature_savanna_tree": 3,
+    "ecological_broadleaf_tree": 10,
+    "ecological_conifer_tree": 10,
+    "ecological_savanna_tree": 10,
     "rock": 6,
     "bush": 4,
     "stump_log": 3
@@ -3531,6 +8699,25 @@
     "G": "stable per-vertex phase offset",
     "B": "foliage detail flutter weight",
     "A": "reserved/AO, currently one"
+  },
+  "treeEcology": {
+    "ageBands": [
+      "young",
+      "established",
+      "mature",
+      "old",
+      "ancient"
+    ],
+    "variantsPerArchitectureAndAgeBand": 2,
+    "selectionAuthority": "seed + biome + continuous local maturity + stable tree genetics",
+    "runtimeMeshGeneration": false,
+    "minimumFullness": "every primary sector has terminal foliage and each phenotype has at least 300 individual foliage cards"
+  },
+  "barkEncoding": {
+    "attribute": "TEXCOORD_0",
+    "mapping": "branch-local U circumference and V physical length",
+    "authoredRepeatsPerMeter": 0.72,
+    "runtimeScaleCompensation": "instance shader bark_scale"
   },
   "materialVocabulary": [
     "bark_dark",

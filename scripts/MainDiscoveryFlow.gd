@@ -93,6 +93,11 @@ func debug_performance_state() -> Dictionary:
     debug_performance_state_trace("perf_summary")
     var save_stats: Dictionary = save_system.stats() if save_system != null and save_system.has_method("stats") else {}
     debug_performance_state_trace("save_stats")
+    # This class is lower in the inherited Main chain than the queue owner. Resolve the
+    # composed service by node rather than reaching upward into a child-class field.
+    var tree_publication_queue: Node = get_node_or_null("TreePublicationQueue")
+    var tree_publication_stats: Dictionary = tree_publication_queue.metrics() if tree_publication_queue != null and is_instance_valid(tree_publication_queue) and tree_publication_queue.has_method("metrics") else {}
+    debug_performance_state_trace("tree_publication")
     var navigation_backend := {}
     var navmesh_world_stats := {}
     if npc_system != null:
@@ -150,6 +155,7 @@ func debug_performance_state() -> Dictionary:
         "hudMs": perf_hud_ms,
         "hudRefresh": hud_refresh_stats(),
         "chunkCache": chunk_asset_cache_stats(),
+        "treePublication": tree_publication_stats,
         "npcDebug": npc_debug_overlay_state(),
         "navigationBackend": navigation_backend,
         "navmeshWorld": navmesh_world_stats,
@@ -231,7 +237,12 @@ func _on_equipment_slot_clicked(slot: String) -> void:
 
 func _on_contracts_changed() -> void:
     mark_world_dirty("contracts_changed")
-    if hud and contract_system:
+    # Contract completion can be emitted inside the regular HUD/world-state
+    # refresh. Rebuilding a closed panel here needlessly constructs every
+    # contract row in that same gameplay frame. The authoritative system state
+    # remains current; an open panel still refreshes immediately, and reopening
+    # always renders from that state.
+    if hud and contract_system and hud.is_contracts_open():
         hud.set_contracts(contract_system.state())
 
 func _on_contract_rewarded(contract: Dictionary) -> void:
@@ -248,7 +259,12 @@ func _on_contract_rewarded(contract: Dictionary) -> void:
         maybe_emit_story_countermeasure_prepared(item_id, "contract_reward")
     _sync_inventory_totals()
     play_feedback("pickup", Vector3.INF, Color(0.86, 0.75, 0.42), 14)
-    update_hud("Contract complete: %s" % String(contract.get("label", "Contract")))
+    # ContractSystem emits this while it is evaluating the current state.
+    # A full HUD refresh here re-entered objective/contract evaluation with the
+    # newly granted reward items, allowing a completion cascade in one frame.
+    # Keep the acknowledgement immediate without recursively rebuilding HUD
+    # world state; the ordinary throttled refresh renders the new inventory.
+    show_action_message("Contract complete: %s" % String(contract.get("label", "Contract")))
 
 func parse_teleport_coords(value: String) -> Dictionary:
     var regex := RegEx.new()

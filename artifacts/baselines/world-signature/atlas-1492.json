@@ -1,5 +1,63 @@
 {
-  "fixtureContract": "stable_loaded_chunks_with_completed_surface_prop_attempts",
+  "fixtureContract": "explicit_canonical_chunk_window_with_completed_surface_prop_attempts",
+  "fixtureWindow": {
+    "centerChunk": {
+      "x": 10,
+      "z": 0
+    },
+    "keys": [
+      "10,-1",
+      "10,-2",
+      "10,-3",
+      "10,0",
+      "10,1",
+      "10,2",
+      "10,3",
+      "11,-1",
+      "11,-2",
+      "11,-3",
+      "11,0",
+      "11,1",
+      "11,2",
+      "11,3",
+      "12,-1",
+      "12,-2",
+      "12,-3",
+      "12,0",
+      "12,1",
+      "12,2",
+      "12,3",
+      "13,-1",
+      "13,-2",
+      "13,-3",
+      "13,0",
+      "13,1",
+      "13,2",
+      "13,3",
+      "7,-1",
+      "7,-2",
+      "7,-3",
+      "7,0",
+      "7,1",
+      "7,2",
+      "7,3",
+      "8,-1",
+      "8,-2",
+      "8,-3",
+      "8,0",
+      "8,1",
+      "8,2",
+      "8,3",
+      "9,-1",
+      "9,-2",
+      "9,-3",
+      "9,0",
+      "9,1",
+      "9,2",
+      "9,3"
+    ],
+    "radius": 3
+  },
   "generatedBlocks": [
     {
       "cell": {
@@ -17131,17 +17189,6 @@
     },
     {
       "drop": "logs",
-      "id": "atlas-1492:244,-25:22",
-      "kind": "prop",
-      "material": "tree",
-      "position": {
-        "x": 329.4,
-        "y": 16.065,
-        "z": -33.75
-      }
-    },
-    {
-      "drop": "logs",
       "id": "atlas-1492:244,-48:14",
       "kind": "prop",
       "material": "tree",
@@ -17281,17 +17328,6 @@
         "x": 333.45,
         "y": 18.505,
         "z": -17.55
-      }
-    },
-    {
-      "drop": "logs",
-      "id": "atlas-1492:247,-16:13",
-      "kind": "prop",
-      "material": "tree",
-      "position": {
-        "x": 333.45,
-        "y": 17.457,
-        "z": -21.6
       }
     },
     {
@@ -17446,17 +17482,6 @@
         "x": 333.45,
         "y": 18.36,
         "z": 130.95
-      }
-    },
-    {
-      "drop": "logs",
-      "id": "atlas-1492:248,-22:8",
-      "kind": "prop",
-      "material": "tree",
-      "position": {
-        "x": 334.8,
-        "y": 16.762,
-        "z": -29.7
       }
     },
     {
@@ -17636,17 +17661,6 @@
       }
     },
     {
-      "drop": "logs",
-      "id": "atlas-1492:250,-22:17",
-      "kind": "prop",
-      "material": "tree",
-      "position": {
-        "x": 337.5,
-        "y": 17.083,
-        "z": -29.7
-      }
-    },
-    {
       "drop": "stones",
       "id": "atlas-1492:250,-46:21",
       "kind": "prop",
@@ -17747,39 +17761,6 @@
     },
     {
       "drop": "logs",
-      "id": "atlas-1492:255,-17:2",
-      "kind": "prop",
-      "material": "tree",
-      "position": {
-        "x": 344.25,
-        "y": 19.108,
-        "z": -22.95
-      }
-    },
-    {
-      "drop": "logs",
-      "id": "atlas-1492:255,-23:3",
-      "kind": "prop",
-      "material": "tree",
-      "position": {
-        "x": 344.25,
-        "y": 18.679,
-        "z": -31.05
-      }
-    },
-    {
-      "drop": "logs",
-      "id": "atlas-1492:255,-26:6",
-      "kind": "prop",
-      "material": "tree",
-      "position": {
-        "x": 344.25,
-        "y": 18.55,
-        "z": -35.1
-      }
-    },
-    {
-      "drop": "logs",
       "id": "atlas-1492:255,-32:8",
       "kind": "prop",
       "material": "tree",
@@ -17809,17 +17790,6 @@
         "x": 344.25,
         "y": 20.19,
         "z": -9.45
-      }
-    },
-    {
-      "drop": "logs",
-      "id": "atlas-1492:255,14:26",
-      "kind": "prop",
-      "material": "tree",
-      "position": {
-        "x": 344.25,
-        "y": 20.542,
-        "z": 18.9
       }
     },
     {
@@ -18018,17 +17988,6 @@
         "x": 349.65,
         "y": 23.409,
         "z": 54.0
-      }
-    },
-    {
-      "drop": "logs",
-      "id": "atlas-1492:260,-16:18",
-      "kind": "prop",
-      "material": "tree",
-      "position": {
-        "x": 351.0,
-        "y": 20.205,
-        "z": -21.6
       }
     },
     {
@@ -19374,17 +19333,6 @@
       }
     },
     {
-      "drop": "logs",
-      "id": "atlas-1492:299,20:0",
-      "kind": "prop",
-      "material": "tree",
-      "position": {
-        "x": 403.65,
-        "y": 20.386,
-        "z": 27.0
-      }
-    },
-    {
       "drop": "berries",
       "id": "atlas-1492:299,46:1",
       "kind": "prop",
@@ -19547,17 +19495,6 @@
         "x": 409.05,
         "y": 20.645,
         "z": -45.9
-      }
-    },
-    {
-      "drop": "logs",
-      "id": "atlas-1492:303,11:2",
-      "kind": "prop",
-      "material": "tree",
-      "position": {
-        "x": 409.05,
-        "y": 20.25,
-        "z": 14.85
       }
     },
     {
@@ -19829,17 +19766,6 @@
       "id": "atlas-1492:311,23:0",
       "kind": "prop",
       "material": "wildlife",
-      "position": {
-        "x": 419.85,
-        "y": 23.978,
-        "z": 31.05
-      }
-    },
-    {
-      "drop": "logs",
-      "id": "atlas-1492:311,23:23",
-      "kind": "prop",
-      "material": "tree",
       "position": {
         "x": 419.85,
         "y": 23.978,

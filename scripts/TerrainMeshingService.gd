@@ -20,7 +20,7 @@ var allow_blocking_gdscript_fallback := false
 var pending_jobs := {}
 var completed_jobs := {}
 var job_sequence := 0
-var async_worker_thread: Thread = null
+var async_worker_task_id := -1
 var async_worker_active := false
 var async_worker_key := Vector2i(999999, 999999)
 var async_worker_signature := ""
@@ -28,9 +28,11 @@ var async_worker_cancelled := false
 var async_worker_done := false
 var async_worker_started_usec := 0
 var async_worker_payload := {}
+var async_worker_result := {}
+var async_worker_result_mutex := Mutex.new()
 var async_payload_job := {}
 var async_finalize_job := {}
-var retired_worker_threads := []
+var retired_worker_tasks: Array[int] = []
 var retired_payload_jobs := []
 var retired_payload_cleanup_thread: Thread = null
 var retired_payload_cleanup_count := 0
@@ -40,7 +42,7 @@ var setup_initialized := false
 func setup(main_node) -> void:
 	main = main_node
 	allow_blocking_gdscript_fallback = OS.get_environment("VOXEL_ALLOW_BLOCKING_GDSCRIPT_TERRAIN_MESHING").strip_edges() == "1"
-	collect_retired_worker_threads(false)
+	collect_retired_worker_tasks(false)
 	advance_retired_payload_cleanup(false)
 	if setup_initialized:
 		return
@@ -199,14 +201,14 @@ func invalidate_chunk(cx: int, cz: int) -> void:
 		async_finalize_job = {}
 
 func clear_jobs(blocking := true) -> void:
-	if async_worker_active and async_worker_thread != null:
+	if async_worker_active and async_worker_task_id >= 0:
 		async_worker_cancelled = true
 		if blocking:
-			if async_worker_thread.is_started():
-				async_worker_thread.wait_to_finish()
+			WorkerThreadPool.wait_for_task_completion(async_worker_task_id)
+			clear_async_worker_result()
 		else:
-			retired_worker_threads.append(async_worker_thread)
-	async_worker_thread = null
+			retired_worker_tasks.append(async_worker_task_id)
+	async_worker_task_id = -1
 	async_worker_active = false
 	async_worker_key = Vector2i(999999, 999999)
 	async_worker_signature = ""
@@ -224,7 +226,7 @@ func clear_jobs(blocking := true) -> void:
 	else:
 		advance_retired_payload_cleanup(false)
 	job_sequence = 0
-	collect_retired_worker_threads(blocking)
+	collect_retired_worker_tasks(blocking)
 
 func retired_payload_backlog() -> int:
 	return retired_payload_jobs.size() + (1 if retired_payload_cleanup_thread != null else 0)
@@ -259,20 +261,39 @@ func advance_retired_payload_cleanup(blocking := false) -> void:
 func _thread_release_retired_payload_job(retired_job: Dictionary) -> void:
 	retired_job.clear()
 
-func collect_retired_worker_threads(blocking := false) -> int:
+func clear_async_worker_result() -> void:
+	async_worker_result_mutex.lock()
+	async_worker_result = {}
+	async_worker_done = false
+	async_worker_result_mutex.unlock()
+
+func take_async_worker_result() -> Dictionary:
+	async_worker_result_mutex.lock()
+	var value: Dictionary = async_worker_result
+	async_worker_result = {}
+	async_worker_done = false
+	async_worker_result_mutex.unlock()
+	return value
+
+func collect_retired_worker_tasks(blocking := false) -> int:
 	var collected := 0
-	for index in range(retired_worker_threads.size() - 1, -1, -1):
-		var thread = retired_worker_threads[index] as Thread
-		if thread == null:
-			retired_worker_threads.remove_at(index)
+	for index in range(retired_worker_tasks.size() - 1, -1, -1):
+		var task_id := int(retired_worker_tasks[index])
+		if task_id < 0:
+			retired_worker_tasks.remove_at(index)
 			continue
-		if not blocking and not worker_thread_finished(thread):
+		if not blocking and not WorkerThreadPool.is_task_completed(task_id):
 			continue
-		if thread.is_started():
-			thread.wait_to_finish()
-		retired_worker_threads.remove_at(index)
+		WorkerThreadPool.wait_for_task_completion(task_id)
+		clear_async_worker_result()
+		retired_worker_tasks.remove_at(index)
 		collected += 1
 	return collected
+
+func shutdown_pending_work_count() -> int:
+	var active_worker_count := 1 if async_worker_active and async_worker_task_id >= 0 else 0
+	var payload_cleanup_count := 1 if retired_payload_cleanup_thread != null else 0
+	return active_worker_count + retired_worker_tasks.size() + retired_payload_jobs.size() + payload_cleanup_count
 
 func worker_thread_finished(thread: Thread) -> bool:
 	if thread == null:
@@ -314,7 +335,7 @@ func completed_job_count() -> int:
 
 func process_jobs(max_jobs := 1, budget_ms := 3.0, center := Vector2i(999999, 999999)) -> Dictionary:
 	var collect_started_usec := Time.get_ticks_usec()
-	collect_retired_worker_threads(false)
+	collect_retired_worker_tasks(false)
 	advance_retired_payload_cleanup(false)
 	var completed_summary := collect_async_worker_result()
 	var collect_ms := elapsed_ms(collect_started_usec)
@@ -416,6 +437,12 @@ func process_jobs(max_jobs := 1, budget_ms := 3.0, center := Vector2i(999999, 99
 			"payloadSignatureMs": float(started.get("payloadSignatureMs", 0.0)),
 			"terrainPayloadStateBeginMs": float(started.get("terrainPayloadStateBeginMs", 0.0)),
 			"fluidPayloadStateBeginMs": float(started.get("fluidPayloadStateBeginMs", 0.0)),
+			"terrainPayloadPublishMs": float(started.get("terrainPayloadPublishMs", 0.0)),
+			"fluidPayloadPublishMs": float(started.get("fluidPayloadPublishMs", 0.0)),
+			"payloadHandoffPrepMs": float(started.get("payloadHandoffPrepMs", 0.0)),
+			"workerHandoffMs": float(started.get("workerHandoffMs", 0.0)),
+			"retiredPayloadCleanupMs": float(started.get("retiredPayloadCleanupMs", 0.0)),
+			"retiredWorkerCollectMs": float(started.get("retiredWorkerCollectMs", 0.0)),
 			"fluidPayloadPrepMs": float(started.get("fluidPayloadPrepMs", 0.0)),
 			"fluidPayloadCells": int(started.get("fluidPayloadCells", 0)),
 			"fluidPreparedSections": int(started.get("fluidPreparedSections", 0)),
@@ -484,18 +511,28 @@ func start_next_async_native_job(center: Vector2i, budget_ms := 2.0) -> Dictiona
 		"boundsColumns": 0,
 		"terrainPayloadStateBeginMs": 0.0,
 		"fluidPayloadStateBeginMs": 0.0,
+		"terrainPayloadPublishMs": 0.0,
+		"fluidPayloadPublishMs": 0.0,
+		"payloadHandoffPrepMs": 0.0,
+		"workerHandoffMs": 0.0,
 		"payloadCells": 0,
 		"workerStartMs": 0.0,
+		"retiredPayloadCleanupMs": 0.0,
+		"retiredWorkerCollectMs": 0.0,
 		"dropReason": "",
 		"requestedSignature": "",
 		"currentSignature": ""
 	}
+	var retired_payload_cleanup_started_usec := Time.get_ticks_usec()
 	advance_retired_payload_cleanup(false)
+	result["retiredPayloadCleanupMs"] = elapsed_ms(retired_payload_cleanup_started_usec)
 	if retired_payload_backlog() >= RETIRED_PAYLOAD_JOB_LIMIT:
 		result["dropReason"] = "retired_payload_cleanup_backpressure"
 		return result
-	collect_retired_worker_threads(false)
-	if not retired_worker_threads.is_empty():
+	var retired_worker_collect_started_usec := Time.get_ticks_usec()
+	collect_retired_worker_tasks(false)
+	result["retiredWorkerCollectMs"] = elapsed_ms(retired_worker_collect_started_usec)
+	if not retired_worker_tasks.is_empty():
 		return result
 	if async_payload_job.is_empty():
 		var payload_begin_started_usec := Time.get_ticks_usec()
@@ -564,6 +601,11 @@ func start_next_async_native_job(center: Vector2i, budget_ms := 2.0) -> Dictiona
 			result["dropReason"] = "exact_fluid_state_invalid"
 			return result
 		async_payload_job["fluidState"] = initialized_fluid_state
+		# Bounds completion can establish two payload state machines in the same
+		# frame.  Publish only those tiny states here; their first bounded sampling
+		# step starts on the next frame so a stream transition never combines setup
+		# with terrain and exact-fluid work.
+		return result
 	var payload: Dictionary = async_payload_job.get("terrainPayload", {}) if async_payload_job.get("terrainPayload", {}) is Dictionary else {}
 	if fluid_only and payload.is_empty():
 		payload = {
@@ -595,7 +637,9 @@ func start_next_async_native_job(center: Vector2i, budget_ms := 2.0) -> Dictiona
 			async_payload_job = {}
 			result["dropped"] = 1
 			return result
+		var terrain_payload_publish_started_usec := Time.get_ticks_usec()
 		async_payload_job["terrainPayload"] = payload
+		result["terrainPayloadPublishMs"] = elapsed_ms(terrain_payload_publish_started_usec)
 	var fluid_state: Dictionary = async_payload_job.get("fluidState", {}) if async_payload_job.get("fluidState", {}) is Dictionary else {}
 	var fluid_budget_ms := maxf(0.1, float(budget_ms) - float(result.get("payloadPrepMs", 0.0)))
 	var fluid_advanced_value = world_generation.call(
@@ -625,16 +669,22 @@ func start_next_async_native_job(center: Vector2i, budget_ms := 2.0) -> Dictiona
 		result["dropped"] = 1
 		result["dropReason"] = "exact_fluid_payload_empty"
 		return result
+	var fluid_payload_publish_started_usec := Time.get_ticks_usec()
 	payload["fluidPayload"] = fluid_payload
 	payload["hasFluid"] = bool(fluid_payload.get("hasFluid", false))
 	payload["terrainStepCells"] = maxi(1, int(payload.get("terrainStepCells", payload.get("stepCells", 1))))
+	result["fluidPayloadPublishMs"] = elapsed_ms(fluid_payload_publish_started_usec)
 	var include_collision := bool(async_payload_job.get("includeCollision", true))
 	# Keep the completed incremental state alive until the native worker owns it. Its
 	# dense scratch channels can be large, and releasing them here would synchronously
 	# retire the allocation graph on the gameplay frame.
+	var handoff_prepare_started_usec := Time.get_ticks_usec()
 	var payload_job_to_retire := async_payload_job
 	async_payload_job = {}
+	result["payloadHandoffPrepMs"] = elapsed_ms(handoff_prepare_started_usec)
+	var worker_handoff_started_usec := Time.get_ticks_usec()
 	result = start_async_worker_from_payload(key, requested_signature, payload, include_collision, fluid_only, result, payload_job_to_retire)
+	result["workerHandoffMs"] = elapsed_ms(worker_handoff_started_usec)
 	return result
 
 func begin_next_async_payload_job(center: Vector2i) -> Dictionary:
@@ -751,20 +801,24 @@ func start_async_worker_from_payload(key: Vector2i, requested_signature: String,
 	async_worker_active = true
 	async_worker_started_usec = Time.get_ticks_usec()
 	async_worker_payload = payload
-	async_worker_thread = Thread.new()
+	clear_async_worker_result()
+	var task_input := {
+		"key": key,
+		"signature": requested_signature,
+		"includeCollision": include_collision,
+		"fluidOnly": fluid_only,
+		"payload": payload,
+		"backend": backend,
+		"payloadJobToRetire": payload_job_to_retire
+	}
 	var start_started_usec := Time.get_ticks_usec()
-	var err := async_worker_thread.start(Callable(self, "_thread_build_native_chunk_assets").bind(
-		key,
-		requested_signature,
-		include_collision,
-		fluid_only,
-		payload,
-		backend,
-		payload_job_to_retire
-	), Thread.PRIORITY_LOW)
+	async_worker_task_id = WorkerThreadPool.add_task(
+		Callable(self, "_pool_build_native_chunk_assets").bind(task_input),
+		false,
+		"terrain_meshing"
+	)
 	result["workerStartMs"] = elapsed_ms(start_started_usec)
-	if err != OK:
-		async_worker_thread = null
+	if async_worker_task_id < 0:
 		async_worker_active = false
 		async_worker_key = Vector2i(999999, 999999)
 		async_worker_signature = ""
@@ -776,6 +830,21 @@ func start_async_worker_from_payload(key: Vector2i, requested_signature: String,
 	result["started"] = true
 	result["preparedSections"] = int((payload.get("sections", []) as Array).size()) if payload.get("sections", []) is Array else 0
 	return result
+
+func _pool_build_native_chunk_assets(task_input: Dictionary) -> void:
+	var value := _thread_build_native_chunk_assets(
+		task_input.get("key", Vector2i(999999, 999999)),
+		String(task_input.get("signature", "")),
+		bool(task_input.get("includeCollision", true)),
+		bool(task_input.get("fluidOnly", false)),
+		task_input.get("payload", {}) as Dictionary,
+		task_input.get("backend"),
+		task_input.get("payloadJobToRetire", {}) as Dictionary
+	)
+	async_worker_result_mutex.lock()
+	async_worker_result = value if value is Dictionary else {}
+	async_worker_done = true
+	async_worker_result_mutex.unlock()
 
 func complete_empty_fluid_only_job(key: Vector2i, requested_signature: String, result: Dictionary) -> Dictionary:
 	var signature := requested_signature
@@ -822,19 +891,20 @@ func collect_async_worker_result() -> Dictionary:
 	}
 	if not async_finalize_job.is_empty():
 		return advance_async_fluid_finalize()
-	if not async_worker_active or async_worker_thread == null:
+	if not async_worker_active or async_worker_task_id < 0:
 		return summary
 	if async_worker_started_usec > 0 and elapsed_ms(async_worker_started_usec) < ASYNC_WORKER_MIN_COLLECT_DELAY_MS:
 		return summary
-	if not worker_thread_finished(async_worker_thread):
+	if not WorkerThreadPool.is_task_completed(async_worker_task_id):
 		return summary
 	var key := async_worker_key
 	var signature := async_worker_signature
 	var cancelled := async_worker_cancelled
 	var join_started_usec := Time.get_ticks_usec()
-	var value = async_worker_thread.wait_to_finish()
+	var wait_error := WorkerThreadPool.wait_for_task_completion(async_worker_task_id)
 	summary["workerJoinMs"] = elapsed_ms(join_started_usec)
-	async_worker_thread = null
+	var value: Dictionary = take_async_worker_result()
+	async_worker_task_id = -1
 	async_worker_active = false
 	async_worker_key = Vector2i(999999, 999999)
 	async_worker_signature = ""
@@ -846,7 +916,7 @@ func collect_async_worker_result() -> Dictionary:
 		summary["dropped"] = 1
 		summary["dropReason"] = "worker_cancelled"
 		return summary
-	if not (value is Dictionary):
+	if wait_error != OK or value.is_empty():
 		summary["dropped"] = 1
 		summary["dropReason"] = "worker_result_invalid"
 		return summary

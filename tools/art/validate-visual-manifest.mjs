@@ -14,6 +14,9 @@ const REQUIRED_FAMILIES = {
   old_growth_broadleaf_tree: 2,
   mature_conifer_tree: 4,
   mature_savanna_tree: 3,
+  ecological_broadleaf_tree: 10,
+  ecological_conifer_tree: 10,
+  ecological_savanna_tree: 10,
   rock: 6,
   bush: 4,
   stump_log: 3,
@@ -27,7 +30,17 @@ const TREE_FAMILIES = new Set([
   "old_growth_broadleaf_tree",
   "mature_conifer_tree",
   "mature_savanna_tree",
+  "ecological_broadleaf_tree",
+  "ecological_conifer_tree",
+  "ecological_savanna_tree",
 ]);
+
+const ECOLOGICAL_FAMILIES = new Set([
+  "ecological_broadleaf_tree",
+  "ecological_conifer_tree",
+  "ecological_savanna_tree",
+]);
+const ECOLOGICAL_AGE_BANDS = ["young", "established", "mature", "old", "ancient"];
 
 const HEIGHT_BANDS = {
   mature_broadleaf_tree: [12, 18],
@@ -37,12 +50,23 @@ const HEIGHT_BANDS = {
 };
 const CANOPY_MAX_WIDTH = {
   old_growth_broadleaf_tree: 18.0,
+  ecological_broadleaf_tree: 72.0,
+  ecological_conifer_tree: 46.0,
+  ecological_savanna_tree: 84.0,
+};
+const CANOPY_MAX_HEIGHT = {
+  ecological_broadleaf_tree: 84.0,
+  ecological_conifer_tree: 96.0,
+  ecological_savanna_tree: 78.0,
 };
 const CANOPY_MIN_FOLIAGE_PRIMITIVES = {
   mature_broadleaf_tree: 1100,
   old_growth_broadleaf_tree: 1300,
   mature_conifer_tree: 700,
   mature_savanna_tree: 800,
+  ecological_broadleaf_tree: 300,
+  ecological_conifer_tree: 300,
+  ecological_savanna_tree: 300,
 };
 
 const ALLOWED_MATERIALS = new Set([
@@ -95,8 +119,8 @@ function validateBoundingBox(errors, asset) {
   if (box.size?.some((value) => value <= 0)) {
     fail(errors, `${asset.id}: non-positive bounding size ${JSON.stringify(box.size)}`);
   }
-  const canopyFamily = asset.family in HEIGHT_BANDS;
-  const maxHeight = canopyFamily ? 22.5 : 7.5;
+  const canopyFamily = asset.family in HEIGHT_BANDS || ECOLOGICAL_FAMILIES.has(asset.family);
+  const maxHeight = CANOPY_MAX_HEIGHT[asset.family] ?? (canopyFamily ? 22.5 : 7.5);
   const maxWidth = CANOPY_MAX_WIDTH[asset.family] ?? (canopyFamily ? 16.0 : 4.5);
   if (box.size?.[2] > maxHeight || box.size?.[0] > maxWidth || box.size?.[1] > maxWidth) {
     fail(errors, `${asset.id}: bounding box unexpectedly large ${JSON.stringify(box.size)}`);
@@ -126,7 +150,9 @@ function validateTreeContract(errors, asset) {
     if (structure?.foliagePrimitive !== "individual_triangular_leaf_card" || !Number.isInteger(structure?.foliagePrimitiveCount) || structure.foliagePrimitiveCount < minimum) {
       fail(errors, `${asset.id}: canopy must contain at least ${minimum} individual leaf cards, got ${structure?.foliagePrimitiveCount}`);
     }
-    const expectedStructure = asset.family === "mature_conifer_tree" ? "radial_bough_needle_sprays" : "leaf_canopy";
+    const expectedStructure = asset.family === "mature_conifer_tree"
+      ? "radial_bough_needle_sprays"
+      : asset.family === "ecological_conifer_tree" ? "radial_bough" : "leaf_canopy";
     if (typeof structure?.structure !== "string" || !structure.structure.includes(expectedStructure)) {
       fail(errors, `${asset.id}: canopy structure must be layered branch-attached foliage (${expectedStructure})`);
     }
@@ -150,6 +176,19 @@ function validateTreeContract(errors, asset) {
   const animation = asset.animationContract;
   if (animation?.skeletons !== 0 || animation?.shapeKeys !== 0 || animation?.animationClips !== 0) {
     fail(errors, `${asset.id}: animation contract must remain data-only`);
+  }
+  const bark = asset.barkData;
+  if (bark?.attribute !== "TEXCOORD_0" || bark?.mapping !== "branch_local_circumference_u_physical_length_v" || !isNumber(bark?.authoredRepeatsPerMeter)) {
+    fail(errors, `${asset.id}: missing scale-safe branch-local bark UV contract`);
+  }
+  if (ECOLOGICAL_FAMILIES.has(asset.family)) {
+    const phenotype = asset.treePhenotype;
+    const structure = asset.canopyStructure;
+    if (!ECOLOGICAL_AGE_BANDS.includes(phenotype?.ageBand)) fail(errors, `${asset.id}: invalid ecological ageBand ${phenotype?.ageBand}`);
+    if (!phenotype?.minimumFullnessPassed || (phenotype?.minimumSectorOccupancy ?? 0) < 1) fail(errors, `${asset.id}: ecological minimum fullness failed`);
+    if (!Number.isInteger(phenotype?.terminalTipCount) || phenotype.terminalTipCount <= 0) fail(errors, `${asset.id}: ecological phenotype requires terminal tips`);
+    if (structure?.foliageDistribution !== "branch_length_and_terminal") fail(errors, `${asset.id}: ecological foliage must occupy branch lengths and terminals`);
+    if (!Number.isInteger(structure?.branchInteriorAnchorCount) || structure.branchInteriorAnchorCount <= 0) fail(errors, `${asset.id}: ecological phenotype requires interior branch foliage anchors`);
   }
 }
 
@@ -205,7 +244,8 @@ function validateAsset(errors, asset, seenIds, familyCounts, triangleLimit) {
     fail(errors, `${asset.id}: invalid biomeTags`);
   }
 
-  if (!Number.isInteger(asset.triangleCount) || asset.triangleCount <= 0 || asset.triangleCount > triangleLimit) {
+  const assetTriangleLimit = Number.isInteger(asset.triangleLimit) ? asset.triangleLimit : triangleLimit;
+  if (!Number.isInteger(asset.triangleCount) || asset.triangleCount <= 0 || asset.triangleCount > assetTriangleLimit) {
     fail(errors, `${asset.id}: invalid triangleCount ${asset.triangleCount}`);
   }
 
@@ -232,8 +272,8 @@ const errors = [];
 const manifest = readManifest(errors);
 
 if (manifest) {
-  if (manifest.schemaVersion !== 2) {
-    fail(errors, `Expected schemaVersion 2, got ${manifest.schemaVersion}`);
+  if (manifest.schemaVersion !== 3) {
+    fail(errors, `Expected schemaVersion 3, got ${manifest.schemaVersion}`);
   }
   if (typeof manifest.generator !== "string" || manifest.generator.length === 0) {
     fail(errors, "Missing generator name");
@@ -253,6 +293,9 @@ if (manifest) {
   }
   if (manifest.windEncoding?.attribute !== "COLOR_0") {
     fail(errors, "Missing COLOR_0 windEncoding contract");
+  }
+  if (manifest.barkEncoding?.attribute !== "TEXCOORD_0" || manifest.treeEcology?.runtimeMeshGeneration !== false) {
+    fail(errors, "Missing bark encoding or finite-library tree ecology contract");
   }
 
   const contactSheet = path.join(projectRoot, manifest.contactSheet ?? "");

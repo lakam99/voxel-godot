@@ -458,7 +458,10 @@ func placement_within_action_reach(placement: Dictionary) -> bool:
     var cell: Vector3i = placement["cell"]
     var target_flat := Vector2(float(cell.x) * CELL, float(cell.z) * CELL)
     var player_flat := Vector2(player.global_position.x, player.global_position.z)
-    return player_flat.distance_to(target_flat) <= ACTION_REACH
+    return player_flat.distance_to(target_flat) <= placement_action_reach_distance()
+
+func placement_action_reach_distance() -> float:
+    return ACTION_REACH
 
 func hit_within_action_reach(hit: Dictionary) -> bool:
     if player == null or not hit.has("position"):
@@ -466,7 +469,22 @@ func hit_within_action_reach(hit: Dictionary) -> bool:
     var hit_position: Vector3 = hit.get("position", Vector3.ZERO)
     var target_flat := Vector2(hit_position.x, hit_position.z)
     var player_flat := Vector2(player.global_position.x, player.global_position.z)
-    return player_flat.distance_to(target_flat) <= ACTION_REACH
+    var allowed_reach := ACTION_REACH
+    var collider := hit.get("collider") as Node
+    # Monumental tree bodies keep real trunk collision.  Their bark may be
+    # farther from the player's center than a small prop, so permit a tool to
+    # reach the visible collision surface without extending placement, combat,
+    # terrain, or ordinary-prop interaction range.
+    if collider != null and String(collider.get_meta("kind", "")) == "prop" and String(collider.get_meta("material", "")) == "tree":
+        var trunk_radius := maxf(0.12, float(collider.get_meta("tree_trunk_radius", 0.36)))
+        allowed_reach = maxf(allowed_reach, minf(monumental_tree_melee_ray_range(), trunk_radius + CELL * 1.20))
+    return player_flat.distance_to(target_flat) <= allowed_reach
+
+func monumental_tree_melee_ray_range() -> float:
+    # This is a ray ceiling, not a global melee-range increase.  The collision
+    # and material checks in hit_within_action_reach still reject every
+    # non-tree target beyond ACTION_REACH.
+    return maxf(MELEE_RANGE, CELL * 7.20)
 
 func focused_interaction_hit() -> Dictionary:
     if player == null:

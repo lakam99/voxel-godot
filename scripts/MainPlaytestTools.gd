@@ -1,5 +1,8 @@
 extends "res://scripts/MainRuntimeTools.gd"
 
+const TreePublicationQueueScript := preload("res://scripts/environment/TreePublicationQueue.gd")
+const TreeRuntimeRequestBuilderScript := preload("res://scripts/environment/TreeRuntimeRequestBuilder.gd")
+
 const VOLUME_CUBE_CORNER_OFFSETS := [
     Vector3i(0, 0, 0),
     Vector3i(1, 0, 0),
@@ -45,6 +48,8 @@ var underground_focus_cache_seed := ""
 var underground_focus_cache_debug := false
 var underground_focus_cache_result := false
 var underground_chunk_exposure_cache := {}
+var tree_publication_queue = null
+var tree_runtime_request_builder = null
 
 func generated_volume_exposure_cache_metadata(start_x: int, start_z: int) -> Dictionary:
     var chunk_key := Vector2i(floori(float(start_x) / float(CHUNK_SIZE)), floori(float(start_z) / float(CHUNK_SIZE)))
@@ -2991,6 +2996,7 @@ func begin_chunk_prop_spawn_state(chunk: Node3D, cx: int, cz: int) -> Dictionary
         "detailRng": detail_rng,
         "detailIndex": 0,
         "detailAttempts": -1,
+        "detailActiveAttempt": {},
         "detailBatches": {},
         "detailBatchKeys": [],
         "detailBatchIndex": 0,
@@ -3384,17 +3390,34 @@ func process_chunk_detail_spawn_state(
     var attempts := int(state.get("detailAttempts", 0))
     var detail_index := int(state.get("detailIndex", 0))
     var processed := 0
+    var active_attempt: Dictionary = state.get("detailActiveAttempt", {}) if state.get("detailActiveAttempt", {}) is Dictionary else {}
     var start_usec := budget_start_usec if budget_start_usec > 0 else Time.get_ticks_usec()
     while detail_index < attempts and processed < maxi(1, detail_attempt_budget):
         if processed > 0 and chunk_prop_spawn_budget_elapsed(start_usec, time_budget_ms):
             break
         var detail_attempt_start: int = runtime_perf_monitor.begin_section("chunk_detail_prop_attempt") if runtime_perf_monitor != null else Time.get_ticks_usec()
-        spawn_chunk_detail_attempt(state, detail_index, rng, batches)
+        if active_attempt.is_empty():
+            active_attempt = begin_chunk_detail_attempt(state, rng)
+        var attempt_complete := advance_chunk_detail_attempt(
+            state,
+            active_attempt,
+            rng,
+            batches,
+            time_budget_ms,
+            start_usec
+        )
         if runtime_perf_monitor != null:
             runtime_perf_monitor.end_section("chunk_detail_prop_attempt", detail_attempt_start)
+        if not attempt_complete:
+            state["detailIndex"] = detail_index
+            state["detailActiveAttempt"] = active_attempt
+            state["detailBatches"] = batches
+            return false
         detail_index += 1
         processed += 1
+        active_attempt = {}
     state["detailIndex"] = detail_index
+    state["detailActiveAttempt"] = active_attempt
     state["detailBatches"] = batches
     if detail_index < attempts:
         return false
@@ -3442,27 +3465,105 @@ func process_chunk_detail_batch_spawn_state(state: Dictionary, time_budget_ms :=
     state["detailBatchIndex"] = batch_index
     return true
 
-func spawn_chunk_detail_attempt(state: Dictionary, _index: int, rng: RandomNumberGenerator, batches: Dictionary) -> void:
+func begin_chunk_detail_attempt(state: Dictionary, rng: RandomNumberGenerator) -> Dictionary:
     var start_x := int(state.get("startX", int(state.get("cx", 0)) * CHUNK_SIZE))
     var start_z := int(state.get("startZ", int(state.get("cz", 0)) * CHUNK_SIZE))
-    var x := start_x + 1 + rng.randi_range(0, CHUNK_SIZE - 2)
-    var z := start_z + 1 + rng.randi_range(0, CHUNK_SIZE - 2)
-    if natural_props_blocked_at_cell(x, z):
-        return
-    var surface_sample := surface_volume_spawn_sample_at_cell(x, z)
-    if surface_sample.is_empty() or not bool(surface_sample.get("found", false)):
-        return
-    var h := float(surface_sample.get("height", 0.0))
-    if h < WATER_LEVEL - 0.1 or h > 104.0:
-        return
-    var biome := String(surface_sample.get("biome", "plains"))
-    if biome == "town":
-        return
-    var variation := height_variation_cell(x, z, 1)
-    if variation > CELL * 1.35:
-        return
-    var local_position := Vector3((x - start_x) * CELL + rng.randf_range(-0.42, 0.42), h, (z - start_z) * CELL + rng.randf_range(-0.42, 0.42))
-    add_detail_for_biome(batches, local_position, biome, h, rng)
+    return {
+        "phase": "block_check",
+        "x": start_x + 1 + rng.randi_range(0, CHUNK_SIZE - 2),
+        "z": start_z + 1 + rng.randi_range(0, CHUNK_SIZE - 2),
+        "variationCenterHeight": 0.0,
+        "variationIndex": 0,
+        "variationMaxDelta": 0.0
+    }
+
+func advance_chunk_detail_attempt(
+    state: Dictionary,
+    attempt: Dictionary,
+    rng: RandomNumberGenerator,
+    batches: Dictionary,
+    time_budget_ms := -1.0,
+    budget_start_usec := 0
+) -> bool:
+    var start_x := int(state.get("startX", int(state.get("cx", 0)) * CHUNK_SIZE))
+    var start_z := int(state.get("startZ", int(state.get("cz", 0)) * CHUNK_SIZE))
+    var x := int(attempt.get("x", start_x))
+    var z := int(attempt.get("z", start_z))
+    var start_usec := budget_start_usec if budget_start_usec > 0 else Time.get_ticks_usec()
+    while true:
+        var phase := String(attempt.get("phase", "block_check"))
+        if phase != "block_check" and chunk_prop_spawn_budget_elapsed(start_usec, time_budget_ms):
+            return false
+        if phase == "block_check":
+            var block_check_start: int = runtime_perf_monitor.begin_section("chunk_detail_prop_block_check") if runtime_perf_monitor != null else Time.get_ticks_usec()
+            var blocked := natural_props_blocked_at_cell(x, z)
+            if runtime_perf_monitor != null:
+                runtime_perf_monitor.end_section("chunk_detail_prop_block_check", block_check_start)
+            if blocked:
+                return true
+            attempt["phase"] = "surface_sample"
+            continue
+        if phase == "surface_sample":
+            var sample_start: int = runtime_perf_monitor.begin_section("chunk_detail_prop_sample") if runtime_perf_monitor != null else Time.get_ticks_usec()
+            var surface_sample := surface_volume_spawn_sample_at_cell(x, z)
+            if runtime_perf_monitor != null:
+                runtime_perf_monitor.end_section("chunk_detail_prop_sample", sample_start)
+            if surface_sample.is_empty() or not bool(surface_sample.get("found", false)):
+                return true
+            var h := float(surface_sample.get("height", 0.0))
+            if h < WATER_LEVEL - 0.1 or h > 104.0:
+                return true
+            var biome := String(surface_sample.get("biome", "plains"))
+            if biome == "town":
+                return true
+            attempt["height"] = h
+            attempt["biome"] = biome
+            attempt["phase"] = "variation_center"
+            continue
+        if phase == "variation_center":
+            var center_start: int = runtime_perf_monitor.begin_section("chunk_detail_prop_variation") if runtime_perf_monitor != null else Time.get_ticks_usec()
+            attempt["variationCenterHeight"] = surface_y_at_cell(Vector3i(x, 0, z))
+            if runtime_perf_monitor != null:
+                runtime_perf_monitor.end_section("chunk_detail_prop_variation", center_start)
+            attempt["phase"] = "variation_cells"
+            continue
+        if phase == "variation_cells":
+            var variation_index := int(attempt.get("variationIndex", 0))
+            if variation_index >= 9:
+                if float(attempt.get("variationMaxDelta", 0.0)) > CELL * 1.35:
+                    return true
+                attempt["phase"] = "append"
+                continue
+            var dx := variation_index % 3 - 1
+            var dz := floori(float(variation_index) / 3.0) - 1
+            var variation_start: int = runtime_perf_monitor.begin_section("chunk_detail_prop_variation") if runtime_perf_monitor != null else Time.get_ticks_usec()
+            var sample_height: float = surface_y_at_cell(Vector3i(x + dx, 0, z + dz))
+            if runtime_perf_monitor != null:
+                runtime_perf_monitor.end_section("chunk_detail_prop_variation", variation_start)
+            attempt["variationMaxDelta"] = maxf(
+                float(attempt.get("variationMaxDelta", 0.0)),
+                abs(sample_height - float(attempt.get("variationCenterHeight", 0.0)))
+            )
+            attempt["variationIndex"] = variation_index + 1
+            continue
+        if phase == "append":
+            var append_start: int = runtime_perf_monitor.begin_section("chunk_detail_prop_append") if runtime_perf_monitor != null else Time.get_ticks_usec()
+            var local_position := Vector3(
+                (x - start_x) * CELL + rng.randf_range(-0.42, 0.42),
+                float(attempt.get("height", 0.0)),
+                (z - start_z) * CELL + rng.randf_range(-0.42, 0.42)
+            )
+            add_detail_for_biome(batches, local_position, String(attempt.get("biome", "plains")), float(attempt.get("height", 0.0)), rng)
+            if runtime_perf_monitor != null:
+                runtime_perf_monitor.end_section("chunk_detail_prop_append", append_start)
+            return true
+        return true
+    return true
+
+func spawn_chunk_detail_attempt(state: Dictionary, _index: int, rng: RandomNumberGenerator, batches: Dictionary) -> void:
+    var attempt := begin_chunk_detail_attempt(state, rng)
+    while not advance_chunk_detail_attempt(state, attempt, rng, batches):
+        pass
 
 func spawn_chunk_detail_batches_from_transforms(chunk: Node3D, batches: Dictionary) -> void:
     if batches.is_empty():
@@ -3488,25 +3589,12 @@ func spawn_chunk_detail_batches(chunk: Node3D, cx: int, cz: int) -> void:
     var start_z: int = cz * CHUNK_SIZE
     var attempts: int = maxi(8, int(round(float(visual_quality.get("decorativeDetailCap", 72)) * density)))
     var batches := {}
+    var attempt_state := {
+        "startX": start_x,
+        "startZ": start_z
+    }
     for i in range(attempts):
-        var x := start_x + 1 + rng.randi_range(0, CHUNK_SIZE - 2)
-        var z := start_z + 1 + rng.randi_range(0, CHUNK_SIZE - 2)
-        if natural_props_blocked_at_cell(x, z):
-            continue
-        var surface_sample := surface_volume_spawn_sample_at_cell(x, z)
-        if surface_sample.is_empty() or not bool(surface_sample.get("found", false)):
-            continue
-        var h := float(surface_sample.get("height", 0.0))
-        if h < WATER_LEVEL - 0.1 or h > 104.0:
-            continue
-        var biome := String(surface_sample.get("biome", "plains"))
-        if biome == "town":
-            continue
-        var variation := height_variation_cell(x, z, 1)
-        if variation > CELL * 1.35:
-            continue
-        var local_position := Vector3((x - start_x) * CELL + rng.randf_range(-0.42, 0.42), h, (z - start_z) * CELL + rng.randf_range(-0.42, 0.42))
-        add_detail_for_biome(batches, local_position, biome, h, rng)
+        spawn_chunk_detail_attempt(attempt_state, i, rng, batches)
     spawn_chunk_detail_batches_from_transforms(chunk, batches)
 
 func natural_props_blocked_at_cell(x: int, z: int) -> bool:
@@ -3860,6 +3948,10 @@ func add_detail_octahedron(st: SurfaceTool, center: Vector3, radius: Vector3) ->
     add_detail_triangle(st, bottom, north, west, 0.0, 0.0, 0.0)
 
 func tree_visual_spec(biome: String, rng: RandomNumberGenerator) -> Dictionary:
+    # Preserve the historic prop-RNG draw sequence while the actual natural-tree
+    # dimensions now come from TreeRuntimeRequestBuilder. Other props share this
+    # chunk RNG, so retiring these legacy fallback values outright would reorder
+    # world generation even though they are no longer visual authority.
     var spec := {
         "rotation": rng.randf() * TAU,
         "height": 3.0 + rng.randf() * 2.2,
@@ -3886,30 +3978,56 @@ func tree_visual_spec(biome: String, rng: RandomNumberGenerator) -> Dictionary:
         })
     return spec
 
+func tree_runtime_spec_for_prop(
+    biome: String,
+    prop_id: String,
+    fallback_height: float,
+    world_cell: Vector2i
+) -> Dictionary:
+    var catalog = biome_environment_catalog
+    # Production setup owns this catalog directly. A few isolated contract
+    # fixtures construct Main without the normal setup sequence but inject a
+    # ready registry; using only its already-built catalog keeps those fixtures
+    # on the same pure request builder without reviving asset selection.
+    if catalog == null and visual_asset_registry != null:
+        catalog = visual_asset_registry.environment_catalog
+    if catalog == null or not catalog.has_method("profile_for_biome"):
+        return {}
+    var profile := catalog.profile_for_biome(biome) as BiomeEnvironmentProfile
+    if profile == null:
+        return {}
+    if tree_runtime_request_builder == null:
+        tree_runtime_request_builder = TreeRuntimeRequestBuilderScript.new()
+    return tree_runtime_request_builder.build(profile, biome, prop_id, fallback_height, world_cell, seed_text)
+
 func add_tree_visual(body: StaticBody3D, prop_id: String, biome: String, spec: Dictionary) -> void:
     if add_generated_tree_visual(body, prop_id, biome, spec):
         return
     add_fallback_tree_visual(body, spec)
 
 func add_generated_tree_visual(body: StaticBody3D, prop_id: String, biome: String, spec: Dictionary) -> bool:
-    if visual_asset_registry == null or not visual_asset_registry.is_ready():
-        return false
-    var asset_id := String(spec.get("asset_id", visual_asset_registry.select_tree_asset_id(biome, prop_id)))
-    var visual: Node3D = visual_asset_registry.instantiate_asset(asset_id)
-    if visual == null:
-        return false
-    var scale := maxf(0.1, float(spec.get("asset_scale", 1.0)))
-    visual.name = "GeneratedTreeVisual"
-    visual.position = Vector3.ZERO
-    visual.rotation = Vector3.ZERO
-    visual.scale = Vector3.ONE * scale
-    visual.set_meta("visual_source", "generated_asset")
-    visual.set_meta("visual_asset_id", asset_id)
-    visual_asset_registry.configure_tree_wind_instance(visual, biome, prop_id)
-    body.add_child(visual)
-    body.set_meta("visual_source", "generated_asset")
-    body.set_meta("visual_asset_id", asset_id)
-    return true
+    var runtime_spec: Dictionary = spec.get("runtime_spec", {}) if spec.get("runtime_spec", {}) is Dictionary else {}
+    if TreeRuntimeRequestBuilderScript.is_procedural_request(runtime_spec):
+        var queue = ensure_tree_publication_queue()
+        if queue != null:
+            if player != null and is_instance_valid(player) and queue.has_method("set_viewer"):
+                queue.set_viewer(player)
+            var request := runtime_spec.duplicate(true)
+            request["treeId"] = prop_id
+            request["biome"] = biome
+            request["worldSeed"] = seed_text
+            request["presentation"] = "runtime"
+            request["treeWorldPosition"] = body.global_position
+            # The queue owns only presentation.  Supplying the current viewer
+            # distance lets it complete local canopies first without changing
+            # deterministic prop selection, IDs, collision, or save state.
+            request["publicationPriority"] = body.global_position.distance_squared_to(player.global_position) if player != null and is_instance_valid(player) else INF
+            if bool(queue.enqueue(body, request)):
+                body.set_meta("visual_source", "procedural_tree_recipe_pending")
+                body.set_meta("visual_asset_id", "procedural:%s" % String(runtime_spec.get("speciesGrammar", "tree")))
+                body.set_meta("tree_visual_state", "queued")
+                return true
+    return false
 
 func add_fallback_tree_visual(body: StaticBody3D, spec: Dictionary) -> void:
     var height := float(spec.get("height", 4.0))
@@ -3962,12 +4080,10 @@ func make_tree(
     var spec := tree_visual_spec(biome, rng)
     var legacy_height := float(spec.get("height", 4.0))
     var runtime_spec := {}
-    if visual_asset_registry != null and visual_asset_registry.is_ready() and visual_asset_registry.has_method("tree_runtime_spec"):
-        runtime_spec = visual_asset_registry.tree_runtime_spec(biome, prop_id, legacy_height)
+    runtime_spec = tree_runtime_spec_for_prop(biome, prop_id, legacy_height, world_cell)
     if not runtime_spec.is_empty():
         spec["legacy_height"] = legacy_height
-        spec["asset_id"] = String(runtime_spec.get("assetId", ""))
-        spec["asset_scale"] = float(runtime_spec.get("scale", 1.0))
+        spec["runtime_spec"] = runtime_spec
         spec["height"] = float(runtime_spec.get("visualHeight", legacy_height))
         spec["trunk_radius"] = float(runtime_spec.get("trunkRadius", 0.36))
         spec["canopy_radius"] = float(runtime_spec.get("canopyRadius", 1.8))
@@ -3993,26 +4109,101 @@ func make_tree(
     body.set_meta("visual_biome", biome)
     body.set_meta("tree_family", String(runtime_spec.get("family", "primitive_fallback")))
     body.set_meta("tree_growth_class", String(runtime_spec.get("growthClass", "standard")))
+    body.set_meta("tree_architecture", String(runtime_spec.get("architecture", "legacy")))
+    body.set_meta("tree_age_band", String(runtime_spec.get("ageBand", "standard")))
+    body.set_meta("tree_age_years", float(runtime_spec.get("ageYears", 0.0)))
+    body.set_meta("tree_age_range_min", float(runtime_spec.get("ageRangeMin", 0.0)))
+    body.set_meta("tree_age_range_max", float(runtime_spec.get("ageRangeMax", 0.0)))
+    body.set_meta("tree_local_maturity", float(runtime_spec.get("localMaturity", 0.5)))
+    body.set_meta("tree_genetic_seed", int(runtime_spec.get("geneticSeed", 0)))
     body.set_meta("tree_canopy_radius", canopy_radius)
     body.set_meta("tree_trunk_radius", trunk_radius)
     body.set_meta("tree_visual_height", float(spec.get("height", legacy_height)))
+    body.set_meta("tree_collision_height", float(runtime_spec.get("collisionHeight", spec.get("height", legacy_height))))
     body.set_meta("tree_old_growth", bool(runtime_spec.get("oldGrowth", false)))
+    body.add_to_group("generated_tree_trunks")
 
     var height := float(spec.get("height", 4.0))
-    add_tree_visual(body, prop_id, biome, spec)
-
+    # Branches and foliage are deliberately non-colliding. The recipe supplies
+    # one bounded interaction trunk rather than a collider that reaches through
+    # the complete crown.
+    var collision_height := clampf(float(runtime_spec.get("collisionHeight", height)), 1.0, height)
     var trunk_shape := CylinderShape3D.new()
     trunk_shape.radius = trunk_radius
-    trunk_shape.height = height
+    trunk_shape.height = collision_height
     var collider := CollisionShape3D.new()
     collider.shape = trunk_shape
-    collider.position.y = height * 0.5
+    collider.position.y = collision_height * 0.5
     body.add_child(collider)
 
     parent.add_child(body)
+    # The visual queue ranks publication by distance from the live viewer.  The
+    # collision body must therefore be in the scene tree before its visual is
+    # enqueued; using global_position before this point asks Godot for an
+    # invalid transform during ordinary chunk prop creation.
+    add_tree_visual(body, prop_id, biome, spec)
+    resolve_player_tree_publication_overlap(body)
     if npc_system and npc_system.has_method("notify_navigation_prop_created"):
         npc_system.notify_navigation_prop_created(prop_id, body)
     return body
+
+func resolve_player_tree_publication_overlap(tree: Node3D) -> bool:
+    if player == null or not is_instance_valid(player):
+        return false
+    if not player_position_overlaps_generated_tree(player.global_position, tree):
+        return false
+    var center := tree.global_position
+    var delta := Vector2(player.global_position.x - center.x, player.global_position.z - center.z)
+    var base_angle := delta.angle() if delta.length_squared() > 0.0001 else float(posmod(String(tree.get_meta("prop_id", tree.name)).hash(), 360)) * PI / 180.0
+    var trunk_radius := maxf(0.12, float(tree.get_meta("tree_trunk_radius", 0.36)))
+    for radius_extra in [1.05, 2.40, 4.20]:
+        var radius := trunk_radius + float(radius_extra)
+        for index in range(24):
+            var angle := base_angle + TAU * float(index) / 24.0
+            var candidate_xz := Vector2(center.x, center.z) + Vector2(cos(angle), sin(angle)) * radius
+            var candidate_cell := Vector3i(world_to_cell(candidate_xz.x), 0, world_to_cell(candidate_xz.y))
+            var candidate := Vector3(candidate_xz.x, surface_y_at_cell(candidate_cell) + 0.15, candidate_xz.y)
+            if player_tree_relocation_candidate_is_clear(candidate):
+                player.global_position = candidate
+                player.velocity = Vector3.ZERO
+                return true
+    return false
+
+func player_tree_relocation_candidate_is_clear(candidate: Vector3) -> bool:
+    if player == null or not is_instance_valid(player):
+        return false
+    var scene_tree := player.get_tree()
+    if scene_tree != null:
+        for node in scene_tree.get_nodes_in_group("generated_tree_trunks"):
+            if node is Node3D and is_instance_valid(node) and player_position_overlaps_generated_tree(candidate, node as Node3D):
+                return false
+    var candidate_cell := Vector3i(world_to_cell(candidate.x), world_to_cell(candidate.y), world_to_cell(candidate.z))
+    for dy in range(0, 3):
+        if blocks.has(candidate_cell + Vector3i(0, dy, 0)):
+            return false
+    return true
+
+func ensure_tree_publication_queue():
+    if tree_publication_queue != null and is_instance_valid(tree_publication_queue):
+        if player != null and is_instance_valid(player) and tree_publication_queue.has_method("set_viewer"):
+            tree_publication_queue.set_viewer(player)
+        return tree_publication_queue
+    tree_publication_queue = TreePublicationQueueScript.new()
+    tree_publication_queue.name = "TreePublicationQueue"
+    add_child(tree_publication_queue)
+    if player != null and is_instance_valid(player) and tree_publication_queue.has_method("set_viewer"):
+        tree_publication_queue.set_viewer(player)
+    return tree_publication_queue
+
+func player_position_overlaps_generated_tree(position: Vector3, tree: Node3D) -> bool:
+    if tree == null or not is_instance_valid(tree):
+        return false
+    var center := tree.global_position
+    var height := maxf(0.5, float(tree.get_meta("tree_visual_height", 4.0)))
+    if position.y < center.y - 0.5 or position.y > center.y + height + 0.5:
+        return false
+    var horizontal_delta := Vector2(position.x - center.x, position.z - center.z)
+    return horizontal_delta.length() < maxf(0.12, float(tree.get_meta("tree_trunk_radius", 0.36))) + 0.80
 
 func natural_tree_blocked_at_cell(
     x: int,

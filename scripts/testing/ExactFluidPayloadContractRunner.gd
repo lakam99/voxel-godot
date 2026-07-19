@@ -55,6 +55,20 @@ func run() -> void:
 	var service = TerrainVolumeServiceScript.new()
 	service.setup(null, generator)
 	service.request_section(Vector3i.ZERO)
+	var lazy_exact_state := service.begin_exact_fluid_payload_for_meshing_chunk(0, 0, 2, 0, 0, 14)
+	add_result(
+		"exact_payload_defers_dense_channel_allocation_until_fluid_probe",
+		String(lazy_exact_state.get("phase", "")) == "probe" \
+			and not bool(lazy_exact_state.get("denseChannelsAllocated", true)) \
+			and not lazy_exact_state.has("solidValues") \
+			and not lazy_exact_state.has("fluidTypeIds"),
+		{
+			"phase": lazy_exact_state.get("phase", ""),
+			"denseChannelsAllocated": lazy_exact_state.get("denseChannelsAllocated", true),
+			"hasSolidValues": lazy_exact_state.has("solidValues"),
+			"hasFluidTypeIds": lazy_exact_state.has("fluidTypeIds")
+		}
+	)
 
 	var coarse_payload := service.section_payload_for_meshing_chunk(0, 0, 2, 0, 0, 14)
 	add_result(

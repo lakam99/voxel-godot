@@ -21,6 +21,8 @@ const EDIT_SECTIONS_PER_FRAME := 1
 const PUBLICATION_PROBES_PER_PHYSICS_FRAME := 2
 const COLLISION_SURFACE_TOLERANCE := CELL * 2.5
 const COLLISION_MESH_VERTICAL_MARGIN_CELLS := 4
+const SEED_RESET_TASK_DRAIN_TIMEOUT_SECONDS := 30.0
+const SEED_RESET_REQUIRED_QUIET_FRAMES := 2
 const MATERIAL_IDS := {
 	"air": 0, "grass": 1, "dirt": 2, "stone": 3, "sand": 4, "snow": 5,
 	"deepStone": 6, "bedrock": 7, "clay": 8, "gravel": 9, "coalOre": 10,
@@ -139,6 +141,15 @@ func reset_for_current_seed_staged() -> Dictionary:
 		viewer.requires_collisions = false
 	terrain.automatic_loading_enabled = false
 	await get_tree().physics_frame
+	# Voxel generation and meshing are native asynchronous work.  Swapping the
+	# script generator before that work has stopped can leave a task holding the
+	# previous generator while the terrain is already configured for a new seed.
+	# The Voxel Tools documentation explicitly warns that changing a script while
+	# worker threads are using it is undefined behavior, so preserve the loading
+	# screen and wait for a stable idle boundary before the replacement.
+	var task_drain_result := await wait_for_seed_reset_task_drain()
+	if not bool(task_drain_result.get("ok", false)):
+		return task_drain_result
 	var reset_started_usec := Time.get_ticks_usec()
 	var next_generator = generation_state.get("generator")
 	terrain.generator = next_generator
@@ -179,7 +190,52 @@ func reset_for_current_seed_staged() -> Dictionary:
 		"previousPublishedMeshBlocks": previous_mesh_blocks,
 		"previousPublishedGameplayChunks": previous_gameplay_chunks,
 		"invalidatedGameplayChunks": invalidated_chunks,
-		"resetMapUsec": reset_map_usec
+		"resetMapUsec": reset_map_usec,
+		"taskDrain": task_drain_result.get("metrics", {})
+	})
+
+func wait_for_seed_reset_task_drain() -> Dictionary:
+	var drain_started_usec := Time.get_ticks_usec()
+	var checks := 0
+	var quiet_frames := 0
+	var peak_pending_tasks := 0
+	var last_pending_tasks := -1
+	while quiet_frames < SEED_RESET_REQUIRED_QUIET_FRAMES:
+		if terrain == null or not is_instance_valid(terrain):
+			return STARTUP_READINESS_RESULT_SCRIPT.failed("voxel_terrain_reset_authority_missing")
+		var pending_tasks := voxel_engine_pending_task_count()
+		peak_pending_tasks = maxi(peak_pending_tasks, pending_tasks)
+		checks += 1
+		if pending_tasks <= 0:
+			quiet_frames += 1
+		else:
+			quiet_frames = 0
+		var elapsed_seconds := float(Time.get_ticks_usec() - drain_started_usec) / 1000000.0
+		if elapsed_seconds >= SEED_RESET_TASK_DRAIN_TIMEOUT_SECONDS:
+			return STARTUP_READINESS_RESULT_SCRIPT.failed("voxel_terrain_seed_reset_task_drain_timeout", {}, [], {
+				"pendingTasks": pending_tasks,
+				"peakPendingTasks": peak_pending_tasks,
+				"checks": checks,
+				"elapsedMs": elapsed_seconds * 1000.0
+			})
+		if quiet_frames >= SEED_RESET_REQUIRED_QUIET_FRAMES:
+			break
+		if main != null and is_instance_valid(main) and main.has_method("startup_loading_yield") \
+				and (checks == 1 or pending_tasks != last_pending_tasks or checks % 30 == 0):
+			await main.call("startup_loading_yield", "Retiring previous terrain: %d tasks" % pending_tasks, "terrain_authority", "pending", {
+				"pendingTasks": pending_tasks,
+				"peakPendingTasks": peak_pending_tasks,
+				"checks": checks
+			})
+		else:
+			await get_tree().process_frame
+		last_pending_tasks = pending_tasks
+	return STARTUP_READINESS_RESULT_SCRIPT.ready({}, {
+		"pendingTasks": 0,
+		"peakPendingTasks": peak_pending_tasks,
+		"checks": checks,
+		"quietFrames": quiet_frames,
+		"elapsedMs": float(Time.get_ticks_usec() - drain_started_usec) / 1000.0
 	})
 
 func build_generation_state() -> Dictionary:
@@ -496,6 +552,7 @@ func begin_shutdown() -> void:
 	desired_gameplay_chunks.clear()
 	view_distance_expansion_elapsed = 0.0
 	view_distance_expansion_requested = false
+
 
 func request_final_view_distance_expansion() -> void:
 	if not authority_ready:

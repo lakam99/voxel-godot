@@ -50,11 +50,22 @@ func plan_route(entry: Dictionary, start_cell: Vector2i, candidate_cells: Array,
 		})
 	var snapshot: Dictionary = snapshot_result.get("snapshot", {})
 	var candidates := _normalize_cells(candidate_cells)
+	# Probe-repair avoids are collision findings, not soft route preferences.  A
+	# failed interaction pose must not remain an eligible goal, otherwise A* can
+	# repeatedly return the same terminal cell that the body probe just rejected.
+	# The player and NPC callers both retain every other semantic candidate.
+	var avoided_goal_cells: Array = []
+	for candidate in candidates.duplicate():
+		if avoid_lookup.has(candidate) and candidate != start_cell:
+			candidates.erase(candidate)
+			avoided_goal_cells.append(candidate)
 	if candidates.is_empty():
-		return _result(false, CLASS_INVALID_GOAL, "no_candidate_cells", [], [], {
+		return _result(false, CLASS_UNREACHABLE_STATIC, "all_candidate_cells_avoided_by_probe", [], [], {
 			"collisionBacked": true,
 			"generatedWorldInformed": true,
-			"rejectedGoals": []
+			"rejectedGoals": [],
+			"avoidCells": avoid_cells,
+			"avoidedGoalCells": avoided_goal_cells
 		})
 	var target_lookup := { "_strictTargetCollision": true }
 	var accepted_goals := {}
@@ -677,6 +688,12 @@ func _target_candidate_cells(entry: Dictionary, target: Dictionary, semantic_kin
 	elif semantic_kind == "forage_target":
 		_append_cell(result, target.get("exactSlotCell", target.get("cell", INVALID_CELL)))
 	elif semantic_kind == "interaction_target":
+		# A caller may provide a semantic set of physically valid action poses
+		# (for example, placement stands). They remain candidates only: this
+		# substrate still performs the authoritative snapshot, route, and probe
+		# validation before returning a route.
+		for candidate_cell in target.get("candidateCells", []):
+			_append_cell(result, candidate_cell)
 		_append_cell(result, target.get("cell", INVALID_CELL))
 		_append_position_approaches(result, entry, target.get("position", Vector3.ZERO), allow_outside)
 	elif semantic_kind == "guard_post":

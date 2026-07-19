@@ -11,10 +11,14 @@ uniform vec4 base_color : source_color = vec4(1.0);
 uniform float roughness : hint_range(0.0, 1.0) = 0.82;
 uniform float main_bend_meters : hint_range(0.0, 1.0) = 0.48;
 uniform float detail_flutter_meters : hint_range(0.0, 0.2) = 0.075;
+uniform float bark_enabled : hint_range(0.0, 1.0) = 0.0;
+uniform vec4 bark_accent_color : source_color = vec4(0.16, 0.08, 0.035, 1.0);
+uniform float bark_grain_contrast : hint_range(0.0, 1.0) = 0.38;
 
 instance uniform float tree_phase = 0.0;
 instance uniform float tree_stiffness : hint_range(0.5, 1.5) = 1.0;
 instance uniform float tree_response : hint_range(0.0, 2.0) = 1.0;
+instance uniform vec2 bark_scale = vec2(1.0);
 
 void vertex() {
     vec3 world_position = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
@@ -39,6 +43,11 @@ void vertex() {
 }
 
 void fragment() {
-    ALBEDO = base_color.rgb;
+    vec2 bark_uv = UV * bark_scale;
+    float long_grain = sin(bark_uv.x * 31.415926 + sin(bark_uv.y * 1.65) * 1.18);
+    float fine_grain = sin(bark_uv.x * 75.398224 + bark_uv.y * 3.4) * 0.32;
+    float furrow = smoothstep(0.02, 0.82, 0.5 + 0.5 * (long_grain + fine_grain));
+    vec3 bark_color = mix(bark_accent_color.rgb, base_color.rgb, 0.46 + furrow * bark_grain_contrast);
+    ALBEDO = mix(base_color.rgb, bark_color, bark_enabled);
     ROUGHNESS = roughness;
 }

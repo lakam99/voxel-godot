@@ -454,6 +454,12 @@ func contract_cases() -> Array[Dictionary]:
 			"callable": Callable(self, "test_route_lease_executor_follows_v2_lease")
 		},
 		{
+			"id": "npc_contract_route_lease_executor_accepts_crossed_waypoint",
+			"suite": "contract",
+			"timeModes": ["day", "night"],
+			"callable": Callable(self, "test_route_lease_executor_accepts_crossed_waypoint")
+		},
+		{
 			"id": "npc_contract_route_lease_executor_preserves_moving_home_semantics",
 			"suite": "contract",
 			"timeModes": ["day", "night"],
@@ -1906,6 +1912,38 @@ func test_route_lease_executor_follows_v2_lease(_mode: String) -> Dictionary:
 		"last=%s debug=%s finalDistance=%.3f events=%s" % [JSON.stringify(last), JSON.stringify(debug), final_distance, JSON.stringify(events)],
 		["v2_executor_consumes_ready_lease", "v2_executor_uses_motor_to_arrive", "v2_executor_reports_segments_to_authority"],
 		{ "last": last, "debug": debug, "finalDistance": final_distance, "events": events }
+	)
+
+
+func test_route_lease_executor_accepts_crossed_waypoint(_mode: String) -> Dictionary:
+	var executor = NpcRouteLeaseExecutorScript.new()
+	var crossed := bool(executor.call(
+		"_crossed_waypoint",
+		Vector3(0.0, 0.0, 0.0),
+		Vector3(0.74, 0.0, 0.0),
+		Vector3(0.38, 0.0, 0.0),
+		0.12
+	))
+	var near_miss := bool(executor.call(
+		"_crossed_waypoint",
+		Vector3(0.0, 0.0, 0.0),
+		Vector3(0.74, 0.0, 0.0),
+		Vector3(0.38, 0.0, 0.20),
+		0.12
+	))
+	var before_target := bool(executor.call(
+		"_crossed_waypoint",
+		Vector3(0.0, 0.0, 0.0),
+		Vector3(0.22, 0.0, 0.0),
+		Vector3(0.38, 0.0, 0.0),
+		0.12
+	))
+	var passed := crossed and not near_miss and not before_target
+	return outcome(
+		passed,
+		"crossed=%s nearMiss=%s beforeTarget=%s" % [str(crossed), str(near_miss), str(before_target)],
+		["crossed_waypoint_completes_segment", "near_miss_does_not_cut_route_corner", "pre_target_motion_does_not_complete_segment"],
+		{ "crossed": crossed, "nearMiss": near_miss, "beforeTarget": before_target }
 	)
 
 func test_route_lease_executor_preserves_moving_home_semantics(_mode: String) -> Dictionary:

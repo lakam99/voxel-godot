@@ -1,0 +1,85 @@
+# VOX-131 Tree Ecology Release Report
+
+## Outcome
+
+The player-facing ecology target is implemented: large trees are an ordinary age-distribution outcome in wooded biomes, older trees grow more branch generations and attached leaves, crowns create overhead shade, and bark retains readable scale. There is no canopy planner; existing valid tree placement plus biome age/phenotype rules produces the result.
+
+`manifesto.md` and `CODEX_TUTORIAL_TOWN_NPC_LOADING_PLAN.md` remain release gates. No protected pathfinding implementation changed and vegetation owns no town readiness or NPC command.
+
+## Biome tuning and inspected visual evidence
+
+The final nine headed captures are under `artifacts/visual/vox125-tree-ecology/` and were inspected at gameplay scale.
+
+- Forest midday: eight old/ancient broadleaves within 48 m, 33.611-38.747 m high, 12.548-16.188 m crown radii, projected crown-area ratio 0.692.
+- Forest traversal: 32 trees across the wider observation, overlapping crowns and a projected crown-area ratio of 2.76.
+- Forest storm/night: the same canopy remains readable, sways asynchronously, casts moving shade, and is torch-readable at night.
+- Taiga: tall old conifers provide a distinct vertical silhouette, roughly 37-42 m in the inspected stand.
+- Savanna: mature broad crowns remain lower and flatter, roughly 22-24 m in the inspected stand.
+- Plains: established/mature trees remain smaller, roughly 11.5-13.4 m, preserving open sightlines.
+- Town edge: published building/road/gate exclusions remain clear.
+- The selected swamp capture contains no requested-biome tree inside 48 m, so it is not cited as positive swamp-canopy proof; the profile/runtime contracts cover swamp configuration, and this limitation remains explicit.
+
+Contact sheets prove monotonic architecture/leaf growth across all three species and five bands. Live forest captures prove the generated assets are actually selected in procedural gameplay.
+
+## Performance
+
+Unflagged Main Menu -> New Game random seed `atlas-69326680`:
+
+- report: `artifacts/performance/vox131-ecology-sprint.json`;
+- 1,872 measured frames, 615.12 m travel, 119 chunks created;
+- p50 10.351 ms, p95 16.240 ms, p99 19.533 ms, max 27.059 ms;
+- max chunk 13.953 ms; max chunk prop spawn 12.677 ms;
+- max terrain meshing job 4.277 ms; max NPC 3.749 ms;
+- no spike reason.
+
+This is inside the completed VOX-123 envelope and shows no synchronous phenotype-generation or tree-publication hitch.
+
+The normal world-edit latency runner recorded excellent direct operations:
+
+- placement: wood 0.561 ms, torch 0.639 ms, lantern 0.807 ms;
+- break: wood 0.346 ms, torch 0.154 ms, lantern 0.164 ms;
+- follow-up queue peak 2.377 ms, below its 3 ms budget.
+
+That runner's aggregate result is still red because an unrelated terrain meshing job reached 101.701 ms, navigation snapshot 15.483 ms, and autosave 3.398 ms. VOX-118 already recorded the same pre-canopy terrain hitch at 96.310/100.991 ms; the current direct edit numbers are below the pre-change audit and strict-audit edit values. This tree release does not patch terrain, navigation, or autosave collateral work.
+
+## Determinism and signature publication
+
+Two fresh `atlas-1492` signatures are byte-identical with SHA-256 `C6A282EC72EBEB76B3139CE2EE3CDF28CAF31CA95904DD8D32A879B36B053C88`.
+
+The intended coherent trunk/collision change moved the observer across an exact streaming-window boundary, replacing one perimeter row of loaded chunks. Terrain samples, generated blocks, structure counts, tier counts, and town-home records are unchanged. All 628 overlapping stable prop IDs and records are byte-identical, proving no shared prop RNG reordering. The tracked signature baseline is updated honestly and must be republished through the official latest-artifact runner after its commit.
+
+## Functional and protected evidence
+
+- Blender re-import: 69/69.
+- Visual manifest: 69/69.
+- Canopy asset import: 9/9 across 43 tree GLBs.
+- Biome catalog: 14/14.
+- Canopy runtime: 9/9.
+- Environment wind contract: 11/11.
+- Headed environment wind visual: 8/8.
+- Broad fixed-seed gameplay rerun: passed after updating two dated generated-asset smoke predicates to the ecological registry contract; production was not changed for the test.
+- NPC contract: 82/82 runs, 240 assertions.
+
+The first full protected aggregate passed 16/17 suites. Its only red suite was `streaming_save`: the newly updated working-tree baseline was compared with the still-old generated `latest` artifact. Blob inspection proves `latest` exactly matched the unchanged entry baseline (`2b4fec...`), while the new baseline exactly matched both new runs (`224f7d...`). This was an evidence-publication ordering failure, not a gameplay/pathfinding failure. No protected test or source changed.
+
+After commit `484d62e`, the official `tools/run-world-signature.ps1 -Seed atlas-1492` regenerated `latest` and matched the committed baseline. The unchanged streaming/save suite then passed 40/40 runs and 92 assertions at `artifacts/npc/reports/vox131-streaming-save-postsignature.json`.
+
+The final manifesto aggregate passed 17/17 suites with zero failures in 867.699 seconds:
+
+```powershell
+.\tools\npc\run-all-npc-tests.ps1 -TimeMode Both -Seed atlas-1492 -ReportPath artifacts\npc\reports\vox131-all-npc-both-final.json
+```
+
+Live acceptance included:
+
+- go-home 13/13: approach, door open, crossing, strict interior, clearance, and close;
+- real tutorial 5/5: Mira uses the ordinary home/door path and non-guards return home;
+- following morning: Mira, Rowan, and Niko resume outside behavior;
+- final rescue: live combat, Niko home, and Sera guard restoration;
+- town job cycle 25/25: day jobs/foraging, night transitions/interiors, and morning re-emergence.
+
+Representative captures and timelines under `artifacts/npc/screenshots/*-both/` were inspected. The go-home final frame remains extremely dark, so its image is not used alone as proof; the clearer tutorial interior frame, door timeline, and acceptance trace carry that claim. The rescue combat frame is partially blocked by a nearby actor, so the combat-complete/return frames and timeline are used together. This is consistent with the live-evidence boundary in `CODEX_TUTORIAL_TOWN_NPC_LOADING_PLAN.md`.
+
+## Release boundary
+
+The ecology implementation, visual acceptance, live harvesting/Continue, broad gameplay, direct edit latency, normal traversal, deterministic signature, and protected NPC/town gates are green. Existing shutdown RID/resource warnings remain visible after headed suites and are not attributed to this feature. VOX-125 through VOX-131 are release-complete with unchanged NPC/pathfinding implementation.

@@ -15,8 +15,15 @@ const FLUID_TYPE_NONE := 0
 const FLUID_TYPE_WATER := 1
 const FLUID_TYPE_LAVA := 2
 
-var main
-var generator
+# TerrainVolumeService is owned by WorldGenerationSystem. It must never retain
+# either its owner or a worker's generation context: VoxelTerrain invokes
+# generator callbacks on native worker threads and those otherwise form a
+# RefCounted cycle (context -> generator -> service -> context). Keep only the
+# scalar terrain contract and a non-owning callback reference.
+var configured_cell_size := 1.35
+var configured_min_height := 4.0
+var configured_max_height := 120.0
+var generator_ref: WeakRef
 var sections := {}
 var edited_cells := {}
 var scene_block_cells := {}
@@ -40,8 +47,14 @@ var revision := 0
 var fluid_revision := 0
 
 func setup(main_node, generator_node) -> void:
-	main = main_node
-	generator = generator_node
+	if main_node != null:
+		configured_cell_size = float(main_node.get("CELL")) if main_node.get("CELL") != null else 1.35
+		configured_min_height = float(main_node.get("MIN_HEIGHT")) if main_node.get("MIN_HEIGHT") != null else 4.0
+		configured_max_height = float(main_node.get("MAX_HEIGHT")) if main_node.get("MAX_HEIGHT") != null else 120.0
+	generator_ref = weakref(generator_node) if generator_node != null else null
+
+func active_generator():
+	return generator_ref.get_ref() if generator_ref != null else null
 
 func reset() -> void:
 	sections.clear()
@@ -319,8 +332,9 @@ func begin_exact_fluid_payload_for_meshing_chunk(
 	var to_y := maxi(int(min_y), int(max_y))
 	var requested_from_y := from_y
 	var requested_to_y := to_y
-	if generator != null and generator.has_method("generated_fluid_cell_y_bounds"):
-		var generated_bounds_value = generator.call("generated_fluid_cell_y_bounds")
+	var generation = active_generator()
+	if generation != null and generation.has_method("generated_fluid_cell_y_bounds"):
+		var generated_bounds_value = generation.call("generated_fluid_cell_y_bounds")
 		if generated_bounds_value is Dictionary:
 			var generated_bounds: Dictionary = generated_bounds_value
 			var generated_from_y := maxi(from_y, int(generated_bounds.get("minY", from_y)))
@@ -346,10 +360,6 @@ func begin_exact_fluid_payload_for_meshing_chunk(
 	var max_cell := Vector3i(int(start_x) + safe_chunk_size, to_y + 1, int(start_z) + safe_chunk_size)
 	var payload_size := max_cell - min_cell + Vector3i.ONE
 	var payload_cell_count := payload_size.x * payload_size.y * payload_size.z
-	var solid_values := PackedByteArray()
-	var fluid_type_ids := PackedByteArray()
-	solid_values.resize(payload_cell_count)
-	fluid_type_ids.resize(payload_cell_count)
 	return {
 		"schemaVersion": 1,
 		"terrainStepCells": maxi(1, int(terrain_step_cells)),
@@ -369,8 +379,12 @@ func begin_exact_fluid_payload_for_meshing_chunk(
 		"cursorY": min_cell.y,
 		"cursorZ": min_cell.z,
 		"payloadSize": payload_size,
-		"solidValues": solid_values,
-		"fluidTypeIds": fluid_type_ids,
+		# Most streamed chunks do not contain fluid.  Do the exact, bounded probe
+		# before allocating dense channels, so opening a mesh job cannot synchronously
+		# allocate a full chunk-sized buffer on the gameplay frame.  A fluid-bearing
+		# chunk promotes itself to capture only after that probe completes.
+		"phase": "probe",
+		"denseChannelsAllocated": false,
 		"sectionKeySeen": {},
 		"sectionKeys": [],
 		"hasFluid": false,
@@ -407,6 +421,34 @@ func advance_exact_fluid_payload_state(state: Dictionary, budget_ms := 2.0, max_
 	var cursor_x := int(state.get("cursorX", min_cell.x))
 	var cursor_y := int(state.get("cursorY", min_cell.y))
 	var cursor_z := int(state.get("cursorZ", min_cell.z))
+	var phase := String(state.get("phase", "capture"))
+	if phase == "capture_allocate":
+		# Dense exact channels are required only once fluid was proven in the
+		# preceding bounded probe.  Keep this separate from sampling so the
+		# allocation cannot combine with a full terrain/fluid step in one frame.
+		var allocation_size := maxi(0, int(state.get("payloadCellCount", 0)))
+		if allocation_size <= 0:
+			var allocation_bounds_size: Vector3i = state.get("payloadSize", Vector3i.ZERO)
+			allocation_size = allocation_bounds_size.x * allocation_bounds_size.y * allocation_bounds_size.z
+		var allocated_solid_values := PackedByteArray()
+		var allocated_fluid_type_ids := PackedByteArray()
+		allocated_solid_values.resize(allocation_size)
+		allocated_fluid_type_ids.resize(allocation_size)
+		state["solidValues"] = allocated_solid_values
+		state["fluidTypeIds"] = allocated_fluid_type_ids
+		state["denseChannelsAllocated"] = true
+		state["phase"] = "capture"
+		state["cursorX"] = min_cell.x
+		state["cursorY"] = min_cell.y
+		state["cursorZ"] = min_cell.z
+		state["sectionKeySeen"] = {}
+		state["sectionKeys"] = []
+		state["hasFluid"] = false
+		state["fluidCellCount"] = 0
+		state["solidCellCount"] = 0
+		state["cellsProcessed"] = 0
+		return exact_fluid_payload_advance_result(state, {}, 0, elapsed_ms_since(started_usec))
+	var capture_payload := phase == "capture"
 	var solid_values: PackedByteArray = state.get("solidValues", PackedByteArray())
 	var fluid_type_ids: PackedByteArray = state.get("fluidTypeIds", PackedByteArray())
 	var payload_size: Vector3i = state.get("payloadSize", Vector3i.ZERO)
@@ -423,8 +465,9 @@ func advance_exact_fluid_payload_state(state: Dictionary, budget_ms := 2.0, max_
 		var payload_index := local.y + payload_size.y * (local.x + payload_size.x * local.z)
 		var solid := bool(fluid_state.get("solid", false))
 		var fluid_type := fluid_type_id(String(fluid_state.get("fluid", "")))
-		solid_values[payload_index] = 1 if solid else 0
-		fluid_type_ids[payload_index] = fluid_type
+		if capture_payload:
+			solid_values[payload_index] = 1 if solid else 0
+			fluid_type_ids[payload_index] = fluid_type
 		if solid:
 			state["solidCellCount"] = int(state.get("solidCellCount", 0)) + 1
 		elif fluid_type != FLUID_TYPE_NONE:
@@ -454,6 +497,13 @@ func advance_exact_fluid_payload_state(state: Dictionary, budget_ms := 2.0, max_
 	state["sectionKeys"] = section_keys
 	state["cellsProcessed"] = int(state.get("cellsProcessed", 0)) + processed
 	var complete := cursor_z > max_cell.z
+	if complete and phase == "probe" and bool(state.get("hasFluid", false)):
+		# The probe has established that dense exact data is necessary.  Reset the
+		# accounting for the capture pass; the final payload still represents one
+		# immutable snapshot, while both scans remain independently frame-budgeted.
+		state["phase"] = "capture_allocate"
+		state["complete"] = false
+		return exact_fluid_payload_advance_result(state, {}, processed, elapsed_ms_since(started_usec))
 	state["complete"] = complete
 	var payload := finalized_exact_fluid_payload_from_state(state) if complete else {}
 	if complete:
@@ -1969,10 +2019,11 @@ func terrain_edit_defer_sky_light(state: Dictionary) -> bool:
 	return bool(metadata.get("deferSkyLight", false))
 
 func current_surface_projection_y_for_column(cell: Vector3i) -> float:
-	if generator != null and generator.has_method("volume_surface_y_for_cell"):
-		return float(generator.call("volume_surface_y_for_cell", Vector3i(cell.x, 0, cell.z)))
-	if generator != null and generator.has_method("surface_y_for_cell"):
-		return float(generator.call("surface_y_for_cell", Vector3i(cell.x, 0, cell.z)))
+	var generation = active_generator()
+	if generation != null and generation.has_method("volume_surface_y_for_cell"):
+		return float(generation.call("volume_surface_y_for_cell", Vector3i(cell.x, 0, cell.z)))
+	if generation != null and generation.has_method("surface_y_for_cell"):
+		return float(generation.call("surface_y_for_cell", Vector3i(cell.x, 0, cell.z)))
 	return surface_y_for_cell(Vector3i(cell.x, 0, cell.z))
 
 func smoothstep01(value: float) -> float:
@@ -2416,8 +2467,9 @@ func sample_world(position: Vector3) -> Dictionary:
 	var generated := generated_sample(position)
 	var column_surface_y := float(generated.get("surfaceY", position.y))
 	if column_has_surface_projection_affecting_edits(cell):
-		if generator != null and generator.has_method("volume_surface_y_for_cell"):
-			column_surface_y = float(generator.call("volume_surface_y_for_cell", Vector3i(cell.x, 0, cell.z)))
+		var generation = active_generator()
+		if generation != null and generation.has_method("volume_surface_y_for_cell"):
+			column_surface_y = float(generation.call("volume_surface_y_for_cell", Vector3i(cell.x, 0, cell.z)))
 		else:
 			column_surface_y = surface_y_for_cell(Vector3i(cell.x, 0, cell.z))
 	var state_solid := bool(state.get("solid", false))
@@ -2639,8 +2691,9 @@ func surface_y_for_cell(cell: Vector3i) -> float:
 	return column_top_surface_y_for_cell(cell)
 
 func reference_surface_y_for_cell(cell: Vector3i) -> float:
-	if generator != null and generator.has_method("terrain_reference_surface_y_for_cell"):
-		return float(generator.call("terrain_reference_surface_y_for_cell", cell))
+	var generation = active_generator()
+	if generation != null and generation.has_method("terrain_reference_surface_y_for_cell"):
+		return float(generation.call("terrain_reference_surface_y_for_cell", cell))
 	var sample := generated_sample(Vector3(float(cell.x) * cell_size(), 0.0, float(cell.z) * cell_size()))
 	return float(sample.get("surfaceY", 0.0))
 
@@ -2674,8 +2727,9 @@ func column_top_surface_y_for_cell(cell: Vector3i) -> float:
 	return reference_y
 
 func surface_biome_for_cell(cell: Vector3i) -> String:
-	if generator != null and generator.has_method("surface_biome_for_cell3"):
-		return String(generator.call("surface_biome_for_cell3", cell))
+	var generation = active_generator()
+	if generation != null and generation.has_method("surface_biome_for_cell3"):
+		return String(generation.call("surface_biome_for_cell3", cell))
 	return String(generated_sample(Vector3(float(cell.x) * cell_size(), 0.0, float(cell.z) * cell_size())).get("biome", "plains"))
 
 func solid_at_cell(cell: Vector3i) -> bool:
@@ -2890,8 +2944,9 @@ func cell_has_solid_neighbor(cell: Vector3i) -> bool:
 	return false
 
 func generated_cell_state(cell: Vector3i) -> Dictionary:
-	if generator != null and generator.has_method("generate_cell_state"):
-		return normalize_cell_state(cell, generator.call("generate_cell_state", cell), false)
+	var generation = active_generator()
+	if generation != null and generation.has_method("generate_cell_state"):
+		return normalize_cell_state(cell, generation.call("generate_cell_state", cell), false)
 	var sample := generated_sample(Vector3((float(cell.x) + 0.5) * cell_size(), (float(cell.y) + 0.5) * cell_size(), (float(cell.z) + 0.5) * cell_size()))
 	return normalize_cell_state(cell, sample, false)
 
@@ -2958,8 +3013,9 @@ func normalize_light(light_value, solid: bool) -> Dictionary:
 	}
 
 func generated_sample(position: Vector3) -> Dictionary:
-	if generator != null and generator.has_method("generate_sample_without_volume"):
-		return generator.call("generate_sample_without_volume", position)
+	var generation = active_generator()
+	if generation != null and generation.has_method("generate_sample_without_volume"):
+		return generation.call("generate_sample_without_volume", position)
 	return {
 		"cell": world_to_cell3(position),
 		"position": position,
@@ -2979,16 +3035,17 @@ func world_to_cell3(position: Vector3) -> Vector3i:
 	return Vector3i(floori(position.x / s), floori(position.y / s), floori(position.z / s))
 
 func cell_size() -> float:
-	return float(main.CELL) if main != null else 1.35
+	return configured_cell_size
 
 func world_bottom_cell_y() -> int:
-	if generator != null and generator.has_method("world_bottom_cell_y"):
-		return int(generator.call("world_bottom_cell_y"))
-	var min_height := float(main.MIN_HEIGHT) if main != null else 0.0
+	var generation = active_generator()
+	if generation != null and generation.has_method("world_bottom_cell_y"):
+		return int(generation.call("world_bottom_cell_y"))
+	var min_height := configured_min_height
 	return floori((min_height - cell_size() * 36.0) / cell_size())
 
 func world_top_cell_y() -> int:
-	var max_height := float(main.MAX_HEIGHT) if main != null else 96.0
+	var max_height := configured_max_height
 	return ceili((max_height + cell_size() * 4.0) / cell_size())
 
 func vector3i_to_array(value: Vector3i) -> Array:

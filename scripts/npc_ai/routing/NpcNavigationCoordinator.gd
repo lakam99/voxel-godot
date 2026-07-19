@@ -128,6 +128,30 @@ func cleanup_all() -> Dictionary:
         return { "avoidance": 0, "reason": "missing_locomotion" }
     return locomotion.cleanup_all()
 
+func shutdown_for_process_exit() -> Dictionary:
+    # Do not call rebuild()/ensure_ready() here. The coordinator is no longer
+    # reusable once its owning game is quitting, so release every reciprocal
+    # route-world reference while the owning scene and servers are still alive.
+    var cleanup := { "avoidance": 0, "reason": "missing_locomotion" }
+    if locomotion != null and locomotion.has_method("cleanup_all"):
+        cleanup = locomotion.cleanup_all()
+    if route_ticket_broker != null and route_ticket_broker.has_method("invalidate"):
+        route_ticket_broker.invalidate()
+    if route_planner != null and route_planner.has_method("invalidate"):
+        route_planner.invalidate()
+    if route_delegate != null and route_delegate.has_method("shutdown_for_process_exit"):
+        route_delegate.shutdown_for_process_exit()
+    route_repair = null
+    goal_planner = null
+    locomotion = null
+    route_ticket_broker = null
+    route_planner = null
+    route_delegate = null
+    navigation_world = null
+    system = null
+    main = null
+    return cleanup
+
 func classify_navigation_event(event: Dictionary) -> Dictionary:
     ensure_ready()
     var result := {}

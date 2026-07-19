@@ -234,7 +234,10 @@ function Set-ReportDiagnostics([int]$ExitCode, [string]$StopReason) {
     $report | Add-Member -Force -NotePropertyName engineErrorScan -NotePropertyValue $engineScan
     $report | Add-Member -Force -NotePropertyName processExitCode -NotePropertyValue $ExitCode
     $report | Add-Member -Force -NotePropertyName processStopReason -NotePropertyValue $StopReason
-    $report | ConvertTo-Json -Depth 32 | Set-Content -LiteralPath $ReportPath
+    # The headed runner can retain rich visual/timeline evidence. Keep its
+    # machine-readable report compact so the diagnostic envelope does not turn
+    # a completed run into a long synchronous wrapper operation.
+    $report | ConvertTo-Json -Depth 32 -Compress | Set-Content -LiteralPath $ReportPath
 }
 
 $godotArgs = @(
@@ -404,7 +407,17 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 $report = Get-Content -LiteralPath $ReportPath -Raw | ConvertFrom-Json
-Get-Content -LiteralPath $ReportPath
+[pscustomobject]@{
+    testId = $report.testId
+    seed = $report.seed
+    passed = $report.passed
+    failureCount = $report.failureCount
+    resultCount = $report.resultCount
+    reportPath = $ReportPath
+    screenshotDir = $ScreenshotDir
+    scriptErrorScan = $report.scriptErrorScan.status
+    engineErrorScan = $report.engineErrorScan.status
+} | ConvertTo-Json -Compress
 if (($exitCode -ne 0) -or ([int]$report.failureCount -gt 0) -or ($report.scriptErrorScan.status -ne "passed")) {
     exit 1
 }

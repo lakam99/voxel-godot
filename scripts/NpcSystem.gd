@@ -153,6 +153,38 @@ func cleanup_pathing_agents() -> Dictionary:
         return pathing.cleanup_all()
     return { "avoidance": 0, "reason": "missing_pathing" }
 
+func shutdown_for_process_exit() -> Dictionary:
+    # NavigationServer3D resources must be released while the scene tree and
+    # server are still alive.  Waiting for Node predelete leaves this ordering
+    # up to engine teardown, which is unsafe after a populated world has used
+    # the navmesh backend.
+    var pathing_result := { "avoidance": 0, "reason": "missing_pathing" }
+    if pathing != null and pathing.has_method("shutdown_for_process_exit"):
+        pathing_result = pathing.shutdown_for_process_exit()
+    elif pathing != null and pathing.has_method("cleanup_all"):
+        pathing_result = pathing.cleanup_all()
+    pathing = null
+    var navmesh_before := {}
+    var navmesh_after := {}
+    if autonomy_system != null and is_instance_valid(autonomy_system):
+        var navmesh_world = autonomy_system.get("navmesh_world")
+        if navmesh_world != null and navmesh_world.has_method("stats"):
+            var before_value = navmesh_world.call("stats")
+            navmesh_before = before_value.duplicate(true) if before_value is Dictionary else {}
+        if autonomy_system.has_method("shutdown_for_process_exit"):
+            autonomy_system.call("shutdown_for_process_exit")
+        navmesh_world = autonomy_system.get("navmesh_world")
+        if navmesh_world != null and navmesh_world.has_method("stats"):
+            var after_value = navmesh_world.call("stats")
+            navmesh_after = after_value.duplicate(true) if after_value is Dictionary else {}
+        autonomy_system.queue_free()
+        autonomy_system = null
+    return {
+        "pathing": pathing_result,
+        "navmeshBefore": navmesh_before,
+        "navmeshAfter": navmesh_after
+    }
+
 func clear() -> void:
     cleanup_pathing_agents()
     for entry in npcs:

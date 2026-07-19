@@ -46,6 +46,20 @@ class_name BiomeEnvironmentProfile
 @export var tree_visibility_range := 260.0
 @export var tree_shadow_range := 180.0
 
+@export_group("Tree age ecology")
+@export_enum("broadleaf", "conifer", "savanna") var tree_architecture := "broadleaf"
+@export var tree_age_min_years := 12.0
+@export var tree_age_typical_years := 90.0
+@export var tree_age_max_years := 180.0
+@export var tree_maturity_cell_scale := 180.0
+@export_range(0.0, 1.0) var tree_maturity_influence := 0.72
+@export_range(0.05, 1.0) var tree_local_age_span := 0.34
+@export_range(0.2, 3.0) var tree_age_distribution_skew := 0.86
+@export var tree_age_band_thresholds := PackedFloat32Array([0.20, 0.42, 0.68, 0.88])
+@export_range(0.25, 2.0) var tree_height_growth_exponent := 0.72
+@export_range(0.25, 2.0) var tree_girth_growth_exponent := 0.88
+@export_range(0.25, 2.0) var tree_crown_growth_exponent := 0.68
+
 func forage_spec() -> Dictionary:
 	return {
 		"material": forage_material,
