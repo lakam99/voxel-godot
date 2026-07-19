@@ -1,7 +1,7 @@
 extends RefCounted
 class_name SaveSystem
 
-const SAVE_VERSION := 1
+const SAVE_VERSION := 2
 const ACTIVE_SEED_KEY := "__activeSeed"
 
 var path := "user://voxel_biome_world_saves.json"
@@ -15,6 +15,7 @@ var async_jobs_failed := 0
 
 func _init(path_value := "user://voxel_biome_world_saves.json") -> void:
     path = path_value
+    _purge_incompatible_saves()
 
 func read_all() -> Dictionary:
     return _read_json_file(path)
@@ -163,6 +164,51 @@ func _validated_save(save) -> Dictionary:
     if int(save_data.get("version", 0)) != SAVE_VERSION:
         return {}
     return save_data
+
+func _purge_incompatible_saves() -> void:
+    var saves := read_all()
+    var changed := false
+    var active_seed := String(saves.get(ACTIVE_SEED_KEY, ""))
+    for key_value in saves.keys():
+        var key := String(key_value)
+        if key == ACTIVE_SEED_KEY:
+            continue
+        if _validated_save(saves[key]).is_empty():
+            saves.erase(key)
+            changed = true
+    if active_seed != "" and (_read_slot_save(active_seed).is_empty() and _validated_save(saves.get(active_seed, {})).is_empty()):
+        saves.erase(ACTIVE_SEED_KEY)
+        changed = true
+    if changed:
+        write_all(saves)
+    _purge_incompatible_slot_saves()
+    var active_path := _active_seed_path()
+    if FileAccess.file_exists(active_path):
+        var file := FileAccess.open(active_path, FileAccess.READ)
+        var active_value := ""
+        if file != null:
+            active_value = file.get_as_text().strip_edges()
+            file.close()
+        if active_value == "" or _read_slot_save(active_value).is_empty():
+            _remove_path(active_path)
+
+func _purge_incompatible_slot_saves() -> void:
+    var directory_path := path.get_base_dir()
+    var directory := DirAccess.open(directory_path)
+    if directory == null:
+        return
+    var file_name := path.get_file()
+    var stem := file_name.substr(0, file_name.length() - 5) if file_name.ends_with(".json") else file_name
+    var slot_prefix := "%s_slot_" % stem
+    directory.list_dir_begin()
+    var entry_name := directory.get_next()
+    while entry_name != "":
+        if not directory.current_is_dir() and entry_name.begins_with(slot_prefix) and entry_name.ends_with(".json"):
+            var candidate_path := directory_path.path_join(entry_name)
+            if _validated_save(_read_json_file(candidate_path)).is_empty():
+                _remove_path(candidate_path)
+        entry_name = directory.get_next()
+    directory.list_dir_end()
 
 func _prepared_snapshot(seed_text: String, snapshot: Dictionary, deep := true) -> Dictionary:
     var payload := snapshot.duplicate(deep)

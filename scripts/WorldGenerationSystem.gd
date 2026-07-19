@@ -2,6 +2,7 @@ extends RefCounted
 class_name WorldGenerationSystem
 
 const TerrainVolumeServiceScript := preload("res://scripts/TerrainVolumeService.gd")
+const BiomeRegionFieldScript := preload("res://scripts/world/BiomeRegionField.gd")
 
 const UNDERGROUND_AIR_BIOME := "underground_air"
 const NATURAL_SURFACE_MIN_OVERBURDEN_CELLS := 3.0
@@ -26,6 +27,7 @@ var base_surface_y_cache := {}
 var surface_biome_cache := {}
 var minimum_overburden_cache := {}
 var terrain_volume_service
+var biome_region_field = BiomeRegionFieldScript.new()
 
 func setup(main_node) -> void:
 	main = main_node
@@ -53,6 +55,13 @@ func reset_for_seed() -> void:
 	natural_surface_y_cache.clear()
 	base_surface_y_cache.clear()
 	surface_biome_cache.clear()
+	minimum_overburden_cache.clear()
+
+func biome_region_for_cell3(cell: Vector3i) -> Dictionary:
+	if biome_region_field == null:
+		biome_region_field = BiomeRegionFieldScript.new()
+	var seed_text := String(main.get("seed_text")) if main != null else "default"
+	return biome_region_field.sample(seed_text, Vector2(float(cell.x) * cell_size(), float(cell.z) * cell_size()))
 
 func sample_cell(cell: Vector3i) -> Dictionary:
 	var s := cell_size()
@@ -1031,42 +1040,17 @@ func surface_biome_for_cell3(cell: Vector3i) -> String:
 	if not town_region_at_cell3(cell).is_empty():
 		surface_biome_cache[key] = "town"
 		return "town"
+	var biome := regional_surface_biome_for_cell3(cell)
+	surface_biome_cache[key] = biome
+	return biome
+
+func regional_surface_biome_for_cell3(cell: Vector3i) -> String:
 	var h: float = terrain_reference_surface_y_for_cell(cell)
-	var moisture: float = main.noise01(main.moisture_noise, cell.x - 1200, cell.z + 800) if main != null else 0.5
-	var temp: float = clamp(0.42 + (main.noise01(main.temp_noise, cell.x + 1500, cell.z - 900) if main != null else 0.5) * 0.46 - abs(cell.z) / 1300.0 - max(0.0, h - 38.0) / 180.0, 0.0, 1.0)
 	if h < float(main.WATER_LEVEL) + 0.3:
-		surface_biome_cache[key] = "ocean"
 		return "ocean"
 	if h < float(main.WATER_LEVEL) + 1.7:
-		surface_biome_cache[key] = "beach"
 		return "beach"
-	if h > 78.0:
-		surface_biome_cache[key] = "snow"
-		return "snow"
-	if h > 56.0:
-		var value := "alpine" if temp < 0.48 else "tundra"
-		surface_biome_cache[key] = value
-		return value
-	if h > 42.0 and moisture < 0.5:
-		surface_biome_cache[key] = "alpine"
-		return "alpine"
-	if moisture > 0.78 and h < float(main.WATER_LEVEL) + 6.0:
-		surface_biome_cache[key] = "swamp"
-		return "swamp"
-	if temp > 0.68 and moisture < 0.32:
-		surface_biome_cache[key] = "desert"
-		return "desert"
-	if temp > 0.61 and moisture < 0.48:
-		surface_biome_cache[key] = "savanna"
-		return "savanna"
-	if temp < 0.33 and moisture > 0.42:
-		surface_biome_cache[key] = "taiga"
-		return "taiga"
-	if moisture > 0.64:
-		surface_biome_cache[key] = "forest"
-		return "forest"
-	surface_biome_cache[key] = "plains"
-	return "plains"
+	return String(biome_region_for_cell3(cell).get("biome", "plains"))
 
 func biome_at_volume_cell(cell: Vector3i) -> String:
 	return biome_at(Vector3((float(cell.x) + 0.5) * cell_size(), (float(cell.y) + 0.5) * cell_size(), (float(cell.z) + 0.5) * cell_size()))
