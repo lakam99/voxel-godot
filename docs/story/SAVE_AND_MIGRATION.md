@@ -1,6 +1,9 @@
 # Story Save And Migration
 
-The project save format remains `SAVE_VERSION = 1`. Story data is optional and nested under the existing save snapshot.
+The project save format is `SAVE_VERSION = 2`. The version bump intentionally
+invalidates the previous local saves after the world-generation authority was
+made unconditional. Story data remains optional and nested under the save
+snapshot.
 
 ## Current Story Save Shape
 
@@ -24,7 +27,9 @@ All story fields are optional. Loading an older save with no `story` field resto
 
 ## Migration Rules
 
-- Do not increment `SAVE_VERSION` for optional story additions.
+- Do not increment `SAVE_VERSION` for optional story additions. The current
+  version-2 boundary is already established; a future breaking change requires
+  an explicit product decision.
 - New story fields must have defensive defaults in `StoryDirector.restore()` or the owning system restore method.
 - Do not move existing gameplay fields into story data.
 - Do not serialize transient encounter details such as animation state, elapsed timers, active projectiles, temporary minions, or HUD state.

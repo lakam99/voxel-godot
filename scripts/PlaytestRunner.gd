@@ -3852,7 +3852,13 @@ func test_save_load_round_trip() -> void:
     progression_system.restore({ "level": 2, "xp": 17, "totalXp": 97 })
     equipment_system.restore({ "body": "stoneArmor", "accessory": "trailCharm" })
     contract_system.restore({ "completed": ["masonOrder"], "townUnlocked": true, "menuOpen": true })
+    var generation_snapshot: Dictionary = main.call("create_save_snapshot")
+    var biome_probe_cell := Vector3i(2850, 0, -1762)
+    var biome_before_save := String(world_generation.call("surface_biome_for_cell3", biome_probe_cell)) if world_generation != null and world_generation.has_method("surface_biome_for_cell3") else ""
+    var save_snapshot_has_no_biome_selector := not generation_snapshot.has("worldGeneration")
     var saved: bool = main.call("save_world", true)
+    var saved_payload: Dictionary = save_system.load(String(main.get("seed_text"))) if save_system != null else {}
+    var saved_with_current_format := int(saved_payload.get("version", 0)) == 2
 
     player.global_position = saved_position + Vector3(22.0, 4.0, 0.0)
     inventory_system.clear()
@@ -3900,10 +3906,12 @@ func test_save_load_round_trip() -> void:
         and String(terrain_sample.get("biome", "")) == "underground_air" \
         and not bool(terrain_sample.get("solid", true))
     var block_restored: bool = blocks.has(save_cell) and bool((blocks[save_cell] as Node).get_meta("player_placed", false))
+    var biome_after_load := String(world_generation.call("surface_biome_for_cell3", biome_probe_cell)) if world_generation != null and world_generation.has_method("surface_biome_for_cell3") else ""
+    var regional_biome_remains_authoritative := biome_before_save != "" and biome_before_save == biome_after_load
     add_result(
         "save_load_round_trip",
-        saved and loaded and player_restored and inventory_restored and survival_restored and progression_restored and equipment_restored and contracts_restored and exploration_restored and terrain_restored and block_restored,
-        "saved %s, loaded %s, player %s, inventory %s, survival %s, progression %s, equipment %s, contracts %s, exploration %s, terrain %s, block %s" % [
+        saved and loaded and player_restored and inventory_restored and survival_restored and progression_restored and equipment_restored and contracts_restored and exploration_restored and terrain_restored and block_restored and save_snapshot_has_no_biome_selector and saved_with_current_format and regional_biome_remains_authoritative,
+        "saved %s, loaded %s, player %s, inventory %s, survival %s, progression %s, equipment %s, contracts %s, exploration %s, terrain %s, block %s, single biome authority %s/%s/%s" % [
             str(saved),
             str(loaded),
             str(player_restored),
@@ -3914,7 +3922,10 @@ func test_save_load_round_trip() -> void:
             str(contracts_restored),
             str(exploration_restored),
             str(terrain_restored),
-            str(block_restored)
+            str(block_restored),
+            str(save_snapshot_has_no_biome_selector),
+            str(saved_with_current_format),
+            str(regional_biome_remains_authoritative)
         ]
     )
 
@@ -6767,7 +6778,6 @@ func test_terrain_generation_profile() -> void:
         add_result("terrain_generation_profile", false, "main missing")
         return
     var normal_biomes := ["plains", "forest", "savanna", "taiga"]
-    var mountain_biomes := ["snow", "alpine", "tundra"]
     var normal_samples := 0
     var smooth_samples := 0
     var variation_total := 0.0
@@ -6783,12 +6793,24 @@ func test_terrain_generation_profile() -> void:
                 normal_samples += 1
                 if variation <= CELL:
                     smooth_samples += 1
-            elif mountain_biomes.has(biome) and height >= 62.0:
+            elif height >= 62.0:
                 mountain_samples += 1
                 max_mountain = maxf(max_mountain, height)
     var average_variation := variation_total / float(maxi(1, normal_samples))
     var smooth_ratio := float(smooth_samples) / float(maxi(1, normal_samples))
-    var mountain_cell: Vector2i = main.call("find_biome_playtest_cell", mountain_biomes, 62.0, 120.0, false)
+    # Mountain height is terrain geometry, while the new kilometre-scale field
+    # owns the ecological macrobiome. Do not require a short mountain patch to
+    # become a separate snow/alpine/tundra biome just to satisfy this geometry
+    # regression check.
+    var mountain_cell := Vector2i(999999, 999999)
+    for z in range(-560, 561, 7):
+        for x in range(-560, 561, 7):
+            var candidate_height := surface_y_at_cell_coords(x, z)
+            if candidate_height >= 62.0 and candidate_height <= 120.0:
+                mountain_cell = Vector2i(x, z)
+                break
+        if mountain_cell != Vector2i(999999, 999999):
+            break
     var mountain_target_found := mountain_cell != Vector2i(999999, 999999)
     var mountain_target_height := 0.0
     if mountain_target_found:
