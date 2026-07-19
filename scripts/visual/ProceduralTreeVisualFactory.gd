@@ -921,6 +921,54 @@ func instantiate_runtime_impostor(recipe: Dictionary, biome: String) -> Node3D:
 		root.add_child(crown)
 	return root
 
+## A temporary collision-visibility representation for a streamed runtime
+## tree. It deliberately consumes only already-shared primitive meshes and
+## cached materials; no recipe graph, branch/leaf nodes, unique material,
+## collision shape, or shadow work is created here. TreePublicationQueue
+## removes it atomically once the normal mathematical recipe visual commits.
+func instantiate_collision_visibility_proxy(request: Dictionary, biome: String) -> Node3D:
+	var root := Node3D.new()
+	root.name = "TreeVisibilityProxy"
+	root.set_meta("tree_visibility_proxy", true)
+	root.set_meta("tree_render_role", "collision_visibility_proxy")
+	root.set_meta("tree_id", String(request.get("treeId", "procedural-tree")))
+	if is_headless_renderer():
+		root.set_meta("tree_headless_visual_proxy", true)
+		return root
+	ensure_shared_geometry()
+	var height := maxf(2.0, float(request.get("visualHeight", request.get("height", 8.0))))
+	var radius := maxf(1.0, float(request.get("canopyRadius", 3.0)))
+	var trunk_radius := maxf(0.10, float(request.get("trunkRadius", 0.25)))
+	var architecture := String(request.get("architecture", "broadleaf"))
+	var visibility_range := maxf(64.0, float((request.get("biomeParameters", {}) as Dictionary).get("visibilityRange", VISIBILITY_RANGE)))
+	var trunk := MeshInstance3D.new()
+	trunk.name = "VisibilityProxyTrunk"
+	trunk.mesh = branch_mesh
+	trunk.material_override = branch_material(architecture, biome)
+	trunk.position.y = height * 0.34
+	trunk.scale = Vector3(trunk_radius, height * 0.68, trunk_radius)
+	trunk.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	trunk.visibility_range_end = visibility_range
+	trunk.visibility_range_end_margin = minf(12.0, visibility_range * 0.12)
+	trunk.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
+	trunk.extra_cull_margin = 1.0
+	root.add_child(trunk)
+	for rotation in [0.0, PI * 0.5]:
+		var crown := MeshInstance3D.new()
+		crown.name = "VisibilityProxyCrown"
+		crown.mesh = impostor_crown_mesh
+		crown.material_override = foliage_material(architecture, biome)
+		crown.position.y = height * 0.68
+		crown.rotation.y = rotation
+		crown.scale = Vector3(radius * 2.0, maxf(radius * 1.2, height * 0.42), 1.0)
+		crown.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		crown.visibility_range_end = visibility_range
+		crown.visibility_range_end_margin = minf(12.0, visibility_range * 0.12)
+		crown.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
+		crown.extra_cull_margin = 1.0
+		root.add_child(crown)
+	return root
+
 func branch_transform(start: Vector3, end: Vector3, radius: float) -> Transform3D:
 	var delta := end - start
 	var length := maxf(0.01, delta.length())

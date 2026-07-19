@@ -284,6 +284,142 @@ func run_contract() -> void:
 		"selectedIndex": viewless_selected_index,
 		"priority": viewless_priority
 	})
+	# Direction is a presentation signal only, but a confidently sprinting
+	# player must see the tree in their actual arrival corridor before equally
+	# near side/behind work. The task data itself remains immutable and no RNG
+	# participates in this ordering decision.
+	var directional_queue = TreePublicationQueueScript.new()
+	fixture.add_child(directional_queue)
+	var directional_viewer := Node3D.new()
+	fixture.add_child(directional_viewer)
+	directional_queue.set_viewer(directional_viewer)
+	directional_queue.set_viewer_motion_snapshot(Vector3.ZERO, Vector3(15.5, 0.0, 0.0), Vector3.RIGHT)
+	var directional_bodies: Array[StaticBody3D] = []
+	for direction_case in [
+		{"id": "lateral", "position": Vector3(0.0, 0.0, 18.0)},
+		{"id": "behind", "position": Vector3(-18.0, 0.0, 0.0)},
+		{"id": "forward", "position": Vector3(18.0, 0.0, 0.0)}
+	]:
+		var directional_body := tree_body("queue-directional-%s" % String(direction_case.get("id", "tree")))
+		directional_body.position = direction_case.get("position", Vector3.ZERO)
+		fixture.add_child(directional_body)
+		directional_bodies.append(directional_body)
+		directional_queue.enqueue_completed_task({
+			"body": weakref(directional_body),
+			"publicationPosition": directional_body.global_position,
+			"enqueuedUsec": Time.get_ticks_usec(),
+			"enqueueSequence": directional_bodies.size(),
+			"request": {},
+			"recipe": {}
+		})
+	var directional_selected := directional_queue.take_next_completed_task()
+	var directional_metrics: Dictionary = directional_queue.metrics()
+	add_result("confident_motion_prioritizes_forward_tree_over_equal_distance_lateral_and_behind_work", \
+		String((directional_selected.get("body") as WeakRef).get_ref().name) == "queue-directional-forward" \
+		and int(directional_metrics.get("priorityScheduling", {}).get("directionalPublicationSelections", 0)) == 1, {
+		"selected": (directional_selected.get("body") as WeakRef).get_ref().name if directional_selected.has("body") else "",
+		"priority": directional_metrics.get("priorityScheduling", {})
+	})
+	var stationary_queue = TreePublicationQueueScript.new()
+	fixture.add_child(stationary_queue)
+	stationary_queue.set_viewer(directional_viewer)
+	stationary_queue.set_viewer_motion_snapshot(Vector3.ZERO, Vector3.ZERO, Vector3.RIGHT)
+	var stationary_near := tree_body("queue-stationary-near")
+	stationary_near.position = Vector3(0.0, 0.0, 8.0)
+	fixture.add_child(stationary_near)
+	var stationary_forward := tree_body("queue-stationary-forward")
+	stationary_forward.position = Vector3(18.0, 0.0, 0.0)
+	fixture.add_child(stationary_forward)
+	for stationary_entry in [
+		{"body": stationary_near, "sequence": 1},
+		{"body": stationary_forward, "sequence": 2}
+	]:
+		var stationary_body := stationary_entry.get("body") as StaticBody3D
+		stationary_queue.enqueue_completed_task({
+			"body": weakref(stationary_body),
+			"publicationPosition": stationary_body.global_position,
+			"enqueuedUsec": Time.get_ticks_usec(),
+			"enqueueSequence": int(stationary_entry.get("sequence", 0)),
+			"request": {},
+			"recipe": {}
+		})
+	var stationary_selected := stationary_queue.take_next_completed_task()
+	add_result("stationary_motion_falls_back_to_distance_priority", \
+		String((stationary_selected.get("body") as WeakRef).get_ref().name) == "queue-stationary-near", {
+		"selected": (stationary_selected.get("body") as WeakRef).get_ref().name if stationary_selected.has("body") else "",
+		"priority": stationary_queue.metrics().get("priorityScheduling", {})
+	})
+	# A body with real trunk collision receives a shared proxy synchronously at
+	# enqueue when it is already inside the collision-visibility horizon. The
+	# final queue commit must replace that proxy without changing identity.
+	var visibility_queue = TreePublicationQueueScript.new()
+	fixture.add_child(visibility_queue)
+	visibility_queue.publication_service.prewarm_visuals()
+	visibility_queue.set_viewer(directional_viewer)
+	visibility_queue.set_viewer_motion_snapshot(Vector3.ZERO, Vector3(15.5, 0.0, 0.0), Vector3.RIGHT)
+	var collision_tree := tree_body("queue-collision-visible")
+	collision_tree.position = Vector3(12.0, 0.0, 0.0)
+	var collision_shape := CollisionShape3D.new()
+	var collision_geometry := CylinderShape3D.new()
+	collision_geometry.radius = 0.88
+	collision_geometry.height = 8.0
+	collision_shape.shape = collision_geometry
+	collision_tree.add_child(collision_shape)
+	fixture.add_child(collision_tree)
+	var collision_request := request_for("queue-collision-visible", "broadleaf", "bushy_oak", "forest")
+	collision_request["treeWorldPosition"] = collision_tree.global_position
+	var collision_queued := visibility_queue.enqueue(collision_tree, collision_request)
+	var proxy_attached := collision_tree.get_node_or_null("TreeVisibilityProxy") != null \
+		and bool(collision_tree.get_meta("tree_visibility_proxy", false)) \
+		and int(collision_tree.get_meta("tree_relevant_collision_to_first_visual_lag_usec", -1)) >= 0
+	var collision_published := await wait_for_published(collision_tree)
+	var collision_metrics: Dictionary = visibility_queue.metrics()
+	add_result("collision_relevant_tree_is_visibly_represented_before_final_recipe_and_replaced_atomically", \
+		collision_queued and proxy_attached and collision_published \
+		and collision_tree.get_node_or_null("TreeVisibilityProxy") == null \
+		and collision_tree.get_node_or_null("GeneratedTreeVisual") != null \
+		and String(collision_tree.get_meta("prop_id", "")) == "queue-collision-visible" \
+		and int(collision_metrics.get("collisionVisibility", {}).get("proxyAttachments", 0)) >= 1 \
+		and int(collision_metrics.get("collisionVisibility", {}).get("collisionBeforeVisualInvariantBreaches", -1)) == 0, {
+		"proxyAttached": proxy_attached,
+		"firstVisualSource": collision_tree.get_meta("tree_first_visual_source", ""),
+		"visibility": collision_metrics.get("collisionVisibility", {})
+	})
+	# Collision can be published before the player enters its local horizon. Once
+	# the player actually approaches that already-queued body, the bounded local
+	# guard must attach the same shared proxy before the recipe is ready; this is
+	# the production failure mode behind an otherwise invisible tree collision.
+	var approaching_queue = TreePublicationQueueScript.new()
+	fixture.add_child(approaching_queue)
+	approaching_queue.publication_service.prewarm_visuals()
+	approaching_queue.set_viewer(directional_viewer)
+	approaching_queue.set_viewer_motion_snapshot(Vector3.ZERO, Vector3.ZERO, Vector3.RIGHT)
+	var approaching_tree := tree_body("queue-collision-approach")
+	approaching_tree.position = Vector3(44.0, 0.0, 0.0)
+	var approaching_shape := CollisionShape3D.new()
+	var approaching_geometry := CylinderShape3D.new()
+	approaching_geometry.radius = 0.88
+	approaching_geometry.height = 8.0
+	approaching_shape.shape = approaching_geometry
+	approaching_tree.add_child(approaching_shape)
+	fixture.add_child(approaching_tree)
+	var approaching_request := request_for("queue-collision-approach", "broadleaf", "bushy_oak", "forest")
+	approaching_request["treeWorldPosition"] = approaching_tree.global_position
+	var approaching_queued := approaching_queue.enqueue(approaching_tree, approaching_request)
+	var proxy_absent_while_far := approaching_tree.get_node_or_null("TreeVisibilityProxy") == null
+	approaching_queue.set_viewer_motion_snapshot(Vector3(24.0, 0.0, 0.0), Vector3(15.5, 0.0, 0.0), Vector3.RIGHT)
+	approaching_queue.refresh_collision_visibility_proxies()
+	var proxy_attached_on_approach := approaching_tree.get_node_or_null("TreeVisibilityProxy") != null \
+		and String(approaching_tree.get_meta("tree_first_visual_source", "")) == "shared_visibility_proxy" \
+		and int(approaching_tree.get_meta("tree_relevant_collision_to_first_visual_lag_usec", -1)) >= 0
+	add_result("queued_tree_gains_shared_visibility_proxy_when_player_enters_collision_horizon", \
+		approaching_queued and proxy_absent_while_far and proxy_attached_on_approach \
+		and int(approaching_queue.metrics().get("collisionVisibility", {}).get("collisionBeforeVisualInvariantBreaches", -1)) == 0, {
+		"queued": approaching_queued,
+		"proxyAbsentWhileFar": proxy_absent_while_far,
+		"proxyAttachedOnApproach": proxy_attached_on_approach,
+		"visibility": approaching_queue.metrics().get("collisionVisibility", {})
+	})
 	var cache_capacity = TreeRecipeCacheScript.new()
 	cache_capacity.configure(2, 8192)
 	for index in range(3):

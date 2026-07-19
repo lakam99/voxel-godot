@@ -4,7 +4,7 @@ const PlaytestSearchLoadingControllerScript := preload("res://scripts/testing/Pl
 const TreeEcologySamplerScript := preload("res://scripts/environment/TreeEcologySampler.gd")
 const STAGE_SAVE_AND_HARVEST := "save_and_harvest"
 const STAGE_CONTINUE_VERIFY := "continue_verify"
-const DEFAULT_WOODED_BIOMES := ["forest", "taiga"]
+const DEFAULT_WOODED_BIOMES: Array[String] = ["forest", "taiga"]
 const MAX_FOREST_CANDIDATES := 8
 const TREE_SEARCH_FRAMES := 420
 const CONTINUE_TREE_PUBLICATION_FRAMES := 1200
@@ -72,9 +72,12 @@ func fixture_selection_summary() -> Dictionary:
     }
 
 func selected_biomes() -> Array[String]:
+    var selected: Array[String] = []
     if target_biome != "":
-        return [target_biome]
-    return DEFAULT_WOODED_BIOMES.duplicate()
+        selected.append(target_biome)
+        return selected
+    selected.assign(DEFAULT_WOODED_BIOMES)
+    return selected
 
 func biome_is_selected(biome: String) -> bool:
     return biome.to_lower() in selected_biomes()

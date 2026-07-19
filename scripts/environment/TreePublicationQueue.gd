@@ -63,6 +63,24 @@ const MAX_LOD_REEVALUATIONS_PER_FRAME := 6
 const COMPLETED_PRIORITY_CELL_SIZE := 24.0
 const COMPLETED_PRIORITY_LOCAL_CELL_RADIUS := 2
 const COMPLETED_UNPLACED_CELL := Vector2i(999999999, 999999999)
+# Directional readiness changes only the order in which the already eligible
+# queue receives work.  It never changes chunk retention, prop placement, or
+# a tree's immutable recipe.  The values deliberately describe a short sprint
+# horizon rather than a second streaming radius.
+const VIEWER_MOTION_MIN_SPEED := 0.75
+const VIEWER_MOTION_LOOKAHEAD_SECONDS := 1.35
+const VIEWER_MOTION_MAX_LOOKAHEAD_DISTANCE := 28.0
+const VIEWER_MOTION_CAMERA_WEIGHT := 0.32
+const FORWARD_CORRIDOR_MIN_HALF_WIDTH := 4.0
+const FORWARD_CORRIDOR_MAX_HALF_WIDTH := 14.0
+const FORWARD_CORRIDOR_LATERAL_WEIGHT := 1.45
+const BACKWARD_PRIORITY_PENALTY := 0.42
+const MAX_DIRECTIONAL_PRIORITY_CELLS := 3
+# Trees retain their authoritative trunk collision.  This distance is only a
+# visual-readiness horizon: at sprint speed it gives the bounded queue more
+# than a second to replace the shared silhouette with the full recipe.
+const COLLISION_VISIBILITY_PROXY_DISTANCE := 28.0
+const MAX_COLLISION_VISIBILITY_PROXIES_PER_FRAME := 2
 
 # Pending recipes use an indexed priority queue rather than sorting and
 # shifting the entire stream-in backlog whenever a worker becomes free.  The
@@ -84,6 +102,9 @@ var staged_publication_task: Dictionary = {}
 var publication_service = TreeSpawnServiceScript.new()
 var recipe_cache = TreeRecipeCacheScript.new()
 var viewer: WeakRef
+var viewer_motion_snapshot := {}
+var external_viewer_motion_snapshot := {}
+var external_viewer_motion_expires_usec := 0
 var published_lod_records: Array[Dictionary] = []
 var lod_recheck_cursor := 0
 ## Render accounting is updated only at publish/retier/removal boundaries.  It
@@ -128,6 +149,21 @@ var worker_priority_selection_sample_cursor := 0
 var worker_local_selection_candidate_count := 0
 var worker_local_selection_score := INF
 var enqueue_sequence := 0
+var directional_worker_selection_count := 0
+var directional_publication_selection_count := 0
+var directional_preemption_count := 0
+var viewer_heading_confident_frame_count := 0
+var viewer_heading_fallback_frame_count := 0
+var collision_visibility_proxy_attach_count := 0
+var collision_visibility_proxy_release_count := 0
+var collision_visibility_proxy_active_count := 0
+var collision_visibility_proxy_peak_count := 0
+var collision_visibility_proxy_lifetime_total_usec := 0
+var collision_visibility_proxy_lifetime_max_usec := 0
+var collision_to_first_visible_total_lag_usec := 0
+var collision_to_first_visible_max_lag_usec := 0
+var collision_to_first_visible_count := 0
+var collision_before_visual_invariant_breach_count := 0
 var publication_work_samples_usec: Array[int] = []
 var publication_frame_samples_usec: Array[int] = []
 var publication_scheduler_samples_usec: Array[int] = []
@@ -189,6 +225,13 @@ func enqueue(body: StaticBody3D, request: Dictionary) -> bool:
 		"publicationPriority": priority,
 		"enqueueSequence": enqueue_sequence
 	}
+	# The trunk collision is already owned by the gameplay prop before this
+	# presentation queue is called.  Record that boundary once, then make a
+	# nearby blocker visible immediately with shared geometry while its full
+	# mathematical recipe remains worker/queue owned.
+	if not body.has_meta("tree_collision_ready_usec"):
+		body.set_meta("tree_collision_ready_usec", Time.get_ticks_usec())
+	ensure_collision_visible_representation(body, prepared_request, "enqueue")
 	queued_count += 1
 	var cached_recipe: Dictionary = recipe_cache.fetch(recipe_key)
 	if not cached_recipe.is_empty():
@@ -212,6 +255,196 @@ func enqueue(body: StaticBody3D, request: Dictionary) -> bool:
 
 func set_viewer(node: Node3D) -> void:
 	viewer = weakref(node) if node != null and is_instance_valid(node) else null
+	if viewer == null:
+		viewer_motion_snapshot.clear()
+
+## An owning game loop or focused contract can supply one already-sampled
+## motion snapshot for the current frame.  It is presentation-only: no raw
+## input or frame timing can influence the generated tree itself.
+func set_viewer_motion_snapshot(position: Vector3, planar_velocity: Vector3, camera_forward: Vector3) -> void:
+	external_viewer_motion_snapshot = make_viewer_motion_snapshot(position, planar_velocity, camera_forward)
+	external_viewer_motion_expires_usec = Time.get_ticks_usec() + 100000
+	viewer_motion_snapshot = external_viewer_motion_snapshot.duplicate(true)
+
+func make_viewer_motion_snapshot(position: Vector3, planar_velocity: Vector3, camera_forward: Vector3) -> Dictionary:
+	var planar_velocity_flat := Vector3(planar_velocity.x, 0.0, planar_velocity.z)
+	var planar_camera_forward := Vector3(camera_forward.x, 0.0, camera_forward.z)
+	var speed := planar_velocity_flat.length()
+	if planar_camera_forward.length_squared() > 0.0001:
+		planar_camera_forward = planar_camera_forward.normalized()
+	var velocity_heading := planar_velocity_flat.normalized() if speed >= VIEWER_MOTION_MIN_SPEED else Vector3.ZERO
+	var blended_heading := velocity_heading
+	if velocity_heading.length_squared() > 0.0001 and planar_camera_forward.length_squared() > 0.0001:
+		blended_heading = (velocity_heading * (1.0 - VIEWER_MOTION_CAMERA_WEIGHT) + planar_camera_forward * VIEWER_MOTION_CAMERA_WEIGHT).normalized()
+	elif planar_camera_forward.length_squared() > 0.0001 and speed >= VIEWER_MOTION_MIN_SPEED:
+		blended_heading = planar_camera_forward
+	var confident := speed >= VIEWER_MOTION_MIN_SPEED and blended_heading.length_squared() > 0.0001
+	var lookahead_distance := minf(VIEWER_MOTION_MAX_LOOKAHEAD_DISTANCE, speed * VIEWER_MOTION_LOOKAHEAD_SECONDS) if confident else 0.0
+	return {
+		"position": position,
+		"planarVelocity": planar_velocity_flat,
+		"cameraForward": planar_camera_forward,
+		"heading": blended_heading,
+		"speed": speed,
+		"confident": confident,
+		"lookaheadDistance": lookahead_distance,
+		"predictedPosition": position + blended_heading * lookahead_distance
+	}
+
+func refresh_viewer_motion_snapshot() -> void:
+	if not external_viewer_motion_snapshot.is_empty() and Time.get_ticks_usec() <= external_viewer_motion_expires_usec:
+		viewer_motion_snapshot = external_viewer_motion_snapshot.duplicate(true)
+	else:
+		var viewer_node: Node3D = viewer.get_ref() as Node3D if viewer != null else null
+		if viewer_node == null or not is_instance_valid(viewer_node):
+			viewer_motion_snapshot.clear()
+		else:
+			var velocity_value = viewer_node.get("velocity")
+			var planar_velocity := velocity_value as Vector3 if velocity_value is Vector3 else Vector3.ZERO
+			var camera_forward := -viewer_node.global_transform.basis.z
+			var camera_value = viewer_node.get("camera")
+			if camera_value is Camera3D and is_instance_valid(camera_value as Camera3D):
+				camera_forward = -(camera_value as Camera3D).global_transform.basis.z
+			viewer_motion_snapshot = make_viewer_motion_snapshot(viewer_node.global_position, planar_velocity, camera_forward)
+	if bool(viewer_motion_snapshot.get("confident", false)):
+		viewer_heading_confident_frame_count += 1
+	else:
+		viewer_heading_fallback_frame_count += 1
+
+func viewer_motion_for_position(viewer_position: Vector3) -> Dictionary:
+	if viewer_motion_snapshot.is_empty() or not bool(viewer_motion_snapshot.get("confident", false)):
+		return {}
+	var snapshot_position = viewer_motion_snapshot.get("position", Vector3.INF)
+	if snapshot_position is not Vector3 or (snapshot_position as Vector3).distance_squared_to(viewer_position) > 0.25:
+		return {}
+	return viewer_motion_snapshot
+
+func current_viewer_position() -> Vector3:
+	var snapshot_position = viewer_motion_snapshot.get("position", null)
+	if snapshot_position is Vector3:
+		return snapshot_position as Vector3
+	var viewer_node: Node3D = viewer.get_ref() as Node3D if viewer != null else null
+	return viewer_node.global_position if viewer_node != null and is_instance_valid(viewer_node) else Vector3.INF
+
+func body_is_collision_visible(body: StaticBody3D) -> bool:
+	if body == null or not is_instance_valid(body):
+		return false
+	return body.get_node_or_null("GeneratedTreeVisual") != null or body.get_node_or_null("TreeVisibilityProxy") != null
+
+func body_is_collision_visibility_relevant(body: StaticBody3D) -> bool:
+	if body == null or not is_instance_valid(body):
+		return false
+	var viewer_position := current_viewer_position()
+	if viewer_position == Vector3.INF:
+		return false
+	var horizontal_delta := Vector2(body.global_position.x - viewer_position.x, body.global_position.z - viewer_position.z)
+	return horizontal_delta.length_squared() <= COLLISION_VISIBILITY_PROXY_DISTANCE * COLLISION_VISIBILITY_PROXY_DISTANCE
+
+func record_first_collision_visible(body: StaticBody3D, source: String) -> void:
+	if body == null or not is_instance_valid(body) or body.has_meta("tree_first_visual_ready_usec"):
+		return
+	if not body.has_meta("tree_collision_visibility_relevant_usec"):
+		return
+	var now_usec := Time.get_ticks_usec()
+	var collision_relevant_usec := int(body.get_meta("tree_collision_visibility_relevant_usec", now_usec))
+	var lag_usec := maxi(0, now_usec - collision_relevant_usec)
+	body.set_meta("tree_first_visual_ready_usec", now_usec)
+	body.set_meta("tree_relevant_collision_to_first_visual_lag_usec", lag_usec)
+	body.set_meta("tree_first_visual_source", source)
+	collision_to_first_visible_count += 1
+	collision_to_first_visible_total_lag_usec += lag_usec
+	collision_to_first_visible_max_lag_usec = maxi(collision_to_first_visible_max_lag_usec, lag_usec)
+
+func ensure_collision_visible_representation(body: StaticBody3D, request: Dictionary, reason: String) -> bool:
+	if body == null or not is_instance_valid(body):
+		return false
+	if not body_is_collision_visibility_relevant(body):
+		return false
+	if not body.has_meta("tree_collision_visibility_relevant_usec"):
+		body.set_meta("tree_collision_visibility_relevant_usec", Time.get_ticks_usec())
+	if body_is_collision_visible(body):
+		record_first_collision_visible(body, "already_published_or_proxied")
+		return false
+	var visual_factory = publication_service.get_visual_factory()
+	var proxy: Node3D = visual_factory.instantiate_collision_visibility_proxy(request, String(request.get("biome", "forest"))) as Node3D
+	if proxy == null:
+		if not bool(body.get_meta("tree_collision_before_visual_breach_recorded", false)):
+			body.set_meta("tree_collision_before_visual_breach_recorded", true)
+			collision_before_visual_invariant_breach_count += 1
+		return false
+	proxy.name = "TreeVisibilityProxy"
+	proxy.set_meta("tree_visibility_proxy_reason", reason)
+	proxy.set_meta("tree_visibility_proxy_attached_usec", Time.get_ticks_usec())
+	body.add_child(proxy)
+	body.set_meta("tree_visibility_proxy", true)
+	body.set_meta("tree_visibility_proxy_reason", reason)
+	body.set_meta("tree_visibility_proxy_attached_usec", int(proxy.get_meta("tree_visibility_proxy_attached_usec", 0)))
+	record_first_collision_visible(body, "shared_visibility_proxy")
+	collision_visibility_proxy_attach_count += 1
+	collision_visibility_proxy_active_count += 1
+	collision_visibility_proxy_peak_count = maxi(collision_visibility_proxy_peak_count, collision_visibility_proxy_active_count)
+	return true
+
+func release_collision_visibility_proxy(body: StaticBody3D) -> void:
+	if body == null or not is_instance_valid(body):
+		return
+	var proxy := body.get_node_or_null("TreeVisibilityProxy") as Node3D
+	if proxy == null or not is_instance_valid(proxy):
+		return
+	var now_usec := Time.get_ticks_usec()
+	var attached_usec := int(proxy.get_meta("tree_visibility_proxy_attached_usec", now_usec))
+	var lifetime_usec := maxi(0, now_usec - attached_usec)
+	body.remove_child(proxy)
+	proxy.queue_free()
+	body.remove_meta("tree_visibility_proxy")
+	body.remove_meta("tree_visibility_proxy_reason")
+	body.remove_meta("tree_visibility_proxy_attached_usec")
+	collision_visibility_proxy_release_count += 1
+	collision_visibility_proxy_active_count = maxi(0, collision_visibility_proxy_active_count - 1)
+	collision_visibility_proxy_lifetime_total_usec += lifetime_usec
+	collision_visibility_proxy_lifetime_max_usec = maxi(collision_visibility_proxy_lifetime_max_usec, lifetime_usec)
+
+func refresh_collision_visibility_proxies() -> void:
+	if current_viewer_position() == Vector3.INF:
+		return
+	var remaining := MAX_COLLISION_VISIBILITY_PROXIES_PER_FRAME
+	# Active workers and a detached publication task are few by construction.
+	for task in active:
+		if remaining <= 0:
+			return
+		var body: StaticBody3D = (task.get("body") as WeakRef).get_ref() as StaticBody3D
+		if body != null and ensure_collision_visible_representation(body, task.get("request", {}), "proximity_guard"):
+			remaining -= 1
+	if not staged_publication_task.is_empty() and remaining > 0:
+		var staged_body: StaticBody3D = (staged_publication_task.get("body") as WeakRef).get_ref() as StaticBody3D
+		if staged_body != null and ensure_collision_visible_representation(staged_body, staged_publication_task.get("request", {}), "proximity_guard"):
+			remaining -= 1
+	if remaining <= 0:
+		return
+	var viewer_position := current_viewer_position()
+	var center_cell := completed_priority_cell(viewer_position)
+	# Inspect only the already local spatial buckets.  This is a collision safety
+	# net, not a global scan of a streamed horizon backlog.
+	for radius in range(COMPLETED_PRIORITY_LOCAL_CELL_RADIUS + 1):
+		for z_offset in range(-radius, radius + 1):
+			for x_offset in range(-radius, radius + 1):
+				if radius > 0 and abs(x_offset) != radius and abs(z_offset) != radius:
+					continue
+				var bucket_key := completed_bucket_key_for_cell(Vector2i(center_cell.x + x_offset, center_cell.y + z_offset))
+				for bucket_kind in ["pending", "completed"]:
+					var bucket_map: Dictionary = pending_spatial_buckets if bucket_kind == "pending" else completed_spatial_buckets
+					var entries = bucket_map.get(bucket_key, [])
+					if entries is not Array:
+						continue
+					for entry in entries as Array:
+						if remaining <= 0:
+							return
+						var task: Dictionary = pending_tasks.get(int(entry), {}) if bucket_kind == "pending" else (completed[int(entry)] if int(entry) >= 0 and int(entry) < completed.size() else {})
+						if task.is_empty():
+							continue
+						var body: StaticBody3D = (task.get("body") as WeakRef).get_ref() as StaticBody3D
+						if body != null and ensure_collision_visible_representation(body, task.get("request", {}), "proximity_guard"):
+							remaining -= 1
 
 func selected_lod_tier(request: Dictionary, current_tier := "") -> String:
 	var viewer_node: Node3D = viewer.get_ref() as Node3D if viewer != null else null
@@ -333,6 +566,8 @@ func retier_task_for_current_viewer(task: Dictionary, body: StaticBody3D) -> boo
 	return true
 
 func _process(_delta: float) -> void:
+	refresh_viewer_motion_snapshot()
+	refresh_collision_visibility_proxies()
 	refresh_published_lods()
 	start_pending_workers()
 	collect_completed_workers()
@@ -391,6 +626,9 @@ func take_highest_priority_pending_task() -> Dictionary:
 	var task: Dictionary = pending_tasks.get(sequence, {})
 	if task.is_empty():
 		return {}
+	var viewer_position := current_viewer_position()
+	if viewer_position != Vector3.INF and task_uses_directional_priority(task, viewer_position):
+		directional_worker_selection_count += 1
 	pending_tasks.erase(sequence)
 	remove_pending_task_from_bucket(sequence, task)
 	if sequence == oldest_pending_sequence():
@@ -444,6 +682,31 @@ func highest_priority_local_pending_sequence(viewer_position: Vector3, now_usec:
 	var best_sequence := -1
 	var best_score := INF
 	var inspected := 0
+	# Search the current cell plus a short predicted corridor before the regular
+	# local rings.  This remains a constant-size bucket query, but lets a tree a
+	# sprint ahead compete with an equally near side/behind tree rather than
+	# being hidden by the first occupied square ring.
+	for bucket_key in directional_priority_cells(viewer_position):
+		var directional_bucket_value: Variant = pending_spatial_buckets.get(bucket_key)
+		if directional_bucket_value is not Array:
+			continue
+		for raw_sequence in directional_bucket_value as Array:
+			var sequence := int(raw_sequence)
+			var candidate_value: Variant = pending_tasks.get(sequence)
+			if candidate_value is not Dictionary:
+				continue
+			var candidate: Dictionary = candidate_value
+			if candidate.is_empty():
+				continue
+			inspected += 1
+			var candidate_score := effective_priority_at(candidate, now_usec, viewer_position)
+			if best_sequence < 0 or priority_score_precedes(candidate, candidate_score, pending_tasks.get(best_sequence, {}), best_score):
+				best_sequence = sequence
+				best_score = candidate_score
+	if best_sequence >= 0:
+		worker_local_selection_candidate_count = inspected
+		worker_local_selection_score = best_score
+		return best_sequence
 	# Same local-ring policy as completed recipes, but here it prevents worker
 	# launch from ever sorting a full streamed-in backlog on the main thread.
 	for radius in range(COMPLETED_PRIORITY_LOCAL_CELL_RADIUS + 1):
@@ -582,8 +845,75 @@ func live_publication_priority(task: Dictionary) -> float:
 func live_publication_priority_at(task: Dictionary, viewer_position := Vector3.INF) -> float:
 	var task_position = task.get("publicationPosition", null)
 	if task_position is Vector3 and viewer_position != Vector3.INF:
-		return viewer_position.distance_squared_to(task_position as Vector3)
+		var base_priority := viewer_position.distance_squared_to(task_position as Vector3)
+		var motion := viewer_motion_for_position(viewer_position)
+		if motion.is_empty():
+			return base_priority
+		var heading: Vector3 = motion.get("heading", Vector3.ZERO)
+		var relative := (task_position as Vector3) - viewer_position
+		relative.y = 0.0
+		var forward_distance := relative.dot(heading)
+		if forward_distance <= 0.0:
+			# Behind-the-player work remains eligible and age-fair, but it should
+			# not consume a renderer slice that would make a sprinting player meet
+			# a collision before its forward tree becomes visible.
+			return base_priority * (1.0 + BACKWARD_PRIORITY_PENALTY)
+		var lateral_distance := maxf(0.0, sqrt(maxf(0.0, relative.length_squared() - forward_distance * forward_distance)))
+		var corridor_half_width := clampf(
+			FORWARD_CORRIDOR_MIN_HALF_WIDTH + forward_distance * 0.18,
+			FORWARD_CORRIDOR_MIN_HALF_WIDTH,
+			FORWARD_CORRIDOR_MAX_HALF_WIDTH
+		)
+		if lateral_distance > corridor_half_width:
+			return base_priority + lateral_distance * lateral_distance * BACKWARD_PRIORITY_PENALTY
+		var predicted_position: Vector3 = motion.get("predictedPosition", viewer_position)
+		var predicted_delta := (task_position as Vector3) - predicted_position
+		predicted_delta.y = 0.0
+		# Arrival-oriented distance makes a tree straight ahead win against an
+		# equal-distance lateral/behind task without inventing a magic authored
+		# priority. Lateral cost preserves a narrow, natural viewing corridor.
+		return predicted_delta.length_squared() + lateral_distance * lateral_distance * FORWARD_CORRIDOR_LATERAL_WEIGHT
 	return float(task.get("publicationPriority", INF))
+
+func task_uses_directional_priority(task: Dictionary, viewer_position: Vector3) -> bool:
+	var task_position = task.get("publicationPosition", null)
+	var motion := viewer_motion_for_position(viewer_position)
+	if task_position is not Vector3 or motion.is_empty():
+		return false
+	var heading: Vector3 = motion.get("heading", Vector3.ZERO)
+	var relative := (task_position as Vector3) - viewer_position
+	relative.y = 0.0
+	var forward_distance := relative.dot(heading)
+	if forward_distance <= 0.0:
+		return false
+	var lateral_distance := maxf(0.0, sqrt(maxf(0.0, relative.length_squared() - forward_distance * forward_distance)))
+	var corridor_half_width := clampf(
+		FORWARD_CORRIDOR_MIN_HALF_WIDTH + forward_distance * 0.18,
+		FORWARD_CORRIDOR_MIN_HALF_WIDTH,
+		FORWARD_CORRIDOR_MAX_HALF_WIDTH
+	)
+	return lateral_distance <= corridor_half_width
+
+func directional_priority_cells(viewer_position: Vector3) -> Array[Vector2i]:
+	var motion := viewer_motion_for_position(viewer_position)
+	if motion.is_empty():
+		return []
+	var heading: Vector3 = motion.get("heading", Vector3.ZERO)
+	var lookahead_distance := float(motion.get("lookaheadDistance", 0.0))
+	if heading.length_squared() <= 0.0001 or lookahead_distance <= 0.0:
+		return []
+	var cells: Array[Vector2i] = []
+	var center := completed_priority_cell(viewer_position)
+	cells.append(center)
+	var scan_distance := minf(VIEWER_MOTION_MAX_LOOKAHEAD_DISTANCE + COMPLETED_PRIORITY_CELL_SIZE * 0.5, lookahead_distance + COMPLETED_PRIORITY_CELL_SIZE * 0.5)
+	for index in range(1, MAX_DIRECTIONAL_PRIORITY_CELLS + 1):
+		var distance := minf(scan_distance, COMPLETED_PRIORITY_CELL_SIZE * float(index))
+		if distance <= 0.0:
+			continue
+		var cell := completed_priority_cell(viewer_position + heading * distance)
+		if cell not in cells:
+			cells.append(cell)
+	return cells
 
 func publish_completed_recipes() -> void:
 	var work_units := 0
@@ -731,6 +1061,8 @@ func promote_higher_priority_completed_task() -> void:
 	enqueue_completed_task(paused_task)
 	staged_publication_task = {}
 	preempted_publication_count += 1
+	if viewer_position != Vector3.INF and task_uses_directional_priority(candidate, viewer_position):
+		directional_preemption_count += 1
 
 func highest_priority_completed_index() -> int:
 	var selection_started_usec := Time.get_ticks_usec()
@@ -770,6 +1102,29 @@ func highest_priority_local_completed_index(viewer_position: Vector3, now_usec: 
 	var best_index := -1
 	var best_score := INF
 	var inspected := 0
+	# See the equivalent pending-worker corridor above. Completed recipes need
+	# the same small forward look-ahead or worker completion order can undo the
+	# readiness win by publishing a lateral tree first.
+	for bucket_key in directional_priority_cells(viewer_position):
+		var directional_bucket_value: Variant = completed_spatial_buckets.get(bucket_key)
+		if directional_bucket_value is not Array:
+			continue
+		for raw_index in directional_bucket_value as Array:
+			var index := int(raw_index)
+			if index < completed_head or index >= completed.size():
+				continue
+			var candidate: Dictionary = completed[index]
+			if candidate.is_empty():
+				continue
+			inspected += 1
+			var candidate_score := effective_priority_at(candidate, now_usec, viewer_position)
+			if best_index < 0 or priority_score_precedes(candidate, candidate_score, completed[best_index], best_score):
+				best_index = index
+				best_score = candidate_score
+	if best_index >= 0:
+		local_selection_candidate_count = inspected
+		local_selection_score = best_score
+		return best_index
 	# Check increasingly distant square rings.  The first occupied ring bounds
 	# work to nearby buckets; every candidate within that ring still receives an
 	# exact distance-and-age comparison, so this is not authored ordering.
@@ -869,6 +1224,9 @@ func take_next_completed_task(selected_completed_index := -1) -> Dictionary:
 	if best_index < 0:
 		return {}
 	var task: Dictionary = completed[best_index]
+	var viewer_position := current_viewer_position()
+	if viewer_position != Vector3.INF and task_uses_directional_priority(task, viewer_position):
+		directional_publication_selection_count += 1
 	remove_completed_task_from_bucket(best_index, task)
 	completed[best_index] = {}
 	completed_count = maxi(0, completed_count - 1)
@@ -1115,6 +1473,10 @@ func commit_published_visual(task: Dictionary, body: StaticBody3D, visual: Node3
 		body.remove_child(prior_visual)
 		prior_visual.queue_free()
 	body.add_child(visual)
+	# Attach the final root before removing the temporary silhouette so the
+	# renderer never observes a collision-owning body with no tree visual.
+	record_first_collision_visible(body, "procedural_tree_recipe")
+	release_collision_visibility_proxy(body)
 	body.set_meta("visual_source", "procedural_tree_recipe")
 	body.set_meta("visual_asset_id", "procedural:%s" % String(request.get("speciesGrammar", "tree")))
 	body.set_meta("tree_recipe_signature", String(recipe.get("signature", "")))
@@ -1454,7 +1816,28 @@ func metrics() -> Dictionary:
 			"maxSelectionCandidates": priority_selection_max_candidates,
 			"fullFallbackSelections": priority_selection_full_fallback_count,
 			"viewlessFifoSelections": priority_selection_viewless_fifo_count,
+			"directionalPublicationSelections": directional_publication_selection_count,
+			"directionalPreemptions": directional_preemption_count,
+			"directionalWorkerSelections": directional_worker_selection_count,
+			"viewerHeadingConfidentFrames": viewer_heading_confident_frame_count,
+			"viewerHeadingFallbackFrames": viewer_heading_fallback_frame_count,
+			"lookaheadSeconds": VIEWER_MOTION_LOOKAHEAD_SECONDS,
+			"maxLookaheadDistance": VIEWER_MOTION_MAX_LOOKAHEAD_DISTANCE,
+			"forwardCorridorMaxHalfWidth": FORWARD_CORRIDOR_MAX_HALF_WIDTH,
 			"selectionTiming": priority_selection_timing()
+		},
+		"collisionVisibility": {
+			"proxyDistance": COLLISION_VISIBILITY_PROXY_DISTANCE,
+			"proxyAttachments": collision_visibility_proxy_attach_count,
+			"proxyReleases": collision_visibility_proxy_release_count,
+			"activeProxies": collision_visibility_proxy_active_count,
+			"peakActiveProxies": collision_visibility_proxy_peak_count,
+			"averageProxyLifetimeUsec": float(collision_visibility_proxy_lifetime_total_usec) / float(maxi(1, collision_visibility_proxy_release_count)),
+			"maxProxyLifetimeUsec": collision_visibility_proxy_lifetime_max_usec,
+			"firstVisibleCount": collision_to_first_visible_count,
+			"averageRelevantCollisionToFirstVisibleLagUsec": float(collision_to_first_visible_total_lag_usec) / float(maxi(1, collision_to_first_visible_count)),
+			"maxRelevantCollisionToFirstVisibleLagUsec": collision_to_first_visible_max_lag_usec,
+			"collisionBeforeVisualInvariantBreaches": collision_before_visual_invariant_breach_count
 		},
 		"workerPriorityScheduling": {
 			"enabled": true,
