@@ -36,6 +36,83 @@ Main.gd
 
 Prefer composed systems under `scripts/` or `scripts/story/` over expanding that chain.
 
+## Game Model And Authority Map
+
+The game is a coherent survival world, not a collection of isolated scenes.
+When changing one layer, identify the authoritative owner and preserve the
+contracts below and above it:
+
+```text
+world seed
+  -> WorldGenerationSystem + BiomeRegionField
+  -> authoritative terrain volume / edited cells
+  -> chunk mesh, collision, lighting, navigation publication, props
+  -> player/NPC interaction, survival, crafting, combat, story and tutorial
+  -> save snapshots, HUD, loading feedback and playtest evidence
+```
+
+- A visible result must have a real source of truth. Do not create a second
+  visual, collision, save, navigation, or metadata-only authority to mask a
+  defect in the first one.
+- `WorldGenerationSystem.surface_biome_for_cell3` is the sole production
+  surface-biome query. It always composes the deterministic kilometre-scale
+  `scripts/world/BiomeRegionField.gd`; there is no legacy sampler or
+  save-selected biome mode.
+- Terrain volume is the authority for material, solidity, digging and
+  underground air. Meshes, colliders, light, props and navigation publish from
+  that authority rather than inventing their own terrain interpretation.
+- The tutorial is a scenario layered on ordinary game systems. It may choose
+  actors, goals and presentation, but must not become a parallel world,
+  movement, home, door, or save system.
+- A save records player-made and durable world deltas; it must not replace
+  deterministic generation with a second generated-world implementation.
+
+## Core Project Map
+
+Start orientation with these files and folders rather than searching from an
+individual symptom:
+
+- `project.godot`, `scenes/Main.tscn`, and the `Main*.gd` chain define the
+  production runtime. `scenes/Playtest.tscn` hosts the broad integration
+  fixture; `scenes/testing/` and `scenes/story_testing/` host focused fixtures.
+- `scripts/WorldGenerationSystem.gd`, `scripts/TerrainVolumeService.gd`,
+  `scripts/terrain/VoxelTerrainGenerator.gd`, and
+  `scripts/terrain/VoxelTerrainRuntime.gd` own generation, editable volume,
+  terrain publication, and streaming.
+- `scripts/world/BiomeRegionField.gd` is the pure, deterministic macrobiome
+  field. `scripts/environment/BiomeEnvironmentCatalog.gd` turns biome identity
+  into environment/foliage policy.
+- `scripts/environment/` and `scripts/visual/` own procedural ecology and
+  rendering. `scripts/perf/RuntimePerformanceMonitor.gd` owns runtime
+  performance observations. Do not put their work into a `Main*.gd` layer.
+- `scripts/SaveSystem.gd` owns the save envelope and `MainSaveState.gd` owns
+  the gameplay snapshot. The current intentional format is `SAVE_VERSION = 2`;
+  version-1 local saves were retired, not migrated.
+- `scripts/tutorial/`, `scripts/Tutorial*.gd`, `scripts/story/`, and
+  `scripts/missions/` own scenario and story composition. Dialogue presents
+  state; it does not become the state authority.
+- `scripts/npc_ai/` owns the mature routing/movement stack. Read
+  `MANIFESTO.md` before considering any change there.
+
+## Core Principles
+
+- Build a survival game where ordinary play works end-to-end: gather, craft,
+  build, explore, fight, sleep, progress the story, save, reload, and leave
+  the game without breaking the world around those actions.
+- Prefer a few composable, inspectable authorities over parallel “helpful”
+  fallbacks. A system should be reusable by the tutorial, generated towns,
+  normal gameplay, a focused PoC, and tests through the same public contract.
+- Preserve determinism. Seeded generation may vary richly, but a seed and its
+  durable deltas must reproduce the same world without mutable global RNG,
+  query-order dependence, or hidden authored repairs.
+- Favour systemic correctness over a patch for a screenshot. Ask what owns
+  the failing fact, then repair that contract at its source.
+- Treat smoothness, loading feedback, collision and visual readability as
+  gameplay correctness. A feature that works only after a visible stall,
+  through missing collision, or without readable feedback is incomplete.
+- Keep the cozy voxel direction through silhouette, material identity, warm
+  light and dark nights—not by flattening the world into generic primitives.
+
 ## Project North Stars
 
 - This is a survival game, not a tech demo. Terrain, structures, NPCs, weather, lighting, inventory, crafting, combat, story, saves, and performance must continue to work together in normal gameplay.
@@ -51,10 +128,34 @@ Prefer composed systems under `scripts/` or `scripts/story/` over expanding that
 - Keep changes focused. Avoid broad refactors while fixing gameplay bugs.
 - Do not discard, reset, clean, or rewrite branches unless the user explicitly asks.
 - Do not weaken tests to make a change pass.
-- Keep save changes additive unless an explicit migration is implemented and tested.
+- Save changes are normally additive. The current format is deliberately v2:
+  do not reintroduce legacy biome/save compatibility, a version selector, or a
+  second world-generation authority without an explicit product decision.
 - Preserve deterministic world generation. Story or visual additions may derive stable IDs from the seed, but must not reorder terrain/town/prop RNG.
 - Visual assets, Blender generators, generated GLBs, and registries are first-class project assets. Do not replace them with a parallel pipeline.
 - Browser/Three.js work is historical context. New gameplay work should target this Godot project unless the user says otherwise.
+
+## How To Approach Work
+
+1. Orient before editing: read the controlling plan/manifesto, check the
+   current branch and worktree, identify the owner of the fact being changed,
+   and distinguish user work from task work.
+2. Reproduce at the right evidence level. Use a small contract runner to
+   isolate deterministic rules, then a real scene or headed playtest for
+   player-visible behaviour. A screenshot can invalidate a green synthetic
+   result.
+3. Change the lowest correct authority. Reuse established commands and data
+   flows instead of adding named exceptions, copied generators, direct
+   movement, UI-state logic, or test-only pathways.
+4. Keep publication incremental. Expensive generation, meshing, prop/tree
+   construction, navigation publication, route work and saving belong in
+   measured queues/budgets, but queued requests must remain retryable and must
+   not silently disappear.
+5. Verify proportionally: focused contract first, then functional/visual and
+   runtime performance coverage when a player can notice the change. State
+   exactly what each test proves and what it does not.
+6. Leave the repository legible: update the relevant plan/Linear item when
+   requested, preserve unrelated files, and commit only the requested scope.
 
 ## DO NOT FAKE GAMEPLAY TESTS
 
@@ -69,18 +170,57 @@ Prefer composed systems under `scripts/` or `scripts/story/` over expanding that
 
 ## Important Plans And Docs
 
-- `CODEX_NPC_PATHFINDING_FINAL_IMPLEMENTATION_PLAN.md`: controlling mandatory specification for the NPC autonomy/pathfinding replacement. When executing this work, reread the current phase, global invariants, test protocol, and prohibited-shortcuts section before editing. Follow one phase branch/report/merge cycle at a time.
-- `CODEX_MATURE_NAV_PLAN.md` and `NPC_PATHFINDING_REGRESSION_HANDOFF.md`: current context for the systemic NPC pathfinding regression. Use these before changing NPC routing, route readiness, collision, door traversal, forager behavior, or live NPC playtests.
+- `MANIFESTO.md`: the pathfinding stability manifesto. Read it before work that
+  could touch NPC routing, generated collision, doors, towns, streaming,
+  navigation publication or pathfinding acceptance. The routing replacement is
+  complete; its code is protected unless pathfinding work is explicitly
+  authorised.
+- `CODEX_NPC_PATHFINDING_FINAL_IMPLEMENTATION_PLAN.md`,
+  `CODEX_MATURE_NAV_PLAN.md`, and `NPC_PATHFINDING_REGRESSION_HANDOFF.md`:
+  historical implementation/reference material. They become controlling only
+  for explicitly authorised pathfinding work; otherwise use them to preserve
+  contracts, not to restart an old replacement campaign.
 - `CODEX_TUTORIAL_TOWN_NPC_LOADING_PLAN.md`: controlling sequential plan for making the tutorial town a fully published loading artifact and removing tutorial-specific movement privilege from generic NPC systems. Follow it before changing tutorial-town readiness, tutorial NPC spawning/home assignment, post-knock behavior, or tutorial-owned NPC commands.
 - `Minecraft-Equivalent Terrain Migr.md`: terrain architecture migration context. The target is Minecraft-like terrain authority with smooth/non-blocky rendering, not a heightfield plus cave band-aids.
 - `CODEX_PERFORMANCE_PLAN.md`: performance roadmap and prior performance constraints. Recheck when touching terrain, chunk streaming, structures, NPC/nav, autosave, or main menu/runtime loading.
 - `CODEX_VISUAL_UPGRADE_PLAN.md`: visual polish roadmap.
 - `CODEX_STORY_IMPLEMENTATION_PLAN.md`: story/worldmark roadmap. Follow one phase at a time.
+- `docs/KILOMETRE_BIOME_FIELD.md`: the current single-authority regional-biome
+  contract and its focused verification.
 - `docs/ANIMATED_ASSET_PIPELINE.md`: generated animated asset workflow.
 - `docs/STORY_SUMMARY.md`: narrative brief for story manager context.
 - `docs/VISUAL_*_REPORT.md`: prior visual work and verification notes.
 
 When executing story work, reread `CODEX_STORY_IMPLEMENTATION_PLAN.md` and follow the requested phase only. Phase reports and commits are part of the expected workflow.
+
+## Procedural Ecology And Trees
+
+Trees are generated world behaviour, not a static asset catalogue or a
+decorative afterthought. The biome/environment policy and deterministic tree
+recipe are the source of truth for both PoCs and the live world.
+
+```text
+BiomeRegionField -> BiomeEnvironmentCatalog -> TreeEcologySampler
+  -> ProceduralTreeRecipeBuilder / family grammar -> TreeRecipeCache
+  -> TreeRuntimeRequestBuilder -> TreePublicationQueue -> visual/collision publication
+```
+
+- Tree family, age, scale, trunk form, branching and leaf distribution should
+  derive from stable seed/biome/ecology inputs. Do not hand-place a special
+  forest stand or fork a PoC-only tree builder to get a visual result.
+- The mathematical tree PoCs under `scenes/testing/MathematicalTreePocTest.tscn`
+  and `scripts/testing/trees/` must call the same family recipe path as runtime
+  spawning. If a tree needs to look different everywhere, improve the recipe
+  grammar rather than replacing live assets by hand.
+- Mature broadleaf/oak forms need greedy branching along viable split axes,
+  allometric taper, outward/dome-seeking growth and recursive terminal detail.
+  Conifers and savanna trees need their own grammar, not a uniformly scaled oak.
+- No branch/leaf collision is required unless gameplay explicitly asks for it;
+  player collision belongs to trunks/declared blockers. Visual wind, shadow and
+  density must remain compatible with chunk streaming and frame budgets.
+- Profile recipe construction and publication separately. Prioritise facing or
+  approaching content without creating invisible solid obstacles or reordering
+  deterministic spawn results.
 
 ## Test Commands
 
@@ -147,6 +287,14 @@ Visual captures:
 .\tools\run-visual-captures.ps1
 ```
 
+Biome and procedural-ecology contracts:
+
+```powershell
+.\tools\run-biome-region-field-contract-tests.ps1
+.\tools\run-tree-spawn-performance.ps1
+.\tools\run-procedural-tree-performance-benchmark.ps1
+```
+
 World signature:
 
 ```powershell
@@ -211,6 +359,16 @@ Use random seeds for broad tutorial or generated-town playtests unless replaying
 - `scripts/GameHud*.gd`, `MainHudFlow.gd`: HUD, inventory UI, settings, objectives, contracts.
 - `scripts/visual/*Registry.gd`: generated visual asset registries.
 - `scripts/ItemVisualFactory.gd`, `HeldItemSystem.gd`, `ItemIconFactory.gd`: item meshes, held visuals, UI icons.
+- `scripts/environment/TreeEcologySampler.gd`, `ProceduralTreeRecipeBuilder.gd`,
+  `TreeSpawnService.gd`, and `TreePublicationQueue.gd`: deterministic tree
+  ecology, recipes, request construction and budgeted runtime publication.
+- `scripts/visual/ProceduralTreeVisualFactory.gd` and
+  `TreeChunkBatchRenderer.gd`: live tree visuals and chunk-safe batching.
+- `scripts/environment/EnvironmentWindSystem.gd`: shared wind inputs for
+  foliage/grass presentation; do not add unrelated per-prop wind clocks.
+- `scripts/story/StoryDirector.gd`, `StoryEventBus.gd`, and
+  `StoryQuestSystem.gd`: deterministic story state, event flow and quest
+  ownership.
 
 ## Tutorial Town And NPC Boundaries
 
@@ -254,9 +412,15 @@ Avoid:
 
 ## NPC And AI Expectations
 
-For the NPC autonomy/pathfinding replacement, `CODEX_NPC_PATHFINDING_REPLACEMENT_PHASE_PLAN.md` is the current sequential implementation plan. Phase work must keep the phase branch and merged `master` green and must tie every acceptance claim to a command, report, trace, capture, static audit, or commit.
+Pathfinding replacement is complete and protected by `MANIFESTO.md`. Do not
+modify it during ordinary NPC, tutorial, terrain, loading, performance or world
+generation work. If a task explicitly authorises pathfinding work, begin with
+the manifesto and the relevant historical plan, then tie every acceptance claim
+to a command, report, trace, capture, static audit, or commit.
 
-Recent context: NPC failures are systemic pathfinding failures unless proven otherwise. Do not patch Niko, Mira, Rowan, or any named NPC in isolation when the symptom is an actor stopping outside a door, on a porch, at a wall, or beside a fence. Fix the shared route contract.
+If an NPC symptom might involve routing, diagnose read-only first. Do not patch
+Niko, Mira, Rowan, or any named NPC in isolation when the shared route contract
+is the likely owner.
 
 Current ownership:
 
