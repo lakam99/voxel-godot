@@ -28,6 +28,7 @@ const EquipmentSystemScript := preload("res://scripts/EquipmentSystem.gd")
 const ContractSystemScript := preload("res://scripts/ContractSystem.gd")
 const AudioEffectsSystemScript := preload("res://scripts/AudioEffectsSystem.gd")
 const PlayerProjectileSystemScript := preload("res://scripts/PlayerProjectileSystem.gd")
+const PlayerMotionCombatControllerScript := preload("res://scripts/combat/runtime/PlayerMotionCombatController.gd")
 const WeatherSystemScript := preload("res://scripts/WeatherSystem.gd")
 const EnvironmentWindSystemScript := preload("res://scripts/environment/EnvironmentWindSystem.gd")
 const TutorialSystemScript := preload("res://scripts/TutorialSystem.gd")
@@ -201,6 +202,7 @@ func setup_player() -> void: pass
 func setup_hostiles() -> void: pass
 func setup_npc_system() -> void: pass
 func setup_player_projectiles() -> void: pass
+func setup_player_motion_combat() -> void: pass
 func setup_held_item() -> void: pass
 func find_spawn_position() -> Vector3: return Vector3.ZERO
 func find_spawn_cell(max_variation: float) -> Vector2i: return Vector2i.ZERO
@@ -462,6 +464,8 @@ func trap_damage_at(position: Vector3, delta: float = 0.0) -> float: return 0.0
 func light_safety_at(position: Vector3, include_beacon := true, range: float = CELL * 9.0) -> float: return 0.0
 func destroy_target() -> void: pass
 func play_melee_miss() -> void: pass
+func begin_player_melee_motion() -> bool: return false
+func _on_player_motion_hostile_contact_resolved(_body, _variant: String, _defeated: bool, _position: Vector3, _resolution: Dictionary) -> void: pass
 func strike_effect_for_material(material_id: String) -> String: return ""
 func break_target_for_hit(hit: Dictionary, collider: Node, kind: String) -> Dictionary: return {}
 func complete_destroy_target(hit: Dictionary, collider: Node, kind: String, material_id: String) -> void: pass

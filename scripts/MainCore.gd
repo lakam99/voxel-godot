@@ -88,6 +88,7 @@ var equipment_system
 var contract_system
 var audio_effects
 var player_projectiles
+var player_motion_combat
 var weather_system
 var environment_wind_system
 var tutorial_system
@@ -310,6 +311,7 @@ func _ready() -> void:
     setup_hostiles()
     setup_npc_system()
     setup_player_projectiles()
+    setup_player_motion_combat()
     setup_held_item()
     setup_hud()
     await prewarm_runtime_visuals_staged()
@@ -411,6 +413,7 @@ func _run_deferred_startup_boot() -> void:
     setup_hostiles()
     setup_npc_system()
     setup_player_projectiles()
+    setup_player_motion_combat()
     setup_held_item()
     setup_hud()
     playtest_progress("main_scene_nodes_done")

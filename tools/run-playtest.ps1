@@ -6,7 +6,7 @@ param(
     [int]$TimeoutSeconds = 1800,
     [int]$StartupProgressSeconds = 120,
     [int]$StaleProgressSeconds = 300,
-    [ValidateSet("", "scene_bootstrap", "inventory_and_crafting", "hostiles", "defensive_blocks", "structures", "movement", "navigation_map", "chunk_detail_batches", "mining_requirements", "mouse_interaction", "settings_debug", "generated_prop_visuals", "tutorial_start", "tutorial_runtime_reset")]
+    [ValidateSet("", "scene_bootstrap", "inventory_and_crafting", "hostiles", "player_motion_combat", "hostile_motion_combat", "defensive_blocks", "structures", "movement", "navigation_map", "chunk_detail_batches", "mining_requirements", "mouse_interaction", "settings_debug", "generated_prop_visuals", "tutorial_start", "tutorial_runtime_reset")]
     [string]$Only = "",
     [switch]$Visible
 )

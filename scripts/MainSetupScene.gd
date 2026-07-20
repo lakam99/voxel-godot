@@ -303,6 +303,13 @@ func setup_player_projectiles() -> void:
     player_projectiles.story_worldmark_hit.connect(_on_player_projectile_story_worldmark_hit)
     add_child(player_projectiles)
 
+func setup_player_motion_combat() -> void:
+    player_motion_combat = PlayerMotionCombatControllerScript.new()
+    player_motion_combat.name = "PlayerMotionCombat"
+    player_motion_combat.setup(player, hostile_system, seed_hash)
+    player_motion_combat.hostile_contact_resolved.connect(_on_player_motion_hostile_contact_resolved)
+    add_child(player_motion_combat)
+
 func setup_held_item() -> void:
     if not player or not player.camera:
         return

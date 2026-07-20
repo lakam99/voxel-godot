@@ -20,6 +20,8 @@ var failed := false
 var elapsed := 0.0
 var watchdog_seconds := 240.0
 var finished := false
+var motion_combat_contact_events: Array[Dictionary] = []
+var hostile_motion_combat_contact_events: Array[Dictionary] = []
 # Preserve the enclosing test-step name while a nested async readiness helper
 # reports progress.  This is diagnostic-only: it makes a stalled broad run
 # attributable without changing its frame limit, collision criterion, or
@@ -192,6 +194,16 @@ func run() -> void:
     if only_section == "hostiles":
         mark_progress("hostiles")
         await test_hostile_system()
+        finish_playtest()
+        return
+    if only_section == "player_motion_combat":
+        mark_progress("player_motion_combat")
+        await test_player_motion_combat()
+        finish_playtest()
+        return
+    if only_section == "hostile_motion_combat":
+        mark_progress("hostile_motion_combat")
+        await test_hostile_motion_combat()
         finish_playtest()
         return
     if only_section == "defensive_blocks":
@@ -4181,6 +4193,278 @@ func test_bed_respawn_and_death_drop() -> void:
             pickup_count,
             str(collected_logs)
         ]
+    )
+
+func test_player_motion_combat() -> void:
+    if main == null or player == null or camera == null:
+        add_result("player_motion_combat_dependencies", false, "main/player/camera missing")
+        return
+    var hostile_system = main.get("hostile_system")
+    var motion_controller = main.get("player_motion_combat")
+    var present: bool = hostile_system != null and motion_controller != null \
+        and motion_controller.has_method("summary") and motion_controller.has_method("is_motion_active")
+    add_result("player_motion_combat_dependencies", present, "hostiles %s, controller %s" % [str(hostile_system != null), str(motion_controller != null)])
+    if not present:
+        return
+
+    hostile_system.clear()
+    motion_combat_contact_events.clear()
+    # This fixture deliberately moves the real player into a freshly published,
+    # cleared patch. It keeps the visible motion proof out of the starter home
+    # and prevents a wall, bed, or prop from becoming an accidental target.
+    var source_cell := Vector2i(roundi(player.global_position.x / CELL), roundi(player.global_position.z / CELL))
+    var candidate = main.call("find_biome_playtest_cell", ["plains", "savanna"], 6.0, 54.0, true) if main.has_method("find_biome_playtest_cell") else source_cell + Vector2i(12, 12)
+    var arena_cell := source_cell + Vector2i(12, 12)
+    if candidate is Vector2i and abs(candidate.x) < 900000:
+        arena_cell = candidate
+    reset_player_on_flat_patch(arena_cell, 8)
+    clear_blocks_near_cell(arena_cell, 12)
+    clear_props_near_cell(arena_cell, 12)
+    await settle_streamed_chunks_after_relocation("player_motion_combat_arena", 180)
+    await wait_physics_frames(6)
+    # The tutorial intentionally freezes its opening storm at night. This
+    # isolated combat fixture is not tutorial acceptance, so switch off that
+    # presentation hold before asking the normal sky system for a daytime
+    # visual proof. The real combat input/collision path remains unchanged.
+    var tutorial_system = main.get("tutorial_system")
+    if tutorial_system != null:
+        tutorial_system.set("intro_repair_active", false)
+        tutorial_system.set("final_night_active", false)
+        tutorial_system.set("intro_bed_used", true)
+    if main.has_method("update_sky"):
+        main.set("time_of_day", 0.46)
+        main.call("update_sky", 0.0)
+    var weather_system = main.get("weather_system")
+    if weather_system != null and weather_system.has_method("force_weather"):
+        weather_system.call("force_weather", "clear", 0.0, 0.08, player.global_position)
+    # Keep the real input, camera, player body, motion controller and Godot
+    # physics active. The main loop and player motor pause only after the arena
+    # is ready so the focused hostile cannot autonomously move off the sweep.
+    main.set_process(false)
+    player.set_physics_process(false)
+    var contact_callback := Callable(self, "_on_player_motion_combat_contact_resolved")
+    if not motion_controller.is_connected("hostile_contact_resolved", contact_callback):
+        motion_controller.hostile_contact_resolved.connect(contact_callback)
+    var forward := -player.global_transform.basis.z
+    forward.y = 0.0
+    forward = forward.normalized() if forward.length_squared() > 0.0001 else Vector3.FORWARD
+    var fixture_position := player.global_position + forward * 2.35
+    fixture_position.y = player.global_position.y
+    var fixture: StaticBody3D = hostile_system.spawn_enemy(fixture_position, "shadow")
+    add_result("player_motion_combat_fixture_spawned", fixture != null and is_instance_valid(fixture), "position %s" % str(fixture_position))
+    if fixture == null or not is_instance_valid(fixture):
+        return
+    camera.look_at(fixture.global_position + Vector3.UP * 0.82, Vector3.UP)
+    camera.current = true
+    await wait_physics_frames(3)
+    var fixture_ray: Dictionary = player.view_ray(MELEE_RANGE)
+    var ray_targets_fixture: bool = fixture_ray.get("collider", null) == fixture
+    add_result(
+        "player_motion_combat_real_camera_targets_fixture",
+        ray_targets_fixture,
+        "hit %s, kind %s" % [str(not fixture_ray.is_empty()), String(fixture.get_meta("kind", ""))]
+    )
+    if not ray_targets_fixture:
+        hostile_system.clear()
+        return
+
+    var fixture_state: Dictionary = hostile_system.enemy_for_body(fixture)
+    var health_before := float(fixture_state.get("health", -1.0))
+    var expected_damage := float(main.call("melee_damage_for_active_item")) if main.has_method("melee_damage_for_active_item") else 1.0
+    dispatch_mouse_button(MOUSE_BUTTON_LEFT, true)
+    dispatch_mouse_button(MOUSE_BUTTON_LEFT, false)
+    await wait_physics_frames(4)
+    var windup_state: Dictionary = hostile_system.enemy_for_body(fixture)
+    var health_after_windup := float(windup_state.get("health", -INF))
+    add_result(
+        "player_motion_combat_windup_is_non_damaging",
+        is_equal_approx(health_before, health_after_windup),
+        "health %.2f -> %.2f, motion %s" % [health_before, health_after_windup, str(motion_controller.summary())]
+    )
+    await capture_player_motion_combat_stage("windup", motion_controller, fixture)
+    await wait_physics_frames(10)
+    await capture_player_motion_combat_stage("active_contact", motion_controller, fixture)
+    await wait_physics_frames(24)
+    var final_state: Dictionary = hostile_system.enemy_for_body(fixture) if is_instance_valid(fixture) else {}
+    var fixture_defeated := final_state.is_empty()
+    var health_after := float(final_state.get("health", -INF))
+    var expected_health := health_before - expected_damage
+    var one_contact := motion_combat_contact_events.size() == 1
+    var damage_exact := fixture_defeated if expected_damage >= health_before else is_equal_approx(health_after, expected_health)
+    add_result(
+        "player_motion_combat_resolves_one_authoritative_contact",
+        one_contact and damage_exact,
+        "events %d, health %.2f -> %.2f expected %.2f, defeated %s" % [motion_combat_contact_events.size(), health_before, health_after, expected_health, str(fixture_defeated)]
+    )
+    hostile_system.clear()
+
+func _on_player_motion_combat_contact_resolved(_body, variant: String, defeated: bool, position: Vector3, resolution: Dictionary) -> void:
+    motion_combat_contact_events.append({
+        "variant": variant,
+        "defeated": defeated,
+        "position": position,
+        "resolution": resolution
+    })
+
+func test_hostile_motion_combat() -> void:
+    if main == null or player == null or camera == null:
+        add_result("hostile_motion_combat_dependencies", false, "main/player/camera missing")
+        return
+    var hostile_system = main.get("hostile_system")
+    var survival_system = main.get("survival_system")
+    var motion_system = hostile_system.get("hostile_motion_combat") if hostile_system != null else null
+    var present: bool = hostile_system != null and survival_system != null and motion_system != null \
+        and motion_system.has_method("is_motion_active") and motion_system.has_method("active_motion_count")
+    add_result("hostile_motion_combat_dependencies", present, "hostiles %s, survival %s, motion %s" % [str(hostile_system != null), str(survival_system != null), str(motion_system != null)])
+    if not present:
+        return
+
+    hostile_system.clear()
+    hostile_motion_combat_contact_events.clear()
+    var source_cell := Vector2i(roundi(player.global_position.x / CELL), roundi(player.global_position.z / CELL))
+    var candidate = main.call("find_biome_playtest_cell", ["plains", "savanna"], 6.0, 54.0, true) if main.has_method("find_biome_playtest_cell") else source_cell + Vector2i(16, 16)
+    var arena_cell := source_cell + Vector2i(16, 16)
+    if candidate is Vector2i and abs(candidate.x) < 900000:
+        arena_cell = candidate
+    reset_player_on_flat_patch(arena_cell, 8)
+    clear_blocks_near_cell(arena_cell, 12)
+    clear_props_near_cell(arena_cell, 12)
+    await settle_streamed_chunks_after_relocation("hostile_motion_combat_arena", 180)
+    await wait_physics_frames(6)
+    var tutorial_system = main.get("tutorial_system")
+    if tutorial_system != null:
+        tutorial_system.set("intro_repair_active", false)
+        tutorial_system.set("final_night_active", false)
+        tutorial_system.set("intro_bed_used", true)
+    if main.has_method("update_sky"):
+        main.set("time_of_day", 0.46)
+        main.call("update_sky", 0.0)
+    var weather_system = main.get("weather_system")
+    if weather_system != null and weather_system.has_method("force_weather"):
+        weather_system.call("force_weather", "clear", 0.0, 0.08, player.global_position)
+    # The fixture uses the production HostileSystem attack branch and the real
+    # player collision body. The world loop/player motor pause only after the
+    # arena is published so no unrelated tutorial actor changes the target.
+    main.set_process(false)
+    player.set_physics_process(false)
+    var callback := Callable(self, "_on_hostile_motion_combat_contact_resolved")
+    if not motion_system.is_connected("motion_contact_resolved", callback):
+        motion_system.motion_contact_resolved.connect(callback)
+    var forward := -player.global_transform.basis.z
+    forward.y = 0.0
+    forward = forward.normalized() if forward.length_squared() > 0.0001 else Vector3.FORWARD
+    var fixture_position := player.global_position + forward * 1.72
+    fixture_position.y = player.global_position.y
+    var fixture: StaticBody3D = hostile_system.spawn_enemy(fixture_position, "shadow")
+    add_result("hostile_motion_combat_fixture_spawned", fixture != null and is_instance_valid(fixture), "position %s" % str(fixture_position))
+    if fixture == null or not is_instance_valid(fixture):
+        return
+    camera.look_at(fixture.global_position + Vector3.UP * 0.82, Vector3.UP)
+    camera.current = true
+    var enemy: Dictionary = hostile_system.enemy_for_body(fixture)
+    enemy["aware"] = true
+    enemy["daylightImmune"] = true
+    enemy["cooldown"] = 0.0
+    enemy["canAttack"] = true
+    var health_before := float(survival_system.health)
+    hostile_system.update_enemy(enemy, 0.0, 0.70)
+    var started: bool = motion_system.is_motion_active(fixture)
+    add_result("hostile_motion_combat_starts_from_production_attack_branch", started, "motion %d, enemy %s" % [motion_system.active_motion_count(), str(enemy)])
+    if not started:
+        hostile_system.clear()
+        return
+    await wait_physics_frames(5)
+    var health_after_windup := float(survival_system.health)
+    add_result(
+        "hostile_motion_combat_windup_is_non_damaging",
+        is_equal_approx(health_before, health_after_windup),
+        "health %.2f -> %.2f" % [health_before, health_after_windup]
+    )
+    await capture_hostile_motion_combat_stage("windup", motion_system, fixture)
+    # Capture once the same rendered side arc has begun but before its contact
+    # consequence can obscure the ribbon with hit feedback.
+    await wait_physics_frames(8)
+    await capture_hostile_motion_combat_stage("active_arc", motion_system, fixture)
+    await wait_physics_frames(8)
+    await capture_hostile_motion_combat_stage("active_contact", motion_system, fixture)
+    await wait_physics_frames(28)
+    var expected_damage := 8.0 + 0.70 * 4.0
+    var one_contact := hostile_motion_combat_contact_events.size() == 1
+    var damage_exact := is_equal_approx(float(survival_system.health), health_before - expected_damage)
+    add_result(
+        "hostile_motion_combat_resolves_one_authoritative_contact",
+        one_contact and damage_exact,
+        "events %d, health %.2f -> %.2f expected %.2f" % [hostile_motion_combat_contact_events.size(), health_before, float(survival_system.health), health_before - expected_damage]
+    )
+    hostile_system.clear()
+
+func _on_hostile_motion_combat_contact_resolved(source_body, target, target_kind: String, damage: float, variant: String, resolution: Dictionary) -> void:
+    hostile_motion_combat_contact_events.append({
+        "source": source_body,
+        "target": target,
+        "targetKind": target_kind,
+        "damage": damage,
+        "variant": variant,
+        "resolution": resolution
+    })
+
+func capture_hostile_motion_combat_stage(stage: String, motion_system, fixture: Node3D) -> void:
+    var directory := OS.get_environment("VOXEL_HOSTILE_MOTION_COMBAT_CAPTURE_DIR").strip_edges()
+    if directory == "":
+        var report_path := OS.get_environment("VOXEL_PLAYTEST_REPORT").strip_edges()
+        if report_path == "":
+            return
+        directory = report_path.get_base_dir().path_join("hostile-motion-captures")
+    DirAccess.make_dir_recursive_absolute(directory)
+    await wait_process_frames(1)
+    var path := directory.path_join("%s.png" % stage)
+    var image := get_viewport().get_texture().get_image()
+    var error := image.save_png(path)
+    add_result(
+        "hostile_motion_combat_capture_%s" % stage,
+        error == OK and FileAccess.file_exists(path),
+        "path %s, active %d, fixture %s, ribbon %s" % [path, motion_system.active_motion_count(), str(fixture.global_position if fixture != null and is_instance_valid(fixture) else Vector3.INF), str(hostile_motion_afterimage_snapshot(motion_system))]
+    )
+
+
+func hostile_motion_afterimage_snapshot(motion_system) -> Dictionary:
+    if motion_system == null:
+        return {"present": false}
+    for presentation in motion_system.get_children():
+        if not String(presentation.name).begins_with("HostileMotionAfterimage_"):
+            continue
+        var ribbons: Array = presentation.get_children()
+        if ribbons.is_empty():
+            return {"present": true, "ribbonCount": 0}
+        var ribbon := ribbons[0] as MeshInstance3D
+        var mesh := ribbon.mesh if ribbon != null else null
+        return {
+            "present": true,
+            "ribbonCount": ribbons.size(),
+            "visible": ribbon.visible if ribbon != null else false,
+            "surfaceCount": mesh.get_surface_count() if mesh != null else 0,
+            "aabb": mesh.get_aabb() if mesh != null else AABB(),
+            "position": ribbon.global_position if ribbon != null else Vector3.INF
+        }
+    return {"present": false}
+
+
+func capture_player_motion_combat_stage(stage: String, motion_controller, fixture: Node3D) -> void:
+    var directory := OS.get_environment("VOXEL_PLAYER_MOTION_COMBAT_CAPTURE_DIR").strip_edges()
+    if directory == "":
+        var report_path := OS.get_environment("VOXEL_PLAYTEST_REPORT").strip_edges()
+        if report_path == "":
+            return
+        directory = report_path.get_base_dir().path_join("player-motion-captures")
+    DirAccess.make_dir_recursive_absolute(directory)
+    await wait_process_frames(1)
+    var path := directory.path_join("%s.png" % stage)
+    var image := get_viewport().get_texture().get_image()
+    var error := image.save_png(path)
+    add_result(
+        "player_motion_combat_capture_%s" % stage,
+        error == OK and FileAccess.file_exists(path),
+        "path %s, motion %s, fixture %s" % [path, str(motion_controller.summary()), str(fixture.global_position if fixture != null and is_instance_valid(fixture) else Vector3.INF)]
     )
 
 func test_hostile_system() -> void:

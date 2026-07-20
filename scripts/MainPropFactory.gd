@@ -6,7 +6,8 @@ func destroy_target() -> void:
     var hit: Dictionary = player.view_ray(monumental_tree_melee_ray_range())
     if hit.is_empty():
         reset_break_progress()
-        play_melee_miss()
+        if not begin_player_melee_motion():
+            play_melee_miss()
         return
     if not hit_within_action_reach(hit):
         reset_break_progress()
@@ -33,17 +34,8 @@ func destroy_target() -> void:
         return
     if kind == "hostile":
         reset_break_progress()
-        if held_item:
-            held_item.play_use("strike")
-        if hostile_system:
-            var variant := String(collider.get_meta("variant", "shadow"))
-            var defeated_hostile: bool = hostile_system.damage_hostile(collider, melee_damage_for_active_item(), true, player, "player_melee")
-            if defeated_hostile:
-                award_hostile_xp(variant)
-                play_feedback("defeat", collider.global_position + Vector3(0.0, 1.0, 0.0) if collider is Node3D else Vector3.INF, Color(0.62, 0.24, 0.82), 16)
-            else:
-                play_feedback("enemyHit", collider.global_position + Vector3(0.0, 1.0, 0.0) if collider is Node3D else Vector3.INF, Color(0.82, 0.22, 0.20), 8)
-            update_hud(hostile_system.last_message)
+        if not begin_player_melee_motion():
+            play_melee_miss()
         return
     var target: Dictionary = break_target_for_hit(hit, collider, kind)
     if target.is_empty():
@@ -84,6 +76,23 @@ func destroy_target() -> void:
 func play_melee_miss() -> void:
     if held_item:
         held_item.play_use("strike")
+
+func begin_player_melee_motion() -> bool:
+    if player_motion_combat == null or not player_motion_combat.has_method("begin_side_arc_motion"):
+        return false
+    var started: bool = player_motion_combat.begin_side_arc_motion(melee_damage_for_active_item())
+    if started and held_item:
+        held_item.play_use("strike")
+    return started
+
+func _on_player_motion_hostile_contact_resolved(_body, variant: String, defeated: bool, position: Vector3, _resolution: Dictionary) -> void:
+    if defeated:
+        award_hostile_xp(variant)
+        play_feedback("defeat", position, Color(0.62, 0.24, 0.82), 16)
+    else:
+        play_feedback("enemyHit", position, Color(0.82, 0.22, 0.20), 8)
+    if hostile_system:
+        update_hud(hostile_system.last_message)
 
 func strike_effect_for_material(material_id: String) -> String:
     var id := material_id.to_lower()

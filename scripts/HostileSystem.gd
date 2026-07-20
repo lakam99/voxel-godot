@@ -4,6 +4,7 @@ class_name HostileSystem
 const HostileProjectileSystemScript := preload("res://scripts/HostileProjectileSystem.gd")
 const HostileRulesScript := preload("res://scripts/HostileRules.gd")
 const HostileVisualFactoryScript := preload("res://scripts/HostileVisualFactory.gd")
+const HostileMotionCombatSystemScript := preload("res://scripts/combat/runtime/HostileMotionCombatSystem.gd")
 const CELL := 1.35
 const HOSTILE_SPACING_RADIUS := CELL * 0.95
 const HOSTILE_RIFT_SPACING_RADIUS := CELL * 1.25
@@ -37,6 +38,7 @@ var defeated_variants := {}
 var last_message := ""
 var visual_factory
 var projectile_system
+var hostile_motion_combat
 var npc_target_attacks := 0
 var npc_target_projectiles := 0
 var scripted_battle_starts := 0
@@ -57,6 +59,10 @@ func setup(main_node, player_node: CharacterBody3D, survival_system, inventory_s
     add_child(projectile_system)
     projectile_system.setup(main, player, survival)
     projectiles = projectile_system.projectiles
+    hostile_motion_combat = HostileMotionCombatSystemScript.new()
+    hostile_motion_combat.name = "HostileMotionCombat"
+    hostile_motion_combat.motion_contact_resolved.connect(_on_hostile_motion_contact_resolved)
+    add_child(hostile_motion_combat)
 
 func prewarm_visuals_staged() -> Dictionary:
     if visual_factory == null or not is_inside_tree():
@@ -108,6 +114,8 @@ func recycle_hostile_body(body: Node) -> bool:
     var body_3d := body as StaticBody3D
     if body_3d == null or not is_instance_valid(body_3d):
         return false
+    if hostile_motion_combat != null and hostile_motion_combat.has_method("cancel_for_body"):
+        hostile_motion_combat.cancel_for_body(body_3d)
     var variant := String(body_3d.get_meta("hostile_pool_variant", ""))
     if variant == "":
         return false
@@ -1010,7 +1018,8 @@ func update_enemy(enemy: Dictionary, delta: float, night_factor: float) -> void:
     enemy["frenzy"] = frenzy
     body.set_meta("hostile_frenzy", frenzy)
     var separation_direction := hostile_separation_direction(body, variant)
-    if aware and active_threat:
+    var motion_active: bool = hostile_motion_combat != null and hostile_motion_combat.has_method("is_motion_active") and bool(hostile_motion_combat.is_motion_active(body))
+    if aware and active_threat and not motion_active:
         var move_direction: Vector3 = scripted_leash.get("direction", direction) if leash_returning else direction
         var speed: float = 2.35 + night_factor * 0.95
         if variant == "rift":
@@ -1042,7 +1051,7 @@ func update_enemy(enemy: Dictionary, delta: float, night_factor: float) -> void:
                 facing_direction = -direction
             if light_safety > 0.82:
                 enemy["aware"] = false
-    elif active_threat:
+    elif active_threat and not motion_active:
         var roam_direction: Vector3 = enemy.get("roamDirection", Vector3.ZERO)
         if roam_direction.length_squared() < 0.001:
             roam_direction = HostileRulesScript.random_roam_direction()
@@ -1100,17 +1109,49 @@ func update_enemy(enemy: Dictionary, delta: float, night_factor: float) -> void:
             register_hostile_npc_attack(target_node, body, variant, "projectile")
             npc_target_projectiles += 1
         enemy["cooldown"] = 2.2
-    elif can_attack and distance < (2.85 if variant == "rift" else 2.1) and aware and active_threat and float(enemy.get("cooldown", 0.0)) <= 0.0:
-        if target_kind == "player" and survival:
-            var damage: float = 21.0 + night_factor * 5.0 if variant == "rift" else 8.0 + night_factor * 4.0
-            var label: String = "Hit by Rift Colossus" if variant == "rift" else "Hit by Shadow Stalker"
-            survival.apply_damage(damage, label, "hostile")
-        elif target_kind == "npc":
-            register_hostile_npc_attack(target_node, body, variant, "melee")
-        enemy["cooldown"] = 1.85 if variant == "rift" else 1.25
+    elif can_attack and not motion_active and distance < (2.85 if variant == "rift" else 2.1) and aware and active_threat and float(enemy.get("cooldown", 0.0)) <= 0.0:
+        var damage := hostile_melee_damage(variant, night_factor)
+        var seed := next_hostile_motion_seed(enemy, body.global_position, variant)
+        var started: bool = hostile_motion_combat != null and bool(hostile_motion_combat.begin_side_arc_motion(body, target_node, target_kind, damage, variant, seed))
+        if started:
+            # Starting the generic motion spends the existing attack cooldown;
+            # the consequence arrives only if its contact volume resolves.
+            enemy["cooldown"] = 1.85 if variant == "rift" else 1.25
+        else:
+            # Keep the old authority available only if the composed runtime
+            # consumer is unavailable during an incomplete startup teardown.
+            apply_hostile_melee_consequence(body, target_node, target_kind, damage, variant)
+            enemy["cooldown"] = 1.85 if variant == "rift" else 1.25
 
     if body.global_position.distance_to(player.global_position) > 112.0:
         remove_enemy(enemy, false)
+
+func hostile_melee_damage(variant: String, night_factor: float) -> float:
+    return 21.0 + night_factor * 5.0 if variant == "rift" else 8.0 + night_factor * 4.0
+
+func next_hostile_motion_seed(enemy: Dictionary, position: Vector3, variant: String) -> int:
+    var serial := int(enemy.get("motionSerial", 0)) + 1
+    enemy["motionSerial"] = serial
+    var world_seed := int(main.get("seed_hash")) if main != null else 1
+    var salt := 0
+    for index in range(variant.length()):
+        salt = posmod(salt * 131 + variant.unicode_at(index) + 1, 2147483629)
+    var coordinate_hash := roundi(position.x * 10.0) * 73856093 + roundi(position.z * 10.0) * 19349663
+    return posmod(world_seed + coordinate_hash + salt + serial * 7919, 2147483629)
+
+func _on_hostile_motion_contact_resolved(source_body: Node3D, target: Node3D, target_kind: String, damage: float, variant: String, _resolution: Dictionary) -> void:
+    if source_body == null or target == null or not is_instance_valid(source_body) or not is_instance_valid(target):
+        return
+    if enemy_for_body(source_body).is_empty():
+        return
+    apply_hostile_melee_consequence(source_body, target, target_kind, damage, variant)
+
+func apply_hostile_melee_consequence(source_body: Node3D, target: Node3D, target_kind: String, damage: float, variant: String) -> void:
+    if target_kind == "player" and target == player and survival:
+        var label: String = "Hit by Rift Colossus" if variant == "rift" else "Hit by Shadow Stalker"
+        survival.apply_damage(damage, label, "hostile")
+    elif target_kind == "npc":
+        register_hostile_npc_attack(target, source_body, variant, "melee")
 
 func update_scripted_enemy(enemy: Dictionary, body: StaticBody3D, delta: float, night_factor: float) -> void:
     var variant := String(enemy.get("variant", "shadow"))
