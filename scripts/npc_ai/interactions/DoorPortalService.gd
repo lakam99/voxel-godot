@@ -498,8 +498,10 @@ func _vec3(value: Vector3) -> Dictionary:
 func _on_controller_state_changed(portal, reason: String) -> void:
 	state_revisions += 1
 	if owner != null and owner.has_method("emit_door_state_revision"):
-		for leaf in portal.leaf_nodes.duplicate():
+		# DoorPortal owns pruning freed generated leaves. Do that before notifying
+		# world listeners so typed leaf arrays are never asked to erase a freed node.
+		portal.rebuild_geometry()
+		for leaf in portal.leaf_nodes:
 			if leaf == null or not is_instance_valid(leaf):
-				portal.leaf_nodes.erase(leaf)
 				continue
 			owner.call("emit_door_state_revision", leaf, portal.state == NpcEnumsScript.DOOR_STATE_OPEN, reason, portal.state_revision)

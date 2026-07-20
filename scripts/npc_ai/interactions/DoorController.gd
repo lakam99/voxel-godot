@@ -163,9 +163,12 @@ func _leaf_clear_for_state() -> bool:
 func _apply_leaf_state(open: bool, reason: String) -> void:
 	if portal == null:
 		return
-	for leaf in portal.leaf_nodes.duplicate():
+	# A generated door leaf may be freed by world cleanup before its portal policy
+	# receives the next close request. Rebuild through DoorPortal's ownership
+	# contract first; never erase a freed object through a typed array.
+	portal.rebuild_geometry()
+	for leaf in portal.leaf_nodes:
 		if leaf == null or not is_instance_valid(leaf):
-			portal.leaf_nodes.erase(leaf)
 			continue
 		var door := leaf as Node3D
 		if door == null:
