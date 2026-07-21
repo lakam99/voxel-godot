@@ -203,6 +203,10 @@ func clear() -> void:
     if combat:
         combat.clear()
 
+func clear_combat_transients() -> void:
+    if combat:
+        combat.clear()
+
 func unregister_npc(body: Node) -> void:
     if body == null:
         return

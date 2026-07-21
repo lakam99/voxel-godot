@@ -10,6 +10,9 @@ var frost_material: StandardMaterial3D
 var frost_eye_material: StandardMaterial3D
 var rift_material: StandardMaterial3D
 var rift_eye_material: StandardMaterial3D
+var wolf_material: StandardMaterial3D
+var wolf_accent_material: StandardMaterial3D
+var wolf_eye_material: StandardMaterial3D
 
 func _init() -> void:
     setup_materials()
@@ -24,6 +27,9 @@ func setup_materials() -> void:
     frost_eye_material = make_material(Color(0.74, 0.95, 1.0), Color(0.32, 0.84, 1.0), 0.5)
     rift_material = make_material(Color(0.11, 0.08, 0.19), Color(0.23, 0.08, 0.37), 0.58)
     rift_eye_material = make_material(Color(1.0, 0.46, 0.94), Color(1.0, 0.28, 0.88), 0.5)
+    wolf_material = make_material(Color(0.29, 0.31, 0.30), Color(0.035, 0.045, 0.04), 0.88)
+    wolf_accent_material = make_material(Color(0.18, 0.20, 0.18), Color(0.02, 0.025, 0.02), 0.92)
+    wolf_eye_material = make_material(Color(0.98, 0.75, 0.26), Color(0.76, 0.39, 0.05), 0.36)
 
 func make_material(albedo: Color, emission: Color, roughness: float) -> StandardMaterial3D:
     var material := StandardMaterial3D.new()
@@ -35,6 +41,17 @@ func make_material(albedo: Color, emission: Color, roughness: float) -> Standard
 
 func variant_spec(variant: String) -> Dictionary:
     match variant:
+        "wolf":
+            return {
+                "health": 74.0,
+                "scale": 1.0,
+                "colliderRadius": 0.34,
+                "colliderHeight": 0.94,
+                "colliderCenterY": 0.47,
+                "material": wolf_material,
+                "accentMaterial": wolf_accent_material,
+                "eyeMaterial": wolf_eye_material
+            }
         "seer":
             return {
                 "health": 20.0,
@@ -69,15 +86,17 @@ func build_visual(body: Node3D, variant: String) -> Dictionary:
     var visual_material: StandardMaterial3D = spec.get("material", enemy_material)
     var visual_eye_material: StandardMaterial3D = spec.get("eyeMaterial", eye_material)
 
-    if not add_generated_visual(body, variant, scale, visual_material, visual_eye_material):
+    if variant == "wolf":
+        add_wolf_visual(body, scale, visual_material, spec.get("accentMaterial", wolf_accent_material), visual_eye_material)
+    elif not add_generated_visual(body, variant, scale, visual_material, visual_eye_material):
         add_primitive_visual(body, variant, scale, visual_material, visual_eye_material)
 
     var shape := CapsuleShape3D.new()
-    shape.radius = 0.42 * scale
-    shape.height = 1.65 * scale
+    shape.radius = float(spec.get("colliderRadius", 0.42)) * scale
+    shape.height = float(spec.get("colliderHeight", 1.65)) * scale
     var collider := CollisionShape3D.new()
     collider.shape = shape
-    collider.position.y = 0.82 * scale
+    collider.position.y = float(spec.get("colliderCenterY", 0.82)) * scale
     body.add_child(collider)
     return spec
 
@@ -187,6 +206,59 @@ func add_primitive_visual(body: Node3D, variant: String, scale: float, visual_ma
         add_rift_core(body, scale, visual_eye_material)
     body.set_meta("visual_source", "primitive_fallback")
     body.set_meta("character_asset_parts", [])
+
+func add_wolf_visual(body: Node3D, scale: float, fur_material: Material, accent_material: Material, eye_material_override: Material) -> void:
+    # The authored wolf stays in the normal hostile visual factory rather than
+    # being an arena-only mesh. Its intentionally chunky construction keeps the
+    # existing cozy voxel silhouette while presenting a low, readable predator.
+    add_box_part(body, "WolfBody", Vector3(0.82, 0.50, 1.34) * scale, Vector3(0.0, 0.66, 0.05) * scale, fur_material)
+    add_box_part(body, "WolfShoulders", Vector3(0.72, 0.38, 0.52) * scale, Vector3(0.0, 0.83, -0.48) * scale, accent_material)
+    add_box_part(body, "WolfHead", Vector3(0.56, 0.48, 0.54) * scale, Vector3(0.0, 1.00, -0.72) * scale, fur_material)
+    add_box_part(body, "WolfMuzzle", Vector3(0.36, 0.26, 0.32) * scale, Vector3(0.0, 0.91, -1.05) * scale, accent_material)
+    for x in [-0.21, 0.21]:
+        add_cone_part(body, "WolfEar", 0.17 * scale, 0.0, 0.42 * scale, Vector3(x * scale, 1.37, -0.72) * scale, fur_material)
+        add_box_part(body, "WolfEye", Vector3(0.075, 0.075, 0.05) * scale, Vector3(x * scale, 1.06, -1.01) * scale, eye_material_override)
+    for x in [-0.28, 0.28]:
+        for z in [-0.38, 0.50]:
+            add_box_part(body, "WolfLeg", Vector3(0.16, 0.52, 0.18) * scale, Vector3(x * scale, 0.27, z) * scale, fur_material)
+            add_box_part(body, "WolfPaw", Vector3(0.20, 0.11, 0.30) * scale, Vector3(x * scale, 0.055, (z + 0.05)) * scale, accent_material)
+    var tail := CylinderMesh.new()
+    tail.top_radius = 0.10 * scale
+    tail.bottom_radius = 0.18 * scale
+    tail.height = 0.92 * scale
+    tail.radial_segments = 5
+    var tail_instance := MeshInstance3D.new()
+    tail_instance.name = "WolfTail"
+    tail_instance.mesh = tail
+    tail_instance.material_override = fur_material
+    tail_instance.position = Vector3(0.0, 0.86, 0.86) * scale
+    tail_instance.rotation_degrees = Vector3(0.0, 0.0, -54.0)
+    body.add_child(tail_instance)
+    body.set_meta("visual_source", "authored_wolf_factory")
+    body.set_meta("character_asset_parts", [])
+
+func add_box_part(body: Node3D, part_name: String, size: Vector3, position: Vector3, material: Material) -> void:
+    var mesh := BoxMesh.new()
+    mesh.size = size
+    var instance := MeshInstance3D.new()
+    instance.name = part_name
+    instance.mesh = mesh
+    instance.material_override = material
+    instance.position = position
+    body.add_child(instance)
+
+func add_cone_part(body: Node3D, part_name: String, bottom_radius: float, top_radius: float, height: float, position: Vector3, material: Material) -> void:
+    var mesh := CylinderMesh.new()
+    mesh.bottom_radius = bottom_radius
+    mesh.top_radius = top_radius
+    mesh.height = height
+    mesh.radial_segments = 4
+    var instance := MeshInstance3D.new()
+    instance.name = part_name
+    instance.mesh = mesh
+    instance.material_override = material
+    instance.position = position
+    body.add_child(instance)
 
 func add_seer_halo(body: Node3D, scale: float, material: Material) -> void:
     var halo_mesh := TorusMesh.new()

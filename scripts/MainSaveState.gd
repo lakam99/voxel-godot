@@ -140,6 +140,7 @@ func create_save_snapshot() -> Dictionary:
 func apply_save_snapshot(snapshot: Dictionary) -> bool:
     if String(snapshot.get("seed", seed_text)) != seed_text:
         return false
+    clear_combat_transients_before_restore()
     save_load_progress("core systems")
     time_of_day = clampf(float(snapshot.get("timeOfDay", time_of_day)), 0.0, 1.0)
     if inventory_system and snapshot.has("inventory"):
@@ -207,6 +208,22 @@ func apply_save_snapshot(snapshot: Dictionary) -> bool:
     save_load_progress("chunks reloaded")
     refresh_intro_knock_audio()
     return true
+
+func clear_combat_transients_before_restore() -> void:
+    # Motion playback, contact windows, projectiles, tracers, and dodge timing
+    # are ephemeral runtime facts. They intentionally have no save snapshot;
+    # clear them at the one snapshot-restore boundary before durable state is
+    # reapplied.
+    if player != null and player.has_method("clear_combat_transients"):
+        player.clear_combat_transients()
+    if player_motion_combat != null and player_motion_combat.has_method("clear_transient_state"):
+        player_motion_combat.clear_transient_state()
+    if player_projectiles != null and player_projectiles.has_method("clear_transient_state"):
+        player_projectiles.clear_transient_state()
+    if hostile_system != null and hostile_system.has_method("clear_combat_transients"):
+        hostile_system.clear_combat_transients()
+    if npc_system != null and npc_system.has_method("clear_combat_transients"):
+        npc_system.clear_combat_transients()
 
 func save_load_progress(message: String) -> void:
     if startup_loading_active:

@@ -9,6 +9,7 @@ const MotionVolumeRecipeBuilderScript := preload("res://scripts/combat/contact/M
 const MotionVolumeSamplerScript := preload("res://scripts/combat/contact/MotionVolumeSampler.gd")
 const MotionContactResolverScript := preload("res://scripts/combat/contact/MotionContactResolver.gd")
 const MotionAfterimageRendererScript := preload("res://scripts/combat/presentation/MotionAfterimageRenderer.gd")
+const MotionTelegraphRendererScript := preload("res://scripts/combat/presentation/MotionTelegraphRenderer.gd")
 const LiveCollisionContactGeometryAdapterScript := preload("res://scripts/combat/runtime/LiveCollisionContactGeometryAdapter.gd")
 
 ## Hostile-facing runtime adapter for the shared procedural motion layer. It
@@ -23,18 +24,65 @@ const MOTION_DURATION_SECONDS := 0.62
 const TRAIL_SAMPLE_COUNT := 15
 
 var active_by_source_id: Dictionary = {}
+var performance_monitor
 
 
-func begin_side_arc_motion(source_body: Node3D, target: Node3D, target_kind: String, damage: float, variant: String, recipe_seed: int) -> bool:
+func setup(runtime_monitor = null) -> void:
+	performance_monitor = runtime_monitor
+
+
+func begin_side_arc_motion(source_body: Node3D, target: Node3D, target_kind: String, damage: float, variant: String, recipe_seed: int, show_telegraph := false) -> bool:
+	var recipe_started: int = performance_monitor.begin_section("hostile_motion_recipe") if performance_monitor != null else Time.get_ticks_usec()
+	var recipe = MotionRecipeBuilderScript.build_side_arc(recipe_seed)
+	if performance_monitor != null:
+		performance_monitor.end_section("hostile_motion_recipe", recipe_started)
+	return begin_recipe_motion(
+		source_body,
+		target,
+		target_kind,
+		damage,
+		variant,
+		recipe,
+		show_telegraph
+	)
+
+
+func begin_arc_motion(source_body: Node3D, target: Node3D, target_kind: String, damage: float, variant: String, recipe_seed: int, plane_profile := "seeded", show_telegraph := false) -> bool:
+	var recipe_started: int = performance_monitor.begin_section("hostile_motion_recipe") if performance_monitor != null else Time.get_ticks_usec()
+	var recipe = MotionRecipeBuilderScript.build_arc(recipe_seed, {"planeProfile": plane_profile})
+	if performance_monitor != null:
+		performance_monitor.end_section("hostile_motion_recipe", recipe_started)
+	return begin_recipe_motion(
+		source_body,
+		target,
+		target_kind,
+		damage,
+		variant,
+		recipe,
+		show_telegraph
+	)
+
+
+func begin_forward_surge_motion(source_body: Node3D, target: Node3D, target_kind: String, damage: float, variant: String, recipe_seed: int, show_telegraph := false) -> bool:
+	var recipe_started: int = performance_monitor.begin_section("hostile_motion_recipe") if performance_monitor != null else Time.get_ticks_usec()
+	var recipe = MotionRecipeBuilderScript.build_forward_surge(recipe_seed)
+	if performance_monitor != null:
+		performance_monitor.end_section("hostile_motion_recipe", recipe_started)
+	# This is not a special combat path. The generic recipe simply follows its
+	# source while the caller's real CharacterBody3D motor executes movement.
+	return begin_recipe_motion(source_body, target, target_kind, damage, variant, recipe, show_telegraph, true)
+
+
+func begin_recipe_motion(source_body: Node3D, target: Node3D, target_kind: String, damage: float, variant: String, recipe, show_telegraph := false, follow_source := false) -> bool:
 	if source_body == null or target == null or not is_instance_valid(source_body) or not is_instance_valid(target):
 		return false
 	var source_id := source_body.get_instance_id()
 	if active_by_source_id.has(source_id):
 		return false
-	var recipe = MotionRecipeBuilderScript.build_side_arc(recipe_seed)
+	var recipe_seed := int(recipe.seed) if recipe != null else 1
 	var direction := -1.0 if MotionRecipeBuilderScript.hash01(recipe_seed, "side") < 0.5 else 1.0
 	var instance = MotionInstanceScript.new({
-		"instanceId": "hostile_side_arc_%d" % source_id,
+		"instanceId": "hostile_arc_%d" % source_id,
 		"recipe": recipe,
 		"anchorId": "hostile_combat_anchor",
 		"direction": direction
@@ -42,8 +90,23 @@ func begin_side_arc_motion(source_body: Node3D, target: Node3D, target_kind: Str
 	var stack = MotionStackScript.new("hostile_motion_stack_%d" % source_id, [instance])
 	var renderer = MotionAfterimageRendererScript.new()
 	renderer.name = "HostileMotionAfterimage_%d" % source_id
+	# Hostile-source ribbons are telegraphs first: keep the same sampled shape
+	# legible when it traverses through the originating body from the player's
+	# viewpoint. Contact remains exclusively depth-independent physics math.
+	renderer.set_draw_over_depth(true)
 	add_child(renderer)
+	var telegraph = null
+	if show_telegraph:
+		telegraph = MotionTelegraphRendererScript.new()
+		telegraph.name = "HostileMotionTelegraph_%d" % source_id
+		add_child(telegraph)
 	var contact_anchor := hostile_contact_space(source_body, target)
+	# A volume recipe says which shared primitive phase is able to contact. This
+	# keeps forward motion generic: it changes the phase name, not the combat
+	# resolver, damage path, or collision ownership.
+	var active_phases: Array = ["arc"]
+	if recipe != null and String(recipe.primitive_id) == "forward_surge_motion":
+		active_phases = ["surge"]
 	var entry := {
 		"source": source_body,
 		"target": target,
@@ -51,7 +114,7 @@ func begin_side_arc_motion(source_body: Node3D, target: Node3D, target_kind: Str
 		"variant": variant,
 		"damage": maxf(0.0, damage),
 		"recipe": recipe,
-		"volume": MotionVolumeRecipeBuilderScript.build_capsule_segment(recipe_seed),
+		"volume": MotionVolumeRecipeBuilderScript.build_capsule_segment(recipe_seed, {"activePhases": active_phases}),
 		"stack": stack,
 		# Contact and presentation consume the exact same local samples. The
 		# contact anchor preserves physical reach; the presentation adapter keeps
@@ -61,7 +124,9 @@ func begin_side_arc_motion(source_body: Node3D, target: Node3D, target_kind: Str
 		"elapsed": 0.0,
 		"previousVolumes": {},
 		"resolved": false,
-		"renderer": renderer
+		"renderer": renderer,
+		"telegraph": telegraph,
+		"followSource": follow_source
 	}
 	active_by_source_id[source_id] = entry
 	render_entry(entry)
@@ -79,8 +144,20 @@ func cancel_for_body(source_body: Node3D) -> void:
 	finish_entry(source_body.get_instance_id(), false)
 
 
+func clear_transient_state() -> void:
+	for source_id_value in active_by_source_id.keys().duplicate():
+		finish_entry(int(source_id_value), false)
+
+
 func active_motion_count() -> int:
 	return active_by_source_id.size()
+
+
+func summary_for_body(source_body: Node3D) -> Dictionary:
+	if source_body == null or not is_instance_valid(source_body):
+		return {}
+	var entry: Dictionary = active_by_source_id.get(source_body.get_instance_id(), {})
+	return summary_for(entry) if not entry.is_empty() else {}
 
 
 func _physics_process(delta: float) -> void:
@@ -92,9 +169,19 @@ func _physics_process(delta: float) -> void:
 		if source == null or target == null or not is_instance_valid(source) or not is_instance_valid(target):
 			finish_entry(source_id, false)
 			continue
+		if bool(entry.get("followSource", false)):
+			var updated_anchor := hostile_contact_space(source, target)
+			entry["contactAnchor"] = updated_anchor
+			entry["presentationAnchor"] = hostile_presentation_space(updated_anchor, source, target, entry.get("recipe", null))
 		entry["elapsed"] = minf(MOTION_DURATION_SECONDS, float(entry.get("elapsed", 0.0)) + maxf(0.0, delta))
+		var contact_started: int = performance_monitor.begin_section("hostile_motion_contact") if performance_monitor != null else Time.get_ticks_usec()
 		resolve_entry_contact(entry)
+		if performance_monitor != null:
+			performance_monitor.end_section("hostile_motion_contact", contact_started)
+		var render_started: int = performance_monitor.begin_section("hostile_motion_render") if performance_monitor != null else Time.get_ticks_usec()
 		render_entry(entry)
+		if performance_monitor != null:
+			performance_monitor.end_section("hostile_motion_render", render_started)
 		active_by_source_id[source_id] = entry
 		if float(entry.get("elapsed", 0.0)) >= MOTION_DURATION_SECONDS:
 			finish_entry(source_id, true)
@@ -201,6 +288,10 @@ func render_entry(entry: Dictionary) -> void:
 	var anchor: Transform3D = entry.get("presentationAnchor", Transform3D.IDENTITY)
 	var world_trails: Array = MotionSampleSpaceTransformerScript.transform_trails(trails, anchor)
 	renderer.render_trails(world_trails)
+	var telegraph = entry.get("telegraph", null)
+	var source := entry.get("source") as Node3D
+	if telegraph != null and is_instance_valid(telegraph) and telegraph.has_method("render_for"):
+		telegraph.render_for(source, entry.get("recipe", null), normalized_time(entry))
 
 
 func finish_entry(source_id: int, emit_finished: bool) -> void:
@@ -212,6 +303,9 @@ func finish_entry(source_id: int, emit_finished: bool) -> void:
 	if renderer != null and is_instance_valid(renderer):
 		renderer.clear_visuals()
 		renderer.queue_free()
+	var telegraph = entry.get("telegraph", null)
+	if telegraph != null and is_instance_valid(telegraph):
+		telegraph.queue_free()
 	var source := entry.get("source") as Node3D
 	if emit_finished and source != null and is_instance_valid(source):
 		motion_finished.emit(source, summary_for(entry))
@@ -220,9 +314,16 @@ func finish_entry(source_id: int, emit_finished: bool) -> void:
 func summary_for(entry: Dictionary) -> Dictionary:
 	var recipe = entry.get("recipe", null)
 	var volume = entry.get("volume", null)
+	var phase := "inactive"
+	var stack = entry.get("stack", null)
+	if stack != null and stack.has_method("samples_at"):
+		var samples: Array = stack.samples_at(normalized_time(entry))
+		if not samples.is_empty() and samples[0] != null:
+			phase = String(samples[0].phase)
 	return {
 		"active": true,
 		"normalizedTime": normalized_time(entry),
+		"phase": phase,
 		"targetKind": String(entry.get("targetKind", "")),
 		"variant": String(entry.get("variant", "shadow")),
 		"damage": float(entry.get("damage", 0.0)),

@@ -1,6 +1,8 @@
 extends Node3D
 class_name HostileProjectileSystem
 
+const CombatTargetPolicyScript := preload("res://scripts/combat/CombatTargetPolicy.gd")
+
 const CELL := 1.35
 const PROJECTILE_BLOCK_BROAD_PHASE_RADIUS_CELLS := 2
 
@@ -89,9 +91,9 @@ func update_projectiles(delta: float) -> void:
             if is_instance_valid(collider_value):
                 collider = collider_value as Node
             var collider_kind := String(collider.get_meta("kind", "")) if collider != null and collider.has_meta("kind") else ""
-            if collider == player and survival:
+            if collider == player and survival and CombatTargetPolicyScript.can_damage("hostile", "player"):
                 survival.apply_damage(float(projectile_state.get("damage", 8.0)), "Rift bolt", "hostile")
-            elif collider_kind == "npc":
+            elif collider_kind == "npc" and CombatTargetPolicyScript.can_damage("hostile", "npc"):
                 npc_target_hits += 1
                 collider.set_meta("npc_hostile_projectile_hits", int(collider.get_meta("npc_hostile_projectile_hits", 0)) + 1)
                 collider.set_meta("npc_last_hostile_attack", "projectile")

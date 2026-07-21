@@ -108,6 +108,17 @@ func set_bonuses(bonuses: Dictionary) -> void:
 func can_sprint() -> bool:
     return stamina > 8.0 and hunger > 2.0 and health > 0.0
 
+func try_spend_stamina(amount: float, reason := "Exertion") -> bool:
+    var cost := maxf(0.0, amount)
+    if health <= 0.0 or stamina + 0.001 < cost:
+        last_message = "Too exhausted" if health > 0.0 else "You collapsed"
+        changed.emit()
+        return false
+    stamina = maxf(0.0, stamina - cost)
+    last_message = reason
+    changed.emit()
+    return true
+
 func can_use_item(item_id: String) -> bool:
     var spec: Dictionary = catalog.get(item_id, {})
     return float(spec.get("food", 0.0)) != 0.0 or float(spec.get("health", 0.0)) != 0.0 or float(spec.get("stamina", 0.0)) != 0.0 or float(spec.get("warmth", 0.0)) != 0.0 or float(spec.get("ward", 0.0)) != 0.0

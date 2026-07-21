@@ -2,6 +2,7 @@ extends RefCounted
 class_name NpcCombat
 
 const CELL := 1.35
+const CombatTargetPolicyScript := preload("res://scripts/combat/CombatTargetPolicy.gd")
 
 var system
 var hostile_system
@@ -48,7 +49,7 @@ func nearest_hostile(origin: Vector3, radius: float, owner: Node = null, prefer_
     return best_clear if best_clear != null else best
 
 func fire_at_hostile(entry: Dictionary, target: Node3D) -> void:
-    if target == null or hostile_system == null or float(entry.get("cooldown", 0.0)) > 0.0:
+    if target == null or hostile_system == null or float(entry.get("cooldown", 0.0)) > 0.0 or not CombatTargetPolicyScript.can_damage("npc", "hostile"):
         if float(entry.get("cooldown", 0.0)) > 0.0:
             record_shot_debug(entry, "cooldown", target)
         return
@@ -80,7 +81,7 @@ func fire_at_hostile(entry: Dictionary, target: Node3D) -> void:
     system.last_message = "%s fired at a hostile" % String(entry.get("name", "Guard"))
 
 func strike_hostile(entry: Dictionary, target: Node3D) -> void:
-    if target == null or hostile_system == null or float(entry.get("cooldown", 0.0)) > 0.0:
+    if target == null or hostile_system == null or float(entry.get("cooldown", 0.0)) > 0.0 or not CombatTargetPolicyScript.can_damage("npc", "hostile"):
         return
     var body := entry.get("body") as Node3D
     if body == null:

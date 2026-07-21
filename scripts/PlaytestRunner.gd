@@ -4,6 +4,7 @@ const MAIN_SCENE: PackedScene = preload("res://scenes/Main.tscn")
 const ItemCatalogScript := preload("res://scripts/ItemCatalog.gd")
 const InventorySlotButtonScript := preload("res://scripts/InventorySlotButton.gd")
 const NpcRouteStateStoreScript := preload("res://scripts/npc_ai/routing/NpcRouteStateStore.gd")
+const PlaytestSurvivalPolicyScript := preload("res://scripts/testing/PlaytestSurvivalPolicy.gd")
 const CELL := 1.35
 const CHUNK_SIZE := 28
 const WATER_LEVEL := 11.1
@@ -204,6 +205,21 @@ func run() -> void:
     if only_section == "hostile_motion_combat":
         mark_progress("hostile_motion_combat")
         await test_hostile_motion_combat()
+        finish_playtest()
+        return
+    if only_section == "combat_runtime_performance":
+        mark_progress("combat_runtime_performance")
+        await test_combat_runtime_performance()
+        finish_playtest()
+        return
+    if only_section == "player_dodge_combat":
+        mark_progress("player_dodge_combat")
+        await test_player_dodge_combat()
+        finish_playtest()
+        return
+    if only_section == "combat_save_transients":
+        mark_progress("combat_save_transients")
+        await test_combat_save_transients()
         finish_playtest()
         return
     if only_section == "defensive_blocks":
@@ -431,6 +447,35 @@ func wait_process_frames(count: int) -> void:
     for i in range(count):
         await get_tree().process_frame
 
+func combat_fixture_time() -> float:
+    var requested := OS.get_environment("VOXEL_COMBAT_FIXTURE_TIME").strip_edges()
+    if requested == "":
+        return 0.25
+    return clampf(requested.to_float(), 0.0, 1.0)
+
+func combat_fixture_is_night() -> bool:
+    return main != null and main.has_method("clock_day_factor") and float(main.call("clock_day_factor")) < 0.20
+
+func apply_night_combat_fixture_survival_policy(reason: String) -> Dictionary:
+    if not combat_fixture_is_night():
+        return {
+            "required": false,
+            "enabled": false,
+            "reason": "day_fixture"
+        }
+    return PlaytestSurvivalPolicyScript.enable_player_god_mode(main, reason)
+
+func refresh_combat_fixture_presentation() -> Dictionary:
+    if main != null and main.has_method("update_hud"):
+        main.call("update_hud", "", false)
+    var time_value := float(main.get("time_of_day")) if main != null else -1.0
+    var day_factor := float(main.call("clock_day_factor")) if main != null and main.has_method("clock_day_factor") else -1.0
+    return {
+        "timeOfDay": time_value,
+        "dayFactor": day_factor,
+        "night": day_factor >= 0.0 and day_factor < 0.20
+    }
+
 func wait_gameplay_frames(count: int) -> void:
     for i in range(count):
         await get_tree().process_frame
@@ -470,6 +515,12 @@ func dispatch_mouse_button(button_index: int, pressed := true, position := Vecto
         event_position = get_viewport().get_visible_rect().size * 0.5
     event.position = event_position
     event.global_position = event_position
+    get_viewport().push_input(event)
+
+func dispatch_key(keycode: Key, pressed := true) -> void:
+    var event := InputEventKey.new()
+    event.keycode = keycode
+    event.pressed = pressed
     get_viewport().push_input(event)
 
 func control_center(control: Control) -> Vector2:
@@ -4232,7 +4283,7 @@ func test_player_motion_combat() -> void:
         tutorial_system.set("final_night_active", false)
         tutorial_system.set("intro_bed_used", true)
     if main.has_method("update_sky"):
-        main.set("time_of_day", 0.46)
+        main.set("time_of_day", combat_fixture_time())
         main.call("update_sky", 0.0)
     var weather_system = main.get("weather_system")
     if weather_system != null and weather_system.has_method("force_weather"):
@@ -4273,6 +4324,15 @@ func test_player_motion_combat() -> void:
     var expected_damage := float(main.call("melee_damage_for_active_item")) if main.has_method("melee_damage_for_active_item") else 1.0
     dispatch_mouse_button(MOUSE_BUTTON_LEFT, true)
     dispatch_mouse_button(MOUSE_BUTTON_LEFT, false)
+    var player_motion_summary: Dictionary = motion_controller.summary()
+    var player_recipe: Dictionary = player_motion_summary.get("motion", {})
+    var player_parameters: Dictionary = player_recipe.get("parameters", {})
+    var player_profile := String(player_parameters.get("planeProfile", ""))
+    add_result(
+        "player_motion_combat_uses_seeded_generic_arc",
+        String(player_recipe.get("primitiveId", "")) == "arc_motion" and player_profile in ["lateral", "rising", "falling", "overhead"],
+        "primitive %s, profile %s, seed %s" % [String(player_recipe.get("primitiveId", "")), player_profile, str(player_recipe.get("seed", ""))]
+    )
     await wait_physics_frames(4)
     var windup_state: Dictionary = hostile_system.enemy_for_body(fixture)
     var health_after_windup := float(windup_state.get("health", -INF))
@@ -4337,11 +4397,28 @@ func test_hostile_motion_combat() -> void:
         tutorial_system.set("final_night_active", false)
         tutorial_system.set("intro_bed_used", true)
     if main.has_method("update_sky"):
-        main.set("time_of_day", 0.46)
+        main.set("time_of_day", combat_fixture_time())
         main.call("update_sky", 0.0)
+    var safety_policy := apply_night_combat_fixture_survival_policy("hostile_motion_combat_night_safe_observer")
+    if bool(safety_policy.get("required", false)):
+        add_result(
+            "hostile_motion_combat_night_player_god_mode",
+            bool(safety_policy.get("enabled", false)),
+            JSON.stringify(safety_policy)
+        )
+        if not bool(safety_policy.get("enabled", false)):
+            return
     var weather_system = main.get("weather_system")
     if weather_system != null and weather_system.has_method("force_weather"):
         weather_system.call("force_weather", "clear", 0.0, 0.08, player.global_position)
+    var fixture_presentation := refresh_combat_fixture_presentation()
+    var requested_night := combat_fixture_time() >= 0.70 or combat_fixture_time() <= 0.10
+    var fixture_time_valid := bool(fixture_presentation.get("night", false)) if requested_night else float(fixture_presentation.get("dayFactor", -1.0)) > 0.90
+    add_result(
+        "hostile_motion_combat_fixture_time_is_readable",
+        fixture_time_valid,
+        JSON.stringify(fixture_presentation)
+    )
     # The fixture uses the production HostileSystem attack branch and the real
     # player collision body. The world loop/player motor pause only after the
     # arena is published so no unrelated tutorial actor changes the target.
@@ -4369,19 +4446,42 @@ func test_hostile_motion_combat() -> void:
     var health_before := float(survival_system.health)
     hostile_system.update_enemy(enemy, 0.0, 0.70)
     var started: bool = motion_system.is_motion_active(fixture)
-    add_result("hostile_motion_combat_starts_from_production_attack_branch", started, "motion %d, enemy %s" % [motion_system.active_motion_count(), str(enemy)])
+    var motion_summary: Dictionary = motion_system.summary_for_body(fixture) if motion_system.has_method("summary_for_body") else {}
+    var motion_recipe: Dictionary = motion_summary.get("motion", {})
+    var motion_parameters: Dictionary = motion_recipe.get("parameters", {})
+    add_result(
+        "hostile_motion_combat_starts_from_production_attack_branch",
+        started,
+        "motion %d, profile %s, seed %s, enemy %s" % [motion_system.active_motion_count(), String(motion_parameters.get("planeProfile", "")), str(motion_recipe.get("seed", "")), str(enemy)]
+    )
+    add_result(
+        "hostile_motion_combat_uses_seeded_generic_arc",
+        String(motion_recipe.get("primitiveId", "")) == "arc_motion" and String(motion_parameters.get("planeProfile", "")) in ["lateral", "rising", "falling", "overhead"],
+        "primitive %s, profile %s, seed %s" % [String(motion_recipe.get("primitiveId", "")), String(motion_parameters.get("planeProfile", "")), str(motion_recipe.get("seed", ""))]
+    )
     if not started:
         hostile_system.clear()
         return
     await wait_physics_frames(5)
     var health_after_windup := float(survival_system.health)
+    var windup_summary: Dictionary = motion_system.summary_for_body(fixture) if motion_system.has_method("summary_for_body") else {}
     add_result(
         "hostile_motion_combat_windup_is_non_damaging",
         is_equal_approx(health_before, health_after_windup),
         "health %.2f -> %.2f" % [health_before, health_after_windup]
     )
+    var telegraph: Node = motion_system.get_node_or_null("HostileMotionTelegraph_%d" % fixture.get_instance_id())
+    var telegraph_ring: MeshInstance3D = null
+    if telegraph != null:
+        telegraph_ring = telegraph.get_node_or_null("MotionWindupTelegraph") as MeshInstance3D
+    var telegraph_visible := telegraph_ring != null and is_instance_valid(telegraph_ring) and telegraph_ring.visible
+    add_result(
+        "hostile_motion_combat_windup_has_recipe_backed_telegraph",
+        String(windup_summary.get("phase", "")) == "windup" and telegraph_visible and telegraph_ring.mesh != null,
+        "phase %s, telegraph %s, ring %s" % [String(windup_summary.get("phase", "")), str(telegraph != null), str(telegraph_visible)]
+    )
     await capture_hostile_motion_combat_stage("windup", motion_system, fixture)
-    # Capture once the same rendered side arc has begun but before its contact
+    # Capture once the same rendered motion arc has begun but before its contact
     # consequence can obscure the ribbon with hit feedback.
     await wait_physics_frames(8)
     await capture_hostile_motion_combat_stage("active_arc", motion_system, fixture)
@@ -4391,10 +4491,11 @@ func test_hostile_motion_combat() -> void:
     var expected_damage := 8.0 + 0.70 * 4.0
     var one_contact := hostile_motion_combat_contact_events.size() == 1
     var damage_exact := is_equal_approx(float(survival_system.health), health_before - expected_damage)
+    var night_contact_safe := bool(safety_policy.get("required", false)) and bool(safety_policy.get("enabled", false)) and is_equal_approx(float(survival_system.health), health_before)
     add_result(
         "hostile_motion_combat_resolves_one_authoritative_contact",
-        one_contact and damage_exact,
-        "events %d, health %.2f -> %.2f expected %.2f" % [hostile_motion_combat_contact_events.size(), health_before, float(survival_system.health), health_before - expected_damage]
+        one_contact and (night_contact_safe or damage_exact),
+        "events %d, health %.2f -> %.2f expected %.2f, nightSafe %s" % [hostile_motion_combat_contact_events.size(), health_before, float(survival_system.health), health_before - expected_damage, str(night_contact_safe)]
     )
     hostile_system.clear()
 
@@ -4407,6 +4508,283 @@ func _on_hostile_motion_combat_contact_resolved(source_body, target, target_kind
         "variant": variant,
         "resolution": resolution
     })
+
+func test_combat_runtime_performance() -> void:
+    if main == null or player == null:
+        add_result("combat_runtime_performance_dependencies", false, "main/player missing")
+        return
+    var hostile_system = main.get("hostile_system")
+    var hostile_motion = hostile_system.get("hostile_motion_combat") if hostile_system != null else null
+    var player_motion = main.get("player_motion_combat")
+    var monitor = main.get("runtime_perf_monitor")
+    var present: bool = hostile_system != null and hostile_motion != null and player_motion != null and monitor != null \
+        and hostile_motion.has_method("begin_arc_motion") and hostile_motion.has_method("is_motion_active") \
+        and player_motion.has_method("begin_arc_motion") and player_motion.has_method("is_motion_active") \
+        and monitor.has_method("reset") and monitor.has_method("summary")
+    add_result("combat_runtime_performance_dependencies", present, "hostiles %s hostileMotion %s playerMotion %s monitor %s" % [str(hostile_system != null), str(hostile_motion != null), str(player_motion != null), str(monitor != null)])
+    if not present:
+        return
+
+    hostile_system.clear()
+    var source_cell := Vector2i(roundi(player.global_position.x / CELL), roundi(player.global_position.z / CELL))
+    var arena_cell := source_cell + Vector2i(16, 16)
+    reset_player_on_flat_patch(arena_cell, 8)
+    clear_blocks_near_cell(arena_cell, 12)
+    clear_props_near_cell(arena_cell, 12)
+    await settle_streamed_chunks_after_relocation("combat_runtime_performance_arena", 180)
+    await wait_physics_frames(6)
+    var tutorial_system = main.get("tutorial_system")
+    if tutorial_system != null:
+        tutorial_system.set("intro_repair_active", false)
+        tutorial_system.set("final_night_active", false)
+        tutorial_system.set("intro_bed_used", true)
+    if main.has_method("update_sky"):
+        main.set("time_of_day", 0.25)
+        main.call("update_sky", 0.0)
+    var weather_system = main.get("weather_system")
+    if weather_system != null and weather_system.has_method("force_weather"):
+        weather_system.call("force_weather", "clear", 0.0, 0.08, player.global_position)
+    refresh_combat_fixture_presentation()
+    var safety_policy := PlaytestSurvivalPolicyScript.enable_player_god_mode(main, "combat_runtime_performance_observer")
+    add_result("combat_runtime_performance_player_god_mode", bool(safety_policy.get("enabled", false)), JSON.stringify(safety_policy))
+    if not bool(safety_policy.get("enabled", false)):
+        return
+
+    var sources: Array[Dictionary] = []
+    var radius := 1.86
+    for index in range(4):
+        var angle := TAU * float(index) / 4.0
+        var position := player.global_position + Vector3(cos(angle) * radius, 0.0, sin(angle) * radius)
+        position.y = player.global_position.y
+        var body: StaticBody3D = hostile_system.spawn_enemy(position, "shadow")
+        if body != null and is_instance_valid(body):
+            sources.append({"body": body, "seed": 1720003 + index * 4099, "starts": 0})
+    add_result("combat_runtime_performance_fixture_spawned", sources.size() == 4, "sources %d" % sources.size())
+    if sources.size() != 4:
+        hostile_system.clear()
+        return
+
+    monitor.reset()
+    var peak_active := 0
+    var player_starts := 0
+    var hostile_starts := 0
+    for frame in range(360):
+        for source in sources:
+            var body := source.get("body") as Node3D
+            if body == null or not is_instance_valid(body):
+                continue
+            if not hostile_motion.is_motion_active(body):
+                var starts := int(source.get("starts", 0))
+                var profile: String = ["lateral", "rising", "falling", "overhead"][starts % 4]
+                if hostile_motion.begin_arc_motion(body, player, "player", 8.0, "shadow", int(source.get("seed", 0)) + starts * 8191, profile, true):
+                    source["starts"] = starts + 1
+                    hostile_starts += 1
+        if not player_motion.is_motion_active():
+            if player_motion.begin_arc_motion(0.0, "seeded"):
+                player_starts += 1
+        await get_tree().process_frame
+        peak_active = maxi(peak_active, int(hostile_motion.active_motion_count()))
+
+    var summary: Dictionary = monitor.summary()
+    var section_max: Dictionary = summary.get("sectionMaxMs", {})
+    var required_sections := ["hostile_motion_recipe", "hostile_motion_contact", "hostile_motion_render", "player_motion_recipe", "player_motion_contact", "player_motion_render", "hostiles", "hud_status_panels"]
+    var observed_sections := true
+    for section_name in required_sections:
+        if not section_max.has(section_name):
+            observed_sections = false
+            break
+    var frame_p95 := float(summary.get("frameP95Ms", 0.0))
+    var frame_max := float(summary.get("frameMaxMs", 0.0))
+    add_result(
+        "combat_runtime_performance_profiled_shared_pipeline",
+        peak_active >= 4 and hostile_starts >= 8 and player_starts >= 4 and observed_sections and frame_p95 <= 33.0,
+        "active %d, hostileStarts %d, playerStarts %d, p95 %.2fms, max %.2fms, sectionMax %s" % [peak_active, hostile_starts, player_starts, frame_p95, frame_max, JSON.stringify(section_max)]
+    )
+    hostile_system.clear()
+    if player_motion.has_method("clear_transient_state"):
+        player_motion.clear_transient_state()
+
+
+func test_player_dodge_combat() -> void:
+    if main == null or player == null or camera == null:
+        add_result("player_dodge_combat_dependencies", false, "main/player/camera missing")
+        return
+    var hostile_system = main.get("hostile_system")
+    var survival_system = main.get("survival_system")
+    var motion_system = hostile_system.get("hostile_motion_combat") if hostile_system != null else null
+    var present := hostile_system != null and survival_system != null and motion_system != null \
+        and player.has_method("dodge_summary") and player.has_method("request_dodge")
+    add_result("player_dodge_combat_dependencies", present, "hostiles %s, survival %s, motion %s, dodge %s" % [str(hostile_system != null), str(survival_system != null), str(motion_system != null), str(player.has_method("dodge_summary"))])
+    if not present:
+        return
+
+    hostile_system.clear()
+    hostile_motion_combat_contact_events.clear()
+    var source_cell := Vector2i(roundi(player.global_position.x / CELL), roundi(player.global_position.z / CELL))
+    var candidate = main.call("find_biome_playtest_cell", ["plains", "savanna"], 6.0, 54.0, true) if main.has_method("find_biome_playtest_cell") else source_cell + Vector2i(20, 20)
+    var arena_cell := source_cell + Vector2i(20, 20)
+    if candidate is Vector2i and abs(candidate.x) < 900000:
+        arena_cell = candidate
+    reset_player_on_flat_patch(arena_cell, 8)
+    clear_blocks_near_cell(arena_cell, 12)
+    clear_props_near_cell(arena_cell, 12)
+    await settle_streamed_chunks_after_relocation("player_dodge_combat_arena", 180)
+    await wait_physics_frames(6)
+    var hud = main.get("hud")
+    if hud != null and hud.has_method("set_inventory_open"):
+        hud.call("set_inventory_open", false)
+    if main.has_method("update_sky"):
+        main.set("time_of_day", combat_fixture_time())
+        main.call("update_sky", 0.0)
+    var safety_policy := apply_night_combat_fixture_survival_policy("player_dodge_combat_night_safe_observer")
+    if bool(safety_policy.get("required", false)):
+        add_result(
+            "player_dodge_combat_night_player_god_mode",
+            bool(safety_policy.get("enabled", false)),
+            JSON.stringify(safety_policy)
+        )
+        if not bool(safety_policy.get("enabled", false)):
+            return
+    main.set_process(false)
+    player.set("automated_input", false)
+    player.set_physics_process(true)
+    player.velocity = Vector3.ZERO
+    var callback := Callable(self, "_on_hostile_motion_combat_contact_resolved")
+    if not motion_system.is_connected("motion_contact_resolved", callback):
+        motion_system.motion_contact_resolved.connect(callback)
+    var forward := -player.global_transform.basis.z
+    forward.y = 0.0
+    forward = forward.normalized() if forward.length_squared() > 0.0001 else Vector3.FORWARD
+    var fixture_position := player.global_position + forward * 1.72
+    fixture_position.y = player.global_position.y
+    var fixture: StaticBody3D = hostile_system.spawn_enemy(fixture_position, "shadow")
+    add_result("player_dodge_combat_fixture_spawned", fixture != null and is_instance_valid(fixture), "position %s" % str(fixture_position))
+    if fixture == null or not is_instance_valid(fixture):
+        player.set("automated_input", true)
+        return
+    var escape_direction := player.global_position - fixture.global_position
+    escape_direction.y = 0.0
+    if escape_direction.length_squared() > 0.0001:
+        # Default dodge direction is the actual player body's forward axis.
+        # Face it away from the stationary threat before driving the same C
+        # key a player uses, rather than injecting a test-only escape vector.
+        player.look_at(player.global_position + escape_direction, Vector3.UP)
+    camera.look_at(fixture.global_position + Vector3.UP * 0.82, Vector3.UP)
+    camera.current = true
+    var enemy: Dictionary = hostile_system.enemy_for_body(fixture)
+    enemy["aware"] = true
+    enemy["daylightImmune"] = true
+    enemy["cooldown"] = 0.0
+    enemy["canAttack"] = true
+    var health_before := float(survival_system.health)
+    var stamina_before := float(survival_system.stamina)
+    var position_before := player.global_position
+    hostile_system.update_enemy(enemy, 0.0, 0.70)
+    var hostile_started: bool = motion_system.is_motion_active(fixture)
+    dispatch_key(KEY_C, true)
+    await wait_physics_frames(1)
+    dispatch_key(KEY_C, false)
+    # Sample after the active travel window but before the recovery cooldown
+    # ends, so this proves the real controller cannot chain dodges.
+    await wait_physics_frames(20)
+    var cooldown_blocked := not bool(player.call("request_dodge", forward)) and String(player.call("dodge_summary").get("lastReason", "")) == "cooldown"
+    await wait_physics_frames(14)
+    var dodge_state: Dictionary = player.call("dodge_summary")
+    var dodge_distance := player.global_position.distance_to(position_before)
+    var primary_dodge := hostile_started \
+        and int(dodge_state.get("serial", 0)) == 1 \
+        and hostile_motion_combat_contact_events.is_empty() \
+        and is_equal_approx(float(survival_system.health), health_before) \
+        and is_equal_approx(float(survival_system.stamina), stamina_before - float(dodge_state.get("staminaCost", 0.0))) \
+        and dodge_distance >= 4.0
+    add_result(
+        "player_dodge_combat_real_key_input_clears_live_hostile_motion",
+        primary_dodge,
+        "started %s, contacts %d, health %.1f->%.1f, stamina %.1f->%.1f, distance %.2f, dodge %s" % [str(hostile_started), hostile_motion_combat_contact_events.size(), health_before, float(survival_system.health), stamina_before, float(survival_system.stamina), dodge_distance, str(dodge_state)]
+    )
+    await wait_physics_frames(42)
+    survival_system.stamina = 0.0
+    var exhausted_blocked := not bool(player.call("request_dodge", forward)) and String(player.call("dodge_summary").get("lastReason", "")) == "insufficient_stamina"
+    add_result(
+        "player_dodge_combat_cooldown_and_exhaustion_fail_safely",
+        cooldown_blocked and exhausted_blocked,
+        "cooldown %s, exhausted %s, state %s" % [str(cooldown_blocked), str(exhausted_blocked), str(player.call("dodge_summary"))]
+    )
+    survival_system.stamina = stamina_before
+    player.set("automated_input", true)
+    hostile_system.clear()
+
+
+func test_combat_save_transients() -> void:
+    if main == null or player == null:
+        add_result("combat_save_transients_dependencies", false, "main/player missing")
+        return
+    var hostile_system = main.get("hostile_system")
+    var player_motion = main.get("player_motion_combat")
+    var player_projectiles = main.get("player_projectiles")
+    var npc_system = main.get("npc_system")
+    var hostile_projectiles = hostile_system.get("projectile_system") if hostile_system != null else null
+    var hostile_motion = hostile_system.get("hostile_motion_combat") if hostile_system != null else null
+    var npc_combat = npc_system.get("combat") if npc_system != null else null
+    var present := hostile_system != null and player_motion != null and player_projectiles != null and hostile_projectiles != null and hostile_motion != null
+    add_result("combat_save_transients_dependencies", present, "hostiles %s, playerMotion %s, playerProjectiles %s, hostileProjectiles %s, hostileMotion %s" % [str(hostile_system != null), str(player_motion != null), str(player_projectiles != null), str(hostile_projectiles != null), str(hostile_motion != null)])
+    if not present:
+        return
+
+    hostile_system.clear()
+    var source_cell := Vector2i(roundi(player.global_position.x / CELL), roundi(player.global_position.z / CELL))
+    reset_player_on_flat_patch(source_cell + Vector2i(24, 24), 8)
+    await settle_streamed_chunks_after_relocation("combat_save_transients_arena", 180)
+    await wait_physics_frames(4)
+    var forward := -player.global_transform.basis.z
+    forward.y = 0.0
+    forward = forward.normalized() if forward.length_squared() > 0.0001 else Vector3.FORWARD
+    var enemy_position := player.global_position + forward * 1.72
+    enemy_position.y = player.global_position.y
+    var enemy: StaticBody3D = hostile_system.spawn_enemy(enemy_position, "shadow")
+    if enemy == null or not is_instance_valid(enemy):
+        add_result("combat_save_transients_fixture", false, "hostile spawn failed")
+        return
+    var enemy_state: Dictionary = hostile_system.enemy_for_body(enemy)
+    enemy_state["aware"] = true
+    enemy_state["daylightImmune"] = true
+    enemy_state["cooldown"] = 0.0
+    enemy_state["canAttack"] = true
+    hostile_system.update_enemy(enemy_state, 0.0, 0.70)
+    var hostile_motion_started: bool = bool(hostile_motion.is_motion_active(enemy))
+    var player_motion_started := bool(player_motion.begin_arc_motion(7.0))
+    player_projectiles.spawn_tracer(player.global_position + Vector3.UP, player.global_position + Vector3.UP + forward * 2.0)
+    hostile_projectiles.spawn_projectile(enemy.global_position + Vector3.UP * 0.8, player.global_position + Vector3.UP * 0.8, 1.0, enemy, player, "player")
+    if npc_combat != null and npc_combat.has_method("spawn_tracer"):
+        npc_combat.spawn_tracer(player.global_position + Vector3.UP * 1.2, player.global_position + Vector3.UP * 1.2 + forward * 2.0)
+    player.set("automated_input", false)
+    var dodge_started := bool(player.request_dodge(-forward))
+    player.set("automated_input", true)
+    var pre_snapshot_transients := {
+        "hostileMotion": hostile_motion.active_motion_count(),
+        "playerMotion": player_motion.is_motion_active(),
+        "playerTracers": int(player_projectiles.stats().get("projectiles", 0)),
+        "hostileProjectiles": int(hostile_projectiles.stats().get("projectiles", 0)),
+        "npcTracers": (npc_combat.get("tracers") as Array).size() if npc_combat != null else 0,
+        "dodge": player.dodge_summary()
+    }
+    var snapshot: Dictionary = main.create_save_snapshot()
+    var snapshot_is_durable_only := not snapshot.has("combat") and not snapshot.has("projectiles") and not snapshot.has("motions") and not snapshot.has("dodge")
+    var restored := bool(main.apply_save_snapshot(snapshot))
+    await wait_process_frames(2)
+    var post_restore_clear: bool = hostile_motion.active_motion_count() == 0 \
+        and not bool(player_motion.is_motion_active()) \
+        and int(player_projectiles.stats().get("projectiles", -1)) == 0 \
+        and int(hostile_projectiles.stats().get("projectiles", -1)) == 0 \
+        and ((npc_combat.get("tracers") as Array).is_empty() if npc_combat != null else true) \
+        and not bool(player.dodge_summary().get("active", true)) \
+        and float(player.dodge_summary().get("cooldown", 1.0)) <= 0.0
+    add_result(
+        "combat_save_restore_excludes_and_clears_transient_runtime_state",
+        hostile_motion_started and player_motion_started and dodge_started and snapshot_is_durable_only and restored and post_restore_clear,
+        "pre %s, durableOnly %s, restored %s, post hostileMotion %d playerMotion %s playerTracers %d hostileProjectiles %d dodge %s" % [str(pre_snapshot_transients), str(snapshot_is_durable_only), str(restored), hostile_motion.active_motion_count(), str(player_motion.is_motion_active()), int(player_projectiles.stats().get("projectiles", -1)), int(hostile_projectiles.stats().get("projectiles", -1)), str(player.dodge_summary())]
+    )
+    hostile_system.clear()
 
 func capture_hostile_motion_combat_stage(stage: String, motion_system, fixture: Node3D) -> void:
     var directory := OS.get_environment("VOXEL_HOSTILE_MOTION_COMBAT_CAPTURE_DIR").strip_edges()
@@ -4508,10 +4886,22 @@ func test_hostile_system() -> void:
     )
     hostile_system.clear()
     hostile_system.spawn_cooldown = 999.0
+    # This is a generic hostile-behavior fixture, not the tutorial's protected
+    # opening. Disable only scenario-owned hostile suppression so collision and
+    # natural-roam assertions exercise ordinary world behavior.
+    var hostile_test_tutorial = main.get("tutorial_system")
+    if hostile_test_tutorial != null:
+        hostile_test_tutorial.set("intro_repair_active", false)
+        hostile_test_tutorial.set("final_night_active", false)
+        hostile_test_tutorial.set("intro_bed_used", true)
     var restore_position: Vector3 = player.global_position
     var restore_velocity: Vector3 = player.velocity
     var hostile_cell := Vector2i(roundi(restore_position.x / CELL) + 96, roundi(restore_position.z / CELL) + 96)
-    reset_player_on_flat_patch(hostile_cell)
+    # The chase source begins 12 world units from the player. Keep the whole
+    # source-to-target corridor inside the controlled terrain patch; the old
+    # five-cell pad left the source on arbitrary sloped terrain and could
+    # falsely report an intended slope/collision rejection as a chase failure.
+    reset_player_on_flat_patch(hostile_cell, 16)
     clear_blocks_near_cell(hostile_cell, 16)
     clear_props_near_cell(hostile_cell, 16)
     await settle_streamed_chunks_after_relocation("hostile_chunks")
@@ -4661,11 +5051,31 @@ func test_hostile_system() -> void:
         natural_start = natural_enemy.global_position
         var natural_state: Dictionary = hostile_system.enemy_for_body(natural_enemy)
         natural_aware = bool(natural_state.get("aware", true))
+    # `spawn_near_player` intentionally chooses a distant arbitrary valid cell.
+    # Its spacing contract must not also assume that several subsequent roam
+    # steps are flat. Exercise that shared natural-roam state on the already
+    # controlled flat corridor instead, keeping the movement threshold intact.
+    hostile_system.clear()
+    player.global_position = original_position
+    player.velocity = Vector3.ZERO
+    var natural_roamer_position := original_position + Vector3(CELL * 7.0, 0.0, 0.0)
+    natural_roamer_position.y = surface_y_at_position(natural_roamer_position) + 0.72
+    var natural_roamer: StaticBody3D = hostile_system.spawn_enemy(natural_roamer_position, "shadow")
+    var natural_roamer_state: Dictionary = hostile_system.enemy_for_body(natural_roamer)
+    if not natural_roamer_state.is_empty():
+        natural_roamer_state["naturalSpawn"] = true
+        natural_roamer_state["aware"] = false
+        natural_roamer_state["awarenessDelay"] = 10.0
+        natural_roamer_state["roamDirection"] = Vector3(1.0, 0.0, 0.0)
+        natural_roamer_state["roamTimer"] = 2.0
+    var natural_roam_distance := 0.0
     for i in range(10):
         hostile_system.update_hostiles(0.12, 0.0, "plains")
-    var natural_roam_distance := 0.0
-    if natural_enemy and is_instance_valid(natural_enemy):
-        natural_roam_distance = natural_enemy.global_position.distance_to(natural_start)
+        var updated_roamer: Dictionary = hostile_system.enemy_for_body(natural_roamer)
+        # `lastMoveDistance` is the value returned by the shared collision-aware
+        # horizontal movement authority. Sum it rather than deriving motion from
+        # a pooled body transform while terrain publication reconciles height.
+        natural_roam_distance += float(updated_roamer.get("lastMoveDistance", 0.0))
     var reduced_awareness: bool = hostile_system.awareness_radius({ "variant": "shadow" }) <= 26.0 and hostile_system.awareness_radius({ "variant": "seer" }) <= 32.0
     add_result(
         "hostile_natural_spawn_spacing",
@@ -4680,10 +5090,12 @@ func test_hostile_system() -> void:
     )
     add_result(
         "hostile_natural_roaming",
-        natural_enemy != null and natural_roam_distance > 0.08,
-        "spawned %s, roam %.2f, aware %s" % [str(natural_enemy != null), natural_roam_distance, str(natural_aware)]
+        natural_roamer != null and natural_roam_distance > 0.08,
+        "spawned %s, roam %.2f, actualSpawnAware %s" % [str(natural_roamer != null), natural_roam_distance, str(natural_aware)]
     )
     hostile_system.clear()
+    player.global_position = restore_position
+    player.velocity = restore_velocity
 
 func test_rift_hostile_system() -> void:
     if not main or not player:

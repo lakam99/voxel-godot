@@ -4,6 +4,7 @@ const CharacterMotor3DScript := preload("res://scripts/npc_ai/motor/CharacterMot
 const CharacterMotorCommandScript := preload("res://scripts/npc_ai/contracts/CharacterMotorCommand.gd")
 const CharacterMotorProfileScript := preload("res://scripts/npc_ai/contracts/CharacterMotorProfile.gd")
 const NpcConstantsScript := preload("res://scripts/npc_ai/NpcConstants.gd")
+const PlayerDefenseControllerScript := preload("res://scripts/combat/runtime/PlayerDefenseController.gd")
 
 const WALK_SPEED := 9.5
 const SPRINT_SPEED := 15.5
@@ -48,6 +49,9 @@ var character_motor = CharacterMotor3DScript.new()
 var motor_profile = CharacterMotorProfileScript.player_default()
 var terrain_collision_hold_frames := 0
 var last_terrain_collision_proof := {}
+var player_defense = PlayerDefenseControllerScript.new()
+var dodge_input_was_pressed := false
+var last_movement_wish := Vector3.ZERO
 
 func _ready() -> void:
     set_physics_process(true)
@@ -93,8 +97,27 @@ func apply_camera_settings(settings: Dictionary) -> void:
     if camera:
         camera.fov = clampf(float(settings.get("fov", 72.0)), 58.0, 104.0)
 
+func _unhandled_input(event: InputEvent) -> void:
+    if automated_input or not (event is InputEventKey):
+        return
+    var key_event := event as InputEventKey
+    if key_event.keycode != KEY_C:
+        return
+    if not key_event.pressed:
+        dodge_input_was_pressed = false
+        return
+    if key_event.echo or dodge_input_was_pressed or not defense_input_available():
+        return
+    dodge_input_was_pressed = true
+    var requested_direction := last_movement_wish
+    if requested_direction.length_squared() <= 0.0001:
+        requested_direction = -global_transform.basis.z
+        requested_direction.y = 0.0
+    request_dodge(requested_direction)
+
 func _physics_process(delta: float) -> void:
     physics_ticks += 1
+    player_defense.advance(delta)
     var forward := -global_transform.basis.z
     forward.y = 0.0
     forward = forward.normalized()
@@ -116,16 +139,30 @@ func _physics_process(delta: float) -> void:
             wish -= right
     if wish.length_squared() > 0.001:
         wish = wish.normalized()
+    last_movement_wish = wish
+
+    var dodge_pressed := not automated_input and Input.is_key_pressed(KEY_C)
+    if dodge_pressed and not dodge_input_was_pressed and defense_input_available():
+        request_dodge(wish if wish.length_squared() > 0.0001 else -forward)
+    dodge_input_was_pressed = dodge_pressed
 
     var sprinting := automated_sprint if automated_input else Input.is_key_pressed(KEY_SHIFT)
     if sprinting and survival != null and survival.has_method("can_sprint"):
         sprinting = survival.can_sprint()
-    is_moving = wish.length_squared() > 0.001
-    is_sprinting = sprinting and is_moving
-    var speed := SPRINT_SPEED if sprinting else WALK_SPEED
-    var jumping := automated_jump if automated_input else Input.is_key_pressed(KEY_SPACE)
+    var dodging := player_defense.is_active()
+    var movement_direction: Vector3 = player_defense.direction if dodging else wish
+    is_moving = movement_direction.length_squared() > 0.001
+    is_sprinting = sprinting and is_moving and not dodging
+    var speed := PlayerDefenseControllerScript.DODGE_SPEED if dodging else (SPRINT_SPEED if sprinting else WALK_SPEED)
+    # A dodge has a short, deliberate travel window. Keep the shared motor and
+    # its collision/terrain authority, but seed it with the requested evade
+    # velocity so ordinary walking acceleration cannot consume the window.
+    if dodging:
+        velocity.x = movement_direction.x * speed
+        velocity.z = movement_direction.z * speed
+    var jumping := (automated_jump if automated_input else Input.is_key_pressed(KEY_SPACE)) and not dodging
     if main != null and main.has_method("terrain_collision_motion_proof"):
-        var predicted_position := global_position + wish * speed * delta
+        var predicted_position := global_position + movement_direction * speed * delta
         var collision_proof: Dictionary = main.call("terrain_collision_motion_proof", global_position, predicted_position, 0.42)
         last_terrain_collision_proof = collision_proof
         if not bool(collision_proof.get("passed", false)):
@@ -140,7 +177,7 @@ func _physics_process(delta: float) -> void:
             return
     set_meta("terrain_collision_hold", false)
     set_meta("terrain_collision_hold_reason", "")
-    var command = CharacterMotorCommandScript.from_direction(wish, speed, jumping, sprinting)
+    var command = CharacterMotorCommandScript.from_direction(movement_direction, speed, jumping, is_sprinting)
     command.terrain_grounded = terrain_grounded
     command.grounded_hint = is_on_floor()
     command.jump_snap_time = jump_snap_time
@@ -155,6 +192,44 @@ func _physics_process(delta: float) -> void:
     if bool(motor_state.get("airborne_obstacle_blocked")):
         airborne_obstacle_blocks += 1
     update_camera_feel(delta)
+
+func defense_input_available() -> bool:
+    if survival == null or float(survival.get("health")) <= 0.0:
+        return false
+    if main == null:
+        return true
+    var active_hud = main.get("hud")
+    if active_hud == null or not is_instance_valid(active_hud):
+        return true
+    return not (
+        (active_hud.has_method("is_inventory_open") and bool(active_hud.call("is_inventory_open")))
+        or (active_hud.has_method("is_game_menu_open") and bool(active_hud.call("is_game_menu_open")))
+        or (active_hud.has_method("is_dialogue_open") and bool(active_hud.call("is_dialogue_open")))
+    )
+
+func request_dodge(requested_direction: Vector3) -> bool:
+    if not defense_input_available():
+        return false
+    var can_enter := true
+    if main != null and main.has_method("terrain_collision_motion_proof"):
+        var direction := requested_direction.normalized()
+        var predicted_position := global_position + direction * PlayerDefenseControllerScript.DODGE_SPEED * PlayerDefenseControllerScript.DODGE_DURATION_SECONDS
+        var proof: Dictionary = main.call("terrain_collision_motion_proof", global_position, predicted_position, 0.42)
+        last_terrain_collision_proof = proof
+        can_enter = bool(proof.get("passed", false))
+    var started: bool = player_defense.request(survival, requested_direction, can_enter)
+    if main != null and main.has_method("show_action_message"):
+        main.call("show_action_message", "Dodge" if started else ("Too exhausted" if player_defense.last_reason == "insufficient_stamina" else "Dodge unavailable"))
+    return started
+
+func dodge_summary() -> Dictionary:
+    return player_defense.summary()
+
+func clear_combat_transients() -> void:
+    dodge_input_was_pressed = false
+    last_movement_wish = Vector3.ZERO
+    if player_defense != null and player_defense.has_method("clear_transient_state"):
+        player_defense.clear_transient_state()
 
 func update_camera_feel(delta: float) -> void:
     if camera == null:

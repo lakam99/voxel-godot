@@ -78,9 +78,9 @@ func play_melee_miss() -> void:
         held_item.play_use("strike")
 
 func begin_player_melee_motion() -> bool:
-    if player_motion_combat == null or not player_motion_combat.has_method("begin_side_arc_motion"):
+    if player_motion_combat == null or not player_motion_combat.has_method("begin_arc_motion"):
         return false
-    var started: bool = player_motion_combat.begin_side_arc_motion(melee_damage_for_active_item())
+    var started: bool = player_motion_combat.begin_arc_motion(melee_damage_for_active_item())
     if started and held_item:
         held_item.play_use("strike")
     return started

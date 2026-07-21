@@ -6,6 +6,7 @@ class_name MotionArenaOpponentCatalog
 ## authority for an opponent's presentation and physical contact shape.
 
 const HostileVisualFactoryScript := preload("res://scripts/HostileVisualFactory.gd")
+const HostileBehaviorProfileCatalogScript := preload("res://scripts/combat/hostile/HostileBehaviorProfileCatalog.gd")
 
 const DEFAULT_OPPONENT_ID := "hostile.shadow"
 const HOSTILE_VARIANTS: Array[String] = ["shadow", "frost", "seer", "rift", "skitter"]
@@ -13,6 +14,17 @@ const HOSTILE_VARIANTS: Array[String] = ["shadow", "frost", "seer", "rift", "ski
 
 static func definition_for(opponent_id: String) -> Dictionary:
 	var normalized := opponent_id.strip_edges().to_lower()
+	var profile = HostileBehaviorProfileCatalogScript.profile_for(normalized)
+	if profile != null:
+		return {
+			"id": profile.id,
+			"family": "authored_hostile",
+			"variant": profile.visual_variant,
+			"displayName": profile.display_name,
+			"motionVariant": profile.visual_variant,
+			"testDamage": profile.motion_damage,
+			"behaviorProfile": profile
+		}
 	if not normalized.begins_with("hostile."):
 		normalized = DEFAULT_OPPONENT_ID
 	var variant := normalized.trim_prefix("hostile.")
@@ -28,12 +40,12 @@ static func definition_for(opponent_id: String) -> Dictionary:
 	}
 
 
-static func instantiate_static_opponent(definition: Dictionary) -> Dictionary:
+static func instantiate_opponent(definition: Dictionary) -> Dictionary:
 	var family := String(definition.get("family", ""))
-	if family != "hostile":
+	if family not in ["hostile", "authored_hostile"]:
 		return {}
 	var variant := String(definition.get("variant", "shadow"))
-	var body := StaticBody3D.new()
+	var body: Node3D = CharacterBody3D.new() if family == "authored_hostile" else StaticBody3D.new()
 	body.name = "MotionArenaOpponent_%s" % variant
 	var visual_factory = HostileVisualFactoryScript.new()
 	var spec: Dictionary = visual_factory.build_visual(body, variant)
@@ -49,8 +61,16 @@ static func instantiate_static_opponent(definition: Dictionary) -> Dictionary:
 	}
 
 
+static func instantiate_static_opponent(definition: Dictionary) -> Dictionary:
+	# Kept for focused callers that explicitly require the original stationary
+	# fixture. The general arena entry point above is now the authority.
+	return instantiate_opponent(definition)
+
+
 static func hostile_display_name(variant: String) -> String:
 	match variant:
+		"wolf":
+			return "Ash Wolf"
 		"frost":
 			return "Frost Stalker"
 		"seer":

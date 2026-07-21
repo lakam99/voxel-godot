@@ -3,15 +3,21 @@ param(
     [string]$ReportPath = "",
     [string]$ScreenshotPath = "",
     [string]$Seed = "atlas-1492",
+    [double]$CombatFixtureTime = -1.0,
+    [string]$HostileMotionCaptureDir = "",
     [int]$TimeoutSeconds = 1800,
     [int]$StartupProgressSeconds = 120,
     [int]$StaleProgressSeconds = 300,
-    [ValidateSet("", "scene_bootstrap", "inventory_and_crafting", "hostiles", "player_motion_combat", "hostile_motion_combat", "defensive_blocks", "structures", "movement", "navigation_map", "chunk_detail_batches", "mining_requirements", "mouse_interaction", "settings_debug", "generated_prop_visuals", "tutorial_start", "tutorial_runtime_reset")]
+    [ValidateSet("", "scene_bootstrap", "inventory_and_crafting", "hostiles", "player_motion_combat", "hostile_motion_combat", "combat_runtime_performance", "player_dodge_combat", "combat_save_transients", "defensive_blocks", "structures", "movement", "navigation_map", "chunk_detail_batches", "mining_requirements", "mouse_interaction", "settings_debug", "generated_prop_visuals", "tutorial_start", "tutorial_runtime_reset")]
     [string]$Only = "",
     [switch]$Visible
 )
 
 $ErrorActionPreference = "Stop"
+
+if ($CombatFixtureTime -gt 1.0) {
+    throw "CombatFixtureTime must be between 0.0 and 1.0, or -1.0 to use the fixture default."
+}
 
 $projectPath = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 if ($ReportPath -eq "") {
@@ -32,6 +38,16 @@ if ($Only -ne "") {
     $env:VOXEL_PLAYTEST_ONLY = $Only
 } else {
     Remove-Item Env:\VOXEL_PLAYTEST_ONLY -ErrorAction SilentlyContinue
+}
+if ($CombatFixtureTime -ge 0.0) {
+    $env:VOXEL_COMBAT_FIXTURE_TIME = $CombatFixtureTime.ToString([Globalization.CultureInfo]::InvariantCulture)
+} else {
+    Remove-Item Env:\VOXEL_COMBAT_FIXTURE_TIME -ErrorAction SilentlyContinue
+}
+if ($HostileMotionCaptureDir -ne "") {
+    $env:VOXEL_HOSTILE_MOTION_COMBAT_CAPTURE_DIR = [System.IO.Path]::GetFullPath((Join-Path $projectPath $HostileMotionCaptureDir))
+} else {
+    Remove-Item Env:\VOXEL_HOSTILE_MOTION_COMBAT_CAPTURE_DIR -ErrorAction SilentlyContinue
 }
 if ($ScreenshotPath -ne "") {
     $env:VOXEL_PLAYTEST_SCREENSHOT = $ScreenshotPath

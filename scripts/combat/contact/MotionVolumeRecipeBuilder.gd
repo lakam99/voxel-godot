@@ -9,7 +9,10 @@ const MotionVolumeRecipeScript := preload("res://scripts/combat/contact/MotionVo
 
 static func build_capsule_segment(seed: int, overrides: Dictionary = {}) -> MotionVolumeRecipe:
 	var parameters := {
-		"radius": lerpf(0.18, 0.31, MotionRecipeBuilderScript.hash01(seed, "volume_radius")),
+		# The swept capsule must cover the same standard actor corridor as the
+		# visible ribbon. The former 0.18m lower bound allowed otherwise valid
+		# seeded arcs to skim a real player capsule by only a few centimetres.
+		"radius": lerpf(0.45, 0.54, MotionRecipeBuilderScript.hash01(seed, "volume_radius")),
 		"spanStart": lerpf(0.34, 0.49, MotionRecipeBuilderScript.hash01(seed, "volume_start")),
 		"spanEnd": lerpf(0.88, 1.0, MotionRecipeBuilderScript.hash01(seed, "volume_end")),
 		"activePhases": ["arc"]

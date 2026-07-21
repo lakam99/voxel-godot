@@ -5,6 +5,7 @@ const HostileProjectileSystemScript := preload("res://scripts/HostileProjectileS
 const HostileRulesScript := preload("res://scripts/HostileRules.gd")
 const HostileVisualFactoryScript := preload("res://scripts/HostileVisualFactory.gd")
 const HostileMotionCombatSystemScript := preload("res://scripts/combat/runtime/HostileMotionCombatSystem.gd")
+const CombatTargetPolicyScript := preload("res://scripts/combat/CombatTargetPolicy.gd")
 const CELL := 1.35
 const HOSTILE_SPACING_RADIUS := CELL * 0.95
 const HOSTILE_RIFT_SPACING_RADIUS := CELL * 1.25
@@ -63,6 +64,7 @@ func setup(main_node, player_node: CharacterBody3D, survival_system, inventory_s
     hostile_motion_combat.name = "HostileMotionCombat"
     hostile_motion_combat.motion_contact_resolved.connect(_on_hostile_motion_contact_resolved)
     add_child(hostile_motion_combat)
+    hostile_motion_combat.setup(main.get("runtime_perf_monitor") if main != null else null)
 
 func prewarm_visuals_staged() -> Dictionary:
     if visual_factory == null or not is_inside_tree():
@@ -152,6 +154,14 @@ func clear() -> void:
                 body.queue_free()
     enemies.clear()
     if projectile_system:
+        projectile_system.clear()
+
+func clear_combat_transients() -> void:
+    # Enemies themselves remain owned by hostile lifecycle/world state. Only
+    # active motion and projectile windows are transient across save restore.
+    if hostile_motion_combat != null and hostile_motion_combat.has_method("clear_transient_state"):
+        hostile_motion_combat.clear_transient_state()
+    if projectile_system != null and projectile_system.has_method("clear"):
         projectile_system.clear()
 
 func clear_scripted_encounter(encounter_id: String, drop := false) -> int:
@@ -1112,7 +1122,10 @@ func update_enemy(enemy: Dictionary, delta: float, night_factor: float) -> void:
     elif can_attack and not motion_active and distance < (2.85 if variant == "rift" else 2.1) and aware and active_threat and float(enemy.get("cooldown", 0.0)) <= 0.0:
         var damage := hostile_melee_damage(variant, night_factor)
         var seed := next_hostile_motion_seed(enemy, body.global_position, variant)
-        var started: bool = hostile_motion_combat != null and bool(hostile_motion_combat.begin_side_arc_motion(body, target_node, target_kind, damage, variant, seed))
+        # The hostile owns target/damage/cooldown policy. The shared recipe path
+        # independently derives a bounded plane and readable wind-up from this
+        # stable entity/world/serial seed.
+        var started: bool = hostile_motion_combat != null and bool(hostile_motion_combat.begin_arc_motion(body, target_node, target_kind, damage, variant, seed, "seeded", true))
         if started:
             # Starting the generic motion spends the existing attack cooldown;
             # the consequence arrives only if its contact volume resolves.
@@ -1147,6 +1160,8 @@ func _on_hostile_motion_contact_resolved(source_body: Node3D, target: Node3D, ta
     apply_hostile_melee_consequence(source_body, target, target_kind, damage, variant)
 
 func apply_hostile_melee_consequence(source_body: Node3D, target: Node3D, target_kind: String, damage: float, variant: String) -> void:
+    if not CombatTargetPolicyScript.can_damage("hostile", target_kind):
+        return
     if target_kind == "player" and target == player and survival:
         var label: String = "Hit by Rift Colossus" if variant == "rift" else "Hit by Shadow Stalker"
         survival.apply_damage(damage, label, "hostile")

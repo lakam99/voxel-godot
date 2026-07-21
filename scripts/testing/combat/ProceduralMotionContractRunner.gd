@@ -24,6 +24,10 @@ func run() -> void:
 		report_path = ProjectSettings.globalize_path("res://artifacts/combat/procedural-motion-contract.json")
 	test_same_seed_replays_exactly()
 	test_seed_variation_stays_bounded()
+	test_multi_plane_recipes_replay_exactly_and_stay_bounded()
+	test_seeded_multi_plane_profiles_cover_all_supported_planes()
+	test_multi_plane_profiles_keep_a_standard_hostile_actor_corridor_contactable()
+	test_lateral_arc_preserves_legacy_side_arc_trajectory()
 	test_stack_retains_independent_motions()
 	test_contact_volume_derives_from_motion_sample()
 	test_contact_volume_respects_phase_window()
@@ -69,6 +73,104 @@ func test_seed_variation_stays_bounded() -> void:
 	# bounding its elevation strongly enough to remain legible in first person.
 	var bounded := reach_a >= 0.25 and reach_a <= 8.0 and reach_b >= 0.25 and reach_b <= 8.0 and arc_a >= 18.0 and arc_a <= 220.0 and arc_b >= 18.0 and arc_b <= 220.0 and absf(plane_a) >= 12.0 and absf(plane_a) <= 26.0 and absf(plane_b) >= 12.0 and absf(plane_b) <= 26.0
 	add_result("seed_variation_is_visible_and_bounded", different and bounded, {"first": first.snapshot(), "second": second.snapshot()})
+
+
+func test_multi_plane_recipes_replay_exactly_and_stay_bounded() -> void:
+	var profiles: Array[String] = ["lateral", "rising", "falling", "overhead"]
+	var exact := true
+	var bounded := true
+	var trajectories: Dictionary = {}
+	for profile in profiles:
+		var first = MotionRecipeBuilderScript.build_arc(1543, {"planeProfile": profile})
+		var second = MotionRecipeBuilderScript.build_arc(1543, {"planeProfile": profile})
+		var first_instance = MotionInstanceScript.new({"instanceId": "first_%s" % profile, "recipe": first, "anchorId": "multi_plane"})
+		var second_instance = MotionInstanceScript.new({"instanceId": "second_%s" % profile, "recipe": second, "anchorId": "multi_plane"})
+		for time in [0.0, 0.18, 0.42, 0.67, 1.0]:
+			var a = first_instance.sample(time)
+			var b = second_instance.sample(time)
+			exact = exact and a.phase == b.phase and a.tip.is_equal_approx(b.tip) and a.facing.is_equal_approx(b.facing)
+		var parameters: Dictionary = first.parameters
+		var pitch := float(parameters.get("centralPitchDegrees", INF))
+		var roll := float(parameters.get("sweepRollDegrees", INF))
+		bounded = bounded and absf(pitch) <= 80.0 and absf(roll) <= 68.0 and float(parameters.get("reach", 0.0)) >= 0.25 and float(parameters.get("reach", 9.0)) <= 8.0
+		trajectories[profile] = first_instance.sample(0.50).snapshot()
+	var lateral_tip: Vector3 = (trajectories.get("lateral", {}) as Dictionary).get("tip", Vector3.ZERO)
+	var rising_tip: Vector3 = (trajectories.get("rising", {}) as Dictionary).get("tip", Vector3.ZERO)
+	var falling_tip: Vector3 = (trajectories.get("falling", {}) as Dictionary).get("tip", Vector3.ZERO)
+	var overhead_tip: Vector3 = (trajectories.get("overhead", {}) as Dictionary).get("tip", Vector3.ZERO)
+	var distinct := not lateral_tip.is_equal_approx(rising_tip) and not rising_tip.is_equal_approx(falling_tip) and not rising_tip.is_equal_approx(overhead_tip)
+	add_result("multi_plane_arc_recipes_are_deterministic_bounded_and_distinct", exact and bounded and distinct, {"seed": 1543, "trajectories": trajectories})
+
+
+func test_seeded_multi_plane_profiles_cover_all_supported_planes() -> void:
+	var observed: Dictionary = {}
+	for seed in range(1, 2049):
+		var recipe = MotionRecipeBuilderScript.build_arc(seed)
+		observed[String(recipe.parameters.get("planeProfile", ""))] = seed
+		if observed.size() == MotionRecipeBuilderScript.PLANE_PROFILES.size():
+			break
+	var covered := true
+	for profile in MotionRecipeBuilderScript.PLANE_PROFILES:
+		covered = covered and observed.has(profile)
+	add_result("seeded_multi_plane_selection_covers_each_supported_plane_profile", covered, {"observedSeeds": observed, "profiles": MotionRecipeBuilderScript.PLANE_PROFILES})
+
+
+func test_multi_plane_profiles_keep_a_standard_hostile_actor_corridor_contactable() -> void:
+	# Match the live hostile/player anchor relationship: a hovering hostile's
+	# shared contact anchor sits 0.32m above the target capsule's centre, and the
+	# enemy enters the normal 1.72m melee threshold. A profile can look diagonal
+	# or overhead, but it may not curve entirely outside this real actor corridor.
+	var target_geometries := [
+		PassiveContactSphereScript.new({"geometryId": "actor:lower", "center": Vector3(0.0, -0.76, -1.72), "radius": 0.42}),
+		PassiveContactSphereScript.new({"geometryId": "actor:middle", "center": Vector3(0.0, -0.32, -1.72), "radius": 0.42}),
+		PassiveContactSphereScript.new({"geometryId": "actor:upper", "center": Vector3(0.0, 0.12, -1.72), "radius": 0.42})
+	]
+	var seeds: Array = [1, 1543, 7651, 557693527, 1201775400, 2147480000]
+	for index in range(1, 129):
+		seeds.append(index * 7919)
+	var misses: Array = []
+	for profile in MotionRecipeBuilderScript.PLANE_PROFILES:
+		for seed_value in seeds:
+			var seed := int(seed_value)
+			var recipe = MotionRecipeBuilderScript.build_arc(seed, {"planeProfile": profile})
+			var instance = MotionInstanceScript.new({"instanceId": "%s_%d" % [profile, seed], "recipe": recipe, "anchorId": "hostile_actor_corridor"})
+			var volume_recipe = MotionVolumeRecipeBuilderScript.build_capsule_segment(seed)
+			var previous = null
+			var resolved := false
+			var nearest_margin := INF
+			for index in range(73):
+				var time := float(index) / 72.0
+				var current = MotionVolumeSamplerScript.sample(volume_recipe, instance.sample(time))
+				if current.active:
+					for geometry in target_geometries:
+						var closest: Vector3 = MotionContactResolverScript.closest_point_on_segment(geometry.center, current.segment_start, current.segment_end)
+						nearest_margin = minf(nearest_margin, closest.distance_to(geometry.center) - (float(current.radius) + float(geometry.radius)))
+						if MotionContactResolverScript.resolve_transition(previous, current, geometry).resolved:
+							resolved = true
+							break
+					previous = current
+				if resolved:
+					break
+			if not resolved:
+				misses.append({"profile": profile, "seed": seed, "nearestMargin": nearest_margin, "parameters": recipe.parameters})
+	add_result(
+		"multi_plane_profiles_keep_the_standard_hostile_actor_corridor_contactable",
+		misses.is_empty(),
+		{"sampleCount": seeds.size() * MotionRecipeBuilderScript.PLANE_PROFILES.size(), "misses": misses}
+	)
+
+
+func test_lateral_arc_preserves_legacy_side_arc_trajectory() -> void:
+	var legacy = MotionRecipeBuilderScript.build_side_arc(7651)
+	var lateral = MotionRecipeBuilderScript.build_arc(7651, {"planeProfile": "lateral"})
+	var legacy_instance = MotionInstanceScript.new({"instanceId": "legacy", "recipe": legacy, "anchorId": "legacy_anchor"})
+	var lateral_instance = MotionInstanceScript.new({"instanceId": "lateral", "recipe": lateral, "anchorId": "legacy_anchor"})
+	var preserved := true
+	for time in [0.0, 0.13, 0.29, 0.51, 0.78, 1.0]:
+		var old_sample = legacy_instance.sample(time)
+		var new_sample = lateral_instance.sample(time)
+		preserved = preserved and old_sample.phase == new_sample.phase and old_sample.tip.is_equal_approx(new_sample.tip) and old_sample.facing.is_equal_approx(new_sample.facing)
+	add_result("explicit_lateral_arc_preserves_the_legacy_side_arc_trajectory", preserved, {"seed": 7651, "legacy": legacy.snapshot(), "lateral": lateral.snapshot()})
 
 
 func test_stack_retains_independent_motions() -> void:

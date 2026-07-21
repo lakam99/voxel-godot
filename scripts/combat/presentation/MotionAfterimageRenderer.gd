@@ -10,9 +10,18 @@ const AFTERIMAGE_COLOR := Color(1.0, 1.0, 1.0, 0.34)
 ## StandardMaterial3D while a hostile is striking can force renderer resource
 ## work into a gameplay frame, even though the visual state has not changed.
 static var shared_afterimage_material: StandardMaterial3D
+static var shared_overlay_afterimage_material: StandardMaterial3D
 
 var stack
 var ribbons_by_trail_id: Dictionary = {}
+var draw_over_depth := false
+
+
+func set_draw_over_depth(enabled: bool) -> void:
+	# A readable hostile commitment must not disappear into the body originating
+	# it. This presentation preference still renders the same sampled ribbon; it
+	# neither changes the motion timeline nor contact geometry.
+	draw_over_depth = enabled
 
 
 func set_stack(next_stack) -> void:
@@ -167,7 +176,9 @@ func trajectory_edges(samples: Array, index: int) -> Dictionary:
 
 
 func afterimage_material() -> StandardMaterial3D:
-	if shared_afterimage_material != null:
+	if draw_over_depth and shared_overlay_afterimage_material != null:
+		return shared_overlay_afterimage_material
+	if not draw_over_depth and shared_afterimage_material != null:
 		return shared_afterimage_material
 	var material := StandardMaterial3D.new()
 	material.albedo_color = AFTERIMAGE_COLOR
@@ -176,7 +187,10 @@ func afterimage_material() -> StandardMaterial3D:
 	material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 	material.cull_mode = BaseMaterial3D.CULL_DISABLED
-	material.no_depth_test = false
-	material.render_priority = 1
+	material.no_depth_test = draw_over_depth
+	material.render_priority = 2 if draw_over_depth else 1
+	if draw_over_depth:
+		shared_overlay_afterimage_material = material
+		return shared_overlay_afterimage_material
 	shared_afterimage_material = material
 	return shared_afterimage_material

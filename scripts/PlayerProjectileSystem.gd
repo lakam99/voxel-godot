@@ -1,6 +1,8 @@
 extends Node3D
 class_name PlayerProjectileSystem
 
+const CombatTargetPolicyScript := preload("res://scripts/combat/CombatTargetPolicy.gd")
+
 signal hostile_hit(variant, defeated, position)
 signal story_worldmark_hit(resolved, position)
 
@@ -77,14 +79,14 @@ func fire_active() -> bool:
         return true
 
     var collider := hit.get("collider") as Node
-    if collider and collider.has_meta("kind") and String(collider.get_meta("kind")) == "hostile" and hostile_system:
+    if collider and collider.has_meta("kind") and String(collider.get_meta("kind")) == "hostile" and hostile_system and CombatTargetPolicyScript.can_damage("player", "hostile"):
         var variant := String(collider.get_meta("variant", "shadow"))
         var defeated: bool = hostile_system.damage_hostile(collider, maxf(1.0, float(spec.get("damage", 1.0))), true, player, "player_ranged")
         hostile_hit.emit(variant, defeated, target)
         last_message = hostile_system.last_message
         return true
 
-    if collider and collider.has_meta("kind") and String(collider.get_meta("kind")) == "story_worldmark":
+    if collider and collider.has_meta("kind") and String(collider.get_meta("kind")) == "story_worldmark" and CombatTargetPolicyScript.can_damage("player", "story_worldmark"):
         var controller = story_worldmark_controller()
         if controller != null and controller.has_method("damage_active_encounter"):
             var resolved: bool = bool(controller.damage_active_encounter(maxf(1.0, float(spec.get("damage", 1.0))), "ranged"))
@@ -273,6 +275,13 @@ func recycle_tracer(projectile: Dictionary) -> void:
     node.scale = Vector3.ONE
     if tracer_pool.size() < 64:
         tracer_pool.append(node)
+
+func clear_transient_state() -> void:
+    # Tracers are visual lifetime state only; shots have already resolved from
+    # their authoritative ray result and therefore must not resume after load.
+    for projectile in projectiles:
+        recycle_tracer(projectile)
+    projectiles.clear()
 
 func _process(delta: float) -> void:
     for projectile in projectiles.duplicate():
