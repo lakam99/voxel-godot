@@ -9,14 +9,17 @@ const MotionVolumeRecipeBuilderScript := preload("res://scripts/combat/contact/M
 const MotionVolumeSamplerScript := preload("res://scripts/combat/contact/MotionVolumeSampler.gd")
 const MotionContactResolverScript := preload("res://scripts/combat/contact/MotionContactResolver.gd")
 const MotionAfterimageRendererScript := preload("res://scripts/combat/presentation/MotionAfterimageRenderer.gd")
+const MotionSegmentSweepRendererScript := preload("res://scripts/combat/presentation/MotionSegmentSweepRenderer.gd")
 const MotionTelegraphRendererScript := preload("res://scripts/combat/presentation/MotionTelegraphRenderer.gd")
 const LiveCollisionContactGeometryAdapterScript := preload("res://scripts/combat/runtime/LiveCollisionContactGeometryAdapter.gd")
+const MotionPoseSignalBuilderScript := preload("res://scripts/combat/rig/MotionPoseSignalBuilder.gd")
 
 ## Hostile-facing runtime adapter for the shared procedural motion layer. It
 ## samples recipe/contact math and emits a contact fact; HostileSystem keeps
 ## ownership of damage, NPC consequences, drops, and combat policy.
 
 signal motion_started(source_body, target, target_kind: String, variant: String, summary: Dictionary)
+signal motion_pose_signals(source_body, signals: Array, summary: Dictionary)
 signal motion_contact_resolved(source_body, target, target_kind: String, damage: float, variant: String, resolution: Dictionary)
 signal motion_finished(source_body, summary: Dictionary)
 
@@ -88,7 +91,8 @@ func begin_recipe_motion(source_body: Node3D, target: Node3D, target_kind: Strin
 		"direction": direction
 	})
 	var stack = MotionStackScript.new("hostile_motion_stack_%d" % source_id, [instance])
-	var renderer = MotionAfterimageRendererScript.new()
+	var contact_provider = contact_provider_for(source_body)
+	var renderer = MotionSegmentSweepRendererScript.new() if contact_provider != null else MotionAfterimageRendererScript.new()
 	renderer.name = "HostileMotionAfterimage_%d" % source_id
 	# Hostile-source ribbons are telegraphs first: keep the same sampled shape
 	# legible when it traverses through the originating body from the player's
@@ -126,11 +130,19 @@ func begin_recipe_motion(source_body: Node3D, target: Node3D, target_kind: Strin
 		"resolved": false,
 		"renderer": renderer,
 		"telegraph": telegraph,
-		"followSource": follow_source
+		"followSource": follow_source,
+		"contactProvider": contact_provider,
+		"equipmentTrails": {}
 	}
 	active_by_source_id[source_id] = entry
-	render_entry(entry)
+	# Announce the chosen mathematical motion side before its first wind-up
+	# frame. Equipment adapters can therefore prepare the matching semantic limb
+	# instead of briefly rendering an idle/default-hand item on the wrong arm.
+	# The runtime exposes only the body-neutral side; a rig remains responsible
+	# for resolving that into its own lead_appendage role.
 	motion_started.emit(source_body, target, target_kind, variant, summary_for(entry))
+	emit_pose_signals(entry)
+	render_entry(entry)
 	return true
 
 
@@ -174,6 +186,13 @@ func _physics_process(delta: float) -> void:
 			entry["contactAnchor"] = updated_anchor
 			entry["presentationAnchor"] = hostile_presentation_space(updated_anchor, source, target, entry.get("recipe", null))
 		entry["elapsed"] = minf(MOTION_DURATION_SECONDS, float(entry.get("elapsed", 0.0)) + maxf(0.0, delta))
+		# An equipped contact source reads pose-driven sockets. Publish the same
+		# semantic motion signal first so both the visible item and its segment have
+		# reached this frame's shared motion sample before contact is queried.
+		var pose_started: int = performance_monitor.begin_section("hostile_motion_pose") if performance_monitor != null else Time.get_ticks_usec()
+		emit_pose_signals(entry)
+		if performance_monitor != null:
+			performance_monitor.end_section("hostile_motion_pose", pose_started)
 		var contact_started: int = performance_monitor.begin_section("hostile_motion_contact") if performance_monitor != null else Time.get_ticks_usec()
 		resolve_entry_contact(entry)
 		if performance_monitor != null:
@@ -241,6 +260,35 @@ func world_samples(entry: Dictionary) -> Array:
 	return result
 
 
+func motion_samples(entry: Dictionary) -> Array:
+	var stack = entry.get("stack", null)
+	return stack.samples_at(normalized_time(entry)) if stack != null and stack.has_method("samples_at") else []
+
+
+func contact_provider_for(source_body: Node3D):
+	if source_body == null or not is_instance_valid(source_body) or not source_body.has_meta("motion_contact_provider"):
+		return null
+	var provider = source_body.get_meta("motion_contact_provider", null)
+	return provider if provider != null and is_instance_valid(provider) and provider.has_method("sample_contact_volume") else null
+
+
+func contact_volumes(entry: Dictionary) -> Array:
+	var result: Array = []
+	var provider = entry.get("contactProvider", null)
+	var volume_recipe = entry.get("volume", null)
+	if provider != null and is_instance_valid(provider) and provider.has_method("sample_contact_volume"):
+		for motion_sample in motion_samples(entry):
+			var volume = provider.sample_contact_volume(motion_sample, volume_recipe)
+			if volume != null and not String(volume.shape_id).is_empty():
+				result.append(volume)
+		return result
+	for motion_sample in world_samples(entry):
+		var volume = MotionVolumeSamplerScript.sample(volume_recipe, motion_sample)
+		if volume != null and not String(volume.shape_id).is_empty():
+			result.append(volume)
+	return result
+
+
 func resolve_entry_contact(entry: Dictionary) -> void:
 	if bool(entry.get("resolved", false)):
 		return
@@ -252,10 +300,8 @@ func resolve_entry_contact(entry: Dictionary) -> void:
 	var target_geometry := LiveCollisionContactGeometryAdapterScript.passive_spheres_for_body(target, target_id)
 	if target_geometry.is_empty():
 		return
-	var volume_recipe = entry.get("volume", null)
 	var previous_volumes: Dictionary = entry.get("previousVolumes", {})
-	for motion_sample in world_samples(entry):
-		var current_volume = MotionVolumeSamplerScript.sample(volume_recipe, motion_sample)
+	for current_volume in contact_volumes(entry):
 		if not current_volume.active:
 			continue
 		var previous_volume = previous_volumes.get(current_volume.instance_id, null)
@@ -284,6 +330,24 @@ func render_entry(entry: Dictionary) -> void:
 	var stack = entry.get("stack", null)
 	if renderer == null or stack == null:
 		return
+	var provider = entry.get("contactProvider", null)
+	if provider != null and is_instance_valid(provider) and renderer.has_method("render_segment_trails"):
+		var trails: Dictionary = entry.get("equipmentTrails", {}) as Dictionary
+		for volume in contact_volumes(entry):
+			var trail_id := String(volume.instance_id)
+			var samples: Array = trails.get(trail_id, []) as Array
+			samples.append(volume)
+			# Keep visual history bounded while preserving enough of a full motion to
+			# make the continuous wind-up/strike ribbon readable at slow motion.
+			if samples.size() > TRAIL_SAMPLE_COUNT:
+				samples.pop_front()
+			trails[trail_id] = samples
+		entry["equipmentTrails"] = trails
+		var segment_trails: Array = []
+		for trail_id_value in trails.keys():
+			segment_trails.append({"instanceId": String(trail_id_value), "samples": trails.get(trail_id_value, [])})
+		renderer.render_segment_trails(segment_trails)
+		return
 	var trails: Array = stack.trails_until(normalized_time(entry), TRAIL_SAMPLE_COUNT)
 	var anchor: Transform3D = entry.get("presentationAnchor", Transform3D.IDENTITY)
 	var world_trails: Array = MotionSampleSpaceTransformerScript.transform_trails(trails, anchor)
@@ -292,6 +356,17 @@ func render_entry(entry: Dictionary) -> void:
 	var source := entry.get("source") as Node3D
 	if telegraph != null and is_instance_valid(telegraph) and telegraph.has_method("render_for"):
 		telegraph.render_for(source, entry.get("recipe", null), normalized_time(entry))
+
+
+func emit_pose_signals(entry: Dictionary) -> void:
+	var source := entry.get("source") as Node3D
+	var stack = entry.get("stack", null)
+	if source == null or stack == null:
+		return
+	# The combat runtime only publishes body-neutral phase signals. It does not
+	# inspect or bind a Skeleton3D; a rig driver may consume these independently.
+	var signals: Array = MotionPoseSignalBuilderScript.build_for_stack(stack, normalized_time(entry))
+	motion_pose_signals.emit(source, signals, summary_for(entry))
 
 
 func finish_entry(source_id: int, emit_finished: bool) -> void:
@@ -328,6 +403,17 @@ func summary_for(entry: Dictionary) -> Dictionary:
 		"variant": String(entry.get("variant", "shadow")),
 		"damage": float(entry.get("damage", 0.0)),
 		"resolved": bool(entry.get("resolved", false)),
+		"leadMotionSide": lead_motion_side(entry),
+		"contactSource": "equipped_item" if entry.get("contactProvider", null) != null else "motion_volume",
 		"motion": recipe.snapshot() if recipe != null else {},
 		"volume": volume.snapshot() if volume != null else {}
 	}
+
+
+func lead_motion_side(entry: Dictionary) -> float:
+	var stack = entry.get("stack", null)
+	if stack != null and stack.has_method("samples_at"):
+		var samples: Array = stack.samples_at(normalized_time(entry))
+		if not samples.is_empty() and samples[0] != null:
+			return -1.0 if float(samples[0].direction) < 0.0 else 1.0
+	return 1.0

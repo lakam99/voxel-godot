@@ -67,6 +67,7 @@ static func sample_arc(recipe, local_time: float, direction: float, origin: Vect
 		"localTime": t,
 		"phase": phase,
 		"active": true,
+		"direction": signed_direction,
 		"origin": origin,
 		"tip": tip,
 		"facing": facing
@@ -109,6 +110,7 @@ static func sample_forward_surge(recipe, local_time: float, direction: float, or
 		"localTime": t,
 		"phase": phase,
 		"active": true,
+		"direction": signed_direction,
 		"origin": origin,
 		"tip": tip,
 		"facing": facing

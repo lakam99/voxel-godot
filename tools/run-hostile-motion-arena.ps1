@@ -3,6 +3,10 @@ param(
     [string]$GodotExe = "C:\Users\arkam\Desktop\Godot_v4.6.1-stable_win64.exe\Godot_v4.6.1-stable_win64_console.exe",
     [switch]$Verify,
     [switch]$Capture,
+    [switch]$Visible,
+    [switch]$SlowMo,
+    [ValidateRange(0.05, 1.0)]
+    [double]$TimeScale = 1.0,
     [switch]$DodgeVerify,
     [switch]$WolfAutoAttack,
     [switch]$WolfAutoTrack,
@@ -25,6 +29,8 @@ $ProjectPath = (Resolve-Path -LiteralPath $ProjectPath).Path
 if (-not (Test-Path -LiteralPath $GodotExe)) {
     throw "Godot console executable was not found: $GodotExe"
 }
+$EffectiveTimeScale = if ($SlowMo) { 0.20 } else { $TimeScale }
+$env:VOXEL_HOSTILE_MOTION_ARENA_TIME_SCALE = $EffectiveTimeScale.ToString([Globalization.CultureInfo]::InvariantCulture)
 
 if ($Verify -or $Capture -or $DodgeVerify) {
     $ArtifactDir = Join-Path $ProjectPath $ArtifactDir
@@ -72,6 +78,7 @@ if ($Verify -or $Capture -or $DodgeVerify) {
 	Remove-Item Env:VOXEL_WOLF_ARENA_AUTOCLAW -ErrorAction SilentlyContinue
 	Remove-Item Env:VOXEL_WOLF_ARENA_AUTOPUNISH -ErrorAction SilentlyContinue
 	Remove-Item Env:VOXEL_WOLF_ARENA_START_DISTANCE -ErrorAction SilentlyContinue
+	Remove-Item Env:VOXEL_HOSTILE_MOTION_ARENA_TIME_SCALE -ErrorAction SilentlyContinue
     if (-not (Test-Path -LiteralPath $reportPath)) {
         throw "Hostile Motion Arena did not produce a report: $reportPath"
     }
@@ -86,8 +93,10 @@ if ($Verify -or $Capture -or $DodgeVerify) {
     exit 0
 }
 
-Write-Host "Launching the interactive Hostile Motion Arena. Close the Godot window when finished."
+Write-Host ("Launching the interactive Hostile Motion Arena at {0:0.00}x. Close the Godot window when finished." -f $EffectiveTimeScale)
 & $GodotExe --path $ProjectPath --resolution 1280x720 --scene res://scenes/testing/HostileMotionArenaTest.tscn -- --arena-opponent $OpponentId --motion-profile $MotionProfile --arena-seed-index $SeedIndex
-if ($LASTEXITCODE -ne 0) {
-    throw "Hostile Motion Arena exited with code $LASTEXITCODE"
+$ExitCode = $LASTEXITCODE
+Remove-Item Env:VOXEL_HOSTILE_MOTION_ARENA_TIME_SCALE -ErrorAction SilentlyContinue
+if ($ExitCode -ne 0) {
+	throw "Hostile Motion Arena exited with code $ExitCode"
 }

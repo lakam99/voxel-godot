@@ -24,6 +24,7 @@ const STATIC_AUTO_VERIFY_DURATION_SECONDS := 2.0
 const WOLF_AUTO_VERIFY_DURATION_SECONDS := 8.2
 const ARENA_HALF_EXTENT := 18.0
 const DEFAULT_WOLF_START_DISTANCE := 4.35
+const EQUIPPED_MOTION_START_DISTANCE := 1.55
 
 var player: CharacterBody3D
 var player_head: Node3D
@@ -47,6 +48,7 @@ var motion_paused := false
 var loop_delay_remaining := 0.0
 var selected_seed_index := 0
 var selected_plane_profile := "seeded"
+var arena_time_scale := 1.0
 var last_hit_text := "No contact yet - step into the sweep to test it."
 var elapsed_since_hit := INF
 var auto_verify_enabled := false
@@ -93,6 +95,8 @@ func _ready() -> void:
 	selected_seed_index = requested_seed_index()
 	opponent_definition = MotionArenaOpponentCatalogScript.definition_for(requested_opponent_id())
 	selected_plane_profile = requested_motion_profile()
+	arena_time_scale = requested_time_scale()
+	Engine.time_scale = arena_time_scale
 	create_world()
 	create_player()
 	create_player_defense()
@@ -102,6 +106,13 @@ func _ready() -> void:
 	create_hud()
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 	call_deferred("replay_motion")
+
+
+func _exit_tree() -> void:
+	# This scene is the sole owner of its review clock. Avoid leaking a slow
+	# factor into any other scene when it is closed interactively.
+	if is_equal_approx(Engine.time_scale, arena_time_scale):
+		Engine.time_scale = 1.0
 
 
 func requested_opponent_id() -> String:
@@ -129,6 +140,11 @@ func requested_motion_profile() -> String:
 		if arguments[index] == "--motion-profile":
 			return normalized_motion_profile(arguments[index + 1])
 	return "seeded"
+
+
+func requested_time_scale() -> float:
+	var raw := OS.get_environment("VOXEL_HOSTILE_MOTION_ARENA_TIME_SCALE")
+	return clampf(raw.to_float(), 0.05, 1.0) if not raw.is_empty() else 1.0
 
 
 func requested_capture_time() -> float:
@@ -239,7 +255,14 @@ func add_arena_boundary(position: Vector3) -> void:
 func create_player() -> void:
 	player = CharacterBody3D.new()
 	player.name = "ArenaPlayer"
-	player.position = Vector3(0.0, 0.0, 2.35)
+	# A body-centred motion fixture could begin well beyond the actual weapon
+	# reach. Automated verification begins an equipment-backed opponent inside its
+	# declared blade corridor, proving the sword segment rather than an old generic
+	# capsule. The interactive arena remains just outside range so the player can
+	# walk in and out of the real sweep themselves.
+	var has_equipment := opponent_definition.get("equipmentProfile", null) != null
+	var start_distance := EQUIPPED_MOTION_START_DISTANCE if has_equipment and auto_verify_enabled else 2.35
+	player.position = Vector3(0.0, 0.0, start_distance)
 	var collision := CollisionShape3D.new()
 	var shape := CapsuleShape3D.new()
 	shape.radius = 0.38
@@ -273,6 +296,7 @@ func create_opponent() -> void:
 		return
 	opponent.position = Vector3.ZERO
 	add_child(opponent)
+	orient_motion_rig_to_player()
 	if is_wolf_opponent():
 		wolf = opponent as CharacterBody3D
 		wolf_profile = opponent_definition.get("behaviorProfile", null)
@@ -285,7 +309,30 @@ func create_opponent() -> void:
 	hostile_motion.motion_contact_resolved.connect(_on_motion_contact_resolved)
 	hostile_motion.motion_finished.connect(_on_motion_finished)
 	add_child(hostile_motion)
+	bind_opponent_motion_rig()
 
+
+func bind_opponent_motion_rig() -> void:
+	if opponent == null or hostile_motion == null:
+		return
+	var driver = opponent.get_node_or_null("MotionRigPoseDriver")
+	if driver != null and driver.has_method("bind_motion_runtime"):
+		driver.bind_motion_runtime(hostile_motion)
+	var equipment = opponent.get_node_or_null("MotionEquipmentAdapter")
+	if equipment != null and equipment.has_method("bind_motion_runtime"):
+		equipment.bind_motion_runtime(hostile_motion)
+
+
+func orient_motion_rig_to_player() -> void:
+	# A rig's local -Z is its declared visual forward. Align it with the same
+	# target-facing convention that the shared motion contact frame uses, so a
+	# profile can consume its local sampled vector without an arena-only axis fix.
+	if opponent == null or player == null or not opponent.has_meta("motion_rig_profile"):
+		return
+	var target := player.global_position
+	target.y = opponent.global_position.y
+	if opponent.global_position.distance_squared_to(target) > 0.000001:
+		opponent.look_at(target, Vector3.UP)
 
 func create_player_motion_adapter() -> void:
 	if not is_wolf_opponent():
@@ -544,6 +591,9 @@ func replay_motion() -> void:
 		return
 	if hostile_motion.is_motion_active(opponent):
 		hostile_motion.cancel_for_body(opponent)
+	# The body remains target-facing. The arm retargets the shared endpoint ray,
+	# so the equipped blade traces the same swing without a sideways body turn.
+	orient_motion_rig_to_player()
 	loop_delay_remaining = LOOP_DELAY_SECONDS
 	var seed := int(ARENA_SEEDS[selected_seed_index])
 	var damage := float(opponent_definition.get("testDamage", 16.0))
@@ -624,6 +674,8 @@ func _on_motion_contact_resolved(_source, target, _target_kind: String, damage: 
 
 func _on_motion_finished(source, _summary: Dictionary) -> void:
 	loop_delay_remaining = LOOP_DELAY_SECONDS
+	if source == opponent and not is_wolf_opponent():
+		orient_motion_rig_to_player()
 	if is_wolf_opponent() and source == wolf and auto_dodge_enabled and auto_dodge_requested and contact_count == 0:
 		# This is evaluated at the end of the exact shared lunge motion started by
 		# the wolf. Later loop damage cannot retroactively change this proof.
@@ -712,13 +764,26 @@ func update_hud() -> void:
 		var evade_text := "EVADE %s | cd %.2f | energy %.0f | threat %s" % [String(behavior.get("lastEvadeReason", "")), float(behavior.get("evadeCooldown", 0.0)), float(behavior.get("evadeStamina", 0.0)), String(threat.get("reason", "none"))]
 		status_label.text = (last_hit_text if elapsed_since_hit < 2.8 else "Watch the probe before entering range; [F] starts a shared player motion.") + "  |  " + dodge_text + "  |  " + evade_text
 	else:
-		motion_label.text = "%s | %s | plane %s | seed %d | %.2fm | loop %s" % [phase_text, String(opponent_definition.get("id", "opponent")), resolved_motion_profile(), int(ARENA_SEEDS[selected_seed_index]), distance, "ON" if loop_enabled else "OFF"]
+		motion_label.text = "%s | %s | plane %s | seed %d | %.2fm | loop %s | %.2fx" % [phase_text, String(opponent_definition.get("id", "opponent")), resolved_motion_profile(), int(ARENA_SEEDS[selected_seed_index]), distance, "ON" if loop_enabled else "OFF", arena_time_scale]
 		status_label.text = (last_hit_text if elapsed_since_hit < 2.4 else "No contact - press C during wind-up to clear the white sweep.") + "  |  " + dodge_text
+
+
+func opponent_facing_player_degrees() -> float:
+	if opponent == null or player == null:
+		return INF
+	var forward := -opponent.global_transform.basis.z
+	var toward_player := player.global_position - opponent.global_position
+	forward.y = 0.0
+	toward_player.y = 0.0
+	if forward.length_squared() <= 0.000001 or toward_player.length_squared() <= 0.000001:
+		return INF
+	return rad_to_deg(forward.normalized().angle_to(toward_player.normalized()))
 
 
 func complete_auto_verify() -> void:
 	auto_verify_enabled = false
 	var dodge_state: Dictionary = player_defense.summary() if player_defense != null else {}
+	var opponent_facing_player := opponent_facing_player_degrees()
 	var passed := false
 	var notes := ""
 	if is_wolf_opponent() and wolf_behavior != null:
@@ -736,7 +801,8 @@ func complete_auto_verify() -> void:
 	else:
 		var dodged := auto_dodge_enabled and contact_count == 0 and int(dodge_state.get("serial", 0)) >= 1 and player != null and opponent != null and player.global_position.distance_to(opponent.global_position) >= 4.2
 		var struck := not auto_dodge_enabled and contact_count >= 1 and health < PLAYER_MAX_HEALTH
-		passed = dodged or struck
+		var facing_ok := String(opponent_definition.get("family", "")) != "rig_fixture" or opponent_facing_player <= 0.5
+		passed = (dodged or struck) and facing_ok
 		notes = "The fixture uses the real hostile motion/contact adapter, shared PlayerDefenseController, SurvivalSystem stamina, and a CharacterBody3D capsule. Automated dodge presses the same isolated defense state before the active phase; manual review still requires a headed arena run."
 	var report := {
 		"runnerId": "hostile_motion_arena",
@@ -754,6 +820,7 @@ func complete_auto_verify() -> void:
 		"autoPunishRequested": auto_punish_requested,
 		"dodgeState": dodge_state,
 		"playerDistance": player.global_position.distance_to(opponent.global_position) if player != null and opponent != null else INF,
+		"opponentFacingPlayerDegrees": opponent_facing_player,
 		"seed": int(ARENA_SEEDS[selected_seed_index]),
 		"capturePath": auto_verify_capture_path,
 		"wolf": wolf_behavior.summary() if wolf_behavior != null else {},

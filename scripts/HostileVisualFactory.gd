@@ -2,6 +2,7 @@ extends RefCounted
 class_name HostileVisualFactory
 
 const CharacterAssetRegistryScript := preload("res://scripts/visual/CharacterAssetRegistry.gd")
+const MotionRigVisualFactoryScript := preload("res://scripts/combat/rig/MotionRigVisualFactory.gd")
 
 var character_assets
 var enemy_material: StandardMaterial3D
@@ -52,6 +53,17 @@ func variant_spec(variant: String) -> Dictionary:
                 "accentMaterial": wolf_accent_material,
                 "eyeMaterial": wolf_eye_material
             }
+        "motion_biped":
+            return {
+                "health": 38.0,
+                "scale": 1.0,
+                "colliderRadius": 0.38,
+                "colliderHeight": 1.76,
+                "colliderCenterY": 0.88,
+                "material": frost_material,
+                "accentMaterial": rift_material,
+                "eyeMaterial": wolf_eye_material
+            }
         "seer":
             return {
                 "health": 20.0,
@@ -88,6 +100,8 @@ func build_visual(body: Node3D, variant: String) -> Dictionary:
 
     if variant == "wolf":
         add_wolf_visual(body, scale, visual_material, spec.get("accentMaterial", wolf_accent_material), visual_eye_material)
+    elif variant == "motion_biped":
+        add_motion_biped_visual(body, scale, visual_material, spec.get("accentMaterial", rift_material), visual_eye_material)
     elif not add_generated_visual(body, variant, scale, visual_material, visual_eye_material):
         add_primitive_visual(body, variant, scale, visual_material, visual_eye_material)
 
@@ -208,34 +222,14 @@ func add_primitive_visual(body: Node3D, variant: String, scale: float, visual_ma
     body.set_meta("character_asset_parts", [])
 
 func add_wolf_visual(body: Node3D, scale: float, fur_material: Material, accent_material: Material, eye_material_override: Material) -> void:
-    # The authored wolf stays in the normal hostile visual factory rather than
-    # being an arena-only mesh. Its intentionally chunky construction keeps the
-    # existing cozy voxel silhouette while presenting a low, readable predator.
-    add_box_part(body, "WolfBody", Vector3(0.82, 0.50, 1.34) * scale, Vector3(0.0, 0.66, 0.05) * scale, fur_material)
-    add_box_part(body, "WolfShoulders", Vector3(0.72, 0.38, 0.52) * scale, Vector3(0.0, 0.83, -0.48) * scale, accent_material)
-    add_box_part(body, "WolfHead", Vector3(0.56, 0.48, 0.54) * scale, Vector3(0.0, 1.00, -0.72) * scale, fur_material)
-    add_box_part(body, "WolfMuzzle", Vector3(0.36, 0.26, 0.32) * scale, Vector3(0.0, 0.91, -1.05) * scale, accent_material)
-    for x in [-0.21, 0.21]:
-        add_cone_part(body, "WolfEar", 0.17 * scale, 0.0, 0.42 * scale, Vector3(x * scale, 1.37, -0.72) * scale, fur_material)
-        add_box_part(body, "WolfEye", Vector3(0.075, 0.075, 0.05) * scale, Vector3(x * scale, 1.06, -1.01) * scale, eye_material_override)
-    for x in [-0.28, 0.28]:
-        for z in [-0.38, 0.50]:
-            add_box_part(body, "WolfLeg", Vector3(0.16, 0.52, 0.18) * scale, Vector3(x * scale, 0.27, z) * scale, fur_material)
-            add_box_part(body, "WolfPaw", Vector3(0.20, 0.11, 0.30) * scale, Vector3(x * scale, 0.055, (z + 0.05)) * scale, accent_material)
-    var tail := CylinderMesh.new()
-    tail.top_radius = 0.10 * scale
-    tail.bottom_radius = 0.18 * scale
-    tail.height = 0.92 * scale
-    tail.radial_segments = 5
-    var tail_instance := MeshInstance3D.new()
-    tail_instance.name = "WolfTail"
-    tail_instance.mesh = tail
-    tail_instance.material_override = fur_material
-    tail_instance.position = Vector3(0.0, 0.86, 0.86) * scale
-    tail_instance.rotation_degrees = Vector3(0.0, 0.0, -54.0)
-    body.add_child(tail_instance)
-    body.set_meta("visual_source", "authored_wolf_factory")
-    body.set_meta("character_asset_parts", [])
+    # The wolf remains in the production hostile factory; it now publishes a
+    # regular Skeleton3D + profile rather than receiving arena-only pose code.
+    MotionRigVisualFactoryScript.add_ash_wolf(body, scale, fur_material, accent_material, eye_material_override)
+
+func add_motion_biped_visual(body: Node3D, scale: float, body_material: Material, accent_material: Material, eye_material_override: Material) -> void:
+    # Arena-only proof body. It intentionally uses the same skeletal/profile
+    # route as the wolf while expressing a side arc through a biped topology.
+    MotionRigVisualFactoryScript.add_training_construct(body, scale, body_material, accent_material, eye_material_override)
 
 func add_box_part(body: Node3D, part_name: String, size: Vector3, position: Vector3, material: Material) -> void:
     var mesh := BoxMesh.new()

@@ -319,6 +319,12 @@ func build_tool(root: Node3D, item_id: String, held: bool) -> void:
 	var head_material := material_for(item_id)
 	var is_sword := item_id.ends_with("Sword") or item_id == "nightBlade"
 	if is_sword:
+		# Equipment adapters attach through this semantic point instead of guessing
+		# at the item root. Generated static swords expose the same "Grip" name.
+		var grip_anchor := Node3D.new()
+		grip_anchor.name = "Grip"
+		grip_anchor.position = Vector3(0.0, -0.30 * scale, 0.0)
+		root.add_child(grip_anchor)
 		add_cylinder(root, 0.030 * scale, 0.32 * scale, materials["wood"], Vector3(0.0, -0.30 * scale, 0.0), Vector3.ZERO, 7)
 		add_box(root, Vector3(0.34, 0.045, 0.055) * scale, head_material, Vector3(0.0, -0.10 * scale, 0.0))
 		add_box(root, Vector3(0.075, 0.68, 0.040) * scale, head_material, Vector3(0.0, 0.26 * scale, 0.0))
