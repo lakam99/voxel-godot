@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generator": "phase10-characters-v1",
+  "generator": "phase11-characters-shadow-stalker-v3",
   "seed": 1492,
   "coordinateSystem": "Blender Z-up source; GLB import verified in Godot",
   "triangleLimit": 900,
@@ -15,7 +15,8 @@
     "hostile_head": 5,
     "hostile_eye": 3,
     "hostile_core": 2,
-    "hostile_shard": 3
+    "hostile_shard": 3,
+    "shadow_stalker": 5
   },
   "materialVocabulary": [
     "accent",
@@ -1161,6 +1162,196 @@
       },
       "materialSlots": [
         "rift_core",
+        "hostile_accent"
+      ]
+    },
+    {
+      "id": "shadow_stalker_torso",
+      "path": "assets/visual/generated/characters/shadow_stalker_torso.glb",
+      "family": "shadow_stalker",
+      "variant": "torso",
+      "triangleCount": 140,
+      "boundingBox": {
+        "min": [
+          -0.5103,
+          -0.3833,
+          0.0
+        ],
+        "max": [
+          0.5103,
+          0.2357,
+          1.13
+        ],
+        "size": [
+          1.0206,
+          0.619,
+          1.13
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "grounded": true,
+        "minZ": 0.0,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "hostile",
+        "hostile_accent"
+      ]
+    },
+    {
+      "id": "shadow_stalker_head",
+      "path": "assets/visual/generated/characters/shadow_stalker_head.glb",
+      "family": "shadow_stalker",
+      "variant": "head",
+      "triangleCount": 142,
+      "boundingBox": {
+        "min": [
+          -0.2511,
+          -0.37,
+          0.0
+        ],
+        "max": [
+          0.2511,
+          0.2296,
+          0.679
+        ],
+        "size": [
+          0.5023,
+          0.5996,
+          0.679
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "grounded": true,
+        "minZ": 0.0,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "hostile",
+        "hostile_accent",
+        "hostile_eye"
+      ]
+    },
+    {
+      "id": "shadow_stalker_arm",
+      "path": "assets/visual/generated/characters/shadow_stalker_arm.glb",
+      "family": "shadow_stalker",
+      "variant": "arm",
+      "triangleCount": 90,
+      "boundingBox": {
+        "min": [
+          -0.1103,
+          -0.2048,
+          0.0
+        ],
+        "max": [
+          0.1103,
+          0.0988,
+          1.3018
+        ],
+        "size": [
+          0.2207,
+          0.3036,
+          1.3018
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "grounded": true,
+        "minZ": 0.0,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "hostile",
+        "hostile_accent"
+      ]
+    },
+    {
+      "id": "shadow_stalker_leg",
+      "path": "assets/visual/generated/characters/shadow_stalker_leg.glb",
+      "family": "shadow_stalker",
+      "variant": "leg",
+      "triangleCount": 108,
+      "boundingBox": {
+        "min": [
+          -0.205,
+          -0.4775,
+          0.0
+        ],
+        "max": [
+          0.1847,
+          0.1702,
+          1.03
+        ],
+        "size": [
+          0.3897,
+          0.6478,
+          1.03
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "grounded": true,
+        "minZ": 0.0,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "hostile"
+      ]
+    },
+    {
+      "id": "shadow_stalker_tail",
+      "path": "assets/visual/generated/characters/shadow_stalker_tail.glb",
+      "family": "shadow_stalker",
+      "variant": "tail",
+      "triangleCount": 34,
+      "boundingBox": {
+        "min": [
+          -0.1043,
+          -0.5486,
+          0.0
+        ],
+        "max": [
+          0.1043,
+          0.24,
+          0.393
+        ],
+        "size": [
+          0.2085,
+          0.7886,
+          0.393
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "grounded": true,
+        "minZ": 0.0,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "hostile",
         "hostile_accent"
       ]
     }

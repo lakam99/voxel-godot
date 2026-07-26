@@ -61,6 +61,62 @@ static func add_training_construct(body: Node3D, scale: float, body_material: Ma
 	return finalize_rig(body, skeleton, construct_profile())
 
 
+static func add_shadow_stalker(body: Node3D, scale: float, asset_registry, material_map: Dictionary) -> Dictionary:
+	# The Shadow Stalker is the first family to consume authored generated mesh
+	# parts through the same semantic Skeleton3D contract. The asset pieces are
+	# visible anatomy; the capsule that may accompany the actor remains physics
+	# only and is never used as this body's presentation.
+	var skeleton := create_skeleton(body, "ShadowStalkerMotionSkeleton", [
+		{"name": "Root", "parent": "", "rest": Vector3(0.0, 1.28, 0.0) * scale},
+		{"name": "Spine", "parent": "Root", "rest": Vector3(0.0, 0.22, 0.08) * scale},
+		{"name": "Chest", "parent": "Spine", "rest": Vector3(0.0, 0.32, -0.12) * scale},
+		{"name": "Head", "parent": "Chest", "rest": Vector3(0.0, 0.44, -0.18) * scale},
+		{"name": "ArmLeft", "parent": "Chest", "rest": Vector3(-0.43, 0.16, -0.06) * scale},
+		{"name": "ArmRight", "parent": "Chest", "rest": Vector3(0.43, 0.16, -0.06) * scale},
+		# The continuous leg mesh begins at its hip. Place that origin just inside
+		# the continuous torso base so the generated anatomy has a real overlap
+		# instead of a visible gap below the Root attachment.
+		{"name": "LegLeft", "parent": "Root", "rest": Vector3(-0.23, 0.04, 0.06) * scale},
+		{"name": "LegRight", "parent": "Root", "rest": Vector3(0.23, 0.04, 0.06) * scale},
+		{"name": "Tail", "parent": "Spine", "rest": Vector3(0.0, 0.06, 0.36) * scale}
+	])
+	var assets := [
+		{"id": "shadow_stalker_torso", "bone": "Root", "name": "ShadowStalkerTorso", "position": Vector3.ZERO, "rotation": Vector3.ZERO},
+		# The generated head's authored forward axis is opposite the shared Godot
+		# target-facing convention. Normalize it at the semantic attachment so the
+		# mesh family remains reusable while every consumer sees the actual face
+		# looking toward the target/body forward direction.
+		{"id": "shadow_stalker_head", "bone": "Head", "name": "ShadowStalkerHead", "position": Vector3.ZERO, "rotation": Vector3(0.0, PI, 0.0)},
+		{"id": "shadow_stalker_arm", "bone": "ArmLeft", "name": "ShadowStalkerArmLeft", "position": Vector3.ZERO, "rotation": Vector3(PI, 0.0, 0.0)},
+		{"id": "shadow_stalker_arm", "bone": "ArmRight", "name": "ShadowStalkerArmRight", "position": Vector3.ZERO, "rotation": Vector3(PI, 0.0, 0.0)},
+		{"id": "shadow_stalker_leg", "bone": "LegLeft", "name": "ShadowStalkerLegLeft", "position": Vector3.ZERO, "rotation": Vector3(PI, 0.0, 0.0)},
+		{"id": "shadow_stalker_leg", "bone": "LegRight", "name": "ShadowStalkerLegRight", "position": Vector3.ZERO, "rotation": Vector3(PI, 0.0, 0.0)},
+		{"id": "shadow_stalker_tail", "bone": "Tail", "name": "ShadowStalkerTail", "position": Vector3.ZERO, "rotation": Vector3(deg_to_rad(-72.0), 0.0, 0.0)}
+	]
+	var attached_asset_ids: Array[String] = []
+	for raw in assets:
+		var asset_data: Dictionary = raw as Dictionary
+		var asset_id := String(asset_data.get("id", ""))
+		var part: Node3D = asset_registry.instantiate_asset(asset_id) if asset_registry != null and asset_registry.has_method("instantiate_asset") else null
+		if part == null:
+			var errors := ["Missing generated Shadow Stalker asset %s" % asset_id]
+			skeleton.queue_free()
+			return {"profile": shadow_stalker_profile(), "validation": {"valid": false, "errors": errors}, "assetIds": attached_asset_ids}
+		part.name = String(asset_data.get("name", asset_id))
+		part.position = asset_data.get("position", Vector3.ZERO) as Vector3
+		part.rotation = asset_data.get("rotation", Vector3.ZERO) as Vector3
+		part.scale = Vector3.ONE * scale
+		if asset_registry.has_method("apply_material_map"):
+			asset_registry.apply_material_map(part, material_map)
+		add_attachment(skeleton, String(asset_data.get("bone", "Root")), part.name).add_child(part)
+		attached_asset_ids.append(asset_id)
+	var result := finalize_rig(body, skeleton, shadow_stalker_profile())
+	body.set_meta("character_asset_parts", attached_asset_ids)
+	body.set_meta("visual_source", "generated_shadow_stalker_mesh")
+	result["assetIds"] = attached_asset_ids
+	return result
+
+
 static func create_skeleton(body: Node3D, skeleton_name: String, bones: Array) -> Skeleton3D:
 	var skeleton := Skeleton3D.new()
 	skeleton.name = skeleton_name
@@ -174,5 +230,42 @@ static func construct_profile():
 			"lead_right": {"bone": "ArmRight", "axis": Vector3.FORWARD, "maxDegrees": 0.0, "motionAlign": true, "restDirection": Vector3.DOWN},
 			"counter_left": {"bone": "LegLeft", "axis": Vector3.FORWARD, "maxDegrees": 21.0, "sign": -1.0},
 			"counter_right": {"bone": "LegRight", "axis": Vector3.FORWARD, "maxDegrees": 21.0}
+		}
+	})
+
+
+static func shadow_stalker_profile():
+	return MotionRigProfileScript.new({
+		"id": "biped.shadow_stalker.v1",
+		"skeletonPath": "ShadowStalkerMotionSkeleton",
+		"metadata": {
+			"family": "shadow_stalker",
+			"visual": "generated_shadow_stalker",
+			"locomotion": {
+				"left": [{"role": "counter_left"}],
+				"right": [{"role": "counter_right"}],
+				"axis": Vector3.RIGHT,
+				"maxDegrees": 31.0,
+				"referenceSpeed": 4.55,
+				"strideFrequency": 3.6,
+				"blendRate": 12.0
+			},
+			"gazeTracking": {
+				"role": "gaze",
+				# Orbit locomotion keeps the collision body tangent to travel. Give the
+				# independent head enough range to hold the player in its view across
+				# that right-angle circle rather than only glancing toward them.
+				"maxYawDegrees": 82.0,
+				"blendRate": 10.0
+			}
+		},
+		"roles": {
+			"root": {"bone": "Root", "axis": Vector3.UP, "maxDegrees": 8.0},
+			"torso": [{"bone": "Spine", "axis": Vector3.UP, "maxDegrees": 15.0, "weight": 0.52}, {"bone": "Chest", "axis": Vector3.UP, "maxDegrees": 24.0, "weight": 0.86}],
+			"gaze": {"bone": "Head", "axis": Vector3.UP, "maxDegrees": 18.0},
+			"lead_left": {"bone": "ArmLeft", "axis": Vector3.FORWARD, "maxDegrees": 0.0, "motionAlign": true, "restDirection": Vector3.DOWN},
+			"lead_right": {"bone": "ArmRight", "axis": Vector3.FORWARD, "maxDegrees": 0.0, "motionAlign": true, "restDirection": Vector3.DOWN},
+			"counter_left": {"bone": "LegLeft", "axis": Vector3.FORWARD, "maxDegrees": 24.0, "sign": -1.0},
+			"counter_right": {"bone": "LegRight", "axis": Vector3.FORWARD, "maxDegrees": 24.0}
 		}
 	})

@@ -9,7 +9,7 @@ import bpy
 from mathutils import Vector
 
 
-GENERATOR_VERSION = "phase10-characters-v1"
+GENERATOR_VERSION = "phase11-characters-shadow-stalker-v3"
 SEED = 1492
 TRIANGLE_LIMIT = 900
 GALLERY_COLUMNS = 6
@@ -75,6 +75,11 @@ ASSET_SPECS = [
         {"id": f"hostile_shard_{index:02d}", "family": "hostile_shard", "builder": "hostile_shard", "variant": index}
         for index in range(1, 4)
     ],
+    {"id": "shadow_stalker_torso", "family": "shadow_stalker", "builder": "shadow_stalker_torso", "variant": "torso"},
+    {"id": "shadow_stalker_head", "family": "shadow_stalker", "builder": "shadow_stalker_head", "variant": "head"},
+    {"id": "shadow_stalker_arm", "family": "shadow_stalker", "builder": "shadow_stalker_arm", "variant": "arm"},
+    {"id": "shadow_stalker_leg", "family": "shadow_stalker", "builder": "shadow_stalker_leg", "variant": "leg"},
+    {"id": "shadow_stalker_tail", "family": "shadow_stalker", "builder": "shadow_stalker_tail", "variant": "tail"},
 ]
 
 
@@ -204,6 +209,41 @@ def add_branch(name, start, end, radius, vertices, material):
     obj.rotation_euler = direction.to_track_quat("Z", "Y").to_euler()
     assign_material(obj, material)
     apply_object_transform(obj)
+    return obj
+
+
+def add_profiled_body(name, rings, sides, material, phase=0.0):
+    """Build one continuous low-poly body from an ordered set of elliptical rings.
+
+    Unlike joined cone primitives, each adjacent profile ring shares a quad
+    surface with the next one.  This permits a deliberately faceted voxel
+    silhouette while keeping the torso a single uninterrupted volume.
+    Each ring is ``(z, radius_x, radius_y, center_y)`` in local Z-up space.
+    """
+    vertices = []
+    faces = []
+    side_count = max(3, int(sides))
+    for z, radius_x, radius_y, center_y in rings:
+        for side in range(side_count):
+            angle = phase + math.tau * side / side_count
+            vertices.append((math.cos(angle) * radius_x, center_y + math.sin(angle) * radius_y, z))
+    for ring_index in range(len(rings) - 1):
+        base = ring_index * side_count
+        next_base = (ring_index + 1) * side_count
+        for side in range(side_count):
+            next_side = (side + 1) % side_count
+            faces.append((base + side, base + next_side, next_base + next_side, next_base + side))
+    # Cap the body so it remains a watertight generated asset rather than a
+    # visual shell that exposes gaps at low camera angles.
+    faces.append(tuple(reversed(range(side_count))))
+    top_start = (len(rings) - 1) * side_count
+    faces.append(tuple(top_start + side for side in range(side_count)))
+    mesh = bpy.data.meshes.new(name + "_mesh")
+    mesh.from_pydata(vertices, [], faces)
+    mesh.materials.append(material)
+    mesh.update()
+    obj = bpy.data.objects.new(name, mesh)
+    bpy.context.collection.objects.link(obj)
     return obj
 
 
@@ -342,6 +382,70 @@ def build_hostile_shard(spec, materials, rng):
     return combine_asset(spec["id"], [shard, socket])
 
 
+def build_shadow_stalker_torso(spec, materials, rng):
+    # A single continuous, hunched torso volume.  The gradual ring changes
+    # create hips, waist, rib cage, and shoulder mass without the visual
+    # seams produced by stacking separate pelvis/ribcage/mantle cylinders.
+    torso = add_profiled_body("shadow_continuous_torso", [
+        (0.00, 0.255, 0.188, 0.055),
+        (0.18, 0.292, 0.214, 0.038),
+        (0.39, 0.305, 0.224, 0.008),
+        (0.60, 0.370, 0.267, -0.030),
+        (0.82, 0.404, 0.288, -0.062),
+        (1.01, 0.437, 0.302, -0.044),
+        (1.13, 0.382, 0.270, -0.018)
+    ], 8, materials["hostile"], phase=math.radians(22.5))
+    sternum = add_cube("shadow_sternum", (0.16, 0.085, 0.40), (0.0, -0.31, 0.72), materials["hostile_accent"], rotation=(math.radians(-9.0), 0.0, 0.0))
+    objects = [torso, sternum]
+    for side in (-1.0, 1.0):
+        objects.append(add_cone("shadow_shoulder_spike", 5, 0.07, 0.0, 0.34, (side * 0.39, 0.01, 1.01), materials["hostile_accent"], rotation=(math.radians(64.0), 0.0, math.radians(-side * 21.0))))
+    return combine_asset(spec["id"], objects)
+
+
+def build_shadow_stalker_head(spec, materials, rng):
+    skull = add_sphere("shadow_skull", 0.28, (0.0, 0.0, 0.29), materials["hostile"], segments=7, rings=4, scale=(0.92, 0.82, 1.05))
+    muzzle = add_cone("shadow_muzzle", 5, 0.19, 0.10, 0.32, (0.0, -0.21, 0.24), materials["hostile_accent"], rotation=(math.radians(90.0), 0.0, 0.0), scale=(0.88, 0.72, 1.0))
+    brow = add_cube("shadow_brow", (0.44, 0.06, 0.09), (0.0, -0.23, 0.40), materials["hostile_accent"], rotation=(math.radians(-8.0), 0.0, 0.0))
+    objects = [skull, muzzle, brow]
+    for side in (-1.0, 1.0):
+        objects.append(add_cone("shadow_ear", 5, 0.11, 0.0, 0.31, (side * 0.19, 0.02, 0.53), materials["hostile"], rotation=(math.radians(-12.0), math.radians(side * 17.0), 0.0)))
+        objects.append(add_sphere("shadow_eye", 0.055, (side * 0.105, -0.25, 0.34), materials["hostile_eye"], segments=6, rings=3, scale=(0.88, 0.40, 0.68)))
+    return combine_asset(spec["id"], objects)
+
+
+def build_shadow_stalker_arm(spec, materials, rng):
+    upper = add_cone("shadow_upper_arm", 6, 0.13, 0.095, 0.48, (0.0, 0.0, 0.24), materials["hostile"], scale=(0.84, 0.76, 1.0))
+    forearm = add_cone("shadow_forearm", 6, 0.11, 0.065, 0.46, (0.0, -0.035, 0.67), materials["hostile"], rotation=(math.radians(-7.0), 0.0, 0.0), scale=(0.80, 0.72, 1.0))
+    palm = add_cube("shadow_palm", (0.22, 0.16, 0.13), (0.0, -0.07, 0.96), materials["hostile_accent"], rotation=(math.radians(-10.0), 0.0, 0.0))
+    objects = [upper, forearm, palm]
+    for index, x in enumerate((-0.078, 0.0, 0.078)):
+        objects.append(add_cone("shadow_claw_%d" % index, 5, 0.034, 0.0, 0.30, (x, -0.13, 1.16), materials["hostile_accent"], rotation=(math.radians(-19.0), 0.0, 0.0)))
+    return combine_asset(spec["id"], objects)
+
+
+def build_shadow_stalker_leg(spec, materials, rng):
+    # One continuous hip-to-toe profile. The lower rings lean forward into a
+    # foot, so the form still reads as a digitigrade leg without individual
+    # thigh, shin, and foot cylinders floating from each other.
+    leg = add_profiled_body("shadow_continuous_leg", [
+        (0.00, 0.205, 0.158, 0.015),
+        (0.16, 0.194, 0.150, 0.024),
+        (0.39, 0.158, 0.124, 0.047),
+        (0.63, 0.132, 0.105, 0.067),
+        (0.84, 0.104, 0.086, 0.040),
+        (0.96, 0.118, 0.096, -0.075),
+        (1.03, 0.158, 0.118, -0.245),
+        (1.02, 0.145, 0.098, -0.382)
+    ], 7, materials["hostile"], phase=math.radians(25.714))
+    return combine_asset(spec["id"], [leg])
+
+
+def build_shadow_stalker_tail(spec, materials, rng):
+    base = add_cone("shadow_tail_base", 6, 0.14, 0.10, 0.48, (0.0, 0.0, 0.24), materials["hostile"], rotation=(math.radians(90.0), 0.0, 0.0), scale=(0.86, 0.74, 1.0))
+    tip = add_cone("shadow_tail_tip", 5, 0.10, 0.0, 0.58, (0.0, -0.30, 0.38), materials["hostile_accent"], rotation=(math.radians(59.0), 0.0, 0.0), scale=(0.72, 0.62, 1.0))
+    return combine_asset(spec["id"], [base, tip])
+
+
 BUILDERS = {
     "npc_torso": build_npc_torso,
     "npc_head": build_npc_head,
@@ -352,6 +456,11 @@ BUILDERS = {
     "hostile_eye": build_hostile_eye,
     "hostile_core": build_hostile_core,
     "hostile_shard": build_hostile_shard,
+    "shadow_stalker_torso": build_shadow_stalker_torso,
+    "shadow_stalker_head": build_shadow_stalker_head,
+    "shadow_stalker_arm": build_shadow_stalker_arm,
+    "shadow_stalker_leg": build_shadow_stalker_leg,
+    "shadow_stalker_tail": build_shadow_stalker_tail,
 }
 
 

@@ -27,17 +27,33 @@ static func step(body: CharacterBody3D, target: Node3D, intent, profile, delta: 
 		requested = requested.normalized()
 		body.velocity.x = requested.x * speed
 		body.velocity.z = requested.z * speed
-		# Godot's forward axis is -Z. Keep a profile visual's forward-facing head
-		# aligned with the actual motor velocity rather than its tail.
-		body.rotation.y = atan2(-requested.x, -requested.z)
 	else:
 		body.velocity.x = move_toward(body.velocity.x, 0.0, maxf(1.0, profile.orbit_speed * 7.0) * delta)
 		body.velocity.z = move_toward(body.velocity.z, 0.0, maxf(1.0, profile.orbit_speed * 7.0) * delta)
-		if radial.length_squared() > 0.0001:
-			body.rotation.y = atan2(-radial.x, -radial.z)
+	# A locomotion profile selects whether its visual faces its travel tangent
+	# (useful for an animal) or keeps its anatomy trained on the target (useful
+	# for a stalking humanoid). This is declarative profile data, not a family
+	# branch, and never changes the movement vector itself.
+	var facing := radial if String(profile.facing_mode) == "target" else requested
+	if facing.length_squared() <= 0.0001:
+		facing = radial
+	if facing.length_squared() > 0.0001:
+		body.rotation.y = atan2(-facing.x, -facing.z)
 	body.velocity.y = -0.25
 	body.move_and_slide()
 	var displacement := body.global_position - previous
+	var rig_driver := body.get_node_or_null("MotionRigPoseDriver")
+	if rig_driver != null and rig_driver.has_method("apply_locomotion_velocity"):
+		rig_driver.apply_locomotion_velocity(Vector3(body.velocity.x, 0.0, body.velocity.z), delta)
+	# A movement-facing retreat should be read as a whole-body withdrawal. Keep
+	# target gaze for circling, but blend the head back to the collision body's
+	# real travel heading while leaving range; otherwise a head still tracking the
+	# player produces a conspicuous jerk immediately after a motion resolves.
+	var retreat_uses_movement_gaze := String(intent.kind) == "retreat" and String(profile.facing_mode) == "movement" and requested.length_squared() > 0.0001
+	if retreat_uses_movement_gaze and rig_driver != null and rig_driver.has_method("apply_gaze_direction"):
+		rig_driver.apply_gaze_direction(requested, delta)
+	elif rig_driver != null and rig_driver.has_method("apply_gaze_target"):
+		rig_driver.apply_gaze_target(target.global_position, delta)
 	result["requestedDirection"] = requested
 	result["appliedVelocity"] = Vector3(displacement.x / delta, displacement.y / delta, displacement.z / delta)
 	result["displacement"] = displacement

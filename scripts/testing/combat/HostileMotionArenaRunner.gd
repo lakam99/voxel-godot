@@ -65,8 +65,12 @@ var auto_claw_enabled := false
 var auto_punish_enabled := false
 var auto_punish_requested := false
 var wolf_start_distance := DEFAULT_WOLF_START_DISTANCE
+var arena_start_angle_degrees := 0.0
+var capture_view := "gameplay"
 var wolf_dodge_success := false
 var wolf_recovery_punish_contact := false
+var opponent_motion_history: Array[Dictionary] = []
+var opponent_combo_locomotion_history: Array[Dictionary] = []
 var render_frame_count := 0
 var worst_render_frame_ms := 0.0
 var render_frames_over_50ms := 0
@@ -81,17 +85,20 @@ var wolf_health_bar: ProgressBar
 var motion_label: Label
 var status_label: Label
 var controls_label: Label
+var capture_camera: Camera3D
 
 
 func _ready() -> void:
 	auto_verify_enabled = OS.get_environment("VOXEL_HOSTILE_MOTION_ARENA_AUTOVERIFY") == "1"
 	auto_verify_capture_path = OS.get_environment("VOXEL_HOSTILE_MOTION_ARENA_CAPTURE")
 	auto_dodge_enabled = OS.get_environment("VOXEL_HOSTILE_MOTION_ARENA_AUTODODGE") == "1"
-	auto_attack_enabled = OS.get_environment("VOXEL_WOLF_ARENA_AUTOATTACK") == "1"
-	auto_track_enabled = OS.get_environment("VOXEL_WOLF_ARENA_AUTOTRACK") == "1"
-	auto_claw_enabled = OS.get_environment("VOXEL_WOLF_ARENA_AUTOCLAW") == "1"
-	auto_punish_enabled = OS.get_environment("VOXEL_WOLF_ARENA_AUTOPUNISH") == "1"
+	auto_attack_enabled = arena_flag_enabled("VOXEL_HOSTILE_ARENA_AUTOATTACK", "VOXEL_WOLF_ARENA_AUTOATTACK")
+	auto_track_enabled = arena_flag_enabled("VOXEL_HOSTILE_ARENA_AUTOTRACK", "VOXEL_WOLF_ARENA_AUTOTRACK")
+	auto_claw_enabled = arena_flag_enabled("VOXEL_HOSTILE_ARENA_AUTOCLAW", "VOXEL_WOLF_ARENA_AUTOCLAW")
+	auto_punish_enabled = arena_flag_enabled("VOXEL_HOSTILE_ARENA_AUTOPUNISH", "VOXEL_WOLF_ARENA_AUTOPUNISH")
 	wolf_start_distance = requested_wolf_start_distance()
+	arena_start_angle_degrees = requested_start_angle_degrees()
+	capture_view = requested_capture_view()
 	selected_seed_index = requested_seed_index()
 	opponent_definition = MotionArenaOpponentCatalogScript.definition_for(requested_opponent_id())
 	selected_plane_profile = requested_motion_profile()
@@ -102,6 +109,7 @@ func _ready() -> void:
 	create_player_defense()
 	create_opponent()
 	create_player_motion_adapter()
+	create_capture_camera_if_requested()
 	auto_verify_capture_time = requested_capture_time()
 	create_hud()
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
@@ -157,8 +165,24 @@ func requested_wolf_start_distance() -> float:
 	# This is pre-act arena setup, not a behavior override. It lets review start
 	# inside the profile's legitimate claw band or its lunge band using the same
 	# live target facts that ordinary play supplies.
-	var raw := OS.get_environment("VOXEL_WOLF_ARENA_START_DISTANCE")
+	var raw := OS.get_environment("VOXEL_HOSTILE_ARENA_START_DISTANCE")
+	if raw.is_empty():
+		raw = OS.get_environment("VOXEL_WOLF_ARENA_START_DISTANCE")
 	return clampf(raw.to_float(), 2.34, 5.40) if not raw.is_empty() else DEFAULT_WOLF_START_DISTANCE
+
+
+func requested_start_angle_degrees() -> float:
+	var raw := OS.get_environment("VOXEL_HOSTILE_ARENA_START_ANGLE_DEGREES")
+	return fposmod(raw.to_float(), 360.0) if not raw.is_empty() else 0.0
+
+
+func requested_capture_view() -> String:
+	var requested := OS.get_environment("VOXEL_HOSTILE_MOTION_ARENA_CAPTURE_VIEW").strip_edges().to_lower()
+	return requested if requested in ["gameplay", "side", "rear"] else "gameplay"
+
+
+func arena_flag_enabled(generic_name: String, legacy_name: String) -> bool:
+	return OS.get_environment(generic_name) == "1" or OS.get_environment(legacy_name) == "1"
 
 
 func normalized_motion_profile(value: String) -> String:
@@ -288,6 +312,30 @@ func create_player_defense() -> void:
 	player_defense = PlayerDefenseControllerScript.new()
 
 
+func create_capture_camera_if_requested() -> void:
+	if auto_verify_capture_path.is_empty() or capture_view == "gameplay":
+		return
+	# Capture-only observer. It never changes a body, input, target facts,
+	# motion samples or contact resolution; it simply records another readable
+	# view of the same live arena state for the visual approval gate.
+	capture_camera = Camera3D.new()
+	capture_camera.name = "ArenaCaptureObserver"
+	capture_camera.current = true
+	capture_camera.fov = 66.0
+	capture_camera.near = 0.05
+	add_child(capture_camera)
+	update_capture_camera()
+
+
+func update_capture_camera() -> void:
+	if capture_camera == null or opponent == null or not is_instance_valid(capture_camera) or not is_instance_valid(opponent):
+		return
+	var target := opponent.global_position + Vector3.UP * 1.05
+	var offset := Vector3(4.7, 2.35, 0.0) if capture_view == "side" else Vector3(0.0, 2.05, -4.9)
+	capture_camera.global_position = opponent.global_position + offset
+	capture_camera.look_at(target, Vector3.UP)
+
+
 func create_opponent() -> void:
 	var result: Dictionary = MotionArenaOpponentCatalogScript.instantiate_opponent(opponent_definition)
 	opponent = result.get("body", null) as Node3D
@@ -306,6 +354,7 @@ func create_opponent() -> void:
 
 	hostile_motion = HostileMotionCombatSystemScript.new()
 	hostile_motion.name = "ArenaHostileMotion"
+	hostile_motion.motion_started.connect(_on_motion_started)
 	hostile_motion.motion_contact_resolved.connect(_on_motion_contact_resolved)
 	hostile_motion.motion_finished.connect(_on_motion_finished)
 	add_child(hostile_motion)
@@ -352,7 +401,7 @@ func create_hud() -> void:
 	var panel := ColorRect.new()
 	panel.color = Color(0.025, 0.04, 0.07, 0.86)
 	panel.position = Vector2(18.0, 18.0)
-	panel.size = Vector2(590.0, 250.0 if is_wolf_opponent() else 214.0)
+	panel.size = Vector2(590.0, 286.0 if is_wolf_opponent() else 214.0)
 	layer.add_child(panel)
 	var title := Label.new()
 	title.text = "HOSTILE MOTION ARENA  |  %s" % String(opponent_definition.get("displayName", "OPPONENT")).to_upper()
@@ -374,7 +423,7 @@ func create_hud() -> void:
 	layer.add_child(health_bar)
 	if is_wolf_opponent():
 		wolf_health_label = Label.new()
-		wolf_health_label.position = Vector2(292.0, 72.0)
+		wolf_health_label.position = Vector2(314.0, 72.0)
 		wolf_health_label.add_theme_font_size_override("font_size", 17)
 		wolf_health_label.add_theme_color_override("font_color", Color("f5dfac"))
 		layer.add_child(wolf_health_label)
@@ -392,6 +441,8 @@ func create_hud() -> void:
 	layer.add_child(motion_label)
 	status_label = Label.new()
 	status_label.position = Vector2(36.0, 180.0 if is_wolf_opponent() else 154.0)
+	status_label.size = Vector2(538.0, 80.0 if is_wolf_opponent() else 42.0)
+	status_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	status_label.add_theme_font_size_override("font_size", 15)
 	status_label.add_theme_color_override("font_color", Color("f6e9a5"))
 	layer.add_child(status_label)
@@ -411,6 +462,7 @@ func _physics_process(delta: float) -> void:
 		update_wolf_behavior(delta)
 	else:
 		update_static_motion_loop(delta)
+	update_capture_camera()
 	if not motion_paused:
 		elapsed_since_hit += delta
 	update_hud()
@@ -455,7 +507,45 @@ func update_static_motion_loop(delta: float) -> void:
 func update_wolf_behavior(delta: float) -> void:
 	if motion_paused or wolf == null or wolf_behavior == null or wolf_defeated:
 		return
-	wolf_behavior.advance(delta, wolf, player, hostile_motion, arena_player_motion, {"center": Vector3.ZERO, "halfExtent": ARENA_HALF_EXTENT - 0.8})
+	var behavior: Dictionary = wolf_behavior.advance(delta, wolf, player, hostile_motion, arena_player_motion, {"center": Vector3.ZERO, "halfExtent": ARENA_HALF_EXTENT - 0.8})
+	observe_declared_combo_locomotion(behavior)
+
+
+func observe_declared_combo_locomotion(behavior: Dictionary) -> void:
+	# Observation only: the live controller and CharacterBody3D have already
+	# acted for this frame. This records whether a profile-declared locomotion
+	# window actually coincides with its named shared-motion phase.
+	if wolf_profile == null or hostile_motion == null or String(behavior.get("state", "")) != "commit":
+		return
+	var combo_index := int(behavior.get("activeComboIndex", -1))
+	var steps: Array = wolf_profile.combo_steps("forward_surge") if wolf_profile.has_method("combo_steps") else []
+	if combo_index < 0 or combo_index >= steps.size():
+		return
+	var step: Dictionary = steps[combo_index] as Dictionary
+	var locomotion_kind := String(step.get("locomotionKind", "")).strip_edges().to_lower()
+	var locomotion_phases: Array = step.get("locomotionPhases", []) as Array
+	var motion: Dictionary = hostile_motion.summary_for_body(wolf)
+	var phase := String(motion.get("phase", ""))
+	var intent: Dictionary = behavior.get("intent", {}) as Dictionary
+	if locomotion_kind.is_empty() or not locomotion_phases.has(phase) or String(intent.get("kind", "")) != locomotion_kind:
+		return
+	var observation := {
+		"at": auto_verify_elapsed,
+		"comboIndex": combo_index,
+		"motionPhase": phase,
+		"locomotionKind": locomotion_kind,
+		"intentReason": String(intent.get("reason", "")),
+		"speed": float(intent.get("speed", 0.0))
+	}
+	if not opponent_combo_locomotion_history.is_empty():
+		var previous: Dictionary = opponent_combo_locomotion_history.back() as Dictionary
+		if int(previous.get("comboIndex", -1)) == combo_index \
+			and String(previous.get("motionPhase", "")) == phase \
+			and String(previous.get("locomotionKind", "")) == locomotion_kind:
+			return
+	opponent_combo_locomotion_history.append(observation)
+	if opponent_combo_locomotion_history.size() > 32:
+		opponent_combo_locomotion_history.pop_front()
 
 
 func update_player_movement() -> void:
@@ -610,7 +700,8 @@ func reset_wolf_encounter() -> void:
 	# this point is exclusively through CharacterBody3D.move_and_slide().
 	wolf.global_position = Vector3.ZERO
 	wolf.velocity = Vector3.ZERO
-	player.global_position = Vector3(0.0, 0.0, wolf_start_distance)
+	var start_offset := Vector3(0.0, 0.0, wolf_start_distance).rotated(Vector3.UP, deg_to_rad(arena_start_angle_degrees))
+	player.global_position = start_offset
 	player.velocity = Vector3.ZERO
 	wolf_health = float(wolf_profile.max_health)
 	wolf_contact_count = 0
@@ -619,6 +710,8 @@ func reset_wolf_encounter() -> void:
 	wolf_recovery_punish_contact = false
 	if wolf_behavior != null:
 		wolf_behavior.setup(wolf_profile, int(ARENA_SEEDS[selected_seed_index]))
+	opponent_motion_history.clear()
+	opponent_combo_locomotion_history.clear()
 	if arena_player_motion != null:
 		arena_player_motion.clear_transient_state()
 	health = PLAYER_MAX_HEALTH
@@ -626,7 +719,7 @@ func reset_wolf_encounter() -> void:
 	auto_dodge_requested = false
 	auto_attack_requested = false
 	auto_punish_requested = false
-	last_hit_text = "WOLF RESET  |  circle, probe, commit, recover, and evade are replayable from this seed."
+	last_hit_text = "%s RESET  |  circle, probe, commit, recover, and evade are replayable from this seed." % String(opponent_definition.get("displayName", "HOSTILE")).to_upper()
 
 
 func arena_player_motion_targets() -> Array:
@@ -655,7 +748,7 @@ func resolve_arena_player_motion_contact(target: Dictionary, _resolution: Dictio
 	wolf_defeated = wolf_health <= 0.0
 	if wolf_defeated:
 		wolf.velocity = Vector3.ZERO
-	last_hit_text = "WOLF HIT %d  |  %.1f damage  |  %s" % [wolf_contact_count, damage, "defeated" if wolf_defeated else "behavior will reassess"]
+	last_hit_text = "%s HIT %d  |  %.1f damage  |  %s" % [String(opponent_definition.get("displayName", "HOSTILE")).to_upper(), wolf_contact_count, damage, "defeated" if wolf_defeated else "behavior will reassess"]
 	return {
 		"defeated": wolf_defeated,
 		"variant": String(opponent_definition.get("motionVariant", "wolf")),
@@ -670,6 +763,25 @@ func _on_motion_contact_resolved(_source, target, _target_kind: String, damage: 
 	contact_count += 1
 	elapsed_since_hit = 0.0
 	last_hit_text = "CONTACT %d  |  %.1f damage  |  move out before the next swing" % [contact_count, damage]
+
+
+func _on_motion_started(source, _target, _target_kind: String, _variant: String, summary: Dictionary) -> void:
+	if source != opponent:
+		return
+	var motion: Dictionary = summary.get("motion", {}) as Dictionary
+	var side := float(summary.get("leadMotionSide", 0.0))
+	var rig_profile = opponent.get_meta("motion_rig_profile", null) if opponent != null and opponent.has_meta("motion_rig_profile") else null
+	var lead_role := String(rig_profile.resolved_role("lead_appendage", side)) if rig_profile != null and rig_profile.has_method("resolved_role") else ""
+	opponent_motion_history.append({
+		"at": auto_verify_elapsed,
+		"primitiveId": String(motion.get("primitiveId", "")),
+		"leadMotionSide": side,
+		"leadRole": lead_role,
+		"verticalDirection": String((motion.get("parameters", {}) as Dictionary).get("verticalDirection", "")),
+		"phase": String(summary.get("phase", ""))
+	})
+	if opponent_motion_history.size() > 32:
+		opponent_motion_history.pop_front()
 
 
 func _on_motion_finished(source, _summary: Dictionary) -> void:
@@ -755,7 +867,7 @@ func update_hud() -> void:
 		var behavior: Dictionary = wolf_behavior.summary()
 		var intent: Dictionary = behavior.get("intent", {})
 		var threat: Dictionary = behavior.get("threat", {})
-		wolf_health_label.text = "WOLF HP  %.0f / %.0f" % [wolf_health, float(wolf_profile.max_health)]
+		wolf_health_label.text = "%s HP  %.0f / %.0f" % [String(opponent_definition.get("displayName", "HOSTILE")).to_upper(), wolf_health, float(wolf_profile.max_health)]
 		wolf_health_bar.value = wolf_health
 		motion_label.text = "%s | %s  ->  %s | %.2fm / %.2fm | orbit %s | seed %d" % [
 			String(behavior.get("state", "idle")).to_upper(), String(intent.get("kind", "hold")).to_upper(), phase_text,
@@ -780,10 +892,25 @@ func opponent_facing_player_degrees() -> float:
 	return rad_to_deg(forward.normalized().angle_to(toward_player.normalized()))
 
 
+func opponent_facing_movement_degrees() -> float:
+	if opponent == null or not is_instance_valid(opponent) or wolf_behavior == null:
+		return INF
+	var behavior: Dictionary = wolf_behavior.summary()
+	var motor: Dictionary = behavior.get("motor", {}) as Dictionary
+	var heading: Vector3 = motor.get("heading", Vector3.ZERO) as Vector3
+	heading.y = 0.0
+	var forward := -opponent.global_transform.basis.z
+	forward.y = 0.0
+	if heading.length_squared() <= 0.000001 or forward.length_squared() <= 0.000001:
+		return INF
+	return rad_to_deg(forward.normalized().angle_to(heading.normalized()))
+
+
 func complete_auto_verify() -> void:
 	auto_verify_enabled = false
 	var dodge_state: Dictionary = player_defense.summary() if player_defense != null else {}
 	var opponent_facing_player := opponent_facing_player_degrees()
+	var opponent_facing_movement := opponent_facing_movement_degrees()
 	var passed := false
 	var notes := ""
 	if is_wolf_opponent() and wolf_behavior != null:
@@ -793,11 +920,15 @@ func complete_auto_verify() -> void:
 		for transition in transitions:
 			if transition is Dictionary:
 				observed[String((transition as Dictionary).get("to", ""))] = true
+		var combo_verified := declared_combo_history_matches(wolf_profile)
+		var combo_locomotion_verified := declared_combo_locomotion_matches(wolf_profile)
 		passed = observed.has("orbit") and observed.has("probe") and observed.has("commit") and observed.has("recovery") \
 			and (not auto_attack_enabled or observed.has("evade")) \
 			and (not auto_dodge_enabled or wolf_dodge_success) \
-			and (not auto_punish_enabled or wolf_recovery_punish_contact)
-		notes = "Wolf fixture uses the authored profile, pure intent policy, CharacterBody3D motor, shared forward/arc motion runtime and live player contact geometry. Headed visual review is still required for readability and evade observation."
+			and (not auto_punish_enabled or wolf_recovery_punish_contact) \
+			and (String(wolf_profile.facing_mode) != "movement" or opponent_facing_movement <= 0.5) \
+			and combo_verified and combo_locomotion_verified
+		notes = "%s uses a declared behavior profile, pure intent policy, CharacterBody3D motor, shared forward/arc motion runtime and live player contact geometry. Declared combo starts and declared locomotion-in-motion-phase windows are verified; headed visual review remains required for readable pose and evade observation." % String(opponent_definition.get("displayName", "Profiled hostile"))
 	else:
 		var dodged := auto_dodge_enabled and contact_count == 0 and int(dodge_state.get("serial", 0)) >= 1 and player != null and opponent != null and player.global_position.distance_to(opponent.global_position) >= 4.2
 		var struck := not auto_dodge_enabled and contact_count >= 1 and health < PLAYER_MAX_HEALTH
@@ -820,7 +951,9 @@ func complete_auto_verify() -> void:
 		"autoPunishRequested": auto_punish_requested,
 		"dodgeState": dodge_state,
 		"playerDistance": player.global_position.distance_to(opponent.global_position) if player != null and opponent != null else INF,
+		"arenaStartAngleDegrees": arena_start_angle_degrees,
 		"opponentFacingPlayerDegrees": opponent_facing_player,
+		"opponentFacingMovementDegrees": opponent_facing_movement,
 		"seed": int(ARENA_SEEDS[selected_seed_index]),
 		"capturePath": auto_verify_capture_path,
 		"wolf": wolf_behavior.summary() if wolf_behavior != null else {},
@@ -828,6 +961,8 @@ func complete_auto_verify() -> void:
 		"wolfContactCount": wolf_contact_count,
 		"wolfDodgeSuccess": wolf_dodge_success,
 		"wolfRecoveryPunishContact": wolf_recovery_punish_contact,
+		"opponentMotionHistory": opponent_motion_history.duplicate(true),
+		"opponentComboLocomotionHistory": opponent_combo_locomotion_history.duplicate(true),
 		"performance": {
 			"renderFrameCount": render_frame_count,
 			"worstRenderFrameMs": worst_render_frame_ms,
@@ -845,6 +980,65 @@ func complete_auto_verify() -> void:
 			report_file.store_string(JSON.stringify(report, "\t"))
 			report_file.close()
 	get_tree().quit(0 if passed else 1)
+
+
+func declared_combo_history_matches(profile) -> bool:
+	if profile == null or not profile.has_method("combo_steps"):
+		return true
+	var expected_steps: Array = profile.combo_steps("forward_surge")
+	if expected_steps.is_empty():
+		return true
+	for start in range(opponent_motion_history.size() - expected_steps.size() + 1):
+		var matches := true
+		for offset in expected_steps.size():
+			var expected: Dictionary = expected_steps[offset] as Dictionary
+			var observed: Dictionary = opponent_motion_history[start + offset] as Dictionary
+			var expected_kind := String(expected.get("motionKind", ""))
+			var expected_primitive := "forward_surge_motion" if expected_kind == "forward_surge" else "%s_motion" % expected_kind
+			if String(observed.get("primitiveId", "")) != expected_primitive:
+				matches = false
+				break
+			var expected_side := float(expected.get("side", 0.0))
+			if absf(expected_side) > 0.001 and absf(float(observed.get("leadMotionSide", 0.0)) - expected_side) > 0.001:
+				matches = false
+				break
+			var expected_role := "lead_left" if expected_side < 0.0 else "lead_right"
+			if absf(expected_side) > 0.001 and String(observed.get("leadRole", "")) != expected_role:
+				matches = false
+				break
+			var expected_vertical := String(expected.get("verticalDirection", ""))
+			if not expected_vertical.is_empty() and String(observed.get("verticalDirection", "")) != expected_vertical:
+				matches = false
+				break
+		if matches:
+			return true
+	return false
+
+
+func declared_combo_locomotion_matches(profile) -> bool:
+	if profile == null or not profile.has_method("combo_steps"):
+		return true
+	var expected_steps: Array = profile.combo_steps("forward_surge")
+	for index in expected_steps.size():
+		var expected: Dictionary = expected_steps[index] as Dictionary
+		var expected_kind := String(expected.get("locomotionKind", "")).strip_edges().to_lower()
+		var expected_phases: Array = expected.get("locomotionPhases", []) as Array
+		if expected_kind.is_empty() or expected_phases.is_empty():
+			continue
+		var observed_match := false
+		for observation in opponent_combo_locomotion_history:
+			if not observation is Dictionary:
+				continue
+			var observed: Dictionary = observation as Dictionary
+			if int(observed.get("comboIndex", -1)) == index \
+				and String(observed.get("locomotionKind", "")) == expected_kind \
+				and expected_phases.has(String(observed.get("motionPhase", ""))) \
+				and float(observed.get("speed", 0.0)) > 0.0:
+				observed_match = true
+				break
+		if not observed_match:
+			return false
+	return true
 
 
 func capture_auto_verify() -> void:

@@ -10,6 +10,8 @@ static func profile_for(profile_id: String):
 	var normalized := profile_id.strip_edges().to_lower()
 	if normalized in ["wolf", "wolf.gray", "wolf_ash"]:
 		return wolf_gray()
+	if normalized in ["shadow.stalker", "shadow_stalker", "stalker.shadow"]:
+		return shadow_stalker()
 	return null
 
 
@@ -42,4 +44,50 @@ static func wolf_gray():
 		"motionDamage": 14.0,
 		"clawPlaneProfile": "lateral",
 		"motionSet": ["arc", "forward_surge"]
+	})
+
+
+static func shadow_stalker():
+	# Arena-only family grammar. It selects shared orbit/probe/arc/surge behavior
+	# through data; there is no shadow-specific attack or motor code.
+	return HostileBehaviorProfileScript.new({
+		"id": "shadow.stalker",
+		"displayName": "Shadow Stalker",
+		"visualVariant": "shadow_stalker",
+		"maxHealth": 58.0,
+		"preferredDistance": 3.65,
+		"engagementInnerDistance": 2.05,
+		"engagementOuterDistance": 5.15,
+		"clawDistance": 2.80,
+		"lungeMinDistance": 3.15,
+		"lungeMaxDistance": 5.00,
+		"approachSpeed": 2.85,
+		"orbitSpeed": 2.65,
+		"retreatSpeed": 3.00,
+		"lungeSpeed": 10.2,
+		"evadeSpeed": 11.4,
+		"orbitDuration": 1.16,
+		"probeDuration": 0.34,
+		"recoveryDuration": 0.76,
+		"evadeDuration": 0.26,
+		"evadeCooldown": 1.45,
+		"evadeStaminaCost": 24.0,
+		"evadeStaminaMax": 100.0,
+		"evadeStaminaRegen": 26.0,
+		"evadeLookaheadSeconds": 0.17,
+		"motionDamage": 15.0,
+		"clawPlaneProfile": "seeded",
+		"facingMode": "movement",
+		"motionSet": ["arc", "forward_surge"],
+		# This is a data-declared combo, not a Stalker-only controller path. The
+		# first left arc begins its normal wind-up while the ordinary shared motor
+		# lunges; it becomes contactable only when that arc descends. Each follow-up
+		# is an independently-instantiated shared downward arc whose side resolves
+		# through the rig profile rather than a bespoke animation clip.
+		"motionCombos": {
+			"forward_surge": [
+				{"motionKind": "arc", "side": -1.0, "planeProfile": "falling", "verticalDirection": "down", "locomotionKind": "lunge", "locomotionPhases": ["windup"]},
+				{"motionKind": "arc", "side": 1.0, "planeProfile": "falling", "verticalDirection": "down"}
+			]
+		}
 	})

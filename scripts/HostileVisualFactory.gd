@@ -14,6 +14,9 @@ var rift_eye_material: StandardMaterial3D
 var wolf_material: StandardMaterial3D
 var wolf_accent_material: StandardMaterial3D
 var wolf_eye_material: StandardMaterial3D
+var shadow_stalker_material: StandardMaterial3D
+var shadow_stalker_accent_material: StandardMaterial3D
+var shadow_stalker_eye_material: StandardMaterial3D
 
 func _init() -> void:
     setup_materials()
@@ -31,6 +34,9 @@ func setup_materials() -> void:
     wolf_material = make_material(Color(0.29, 0.31, 0.30), Color(0.035, 0.045, 0.04), 0.88)
     wolf_accent_material = make_material(Color(0.18, 0.20, 0.18), Color(0.02, 0.025, 0.02), 0.92)
     wolf_eye_material = make_material(Color(0.98, 0.75, 0.26), Color(0.76, 0.39, 0.05), 0.36)
+    shadow_stalker_material = make_material(Color(0.105, 0.085, 0.18), Color(0.018, 0.010, 0.04), 0.84)
+    shadow_stalker_accent_material = make_material(Color(0.25, 0.09, 0.36), Color(0.16, 0.015, 0.30), 0.70)
+    shadow_stalker_eye_material = make_material(Color(0.86, 0.52, 1.0), Color(0.62, 0.10, 1.0), 0.30)
 
 func make_material(albedo: Color, emission: Color, roughness: float) -> StandardMaterial3D:
     var material := StandardMaterial3D.new()
@@ -63,6 +69,17 @@ func variant_spec(variant: String) -> Dictionary:
                 "material": frost_material,
                 "accentMaterial": rift_material,
                 "eyeMaterial": wolf_eye_material
+            }
+        "shadow_stalker":
+            return {
+                "health": 34.0,
+                "scale": 1.0,
+                "colliderRadius": 0.38,
+                "colliderHeight": 2.16,
+                "colliderCenterY": 1.08,
+                "material": shadow_stalker_material,
+                "accentMaterial": shadow_stalker_accent_material,
+                "eyeMaterial": shadow_stalker_eye_material
             }
         "seer":
             return {
@@ -102,6 +119,8 @@ func build_visual(body: Node3D, variant: String) -> Dictionary:
         add_wolf_visual(body, scale, visual_material, spec.get("accentMaterial", wolf_accent_material), visual_eye_material)
     elif variant == "motion_biped":
         add_motion_biped_visual(body, scale, visual_material, spec.get("accentMaterial", rift_material), visual_eye_material)
+    elif variant == "shadow_stalker":
+        add_shadow_stalker_visual(body, scale, visual_material, spec.get("accentMaterial", shadow_stalker_accent_material), visual_eye_material)
     elif not add_generated_visual(body, variant, scale, visual_material, visual_eye_material):
         add_primitive_visual(body, variant, scale, visual_material, visual_eye_material)
 
@@ -230,6 +249,22 @@ func add_motion_biped_visual(body: Node3D, scale: float, body_material: Material
     # Arena-only proof body. It intentionally uses the same skeletal/profile
     # route as the wolf while expressing a side arc through a biped topology.
     MotionRigVisualFactoryScript.add_training_construct(body, scale, body_material, accent_material, eye_material_override)
+
+
+func add_shadow_stalker_visual(body: Node3D, scale: float, body_material: Material, accent_material: Material, eye_material_override: Material) -> void:
+    # Arena-first generated mesh consumer. Do not substitute primitive body
+    # geometry here: a missing generated asset must fail visibly during the PoC
+    # rather than silently reintroducing a capsule-like hostile.
+    var material_map := {
+        "hostile": body_material,
+        "hostile_accent": accent_material,
+        "hostile_eye": eye_material_override
+    }
+    var result: Dictionary = MotionRigVisualFactoryScript.add_shadow_stalker(body, scale, character_assets, material_map)
+    var validation: Dictionary = result.get("validation", {}) as Dictionary
+    body.set_meta("shadow_stalker_visual_valid", bool(validation.get("valid", false)))
+    if not bool(validation.get("valid", false)):
+        push_error("Shadow Stalker generated visual failed: %s" % str(validation.get("errors", [])))
 
 func add_box_part(body: Node3D, part_name: String, size: Vector3, position: Vector3, material: Material) -> void:
     var mesh := BoxMesh.new()

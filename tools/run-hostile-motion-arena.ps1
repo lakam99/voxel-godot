@@ -12,8 +12,16 @@ param(
     [switch]$WolfAutoTrack,
     [switch]$WolfAutoClaw,
     [switch]$WolfAutoPunish,
+    [switch]$AutoAttack,
+    [switch]$AutoTrack,
+    [switch]$AutoClaw,
+    [switch]$AutoPunish,
     [ValidateRange(2.34, 5.40)]
     [double]$WolfStartDistance = 4.35,
+    [ValidateRange(2.05, 5.40)]
+    [double]$StartDistance = 4.35,
+    [ValidateRange(0, 359.99)]
+    [double]$StartAngleDegrees = 0.0,
     [ValidateRange(0, 1)]
     [int]$SeedIndex = 0,
     [string]$OpponentId = "hostile.shadow",
@@ -21,6 +29,8 @@ param(
     [string]$MotionProfile = "seeded",
     [ValidateRange(0.02, 8.18)]
     [double]$CaptureTime = 0.48,
+    [ValidateSet("gameplay", "side", "rear")]
+    [string]$CaptureView = "gameplay",
     [string]$ArtifactDir = "artifacts\combat\hostile-motion-arena"
 )
 
@@ -42,26 +52,29 @@ if ($Verify -or $Capture -or $DodgeVerify) {
 	if ($DodgeVerify) {
 		$env:VOXEL_HOSTILE_MOTION_ARENA_AUTODODGE = "1"
 	}
-	if ($WolfAutoAttack) {
-		$env:VOXEL_WOLF_ARENA_AUTOATTACK = "1"
+	if ($WolfAutoAttack -or $AutoAttack) {
+		$env:VOXEL_HOSTILE_ARENA_AUTOATTACK = "1"
 	}
-	if ($WolfAutoTrack) {
-		$env:VOXEL_WOLF_ARENA_AUTOTRACK = "1"
+	if ($WolfAutoTrack -or $AutoTrack) {
+		$env:VOXEL_HOSTILE_ARENA_AUTOTRACK = "1"
 	}
-	if ($WolfAutoClaw) {
-		$env:VOXEL_WOLF_ARENA_AUTOCLAW = "1"
+	if ($WolfAutoClaw -or $AutoClaw) {
+		$env:VOXEL_HOSTILE_ARENA_AUTOCLAW = "1"
 	}
-	if ($WolfAutoPunish) {
-		$env:VOXEL_WOLF_ARENA_AUTOPUNISH = "1"
+	if ($WolfAutoPunish -or $AutoPunish) {
+		$env:VOXEL_HOSTILE_ARENA_AUTOPUNISH = "1"
 	}
-	if ($OpponentId -like "wolf.*") {
-		$env:VOXEL_WOLF_ARENA_START_DISTANCE = $WolfStartDistance.ToString([Globalization.CultureInfo]::InvariantCulture)
+	if ($OpponentId -like "wolf.*" -or $OpponentId -like "shadow.*") {
+		$ResolvedStartDistance = if ($StartDistance -ne 4.35) { $StartDistance } else { $WolfStartDistance }
+		$env:VOXEL_HOSTILE_ARENA_START_DISTANCE = $ResolvedStartDistance.ToString([Globalization.CultureInfo]::InvariantCulture)
+		$env:VOXEL_HOSTILE_ARENA_START_ANGLE_DEGREES = $StartAngleDegrees.ToString([Globalization.CultureInfo]::InvariantCulture)
 	}
     $capturePath = Join-Path $ArtifactDir "hostile-motion-arena.png"
     if ($Capture) {
         Remove-Item -LiteralPath $capturePath -Force -ErrorAction SilentlyContinue
         $env:VOXEL_HOSTILE_MOTION_ARENA_CAPTURE = $capturePath
         $env:VOXEL_HOSTILE_MOTION_ARENA_CAPTURE_TIME = $CaptureTime.ToString([Globalization.CultureInfo]::InvariantCulture)
+		$env:VOXEL_HOSTILE_MOTION_ARENA_CAPTURE_VIEW = $CaptureView
         Write-Host "Running standalone hostile-motion arena visual fixture capture."
 		& $GodotExe --path $ProjectPath --resolution 1280x720 --scene res://scenes/testing/HostileMotionArenaTest.tscn -- --arena-opponent $OpponentId --motion-profile $MotionProfile --arena-seed-index $SeedIndex
     } else {
@@ -72,12 +85,14 @@ if ($Verify -or $Capture -or $DodgeVerify) {
     Remove-Item Env:VOXEL_HOSTILE_MOTION_ARENA_REPORT -ErrorAction SilentlyContinue
     Remove-Item Env:VOXEL_HOSTILE_MOTION_ARENA_CAPTURE -ErrorAction SilentlyContinue
 	Remove-Item Env:VOXEL_HOSTILE_MOTION_ARENA_CAPTURE_TIME -ErrorAction SilentlyContinue
+	Remove-Item Env:VOXEL_HOSTILE_MOTION_ARENA_CAPTURE_VIEW -ErrorAction SilentlyContinue
 	Remove-Item Env:VOXEL_HOSTILE_MOTION_ARENA_AUTODODGE -ErrorAction SilentlyContinue
-	Remove-Item Env:VOXEL_WOLF_ARENA_AUTOATTACK -ErrorAction SilentlyContinue
-	Remove-Item Env:VOXEL_WOLF_ARENA_AUTOTRACK -ErrorAction SilentlyContinue
-	Remove-Item Env:VOXEL_WOLF_ARENA_AUTOCLAW -ErrorAction SilentlyContinue
-	Remove-Item Env:VOXEL_WOLF_ARENA_AUTOPUNISH -ErrorAction SilentlyContinue
-	Remove-Item Env:VOXEL_WOLF_ARENA_START_DISTANCE -ErrorAction SilentlyContinue
+	Remove-Item Env:VOXEL_HOSTILE_ARENA_AUTOATTACK -ErrorAction SilentlyContinue
+	Remove-Item Env:VOXEL_HOSTILE_ARENA_AUTOTRACK -ErrorAction SilentlyContinue
+	Remove-Item Env:VOXEL_HOSTILE_ARENA_AUTOCLAW -ErrorAction SilentlyContinue
+	Remove-Item Env:VOXEL_HOSTILE_ARENA_AUTOPUNISH -ErrorAction SilentlyContinue
+	Remove-Item Env:VOXEL_HOSTILE_ARENA_START_DISTANCE -ErrorAction SilentlyContinue
+	Remove-Item Env:VOXEL_HOSTILE_ARENA_START_ANGLE_DEGREES -ErrorAction SilentlyContinue
 	Remove-Item Env:VOXEL_HOSTILE_MOTION_ARENA_TIME_SCALE -ErrorAction SilentlyContinue
     if (-not (Test-Path -LiteralPath $reportPath)) {
         throw "Hostile Motion Arena did not produce a report: $reportPath"
