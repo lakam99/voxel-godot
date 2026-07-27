@@ -30,36 +30,34 @@ static func step(body: CharacterBody3D, target: Node3D, intent, profile, delta: 
 	else:
 		body.velocity.x = move_toward(body.velocity.x, 0.0, maxf(1.0, profile.orbit_speed * 7.0) * delta)
 		body.velocity.z = move_toward(body.velocity.z, 0.0, maxf(1.0, profile.orbit_speed * 7.0) * delta)
-	# A locomotion profile selects whether its visual faces its travel tangent
-	# (useful for an animal) or keeps its anatomy trained on the target (useful
-	# for a stalking humanoid). This is declarative profile data, not a family
-	# branch, and never changes the movement vector itself.
-	var facing := radial if String(profile.facing_mode) == "target" else requested
-	if facing.length_squared() <= 0.0001:
-		facing = radial
-	if facing.length_squared() > 0.0001:
-		body.rotation.y = atan2(-facing.x, -facing.z)
 	body.velocity.y = -0.25
 	body.move_and_slide()
 	var displacement := body.global_position - previous
+	var applied_planar_velocity := Vector3(displacement.x / delta, 0.0, displacement.z / delta)
+	var travel_heading := applied_planar_velocity.normalized() if applied_planar_velocity.length_squared() > 0.0001 else requested
+	if travel_heading.length_squared() <= 0.0001:
+		travel_heading = radial
+	# A profile declares body and gaze independently. This avoids anatomy-family
+	# branches: a quadruped can face and look along real travel, while a biped can
+	# keep a target-tracking head over movement-facing locomotion. Use measured
+	# displacement after slide resolution so a constrained body never presents as
+	# travelling sideways relative to its legs.
+	var facing := radial if String(profile.facing_mode) == "target" else travel_heading
+	if facing.length_squared() > 0.0001:
+		body.rotation.y = atan2(-facing.x, -facing.z)
 	var rig_driver := body.get_node_or_null("MotionRigPoseDriver")
 	if rig_driver != null and rig_driver.has_method("apply_locomotion_velocity"):
-		rig_driver.apply_locomotion_velocity(Vector3(body.velocity.x, 0.0, body.velocity.z), delta)
-	# A movement-facing retreat should be read as a whole-body withdrawal. Keep
-	# target gaze for circling, but blend the head back to the collision body's
-	# real travel heading while leaving range; otherwise a head still tracking the
-	# player produces a conspicuous jerk immediately after a motion resolves.
-	var retreat_uses_movement_gaze := String(intent.kind) == "retreat" and String(profile.facing_mode) == "movement" and requested.length_squared() > 0.0001
-	if retreat_uses_movement_gaze and rig_driver != null and rig_driver.has_method("apply_gaze_direction"):
-		rig_driver.apply_gaze_direction(requested, delta)
+		rig_driver.apply_locomotion_velocity(applied_planar_velocity, delta)
+	if String(profile.gaze_mode) == "movement" and rig_driver != null and rig_driver.has_method("apply_gaze_direction"):
+		rig_driver.apply_gaze_direction(travel_heading, delta)
 	elif rig_driver != null and rig_driver.has_method("apply_gaze_target"):
 		rig_driver.apply_gaze_target(target.global_position, delta)
 	result["requestedDirection"] = requested
-	result["appliedVelocity"] = Vector3(displacement.x / delta, displacement.y / delta, displacement.z / delta)
+	result["appliedVelocity"] = Vector3(applied_planar_velocity.x, displacement.y / delta, applied_planar_velocity.z)
 	result["displacement"] = displacement
 	result["collisionCount"] = body.get_slide_collision_count()
 	result["blocked"] = requested.length_squared() > 0.0001 and Vector2(displacement.x, displacement.z).length() <= 0.001
-	result["heading"] = requested if requested.length_squared() > 0.0001 else radial
+	result["heading"] = travel_heading
 	result["distance"] = distance
 	return result
 

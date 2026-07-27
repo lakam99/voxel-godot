@@ -9,7 +9,7 @@ import bpy
 from mathutils import Vector
 
 
-GENERATOR_VERSION = "phase11-characters-shadow-stalker-v3"
+GENERATOR_VERSION = "phase11-characters-frost-predator-v1"
 SEED = 1492
 TRIANGLE_LIMIT = 900
 GALLERY_COLUMNS = 6
@@ -26,6 +26,7 @@ MATERIAL_SPECS = {
     "hostile_eye": (0.62, 0.90, 1.0, 1.0),
     "rift_core": (0.94, 0.36, 0.88, 1.0),
     "frost": (0.20, 0.34, 0.42, 1.0),
+    "frost_ice": (0.66, 0.89, 0.95, 1.0),
 }
 
 ASSET_SPECS = [
@@ -80,6 +81,11 @@ ASSET_SPECS = [
     {"id": "shadow_stalker_arm", "family": "shadow_stalker", "builder": "shadow_stalker_arm", "variant": "arm"},
     {"id": "shadow_stalker_leg", "family": "shadow_stalker", "builder": "shadow_stalker_leg", "variant": "leg"},
     {"id": "shadow_stalker_tail", "family": "shadow_stalker", "builder": "shadow_stalker_tail", "variant": "tail"},
+    {"id": "frost_predator_torso", "family": "frost_predator", "builder": "frost_predator_torso", "variant": "torso"},
+    {"id": "frost_predator_head", "family": "frost_predator", "builder": "frost_predator_head", "variant": "head"},
+    {"id": "frost_predator_foreleg", "family": "frost_predator", "builder": "frost_predator_foreleg", "variant": "foreleg"},
+    {"id": "frost_predator_hindleg", "family": "frost_predator", "builder": "frost_predator_hindleg", "variant": "hindleg"},
+    {"id": "frost_predator_tail", "family": "frost_predator", "builder": "frost_predator_tail", "variant": "tail"},
 ]
 
 
@@ -244,6 +250,12 @@ def add_profiled_body(name, rings, sides, material, phase=0.0):
     mesh.update()
     obj = bpy.data.objects.new(name, mesh)
     bpy.context.collection.objects.link(obj)
+    return obj
+
+
+def rotate_and_apply(obj, rotation):
+    obj.rotation_euler = rotation
+    apply_object_transform(obj)
     return obj
 
 
@@ -446,6 +458,122 @@ def build_shadow_stalker_tail(spec, materials, rng):
     return combine_asset(spec["id"], [base, tip])
 
 
+def build_frost_predator_torso(spec, materials, rng):
+    # The cold predator is a low, broad four-legged body. Its trunk is one
+    # watertight, ring-generated volume rather than a stack of primitive body
+    # segments. The long axis becomes Godot -Z after export, matching the
+    # semantic forward axis used by its quadruped rig.
+    torso = add_profiled_body("frost_predator_continuous_torso", [
+        (0.00, 0.36, 0.245, 0.000),
+        (0.19, 0.43, 0.292, -0.014),
+        (0.48, 0.49, 0.332, -0.022),
+        (0.82, 0.52, 0.352, -0.010),
+        (1.14, 0.50, 0.341, 0.002),
+        (1.42, 0.55, 0.372, 0.010),
+        (1.62, 0.49, 0.337, 0.000)
+    ], 8, materials["frost"], phase=math.radians(22.5))
+    objects = [torso]
+    # Crystalline dorsal plates are distinct surface anatomy, but the actual
+    # load-bearing torso remains continuous. Pre-rotating these cones keeps
+    # them vertical after the torso's export-axis conversion below.
+    for index, z in enumerate((0.38, 0.68, 0.98, 1.28)):
+        plate = add_cone(
+            "frost_dorsal_plate_%d" % index,
+            5,
+            0.105 - index * 0.008,
+            0.0,
+            0.26 - index * 0.012,
+            (0.0, -0.31, z),
+            materials["frost_ice"],
+            rotation=(math.radians(90.0), 0.0, 0.0),
+            scale=(0.82, 0.74, 1.0),
+        )
+        objects.append(plate)
+    for obj in objects:
+        rotate_and_apply(obj, (math.radians(-90.0), 0.0, 0.0))
+    return combine_asset(spec["id"], objects)
+
+
+def build_frost_predator_head(spec, materials, rng):
+    # A wedge-shaped prow gives this family a predator silhouette instead of
+    # reusing the generic hostile sphere. The profile is continuous from neck
+    # to snout; ears and ice brows are intentional facial attachments.
+    head = add_profiled_body("frost_predator_continuous_head", [
+        (0.00, 0.28, 0.255, 0.000),
+        (0.18, 0.34, 0.292, -0.008),
+        (0.40, 0.31, 0.266, 0.000),
+        (0.60, 0.25, 0.208, 0.012),
+        (0.74, 0.17, 0.155, 0.018)
+    ], 7, materials["frost"], phase=math.radians(25.714))
+    objects = [head]
+    for side in (-1.0, 1.0):
+        ear = add_cone(
+            "frost_ear_%d" % int(side), 5, 0.105, 0.0, 0.30,
+            (side * 0.20, -0.12, 0.22), materials["frost"],
+            rotation=(math.radians(82.0), math.radians(side * 14.0), 0.0),
+            scale=(0.82, 0.72, 1.0),
+        )
+        brow = add_cone(
+            "frost_brow_%d" % int(side), 5, 0.060, 0.0, 0.24,
+            (side * 0.16, -0.24, 0.47), materials["frost_ice"],
+            rotation=(math.radians(93.0), math.radians(side * 12.0), 0.0),
+            scale=(0.84, 0.70, 1.0),
+        )
+        eye = add_sphere("frost_eye_%d" % int(side), 0.052, (side * 0.125, -0.27, 0.49), materials["hostile_eye"], segments=6, rings=3, scale=(0.84, 0.42, 0.72))
+        objects.extend([ear, brow, eye])
+    for obj in objects:
+        rotate_and_apply(obj, (math.radians(-90.0), 0.0, 0.0))
+    return combine_asset(spec["id"], objects)
+
+
+def build_frost_predator_foreleg(spec, materials, rng):
+    # A single hip-to-claw volume lets the animated foreleg read as an actual
+    # limb while it follows the shared arc motion. The ice claws are only the
+    # terminal contact anatomy, never a second detached limb.
+    leg = add_profiled_body("frost_predator_continuous_foreleg", [
+        (0.00, 0.172, 0.150, 0.000),
+        (0.16, 0.180, 0.154, 0.010),
+        (0.38, 0.145, 0.124, 0.020),
+        (0.61, 0.112, 0.096, 0.032),
+        (0.80, 0.108, 0.092, 0.018),
+        (0.93, 0.146, 0.110, -0.086),
+        (0.99, 0.178, 0.124, -0.222)
+    ], 7, materials["frost"], phase=math.radians(25.714))
+    objects = [leg]
+    for index, x in enumerate((-0.072, 0.0, 0.072)):
+        objects.append(add_cone("frost_foreclaw_%d" % index, 5, 0.030, 0.0, 0.20, (x, -0.15, 1.11), materials["frost_ice"], rotation=(math.radians(-18.0), 0.0, 0.0)))
+    return combine_asset(spec["id"], objects)
+
+
+def build_frost_predator_hindleg(spec, materials, rng):
+    # The rear leg has a heavier haunch, but retains a single uninterrupted
+    # profile from the shoulder socket to the planted paw.
+    leg = add_profiled_body("frost_predator_continuous_hindleg", [
+        (0.00, 0.226, 0.188, 0.000),
+        (0.18, 0.232, 0.194, 0.014),
+        (0.38, 0.190, 0.157, 0.036),
+        (0.59, 0.132, 0.112, 0.062),
+        (0.77, 0.114, 0.097, 0.045),
+        (0.91, 0.145, 0.108, -0.070),
+        (0.98, 0.180, 0.125, -0.232)
+    ], 7, materials["frost"], phase=math.radians(25.714))
+    return combine_asset(spec["id"], [leg])
+
+
+def build_frost_predator_tail(spec, materials, rng):
+    tail = add_profiled_body("frost_predator_continuous_tail", [
+        (0.00, 0.158, 0.130, 0.000),
+        (0.20, 0.144, 0.116, 0.018),
+        (0.46, 0.112, 0.094, 0.060),
+        (0.70, 0.078, 0.068, 0.112),
+        (0.90, 0.036, 0.033, 0.158)
+    ], 7, materials["frost"], phase=math.radians(25.714))
+    tip = add_cone("frost_tail_ice_tip", 5, 0.060, 0.0, 0.23, (0.0, 0.154, 0.97), materials["frost_ice"], scale=(0.78, 0.72, 1.0))
+    for obj in [tail, tip]:
+        rotate_and_apply(obj, (math.radians(90.0), 0.0, 0.0))
+    return combine_asset(spec["id"], [tail, tip])
+
+
 BUILDERS = {
     "npc_torso": build_npc_torso,
     "npc_head": build_npc_head,
@@ -461,6 +589,11 @@ BUILDERS = {
     "shadow_stalker_arm": build_shadow_stalker_arm,
     "shadow_stalker_leg": build_shadow_stalker_leg,
     "shadow_stalker_tail": build_shadow_stalker_tail,
+    "frost_predator_torso": build_frost_predator_torso,
+    "frost_predator_head": build_frost_predator_head,
+    "frost_predator_foreleg": build_frost_predator_foreleg,
+    "frost_predator_hindleg": build_frost_predator_hindleg,
+    "frost_predator_tail": build_frost_predator_tail,
 }
 
 

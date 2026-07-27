@@ -12,6 +12,8 @@ static func profile_for(profile_id: String):
 		return wolf_gray()
 	if normalized in ["shadow.stalker", "shadow_stalker", "stalker.shadow"]:
 		return shadow_stalker()
+	if normalized in ["frost.predator", "frost_predator", "predator.frost"]:
+		return frost_predator()
 	return null
 
 
@@ -43,6 +45,10 @@ static func wolf_gray():
 		"evadeLookaheadSeconds": 0.19,
 		"motionDamage": 14.0,
 		"clawPlaneProfile": "lateral",
+		# Quadrupeds move as a whole: their collision body and head both follow
+		# measured travel instead of visually crab-walking while tracking a target.
+		"facingMode": "movement",
+		"gazeMode": "movement",
 		"motionSet": ["arc", "forward_surge"]
 	})
 
@@ -78,6 +84,7 @@ static func shadow_stalker():
 		"motionDamage": 15.0,
 		"clawPlaneProfile": "seeded",
 		"facingMode": "movement",
+		"gazeMode": "target",
 		"motionSet": ["arc", "forward_surge"],
 		# This is a data-declared combo, not a Stalker-only controller path. The
 		# first left arc begins its normal wind-up while the ordinary shared motor
@@ -85,6 +92,52 @@ static func shadow_stalker():
 		# is an independently-instantiated shared downward arc whose side resolves
 		# through the rig profile rather than a bespoke animation clip.
 		"motionCombos": {
+			"forward_surge": [
+				{"motionKind": "arc", "side": -1.0, "planeProfile": "falling", "verticalDirection": "down", "locomotionKind": "lunge", "locomotionPhases": ["windup"]},
+				{"motionKind": "arc", "side": 1.0, "planeProfile": "falling", "verticalDirection": "down"}
+			]
+		}
+	})
+
+
+static func frost_predator():
+	# Arena-only cold-predator grammar. Its different pacing and reach are all
+	# declared profile values; it still uses the shared behavior policy, motor,
+	# arc recipe, semantic rig and contact pipeline.
+	return HostileBehaviorProfileScript.new({
+		"id": "frost.predator",
+		"displayName": "Frost Predator",
+		"visualVariant": "frost_predator",
+		"maxHealth": 66.0,
+		"preferredDistance": 4.20,
+		"engagementInnerDistance": 2.35,
+		"engagementOuterDistance": 5.75,
+		"clawDistance": 3.05,
+		"lungeMinDistance": 3.55,
+		"lungeMaxDistance": 5.60,
+		"approachSpeed": 3.55,
+		"orbitSpeed": 3.25,
+		"retreatSpeed": 4.05,
+		"lungeSpeed": 8.85,
+		"evadeSpeed": 9.20,
+		"orbitDuration": 1.34,
+		"probeDuration": 0.38,
+		"recoveryDuration": 0.68,
+		"evadeDuration": 0.24,
+		"evadeCooldown": 1.72,
+		"evadeStaminaCost": 30.0,
+		"evadeStaminaMax": 100.0,
+		"evadeStaminaRegen": 20.0,
+		"evadeLookaheadSeconds": 0.16,
+		"motionDamage": 17.0,
+		"clawPlaneProfile": "falling",
+		"facingMode": "movement",
+		"gazeMode": "movement",
+		"motionSet": ["arc", "forward_surge"],
+		"motionCombos": {
+			# Its paired foreclaws use two independently-instantiated downward arcs.
+			# The first telegraphs and advances through the ordinary lunge intent;
+			# no Frost-specific animation state or hit rule is introduced.
 			"forward_surge": [
 				{"motionKind": "arc", "side": -1.0, "planeProfile": "falling", "verticalDirection": "down", "locomotionKind": "lunge", "locomotionPhases": ["windup"]},
 				{"motionKind": "arc", "side": 1.0, "planeProfile": "falling", "verticalDirection": "down"}

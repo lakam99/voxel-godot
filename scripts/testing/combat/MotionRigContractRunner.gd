@@ -31,6 +31,7 @@ func run() -> void:
 	test_stacked_motions_keep_separate_pose_contributors()
 	test_quadruped_and_biped_profiles_validate()
 	test_generated_shadow_stalker_mesh_and_rig_validate()
+	test_generated_frost_predator_mesh_and_rig_validate()
 	test_declared_locomotion_gait_uses_velocity_without_moving_the_body()
 	test_declared_gaze_tracks_target_without_turning_the_body()
 	test_movement_gaze_releases_target_tracking_smoothly()
@@ -126,6 +127,47 @@ func test_generated_shadow_stalker_mesh_and_rig_validate() -> void:
 		has_all_assets = has_all_assets and asset_ids.has(asset_id)
 	var valid := bool(validation.get("valid", false)) and source == "generated_shadow_stalker_mesh" and skeleton != null and has_all_assets and tracks_motion and not (solution.get("contributions", {}) as Dictionary).is_empty()
 	add_result("shadow_stalker_uses_generated_anatomy_and_retargets_the_shared_arc_to_its_arm", valid, {"validation": validation, "assetIds": asset_ids, "source": source, "tracksMotion": tracks_motion, "armDirection": arm_direction, "solution": solution})
+	root.free()
+
+
+func test_generated_frost_predator_mesh_and_rig_validate() -> void:
+	# The arena must exercise the actual registry-generated cold-predator body,
+	# not the older generic frost torso/head path. Both lead signs select their
+	# declared forelimb through the same shared pose signal contract.
+	var root := Node3D.new()
+	get_root().add_child(root)
+	var predator := Node3D.new()
+	root.add_child(predator)
+	var factory = HostileVisualFactoryScript.new()
+	factory.build_visual(predator, "frost_predator")
+	var validation: Dictionary = predator.get_meta("motion_rig_validation", {}) as Dictionary
+	var asset_ids: Array = predator.get_meta("character_asset_parts", []) as Array
+	var source := String(predator.get_meta("visual_source", ""))
+	var skeleton := predator.get_node_or_null("FrostPredatorMotionSkeleton") as Skeleton3D
+	var driver = predator.get_node_or_null("MotionRigPoseDriver")
+	var left_signals = MotionPoseSignalBuilderScript.build_for_stack(arc_stack(1543, -1.0), 0.52)
+	var left_solution: Dictionary = driver.apply_signals(left_signals) if driver != null else {}
+	var left_index := skeleton.find_bone("ForeLeft") if skeleton != null else -1
+	var left_direction := skeleton.get_bone_pose_rotation(left_index) * Vector3.DOWN if left_index >= 0 else Vector3.ZERO
+	var right_signals = MotionPoseSignalBuilderScript.build_for_stack(arc_stack(7651, 1.0), 0.52)
+	var right_solution: Dictionary = driver.apply_signals(right_signals) if driver != null else {}
+	var right_index := skeleton.find_bone("ForeRight") if skeleton != null else -1
+	var right_direction := skeleton.get_bone_pose_rotation(right_index) * Vector3.DOWN if right_index >= 0 else Vector3.ZERO
+	var expected_assets := ["frost_predator_torso", "frost_predator_head", "frost_predator_foreleg", "frost_predator_hindleg", "frost_predator_tail"]
+	var has_all_assets := true
+	for asset_id in expected_assets:
+		has_all_assets = has_all_assets and asset_ids.has(asset_id)
+	var left_tracks_motion := left_direction.length_squared() > 0.000001 and left_direction.normalized().angle_to(left_signals[0].limb_direction) < deg_to_rad(0.5) if not left_signals.is_empty() else false
+	var right_tracks_motion := right_direction.length_squared() > 0.000001 and right_direction.normalized().angle_to(right_signals[0].limb_direction) < deg_to_rad(0.5) if not right_signals.is_empty() else false
+	if driver != null and driver.has_method("reset_pose"):
+		driver.reset_pose()
+	if driver != null and driver.has_method("apply_locomotion_velocity"):
+		driver.apply_locomotion_velocity(Vector3(0.0, 0.0, 4.25), 0.13)
+	var gait_left_direction := skeleton.get_bone_pose_rotation(left_index) * Vector3.DOWN if left_index >= 0 else Vector3.ZERO
+	var gait_right_direction := skeleton.get_bone_pose_rotation(right_index) * Vector3.DOWN if right_index >= 0 else Vector3.ZERO
+	var fore_aft_gait := absf(gait_left_direction.z) > 0.02 and absf(gait_right_direction.z) > 0.02 and gait_left_direction.z * gait_right_direction.z < 0.0 and absf(gait_left_direction.x) < 0.01 and absf(gait_right_direction.x) < 0.01
+	var valid := bool(validation.get("valid", false)) and source == "generated_frost_predator_mesh" and skeleton != null and has_all_assets and left_tracks_motion and right_tracks_motion and fore_aft_gait and not (left_solution.get("contributions", {}) as Dictionary).is_empty() and not (right_solution.get("contributions", {}) as Dictionary).is_empty()
+	add_result("frost_predator_uses_generated_quadruped_anatomy_forelimb_arcs_and_fore_aft_gait", valid, {"validation": validation, "assetIds": asset_ids, "source": source, "leftTracksMotion": left_tracks_motion, "rightTracksMotion": right_tracks_motion, "leftDirection": left_direction, "rightDirection": right_direction, "gaitLeftDirection": gait_left_direction, "gaitRightDirection": gait_right_direction, "foreAftGait": fore_aft_gait})
 	root.free()
 
 

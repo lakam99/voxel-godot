@@ -32,6 +32,7 @@ var evade_lookahead_seconds := 0.18
 var motion_damage := 14.0
 var claw_plane_profile := "lateral"
 var facing_mode := "movement"
+var gaze_mode := "target"
 var motion_set: Array[String] = []
 var motion_combos: Dictionary = {}
 
@@ -66,6 +67,9 @@ func _init(values: Dictionary = {}) -> void:
 	facing_mode = String(values.get("facingMode", facing_mode)).strip_edges().to_lower()
 	if facing_mode not in ["movement", "target"]:
 		facing_mode = "movement"
+	gaze_mode = String(values.get("gazeMode", gaze_mode)).strip_edges().to_lower()
+	if gaze_mode not in ["movement", "target"]:
+		gaze_mode = "target"
 	for raw_motion in values.get("motionSet", ["arc", "forward_surge"]):
 		var motion := String(raw_motion).strip_edges().to_lower()
 		if not motion.is_empty() and not motion_set.has(motion):
@@ -160,6 +164,7 @@ func snapshot() -> Dictionary:
 		"motionDamage": motion_damage,
 		"clawPlaneProfile": claw_plane_profile,
 		"facingMode": facing_mode,
+		"gazeMode": gaze_mode,
 		"motionSet": motion_set.duplicate(),
 		"motionCombos": motion_combos.duplicate(true)
 	}

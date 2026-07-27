@@ -117,6 +117,55 @@ static func add_shadow_stalker(body: Node3D, scale: float, asset_registry, mater
 	return result
 
 
+static func add_frost_predator(body: Node3D, scale: float, asset_registry, material_map: Dictionary) -> Dictionary:
+	# The Frost Predator is a generated quadruped family, not a scaled copy of
+	# Ash Wolf. Its visible load-bearing body and each limb come from the asset
+	# pipeline, while this semantic skeleton remains the reusable bridge between
+	# its anatomy and all shared motion/contact systems.
+	var skeleton := create_skeleton(body, "FrostPredatorMotionSkeleton", [
+		{"name": "Root", "parent": "", "rest": Vector3(0.0, 0.83, 0.38) * scale},
+		{"name": "Spine", "parent": "Root", "rest": Vector3(0.0, 0.03, -0.37) * scale},
+		{"name": "Chest", "parent": "Spine", "rest": Vector3(0.0, 0.09, -0.76) * scale},
+		{"name": "Head", "parent": "Chest", "rest": Vector3(0.0, 0.08, -0.44) * scale},
+		{"name": "ForeLeft", "parent": "Chest", "rest": Vector3(-0.42, -0.18, 0.09) * scale},
+		{"name": "ForeRight", "parent": "Chest", "rest": Vector3(0.42, -0.18, 0.09) * scale},
+		{"name": "HindLeft", "parent": "Root", "rest": Vector3(-0.38, -0.12, 0.11) * scale},
+		{"name": "HindRight", "parent": "Root", "rest": Vector3(0.38, -0.12, 0.11) * scale},
+		{"name": "Tail", "parent": "Root", "rest": Vector3(0.0, 0.05, 0.30) * scale}
+	])
+	var assets := [
+		{"id": "frost_predator_torso", "bone": "Root", "name": "FrostPredatorTorso", "position": Vector3(0.0, -0.16, 0.0), "rotation": Vector3.ZERO},
+		{"id": "frost_predator_head", "bone": "Head", "name": "FrostPredatorHead", "position": Vector3.ZERO, "rotation": Vector3.ZERO},
+		{"id": "frost_predator_foreleg", "bone": "ForeLeft", "name": "FrostPredatorForeLeft", "position": Vector3(0.0, 0.12, 0.0), "rotation": Vector3(PI, 0.0, 0.0)},
+		{"id": "frost_predator_foreleg", "bone": "ForeRight", "name": "FrostPredatorForeRight", "position": Vector3(0.0, 0.12, 0.0), "rotation": Vector3(PI, 0.0, 0.0)},
+		{"id": "frost_predator_hindleg", "bone": "HindLeft", "name": "FrostPredatorHindLeft", "position": Vector3(0.0, 0.12, 0.0), "rotation": Vector3(PI, 0.0, 0.0)},
+		{"id": "frost_predator_hindleg", "bone": "HindRight", "name": "FrostPredatorHindRight", "position": Vector3(0.0, 0.12, 0.0), "rotation": Vector3(PI, 0.0, 0.0)},
+		{"id": "frost_predator_tail", "bone": "Tail", "name": "FrostPredatorTail", "position": Vector3.ZERO, "rotation": Vector3.ZERO}
+	]
+	var attached_asset_ids: Array[String] = []
+	for raw in assets:
+		var asset_data: Dictionary = raw as Dictionary
+		var asset_id := String(asset_data.get("id", ""))
+		var part: Node3D = asset_registry.instantiate_asset(asset_id) if asset_registry != null and asset_registry.has_method("instantiate_asset") else null
+		if part == null:
+			var errors := ["Missing generated Frost Predator asset %s" % asset_id]
+			skeleton.queue_free()
+			return {"profile": frost_predator_profile(), "validation": {"valid": false, "errors": errors}, "assetIds": attached_asset_ids}
+		part.name = String(asset_data.get("name", asset_id))
+		part.position = asset_data.get("position", Vector3.ZERO) as Vector3
+		part.rotation = asset_data.get("rotation", Vector3.ZERO) as Vector3
+		part.scale = Vector3.ONE * scale
+		if asset_registry.has_method("apply_material_map"):
+			asset_registry.apply_material_map(part, material_map)
+		add_attachment(skeleton, String(asset_data.get("bone", "Root")), part.name).add_child(part)
+		attached_asset_ids.append(asset_id)
+	var result := finalize_rig(body, skeleton, frost_predator_profile())
+	body.set_meta("character_asset_parts", attached_asset_ids)
+	body.set_meta("visual_source", "generated_frost_predator_mesh")
+	result["assetIds"] = attached_asset_ids
+	return result
+
+
 static func create_skeleton(body: Node3D, skeleton_name: String, bones: Array) -> Skeleton3D:
 	var skeleton := Skeleton3D.new()
 	skeleton.name = skeleton_name
@@ -267,5 +316,40 @@ static func shadow_stalker_profile():
 			"lead_right": {"bone": "ArmRight", "axis": Vector3.FORWARD, "maxDegrees": 0.0, "motionAlign": true, "restDirection": Vector3.DOWN},
 			"counter_left": {"bone": "LegLeft", "axis": Vector3.FORWARD, "maxDegrees": 24.0, "sign": -1.0},
 			"counter_right": {"bone": "LegRight", "axis": Vector3.FORWARD, "maxDegrees": 24.0}
+		}
+	})
+
+
+static func frost_predator_profile():
+	return MotionRigProfileScript.new({
+		"id": "quadruped.frost_predator.v1",
+		"skeletonPath": "FrostPredatorMotionSkeleton",
+		"metadata": {
+			"family": "frost_predator",
+			"visual": "generated_frost_predator",
+			"locomotion": {
+				# Diagonal pairs are normal four-legged gait data. This only controls
+				# a visual pose overlay from the true CharacterBody velocity.
+				"left": [{"role": "lead_left"}, {"role": "counter_right"}],
+				"right": [{"role": "lead_right"}, {"role": "counter_left"}],
+				# Rotate the downward rest limbs around their lateral axis so gait
+				# travels fore-and-aft. A forward-axis rotation would only sway them
+				# side-to-side regardless of the real motor heading.
+				"axis": Vector3.RIGHT,
+				"maxDegrees": 29.0,
+				"referenceSpeed": 4.25,
+				"strideFrequency": 4.15,
+				"blendRate": 12.0
+			},
+			"gazeTracking": {"role": "gaze", "maxYawDegrees": 46.0, "blendRate": 11.0}
+		},
+		"roles": {
+			"root": {"bone": "Root", "axis": Vector3.UP, "maxDegrees": 9.0},
+			"torso": [{"bone": "Spine", "axis": Vector3.UP, "maxDegrees": 13.0, "weight": 0.50}, {"bone": "Chest", "axis": Vector3.UP, "maxDegrees": 20.0, "weight": 0.82}],
+			"gaze": {"bone": "Head", "axis": Vector3.UP, "maxDegrees": 14.0},
+			"lead_left": {"bone": "ForeLeft", "axis": Vector3.FORWARD, "maxDegrees": 0.0, "motionAlign": true, "restDirection": Vector3.DOWN},
+			"lead_right": {"bone": "ForeRight", "axis": Vector3.FORWARD, "maxDegrees": 0.0, "motionAlign": true, "restDirection": Vector3.DOWN},
+			"counter_left": {"bone": "HindLeft", "axis": Vector3.FORWARD, "maxDegrees": 24.0, "sign": -1.0},
+			"counter_right": {"bone": "HindRight", "axis": Vector3.FORWARD, "maxDegrees": 24.0}
 		}
 	})

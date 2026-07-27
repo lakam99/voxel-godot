@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generator": "phase11-characters-shadow-stalker-v3",
+  "generator": "phase11-characters-frost-predator-v1",
   "seed": 1492,
   "coordinateSystem": "Blender Z-up source; GLB import verified in Godot",
   "triangleLimit": 900,
@@ -16,12 +16,14 @@
     "hostile_eye": 3,
     "hostile_core": 2,
     "hostile_shard": 3,
-    "shadow_stalker": 5
+    "shadow_stalker": 5,
+    "frost_predator": 5
   },
   "materialVocabulary": [
     "accent",
     "cloth",
     "frost",
+    "frost_ice",
     "hair",
     "hostile",
     "hostile_accent",
@@ -1353,6 +1355,196 @@
       "materialSlots": [
         "hostile",
         "hostile_accent"
+      ]
+    },
+    {
+      "id": "frost_predator_torso",
+      "path": "assets/visual/generated/characters/frost_predator_torso.glb",
+      "family": "frost_predator",
+      "variant": "torso",
+      "triangleCount": 148,
+      "boundingBox": {
+        "min": [
+          -0.5081,
+          -0.0,
+          0.0
+        ],
+        "max": [
+          0.5081,
+          1.62,
+          0.7937
+        ],
+        "size": [
+          1.0163,
+          1.62,
+          0.7937
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "grounded": true,
+        "minZ": 0.0,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "frost",
+        "frost_ice"
+      ]
+    },
+    {
+      "id": "frost_predator_head",
+      "path": "assets/visual/generated/characters/frost_predator_head.glb",
+      "family": "frost_predator",
+      "variant": "head",
+      "triangleCount": 154,
+      "boundingBox": {
+        "min": [
+          -0.34,
+          -0.0,
+          0.0
+        ],
+        "max": [
+          0.3063,
+          0.74,
+          0.6365
+        ],
+        "size": [
+          0.6463,
+          0.74,
+          0.6365
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "grounded": true,
+        "minZ": 0.0,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "frost",
+        "frost_ice",
+        "hostile_eye"
+      ]
+    },
+    {
+      "id": "frost_predator_foreleg",
+      "path": "assets/visual/generated/characters/frost_predator_foreleg.glb",
+      "family": "frost_predator",
+      "variant": "foreleg",
+      "triangleCount": 124,
+      "boundingBox": {
+        "min": [
+          -0.18,
+          -0.3429,
+          0.0
+        ],
+        "max": [
+          0.1622,
+          0.1601,
+          1.2051
+        ],
+        "size": [
+          0.3422,
+          0.503,
+          1.2051
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "grounded": true,
+        "minZ": 0.0,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "frost",
+        "frost_ice"
+      ]
+    },
+    {
+      "id": "frost_predator_hindleg",
+      "path": "assets/visual/generated/characters/frost_predator_hindleg.glb",
+      "family": "frost_predator",
+      "variant": "hindleg",
+      "triangleCount": 94,
+      "boundingBox": {
+        "min": [
+          -0.232,
+          -0.3539,
+          0.0
+        ],
+        "max": [
+          0.209,
+          0.2031,
+          0.98
+        ],
+        "size": [
+          0.441,
+          0.557,
+          0.98
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "grounded": true,
+        "minZ": 0.0,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "frost"
+      ]
+    },
+    {
+      "id": "frost_predator_tail",
+      "path": "assets/visual/generated/characters/frost_predator_tail.glb",
+      "family": "frost_predator",
+      "variant": "tail",
+      "triangleCount": 76,
+      "boundingBox": {
+        "min": [
+          -0.158,
+          -1.085,
+          0.0
+        ],
+        "max": [
+          0.1424,
+          0.0,
+          0.3239
+        ],
+        "size": [
+          0.3004,
+          1.085,
+          0.3239
+        ]
+      },
+      "pivotCheck": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "grounded": true,
+        "minZ": 0.0,
+        "originXYCentered": true
+      },
+      "materialSlots": [
+        "frost",
+        "frost_ice"
       ]
     }
   ]
