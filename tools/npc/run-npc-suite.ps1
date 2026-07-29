@@ -9,6 +9,7 @@ param(
     [string]$ProgressPath = "",
     [string]$TraceDir = "",
     [string]$ScreenshotDir = "",
+    [string]$UserDataRoot = "",
     [ValidateSet("", "unit", "contract", "synthetic", "static_audit", "integration", "acceptance_visual")]
     [string]$EvidenceLevel = "",
     [string[]]$AcceptanceClaims = @(),
@@ -49,6 +50,14 @@ Remove-Item -LiteralPath $ProgressPath -ErrorAction SilentlyContinue
 $runToken = [guid]::NewGuid().ToString("N")
 $branch = (& git -C $projectPath branch --show-current).Trim()
 $commit = (& git -C $projectPath rev-parse HEAD).Trim()
+if ($UserDataRoot -eq "") {
+    # Godot resolves user:// through APPDATA on Windows. Keep test-only logs,
+    # saves, and shader caches inside the workspace so a sandboxed test process
+    # never inherits an unwritable desktop user's roaming profile.
+    $UserDataRoot = Join-Path $projectPath "artifacts\\npc\\runtime_userdata\\$Suite-$timeModeValue-$runToken"
+}
+$UserDataRoot = [System.IO.Path]::GetFullPath($UserDataRoot)
+New-Item -ItemType Directory -Force -Path $UserDataRoot | Out-Null
 
 $env:VOXEL_PLAYTEST = "1"
 $env:VOXEL_TEST_SEED = $Seed
@@ -89,9 +98,26 @@ $process.StartInfo.WorkingDirectory = $projectPath
 $process.StartInfo.UseShellExecute = $false
 $process.StartInfo.CreateNoWindow = -not $Visible
 $process.StartInfo.Arguments = ($args | ForEach-Object { '"' + ($_ -replace '"', '\"') + '"' }) -join " "
+$previousAppData = $env:APPDATA
+$previousLocalAppData = $env:LOCALAPPDATA
+$env:APPDATA = $UserDataRoot
+$env:LOCALAPPDATA = $UserDataRoot
 $started = Get-Date
-[void]$process.Start()
+try {
+    [void]$process.Start()
+} finally {
+    if ($null -eq $previousAppData) {
+        Remove-Item Env:APPDATA -ErrorAction SilentlyContinue
+    } else {
+        $env:APPDATA = $previousAppData
+    }
+    if ($null -eq $previousLocalAppData) {
+        Remove-Item Env:LOCALAPPDATA -ErrorAction SilentlyContinue
+    } else {
+        $env:LOCALAPPDATA = $previousLocalAppData
+    }
 
+}
 while (-not $process.HasExited) {
     Start-Sleep -Milliseconds 250
     if (((Get-Date) - $started).TotalSeconds -gt $WatchdogSeconds) {

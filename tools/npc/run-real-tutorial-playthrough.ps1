@@ -7,6 +7,7 @@ param(
     [string]$ProgressPath = "",
     [string]$ScreenshotDir = "",
     [int]$TimeoutSeconds = 470,
+    [string]$UserDataRoot = "",
     [int]$StaleProgressSeconds = 45,
     [switch]$Visible,
     [switch]$MiraHomeOnly,
@@ -78,6 +79,13 @@ $runToken = [guid]::NewGuid().ToString("N")
 $branch = (& git -C $projectPath branch --show-current).Trim()
 $commit = (& git -C $projectPath rev-parse HEAD).Trim()
 $focusedVisualAcceptance = $Visible -and ($MiraHomeOnly -or $MorningOutsideOnly -or $FinalRescue)
+if ($UserDataRoot -eq "") {
+    # Headed NPC acceptance needs a writable isolated Godot user:// profile.
+    $UserDataRoot = Join-Path $projectPath "artifacts\npc\runtime_userdata\real-tutorial-$runToken"
+}
+$UserDataRoot = [System.IO.Path]::GetFullPath($UserDataRoot)
+New-Item -ItemType Directory -Force -Path $UserDataRoot | Out-Null
+
 $dayOneVisualAcceptance = $Visible -and $DayOne
 $fullPlayerPovVisible = $Visible -and (-not $MiraHomeOnly) -and (-not $MorningOutsideOnly)
 # All headed tutorial flows can cross night. Keep the legacy -GodMode switch
@@ -220,19 +228,30 @@ if (-not $Visible) {
 }
 $argumentLine = ($godotArgs | ForEach-Object { Quote-Arg $_ }) -join " "
 
-$startInfo = @{
-    FilePath = $GodotExe
-    ArgumentList = $argumentLine
-    WorkingDirectory = $projectPath
-    PassThru = $true
-    RedirectStandardOutput = $outLog
-    RedirectStandardError = $errLog
+$process = [System.Diagnostics.Process]::new()
+$process.StartInfo.FileName = $GodotExe
+$process.StartInfo.WorkingDirectory = $projectPath
+$process.StartInfo.UseShellExecute = $false
+$process.StartInfo.CreateNoWindow = -not $Visible
+$process.StartInfo.Arguments = $argumentLine
+$previousAppData = $env:APPDATA
+$previousLocalAppData = $env:LOCALAPPDATA
+$env:APPDATA = $UserDataRoot
+$env:LOCALAPPDATA = $UserDataRoot
+try {
+    [void]$process.Start()
+} finally {
+    if ($null -eq $previousAppData) {
+        Remove-Item Env:APPDATA -ErrorAction SilentlyContinue
+    } else {
+        $env:APPDATA = $previousAppData
+    }
+    if ($null -eq $previousLocalAppData) {
+        Remove-Item Env:LOCALAPPDATA -ErrorAction SilentlyContinue
+    } else {
+        $env:LOCALAPPDATA = $previousLocalAppData
+    }
 }
-if (-not $Visible) {
-    $startInfo.WindowStyle = "Hidden"
-}
-
-$process = Start-Process @startInfo
 $started = Get-Date
 $lastProgressWriteUtc = [datetime]::MinValue
 $lastProgressText = ""

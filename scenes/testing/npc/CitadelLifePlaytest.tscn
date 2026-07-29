@@ -1,0 +1,6 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://scripts/testing/npc/CitadelLifePlaytestRunner.gd" id="1_citadel_life"]
+
+[node name="CitadelLifePlaytest" type="Node"]
+script = ExtResource("1_citadel_life")

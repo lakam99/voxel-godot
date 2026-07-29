@@ -5,6 +5,7 @@ param(
     [string]$ProgressPath = "",
     [string]$ScreenshotDir = "",
     [int]$TimeoutSeconds = 460,
+    [string]$UserDataRoot = "",
     [int]$StaleProgressSeconds = 70
 )
 
@@ -123,6 +124,13 @@ $branch = (& git -C $projectPath branch --show-current).Trim()
 $commit = (& git -C $projectPath rev-parse HEAD).Trim()
 
 $env:VOXEL_PLAYTEST = "1"
+if ($UserDataRoot -eq "") {
+    # Headed NPC acceptance needs a writable isolated Godot user:// profile.
+    $UserDataRoot = Join-Path $projectPath "artifacts\npc\runtime_userdata\town-job-cycle-$runToken"
+}
+$UserDataRoot = [System.IO.Path]::GetFullPath($UserDataRoot)
+New-Item -ItemType Directory -Force -Path $UserDataRoot | Out-Null
+
 $env:VOXEL_TEST_SEED = $Seed
 $env:VOXEL_NPC_TOWN_JOB_CYCLE_REPORT = $ReportPath
 $env:VOXEL_NPC_TOWN_JOB_CYCLE_PROGRESS = $ProgressPath
@@ -248,16 +256,30 @@ $godotArgs = @(
 )
 $argumentLine = ($godotArgs | ForEach-Object { Quote-Arg $_ }) -join " "
 
-$startInfo = @{
-    FilePath = $GodotExe
-    ArgumentList = $argumentLine
-    WorkingDirectory = $projectPath
-    PassThru = $true
-    RedirectStandardOutput = $outLog
-    RedirectStandardError = $errLog
+$process = [System.Diagnostics.Process]::new()
+$process.StartInfo.FileName = $GodotExe
+$process.StartInfo.WorkingDirectory = $projectPath
+$process.StartInfo.UseShellExecute = $false
+$process.StartInfo.CreateNoWindow = $false
+$process.StartInfo.Arguments = $argumentLine
+$previousAppData = $env:APPDATA
+$previousLocalAppData = $env:LOCALAPPDATA
+$env:APPDATA = $UserDataRoot
+$env:LOCALAPPDATA = $UserDataRoot
+try {
+    [void]$process.Start()
+} finally {
+    if ($null -eq $previousAppData) {
+        Remove-Item Env:APPDATA -ErrorAction SilentlyContinue
+    } else {
+        $env:APPDATA = $previousAppData
+    }
+    if ($null -eq $previousLocalAppData) {
+        Remove-Item Env:LOCALAPPDATA -ErrorAction SilentlyContinue
+    } else {
+        $env:LOCALAPPDATA = $previousLocalAppData
+    }
 }
-
-$process = Start-Process @startInfo
 $started = Get-Date
 $lastProgressWriteUtc = [datetime]::MinValue
 $lastProgressText = ""

@@ -119,6 +119,11 @@ $registry = Get-Content -LiteralPath $registryPath -Raw | ConvertFrom-Json
 $results = @()
 $failureCount = 0
 $started = Get-Date
+$runtimeToken = [guid]::NewGuid().ToString("N")
+$runtimeUserDataRoot = Join-Path $projectPath "artifacts/npc/runtime_userdata/all-npc-$runtimeToken"
+New-Item -ItemType Directory -Force -Path $runtimeUserDataRoot | Out-Null
+$env:APPDATA = $runtimeUserDataRoot
+$env:LOCALAPPDATA = $runtimeUserDataRoot
 
 Push-Location $projectPath
 try {

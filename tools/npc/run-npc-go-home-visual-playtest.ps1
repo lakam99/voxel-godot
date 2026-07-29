@@ -4,6 +4,7 @@ param(
     [string]$ReportPath = "",
     [string]$ProgressPath = "",
     [string]$ScreenshotDir = "",
+    [string]$UserDataRoot = "",
     [int]$WatchdogSeconds = 190
 )
 
@@ -50,6 +51,13 @@ $staticScan = $guardJson | ConvertFrom-Json
 
 $runToken = [guid]::NewGuid().ToString("N")
 $env:VOXEL_PLAYTEST = "1"
+if ($UserDataRoot -eq "") {
+    # Headed NPC acceptance needs an isolated writable Godot user:// profile.
+    $UserDataRoot = Join-Path $projectPath "artifacts\npc\runtime_userdata\go-home-visual-$runToken"
+}
+$UserDataRoot = [System.IO.Path]::GetFullPath($UserDataRoot)
+New-Item -ItemType Directory -Force -Path $UserDataRoot | Out-Null
+
 $env:VOXEL_TEST_SEED = $Seed
 $env:VOXEL_NPC_GO_HOME_VISUAL_REPORT = $ReportPath
 $env:VOXEL_NPC_GO_HOME_VISUAL_PROGRESS = $ProgressPath
@@ -75,7 +83,24 @@ $process.StartInfo.WorkingDirectory = $projectPath
 $process.StartInfo.UseShellExecute = $false
 $process.StartInfo.CreateNoWindow = $false
 $process.StartInfo.Arguments = $argumentLine
-[void]$process.Start()
+$previousAppData = $env:APPDATA
+$previousLocalAppData = $env:LOCALAPPDATA
+$env:APPDATA = $UserDataRoot
+$env:LOCALAPPDATA = $UserDataRoot
+try {
+    [void]$process.Start()
+} finally {
+    if ($null -eq $previousAppData) {
+        Remove-Item Env:APPDATA -ErrorAction SilentlyContinue
+    } else {
+        $env:APPDATA = $previousAppData
+    }
+    if ($null -eq $previousLocalAppData) {
+        Remove-Item Env:LOCALAPPDATA -ErrorAction SilentlyContinue
+    } else {
+        $env:LOCALAPPDATA = $previousLocalAppData
+    }
+}
 $processId = $process.Id
 $started = Get-Date
 $lastProgressWriteUtc = [datetime]::MinValue
