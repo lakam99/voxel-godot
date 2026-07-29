@@ -8,6 +8,7 @@ class_name CottageFurnishingPlanner
 
 const FurnishingPlanScript := preload("res://scripts/buildings/FurnishingPlan.gd")
 const InteriorFurnishingLayoutScript := preload("res://scripts/buildings/InteriorFurnishingLayout.gd")
+const FurnishingArchetypeCatalogScript := preload("res://scripts/buildings/FurnishingArchetypeCatalog.gd")
 
 const FLOOR_Y := 0.70
 
@@ -92,7 +93,7 @@ static func place_dining_set(plan, occupied: Array[AABB], room: Dictionary, rng:
 	# Reserve a table and at least one table-facing chair as one transaction. A
 	# failed chair candidate discards the table candidate, so the grammar cannot
 	# publish a stranded table with no usable seating.
-	var table_size := Vector3(1.54, 0.84, 1.04)
+	var table_size: Vector3 = room.get("diningTableSize", Vector3(1.54, 0.84, 1.04)) as Vector3
 	var chair_size := Vector3(0.56, 0.92, 0.58)
 	var seat_definitions: Array[Dictionary] = [
 		{"offset": Vector3(0.0, 0.0, 1.0), "yaw": 0.0},
@@ -139,6 +140,142 @@ static func place_dining_set(plan, occupied: Array[AABB], room: Dictionary, rng:
 			occupied.append(seat.get("bounds", AABB()) as AABB)
 		return {"table": table, "chairs": chair_parts}
 	return {}
+
+
+static func place_catalogued_random(plan, occupied: Array[AABB], room: Dictionary, part_id: String, catalog_id: String, rng: RandomNumberGenerator, attempts := 10, options: Dictionary = {}):
+	# Generic room-aware selector for future cottages, manors, inns and civic
+	# buildings. The catalogue only describes furniture; this helper still owns
+	# room bounds, access reservations and connected-floor validation.
+	var definition := FurnishingArchetypeCatalogScript.definition(catalog_id)
+	if definition.is_empty():
+		return null
+	var size: Vector3 = definition.get("size", Vector3.ONE) as Vector3
+	var placement_options := definition.duplicate(true)
+	placement_options.merge(options, true)
+	for _attempt in range(maxi(1, attempts)):
+		var position := random_room_position(room, size, rng, 0.18)
+		var part = place_at(plan, occupied, part_id, String(room.get("id", "")), String(definition.get("archetype", catalog_id)), String(definition.get("material", "timber_board")), position, size, placement_options, room)
+		if part != null:
+			return part
+	return null
+
+
+static func place_catalogued_in_zones(plan, occupied: Array[AABB], room: Dictionary, part_id: String, catalog_id: String, normalized_zones: Array, rng: RandomNumberGenerator, jitter := Vector2(0.08, 0.08), options: Dictionary = {}):
+	# Larger rooms should read inhabited across their useful floor area, not as a
+	# random pile near one successful central candidate. Zones are room-relative
+	# and shuffled/jittered per seed, so this remains a reusable grammar rule.
+	var definition := FurnishingArchetypeCatalogScript.definition(catalog_id)
+	if definition.is_empty():
+		return null
+	var size: Vector3 = definition.get("size", Vector3.ONE) as Vector3
+	var placement_options := definition.duplicate(true)
+	placement_options.merge(options, true)
+	var remaining: Array = normalized_zones.duplicate()
+	while not remaining.is_empty():
+		var index := rng.randi_range(0, remaining.size() - 1)
+		var zone = remaining[index]
+		remaining.remove_at(index)
+		if not zone is Vector2:
+			continue
+		var normalized: Vector2 = zone as Vector2
+		var bounds: AABB = room.get("bounds", AABB()) as AABB
+		var position := Vector3(
+			bounds.position.x + bounds.size.x * clampf(normalized.x + rng.randf_range(-jitter.x, jitter.x), 0.0, 1.0),
+			FLOOR_Y,
+			bounds.position.z + bounds.size.z * clampf(normalized.y + rng.randf_range(-jitter.y, jitter.y), 0.0, 1.0)
+		)
+		# Normalized anchors are intentionally only a preference. The existing
+		# shared placement authority rejects any candidate outside the room,
+		# inside a protected lane, or disconnecting the walkable floor.
+		var candidate := InteriorFurnishingLayoutScript.horizontal_bounds(position, size, placement_options.get("rotation", Vector3.ZERO) as Vector3, float(placement_options.get("clearance", 0.0)))
+		if not candidate_is_inside_room(candidate, room):
+			continue
+		var part = place_at(plan, occupied, part_id, String(room.get("id", "")), String(definition.get("archetype", catalog_id)), String(definition.get("material", "timber_board")), position, size, placement_options, room)
+		if part != null:
+			return part
+	return null
+
+
+static func place_catalogued_on_surface(plan, support, part_id: String, catalog_id: String, local_offset := Vector3.ZERO, options: Dictionary = {}):
+	# A raised lectern, altar, display, or future throne must derive from its
+	# actual support record. The floor placement planner deliberately cannot do
+	# this: its horizontal occupancy rules are correct for circulation but would
+	# treat a legitimate vertical composition as an overlap. This helper keeps
+	# one furnishing plan authoritative while recording the supporting surface.
+	if support == null or not bool(support.collision_enabled):
+		return null
+	var definition := FurnishingArchetypeCatalogScript.definition(catalog_id)
+	if definition.is_empty():
+		return null
+	var size: Vector3 = definition.get("size", Vector3.ONE) as Vector3
+	var placement_options := definition.duplicate(true)
+	placement_options.merge(options, true)
+	var rotation: Vector3 = placement_options.get("rotation", support.rotation) as Vector3
+	var local: Vector3 = local_offset.rotated(Vector3.UP, support.rotation.y)
+	var position: Vector3 = support.position + local + Vector3(0.0, support.occupied_size.y, 0.0)
+	var support_bounds: AABB = InteriorFurnishingLayoutScript.horizontal_bounds(support.position, support.occupied_size, support.rotation)
+	var candidate_bounds: AABB = InteriorFurnishingLayoutScript.horizontal_bounds(position, size, rotation)
+	if candidate_bounds.position.x < support_bounds.position.x or candidate_bounds.end.x > support_bounds.end.x or candidate_bounds.position.z < support_bounds.position.z or candidate_bounds.end.z > support_bounds.end.z:
+		return null
+	placement_options["supportedBy"] = String(support.id)
+	placement_options["supportSurface"] = String(support.archetype)
+	placement_options["surfaceBaseY"] = position.y
+	placement_options["rotation"] = rotation
+	return add_part(plan, part_id, String(support.room_id), String(definition.get("archetype", catalog_id)), String(definition.get("material", "timber_board")), position, size, placement_options)
+
+
+static func place_catalogued_against_walls(plan, occupied: Array[AABB], room: Dictionary, part_id: String, catalog_id: String, wall_ids: Array, rng: RandomNumberGenerator, options: Dictionary = {}):
+	var definition := FurnishingArchetypeCatalogScript.definition(catalog_id)
+	if definition.is_empty():
+		return null
+	var placement_options := definition.duplicate(true)
+	placement_options.merge(options, true)
+	return place_against_random_walls(plan, occupied, room, part_id, String(definition.get("archetype", catalog_id)), String(definition.get("material", "timber_board")), wall_ids, rng, definition.get("size", Vector3.ONE) as Vector3, placement_options)
+
+
+static func place_catalogued_wall_sconce(plan, room: Dictionary, part_id: String, wall_id: String, along: float):
+	var definition := FurnishingArchetypeCatalogScript.definition("wall_sconce")
+	if definition.is_empty():
+		return null
+	var size: Vector3 = definition.get("size", Vector3.ONE) as Vector3
+	var rotation := InteriorFurnishingLayoutScript.wall_facing_rotation(wall_id)
+	var position := InteriorFurnishingLayoutScript.wall_mount_position(room, wall_id, along, size)
+	if not InteriorFurnishingLayoutScript.wall_mount_is_clear(plan.parts, wall_id, position, rotation, size, float(definition.get("mountHeight", 2.12))):
+		return null
+	return add_part(plan, part_id, String(room.get("id", "")), String(definition.get("archetype", "wall_sconce")), String(definition.get("material", "brass")), position, size, {
+		"collision": false,
+		"semantic": String(definition.get("semantic", "wall_light")),
+		"supportingWall": wall_id,
+		"mountHeight": float(definition.get("mountHeight", 2.12)),
+		"mountMode": "back_face_on_wall",
+		"rotation": rotation
+	})
+
+
+static func place_catalogued_wall_banner(plan, room: Dictionary, part_id: String, wall_id: String, along: float, material_override := ""):
+	# The caller names a wall that the blueprint knows is solid at the selected
+	# span. This generic helper is then usable by manor/castle grammars without
+	# treating a banner as collision or as an alternative wall authority.
+	var definition := FurnishingArchetypeCatalogScript.definition("wall_banner")
+	if definition.is_empty():
+		return null
+	var size: Vector3 = definition.get("size", Vector3.ONE) as Vector3
+	var rotation := InteriorFurnishingLayoutScript.wall_facing_rotation(wall_id)
+	var position := InteriorFurnishingLayoutScript.wall_mount_position(room, wall_id, along, size)
+	var mount_height := float(definition.get("mountHeight", 2.54))
+	if not InteriorFurnishingLayoutScript.wall_mount_is_clear(plan.parts, wall_id, position, rotation, size, mount_height):
+		return null
+	var material := material_override.strip_edges().to_lower()
+	if material.is_empty():
+		material = String(definition.get("material", "wool_rust"))
+	return add_part(plan, part_id, String(room.get("id", "")), String(definition.get("archetype", "wall_banner")), material, position, size, {
+		"collision": false,
+		"semantic": String(definition.get("semantic", "heraldic_wall_banner")),
+		"supportingWall": wall_id,
+		"mountHeight": mount_height,
+		"mountMode": "back_face_on_wall",
+		"rotation": rotation
+	})
 
 
 static func random_room_position(room: Dictionary, size: Vector3, rng: RandomNumberGenerator, padding := 0.10) -> Vector3:
@@ -248,6 +385,19 @@ static func add_candle_on_surface(plan, part_id: String, surface, local_offset: 
 		return null
 	var position: Vector3 = surface.position + local_offset
 	return add_part(plan, part_id, String(surface.room_id), "candle", "candle_wax", position, Vector3(0.15, 0.30, 0.15), {"collision": false, "semantic": "candle", "mount": String(surface.id), "mountSurface": String(surface.archetype)})
+
+
+static func add_rug_under_surface(plan, part_id: String, surface, padding := Vector2(1.12, 1.12), material := "wool_rust", semantic := "woven_rug"):
+	if surface == null or not surface.has_method("snapshot"):
+		return null
+	var size := Vector3(surface.occupied_size.x * padding.x, 0.035, surface.occupied_size.z * padding.y)
+	return add_part(plan, part_id, String(surface.room_id), "rug", material, surface.position, size, {
+		"collision": false,
+		"reserve": false,
+		"semantic": semantic,
+		"mount": String(surface.id),
+		"mountSurface": String(surface.archetype)
+	})
 
 
 static func plan_room_is_walkable(plan, room: Dictionary) -> bool:

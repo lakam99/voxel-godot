@@ -93,7 +93,11 @@ func publish_part(part, parent: Node3D) -> StaticBody3D:
 		collision.shape = shape
 		body.add_child(collision)
 		collision_count += 1
-	publish_visual(part, body)
+	# Some construction records are collision stringers beneath richer generated
+	# geometry (for example a stair flight's visible treads).  They remain normal
+	# source parts with real collision, but do not duplicate the finished visual.
+	if bool(part.recipe.get("visual", true)):
+		publish_visual(part, body)
 	if String(part.kind) == "door":
 		add_door_interaction_proxy(body, part.size)
 	recipe_build_usec += Time.get_ticks_usec() - started
@@ -103,7 +107,7 @@ func publish_part(part, parent: Node3D) -> StaticBody3D:
 func publish_visual(part, parent: Node3D) -> void:
 	match String(part.kind):
 		"wall":
-			if String(part.material_id) == "fired_brick":
+			if ConstructionMaterialCatalogScript.is_masonry_material(String(part.material_id)):
 				publish_brick_wall(part, parent)
 			else:
 				publish_timber_wall(part, parent)
@@ -112,7 +116,10 @@ func publish_visual(part, parent: Node3D) -> void:
 		"roof":
 			publish_roof_shingles(part, parent)
 		"door":
-			publish_door_boards(part, parent)
+			if String(part.recipe.get("doorPresentation", "")) == "portcullis":
+				publish_portcullis(part, parent)
+			else:
+				publish_door_boards(part, parent)
 		"window":
 			publish_window(part, parent)
 		_:
@@ -213,6 +220,28 @@ func publish_door_boards(part, parent: Node3D) -> void:
 	add_box_visual(leaf, Vector3(0.105, 0.105, 0.090), Vector3(size.x * 0.27, -0.04, -size.z * 0.70), material_for_id("brass", variation_for(part)), "DoorHandle")
 
 
+func publish_portcullis(part, parent: Node3D) -> void:
+	# A castle gate is a raised iron grille, not a painted plank wall.  It is
+	# still one ordinary door part: the shared controller owns its closed
+	# collision and lifts the same visual leaf clear when opened.
+	var size: Vector3 = part.size
+	var pivot := Node3D.new()
+	pivot.name = "DoorPivot"
+	parent.add_child(pivot)
+	var leaf := Node3D.new()
+	leaf.name = "DoorLeaf"
+	pivot.add_child(leaf)
+	var bar_count := maxi(4, ceili(size.x / 0.30))
+	var bar_width := minf(0.12, size.x / float(bar_count) * 0.48)
+	var bars: Array[Transform3D] = []
+	for index in range(bar_count):
+		var x := -size.x * 0.5 + size.x * (float(index) + 0.5) / float(bar_count)
+		bars.append(box_transform(Vector3(x, 0.0, 0.0), Vector3(bar_width, size.y, maxf(0.12, size.z * 1.35))))
+	add_box_batch(leaf, bars, material_for(part), "PortcullisBars")
+	for crossbar_ratio in [-0.30, 0.20]:
+		add_box_visual(leaf, Vector3(size.x, 0.12, maxf(0.14, size.z * 1.45)), Vector3(0.0, size.y * crossbar_ratio, 0.0), material_for(part), "PortcullisCrossbar")
+
+
 func configure_door_leaf(body: StaticBody3D, part) -> void:
 	# Match the established DoorPortal/DoorController leaf contract. The generic
 	# controller owns swing state and collider disabling; this publisher only
@@ -222,6 +251,8 @@ func configure_door_leaf(body: StaticBody3D, part) -> void:
 	body.set_meta("open", false)
 	body.set_meta("closed_rotation", body.rotation.y)
 	body.set_meta("open_swing", -PI * 0.5)
+	body.set_meta("door_motion", String(part.recipe.get("doorMotion", "swing")))
+	body.set_meta("open_visual_offset", Vector3(0.0, part.size.y + 0.18, 0.0) if String(part.recipe.get("doorMotion", "swing")) == "raise" else Vector3.ZERO)
 	body.set_meta("door_portal_id", portal_id)
 	body.set_meta("door_group_id", portal_id)
 	body.set_meta("door_building_id", source_blueprint_id)

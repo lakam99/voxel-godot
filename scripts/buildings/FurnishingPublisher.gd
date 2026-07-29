@@ -109,6 +109,32 @@ func publish_visual(part, parent: Node3D) -> void:
 			publish_table(part, parent)
 		"chair":
 			publish_chair(part, parent)
+		"bench":
+			publish_bench(part, parent)
+		"sideboard":
+			publish_sideboard(part, parent)
+		"lectern":
+			publish_lectern(part, parent)
+		"map_table":
+			publish_map_table(part, parent)
+		"workbench":
+			publish_workbench(part, parent)
+		"crate_stack":
+			publish_crate_stack(part, parent)
+		"barrel_stack":
+			publish_barrel_stack(part, parent)
+		"display_plinth":
+			publish_display_plinth(part, parent)
+		"dais":
+			publish_dais(part, parent)
+		"coat_rack":
+			publish_coat_rack(part, parent)
+		"planter":
+			publish_planter(part, parent)
+		"wall_sconce":
+			publish_wall_sconce(part, parent)
+		"wall_banner":
+			publish_wall_banner(part, parent)
 		"cabinet":
 			publish_cabinet(part, parent)
 		"hearth":
@@ -142,11 +168,129 @@ func publish_bed(part, parent: Node3D) -> void:
 
 
 func publish_table(part, parent: Node3D) -> void:
-	add_box(parent, Vector3(1.56, 0.14, 1.06), Vector3(0.0, 0.78, 0.0), material_for("timber_board", part), "TableTop")
-	for x in [-0.60, 0.60]:
-		for z in [-0.37, 0.37]:
+	var width: float = float(part.occupied_size.x)
+	var depth: float = float(part.occupied_size.z)
+	add_box(parent, Vector3(width, 0.14, depth), Vector3(0.0, 0.78, 0.0), material_for("timber_board", part), "TableTop")
+	for x in [-maxf(0.16, width * 0.5 - 0.17), maxf(0.16, width * 0.5 - 0.17)]:
+		for z in [-maxf(0.14, depth * 0.5 - 0.16), maxf(0.14, depth * 0.5 - 0.16)]:
 			add_box(parent, Vector3(0.13, 0.76, 0.13), Vector3(float(x), 0.38, float(z)), material_for("timber_beam", part), "TableLeg")
-	add_box(parent, Vector3(1.32, 0.10, 0.11), Vector3(0.0, 0.37, 0.0), material_for("timber_beam", part), "TableStretcher")
+	add_box(parent, Vector3(maxf(0.32, width - 0.24), 0.10, 0.11), Vector3(0.0, 0.37, 0.0), material_for("timber_beam", part), "TableStretcher")
+
+
+func publish_bench(part, parent: Node3D) -> void:
+	var width: float = float(part.occupied_size.x)
+	var depth: float = float(part.occupied_size.z)
+	add_box(parent, Vector3(width, 0.12, depth), Vector3(0.0, 0.50, 0.0), material_for("timber_board", part), "BenchSeat")
+	for x in [-maxf(0.18, width * 0.5 - 0.18), maxf(0.18, width * 0.5 - 0.18)]:
+		add_box(parent, Vector3(0.13, 0.52, 0.13), Vector3(float(x), 0.26, 0.0), material_for("timber_beam", part), "BenchLeg")
+	add_box(parent, Vector3(maxf(0.32, width - 0.22), 0.09, 0.10), Vector3(0.0, 0.26, 0.0), material_for("timber_beam", part), "BenchStretcher")
+
+
+func publish_sideboard(part, parent: Node3D) -> void:
+	var width: float = float(part.occupied_size.x)
+	var height: float = float(part.occupied_size.y)
+	var depth: float = float(part.occupied_size.z)
+	add_box(parent, Vector3(width, height * 0.78, depth), Vector3(0.0, height * 0.39, 0.0), material_for(part.material_id, part), "SideboardBody")
+	add_box(parent, Vector3(width * 0.90, height * 0.19, 0.05), Vector3(0.0, height * 0.55, -depth * 0.53), material_for("timber_board", part), "SideboardDrawer")
+	add_box(parent, Vector3(width * 1.06, 0.10, depth * 1.12), Vector3(0.0, height * 0.82, 0.0), material_for("timber_beam", part), "SideboardTop")
+	for x in [-width * 0.25, width * 0.25]:
+		add_sphere(parent, 0.055, Vector3(float(x), height * 0.54, -depth * 0.57), material_for("brass", part), "SideboardPull")
+
+
+func publish_lectern(part, parent: Node3D) -> void:
+	var width: float = float(part.occupied_size.x)
+	var height: float = float(part.occupied_size.y)
+	add_box(parent, Vector3(width * 0.86, 0.12, 0.50), Vector3(0.0, height * 0.87, -0.05), material_for("timber_board", part), "LecternTop", Vector3(deg_to_rad(-22.0), 0.0, 0.0))
+	add_box(parent, Vector3(0.22, height * 0.74, 0.22), Vector3(0.0, height * 0.40, 0.0), material_for("timber_beam", part), "LecternStem")
+	add_box(parent, Vector3(width, 0.12, 0.54), Vector3(0.0, 0.06, 0.0), material_for("timber_beam", part), "LecternBase")
+	add_box(parent, Vector3(width * 0.62, 0.02, 0.34), Vector3(0.0, height * 0.92, -0.10), material_for("linen", part), "LecternBook")
+
+
+func publish_map_table(part, parent: Node3D) -> void:
+	publish_table(part, parent)
+	var width: float = float(part.occupied_size.x)
+	var depth: float = float(part.occupied_size.z)
+	add_box(parent, Vector3(width * 0.78, 0.018, depth * 0.68), Vector3(0.0, 0.858, 0.0), material_for("linen", part), "MapSheet")
+	add_sphere(parent, 0.07, Vector3(width * 0.29, 0.90, -depth * 0.22), material_for("brass", part), "MapCompass")
+
+
+func publish_workbench(part, parent: Node3D) -> void:
+	publish_table(part, parent)
+	var width: float = float(part.occupied_size.x)
+	add_box(parent, Vector3(width * 0.20, 0.10, 0.16), Vector3(-width * 0.23, 0.89, -0.10), material_for("brass", part), "WorkbenchPlane")
+	add_box(parent, Vector3(width * 0.16, 0.14, 0.12), Vector3(width * 0.17, 0.91, 0.12), material_for("timber_beam", part), "WorkbenchToolBlock")
+
+
+func publish_crate_stack(part, parent: Node3D) -> void:
+	var width: float = float(part.occupied_size.x)
+	var height: float = float(part.occupied_size.y)
+	var depth: float = float(part.occupied_size.z)
+	add_box(parent, Vector3(width, height * 0.52, depth), Vector3(0.0, height * 0.26, 0.0), material_for("timber_board", part), "CrateLower")
+	add_box(parent, Vector3(width * 0.76, height * 0.42, depth * 0.78), Vector3(-width * 0.08, height * 0.73, depth * 0.06), material_for("timber_beam", part), "CrateUpper")
+
+
+func publish_barrel_stack(part, parent: Node3D) -> void:
+	var radius := float(part.occupied_size.x) * 0.29
+	add_cylinder(parent, radius, float(part.occupied_size.y) * 0.54, Vector3(-radius * 0.56, float(part.occupied_size.y) * 0.27, 0.0), material_for("timber_board", part), "BarrelLower")
+	add_cylinder(parent, radius * 0.84, float(part.occupied_size.y) * 0.42, Vector3(radius * 0.30, float(part.occupied_size.y) * 0.70, 0.04), material_for("timber_beam", part), "BarrelUpper")
+
+
+func publish_display_plinth(part, parent: Node3D) -> void:
+	var width: float = float(part.occupied_size.x)
+	var height: float = float(part.occupied_size.y)
+	add_box(parent, Vector3(width, height * 0.18, width), Vector3(0.0, height * 0.09, 0.0), material_for("stone_foundation", part), "PlinthBase")
+	add_box(parent, Vector3(width * 0.54, height * 0.72, width * 0.54), Vector3(0.0, height * 0.50, 0.0), material_for(part.material_id, part), "PlinthColumn")
+	add_sphere(parent, width * 0.24, Vector3(0.0, height * 0.95, 0.0), material_for("brass", part), "PlinthCivicSeal", Vector3(1.0, 0.38, 1.0))
+
+
+func publish_dais(part, parent: Node3D) -> void:
+	var width: float = float(part.occupied_size.x)
+	var height: float = float(part.occupied_size.y)
+	var depth: float = float(part.occupied_size.z)
+	add_box(parent, Vector3(width, height * 0.68, depth), Vector3(0.0, height * 0.34, 0.0), material_for(part.material_id, part), "DaisBody")
+	add_box(parent, Vector3(width * 1.06, 0.12, depth * 1.10), Vector3(0.0, height * 0.72, 0.0), material_for("timber_board", part), "DaisTop")
+	add_box(parent, Vector3(width * 0.42, height * 0.22, 0.34), Vector3(0.0, height * 0.15, -depth * 0.58), material_for("timber_beam", part), "DaisStep")
+
+
+func publish_coat_rack(part, parent: Node3D) -> void:
+	var height: float = float(part.occupied_size.y)
+	add_cylinder(parent, 0.08, height * 0.86, Vector3(0.0, height * 0.43, 0.0), material_for(part.material_id, part), "CoatRackStem")
+	add_cylinder(parent, 0.22, 0.08, Vector3(0.0, 0.04, 0.0), material_for("timber_board", part), "CoatRackBase")
+	for angle in [0.0, PI * 0.5, PI, PI * 1.5]:
+		add_box(parent, Vector3(0.28, 0.07, 0.07), Vector3(cos(angle) * 0.12, height * 0.78, sin(angle) * 0.12), material_for("timber_beam", part), "CoatRackHook", Vector3(0.0, angle, 0.0))
+
+
+func publish_planter(part, parent: Node3D) -> void:
+	var height: float = float(part.occupied_size.y)
+	add_cylinder(parent, float(part.occupied_size.x) * 0.35, height * 0.46, Vector3(0.0, height * 0.23, 0.0), material_for(part.material_id, part), "PlanterPot")
+	for angle in [0.0, 1.57, 3.14, 4.71]:
+		var leaf := MeshInstance3D.new()
+		leaf.name = "PlanterLeaf"
+		leaf.mesh = unit_sphere
+		leaf.scale = Vector3(0.16, 0.44, 0.09)
+		leaf.position = Vector3(cos(angle) * 0.14, height * 0.72, sin(angle) * 0.14)
+		leaf.rotation = Vector3(sin(angle) * 0.38, 0.0, -cos(angle) * 0.50)
+		leaf.material_override = material_for("wool_moss", part)
+		leaf.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+		parent.add_child(leaf)
+		visual_piece_count += 1
+
+
+func publish_wall_sconce(part, parent: Node3D) -> void:
+	var mount_height := float(part.recipe.get("mountHeight", 2.12))
+	add_box(parent, Vector3(0.12, 0.25, 0.14), Vector3(0.0, mount_height, -0.05), material_for("brass", part), "SconceArm")
+	add_cylinder(parent, 0.07, 0.24, Vector3(0.0, mount_height + 0.12, -0.12), material_for("candle_wax", part), "SconceWax")
+	add_sphere(parent, 0.065, Vector3(0.0, mount_height + 0.29, -0.12), material_for("candle_flame", part), "SconceFlame", Vector3(0.58, 1.28, 0.58))
+
+
+func publish_wall_banner(part, parent: Node3D) -> void:
+	var width: float = float(part.occupied_size.x)
+	var height: float = float(part.occupied_size.y)
+	var mount_height := float(part.recipe.get("mountHeight", 2.54))
+	add_box(parent, Vector3(width * 1.18, 0.07, 0.10), Vector3(0.0, mount_height + height * 0.54, -0.02), material_for("timber_beam", part), "BannerTopRail")
+	add_box(parent, Vector3(width * 1.18, 0.07, 0.10), Vector3(0.0, mount_height - height * 0.54, -0.02), material_for("timber_beam", part), "BannerBottomRail")
+	add_box(parent, Vector3(width, height, 0.045), Vector3(0.0, mount_height, -0.07), material_for(part.material_id, part), "BannerCloth")
+	add_sphere(parent, width * 0.16, Vector3(0.0, mount_height + height * 0.06, -0.115), material_for("brass", part), "BannerSeal", Vector3(1.0, 0.72, 0.20))
 
 
 func publish_chair(part, parent: Node3D) -> void:
@@ -233,12 +377,13 @@ func publish_wall_art(part, parent: Node3D) -> void:
 	add_box(parent, Vector3(part.occupied_size.x, part.occupied_size.y, 0.045), Vector3(0.0, mount_height, -0.06), material_for("painted_decor", part), "ArtPanel")
 
 
-func add_box(parent: Node3D, size: Vector3, position: Vector3, material: Material, node_name: String) -> void:
+func add_box(parent: Node3D, size: Vector3, position: Vector3, material: Material, node_name: String, rotation := Vector3.ZERO) -> void:
 	var mesh := MeshInstance3D.new()
 	mesh.name = node_name
 	mesh.mesh = unit_box
 	mesh.scale = size
 	mesh.position = position
+	mesh.rotation = rotation
 	mesh.material_override = material
 	mesh.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
 	parent.add_child(mesh)

@@ -1,0 +1,6 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://scripts/testing/buildings/ManorWalkthroughRunner.gd" id="1_manor_walkthrough"]
+
+[node name="ManorWalkthrough" type="Node3D"]
+script = ExtResource("1_manor_walkthrough")

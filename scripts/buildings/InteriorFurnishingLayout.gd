@@ -24,7 +24,10 @@ static func access_reservations(room_records: Array) -> Array[AABB]:
 			if access_id.is_empty() or seen_ids.has(access_id):
 				continue
 			var position: Vector3 = access.get("position", Vector3.ZERO) as Vector3
-			var size: Vector3 = access.get("size", Vector3.ZERO) as Vector3
+			# An opening has its physical size and may declare a larger protected
+			# furnishing approach. This lets a blueprint keep the doorway truthful
+			# while preventing tables, chairs, or storage from crowding the route.
+			var size: Vector3 = access.get("furnishingSize", access.get("size", Vector3.ZERO)) as Vector3
 			if size.x <= 0.0 or size.z <= 0.0:
 				continue
 			seen_ids[access_id] = true

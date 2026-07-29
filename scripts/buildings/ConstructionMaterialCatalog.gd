@@ -23,6 +23,11 @@ const DEFINITIONS := {
 		"roughness": 0.74, "breakup": 0.10, "grid": 0.02,
 		"grain": 0.22, "grain_scale": 16.0, "grain_color": Color(0.018, 0.050, 0.055)
 	},
+	"ironwork": {
+		"base": Color(0.115, 0.135, 0.145), "accent": Color(0.045, 0.060, 0.068),
+		"roughness": 0.60, "breakup": 0.08, "grid": 0.0,
+		"grain": 0.0, "grain_scale": 1.0, "grain_color": Color.BLACK
+	},
 	"brass": {
 		"base": Color(0.78, 0.50, 0.14), "accent": Color(0.38, 0.20, 0.045),
 		"roughness": 0.42, "breakup": 0.05, "grid": 0.0,
@@ -82,6 +87,39 @@ const DEFINITIONS := {
 		"roughness": 0.94, "breakup": 0.18, "grid": 0.0,
 		"grain": 0.0, "grain_scale": 1.0, "grain_color": Color.BLACK
 	},
+	# City masonry is still individually published brick, not a flat paint overlay.
+	# Castle grammar selects these as a civic palette per seed; residences then
+	# derive a façade colour from that same palette and their stable lot id.
+	"painted_brick_ochre": {
+		"base": Color(0.61, 0.365, 0.135), "accent": Color(0.39, 0.190, 0.050),
+		"roughness": 0.91, "breakup": 0.19, "grid": 0.0,
+		"grain": 0.0, "grain_scale": 1.0, "grain_color": Color.BLACK
+	},
+	"painted_brick_sage": {
+		"base": Color(0.285, 0.465, 0.300), "accent": Color(0.125, 0.255, 0.150),
+		"roughness": 0.91, "breakup": 0.18, "grid": 0.0,
+		"grain": 0.0, "grain_scale": 1.0, "grain_color": Color.BLACK
+	},
+	"painted_brick_azure": {
+		"base": Color(0.225, 0.395, 0.585), "accent": Color(0.082, 0.180, 0.315),
+		"roughness": 0.90, "breakup": 0.17, "grid": 0.0,
+		"grain": 0.0, "grain_scale": 1.0, "grain_color": Color.BLACK
+	},
+	"painted_brick_rose": {
+		"base": Color(0.640, 0.285, 0.270), "accent": Color(0.385, 0.105, 0.105),
+		"roughness": 0.92, "breakup": 0.19, "grid": 0.0,
+		"grain": 0.0, "grain_scale": 1.0, "grain_color": Color.BLACK
+	},
+	"painted_brick_plum": {
+		"base": Color(0.405, 0.275, 0.500), "accent": Color(0.205, 0.105, 0.270),
+		"roughness": 0.91, "breakup": 0.18, "grid": 0.0,
+		"grain": 0.0, "grain_scale": 1.0, "grain_color": Color.BLACK
+	},
+	"painted_brick_cream": {
+		"base": Color(0.690, 0.575, 0.345), "accent": Color(0.430, 0.325, 0.165),
+		"roughness": 0.94, "breakup": 0.16, "grid": 0.0,
+		"grain": 0.0, "grain_scale": 1.0, "grain_color": Color.BLACK
+	},
 	"mortar": {
 		"base": Color(0.245, 0.225, 0.200), "accent": Color(0.165, 0.150, 0.132),
 		"roughness": 0.96, "breakup": 0.10, "grid": 0.0,
@@ -98,7 +136,9 @@ const DEFINITIONS := {
 		"grain": 0.0, "grain_scale": 1.0, "grain_color": Color.BLACK
 	},
 	"window_glass": {
-		"base": Color(0.34, 0.68, 0.76, 0.62), "accent": Color(0.72, 0.88, 0.90, 0.62),
+		# Keep the cool glint while allowing an exterior reader to see the actual
+		# furnished rooms beyond the opening rather than a blue opaque pane.
+		"base": Color(0.34, 0.68, 0.76, 0.30), "accent": Color(0.72, 0.88, 0.90, 0.30),
 		"roughness": 0.20, "breakup": 0.04, "grid": 0.0,
 		"grain": 0.0, "grain_scale": 1.0, "grain_color": Color.BLACK,
 		"transparent": true
@@ -110,6 +150,11 @@ static func definition_for(material_id: String) -> Dictionary:
 	var normalized := material_id.strip_edges().to_lower()
 	var definition: Dictionary = DEFINITIONS.get(normalized, DEFINITIONS["stone_foundation"])
 	return definition.duplicate(true)
+
+
+static func is_masonry_material(material_id: String) -> bool:
+	var normalized := material_id.strip_edges().to_lower()
+	return normalized.begins_with("fired_brick") or normalized.begins_with("painted_brick_")
 
 
 static func create_material(material_id: String, variation := 0.0) -> Material:
