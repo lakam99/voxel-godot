@@ -7,6 +7,7 @@ const MotionRigProfileScript := preload("res://scripts/combat/rig/MotionRigProfi
 const MotionPoseSignalBuilderScript := preload("res://scripts/combat/rig/MotionPoseSignalBuilder.gd")
 const MotionPoseSolverScript := preload("res://scripts/combat/rig/MotionPoseSolver.gd")
 const MotionRigVisualFactoryScript := preload("res://scripts/combat/rig/MotionRigVisualFactory.gd")
+const HostileVisualFactoryScript := preload("res://scripts/HostileVisualFactory.gd")
 const MotionEquipmentProfileScript := preload("res://scripts/combat/equipment/MotionEquipmentProfile.gd")
 const MotionEquipmentAdapterScript := preload("res://scripts/combat/equipment/MotionEquipmentAdapter.gd")
 const MotionVolumeRecipeBuilderScript := preload("res://scripts/combat/contact/MotionVolumeRecipeBuilder.gd")
@@ -29,6 +30,11 @@ func run() -> void:
 	test_sweep_axis_is_continuous_across_motion_reversals()
 	test_stacked_motions_keep_separate_pose_contributors()
 	test_quadruped_and_biped_profiles_validate()
+	test_generated_shadow_stalker_mesh_and_rig_validate()
+	test_generated_frost_predator_mesh_and_rig_validate()
+	test_declared_locomotion_gait_uses_velocity_without_moving_the_body()
+	test_declared_gaze_tracks_target_without_turning_the_body()
+	test_movement_gaze_releases_target_tracking_smoothly()
 	test_missing_required_role_is_rejected_explicitly()
 	test_same_arc_selects_anatomy_by_profile()
 	test_pose_driver_never_moves_parent_body()
@@ -92,6 +98,151 @@ func test_quadruped_and_biped_profiles_validate() -> void:
 	var wolf_valid: Dictionary = wolf_result.get("validation", {}) as Dictionary
 	var construct_valid: Dictionary = construct_result.get("validation", {}) as Dictionary
 	add_result("unlike_quadruped_and_biped_profiles_validate_the_same_semantic_contract", bool(wolf_valid.get("valid", false)) and bool(construct_valid.get("valid", false)), {"wolf": wolf_valid, "construct": construct_valid})
+	root.free()
+
+
+func test_generated_shadow_stalker_mesh_and_rig_validate() -> void:
+	# This exercises the registry-backed mesh path used by the arena rather than
+	# a hand-built stand-in. The capsule remains a collision child only; all
+	# visible anatomy must come from the five generated Stalker parts.
+	var root := Node3D.new()
+	get_root().add_child(root)
+	var stalker := Node3D.new()
+	root.add_child(stalker)
+	var factory = HostileVisualFactoryScript.new()
+	factory.build_visual(stalker, "shadow_stalker")
+	var validation: Dictionary = stalker.get_meta("motion_rig_validation", {}) as Dictionary
+	var asset_ids: Array = stalker.get_meta("character_asset_parts", []) as Array
+	var source := String(stalker.get_meta("visual_source", ""))
+	var skeleton := stalker.get_node_or_null("ShadowStalkerMotionSkeleton") as Skeleton3D
+	var driver = stalker.get_node_or_null("MotionRigPoseDriver")
+	var signals = MotionPoseSignalBuilderScript.build_for_stack(arc_stack(1543, -1.0), 0.52)
+	var solution: Dictionary = driver.apply_signals(signals) if driver != null else {}
+	var arm_index := skeleton.find_bone("ArmLeft") if skeleton != null else -1
+	var arm_direction := skeleton.get_bone_pose_rotation(arm_index) * Vector3.DOWN if arm_index >= 0 else Vector3.ZERO
+	var tracks_motion := arm_direction.length_squared() > 0.000001 and arm_direction.normalized().angle_to(signals[0].limb_direction) < deg_to_rad(0.5) if not signals.is_empty() else false
+	var expected_assets := ["shadow_stalker_torso", "shadow_stalker_head", "shadow_stalker_arm", "shadow_stalker_leg", "shadow_stalker_tail"]
+	var has_all_assets := true
+	for asset_id in expected_assets:
+		has_all_assets = has_all_assets and asset_ids.has(asset_id)
+	var valid := bool(validation.get("valid", false)) and source == "generated_shadow_stalker_mesh" and skeleton != null and has_all_assets and tracks_motion and not (solution.get("contributions", {}) as Dictionary).is_empty()
+	add_result("shadow_stalker_uses_generated_anatomy_and_retargets_the_shared_arc_to_its_arm", valid, {"validation": validation, "assetIds": asset_ids, "source": source, "tracksMotion": tracks_motion, "armDirection": arm_direction, "solution": solution})
+	root.free()
+
+
+func test_generated_frost_predator_mesh_and_rig_validate() -> void:
+	# The arena must exercise the actual registry-generated cold-predator body,
+	# not the older generic frost torso/head path. Both lead signs select their
+	# declared forelimb through the same shared pose signal contract.
+	var root := Node3D.new()
+	get_root().add_child(root)
+	var predator := Node3D.new()
+	root.add_child(predator)
+	var factory = HostileVisualFactoryScript.new()
+	factory.build_visual(predator, "frost_predator")
+	var validation: Dictionary = predator.get_meta("motion_rig_validation", {}) as Dictionary
+	var asset_ids: Array = predator.get_meta("character_asset_parts", []) as Array
+	var source := String(predator.get_meta("visual_source", ""))
+	var skeleton := predator.get_node_or_null("FrostPredatorMotionSkeleton") as Skeleton3D
+	var driver = predator.get_node_or_null("MotionRigPoseDriver")
+	var left_signals = MotionPoseSignalBuilderScript.build_for_stack(arc_stack(1543, -1.0), 0.52)
+	var left_solution: Dictionary = driver.apply_signals(left_signals) if driver != null else {}
+	var left_index := skeleton.find_bone("ForeLeft") if skeleton != null else -1
+	var left_direction := skeleton.get_bone_pose_rotation(left_index) * Vector3.DOWN if left_index >= 0 else Vector3.ZERO
+	var right_signals = MotionPoseSignalBuilderScript.build_for_stack(arc_stack(7651, 1.0), 0.52)
+	var right_solution: Dictionary = driver.apply_signals(right_signals) if driver != null else {}
+	var right_index := skeleton.find_bone("ForeRight") if skeleton != null else -1
+	var right_direction := skeleton.get_bone_pose_rotation(right_index) * Vector3.DOWN if right_index >= 0 else Vector3.ZERO
+	var expected_assets := ["frost_predator_torso", "frost_predator_head", "frost_predator_foreleg", "frost_predator_hindleg", "frost_predator_tail"]
+	var has_all_assets := true
+	for asset_id in expected_assets:
+		has_all_assets = has_all_assets and asset_ids.has(asset_id)
+	var left_tracks_motion := left_direction.length_squared() > 0.000001 and left_direction.normalized().angle_to(left_signals[0].limb_direction) < deg_to_rad(0.5) if not left_signals.is_empty() else false
+	var right_tracks_motion := right_direction.length_squared() > 0.000001 and right_direction.normalized().angle_to(right_signals[0].limb_direction) < deg_to_rad(0.5) if not right_signals.is_empty() else false
+	if driver != null and driver.has_method("reset_pose"):
+		driver.reset_pose()
+	if driver != null and driver.has_method("apply_locomotion_velocity"):
+		driver.apply_locomotion_velocity(Vector3(0.0, 0.0, 4.25), 0.13)
+	var gait_left_direction := skeleton.get_bone_pose_rotation(left_index) * Vector3.DOWN if left_index >= 0 else Vector3.ZERO
+	var gait_right_direction := skeleton.get_bone_pose_rotation(right_index) * Vector3.DOWN if right_index >= 0 else Vector3.ZERO
+	var fore_aft_gait := absf(gait_left_direction.z) > 0.02 and absf(gait_right_direction.z) > 0.02 and gait_left_direction.z * gait_right_direction.z < 0.0 and absf(gait_left_direction.x) < 0.01 and absf(gait_right_direction.x) < 0.01
+	var valid := bool(validation.get("valid", false)) and source == "generated_frost_predator_mesh" and skeleton != null and has_all_assets and left_tracks_motion and right_tracks_motion and fore_aft_gait and not (left_solution.get("contributions", {}) as Dictionary).is_empty() and not (right_solution.get("contributions", {}) as Dictionary).is_empty()
+	add_result("frost_predator_uses_generated_quadruped_anatomy_forelimb_arcs_and_fore_aft_gait", valid, {"validation": validation, "assetIds": asset_ids, "source": source, "leftTracksMotion": left_tracks_motion, "rightTracksMotion": right_tracks_motion, "leftDirection": left_direction, "rightDirection": right_direction, "gaitLeftDirection": gait_left_direction, "gaitRightDirection": gait_right_direction, "foreAftGait": fore_aft_gait})
+	root.free()
+
+
+func test_declared_locomotion_gait_uses_velocity_without_moving_the_body() -> void:
+	var root := Node3D.new()
+	get_root().add_child(root)
+	var stalker := Node3D.new()
+	stalker.position = Vector3(2.0, 0.0, -3.0)
+	root.add_child(stalker)
+	var factory = HostileVisualFactoryScript.new()
+	factory.build_visual(stalker, "shadow_stalker")
+	var driver = stalker.get_node_or_null("MotionRigPoseDriver")
+	var skeleton := stalker.get_node_or_null("ShadowStalkerMotionSkeleton") as Skeleton3D
+	var initial_transform := stalker.global_transform
+	if driver != null and driver.has_method("apply_locomotion_velocity"):
+		driver.apply_locomotion_velocity(Vector3(0.0, 0.0, 4.55), 0.13)
+	var left_index := skeleton.find_bone("LegLeft") if skeleton != null else -1
+	var right_index := skeleton.find_bone("LegRight") if skeleton != null else -1
+	var left_direction := skeleton.get_bone_pose_rotation(left_index) * Vector3.DOWN if left_index >= 0 else Vector3.ZERO
+	var right_direction := skeleton.get_bone_pose_rotation(right_index) * Vector3.DOWN if right_index >= 0 else Vector3.ZERO
+	var legs_swing := left_direction.length_squared() > 0.000001 and right_direction.length_squared() > 0.000001 and absf(left_direction.z) > 0.02 and absf(right_direction.z) > 0.02 and left_direction.z * right_direction.z < 0.0
+	var diagnostics: Dictionary = driver.diagnostics() if driver != null and driver.has_method("diagnostics") else {}
+	add_result("declared_locomotion_gait_uses_actual_velocity_for_opposed_leg_motion_without_moving_the_collision_body", legs_swing and stalker.global_transform.is_equal_approx(initial_transform), {"leftDirection": left_direction, "rightDirection": right_direction, "diagnostics": diagnostics})
+	root.free()
+
+
+func test_declared_gaze_tracks_target_without_turning_the_body() -> void:
+	var root := Node3D.new()
+	get_root().add_child(root)
+	var stalker := Node3D.new()
+	stalker.position = Vector3(-1.0, 0.0, -2.0)
+	root.add_child(stalker)
+	var factory = HostileVisualFactoryScript.new()
+	factory.build_visual(stalker, "shadow_stalker")
+	var driver = stalker.get_node_or_null("MotionRigPoseDriver")
+	var skeleton := stalker.get_node_or_null("ShadowStalkerMotionSkeleton") as Skeleton3D
+	var initial_transform := stalker.global_transform
+	if driver != null and driver.has_method("apply_gaze_target"):
+		driver.apply_gaze_target(Vector3(4.0, 1.2, -2.0), 0.18)
+	var head_index := skeleton.find_bone("Head") if skeleton != null else -1
+	var head_rotation := skeleton.get_bone_pose_rotation(head_index) if head_index >= 0 else Quaternion.IDENTITY
+	var diagnostics: Dictionary = driver.diagnostics() if driver != null and driver.has_method("diagnostics") else {}
+	var gaze_applied := head_rotation.angle_to(Quaternion.IDENTITY) > deg_to_rad(1.0) and (diagnostics.get("gazeBones", []) as Array).has("Head")
+	# The target is to the stalker's local right. Its declared -Z-forward head must
+	# therefore yaw right (negative Godot Y yaw), not merely receive any rotation.
+	# This distinguishes actual target tracking from an arbitrary visual twitch.
+	var head_yaw := head_rotation.get_euler().y
+	var gaze_faces_target_side := head_yaw < -deg_to_rad(20.0)
+	add_result("declared_gaze_tracks_target_through_the_head_without_turning_the_collision_body", gaze_applied and gaze_faces_target_side and stalker.global_transform.is_equal_approx(initial_transform), {"headRotationDegrees": rad_to_deg(head_rotation.get_angle()), "headYawDegrees": rad_to_deg(head_yaw), "diagnostics": diagnostics})
+	root.free()
+
+
+func test_movement_gaze_releases_target_tracking_smoothly() -> void:
+	var root := Node3D.new()
+	get_root().add_child(root)
+	var stalker := Node3D.new()
+	root.add_child(stalker)
+	var factory = HostileVisualFactoryScript.new()
+	factory.build_visual(stalker, "shadow_stalker")
+	var driver = stalker.get_node_or_null("MotionRigPoseDriver")
+	var skeleton := stalker.get_node_or_null("ShadowStalkerMotionSkeleton") as Skeleton3D
+	if driver != null and driver.has_method("apply_gaze_target"):
+		driver.apply_gaze_target(Vector3(5.0, 1.2, 0.0), 0.35)
+	var head_index := skeleton.find_bone("Head") if skeleton != null else -1
+	var target_yaw := skeleton.get_bone_pose_rotation(head_index).get_euler().y if head_index >= 0 else 0.0
+	# The body is facing world -Z, which is also the retreat direction. The
+	# movement gaze must blend the existing target offset back toward its forward
+	# rest rather than preserving the player-facing head pose.
+	if driver != null and driver.has_method("apply_gaze_direction"):
+		driver.apply_gaze_direction(Vector3.FORWARD, 0.35)
+	var retreat_yaw := skeleton.get_bone_pose_rotation(head_index).get_euler().y if head_index >= 0 else 0.0
+	var diagnostics: Dictionary = driver.diagnostics() if driver != null and driver.has_method("diagnostics") else {}
+	var target_tracking_existed := absf(target_yaw) > deg_to_rad(20.0)
+	var returned_toward_movement := absf(retreat_yaw) < absf(target_yaw) and absf(retreat_yaw) < deg_to_rad(5.0)
+	add_result("movement_gaze_releases_target_tracking_back_to_the_travel_heading", target_tracking_existed and returned_toward_movement and (diagnostics.get("gazeBones", []) as Array).has("Head"), {"targetYawDegrees": rad_to_deg(target_yaw), "retreatYawDegrees": rad_to_deg(retreat_yaw), "diagnostics": diagnostics})
 	root.free()
 
 

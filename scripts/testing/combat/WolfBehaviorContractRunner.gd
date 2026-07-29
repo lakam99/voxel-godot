@@ -14,10 +14,13 @@ func _ready() -> void:
 	var failures: Array[String] = []
 	var checks: Dictionary = {}
 	var profile = HostileBehaviorProfileCatalogScript.profile_for("wolf.gray")
+	var frost_profile = HostileBehaviorProfileCatalogScript.profile_for("frost.predator")
 	checks["profile_resolves"] = profile != null and profile.id == "wolf.gray" and profile.supports_motion("arc") and profile.supports_motion("forward_surge")
 	check(failures, checks, "profile_resolves")
 	checks["profile_replay_stable"] = JSON.stringify(profile.snapshot()) == JSON.stringify(HostileBehaviorProfileCatalogScript.profile_for("wolf.gray").snapshot())
 	check(failures, checks, "profile_replay_stable")
+	checks["quadruped_profiles_face_and_gaze_along_travel"] = frost_profile != null and profile.facing_mode == "movement" and profile.gaze_mode == "movement" and frost_profile.facing_mode == "movement" and frost_profile.gaze_mode == "movement"
+	check(failures, checks, "quadruped_profiles_face_and_gaze_along_travel")
 
 	var common := {
 		"stateElapsed": 0.0,
@@ -60,7 +63,8 @@ func _ready() -> void:
 		"checks": checks,
 		"failures": failures,
 		"profile": profile.snapshot(),
-		"notes": "This proves data/profile, intent, recovery, evade-gating and forward-surge sampling determinism. It does not prove headed arena readability or normal-world integration."
+		"frostProfile": frost_profile.snapshot() if frost_profile != null else {},
+		"notes": "This proves data/profile, intent, recovery, evade-gating, quadruped travel-facing declarations and forward-surge sampling determinism. It does not prove headed arena readability or normal-world integration."
 	}
 	write_report(report)
 	get_tree().quit(0 if failures.is_empty() else 1)

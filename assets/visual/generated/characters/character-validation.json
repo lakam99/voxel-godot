@@ -1,6 +1,6 @@
 {
   "passed": true,
-  "checked": 30,
+  "checked": 40,
   "errors": [],
   "assets": [
     {
@@ -29,7 +29,11 @@
         ]
       },
       "pivotAtOrigin": true,
-      "grounded": true
+      "grounded": true,
+      "vertexColorAttributes": [],
+      "armatures": 0,
+      "shapeKeys": 0,
+      "animationActions": 0
     },
     {
       "id": "npc_torso_02",
@@ -57,7 +61,11 @@
         ]
       },
       "pivotAtOrigin": true,
-      "grounded": true
+      "grounded": true,
+      "vertexColorAttributes": [],
+      "armatures": 0,
+      "shapeKeys": 0,
+      "animationActions": 0
     },
     {
       "id": "npc_torso_03",
@@ -85,7 +93,11 @@
         ]
       },
       "pivotAtOrigin": true,
-      "grounded": true
+      "grounded": true,
+      "vertexColorAttributes": [],
+      "armatures": 0,
+      "shapeKeys": 0,
+      "animationActions": 0
     },
     {
       "id": "npc_head_01",
@@ -112,7 +124,11 @@
         ]
       },
       "pivotAtOrigin": true,
-      "grounded": true
+      "grounded": true,
+      "vertexColorAttributes": [],
+      "armatures": 0,
+      "shapeKeys": 0,
+      "animationActions": 0
     },
     {
       "id": "npc_head_02",
@@ -139,7 +155,11 @@
         ]
       },
       "pivotAtOrigin": true,
-      "grounded": true
+      "grounded": true,
+      "vertexColorAttributes": [],
+      "armatures": 0,
+      "shapeKeys": 0,
+      "animationActions": 0
     },
     {
       "id": "npc_head_03",
@@ -166,7 +186,11 @@
         ]
       },
       "pivotAtOrigin": true,
-      "grounded": true
+      "grounded": true,
+      "vertexColorAttributes": [],
+      "armatures": 0,
+      "shapeKeys": 0,
+      "animationActions": 0
     },
     {
       "id": "npc_headwear_01",
@@ -193,7 +217,11 @@
         ]
       },
       "pivotAtOrigin": true,
-      "grounded": true
+      "grounded": true,
+      "vertexColorAttributes": [],
+      "armatures": 0,
+      "shapeKeys": 0,
+      "animationActions": 0
     },
     {
       "id": "npc_headwear_02",
@@ -220,7 +248,11 @@
         ]
       },
       "pivotAtOrigin": true,
-      "grounded": true
+      "grounded": true,
+      "vertexColorAttributes": [],
+      "armatures": 0,
+      "shapeKeys": 0,
+      "animationActions": 0
     },
     {
       "id": "npc_headwear_03",
@@ -247,7 +279,11 @@
         ]
       },
       "pivotAtOrigin": true,
-      "grounded": true
+      "grounded": true,
+      "vertexColorAttributes": [],
+      "armatures": 0,
+      "shapeKeys": 0,
+      "animationActions": 0
     },
     {
       "id": "npc_headwear_04",
@@ -274,7 +310,11 @@
         ]
       },
       "pivotAtOrigin": true,
-      "grounded": true
+      "grounded": true,
+      "vertexColorAttributes": [],
+      "armatures": 0,
+      "shapeKeys": 0,
+      "animationActions": 0
     },
     {
       "id": "npc_arm_01",
@@ -303,7 +343,11 @@
         ]
       },
       "pivotAtOrigin": true,
-      "grounded": true
+      "grounded": true,
+      "vertexColorAttributes": [],
+      "armatures": 0,
+      "shapeKeys": 0,
+      "animationActions": 0
     },
     {
       "id": "npc_arm_02",
@@ -332,7 +376,11 @@
         ]
       },
       "pivotAtOrigin": true,
-      "grounded": true
+      "grounded": true,
+      "vertexColorAttributes": [],
+      "armatures": 0,
+      "shapeKeys": 0,
+      "animationActions": 0
     },
     {
       "id": "hostile_torso_shadow",
@@ -360,7 +408,11 @@
         ]
       },
       "pivotAtOrigin": true,
-      "grounded": true
+      "grounded": true,
+      "vertexColorAttributes": [],
+      "armatures": 0,
+      "shapeKeys": 0,
+      "animationActions": 0
     },
     {
       "id": "hostile_torso_frost",
@@ -388,7 +440,11 @@
         ]
       },
       "pivotAtOrigin": true,
-      "grounded": true
+      "grounded": true,
+      "vertexColorAttributes": [],
+      "armatures": 0,
+      "shapeKeys": 0,
+      "animationActions": 0
     },
     {
       "id": "hostile_torso_seer",
@@ -416,7 +472,11 @@
         ]
       },
       "pivotAtOrigin": true,
-      "grounded": true
+      "grounded": true,
+      "vertexColorAttributes": [],
+      "armatures": 0,
+      "shapeKeys": 0,
+      "animationActions": 0
     },
     {
       "id": "hostile_torso_rift",
@@ -444,7 +504,11 @@
         ]
       },
       "pivotAtOrigin": true,
-      "grounded": true
+      "grounded": true,
+      "vertexColorAttributes": [],
+      "armatures": 0,
+      "shapeKeys": 0,
+      "animationActions": 0
     },
     {
       "id": "hostile_torso_skitter",
@@ -472,7 +536,11 @@
         ]
       },
       "pivotAtOrigin": true,
-      "grounded": true
+      "grounded": true,
+      "vertexColorAttributes": [],
+      "armatures": 0,
+      "shapeKeys": 0,
+      "animationActions": 0
     },
     {
       "id": "hostile_head_shadow",
@@ -500,7 +568,11 @@
         ]
       },
       "pivotAtOrigin": true,
-      "grounded": true
+      "grounded": true,
+      "vertexColorAttributes": [],
+      "armatures": 0,
+      "shapeKeys": 0,
+      "animationActions": 0
     },
     {
       "id": "hostile_head_frost",
@@ -528,7 +600,11 @@
         ]
       },
       "pivotAtOrigin": true,
-      "grounded": true
+      "grounded": true,
+      "vertexColorAttributes": [],
+      "armatures": 0,
+      "shapeKeys": 0,
+      "animationActions": 0
     },
     {
       "id": "hostile_head_seer",
@@ -556,7 +632,11 @@
         ]
       },
       "pivotAtOrigin": true,
-      "grounded": true
+      "grounded": true,
+      "vertexColorAttributes": [],
+      "armatures": 0,
+      "shapeKeys": 0,
+      "animationActions": 0
     },
     {
       "id": "hostile_head_rift",
@@ -584,7 +664,11 @@
         ]
       },
       "pivotAtOrigin": true,
-      "grounded": true
+      "grounded": true,
+      "vertexColorAttributes": [],
+      "armatures": 0,
+      "shapeKeys": 0,
+      "animationActions": 0
     },
     {
       "id": "hostile_head_skitter",
@@ -612,7 +696,11 @@
         ]
       },
       "pivotAtOrigin": true,
-      "grounded": true
+      "grounded": true,
+      "vertexColorAttributes": [],
+      "armatures": 0,
+      "shapeKeys": 0,
+      "animationActions": 0
     },
     {
       "id": "hostile_eye_01",
@@ -640,7 +728,11 @@
         ]
       },
       "pivotAtOrigin": true,
-      "grounded": true
+      "grounded": true,
+      "vertexColorAttributes": [],
+      "armatures": 0,
+      "shapeKeys": 0,
+      "animationActions": 0
     },
     {
       "id": "hostile_eye_02",
@@ -668,7 +760,11 @@
         ]
       },
       "pivotAtOrigin": true,
-      "grounded": true
+      "grounded": true,
+      "vertexColorAttributes": [],
+      "armatures": 0,
+      "shapeKeys": 0,
+      "animationActions": 0
     },
     {
       "id": "hostile_eye_03",
@@ -696,7 +792,11 @@
         ]
       },
       "pivotAtOrigin": true,
-      "grounded": true
+      "grounded": true,
+      "vertexColorAttributes": [],
+      "armatures": 0,
+      "shapeKeys": 0,
+      "animationActions": 0
     },
     {
       "id": "hostile_core_01",
@@ -724,7 +824,11 @@
         ]
       },
       "pivotAtOrigin": true,
-      "grounded": true
+      "grounded": true,
+      "vertexColorAttributes": [],
+      "armatures": 0,
+      "shapeKeys": 0,
+      "animationActions": 0
     },
     {
       "id": "hostile_core_02",
@@ -752,7 +856,11 @@
         ]
       },
       "pivotAtOrigin": true,
-      "grounded": true
+      "grounded": true,
+      "vertexColorAttributes": [],
+      "armatures": 0,
+      "shapeKeys": 0,
+      "animationActions": 0
     },
     {
       "id": "hostile_shard_01",
@@ -780,7 +888,11 @@
         ]
       },
       "pivotAtOrigin": true,
-      "grounded": true
+      "grounded": true,
+      "vertexColorAttributes": [],
+      "armatures": 0,
+      "shapeKeys": 0,
+      "animationActions": 0
     },
     {
       "id": "hostile_shard_02",
@@ -808,7 +920,11 @@
         ]
       },
       "pivotAtOrigin": true,
-      "grounded": true
+      "grounded": true,
+      "vertexColorAttributes": [],
+      "armatures": 0,
+      "shapeKeys": 0,
+      "animationActions": 0
     },
     {
       "id": "hostile_shard_03",
@@ -836,7 +952,331 @@
         ]
       },
       "pivotAtOrigin": true,
-      "grounded": true
+      "grounded": true,
+      "vertexColorAttributes": [],
+      "armatures": 0,
+      "shapeKeys": 0,
+      "animationActions": 0
+    },
+    {
+      "id": "shadow_stalker_torso",
+      "path": "assets/visual/generated/characters/shadow_stalker_torso.glb",
+      "triangles": 140,
+      "materials": [
+        "hostile",
+        "hostile_accent"
+      ],
+      "bounds": {
+        "min": [
+          -0.5103,
+          -0.3833,
+          0.0
+        ],
+        "max": [
+          0.5103,
+          0.2357,
+          1.13
+        ],
+        "size": [
+          1.0206,
+          0.619,
+          1.13
+        ]
+      },
+      "pivotAtOrigin": true,
+      "grounded": true,
+      "vertexColorAttributes": [],
+      "armatures": 0,
+      "shapeKeys": 0,
+      "animationActions": 0
+    },
+    {
+      "id": "shadow_stalker_head",
+      "path": "assets/visual/generated/characters/shadow_stalker_head.glb",
+      "triangles": 142,
+      "materials": [
+        "hostile",
+        "hostile_accent",
+        "hostile_eye"
+      ],
+      "bounds": {
+        "min": [
+          -0.2511,
+          -0.37,
+          0.0
+        ],
+        "max": [
+          0.2511,
+          0.2296,
+          0.679
+        ],
+        "size": [
+          0.5023,
+          0.5996,
+          0.679
+        ]
+      },
+      "pivotAtOrigin": true,
+      "grounded": true,
+      "vertexColorAttributes": [],
+      "armatures": 0,
+      "shapeKeys": 0,
+      "animationActions": 0
+    },
+    {
+      "id": "shadow_stalker_arm",
+      "path": "assets/visual/generated/characters/shadow_stalker_arm.glb",
+      "triangles": 90,
+      "materials": [
+        "hostile",
+        "hostile_accent"
+      ],
+      "bounds": {
+        "min": [
+          -0.1103,
+          -0.2048,
+          0.0
+        ],
+        "max": [
+          0.1103,
+          0.0988,
+          1.3018
+        ],
+        "size": [
+          0.2207,
+          0.3036,
+          1.3018
+        ]
+      },
+      "pivotAtOrigin": true,
+      "grounded": true,
+      "vertexColorAttributes": [],
+      "armatures": 0,
+      "shapeKeys": 0,
+      "animationActions": 0
+    },
+    {
+      "id": "shadow_stalker_leg",
+      "path": "assets/visual/generated/characters/shadow_stalker_leg.glb",
+      "triangles": 108,
+      "materials": [
+        "hostile"
+      ],
+      "bounds": {
+        "min": [
+          -0.205,
+          -0.4775,
+          0.0
+        ],
+        "max": [
+          0.1847,
+          0.1702,
+          1.03
+        ],
+        "size": [
+          0.3897,
+          0.6478,
+          1.03
+        ]
+      },
+      "pivotAtOrigin": true,
+      "grounded": true,
+      "vertexColorAttributes": [],
+      "armatures": 0,
+      "shapeKeys": 0,
+      "animationActions": 0
+    },
+    {
+      "id": "shadow_stalker_tail",
+      "path": "assets/visual/generated/characters/shadow_stalker_tail.glb",
+      "triangles": 34,
+      "materials": [
+        "hostile",
+        "hostile_accent"
+      ],
+      "bounds": {
+        "min": [
+          -0.1043,
+          -0.5486,
+          0.0
+        ],
+        "max": [
+          0.1043,
+          0.24,
+          0.393
+        ],
+        "size": [
+          0.2085,
+          0.7886,
+          0.393
+        ]
+      },
+      "pivotAtOrigin": true,
+      "grounded": true,
+      "vertexColorAttributes": [],
+      "armatures": 0,
+      "shapeKeys": 0,
+      "animationActions": 0
+    },
+    {
+      "id": "frost_predator_torso",
+      "path": "assets/visual/generated/characters/frost_predator_torso.glb",
+      "triangles": 148,
+      "materials": [
+        "frost",
+        "frost_ice"
+      ],
+      "bounds": {
+        "min": [
+          -0.5081,
+          -0.0,
+          0.0
+        ],
+        "max": [
+          0.5081,
+          1.62,
+          0.7937
+        ],
+        "size": [
+          1.0163,
+          1.62,
+          0.7937
+        ]
+      },
+      "pivotAtOrigin": true,
+      "grounded": true,
+      "vertexColorAttributes": [],
+      "armatures": 0,
+      "shapeKeys": 0,
+      "animationActions": 0
+    },
+    {
+      "id": "frost_predator_head",
+      "path": "assets/visual/generated/characters/frost_predator_head.glb",
+      "triangles": 154,
+      "materials": [
+        "frost",
+        "frost_ice",
+        "hostile_eye"
+      ],
+      "bounds": {
+        "min": [
+          -0.34,
+          -0.0,
+          0.0
+        ],
+        "max": [
+          0.3063,
+          0.74,
+          0.6365
+        ],
+        "size": [
+          0.6463,
+          0.74,
+          0.6365
+        ]
+      },
+      "pivotAtOrigin": true,
+      "grounded": true,
+      "vertexColorAttributes": [],
+      "armatures": 0,
+      "shapeKeys": 0,
+      "animationActions": 0
+    },
+    {
+      "id": "frost_predator_foreleg",
+      "path": "assets/visual/generated/characters/frost_predator_foreleg.glb",
+      "triangles": 124,
+      "materials": [
+        "frost",
+        "frost_ice"
+      ],
+      "bounds": {
+        "min": [
+          -0.18,
+          -0.3429,
+          0.0
+        ],
+        "max": [
+          0.1622,
+          0.1601,
+          1.2051
+        ],
+        "size": [
+          0.3422,
+          0.503,
+          1.2051
+        ]
+      },
+      "pivotAtOrigin": true,
+      "grounded": true,
+      "vertexColorAttributes": [],
+      "armatures": 0,
+      "shapeKeys": 0,
+      "animationActions": 0
+    },
+    {
+      "id": "frost_predator_hindleg",
+      "path": "assets/visual/generated/characters/frost_predator_hindleg.glb",
+      "triangles": 94,
+      "materials": [
+        "frost"
+      ],
+      "bounds": {
+        "min": [
+          -0.232,
+          -0.3539,
+          0.0
+        ],
+        "max": [
+          0.209,
+          0.2031,
+          0.98
+        ],
+        "size": [
+          0.441,
+          0.557,
+          0.98
+        ]
+      },
+      "pivotAtOrigin": true,
+      "grounded": true,
+      "vertexColorAttributes": [],
+      "armatures": 0,
+      "shapeKeys": 0,
+      "animationActions": 0
+    },
+    {
+      "id": "frost_predator_tail",
+      "path": "assets/visual/generated/characters/frost_predator_tail.glb",
+      "triangles": 76,
+      "materials": [
+        "frost",
+        "frost_ice"
+      ],
+      "bounds": {
+        "min": [
+          -0.158,
+          -1.085,
+          0.0
+        ],
+        "max": [
+          0.1424,
+          0.0,
+          0.3239
+        ],
+        "size": [
+          0.3004,
+          1.085,
+          0.3239
+        ]
+      },
+      "pivotAtOrigin": true,
+      "grounded": true,
+      "vertexColorAttributes": [],
+      "armatures": 0,
+      "shapeKeys": 0,
+      "animationActions": 0
     }
   ]
 }

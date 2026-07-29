@@ -20,6 +20,9 @@ var evade_direction := Vector3.ZERO
 var evade_cooldown_remaining := 0.0
 var evade_stamina := 100.0
 var committed_motion_kind := ""
+var active_combo_id := ""
+var active_combo_steps: Array = []
+var active_combo_index := -1
 var last_intent
 var last_motor: Dictionary = {}
 var last_threat: Dictionary = {}
@@ -38,6 +41,7 @@ func setup(next_profile, next_seed: int) -> void:
 	action_serial = 0
 	motion_seed_serial = 0
 	committed_motion_kind = ""
+	clear_active_combo()
 	evade_cooldown_remaining = 0.0
 	evade_direction = Vector3.ZERO
 	last_intent = HostileBehaviorIntentScript.new({"kind": "approach", "reason": "initial"})
@@ -69,7 +73,11 @@ func advance(delta: float, body: CharacterBody3D, target: Node3D, motion_runtime
 		last_evade_reason = String(last_threat.get("reason", "no_player_motion"))
 
 	if state == "commit" and not motion_active and state_elapsed >= 0.06:
-		transition_to("recovery", "shared_motion_finished")
+		if begin_next_combo_step(body, target, motion_runtime):
+			motion_active = true
+			motion_summary = motion_runtime.summary_for_body(body) if motion_runtime != null and motion_runtime.has_method("summary_for_body") else {}
+		else:
+			transition_to("recovery", "shared_motion_finished")
 	if state == "evade" and state_elapsed >= profile.evade_duration:
 		transition_to("orbit", "evade_complete")
 	if state == "recovery" and state_elapsed >= profile.recovery_duration:
@@ -116,7 +124,10 @@ func advance(delta: float, body: CharacterBody3D, target: Node3D, motion_runtime
 
 	if state == "commit":
 		var active_phase := String(motion_summary.get("phase", ""))
-		if committed_motion_kind == "forward_surge" and active_phase == "surge":
+		var combo_locomotion = combo_locomotion_intent(active_phase)
+		if combo_locomotion != null:
+			intent = combo_locomotion
+		elif committed_motion_kind == "forward_surge" and active_phase == "surge":
 			intent = HostileBehaviorIntentScript.new({"kind": "lunge", "reason": "forward_surge_active", "speed": profile.lunge_speed, "orbitDirection": orbit_direction})
 		else:
 			intent = HostileBehaviorIntentScript.new({"kind": "hold", "reason": "committed_motion_%s" % active_phase, "orbitDirection": orbit_direction})
@@ -135,17 +146,79 @@ func advance(delta: float, body: CharacterBody3D, target: Node3D, motion_runtime
 func begin_committed_motion(motion_kind: String, body: CharacterBody3D, target: Node3D, motion_runtime) -> bool:
 	if motion_runtime == null or body == null or target == null:
 		return false
-	motion_seed_serial += 1
 	action_serial += 1
+	var declared_steps: Array = profile.combo_steps(motion_kind) if profile != null and profile.has_method("combo_steps") else []
+	active_combo_id = motion_kind if not declared_steps.is_empty() else ""
+	active_combo_steps = declared_steps if not declared_steps.is_empty() else [{"motionKind": motion_kind, "side": 0.0, "planeProfile": profile.claw_plane_profile, "verticalDirection": "", "poseRoles": [], "showTelegraph": true}]
+	active_combo_index = 0
+	var started := begin_combo_step(active_combo_steps[active_combo_index] as Dictionary, body, target, motion_runtime)
+	if not started:
+		clear_active_combo()
+	return started
+
+
+func begin_next_combo_step(body: CharacterBody3D, target: Node3D, motion_runtime) -> bool:
+	if active_combo_steps.is_empty():
+		return false
+	var next_index := active_combo_index + 1
+	if next_index >= active_combo_steps.size():
+		clear_active_combo()
+		return false
+	active_combo_index = next_index
+	return begin_combo_step(active_combo_steps[active_combo_index] as Dictionary, body, target, motion_runtime)
+
+
+func begin_combo_step(step: Dictionary, body: CharacterBody3D, target: Node3D, motion_runtime) -> bool:
+	if profile == null or motion_runtime == null:
+		return false
+	var motion_kind := String(step.get("motionKind", "")).strip_edges().to_lower()
+	if not profile.supports_motion(motion_kind):
+		return false
+	motion_seed_serial += 1
 	var seed := motion_seed(motion_seed_serial)
 	var started := false
-	if motion_kind == "forward_surge" and profile.supports_motion("forward_surge") and motion_runtime.has_method("begin_forward_surge_motion"):
-		started = bool(motion_runtime.begin_forward_surge_motion(body, target, "arena_player", profile.motion_damage, profile.visual_variant, seed, true))
-	elif motion_kind == "arc" and profile.supports_motion("arc") and motion_runtime.has_method("begin_arc_motion"):
-		started = bool(motion_runtime.begin_arc_motion(body, target, "arena_player", profile.motion_damage, profile.visual_variant, seed, profile.claw_plane_profile, true))
+	var pose_roles: Array = step.get("poseRoles", []) as Array
+	if motion_kind == "forward_surge" and motion_runtime.has_method("begin_forward_surge_motion"):
+		started = bool(motion_runtime.begin_forward_surge_motion(body, target, "arena_player", profile.motion_damage, profile.visual_variant, seed, bool(step.get("showTelegraph", true)), pose_roles))
+	elif motion_kind == "arc" and motion_runtime.has_method("begin_arc_motion"):
+		started = bool(motion_runtime.begin_arc_motion(body, target, "arena_player", profile.motion_damage, profile.visual_variant, seed, String(step.get("planeProfile", profile.claw_plane_profile)), bool(step.get("showTelegraph", true)), float(step.get("side", 0.0)), String(step.get("verticalDirection", "")), pose_roles))
 	if started:
 		committed_motion_kind = motion_kind
 	return started
+
+
+func combo_locomotion_intent(active_phase: String):
+	if profile == null or active_combo_index < 0 or active_combo_index >= active_combo_steps.size():
+		return null
+	var step: Dictionary = active_combo_steps[active_combo_index] as Dictionary
+	var locomotion_kind := String(step.get("locomotionKind", "")).strip_edges().to_lower()
+	var phases: Array = step.get("locomotionPhases", []) as Array
+	if locomotion_kind.is_empty() or not phases.has(active_phase):
+		return null
+	var speed := 0.0
+	match locomotion_kind:
+		"approach":
+			speed = profile.approach_speed
+		"lunge":
+			speed = profile.lunge_speed
+		"retreat":
+			speed = profile.retreat_speed
+		"orbit":
+			speed = profile.orbit_speed
+		_:
+			return null
+	return HostileBehaviorIntentScript.new({
+		"kind": locomotion_kind,
+		"reason": "combo_%s_%s" % [locomotion_kind, active_phase],
+		"speed": speed,
+		"orbitDirection": orbit_direction
+	})
+
+
+func clear_active_combo() -> void:
+	active_combo_id = ""
+	active_combo_steps.clear()
+	active_combo_index = -1
 
 
 func enter_evade(body: CharacterBody3D, target: Node3D) -> bool:
@@ -204,6 +277,7 @@ func transition_to(next_state: String, reason: String) -> void:
 		orbit_direction *= -1.0 if hash01("orbit:%d" % (action_serial + transitions.size())) < 0.24 else 1.0
 	if state == "recovery":
 		committed_motion_kind = ""
+		clear_active_combo()
 
 
 func motion_seed(serial: int) -> int:
@@ -226,6 +300,9 @@ func summary() -> Dictionary:
 		"motionSeedSerial": motion_seed_serial,
 		"orbitDirection": orbit_direction,
 		"committedMotionKind": committed_motion_kind,
+		"activeComboId": active_combo_id,
+		"activeComboIndex": active_combo_index,
+		"activeComboStepCount": active_combo_steps.size(),
 		"evadeCooldown": evade_cooldown_remaining,
 		"evadeStamina": evade_stamina,
 		"lastEvadeReason": last_evade_reason,

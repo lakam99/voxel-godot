@@ -19,3 +19,4 @@ addons/terrain_meshing_backend/bin/
 addons/zylann.voxel/bin/
 compile-smoke-debug.txt
 npc-navigation-direct-log-progress.txt
+**.pyc

@@ -50,9 +50,9 @@ func begin_side_arc_motion(source_body: Node3D, target: Node3D, target_kind: Str
 	)
 
 
-func begin_arc_motion(source_body: Node3D, target: Node3D, target_kind: String, damage: float, variant: String, recipe_seed: int, plane_profile := "seeded", show_telegraph := false) -> bool:
+func begin_arc_motion(source_body: Node3D, target: Node3D, target_kind: String, damage: float, variant: String, recipe_seed: int, plane_profile := "seeded", show_telegraph := false, side_override := 0.0, vertical_direction := "", pose_roles: Array = []) -> bool:
 	var recipe_started: int = performance_monitor.begin_section("hostile_motion_recipe") if performance_monitor != null else Time.get_ticks_usec()
-	var recipe = MotionRecipeBuilderScript.build_arc(recipe_seed, {"planeProfile": plane_profile})
+	var recipe = MotionRecipeBuilderScript.build_arc(recipe_seed, {"planeProfile": plane_profile, "motionSide": side_override, "verticalDirection": vertical_direction})
 	if performance_monitor != null:
 		performance_monitor.end_section("hostile_motion_recipe", recipe_started)
 	return begin_recipe_motion(
@@ -62,28 +62,36 @@ func begin_arc_motion(source_body: Node3D, target: Node3D, target_kind: String, 
 		damage,
 		variant,
 		recipe,
-		show_telegraph
+		show_telegraph,
+		false,
+		side_override,
+		pose_roles
 	)
 
 
-func begin_forward_surge_motion(source_body: Node3D, target: Node3D, target_kind: String, damage: float, variant: String, recipe_seed: int, show_telegraph := false) -> bool:
+func begin_forward_surge_motion(source_body: Node3D, target: Node3D, target_kind: String, damage: float, variant: String, recipe_seed: int, show_telegraph := false, pose_roles: Array = []) -> bool:
 	var recipe_started: int = performance_monitor.begin_section("hostile_motion_recipe") if performance_monitor != null else Time.get_ticks_usec()
 	var recipe = MotionRecipeBuilderScript.build_forward_surge(recipe_seed)
 	if performance_monitor != null:
 		performance_monitor.end_section("hostile_motion_recipe", recipe_started)
 	# This is not a special combat path. The generic recipe simply follows its
 	# source while the caller's real CharacterBody3D motor executes movement.
-	return begin_recipe_motion(source_body, target, target_kind, damage, variant, recipe, show_telegraph, true)
+	return begin_recipe_motion(source_body, target, target_kind, damage, variant, recipe, show_telegraph, true, 0.0, pose_roles)
 
 
-func begin_recipe_motion(source_body: Node3D, target: Node3D, target_kind: String, damage: float, variant: String, recipe, show_telegraph := false, follow_source := false) -> bool:
+func begin_recipe_motion(source_body: Node3D, target: Node3D, target_kind: String, damage: float, variant: String, recipe, show_telegraph := false, follow_source := false, side_override := 0.0, pose_roles: Array = []) -> bool:
 	if source_body == null or target == null or not is_instance_valid(source_body) or not is_instance_valid(target):
 		return false
 	var source_id := source_body.get_instance_id()
 	if active_by_source_id.has(source_id):
 		return false
 	var recipe_seed := int(recipe.seed) if recipe != null else 1
+	# A combo may request a semantic left/right lead limb. It still runs exactly
+	# the same body-neutral recipe; the rig maps the selected sign to its own
+	# anatomy. Other callers preserve deterministic seed-selected variation.
 	var direction := -1.0 if MotionRecipeBuilderScript.hash01(recipe_seed, "side") < 0.5 else 1.0
+	if absf(side_override) > 0.001:
+		direction = -1.0 if side_override < 0.0 else 1.0
 	var instance = MotionInstanceScript.new({
 		"instanceId": "hostile_arc_%d" % source_id,
 		"recipe": recipe,
@@ -131,6 +139,10 @@ func begin_recipe_motion(source_body: Node3D, target: Node3D, target_kind: Strin
 		"renderer": renderer,
 		"telegraph": telegraph,
 		"followSource": follow_source,
+		# Empty means the normal whole-body pose request. A step may deliberately
+		# select a smaller semantic layer (for example, body/legs for a dash) while
+		# retaining the exact same math, contact and renderer path.
+		"poseRoles": pose_roles.duplicate(),
 		"contactProvider": contact_provider,
 		"equipmentTrails": {}
 	}
@@ -366,6 +378,18 @@ func emit_pose_signals(entry: Dictionary) -> void:
 	# The combat runtime only publishes body-neutral phase signals. It does not
 	# inspect or bind a Skeleton3D; a rig driver may consume these independently.
 	var signals: Array = MotionPoseSignalBuilderScript.build_for_stack(stack, normalized_time(entry))
+	var pose_roles: Array = entry.get("poseRoles", []) as Array
+	if not pose_roles.is_empty():
+		for pose_signal in signals:
+			if pose_signal == null:
+				continue
+			for role_value in pose_signal.role_weights.keys():
+				var role := String(role_value)
+				if not pose_roles.has(role):
+					pose_signal.role_weights[role] = 0.0
+			# Motion alignment is meaningful only for the articulated lead limb.
+			if not pose_roles.has("lead_appendage"):
+				pose_signal.motion_alignment = 0.0
 	motion_pose_signals.emit(source, signals, summary_for(entry))
 
 

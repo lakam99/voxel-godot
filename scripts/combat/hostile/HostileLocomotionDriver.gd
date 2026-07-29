@@ -27,23 +27,37 @@ static func step(body: CharacterBody3D, target: Node3D, intent, profile, delta: 
 		requested = requested.normalized()
 		body.velocity.x = requested.x * speed
 		body.velocity.z = requested.z * speed
-		# Godot's forward axis is -Z. Keep a profile visual's forward-facing head
-		# aligned with the actual motor velocity rather than its tail.
-		body.rotation.y = atan2(-requested.x, -requested.z)
 	else:
 		body.velocity.x = move_toward(body.velocity.x, 0.0, maxf(1.0, profile.orbit_speed * 7.0) * delta)
 		body.velocity.z = move_toward(body.velocity.z, 0.0, maxf(1.0, profile.orbit_speed * 7.0) * delta)
-		if radial.length_squared() > 0.0001:
-			body.rotation.y = atan2(-radial.x, -radial.z)
 	body.velocity.y = -0.25
 	body.move_and_slide()
 	var displacement := body.global_position - previous
+	var applied_planar_velocity := Vector3(displacement.x / delta, 0.0, displacement.z / delta)
+	var travel_heading := applied_planar_velocity.normalized() if applied_planar_velocity.length_squared() > 0.0001 else requested
+	if travel_heading.length_squared() <= 0.0001:
+		travel_heading = radial
+	# A profile declares body and gaze independently. This avoids anatomy-family
+	# branches: a quadruped can face and look along real travel, while a biped can
+	# keep a target-tracking head over movement-facing locomotion. Use measured
+	# displacement after slide resolution so a constrained body never presents as
+	# travelling sideways relative to its legs.
+	var facing := radial if String(profile.facing_mode) == "target" else travel_heading
+	if facing.length_squared() > 0.0001:
+		body.rotation.y = atan2(-facing.x, -facing.z)
+	var rig_driver := body.get_node_or_null("MotionRigPoseDriver")
+	if rig_driver != null and rig_driver.has_method("apply_locomotion_velocity"):
+		rig_driver.apply_locomotion_velocity(applied_planar_velocity, delta)
+	if String(profile.gaze_mode) == "movement" and rig_driver != null and rig_driver.has_method("apply_gaze_direction"):
+		rig_driver.apply_gaze_direction(travel_heading, delta)
+	elif rig_driver != null and rig_driver.has_method("apply_gaze_target"):
+		rig_driver.apply_gaze_target(target.global_position, delta)
 	result["requestedDirection"] = requested
-	result["appliedVelocity"] = Vector3(displacement.x / delta, displacement.y / delta, displacement.z / delta)
+	result["appliedVelocity"] = Vector3(applied_planar_velocity.x, displacement.y / delta, applied_planar_velocity.z)
 	result["displacement"] = displacement
 	result["collisionCount"] = body.get_slide_collision_count()
 	result["blocked"] = requested.length_squared() > 0.0001 and Vector2(displacement.x, displacement.z).length() <= 0.001
-	result["heading"] = requested if requested.length_squared() > 0.0001 else radial
+	result["heading"] = travel_heading
 	result["distance"] = distance
 	return result
 

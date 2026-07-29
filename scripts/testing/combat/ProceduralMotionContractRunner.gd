@@ -25,6 +25,7 @@ func run() -> void:
 	test_same_seed_replays_exactly()
 	test_seed_variation_stays_bounded()
 	test_multi_plane_recipes_replay_exactly_and_stay_bounded()
+	test_explicit_downward_arcs_descend_for_both_lead_sides()
 	test_seeded_multi_plane_profiles_cover_all_supported_planes()
 	test_multi_plane_profiles_keep_a_standard_hostile_actor_corridor_contactable()
 	test_lateral_arc_preserves_legacy_side_arc_trajectory()
@@ -100,6 +101,39 @@ func test_multi_plane_recipes_replay_exactly_and_stay_bounded() -> void:
 	var overhead_tip: Vector3 = (trajectories.get("overhead", {}) as Dictionary).get("tip", Vector3.ZERO)
 	var distinct := not lateral_tip.is_equal_approx(rising_tip) and not rising_tip.is_equal_approx(falling_tip) and not rising_tip.is_equal_approx(overhead_tip)
 	add_result("multi_plane_arc_recipes_are_deterministic_bounded_and_distinct", exact and bounded and distinct, {"seed": 1543, "trajectories": trajectories})
+
+
+func test_explicit_downward_arcs_descend_for_both_lead_sides() -> void:
+	# A host can request an anatomical left or right lead limb, but that must not
+	# invert the requested vertical travel.  The recipe mirrors its plane roll
+	# from the lead side so each sampled strike travels down in world space.
+	var observations: Dictionary = {}
+	var both_descend := true
+	for side in [-1.0, 1.0]:
+		var recipe = MotionRecipeBuilderScript.build_arc(1543, {
+			"planeProfile": "falling",
+			"motionSide": side,
+			"verticalDirection": "down"
+		})
+		var instance = MotionInstanceScript.new({
+			"instanceId": "downward_%s" % ("left" if side < 0.0 else "right"),
+			"recipe": recipe,
+			"anchorId": "downward_contract",
+			"direction": side
+		})
+		var windup := float(recipe.parameters.get("windupFraction", 0.25))
+		var strike := float(recipe.parameters.get("strikeFraction", 0.40))
+		var start = instance.sample(windup + strike * 0.12)
+		var finish = instance.sample(windup + strike * 0.88)
+		var descent: float = start.tip.y - finish.tip.y
+		both_descend = both_descend and descent > 0.12 and String(recipe.parameters.get("verticalDirection", "")) == "down"
+		observations["left" if side < 0.0 else "right"] = {
+			"startY": start.tip.y,
+			"finishY": finish.tip.y,
+			"descent": descent,
+			"sweepRollDegrees": float(recipe.parameters.get("sweepRollDegrees", 0.0))
+		}
+	add_result("explicit_downward_arcs_descend_for_both_left_and_right_lead_sides", both_descend, observations)
 
 
 func test_seeded_multi_plane_profiles_cover_all_supported_planes() -> void:

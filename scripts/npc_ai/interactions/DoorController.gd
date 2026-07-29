@@ -180,7 +180,18 @@ func _apply_leaf_state(open: bool, reason: String) -> void:
 		door.rotation.y = float(door.get_meta("closed_rotation", door.rotation.y))
 		var pivot := door.get_node_or_null("DoorPivot") as Node3D
 		if pivot != null:
-			pivot.rotation.y = float(door.get_meta("open_swing", PI * 0.5)) if open else 0.0
+			# Most leaves swing, while a portcullis uses the same generic door
+			# authority to lift its visual leaf.  Collision remains attached to the
+			# single source door body and is disabled below in either open state.
+			if not door.has_meta("door_pivot_closed_position"):
+				door.set_meta("door_pivot_closed_position", pivot.position)
+			var closed_pivot_position: Vector3 = door.get_meta("door_pivot_closed_position", Vector3.ZERO) as Vector3
+			if String(door.get_meta("door_motion", "swing")) == "raise":
+				pivot.rotation.y = 0.0
+				pivot.position = closed_pivot_position + (door.get_meta("open_visual_offset", Vector3.ZERO) as Vector3 if open else Vector3.ZERO)
+			else:
+				pivot.position = closed_pivot_position
+				pivot.rotation.y = float(door.get_meta("open_swing", PI * 0.5)) if open else 0.0
 		for child in door.get_children():
 			if child is CollisionShape3D:
 				(child as CollisionShape3D).disabled = open

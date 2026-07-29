@@ -64,6 +64,23 @@ static func build_arc(seed: int, overrides: Dictionary = {}) -> MotionRecipe:
 	parameters["planeProfile"] = resolve_plane_profile(seed, String(parameters.get("planeProfile", profile)))
 	parameters["centralPitchDegrees"] = clampf(float(parameters.get("centralPitchDegrees", 0.0)), -80.0, 80.0)
 	parameters["sweepRollDegrees"] = clampf(float(parameters.get("sweepRollDegrees", parameters.get("attackPlaneTiltDegrees", 0.0))), -68.0, 68.0)
+	# "Down" and "up" describe the visual travel of the strike rather than a
+	# signed plane. Opposite limbs traverse a shared arc in opposite yaw
+	# directions, so the plane roll must mirror with the side to preserve the
+	# requested vertical travel for both arms. This stays entirely in recipe math:
+	# a host declares intent and a rig maps the sampled side to its anatomy.
+	var vertical_direction := String(parameters.get("verticalDirection", "")).strip_edges().to_lower()
+	if vertical_direction in ["up", "down"]:
+		var motion_side := -1.0 if float(parameters.get("motionSide", 1.0)) < 0.0 else 1.0
+		var roll_magnitude := absf(float(parameters.get("sweepRollDegrees", 0.0)))
+		if roll_magnitude <= 0.001:
+			roll_magnitude = 42.0
+		var roll_sign := motion_side if vertical_direction == "down" else -motion_side
+		parameters["sweepRollDegrees"] = roll_magnitude * roll_sign
+		parameters["verticalDirection"] = vertical_direction
+	else:
+		parameters.erase("verticalDirection")
+	parameters.erase("motionSide")
 	parameters["trailSamples"] = clampi(int(parameters.get("trailSamples", 15)), 3, 48)
 	return MotionRecipeScript.new("arc_motion", seed, parameters)
 

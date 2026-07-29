@@ -31,7 +31,10 @@ var evade_stamina_regen := 22.0
 var evade_lookahead_seconds := 0.18
 var motion_damage := 14.0
 var claw_plane_profile := "lateral"
+var facing_mode := "movement"
+var gaze_mode := "target"
 var motion_set: Array[String] = []
+var motion_combos: Dictionary = {}
 
 
 func _init(values: Dictionary = {}) -> void:
@@ -61,14 +64,75 @@ func _init(values: Dictionary = {}) -> void:
 	evade_lookahead_seconds = clampf(float(values.get("evadeLookaheadSeconds", evade_lookahead_seconds)), 0.02, 0.5)
 	motion_damage = maxf(0.0, float(values.get("motionDamage", motion_damage)))
 	claw_plane_profile = String(values.get("clawPlaneProfile", claw_plane_profile)).strip_edges().to_lower()
+	facing_mode = String(values.get("facingMode", facing_mode)).strip_edges().to_lower()
+	if facing_mode not in ["movement", "target"]:
+		facing_mode = "movement"
+	gaze_mode = String(values.get("gazeMode", gaze_mode)).strip_edges().to_lower()
+	if gaze_mode not in ["movement", "target"]:
+		gaze_mode = "target"
 	for raw_motion in values.get("motionSet", ["arc", "forward_surge"]):
 		var motion := String(raw_motion).strip_edges().to_lower()
 		if not motion.is_empty() and not motion_set.has(motion):
 			motion_set.append(motion)
+	var raw_combos: Dictionary = values.get("motionCombos", {}) as Dictionary
+	for raw_trigger in raw_combos.keys():
+		var trigger := String(raw_trigger).strip_edges().to_lower()
+		var raw_steps = raw_combos.get(raw_trigger, [])
+		if trigger.is_empty() or not raw_steps is Array:
+			continue
+		var steps: Array = []
+		for raw_step in raw_steps as Array:
+			if not raw_step is Dictionary:
+				continue
+			var source: Dictionary = raw_step as Dictionary
+			var motion_kind := String(source.get("motionKind", "")).strip_edges().to_lower()
+			if not supports_motion(motion_kind):
+				continue
+			var side := float(source.get("side", 0.0))
+			var vertical_direction := String(source.get("verticalDirection", "")).strip_edges().to_lower()
+			if vertical_direction not in ["", "up", "down"]:
+				vertical_direction = ""
+			# A motion remains body-neutral.  A profile can separately declare a
+			# normal locomotion intent for a named motion phase, which lets wind-up
+			# and movement overlap without introducing a family-specific animation.
+			var locomotion_kind := String(source.get("locomotionKind", "")).strip_edges().to_lower()
+			if locomotion_kind not in ["", "approach", "lunge", "retreat", "orbit"]:
+				locomotion_kind = ""
+			var locomotion_phases: Array[String] = []
+			if not locomotion_kind.is_empty():
+				for raw_phase in source.get("locomotionPhases", []):
+					var phase := String(raw_phase).strip_edges().to_lower()
+					if phase in ["windup", "arc", "surge", "recovery"] and not locomotion_phases.has(phase):
+						locomotion_phases.append(phase)
+			var pose_roles: Array[String] = []
+			for raw_role in source.get("poseRoles", []):
+				var role := String(raw_role).strip_edges().to_lower()
+				if not role.is_empty() and not pose_roles.has(role):
+					pose_roles.append(role)
+			steps.append({
+				"motionKind": motion_kind,
+				# A nonzero side selects an anatomical lead limb through the shared
+				# rig profile. Zero preserves the recipe's seeded side selection.
+				"side": -1.0 if side < -0.001 else (1.0 if side > 0.001 else 0.0),
+				"planeProfile": String(source.get("planeProfile", claw_plane_profile)).strip_edges().to_lower(),
+				"verticalDirection": vertical_direction,
+				"locomotionKind": locomotion_kind,
+				"locomotionPhases": locomotion_phases,
+				"poseRoles": pose_roles,
+				"showTelegraph": bool(source.get("showTelegraph", true))
+			})
+		if not steps.is_empty():
+			motion_combos[trigger] = steps
 
 
 func supports_motion(motion_kind: String) -> bool:
 	return motion_set.has(motion_kind.strip_edges().to_lower())
+
+
+func combo_steps(trigger_motion: String) -> Array:
+	var trigger := trigger_motion.strip_edges().to_lower()
+	var steps: Array = motion_combos.get(trigger, []) as Array
+	return steps.duplicate(true)
 
 
 func snapshot() -> Dictionary:
@@ -99,5 +163,8 @@ func snapshot() -> Dictionary:
 		"evadeLookaheadSeconds": evade_lookahead_seconds,
 		"motionDamage": motion_damage,
 		"clawPlaneProfile": claw_plane_profile,
-		"motionSet": motion_set.duplicate()
+		"facingMode": facing_mode,
+		"gazeMode": gaze_mode,
+		"motionSet": motion_set.duplicate(),
+		"motionCombos": motion_combos.duplicate(true)
 	}
