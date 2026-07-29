@@ -4,14 +4,15 @@ import os
 
 godot_cpp_dir = os.environ.get("GODOT_CPP_DIR", "godot-cpp")
 if not os.path.exists(os.path.join(godot_cpp_dir, "SConstruct")):
-    raise RuntimeError("Missing godot-cpp bindings. Set GODOT_CPP_DIR or run tools/build-native-terrain-meshing.ps1 -FetchGodotCpp.")
+    raise RuntimeError("Missing godot-cpp bindings. Set GODOT_CPP_DIR or run node tools/build-native-terrain-meshing.mjs --fetch-godot-cpp.")
 
 env = SConscript(os.path.join(godot_cpp_dir, "SConstruct"))
 env = env.Clone()
 env.Append(CPPPATH=["src"])
 env.Append(CXXFLAGS=["/O2"] if env["platform"] == "windows" and env.get("is_msvc", False) else ["-O2"])
 
-sources = Glob("src/*.cpp")
+env.VariantDir("build", "src", duplicate=0)
+sources = Glob("build/*.cpp")
 target_name = "terrain_meshing_backend{}{}".format(env["suffix"], env["SHLIBSUFFIX"])
 library = env.SharedLibrary(os.path.join("bin", target_name), source=sources)
 

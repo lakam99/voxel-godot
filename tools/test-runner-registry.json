@@ -13,7 +13,7 @@
     {
       "id": "npc_focused",
       "description": "All focused NPC suites implemented up to the active phase; aggregate report only, not live NPC/pathfinding acceptance",
-      "command": ".\\tools\\npc\\run-all-npc-tests.ps1",
+      "command": ".\\tools\\npc\\run-all-npc-tests.mjs",
       "args": ["-TimeMode", "Both", "-Seed", "atlas-1492", "-ReportPath", "artifacts\\test-runners\\all-npc-both.json"],
       "reportPath": "artifacts\\test-runners\\all-npc-both.json",
       "evidenceLevel": "integration",
@@ -22,7 +22,7 @@
     {
       "id": "npc_acceptance_guard_self_test",
       "description": "Static acceptance-runner guard self-test",
-      "command": ".\\tools\\npc\\test-npc-acceptance-guard.ps1",
+      "command": ".\\tools\\npc\\test-npc-acceptance-guard.mjs",
       "args": ["-ReportPath", "artifacts\\test-runners\\npc-acceptance-guard-self-test.json"],
       "reportPath": "artifacts\\test-runners\\npc-acceptance-guard-self-test.json",
       "evidenceLevel": "static_audit",
@@ -31,7 +31,7 @@
     {
       "id": "test_evidence_registry_self_test",
       "description": "Registry/report evidence taxonomy enforcement self-test",
-      "command": ".\\tools\\test-evidence-registry-self-test.ps1",
+      "command": ".\\tools\\test-evidence-registry-self-test.mjs",
       "args": ["-ReportPath", "artifacts\\test-runners\\test-evidence-registry-self-test.json"],
       "reportPath": "artifacts\\test-runners\\test-evidence-registry-self-test.json",
       "evidenceLevel": "static_audit",
@@ -40,7 +40,7 @@
     {
       "id": "npc_contract_tests",
       "description": "R06 explicit NPC contract suite gate; not live gameplay acceptance",
-      "command": ".\\tools\\npc\\run-npc-contract-tests.ps1",
+      "command": ".\\tools\\npc\\run-npc-contract-tests.mjs",
       "args": ["-TimeMode", "Both", "-Seed", "atlas-1492", "-ReportPath", "artifacts\\test-runners\\npc-contract-both.json"],
       "reportPath": "artifacts\\test-runners\\npc-contract-both.json",
       "evidenceLevel": "contract",
@@ -49,7 +49,7 @@
     {
       "id": "npc_motor_tests",
       "description": "R06 explicit NPC motor suite gate; not live gameplay acceptance",
-      "command": ".\\tools\\npc\\run-npc-motor-tests.ps1",
+      "command": ".\\tools\\npc\\run-npc-motor-tests.mjs",
       "args": ["-TimeMode", "Both", "-Seed", "atlas-1492", "-ReportPath", "artifacts\\test-runners\\npc-motor-both.json"],
       "reportPath": "artifacts\\test-runners\\npc-motor-both.json",
       "evidenceLevel": "contract",
@@ -58,7 +58,7 @@
     {
       "id": "npc_route_tests",
       "description": "R06 explicit NPC route service suite gate; not live gameplay acceptance",
-      "command": ".\\tools\\npc\\run-npc-route-tests.ps1",
+      "command": ".\\tools\\npc\\run-npc-route-tests.mjs",
       "args": ["-TimeMode", "Both", "-Seed", "atlas-1492", "-ReportPath", "artifacts\\test-runners\\npc-route-both.json"],
       "reportPath": "artifacts\\test-runners\\npc-route-both.json",
       "evidenceLevel": "synthetic",
@@ -67,7 +67,7 @@
     {
       "id": "npc_repair_tests",
       "description": "R06 explicit NPC repair service suite gate; not live gameplay acceptance",
-      "command": ".\\tools\\npc\\run-npc-repair-tests.ps1",
+      "command": ".\\tools\\npc\\run-npc-repair-tests.mjs",
       "args": ["-TimeMode", "Both", "-Seed", "atlas-1492", "-ReportPath", "artifacts\\test-runners\\npc-repair-both.json"],
       "reportPath": "artifacts\\test-runners\\npc-repair-both.json",
       "evidenceLevel": "synthetic",
@@ -76,7 +76,7 @@
     {
       "id": "npc_door_tests",
       "description": "R06 explicit NPC door service suite gate; not live gameplay acceptance",
-      "command": ".\\tools\\npc\\run-npc-door-tests.ps1",
+      "command": ".\\tools\\npc\\run-npc-door-tests.mjs",
       "args": ["-TimeMode", "Both", "-Seed", "atlas-1492", "-ReportPath", "artifacts\\test-runners\\npc-door-both.json"],
       "reportPath": "artifacts\\test-runners\\npc-door-both.json",
       "evidenceLevel": "synthetic",
@@ -85,7 +85,7 @@
     {
       "id": "npc_avoidance_tests",
       "description": "R06 explicit NPC avoidance suite gate; not live gameplay acceptance",
-      "command": ".\\tools\\npc\\run-npc-avoidance-tests.ps1",
+      "command": ".\\tools\\npc\\run-npc-avoidance-tests.mjs",
       "args": ["-TimeMode", "Both", "-Seed", "atlas-1492", "-ReportPath", "artifacts\\test-runners\\npc-avoidance-both.json"],
       "reportPath": "artifacts\\test-runners\\npc-avoidance-both.json",
       "evidenceLevel": "synthetic",
@@ -94,7 +94,7 @@
     {
       "id": "npc_traffic_tests",
       "description": "R06 explicit NPC traffic service suite gate; not live gameplay acceptance",
-      "command": ".\\tools\\npc\\run-npc-traffic-tests.ps1",
+      "command": ".\\tools\\npc\\run-npc-traffic-tests.mjs",
       "args": ["-TimeMode", "Both", "-Seed", "atlas-1492", "-ReportPath", "artifacts\\test-runners\\npc-traffic-both.json"],
       "reportPath": "artifacts\\test-runners\\npc-traffic-both.json",
       "evidenceLevel": "synthetic",
@@ -103,7 +103,7 @@
     {
       "id": "npc_behavior_tests",
       "description": "R06 explicit NPC behavior service suite gate; not live gameplay acceptance",
-      "command": ".\\tools\\npc\\run-npc-behavior-tests.ps1",
+      "command": ".\\tools\\npc\\run-npc-behavior-tests.mjs",
       "args": ["-TimeMode", "Both", "-Seed", "atlas-1492", "-ReportPath", "artifacts\\test-runners\\npc-behavior-both.json"],
       "reportPath": "artifacts\\test-runners\\npc-behavior-both.json",
       "evidenceLevel": "synthetic",
@@ -112,7 +112,7 @@
     {
       "id": "npc_behavior_transition_tests",
       "description": "R06 explicit NPC behavior transition service suite gate; not live gameplay acceptance",
-      "command": ".\\tools\\npc\\run-npc-behavior-tests.ps1",
+      "command": ".\\tools\\npc\\run-npc-behavior-tests.mjs",
       "args": ["-TimeMode", "Transition", "-Seed", "atlas-1492", "-ReportPath", "artifacts\\test-runners\\npc-behavior-transition.json"],
       "reportPath": "artifacts\\test-runners\\npc-behavior-transition.json",
       "evidenceLevel": "synthetic",
@@ -121,7 +121,7 @@
     {
       "id": "npc_interaction_tests",
       "description": "R06 explicit NPC interaction service suite gate; not live gameplay acceptance",
-      "command": ".\\tools\\npc\\run-npc-interaction-tests.ps1",
+      "command": ".\\tools\\npc\\run-npc-interaction-tests.mjs",
       "args": ["-TimeMode", "Both", "-Seed", "atlas-1492", "-ReportPath", "artifacts\\test-runners\\npc-interaction-both.json"],
       "reportPath": "artifacts\\test-runners\\npc-interaction-both.json",
       "evidenceLevel": "synthetic",
@@ -130,7 +130,7 @@
     {
       "id": "npc_streaming_save_tests",
       "description": "R06 explicit NPC streaming/save service suite gate; not live gameplay acceptance",
-      "command": ".\\tools\\npc\\run-npc-streaming-save-tests.ps1",
+      "command": ".\\tools\\npc\\run-npc-streaming-save-tests.mjs",
       "args": ["-TimeMode", "Both", "-Seed", "atlas-1492", "-ReportPath", "artifacts\\test-runners\\npc-streaming-save-both.json"],
       "reportPath": "artifacts\\test-runners\\npc-streaming-save-both.json",
       "evidenceLevel": "synthetic",
@@ -139,7 +139,7 @@
     {
       "id": "npc_soak_tests",
       "description": "R06 explicit NPC soak suite gate; not live gameplay acceptance",
-      "command": ".\\tools\\npc\\run-npc-soak-tests.ps1",
+      "command": ".\\tools\\npc\\run-npc-soak-tests.mjs",
       "args": ["-TimeMode", "Both", "-Seed", "atlas-1492", "-ReportPath", "artifacts\\test-runners\\npc-soak-both.json"],
       "reportPath": "artifacts\\test-runners\\npc-soak-both.json",
       "evidenceLevel": "synthetic",
@@ -148,7 +148,7 @@
     {
       "id": "npc_observation_dusk",
       "description": "Phase 09 dusk return-home observation evidence; integration only, not acceptance",
-      "command": ".\\tools\\npc\\run-npc-observation-tests.ps1",
+      "command": ".\\tools\\npc\\run-npc-observation-tests.mjs",
       "args": ["-Scenario", "DuskReturnHome", "-TimeMode", "Transition", "-Seed", "atlas-1492", "-ReportPath", "artifacts\\test-runners\\npc-observation-dusk.json"],
       "reportPath": "artifacts\\test-runners\\npc-observation-dusk.json",
       "evidenceLevel": "integration",
@@ -157,7 +157,7 @@
     {
       "id": "npc_observation_midnight",
       "description": "Phase 09 midnight guard/interior observation evidence; integration only, not acceptance",
-      "command": ".\\tools\\npc\\run-npc-observation-tests.ps1",
+      "command": ".\\tools\\npc\\run-npc-observation-tests.mjs",
       "args": ["-Scenario", "MidnightTown", "-TimeMode", "Night", "-Seed", "atlas-1492", "-ReportPath", "artifacts\\test-runners\\npc-observation-midnight.json"],
       "reportPath": "artifacts\\test-runners\\npc-observation-midnight.json",
       "evidenceLevel": "integration",
@@ -166,7 +166,7 @@
     {
       "id": "npc_observation_phase12",
       "description": "Phase 12 noon, dusk, midnight, dawn, crowded-door, shared-door, and dynamic-repair observation evidence; integration only, not acceptance",
-      "command": ".\\tools\\npc\\run-npc-observation-tests.ps1",
+      "command": ".\\tools\\npc\\run-npc-observation-tests.mjs",
       "args": ["-Scenario", "All", "-TimeMode", "Both", "-Seed", "atlas-1492", "-ReportPath", "artifacts\\test-runners\\npc-observation-phase12.json"],
       "reportPath": "artifacts\\test-runners\\npc-observation-phase12.json",
       "evidenceLevel": "integration",
@@ -175,7 +175,7 @@
     {
       "id": "world_signature",
       "description": "Deterministic world signature comparison",
-      "command": ".\\tools\\run-world-signature.ps1",
+      "command": ".\\tools\\run-world-signature.mjs",
       "args": ["-OutputPath", "artifacts\\test-runners\\world-signature-atlas-1492.json", "-Seed", "atlas-1492"],
       "reportPath": "artifacts\\test-runners\\world-signature-atlas-1492.json",
       "evidenceLevel": "static_audit",
@@ -192,7 +192,7 @@
     {
       "id": "npc_navigation_integration",
       "description": "Dedicated NPC navigation integration regression runner",
-      "command": ".\\tools\\run-npc-navigation-tests.ps1",
+      "command": ".\\tools\\run-npc-navigation-tests.mjs",
       "args": ["-ReportPath", "artifacts\\test-runners\\npc-navigation-report.json", "-Seed", "atlas-1492"],
       "reportPath": "artifacts\\test-runners\\npc-navigation-report.json",
       "evidenceLevel": "integration",
@@ -201,7 +201,7 @@
     {
       "id": "npc_go_home_visual_playtest",
       "description": "Headed generated-world NPC go-home door traversal acceptance",
-      "command": ".\\tools\\npc\\run-npc-go-home-visual-playtest.ps1",
+      "command": ".\\tools\\npc\\run-npc-go-home-visual-playtest.mjs",
       "args": ["-Seed", "atlas-1492", "-ReportPath", "artifacts\\test-runners\\npc-go-home-visual-playtest.json", "-ScreenshotDir", "artifacts\\test-runners\\screenshots\\npc-go-home-visual"],
       "reportPath": "artifacts\\test-runners\\npc-go-home-visual-playtest.json",
       "screenshotDir": "artifacts\\test-runners\\screenshots\\npc-go-home-visual",
@@ -220,7 +220,7 @@
     {
       "id": "npc_real_tutorial_playthrough",
       "description": "Headed real tutorial Mira-home path acceptance",
-      "command": ".\\tools\\npc\\run-real-tutorial-playthrough.ps1",
+      "command": ".\\tools\\npc\\run-real-tutorial-playthrough.mjs",
       "args": ["-TimeMode", "Both", "-ReportPath", "artifacts\\test-runners\\npc-real-tutorial-playthrough.json", "-ScreenshotDir", "artifacts\\test-runners\\screenshots\\npc-real-tutorial-playthrough", "-Visible", "-MiraHomeOnly"],
       "reportPath": "artifacts\\test-runners\\npc-real-tutorial-playthrough.json",
       "screenshotDir": "artifacts\\test-runners\\screenshots\\npc-real-tutorial-playthrough",
@@ -246,7 +246,7 @@
     {
       "id": "npc_real_tutorial_no_flags",
       "description": "Headed project-main-menu New Game tutorial playthrough with no gameplay-affecting test flags",
-      "command": ".\\tools\\npc\\run-real-tutorial-playthrough-no-flags.ps1",
+      "command": ".\\tools\\npc\\run-real-tutorial-playthrough-no-flags.mjs",
       "args": ["-Visible", "-ReportPath", "artifacts\\test-runners\\npc-real-tutorial-no-flags.json", "-ScreenshotDir", "artifacts\\test-runners\\screenshots\\npc-real-tutorial-no-flags"],
       "reportPath": "artifacts\\test-runners\\npc-real-tutorial-no-flags.json",
       "screenshotDir": "artifacts\\test-runners\\screenshots\\npc-real-tutorial-no-flags",
@@ -270,7 +270,7 @@
     {
       "id": "npc_real_tutorial_morning_outside",
       "description": "Headed real tutorial following-morning NPC outside observation acceptance",
-      "command": ".\\tools\\npc\\run-real-tutorial-playthrough.ps1",
+      "command": ".\\tools\\npc\\run-real-tutorial-playthrough.mjs",
       "args": ["-TimeMode", "Both", "-ReportPath", "artifacts\\test-runners\\npc-real-tutorial-morning-outside.json", "-ScreenshotDir", "artifacts\\test-runners\\screenshots\\npc-real-tutorial-morning-outside", "-Visible", "-MorningOutsideOnly"],
       "reportPath": "artifacts\\test-runners\\npc-real-tutorial-morning-outside.json",
       "screenshotDir": "artifacts\\test-runners\\screenshots\\npc-real-tutorial-morning-outside",
@@ -289,7 +289,7 @@
     {
       "id": "npc_real_tutorial_final_rescue",
       "description": "Headed real tutorial final rescue acceptance from Mira briefing through Sera escort, combat, and Niko return",
-      "command": ".\\tools\\npc\\run-real-tutorial-playthrough.ps1",
+      "command": ".\\tools\\npc\\run-real-tutorial-playthrough.mjs",
       "args": ["-TimeMode", "Both", "-ReportPath", "artifacts\\test-runners\\npc-real-tutorial-final-rescue.json", "-ScreenshotDir", "artifacts\\test-runners\\screenshots\\npc-real-tutorial-final-rescue", "-Visible", "-FinalRescue"],
       "reportPath": "artifacts\\test-runners\\npc-real-tutorial-final-rescue.json",
       "screenshotDir": "artifacts\\test-runners\\screenshots\\npc-real-tutorial-final-rescue",
@@ -317,7 +317,7 @@
     {
       "id": "npc_town_job_cycle_visual_playtest",
       "description": "Headed non-tutorial generated-town day/night/day natural observation with physical work assertions limited to active or nearby NPCs",
-      "command": ".\\tools\\npc\\run-npc-town-job-cycle-visual-playtest.ps1",
+      "command": ".\\tools\\npc\\run-npc-town-job-cycle-visual-playtest.mjs",
       "args": ["-ReportPath", "artifacts\\test-runners\\npc-town-job-cycle-visual-playtest.json", "-ScreenshotDir", "artifacts\\test-runners\\screenshots\\npc-town-job-cycle-visual-playtest"],
       "reportPath": "artifacts\\test-runners\\npc-town-job-cycle-visual-playtest.json",
       "screenshotDir": "artifacts\\test-runners\\screenshots\\npc-town-job-cycle-visual-playtest",
@@ -339,7 +339,7 @@
     {
       "id": "story_playtest",
       "description": "Story continuity playtest",
-      "command": ".\\tools\\story\\run-story-playtest.ps1",
+      "command": ".\\tools\\story\\run-story-playtest.mjs",
       "args": ["-ReportPath", "artifacts\\test-runners\\story-playtest-report.json", "-Seed", "atlas-1492"],
       "reportPath": "artifacts\\test-runners\\story-playtest-report.json",
       "evidenceLevel": "integration",
@@ -348,7 +348,7 @@
     {
       "id": "visual_captures",
       "description": "Visual capture generation and metadata validation",
-      "command": ".\\tools\\run-visual-captures.ps1",
+      "command": ".\\tools\\run-visual-captures.mjs",
       "args": ["-OutputDir", "artifacts\\test-runners\\visual", "-Seed", "atlas-1492"],
       "reportPath": "artifacts\\test-runners\\visual\\visual-captures.json",
       "evidenceLevel": "integration",
@@ -357,7 +357,7 @@
     {
       "id": "underground_generation_contract",
       "description": "Unified underground procedural volume, material, depth-cap, and excavation contract coverage",
-      "command": ".\\tools\\run-underground-generation-tests.ps1",
+      "command": ".\\tools\\run-underground-generation-tests.mjs",
       "args": ["-Seed", "atlas-1492", "-ReportPath", "artifacts\\test-runners\\underground-generation-report.json"],
       "reportPath": "artifacts\\test-runners\\underground-generation-report.json",
       "evidenceLevel": "contract",
@@ -366,7 +366,7 @@
     {
       "id": "underground_fluid_render_contract",
       "description": "Real Main scene chunk creation check that generated terrain fluid states create a non-collision TerrainFluidMesh",
-      "command": ".\\tools\\run-underground-fluid-render-tests.ps1",
+      "command": ".\\tools\\run-underground-fluid-render-tests.mjs",
       "args": ["-Seed", "atlas-1492", "-ReportPath", "artifacts\\test-runners\\underground-fluid-render-contract.json"],
       "reportPath": "artifacts\\test-runners\\underground-fluid-render-contract.json",
       "evidenceLevel": "integration",
@@ -375,7 +375,7 @@
     {
       "id": "town_runtime_manifest_contract",
       "description": "Serializable generated-town manifest, semantic home requirements, startup readiness, and generic NPC order-acceptance contracts",
-      "command": ".\\tools\\run-town-runtime-manifest-contract-tests.ps1",
+      "command": ".\\tools\\run-town-runtime-manifest-contract-tests.mjs",
       "args": ["-ReportPath", "artifacts\\test-runners\\town-runtime-manifest-contract.json"],
       "reportPath": "artifacts\\test-runners\\town-runtime-manifest-contract.json",
       "evidenceLevel": "contract",
@@ -384,7 +384,7 @@
     {
       "id": "structure_town_manifest_contract",
       "description": "StructureSystem deterministic town-manifest publication, queue ownership, pending readiness, failure, and idempotency contracts",
-      "command": ".\\tools\\run-structure-town-manifest-contract-tests.ps1",
+      "command": ".\\tools\\run-structure-town-manifest-contract-tests.mjs",
       "args": ["-ReportPath", "artifacts\\test-runners\\structure-town-manifest-contract.json"],
       "reportPath": "artifacts\\test-runners\\structure-town-manifest-contract.json",
       "evidenceLevel": "contract",
@@ -393,7 +393,7 @@
     {
       "id": "startup_loading_readiness_contract",
       "description": "Tutorial startup semantic requirements, failure gating, deferred Continue setup, disabled gameplay, and visible failure contracts",
-      "command": ".\\tools\\run-startup-loading-readiness-contract-tests.ps1",
+      "command": ".\\tools\\run-startup-loading-readiness-contract-tests.mjs",
       "args": ["-ReportPath", "artifacts\\test-runners\\startup-loading-readiness-contract.json"],
       "reportPath": "artifacts\\test-runners\\startup-loading-readiness-contract.json",
       "evidenceLevel": "contract",
@@ -402,7 +402,7 @@
     {
       "id": "biome_environment_catalog_contract",
       "description": "Biome environment profile schema, exact behavior parity, bounded fallback, shared consumer injection, RNG firewall, and duplicate-table retirement",
-      "command": ".\\tools\\run-biome-environment-catalog-contract-tests.ps1",
+      "command": ".\\tools\\run-biome-environment-catalog-contract-tests.mjs",
       "args": ["-ReportPath", "artifacts\\test-runners\\biome-environment-catalog-contract.json"],
       "reportPath": "artifacts\\test-runners\\biome-environment-catalog-contract.json",
       "evidenceLevel": "contract",
@@ -411,7 +411,7 @@
     {
       "id": "canopy_asset_import_contract",
       "description": "VOX-120 Godot import integrity and runtime dormancy for generated mature canopy assets",
-      "command": ".\\tools\\run-canopy-asset-import-contract-tests.ps1",
+      "command": ".\\tools\\run-canopy-asset-import-contract-tests.mjs",
       "args": ["-ReportPath", "artifacts\\test-runners\\canopy-asset-import-contract.json"],
       "reportPath": "artifacts\\test-runners\\canopy-asset-import-contract.json",
       "evidenceLevel": "contract",
@@ -420,7 +420,7 @@
     {
       "id": "tutorial_actor_registration_contract",
       "description": "Manifest-derived tutorial actor profiles, ordinary registration parity, and no tutorial simulation privilege",
-      "command": ".\\tools\\run-tutorial-actor-registration-contract-tests.ps1",
+      "command": ".\\tools\\run-tutorial-actor-registration-contract-tests.mjs",
       "args": ["-ReportPath", "artifacts\\test-runners\\tutorial-actor-registration-contract.json"],
       "reportPath": "artifacts\\test-runners\\tutorial-actor-registration-contract.json",
       "evidenceLevel": "contract",
@@ -429,7 +429,7 @@
     {
       "id": "tutorial_generic_order_contract",
       "description": "Generic tutorial wait/go-home order replacement, route ownership cancellation, dialogue pause, and removal of movement holds",
-      "command": ".\\tools\\run-tutorial-generic-order-contract-tests.ps1",
+      "command": ".\\tools\\run-tutorial-generic-order-contract-tests.mjs",
       "args": ["-ReportPath", "artifacts\\test-runners\\tutorial-generic-order-contract.json"],
       "reportPath": "artifacts\\test-runners\\tutorial-generic-order-contract.json",
       "evidenceLevel": "contract",
@@ -438,7 +438,7 @@
     {
       "id": "tutorial_save_compatibility_contract",
       "description": "Additive tutorial save contract, regenerated-manifest validation, home-assignment preservation, and idempotent generic-order restoration",
-      "command": ".\\tools\\run-tutorial-save-compatibility-contract-tests.ps1",
+      "command": ".\\tools\\run-tutorial-save-compatibility-contract-tests.mjs",
       "args": ["-ReportPath", "artifacts\\test-runners\\tutorial-save-compatibility-contract.json"],
       "reportPath": "artifacts\\test-runners\\tutorial-save-compatibility-contract.json",
       "evidenceLevel": "contract",
@@ -447,7 +447,7 @@
     {
       "id": "main_menu_startup_smoke",
       "description": "Main Menu to New Game production-scene startup readiness domains, physics gate, and zero pending town structure operations",
-      "command": ".\\tools\\run-main-menu-startup-readiness-smoke.ps1",
+      "command": ".\\tools\\run-main-menu-startup-readiness-smoke.mjs",
       "args": ["-ReportPath", "artifacts\\test-runners\\main-menu-startup-readiness-smoke.json"],
       "reportPath": "artifacts\\test-runners\\main-menu-startup-readiness-smoke.json",
       "evidenceLevel": "scene-load-smoke",
@@ -456,7 +456,7 @@
     {
       "id": "main_menu_runtime_reset_smoke",
       "description": "Known-seed Forward+ in-session New Game terrain reset, collision republication, navigation readiness, and native terrain instance preservation",
-      "command": ".\\tools\\run-main-menu-startup-readiness-smoke.ps1",
+      "command": ".\\tools\\run-main-menu-startup-readiness-smoke.mjs",
       "args": ["-RuntimeReset", "-Visible", "-TestSeed", "atlas-1492", "-ReportPath", "artifacts\\test-runners\\main-menu-runtime-reset-smoke.json"],
       "reportPath": "artifacts\\test-runners\\main-menu-runtime-reset-smoke.json",
       "evidenceLevel": "scene-load-smoke",
@@ -465,7 +465,7 @@
     {
       "id": "main_menu_continue_startup_smoke",
       "description": "Main Menu to Continue production-scene manifest, collision, navigation, and physics readiness parity",
-      "command": ".\\tools\\run-main-menu-continue-readiness-smoke.ps1",
+      "command": ".\\tools\\run-main-menu-continue-readiness-smoke.mjs",
       "args": ["-ReportPath", "artifacts\\test-runners\\main-menu-continue-startup-smoke.json"],
       "reportPath": "artifacts\\test-runners\\main-menu-continue-startup-smoke.json",
       "evidenceLevel": "scene-load-smoke",
@@ -474,7 +474,7 @@
     {
       "id": "exact_fluid_payload_contract",
       "description": "Exact immutable step-1 fluid occupancy snapshot, halo, revision, cancellation, and save-load contract",
-      "command": ".\\tools\\run-exact-fluid-payload-contract.ps1",
+      "command": ".\\tools\\run-exact-fluid-payload-contract.mjs",
       "args": ["-ReportPath", "artifacts\\test-runners\\exact-fluid-payload-contract.json"],
       "reportPath": "artifacts\\test-runners\\exact-fluid-payload-contract.json",
       "evidenceLevel": "contract",
@@ -483,7 +483,7 @@
     {
       "id": "exact_fluid_mesh_contract",
       "description": "Native exact step-1 fluid geometry, boundary culling, material identity, and coarse-payload rejection contract",
-      "command": ".\\tools\\run-exact-fluid-mesh-contract.ps1",
+      "command": ".\\tools\\run-exact-fluid-mesh-contract.mjs",
       "args": ["-ReportPath", "artifacts\\test-runners\\exact-fluid-mesh-contract.json"],
       "reportPath": "artifacts\\test-runners\\exact-fluid-mesh-contract.json",
       "evidenceLevel": "contract",
@@ -492,7 +492,7 @@
     {
       "id": "voxel_terrain_collision_publication",
       "description": "Current VoxelTerrain collision, analytic-surface alignment, navigation publication, and shutdown contract",
-      "command": ".\\tools\\run-voxel-terrain-collision-publication.ps1",
+      "command": ".\\tools\\run-voxel-terrain-collision-publication.mjs",
       "args": ["-ReportPath", "artifacts\\test-runners\\voxel-terrain-collision-publication.json"],
       "reportPath": "artifacts\\test-runners\\voxel-terrain-collision-publication.json",
       "evidenceLevel": "integration",
@@ -501,7 +501,7 @@
     {
       "id": "terrain_block_light_batch_contract",
       "description": "Current authoritative torch and lamp block-light batching, incremental slice, removal, and overlay contract",
-      "command": ".\\tools\\run-terrain-block-light-batch-contract.ps1",
+      "command": ".\\tools\\run-terrain-block-light-batch-contract.mjs",
       "args": ["-ReportPath", "artifacts\\test-runners\\terrain-block-light-batch-contract.json"],
       "reportPath": "artifacts\\test-runners\\terrain-block-light-batch-contract.json",
       "evidenceLevel": "contract",
@@ -510,7 +510,7 @@
     {
       "id": "normal_runtime_performance_pass",
       "description": "Current Main Menu New Game sprint traversal across VoxelTerrain collision, streaming, movement, jumping, and frame budgets",
-      "command": ".\\tools\\run-normal-runtime-performance-pass.ps1",
+      "command": ".\\tools\\run-normal-runtime-performance-pass.mjs",
       "args": ["-ReportPath", "artifacts\\test-runners\\normal-runtime-performance-pass.json", "-ProgressPath", "artifacts\\test-runners\\normal-runtime-performance-pass-progress.txt", "-LogPath", "artifacts\\test-runners\\normal-runtime-performance-pass.log", "-ScreenshotPath", "artifacts\\test-runners\\screenshots\\normal-runtime-performance-pass.png"],
       "reportPath": "artifacts\\test-runners\\normal-runtime-performance-pass.json",
       "evidenceLevel": "integration",
@@ -519,7 +519,7 @@
     {
       "id": "normal_runtime_world_edit_latency",
       "description": "Current Main Menu New Game placement and break latency for wood, torch, and ward lantern, including deferred follow-up frame budgets",
-      "command": ".\\tools\\run-normal-runtime-performance-pass.ps1",
+      "command": ".\\tools\\run-normal-runtime-performance-pass.mjs",
       "args": ["-Scenario", "NormalWorldEditLatency", "-DurationSeconds", "30", "-WarmupFrames", "120", "-WatchdogSeconds", "300", "-ReportPath", "artifacts\\test-runners\\normal-runtime-world-edit-latency.json", "-ProgressPath", "artifacts\\test-runners\\normal-runtime-world-edit-latency-progress.txt", "-LogPath", "artifacts\\test-runners\\normal-runtime-world-edit-latency.log", "-ScreenshotPath", "artifacts\\test-runners\\screenshots\\normal-runtime-world-edit-latency.png"],
       "reportPath": "artifacts\\test-runners\\normal-runtime-world-edit-latency.json",
       "evidenceLevel": "integration",
@@ -528,7 +528,7 @@
     {
       "id": "town_ground_visual_playtest",
       "description": "Headed fixture integration diagnostic for VoxelTerrain town edges and house foundations using the collision-backed production player camera; not live VOX-43/55 acceptance",
-      "command": ".\\tools\\run-town-ground-visual-playtest.ps1",
+      "command": ".\\tools\\run-town-ground-visual-playtest.mjs",
       "args": ["-ReportPath", "artifacts\\test-runners\\town-ground-visual-playtest.json", "-ProgressPath", "artifacts\\test-runners\\town-ground-visual-playtest-progress.txt", "-ScreenshotDir", "artifacts\\test-runners\\screenshots\\town-ground-visual-playtest"],
       "reportPath": "artifacts\\test-runners\\town-ground-visual-playtest.json",
       "screenshotDir": "artifacts\\test-runners\\screenshots\\town-ground-visual-playtest",
@@ -544,7 +544,7 @@
     {
       "id": "digging_visual_playtest",
       "description": "Headed player-POV visual proof that digging through terrain exposes generated material beneath and adds the matching material drop",
-      "command": ".\\tools\\run-digging-visual-playtest.ps1",
+      "command": ".\\tools\\run-digging-visual-playtest.mjs",
       "args": ["-Seed", "atlas-1492", "-ReportPath", "artifacts\\test-runners\\digging-visual-playtest.json", "-ScreenshotDir", "artifacts\\test-runners\\screenshots\\digging-visual-playtest"],
       "reportPath": "artifacts\\test-runners\\digging-visual-playtest.json",
       "screenshotDir": "artifacts\\test-runners\\screenshots\\digging-visual-playtest",

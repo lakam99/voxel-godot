@@ -165,7 +165,7 @@ individual symptom:
 - NPC/pathfinding acceptance must not directly call tutorial progression handlers, `interact_with`, `on_door_opened`, `on_block_placed`, `sleep_at_bed`, `npc_system.move_npc`, `request_door_state`, `request_crossing`, or mark success through metadata such as `npc_inside_home`.
 - Fixture setup may use narrowly documented placement helpers before the act phase, but the behavior being proven must proceed through live game systems.
 - Door/home acceptance must prove the visible sequence: approach the door, open it before crossing, enter a strict interior location, clear the threshold, and close the door after clearance. Stats and metadata may support the claim, but they cannot be the only proof.
-- New headed NPC acceptance runners must call `tools/npc/assert-npc-acceptance-runner-clean.ps1` before launching Godot.
+- New headed NPC acceptance runners must call `tools/npc/assert-npc-acceptance-runner-clean.mjs` before launching Godot.
 - Every NPC/pathfinding acceptance claim must include the command, report path, screenshots or trace/timeline evidence when visual behavior matters, and a brief statement of what the test does and does not prove.
 
 ## Important Plans And Docs
@@ -229,85 +229,85 @@ Use the bundled Godot console executable paths already encoded in the tool scrip
 Functional playtest:
 
 ```powershell
-.\tools\run-playtest.ps1
+node tools/run-playtest.mjs
 ```
 
 NPC pathfinding replacement harness:
 
 ```powershell
-.\tools\npc\run-npc-contract-tests.ps1 -TimeMode Both
-.\tools\npc\run-all-npc-tests.ps1 -TimeMode Both
-.\tools\run-all-test-runners.ps1
+node tools/npc/run-npc-contract-tests.mjs -TimeMode Both
+node tools/npc/run-all-npc-tests.mjs -TimeMode Both
+node tools/run-all-test-runners.mjs
 ```
 
 Phase 13 focused NPC release checks:
 
 ```powershell
-.\tools\npc\run-npc-contract-tests.ps1 -TimeMode Both
-.\tools\npc\run-npc-motor-tests.ps1 -TimeMode Both
-.\tools\npc\run-npc-nav-world-tests.ps1 -TimeMode Both
-.\tools\npc\run-npc-route-tests.ps1 -TimeMode Both
-.\tools\npc\run-npc-repair-tests.ps1 -TimeMode Both
-.\tools\npc\run-npc-door-tests.ps1 -TimeMode Both
-.\tools\npc\run-npc-avoidance-tests.ps1 -TimeMode Both
-.\tools\npc\run-npc-traffic-tests.ps1 -TimeMode Both
-.\tools\npc\run-npc-behavior-tests.ps1 -TimeMode Both
-.\tools\npc\run-npc-behavior-tests.ps1 -TimeMode Transition
-.\tools\npc\run-npc-interaction-tests.ps1 -TimeMode Both
-.\tools\npc\run-npc-streaming-save-tests.ps1 -TimeMode Both
-.\tools\npc\run-npc-soak-tests.ps1 -TimeMode Both
-.\tools\npc\run-npc-soak-tests.ps1 -TimeMode Transition
-.\tools\npc\run-npc-observation-tests.ps1 -TimeMode Both
-.\tools\run-npc-navigation-tests.ps1
+node tools/npc/run-npc-contract-tests.mjs -TimeMode Both
+node tools/npc/run-npc-motor-tests.mjs -TimeMode Both
+node tools/npc/run-npc-nav-world-tests.mjs -TimeMode Both
+node tools/npc/run-npc-route-tests.mjs -TimeMode Both
+node tools/npc/run-npc-repair-tests.mjs -TimeMode Both
+node tools/npc/run-npc-door-tests.mjs -TimeMode Both
+node tools/npc/run-npc-avoidance-tests.mjs -TimeMode Both
+node tools/npc/run-npc-traffic-tests.mjs -TimeMode Both
+node tools/npc/run-npc-behavior-tests.mjs -TimeMode Both
+node tools/npc/run-npc-behavior-tests.mjs -TimeMode Transition
+node tools/npc/run-npc-interaction-tests.mjs -TimeMode Both
+node tools/npc/run-npc-streaming-save-tests.mjs -TimeMode Both
+node tools/npc/run-npc-soak-tests.mjs -TimeMode Both
+node tools/npc/run-npc-soak-tests.mjs -TimeMode Transition
+node tools/npc/run-npc-observation-tests.mjs -TimeMode Both
+node tools/run-npc-navigation-tests.mjs
 ```
 
 Live NPC and runtime regression runners:
 
 ```powershell
-.\tools\npc\run-real-tutorial-playthrough.ps1
-.\tools\npc\run-npc-town-job-cycle-visual-playtest.ps1
-.\tools\npc\run-npc-go-home-visual-playtest.ps1
-.\tools\run-normal-runtime-performance-pass.ps1
-.\tools\run-runtime-performance-observation.ps1
+node tools/npc/run-real-tutorial-playthrough.mjs
+node tools/npc/run-npc-town-job-cycle-visual-playtest.mjs
+node tools/npc/run-npc-go-home-visual-playtest.mjs
+node tools/run-normal-runtime-performance-pass.mjs
+node tools/run-runtime-performance-observation.mjs
 ```
 
 Terrain, underground, and digging visual runners:
 
 ```powershell
-.\tools\run-underground-visual-playtest.ps1
-.\tools\run-underground-interactive-playtest.ps1
-.\tools\run-digging-visual-playtest.ps1
-.\tools\run-town-ground-visual-playtest.ps1
-.\tools\run-light-shadow-visual-playtest.ps1
+node tools/run-underground-visual-playtest.mjs
+node tools/run-underground-interactive-playtest.mjs
+node tools/run-digging-visual-playtest.mjs
+node tools/run-town-ground-visual-playtest.mjs
+node tools/run-light-shadow-visual-playtest.mjs
 ```
 
 Visual captures:
 
 ```powershell
-.\tools\run-visual-captures.ps1
+node tools/run-visual-captures.mjs
 ```
 
 Biome and procedural-ecology contracts:
 
 ```powershell
-.\tools\run-biome-region-field-contract-tests.ps1
-.\tools\run-tree-spawn-performance.ps1
-.\tools\run-procedural-tree-performance-benchmark.ps1
+node tools/run-biome-region-field-contract-tests.mjs
+node tools/run-tree-spawn-performance.mjs
+node tools/run-procedural-tree-performance-benchmark.mjs
 ```
 
 World signature:
 
 ```powershell
-.\tools\run-world-signature.ps1
+node tools/run-world-signature.mjs
 ```
 
 Useful generated asset commands:
 
 ```powershell
-.\tools\blender\build-environment-assets.ps1
-.\tools\blender\build-character-assets.ps1
-.\tools\blender\build-animated-assets.ps1
-.\tools\blender\build-static-item-assets.ps1
+node tools/blender/build-environment-assets.mjs
+node tools/blender/build-character-assets.mjs
+node tools/blender/build-animated-assets.mjs
+node tools/blender/build-static-item-assets.mjs
 ```
 
 If a playtest times out, inspect `playtest-progress.txt` and `playtest-report.json` before changing code.
@@ -528,7 +528,7 @@ Visual baseline artifacts under `artifacts/baselines/` may be intentional tracke
 
 ## Verification Standard
 
-For gameplay changes, run `.\tools\run-playtest.ps1` unless the change is documentation-only or the user explicitly says not to.
+For gameplay changes, run `.\tools\run-playtest.mjs` unless the change is documentation-only or the user explicitly says not to.
 
 For visual changes, run visual captures when feasible and inspect the output. If a visual issue is viewport-dependent, test at least one normal gameplay viewport and one dark/night case.
 
