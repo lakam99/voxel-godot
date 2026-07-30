@@ -117,6 +117,7 @@ var loading_overlay: Control
 var loading_label: Label
 var icon_cache := {}
 var icon_factory
+var item_icon_warmup_queue: Array[String] = []
 var hotbar_slot_buttons: Array[Button] = []
 var setting_controls := {}
 var settings_state := {}
@@ -148,6 +149,13 @@ func setup(inventory_system, crafting_system, objective_system = null, equipment
     if contracts:
         contracts.changed.connect(render_contracts)
     render()
+    queue_item_icon_warmup()
+
+func queue_item_icon_warmup() -> void:
+    item_icon_warmup_queue.clear()
+    for item_id_value in ItemCatalogScript.ITEMS.keys():
+        item_icon_warmup_queue.append(String(item_id_value))
+    item_icon_warmup_queue.sort()
 
 func build_ui() -> void:
     GameHudLayoutBuilderScript.build_ui(self)
@@ -607,6 +615,12 @@ func show_objective_complete(label: String) -> void:
 
 func _process(delta: float) -> void:
     GameHudOverlayControllerScript.process(self, delta)
+    if item_icon_warmup_queue.is_empty() or icon_factory == null:
+        return
+    var item_id: String = item_icon_warmup_queue.pop_front()
+    icon_factory.icon_for(item_id)
+    if inventory != null and inventory.count(item_id) > 0:
+        render()
 
 func render() -> void:
     GameHudRendererScript.render(self)
