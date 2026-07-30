@@ -32,6 +32,9 @@ var peak_process_ms := 0.0
 var peak_state_sync_ms := 0.0
 var peak_light_begin_ms := 0.0
 var peak_reward_unit_ms := 0.0
+var peak_reward_item_ms := 0.0
+var peak_reward_xp_ms := 0.0
+var peak_reward_objective_ms := 0.0
 var total_enqueued := 0
 var total_completed := 0
 
@@ -217,23 +220,29 @@ func process_reward_unit() -> void:
 			var item_value: Variant = items[item_index]
 			reward["itemIndex"] = item_index + 1
 			if item_value is Dictionary and main != null and main.inventory_system != null:
+				var item_started_usec := Time.get_ticks_usec()
 				var item: Dictionary = item_value
 				main.inventory_system.add_item(String(item.get("item", "")), int(item.get("count", 0)))
-			pending_rewards[0] = reward
-			return
+				peak_reward_item_ms = maxf(peak_reward_item_ms, float(Time.get_ticks_usec() - item_started_usec) / 1000.0)
+				pending_rewards[0] = reward
+				return
 		reward["phase"] = "xp"
 		pending_rewards[0] = reward
 		return
 	if phase == "xp":
 		var xp_material := String(reward.get("xpMaterial", ""))
 		if xp_material != "" and main != null:
+			var xp_started_usec := Time.get_ticks_usec()
 			main.award_break_xp(xp_material)
+			peak_reward_xp_ms = maxf(peak_reward_xp_ms, float(Time.get_ticks_usec() - xp_started_usec) / 1000.0)
 		reward["phase"] = "objectives"
 		pending_rewards[0] = reward
 		return
 	var objective_material := String(reward.get("objectiveMaterial", ""))
 	if objective_material != "" and main != null:
+		var objective_started_usec := Time.get_ticks_usec()
 		main.complete_break_objectives(objective_material)
+		peak_reward_objective_ms = maxf(peak_reward_objective_ms, float(Time.get_ticks_usec() - objective_started_usec) / 1000.0)
 	pending_rewards.pop_front()
 
 func apply_edit_state(edit: Dictionary) -> void:
@@ -385,6 +394,9 @@ func stats() -> Dictionary:
 		"peakStateSyncMs": peak_state_sync_ms,
 		"peakLightBeginMs": peak_light_begin_ms,
 		"peakRewardUnitMs": peak_reward_unit_ms,
+		"peakRewardItemMs": peak_reward_item_ms,
+		"peakRewardXpMs": peak_reward_xp_ms,
+		"peakRewardObjectiveMs": peak_reward_objective_ms,
 		"totalEnqueued": total_enqueued,
 		"totalCompleted": total_completed
 	}

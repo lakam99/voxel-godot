@@ -547,10 +547,25 @@ async function runHeadedTool(toolId, rawArgs) {
   const parsed = parseArguments(rawArgs);
   const config = headedTools[toolId];
   if (!config) throw new Error(`No headed configuration registered for ${toolId}`);
+  const isNormalRuntimePerformance = toolId === 'run-normal-runtime-performance-pass';
+  const isRuntimePerformanceObservation = toolId === 'run-runtime-performance-observation';
+  if (isNormalRuntimePerformance && parsed.options.seed !== undefined) {
+    throw new Error('Normal runtime performance passes launch an unseeded New Game and do not accept --seed.');
+  }
   const [scene, reportEnvironment, progressEnvironment, screenshotEnvironment, configuredReport, configuredProgress, configuredScreenshots] = config;
   const reportPath = resolveProjectPath(parsed.options.reportPath, configuredReport);
   const progressPath = resolveProjectPath(parsed.options.progressPath, configuredProgress);
   const screenshotDir = screenshotEnvironment ? resolveProjectPath(parsed.options.screenshotDir, configuredScreenshots) : '';
+  const normalScreenshotPath = isNormalRuntimePerformance
+    ? resolveProjectPath(parsed.options.screenshotPath, 'artifacts/performance/normal-runtime-performance-pass.png')
+    : '';
+  const normalLogPath = isNormalRuntimePerformance
+    ? resolveProjectPath(parsed.options.logPath, 'artifacts/performance/normal-runtime-performance-pass-godot.log')
+    : '';
+  const runtimeObservationScenario = String(parsed.options.scenario ?? 'All');
+  const runtimeObservationLogPath = isRuntimePerformanceObservation
+    ? resolveProjectPath(parsed.options.logPath, `artifacts/performance/runtime-observation-${runtimeObservationScenario}-godot.log`)
+    : '';
   const traceDir = toolId === 'npc/run-npc-observation-tests' ? resolveProjectPath(parsed.options.traceDir, 'artifacts/npc/traces/npc-observation') : '';
   const guard = headedAcceptanceGuards[toolId];
   if (guard) {
@@ -560,32 +575,81 @@ async function runHeadedTool(toolId, rawArgs) {
     const guardReport = await readJson(guardReportPath);
     if (!guardReport.passed) throw new Error(`NPC acceptance runner guard failed: ${guardReportPath}`);
   }
-  await Promise.all([ensureDirectory(dirname(reportPath)), ensureDirectory(dirname(progressPath)), screenshotDir ? ensureDirectory(screenshotDir) : Promise.resolve(), traceDir ? ensureDirectory(traceDir) : Promise.resolve()]);
-  await Promise.all([removeFile(reportPath), removeFile(progressPath), screenshotDir ? clearPngFiles(screenshotDir) : Promise.resolve()]);
+  await Promise.all([
+    ensureDirectory(dirname(reportPath)),
+    ensureDirectory(dirname(progressPath)),
+    screenshotDir ? ensureDirectory(screenshotDir) : Promise.resolve(),
+    normalScreenshotPath ? ensureDirectory(dirname(normalScreenshotPath)) : Promise.resolve(),
+    normalLogPath ? ensureDirectory(dirname(normalLogPath)) : Promise.resolve(),
+    runtimeObservationLogPath ? ensureDirectory(dirname(runtimeObservationLogPath)) : Promise.resolve(),
+    traceDir ? ensureDirectory(traceDir) : Promise.resolve()
+  ]);
+  await Promise.all([
+    removeFile(reportPath),
+    removeFile(progressPath),
+    screenshotDir ? clearPngFiles(screenshotDir) : Promise.resolve(),
+    normalScreenshotPath ? removeFile(normalScreenshotPath) : Promise.resolve(),
+    normalLogPath ? removeFile(normalLogPath) : Promise.resolve(),
+    runtimeObservationLogPath ? removeFile(runtimeObservationLogPath) : Promise.resolve()
+  ]);
   const runToken = randomUUID().replaceAll('-', '');
+  const normalDurationSeconds = Math.max(5, asNumber(parsed.options.durationSeconds, 75));
+  const requestedNormalWatchdogSeconds = asNumber(parsed.options.watchdogSeconds ?? parsed.options.timeoutSeconds, 0);
+  const normalWatchdogSeconds = requestedNormalWatchdogSeconds > 0
+    ? requestedNormalWatchdogSeconds
+    : Math.max(240, normalDurationSeconds + 150);
+  const runtimeObservationDurationSeconds = Math.max(1, asNumber(parsed.options.durationSeconds, 60));
+  const runtimeObservationScenarioCount = runtimeObservationScenario === 'All' ? 8 : 1;
+  const requestedRuntimeObservationWatchdogSeconds = asNumber(parsed.options.watchdogSeconds ?? parsed.options.timeoutSeconds, 0);
+  const runtimeObservationWatchdogSeconds = requestedRuntimeObservationWatchdogSeconds > 0
+    ? requestedRuntimeObservationWatchdogSeconds
+    : Math.max(300, runtimeObservationDurationSeconds * runtimeObservationScenarioCount + 90);
   const environment = {
     ...process.env,
-    VOXEL_PLAYTEST: '1',
-    VOXEL_TEST_SEED: String(parsed.options.seed ?? 'atlas-1492'),
     [reportEnvironment]: reportPath,
     [progressEnvironment]: progressPath,
     [reportEnvironment.replace(/_REPORT$/, '_RUN_TOKEN')]: runToken,
-    [reportEnvironment.replace(/_REPORT$/, '_WATCHDOG_SECONDS')]: String(asNumber(parsed.options.watchdogSeconds ?? parsed.options.timeoutSeconds, 300)),
+    [reportEnvironment.replace(/_REPORT$/, '_WATCHDOG_SECONDS')]: String(
+      isNormalRuntimePerformance
+        ? normalWatchdogSeconds
+        : isRuntimePerformanceObservation
+          ? runtimeObservationWatchdogSeconds
+          : asNumber(parsed.options.watchdogSeconds ?? parsed.options.timeoutSeconds, 300)
+    ),
     VOXEL_GIT_BRANCH: gitValue(['branch', '--show-current']),
     VOXEL_GIT_COMMIT: gitValue(['rev-parse', 'HEAD'])
   };
+  if (isNormalRuntimePerformance) {
+    delete environment.VOXEL_PLAYTEST;
+    delete environment.VOXEL_TEST_SEED;
+    delete environment.VOXEL_RUNTIME_PERF_FAST_BOOT;
+    delete environment.VOXEL_UNDERGROUND_VISUAL_FAST_BOOT;
+    delete environment.VOXEL_DIGGING_VISUAL_FAST_BOOT;
+    environment.VOXEL_NORMAL_RUNTIME_PERF_SCREENSHOT = normalScreenshotPath;
+    environment.VOXEL_NORMAL_RUNTIME_PERF_DURATION_SECONDS = String(normalDurationSeconds);
+    environment.VOXEL_NORMAL_RUNTIME_PERF_WARMUP_FRAMES = String(Math.max(0, asNumber(parsed.options.warmupFrames, 120)));
+    environment.VOXEL_NORMAL_RUNTIME_PERF_SCENARIO = String(parsed.options.scenario ?? 'NormalSprintTraversal');
+    if (asBoolean(parsed.options.useRealSave)) {
+      delete environment.VOXEL_SAVE_PATH_OVERRIDE;
+    } else {
+      environment.VOXEL_SAVE_PATH_OVERRIDE = join(projectRoot, 'artifacts', 'performance', `normal-runtime-save-${runToken}.json`);
+    }
+  } else {
+    environment.VOXEL_PLAYTEST = '1';
+    environment.VOXEL_TEST_SEED = String(parsed.options.seed ?? 'atlas-1492');
+  }
   if (screenshotEnvironment) environment[screenshotEnvironment] = screenshotDir;
   if (traceDir) environment.VOXEL_NPC_OBSERVATION_TRACE_DIR = traceDir;
   if (parsed.options.timeMode !== undefined) environment.VOXEL_NPC_TIME_MODE = String(parsed.options.timeMode).toLowerCase();
-  if (parsed.options.scenario !== undefined) {
+  if (parsed.options.scenario !== undefined && !isNormalRuntimePerformance) {
     environment.VOXEL_NPC_OBSERVATION_SCENARIO = String(parsed.options.scenario);
     environment.VOXEL_RUNTIME_PERF_SCENARIO = String(parsed.options.scenario);
   }
-  if (parsed.options.durationSeconds !== undefined) {
+  if (parsed.options.durationSeconds !== undefined && !isNormalRuntimePerformance) {
     environment.VOXEL_RUNTIME_PERF_DURATION_SECONDS = String(parsed.options.durationSeconds);
     environment.VOXEL_NORMAL_RUNTIME_PERF_DURATION_SECONDS = String(parsed.options.durationSeconds);
   }
-  if (parsed.options.warmupFrames !== undefined) {
+  if (parsed.options.warmupFrames !== undefined && !isNormalRuntimePerformance) {
     environment.VOXEL_RUNTIME_PERF_WARMUP_FRAMES = String(parsed.options.warmupFrames);
     environment.VOXEL_NORMAL_RUNTIME_PERF_WARMUP_FRAMES = String(parsed.options.warmupFrames);
   }
@@ -604,11 +668,29 @@ async function runHeadedTool(toolId, rawArgs) {
     if (toolId.endsWith('no-flags')) environment.VOXEL_REAL_TUTORIAL_PHASE7_LIVE_ACCEPTANCE = '1';
   }
   const godot = await findGodot(parsed.options.godotExe);
-  const godotArguments = ['--fixed-fps', '60', '--path', projectRoot];
+  const godotArguments = [];
+  if (isNormalRuntimePerformance) {
+    if (asBoolean(parsed.options.headless)) godotArguments.push('--headless');
+    if (parsed.options.resolution) godotArguments.push('--resolution', String(parsed.options.resolution));
+    godotArguments.push('--log-file', normalLogPath);
+  } else if (isRuntimePerformanceObservation) {
+    if (!asBoolean(parsed.options.visible)) godotArguments.push('--headless');
+    godotArguments.push('--fixed-fps', '60', '--log-file', runtimeObservationLogPath);
+  } else {
+    godotArguments.push('--fixed-fps', '60');
+  }
+  godotArguments.push('--path', projectRoot);
   if (scene) godotArguments.push('--scene', scene);
   const forwarded = [...sceneArgumentOptions(parsed.options), ...parsed.passthrough];
   if (forwarded.length) godotArguments.push('--', ...forwarded);
-  const execution = await runProcess(godot, godotArguments, { env: environment, timeoutSeconds: asNumber(parsed.options.timeoutSeconds ?? parsed.options.watchdogSeconds, 300) });
+  const execution = await runProcess(godot, godotArguments, {
+    env: environment,
+    timeoutSeconds: isNormalRuntimePerformance
+      ? normalWatchdogSeconds
+      : isRuntimePerformanceObservation
+        ? runtimeObservationWatchdogSeconds
+      : asNumber(parsed.options.timeoutSeconds ?? parsed.options.watchdogSeconds, 300)
+  });
   if (!(await exists(reportPath))) throw new Error(`Missing report from ${toolId}: ${reportPath}`);
   const report = await readJson(reportPath);
   if (report.runToken && report.runToken !== runToken) throw new Error(`Stale report token from ${toolId}`);
