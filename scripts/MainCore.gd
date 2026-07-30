@@ -67,6 +67,7 @@ var pending_generated_volume_exposure_scans := {}
 var volume_edit_markers := {}
 var town_region_cache := {}
 var town_slope_apron_cache := {}
+var settlement_site_authority
 var blocks := {}
 var removed_props := {}
 var inventory := {}
@@ -1340,6 +1341,8 @@ func apply_world_seed(new_seed: String, remember := false) -> void:
         seed(seed_hash)
     town_region_cache.clear()
     town_slope_apron_cache.clear()
+    if settlement_site_authority != null and settlement_site_authority.has_method("reset_for_seed"):
+        settlement_site_authority.call("reset_for_seed", seed_text)
     fishing_rng.seed = hash_string("%s:fishing" % seed_text)
     playtest_progress("apply_seed_setup_noise")
     setup_noise()
@@ -1573,12 +1576,27 @@ func setup_game_systems() -> void:
     _sync_inventory_totals()
 
 func setup_world_generation_system() -> void:
+    if settlement_site_authority == null:
+        settlement_site_authority = preload("res://scripts/world/SettlementSiteAuthority.gd").new()
+        settlement_site_authority.reset_for_seed(seed_text)
     if world_generation_system == null:
         world_generation_system = WorldGenerationSystemScript.new()
     world_generation_system.setup(self)
     if terrain_meshing_service == null:
         terrain_meshing_service = TerrainMeshingServiceScript.new()
     terrain_meshing_service.setup(self)
+
+func register_settlement_site(site: Dictionary) -> Dictionary:
+    setup_world_generation_system()
+    if settlement_site_authority == null or not settlement_site_authority.has_method("register_site"):
+        return {"accepted": false, "reason": "settlement_site_authority_missing"}
+    var result: Dictionary = settlement_site_authority.call("register_site", site, TOWN_REGION_CELLS)
+    if bool(result.get("accepted", false)) and bool(result.get("changed", false)):
+        town_region_cache.clear()
+        town_slope_apron_cache.clear()
+        if world_generation_system != null and world_generation_system.has_method("invalidate_generated_surface_caches"):
+            world_generation_system.call("invalidate_generated_surface_caches")
+    return result
 
 func setup_story_systems() -> void:
     if region_story_generator == null:

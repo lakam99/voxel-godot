@@ -3369,6 +3369,25 @@ func notify_navigation_structure_metadata_changed(structure_id: String, bounds: 
         autonomy_system.notify_structure_metadata_changed(structure_id, bounds, metadata)
         flush_navigation_change_bus()
 
+func register_building_navigation_manifest(manifest: Dictionary) -> Dictionary:
+    if autonomy_system == null or not autonomy_system.has_method("register_building_navigation_manifest"):
+        return { "ok": false, "reason": "missing_navigation_authority" }
+    var result: Dictionary = autonomy_system.register_building_navigation_manifest(manifest)
+    navigation_change_flush_pending = true
+    return result
+
+func unregister_building_navigation_manifest(building_id: String) -> Dictionary:
+    if autonomy_system == null or not autonomy_system.has_method("unregister_building_navigation_manifest"):
+        return { "ok": false, "reason": "missing_navigation_authority" }
+    var result: Dictionary = autonomy_system.unregister_building_navigation_manifest(building_id)
+    navigation_change_flush_pending = true
+    return result
+
+func building_navigation_manifest_snapshot() -> Array:
+    if autonomy_system == null or not autonomy_system.has_method("building_navigation_manifest_snapshot"):
+        return []
+    return autonomy_system.building_navigation_manifest_snapshot()
+
 func notify_navigation_semantic_changed(semantic_id: String, bounds: AABB, metadata := {}) -> void:
     if autonomy_system:
         autonomy_system.notify_semantic_changed(semantic_id, bounds, metadata)

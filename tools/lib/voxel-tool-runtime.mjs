@@ -4,7 +4,7 @@ import { basename, dirname, extname, isAbsolute, join, normalize, resolve } from
 import { fileURLToPath } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 
 const runtimeDirectory = dirname(fileURLToPath(import.meta.url));
 export const projectRoot = resolve(runtimeDirectory, '..', '..');
@@ -22,6 +22,7 @@ const optionAliases = new Map([
   ['capture', 'capture'], ['style', 'style'], ['view', 'view'], ['species', 'species'],
   ['presentation', 'presentation'], ['maturity', 'maturity'], ['reviewseconds', 'reviewSeconds'],
   ['durationseconds', 'durationSeconds'], ['warmupframes', 'warmupFrames'], ['resolution', 'resolution'],
+  ['citadelscale', 'citadelScale'], ['profileseconds', 'profileSeconds'], ['profile', 'profile'],
   ['logpath', 'logPath'], ['usestorealsave', 'useRealSave'], ['userealsave', 'useRealSave'],
   ['requirerealboot', 'realBoot'], ['realboot', 'realBoot'], ['runname', 'runName'],
   ['noflagsproofpath', 'noFlagsProofPath'], ['stoponfailure', 'stopOnFailure'],
@@ -136,7 +137,8 @@ export async function findExecutable(explicitPath, environmentNames, commands, a
   const candidates = [explicitPath, ...environmentNames.map((name) => process.env[name]), ...applicationPaths].filter(Boolean);
   for (const candidate of candidates) {
     const resolved = resolve(candidate);
-    if (await exists(resolved)) return resolved;
+    const executable = await resolveExecutableCandidate(resolved, label);
+    if (executable) return executable;
   }
   for (const command of commands) {
     const resolved = commandPath(command);
@@ -145,14 +147,45 @@ export async function findExecutable(explicitPath, environmentNames, commands, a
   throw new Error(`Could not find ${label}. Pass --${label.toLowerCase().replace(/\s+/g, '-')} or set ${environmentNames[0]}.`);
 }
 
+async function resolveExecutableCandidate(candidate, label) {
+  if (!(await exists(candidate))) return '';
+  const candidateStat = await stat(candidate);
+  if (candidateStat.isFile()) return candidate;
+  if (!candidateStat.isDirectory()) return '';
+
+  // Godot's Windows archive is occasionally unpacked into a folder whose
+  // name still ends in `.exe`.  Treating that folder as the executable causes
+  // every runner to fail before it can show its own loading feedback.  Resolve
+  // the real binary inside only when the folder is explicitly supplied or
+  // discovered as an application candidate.
+  if (label !== 'Godot') return '';
+  const entries = await readdir(candidate, { withFileTypes: true });
+  const binaries = entries
+    .filter((entry) => entry.isFile() && /^Godot(?:_|-).*\.exe$/i.test(entry.name))
+    .map((entry) => entry.name)
+    .sort((left, right) => {
+      const leftConsole = /_console\.exe$/i.test(left);
+      const rightConsole = /_console\.exe$/i.test(right);
+      return Number(leftConsole) - Number(rightConsole) || left.localeCompare(right);
+    });
+  return binaries.length ? join(candidate, binaries[0]) : '';
+}
+
 export function findGodot(explicitPath) {
+  const windowsArchiveFolders = process.platform === 'win32'
+    ? [
+      join(homedir(), 'Desktop', 'Godot_v4.6.1-stable_win64.exe'),
+      join(homedir(), 'Downloads', 'Godot_v4.6.1-stable_win64.exe')
+    ]
+    : [];
   return findExecutable(
     explicitPath,
     ['GODOT_EXE', 'GODOT_BIN'],
     ['godot', 'godot4', 'Godot'],
     [
       '/Applications/Godot.app/Contents/MacOS/Godot',
-      '/Applications/Godot 4.app/Contents/MacOS/Godot'
+      '/Applications/Godot 4.app/Contents/MacOS/Godot',
+      ...windowsArchiveFolders
     ],
     'Godot'
   );
@@ -292,6 +325,7 @@ export async function validateEvidence(options) {
 const scriptTools = {
   'run-biome-environment-catalog-contract-tests': ['res://scripts/testing/BiomeEnvironmentCatalogContractRunner.gd', 'VOXEL_BIOME_ENVIRONMENT_CONTRACT_REPORT'],
   'run-biome-region-field-contract-tests': ['res://scripts/testing/BiomeRegionFieldContractRunner.gd', 'VOXEL_BIOME_REGION_FIELD_REPORT'],
+	'run-building-navigation-manifest-contract': ['res://scripts/testing/buildings/BuildingNavigationManifestContractRunner.gd', 'VOXEL_BUILDING_NAVIGATION_MANIFEST_REPORT'],
   'run-canopy-asset-import-contract-tests': ['res://scripts/testing/CanopyAssetImportContractRunner.gd', 'VOXEL_CANOPY_IMPORT_CONTRACT_REPORT'],
   'run-canopy-runtime-contract-tests': ['res://scripts/testing/CanopyRuntimeContractRunner.gd', 'VOXEL_CANOPY_RUNTIME_CONTRACT_REPORT'],
   'run-combat-target-policy-contract': ['res://scripts/testing/combat/CombatTargetPolicyContractRunner.gd', 'VOXEL_COMBAT_TARGET_POLICY_REPORT'],
@@ -367,6 +401,7 @@ const visualRequiredScreenshots = {
 };
 
 const headedTools = {
+  'run-citadel-life-playtest': ['res://scenes/testing/npc/CitadelLifePlaytest.tscn', 'VOXEL_CITADEL_LIFE_REPORT', 'VOXEL_CITADEL_LIFE_PROGRESS', 'VOXEL_CITADEL_LIFE_SCREENSHOT_DIR', 'artifacts/performance/citadel-life-report.json', 'artifacts/performance/citadel-life-progress.txt', 'artifacts/performance/citadel-life-screenshots'],
   'run-canopy-release-playtest': ['res://scenes/testing/CanopyReleasePlaytest.tscn', 'VOXEL_CANOPY_RELEASE_REPORT', 'VOXEL_CANOPY_RELEASE_PROGRESS', 'VOXEL_CANOPY_RELEASE_SCREENSHOT_DIR', 'artifacts/vegetation/canopy-release/report.json', 'artifacts/vegetation/canopy-release/progress.txt', 'artifacts/vegetation/canopy-release/screenshots'],
   'run-runtime-performance-observation': ['res://scenes/testing/RuntimePerformanceObservation.tscn', 'VOXEL_RUNTIME_PERF_REPORT', 'VOXEL_RUNTIME_PERF_PROGRESS', '', 'artifacts/performance/runtime-observation.json', 'artifacts/performance/runtime-observation-progress.txt', ''],
   'run-normal-runtime-performance-pass': ['res://scenes/testing/NormalRuntimePerformancePass.tscn', 'VOXEL_NORMAL_RUNTIME_PERF_REPORT', 'VOXEL_NORMAL_RUNTIME_PERF_PROGRESS', '', 'artifacts/performance/normal-runtime-performance-pass.json', 'artifacts/performance/normal-runtime-performance-pass-progress.txt', ''],
@@ -381,6 +416,14 @@ const headedTools = {
 };
 
 const headedAcceptanceGuards = {
+  // Citadel Life may place actors only during documented fixture setup, before
+  // its public civic/home orders begin. The runner otherwise drives production
+  // CharacterBody3D actors through ordinary NpcSystem commands.
+  'run-citadel-life-playtest': ['scripts/testing/npc/CitadelLifePlaytestRunner.gd', [
+    'safe_place_npc.*citadel_life_day_spawn',
+    'player\\.global_position\\s*=\\s*fixture_origin.*gate_depth',
+    'player\\.global_position\\s*=\\s*fixture_origin.*span'
+  ]],
   'npc/run-actual-gameplay-mira-porch-regression': ['scripts/testing/npc/NpcActualGameplayMiraPorchRegressionRunner.gd', []],
   'npc/run-npc-go-home-visual-playtest': ['scripts/testing/npc/NpcGoHomeVisualPlaytestRunner.gd', ['safe_place_npc.*visual_go_home_spawn', 'player\\.global_position\\s*=\\s*Vector3\\(float\\(center\\.x - 10\\)']],
   'npc/run-npc-town-job-cycle-visual-playtest': ['scripts/testing/npc/NpcTownJobCycleVisualPlaytestRunner.gd', ['player\\.global_position\\s*=.*town_job_cycle_pre_act_stream_anchor']],

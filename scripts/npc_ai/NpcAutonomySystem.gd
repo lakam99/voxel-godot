@@ -47,6 +47,7 @@ var change_bus
 var navigation_backend_config
 var navigation_world
 var navmesh_world
+var building_navigation_manifests: Dictionary = {}
 var door_portals
 var smart_objects
 var door_traversal
@@ -906,6 +907,47 @@ func emit_door_state_revision(door: Node, open: bool, reason: String, revision: 
 func notify_structure_metadata_changed(structure_id: String, bounds: AABB, metadata := {}) -> void:
 	change_bus.emit_change(NpcEnumsScript.CHANGE_KIND_STRUCTURE_METADATA, "structure:%s" % structure_id, bounds, NavigationChangeBusScript.tile_keys_for_bounds(bounds))
 	telemetry.record_event("_system", &"semantic", "structure_metadata", &"none", metadata)
+
+
+func register_building_navigation_manifest(manifest: Dictionary) -> Dictionary:
+	var building_id := String(manifest.get("buildingId", manifest.get("sourceBlueprintId", "")))
+	if building_id == "":
+		return { "ok": false, "reason": "missing_building_id" }
+	var snapshot: Dictionary = manifest.duplicate(true)
+	building_navigation_manifests[building_id] = snapshot
+	var bounds: AABB = snapshot.get("bounds", AABB()) if snapshot.get("bounds", AABB()) is AABB else AABB()
+	notify_structure_metadata_changed(building_id, bounds, {
+		"source": "building_part_navigation_manifest",
+		"supportCount": int(snapshot.get("supportCount", 0)),
+		"verticalLinkCount": int(snapshot.get("verticalLinkCount", 0))
+	})
+	return {
+		"ok": true,
+		"buildingId": building_id,
+		"supportCount": int(snapshot.get("supportCount", 0)),
+		"verticalLinkCount": int(snapshot.get("verticalLinkCount", 0))
+	}
+
+
+func unregister_building_navigation_manifest(building_id: String) -> Dictionary:
+	if building_id == "" or not building_navigation_manifests.has(building_id):
+		return { "ok": false, "reason": "missing_building_manifest" }
+	var manifest: Dictionary = building_navigation_manifests.get(building_id, {}) as Dictionary
+	building_navigation_manifests.erase(building_id)
+	var bounds: AABB = manifest.get("bounds", AABB()) if manifest.get("bounds", AABB()) is AABB else AABB()
+	notify_structure_metadata_changed(building_id, bounds, { "source": "building_part_navigation_manifest", "removed": true })
+	return { "ok": true, "buildingId": building_id }
+
+
+func building_navigation_manifest_snapshot() -> Array[Dictionary]:
+	var ids: Array = building_navigation_manifests.keys()
+	ids.sort()
+	var manifests: Array[Dictionary] = []
+	for id_value in ids:
+		var manifest: Dictionary = building_navigation_manifests.get(id_value, {}) as Dictionary
+		if not manifest.is_empty():
+			manifests.append(manifest.duplicate(true))
+	return manifests
 
 func notify_semantic_changed(semantic_id: String, bounds: AABB, metadata := {}) -> void:
 	change_bus.emit_change(NpcEnumsScript.CHANGE_KIND_SEMANTIC_CHANGED, "semantic:%s" % semantic_id, bounds, NavigationChangeBusScript.tile_keys_for_bounds(bounds))

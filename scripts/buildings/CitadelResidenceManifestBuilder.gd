@@ -49,6 +49,11 @@ static func build(castle_blueprint, furnishing_plan, cell_size := DEFAULT_CELL_S
 			used_stand_cells[cell_key(stand_cell)] = true
 			var citizen_id := "citadel:%s:%s:%s" % [blueprint_id, residence_id, String(bed.id)]
 			var citizen := shell.duplicate(true)
+			# A resident's home elevation belongs to the bed/furnishing source it was
+			# assigned, not the lower edge of a doorway.  The latter is intentionally
+			# recessed into the threshold while the bed sits on the completed interior
+			# floor; using it made a real capsule overlap the published floor collider.
+			var bed_walk_level := maxf(float(shell.get("level", 0.0)), bed.position.y + world_origin.y)
 			citizen.merge({
 				"id": citizen_id,
 				"homeStableId": "citadel-home:%s:%s" % [blueprint_id, residence_id],
@@ -62,7 +67,8 @@ static func build(castle_blueprint, furnishing_plan, cell_size := DEFAULT_CELL_S
 				"job": "civic",
 				"role": "Citizen",
 				"canFight": false,
-				"nightGuard": false
+				"nightGuard": false,
+				"level": bed_walk_level
 			}, true)
 			result["citizens"].append(citizen)
 			citizen_count += 1

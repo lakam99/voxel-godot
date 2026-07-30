@@ -16,6 +16,7 @@ var blockers: Array[Dictionary] = []
 var semantic_anchors: Array[Dictionary] = []
 var door_portals: Array[Dictionary] = []
 var door_links: Array[Dictionary] = []
+var navigation_links: Array[Dictionary] = []
 
 static func create(region_id_value: String, tile_key_value: String, bounds_value := AABB()):
 	var descriptor = load("res://scripts/npc_ai/contracts/NavigationBakeDescriptor.gd").new()
@@ -51,7 +52,7 @@ static func from_tile_snapshot(snapshot: Dictionary):
 		if not (cell is Vector3i):
 			cell = Vector3i(int(surface.get("x", 0)), int(surface.get("y", 0)), int(surface.get("z", 0)))
 		var center: Vector3 = surface.get("worldPosition", Vector3(float(cell.x) * NpcConstantsScript.CELL_SIZE, float(cell.y) * NpcConstantsScript.CELL_SIZE, float(cell.z) * NpcConstantsScript.CELL_SIZE))
-		var size := Vector3(NpcConstantsScript.CELL_SIZE, 0.05, NpcConstantsScript.CELL_SIZE)
+		var size: Vector3 = surface.get("size", Vector3(NpcConstantsScript.CELL_SIZE, 0.05, NpcConstantsScript.CELL_SIZE))
 		var span_index := int(surface.get("spanIndex", index))
 		var surface_id := "surface:%s:%d,%d,%d:%d" % [tile_key_value, cell.x, cell.y, cell.z, span_index]
 		var extra := {
@@ -62,6 +63,14 @@ static func from_tile_snapshot(snapshot: Dictionary):
 			"semanticRegionIds": surface.get("semanticRegionIds", []),
 			"traversalTags": surface.get("traversalTags", [])
 		}
+		if surface.get("polygon", []) is Array:
+			extra["polygon"] = surface.get("polygon", [])
+		if surface.has("sourcePartId"):
+			extra["sourcePartId"] = String(surface.get("sourcePartId", ""))
+		if surface.has("sourceCollisionPartId"):
+			extra["sourceCollisionPartId"] = String(surface.get("sourceCollisionPartId", ""))
+		if surface.has("support"):
+			extra["support"] = bool(surface.get("support", false))
 		var surface_bounds := _surface_bounds(center, size)
 		if bool(surface.get("blocked", false)):
 			descriptor.add_blocker("blocker:%s" % surface_id, surface_bounds, {
@@ -98,6 +107,14 @@ static func from_tile_snapshot(snapshot: Dictionary):
 		if portal_id == "":
 			continue
 		descriptor.add_door_link(String(link.get("from", "")), String(link.get("to", "")), portal_id, link)
+	for link_value in snapshot.get("navigationLinks", []):
+		if not (link_value is Dictionary):
+			continue
+		var link: Dictionary = link_value
+		var link_id := String(link.get("id", ""))
+		if link_id == "":
+			continue
+		descriptor.add_navigation_link(link_id, link.get("start", Vector3.ZERO), link.get("end", Vector3.ZERO), link)
 	if has_bounds:
 		descriptor.bounds = merged_bounds
 	return descriptor
@@ -177,6 +194,18 @@ func add_door_link(from_key: String, to_key: String, portal_id: String, extra :=
 	_merge_extra(link, extra)
 	door_links.append(link)
 
+func add_navigation_link(link_id: String, start: Vector3, end: Vector3, extra := {}) -> void:
+	var link := {
+		"id": link_id,
+		"start": start,
+		"end": end,
+		"bidirectional": true,
+		"enabled": true,
+		"cost": 1.0
+	}
+	_merge_extra(link, extra)
+	navigation_links.append(link)
+
 func stable_signature() -> String:
 	return JSON.stringify(to_summary())
 
@@ -193,7 +222,8 @@ func to_summary() -> Dictionary:
 		"blockers": _sorted_summary_array(blockers),
 		"semanticAnchors": _sorted_summary_array(semantic_anchors),
 		"doorPortals": _sorted_summary_array(door_portals),
-		"doorLinks": _sorted_summary_array(door_links)
+		"doorLinks": _sorted_summary_array(door_links),
+		"navigationLinks": _sorted_summary_array(navigation_links)
 	}
 
 func _merge_extra(target: Dictionary, extra := {}) -> void:

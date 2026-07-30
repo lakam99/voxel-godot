@@ -4,6 +4,11 @@ func town_region(region_x: int, region_z: int) -> Dictionary:
 	var cache_key := Vector2i(region_x, region_z)
 	if town_region_cache.has(cache_key):
 		return town_region_cache[cache_key]
+	if settlement_site_authority != null and settlement_site_authority.has_method("site_for_region"):
+		var reserved_site: Dictionary = settlement_site_authority.call("site_for_region", region_x, region_z)
+		if not reserved_site.is_empty():
+			town_region_cache[cache_key] = reserved_site
+			return reserved_site
 	var forced := region_x == 1 and region_z == 0
 	if not forced and hash01("town:%d,%d" % [region_x, region_z]) > TOWN_SPAWN_CHANCE:
 		town_region_cache[cache_key] = {}

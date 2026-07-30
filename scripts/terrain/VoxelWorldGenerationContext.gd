@@ -36,6 +36,14 @@ func setup_from_main(main) -> void:
 				continue
 			var town_value = main_town_cache[region_value]
 			pinned_town_regions[region_value] = town_value.duplicate(true) if town_value is Dictionary else {}
+	var settlement_sites = main.get("settlement_site_authority")
+	if settlement_sites != null and settlement_sites.has_method("snapshot_by_region"):
+		var reserved_regions: Dictionary = settlement_sites.call("snapshot_by_region")
+		for region_value in reserved_regions.keys():
+			if not (region_value is Vector2i):
+				continue
+			var reserved_value = reserved_regions[region_value]
+			pinned_town_regions[region_value] = reserved_value.duplicate(true) if reserved_value is Dictionary else {}
 	var world_generation = main.get("world_generation_system")
 	var volume_service = world_generation.get("terrain_volume_service") if world_generation != null else null
 	var edited_value = volume_service.get("edited_cells") if volume_service != null else null

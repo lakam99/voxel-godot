@@ -18,6 +18,7 @@ static func build(castle_blueprint, furnishing_seed: int):
 	var plan = FurnishingPlanScript.new("furnishing.%s.%d" % [blueprint_id, furnishing_seed], furnishing_seed, blueprint_id)
 	if castle_blueprint == null:
 		return plan
+	plan.set_protected_access_reservations(InteriorFurnishingLayoutScript.access_reservations(castle_blueprint.rooms))
 	var residences: Array = castle_blueprint.recipe.get("courtyardResidences", []) as Array
 	var castle_foundation_height := float(castle_blueprint.recipe.get("foundationHeight", 0.62))
 	for residence_value in residences:
@@ -111,6 +112,13 @@ static func stable_residence_furnishing_seed(base_seed: int, residence_id: Strin
 
 static func append_transformed_plan(target_plan, source_plan, residence_id: String, family: String, origin: Vector3, yaw: float) -> void:
 	var yaw_basis := Basis(Vector3.UP, yaw)
+	# Synthetic manor accesses are created by the same source furnishing grammar,
+	# so preserve them when that grammar is composed into the castle. This avoids
+	# a second, castle-specific interpretation of a doorway clearance.
+	var transformed_accesses: Array[AABB] = []
+	for source_access in source_plan.access_reservations_snapshot():
+		transformed_accesses.append(transform_access_reservation(source_access, origin, yaw_basis))
+	target_plan.add_protected_access_reservations(transformed_accesses)
 	var id_map := {}
 	for source_part in source_plan.parts:
 		if source_part != null:
@@ -133,6 +141,19 @@ static func append_transformed_plan(target_plan, source_plan, residence_id: Stri
 		values["rotation"] = transformed_basis.get_euler()
 		values["recipe"] = recipe
 		target_plan.add_part(values)
+
+
+static func transform_access_reservation(reservation: AABB, origin: Vector3, yaw_basis: Basis) -> AABB:
+	var minimum := Vector3(INF, reservation.position.y + origin.y, INF)
+	var maximum := Vector3(-INF, reservation.end.y + origin.y, -INF)
+	for x in [reservation.position.x, reservation.end.x]:
+		for z in [reservation.position.z, reservation.end.z]:
+			var transformed := origin + yaw_basis * Vector3(x, 0.0, z)
+			minimum.x = minf(minimum.x, transformed.x)
+			minimum.z = minf(minimum.z, transformed.z)
+			maximum.x = maxf(maximum.x, transformed.x)
+			maximum.z = maxf(maximum.z, transformed.z)
+	return AABB(minimum, Vector3(maximum.x - minimum.x, reservation.size.y, maximum.z - minimum.z))
 
 
 static func remap_furnishing_links(recipe: Dictionary, id_map: Dictionary) -> void:
@@ -161,6 +182,9 @@ static func build_manor_residence_plan(source_blueprint, furnishing_seed: int):
 			continue
 		var local_room := room_with_residential_access(source_room)
 		var room_plan = FurnishingPlanScript.new("%s.%s" % [blueprint_id, role], furnishing_seed, blueprint_id)
+		var room_accesses: Array[AABB] = InteriorFurnishingLayoutScript.access_reservations([local_room])
+		plan.add_protected_access_reservations(room_accesses)
+		room_plan.set_protected_access_reservations(room_accesses)
 		var occupied: Array[AABB] = InteriorFurnishingLayoutScript.access_reservations([local_room])
 		match role:
 			"entry_hall":

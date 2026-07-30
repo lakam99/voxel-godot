@@ -18,6 +18,7 @@ static func build(blueprint, furnishing_seed: int):
 	var plan = FurnishingPlanScript.new("furnishing.%s.%d" % [blueprint_id, furnishing_seed], furnishing_seed, blueprint_id)
 	if blueprint == null:
 		return plan
+	plan.set_protected_access_reservations(InteriorFurnishingLayoutScript.access_reservations(blueprint.rooms))
 	var rooms := rooms_by_id(blueprint.rooms)
 	var hearth_room: Dictionary = rooms.get("hearth_room", {}) as Dictionary
 	var sleeping_room: Dictionary = rooms.get("sleeping_room", {}) as Dictionary

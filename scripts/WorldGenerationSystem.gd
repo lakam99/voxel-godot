@@ -57,6 +57,19 @@ func reset_for_seed() -> void:
 	surface_biome_cache.clear()
 	minimum_overburden_cache.clear()
 
+func invalidate_generated_surface_caches() -> void:
+	# A deterministic settlement manifest changed before a new terrain generator
+	# is published. Clear derived generation caches only: player-made cells remain
+	# owned by TerrainVolumeService and survive the generator refresh.
+	surface_projection_cache.clear()
+	deformed_surface_y_cache.clear()
+	natural_surface_y_cache.clear()
+	base_surface_y_cache.clear()
+	surface_biome_cache.clear()
+	minimum_overburden_cache.clear()
+	if terrain_volume_service != null and terrain_volume_service.has_method("invalidate_generated_surface_caches"):
+		terrain_volume_service.invalidate_generated_surface_caches()
+
 func biome_region_for_cell3(cell: Vector3i) -> Dictionary:
 	if biome_region_field == null:
 		biome_region_field = BiomeRegionFieldScript.new()

@@ -90,6 +90,11 @@ func setup(main_node) -> Dictionary:
 	material.shader = TERRAIN_SHADER
 	terrain.material_override = material
 	add_child(terrain)
+	# Native voxel collision bodies are generated below the VoxelTerrain node.
+	# They must retain the terrain semantic on the actual PhysicsBody hit by
+	# production placement/movement queries; putting it only on the visual terrain
+	# parent makes walkable ground indistinguishable from an occupied obstacle.
+	bind_terrain_collision_metadata(terrain)
 
 	viewer = VoxelViewer.new()
 	viewer.name = "VoxelTerrainViewer"
@@ -108,7 +113,29 @@ func setup(main_node) -> Dictionary:
 	authority_ready = true
 	return {"ok": true, "backend": "VoxelTerrain", "mesher": "VoxelMesherTransvoxel"}
 
-func reset_for_current_seed_staged() -> Dictionary:
+
+func bind_terrain_collision_metadata(node: Node) -> void:
+	# VoxelTools publishes collision bodies asynchronously beneath `terrain`.
+	# Physics queries see those child StaticBody3Ds, not the VoxelTerrain parent,
+	# so propagate the authoritative terrain classification as each one enters.
+	if node == null:
+		return
+	if node is StaticBody3D:
+		node.set_meta("kind", "terrain")
+		node.set_meta("geometry_source", "voxel_sdf_authority")
+		node.set_meta("collision_source", "VoxelMesherTransvoxel")
+	for child in node.get_children():
+		bind_terrain_collision_metadata(child)
+	var descendant_callback := Callable(self, "_on_terrain_collision_descendant_entered")
+	if not node.child_entered_tree.is_connected(descendant_callback):
+		node.child_entered_tree.connect(descendant_callback)
+
+
+func _on_terrain_collision_descendant_entered(node: Node) -> void:
+	bind_terrain_collision_metadata(node)
+
+
+func reset_for_current_seed_staged(force_generator_reload := false, reset_reason := "seed_change") -> Dictionary:
 	if main == null:
 		return STARTUP_READINESS_RESULT_SCRIPT.failed("voxel_terrain_reset_main_missing")
 	if terrain == null or not is_instance_valid(terrain):
@@ -116,7 +143,7 @@ func reset_for_current_seed_staged() -> Dictionary:
 	var next_seed := String(main.get("seed_text"))
 	if next_seed.strip_edges() == "":
 		return STARTUP_READINESS_RESULT_SCRIPT.failed("voxel_terrain_reset_seed_missing")
-	if configured_seed == next_seed and authority_ready:
+	if configured_seed == next_seed and authority_ready and not force_generator_reload:
 		return STARTUP_READINESS_RESULT_SCRIPT.ready({}, {
 			"seed": configured_seed,
 			"resetMode": "already_current",
@@ -185,6 +212,7 @@ func reset_for_current_seed_staged() -> Dictionary:
 		"previousSeed": previous_seed,
 		"seed": configured_seed,
 		"resetMode": "in_place_generator_reload",
+		"resetReason": reset_reason,
 		"terrainInstanceId": terrain_instance_id,
 		"terrainInstancePreserved": terrain.get_instance_id() == terrain_instance_id,
 		"previousPublishedMeshBlocks": previous_mesh_blocks,
@@ -193,6 +221,14 @@ func reset_for_current_seed_staged() -> Dictionary:
 		"resetMapUsec": reset_map_usec,
 		"taskDrain": task_drain_result.get("metrics", {})
 	})
+
+func refresh_generation_for_world_authority(reason := "world_authority_changed") -> Dictionary:
+	if main == null:
+		return STARTUP_READINESS_RESULT_SCRIPT.failed("voxel_terrain_refresh_main_missing")
+	var world_generation = main.get("world_generation_system")
+	if world_generation != null and world_generation.has_method("invalidate_generated_surface_caches"):
+		world_generation.invalidate_generated_surface_caches()
+	return await reset_for_current_seed_staged(true, reason)
 
 func wait_for_seed_reset_task_drain() -> Dictionary:
 	var drain_started_usec := Time.get_ticks_usec()

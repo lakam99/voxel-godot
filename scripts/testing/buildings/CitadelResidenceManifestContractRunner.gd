@@ -7,6 +7,7 @@ extends SceneTree
 const CastleCompoundBlueprintBuilderScript := preload("res://scripts/buildings/CastleCompoundBlueprintBuilder.gd")
 const CastleFurnishingPlannerScript := preload("res://scripts/buildings/CastleFurnishingPlanner.gd")
 const CitadelResidenceManifestBuilderScript := preload("res://scripts/buildings/CitadelResidenceManifestBuilder.gd")
+const InteriorFurnishingLayoutScript := preload("res://scripts/buildings/InteriorFurnishingLayout.gd")
 
 const SEEDS: Array[int] = [208158, 208159, 306701]
 
@@ -55,6 +56,15 @@ func verify_seed(seed: int) -> Dictionary:
 		"seed %d residence manifest did not replay deterministically" % seed
 	)
 	var source_bed_ids := {}
+	var access_reservations: Array[AABB] = furnishing.access_reservations_snapshot()
+	check(not access_reservations.is_empty(), "seed %d castle furnishing lacks source access reservations" % seed)
+	for part in furnishing.parts:
+		if part == null:
+			continue
+		if String(part.archetype) in ["rug", "aisle_runner"]:
+			continue
+		var part_bounds := InteriorFurnishingLayoutScript.horizontal_bounds(part.position, part.occupied_size, part.rotation)
+		check(not InteriorFurnishingLayoutScript.intersects_any(part_bounds, access_reservations), "seed %d furnishing %s occupies a protected castle access" % [seed, String(part.id)])
 	for part in furnishing.parts:
 		if part == null or String(part.archetype) != "bed":
 			continue

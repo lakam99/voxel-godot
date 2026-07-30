@@ -78,8 +78,8 @@ func verify_style_seed(style: String, seed: int) -> Dictionary:
 		check(not ids.has(part.id), "%s seed %d repeats furnishing id %s" % [style, seed, String(part.id)])
 		ids[part.id] = true
 		var bounds := InteriorFurnishingLayoutScript.horizontal_bounds(part.position, part.occupied_size, part.rotation, 0.04)
-		if part.collision_enabled:
-			check(not InteriorFurnishingLayoutScript.intersects_any(bounds, access_reservations), "%s seed %d furnishing %s blocks declared access" % [style, seed, String(part.id)])
+		if String(part.archetype) not in ["rug", "aisle_runner"]:
+			check(not InteriorFurnishingLayoutScript.intersects_any(bounds, access_reservations), "%s seed %d furnishing %s occupies declared access" % [style, seed, String(part.id)])
 		if String(part.room_id) == "public_hall" and String(part.archetype) == "table":
 			public_table_count += 1
 		if String(part.id) == "civic_dais":

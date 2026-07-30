@@ -45,8 +45,10 @@ var rebuild_count := 0
 var last_rebuild_usec := 0
 var door_link_records_by_region := {}
 var door_link_records_by_portal := {}
+var navigation_link_records_by_region := {}
 var door_portal_states := {}
 var installed_door_link_count := 0
+var installed_navigation_link_count := 0
 var door_link_state_revision := 0
 var door_link_install_failure_count := 0
 var actor_path_records := {}
@@ -72,6 +74,7 @@ func clear() -> void:
 	dirty_region_queue.clear()
 	door_link_records_by_region.clear()
 	door_link_records_by_portal.clear()
+	navigation_link_records_by_region.clear()
 	door_portal_states.clear()
 	actor_path_records.clear()
 	endpoint_query_cache.clear()
@@ -97,6 +100,7 @@ func clear() -> void:
 	install_duration_samples_usec.clear()
 	path_query_duration_samples_usec.clear()
 	installed_door_link_count = 0
+	installed_navigation_link_count = 0
 	door_link_state_revision = 0
 	door_link_install_failure_count = 0
 	if owns_navigation_map and navigation_map.is_valid():
@@ -601,7 +605,8 @@ func debug_snapshot() -> Dictionary:
 		"actorPathStatus": actor_path_status(),
 		"installedRegionCount": region_rids_by_region.size(),
 		"installedSurfaceCount": installed_surface_count,
-		"installedDoorLinkCount": installed_door_link_count
+	"installedDoorLinkCount": installed_door_link_count,
+	"installedNavigationLinkCount": installed_navigation_link_count
 	}
 
 func tile_region_status(tile_key: String) -> Dictionary:
@@ -650,7 +655,8 @@ func stats() -> Dictionary:
 		"regionCount": descriptors_by_region.size(),
 		"installedRegionCount": region_rids_by_region.size(),
 		"installedSurfaceCount": installed_surface_count,
-		"installedDoorLinkCount": installed_door_link_count,
+	"installedDoorLinkCount": installed_door_link_count,
+	"installedNavigationLinkCount": installed_navigation_link_count,
 		"topologyRevision": topology_revision,
 		"dynamicRevision": dynamic_revision,
 		"doorLinkStateRevision": door_link_state_revision,
@@ -726,6 +732,32 @@ func _aabb_distance_to_position(bounds: AABB, position: Vector3) -> float:
 	return sqrt(dx * dx + dy * dy + dz * dz)
 
 func _closest_point_on_surface(surface: Dictionary, position: Vector3) -> Vector3:
+	var polygon_value = surface.get("polygon", [])
+	if polygon_value is Array and polygon_value.size() >= 3:
+		var polygon: Array[Vector3] = []
+		for point_value in polygon_value:
+			if point_value is Vector3:
+				polygon.append(point_value)
+		if polygon.size() >= 3:
+			var normal := (polygon[1] - polygon[0]).cross(polygon[2] - polygon[0]).normalized()
+			if normal.length_squared() > 0.000001:
+				var projected := position - normal * normal.dot(position - polygon[0])
+				if _point_within_surface_polygon(projected, polygon):
+					return projected
+			var closest_edge := polygon[0]
+			var closest_distance := INF
+			for index in range(polygon.size()):
+				var edge_start: Vector3 = polygon[index]
+				var edge_end: Vector3 = polygon[(index + 1) % polygon.size()]
+				var edge := edge_end - edge_start
+				var edge_length_squared := edge.length_squared()
+				var edge_t := 0.0 if edge_length_squared <= 0.000001 else clampf((position - edge_start).dot(edge) / edge_length_squared, 0.0, 1.0)
+				var candidate := edge_start.lerp(edge_end, edge_t)
+				var candidate_distance := position.distance_squared_to(candidate)
+				if candidate_distance < closest_distance:
+					closest_distance = candidate_distance
+					closest_edge = candidate
+			return closest_edge
 	var center: Vector3 = surface.get("center", Vector3.ZERO)
 	var size: Vector3 = surface.get("size", Vector3.ONE)
 	var half_x := maxf(size.x, 0.01) * 0.5
@@ -735,6 +767,23 @@ func _closest_point_on_surface(surface: Dictionary, position: Vector3) -> Vector
 		center.y,
 		clampf(position.z, center.z - half_z, center.z + half_z)
 	)
+
+
+func _point_within_surface_polygon(position: Vector3, polygon: Array[Vector3]) -> bool:
+	# Source supports are upward-facing; their XZ projection remains a stable
+	# containment plane for both floor slabs and inclined stair stringers.
+	var inside := false
+	var previous: Vector3 = polygon[polygon.size() - 1]
+	for point in polygon:
+		var crosses := (point.z > position.z) != (previous.z > position.z)
+		if crosses:
+			var denominator := previous.z - point.z
+			if absf(denominator) > 0.000001:
+				var x_at_z := (previous.x - point.x) * (position.z - point.z) / denominator + point.x
+				if position.x < x_at_z:
+					inside = not inside
+		previous = point
+	return inside
 
 func _ensure_navigation_map() -> void:
 	if navigation_map.is_valid():
@@ -769,6 +818,7 @@ func _install_region(region_id: String, descriptor) -> Dictionary:
 	region_rids_by_region[region_id] = region_rid
 	region_ids_by_rid[region_rid] = region_id
 	var link_metrics := _install_door_links_for_region(region_id, descriptor)
+	var navigation_link_metrics := _install_navigation_links_for_region(region_id, descriptor)
 	last_install_usec = Time.get_ticks_usec() - started
 	_record_timing_sample(install_duration_samples_usec, last_install_usec)
 	installed_region_count += 1
@@ -778,7 +828,8 @@ func _install_region(region_id: String, descriptor) -> Dictionary:
 		"polygonCount": polygon_count,
 		"vertexCount": vertex_count,
 		"durationUsec": last_install_usec,
-		"doorLinks": link_metrics
+		"doorLinks": link_metrics,
+		"navigationLinks": navigation_link_metrics
 	}
 	region_metrics_by_region[region_id] = metrics
 	return metrics.duplicate(true)
@@ -923,6 +974,7 @@ func _surface_polygon(surface: Dictionary) -> Array[Vector3]:
 
 func _release_region(region_id: String) -> void:
 	_release_door_links_for_region(region_id)
+	_release_navigation_links_for_region(region_id)
 	if not region_rids_by_region.has(region_id):
 		return
 	var region_rid: RID = region_rids_by_region[region_id]
@@ -959,7 +1011,16 @@ func _closest_walkable_for_query_endpoint(position: Vector3, max_distance: float
 	elif prefer_descriptor_endpoint:
 		var server_endpoint := _closest_walkable_from_server(position, max_distance)
 		var descriptor_endpoint := _closest_installed_descriptor_route_endpoint(position, max_distance)
-		if bool(server_endpoint.get("found", false)) and _route_endpoint_owned_by_server(server_endpoint):
+		# A layered building floor overlaps terrain in XZ. A server-owned ground
+		# polygon is not necessarily the actor's true floor, so choose the closest
+		# physical support rather than giving terrain an implicit priority.
+		var server_distance := float(server_endpoint.get("distance", INF)) if bool(server_endpoint.get("found", false)) else INF
+		var descriptor_distance := float(descriptor_endpoint.get("distance", INF)) if bool(descriptor_endpoint.get("found", false)) else INF
+		if bool(descriptor_endpoint.get("found", false)) and descriptor_distance + 0.002 < server_distance:
+			if bool(server_endpoint.get("found", false)):
+				descriptor_endpoint["serverFallbackReason"] = "closer_layered_descriptor_support"
+			result = descriptor_endpoint
+		elif bool(server_endpoint.get("found", false)) and _route_endpoint_owned_by_server(server_endpoint):
 			result = server_endpoint
 		elif bool(descriptor_endpoint.get("found", false)):
 			if bool(server_endpoint.get("found", false)):
@@ -1554,6 +1615,73 @@ func _release_door_links_for_region(region_id: String) -> int:
 				door_link_records_by_portal[portal_id] = kept
 	door_link_records_by_region.erase(region_id)
 	installed_door_link_count = maxi(0, installed_door_link_count - released)
+	return released
+
+
+func _install_navigation_links_for_region(region_id: String, descriptor) -> Dictionary:
+	var links: Array = _descriptor_array(descriptor, "navigation_links")
+	if links.is_empty():
+		return { "status": "none", "installed": 0, "failed": 0 }
+	if not _link_api_supported():
+		return { "status": "unsupported", "installed": 0, "failed": links.size() }
+	var installed := 0
+	var failed := 0
+	for link_value in links:
+		if not (link_value is Dictionary):
+			failed += 1
+			continue
+		var link_spec: Dictionary = link_value
+		var link_id := String(link_spec.get("id", ""))
+		var start: Vector3 = link_spec.get("start", Vector3.ZERO) if link_spec.get("start", Vector3.ZERO) is Vector3 else Vector3.ZERO
+		var end: Vector3 = link_spec.get("end", Vector3.ZERO) if link_spec.get("end", Vector3.ZERO) is Vector3 else Vector3.ZERO
+		if link_id == "" or start.distance_to(end) <= 0.001:
+			failed += 1
+			continue
+		var link_value_rid = NavigationServer3D.call("link_create")
+		if not (link_value_rid is RID):
+			failed += 1
+			continue
+		var link_rid: RID = link_value_rid
+		NavigationServer3D.call("link_set_map", link_rid, navigation_map)
+		NavigationServer3D.call("link_set_start_position", link_rid, start)
+		NavigationServer3D.call("link_set_end_position", link_rid, end)
+		NavigationServer3D.call("link_set_bidirectional", link_rid, bool(link_spec.get("bidirectional", true)))
+		if NavigationServer3D.has_method("link_set_navigation_layers"):
+			NavigationServer3D.call("link_set_navigation_layers", link_rid, int(link_spec.get("navigationLayers", 1)))
+		if NavigationServer3D.has_method("link_set_enter_cost"):
+			NavigationServer3D.call("link_set_enter_cost", link_rid, float(link_spec.get("enterCost", link_spec.get("cost", 1.0))))
+		if NavigationServer3D.has_method("link_set_travel_cost"):
+			NavigationServer3D.call("link_set_travel_cost", link_rid, float(link_spec.get("travelCost", link_spec.get("cost", 1.0))))
+		_set_link_enabled(link_rid, bool(link_spec.get("enabled", true)))
+		if not navigation_link_records_by_region.has(region_id):
+			navigation_link_records_by_region[region_id] = []
+		(navigation_link_records_by_region[region_id] as Array).append({
+			"rid": link_rid,
+			"id": link_id,
+			"regionId": region_id,
+			"start": start,
+			"end": end,
+			"metadata": link_spec.duplicate(true)
+		})
+		installed += 1
+	installed_navigation_link_count += installed
+	return { "status": "installed", "installed": installed, "failed": failed }
+
+
+func _release_navigation_links_for_region(region_id: String) -> int:
+	var records: Array = navigation_link_records_by_region.get(region_id, [])
+	var released := 0
+	for record_value in records:
+		if not (record_value is Dictionary):
+			continue
+		var record: Dictionary = record_value
+		var link_rid: RID = record.get("rid", RID())
+		if link_rid.is_valid():
+			NavigationServer3D.free_rid(link_rid)
+			_mark_navigation_map_dirty()
+			released += 1
+	navigation_link_records_by_region.erase(region_id)
+	installed_navigation_link_count = maxi(0, installed_navigation_link_count - released)
 	return released
 
 func _apply_portal_state_to_link_record(record: Dictionary, portal_state: Dictionary) -> void:

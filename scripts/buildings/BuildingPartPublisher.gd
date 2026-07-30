@@ -6,15 +6,24 @@ class_name BuildingPartPublisher
 ## one record, and board/brick detail is instanced per parent part.
 
 const ConstructionMaterialCatalogScript := preload("res://scripts/buildings/ConstructionMaterialCatalog.gd")
+const BuildingNavigationManifestBuilderScript := preload("res://scripts/buildings/BuildingNavigationManifestBuilder.gd")
 
 var unit_box: BoxMesh
 var material_cache: Dictionary = {}
-var published_parts: Array = []
+var published_nodes: Array = []
+var published_part_count := 0
 var collision_count := 0
 var visual_batch_count := 0
 var recipe_build_usec := 0
 var publication_usec := 0
 var source_blueprint_id := ""
+var batch_static_parts := false
+var static_collision_body: StaticBody3D
+var static_part_records: Dictionary = {}
+var static_visual_batches: Dictionary = {}
+var static_visual_collecting := false
+var static_visual_part_transform := Transform3D.IDENTITY
+var building_navigation_manifest: Dictionary = {}
 
 
 func _init() -> void:
@@ -22,27 +31,31 @@ func _init() -> void:
 	unit_box.size = Vector3.ONE
 
 
-func publish(blueprint, parent: Node3D) -> Dictionary:
+func publish(blueprint, parent: Node3D, options: Dictionary = {}) -> Dictionary:
 	clear_published()
 	if blueprint == null or parent == null:
 		return summary()
+	configure_publication_options(options)
 	source_blueprint_id = String(blueprint.id)
 	var started := Time.get_ticks_usec()
 	for part in blueprint.parts:
 		if part == null:
 			continue
 		publish_part(part, parent)
+	flush_static_batches(parent)
+	publish_navigation_manifest(blueprint, parent)
 	publication_usec = Time.get_ticks_usec() - started
 	return summary()
 
 
-func publish_incremental(blueprint, parent: Node3D, parts_per_frame := 6) -> Dictionary:
+func publish_incremental(blueprint, parent: Node3D, parts_per_frame := 6, options: Dictionary = {}) -> Dictionary:
 	# Uses the same part records and publish_part path as synchronous publication.
 	# Consumers with an on-screen loading state can spread a larger blueprint over
 	# frames without inventing a second visual/collision publication authority.
 	clear_published()
 	if blueprint == null or parent == null:
 		return summary()
+	configure_publication_options(options)
 	source_blueprint_id = String(blueprint.id)
 	var started := Time.get_ticks_usec()
 	var frame_budget := maxi(1, parts_per_frame)
@@ -55,24 +68,43 @@ func publish_incremental(blueprint, parent: Node3D, parts_per_frame := 6) -> Dic
 		if published_this_frame >= frame_budget:
 			published_this_frame = 0
 			await parent.get_tree().process_frame
+	flush_static_batches(parent)
+	publish_navigation_manifest(blueprint, parent)
 	publication_usec = Time.get_ticks_usec() - started
 	return summary()
 
 
 func clear_published() -> void:
-	for node in published_parts:
+	for node in published_nodes:
 		if node != null and is_instance_valid(node):
 			node.queue_free()
-	published_parts.clear()
+	published_nodes.clear()
+	published_part_count = 0
 	collision_count = 0
 	visual_batch_count = 0
 	recipe_build_usec = 0
 	publication_usec = 0
 	source_blueprint_id = ""
+	batch_static_parts = false
+	static_collision_body = null
+	static_part_records.clear()
+	static_visual_batches.clear()
+	static_visual_collecting = false
+	static_visual_part_transform = Transform3D.IDENTITY
+	building_navigation_manifest.clear()
+
+
+func configure_publication_options(options: Dictionary) -> void:
+	batch_static_parts = bool(options.get("batchStaticParts", false))
 
 
 func publish_part(part, parent: Node3D) -> StaticBody3D:
 	var started := Time.get_ticks_usec()
+	published_part_count += 1
+	if batch_static_parts and String(part.kind) != "door":
+		publish_static_part(part, parent)
+		recipe_build_usec += Time.get_ticks_usec() - started
+		return null
 	var body := StaticBody3D.new()
 	body.name = "ConstructionPart_%s" % String(part.id)
 	body.position = part.position
@@ -85,12 +117,14 @@ func publish_part(part, parent: Node3D) -> StaticBody3D:
 	if String(part.kind) == "door":
 		configure_door_leaf(body, part)
 	parent.add_child(body)
-	published_parts.append(body)
+	published_nodes.append(body)
 	if part.collision_enabled:
 		var collision := CollisionShape3D.new()
 		var shape := BoxShape3D.new()
 		shape.size = part.size
 		collision.shape = shape
+		collision.set_meta("building_part_id", part.id)
+		collision.set_meta("building_part_kind", part.kind)
 		body.add_child(collision)
 		collision_count += 1
 	# Some construction records are collision stringers beneath richer generated
@@ -102,6 +136,44 @@ func publish_part(part, parent: Node3D) -> StaticBody3D:
 		add_door_interaction_proxy(body, part.size)
 	recipe_build_usec += Time.get_ticks_usec() - started
 	return body
+
+
+func publish_static_part(part, parent: Node3D) -> void:
+	# Static construction records remain the source of visual and collision facts;
+	# this only composes their publication under shared scene nodes. Doors keep
+	# their individual bodies because DoorPortalService owns their interaction and
+	# collision state.
+	if part.collision_enabled:
+		var collision_body := static_collision_batch(parent)
+		var collision := CollisionShape3D.new()
+		var shape := BoxShape3D.new()
+		shape.size = part.size
+		collision.shape = shape
+		collision.set_meta("building_part_id", part.id)
+		collision.set_meta("building_part_kind", part.kind)
+		collision.position = part.position
+		collision.rotation = part.rotation
+		collision_body.add_child(collision)
+		static_part_records[String(part.id)] = part.snapshot()
+		collision_count += 1
+	if bool(part.recipe.get("visual", true)):
+		static_visual_collecting = true
+		static_visual_part_transform = Transform3D(Basis.from_euler(part.rotation), part.position)
+		publish_visual(part, parent)
+		static_visual_collecting = false
+		static_visual_part_transform = Transform3D.IDENTITY
+
+
+func static_collision_batch(parent: Node3D) -> StaticBody3D:
+	if static_collision_body != null and is_instance_valid(static_collision_body):
+		return static_collision_body
+	static_collision_body = StaticBody3D.new()
+	static_collision_body.name = "ConstructionStaticCollisionBatch"
+	static_collision_body.set_meta("building_part_kind", "batched_static")
+	static_collision_body.set_meta("building_source_blueprint", source_blueprint_id)
+	parent.add_child(static_collision_body)
+	published_nodes.append(static_collision_body)
+	return static_collision_body
 
 
 func publish_visual(part, parent: Node3D) -> void:
@@ -293,9 +365,14 @@ func publish_window(part, parent: Node3D) -> void:
 		add_box_visual(parent, Vector3(0.10, size.y * 1.16, size.z * 1.6), Vector3(size.x * 0.53, 0.0, 0.0), trim, "WindowFrameFar")
 
 
-func add_box_batch(parent: Node3D, transforms: Array, material: Material, node_name: String) -> void:
+func add_box_batch(parent: Node3D, transforms: Array, material: Material, node_name: String) -> MultiMeshInstance3D:
 	if transforms.is_empty():
-		return
+		return null
+	if static_visual_collecting:
+		for transform_value in transforms:
+			if transform_value is Transform3D:
+				collect_static_visual_transform(static_visual_part_transform * (transform_value as Transform3D), material)
+		return null
 	var multi_mesh := MultiMesh.new()
 	multi_mesh.transform_format = MultiMesh.TRANSFORM_3D
 	multi_mesh.instance_count = transforms.size()
@@ -309,9 +386,13 @@ func add_box_batch(parent: Node3D, transforms: Array, material: Material, node_n
 	instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
 	parent.add_child(instance)
 	visual_batch_count += 1
+	return instance
 
 
 func add_box_visual(parent: Node3D, size: Vector3, position: Vector3, material: Material, node_name: String) -> void:
+	if static_visual_collecting:
+		collect_static_visual_transform(static_visual_part_transform * box_transform(position, size), material)
+		return
 	var visual := MeshInstance3D.new()
 	visual.name = node_name
 	visual.mesh = unit_box
@@ -321,6 +402,46 @@ func add_box_visual(parent: Node3D, size: Vector3, position: Vector3, material: 
 	visual.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
 	parent.add_child(visual)
 	visual_batch_count += 1
+
+
+func collect_static_visual_transform(transform: Transform3D, material: Material) -> void:
+	if material == null:
+		return
+	var key := str(material.get_instance_id())
+	var group: Dictionary = static_visual_batches.get(key, {}) if static_visual_batches.get(key, {}) is Dictionary else {}
+	if group.is_empty():
+		group = {"material": material, "transforms": []}
+	var transforms: Array = group.get("transforms", []) as Array
+	transforms.append(transform)
+	group["transforms"] = transforms
+	static_visual_batches[key] = group
+
+
+func flush_static_batches(parent: Node3D) -> void:
+	if static_visual_batches.is_empty() or parent == null:
+		return
+	var keys := static_visual_batches.keys()
+	keys.sort()
+	for key_value in keys:
+		var group: Dictionary = static_visual_batches.get(key_value, {}) as Dictionary
+		var transforms: Array = group.get("transforms", []) as Array
+		var material := group.get("material") as Material
+		var instance := add_box_batch(parent, transforms, material, "ConstructionStaticVisualBatch")
+		if instance != null:
+			published_nodes.append(instance)
+	if static_collision_body != null and is_instance_valid(static_collision_body):
+		static_collision_body.set_meta("building_part_records", static_part_records.duplicate(true))
+	static_visual_batches.clear()
+
+
+func publish_navigation_manifest(blueprint, parent: Node3D) -> void:
+	# Navigation facts are derived from BuildingPart source records immediately
+	# after their collision publication.  The manifest is intentionally data-only
+	# so navigation can consume it without parsing meshes or inventing supports.
+	building_navigation_manifest = BuildingNavigationManifestBuilderScript.build(blueprint, parent.global_transform)
+	parent.set_meta("building_navigation_manifest", building_navigation_manifest.duplicate(true))
+	if static_collision_body != null and is_instance_valid(static_collision_body):
+		static_collision_body.set_meta("building_navigation_manifest", building_navigation_manifest.duplicate(true))
 
 
 func box_transform(position: Vector3, size: Vector3) -> Transform3D:
@@ -346,9 +467,15 @@ func material_for_id(material_id: String, variation := 0.0) -> Material:
 
 func summary() -> Dictionary:
 	return {
-		"publishedPartCount": published_parts.size(),
+		"publishedPartCount": published_part_count,
+		"publishedNodeCount": published_nodes.size(),
 		"collisionPartCount": collision_count,
 		"visualBatchCount": visual_batch_count,
+		"batchedStaticParts": batch_static_parts,
+		"staticRecordCount": static_part_records.size(),
+		"navigationSupportCount": int(building_navigation_manifest.get("supportCount", 0)),
+		"navigationVerticalLinkCount": int(building_navigation_manifest.get("verticalLinkCount", 0)),
+		"navigationManifest": building_navigation_manifest.duplicate(true),
 		"recipeBuildUsec": recipe_build_usec,
 		"publicationUsec": publication_usec
 	}

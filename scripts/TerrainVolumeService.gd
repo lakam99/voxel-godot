@@ -82,6 +82,13 @@ func reset() -> void:
 func reset_for_seed() -> void:
 	reset()
 
+func invalidate_generated_surface_caches() -> void:
+	# Preserve durable edits while invalidating projections derived from a newly
+	# registered deterministic settlement terrain site.
+	top_surface_y_cache.clear()
+	exposed_floor_cache.clear()
+	revision += 1
+
 func section_key_for_cell(cell: Vector3i) -> Vector3i:
 	return Vector3i(
 		floori(float(cell.x) / float(SECTION_SIZE)),

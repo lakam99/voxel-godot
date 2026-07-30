@@ -59,9 +59,13 @@ func verify_style(style: String) -> Dictionary:
 			var room := raw_room as Dictionary
 			rooms_by_id[String(room.get("id", ""))] = room
 	var furnishing_profile := String(blueprint.recipe.get("furnishingProfile", "hearth_social"))
-	for part in collision_parts:
+	for part in plan.parts:
+		if part == null:
+			continue
+		if String(part.archetype) in ["rug", "aisle_runner"]:
+			continue
 		var candidate := InteriorFurnishingLayoutScript.horizontal_bounds(part.position, part.occupied_size, part.rotation)
-		check(not InteriorFurnishingLayoutScript.intersects_any(candidate, accesses), "%s furnishing %s blocks a declared access lane" % [style, String(part.id)])
+		check(not InteriorFurnishingLayoutScript.intersects_any(candidate, accesses), "%s furnishing %s occupies a declared access lane" % [style, String(part.id)])
 	for first_index in range(collision_parts.size()):
 		var first = collision_parts[first_index]
 		var first_bounds := InteriorFurnishingLayoutScript.horizontal_bounds(first.position, first.occupied_size, first.rotation)

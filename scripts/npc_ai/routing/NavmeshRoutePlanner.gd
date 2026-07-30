@@ -52,7 +52,7 @@ func plan_runtime_route(entry: Dictionary, intent: Dictionary, generated_world =
 	var query_start_position := _nav_query_position(start, start_cell, generated_world)
 	var monitor = main.get("runtime_perf_monitor") if main != null else null
 	var target_block_start: int = monitor.begin_section("navmesh_route_target_block_check") if monitor != null else Time.get_ticks_usec()
-	var blocked_target := _target_cell_blocked(entry, target_cell, generated_world, bool(intent.get("allowOutside", false)), bool(intent.get("movingHome", false)))
+	var blocked_target := _target_position_blocked(entry, target, target_cell, generated_world, bool(intent.get("allowOutside", false)), bool(intent.get("movingHome", false)))
 	if monitor != null:
 		monitor.end_section("navmesh_route_target_block_check", target_block_start)
 	if blocked_target:
@@ -207,10 +207,10 @@ func _plan_fallback_cell_route(entry: Dictionary, intent: Dictionary, generated_
 		if fallback_cell == target_cell or tried.has(fallback_cell):
 			continue
 		tried[fallback_cell] = true
-		if _target_cell_blocked(entry, fallback_cell, generated_world, allow_outside, moving_home):
+		var fallback_position: Vector3 = source.cell_position(fallback_cell)
+		if _target_position_blocked(entry, fallback_position, fallback_cell, generated_world, allow_outside, moving_home):
 			fallback_debug.append({ "cell": fallback_cell, "status": "blocked_target" })
 			continue
-		var fallback_position: Vector3 = source.cell_position(fallback_cell)
 		var query_target := _nav_query_position(fallback_position, fallback_cell, generated_world)
 		var fallback_route_kind := String(intent.get("kind", "move"))
 		var fallback_snap_distances := _snap_distances_for_route_kind(fallback_route_kind, maxf(arrival_radius, CELL * 0.55), true)
@@ -861,7 +861,7 @@ func route_cost_for_runtime(entry: Dictionary, target: Vector3, allow_outside :=
 	var start: Vector3 = body.global_position if body != null else entry.get("position", entry.get("porchPosition", target))
 	var target_cell := _world_cell(target, generated_world)
 	var start_cell := _world_cell(start, generated_world)
-	if _target_cell_blocked(entry, target_cell, generated_world, allow_outside, moving_home):
+	if _target_position_blocked(entry, target, target_cell, generated_world, allow_outside, moving_home):
 		return INF
 	var cost_kind := "forage" if String(entry.get("job", "")) == "forage" else "job"
 	var snap_distances := _snap_distances_for_route_kind(cost_kind, arrival_radius, not moving_home)
@@ -1116,6 +1116,8 @@ func _cell_position(cell: Vector2i, generated_world = null) -> Vector3:
 func _nav_query_position(position: Vector3, cell: Vector2i, generated_world = null) -> Vector3:
 	var result := position
 	var source = generated_world if generated_world != null else world_adapter
+	if source != null and source.has_method("navigation_query_position"):
+		return source.navigation_query_position(position)
 	if source != null and source.has_method("cell_position"):
 		var cell_position: Vector3 = source.cell_position(cell)
 		result.y = cell_position.y
@@ -1123,10 +1125,12 @@ func _nav_query_position(position: Vector3, cell: Vector2i, generated_world = nu
 		result.y = float(main.call("surface_y_at_position", position)) + 0.04
 	return result
 
-func _target_cell_blocked(entry: Dictionary, target_cell: Vector2i, generated_world = null, allow_outside := false, moving_home := false) -> bool:
+func _target_position_blocked(entry: Dictionary, target: Vector3, target_cell: Vector2i, generated_world = null, allow_outside := false, moving_home := false) -> bool:
 	var source = generated_world if generated_world != null else world_adapter
 	if source == null or not source.has_method("build_snapshot"):
 		return false
+	if source.has_method("position_is_static_standable_goal"):
+		return not bool(source.position_is_static_standable_goal(entry, target, allow_outside, moving_home))
 	if source.has_method("cell_is_static_standable_goal"):
 		return not bool(source.cell_is_static_standable_goal(entry, target_cell, allow_outside, moving_home))
 	if source.has_method("cell_is_standable_goal"):

@@ -33,6 +33,8 @@ var cached_static_collision_records: Array[Dictionary] = []
 var cached_static_collision_by_cell := {}
 var cached_door_collision_records: Array[Dictionary] = []
 var cached_door_collision_by_cell := {}
+var cached_building_supports: Array[Dictionary] = []
+var cached_building_vertical_links: Array[Dictionary] = []
 var cached_private_interior_records_revision := ""
 var cached_private_interior_records: Array = []
 var height_cache := {}
@@ -186,6 +188,8 @@ func build_snapshot(entry: Dictionary, allow_outside := false, moving_home := fa
         "staticCollisionByCell": cached_static_collision_by_cell,
         "doorCollision": cached_door_collision_records,
         "doorCollisionByCell": cached_door_collision_by_cell,
+        "buildingSupports": cached_building_supports,
+        "buildingVerticalLinks": cached_building_vertical_links,
         "dynamic": dynamic_cells,
         "allowOutside": allow_outside,
         "movingHome": moving_home
@@ -260,6 +264,12 @@ func build_navmesh_tile_snapshot(tile_key: String) -> Dictionary:
             var surface := _navmesh_surface_for_cell(snapshot, cell)
             if not surface.is_empty():
                 surfaces.append(surface)
+    var support_span_index := 1
+    for support in building_supports_for_tile(tile_key):
+        var support_surface := _navmesh_surface_from_building_support(support, support_span_index)
+        if not support_surface.is_empty():
+            surfaces.append(support_surface)
+            support_span_index += 1
     var door_summary := _navmesh_door_summary_for_tile(snapshot, tile_key)
     var result: Dictionary = {
         "tileKey": tile_key,
@@ -275,10 +285,13 @@ func build_navmesh_tile_snapshot(tile_key: String) -> Dictionary:
         "staticCollisionByCell": snapshot.get("staticCollisionByCell", {}),
         "doorCollision": snapshot.get("doorCollision", []),
         "doorCollisionByCell": snapshot.get("doorCollisionByCell", {}),
+        "buildingSupports": snapshot.get("buildingSupports", []),
+        "buildingVerticalLinks": snapshot.get("buildingVerticalLinks", []),
         "surfaces": surfaces,
         "semanticRegions": semantic_regions,
         "doorPortals": door_summary.get("doorPortals", []),
-        "doorLinks": door_summary.get("doorLinks", [])
+        "doorLinks": door_summary.get("doorLinks", []),
+        "navigationLinks": building_vertical_links_for_tile(tile_key)
     }
     _store_navmesh_tile_snapshot_cache(cache_key, result)
     return result
@@ -477,6 +490,8 @@ func cached_static_tile_snapshot(allow_outside := false, moving_home := false) -
         "staticCollisionByCell": cached_static_collision_by_cell,
         "doorCollision": cached_door_collision_records,
         "doorCollisionByCell": cached_door_collision_by_cell,
+        "buildingSupports": cached_building_supports,
+        "buildingVerticalLinks": cached_building_vertical_links,
         "dynamic": {},
         "allowOutside": allow_outside,
         "movingHome": moving_home
@@ -604,6 +619,8 @@ func rebuild_static_cells() -> int:
     cached_static_collision_by_cell = {}
     cached_door_collision_records = []
     cached_door_collision_by_cell = {}
+    cached_building_supports = []
+    cached_building_vertical_links = []
     height_cache = {}
     terrain_projection_cache = {}
     if main == null:
@@ -633,7 +650,68 @@ func rebuild_static_cells() -> int:
         cached_blocked[block_cell] = body
         _add_collision_records(body, block_cell, block_type, false)
     scanned += add_prop_obstacle_cells()
+    _rebuild_building_navigation_facts()
     return scanned
+
+func _rebuild_building_navigation_facts() -> void:
+    if system == null or not system.has_method("building_navigation_manifest_snapshot"):
+        return
+    var manifests = system.call("building_navigation_manifest_snapshot")
+    if not (manifests is Array):
+        return
+    for manifest_value in manifests:
+        if not (manifest_value is Dictionary):
+            continue
+        var manifest: Dictionary = manifest_value
+        for support_value in manifest.get("supports", []):
+            if support_value is Dictionary:
+                cached_building_supports.append((support_value as Dictionary).duplicate(true))
+        for link_value in manifest.get("verticalLinks", []):
+            if link_value is Dictionary:
+                cached_building_vertical_links.append((link_value as Dictionary).duplicate(true))
+    cached_building_supports.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return String(a.get("id", "")) < String(b.get("id", "")))
+    cached_building_vertical_links.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return String(a.get("id", "")) < String(b.get("id", "")))
+
+func building_supports_for_tile(tile_key: String) -> Array[Dictionary]:
+    var result: Array[Dictionary] = []
+    for support in cached_building_supports:
+        var tiles: Array = support.get("tileKeys", []) if support.get("tileKeys", []) is Array else []
+        if tiles.has(tile_key):
+            result.append(support)
+    return result
+
+func building_vertical_links_for_tile(tile_key: String) -> Array[Dictionary]:
+    var result: Array[Dictionary] = []
+    for link in cached_building_vertical_links:
+        var tiles: Array = link.get("tileKeys", []) if link.get("tileKeys", []) is Array else []
+        # Links are global navigation objects.  A link that straddles tile
+        # bounds is emitted by one deterministic owner tile, never duplicated.
+        if not tiles.is_empty() and String(tiles[0]) == tile_key:
+            result.append(link)
+    return result
+
+func _navmesh_surface_from_building_support(support: Dictionary, span_index: int) -> Dictionary:
+    var cell: Vector3i = support.get("cell", Vector3i.ZERO) if support.get("cell", Vector3i.ZERO) is Vector3i else Vector3i.ZERO
+    var position: Vector3 = support.get("worldPosition", Vector3.ZERO) if support.get("worldPosition", Vector3.ZERO) is Vector3 else Vector3.ZERO
+    var polygon: Array = support.get("polygon", []) if support.get("polygon", []) is Array else []
+    if polygon.size() < 3:
+        return {}
+    return {
+        "id": String(support.get("id", "")),
+        "cell": cell,
+        "spanIndex": span_index,
+        "worldPosition": position,
+        "floorNormal": support.get("floorNormal", Vector3.UP),
+        "headroom": float(support.get("headroom", 3.0)),
+        "lateralClearance": float(support.get("lateralClearance", 1.0)),
+        "blocked": false,
+        "semanticRegionIds": [],
+        "traversalTags": support.get("traversalTags", ["building", "support"]),
+        "polygon": polygon,
+        "sourcePartId": String(support.get("sourcePartId", "")),
+        "sourceCollisionPartId": String(support.get("sourceCollisionPartId", "")),
+        "support": true
+    }
 
 func block_world_cell(body: Node) -> Vector2i:
     if body.has_meta("cell"):
@@ -697,19 +775,23 @@ func _box_collision_record(body: Node3D, collider: CollisionShape3D, box: BoxSha
         transform = body_transform * collider.transform
     var half := box.size * 0.5
     var corners := [
-        Vector3(-half.x, 0.0, -half.z),
-        Vector3(half.x, 0.0, -half.z),
-        Vector3(half.x, 0.0, half.z),
-        Vector3(-half.x, 0.0, half.z)
+        Vector3(-half.x, -half.y, -half.z), Vector3(-half.x, -half.y, half.z),
+        Vector3(-half.x, half.y, -half.z), Vector3(-half.x, half.y, half.z),
+        Vector3(half.x, -half.y, -half.z), Vector3(half.x, -half.y, half.z),
+        Vector3(half.x, half.y, -half.z), Vector3(half.x, half.y, half.z)
     ]
     var min_x := INF
     var max_x := -INF
+    var min_y := INF
+    var max_y := -INF
     var min_z := INF
     var max_z := -INF
     for corner in corners:
         var world_corner: Vector3 = transform * corner
         min_x = minf(min_x, world_corner.x)
         max_x = maxf(max_x, world_corner.x)
+        min_y = minf(min_y, world_corner.y)
+        max_y = maxf(max_y, world_corner.y)
         min_z = minf(min_z, world_corner.z)
         max_z = maxf(max_z, world_corner.z)
     if min_x == INF or min_z == INF:
@@ -722,8 +804,12 @@ func _box_collision_record(body: Node3D, collider: CollisionShape3D, box: BoxSha
         "isDoor": is_door,
         "minX": min_x,
         "maxX": max_x,
+        "minY": min_y,
+        "maxY": max_y,
         "minZ": min_z,
         "maxZ": max_z,
+        "sourcePartId": String(collider.get_meta("building_part_id", body.get_meta("building_part_id", ""))),
+        "sourcePartKind": String(collider.get_meta("building_part_kind", body.get_meta("building_part_kind", ""))),
         "inflation": TRANSITION_COLLISION_INFLATION
     }
 
@@ -738,6 +824,8 @@ func _fallback_collision_record(body: Node3D, cell: Vector2i, block_type: String
         "isDoor": is_door,
         "minX": center.x - radius,
         "maxX": center.x + radius,
+        "minY": center.y - radius,
+        "maxY": center.y + radius,
         "minZ": center.z - radius,
         "maxZ": center.z + radius,
         "inflation": TRANSITION_COLLISION_INFLATION
@@ -1008,6 +1096,82 @@ func cell_position(cell: Vector2i) -> Vector3:
         return Vector3(float(cell.x) * CELL, 0.0, float(cell.y) * CELL)
     var y: float = height_for_cell(cell)
     return Vector3(float(cell.x) * CELL, y + 0.04, float(cell.y) * CELL)
+
+
+func navigation_query_position(position: Vector3) -> Vector3:
+    # A point already placed on a published building support retains that layer.
+    # Ground callers keep the old terrain projection, so this does not alter
+    # ordinary terrain routing or silently promote a point to a nearby floor.
+    var support := building_support_for_position(position, CELL * 0.82)
+    if not support.is_empty():
+        var supported := position
+        supported.y = _support_surface_y(support, position) + 0.04
+        return supported
+    var cell := world_cell(position)
+    var terrain_position := cell_position(cell)
+    if absf(position.y - terrain_position.y) <= CELL * 0.72:
+        return terrain_position
+    return position
+
+
+func position_is_static_standable_goal(entry: Dictionary, position: Vector3, allow_outside := false, moving_home := false) -> bool:
+    var support := building_support_for_position(position, CELL * 0.82)
+    if not support.is_empty():
+        var foot := position
+        foot.y = _support_surface_y(support, position) + 0.04
+        return static_collision_blocker_at_position(cached_static_tile_snapshot(allow_outside, moving_home), foot).is_empty()
+    return cell_is_static_standable_goal(entry, world_cell(position), allow_outside, moving_home)
+
+
+func building_support_for_position(position: Vector3, vertical_tolerance := CELL * 0.48) -> Dictionary:
+    var best: Dictionary = {}
+    var best_distance := INF
+    for support in cached_building_supports:
+        if not _point_within_support_xz(position, support):
+            continue
+        var support_y := _support_surface_y(support, position)
+        var distance := absf(position.y - support_y)
+        if distance > vertical_tolerance or distance >= best_distance:
+            continue
+        best = support
+        best_distance = distance
+    return best
+
+
+func _point_within_support_xz(position: Vector3, support: Dictionary) -> bool:
+    var polygon: Array = support.get("polygon", []) if support.get("polygon", []) is Array else []
+    if polygon.size() < 3:
+        return false
+    var inside := false
+    var previous: Vector3 = polygon[polygon.size() - 1] if polygon[polygon.size() - 1] is Vector3 else Vector3.ZERO
+    for point_value in polygon:
+        if not (point_value is Vector3):
+            return false
+        var point: Vector3 = point_value
+        var crosses := (point.z > position.z) != (previous.z > position.z)
+        if crosses:
+            var denominator := previous.z - point.z
+            if absf(denominator) <= 0.000001:
+                previous = point
+                continue
+            var x_at_z := (previous.x - point.x) * (position.z - point.z) / denominator + point.x
+            if position.x < x_at_z:
+                inside = not inside
+        previous = point
+    return inside
+
+
+func _support_surface_y(support: Dictionary, position: Vector3) -> float:
+    var polygon: Array = support.get("polygon", []) if support.get("polygon", []) is Array else []
+    if polygon.size() >= 3 and polygon[0] is Vector3 and polygon[1] is Vector3 and polygon[2] is Vector3:
+        var a: Vector3 = polygon[0]
+        var b: Vector3 = polygon[1]
+        var c: Vector3 = polygon[2]
+        var normal := (b - a).cross(c - a)
+        if absf(normal.y) > 0.0001:
+            return a.y - (normal.x * (position.x - a.x) + normal.z * (position.z - a.z)) / normal.y
+    var center: Vector3 = support.get("worldPosition", position) if support.get("worldPosition", position) is Vector3 else position
+    return center.y
 
 func height_for_cell(cell: Vector2i) -> float:
     if main == null:
@@ -1314,6 +1478,8 @@ func cell_transition_pathable(entry: Dictionary, snapshot: Dictionary, from_cell
 func validate_waypoint_route(entry: Dictionary, snapshot: Dictionary, points: Array, target_cells: Dictionary, ignore_dynamic := true) -> Dictionary:
     if points.size() < 2:
         return { "ok": true, "reason": "" }
+    if _route_uses_building_supports(points):
+        return _validate_layered_building_route(snapshot, points)
     var avoid_lookup := {}
     for cell_value in entry.get("routeDynamicAvoidCells", []):
         if cell_value is Vector2i:
@@ -1363,6 +1529,55 @@ func validate_waypoint_route(entry: Dictionary, snapshot: Dictionary, points: Ar
         previous_cell = sample_cell
         previous_point = next_point
     return { "ok": true, "reason": "" }
+
+
+func _route_uses_building_supports(points: Array) -> bool:
+    for point_value in points:
+        if point_value is Vector3 and not building_support_for_position(point_value as Vector3, CELL * 0.92).is_empty():
+            return true
+    return false
+
+
+func _validate_layered_building_route(snapshot: Dictionary, points: Array) -> Dictionary:
+    # The navmesh may cross terrain, floor slabs and real stair stringers in one
+    # route.  Validate that exact three-dimensional corridor instead of applying
+    # the legacy one-height-per-XZ cell test, which cannot represent a floor over
+    # ground.  Every permitted elevated point still has a published support and
+    # every non-support construction collider remains a blocker.
+    var previous: Vector3 = points[0] if points[0] is Vector3 else Vector3.ZERO
+    for index in range(1, points.size()):
+        if not (points[index] is Vector3):
+            continue
+        var next: Vector3 = points[index]
+        var samples := clampi(ceili(previous.distance_to(next) / maxf(CELL * 0.28, 0.12)), 1, 96)
+        for sample_index in range(samples + 1):
+            var point := previous.lerp(next, float(sample_index) / float(samples))
+            var support := building_support_for_position(point, CELL * 0.92)
+            var source_part_id := ""
+            if not support.is_empty():
+                point.y = _support_surface_y(support, point) + 0.04
+                source_part_id = String(support.get("sourceCollisionPartId", support.get("sourcePartId", "")))
+            else:
+                var terrain_point := cell_position(world_cell(point))
+                if absf(point.y - terrain_point.y) > CELL * 0.88:
+                    return {
+                        "ok": false,
+                        "reason": "missing_walkable_support_layer",
+                        "segmentIndex": index - 1,
+                        "point": point
+                    }
+                point.y = terrain_point.y
+            var collision := static_collision_blocker_at_position(snapshot, point, source_part_id)
+            if not collision.is_empty():
+                return {
+                    "ok": false,
+                    "reason": "layered_static_collision",
+                    "segmentIndex": index - 1,
+                    "point": point,
+                    "collision": collision
+                }
+        previous = next
+    return { "ok": true, "reason": "", "layeredSupportValidation": true }
 func _transition_door_collision_pathable(entry: Dictionary, snapshot: Dictionary, from_cell: Vector2i, to_cell: Vector2i, moving_home := false) -> Dictionary:
     var from_position := cell_position(from_cell)
     var to_position := cell_position(to_cell)
@@ -1421,6 +1636,21 @@ func static_collision_blocker(snapshot: Dictionary, cell: Vector2i) -> Dictionar
             return record
     return {}
 
+
+func static_collision_blocker_at_position(snapshot: Dictionary, position: Vector3, supporting_source_part_id := "") -> Dictionary:
+    var cell := world_cell(position)
+    var records := _transition_collision_records(snapshot, "staticCollisionByCell", cell, cell)
+    for record in records:
+        var node_value = record.get("node", null)
+        if node_value != null and not is_instance_valid(node_value):
+            continue
+        var source_part_id := String(record.get("sourcePartId", ""))
+        if supporting_source_part_id != "" and source_part_id == supporting_source_part_id:
+            continue
+        if _point_inside_collision_record_3d(position, record):
+            return record
+    return {}
+
 func _transition_collision_records(snapshot: Dictionary, index_key: String, from_cell: Vector2i, to_cell: Vector2i) -> Array:
     var index: Dictionary = snapshot.get(index_key, {})
     if index.is_empty():
@@ -1459,6 +1689,14 @@ func _point_inside_collision_record(position: Vector3, record: Dictionary) -> bo
         and x <= float(record.get("maxX", 0.0)) + inflation \
         and z >= float(record.get("minZ", 0.0)) - inflation \
         and z <= float(record.get("maxZ", 0.0)) + inflation
+
+
+func _point_inside_collision_record_3d(position: Vector3, record: Dictionary) -> bool:
+    if not _point_inside_collision_record(position, record):
+        return false
+    var min_y := float(record.get("minY", -INF))
+    var max_y := float(record.get("maxY", INF))
+    return position.y >= min_y - 0.025 and position.y <= max_y + 0.025
 
 func _segment_intersects_aabb_2d(from_point: Vector2, to_point: Vector2, min_point: Vector2, max_point: Vector2) -> bool:
     var delta := to_point - from_point
