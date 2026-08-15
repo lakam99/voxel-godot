@@ -11,14 +11,15 @@ const CottageBlueprintBuilderScript := preload("res://scripts/buildings/CottageB
 const LandmarkBuildingBlueprintBuilderScript := preload("res://scripts/buildings/LandmarkBuildingBlueprintBuilder.gd")
 const CottageFurnishingPlannerScript := preload("res://scripts/buildings/CottageFurnishingPlanner.gd")
 const InteriorFurnishingLayoutScript := preload("res://scripts/buildings/InteriorFurnishingLayout.gd")
+const CitadelResidenceManifestBuilderScript := preload("res://scripts/buildings/CitadelResidenceManifestBuilder.gd")
+const BuildingNavigationManifestBuilderScript := preload("res://scripts/buildings/BuildingNavigationManifestBuilder.gd")
 
 
-static func build(castle_blueprint, furnishing_seed: int):
+static func build(castle_blueprint, furnishing_seed: int, world_origin := Vector3.ZERO):
 	var blueprint_id := String(castle_blueprint.id) if castle_blueprint != null else "missing-castle-blueprint"
 	var plan = FurnishingPlanScript.new("furnishing.%s.%d" % [blueprint_id, furnishing_seed], furnishing_seed, blueprint_id)
 	if castle_blueprint == null:
 		return plan
-	plan.set_protected_access_reservations(InteriorFurnishingLayoutScript.access_reservations(castle_blueprint.rooms))
 	var residences: Array = castle_blueprint.recipe.get("courtyardResidences", []) as Array
 	var castle_foundation_height := float(castle_blueprint.recipe.get("foundationHeight", 0.62))
 	for residence_value in residences:
@@ -26,6 +27,7 @@ static func build(castle_blueprint, furnishing_seed: int):
 			continue
 		var residence: Dictionary = residence_value as Dictionary
 		append_residence_furnishings(plan, residence, castle_foundation_height, furnishing_seed)
+	rebuild_furniture_blocked_egress(plan, castle_blueprint, residences, castle_foundation_height, furnishing_seed, world_origin)
 	return plan
 
 
@@ -74,7 +76,7 @@ static func summary(plan, expected_residence_count := -1) -> Dictionary:
 	}
 
 
-static func append_residence_furnishings(target_plan, residence: Dictionary, castle_foundation_height: float, furnishing_seed: int) -> void:
+static func append_residence_furnishings(target_plan, residence: Dictionary, castle_foundation_height: float, furnishing_seed: int, furnishing_options: Dictionary = {}) -> void:
 	var residence_id := String(residence.get("id", "")).strip_edges()
 	if residence_id.is_empty():
 		return
@@ -88,14 +90,15 @@ static func append_residence_furnishings(target_plan, residence: Dictionary, cas
 	if source_blueprint == null:
 		return
 	var residence_seed := stable_residence_furnishing_seed(furnishing_seed, residence_id, family)
-	var source_plan = CottageFurnishingPlannerScript.build(source_blueprint, residence_seed) if family == "cottage" else build_manor_residence_plan(source_blueprint, residence_seed)
+	var source_plan = CottageFurnishingPlannerScript.build(source_blueprint, residence_seed, furnishing_options) if family == "cottage" else build_manor_residence_plan(source_blueprint, residence_seed)
 	if source_plan == null or source_plan.parts.is_empty():
 		return
 	var local_foundation_height := float(source_blueprint.recipe.get("foundationHeight", 0.48))
 	var center: Vector3 = residence.get("center", Vector3.ZERO) as Vector3
 	var yaw := float(residence.get("yaw", PI * 0.5 if center.x > 0.0 else -PI * 0.5))
 	var origin: Vector3 = residence.get("origin", Vector3(center.x, castle_foundation_height - local_foundation_height, center.z)) as Vector3
-	append_transformed_plan(target_plan, source_plan, residence_id, family, origin, yaw)
+	var egress_profile := "essential" if bool(furnishing_options.get("egressSafe", false)) else "full"
+	append_transformed_plan(target_plan, source_plan, residence_id, family, origin, yaw, egress_profile)
 
 
 static func source_blueprint_for(family: String, recipe: Dictionary):
@@ -110,7 +113,7 @@ static func stable_residence_furnishing_seed(base_seed: int, residence_id: Strin
 	return int(("%d|castle.residence.furnishing|%s|%s" % [base_seed, residence_id, family]).hash())
 
 
-static func append_transformed_plan(target_plan, source_plan, residence_id: String, family: String, origin: Vector3, yaw: float) -> void:
+static func append_transformed_plan(target_plan, source_plan, residence_id: String, family: String, origin: Vector3, yaw: float, egress_profile := "full") -> void:
 	var yaw_basis := Basis(Vector3.UP, yaw)
 	# Synthetic manor accesses are created by the same source furnishing grammar,
 	# so preserve them when that grammar is composed into the castle. This avoids
@@ -133,6 +136,7 @@ static func append_transformed_plan(target_plan, source_plan, residence_id: Stri
 		recipe["rotation"] = transformed_basis.get_euler()
 		recipe["castleResidenceId"] = residence_id
 		recipe["castleResidenceFamily"] = family
+		recipe["castleEgressProfile"] = egress_profile
 		recipe["castleResidenceSourcePart"] = String(source_part.id)
 		recipe["castleResidenceFacing"] = "courtyard_core"
 		values["id"] = String(id_map.get(String(source_part.id), String(source_part.id)))
@@ -141,6 +145,43 @@ static func append_transformed_plan(target_plan, source_plan, residence_id: Stri
 		values["rotation"] = transformed_basis.get_euler()
 		values["recipe"] = recipe
 		target_plan.add_part(values)
+
+
+static func rebuild_furniture_blocked_egress(plan, castle_blueprint, residences: Array, castle_foundation_height: float, furnishing_seed: int, world_origin := Vector3.ZERO) -> void:
+	var parent_transform := Transform3D(Basis.IDENTITY, world_origin)
+	var navigation_manifest := BuildingNavigationManifestBuilderScript.build(castle_blueprint, parent_transform)
+	var residence_manifest := CitadelResidenceManifestBuilderScript.build(castle_blueprint, plan, CitadelResidenceManifestBuilderScript.DEFAULT_CELL_SIZE, world_origin)
+	var empty_plan = FurnishingPlanScript.new("furnishing.egress-baseline", 0, String(castle_blueprint.id))
+	var fallback_residences := {}
+	for citizen_value in residence_manifest.get("citizens", []) as Array:
+		if not (citizen_value is Dictionary):
+			continue
+		var citizen: Dictionary = citizen_value as Dictionary
+		var furnished_route := CitadelResidenceManifestBuilderScript.furnishing_egress_path(citizen, plan, navigation_manifest, CitadelResidenceManifestBuilderScript.DEFAULT_CELL_SIZE, world_origin)
+		if bool(furnished_route.get("reachable", false)):
+			continue
+		var baseline_route := CitadelResidenceManifestBuilderScript.furnishing_egress_path(citizen, empty_plan, navigation_manifest, CitadelResidenceManifestBuilderScript.DEFAULT_CELL_SIZE, world_origin)
+		if bool(baseline_route.get("reachable", false)):
+			fallback_residences[String(citizen.get("residenceId", ""))] = true
+	if fallback_residences.is_empty():
+		return
+	for residence_value in residences:
+		if not (residence_value is Dictionary):
+			continue
+		var residence: Dictionary = residence_value as Dictionary
+		var residence_id := String(residence.get("id", "")).strip_edges()
+		if residence_id.is_empty() or not fallback_residences.has(residence_id):
+			continue
+		remove_residence_furnishings(plan, residence_id)
+		append_residence_furnishings(plan, residence, castle_foundation_height, furnishing_seed, {"egressSafe": true})
+
+
+static func remove_residence_furnishings(plan, residence_id: String) -> void:
+	var retained: Array = []
+	for part in plan.parts:
+		if part == null or String(part.recipe.get("castleResidenceId", "")) != residence_id:
+			retained.append(part)
+	plan.parts = retained
 
 
 static func transform_access_reservation(reservation: AABB, origin: Vector3, yaw_basis: Basis) -> AABB:
@@ -182,10 +223,10 @@ static func build_manor_residence_plan(source_blueprint, furnishing_seed: int):
 			continue
 		var local_room := room_with_residential_access(source_room)
 		var room_plan = FurnishingPlanScript.new("%s.%s" % [blueprint_id, role], furnishing_seed, blueprint_id)
-		var room_accesses: Array[AABB] = InteriorFurnishingLayoutScript.access_reservations([local_room])
+		var room_accesses: Array[AABB] = InteriorFurnishingLayoutScript.circulation_reservations([local_room])
 		plan.add_protected_access_reservations(room_accesses)
 		room_plan.set_protected_access_reservations(room_accesses)
-		var occupied: Array[AABB] = InteriorFurnishingLayoutScript.access_reservations([local_room])
+		var occupied: Array[AABB] = InteriorFurnishingLayoutScript.circulation_reservations([local_room])
 		match role:
 			"entry_hall":
 				furnish_manor_entry(room_plan, occupied, local_room, rng)

@@ -5,6 +5,7 @@ extends SceneTree
 
 const CottageBlueprintBuilderScript := preload("res://scripts/buildings/CottageBlueprintBuilder.gd")
 const CottageFurnishingPlannerScript := preload("res://scripts/buildings/CottageFurnishingPlanner.gd")
+const FurnishingPlanScript := preload("res://scripts/buildings/FurnishingPlan.gd")
 const InteriorFurnishingLayoutScript := preload("res://scripts/buildings/InteriorFurnishingLayout.gd")
 
 const SEED := 207154
@@ -24,6 +25,7 @@ func run_contract() -> void:
 	var styles: Array[Dictionary] = []
 	for style in ["timber", "masonry"]:
 		styles.append(verify_style(style))
+	verify_clearance_guard()
 	var passed := failures.is_empty()
 	var report := {
 		"runnerId": "cottage_furnishing_layout_contract",
@@ -52,7 +54,7 @@ func verify_style(style: String) -> Dictionary:
 		parts_by_id[String(part.id)] = part
 		if part.collision_enabled:
 			collision_parts.append(part)
-	var accesses := InteriorFurnishingLayoutScript.access_reservations(blueprint.rooms)
+	var accesses := InteriorFurnishingLayoutScript.circulation_reservations(blueprint.rooms)
 	var rooms_by_id := {}
 	for raw_room in blueprint.rooms:
 		if raw_room is Dictionary:
@@ -64,7 +66,7 @@ func verify_style(style: String) -> Dictionary:
 			continue
 		if String(part.archetype) in ["rug", "aisle_runner"]:
 			continue
-		var candidate := InteriorFurnishingLayoutScript.horizontal_bounds(part.position, part.occupied_size, part.rotation)
+		var candidate := InteriorFurnishingLayoutScript.horizontal_bounds(part.position, part.occupied_size, part.rotation, FurnishingPlanScript.PROTECTED_ACCESS_CLEARANCE)
 		check(not InteriorFurnishingLayoutScript.intersects_any(candidate, accesses), "%s furnishing %s occupies a declared access lane" % [style, String(part.id)])
 	for first_index in range(collision_parts.size()):
 		var first = collision_parts[first_index]
@@ -115,8 +117,9 @@ func verify_style(style: String) -> Dictionary:
 		for part in collision_parts:
 			if String(part.room_id) == room_id:
 				room_solids.append(part)
-		var walkability: Dictionary = InteriorFurnishingLayoutScript.room_walkability(room as Dictionary, room_solids)
+		var walkability: Dictionary = InteriorFurnishingLayoutScript.room_walkability(room as Dictionary, room_solids, CottageFurnishingPlannerScript.NPC_EGRESS_CLEARANCE)
 		check(int(walkability.get("accessSeedCells", 0)) > 0, "%s room %s has no usable access seed" % [style, room_id])
+		check(int(walkability.get("accessComponentCount", 0)) == 1, "%s room %s disconnects its declared access lanes" % [style, room_id])
 		check(int(walkability.get("unreachableCells", 0)) == 0, "%s room %s leaves inaccessible open floor" % [style, room_id])
 		room_walkability.append({"roomId": room_id, "walkability": walkability})
 	var table = parts_by_id.get("table", null)
@@ -146,6 +149,21 @@ func verify_style(style: String) -> Dictionary:
 		"reservedAccessLanes": accesses.size(),
 		"roomWalkability": room_walkability
 	}
+
+
+func verify_clearance_guard() -> void:
+	var plan = FurnishingPlanScript.new("protected-access-clearance", 1, "contract")
+	plan.set_protected_access_reservations([AABB(Vector3(-0.5, 0.70, -2.0), Vector3(1.0, 2.0, 4.0))])
+	var part = plan.add_part({
+		"id": "nearby_table",
+		"roomId": "room",
+		"archetype": "table",
+		"material": "timber_board",
+		"position": Vector3(1.0, 0.70, 0.0),
+		"occupiedSize": Vector3(0.8, 0.84, 0.8),
+		"collision": true
+	})
+	check(part == null, "furnishing collision clearance can reach a protected access lane")
 
 func check_wall_facing(part, style: String) -> void:
 	var supporting_wall := String(part.recipe.get("supportingWall", ""))

@@ -6,6 +6,7 @@ class_name FurnishingPublisher
 ## never become separate collision, save, or placement authorities.
 
 const ConstructionMaterialCatalogScript := preload("res://scripts/buildings/ConstructionMaterialCatalog.gd")
+const FurnishingNavigationManifestBuilderScript := preload("res://scripts/buildings/FurnishingNavigationManifestBuilder.gd")
 
 var unit_box: BoxMesh
 var unit_cylinder: CylinderMesh
@@ -15,6 +16,7 @@ var published_parts: Array = []
 var collision_count := 0
 var visual_piece_count := 0
 var publication_usec := 0
+var furnishing_navigation_manifest: Dictionary = {}
 
 
 func _init() -> void:
@@ -40,6 +42,7 @@ func publish(plan, parent: Node3D) -> Dictionary:
 	for part in plan.parts:
 		if part != null:
 			publish_part(part, parent)
+	publish_navigation_manifest(plan, parent)
 	publication_usec = Time.get_ticks_usec() - started
 	return summary()
 
@@ -62,6 +65,7 @@ func publish_incremental(plan, parent: Node3D, parts_per_frame := 5) -> Dictiona
 		if published_this_frame >= frame_budget:
 			published_this_frame = 0
 			await parent.get_tree().process_frame
+	publish_navigation_manifest(plan, parent)
 	publication_usec = Time.get_ticks_usec() - started
 	return summary()
 
@@ -74,6 +78,12 @@ func clear_published() -> void:
 	collision_count = 0
 	visual_piece_count = 0
 	publication_usec = 0
+	furnishing_navigation_manifest.clear()
+
+
+func publish_navigation_manifest(plan, parent: Node3D) -> void:
+	furnishing_navigation_manifest = FurnishingNavigationManifestBuilderScript.build(plan, parent.global_transform)
+	parent.set_meta("furnishing_navigation_manifest", furnishing_navigation_manifest.duplicate(true))
 
 
 func publish_part(part, parent: Node3D) -> StaticBody3D:
@@ -429,5 +439,7 @@ func summary() -> Dictionary:
 		"publishedPartCount": published_parts.size(),
 		"collisionPartCount": collision_count,
 		"visualPieceCount": visual_piece_count,
+		"navigationCollisionCount": int(furnishing_navigation_manifest.get("staticCollisionCount", 0)),
+		"navigationManifest": furnishing_navigation_manifest.duplicate(true),
 		"publicationUsec": publication_usec
 	}

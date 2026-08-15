@@ -9,6 +9,7 @@ const LandmarkBuildingBlueprintBuilderScript := preload("res://scripts/buildings
 const CastleCompoundBlueprintBuilderScript := preload("res://scripts/buildings/CastleCompoundBlueprintBuilder.gd")
 const BuildingPartPublisherScript := preload("res://scripts/buildings/BuildingPartPublisher.gd")
 const ConstructionMaterialCatalogScript := preload("res://scripts/buildings/ConstructionMaterialCatalog.gd")
+const DoorPortalScript := preload("res://scripts/npc_ai/interactions/DoorPortal.gd")
 
 const SEED := 208154
 const FAMILIES: Array[String] = ["town_hall", "manor", "keep", "gatehouse", "tower", "curtain_wall", "courtyard"]
@@ -196,9 +197,13 @@ func verify_town_hall_variants() -> Dictionary:
 
 func validate_manor(blueprint) -> void:
 	var parts_by_id := {}
+	var rooms_by_id := {}
 	for part in blueprint.parts:
 		if part != null:
 			parts_by_id[String(part.id)] = part
+	for room_value in blueprint.rooms:
+		if room_value is Dictionary:
+			rooms_by_id[String((room_value as Dictionary).get("id", ""))] = room_value
 	for required_part in ["manor_main_foundation", "manor_service_foundation", "manor_tower_foundation", "manor_main_lower_floor", "manor_solar_upper_floor", "manor_service_wing_floor", "manor_stair_tower_floor", "manor_main_lower_left_header", "manor_service_wing_right_header", "manor_main_lower_right_header", "manor_solar_upper_right_header", "manor_stair_tower_left_header_0", "manor_wing_threshold", "manor_lower_tower_bridge", "manor_solar_tower_bridge", "manor_main_roof_left", "manor_service_roof_left", "manor_tower_roof_left", "manor_portico_roof"]:
 		check(parts_by_id.has(required_part), "Manor lacks assembled structural part %s" % required_part)
 	var lower = parts_by_id.get("manor_main_lower_floor", null)
@@ -208,14 +213,28 @@ func validate_manor(blueprint) -> void:
 	check(lower != null and solar != null and solar.position.y > lower.position.y and solar.size.x > lower.size.x and solar.size.z > lower.size.z, "Manor upper solar is not a broader projected floor above the lower hall")
 	check(lower != null and wing != null and horizontal_volumes_touch(lower, wing), "Manor service wing is not attached to the main hall")
 	check(lower != null and tower != null and horizontal_volumes_touch(lower, tower), "Manor stair tower is not attached to the main hall")
+	check(manor_room_has_access(rooms_by_id, "dining", "manor_lower_tower", "manor_main_lower_floor"), "Manor lower hall does not declare its physical tower passage")
+	check(manor_room_has_access(rooms_by_id, "bedroom", "manor_solar_tower", "manor_solar_upper_floor"), "Manor bedroom does not declare its physical tower passage")
+	check(manor_room_has_access(rooms_by_id, "store", "manor_lower_tower", "manor_stair_tower_floor"), "Manor stair tower does not declare its lower-floor passage support")
+	check(manor_room_has_access(rooms_by_id, "store", "manor_solar_tower", "manor_stair_exit_0"), "Manor stair tower does not declare its upper-floor passage support")
 	if int(blueprint.recipe.get("floorCount", 0)) >= 3:
 		check(parts_by_id.has("manor_solar_upper_ceiling"), "Three-storey manor leaves the solar-to-attic junction open")
 		check(parts_by_id.has("manor_attic_tower_bridge"), "Three-storey manor has no physical tower-to-attic connection")
 	var stair_count := 0
+	var stair_transition_count := 0
 	for part in blueprint.parts:
-		if part != null and String(part.id).begins_with("manor_stair_"):
+		if part == null:
+			continue
+		var part_id := String(part.id)
+		if part_id.begins_with("manor_stair_"):
 			stair_count += 1
+		if "_tread_" in part_id:
+			check(not part.collision_enabled, "Manor stair tread %s duplicates the ramp collision" % part_id)
+		if part_id.begins_with("manor_stair_landing_") or part_id.begins_with("manor_stair_exit_"):
+			stair_transition_count += 1
+			check(part.size.z >= 1.08, "Manor stair transition %s is too shallow for an NPC capsule" % part_id)
 	check(stair_count >= maxi(3, (int(blueprint.recipe.get("floorCount", 2)) - 1) * 3), "Manor lacks the collision-backed stair flights and landings required for its floors")
+	check(stair_transition_count >= maxi(2, (int(blueprint.recipe.get("floorCount", 2)) - 1) * 2), "Manor lacks adequate stair entry and landing platforms")
 	var tower_top := 0.0
 	var tower_base := INF
 	for part in blueprint.parts:
@@ -230,6 +249,17 @@ func validate_manor(blueprint) -> void:
 		if part != null and String(part.kind) == "window":
 			window_count += 1
 	check(window_count >= 8, "Manor wall openings do not publish their matching glass panes")
+
+
+func manor_room_has_access(rooms_by_id: Dictionary, room_id: String, access_id: String, support_part_id: String) -> bool:
+	var room: Dictionary = rooms_by_id.get(room_id, {}) as Dictionary
+	for access_value in room.get("accesses", []) as Array:
+		if not (access_value is Dictionary):
+			continue
+		var access: Dictionary = access_value
+		if String(access.get("id", "")) == access_id and String(access.get("supportPartId", "")) == support_part_id:
+			return true
+	return false
 
 
 func horizontal_volumes_touch(first, second, tolerance := 0.45) -> bool:
@@ -312,6 +342,15 @@ func verify_castle(context: Dictionary) -> Dictionary:
 	if grid_mode == "district_grid":
 		check(courtyard_program.size() == max_program_size, "castle district grid did not fill all non-boulevard residence lots")
 		check((courtyard_grid.get("streetRecords", []) as Array).size() >= 2, "castle district grid lacks a boulevard and cross-street graph")
+		var urban_rooms: Dictionary = courtyard_grid.get("urbanRooms", {}) as Dictionary
+		for room_id in ["gate", "palace"]:
+			var urban_room: Dictionary = urban_rooms.get(room_id, {}) as Dictionary
+			var room_center: Vector3 = urban_room.get("center", Vector3(INF, INF, INF)) as Vector3
+			var sightline_target: Vector3 = urban_room.get("sightlineTarget", Vector3(INF, INF, INF)) as Vector3
+			check(not urban_room.is_empty(), "castle district grid lacks the %s urban-room solve" % room_id)
+			check(float(urban_room.get("width", 0.0)) > 4.0 and float(urban_room.get("depth", 0.0)) > 4.0, "castle %s urban room has invalid dimensions" % room_id)
+			check(absf(room_center.x) < float(grammar.get("courtyardWidth", 0.0)) * 0.5 and absf(room_center.z) < float(grammar.get("courtyardDepth", 0.0)) * 0.5, "castle %s urban room escaped the courtyard" % room_id)
+			check(room_center.distance_to(sightline_target) > 6.0, "castle %s urban room lacks a meaningful sightline target" % room_id)
 	var courtyard_ids := {}
 	var courtyard_slots := {}
 	var symmetry_groups := {}
@@ -359,6 +398,7 @@ func verify_castle(context: Dictionary) -> Dictionary:
 	check(blueprint != null and replay_blueprint != null and blueprint.deterministic_signature() == replay_blueprint.deterministic_signature(), "castle compound blueprint replay is not deterministic")
 	var published_towers := 0
 	var published_courtyard_buildings := 0
+	var published_door_orientation := {}
 	if blueprint != null:
 		for part in blueprint.parts:
 			if part != null and String(part.id).begins_with("castle_tower_") and String(part.id).ends_with("_floor"):
@@ -374,7 +414,54 @@ func verify_castle(context: Dictionary) -> Dictionary:
 		validate_castle_gate_entry(blueprint)
 		validate_castle_vertical_circulation(blueprint)
 		validate_castle_seeded_masonry(blueprint, grammar)
-	return {"id": first.get("id"), "memberCount": members.size(), "familyCounts": family_counts, "grammar": grammar, "courtyardBuildingCount": courtyard_program.size(), "blueprintParts": blueprint.parts.size() if blueprint != null else 0}
+		published_door_orientation = verify_castle_published_door_orientation(blueprint)
+	return {"id": first.get("id"), "memberCount": members.size(), "familyCounts": family_counts, "grammar": grammar, "courtyardBuildingCount": courtyard_program.size(), "blueprintParts": blueprint.parts.size() if blueprint != null else 0, "publishedDoorOrientation": published_door_orientation}
+
+
+func verify_castle_published_door_orientation(blueprint) -> Dictionary:
+	var fixture := Node3D.new()
+	get_root().add_child(fixture)
+	var publisher = BuildingPartPublisherScript.new()
+	publisher.publish(blueprint, fixture)
+	var doors_by_part_id := {}
+	for child in fixture.get_children():
+		if child is StaticBody3D and String(child.get_meta("building_part_kind", "")) == "door":
+			doors_by_part_id[String(child.get_meta("building_part_id", ""))] = child
+	var source_door_count := 0
+	var rotated_door_count := 0
+	var axis_counts := {"x": 0, "z": 0}
+	for part in blueprint.parts:
+		if part == null or String(part.kind) != "door":
+			continue
+		source_door_count += 1
+		var part_id := String(part.id)
+		var body := doors_by_part_id.get(part_id) as StaticBody3D
+		check(body != null and is_instance_valid(body), "castle publisher omitted door body %s" % part_id)
+		if body == null or not is_instance_valid(body):
+			continue
+		var world_forward := body.global_transform.basis * Vector3.FORWARD
+		world_forward.y = 0.0
+		var expected_axis := "x" if absf(world_forward.x) > absf(world_forward.z) else "z"
+		var side := int(body.get_meta("door_side", -1))
+		var published_axis := "x" if side == 1 or side == 3 else "z" if side == 0 or side == 2 else ""
+		check(published_axis == expected_axis, "castle door %s published %s portal axis for a %s world-facing leaf" % [part_id, published_axis, expected_axis])
+		var portal = DoorPortalScript.new()
+		portal.add_leaf(body)
+		check(String(portal.crossing_axis) == expected_axis, "castle door %s portal resolves %s instead of %s" % [part_id, String(portal.crossing_axis), expected_axis])
+		axis_counts[expected_axis] = int(axis_counts.get(expected_axis, 0)) + 1
+		if expected_axis == "x":
+			rotated_door_count += 1
+	check(doors_by_part_id.size() == source_door_count, "castle publisher produced %d door bodies for %d source doors" % [doors_by_part_id.size(), source_door_count])
+	check(rotated_door_count > 0, "castle door publication contract did not exercise any rotated portal axes")
+	var gate := doors_by_part_id.get("castle_gatehouse_portcullis") as StaticBody3D
+	var gate_is_portcullis := gate != null and String(gate.get_meta("door_presentation", "")) == "portcullis"
+	var gate_has_lever := gate != null and gate.get_node_or_null("PortcullisLever") != null
+	var gate_is_interaction_door := gate != null and String(gate.get_meta("block_type", "")) == "door" and gate.get_node_or_null("DoorInteraction") != null
+	check(gate_is_portcullis, "castle gate publisher omitted portcullis interaction metadata")
+	check(gate_has_lever, "castle gate publisher omitted its non-colliding interaction lever")
+	check(gate_is_interaction_door, "castle gate publisher omitted the shared production door interaction contract")
+	fixture.free()
+	return {"sourceDoorCount": source_door_count, "publishedDoorCount": doors_by_part_id.size(), "rotatedDoorCount": rotated_door_count, "axisCounts": axis_counts, "gateIsPortcullis": gate_is_portcullis, "gateHasLever": gate_has_lever, "gateIsInteractionDoor": gate_is_interaction_door}
 
 
 func verify_sixfold_citadel(base_context: Dictionary) -> Dictionary:
@@ -661,20 +748,18 @@ func validate_castle_keep_roof(blueprint) -> void:
 		if part != null:
 			parts_by_id[String(part.id)] = part
 	var upper_register = parts_by_id.get("castle_keep_upper_register", null)
-	var lower_roof_deck = parts_by_id.get("castle_keep_lower_roof_deck", null)
-	var roof_cornice = parts_by_id.get("castle_keep_roof_cornice", null)
-	var roof_deck = parts_by_id.get("castle_keep_roof_deck", null)
-	check(upper_register != null and lower_roof_deck != null and roof_cornice != null and roof_deck != null, "castle keep lacks a complete lower-roof/upper-register/cornice/roof stack")
-	if lower_roof_deck != null and upper_register != null:
-		check(positive_volume_overlap(part_bounds(lower_roof_deck), part_bounds(upper_register)), "castle keep upper register is not seated into its lower roof deck")
-	for lower_wall_id in ["castle_keep_back", "castle_keep_left", "castle_keep_right", "castle_keep_front_-1", "castle_keep_front_1"]:
-		var lower_wall = parts_by_id.get(lower_wall_id, null)
-		if lower_roof_deck != null and lower_wall != null:
-			check(positive_volume_overlap(part_bounds(lower_roof_deck), part_bounds(lower_wall)), "castle keep lower roof deck does not close %s" % lower_wall_id)
-	if upper_register != null and roof_cornice != null:
-		check(positive_volume_overlap(part_bounds(upper_register), part_bounds(roof_cornice)), "castle keep cornice is detached from its upper register")
-	if roof_cornice != null and roof_deck != null:
-		check(positive_volume_overlap(part_bounds(roof_cornice), part_bounds(roof_deck)), "castle keep roof deck is detached from its cornice")
+	var crown_seat = parts_by_id.get("castle_keep_upper_crown_seat", null)
+	var hall_roof_left = parts_by_id.get("castle_keep_hall_roof_left", null)
+	var hall_roof_right = parts_by_id.get("castle_keep_hall_roof_right", null)
+	var hall_roof_ridge = parts_by_id.get("castle_keep_hall_roof_ridge", null)
+	check(upper_register != null and crown_seat != null and hall_roof_left != null and hall_roof_right != null and hall_roof_ridge != null, "castle keep lacks its enclosed pitched hall-roof and crown stack")
+	check(not parts_by_id.has("castle_keep_lower_roof_deck") and not parts_by_id.has("castle_keep_roof_deck"), "castle keep reintroduced elevated exterior roof platforms")
+	if hall_roof_left != null and hall_roof_right != null:
+		check(absf(hall_roof_left.rotation.z) > 0.05 and hall_roof_left.rotation.z * hall_roof_right.rotation.z < 0.0, "castle keep hall roof is not a paired pitched roof")
+	if hall_roof_left != null and hall_roof_ridge != null:
+		check(part_bounds(hall_roof_ridge).position.y >= part_bounds(hall_roof_left).position.y, "castle keep hall roof ridge sits below its roof plane")
+	if upper_register != null and crown_seat != null:
+		check(horizontal_positive_overlap(part_bounds(upper_register), part_bounds(crown_seat)), "castle keep crown seat is not horizontally supported by its enclosed upper register")
 
 
 func validate_castle_gate_entry(blueprint) -> void:
@@ -733,15 +818,35 @@ func validate_castle_vertical_circulation(blueprint) -> void:
 	# the evidence for player control on those stairs.
 	var parts_by_id := {}
 	var keep_storey_rooms := {}
+	var keep_room_bounds := AABB()
+	var has_keep_room_bounds := false
 	for part in blueprint.parts:
 		if part != null:
 			parts_by_id[String(part.id)] = part
 	for room_value in blueprint.rooms:
-		if room_value is Dictionary and (room_value as Dictionary).has("castleKeepStorey"):
-			keep_storey_rooms[int((room_value as Dictionary).get("castleKeepStorey", -1))] = room_value
+		if not room_value is Dictionary:
+			continue
+		var room := room_value as Dictionary
+		if String(room.get("id", "")) == "castle_keep":
+			keep_room_bounds = room.get("bounds", AABB()) as AABB
+			has_keep_room_bounds = keep_room_bounds.size.x > 0.0 and keep_room_bounds.size.z > 0.0
+		if room.has("castleKeepStorey"):
+			keep_storey_rooms[int(room.get("castleKeepStorey", -1))] = room_value
 	var storey_count := int(blueprint.recipe.get("keepStoreyCount", 0))
 	check(storey_count >= 3, "castle keep has no multi-storey circulation contract")
 	check(keep_storey_rooms.size() == storey_count, "castle keep lacks room records for one or more occupied storeys")
+	check(has_keep_room_bounds, "castle keep lacks an enclosed hall footprint for vertical-circulation validation")
+	if has_keep_room_bounds:
+		var interior_bounds := AABB(
+			keep_room_bounds.position + Vector3(0.72, 0.0, 0.72),
+			keep_room_bounds.size - Vector3(1.44, 0.0, 1.44)
+		)
+		for part_value in parts_by_id.values():
+			var part = part_value
+			var part_id := String(part.id)
+			if not part_id.begins_with("castle_keep_stair_") and not part_id.begins_with("castle_keep_storey_"):
+				continue
+			check(horizontal_bounds_contain(interior_bounds, part_bounds(part), 0.08), "castle keep interior circulation part %s protrudes beyond the enclosed hall footprint" % part_id)
 	for storey_index in range(storey_count):
 		var room: Dictionary = keep_storey_rooms.get(storey_index, {}) as Dictionary
 		check(not room.is_empty() and not (room.get("accesses", []) as Array).is_empty(), "castle keep storey %d lacks its stair access record" % storey_index)
@@ -782,6 +887,10 @@ func validate_castle_vertical_circulation(blueprint) -> void:
 func horizontal_positive_overlap(first: AABB, second: AABB) -> bool:
 	var epsilon := 0.0001
 	return first.position.x < second.end.x - epsilon and first.end.x > second.position.x + epsilon and first.position.z < second.end.z - epsilon and first.end.z > second.position.z + epsilon
+
+
+func horizontal_bounds_contain(outer: AABB, inner: AABB, tolerance := 0.0) -> bool:
+	return inner.position.x >= outer.position.x - tolerance and inner.end.x <= outer.end.x + tolerance and inner.position.z >= outer.position.z - tolerance and inner.end.z <= outer.end.z + tolerance
 
 
 func horizontal_expanded_bounds(bounds: AABB, padding: float) -> AABB:

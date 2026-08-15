@@ -1743,6 +1743,33 @@ const PREBAKE_MAX_TILES := 256
 # once at load (town spawn) so the static town is fully baked before NPC
 # scheduling starts and pending_nav_data stops being the steady state.
 func prebake_area_tiles(center_cell: Vector2i, radius_cells: int) -> Dictionary:
+	var radius := maxi(0, radius_cells)
+	var min_cell := Vector2i(center_cell.x - radius, center_cell.y - radius)
+	var max_cell := Vector2i(center_cell.x + radius, center_cell.y + radius)
+	var tile_size: int = maxi(1, NpcConstantsScript.NAV_TILE_CELL_SIZE)
+	var min_tile_x := floori(float(min_cell.x) / float(tile_size))
+	var max_tile_x := floori(float(max_cell.x) / float(tile_size))
+	var min_tile_z := floori(float(min_cell.y) / float(tile_size))
+	var max_tile_z := floori(float(max_cell.y) / float(tile_size))
+	var tile_keys: Array[String] = []
+	for tile_z in range(min_tile_z, max_tile_z + 1):
+		for tile_x in range(min_tile_x, max_tile_x + 1):
+			tile_keys.append("%d,%d" % [tile_x, tile_z])
+	return prebake_navmesh_tile_keys(tile_keys)
+
+
+func prebake_building_navigation_topology() -> Dictionary:
+	if world == null or not world.has_method("building_navigation_topology_tile_keys"):
+		return { "ok": false, "reason": "missing_building_topology_source" }
+	var tile_keys_value = world.building_navigation_topology_tile_keys()
+	if not (tile_keys_value is Array):
+		return { "ok": false, "reason": "invalid_building_topology_tiles" }
+	var summary := prebake_navmesh_tile_keys(tile_keys_value as Array)
+	summary["source"] = "building_navigation_manifest"
+	return summary
+
+
+func prebake_navmesh_tile_keys(tile_keys: Array) -> Dictionary:
 	var summary := {
 		"published": 0,
 		"cachedReady": 0,
@@ -1756,42 +1783,38 @@ func prebake_area_tiles(center_cell: Vector2i, radius_cells: int) -> Dictionary:
 	if not world.has_method("build_navmesh_tile_snapshot"):
 		summary["reason"] = "missing_snapshot_api"
 		return summary
-	var radius := maxi(0, radius_cells)
-	var min_cell := Vector2i(center_cell.x - radius, center_cell.y - radius)
-	var max_cell := Vector2i(center_cell.x + radius, center_cell.y + radius)
-	var tile_size: int = maxi(1, NpcConstantsScript.NAV_TILE_CELL_SIZE)
-	var min_tile_x := floori(float(min_cell.x) / float(tile_size))
-	var max_tile_x := floori(float(max_cell.x) / float(tile_size))
-	var min_tile_z := floori(float(min_cell.y) / float(tile_size))
-	var max_tile_z := floori(float(max_cell.y) / float(tile_size))
-	var processed := 0
-	for tile_z in range(min_tile_z, max_tile_z + 1):
-		for tile_x in range(min_tile_x, max_tile_x + 1):
-			if processed >= PREBAKE_MAX_TILES:
-				summary["reason"] = "tile_cap_reached"
-				summary["ok"] = true
-				return summary
-			processed += 1
-			summary["tiles"] = processed
-			var tile_key := "%d,%d" % [tile_x, tile_z]
-			var source_key := _navmesh_tile_source_key(tile_key)
-			var published_key := "%s|%s" % [tile_key, source_key]
-			if String(empty_navmesh_tile_keys.get(tile_key, "")) == published_key:
-				summary["empty"] = int(summary["empty"]) + 1
+	var normalized_tiles := {}
+	for tile_key_value in tile_keys:
+		var tile_key := String(tile_key_value).strip_edges()
+		if not tile_key.is_empty():
+			normalized_tiles[tile_key] = true
+	var ordered_tiles: Array = normalized_tiles.keys()
+	ordered_tiles.sort()
+	for tile_key_value in ordered_tiles:
+		if int(summary["tiles"]) >= PREBAKE_MAX_TILES:
+			summary["reason"] = "tile_cap_reached"
+			summary["ok"] = true
+			return summary
+		var tile_key := String(tile_key_value)
+		summary["tiles"] = int(summary["tiles"]) + 1
+		var source_key := _navmesh_tile_source_key(tile_key)
+		var published_key := "%s|%s" % [tile_key, source_key]
+		if String(empty_navmesh_tile_keys.get(tile_key, "")) == published_key:
+			summary["empty"] = int(summary["empty"]) + 1
+			continue
+		if String(published_navmesh_tile_keys.get(tile_key, "")) == published_key:
+			var status := _navmesh_tile_region_status(tile_key)
+			if bool(status.get("installed", false)) and not bool(status.get("dirty", false)) and int(status.get("surfaceCount", 0)) > 0:
+				summary["cachedReady"] = int(summary["cachedReady"]) + 1
 				continue
-			if String(published_navmesh_tile_keys.get(tile_key, "")) == published_key:
-				var status := _navmesh_tile_region_status(tile_key)
-				if bool(status.get("installed", false)) and not bool(status.get("dirty", false)) and int(status.get("surfaceCount", 0)) > 0:
-					summary["cachedReady"] = int(summary["cachedReady"]) + 1
-					continue
-			var snapshot: Dictionary = world.build_navmesh_tile_snapshot(tile_key)
-			if snapshot.is_empty():
-				empty_navmesh_tile_keys[tile_key] = published_key
-				summary["empty"] = int(summary["empty"]) + 1
-				continue
-			navmesh_world.register_tile_snapshot(snapshot)
-			published_navmesh_tile_keys[tile_key] = published_key
-			summary["published"] = int(summary["published"]) + 1
+		var snapshot: Dictionary = world.build_navmesh_tile_snapshot(tile_key)
+		if snapshot.is_empty():
+			empty_navmesh_tile_keys[tile_key] = published_key
+			summary["empty"] = int(summary["empty"]) + 1
+			continue
+		navmesh_world.register_tile_snapshot(snapshot)
+		published_navmesh_tile_keys[tile_key] = published_key
+		summary["published"] = int(summary["published"]) + 1
 	if navmesh_world.has_method("sync_navigation_map_if_dirty"):
 		navmesh_world.sync_navigation_map_if_dirty()
 	summary["ok"] = true
@@ -2053,7 +2076,7 @@ func _route_cache_key(entry: Dictionary, intent: Dictionary) -> String:
 	# Cache key intentionally excludes the NavmeshWorldService topology_revision.
 	# That counter is bumped on every tile publish, so keying routes on it made the
 	# whole town's cache churn every frame under multi-NPC load. The world's
-	# navmesh_tile_source_key (static_snapshot_revision:semantic_revision) already
+	# navmesh_tile_source_key (static_snapshot_revision:door_state_revision) already
 	# changes only on real content edits; tile-scoped event invalidation
 	# (process_navigation_events) handles per-tile changes precisely.
 	var world_revision := ""

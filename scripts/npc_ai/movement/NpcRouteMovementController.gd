@@ -5,7 +5,6 @@ const CELL := 1.35
 const NpcConstantsScript := preload("res://scripts/npc_ai/NpcConstants.gd")
 const HomeInteriorServiceScript := preload("res://scripts/npc_ai/behavior/HomeInteriorService.gd")
 const NpcCorridorFollowerScript := preload("res://scripts/npc_ai/movement/NpcCorridorFollower.gd")
-const ReciprocalAvoidanceAdapterScript := preload("res://scripts/npc_ai/movement/ReciprocalAvoidanceAdapter.gd")
 const NpcRouteStateStoreScript := preload("res://scripts/npc_ai/routing/NpcRouteStateStore.gd")
 const CAPSULE_RADIUS := 0.34
 const DOOR_ACTION_LOOKAHEAD_CELLS := 4
@@ -45,8 +44,8 @@ func setup(system_node, main_node) -> void:
     system = system_node
     main = main_node
     corridor_follower = NpcCorridorFollowerScript.new()
-    avoidance_adapter = ReciprocalAvoidanceAdapterScript.new()
-    avoidance_adapter.setup(system, main)
+    var autonomy = system.get("autonomy_system") if system != null else null
+    avoidance_adapter = autonomy.get("crowd_velocity_service") if autonomy != null else null
 
 func begin_frame() -> void:
     frame_claimed_cells.clear()
@@ -58,7 +57,7 @@ func performance_monitor():
 
 func move(entry: Dictionary, intent: Dictionary, max_distance: float, planner, world) -> Dictionary:
     var body := entry.get("body") as CharacterBody3D
-    if body == null or main == null or planner == null or world == null or max_distance <= 0.0:
+    if body == null or main == null or planner == null or world == null or avoidance_adapter == null or max_distance <= 0.0:
         return { "moved": 0.0, "status": "blocked", "reason": "missing_context" }
     var previous: Vector3 = body.global_position
     var target: Vector3 = intent.get("target", previous)
@@ -2662,14 +2661,23 @@ func set_route_status(entry: Dictionary, status: String, reason: String) -> void
 
 func increment_route_replan(entry: Dictionary) -> void:
     entry["routeReplans"] = int(entry.get("routeReplans", 0)) + 1
-    if system != null:
-        system.npc_route_replans += 1
-        system.npc_path_detours += 1
+    if _object_has_property(system, "npc_route_replans"):
+        system.set("npc_route_replans", int(system.get("npc_route_replans")) + 1)
+    if _object_has_property(system, "npc_path_detours"):
+        system.set("npc_path_detours", int(system.get("npc_path_detours")) + 1)
 
 func increment_stuck_recovery(entry: Dictionary) -> void:
     entry["stuckRecoveries"] = int(entry.get("stuckRecoveries", 0)) + 1
-    if system != null:
-        system.npc_stuck_recoveries += 1
+    if _object_has_property(system, "npc_stuck_recoveries"):
+        system.set("npc_stuck_recoveries", int(system.get("npc_stuck_recoveries")) + 1)
+
+func _object_has_property(object, property_name: String) -> bool:
+    if object == null:
+        return false
+    for property in object.get_property_list():
+        if String((property as Dictionary).get("name", "")) == property_name:
+            return true
+    return false
 
 func increment_reservation_wait(entry: Dictionary) -> void:
     entry["reservationWaits"] = int(entry.get("reservationWaits", 0)) + 1

@@ -1158,7 +1158,18 @@ func should_freeze_intro_night() -> bool:
     return (started and intro_repair_active and not intro_bed_used) or (final_night_active and not final_night_complete)
 
 func should_loop_intro_knock() -> bool:
-    return started and intro_repair_active and not intro_door_opened
+    return started and intro_repair_active and not intro_door_opened and intro_knock_scene_is_present()
+
+func intro_knock_scene_is_present() -> bool:
+    if main == null or not is_instance_valid(main) or not main.is_inside_tree():
+        return false
+    var tree: SceneTree = main.get_tree()
+    if tree == null:
+        return false
+    if tree.current_scene == main:
+        return true
+    var parent: Node = main.get_parent()
+    return parent != null and tree.current_scene == parent and parent.get("active_main") == main
 
 func is_intro_elder_waiting_for_ack() -> bool:
     return started and intro_repair_active and intro_door_opened and not intro_elder_dialogue_acknowledged

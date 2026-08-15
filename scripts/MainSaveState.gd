@@ -571,6 +571,7 @@ func reload_chunks(defer_rebuild := false) -> void:
     pending_chunk_prop_spawns.clear()
     pending_chunk_terrain_refreshes.clear()
     pending_chunk_collision_refreshes.clear()
+    pending_voxel_fluid_publications.clear()
     last_center_chunk = Vector2i(999999, 999999)
     if player:
         playtest_progress("reload_chunks_update")

@@ -23,19 +23,70 @@ static func access_reservations(room_records: Array) -> Array[AABB]:
 			var access_id := String(access.get("id", "")).strip_edges()
 			if access_id.is_empty() or seen_ids.has(access_id):
 				continue
-			var position: Vector3 = access.get("position", Vector3.ZERO) as Vector3
-			# An opening has its physical size and may declare a larger protected
-			# furnishing approach. This lets a blueprint keep the doorway truthful
-			# while preventing tables, chairs, or storage from crowding the route.
-			var size: Vector3 = access.get("furnishingSize", access.get("size", Vector3.ZERO)) as Vector3
-			if size.x <= 0.0 or size.z <= 0.0:
+			var reservation := access_reservation(access)
+			if reservation.size.x <= 0.0 or reservation.size.z <= 0.0:
 				continue
 			seen_ids[access_id] = true
-			reservations.append(AABB(
-				Vector3(position.x - size.x * 0.5, FLOOR_Y, position.z - size.z * 0.5),
-				Vector3(size.x, maxf(0.10, size.y), size.z)
-			))
+			reservations.append(reservation)
 	return reservations
+
+
+static func circulation_reservations(room_records: Array, actor_radius := 0.34, margin := 0.16) -> Array[AABB]:
+	var reservations := access_reservations(room_records)
+	var corridor_width := maxf(actor_radius * 2.0 + margin * 2.0, 0.10)
+	for raw_room in room_records:
+		if not raw_room is Dictionary:
+			continue
+		var room := raw_room as Dictionary
+		var entries: Array[Dictionary] = []
+		for raw_access in room.get("accesses", []) as Array:
+			if not raw_access is Dictionary:
+				continue
+			var reservation := access_reservation(raw_access as Dictionary)
+			if reservation.size.x <= 0.0 or reservation.size.z <= 0.0:
+				continue
+			entries.append({"position": reservation.get_center(), "height": reservation.size.y})
+		if entries.size() < 2:
+			continue
+		var anchor: Dictionary = entries[0]
+		var anchor_position: Vector3 = anchor.get("position", Vector3.ZERO) as Vector3
+		for entry_index in range(1, entries.size()):
+			var entry: Dictionary = entries[entry_index]
+			var target_position: Vector3 = entry.get("position", Vector3.ZERO) as Vector3
+			var height := maxf(float(anchor.get("height", 0.10)), float(entry.get("height", 0.10)))
+			var corner := Vector3(target_position.x, FLOOR_Y, anchor_position.z)
+			append_circulation_segment(reservations, anchor_position, corner, corridor_width, height)
+			append_circulation_segment(reservations, corner, target_position, corridor_width, height)
+	return reservations
+
+
+static func access_reservation(access: Dictionary) -> AABB:
+	var position: Vector3 = access.get("position", Vector3.ZERO) as Vector3
+	var size: Vector3 = access.get("furnishingSize", access.get("size", Vector3.ZERO)) as Vector3
+	if size.x <= 0.0 or size.z <= 0.0:
+		return AABB()
+	return AABB(
+		Vector3(position.x - size.x * 0.5, FLOOR_Y, position.z - size.z * 0.5),
+		Vector3(size.x, maxf(0.10, size.y), size.z)
+	)
+
+
+static func append_circulation_segment(reservations: Array[AABB], start: Vector3, end: Vector3, width: float, height: float) -> void:
+	var half_width := width * 0.5
+	var minimum_x := minf(start.x, end.x)
+	var maximum_x := maxf(start.x, end.x)
+	var minimum_z := minf(start.z, end.z)
+	var maximum_z := maxf(start.z, end.z)
+	if is_equal_approx(minimum_x, maximum_x):
+		minimum_x -= half_width
+		maximum_x += half_width
+	else:
+		minimum_z -= half_width
+		maximum_z += half_width
+	reservations.append(AABB(
+		Vector3(minimum_x, FLOOR_Y, minimum_z),
+		Vector3(maximum_x - minimum_x, maxf(0.10, height), maximum_z - minimum_z)
+	))
 
 
 static func wall_facing_rotation(wall_id: String) -> Vector3:
@@ -175,36 +226,61 @@ static func room_walkability_for_blocked_bounds(room: Dictionary, blocked: Array
 				var key := "%d:%d" % [x_index, z_index]
 				free[key] = true
 				positions[key] = position
+	var component_by_cell := {}
+	var components: Array[Dictionary] = []
+	var free_keys: Array = free.keys()
+	free_keys.sort()
+	for key_value in free_keys:
+		var start_key := String(key_value)
+		if component_by_cell.has(start_key):
+			continue
+		var component_id := components.size()
+		var frontier: Array[String] = [start_key]
+		var cursor := 0
+		var cell_count := 0
+		while cursor < frontier.size():
+			var key := frontier[cursor]
+			cursor += 1
+			if component_by_cell.has(key) or not free.has(key):
+				continue
+			component_by_cell[key] = component_id
+			cell_count += 1
+			var values := key.split(":")
+			if values.size() != 2:
+				continue
+			var x_index := int(values[0])
+			var z_index := int(values[1])
+			for delta in [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]:
+				var neighbour := "%d:%d" % [x_index + delta.x, z_index + delta.y]
+				if free.has(neighbour) and not component_by_cell.has(neighbour):
+					frontier.append(neighbour)
+		components.append({"id": component_id, "cellCount": cell_count})
 	var access_lanes := access_reservations([room])
-	var frontier: Array[String] = []
-	var visited := {}
-	for key in free.keys():
+	var access_components := {}
+	var access_seed_cells := 0
+	for key_value in free_keys:
+		var key := String(key_value)
 		var position: Vector3 = positions[key] as Vector3
 		for access in access_lanes:
 			if point_inside_horizontal_bounds(position, access):
-				visited[key] = true
-				frontier.append(String(key))
+				access_seed_cells += 1
+				access_components[int(component_by_cell.get(key, -1))] = true
 				break
-	var access_seed_cells := frontier.size()
-	var cursor := 0
-	while cursor < frontier.size():
-		var key := frontier[cursor]
-		cursor += 1
-		var values := key.split(":")
-		if values.size() != 2:
-			continue
-		var x_index := int(values[0])
-		var z_index := int(values[1])
-		for delta in [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]:
-			var neighbour := "%d:%d" % [x_index + delta.x, z_index + delta.y]
-			if free.has(neighbour) and not visited.has(neighbour):
-				visited[neighbour] = true
-				frontier.append(neighbour)
+	var access_component_ids: Array = access_components.keys()
+	access_component_ids.sort()
+	var reachable_cells := 0
+	if not access_component_ids.is_empty():
+		var primary_component_id := int(access_component_ids[0])
+		if primary_component_id >= 0 and primary_component_id < components.size():
+			reachable_cells = int((components[primary_component_id] as Dictionary).get("cellCount", 0))
 	return {
 		"freeCells": free.size(),
-		"reachableCells": visited.size(),
-		"unreachableCells": maxi(0, free.size() - visited.size()),
-		"accessSeedCells": access_seed_cells
+		"reachableCells": reachable_cells,
+		"unreachableCells": maxi(0, free.size() - reachable_cells),
+		"accessSeedCells": access_seed_cells,
+		"componentCount": components.size(),
+		"accessComponentCount": access_component_ids.size(),
+		"accessComponents": access_component_ids
 	}
 
 

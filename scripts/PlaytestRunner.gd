@@ -719,12 +719,13 @@ func test_tutorial_start_system() -> void:
     var niko := npc_root.get_node_or_null("TutorialNPC_niko") if npc_root else null
     var sera := npc_root.get_node_or_null("TutorialNPC_sera") if npc_root else null
     var audio_effects = main.get("audio_effects")
-    var knock_started := audio_effects != null and bool(audio_effects.stats().get("knockLooping", false))
+    main.call("refresh_intro_knock_audio")
+    var knock_suppressed := audio_effects != null and not bool(audio_effects.stats().get("knockLooping", false))
     var intro_before_door: Dictionary = tutorial_system.state() if tutorial_system.has_method("state") else {}
     var door_opened := bool(tutorial_system.on_door_opened(null))
     var intro_after_door: Dictionary = tutorial_system.state() if tutorial_system.has_method("state") else {}
     main.call("refresh_intro_knock_audio")
-    var knock_stopped := audio_effects != null and not bool(audio_effects.stats().get("knockLooping", false))
+    var knock_remains_suppressed := audio_effects != null and not bool(audio_effects.stats().get("knockLooping", false))
     main.call("show_tutorial_dialogue", String(tutorial_system.get("last_message")))
     await get_tree().process_frame
     var game_hud = main.get("hud")
@@ -744,17 +745,17 @@ func test_tutorial_start_system() -> void:
         "tutorial_contract_intro_knock_elder",
         door_opened
             and door_objective
-            and knock_started
-            and knock_stopped
+            and knock_suppressed
+            and knock_remains_suppressed
             and dialogue_open
             and dialogue_acknowledged
             and mira_has_separate_home
             and String(tutorial_system.get("last_message")).find("Mira:") == 0,
-        "door %s, objective %s, knock %s->%s, dialogue open %s ack %s, before open/ack/active %s/%s/%s after %s/%s/%s, mira home %s starter %s, message '%s'" % [
+        "door %s, objective %s, embedded knock suppressed %s->%s, dialogue open %s ack %s, before open/ack/active %s/%s/%s after %s/%s/%s, mira home %s starter %s, message '%s'" % [
             str(door_opened),
             str(door_objective),
-            str(knock_started),
-            str(not knock_stopped),
+            str(knock_suppressed),
+            str(knock_remains_suppressed),
             str(dialogue_open),
             str(dialogue_acknowledged),
             str(intro_before_door.get("introDoorOpened", null)),

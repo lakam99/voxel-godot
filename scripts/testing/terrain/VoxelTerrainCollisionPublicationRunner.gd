@@ -117,6 +117,9 @@ func run() -> void:
 	var world_generation = main.get("world_generation_system")
 	runtime.call("configure_startup_auxiliary_viewers", connected_player_region, world_generation)
 	var auxiliary_viewer_records: Array = runtime.get("startup_auxiliary_viewers")
+	var queued_auxiliary_viewer_count := int(runtime.get("startup_auxiliary_pending_specs").size())
+	var auxiliary_concurrency_limit := int(runtime.call("startup_auxiliary_concurrency_limit"))
+	var planned_auxiliary_viewer_count := auxiliary_viewer_records.size() + queued_auxiliary_viewer_count
 	var auxiliary_covers_far_edge := false
 	for record_value in auxiliary_viewer_records:
 		if not (record_value is Dictionary):
@@ -137,6 +140,46 @@ func run() -> void:
 			"primaryCovers": not connected_player_region_needs_help,
 			"auxiliaryViewerCount": auxiliary_viewer_records.size(),
 			"auxiliaryCoversFarEdge": auxiliary_covers_far_edge
+		})
+	)
+	add_result(
+		"voxel_publication_auxiliary_regions_use_bounded_parallel_viewers",
+		planned_auxiliary_viewer_count > 0
+			and auxiliary_viewer_records.size() == mini(planned_auxiliary_viewer_count, auxiliary_concurrency_limit)
+			and auxiliary_viewer_records.size() <= auxiliary_concurrency_limit,
+		JSON.stringify({
+			"activeViewerCount": auxiliary_viewer_records.size(),
+			"queuedViewerCount": queued_auxiliary_viewer_count,
+			"plannedViewerCount": planned_auxiliary_viewer_count,
+			"concurrencyLimit": auxiliary_concurrency_limit
+		})
+	)
+	runtime.call("clear_startup_auxiliary_viewers")
+	var compact_region: Array[Vector2i] = []
+	for dz in range(-4, 5):
+		for dx in range(-4, 5):
+			compact_region.append(chunk_key + Vector2i(dx, dz))
+	runtime.call("configure_startup_collision_bounds", compact_region)
+	var compact_auxiliary_viewers: Array = runtime.get("startup_auxiliary_viewers")
+	var compact_pending_specs: Array = runtime.get("startup_auxiliary_pending_specs")
+	var compact_coverage := {}
+	for record_value in compact_auxiliary_viewers:
+		if not (record_value is Dictionary):
+			continue
+		for covered_chunk in (record_value as Dictionary).get("chunks", []):
+			if covered_chunk is Vector2i:
+				compact_coverage[covered_chunk] = true
+	add_result(
+		"voxel_publication_compact_region_uses_single_coverage_viewer",
+		compact_auxiliary_viewers.size() == 1
+			and compact_pending_specs.is_empty()
+			and compact_coverage.size() == compact_region.size(),
+		JSON.stringify({
+			"compactRegionCount": compact_region.size(),
+			"auxiliaryViewerCount": compact_auxiliary_viewers.size(),
+			"pendingViewerCount": compact_pending_specs.size(),
+			"coveredChunkCount": compact_coverage.size(),
+			"terrainMaxViewDistance": int(runtime.get("terrain").max_view_distance)
 		})
 	)
 	runtime.call("clear_startup_auxiliary_viewers")

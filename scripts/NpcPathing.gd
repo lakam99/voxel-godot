@@ -44,6 +44,24 @@ func prebake_town(center_cell: Vector2i, radius_cells: int) -> Dictionary:
         return { "ok": false, "reason": "missing_coordinator" }
     return coordinator.prebake_town(center_cell, radius_cells)
 
+
+func prebake_building_navigation_topology() -> Dictionary:
+    ensure_ready()
+    if coordinator == null or not coordinator.has_method("prebake_building_navigation_topology"):
+        return { "ok": false, "reason": "missing_coordinator" }
+    return coordinator.prebake_building_navigation_topology()
+
+func plan_source_navigation_route(entry: Dictionary, intent: Dictionary) -> Dictionary:
+    ensure_ready()
+    if coordinator == null or not coordinator.has_method("plan_source_navigation_route"):
+        return {
+            "ok": false,
+            "status": "pending",
+            "classification": "pending_nav_data",
+            "reason": "missing_source_navigation_coordinator"
+        }
+    return coordinator.plan_source_navigation_route(entry, intent)
+
 func begin_frame() -> void:
     ensure_ready()
     if coordinator != null:

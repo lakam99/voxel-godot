@@ -565,6 +565,10 @@ func register_npc(body: Node3D, profile: Dictionary) -> Dictionary:
     var level := float(profile.get("level", body_position.y))
     var home_position := cell_to_position(home_cell, level)
     var porch_position := cell_to_position(porch_cell, level)
+    if profile.get("homePosition") is Vector3:
+        home_position = profile.get("homePosition") as Vector3
+    if profile.get("porchPosition") is Vector3:
+        porch_position = profile.get("porchPosition") as Vector3
     var profile_home_route_cells: Array = profile.get("homeRouteCells", []) if profile.get("homeRouteCells", []) is Array else []
     var profile_home_route_positions: Array = profile.get("homeRoutePositions", []) if profile.get("homeRoutePositions", []) is Array else []
     var home_route_positions: Array = profile_home_route_positions.duplicate()
@@ -971,10 +975,18 @@ func prebake_town_navmesh(records: Array) -> void:
     # perimeter routes and departures are pre-baked too.
     var prebake_radius := town_radius + 30
     var summary: Dictionary = pathing.prebake_town(center, prebake_radius)
+    var building_topology: Dictionary = prebake_building_navigation_topology()
     var monitor = main.get("runtime_perf_monitor") if main != null else null
     if monitor != null and monitor.has_method("increment_counter"):
         monitor.increment_counter("navmesh_town_prebake_published", int(summary.get("published", 0)))
         monitor.increment_counter("navmesh_town_prebake_tiles", int(summary.get("tiles", 0)))
+        monitor.increment_counter("navmesh_building_topology_prebake_published", int(building_topology.get("published", 0)))
+        monitor.increment_counter("navmesh_building_topology_prebake_tiles", int(building_topology.get("tiles", 0)))
+
+func prebake_building_navigation_topology() -> Dictionary:
+    if pathing == null or not pathing.has_method("prebake_building_navigation_topology"):
+        return { "ok": false, "reason": "missing_pathing" }
+    return pathing.prebake_building_navigation_topology()
 
 func claim_town_population(town_key: String, owner_id: String) -> Dictionary:
     var normalized_town_key := town_key.strip_edges()
@@ -1051,6 +1063,12 @@ func update_npc_home_record(actor_id, record: Dictionary) -> bool:
     var porch_cell: Vector2i = record.get("porchCell", entry.get("porchCell", home_cell))
     var door_cell: Vector2i = record.get("doorCell", entry.get("doorCell", porch_cell))
     var interior_landing_cell: Vector2i = record.get("interiorLandingCell", record.get("homeCell", home_cell))
+    var home_position := cell_to_position(home_cell, level)
+    var porch_position := cell_to_position(porch_cell, level)
+    if record.get("homePosition") is Vector3:
+        home_position = record.get("homePosition") as Vector3
+    if record.get("porchPosition") is Vector3:
+        porch_position = record.get("porchPosition") as Vector3
     var route_cells: Array = record.get("homeRouteCells", []) if record.get("homeRouteCells", []) is Array else []
     var route_positions: Array = []
     if route_cells.is_empty():
@@ -1061,16 +1079,21 @@ func update_npc_home_record(actor_id, record: Dictionary) -> bool:
         var route_cell: Vector2i = route_cell_value
         if not route_positions.is_empty() and flat_cell_for_position(route_positions[route_positions.size() - 1]) == route_cell:
             continue
-        route_positions.append(cell_to_position(route_cell, level))
+        if route_cell == home_cell:
+            route_positions.append(home_position)
+        elif route_cell == porch_cell:
+            route_positions.append(porch_position)
+        else:
+            route_positions.append(cell_to_position(route_cell, level))
     if route_positions.is_empty():
-        route_positions = [cell_to_position(porch_cell, level), cell_to_position(home_cell, level)]
+        route_positions = [porch_position, home_position]
     entry["level"] = level
     entry["homeCell"] = home_cell
     entry["porchCell"] = porch_cell
     entry["doorCell"] = door_cell
     entry["interiorLandingCell"] = interior_landing_cell
-    entry["homePosition"] = cell_to_position(home_cell, level)
-    entry["porchPosition"] = cell_to_position(porch_cell, level)
+    entry["homePosition"] = home_position
+    entry["porchPosition"] = porch_position
     entry["homeRouteCells"] = route_cells
     entry["homeRoutePositions"] = route_positions
     entry["interiorMinCell"] = record.get("interiorMinCell", entry.get("interiorMinCell", home_cell))
@@ -3387,6 +3410,25 @@ func building_navigation_manifest_snapshot() -> Array:
     if autonomy_system == null or not autonomy_system.has_method("building_navigation_manifest_snapshot"):
         return []
     return autonomy_system.building_navigation_manifest_snapshot()
+
+func register_navigation_collision_manifest(manifest: Dictionary) -> Dictionary:
+    if autonomy_system == null or not autonomy_system.has_method("register_navigation_collision_manifest"):
+        return { "ok": false, "reason": "missing_navigation_authority" }
+    var result: Dictionary = autonomy_system.register_navigation_collision_manifest(manifest)
+    navigation_change_flush_pending = true
+    return result
+
+func unregister_navigation_collision_manifest(manifest_id: String) -> Dictionary:
+    if autonomy_system == null or not autonomy_system.has_method("unregister_navigation_collision_manifest"):
+        return { "ok": false, "reason": "missing_navigation_authority" }
+    var result: Dictionary = autonomy_system.unregister_navigation_collision_manifest(manifest_id)
+    navigation_change_flush_pending = true
+    return result
+
+func navigation_collision_manifest_snapshot() -> Array:
+    if autonomy_system == null or not autonomy_system.has_method("navigation_collision_manifest_snapshot"):
+        return []
+    return autonomy_system.navigation_collision_manifest_snapshot()
 
 func notify_navigation_semantic_changed(semantic_id: String, bounds: AABB, metadata := {}) -> void:
     if autonomy_system:

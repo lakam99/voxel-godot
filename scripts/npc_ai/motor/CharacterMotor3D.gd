@@ -83,8 +83,20 @@ func apply(body: CharacterBody3D, command, profile, delta: float, terrain_provid
 	state.jump_snap_time = snap_time
 	if requested.length_squared() > 0.001 and state.flat_displacement() <= 0.001:
 		state.blocked = true
-		state.blocked_contact_category = "static_or_dynamic_collision"
+		state.blocked_contact_category = "dynamic_actor" if _is_dynamic_actor_contact(body, state) else "static_collision"
 	return state
+
+func _is_dynamic_actor_contact(body: CharacterBody3D, state) -> bool:
+	if body == null or int(state.slide_collision_count) <= 0:
+		return false
+	for collision_index in range(body.get_slide_collision_count()):
+		var collision := body.get_slide_collision(collision_index)
+		var collider = collision.get_collider() if collision != null else null
+		if collider is CharacterBody3D and collider != body:
+			return true
+		if collider is Node and (collider as Node).has_meta("npc_stable_id"):
+			return true
+	return false
 
 func apply_terrain_grounding(body: CharacterBody3D, profile, delta: float, terrain_provider: Node, was_grounded: bool, jumped: bool, previous_position: Vector3, state) -> void:
 	if terrain_provider == null or (not terrain_provider.has_method("ground_y_near_position") and not terrain_provider.has_method("surface_y_at_position")):

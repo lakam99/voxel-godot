@@ -36,7 +36,7 @@ func publish(blueprint, parent: Node3D, options: Dictionary = {}) -> Dictionary:
 	if blueprint == null or parent == null:
 		return summary()
 	configure_publication_options(options)
-	source_blueprint_id = String(blueprint.id)
+	source_blueprint_id = canonical_source_blueprint_id(blueprint)
 	var started := Time.get_ticks_usec()
 	for part in blueprint.parts:
 		if part == null:
@@ -56,7 +56,7 @@ func publish_incremental(blueprint, parent: Node3D, parts_per_frame := 6, option
 	if blueprint == null or parent == null:
 		return summary()
 	configure_publication_options(options)
-	source_blueprint_id = String(blueprint.id)
+	source_blueprint_id = canonical_source_blueprint_id(blueprint)
 	var started := Time.get_ticks_usec()
 	var frame_budget := maxi(1, parts_per_frame)
 	var published_this_frame := 0
@@ -98,6 +98,13 @@ func configure_publication_options(options: Dictionary) -> void:
 	batch_static_parts = bool(options.get("batchStaticParts", false))
 
 
+func canonical_source_blueprint_id(blueprint) -> String:
+	var result := String(blueprint.id) if blueprint != null else ""
+	if blueprint != null and blueprint.recipe is Dictionary:
+		result = String((blueprint.recipe as Dictionary).get("sourceBlueprintId", result))
+	return result
+
+
 func publish_part(part, parent: Node3D) -> StaticBody3D:
 	var started := Time.get_ticks_usec()
 	published_part_count += 1
@@ -114,9 +121,9 @@ func publish_part(part, parent: Node3D) -> StaticBody3D:
 	body.set_meta("building_material", part.material_id)
 	body.set_meta("building_semantic", part.semantic)
 	body.set_meta("building_part_record", part.snapshot())
+	parent.add_child(body)
 	if String(part.kind) == "door":
 		configure_door_leaf(body, part)
-	parent.add_child(body)
 	published_nodes.append(body)
 	if part.collision_enabled:
 		var collision := CollisionShape3D.new()
@@ -324,17 +331,29 @@ func configure_door_leaf(body: StaticBody3D, part) -> void:
 	body.set_meta("closed_rotation", body.rotation.y)
 	body.set_meta("open_swing", -PI * 0.5)
 	body.set_meta("door_motion", String(part.recipe.get("doorMotion", "swing")))
+	body.set_meta("door_presentation", String(part.recipe.get("doorPresentation", "door")))
 	body.set_meta("open_visual_offset", Vector3(0.0, part.size.y + 0.18, 0.0) if String(part.recipe.get("doorMotion", "swing")) == "raise" else Vector3.ZERO)
 	body.set_meta("door_portal_id", portal_id)
 	body.set_meta("door_group_id", portal_id)
 	body.set_meta("door_building_id", source_blueprint_id)
-	body.set_meta("door_side", 0)
+	body.set_meta("door_side", door_side_for_world_transform(body.global_transform))
 	body.set_meta("door_public_access", true)
 	body.set_meta("door_policy", "private_home")
 	body.set_meta("locked", false)
 	body.set_meta("jammed", false)
 	body.set_meta("destroyed", false)
 	body.set_meta("unloaded", false)
+
+
+func door_side_for_world_transform(transform: Transform3D) -> int:
+	var forward := transform.basis * Vector3.FORWARD
+	forward.y = 0.0
+	if forward.length_squared() <= 0.0001:
+		return 0
+	forward = forward.normalized()
+	if absf(forward.x) > absf(forward.z):
+		return 1 if forward.x > 0.0 else 3
+	return 0 if forward.z >= 0.0 else 2
 
 
 func add_door_interaction_proxy(door: StaticBody3D, size: Vector3) -> void:
@@ -475,6 +494,8 @@ func summary() -> Dictionary:
 		"staticRecordCount": static_part_records.size(),
 		"navigationSupportCount": int(building_navigation_manifest.get("supportCount", 0)),
 		"navigationVerticalLinkCount": int(building_navigation_manifest.get("verticalLinkCount", 0)),
+		"navigationSupportSeamLinkCount": int(building_navigation_manifest.get("supportSeamLinkCount", 0)),
+		"navigationInteriorPassageLinkCount": int(building_navigation_manifest.get("interiorPassageLinkCount", 0)),
 		"navigationManifest": building_navigation_manifest.duplicate(true),
 		"recipeBuildUsec": recipe_build_usec,
 		"publicationUsec": publication_usec

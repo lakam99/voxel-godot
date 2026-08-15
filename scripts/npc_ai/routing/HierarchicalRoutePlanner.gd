@@ -422,7 +422,7 @@ func resolve_start_key(graph: Dictionary, request, profile = null) -> String:
 	var nodes: Dictionary = graph.get("nodes", {})
 	if start_span is String and nodes.has(String(start_span)):
 		return String(start_span)
-	if start_span != null and start_span.has_method("key_string") and nodes.has(start_span.key_string()):
+	if start_span != null and not (start_span is String) and start_span.has_method("key_string") and nodes.has(start_span.key_string()):
 		return start_span.key_string()
 	return _nearest_span(graph, request.get("start_position"), float(_goal_spec(request).get("maxStartSnap", NpcConstantsScript.CELL_SIZE * 0.60)), request.get("start_position").y, float(_goal_spec(request).get("verticalTolerance", NpcConstantsScript.DEFAULT_NPC_STEP_UP)))
 

@@ -660,6 +660,8 @@ func nav_world_cases() -> Array[Dictionary]:
 		["npc_navworld_event_terrain_edit_dirty_exact_tiles", "test_navworld_event_terrain_edit_dirty_exact_tiles"],
 		["npc_navworld_event_chunk_load_unload", "test_navworld_event_chunk_load_unload"],
 		["npc_navworld_tile_source_key_is_tile_stable", "test_navworld_tile_source_key_is_tile_stable"],
+		["npc_navworld_incremental_prop_change_keeps_unrelated_tile_cache", "test_navworld_incremental_prop_change_keeps_unrelated_tile_cache"],
+		["npc_navworld_semantic_change_preserves_geometry_tile_cache", "test_navworld_semantic_change_preserves_geometry_tile_cache"],
 		["npc_navworld_no_scene_scan_revision", "test_navworld_no_scene_scan_revision"],
 		["npc_navworld_multisurface_bridge", "test_navworld_multisurface_bridge"],
 		["npc_navworld_tunnel_headroom", "test_navworld_tunnel_headroom"],
@@ -680,17 +682,27 @@ func nav_world_cases() -> Array[Dictionary]:
 		["npc_navmesh_backend_custom_alias_navmesh", "test_navmesh_backend_custom_alias_navmesh"],
 		["npc_navmesh_descriptor_deterministic_signature", "test_navmesh_descriptor_deterministic_signature"],
 		["npc_navmesh_tile_snapshot_descriptor_deterministic", "test_navmesh_tile_snapshot_descriptor_deterministic"],
+		["npc_navmesh_adjacent_tile_collision_clearance", "test_navmesh_adjacent_tile_collision_clearance"],
+		["npc_navmesh_source_door_portal_physical_clearance", "test_navmesh_source_door_portal_physical_clearance"],
+		["npc_navmesh_building_topology_tile_closure", "test_navmesh_building_topology_tile_closure"],
+		["npc_navmesh_invalidated_static_snapshot_rebuilds", "test_navmesh_invalidated_static_snapshot_rebuilds"],
+		["npc_navmesh_cross_tile_link_survives_endpoint_rebuild", "test_navmesh_cross_tile_link_survives_endpoint_rebuild"],
 		["npc_navmesh_descriptor_keeps_door_links", "test_navmesh_descriptor_keeps_door_links"],
 		["npc_navmesh_service_installs_navigation_region", "test_navmesh_service_installs_navigation_region"],
+		["npc_navmesh_conforming_support_cells", "test_navmesh_conforming_support_cells"],
+		["npc_navmesh_unified_tile_support_cells", "test_navmesh_unified_tile_support_cells"],
+		["npc_navmesh_discards_unresolved_building_link_endpoints", "test_navmesh_discards_unresolved_building_link_endpoints"],
 		["npc_navmesh_chunk_unload_cleans_region", "test_navmesh_chunk_unload_cleans_region"],
 		["npc_navmesh_door_portal_installs_nav_link", "test_navmesh_door_portal_installs_nav_link"],
 		["npc_navmesh_route_through_door_link_emits_action", "test_navmesh_route_through_door_link_emits_action"],
 		["npc_navmesh_actor_path_status", "test_navmesh_actor_path_status"],
 		["npc_navmesh_door_state_toggles_nav_link", "test_navmesh_door_state_toggles_nav_link"],
 		["npc_navmesh_dirty_region_rebuild_after_world_edit", "test_navmesh_dirty_region_rebuild_after_world_edit"],
+		["npc_navmesh_semantic_event_preserves_geometry_region", "test_navmesh_semantic_event_preserves_geometry_region"],
 		["npc_navmesh_chunk_unload_cleans_door_links", "test_navmesh_chunk_unload_cleans_door_links"],
 		["npc_navmesh_semantic_interior_descriptor_registered", "test_navmesh_semantic_interior_descriptor_registered"],
 		["npc_navmesh_autonomy_semantic_backend_registers", "test_navmesh_autonomy_semantic_backend_registers"],
+		["npc_navmesh_autonomy_prefetch_preserves_published_tile", "test_navmesh_autonomy_prefetch_preserves_published_tile"],
 		["npc_navmesh_service_register_unregister_descriptor", "test_navmesh_service_register_unregister_descriptor"],
 		["npc_navmesh_closest_walkable_descriptor_point", "test_navmesh_closest_walkable_descriptor_point"],
 		["npc_navmesh_no_scene_visual_mesh_scan", "test_navmesh_no_scene_visual_mesh_scan"],
@@ -3101,6 +3113,73 @@ func test_navworld_tile_source_key_is_tile_stable(_mode: String) -> Dictionary:
 		}
 	)
 
+
+func test_navworld_incremental_prop_change_keeps_unrelated_tile_cache(_mode: String) -> Dictionary:
+	var adapter := GeneratedWorldNavigationAdapterScript.new()
+	adapter.cached_revision = "1"
+	var changed_tile_key := "4,4"
+	var unrelated_tile_key := "9,9"
+	var changed_source_key := adapter.navmesh_tile_source_key_for_tile(changed_tile_key)
+	var unrelated_source_key := adapter.navmesh_tile_source_key_for_tile(unrelated_tile_key)
+	var changed_cache_key := "%s|%s" % [changed_tile_key, changed_source_key]
+	var unrelated_cache_key := "%s|%s" % [unrelated_tile_key, unrelated_source_key]
+	adapter.navmesh_tile_snapshot_cache[changed_cache_key] = { "tileKey": changed_tile_key }
+	adapter.navmesh_tile_snapshot_cache[unrelated_cache_key] = { "tileKey": unrelated_tile_key }
+	adapter.navmesh_tile_snapshot_cache_order = [changed_cache_key, unrelated_cache_key]
+	adapter.apply_navigation_events([{
+		"tileKey": changed_tile_key,
+		"changeKinds": [String(NpcEnumsScript.CHANGE_KIND_PROP_CREATED)],
+		"objectIds": ["prop:missing"],
+		"revision": 8
+	}])
+	var changed_source_after := adapter.navmesh_tile_source_key_for_tile(changed_tile_key)
+	var unrelated_source_after := adapter.navmesh_tile_source_key_for_tile(unrelated_tile_key)
+	var passed := not adapter.navmesh_tile_snapshot_cache.has(changed_cache_key) \
+		and adapter.navmesh_tile_snapshot_cache.has(unrelated_cache_key) \
+		and changed_source_after != changed_source_key \
+		and unrelated_source_after == unrelated_source_key
+	return outcome(
+		passed,
+		"changed=%s->%s unrelated=%s->%s cache=%s" % [changed_source_key, changed_source_after, unrelated_source_key, unrelated_source_after, JSON.stringify(adapter.navmesh_tile_snapshot_cache.keys())],
+		["incremental_prop_change_evicts_changed_tile", "incremental_prop_change_preserves_unrelated_tile_cache", "unrelated_tile_source_key_stays_stable"],
+		{
+			"changedSourceBefore": changed_source_key,
+			"changedSourceAfter": changed_source_after,
+			"unrelatedSourceBefore": unrelated_source_key,
+			"unrelatedSourceAfter": unrelated_source_after,
+			"cacheKeys": adapter.navmesh_tile_snapshot_cache.keys()
+		}
+	)
+
+
+func test_navworld_semantic_change_preserves_geometry_tile_cache(_mode: String) -> Dictionary:
+	var adapter := GeneratedWorldNavigationAdapterScript.new()
+	adapter.cached_revision = "1"
+	var tile_key := "4,4"
+	var source_key := adapter.navmesh_tile_source_key_for_tile(tile_key)
+	var cache_key := "%s|%s" % [tile_key, source_key]
+	adapter.navmesh_tile_snapshot_cache[cache_key] = { "tileKey": tile_key }
+	adapter.navmesh_tile_snapshot_cache_order = [cache_key]
+	adapter.apply_navigation_events([{
+		"tileKey": tile_key,
+		"changeKinds": [String(NpcEnumsScript.CHANGE_KIND_SEMANTIC_CHANGED)],
+		"revision": 8
+	}])
+	var source_after := adapter.navmesh_tile_source_key_for_tile(tile_key)
+	var passed := source_after == source_key and adapter.navmesh_tile_snapshot_cache.has(cache_key)
+	return outcome(
+		passed,
+		"source=%s->%s cache=%s semanticRevision=%d" % [source_key, source_after, JSON.stringify(adapter.navmesh_tile_snapshot_cache.keys()), adapter.semantic_revision],
+		["semantic_change_keeps_geometry_tile_source", "semantic_change_preserves_geometry_tile_cache", "semantic_revision_remains_observable"],
+		{
+			"sourceBefore": source_key,
+			"sourceAfter": source_after,
+			"cacheKeys": adapter.navmesh_tile_snapshot_cache.keys(),
+			"semanticRevision": adapter.semantic_revision
+		}
+	)
+
+
 func test_navworld_no_scene_scan_revision(_mode: String) -> Dictionary:
 	var service_text := read_text("res://scripts/npc_ai/navigation/NavigationWorldService.gd")
 	var builder_text := read_text("res://scripts/npc_ai/navigation/NavigationTileBuilder.gd")
@@ -3358,6 +3437,151 @@ func test_navmesh_tile_snapshot_descriptor_deterministic(_mode: String) -> Dicti
 	var passed: bool = first.stable_signature() == second.stable_signature() and String(first.get("region_id")) == "region:chunk:2,-1" and summary.get("walkableSurfaces", []).size() == 2 and summary.get("blockers", []).size() == 1 and summary.get("doorPortals", []).size() == 1 and summary.get("doorLinks", []).size() == 1
 	return outcome(passed, "signature=%s summary=%s" % [first.stable_signature(), JSON.stringify(summary)], ["tile_snapshot_descriptor_deterministic", "tile_snapshot_keeps_blockers", "tile_snapshot_keeps_door_portals", "tile_snapshot_keeps_door_links"], { "summary": summary })
 
+
+func test_navmesh_adjacent_tile_collision_clearance(_mode: String) -> Dictionary:
+	var adapter := GeneratedWorldNavigationAdapterScript.new()
+	var divider := {
+		"minX": 438.20,
+		"maxX": 441.34,
+		"minZ": 538.89,
+		"maxZ": 539.15,
+		"inflation": 0.52
+	}
+	var source_tile := bool(adapter.call("_collision_record_overlaps_tile", divider, "20,24"))
+	var clearance_tile := bool(adapter.call("_collision_record_overlaps_tile", divider, "20,25"))
+	var unrelated_tile := bool(adapter.call("_collision_record_overlaps_tile", divider, "20,26"))
+	var passed := source_tile and clearance_tile and not unrelated_tile
+	return outcome(
+		passed,
+		"source=%s clearance=%s unrelated=%s" % [str(source_tile), str(clearance_tile), str(unrelated_tile)],
+		["collision_clearance_publishes_across_cell_center_tile_boundary", "adjacent_tile_support_mesh_receives_neighboring_static_collision"],
+		{ "sourceTile": source_tile, "clearanceTile": clearance_tile, "unrelatedTile": unrelated_tile }
+	)
+
+
+func test_navmesh_source_door_portal_physical_clearance(_mode: String) -> Dictionary:
+	var adapter := GeneratedWorldNavigationAdapterScript.new()
+	var support := {
+		"id": "support:door-portal",
+		"cell": Vector3i.ZERO,
+		"worldPosition": Vector3.ZERO,
+		"floorNormal": Vector3.UP,
+		"headroom": 3.0,
+		"lateralClearance": 1.0,
+		"sourcePartId": "floor:door-portal",
+		"sourceCollisionPartId": "floor:door-portal",
+		"polygon": [Vector3(-1.5, 0.0, -1.0), Vector3(-1.5, 0.0, 1.0), Vector3(1.5, 0.0, 1.0), Vector3(1.5, 0.0, -1.0)]
+	}
+	var supports: Array[Dictionary] = [support]
+	adapter.cached_building_supports = supports
+	adapter.cached_building_doors = [{
+		"id": "door:physical-clearance",
+		"sourcePortalReady": true,
+		"interior": Vector3(-0.5, 0.04, 0.0),
+		"exterior": Vector3(0.5, 0.04, 0.0)
+	}]
+	var near_jamb := {
+		"id": "collision:door:jamb",
+		"sourcePartId": "wall:door:jamb",
+		"minX": -0.10,
+		"maxX": 0.10,
+		"minY": 0.0,
+		"maxY": 2.4,
+		"minZ": 0.47,
+		"maxZ": 0.70,
+		"inflation": 0.52
+	}
+	var snapshot := { "staticCollisionByCell": {}, "staticCollisionBroad": [near_jamb] }
+	var points: Array[Vector3] = [Vector3(-1.2, 0.04, 0.0), Vector3(-0.5, 0.04, 0.0), Vector3(0.5, 0.04, 0.0), Vector3(1.2, 0.04, 0.0)]
+	var strict: Dictionary = adapter.validate_waypoint_route({}, snapshot, points, {}, true)
+	var actions := {
+		"door:physical-clearance": {
+			"kind": "door",
+			"navLink": true,
+			"portalId": "door:physical-clearance",
+			"entryPosition": points[1],
+			"exitPosition": points[2]
+		}
+	}
+	var portal_checked: Dictionary = adapter.validate_waypoint_route({}, snapshot, points, {}, true, actions)
+	var passed := not bool(strict.get("ok", true)) and String(strict.get("reason", "")) == "layered_static_collision" and bool(portal_checked.get("ok", false))
+	return outcome(passed, "strict=%s portalChecked=%s" % [JSON.stringify(strict), JSON.stringify(portal_checked)], ["ordinary_routes_keep_social_collision_margin", "published_source_door_segments_use_capsule_clearance", "door_portal_exception_remains_action_scoped"], { "strict": strict, "portalChecked": portal_checked })
+
+func test_navmesh_building_topology_tile_closure(_mode: String) -> Dictionary:
+	var adapter = GeneratedWorldNavigationAdapterScript.new()
+	adapter.cached_revision = "test"
+	var supports: Array[Dictionary] = [
+		{ "id": "support:west", "tileKeys": ["-1,0", "0,0"] },
+		{ "id": "support:east", "tileKeys": ["1,0"] }
+	]
+	var doors: Array[Dictionary] = [{ "id": "door:boundary", "tileKeys": ["0,0", "0,1"] }]
+	var vertical_links: Array[Dictionary] = [{
+		"id": "link:stairs",
+		"ownerTileKey": "0,0",
+		"startTileKey": "0,0",
+		"endTileKey": "1,0",
+		"tileKeys": ["0,0", "1,0"]
+	}]
+	var support_seam_links: Array[Dictionary] = [{
+		"id": "link:seam",
+		"ownerTileKey": "0,1",
+		"startTileKey": "0,1",
+		"endTileKey": "0,2",
+		"tileKeys": ["0,1", "0,2"]
+	}]
+	adapter.cached_building_supports = supports
+	adapter.cached_building_doors = doors
+	adapter.cached_building_vertical_links = vertical_links
+	adapter.cached_building_support_seam_links = support_seam_links
+	var interior_passage_links: Array[Dictionary] = []
+	adapter.cached_building_interior_passage_links = interior_passage_links
+	var keys: Array = adapter.building_navigation_topology_tile_keys()
+	var expected := ["-1,0", "0,0", "0,1", "0,2", "1,0"]
+	var passed := keys == expected
+	return outcome(passed, "keys=%s" % JSON.stringify(keys), ["building_topology_prebake_covers_supports_doors_and_link_endpoints", "building_topology_tile_closure_is_sorted"], { "keys": keys, "expected": expected })
+
+func test_navmesh_invalidated_static_snapshot_rebuilds(_mode: String) -> Dictionary:
+	var adapter = GeneratedWorldNavigationAdapterScript.new()
+	adapter.cached_revision = ""
+	adapter.cached_blocked[Vector2i.ZERO] = true
+	adapter.building_navigation_topology_tile_keys()
+	var passed: bool = adapter.nav_static_rebuild_count == 1 and adapter.cached_blocked.is_empty()
+	return outcome(passed, "rebuilds=%d blocked=%s" % [adapter.nav_static_rebuild_count, JSON.stringify(adapter.cached_blocked)], ["invalidated_static_snapshot_rebuilds_despite_previous_cached_cells", "topology_prebake_never_reads_pre_manifest_static_cache"], { "rebuilds": adapter.nav_static_rebuild_count, "blocked": adapter.cached_blocked })
+
+func test_navmesh_cross_tile_link_survives_endpoint_rebuild(_mode: String) -> Dictionary:
+	var service = NavmeshWorldServiceScript.new()
+	service.setup(NavigationBackendConfigScript.from_value("navmesh", "test"))
+	var left = NavigationBakeDescriptorScript.create("region:chunk:0,0", "0,0", AABB(Vector3(-1.0, -0.1, -1.0), Vector3(2.0, 0.2, 2.0)))
+	left.add_walkable_surface("surface:left", Vector3.ZERO, Vector3(1.0, 0.05, 1.0))
+	left.add_navigation_link("link:left-to-right", Vector3(0.45, 0.0, 0.0), Vector3(1.55, 0.0, 0.0), {
+		"startTileKey": "0,0",
+		"endTileKey": "1,0"
+	})
+	var right = NavigationBakeDescriptorScript.create("region:chunk:1,0", "1,0", AABB(Vector3(1.0, -0.1, -1.0), Vector3(2.0, 0.2, 2.0)))
+	right.add_walkable_surface("surface:right", Vector3(1.6, 0.0, 0.0), Vector3(1.0, 0.05, 1.0))
+	service.register_chunk_descriptor(left)
+	service.register_chunk_descriptor(right)
+	for _pass in range(4):
+		service.process_dirty_regions(1, 100000)
+	var before_rebuild: Dictionary = service.stats()
+	service.apply_navigation_events([{ "tileKey": "1,0", "changeKinds": ["block_removed"], "revision": 7 }])
+	var rebuilt: Array = service.process_dirty_regions(1, 100000)
+	var after_rebuild: Dictionary = service.stats()
+	var snapshot: Dictionary = service.debug_snapshot()
+	service.apply_navigation_events([{ "tileKey": "1,0", "changeKinds": ["chunk_unloaded"], "revision": 8 }])
+	var after_unload: Dictionary = service.stats()
+	service.clear()
+	var installed_links: Array = snapshot.get("navigationLinks", []) as Array
+	var passed: bool = int(before_rebuild.get("pendingNavigationLinkCount", -1)) == 0 \
+		and int(before_rebuild.get("installedNavigationLinkCount", 0)) == 1 \
+		and not rebuilt.is_empty() \
+		and int(after_rebuild.get("pendingNavigationLinkCount", -1)) == 0 \
+		and int(after_rebuild.get("installedNavigationLinkCount", 0)) == 1 \
+		and installed_links.size() == 1 \
+		and int(after_unload.get("pendingNavigationLinkCount", 0)) == 1 \
+		and int(after_unload.get("installedNavigationLinkCount", -1)) == 0
+	return outcome(passed, "before=%s rebuilt=%s after=%s unload=%s" % [JSON.stringify(before_rebuild), JSON.stringify(rebuilt), JSON.stringify(after_rebuild), JSON.stringify(after_unload)], ["cross_tile_link_survives_atomic_endpoint_rebuild", "endpoint_unload_defers_cross_tile_link"], { "before": before_rebuild, "rebuilt": rebuilt, "after": after_rebuild, "unload": after_unload, "snapshot": snapshot })
+
 func test_navmesh_descriptor_keeps_door_links(_mode: String) -> Dictionary:
 	var first = NavigationBakeDescriptorScript.create("region:chunk:links", "links", AABB(Vector3.ZERO, Vector3(6, 2, 6)))
 	first.add_walkable_surface("surface:left", Vector3(0.0, 0.0, 0.0))
@@ -3384,6 +3608,153 @@ func test_navmesh_service_installs_navigation_region(_mode: String) -> Dictionar
 	service.clear()
 	var passed: bool = String(registered.get("status", "")) == "installed" and bool(registered.get("installed", false)) and int(stats.get("installedRegionCount", 0)) == 1 and int(stats.get("installedSurfaceCount", 0)) == 2 and bool(snapshot.get("hasNavigationMap", false))
 	return outcome(passed, "registered=%s stats=%s" % [JSON.stringify(registered), JSON.stringify(stats)], ["navmesh_descriptor_installs_region_rid", "navmesh_install_counts_surfaces", "navmesh_debug_reports_map"], { "registered": registered, "stats": stats, "snapshot": snapshot })
+
+func test_navmesh_conforming_support_cells(_mode: String) -> Dictionary:
+	var adapter = GeneratedWorldNavigationAdapterScript.new()
+	var support := {
+		"id": "support:conforming-test",
+		"cell": Vector3i.ZERO,
+		"worldPosition": Vector3(0.16, 0.04, 0.16),
+		"floorNormal": Vector3.UP,
+		"headroom": 3.0,
+		"lateralClearance": 1.0,
+		"traversalTags": ["building", "support"],
+		"sourcePartId": "floor:conforming-test",
+		"sourceCollisionPartId": "floor:conforming-test"
+	}
+	var cells := {
+		Vector2i(0, 0): true,
+		Vector2i(1, 0): true,
+		Vector2i(2, 0): true,
+		Vector2i(2, 1): true,
+		Vector2i(2, 2): true
+	}
+	var surface_value = adapter.call("_merged_building_support_navmesh_surfaces", support, cells, 1)
+	var surfaces: Array = surface_value if surface_value is Array else []
+	var every_surface_is_row_segment := true
+	for surface_value_item in surfaces:
+		if not (surface_value_item is Dictionary):
+			every_surface_is_row_segment = false
+			break
+		var polygon: Array = (surface_value_item as Dictionary).get("polygon", []) if (surface_value_item as Dictionary).get("polygon", []) is Array else []
+		if polygon.size() != 4:
+			every_surface_is_row_segment = false
+			break
+		var minimum := Vector2(INF, INF)
+		var maximum := Vector2(-INF, -INF)
+		for point_value in polygon:
+			if not (point_value is Vector3):
+				every_surface_is_row_segment = false
+				break
+			var point: Vector3 = point_value
+			minimum.x = minf(minimum.x, point.x)
+			minimum.y = minf(minimum.y, point.z)
+			maximum.x = maxf(maximum.x, point.x)
+			maximum.y = maxf(maximum.y, point.z)
+		if not every_surface_is_row_segment:
+			break
+		if maximum.x - minimum.x < 0.3199 or absf((maximum.y - minimum.y) - 0.32) > 0.0001:
+			every_surface_is_row_segment = false
+			break
+	var service = NavmeshWorldServiceScript.new()
+	service.setup(NavigationBackendConfigScript.from_value("navmesh", "test"))
+	var registered := service.register_tile_snapshot(nav_snapshot("conforming-support", surfaces))
+	var stats: Dictionary = service.stats()
+	service.clear()
+	var passed: bool = bool(registered.get("installed", false)) \
+		and surfaces.size() == 4 \
+		and every_surface_is_row_segment \
+		and int(stats.get("installedSurfaceCount", 0)) == surfaces.size()
+	return outcome(passed, "registered=%s surfaces=%d rowSegments=%s stats=%s" % [JSON.stringify(registered), surfaces.size(), str(every_surface_is_row_segment), JSON.stringify(stats)], ["building_support_cells_share_complete_navmesh_edges", "support_rows_split_at_neighboring_boundaries", "support_navmesh_surface_count_stays_compact"], { "registered": registered, "surfaceCount": surfaces.size(), "rowSegments": every_surface_is_row_segment, "stats": stats })
+
+
+func test_navmesh_unified_tile_support_cells(_mode: String) -> Dictionary:
+	var adapter = GeneratedWorldNavigationAdapterScript.new()
+	var first_support := {
+		"id": "support:unified:first",
+		"cell": Vector3i.ZERO,
+		"worldPosition": Vector3(0.32, 0.0, 0.16),
+		"floorNormal": Vector3.UP,
+		"headroom": 3.0,
+		"lateralClearance": 1.0,
+		"traversalTags": ["building", "support"],
+		"sourcePartId": "floor:unified:first",
+		"sourceCollisionPartId": "floor:unified:first",
+		"tileKeys": ["0,0"],
+		"polygon": [Vector3(0.0, 0.0, 0.0), Vector3(0.0, 0.0, 0.32), Vector3(0.64, 0.0, 0.32), Vector3(0.64, 0.0, 0.0)]
+	}
+	var second_support := {
+		"id": "support:unified:second",
+		"cell": Vector3i.ZERO,
+		"worldPosition": Vector3(0.96, 0.0, 0.16),
+		"floorNormal": Vector3.UP,
+		"headroom": 3.0,
+		"lateralClearance": 1.0,
+		"traversalTags": ["building", "support"],
+		"sourcePartId": "floor:unified:second",
+		"sourceCollisionPartId": "floor:unified:second",
+		"tileKeys": ["0,0"],
+		"polygon": [Vector3(0.64, 0.0, 0.0), Vector3(0.64, 0.0, 0.32), Vector3(1.28, 0.0, 0.32), Vector3(1.28, 0.0, 0.0)]
+	}
+	var supports: Array[Dictionary] = [first_support, second_support]
+	adapter.cached_building_supports = supports
+	adapter.cached_building_supports_by_tile = { "0,0": supports }
+	var surface_value = adapter.call("_navmesh_surfaces_from_building_tile", { "staticCollisionByCell": {} }, "0,0", 1)
+	var surfaces: Array = surface_value if surface_value is Array else []
+	var polygon: Array = surfaces[0].get("polygon", []) if surfaces.size() == 1 and surfaces[0] is Dictionary else []
+	var minimum := Vector2(INF, INF)
+	var maximum := Vector2(-INF, -INF)
+	var valid_polygon := polygon.size() == 4
+	for point_value in polygon:
+		if not (point_value is Vector3):
+			valid_polygon = false
+			break
+		var point: Vector3 = point_value
+		minimum.x = minf(minimum.x, point.x)
+		minimum.y = minf(minimum.y, point.z)
+		maximum.x = maxf(maximum.x, point.x)
+		maximum.y = maxf(maximum.y, point.z)
+	var passed := valid_polygon \
+		and surfaces.size() == 1 \
+		and absf(minimum.x) <= 0.0001 \
+		and absf(maximum.x - 1.28) <= 0.0001 \
+		and absf(minimum.y) <= 0.0001 \
+		and absf(maximum.y - 0.32) <= 0.0001
+	return outcome(passed, "surfaces=%s bounds=(%s,%s)" % [JSON.stringify(surfaces), minimum, maximum], ["adjacent_building_supports_share_one_tile_walkability_mesh", "unified_support_mesh_has_no_part_boundary_gap", "unified_support_mesh_stays_compact"], { "surfaces": surfaces, "minimum": minimum, "maximum": maximum })
+
+
+func test_navmesh_discards_unresolved_building_link_endpoints(_mode: String) -> Dictionary:
+	var adapter = GeneratedWorldNavigationAdapterScript.new()
+	var support := {
+		"id": "support:unresolved-link",
+		"cell": Vector3i.ZERO,
+		"worldPosition": Vector3(0.64, 0.0, 0.16),
+		"floorNormal": Vector3.UP,
+		"headroom": 3.0,
+		"lateralClearance": 1.0,
+		"traversalTags": ["building", "support"],
+		"sourcePartId": "floor:unresolved-link",
+		"sourceCollisionPartId": "floor:unresolved-link",
+		"tileKeys": ["0,0"],
+		"polygon": [Vector3(0.0, 0.0, 0.0), Vector3(0.0, 0.0, 0.32), Vector3(1.28, 0.0, 0.32), Vector3(1.28, 0.0, 0.0)]
+	}
+	var supports: Array[Dictionary] = [support]
+	adapter.cached_building_supports = supports
+	adapter.cached_building_supports_by_tile = { "0,0": supports }
+	var links: Array[Dictionary] = [{
+		"id": "link:unresolved-endpoint",
+		"kind": "support_seam",
+		"supportId": "support:unresolved-link",
+		"start": Vector3(0.32, 0.0, 0.16),
+		"end": Vector3(22.0, 0.0, 0.16),
+		"startTileKey": "0,0",
+		"endTileKey": "1,0"
+	}]
+	var resolved_value = adapter.call("_resolve_building_navigation_link_endpoints", { "staticCollisionByCell": {} }, links)
+	var resolved_links: Array = resolved_value if resolved_value is Array else []
+	var passed := resolved_links.is_empty()
+	return outcome(passed, "resolvedLinks=%s" % JSON.stringify(resolved_links), ["building_link_requires_two_collision_screened_endpoints", "unresolved_cross_tile_link_is_not_published"], { "resolvedLinks": resolved_links })
+
 
 func test_navmesh_chunk_unload_cleans_region(_mode: String) -> Dictionary:
 	var service = NavmeshWorldServiceScript.new()
@@ -3424,10 +3795,24 @@ func test_navmesh_route_through_door_link_emits_action(_mode: String) -> Diction
 		if action_value is Dictionary and String((action_value as Dictionary).get("portalId", "")) == "door:route":
 			door_action = action_value
 			break
+	var raw_path: Array[Vector3] = [Vector3(0.0, 0.0, 0.0), Vector3(0.0, 0.0, 2.7)]
+	var raw_actions := {
+		"0,2": {
+			"kind": "door",
+			"portalId": "door:route",
+			"entryPosition": Vector3(0.0, 0.0, 0.9),
+			"exitPosition": Vector3(0.0, 0.0, 1.8),
+			"pathSegmentIndex": 1
+		}
+	}
+	var sequenced_value = service.call("_with_door_portal_waypoints", raw_path, raw_actions)
+	var sequenced_path: Array = sequenced_value if sequenced_value is Array else []
+	var has_entry := sequenced_path.size() >= 4 and sequenced_path[1] is Vector3 and (sequenced_path[1] as Vector3).distance_to(Vector3(0.0, 0.0, 0.9)) <= 0.001
+	var has_exit := sequenced_path.size() >= 4 and sequenced_path[2] is Vector3 and (sequenced_path[2] as Vector3).distance_to(Vector3(0.0, 0.0, 1.8)) <= 0.001
 	var stats: Dictionary = service.stats()
 	service.clear()
-	var passed: bool = bool(route.get("ok", false)) and not door_action.is_empty() and String(door_action.get("kind", "")) == "door" and bool(door_action.get("requiresSmartObject", false)) and bool(door_action.get("navLink", false)) and int(stats.get("pathQueryFailureCount", 0)) == 0
-	return outcome(passed, "route=%s action=%s stats=%s" % [JSON.stringify(route), JSON.stringify(door_action), JSON.stringify(stats)], ["navmesh_query_uses_door_link", "door_link_route_emits_smart_object_action"], { "route": route, "action": door_action, "stats": stats })
+	var passed: bool = bool(route.get("ok", false)) and not door_action.is_empty() and String(door_action.get("kind", "")) == "door" and bool(door_action.get("requiresSmartObject", false)) and bool(door_action.get("navLink", false)) and has_entry and has_exit and int(stats.get("pathQueryFailureCount", 0)) == 0
+	return outcome(passed, "route=%s action=%s sequencedPath=%s stats=%s" % [JSON.stringify(route), JSON.stringify(door_action), JSON.stringify(sequenced_path), JSON.stringify(stats)], ["navmesh_query_uses_door_link", "door_link_route_emits_smart_object_action", "door_action_inserts_entry_and_exit_waypoints"], { "route": route, "action": door_action, "sequencedPath": sequenced_path, "stats": stats })
 
 func test_navmesh_actor_path_status(_mode: String) -> Dictionary:
 	var service = NavmeshWorldServiceScript.new()
@@ -3477,6 +3862,28 @@ func test_navmesh_dirty_region_rebuild_after_world_edit(_mode: String) -> Dictio
 	var passed: bool = not responses.is_empty() and String((responses[0] as Dictionary).get("status", "")) == "dirty" and dirty_state == "dirty" and int(dirty_stats.get("dirtyRegionCount", 0)) == 1 and not rebuilt.is_empty() and String((rebuilt[0] as Dictionary).get("status", "")) == "rebuilt" and int(rebuilt_stats.get("dirtyRegionCount", -1)) == 0 and int(rebuilt_stats.get("rebuildCount", 0)) == 1 and int(rebuilt_stats.get("installedRegionCount", 0)) == 1
 	return outcome(passed, "responses=%s dirty=%s rebuilt=%s stats=%s" % [JSON.stringify(responses), JSON.stringify(dirty_stats), JSON.stringify(rebuilt), JSON.stringify(rebuilt_stats)], ["world_edit_marks_navmesh_region_dirty", "dirty_region_rebuild_clears_queue"], { "responses": responses, "dirtyStats": dirty_stats, "rebuilt": rebuilt, "rebuiltStats": rebuilt_stats })
 
+
+func test_navmesh_semantic_event_preserves_geometry_region(_mode: String) -> Dictionary:
+	var service = NavmeshWorldServiceScript.new()
+	service.setup(NavigationBackendConfigScript.from_value("navmesh", "test"))
+	service.register_tile_snapshot(nav_snapshot("6,6", [
+		nav_surface(Vector3i(96, 0, 96)),
+		nav_surface(Vector3i(97, 0, 96))
+	]))
+	var topology_before: int = service.topology_revision
+	var responses: Array = service.apply_navigation_events([{ "tileKey": "6,6", "changeKinds": [String(NpcEnumsScript.CHANGE_KIND_SEMANTIC_CHANGED)], "revision": 8 }])
+	var stats: Dictionary = service.stats()
+	var topology_after: int = service.topology_revision
+	var queued_dirty_regions: Array = service.dirty_region_queue.duplicate()
+	service.clear()
+	var response: Dictionary = responses[0] if not responses.is_empty() and responses[0] is Dictionary else {}
+	var passed: bool = String(response.get("status", "")) == "semantic" \
+		and queued_dirty_regions.is_empty() \
+		and topology_after == topology_before \
+		and int(stats.get("dirtyRegionCount", -1)) == 0
+	return outcome(passed, "response=%s topology=%d->%d queued=%s stats=%s" % [JSON.stringify(response), topology_before, topology_after, JSON.stringify(queued_dirty_regions), JSON.stringify(stats)], ["semantic_event_keeps_geometry_region_published", "semantic_event_does_not_queue_navmesh_rebuild"], { "response": response, "topologyBefore": topology_before, "topologyAfter": topology_after, "queuedDirtyRegions": queued_dirty_regions, "stats": stats })
+
+
 func test_navmesh_chunk_unload_cleans_door_links(_mode: String) -> Dictionary:
 	var service = NavmeshWorldServiceScript.new()
 	service.setup(NavigationBackendConfigScript.from_value("navmesh", "test"))
@@ -3514,6 +3921,30 @@ func test_navmesh_autonomy_semantic_backend_registers(_mode: String) -> Dictiona
 	var navmesh_stats: Dictionary = stats.get("navmeshWorld", {})
 	var passed: bool = revision > 0 and bool(summary.get("navmeshEnabled", false)) and int(navmesh_stats.get("installedRegionCount", 0)) == 1 and int(navmesh_stats.get("installedSurfaceCount", 0)) == 1
 	return outcome(passed, "summary=%s navmesh=%s revision=%d" % [JSON.stringify(summary), JSON.stringify(navmesh_stats), revision], ["autonomy_navmesh_backend_enabled", "autonomy_semantic_registers_navmesh_region"], { "summary": summary, "navmesh": navmesh_stats, "revision": revision })
+
+func test_navmesh_autonomy_prefetch_preserves_published_tile(_mode: String) -> Dictionary:
+	var previous_backend := OS.get_environment(NavigationBackendConfigScript.ENV_BACKEND)
+	OS.set_environment(NavigationBackendConfigScript.ENV_BACKEND, "navmesh")
+	var autonomy := NpcAutonomySystemScript.new()
+	autonomy.setup(null, null)
+	var published_snapshot := nav_snapshot("7,7", [
+		nav_surface(Vector3i(112, 0, 112)),
+		nav_surface(Vector3i(113, 0, 112))
+	], { "regionId": "region:chunk:7,7" })
+	var published: Dictionary = autonomy.navmesh_world.register_tile_snapshot(published_snapshot)
+	var prefetch: Dictionary = autonomy.request_navigation_tile({ "tileKey": "7,7", "centerCell": Vector2i(112, 112) }, 10)
+	var navmesh_stats: Dictionary = autonomy.navmesh_world.stats()
+	var navmesh_snapshot: Dictionary = autonomy.navmesh_world.debug_snapshot()
+	autonomy.free()
+	OS.set_environment(NavigationBackendConfigScript.ENV_BACKEND, previous_backend)
+	var region: Dictionary = (navmesh_snapshot.get("regions", {}) as Dictionary).get("region:chunk:7,7", {}) as Dictionary
+	var published_surfaces: Array = region.get("walkableSurfaces", []) as Array
+	var passed := bool(published.get("installed", false)) \
+		and String(prefetch.get("status", "")) == String(NpcEnumsScript.ROUTE_STATUS_PENDING) \
+		and int(navmesh_stats.get("installedRegionCount", 0)) == 1 \
+		and int(navmesh_stats.get("installedSurfaceCount", 0)) > 0 \
+		and published_surfaces.size() == 2
+	return outcome(passed, "published=%s prefetch=%s stats=%s region=%s" % [JSON.stringify(published), JSON.stringify(prefetch), JSON.stringify(navmesh_stats), JSON.stringify(region)], ["lod_prefetch_requests_topology_without_replacing_navmesh_descriptor", "published_navmesh_tile_retains_walkable_surfaces"], { "published": published, "prefetch": prefetch, "navmesh": navmesh_stats, "region": region })
 
 func test_navmesh_service_register_unregister_descriptor(_mode: String) -> Dictionary:
 	var service = NavmeshWorldServiceScript.new()
