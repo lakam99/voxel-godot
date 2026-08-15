@@ -162,15 +162,16 @@ static func sample_castle_grammar(seed: int, context: Dictionary) -> Dictionary:
 	# and collision all use the same fact.
 	var citadel_progress := clampf((grand_scale - 1.0) / 5.0, 0.0, 1.0)
 	var keep_footprint_scale := 1.0
-	var keep_height_scale := lerpf(1.0, 2.55, pow(citadel_progress, 0.70))
+	var keep_height_scale := lerpf(1.0, 1.42, pow(citadel_progress, 0.70))
 	var base_keep_storeys := keep_storeys
-	keep_storeys = maxi(keep_storeys, roundi(float(base_keep_storeys) * keep_height_scale))
-	var keep_width := snappedf(courtyard_width * rng.randf_range(0.32, 0.48) * keep_footprint_scale, 0.20)
-	var keep_depth := snappedf(courtyard_depth * rng.randf_range(0.28, 0.46) * keep_footprint_scale, 0.20)
+	keep_storeys = clampi(maxi(keep_storeys, roundi(float(base_keep_storeys) * keep_height_scale)), 5, 7)
+	var keep_width := snappedf(courtyard_width * rng.randf_range(0.25, 0.34) * keep_footprint_scale, 0.20)
+	var keep_depth := snappedf(courtyard_depth * rng.randf_range(0.22, 0.32) * keep_footprint_scale, 0.20)
 	var gate_width := snappedf(rng.randf_range(10.0, minf(20.0, courtyard_width * 0.28)), 0.20)
 	var keep_offset_z := snappedf(rng.randf_range(0.08, 0.25), 0.02)
-	var uses_district_grid := profile == "grand_citadel" and (courtyard_width > 128.0 or courtyard_depth > 112.0)
-	var courtyard_grid := castle_courtyard_occupancy_lattice(courtyard_width, courtyard_depth, keep_width, keep_depth, keep_offset_z, gate_width, tower_span, uses_district_grid)
+	var uses_district_grid := profile == "grand_citadel" and (courtyard_width > 88.0 or courtyard_depth > 80.0)
+	var route_sign := -1.0 if rng.randi_range(0, 1) == 0 else 1.0
+	var courtyard_grid := castle_courtyard_occupancy_lattice(courtyard_width, courtyard_depth, keep_width, keep_depth, keep_offset_z, gate_width, tower_span, uses_district_grid, route_sign)
 	# The courtyard is a filled, mirrored settlement lattice. Only the keep
 	# footprint and the continuous gate-to-keep route are reserved; the remaining
 	# flank cells are eligible for real shared residence recipes.  The exact
@@ -185,10 +186,12 @@ static func sample_castle_grammar(seed: int, context: Dictionary) -> Dictionary:
 	# medium and grand compounds scale through planned perimeter and inner rows.
 	var courtyard_building_count := 2 if profile == "compact_keep" else 6 if profile == "walled_bailey" else 12
 	var courtyard_program := sample_district_castle_courtyard_program(rng, courtyard_grid) if uses_district_grid else sample_castle_courtyard_program(rng, courtyard_building_count, courtyard_width, courtyard_depth)
+	var citadel_masonry := sample_citadel_masonry_palette(seed, context)
+	var palace_grammar := sample_castle_palace_grammar(seed, context, keep_width, keep_depth, floor_height, keep_storeys, masonry_palette_residence_material(citadel_masonry))
 	return {
 		"profile": profile,
 		"grandScale": grand_scale,
-		"citadelMasonry": sample_citadel_masonry_palette(seed, context),
+		"citadelMasonry": citadel_masonry,
 		"courtyardWidth": courtyard_width,
 		"courtyardDepth": courtyard_depth,
 		"towerCount": tower_count,
@@ -209,9 +212,119 @@ static func sample_castle_grammar(seed: int, context: Dictionary) -> Dictionary:
 		"gateDepth": snappedf(rng.randf_range(8.0, 15.0), 0.20),
 		"gateHeight": snappedf(wall_height + rng.randf_range(2.0, 5.2), 0.20),
 		"towerPhase": rng.randi_range(0, 3),
+		"palaceGrammar": palace_grammar,
 		"courtyardGrid": courtyard_grid,
 		"courtyardProgram": courtyard_program
 	}
+
+
+static func sample_castle_palace_grammar(seed: int, context: Dictionary, keep_width: float, keep_depth: float, floor_height: float, keep_storeys: int, palace_material: String) -> Dictionary:
+	var rng := RandomNumberGenerator.new()
+	var palace_recipe_seed := stable_recipe_seed(seed, "castle.palace", context)
+	rng.seed = palace_recipe_seed
+	var plan_families: Array[String] = ["u_court", "offset_court", "e_court"]
+	var plan_family := plan_families[rng.randi_range(0, plan_families.size() - 1)]
+	var dominant_side := -1.0 if rng.randi_range(0, 1) == 0 else 1.0
+	var plan_wing_depth_bias := 0.0 if plan_family == "u_court" else 0.10 if plan_family == "offset_court" else 0.16
+	var plan_gallery_depth_bias := 0.0 if plan_family == "u_court" else -0.06 if plan_family == "offset_court" else 0.08
+	var dominant_gallery_depth_scale := snappedf(rng.randf_range(0.68, 0.84), 0.02)
+	var secondary_gallery_depth_scale := snappedf(rng.randf_range(0.44, 0.64), 0.02)
+	if plan_family == "e_court":
+		dominant_gallery_depth_scale += 0.10
+	if plan_family == "offset_court":
+		secondary_gallery_depth_scale -= 0.08
+	var hall_storeys := clampi(rng.randi_range(3, 4), 3, mini(4, keep_storeys))
+	var wing_offset_left := snappedf(rng.randf_range(0.55, 0.62), 0.01)
+	var wing_offset_right := snappedf(rng.randf_range(0.53, 0.60), 0.01)
+	if dominant_side > 0.0:
+		var swap_offset := wing_offset_left
+		wing_offset_left = wing_offset_right
+		wing_offset_right = swap_offset
+	return {
+		"schemaVersion": 1,
+		"recipeSeed": palace_recipe_seed,
+		"planFamily": plan_family,
+		"palaceMaterial": palace_material,
+		"dominantSide": dominant_side,
+		"dominantWingDepthBias": plan_wing_depth_bias,
+		"secondaryWingDepthBias": -0.04 if plan_family == "offset_court" else 0.0,
+		"galleryDepthBias": plan_gallery_depth_bias,
+		"dominantGalleryDepthScale": dominant_gallery_depth_scale,
+		"secondaryGalleryDepthScale": maxf(0.34, secondary_gallery_depth_scale),
+		"galleryArcadeShare": snappedf(rng.randf_range(0.42, 0.58), 0.02),
+		"galleryFlareRatio": snappedf(rng.randf_range(0.05, 0.10), 0.01),
+		"galleryPavilionDepthRatio": snappedf(rng.randf_range(0.28, 0.40), 0.02),
+		"galleryPavilionHeightAdd": snappedf(rng.randf_range(1.4, 2.4), 0.20),
+		"dominantWingForwardBias": snappedf(rng.randf_range(0.04, 0.10), 0.01) if plan_family != "u_court" else 0.0,
+		"secondaryWingForwardBias": snappedf(rng.randf_range(-0.03, 0.03), 0.01),
+		"hallStoreys": hall_storeys,
+		"hallRoofRiseRatio": snappedf(rng.randf_range(0.17, 0.23), 0.01),
+		"upperWidthRatio": snappedf(rng.randf_range(0.31, 0.38), 0.01),
+		"upperDepthRatio": snappedf(rng.randf_range(0.35, 0.43), 0.01),
+		"upperOffsetXRatio": snappedf(rng.randf_range(0.05, 0.11) * dominant_side, 0.01),
+		"upperOffsetZRatio": snappedf(rng.randf_range(0.01, 0.06), 0.01),
+		"entranceBayWidthRatio": snappedf(rng.randf_range(0.22, 0.28), 0.01),
+		"entranceBayDepthRatio": snappedf(rng.randf_range(0.07, 0.12), 0.01),
+		"entranceBayHeightRatio": snappedf(rng.randf_range(0.76, 0.88), 0.02),
+		"entranceFlankStepRatio": snappedf(rng.randf_range(0.10, 0.15), 0.01),
+		"rotundaRootWidthRatio": snappedf(rng.randf_range(0.24, 0.31), 0.01),
+		"rotundaRootProjectionRatio": snappedf(rng.randf_range(0.04, 0.08), 0.01),
+		"frontTowerSpanRatio": snappedf(rng.randf_range(0.17, 0.21), 0.01),
+		"frontTowerDominantHeight": snappedf(rng.randf_range(4.2, 6.4), 0.20),
+		"frontTowerSecondaryHeight": snappedf(rng.randf_range(-3.0, -1.4), 0.20),
+		"wingWidthRatio": snappedf(rng.randf_range(0.62, 0.72), 0.01),
+		"wingDepthRatio": snappedf(rng.randf_range(0.62, 0.73), 0.01),
+		"wingHeightRatio": snappedf(rng.randf_range(0.68, 0.78), 0.01),
+		"wingOffsetLeftRatio": wing_offset_left,
+		"wingOffsetRightRatio": wing_offset_right,
+		"wingZRatio": snappedf(rng.randf_range(-0.20, -0.11), 0.01),
+		"wingZAsymmetry": snappedf(rng.randf_range(0.8, 1.8), 0.20),
+		"pavilionSpanRatio": snappedf(rng.randf_range(0.36, 0.44), 0.01),
+		"pavilionHeightAdd": snappedf(rng.randf_range(1.8, 2.8), 0.20),
+		"domeOffsetZRatio": snappedf(rng.randf_range(-0.12, -0.06), 0.01),
+		"drumSpanRatio": snappedf(rng.randf_range(1.28, 1.44), 0.02),
+		"drumHeightRatio": snappedf(rng.randf_range(0.52, 0.68), 0.02),
+		"drumSeatOverlap": snappedf(rng.randf_range(0.16, 0.34), 0.02),
+		"domeTierCount": rng.randi_range(8, 10),
+		"domeTierStep": snappedf(rng.randf_range(0.62, 0.76), 0.02),
+		"domeTwist": rng.randi_range(0, 1) == 1,
+		"courtWidthRatio": snappedf(rng.randf_range(0.52, 0.62), 0.02),
+		"courtDepthRatio": snappedf(rng.randf_range(0.22, 0.30), 0.02),
+		"galleryDepthRatio": snappedf(rng.randf_range(0.32, 0.41), 0.01),
+		"galleryXRatio": snappedf(rng.randf_range(0.32, 0.38), 0.01),
+		"galleryWidthRatio": snappedf(rng.randf_range(0.18, 0.23), 0.01),
+		"galleryHeight": snappedf(rng.randf_range(4.4, 5.4), 0.20),
+		"galleryBayCount": rng.randi_range(4, 6),
+		"connectorHeightRatio": snappedf(rng.randf_range(0.48, 0.60), 0.02),
+		"connectorDepthRatio": snappedf(rng.randf_range(0.42, 0.58), 0.02),
+		"entryStepCount": rng.randi_range(3, 5),
+		"rearCourtDepthRatio": snappedf(rng.randf_range(0.18, 0.28), 0.02),
+		"rearPorticoWidthRatio": snappedf(rng.randf_range(0.30, 0.42), 0.02),
+		"rearServiceWingBias": snappedf(rng.randf_range(0.04, 0.12), 0.02),
+		"rearCrossWingWidthRatio": snappedf(rng.randf_range(0.25, 0.34), 0.02),
+		"rearCrossWingDepthRatio": snappedf(rng.randf_range(0.42, 0.58), 0.02),
+		"rearCrossWingHeightRatio": snappedf(rng.randf_range(0.46, 0.62), 0.02),
+		"endPavilionDepthRatio": snappedf(rng.randf_range(0.38, 0.52), 0.02),
+		"endPavilionInsetRatio": snappedf(rng.randf_range(0.06, 0.14), 0.02),
+		"approachLengthRatio": snappedf(rng.randf_range(0.34, 0.48), 0.02),
+		"courtWallHeight": snappedf(rng.randf_range(2.4, 3.2), 0.10),
+		"sideBayCount": rng.randi_range(2, 4),
+		"centralWindowColumns": [5, 7][rng.randi_range(0, 1)],
+		"wingWindowColumns": rng.randi_range(3, 5),
+		"rearWindowColumns": rng.randi_range(4, 6),
+		"wingEndWindowColumns": rng.randi_range(2, 3),
+		"hallSideWindowColumns": rng.randi_range(3, 5),
+		"floorHeight": floor_height,
+		"sourceKeepSize": Vector2(keep_width, keep_depth)
+	}
+
+
+static func masonry_palette_residence_material(palette: Dictionary) -> String:
+	var residence_materials: Array = palette.get("residences", []) as Array
+	for material_value in residence_materials:
+		if String(material_value) == "painted_brick_cream":
+			return "painted_brick_cream"
+	return String(residence_materials[0]) if not residence_materials.is_empty() else "painted_brick_cream"
 
 
 static func sample_citadel_masonry_palette(seed: int, context: Dictionary) -> Dictionary:
@@ -299,12 +412,17 @@ static func sample_district_castle_courtyard_program(rng: RandomNumberGenerator,
 		var lot_pair: Dictionary = lot_pairs[pair_index] as Dictionary
 		var kind := kinds[(pair_index * 5 + rng.randi_range(0, kinds.size() - 1)) % kinds.size()]
 		var group_id := "courtyard_pair_%03d" % (pair_index + 1)
-		var center_x := float(lot_pair.get("centerX", 0.0))
-		var center_z := float(lot_pair.get("centerZ", 0.0))
+		var left_center_x := float(lot_pair.get("leftCenterX", lot_pair.get("centerX", 0.0)))
+		var right_center_x := float(lot_pair.get("rightCenterX", -left_center_x))
+		var left_center_z := float(lot_pair.get("leftCenterZ", lot_pair.get("centerZ", 0.0)))
+		var right_center_z := float(lot_pair.get("rightCenterZ", lot_pair.get("centerZ", 0.0)))
 		var band_index := int(lot_pair.get("bandIndex", 0))
 		var row_index := int(lot_pair.get("rowIndex", 0))
 		var neighbourhood := int(lot_pair.get("neighbourhood", 0))
 		var district_class := String(lot_pair.get("districtClass", "golden_lane"))
+		var left_district_class := String(lot_pair.get("leftDistrictClass", district_class))
+		var right_district_class := String(lot_pair.get("rightDistrictClass", district_class))
+		var terrace_elevation := float(lot_pair.get("terraceElevation", 0.0))
 		var front_direction_left := String(lot_pair.get("frontDirectionLeft", "east"))
 		var front_direction_right := String(lot_pair.get("frontDirectionRight", "west"))
 		for mirror_side in ["left", "right"]:
@@ -321,10 +439,11 @@ static func sample_district_castle_courtyard_program(rng: RandomNumberGenerator,
 					"cityGridRow": row_index,
 					"cityGridColumn": int(lot_pair.get("leftColumn", band_index)) if mirror_side == "left" else int(lot_pair.get("rightColumn", band_index)),
 					"neighbourhood": neighbourhood,
-					"districtClass": district_class,
+					"districtClass": left_district_class if mirror_side == "left" else right_district_class,
+					"terraceElevation": terrace_elevation,
 					"frontDirection": front_direction_left if mirror_side == "left" else front_direction_right,
-					"gridCenterX": center_x,
-					"gridCenterZ": center_z,
+					"gridCenterX": left_center_x if mirror_side == "left" else right_center_x,
+					"gridCenterZ": left_center_z if mirror_side == "left" else right_center_z,
 					"lotPitchX": float(lot_pair.get("lotPitchX", grid.get("cellSpacing", 28.0))),
 					"lotPitchZ": float(grid.get("cellSpacing", 28.0)),
 					"width": float(lot_pair.get("lotPitchX", grid.get("cellSpacing", 28.0))) - 1.2,
@@ -336,87 +455,125 @@ static func sample_district_castle_courtyard_program(rng: RandomNumberGenerator,
 	return program
 
 
-static func castle_courtyard_occupancy_lattice(courtyard_width := 0.0, courtyard_depth := 0.0, keep_width := 0.0, keep_depth := 0.0, keep_offset_z := 0.0, gate_width := 0.0, tower_span := 0.0, district_grid := false) -> Dictionary:
+static func castle_courtyard_occupancy_lattice(courtyard_width := 0.0, courtyard_depth := 0.0, keep_width := 0.0, keep_depth := 0.0, keep_offset_z := 0.0, gate_width := 0.0, tower_span := 0.0, district_grid := false, route_sign := 1.0) -> Dictionary:
 	if district_grid:
-		# Lots, streets and the keep all live in one deterministic city graph. The
-		# narrow boulevard is protected from the gate to the keep door; the keep's
-		# wider footprint only removes the rows it physically occupies.
-		# The exterior districts use a short, repeatable house pitch: this is what
-		# makes a Golden-Lane row read as joined town houses rather than rural homes
-		# scattered through a large court.  Inner lots deliberately claim every
-		# other row below, leaving room for larger homes and their private approaches.
-		var cell_spacing := 20.0
-		var street_gap := 8.0
-		var neighbourhood_rows := 5
+		# Grand citadels use a processional graph rather than a centred boulevard.
+		# The route makes two deterministic turns: the first terminates the gate view
+		# on a civic facade, and the second returns to the palace axis only at the
+		# forecourt. Lots derive from the route, so buildings, paving and terraces
+		# share one authority across seeds and scales.
+		var cell_spacing := 13.0
 		var half_width := courtyard_width * 0.5
 		var half_depth := courtyard_depth * 0.5
-		var boulevard_half_width := maxf(gate_width * 0.5 + 2.40, 6.0)
-		var inner_lot_min_x := boulevard_half_width + 11.0
-		var outer_center_limit := half_width - tower_span * 0.5 - 8.0
-		var front_center := -half_depth + tower_span * 0.5 + 8.0 + cell_spacing * 0.5
-		var rear_center_limit := half_depth - tower_span * 0.5 - 8.0 - cell_spacing * 0.5
-		# A dense Golden-Lane belt fronts narrow shared streets near the curtain
-		# wall. Past one intentional transition lane, inner lots widen into the
-		# roomier manor-capable neighbourhoods around the keep.
-		var golden_lane_pitch := 20.0
-		var wealthy_pitch := 32.0
-		var transition_lane_width := 12.0
-		var dense_band_count := mini(6, maxi(2, floori((outer_center_limit - inner_lot_min_x) * 0.42 / golden_lane_pitch) + 1))
-		var band_specs: Array[Dictionary] = []
-		var current_band_x := outer_center_limit
-		for dense_band_index in range(dense_band_count):
-			if current_band_x < inner_lot_min_x:
-				break
-			band_specs.append({"centerX": current_band_x, "districtClass": "golden_lane", "lotPitchX": golden_lane_pitch})
-			current_band_x -= golden_lane_pitch
-		var golden_lane_inner_x := current_band_x + golden_lane_pitch
-		current_band_x -= transition_lane_width
-		var wealthy_outer_x := current_band_x
-		while current_band_x >= inner_lot_min_x:
-			band_specs.append({"centerX": current_band_x, "districtClass": "wealthy", "lotPitchX": wealthy_pitch})
-			current_band_x -= wealthy_pitch
-		var bands_per_side := band_specs.size()
+		var route_half_width := clampf(gate_width * 0.17, 2.65, 3.35)
+		var boulevard_half_width := route_half_width
+		var outer_center_limit := half_width - tower_span * 0.5 - 5.2
+		var front_center := -half_depth + tower_span * 0.5 + 2.8 + cell_spacing * 0.5
+		var rear_center_limit := half_depth - tower_span * 0.5 - 5.0 - cell_spacing * 0.5
 		var row_centers: Array[float] = []
 		var row_index := 0
 		while true:
-			var row_z := front_center + float(row_index) * cell_spacing + float(row_index / neighbourhood_rows) * street_gap
+			var row_z := front_center + float(row_index) * cell_spacing
 			if row_z > rear_center_limit + 0.01:
 				break
 			row_centers.append(row_z)
 			row_index += 1
 		var rows := row_centers.size()
+		var terrace_step_height := 1.80
+		var keep_center_z := courtyard_depth * keep_offset_z
+		var keep_front_z := keep_center_z - keep_depth * 0.5
+		var turn_offset := route_sign * clampf(courtyard_width * 0.15, 12.0, 17.0)
+		var first_turn_z := float(row_centers[0]) + cell_spacing * 0.15 if not row_centers.is_empty() else -courtyard_depth * 0.30
+		var final_turn_z := keep_front_z - clampf(keep_depth * 0.45, 10.0, 14.0)
+		var route_centers: Array[float] = []
+		for resolved_row_index in range(rows):
+			var row_z := float(row_centers[resolved_row_index])
+			route_centers.append(0.0 if row_z < first_turn_z else turn_offset if row_z < final_turn_z else 0.0)
+		var bands_per_side := 1
 		var columns := bands_per_side * 2 + 1
 		var cells: Array = []
 		var lot_pairs: Array[Dictionary] = []
 		var street_records: Array[Dictionary] = []
-		var keep_center_z := courtyard_depth * keep_offset_z
 		var keep_min_z := keep_center_z - keep_depth * 0.5 - cell_spacing * 0.42
 		var keep_max_z := keep_center_z + keep_depth * 0.5 + cell_spacing * 0.42
-		var keep_side_clearance := keep_width * 0.5 + 12.0
+		var palace_approach_min_z := keep_center_z - keep_depth * 0.5 - clampf(keep_depth * 0.72, 14.0, 22.0)
 		for resolved_row_index in range(rows):
 			var resolved_row_z := row_centers[resolved_row_index]
+			var lane_x := route_centers[resolved_row_index]
 			var row: Array[int] = []
 			for column in range(columns):
 				row.append(0)
 			for band_index in range(bands_per_side):
-				var band_spec: Dictionary = band_specs[band_index] as Dictionary
-				var center_x := float(band_spec.get("centerX", 0.0))
-				var district_class := String(band_spec.get("districtClass", "golden_lane"))
-				# Wealthy homes have a larger two-row cadence; compact Golden-Lane
-				# cottages claim every row. This is a simple density field, not a
-				# hand-authored neighbourhood exception.
-				if district_class == "wealthy" and resolved_row_index % 2 != 0:
-					continue
-				var intersects_keep := resolved_row_z >= keep_min_z and resolved_row_z <= keep_max_z and center_x <= keep_side_clearance
-				if intersects_keep:
-					continue
-				var row_in_neighbourhood := resolved_row_index % neighbourhood_rows
-				# Successive Golden-Lane rows face one another across their narrow
-				# shared lane. They are a compact urban frontage, not independent
-				# cottages each pointing at a different accidental gap.
-				var golden_lane_front := "south" if resolved_row_index % 2 == 0 else "north"
-				var left_front := golden_lane_front if district_class == "golden_lane" else ("east" if band_index == bands_per_side - 1 else ("north" if row_in_neighbourhood == 0 else "south" if row_in_neighbourhood == neighbourhood_rows - 1 else ("north" if (resolved_row_index + band_index) % 2 == 0 else "south")))
-				var right_front := "west" if district_class == "wealthy" and band_index == bands_per_side - 1 else left_front
+				var at_first_node := resolved_row_z <= first_turn_z and first_turn_z - resolved_row_z < cell_spacing * 0.90
+				var at_final_node := absf(resolved_row_z - final_turn_z) < cell_spacing * 0.55
+				var at_route_node := at_first_node or at_final_node
+				var district_class := "civic_anchor" if at_first_node else "civic" if at_final_node or resolved_row_z >= first_turn_z else "golden_lane"
+				var lot_pitch := 17.5 if district_class == "civic_anchor" else 14.5 if district_class == "golden_lane" else 16.5
+				# The route reservation includes the transformed source blueprint's
+				# roof eaves, not just its wall footprint. This keeps the live player,
+				# NPC motor and review camera out of apparently open but roof-covered
+				# space after east/west rotation.
+				var center_offset := route_half_width + (7.8 if at_first_node else 9.0) + float(band_index) * 14.2
+				var left_center_x := lane_x - center_offset
+				var right_center_x := lane_x + center_offset
+				var left_center_z := resolved_row_z
+				var right_center_z := resolved_row_z
+				var left_district_class := district_class
+				var right_district_class := district_class
+				var front_direction_left := "east"
+				var front_direction_right := "west"
+				if at_first_node:
+					# The first civic pair forms the inhabited gate court. Its public
+					# fronts face arriving players so doors, awnings and trade counters
+					# establish city life before the processional route turns inland.
+					front_direction_left = "north"
+					front_direction_right = "west" if route_sign > 0.0 else "east"
+					var gate_room_depth := cell_spacing * 0.08
+					left_center_z += gate_room_depth
+					right_center_z += gate_room_depth
+					left_center_x -= route_sign * 1.6
+					# The route-facing shop sits beyond the turn rather than inside its
+					# stair approach. Its public facade terminates the gate court while
+					# preserving a full player/NPC clearance volume around route_x.
+					var route_facing_shift := clampf(outer_center_limit - absf(right_center_x) - 6.0, 3.2, 10.0)
+					right_center_x += route_sign * route_facing_shift
+				if band_index == 1:
+					left_center_x = maxf(-outer_center_limit, left_center_x)
+					right_center_x = minf(outer_center_limit, right_center_x)
+				if resolved_row_z >= palace_approach_min_z and resolved_row_z <= keep_max_z and (absf(left_center_x) < keep_width * 0.5 + 12.0 or absf(right_center_x) < keep_width * 0.5 + 12.0):
+					# The palace removes only its inner approach lots. Repack the remaining
+					# court edge with shallow civic frontage instead of discarding the
+					# entire row inherited from the coarse lattice.
+					var court_edge_x := minf(outer_center_limit, keep_width * 0.5 + 15.0)
+					left_center_x = -court_edge_x
+					right_center_x = court_edge_x
+					district_class = "civic_anchor" if at_first_node else "civic"
+					left_district_class = district_class
+					right_district_class = district_class
+					lot_pitch = 17.5 if district_class == "civic_anchor" else 16.5
+				if at_final_node:
+					# The middle street terminates on one inhabited civic facade. Its
+					# broad, tall ordinary manor occupies the diagonal sightline between
+					# the incoming lane and palace axis. It stays north of the horizontal
+					# turn, so the player clears its corner before the palace reopens.
+					var screen_z := final_turn_z + cell_spacing * 0.48
+					# Derive the diagonal screen from both the bent route and palace span.
+					# Its inner edge should reveal a narrow slice of the central palace at
+					# the final turn, then clear fully on the axial approach. A fixed route
+					# fraction either hides the palace completely or exposes it too early as
+					# generated keep widths vary.
+					var screen_offset := maxf(0.0, minf(absf(turn_offset), keep_width * 0.52) - 1.30)
+					var screen_x := route_sign * screen_offset
+					if route_sign > 0.0:
+						right_center_x = screen_x
+						right_center_z = screen_z
+						right_district_class = "sightline_screen"
+						front_direction_right = "south"
+					else:
+						left_center_x = screen_x
+						left_center_z = screen_z
+						left_district_class = "sightline_screen"
+						front_direction_left = "south"
 				var left_column := band_index
 				var right_column := columns - 1 - band_index
 				row[left_column] = 1
@@ -424,58 +581,78 @@ static func castle_courtyard_occupancy_lattice(courtyard_width := 0.0, courtyard
 				lot_pairs.append({
 					"bandIndex": band_index,
 					"districtClass": district_class,
-					"lotPitchX": float(band_spec.get("lotPitchX", cell_spacing)),
+					"lotPitchX": lot_pitch,
 					"rowIndex": resolved_row_index,
-					"neighbourhood": resolved_row_index / neighbourhood_rows,
+					"neighbourhood": resolved_row_index,
 					"leftColumn": left_column,
 					"rightColumn": right_column,
-					"centerX": center_x,
+					"leftCenterX": left_center_x,
+					"rightCenterX": right_center_x,
+					"leftCenterZ": left_center_z,
+					"rightCenterZ": right_center_z,
 					"centerZ": resolved_row_z,
-					"frontDirectionLeft": left_front,
-					"frontDirectionRight": right_front
+					"leftDistrictClass": left_district_class,
+					"rightDistrictClass": right_district_class,
+					"terraceElevation": 0.0 if resolved_row_z < first_turn_z else terrace_step_height if resolved_row_z < final_turn_z else terrace_step_height * 2.0,
+					"frontDirectionLeft": front_direction_left,
+					"frontDirectionRight": front_direction_right
 				})
 			cells.append(row)
-			if (resolved_row_index + 1) % neighbourhood_rows == 0 and resolved_row_index + 1 < rows:
-				var next_row_z := row_centers[resolved_row_index + 1]
-				var street_z := (resolved_row_z + next_row_z) * 0.5
-				if street_z < keep_min_z or street_z > keep_max_z:
-					street_records.append({"id": "cross_street_%02d" % street_records.size(), "z": street_z, "width": courtyard_width - tower_span - 5.0, "depth": street_gap})
-			elif resolved_row_index % 2 == 0 and resolved_row_index + 1 < rows:
-				# Pave the short lane that the paired Golden-Lane facades actually
-				# front. The wealthier inner neighbourhood intentionally remains more
-				# open and is served by the larger cross streets instead.
-				var paired_lane_z := (resolved_row_z + row_centers[resolved_row_index + 1]) * 0.5
-				var golden_lane_width := outer_center_limit - golden_lane_inner_x + golden_lane_pitch
-				var golden_lane_center_x := (outer_center_limit + golden_lane_inner_x) * 0.5
-				if golden_lane_width > 0.20:
-					street_records.append({"id": "golden_lane_left_%02d" % resolved_row_index, "x": -golden_lane_center_x, "z": paired_lane_z, "width": golden_lane_width, "depth": maxf(0.20, cell_spacing - 14.0)})
-					street_records.append({"id": "golden_lane_right_%02d" % resolved_row_index, "x": golden_lane_center_x, "z": paired_lane_z, "width": golden_lane_width, "depth": maxf(0.20, cell_spacing - 14.0)})
-		var keep_front_z := keep_center_z - keep_depth * 0.5
-		if golden_lane_inner_x > inner_lot_min_x and wealthy_outer_x < golden_lane_inner_x - 2.0:
-			var transition_center_x := (golden_lane_inner_x + wealthy_outer_x) * 0.5
-			street_records.append({"id": "golden_lane_transition_left", "x": -transition_center_x, "z": 0.0, "width": transition_lane_width, "depth": courtyard_depth - tower_span - 5.0})
-			street_records.append({"id": "golden_lane_transition_right", "x": transition_center_x, "z": 0.0, "width": transition_lane_width, "depth": courtyard_depth - tower_span - 5.0})
 		var boulevard_front_z := -half_depth + tower_span * 0.5 + 1.0
-		var boulevard_depth := maxf(0.20, keep_front_z - boulevard_front_z + 0.50)
-		street_records.append({"id": "gate_to_keep_boulevard", "z": boulevard_front_z + boulevard_depth * 0.5, "width": boulevard_half_width * 2.0, "depth": boulevard_depth})
+		var stair_run := 7.0 * 0.48
+		var first_transition_index := 0
+		var second_transition_index := maxi(0, row_centers.size() - 1)
+		for transition_index in range(row_centers.size()):
+			var transition_z := float(row_centers[transition_index])
+			if transition_z >= first_turn_z and first_transition_index == 0:
+				first_transition_index = transition_index
+			if transition_z >= final_turn_z:
+				second_transition_index = transition_index
+				break
+		var first_stair_center_z := float(row_centers[first_transition_index]) - 1.6
+		var first_stair_start_z := first_stair_center_z - stair_run
+		var second_stair_center_z := float(row_centers[second_transition_index]) - 1.6
+		var second_stair_start_z := second_stair_center_z - stair_run
+		street_records.append({"id": "processional_00_gate_lane", "x": 0.0, "z": (boulevard_front_z + first_turn_z) * 0.5, "width": route_half_width * 2.0, "depth": first_turn_z - boulevard_front_z, "elevation": 0.0})
+		street_records.append({"id": "processional_01_first_turn", "x": turn_offset * 0.5, "z": first_turn_z, "width": absf(turn_offset) + route_half_width * 2.0, "depth": route_half_width * 2.0, "elevation": 0.0})
+		street_records.append({"id": "processional_02a_civic_approach", "x": turn_offset, "z": (first_turn_z + first_stair_start_z) * 0.5, "width": route_half_width * 2.0, "depth": maxf(0.2, first_stair_start_z - first_turn_z), "elevation": 0.0})
+		street_records.append({"id": "processional_02b_civic_climb", "x": turn_offset, "z": (first_stair_center_z + final_turn_z) * 0.5, "width": route_half_width * 2.0, "depth": maxf(0.2, final_turn_z - first_stair_center_z), "elevation": terrace_step_height})
+		street_records.append({"id": "processional_03_final_turn", "x": turn_offset * 0.5, "z": final_turn_z, "width": absf(turn_offset) + route_half_width * 2.0, "depth": route_half_width * 2.0, "elevation": terrace_step_height})
+		street_records.append({"id": "processional_04a_palace_approach", "x": 0.0, "z": (final_turn_z + second_stair_start_z) * 0.5, "width": route_half_width * 2.0, "depth": maxf(0.2, second_stair_start_z - final_turn_z), "elevation": terrace_step_height})
+		street_records.append({"id": "processional_04b_palace_reveal", "x": 0.0, "z": (second_stair_center_z + keep_front_z) * 0.5, "width": route_half_width * 2.0, "depth": maxf(0.2, keep_front_z - second_stair_center_z), "elevation": terrace_step_height * 2.0})
+		var urban_rooms := {
+			"gate": {"center": Vector3(0.0, 0.0, first_turn_z - cell_spacing * 0.28), "width": absf(turn_offset) + route_half_width * 2.0, "depth": cell_spacing * 0.72, "sightlineTarget": Vector3(turn_offset, terrace_step_height + 2.2, first_stair_center_z + 2.0)},
+			"palace": {"center": Vector3(0.0, terrace_step_height * 2.0, (final_turn_z + keep_front_z) * 0.5), "width": keep_width * 1.55, "depth": keep_front_z - final_turn_z, "sightlineTarget": Vector3(0.0, terrace_step_height * 2.0 + clampf(keep_depth * 0.28, 7.0, 10.0), keep_center_z)}
+		}
+		var route_necks := [
+			{"id": "civic_climb", "center": Vector3(turn_offset, terrace_step_height, first_stair_center_z + 3.2), "direction": "z", "clearWidth": route_half_width * 2.0, "clearHeight": 5.0, "projectionDepth": 1.45},
+			{"id": "palace_turn", "center": Vector3(turn_offset * 0.5, terrace_step_height, final_turn_z), "direction": "x", "clearWidth": route_half_width * 2.0, "clearHeight": 5.2, "projectionDepth": 1.65}
+		]
 		return {
 			"mode": "district_grid",
+			"layoutFamily": "bent_processional",
 			"columns": columns,
 			"rows": rows,
 			"bandsPerSide": bands_per_side,
 			"cellSpacing": cell_spacing,
-			"goldenLanePitch": golden_lane_pitch,
-			"wealthyPitch": wealthy_pitch,
-			"streetGap": street_gap,
-			"neighbourhoodRows": neighbourhood_rows,
+			"goldenLanePitch": 15.5,
+			"wealthyPitch": 18.5,
 			"boulevardHalfWidth": boulevard_half_width,
 			"outerCenterX": outer_center_limit,
 			"frontCenterZ": front_center,
+			"rowCenters": row_centers,
+			"routeCenters": route_centers,
+			"routeTurnOffset": turn_offset,
+			"firstTurnZ": first_turn_z,
+			"finalTurnZ": final_turn_z,
+			"terraceStepHeight": terrace_step_height,
 			"cells": cells,
 			"lotPairs": lot_pairs,
 			"lotPairCount": lot_pairs.size(),
 			"streetRecords": street_records,
-			"reserved": "keep_footprint_and_gate_to_keep_boulevard"
+			"urbanRooms": urban_rooms,
+			"routeNecks": route_necks,
+			"reserved": "keep_palace_court_and_bent_processional_route"
 		}
 	# 1 means a residence may claim the cell; 0 is permanently reserved for the
 	# keep footprint or its public gate-to-door approach.  A later footprint

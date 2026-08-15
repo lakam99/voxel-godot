@@ -384,6 +384,8 @@ const sceneTools = {
 };
 
 const visualTools = {
+	'run-keep-recipe-poc': ['res://scenes/testing/buildings/KeepRecipePocTest.tscn', 'VOXEL_KEEP_RECIPE_POC_REPORT', '', 'VOXEL_KEEP_RECIPE_POC_SCREENSHOT_DIR', 'artifacts/buildings/keep-recipe-poc/report.json', '', 'artifacts/buildings/keep-recipe-poc/screenshots'],
+	'run-citadel-urban-poc': ['res://scenes/testing/buildings/CitadelUrbanPocTest.tscn', 'VOXEL_CITADEL_URBAN_POC_REPORT', '', 'VOXEL_CITADEL_URBAN_POC_SCREENSHOT_DIR', 'artifacts/buildings/citadel-urban-poc/report.json', '', 'artifacts/buildings/citadel-urban-poc/screenshots'],
   'run-underground-visual-playtest': ['res://scenes/testing/UndergroundVisualPlaytest.tscn', 'VOXEL_UNDERGROUND_VISUAL_REPORT', 'VOXEL_UNDERGROUND_VISUAL_PROGRESS', 'VOXEL_UNDERGROUND_VISUAL_SCREENSHOT_DIR', 'artifacts/underground/underground-visual-playtest.json', 'artifacts/underground/underground-visual-playtest-progress.txt', 'artifacts/underground/screenshots/underground-visual'],
   'run-digging-visual-playtest': ['res://scenes/testing/DiggingVisualPlaytest.tscn', 'VOXEL_DIGGING_VISUAL_REPORT', 'VOXEL_DIGGING_VISUAL_PROGRESS', 'VOXEL_DIGGING_VISUAL_SCREENSHOT_DIR', 'artifacts/underground/digging-visual-playtest.json', 'artifacts/underground/digging-visual-playtest-progress.txt', 'artifacts/underground/screenshots/digging-visual'],
   'run-light-shadow-visual-playtest': ['res://scenes/testing/LightShadowVisualPlaytest.tscn', 'VOXEL_LIGHT_SHADOW_REPORT', 'VOXEL_LIGHT_SHADOW_PROGRESS', 'VOXEL_LIGHT_SHADOW_SCREENSHOT_DIR', 'artifacts/light/light-shadow-visual-playtest.json', 'artifacts/light/light-shadow-visual-playtest-progress.txt', 'artifacts/light/screenshots/light-shadow'],
@@ -394,6 +396,7 @@ const visualTools = {
 };
 
 const visualRequiredScreenshots = {
+	'run-citadel-urban-poc': ['outer_approach.png', 'gate_threshold.png', 'inner_lane.png', 'market_release.png', 'civic_overview.png'],
   'run-underground-visual-playtest': ['underground_air_reference.png', 'underground_wall_boundary.png', 'underground_floor_boundary.png', 'underground_ceiling_boundary.png', 'underground_material_probe.png', 'underground_collision_probe.png'],
   'run-digging-visual-playtest': ['digging_before_surface.png', 'digging_after_first_dig.png', 'digging_after_second_dig.png', 'digging_material_drop_inventory.png'],
   'run-light-shadow-visual-playtest': ['outdoor_noon_reference.png', 'underground_noon_dark.png', 'underground_torch_lit.png', 'underground_torch_closeup.png'],
@@ -491,6 +494,12 @@ async function runConfiguredGodot(toolId, rawArgs) {
   const runToken = randomUUID().replaceAll('-', '');
   const environment = { ...process.env };
   if (requiresReport) environment[reportEnvironment] = reportPath;
+	if (toolId === 'run-cottage-material-poc' && parsed.options.capture) {
+	  const capturePath = resolveProjectPath(parsed.options.capture);
+	  await ensureDirectory(dirname(capturePath));
+	  await removeFile(capturePath);
+	  environment.VOXEL_COTTAGE_POC_CAPTURE = capturePath;
+	}
   if (parsed.options.seed !== undefined) environment.VOXEL_TEST_SEED = String(parsed.options.seed);
   if (parsed.options.timeMode !== undefined) environment.VOXEL_NPC_TIME_MODE = String(parsed.options.timeMode).toLowerCase();
   if (progressEnvironment) environment[progressEnvironment] = progressPath;
@@ -511,7 +520,10 @@ async function runConfiguredGodot(toolId, rawArgs) {
   if (isScript || asBoolean(parsed.options.headless)) godotArguments.push('--headless');
   if (isVisual) godotArguments.push('--fixed-fps', '60', '--resolution', '1280x720');
   godotArguments.push('--path', projectRoot, isScript ? '--script' : '--scene', target);
-  if (!isScript && parsed.passthrough.length) godotArguments.push('--', ...parsed.passthrough);
+	if (!isScript) {
+	  const forwarded = [...sceneArgumentOptions(parsed.options), ...parsed.passthrough];
+	  if (forwarded.length) godotArguments.push('--', ...forwarded);
+	}
   const execution = await runProcess(godot, godotArguments, {
     env: environment,
     timeoutSeconds: asNumber(parsed.options.watchdogSeconds ?? parsed.options.timeoutSeconds, isVisual ? 90 : 0)

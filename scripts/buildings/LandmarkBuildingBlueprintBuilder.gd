@@ -7,6 +7,11 @@ class_name LandmarkBuildingBlueprintBuilder
 
 const BuildingBlueprintScript := preload("res://scripts/buildings/BuildingBlueprint.gd")
 const LandmarkBuildingRecipeSamplerScript := preload("res://scripts/buildings/LandmarkBuildingRecipeSampler.gd")
+const MANOR_STAIR_TRANSITION_WALL_CLEARANCE := 0.82
+const MANOR_STAIR_TRANSITION_DEPTH := 1.12
+const MANOR_TOWER_PASSAGE_CROSSING := 1.80
+const MANOR_TOWER_PASSAGE_HEIGHT := 2.48
+const MANOR_TOWER_PASSAGE_WIDTH := 1.80
 
 
 static func build(seed: int, requested_family := "town_hall", context: Dictionary = {}):
@@ -69,10 +74,15 @@ static func build_manor(recipe: Dictionary):
 	var wing_passage_width := minf(1.62, wing_depth * 0.34)
 	var wing_passage := {"side": "left", "coordinate": wing_passage_z, "width": wing_passage_width}
 	var main_passage := {"side": "right", "coordinate": wing_passage_z, "width": wing_passage_width}
-	var stair_run := tower_span - 0.92
+	var stair_run := manor_stair_run(tower_span)
 	var tower_entry_z := tower_center.z - stair_run * 0.5
-	var tower_passage := {"side": "right", "coordinate": tower_entry_z, "width": minf(1.50, tower_span * 0.38)}
-	var upper_passage := {"side": "right", "coordinate": tower_entry_z, "width": minf(1.50, tower_span * 0.38)}
+	var tower_passage := {"side": "right", "coordinate": tower_entry_z, "width": MANOR_TOWER_PASSAGE_WIDTH}
+	var upper_passage := {"side": "right", "coordinate": tower_entry_z, "width": MANOR_TOWER_PASSAGE_WIDTH}
+	var tower_passage_x := tower_center.x - tower_span * 0.5
+	var lower_tower_hall_access := manor_tower_passage_access("manor_lower_tower", tower_passage_x, foundation_height + 0.20, tower_entry_z, float(tower_passage.get("width", 1.40)), "manor_main_lower_floor")
+	var lower_tower_stair_access := manor_tower_passage_access("manor_lower_tower", tower_passage_x, foundation_height + 0.20, tower_entry_z, float(tower_passage.get("width", 1.40)), "manor_stair_tower_floor")
+	var upper_tower_room_access := manor_tower_passage_access("manor_solar_tower", tower_passage_x, foundation_height + floor_height + 0.20, tower_entry_z, float(upper_passage.get("width", 1.40)), "manor_solar_upper_floor")
+	var upper_tower_stair_access := manor_tower_passage_access("manor_solar_tower", tower_passage_x, foundation_height + floor_height + 0.20, tower_entry_z, float(upper_passage.get("width", 1.40)), "manor_stair_exit_0")
 
 	var lower_bounds := AABB(Vector3(lower_center.x - lower_width * 0.5, foundation_height, lower_center.z - lower_depth * 0.5), Vector3(lower_width, floor_height, lower_depth))
 	var solar_bounds := AABB(Vector3(solar_center.x - solar_width * 0.5, foundation_height + floor_height, solar_center.z - solar_depth * 0.5), Vector3(solar_width, floor_height, solar_depth))
@@ -80,11 +90,11 @@ static func build_manor(recipe: Dictionary):
 	var tower_bounds := AABB(Vector3(tower_center.x - tower_span * 0.5, foundation_height, tower_center.z - tower_span * 0.5), Vector3(tower_span, tower_height, tower_span))
 	blueprint.set_room_records([
 		{"id": "entry_hall", "role": "entry_hall", "bounds": AABB(lower_bounds.position, Vector3(lower_bounds.size.x * 0.52, floor_height, lower_bounds.size.z)), "wallMountInset": wall_thickness * 0.5, "accesses": []},
-		{"id": "dining", "role": "dining", "bounds": AABB(Vector3(lower_bounds.position.x + lower_bounds.size.x * 0.52, foundation_height, lower_bounds.position.z), Vector3(lower_bounds.size.x * 0.48, floor_height, lower_bounds.size.z)), "wallMountInset": wall_thickness * 0.5, "accesses": []},
+		{"id": "dining", "role": "dining", "bounds": AABB(Vector3(lower_bounds.position.x + lower_bounds.size.x * 0.52, foundation_height, lower_bounds.position.z), Vector3(lower_bounds.size.x * 0.48, floor_height, lower_bounds.size.z)), "wallMountInset": wall_thickness * 0.5, "accesses": [lower_tower_hall_access]},
 		{"id": "kitchen", "role": "kitchen", "bounds": wing_bounds, "wallMountInset": wall_thickness * 0.5, "accesses": []},
 		{"id": "private_chamber", "role": "private_chamber", "bounds": AABB(solar_bounds.position, Vector3(solar_bounds.size.x * 0.52, floor_height, solar_bounds.size.z)), "wallMountInset": wall_thickness * 0.5, "accesses": []},
-		{"id": "bedroom", "role": "bedroom", "bounds": AABB(Vector3(solar_bounds.position.x + solar_bounds.size.x * 0.52, solar_bounds.position.y, solar_bounds.position.z), Vector3(solar_bounds.size.x * 0.48, floor_height, solar_bounds.size.z)), "wallMountInset": wall_thickness * 0.5, "accesses": []},
-		{"id": "store", "role": "store", "bounds": tower_bounds, "wallMountInset": wall_thickness * 0.5, "accesses": []}
+		{"id": "bedroom", "role": "bedroom", "bounds": AABB(Vector3(solar_bounds.position.x + solar_bounds.size.x * 0.52, solar_bounds.position.y, solar_bounds.position.z), Vector3(solar_bounds.size.x * 0.48, floor_height, solar_bounds.size.z)), "wallMountInset": wall_thickness * 0.5, "accesses": [upper_tower_room_access]},
+		{"id": "store", "role": "store", "bounds": tower_bounds, "wallMountInset": wall_thickness * 0.5, "accesses": [lower_tower_stair_access, upper_tower_stair_access]}
 	])
 
 	add_manor_foundation(blueprint, "manor_main_foundation", lower_center, lower_width, lower_depth, foundation_height, variation)
@@ -95,9 +105,9 @@ static func build_manor(recipe: Dictionary):
 	# bridge.  The bridge covers the small intentional separation between the
 	# composed volumes, so the visible connection and the walkable collision
 	# connection are one construction fact.
-	add_manor_tower_bridge(blueprint, "manor_lower_tower_bridge", tower_center, tower_span, lower_center, lower_width, tower_entry_z, foundation_height, variation)
+	add_manor_tower_bridge(blueprint, "manor_lower_tower_bridge", tower_center, tower_span, lower_center, lower_width, tower_entry_z, float(tower_passage.get("width", MANOR_TOWER_PASSAGE_WIDTH)), foundation_height, variation)
 	add_manor_storey_shell(blueprint, "manor_solar_upper", wall_material, solar_center, solar_width, solar_depth, foundation_height + floor_height, floor_height, wall_thickness, variation, false, upper_passage)
-	add_manor_tower_bridge(blueprint, "manor_solar_tower_bridge", tower_center, tower_span, solar_center, solar_width, tower_entry_z, foundation_height + floor_height, variation)
+	add_manor_tower_bridge(blueprint, "manor_solar_tower_bridge", tower_center, tower_span, solar_center, solar_width, tower_entry_z, float(upper_passage.get("width", MANOR_TOWER_PASSAGE_WIDTH)), foundation_height + floor_height, variation)
 	add_manor_solar_corbels(blueprint, lower_center, lower_width, lower_depth, solar_center, solar_width, solar_depth, foundation_height + floor_height, beam_material, variation)
 	var roof_center := solar_center
 	var roof_width := solar_width
@@ -112,7 +122,7 @@ static func build_manor(recipe: Dictionary):
 		var attic_depth := solar_depth * 0.78
 		var attic_center := solar_center + Vector3(0.20, 0.0, 0.08)
 		add_manor_storey_shell(blueprint, "manor_attic", wall_material, attic_center, attic_width, attic_depth, foundation_height + floor_height * 2.0, floor_height * 0.82, wall_thickness, variation, false, upper_passage)
-		add_manor_tower_bridge(blueprint, "manor_attic_tower_bridge", tower_center, tower_span, attic_center, attic_width, tower_entry_z, foundation_height + floor_height * 2.0, variation)
+		add_manor_tower_bridge(blueprint, "manor_attic_tower_bridge", tower_center, tower_span, attic_center, attic_width, tower_entry_z, float(upper_passage.get("width", MANOR_TOWER_PASSAGE_WIDTH)), foundation_height + floor_height * 2.0, variation)
 		roof_center = attic_center
 		roof_width = attic_width
 		roof_depth = attic_depth
@@ -180,12 +190,28 @@ static func add_manor_foundation(blueprint, part_id: String, center: Vector3, wi
 	add_part(blueprint, part_id, "foundation", "stone_foundation", Vector3(center.x, height * 0.5, center.z), Vector3(width + 0.42, height, depth + 0.42), {"variation": variation, "semantic": "manor_foundation"})
 
 
+static func manor_stair_run(tower_span: float) -> float:
+	return maxf(2.20, tower_span - MANOR_STAIR_TRANSITION_WALL_CLEARANCE * 2.0)
+
+
+static func manor_tower_passage_access(access_id: String, passage_x: float, floor_y: float, passage_z: float, passage_width: float, support_part_id: String) -> Dictionary:
+	return {
+		"id": access_id,
+		"kind": "interior_passage",
+		"position": Vector3(passage_x, floor_y, passage_z),
+		"size": Vector3(MANOR_TOWER_PASSAGE_CROSSING, MANOR_TOWER_PASSAGE_HEIGHT, passage_width),
+		"furnishingSize": Vector3(MANOR_TOWER_PASSAGE_CROSSING + 0.80, MANOR_TOWER_PASSAGE_HEIGHT, passage_width + 0.40),
+		"crossingAxis": Vector3.RIGHT,
+		"supportPartId": support_part_id
+	}
+
+
 static func add_manor_tower_stairs(blueprint, tower_center: Vector3, tower_span: float, foundation_height: float, floor_height: float, floor_count: int, variation: float) -> void:
 	# A real stair flight is repeated horizontal treads and risers. Each flight
 	# also owns a hidden continuous stringer collision volume from the same
 	# recipe; the player can therefore climb the visible stairs smoothly rather
 	# than snagging on tiny individual collision steps.
-	var run := tower_span - 0.92
+	var run := manor_stair_run(tower_span)
 	var half_rise := floor_height * 0.5
 	var angle := atan2(half_rise, run)
 	var ramp_width := tower_span * 0.28
@@ -200,25 +226,25 @@ static func add_manor_tower_stairs(blueprint, tower_center: Vector3, tower_span:
 		for tread_index in range(tread_count):
 			var up_z := tower_center.z - run * 0.5 + tread_run * (float(tread_index) + 0.5)
 			var up_y := base_y + tread_rise * float(tread_index + 1) - 0.055
-			add_part(blueprint, "manor_stair_up_tread_%d_%d" % [level, tread_index], "stair_tread", "timber_board", Vector3(left_x, up_y, up_z), Vector3(ramp_width, 0.11, tread_run + 0.025), {"variation": variation, "semantic": "manor_stair_tread"})
-		add_part(blueprint, "manor_stair_landing_%d" % level, "floor", "timber_board", Vector3(tower_center.x, base_y + half_rise, tower_center.z + run * 0.5), Vector3(tower_span - 0.70, 0.20, 0.58), {"variation": variation, "semantic": "manor_stair_landing"})
+			add_part(blueprint, "manor_stair_up_tread_%d_%d" % [level, tread_index], "stair_tread", "timber_board", Vector3(left_x, up_y, up_z), Vector3(ramp_width, 0.11, tread_run + 0.025), {"collision": false, "variation": variation, "semantic": "manor_stair_tread"})
+		add_part(blueprint, "manor_stair_landing_%d" % level, "floor", "timber_board", Vector3(tower_center.x, base_y + half_rise, tower_center.z + run * 0.5), Vector3(tower_span - 0.70, 0.20, MANOR_STAIR_TRANSITION_DEPTH), {"variation": variation, "semantic": "manor_stair_landing"})
 		add_part(blueprint, "manor_stair_return_stringer_%d" % level, "ramp", "timber_board", Vector3(right_x, base_y + half_rise * 1.50, tower_center.z), Vector3(ramp_width, 0.18, run), {"rotation": Vector3(angle, 0.0, 0.0), "visual": false, "variation": variation, "semantic": "manor_stair_stringer"})
 		for tread_index in range(tread_count):
 			var return_z := tower_center.z + run * 0.5 - tread_run * (float(tread_index) + 0.5)
 			var return_y := base_y + half_rise + tread_rise * float(tread_index + 1) - 0.055
-			add_part(blueprint, "manor_stair_return_tread_%d_%d" % [level, tread_index], "stair_tread", "timber_board", Vector3(right_x, return_y, return_z), Vector3(ramp_width, 0.11, tread_run + 0.025), {"variation": variation, "semantic": "manor_stair_tread"})
-		add_part(blueprint, "manor_stair_exit_%d" % level, "floor", "timber_board", Vector3(tower_center.x, base_y + floor_height, tower_center.z - run * 0.5), Vector3(tower_span - 0.70, 0.20, 0.58), {"variation": variation, "semantic": "manor_stair_exit"})
+			add_part(blueprint, "manor_stair_return_tread_%d_%d" % [level, tread_index], "stair_tread", "timber_board", Vector3(right_x, return_y, return_z), Vector3(ramp_width, 0.11, tread_run + 0.025), {"collision": false, "variation": variation, "semantic": "manor_stair_tread"})
+		add_part(blueprint, "manor_stair_exit_%d" % level, "floor", "timber_board", Vector3(tower_center.x, base_y + floor_height, tower_center.z - run * 0.5), Vector3(tower_span - 0.70, 0.20, MANOR_STAIR_TRANSITION_DEPTH), {"variation": variation, "semantic": "manor_stair_exit"})
 
 
-static func add_manor_tower_bridge(blueprint, part_id: String, tower_center: Vector3, tower_span: float, source_center: Vector3, source_width: float, exit_z: float, floor_y: float, variation: float) -> void:
+static func add_manor_tower_bridge(blueprint, part_id: String, tower_center: Vector3, tower_span: float, source_center: Vector3, source_width: float, exit_z: float, passage_width: float, floor_y: float, variation: float) -> void:
 	var tower_left := tower_center.x - tower_span * 0.5
 	var source_right := source_center.x + source_width * 0.5
 	# Components can overlap slightly at upper floors, while the lower hall has
 	# a deliberate reveal.  A minimum bridge width keeps both cases continuous
 	# without a special collision-only patch.
-	var bridge_width := maxf(0.68, tower_left - source_right + 0.44)
+	var bridge_width := maxf(MANOR_TOWER_PASSAGE_CROSSING, tower_left - source_right + 0.44)
 	var bridge_center_x := (tower_left + source_right) * 0.5
-	add_part(blueprint, part_id, "floor", "timber_board", Vector3(bridge_center_x, floor_y + 0.10, exit_z), Vector3(bridge_width, 0.20, 1.42), {"variation": variation, "semantic": "manor_tower_bridge"})
+	add_part(blueprint, part_id, "floor", "timber_board", Vector3(bridge_center_x, floor_y + 0.10, exit_z), Vector3(bridge_width, 0.20, passage_width), {"variation": variation, "semantic": "manor_tower_bridge"})
 
 
 static func add_manor_wall_with_passage(blueprint, prefix: String, material: String, center: Vector3, size: Vector3, passage_z: float, passage_width: float, bottom_y: float, variation: float) -> void:
