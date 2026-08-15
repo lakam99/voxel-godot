@@ -9,7 +9,13 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFont, ImageOps
+try:
+    from PIL import Image, ImageDraw, ImageFont, ImageOps
+except ModuleNotFoundError as error:
+    raise SystemExit(
+        "Pillow is required. Run this script with the bundled Codex workspace "
+        "Python reported by codex_app__load_workspace_dependencies."
+    ) from error
 
 
 COMMONS_FILES = [
