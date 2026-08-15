@@ -6,17 +6,21 @@ from collections import Counter, defaultdict, deque
 from pathlib import Path
 
 import bpy
-from mathutils import Matrix, Vector
+import numpy as np
+from mathutils import Vector
 from mathutils.bvhtree import BVHTree
 
 
 SEGMENTS = 24
+CONTROL_WIDTH_RATIOS = (1.00, 0.73, 0.60, 0.56, 0.58, 0.58, 0.52, 0.44, 0.37)
+CONTROL_DEPTH_RATIOS = (1.00, 0.90, 0.82, 0.78, 0.72, 0.60, 0.52, 0.42, 0.35)
 
 
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output-blend", required=True)
     parser.add_argument("--report", required=True)
+    parser.add_argument("--smoothing-weight", type=float, default=400.0)
     return parser.parse_args(sys.argv[sys.argv.index("--") + 1 :])
 
 
@@ -68,17 +72,17 @@ def parallel_transport_frames(centers, initial_tangent):
 def build_control_centers(h0_center, length, initial_tangent):
     offsets = (
         (0.0, 0.0, 0.0),
-        (0.10, 0.010, -0.012),
-        (0.22, 0.040, -0.070),
-        (0.34, 0.080, -0.180),
-        (0.36, 0.100, -0.330),
-        (0.34, 0.070, -0.430),
+        (0.13, 0.000, 0.000),
+        (0.22, 0.025, -0.100),
+        (0.31, 0.055, -0.220),
+        (0.35, 0.090, -0.350),
+        (0.35, 0.070, -0.450),
         (0.31, 0.020, -0.560),
         (0.29, -0.050, -0.660),
         (0.28, -0.080, -0.710),
     )
     centers = [Vector(h0_center)]
-    centers.append(Vector(h0_center) + Vector(initial_tangent).normalized() * (0.10 * length))
+    centers.append(Vector(h0_center) + Vector(initial_tangent).normalized() * (0.13 * length))
     for lateral, caudal, vertical in offsets[2:]:
         centers.append(Vector(h0_center) + Vector((lateral * length, caudal * length, vertical * length)))
     return centers
@@ -119,52 +123,222 @@ def dense_control_values(values, bands_per_interval=3):
     return dense
 
 
-def dense_centers(control_centers, bands_per_interval=3):
-    components = []
-    for axis in range(3):
-        components.append(dense_control_values([center[axis] for center in control_centers], bands_per_interval))
-    return [Vector((components[0][index], components[1][index], components[2][index])) for index in range(len(components[0]))]
+def bspline_basis(index, degree, parameter, knots, control_count):
+    if degree == 0:
+        if parameter == 1.0:
+            return 1.0 if index == control_count - 1 else 0.0
+        return 1.0 if knots[index] <= parameter < knots[index + 1] else 0.0
+    first = 0.0
+    first_denominator = knots[index + degree] - knots[index]
+    if first_denominator > 0.0:
+        first = (
+            (parameter - knots[index])
+            / first_denominator
+            * bspline_basis(index, degree - 1, parameter, knots, control_count)
+        )
+    second = 0.0
+    second_denominator = knots[index + degree + 1] - knots[index + 1]
+    if second_denominator > 0.0:
+        second = (
+            (knots[index + degree + 1] - parameter)
+            / second_denominator
+            * bspline_basis(index + 1, degree - 1, parameter, knots, control_count)
+        )
+    return first + second
 
 
-def enforce_rail_advance(ring, previous_ring, path_direction):
-    ring = [Vector(point) for point in ring]
-    previous_ring = [Vector(point) for point in previous_ring]
-    path_direction = Vector(path_direction).normalized()
-    for _ in range(3):
-        updated = []
-        for index, point in enumerate(ring):
-            previous_column = previous_ring[index]
-            circumferential = 0.5 * (
-                (point - ring[(index - 1) % SEGMENTS]).length
-                + (ring[(index + 1) % SEGMENTS] - point).length
+def interpolate_log_schedule(values, station_parameters, parameter):
+    if parameter <= station_parameters[0]:
+        return values[0]
+    if parameter >= station_parameters[-1]:
+        return values[-1]
+    for index in range(len(station_parameters) - 1):
+        first = station_parameters[index]
+        second = station_parameters[index + 1]
+        if first <= parameter <= second:
+            factor = (parameter - first) / (second - first)
+            return math.exp(
+                math.log(values[index]) * (1.0 - factor)
+                + math.log(values[index + 1]) * factor
             )
-            minimum_advance = 1.25 * circumferential
-            maximum_advance = 2.60 * circumferential
-            advance = (point - previous_column).dot(path_direction)
-            if advance < minimum_advance:
-                point += path_direction * (minimum_advance - advance)
-            elif advance > maximum_advance:
-                point -= path_direction * (advance - maximum_advance)
-            updated.append(point)
-        ring = updated
-    return ring
+    return values[-1]
 
 
-def append_forelimb(vertices, faces, collar_indices, h0_indices, initial_tangent):
+def evaluate_bspline(control_points, parameter, knots, degree=3):
+    return sum(
+        (
+            point * bspline_basis(index, degree, parameter, knots, len(control_points))
+            for index, point in enumerate(control_points)
+        ),
+        start=Vector(),
+    )
+
+
+def fit_centerline(control_centers, initial_tangent, shoulder_width, length, smoothing_weight):
+    degree = 3
+    control_count = 10
+    internal_count = control_count - degree - 1
+    knots = [0.0] * (degree + 1)
+    knots.extend(index / (internal_count + 1) for index in range(1, internal_count + 1))
+    knots.extend([1.0] * (degree + 1))
+
+    chord_lengths = [
+        (control_centers[index + 1] - control_centers[index]).length
+        for index in range(len(control_centers) - 1)
+    ]
+    cumulative = [0.0]
+    for chord_length in chord_lengths:
+        cumulative.append(cumulative[-1] + chord_length)
+    station_parameters = [value / cumulative[-1] for value in cumulative]
+
+    fixed = {
+        0: Vector(control_centers[0]),
+        1: Vector(control_centers[0]) + Vector(initial_tangent).normalized() * (0.10 * length),
+        control_count - 1: Vector(control_centers[-1]),
+    }
+    variable_indices = [index for index in range(control_count) if index not in fixed]
+    station_weights = (0.0, 20.0, 16.0, 16.0, 28.0, 16.0, 14.0, 12.0, 0.0)
+    solved = None
+    solve_metrics = None
+
+    for _ in range(1):
+        rows = []
+        targets = []
+        for station, parameter, weight in zip(control_centers, station_parameters, station_weights):
+            if weight <= 0.0:
+                continue
+            basis = [
+                bspline_basis(index, degree, parameter, knots, control_count)
+                for index in range(control_count)
+            ]
+            adjusted = Vector(station)
+            for index, point in fixed.items():
+                adjusted -= point * basis[index]
+            rows.append([math.sqrt(weight) * basis[index] for index in variable_indices])
+            targets.append([math.sqrt(weight) * value for value in adjusted])
+        for center_index in range(1, control_count - 1):
+            coefficients = [0.0] * control_count
+            coefficients[center_index - 1] = 1.0
+            coefficients[center_index] = -2.0
+            coefficients[center_index + 1] = 1.0
+            adjusted = Vector()
+            for index, point in fixed.items():
+                adjusted -= point * coefficients[index]
+            rows.append(
+                [math.sqrt(smoothing_weight) * coefficients[index] for index in variable_indices]
+            )
+            targets.append([math.sqrt(smoothing_weight) * value for value in adjusted])
+        matrix = np.asarray(rows, dtype=float)
+        right_hand = np.asarray(targets, dtype=float)
+        solution, _, _, _ = np.linalg.lstsq(matrix, right_hand, rcond=None)
+        solved = [Vector()] * control_count
+        for index, point in fixed.items():
+            solved[index] = point
+        for row, index in enumerate(variable_indices):
+            solved[index] = Vector(solution[row])
+
+        samples = [evaluate_bspline(solved, index / 600.0, knots) for index in range(601)]
+        curvature_radius_products = []
+        for index in range(1, len(samples) - 1):
+            incoming = samples[index] - samples[index - 1]
+            outgoing = samples[index + 1] - samples[index]
+            average_step = 0.5 * (incoming.length + outgoing.length)
+            if average_step <= 1e-8:
+                continue
+            curvature = incoming.normalized().angle(outgoing.normalized()) / average_step
+            parameter = index / 600.0
+            radius = 0.5 * shoulder_width * interpolate_log_schedule(
+                CONTROL_WIDTH_RATIOS, station_parameters, parameter
+            )
+            curvature_radius_products.append(curvature * radius)
+        maximum_product = max(curvature_radius_products or [0.0])
+        solve_metrics = {
+            "smoothingWeight": smoothing_weight,
+            "maximumDenseCurvatureTimesBendRadius": maximum_product,
+        }
+
+    samples = [evaluate_bspline(solved, index / 1200.0, knots) for index in range(1201)]
+    cumulative_tau = [0.0]
+    for index in range(1, len(samples)):
+        midpoint_parameter = (index - 0.5) / 1200.0
+        radius = 0.5 * shoulder_width * interpolate_log_schedule(
+            CONTROL_WIDTH_RATIOS, station_parameters, midpoint_parameter
+        )
+        cumulative_tau.append(
+            cumulative_tau[-1]
+            + (samples[index] - samples[index - 1]).length / radius
+        )
+    emitted_parameters = [0.0]
+    search_index = 1
+    for ring_index in range(1, 25):
+        target_tau = cumulative_tau[-1] * ring_index / 24.0
+        while cumulative_tau[search_index] < target_tau:
+            search_index += 1
+        first_tau = cumulative_tau[search_index - 1]
+        second_tau = cumulative_tau[search_index]
+        factor = (target_tau - first_tau) / max(second_tau - first_tau, 1e-8)
+        emitted_parameters.append((search_index - 1 + factor) / 1200.0)
+    tail_anchor_ring = 6
+    tail_anchor_sample = round(emitted_parameters[tail_anchor_ring] * 1200.0)
+    tail_arc_lengths = [0.0]
+    for sample_index in range(tail_anchor_sample + 1, len(samples)):
+        tail_arc_lengths.append(
+            tail_arc_lengths[-1] + (samples[sample_index] - samples[sample_index - 1]).length
+        )
+    tail_search_index = 1
+    tail_interval_count = 24 - tail_anchor_ring
+    for tail_ring in range(1, tail_interval_count + 1):
+        target_arc = tail_arc_lengths[-1] * tail_ring / tail_interval_count
+        while tail_arc_lengths[tail_search_index] < target_arc:
+            tail_search_index += 1
+        first_arc = tail_arc_lengths[tail_search_index - 1]
+        second_arc = tail_arc_lengths[tail_search_index]
+        factor = (target_arc - first_arc) / max(second_arc - first_arc, 1e-8)
+        emitted_parameters[tail_anchor_ring + tail_ring] = (
+            tail_anchor_sample + tail_search_index - 1 + factor
+        ) / 1200.0
+    centers = [evaluate_bspline(solved, parameter, knots) for parameter in emitted_parameters]
+    return {
+        "centers": centers,
+        "emittedParameters": emitted_parameters,
+        "stationParameters": station_parameters,
+        "solveMetrics": solve_metrics,
+    }
+
+
+def append_forelimb(
+    vertices,
+    faces,
+    collar_indices,
+    h0_indices,
+    initial_tangent,
+    smoothing_weight,
+):
     h0_points = [Vector(vertices[index]) for index in h0_indices]
     h0_center = sum(h0_points, start=Vector()) / SEGMENTS
     shoulder_to_ground = max(0.80, h0_center.z - 0.08)
     control_centers = build_control_centers(h0_center, shoulder_to_ground, initial_tangent)
-    centers = dense_centers(control_centers)
-    frames, roll_changes = parallel_transport_frames(centers, initial_tangent)
-    initial_dorsal = frames[0][1]
-    initial_caudal = frames[0][2]
+    initial_tangent = Vector(initial_tangent).normalized()
+    initial_dorsal = Vector((0.0, 0.0, 1.0))
+    initial_dorsal = (initial_dorsal - initial_tangent * initial_dorsal.dot(initial_tangent)).normalized()
+    initial_caudal = initial_tangent.cross(initial_dorsal).normalized()
+    if initial_caudal.y < 0.0:
+        initial_caudal = -initial_caudal
     dorsal_values = [(point - h0_center).dot(initial_dorsal) for point in h0_points]
     caudal_values = [(point - h0_center).dot(initial_caudal) for point in h0_points]
     dorsal_mid = 0.5 * (max(dorsal_values) + min(dorsal_values))
     caudal_mid = 0.5 * (max(caudal_values) + min(caudal_values))
     shoulder_width = max(dorsal_values) - min(dorsal_values)
     shoulder_depth = max(caudal_values) - min(caudal_values)
+    centerline = fit_centerline(
+        control_centers,
+        initial_tangent,
+        shoulder_width,
+        shoulder_to_ground,
+        smoothing_weight,
+    )
+    centers = centerline["centers"]
+    frames, roll_changes = parallel_transport_frames(centers, initial_tangent)
     normalized = [
         (
             (dorsal - dorsal_mid) / (0.5 * shoulder_width),
@@ -172,10 +346,16 @@ def append_forelimb(vertices, faces, collar_indices, h0_indices, initial_tangent
         )
         for dorsal, caudal in zip(dorsal_values, caudal_values)
     ]
-    control_width_ratios = (1.00, 0.94, 0.86, 0.84, 0.74, 0.58, 0.52, 0.44, 0.37)
-    control_depth_ratios = (1.00, 0.92, 0.74, 0.68, 0.66, 0.58, 0.50, 0.40, 0.34)
-    width_ratios = [math.exp(value) for value in dense_control_values([math.log(value) for value in control_width_ratios])]
-    depth_ratios = [math.exp(value) for value in dense_control_values([math.log(value) for value in control_depth_ratios])]
+    width_ratios = [
+        interpolate_log_schedule(CONTROL_WIDTH_RATIOS, centerline["stationParameters"], parameter)
+        for parameter in centerline["emittedParameters"]
+    ]
+    depth_ratios = [
+        interpolate_log_schedule(CONTROL_DEPTH_RATIOS, centerline["stationParameters"], parameter)
+        for parameter in centerline["emittedParameters"]
+    ]
+    width_ratios[1] = 1.0
+    depth_ratios[1] = 1.0
     section_indices = [list(h0_indices)]
     section_names = (
         "H0",
@@ -192,7 +372,13 @@ def append_forelimb(vertices, faces, collar_indices, h0_indices, initial_tangent
     incoming_directions = [
         (h0_point - collar_point).normalized() for h0_point, collar_point in zip(h0_points, collar_points)
     ]
-    control_parameter = [index / 3.0 for index in range(len(centers))]
+    control_parameter = []
+    for parameter in centerline["emittedParameters"]:
+        nearest = min(
+            range(len(centerline["stationParameters"])),
+            key=lambda index: abs(centerline["stationParameters"][index] - parameter),
+        )
+        control_parameter.append(float(nearest))
     for section in range(1, len(centers)):
         _, dorsal_axis, caudal_axis = frames[section]
         ring = []
@@ -205,15 +391,32 @@ def append_forelimb(vertices, faces, collar_indices, h0_indices, initial_tangent
             forearm_weight = max(0.0, min(1.0, parameter - 4.5))
             caudal_coordinate += 0.035 * shoulder_width * upper_weight * max(0.0, caudal_normalized) ** 2
             if elbow_weight > 0.0:
-                caudal_coordinate += 0.095 * shoulder_width * elbow_weight * max(0.0, caudal_normalized) ** 3
+                caudal_coordinate += 0.086 * shoulder_width * elbow_weight * max(0.0, caudal_normalized) ** 3
                 dorsal_coordinate *= 1.0 - 0.08 * max(0.0, -caudal_normalized)
+            if 10 <= section <= 13:
+                cranial_transfer_weight = 1.0 - abs(section - 11.5) / 2.5
+                caudal_coordinate -= (
+                    0.009
+                    * shoulder_width
+                    * cranial_transfer_weight
+                    * max(0.0, -caudal_normalized) ** 2
+                )
             dorsal_coordinate *= 1.0 - 0.10 * forearm_weight * max(0.0, -caudal_normalized)
             model_point = centers[section] + dorsal_axis * dorsal_coordinate + caudal_axis * caudal_coordinate
-            if section <= 5:
-                local_step = (centers[1] - centers[0]).length
-                incoming_point = h0_points[column] + incoming_directions[column] * (local_step * section)
-                model_weight = 0.0 if section <= 3 else 0.33 if section == 4 else 0.66
-                model_point = incoming_point.lerp(model_point, model_weight)
+            if section <= 7:
+                local_step = (centers[section] - centers[section - 1]).length
+                previous_point = (
+                    h0_points[column]
+                    if section == 1
+                    else Vector(vertices[section_indices[-1][column]])
+                )
+                direction_weight = (section - 1) / 6.0
+                travel_direction = incoming_directions[column].lerp(
+                    Vector(initial_tangent).normalized(), direction_weight
+                ).normalized()
+                transported_point = previous_point + travel_direction * local_step
+                model_weight = (section - 1) / 7.0
+                model_point = transported_point.lerp(model_point, model_weight)
             ring.append(model_point)
         ring = [tuple(point) for point in ring]
         indices = list(range(len(vertices), len(vertices) + SEGMENTS))
@@ -230,11 +433,15 @@ def append_forelimb(vertices, faces, collar_indices, h0_indices, initial_tangent
         "centers": centers,
         "controlCenters": control_centers,
         "frames": frames,
+        "emittedParameters": centerline["emittedParameters"],
+        "stationParameters": centerline["stationParameters"],
+        "centerlineSolveMetrics": centerline["solveMetrics"],
         "rollChangesDegrees": roll_changes,
         "shoulderToGround": shoulder_to_ground,
         "shoulderWidth": shoulder_width,
-        "widthRatios": control_width_ratios,
-        "depthRatios": control_depth_ratios,
+        "widthRatios": CONTROL_WIDTH_RATIOS,
+        "depthRatios": CONTROL_DEPTH_RATIOS,
+        "emittedWidthRatios": width_ratios,
         "collarIndices": list(collar_indices),
         "limbFaceStart": limb_face_start,
     }
@@ -301,6 +508,41 @@ def topology_report(vertices, faces, build):
             group_normals = [polygon_normal(vertices, face) for face in face_group if vertex in face]
             side_normals.append(sum(group_normals, start=Vector()).normalized())
         h0_normal_dots.append(abs(side_normals[0].dot(side_normals[1])))
+    normalized_band_quality = []
+    normalized_face_quality = []
+    for band, (first_ring, second_ring) in enumerate(
+        zip(build["sectionIndices"], build["sectionIndices"][1:])
+    ):
+        center_step = (build["centers"][band + 1] - build["centers"][band]).length
+        circumferential_lengths = []
+        for ring in (first_ring, second_ring):
+            circumferential_lengths.extend(
+                (Vector(vertices[ring[(index + 1) % SEGMENTS]]) - Vector(vertices[ring[index]])).length
+                for index in range(SEGMENTS)
+            )
+        target_circumferential_edge = sum(circumferential_lengths) / len(circumferential_lengths)
+        denominator = max(center_step * target_circumferential_edge, 1e-12)
+        band_start = limb_start + band * SEGMENTS
+        values = [face_areas[band_start + index] / denominator for index in range(SEGMENTS)]
+        median_value = sorted(values)[len(values) // 2]
+        normalized_face_quality.extend(values)
+        normalized_band_quality.append(
+            {
+                "band": band,
+                "minimum": min(values),
+                "median": median_value,
+                "minimumToMedian": min(values) / median_value,
+            }
+        )
+    normalized_global_median = sorted(normalized_face_quality)[len(normalized_face_quality) // 2]
+    adjacent_band_ratios = []
+    for index, band in enumerate(normalized_band_quality):
+        neighbors = []
+        if index > 0:
+            neighbors.append(normalized_band_quality[index - 1]["median"])
+        if index + 1 < len(normalized_band_quality):
+            neighbors.append(normalized_band_quality[index + 1]["median"])
+        adjacent_band_ratios.extend(band["median"] / neighbor for neighbor in neighbors)
     components = 0
     adjacency = defaultdict(set)
     for first, second in edges:
@@ -337,12 +579,63 @@ def topology_report(vertices, faces, build):
         "minimumFaceArea": min(face_areas),
         "medianFaceArea": sorted(face_areas)[len(face_areas) // 2],
         "minimumAreaFraction": min(face_areas) / sorted(face_areas)[len(face_areas) // 2],
+        "normalizedAreaQuality": {
+            "definition": "face_area / (center_step * mean_circumferential_edge)",
+            "globalMinimumToMedian": min(normalized_face_quality) / normalized_global_median,
+            "minimumBandMinimumToMedian": min(
+                band["minimumToMedian"] for band in normalized_band_quality
+            ),
+            "minimumAdjacentBandMedianRatio": min(adjacent_band_ratios),
+            "bands": normalized_band_quality,
+        },
+        "smallestAreaFaces": [
+            {
+                "index": face_index,
+                "area": face_areas[face_index],
+                "vertices": list(faces[face_index]),
+                "coordinates": [list(vertices[vertex]) for vertex in faces[face_index]],
+                "band": "base" if face_index < limb_start else (face_index - limb_start) // SEGMENTS,
+            }
+            for face_index in sorted(range(len(faces)), key=face_areas.__getitem__)[:12]
+        ],
         "nonadjacentSelfIntersectionPairs": len(intersections),
         "firstSelfIntersectionPairs": intersections[:12],
         "selfIntersectionCategories": dict(sorted(intersection_categories.items())),
         "reversedAdjacencies": reversed_adjacencies,
         "h0SeamMinimumNormalDot": min(h0_normal_dots),
         "h0CageTangentMinimumDot": min(cage_tangent_dots),
+    }
+
+
+def centerline_report(build):
+    centers = build["centers"]
+    frames = build["frames"]
+    shoulder_width = build["shoulderWidth"]
+    dense_width_ratios = build["emittedWidthRatios"]
+    tangent_changes = []
+    curvature_radius_products = []
+    for index in range(1, len(centers)):
+        tangent_changes.append(math.degrees(frames[index - 1][0].angle(frames[index][0])))
+    for index in range(1, len(centers) - 1):
+        incoming = (centers[index] - centers[index - 1]).normalized()
+        outgoing = (centers[index + 1] - centers[index]).normalized()
+        turning_angle = incoming.angle(outgoing)
+        average_step = 0.5 * (
+            (centers[index] - centers[index - 1]).length
+            + (centers[index + 1] - centers[index]).length
+        )
+        curvature = turning_angle / max(average_step, 1e-8)
+        bend_plane_half_radius = 0.5 * shoulder_width * dense_width_ratios[index]
+        curvature_radius_products.append(curvature * bend_plane_half_radius)
+    return {
+        "construction": "globally_constrained_approximating_c2_bspline",
+        "ringDistribution": "radius-weighted through ring 6, then uniform distal arc length",
+        "solve": build["centerlineSolveMetrics"],
+        "emittedBandTangentChangesDegrees": tangent_changes,
+        "curvatureTimesBendRadiusByInteriorRing": curvature_radius_products,
+        "maximumEmittedBandTangentChangeDegrees": max(tangent_changes or [0.0]),
+        "maximumCurvatureTimesBendRadius": max(curvature_radius_products or [0.0]),
+        "curvatureTimesBendRadiusLimit": 0.40,
     }
 
 
@@ -376,27 +669,36 @@ def main():
     h0_indices = list(obj["h0_indices"])
     collar_indices = list(obj["collar_indices"])
     initial_tangent = Vector(obj["humerus_tangent"])
-    build = append_forelimb(vertices, faces, collar_indices, h0_indices, initial_tangent)
+    build = append_forelimb(
+        vertices,
+        faces,
+        collar_indices,
+        h0_indices,
+        initial_tangent,
+        args.smoothing_weight,
+    )
     mesh.clear_geometry()
     mesh.from_pydata(vertices, [], faces)
     mesh.update()
     obj["carpus_indices"] = build["sectionIndices"][-1]
+    obj["precarpus_indices"] = build["sectionIndices"][-2]
     obj["forelimb_section_names"] = list(build["sectionNames"])
     group = obj.vertex_groups.get("Carpus") or obj.vertex_groups.new(name="Carpus")
     group.add(build["sectionIndices"][-1], 1.0, "REPLACE")
     topology = topology_report(vertices, faces, build)
     subdivision = subdivided_intersection_report(obj)
+    centerline = centerline_report(build)
     centers = build["controlCenters"]
     length = build["shoulderToGround"]
     report = {
         "status": "pending_forelimb_carpus_critic_gate",
         "topology": topology,
         "subdivision": subdivision,
+        "centerline": centerline,
         "anatomy": {
             "sections": list(build["sectionNames"]),
             "sectionCountIncludingH0": len(build["sectionNames"]),
             "emittedRingCountIncludingH0": len(build["sectionIndices"]),
-            "supportLoopsPerControlInterval": 2,
             "widthRatios": list(build["widthRatios"]),
             "depthRatios": list(build["depthRatios"]),
             "elbowDepthFraction": (centers[0].z - centers[4].z) / length,

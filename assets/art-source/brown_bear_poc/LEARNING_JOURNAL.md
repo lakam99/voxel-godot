@@ -998,3 +998,33 @@
 **Reusable rule**
 
 > Solve connectivity, geometric embedding, and anatomy as three separate gates. Preserve a passed lower gate while correcting the next one, but never promote the lower gate's vocabulary into a claim that the sculpt itself is realistic.
+
+## Iterations 487–524 — A safety proxy can erase anatomy
+
+- Iteration 491 established the first regional shoulder pass: one welded all-quad component, exact H0 seam ownership, broad scapular and triceps sectors, a readable axillary trough, zero intersections, and no finite proxy edge masquerading as skin. That pass was shoulder-only; H0 remained an open terminal, not a forelimb approval.
+- Early shoulder-to-carpus sweeps repeatedly folded their inner rails because the centerline turned more tightly than the section radius. Adding support loops, cyclic phase changes, or post-hoc rail clamps did not repair the geometric contradiction. The clamp experiment diverged catastrophically and was removed rather than normalized into the pipeline.
+- Exact local seam continuation is a derivative constraint, not permission to extrapolate several whole rings independently. The first ring may follow per-column incoming derivatives; subsequent rings must transition through a shared centerline/frame authority or they converge, stall, and create sliver bands.
+- Component-wise PCHIP and station-by-station Hermite interpolation localized curvature at anatomical controls. A clamped C2 spline removed cage and subdivision intersections, proving that station coordinates must be soft evidence whenever exact interpolation conflicts with offset-surface safety.
+- The critic's initial `κr` limit was itself inconsistent with the accepted H0 radius, elbow chord, and prescribed tangent turn. Treating it as hard straightened the arm into a tapered column and erased the olecranon. The critic explicitly retired `κr` as an acceptance gate after visual evidence showed that a mathematically safer centerline could be anatomically worse.
+- The mature centerline authority is now a globally approximating C2 B-spline with hard H0 position/tangent and carpus endpoint, soft anatomical stations, radius-aware diagnostics, and 25 emitted rings. Surface acceptance remains zero cage/L2 intersections, zero reversals, controlled edge ratios, and critic-readable anatomy.
+- Raw global minimum-area divided by global median area is biased against an intentional taper: with a carpus radius ratio near `.37`, structurally regular distal quads are expected to have much less area than shoulder quads. Iterations 519–524 proved that forcing the raw ratio upward by global ring redistribution either overpacked the shoulder or created a transition discontinuity. Quality reports must identify the failing band and distinguish taper from collapse before changing anatomy.
+- Radius-weighted spacing is safest proximally; selective uniform-arc redistribution after the early arm can improve distal quad area without touching the seam. The transition itself must be audited because placing it too near H0 moves the sliver defect rather than removing it.
+
+**Reusable rule**
+
+> Numerical proxies are subordinate to the failure they were invented to detect. If zero intersections, zero reversals, acceptable aspect ratios, and subdivision renders show a stable tapered surface, do not erase an elbow merely to satisfy a curvature or global-area scalar that confounds healthy taper with collapse. Return contradictory gates to the critic with measured geometry and require one explicit authority to yield.
+
+## Iterations 530–551 — Model toe mass, not the gaps between toes
+
+- The exact 24-vertex carpus seam can continue into a safe paw shell, but a uniform 13-rail width chart gives each toe only one dorsal sample. Catmull–Clark turns those samples into ribs and terminal scallops; increasing relief merely produces a serrated or webbed paddle.
+- The first distal design treated web lag and web depression as the primary form. It passed intersection checks while visibly resembling a flipper. Brown-bear evidence shows the inverse hierarchy: one convex palm envelope contains five broad toe masses, and shallow interdigital channels appear only in the distal third.
+- The durable distal authority therefore expands after the palm into paired toe rails: five two-rail toe spans and four narrow web corridors on each surface. Exact wrist ownership remains frozen; new density is introduced only beyond the palm through localized pole routing.
+- A 24-to-26 ring transition cannot be tiled as two independent odd-sided strips with quads. Temporary pentagons proved the geometry but violated the production topology gate. A closed-annulus zipper can remain all-quad by balancing split and merge operations around the full circumference; pole placement and rail-spacing activation must then be localized so the transition does not notch the silhouette.
+- Final toe spacing cannot be imposed at the pole row. Blending from a near-uniform 14-rail transition to anatomical paired-rail spacing after the pole zone prevents extraordinary faces from inheriting both a wide toe span and a narrow web edge.
+- Row density is not monotonically better. Very sparse rows stretch web corridors; very dense rows create long transverse toe faces over tiny longitudinal steps. Longitudinal spacing must be balanced against both the narrowest web corridor and widest toe span, and terminal closure needs its own support schedule.
+- A rounded terminal silhouette is not produced by alternating tip positions. Each toe pair must retain shared volume, contract laterally near its endpoint, and taper through multiple thickness stages before meeting the seam. Claws are forbidden as camouflage until the naked clay palm and toes read correctly.
+- Moving maximum thickness from the wrist into the palm immediately improves load-bearing anatomy, but a numerically exact seam can still shade as a cuff. Seam position, tangent, first-section width/depth derivatives, subdivision support spacing, and signed normals must all be audited; an absolute normal dot can conceal an orientation defect.
+
+**Reusable rule**
+
+> Sculpt positive anatomical masses first. Gaps, grooves, and claws are subordinate details. If the untextured paw does not read as a crowned palm carrying five broad toe volumes, no amount of web depth, terminal scalloping, or decorative claws can rescue it.
