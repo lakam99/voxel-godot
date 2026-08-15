@@ -15,13 +15,28 @@ var route_authority = null
 var terrain_provider = null
 var system = null
 var motor = null
+var crowd_velocity_service = null
 
 
-func setup(authority, terrain_node = null, system_node = null) -> void:
+func setup(authority, terrain_node = null, system_node = null, crowd_service = null) -> void:
 	route_authority = authority
 	terrain_provider = terrain_node
 	system = system_node
 	motor = CharacterMotor3DScript.new()
+	crowd_velocity_service = crowd_service
+
+
+func cancel_entry(entry: Dictionary) -> void:
+	entry["_v2LeaseExecutorGeneration"] = int(entry.get("_v2LeaseExecutorGeneration", 0)) + 1
+	entry.erase("_v2LeaseExecutorPendingAvoidance")
+	_clear_request(entry)
+	var body := entry.get("body") as CharacterBody3D
+	if body != null and is_instance_valid(body):
+		body.set_meta("npc_requested_velocity", Vector3.ZERO)
+		body.set_meta("npc_avoidance_committed_velocity", Vector3.ZERO)
+		body.set_meta("npc_applied_velocity", Vector3.ZERO)
+	if crowd_velocity_service != null and crowd_velocity_service.has_method("disable_actor"):
+		crowd_velocity_service.disable_actor(String(entry.get("id", body.name if body != null else "")))
 
 
 func execute(entry: Dictionary, request_id: String, lease: Dictionary, delta: float, options := {}) -> Dictionary:
@@ -31,6 +46,7 @@ func execute(entry: Dictionary, request_id: String, lease: Dictionary, delta: fl
 	var body := entry.get("body") as CharacterBody3D
 	var waypoints: Array = lease.get("waypoints", [])
 	var waypoint_radius := float(options.get("waypointRadius", DEFAULT_WAYPOINT_RADIUS))
+	var final_waypoint_radius := float(options.get("finalWaypointRadius", waypoint_radius))
 	var new_request := _reset_if_new_request(entry, request_id)
 	if new_request:
 		_mirror_lease_for_runtime_services(entry, lease, options)
@@ -40,8 +56,9 @@ func execute(entry: Dictionary, request_id: String, lease: Dictionary, delta: fl
 			return { "ok": false, "status": "rejected", "reason": String(moving.get("reason", "route_not_ready")), "authority": moving }
 		entry["_v2LeaseExecutorMoving"] = true
 	var index := clampi(int(entry.get("_v2LeaseExecutorWaypointIndex", 0)), 0, waypoints.size())
-	index = _skip_reached_waypoints(entry, request_id, body, lease, waypoints, index, waypoint_radius)
+	index = _skip_reached_waypoints(entry, request_id, body, lease, waypoints, index, waypoint_radius, final_waypoint_radius)
 	if index >= waypoints.size():
+		_publish_motion_metadata(body, Vector3.ZERO, Vector3.ZERO)
 		if bool(options.get("deferArrivalReport", false)):
 			return { "ok": true, "status": "route_complete", "reason": "awaiting_semantic_arrival", "moved": 0.0 }
 		var arrived: Dictionary = route_authority.report_arrived(request_id, "lease_executor_arrived") if route_authority != null else { "ok": true }
@@ -49,18 +66,20 @@ func execute(entry: Dictionary, request_id: String, lease: Dictionary, delta: fl
 		return { "ok": true, "status": "arrived", "reason": "", "authority": arrived }
 	if int(entry.get("_v2LeaseExecutorActiveSegment", -1)) != index:
 		entry["_v2LeaseExecutorActiveSegment"] = index
+		entry["_v2LeaseExecutorSegmentStart"] = body.global_position
 		if route_authority != null:
 			route_authority.report_segment_started(request_id, index, { "target": waypoints[index] })
 	var door_result := _handle_door_action(entry, request_id, lease, index, body, delta, options)
 	if not bool(door_result.get("ok", true)):
 		return door_result
 	var target: Vector3 = waypoints[index]
+	var active_waypoint_radius := final_waypoint_radius if index + 1 >= waypoints.size() else waypoint_radius
 	var previous: Vector3 = body.global_position
 	var offset := target - previous
 	offset.y = 0.0
 	var flat_distance := offset.length()
 	_reset_progress_watch_if_target_changed(entry, "waypoint", index, target, flat_distance)
-	if flat_distance <= waypoint_radius:
+	if flat_distance <= active_waypoint_radius:
 		_reset_progress_watch(entry)
 		entry["_v2LeaseExecutorWaypointIndex"] = index + 1
 		if route_authority != null:
@@ -72,13 +91,121 @@ func execute(entry: Dictionary, request_id: String, lease: Dictionary, delta: fl
 		entry["motorProfile"] = profile
 	var requested_speed := float(options.get("speed", profile.get("walk_speed")))
 	var speed := minf(requested_speed, flat_distance / maxf(delta, 0.001))
-	var command = CharacterMotorCommandScript.from_velocity(offset.normalized() * speed)
+	var desired_velocity := offset.normalized() * speed
+	var avoidance_options: Dictionary = options.duplicate(true)
+	avoidance_options["physicsDelta"] = delta
+	var execution_generation := int(entry.get("_v2LeaseExecutorGeneration", 0))
+	var avoidance_request_key := "%s|%d|%.3f|%.3f|%.3f|g%d" % [request_id, index, target.x, target.y, target.z, execution_generation]
+	avoidance_options["avoidanceRequestKey"] = avoidance_request_key
+	avoidance_options["safeVelocityConsumer"] = Callable(self, "_commit_deferred_safe_velocity").bind(entry)
+	avoidance_options["safeVelocityFilter"] = Callable(self, "_filter_reverse_velocity_candidate").bind(entry, request_id, lease, index, body, target, desired_velocity, flat_distance, active_waypoint_radius, delta)
+	var avoidance := _safe_velocity(entry, body, desired_velocity, target, profile, avoidance_options)
+	if bool(avoidance.get("active", false)):
+		entry["_v2LeaseExecutorPendingAvoidance"] = {
+			"generation": execution_generation,
+			"requestKey": avoidance_request_key,
+			"requestId": request_id,
+			"lease": lease,
+			"index": index,
+			"body": body,
+			"target": target,
+			"activeWaypointRadius": active_waypoint_radius,
+			"profile": profile,
+			"speed": speed,
+			"desiredVelocity": desired_velocity,
+			"flatDistance": flat_distance,
+			"delta": delta,
+			"options": options,
+			"avoidance": avoidance
+		}
+		body.set_meta("npc_requested_velocity", desired_velocity)
+		body.set_meta("npc_applied_velocity", Vector3.ZERO)
+		return { "ok": true, "status": "moving", "reason": "avoidance_submitted", "moved": 0.0, "avoidance": _avoidance_debug(avoidance, desired_velocity, Vector3.ZERO, Vector3.ZERO) }
+	entry.erase("_v2LeaseExecutorPendingAvoidance")
+	var raw_safe_velocity: Vector3 = avoidance.get("safeVelocity", desired_velocity)
+	return _apply_velocity_and_advance(entry, request_id, lease, index, body, target, active_waypoint_radius, profile, speed, desired_velocity, flat_distance, delta, options, avoidance, raw_safe_velocity)
+
+
+func _commit_deferred_safe_velocity(safe_velocity: Vector3, callback_request_key: String, entry: Dictionary) -> void:
+	var pending: Dictionary = entry.get("_v2LeaseExecutorPendingAvoidance", {}) if entry.get("_v2LeaseExecutorPendingAvoidance", {}) is Dictionary else {}
+	if pending.is_empty() or String(pending.get("requestKey", "")) != callback_request_key:
+		return
+	if int(entry.get("_v2LeaseExecutorGeneration", -1)) != int(pending.get("generation", -2)):
+		entry.erase("_v2LeaseExecutorPendingAvoidance")
+		return
+	if String(entry.get("_v2LeaseExecutorRequestId", "")) != String(pending.get("requestId", "")):
+		entry.erase("_v2LeaseExecutorPendingAvoidance")
+		return
+	if int(entry.get("_v2LeaseExecutorWaypointIndex", -1)) != int(pending.get("index", -2)):
+		entry.erase("_v2LeaseExecutorPendingAvoidance")
+		return
+	entry.erase("_v2LeaseExecutorPendingAvoidance")
+	var result := _apply_velocity_and_advance(
+		entry,
+		String(pending.get("requestId", "")),
+		pending.get("lease", {}),
+		int(pending.get("index", 0)),
+		pending.get("body") as CharacterBody3D,
+		pending.get("target", Vector3.ZERO),
+		float(pending.get("activeWaypointRadius", DEFAULT_WAYPOINT_RADIUS)),
+		pending.get("profile"),
+		float(pending.get("speed", 0.0)),
+		pending.get("desiredVelocity", Vector3.ZERO),
+		float(pending.get("flatDistance", 0.0)),
+		float(pending.get("delta", 0.0)),
+		pending.get("options", {}),
+		pending.get("avoidance", {}),
+		safe_velocity
+	)
+	entry["routeLeaseDeferredExecution"] = result
+
+
+func _apply_velocity_and_advance(entry: Dictionary, request_id: String, lease: Dictionary, index: int, body: CharacterBody3D, target: Vector3, active_waypoint_radius: float, profile, speed: float, desired_velocity: Vector3, flat_distance: float, delta: float, options: Dictionary, avoidance: Dictionary, raw_safe_velocity: Vector3) -> Dictionary:
+	if body == null or not is_instance_valid(body):
+		return { "ok": false, "status": "rejected", "reason": "missing_character_body", "moved": 0.0 }
+	var waypoints: Array = lease.get("waypoints", []) if lease.get("waypoints", []) is Array else []
+	var previous: Vector3 = body.global_position
+	var applied_velocity := raw_safe_velocity
+	var terminal_route_length := _remaining_waypoint_route_length(body.global_position, waypoints, index)
+	var terminal_pending_door := _lease_has_pending_door_from(lease, index)
+	var terminal_direct := terminal_route_length <= NpcConstantsScript.AVOIDANCE_TERMINAL_DIRECT_DISTANCE \
+		and String(entry.get("activeDoorPortalId", "")) == "" \
+		and not terminal_pending_door
+	avoidance["terminalRouteLength"] = terminal_route_length
+	avoidance["terminalPendingDoor"] = terminal_pending_door
+	avoidance["terminalDirectEligible"] = terminal_direct
+	var reverse_result: Dictionary = entry.get("_v2AvoidancePendingReverseResult", {}) if entry.get("_v2AvoidancePendingReverseResult", {}) is Dictionary else {}
+	entry.erase("_v2AvoidancePendingReverseResult")
+	if reverse_result.is_empty():
+		reverse_result = {"velocity": applied_velocity, "exhausted": false, "telemetry": {}}
+	reverse_result["velocity"] = applied_velocity
+	entry["routeLeaseAvoidance"] = _avoidance_debug(avoidance, desired_velocity, raw_safe_velocity, applied_velocity)
+	entry["routeLeaseAvoidance"]["reverseYield"] = reverse_result.get("telemetry", {}).duplicate(true)
+	body.set_meta("npc_requested_velocity", desired_velocity)
+	body.set_meta("npc_avoidance_committed_velocity", applied_velocity)
+	if bool(avoidance.get("movementBlocked", false)) or (bool(avoidance.get("active", false)) and applied_velocity.length_squared() <= 0.000001):
+		body.set_meta("npc_applied_velocity", Vector3.ZERO)
+		return { "ok": false, "status": "waiting", "reason": "blocked_dynamic", "classification": "crowd_avoidance", "moved": 0.0, "avoidance": entry["routeLeaseAvoidance"] }
+	var command = CharacterMotorCommandScript.from_velocity(applied_velocity)
 	command.grounded_hint = true
 	command.terrain_grounded = true
 	var motor_state = motor.apply(body, command, profile, delta, terrain_provider)
 	var moved := Vector2(body.global_position.x - previous.x, body.global_position.z - previous.z).length()
+	var realized_velocity := (body.global_position - previous) / maxf(delta, 0.001)
+	realized_velocity.y = 0.0
+	body.set_meta("npc_applied_velocity", realized_velocity)
+	entry["routeLeaseAvoidance"]["realizedVelocity"] = realized_velocity
 	entry["_v2LeaseExecutorLastMove"] = moved
 	if bool(motor_state.get("blocked")):
+		if String(motor_state.get("blocked_contact_category")) == "dynamic_actor":
+			return {
+				"ok": false,
+				"status": "waiting",
+				"reason": "blocked_dynamic",
+				"classification": "motor_actor_contact",
+				"moved": moved,
+				"motor": motor_state.to_summary() if motor_state.has_method("to_summary") else {}
+			}
 		_report_collision(entry, request_id, motor_state)
 		return {
 			"ok": false,
@@ -88,6 +215,9 @@ func execute(entry: Dictionary, request_id: String, lease: Dictionary, delta: fl
 			"motor": motor_state.to_summary() if motor_state.has_method("to_summary") else {}
 		}
 	if moved <= MIN_PROGRESS_DISTANCE:
+		if bool(avoidance.get("active", false)):
+			entry["_v2LeaseExecutorStuckTime"] = 0.0
+			return { "ok": false, "status": "waiting", "reason": "blocked_dynamic", "classification": "crowd_avoidance", "moved": moved, "avoidance": entry["routeLeaseAvoidance"] }
 		var stuck_time := float(entry.get("_v2LeaseExecutorStuckTime", 0.0)) + delta
 		entry["_v2LeaseExecutorStuckTime"] = stuck_time
 		if stuck_time >= STUCK_TIME_SECONDS:
@@ -102,7 +232,9 @@ func execute(entry: Dictionary, request_id: String, lease: Dictionary, delta: fl
 	# progress watchdog runs.  Without this, the actor can oscillate across a
 	# corner on coarse frames and be reported as dynamically stuck even though it
 	# actually traversed the waypoint corridor.
-	if _crossed_waypoint(previous, body.global_position, target, waypoint_radius):
+	var terminal_waypoint := index + 1 >= waypoints.size()
+	var crossed_waypoint := _crossed_waypoint(previous, body.global_position, target, active_waypoint_radius)
+	if crossed_waypoint and (not terminal_waypoint or bool(options.get("allowTerminalWaypointCrossing", false))):
 		_reset_progress_watch(entry)
 		entry["_v2LeaseExecutorWaypointIndex"] = index + 1
 		if route_authority != null:
@@ -117,10 +249,10 @@ func execute(entry: Dictionary, request_id: String, lease: Dictionary, delta: fl
 			_clear_request(entry)
 			return { "ok": true, "status": "arrived", "reason": "", "moved": moved, "authority": arrived_after_crossing }
 		return { "ok": true, "status": "moving", "reason": "", "moved": moved, "waypointIndex": index + 1 }
-	var no_progress := _update_progress_watch(entry, request_id, "waypoint", index, target, flat_distance, body.global_position, delta, moved, waypoint_radius)
+	var no_progress := _update_progress_watch(entry, request_id, "waypoint", index, target, flat_distance, body.global_position, delta, moved, active_waypoint_radius, bool(avoidance.get("active", false)))
 	if not bool(no_progress.get("ok", true)):
 		return no_progress
-	if Vector2(body.global_position.x - target.x, body.global_position.z - target.z).length() <= waypoint_radius:
+	if Vector2(body.global_position.x - target.x, body.global_position.z - target.z).length() <= active_waypoint_radius:
 		_reset_progress_watch(entry)
 		entry["_v2LeaseExecutorWaypointIndex"] = index + 1
 		if route_authority != null:
@@ -181,11 +313,13 @@ func _reset_if_new_request(entry: Dictionary, request_id: String) -> bool:
 	if String(entry.get("_v2LeaseExecutorRequestId", "")) == request_id:
 		return false
 	_clear_request(entry)
+	entry["_v2LeaseExecutorGeneration"] = int(entry.get("_v2LeaseExecutorGeneration", 0)) + 1
 	entry["_v2LeaseExecutorRequestId"] = request_id
 	entry["_v2LeaseExecutorWaypointIndex"] = 0
 	entry["_v2LeaseExecutorActiveSegment"] = -1
 	entry["_v2LeaseExecutorMoving"] = false
 	entry["_v2LeaseExecutorStuckTime"] = 0.0
+	entry["_v2AvoidanceReplanCount"] = int(entry.get("crowdAvoidanceReplanCount", 0))
 	return true
 
 
@@ -193,6 +327,7 @@ func _mirror_lease_for_runtime_services(entry: Dictionary, lease: Dictionary, op
 	entry["routeActions"] = (lease.get("actions", {}) as Dictionary).duplicate(true) if lease.get("actions", {}) is Dictionary else {}
 	entry["routeCells"] = (lease.get("cells", []) as Array).duplicate() if lease.get("cells", []) is Array else []
 	entry["pathWaypoints"] = (lease.get("waypoints", []) as Array).duplicate() if lease.get("waypoints", []) is Array else []
+	entry["routeDoorWaypointBindings"] = _door_waypoint_bindings(lease)
 	var target_cell = lease.get("targetCell", Vector2i(999999, 999999))
 	if target_cell is Vector2i:
 		entry["routeGoalCell"] = target_cell
@@ -204,9 +339,11 @@ func _mirror_lease_for_runtime_services(entry: Dictionary, lease: Dictionary, op
 
 
 func _clear_request(entry: Dictionary) -> void:
+	entry.erase("_v2LeaseExecutorPendingAvoidance")
 	entry.erase("_v2LeaseExecutorRequestId")
 	entry.erase("_v2LeaseExecutorWaypointIndex")
 	entry.erase("_v2LeaseExecutorActiveSegment")
+	entry.erase("_v2LeaseExecutorSegmentStart")
 	entry.erase("_v2LeaseExecutorMoving")
 	entry.erase("_v2LeaseExecutorStuckTime")
 	entry.erase("_v2LeaseExecutorLastMove")
@@ -214,13 +351,31 @@ func _clear_request(entry: Dictionary) -> void:
 	entry.erase("_v2LeaseExecutorBestDistance")
 	entry.erase("_v2LeaseExecutorLastDistance")
 	entry.erase("_v2LeaseExecutorNoProgressTime")
+	entry.erase("_v2AvoidanceReverseKey")
+	entry.erase("_v2AvoidanceReverseFrames")
+	entry.erase("_v2AvoidanceReverseDistance")
+	entry.erase("_v2AvoidanceLastDirectionSign")
+	entry.erase("_v2AvoidanceDirectionFlips")
+	entry.erase("_v2AvoidanceInitialDistance")
+	entry.erase("_v2AvoidanceBestDistance")
 
 
-func _skip_reached_waypoints(entry: Dictionary, request_id: String, body: CharacterBody3D, lease: Dictionary, waypoints: Array, index: int, waypoint_radius: float) -> int:
+func _publish_motion_metadata(body: CharacterBody3D, requested_velocity: Vector3, applied_velocity: Vector3) -> void:
+	if body == null or not is_instance_valid(body):
+		return
+	var requested_planar := Vector3(requested_velocity.x, 0.0, requested_velocity.z)
+	var applied_planar := Vector3(applied_velocity.x, 0.0, applied_velocity.z)
+	body.set_meta("npc_requested_velocity", requested_planar)
+	body.set_meta("npc_avoidance_committed_velocity", applied_planar)
+	body.set_meta("npc_applied_velocity", applied_planar)
+
+
+func _skip_reached_waypoints(entry: Dictionary, request_id: String, body: CharacterBody3D, lease: Dictionary, waypoints: Array, index: int, waypoint_radius: float, final_waypoint_radius: float) -> int:
 	var cursor := index
 	while cursor < waypoints.size():
 		var waypoint: Vector3 = waypoints[cursor]
-		var reached := Vector2(body.global_position.x - waypoint.x, body.global_position.z - waypoint.z).length() <= waypoint_radius
+		var active_radius := final_waypoint_radius if cursor + 1 >= waypoints.size() else waypoint_radius
+		var reached := Vector2(body.global_position.x - waypoint.x, body.global_position.z - waypoint.z).length() <= active_radius
 		if not reached and cursor + 1 < waypoints.size() and _door_action_for_waypoint(lease, cursor).is_empty():
 			reached = _actor_has_passed_waypoint(body.global_position, waypoint, waypoints[cursor + 1], waypoint_radius)
 		if not reached:
@@ -252,12 +407,14 @@ func _handle_door_action(entry: Dictionary, request_id: String, lease: Dictionar
 		return { "ok": true, "status": "clear" }
 	if not _door_action_is_local(action, body):
 		return { "ok": true, "status": "approaching_door" }
-	var door = action.get("door") as Node
+	var door := _action_door_node(action)
 	if door == null or not is_instance_valid(door):
+		_publish_motion_metadata(body, Vector3.ZERO, Vector3.ZERO)
 		if route_authority != null:
 			route_authority.report_door_wait(request_id, "missing_door_action_node", { "waypointIndex": waypoint_index })
 		return { "ok": false, "status": "waiting", "reason": "missing_door_action_node", "moved": 0.0 }
 	if system == null or not system.has_method("request_npc_door_traversal"):
+		_publish_motion_metadata(body, Vector3.ZERO, Vector3.ZERO)
 		if route_authority != null:
 			route_authority.report_door_wait(request_id, "missing_door_traversal_service", { "waypointIndex": waypoint_index })
 		return { "ok": false, "status": "waiting", "reason": "missing_door_traversal_service", "moved": 0.0 }
@@ -275,6 +432,7 @@ func _handle_door_action(entry: Dictionary, request_id: String, lease: Dictionar
 			stage_move["reason"] = String(traversal.get("reason", "door_stage_required"))
 		stage_move["door"] = traversal
 		return stage_move
+	_publish_motion_metadata(body, Vector3.ZERO, Vector3.ZERO)
 	return {
 		"ok": false,
 		"status": "waiting",
@@ -284,20 +442,137 @@ func _handle_door_action(entry: Dictionary, request_id: String, lease: Dictionar
 	}
 
 
+func _move_toward_position(entry: Dictionary, request_id: String, body: CharacterBody3D, target: Vector3, delta: float, options := {}) -> Dictionary:
+	var offset := target - body.global_position
+	offset.y = 0.0
+	var flat_distance := offset.length()
+	_reset_progress_watch_if_target_changed(entry, "door_stage", -1, target, flat_distance)
+	if flat_distance <= DEFAULT_WAYPOINT_RADIUS:
+		_reset_progress_watch(entry)
+		_publish_motion_metadata(body, Vector3.ZERO, Vector3.ZERO)
+		return { "ok": false, "status": "waiting", "reason": "door_stage_wait", "moved": 0.0 }
+	var profile = entry.get("motorProfile")
+	if profile == null:
+		profile = CharacterMotorProfileScript.npc_default()
+		entry["motorProfile"] = profile
+	var requested_speed := float(options.get("speed", profile.get("walk_speed")))
+	var speed := minf(requested_speed, flat_distance / maxf(delta, 0.001))
+	var desired_velocity := offset.normalized() * speed
+	var avoidance := _safe_velocity(entry, body, desired_velocity, target, profile, options)
+	var raw_safe_velocity: Vector3 = avoidance.get("safeVelocity", desired_velocity)
+	var applied_velocity := raw_safe_velocity
+	if applied_velocity.length() > speed:
+		applied_velocity = applied_velocity.normalized() * speed
+	entry["routeLeaseAvoidance"] = _avoidance_debug(avoidance, desired_velocity, raw_safe_velocity, applied_velocity)
+	if bool(avoidance.get("movementBlocked", false)) or (bool(avoidance.get("active", false)) and applied_velocity.length_squared() <= 0.000001):
+		_publish_motion_metadata(body, desired_velocity, Vector3.ZERO)
+		return { "ok": false, "status": "waiting", "reason": "blocked_dynamic", "classification": "crowd_avoidance", "moved": 0.0, "avoidance": entry["routeLeaseAvoidance"] }
+	var command = CharacterMotorCommandScript.from_velocity(applied_velocity)
+	command.grounded_hint = true
+	command.terrain_grounded = true
+	var previous := body.global_position
+	var motor_state = motor.apply(body, command, profile, delta, terrain_provider)
+	var moved := Vector2(body.global_position.x - previous.x, body.global_position.z - previous.z).length()
+	var realized_velocity := (body.global_position - previous) / maxf(delta, 0.001)
+	realized_velocity.y = 0.0
+	_publish_motion_metadata(body, desired_velocity, realized_velocity)
+	entry["routeLeaseAvoidance"]["realizedVelocity"] = realized_velocity
+	if bool(motor_state.get("blocked")):
+		return { "ok": false, "status": "waiting", "reason": "door_stage_blocked", "moved": moved }
+	var no_progress := _update_progress_watch(entry, request_id, "door_stage", -1, target, flat_distance, body.global_position, delta, moved, DEFAULT_WAYPOINT_RADIUS, bool(avoidance.get("active", false)))
+	if not bool(no_progress.get("ok", true)):
+		no_progress["status"] = "waiting"
+		return no_progress
+	return { "ok": false, "status": "waiting", "reason": "door_stage_required", "moved": moved }
+
+
 func _door_action_for_waypoint(lease: Dictionary, waypoint_index: int) -> Dictionary:
 	var actions: Dictionary = lease.get("actions", {}) if lease.get("actions", {}) is Dictionary else {}
 	if actions.is_empty():
 		return {}
-	var cells: Array = lease.get("cells", []) if lease.get("cells", []) is Array else []
-	if waypoint_index >= 0 and waypoint_index < cells.size() and cells[waypoint_index] is Vector2i:
-		var cell: Vector2i = cells[waypoint_index]
-		var key := "%d,%d" % [cell.x, cell.y]
-		var action_value = actions.get(key)
-		if action_value is Dictionary:
-			var action: Dictionary = action_value
-			if String(action.get("kind", "")) == "door" and bool(action.get("enabled", true)):
-				return action
-	return {}
+	var waypoints: Array = lease.get("waypoints", []) if lease.get("waypoints", []) is Array else []
+	if waypoint_index < 0 or waypoint_index >= waypoints.size() or not (waypoints[waypoint_index] is Vector3):
+		return {}
+	var waypoint: Vector3 = waypoints[waypoint_index]
+	var best_action: Dictionary = {}
+	var best_distance := INF
+	var best_uses_navigation_link := false
+	var action_keys := actions.keys()
+	action_keys.sort()
+	for action_key in action_keys:
+		var action_value = actions.get(action_key)
+		if not (action_value is Dictionary):
+			continue
+		var action: Dictionary = action_value
+		if String(action.get("kind", "")) != "door" or not bool(action.get("enabled", true)):
+			continue
+		var binding := _door_action_waypoint_binding(action, waypoint)
+		if binding.is_empty():
+			continue
+		var distance := float(binding.get("distance", INF))
+		var uses_navigation_link := bool(action.get("navLink", false))
+		if distance < best_distance - 0.001 \
+			or (is_equal_approx(distance, best_distance) and uses_navigation_link and not best_uses_navigation_link):
+			best_action = action
+			best_distance = distance
+			best_uses_navigation_link = uses_navigation_link
+	return best_action
+
+
+func _door_action_waypoint_binding(action: Dictionary, waypoint: Vector3) -> Dictionary:
+	var closest_distance := INF
+	var closest_phase := ""
+	var entry_position = action.get("entryPosition", null)
+	if entry_position is Vector3:
+		closest_distance = waypoint.distance_to(entry_position)
+		closest_phase = "entry"
+	var door := _action_door_node(action)
+	if closest_phase == "" and door != null:
+		closest_distance = waypoint.distance_to(door.global_position)
+		closest_phase = "door"
+	if closest_phase == "" or closest_distance > NpcConstantsScript.DOOR_PORTAL_PATH_POINT_EPSILON:
+		return {}
+	return {
+		"distance": closest_distance,
+		"phase": closest_phase
+	}
+
+
+func _door_waypoint_bindings(lease: Dictionary) -> Array[Dictionary]:
+	var result: Array[Dictionary] = []
+	var seen_portals := {}
+	var waypoints: Array = lease.get("waypoints", []) if lease.get("waypoints", []) is Array else []
+	for waypoint_index in range(waypoints.size()):
+		if not (waypoints[waypoint_index] is Vector3):
+			continue
+		var action := _door_action_for_waypoint(lease, waypoint_index)
+		if action.is_empty():
+			continue
+		var portal_id := String(action.get("portalId", ""))
+		var portal_key := portal_id if portal_id != "" else "%s|%s" % [String(action.get("cell", "")), String(action.get("direction", ""))]
+		if seen_portals.has(portal_key):
+			continue
+		var waypoint: Vector3 = waypoints[waypoint_index]
+		var binding := _door_action_waypoint_binding(action, waypoint)
+		seen_portals[portal_key] = true
+		result.append({
+			"portalId": portal_id,
+			"actionCell": action.get("cell", Vector2i(999999, 999999)),
+			"direction": String(action.get("direction", "")),
+			"navLink": bool(action.get("navLink", false)),
+			"waypointIndex": waypoint_index,
+			"waypoint": waypoint,
+			"phase": String(binding.get("phase", "")),
+			"distance": float(binding.get("distance", INF))
+		})
+	return result
+
+
+func _action_door_node(action: Dictionary) -> Node3D:
+	var door_value = action.get("door", null)
+	if door_value == null or not is_instance_valid(door_value) or not (door_value is Node3D):
+		return null
+	return door_value as Node3D
 
 
 func _door_action_is_local(action: Dictionary, body: CharacterBody3D) -> bool:
@@ -308,40 +583,171 @@ func _door_action_is_local(action: Dictionary, body: CharacterBody3D) -> bool:
 		var entry_distance := Vector2(body.global_position.x - entry_position.x, body.global_position.z - entry_position.z).length()
 		if entry_distance <= NpcConstantsScript.CELL_SIZE * 1.35:
 			return true
-	var door = action.get("door") as Node3D
-	if door != null and is_instance_valid(door):
+	var door := _action_door_node(action)
+	if door != null:
 		var door_distance := Vector2(body.global_position.x - door.global_position.x, body.global_position.z - door.global_position.z).length()
 		return door_distance <= NpcConstantsScript.CELL_SIZE * 1.8
 	return false
 
 
-func _move_toward_position(entry: Dictionary, request_id: String, body: CharacterBody3D, target: Vector3, delta: float, options := {}) -> Dictionary:
-	var offset := target - body.global_position
-	offset.y = 0.0
-	var flat_distance := offset.length()
-	_reset_progress_watch_if_target_changed(entry, "door_stage", -1, target, flat_distance)
-	if flat_distance <= DEFAULT_WAYPOINT_RADIUS:
-		_reset_progress_watch(entry)
-		return { "ok": false, "status": "waiting", "reason": "door_stage_wait", "moved": 0.0 }
-	var profile = entry.get("motorProfile")
-	if profile == null:
-		profile = CharacterMotorProfileScript.npc_default()
-		entry["motorProfile"] = profile
-	var requested_speed := float(options.get("speed", profile.get("walk_speed")))
-	var speed := minf(requested_speed, flat_distance / maxf(delta, 0.001))
-	var command = CharacterMotorCommandScript.from_velocity(offset.normalized() * speed)
-	command.grounded_hint = true
-	command.terrain_grounded = true
-	var previous := body.global_position
-	var motor_state = motor.apply(body, command, profile, delta, terrain_provider)
-	var moved := Vector2(body.global_position.x - previous.x, body.global_position.z - previous.z).length()
-	if bool(motor_state.get("blocked")):
-		return { "ok": false, "status": "waiting", "reason": "door_stage_blocked", "moved": moved }
-	var no_progress := _update_progress_watch(entry, request_id, "door_stage", -1, target, flat_distance, body.global_position, delta, moved, DEFAULT_WAYPOINT_RADIUS)
-	if not bool(no_progress.get("ok", true)):
-		no_progress["status"] = "waiting"
-		return no_progress
-	return { "ok": false, "status": "waiting", "reason": "door_stage_required", "moved": moved }
+func _filter_reverse_velocity_candidate(safe_velocity: Vector3, entry: Dictionary, request_id: String, lease: Dictionary, segment_index: int, body: CharacterBody3D, target: Vector3, desired_velocity: Vector3, target_distance: float, arrival_radius: float, delta: float) -> Vector3:
+	var avoidance: Dictionary = entry.get("routeLeaseAvoidance", {}) if entry.get("routeLeaseAvoidance", {}) is Dictionary else {}
+	var result := _apply_bounded_reverse_yield(entry, request_id, lease, segment_index, body, target, desired_velocity, safe_velocity, target_distance, arrival_radius, delta, avoidance)
+	entry["_v2AvoidancePendingReverseResult"] = result
+	return result.get("velocity", safe_velocity)
+
+
+func avoidance_stats() -> Dictionary:
+	return crowd_velocity_service.stats() if crowd_velocity_service != null else {}
+
+
+func _safe_velocity(entry: Dictionary, body: CharacterBody3D, desired_velocity: Vector3, target: Vector3, profile, options: Dictionary) -> Dictionary:
+	if crowd_velocity_service == null:
+		return {
+			"active": false,
+			"safeVelocity": Vector3.ZERO,
+			"status": "blocked",
+			"reason": "missing_crowd_authority",
+			"callbackFresh": false,
+			"fallbackUsed": false,
+			"movementBlocked": true,
+			"activeRegistrationCount": 0
+		}
+	var corridor_direction := target - body.global_position
+	corridor_direction.y = 0.0
+	return crowd_velocity_service.resolve_safe_velocity(entry, body, desired_velocity, {
+		"profile": profile,
+		"portalMode": String(entry.get("activeDoorPortalId", "")) != "",
+		"corridorDirection": corridor_direction,
+		"maxSpeed": desired_velocity.length(),
+		"priority": int(entry.get("routePriority", options.get("priority", 0))),
+		"physicsDelta": float(options.get("physicsDelta", options.get("delta", 1.0 / 60.0))),
+		"avoidanceTarget": target,
+		"avoidanceRequestKey": String(options.get("avoidanceRequestKey", "")),
+		"safeVelocityConsumer": options.get("safeVelocityConsumer", Callable()),
+		"safeVelocityFilter": options.get("safeVelocityFilter", Callable())
+	})
+
+func _avoidance_debug(avoidance: Dictionary, desired_velocity: Vector3, raw_safe_velocity: Vector3, applied_velocity: Vector3) -> Dictionary:
+	return {
+		"active": bool(avoidance.get("active", false)),
+		"status": String(avoidance.get("status", "")),
+		"reason": String(avoidance.get("reason", "")),
+		"callbackFresh": bool(avoidance.get("callbackFresh", false)),
+		"fallbackUsed": bool(avoidance.get("fallbackUsed", false)),
+		"movementBlocked": bool(avoidance.get("movementBlocked", false)),
+		"activeRegistrationCount": int(avoidance.get("activeRegistrationCount", 0)),
+		"desiredVelocity": desired_velocity,
+		"preferredVelocity": avoidance.get("preferredVelocity", desired_velocity),
+		"laneBiasApplied": bool(avoidance.get("laneBiasApplied", false)),
+		"encounterActorId": String(avoidance.get("encounterActorId", "")),
+		"selfAvoidancePriority": float(avoidance.get("selfAvoidancePriority", 0.0)),
+		"encounterAvoidancePriority": float(avoidance.get("encounterAvoidancePriority", 0.0)),
+		"encounterStationary": bool(avoidance.get("encounterStationary", false)),
+		"certifiedLaneOverride": bool(avoidance.get("certifiedLaneOverride", false)),
+		"terminalDirectOverride": bool(avoidance.get("terminalDirectOverride", false)),
+		"terminalRouteLength": float(avoidance.get("terminalRouteLength", INF)),
+		"terminalPendingDoor": bool(avoidance.get("terminalPendingDoor", false)),
+		"deterministicEncounterPrecedence": bool(avoidance.get("deterministicEncounterPrecedence", false)),
+		"solverAgent": avoidance.get("solverAgent", {}),
+		"rawSafeVelocity": raw_safe_velocity,
+		"appliedVelocity": applied_velocity,
+		"corridorConstrained": not raw_safe_velocity.is_equal_approx(applied_velocity),
+		"metrics": avoidance.get("metrics", {})
+	}
+
+
+func _remaining_waypoint_route_length(position: Vector3, waypoints: Array, index: int) -> float:
+	if index < 0 or index >= waypoints.size():
+		return 0.0
+	var remaining := position.distance_to(waypoints[index] as Vector3)
+	for waypoint_index in range(index, waypoints.size() - 1):
+		remaining += (waypoints[waypoint_index] as Vector3).distance_to(waypoints[waypoint_index + 1] as Vector3)
+	return remaining
+
+
+func _lease_has_pending_door_from(lease: Dictionary, index: int) -> bool:
+	var waypoints: Array = lease.get("waypoints", []) if lease.get("waypoints", []) is Array else []
+	for waypoint_index in range(maxi(0, index), waypoints.size()):
+		if not _door_action_for_waypoint(lease, waypoint_index).is_empty():
+			return true
+	return false
+
+
+func _apply_bounded_reverse_yield(entry: Dictionary, request_id: String, lease: Dictionary, segment_index: int, body: CharacterBody3D, target: Vector3, desired_velocity: Vector3, applied_velocity: Vector3, target_distance: float, arrival_radius: float, delta: float, avoidance: Dictionary) -> Dictionary:
+	var desired_axis := desired_velocity.normalized() if desired_velocity.length_squared() > 0.0001 else Vector3.ZERO
+	var signed_speed := applied_velocity.dot(desired_axis) if desired_axis.length_squared() > 0.0001 else 0.0
+	var direction_sign := -1 if signed_speed < -0.01 else (1 if signed_speed > 0.01 else 0)
+	var prior_sign := int(entry.get("_v2AvoidanceLastDirectionSign", 0))
+	if direction_sign != 0 and prior_sign != 0 and direction_sign != prior_sign:
+		entry["_v2AvoidanceDirectionFlips"] = int(entry.get("_v2AvoidanceDirectionFlips", 0)) + 1
+	if direction_sign != 0:
+		entry["_v2AvoidanceLastDirectionSign"] = direction_sign
+	var initial_distance := float(entry.get("_v2AvoidanceInitialDistance", target_distance))
+	var best_distance := minf(float(entry.get("_v2AvoidanceBestDistance", initial_distance)), target_distance)
+	entry["_v2AvoidanceInitialDistance"] = initial_distance
+	entry["_v2AvoidanceBestDistance"] = best_distance
+	var encounter_actor_id := String(avoidance.get("encounterActorId", ""))
+	var reverse_key := "%s|%d" % [request_id, segment_index]
+	if String(entry.get("_v2AvoidanceReverseKey", "")) != reverse_key:
+		entry["_v2AvoidanceReverseKey"] = reverse_key
+		entry["_v2AvoidanceReverseFrames"] = 0
+		entry["_v2AvoidanceReverseDistance"] = 0.0
+		entry["_v2AvoidanceReverseStreak"] = 0
+	var reverse_frames := int(entry.get("_v2AvoidanceReverseFrames", 0))
+	var reverse_distance := float(entry.get("_v2AvoidanceReverseDistance", 0.0))
+	var reverse_streak := int(entry.get("_v2AvoidanceReverseStreak", 0))
+	var reversing := signed_speed < -0.01
+	var portal_mode := String(entry.get("activeDoorPortalId", "")) != "" or not _door_action_for_waypoint(lease, segment_index).is_empty()
+	var terminal_mode := segment_index + 1 >= (lease.get("waypoints", []) as Array).size() and target_distance <= maxf(0.0, arrival_radius)
+	var rear_clear := true
+	if reversing:
+		var reverse_direction := applied_velocity.normalized()
+		var probe_distance := maxf(applied_velocity.length() * delta, NpcConstantsScript.AVOIDANCE_REVERSE_REAR_PROBE_DISTANCE)
+		rear_clear = _motion_collision(body, reverse_direction * probe_distance) == null
+	var permitted := reversing and not portal_mode and not terminal_mode and rear_clear \
+		and reverse_frames < NpcConstantsScript.AVOIDANCE_MAX_YIELD_REVERSE_FRAMES \
+		and reverse_distance < NpcConstantsScript.AVOIDANCE_MAX_YIELD_REVERSE_DISTANCE
+	if reversing and permitted:
+		var remaining_distance := maxf(0.0, NpcConstantsScript.AVOIDANCE_MAX_YIELD_REVERSE_DISTANCE - reverse_distance)
+		var limited_speed := minf(minf(applied_velocity.length(), NpcConstantsScript.AVOIDANCE_MAX_YIELD_REVERSE_SPEED), remaining_distance / maxf(delta, 0.001))
+		applied_velocity = applied_velocity.normalized() * limited_speed
+		reverse_frames += 1
+		reverse_streak += 1
+		reverse_distance += limited_speed * delta
+		entry["_v2AvoidanceReverseFrames"] = reverse_frames
+		entry["_v2AvoidanceReverseDistance"] = reverse_distance
+		entry["_v2AvoidanceReverseStreak"] = reverse_streak
+	else:
+		reverse_streak = 0
+		entry["_v2AvoidanceReverseStreak"] = 0
+	var exhausted := reversing and not permitted
+	return {
+		"velocity": desired_velocity if exhausted else applied_velocity,
+		"exhausted": exhausted,
+		"telemetry": {
+			"encounterActorId": encounter_actor_id,
+			"desiredSafeDot": desired_axis.dot(avoidance.get("safeVelocity", Vector3.ZERO)) if desired_axis.length_squared() > 0.0001 else 0.0,
+			"consecutiveReverseFrames": reverse_streak,
+			"totalReverseFrames": reverse_frames,
+			"reverseDisplacement": reverse_distance,
+			"directionFlips": int(entry.get("_v2AvoidanceDirectionFlips", 0)),
+			"netProgress": maxf(0.0, initial_distance - target_distance),
+			"bestProgress": maxf(0.0, initial_distance - best_distance),
+			"recoveryCount": int(entry.get("crowdAvoidanceRecoveryCount", 0)),
+			"replanCount": int(entry.get("crowdAvoidanceReplanCount", 0)),
+			"rearClear": rear_clear,
+			"portalMode": portal_mode,
+			"terminalMode": terminal_mode,
+			"exhausted": exhausted
+		}
+	}
+
+
+func _motion_collision(body: CharacterBody3D, displacement: Vector3):
+	if body == null or not body.is_inside_tree() or displacement.length_squared() <= 0.000001:
+		return null
+	return body.move_and_collide(displacement, true, 0.001, false, 8)
 
 
 func _reset_progress_watch_if_target_changed(entry: Dictionary, kind: String, index: int, target: Vector3, distance: float) -> void:
@@ -360,7 +766,7 @@ func _reset_progress_watch(entry: Dictionary) -> void:
 	entry.erase("_v2LeaseExecutorLastDistance")
 
 
-func _update_progress_watch(entry: Dictionary, request_id: String, kind: String, index: int, target: Vector3, previous_distance: float, position: Vector3, delta: float, moved: float, waypoint_radius: float) -> Dictionary:
+func _update_progress_watch(entry: Dictionary, request_id: String, kind: String, index: int, target: Vector3, previous_distance: float, position: Vector3, delta: float, moved: float, waypoint_radius: float, crowd_active := false) -> Dictionary:
 	var current_distance := Vector2(position.x - target.x, position.z - target.z).length()
 	var best_distance := float(entry.get("_v2LeaseExecutorBestDistance", previous_distance))
 	var progress_epsilon := maxf(MIN_TARGET_PROGRESS_DISTANCE, waypoint_radius * 0.05)
@@ -372,6 +778,16 @@ func _update_progress_watch(entry: Dictionary, request_id: String, kind: String,
 	entry["_v2LeaseExecutorLastDistance"] = current_distance
 	if moved <= MIN_PROGRESS_DISTANCE:
 		return { "ok": true }
+	if crowd_active:
+		entry["_v2LeaseExecutorNoProgressTime"] = 0.0
+		return {
+			"ok": false,
+			"status": "waiting",
+			"reason": "blocked_dynamic",
+			"classification": "crowd_avoidance",
+			"moved": moved,
+			"details": {"stuckKind": "crowd_no_target_progress", "target": target}
+		}
 	var no_progress_time := float(entry.get("_v2LeaseExecutorNoProgressTime", 0.0)) + delta
 	entry["_v2LeaseExecutorNoProgressTime"] = no_progress_time
 	if no_progress_time < STUCK_TIME_SECONDS:

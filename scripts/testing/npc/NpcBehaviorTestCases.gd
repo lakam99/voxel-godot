@@ -87,6 +87,22 @@ class FakeCollisionProbe:
 			}
 		}
 
+class FakeSemanticArrivalAuthority:
+	extends RefCounted
+	var state := "moving"
+	var report_arrived_calls := 0
+
+	func runtime_for_entry(entry: Dictionary) -> Dictionary:
+		return {
+			"requestId": String(entry.get("routineRouteV2RequestId", "")),
+			"state": state
+		}
+
+	func report_arrived(request_id: String, reason: String) -> Dictionary:
+		report_arrived_calls += 1
+		state = "arrived"
+		return { "ok": true, "requestId": request_id, "state": state, "reason": reason }
+
 class FakeMain:
 	extends Node
 	const WATER_LEVEL := -100.0
@@ -480,6 +496,8 @@ func cases() -> Array[Dictionary]:
 		case("npc_behavior_route_order_promotes_abstract_actor", "day", "test_route_order_promotes_abstract_actor"),
 		case("npc_behavior_scripted_go_home_arrival_clears_cached_motion", "day", "test_scripted_go_home_arrival_clears_cached_motion"),
 		case("npc_behavior_scripted_go_home_hold_arrival_stays_home", "day", "test_scripted_go_home_hold_arrival_stays_home"),
+		case("npc_behavior_scripted_go_to_hold_arrival_stays_at_target", "day", "test_scripted_go_to_hold_arrival_stays_at_target"),
+		case("npc_behavior_scripted_semantic_arrival_owns_authority_report", "day", "test_scripted_semantic_arrival_owns_authority_report"),
 		case("npc_behavior_scripted_order_normal_profile_speed", "day", "test_scripted_order_normal_profile_speed"),
 		case("npc_behavior_scripted_order_sprint_profile_speed", "day", "test_scripted_order_sprint_profile_speed"),
 		case("npc_behavior_scripted_order_no_transform_write", "day", "test_scripted_order_no_transform_write"),
@@ -1263,6 +1281,74 @@ func test_scripted_go_home_hold_arrival_stays_home(_mode: String) -> Dictionary:
 		{ "moveCalls": fake_npc.move_calls, "result": result, "order": order }
 	)
 
+
+func test_scripted_go_to_hold_arrival_stays_at_target(_mode: String) -> Dictionary:
+	var fake_npc := FakeNpcSystem.new()
+	var executor: Variant = make_executor(fake_npc)
+	var target := Vector3(2.7, 0.0, 0.0)
+	var entry_data := entry("Villager", { "id": "go_to_hold", "position": target })
+	var body := entry_data.get("body") as Node3D
+	entry_data["activeMotionGoal"] = { "goalKind": NpcEnumsScript.GOAL_KIND_IDLE, "reason": "highest_utility" }
+	entry_data["scriptedOrder"] = { "kind": "go_to", "state": "ARRIVED", "reason": "target_reached", "target": target, "arrivalRadius": 0.45, "holdOnArrival": true }
+	body.set_meta("npc_scripted_target", target)
+	body.set_meta("npc_scripted_arrival_radius", 0.45)
+	body.set_meta("npc_scripted_allow_outside", true)
+	body.set_meta("npc_scripted_order_kind", "go_to")
+	body.set_meta("npc_scripted_order_state", "ARRIVED")
+	body.set_meta("npc_scripted_order_reason", "target_reached")
+	body.set_meta("npc_scripted_hold_on_arrival", true)
+	var before := body.global_position
+	var result: Dictionary = executor.advance_motion_npc(entry_data, 1.0 / 60.0, 0.0)
+	var order: Dictionary = entry_data.get("scriptedOrder", {})
+	var passed: bool = body.global_position.distance_to(before) <= 0.001 \
+		and bool(result.get("advanced", false)) \
+		and String(result.get("intentKind", "")) == "scripted" \
+		and String(order.get("state", "")) == "ARRIVED"
+	fake_npc.queue_free()
+	return outcome(
+		passed,
+		"before=%s after=%s result=%s order=%s" % [str(before), str(body.global_position), JSON.stringify(result), JSON.stringify(order)],
+		["held_go_to_arrival_keeps_scripted_goal", "held_go_to_does_not_resume_schedule"],
+		{ "before": before, "after": body.global_position, "result": result, "order": order }
+	)
+
+
+func test_scripted_semantic_arrival_owns_authority_report(_mode: String) -> Dictionary:
+	var fake_npc := FakeNpcSystem.new()
+	var autonomy := FakeAutonomy.new()
+	fake_npc.add_child(autonomy)
+	autonomy.route_world = FakeRouteWorld.new()
+	var authority := FakeSemanticArrivalAuthority.new()
+	autonomy.route_authority_v2 = authority
+	var executor := NpcPlanExecutorScript.new()
+	executor.setup(autonomy, fake_npc, FakeMain.new(), {})
+	var entry_data := { "id": "semantic_arrival", "routineRouteV2RequestId": "semantic-arrival:1" }
+	var shortfall: Dictionary = executor._finalize_scripted_semantic_arrival(entry_data, 2.0, 0.45, "route_complete")
+	var calls_after_shortfall: int = authority.report_arrived_calls
+	var reached: Dictionary = executor._finalize_scripted_semantic_arrival(entry_data, 0.2, 0.45, "route_complete")
+	var repeated: Dictionary = executor._finalize_scripted_semantic_arrival(entry_data, 0.2, 0.45, "arrived")
+	var exact_target := Vector3(1.62, 0.0, 0.18)
+	var bound: Dictionary = executor._bind_exact_semantic_target({
+		"ok": true,
+		"waypoints": [Vector3.ZERO, Vector3(1.35, 0.0, 0.0)]
+	}, Vector3.ZERO, exact_target, "scripted_target")
+	var waypoints: Array = bound.get("waypoints", []) if bound.get("waypoints", []) is Array else []
+	var exact_final_pose: bool = not waypoints.is_empty() and waypoints.back() is Vector3 and (waypoints.back() as Vector3).distance_to(exact_target) <= 0.001
+	var passed: bool = calls_after_shortfall == 0 \
+		and not bool(shortfall.get("reported", true)) \
+		and bool(reached.get("reported", false)) \
+		and not bool(repeated.get("reported", true)) \
+		and authority.report_arrived_calls == 1 \
+		and exact_final_pose
+	fake_npc.queue_free()
+	return outcome(
+		passed,
+		"shortfall=%s reached=%s repeated=%s calls=%d exactFinal=%s" % [JSON.stringify(shortfall), JSON.stringify(reached), JSON.stringify(repeated), authority.report_arrived_calls, str(exact_final_pose)],
+		["endpoint_shortfall_does_not_publish_arrival", "physical_arrival_publishes_once", "scripted_route_ends_at_exact_pose"],
+		{ "shortfall": shortfall, "reached": reached, "repeated": repeated, "reportArrivedCalls": authority.report_arrived_calls, "waypoints": waypoints }
+	)
+
+
 func test_scripted_order_normal_profile_speed(_mode: String) -> Dictionary:
 	var fake_npc := FakeNpcSystem.new()
 	var executor: Variant = make_executor(fake_npc)
@@ -1435,6 +1521,7 @@ func test_scripted_combat_overlay_advances_with_v2_route_service(_mode: String) 
 		and fake_npc.fighter_target_updates == 1 \
 		and bool(entry_data.get("scriptedCombatOverlay", false)) \
 		and bool(body.get_meta("npc_scripted_combat_overlay", false)) \
+		and bool(result.get("advanced", false)) \
 		and String(result.get("status", "")) in ["moving", "arrived"] \
 		and body.global_position.distance_to(before) > 0.001
 	hostile.free()

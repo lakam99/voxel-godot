@@ -12,6 +12,7 @@ const START_OVERLAP_ESCAPE_MIN_DOT := 0.25
 const DUPLICATE_WAYPOINT_EPSILON := 0.02
 const TERRAIN_MOTION_MAX_COLLISIONS := 8
 const TERRAIN_MOTION_MARGIN := 0.001
+const WALKABLE_SUPPORT_VERTICAL_TOLERANCE := 0.18
 
 var system = null
 var main = null
@@ -39,10 +40,7 @@ func probe_route(entry: Dictionary, route: Dictionary, intent: Dictionary, optio
 	var points: Array[Vector3] = [body.global_position]
 	for waypoint in waypoints:
 		if waypoint is Vector3:
-			var point: Vector3 = waypoint
-			if _flat_points_close(points[points.size() - 1], point):
-				continue
-			points.append(point)
+			points.append(waypoint)
 	if points.size() < 2:
 		return _certificate(true, "passed", "", true, 0, {
 			"pointCount": points.size(),
@@ -122,10 +120,27 @@ func terrain_motion_collision_mask(body: CharacterBody3D) -> int:
 	return int(body.collision_mask) & NpcConstantsScript.COLLISION_NPC_TERRAIN_MOTION_MASK
 
 func _grounded_sample(sample: Vector3) -> Vector3:
+	var generated_world = _generated_navigation_adapter()
+	if generated_world != null and generated_world.has_method("navigation_query_position"):
+		var navigation_sample = generated_world.call("navigation_query_position", sample)
+		if navigation_sample is Vector3:
+			return navigation_sample
 	var result := sample
 	if main != null and main.has_method("surface_y_at_position"):
 		result.y = float(main.call("surface_y_at_position", sample)) + DEFAULT_GROUND_OFFSET
 	return result
+
+func _generated_navigation_adapter():
+	if system == null:
+		return null
+	if system.has_method("generated_navigation_adapter"):
+		return system.call("generated_navigation_adapter")
+	var pathing = system.get("pathing")
+	if pathing == null:
+		return null
+	if pathing.has_method("ensure_ready"):
+		pathing.call("ensure_ready")
+	return pathing.get("navigation_world")
 
 func _current_overlap_escape_colliders(entry: Dictionary, body: CharacterBody3D, shape: CapsuleShape3D, route: Dictionary) -> Dictionary:
 	var result := {}
@@ -145,7 +160,7 @@ func _current_overlap_escape_colliders(entry: Dictionary, body: CharacterBody3D,
 		var collider := hit_dict.get("collider") as Node
 		if collider == null or collider == body:
 			continue
-		if _collider_allowed_for_route(entry, collider, route):
+		if _collider_allowed_for_route(entry, collider, route, current_sample, hit_dict, shape):
 			continue
 		if not _collider_type_supports_start_overlap_escape(collider):
 			continue
@@ -172,7 +187,7 @@ func _blocking_overlap(entry: Dictionary, body: CharacterBody3D, shape: CapsuleS
 		var collider := hit_dict.get("collider") as Node
 		if collider == null or collider == body:
 			continue
-		if _collider_allowed_for_route(entry, collider, route):
+		if _collider_allowed_for_route(entry, collider, route, sample, hit_dict, shape):
 			continue
 		var escape_context := _start_overlap_escape_context(collider, sample, start_overlap_escape_colliders)
 		if bool(escape_context.get("allowed", false)):
@@ -188,6 +203,7 @@ func _blocking_overlap(entry: Dictionary, body: CharacterBody3D, shape: CapsuleS
 			"position": collider_position,
 			"cell": Vector2i(roundi(collider_position.x / NpcConstantsScript.CELL_SIZE), roundi(collider_position.z / NpcConstantsScript.CELL_SIZE))
 		}
+		blocker["collisionSource"] = _collision_hit_source_details(collider, hit_dict)
 		if not escape_context.is_empty():
 			blocker["startOverlapEscape"] = escape_context
 		return blocker
@@ -262,14 +278,95 @@ func _is_terrain_collider(collider: Node) -> bool:
 	var collision_object := collider as CollisionObject3D
 	return collision_object != null and (int(collision_object.collision_layer) & NpcConstantsScript.COLLISION_NPC_TERRAIN_MOTION_MASK) != 0
 
-func _collider_allowed_for_route(_entry: Dictionary, collider: Node, route: Dictionary) -> bool:
+func _collider_allowed_for_route(_entry: Dictionary, collider: Node, route: Dictionary, sample := Vector3.INF, hit := {}, shape: CapsuleShape3D = null) -> bool:
 	var kind := String(collider.get_meta("kind", ""))
 	var block_type := String(collider.get_meta("block_type", ""))
 	if kind == "block" and block_type in ["cobblestonePath", "torch"]:
 		return true
 	if block_type == "door" and _route_has_matching_door_action(collider, route):
 		return true
+	if sample is Vector3 and sample.is_finite() and hit is Dictionary:
+		var horizontal_tolerance := shape.radius if shape != null else 0.0
+		return _collision_hit_is_walkable_building_support(collider, hit, sample, horizontal_tolerance)
 	return false
+
+
+func _collision_hit_is_walkable_building_support(collider: Node, hit: Dictionary, sample: Vector3, horizontal_tolerance := 0.0) -> bool:
+	var collision_object := collider as CollisionObject3D
+	if collision_object == null:
+		return false
+	var shape_index := int(hit.get("shape", -1))
+	if shape_index < 0:
+		return false
+	var owner_id := collision_object.shape_find_owner(shape_index)
+	if owner_id < 0:
+		return false
+	var owner = collision_object.shape_owner_get_owner(owner_id)
+	if not (owner is CollisionShape3D):
+		return false
+	var collision_shape := owner as CollisionShape3D
+	var source_part_id := String(collision_shape.get_meta("building_part_id", ""))
+	if source_part_id == "":
+		return false
+	var generated_world = _generated_navigation_adapter()
+	if generated_world != null and generated_world.has_method("collision_part_is_walkable_building_support"):
+		if bool(generated_world.call("collision_part_is_walkable_building_support", source_part_id, sample, WALKABLE_SUPPORT_VERTICAL_TOLERANCE, horizontal_tolerance)):
+			return true
+	if generated_world == null \
+		or not generated_world.has_method("building_support_for_position") \
+		or not generated_world.has_method("support_surface_y_for_position"):
+		return false
+	var support_value = generated_world.call("building_support_for_position", sample, NpcConstantsScript.CELL_SIZE * 0.92)
+	if not (support_value is Dictionary):
+		return false
+	var support: Dictionary = support_value
+	if source_part_id != String(support.get("sourceCollisionPartId", support.get("sourcePartId", ""))):
+		return false
+	var surface_y_value = generated_world.call("support_surface_y_for_position", support, sample)
+	if not (surface_y_value is float or surface_y_value is int):
+		return false
+	return absf(sample.y - float(surface_y_value)) <= WALKABLE_SUPPORT_VERTICAL_TOLERANCE
+
+
+func _collision_hit_source_details(collider: Node, hit: Dictionary) -> Dictionary:
+	var result := {
+		"shapeIndex": int(hit.get("shape", -1)),
+		"colliderPartId": String(collider.get_meta("building_part_id", "")),
+		"colliderPartKind": String(collider.get_meta("building_part_kind", "")),
+		"sourceBlueprintId": String(collider.get_meta("building_source_blueprint", ""))
+	}
+	var collision_object := collider as CollisionObject3D
+	if collision_object == null:
+		return result
+	var shape_index := int(result.get("shapeIndex", -1))
+	if shape_index < 0:
+		return result
+	var owner_id := collision_object.shape_find_owner(shape_index)
+	result["shapeOwnerId"] = owner_id
+	if owner_id < 0:
+		return result
+	var owner = collision_object.shape_owner_get_owner(owner_id)
+	if not (owner is CollisionShape3D):
+		return result
+	var collision_shape := owner as CollisionShape3D
+	var source_part_id := String(collision_shape.get_meta("building_part_id", ""))
+	result["shapeOwner"] = collision_shape.name
+	result["sourcePartId"] = source_part_id
+	result["sourcePartKind"] = String(collision_shape.get_meta("building_part_kind", ""))
+	if source_part_id.is_empty():
+		return result
+	var records_value = collider.get_meta("building_part_records", {})
+	if not (records_value is Dictionary):
+		return result
+	var records: Dictionary = records_value
+	var record_value = records.get(source_part_id, {})
+	if not (record_value is Dictionary):
+		return result
+	var record: Dictionary = record_value
+	result["sourceSemantic"] = String(record.get("semantic", ""))
+	result["sourceMaterial"] = String(record.get("material", ""))
+	result["sourcePartSize"] = record.get("size", Vector3.ZERO)
+	return result
 
 func _collider_type_supports_start_overlap_escape(collider: Node) -> bool:
 	if collider == null:

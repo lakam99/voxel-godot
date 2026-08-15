@@ -9,6 +9,8 @@ const STREAMING_CHUNK_PROP_FRAME_BUDGET_MS := 1.35
 const STREAMING_COLLISION_DEFER_MIN_CHUNK_DISTANCE := 2
 const STREAMING_TERRAIN_MESH_JOBS_PER_FRAME := 1
 const STREAMING_TERRAIN_MESH_FRAME_BUDGET_MS := 3.25
+const STREAMING_VOXEL_FLUID_PUBLICATIONS_PER_FRAME := 1
+const VOXEL_AUTHORITY_INITIALIZATION_GRACE_MSEC := 120000
 const STREAMING_EXTERIOR_LOD_MIN_CHUNK_DISTANCE := 0
 const STREAMING_EXTERIOR_LOD_STEP_CELLS := 14
 const STREAMING_SOLID_PLACEHOLDER_STEP_CELLS := 4
@@ -155,7 +157,17 @@ func create_playtest_collapse_case(base_cell: Vector2i) -> void:
     for x in range(-2, 3):
         create_playtest_structure_block(base_cell.x + x, base_cell.y - 2, level, 4, "woodBlock")
 
+func interact_focused() -> void:
+    try_focused_interaction()
+
 func use_or_place() -> void:
+    if try_focused_interaction():
+        return
+    if try_use_active_consumable():
+        return
+    place_selected_block()
+
+func try_focused_interaction() -> bool:
     var hit: Dictionary = focused_interaction_hit()
     if not hit.is_empty():
         var collider: Node = hit.get("collider")
@@ -164,32 +176,35 @@ func use_or_place() -> void:
                 if held_item:
                     held_item.play_use("interact")
                 show_tutorial_dialogue(tutorial_system.last_message)
-                return
+                return true
         if collider and interact_story_dialogue_node(collider):
             if held_item:
                 held_item.play_use("interact")
-            return
+            return true
         if collider and interact_story_node(collider):
             if held_item:
                 held_item.play_use("interact")
-            return
+            return true
         var block := interaction_block_from_collider(collider)
-        if block and block.has_meta("kind") and String(block.get_meta("kind")) == "block":
+        if block:
             var block_type := String(block.get_meta("block_type"))
             if block_type == "door":
                 var door_result = request_player_door_use(block, player, "player")
                 if door_result != null and String(door_result.get("status")) == "succeeded":
                     var door_open := bool(block.get_meta("open"))
+                    var door_name := "gate" if String(block.get_meta("door_presentation", "")) == "portcullis" else "door"
                     play_feedback("doorOpen" if door_open else "doorClose", block.global_position if block is Node3D else Vector3.INF, feedback_color_for_material("door"), 2)
                     if door_open and tutorial_system and tutorial_system.has_method("on_door_opened") and bool(tutorial_system.on_door_opened(block)):
                         refresh_intro_knock_audio()
                         show_tutorial_dialogue(tutorial_system.last_message)
                     else:
-                        update_hud("Opened door" if door_open else "Closed door")
-                    return
+                        update_hud("Opened %s" % door_name if door_open else "Closed %s" % door_name)
+                    return true
+            if not block.has_meta("kind") or String(block.get_meta("kind")) != "block":
+                return false
             if block_type == "bed":
                 if sleep_at_bed(block):
-                    return
+                    return true
             if utility_system and utility_system.is_utility_block(block_type):
                 if hud:
                     hud.set_inventory_open(false)
@@ -202,13 +217,11 @@ func use_or_place() -> void:
                         update_hud(tutorial_system.last_message)
                     else:
                         update_hud(utility_system.last_message)
-                    return
+                    return true
             if is_utility_block(block_type):
                 update_hud("%s ready" % ItemCatalogScript.label(block_type))
-                return
-    if try_use_active_consumable():
-        return
-    place_selected_block()
+                return true
+    return false
 
 func try_use_active_consumable() -> bool:
     if survival_system == null or inventory_system == null:
@@ -347,7 +360,8 @@ func process_pending_terrain_volume_light_updates(max_columns := 2) -> int:
 
 func update_chunks(force: bool = false) -> void:
     if not ensure_voxel_terrain_authority():
-        report_voxel_authority_failure_once("update_chunks")
+        if not voxel_terrain_authority_initialization_pending():
+            report_voxel_authority_failure_once("update_chunks")
         return
     update_voxel_authority_chunks(force)
 
@@ -439,6 +453,7 @@ func update_legacy_terrain_chunks_for_diagnostics(force: bool = false) -> void:
     prune_stale_pending_chunk_terrain_refreshes(needed)
     prune_stale_pending_generated_volume_exposure_scans(needed)
     prune_stale_pending_chunk_prop_spawns(needed)
+    prune_stale_pending_voxel_fluid_publications(needed)
     if monitor != null:
         monitor.end_section("chunk_unload", unload_start)
     if structure_system:
@@ -452,26 +467,71 @@ func update_legacy_terrain_chunks_for_diagnostics(force: bool = false) -> void:
 func ensure_voxel_terrain_authority() -> bool:
     if voxel_terrain_runtime != null and is_instance_valid(voxel_terrain_runtime):
         if String(voxel_terrain_runtime.get("configured_seed")) == seed_text:
-            return bool(voxel_terrain_runtime.get("authority_ready"))
+            if bool(voxel_terrain_runtime.get("authority_ready")):
+                voxel_authority_initialization_attempts = 0
+                voxel_authority_initialization_started_msec = -1
+                voxel_authority_initialization_reason = ""
+                return true
+            if bool(voxel_terrain_runtime.get("authority_refresh_pending")):
+                voxel_authority_initialization_reason = "voxel_terrain_authority_refresh_pending"
+                return false
+            return false
         push_error("Voxel terrain seed mismatch requires the staged runtime reset contract")
+        return false
+    if not voxel_terrain_runtime_classes_available():
+        note_voxel_terrain_authority_initialization_pending("voxel_tools_runtime_classes_missing")
         return false
     var runtime := VoxelTerrainRuntimeScript.new() as Node3D
     runtime.name = "VoxelTerrainRuntime"
     add_child(runtime)
     var result: Dictionary = runtime.call("setup", self)
     if not bool(result.get("ok", false)):
+        voxel_authority_initialization_reason = String(result.get("reason", "unknown"))
         push_error("VOX-59 terrain authority failed: %s" % String(result.get("reason", "unknown")))
         runtime.queue_free()
         return false
     voxel_terrain_runtime = runtime
+    voxel_authority_initialization_attempts = 0
+    voxel_authority_initialization_started_msec = -1
+    voxel_authority_initialization_reason = ""
     clear_chunk_asset_cache()
     return true
+
+func voxel_terrain_runtime_classes_available() -> bool:
+    for class_name_value in ["VoxelTerrain", "VoxelViewer", "VoxelMesherTransvoxel", "VoxelFormat"]:
+        if not ClassDB.class_exists(class_name_value):
+            return false
+    return true
+
+func note_voxel_terrain_authority_initialization_pending(reason: String) -> void:
+    if voxel_authority_initialization_started_msec < 0:
+        voxel_authority_initialization_started_msec = Time.get_ticks_msec()
+    voxel_authority_initialization_attempts += 1
+    voxel_authority_initialization_reason = reason
+    if runtime_perf_monitor != null:
+        runtime_perf_monitor.increment_counter("voxel_authority_initialization_pending")
+
+func voxel_terrain_authority_initialization_pending() -> bool:
+    if voxel_authority_initialization_reason == "voxel_terrain_authority_refresh_pending":
+        return voxel_terrain_runtime != null \
+            and is_instance_valid(voxel_terrain_runtime) \
+            and bool(voxel_terrain_runtime.get("authority_refresh_pending"))
+    return voxel_authority_initialization_reason == "voxel_tools_runtime_classes_missing" \
+        and voxel_authority_initialization_started_msec >= 0 \
+        and Time.get_ticks_msec() - voxel_authority_initialization_started_msec < VOXEL_AUTHORITY_INITIALIZATION_GRACE_MSEC
 
 func report_voxel_authority_failure_once(source: String) -> void:
     if bool(get_meta("voxel_authority_failure_reported", false)):
         return
     set_meta("voxel_authority_failure_reported", true)
-    push_error("VOX-59 fail-closed terrain authority unavailable at %s; legacy terrain presenters will not be activated" % source)
+    var missing_classes: Array[String] = []
+    for class_name_value in ["VoxelTerrain", "VoxelViewer", "VoxelMesherTransvoxel", "VoxelFormat"]:
+        if not ClassDB.class_exists(class_name_value):
+            missing_classes.append(class_name_value)
+    var elapsed_msec := 0
+    if voxel_authority_initialization_started_msec >= 0:
+        elapsed_msec = Time.get_ticks_msec() - voxel_authority_initialization_started_msec
+    push_error("VOX-59 fail-closed terrain authority unavailable at %s after %d ms; reason=%s; missing classes=%s; legacy terrain presenters will not be activated" % [source, elapsed_msec, voxel_authority_initialization_reason, JSON.stringify(missing_classes)])
 
 func voxel_terrain_authority_active() -> bool:
     return voxel_terrain_runtime != null \
@@ -504,14 +564,18 @@ func update_voxel_authority_chunks(force: bool) -> void:
         var key: Vector2i = key_value
         if needed.has(key):
             continue
+        if voxel_terrain_runtime != null and voxel_terrain_runtime.has_method("release_gameplay_chunk"):
+            voxel_terrain_runtime.call("release_gameplay_chunk", key)
         chunks[key].queue_free()
         chunks.erase(key)
     prune_stale_pending_chunk_loads(needed)
     prune_stale_pending_chunk_prop_spawns(needed)
+    prune_stale_pending_voxel_fluid_publications(needed)
     queue_dirty_terrain_volume_chunk_refreshes()
     var fluid_refreshes := process_pending_chunk_terrain_refreshes(center)
     var fluid_assets_applied := apply_completed_terrain_meshing_jobs(center)
     if fluid_refreshes <= 0 and fluid_assets_applied <= 0:
+        process_pending_voxel_fluid_publications(center)
         process_pending_terrain_meshing_jobs(center)
     if not force:
         if pending_streaming_structure_work_count() > 0 and pending_chunk_loads.is_empty():
@@ -1517,7 +1581,8 @@ func prune_stale_pending_chunk_prop_spawns(needed: Dictionary) -> void:
 
 func create_chunk(cx: int, cz: int, defer_props := false, defer_streaming_collision := false) -> void:
     if not ensure_voxel_terrain_authority():
-        report_voxel_authority_failure_once("create_chunk")
+        if not voxel_terrain_authority_initialization_pending():
+            report_voxel_authority_failure_once("create_chunk")
         return
     create_voxel_authority_chunk_container(cx, cz, defer_props)
 
@@ -1641,6 +1706,49 @@ func create_voxel_authority_chunk_container(cx: int, cz: int, defer_props := fal
 func request_voxel_authority_chunk_fluid(chunk_key: Vector2i, priority := 0) -> bool:
     if terrain_meshing_service == null or not terrain_meshing_service.has_method("request_chunk_assets"):
         return false
+    var queued_priority := int(pending_voxel_fluid_publications.get(chunk_key, priority))
+    pending_voxel_fluid_publications[chunk_key] = maxi(queued_priority, priority)
+    if runtime_perf_monitor != null:
+        runtime_perf_monitor.increment_counter("voxel_fluid_publications_queued")
+    return true
+
+func process_pending_voxel_fluid_publications(center: Vector2i) -> int:
+    if pending_voxel_fluid_publications.is_empty():
+        return 0
+    var monitor = runtime_perf_monitor
+    if not voxel_terrain_authority_active() or voxel_terrain_runtime == null \
+            or not voxel_terrain_runtime.has_method("gameplay_collision_publication_pending"):
+        if monitor != null:
+            monitor.increment_counter("voxel_fluid_publications_deferred_authority")
+            monitor.increment_counter("voxel_fluid_publication_queue_depth", pending_voxel_fluid_publications.size())
+        return 0
+    if bool(voxel_terrain_runtime.call("gameplay_collision_publication_pending")):
+        if monitor != null:
+            monitor.increment_counter("voxel_fluid_publications_deferred_collision")
+            monitor.increment_counter("voxel_fluid_publication_queue_depth", pending_voxel_fluid_publications.size())
+        return 0
+    var published := 0
+    while published < STREAMING_VOXEL_FLUID_PUBLICATIONS_PER_FRAME and not pending_voxel_fluid_publications.is_empty():
+        var chunk_key := nearest_pending_voxel_fluid_publication(center)
+        if chunk_key == Vector2i(999999, 999999):
+            break
+        if not chunks.has(chunk_key):
+            pending_voxel_fluid_publications.erase(chunk_key)
+            if monitor != null:
+                monitor.increment_counter("voxel_fluid_publications_pruned")
+            continue
+        var priority := int(pending_voxel_fluid_publications.get(chunk_key, 0))
+        if not submit_voxel_authority_chunk_fluid(chunk_key, priority):
+            break
+        pending_voxel_fluid_publications.erase(chunk_key)
+        published += 1
+        if monitor != null:
+            monitor.increment_counter("voxel_fluid_publications_submitted")
+    if monitor != null:
+        monitor.increment_counter("voxel_fluid_publication_queue_depth", pending_voxel_fluid_publications.size())
+    return published
+
+func submit_voxel_authority_chunk_fluid(chunk_key: Vector2i, priority: int) -> bool:
     var signature := chunk_asset_signature(chunk_key)
     var result: Dictionary = terrain_meshing_service.call(
         "request_chunk_assets",
@@ -1651,7 +1759,47 @@ func request_voxel_authority_chunk_fluid(chunk_key: Vector2i, priority := 0) -> 
         priority,
         true
     )
-    return String(result.get("status", "")) in ["queued", "pending", "ready"]
+    var status := String(result.get("status", ""))
+    if runtime_perf_monitor != null:
+        if status == "queued":
+            runtime_perf_monitor.increment_counter("terrain_fluid_jobs_queued")
+        elif status == "pending":
+            runtime_perf_monitor.increment_counter("terrain_fluid_jobs_already_pending")
+        elif status == "ready":
+            runtime_perf_monitor.increment_counter("terrain_fluid_jobs_already_ready")
+    return status in ["queued", "pending", "ready"]
+
+func nearest_pending_voxel_fluid_publication(center: Vector2i) -> Vector2i:
+    var best := Vector2i(999999, 999999)
+    var best_priority := -2147483647
+    var best_distance := 2147483647
+    for key_value in pending_voxel_fluid_publications.keys():
+        if not (key_value is Vector2i):
+            continue
+        var chunk_key: Vector2i = key_value
+        var priority := int(pending_voxel_fluid_publications.get(chunk_key, 0))
+        var distance := absi(chunk_key.x - center.x) + absi(chunk_key.y - center.y)
+        if priority > best_priority \
+                or (priority == best_priority and distance < best_distance) \
+                or (priority == best_priority and distance == best_distance \
+                    and (chunk_key.x < best.x or (chunk_key.x == best.x and chunk_key.y < best.y))):
+            best = chunk_key
+            best_priority = priority
+            best_distance = distance
+    return best
+
+func prune_stale_pending_voxel_fluid_publications(needed: Dictionary) -> void:
+    if pending_voxel_fluid_publications.is_empty():
+        return
+    for key_value in pending_voxel_fluid_publications.keys():
+        if not (key_value is Vector2i):
+            continue
+        var chunk_key: Vector2i = key_value
+        if needed.has(chunk_key):
+            continue
+        pending_voxel_fluid_publications.erase(chunk_key)
+        if runtime_perf_monitor != null:
+            runtime_perf_monitor.increment_counter("voxel_fluid_publications_pruned")
 
 func chunk_assets(cx: int, cz: int) -> Dictionary:
     var monitor = runtime_perf_monitor

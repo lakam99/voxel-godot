@@ -4980,8 +4980,8 @@ func execute_player_route_action(action: Dictionary, action_key: String, label: 
             "player": vec3(player.global_position)
         }))
         return false
-    dispatch_mouse_button(MOUSE_BUTTON_RIGHT, true)
-    dispatch_mouse_button(MOUSE_BUTTON_RIGHT, false)
+    dispatch_key(KEY_E, true)
+    dispatch_key(KEY_E, false)
     await wait_physics_frames(POST_ACTION_FRAMES)
     var opened := bool(door.get_meta("open", false))
     record_player_route_event(label, "door_action", {
@@ -5224,8 +5224,8 @@ func open_tutorial_route_gate(gate_cell: Vector2i, label: String) -> bool:
             "player": vec3(player.global_position)
         }))
         return false
-    dispatch_mouse_button(MOUSE_BUTTON_RIGHT, true)
-    dispatch_mouse_button(MOUSE_BUTTON_RIGHT, false)
+    dispatch_key(KEY_E, true)
+    dispatch_key(KEY_E, false)
     await wait_physics_frames(POST_ACTION_FRAMES)
     if not bool(gate.get_meta("open", false)):
         add_failure("tutorial_route_gate_did_not_open", JSON.stringify({
@@ -5237,6 +5237,7 @@ func open_tutorial_route_gate(gate_cell: Vector2i, label: String) -> bool:
         return false
     interaction_timeline.append({
         "label": "%s_route_gate_opened" % label,
+        "input": "E",
         "gate": block_summary(gate),
         "player": vec3(player.global_position)
     })

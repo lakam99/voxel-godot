@@ -21,7 +21,10 @@ func place_spawn(body: CharacterBody3D, requested_position: Vector3, profile = n
 		position.y = maxf(position.y, ground_y)
 	var validation := validate_capsule(body, position, motor_profile)
 	if not bool(validation.get("ok", false)):
-		return result(false, position, String(validation.get("reason", "invalid_capsule")))
+		var rejected := result(false, position, String(validation.get("reason", "invalid_capsule")))
+		if validation.has("collider"):
+			rejected["collider"] = String(validation.get("collider", ""))
+		return rejected
 	if body.is_inside_tree():
 		body.global_position = position
 	else:

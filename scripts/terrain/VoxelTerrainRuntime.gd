@@ -11,6 +11,9 @@ const GAME_CHUNK_SIZE := 28
 const TERRAIN_COLLISION_LAYER := 2
 const FINAL_VIEW_DISTANCE := 112
 const STARTUP_VIEW_DISTANCE := 80
+const STARTUP_AUXILIARY_MAX_VIEW_DISTANCE_VOXELS := 160
+const STARTUP_AUXILIARY_MAX_CONCURRENT_VIEWERS := 3
+const STARTUP_AUXILIARY_TARGET_MESH_BLOCK_RADIUS := 6
 const VIEW_DISTANCE_EXPANSION_STEP := 16
 const VIEW_DISTANCE_EXPANSION_INTERVAL_SECONDS := 2.0
 const STARTUP_VERTICAL_MIN_CELL := -16
@@ -34,6 +37,7 @@ var terrain: VoxelTerrain
 var viewer: VoxelViewer
 var generator
 var authority_ready := false
+var authority_refresh_pending := false
 var published_mesh_blocks := {}
 var configured_seed := ""
 var last_volume_revision := -1
@@ -49,6 +53,8 @@ var collision_probe_passes := 0
 var view_distance_expansion_elapsed := 0.0
 var view_distance_expansion_requested := false
 var startup_auxiliary_viewers: Array[Dictionary] = []
+var startup_auxiliary_pending_specs: Array[Dictionary] = []
+var startup_auxiliary_active_viewer_indices: Array[int] = []
 var startup_auxiliary_cleanup_requested := false
 var startup_auxiliary_cleanup_frames_remaining := 0
 var startup_auxiliary_viewers_created := 0
@@ -160,6 +166,7 @@ func reset_for_current_seed_staged(force_generator_reload := false, reset_reason
 	var previous_gameplay_chunks := published_gameplay_chunks.size()
 	var invalidated_chunks := invalidate_gameplay_publication()
 	clear_startup_auxiliary_viewers()
+	authority_refresh_pending = true
 	authority_ready = false
 	set_process(false)
 	set_physics_process(false)
@@ -176,12 +183,14 @@ func reset_for_current_seed_staged(force_generator_reload := false, reset_reason
 	# screen and wait for a stable idle boundary before the replacement.
 	var task_drain_result := await wait_for_seed_reset_task_drain()
 	if not bool(task_drain_result.get("ok", false)):
+		authority_refresh_pending = false
 		return task_drain_result
 	var reset_started_usec := Time.get_ticks_usec()
 	var next_generator = generation_state.get("generator")
 	terrain.generator = next_generator
 	var reset_map_usec := Time.get_ticks_usec() - reset_started_usec
 	if terrain.generator != next_generator:
+		authority_refresh_pending = false
 		return STARTUP_READINESS_RESULT_SCRIPT.failed("voxel_terrain_generator_replacement_failed", {}, [], {
 			"previousSeed": previous_seed,
 			"nextSeed": next_seed,
@@ -204,6 +213,7 @@ func reset_for_current_seed_staged(force_generator_reload := false, reset_reason
 	view_distance_expansion_elapsed = 0.0
 	view_distance_expansion_requested = false
 	update_viewer_position()
+	authority_refresh_pending = false
 	authority_ready = true
 	set_process(true)
 	set_physics_process(true)
@@ -363,7 +373,33 @@ func configure_startup_collision_bounds(chunk_keys: Array) -> void:
 	if min_surface_cell > max_surface_cell:
 		return
 	apply_vertical_cell_bounds(min_surface_cell - 16, max_surface_cell + 16)
+	configure_startup_auxiliary_view_distance_cap(chunk_keys)
 	configure_startup_auxiliary_viewers(chunk_keys, world_generation)
+
+
+func configure_startup_auxiliary_view_distance_cap(chunk_keys: Array) -> void:
+	if terrain == null or not is_instance_valid(terrain):
+		return
+	var required_voxels := int(terrain.max_view_distance)
+	for component_value in connected_gameplay_chunk_components(chunk_keys):
+		var component: Array = component_value
+		if primary_viewer_covers_component(component):
+			continue
+		var min_chunk := Vector2i(2147483000, 2147483000)
+		var max_chunk := Vector2i(-2147483000, -2147483000)
+		for key_value in component:
+			if not (key_value is Vector2i):
+				continue
+			var chunk_key: Vector2i = key_value
+			min_chunk = Vector2i(mini(min_chunk.x, chunk_key.x), mini(min_chunk.y, chunk_key.y))
+			max_chunk = Vector2i(maxi(max_chunk.x, chunk_key.x), maxi(max_chunk.y, chunk_key.y))
+		if min_chunk.x > max_chunk.x or min_chunk.y > max_chunk.y:
+			continue
+		var minimum := Vector2(float(min_chunk.x * GAME_CHUNK_SIZE) * CELL, float(min_chunk.y * GAME_CHUNK_SIZE) * CELL)
+		var maximum := Vector2(float((max_chunk.x + 1) * GAME_CHUNK_SIZE) * CELL, float((max_chunk.y + 1) * GAME_CHUNK_SIZE) * CELL)
+		var configuration := auxiliary_viewer_configuration(component, (minimum + maximum) * 0.5)
+		required_voxels = maxi(required_voxels, ceili(float(configuration.get("viewDistance", STARTUP_VIEW_DISTANCE)) / terrain_voxel_world_scale()))
+	terrain.max_view_distance = mini(STARTUP_AUXILIARY_MAX_VIEW_DISTANCE_VOXELS, required_voxels)
 
 
 func configure_startup_auxiliary_viewers(chunk_keys: Array, world_generation) -> void:
@@ -376,19 +412,8 @@ func configure_startup_auxiliary_viewers(chunk_keys: Array, world_generation) ->
 			continue
 		for spec_value in auxiliary_viewer_specs_for_component(component, world_generation):
 			var spec: Dictionary = spec_value
-			var auxiliary := VoxelViewer.new()
-			auxiliary.name = "StartupAuxiliaryVoxelViewer_%d" % startup_auxiliary_viewers_created
-			auxiliary.view_distance = int(spec.get("viewDistance", STARTUP_VIEW_DISTANCE))
-			auxiliary.requires_visuals = true
-			auxiliary.requires_collisions = true
-			auxiliary.set_meta("startup_auxiliary", true)
-			add_child(auxiliary)
-			auxiliary.global_position = spec.get("position", Vector3.ZERO)
-			startup_auxiliary_viewers.append({
-				"viewer": auxiliary,
-				"chunks": (spec.get("chunks", []) as Array).duplicate()
-			})
-			startup_auxiliary_viewers_created += 1
+			startup_auxiliary_pending_specs.append(spec.duplicate(true))
+	activate_pending_startup_auxiliary_viewers()
 
 
 func connected_gameplay_chunk_components(chunk_keys: Array) -> Array:
@@ -427,20 +452,94 @@ func connected_gameplay_chunk_components(chunk_keys: Array) -> Array:
 func primary_viewer_covers_component(component: Array) -> bool:
 	if viewer == null or not is_instance_valid(viewer) or component.is_empty():
 		return false
-	var available_distance := maxf(0.0, float(viewer.view_distance) - CELL * 4.0)
-	var viewer_xz := Vector2(viewer.global_position.x, viewer.global_position.z)
-	var half_chunk_diagonal := float(GAME_CHUNK_SIZE) * CELL * sqrt(2.0) * 0.5
+	return viewer_covers_component(viewer.global_position, float(viewer.view_distance), component)
+
+
+func terrain_voxel_world_scale() -> float:
+	if terrain != null and is_instance_valid(terrain):
+		return maxf(0.001, (terrain.global_transform.basis * Vector3.RIGHT).length())
+	return CELL
+
+
+func terrain_mesh_block_size() -> int:
+	if terrain != null and is_instance_valid(terrain):
+		return maxi(1, int(terrain.mesh_block_size))
+	return 16
+
+
+func terrain_maximum_view_distance_world() -> float:
+	var maximum_voxels := int(terrain.max_view_distance) if terrain != null and is_instance_valid(terrain) else FINAL_VIEW_DISTANCE
+	return float(maximum_voxels) * terrain_voxel_world_scale()
+
+
+func world_position_to_mesh_block(position: Vector3) -> Vector2i:
+	var voxel_scale := terrain_voxel_world_scale()
+	var mesh_block_size := terrain_mesh_block_size()
+	return Vector2i(
+		floori(position.x / voxel_scale / float(mesh_block_size)),
+		floori(position.z / voxel_scale / float(mesh_block_size))
+	)
+
+
+func gameplay_chunk_mesh_block_bounds(chunk_key: Vector2i) -> Dictionary:
+	var mesh_block_size := terrain_mesh_block_size()
+	var minimum := Vector2i(
+		floori(float(chunk_key.x * GAME_CHUNK_SIZE) / float(mesh_block_size)),
+		floori(float(chunk_key.y * GAME_CHUNK_SIZE) / float(mesh_block_size))
+	)
+	var maximum := Vector2i(
+		floori(float((chunk_key.x + 1) * GAME_CHUNK_SIZE - 1) / float(mesh_block_size)),
+		floori(float((chunk_key.y + 1) * GAME_CHUNK_SIZE - 1) / float(mesh_block_size))
+	)
+	return {"minimum": minimum, "maximum": maximum}
+
+
+func mesh_block_radius_for_view_distance(view_distance_world: float) -> int:
+	var voxel_scale := terrain_voxel_world_scale()
+	var maximum_voxels := int(terrain.max_view_distance) if terrain != null and is_instance_valid(terrain) else FINAL_VIEW_DISTANCE
+	var requested_voxels := floori(maxf(0.0, view_distance_world) / voxel_scale)
+	var clamped_voxels := mini(requested_voxels, maximum_voxels)
+	return ceili(float(clamped_voxels) / float(terrain_mesh_block_size()))
+
+
+func viewer_covers_component(viewer_position: Vector3, view_distance_world: float, component: Array) -> bool:
+	if component.is_empty():
+		return false
+	var viewer_mesh_block := world_position_to_mesh_block(viewer_position)
+	var mesh_block_radius := mesh_block_radius_for_view_distance(view_distance_world)
 	for key_value in component:
 		if not (key_value is Vector2i):
 			continue
-		var chunk_key: Vector2i = key_value
-		var center := Vector2(
-			(float(chunk_key.x * GAME_CHUNK_SIZE) + float(GAME_CHUNK_SIZE) * 0.5) * CELL,
-			(float(chunk_key.y * GAME_CHUNK_SIZE) + float(GAME_CHUNK_SIZE) * 0.5) * CELL
-		)
-		if viewer_xz.distance_to(center) + half_chunk_diagonal > available_distance:
+		var bounds := gameplay_chunk_mesh_block_bounds(key_value as Vector2i)
+		var minimum: Vector2i = bounds.get("minimum", Vector2i.ZERO) as Vector2i
+		var maximum: Vector2i = bounds.get("maximum", Vector2i.ZERO) as Vector2i
+		if absi(minimum.x - viewer_mesh_block.x) > mesh_block_radius \
+				or absi(maximum.x - viewer_mesh_block.x) > mesh_block_radius \
+				or absi(minimum.y - viewer_mesh_block.y) > mesh_block_radius \
+				or absi(maximum.y - viewer_mesh_block.y) > mesh_block_radius:
 			return false
 	return true
+
+
+func auxiliary_viewer_configuration(component: Array, center_xz: Vector2) -> Dictionary:
+	var viewer_position := Vector3(center_xz.x, 0.0, center_xz.y)
+	var viewer_mesh_block := world_position_to_mesh_block(viewer_position)
+	var required_mesh_block_radius := 0
+	for key_value in component:
+		if not (key_value is Vector2i):
+			continue
+		var bounds := gameplay_chunk_mesh_block_bounds(key_value as Vector2i)
+		var minimum: Vector2i = bounds.get("minimum", Vector2i.ZERO) as Vector2i
+		var maximum: Vector2i = bounds.get("maximum", Vector2i.ZERO) as Vector2i
+		required_mesh_block_radius = maxi(required_mesh_block_radius, absi(minimum.x - viewer_mesh_block.x))
+		required_mesh_block_radius = maxi(required_mesh_block_radius, absi(maximum.x - viewer_mesh_block.x))
+		required_mesh_block_radius = maxi(required_mesh_block_radius, absi(minimum.y - viewer_mesh_block.y))
+		required_mesh_block_radius = maxi(required_mesh_block_radius, absi(maximum.y - viewer_mesh_block.y))
+	required_mesh_block_radius += 1
+	return {
+		"meshBlockRadius": required_mesh_block_radius,
+		"viewDistance": float(required_mesh_block_radius * terrain_mesh_block_size()) * terrain_voxel_world_scale()
+	}
 
 
 func auxiliary_viewer_specs_for_component(component: Array, world_generation) -> Array[Dictionary]:
@@ -458,33 +557,125 @@ func auxiliary_viewer_specs_for_component(component: Array, world_generation) ->
 	var minimum := Vector2(float(min_chunk.x * GAME_CHUNK_SIZE) * CELL, float(min_chunk.y * GAME_CHUNK_SIZE) * CELL)
 	var maximum := Vector2(float((max_chunk.x + 1) * GAME_CHUNK_SIZE) * CELL, float((max_chunk.y + 1) * GAME_CHUNK_SIZE) * CELL)
 	var center_xz := (minimum + maximum) * 0.5
-	var required_distance := center_xz.distance_to(maximum) + CELL * 16.0
-	var maximum_view_distance := int(terrain.max_view_distance) if terrain != null else FINAL_VIEW_DISTANCE
-	if required_distance <= float(maximum_view_distance):
+	var configuration := auxiliary_viewer_configuration(component, center_xz)
+	var required_distance := float(configuration.get("viewDistance", STARTUP_VIEW_DISTANCE))
+	var maximum_view_distance := terrain_maximum_view_distance_world()
+	if required_distance <= maximum_view_distance:
 		var center_position := Vector3(center_xz.x, 0.0, center_xz.y)
 		center_position.y = float(world_generation.call("surface_y_at", center_position))
 		specs.append({
 			"position": center_position,
-			"viewDistance": clampi(ceili(required_distance), STARTUP_VIEW_DISTANCE, maximum_view_distance),
+			"viewDistance": clampi(ceili(required_distance), STARTUP_VIEW_DISTANCE, ceili(maximum_view_distance)),
+			"meshBlockRadius": int(configuration.get("meshBlockRadius", 0)),
 			"chunks": component.duplicate()
 		})
 		return specs
+	var grouping_view_distance := minf(
+		maximum_view_distance,
+		float(STARTUP_AUXILIARY_TARGET_MESH_BLOCK_RADIUS * terrain_mesh_block_size()) * terrain_voxel_world_scale()
+	)
+	for group_value in split_component_for_auxiliary_viewers(component, min_chunk, grouping_view_distance):
+		var group: Array = group_value
+		if primary_viewer_covers_component(group):
+			continue
+		specs.append_array(auxiliary_viewer_specs_for_component(group, world_generation))
+	return specs
+
+
+func split_component_for_auxiliary_viewers(component: Array, min_chunk: Vector2i, maximum_view_distance: float) -> Array:
+	var group_span := maximum_auxiliary_viewer_chunk_span(maximum_view_distance)
+	var grouped_chunks := {}
 	for key_value in component:
 		if not (key_value is Vector2i):
 			continue
 		var chunk_key: Vector2i = key_value
-		var position := Vector3(
-			(float(chunk_key.x * GAME_CHUNK_SIZE) + float(GAME_CHUNK_SIZE) * 0.5) * CELL,
-			0.0,
-			(float(chunk_key.y * GAME_CHUNK_SIZE) + float(GAME_CHUNK_SIZE) * 0.5) * CELL
+		var group_key := Vector2i(
+			floori(float(chunk_key.x - min_chunk.x) / float(group_span)),
+			floori(float(chunk_key.y - min_chunk.y) / float(group_span))
 		)
-		position.y = float(world_generation.call("surface_y_at", position))
-		specs.append({
-			"position": position,
-			"viewDistance": STARTUP_VIEW_DISTANCE,
-			"chunks": [chunk_key]
-		})
-	return specs
+		var group: Array = grouped_chunks.get(group_key, [])
+		group.append(chunk_key)
+		grouped_chunks[group_key] = group
+	var group_keys: Array = grouped_chunks.keys()
+	group_keys.sort_custom(func(left: Vector2i, right: Vector2i) -> bool:
+		return left.x < right.x if left.x != right.x else left.y < right.y
+	)
+	var groups: Array = []
+	for group_key_value in group_keys:
+		var group: Array = grouped_chunks[group_key_value]
+		group.sort_custom(func(left: Vector2i, right: Vector2i) -> bool:
+			return left.x < right.x if left.x != right.x else left.y < right.y
+		)
+		groups.append(group)
+	return groups
+
+
+func maximum_auxiliary_viewer_chunk_span(maximum_view_distance: float) -> int:
+	var span := 1
+	while true:
+		var next_span := span + 1
+		var half_span_cells := ceili(float(next_span * GAME_CHUNK_SIZE) * 0.5)
+		var required_mesh_block_radius := ceili(float(half_span_cells) / float(terrain_mesh_block_size())) + 1
+		var required_distance := float(required_mesh_block_radius * terrain_mesh_block_size()) * terrain_voxel_world_scale()
+		if required_distance > maximum_view_distance:
+			return span
+		span = next_span
+	return span
+
+
+func startup_auxiliary_concurrency_limit() -> int:
+	var requested_limit := int(OS.get_environment("VOXEL_STARTUP_AUXILIARY_MAX_CONCURRENT_VIEWERS"))
+	if requested_limit > 0:
+		return clampi(requested_limit, 1, 8)
+	return STARTUP_AUXILIARY_MAX_CONCURRENT_VIEWERS
+
+
+func activate_pending_startup_auxiliary_viewers() -> void:
+	var concurrency_limit := startup_auxiliary_concurrency_limit()
+	while not startup_auxiliary_pending_specs.is_empty() and startup_auxiliary_active_viewer_indices.size() < concurrency_limit:
+		activate_next_startup_auxiliary_viewer()
+
+
+func activate_next_startup_auxiliary_viewer() -> void:
+	if startup_auxiliary_pending_specs.is_empty():
+		return
+	var spec: Dictionary = startup_auxiliary_pending_specs.pop_front()
+	var auxiliary := VoxelViewer.new()
+	auxiliary.name = "StartupAuxiliaryVoxelViewer_%d" % startup_auxiliary_viewers_created
+	auxiliary.view_distance = int(spec.get("viewDistance", STARTUP_VIEW_DISTANCE))
+	auxiliary.requires_visuals = true
+	auxiliary.requires_collisions = true
+	auxiliary.set_meta("startup_auxiliary", true)
+	add_child(auxiliary)
+	auxiliary.global_position = spec.get("position", Vector3.ZERO)
+	startup_auxiliary_viewers.append({
+		"viewer": auxiliary,
+		"meshBlockRadius": int(spec.get("meshBlockRadius", 0)),
+		"chunks": (spec.get("chunks", []) as Array).duplicate()
+	})
+	startup_auxiliary_active_viewer_indices.append(startup_auxiliary_viewers.size() - 1)
+	startup_auxiliary_viewers_created += 1
+
+
+func advance_startup_auxiliary_viewer_queue() -> void:
+	var completed_indices: Array[int] = []
+	for viewer_index in startup_auxiliary_active_viewer_indices:
+		if viewer_index < 0 or viewer_index >= startup_auxiliary_viewers.size():
+			completed_indices.append(viewer_index)
+			continue
+		var active_record: Dictionary = startup_auxiliary_viewers[viewer_index]
+		var chunks_published := true
+		var chunks_value = active_record.get("chunks", [])
+		if chunks_value is Array:
+			for chunk_value in chunks_value:
+				if chunk_value is Vector2i and desired_gameplay_chunks.has(chunk_value) and not published_gameplay_chunks.has(chunk_value):
+					chunks_published = false
+					break
+		if chunks_published:
+			completed_indices.append(viewer_index)
+	for viewer_index in completed_indices:
+		startup_auxiliary_active_viewer_indices.erase(viewer_index)
+	activate_pending_startup_auxiliary_viewers()
 
 
 func clear_startup_auxiliary_viewers() -> void:
@@ -497,6 +688,8 @@ func clear_startup_auxiliary_viewers() -> void:
 		auxiliary.requires_collisions = false
 		auxiliary.queue_free()
 	startup_auxiliary_viewers.clear()
+	startup_auxiliary_pending_specs.clear()
+	startup_auxiliary_active_viewer_indices.clear()
 	startup_auxiliary_cleanup_requested = false
 	startup_auxiliary_cleanup_frames_remaining = 0
 
@@ -516,8 +709,8 @@ func prune_startup_auxiliary_viewers() -> void:
 
 func startup_auxiliary_viewer_diagnostics() -> Array:
 	var diagnostics: Array = []
-	for record_value in startup_auxiliary_viewers:
-		var record: Dictionary = record_value
+	for viewer_index in range(startup_auxiliary_viewers.size()):
+		var record: Dictionary = startup_auxiliary_viewers[viewer_index]
 		var auxiliary = record.get("viewer")
 		if auxiliary == null or not is_instance_valid(auxiliary):
 			continue
@@ -533,6 +726,8 @@ func startup_auxiliary_viewer_diagnostics() -> Array:
 			"viewDistance": int(auxiliary.view_distance),
 			"requiresVisuals": bool(auxiliary.requires_visuals),
 			"requiresCollisions": bool(auxiliary.requires_collisions),
+			"active": startup_auxiliary_active_viewer_indices.has(viewer_index),
+			"meshBlockRadius": int(record.get("meshBlockRadius", 0)),
 			"chunks": keys
 		})
 	return diagnostics
@@ -565,6 +760,7 @@ func _process(delta: float) -> void:
 func _physics_process(_delta: float) -> void:
 	if authority_ready:
 		process_pending_gameplay_chunk_publications()
+		advance_startup_auxiliary_viewer_queue()
 
 
 func _exit_tree() -> void:
@@ -572,6 +768,7 @@ func _exit_tree() -> void:
 		viewer.queue_free()
 
 func begin_shutdown() -> void:
+	authority_refresh_pending = false
 	authority_ready = false
 	set_process(false)
 	set_physics_process(false)
@@ -682,6 +879,9 @@ func stats() -> Dictionary:
 		"startupAuxiliaryCleanupRequested": startup_auxiliary_cleanup_requested,
 		"startupAuxiliaryCleanupFramesRemaining": startup_auxiliary_cleanup_frames_remaining,
 		"startupAuxiliaryViewers": startup_auxiliary_viewer_diagnostics(),
+		"startupAuxiliaryPendingViewerCount": startup_auxiliary_pending_specs.size(),
+		"startupAuxiliaryActiveViewerCount": startup_auxiliary_active_viewer_indices.size(),
+		"startupAuxiliaryConcurrencyLimit": startup_auxiliary_concurrency_limit(),
 		"verticalCellBounds": vertical_cell_bounds(),
 		"finalVerticalCellBounds": full_vertical_cell_bounds(),
 		"voxelEngine": voxel_engine_task_stats(),
@@ -831,6 +1031,9 @@ func gameplay_chunks_published(chunk_keys: Array) -> bool:
 			return false
 	return true
 
+func gameplay_collision_publication_pending() -> bool:
+	return not pending_gameplay_chunks.is_empty()
+
 func published_gameplay_chunk_count(chunk_keys: Array) -> int:
 	var count := 0
 	for key_value in chunk_keys:
@@ -862,6 +1065,7 @@ func gameplay_publication_diagnostics(chunk_keys: Array) -> Dictionary:
 		"viewerRequiresCollisions": bool(viewer.requires_collisions) if viewer != null and is_instance_valid(viewer) else false,
 		"startupAuxiliaryViewers": startup_auxiliary_viewer_diagnostics(),
 		"publishedMeshBlockCount": published_mesh_blocks.size(),
+		"terrainBounds": terrain.bounds if terrain != null else AABB(),
 		"desiredGameplayChunkCount": desired_gameplay_chunks.size(),
 		"pendingGameplayChunkCount": pending_gameplay_chunks.size(),
 		"publishedGameplayChunkCount": published_gameplay_chunks.size(),

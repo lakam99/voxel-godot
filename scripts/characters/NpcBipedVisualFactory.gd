@@ -3,6 +3,7 @@ class_name NpcBipedVisualFactory
 
 const NpcBipedBlinkPresenterScript := preload("res://scripts/characters/NpcBipedBlinkPresenter.gd")
 const NpcBipedLocomotionPresenterScript := preload("res://scripts/characters/NpcBipedLocomotionPresenter.gd")
+const OVERALL_VISUAL_SCALE := 0.60
 
 ## Recipe-backed, low-poly human biped presentation.  The returned semantic
 ## skeleton is intentionally useful beyond this PoC: later NPC runtime code
@@ -12,6 +13,7 @@ const NpcBipedLocomotionPresenterScript := preload("res://scripts/characters/Npc
 static func add_biped(parent: Node3D, recipe: Dictionary, display_name := "Citizen") -> Dictionary:
 	var visual_root := Node3D.new()
 	visual_root.name = "NpcBipedVisual"
+	visual_root.scale = Vector3.ONE * OVERALL_VISUAL_SCALE
 	parent.add_child(visual_root)
 	var scale_factor := clampf(float(recipe.get("stature", 1.0)), 0.82, 1.22)
 	var shoulder_scale := clampf(float(recipe.get("shoulderScale", 1.0)), 0.82, 1.22)

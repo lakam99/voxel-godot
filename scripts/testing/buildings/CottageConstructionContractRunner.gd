@@ -80,12 +80,14 @@ func validate_source_parts(blueprint, style: String) -> Dictionary:
 	var window_count := 0
 	var window_parts: Array = []
 	var brick_wall_count := 0
+	var parts_by_id := {}
 	for part in blueprint.parts:
 		check(part != null, "%s blueprint contains a null part" % style)
 		if part == null:
 			continue
 		check(not ids.has(part.id), "%s blueprint repeats part id %s" % [style, part.id])
 		ids[part.id] = true
+		parts_by_id[String(part.id)] = part
 		check(part.size.x > 0.0 and part.size.y > 0.0 and part.size.z > 0.0, "%s part %s has invalid occupied volume" % [style, part.id])
 		if part.collision_enabled:
 			expected_collision_count += 1
@@ -110,6 +112,14 @@ func validate_source_parts(blueprint, style: String) -> Dictionary:
 	check(split_front_foundation_parts == 2, "%s blueprint does not split the front foundation around its doorway" % style)
 	check(not ids.has("foundation_front"), "%s blueprint restored a solid foundation through the doorway" % style)
 	check(window_count >= 3, "%s blueprint does not expose its window parts" % style)
+	var divider_front = parts_by_id.get("divider_front", null)
+	var divider_back = parts_by_id.get("divider_back", null)
+	var divider_passage_width := 0.0
+	if divider_front == null or divider_back == null:
+		check(false, "%s blueprint does not split its interior divider around a passage" % style)
+	else:
+		divider_passage_width = (divider_back.position.z - divider_back.size.z * 0.5) - (divider_front.position.z + divider_front.size.z * 0.5)
+		check(divider_passage_width >= CottageBlueprintBuilderScript.MIN_INTERIOR_PASSAGE_WIDTH - 0.001, "%s divider passage is narrower than the shared navigation-safe width" % style)
 	for window in window_parts:
 		var window_bounds := part_bounds(window)
 		for wall in blueprint.parts:
@@ -126,7 +136,8 @@ func validate_source_parts(blueprint, style: String) -> Dictionary:
 		"entryRamp": entry_ramp_found,
 		"splitFrontFoundationParts": split_front_foundation_parts,
 		"windowParts": window_count,
-		"brickWallParts": brick_wall_count
+		"brickWallParts": brick_wall_count,
+		"dividerPassageWidth": divider_passage_width
 	}
 
 

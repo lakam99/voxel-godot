@@ -373,6 +373,7 @@ func create_playtest_ground_block(base_cell: Vector2i, offset: Vector2i, block_t
 func create_playtest_structure_block(cell_x: int, cell_z: int, level: float, dy: int, block_type: String, case_id: String = "collapse") -> Node: return null
 func create_playtest_collapse_case(base_cell: Vector2i) -> void: pass
 func focused_interaction_hit() -> Dictionary: return {}
+func interact_focused() -> void: pass
 func use_or_place() -> void: pass
 func try_use_active_consumable() -> bool: return false
 func fish_with_rod() -> bool: return false

@@ -39,9 +39,11 @@ class RouteTestMain:
 class FakeNavmeshRouteService:
 	extends RefCounted
 	var query_count := 0
+	var last_options := {}
 
-	func query_route(start: Vector3, target: Vector3, _options := {}) -> Dictionary:
+	func query_route(start: Vector3, target: Vector3, options := {}) -> Dictionary:
 		query_count += 1
+		last_options = options.duplicate(true)
 		return {
 			"ok": true,
 			"status": "complete",
@@ -59,6 +61,36 @@ class FakeNavmeshRouteService:
 
 	func stats() -> Dictionary:
 		return { "pathQueryCount": query_count }
+
+class PassthroughCrowdVelocityService:
+	extends RefCounted
+
+	func resolve_safe_velocity(_entry: Dictionary, _body: CharacterBody3D, desired_velocity: Vector3, _context := {}) -> Dictionary:
+		return {
+			"active": true,
+			"safeVelocity": desired_velocity,
+			"status": "synthetic_callback",
+			"reason": "route_executor_test",
+			"callbackFresh": true,
+			"fallbackUsed": false,
+			"movementBlocked": false,
+			"activeRegistrationCount": 1
+		}
+
+class InactivePassthroughCrowdVelocityService:
+	extends RefCounted
+
+	func resolve_safe_velocity(_entry: Dictionary, _body: CharacterBody3D, desired_velocity: Vector3, _context := {}) -> Dictionary:
+		return {
+			"active": false,
+			"safeVelocity": desired_velocity,
+			"status": "inactive",
+			"reason": "no_crowd",
+			"callbackFresh": false,
+			"fallbackUsed": false,
+			"movementBlocked": false,
+			"activeRegistrationCount": 0
+		}
 
 class BudgetedCollisionProbe:
 	extends RefCounted
@@ -248,6 +280,7 @@ class FakeLeaseAuthority:
 	var started_segments := []
 	var door_waits := []
 	var stuck_reports := []
+	var unexpected_collisions := []
 
 	func begin_moving(_request_id: String, _reason := "") -> Dictionary:
 		return { "ok": true, "state": "moving" }
@@ -265,7 +298,7 @@ class FakeLeaseAuthority:
 		door_waits.append({ "reason": reason, "details": details })
 
 	func report_unexpected_collision(_request_id: String, _reason := "", _details := {}) -> void:
-		pass
+		unexpected_collisions.append({"reason": _reason, "details": _details})
 
 	func report_stuck(_request_id: String, _reason := "", _details := {}) -> void:
 		stuck_reports.append({ "reason": _reason, "details": _details })
@@ -440,14 +473,25 @@ func cases() -> Array[Dictionary]:
 		["npc_route_authority_terrain_motion_probe_repairs_before_blocking", "test_route_authority_terrain_motion_probe_repairs_before_blocking"],
 		["npc_route_authority_failed_goal_cells_exclude_only_failed_destinations", "test_route_authority_failed_goal_cells_exclude_only_failed_destinations"],
 		["npc_route_authority_phase10_counters", "test_route_authority_phase10_counters"],
+		["npc_route_authority_arrival_revokes_entry_lease", "test_route_authority_arrival_revokes_entry_lease"],
 		["npc_route_authority_stuck_revokes_moving_lease", "test_route_authority_stuck_revokes_moving_lease"],
 		["npc_route_lease_executor_skips_passed_non_door_waypoint", "test_route_lease_executor_skips_passed_non_door_waypoint"],
+		["npc_route_lease_executor_binds_door_actions_to_physical_waypoints", "test_route_lease_executor_binds_door_actions_to_physical_waypoints"],
+		["npc_route_lease_executor_ignores_freed_door_reference", "test_route_lease_executor_ignores_freed_door_reference"],
+		["npc_route_production_avoids_custom_lane_proof", "test_route_production_avoids_custom_lane_proof"],
+		["npc_route_door_action_binds_exact_entry_waypoint", "test_route_door_action_binds_exact_entry_waypoint"],
 		["npc_route_lease_executor_reports_no_target_progress", "test_route_lease_executor_reports_no_target_progress"],
+		["npc_route_lease_executor_bounds_reverse_yield", "test_route_lease_executor_bounds_reverse_yield"],
+		["npc_route_lease_executor_bounds_terminal_and_prohibits_door_reverse", "test_route_lease_executor_bounds_terminal_and_prohibits_door_reverse"],
+		["npc_route_lease_executor_never_bypasses_orca", "test_route_lease_executor_never_bypasses_orca"],
+		["npc_route_lease_executor_terminal_docking_respects_orca", "test_route_lease_executor_terminal_docking_respects_orca"],
+		["npc_route_lease_executor_stationary_occupant_keeps_orca_authority", "test_route_lease_executor_stationary_occupant_keeps_orca_authority"],
 		["npc_route_partial_explicit_only", "test_route_partial_explicit_only"],
 		["npc_route_unreachable_terminal_reason", "test_route_unreachable_terminal_reason"],
 		["npc_route_deterministic_replay", "test_route_deterministic_replay"],
 		["npc_route_navmesh_query_or_same_surface_returns_route", "test_route_navmesh_query_or_same_surface_returns_route"],
 		["npc_route_navmesh_preserves_door_action_cells", "test_route_navmesh_preserves_door_action_cells"],
+		["npc_route_navmesh_preserves_door_portal_approach", "test_route_navmesh_preserves_door_portal_approach"],
 		["npc_route_navmesh_planner_goal_kinds", "test_route_navmesh_planner_goal_kinds"],
 		["npc_route_navmesh_adapter_no_legacy_fallback", "test_route_navmesh_adapter_no_legacy_fallback"],
 		["npc_route_routine_jobs_do_not_use_generated_cell_bridge", "test_route_routine_jobs_do_not_use_generated_cell_bridge"],
@@ -473,6 +517,7 @@ func cases() -> Array[Dictionary]:
 		["npc_route_runtime_goal_adapter_uses_new_corridor", "test_route_runtime_goal_adapter_uses_new_corridor"],
 		["npc_route_substrate_reachable_generated_town_fixture", "test_route_substrate_reachable_generated_town_fixture"],
 		["npc_route_substrate_uses_actual_start_waypoint", "test_route_substrate_uses_actual_start_waypoint"],
+		["npc_route_substrate_scripted_target_is_exact_goal", "test_route_substrate_scripted_target_is_exact_goal"],
 		["npc_route_substrate_home_departure_clearance_exact_goal", "test_route_substrate_home_departure_clearance_exact_goal"],
 		["npc_route_substrate_forage_search_anchor_exact_outside_goal", "test_route_substrate_forage_search_anchor_exact_outside_goal"],
 		["npc_route_substrate_blocked_generated_town_fixture", "test_route_substrate_blocked_generated_town_fixture"],
@@ -1077,6 +1122,30 @@ func test_route_authority_phase10_counters(_mode: String) -> Dictionary:
 		{ "counters": counters }
 	)
 
+func test_route_authority_arrival_revokes_entry_lease(_mode: String) -> Dictionary:
+	var probe := BudgetedCollisionProbe.new()
+	probe.required_samples = 1
+	var authority = NpcRouteAuthorityV2Script.new()
+	authority.setup(null, null, probe)
+	var entry := { "id": "arrived-authority-npc" }
+	var request: Dictionary = authority.submit_request(entry, { "kind": "scripted", "targetCell": Vector2i(1, 0) }, { "priority": 180 })
+	var request_id := String(request.get("requestId", ""))
+	var ready: Dictionary = authority.commit_route_after_probe(entry, request_id, authority_test_route(2), { "kind": "scripted", "targetCell": Vector2i(1, 0) })
+	var moving: Dictionary = authority.begin_moving(request_id, "test_move")
+	var arrived: Dictionary = authority.report_arrived(request_id, "scripted_semantic_target_reached")
+	var passed: bool = String(ready.get("state", "")) == "ready" \
+		and String(moving.get("state", "")) == "moving" \
+		and String(arrived.get("state", "")) == "arrived" \
+		and String(entry.get("routeStatus", "")) == "arrived" \
+		and not entry.has("routeLease")
+	return outcome(
+		passed,
+		"ready=%s moving=%s arrived=%s entry=%s" % [JSON.stringify(authority_summary(ready)), JSON.stringify(authority_summary(moving)), JSON.stringify(authority_summary(arrived)), JSON.stringify(entry)],
+		["arrival_publishes_terminal_status", "arrival_revokes_entry_execution_lease"],
+		{ "ready": authority_summary(ready), "moving": authority_summary(moving), "arrived": authority_summary(arrived), "entry": entry }
+	)
+
+
 func test_route_authority_stuck_revokes_moving_lease(_mode: String) -> Dictionary:
 	var probe := BudgetedCollisionProbe.new()
 	probe.required_samples = 1
@@ -1118,7 +1187,7 @@ func test_route_authority_stuck_revokes_moving_lease(_mode: String) -> Dictionar
 func test_route_lease_executor_skips_passed_non_door_waypoint(_mode: String) -> Dictionary:
 	var authority := FakeLeaseAuthority.new()
 	var executor = NpcRouteLeaseExecutorScript.new()
-	executor.setup(authority, null, null)
+	executor.setup(authority, null, null, PassthroughCrowdVelocityService.new())
 	var body := CharacterBody3D.new()
 	if runner != null:
 		runner.add_child(body)
@@ -1186,10 +1255,70 @@ func test_route_lease_executor_skips_passed_non_door_waypoint(_mode: String) -> 
 		{ "skipResult": result, "doorResult": door_result, "passedNonDoor": skipped_non_door, "preservedDoor": preserved_door_action }
 	)
 
+
+func test_route_lease_executor_binds_door_actions_to_physical_waypoints(_mode: String) -> Dictionary:
+	var executor = NpcRouteLeaseExecutorScript.new()
+	var portal_id := "door:physical-waypoint-binding"
+	var entry_position := Vector3(6.0, 0.0, 0.0)
+	var exit_position := Vector3(8.7, 0.0, 0.0)
+	var lease := {
+		"state": "ready",
+		"cells": [Vector2i(2, 0), Vector2i(3, 0)],
+		"waypoints": [Vector3(0.0, 0.0, 0.0), entry_position, exit_position, Vector3(10.8, 0.0, 0.0)],
+		"actions": {
+			"2,0": {
+				"kind": "door",
+				"enabled": true,
+				"portalId": portal_id,
+				"cell": Vector2i(2, 0),
+				"entryPosition": entry_position,
+				"exitPosition": exit_position,
+				"navLink": true
+			}
+		}
+	}
+	var before_action: Dictionary = executor.call("_door_action_for_waypoint", lease, 0)
+	var entry_action: Dictionary = executor.call("_door_action_for_waypoint", lease, 1)
+	var exit_action: Dictionary = executor.call("_door_action_for_waypoint", lease, 2)
+	var bindings: Array = executor.call("_door_waypoint_bindings", lease)
+	var passed := before_action.is_empty() \
+		and String(entry_action.get("portalId", "")) == portal_id \
+		and exit_action.is_empty() \
+		and bindings.size() == 1 \
+		and int((bindings[0] as Dictionary).get("waypointIndex", -1)) == 1
+	return outcome(
+		passed,
+		"before=%s entry=%s exit=%s bindings=%s" % [JSON.stringify(before_action), JSON.stringify(entry_action), JSON.stringify(exit_action), JSON.stringify(bindings)],
+		["door_actions_bind_only_to_physical_entry_waypoint", "cell_and_waypoint_arrays_do_not_need_matching_lengths"],
+		{ "before": before_action, "entry": entry_action, "exit": exit_action, "bindings": bindings }
+	)
+
+
+func test_route_lease_executor_ignores_freed_door_reference(_mode: String) -> Dictionary:
+	var executor = NpcRouteLeaseExecutorScript.new()
+	var stale_door := Node3D.new()
+	var action := {
+		"kind": "door",
+		"entryPosition": Vector3(3.0, 0.0, 0.0),
+		"exitPosition": Vector3(4.35, 0.0, 0.0),
+		"door": stale_door
+	}
+	stale_door.free()
+	var resolved_door = executor.call("_action_door_node", action)
+	var binding: Dictionary = executor.call("_door_action_waypoint_binding", action, Vector3(3.0, 0.0, 0.0))
+	var passed := resolved_door == null and String(binding.get("phase", "")) == "entry"
+	return outcome(
+		passed,
+		"resolvedDoor=%s binding=%s" % [str(resolved_door), JSON.stringify(binding)],
+		["freed_door_reference_is_rejected_before_cast", "door_waypoint_binding_uses_published_position"],
+		{ "binding": binding, "resolvedDoor": resolved_door == null }
+	)
+
+
 func test_route_lease_executor_reports_no_target_progress(_mode: String) -> Dictionary:
 	var authority := FakeLeaseAuthority.new()
 	var executor = NpcRouteLeaseExecutorScript.new()
-	executor.setup(authority, null, null)
+	executor.setup(authority, null, null, InactivePassthroughCrowdVelocityService.new())
 	executor.motor = FakeNoProgressMotor.new()
 	var body := CharacterBody3D.new()
 	if runner != null:
@@ -1225,6 +1354,109 @@ func test_route_lease_executor_reports_no_target_progress(_mode: String) -> Dict
 		["lease_executor_reports_slide_without_target_progress", "authority_receives_repairable_stuck_event"],
 		{ "result": result, "stuckReports": authority.stuck_reports, "position": body.global_position }
 	)
+
+func test_route_production_avoids_custom_lane_proof(_mode: String) -> Dictionary:
+	var executor_source := FileAccess.get_file_as_string("res://scripts/npc_ai/movement/NpcRouteLeaseExecutor.gd")
+	var probe_source := FileAccess.get_file_as_string("res://scripts/npc_ai/routing/CollisionProbeService.gd")
+	var adapter_source := FileAccess.get_file_as_string("res://scripts/npc_ai/movement/ReciprocalAvoidanceAdapter.gd")
+	var passed := executor_source.find("segmentLateralClearance") < 0 \
+		and probe_source.find("segmentLateralClearance") < 0 \
+		and adapter_source.find("NpcCrowdSteeringPolicy") < 0
+	return outcome(passed, "executorLaneProof=%s probeLaneProof=%s adapterLanePolicy=%s" % [str(executor_source.find("segmentLateralClearance") >= 0), str(probe_source.find("segmentLateralClearance") >= 0), str(adapter_source.find("NpcCrowdSteeringPolicy") >= 0)], ["production_avoidance_has_single_navigation_authority", "route_probe_budget_excludes_unused_lane_certificates"], {})
+
+func test_route_door_action_binds_exact_entry_waypoint(_mode: String) -> Dictionary:
+	var executor = NpcRouteLeaseExecutorScript.new()
+	var entry_position := Vector3(0.0, 0.0, 0.0)
+	var lease := {
+		"waypoints": [Vector3(-0.96, 0.0, 0.0), Vector3(-0.32, 0.0, 0.0), Vector3(0.0, 0.32, 0.0), entry_position, Vector3(1.35, 0.0, 0.0)],
+		"actions": {
+			"door:test": {
+				"kind": "door",
+				"enabled": true,
+				"portalId": "door:test",
+				"entryPosition": entry_position,
+				"exitPosition": Vector3(1.35, 0.0, 0.0)
+			}
+		}
+	}
+	var early: Dictionary = executor.call("_door_action_for_waypoint", lease, 0)
+	var adjacent: Dictionary = executor.call("_door_action_for_waypoint", lease, 1)
+	var vertical: Dictionary = executor.call("_door_action_for_waypoint", lease, 2)
+	var entry: Dictionary = executor.call("_door_action_for_waypoint", lease, 3)
+	var exit: Dictionary = executor.call("_door_action_for_waypoint", lease, 4)
+	var passed := early.is_empty() and adjacent.is_empty() and vertical.is_empty() and String(entry.get("portalId", "")) == "door:test" and exit.is_empty()
+	return outcome(passed, "early=%s adjacent=%s vertical=%s entry=%s exit=%s" % [JSON.stringify(early), JSON.stringify(adjacent), JSON.stringify(vertical), JSON.stringify(entry), JSON.stringify(exit)], ["door_traversal_starts_at_published_entry", "adjacent_published_waypoint_does_not_trigger_door_staging", "vertically_distinct_waypoint_does_not_bind_as_entry", "exit_waypoint_does_not_reopen_portal"], {})
+
+
+
+func test_route_lease_executor_bounds_reverse_yield(_mode: String) -> Dictionary:
+	var executor = NpcRouteLeaseExecutorScript.new()
+	var body := CharacterBody3D.new()
+	if runner != null:
+		runner.add_child(body)
+	var entry := {"id": "bounded-reverse", "body": body}
+	var lease := {
+		"state": "ready",
+		"waypoints": [Vector3(8.0, 0.0, 0.0), Vector3(12.0, 0.0, 0.0)],
+		"actions": {},
+		"probeCertificate": {"ok": true, "authoritative": true}
+	}
+	var result := {}
+	for _frame in range(NpcConstantsScript.AVOIDANCE_MAX_YIELD_REVERSE_FRAMES + 2):
+		if _frame == int(NpcConstantsScript.AVOIDANCE_MAX_YIELD_REVERSE_FRAMES / 2):
+			executor.call("_apply_bounded_reverse_yield", entry, "bounded-request", lease, 0, body, Vector3(8.0, 0.0, 0.0), Vector3(2.0, 0.0, 0.0), Vector3(0.55, 0.0, 0.0), 8.0, 0.36, 1.0 / 60.0, {"safeVelocity": Vector3(0.55, 0.0, 0.0), "encounterActorId": "parked-a"})
+		result = executor.call("_apply_bounded_reverse_yield", entry, "bounded-request", lease, 0, body, Vector3(8.0, 0.0, 0.0), Vector3(2.0, 0.0, 0.0), Vector3(-0.55, 0.0, 0.0), 8.0, 0.36, 1.0 / 60.0, {"safeVelocity": Vector3(-2.0, 0.0, 0.0), "encounterActorId": "parked-a"})
+		if bool(result.get("exhausted", false)):
+			break
+	var telemetry: Dictionary = result.get("telemetry", {}) if result.get("telemetry", {}) is Dictionary else {}
+	var passed := bool(result.get("exhausted", false)) \
+		and int(telemetry.get("consecutiveReverseFrames", 0)) <= NpcConstantsScript.AVOIDANCE_MAX_YIELD_REVERSE_FRAMES \
+		and float(telemetry.get("reverseDisplacement", 0.0)) <= NpcConstantsScript.AVOIDANCE_MAX_YIELD_REVERSE_DISTANCE + 0.001 \
+		and (result.get("velocity", Vector3.ZERO) as Vector3).is_equal_approx(Vector3(2.0, 0.0, 0.0))
+	return outcome(passed, "result=%s" % JSON.stringify(result), ["reverse_yield_is_encounter_bounded_across_forward_gaps", "reverse_yield_is_distance_bounded", "exhausted_reverse_resubmits_goal_velocity_for_joint_certification"], {"result": result})
+
+
+func test_route_lease_executor_bounds_terminal_and_prohibits_door_reverse(_mode: String) -> Dictionary:
+	var executor = NpcRouteLeaseExecutorScript.new()
+	var body := CharacterBody3D.new()
+	if runner != null:
+		runner.add_child(body)
+	var reverse_avoidance := {"safeVelocity": Vector3(-2.0, 0.0, 0.0), "encounterActorId": "parked-b"}
+	var terminal_entry := {"id": "terminal-reverse", "body": body}
+	var terminal_lease := {"state": "ready", "waypoints": [Vector3(1.0, 0.0, 0.0)], "actions": {}, "probeCertificate": {"ok": true, "authoritative": true}}
+	var terminal: Dictionary = executor.call("_apply_bounded_reverse_yield", terminal_entry, "terminal-request", terminal_lease, 0, body, Vector3(1.0, 0.0, 0.0), Vector3(2.0, 0.0, 0.0), Vector3(-0.55, 0.0, 0.0), 1.0, 0.36, 1.0 / 60.0, reverse_avoidance)
+	var arrived: Dictionary = executor.call("_apply_bounded_reverse_yield", {}, "arrived-request", terminal_lease, 0, body, Vector3(0.2, 0.0, 0.0), Vector3(2.0, 0.0, 0.0), Vector3(-0.55, 0.0, 0.0), 0.2, 0.36, 1.0 / 60.0, reverse_avoidance)
+	var door_entry := {"id": "door-reverse", "body": body, "activeDoorPortalId": "door:test"}
+	var door_lease := {"state": "ready", "waypoints": [Vector3(8.0, 0.0, 0.0)], "actions": {}, "probeCertificate": {"ok": true, "authoritative": true}}
+	var door: Dictionary = executor.call("_apply_bounded_reverse_yield", door_entry, "door-request", door_lease, 0, body, Vector3(8.0, 0.0, 0.0), Vector3(2.0, 0.0, 0.0), Vector3(-0.55, 0.0, 0.0), 8.0, 0.36, 1.0 / 60.0, reverse_avoidance)
+	var terminal_telemetry: Dictionary = terminal.get("telemetry", {}) if terminal.get("telemetry", {}) is Dictionary else {}
+	var arrived_telemetry: Dictionary = arrived.get("telemetry", {}) if arrived.get("telemetry", {}) is Dictionary else {}
+	var door_telemetry: Dictionary = door.get("telemetry", {}) if door.get("telemetry", {}) is Dictionary else {}
+	var passed := not bool(terminal.get("exhausted", false)) and not bool(terminal_telemetry.get("terminalMode", false)) \
+		and bool(arrived.get("exhausted", false)) and bool(arrived_telemetry.get("terminalMode", false)) \
+		and bool(door.get("exhausted", false)) and bool(door_telemetry.get("portalMode", false))
+	return outcome(passed, "terminal=%s arrived=%s door=%s" % [JSON.stringify(terminal), JSON.stringify(arrived), JSON.stringify(door)], ["terminal_reverse_is_bounded_outside_arrival_radius", "arrival_radius_reverse_prohibited", "door_reverse_prohibited"], {"terminal": terminal, "arrived": arrived, "door": door})
+
+
+func test_route_lease_executor_never_bypasses_orca(_mode: String) -> Dictionary:
+	var executor = NpcRouteLeaseExecutorScript.new()
+	var passed := not executor.has_method("_can_apply_certified_lane_velocity") and not executor.has_method("_has_deterministic_encounter_precedence")
+	return outcome(passed, "laneOverride=%s precedenceBypass=%s" % [str(executor.has_method("_can_apply_certified_lane_velocity")), str(executor.has_method("_has_deterministic_encounter_precedence"))], ["lane_intent_enters_orca_as_preferred_velocity", "stable_id_never_bypasses_orca_output"], {})
+
+
+func test_route_lease_executor_terminal_docking_respects_orca(_mode: String) -> Dictionary:
+	var executor = NpcRouteLeaseExecutorScript.new()
+	var short_route_length := float(executor.call("_remaining_waypoint_route_length", Vector3.ZERO, [Vector3(1.0, 0.0, 0.0), Vector3(1.8, 0.0, 0.0)], 0))
+	var door_lease := {"waypoints": [Vector3(1.0, 0.0, 0.0)], "actions": {"0,0": {"kind": "door", "entryPosition": Vector3(1.0, 0.0, 0.0)}}}
+	var pending_door := bool(executor.call("_lease_has_pending_door_from", door_lease, 0))
+	var passed := not executor.has_method("_can_apply_terminal_direct_velocity") and is_equal_approx(short_route_length, 1.8) and pending_door
+	return outcome(passed, "terminalOverride=%s length=%.2f door=%s" % [str(executor.has_method("_can_apply_terminal_direct_velocity")), short_route_length, str(pending_door)], ["terminal_docking_never_replaces_orca_output", "pending_door_disables_terminal_direct_mode"], {"shortRouteLength": short_route_length, "pendingDoor": pending_door})
+
+
+func test_route_lease_executor_stationary_occupant_keeps_orca_authority(_mode: String) -> Dictionary:
+	var executor = NpcRouteLeaseExecutorScript.new()
+	var passed := not executor.has_method("_has_deterministic_encounter_precedence")
+	return outcome(passed, "precedenceBypass=%s" % str(executor.has_method("_has_deterministic_encounter_precedence")), ["stationary_actor_priority_is_resolved_by_orca", "mover_cannot_push_through_parked_actor"], {})
 
 func test_route_partial_explicit_only(_mode: String) -> Dictionary:
 	var service = route_service_from_surfaces({
@@ -1310,6 +1542,41 @@ func test_route_navmesh_preserves_door_action_cells(_mode: String) -> Dictionary
 	var entry_cell_preserved := emitted_action.get("entryCell") is Vector2i
 	var passed := action_preserved and bool(route.get("ok", false)) and not emitted_action.is_empty() and direction_preserved and entry_cell_preserved and int(stats.get("pathQueryFailureCount", 0)) == 0
 	return outcome(passed, "preserved=%s route=%s action=%s stats=%s" % [JSON.stringify(vec2i_array_summary(preserved)), JSON.stringify(navmesh_route_summary(route)), JSON.stringify(emitted_action), JSON.stringify(stats)], ["navmesh_preserves_door_action_cell_after_waypoint_prune", "navmesh_door_action_direction_matches_link"], { "preserved": vec2i_array_summary(preserved), "route": navmesh_route_summary(route), "action": emitted_action, "stats": stats })
+
+func test_route_navmesh_preserves_door_portal_approach(_mode: String) -> Dictionary:
+	var planner = NavmeshRoutePlannerScript.new()
+	var start := Vector3(0.0, 0.0, 0.0)
+	var entry := Vector3(0.25, 0.0, -0.9)
+	var exit := Vector3(3.7, 0.0, -0.9)
+	var target := Vector3(4.8, 0.0, -4.8)
+	var raw_path: Array[Vector3] = [
+		start,
+		Vector3(0.25, 0.0, -0.01),
+		Vector3(0.25, 0.0, -0.33),
+		Vector3(0.25, 0.0, -0.65),
+		entry,
+		exit,
+		target
+	]
+	var actions := {
+		"2,-1": {
+			"kind": "door",
+			"portalId": "door:portal-approach",
+			"entryPosition": entry,
+			"exitPosition": exit
+		}
+	}
+	var waypoints: Array[Vector3] = planner._path_waypoints(raw_path, start, target, null, {}, false, false, actions)
+	var entry_index := -1
+	var exit_index := -1
+	for index in range(waypoints.size()):
+		if waypoints[index].distance_to(entry) <= 0.001:
+			entry_index = index
+		if waypoints[index].distance_to(exit) <= 0.001:
+			exit_index = index
+	var initial_approach_preserved := not waypoints.is_empty() and waypoints[0].distance_to(raw_path[1]) <= 0.001
+	var passed := initial_approach_preserved and entry_index >= 0 and exit_index > entry_index
+	return outcome(passed, "waypoints=%s entryIndex=%d exitIndex=%d" % [JSON.stringify(waypoints), entry_index, exit_index], ["door_action_preserves_interior_portal_approach", "door_action_entry_precedes_exit"], { "waypoints": waypoints, "entryIndex": entry_index, "exitIndex": exit_index })
 
 func test_route_navmesh_planner_goal_kinds(_mode: String) -> Dictionary:
 	var service = navmesh_test_service("goal-kinds", Vector3(-2.7, 0.0, -2.7), Vector3(14.85, 0.0, 6.75))
@@ -2092,10 +2359,14 @@ func test_route_navmesh_post_validation_rejects_wall_cross(_mode: String) -> Dic
 		"arrivalRadius": CELL * 0.5,
 		"strictArrival": true
 	}, adapter, 0)
-	var passed := not bool(route.get("ok", true)) and String(route.get("reason", "")) == "path_crosses_static_collision"
+	var passed := not bool(route.get("ok", true)) \
+		and String(route.get("reason", "")) == "path_crosses_static_collision" \
+		and int(service.last_options.get("pathPostprocessing", -1)) == NavigationPathQueryParameters3D.PATH_POSTPROCESSING_CORRIDORFUNNEL \
+		and bool(service.last_options.get("simplifyPath", false)) \
+		and is_equal_approx(float(service.last_options.get("simplifyEpsilon", 0.0)), NpcConstantsScript.NAVMESH_PATH_SIMPLIFY_EPSILON)
 	body.free()
 	free_collision_setup(setup)
-	return outcome(passed, "route=%s" % JSON.stringify(navmesh_route_dictionary_summary(route)), ["navmesh_route_post_validation_rejects_wall_crossing", "bad_navmesh_path_not_accepted"], { "route": navmesh_route_dictionary_summary(route) })
+	return outcome(passed, "route=%s options=%s" % [JSON.stringify(navmesh_route_dictionary_summary(route)), JSON.stringify(service.last_options)], ["navmesh_route_post_validation_rejects_wall_crossing", "bad_navmesh_path_not_accepted", "runtime_navmesh_corridor_funnel_enabled", "runtime_navmesh_path_simplification_enabled"], { "route": navmesh_route_dictionary_summary(route), "options": service.last_options })
 
 func test_route_scripted_target_expands_navmesh_tiles(_mode: String) -> Dictionary:
 	var adapter = GeneratedWorldNavigationAdapterScript.new()
@@ -2182,6 +2453,31 @@ func test_route_substrate_uses_actual_start_waypoint(_mode: String) -> Dictionar
 		["substrate_route_starts_at_actor_pose", "substrate_second_waypoint_keeps_cell_route"],
 		{ "route": substrate_route_summary(route), "first": first, "actualStart": actual_start, "second": second }
 	)
+
+
+func test_route_substrate_scripted_target_is_exact_goal(_mode: String) -> Dictionary:
+	var fixture := GeneratedTownRouteSubstrateFixtureWorld.new()
+	var substrate = CollisionBackedRouteSubstrateScript.new()
+	substrate.setup(fixture)
+	var entry := fixture.generated_town_entry()
+	var target_cell := Vector2i(4, 0)
+	var target_position := fixture.cell_position(target_cell) + Vector3(0.31, 0.0, -0.22)
+	var poses: Dictionary = substrate.candidate_poses_for_target(entry, {
+		"cell": target_cell,
+		"position": target_position
+	}, "scripted_target", { "allowOutside": true })
+	var candidates: Array = poses.get("candidates", []) if poses.get("candidates", []) is Array else []
+	var candidate_cell: Vector2i = (candidates[0] as Dictionary).get("cell", Vector2i(999999, 999999)) if candidates.size() == 1 and candidates[0] is Dictionary else Vector2i(999999, 999999)
+	var passed: bool = bool(poses.get("ok", false)) \
+		and candidates.size() == 1 \
+		and candidate_cell == target_cell
+	return outcome(
+		passed,
+		"poses=%s" % JSON.stringify(substrate_pose_summary(poses)),
+		["scripted_target_has_one_exact_goal_cell"],
+		{ "poses": substrate_pose_summary(poses) }
+	)
+
 
 func test_route_substrate_home_departure_clearance_exact_goal(_mode: String) -> Dictionary:
 	var fixture := GeneratedTownRouteSubstrateFixtureWorld.new()

@@ -421,8 +421,10 @@ const headedAcceptanceGuards = {
   // CharacterBody3D actors through ordinary NpcSystem commands.
   'run-citadel-life-playtest': ['scripts/testing/npc/CitadelLifePlaytestRunner.gd', [
     'safe_place_npc.*citadel_life_day_spawn',
+    'safe_place_npc.*citadel_crowd_pre_act_lineup',
     'player\\.global_position\\s*=\\s*fixture_origin.*gate_depth',
-    'player\\.global_position\\s*=\\s*fixture_origin.*span'
+    'player\\.global_position\\s*=\\s*fixture_origin.*span',
+    'player\\.global_position\\s*=\\s*fixture_streaming_focus_offset'
   ]],
   'npc/run-actual-gameplay-mira-porch-regression': ['scripts/testing/npc/NpcActualGameplayMiraPorchRegressionRunner.gd', []],
   'npc/run-npc-go-home-visual-playtest': ['scripts/testing/npc/NpcGoHomeVisualPlaytestRunner.gd', ['safe_place_npc.*visual_go_home_spawn', 'player\\.global_position\\s*=\\s*Vector3\\(float\\(center\\.x - 10\\)']],
@@ -549,6 +551,10 @@ async function runHeadedTool(toolId, rawArgs) {
   if (!config) throw new Error(`No headed configuration registered for ${toolId}`);
   const isNormalRuntimePerformance = toolId === 'run-normal-runtime-performance-pass';
   const isRuntimePerformanceObservation = toolId === 'run-runtime-performance-observation';
+  const isInteractiveCitadel = toolId === 'run-citadel-life-playtest'
+    && !asBoolean(parsed.options.profile)
+    && !asBoolean(parsed.options.acceptance)
+    && !asBoolean(parsed.options.linkDiagnostics);
   if (isNormalRuntimePerformance && parsed.options.seed !== undefined) {
     throw new Error('Normal runtime performance passes launch an unseeded New Game and do not accept --seed.');
   }
@@ -614,6 +620,8 @@ async function runHeadedTool(toolId, rawArgs) {
         ? normalWatchdogSeconds
         : isRuntimePerformanceObservation
           ? runtimeObservationWatchdogSeconds
+          : isInteractiveCitadel
+            ? asNumber(parsed.options.watchdogSeconds ?? parsed.options.timeoutSeconds, 0)
           : asNumber(parsed.options.watchdogSeconds ?? parsed.options.timeoutSeconds, 300)
     ),
     VOXEL_GIT_BRANCH: gitValue(['branch', '--show-current']),
@@ -689,6 +697,8 @@ async function runHeadedTool(toolId, rawArgs) {
       ? normalWatchdogSeconds
       : isRuntimePerformanceObservation
         ? runtimeObservationWatchdogSeconds
+        : isInteractiveCitadel
+          ? asNumber(parsed.options.timeoutSeconds ?? parsed.options.watchdogSeconds, 0)
       : asNumber(parsed.options.timeoutSeconds ?? parsed.options.watchdogSeconds, 300)
   });
   if (!(await exists(reportPath))) throw new Error(`Missing report from ${toolId}: ${reportPath}`);

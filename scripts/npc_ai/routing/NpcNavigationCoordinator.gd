@@ -76,6 +76,24 @@ func prebake_town(center_cell: Vector2i, radius_cells: int) -> Dictionary:
         return route_planner.prebake_area_tiles(center_cell, radius_cells)
     return { "ok": false, "reason": "missing_route_planner" }
 
+
+func prebake_building_navigation_topology() -> Dictionary:
+    ensure_ready()
+    if route_planner != null and route_planner.has_method("prebake_building_navigation_topology"):
+        return route_planner.prebake_building_navigation_topology()
+    return { "ok": false, "reason": "missing_route_planner" }
+
+func plan_source_navigation_route(entry: Dictionary, intent: Dictionary) -> Dictionary:
+    ensure_ready()
+    if route_delegate == null or not route_delegate.has_method("plan_route"):
+        return {
+            "ok": false,
+            "status": "pending",
+            "classification": "pending_nav_data",
+            "reason": "missing_source_navigation_route_delegate"
+        }
+    return route_delegate.plan_route(entry, intent)
+
 func begin_frame() -> void:
     ensure_ready()
     if route_planner != null and route_planner.has_method("begin_frame"):
