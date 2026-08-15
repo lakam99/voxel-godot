@@ -12,12 +12,12 @@ from mathutils.bvhtree import BVHTree
 
 SEGMENTS = 24
 RAILS = 13
-DISTAL_RAILS = 14
+DISTAL_RAILS = 19
 ANATOMY_PARAMETERS = (0.00, 0.04, 0.08, 0.13, 0.18, 0.265, 0.35, 0.45, 0.55, 0.625, 0.70, 0.76, 0.82)
 SECTION_PARAMETERS = (
-    0.00, 0.045, 0.09, 0.16, 0.24, 0.35, 0.42, 0.45,
+    0.00, 0.04, 0.08, 0.12, 0.16, 0.22, 0.28, 0.34, 0.42, 0.45,
     0.475, 0.515, 0.555, 0.595, 0.635, 0.661, 0.687, 0.713,
-    0.739, 0.765, 0.791, 0.817, 0.85, 0.88, 0.91, 0.94,
+    0.739, 0.765, 0.791, 0.817, 0.85, 0.90, 0.94,
 )
 WIDTH_RATIOS = (1.00, 0.98, 0.95, 1.05, 1.15, 1.26, 1.35, 1.41, 1.44, 1.44, 1.42, 1.39, 1.35)
 THICKNESS_RATIOS = (0.78, 0.84, 0.90, 0.96, 1.00, 1.00, 0.98, 0.92, 0.84, 0.76, 0.70, 0.66, 0.62)
@@ -25,10 +25,11 @@ LANE_COEFFICIENTS = (0.0, 0.35, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0,
 TOE_CENTER_RAILS = (2, 4, 6, 8, 10)
 TOE_LATERAL = (-0.38, -0.19, 0.0, 0.19, 0.38)
 TOE_FAN_DEGREES = (-10.0, -5.0, 0.0, 5.0, 10.0)
-TOE_LENGTHS = (0.945, 0.982, 1.00, 0.985, 0.95)
-DISTAL_LATERAL = (-0.50, -0.36, -0.3375, -0.315, -0.145, -0.1225, -0.10, 0.10, 0.1225, 0.145, 0.315, 0.3375, 0.36, 0.50)
-DISTAL_TOE_PAIRS = ((0, 1), (3, 4), (6, 7), (9, 10), (12, 13))
-DISTAL_WEB_RAILS = (2, 5, 8, 11)
+TOE_LENGTHS = (0.95, 0.982, 1.00, 0.985, 0.945)
+DISTAL_LATERAL = (-0.50, -0.43, -0.36, -0.3375, -0.315, -0.23, -0.145, -0.1225, -0.10, 0.0, 0.10, 0.1225, 0.145, 0.23, 0.315, 0.3375, 0.36, 0.43, 0.50)
+DISTAL_TOE_TRIPLETS = ((0, 1, 2), (4, 5, 6), (8, 9, 10), (12, 13, 14), (16, 17, 18))
+DISTAL_TOE_CENTERS = (1, 5, 9, 13, 17)
+DISTAL_WEB_RAILS = (3, 7, 11, 15)
 
 
 def parse_args():
@@ -103,6 +104,20 @@ def smoothstep(first, second, value):
     return factor * factor * (3.0 - 2.0 * factor)
 
 
+def smootherstep(first, second, value):
+    factor = max(0.0, min(1.0, (value - first) / (second - first)))
+    return factor**3 * (factor * (factor * 6.0 - 15.0) + 10.0)
+
+
+def palm_outer_compression(parameter, normalized_lateral):
+    if parameter <= 0.52:
+        longitudinal = smootherstep(0.28, 0.52, parameter)
+    else:
+        longitudinal = 1.0 - smootherstep(0.52, 0.76, parameter)
+    lateral = smootherstep(0.55, 1.0, abs(normalized_lateral))
+    return 1.0 - 0.08 * longitudinal * lateral
+
+
 def interpolate_schedule(values, parameter):
     if parameter <= ANATOMY_PARAMETERS[0]:
         return values[0]
@@ -115,6 +130,16 @@ def interpolate_schedule(values, parameter):
             factor = (parameter - first) / (second - first)
             return values[index] * (1.0 - factor) + values[index + 1] * factor
     return values[-1]
+
+
+def interpolate_controls(controls, factor):
+    if factor <= controls[0][0]:
+        return controls[0][1]
+    for (first_u, first_value), (second_u, second_value) in zip(controls, controls[1:]):
+        if first_u <= factor <= second_u:
+            local = smootherstep(first_u, second_u, factor)
+            return first_value * (1.0 - local) + second_value * local
+    return controls[-1][1]
 
 
 def distal_phase(parameter):
@@ -138,15 +163,13 @@ def distal_phase(parameter):
 def width_ratio(parameter):
     controls = (
         (0.00, 0.71),
-        (0.045, 0.71),
-        (0.09, 0.71 * 1.02),
-        (0.16, 0.71 * 1.08),
-        (0.26, 0.82),
-        (0.42, 0.96),
-        (0.55, 1.00),
-        (0.66, 0.96),
-        (0.82, 0.93),
-        (0.94, 0.90),
+        (0.10, 0.71),
+        (0.18, 0.71 * 1.04),
+        (0.28, 0.86),
+        (0.45, 0.96),
+        (0.62, 1.00),
+        (0.78, 0.95),
+        (0.94, 0.89),
     )
     for (first_u, first_value), (second_u, second_value) in zip(controls, controls[1:]):
         if first_u <= parameter <= second_u:
@@ -158,9 +181,9 @@ def width_ratio(parameter):
 def thickness_ratio(parameter, carpus_depth, paw_width):
     controls = (
         (0.00, carpus_depth),
-        (0.045, carpus_depth),
-        (0.09, carpus_depth * 1.01),
-        (0.16, carpus_depth * 1.04),
+        (0.10, carpus_depth),
+        (0.18, carpus_depth * 1.02),
+        (0.28, carpus_depth * 1.08),
         (0.30, paw_width * 0.33),
         (0.44, paw_width * 0.36),
         (0.55, paw_width * 0.35),
@@ -194,6 +217,16 @@ def cubic_bezier_tangent(first, second, third, fourth, factor):
     ).normalized()
 
 
+def quadratic_extrapolation(first, second, third, first_distance, second_distance, distance):
+    first_x = -(first_distance + second_distance)
+    second_x = -second_distance
+    third_x = 0.0
+    first_weight = (distance - second_x) * (distance - third_x) / ((first_x - second_x) * (first_x - third_x))
+    second_weight = (distance - first_x) * (distance - third_x) / ((second_x - first_x) * (second_x - third_x))
+    third_weight = (distance - first_x) * (distance - second_x) / ((third_x - first_x) * (third_x - second_x))
+    return first * first_weight + second * second_weight + third * third_weight
+
+
 def section_point(
     rail,
     is_dorsal,
@@ -207,7 +240,7 @@ def section_point(
     thickness,
 ):
     width_normalized = rail / (RAILS - 1) * 2.0 - 1.0
-    lateral = 0.5 * paw_width * width_normalized
+    lateral = 0.5 * paw_width * width_normalized * palm_outer_compression(parameter, width_normalized)
     forward = 0.0
     relief = smoothstep(0.68, 0.86, parameter)
     toe_phase = distal_phase(parameter)
@@ -255,8 +288,8 @@ def section_point(
 
 
 def distal_rail_influence(rail):
-    for toe_index, pair in enumerate(DISTAL_TOE_PAIRS):
-        if rail in pair:
+    for toe_index, triplet in enumerate(DISTAL_TOE_TRIPLETS):
+        if rail in triplet:
             return ((1.0, toe_index),)
     web_index = DISTAL_WEB_RAILS.index(rail)
     return ((0.5, web_index), (0.5, web_index + 1))
@@ -273,41 +306,50 @@ def distal_section_point(
     paw_width,
     paw_length,
     thickness,
+    contact_z,
 ):
     uniform_lateral = rail / (DISTAL_RAILS - 1) - 0.5
     spacing_blend = smoothstep(0.475, 0.66, parameter)
     lateral_normalized = uniform_lateral * (1.0 - spacing_blend) + DISTAL_LATERAL[rail] * spacing_blend
-    lateral = paw_width * lateral_normalized
+    lateral = paw_width * lateral_normalized * palm_outer_compression(parameter, lateral_normalized / 0.5)
     toe_phase = distal_phase(parameter)
     influences = distal_rail_influence(rail)
     relative_length = sum(weight * TOE_LENGTHS[toe] for weight, toe in influences)
     fan_angle = sum(weight * TOE_FAN_DEGREES[toe] for weight, toe in influences)
     is_web = rail in DISTAL_WEB_RAILS
-    target_length = relative_length - (0.0275 if is_web else 0.0)
+    target_length = relative_length - (0.03 if is_web or rail in (0, DISTAL_RAILS - 1) else 0.0)
     desired_parameter = 0.68 + toe_phase * (target_length - 0.68)
     terminal_factor = smoothstep(target_length - 0.10, target_length, desired_parameter)
-    for toe_index, pair in enumerate(DISTAL_TOE_PAIRS):
-        if rail in pair:
-            pair_center = 0.5 * (DISTAL_LATERAL[pair[0]] + DISTAL_LATERAL[pair[1]])
-            contracted = pair_center + (DISTAL_LATERAL[rail] - pair_center) * 0.76
-            lateral_normalized += (contracted - DISTAL_LATERAL[rail]) * terminal_factor * spacing_blend
-            lateral = paw_width * lateral_normalized
+    terminal_width = interpolate_controls(
+        ((0.0, 1.0), (0.45, 0.92), (0.80, 0.72), (1.0, 0.45)),
+        terminal_factor,
+    )
+    for toe_index, triplet in enumerate(DISTAL_TOE_TRIPLETS):
+        if rail in triplet:
+            pair_center = DISTAL_LATERAL[triplet[1]]
+            expansion = 1.0 + 0.06 * smoothstep(0.68, 0.76, parameter) * (1.0 - smoothstep(0.84, 0.90, parameter))
+            contracted = pair_center + (DISTAL_LATERAL[rail] - pair_center) * expansion * terminal_width
+            lateral_normalized += (contracted - DISTAL_LATERAL[rail]) * spacing_blend
+            lateral = paw_width * lateral_normalized * palm_outer_compression(parameter, lateral_normalized / 0.5)
             break
     forward = (desired_parameter - parameter) * paw_length if toe_phase > 0.0 else 0.0
     if toe_phase > 0.0:
         lateral += math.tan(math.radians(fan_angle)) * (desired_parameter - 0.68) * paw_length
     crown = max(0.0, 1.0 - (lateral_normalized / 0.5) ** 2) ** 2
     relief = smoothstep(0.66, 0.84, parameter)
-    terminal_thickness = 1.0
-    if terminal_factor > 0.0:
-        terminal_controls = ((0.0, 1.0), (0.33, 0.65), (0.67, 0.25), (1.0, 0.0))
-        for (first_u, first_value), (second_u, second_value) in zip(terminal_controls, terminal_controls[1:]):
-            if first_u <= terminal_factor <= second_u:
-                factor = smoothstep(first_u, second_u, terminal_factor)
-                terminal_thickness = first_value * (1.0 - factor) + second_value * factor
-                break
+    terminal_thickness = interpolate_controls(
+        ((0.0, 1.0), (0.45, 0.75), (0.80, 0.35), (1.0, 0.0)),
+        terminal_factor,
+    )
+    terminal_crown = interpolate_controls(
+        ((0.0, 0.0), (0.45, 0.06), (0.78, 0.09), (0.94, 0.05), (1.0, 0.0)),
+        terminal_factor,
+    )
     if is_dorsal:
-        vertical = thickness * terminal_thickness * (0.58 * crown + relief * (-0.07 if is_web else 0.12))
+        vertical = thickness * (
+            terminal_thickness * (0.58 * crown + relief * (-0.04 if is_web else 0.07))
+            + terminal_crown * (0.0 if is_web else 1.0)
+        )
     else:
         vertical = thickness * terminal_thickness * (-0.50 * crown + (0.03 * relief if is_web else 0.0))
     if rail in (0, DISTAL_RAILS - 1):
@@ -316,35 +358,24 @@ def distal_section_point(
 
 
 def connect_transition(faces, first_ring, second_ring):
-    operations = ["regular"] * 6 + ["merge", "split"] + ["regular"] * 10 + ["split"] + ["regular"] * 6
-    first_index = 0
+    split_columns = {4, 6, 8, 16, 18, 20}
     second_index = 0
-    for operation in operations:
-        if operation == "regular":
+    for first_index in range(24):
+        if first_index in split_columns:
             faces.append((
-                first_ring[first_index % 24],
-                first_ring[(first_index + 1) % 24],
-                second_ring[(second_index + 1) % 26],
-                second_ring[second_index % 26],
-            ))
-            first_index += 1
-            second_index += 1
-        elif operation == "split":
-            faces.append((
-                first_ring[first_index % 24],
-                second_ring[(second_index + 2) % 26],
-                second_ring[(second_index + 1) % 26],
-                second_ring[second_index % 26],
+                first_ring[first_index],
+                second_ring[(second_index + 2) % 36],
+                second_ring[(second_index + 1) % 36],
+                second_ring[second_index % 36],
             ))
             second_index += 2
-        else:
-            faces.append((
-                first_ring[first_index % 24],
-                first_ring[(first_index + 1) % 24],
-                first_ring[(first_index + 2) % 24],
-                second_ring[second_index % 26],
-            ))
-            first_index += 2
+        faces.append((
+            first_ring[first_index],
+            first_ring[(first_index + 1) % 24],
+            second_ring[(second_index + 1) % 36],
+            second_ring[second_index % 36],
+        ))
+        second_index += 1
 
 
 def build_paw(vertices, faces, carpus_indices, precarpus_indices):
@@ -354,6 +385,11 @@ def build_paw(vertices, faces, carpus_indices, precarpus_indices):
     previous_by_carpus = {
         carpus: precarpus
         for carpus, precarpus in zip(carpus_indices, precarpus_indices)
+    }
+    preprecarpus_indices = [index - SEGMENTS for index in precarpus_indices]
+    preprecarpus_by_carpus = {
+        carpus: preprecarpus
+        for carpus, preprecarpus in zip(carpus_indices, preprecarpus_indices)
     }
     forward_axis = Vector((0.0, -1.0, 0.0))
     precarpus_points = [Vector(vertices[index]) for index in precarpus_indices]
@@ -386,8 +422,24 @@ def build_paw(vertices, faces, carpus_indices, precarpus_indices):
     cycle_positions = {vertex: index for index, vertex in enumerate(cycle)}
     dorsal_positions = [cycle_positions[index] for index in dorsal_path]
     plantar_positions = [cycle_positions[index] for index in plantar_path]
+    preprecarpus_points = [Vector(vertices[index]) for index in preprecarpus_indices]
+    preprecarpus_center = sum(preprecarpus_points, start=Vector()) / SEGMENTS
+    prior_tangent = (precarpus_center - preprecarpus_center).normalized()
+    incoming_turn = prior_tangent.angle(incoming_tangent)
+    incoming_spacing = 0.5 * (
+        (precarpus_center - preprecarpus_center).length
+        + (carpus_center - precarpus_center).length
+    )
+    wrist_curvature = incoming_turn / max(incoming_spacing, 1e-8)
+    bend_direction = incoming_tangent - prior_tangent
+    bend_direction -= incoming_tangent * bend_direction.dot(incoming_tangent)
+    if bend_direction.length < 1e-8:
+        bend_direction = thickness_axis.copy()
+    else:
+        bend_direction.normalize()
+    bend_radius = max(abs((point - carpus_center).dot(bend_direction)) for point in carpus_points)
+    wrist_curvature = min(wrist_curvature, 0.55 / max(bend_radius, 1e-8))
     sections = [list(cycle)]
-    transition_weights = (0.0, 0.0, 0.0, 0.0, 0.55, 1.0)
     previous_width_axis = width_axis
     for section_index, parameter in enumerate(SECTION_PARAMETERS[1:], start=1):
         width = paw_width * width_ratio(parameter)
@@ -424,14 +476,14 @@ def build_paw(vertices, faces, carpus_indices, precarpus_indices):
             distal_dorsal = [
                 distal_section_point(
                     rail, True, parameter, center, forward_axis, section_width_axis,
-                    section_thickness_axis, width, paw_length, thickness,
+                    section_thickness_axis, width, paw_length, thickness, contact_z,
                 )
                 for rail in range(DISTAL_RAILS)
             ]
             distal_plantar = [
                 distal_section_point(
                     rail, False, parameter, center, forward_axis, section_width_axis,
-                    section_thickness_axis, width, paw_length, thickness,
+                    section_thickness_axis, width, paw_length, thickness, contact_z,
                 )
                 for rail in range(DISTAL_RAILS)
             ]
@@ -440,27 +492,38 @@ def build_paw(vertices, faces, carpus_indices, precarpus_indices):
                 distal_dorsal[edge_rail] = shared
                 distal_plantar[edge_rail] = shared
             ring_points = distal_dorsal + list(reversed(distal_plantar[1:-1]))
-        transition_weight = transition_weights[min(section_index, len(transition_weights) - 1)]
-        transition_advance = (center - carpus_center).length
-        wrist_authority = len(ring_points) == SEGMENTS and section_index <= 3
-        if wrist_authority:
-            width_scales = (1.0, 1.0, 1.02, 1.08)
-            depth_scales = (1.0, 1.0, 1.01, 1.04)
-            translated_center = carpus_center + incoming_tangent * (parameter * paw_length)
-            for position, carpus_vertex in enumerate(cycle):
-                relative = Vector(vertices[carpus_vertex]) - carpus_center
-                lateral_component = width_axis * relative.dot(width_axis) * width_scales[section_index]
-                depth_component = thickness_axis * relative.dot(thickness_axis) * depth_scales[section_index]
-                ring_points[position] = translated_center + lateral_component + depth_component
-        elif len(ring_points) == SEGMENTS:
-            for position, target_point in enumerate(ring_points):
-                carpus_vertex = cycle[position]
-                incoming_direction = (
-                    Vector(vertices[carpus_vertex])
-                    - Vector(vertices[previous_by_carpus[carpus_vertex]])
+        if len(ring_points) == SEGMENTS and parameter <= 0.34:
+            correction = 0.0 if parameter <= 0.12 else smootherstep(0.12, 0.32, parameter)
+            wrist_distance = parameter * paw_length
+            ramp_length = 0.12 * paw_length
+            integration_steps = max(8, math.ceil(wrist_distance / max(0.01 * paw_length, 1e-8)))
+            step_length = wrist_distance / integration_steps
+            wrist_center = carpus_center.copy()
+            wrist_angle = 0.0
+            for integration_step in range(integration_steps):
+                midpoint_distance = (integration_step + 0.5) * step_length
+                local_curvature = wrist_curvature * min(1.0, midpoint_distance / ramp_length)
+                midpoint_angle = wrist_angle + 0.5 * local_curvature * step_length
+                midpoint_tangent = (
+                    incoming_tangent * math.cos(midpoint_angle)
+                    + bend_direction * math.sin(midpoint_angle)
                 ).normalized()
-                continuation = Vector(vertices[carpus_vertex]) + incoming_direction * transition_advance
-                ring_points[position] = continuation.lerp(target_point, transition_weight)
+                wrist_center += midpoint_tangent * step_length
+                wrist_angle += local_curvature * step_length
+            wrist_tangent = (
+                incoming_tangent * math.cos(wrist_angle)
+                + bend_direction * math.sin(wrist_angle)
+            ).normalized()
+            wrist_width_axis = (width_axis - wrist_tangent * width_axis.dot(wrist_tangent)).normalized()
+            wrist_thickness_axis = wrist_tangent.cross(wrist_width_axis).normalized()
+            for position, target_point in enumerate(ring_points):
+                relative = Vector(vertices[cycle[position]]) - carpus_center
+                continuation = (
+                    wrist_center
+                    + wrist_width_axis * relative.dot(width_axis)
+                    + wrist_thickness_axis * relative.dot(thickness_axis)
+                )
+                ring_points[position] = continuation.lerp(target_point, correction)
         indices = list(range(len(vertices), len(vertices) + len(ring_points)))
         vertices.extend(tuple(point) for point in ring_points)
         sections.append(indices)
@@ -474,20 +537,27 @@ def build_paw(vertices, faces, carpus_indices, precarpus_indices):
             faces.append((first_ring[index], first_ring[following], second_ring[following], second_ring[index]))
 
     final_ring = sections[-1]
-    final_dorsal = final_ring[:14]
-    final_plantar = [final_ring[0]] + list(reversed(final_ring[14:])) + [final_ring[13]]
+    final_dorsal = final_ring[:19]
+    final_plantar = [final_ring[0]] + list(reversed(final_ring[19:])) + [final_ring[18]]
     seam = []
     for rail in range(DISTAL_RAILS):
         influences = distal_rail_influence(rail)
         relative_length = sum(weight * TOE_LENGTHS[toe] for weight, toe in influences)
         fan_angle = sum(weight * TOE_FAN_DEGREES[toe] for weight, toe in influences)
         is_web = rail in DISTAL_WEB_RAILS
-        if is_web:
-            relative_length -= 0.0275
+        if is_web or rail in (0, DISTAL_RAILS - 1):
+            relative_length -= 0.03
         forward = paw_length * relative_length
-        lateral = paw_width * DISTAL_LATERAL[rail]
+        seam_lateral = DISTAL_LATERAL[rail]
+        for triplet in DISTAL_TOE_TRIPLETS:
+            if rail in triplet:
+                pair_center = DISTAL_LATERAL[triplet[1]]
+                seam_lateral = pair_center + (seam_lateral - pair_center) * 0.45
+                break
+        lateral = paw_width * seam_lateral
         lateral += math.tan(math.radians(fan_angle)) * paw_length * (relative_length - 0.68)
-        vertical = contact_z + 0.325 * thickness_ratio(0.94, carpus_depth, paw_width)
+        seam_raise = 0.20 if is_web or rail in (0, DISTAL_RAILS - 1) else 0.16
+        vertical = contact_z + seam_raise * thickness_ratio(0.94, carpus_depth, paw_width)
         seam.append(len(vertices))
         vertices.append(tuple(carpus_center + forward_axis * forward + width_axis * lateral + Vector((0, 0, vertical - carpus_center.z))))
     for rail in range(DISTAL_RAILS - 1):
@@ -649,7 +719,7 @@ def main():
             ),
             "lengthToWidth": build["pawLength"] / build["pawWidth"],
             "thicknessToWidth": build["maximumThickness"] / build["pawWidth"],
-            "toeCenterRails": list(TOE_CENTER_RAILS),
+            "toeCenterRails": list(DISTAL_TOE_CENTERS),
             "toeFanDegrees": list(TOE_FAN_DEGREES),
             "toeRelativeLengths": list(TOE_LENGTHS),
         },
