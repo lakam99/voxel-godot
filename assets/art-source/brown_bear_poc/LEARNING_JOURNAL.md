@@ -1028,3 +1028,18 @@
 **Reusable rule**
 
 > Sculpt positive anatomical masses first. Gaps, grooves, and claws are subordinate details. If the untextured paw does not read as a crowned palm carrying five broad toe volumes, no amount of web depth, terminal scalloping, or decorative claws can rescue it.
+
+## Iterations 552–576 — Independent toe caps need physical runway
+
+- A 19-rail distal chart—five shoulder/center/shoulder toe triplets separated by four web rails—is the first layout that preserves five toe identities after subdivision. Thirteen single-center rails and fourteen paired rails both collapse into a scalloped skirt.
+- Collapsing dorsal and plantar rails onto one transverse seam creates a dark shelf and cage intersections. Five finite caps must close independently while the web bridges stop behind them.
+- A common shell can branch into five manifold toe caps without separate objects: close each web at the common terminal row, continue each triplet through its own dorsal, plantar, and side strips, then close each toe locally. This retained one component, unchanged intentional boundaries, and zero cage/L2 intersections.
+- Anatomical naming is not enough to orient a cap. Tip rows must inherit the signed local dorsal-to-plantar axis from their source rails; forcing world-Z top and bottom made every cap cross because the frozen carpal frame uses the opposite signed surface orientation.
+- Iteration 574 proved the independent-cap topology with zero intersections, but one direct cap interval remained square and thin. Iteration 575 added a `.94` interpolation row and improved toe hierarchy and rounding while retaining topology safety.
+- Iteration 576 exposed a metric trap: adding `.91/.94/.97` rows inside an unchanged short cap length increased the worst edge ratio from `5.33` to `10.60`. More rows help only when the longitudinal cap runway grows with them; otherwise they create stacked slivers.
+- The accepted toe hierarchy under review is `[.88, .96, 1.00, .96, .88]` with a total fan near `16°`. Outer centers move inward and claws remain forbidden until five naked toe volumes and five plantar contact arcs pass.
+- A paw can show five top-view lobes and still fail as weight-bearing anatomy. Plantar center lanes, raised webs, proximal dorsal relief, and preserved thickness through roughly `.75P` must be authored as positive volumes rather than inferred from terminal clefts.
+
+**Reusable rule**
+
+> Branch the topology where the anatomy branches, inherit the source surface frame, and budget real longitudinal distance for every interpolation row. Subdivision cannot turn a short stack of thin cap bands into a loaded toe.
