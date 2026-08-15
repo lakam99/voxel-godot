@@ -1043,3 +1043,19 @@
 **Reusable rule**
 
 > Branch the topology where the anatomy branches, inherit the source surface frame, and budget real longitudinal distance for every interpolation row. Subdivision cannot turn a short stack of thin cap bands into a loaded toe.
+
+## Iterations 577–589 — Ground the plantar envelope; add mass dorsally
+
+- Equalizing cap runway inside the still-shared terminal shell folded the shell because shorter toes required their roots to move backward through already emitted bands. The correct architectural response was to end the common shell proximally, branch five toe roots, and advance four web saddles independently.
+- A curved forelimb rotation-minimizing frame may safely orient a sweep yet still produce a ski-like paw if thickness remains symmetric around its centerline. Iteration 580 aligned the frame to the contact plane, but only iteration 581 restored weight-bearing anatomy by fixing the plantar envelope and adding all extra thickness dorsally.
+- The veteran critic explicitly passed the asymmetric heel-to-palm load concept. The retained scale is `T=.26P`; the plantar surface grounds through the load interval while the dorsal span forms the heel, palm wedge, knuckles, and toe pads above it.
+- Signed frame semantics matter. The inherited arrays named “dorsal” and “plantar” do not reliably correspond to world-up and world-down, so grounded cap rows must inspect the source pair's signed world height before assigning upper and lower vertices.
+- Splitting exposed toe sidewalls into reusable three-segment vertical profiles preserved one manifold component and reduced the sidewall sliver problem, but the remaining `>3.5` ratios moved to dorsal/plantar shoulder-to-center spans. Production cap sampling therefore needs more circumferential toe rails, not merely more longitudinal rows.
+- Directly burying a web endpoint by the critic's full vertical target intersected the existing saddle even at one-eighth amplitude. Recession must be distributed through a multi-row curved saddle; scalar endpoint displacement is retired.
+- Pulling outer root rails inward also intersected the saddle before resolving the hook. Outer convexity must be solved together with the same redistributed cap/saddle topology rather than as an isolated coordinate warp.
+- Repeating the last carpal rigid transform was not a valid wrist continuation: the frozen forelimb is not a repeated rigid sweep, and the experiment folded both cage and subdivision. Wrist repair remains a shared centerline/frame problem with first-derivative scale matching, not discrete transform cloning.
+- Iteration 589 freezes the zero-intersection asymmetric load envelope. Future cap, saddle, and wrist work must preserve its contact frame, toe lengths, fan, branching location, cleft lag, and lateral load silhouette.
+
+**Reusable rule**
+
+> A plantigrade paw is not a tube rotated flat. Ground the plantar authority first, place volume dorsally above it, and branch only after proximal toe masses already exist. If a local endpoint correction intersects at arbitrarily small amplitude, change the surrounding correspondence instead of continuing scalar backoff.
