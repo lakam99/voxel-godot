@@ -10,6 +10,7 @@ const NpcRouteLeaseExecutorScript := preload("res://scripts/npc_ai/movement/NpcR
 
 const HOME_V2_ROUTE_MAX_EXPANSIONS := 8192
 const HOME_V2_WAYPOINT_RADIUS := 0.28
+const HOME_V2_FINAL_WAYPOINT_RADIUS := 0.08
 const ROUTINE_V2_ROUTE_MAX_EXPANSIONS := 8192
 const ROUTINE_V2_WAYPOINT_RADIUS := 0.32
 const V2_ROUTE_EXPANSIONS_PER_CALL := 16
@@ -26,6 +27,7 @@ var perception_service = null
 var goal_selector = null
 var task_planner = null
 var recovery_policy = null
+var crowd_velocity_service = null
 var compliance_counters := {}
 var job_selection_frame := -1
 var job_selections_this_frame := 0
@@ -57,12 +59,18 @@ func setup(autonomy, system_node, main_node, services: Dictionary) -> void:
 	if task_planner != null and task_planner.has_method("set_performance_monitor"):
 		task_planner.set_performance_monitor(performance_monitor())
 	recovery_policy = services.get("recovery")
+	crowd_velocity_service = services.get("crowdVelocity")
 
 func performance_monitor():
 	return main.get("runtime_perf_monitor") if main != null else null
 
 func begin_update_frame() -> void:
 	update_frame_serial += 1
+
+
+func cancel_route_execution(entry: Dictionary) -> void:
+	if home_route_executor != null and home_route_executor.has_method("cancel_entry"):
+		home_route_executor.cancel_entry(entry)
 
 func update_npc(entry: Dictionary, delta: float, night_factor: float) -> void:
 	if npc_system == null:
@@ -185,12 +193,25 @@ func advance_physics_route_service(entry: Dictionary, delta: float) -> Dictionar
 				body,
 				entry.get("activeMotionPerception", {}) if entry.get("activeMotionPerception", {}) is Dictionary else {}
 			)
-			result = _execute_scripted_go_to_route_v2(entry, body, delta)
+			result = _physics_scripted_route_result(entry, _execute_scripted_go_to_route_v2(entry, body, delta))
 		"routine":
 			result = _advance_physics_routine_route(entry, body, delta)
 		_:
 			return { "advanced": false, "reason": "unknown_route_service_kind" }
 	_record_physics_route_service(entry, service_kind, result)
+	return result
+
+
+func _physics_scripted_route_result(entry: Dictionary, route_result: Dictionary) -> Dictionary:
+	var moved := maxf(0.0, float(route_result.get("moved", entry.get("lastMoveDistance", 0.0))))
+	var result := _motion_result(entry, "scripted", "physics_route_service_scripted")
+	result["advanced"] = bool(route_result.get("ok", false)) or moved > 0.001
+	result["status"] = String(route_result.get("status", result.get("routeStatus", "")))
+	result["state"] = String(route_result.get("state", ""))
+	result["reason"] = String(route_result.get("reason", result.get("reason", "")))
+	result["moved"] = moved
+	result["waypointIndex"] = int(route_result.get("waypointIndex", -1))
+	result["classification"] = String(route_result.get("classification", result.get("classification", "")))
 	return result
 
 
@@ -291,11 +312,43 @@ func _advance_physics_routine_route(entry: Dictionary, body: Node3D, delta: floa
 
 func _record_physics_route_service(entry: Dictionary, service_kind: String, result: Dictionary) -> void:
 	var physics_frame := Engine.get_physics_frames()
+	var advanced := bool(result.get("advanced", false))
+	var moved := maxf(0.0, float(result.get("moved", 0.0)))
+	var status := String(result.get("status", result.get("state", "")))
+	var reason := String(result.get("reason", ""))
 	entry["routePhysicsServiceTicks"] = int(entry.get("routePhysicsServiceTicks", 0)) + 1
+	if advanced:
+		entry["routePhysicsServiceAdvancedTicks"] = int(entry.get("routePhysicsServiceAdvancedTicks", 0)) + 1
+	if moved > 0.001:
+		entry["routePhysicsServiceMovedTicks"] = int(entry.get("routePhysicsServiceMovedTicks", 0)) + 1
+		entry["routePhysicsServiceMovedDistance"] = float(entry.get("routePhysicsServiceMovedDistance", 0.0)) + moved
 	entry["routePhysicsServiceLastFrame"] = physics_frame
 	entry["routePhysicsServiceKind"] = service_kind
-	entry["routePhysicsServiceReason"] = String(result.get("reason", ""))
+	entry["routePhysicsServiceReason"] = reason
 	entry["routePhysicsServiceSinceBrainFrames"] = maxi(0, physics_frame - int(entry.get("npc_last_brain_tick", physics_frame)))
+	entry["routePhysicsServiceLastResult"] = {
+		"advanced": advanced,
+		"ok": bool(result.get("ok", false)),
+		"status": status,
+		"state": String(result.get("state", "")),
+		"reason": reason,
+		"moved": moved,
+		"waypointIndex": int(result.get("waypointIndex", -1)),
+		"classification": String(result.get("classification", ""))
+	}
+	_increment_route_physics_service_counter(entry, "status:%s" % (status if status != "" else "none"))
+	_increment_route_physics_service_counter(entry, "reason:%s" % (reason if reason != "" else "none"))
+
+
+func _increment_route_physics_service_counter(entry: Dictionary, key: String) -> void:
+	var counters: Dictionary = entry.get("routePhysicsServiceResultCounts", {}) if entry.get("routePhysicsServiceResultCounts", {}) is Dictionary else {}
+	if counters.has(key):
+		counters[key] = int(counters.get(key, 0)) + 1
+	elif counters.size() < 12:
+		counters[key] = 1
+	else:
+		counters["other"] = int(counters.get("other", 0)) + 1
+	entry["routePhysicsServiceResultCounts"] = counters
 
 func _cache_motion_intent(entry: Dictionary, goal: Dictionary, plan: Dictionary, schedule: Dictionary, perception: Dictionary) -> void:
 	entry["activeMotionGoal"] = goal.duplicate(false)
@@ -422,12 +475,17 @@ func _advance_guard_motion(entry: Dictionary, body: Node3D, perception: Dictiona
 	return _motion_result(entry, "guard", "guard_route")
 
 func _guard_needs_departure_stage(entry: Dictionary, body: Node3D, target: Vector3) -> bool:
+	return _home_departure_required_for_target(entry, body, target)
+
+func _home_departure_required_for_target(entry: Dictionary, body: Node3D, target: Vector3) -> bool:
 	if body == null:
 		return false
 	if _inside_home_now(entry, body) or _inside_home_bounds_now(entry, body.global_position):
 		_set_home_departure_state(entry, "inside", "strict_interior")
 		if _inside_home_bounds_now(entry, target):
 			return false
+	elif _inside_home_bounds_now(entry, target):
+		return false
 	return _home_departure_needs_clearance(entry, body)
 
 func _advance_guard_departure_stage(entry: Dictionary, body: Node3D, delta: float) -> Dictionary:
@@ -553,8 +611,9 @@ func _scripted_order_kind(body: Node, entry := {}) -> String:
 	var state := String(body.get_meta("npc_scripted_order_state", ""))
 	if state in ["PENDING", "ACTIVE"]:
 		return String(body.get_meta("npc_scripted_order_kind", ""))
-	if state == "ARRIVED" and bool(body.get_meta("npc_scripted_hold_on_arrival", false)) and String(body.get_meta("npc_scripted_order_kind", "")) == "go_home":
-		return "go_home"
+	var arrived_kind := String(body.get_meta("npc_scripted_order_kind", ""))
+	if state == "ARRIVED" and bool(body.get_meta("npc_scripted_hold_on_arrival", false)) and arrived_kind in ["go_home", "go_to"]:
+		return arrived_kind
 	return _entry_scripted_order_kind(entry)
 
 func _entry_scripted_order_kind(entry) -> String:
@@ -567,8 +626,9 @@ func _entry_scripted_order_kind(entry) -> String:
 	var state := String(order.get("state", ""))
 	if state in ["PENDING", "ACTIVE"]:
 		return String(order.get("kind", ""))
-	if state == "ARRIVED" and bool(order.get("holdOnArrival", false)) and String(order.get("kind", "")) == "go_home":
-		return "go_home"
+	var arrived_kind := String(order.get("kind", ""))
+	if state == "ARRIVED" and bool(order.get("holdOnArrival", false)) and arrived_kind in ["go_home", "go_to"]:
+		return arrived_kind
 	return ""
 
 func _mark_scripted_order(entry: Dictionary, state: String, reason: String) -> void:
@@ -650,22 +710,90 @@ func _execute_scripted_go_to_route_v2(entry: Dictionary, body: Node3D, delta: fl
 	var speed := _set_motion_speed_mode(entry, speed_mode, "scripted_go_to")
 	var priority := 210 if String(entry.get("npcSpeedMode", speed_mode)) == "sprinting" else maxi(int(entry.get("routePriority", 180)), 180)
 	entry["routePriority"] = priority
-	var route_result := _execute_routine_route_v2(entry, body, delta, speed, "scripted", target, "scripted_target", allow_outside, priority, "scripted_go_to")
-	entry["lastMoveDistance"] = float(route_result.get("moved", 0.0))
-	var state := String(route_result.get("state", route_result.get("status", "")))
-	if state == "arrived" or body.global_position.distance_to(target) <= arrival_radius:
+	var departure_stage := _home_departure_required_for_target(entry, body, target)
+	var route_target := _home_exit_stage_target(entry, body) if departure_stage else target
+	var semantic_kind := "home_departure_clearance" if departure_stage else "scripted_target"
+	var route_reason := "scripted_departure_home_exit" if departure_stage else "scripted_go_to"
+	var target_distance := _flat_distance(body.global_position, target)
+	if not departure_stage and target_distance <= arrival_radius:
+		var arrival_report := _finalize_scripted_semantic_arrival(entry, target_distance, arrival_radius, String(entry.get("routeStatus", "")))
+		if not bool(arrival_report.get("ok", false)):
+			_mark_scripted_order(entry, "ACTIVE", String(arrival_report.get("reason", "authority_arrival_pending")))
+			return {"ok": false, "status": "waiting", "state": "waiting", "reason": String(arrival_report.get("reason", "authority_arrival_pending")), "moved": 0.0}
 		body.set_meta("npc_scripted_arrived", true)
 		entry.erase("scriptedRouteBlockedTime")
+		entry.erase("scriptedRouteEndpointShortfall")
 		_mark_scripted_order(entry, "ARRIVED", "target_reached")
 		if not bool(body.get_meta("npc_scripted_hold_on_arrival", true)):
 			body.remove_meta("npc_scripted_target")
 			entry.erase("activeMotionGoal")
 			entry.erase("activeMotionPlan")
+		return {"ok": true, "status": "arrived", "state": "arrived", "reason": "scripted_semantic_target_reached", "moved": 0.0}
+	var route_result := _execute_routine_route_v2(entry, body, delta, speed, "scripted", route_target, semantic_kind, allow_outside, priority, route_reason)
+	entry["lastMoveDistance"] = float(route_result.get("moved", 0.0))
+	var state := String(route_result.get("state", route_result.get("status", "")))
+	if departure_stage:
+		if state == "arrived":
+			_complete_home_departure_stage(entry, body, "scripted_departure_stage_complete")
+			_clear_inside_home_if_not_semantic(entry, body)
+			_mark_scripted_order(entry, "ACTIVE", "home_departure_clearance")
+		elif state in ["unreachable_static", "invalid_goal", "cancelled"]:
+			_mark_scripted_order(entry, "FAILED_BLOCKED", String(route_result.get("reason", state)))
+		else:
+			_mark_scripted_order(entry, "ACTIVE", "home_departure_clearance")
+		return route_result
+	target_distance = _flat_distance(body.global_position, target)
+	if target_distance <= arrival_radius:
+		var arrival_report := _finalize_scripted_semantic_arrival(entry, target_distance, arrival_radius, state)
+		if not bool(arrival_report.get("ok", false)):
+			_mark_scripted_order(entry, "ACTIVE", String(arrival_report.get("reason", "authority_arrival_pending")))
+			return {"ok": false, "status": "waiting", "state": "waiting", "reason": String(arrival_report.get("reason", "authority_arrival_pending")), "moved": float(route_result.get("moved", 0.0))}
+		body.set_meta("npc_scripted_arrived", true)
+		entry.erase("scriptedRouteBlockedTime")
+		entry.erase("scriptedRouteEndpointShortfall")
+		_mark_scripted_order(entry, "ARRIVED", "target_reached")
+		if not bool(body.get_meta("npc_scripted_hold_on_arrival", true)):
+			body.remove_meta("npc_scripted_target")
+			entry.erase("activeMotionGoal")
+			entry.erase("activeMotionPlan")
+	elif state in ["route_complete", "arrived"]:
+		entry["scriptedRouteEndpointShortfall"] = {
+			"distance": target_distance,
+			"arrivalRadius": arrival_radius,
+			"target": target,
+			"position": body.global_position,
+			"physicsFrame": Engine.get_physics_frames()
+		}
+		_reset_route_for_replan(entry, "scripted_route_endpoint_shortfall")
+		_mark_scripted_order(entry, "ACTIVE", "route_endpoint_shortfall")
 	elif state in ["unreachable_static", "invalid_goal", "cancelled"]:
 		_mark_scripted_order(entry, "FAILED_BLOCKED", String(route_result.get("reason", state)))
 	else:
 		_mark_scripted_order(entry, "ACTIVE", "go_to")
 	return route_result
+
+
+func _finalize_scripted_semantic_arrival(entry: Dictionary, target_distance: float, arrival_radius: float, route_state: String) -> Dictionary:
+	if target_distance > arrival_radius:
+		return { "reported": false, "reason": "semantic_target_not_reached", "routeState": route_state }
+	var components := _ensure_home_v2_components()
+	if not bool(components.get("ok", false)):
+		return { "reported": false, "reason": String(components.get("reason", "route_authority_unavailable")), "routeState": route_state }
+	var authority = components.get("authority")
+	var request_id := String(entry.get("routineRouteV2RequestId", ""))
+	if authority == null or request_id == "" or not authority.has_method("report_arrived"):
+		return { "reported": false, "reason": "missing_active_route_request", "routeState": route_state }
+	var active: Dictionary = authority.runtime_for_entry(entry) if authority.has_method("runtime_for_entry") else {}
+	var authority_state := String(active.get("state", route_state))
+	if authority_state == "arrived":
+		return { "ok": true, "reported": false, "reason": "already_reported", "routeState": authority_state }
+	if not (authority_state in ["queued", "pending_nav_data", "pending_budget", "probing", "ready", "moving"]):
+		return { "reported": false, "reason": "route_not_arrival_reportable", "routeState": authority_state }
+	var reported: Dictionary = authority.report_arrived(request_id, "scripted_semantic_target_reached")
+	entry["routineRouteV2LastAuthority"] = reported
+	if not bool(reported.get("ok", false)):
+		return { "ok": false, "reported": false, "reason": String(reported.get("reason", "authority_arrival_rejected")), "routeState": authority_state, "authority": reported }
+	return { "ok": true, "reported": true, "reason": "semantic_target_reached", "routeState": authority_state, "authority": reported }
 
 func _execute_scripted_combat_overlay(entry: Dictionary, body: Node3D, perception: Dictionary) -> void:
 	entry["scriptedCombatOverlay"] = false
@@ -767,7 +895,7 @@ func _execute_home_route_v2(entry: Dictionary, body: Node3D, delta: float, speed
 		var stored_intent: Dictionary = entry.get("_homeRouteV2Intent", {}) if entry.get("_homeRouteV2Intent", {}) is Dictionary else _home_v2_intent(entry, [])
 		var probe_start_cell := _home_v2_world_cell(world, body.global_position)
 		var probe_candidate_cells := _home_v2_candidate_cells(entry, probe_start_cell, world)
-		var probe_options := _v2_probe_repair_commit_options(substrate, probe_start_cell, probe_candidate_cells, _home_v2_plan_options(body.global_position))
+		var probe_options := _v2_probe_repair_commit_options(substrate, probe_start_cell, probe_candidate_cells, _home_v2_plan_options(body.global_position), stored_route)
 		var probe_result: Dictionary = authority.commit_route_after_probe(entry, String(active.get("requestId", "")), stored_route, stored_intent, probe_options)
 		_update_v2_stored_route_from_authority(entry, "_homeRouteV2Route", probe_result)
 		entry["homeRouteV2LastAuthority"] = probe_result
@@ -807,7 +935,7 @@ func _plan_and_commit_home_v2_route(entry: Dictionary, body: Node3D, authority, 
 	entry["_homeRouteV2Intent"] = intent.duplicate(true)
 	var plan_options := _home_v2_plan_options(body.global_position, planning_budget)
 	plan_options = _v2_plan_options_with_probe_repair_avoidance(plan_options, active)
-	var route: Dictionary = substrate.plan_route(entry, start_cell, candidate_cells, plan_options)
+	var route: Dictionary = _plan_v2_route(entry, substrate, world, intent, start_cell, candidate_cells, plan_options)
 	entry["homeRouteV2LastPlan"] = _home_v2_route_debug(route)
 	if not bool(route.get("ok", false)):
 		var failure := _apply_home_v2_route_failure(authority, request_id, route)
@@ -815,7 +943,7 @@ func _plan_and_commit_home_v2_route(entry: Dictionary, body: Node3D, authority, 
 		return _home_v2_pending_or_failure_result(failure)
 	entry["_homeRouteV2Route"] = route.duplicate(true)
 	entry["routeForceReplan"] = false
-	var commit_options := _v2_probe_repair_commit_options(substrate, start_cell, candidate_cells, plan_options)
+	var commit_options := _v2_probe_repair_commit_options(substrate, start_cell, candidate_cells, plan_options, route)
 	var commit: Dictionary = authority.commit_route_after_probe(entry, request_id, route, intent, commit_options)
 	_update_v2_stored_route_from_authority(entry, "_homeRouteV2Route", commit)
 	entry["homeRouteV2LastAuthority"] = commit
@@ -835,6 +963,8 @@ func _execute_home_v2_lease(entry: Dictionary, body: Node3D, authority, executor
 	var execution: Dictionary = executor.execute(entry, request_id, lease, delta, {
 		"speed": speed,
 		"waypointRadius": HOME_V2_WAYPOINT_RADIUS,
+		"finalWaypointRadius": HOME_V2_FINAL_WAYPOINT_RADIUS,
+		"allowTerminalWaypointCrossing": false,
 		"deferArrivalReport": true,
 		"allowDoorStageMotion": true,
 		"intentKind": "home",
@@ -850,12 +980,13 @@ func _execute_home_v2_lease(entry: Dictionary, body: Node3D, authority, executor
 			_clear_home_v2_route_state(entry)
 			return { "ok": true, "status": "arrived", "state": "arrived", "reason": "home_interior_reached", "moved": float(execution.get("moved", 0.0)), "authority": arrived }
 		var strict_status := _home_interior_status(entry, body.global_position)
-		var reason := "home_route_complete_not_strict_inside:%s" % String(strict_status.get("reason", "not_inside"))
-		var failed: Dictionary = authority.report_unreachable_static(request_id, reason)
+		var reason := "home_route_terminal_requires_strict_replan:%s" % String(strict_status.get("reason", "not_inside"))
 		entry["homeRouteV2StrictFailure"] = strict_status
-		return { "ok": false, "status": "unreachable_static", "state": "unreachable_static", "reason": reason, "moved": float(execution.get("moved", 0.0)), "authority": failed }
-	if not bool(execution.get("ok", false)) and String(execution.get("reason", "")) in ["unexpected_collision", "stuck", "door_stage_blocked"]:
+		_cancel_home_v2_request(authority, entry, reason)
 		entry["homeRouteV2RetryAfterFrame"] = Engine.get_physics_frames() + V2_EXECUTION_REPAIR_RETRY_FRAMES
+		return { "ok": false, "status": "pending_budget", "state": "pending_budget", "reason": reason, "moved": float(execution.get("moved", 0.0)) }
+	if not bool(execution.get("ok", false)) and String(execution.get("reason", "")) in ["unexpected_collision", "stuck", "door_stage_blocked"]:
+		entry["homeRouteV2RetryAfterFrame"] = Engine.get_physics_frames() + _v2_execution_retry_frames(entry, String(execution.get("reason", "")))
 		_report_v2_route_repair(authority, request_id, "home_execution_repair_pending", execution)
 	return execution
 
@@ -871,7 +1002,7 @@ func _home_v2_request(authority, entry: Dictionary, reason: String) -> Dictionar
 func _apply_home_v2_route_failure(authority, request_id: String, route: Dictionary) -> Dictionary:
 	var classification := String(route.get("classification", route.get("status", "")))
 	var reason := String(route.get("reason", classification))
-	if classification == "pending_nav_data":
+	if classification in ["pending", "pending_nav_data"]:
 		return authority.mark_pending_nav_data(request_id, reason)
 	if classification == "pending_budget":
 		return authority.mark_pending_budget(request_id, reason)
@@ -949,7 +1080,7 @@ func _ensure_home_v2_components() -> Dictionary:
 		home_route_world = world
 	if home_route_executor == null or home_route_authority != authority:
 		home_route_executor = NpcRouteLeaseExecutorScript.new()
-		home_route_executor.setup(authority, main, npc_system)
+		home_route_executor.setup(authority, main, npc_system, crowd_velocity_service)
 		home_route_authority = authority
 	return {
 		"ok": true,
@@ -1091,14 +1222,48 @@ func _v2_route_search_expansions(planning_budget) -> int:
 	return V2_ROUTE_EXPANSIONS_PER_CALL
 
 
-func _v2_probe_repair_commit_options(substrate, start_cell: Vector2i, candidate_cells: Array, plan_options: Dictionary) -> Dictionary:
+func _v2_probe_repair_commit_options(substrate, start_cell: Vector2i, candidate_cells: Array, plan_options: Dictionary, route := {}) -> Dictionary:
+	var source := String(route.get("source", "")) if route is Dictionary else ""
 	return {
 		"repairSubstrate": substrate,
 		"repairStartCell": start_cell,
 		"repairCandidateCells": candidate_cells.duplicate(),
 		"repairPlanOptions": plan_options.duplicate(true),
-		"maxProbeRepairAttempts": 3
+		"maxProbeRepairAttempts": 0 if source == "navmesh" else 3
 	}
+
+
+func _plan_v2_route(entry: Dictionary, substrate, world, intent: Dictionary, start_cell: Vector2i, candidate_cells: Array, plan_options: Dictionary) -> Dictionary:
+	var start_position: Vector3 = plan_options.get("startPosition", Vector3.ZERO) if plan_options.get("startPosition", Vector3.ZERO) is Vector3 else Vector3.ZERO
+	var target_position: Vector3 = intent.get("target", start_position) if intent.get("target", start_position) is Vector3 else start_position
+	var requires_layered_navigation: bool = world != null \
+		and world.has_method("route_requires_layered_navigation") \
+		and bool(world.call("route_requires_layered_navigation", start_position, target_position))
+	if requires_layered_navigation:
+		if autonomy_system == null or not autonomy_system.has_method("plan_source_navigation_route"):
+			return {
+				"ok": false,
+				"status": "pending_nav_data",
+				"classification": "pending_nav_data",
+				"reason": "missing_source_navigation_route"
+			}
+		var source_route_value = autonomy_system.call("plan_source_navigation_route", entry, intent)
+		if not (source_route_value is Dictionary):
+			return {
+				"ok": false,
+				"status": "pending_nav_data",
+				"classification": "pending_nav_data",
+				"reason": "invalid_source_navigation_route"
+			}
+		var source_route: Dictionary = source_route_value
+		if not bool(source_route.get("ok", false)) and String(source_route.get("classification", "")) == "":
+			var source_status := String(source_route.get("status", ""))
+			if source_status == "pending":
+				source_route["classification"] = "pending_nav_data"
+			elif source_status == "pending_budget":
+				source_route["classification"] = "pending_budget"
+		return source_route
+	return substrate.plan_route(entry, start_cell, candidate_cells, plan_options)
 
 
 func _v2_plan_options_with_probe_repair_avoidance(plan_options: Dictionary, active: Dictionary) -> Dictionary:
@@ -1159,6 +1324,7 @@ func _home_v2_terminal_recovery_needed(entry: Dictionary, result: Dictionary) ->
 func _home_v2_route_debug(route: Dictionary) -> Dictionary:
 	var proof: Dictionary = route.get("proof", {}) if route.get("proof", {}) is Dictionary else {}
 	var blocked: Array = proof.get("blocked", []) if proof.get("blocked", []) is Array else []
+	var navmesh_route: Dictionary = route.get("navmeshRoute", {}) if route.get("navmeshRoute", {}) is Dictionary else {}
 	return {
 		"ok": bool(route.get("ok", false)),
 		"status": String(route.get("status", "")),
@@ -1180,7 +1346,35 @@ func _home_v2_route_debug(route: Dictionary) -> Dictionary:
 		"blockedCount": blocked.size(),
 		"blockedSample": blocked.slice(0, mini(blocked.size(), 8)),
 		"doorEdges": proof.get("doorEdges", []),
-		"exploredDoorEdges": proof.get("exploredDoorEdges", [])
+		"exploredDoorEdges": proof.get("exploredDoorEdges", []),
+		"navmeshValidation": _home_v2_navmesh_validation_debug(navmesh_route.get("validation", {}))
+	}
+
+
+func _home_v2_navmesh_validation_debug(validation_value) -> Dictionary:
+	if not (validation_value is Dictionary):
+		return {}
+	var validation: Dictionary = validation_value
+	var collision_value = validation.get("collision", {})
+	var collision: Dictionary = collision_value if collision_value is Dictionary else {}
+	return {
+		"reason": String(validation.get("reason", "")),
+		"transitionReason": String(validation.get("transitionReason", "")),
+		"segmentIndex": int(validation.get("segmentIndex", -1)),
+		"fromCell": validation.get("fromCell", Vector2i(999999, 999999)),
+		"toCell": validation.get("toCell", Vector2i(999999, 999999)),
+		"point": validation.get("point", Vector3.INF),
+		"blockerCell": validation.get("blockerCell", Vector2i(999999, 999999)),
+		"blockType": String(validation.get("blockType", "")),
+		"collision": {
+			"id": String(collision.get("id", "")),
+			"sourcePartId": String(collision.get("sourcePartId", "")),
+			"sourceBlueprintId": String(collision.get("sourceBlueprintId", "")),
+			"kind": String(collision.get("kind", "")),
+			"semantic": String(collision.get("semantic", "")),
+			"minY": float(collision.get("minY", 0.0)),
+			"maxY": float(collision.get("maxY", 0.0))
+		}
 	}
 
 
@@ -1223,7 +1417,7 @@ func _execute_routine_route_v2(entry: Dictionary, body: Node3D, delta: float, sp
 		var stored_intent: Dictionary = entry.get("_routineRouteV2Intent", {}) if entry.get("_routineRouteV2Intent", {}) is Dictionary else _routine_v2_intent(entry, intent_kind, semantic_kind, target, target_cell, [], allow_outside, priority, reason)
 		var probe_start_cell := _home_v2_world_cell(world, body.global_position)
 		var probe_candidate_cells: Array = stored_intent.get("candidateCells", []) if stored_intent.get("candidateCells", []) is Array else []
-		var probe_options := _v2_probe_repair_commit_options(substrate, probe_start_cell, probe_candidate_cells, _routine_v2_plan_options(allow_outside, semantic_kind, body.global_position))
+		var probe_options := _v2_probe_repair_commit_options(substrate, probe_start_cell, probe_candidate_cells, _routine_v2_plan_options(allow_outside, semantic_kind, body.global_position), stored_route)
 		var probe_result: Dictionary = authority.commit_route_after_probe(entry, String(active.get("requestId", "")), stored_route, stored_intent, probe_options)
 		_update_v2_stored_route_from_authority(entry, "_routineRouteV2Route", probe_result)
 		entry["routineRouteV2LastAuthority"] = probe_result
@@ -1267,13 +1461,16 @@ func _plan_and_commit_routine_v2_route(entry: Dictionary, body: Node3D, authorit
 		_record_routine_v2_planning_profile(entry, intent_kind, semantic_kind, reason, candidate_ms, plan_ms, probe_commit_ms, "planning_budget")
 		return _routine_v2_pending_or_failure_result(planning_budget)
 	var candidate_start: int = monitor.begin_section("npc_routine_v2_candidates") if monitor != null else Time.get_ticks_usec()
-	var candidate_options := {
-		"allowOutside": allow_outside,
-		"movingHome": moving_home
-	}
-	if use_staged_guard_budget:
-		candidate_options["candidateValidationsPerCall"] = GUARD_V2_CANDIDATE_VALIDATIONS_PER_CALL
-	var candidates_result: Dictionary = substrate.candidate_poses_for_target(entry, target_data, semantic_kind, candidate_options)
+	var layered_navigation := _routine_v2_requires_layered_navigation(world, body.global_position, target)
+	var candidates_result: Dictionary = _source_navigation_candidate_result(target, target_cell, semantic_kind) if layered_navigation else {}
+	if not layered_navigation:
+		var candidate_options := {
+			"allowOutside": allow_outside,
+			"movingHome": moving_home
+		}
+		if use_staged_guard_budget:
+			candidate_options["candidateValidationsPerCall"] = GUARD_V2_CANDIDATE_VALIDATIONS_PER_CALL
+		candidates_result = substrate.candidate_poses_for_target(entry, target_data, semantic_kind, candidate_options)
 	candidate_ms = monitor.end_section("npc_routine_v2_candidates", candidate_start) if monitor != null else float(Time.get_ticks_usec() - candidate_start) / 1000.0
 	entry["routineRouteV2LastCandidates"] = candidates_result
 	if String(candidates_result.get("classification", "")) == "pending_budget":
@@ -1295,8 +1492,10 @@ func _plan_and_commit_routine_v2_route(entry: Dictionary, body: Node3D, authorit
 	var plan_options := _routine_v2_plan_options(allow_outside, semantic_kind, body.global_position, planning_budget, use_staged_guard_budget)
 	plan_options = _v2_plan_options_with_probe_repair_avoidance(plan_options, active)
 	var plan_start: int = monitor.begin_section("npc_routine_v2_plan") if monitor != null else Time.get_ticks_usec()
-	var route: Dictionary = substrate.plan_route(entry, start_cell, candidate_cells, plan_options)
+	var route: Dictionary = _plan_v2_route(entry, substrate, world, intent, start_cell, candidate_cells, plan_options)
 	plan_ms = monitor.end_section("npc_routine_v2_plan", plan_start) if monitor != null else float(Time.get_ticks_usec() - plan_start) / 1000.0
+	if bool(route.get("ok", false)):
+		route = _bind_exact_semantic_target(route, body.global_position, target, semantic_kind)
 	entry["routineRouteV2LastPlan"] = _home_v2_route_debug(route)
 	if not bool(route.get("ok", false)):
 		var failure := _apply_home_v2_route_failure(authority, request_id, route)
@@ -1306,7 +1505,7 @@ func _plan_and_commit_routine_v2_route(entry: Dictionary, body: Node3D, authorit
 	route["interactionClaim"] = interaction_claim.duplicate(true)
 	entry["_routineRouteV2Route"] = route.duplicate(true)
 	entry["routeForceReplan"] = false
-	var commit_options := _v2_probe_repair_commit_options(substrate, start_cell, candidate_cells, plan_options)
+	var commit_options := _v2_probe_repair_commit_options(substrate, start_cell, candidate_cells, plan_options, route)
 	var probe_commit_start: int = monitor.begin_section("npc_routine_v2_probe_commit") if monitor != null else Time.get_ticks_usec()
 	var commit: Dictionary = authority.commit_route_after_probe(entry, request_id, route, intent, commit_options)
 	probe_commit_ms = monitor.end_section("npc_routine_v2_probe_commit", probe_commit_start) if monitor != null else float(Time.get_ticks_usec() - probe_commit_start) / 1000.0
@@ -1349,7 +1548,8 @@ func _execute_routine_v2_lease(entry: Dictionary, body: Node3D, authority, execu
 	var execution: Dictionary = executor.execute(entry, request_id, lease, delta, {
 		"speed": speed,
 		"waypointRadius": ROUTINE_V2_WAYPOINT_RADIUS,
-		"deferArrivalReport": false,
+		"finalWaypointRadius": float(body.get_meta("npc_scripted_arrival_radius", ROUTINE_V2_WAYPOINT_RADIUS)) if semantic_kind == "scripted_target" else ROUTINE_V2_WAYPOINT_RADIUS,
+		"deferArrivalReport": semantic_kind == "scripted_target",
 		"allowDoorStageMotion": true,
 		"intentKind": intent_kind,
 		"semanticKind": semantic_kind,
@@ -1359,9 +1559,32 @@ func _execute_routine_v2_lease(entry: Dictionary, body: Node3D, authority, execu
 	entry["routineRouteV2IntentKind"] = intent_kind
 	entry["routineRouteV2SemanticKind"] = semantic_kind
 	if not bool(execution.get("ok", false)) and String(execution.get("reason", "")) in ["unexpected_collision", "stuck", "door_stage_blocked"]:
-		entry["routineRouteV2RetryAfterFrame"] = Engine.get_physics_frames() + V2_EXECUTION_REPAIR_RETRY_FRAMES
+		entry["routineRouteV2RetryAfterFrame"] = Engine.get_physics_frames() + _v2_execution_retry_frames(entry, String(execution.get("reason", "")))
 		_report_v2_route_repair(authority, request_id, "routine_execution_repair_pending", execution)
 	return execution
+
+
+func _v2_execution_retry_frames(entry: Dictionary, reason: String) -> int:
+	if reason != "crowd_reverse_budget_exhausted":
+		return V2_EXECUTION_REPAIR_RETRY_FRAMES
+	var actor_id := String(entry.get("id", ""))
+	var spread := maxi(1, NpcConstantsScript.AVOIDANCE_REPLAN_COOLDOWN_SPREAD_FRAMES)
+	return NpcConstantsScript.AVOIDANCE_REPLAN_COOLDOWN_MIN_FRAMES + posmod(actor_id.hash(), spread)
+
+
+func _bind_exact_semantic_target(route: Dictionary, start: Vector3, target: Vector3, semantic_kind: String) -> Dictionary:
+	if semantic_kind != "scripted_target":
+		return route
+	var result := route.duplicate(true)
+	var exact_waypoints: Array = result.get("waypoints", []) if result.get("waypoints", []) is Array else []
+	if exact_waypoints.is_empty():
+		exact_waypoints.append(start)
+		exact_waypoints.append(target)
+	else:
+		exact_waypoints[exact_waypoints.size() - 1] = target
+	result["waypoints"] = exact_waypoints
+	result["exactSemanticTarget"] = target
+	return result
 
 
 func _routine_v2_request(authority, entry: Dictionary, intent_kind: String, semantic_kind: String, target: Vector3, target_cell: Vector2i, candidate_cells: Array, allow_outside: bool, priority: int, reason: String, route_key: String, use_staged_guard_budget := false) -> Dictionary:
@@ -1434,6 +1657,33 @@ func _routine_v2_target_data(entry: Dictionary, target: Vector3, target_cell: Ve
 		data["guardCell"] = entry.get("guardCell", target_cell)
 		data["guardPosition"] = entry.get("guardPosition", target)
 	return data
+
+
+func _routine_v2_requires_layered_navigation(world, start: Vector3, target: Vector3) -> bool:
+	return world != null \
+		and world.has_method("route_requires_layered_navigation") \
+		and bool(world.call("route_requires_layered_navigation", start, target))
+
+
+func _source_navigation_candidate_result(target: Vector3, target_cell: Vector2i, semantic_kind: String) -> Dictionary:
+	return {
+		"ok": true,
+		"classification": "reachable",
+		"reason": "source_navigation_candidate",
+		"candidates": [{
+			"cell": target_cell,
+			"position": target,
+			"semanticKind": semantic_kind,
+			"proof": {
+				"ok": true,
+				"classification": "pending_collision_probe",
+				"source": "navmesh"
+			}
+		}],
+		"collisionBacked": false,
+		"generatedWorldInformed": true,
+		"source": "navmesh"
+	}
 
 
 func _routine_v2_candidate_cells(candidates_result: Dictionary) -> Array:
@@ -1925,9 +2175,6 @@ func _home_door_exit_target(entry: Dictionary, fallback_y: float) -> Vector3:
 	var position: Vector3 = entry.get("porchPosition", Vector3(float(porch_cell.x) * NpcConstantsScript.CELL_SIZE, fallback_y, float(porch_cell.y) * NpcConstantsScript.CELL_SIZE))
 	if position == Vector3.INF:
 		position = Vector3(float(porch_cell.x) * NpcConstantsScript.CELL_SIZE, fallback_y, float(porch_cell.y) * NpcConstantsScript.CELL_SIZE)
-	var main_node = npc_system.get("main") if npc_system != null else null
-	if main_node != null and main_node.has_method("surface_y_at_position"):
-		position.y = float(main_node.call("surface_y_at_position", position)) + 0.04
 	return position
 
 func _home_exit_clearance_target(entry: Dictionary, fallback_y: float) -> Vector3:

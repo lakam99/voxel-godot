@@ -1328,7 +1328,7 @@ func _maybe_capture_scripted_order_stall_trace(actor_id: String, entry: Dictiona
 	var trace := {
 		"capturedWallMsec": now_msec,
 		"authorityPhysicsFrame": frame_serial,
-		"worldSeed": String(main.get("seed_text", "")) if main != null else "",
+		"worldSeed": String(main.get("seed_text")) if main != null else "",
 		"actorId": actor_id,
 		"order": _trace_safe_value(order),
 		"submittedPhysicsFrame": int(order.get("submittedPhysicsFrame", -1)),
@@ -1404,7 +1404,7 @@ func _observe_collision_recovery_stall(record: Dictionary, details) -> void:
 	var trace := {
 		"capturedWallMsec": now_msec,
 		"authorityPhysicsFrame": frame_serial,
-		"worldSeed": String(main.get("seed_text", "")) if main != null else "",
+		"worldSeed": String(main.get("seed_text")) if main != null else "",
 		"actorId": actor_id,
 		"firstCollisionWallMsec": first_msec,
 		"wallRecoveryMsec": wall_wait_msec,
@@ -1495,9 +1495,10 @@ func _publish_entry_debug(entry: Dictionary, record: Dictionary) -> void:
 		return
 	var summary := record_summary(record)
 	entry["routeAuthorityV2"] = summary
-	NpcRouteStateStoreScript.write_status(entry, _legacy_route_status_for_state(String(record.get("state", STATE_NONE))), String(record.get("reason", "")), "NpcRouteAuthorityV2")
+	var state := String(record.get("state", STATE_NONE))
+	NpcRouteStateStoreScript.write_status(entry, _legacy_route_status_for_state(state), String(record.get("reason", "")), "NpcRouteAuthorityV2")
 	var lease: Dictionary = record.get("routeLease", {}) if record.get("routeLease", {}) is Dictionary else {}
-	if lease.is_empty():
+	if lease.is_empty() or not (state in [STATE_READY, STATE_MOVING]):
 		NpcRouteStateStoreScript.clear_route_lease(entry, "NpcRouteAuthorityV2")
 	else:
 		NpcRouteStateStoreScript.write_route_lease(entry, lease, String(lease.get("leaseId", "")), lease.get("generation", null), "NpcRouteAuthorityV2")

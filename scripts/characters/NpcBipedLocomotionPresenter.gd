@@ -37,6 +37,10 @@ func apply_velocity(world_velocity: Vector3, delta: float) -> void:
 		return
 	var horizontal := Vector3(world_velocity.x, 0.0, world_velocity.z)
 	var speed := horizontal.length()
+	if speed <= 0.0001:
+		gait_weight = 0.0
+		apply_gait()
+		return
 	var target_weight := clampf(speed / 3.3, 0.0, 1.0)
 	gait_weight = move_toward(gait_weight, target_weight, maxf(0.0, delta) * 8.5)
 	if speed > 0.035:
@@ -46,6 +50,14 @@ func apply_velocity(world_velocity: Vector3, delta: float) -> void:
 		visual_root.global_rotation = Vector3(0.0, visual_yaw, 0.0)
 		gait_phase = fposmod(gait_phase + delta * TAU * lerpf(1.35, 3.15, target_weight), TAU)
 	apply_gait()
+
+
+func apply_body_motion(body: CharacterBody3D, delta: float) -> void:
+	if body == null or not is_instance_valid(body):
+		apply_velocity(Vector3.ZERO, delta)
+		return
+	var applied_velocity: Vector3 = body.get_meta("npc_applied_velocity", Vector3.ZERO)
+	apply_velocity(applied_velocity, delta)
 
 
 func apply_gait() -> void:

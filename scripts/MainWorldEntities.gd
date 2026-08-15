@@ -135,6 +135,11 @@ func _unhandled_input(event: InputEvent) -> void:
     ):
         return
 
+    if event is InputEventKey and event.pressed and not event.echo:
+        if event.keycode == KEY_E:
+            interact_focused()
+            return
+
     if event is InputEventMouseButton and event.pressed:
         if event.button_index == MOUSE_BUTTON_WHEEL_UP:
             select_hotbar_delta(-1)
@@ -298,11 +303,13 @@ func focused_interaction_prompt() -> String:
     if collider.has_meta("kind"):
         var kind := String(collider.get_meta("kind"))
         if kind == "npc":
-            return "[RMB] Talk to %s" % String(collider.get_meta("npc_name", "Resident"))
+            return "[E/RMB] Talk to %s" % String(collider.get_meta("npc_name", "Resident"))
     var block := interaction_block_from_collider(collider)
-    if block == null or not block.has_meta("kind") or String(block.get_meta("kind")) != "block":
+    if block == null:
         return ""
     var block_type := String(block.get_meta("block_type", ""))
+    if block_type != "door" and (not block.has_meta("kind") or String(block.get_meta("kind")) != "block"):
+        return ""
     return focused_block_prompt(block, block_type)
 
 func focused_story_prompt(collider: Node) -> String:
@@ -310,27 +317,28 @@ func focused_story_prompt(collider: Node) -> String:
     while current != null:
         if current.has_meta("kind") and String(current.get_meta("kind")) == "story_interactable":
             var prompt := String(current.get_meta("storyPrompt", "Inspect"))
-            return "[RMB] %s" % prompt
+            return "[E/RMB] %s" % prompt
         current = current.get_parent()
     return ""
 
 func focused_block_prompt(block: Node, block_type: String) -> String:
     if block_type == "door":
-        return "[RMB] Close door" if bool(block.get_meta("open", false)) else "[RMB] Open door"
+        var door_name := "gate" if String(block.get_meta("door_presentation", "")) == "portcullis" else "door"
+        return "[E/RMB] Close %s" % door_name if bool(block.get_meta("open", false)) else "[E/RMB] Open %s" % door_name
     if block_type == "bed":
-        return "[RMB] Sleep"
+        return "[E/RMB] Sleep"
     if block_type == "chest":
-        return "[RMB] Open Chest"
+        return "[E/RMB] Open Chest"
     if block_type == "furnace":
-        return "[RMB] Use Furnace"
+        return "[E/RMB] Use Furnace"
     if block_type == "campfire":
-        return "[RMB] Use Campfire"
+        return "[E/RMB] Use Campfire"
     if block_type == "workbench":
-        return "[RMB] Craft at Workbench"
+        return "[E/RMB] Craft at Workbench"
     if block_type == "anvil":
-        return "[RMB] Use Anvil"
+        return "[E/RMB] Use Anvil"
     if block_type == "traderStall":
-        return "[RMB] Trade"
+        return "[E/RMB] Trade"
     return ""
 
 func update_exploration_state(cell: Vector2i, biome: String) -> void:

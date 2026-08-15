@@ -157,7 +157,7 @@ func place_capture_player_for_view() -> void:
 	var floor_height := float(recipe.get("floorHeight", 3.55))
 	var tower_span := clampf(snappedf(width * 0.23, 0.20), 4.00, 5.40)
 	var tower_center := Vector3(width * 0.35, 0.0, depth * 0.20)
-	var stair_run := tower_span - 0.92
+	var stair_run := LandmarkBuildingBlueprintBuilderScript.manor_stair_run(tower_span)
 	var left_stair_x := tower_center.x - tower_span * 0.20
 	match capture_view:
 		"stairs":

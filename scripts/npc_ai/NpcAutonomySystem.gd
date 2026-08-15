@@ -48,6 +48,8 @@ var navigation_backend_config
 var navigation_world
 var navmesh_world
 var building_navigation_manifests: Dictionary = {}
+var navigation_collision_manifests: Dictionary = {}
+var crowd_velocity_service
 var door_portals
 var smart_objects
 var door_traversal
@@ -123,17 +125,24 @@ func setup(system_node: Node, main_node: Node) -> void:
 func _physics_process(delta: float) -> void:
 	if route_authority_v2 != null:
 		route_authority_v2.begin_frame()
+	if crowd_velocity_service != null:
+		var crowd_entries: Array = npc_system.get("npcs") if npc_system != null and npc_system.get("npcs") is Array else []
+		crowd_velocity_service.begin_physics_frame(crowd_entries)
 	process_navigation_changes(NAV_CHANGE_EVENTS_PER_PHYSICS_TICK, NAV_CHANGE_OBJECT_IDS_PER_PHYSICS_TICK)
 	build_navigation_tiles(NpcConstantsScript.NAV_BUILD_MAX_JOBS_PER_TICK)
 	process_navmesh_dirty_regions(1)
 	advance_traffic(delta)
 	service_active_route_work(delta)
+	if crowd_velocity_service != null:
+		crowd_velocity_service.end_physics_frame()
 
 func _notification(what: int) -> void:
 	if what == NOTIFICATION_PREDELETE:
 		_clear_navmesh_world()
 
 func clear() -> void:
+	if crowd_velocity_service != null:
+		crowd_velocity_service.clear()
 	contexts_by_instance_id.clear()
 	contexts_by_stable_id.clear()
 	blackboards_by_stable_id.clear()
@@ -176,9 +185,12 @@ func shutdown_for_process_exit() -> void:
 	contexts_by_instance_id.clear()
 	contexts_by_stable_id.clear()
 	blackboards_by_stable_id.clear()
+	if crowd_velocity_service != null:
+		crowd_velocity_service.clear()
 	_clear_navmesh_world()
 	route_authority_v2 = null
 	plan_executor = null
+	crowd_velocity_service = null
 	recovery_policy = null
 	task_planner = null
 	action_library = null
@@ -209,6 +221,9 @@ func _clear_navmesh_world() -> void:
 		navmesh_world.clear()
 
 func setup_behavior_services() -> void:
+	var CrowdVelocityServiceScript := preload("res://scripts/npc_ai/movement/NpcCrowdVelocityService.gd")
+	crowd_velocity_service = CrowdVelocityServiceScript.new()
+	crowd_velocity_service.setup(npc_system, main)
 	guard_roster = GuardRosterServiceScript.new()
 	schedule_service = NpcScheduleServiceScript.new()
 	schedule_service.setup(guard_roster)
@@ -226,7 +241,8 @@ func setup_behavior_services() -> void:
 		"perception": perception_service,
 		"goalSelector": goal_selector,
 		"taskPlanner": task_planner,
-		"recovery": recovery_policy
+		"recovery": recovery_policy,
+		"crowdVelocity": crowd_velocity_service
 	})
 
 func closest_walkable(position: Vector3, max_distance := INF) -> Dictionary:
@@ -276,6 +292,24 @@ func generated_navigation_adapter():
 	if pathing.has_method("ensure_ready"):
 		pathing.ensure_ready()
 	return pathing.get("navigation_world")
+
+func plan_source_navigation_route(entry: Dictionary, intent: Dictionary) -> Dictionary:
+	if npc_system == null:
+		return {
+			"ok": false,
+			"status": "pending",
+			"classification": "pending_nav_data",
+			"reason": "missing_npc_system"
+		}
+	var pathing = npc_system.get("pathing")
+	if pathing == null or not pathing.has_method("plan_source_navigation_route"):
+		return {
+			"ok": false,
+			"status": "pending",
+			"classification": "pending_nav_data",
+			"reason": "missing_source_navigation_pathing"
+		}
+	return pathing.plan_source_navigation_route(entry, intent)
 
 func begin_update_frame() -> void:
 	if plan_executor != null and plan_executor.has_method("begin_update_frame"):
@@ -463,12 +497,17 @@ func record_motion_update(entry: Dictionary, result := {}) -> Dictionary:
 
 func record_motion_skipped(entry: Dictionary, reason := "no_motion_intent") -> Dictionary:
 	entry["npc_motion_skipped_reason"] = reason
-	var count := int(entry.get("npc_motion_budget_skipped", 0)) + 1
-	entry["npc_motion_budget_skipped"] = count
+	entry["npc_motion_skipped"] = int(entry.get("npc_motion_skipped", 0)) + 1
+	var budget_skipped := reason in ["motion_budget", "frame_time_budget"]
+	var budget_count := int(entry.get("npc_motion_budget_skipped", 0)) + 1 if budget_skipped else 0
+	entry["npc_motion_budget_skipped"] = budget_count
+	if reason == "physics_route_service":
+		entry["npc_motion_handoff_skipped"] = int(entry.get("npc_motion_handoff_skipped", 0)) + 1
 	var body := entry.get("body") as Node
 	if body != null and is_instance_valid(body):
 		body.set_meta("npc_motion_skipped_reason", reason)
-		body.set_meta("npc_motion_budget_skipped", count)
+		body.set_meta("npc_motion_skipped", int(entry.get("npc_motion_skipped", 0)))
+		body.set_meta("npc_motion_budget_skipped", budget_count)
 	return { "advanced": false, "reason": reason }
 
 func update_simulation_lod(entry: Dictionary, delta: float, observer_position := Vector3.INF, context := {}) -> Dictionary:
@@ -511,6 +550,8 @@ func release_action_owned_state(entry: Dictionary, reason := "released") -> void
 		smart_objects.release_owner(String(entry.get("id", "")), reason)
 
 func cancel_active_route_request(entry: Dictionary, reason := "order_replaced") -> Dictionary:
+	if plan_executor != null and plan_executor.has_method("cancel_route_execution"):
+		plan_executor.cancel_route_execution(entry)
 	if route_authority_v2 == null:
 		return {"ok": true, "cancelled": false, "reason": "missing_route_authority"}
 	var active: Dictionary = route_authority_v2.runtime_for_entry(entry)
@@ -949,6 +990,46 @@ func building_navigation_manifest_snapshot() -> Array[Dictionary]:
 			manifests.append(manifest.duplicate(true))
 	return manifests
 
+
+func register_navigation_collision_manifest(manifest: Dictionary) -> Dictionary:
+	var manifest_id := String(manifest.get("manifestId", ""))
+	if manifest_id == "":
+		return { "ok": false, "reason": "missing_navigation_collision_manifest_id" }
+	var snapshot: Dictionary = manifest.duplicate(true)
+	navigation_collision_manifests[manifest_id] = snapshot
+	var bounds: AABB = snapshot.get("bounds", AABB()) if snapshot.get("bounds", AABB()) is AABB else AABB()
+	notify_structure_metadata_changed(manifest_id, bounds, {
+		"source": "navigation_collision_manifest",
+		"sourceKind": String(snapshot.get("sourceKind", "")),
+		"staticCollisionCount": int(snapshot.get("staticCollisionCount", 0))
+	})
+	return {
+		"ok": true,
+		"manifestId": manifest_id,
+		"staticCollisionCount": int(snapshot.get("staticCollisionCount", 0))
+	}
+
+
+func unregister_navigation_collision_manifest(manifest_id: String) -> Dictionary:
+	if manifest_id == "" or not navigation_collision_manifests.has(manifest_id):
+		return { "ok": false, "reason": "missing_navigation_collision_manifest" }
+	var manifest: Dictionary = navigation_collision_manifests.get(manifest_id, {}) as Dictionary
+	navigation_collision_manifests.erase(manifest_id)
+	var bounds: AABB = manifest.get("bounds", AABB()) if manifest.get("bounds", AABB()) is AABB else AABB()
+	notify_structure_metadata_changed(manifest_id, bounds, { "source": "navigation_collision_manifest", "removed": true })
+	return { "ok": true, "manifestId": manifest_id }
+
+
+func navigation_collision_manifest_snapshot() -> Array[Dictionary]:
+	var ids: Array = navigation_collision_manifests.keys()
+	ids.sort()
+	var manifests: Array[Dictionary] = []
+	for id_value in ids:
+		var manifest: Dictionary = navigation_collision_manifests.get(id_value, {}) as Dictionary
+		if not manifest.is_empty():
+			manifests.append(manifest.duplicate(true))
+	return manifests
+
 func notify_semantic_changed(semantic_id: String, bounds: AABB, metadata := {}) -> void:
 	change_bus.emit_change(NpcEnumsScript.CHANGE_KIND_SEMANTIC_CHANGED, "semantic:%s" % semantic_id, bounds, NavigationChangeBusScript.tile_keys_for_bounds(bounds))
 	telemetry.record_event("_system", &"semantic", "changed", &"none", metadata)
@@ -1008,11 +1089,17 @@ func process_navmesh_dirty_regions(max_jobs := 1) -> Array:
 
 func request_navigation_tile(snapshot: Dictionary, priority := 0, profile = null) -> Dictionary:
 	var result: Dictionary = navigation_world.request_tile(snapshot, priority, profile) if navigation_world != null else {}
-	if navmesh_world != null and navigation_backend_config != null and navigation_backend_config.use_navmesh():
+	if navmesh_world != null \
+		and navigation_backend_config != null \
+		and navigation_backend_config.use_navmesh() \
+		and _is_publishable_navmesh_tile_snapshot(snapshot):
 		navmesh_world.register_tile_snapshot(snapshot)
 	if navigation_world != null:
 		telemetry.observe_navigation_stats(navigation_world.stats())
 	return result
+
+func _is_publishable_navmesh_tile_snapshot(snapshot: Dictionary) -> bool:
+	return snapshot.has("regionId") and snapshot.get("surfaces", null) is Array
 
 func _publish_door_portal_to_navmesh(door: Node, extra := {}) -> void:
 	if not _navmesh_backend_active() or navmesh_world == null or door_portals == null:

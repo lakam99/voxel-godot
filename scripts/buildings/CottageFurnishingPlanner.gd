@@ -9,16 +9,18 @@ class_name CottageFurnishingPlanner
 const FurnishingPlanScript := preload("res://scripts/buildings/FurnishingPlan.gd")
 const InteriorFurnishingLayoutScript := preload("res://scripts/buildings/InteriorFurnishingLayout.gd")
 const FurnishingArchetypeCatalogScript := preload("res://scripts/buildings/FurnishingArchetypeCatalog.gd")
+const NpcConstantsScript := preload("res://scripts/npc_ai/NpcConstants.gd")
 
 const FLOOR_Y := 0.70
+const NPC_EGRESS_CLEARANCE := NpcConstantsScript.DEFAULT_NPC_RADIUS + NpcConstantsScript.DEFAULT_PERSONAL_SPACE_MARGIN
 
 
-static func build(blueprint, furnishing_seed: int):
+static func build(blueprint, furnishing_seed: int, furnishing_options: Dictionary = {}):
 	var blueprint_id := String(blueprint.id) if blueprint != null else "missing-blueprint"
 	var plan = FurnishingPlanScript.new("furnishing.%s.%d" % [blueprint_id, furnishing_seed], furnishing_seed, blueprint_id)
 	if blueprint == null:
 		return plan
-	plan.set_protected_access_reservations(InteriorFurnishingLayoutScript.access_reservations(blueprint.rooms))
+	plan.set_protected_access_reservations(InteriorFurnishingLayoutScript.circulation_reservations(blueprint.rooms))
 	var rooms := rooms_by_id(blueprint.rooms)
 	var hearth_room: Dictionary = rooms.get("hearth_room", {}) as Dictionary
 	var sleeping_room: Dictionary = rooms.get("sleeping_room", {}) as Dictionary
@@ -29,29 +31,33 @@ static func build(blueprint, furnishing_seed: int):
 	var rug_material := "wool_moss" if rng.randi_range(0, 1) == 0 else "wool_rust"
 	var blanket_material := "wool_rust" if rug_material == "wool_moss" else "wool_moss"
 	var art_material := "painted_decor"
+	var egress_safe := bool(furnishing_options.get("egressSafe", false))
 	var furnishing_profile := String(blueprint.recipe.get("furnishingProfile", "hearth_social"))
-	var dining_seat_goal := 2 if furnishing_profile == "hearth_social" else 1
-	if furnishing_profile == "hearth_social" and rng.randf() < 0.40:
+	var dining_seat_goal := 0 if egress_safe else 2 if furnishing_profile == "hearth_social" else 1
+	if dining_seat_goal > 0 and furnishing_profile == "hearth_social" and rng.randf() < 0.40:
 		dining_seat_goal += 1
 	# Circulation comes from semantic room accesses, not from a one-off list of
 	# furniture offsets. Every substantial furnishing must respect these lanes.
-	var occupied: Array[AABB] = InteriorFurnishingLayoutScript.access_reservations(blueprint.rooms)
+	var occupied: Array[AABB] = InteriorFurnishingLayoutScript.circulation_reservations(blueprint.rooms)
 
 	# Every placement below is sampled from room-relative anchors, then accepted
 	# only if it preserves all reserved traffic/action space. This makes one seed
 	# a coherent interior recipe, not a list of shuffled fixture transforms.
 	var hearth = place_against_random_walls(plan, occupied, hearth_room, "hearth", "hearth", "fired_brick", ["back", "left", "right"], rng, Vector3(1.68, 1.88, 0.64), {"semantic": "hearth", "clearance": 0.10})
-	var cabinet = place_against_random_walls(plan, occupied, hearth_room, "cabinet", "cabinet", "timber_beam", ["back", "left", "right"], rng, Vector3(0.78, 1.46, 0.42), {"semantic": "storage", "clearance": 0.08, "interactionClearance": 0.92})
-	var shelf = place_against_random_walls(plan, occupied, hearth_room, "shelf", "shelf", "timber_beam", ["back", "left", "right"], rng, Vector3(0.66, 1.64, 0.40), {"semantic": "shelf", "clearance": 0.08})
+	var cabinet = null
+	var shelf = null
+	if not egress_safe:
+		cabinet = place_against_random_walls(plan, occupied, hearth_room, "cabinet", "cabinet", "timber_beam", ["back", "left", "right"], rng, Vector3(0.78, 1.46, 0.42), {"semantic": "storage", "clearance": 0.08, "interactionClearance": 0.92})
+		shelf = place_against_random_walls(plan, occupied, hearth_room, "shelf", "shelf", "timber_beam", ["back", "left", "right"], rng, Vector3(0.66, 1.64, 0.40), {"semantic": "shelf", "clearance": 0.08})
 	place(plan, occupied, hearth_room, "hearth_rug", "rug", rug_material, Vector2(rng.randf_range(0.42, 0.62), rng.randf_range(0.32, 0.52)), Vector3(2.24, 0.035, 1.56), {"semantic": "rug", "collision": false, "reserve": false})
-	var dining := place_dining_set(plan, occupied, hearth_room, rng, dining_seat_goal)
+	var dining := place_dining_set(plan, occupied, hearth_room, rng, dining_seat_goal) if dining_seat_goal > 0 else {}
 	var table = dining.get("table", null)
 	if table != null:
 		if rng.randf() < 0.72:
 			add_candle_on_surface(plan, "table_candle", table, Vector3(rng.randf_range(-0.24, -0.08), 0.86, rng.randf_range(-0.12, 0.12)))
 		if rng.randf() < 0.78:
 			add_part(plan, "table_pot", "hearth_room", "pot_plant", "ceramic_glaze", table.position + Vector3(rng.randf_range(0.10, 0.28), 0.85, rng.randf_range(-0.12, 0.12)), Vector3(0.42, 0.64, 0.42), {"collision": false, "semantic": "table_decor", "mount": "table"})
-	if rng.randf() < 0.55:
+	if not egress_safe and rng.randf() < 0.55:
 		place_against_random_walls(plan, occupied, hearth_room, "reading_chair", "chair", "timber_board", ["back", "left", "right"], rng, Vector3(0.56, 0.92, 0.58), {"semantic": "reading_chair", "clearance": 0.04})
 	if hearth != null:
 		place_wall_art(plan, hearth_room, "hearth_art", art_material, String(hearth.recipe.get("supportingWall", "back")), rng.randf_range(0.16, 0.84), Vector3(0.94, 0.74, 0.08), 2.80)
@@ -62,12 +68,15 @@ static func build(blueprint, furnishing_seed: int):
 	# bedside furnishing, storage wall, shelf wall and decor are seed-selected.
 	var bed_normalized := Vector2(rng.randf_range(0.40, 0.64), rng.randf_range(0.80, 0.90))
 	place(plan, occupied, sleeping_room, "bed_rug", "rug", rug_material, Vector2(bed_normalized.x, maxf(0.56, bed_normalized.y - 0.18)), Vector3(2.42, 0.035, 1.62), {"semantic": "rug", "collision": false, "reserve": false})
-	var bed = place(plan, occupied, sleeping_room, "bed", "bed", "timber_beam", bed_normalized, Vector3(2.26, 0.76, 1.28), {"semantic": "bed", "blanket": blanket_material, "clearance": 0.10})
+	var bed = place_essential_bed(plan, occupied, sleeping_room, bed_normalized, blanket_material)
 	var bedside = null
-	if bed != null:
+	if bed != null and not egress_safe:
 		bedside = place_at(plan, occupied, "bedside", "sleeping_room", "cabinet", "timber_beam", bed.position + Vector3(-bed.occupied_size.x * 0.5 - 0.54 * 0.5 - 0.26, 0.0, 0.0), Vector3(0.54, 0.72, 0.46), {"semantic": "bedside", "clearance": 0.06, "interactionClearance": 0.64}, sleeping_room)
-	var chest = place_against_random_walls(plan, occupied, sleeping_room, "chest", "chest", "timber_board", ["back", "right", "left"], rng, Vector3(0.96, 0.70, 0.58), {"semantic": "storage", "clearance": 0.08, "interactionClearance": 0.82})
-	var sleeping_shelf = place_against_random_walls(plan, occupied, sleeping_room, "sleeping_shelf", "shelf", "timber_beam", ["back", "right", "left"], rng, Vector3(0.62, 1.64, 0.38), {"semantic": "shelf", "clearance": 0.08})
+	var chest = null
+	var sleeping_shelf = null
+	if not egress_safe:
+		chest = place_against_random_walls(plan, occupied, sleeping_room, "chest", "chest", "timber_board", ["back", "right", "left"], rng, Vector3(0.96, 0.70, 0.58), {"semantic": "storage", "clearance": 0.08, "interactionClearance": 0.82})
+		sleeping_shelf = place_against_random_walls(plan, occupied, sleeping_room, "sleeping_shelf", "shelf", "timber_beam", ["back", "right", "left"], rng, Vector3(0.62, 1.64, 0.38), {"semantic": "shelf", "clearance": 0.08})
 	if bed != null:
 		if bedside != null:
 			add_candle_on_surface(plan, "bedside_candle", bedside, Vector3(rng.randf_range(-0.12, 0.12), bedside.occupied_size.y + 0.04, rng.randf_range(-0.08, 0.08)))
@@ -90,6 +99,30 @@ static func place_against_random_walls(plan, occupied: Array[AABB], room: Dictio
 	return null
 
 
+static func place_essential_bed(plan, occupied: Array[AABB], room: Dictionary, preferred_normalized: Vector2, blanket_material: String):
+	var candidates: Array[Vector2] = [
+		preferred_normalized,
+		Vector2(0.30, 0.84),
+		Vector2(0.70, 0.84),
+		Vector2(0.30, 0.68),
+		Vector2(0.70, 0.68),
+		Vector2(0.50, 0.84)
+	]
+	for normalized in candidates:
+		var bed = place(plan, occupied, room, "bed", "bed", "timber_beam", normalized, Vector3(2.26, 0.76, 1.28), {"semantic": "bed", "blanket": blanket_material, "clearance": 0.10})
+		if bed != null:
+			return bed
+	for wall_id in ["right", "back", "left"]:
+		var wall_bed = place_against_wall(plan, occupied, room, "bed", "bed", "timber_beam", wall_id, 0.66, Vector3(2.26, 0.76, 1.28), {"semantic": "bed", "blanket": blanket_material, "clearance": 0.10})
+		if wall_bed != null:
+			return wall_bed
+	for normalized in [Vector2(0.72, 0.66), Vector2(0.72, 0.50), Vector2(0.50, 0.70)]:
+		var compact_bed = place(plan, occupied, room, "bed", "bed", "timber_beam", normalized, Vector3(1.34, 0.76, 2.08), {"semantic": "bed", "blanket": blanket_material, "bedVariant": "single", "clearance": 0.10})
+		if compact_bed != null:
+			return compact_bed
+	return null
+
+
 static func place_dining_set(plan, occupied: Array[AABB], room: Dictionary, rng: RandomNumberGenerator, requested_seats: int) -> Dictionary:
 	# Reserve a table and at least one table-facing chair as one transaction. A
 	# failed chair candidate discards the table candidate, so the grammar cannot
@@ -109,7 +142,7 @@ static func place_dining_set(plan, occupied: Array[AABB], room: Dictionary, rng:
 			continue
 		var provisional: Array[AABB] = occupied.duplicate()
 		provisional.append(table_bounds)
-		var walkability_candidates: Array[AABB] = [InteriorFurnishingLayoutScript.horizontal_bounds(table_position, table_size, Vector3.ZERO, 0.34)]
+		var walkability_candidates: Array[AABB] = [InteriorFurnishingLayoutScript.horizontal_bounds(table_position, table_size, Vector3.ZERO, NPC_EGRESS_CLEARANCE)]
 		var remaining: Array = seat_definitions.duplicate()
 		var seats: Array[Dictionary] = []
 		while not remaining.is_empty() and seats.size() < maxi(1, requested_seats):
@@ -126,18 +159,31 @@ static func place_dining_set(plan, occupied: Array[AABB], room: Dictionary, rng:
 				continue
 			seats.append({"position": chair_position, "rotation": rotation, "bounds": chair_bounds})
 			provisional.append(chair_bounds)
-			walkability_candidates.append(InteriorFurnishingLayoutScript.horizontal_bounds(chair_position, chair_size, rotation, 0.34))
+			walkability_candidates.append(InteriorFurnishingLayoutScript.horizontal_bounds(chair_position, chair_size, rotation, NPC_EGRESS_CLEARANCE))
 		if seats.is_empty():
 			continue
 		if not candidate_bounds_keep_room_walkable(plan, room, walkability_candidates):
 			continue
 		var table = add_part(plan, "table", String(room.get("id", "")), "table", "timber_board", table_position, table_size, {"semantic": "dining_table", "clearance": 0.08, "seatingTarget": requested_seats})
-		occupied.append(table_bounds)
+		if table == null:
+			continue
 		var chair_parts: Array = []
+		var rejected := false
 		for seat_index in range(seats.size()):
 			var seat: Dictionary = seats[seat_index] as Dictionary
 			var chair = add_part(plan, "dining_chair_%d" % (seat_index + 1), String(room.get("id", "")), "chair", "timber_board", seat.get("position", Vector3.ZERO) as Vector3, chair_size, {"semantic": "dining_chair", "rotation": seat.get("rotation", Vector3.ZERO), "clearance": 0.04, "tableId": "table"})
+			if chair == null:
+				rejected = true
+				break
 			chair_parts.append(chair)
+		if rejected:
+			plan.parts.erase(table)
+			for chair in chair_parts:
+				plan.parts.erase(chair)
+			continue
+		occupied.append(table_bounds)
+		for seat_index in range(seats.size()):
+			var seat: Dictionary = seats[seat_index] as Dictionary
 			occupied.append(seat.get("bounds", AABB()) as AABB)
 		return {"table": table, "chairs": chair_parts}
 	return {}
@@ -302,10 +348,10 @@ static func candidate_bounds_keep_room_walkable(plan, room: Dictionary, candidat
 	var blocked: Array[AABB] = []
 	for part in plan.parts:
 		if part != null and part.collision_enabled and String(part.room_id) == room_id:
-			blocked.append(InteriorFurnishingLayoutScript.horizontal_bounds(part.position, part.occupied_size, part.rotation, 0.34))
+			blocked.append(InteriorFurnishingLayoutScript.horizontal_bounds(part.position, part.occupied_size, part.rotation, NPC_EGRESS_CLEARANCE))
 	blocked.append_array(candidates)
-	var walkability: Dictionary = InteriorFurnishingLayoutScript.room_walkability_for_blocked_bounds(room, blocked)
-	return int(walkability.get("accessSeedCells", 0)) > 0 and int(walkability.get("unreachableCells", 0)) == 0
+	var walkability: Dictionary = InteriorFurnishingLayoutScript.room_walkability_for_blocked_bounds(room, blocked, NPC_EGRESS_CLEARANCE)
+	return int(walkability.get("accessSeedCells", 0)) > 0 and int(walkability.get("accessComponentCount", 0)) == 1 and int(walkability.get("unreachableCells", 0)) == 0
 
 
 static func rooms_by_id(room_records: Array) -> Dictionary:
@@ -407,8 +453,8 @@ static func plan_room_is_walkable(plan, room: Dictionary) -> bool:
 	for part in plan.parts:
 		if part != null and part.collision_enabled and String(part.room_id) == room_id:
 			solid_parts.append(part)
-	var walkability: Dictionary = InteriorFurnishingLayoutScript.room_walkability(room, solid_parts)
-	return int(walkability.get("accessSeedCells", 0)) > 0 and int(walkability.get("unreachableCells", 0)) == 0
+	var walkability: Dictionary = InteriorFurnishingLayoutScript.room_walkability(room, solid_parts, NPC_EGRESS_CLEARANCE)
+	return int(walkability.get("accessSeedCells", 0)) > 0 and int(walkability.get("accessComponentCount", 0)) == 1 and int(walkability.get("unreachableCells", 0)) == 0
 
 
 static func add_part(plan, part_id: String, room_id: String, archetype: String, material: String, position: Vector3, size: Vector3, options: Dictionary = {}):

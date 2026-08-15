@@ -17,7 +17,17 @@ const NAV_TERRAIN_PROJECTION_DOWN_CELLS := 24
 const NAV_TERRAIN_PROJECTION_MAX_SURFACE_DEVIATION := CELL * 1.10
 const TRANSITION_COLLISION_INFLATION := NpcConstantsScript.DEFAULT_NPC_RADIUS + NpcConstantsScript.DEFAULT_PERSONAL_SPACE_MARGIN
 const TRANSITION_RECORD_INDEX_MARGIN_CELLS := 2
+const TRANSITION_RECORD_INDEX_MAX_CELLS := 96
 const NAVMESH_TILE_SNAPSHOT_CACHE_LIMIT := 96
+const BUILDING_SUPPORT_NAV_SAMPLE_STEP := 0.32
+const BUILDING_SUPPORT_NAV_CLEARANCE := TRANSITION_COLLISION_INFLATION
+const DOOR_PORTAL_PHYSICAL_COLLISION_INFLATION := NpcConstantsScript.DEFAULT_NPC_RADIUS
+const DOOR_PORTAL_VALIDATION_POINT_EPSILON := CELL * 0.08
+const BUILDING_SUPPORT_SEAM_MAX_ENDPOINT_DISTANCE := CELL * 0.22
+const BUILDING_NAVIGATION_LINK_MAX_ENDPOINT_DRIFT := CELL * 0.34
+const BUILDING_STAIR_LINK_MAX_ENDPOINT_DRIFT := CELL * 0.78
+const BUILDING_SUPPORT_STACK_MAX_SEPARATION := CELL * 0.50
+const BUILDING_SUPPORT_STACK_EPSILON := 0.01
 
 var system
 var main
@@ -31,10 +41,15 @@ var cached_prop_cell_by_object_id := {}
 var cached_prop_collision_records_by_object_id := {}
 var cached_static_collision_records: Array[Dictionary] = []
 var cached_static_collision_by_cell := {}
+var cached_static_collision_broad: Array[Dictionary] = []
 var cached_door_collision_records: Array[Dictionary] = []
 var cached_door_collision_by_cell := {}
 var cached_building_supports: Array[Dictionary] = []
+var cached_building_supports_by_tile := {}
 var cached_building_vertical_links: Array[Dictionary] = []
+var cached_building_support_seam_links: Array[Dictionary] = []
+var cached_building_interior_passage_links: Array[Dictionary] = []
+var cached_building_doors: Array[Dictionary] = []
 var cached_private_interior_records_revision := ""
 var cached_private_interior_records: Array = []
 var height_cache := {}
@@ -135,11 +150,9 @@ func apply_navigation_events(events: Array) -> void:
         semantic_revision = maxi(semantic_revision + 1, last_event_revision)
         if semantic_global_changed or semantic_changed_tiles.is_empty():
             navmesh_tile_semantic_revision_by_key.clear()
-            _clear_navmesh_tile_snapshot_cache()
         else:
             for changed_tile_key in semantic_changed_tiles:
                 navmesh_tile_semantic_revision_by_key[changed_tile_key] = semantic_revision
-                _clear_navmesh_tile_snapshot_cache_for_tile(changed_tile_key)
     if door_state_changed:
         door_state_revision = maxi(door_state_revision + 1, last_event_revision)
         if door_state_changed_tiles.is_empty():
@@ -186,10 +199,13 @@ func build_snapshot(entry: Dictionary, allow_outside := false, moving_home := fa
         "propClearance": cached_prop_clearance,
         "staticCollision": cached_static_collision_records,
         "staticCollisionByCell": cached_static_collision_by_cell,
+        "staticCollisionBroad": cached_static_collision_broad,
         "doorCollision": cached_door_collision_records,
         "doorCollisionByCell": cached_door_collision_by_cell,
         "buildingSupports": cached_building_supports,
         "buildingVerticalLinks": cached_building_vertical_links,
+        "buildingSupportSeamLinks": cached_building_support_seam_links,
+        "buildingInteriorPassageLinks": cached_building_interior_passage_links,
         "dynamic": dynamic_cells,
         "allowOutside": allow_outside,
         "movingHome": moving_home
@@ -199,7 +215,7 @@ func revision() -> String:
     return "%d:%d:%d:%d" % [static_snapshot_revision, dynamic_revision, semantic_revision, door_state_revision]
 
 func navmesh_tile_source_key() -> String:
-    return "%d:%d:%d" % [static_snapshot_revision, semantic_revision, door_state_revision]
+    return "%d:%d:%d" % [static_snapshot_revision, 0, door_state_revision]
 
 func navmesh_tile_source_key_for_tile(tile_key: String) -> String:
     if tile_key == "":
@@ -209,11 +225,10 @@ func navmesh_tile_source_key_for_tile(tile_key: String) -> String:
     var tile_revision := int(navmesh_tile_revision_by_key.get(tile_key, static_snapshot_revision))
     if not navmesh_tile_semantic_revision_by_key.has(tile_key):
         navmesh_tile_semantic_revision_by_key[tile_key] = semantic_revision
-    var tile_semantic_revision := int(navmesh_tile_semantic_revision_by_key.get(tile_key, semantic_revision))
     if not navmesh_tile_door_revision_by_key.has(tile_key):
         navmesh_tile_door_revision_by_key[tile_key] = door_state_revision
     var tile_door_revision := int(navmesh_tile_door_revision_by_key.get(tile_key, door_state_revision))
-    return "%d:%d:%d" % [tile_revision, tile_semantic_revision, tile_door_revision]
+    return "%d:%d:%d" % [tile_revision, 0, tile_door_revision]
 
 func route_navmesh_tile_keys(entry: Dictionary, start: Vector3, target: Vector3, allow_outside := false, moving_home := false, margin_cells := ROUTE_NAVMESH_MARGIN_CELLS) -> Array[String]:
     var start_cell := world_cell(start)
@@ -243,6 +258,44 @@ func route_navmesh_tile_keys(entry: Dictionary, start: Vector3, target: Vector3,
         return keys
     return _nearest_route_tiles(keys, start_cell, target_cell)
 
+
+func building_navigation_topology_tile_keys() -> Array[String]:
+    cached_static_tile_snapshot(true, true)
+    var tile_keys := {}
+    for support_value in cached_building_supports:
+        if support_value is Dictionary:
+            _append_navigation_topology_tile_keys(tile_keys, (support_value as Dictionary).get("tileKeys", []))
+    for door_value in cached_building_doors:
+        if door_value is Dictionary:
+            _append_navigation_topology_tile_keys(tile_keys, (door_value as Dictionary).get("tileKeys", []))
+    for links_value in [cached_building_vertical_links, cached_building_support_seam_links, cached_building_interior_passage_links]:
+        if not (links_value is Array):
+            continue
+        for link_value in links_value:
+            if not (link_value is Dictionary):
+                continue
+            var link: Dictionary = link_value
+            _append_navigation_topology_tile_keys(tile_keys, link.get("tileKeys", []))
+            _append_navigation_topology_tile_keys(tile_keys, [
+                _building_navigation_link_owner_tile_key(link),
+                String(link.get("startTileKey", "")),
+                String(link.get("endTileKey", ""))
+            ])
+    var result: Array[String] = []
+    for tile_key_value in tile_keys.keys():
+        result.append(String(tile_key_value))
+    result.sort()
+    return result
+
+
+func _append_navigation_topology_tile_keys(result: Dictionary, values) -> void:
+    if not (values is Array):
+        return
+    for value in values:
+        var tile_key := String(value).strip_edges()
+        if not tile_key.is_empty():
+            result[tile_key] = true
+
 # IMPORTANT: navmesh tile snapshots must be built from the same live collision
 # snapshot used by collision probing. Do not switch this back to the lighter
 # helper that only updates blocked/doors/paths; that reintroduces planner/probe
@@ -252,7 +305,7 @@ func build_navmesh_tile_snapshot(tile_key: String) -> Dictionary:
     if navmesh_tile_snapshot_cache.has(cache_key):
         var cached_snapshot: Dictionary = navmesh_tile_snapshot_cache[cache_key]
         return cached_snapshot
-    var snapshot: Dictionary = _snapshot_with_live_tile_blocks(cached_static_tile_snapshot(true, true), tile_key)
+    var snapshot: Dictionary = _navmesh_snapshot_with_live_tile_blocks(cached_static_tile_snapshot(true, true), tile_key)
     var tile := _parse_tile_key(tile_key)
     var min_x := tile.x * NAV_TILE_CELL_SIZE
     var min_z := tile.y * NAV_TILE_CELL_SIZE
@@ -264,13 +317,12 @@ func build_navmesh_tile_snapshot(tile_key: String) -> Dictionary:
             var surface := _navmesh_surface_for_cell(snapshot, cell)
             if not surface.is_empty():
                 surfaces.append(surface)
-    var support_span_index := 1
-    for support in building_supports_for_tile(tile_key):
-        var support_surface := _navmesh_surface_from_building_support(support, support_span_index)
-        if not support_surface.is_empty():
-            surfaces.append(support_surface)
-            support_span_index += 1
+    surfaces.append_array(_navmesh_surfaces_from_building_tile(snapshot, tile_key, 1))
     var door_summary := _navmesh_door_summary_for_tile(snapshot, tile_key)
+    var navigation_links := building_vertical_links_for_tile(tile_key)
+    navigation_links.append_array(building_support_seam_links_for_tile(tile_key))
+    navigation_links.append_array(building_interior_passage_links_for_tile(tile_key))
+    navigation_links = _resolve_building_navigation_link_endpoints(snapshot, navigation_links)
     var result: Dictionary = {
         "tileKey": tile_key,
         "regionId": "region:chunk:%s" % tile_key,
@@ -283,18 +335,74 @@ func build_navmesh_tile_snapshot(tile_key: String) -> Dictionary:
         "paths": snapshot.get("paths", {}),
         "staticCollision": snapshot.get("staticCollision", []),
         "staticCollisionByCell": snapshot.get("staticCollisionByCell", {}),
+        "staticCollisionBroad": snapshot.get("staticCollisionBroad", []),
         "doorCollision": snapshot.get("doorCollision", []),
         "doorCollisionByCell": snapshot.get("doorCollisionByCell", {}),
         "buildingSupports": snapshot.get("buildingSupports", []),
         "buildingVerticalLinks": snapshot.get("buildingVerticalLinks", []),
+        "buildingSupportSeamLinks": snapshot.get("buildingSupportSeamLinks", []),
+        "buildingInteriorPassageLinks": snapshot.get("buildingInteriorPassageLinks", []),
         "surfaces": surfaces,
         "semanticRegions": semantic_regions,
         "doorPortals": door_summary.get("doorPortals", []),
         "doorLinks": door_summary.get("doorLinks", []),
-        "navigationLinks": building_vertical_links_for_tile(tile_key)
+        "navigationLinks": navigation_links
     }
     _store_navmesh_tile_snapshot_cache(cache_key, result)
     return result
+
+
+func building_navigation_link_resolution_diagnostics(tile_key: String, link_ids: Array = []) -> Array[Dictionary]:
+    var snapshot: Dictionary = _navmesh_snapshot_with_live_tile_blocks(cached_static_tile_snapshot(true, true), tile_key)
+    var requested_ids := {}
+    for link_id in link_ids:
+        if not link_id.is_empty():
+            requested_ids[link_id] = true
+    var result: Array[Dictionary] = []
+    for link_value in building_vertical_links_for_tile(tile_key):
+        if not (link_value is Dictionary):
+            continue
+        var link: Dictionary = link_value
+        var link_id := String(link.get("id", ""))
+        if not requested_ids.is_empty() and not requested_ids.has(link_id):
+            continue
+        var start_support_id := String(link.get("startSupportId", ""))
+        var end_support_id := String(link.get("endSupportId", ""))
+        var authored_start: Vector3 = link.get("start", Vector3.INF) as Vector3
+        var authored_end: Vector3 = link.get("end", Vector3.INF) as Vector3
+        var start_tile_key := _building_navigation_link_endpoint_tile_key(link, "start", authored_start)
+        var end_tile_key := _building_navigation_link_endpoint_tile_key(link, "end", authored_end)
+        var start_resolution := _resolve_building_navigation_link_endpoint(snapshot, start_support_id, authored_start, start_tile_key)
+        var end_resolution := _resolve_building_navigation_link_endpoint(snapshot, end_support_id, authored_end, end_tile_key)
+        var start_position: Vector3 = start_resolution.get("position", Vector3.INF) as Vector3
+        var end_position: Vector3 = end_resolution.get("position", Vector3.INF) as Vector3
+        var maximum_drift := BUILDING_STAIR_LINK_MAX_ENDPOINT_DRIFT
+        var start_drift := start_position.distance_to(authored_start) if start_position.is_finite() and authored_start.is_finite() else INF
+        var end_drift := end_position.distance_to(authored_end) if end_position.is_finite() and authored_end.is_finite() else INF
+        var reason := ""
+        if not bool(start_resolution.get("resolved", false)):
+            reason = "start_%s" % String(start_resolution.get("reason", "unresolved"))
+        elif not bool(end_resolution.get("resolved", false)):
+            reason = "end_%s" % String(end_resolution.get("reason", "unresolved"))
+        elif start_drift > maximum_drift:
+            reason = "start_endpoint_drift"
+        elif end_drift > maximum_drift:
+            reason = "end_endpoint_drift"
+        result.append({
+            "id": link_id,
+            "ownerTileKey": tile_key,
+            "accepted": reason.is_empty(),
+            "reason": reason,
+            "maximumEndpointDrift": maximum_drift,
+            "startDrift": start_drift,
+            "endDrift": end_drift,
+            "startResolution": start_resolution,
+            "endResolution": end_resolution,
+            "startSupportSamples": building_support_navigation_sample_diagnostics(start_support_id, start_tile_key, [{"id": "authored_start", "position": authored_start}]),
+            "endSupportSamples": building_support_navigation_sample_diagnostics(end_support_id, end_tile_key, [{"id": "authored_end", "position": authored_end}])
+        })
+    return result
+
 
 func collision_snapshot_for_bounds(entry: Dictionary, bounds: Dictionary, allow_outside := false, moving_home := false) -> Dictionary:
     var snapshot := cached_validation_snapshot(entry, allow_outside, moving_home)
@@ -403,6 +511,8 @@ func _snapshot_with_live_tile_blocks(base_snapshot: Dictionary, tile_key: String
     _erase_tile_cells(paths, tile_key)
     var static_records: Array = _collision_records_outside_tile(base_snapshot.get("staticCollision", []), tile_key)
     var door_records: Array = _collision_records_outside_tile(base_snapshot.get("doorCollision", []), tile_key)
+    var static_broad: Array[Dictionary] = []
+    var door_broad: Array[Dictionary] = []
     for block_value in blocks.values():
         var body := block_value as Node
         if body == null or not is_instance_valid(body):
@@ -432,10 +542,81 @@ func _snapshot_with_live_tile_blocks(base_snapshot: Dictionary, tile_key: String
     snapshot["doors"] = doors
     snapshot["paths"] = paths
     snapshot["staticCollision"] = static_records
-    snapshot["staticCollisionByCell"] = _collision_index_for_records(static_records)
+    snapshot["staticCollisionByCell"] = _collision_index_for_records(static_records, static_broad, -1)
+    snapshot["staticCollisionBroad"] = static_broad
     snapshot["doorCollision"] = door_records
-    snapshot["doorCollisionByCell"] = _collision_index_for_records(door_records)
+    snapshot["doorCollisionByCell"] = _collision_index_for_records(door_records, door_broad, -1)
+    snapshot["doorCollisionBroad"] = door_broad
     return snapshot
+
+
+func _navmesh_snapshot_with_live_tile_blocks(base_snapshot: Dictionary, tile_key: String) -> Dictionary:
+    if main == null:
+        return base_snapshot
+    var blocks: Dictionary = main.get("blocks")
+    if blocks.is_empty():
+        return base_snapshot
+    var snapshot := base_snapshot.duplicate(false)
+    var blocked := _tile_cells_dictionary(base_snapshot.get("blocked", {}), tile_key)
+    var doors := _tile_cells_dictionary(base_snapshot.get("doors", {}), tile_key)
+    var paths := _tile_cells_dictionary(base_snapshot.get("paths", {}), tile_key)
+    var static_records := _collision_records_for_navmesh_tile(base_snapshot.get("staticCollision", []), tile_key)
+    var door_records := _collision_records_for_navmesh_tile(base_snapshot.get("doorCollision", []), tile_key)
+    for block_value in blocks.values():
+        var body := block_value as Node
+        if body == null or not is_instance_valid(body):
+            continue
+        var block_cell := block_world_cell(body)
+        if block_cell == INVALID_CELL or tile_key_for_cell(block_cell) != tile_key:
+            continue
+        var block_type := String(body.get_meta("block_type", ""))
+        if block_type == "door":
+            doors[block_cell] = body
+            blocked.erase(block_cell)
+            _append_collision_records(door_records, body, block_cell, block_type, true)
+            continue
+        if block_type == "cobblestonePath":
+            paths[block_cell] = true
+            blocked.erase(block_cell)
+            continue
+        if block_type == "torch":
+            blocked.erase(block_cell)
+            continue
+        if not block_xz_blocks_npc(block_cell, body):
+            blocked.erase(block_cell)
+            continue
+        blocked[block_cell] = body
+        _append_collision_records(static_records, body, block_cell, block_type, false)
+    snapshot["blocked"] = blocked
+    snapshot["doors"] = doors
+    snapshot["paths"] = paths
+    snapshot["staticCollision"] = static_records
+    snapshot["staticCollisionByCell"] = _collision_index_for_records(static_records, [], -1)
+    snapshot["staticCollisionBroad"] = []
+    snapshot["doorCollision"] = door_records
+    snapshot["doorCollisionByCell"] = _collision_index_for_records(door_records, [], -1)
+    snapshot["doorCollisionBroad"] = []
+    return snapshot
+
+
+func _collision_records_for_navmesh_tile(records_value, tile_key: String) -> Array:
+    var result := []
+    if not (records_value is Array):
+        return result
+    for record_value in records_value:
+        if not (record_value is Dictionary):
+            continue
+        var record: Dictionary = record_value
+        if bool(record.get("sourceManifest", false)):
+            if _collision_record_overlaps_tile(record, tile_key):
+                result.append(record)
+            continue
+        var cell: Vector2i = record.get("cell", INVALID_CELL)
+        if cell != INVALID_CELL and tile_key_for_cell(cell) == tile_key:
+            continue
+        if _collision_record_overlaps_tile(record, tile_key):
+            result.append(record)
+    return result
 
 func _erase_tile_cells(cells: Dictionary, tile_key: String) -> void:
     for cell_value in cells.keys():
@@ -450,11 +631,28 @@ func _collision_records_outside_tile(records_value, tile_key: String) -> Array:
         if not (record_value is Dictionary):
             continue
         var record: Dictionary = record_value
+        if bool(record.get("sourceManifest", false)):
+            if _collision_record_overlaps_tile(record, tile_key):
+                result.append(record)
+            continue
         var cell: Vector2i = record.get("cell", INVALID_CELL)
         if cell != INVALID_CELL and tile_key_for_cell(cell) == tile_key:
             continue
         result.append(record)
     return result
+
+
+func _collision_record_overlaps_tile(record: Dictionary, tile_key: String) -> bool:
+    var tile := _parse_tile_key(tile_key)
+    var tile_min_x := (float(tile.x * NAV_TILE_CELL_SIZE) - 0.5) * CELL
+    var tile_max_x := (float((tile.x + 1) * NAV_TILE_CELL_SIZE) - 0.5) * CELL
+    var tile_min_z := (float(tile.y * NAV_TILE_CELL_SIZE) - 0.5) * CELL
+    var tile_max_z := (float((tile.y + 1) * NAV_TILE_CELL_SIZE) - 0.5) * CELL
+    var inflation := float(record.get("inflation", TRANSITION_COLLISION_INFLATION))
+    return float(record.get("maxX", -INF)) + inflation >= tile_min_x \
+        and float(record.get("minX", INF)) - inflation <= tile_max_x \
+        and float(record.get("maxZ", -INF)) + inflation >= tile_min_z \
+        and float(record.get("minZ", INF)) - inflation <= tile_max_z
 
 func _append_collision_records(records: Array, body: Node, cell: Vector2i, block_type: String, is_door: bool) -> void:
     var body_records := _collision_records_for_body(body, cell, block_type, is_door)
@@ -463,15 +661,15 @@ func _append_collision_records(records: Array, body: Node, cell: Vector2i, block
     for record in body_records:
         records.append(record)
 
-func _collision_index_for_records(records: Array) -> Dictionary:
+func _collision_index_for_records(records: Array, broad_records: Array = [], max_index_cells := TRANSITION_RECORD_INDEX_MAX_CELLS) -> Dictionary:
     var index := {}
     for record_value in records:
         if record_value is Dictionary:
-            _index_collision_record(index, record_value)
+            _index_collision_record(index, record_value, broad_records, max_index_cells)
     return index
 
 func cached_static_tile_snapshot(allow_outside := false, moving_home := false) -> Dictionary:
-    if cached_revision == "" and cached_blocked.is_empty() and cached_doors.is_empty() and cached_paths.is_empty() and cached_props.is_empty():
+    if cached_revision == "":
         return build_snapshot({}, allow_outside, moving_home)
     return {
         "revision": revision(),
@@ -488,17 +686,20 @@ func cached_static_tile_snapshot(allow_outside := false, moving_home := false) -
         "propClearance": cached_prop_clearance,
         "staticCollision": cached_static_collision_records,
         "staticCollisionByCell": cached_static_collision_by_cell,
+        "staticCollisionBroad": cached_static_collision_broad,
         "doorCollision": cached_door_collision_records,
         "doorCollisionByCell": cached_door_collision_by_cell,
         "buildingSupports": cached_building_supports,
         "buildingVerticalLinks": cached_building_vertical_links,
+        "buildingSupportSeamLinks": cached_building_support_seam_links,
+        "buildingInteriorPassageLinks": cached_building_interior_passage_links,
         "dynamic": {},
         "allowOutside": allow_outside,
         "movingHome": moving_home
     }
 
 func cached_validation_snapshot(entry: Dictionary, allow_outside := false, moving_home := false) -> Dictionary:
-    if cached_revision == "" and cached_blocked.is_empty() and cached_doors.is_empty() and cached_paths.is_empty() and cached_props.is_empty():
+    if cached_revision == "":
         return build_snapshot(entry, allow_outside, moving_home)
     var monitor = performance_monitor()
     var dynamic_start: int = monitor.begin_section("navigation_dynamic_update") if monitor != null else Time.get_ticks_usec()
@@ -522,6 +723,7 @@ func cached_validation_snapshot(entry: Dictionary, allow_outside := false, movin
         "propClearance": cached_prop_clearance,
         "staticCollision": cached_static_collision_records,
         "staticCollisionByCell": cached_static_collision_by_cell,
+        "staticCollisionBroad": cached_static_collision_broad,
         "doorCollision": cached_door_collision_records,
         "doorCollisionByCell": cached_door_collision_by_cell,
         "dynamic": dynamic_cells,
@@ -572,8 +774,11 @@ func _mark_incremental_static_change(tile_key := "") -> void:
     topology_revision = static_snapshot_revision
     if cached_revision != "":
         cached_revision = str(static_snapshot_revision)
-    if String(tile_key) != "":
-        navmesh_tile_revision_by_key[String(tile_key)] = static_snapshot_revision
+    var changed_tile_key := String(tile_key).strip_edges()
+    if not changed_tile_key.is_empty():
+        navmesh_tile_revision_by_key[changed_tile_key] = static_snapshot_revision
+        _clear_navmesh_tile_snapshot_cache_for_tile(changed_tile_key)
+        return
     _clear_navmesh_tile_snapshot_cache()
 
 func _apply_prop_event_to_static_cache(event: Dictionary) -> bool:
@@ -617,10 +822,15 @@ func rebuild_static_cells() -> int:
     cached_prop_collision_records_by_object_id = {}
     cached_static_collision_records = []
     cached_static_collision_by_cell = {}
+    cached_static_collision_broad = []
     cached_door_collision_records = []
     cached_door_collision_by_cell = {}
     cached_building_supports = []
+    cached_building_supports_by_tile = {}
     cached_building_vertical_links = []
+    cached_building_support_seam_links = []
+    cached_building_interior_passage_links = []
+    cached_building_doors = []
     height_cache = {}
     terrain_projection_cache = {}
     if main == null:
@@ -669,31 +879,731 @@ func _rebuild_building_navigation_facts() -> void:
         for link_value in manifest.get("verticalLinks", []):
             if link_value is Dictionary:
                 cached_building_vertical_links.append((link_value as Dictionary).duplicate(true))
+        for link_value in manifest.get("supportSeamLinks", []):
+            if link_value is Dictionary:
+                cached_building_support_seam_links.append((link_value as Dictionary).duplicate(true))
+        for link_value in manifest.get("interiorPassageLinks", []):
+            if link_value is Dictionary:
+                cached_building_interior_passage_links.append((link_value as Dictionary).duplicate(true))
+        for door_value in manifest.get("doors", []):
+            if door_value is Dictionary:
+                cached_building_doors.append((door_value as Dictionary).duplicate(true))
+        _append_manifest_static_collision_records(manifest)
+
+    if system != null and system.has_method("navigation_collision_manifest_snapshot"):
+        var collision_manifests = system.call("navigation_collision_manifest_snapshot")
+        if collision_manifests is Array:
+            for manifest_value in collision_manifests:
+                if manifest_value is Dictionary:
+                    _append_manifest_static_collision_records(manifest_value as Dictionary)
     cached_building_supports.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return String(a.get("id", "")) < String(b.get("id", "")))
+    _index_building_supports_by_tile()
     cached_building_vertical_links.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return String(a.get("id", "")) < String(b.get("id", "")))
+    cached_building_support_seam_links.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return String(a.get("id", "")) < String(b.get("id", "")))
+    cached_building_interior_passage_links.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return String(a.get("id", "")) < String(b.get("id", "")))
+    cached_building_doors.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return String(a.get("id", "")) < String(b.get("id", "")))
+
+
+func _index_building_supports_by_tile() -> void:
+    cached_building_supports_by_tile = {}
+    for support in cached_building_supports:
+        var tile_keys: Array = support.get("tileKeys", []) if support.get("tileKeys", []) is Array else []
+        for tile_key_value in tile_keys:
+            var tile_key := String(tile_key_value)
+            if tile_key.is_empty():
+                continue
+            if not cached_building_supports_by_tile.has(tile_key):
+                cached_building_supports_by_tile[tile_key] = []
+            (cached_building_supports_by_tile[tile_key] as Array).append(support)
+
+
+func _append_manifest_static_collision_records(manifest: Dictionary) -> void:
+    for part_value in manifest.get("staticCollision", []):
+        if not (part_value is Dictionary):
+            continue
+        var record := _manifest_static_collision_record(part_value as Dictionary, String(manifest.get("sourceKind", "building")))
+        if record.is_empty():
+            continue
+        cached_static_collision_records.append(record)
+        _index_collision_record(cached_static_collision_by_cell, record, cached_static_collision_broad)
+
+
+func _manifest_static_collision_record(part: Dictionary, source_kind: String) -> Dictionary:
+    var bounds: AABB = part.get("bounds", AABB()) if part.get("bounds", AABB()) is AABB else AABB()
+    if bounds.size.x <= 0.0 or bounds.size.y <= 0.0 or bounds.size.z <= 0.0:
+        return {}
+    var part_id := String(part.get("id", ""))
+    if part_id == "":
+        return {}
+    var center := bounds.get_center()
+    var result := {
+        "id": part_id,
+        "cell": world_cell(center),
+        "blockType": source_kind,
+        "isDoor": false,
+        "minX": bounds.position.x,
+        "maxX": bounds.end.x,
+        "minY": bounds.position.y,
+        "maxY": bounds.end.y,
+        "minZ": bounds.position.z,
+        "maxZ": bounds.end.z,
+        "sourcePartId": String(part.get("sourceCollisionPartId", part.get("sourcePartId", ""))),
+        "sourcePartKind": String(part.get("kind", "")),
+        "sourceManifest": true,
+        "inflation": TRANSITION_COLLISION_INFLATION
+    }
+    var footprint: Array = part.get("footprint", []) if part.get("footprint", []) is Array else []
+    if footprint.size() >= 3:
+        result["footprint"] = footprint.duplicate(true)
+    return result
 
 func building_supports_for_tile(tile_key: String) -> Array[Dictionary]:
     var result: Array[Dictionary] = []
-    for support in cached_building_supports:
-        var tiles: Array = support.get("tileKeys", []) if support.get("tileKeys", []) is Array else []
-        if tiles.has(tile_key):
-            result.append(support)
+    for support_value in cached_building_supports_by_tile.get(tile_key, []) as Array:
+        if support_value is Dictionary:
+            result.append(support_value as Dictionary)
     return result
 
 func building_vertical_links_for_tile(tile_key: String) -> Array[Dictionary]:
     var result: Array[Dictionary] = []
     for link in cached_building_vertical_links:
-        var tiles: Array = link.get("tileKeys", []) if link.get("tileKeys", []) is Array else []
-        # Links are global navigation objects.  A link that straddles tile
-        # bounds is emitted by one deterministic owner tile, never duplicated.
-        if not tiles.is_empty() and String(tiles[0]) == tile_key:
+        if _building_navigation_link_owner_tile_key(link) == tile_key:
             result.append(link)
     return result
 
-func _navmesh_surface_from_building_support(support: Dictionary, span_index: int) -> Dictionary:
+
+func building_support_seam_links_for_tile(tile_key: String) -> Array[Dictionary]:
+    var result: Array[Dictionary] = []
+    for link in cached_building_support_seam_links:
+        if _building_navigation_link_owner_tile_key(link) == tile_key:
+            result.append(link)
+    return result
+
+
+func building_interior_passage_links_for_tile(tile_key: String) -> Array[Dictionary]:
+    var result: Array[Dictionary] = []
+    for link in cached_building_interior_passage_links:
+        if _building_navigation_link_owner_tile_key(link) == tile_key:
+            result.append(link)
+    return result
+
+
+func building_doors_for_tile(tile_key: String) -> Array[Dictionary]:
+    var result: Array[Dictionary] = []
+    for door in cached_building_doors:
+        var tiles: Array = door.get("tileKeys", []) if door.get("tileKeys", []) is Array else []
+        # A source door portal may cross a tile boundary. Publish the shared link
+        # through one deterministic owner tile so it cannot be installed twice.
+        if not tiles.is_empty() and String(tiles[0]) == tile_key:
+            result.append(door)
+    return result
+
+func _navmesh_surfaces_from_building_tile(snapshot: Dictionary, tile_key: String, span_index: int) -> Array[Dictionary]:
+    var flat_layers := {}
+    var ramps: Array[Dictionary] = []
+    for support in building_supports_for_tile(tile_key):
+        var polygon: Array = support.get("polygon", []) if support.get("polygon", []) is Array else []
+        if polygon.size() < 3:
+            continue
+        var normal: Vector3 = support.get("floorNormal", Vector3.UP) if support.get("floorNormal", Vector3.UP) is Vector3 else Vector3.UP
+        if normal.normalized().y < 0.985:
+            ramps.append(support)
+            continue
+        var sample_data := _building_support_navigation_sample_data(support, snapshot, tile_key)
+        var navigable_cells: Dictionary = sample_data.get("navigableCells", {}) if sample_data.get("navigableCells", {}) is Dictionary else {}
+        for cell_value in navigable_cells.keys():
+            if not (cell_value is Vector2i):
+                continue
+            var cell: Vector2i = cell_value
+            var position: Vector3 = navigable_cells.get(cell, Vector3.INF) if navigable_cells.get(cell, Vector3.INF) is Vector3 else Vector3.INF
+            if not position.is_finite():
+                continue
+            var layer_key := str(roundi(position.y * 100.0))
+            if not flat_layers.has(layer_key):
+                flat_layers[layer_key] = {
+                    "cells": {},
+                    "height": position.y - 0.04,
+                    "sourcePartIds": {},
+                    "sourceCollisionPartIds": {},
+                    "lateralClearance": float(support.get("lateralClearance", 1.0)),
+                    "traversalTags": support.get("traversalTags", ["building", "support"])
+                }
+            var layer: Dictionary = flat_layers.get(layer_key, {}) as Dictionary
+            var layer_cells: Dictionary = layer.get("cells", {}) as Dictionary
+            if not layer_cells.has(cell):
+                layer_cells[cell] = position
+            var source_part_ids: Dictionary = layer.get("sourcePartIds", {}) as Dictionary
+            source_part_ids[String(support.get("sourcePartId", ""))] = true
+            var source_collision_part_ids: Dictionary = layer.get("sourceCollisionPartIds", {}) as Dictionary
+            source_collision_part_ids[String(support.get("sourceCollisionPartId", ""))] = true
+            layer["lateralClearance"] = minf(float(layer.get("lateralClearance", 1.0)), float(support.get("lateralClearance", 1.0)))
+            flat_layers[layer_key] = layer
+    var result: Array[Dictionary] = []
+    var next_span := span_index
+    var layer_keys: Array = flat_layers.keys()
+    layer_keys.sort_custom(func(left, right) -> bool: return int(left) < int(right))
+    for layer_key_value in layer_keys:
+        var layer_key := String(layer_key_value)
+        var layer: Dictionary = flat_layers.get(layer_key, {}) as Dictionary
+        var cells: Dictionary = layer.get("cells", {}) as Dictionary
+        if cells.is_empty():
+            continue
+        var source_part_ids: Array = (layer.get("sourcePartIds", {}) as Dictionary).keys()
+        source_part_ids.sort()
+        var source_collision_part_ids: Array = (layer.get("sourceCollisionPartIds", {}) as Dictionary).keys()
+        source_collision_part_ids.sort()
+        var height := float(layer.get("height", 0.0))
+        var unified_support := {
+            "id": "building:tile:%s:flat:%s" % [tile_key, layer_key],
+            "cell": Vector3i.ZERO,
+            "worldPosition": Vector3(0.0, height, 0.0),
+            "floorNormal": Vector3.UP,
+            "headroom": 3.0,
+            "lateralClearance": float(layer.get("lateralClearance", 1.0)),
+            "traversalTags": layer.get("traversalTags", ["building", "support"]),
+            "sourcePartId": String(source_part_ids[0]) if not source_part_ids.is_empty() else "",
+            "sourceCollisionPartId": String(source_collision_part_ids[0]) if not source_collision_part_ids.is_empty() else ""
+        }
+        var layer_surfaces := _merged_building_support_navmesh_surfaces(unified_support, cells, next_span)
+        result.append_array(layer_surfaces)
+        next_span += layer_surfaces.size()
+    for ramp_value in ramps:
+        var ramp: Dictionary = ramp_value
+        var ramp_polygon: Array = ramp.get("polygon", []) if ramp.get("polygon", []) is Array else []
+        var ramp_surface := _navmesh_surface_from_building_support(ramp, next_span, ramp_polygon)
+        if ramp_surface.is_empty():
+            continue
+        result.append(ramp_surface)
+        next_span += 1
+    return result
+
+
+func _resolve_building_navigation_link_endpoints(snapshot: Dictionary, links: Array[Dictionary]) -> Array[Dictionary]:
+    var resolved_links: Array[Dictionary] = []
+    for link_value in links:
+        var link: Dictionary = link_value.duplicate(true)
+        var kind := String(link.get("kind", ""))
+        if kind == "support_seam":
+            resolved_links.append_array(_resolve_building_support_seam_links(snapshot, link))
+            continue
+        if kind not in ["interior_passage", "stair_ramp"]:
+            resolved_links.append(link)
+            continue
+        var start_support_id := String(link.get("startSupportId", link.get("supportId", link.get("firstSupportId", ""))))
+        var end_support_id := String(link.get("endSupportId", link.get("supportId", link.get("secondSupportId", ""))))
+        var authored_start: Vector3 = link.get("start", Vector3.INF) as Vector3
+        var authored_end: Vector3 = link.get("end", Vector3.INF) as Vector3
+        var start_tile_key := _building_navigation_link_endpoint_tile_key(link, "start", authored_start)
+        var end_tile_key := _building_navigation_link_endpoint_tile_key(link, "end", authored_end)
+        var start_resolution := _resolve_building_navigation_link_endpoint(snapshot, start_support_id, authored_start, start_tile_key)
+        var end_resolution := _resolve_building_navigation_link_endpoint(snapshot, end_support_id, authored_end, end_tile_key)
+        if not bool(start_resolution.get("resolved", false)) or not bool(end_resolution.get("resolved", false)):
+            continue
+        var resolved_start: Vector3 = start_resolution.get("position", authored_start) as Vector3
+        var resolved_end: Vector3 = end_resolution.get("position", authored_end) as Vector3
+        var maximum_endpoint_drift := BUILDING_STAIR_LINK_MAX_ENDPOINT_DRIFT if kind == "stair_ramp" else BUILDING_NAVIGATION_LINK_MAX_ENDPOINT_DRIFT
+        if resolved_start.distance_to(authored_start) > maximum_endpoint_drift \
+            or resolved_end.distance_to(authored_end) > maximum_endpoint_drift:
+            continue
+        if kind == "interior_passage":
+            var start_support := _building_support_by_id(start_support_id)
+            var link_blocker := _building_navigation_link_blocker(snapshot, start_support, resolved_start, resolved_end)
+            if not link_blocker.is_empty():
+                continue
+        link["start"] = resolved_start
+        link["end"] = resolved_end
+        link["authoredStart"] = authored_start
+        link["authoredEnd"] = authored_end
+        link["endpointResolution"] = {
+            "start": start_resolution,
+            "end": end_resolution
+        }
+        resolved_links.append(link)
+    return resolved_links
+
+
+func _resolve_building_support_seam_links(snapshot: Dictionary, link: Dictionary) -> Array[Dictionary]:
+    var result: Array[Dictionary] = []
+    var support_id := String(link.get("supportId", ""))
+    var support := _building_support_by_id(support_id)
+    var axis := String(link.get("axis", ""))
+    var authored_start: Vector3 = link.get("start", Vector3.INF) as Vector3
+    var authored_end: Vector3 = link.get("end", Vector3.INF) as Vector3
+    if support.is_empty() or axis not in ["x", "z"] or not authored_start.is_finite() or not authored_end.is_finite():
+        return result
+    var seam_coordinate := float(link.get("seamCoordinate", INF))
+    if not is_finite(seam_coordinate):
+        seam_coordinate = _building_navigation_link_axis_value(authored_start, axis) + (_building_navigation_link_axis_value(authored_end, axis) - _building_navigation_link_axis_value(authored_start, axis)) * 0.5
+    var start_tile_key := _building_navigation_link_endpoint_tile_key(link, "start", authored_start)
+    var end_tile_key := _building_navigation_link_endpoint_tile_key(link, "end", authored_end)
+    var start_snapshot := _navmesh_snapshot_with_live_tile_blocks(snapshot, start_tile_key)
+    var end_snapshot := _navmesh_snapshot_with_live_tile_blocks(snapshot, end_tile_key)
+    var start_samples: Dictionary = _building_support_navigation_sample_data(support, start_snapshot, start_tile_key).get("navigableCells", {}) as Dictionary
+    var end_samples: Dictionary = _building_support_navigation_sample_data(support, end_snapshot, end_tile_key).get("navigableCells", {}) as Dictionary
+    var start_side := signf(_building_navigation_link_axis_value(authored_start, axis) - seam_coordinate)
+    var end_side := signf(_building_navigation_link_axis_value(authored_end, axis) - seam_coordinate)
+    if start_side == 0.0 or end_side == 0.0 or is_equal_approx(start_side, end_side):
+        return result
+    var start_lanes := _building_support_seam_lane_positions(start_samples, axis, seam_coordinate, start_side)
+    var end_lanes := _building_support_seam_lane_positions(end_samples, axis, seam_coordinate, end_side)
+    var lane_indices: Array = start_lanes.keys()
+    lane_indices.sort()
+    for lane_value in lane_indices:
+        var lane_index := int(lane_value)
+        if not end_lanes.has(lane_index):
+            continue
+        var start_resolution: Dictionary = start_lanes.get(lane_index, {}) as Dictionary
+        var end_resolution: Dictionary = end_lanes.get(lane_index, {}) as Dictionary
+        var resolved_start: Vector3 = start_resolution.get("position", Vector3.INF) as Vector3
+        var resolved_end: Vector3 = end_resolution.get("position", Vector3.INF) as Vector3
+        if not resolved_start.is_finite() or not resolved_end.is_finite():
+            continue
+        var link_blocker := _building_navigation_link_blocker(snapshot, support, resolved_start, resolved_end)
+        if not link_blocker.is_empty():
+            continue
+        var resolved_link := link.duplicate(true)
+        resolved_link["id"] = "%s:lane:%d" % [String(link.get("id", "")), lane_index]
+        resolved_link["start"] = resolved_start
+        resolved_link["end"] = resolved_end
+        resolved_link["authoredStart"] = authored_start
+        resolved_link["authoredEnd"] = authored_end
+        resolved_link["cost"] = resolved_start.distance_to(resolved_end)
+        resolved_link["bounds"] = AABB(resolved_start, Vector3.ZERO).expand(resolved_end).grow(CELL * 0.04)
+        resolved_link["endpointResolution"] = {
+            "start": start_resolution,
+            "end": end_resolution
+        }
+        result.append(resolved_link)
+    return result
+
+
+func _building_support_seam_lane_positions(samples: Dictionary, axis: String, seam_coordinate: float, side: float) -> Dictionary:
+    var lanes := {}
+    for cell_value in samples.keys():
+        if not (cell_value is Vector2i):
+            continue
+        var cell: Vector2i = cell_value
+        var position: Vector3 = samples.get(cell, Vector3.INF) as Vector3
+        if not position.is_finite():
+            continue
+        var axis_value := _building_navigation_link_axis_value(position, axis)
+        var side_distance := (axis_value - seam_coordinate) * side
+        if side_distance <= 0.0 or side_distance > BUILDING_SUPPORT_SEAM_MAX_ENDPOINT_DISTANCE:
+            continue
+        var lane_index := cell.x if axis == "z" else cell.y
+        var existing: Dictionary = lanes.get(lane_index, {}) as Dictionary
+        if existing.is_empty() or side_distance < float(existing.get("distanceToSeam", INF)):
+            lanes[lane_index] = {
+                "cell": cell,
+                "position": position,
+                "distanceToSeam": side_distance
+            }
+    return lanes
+
+
+func _building_navigation_link_axis_value(position: Vector3, axis: String) -> float:
+    return position.x if axis == "x" else position.z
+
+
+func _building_navigation_link_blocker(snapshot: Dictionary, support: Dictionary, start: Vector3, end: Vector3) -> Dictionary:
+    if support.is_empty():
+        return {"reason": "missing_support"}
+    var minimum := Vector2(minf(start.x, end.x), minf(start.z, end.z))
+    var maximum := Vector2(maxf(start.x, end.x), maxf(start.z, end.z))
+    return _building_support_navigation_blocker_for_footprint(snapshot, support, minf(start.y, end.y), minimum, maximum)
+
+
+func _resolve_building_navigation_link_endpoint(snapshot: Dictionary, support_id: String, authored_position: Vector3, tile_key: String) -> Dictionary:
+    if support_id.is_empty() or not authored_position.is_finite():
+        return {"resolved": false, "reason": "missing_support_or_position"}
+    var support := _building_support_by_id(support_id)
+    if support.is_empty():
+        return {"resolved": false, "reason": "support_not_found", "supportId": support_id}
+    if tile_key.is_empty():
+        tile_key = tile_key_for_cell(world_cell(authored_position))
+    var tile_snapshot := _navmesh_snapshot_with_live_tile_blocks(snapshot, tile_key)
+    var sample_data := _building_support_navigation_sample_data(support, tile_snapshot, tile_key)
+    var navigable_cells: Dictionary = sample_data.get("navigableCells", {}) if sample_data.get("navigableCells", {}) is Dictionary else {}
+    var best_position := Vector3.INF
+    var best_distance := INF
+    var best_cell := Vector2i.ZERO
+    for cell_value in navigable_cells.keys():
+        if not (cell_value is Vector2i):
+            continue
+        var cell: Vector2i = cell_value
+        var candidate: Vector3 = navigable_cells.get(cell, Vector3.INF) as Vector3
+        if not candidate.is_finite():
+            continue
+        var distance := candidate.distance_to(authored_position)
+        if distance < best_distance - 0.0001 or (is_equal_approx(distance, best_distance) and (cell.x < best_cell.x or (cell.x == best_cell.x and cell.y < best_cell.y))):
+            best_position = candidate
+            best_distance = distance
+            best_cell = cell
+    if not best_position.is_finite():
+        return {"resolved": false, "reason": "no_collision_screened_support_sample", "supportId": support_id, "tileKey": tile_key}
+    return {
+        "resolved": true,
+        "supportId": support_id,
+        "tileKey": tile_key,
+        "cell": best_cell,
+        "position": best_position,
+        "distance": best_distance
+    }
+
+
+func _building_support_by_id(support_id: String) -> Dictionary:
+    for support_value in cached_building_supports:
+        if support_value is Dictionary and String((support_value as Dictionary).get("id", "")) == support_id:
+            return support_value as Dictionary
+    return {}
+
+
+func _building_navigation_link_owner_tile_key(link: Dictionary) -> String:
+    var owner_tile_key := String(link.get("ownerTileKey", ""))
+    if not owner_tile_key.is_empty():
+        return owner_tile_key
+    var start: Vector3 = link.get("start", Vector3.INF) as Vector3
+    if start.is_finite():
+        return tile_key_for_cell(world_cell(start))
+    var tile_keys: Array = link.get("tileKeys", []) if link.get("tileKeys", []) is Array else []
+    return String(tile_keys[0]) if not tile_keys.is_empty() else ""
+
+
+func _building_navigation_link_endpoint_tile_key(link: Dictionary, endpoint: String, position: Vector3) -> String:
+    var declared_tile_key := String(link.get("%sTileKey" % endpoint.capitalize(), ""))
+    if not declared_tile_key.is_empty():
+        return declared_tile_key
+    if position.is_finite():
+        return tile_key_for_cell(world_cell(position))
+    return _building_navigation_link_owner_tile_key(link)
+
+
+func building_support_navigation_sample_diagnostics(support_id: String, tile_key: String, probes: Array = [], options := {}) -> Dictionary:
+    var support := {}
+    for support_value in cached_building_supports:
+        if support_value is Dictionary and String((support_value as Dictionary).get("id", "")) == support_id:
+            support = support_value as Dictionary
+            break
+    if support.is_empty():
+        return {"diagnosticOnly": true, "reason": "support_not_found", "supportId": support_id, "tileKey": tile_key}
+    var snapshot := _navmesh_snapshot_with_live_tile_blocks(cached_static_tile_snapshot(true, true), tile_key)
+    if bool(options.get("excludeFurnishings", false)):
+        snapshot = _diagnostic_snapshot_without_furnishings(snapshot)
+    var sample_data := _building_support_navigation_sample_data(support, snapshot, tile_key)
+    var navigable_cells: Dictionary = sample_data.get("navigableCells", {}) if sample_data.get("navigableCells", {}) is Dictionary else {}
+    var blocked_by_cell: Dictionary = sample_data.get("blockedByCell", {}) if sample_data.get("blockedByCell", {}) is Dictionary else {}
+    var component_by_cell := {}
+    var components: Array[Dictionary] = []
+    var sorted_cells: Array = navigable_cells.keys()
+    sorted_cells.sort_custom(func(left: Vector2i, right: Vector2i) -> bool:
+        return left.x < right.x if left.y == right.y else left.y < right.y
+    )
+    for cell_value in sorted_cells:
+        if not (cell_value is Vector2i):
+            continue
+        var start: Vector2i = cell_value
+        if component_by_cell.has(start):
+            continue
+        var component_id := components.size()
+        var queue: Array[Vector2i] = [start]
+        var cell_count := 0
+        var minimum := Vector2i(2147483647, 2147483647)
+        var maximum := Vector2i(-2147483647, -2147483647)
+        while not queue.is_empty():
+            var current: Vector2i = queue.pop_front()
+            if component_by_cell.has(current) or not navigable_cells.has(current):
+                continue
+            component_by_cell[current] = component_id
+            cell_count += 1
+            minimum.x = mini(minimum.x, current.x)
+            minimum.y = mini(minimum.y, current.y)
+            maximum.x = maxi(maximum.x, current.x)
+            maximum.y = maxi(maximum.y, current.y)
+            for neighbor in [current + Vector2i.LEFT, current + Vector2i.RIGHT, current + Vector2i.UP, current + Vector2i.DOWN]:
+                if navigable_cells.has(neighbor) and not component_by_cell.has(neighbor):
+                    queue.append(neighbor)
+        components.append({"id": component_id, "cellCount": cell_count, "minimumCell": minimum, "maximumCell": maximum})
+    var blocker_counts := {}
+    for blocker_value in blocked_by_cell.values():
+        if not (blocker_value is Dictionary):
+            continue
+        var blocker: Dictionary = blocker_value
+        var blocker_id := String(blocker.get("id", "unknown"))
+        blocker_counts[blocker_id] = int(blocker_counts.get(blocker_id, 0)) + 1
+    var blockers: Array[Dictionary] = []
+    for blocker_id_value in blocker_counts.keys():
+        var blocker_id := String(blocker_id_value)
+        blockers.append({"id": blocker_id, "blockedSampleCount": int(blocker_counts[blocker_id]), "sourcePartId": blocker_id})
+    blockers.sort_custom(func(left: Dictionary, right: Dictionary) -> bool:
+        var left_count := int(left.get("blockedSampleCount", 0))
+        var right_count := int(right.get("blockedSampleCount", 0))
+        return String(left.get("id", "")) < String(right.get("id", "")) if left_count == right_count else left_count > right_count
+    )
+    var probe_results: Array[Dictionary] = []
+    for probe_value in probes:
+        if not (probe_value is Dictionary):
+            continue
+        var probe: Dictionary = probe_value
+        var position: Vector3 = probe.get("position", Vector3.INF) if probe.get("position", Vector3.INF) is Vector3 else Vector3.INF
+        if not position.is_finite():
+            continue
+        var nearest_cell := Vector2i.ZERO
+        var nearest_position := Vector3.INF
+        var nearest_distance := INF
+        for cell_value in sorted_cells:
+            if not (cell_value is Vector2i):
+                continue
+            var cell: Vector2i = cell_value
+            var candidate: Vector3 = navigable_cells.get(cell, Vector3.INF) if navigable_cells.get(cell, Vector3.INF) is Vector3 else Vector3.INF
+            var distance := candidate.distance_to(position)
+            if distance < nearest_distance:
+                nearest_cell = cell
+                nearest_position = candidate
+                nearest_distance = distance
+        probe_results.append({
+            "id": String(probe.get("id", "probe")),
+            "position": position,
+            "nearestCell": nearest_cell,
+            "nearestPosition": nearest_position,
+            "nearestDistance": nearest_distance,
+            "componentId": int(component_by_cell.get(nearest_cell, -1))
+        })
+    return {
+        "diagnosticOnly": true,
+        "supportId": support_id,
+        "tileKey": tile_key,
+        "options": options.duplicate(true),
+        "sampleStep": BUILDING_SUPPORT_NAV_SAMPLE_STEP,
+        "navigableCellCount": navigable_cells.size(),
+        "blockedCellCount": blocked_by_cell.size(),
+        "componentCount": components.size(),
+        "components": components,
+        "topBlockedSources": blockers.slice(0, 8),
+        "probes": probe_results
+    }
+
+
+static func source_support_connectivity(building_manifest: Dictionary, collision_manifests: Array, support_id: String, probes: Array, snap_distance: float) -> Dictionary:
+    var adapter = GeneratedWorldNavigationAdapter.new()
+    adapter._load_source_navigation_manifests(building_manifest, collision_manifests)
+    return adapter._source_support_connectivity(support_id, probes, snap_distance)
+
+
+func _load_source_navigation_manifests(building_manifest: Dictionary, collision_manifests: Array) -> void:
+    cached_static_collision_records = []
+    cached_static_collision_by_cell = {}
+    cached_static_collision_broad = []
+    cached_building_supports = []
+    cached_building_supports_by_tile = {}
+    for support_value in building_manifest.get("supports", []) as Array:
+        if support_value is Dictionary:
+            cached_building_supports.append((support_value as Dictionary).duplicate(true))
+    _append_manifest_static_collision_records(building_manifest)
+    for manifest_value in collision_manifests:
+        if manifest_value is Dictionary:
+            _append_manifest_static_collision_records(manifest_value as Dictionary)
+    cached_building_supports.sort_custom(func(left: Dictionary, right: Dictionary) -> bool:
+        return String(left.get("id", "")) < String(right.get("id", ""))
+    )
+    _index_building_supports_by_tile()
+
+
+func _source_support_connectivity(support_id: String, probes: Array, snap_distance: float) -> Dictionary:
+    var support := _building_support_by_id(support_id)
+    if support.is_empty():
+        return {"reachable": false, "reason": "missing_door_interior_support", "supportId": support_id}
+    var tile_keys: Array = support.get("tileKeys", []) as Array
+    if tile_keys.is_empty():
+        return {"reachable": false, "reason": "missing_support_tiles", "supportId": support_id}
+    var snapshot := {
+        "staticCollision": cached_static_collision_records,
+        "staticCollisionByCell": cached_static_collision_by_cell,
+        "staticCollisionBroad": cached_static_collision_broad
+    }
+    var navigable_cells := {}
+    for tile_key_value in tile_keys:
+        var tile_key := String(tile_key_value)
+        if tile_key.is_empty():
+            continue
+        var sample_data := _building_support_navigation_sample_data(support, snapshot, tile_key)
+        var tile_cells: Dictionary = sample_data.get("navigableCells", {}) as Dictionary
+        for cell_value in tile_cells.keys():
+            if cell_value is Vector2i:
+                navigable_cells[cell_value] = tile_cells[cell_value]
+    if navigable_cells.is_empty():
+        return {"reachable": false, "reason": "no_collision_screened_support_samples", "supportId": support_id}
+    var resolved_probes: Array[Dictionary] = []
+    for probe_value in probes:
+        if not (probe_value is Dictionary):
+            continue
+        var probe: Dictionary = probe_value as Dictionary
+        var position: Vector3 = probe.get("position", Vector3.INF) as Vector3
+        var resolution := _nearest_source_support_sample(navigable_cells, position, snap_distance)
+        resolution["id"] = String(probe.get("id", "probe"))
+        resolved_probes.append(resolution)
+    if resolved_probes.size() < 2:
+        return {"reachable": false, "reason": "missing_egress_probes", "supportId": support_id, "probes": resolved_probes}
+    var start_resolution: Dictionary = resolved_probes[0]
+    var target_resolution: Dictionary = resolved_probes[1]
+    if not bool(start_resolution.get("resolved", false)) or not bool(target_resolution.get("resolved", false)):
+        return {
+            "reachable": false,
+            "reason": "egress_probe_has_no_collision_screened_sample",
+            "supportId": support_id,
+            "probes": resolved_probes
+        }
+    var start: Vector2i = start_resolution.get("cell", INVALID_CELL) as Vector2i
+    var target: Vector2i = target_resolution.get("cell", INVALID_CELL) as Vector2i
+    var frontier: Array[Vector2i] = [start]
+    var visited := {start: true}
+    var cursor := 0
+    while cursor < frontier.size():
+        var current: Vector2i = frontier[cursor]
+        cursor += 1
+        if current == target:
+            return {
+                "reachable": true,
+                "supportId": support_id,
+                "probes": resolved_probes,
+                "visitedCellCount": visited.size()
+            }
+        for offset in [Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN]:
+            var neighbor: Vector2i = current + offset
+            if navigable_cells.has(neighbor) and not visited.has(neighbor):
+                visited[neighbor] = true
+                frontier.append(neighbor)
+    return {
+        "reachable": false,
+        "reason": "collision_screened_support_disconnected",
+        "supportId": support_id,
+        "probes": resolved_probes,
+        "visitedCellCount": visited.size()
+    }
+
+
+func _nearest_source_support_sample(navigable_cells: Dictionary, position: Vector3, snap_distance: float) -> Dictionary:
+    if not position.is_finite():
+        return {"resolved": false, "reason": "invalid_probe_position"}
+    var nearest_cell := INVALID_CELL
+    var nearest_position := Vector3.INF
+    var nearest_distance := INF
+    for cell_value in navigable_cells.keys():
+        if not (cell_value is Vector2i):
+            continue
+        var cell: Vector2i = cell_value
+        var candidate: Vector3 = navigable_cells[cell] as Vector3
+        var distance := Vector2(candidate.x - position.x, candidate.z - position.z).length()
+        if distance < nearest_distance:
+            nearest_cell = cell
+            nearest_position = candidate
+            nearest_distance = distance
+    if nearest_cell == INVALID_CELL or nearest_distance > snap_distance:
+        return {"resolved": false, "reason": "no_sample_within_snap_distance", "distance": nearest_distance}
+    return {
+        "resolved": true,
+        "cell": nearest_cell,
+        "position": nearest_position,
+        "distance": nearest_distance
+    }
+
+
+func _diagnostic_snapshot_without_furnishings(snapshot: Dictionary) -> Dictionary:
+    var records: Array = snapshot.get("staticCollision", []) if snapshot.get("staticCollision", []) is Array else []
+    var filtered: Array = []
+    for record_value in records:
+        if not (record_value is Dictionary):
+            continue
+        var record: Dictionary = record_value
+        if String(record.get("id", "")).begins_with("furnishing:"):
+            continue
+        filtered.append(record)
+    var broad_records: Array = []
+    var result := snapshot.duplicate(false)
+    result["staticCollision"] = filtered
+    result["staticCollisionByCell"] = _collision_index_for_records(filtered, broad_records)
+    result["staticCollisionBroad"] = broad_records
+    return result
+
+
+func _building_support_navigation_sample_data(support: Dictionary, snapshot: Dictionary, tile_key: String) -> Dictionary:
+    var polygon: Array = support.get("polygon", []) if support.get("polygon", []) is Array else []
+    if polygon.size() < 3:
+        return {"navigableCells": {}, "blockedByCell": {}}
+    var tile := _parse_tile_key(tile_key)
+    var tile_min_x := (float(tile.x * NAV_TILE_CELL_SIZE) - 0.5) * CELL
+    var tile_max_x := (float((tile.x + 1) * NAV_TILE_CELL_SIZE) - 0.5) * CELL
+    var tile_min_z := (float(tile.y * NAV_TILE_CELL_SIZE) - 0.5) * CELL
+    var tile_max_z := (float((tile.y + 1) * NAV_TILE_CELL_SIZE) - 0.5) * CELL
+    var minimum := Vector2(INF, INF)
+    var maximum := Vector2(-INF, -INF)
+    for point_value in polygon:
+        if point_value is Vector3:
+            var point: Vector3 = point_value
+            minimum.x = minf(minimum.x, point.x)
+            minimum.y = minf(minimum.y, point.z)
+            maximum.x = maxf(maximum.x, point.x)
+            maximum.y = maxf(maximum.y, point.z)
+    minimum.x = maxf(minimum.x, tile_min_x)
+    minimum.y = maxf(minimum.y, tile_min_z)
+    maximum.x = minf(maximum.x, tile_max_x)
+    maximum.y = minf(maximum.y, tile_max_z)
+    if minimum.x >= maximum.x or minimum.y >= maximum.y:
+        return {"navigableCells": {}, "blockedByCell": {}}
+    var first_x := ceili((minimum.x - BUILDING_SUPPORT_NAV_SAMPLE_STEP * 0.5) / BUILDING_SUPPORT_NAV_SAMPLE_STEP)
+    var last_x := floori((maximum.x - BUILDING_SUPPORT_NAV_SAMPLE_STEP * 0.5) / BUILDING_SUPPORT_NAV_SAMPLE_STEP)
+    var first_z := ceili((minimum.y - BUILDING_SUPPORT_NAV_SAMPLE_STEP * 0.5) / BUILDING_SUPPORT_NAV_SAMPLE_STEP)
+    var last_z := floori((maximum.y - BUILDING_SUPPORT_NAV_SAMPLE_STEP * 0.5) / BUILDING_SUPPORT_NAV_SAMPLE_STEP)
+    var navigable_cells := {}
+    var blocked_by_cell := {}
+    for z in range(first_z, last_z + 1):
+        for x in range(first_x, last_x + 1):
+            var sample_cell := Vector2i(x, z)
+            var minimum_corner := Vector2(float(x) * BUILDING_SUPPORT_NAV_SAMPLE_STEP, float(z) * BUILDING_SUPPORT_NAV_SAMPLE_STEP)
+            var maximum_corner := minimum_corner + Vector2(BUILDING_SUPPORT_NAV_SAMPLE_STEP, BUILDING_SUPPORT_NAV_SAMPLE_STEP)
+            var position := Vector3((float(x) + 0.5) * BUILDING_SUPPORT_NAV_SAMPLE_STEP, 0.0, (float(z) + 0.5) * BUILDING_SUPPORT_NAV_SAMPLE_STEP)
+            if not _point_within_support_xz(position, support):
+                continue
+            position.y = _support_surface_y(support, position) + 0.04
+            if not _building_support_owns_navigation_sample(support, position, tile_key):
+                continue
+            var blocker := _building_support_navigation_cell_blocker(snapshot, support, position, minimum_corner, maximum_corner)
+            if not blocker.is_empty():
+                blocked_by_cell[sample_cell] = blocker
+                continue
+            navigable_cells[sample_cell] = position
+    return {"navigableCells": navigable_cells, "blockedByCell": blocked_by_cell}
+
+
+func _building_support_owns_navigation_sample(support: Dictionary, position: Vector3, tile_key: String) -> bool:
+    var support_id := String(support.get("id", ""))
+    if support_id.is_empty():
+        return true
+    var support_y := _support_surface_y(support, position)
+    var owner_id := support_id
+    var owner_y := support_y
+    for candidate_value in building_supports_for_tile(tile_key):
+        if not (candidate_value is Dictionary):
+            continue
+        var candidate: Dictionary = candidate_value
+        if not _point_within_support_xz(position, candidate):
+            continue
+        var candidate_y := _support_surface_y(candidate, position)
+        if candidate_y < support_y - BUILDING_SUPPORT_STACK_EPSILON:
+            continue
+        if candidate_y > support_y + BUILDING_SUPPORT_STACK_MAX_SEPARATION:
+            continue
+        var candidate_id := String(candidate.get("id", ""))
+        if candidate_y > owner_y + BUILDING_SUPPORT_STACK_EPSILON or (absf(candidate_y - owner_y) <= BUILDING_SUPPORT_STACK_EPSILON and candidate_id < owner_id):
+            owner_id = candidate_id
+            owner_y = candidate_y
+    return owner_id == support_id
+
+
+func _navmesh_surface_from_building_support(support: Dictionary, span_index: int, polygon: Array = []) -> Dictionary:
     var cell: Vector3i = support.get("cell", Vector3i.ZERO) if support.get("cell", Vector3i.ZERO) is Vector3i else Vector3i.ZERO
     var position: Vector3 = support.get("worldPosition", Vector3.ZERO) if support.get("worldPosition", Vector3.ZERO) is Vector3 else Vector3.ZERO
-    var polygon: Array = support.get("polygon", []) if support.get("polygon", []) is Array else []
+    if polygon.is_empty():
+        polygon = support.get("polygon", []) if support.get("polygon", []) is Array else []
     if polygon.size() < 3:
         return {}
     return {
@@ -712,6 +1622,147 @@ func _navmesh_surface_from_building_support(support: Dictionary, span_index: int
         "sourceCollisionPartId": String(support.get("sourceCollisionPartId", "")),
         "support": true
     }
+
+
+func _merged_building_support_navmesh_surfaces(support: Dictionary, cells: Dictionary, span_index: int) -> Array[Dictionary]:
+    var result: Array[Dictionary] = []
+    var columns_by_row := {}
+    for key_value in cells.keys():
+        if not (key_value is Vector2i):
+            continue
+        var cell: Vector2i = key_value
+        if not columns_by_row.has(cell.y):
+            columns_by_row[cell.y] = []
+        (columns_by_row[cell.y] as Array).append(cell.x)
+    var row_runs := {}
+    var rows: Array = columns_by_row.keys()
+    rows.sort()
+    for row_value in rows:
+        var row := int(row_value)
+        var columns: Array = columns_by_row.get(row, [])
+        columns.sort()
+        var runs: Array[Vector2i] = []
+        var run_start := 0
+        var previous_column := 0
+        var has_run := false
+        for column_value in columns:
+            var column := int(column_value)
+            if not has_run:
+                run_start = column
+                previous_column = column
+                has_run = true
+                continue
+            if column == previous_column + 1:
+                previous_column = column
+                continue
+            runs.append(Vector2i(run_start, previous_column + 1))
+            run_start = column
+            previous_column = column
+        if has_run:
+            runs.append(Vector2i(run_start, previous_column + 1))
+        row_runs[row] = runs
+    var row_breakpoints := {}
+    for row_value in rows:
+        var row := int(row_value)
+        var breakpoints := {}
+        for run_value in row_runs.get(row, []):
+            if not (run_value is Vector2i):
+                continue
+            var run: Vector2i = run_value
+            breakpoints[run.x] = true
+            breakpoints[run.y] = true
+        row_breakpoints[row] = breakpoints
+    for _pass in range(maxi(1, rows.size())):
+        var changed := false
+        for row_value in rows:
+            var row := int(row_value)
+            var current_runs: Array = row_runs.get(row, [])
+            var current_breakpoints: Dictionary = row_breakpoints.get(row, {}) as Dictionary
+            for neighbor_row in [row - 1, row + 1]:
+                var neighbor_breakpoints: Dictionary = row_breakpoints.get(neighbor_row, {}) as Dictionary
+                for boundary_value in neighbor_breakpoints.keys():
+                    var boundary := int(boundary_value)
+                    if not _building_support_row_contains_boundary(current_runs, boundary) or current_breakpoints.has(boundary):
+                        continue
+                    current_breakpoints[boundary] = true
+                    changed = true
+            row_breakpoints[row] = current_breakpoints
+        if not changed:
+            break
+    var next_span := span_index
+    for row_value in rows:
+        var row := int(row_value)
+        var current_runs: Array = row_runs.get(row, [])
+        var breakpoints: Dictionary = row_breakpoints.get(row, {}) as Dictionary
+        var sorted_breakpoints: Array = breakpoints.keys()
+        sorted_breakpoints.sort()
+        for breakpoint_index in range(maxi(0, sorted_breakpoints.size() - 1)):
+            var start_x := int(sorted_breakpoints[breakpoint_index])
+            var end_x := int(sorted_breakpoints[breakpoint_index + 1])
+            if end_x <= start_x or not cells.has(Vector2i(start_x, row)):
+                continue
+            var min_x := float(start_x) * BUILDING_SUPPORT_NAV_SAMPLE_STEP
+            var max_x := float(end_x) * BUILDING_SUPPORT_NAV_SAMPLE_STEP
+            var min_z := float(row) * BUILDING_SUPPORT_NAV_SAMPLE_STEP
+            var max_z := float(row + 1) * BUILDING_SUPPORT_NAV_SAMPLE_STEP
+            var polygon: Array[Vector3] = []
+            for point in [Vector3(min_x, 0.0, min_z), Vector3(min_x, 0.0, max_z), Vector3(max_x, 0.0, max_z), Vector3(max_x, 0.0, min_z)]:
+                point.y = _support_surface_y(support, point) + 0.04
+                polygon.append(point)
+            var center := Vector3((min_x + max_x) * 0.5, 0.0, (min_z + max_z) * 0.5)
+            center.y = _support_surface_y(support, center) + 0.04
+            var surface := _navmesh_surface_from_building_support(support, next_span, polygon)
+            surface["cell"] = Vector3i(roundi(center.x / CELL), floori(center.y / CELL), roundi(center.z / CELL))
+            surface["worldPosition"] = center
+            surface["id"] = "%s:navmesh:%d" % [String(support.get("id", "")), next_span]
+            result.append(surface)
+            next_span += 1
+    return result
+
+
+func _building_support_row_contains_boundary(runs: Array, boundary: int) -> bool:
+    for run_value in runs:
+        if run_value is Vector2i:
+            var run: Vector2i = run_value
+            if boundary >= run.x and boundary <= run.y:
+                return true
+    return false
+
+
+func _building_support_navigation_blocked(snapshot: Dictionary, support: Dictionary, position: Vector3) -> bool:
+    return not _building_support_navigation_blocker(snapshot, support, position).is_empty()
+
+
+func _building_support_navigation_blocker(snapshot: Dictionary, support: Dictionary, position: Vector3) -> Dictionary:
+    var footprint := Vector2(position.x, position.z)
+    return _building_support_navigation_blocker_for_footprint(snapshot, support, position.y, footprint, footprint)
+
+
+func _building_support_navigation_cell_blocker(snapshot: Dictionary, support: Dictionary, position: Vector3, minimum_corner: Vector2, maximum_corner: Vector2) -> Dictionary:
+    return _building_support_navigation_blocker_for_footprint(snapshot, support, position.y, minimum_corner, maximum_corner)
+
+
+func _building_support_navigation_blocker_for_footprint(snapshot: Dictionary, support: Dictionary, sample_y: float, minimum_corner: Vector2, maximum_corner: Vector2) -> Dictionary:
+    var minimum_cell := world_cell(Vector3(minimum_corner.x, sample_y, minimum_corner.y))
+    var maximum_cell := world_cell(Vector3(maximum_corner.x, sample_y, maximum_corner.y))
+    var records := _transition_collision_records(snapshot, "staticCollisionByCell", minimum_cell, maximum_cell)
+    var support_part_id := String(support.get("sourceCollisionPartId", support.get("sourcePartId", "")))
+    for record_value in records:
+        if not (record_value is Dictionary):
+            continue
+        var record: Dictionary = record_value
+        if String(record.get("sourcePartId", "")) == support_part_id:
+            continue
+        if float(record.get("maxY", -INF)) < sample_y + 0.02 or float(record.get("minY", INF)) > sample_y + NpcConstantsScript.DEFAULT_NPC_STANDING_HEIGHT:
+            continue
+        if maximum_corner.x <= float(record.get("minX", INF)) - BUILDING_SUPPORT_NAV_CLEARANCE + 0.0001 \
+            or minimum_corner.x >= float(record.get("maxX", -INF)) + BUILDING_SUPPORT_NAV_CLEARANCE - 0.0001 \
+            or maximum_corner.y <= float(record.get("minZ", INF)) - BUILDING_SUPPORT_NAV_CLEARANCE + 0.0001 \
+            or minimum_corner.y >= float(record.get("maxZ", -INF)) + BUILDING_SUPPORT_NAV_CLEARANCE - 0.0001:
+            continue
+        return record
+    return {}
+
 
 func block_world_cell(body: Node) -> Vector2i:
     if body.has_meta("cell"):
@@ -740,7 +1791,7 @@ func _add_collision_records(body: Node, cell: Vector2i, block_type: String, is_d
             _index_collision_record(cached_door_collision_by_cell, record)
         else:
             cached_static_collision_records.append(record)
-            _index_collision_record(cached_static_collision_by_cell, record)
+            _index_collision_record(cached_static_collision_by_cell, record, cached_static_collision_broad)
             if prop_object_id != "":
                 prop_records.append(record)
     if prop_object_id != "" and not prop_records.is_empty():
@@ -831,12 +1882,16 @@ func _fallback_collision_record(body: Node3D, cell: Vector2i, block_type: String
         "inflation": TRANSITION_COLLISION_INFLATION
     }
 
-func _index_collision_record(index: Dictionary, record: Dictionary) -> void:
+func _index_collision_record(index: Dictionary, record: Dictionary, broad_records: Array = [], max_index_cells := TRANSITION_RECORD_INDEX_MAX_CELLS) -> void:
     var inflation := float(record.get("inflation", TRANSITION_COLLISION_INFLATION))
     var min_x := floori((float(record.get("minX", 0.0)) - inflation) / CELL) - TRANSITION_RECORD_INDEX_MARGIN_CELLS
     var max_x := floori((float(record.get("maxX", 0.0)) + inflation) / CELL) + TRANSITION_RECORD_INDEX_MARGIN_CELLS
     var min_z := floori((float(record.get("minZ", 0.0)) - inflation) / CELL) - TRANSITION_RECORD_INDEX_MARGIN_CELLS
     var max_z := floori((float(record.get("maxZ", 0.0)) + inflation) / CELL) + TRANSITION_RECORD_INDEX_MARGIN_CELLS
+    var cell_count := (max_x - min_x + 1) * (max_z - min_z + 1)
+    if max_index_cells > 0 and cell_count > max_index_cells:
+        broad_records.append(record)
+        return
     for z in range(min_z, max_z + 1):
         for x in range(min_x, max_x + 1):
             var key := Vector2i(x, z)
@@ -921,6 +1976,7 @@ func _remove_collision_records_for_prop(object_id: String) -> bool:
             var record: Dictionary = record_value
             cached_static_collision_records.erase(record)
             _unindex_collision_record(cached_static_collision_by_cell, record)
+            cached_static_collision_broad.erase(record)
         cached_prop_collision_records_by_object_id.erase(object_id)
         return not indexed_records.is_empty()
     var filtered: Array[Dictionary] = []
@@ -932,7 +1988,8 @@ func _remove_collision_records_for_prop(object_id: String) -> bool:
         filtered.append(record)
     if removed:
         cached_static_collision_records = filtered
-        cached_static_collision_by_cell = _collision_index_for_records(cached_static_collision_records)
+        cached_static_collision_broad = []
+        cached_static_collision_by_cell = _collision_index_for_records(cached_static_collision_records, cached_static_collision_broad)
     return removed
 
 func _registered_prop_node(object_id: String) -> Node3D:
@@ -1098,6 +2155,25 @@ func cell_position(cell: Vector2i) -> Vector3:
     return Vector3(float(cell.x) * CELL, y + 0.04, float(cell.y) * CELL)
 
 
+func route_waypoint_for_cell(cell: Vector2i, reference_position: Vector3 = Vector3.INF) -> Vector3:
+    var position := Vector3(float(cell.x) * CELL, 0.0, float(cell.y) * CELL)
+    if reference_position.is_finite():
+        var source_support := building_support_for_position(reference_position, CELL * 0.92)
+        if not source_support.is_empty() and _point_within_support_xz(position, source_support):
+            position.y = _support_surface_y(source_support, position) + 0.04
+            return position
+    return cell_position(cell)
+
+
+func route_requires_layered_navigation(start: Vector3, target: Vector3) -> bool:
+    return not building_support_for_position(start, CELL * 0.92).is_empty() \
+        or not building_support_for_position(target, CELL * 0.92).is_empty()
+
+
+func support_surface_y_for_position(support: Dictionary, position: Vector3) -> float:
+    return _support_surface_y(support, position)
+
+
 func navigation_query_position(position: Vector3) -> Vector3:
     # A point already placed on a published building support retains that layer.
     # Ground callers keep the old terrain projection, so this does not alter
@@ -1138,6 +2214,22 @@ func building_support_for_position(position: Vector3, vertical_tolerance := CELL
     return best
 
 
+func collision_part_is_walkable_building_support(source_part_id: String, position: Vector3, vertical_tolerance := 0.08, horizontal_tolerance := 0.0) -> bool:
+    if source_part_id.is_empty():
+        return false
+    for support_value in cached_building_supports:
+        if not (support_value is Dictionary):
+            continue
+        var support: Dictionary = support_value
+        if String(support.get("sourceCollisionPartId", support.get("sourcePartId", ""))) != source_part_id:
+            continue
+        if not _point_within_or_near_support_xz(position, support, horizontal_tolerance):
+            continue
+        if absf(position.y - _support_surface_y(support, position) - 0.04) <= vertical_tolerance:
+            return true
+    return false
+
+
 func _point_within_support_xz(position: Vector3, support: Dictionary) -> bool:
     var polygon: Array = support.get("polygon", []) if support.get("polygon", []) is Array else []
     if polygon.size() < 3:
@@ -1159,6 +2251,34 @@ func _point_within_support_xz(position: Vector3, support: Dictionary) -> bool:
                 inside = not inside
         previous = point
     return inside
+
+
+func _point_within_or_near_support_xz(position: Vector3, support: Dictionary, horizontal_tolerance := 0.0) -> bool:
+    if _point_within_support_xz(position, support):
+        return true
+    if horizontal_tolerance <= 0.0:
+        return false
+    var polygon: Array = support.get("polygon", []) if support.get("polygon", []) is Array else []
+    if polygon.size() < 2:
+        return false
+    var point_2d := Vector2(position.x, position.z)
+    var previous: Vector3 = polygon[polygon.size() - 1] if polygon[polygon.size() - 1] is Vector3 else Vector3.ZERO
+    for point_value in polygon:
+        if not (point_value is Vector3):
+            return false
+        var point: Vector3 = point_value
+        var edge_start := Vector2(previous.x, previous.z)
+        var edge_end := Vector2(point.x, point.z)
+        var edge := edge_end - edge_start
+        var edge_length_squared := edge.length_squared()
+        var closest := edge_start
+        if edge_length_squared > 0.000001:
+            var projection := clampf((point_2d - edge_start).dot(edge) / edge_length_squared, 0.0, 1.0)
+            closest = edge_start + edge * projection
+        if point_2d.distance_to(closest) <= horizontal_tolerance:
+            return true
+        previous = point
+    return false
 
 
 func _support_surface_y(support: Dictionary, position: Vector3) -> float:
@@ -1475,11 +2595,11 @@ func cell_transition_pathable(entry: Dictionary, snapshot: Dictionary, from_cell
         return static_check
     return { "ok": true, "reason": "" }
 
-func validate_waypoint_route(entry: Dictionary, snapshot: Dictionary, points: Array, target_cells: Dictionary, ignore_dynamic := true) -> Dictionary:
+func validate_waypoint_route(entry: Dictionary, snapshot: Dictionary, points: Array, target_cells: Dictionary, ignore_dynamic := true, route_actions := {}) -> Dictionary:
     if points.size() < 2:
         return { "ok": true, "reason": "" }
     if _route_uses_building_supports(points):
-        return _validate_layered_building_route(snapshot, points)
+        return _validate_layered_building_route(snapshot, points, route_actions)
     var avoid_lookup := {}
     for cell_value in entry.get("routeDynamicAvoidCells", []):
         if cell_value is Vector2i:
@@ -1538,7 +2658,7 @@ func _route_uses_building_supports(points: Array) -> bool:
     return false
 
 
-func _validate_layered_building_route(snapshot: Dictionary, points: Array) -> Dictionary:
+func _validate_layered_building_route(snapshot: Dictionary, points: Array, route_actions := {}) -> Dictionary:
     # The navmesh may cross terrain, floor slabs and real stair stringers in one
     # route.  Validate that exact three-dimensional corridor instead of applying
     # the legacy one-height-per-XZ cell test, which cannot represent a floor over
@@ -1569,6 +2689,9 @@ func _validate_layered_building_route(snapshot: Dictionary, points: Array) -> Di
                 point.y = terrain_point.y
             var collision := static_collision_blocker_at_position(snapshot, point, source_part_id)
             if not collision.is_empty():
+                var portal_action := _source_door_portal_action_for_segment(route_actions, previous, next)
+                if not portal_action.is_empty() and _door_portal_segment_is_physically_clear(snapshot, previous, next, portal_action):
+                    continue
                 return {
                     "ok": false,
                     "reason": "layered_static_collision",
@@ -1578,6 +2701,73 @@ func _validate_layered_building_route(snapshot: Dictionary, points: Array) -> Di
                 }
         previous = next
     return { "ok": true, "reason": "", "layeredSupportValidation": true }
+
+
+func _source_door_portal_action_for_segment(route_actions, first: Vector3, second: Vector3) -> Dictionary:
+    if not (route_actions is Dictionary):
+        return {}
+    for action_value in (route_actions as Dictionary).values():
+        if not (action_value is Dictionary):
+            continue
+        var action: Dictionary = action_value
+        if String(action.get("kind", "")) != "door" or not bool(action.get("navLink", false)):
+            continue
+        var portal_id := String(action.get("portalId", ""))
+        var source_door := _source_building_door_for_portal(portal_id)
+        if source_door.is_empty():
+            continue
+        var entry_position = action.get("entryPosition", null)
+        var exit_position = action.get("exitPosition", null)
+        if not (entry_position is Vector3) or not (exit_position is Vector3):
+            continue
+        if not _source_door_action_matches_portal(entry_position as Vector3, exit_position as Vector3, source_door):
+            continue
+        if _door_portal_segment_touches_endpoint(first, second, entry_position as Vector3, exit_position as Vector3):
+            return action
+    return {}
+
+
+func _source_building_door_for_portal(portal_id: String) -> Dictionary:
+    if portal_id.is_empty():
+        return {}
+    for door_value in cached_building_doors:
+        if not (door_value is Dictionary):
+            continue
+        var source_door: Dictionary = door_value
+        if String(source_door.get("id", "")) == portal_id and bool(source_door.get("sourcePortalReady", false)):
+            return source_door
+    return {}
+
+
+func _source_door_action_matches_portal(entry: Vector3, exit: Vector3, source_door: Dictionary) -> bool:
+    var interior = source_door.get("interior", null)
+    var exterior = source_door.get("exterior", null)
+    if not (interior is Vector3) or not (exterior is Vector3):
+        return false
+    return (entry.distance_to(interior as Vector3) <= DOOR_PORTAL_VALIDATION_POINT_EPSILON and exit.distance_to(exterior as Vector3) <= DOOR_PORTAL_VALIDATION_POINT_EPSILON) \
+        or (entry.distance_to(exterior as Vector3) <= DOOR_PORTAL_VALIDATION_POINT_EPSILON and exit.distance_to(interior as Vector3) <= DOOR_PORTAL_VALIDATION_POINT_EPSILON)
+
+
+func _door_portal_segment_touches_endpoint(first: Vector3, second: Vector3, entry: Vector3, exit: Vector3) -> bool:
+    return first.distance_to(entry) <= DOOR_PORTAL_VALIDATION_POINT_EPSILON \
+        or first.distance_to(exit) <= DOOR_PORTAL_VALIDATION_POINT_EPSILON \
+        or second.distance_to(entry) <= DOOR_PORTAL_VALIDATION_POINT_EPSILON \
+        or second.distance_to(exit) <= DOOR_PORTAL_VALIDATION_POINT_EPSILON
+
+
+func _door_portal_segment_is_physically_clear(snapshot: Dictionary, first: Vector3, second: Vector3, _action: Dictionary) -> bool:
+    var samples := clampi(ceili(first.distance_to(second) / maxf(CELL * 0.28, 0.12)), 1, 96)
+    for sample_index in range(samples + 1):
+        var point := first.lerp(second, float(sample_index) / float(samples))
+        var support := building_support_for_position(point, CELL * 0.92)
+        var source_part_id := ""
+        if not support.is_empty():
+            point.y = _support_surface_y(support, point) + 0.04
+            source_part_id = String(support.get("sourceCollisionPartId", support.get("sourcePartId", "")))
+        var collision := static_collision_blocker_at_position_with_inflation(snapshot, point, source_part_id, DOOR_PORTAL_PHYSICAL_COLLISION_INFLATION)
+        if not collision.is_empty():
+            return false
+    return true
 func _transition_door_collision_pathable(entry: Dictionary, snapshot: Dictionary, from_cell: Vector2i, to_cell: Vector2i, moving_home := false) -> Dictionary:
     var from_position := cell_position(from_cell)
     var to_position := cell_position(to_cell)
@@ -1651,9 +2841,26 @@ func static_collision_blocker_at_position(snapshot: Dictionary, position: Vector
             return record
     return {}
 
+
+func static_collision_blocker_at_position_with_inflation(snapshot: Dictionary, position: Vector3, supporting_source_part_id: String, inflation: float) -> Dictionary:
+    var cell := world_cell(position)
+    var records := _transition_collision_records(snapshot, "staticCollisionByCell", cell, cell)
+    for record in records:
+        var node_value = record.get("node", null)
+        if node_value != null and not is_instance_valid(node_value):
+            continue
+        var source_part_id := String(record.get("sourcePartId", ""))
+        if not supporting_source_part_id.is_empty() and source_part_id == supporting_source_part_id:
+            continue
+        if _point_inside_collision_record_3d_with_inflation(position, record, inflation):
+            return record
+    return {}
+
 func _transition_collision_records(snapshot: Dictionary, index_key: String, from_cell: Vector2i, to_cell: Vector2i) -> Array:
     var index: Dictionary = snapshot.get(index_key, {})
-    if index.is_empty():
+    var broad_key := "staticCollisionBroad" if index_key == "staticCollisionByCell" else "doorCollisionBroad" if index_key == "doorCollisionByCell" else ""
+    var broad_records: Array = snapshot.get(broad_key, []) if broad_key != "" and snapshot.get(broad_key, []) is Array else []
+    if index.is_empty() and broad_records.is_empty():
         return []
     var min_x := mini(from_cell.x, to_cell.x) - 1
     var max_x := maxi(from_cell.x, to_cell.x) + 1
@@ -1673,16 +2880,46 @@ func _transition_collision_records(snapshot: Dictionary, index_key: String, from
                     continue
                 seen[id] = true
                 result.append(record)
+    for record_value in broad_records:
+        if not (record_value is Dictionary):
+            continue
+        var record: Dictionary = record_value
+        var id := String(record.get("id", ""))
+        if id == "" or seen.has(id) or not _collision_record_overlaps_cells(record, min_x, max_x, min_z, max_z):
+            continue
+        seen[id] = true
+        result.append(record)
     return result
+
+func _collision_record_overlaps_cells(record: Dictionary, min_x: int, max_x: int, min_z: int, max_z: int) -> bool:
+    var inflation := float(record.get("inflation", TRANSITION_COLLISION_INFLATION))
+    var min_world_x := float(min_x) * CELL
+    var max_world_x := float(max_x + 1) * CELL
+    var min_world_z := float(min_z) * CELL
+    var max_world_z := float(max_z + 1) * CELL
+    return float(record.get("maxX", -INF)) + inflation >= min_world_x \
+        and float(record.get("minX", INF)) - inflation <= max_world_x \
+        and float(record.get("maxZ", -INF)) + inflation >= min_world_z \
+        and float(record.get("minZ", INF)) - inflation <= max_world_z
 
 func _segment_intersects_collision_record(from_position: Vector3, to_position: Vector3, record: Dictionary) -> bool:
     var inflation := float(record.get("inflation", TRANSITION_COLLISION_INFLATION))
+    var footprint: Array = record.get("footprint", []) if record.get("footprint", []) is Array else []
+    if footprint.size() >= 3:
+        return _footprint_intersects_segment(Vector2(from_position.x, from_position.z), Vector2(to_position.x, to_position.z), footprint, inflation)
     var min_point := Vector2(float(record.get("minX", 0.0)) - inflation, float(record.get("minZ", 0.0)) - inflation)
     var max_point := Vector2(float(record.get("maxX", 0.0)) + inflation, float(record.get("maxZ", 0.0)) + inflation)
     return _segment_intersects_aabb_2d(Vector2(from_position.x, from_position.z), Vector2(to_position.x, to_position.z), min_point, max_point)
 
 func _point_inside_collision_record(position: Vector3, record: Dictionary) -> bool:
     var inflation := float(record.get("inflation", TRANSITION_COLLISION_INFLATION))
+    return _point_inside_collision_record_with_inflation(position, record, inflation)
+
+
+func _point_inside_collision_record_with_inflation(position: Vector3, record: Dictionary, inflation: float) -> bool:
+    var footprint: Array = record.get("footprint", []) if record.get("footprint", []) is Array else []
+    if footprint.size() >= 3:
+        return _footprint_intersects_segment(Vector2(position.x, position.z), Vector2(position.x, position.z), footprint, inflation)
     var x := position.x
     var z := position.z
     return x >= float(record.get("minX", 0.0)) - inflation \
@@ -1694,6 +2931,16 @@ func _point_inside_collision_record(position: Vector3, record: Dictionary) -> bo
 func _point_inside_collision_record_3d(position: Vector3, record: Dictionary) -> bool:
     if not _point_inside_collision_record(position, record):
         return false
+    return _point_inside_collision_record_vertical_range(position, record)
+
+
+func _point_inside_collision_record_3d_with_inflation(position: Vector3, record: Dictionary, inflation: float) -> bool:
+    if not _point_inside_collision_record_with_inflation(position, record, inflation):
+        return false
+    return _point_inside_collision_record_vertical_range(position, record)
+
+
+func _point_inside_collision_record_vertical_range(position: Vector3, record: Dictionary) -> bool:
     var min_y := float(record.get("minY", -INF))
     var max_y := float(record.get("maxY", INF))
     return position.y >= min_y - 0.025 and position.y <= max_y + 0.025
@@ -1719,6 +2966,78 @@ func _segment_intersects_aabb_2d(from_point: Vector2, to_point: Vector2, min_poi
         t_min = maxf(t_min, minf(ty1, ty2))
         t_max = minf(t_max, maxf(ty1, ty2))
     return t_max >= t_min and t_max >= 0.0 and t_min <= 1.0
+
+
+func _footprint_intersects_segment(first: Vector2, second: Vector2, footprint: Array, clearance: float) -> bool:
+    if footprint.size() < 3:
+        return false
+    if _point_within_footprint(first, footprint) or _point_within_footprint(second, footprint):
+        return true
+    var clearance_squared := clearance * clearance
+    var previous: Vector3 = footprint[footprint.size() - 1] if footprint[footprint.size() - 1] is Vector3 else Vector3.ZERO
+    for point_value in footprint:
+        if not (point_value is Vector3):
+            return false
+        var point: Vector3 = point_value
+        var edge_start := Vector2(previous.x, previous.z)
+        var edge_end := Vector2(point.x, point.z)
+        if _segments_intersect_2d(first, second, edge_start, edge_end):
+            return true
+        if _point_to_segment_distance_squared(first, edge_start, edge_end) <= clearance_squared \
+                or _point_to_segment_distance_squared(second, edge_start, edge_end) <= clearance_squared \
+                or _point_to_segment_distance_squared(edge_start, first, second) <= clearance_squared \
+                or _point_to_segment_distance_squared(edge_end, first, second) <= clearance_squared:
+            return true
+        previous = point
+    return false
+
+
+func _point_within_footprint(position: Vector2, footprint: Array) -> bool:
+    if footprint.size() < 3:
+        return false
+    var inside := false
+    var previous: Vector3 = footprint[footprint.size() - 1] if footprint[footprint.size() - 1] is Vector3 else Vector3.ZERO
+    for point_value in footprint:
+        if not (point_value is Vector3):
+            return false
+        var point: Vector3 = point_value
+        var crosses := (point.z > position.y) != (previous.z > position.y)
+        if crosses:
+            var denominator := previous.z - point.z
+            if absf(denominator) > 0.000001:
+                var x_at_z := (previous.x - point.x) * (position.y - point.z) / denominator + point.x
+                if position.x < x_at_z:
+                    inside = not inside
+        previous = point
+    return inside
+
+
+func _segments_intersect_2d(first_start: Vector2, first_end: Vector2, second_start: Vector2, second_end: Vector2) -> bool:
+    var first_direction := first_end - first_start
+    var second_direction := second_end - second_start
+    var denominator := first_direction.cross(second_direction)
+    var delta := second_start - first_start
+    if absf(denominator) <= 0.000001:
+        if absf(delta.cross(first_direction)) > 0.000001:
+            return false
+        var first_length_squared := first_direction.length_squared()
+        if first_length_squared <= 0.000001:
+            return first_start.distance_squared_to(second_start) <= 0.000001
+        var start_projection := delta.dot(first_direction) / first_length_squared
+        var end_projection := (second_end - first_start).dot(first_direction) / first_length_squared
+        return maxf(minf(start_projection, end_projection), 0.0) <= minf(maxf(start_projection, end_projection), 1.0)
+    var first_t := delta.cross(second_direction) / denominator
+    var second_t := delta.cross(first_direction) / denominator
+    return first_t >= -0.000001 and first_t <= 1.000001 and second_t >= -0.000001 and second_t <= 1.000001
+
+
+func _point_to_segment_distance_squared(point: Vector2, segment_start: Vector2, segment_end: Vector2) -> float:
+    var segment := segment_end - segment_start
+    var length_squared := segment.length_squared()
+    if length_squared <= 0.000001:
+        return point.distance_squared_to(segment_start)
+    var projection := clampf((point - segment_start).dot(segment) / length_squared, 0.0, 1.0)
+    return point.distance_squared_to(segment_start + segment * projection)
 
 func _door_transition_allows(entry: Dictionary, door: Node, from_cell: Vector2i, to_cell: Vector2i, moving_home := false) -> bool:
     if door == null:
@@ -1906,6 +3225,8 @@ func _navmesh_surface_for_cell(snapshot: Dictionary, cell: Vector2i) -> Dictiona
     if prop_clearance_blocker(snapshot, cell) != null:
         return {}
     var position := cell_position(cell)
+    if _terrain_surface_is_covered_by_building_support(position):
+        return {}
     var span_y := floori(position.y / CELL)
     position.y = float(span_y) * CELL + 0.04
     var traversal_tags: Array[String] = ["terrain"]
@@ -1927,9 +3248,68 @@ func _navmesh_surface_for_cell(snapshot: Dictionary, cell: Vector2i) -> Dictiona
     }
     return surface
 
+
+func _terrain_surface_is_covered_by_building_support(position: Vector3) -> bool:
+    for support in cached_building_supports:
+        if not _point_within_support_xz(position, support):
+            continue
+        if _support_surface_y(support, position) >= position.y + CELL * 0.12:
+            return true
+    return false
+
 func _navmesh_door_summary_for_tile(snapshot: Dictionary, tile_key: String) -> Dictionary:
     var portals: Array[Dictionary] = []
     var links: Array[Dictionary] = []
+    var source_portal_ids := {}
+    for source_door in building_doors_for_tile(tile_key):
+        if not bool(source_door.get("sourcePortalReady", false)):
+            continue
+        var portal_id := String(source_door.get("id", ""))
+        var interior: Vector3 = source_door.get("interior", Vector3.ZERO) if source_door.get("interior", Vector3.ZERO) is Vector3 else Vector3.ZERO
+        var exterior: Vector3 = source_door.get("exterior", Vector3.ZERO) if source_door.get("exterior", Vector3.ZERO) is Vector3 else Vector3.ZERO
+        if portal_id.is_empty() or interior.distance_squared_to(exterior) <= 0.0001:
+            continue
+        var live_door := _live_door_for_portal(snapshot, portal_id)
+        var door_cell := world_cell((interior + exterior) * 0.5)
+        var state := String(live_door.get_meta("door_state", NpcEnumsScript.DOOR_STATE_CLOSED)) if live_door != null else String(NpcEnumsScript.DOOR_STATE_CLOSED)
+        var locked := bool(live_door.get_meta("locked", false)) if live_door != null else false
+        var jammed := bool(live_door.get_meta("jammed", false)) if live_door != null else false
+        var destroyed := bool(live_door.get_meta("destroyed", false)) if live_door != null else false
+        var unloaded := bool(live_door.get_meta("unloaded", false)) if live_door != null else false
+        portals.append({
+            "id": portal_id,
+            "entrance": interior,
+            "exit": exterior,
+            "state": state,
+            "openable": true,
+            "enabled": not destroyed and not unloaded,
+            "locked": locked,
+            "jammed": jammed,
+            "destroyed": destroyed,
+            "unloaded": unloaded,
+            "crossingAxis": "source",
+            "cell": door_cell,
+            "sourceDoor": true,
+            "sourcePartId": String(source_door.get("sourcePartId", ""))
+        })
+        links.append({
+            "id": "door-link:%s:%s" % [portal_id, tile_key],
+            "from": _nav_span_key(tile_key, world_cell(interior)),
+            "to": _nav_span_key(tile_key, world_cell(exterior)),
+            "portalId": portal_id,
+            "actionId": "open",
+            "start": interior,
+            "end": exterior,
+            "bidirectional": true,
+            "openable": true,
+            "enabled": true,
+            "cost": 1.0,
+            "enterCost": DOOR_LINK_ENTER_COST,
+            "travelCost": 1.0,
+            "cell": door_cell,
+            "sourceDoor": true
+        })
+        source_portal_ids[portal_id] = true
     var doors: Dictionary = snapshot.get("doors", {})
     var cells: Array = doors.keys()
     cells.sort_custom(func(a, b): return cell_key(a) < cell_key(b))
@@ -1944,6 +3324,8 @@ func _navmesh_door_summary_for_tile(snapshot: Dictionary, tile_key: String) -> D
             continue
         var portal_id := _door_portal_id(door, cell)
         if portal_id == "":
+            continue
+        if source_portal_ids.has(portal_id):
             continue
         var axis := _door_crossing_axis(door, snapshot, cell)
         var step := Vector2i(1, 0) if axis == "x" else Vector2i(0, 1)
@@ -1982,6 +3364,19 @@ func _navmesh_door_summary_for_tile(snapshot: Dictionary, tile_key: String) -> D
             "cell": cell
         })
     return { "doorPortals": portals, "doorLinks": links }
+
+
+func _live_door_for_portal(snapshot: Dictionary, portal_id: String) -> Node:
+    var doors: Dictionary = snapshot.get("doors", {})
+    var cells: Array = doors.keys()
+    cells.sort_custom(func(a, b): return cell_key(a) < cell_key(b))
+    for cell_value in cells:
+        if not (cell_value is Vector2i):
+            continue
+        var door := door_at(snapshot, cell_value as Vector2i)
+        if door != null and _door_portal_id(door, cell_value as Vector2i) == portal_id:
+            return door
+    return null
 
 func _door_portal_id(door: Node, cell: Vector2i) -> String:
     if door == null:
@@ -2117,7 +3512,7 @@ func cell_is_static_standable_goal(entry: Dictionary, cell: Vector2i, allow_outs
 
 
 func static_validation_snapshot(entry: Dictionary, allow_outside := false, moving_home := false) -> Dictionary:
-    if cached_revision == "" and cached_blocked.is_empty() and cached_doors.is_empty() and cached_paths.is_empty() and cached_props.is_empty():
+    if cached_revision == "":
         build_snapshot(entry, allow_outside, moving_home)
     return {
         "revision": revision(),

@@ -641,6 +641,8 @@ func _home_wall_transition_block(entry: Dictionary, from_cell: Vector2i, to_cell
 		return {}
 	if from_cell == door_cell or to_cell == door_cell:
 		return {}
+	if _declared_home_entry_corridor_cell(entry, from_cell) and _declared_home_entry_corridor_cell(entry, to_cell):
+		return {}
 	return {
 		"ok": false,
 		"classification": CLASS_UNREACHABLE_STATIC,
@@ -652,6 +654,33 @@ func _home_wall_transition_block(entry: Dictionary, from_cell: Vector2i, to_cell
 		"generatedWorldInformed": true,
 		"semanticDoorEdgeRequired": true
 	}
+
+
+func _declared_home_entry_corridor_cell(entry: Dictionary, cell: Vector2i) -> bool:
+	var door_cell: Variant = entry.get("doorCell", INVALID_CELL)
+	var landing_cell: Variant = entry.get("interiorLandingCell", INVALID_CELL)
+	if not (door_cell is Vector2i) or not (landing_cell is Vector2i):
+		return false
+	var typed_door_cell: Vector2i = door_cell
+	var typed_landing_cell: Vector2i = landing_cell
+	if typed_door_cell == INVALID_CELL or typed_landing_cell == INVALID_CELL:
+		return false
+	var corridor: Vector2i = typed_landing_cell - typed_door_cell
+	if corridor == Vector2i.ZERO:
+		return cell == typed_door_cell
+	var direction: Vector2i = Vector2i.ZERO
+	if absi(corridor.x) >= absi(corridor.y):
+		direction.x = 1 if corridor.x > 0 else -1
+	else:
+		direction.y = 1 if corridor.y > 0 else -1
+	var offset: Vector2i = cell - typed_door_cell
+	if direction.x != 0 and offset.y != 0:
+		return false
+	if direction.y != 0 and offset.x != 0:
+		return false
+	var distance: int = offset.x * direction.x + offset.y * direction.y
+	var corridor_length: int = absi(corridor.x) + absi(corridor.y)
+	return distance >= 0 and distance <= corridor_length
 
 
 func _build_snapshot(entry: Dictionary, allow_outside: bool, moving_home: bool) -> Dictionary:
@@ -687,6 +716,11 @@ func _target_candidate_cells(entry: Dictionary, target: Dictionary, semantic_kin
 		_append_cell(result, target.get("cell", INVALID_CELL))
 	elif semantic_kind == "forage_target":
 		_append_cell(result, target.get("exactSlotCell", target.get("cell", INVALID_CELL)))
+	elif semantic_kind == "scripted_target":
+		# Public go-to orders name an exact semantic destination. Broad approach
+		# poses are valid for interactions, but accepting one here can complete a
+		# route several metres from the commanded point.
+		_append_cell(result, target.get("cell", INVALID_CELL))
 	elif semantic_kind == "interaction_target":
 		# A caller may provide a semantic set of physically valid action poses
 		# (for example, placement stands). They remain candidates only: this
@@ -902,7 +936,11 @@ func _door_actions_for_edges(door_edges: Array) -> Dictionary:
 	return actions
 
 
-func _cell_position(cell: Vector2i) -> Vector3:
+func _cell_position(cell: Vector2i, reference_position: Vector3 = Vector3.INF) -> Vector3:
+	if _adapter_has("route_waypoint_for_cell"):
+		var waypoint = world_adapter.call("route_waypoint_for_cell", cell, reference_position)
+		if waypoint is Vector3:
+			return waypoint
 	if _adapter_has("cell_position"):
 		var position = world_adapter.call("cell_position", cell)
 		if position is Vector3:
@@ -1171,13 +1209,18 @@ func _adapter_has(method_name: String) -> bool:
 
 func _result(ok: bool, classification: String, reason: String, route_cells: Array, visited_cells: Array, proof: Dictionary, actions := {}, start_position = null) -> Dictionary:
 	var waypoints: Array = []
+	var waypoint_reference := Vector3.INF
+	if start_position is Vector3:
+		waypoint_reference = start_position
 	for index in range(route_cells.size()):
 		var cell = route_cells[index]
 		if cell is Vector2i:
 			if index == 0 and start_position is Vector3:
 				waypoints.append(start_position)
 			else:
-				waypoints.append(_cell_position(cell))
+				waypoints.append(_cell_position(cell, waypoint_reference))
+			if waypoints[waypoints.size() - 1] is Vector3:
+				waypoint_reference = waypoints[waypoints.size() - 1]
 	var target_cell := INVALID_CELL
 	if not route_cells.is_empty() and route_cells[route_cells.size() - 1] is Vector2i:
 		target_cell = route_cells[route_cells.size() - 1]

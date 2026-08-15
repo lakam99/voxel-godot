@@ -3,6 +3,9 @@ class_name FurnishingPlan
 
 const FurnishingPartScript := preload("res://scripts/buildings/FurnishingPart.gd")
 const InteriorFurnishingLayoutScript := preload("res://scripts/buildings/InteriorFurnishingLayout.gd")
+const NpcConstantsScript := preload("res://scripts/npc_ai/NpcConstants.gd")
+
+const PROTECTED_ACCESS_CLEARANCE := NpcConstantsScript.DEFAULT_NPC_RADIUS + NpcConstantsScript.DEFAULT_PERSONAL_SPACE_MARGIN
 
 var id := ""
 var seed := 0
@@ -59,7 +62,7 @@ func part_occupies_protected_access(part) -> bool:
 	# physically sealed by a furnishing record.
 	if String(part.archetype) in ["rug", "aisle_runner"]:
 		return false
-	var bounds := InteriorFurnishingLayoutScript.horizontal_bounds(part.position, part.occupied_size, part.rotation)
+	var bounds := InteriorFurnishingLayoutScript.horizontal_bounds(part.position, part.occupied_size, part.rotation, PROTECTED_ACCESS_CLEARANCE)
 	return InteriorFurnishingLayoutScript.intersects_any(bounds, protected_access_reservations)
 
 

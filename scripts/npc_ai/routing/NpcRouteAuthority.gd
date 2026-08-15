@@ -72,6 +72,12 @@ func prebake_area_tiles(center_cell: Vector2i, radius_cells: int) -> Dictionary:
 		return delegate.prebake_area_tiles(center_cell, radius_cells)
 	return { "ok": false, "reason": "missing_prebake_delegate" }
 
+
+func prebake_building_navigation_topology() -> Dictionary:
+	if delegate != null and delegate.has_method("prebake_building_navigation_topology"):
+		return delegate.prebake_building_navigation_topology()
+	return { "ok": false, "reason": "missing_prebake_delegate" }
+
 func plan_route(entry: Dictionary, intent: Dictionary) -> Dictionary:
 	counters["requests"] = int(counters.get("requests", 0)) + 1
 	if delegate == null or not delegate.has_method("plan_route"):

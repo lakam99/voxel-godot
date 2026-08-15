@@ -73,6 +73,9 @@ func plan_runtime_route(entry: Dictionary, intent: Dictionary, generated_world =
 		"startMaxSnapDistance": float(snap_distances.get("start", CELL * 0.95)),
 		"targetMaxSnapDistance": float(snap_distances.get("target", CELL * 0.95)),
 		"queryApi": query_api,
+		"pathPostprocessing": NavigationPathQueryParameters3D.PATH_POSTPROCESSING_CORRIDORFUNNEL,
+		"simplifyPath": true,
+		"simplifyEpsilon": NpcConstantsScript.NAVMESH_PATH_SIMPLIFY_EPSILON,
 		"preferDescriptorEndpoint": true,
 		"forbiddenDoorPortalIds": forbidden_private_door_ids
 	})
@@ -225,6 +228,9 @@ func _plan_fallback_cell_route(entry: Dictionary, intent: Dictionary, generated_
 			"startMaxSnapDistance": float(fallback_snap_distances.get("start", CELL * 0.95)),
 			"targetMaxSnapDistance": float(fallback_snap_distances.get("target", CELL * 0.95)),
 			"queryApi": _runtime_query_api(intent),
+			"pathPostprocessing": NavigationPathQueryParameters3D.PATH_POSTPROCESSING_CORRIDORFUNNEL,
+			"simplifyPath": true,
+			"simplifyEpsilon": NpcConstantsScript.NAVMESH_PATH_SIMPLIFY_EPSILON,
 			"preferDescriptorEndpoint": true,
 			"forbiddenDoorPortalIds": forbidden_private_door_ids
 		})
@@ -824,10 +830,11 @@ func _build_runtime_route_from_navmesh(entry: Dictionary, intent: Dictionary, ge
 		var rejected_route := route.duplicate(true)
 		rejected_route["validation"] = validation
 		return _route_failure("blocked", "path_crosses_static_collision", target_cell, rejected_route)
-	var waypoints: Array = _path_waypoints(raw_points, query_start, route_target, generated_world, entry, bool(intent.get("allowOutside", false)), bool(intent.get("movingHome", false)))
+	var route_actions: Dictionary = route.get("actions", {}) if route.get("actions", {}) is Dictionary else {}
+	var waypoints: Array = _path_waypoints(raw_points, query_start, route_target, generated_world, entry, bool(intent.get("allowOutside", false)), bool(intent.get("movingHome", false)), route_actions)
 	var cells: Array[Vector2i] = _cells_for_waypoints(waypoints, generated_world)
 	var sampled_cells: Array[Vector2i] = _cells_for_route_points(raw_points, generated_world)
-	var actions := _route_actions_with_detected_doors(entry, intent, generated_world, sampled_cells, route.get("actions", {}))
+	var actions := _route_actions_with_detected_doors(entry, intent, generated_world, sampled_cells, route_actions)
 	cells = _preserve_route_action_cells(cells, actions)
 	var using_fallback := fallback_cell != target_cell
 	var route_reason := String(route.get("reason", ""))
@@ -946,9 +953,10 @@ func _validate_generated_world_route(entry: Dictionary, intent: Dictionary, gene
 		var action_cell = action.get("cell")
 		if action_cell is Vector2i:
 			target_lookup[action_cell] = true
-	return source.validate_waypoint_route(entry, snapshot, points, target_lookup, true)
+	var route_actions: Dictionary = route.get("actions", {}) if route.get("actions", {}) is Dictionary else {}
+	return source.validate_waypoint_route(entry, snapshot, points, target_lookup, true, route_actions)
 
-func _path_waypoints(path_value, start: Vector3, target: Vector3, generated_world = null, entry := {}, allow_outside := false, moving_home := false) -> Array[Vector3]:
+func _path_waypoints(path_value, start: Vector3, target: Vector3, generated_world = null, entry := {}, allow_outside := false, moving_home := false, route_actions := {}) -> Array[Vector3]:
 	var result: Array[Vector3] = []
 	if path_value is PackedVector3Array:
 		for point in path_value:
@@ -959,15 +967,17 @@ func _path_waypoints(path_value, start: Vector3, target: Vector3, generated_worl
 				result.append(point)
 	while not result.is_empty() and result[0].distance_to(start) <= CELL * 0.08:
 		result.remove_at(0)
-	result = _prune_initial_hairpin_waypoints(result, start, target)
+	result = _prune_initial_hairpin_waypoints(result, start, target, route_actions)
 	if result.is_empty() and start.distance_to(target) > CELL * 0.08:
 		result.append(target)
 	if not result.is_empty() and result[result.size() - 1].distance_to(target) > CELL * 0.12:
 		result.append(target)
 	return result
 
-func _prune_initial_hairpin_waypoints(waypoints: Array[Vector3], start: Vector3, target: Vector3) -> Array[Vector3]:
+func _prune_initial_hairpin_waypoints(waypoints: Array[Vector3], start: Vector3, target: Vector3, route_actions := {}) -> Array[Vector3]:
 	var result: Array[Vector3] = waypoints.duplicate()
+	if _route_has_door_actions(route_actions):
+		return result
 	var target_delta := _flat_delta(start, target)
 	if target_delta.length_squared() <= 0.0001:
 		return result
@@ -989,6 +999,14 @@ func _prune_initial_hairpin_waypoints(waypoints: Array[Vector3], start: Vector3,
 			break
 		result.remove_at(0)
 	return result
+
+func _route_has_door_actions(actions_value) -> bool:
+	if not (actions_value is Dictionary):
+		return false
+	for action_value in (actions_value as Dictionary).values():
+		if action_value is Dictionary and String((action_value as Dictionary).get("kind", "")) == "door":
+			return true
+	return false
 
 func _cells_for_waypoints(waypoints: Array[Vector3], generated_world = null) -> Array[Vector2i]:
 	var cells: Array[Vector2i] = []
