@@ -22,3 +22,25 @@ addons/zylann.voxel/bin/
 compile-smoke-debug.txt
 npc-navigation-direct-log-progress.txt
 **.pyc
+**/.DS_Store
+
+# Brown-bear sculpt working cache. Keep the journal, brief, READMEs, and
+# reproducible pipeline source under version control.
+assets/art-source/brown_bear_poc/studies/
+assets/art-source/brown_bear_poc/rejected/
+assets/art-source/brown_bear_poc/textures/
+assets/art-source/brown_bear_poc/reference-library/images/
+assets/art-source/brown_bear_poc/reference-library/contact-sheets/
+assets/art-source/brown_bear_poc/reference-library/manifest.json
+assets/art-source/brown_bear_poc/STUDY_RETENTION_MANIFEST.json
+
+# Superseded one-off bear experiments. The maintained pipeline tools are
+# explicitly restored below.
+tools/blender/*bear*.py
+tools/blender/*paw*.py
+tools/blender/*preferred*.py
+!tools/blender/build_bear_anatomy_reference_library.py
+!tools/blender/build_bear_forequarter_subdivision_cage.py
+!tools/blender/preview_bear_forequarter_cage_standalone.py
+!tools/blender/prune_bear_studies.py
+!tools/blender/render_bear_forequarter_cage_gate.py

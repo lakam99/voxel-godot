@@ -1,0 +1,38 @@
+{
+  "assetId": "brown_bear_poc",
+  "assetClass": "authored_creature_poc",
+  "stage": "apprenticeship_in_progress",
+  "intent": "A realistic, aggressive adult brown bear for an authored-mob pipeline pilot.",
+  "referenceObservations": [
+    "Tall shoulder hump and forequarters that outweigh the rear body.",
+    "A short, broad neck that flows into a low, tapered muzzle.",
+    "Small round ears set wide on the crown rather than tall pointed ears.",
+    "Plantigrade hind feet, broad paws, and heavy hanging forearms.",
+    "Long, coarse chestnut guard hairs over a dense dark underfur."
+  ],
+  "avoid": [
+    "Voxel, blocky, low-poly, or visibly primitive final forms.",
+    "Human torso proportions, a dog-like muzzle, or a narrow waist.",
+    "Fur used to conceal an unresolved silhouette or anatomy."
+  ],
+  "source": "source/brown_bear_poc.blend",
+  "export": "export/brown_bear_poc.glb",
+  "authoringBase": "No final authoring base is admitted until the anatomy critic approves every required cage and clay stage.",
+  "furAlbedoSource": "textures/brown_bear_fur_albedo-source.png",
+  "reviewRenders": [
+    "reviews/brown_bear_poc-beauty.png",
+    "reviews/brown_bear_poc-clay-front.png",
+    "reviews/brown_bear_poc-clay-side.png",
+    "reviews/brown_bear_poc-silhouette.png"
+  ],
+  "referenceInputs": [
+    "User-supplied Photo 1: aggressive upright brown bear reference.",
+    "User-supplied Photo 2: side-view brown bear anatomy reference."
+  ],
+  "acceptance": {
+    "minimumAuthoringBaseVertices": 5000,
+    "minimumNativeSculptChangedVertices": 1,
+    "requiredReviewGate": "An independent veteran-critic agent must approve landmark, primary-form, secondary-form, and full clay review stages before export.",
+    "forbiddenFallback": "No production output may be generated from unreviewed primitive, metaball, fused-volume, or partial-cage anatomy."
+  }
+}

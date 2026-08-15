@@ -1,0 +1,7 @@
+# Brown Bear Authoring Base
+
+Put the approved base at `brown-bear-authoring-base.glb` before starting the build script.
+
+The pilot requires a documented commercial-use license, source URL, original download date, and a source image or turntable in the asset review. The candidate must be a realistic quadruped brown bear, not a low-poly or procedural shape study. The public [Meshy candidate](https://www.meshy.ai/3d-models/Ultrarealistic-adult-bear-animal-model-as-a-single-solid-printsafe-asset-The-bear-stands-in-a-natural-grounded-pose-with-all-four-limbs-firmly-supporting-its-massive-weight-for-stability-Anatomy-is-physically-accurate-featuring-a-broad-muscular-torso-thick-neck-powerful-shoulders-heavy-paws-and-short-reinforced-claws-suitable-for-3D-printing-Head-is-large-with-a-strong-snout-defined-jaw-small-rounded-ears-and-deepset-eyes-Fur-texture-is-dense-layered-macrofur-for-realism-and-printability-Fur-material-is-matte-and-coarse-colored-deep-dark-brown-with-warm-umber-gradients-slightly-lighter-around-the-muzzle-chest-and-inner-ears-Eyes-are-dark-brown-with-subtle-natural-gloss-nose-is-dark-charcoal-with-soft-leathery-finish-v2-019b33ec-2cd6-7620-9000-7a1b6ed04f95) advertises CC0, but its download currently requires an account session and must be acquired by the project owner before import.
+
+Never replace this input with a primitive/metaball generator to get a green build. Rejection evidence belongs in `../rejected/`.
