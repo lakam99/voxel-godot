@@ -973,3 +973,28 @@
 **Reusable rule**
 
 > Separate silhouette placement, topology authority, and surface finishing. Use continuous warps for gross load lines, a clean quad/branch topology for anatomical mass, and native brushes only after the substrate and region ownership are trustworthy. Never promote a numerically safe or correctly masked edit when cavity renders show a stamp, lobe, or mitten.
+
+## Iterations 452–466 — A torso hole loft is still a socket
+
+- The first clean forequarter cage replaced disconnected primitives with one all-quad component, but its construction still deleted a patch from a cylindrical torso and lofted that boundary through concentric rings. The representation remained a socket even when the opening was moved inferolaterally and the section centers followed a plausible skeletal S-curve.
+- Iteration 464 passed basic topology counters with `2,130` quads, zero triangles/ngons/nonmanifold edges, one component, and only intentional neck/rear boundaries. The standalone painter understated the failure. A new Blender 5.2 gate in iteration 465 applied a real level-2 Catmull–Clark modifier and exposed a rectangular shoulder flap, collapsed axilla, ribbon forearm, swollen hinge elbow, wrist crease, and scalloped mitten paw.
+- Replacing the rectangular `5×7` excision with a centered `3/5/7/5/3` polyomino preserved the 24-edge branch count but made the underlying mistake more visible. Iteration 466 produced a serrated scapular flap: subdivision rounded the steps but could not invent a continuous scapular sheet or pectoral/triceps flow.
+- Changing section widths, depths, caudal bias, and load-path points improved gross taper but could not repair the shoulder because the torso strips still terminated at a hole and every attachment strip was forced toward one ring. The failure is topological correspondence, not insufficient parameter tuning.
+- Real Blender subdivision renders are now mandatory before critic submission. Standalone previews remain useful for fast inversion/manifold checks but cannot serve as the anatomical authority.
+
+**Reusable rule**
+
+> Never construct a quadruped shoulder by deleting a rectangular or stepped polyomino from a torso tube and morphing its perimeter into a limb ring. A production shoulder needs locally rerouted torso flow: dorsal strips must continue across a scapular sheet, cranial strips into pectoral/sternal flow, and caudal strips into triceps, with the axillary concavity lying between those authorities rather than on a loft seam.
+
+## Iterations 467–486 — A topology pass is not an anatomical pass
+
+- The accepted local connectivity is a `12×10` torso-side patch with one omitted `6×6` face block, a 24-edge `J0` branch, and two 24-quad collar bands. It contains exactly four valence-5 poles at the prescribed `J0` corners and no other non-regular interior vertices.
+- Hand-positioned guide rows repeatedly produced stretched sliver quads. Replacing every adjacent guide with one uniform `45%` interpolation from `J0` to the corresponding torso boundary reduced the maximum edge ratio from `7.90` to `2.47`, retained a minimum/median face-area ratio above `0.43`, and removed all nonadjacent intersections.
+- The collision-free result required the branch root to be the lateral-most local skin envelope before the collar exited it. Trying to force a collar out of a root buried inside the torso produced patch-collar intersections regardless of whether the nominal humeral tangent pointed lateral or ventral.
+- Those gates established a sound subdivision substrate, not a bear shoulder. Iteration 485 still read as a rounded-square socket with a uniform toroidal collar. The veteran critic rejected it anatomically despite a complete topology-specialist pass.
+- Iteration 486 therefore preserved connectivity and guide generation while making `J0` and collar thickness sectoral: broad scapular and triceps authority, reduced pectoral projection, and a compressed axillary sector. A torso proxy was added only as diagnostic context; it is not asset authority and may not be used to conceal a finite patch edge.
+- Every future report must separate `topologyStatus` from `anatomyStatus`. Zero intersections, controlled valence, monotonic collar advance, and good quad ratios are prerequisites. They cannot label a region accepted until raking-light views show the intended scapular plane, triceps mass, pectoral flow, and inward axillary saddle.
+
+**Reusable rule**
+
+> Solve connectivity, geometric embedding, and anatomy as three separate gates. Preserve a passed lower gate while correcting the next one, but never promote the lower gate's vocabulary into a claim that the sculpt itself is realistic.
