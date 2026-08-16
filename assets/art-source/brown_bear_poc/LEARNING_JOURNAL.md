@@ -1131,3 +1131,14 @@
 **Reusable rule**
 
 > When an attachment problem prevents anatomical judgment, isolate and pass the articulated region first with an explicit future seam. Do not let a folded junction force the apprentice to tune the limb around topology noise; freeze the accepted chain, then solve correspondence at its boundary.
+
+## Iterations 671–672 — A rump is not a shrinking hemisphere
+
+- The first isolated pelvis envelope preserved width and stayed below the withers, but its uniform cross-section falloff produced a ballooned sacrum, level ventral shelf, generic hemispherical gluteal descent, and a large centered tail tunnel.
+- The critic supplied a station-level correction rather than requesting more subdivision: slightly flatten the sacral apex, narrow the gluteal falloff earlier, raise and reduce the ischial section, then move a much smaller tail boundary dorsally.
+- Iteration 672 retains 96 all-quad faces, two intentional 16-edge attachment boundaries, zero nonmanifold edges, and zero self-intersections. Its measured apex is `2.02`, below the frozen `2.075` withers authority.
+- The veteran critic issued `PELVIS PRIMARY PASS`. The lumbar seam, sacral crown, iliac breadth, caudoventral tuck, gluteal falloff, and elevated tail seam are frozen; hindlimb extraction and tail geometry remain separate gates.
+
+**Reusable rule**
+
+> Rear-body realism comes from the hierarchy between iliac breadth, a short sacral crown, early gluteal falloff, rising ischial tuck, and a small elevated tail root. Uniformly shrinking elliptical sections make a polished balloon, not a pelvis.
