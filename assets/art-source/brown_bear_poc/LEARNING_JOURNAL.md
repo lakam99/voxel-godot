@@ -1118,3 +1118,16 @@
 **Reusable rule**
 
 > If a cleft remains deep when its scalar gap reaches zero, the problem is face ownership, not spacing. Keep the proximal mass as one shared surface, branch only where the anatomy visibly divides, give the branch finite subdivision runway, and audit winding across every newly rerouted saddle.
+
+## Iterations 664–670 — Separate limb anatomy from pelvic attachment
+
+- The first hindquarter experiment excised bilateral side patches from a closed pelvis and lofted them directly into limb sections. Although manifold, the patch plane and limb cross-section plane rotated too abruptly; geometric boundary sorting also destroyed true edge correspondence. The result formed apron folds and hundreds of nonadjacent intersections.
+- Adding collars and interpolation rows reduced the abruptness but did not change the underlying gate conflict: pelvic attachment topology was obscuring whether the hip–stifle–hock–heel chain itself was anatomically correct.
+- The workflow therefore split the problem. Iteration 668 isolated one all-quad hindlimb with an intentional 14-edge proximal attachment boundary and zero self-intersections. The critic rejected its continuous C-curve as a swan-neck rather than a loaded bear limb.
+- The correction shortened the hock-to-heel span, moved the heel posterior and down, widened the ankle, shifted and expanded the stifle, and carried at least ninety percent of paw width through the distal shelf. The heel-to-toe length remained measured rather than inferred from station names.
+- Iteration 670 measures a `.465` heel-to-toe length, `.232` maximum paw width, and `.732` hock-to-heel/heel-to-toe ratio, with 148 all-quad faces, zero nonmanifold edges, and zero nonadjacent intersections. The veteran critic issued `HINDLIMB PRIMARY PASS`.
+- Iteration 670 freezes the hindlimb primary silhouette only. Its open proximal loop is deliberate; pelvis attachment, paw digits, and secondary muscle planes remain separate gates and may not reshape the accepted stifle, hock, heel, or planted paw proportions.
+
+**Reusable rule**
+
+> When an attachment problem prevents anatomical judgment, isolate and pass the articulated region first with an explicit future seam. Do not let a folded junction force the apprentice to tune the limb around topology noise; freeze the accepted chain, then solve correspondence at its boundary.

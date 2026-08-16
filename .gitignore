@@ -42,10 +42,12 @@ tools/blender/*preferred*.py
 !tools/blender/build_bear_anatomy_reference_library.py
 !tools/blender/build_bear_forelimb_carpus_gate.py
 !tools/blender/build_bear_forepaw_gate.py
+!tools/blender/build_bear_hindlimb_gate.py
 !tools/blender/build_bear_forequarter_subdivision_cage.py
 !tools/blender/build_bear_shoulder_saddle_patch.py
 !tools/blender/render_bear_forelimb_carpus_gate.py
 !tools/blender/render_bear_forepaw_gate.py
+!tools/blender/render_bear_hindquarter_gate.py
 !tools/blender/render_bear_shoulder_saddle_patch.py
 !tools/blender/preview_bear_forequarter_cage_standalone.py
 !tools/blender/prune_bear_studies.py

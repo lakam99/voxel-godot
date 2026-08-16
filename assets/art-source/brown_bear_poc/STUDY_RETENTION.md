@@ -11,6 +11,11 @@ Heavy payloads are retained only for milestone authorities and the current open 
 - iteration 274: accepted ears
 - iteration 284: accepted mouth/lower lip
 - iteration 289: current accepted whole-bear source
+- iteration 513: accepted shoulder authority
+- iteration 531: accepted forelimb/carpus authority
+- iteration 589: accepted grounded forepaw load envelope
+- iteration 663: critic-approved forepaw primary-form authority
+- iteration 670: critic-approved hindlimb primary-form authority
 - current open iteration: active diagnostic only; once accepted or rejected, preserve its report, script, critic decision, and only the minimum representative renders
 
 Every iteration keeps its lightweight JSON reports. Modeling scripts remain the reproducible transformation history, and `LEARNING_JOURNAL.md` summarizes critic findings and failed branches.
