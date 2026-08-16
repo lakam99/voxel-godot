@@ -1059,3 +1059,62 @@
 **Reusable rule**
 
 > A plantigrade paw is not a tube rotated flat. Ground the plantar authority first, place volume dorsally above it, and branch only after proximal toe masses already exist. If a local endpoint correction intersects at arbitrarily small amplitude, change the surrounding correspondence instead of continuing scalar backoff.
+
+## Iterations 590–606 — Support rows cannot compensate for the wrong boundary
+
+- Expanding each toe from three to seven circumferential rails through one zipper preserved one component and zero intersections, but the long root-to-cap interval still exceeded the aspect gate. The defect was longitudinal sampling, not merely cap circumference.
+- Continuing the carpal width and depth derivatives through a shared rotation-minimizing frame raised the seam normal dot from roughly `.99075` to `.9999975` without moving the frozen carpus or creating cage/subdivision intersections. This wrist strategy is retained.
+- A staged `3→5→5→7` branch separates expansion poles and gives the toe root physical runway. The required longitudinal authorities are `.81/.86/.90/.94/.97/1`, with all web topology ending by `.94`.
+- The first staged branch initially folded because its grounded lower surface dropped immediately from the common shell to the contact plane. Easing that descent from the measured source height through `.94` removed the last cage intersections while preserving the asymmetric load envelope.
+- Recessed web saddles must transport the existing web rail with neighboring boundary displacement at their first row. Pulling `W1` proximally, laterally, or vertically before correspondence is established repeatedly folded it into the common shell.
+- Adding disconnected transverse support profiles to improve terminal web aspect ratios created new boundary loops and level-2 collisions. Any support row must also subdivide the owning dorsal and plantar faces; isolated sidewall strips are invalid.
+- A mathematically rounded crown with zero edge height created tented, claw-like toe ridges. Restoring a broad crown recovered mass, while the full old shelf produced overlaps. Crown falloff must remain broad but cannot use collapsed global side vertices as its boundary authority.
+- Iteration 606 is structurally safe but visually rejected by self-review: the global outer toe boundaries form subdivision horns and the terminal web profiles still read as planar fins. Zero intersections are a retained gate, not an anatomical promotion.
+
+**Reusable rule**
+
+> Insert support topology only where every adjoining surface owns it, and judge its subdivided silhouette immediately. If a new row produces horns, tents, or fins, do not tune the spike—replace the collapsed boundary or face correspondence that generated it.
+
+## Iterations 607–622 — Closed toe rings replace pleated surface strips
+
+- Applying the critic's loaded toe thickness schedule to the staged dorsal/plantar strips made the existing representation failure more obvious: every toe became a vertical crest because the branch remained two heightfields joined by exposed side profiles.
+- Reducing thickness did not remove the pleats. The staged strip architecture was therefore retired rather than tuned further.
+- The first closed eight-vertex tube prototype immediately produced five rounded volumes and an all-quad manifold mesh, proving that each digit needs a closed circumferential authority. Its root still cuffed because the `.81` source had collapsed global outer vertices and mismatched source-cycle counts.
+- The mature branch topology uses finite `.81` source profiles and constant-count closed cycles: ten vertices for outer toes, twelve for inner toes. Shared web profiles belong simultaneously to adjacent source cycles, creating a pair-of-pants saddle without explicit web membranes or terminal fins.
+- Signed surface orientation had to be inherited again. Mapping the target ellipses to world-up while the frozen arrays used the opposite signed order produced 39 cage and 242 subdivision intersections; multiplying the ellipse profile by the source cycle's signed dorsal/plantar orientation reduced that to four cage-only pairs and zero subdivision pairs.
+- Splitting the global outer `.81` points into finite D/M/P profiles removed `>260` aspect ratios. Raising only the `.86` support profile moved the plantar descent outside the frozen shell and eliminated the final symmetric cage folds.
+- Finite quad-grid caps are superior to collapsed seams. Two interior vertices close each ten-ring with six quads; four interior vertices close each twelve-ring with nine quads. Retaining more finite tip-ring area lets subdivision create the dome without a final sliver stack.
+- Iteration 622 is the first structurally clean closed-toe authority: `1,859/1,859` quads, one component, zero nonmanifold edges, zero cage/L2 intersections, and carpal seam dot `.9999975`. Its global `4.852` ratio belongs to the frozen common shell; anatomy remains under veteran review.
+
+**Reusable rule**
+
+> When anatomy branches into digits, branch into closed circumferential rings. A pair-of-pants saddle shared by adjacent closed cycles can create shallow webs without membranes; two open surface strips plus sidewalls will keep producing pleats, cuffs, or fins regardless of scalar tuning.
+
+## Iterations 623–634 — A closed tube can still read as a finger
+
+- Closing every digit into a constant-count circumferential ring solved the strip/fin failure, but it did not by itself produce paw anatomy. Iteration 634 remains one component, all quads, collision-free, and exactly continuous at the carpus while the subdivided digits still read as five soft hanging lobes.
+- Scalar gap reduction successfully buried the roots without reintroducing intersections. It did not change the dominant silhouette enough: the middle digit still projects too far, the terminal row forms a downward scallop, and the outer digits pinch away from the metacarpal envelope.
+- The curated brown-bear foot references show a broad, almost level transverse digit row carried by one continuous palm. Digit separation is visually shallow until the claw-bearing distal phalanges; the visible toe masses are wider than deep and do not hang as long vertical capsules.
+- The skeletal reference confirms that long ungual phalanges and claws account for much of the apparent distal length. Because claws are deliberately withheld at this gate, the naked soft-tissue toe caps must be shorter and broader than the final claw-inclusive silhouette rather than borrowing claw length as flesh.
+- Region-specific reference sheets are now a required sculpt input. The active region sheet must be reviewed beside the clay renders before a parameter change, while the full downloaded library remains normalized, deduplicated, ignored by Git, and bounded below ten megabytes.
+
+**Reusable rule**
+
+> Topology may make an anatomical form possible, but it cannot substitute for its proportions. For an unclawed bear paw, preserve one broad metacarpal mass, keep the toe row nearly level, expose only short wide distal pads, and reserve the long forward rhythm for later claw geometry.
+
+## Iterations 635–658 — A continuous knuckle shelf needs shared face ownership
+
+- Measuring the emitted mesh exposed a mismatch between intended constants and actual anatomy. Root width-to-depth ratios, exposed length, plantar offset, and cap taper now come from final vertices in every report; parameter names alone are no longer accepted as evidence.
+- Shortening and broadening the closed tubes improved their proportions, but scalar gap reduction could not remove the deep clefts. Each toe still owned a complete inward wall, so even a zero-width gap retained two facing surfaces and subdivided into five separate fingers.
+- The distal architecture now keeps the `.86` and `.90` rows as one 48-vertex composite knuckle shelf. It branches into five closed digit cycles only at `.92`, after the common metacarpal envelope has already established the dorsal silhouette.
+- A local all-quad `40→48` transition introduces the additional shelf rails without changing the frozen `.81` authority. Four-quad saddle patches then distribute each web into the neighboring closed cycles; no separate membrane, disconnected support strip, or duplicated inward toe wall remains.
+- Coincident branch boundaries are not a safe substitute for continuity. Small finite bridge gaps at `.86`, `.90`, and `.92` provide subdivision runway while retaining shallow clefts and avoiding cage or level-2 intersections.
+- The first saddle implementation was geometrically plausible but wound opposite its neighboring shelf faces. Auditing face-adjacency orientation—not only normals and intersections—identified the error. Reversing each saddle patch as a unit removed the square shading scars without changing the accepted silhouette.
+- Iteration 658 retains one component, all-quad manifold topology, zero cage and level-2 intersections, a carpal seam dot of `.9999975`, a broad common shelf, compact distal masses, and near-grounded plantar offsets. Its remaining high edge ratio is localized to the new transition/branch and must be reduced only after the anatomical arrangement is accepted.
+- The critic rejected iteration 658 because the terminal masses remained too flat, the outer digits read as lateral knobs, the crown stayed too distal, and the cleft floors pinched. Dorsal-only depth, delayed outer fan, proximal crown placement, and a flatter terminal descent corrected those defects without moving the grounded plantar authority.
+- Literal root shifts at the requested upper range intersected the outer branch with its own distal bands. Reducing the branch-row inset to the largest collision-free value preserved the intended visual integration. Iteration 663 then passed with root width-to-depth ratios `[1.440, 1.415, 1.432, 1.444, 1.480]`, zero cage/L2 intersections, and no change to the accepted carpus or palm envelope.
+- The veteran critic issued `FOREPAW PASS` for iteration 663. This geometry is frozen as the primary-form forepaw authority; claws, claw-root dimples, and plantar pads are separate secondary-form gates and may not reshape its envelope.
+
+**Reusable rule**
+
+> If a cleft remains deep when its scalar gap reaches zero, the problem is face ownership, not spacing. Keep the proximal mass as one shared surface, branch only where the anatomy visibly divides, give the branch finite subdivision runway, and audit winding across every newly rerouted saddle.

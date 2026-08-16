@@ -15,6 +15,7 @@ PINNED_ITERATIONS = {
     "iteration-513-rebuilt-shoulder-authority",
     "iteration-531-frozen-forelimb-authority",
     "iteration-589-frozen-load-envelope-safe",
+    "iteration-663-safe-outer-root-integration",
 }
 HEAVY_SUFFIXES = {".blend", ".blend1", ".png", ".exr", ".tif", ".tiff"}
 EVIDENCE_PREFIXES = ("rejected-",)
