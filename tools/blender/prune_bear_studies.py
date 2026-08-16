@@ -18,6 +18,7 @@ PINNED_ITERATIONS = {
     "iteration-663-safe-outer-root-integration",
     "iteration-670-measured-hind-paw-length",
     "iteration-672-elevated-pelvis-tail-seam",
+    "iteration-674-buried-hip-placement",
 }
 HEAVY_SUFFIXES = {".blend", ".blend1", ".png", ".exr", ".tif", ".tiff"}
 EVIDENCE_PREFIXES = ("rejected-",)

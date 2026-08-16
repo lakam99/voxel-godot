@@ -1142,3 +1142,15 @@
 **Reusable rule**
 
 > Rear-body realism comes from the hierarchy between iliac breadth, a short sacral crown, early gluteal falloff, rising ischial tuck, and a small elevated tail root. Uniformly shrinking elliptical sections make a polished balloon, not a pelvis.
+
+## Iterations 673–685 — Pass placement before extraction topology
+
+- A placement-only composite exposed the proximal limb boundaries outside the iliac envelope at a `1.06` hip spacing. Narrowing the spacing to `.72` buried those boundaries while preserving every frozen source vertex. The veteran critic issued `HINDQUARTER PLACEMENT PASS` for iteration 674.
+- Directly connecting a guessed 14-edge pelvic aperture to the frozen 14-edge hip loop produced 54 nonadjacent intersections. Searching every legal 4×3 extraction patch reduced mapping cost and collisions, proving aperture location must be measured rather than named.
+- A larger 4×4 aperture with one controlled all-quad `16→14` reduction pole did not eliminate the overlap. Moving the seam from the hidden hip/gluteal rings to the femoral boundary reduced collisions to 23; moving it again to the stifle regressed to 31 and was retired.
+- Interpolated collar rings and outward offsets were swept across forty combinations. The best collar still produced 25 collisions, worse than the direct femoral seam. This is a correspondence/topology problem, not a scalar embedding problem.
+- The rejected integration builder is not retained. Iterations 670, 672, and 674 remain the durable hindlimb, pelvis, and placement authorities. Final whole-body retopology must reproduce their accepted visible envelopes while routing new poles through hidden groin/underside territory.
+
+**Reusable rule**
+
+> Freeze anatomical placement before welding, and delete a seam experiment when every scalar sweep preserves the same collision family. A passed overlap composite is valid landmark evidence; it is not permission to call overlapping shells a finished mesh.

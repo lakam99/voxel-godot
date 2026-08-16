@@ -37,9 +37,10 @@ def main():
     scene.render.resolution_percentage = 100
     scene.render.image_settings.file_format = "PNG"
     scene.world.color = (0.025, 0.025, 0.025)
-    obj = bpy.data.objects["BrownBear_HindquarterGate"]
-    obj.data.materials.clear()
-    obj.data.materials.append(material())
+    clay = material()
+    for obj in (value for value in bpy.context.scene.objects if value.type == "MESH"):
+        obj.data.materials.clear()
+        obj.data.materials.append(clay)
     bpy.ops.object.light_add(type="AREA", location=(-3.5, -4.0, 5.0))
     bpy.context.object.data.energy = 1100
     bpy.context.object.data.shape = "DISK"
